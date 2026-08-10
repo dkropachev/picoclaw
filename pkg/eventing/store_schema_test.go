@@ -5,6 +5,7 @@ package eventing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -364,6 +365,188 @@ func TestStoreMigratesV12ToEmptyPRDevelopmentControllerOperationSchema(t *testin
 		SELECT COUNT(*) FROM pr_development_controller_operation_intents`,
 	).Scan(&count))
 	assert.Zero(t, count, "v13 migration must not manufacture operation authority")
+}
+
+func TestStoreMigratesV16ControllersByteExactlyWithPopulatedForeignKeys(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "migration-v16-suspension-populated.db")
+	fixture := newPRDevelopmentOperationFixture(t, path)
+	adopt, adopted := adoptOperationForTest(t, fixture, fixture.Mutation)
+	_, _, parked := parkOperationForTest(
+		t,
+		fixture,
+		operationLeaseFromTransition(adopted),
+		[]PRDevelopmentControllerOperation{adopt},
+		operationTestSummary,
+		operationTestIterations,
+		1,
+	)
+	controllerID := parked.Controller.ID
+	require.NoError(t, fixture.Store.Close())
+
+	db := openSchemaTestDB(t, path)
+	setSchemaTestVersion(t, db, 16)
+	before := readControllerRowsForSchemaTest(t, db)
+	require.NotEmpty(t, before)
+	var fences, operations int
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_attempt_review_fences
+		WHERE controller_id = ?`, controllerID).Scan(&fences))
+	require.Positive(t, fences)
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_controller_operation_intents
+		WHERE controller_id = ?`, controllerID).Scan(&operations))
+	require.Positive(t, operations)
+	assert.False(t, schemaObjectExists(
+		t, db, "table", "pr_development_controller_suspensions",
+	))
+	require.NoError(t, db.Close())
+
+	migrated, err := Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, migrated.Close()) })
+	after := readControllerRowsForSchemaTest(t, migrated.db)
+	assert.Equal(t, before, after, "v17 must preserve every controller SQLite value")
+
+	var version, suspensions, migratedFences, migratedOperations int
+	require.NoError(t, migrated.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 17, version)
+	require.NoError(t, migrated.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_controller_suspensions`,
+	).Scan(&suspensions))
+	assert.Zero(t, suspensions, "migration must not infer suspension work")
+	require.NoError(t, migrated.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_attempt_review_fences
+		WHERE controller_id = ?`, controllerID).Scan(&migratedFences))
+	assert.Equal(t, fences, migratedFences)
+	require.NoError(t, migrated.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_controller_operation_intents
+		WHERE controller_id = ?`, controllerID).Scan(&migratedOperations))
+	assert.Equal(t, operations, migratedOperations)
+	assertNoForeignKeyViolationsForSchemaTest(t, migrated.db)
+}
+
+func TestStoreMigratesEmptyV16WithoutInferringSuspensions(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v16-suspension-empty.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7,
+		schemaV8, schemaV9, schemaV10, schemaV11, schemaV12, schemaV13,
+		schemaV14, schemaV15, schemaV16,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	setSchemaTestVersion(t, db, 16)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	for _, table := range []string{
+		"pr_development_thread_controllers",
+		"pr_development_controller_suspensions",
+	} {
+		var count int
+		require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count))
+		assert.Zero(t, count, "v17 migration must not manufacture "+table)
+	}
+	assertNoForeignKeyViolationsForSchemaTest(t, store.db)
+}
+
+func TestStoreV17RejectsFutureVersionWithoutTouchingV16Layout(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "future-v18-v16-layout.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	setSchemaTestVersion(t, db, 16)
+	_, err := db.Exec(`PRAGMA user_version = 18`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaTooNew)
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 18, version)
+	assert.False(t, schemaObjectExists(
+		t, db, "table", "pr_development_controller_suspensions",
+	), "future-version fencing must occur before v17 DDL")
+	require.NoError(t, validateControllerTableForSchemaTest(
+		context.Background(), db, schemaV10PRDevelopmentControllersTable,
+	))
+}
+
+func TestStoreV17MigrationFailureRollsBackControllerRebuild(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v17-controller-rollback.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	setSchemaTestVersion(t, db, 16)
+	malformed := strings.Replace(
+		schemaV17PRDevelopmentControllerSuspensionsTable,
+		"changed_file_count >= 0 AND changed_file_count <= 1000",
+		"changed_file_count >= 0 AND changed_file_count <= 1001",
+		1,
+	)
+	require.NotEqual(t, schemaV17PRDevelopmentControllerSuspensionsTable, malformed)
+	_, err := db.Exec(malformed)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "schema v17")
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 16, version)
+	require.NoError(t, validateControllerTableForSchemaTest(
+		context.Background(), db, schemaV10PRDevelopmentControllersTable,
+	))
+	assert.True(t, schemaObjectExists(
+		t, db, "table", "pr_development_controller_suspensions",
+	), "the preexisting malformed table must survive rollback")
+	assert.False(t, schemaObjectExists(
+		t, db, "index", "pr_development_controller_suspensions_active",
+	), "v17 indexes created after the controller rebuild must roll back")
+}
+
+func TestPRDevelopmentControllerSuspensionTypesAreJSONPrivate(t *testing.T) {
+	t.Parallel()
+
+	sentinel := "private-suspension-sentinel"
+	values := []any{
+		PRDevelopmentControllerSuspensionRequest{Repository: sentinel},
+		PRDevelopmentControllerSuspensionResult{WorkspaceID: sentinel},
+		PRDevelopmentControllerSuspendedResumeRequest{Repository: sentinel},
+		PRDevelopmentControllerSuspendedResumeResult{WorkspaceID: sentinel},
+		PRDevelopmentControllerSuspension{
+			ID: sentinel,
+			SuspendRequest: PRDevelopmentControllerSuspensionRequest{
+				Repository: sentinel,
+			},
+		},
+	}
+	for _, value := range values {
+		encoded, err := json.Marshal(value)
+		require.NoError(t, err)
+		assert.Equal(t, `{}`, string(encoded))
+		assert.NotContains(t, string(encoded), sentinel)
+	}
 }
 
 func TestStoreMigratesV13ToEmptyPRDevelopmentRepairOrchestrationSchema(t *testing.T) {
@@ -1505,7 +1688,23 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV16)
 	require.NoError(t, err)
+	installSchemaV17ForTest(t, db)
 	setSchemaTestVersion(t, db, schemaVersion)
+}
+
+func installSchemaV17ForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, beginSchemaTestMigration(ctx, conn))
+	if err = migrateSchemaV17(ctx, conn); err != nil {
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		require.NoError(t, err)
+	}
+	require.NoError(t, commitSchemaTestMigration(ctx, conn))
 }
 
 func installSchemaTextForTest(t *testing.T, db *sql.DB, schema string) {
@@ -1519,6 +1718,14 @@ func installSchemaTextForTest(t *testing.T, db *sql.DB, schema string) {
 func setSchemaTestVersion(t *testing.T, db *sql.DB, version int) {
 	t.Helper()
 
+	if version < 17 && schemaObjectExists(
+		t,
+		db,
+		"table",
+		"pr_development_controller_suspensions",
+	) {
+		downgradeSchemaV17ForTest(t, db)
+	}
 	if version < 16 {
 		_, err := db.Exec(`DROP TABLE IF EXISTS pr_development_attention_triggers`)
 		require.NoError(t, err)
@@ -1533,6 +1740,63 @@ func setSchemaTestVersion(t *testing.T, db *sql.DB, version int) {
 	require.NoError(t, err)
 }
 
+func downgradeSchemaV17ForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, beginSchemaTestMigration(ctx, conn))
+	rollback := true
+	defer func() {
+		if rollback {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	_, err = conn.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, `DROP TABLE pr_development_controller_suspensions`)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx,
+		`CREATE TEMP TABLE pr_development_thread_controllers_v17_downgrade AS SELECT `+
+			schemaV17PRDevelopmentControllerColumns+
+			` FROM pr_development_thread_controllers`,
+	)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, `DROP TABLE pr_development_thread_controllers`)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, schemaV10PRDevelopmentControllersTable)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx,
+		`INSERT INTO pr_development_thread_controllers (`+
+			schemaV17PRDevelopmentControllerColumns+`) SELECT `+
+			schemaV17PRDevelopmentControllerColumns+
+			` FROM pr_development_thread_controllers_v17_downgrade`,
+	)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, `DROP TABLE pr_development_thread_controllers_v17_downgrade`)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx,
+		schemaV10PRDevelopmentControllerWorkspaceIndex+"\n"+
+			schemaV10PRDevelopmentControllerReservationIndex+"\n"+
+			schemaV10PRDevelopmentControllerLeaseIndex,
+	)
+	require.NoError(t, err)
+	require.NoError(t, commitSchemaTestMigration(ctx, conn))
+	rollback = false
+}
+
+func beginSchemaTestMigration(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`)
+	return err
+}
+
+func commitSchemaTestMigration(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, `COMMIT`)
+	return err
+}
+
 func schemaObjectExists(t *testing.T, db *sql.DB, objectType, name string) bool {
 	t.Helper()
 
@@ -1544,4 +1808,74 @@ func schemaObjectExists(t *testing.T, db *sql.DB, objectType, name string) bool 
 	).Scan(&count)
 	require.NoError(t, err)
 	return count == 1
+}
+
+func readControllerRowsForSchemaTest(t *testing.T, db *sql.DB) [][]any {
+	t.Helper()
+
+	rows, err := db.Query(`SELECT ` + schemaV17PRDevelopmentControllerColumns + `
+		FROM pr_development_thread_controllers ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	columns, err := rows.Columns()
+	require.NoError(t, err)
+	result := make([][]any, 0)
+	for rows.Next() {
+		values := make([]any, len(columns))
+		destinations := make([]any, len(columns))
+		for index := range values {
+			destinations[index] = &values[index]
+		}
+		require.NoError(t, rows.Scan(destinations...))
+		for index, value := range values {
+			if bytes, ok := value.([]byte); ok {
+				values[index] = append([]byte(nil), bytes...)
+			}
+		}
+		result = append(result, values)
+	}
+	require.NoError(t, rows.Err())
+	return result
+}
+
+func assertNoForeignKeyViolationsForSchemaTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	require.NoError(t, err)
+	defer rows.Close()
+	if rows.Next() {
+		var table string
+		var rowID sql.NullInt64
+		var parent string
+		var foreignKey int
+		require.NoError(t, rows.Scan(&table, &rowID, &parent, &foreignKey))
+		t.Fatalf(
+			"foreign-key violation: table=%s rowid=%v parent=%s key=%d",
+			table,
+			rowID,
+			parent,
+			foreignKey,
+		)
+	}
+	require.NoError(t, rows.Err())
+}
+
+func validateControllerTableForSchemaTest(
+	ctx context.Context,
+	db *sql.DB,
+	expected string,
+) error {
+	var actual string
+	if err := db.QueryRowContext(ctx, `
+		SELECT sql FROM sqlite_schema
+		WHERE type = 'table' AND name = 'pr_development_thread_controllers'`,
+	).Scan(&actual); err != nil {
+		return err
+	}
+	return validateSchemaDefinition(
+		"pr_development_thread_controllers",
+		actual,
+		expected,
+	)
 }

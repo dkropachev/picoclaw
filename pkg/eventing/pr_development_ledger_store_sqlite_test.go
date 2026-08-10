@@ -514,11 +514,11 @@ func TestStoreMigratedLedgerAnchorsToPreexistingParkedFence(t *testing.T) {
 		`DROP TABLE pr_development_ledger_review_findings`,
 		`DROP TABLE pr_development_ledger_checkpoints`,
 		`DROP TABLE pr_development_ledger_entries`,
-		`PRAGMA user_version = 10`,
 	} {
 		_, err := db.Exec(statement)
 		require.NoError(t, err)
 	}
+	setSchemaTestVersion(t, db, 10)
 	require.NoError(t, db.Close())
 
 	migrated, err := Open(ctx, path, WithClock(func() time.Time { return *clock }))
