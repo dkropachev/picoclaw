@@ -17,7 +17,302 @@ import (
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prdevelopment"
 	"github.com/sipeed/picoclaw/pkg/prdevelopment/localci"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+type gatewayReviewGenerationContextKey struct{}
+
+type gatewayReviewGenerationLease struct {
+	released chan struct{}
+}
+
+func TestPRDevelopmentPendingReviewRuntimeDoesNotRequireProviderMCP(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	msgBus := bus.NewMessageBus()
+	provider := &orderedShutdownProvider{closed: make(chan struct{})}
+	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	service, err := setupEventAutomationService(context.Background(), cfg, agentLoop)
+	if err != nil {
+		msgBus.Close()
+		agentLoop.Close()
+		t.Fatalf("setupEventAutomationService() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+		msgBus.Close()
+		agentLoop.Close()
+	})
+
+	if service.prLocalCI == nil || service.prLocalCI.evidence == nil {
+		t.Fatal("local review evidence runtime was not composed without provider MCP")
+	}
+}
+
+func TestPRDevelopmentReviewWorkerHoldsRuntimeGeneration(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	entered := make(chan *gatewayReviewGenerationLease, 1)
+	releaseProcess := make(chan struct{})
+	var processOnce sync.Once
+	reviewProcess := func(ctx context.Context) (bool, error) {
+		processed := false
+		processOnce.Do(func() {
+			processed = true
+			lease, _ := ctx.Value(gatewayReviewGenerationContextKey{}).(*gatewayReviewGenerationLease)
+			entered <- lease
+			select {
+			case <-releaseProcess:
+			case <-ctx.Done():
+			}
+		})
+		return processed, ctx.Err()
+	}
+	acquireRuntime := func(ctx context.Context) (context.Context, func(), error) {
+		lease := &gatewayReviewGenerationLease{released: make(chan struct{})}
+		leaseCtx := context.WithValue(ctx, gatewayReviewGenerationContextKey{}, lease)
+		return leaseCtx, func() { close(lease.released) }, nil
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		acquireRuntime,
+		eventReviewRuntime{reviewProcess: reviewProcess},
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseProcess) })
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	var lease *gatewayReviewGenerationLease
+	select {
+	case lease = <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("wired review worker did not enter its runtime generation")
+	}
+	if lease == nil {
+		t.Fatal("review worker context has no runtime generation marker")
+	}
+	select {
+	case <-lease.released:
+		t.Fatal("runtime generation was released while review was running")
+	default:
+	}
+
+	releaseOnce.Do(func() { close(releaseProcess) })
+	select {
+	case <-lease.released:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runtime generation was not released after review returned")
+	}
+}
+
+func TestPRDevelopmentRepairAndReviewReadinessAreConjunctive(t *testing.T) {
+	if combinedPRDevelopmentAgentReadiness(nil, func(string) bool { return true }) != nil {
+		t.Fatal("combined readiness is non-nil without repair readiness")
+	}
+	if combinedPRDevelopmentAgentReadiness(func(string) bool { return true }, nil) != nil {
+		t.Fatal("combined readiness is non-nil without review readiness")
+	}
+
+	var repairAgentID, reviewAgentID string
+	ready := combinedPRDevelopmentAgentReadiness(
+		func(agentID string) bool {
+			repairAgentID = agentID
+			return agentID == "pinned"
+		},
+		func(agentID string) bool {
+			reviewAgentID = agentID
+			return agentID == "pinned"
+		},
+	)
+	if ready == nil || !ready("pinned") || repairAgentID != "pinned" ||
+		reviewAgentID != "pinned" {
+		t.Fatalf(
+			"combined pinned readiness = %t, repair agent = %q, review agent = %q",
+			ready != nil && ready("pinned"),
+			repairAgentID,
+			reviewAgentID,
+		)
+	}
+	if ready("other") {
+		t.Fatal("combined readiness accepted a different agent")
+	}
+}
+
+func TestPRDevelopmentControllerRunsWhenReviewCompositionIsIncomplete(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	caseID, captured := seedGatewayPRDevelopmentRepair(t, cfg)
+	controllerEntered := make(chan struct{})
+	var controllerOnce sync.Once
+	reviewRuntime := eventReviewRuntime{
+		agent:   gatewayReviewContextAgent{},
+		agentID: "main",
+		repairAgentReady: func(agentID string) bool {
+			return agentID == "main"
+		},
+		repairVerifier: gatewayRepairVerifier{verified: prdevelopment.VerifiedCase{
+			CaseID:         caseID,
+			HeadRepository: captured.HeadRepository,
+			HeadRef:        captured.HeadRef,
+			HeadSHA:        captured.HeadSHA,
+			HeadCloneURL:   "https://github.com/" + captured.HeadRepository + ".git",
+			ReviewDigest:   "sha256:" + strings.Repeat("b", 64),
+		}},
+		repairRuntime: func(
+			string,
+			string,
+		) (prdevelopment.LocalRepairExecutor, error) {
+			return newGatewayBlockingRepairRunner(), nil
+		},
+		repairWorkspaces: func() (*gitworkspace.Manager, error) { return nil, nil },
+		repairLocalCI:    &prDevelopmentLocalCIRuntime{runner: &localci.Runner{}},
+		repairControllerProcess: func(ctx context.Context) (bool, error) {
+			processed := false
+			controllerOnce.Do(func() {
+				processed = true
+				close(controllerEntered)
+				<-ctx.Done()
+			})
+			return processed, ctx.Err()
+		},
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		nil,
+		reviewRuntime,
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	}()
+
+	select {
+	case <-controllerEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("controller did not run with incomplete review composition")
+	}
+	detail, err := service.prDevelopment.Get(context.Background(), caseID)
+	if err != nil {
+		t.Fatalf("PR development Get() error = %v", err)
+	}
+	if detail.RepairAvailable || detail.RepairUnavailableReason != "runtime_unavailable" {
+		t.Fatalf("repair admission with incomplete review composition = %#v", detail)
+	}
+}
+
+func TestPRDevelopmentReviewStopsBeforeLocalCIEvidenceCloses(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	evidence, err := localci.OpenFileEvidenceStore(workspace + "/review-evidence")
+	if err != nil {
+		t.Fatalf("OpenFileEvidenceStore() error = %v", err)
+	}
+	digest := strings.Repeat("d", 64)
+	entered := make(chan struct{})
+	checked := make(chan error, 1)
+	var processOnce sync.Once
+	reviewProcess := func(ctx context.Context) (bool, error) {
+		processed := false
+		processOnce.Do(func() {
+			processed = true
+			close(entered)
+			<-ctx.Done()
+			_, _, evidenceErr := evidence.GetPlan(context.Background(), digest)
+			checked <- evidenceErr
+		})
+		return processed, ctx.Err()
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		nil,
+		eventReviewRuntime{
+			repairLocalCI: &prDevelopmentLocalCIRuntime{evidence: evidence},
+			reviewProcess: reviewProcess,
+		},
+	)
+	if err != nil {
+		_ = evidence.Close()
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("review process did not start")
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = service.Close(closeCtx); err != nil {
+		t.Fatalf("event automation Close() error = %v", err)
+	}
+	select {
+	case evidenceErr := <-checked:
+		if evidenceErr != nil {
+			t.Fatalf("local-CI evidence closed before reviewer joined: %v", evidenceErr)
+		}
+	default:
+		t.Fatal("reviewer was not joined before Close returned")
+	}
+	if _, _, err = evidence.GetPlan(context.Background(), digest); err == nil {
+		t.Fatal("local-CI evidence remained open after reviewer joined")
+	}
+}
+
+type gatewayReviewContextAgent struct{}
+
+func (gatewayReviewContextAgent) RunAgent(
+	context.Context,
+	workflows.AgentRequest,
+) (map[string]any, error) {
+	return map[string]any{"text": "unused"}, nil
+}
 
 func TestPRDevelopmentControllerWorkerHoldsGenerationAndPinnedAgentProjection(
 	t *testing.T,
@@ -34,6 +329,10 @@ func TestPRDevelopmentControllerWorkerHoldsGenerationAndPinnedAgentProjection(
 	msgBus := bus.NewMessageBus()
 	provider := &orderedShutdownProvider{closed: make(chan struct{})}
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	reviewEvidence, err := localci.OpenFileEvidenceStore(workspace + "/review-evidence")
+	if err != nil {
+		t.Fatalf("OpenFileEvidenceStore() error = %v", err)
+	}
 	controllerEntered := make(chan struct{})
 	controllerRelease := make(chan struct{})
 	var controllerEnterOnce sync.Once
@@ -44,9 +343,11 @@ func TestPRDevelopmentControllerWorkerHoldsGenerationAndPinnedAgentProjection(
 		if service != nil {
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := service.Close(closeCtx); err != nil {
-				t.Errorf("event automation Close() error = %v", err)
+			if closeErr := service.Close(closeCtx); closeErr != nil {
+				t.Errorf("event automation Close() error = %v", closeErr)
 			}
+		} else if closeErr := reviewEvidence.Close(); closeErr != nil {
+			t.Errorf("review evidence Close() error = %v", closeErr)
 		}
 		msgBus.Close()
 		agentLoop.Close()
@@ -78,7 +379,10 @@ func TestPRDevelopmentControllerWorkerHoldsGenerationAndPinnedAgentProjection(
 		repairWorkspaces: func() (*gitworkspace.Manager, error) {
 			return nil, nil
 		},
-		repairLocalCI: &prDevelopmentLocalCIRuntime{runner: &localci.Runner{}},
+		repairLocalCI: &prDevelopmentLocalCIRuntime{
+			runner:   &localci.Runner{},
+			evidence: reviewEvidence,
+		},
 		repairControllerProcess: func(ctx context.Context) (bool, error) {
 			processed := false
 			controllerEnterOnce.Do(func() {
@@ -91,11 +395,16 @@ func TestPRDevelopmentControllerWorkerHoldsGenerationAndPinnedAgentProjection(
 			})
 			return processed, ctx.Err()
 		},
+		reviewRuntime: func(string) (prdevelopment.LocalReviewExecutor, error) {
+			return gatewayLocalReviewRunner{}, nil
+		},
+		reviewWorkspaces: func() (*gitworkspace.Manager, error) {
+			return nil, nil
+		},
 	}
 	acquireRuntime := func(ctx context.Context) (context.Context, func(), error) {
 		return agentLoop.AcquireRuntimeGeneration(ctx, cfg)
 	}
-	var err error
 	service, err = newEventAutomationServiceWithReviews(
 		context.Background(),
 		cfg,
@@ -235,6 +544,18 @@ func TestPRDevelopmentControllerWorkerReconcilesWhenRuntimeUnavailable(t *testin
 
 type gatewayRepairVerifier struct {
 	verified prdevelopment.VerifiedCase
+}
+
+type gatewayLocalReviewRunner struct{}
+
+func (gatewayLocalReviewRunner) Run(
+	context.Context,
+	agent.ControllerLocalReviewRequest,
+) (agent.ControllerLocalReviewResult, error) {
+	return agent.ControllerLocalReviewResult{
+		Outcome: agent.ControllerLocalReviewPassed,
+		Summary: "The immutable local candidate passed review.",
+	}, nil
 }
 
 func (verifier gatewayRepairVerifier) VerifyCase(
