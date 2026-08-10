@@ -191,7 +191,7 @@ const (
 	candidate_tree TEXT NOT NULL DEFAULT '' CHECK (length(candidate_tree) IN (0, 40, 64)),
 	candidate_digest TEXT NOT NULL DEFAULT '' CHECK (length(candidate_digest) IN (0, 64)),
 	changed_file_count INTEGER NOT NULL DEFAULT 0 CHECK (
-		changed_file_count >= 0 AND changed_file_count <= 1000
+		changed_file_count >= 0 AND changed_file_count <= 10000
 	),
 	suspension_hash TEXT NOT NULL DEFAULT '' CHECK (length(suspension_hash) IN (0, 64)),
 	prepared_commit TEXT NOT NULL DEFAULT '' CHECK (length(prepared_commit) IN (0, 40, 64)),

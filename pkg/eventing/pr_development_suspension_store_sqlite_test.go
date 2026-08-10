@@ -252,14 +252,43 @@ func TestStorePRDevelopmentControllerSuspensionClaimReclaimFinalizeAndReplay(
 }
 
 func TestPRDevelopmentControllerSuspensionChangedFileLimitMatchesGit(t *testing.T) {
+	ctx := context.Background()
 	fixture := newStagedPRDevelopmentSuspensionFixture(t)
-	result := suspensionResultForTest(fixture.Suspension)
-	result.ChangedFileCount = maxPRDevelopmentSuspensionChangedFiles
-	_, err := normalizePRDevelopmentControllerSuspensionResult(
-		fixture.Suspension,
-		result,
+	lease, changed, err := fixture.Store.ClaimPRDevelopmentControllerSuspension(
+		ctx,
+		PRDevelopmentControllerSuspensionClaim{
+			CaseID:           fixture.Case.ID,
+			SuspensionID:     fixture.Suspension.ID,
+			ControllerID:     fixture.Controller.ID,
+			AttemptID:        fixture.Attempt.ID,
+			ExpectedRevision: fixture.Controller.Revision,
+			ClaimID:          "suspension-capacity-claim",
+			WorkerLabel:      "suspension-capacity-worker",
+			Lease:            time.Minute,
+		},
 	)
 	require.NoError(t, err)
+	require.True(t, changed)
+	result := suspensionResultForTest(fixture.Suspension)
+	result.ChangedFileCount = maxPRDevelopmentSuspensionChangedFiles
+	transition, changed, err := fixture.Store.FinalizePRDevelopmentControllerSuspension(
+		ctx,
+		PRDevelopmentControllerSuspensionFinalize{
+			SuspensionID:     fixture.Suspension.ID,
+			ControllerID:     fixture.Controller.ID,
+			AttemptID:        fixture.Attempt.ID,
+			ExpectedRevision: fixture.Controller.Revision,
+			ClaimID:          lease.Suspension.SuspendClaimID,
+			ClaimToken:       lease.Suspension.SuspendClaimToken,
+			ClaimEpoch:       lease.Suspension.SuspendClaimEpoch,
+			Result:           result,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Equal(t, maxPRDevelopmentSuspensionChangedFiles,
+		transition.Suspension.SuspendResult.ChangedFileCount)
+
 	result.ChangedFileCount++
 	_, err = normalizePRDevelopmentControllerSuspensionResult(
 		fixture.Suspension,
