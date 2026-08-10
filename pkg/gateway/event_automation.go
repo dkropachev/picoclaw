@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/agent"
+	sharedattention "github.com/sipeed/picoclaw/pkg/attention"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
@@ -37,18 +38,19 @@ const (
 )
 
 type eventAutomationService struct {
-	store           *eventing.Store
-	operatorBackend *eventoperator.Backend
-	webhookBackend  *eventwebhook.Backend
-	channelBackend  *eventchannel.Backend
-	reviewService   *reviews.Service
-	prDevelopment   *prdevelopment.Service
-	reviewAttention *reviews.AttentionLauncher
-	reviewBridge    *reviews.AttentionBridge
-	githubPoller    *eventgithubpoll.Poller
-	prLocalCI       *prDevelopmentLocalCIRuntime
-	cancel          context.CancelFunc
-	done            chan struct{}
+	store                  *eventing.Store
+	operatorBackend        *eventoperator.Backend
+	webhookBackend         *eventwebhook.Backend
+	channelBackend         *eventchannel.Backend
+	reviewService          *reviews.Service
+	prDevelopment          *prdevelopment.Service
+	reviewAttention        *reviews.AttentionLauncher
+	prDevelopmentAttention *prdevelopment.AttentionLauncher
+	reviewBridge           *reviews.AttentionBridge
+	githubPoller           *eventgithubpoll.Poller
+	prLocalCI              *prDevelopmentLocalCIRuntime
+	cancel                 context.CancelFunc
+	done                   chan struct{}
 
 	stopOnce  sync.Once
 	closeOnce sync.Once
@@ -69,22 +71,25 @@ type eventRetentionPruner interface {
 }
 
 type eventReviewRuntime struct {
-	agent                        workflows.AgentRunner
-	agentID                      string
-	repairAgentReady             func(agentID string) bool
-	repairVerifier               prdevelopment.RepairCaseVerifier
-	repairRuntime                prdevelopment.RepairRuntimeFactory
-	repairWorkspaces             prdevelopment.RepairControllerWorkspaceFactory
-	repairLocalCI                *prDevelopmentLocalCIRuntime
-	repairControllerProcess      func(context.Context) (bool, error)
-	reviewRuntime                prdevelopment.ReviewRuntimeFactory
-	reviewWorkspaces             prdevelopment.ReviewControllerWorkspaceFactory
-	reviewProcess                func(context.Context) (bool, error)
-	acquireWorkingContextRuntime reviews.WorkingContextRuntimeAcquire
-	submitter                    reviews.Submitter
-	attentionPolicies            reviews.AttentionPolicySource
-	notificationMCP              workflows.ToolRunner
-	mcpArtifactRoot              string
+	agent                                workflows.AgentRunner
+	agentID                              string
+	repairAgentReady                     func(agentID string) bool
+	repairVerifier                       prdevelopment.RepairCaseVerifier
+	repairRuntime                        prdevelopment.RepairRuntimeFactory
+	repairWorkspaces                     prdevelopment.RepairControllerWorkspaceFactory
+	repairLocalCI                        *prDevelopmentLocalCIRuntime
+	repairControllerProcess              func(context.Context) (bool, error)
+	reviewRuntime                        prdevelopment.ReviewRuntimeFactory
+	reviewWorkspaces                     prdevelopment.ReviewControllerWorkspaceFactory
+	reviewProcess                        func(context.Context) (bool, error)
+	acquireWorkingContextRuntime         reviews.WorkingContextRuntimeAcquire
+	prDevelopmentAttentionPolicies       sharedattention.PolicySource
+	prDevelopmentAttentionWorkspaces     prdevelopment.AttentionReviewWorkspaceFactory
+	acquirePRDevelopmentAttentionRuntime prdevelopment.AttentionContextRuntimeAcquire
+	submitter                            reviews.Submitter
+	attentionPolicies                    reviews.AttentionPolicySource
+	notificationMCP                      workflows.ToolRunner
+	mcpArtifactRoot                      string
 }
 
 func newEventReviewRuntime(
@@ -93,6 +98,9 @@ func newEventReviewRuntime(
 	attentionPolicies reviews.AttentionPolicySource,
 ) eventReviewRuntime {
 	runtime := eventReviewRuntime{attentionPolicies: attentionPolicies}
+	if shared, ok := attentionPolicies.(sharedattention.PolicySource); ok {
+		runtime.prDevelopmentAttentionPolicies = shared
+	}
 	if agentLoop != nil {
 		runtime.mcpArtifactRoot = githubMCPArtifactRoot(cfg, agentLoop)
 	}
@@ -145,6 +153,14 @@ func setupEventAutomationService(
 		}
 		reviewRuntime.agentID = defaultAgent.ID
 		reviewRuntime.acquireWorkingContextRuntime = newReviewWorkingContextRuntimeAcquire(cfg, agentLoop)
+		reviewRuntime.prDevelopmentAttentionWorkspaces = newPRDevelopmentAttentionWorkspaceFactory(
+			cfg,
+			agentLoop,
+		)
+		reviewRuntime.acquirePRDevelopmentAttentionRuntime = newPRDevelopmentAttentionRuntimeAcquire(
+			cfg,
+			agentLoop,
+		)
 		// A parked candidate is reviewed entirely from durable local evidence and
 		// its retained branch. Keep this composition independent of provider MCP
 		// readiness so an already-pending review can finish during an outage.
@@ -280,6 +296,11 @@ func newEventAutomationServiceWithReviews(
 		}
 		reviewRuntime.attentionPolicies = configured
 	}
+	if cfg.Workflows.Enabled && reviewRuntime.prDevelopmentAttentionPolicies == nil {
+		if shared, ok := reviewRuntime.attentionPolicies.(sharedattention.PolicySource); ok {
+			reviewRuntime.prDevelopmentAttentionPolicies = shared
+		}
+	}
 
 	workspace := cfg.WorkspacePath()
 	store, err := openEventAutomationStore(ctx, cfg)
@@ -294,14 +315,29 @@ func newEventAutomationServiceWithReviews(
 		reviewRuntime.agent != nil && reviewRuntime.agentID != ""
 	reviewRuntimeConfigured := reviewRuntime.reviewRuntime != nil &&
 		reviewRuntime.reviewWorkspaces != nil && reviewRuntime.agent != nil
-	if prLocalCI == nil && (controllerRuntimeReady || reviewRuntimeConfigured) {
+	prDevelopmentAttentionRuntimeReady := cfg.Workflows.Enabled && executor != nil &&
+		reviewRuntime.prDevelopmentAttentionPolicies != nil &&
+		reviewRuntime.prDevelopmentAttentionWorkspaces != nil &&
+		reviewRuntime.acquirePRDevelopmentAttentionRuntime != nil
+	if prLocalCI == nil && prDevelopmentAttentionRuntimeReady &&
+		!controllerRuntimeReady && !reviewRuntimeConfigured {
+		prLocalCI, err = newPRDevelopmentLocalCIEvidenceRuntime(cfg)
+		if err != nil {
+			logger.WarnCF(
+				"eventing",
+				"PR development attention evidence is unavailable",
+				map[string]any{"error": err.Error()},
+			)
+			prLocalCI = nil
+		}
+	} else if prLocalCI == nil && (controllerRuntimeReady || reviewRuntimeConfigured) {
 		prLocalCI, err = newPRDevelopmentLocalCIRuntime(cfg)
 		if err != nil {
 			logger.WarnCF("eventing", "PR development local CI is unavailable", map[string]any{
 				"error": err.Error(),
 			})
 			prLocalCI = nil
-			if reviewRuntimeConfigured {
+			if reviewRuntimeConfigured || prDevelopmentAttentionRuntimeReady {
 				prLocalCI, err = newPRDevelopmentLocalCIEvidenceRuntime(cfg)
 				if err != nil {
 					logger.WarnCF(
@@ -354,6 +390,23 @@ func newEventAutomationServiceWithReviews(
 	})
 	if err != nil {
 		return nil, closeSetup(err)
+	}
+	var prDevelopmentAttention *prdevelopment.AttentionLauncher
+	if prDevelopmentAttentionRuntimeReady && prLocalCI != nil && prLocalCI.evidence != nil {
+		prDevelopmentAttention, err = prdevelopment.NewAttentionLauncher(
+			prdevelopment.AttentionLauncherConfig{
+				Store:          store,
+				Executor:       executor,
+				Runs:           runStore,
+				Policies:       reviewRuntime.prDevelopmentAttentionPolicies,
+				Evidence:       prLocalCI.evidence,
+				Workspaces:     reviewRuntime.prDevelopmentAttentionWorkspaces,
+				AcquireRuntime: reviewRuntime.acquirePRDevelopmentAttentionRuntime,
+			},
+		)
+		if err != nil {
+			return nil, closeSetup(err)
+		}
 	}
 	var reviewAttention *reviews.AttentionLauncher
 	if cfg.Workflows.Enabled && reviewRuntime.attentionPolicies != nil {
@@ -456,17 +509,18 @@ func newEventAutomationServiceWithReviews(
 	}
 
 	service := &eventAutomationService{
-		store:           store,
-		operatorBackend: operatorBackend,
-		webhookBackend:  webhookBackend,
-		channelBackend:  channelBackend,
-		reviewService:   reviewService,
-		prDevelopment:   prDevelopmentService,
-		reviewAttention: reviewAttention,
-		reviewBridge:    reviewBridge,
-		githubPoller:    githubPoller,
-		prLocalCI:       prLocalCI,
-		done:            make(chan struct{}),
+		store:                  store,
+		operatorBackend:        operatorBackend,
+		webhookBackend:         webhookBackend,
+		channelBackend:         channelBackend,
+		reviewService:          reviewService,
+		prDevelopment:          prDevelopmentService,
+		reviewAttention:        reviewAttention,
+		prDevelopmentAttention: prDevelopmentAttention,
+		reviewBridge:           reviewBridge,
+		githubPoller:           githubPoller,
+		prLocalCI:              prLocalCI,
+		done:                   make(chan struct{}),
 	}
 
 	workerCtx, cancel := context.WithCancel(context.Background())

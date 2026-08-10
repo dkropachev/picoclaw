@@ -101,19 +101,37 @@ const (
 )
 
 func validateSchemaV11(ctx context.Context, conn *sql.Conn) error {
+	return validateSchemaV11ForVersion(ctx, conn, false)
+}
+
+func validateSchemaV11ForVersion(
+	ctx context.Context,
+	conn *sql.Conn,
+	expectAttentionIndex bool,
+) error {
 	binary := func(name string) schemaIndexColumn {
 		return schemaIndexColumn{name: name, collation: "BINARY"}
 	}
+	ledgerEntryIndexes := []schemaUniqueIndexSpec{
+		{origin: "pk", columns: []schemaIndexColumn{binary("id")}},
+		{origin: "u", columns: []schemaIndexColumn{binary("thread_id"), binary("ordinal")}},
+		{origin: "u", columns: []schemaIndexColumn{binary("attempt_id"), binary("kind")}},
+		{origin: "u", columns: []schemaIndexColumn{binary("id"), binary("kind")}},
+	}
+	if expectAttentionIndex {
+		ledgerEntryIndexes = append(ledgerEntryIndexes, schemaUniqueIndexSpec{
+			name:   "pr_development_ledger_entries_attention",
+			origin: "c",
+			columns: []schemaIndexColumn{
+				binary("id"), binary("kind"), binary("entry_hash"),
+			},
+		})
+	}
 	for _, table := range []schemaTableSpec{
 		{
-			name:      "pr_development_ledger_entries",
-			createSQL: schemaV11PRDevelopmentLedgerEntriesTable,
-			uniqueIndexes: []schemaUniqueIndexSpec{
-				{origin: "pk", columns: []schemaIndexColumn{binary("id")}},
-				{origin: "u", columns: []schemaIndexColumn{binary("thread_id"), binary("ordinal")}},
-				{origin: "u", columns: []schemaIndexColumn{binary("attempt_id"), binary("kind")}},
-				{origin: "u", columns: []schemaIndexColumn{binary("id"), binary("kind")}},
-			},
+			name:          "pr_development_ledger_entries",
+			createSQL:     schemaV11PRDevelopmentLedgerEntriesTable,
+			uniqueIndexes: ledgerEntryIndexes,
 		},
 		{
 			name:      "pr_development_ledger_review_findings",

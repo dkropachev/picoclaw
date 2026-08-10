@@ -3,30 +3,23 @@ package reviews
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
+	sharedattention "github.com/sipeed/picoclaw/pkg/attention"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 const (
-	reviewAttentionWorkflowName = "Review attention gates"
-	reviewAttentionWorkflowRef  = "inline/review-attention-gates/v1"
+	reviewAttentionWorkflowName = sharedattention.WorkflowName
+	reviewAttentionWorkflowRef  = sharedattention.WorkflowRef
 	maxAttentionDecisionBytes   = 128
-	maxAttentionRevisionBytes   = 256
-	preparedAttentionPolicyV1   = 1
-	// A prepared envelope contains the effective gate inputs plus stable
-	// provenance, source identity, and its decision digest. Keep that wrapper
-	// independently bounded without reducing the workflow compiler's existing
-	// 2 MiB input contract for custom trusted policy sources.
-	maxPreparedAttentionBytes = workflows.MaxWorkflowGateInputsBytes + (1 << 20)
+	maxPreparedAttentionBytes   = sharedattention.MaxPreparedPolicyBytes
 )
 
 var attentionDecisionPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
@@ -70,15 +63,15 @@ type AttentionLauncherConfig struct {
 	Policies AttentionPolicySource
 }
 
-// AttentionLauncher starts one private gate workflow for an exact case version
-// and trusted effective policy. Its durable decision link is the idempotency
-// authority across concurrent launches and process restarts.
+// AttentionLauncher remains the source-compatible review adapter around the
+// shared private attention workflow runner.
 type AttentionLauncher struct {
 	service   *Service
 	executor  *workflows.Executor
 	policies  AttentionPolicySource
 	decisions eventing.ReviewDecisionRunStore
 	runs      workflows.RunStore
+	shared    *sharedattention.PrivateRunner
 }
 
 type AttentionLaunchRequest struct {
@@ -101,32 +94,19 @@ type AttentionLaunchResult struct {
 	Noop           bool   `json:"noop,omitempty"`
 }
 
+// These package-private compatibility shapes are retained because the durable
+// trigger and attention bridge intentionally cannot accept arbitrary prepared
+// policy bytes from an external API caller.
 type resolvedAttentionPolicy struct {
 	sourceRevision   string
 	decisionRevision string
 	resolution       *workflows.GatePolicyResolution
+	shared           sharedattention.PreparedPolicy
 }
 
-// preparedAttentionPolicy is the package-private authority used by the
-// durable trigger worker. Its canonical envelope can be persisted before any
-// model, session, or workflow-run effect and later decoded into the exact same
-// detached policy after a crash or configuration reload.
-//
-// Keeping this type and the prepared launch entry point private prevents an
-// HTTP/API caller from supplying effective gates or a policy revision. The
-// normal Launch method can still only capture policy from AttentionPolicySource.
 type preparedAttentionPolicy struct {
 	canonical []byte
 }
-
-type preparedAttentionPolicyEnvelope struct {
-	Version          int                             `json:"version"`
-	SourceRevision   string                          `json:"source_revision"`
-	DecisionRevision string                          `json:"decision_revision"`
-	Resolution       *workflows.GatePolicyResolution `json:"resolution"`
-}
-
-var errAttentionPolicyChanged = errors.New("review attention policy changed")
 
 func NewAttentionLauncher(config AttentionLauncherConfig) (*AttentionLauncher, error) {
 	if config.Service == nil || config.Service.store == nil ||
@@ -147,12 +127,23 @@ func NewAttentionLauncher(config AttentionLauncherConfig) (*AttentionLauncher, e
 	if runs == nil || isNilWorkingContextValue(runs) {
 		runs = workflows.NewFileRunStore(config.Executor.WorkspaceDir)
 	}
+	policyAdapter := reviewAttentionPolicyAdapter{source: config.Policies}
+	shared, err := sharedattention.NewPrivateRunner(sharedattention.PrivateRunnerConfig{
+		Executor:  config.Executor,
+		Runs:      runs,
+		Policies:  policyAdapter,
+		Decisions: reviewAttentionDecisionBinding{store: decisions},
+	})
+	if err != nil {
+		return nil, errors.New("review attention workflow runner is unavailable")
+	}
 	return &AttentionLauncher{
 		service:   config.Service,
 		executor:  config.Executor,
 		policies:  config.Policies,
 		decisions: decisions,
 		runs:      runs,
+		shared:    shared,
 	}, nil
 }
 
@@ -201,18 +192,18 @@ func (launcher *AttentionLauncher) capturePreparedAttentionPolicy(
 	if requireCurrentVersion && detail.Case.Version != request.ExpectedCaseVersion {
 		return preparedAttentionPolicy{}, workflows.ErrRunAdmissionConflict
 	}
-	policy, err := launcher.capturePolicy(ctx, AttentionPolicySelector{
-		Repository:    detail.Case.Repository,
-		DecisionPoint: request.DecisionPoint,
-	})
+	prepared, err := sharedattention.PreparePolicy(
+		ctx,
+		reviewAttentionPolicyAdapter{source: launcher.policies},
+		sharedattention.PolicySelector{
+			Repository:    detail.Case.Repository,
+			DecisionPoint: request.DecisionPoint,
+		},
+	)
 	if err != nil {
 		return preparedAttentionPolicy{}, sanitizeAttentionError(ctx, err, false)
 	}
-	prepared, err := encodePreparedAttentionPolicy(policy)
-	if err != nil {
-		return preparedAttentionPolicy{}, ErrUnavailable
-	}
-	return prepared, nil
+	return preparedAttentionPolicy{canonical: prepared.Canonical()}, nil
 }
 
 // launchPreparedAttentionPolicy is deliberately package-private. Durable
@@ -255,7 +246,7 @@ func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
 		DecisionPoint:  request.DecisionPoint,
 		PolicyRevision: policy.decisionRevision,
 	}
-	runID, err := attentionRunID(key)
+	decisionKey, err := reviewAttentionDecisionKey(key)
 	if err != nil {
 		return AttentionLaunchResult{}, ErrUnavailable
 	}
@@ -266,10 +257,10 @@ func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
 		PolicyRevision: key.PolicyRevision,
 	}
 
-	if existing, found, lookupErr := launcher.findExisting(ctx, key, runID); lookupErr != nil {
-		return AttentionLaunchResult{}, lookupErr
+	if existing, found, lookupErr := launcher.shared.FindExisting(ctx, decisionKey); lookupErr != nil {
+		return AttentionLaunchResult{}, sanitizeAttentionError(ctx, lookupErr, false)
 	} else if found {
-		return attentionResultForRun(baseResult, existing, true), nil
+		return attentionResultForShared(baseResult, existing), nil
 	}
 	// Historical exact duplicates above remain discoverable after the case has
 	// advanced. A genuinely new decision must bind the current exact version.
@@ -277,48 +268,27 @@ func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
 		return AttentionLaunchResult{}, workflows.ErrRunAdmissionConflict
 	}
 
-	if attentionPolicyIsNoop(policy.resolution.Effective) {
-		compilation, compileErr := workflows.CompileGateWorkflow(
-			reviewAttentionWorkflowName,
-			policy.resolution.Effective,
-			nil,
-		)
-		if compileErr != nil || compilation == nil || !compilation.Noop ||
-			compilation.Workflow != nil || compilation.PrivateRoot != nil {
-			return AttentionLaunchResult{}, ErrUnavailable
-		}
-		baseResult.Noop = true
-		return baseResult, nil
+	sharedRequest := sharedattention.PrivateLaunchRequest{
+		DecisionKey: decisionKey,
+		Policy:      policy.shared,
+		Selector: sharedattention.PolicySelector{
+			Repository:    selector.Repository,
+			DecisionPoint: selector.DecisionPoint,
+		},
+		RevalidateLive: revalidateLive,
+	}
+	if policy.shared.IsNoop() {
+		return launcher.launchShared(ctx, baseResult, sharedRequest)
 	}
 
-	workingAgentID := attentionWorkingAgentID(policy.resolution.Effective)
+	workingAgentID := policy.shared.WorkingContextAgentID()
 	if workingAgentID == "" {
 		subject, subjectErr := workingContextGateSubject(detail)
 		if subjectErr != nil {
 			return AttentionLaunchResult{}, ErrUnavailable
 		}
-		compilation, compileErr := workflows.CompileGateWorkflow(
-			reviewAttentionWorkflowName,
-			policy.resolution.Effective,
-			subject,
-		)
-		if compileErr != nil {
-			return AttentionLaunchResult{}, ErrUnavailable
-		}
-		if compilation == nil || compilation.Noop || compilation.RequiresSession ||
-			compilation.RequiredSessionAgentID != "" {
-			return AttentionLaunchResult{}, ErrUnavailable
-		}
-		return launcher.launchCompilation(
-			ctx,
-			selector,
-			policy,
-			revalidateLive,
-			key,
-			runID,
-			baseResult,
-			compilation,
-		)
+		sharedRequest.Subject = subject
+		return launcher.launchShared(ctx, baseResult, sharedRequest)
 	}
 
 	var result AttentionLaunchResult
@@ -331,33 +301,14 @@ func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
 				working.SessionRevision == "" {
 				return workflows.ErrRunAdmissionConflict
 			}
-			compilation, compileErr := workflows.CompileGateWorkflow(
-				reviewAttentionWorkflowName,
-				policy.resolution.Effective,
-				working.GateSubject,
-			)
-			if compileErr != nil || compilation == nil || compilation.Noop ||
-				!compilation.RequiresSession ||
-				compilation.RequiredSessionAgentID != working.AgentID ||
-				compilation.PrivateRoot == nil {
-				return ErrUnavailable
-			}
-			compilation.PrivateRoot.ReadOnlySession = &workflows.ReadOnlySessionRef{
+			sharedRequest.Subject = working.GateSubject
+			sharedRequest.ReadOnlySession = &workflows.ReadOnlySessionRef{
 				AgentID:          working.AgentID,
 				Session:          working.SessionKey,
 				ExpectedRevision: working.SessionRevision,
 			}
 			var launchErr error
-			result, launchErr = launcher.launchCompilation(
-				runtimeCtx,
-				selector,
-				policy,
-				revalidateLive,
-				key,
-				runID,
-				baseResult,
-				compilation,
-			)
+			result, launchErr = launcher.launchShared(runtimeCtx, baseResult, sharedRequest)
 			return launchErr
 		},
 	)
@@ -371,9 +322,26 @@ func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
 	return result, nil
 }
 
+func (launcher *AttentionLauncher) launchShared(
+	ctx context.Context,
+	base AttentionLaunchResult,
+	request sharedattention.PrivateLaunchRequest,
+) (AttentionLaunchResult, error) {
+	launched, err := launcher.shared.Launch(ctx, request)
+	if err != nil {
+		safeErr := sanitizeAttentionError(ctx, err, true)
+		if launched.RunID != "" && launched.Status != "" {
+			return attentionResultForShared(base, launched), safeErr
+		}
+		return AttentionLaunchResult{}, safeErr
+	}
+	return attentionResultForShared(base, launched), nil
+}
+
 func (launcher *AttentionLauncher) available() bool {
 	return launcher != nil && launcher.service != nil && launcher.executor != nil &&
-		launcher.policies != nil && launcher.decisions != nil && launcher.runs != nil
+		launcher.policies != nil && launcher.decisions != nil && launcher.runs != nil &&
+		launcher.shared != nil && launcher.shared.Available()
 }
 
 func validateAttentionLaunchRequest(request AttentionLaunchRequest) error {
@@ -385,221 +353,57 @@ func validateAttentionLaunchRequest(request AttentionLaunchRequest) error {
 	return nil
 }
 
-func (launcher *AttentionLauncher) capturePolicy(
-	ctx context.Context,
-	selector AttentionPolicySelector,
-) (resolvedAttentionPolicy, error) {
-	var captured resolvedAttentionPolicy
-	called := 0
-	var callbackErr error
-	err := launcher.policies.WithReviewAttentionPolicy(
-		ctx,
-		selector,
-		func(policyCtx context.Context, snapshot AttentionPolicySnapshot) error {
-			called++
-			if called != 1 || policyCtx == nil {
-				callbackErr = ErrUnavailable
-				return callbackErr
-			}
-			if contextErr := policyCtx.Err(); contextErr != nil {
-				callbackErr = contextErr
-				return callbackErr
-			}
-			resolved, resolveErr := resolveAttentionPolicy(snapshot)
-			if resolveErr != nil {
-				callbackErr = ErrUnavailable
-				return callbackErr
-			}
-			captured = resolved
-			return nil
-		},
-	)
-	// A trusted source is required to propagate the callback result. Retaining
-	// it independently keeps a buggy adapter from converting a rejected lease
-	// snapshot into successful launch authority.
-	if callbackErr != nil {
-		return resolvedAttentionPolicy{}, callbackErr
-	}
-	if err != nil {
-		return resolvedAttentionPolicy{}, err
-	}
-	if called != 1 || captured.resolution == nil {
-		return resolvedAttentionPolicy{}, ErrUnavailable
-	}
-	return captured, nil
-}
-
 func resolveAttentionPolicy(
 	snapshot AttentionPolicySnapshot,
 ) (resolvedAttentionPolicy, error) {
-	if !validAttentionSourceRevision(snapshot.Revision) {
-		return resolvedAttentionPolicy{}, errors.New("invalid attention policy revision")
-	}
-	resolution, err := workflows.ResolveGatePolicy(snapshot.Global, snapshot.Repository)
-	if err != nil {
-		return resolvedAttentionPolicy{}, err
-	}
-	decisionRevision, err := attentionPolicyDecisionRevision(snapshot.Revision, resolution)
-	if err != nil {
-		return resolvedAttentionPolicy{}, err
-	}
-	return resolvedAttentionPolicy{
-		sourceRevision:   snapshot.Revision,
-		decisionRevision: decisionRevision,
-		resolution:       resolution,
-	}, nil
-}
-
-func attentionPolicyDecisionRevision(
-	sourceRevision string,
-	resolution *workflows.GatePolicyResolution,
-) (string, error) {
-	if !validAttentionSourceRevision(sourceRevision) || resolution == nil {
-		return "", errors.New("invalid attention policy")
-	}
-	canonical, err := json.Marshal(struct {
-		Version    int                             `json:"version"`
-		Revision   string                          `json:"source_revision"`
-		Resolution *workflows.GatePolicyResolution `json:"resolution"`
-	}{
-		Version:    preparedAttentionPolicyV1,
-		Revision:   sourceRevision,
-		Resolution: resolution,
+	prepared, err := sharedattention.PrepareSnapshot(sharedattention.PolicySnapshot{
+		Revision:   snapshot.Revision,
+		Global:     snapshot.Global,
+		Repository: snapshot.Repository,
 	})
 	if err != nil {
-		return "", err
+		return resolvedAttentionPolicy{}, err
 	}
-	digest := sha256.Sum256(canonical)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return resolvedAttentionPolicyForShared(prepared)
+}
+
+func resolvedAttentionPolicyForShared(
+	prepared sharedattention.PreparedPolicy,
+) (resolvedAttentionPolicy, error) {
+	resolution := prepared.Resolution()
+	if resolution == nil || prepared.SourceRevision() == "" ||
+		prepared.DecisionRevision() == "" || len(prepared.Canonical()) == 0 {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	return resolvedAttentionPolicy{
+		sourceRevision:   prepared.SourceRevision(),
+		decisionRevision: prepared.DecisionRevision(),
+		resolution:       resolution,
+		shared:           prepared,
+	}, nil
 }
 
 func encodePreparedAttentionPolicy(
 	policy resolvedAttentionPolicy,
 ) (preparedAttentionPolicy, error) {
-	decisionRevision, err := attentionPolicyDecisionRevision(
-		policy.sourceRevision,
-		policy.resolution,
-	)
-	if err != nil || decisionRevision != policy.decisionRevision ||
-		validatePreparedAttentionResolution(policy.resolution) != nil {
+	if policy.sourceRevision != policy.shared.SourceRevision() ||
+		policy.decisionRevision != policy.shared.DecisionRevision() ||
+		!reflect.DeepEqual(policy.resolution, policy.shared.Resolution()) {
 		return preparedAttentionPolicy{}, errors.New("invalid prepared attention policy")
 	}
-	canonical, err := json.Marshal(preparedAttentionPolicyEnvelope{
-		Version:          preparedAttentionPolicyV1,
-		SourceRevision:   policy.sourceRevision,
-		DecisionRevision: policy.decisionRevision,
-		Resolution:       policy.resolution,
-	})
-	if err != nil || len(canonical) == 0 || len(canonical) > maxPreparedAttentionBytes {
+	canonical := policy.shared.Canonical()
+	if len(canonical) == 0 || len(canonical) > maxPreparedAttentionBytes {
 		return preparedAttentionPolicy{}, errors.New("invalid prepared attention policy")
 	}
 	return preparedAttentionPolicy{canonical: canonical}, nil
 }
 
 func decodePreparedAttentionPolicy(raw []byte) (resolvedAttentionPolicy, error) {
-	if len(raw) == 0 || len(raw) > maxPreparedAttentionBytes ||
-		!bytes.Equal(raw, bytes.TrimSpace(raw)) {
+	prepared, err := sharedattention.DecodePreparedPolicy(raw)
+	if err != nil {
 		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	decoder.UseNumber()
-	var envelope preparedAttentionPolicyEnvelope
-	if err := decoder.Decode(&envelope); err != nil {
-		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
-	}
-	if envelope.Version != preparedAttentionPolicyV1 ||
-		!validAttentionSourceRevision(envelope.SourceRevision) ||
-		validatePreparedAttentionResolution(envelope.Resolution) != nil {
-		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
-	}
-	decisionRevision, err := attentionPolicyDecisionRevision(
-		envelope.SourceRevision,
-		envelope.Resolution,
-	)
-	if err != nil || envelope.DecisionRevision != decisionRevision {
-		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
-	}
-	canonical, err := json.Marshal(envelope)
-	if err != nil || !bytes.Equal(raw, canonical) {
-		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
-	}
-	return resolvedAttentionPolicy{
-		sourceRevision:   envelope.SourceRevision,
-		decisionRevision: envelope.DecisionRevision,
-		resolution:       envelope.Resolution,
-	}, nil
-}
-
-func validAttentionSourceRevision(revision string) bool {
-	return revision != "" && revision == strings.TrimSpace(revision) &&
-		utf8.ValidString(revision) && len(revision) <= maxAttentionRevisionBytes
-}
-
-func validatePreparedAttentionResolution(resolution *workflows.GatePolicyResolution) error {
-	if resolution == nil || len(resolution.Effective) > workflows.MaxWorkflowGateCount ||
-		len(resolution.Entries) != len(resolution.Effective) {
-		return errors.New("invalid attention policy resolution")
-	}
-	if _, err := workflows.ResolveGatePolicy(resolution.Effective, nil); err != nil {
-		return err
-	}
-	switch resolution.Mode {
-	case workflows.GatePolicyInherit, workflows.GatePolicyOverlay,
-		workflows.GatePolicyReplace, workflows.GatePolicyDisable:
-	default:
-		return errors.New("invalid attention policy resolution mode")
-	}
-	if resolution.Mode == workflows.GatePolicyDisable && len(resolution.Effective) != 0 {
-		return errors.New("disabled attention policy is not empty")
-	}
-	for index, entry := range resolution.Entries {
-		if entry.ID != resolution.Effective[index].ID || entry.EffectivePosition != index+1 ||
-			entry.GlobalPosition < 0 || entry.GlobalPosition > workflows.MaxWorkflowGateCount ||
-			entry.RepositoryPosition < 0 ||
-			entry.RepositoryPosition > workflows.MaxWorkflowGateCount {
-			return errors.New("invalid attention policy resolution entry")
-		}
-		switch resolution.Mode {
-		case workflows.GatePolicyInherit:
-			if entry.Action != workflows.GatePolicyResolutionInherited ||
-				entry.GlobalPosition != index+1 || entry.RepositoryPosition != 0 {
-				return errors.New("invalid inherited attention policy entry")
-			}
-		case workflows.GatePolicyReplace:
-			if entry.Action != workflows.GatePolicyResolutionSelected ||
-				entry.GlobalPosition != 0 || entry.RepositoryPosition != index+1 {
-				return errors.New("invalid replacement attention policy entry")
-			}
-		case workflows.GatePolicyOverlay:
-			switch entry.Action {
-			case workflows.GatePolicyResolutionInherited:
-				if entry.GlobalPosition == 0 || entry.RepositoryPosition != 0 {
-					return errors.New("invalid overlaid attention policy entry")
-				}
-			case workflows.GatePolicyResolutionReplaced:
-				if entry.GlobalPosition == 0 || entry.RepositoryPosition == 0 {
-					return errors.New("invalid overlaid attention policy entry")
-				}
-			case workflows.GatePolicyResolutionTombstoned:
-				if entry.GlobalPosition == 0 || entry.RepositoryPosition == 0 ||
-					resolution.Effective[index].Kind != workflows.GateZero {
-					return errors.New("invalid overlaid attention policy entry")
-				}
-			case workflows.GatePolicyResolutionAppended:
-				if entry.GlobalPosition != 0 || entry.RepositoryPosition == 0 {
-					return errors.New("invalid overlaid attention policy entry")
-				}
-			default:
-				return errors.New("invalid overlaid attention policy action")
-			}
-		}
-	}
-	return nil
+	return resolvedAttentionPolicyForShared(prepared)
 }
 
 func attentionPolicyIsNoop(specs []workflows.GateSpec) bool {
@@ -611,282 +415,150 @@ func attentionPolicyIsNoop(specs []workflows.GateSpec) bool {
 	return true
 }
 
-func attentionWorkingAgentID(specs []workflows.GateSpec) string {
-	for _, spec := range specs {
-		if spec.Kind == workflows.GateAIWorkingContext {
-			return spec.AgentID
-		}
-	}
-	return ""
-}
-
 func attentionRunID(key eventing.ReviewDecisionKey) (string, error) {
-	canonical, err := json.Marshal(struct {
-		Version int                        `json:"version"`
-		Key     eventing.ReviewDecisionKey `json:"key"`
-	}{Version: 1, Key: key})
+	decisionKey, err := reviewAttentionDecisionKey(key)
 	if err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(canonical)
-	return "wr_" + hex.EncodeToString(digest[:16]), nil
+	return sharedattention.RunIDForDecisionKey(decisionKey)
 }
 
-func (launcher *AttentionLauncher) findExisting(
-	ctx context.Context,
-	key eventing.ReviewDecisionKey,
-	runID string,
-) (*workflows.Run, bool, error) {
-	link, err := launcher.decisions.GetReviewDecisionRun(ctx, key)
-	if err == nil {
-		run, runErr := launcher.loadLinkedRun(ctx, key, runID, link)
-		if runErr != nil {
-			return nil, false, runErr
-		}
-		return run, true, nil
-	}
-	if !errors.Is(err, eventing.ErrNotFound) {
-		return nil, false, sanitizeAttentionError(ctx, err, false)
-	}
-	return nil, false, nil
-}
-
-func (launcher *AttentionLauncher) loadLinkedRun(
-	ctx context.Context,
-	key eventing.ReviewDecisionKey,
-	runID string,
-	link eventing.ReviewDecisionRunLink,
-) (*workflows.Run, error) {
-	if link.Key != key || link.RunID != runID {
-		return nil, ErrUnavailable
-	}
-	run, err := launcher.runs.GetRun(ctx, link.RunID)
-	if err != nil || !validAttentionRun(run, runID) {
-		return nil, ErrUnavailable
-	}
-	return run, nil
+func reviewAttentionDecisionKey(key eventing.ReviewDecisionKey) (string, error) {
+	return sharedattention.CanonicalDecisionKey(key)
 }
 
 func validAttentionRun(run *workflows.Run, runID string) bool {
-	if run == nil || run.ID != runID || run.WorkflowRef != reviewAttentionWorkflowRef ||
-		run.ContextVisibility != workflows.WorkflowContextVisibilityPrivate ||
-		!workflows.IsPrivateWorkflowRun(run) || run.ParentRunID != "" ||
-		run.CallerJobID != "" || len(run.ChildRunIDs) != 0 ||
-		run.RetryOfRunID != "" || run.Session != "" ||
-		!attentionDeliveryIsEmpty(run.Delivery) || len(run.Inputs) != 0 ||
-		len(run.Event) != 0 || run.Origin != nil {
-		return false
-	}
-	switch run.Status {
-	case workflows.RunStatusRunning, workflows.RunStatusWaiting,
-		workflows.RunStatusSucceeded, workflows.RunStatusFailed,
-		workflows.RunStatusCanceled, workflows.RunStatusSkipped:
-		return true
-	default:
-		return false
-	}
+	return sharedattention.ValidPrivateRun(run, runID)
 }
 
-func (launcher *AttentionLauncher) launchCompilation(
-	ctx context.Context,
-	selector AttentionPolicySelector,
-	policy resolvedAttentionPolicy,
-	revalidateLive bool,
-	key eventing.ReviewDecisionKey,
-	runID string,
-	baseResult AttentionLaunchResult,
-	compilation *workflows.GateCompilation,
-) (AttentionLaunchResult, error) {
-	if compilation == nil || compilation.Noop || compilation.Workflow == nil ||
-		compilation.PrivateRoot == nil {
-		return AttentionLaunchResult{}, ErrUnavailable
-	}
-	executor := *launcher.executor
-	executor.Store = launcher.runs
-	baseAdmission := executor.AdmittedRunCreate
-	var duplicate *eventing.ReviewDecisionRunLink
-	executor.AdmittedRunCreate = func(
-		admissionCtx context.Context,
-		candidate *workflows.Run,
-		create func() error,
-	) error {
-		if !validAttentionAdmissionCandidate(candidate, runID) {
-			return workflows.ErrRunAdmissionConflict
-		}
-		admit := func(admitCtx context.Context) error {
-			link, existed, admitErr := launcher.decisions.AdmitReviewDecisionRun(
-				admitCtx,
-				eventing.ReviewDecisionRunAdmission{Key: key, RunID: runID},
-				func(createCtx context.Context) error {
-					createCalls := 0
-					var durableCreateErr error
-					checkedCreate := func() error {
-						createCalls++
-						if createCalls != 1 {
-							durableCreateErr = workflows.ErrRunAdmissionUnavailable
-							return durableCreateErr
-						}
-						durableCreateErr = create()
-						return durableCreateErr
-					}
-					var createErr error
-					if baseAdmission != nil {
-						createErr = baseAdmission(createCtx, candidate, checkedCreate)
-					} else {
-						createErr = checkedCreate()
-					}
-					if createErr != nil {
-						return createErr
-					}
-					if durableCreateErr != nil {
-						return durableCreateErr
-					}
-					if createCalls != 1 {
-						return workflows.ErrRunAdmissionUnavailable
-					}
-					return nil
-				},
-			)
-			if admitErr != nil {
-				return admitErr
-			}
-			if existed {
-				linked := link
-				duplicate = &linked
-				// Executor must not execute the duplicate in-memory candidate.
-				return workflows.ErrRunAdmissionConflict
-			}
-			if link.Key != key || link.RunID != runID {
-				return ErrUnavailable
-			}
-			return nil
-		}
-
-		called := 0
-		var callbackErr error
-		var policyErr error
-		if revalidateLive {
-			policyErr = launcher.policies.WithReviewAttentionPolicy(
-				admissionCtx,
-				selector,
-				func(policyCtx context.Context, snapshot AttentionPolicySnapshot) error {
-					called++
-					if called != 1 || policyCtx == nil {
-						callbackErr = ErrUnavailable
-						return callbackErr
-					}
-					if contextErr := policyCtx.Err(); contextErr != nil {
-						callbackErr = contextErr
-						return callbackErr
-					}
-					current, resolveErr := resolveAttentionPolicy(snapshot)
-					if resolveErr != nil {
-						callbackErr = ErrUnavailable
-						return callbackErr
-					}
-					if current.sourceRevision != policy.sourceRevision ||
-						current.decisionRevision != policy.decisionRevision {
-						callbackErr = errAttentionPolicyChanged
-						return callbackErr
-					}
-					callbackErr = admit(policyCtx)
-					return callbackErr
-				},
-			)
-			if callbackErr != nil {
-				policyErr = callbackErr
-			}
-		} else {
-			policyErr = admit(admissionCtx)
-			called = 1
-		}
-		if policyErr != nil {
-			switch {
-			case errors.Is(policyErr, errAttentionPolicyChanged),
-				errors.Is(policyErr, eventing.ErrReviewConflict),
-				errors.Is(policyErr, eventing.ErrNotFound),
-				errors.Is(policyErr, workflows.ErrRunAdmissionConflict):
-				return workflows.ErrRunAdmissionConflict
-			case errors.Is(policyErr, context.Canceled):
-				return context.Canceled
-			case errors.Is(policyErr, context.DeadlineExceeded):
-				return context.DeadlineExceeded
-			default:
-				return workflows.ErrRunAdmissionUnavailable
-			}
-		}
-		if called != 1 {
-			return workflows.ErrRunAdmissionUnavailable
-		}
-		return nil
-	}
-
-	runResult, runErr := executor.Run(ctx, workflows.RunRequest{
-		RunID:       runID,
-		Workflow:    compilation.Workflow,
-		WorkflowRef: reviewAttentionWorkflowRef,
-		PrivateRoot: compilation.PrivateRoot,
-	})
-	if duplicate != nil {
-		run, loadErr := launcher.loadLinkedRun(ctx, key, runID, *duplicate)
-		if loadErr != nil {
-			return AttentionLaunchResult{}, loadErr
-		}
-		return attentionResultForRun(baseResult, run, true), nil
-	}
-	if runErr != nil {
-		safeErr := sanitizeAttentionError(ctx, runErr, true)
-		if runResult != nil && runResult.RunID == runID && runResult.Status != "" {
-			run, loadErr := launcher.runs.GetRun(ctx, runID)
-			if loadErr == nil && validAttentionRun(run, runID) &&
-				run.Status == runResult.Status {
-				return attentionResultForRun(baseResult, run, false), safeErr
-			}
-		}
-		return AttentionLaunchResult{}, safeErr
-	}
-	if runResult == nil || runResult.RunID != runID || runResult.Status == "" {
-		return AttentionLaunchResult{}, ErrUnavailable
-	}
-	run, err := launcher.runs.GetRun(ctx, runID)
-	if err != nil || !validAttentionRun(run, runID) || run.Status != runResult.Status {
-		return AttentionLaunchResult{}, ErrUnavailable
-	}
-	return attentionResultForRun(baseResult, run, false), nil
-}
-
-func validAttentionAdmissionCandidate(candidate *workflows.Run, runID string) bool {
-	return candidate != nil && candidate.ID == runID &&
-		candidate.WorkflowRef == reviewAttentionWorkflowRef &&
-		candidate.Status == workflows.RunStatusRunning &&
-		candidate.ContextVisibility == workflows.WorkflowContextVisibilityPrivate &&
-		workflows.IsPrivateWorkflowRun(candidate) && candidate.ParentRunID == "" &&
-		candidate.CallerJobID == "" && len(candidate.ChildRunIDs) == 0 &&
-		candidate.RetryOfRunID == "" && candidate.Session == "" &&
-		attentionDeliveryIsEmpty(candidate.Delivery) && len(candidate.Inputs) == 0 &&
-		len(candidate.Event) == 0 && candidate.Origin == nil
-}
-
-func attentionDeliveryIsEmpty(delivery workflows.Delivery) bool {
-	return delivery.Channel == "" && delivery.ChatID == "" && delivery.TopicID == "" &&
-		delivery.ThreadTS == "" && delivery.MessageID == "" &&
-		delivery.ReplyToMessageID == "" && len(delivery.ReplyHandles) == 0
-}
-
-func attentionResultForRun(
+func attentionResultForShared(
 	base AttentionLaunchResult,
-	run *workflows.Run,
-	existing bool,
+	result sharedattention.PrivateLaunchResult,
 ) AttentionLaunchResult {
-	base.RunID = run.ID
-	base.Status = run.Status
-	base.Existing = existing
+	base.RunID = result.RunID
+	base.Status = result.Status
+	base.Existing = result.Existing
+	base.Noop = result.Noop
 	return base
+}
+
+type reviewAttentionPolicyAdapter struct {
+	source AttentionPolicySource
+}
+
+func (adapter reviewAttentionPolicyAdapter) WithAttentionPolicy(
+	ctx context.Context,
+	selector sharedattention.PolicySelector,
+	use sharedattention.PolicyUse,
+) error {
+	if adapter.source == nil || isNilWorkingContextValue(adapter.source) {
+		return ErrUnavailable
+	}
+	return adapter.source.WithReviewAttentionPolicy(
+		ctx,
+		AttentionPolicySelector{
+			Repository: selector.Repository, DecisionPoint: selector.DecisionPoint,
+		},
+		func(policyCtx context.Context, snapshot AttentionPolicySnapshot) error {
+			if use == nil {
+				return errors.New("review attention policy callback is required")
+			}
+			return use(policyCtx, sharedattention.PolicySnapshot{
+				Revision:   snapshot.Revision,
+				Global:     snapshot.Global,
+				Repository: snapshot.Repository,
+			})
+		},
+	)
+}
+
+type reviewAttentionDecisionBinding struct {
+	store eventing.ReviewDecisionRunStore
+}
+
+func (binding reviewAttentionDecisionBinding) Find(
+	ctx context.Context,
+	rawKey string,
+) (string, bool, error) {
+	key, err := decodeReviewAttentionDecisionKey(rawKey)
+	if err != nil {
+		return "", false, ErrUnavailable
+	}
+	link, err := binding.store.GetReviewDecisionRun(ctx, key)
+	if errors.Is(err, eventing.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if link.Key != key || link.RunID == "" {
+		return "", false, ErrUnavailable
+	}
+	return link.RunID, true, nil
+}
+
+func (binding reviewAttentionDecisionBinding) Admit(
+	ctx context.Context,
+	rawKey string,
+	create func(context.Context) error,
+) (string, bool, error) {
+	key, err := decodeReviewAttentionDecisionKey(rawKey)
+	if err != nil {
+		return "", false, ErrUnavailable
+	}
+	runID, err := sharedattention.RunIDForDecisionKey(rawKey)
+	if err != nil {
+		return "", false, ErrUnavailable
+	}
+	link, existed, err := binding.store.AdmitReviewDecisionRun(
+		ctx,
+		eventing.ReviewDecisionRunAdmission{Key: key, RunID: runID},
+		create,
+	)
+	if err != nil {
+		if errors.Is(err, eventing.ErrReviewDecisionAdmissionUncertain) {
+			return "", false, sharedattention.ErrPrivateRunAdmissionUncertain
+		}
+		if errors.Is(err, eventing.ErrReviewConflict) || errors.Is(err, eventing.ErrNotFound) {
+			return "", false, workflows.ErrRunAdmissionConflict
+		}
+		return "", false, err
+	}
+	if link.Key != key || link.RunID != runID {
+		return "", false, ErrUnavailable
+	}
+	return link.RunID, existed, nil
+}
+
+func decodeReviewAttentionDecisionKey(raw string) (eventing.ReviewDecisionKey, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var key eventing.ReviewDecisionKey
+	if err := decoder.Decode(&key); err != nil {
+		return eventing.ReviewDecisionKey{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return eventing.ReviewDecisionKey{}, errors.New("invalid review attention key")
+	}
+	canonical, err := json.Marshal(key)
+	if err != nil || !bytes.Equal(canonical, []byte(raw)) {
+		return eventing.ReviewDecisionKey{}, errors.New("invalid review attention key")
+	}
+	return key, nil
 }
 
 func sanitizeAttentionError(ctx context.Context, err error, admission bool) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, sharedattention.ErrPrivateRunAdmissionUncertain) {
+		// Retain the established unavailable classification while allowing
+		// trusted workers to distinguish a durable quarantined admission.
+		return errors.Join(
+			workflows.ErrRunAdmissionUnavailable,
+			sharedattention.ErrPrivateRunAdmissionUncertain,
+		)
 	}
 	if ctx != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

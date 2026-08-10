@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	sharedattention "github.com/sipeed/picoclaw/pkg/attention"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
@@ -36,6 +37,8 @@ type ConfigAttentionPolicySource struct {
 	workingAgentIDs []string
 	revision        string
 }
+
+var _ sharedattention.PolicySource = (*ConfigAttentionPolicySource)(nil)
 
 type canonicalAttentionSelection struct {
 	Format           string                          `json:"format"`
@@ -275,6 +278,33 @@ func (source *ConfigAttentionPolicySource) WithReviewAttentionPolicy(
 		Global:     global,
 		Repository: repository,
 	})
+}
+
+// WithAttentionPolicy adapts this established global/repository catalog to the
+// domain-neutral attention workflow core. The legacy review source method
+// remains unchanged for custom review integrations.
+func (source *ConfigAttentionPolicySource) WithAttentionPolicy(
+	ctx context.Context,
+	selector sharedattention.PolicySelector,
+	use sharedattention.PolicyUse,
+) error {
+	if use == nil {
+		return errors.New("attention policy callback is required")
+	}
+	return source.WithReviewAttentionPolicy(
+		ctx,
+		AttentionPolicySelector{
+			Repository:    selector.Repository,
+			DecisionPoint: selector.DecisionPoint,
+		},
+		func(policyCtx context.Context, snapshot AttentionPolicySnapshot) error {
+			return use(policyCtx, sharedattention.PolicySnapshot{
+				Revision:   snapshot.Revision,
+				Global:     snapshot.Global,
+				Repository: snapshot.Repository,
+			})
+		},
+	)
 }
 
 func validAttentionDecisionPoint(value string) bool {

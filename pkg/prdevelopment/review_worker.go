@@ -79,12 +79,7 @@ type reviewWorkerStore interface {
 	) (eventing.PRDevelopmentController, error)
 }
 
-type reviewWorkspace interface {
-	SnapshotPinnedLineReview(
-		ctx context.Context,
-		request gitworkspace.PinnedLineReviewRequest,
-	) (gitworkspace.PinnedLineReviewSnapshot, error)
-}
+type reviewWorkspace = AttentionReviewWorkspace
 
 type reviewEvidenceStore interface {
 	GetPlan(ctx context.Context, digest string) (localci.Plan, bool, error)

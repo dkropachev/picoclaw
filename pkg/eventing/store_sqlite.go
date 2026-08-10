@@ -388,7 +388,7 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 11"); err != nil {
 			return fmt.Errorf("record eventing schema v11: %w", err)
 		}
-	} else if err = validateSchemaV11(ctx, conn); err != nil {
+	} else if err = validateSchemaV11ForVersion(ctx, conn, version >= 15); err != nil {
 		return fmt.Errorf("validate eventing schema v11: %w", err)
 	}
 	if version < 12 {
@@ -429,6 +429,19 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 		}
 	} else if err = validateSchemaV14(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v14: %w", err)
+	}
+	if version < 15 {
+		if _, err = conn.ExecContext(ctx, schemaV15); err != nil {
+			return fmt.Errorf("create eventing schema v15: %w", err)
+		}
+		if err = validateSchemaV15(ctx, conn); err != nil {
+			return fmt.Errorf("validate eventing schema v15: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 15"); err != nil {
+			return fmt.Errorf("record eventing schema v15: %w", err)
+		}
+	} else if err = validateSchemaV15(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v15: %w", err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)

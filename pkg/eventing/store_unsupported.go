@@ -11,30 +11,32 @@ import (
 type Store struct{}
 
 var (
-	_ Inbox                                 = (*Store)(nil)
-	_ EventOperatorReader                   = (*Store)(nil)
-	_ DispatchOperatorReader                = (*Store)(nil)
-	_ DispatchOperatorGetter                = (*Store)(nil)
-	_ RevisionRoutingDispatchCreator        = (*Store)(nil)
-	_ DispatchLeaseRenewer                  = (*Store)(nil)
-	_ ReviewStore                           = (*Store)(nil)
-	_ ReviewDecisionRunStore                = (*Store)(nil)
-	_ ReviewAttentionTriggerQueue           = (*Store)(nil)
-	_ PRDevelopmentCaseStore                = (*Store)(nil)
-	_ PRDevelopmentCaseReader               = (*Store)(nil)
-	_ PRDevelopmentThreadReader             = (*Store)(nil)
-	_ PRDevelopmentConversationStore        = (*Store)(nil)
-	_ PRDevelopmentWorkbenchReader          = (*Store)(nil)
-	_ PRDevelopmentRepairAdmitter           = (*Store)(nil)
-	_ PRDevelopmentRepairQueue              = (*Store)(nil)
-	_ PRDevelopmentRepairOrchestrationStore = (*Store)(nil)
-	_ PRDevelopmentControllerReader         = (*Store)(nil)
-	_ PRDevelopmentControllerStore          = (*Store)(nil)
-	_ PRDevelopmentControllerOperationStore = (*Store)(nil)
-	_ PRDevelopmentLedgerReader             = (*Store)(nil)
-	_ PRDevelopmentLedgerStore              = (*Store)(nil)
-	_ PRDevelopmentReviewQueue              = (*Store)(nil)
-	_ PRDevelopmentContextReader            = (*Store)(nil)
+	_ Inbox                                  = (*Store)(nil)
+	_ EventOperatorReader                    = (*Store)(nil)
+	_ DispatchOperatorReader                 = (*Store)(nil)
+	_ DispatchOperatorGetter                 = (*Store)(nil)
+	_ RevisionRoutingDispatchCreator         = (*Store)(nil)
+	_ DispatchLeaseRenewer                   = (*Store)(nil)
+	_ ReviewStore                            = (*Store)(nil)
+	_ ReviewDecisionRunStore                 = (*Store)(nil)
+	_ ReviewAttentionTriggerQueue            = (*Store)(nil)
+	_ PRDevelopmentCaseStore                 = (*Store)(nil)
+	_ PRDevelopmentCaseReader                = (*Store)(nil)
+	_ PRDevelopmentThreadReader              = (*Store)(nil)
+	_ PRDevelopmentConversationStore         = (*Store)(nil)
+	_ PRDevelopmentWorkbenchReader           = (*Store)(nil)
+	_ PRDevelopmentRepairAdmitter            = (*Store)(nil)
+	_ PRDevelopmentRepairQueue               = (*Store)(nil)
+	_ PRDevelopmentRepairOrchestrationStore  = (*Store)(nil)
+	_ PRDevelopmentControllerReader          = (*Store)(nil)
+	_ PRDevelopmentControllerStore           = (*Store)(nil)
+	_ PRDevelopmentControllerOperationStore  = (*Store)(nil)
+	_ PRDevelopmentLedgerReader              = (*Store)(nil)
+	_ PRDevelopmentLedgerStore               = (*Store)(nil)
+	_ PRDevelopmentReviewQueue               = (*Store)(nil)
+	_ PRDevelopmentContextReader             = (*Store)(nil)
+	_ PRDevelopmentAttentionSnapshotReader   = (*Store)(nil)
+	_ PRDevelopmentAttentionDecisionRunStore = (*Store)(nil)
 )
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -628,4 +630,26 @@ func (*Store) AdmitReviewDecisionRun(
 	func(context.Context) error,
 ) (ReviewDecisionRunLink, bool, error) {
 	return ReviewDecisionRunLink{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentAttentionSnapshot(
+	context.Context,
+	string,
+) (PRDevelopmentAttentionSnapshot, error) {
+	return PRDevelopmentAttentionSnapshot{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentAttentionDecisionRun(
+	context.Context,
+	PRDevelopmentAttentionDecisionKey,
+) (PRDevelopmentAttentionDecisionRunLink, error) {
+	return PRDevelopmentAttentionDecisionRunLink{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AdmitPRDevelopmentAttentionDecisionRun(
+	context.Context,
+	PRDevelopmentAttentionDecisionRunAdmission,
+	func(context.Context) error,
+) (PRDevelopmentAttentionDecisionRunLink, bool, error) {
+	return PRDevelopmentAttentionDecisionRunLink{}, false, ErrUnsupportedPlatform
 }

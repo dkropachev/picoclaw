@@ -359,3 +359,29 @@ func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 		)
 	}
 }
+
+func TestStorePRDevelopmentAttentionUnsupported(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var store Store
+	if _, err := store.GetPRDevelopmentAttentionSnapshot(
+		ctx,
+		"pdc_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("GetPRDevelopmentAttentionSnapshot() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, err := store.GetPRDevelopmentAttentionDecisionRun(
+		ctx,
+		PRDevelopmentAttentionDecisionKey{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("GetPRDevelopmentAttentionDecisionRun() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.AdmitPRDevelopmentAttentionDecisionRun(
+		ctx,
+		PRDevelopmentAttentionDecisionRunAdmission{},
+		func(context.Context) error { return nil },
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("AdmitPRDevelopmentAttentionDecisionRun() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+}
