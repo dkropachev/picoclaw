@@ -15,6 +15,7 @@ func TestPinnedLineReservationRecoveryJSONIsPrivate(t *testing.T) {
 	adoptJSON, err := json.Marshal(PinnedLineAdoptRecoveryRequest{
 		IntentID:                  "private-adopt-intent",
 		ReplacementReservationKey: "private-adopt-replacement",
+		RequireSuspensionCapacity: true,
 	})
 	if err != nil || string(adoptJSON) != "{}" {
 		t.Fatalf("adopt recovery JSON = %q, %v", adoptJSON, err)
@@ -22,6 +23,7 @@ func TestPinnedLineReservationRecoveryJSONIsPrivate(t *testing.T) {
 	resumeJSON, err := json.Marshal(PinnedLineResumeRecoveryRequest{
 		IntentID:                  "private-resume-intent",
 		ReplacementReservationKey: "private-resume-replacement",
+		RequireSuspensionCapacity: true,
 	})
 	if err != nil || string(resumeJSON) != "{}" {
 		t.Fatalf("resume recovery JSON = %q, %v", resumeJSON, err)
