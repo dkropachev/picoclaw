@@ -2646,6 +2646,29 @@ type PRDevelopmentPublicationReader interface {
 	) (PRDevelopmentPublication, error)
 }
 
+// PRDevelopmentPublicationGateAuthentication is the narrow result of proving
+// one exact initial publication claim against the current local high-water. The
+// repository is copied from that high-water's exact development case so policy
+// selection needs no rich gate context.
+type PRDevelopmentPublicationGateAuthentication struct {
+	Publication PRDevelopmentPublication `json:"-"`
+	Repository  string                   `json:"-"`
+}
+
+// PRDevelopmentPublicationGateClaimAuthenticator proves that one exact initial
+// publication claim is live and still owns the current publishable local
+// high-water candidate. It returns only the claim-redacted publication and
+// exact repository, and grants no conversation, provider, workflow, model, Git,
+// filesystem, or mutation authority.
+type PRDevelopmentPublicationGateClaimAuthenticator interface {
+	AuthenticateClaimedPRDevelopmentPublicationGate(
+		ctx context.Context,
+		publicationID string,
+		claimToken string,
+		claimEpoch int64,
+	) (PRDevelopmentPublicationGateAuthentication, error)
+}
+
 // PRDevelopmentPublicationGateContextSnapshotReader atomically captures the
 // complete local gate subject under one exact live initial publication claim.
 // It grants no provider, workflow, model, Git, filesystem, or mutation power.

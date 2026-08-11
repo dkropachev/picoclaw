@@ -18,6 +18,7 @@ import (
 
 var (
 	_ PRDevelopmentPublicationReader                    = (*Store)(nil)
+	_ PRDevelopmentPublicationGateClaimAuthenticator    = (*Store)(nil)
 	_ PRDevelopmentPublicationGateContextSnapshotReader = (*Store)(nil)
 	_ PRDevelopmentPublicationQueue                     = (*Store)(nil)
 	_ PRDevelopmentPublicationPushJournal               = (*Store)(nil)
@@ -155,6 +156,80 @@ func (s *Store) GetPRDevelopmentPublicationForReview(
 		return PRDevelopmentPublication{}, s.dbError(err)
 	}
 	return redactPRDevelopmentPublicationAuthority(publication), nil
+}
+
+// AuthenticateClaimedPRDevelopmentPublicationGate proves that an exact live
+// initial publication claim still owns the current publishable local candidate.
+// It performs no conversation, provider, workflow, model, filesystem, or Git
+// read or effect and returns only the redacted publication plus the exact case
+// repository selected by the same high-water read.
+func (s *Store) AuthenticateClaimedPRDevelopmentPublicationGate(
+	ctx context.Context,
+	publicationID string,
+	claimToken string,
+	claimEpoch int64,
+) (PRDevelopmentPublicationGateAuthentication, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentPublicationGateAuthentication{}, err
+	}
+	publicationID, claimToken, err := normalizePRDevelopmentPublicationClaim(
+		publicationID,
+		claimToken,
+		claimEpoch,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateAuthentication{}, err
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return PRDevelopmentPublicationGateAuthentication{}, err
+	}
+	var authentication PRDevelopmentPublicationGateAuthentication
+	err = s.withPRDevelopmentConversationReadSnapshot(
+		ctx,
+		func(queryer rowsQueryer) error {
+			loaded, loadErr := getPRDevelopmentPublicationByID(
+				ctx,
+				queryer,
+				publicationID,
+			)
+			if loadErr != nil {
+				return loadErr
+			}
+			if claimErr := requireLivePRDevelopmentPublicationClaim(
+				loaded,
+				claimToken,
+				claimEpoch,
+				now,
+			); claimErr != nil {
+				return claimErr
+			}
+			if loaded.Status != PRDevelopmentPublicationClaimed ||
+				loaded.ClaimFrom != PRDevelopmentPublicationPending {
+				return ErrStaleLease
+			}
+			highWater, loadErr := loadCurrentPRDevelopmentPublicationHighWater(
+				ctx,
+				queryer,
+				loaded,
+			)
+			if loadErr != nil {
+				return loadErr
+			}
+			authentication = PRDevelopmentPublicationGateAuthentication{
+				Publication: redactPRDevelopmentPublicationAuthority(loaded),
+				Repository:  highWater.Case.Repository,
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateAuthentication{}, fmt.Errorf(
+			"authenticate claimed pull request development publication gate: %w",
+			s.dbError(err),
+		)
+	}
+	return authentication, nil
 }
 
 // GetClaimedPRDevelopmentPublicationGateContextSnapshot returns the complete
@@ -918,7 +993,8 @@ func validateStoredPRDevelopmentPublication(
 		observation, canonical, hash, err := encodePRDevelopmentPublicationProvider(
 			publication.ProviderObservation,
 		)
-		if err != nil || !bytes.Equal(canonical, publication.ProviderObservationJSON) ||
+		if err != nil || !subjectPinned ||
+			!bytes.Equal(canonical, publication.ProviderObservationJSON) ||
 			hash != publication.ProviderObservationHash || publication.ProviderPinnedAt == nil ||
 			publication.ProviderObservedAt == nil ||
 			publication.ProviderPinnedAt.After(*publication.ProviderObservedAt) ||
