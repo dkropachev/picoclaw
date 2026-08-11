@@ -864,6 +864,13 @@ func (*Store) RenewPRDevelopmentPublication(
 	return ErrUnsupportedPlatform
 }
 
+func (*Store) RequeuePRDevelopmentPublication(
+	context.Context,
+	PRDevelopmentPublicationRequeue,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
 func (*Store) RenewPRDevelopmentPublicationPush(
 	context.Context,
 	PRDevelopmentPublicationRenew,
