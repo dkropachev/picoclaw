@@ -2283,6 +2283,29 @@ type PRDevelopmentPublicationOutcomeReconciliation struct {
 	Result        PRDevelopmentPublicationPushResult        `json:"-"`
 }
 
+// PRDevelopmentPublicationUnknownOutcomeCursor identifies one stable private
+// position in the oldest-first outcome-unknown journal scan. All three fields
+// are required together and are copied only from a previously returned page.
+type PRDevelopmentPublicationUnknownOutcomeCursor struct {
+	AvailableAt time.Time `json:"-"`
+	CreatedAt   time.Time `json:"-"`
+	ID          string    `json:"-"`
+}
+
+// PRDevelopmentPublicationUnknownOutcomeFilter bounds one private durable
+// scan. After is a keyset cursor rather than durable retry scheduling state.
+type PRDevelopmentPublicationUnknownOutcomeFilter struct {
+	After *PRDevelopmentPublicationUnknownOutcomeCursor `json:"-"`
+	Limit int                                           `json:"-"`
+}
+
+// PRDevelopmentPublicationUnknownOutcomePage contains only integrity-checked,
+// authority-redacted private journal records and an optional continuation.
+type PRDevelopmentPublicationUnknownOutcomePage struct {
+	Publications []PRDevelopmentPublication                    `json:"-"`
+	Next         *PRDevelopmentPublicationUnknownOutcomeCursor `json:"-"`
+}
+
 // PRDevelopmentPublicationDecisionKey identifies one immutable gate decision.
 // Mutable claim/controller revisions are deliberately excluded.
 type PRDevelopmentPublicationDecisionKey struct {
@@ -2828,6 +2851,10 @@ type PRDevelopmentPublicationOutcomeReconciler interface {
 		ctx context.Context,
 		limit int,
 	) ([]PRDevelopmentPublication, error)
+	ListPRDevelopmentPublicationUnknownOutcomes(
+		ctx context.Context,
+		filter PRDevelopmentPublicationUnknownOutcomeFilter,
+	) (PRDevelopmentPublicationUnknownOutcomePage, error)
 	ReconcilePRDevelopmentPublicationOutcome(
 		ctx context.Context,
 		input PRDevelopmentPublicationOutcomeReconciliation,
