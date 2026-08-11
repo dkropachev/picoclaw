@@ -478,6 +478,22 @@ func TestStorePRDevelopmentPublicationUnsupported(t *testing.T) {
 		false,
 		err,
 	)
+	authentication, err := store.AuthenticateClaimedPRDevelopmentPublicationGate(
+		ctx,
+		"publication",
+		"claim",
+		1,
+	)
+	assertUnsupported(
+		"AuthenticateClaimedPRDevelopmentPublicationGate()",
+		err,
+	)
+	if !reflect.DeepEqual(authentication, PRDevelopmentPublicationGateAuthentication{}) {
+		t.Fatalf(
+			"AuthenticateClaimedPRDevelopmentPublicationGate() = %#v, want zero value",
+			authentication,
+		)
+	}
 	snapshot, err := store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
 		ctx,
 		"publication",
