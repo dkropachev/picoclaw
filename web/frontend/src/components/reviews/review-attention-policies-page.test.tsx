@@ -90,11 +90,6 @@ describe("ReviewAttentionPoliciesPage", () => {
     vi.mocked(showSaveSuccessOrRestartToast).mockReset()
 
     vi.mocked(getReviewAttentionAgents).mockResolvedValue(agentCatalog())
-    vi.mocked(refreshGatewayState).mockResolvedValue({
-      status: "running",
-      canStart: true,
-      restartRequired: false,
-    })
   })
 
   it("shows loading, then renders every gate kind and repository override mode without executing anything", async () => {
@@ -118,11 +113,11 @@ describe("ReviewAttentionPoliciesPage", () => {
     await act(async () => resolvePolicies(mixedSnapshot()))
 
     expect(
-      await screen.findByText("Review events trigger attention"),
+      await screen.findByText("Decision gates request attention"),
     ).toBeVisible()
     expect(
       screen.getByText(
-        "Use review.submitted for reviews you send and pr_development.review_attention_required for reviewer feedback on your PRs. Matching policies are queued and run when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
+        "Use review.submitted for reviews you send, pr_development.review_attention_required for reviewer feedback on your PRs, and pr_development.before_push for the final local publication decision. Matching policies run when their runtime reaches that decision. Changes affect only future decisions that have not pinned a policy revision. Saving only updates configuration; it does not run a gate or model, edit code, run CI, invoke Git or push, acknowledge a review, resolve a review thread, or merge a pull request.",
       ),
     ).toBeVisible()
     const decisionPoint = screen.getAllByLabelText("Decision point")[0]
@@ -133,10 +128,12 @@ describe("ReviewAttentionPoliciesPage", () => {
     expect(presetOptions.map((option) => option.value)).toEqual([
       "review.submitted",
       "pr_development.review_attention_required",
+      "pr_development.before_push",
     ])
     expect(presetOptions.map((option) => option.label)).toEqual([
       "Outgoing review submitted",
       "My PR development review needs attention",
+      "Before pushing my PR changes",
     ])
     await waitFor(() => expect(getReviewAttentionAgents).toHaveBeenCalledOnce())
     const initialAgentRequest = vi.mocked(getReviewAttentionAgents).mock
@@ -157,8 +154,28 @@ describe("ReviewAttentionPoliciesPage", () => {
       "Ask the owner only when repository intent is required.",
     )
     expect(screen.getByLabelText("Deterministic condition")).toHaveValue(
-      "inputs.review.blocking == true",
+      "inputs.gate_subject.untrusted_target.review.has_findings == true",
     )
+    expect(
+      screen.getByText(
+        "Uses the AI already working on the problem and its current context. It asks you only when that AI decides your input is needed.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        "Uses a separate private AI context over the code, findings, and other inputs supplied to this decision.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        "Evaluates the configured condition without AI and asks the configured questions only when it matches. Decision data is available under inputs.gate_subject.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        "For a working-context gate here, select the same agent that owns this PR's local development. An owner mismatch fails closed before publication.",
+      ),
+    ).toBeVisible()
 
     await user.click(screen.getByRole("button", { name: /octo\/repo/ }))
 
@@ -166,13 +183,58 @@ describe("ReviewAttentionPoliciesPage", () => {
       screen
         .getAllByLabelText("Override mode")
         .map((field) => (field as HTMLSelectElement).value),
-    ).toEqual(["disable", "inherit", "overlay", "replace"])
+    ).toEqual(["overlay", "disable", "inherit", "replace"])
     expect(screen.getAllByText("Effective repository policy")).toHaveLength(4)
+    const beforePushPolicy = screen.getByRole("article", {
+      name: "Decision policy 1",
+    })
+    const resolvedGateRows = within(
+      within(beforePushPolicy).getByRole("list", {
+        name: "Resolved gate order",
+      }),
+    )
+      .getAllByRole("listitem")
+      .map((row) => row.getAttribute("aria-label"))
+    expect(resolvedGateRows).toEqual([
+      "1. ask_owner zero tombstoned",
+      "2. independent_check ai_isolated_context inherited",
+      "3. blocking_check deterministic inherited",
+      "4. no_attention zero inherited",
+      "5. repository_rule deterministic appended",
+    ])
     expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
-    expect(refreshGatewayState).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole("button", { name: "Review inbox" }))
     expect(onShowInbox).toHaveBeenCalledTimes(2)
+  })
+
+  it("keeps a custom decision point while offering the known before-push decision", async () => {
+    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
+      snapshot({
+        global: {
+          "custom.release_check": [{ id: "custom", kind: "zero" }],
+          "pr_development.before_push": [{ id: "before_push", kind: "zero" }],
+        },
+        repositories: {},
+      }),
+    )
+
+    renderPage()
+
+    const decisionPoints = await screen.findAllByLabelText("Decision point")
+    expect(
+      decisionPoints.map((field) => (field as HTMLInputElement).value),
+    ).toEqual(["custom.release_check", "pr_development.before_push"])
+    const decisionPoint = decisionPoints[0]
+    const presets = document.getElementById(
+      decisionPoint.getAttribute("list") ?? "",
+    )
+    expect(
+      Array.from(presets?.querySelectorAll("option") ?? []).map(
+        (option) => option.value,
+      ),
+    ).toContain("pr_development.before_push")
+    expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
   })
 
   it("pages a large decision scope and defers whole-catalog validation while editing", async () => {
@@ -235,7 +297,7 @@ describe("ReviewAttentionPoliciesPage", () => {
       "Gate ID must",
     )
     expect(
-      screen.getByText(/Global · review\.submitted · gate 1 · id/),
+      screen.getByText(/Global · pr_development\.before_push · gate 1 · id/),
     ).toBeVisible()
 
     await user.click(repositoryScope)
@@ -287,23 +349,23 @@ describe("ReviewAttentionPoliciesPage", () => {
     const [catalog, expectedRevision] = vi.mocked(putReviewAttentionPolicies)
       .mock.calls[0]
     expect(expectedRevision).toBe("config-revision-7")
-    expect(Object.keys(catalog.global)).toEqual(["review.submitted"])
-    expect(catalog.global["review.submitted"].map((gate) => gate.id)).toEqual([
-      "second_gate",
-      "deterministic_gate",
-    ])
-    expect(catalog.global["review.submitted"][0]).toEqual({
+    expect(Object.keys(catalog.global)).toEqual(["pr_development.before_push"])
+    expect(
+      catalog.global["pr_development.before_push"].map((gate) => gate.id),
+    ).toEqual(["second_gate", "deterministic_gate"])
+    expect(catalog.global["pr_development.before_push"][0]).toEqual({
       id: "second_gate",
       kind: "zero",
     })
     expect(
-      stringifyExactJSON(catalog.global["review.submitted"][1].questions!),
+      stringifyExactJSON(
+        catalog.global["pr_development.before_push"][1].questions!,
+      ),
     ).toBe(exactQuestionsSource)
     expect(Object.keys(catalog.repositories)).toEqual(["octo/keep"])
-    expect(catalog.repositories["octo/keep"]["review.submitted"]).toEqual({
-      mode: "inherit",
-      gates: [],
-    })
+    expect(
+      catalog.repositories["octo/keep"]["pr_development.before_push"],
+    ).toEqual({ mode: "inherit", gates: [] })
     expect(screen.getAllByLabelText("Gate ID")[0]).toBeDisabled()
     const inboxTab = screen.getByRole("button", { name: "Review inbox" })
     expect(inboxTab).toBeDisabled()
@@ -331,8 +393,13 @@ describe("ReviewAttentionPoliciesPage", () => {
         effects: { gateway_effect: "applied" },
       }),
     )
-    expect(refreshGatewayState).toHaveBeenCalledWith({ force: true })
-    expect(showSaveSuccessOrRestartToast).toHaveBeenCalledOnce()
+    expect(showSaveSuccessOrRestartToast).toHaveBeenCalledWith(
+      expect.any(Function),
+      "Review attention policies saved.",
+      "review attention policies",
+      false,
+    )
+    expect(refreshGatewayState).not.toHaveBeenCalled()
     expect(
       client.getQueryData<ReviewAttentionAgentCatalog>([
         "reviews",
@@ -1002,7 +1069,6 @@ describe("ReviewAttentionPoliciesPage", () => {
       expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2),
     )
     expect(putReviewAttentionPolicies).toHaveBeenCalledOnce()
-    expect(refreshGatewayState).not.toHaveBeenCalled()
     expect(showSaveSuccessOrRestartToast).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole("button", { name: "Reload latest" }))
@@ -1254,7 +1320,7 @@ function agentCatalog(configRevision = "config-revision-1") {
 function mixedSnapshot(): ReviewAttentionPolicySnapshot {
   return snapshot({
     global: {
-      "review.submitted": [
+      "pr_development.before_push": [
         {
           id: "ask_owner",
           kind: "ai_working_context",
@@ -1273,7 +1339,7 @@ function mixedSnapshot(): ReviewAttentionPolicySnapshot {
         {
           id: "blocking_check",
           kind: "deterministic",
-          when: "inputs.review.blocking == true",
+          when: "inputs.gate_subject.untrusted_target.review.has_findings == true",
           title: "Blocking finding",
           questions: parseExactJSON('[{"id":"resolution"}]'),
         },
@@ -1284,9 +1350,18 @@ function mixedSnapshot(): ReviewAttentionPolicySnapshot {
       "octo/repo": {
         "review.disabled": { mode: "disable", gates: [] },
         "review.inherited": { mode: "inherit", gates: [] },
-        "review.overlay": {
+        "pr_development.before_push": {
           mode: "overlay",
-          gates: [{ id: "overlay_noop", kind: "zero" }],
+          gates: [
+            { id: "ask_owner", kind: "zero" },
+            {
+              id: "repository_rule",
+              kind: "deterministic",
+              when: "true",
+              title: "Repository rule",
+              questions: parseExactJSON("[]"),
+            },
+          ],
         },
         "review.replaced": {
           mode: "replace",
@@ -1301,11 +1376,11 @@ function replacementSnapshot(): ReviewAttentionPolicySnapshot {
   return snapshot(
     {
       global: {
-        "review.submitted": [
+        "pr_development.before_push": [
           {
             id: "deterministic_gate",
             kind: "deterministic",
-            when: "inputs.review.blocking == true",
+            when: "inputs.gate_subject.untrusted_target.review.has_findings == true",
             title: "Blocking review",
             questions: parseExactJSON(exactQuestionsSource),
           },
@@ -1313,7 +1388,7 @@ function replacementSnapshot(): ReviewAttentionPolicySnapshot {
       },
       repositories: {
         "octo/keep": {
-          "review.submitted": { mode: "inherit", gates: [] },
+          "pr_development.before_push": { mode: "inherit", gates: [] },
         },
       },
     },

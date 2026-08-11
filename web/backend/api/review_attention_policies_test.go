@@ -146,7 +146,7 @@ func reviewAttentionDirectorySnapshot(
 func completeReviewAttentionPolicy() config.ReviewAttentionConfig {
 	return config.ReviewAttentionConfig{
 		Global: map[string][]gatetypes.GateSpec{
-			"review.submitted": {
+			"pr_development.before_push": {
 				{
 					ID:       "working",
 					Kind:     gatetypes.GateAIWorkingContext,
@@ -173,7 +173,7 @@ func completeReviewAttentionPolicy() config.ReviewAttentionConfig {
 		},
 		Repositories: map[string]map[string]gatetypes.RepositoryGatePolicy{
 			"Acme/Widgets": {
-				"review.submitted": {
+				"pr_development.before_push": {
 					Mode: gatetypes.GatePolicyOverlay,
 					Gates: []gatetypes.GateSpec{
 						{ID: "isolated", Kind: gatetypes.GateZero},
@@ -369,10 +369,10 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	if _, exists := saved.Reviews.Attention.Repositories["Old/Repository"]; exists {
 		t.Fatal("PUT merged instead of fully replacing repository policies")
 	}
-	if len(saved.Reviews.Attention.Global["review.submitted"]) != 4 {
+	if len(saved.Reviews.Attention.Global["pr_development.before_push"]) != 4 {
 		t.Fatalf("saved policies = %#v", saved.Reviews.Attention)
 	}
-	repositoryPolicy := saved.Reviews.Attention.Repositories["Acme/Widgets"]["review.submitted"]
+	repositoryPolicy := saved.Reviews.Attention.Repositories["Acme/Widgets"]["pr_development.before_push"]
 	questions, ok := repositoryPolicy.Gates[1].Questions.(map[string]any)
 	if !ok || questions["Foo"] != "one" || questions["foo"] != "two" {
 		t.Fatalf("saved case-sensitive questions = %#v", questions)
@@ -879,7 +879,7 @@ func TestReviewAttentionPoliciesUseNumberAndFenceCAS(t *testing.T) {
 		t.Fatal("concurrent writer was not injected")
 	}
 	saved := requireConcurrentAlias(t, harness.configPath)
-	if _, exists := saved.Reviews.Attention.Global["review.submitted"]; exists {
+	if _, exists := saved.Reviews.Attention.Global["pr_development.before_push"]; exists {
 		t.Fatal("stale attention policy candidate was persisted")
 	}
 }
@@ -1104,9 +1104,9 @@ func TestConfigSignatureTracksOnlyActiveCanonicalAttentionCatalog(t *testing.T) 
 		t.Fatal("repository key case changed canonical attention signature")
 	}
 
-	ordered := canonical.Reviews.Attention.Global["review.submitted"]
+	ordered := canonical.Reviews.Attention.Global["pr_development.before_push"]
 	ordered[0], ordered[1] = ordered[1], ordered[0]
-	canonical.Reviews.Attention.Global["review.submitted"] = ordered
+	canonical.Reviews.Attention.Global["pr_development.before_push"] = ordered
 	if got := computeConfigSignature(canonical); got == activeSignature {
 		t.Fatal("gate order did not change active attention signature")
 	}

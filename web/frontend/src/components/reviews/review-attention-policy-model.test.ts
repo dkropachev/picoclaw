@@ -64,7 +64,7 @@ function validDraft(): ReviewAttentionPolicyDraft {
     global: [
       {
         editorKey: "global-1",
-        decisionPoint: "review.submitted",
+        decisionPoint: "pr_development.before_push",
         gates: [
           aiGate("gate-1", "working"),
           aiGate("gate-2", "isolated", "ai_isolated_context", "reviewer"),
@@ -85,7 +85,7 @@ function validDraft(): ReviewAttentionPolicyDraft {
         policies: [
           {
             editorKey: "repository-policy-1",
-            decisionPoint: "review.submitted",
+            decisionPoint: "pr_development.before_push",
             mode: "overlay",
             gates: [
               { editorKey: "gate-5", id: "isolated", kind: "zero" },
@@ -233,7 +233,9 @@ describe("review attention policy draft model", () => {
     expect(validation.metrics.canonicalBytes).toBeGreaterThan(0)
     expect(validation.metrics.requestBytes).toBeGreaterThan(0)
     expect(
-      validation.catalog?.repositories["Acme/Widgets"]["review.submitted"],
+      validation.catalog?.repositories["Acme/Widgets"][
+        "pr_development.before_push"
+      ],
     ).toMatchObject({ mode: "overlay" })
 
     const reordered = validDraft()
@@ -255,7 +257,7 @@ describe("review attention policy draft model", () => {
     const draft = validDraft()
     draft.global.push({
       editorKey: "duplicate-global",
-      decisionPoint: "review.submitted",
+      decisionPoint: "pr_development.before_push",
       gates: [],
     })
     draft.repositories.push({
@@ -411,10 +413,10 @@ describe("review attention effective policy resolution", () => {
     gates: ReviewAttentionGate[] = [],
   ): ReviewAttentionPolicyCatalog {
     return {
-      global: { "review.ready": globalGates },
+      global: { "pr_development.before_push": globalGates },
       repositories: {
         "Acme/Widgets": {
-          "review.ready": { mode, gates },
+          "pr_development.before_push": { mode, gates },
         },
       },
     }
@@ -422,9 +424,12 @@ describe("review attention effective policy resolution", () => {
 
   it("resolves absent and explicit inheritance", () => {
     const inherited = resolveReviewAttentionPolicy(
-      { global: { "review.ready": globalGates }, repositories: {} },
+      {
+        global: { "pr_development.before_push": globalGates },
+        repositories: {},
+      },
       "unknown/repo",
-      "review.ready",
+      "pr_development.before_push",
     )
     expect(inherited).toMatchObject({
       mode: "inherit",
@@ -439,7 +444,7 @@ describe("review attention effective policy resolution", () => {
     const explicit = resolveReviewAttentionPolicy(
       catalog("inherit"),
       "acme/widgets",
-      "review.ready",
+      "pr_development.before_push",
     )
     expect(explicit.overrideConfigured).toBe(true)
     expect(explicit.mode).toBe("inherit")
@@ -458,7 +463,7 @@ describe("review attention effective policy resolution", () => {
         },
       ]),
       "acme/widgets",
-      "review.ready",
+      "pr_development.before_push",
     )
     expect(result.entries.map(({ id, action }) => ({ id, action }))).toEqual([
       { id: "ask", action: "tombstoned" },
@@ -484,7 +489,7 @@ describe("review attention effective policy resolution", () => {
     const replaced = resolveReviewAttentionPolicy(
       catalog("replace", [replacement]),
       "ACME/WIDGETS",
-      "review.ready",
+      "pr_development.before_push",
     )
     expect(replaced.entries[0].action).toBe("selected")
     expect(replaced.entries[0].effectivePosition).toBe(1)
@@ -498,7 +503,7 @@ describe("review attention effective policy resolution", () => {
       resolveReviewAttentionPolicy(
         catalog("disable"),
         "Acme/Widgets",
-        "review.ready",
+        "pr_development.before_push",
       ),
     ).toMatchObject({ mode: "disable", entries: [], effective: [], noop: true })
   })

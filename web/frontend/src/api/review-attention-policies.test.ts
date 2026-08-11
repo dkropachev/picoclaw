@@ -20,7 +20,7 @@ const mockedLauncherFetch = vi.mocked(launcherFetch)
 
 const responseBody = `{
   "global": {
-    "review.submitted": [
+    "pr_development.before_push": [
       {
         "id": "deterministic",
         "kind": "deterministic",
@@ -38,7 +38,7 @@ const responseBody = `{
   },
   "repositories": {
     "Acme/Widgets": {
-      "review.submitted": {
+      "pr_development.before_push": {
         "mode": "overlay",
         "gates": [{"id": "skip", "kind": "zero"}]
       },
@@ -75,7 +75,7 @@ describe("review attention policies API", () => {
       "/api/reviews/attention-policies",
       expect.anything(),
     )
-    const questions = snapshot.global["review.submitted"][0].questions
+    const questions = snapshot.global["pr_development.before_push"][0].questions
     expect(questions).toBeDefined()
     expect(stringifyExactJSON(questions!)).toBe(
       '{"limit":9007199254740993,"decimal":1.2300e+400,"__proto__":{"constructor":9007199254740995},"Foo":"one","foo":"two"}',
@@ -103,7 +103,7 @@ describe("review attention policies API", () => {
         ),
       )
     const snapshot = await getReviewAttentionPolicies()
-    snapshot.global["review.submitted"][0].title = "Confirm locally"
+    snapshot.global["pr_development.before_push"][0].title = "Confirm locally"
     delete snapshot.repositories["Acme/Widgets"]["review.disabled"]
 
     const saved = await putReviewAttentionPolicies(
