@@ -50,6 +50,8 @@ var (
 	_ PRDevelopmentPublicationDecisionRunStore            = (*Store)(nil)
 )
 
+var _ PRDevelopmentPublicationPinnedGateContextSnapshotReader = (*Store)(nil)
+
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
 }
@@ -846,6 +848,16 @@ func (*Store) GetClaimedPRDevelopmentPublicationGateContextSnapshot(
 	string,
 	string,
 	int64,
+) (PRDevelopmentPublicationGateContextSnapshot, error) {
+	return PRDevelopmentPublicationGateContextSnapshot{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+	context.Context,
+	string,
+	string,
+	int64,
+	PRDevelopmentPublicationGateContextAnchor,
 ) (PRDevelopmentPublicationGateContextSnapshot, error) {
 	return PRDevelopmentPublicationGateContextSnapshot{}, ErrUnsupportedPlatform
 }

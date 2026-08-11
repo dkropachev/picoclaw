@@ -165,6 +165,74 @@ func TestPublicationGateProcessorActivePolicyStopsAfterPolicyPin(t *testing.T) {
 	}
 }
 
+func TestPublicationGateProcessorActivePolicyReplaysCompleteDurableDecisionWithoutEffects(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newPublicationGateExecutorFixture(t, publicationGateExecutorPassingGates())
+	first, err := fixture.executor(t).ExecuteClaim(t.Context(), fixture.claim)
+	if err != nil || first.RunID == "" || first.Status != workflows.RunStatusSucceeded ||
+		first.Existing {
+		t.Fatalf("initial ExecuteClaim() = (%#v, %v), operations=%v", first, err, fixture.operations())
+	}
+	before := fixture.store.current()
+	if before.SubjectRevision == "" || before.ProviderObservationHash == "" ||
+		before.DecisionRunID != first.RunID ||
+		before.Status != eventing.PRDevelopmentPublicationClaimed ||
+		before.ClaimFrom != eventing.PRDevelopmentPublicationPending {
+		t.Fatalf("complete durable active decision = %#v, run=%q", before, first.RunID)
+	}
+	key := publicationDecisionKey(before)
+	fixture.store.mu.Lock()
+	linkBefore, linked := fixture.store.links[key]
+	fixture.store.mu.Unlock()
+	if !linked || linkBefore.RunID != first.RunID {
+		t.Fatalf("durable decision link = (%#v, %v), want run %q", linkBefore, linked, first.RunID)
+	}
+
+	policies := &publicationGatePolicySourceFake{
+		fixture: fixture.base,
+		err:     errors.New("active replay must not reconstruct policy"),
+	}
+	fixture.provider.err = errors.New("active replay must not observe provider")
+	processor, err := NewPublicationGateProcessor(PublicationGateProcessorConfig{
+		Store: fixture.store, Policies: policies, Provider: fixture.provider,
+	})
+	if err != nil {
+		t.Fatalf("NewPublicationGateProcessor() error = %v", err)
+	}
+	fixture.clearOperations()
+
+	replayed, err := processor.ProcessClaim(t.Context(), fixture.claim)
+	if err != nil || replayed.Disposition != PublicationGateRequiresExecution {
+		t.Fatalf("replayed ProcessClaim() = (%#v, %v), operations=%v", replayed, err, fixture.operations())
+	}
+	if replayed.Publication.DecisionRunID != first.RunID ||
+		replayed.Publication.SubjectRevision != before.SubjectRevision ||
+		replayed.Publication.ProviderObservationHash != before.ProviderObservationHash ||
+		replayed.Publication.ClaimToken != "" {
+		t.Fatalf("replayed durable active decision = %#v", replayed.Publication)
+	}
+	if got, want := fixture.operations(), []string{"authenticate"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("replay operations = %v, want %v", got, want)
+	}
+	if policies.calls != 0 || fixture.provider.callsValue() != 1 {
+		t.Fatalf("replay reconstructed policy/provider: policy=%d provider=%d",
+			policies.calls, fixture.provider.callsValue())
+	}
+	if after := fixture.store.current(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("processor replay transitioned durable state: before=%#v after=%#v", before, after)
+	}
+	fixture.store.mu.Lock()
+	linkAfter, stillLinked := fixture.store.links[key]
+	fixture.store.mu.Unlock()
+	if !stillLinked || linkAfter != linkBefore {
+		t.Fatalf("processor replay changed decision link: before=%#v after=%#v found=%v",
+			linkBefore, linkAfter, stillLinked)
+	}
+}
+
 func TestPublicationGateProcessorPinnedPolicyIgnoresLivePolicySource(t *testing.T) {
 	t.Parallel()
 
@@ -926,6 +994,7 @@ func (source *publicationGatePolicySourceFake) WithAttentionPolicy(
 }
 
 type publicationGateProviderFake struct {
+	mu          sync.Mutex
 	fixture     *publicationGateProcessorFixture
 	observation TimedPublicationProviderObservation
 	err         error
@@ -940,19 +1009,29 @@ func (provider *publicationGateProviderFake) ObservePublication(
 	if provider == nil {
 		return TimedPublicationProviderObservation{}, errors.New("nil provider")
 	}
+	provider.mu.Lock()
 	provider.calls++
+	providerErr := provider.err
+	observation := provider.observation
+	provider.mu.Unlock()
 	provider.fixture.record("provider")
 	if err := ctx.Err(); err != nil {
 		return TimedPublicationProviderObservation{}, err
 	}
-	if provider.err != nil {
-		return TimedPublicationProviderObservation{}, provider.err
+	if providerErr != nil {
+		return TimedPublicationProviderObservation{}, providerErr
 	}
 	if stored.ID != provider.fixture.store.snapshot.Case.ID ||
 		expected != provider.fixture.store.snapshot.Thread.Identity {
 		return TimedPublicationProviderObservation{}, errors.New("unexpected provider subject")
 	}
-	return provider.observation, nil
+	return observation, nil
+}
+
+func (provider *publicationGateProviderFake) callsValue() int {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.calls
 }
 
 type publicationGateStoreFake struct {
