@@ -637,6 +637,17 @@ func TestStorePRDevelopmentPublicationUnsupported(t *testing.T) {
 			publications,
 		)
 	}
+	unknownPage, err := store.ListPRDevelopmentPublicationUnknownOutcomes(
+		ctx,
+		PRDevelopmentPublicationUnknownOutcomeFilter{},
+	)
+	assertUnsupported("ListPRDevelopmentPublicationUnknownOutcomes()", err)
+	if !reflect.DeepEqual(unknownPage, PRDevelopmentPublicationUnknownOutcomePage{}) {
+		t.Fatalf(
+			"ListPRDevelopmentPublicationUnknownOutcomes() = %#v, want zero value",
+			unknownPage,
+		)
+	}
 	publication, changed, err = store.ReconcilePRDevelopmentPublicationOutcome(
 		ctx,
 		PRDevelopmentPublicationOutcomeReconciliation{},
@@ -707,6 +718,14 @@ func TestPRDevelopmentPublicationUnsupportedSurfaceIsJSONPrivate(t *testing.T) {
 		PRDevelopmentPublicationPushStart{PublicationID: sentinel},
 		PRDevelopmentPublicationPushFinalize{PublicationID: sentinel},
 		PRDevelopmentPublicationOutcomeReconciliation{PublicationID: sentinel},
+		PRDevelopmentPublicationUnknownOutcomeCursor{ID: sentinel},
+		PRDevelopmentPublicationUnknownOutcomeFilter{
+			After: &PRDevelopmentPublicationUnknownOutcomeCursor{ID: sentinel},
+		},
+		PRDevelopmentPublicationUnknownOutcomePage{
+			Publications: []PRDevelopmentPublication{{ID: sentinel}},
+			Next:         &PRDevelopmentPublicationUnknownOutcomeCursor{ID: sentinel},
+		},
 		PRDevelopmentPublicationDecisionKey{PublicationID: sentinel},
 		PRDevelopmentPublicationDecisionRunAdmission{RunID: sentinel},
 		PRDevelopmentPublicationDecisionRunLink{RunID: sentinel},

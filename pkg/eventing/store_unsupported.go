@@ -962,6 +962,13 @@ func (*Store) ExpirePRDevelopmentPublicationPushes(
 	return nil, ErrUnsupportedPlatform
 }
 
+func (*Store) ListPRDevelopmentPublicationUnknownOutcomes(
+	context.Context,
+	PRDevelopmentPublicationUnknownOutcomeFilter,
+) (PRDevelopmentPublicationUnknownOutcomePage, error) {
+	return PRDevelopmentPublicationUnknownOutcomePage{}, ErrUnsupportedPlatform
+}
+
 func (*Store) ReconcilePRDevelopmentPublicationOutcome(
 	context.Context,
 	PRDevelopmentPublicationOutcomeReconciliation,

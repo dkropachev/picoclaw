@@ -2022,6 +2022,138 @@ func expirePRDevelopmentPublicationPushes(
 	return expired, nil
 }
 
+type prDevelopmentPublicationUnknownOutcomeListPlan struct {
+	query string
+	args  []any
+	limit int
+}
+
+// ListPRDevelopmentPublicationUnknownOutcomes returns one stable bounded page
+// of existing outcome-unknown journal rows. It performs no claim, provider,
+// Git, retry-scheduling, or reconciliation operation.
+func (s *Store) ListPRDevelopmentPublicationUnknownOutcomes(
+	ctx context.Context,
+	filter PRDevelopmentPublicationUnknownOutcomeFilter,
+) (PRDevelopmentPublicationUnknownOutcomePage, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentPublicationUnknownOutcomePage{}, err
+	}
+	plan, err := buildPRDevelopmentPublicationUnknownOutcomeListPlan(filter)
+	if err != nil {
+		return PRDevelopmentPublicationUnknownOutcomePage{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, plan.query, plan.args...)
+	if err != nil {
+		return PRDevelopmentPublicationUnknownOutcomePage{}, fmt.Errorf(
+			"list pull request development publication unknown outcomes: %w",
+			s.dbError(err),
+		)
+	}
+	defer rows.Close()
+
+	publications := make([]PRDevelopmentPublication, 0, plan.limit+1)
+	for rows.Next() {
+		publication, scanErr := scanPRDevelopmentPublication(rows)
+		if scanErr != nil {
+			return PRDevelopmentPublicationUnknownOutcomePage{}, fmt.Errorf(
+				"scan pull request development publication unknown outcome: %w",
+				scanErr,
+			)
+		}
+		if publication.Status != PRDevelopmentPublicationOutcomeUnknown ||
+			publication.ClaimUntil != nil {
+			return PRDevelopmentPublicationUnknownOutcomePage{}, errors.New(
+				"listed pull request development publication is not an unclaimed unknown outcome",
+			)
+		}
+		publications = append(
+			publications,
+			redactPRDevelopmentPublicationAuthority(publication),
+		)
+	}
+	if err := rows.Err(); err != nil {
+		return PRDevelopmentPublicationUnknownOutcomePage{}, fmt.Errorf(
+			"iterate pull request development publication unknown outcomes: %w",
+			s.dbError(err),
+		)
+	}
+
+	page := PRDevelopmentPublicationUnknownOutcomePage{Publications: publications}
+	if len(publications) > plan.limit {
+		last := publications[plan.limit-1]
+		page.Publications = publications[:plan.limit]
+		page.Next = &PRDevelopmentPublicationUnknownOutcomeCursor{
+			AvailableAt: last.AvailableAt,
+			CreatedAt:   last.CreatedAt,
+			ID:          last.ID,
+		}
+	}
+	return page, nil
+}
+
+func buildPRDevelopmentPublicationUnknownOutcomeListPlan(
+	filter PRDevelopmentPublicationUnknownOutcomeFilter,
+) (prDevelopmentPublicationUnknownOutcomeListPlan, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > maxPRDevelopmentPublicationClaimLimit {
+		limit = maxPRDevelopmentPublicationClaimLimit
+	}
+
+	query := `
+		SELECT ` + prDevelopmentPublicationColumns + `
+		FROM pr_development_publications
+			INDEXED BY pr_development_publications_claimable
+		WHERE status = 'outcome_unknown' AND claim_until IS NULL`
+	args := make([]any, 0, 7)
+	if filter.After != nil {
+		cursor := *filter.After
+		if !canonicalPRDevelopmentPublicationUnknownOutcomeCursorTime(cursor.AvailableAt) ||
+			!canonicalPRDevelopmentPublicationUnknownOutcomeCursorTime(cursor.CreatedAt) ||
+			cursor.AvailableAt.Before(cursor.CreatedAt) ||
+			!validPrefixedHexID(cursor.ID, prDevelopmentPublicationIDPrefix) {
+			return prDevelopmentPublicationUnknownOutcomeListPlan{}, fmt.Errorf(
+				"%w: publication unknown-outcome cursor is invalid",
+				ErrInvalidPRDevelopmentPublication,
+			)
+		}
+		availableAt := toDBTime(cursor.AvailableAt)
+		createdAt := toDBTime(cursor.CreatedAt)
+		query += ` AND (
+			available_at > ? OR
+			(available_at = ? AND created_at > ?) OR
+			(available_at = ? AND created_at = ? AND id > ?)
+		)`
+		args = append(
+			args,
+			availableAt,
+			availableAt,
+			createdAt,
+			availableAt,
+			createdAt,
+			cursor.ID,
+		)
+	}
+	query += `
+		ORDER BY available_at ASC, claim_until ASC, created_at ASC, id ASC
+		LIMIT ?`
+	args = append(args, limit+1)
+	return prDevelopmentPublicationUnknownOutcomeListPlan{
+		query: query,
+		args:  args,
+		limit: limit,
+	}, nil
+}
+
+func canonicalPRDevelopmentPublicationUnknownOutcomeCursorTime(value time.Time) bool {
+	if value.IsZero() {
+		return false
+	}
+	return value == time.Unix(0, value.UnixNano()).UTC()
+}
+
 func normalizePRDevelopmentPublicationIdentity(
 	field, value string,
 	maximum int,
