@@ -72,7 +72,6 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { cn } from "@/lib/utils"
-import { refreshGatewayState } from "@/store/gateway"
 
 const policyQueryKey = ["reviews", "attention-policies"] as const
 const agentQueryKey = ["reviews", "attention-policy-agents"] as const
@@ -87,6 +86,11 @@ const knownAttentionDecisionPoints = [
     value: "pr_development.review_attention_required",
     labelKey: "pages.reviews.policies.decision_pr_development_attention",
     label: "My PR development review needs attention",
+  },
+  {
+    value: "pr_development.before_push",
+    labelKey: "pages.reviews.policies.decision_pr_development_before_push",
+    label: "Before pushing my PR changes",
   },
 ] as const
 
@@ -473,13 +477,11 @@ export function ReviewAttentionPoliciesPage({
           ),
         )
       }
-      const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
         t("pages.reviews.policies.saved", "Review attention policies saved."),
         t("pages.reviews.policies.name", "review attention policies"),
-        response.effects.gateway_effect === "restart_required" ||
-          gateway?.restartRequired === true,
+        response.effects.gateway_effect === "restart_required",
       )
     } catch (error) {
       if (
@@ -853,11 +855,11 @@ export function ReviewAttentionPoliciesPage({
                 kind="save"
                 title={t(
                   "pages.reviews.policies.automatic_title",
-                  "Review events trigger attention",
+                  "Decision gates request attention",
                 )}
                 description={t(
                   "pages.reviews.policies.automatic_description",
-                  "Use review.submitted for reviews you send and pr_development.review_attention_required for reviewer feedback on your PRs. Matching policies are queued and run when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
+                  "Use review.submitted for reviews you send, pr_development.review_attention_required for reviewer feedback on your PRs, and pr_development.before_push for the final local publication decision. Matching policies run when their runtime reaches that decision. Changes affect only future decisions that have not pinned a policy revision. Saving only updates configuration; it does not run a gate or model, edit code, run CI, invoke Git or push, acknowledge a review, resolve a review thread, or merge a pull request.",
                 )}
               />
               {snapshot.effects.gateway_effect === "restart_required" && (
@@ -1566,9 +1568,17 @@ function PolicyEditorCard({
           <p className="text-muted-foreground mt-1 text-xs">
             {t(
               "pages.reviews.policies.decision_point_help",
-              "Choose a known review event or enter a custom workflow decision point.",
+              "Choose a known product decision or enter a custom workflow decision point.",
             )}
           </p>
+          {policy.decisionPoint === "pr_development.before_push" && (
+            <p className="text-muted-foreground mt-1 text-xs">
+              {t(
+                "pages.reviews.policies.before_push_owner_help",
+                "For a working-context gate here, select the same agent that owns this PR's local development. An owner mismatch fails closed before publication.",
+              )}
+            </p>
+          )}
           <ReviewAttentionFieldIssue
             id={`${policy.editorKey}-decision-error`}
             issue={decisionPointIssue}
@@ -1716,10 +1726,17 @@ function PolicyEditorCard({
               )}
             </p>
           ) : (
-            <ol className="mt-2 flex min-w-0 flex-wrap gap-2">
+            <ol
+              aria-label={t(
+                "pages.reviews.policies.effective_gate_order",
+                "Resolved gate order",
+              )}
+              className="mt-2 flex min-w-0 flex-wrap gap-2"
+            >
               {preview.entries.map((entry) => (
                 <li
                   key={`${entry.effectivePosition}:${entry.gate.id}`}
+                  aria-label={`${entry.effectivePosition}. ${entry.gate.id} ${entry.gate.kind} ${entry.action}`}
                   className="border-border bg-background flex max-w-full min-w-0 flex-wrap items-center gap-2 rounded-md border px-2 py-1 text-xs"
                 >
                   <span className="text-muted-foreground shrink-0">
@@ -1728,6 +1745,9 @@ function PolicyEditorCard({
                   <span className="min-w-0 font-mono break-all">
                     {entry.gate.id}
                   </span>
+                  <Badge variant="secondary" className="shrink-0">
+                    {entry.gate.kind}
+                  </Badge>
                   <Badge variant="outline" className="shrink-0">
                     {entry.action}
                   </Badge>
@@ -1790,6 +1810,24 @@ function GateEditor({
     !agents.some((agent) => agent.id === selectedAgentID)
       ? [...agents, { id: selectedAgentID, name: "" }]
       : agents
+  const gateKindHelp = {
+    ai_working_context: t(
+      "pages.reviews.policies.ai_working_context_help",
+      "Uses the AI already working on the problem and its current context. It asks you only when that AI decides your input is needed.",
+    ),
+    ai_isolated_context: t(
+      "pages.reviews.policies.ai_isolated_context_help",
+      "Uses a separate private AI context over the code, findings, and other inputs supplied to this decision.",
+    ),
+    deterministic: t(
+      "pages.reviews.policies.deterministic_help",
+      "Evaluates the configured condition without AI and asks the configured questions only when it matches. Decision data is available under inputs.gate_subject.",
+    ),
+    zero: t(
+      "pages.reviews.policies.zero_help",
+      "A zero gate is an explicit no-op. In an overlay it can tombstone a global gate with the same ID.",
+    ),
+  }[gate.kind]
   return (
     <fieldset className="border-border min-w-0 space-y-3 rounded-lg border p-3">
       <legend className="px-1 text-xs font-medium">
@@ -1885,6 +1923,8 @@ function GateEditor({
           </Button>
         </div>
       </div>
+
+      <p className="text-muted-foreground text-xs">{gateKindHelp}</p>
 
       {(gate.kind === "ai_working_context" ||
         gate.kind === "ai_isolated_context") && (
@@ -2029,7 +2069,7 @@ function GateEditor({
                 onChange={(event) =>
                   onChange({ ...gate, when: event.target.value })
                 }
-                placeholder="inputs.review.blocking == true"
+                placeholder="true"
                 spellCheck={false}
               />
               <ReviewAttentionFieldIssue
@@ -2069,15 +2109,6 @@ function GateEditor({
             }
           />
         </>
-      )}
-
-      {gate.kind === "zero" && (
-        <p className="text-muted-foreground text-xs">
-          {t(
-            "pages.reviews.policies.zero_help",
-            "A zero gate is an explicit no-op. In an overlay it can tombstone a global gate with the same ID.",
-          )}
-        </p>
       )}
     </fieldset>
   )

@@ -976,7 +976,7 @@ const channelCatalogResponse = {
 
 const boundaryReviewAttentionGateID = "g".repeat(64)
 const boundaryReviewAttentionRepository = `${"o".repeat(127)}/${"r".repeat(128)}`
-const reviewAttentionPoliciesResponseText = `{"global":{"review.submitted":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.review.blocking == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]},"repositories":{"octo/repo":{"review.submitted":{"mode":"overlay","gates":[{"id":"ask_owner","kind":"zero"},{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.review.repository_risk == true","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
+const reviewAttentionPoliciesResponseText = `{"global":{"custom.release_check":[],"pr_development.before_push":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.gate_subject.untrusted_target.review.has_findings == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]},"repositories":{"octo/repo":{"pr_development.before_push":{"mode":"overlay","gates":[{"id":"ask_owner","kind":"zero"},{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.gate_subject.untrusted_local_ci.plan_complete == false","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
 const reviewAttentionCaseID = `prc_${"1".repeat(32)}`
 const reviewAttentionResponseToken = `sha256:${"a".repeat(64)}`
 const reviewAttentionCase = {
@@ -3583,7 +3583,29 @@ test("review attention policy route is inert, accessible, and contained on deskt
   await expect(
     page.getByRole("button", { name: "Attention policies" }),
   ).toHaveAttribute("aria-current", "page")
-  await expect(page.getByText("Review events trigger attention")).toBeVisible()
+  await expect(page.getByText("Decision gates request attention")).toBeVisible()
+  await expect(
+    page.getByText(/Changes affect only future decisions that have not pinned/),
+  ).toBeVisible()
+  await expect(
+    page.getByText(/Saving only updates configuration; it does not run a gate/),
+  ).toBeVisible()
+  const decisionPoints = page.getByLabel("Decision point")
+  expect(
+    await decisionPoints.evaluateAll((fields) =>
+      fields.map((field) => (field as HTMLInputElement).value),
+    ),
+  ).toEqual(["custom.release_check", "pr_development.before_push"])
+  const decisionPoint = decisionPoints.nth(1)
+  const presetListID = await decisionPoint.getAttribute("list")
+  expect(presetListID).not.toBeNull()
+  expect(
+    await page
+      .locator(`#${presetListID} option`)
+      .evaluateAll((options) =>
+        options.map((option) => (option as HTMLOptionElement).value),
+      ),
+  ).toContain("pr_development.before_push")
   expect(
     await page
       .getByLabel("Gate type")
@@ -3600,6 +3622,21 @@ test("review attention policy route is inert, accessible, and contained on deskt
   await page.getByRole("button", { name: /octo\/repo/ }).click()
   await expect(page.getByLabel("Override mode")).toHaveValue("overlay")
   await expect(page.getByText("Effective repository policy")).toBeVisible()
+  const effectivePolicy = page.getByRole("article", {
+    name: "Decision policy 1",
+  })
+  expect(
+    await effectivePolicy
+      .getByRole("list", { name: "Resolved gate order" })
+      .getByRole("listitem")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("aria-label"))),
+  ).toEqual([
+    "1. ask_owner zero tombstoned",
+    "2. independent_check ai_isolated_context inherited",
+    "3. blocking_check deterministic inherited",
+    "4. no_attention zero inherited",
+    `5. ${boundaryReviewAttentionGateID} deterministic appended`,
+  ])
 
   await page.waitForTimeout(250)
   expect(reviewRequests.length).toBeGreaterThan(0)
@@ -3672,7 +3709,9 @@ test("review attention policy protects dirty navigation and boundary identities 
   const boundaryPolicy = page.getByRole("article", {
     name: "Decision policy 1",
   })
-  await boundaryPolicy.getByLabel("Decision point").fill("review.submitted")
+  await boundaryPolicy
+    .getByLabel("Decision point")
+    .fill("pr_development.before_push")
   await boundaryPolicy.getByLabel("Override mode").selectOption("overlay")
   await boundaryPolicy.getByRole("textbox", { name: "Gate ID" }).fill("local")
   await boundaryPolicy
@@ -3720,9 +3759,26 @@ test("review attention policy fences navigation until an in-flight save settles"
     releasePut = resolve
   })
   const errors = collectPageErrors(page)
+  const saveBoundaryRequests: Array<{ method: string; path: string }> = []
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname
+    const method = request.method()
+    if (
+      new URL(page.url()).pathname !== "/reviews" ||
+      method === "GET" ||
+      method === "HEAD"
+    ) {
+      return
+    }
+    saveBoundaryRequests.push({
+      method,
+      path,
+    })
+  })
   await gotoMockedRoute(page, "/reviews?view=policies", {
     reviewAttentionPolicyPutGate: putGate,
   })
+  saveBoundaryRequests.length = 0
 
   const title = page.getByLabel("Attention title").first()
   await title.fill("Persist before leaving")
@@ -3750,6 +3806,9 @@ test("review attention policy fences navigation until an in-flight save settles"
   releasePut()
   await expect(page).toHaveURL(/\/models$/)
   await expect(navigation).toBeHidden()
+  expect(saveBoundaryRequests).toEqual([
+    { method: "PUT", path: "/api/reviews/attention-policies" },
+  ])
   expect(errors).toEqual([])
 })
 
