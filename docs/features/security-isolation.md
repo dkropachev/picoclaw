@@ -215,6 +215,17 @@ decisions, counters, local evidence, and recorded parked-line evidence without
 reading current branch or reservation state. Its shared retry-delay helper is
 pure and bounded; worker classification and invocation remain outside both
 capabilities.
+Active publication gates now compose those private seams through the ordinary
+mixed-gate compiler and private runner. The durable subject is a canonical
+owner-local replay envelope, but models receive only its bounded untrusted
+evidence projection; raw conversation is available solely as an exact anchored
+prefix frozen into the protected working-context session. Exact pin ordering,
+create-once run admission, owner-agent equality, and phase-specific status
+mapping prevent restart from changing intent or duplicating execution. Human
+wait keeps neither a mutation reservation nor a scheduling/runtime lease. An
+internal dispatcher routes only caller-owned claims and requires a separate
+handler for every reclaimable phase; because no push-ready handler is supplied,
+security forbids wiring it to the production queue in this slice.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
@@ -470,6 +481,7 @@ materialization fail closed without exposing local paths or payload detail.
 | `FR-SEC-047` | MUST | Only a trusted coordinator that has not crossed the durable Git push-start boundary may call `Store.RequeuePRDevelopmentPublication` with a structurally private `PRDevelopmentPublicationRequeue` containing one exact live publication claim token/epoch, its expected durable origin (`pending`, `gate_waiting`, or `push_ready`), and a canonical `AvailableAt`. In one immediate schema-v18 transaction, the store first integrity-loads the publication. An already-restored unclaimed record is a no-write replay only when the stored claim epoch, restored status, and availability match exactly; that replay resolves before live clock/lease validation and may remain valid after becoming due. Otherwise the store authenticates the unexpired live claim and exact origin, requires availability no earlier than its own sampled transition time, restores only that origin, clears scheduling owner/token/deadline/origin fields, and preserves the claim/attempt counters plus every immutable occurrence identity, local-evidence, policy, subject, provider, decision-run, expected-tip, and recorded parked-line field. A different replay epoch, origin, or time conflicts. The method adds no migration or column, exposes only an authority-redacted result, stores no raw error, and neither classifies failures nor computes backoff. It cannot read or refresh local high-water or current branch/reservation state, observe or write a provider, acquire a reservation, inspect a checkout/filesystem, invoke Git/push, execute a workflow/model/run, start a gateway/worker, acknowledge a review, or merge a pull request. Invalid, stale, expired, replaced, cross-record, wrong-origin, any other unclaimed, `push_started`, terminal, corrupt, canceled, or live-transition past-availability input fails closed without releasing another claim or changing evidence; the already-restored exact committed replay is the sole unclaimed exception and does not repeat a clock or lease check. | A retry seam must release only idle scheduling authority without becoming a broad recovery capability, erasing restart pins, touching the retained branch, or allowing an ambiguous Git push effect to be replayed. |
 
 | `FR-SEC-048` | MUST | Only the trusted PR-development case reader and existing case-owned attention bridge may declassify an already-linked schema-v18 before-push publication decision. The atomic store read may attach only one structurally private `PRDevelopmentPublicationAttentionProjection` to the exact case/conversation/current passed-review snapshot after validating the full publication row, case and review ID/hash/outcome binding, complete policy/subject/provider pins, decision link, and current local high-water. It keeps the local-review trigger and publication projections separate, derives independent `Current` and `AttentionRequired` flags, and rejects a snapshot in which both sources are current. Only a wrapped causal publication supersession becomes historical absence; conflict, corruption, or other lookup failure aborts the whole read. The public list boolean is only the OR of the existing exact local-review predicate and a bounded current publication relational tail in `gate_waiting` or `claimed` from `gate_waiting`; it checks structurally present pins/run while leaving canonical policy/hash/run validation to the case-owned detail read, and reveals no source, deadline, claim, pin, or run field. | The bridge accepts the atomic snapshot as its sole source selector and cannot fall back when the selected source is invalid. For a publication it strictly decodes the private pinned active policy, re-derives the exact semantic decision key and deterministic run ID, and matches the durable decision link and private workflow reference before using the existing bounded conversation engine. Publication response fences have a distinct domain and bind the server-loaded publication/review/policy/subject/provider decision identity plus exact task and waiting revision; the browser still submits only case version, opaque fence, and bounded normalized answer. `gate_waiting` or `claimed` from it may expose the exact actionable task; a linked transiently requeued `pending` publication is queued and `claimed` from `pending` is checking, with neither exposing a response token; `push_ready`, `claimed` from it, `push_started`, and current `published` may expose only consistent completed history. A waiting task after the publication crossed the gate is invalid. Every publication identity, status/origin/claim, pin, decision/run/task/input hash, provider/local evidence, and diagnostic remains absent from the unchanged public DTO, routes, URL, browser storage, logs, and errors. | A valid response consumes only the exact private human-task answer and resumes the already-admitted run continuation; that ordinary continuation may execute remaining configured gates/models or create later human tasks. The bridge cannot admit/start a run, interpret its result, renew/requeue/transition a publication, acquire a checkout or reservation, invoke CI/Git/provider actions, push, acknowledge a review, or merge outside that exact continuation. A stale/cross-source/cross-case fence, simultaneous current source, incomplete pin/link, wrong lifecycle, zero-only linked run, changed high-water, superseded publication, malformed run/task, unsettled workflow behind a terminal publication, unavailable executor, cancellation, or source mismatch fails closed in the detail/response path without returning partial private state or mutating publication/code/provider state. The coarse list hint may over-notify until detail rejects same-shape corrupt private pin/run data, but it never supplies a response fence or effect authority. List/GET polling remains inert, claimed-from-wait scheduling expiry grants no browser authority, exact accepted replay stays idempotent and source-bound, and a later attempt hides prior publication history rather than leaving response authority attached to stale code. | Reusing one case chat for local-review and before-push questions must not turn a coarse marker, browser response token, expired scheduler claim, or completed gate history into a provenance oracle or publication capability. |
+| `FR-SEC-049` | MUST | Active before-push publication execution is available only to a trusted in-process gate handler receiving one exact already-claimed schema-v18 publication from `pending` or `gate_waiting` plus separately injected exact-claim authentication/renewal/requeue/transition, claimed context, immutable CI evidence, parked-review projection, full provider-read observation, decision binding/private runner, owner-agent runtime, and conversation-session capabilities. Every capability-bearing request/result wrapper, handler, claim, pin request, replay anchor, provider fact, decision/run identity, runtime/session reference, and nested private evidence field is structurally `json:"-"`; the sole serializable internal value is the bounded canonical active-subject envelope written only into the already-private `PinnedSubject` bytes. For `pending`, the handler first composes `FR-SEC-046`, strictly decodes only the pinned active policy, and consumes each complete policy, subject, provider, and decision-run pin before invoking its producer. A first subject is compiler-preflighted before pinning and is one canonical bounded private envelope binding exact publication/case/passed-review/policy/evidence identity plus captured conversation version/digest. Its nested gate subject is exactly the existing bounded untrusted attention-evidence projection: projection format/notice, provider/ledger/target/diff data, bounded CI evidence and sanitized plan diagnostics, and conversation count/version plus protected-storage marker may enter `CompileGateWorkflow` or a gate/model. Raw conversation, local IDs and hashes, transcript digest, publication/evidence replay bindings, capability data, runtime/session identity, and raw internal diagnostics never do. A working-context composition must name exactly the immutable repair owner; under one case lock and exact owner runtime, the current integrity-checked append-only transcript must contain the envelope's exact version/digest prefix, and only that prefix may be projected into the protected read-only session and frozen with the private workflow root. Isolated, deterministic, and zero gates receive no session. The full provider observation is consumed or pinned only after subject pinning. The semantic decision key and deterministic run ID are re-derived from immutable pins; an exact linked/orphan lookup precedes every avoidable mutable context, session, runtime, or provider read, and `attention.PrivateRunner` remains the sole create-once ordinary mixed-workflow admission/execution boundary. A `gate_waiting` handler may only inspect and map the already-linked run, never rebuild context, observe the provider, admit, recreate, execute, or resume it. Waiting releases the publication claim, case lock, runtime generation, and all transient owners while the retained line remains parked and mutation-reservation-free. Exact run status alone maps waiting to `gate_waiting`, only succeeded to `push_ready`, and failed/canceled/skipped to pre-start `failed/gate_failed`; missing, malformed, cross-bound, orphaned, or admission-uncertain identity maps to `recovery_required`. A linked `gate_waiting` run that is still `running` returns to reservation-free `gate_waiting` with bounded delay; a pending run still `running` after synchronous admission becomes `recovery_required`. Other classified transient pre-effect errors requeue only to the authenticated exact origin with bounded detached cleanup and preserved pins/link. Renewal ownership loss stops effects and relies only on exact fenced expiry and reclaim. Only the validating store may map exact provider/local conflict or causal supersession. The internal `PublicationDispatcher` accepts no queue capability, validates one caller-owned `claimed` record, routes solely by exact `claim_from`, forwards handler errors unchanged, and requires distinct pending, gate-waiting, and push-ready handlers; it never claims, renews, requeues, transitions, or widens a handler. Since this slice supplies no real push-ready handler, no gateway/worker/production claim loop may be constructed over `ClaimPRDevelopmentPublications`, which returns all three phases. Missing/stale/expired/replaced/cross-origin authority, policy/compiler disagreement, noncanonical or over-limit envelope/subject, conversation rollback/digest mismatch, owner-agent mismatch, changed evidence/provider/high-water, run ambiguity/corruption, cleanup-fence loss, or cancellation fails closed without a second run, later transcript use, or partial declassification. This contract adds no schema, configuration, route, DTO, UI, checkout/Git, local-CI execution, push, provider write, review acknowledgement, merge, or unknown-outcome reconciliation capability; `push_ready` remains scheduling state rather than effect authority. | Reusing ordinary mixed workflow primitives for publication must not turn durable replay metadata, a protected transcript, an idle retained line, a browser answer, a private run, or a partially composed phase router into model-visible provenance, mutation authority, duplicate execution, or an unfenced remote effect. |
 
 For `FR-SEC-025`, `FR-SEC-038`, and `FR-SEC-048`, the strict list DTO alone
 may add the required boolean `attention_required`. It is true only when either
@@ -748,6 +760,16 @@ already-restored replay resolves before the live clock/lease checks and may
 remain valid after becoming due; no `push_started`, terminal, or other unclaimed
 row is eligible.
 
+Active mixed-gate execution also adds no table or public state. The existing
+immutable `PinnedSubject` bytes contain one versioned canonical private replay
+envelope with exact identity/evidence/conversation anchors and a distinct
+bounded nested model subject; they contain no transcript text, session key,
+runtime lease, claim bearer, reservation, path, or credential. A working gate's
+exact transcript prefix is stored only through the existing protected
+agent-session and private workflow-root freeze, while the normal private run
+store retains the already defined workflow/run/task state. The phase dispatcher
+persists nothing and owns no queue cursor or lifecycle state.
+
 Suspended retained-line state remains in that same private Git inventory and
 is deliberately distinct from parked review state. Inventory version 4 retains
 an append-only per-line suspension history whose exact count and
@@ -923,8 +945,11 @@ Owns: TEST pkg/config/version*
 | Controller Go API | `gitworkspace.Manager.PushPinnedLine`, `PinnedLinePushRequest`, and `PinnedLinePushResult` | Under manager-plus-kernel inventory serialization and without a mutation reservation, revalidate one complete parked line and its stored target, exact-observe its derived remote branch, compare-and-swap only expected tip to parked tip, and return a sanitized transient remote/local postflight receipt. Accept no caller credential or transport command and confer no provider, readiness, publication, acknowledgement, merge, model, workflow, tool, HTTP, or UI authority. | `FR-SEC-042` |
 | Private storage / Go API | Schema-v18 `pr_development_publications`; `eventing.PRDevelopmentPublicationReader` and `PRDevelopmentPublicationQueue` | Keep exact occurrence reads, renewable pre-effect `claimed` scheduling, immutable policy/subject/provider pins, reservation-free wait/readiness, and pre-start terminalization owner-local and structurally non-JSON. Queue authority cannot renew `push_started`, start/finalize/reconcile push, or invoke an external capability. | `FR-SEC-043` |
 | Private storage / Go API | `eventing.PRDevelopmentPublicationGateContextSnapshotReader`, `PRDevelopmentPublicationGateContextSnapshot`, and `Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot` | Authenticate only an exact live claimed-from-pending lease, return one detached claim-redacted and owner-session-authority-redacted all-private snapshot over existing canonical evidence, and fence the first subject pin with the current conversation version plus digest while preserving exact post-pin replay. The reader grants no queue, provider, workflow, model invocation, repair-session mutation, filesystem, Git, push, HTTP/UI, acknowledgement, or merge authority. | `FR-SEC-045` |
+| Private storage / Go API | `eventing.PRDevelopmentPublicationGateContextAnchor`, `PRDevelopmentPublicationPinnedGateContextSnapshotReader`, and `Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot` | Reconstruct only the exact subject-anchored canonical conversation prefix for a live pending-origin claim, while revalidating current publication high-water and returning the ordinary claim/session-authority-redacted private snapshot. Reject rollback or digest mismatch and exclude every later message without acquiring queue, model, provider, workflow, filesystem, Git, or mutation authority. | `FR-SEC-049` |
 | Private storage / Go API | `eventing.PRDevelopmentPublicationGateClaimAuthenticator` and `Store.AuthenticateClaimedPRDevelopmentPublicationGate` | Authenticate one exact live claimed-from-pending token/epoch and complete current local high-water, returning only the authority-redacted publication, its validated pin progression, and exact repository policy selector without conversation/rich-context projection, mutation, renewal, or effect authority. | `FR-SEC-046` |
 | Internal Go API | `prdevelopment.PublicationGateProcessor` | Compose only separately injected least-authority exact-claim authentication, policy capture, claimed gate-context read, pre-effect pin/readiness transitions, and full provider observation for an existing claimed-from-pending occurrence. Active policy returns an authenticated policy-only execution handoff without rich context; compiler-confirmed zero policy alone may progressively pin its private conversation-fenced subject and provider observation and become push-ready without a run. Every value stays non-JSON, and the processor owns no claim/renewal, requeue, run/executor/model, repair/filesystem/Git/push, gateway/worker, provider-write, acknowledgement, or merge authority. | `FR-SEC-046` |
+| Internal Go API | `prdevelopment.PublicationGateExecutor`, `PublicationPendingGateHandler`, `PublicationGateWaitingHandler`, their narrow phase-specific store/context/runtime/provider capabilities, and `attention.PrivateRunner` | Consume one existing pending or gate-waiting claim, keep the canonical replay envelope distinct from its bounded model subject, freeze only an authenticated conversation prefix for an owner-matched working gate, converge exact pins on one private run, and transition/requeue only from that run's exact durable state without retaining runtime, session, scheduling, or mutation authority through human wait. | `FR-SEC-049` |
+| Internal Go API | `prdevelopment.PublicationDispatcher` and its three phase-handler interfaces | Route one structurally valid caller-owned claim to exactly its pending, gate-waiting, or push-ready handler without queue or lifecycle authority. Requiring all handlers prevents a partially composed gate consumer from being attached to the shared production claim source before the push-ready capability exists. | `FR-SEC-049` |
 | Private storage / Go API | `eventing.PRDevelopmentPublicationRequeue`; `PRDevelopmentPublicationQueue.RequeuePRDevelopmentPublication` and `Store.RequeuePRDevelopmentPublication` | Release only one exact live pre-effect scheduling claim back to its authenticated expected origin at an availability that is non-past at the live transition. Preserve every evidence/pin/decision/counter/recorded-parked-line value without reading current branch state, expose only authority-redacted output, and reject started, terminal, any other unclaimed, cross-origin, or changed input without obtaining high-water, provider, Git, model, workflow, or worker authority; the already-restored exact committed replay resolves before clock/lease validation and may succeed after becoming due. | `FR-SEC-047` |
 | Pure internal Go API | `prdevelopment.PublicationRetryDelay` | Compute only the deterministic one-second-to-one-minute saturating delay from a claim count; it owns no clock, store, scheduler, error classification, or effect capability. | `FR-SEC-047` |
 | Private storage / Go API | `eventing.PRDevelopmentPublicationAttentionProjection`, publication fields on `PRDevelopmentAttentionTriggerCaseSnapshot`, and `Store.GetCurrentPRDevelopmentAttentionTriggerForCase` | Atomically validate and retain separate local-review and exact current-publication projections, reject dual-current source authority, and derive only source-private current/actionable flags plus the existing coarse public OR. The read can integrity-check high-water but cannot claim, transition, execute, or publish. | `FR-SEC-048` |
@@ -1449,6 +1474,41 @@ Owns: TEST pkg/config/version*
     reading the current branch or reservation. Admit no `push_started`, terminal,
     other unclaimed, cross-origin, or changed input; perform no high-water/
     provider/Git/model/workflow/worker action.
+37. For active publication gates, lend a handler only the exact live claim and
+    the phase-specific capabilities it needs. Consume immutable policy,
+    subject, provider, and decision-run pins before their producers. On a first
+    subject, build and compiler-preflight a canonical private replay envelope;
+    pass only its nested bounded untrusted evidence projection into ordinary
+    gates. Keep transcript text out of both envelope and model subject. When a
+    working-context gate is present, require its sole agent to equal the repair
+    owner, validate the envelope's exact prefix against the current canonical
+    append-only conversation, and freeze only that prefix through the protected
+    session/private-root path. Acquire no session for other gate kinds.
+
+    After the subject pin, consume or obtain the full provider pin, derive the
+    immutable decision/run identity, and resolve an exact linked or orphan run
+    before avoidable mutable reads. Admit a new run only through the ordinary
+    create-once private runner. Never rebuild pinned code/CI/diff evidence,
+    advance the frozen transcript, repeat provider observation, or recreate a
+    missing/uncertain run. Release case/runtime/scheduling ownership on wait;
+    retain no mutation reservation. A gate-waiting handler observes and maps
+    only the linked run. Only exact success reaches push readiness; failure,
+    cancellation, and skip become `gate_failed`. A linked running continuation
+    returns to the same reservation-free wait origin with a delay, while a
+    pending run still running after synchronous admission becomes recovery.
+    Fence every transition by the exact claim, requeue other classified
+    transient pre-effect errors only to that claim's authenticated origin with
+    pins intact, and stop effects on renewal ownership loss so only fenced
+    expiry/reclaim can continue the work.
+
+    Keep the phase dispatcher inert: validate one already-claimed record and
+    invoke exactly one separately injected handler selected by `claim_from`.
+    Give it no store scanner, claim, renewal, transition, or requeue capability,
+    and require pending, gate-waiting, and push-ready handlers together. Until
+    the real push-ready handler exists, do not connect it to the production
+    queue. No model, gate answer, workflow result, or push-ready state grants
+    Git, push, provider-write, acknowledgement, merge, UI, config, or schema
+    authority.
 
 ## Cross-Feature Behavior
 
@@ -1554,8 +1614,8 @@ The exact parked-line push in Git Workspaces requirement 018 and
 `#126a` Git effect primitive. Git Workspaces owns its local/remote fences and
 one-ref compare-and-swap; Security owns its authority minimization, sanitized
 failure boundary, and trusted ambient-transport statement. Event Automation
-does not yet call it, execute an active publication gate, acknowledge a review,
-or merge. Event Automation requirement 069 and `FR-SEC-043` now own
+does not yet call it, acknowledge a review, or merge. Event Automation
+requirement 069 and `FR-SEC-043` now own
 the `#126b1` effect-free schema-v18 local-evidence admission, private pins,
 write-ahead request/result journal, and terminal uncertainty. `FR-SEC-044` now
 supplies distinct least-authority full and head-only provider observation
@@ -1567,12 +1627,18 @@ only far enough to pin policy, return active compositions as
 `FR-SEC-047` supplies only an exact pre-effect claim release and pure bounded
 deterministic retry-delay calculation. `FR-SEC-048` safely projects an already
 linked current publication decision through the existing case-owned attention
-conversation with no new public source identity or publication authority. The
-later `#126b2` active-gate/push
-runtime and transient-failure cleanup must consume the journal, context,
-observations, requeue, and Git primitive through separate capabilities; neither
-a journal row, context snapshot, observation, processor result, retry delay,
-successful primitive call, nor `local_ready` supplies effect authority.
+conversation with no new public source identity or publication authority.
+`FR-SEC-049` composes the active mixed-gate path through a private replay
+envelope, protected owner-matched transcript-prefix freeze, exact
+policy/subject/provider/run pins, reservation-free wait, and an inert
+already-claimed dispatcher. The shared queue also yields `push_ready`, so a
+production claim loop remains forbidden until a real least-authority handler
+for that phase exists. PRs `#136` through `#138` must add the push-ready
+handler, read-only outcome reconciliation, and complete publisher runtime while
+consuming the journal, observations, requeue, and Git primitive through separate
+capabilities; neither a journal row, context snapshot, observation, processor
+result, retry delay, successful gate/run, primitive call, nor `local_ready`
+supplies effect authority.
 Acknowledgement and merge stay separate undefined features pending explicit
 user-facing policy.
 Schema-v10 eventing controller storage is that future controller-private
@@ -1629,10 +1695,13 @@ atomic publication gate-context plus conversation-CAS storage boundary is
 implemented by `FR-SEC-045`. The uncomposed, claimed-input zero-gate processor
 is implemented by `FR-SEC-046`, and the safe pre-effect requeue/delay primitive
 by `FR-SEC-047`. The publication decision attention projection is implemented
-by `FR-SEC-048`; active mixed-gate execution, transient-failure cleanup,
-provider wiring in a generation-owned worker, and push runtime composition
-remain `#126b2`. Acknowledgement and merge remain separately
-unimplemented and deliberately undefined.
+by `FR-SEC-048`, and active mixed-gate execution plus already-claimed phase
+dispatch by `FR-SEC-049`. Generation-owned claiming/renewal and publisher
+cleanup, the real push-ready handler/adapter, provider wiring in a complete
+publisher, and unknown-outcome reconciliation scheduling remain planned for
+`#136` through `#138`.
+Acknowledgement and merge remain separately unimplemented and deliberately
+undefined.
 None may infer its authority or successful outcome from a v13 operation,
 completed repair row, retained branch, local-CI discovery/execution evidence, or
 `review_pending` phase alone.
@@ -1773,6 +1842,30 @@ promise that a provider consumes every materialized modality.
   due. Stale, expired, cross-origin, other unclaimed, started, terminal, or
   altered input changes nothing and acquires no high-water, provider, Git,
   model, or worker capability.
+- An active subject pin is a canonical private replay envelope, not the model
+  subject and not a transcript store. Only its bounded untrusted evidence
+  projection reaches ordinary gates. Raw conversation may enter only an
+  owner-matched protected session after exact prefix version/digest validation,
+  and private-root freezing makes that prefix immutable across later chat,
+  restart, and response. Isolated/deterministic/zero gates receive no session;
+  owner mismatch, prefix rollback, changed evidence, or size/shape failure
+  reaches no model or run admission.
+- Active replay consumes policy, subject, provider, and decision link before
+  the corresponding producer and resolves an existing/orphan run before
+  avoidable mutable reads. Missing, malformed, cross-bound, or admission-
+  uncertain work is never recreated. Human wait releases scheduling, case, and
+  runtime owners and retains no mutation reservation; a reclaimed waiting phase
+  may only observe the linked run. A still-running waiting continuation returns
+  to that same wait origin; other classified transient pre-effect retry
+  preserves pins and link, while renewal ownership loss stops effects and all
+  status transitions require the exact live claim and durable run state. Only
+  success reaches push readiness; failure, cancellation, and skip fail the gate.
+- The phase dispatcher receives no queue or transition capability. It routes
+  exactly one structurally valid caller-owned claim, requires all three phase
+  handlers, and returns the selected handler's error without reinterpretation.
+  Until the push-ready handler exists, attaching it to the shared production
+  claim source is forbidden; a gate-only consumer must not acquire or strand
+  push-ready scheduling authority.
 - Expired or unproved `push_started` state is `outcome_unknown` and cannot be
   reclaimed, returned to push-ready, or used to invoke Git. A current desired
   remote tip can prove publication for reconciliation, but expected/other/
@@ -2047,6 +2140,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-046` | [pkg/prdevelopment/publication_gate_processor.go](../../pkg/prdevelopment/publication_gate_processor.go), [pkg/prdevelopment/publication_gate_processor_test.go](../../pkg/prdevelopment/publication_gate_processor_test.go), [pkg/attention/policy.go](../../pkg/attention/policy.go), [pkg/workflows/gates.go](../../pkg/workflows/gates.go), [pkg/prdevelopment/publication_provider.go](../../pkg/prdevelopment/publication_provider.go), [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_publication_store_sqlite.go](../../pkg/eventing/pr_development_publication_store_sqlite.go), [pkg/eventing/pr_development_publication_gate_claim_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_gate_claim_store_sqlite_test.go), [pkg/eventing/pr_development_publication_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_store_sqlite_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go) |
 | `FR-SEC-047` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_publication_store_sqlite.go](../../pkg/eventing/pr_development_publication_store_sqlite.go), [pkg/eventing/pr_development_publication_requeue_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_requeue_store_sqlite_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/prdevelopment/publication_retry.go](../../pkg/prdevelopment/publication_retry.go), [pkg/prdevelopment/publication_retry_test.go](../../pkg/prdevelopment/publication_retry_test.go), [pkg/prdevelopment/attention_trigger_worker.go](../../pkg/prdevelopment/attention_trigger_worker.go) |
 | `FR-SEC-048` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_attention_trigger_store_sqlite.go](../../pkg/eventing/pr_development_attention_trigger_store_sqlite.go), [pkg/eventing/pr_development_store_sqlite.go](../../pkg/eventing/pr_development_store_sqlite.go), [pkg/eventing/pr_development_publication_attention_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_attention_store_sqlite_test.go), [pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go](../../pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go), [pkg/eventing/pr_development_store_sqlite_test.go](../../pkg/eventing/pr_development_store_sqlite_test.go), [pkg/prdevelopment/publication_decision.go](../../pkg/prdevelopment/publication_decision.go), [pkg/prdevelopment/publication_decision_test.go](../../pkg/prdevelopment/publication_decision_test.go), [pkg/prdevelopment/attention_bridge.go](../../pkg/prdevelopment/attention_bridge.go), [pkg/prdevelopment/attention_bridge_test.go](../../pkg/prdevelopment/attention_bridge_test.go), [pkg/prdevelopment/publication_attention_bridge_test.go](../../pkg/prdevelopment/publication_attention_bridge_test.go), [pkg/prdevelopment/service.go](../../pkg/prdevelopment/service.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [web/frontend/src/components/reviews/attention-conversation.tsx](../../web/frontend/src/components/reviews/attention-conversation.tsx), [web/frontend/src/components/reviews/attention-conversation.test.tsx](../../web/frontend/src/components/reviews/attention-conversation.test.tsx), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/i18n/locales/en.json](../../web/frontend/src/i18n/locales/en.json), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-SEC-049` | [pkg/prdevelopment/publication_gate_processor.go](../../pkg/prdevelopment/publication_gate_processor.go), [pkg/prdevelopment/publication_gate_processor_test.go](../../pkg/prdevelopment/publication_gate_processor_test.go), [pkg/prdevelopment/publication_gate_executor.go](../../pkg/prdevelopment/publication_gate_executor.go), [pkg/prdevelopment/publication_gate_executor_test.go](../../pkg/prdevelopment/publication_gate_executor_test.go), [pkg/prdevelopment/publication_gate_handler.go](../../pkg/prdevelopment/publication_gate_handler.go), [pkg/prdevelopment/publication_gate_handler_test.go](../../pkg/prdevelopment/publication_gate_handler_test.go), [pkg/prdevelopment/publication_dispatcher.go](../../pkg/prdevelopment/publication_dispatcher.go), [pkg/prdevelopment/publication_dispatcher_test.go](../../pkg/prdevelopment/publication_dispatcher_test.go), [pkg/prdevelopment/attention_context.go](../../pkg/prdevelopment/attention_context.go), [pkg/prdevelopment/attention_test.go](../../pkg/prdevelopment/attention_test.go), [pkg/prdevelopment/publication_decision.go](../../pkg/prdevelopment/publication_decision.go), [pkg/prdevelopment/publication_decision_test.go](../../pkg/prdevelopment/publication_decision_test.go), [pkg/attention/private_run.go](../../pkg/attention/private_run.go), [pkg/attention/private_run_test.go](../../pkg/attention/private_run_test.go), [pkg/workflows/gates.go](../../pkg/workflows/gates.go), [pkg/workflows/gates_test.go](../../pkg/workflows/gates_test.go), [pkg/workflows/private_context_security_test.go](../../pkg/workflows/private_context_security_test.go), [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_publication_store_sqlite.go](../../pkg/eventing/pr_development_publication_store_sqlite.go), [pkg/eventing/pr_development_publication_gate_context_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_gate_context_store_sqlite_test.go), [pkg/eventing/pr_development_publication_requeue_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_requeue_store_sqlite_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go) |
 
 Additional `FR-SEC-030` acceptance anchors are
 [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go),
@@ -2079,6 +2173,9 @@ validation in
 - [pkg/prdevelopment/thread_context.go](../../pkg/prdevelopment/thread_context.go)
 - [pkg/prdevelopment/attention.go](../../pkg/prdevelopment/attention.go)
 - [pkg/prdevelopment/attention_context.go](../../pkg/prdevelopment/attention_context.go)
+- [pkg/prdevelopment/publication_gate_executor.go](../../pkg/prdevelopment/publication_gate_executor.go)
+- [pkg/prdevelopment/publication_gate_handler.go](../../pkg/prdevelopment/publication_gate_handler.go)
+- [pkg/prdevelopment/publication_dispatcher.go](../../pkg/prdevelopment/publication_dispatcher.go)
 - [pkg/prdevelopment/localci](../../pkg/prdevelopment/localci)
 - [pkg/eventing/pr_development_conversation_schema_sqlite.go](../../pkg/eventing/pr_development_conversation_schema_sqlite.go)
 - [pkg/eventing/pr_development_ledger_schema_sqlite.go](../../pkg/eventing/pr_development_ledger_schema_sqlite.go)

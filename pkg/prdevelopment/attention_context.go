@@ -61,7 +61,10 @@ type AttentionReviewWorkspaceFactory func() (AttentionReviewWorkspace, error)
 
 type attentionContextStore interface {
 	eventing.PRDevelopmentAttentionSnapshotReader
-	eventing.PRDevelopmentCaseReader
+	GetPRDevelopmentCase(
+		ctx context.Context,
+		id string,
+	) (eventing.PRDevelopmentCase, error)
 }
 
 // AttentionEvidenceStore reloads only the immutable plan and execution bound
@@ -137,6 +140,22 @@ func (loader *attentionContextLoader) load(
 	ctx context.Context,
 	snapshot eventing.PRDevelopmentAttentionSnapshot,
 ) (attentionContext, error) {
+	return loader.loadForReviewOutcome(
+		ctx,
+		snapshot,
+		eventing.PRDevelopmentLedgerReviewAttentionRequired,
+	)
+}
+
+// loadForReviewOutcome reuses the exact bounded PR evidence projection for a
+// caller-selected, already authenticated review outcome. Automatic local
+// attention remains restricted to attention_required through load; the
+// publication gate executor is the only caller that supplies passed.
+func (loader *attentionContextLoader) loadForReviewOutcome(
+	ctx context.Context,
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+	expectedOutcome eventing.PRDevelopmentLedgerReviewOutcome,
+) (attentionContext, error) {
 	if loader == nil || loader.store == nil || loader.evidence == nil ||
 		loader.workspaces == nil {
 		return attentionContext{}, ErrUnavailable
@@ -144,7 +163,10 @@ func (loader *attentionContextLoader) load(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := validateAttentionSnapshot(snapshot); err != nil {
+	if err := validateAttentionSnapshotForReviewOutcome(
+		snapshot,
+		expectedOutcome,
+	); err != nil {
 		return attentionContext{}, err
 	}
 
@@ -265,6 +287,24 @@ func (loader *attentionContextLoader) withRuntimeContextRefresh(
 	refresh attentionRuntimeSnapshotRefresh,
 	use attentionRuntimeUse,
 ) error {
+	return loader.withRuntimeContextRefreshForReviewOutcome(
+		ctx,
+		expected,
+		agentID,
+		eventing.PRDevelopmentLedgerReviewAttentionRequired,
+		refresh,
+		use,
+	)
+}
+
+func (loader *attentionContextLoader) withRuntimeContextRefreshForReviewOutcome(
+	ctx context.Context,
+	expected eventing.PRDevelopmentAttentionSnapshot,
+	agentID string,
+	expectedOutcome eventing.PRDevelopmentLedgerReviewOutcome,
+	refresh attentionRuntimeSnapshotRefresh,
+	use attentionRuntimeUse,
+) error {
 	if loader == nil || loader.store == nil || loader.acquireRuntime == nil ||
 		loader.locks == nil || refresh == nil || use == nil ||
 		!routing.IsCanonicalAgentID(agentID) ||
@@ -307,7 +347,7 @@ func (loader *attentionContextLoader) withRuntimeContextRefresh(
 	if !reflect.DeepEqual(current, expected) {
 		return workflows.ErrRunAdmissionConflict
 	}
-	if err = validateAttentionSnapshot(current); err != nil {
+	if err = validateAttentionSnapshotForReviewOutcome(current, expectedOutcome); err != nil {
 		return err
 	}
 	return use(runtimeCtx, current, rawStore)
@@ -448,6 +488,20 @@ func attentionCIStatus(status localci.Status) (eventing.PRDevelopmentCIStatus, e
 }
 
 func validateAttentionSnapshot(snapshot eventing.PRDevelopmentAttentionSnapshot) error {
+	return validateAttentionSnapshotForReviewOutcome(
+		snapshot,
+		eventing.PRDevelopmentLedgerReviewAttentionRequired,
+	)
+}
+
+func validateAttentionSnapshotForReviewOutcome(
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+	expectedOutcome eventing.PRDevelopmentLedgerReviewOutcome,
+) error {
+	if expectedOutcome != eventing.PRDevelopmentLedgerReviewAttentionRequired &&
+		expectedOutcome != eventing.PRDevelopmentLedgerReviewPassed {
+		return fmt.Errorf("%w: unsupported attention review outcome", ErrUnavailable)
+	}
 	high := snapshot.HighWater
 	if !validCaseID(snapshot.Case.ID) || high.CaseID != snapshot.Case.ID ||
 		!validDevelopmentID(high.ThreadID, "pdt_") ||
@@ -483,7 +537,7 @@ func validateAttentionSnapshot(snapshot eventing.PRDevelopmentAttentionSnapshot)
 		snapshot.ReviewEntry.AttemptID != high.AttemptID ||
 		snapshot.ReviewEntry.FenceOrdinal != high.FenceOrdinal ||
 		snapshot.ReviewEntry.Kind != eventing.PRDevelopmentLedgerReview ||
-		snapshot.ReviewEntry.ReviewOutcome != eventing.PRDevelopmentLedgerReviewAttentionRequired ||
+		snapshot.ReviewEntry.ReviewOutcome != expectedOutcome ||
 		snapshot.ReviewEntry.CIStatus != "" ||
 		high.ReviewEntryOrdinal <= 0 {
 		return fmt.Errorf("%w: atomic attention snapshot is inconsistent", ErrUnavailable)

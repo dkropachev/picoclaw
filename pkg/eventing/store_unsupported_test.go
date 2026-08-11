@@ -510,6 +510,23 @@ func TestStorePRDevelopmentPublicationUnsupported(t *testing.T) {
 			snapshot,
 		)
 	}
+	snapshot, err = store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		"publication",
+		"claim",
+		1,
+		PRDevelopmentPublicationGateContextAnchor{},
+	)
+	assertUnsupported(
+		"GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot()",
+		err,
+	)
+	if !reflect.DeepEqual(snapshot, PRDevelopmentPublicationGateContextSnapshot{}) {
+		t.Fatalf(
+			"GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot() = %#v, want zero value",
+			snapshot,
+		)
+	}
 	publications, err := store.ClaimPRDevelopmentPublications(
 		ctx,
 		PRDevelopmentPublicationClaimRequest{},

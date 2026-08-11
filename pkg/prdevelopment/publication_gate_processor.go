@@ -142,7 +142,11 @@ func (processor *PublicationGateProcessor) ProcessClaim(
 	if err := validatePublicationGateClaimAuthority(claim); err != nil {
 		return PublicationGateProcessResult{}, err
 	}
-	claim, repository, err := processor.authenticatePublicationGateClaim(ctx, claim)
+	claim, repository, err := authenticatePublicationGateClaim(
+		ctx,
+		processor.store,
+		claim,
+	)
 	if err != nil {
 		return processor.finishPublicationGateFailure(ctx, claim, err)
 	}
@@ -152,14 +156,9 @@ func (processor *PublicationGateProcessor) ProcessClaim(
 		return processor.finishPublicationGateFailure(ctx, claim, err)
 	}
 	if !policy.IsNoop() {
-		if publication.SubjectRevision != "" || len(publication.PinnedSubject) != 0 ||
-			publication.PinnedSubjectHash != "" || hasPublicationProviderPin(publication) {
-			return processor.finishPublicationGateFailure(
-				ctx,
-				claim,
-				errPublicationGateCorrupt,
-			)
-		}
+		// Active subject/provider pins belong to PublicationGateExecutor. Keep
+		// this preparation seam replayable after either later pin without
+		// interpreting or recreating those capabilities here.
 		return PublicationGateProcessResult{
 			Disposition: PublicationGateRequiresExecution,
 			Publication: redactPublicationGateClaim(publication),
@@ -204,11 +203,12 @@ func (processor *PublicationGateProcessor) ProcessClaim(
 	}, nil
 }
 
-func (processor *PublicationGateProcessor) authenticatePublicationGateClaim(
+func authenticatePublicationGateClaim(
 	ctx context.Context,
+	authenticator eventing.PRDevelopmentPublicationGateClaimAuthenticator,
 	claim eventing.PRDevelopmentPublication,
 ) (eventing.PRDevelopmentPublication, string, error) {
-	authentication, err := processor.store.AuthenticateClaimedPRDevelopmentPublicationGate(
+	authentication, err := authenticator.AuthenticateClaimedPRDevelopmentPublicationGate(
 		ctx,
 		claim.ID,
 		claim.ClaimToken,
@@ -909,7 +909,11 @@ func validatePublicationGateClaim(publication eventing.PRDevelopmentPublication)
 		publication.ClaimEpoch < 1 || publication.Claims != int(publication.ClaimEpoch) ||
 		publication.ClaimUntil == nil || publication.ClaimedAt == nil ||
 		!publication.ClaimUntil.After(*publication.ClaimedAt) ||
-		publication.DecisionRunID != "" || publication.ExpectedRemoteTip != "" ||
+		(publication.DecisionRunID != "" &&
+			(!validDevelopmentID(publication.DecisionRunID, "wr_") ||
+				publication.PolicyRevision == "" || publication.SubjectRevision == "" ||
+				publication.ProviderObservationHash == "")) ||
+		publication.ExpectedRemoteTip != "" ||
 		publication.PushRequest != (eventing.PRDevelopmentPublicationPushRequest{}) ||
 		len(publication.PushRequestJSON) != 0 || publication.PushRequestHash != "" ||
 		publication.PushResult != (eventing.PRDevelopmentPublicationPushResult{}) ||

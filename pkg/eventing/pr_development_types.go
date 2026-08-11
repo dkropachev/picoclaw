@@ -2191,6 +2191,14 @@ type PRDevelopmentPublicationSubjectPin struct {
 	ExpectedTranscriptDigest    string          `json:"-"`
 }
 
+// PRDevelopmentPublicationGateContextAnchor identifies the exact append-only
+// conversation prefix captured by one already-pinned publication subject.
+type PRDevelopmentPublicationGateContextAnchor struct {
+	SubjectRevision     string `json:"-"`
+	ConversationVersion int64  `json:"-"`
+	TranscriptDigest    string `json:"-"`
+}
+
 // PRDevelopmentPublicationProviderPin freezes exact current provider facts.
 type PRDevelopmentPublicationProviderPin struct {
 	PublicationID string                                      `json:"-"`
@@ -2702,6 +2710,20 @@ type PRDevelopmentPublicationGateContextSnapshotReader interface {
 		publicationID string,
 		claimToken string,
 		claimEpoch int64,
+	) (PRDevelopmentPublicationGateContextSnapshot, error)
+}
+
+// PRDevelopmentPublicationPinnedGateContextSnapshotReader recreates the exact
+// conversation prefix owned by an already-pinned subject while still proving
+// the live initial claim and current local publication high-water. It grants no
+// provider, workflow, model, Git, filesystem, or mutation power.
+type PRDevelopmentPublicationPinnedGateContextSnapshotReader interface {
+	GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx context.Context,
+		publicationID string,
+		claimToken string,
+		claimEpoch int64,
+		anchor PRDevelopmentPublicationGateContextAnchor,
 	) (PRDevelopmentPublicationGateContextSnapshot, error)
 }
 

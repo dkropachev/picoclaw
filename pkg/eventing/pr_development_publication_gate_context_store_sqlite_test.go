@@ -5,6 +5,7 @@ package eventing
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -131,11 +132,278 @@ func TestPRDevelopmentPublicationGateContextSnapshotProjectsExactPrivateEvidence
 			ExpectedConversationVersion: conversation.Version,
 			ExpectedTranscriptDigest:    snapshot.TranscriptDigest,
 		},
+		PRDevelopmentPublicationGateContextAnchor{
+			SubjectRevision:     "sha256:subject-secret",
+			ConversationVersion: conversation.Version,
+			TranscriptDigest:    snapshot.TranscriptDigest,
+		},
 	} {
 		encoded, encodeErr := json.Marshal(value)
 		require.NoError(t, encodeErr)
 		assert.JSONEq(t, `{}`, string(encoded))
 	}
+}
+
+func TestPRDevelopmentPublicationPinnedGateContextSnapshotReturnsExactPrefix(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fixture := newPRDevelopmentPublicationLifecycleFixture(t)
+	_, err := fixture.Store.AppendPRDevelopmentMessage(
+		ctx,
+		PRDevelopmentMessageAppend{
+			CaseID:          fixture.Orchestration.Operation.Case.ID,
+			ExpectedVersion: 0,
+			Role:            PRDevelopmentMessageUser,
+			Content:         "Use this exact conversation prefix for the gate.",
+		},
+	)
+	require.NoError(t, err)
+	captured, err := fixture.Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+	)
+	require.NoError(t, err)
+	policyRevision := pinPRDevelopmentPublicationGatePolicyForContextTest(t, &fixture)
+	subjectPin := publicationGateSubjectPinForContextTest(
+		&fixture,
+		policyRevision,
+		captured,
+	)
+	_, changed, err := fixture.Store.PinPRDevelopmentPublicationSubject(ctx, subjectPin)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	later, err := fixture.Store.AppendPRDevelopmentMessage(
+		ctx,
+		PRDevelopmentMessageAppend{
+			CaseID:          captured.Case.ID,
+			ExpectedVersion: captured.Conversation.Version,
+			Role:            PRDevelopmentMessageAssistant,
+			Content:         "This later message must not change the pinned gate subject.",
+		},
+	)
+	require.NoError(t, err)
+	require.Greater(t, later.Version, captured.Conversation.Version)
+
+	current, err := fixture.Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+	)
+	require.NoError(t, err)
+	anchored, err := fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+		publicationGateContextAnchorForContextTest(subjectPin),
+	)
+	require.NoError(t, err)
+
+	expected := current
+	expected.Conversation = captured.Conversation
+	expected.TranscriptDigest = captured.TranscriptDigest
+	assert.Equal(t, expected, anchored)
+	assert.Equal(t, later, current.Conversation)
+	assert.NotEqual(t, current.Conversation, anchored.Conversation)
+	assert.Equal(t, subjectPin.SubjectRevision, anchored.Publication.SubjectRevision)
+	assert.Empty(t, anchored.Publication.ClaimToken)
+}
+
+func TestPRDevelopmentPublicationPinnedGateContextSnapshotRejectsAlternateValidPrefix(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fixture := newPRDevelopmentPublicationLifecycleFixture(t)
+	_, err := fixture.Store.AppendPRDevelopmentMessage(
+		ctx,
+		PRDevelopmentMessageAppend{
+			CaseID:          fixture.Orchestration.Operation.Case.ID,
+			ExpectedVersion: 0,
+			Role:            PRDevelopmentMessageUser,
+			Content:         "Bind the durable subject to this conversation prefix.",
+		},
+	)
+	require.NoError(t, err)
+	captured, err := fixture.Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+	)
+	require.NoError(t, err)
+	require.Positive(t, captured.Conversation.Version)
+	policyRevision := pinPRDevelopmentPublicationGatePolicyForContextTest(t, &fixture)
+	subjectPin := publicationGateSubjectPinForContextTest(
+		&fixture,
+		policyRevision,
+		captured,
+	)
+	_, changed, err := fixture.Store.PinPRDevelopmentPublicationSubject(ctx, subjectPin)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	_, err = fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+		PRDevelopmentPublicationGateContextAnchor{
+			SubjectRevision:     subjectPin.SubjectRevision,
+			ConversationVersion: 0,
+			TranscriptDigest:    emptyPRDevelopmentTranscriptDigest(),
+		},
+	)
+	assert.ErrorIs(t, err, ErrPRDevelopmentPublicationConflict)
+}
+
+func TestPRDevelopmentPublicationPinnedGateContextSnapshotFailsClosedOnAnchor(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	fixture := newPRDevelopmentPublicationLifecycleFixture(t)
+	snapshot, err := fixture.Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+	)
+	require.NoError(t, err)
+	policyRevision := pinPRDevelopmentPublicationGatePolicyForContextTest(t, &fixture)
+	subjectPin := publicationGateSubjectPinForContextTest(
+		&fixture,
+		policyRevision,
+		snapshot,
+	)
+	anchor := publicationGateContextAnchorForContextTest(subjectPin)
+
+	_, err = fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+		anchor,
+	)
+	assert.ErrorIs(t, err, ErrPRDevelopmentPublicationConflict)
+
+	_, changed, err := fixture.Store.PinPRDevelopmentPublicationSubject(ctx, subjectPin)
+	require.NoError(t, err)
+	require.True(t, changed)
+	wrongDigest := strings.Repeat("0", 64)
+	if wrongDigest == anchor.TranscriptDigest {
+		wrongDigest = strings.Repeat("1", 64)
+	}
+	for _, test := range []struct {
+		name       string
+		claimToken string
+		claimEpoch int64
+		anchor     PRDevelopmentPublicationGateContextAnchor
+		want       error
+	}{
+		{
+			name:       "wrong claim token",
+			claimToken: strings.Repeat("f", len(fixture.Claim.ClaimToken)),
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor:     anchor,
+			want:       ErrStaleLease,
+		},
+		{
+			name:       "malformed subject revision",
+			claimToken: fixture.Claim.ClaimToken,
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor: PRDevelopmentPublicationGateContextAnchor{
+				SubjectRevision:     "subject",
+				ConversationVersion: anchor.ConversationVersion,
+				TranscriptDigest:    anchor.TranscriptDigest,
+			},
+			want: ErrInvalidPRDevelopmentPublication,
+		},
+		{
+			name:       "different pinned subject",
+			claimToken: fixture.Claim.ClaimToken,
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor: PRDevelopmentPublicationGateContextAnchor{
+				SubjectRevision:     "sha256:" + strings.Repeat("c", 64),
+				ConversationVersion: anchor.ConversationVersion,
+				TranscriptDigest:    anchor.TranscriptDigest,
+			},
+			want: ErrPRDevelopmentPublicationConflict,
+		},
+		{
+			name:       "negative conversation version",
+			claimToken: fixture.Claim.ClaimToken,
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor: PRDevelopmentPublicationGateContextAnchor{
+				SubjectRevision:     anchor.SubjectRevision,
+				ConversationVersion: -1,
+				TranscriptDigest:    anchor.TranscriptDigest,
+			},
+			want: ErrInvalidPRDevelopmentPublication,
+		},
+		{
+			name:       "future conversation version",
+			claimToken: fixture.Claim.ClaimToken,
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor: PRDevelopmentPublicationGateContextAnchor{
+				SubjectRevision:     anchor.SubjectRevision,
+				ConversationVersion: snapshot.Conversation.Version + 1,
+				TranscriptDigest:    anchor.TranscriptDigest,
+			},
+			want: ErrPRDevelopmentPublicationConflict,
+		},
+		{
+			name:       "malformed transcript digest",
+			claimToken: fixture.Claim.ClaimToken,
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor: PRDevelopmentPublicationGateContextAnchor{
+				SubjectRevision:     anchor.SubjectRevision,
+				ConversationVersion: anchor.ConversationVersion,
+				TranscriptDigest:    strings.Repeat("A", 64),
+			},
+			want: ErrInvalidPRDevelopmentPublication,
+		},
+		{
+			name:       "changed transcript digest",
+			claimToken: fixture.Claim.ClaimToken,
+			claimEpoch: fixture.Claim.ClaimEpoch,
+			anchor: PRDevelopmentPublicationGateContextAnchor{
+				SubjectRevision:     anchor.SubjectRevision,
+				ConversationVersion: anchor.ConversationVersion,
+				TranscriptDigest:    wrongDigest,
+			},
+			want: ErrPRDevelopmentPublicationConflict,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, readErr := fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+				ctx,
+				fixture.Claim.ID,
+				test.claimToken,
+				test.claimEpoch,
+				test.anchor,
+			)
+			assert.ErrorIs(t, readErr, test.want)
+		})
+	}
+
+	exact, err := fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+		anchor,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, snapshot.Conversation, exact.Conversation)
+	assert.Equal(t, snapshot.TranscriptDigest, exact.TranscriptDigest)
 }
 
 func TestPRDevelopmentPublicationGateContextSnapshotRejectsInvalidOrStaleAuthority(
@@ -237,6 +505,9 @@ func TestPRDevelopmentPublicationGateContextSnapshotRejectsWrongClaimPhase(
 	)
 	require.NoError(t, err)
 	policyRevision := pinPRDevelopmentPublicationGatePolicyForContextTest(t, &fixture)
+	anchor := publicationGateContextAnchorForContextTest(
+		publicationGateSubjectPinForContextTest(&fixture, policyRevision, snapshot),
+	)
 	pinPRDevelopmentPublicationGateSubjectForContextTest(
 		t,
 		&fixture,
@@ -283,6 +554,14 @@ func TestPRDevelopmentPublicationGateContextSnapshotRejectsWrongClaimPhase(
 		claimed[0].ID,
 		claimed[0].ClaimToken,
 		claimed[0].ClaimEpoch,
+	)
+	assert.ErrorIs(t, err, ErrStaleLease)
+	_, err = fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		claimed[0].ID,
+		claimed[0].ClaimToken,
+		claimed[0].ClaimEpoch,
+		anchor,
 	)
 	assert.ErrorIs(t, err, ErrStaleLease)
 }
@@ -429,6 +708,22 @@ func TestPRDevelopmentPublicationGateContextSnapshotFailsClosedOnConversationTam
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, conversation.Messages)
+	snapshot, err := fixture.Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+	)
+	require.NoError(t, err)
+	policyRevision := pinPRDevelopmentPublicationGatePolicyForContextTest(t, &fixture)
+	subjectPin := publicationGateSubjectPinForContextTest(
+		&fixture,
+		policyRevision,
+		snapshot,
+	)
+	_, changed, err := fixture.Store.PinPRDevelopmentPublicationSubject(ctx, subjectPin)
+	require.NoError(t, err)
+	require.True(t, changed)
 	_, err = fixture.Store.db.Exec(`
 		UPDATE pr_development_conversations
 		SET transcript_digest = ?
@@ -443,6 +738,14 @@ func TestPRDevelopmentPublicationGateContextSnapshotFailsClosedOnConversationTam
 		fixture.Claim.ID,
 		fixture.Claim.ClaimToken,
 		fixture.Claim.ClaimEpoch,
+	)
+	require.Error(t, err)
+	_, err = fixture.Store.GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+		publicationGateContextAnchorForContextTest(subjectPin),
 	)
 	require.Error(t, err)
 }
@@ -473,15 +776,31 @@ func publicationGateSubjectPinForContextTest(
 	policyRevision string,
 	snapshot PRDevelopmentPublicationGateContextSnapshot,
 ) PRDevelopmentPublicationSubjectPin {
+	pinnedSubject := json.RawMessage(
+		`{"conversation_version":` +
+			strconv.FormatInt(snapshot.Conversation.Version, 10) +
+			`,"publication":"exact-passed-review","transcript_digest":"` +
+			snapshot.TranscriptDigest + `"}`,
+	)
 	return PRDevelopmentPublicationSubjectPin{
 		PublicationID:               fixture.Claim.ID,
 		ClaimToken:                  fixture.Claim.ClaimToken,
 		ClaimEpoch:                  fixture.Claim.ClaimEpoch,
 		PolicyRevision:              policyRevision,
 		SubjectRevision:             "sha256:" + strings.Repeat("b", 64),
-		PinnedSubject:               json.RawMessage(`{"publication":"exact-passed-review"}`),
+		PinnedSubject:               pinnedSubject,
 		ExpectedConversationVersion: snapshot.Conversation.Version,
 		ExpectedTranscriptDigest:    snapshot.TranscriptDigest,
+	}
+}
+
+func publicationGateContextAnchorForContextTest(
+	input PRDevelopmentPublicationSubjectPin,
+) PRDevelopmentPublicationGateContextAnchor {
+	return PRDevelopmentPublicationGateContextAnchor{
+		SubjectRevision:     input.SubjectRevision,
+		ConversationVersion: input.ExpectedConversationVersion,
+		TranscriptDigest:    input.ExpectedTranscriptDigest,
 	}
 }
 

@@ -42,6 +42,7 @@ ralph/
 tasks/
 
 # Plans
+/plan.md
 docs/plans/
 docs/superpowers/
 

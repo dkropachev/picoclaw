@@ -17,13 +17,14 @@ import (
 )
 
 var (
-	_ PRDevelopmentPublicationReader                    = (*Store)(nil)
-	_ PRDevelopmentPublicationGateClaimAuthenticator    = (*Store)(nil)
-	_ PRDevelopmentPublicationGateContextSnapshotReader = (*Store)(nil)
-	_ PRDevelopmentPublicationQueue                     = (*Store)(nil)
-	_ PRDevelopmentPublicationPushJournal               = (*Store)(nil)
-	_ PRDevelopmentPublicationOutcomeReconciler         = (*Store)(nil)
-	_ PRDevelopmentPublicationDecisionRunStore          = (*Store)(nil)
+	_ PRDevelopmentPublicationReader                          = (*Store)(nil)
+	_ PRDevelopmentPublicationGateClaimAuthenticator          = (*Store)(nil)
+	_ PRDevelopmentPublicationGateContextSnapshotReader       = (*Store)(nil)
+	_ PRDevelopmentPublicationPinnedGateContextSnapshotReader = (*Store)(nil)
+	_ PRDevelopmentPublicationQueue                           = (*Store)(nil)
+	_ PRDevelopmentPublicationPushJournal                     = (*Store)(nil)
+	_ PRDevelopmentPublicationOutcomeReconciler               = (*Store)(nil)
+	_ PRDevelopmentPublicationDecisionRunStore                = (*Store)(nil)
 )
 
 const (
@@ -296,6 +297,136 @@ func (s *Store) GetClaimedPRDevelopmentPublicationGateContextSnapshot(
 		)
 	}
 	return snapshot, nil
+}
+
+// GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot recreates the
+// exact append-only conversation prefix captured by an already-pinned subject.
+// The read still validates the live initial claim and current local publication
+// high-water in one transaction; later conversation messages are excluded.
+func (s *Store) GetClaimedPRDevelopmentPublicationPinnedGateContextSnapshot(
+	ctx context.Context,
+	publicationID string,
+	claimToken string,
+	claimEpoch int64,
+	anchor PRDevelopmentPublicationGateContextAnchor,
+) (PRDevelopmentPublicationGateContextSnapshot, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	publicationID, claimToken, err := normalizePRDevelopmentPublicationClaim(
+		publicationID,
+		claimToken,
+		claimEpoch,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	anchor.SubjectRevision = strings.TrimSpace(anchor.SubjectRevision)
+	anchor.TranscriptDigest = strings.TrimSpace(anchor.TranscriptDigest)
+	if !validReviewPolicyRevision(anchor.SubjectRevision) ||
+		anchor.ConversationVersion < 0 ||
+		anchor.ConversationVersion > MaxPRDevelopmentMessagesPerCase ||
+		!validPRDevelopmentHex(anchor.TranscriptDigest, sha256.Size*2) {
+		return PRDevelopmentPublicationGateContextSnapshot{}, fmt.Errorf(
+			"%w: publication gate context anchor is invalid",
+			ErrInvalidPRDevelopmentPublication,
+		)
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	var snapshot PRDevelopmentPublicationGateContextSnapshot
+	err = s.withPRDevelopmentConversationReadSnapshot(
+		ctx,
+		func(queryer rowsQueryer) error {
+			publication, loadErr := getPRDevelopmentPublicationByID(
+				ctx,
+				queryer,
+				publicationID,
+			)
+			if loadErr != nil {
+				return loadErr
+			}
+			if claimErr := requireLivePRDevelopmentPublicationClaim(
+				publication,
+				claimToken,
+				claimEpoch,
+				now,
+			); claimErr != nil {
+				return claimErr
+			}
+			if publication.Status != PRDevelopmentPublicationClaimed ||
+				publication.ClaimFrom != PRDevelopmentPublicationPending {
+				return ErrStaleLease
+			}
+			if publication.SubjectRevision == "" ||
+				publication.SubjectRevision != anchor.SubjectRevision {
+				return fmt.Errorf(
+					"%w: publication subject pin differs from gate context anchor",
+					ErrPRDevelopmentPublicationConflict,
+				)
+			}
+			pinnedAnchor, anchorErr := prDevelopmentPublicationGateContextAnchorFromSubject(
+				publication,
+			)
+			if anchorErr != nil {
+				return anchorErr
+			}
+			if pinnedAnchor != anchor {
+				return fmt.Errorf(
+					"%w: publication subject conversation anchor differs from requested gate context anchor",
+					ErrPRDevelopmentPublicationConflict,
+				)
+			}
+			snapshot, loadErr = loadCurrentPRDevelopmentPublicationGateContextAtConversation(
+				ctx,
+				queryer,
+				publication,
+				pinnedAnchor,
+			)
+			return loadErr
+		},
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, fmt.Errorf(
+			"get claimed pull request development pinned gate context: %w",
+			s.dbError(err),
+		)
+	}
+	return snapshot, nil
+}
+
+func prDevelopmentPublicationGateContextAnchorFromSubject(
+	publication PRDevelopmentPublication,
+) (PRDevelopmentPublicationGateContextAnchor, error) {
+	var subject map[string]json.RawMessage
+	if err := json.Unmarshal(publication.PinnedSubject, &subject); err != nil {
+		return PRDevelopmentPublicationGateContextAnchor{}, fmt.Errorf(
+			"%w: pinned publication subject is not a gate context object",
+			ErrPRDevelopmentPublicationConflict,
+		)
+	}
+	conversationVersionJSON, versionPresent := subject["conversation_version"]
+	transcriptDigestJSON, digestPresent := subject["transcript_digest"]
+	var conversationVersion int64
+	var transcriptDigest string
+	if !versionPresent || !digestPresent ||
+		json.Unmarshal(conversationVersionJSON, &conversationVersion) != nil ||
+		json.Unmarshal(transcriptDigestJSON, &transcriptDigest) != nil ||
+		conversationVersion < 0 ||
+		conversationVersion > MaxPRDevelopmentMessagesPerCase ||
+		!validPRDevelopmentHex(transcriptDigest, sha256.Size*2) {
+		return PRDevelopmentPublicationGateContextAnchor{}, fmt.Errorf(
+			"%w: pinned publication subject has an invalid gate context anchor",
+			ErrPRDevelopmentPublicationConflict,
+		)
+	}
+	return PRDevelopmentPublicationGateContextAnchor{
+		SubjectRevision:     publication.SubjectRevision,
+		ConversationVersion: conversationVersion,
+		TranscriptDigest:    transcriptDigest,
+	}, nil
 }
 
 func redactPRDevelopmentPublicationAuthority(
@@ -1941,6 +2072,48 @@ func loadCurrentPRDevelopmentPublicationGateContext(
 		AttemptEntry:     highWater.AttemptEntry,
 		ReviewEntry:      highWater.ReviewEntry,
 	}, nil
+}
+
+func loadCurrentPRDevelopmentPublicationGateContextAtConversation(
+	ctx context.Context,
+	queryer rowsQueryer,
+	publication PRDevelopmentPublication,
+	anchor PRDevelopmentPublicationGateContextAnchor,
+) (PRDevelopmentPublicationGateContextSnapshot, error) {
+	snapshot, err := loadCurrentPRDevelopmentPublicationGateContext(
+		ctx,
+		queryer,
+		publication,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	if snapshot.Conversation.Version < anchor.ConversationVersion ||
+		len(snapshot.Conversation.Messages) < int(anchor.ConversationVersion) {
+		return PRDevelopmentPublicationGateContextSnapshot{}, fmt.Errorf(
+			"%w: publication gate conversation prefix is unavailable",
+			ErrPRDevelopmentPublicationConflict,
+		)
+	}
+	prefixDigest := emptyPRDevelopmentTranscriptDigest()
+	for _, message := range snapshot.Conversation.Messages[:anchor.ConversationVersion] {
+		prefixDigest, err = extendPRDevelopmentTranscriptDigest(prefixDigest, message)
+		if err != nil {
+			return PRDevelopmentPublicationGateContextSnapshot{}, err
+		}
+	}
+	if prefixDigest != anchor.TranscriptDigest {
+		return PRDevelopmentPublicationGateContextSnapshot{}, fmt.Errorf(
+			"%w: publication gate conversation prefix changed",
+			ErrPRDevelopmentPublicationConflict,
+		)
+	}
+	messages := make([]PRDevelopmentMessage, int(anchor.ConversationVersion))
+	copy(messages, snapshot.Conversation.Messages[:anchor.ConversationVersion])
+	snapshot.Conversation.Messages = messages
+	snapshot.Conversation.Version = anchor.ConversationVersion
+	snapshot.TranscriptDigest = prefixDigest
+	return snapshot, nil
 }
 
 func redactPRDevelopmentPublicationGateSession(
