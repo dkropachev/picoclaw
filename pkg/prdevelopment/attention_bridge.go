@@ -27,6 +27,9 @@ const (
 
 	prDevelopmentAttentionTaskFenceDomain  = "picoclaw.pr-development-attention.task-fence.v1"
 	prDevelopmentAttentionResponseIDDomain = "picoclaw.pr-development-attention.response-id.v1"
+
+	prDevelopmentPublicationAttentionTaskFenceDomain  = "picoclaw.pr-development-publication.task-fence.v1"
+	prDevelopmentPublicationAttentionResponseIDDomain = "picoclaw.pr-development-publication.response-id.v1"
 )
 
 // AttentionTurnView is the bounded, case-owned projection of one private gate
@@ -63,20 +66,30 @@ type attentionBridgeReader interface {
 		ctx context.Context,
 		key eventing.PRDevelopmentAttentionDecisionKey,
 	) (eventing.PRDevelopmentAttentionDecisionRunLink, error)
+	GetPRDevelopmentPublicationDecisionRun(
+		ctx context.Context,
+		key eventing.PRDevelopmentPublicationDecisionKey,
+	) (eventing.PRDevelopmentPublicationDecisionRunLink, error)
 }
 
 // AttentionBridge projects and resumes only a private run already linked to
-// the authoritative current local-review occurrence. It has no Git, provider,
-// repair, publication, policy-source, or workflow-admission authority.
+// the authoritative current case-owned attention occurrence. It has no Git,
+// provider, repair, publication-transition, policy-source, or
+// workflow-admission authority.
 type AttentionBridge struct {
-	service      *Service
-	reader       attentionBridgeReader
-	conversation *sharedattention.ConversationEngine
+	service                 *Service
+	reader                  attentionBridgeReader
+	reviewConversation      *sharedattention.ConversationEngine
+	publicationConversation *sharedattention.ConversationEngine
 }
 
 type resolvedAttentionConversation struct {
-	base  AttentionView
-	input *sharedattention.ConversationInput
+	base             AttentionView
+	input            *sharedattention.ConversationInput
+	conversation     *sharedattention.ConversationEngine
+	respondable      bool
+	requireCompleted bool
+	requireSettled   bool
 }
 
 func NewAttentionBridge(config AttentionBridgeConfig) (*AttentionBridge, error) {
@@ -88,7 +101,7 @@ func NewAttentionBridge(config AttentionBridgeConfig) (*AttentionBridge, error) 
 	if !ok || isNilServiceValue(reader) {
 		return nil, errors.New("pull request development store does not support attention projection")
 	}
-	conversation, err := sharedattention.NewConversationEngine(
+	reviewConversation, err := sharedattention.NewConversationEngine(
 		sharedattention.ConversationEngineConfig{
 			RunStore:         config.RunStore,
 			Executor:         config.Executor,
@@ -99,10 +112,22 @@ func NewAttentionBridge(config AttentionBridgeConfig) (*AttentionBridge, error) 
 	if err != nil {
 		return nil, err
 	}
+	publicationConversation, err := sharedattention.NewConversationEngine(
+		sharedattention.ConversationEngineConfig{
+			RunStore:         config.RunStore,
+			Executor:         config.Executor,
+			MaxResponseBytes: maximumHumanChatBytes,
+			ResponseIDDomain: prDevelopmentPublicationAttentionResponseIDDomain,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &AttentionBridge{
-		service:      config.Service,
-		reader:       reader,
-		conversation: conversation,
+		service:                 config.Service,
+		reader:                  reader,
+		reviewConversation:      reviewConversation,
+		publicationConversation: publicationConversation,
 	}, nil
 }
 
@@ -122,7 +147,8 @@ func (bridge *AttentionBridge) Respond(
 	request AttentionResponseRequest,
 ) (AttentionView, error) {
 	if bridge == nil || bridge.service == nil || bridge.service.caseLocks == nil ||
-		bridge.reader == nil || bridge.conversation == nil {
+		bridge.reader == nil || bridge.reviewConversation == nil ||
+		bridge.publicationConversation == nil {
 		return AttentionView{}, ErrUnavailable
 	}
 	ctx = developmentAttentionContext(ctx)
@@ -149,10 +175,10 @@ func (bridge *AttentionBridge) Respond(
 	if resolved.base.CaseVersion != request.ExpectedCaseVersion {
 		return AttentionView{}, eventing.ErrPRDevelopmentConversationConflict
 	}
-	if resolved.input == nil {
+	if resolved.input == nil || resolved.conversation == nil || !resolved.respondable {
 		return AttentionView{}, eventing.ErrPRDevelopmentConversationConflict
 	}
-	_, err = bridge.conversation.Respond(
+	_, err = resolved.conversation.Respond(
 		ctx,
 		sharedattention.ConversationResponse{
 			ConversationInput:   *resolved.input,
@@ -165,8 +191,8 @@ func (bridge *AttentionBridge) Respond(
 		return AttentionView{}, sanitizeDevelopmentAttentionBridgeError(ctx, err)
 	}
 	// The task response may commit before private continuation finishes. Re-read
-	// the atomic case/trigger ownership after continuation so the returned view
-	// cannot outlive a concurrently superseded local-review occurrence.
+	// the atomic case-owned occurrence after continuation so the returned view
+	// cannot outlive a concurrently superseded review or publication decision.
 	after, err := bridge.resolve(context.WithoutCancel(ctx), caseID)
 	if err != nil {
 		return AttentionView{}, sanitizeDevelopmentAttentionBridgeError(ctx, err)
@@ -181,9 +207,24 @@ func (bridge *AttentionBridge) projectResolved(
 	if resolved.input == nil {
 		return resolved.base, nil
 	}
-	conversation, err := bridge.conversation.Project(ctx, *resolved.input)
+	if resolved.conversation == nil {
+		return AttentionView{}, ErrUnavailable
+	}
+	conversation, err := resolved.conversation.Project(ctx, *resolved.input)
 	if err != nil {
 		return AttentionView{}, sanitizeDevelopmentAttentionBridgeError(ctx, err)
+	}
+	if resolved.requireCompleted &&
+		conversation.Status != sharedattention.ConversationStatusCompleted {
+		return AttentionView{}, ErrUnavailable
+	}
+	if resolved.requireSettled &&
+		conversation.Status != sharedattention.ConversationStatusCompleted &&
+		conversation.Status != sharedattention.ConversationStatusFailed {
+		return AttentionView{}, ErrUnavailable
+	}
+	if !resolved.respondable && conversation.CanRespond {
+		return AttentionView{}, ErrUnavailable
 	}
 	return projectDevelopmentAttentionConversation(resolved.base, conversation)
 }
@@ -193,7 +234,7 @@ func (bridge *AttentionBridge) resolve(
 	caseID string,
 ) (resolvedAttentionConversation, error) {
 	if bridge == nil || bridge.service == nil || bridge.reader == nil ||
-		bridge.conversation == nil {
+		bridge.reviewConversation == nil || bridge.publicationConversation == nil {
 		return resolvedAttentionConversation{}, ErrUnavailable
 	}
 	ctx = developmentAttentionContext(ctx)
@@ -214,20 +255,39 @@ func (bridge *AttentionBridge) resolve(
 		Status:      AttentionStatusNone,
 		Turns:       []AttentionTurnView{},
 	}
-	if snapshot.Trigger == nil {
-		return resolvedAttentionConversation{base: base}, nil
-	}
-	trigger := *snapshot.Trigger
-	policy, pinned, valid := validDevelopmentAttentionBridgeTrigger(trigger, snapshot)
-	if !valid {
-		return resolvedAttentionConversation{}, ErrUnavailable
-	}
-	if !snapshot.TriggerCurrent {
+	if snapshot.Trigger != nil {
+		trigger := *snapshot.Trigger
+		policy, pinned, valid := validDevelopmentAttentionBridgeTrigger(trigger, snapshot)
+		if !valid {
+			return resolvedAttentionConversation{}, ErrUnavailable
+		}
+		if snapshot.TriggerCurrent {
+			return bridge.resolveReviewAttention(ctx, snapshot, trigger, policy, pinned, base)
+		}
 		if snapshot.AttentionRequired {
 			return resolvedAttentionConversation{}, ErrUnavailable
 		}
-		return resolvedAttentionConversation{base: base}, nil
 	}
+	if snapshot.Publication != nil {
+		publication := *snapshot.Publication
+		if !validDevelopmentPublicationAttentionProjection(publication, snapshot) {
+			return resolvedAttentionConversation{}, ErrUnavailable
+		}
+		if snapshot.PublicationCurrent {
+			return bridge.resolvePublicationAttention(ctx, snapshot, publication, base)
+		}
+	}
+	return resolvedAttentionConversation{base: base}, nil
+}
+
+func (bridge *AttentionBridge) resolveReviewAttention(
+	ctx context.Context,
+	snapshot eventing.PRDevelopmentAttentionTriggerCaseSnapshot,
+	trigger eventing.PRDevelopmentAttentionTrigger,
+	policy sharedattention.PreparedPolicy,
+	pinned bool,
+	base AttentionView,
+) (resolvedAttentionConversation, error) {
 	switch trigger.Status {
 	case eventing.PRDevelopmentAttentionTriggerPending:
 		base.Status = AttentionStatusQueued
@@ -274,7 +334,94 @@ func (bridge *AttentionBridge) resolve(
 		RunID:       runID,
 		Token:       developmentAttentionResponseTokenFactory(trigger),
 	}
-	return resolvedAttentionConversation{base: base, input: &input}, nil
+	return resolvedAttentionConversation{
+		base:         base,
+		input:        &input,
+		conversation: bridge.reviewConversation,
+		respondable:  true,
+	}, nil
+}
+
+func (bridge *AttentionBridge) resolvePublicationAttention(
+	ctx context.Context,
+	snapshot eventing.PRDevelopmentAttentionTriggerCaseSnapshot,
+	publication eventing.PRDevelopmentPublicationAttentionProjection,
+	base AttentionView,
+) (resolvedAttentionConversation, error) {
+	key := publication.DecisionRun.Key
+	runID, err := prDevelopmentPublicationRunID(key)
+	if err != nil || runID != publication.DecisionRun.RunID {
+		return resolvedAttentionConversation{}, ErrUnavailable
+	}
+	link, err := bridge.reader.GetPRDevelopmentPublicationDecisionRun(ctx, key)
+	if err != nil {
+		if errors.Is(err, eventing.ErrNotFound) {
+			return resolvedAttentionConversation{}, ErrUnavailable
+		}
+		return resolvedAttentionConversation{}, sanitizeDevelopmentAttentionBridgeReadError(ctx, err)
+	}
+	if link != publication.DecisionRun || link.RunID != runID {
+		return resolvedAttentionConversation{}, ErrUnavailable
+	}
+
+	respondable := false
+	requireCompleted := false
+	requireSettled := false
+	switch publication.Status {
+	case eventing.PRDevelopmentPublicationClaimed:
+		switch publication.ClaimFrom {
+		case eventing.PRDevelopmentPublicationPending:
+			base.Status = AttentionStatusChecking
+			return resolvedAttentionConversation{base: base}, nil
+		case eventing.PRDevelopmentPublicationGateWaiting:
+			respondable = true
+		case eventing.PRDevelopmentPublicationPushReady:
+			requireCompleted = true
+		default:
+			return resolvedAttentionConversation{}, ErrUnavailable
+		}
+	case eventing.PRDevelopmentPublicationGateWaiting:
+		respondable = true
+	case eventing.PRDevelopmentPublicationPushReady,
+		eventing.PRDevelopmentPublicationPushStarted,
+		eventing.PRDevelopmentPublicationPublished,
+		eventing.PRDevelopmentPublicationOutcomeUnknown:
+		requireCompleted = true
+	case eventing.PRDevelopmentPublicationConflict,
+		eventing.PRDevelopmentPublicationFailed,
+		eventing.PRDevelopmentPublicationRecoveryRequired:
+		// A linked terminal publication can retain either a completed gate
+		// conversation or a failed private run as read-only case history.
+		requireSettled = true
+	case eventing.PRDevelopmentPublicationPending:
+		// A transient pre-effect requeue may restore claimed-from-pending work
+		// after the run was linked. Scheduling may continue later, but the
+		// browser receives no task or continuation authority until the journal
+		// durably reaches gate_waiting.
+		base.Status = AttentionStatusQueued
+		return resolvedAttentionConversation{base: base}, nil
+	case eventing.PRDevelopmentPublicationSuperseded:
+		return resolvedAttentionConversation{}, ErrUnavailable
+	default:
+		return resolvedAttentionConversation{}, ErrUnavailable
+	}
+	input := sharedattention.ConversationInput{
+		CaseVersion: snapshot.ConversationVersion,
+		RunID:       runID,
+		Token: developmentPublicationAttentionResponseTokenFactory(
+			publication.CaseID,
+			key,
+			runID,
+		),
+	}
+	return resolvedAttentionConversation{
+		base:             base,
+		input:            &input,
+		conversation:     bridge.publicationConversation,
+		respondable:      respondable,
+		requireCompleted: requireCompleted,
+		requireSettled:   requireSettled,
+	}, nil
 }
 
 func validDevelopmentAttentionCaseSnapshot(
@@ -283,27 +430,101 @@ func validDevelopmentAttentionCaseSnapshot(
 ) bool {
 	if snapshot.CaseID != caseID || snapshot.ConversationVersion < 0 ||
 		snapshot.ConversationVersion > int64(MaximumConversationVersion) ||
-		snapshot.TriggerCurrent && snapshot.Trigger == nil {
+		snapshot.TriggerCurrent && snapshot.Trigger == nil ||
+		snapshot.PublicationCurrent && snapshot.Publication == nil ||
+		snapshot.PublicationAttentionRequired &&
+			(!snapshot.PublicationCurrent || snapshot.Publication == nil) ||
+		snapshot.TriggerCurrent && snapshot.PublicationCurrent {
 		return false
 	}
 	if snapshot.CurrentReviewEntryID == "" {
 		return snapshot.CurrentReviewEntryHash == "" &&
 			snapshot.CurrentReviewOutcome == "" && !snapshot.AttentionRequired &&
-			!snapshot.TriggerCurrent
+			!snapshot.TriggerCurrent && !snapshot.PublicationCurrent &&
+			!snapshot.PublicationAttentionRequired
 	}
 	if !validDevelopmentID(snapshot.CurrentReviewEntryID, "pdle_") ||
 		!validControllerSHA256(snapshot.CurrentReviewEntryHash) {
 		return false
 	}
 	switch snapshot.CurrentReviewOutcome {
-	case eventing.PRDevelopmentLedgerReviewPassed,
-		eventing.PRDevelopmentLedgerReviewChangesRequired:
+	case eventing.PRDevelopmentLedgerReviewPassed:
 		return !snapshot.AttentionRequired && !snapshot.TriggerCurrent
+	case eventing.PRDevelopmentLedgerReviewChangesRequired:
+		return !snapshot.AttentionRequired && !snapshot.TriggerCurrent &&
+			!snapshot.PublicationCurrent && !snapshot.PublicationAttentionRequired
 	case eventing.PRDevelopmentLedgerReviewAttentionRequired:
-		return snapshot.AttentionRequired
+		return snapshot.AttentionRequired && !snapshot.PublicationCurrent &&
+			!snapshot.PublicationAttentionRequired
 	default:
 		return false
 	}
+}
+
+func validDevelopmentPublicationAttentionProjection(
+	publication eventing.PRDevelopmentPublicationAttentionProjection,
+	snapshot eventing.PRDevelopmentAttentionTriggerCaseSnapshot,
+) bool {
+	key := publication.DecisionRun.Key
+	runID, err := prDevelopmentPublicationRunID(key)
+	if err != nil || publication.CaseID != snapshot.CaseID ||
+		publication.DecisionRun.RunID != runID {
+		return false
+	}
+	policy, err := sharedattention.DecodePreparedPolicy(publication.PinnedPolicy)
+	if err != nil || policy.DecisionRevision() != key.PolicyRevision || policy.IsNoop() {
+		return false
+	}
+	if snapshot.CurrentReviewOutcome != eventing.PRDevelopmentLedgerReviewPassed ||
+		key.ReviewLedgerEntryID != snapshot.CurrentReviewEntryID ||
+		key.ReviewLedgerEntryHash != snapshot.CurrentReviewEntryHash {
+		return false
+	}
+
+	attentionRequired := false
+	switch publication.Status {
+	case eventing.PRDevelopmentPublicationClaimed:
+		switch publication.ClaimFrom {
+		case eventing.PRDevelopmentPublicationPending,
+			eventing.PRDevelopmentPublicationPushReady:
+		case eventing.PRDevelopmentPublicationGateWaiting:
+			attentionRequired = true
+		default:
+			return false
+		}
+	case eventing.PRDevelopmentPublicationGateWaiting:
+		if publication.ClaimFrom != "" {
+			return false
+		}
+		attentionRequired = true
+	case eventing.PRDevelopmentPublicationPushStarted:
+		if publication.ClaimFrom != eventing.PRDevelopmentPublicationPushReady {
+			return false
+		}
+	case eventing.PRDevelopmentPublicationPushReady,
+		eventing.PRDevelopmentPublicationPublished,
+		eventing.PRDevelopmentPublicationConflict,
+		eventing.PRDevelopmentPublicationFailed,
+		eventing.PRDevelopmentPublicationRecoveryRequired,
+		eventing.PRDevelopmentPublicationOutcomeUnknown,
+		eventing.PRDevelopmentPublicationSuperseded:
+		if publication.ClaimFrom != "" {
+			return false
+		}
+	case eventing.PRDevelopmentPublicationPending:
+		// A transient pre-effect failure can restore a linked initial claim to
+		// pending without discarding its immutable decision/run identity.
+		if publication.ClaimFrom != "" {
+			return false
+		}
+	default:
+		return false
+	}
+	if snapshot.PublicationCurrent &&
+		snapshot.PublicationAttentionRequired != attentionRequired {
+		return false
+	}
+	return !snapshot.PublicationAttentionRequired || attentionRequired
 }
 
 func validDevelopmentAttentionBridgeTrigger(
@@ -387,6 +608,35 @@ func developmentAttentionResponseTokenFactory(
 		writeDevelopmentAttentionTokenField(digest, trigger.PolicyRevision)
 		writeDevelopmentAttentionTokenField(digest, trigger.SubjectRevision)
 		writeDevelopmentAttentionTokenField(digest, trigger.RunID)
+		writeDevelopmentAttentionTokenField(digest, task.ID)
+		sharedattention.WriteConversationHashUint64(digest, waitingRevision)
+		writeDevelopmentAttentionTokenField(digest, task.InputHash)
+		return "sha256:" + hex.EncodeToString(digest.Sum(nil)), nil
+	}
+}
+
+func developmentPublicationAttentionResponseTokenFactory(
+	caseID string,
+	key eventing.PRDevelopmentPublicationDecisionKey,
+	runID string,
+) sharedattention.ConversationTokenFactory {
+	canonicalKey, canonicalErr := canonicalPRDevelopmentPublicationDecisionKey(key)
+	expectedRunID, runIDErr := prDevelopmentPublicationRunID(key)
+	return func(task workflows.WorkflowHumanTask, waitingRevision uint64) (string, error) {
+		if canonicalErr != nil || runIDErr != nil || expectedRunID != runID ||
+			!validCaseID(caseID) || !validDevelopmentID(runID, "wr_") ||
+			task.RunID != runID || task.ID == "" ||
+			task.InputHash == "" || waitingRevision == 0 {
+			return "", sharedattention.ErrConversationUnavailable
+		}
+		digest := sha256.New()
+		sharedattention.WriteConversationHashField(
+			digest,
+			[]byte(prDevelopmentPublicationAttentionTaskFenceDomain),
+		)
+		writeDevelopmentAttentionTokenField(digest, caseID)
+		writeDevelopmentAttentionTokenField(digest, canonicalKey)
+		writeDevelopmentAttentionTokenField(digest, runID)
 		writeDevelopmentAttentionTokenField(digest, task.ID)
 		sharedattention.WriteConversationHashUint64(digest, waitingRevision)
 		writeDevelopmentAttentionTokenField(digest, task.InputHash)

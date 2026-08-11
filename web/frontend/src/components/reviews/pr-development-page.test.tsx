@@ -343,9 +343,15 @@ describe("PR development page", () => {
     renderPage({ view: "development", case: caseID, focus: "chat" })
 
     const response = await screen.findByLabelText(
-      "Reply to the AI attention request",
+      "Reply to the current PR gate",
     )
     await waitFor(() => expect(response).toHaveFocus())
+    expect(screen.getByText("PR decision gates")).toBeVisible()
+    expect(
+      screen.getByText(
+        "Your reply continues this gate; it does not directly edit code, run CI, push commits, acknowledge a review, or merge the pull request.",
+      ),
+    ).toBeVisible()
     expect(screen.getByText("Gate owner_input")).toBeVisible()
     expect(document.body).not.toHaveTextContent(attentionResponseToken)
 
@@ -363,7 +369,7 @@ describe("PR development page", () => {
       )
     })
     expect(
-      await screen.findByText("The attention conversation is complete."),
+      await screen.findByText("The PR gate conversation is complete."),
     ).toBeVisible()
   })
 
@@ -379,7 +385,7 @@ describe("PR development page", () => {
     renderPage({ view: "development", case: caseID, focus: "chat" })
 
     const response = await screen.findByLabelText(
-      "Reply to the AI attention request",
+      "Reply to the current PR gate",
     )
     await user.type(response, "Keep my direction")
     await user.click(
@@ -1827,7 +1833,7 @@ describe("PR development page", () => {
     expect(onSearchChange).toHaveBeenLastCalledWith({ view: "policies" })
   })
 
-  it("polls for AI attention on an unselected case and opens its canonical chat", async () => {
+  it("polls for needed input on an unselected case and opens its canonical chat", async () => {
     vi.useFakeTimers({
       toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
     })
@@ -1845,14 +1851,14 @@ describe("PR development page", () => {
         await Promise.resolve()
       })
       expect(mockedList).toHaveBeenCalledTimes(1)
-      expect(screen.queryByText("AI attention")).not.toBeInTheDocument()
+      expect(screen.queryByText("Needs input")).not.toBeInTheDocument()
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000)
       })
 
       expect(mockedList).toHaveBeenCalledTimes(2)
-      const attentionMarker = screen.getByText("AI attention")
+      const attentionMarker = screen.getByText("Needs input")
       fireEvent.click(attentionMarker.closest("button")!)
       expect(onSearchChange).toHaveBeenLastCalledWith(
         {

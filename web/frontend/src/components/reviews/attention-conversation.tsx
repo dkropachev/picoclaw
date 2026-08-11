@@ -29,6 +29,7 @@ export function AttentionConversation({
   pending,
   maximumResponseBytes,
   idPrefix = "review-attention",
+  context = "outbound-review",
   attentionInputRef,
   recoveryButtonRef,
   onResponseChange,
@@ -44,6 +45,7 @@ export function AttentionConversation({
   pending: boolean
   maximumResponseBytes: number
   idPrefix?: string
+  context?: "outbound-review" | "pr-development"
   attentionInputRef: RefObject<HTMLTextAreaElement | null>
   recoveryButtonRef: RefObject<HTMLButtonElement | null>
   onResponseChange: (response: string) => void
@@ -61,6 +63,7 @@ export function AttentionConversation({
   const headingID = `${idPrefix}-conversation-heading`
   const responseID = `${idPrefix}-response`
   const responseHelpID = `${idPrefix}-response-help`
+  const isPRDevelopment = context === "pr-development"
 
   return (
     <div
@@ -70,12 +73,26 @@ export function AttentionConversation({
       <div className="flex items-center gap-2">
         <IconSparkles className="text-muted-foreground size-4" />
         <h4 id={headingID} className="text-sm font-medium">
-          {t("pages.reviews.attention.title", "AI attention")}
+          {isPRDevelopment
+            ? t(
+                "pages.reviews.development.attention_title",
+                "PR decision gates",
+              )
+            : t("pages.reviews.attention.title", "AI attention")}
         </h4>
         {projection?.turns.length ? (
           <Badge variant="outline">{projection.turns.length}</Badge>
         ) : null}
       </div>
+
+      {isPRDevelopment ? (
+        <p className="text-muted-foreground mt-2 text-xs">
+          {t(
+            "pages.reviews.development.attention_safety",
+            "Your reply continues this gate; it does not directly edit code, run CI, push commits, acknowledge a review, or merge the pull request.",
+          )}
+        </p>
+      ) : null}
 
       {loading ? (
         <p className="text-muted-foreground mt-3 text-sm" role="status">
@@ -87,10 +104,15 @@ export function AttentionConversation({
       ) : loadError ? (
         <div className="mt-3 grid justify-items-start gap-2" role="alert">
           <p className="text-destructive text-sm">
-            {t(
-              "pages.reviews.attention.load_error",
-              "AI attention is temporarily unavailable.",
-            )}
+            {isPRDevelopment
+              ? t(
+                  "pages.reviews.development.attention_load_error",
+                  "PR decision gates are temporarily unavailable.",
+                )
+              : t(
+                  "pages.reviews.attention.load_error",
+                  "AI attention is temporarily unavailable.",
+                )}
           </p>
           <Button
             type="button"
@@ -118,7 +140,9 @@ export function AttentionConversation({
                   <div className="bg-muted mr-auto max-w-[95%] rounded-lg px-3 py-2 text-sm">
                     <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] opacity-70">
                       <span>
-                        {t("pages.reviews.chat.assistant", "Assistant")}
+                        {isPRDevelopment
+                          ? t("pages.reviews.development.gate_actor", "Gate")
+                          : t("pages.reviews.chat.assistant", "Assistant")}
                       </span>
                       <span>·</span>
                       <span>{attentionTurnStatusLabel(turn.status, t)}</span>
@@ -149,6 +173,7 @@ export function AttentionConversation({
             {attentionStatusLabel(
               projection.status,
               projection.turns.length > 0,
+              isPRDevelopment,
               t,
             )}
           </p>
@@ -162,10 +187,15 @@ export function AttentionConversation({
           {waiting && projection.can_respond ? (
             <form className="mt-3 grid gap-2" onSubmit={onSubmit}>
               <Label htmlFor={responseID} className="text-xs font-medium">
-                {t(
-                  "pages.reviews.attention.response",
-                  "Reply to the AI attention request",
-                )}
+                {isPRDevelopment
+                  ? t(
+                      "pages.reviews.development.attention_response",
+                      "Reply to the current PR gate",
+                    )
+                  : t(
+                      "pages.reviews.attention.response",
+                      "Reply to the AI attention request",
+                    )}
               </Label>
               <div className="flex min-w-0 items-end gap-2">
                 <Textarea
@@ -361,8 +391,59 @@ function attentionTurnStatusLabel(
 function attentionStatusLabel(
   status: AttentionConversationStatus,
   hasTurns: boolean,
+  isPRDevelopment: boolean,
   t: Translate,
 ): string {
+  if (isPRDevelopment) {
+    const labels: Record<AttentionConversationStatus, string> = {
+      none: t(
+        "pages.reviews.development.attention_status_none",
+        "No PR decision gate is active.",
+      ),
+      queued: t(
+        "pages.reviews.development.attention_status_queued",
+        "The PR gate check is queued.",
+      ),
+      processing: t(
+        "pages.reviews.development.attention_status_processing",
+        "The current PR gate is being evaluated…",
+      ),
+      checking: t(
+        "pages.reviews.development.attention_status_checking",
+        "The current PR gate is being evaluated…",
+      ),
+      waiting: t(
+        "pages.reviews.development.attention_status_waiting",
+        "The current PR gate is waiting for your reply.",
+      ),
+      continuing: t(
+        "pages.reviews.development.attention_status_continuing",
+        "Continuing the current PR gate with your saved reply…",
+      ),
+      recovery_required: hasTurns
+        ? t(
+            "pages.reviews.development.attention_status_recovery",
+            "Your reply is saved, but the PR gate continuation needs an explicit retry.",
+          )
+        : t(
+            "pages.reviews.development.attention_status_recovery_without_turn",
+            "The PR gate stopped in a recovery-required state.",
+          ),
+      completed: t(
+        "pages.reviews.development.attention_status_completed",
+        "The PR gate conversation is complete.",
+      ),
+      not_required: t(
+        "pages.reviews.development.attention_status_not_required",
+        "No reply is required for the current PR gate.",
+      ),
+      failed: t(
+        "pages.reviews.development.attention_status_failed",
+        "The PR gate check could not be completed.",
+      ),
+    }
+    return labels[status]
+  }
   const labels: Record<AttentionConversationStatus, string> = {
     none: t(
       "pages.reviews.attention.status_none",
