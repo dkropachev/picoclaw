@@ -15,8 +15,6 @@ import (
 
 const (
 	defaultPRDevelopmentAttentionTriggerLease = 5 * time.Minute
-	prDevelopmentAttentionRetryBase           = time.Second
-	prDevelopmentAttentionRetryMaximum        = time.Minute
 	prDevelopmentAttentionCompletionLimit     = 10 * time.Second
 	minimumPRDevelopmentAttentionTriggerLease = 3 * prDevelopmentAttentionCompletionLimit
 )
@@ -758,17 +756,7 @@ func (worker *AttentionTriggerWorker) completeAttentionTriggerInput(
 }
 
 func prDevelopmentAttentionRetryDelay(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
-	delay := prDevelopmentAttentionRetryBase
-	for attempt := 1; attempt < attempts && delay < prDevelopmentAttentionRetryMaximum; attempt++ {
-		delay *= 2
-		if delay > prDevelopmentAttentionRetryMaximum {
-			delay = prDevelopmentAttentionRetryMaximum
-		}
-	}
-	return delay
+	return PublicationRetryDelay(attempts)
 }
 
 func (worker *AttentionTriggerWorker) now() time.Time {

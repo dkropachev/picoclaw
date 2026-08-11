@@ -1331,6 +1331,114 @@ func (s *Store) RenewPRDevelopmentPublication(
 	)
 }
 
+// RequeuePRDevelopmentPublication releases one exact live pre-effect claim to
+// its database-recorded scheduling origin. It never reads mutable local
+// high-water state and cannot release a started push effect.
+func (s *Store) RequeuePRDevelopmentPublication(
+	ctx context.Context,
+	input PRDevelopmentPublicationRequeue,
+) (PRDevelopmentPublication, bool, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentPublication{}, false, err
+	}
+	publicationID, claimToken, err := normalizePRDevelopmentPublicationClaim(
+		input.PublicationID,
+		input.ClaimToken,
+		input.ClaimEpoch,
+	)
+	availableAt, timeErr := normalizePRDevelopmentPublicationTime(
+		"publication requeue availability",
+		input.AvailableAt,
+	)
+	if err != nil || timeErr != nil ||
+		!validPRDevelopmentPublicationClaimFrom(input.ExpectedClaimFrom) {
+		return PRDevelopmentPublication{}, false, fmt.Errorf(
+			"%w: publication requeue is invalid",
+			ErrInvalidPRDevelopmentPublication,
+		)
+	}
+	var (
+		publication PRDevelopmentPublication
+		requeued    bool
+	)
+	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+		current, loadErr := getPRDevelopmentPublicationByID(ctx, conn, publicationID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if current.Status != PRDevelopmentPublicationClaimed {
+			exactReplay := current.Status == input.ExpectedClaimFrom &&
+				current.ClaimEpoch == input.ClaimEpoch &&
+				current.AvailableAt.Equal(availableAt) &&
+				current.ClaimFrom == "" && current.ClaimOwner == "" &&
+				current.ClaimToken == "" && current.ClaimUntil == nil
+			if !exactReplay {
+				return fmt.Errorf(
+					"%w: publication is neither claimed nor an exact requeue replay",
+					ErrPRDevelopmentPublicationConflict,
+				)
+			}
+			publication = current
+			return nil
+		}
+		now, clockErr := s.currentTime()
+		if clockErr != nil {
+			return clockErr
+		}
+		if claimErr := requireLivePRDevelopmentPublicationClaim(
+			current,
+			claimToken,
+			input.ClaimEpoch,
+			now,
+		); claimErr != nil {
+			return claimErr
+		}
+		if availableAt.Before(now) {
+			return fmt.Errorf(
+				"%w: requeue availability predates the transition",
+				ErrInvalidPRDevelopmentPublication,
+			)
+		}
+		if current.Status != PRDevelopmentPublicationClaimed ||
+			current.ClaimFrom != input.ExpectedClaimFrom {
+			return fmt.Errorf(
+				"%w: publication requeue origin changed",
+				ErrPRDevelopmentPublicationConflict,
+			)
+		}
+		result, updateErr := conn.ExecContext(ctx, `
+			UPDATE pr_development_publications
+			SET status = claim_from, claim_from = '', claim_owner = '',
+				claim_token = '', claim_until = NULL, available_at = ?, updated_at = ?
+			WHERE id = ? AND status = 'claimed' AND claim_from = ?
+				AND claim_token = ? AND claim_epoch = ? AND claim_until > ?`,
+			toDBTime(availableAt),
+			toDBTime(now),
+			publicationID,
+			input.ExpectedClaimFrom,
+			claimToken,
+			input.ClaimEpoch,
+			toDBTime(now),
+		)
+		if updateErr != nil {
+			return updateErr
+		}
+		if rowErr := requireOnePRDevelopmentPublicationRow(result); rowErr != nil {
+			return rowErr
+		}
+		publication, loadErr = getPRDevelopmentPublicationByID(ctx, conn, publicationID)
+		requeued = loadErr == nil
+		return loadErr
+	})
+	if err != nil {
+		return PRDevelopmentPublication{}, false, fmt.Errorf(
+			"requeue pull request development publication: %w",
+			s.dbError(err),
+		)
+	}
+	return redactPRDevelopmentPublicationAuthority(publication), requeued, nil
+}
+
 // RenewPRDevelopmentPublicationPush extends one exact live PushStarted claim.
 // The started effect remains non-reclaimable if this lease expires.
 func (s *Store) RenewPRDevelopmentPublicationPush(

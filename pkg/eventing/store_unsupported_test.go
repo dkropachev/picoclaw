@@ -522,11 +522,21 @@ func TestStorePRDevelopmentPublicationUnsupported(t *testing.T) {
 		"RenewPRDevelopmentPublication()",
 		store.RenewPRDevelopmentPublication(ctx, PRDevelopmentPublicationRenew{}),
 	)
+	publication, changed, err := store.RequeuePRDevelopmentPublication(
+		ctx,
+		PRDevelopmentPublicationRequeue{},
+	)
+	assertPublication(
+		"RequeuePRDevelopmentPublication()",
+		publication,
+		changed,
+		err,
+	)
 	assertUnsupported(
 		"RenewPRDevelopmentPublicationPush()",
 		store.RenewPRDevelopmentPublicationPush(ctx, PRDevelopmentPublicationRenew{}),
 	)
-	publication, changed, err := store.PinPRDevelopmentPublicationPolicy(
+	publication, changed, err = store.PinPRDevelopmentPublicationPolicy(
 		ctx,
 		PRDevelopmentPublicationPolicyPin{},
 	)
@@ -654,6 +664,7 @@ func TestPRDevelopmentPublicationUnsupportedSurfaceIsJSONPrivate(t *testing.T) {
 		PRDevelopmentPublicationPushResult{WorkspaceID: sentinel},
 		PRDevelopmentPublicationClaimRequest{WorkerLabel: sentinel},
 		PRDevelopmentPublicationRenew{PublicationID: sentinel},
+		PRDevelopmentPublicationRequeue{PublicationID: sentinel},
 		PRDevelopmentPublicationPolicyPin{PublicationID: sentinel},
 		PRDevelopmentPublicationSubjectPin{PublicationID: sentinel},
 		PRDevelopmentPublicationProviderPin{PublicationID: sentinel},

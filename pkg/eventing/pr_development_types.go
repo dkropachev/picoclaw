@@ -2145,6 +2145,16 @@ type PRDevelopmentPublicationRenew struct {
 	Lease         time.Duration `json:"-"`
 }
 
+// PRDevelopmentPublicationRequeue releases one exact live pre-effect claim
+// back to its durable scheduling origin with a caller-selected backoff.
+type PRDevelopmentPublicationRequeue struct {
+	PublicationID     string                         `json:"-"`
+	ClaimToken        string                         `json:"-"`
+	ClaimEpoch        int64                          `json:"-"`
+	ExpectedClaimFrom PRDevelopmentPublicationStatus `json:"-"`
+	AvailableAt       time.Time                      `json:"-"`
+}
+
 // PRDevelopmentPublicationPolicyPin freezes one canonical prepared policy.
 type PRDevelopmentPublicationPolicyPin struct {
 	PublicationID  string          `json:"-"`
@@ -2682,7 +2692,7 @@ type PRDevelopmentPublicationGateContextSnapshotReader interface {
 }
 
 // PRDevelopmentPublicationQueue owns only pre-effect scheduling and pinning. It
-// performs no workflow, provider, model, Git, or retry effect itself.
+// performs no workflow, provider, model, Git, or external effect itself.
 type PRDevelopmentPublicationQueue interface {
 	PRDevelopmentPublicationReader
 	ClaimPRDevelopmentPublications(
@@ -2693,6 +2703,10 @@ type PRDevelopmentPublicationQueue interface {
 		ctx context.Context,
 		input PRDevelopmentPublicationRenew,
 	) error
+	RequeuePRDevelopmentPublication(
+		ctx context.Context,
+		input PRDevelopmentPublicationRequeue,
+	) (publication PRDevelopmentPublication, newlyRequeued bool, err error)
 	PinPRDevelopmentPublicationPolicy(
 		ctx context.Context,
 		input PRDevelopmentPublicationPolicyPin,
