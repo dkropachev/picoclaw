@@ -24,6 +24,47 @@ type prDevelopmentPublicationLifecycleFixture struct {
 	Observation   PRDevelopmentPublicationProviderObservation
 }
 
+func TestExactPRDevelopmentPublicationJSONPreservesOpaqueProducerOrder(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(
+		`{"version":1,"source_revision":"catalog-v1",` +
+			`"decision_revision":"sha256:1111111111111111111111111111111111111111111111111111111111111111",` +
+			`"resolution":{"effective":[],"entries":[]}}`,
+	)
+	exact, err := exactPRDevelopmentPublicationJSON(raw, len(raw))
+	require.NoError(t, err)
+	assert.Equal(t, raw, exact)
+	exact[0] = '['
+	assert.Equal(t, byte('{'), raw[0], "validated bytes must be detached")
+
+	_, err = exactPRDevelopmentPublicationJSON(
+		[]byte(`{"version": 1,"source_revision":"catalog-v1"}`),
+		MaxPRDevelopmentPublicationPolicyBytes,
+	)
+	assert.ErrorIs(t, err, ErrInvalidPRDevelopmentPublication)
+
+	for name, invalid := range map[string][]byte{
+		"duplicate nested key": []byte(
+			`{"version":1,"resolution":{"entries":[],"entries":[]}}`,
+		),
+		"noncanonical string escape": []byte(`{"value":"\u0061"}`),
+		"invalid UTF-8": append(
+			append([]byte(nil), []byte(`{"value":"`)...),
+			0xff, '"', '}',
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, invalidErr := exactPRDevelopmentPublicationJSON(
+				invalid,
+				MaxPRDevelopmentPublicationPolicyBytes,
+			)
+			assert.ErrorIs(t, invalidErr, ErrInvalidPRDevelopmentPublication)
+		})
+	}
+}
+
 func newPRDevelopmentPublicationLifecycleFixture(
 	t *testing.T,
 ) prDevelopmentPublicationLifecycleFixture {
