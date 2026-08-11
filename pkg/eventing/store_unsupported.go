@@ -843,6 +843,15 @@ func (*Store) AuthenticateClaimedPRDevelopmentPublicationGate(
 	return PRDevelopmentPublicationGateAuthentication{}, ErrUnsupportedPlatform
 }
 
+func (*Store) AuthenticateClaimedPRDevelopmentPublicationPush(
+	context.Context,
+	string,
+	string,
+	int64,
+) (PRDevelopmentPublicationPushAuthentication, error) {
+	return PRDevelopmentPublicationPushAuthentication{}, ErrUnsupportedPlatform
+}
+
 func (*Store) GetClaimedPRDevelopmentPublicationGateContextSnapshot(
 	context.Context,
 	string,

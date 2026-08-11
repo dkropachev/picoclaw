@@ -314,6 +314,33 @@ func TestPublicationGateExecutorConcurrentClaimsConvergeOnOneDurableRun(t *testi
 	if err != nil {
 		t.Fatalf("NewPublicationGateExecutor() error = %v", err)
 	}
+	// Establish the immutable subject and provider pins before racing decision
+	// admission. If both callers also race the one-time pinning path, one can
+	// legitimately observe the other pin between authentication and refresh and
+	// return before the decision boundary, leaving the artificial two-party
+	// find barrier with only one participant. This test is specifically about
+	// concurrent admission of the same fully pinned decision.
+	fixture.store.findErr = eventing.ErrClosed
+	primed, primeErr := executor.ExecuteClaim(t.Context(), fixture.claim)
+	if !errors.Is(primeErr, workflows.ErrRunAdmissionUnavailable) ||
+		!reflect.DeepEqual(primed, PublicationGateExecutionResult{}) {
+		t.Fatalf(
+			"prime immutable gate pins = (%#v, %v), want private-run unavailable",
+			primed,
+			primeErr,
+		)
+	}
+	fixture.store.findErr = nil
+	primedPublication := fixture.store.current()
+	if primedPublication.SubjectRevision == "" ||
+		primedPublication.ProviderObservationHash == "" ||
+		primedPublication.DecisionRunID != "" {
+		t.Fatalf(
+			"primed publication = %#v, want complete pins without a decision run",
+			primedPublication,
+		)
+	}
+	fixture.clearOperations()
 	// Freeze both callers' first exact decision lookup at the same absent
 	// snapshot. The admission barrier then proves that both launch attempts
 	// race at the real decision boundary rather than relying on scheduler luck.

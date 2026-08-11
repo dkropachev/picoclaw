@@ -255,6 +255,12 @@ var (
 	ErrPRDevelopmentPublicationSuperseded = errors.New(
 		"pull request development publication was superseded",
 	)
+	// ErrPRDevelopmentPublicationRecoveryRequired reports deterministic missing
+	// or corrupt high-water evidence discovered while authenticating a
+	// publication claim. Operational store failures do not use this error.
+	ErrPRDevelopmentPublicationRecoveryRequired = errors.New(
+		"pull request development publication requires recovery",
+	)
 	// ErrPRDevelopmentPublicationAdmissionUncertain reports that deterministic,
 	// replayable workflow creation completed but its durable decision link was not
 	// confirmed. Automatic callers must not invoke creation again.
@@ -2699,6 +2705,31 @@ type PRDevelopmentPublicationGateClaimAuthenticator interface {
 		claimToken string,
 		claimEpoch int64,
 	) (PRDevelopmentPublicationGateAuthentication, error)
+}
+
+// PRDevelopmentPublicationPushAuthentication is the narrow result of proving
+// one exact push-ready publication claim against the current local high-water.
+// The case and provider thread identity are copied from that same atomic read
+// so a push worker can observe the provider without loading richer local state.
+type PRDevelopmentPublicationPushAuthentication struct {
+	Publication    PRDevelopmentPublication    `json:"-"`
+	Case           PRDevelopmentCase           `json:"-"`
+	ThreadIdentity PRDevelopmentThreadIdentity `json:"-"`
+}
+
+// PRDevelopmentPublicationPushClaimAuthenticator proves that one exact
+// push-ready publication claim is live and still owns the current publishable
+// local high-water candidate. It returns only the claim-redacted publication,
+// exact case, and immutable provider thread identity, and grants no
+// conversation, workflow, model, Git, filesystem, scheduling, or mutation
+// authority.
+type PRDevelopmentPublicationPushClaimAuthenticator interface {
+	AuthenticateClaimedPRDevelopmentPublicationPush(
+		ctx context.Context,
+		publicationID string,
+		claimToken string,
+		claimEpoch int64,
+	) (PRDevelopmentPublicationPushAuthentication, error)
 }
 
 // PRDevelopmentPublicationGateContextSnapshotReader atomically captures the

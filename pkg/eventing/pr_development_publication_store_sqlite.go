@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,11 +15,16 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
 	_ PRDevelopmentPublicationReader                          = (*Store)(nil)
 	_ PRDevelopmentPublicationGateClaimAuthenticator          = (*Store)(nil)
+	_ PRDevelopmentPublicationPushClaimAuthenticator          = (*Store)(nil)
 	_ PRDevelopmentPublicationGateContextSnapshotReader       = (*Store)(nil)
 	_ PRDevelopmentPublicationPinnedGateContextSnapshotReader = (*Store)(nil)
 	_ PRDevelopmentPublicationQueue                           = (*Store)(nil)
@@ -231,6 +237,153 @@ func (s *Store) AuthenticateClaimedPRDevelopmentPublicationGate(
 		)
 	}
 	return authentication, nil
+}
+
+// AuthenticateClaimedPRDevelopmentPublicationPush proves that an exact live
+// push-ready publication claim still owns the current publishable local
+// candidate. It performs no conversation, provider, workflow, model,
+// filesystem, Git, scheduling, or mutation effect and returns only the
+// redacted publication plus the exact case and immutable provider thread
+// identity selected by the same high-water read.
+func (s *Store) AuthenticateClaimedPRDevelopmentPublicationPush(
+	ctx context.Context,
+	publicationID string,
+	claimToken string,
+	claimEpoch int64,
+) (PRDevelopmentPublicationPushAuthentication, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentPublicationPushAuthentication{}, err
+	}
+	publicationID, claimToken, err := normalizePRDevelopmentPublicationClaim(
+		publicationID,
+		claimToken,
+		claimEpoch,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationPushAuthentication{}, err
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return PRDevelopmentPublicationPushAuthentication{}, err
+	}
+	var authentication PRDevelopmentPublicationPushAuthentication
+	err = s.withPRDevelopmentConversationReadSnapshot(
+		ctx,
+		func(queryer rowsQueryer) error {
+			loaded, loadErr := getPRDevelopmentPublicationByID(
+				ctx,
+				queryer,
+				publicationID,
+			)
+			if loadErr != nil {
+				return s.classifyPRDevelopmentPublicationPushAuthenticationReadError(
+					loadErr,
+					false,
+				)
+			}
+			if claimErr := requireLivePRDevelopmentPublicationClaim(
+				loaded,
+				claimToken,
+				claimEpoch,
+				now,
+			); claimErr != nil {
+				return claimErr
+			}
+			if loaded.Status != PRDevelopmentPublicationClaimed ||
+				loaded.ClaimFrom != PRDevelopmentPublicationPushReady {
+				return ErrStaleLease
+			}
+			highWater, loadErr := loadCurrentPRDevelopmentPublicationHighWater(
+				ctx,
+				queryer,
+				loaded,
+			)
+			if loadErr != nil {
+				return s.classifyPRDevelopmentPublicationPushAuthenticationReadError(
+					loadErr,
+					true,
+				)
+			}
+			authentication = PRDevelopmentPublicationPushAuthentication{
+				Publication:    redactPRDevelopmentPublicationAuthority(loaded),
+				Case:           highWater.Case,
+				ThreadIdentity: highWater.Thread.Identity,
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return PRDevelopmentPublicationPushAuthentication{}, fmt.Errorf(
+			"authenticate claimed pull request development publication push: %w",
+			s.dbError(err),
+		)
+	}
+	return authentication, nil
+}
+
+// The authenticated high-water graph is assembled exclusively from SQLite
+// reads and deterministic stored-state validators. Once classified operational
+// store/driver and context failures are excluded, an unclassified read error
+// is durable integrity damage rather than a transient scheduling failure.
+func (s *Store) classifyPRDevelopmentPublicationPushAuthenticationReadError(
+	err error,
+	missingIsRecovery bool,
+) error {
+	err = s.dbError(err)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrPRDevelopmentPublicationConflict) ||
+		errors.Is(err, ErrPRDevelopmentPublicationSuperseded) ||
+		errors.Is(err, ErrStaleLease) ||
+		errors.Is(err, ErrPRDevelopmentPublicationRecoveryRequired) {
+		return err
+	}
+	if errors.Is(err, ErrNotFound) && !missingIsRecovery {
+		return err
+	}
+	if isPRDevelopmentPublicationPushAuthenticationOperationalError(err) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w: publication push high-water integrity failed: %w",
+		ErrPRDevelopmentPublicationRecoveryRequired,
+		err,
+	)
+}
+
+func isPRDevelopmentPublicationPushAuthenticationOperationalError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, ErrClosed) || errors.Is(err, ErrSchemaTooNew) ||
+		errors.Is(err, ErrSchemaInvalid) || errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, sql.ErrConnDone) || errors.Is(err, sql.ErrTxDone) {
+		return true
+	}
+	var sqliteError *sqlite.Error
+	return errors.As(err, &sqliteError) && sqliteError != nil &&
+		operationalPRDevelopmentPublicationSQLiteError(sqliteError.Code())
+}
+
+func operationalPRDevelopmentPublicationSQLiteError(code int) bool {
+	switch code & 0xff {
+	case sqlite3.SQLITE_PERM,
+		sqlite3.SQLITE_ABORT,
+		sqlite3.SQLITE_BUSY,
+		sqlite3.SQLITE_LOCKED,
+		sqlite3.SQLITE_NOMEM,
+		sqlite3.SQLITE_READONLY,
+		sqlite3.SQLITE_INTERRUPT,
+		sqlite3.SQLITE_IOERR,
+		sqlite3.SQLITE_FULL,
+		sqlite3.SQLITE_CANTOPEN,
+		sqlite3.SQLITE_PROTOCOL,
+		sqlite3.SQLITE_SCHEMA,
+		sqlite3.SQLITE_NOLFS,
+		sqlite3.SQLITE_AUTH:
+		return true
+	default:
+		return false
+	}
 }
 
 // GetClaimedPRDevelopmentPublicationGateContextSnapshot returns the complete
@@ -627,28 +780,125 @@ func scanPRDevelopmentPublication(scanner rowScanner) (PRDevelopmentPublication,
 	return publication, nil
 }
 
-func canonicalPRDevelopmentPublicationJSON(
+// exactPRDevelopmentPublicationJSON validates an opaque producer-canonical
+// JSON value while preserving object field order. Policy and subject consumers
+// own their semantic shapes; this layer still rejects invalid UTF-8, duplicate
+// keys at every depth, noncanonical string escapes, whitespace, and trailing
+// values without sorting producer-owned objects.
+func exactPRDevelopmentPublicationJSON(
 	raw []byte,
 	maximum int,
 ) ([]byte, error) {
-	if len(raw) < 2 || len(raw) > maximum || !bytes.Equal(raw, bytes.TrimSpace(raw)) {
+	if len(raw) < 2 || len(raw) > maximum || !utf8.Valid(raw) ||
+		!bytes.Equal(raw, bytes.TrimSpace(raw)) {
 		return nil, ErrInvalidPRDevelopmentPublication
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	var canonical bytes.Buffer
+	if err := appendExactPRDevelopmentPublicationJSONValue(&canonical, decoder); err != nil ||
+		!bytes.Equal(raw, canonical.Bytes()) {
 		return nil, ErrInvalidPRDevelopmentPublication
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, ErrInvalidPRDevelopmentPublication
 	}
-	canonical, err := json.Marshal(value)
-	if err != nil || !bytes.Equal(raw, canonical) {
-		return nil, ErrInvalidPRDevelopmentPublication
+	return canonical.Bytes(), nil
+}
+
+func appendExactPRDevelopmentPublicationJSONValue(
+	destination *bytes.Buffer,
+	decoder *json.Decoder,
+) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
 	}
-	return canonical, nil
+	switch value := token.(type) {
+	case json.Delim:
+		switch value {
+		case '{':
+			destination.WriteByte('{')
+			seen := make(map[string]struct{})
+			first := true
+			for decoder.More() {
+				keyToken, keyErr := decoder.Token()
+				key, ok := keyToken.(string)
+				if keyErr != nil || !ok {
+					return ErrInvalidPRDevelopmentPublication
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return ErrInvalidPRDevelopmentPublication
+				}
+				seen[key] = struct{}{}
+				if !first {
+					destination.WriteByte(',')
+				}
+				first = false
+				encodedKey, encodeErr := json.Marshal(key)
+				if encodeErr != nil {
+					return encodeErr
+				}
+				destination.Write(encodedKey)
+				destination.WriteByte(':')
+				if valueErr := appendExactPRDevelopmentPublicationJSONValue(
+					destination,
+					decoder,
+				); valueErr != nil {
+					return valueErr
+				}
+			}
+			end, endErr := decoder.Token()
+			if endErr != nil || end != json.Delim('}') {
+				return ErrInvalidPRDevelopmentPublication
+			}
+			destination.WriteByte('}')
+			return nil
+		case '[':
+			destination.WriteByte('[')
+			for index := 0; decoder.More(); index++ {
+				if index > 0 {
+					destination.WriteByte(',')
+				}
+				if valueErr := appendExactPRDevelopmentPublicationJSONValue(
+					destination,
+					decoder,
+				); valueErr != nil {
+					return valueErr
+				}
+			}
+			end, endErr := decoder.Token()
+			if endErr != nil || end != json.Delim(']') {
+				return ErrInvalidPRDevelopmentPublication
+			}
+			destination.WriteByte(']')
+			return nil
+		default:
+			return ErrInvalidPRDevelopmentPublication
+		}
+	case string:
+		encoded, encodeErr := json.Marshal(value)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		destination.Write(encoded)
+		return nil
+	case json.Number:
+		destination.WriteString(value.String())
+		return nil
+	case bool:
+		if value {
+			destination.WriteString("true")
+		} else {
+			destination.WriteString("false")
+		}
+		return nil
+	case nil:
+		destination.WriteString("null")
+		return nil
+	default:
+		return ErrInvalidPRDevelopmentPublication
+	}
 }
 
 func hashPRDevelopmentPublicationBlob(domain string, raw []byte) string {
@@ -1094,7 +1344,7 @@ func validateStoredPRDevelopmentPublication(
 	policyPinned := publication.PolicyRevision != "" || len(publication.PinnedPolicy) != 0 ||
 		publication.PinnedPolicyHash != ""
 	if policyPinned {
-		canonical, err := canonicalPRDevelopmentPublicationJSON(
+		canonical, err := exactPRDevelopmentPublicationJSON(
 			publication.PinnedPolicy,
 			MaxPRDevelopmentPublicationPolicyBytes,
 		)
@@ -1107,7 +1357,7 @@ func validateStoredPRDevelopmentPublication(
 	subjectPinned := publication.SubjectRevision != "" || len(publication.PinnedSubject) != 0 ||
 		publication.PinnedSubjectHash != ""
 	if subjectPinned {
-		canonical, err := canonicalPRDevelopmentPublicationJSON(
+		canonical, err := exactPRDevelopmentPublicationJSON(
 			publication.PinnedSubject,
 			MaxPRDevelopmentPublicationSubjectBytes,
 		)
@@ -2173,7 +2423,7 @@ func (s *Store) PinPRDevelopmentPublicationPolicy(
 		input.ClaimEpoch,
 	)
 	input.PolicyRevision = strings.TrimSpace(input.PolicyRevision)
-	canonical, canonicalErr := canonicalPRDevelopmentPublicationJSON(
+	canonical, canonicalErr := exactPRDevelopmentPublicationJSON(
 		input.PinnedPolicy,
 		MaxPRDevelopmentPublicationPolicyBytes,
 	)
@@ -2283,7 +2533,7 @@ func (s *Store) PinPRDevelopmentPublicationSubject(
 	input.PolicyRevision = strings.TrimSpace(input.PolicyRevision)
 	input.SubjectRevision = strings.TrimSpace(input.SubjectRevision)
 	input.ExpectedTranscriptDigest = strings.TrimSpace(input.ExpectedTranscriptDigest)
-	canonical, canonicalErr := canonicalPRDevelopmentPublicationJSON(
+	canonical, canonicalErr := exactPRDevelopmentPublicationJSON(
 		input.PinnedSubject,
 		MaxPRDevelopmentPublicationSubjectBytes,
 	)
