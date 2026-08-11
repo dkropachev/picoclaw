@@ -603,7 +603,8 @@ func attentionTargetAttemptEntry(
 		review.Ordinal != attempt.Ordinal+1 || review.AttemptID != attempt.AttemptID ||
 		review.FenceOrdinal != attempt.FenceOrdinal || review.CaseID != attempt.CaseID ||
 		review.CaseOrdinal != attempt.CaseOrdinal || review.PreviousHash != attempt.EntryHash ||
-		attempt.FenceHash != snapshot.Fence.FenceHash ||
+		!validControllerSHA256(attempt.FenceHash) ||
+		attempt.FenceHash == snapshot.Fence.FenceHash ||
 		review.FenceHash != snapshot.Fence.FenceHash ||
 		!validDevelopmentLedgerCIStatus(attempt.CIStatus) ||
 		!validObjectID(attempt.Commit) || attempt.Summary == "" || review.Summary == "" {

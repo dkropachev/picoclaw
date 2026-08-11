@@ -798,6 +798,43 @@ func publicationGateExecutorPassingGates() []workflows.GateSpec {
 	}}
 }
 
+func TestPublicationGateAttentionSnapshotRejectsMutationFenceCorruption(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*eventing.PRDevelopmentPublicationGateContextSnapshot)
+	}{
+		{
+			name: "arbitrary canonical mutation hash",
+			mutate: func(snapshot *eventing.PRDevelopmentPublicationGateContextSnapshot) {
+				snapshot.AttemptEntry.FenceHash = strings.Repeat("e", 64)
+			},
+		},
+		{
+			name: "final review hash reused as mutation hash",
+			mutate: func(snapshot *eventing.PRDevelopmentPublicationGateContextSnapshot) {
+				snapshot.AttemptEntry.FenceHash = snapshot.Fence.FenceHash
+				snapshot.Orchestration.FenceHash = snapshot.Fence.FenceHash
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newPublicationGateExecutorFixture(t, publicationGateExecutorPassingGates())
+			snapshot := clonePublicationGateExecutorSnapshot(fixture.snapshot)
+			test.mutate(&snapshot)
+			converted, err := publicationGateAttentionSnapshot(snapshot)
+			if err == nil || !reflect.DeepEqual(
+				converted,
+				eventing.PRDevelopmentAttentionSnapshot{},
+			) {
+				t.Fatalf("publicationGateAttentionSnapshot() = (%#v, %v), want zero/error", converted, err)
+			}
+		})
+	}
+}
+
 type publicationGateExecutorFixture struct {
 	t                     *testing.T
 	base                  *publicationGateProcessorFixture
@@ -913,6 +950,7 @@ func newPublicationGateExecutorFixture(
 		ThreadID:     publication.ThreadID,
 		Phase:        publication.OrchestrationPhase,
 		ReviewDigest: reviewDigest,
+		FenceHash:    attemptEntry.FenceHash,
 	}
 	gateSnapshot := eventing.PRDevelopmentPublicationGateContextSnapshot{
 		Publication:      publication,
