@@ -832,6 +832,15 @@ func (*Store) GetPRDevelopmentPublicationForReview(
 	return PRDevelopmentPublication{}, ErrUnsupportedPlatform
 }
 
+func (*Store) GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+	context.Context,
+	string,
+	string,
+	int64,
+) (PRDevelopmentPublicationGateContextSnapshot, error) {
+	return PRDevelopmentPublicationGateContextSnapshot{}, ErrUnsupportedPlatform
+}
+
 func (*Store) ClaimPRDevelopmentPublications(
 	context.Context,
 	PRDevelopmentPublicationClaimRequest,

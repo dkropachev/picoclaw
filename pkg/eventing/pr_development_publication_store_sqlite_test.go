@@ -150,13 +150,22 @@ func pinPRDevelopmentPublicationForTest(
 	require.NoError(t, err)
 	require.True(t, changed)
 	require.Empty(t, publication.ClaimToken)
+	snapshot, err := fixture.Store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		fixture.Claim.ID,
+		fixture.Claim.ClaimToken,
+		fixture.Claim.ClaimEpoch,
+	)
+	require.NoError(t, err)
 	_, changed, err = fixture.Store.PinPRDevelopmentPublicationSubject(
 		ctx,
 		PRDevelopmentPublicationSubjectPin{
 			PublicationID: fixture.Claim.ID,
 			ClaimToken:    fixture.Claim.ClaimToken, ClaimEpoch: fixture.Claim.ClaimEpoch,
 			PolicyRevision: policyRevision, SubjectRevision: subjectRevision,
-			PinnedSubject: []byte(`{"publication":"exact-passed-review"}`),
+			PinnedSubject:               []byte(`{"publication":"exact-passed-review"}`),
+			ExpectedConversationVersion: snapshot.Conversation.Version,
+			ExpectedTranscriptDigest:    snapshot.TranscriptDigest,
 		},
 	)
 	require.NoError(t, err)
@@ -846,7 +855,9 @@ func TestPRDevelopmentPublicationPinsReplayExactlyAcrossPushRefresh(t *testing.T
 		PublicationID: fixture.Claim.ID,
 		ClaimToken:    fixture.Claim.ClaimToken, ClaimEpoch: fixture.Claim.ClaimEpoch,
 		PolicyRevision: pinned.PolicyRevision, SubjectRevision: pinned.SubjectRevision,
-		PinnedSubject: pinned.PinnedSubject,
+		PinnedSubject:               pinned.PinnedSubject,
+		ExpectedConversationVersion: 0,
+		ExpectedTranscriptDigest:    emptyPRDevelopmentTranscriptDigest(),
 	}
 	_, changed, err = fixture.Store.PinPRDevelopmentPublicationSubject(
 		context.Background(),

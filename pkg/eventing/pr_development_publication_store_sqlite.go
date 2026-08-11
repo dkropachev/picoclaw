@@ -17,11 +17,12 @@ import (
 )
 
 var (
-	_ PRDevelopmentPublicationReader            = (*Store)(nil)
-	_ PRDevelopmentPublicationQueue             = (*Store)(nil)
-	_ PRDevelopmentPublicationPushJournal       = (*Store)(nil)
-	_ PRDevelopmentPublicationOutcomeReconciler = (*Store)(nil)
-	_ PRDevelopmentPublicationDecisionRunStore  = (*Store)(nil)
+	_ PRDevelopmentPublicationReader                    = (*Store)(nil)
+	_ PRDevelopmentPublicationGateContextSnapshotReader = (*Store)(nil)
+	_ PRDevelopmentPublicationQueue                     = (*Store)(nil)
+	_ PRDevelopmentPublicationPushJournal               = (*Store)(nil)
+	_ PRDevelopmentPublicationOutcomeReconciler         = (*Store)(nil)
+	_ PRDevelopmentPublicationDecisionRunStore          = (*Store)(nil)
 )
 
 const (
@@ -154,6 +155,72 @@ func (s *Store) GetPRDevelopmentPublicationForReview(
 		return PRDevelopmentPublication{}, s.dbError(err)
 	}
 	return redactPRDevelopmentPublicationAuthority(publication), nil
+}
+
+// GetClaimedPRDevelopmentPublicationGateContextSnapshot returns the complete
+// local subject for an exact live initial publication claim in one read
+// transaction. It performs no provider, workflow, model, filesystem, or Git
+// effect and redacts the claim bearer from the returned publication.
+func (s *Store) GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+	ctx context.Context,
+	publicationID string,
+	claimToken string,
+	claimEpoch int64,
+) (PRDevelopmentPublicationGateContextSnapshot, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	publicationID, claimToken, err := normalizePRDevelopmentPublicationClaim(
+		publicationID,
+		claimToken,
+		claimEpoch,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	var snapshot PRDevelopmentPublicationGateContextSnapshot
+	err = s.withPRDevelopmentConversationReadSnapshot(
+		ctx,
+		func(queryer rowsQueryer) error {
+			publication, loadErr := getPRDevelopmentPublicationByID(
+				ctx,
+				queryer,
+				publicationID,
+			)
+			if loadErr != nil {
+				return loadErr
+			}
+			if claimErr := requireLivePRDevelopmentPublicationClaim(
+				publication,
+				claimToken,
+				claimEpoch,
+				now,
+			); claimErr != nil {
+				return claimErr
+			}
+			if publication.Status != PRDevelopmentPublicationClaimed ||
+				publication.ClaimFrom != PRDevelopmentPublicationPending {
+				return ErrStaleLease
+			}
+			snapshot, loadErr = loadCurrentPRDevelopmentPublicationGateContext(
+				ctx,
+				queryer,
+				publication,
+			)
+			return loadErr
+		},
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, fmt.Errorf(
+			"get claimed pull request development publication gate context: %w",
+			s.dbError(err),
+		)
+	}
+	return snapshot, nil
 }
 
 func redactPRDevelopmentPublicationAuthority(
@@ -1453,14 +1520,16 @@ func requireNonRegressingPRDevelopmentPublicationTime(
 }
 
 type prDevelopmentPublicationHighWater struct {
-	Case          PRDevelopmentCase
-	Thread        PRDevelopmentThread
-	Session       PRDevelopmentRepairSession
-	Controller    PRDevelopmentController
-	Fence         PRDevelopmentAttemptReviewFence
-	Orchestration PRDevelopmentRepairOrchestration
-	AttemptEntry  PRDevelopmentLedgerEntry
-	ReviewEntry   PRDevelopmentLedgerEntry
+	Case            PRDevelopmentCase
+	Thread          PRDevelopmentThread
+	SelectedOrdinal int
+	Session         PRDevelopmentRepairSession
+	Controller      PRDevelopmentController
+	Fence           PRDevelopmentAttemptReviewFence
+	Orchestration   PRDevelopmentRepairOrchestration
+	Ledger          PRDevelopmentLedger
+	AttemptEntry    PRDevelopmentLedgerEntry
+	ReviewEntry     PRDevelopmentLedgerEntry
 }
 
 // loadCurrentPRDevelopmentPublicationHighWater proves that the publication's
@@ -1485,6 +1554,13 @@ func loadCurrentPRDevelopmentPublicationHighWater(
 		return prDevelopmentPublicationHighWater{}, fmt.Errorf(
 			"%w: a newer pull request occurrence superseded the publication",
 			ErrPRDevelopmentPublicationSuperseded,
+		)
+	}
+	selectedOrdinal := thread.Cases[len(thread.Cases)-1].Ordinal
+	if selectedOrdinal < 0 || selectedOrdinal >= thread.CaseCount {
+		return prDevelopmentPublicationHighWater{}, fmt.Errorf(
+			"%w: publication case ordinal is invalid",
+			ErrPRDevelopmentPublicationConflict,
 		)
 	}
 	session, err := loadPRDevelopmentRepairSessionByID(
@@ -1614,6 +1690,7 @@ func loadCurrentPRDevelopmentPublicationHighWater(
 		attemptEntry.EntryHash != publication.AttemptLedgerEntryHash ||
 		attemptEntry.AttemptID != publication.AttemptID ||
 		attemptEntry.CaseID != publication.CaseID ||
+		attemptEntry.CaseOrdinal != selectedOrdinal ||
 		attemptEntry.FenceOrdinal != publication.FenceOrdinal ||
 		attemptEntry.Commit != publication.TipCommit || attemptEntry.Tree != publication.Tree ||
 		attemptEntry.NoChanges != publication.NoChanges ||
@@ -1625,6 +1702,7 @@ func loadCurrentPRDevelopmentPublicationHighWater(
 		reviewEntry.EntryHash != publication.ReviewLedgerEntryHash ||
 		reviewEntry.AttemptID != publication.AttemptID ||
 		reviewEntry.CaseID != publication.CaseID ||
+		reviewEntry.CaseOrdinal != selectedOrdinal ||
 		reviewEntry.FenceOrdinal != publication.FenceOrdinal ||
 		reviewEntry.ReviewOutcome != PRDevelopmentLedgerReviewPassed ||
 		len(reviewEntry.Findings) != 0 || reviewEntry.FenceHash != publication.FenceHash ||
@@ -1636,10 +1714,63 @@ func loadCurrentPRDevelopmentPublicationHighWater(
 		)
 	}
 	return prDevelopmentPublicationHighWater{
-		Case: storedCase.Case, Thread: thread, Session: session,
+		Case: storedCase.Case, Thread: thread, SelectedOrdinal: selectedOrdinal,
+		Session:    session,
 		Controller: controller, Fence: fence, Orchestration: orchestration,
-		AttemptEntry: attemptEntry, ReviewEntry: reviewEntry,
+		Ledger: ledger, AttemptEntry: attemptEntry, ReviewEntry: reviewEntry,
 	}, nil
+}
+
+func loadCurrentPRDevelopmentPublicationGateContext(
+	ctx context.Context,
+	queryer rowsQueryer,
+	publication PRDevelopmentPublication,
+) (PRDevelopmentPublicationGateContextSnapshot, error) {
+	highWater, err := loadCurrentPRDevelopmentPublicationHighWater(
+		ctx,
+		queryer,
+		publication,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	conversation, err := loadPRDevelopmentConversation(
+		ctx,
+		queryer,
+		publication.CaseID,
+	)
+	if err != nil {
+		return PRDevelopmentPublicationGateContextSnapshot{}, err
+	}
+	return PRDevelopmentPublicationGateContextSnapshot{
+		Publication:      redactPRDevelopmentPublicationAuthority(publication),
+		SelectedOrdinal:  highWater.SelectedOrdinal,
+		TranscriptDigest: conversation.TranscriptDigest,
+		Case:             highWater.Case,
+		Thread:           highWater.Thread,
+		Conversation:     conversation.Conversation,
+		OwnerSession:     redactPRDevelopmentPublicationGateSession(highWater.Session),
+		Controller:       highWater.Controller,
+		Fence:            highWater.Fence,
+		Orchestration:    highWater.Orchestration,
+		Ledger:           highWater.Ledger,
+		AttemptEntry:     highWater.AttemptEntry,
+		ReviewEntry:      highWater.ReviewEntry,
+	}, nil
+}
+
+func redactPRDevelopmentPublicationGateSession(
+	session PRDevelopmentRepairSession,
+) PRDevelopmentRepairSession {
+	session.ReservationKey = ""
+	session.Attempts = append([]PRDevelopmentRepairAttempt(nil), session.Attempts...)
+	for index := range session.Attempts {
+		session.Attempts[index].IdempotencyKey = ""
+		session.Attempts[index].LeaseOwner = ""
+		session.Attempts[index].LeaseToken = ""
+		session.Attempts[index].LeaseUntil = nil
+	}
+	return session
 }
 
 func validatePRDevelopmentPublicationProviderAgainstHighWater(
@@ -1794,12 +1925,16 @@ func (s *Store) PinPRDevelopmentPublicationSubject(
 	)
 	input.PolicyRevision = strings.TrimSpace(input.PolicyRevision)
 	input.SubjectRevision = strings.TrimSpace(input.SubjectRevision)
+	input.ExpectedTranscriptDigest = strings.TrimSpace(input.ExpectedTranscriptDigest)
 	canonical, canonicalErr := canonicalPRDevelopmentPublicationJSON(
 		input.PinnedSubject,
 		MaxPRDevelopmentPublicationSubjectBytes,
 	)
 	if err != nil || canonicalErr != nil || !validReviewPolicyRevision(input.PolicyRevision) ||
-		!validReviewPolicyRevision(input.SubjectRevision) {
+		!validReviewPolicyRevision(input.SubjectRevision) ||
+		input.ExpectedConversationVersion < 0 ||
+		input.ExpectedConversationVersion > MaxPRDevelopmentMessagesPerCase ||
+		!validPRDevelopmentHex(input.ExpectedTranscriptDigest, sha256.Size*2) {
 		return PRDevelopmentPublication{}, false, fmt.Errorf(
 			"%w: publication subject pin is invalid",
 			ErrInvalidPRDevelopmentPublication,
@@ -1848,12 +1983,20 @@ func (s *Store) PinPRDevelopmentPublicationSubject(
 				ErrPRDevelopmentPublicationConflict,
 			)
 		}
-		if _, highWaterErr := loadCurrentPRDevelopmentPublicationHighWater(
+		gateContext, highWaterErr := loadCurrentPRDevelopmentPublicationGateContext(
 			ctx,
 			conn,
 			current,
-		); highWaterErr != nil {
+		)
+		if highWaterErr != nil {
 			return highWaterErr
+		}
+		if gateContext.Conversation.Version != input.ExpectedConversationVersion ||
+			gateContext.TranscriptDigest != input.ExpectedTranscriptDigest {
+			return fmt.Errorf(
+				"%w: publication conversation changed before subject pin",
+				ErrPRDevelopmentPublicationConflict,
+			)
 		}
 		result, updateErr := conn.ExecContext(ctx, `
 			UPDATE pr_development_publications
