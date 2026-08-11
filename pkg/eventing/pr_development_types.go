@@ -1821,20 +1821,34 @@ type PRDevelopmentAttentionTrigger struct {
 	CompletedAt         *time.Time                          `json:"-"`
 }
 
+// PRDevelopmentPublicationAttentionProjection is the bounded, all-private
+// publication-gate state exposed by the atomic case bridge read. It carries no
+// claim, provider, Git, retry, or workflow-response authority.
+type PRDevelopmentPublicationAttentionProjection struct {
+	CaseID       string                                  `json:"-"`
+	DecisionRun  PRDevelopmentPublicationDecisionRunLink `json:"-"`
+	PinnedPolicy json.RawMessage                         `json:"-"`
+	Status       PRDevelopmentPublicationStatus          `json:"-"`
+	ClaimFrom    PRDevelopmentPublicationStatus          `json:"-"`
+}
+
 // PRDevelopmentAttentionTriggerCaseSnapshot is one atomic, integrity-checked
-// bridge read. AttentionRequired distinguishes a historical pre-v16 missing
-// occurrence from a case whose current review does not require attention;
-// TriggerCurrent reports whether the latest durable trigger still owns the
-// current review/controller tail.
+// bridge read across local-review and publication-gate attention. The two
+// source-specific Current and AttentionRequired flags deliberately retain
+// distinct semantics: historical projections may remain available after they
+// stop owning the current response opportunity.
 type PRDevelopmentAttentionTriggerCaseSnapshot struct {
-	CaseID                 string                           `json:"-"`
-	ConversationVersion    int64                            `json:"-"`
-	CurrentReviewEntryID   string                           `json:"-"`
-	CurrentReviewEntryHash string                           `json:"-"`
-	CurrentReviewOutcome   PRDevelopmentLedgerReviewOutcome `json:"-"`
-	AttentionRequired      bool                             `json:"-"`
-	Trigger                *PRDevelopmentAttentionTrigger   `json:"-"`
-	TriggerCurrent         bool                             `json:"-"`
+	CaseID                       string                                       `json:"-"`
+	ConversationVersion          int64                                        `json:"-"`
+	CurrentReviewEntryID         string                                       `json:"-"`
+	CurrentReviewEntryHash       string                                       `json:"-"`
+	CurrentReviewOutcome         PRDevelopmentLedgerReviewOutcome             `json:"-"`
+	AttentionRequired            bool                                         `json:"-"`
+	Trigger                      *PRDevelopmentAttentionTrigger               `json:"-"`
+	TriggerCurrent               bool                                         `json:"-"`
+	Publication                  *PRDevelopmentPublicationAttentionProjection `json:"-"`
+	PublicationCurrent           bool                                         `json:"-"`
+	PublicationAttentionRequired bool                                         `json:"-"`
 }
 
 // PRDevelopmentAttentionPolicyPin immutably binds a live trigger claim to its

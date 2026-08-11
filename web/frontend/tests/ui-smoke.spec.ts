@@ -3374,13 +3374,21 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
   )
   await expect(page.locator("body")).not.toContainText("private-cursor-canary")
   await expect(page.getByText(/cannot inspect a checkout/i)).toBeVisible()
-  const attentionResponse = page.getByLabel("Reply to the AI attention request")
+  const attentionResponse = page.getByLabel("Reply to the current PR gate")
   await expect(attentionResponse).toBeFocused()
+  await expect(
+    page.getByRole("heading", { name: "PR decision gates" }),
+  ).toBeVisible()
+  await expect(
+    page.getByText(
+      "Your reply continues this gate; it does not directly edit code, run CI, push commits, acknowledge a review, or merge the pull request.",
+    ),
+  ).toBeVisible()
   await expect(page.getByText("Gate owner_input")).toBeVisible()
   await attentionResponse.fill("Preserve compatibility")
   await page.getByRole("button", { name: "Send attention reply" }).click()
   await expect(
-    page.getByText("The attention conversation is complete."),
+    page.getByText("The PR gate conversation is complete."),
   ).toBeVisible()
   expect(attentionResponseRequests).toEqual([
     {
@@ -3419,7 +3427,7 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
   await expect(
     page.getByRole("heading", { name: "Feedback on my PRs" }),
   ).toBeVisible()
-  await expect(page.getByText("AI attention")).toBeVisible()
+  await expect(page.getByText("Needs input")).toBeVisible()
   await page.getByRole("button", { name: new RegExp(`octo/repo #84`) }).click()
   await expect(page).toHaveURL(
     new RegExp(

@@ -445,8 +445,8 @@ function DevelopmentCaseList({
                       {developmentCase.attention_required ? (
                         <Badge variant="secondary">
                           {t(
-                            "pages.reviews.development.ai_attention",
-                            "AI attention",
+                            "pages.reviews.development.needs_input",
+                            "Needs input",
                           )}
                         </Badge>
                       ) : null}
@@ -1951,13 +1951,13 @@ function DevelopmentConversation({
           tabIndex={-1}
           className="text-sm font-semibold outline-none"
         >
-          {t("pages.reviews.development.chat_title", "Discuss with AI")}
+          {t("pages.reviews.development.chat_title", "Discuss and steer")}
         </h3>
       </div>
       <p className="text-muted-foreground mt-1 text-xs">
         {t(
           "pages.reviews.development.chat_advisory",
-          "AI advice is based on this captured snapshot and conversation. It cannot inspect a checkout, read current GitHub state, edit code, run checks, or push changes.",
+          "The advisory chat uses AI and is based on this captured snapshot and conversation. It cannot inspect a checkout, read current GitHub state, edit code, run checks, or push changes.",
         )}
       </p>
 
@@ -1971,6 +1971,7 @@ function DevelopmentConversation({
           pending={attentionPending || chatPending || otherMutationPending}
           maximumResponseBytes={PR_DEVELOPMENT_ATTENTION_RESPONSE_MAXIMUM_BYTES}
           idPrefix={`pr-development-attention-${developmentCase.id}`}
+          context="pr-development"
           attentionInputRef={attentionInputRef}
           recoveryButtonRef={recoveryButtonRef}
           onResponseChange={setAttentionResponse}

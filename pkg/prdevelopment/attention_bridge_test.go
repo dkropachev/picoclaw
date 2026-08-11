@@ -18,7 +18,9 @@ import (
 
 type developmentAttentionBridgeTestStore struct {
 	*attentionRuntimeStore
-	projection eventing.PRDevelopmentAttentionTriggerCaseSnapshot
+	projection              eventing.PRDevelopmentAttentionTriggerCaseSnapshot
+	publicationLinkOverride *eventing.PRDevelopmentPublicationDecisionRunLink
+	publicationLinkErr      error
 }
 
 func (store *developmentAttentionBridgeTestStore) GetPRDevelopmentConversation(
@@ -55,7 +57,34 @@ func (store *developmentAttentionBridgeTestStore) GetCurrentPRDevelopmentAttenti
 		trigger.PinnedPolicy = append(json.RawMessage(nil), trigger.PinnedPolicy...)
 		result.Trigger = &trigger
 	}
+	if result.Publication != nil {
+		publication := *result.Publication
+		publication.PinnedPolicy = append(
+			json.RawMessage(nil),
+			publication.PinnedPolicy...,
+		)
+		result.Publication = &publication
+	}
 	return result, nil
+}
+
+func (store *developmentAttentionBridgeTestStore) GetPRDevelopmentPublicationDecisionRun(
+	_ context.Context,
+	key eventing.PRDevelopmentPublicationDecisionKey,
+) (eventing.PRDevelopmentPublicationDecisionRunLink, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.publicationLinkErr != nil {
+		return eventing.PRDevelopmentPublicationDecisionRunLink{}, store.publicationLinkErr
+	}
+	if store.publicationLinkOverride != nil {
+		return *store.publicationLinkOverride, nil
+	}
+	if store.projection.Publication == nil ||
+		store.projection.Publication.DecisionRun.Key != key {
+		return eventing.PRDevelopmentPublicationDecisionRunLink{}, eventing.ErrNotFound
+	}
+	return store.projection.Publication.DecisionRun, nil
 }
 
 func (store *developmentAttentionBridgeTestStore) advanceConversationVersion() {
@@ -74,9 +103,11 @@ func (store *developmentAttentionBridgeTestStore) mutateProjection(
 }
 
 type developmentAttentionBridgeFixture struct {
-	bridge *AttentionBridge
-	store  *developmentAttentionBridgeTestStore
-	caseID string
+	bridge   *AttentionBridge
+	store    *developmentAttentionBridgeTestStore
+	caseID   string
+	runID    string
+	executor *workflows.Executor
 }
 
 func newDevelopmentAttentionBridgeFixture(t *testing.T) *developmentAttentionBridgeFixture {
@@ -150,9 +181,11 @@ func newDevelopmentAttentionBridgeFixture(t *testing.T) *developmentAttentionBri
 		t.Fatalf("NewAttentionBridge() error = %v", err)
 	}
 	return &developmentAttentionBridgeFixture{
-		bridge: bridge,
-		store:  store,
-		caseID: result.CaseID,
+		bridge:   bridge,
+		store:    store,
+		caseID:   result.CaseID,
+		runID:    result.RunID,
+		executor: launcher.executor,
 	}
 }
 
@@ -195,6 +228,24 @@ func TestPRDevelopmentAttentionBridgeFencesConversationAndRespondsExactly(
 		completed.Turns[0].Response != request.Response ||
 		completed.Turns[0].ResponseToken != "" {
 		t.Fatalf("Respond() = (%#v, %v), want completed exact response", completed, err)
+	}
+	tasks, err := fixture.executor.ListHumanTasks(context.Background(), fixture.runID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("ListHumanTasks() = (%#v, %v)", tasks, err)
+	}
+	wantReviewResponseID := sharedattention.ConversationResponseID(
+		prDevelopmentAttentionResponseIDDomain,
+		request.ResponseToken,
+		request.Response,
+	)
+	publicationResponseID := sharedattention.ConversationResponseID(
+		prDevelopmentPublicationAttentionResponseIDDomain,
+		request.ResponseToken,
+		request.Response,
+	)
+	if tasks[0].ResponseID != wantReviewResponseID ||
+		tasks[0].ResponseID == publicationResponseID {
+		t.Fatalf("review response ID = %q, want legacy domain %q", tasks[0].ResponseID, wantReviewResponseID)
 	}
 	replayed, err := fixture.bridge.Respond(context.Background(), request)
 	if err != nil || replayed.Status != AttentionStatusCompleted {

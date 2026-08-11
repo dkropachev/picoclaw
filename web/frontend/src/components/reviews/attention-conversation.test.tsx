@@ -98,6 +98,48 @@ describe("AttentionConversation", () => {
     fireEvent.submit(input.closest("form")!)
     expect(onSubmit).toHaveBeenCalledOnce()
   })
+
+  it("uses PR gate copy only for the own-PR context", () => {
+    const projection = {
+      case_version: 3,
+      status: "waiting" as const,
+      can_respond: true,
+      turns: [
+        {
+          status: "waiting" as const,
+          title: "Choose a direction",
+          questions: parseExactJSON("[]"),
+          response_token: responseToken,
+        },
+      ],
+    }
+    const { unmount } = renderConversation(projection, {
+      context: "pr-development",
+    })
+
+    expect(screen.getByText("PR decision gates")).toBeVisible()
+    expect(screen.getByText("Gate")).toBeVisible()
+    expect(
+      screen.getByText("The current PR gate is waiting for your reply."),
+    ).toBeVisible()
+    expect(screen.getByLabelText("Reply to the current PR gate")).toBeVisible()
+    expect(
+      screen.getByText(
+        "Your reply continues this gate; it does not directly edit code, run CI, push commits, acknowledge a review, or merge the pull request.",
+      ),
+    ).toBeVisible()
+    expect(screen.queryByText(/AI|Assistant/)).not.toBeInTheDocument()
+
+    unmount()
+    renderConversation(projection)
+    expect(screen.getByText("AI attention")).toBeVisible()
+    expect(
+      screen.getByLabelText("Reply to the AI attention request"),
+    ).toBeVisible()
+    expect(
+      screen.queryByText(/Your reply continues this gate/),
+    ).not.toBeInTheDocument()
+  })
 })
 
 function renderConversation(

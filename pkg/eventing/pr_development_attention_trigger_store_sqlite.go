@@ -49,8 +49,9 @@ func (s *Store) GetPRDevelopmentAttentionTrigger(
 }
 
 // GetCurrentPRDevelopmentAttentionTriggerForCase returns one atomic
-// case/conversation/ledger/trigger projection for the later case-owned bridge.
-// It never claims work or exposes a mutation capability.
+// case/conversation/ledger projection across local-review and publication-gate
+// attention for the later case-owned bridge. It never claims work or exposes a
+// mutation capability.
 func (s *Store) GetCurrentPRDevelopmentAttentionTriggerForCase(
 	ctx context.Context,
 	caseID string,
@@ -105,67 +106,31 @@ func (s *Store) GetCurrentPRDevelopmentAttentionTriggerForCase(
 				}
 			}
 
-			trigger, loadErr := getLatestPRDevelopmentAttentionTriggerForCase(
+			if loadErr := loadCurrentPRDevelopmentAttentionTriggerProjection(
 				ctx,
 				queryer,
 				caseID,
-			)
-			if errors.Is(loadErr, sql.ErrNoRows) {
-				return nil
-			}
-			if loadErr != nil {
+				conversation.Conversation,
+				ledger,
+				current,
+				&result,
+			); loadErr != nil {
 				return loadErr
 			}
-			_, found := findPRDevelopmentAttentionTriggerEntry(ledger, trigger)
-			if !found {
-				return errors.New(
-					"development attention trigger ledger binding is invalid",
-				)
-			}
-			if trigger.ConversationVersion > conversation.Conversation.Version ||
-				len(conversation.Conversation.Messages) < int(trigger.ConversationVersion) {
-				return errors.New(
-					"development attention trigger conversation prefix is unavailable",
-				)
-			}
-			digest := emptyPRDevelopmentTranscriptDigest()
-			for _, message := range conversation.Conversation.Messages[:trigger.ConversationVersion] {
-				digest, loadErr = extendPRDevelopmentTranscriptDigest(digest, message)
-				if loadErr != nil {
-					return loadErr
-				}
-			}
-			if digest != trigger.TranscriptDigest {
-				return errors.New(
-					"development attention trigger conversation prefix changed",
-				)
-			}
-			triggerCopy := trigger
-			result.Trigger = &triggerCopy
-			if current == nil || current.ID != trigger.ReviewEntryID ||
-				current.EntryHash != trigger.ReviewEntryHash ||
-				current.ReviewOutcome != PRDevelopmentLedgerReviewAttentionRequired ||
-				trigger.Status == PRDevelopmentAttentionTriggerSuperseded {
-				return nil
-			}
-			_, loadErr = loadAnchoredPRDevelopmentAttentionSnapshot(
+			if loadErr := loadCurrentPRDevelopmentPublicationAttentionProjection(
 				ctx,
 				queryer,
-				prDevelopmentAttentionOccurrenceAnchor{
-					CaseID:              trigger.CaseID,
-					ReviewEntryID:       trigger.ReviewEntryID,
-					ReviewEntryHash:     trigger.ReviewEntryHash,
-					ConversationVersion: trigger.ConversationVersion,
-					TranscriptDigest:    trigger.TranscriptDigest,
-				},
-			)
-			if errors.Is(loadErr, ErrPRDevelopmentAttentionSuperseded) {
-				return nil
-			}
-			if loadErr != nil {
+				caseID,
+				current,
+				&result,
+			); loadErr != nil {
 				return loadErr
 			}
-			result.TriggerCurrent = true
+			if result.TriggerCurrent && result.PublicationCurrent {
+				return errors.New(
+					"development attention sources cannot both own the current review",
+				)
+			}
 			return nil
 		},
 	)
@@ -176,6 +141,131 @@ func (s *Store) GetCurrentPRDevelopmentAttentionTriggerForCase(
 		)
 	}
 	return result, nil
+}
+
+func loadCurrentPRDevelopmentAttentionTriggerProjection(
+	ctx context.Context,
+	queryer rowsQueryer,
+	caseID string,
+	conversation PRDevelopmentConversation,
+	ledger PRDevelopmentLedger,
+	current *PRDevelopmentLedgerEntry,
+	result *PRDevelopmentAttentionTriggerCaseSnapshot,
+) error {
+	trigger, err := getLatestPRDevelopmentAttentionTriggerForCase(
+		ctx,
+		queryer,
+		caseID,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, found := findPRDevelopmentAttentionTriggerEntry(ledger, trigger)
+	if !found {
+		return errors.New(
+			"development attention trigger ledger binding is invalid",
+		)
+	}
+	if trigger.ConversationVersion > conversation.Version ||
+		len(conversation.Messages) < int(trigger.ConversationVersion) {
+		return errors.New(
+			"development attention trigger conversation prefix is unavailable",
+		)
+	}
+	digest := emptyPRDevelopmentTranscriptDigest()
+	for _, message := range conversation.Messages[:trigger.ConversationVersion] {
+		digest, err = extendPRDevelopmentTranscriptDigest(digest, message)
+		if err != nil {
+			return err
+		}
+	}
+	if digest != trigger.TranscriptDigest {
+		return errors.New(
+			"development attention trigger conversation prefix changed",
+		)
+	}
+	triggerCopy := trigger
+	result.Trigger = &triggerCopy
+	if current == nil || current.ID != trigger.ReviewEntryID ||
+		current.EntryHash != trigger.ReviewEntryHash ||
+		current.ReviewOutcome != PRDevelopmentLedgerReviewAttentionRequired ||
+		trigger.Status == PRDevelopmentAttentionTriggerSuperseded {
+		return nil
+	}
+	_, err = loadAnchoredPRDevelopmentAttentionSnapshot(
+		ctx,
+		queryer,
+		prDevelopmentAttentionOccurrenceAnchor{
+			CaseID:              trigger.CaseID,
+			ReviewEntryID:       trigger.ReviewEntryID,
+			ReviewEntryHash:     trigger.ReviewEntryHash,
+			ConversationVersion: trigger.ConversationVersion,
+			TranscriptDigest:    trigger.TranscriptDigest,
+		},
+	)
+	if errors.Is(err, ErrPRDevelopmentAttentionSuperseded) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	result.TriggerCurrent = true
+	return nil
+}
+
+func loadCurrentPRDevelopmentPublicationAttentionProjection(
+	ctx context.Context,
+	queryer rowsQueryer,
+	caseID string,
+	current *PRDevelopmentLedgerEntry,
+	result *PRDevelopmentAttentionTriggerCaseSnapshot,
+) error {
+	if current == nil || current.ReviewOutcome != PRDevelopmentLedgerReviewPassed {
+		return nil
+	}
+	publication, err := getPRDevelopmentPublicationByReview(ctx, queryer, current.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if publication.CaseID != caseID ||
+		publication.ReviewLedgerEntryID != current.ID ||
+		publication.ReviewLedgerEntryHash != current.EntryHash ||
+		publication.ReviewOutcome != PRDevelopmentLedgerReviewPassed {
+		return errors.New(
+			"development publication attention review binding is invalid",
+		)
+	}
+	if publication.DecisionRunID == "" {
+		return nil
+	}
+	result.Publication = &PRDevelopmentPublicationAttentionProjection{
+		CaseID: publication.CaseID,
+		DecisionRun: PRDevelopmentPublicationDecisionRunLink{
+			Key:   publicationPRDevelopmentDecisionKey(publication),
+			RunID: publication.DecisionRunID,
+		},
+		PinnedPolicy: append(json.RawMessage(nil), publication.PinnedPolicy...),
+		Status:       publication.Status,
+		ClaimFrom:    publication.ClaimFrom,
+	}
+	_, err = loadCurrentPRDevelopmentPublicationHighWater(ctx, queryer, publication)
+	if errors.Is(err, ErrPRDevelopmentPublicationSuperseded) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	result.PublicationCurrent = true
+	result.PublicationAttentionRequired = publication.Status == PRDevelopmentPublicationGateWaiting ||
+		(publication.Status == PRDevelopmentPublicationClaimed &&
+			publication.ClaimFrom == PRDevelopmentPublicationGateWaiting)
+	return nil
 }
 
 // GetClaimedPRDevelopmentAttentionSnapshot returns the exact completion-time

@@ -43,13 +43,7 @@ const prDevelopmentCaseColumns = `
 	review_commit_sha, review_submitted_at, review_url, feedback,
 	created_at, updated_at, capture_hash`
 
-// prDevelopmentCaseAttentionRequiredColumn is the one coarse mutable list
-// projection. It intentionally stays inside the list query: the browser sees
-// only a boolean, while trigger identity, lifecycle, policy, workflow-run, and
-// lease state remain private. The relational checks mirror the authoritative
-// current attention snapshot without loading the private workflow store.
-const prDevelopmentCaseAttentionRequiredColumn = `
-	CASE WHEN EXISTS (
+const prDevelopmentCaseLocalAttentionRequiredPredicate = `EXISTS (
 		SELECT 1
 		FROM pr_development_thread_cases AS membership
 		JOIN pr_development_threads AS development_thread
@@ -124,7 +118,166 @@ const prDevelopmentCaseAttentionRequiredColumn = `
 				  AND decision_run.run_id = attention.run_id
 			)
 		  )
-	) THEN 1 ELSE 0 END`
+	)`
+
+// The publication predicate mirrors the local durable portion of
+// loadCurrentPRDevelopmentPublicationHighWater. It deliberately does not load
+// or inspect the private workflow store: a linked active gate wait is a coarse
+// browser hint only, never response or effect authority.
+const prDevelopmentCasePublicationAttentionRequiredPredicate = `EXISTS (
+		SELECT 1
+		FROM pr_development_thread_cases AS publication_membership
+		JOIN pr_development_threads AS publication_thread
+		  ON publication_thread.id = publication_membership.thread_id
+		 AND publication_thread.identity_kind = 'provider'
+		JOIN pr_development_ledger_entries AS publication_review
+		  ON publication_review.thread_id = publication_membership.thread_id
+		 AND publication_review.ordinal = (
+			SELECT MAX(publication_tail.ordinal)
+			FROM pr_development_ledger_entries AS publication_tail
+			WHERE publication_tail.thread_id = publication_membership.thread_id
+		 )
+		JOIN pr_development_publications AS publication
+		  ON publication.review_ledger_entry_id = publication_review.id
+		 AND publication.review_ledger_entry_kind = publication_review.kind
+		 AND publication.review_ledger_entry_hash = publication_review.entry_hash
+		JOIN pr_development_ledger_entries AS publication_attempt_entry
+		  ON publication_attempt_entry.id = publication.attempt_ledger_entry_id
+		 AND publication_attempt_entry.kind = publication.attempt_ledger_entry_kind
+		 AND publication_attempt_entry.entry_hash = publication.attempt_ledger_entry_hash
+		JOIN pr_development_repair_sessions AS publication_owner_session
+		  ON publication_owner_session.id = publication.owner_session_id
+		 AND publication_owner_session.case_id = publication_membership.case_id
+		JOIN pr_development_repair_attempts AS publication_attempt
+		  ON publication_attempt.id = publication.attempt_id
+		 AND publication_attempt.session_id = publication_owner_session.id
+		JOIN pr_development_thread_controllers AS publication_controller
+		  ON publication_controller.id = publication.controller_id
+		 AND publication_controller.thread_id = publication_membership.thread_id
+		 AND publication_controller.owner_session_id = publication_owner_session.id
+		JOIN pr_development_attempt_review_fences AS publication_fence
+		  ON publication_fence.attempt_id = publication_attempt.id
+		 AND publication_fence.controller_id = publication_controller.id
+		 AND publication_fence.thread_id = publication_membership.thread_id
+		JOIN pr_development_repair_orchestrations AS publication_orchestration
+		  ON publication_orchestration.attempt_id = publication_attempt.id
+		 AND publication_orchestration.receipt_hash = publication.orchestration_receipt_hash
+		WHERE publication_membership.case_id = pr_development_cases.id
+		  AND publication_membership.ordinal = publication_thread.case_count - 1
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM pr_development_thread_cases AS later_publication_membership
+			WHERE later_publication_membership.thread_id = publication_membership.thread_id
+			  AND later_publication_membership.ordinal > publication_membership.ordinal
+		  )
+		  AND publication.case_id = publication_membership.case_id
+		  AND publication.thread_id = publication_membership.thread_id
+		  AND publication.review_outcome = 'passed'
+		  AND publication.orchestration_phase = 'completed'
+		  AND publication.ci_status = 'passed'
+		  AND publication.decision_run_id <> ''
+		  AND length(publication.policy_revision) = 71
+		  AND length(publication.pinned_policy_json) >= 2
+		  AND length(publication.pinned_policy_hash) = 64
+		  AND length(publication.subject_revision) = 71
+		  AND length(publication.pinned_subject_json) >= 2
+		  AND length(publication.pinned_subject_hash) = 64
+		  AND length(publication.provider_observation_json) >= 2
+		  AND length(publication.provider_observation_hash) = 64
+		  AND publication.provider_pinned_at IS NOT NULL
+		  AND publication.provider_observed_at IS NOT NULL
+		  AND (
+			publication.status = 'gate_waiting' OR
+			(publication.status = 'claimed' AND publication.claim_from = 'gate_waiting')
+		  )
+		  AND publication.completed_at IS NULL
+		  AND publication_review.kind = 'review'
+		  AND publication_review.case_id = publication_membership.case_id
+		  AND publication_review.case_ordinal = publication_membership.ordinal
+		  AND publication_review.attempt_id = publication_attempt.id
+		  AND publication_review.fence_ordinal = publication.fence_ordinal
+		  AND publication_review.fence_hash = publication.fence_hash
+		  AND publication_review.review_outcome = 'passed'
+		  AND publication_review.finding_count = 0
+		  AND publication_attempt_entry.thread_id = publication_membership.thread_id
+		  AND publication_attempt_entry.kind = 'attempt'
+		  AND publication_attempt_entry.case_id = publication_membership.case_id
+		  AND publication_attempt_entry.case_ordinal = publication_membership.ordinal
+		  AND publication_attempt_entry.attempt_id = publication_attempt.id
+		  AND publication_attempt_entry.fence_ordinal = publication.fence_ordinal
+		  AND publication_attempt_entry.commit_oid = publication.tip_commit
+		  AND publication_attempt_entry.tree_oid = publication.tree
+		  AND publication_attempt_entry.no_changes = publication.no_changes
+		  AND publication_attempt_entry.ci_plan_digest = publication.ci_plan_digest
+		  AND publication_attempt_entry.ci_result_digest = publication.ci_result_digest
+		  AND publication_review.ordinal = publication_attempt_entry.ordinal + 1
+		  AND publication_review.previous_hash = publication_attempt_entry.entry_hash
+		  AND publication_attempt.status = 'completed'
+		  AND publication_attempt.lease_owner = ''
+		  AND publication_attempt.lease_token = ''
+		  AND publication_attempt.lease_until IS NULL
+		  AND publication_attempt.ordinal = (
+			SELECT MAX(publication_owner_attempt.ordinal)
+			FROM pr_development_repair_attempts AS publication_owner_attempt
+			WHERE publication_owner_attempt.session_id = publication_owner_session.id
+		  )
+		  AND publication_controller.revision = publication.controller_revision
+		  AND publication_controller.phase = 'ready'
+		  AND publication_controller.current_attempt_id = publication_attempt.id
+		  AND publication_controller.lease_kind = ''
+		  AND publication_controller.lease_owner = ''
+		  AND publication_controller.lease_token = ''
+		  AND publication_controller.lease_until IS NULL
+		  AND publication_controller.mutation_reservation_key = ''
+		  AND publication_controller.workspace_id = publication.workspace_id
+		  AND publication_controller.line_id = publication.line_id
+		  AND publication_controller.source_clone_url = publication.source_clone_url
+		  AND publication_controller.source_ref = publication.source_ref
+		  AND publication_controller.source_commit = publication.source_commit
+		  AND publication_controller.source_tree = publication.source_tree
+		  AND publication_controller.line_version = publication.line_version
+		  AND publication_controller.mutation_epoch = publication.mutation_epoch
+		  AND publication_controller.tip_commit = publication.tip_commit
+		  AND publication_controller.tree = publication.tree
+		  AND publication_controller.fence_count = publication.fence_ordinal + 1
+		  AND publication_controller.fences_digest = publication.fence_hash
+		  AND publication_fence.line_id = publication.line_id
+		  AND publication_fence.ordinal = publication.fence_ordinal
+		  AND publication_fence.line_version = publication.line_version
+		  AND publication_fence.mutation_epoch = publication.mutation_epoch
+		  AND publication_fence.park_intent_id = publication.park_intent_id
+		  AND publication_fence.base_commit = publication.base_commit
+		  AND publication_fence.tip_commit = publication.tip_commit
+		  AND publication_fence.tree = publication.tree
+		  AND publication_fence.no_changes = publication.no_changes
+		  AND publication_fence.fence_hash = publication.fence_hash
+		  AND publication_fence.reviewed_at IS NOT NULL
+		  AND publication_orchestration.session_id = publication_owner_session.id
+		  AND publication_orchestration.case_id = publication_membership.case_id
+		  AND publication_orchestration.thread_id = publication_membership.thread_id
+		  AND publication_orchestration.controller_id = publication_controller.id
+		  AND publication_orchestration.phase = 'completed'
+		  AND publication_orchestration.workspace_id = publication.workspace_id
+		  AND publication_orchestration.clone_url = publication.source_clone_url
+		  AND publication_orchestration.head_ref = publication.source_ref
+		  AND publication_orchestration.head_sha = publication.source_commit
+		  AND publication_orchestration.source_tree = publication.source_tree
+		  AND publication_orchestration.ledger_entry_id = publication.attempt_ledger_entry_id
+		  AND publication_orchestration.ci_status = 'passed'
+		  AND publication_orchestration.ci_effective_plan_digest = publication.ci_plan_digest
+		  AND publication_orchestration.ci_execution_digest = publication.ci_result_digest
+		  AND publication_orchestration.validation_line_id = publication.line_id
+		  AND publication_orchestration.validation_mutation_epoch = publication.mutation_epoch
+		  AND publication_orchestration.candidate_tree = publication.tree
+		  AND publication_orchestration.no_changes = publication.no_changes
+	)`
+
+// prDevelopmentCaseAttentionRequiredColumn is the one coarse mutable list
+// projection. The browser sees only the union boolean while every local or
+// publication trigger identity, policy, workflow run, and bearer stays private.
+const prDevelopmentCaseAttentionRequiredColumn = `
+	CASE WHEN ` + prDevelopmentCaseLocalAttentionRequiredPredicate + ` OR ` +
+	prDevelopmentCasePublicationAttentionRequiredPredicate + ` THEN 1 ELSE 0 END`
 
 type storedPRDevelopmentCase struct {
 	Case        PRDevelopmentCase
