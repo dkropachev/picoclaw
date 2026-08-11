@@ -964,6 +964,16 @@ func publicationGateAttentionSnapshot(
 	snapshot eventing.PRDevelopmentPublicationGateContextSnapshot,
 ) (eventing.PRDevelopmentAttentionSnapshot, error) {
 	publication := snapshot.Publication
+	// Attempt evidence is appended at the mutation-stage fence, before the
+	// immutable review lease fields produce the final reviewed-fence hash. The
+	// event-store gate snapshot carries both proofs; bind them explicitly before
+	// adapting the snapshot to the shared attention projection.
+	if !validControllerSHA256(snapshot.AttemptEntry.FenceHash) ||
+		snapshot.AttemptEntry.FenceHash == snapshot.Fence.FenceHash ||
+		snapshot.AttemptEntry.FenceHash != snapshot.Orchestration.FenceHash ||
+		snapshot.ReviewEntry.FenceHash != snapshot.Fence.FenceHash {
+		return eventing.PRDevelopmentAttentionSnapshot{}, errPublicationGateCorrupt
+	}
 	attemptOrdinal := -1
 	for index, attempt := range snapshot.OwnerSession.Attempts {
 		if attempt.ID == publication.AttemptID {

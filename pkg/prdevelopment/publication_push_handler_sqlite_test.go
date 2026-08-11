@@ -109,6 +109,16 @@ func newPublicationPushSQLiteLifecycle(
 	eventing.PRDevelopmentThreadIdentity, string,
 ) {
 	t.Helper()
+	store, now, developmentCase, identity, reviewDigest, _ := newPublicationPushSQLiteLifecycleWithPublication(t)
+	return store, now, developmentCase, identity, reviewDigest
+}
+
+func newPublicationPushSQLiteLifecycleWithPublication(
+	t *testing.T,
+) (*eventing.Store, *time.Time, eventing.PRDevelopmentCase,
+	eventing.PRDevelopmentThreadIdentity, string, eventing.PRDevelopmentPublication,
+) {
+	t.Helper()
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
 	store, err := eventing.Open(
@@ -354,7 +364,7 @@ func newPublicationPushSQLiteLifecycle(
 	require.NoError(t, err)
 	require.True(t, changed)
 	require.NotNil(t, completion.Publication)
-	return store, &now, developmentCase, identity, reviewDigest
+	return store, &now, developmentCase, identity, reviewDigest, *completion.Publication
 }
 
 func finalizePublicationPushSQLiteOperation(

@@ -90,6 +90,11 @@ type eventReviewRuntime struct {
 	prDevelopmentAttentionWorkspaces     prdevelopment.AttentionReviewWorkspaceFactory
 	acquirePRDevelopmentAttentionRuntime prdevelopment.AttentionContextRuntimeAcquire
 	prDevelopmentAttentionProcess        func(context.Context) (bool, error)
+	publicationProvider                  prdevelopment.PublicationProviderObserver
+	publicationRemoteHead                prdevelopment.PublicationRemoteHeadObserver
+	publicationPusher                    prDevelopmentPublicationPusherFactory
+	publicationProcess                   func(context.Context) (bool, error)
+	publicationReconciliationProcess     func(context.Context) (bool, error)
 	submitter                            reviews.Submitter
 	attentionPolicies                    reviews.AttentionPolicySource
 	notificationMCP                      workflows.ToolRunner
@@ -169,6 +174,7 @@ func setupEventAutomationService(
 			cfg,
 			agentLoop,
 		)
+		reviewRuntime.publicationPusher = newPRDevelopmentPublicationPusherFactory(agentLoop)
 		// A parked candidate is reviewed entirely from durable local evidence and
 		// its retained branch. Keep this composition independent of provider MCP
 		// readiness so an already-pending review can finish during an outage.
@@ -179,17 +185,24 @@ func setupEventAutomationService(
 		}
 		reviewRuntime.reviewWorkspaces = agentLoop.ControllerGitWorkspaceManager
 		if executor != nil && githubPRDevelopmentRepairReady(ctx, agentLoop) {
-			reviewRuntime.repairAgentReady = combinedPRDevelopmentAgentReadiness(
-				agentLoop.ControllerLocalRepairReady,
-				agentLoop.ControllerLocalReviewReady,
-			)
-			reviewRuntime.repairVerifier = &prdevelopment.GitHubVerifier{
+			publicationVerifier := &prdevelopment.GitHubVerifier{
 				Runner: executor.Tools,
 				ArtifactRoot: effectiveGitHubMCPArtifactRoot(
 					cfg,
 					reviewRuntime.mcpArtifactRoot,
 				),
 			}
+			reviewRuntime.repairAgentReady = combinedPRDevelopmentAgentReadiness(
+				agentLoop.ControllerLocalRepairReady,
+				agentLoop.ControllerLocalReviewReady,
+			)
+			reviewRuntime.repairVerifier = publicationVerifier
+			reviewRuntime.publicationProvider = prdevelopment.NewGitHubPublicationProviderObserver(
+				publicationVerifier,
+			)
+			reviewRuntime.publicationRemoteHead = prdevelopment.NewGitHubPublicationRemoteHeadObserver(
+				publicationVerifier,
+			)
 			reviewRuntime.repairRuntime = func(
 				agentID string,
 				routingText string,
@@ -544,6 +557,31 @@ func newEventAutomationServiceWithReviews(
 		}
 		localReviewProcess = localReview.ProcessOne
 	}
+	var publicationEvidence prdevelopment.AttentionEvidenceStore
+	if prLocalCI != nil {
+		publicationEvidence = prLocalCI.evidence
+	}
+	publicationRuntime, err := newPRDevelopmentPublicationRuntime(
+		prDevelopmentPublicationRuntimeConfig{
+			Enabled:                 cfg.Workflows.Enabled,
+			Store:                   store,
+			Executor:                executor,
+			Runs:                    runStore,
+			Policies:                reviewRuntime.prDevelopmentAttentionPolicies,
+			Evidence:                publicationEvidence,
+			Workspaces:              reviewRuntime.prDevelopmentAttentionWorkspaces,
+			AcquireAttentionRuntime: reviewRuntime.acquirePRDevelopmentAttentionRuntime,
+			Provider:                reviewRuntime.publicationProvider,
+			RemoteHead:              reviewRuntime.publicationRemoteHead,
+			Pusher:                  reviewRuntime.publicationPusher,
+			AcquireRuntime:          acquireRuntime,
+			PublicationProcess:      reviewRuntime.publicationProcess,
+			ReconciliationProcess:   reviewRuntime.publicationReconciliationProcess,
+		},
+	)
+	if err != nil {
+		return nil, closeSetup(err)
+	}
 
 	service := &eventAutomationService{
 		store:                  store,
@@ -714,6 +752,24 @@ func newEventAutomationServiceWithReviews(
 			&workers,
 			"PR development attention",
 			withEventAutomationRuntime(acquireRuntime, attentionProcess),
+		)
+	}
+	if publicationRuntime != nil {
+		workers.Add(2)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"PR development publication",
+			withEventAutomationRuntime(acquireRuntime, publicationRuntime.ProcessPublication),
+		)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"PR development publication reconciliation",
+			withEventAutomationRuntime(
+				acquireRuntime,
+				publicationRuntime.ProcessReconciliation,
+			),
 		)
 	}
 	if githubPoller != nil {

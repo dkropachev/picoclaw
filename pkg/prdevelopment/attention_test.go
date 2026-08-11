@@ -91,6 +91,31 @@ func TestPRDevelopmentAttentionAdmissionUncertaintyOutranksCommitCancellation(
 	}
 }
 
+func TestPRDevelopmentAttentionRejectsInvalidMutationStageFenceHash(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		hash func(eventing.PRDevelopmentAttentionSnapshot) string
+	}{
+		{name: "noncanonical", hash: func(eventing.PRDevelopmentAttentionSnapshot) string {
+			return "arbitrary-mutation-fence"
+		}},
+		{name: "duplicates final reviewed fence", hash: func(snapshot eventing.PRDevelopmentAttentionSnapshot) string {
+			return snapshot.Fence.FenceHash
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			snapshot, _, _, _ := attentionRuntimeSnapshot(t)
+			snapshot.Ledger.Entries[0].FenceHash = test.hash(snapshot)
+			if err := validateAttentionSnapshot(snapshot); err == nil {
+				t.Fatal("validateAttentionSnapshot() error = nil")
+			}
+		})
+	}
+}
+
 func TestPRDevelopmentAttentionLauncherAnchoredTargetUsesRuntimeAndExactDecision(t *testing.T) {
 	fixture := newAttentionRuntimeFixture(t)
 	launcher := fixture.launcher(t, []workflows.GateSpec{
@@ -1012,7 +1037,7 @@ func attentionRuntimeSnapshot(
 		CIPlanDigest:   attentionRuntimeDigest("7"),
 		CIResultDigest: attentionRuntimeDigest("8"),
 		CIStatus:       eventing.PRDevelopmentCIPassed,
-		FenceHash:      fence.FenceHash,
+		FenceHash:      attentionRuntimeDigest("f"),
 		PreviousHash:   attentionRuntimeDigest("9"),
 		EntryHash:      attentionRuntimeDigest("a"),
 		CreatedAt:      now.Add(-30 * time.Second),
