@@ -80,6 +80,41 @@ func TestGitHubPRDevelopmentRepairReadinessRequiresPullRequestRead(t *testing.T)
 	}
 }
 
+func TestGitHubReviewProviderReadAndWriteReadinessAreIndependent(t *testing.T) {
+	readName := reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReadTool
+	writeName := reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReviewWriteTool
+	readiness := map[string]workflows.WorkflowDependencyReadinessCode{
+		readName:  workflows.WorkflowDependencyReadinessReady,
+		writeName: workflows.WorkflowDependencyReadinessUnavailable,
+	}
+	resolve := func(occurrence workflows.WorkflowDependencyOccurrence) workflows.WorkflowDependencyReadinessCode {
+		if occurrence.Kind != workflows.WorkflowDependencyKindMCP {
+			t.Fatalf("dependency kind = %q", occurrence.Kind)
+		}
+		return readiness[occurrence.Name]
+	}
+	if !githubReviewProviderReadToolsReady(resolve) {
+		t.Fatal("ready provider read reported unavailable")
+	}
+	if githubReviewProviderWriteToolsReady(resolve) {
+		t.Fatal("unavailable provider write reported ready")
+	}
+	readiness[writeName] = workflows.WorkflowDependencyReadinessReady
+	if !githubReviewProviderWriteToolsReady(resolve) {
+		t.Fatal("ready provider write reported unavailable")
+	}
+	readiness[readName] = workflows.WorkflowDependencyReadinessUnavailable
+	if githubReviewProviderReadToolsReady(resolve) {
+		t.Fatal("unavailable provider read reported ready")
+	}
+	if !githubReviewProviderWriteToolsReady(resolve) {
+		t.Fatal("provider write readiness was incorrectly coupled to read")
+	}
+	if githubReviewProviderReadToolsReady(nil) || githubReviewProviderWriteToolsReady(nil) {
+		t.Fatal("nil resolver reported provider readiness")
+	}
+}
+
 func TestGitHubPRDevelopmentRepairReadinessOnlyRequiresProviderRead(t *testing.T) {
 	runtime := &gatewayRepairReadinessFake{
 		dependency: workflows.WorkflowDependencyReadinessReady,

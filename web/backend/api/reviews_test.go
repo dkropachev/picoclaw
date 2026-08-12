@@ -115,6 +115,30 @@ func TestReviewRoutesProxyExactContractWithPrivateBearer(t *testing.T) {
 			timeout:      reviewGatewayRequestTimeout,
 		},
 		{
+			name:         "get live provider snapshot",
+			method:       http.MethodGet,
+			path:         "/api/reviews/" + testReviewCaseID + "/provider",
+			upstreamPath: "/runtime/eventing/reviews/" + testReviewCaseID + "/provider",
+			timeout:      reviewGatewayProviderTimeout,
+		},
+		{
+			name:         "get live provider status",
+			method:       http.MethodGet,
+			path:         "/api/reviews/" + testReviewCaseID + "/provider?view=status",
+			upstreamPath: "/runtime/eventing/reviews/" + testReviewCaseID + "/provider",
+			upstream:     url.Values{"view": {"status"}},
+			timeout:      reviewGatewayRequestTimeout,
+		},
+		{
+			name:   "resolve live provider thread",
+			method: http.MethodPost,
+			path:   "/api/reviews/" + testReviewCaseID + "/provider/thread",
+			body:   `{"token":"rtt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","action":"resolve"}`,
+			upstreamPath: "/runtime/eventing/reviews/" + testReviewCaseID +
+				"/provider/thread",
+			timeout: reviewGatewayProviderTimeout,
+		},
+		{
 			name:   "respond to attention",
 			method: http.MethodPost,
 			path:   "/api/reviews/" + testReviewCaseID + "/attention/respond",
@@ -314,6 +338,10 @@ func TestReviewRoutesRejectNoncanonicalPathsQueriesAndMethods(t *testing.T) {
 		"/api/reviews/%70rc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"/api/reviews/" + testReviewCaseID + "?detail=true",
 		"/api/reviews/" + testReviewCaseID + "/attention?run_id=private",
+		"/api/reviews/" + testReviewCaseID + "/provider?view=",
+		"/api/reviews/" + testReviewCaseID + "/provider?view=full",
+		"/api/reviews/" + testReviewCaseID + "/provider?view=status&",
+		"/api/reviews/" + testReviewCaseID + "/provider?view=status&view=status",
 		"/api/reviews?unknown=value",
 		"/api/reviews?status=",
 		"/api/reviews?status=OPEN",
@@ -381,6 +409,16 @@ func TestReviewRoutesRejectNoncanonicalPathsQueriesAndMethods(t *testing.T) {
 			http.MethodPost,
 			"/api/reviews/" + testReviewCaseID + "/attention",
 			http.MethodGet,
+		},
+		{
+			http.MethodPost,
+			"/api/reviews/" + testReviewCaseID + "/provider",
+			http.MethodGet,
+		},
+		{
+			http.MethodGet,
+			"/api/reviews/" + testReviewCaseID + "/provider/thread",
+			http.MethodPost,
 		},
 		{
 			http.MethodGet,
@@ -829,6 +867,39 @@ func TestReviewMutationsRequireSameOriginJSONIdentityAndBoundedBody(t *testing.T
 	}
 	if upstreamCalls != 1 {
 		t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
+	}
+}
+
+func TestReviewProviderThreadProxyRejectsInvalidBodiesBeforeUpstream(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	upstreamCalls := 0
+	installEventProxyStubs(t, func(*http.Request, time.Duration) (*http.Response, error) {
+		upstreamCalls++
+		return eventUpstreamResponse(http.StatusOK, `{"ok":true}`), nil
+	})
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+	path := "/api/reviews/" + testReviewCaseID + "/provider/thread"
+	validToken := "rtt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	for _, body := range []string{
+		`{}`,
+		`{"token":"rtt_short","action":"resolve"}`,
+		`{"token":"` + validToken + `","action":"reopen"}`,
+		`{"token":"` + validToken + `","action":"resolve","extra":true}`,
+		`{"token":"` + validToken + `","token":"` + validToken + `","action":"resolve"}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s status=%d response=%s", body, response.Code, response.Body.String())
+		}
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("invalid bodies made %d upstream calls", upstreamCalls)
 	}
 }
 

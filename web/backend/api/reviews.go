@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 const (
 	reviewGatewayRequestTimeout   = 5 * time.Second
 	reviewGatewayAIRequestTimeout = 120 * time.Second
+	reviewGatewayProviderTimeout  = 30 * time.Second
 
 	reviewProxyQueryMaxBytes   = 8 << 10
 	reviewProxyRequestMaxBytes = 1 << 20
@@ -133,6 +136,17 @@ func (h *Handler) handleReviewSubtree(w http.ResponseWriter, r *http.Request) {
 		h.handleReviewGet(w, r, caseID)
 	case len(segments) == 2 && segments[1] == "attention":
 		h.handleReviewAttentionGet(w, r, caseID)
+	case len(segments) == 2 && segments[1] == "provider":
+		h.handleReviewProviderGet(w, r, caseID)
+	case len(segments) == 3 && segments[1] == "provider" && segments[2] == "thread":
+		h.handleReviewMutationValidated(
+			w,
+			r,
+			http.MethodPost,
+			"/runtime/eventing/reviews/"+caseID+"/provider/thread",
+			reviewGatewayProviderTimeout,
+			validateReviewProviderThreadBody,
+		)
 	case len(segments) == 3 &&
 		segments[1] == "attention" &&
 		segments[2] == "respond":
@@ -200,6 +214,66 @@ func (h *Handler) handleReviewSubtree(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeReviewAPIError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (h *Handler) handleReviewProviderGet(
+	w http.ResponseWriter,
+	r *http.Request,
+	caseID string,
+) {
+	if !requireReviewMethod(w, r, http.MethodGet) {
+		return
+	}
+	query := r.URL.RawQuery
+	timeout := reviewGatewayProviderTimeout
+	if query != "" {
+		if query != "view=status" {
+			writeReviewAPIError(w, http.StatusBadRequest, "invalid review request")
+			return
+		}
+		timeout = reviewGatewayRequestTimeout
+	}
+	h.proxyReviewGateway(
+		w,
+		r,
+		http.MethodGet,
+		"/runtime/eventing/reviews/"+caseID+"/provider",
+		query,
+		nil,
+		timeout,
+	)
+}
+
+func validateReviewProviderThreadBody(_ *http.Request, raw []byte) error {
+	if rejectDuplicateJSONKeys(raw, 8, nil) != nil {
+		return errors.New("duplicate provider thread request field")
+	}
+	var body struct {
+		Token  string `json:"token"`
+		Action string `json:"action"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("provider thread request has trailing JSON")
+	}
+	if !validReviewProviderToken(body.Token) ||
+		(body.Action != "resolve" && body.Action != "unresolve") {
+		return errors.New("invalid provider thread request")
+	}
+	return nil
+}
+
+func validReviewProviderToken(value string) bool {
+	if !strings.HasPrefix(value, "rtt_") {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "rtt_"))
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func (h *Handler) handleReviewAttentionGet(

@@ -47,6 +47,7 @@ type ServiceConfig struct {
 	Agent                        workflows.AgentRunner
 	AgentID                      string
 	Submitter                    Submitter
+	Provider                     *GitHubProvider
 	AcquireWorkingContextRuntime WorkingContextRuntimeAcquire
 	MaxConcurrentAI              int
 }
@@ -58,6 +59,7 @@ type Service struct {
 	agent                        workflows.AgentRunner
 	agentID                      string
 	submitter                    Submitter
+	provider                     *GitHubProvider
 	acquireWorkingContextRuntime WorkingContextRuntimeAcquire
 	workingContextLocks          *reviewCaseLockSet
 	aiSlots                      chan struct{}
@@ -85,10 +87,78 @@ func NewService(config ServiceConfig) (*Service, error) {
 		agent:                        config.Agent,
 		agentID:                      agentID,
 		submitter:                    config.Submitter,
+		provider:                     config.Provider,
 		acquireWorkingContextRuntime: config.AcquireWorkingContextRuntime,
 		workingContextLocks:          newReviewCaseLockSet(),
 		aiSlots:                      make(chan struct{}, maxConcurrentAI),
 	}, nil
+}
+
+func (service *Service) ProviderStatus(
+	ctx context.Context,
+	caseID string,
+) (ProviderStatus, error) {
+	if service == nil || service.store == nil {
+		return ProviderStatus{}, ErrUnavailable
+	}
+	stored, err := service.store.GetReviewCase(ctx, strings.TrimSpace(caseID))
+	if err != nil {
+		return ProviderStatus{}, err
+	}
+	if service.provider == nil {
+		return providerStatusBase(stored.Case), nil
+	}
+	status, err := service.provider.Status(ctx, stored.Case)
+	if errors.Is(err, ErrProviderIncompatible) {
+		status = providerStatusBase(stored.Case)
+		status.Availability = ProviderAvailabilityIncompatible
+		status.Limitations = append(status.Limitations, "provider_response_incompatible")
+		return status, nil
+	}
+	return status, err
+}
+
+func (service *Service) ProviderSnapshot(
+	ctx context.Context,
+	caseID string,
+) (ProviderSnapshot, error) {
+	if service == nil || service.store == nil {
+		return ProviderSnapshot{}, ErrUnavailable
+	}
+	stored, err := service.store.GetReviewCase(ctx, strings.TrimSpace(caseID))
+	if err != nil {
+		return ProviderSnapshot{}, err
+	}
+	if service.provider == nil {
+		return unavailableProviderSnapshot(stored.Case), nil
+	}
+	snapshot, err := service.provider.Snapshot(ctx, stored.Case)
+	if errors.Is(err, ErrProviderIncompatible) {
+		snapshot = unavailableProviderSnapshot(stored.Case)
+		snapshot.Availability = ProviderAvailabilityIncompatible
+		snapshot.Limitations = []string{"provider_response_incompatible"}
+		return snapshot, nil
+	}
+	return snapshot, err
+}
+
+func (service *Service) MutateProviderThread(
+	ctx context.Context,
+	request ProviderThreadMutationRequest,
+) (ProviderSnapshot, error) {
+	request.CaseID = strings.TrimSpace(request.CaseID)
+	if !validReviewID(request.CaseID, "prc_") || !validProviderToken(request.Token) ||
+		(request.Action != "resolve" && request.Action != "unresolve") {
+		return ProviderSnapshot{}, ErrInvalidRequest
+	}
+	if service == nil || service.store == nil || service.provider == nil {
+		return ProviderSnapshot{}, ErrProviderMutationUnsupported
+	}
+	stored, err := service.store.GetReviewCase(ctx, request.CaseID)
+	if err != nil {
+		return ProviderSnapshot{}, err
+	}
+	return service.provider.MutateThread(ctx, stored.Case, request)
 }
 
 type ListRequest struct {

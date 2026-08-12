@@ -76,6 +76,26 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 		handler.get(w, request, caseID)
 		return
 	}
+	if len(segments) == 2 && segments[1] == "provider" {
+		if request.Method != http.MethodGet {
+			writeReviewMethod(w, http.MethodGet)
+			return
+		}
+		handler.getProvider(w, request, caseID)
+		return
+	}
+	if len(segments) == 3 && segments[1] == "provider" && segments[2] == "thread" {
+		if request.Method != http.MethodPost {
+			writeReviewMethod(w, http.MethodPost)
+			return
+		}
+		if request.URL.RawQuery != "" || request.URL.ForceQuery {
+			writeReviewError(w, http.StatusBadRequest, "invalid review request", nil)
+			return
+		}
+		handler.mutateProviderThread(w, request, caseID)
+		return
+	}
 	if request.URL.RawQuery != "" {
 		writeReviewError(w, http.StatusBadRequest, "invalid review request", nil)
 		return
@@ -140,6 +160,60 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	default:
 		writeReviewError(w, http.StatusNotFound, "not found", nil)
 	}
+}
+
+func (handler *Handler) getProvider(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	if request.URL.ForceQuery {
+		writeReviewError(w, http.StatusBadRequest, "invalid review request", nil)
+		return
+	}
+	if request.URL.RawQuery == "" {
+		snapshot, err := handler.Service.ProviderSnapshot(request.Context(), caseID)
+		if err != nil {
+			writeReviewOperationError(w, handler.Service, caseID, err)
+			return
+		}
+		writeReviewJSON(w, http.StatusOK, snapshot)
+		return
+	}
+	if request.URL.RawQuery != "view=status" {
+		writeReviewError(w, http.StatusBadRequest, "invalid review request", nil)
+		return
+	}
+	status, err := handler.Service.ProviderStatus(request.Context(), caseID)
+	if err != nil {
+		writeReviewOperationError(w, handler.Service, caseID, err)
+		return
+	}
+	writeReviewJSON(w, http.StatusOK, status)
+}
+
+func (handler *Handler) mutateProviderThread(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	var body struct {
+		Token  string `json:"token"`
+		Action string `json:"action"`
+	}
+	if err := decodeReviewBody(w, request, &body); err != nil {
+		writeReviewBodyError(w, err)
+		return
+	}
+	snapshot, err := handler.Service.MutateProviderThread(
+		request.Context(),
+		ProviderThreadMutationRequest{CaseID: caseID, Token: body.Token, Action: body.Action},
+	)
+	if err != nil {
+		writeReviewOperationError(w, handler.Service, caseID, err)
+		return
+	}
+	writeReviewJSON(w, http.StatusOK, snapshot)
 }
 
 func (handler *Handler) getAttention(
@@ -636,6 +710,12 @@ func writeReviewOperationError(
 		status, message = http.StatusConflict, "review changed; reload before retrying"
 	case errors.Is(err, eventing.ErrInvalidTransition):
 		status, message = http.StatusConflict, "review state does not allow this operation"
+	case errors.Is(err, ErrProviderThreadConflict):
+		status, message = http.StatusConflict, "review provider thread changed; reload before retrying"
+	case errors.Is(err, ErrProviderIncompatible):
+		status, message = http.StatusBadGateway, "review provider response is incompatible"
+	case errors.Is(err, ErrProviderMutationUnsupported):
+		status, message = http.StatusUnprocessableEntity, "review provider thread action unavailable"
 	case errors.Is(err, ErrInvalidRequest),
 		errors.Is(err, eventing.ErrInvalidReview):
 		status, message = http.StatusBadRequest, "invalid review request"
