@@ -24,6 +24,19 @@ func setTestAuthHome(t *testing.T) string {
 	return tmpDir
 }
 
+func authCredentialsEqual(left, right *AuthCredential) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+
+	leftCopy := *left
+	rightCopy := *right
+	expiresAtEqual := leftCopy.ExpiresAt.Equal(rightCopy.ExpiresAt)
+	leftCopy.ExpiresAt = time.Time{}
+	rightCopy.ExpiresAt = time.Time{}
+	return expiresAtEqual && reflect.DeepEqual(leftCopy, rightCopy)
+}
+
 func TestAuthCredentialIsExpired(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -289,14 +302,14 @@ func TestPersistCredentialIfCurrentCommitsWhenSourceIsCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PersistCredentialIfCurrent() error: %v", err)
 	}
-	if !reflect.DeepEqual(authoritative, refreshed) {
+	if !authCredentialsEqual(authoritative, refreshed) {
 		t.Fatalf("authoritative credential = %+v, want refreshed credential %+v", authoritative, refreshed)
 	}
 	stored, err := GetCredential("openai:work")
 	if err != nil {
 		t.Fatalf("GetCredential() error: %v", err)
 	}
-	if !reflect.DeepEqual(stored, refreshed) {
+	if !authCredentialsEqual(stored, refreshed) {
 		t.Fatalf("stored credential = %+v, want refreshed credential %+v", stored, refreshed)
 	}
 }
@@ -340,14 +353,14 @@ func TestPersistCredentialIfCurrentKeepsConcurrentRenewal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PersistCredentialIfCurrent() error: %v", err)
 	}
-	if !reflect.DeepEqual(authoritative, renewed) {
+	if !authCredentialsEqual(authoritative, renewed) {
 		t.Fatalf("authoritative credential = %+v, want concurrent renewal %+v", authoritative, renewed)
 	}
 	stored, err := GetCredential("openai:work")
 	if err != nil {
 		t.Fatalf("GetCredential() error: %v", err)
 	}
-	if !reflect.DeepEqual(stored, renewed) {
+	if !authCredentialsEqual(stored, renewed) {
 		t.Fatalf("stored credential = %+v, want concurrent renewal %+v", stored, renewed)
 	}
 }
@@ -389,7 +402,7 @@ func TestRefreshCredentialDetailedReportsIdenticalConcurrentRenewalNotCommitted(
 	if result.Committed {
 		t.Fatal("Committed = true, want false for a concurrent UI replacement")
 	}
-	if !reflect.DeepEqual(result.Credential, renewed) {
+	if !authCredentialsEqual(result.Credential, renewed) {
 		t.Fatalf("credential = %+v, want concurrent renewal %+v", result.Credential, renewed)
 	}
 }
@@ -625,7 +638,7 @@ func TestRefreshCredentialReturnsConcurrentRenewalAfterRefreshError(t *testing.T
 	if err != nil {
 		t.Fatalf("RefreshCredential() error: %v", err)
 	}
-	if !reflect.DeepEqual(got, renewed) {
+	if !authCredentialsEqual(got, renewed) {
 		t.Fatalf("RefreshCredential() = %+v, want concurrent renewal %+v", got, renewed)
 	}
 }
@@ -663,7 +676,7 @@ func TestRefreshCredentialReturnsConcurrentRenewalAfterNilRefreshResult(t *testi
 	if err != nil {
 		t.Fatalf("RefreshCredential() error: %v", err)
 	}
-	if !reflect.DeepEqual(got, renewed) {
+	if !authCredentialsEqual(got, renewed) {
 		t.Fatalf("RefreshCredential() = %+v, want concurrent renewal %+v", got, renewed)
 	}
 }
@@ -743,7 +756,7 @@ func TestPersistCredentialIfCurrentNormalizesAndValidatesProvider(t *testing.T) 
 	if getErr != nil {
 		t.Fatalf("GetCredential() error: %v", getErr)
 	}
-	if !reflect.DeepEqual(stored, authoritative) {
+	if !authCredentialsEqual(stored, authoritative) {
 		t.Fatalf("stored credential = %+v, want unchanged %+v", stored, authoritative)
 	}
 }
