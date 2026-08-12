@@ -8,23 +8,59 @@ import { AppSidebar } from "@/components/app-sidebar"
 import { SidebarProvider } from "@/components/ui/sidebar"
 
 let pathname = "/threads/search"
+let routeSearch: Record<string, unknown> = {}
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
     to,
+    search,
+    activeOptions,
     ...props
   }: {
     children: ReactNode
     to: string
-  } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
-    <a {...props} href={to}>
-      {children}
-    </a>
-  ),
+    search?: Record<string, unknown>
+    activeOptions?: { exact?: boolean; includeSearch?: boolean }
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) =>
+    (() => {
+      const pathActive = activeOptions?.exact
+        ? pathname === to
+        : pathname === to || (to !== "/" && pathname.startsWith(`${to}/`))
+      const searchActive =
+        activeOptions?.includeSearch === false ||
+        (activeOptions?.exact
+          ? JSON.stringify(routeSearch) === JSON.stringify(search ?? {})
+          : Object.entries(search ?? {}).every(
+              ([key, value]) => routeSearch[key] === value,
+            ))
+      const nativeActive = pathActive && searchActive
+
+      return (
+        <a
+          {...props}
+          href={
+            search && Object.keys(search).length > 0
+              ? `${to}?${new URLSearchParams(
+                  Object.entries(search).map(([key, value]) => [
+                    key,
+                    String(value),
+                  ]),
+                ).toString()}`
+              : to
+          }
+          {...(nativeActive
+            ? { "aria-current": "page", "data-status": "active" }
+            : {})}
+        >
+          {children}
+        </a>
+      )
+    })(),
   useRouterState: () => ({
     location: {
       pathname,
+      search: routeSearch,
     },
   }),
 }))
@@ -67,6 +103,7 @@ describe("AppSidebar", () => {
 
   beforeEach(() => {
     pathname = "/threads/search"
+    routeSearch = {}
   })
 
   it("links Threads navigation directly to the thread search workspace", () => {
@@ -140,5 +177,60 @@ describe("AppSidebar", () => {
       "data-active",
       "true",
     )
+  })
+
+  it("groups pull request work and configuration in a collapsible PR Reviews section", async () => {
+    pathname = "/reviews"
+    const user = userEvent.setup()
+
+    renderSidebar()
+
+    const trigger = screen.getByRole("button", { name: "PR Reviews" })
+    expect(trigger).toHaveAttribute("aria-expanded", "true")
+    const work = screen.getByRole("link", { name: "Pull request work" })
+    const configuration = screen.getByRole("link", {
+      name: "Configuration",
+    })
+    expect(work).toHaveAttribute("href", "/reviews")
+    expect(configuration).toHaveAttribute("href", "/reviews?view=policies")
+    expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+      "data-active",
+      "true",
+    )
+    expect(work).toHaveAttribute("aria-current", "page")
+    expect(work).toHaveAttribute("data-status", "active")
+    expect(configuration).not.toHaveAttribute("aria-current")
+    expect(configuration).not.toHaveAttribute("data-status")
+    expect(
+      configuration.closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "false")
+
+    await user.click(trigger)
+    expect(trigger).toHaveAttribute("aria-expanded", "false")
+    expect(work).not.toBeVisible()
+    expect(configuration).not.toBeVisible()
+  })
+
+  it("marks only PR Reviews configuration active for the policies view", () => {
+    pathname = "/reviews"
+    routeSearch = { view: "policies" }
+
+    renderSidebar()
+
+    const work = screen.getByRole("link", { name: "Pull request work" })
+    const configuration = screen.getByRole("link", {
+      name: "Configuration",
+    })
+    expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+      "data-active",
+      "false",
+    )
+    expect(
+      configuration.closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "true")
+    expect(work).not.toHaveAttribute("aria-current")
+    expect(work).not.toHaveAttribute("data-status")
+    expect(configuration).toHaveAttribute("aria-current", "page")
+    expect(configuration).toHaveAttribute("data-status", "active")
   })
 })

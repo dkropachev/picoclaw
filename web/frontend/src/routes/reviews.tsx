@@ -1,9 +1,12 @@
 import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
-import type { ReviewCaseStatus } from "@/api/reviews"
 import { PRDevelopmentPage } from "@/components/reviews/pr-development-page"
 import { ReviewAttentionPoliciesPage } from "@/components/reviews/review-attention-policies-page"
+import {
+  ReviewPortfolioPage,
+  type ReviewPortfolioSearch,
+} from "@/components/reviews/review-portfolio-page"
 import {
   ReviewsPage,
   type ReviewsRouteSearch,
@@ -11,15 +14,6 @@ import {
 
 const reviewCaseIDPattern = /^prc_[0-9a-f]{32}$/
 const developmentCaseIDPattern = /^pdc_[0-9a-f]{32}$/
-const reviewStatuses = new Set<ReviewCaseStatus>([
-  "open",
-  "all_dropped",
-  "submitting",
-  "submission_unknown",
-  "submitted",
-  "stale",
-])
-
 export function normalizeReviewsSearch(
   raw: Record<string, unknown>,
 ): ReviewsRouteSearch {
@@ -42,6 +36,47 @@ export function normalizeReviewsSearch(
         ...(pullNumber ? { pull_number: pullNumber } : {}),
       }
     }
+    if (raw.view === "review") {
+      const selectedCase =
+        typeof raw.case === "string" && reviewCaseIDPattern.test(raw.case)
+          ? raw.case
+          : undefined
+      const repository = optionalRepository(raw.repo)
+      const pullNumber = optionalPullNumber(raw.pr)
+      const filter = repository ? optionalByteText(raw.filter, 2048) : undefined
+      const requestedRole = repository
+        ? optionalPortfolioRole(raw.role)
+        : undefined
+      if (!selectedCase) {
+        return {
+          ...(repository ? { repo: repository } : {}),
+          ...(repository && pullNumber ? { pr: pullNumber } : {}),
+          ...(filter ? { filter } : {}),
+          ...(repository && pullNumber && requestedRole
+            ? { role: requestedRole }
+            : {}),
+        }
+      }
+      if (raw.focus === "chat") {
+        return {
+          view: "review",
+          case: selectedCase,
+          focus: "chat",
+          ...(repository ? { repo: repository } : {}),
+          ...(repository && pullNumber ? { pr: pullNumber } : {}),
+          ...(filter ? { filter } : {}),
+          ...(repository && pullNumber ? { role: "review" as const } : {}),
+        }
+      }
+      return {
+        view: "review",
+        ...(selectedCase ? { case: selectedCase } : {}),
+        ...(repository ? { repo: repository } : {}),
+        ...(repository && pullNumber ? { pr: pullNumber } : {}),
+        ...(filter ? { filter } : {}),
+        ...(repository && pullNumber ? { role: "review" as const } : {}),
+      }
+    }
     return {}
   }
   const selectedCase =
@@ -51,16 +86,35 @@ export function normalizeReviewsSearch(
   if (selectedCase && raw.focus === "chat") {
     return { case: selectedCase, focus: "chat" }
   }
-  const status =
-    typeof raw.status === "string" &&
-    reviewStatuses.has(raw.status as ReviewCaseStatus)
-      ? (raw.status as ReviewCaseStatus)
+  const legacyStatus = optionalLegacyReviewStatus(raw.status)
+  const legacyRepository = optionalByteText(raw.repository, 512)
+  if (selectedCase || legacyStatus || legacyRepository) {
+    return {
+      ...(selectedCase ? { case: selectedCase } : {}),
+      ...(legacyStatus ? { status: legacyStatus } : {}),
+      ...(legacyRepository ? { repository: legacyRepository } : {}),
+    }
+  }
+  const repository = optionalRepository(raw.repo)
+  const pullNumber = optionalPullNumber(raw.pr)
+  const filter = optionalByteText(raw.filter, 2048)
+  const role =
+    repository && pullNumber ? optionalPortfolioRole(raw.role) : undefined
+  const selectedPortfolioReviewCase =
+    repository &&
+    pullNumber &&
+    typeof raw.review_case === "string" &&
+    reviewCaseIDPattern.test(raw.review_case)
+      ? raw.review_case
       : undefined
-  const repository = optionalByteText(raw.repository, 512)
   return {
-    ...(selectedCase ? { case: selectedCase } : {}),
-    ...(status ? { status } : {}),
-    ...(repository ? { repository } : {}),
+    ...(repository ? { repo: repository } : {}),
+    ...(repository && pullNumber ? { pr: pullNumber } : {}),
+    ...(repository && filter ? { filter } : {}),
+    ...(role ? { role } : {}),
+    ...(selectedPortfolioReviewCase
+      ? { review_case: selectedPortfolioReviewCase }
+      : {}),
   }
 }
 
@@ -112,6 +166,7 @@ function ReviewsRoutePage() {
       <ReviewAttentionPoliciesPage
         onShowInbox={() => changeSearch({})}
         onShowDevelopment={() => changeSearch({ view: "development" })}
+        standalone
       />
     )
   }
@@ -123,7 +178,30 @@ function ReviewsRoutePage() {
       />
     )
   }
-  return <ReviewsPage search={search} onSearchChange={changeSearch} />
+  if (
+    search.view === "review" ||
+    search.case != null ||
+    search.status != null ||
+    search.repository != null
+  ) {
+    return <ReviewsPage search={search} onSearchChange={changeSearch} />
+  }
+  return (
+    <ReviewPortfolioPage
+      search={search as ReviewPortfolioSearch}
+      onSearchChange={changeSearch}
+      onOpenReview={(caseID, repository, pullNumber) =>
+        changeSearch({
+          view: "review",
+          case: caseID,
+          repo: repository,
+          pr: pullNumber,
+          ...(search.filter ? { filter: search.filter } : {}),
+          role: "review",
+        })
+      }
+    />
+  )
 }
 
 export const Route = createFileRoute("/reviews")({
@@ -166,4 +244,21 @@ function optionalPullNumber(value: unknown): number | undefined {
   return Number.isInteger(pullNumber) && pullNumber <= 2_147_483_647
     ? pullNumber
     : undefined
+}
+
+function optionalLegacyReviewStatus(
+  value: unknown,
+): ReviewsRouteSearch["status"] {
+  return value === "open" ||
+    value === "all_dropped" ||
+    value === "submitting" ||
+    value === "submission_unknown" ||
+    value === "submitted" ||
+    value === "stale"
+    ? value
+    : undefined
+}
+
+function optionalPortfolioRole(value: unknown): ReviewsRouteSearch["role"] {
+  return value === "review" || value === "develop" ? value : undefined
 }

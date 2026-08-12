@@ -111,9 +111,11 @@ interface PendingModeChange {
 export function ReviewAttentionPoliciesPage({
   onShowInbox,
   onShowDevelopment,
+  standalone = false,
 }: {
   onShowInbox: () => void
   onShowDevelopment: () => void
+  standalone?: boolean
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -722,6 +724,7 @@ export function ReviewAttentionPoliciesPage({
         <PolicyPageState
           onShowInbox={onShowInbox}
           onShowDevelopment={onShowDevelopment}
+          standalone={standalone}
           title={t(
             initialAgentHydrationFailed
               ? "pages.reviews.policies.hydration_error"
@@ -761,6 +764,7 @@ export function ReviewAttentionPoliciesPage({
       <PolicyPageState
         onShowInbox={onShowInbox}
         onShowDevelopment={onShowDevelopment}
+        standalone={standalone}
         title={t(
           "pages.reviews.policies.loading",
           "Loading review attention policies…",
@@ -794,6 +798,17 @@ export function ReviewAttentionPoliciesPage({
           </Badge>
         }
       >
+        {standalone ? (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={editorBusy}
+            onClick={onShowInbox}
+          >
+            <IconArrowDown className="size-4 rotate-90" />
+            {t("pages.reviews.policies.back", "Pull request work")}
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="outline"
@@ -831,17 +846,19 @@ export function ReviewAttentionPoliciesPage({
         </Button>
       </PageHeader>
 
-      <ReviewWorkbenchTabs
-        active="policies"
-        navigationDisabled={editorBusy}
-        onChange={(view) => {
-          if (view === "inbox") {
-            onShowInbox()
-          } else if (view === "development") {
-            onShowDevelopment()
-          }
-        }}
-      />
+      {!standalone ? (
+        <ReviewWorkbenchTabs
+          active="policies"
+          navigationDisabled={editorBusy}
+          onChange={(view) => {
+            if (view === "inbox") {
+              onShowInbox()
+            } else if (view === "development") {
+              onShowDevelopment()
+            }
+          }}
+        />
+      ) : null}
 
       <form
         id="review-attention-policy-form"
@@ -2239,27 +2256,38 @@ function PolicyPageState({
   action,
   onShowInbox,
   onShowDevelopment,
+  standalone = false,
 }: {
   title: string
   loading?: boolean
   action?: ReactNode
   onShowInbox: () => void
   onShowDevelopment: () => void
+  standalone?: boolean
 }) {
   const { t } = useTranslation()
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
-      <PageHeader title={t("pages.reviews.title", "Pull request reviews")} />
-      <ReviewWorkbenchTabs
-        active="policies"
-        onChange={(view) => {
-          if (view === "inbox") {
-            onShowInbox()
-          } else if (view === "development") {
-            onShowDevelopment()
-          }
-        }}
-      />
+      <PageHeader title={t("pages.reviews.title", "Pull request reviews")}>
+        {standalone ? (
+          <Button type="button" variant="outline" onClick={onShowInbox}>
+            <IconArrowDown className="size-4 rotate-90" />
+            {t("pages.reviews.policies.back", "Pull request work")}
+          </Button>
+        ) : null}
+      </PageHeader>
+      {!standalone ? (
+        <ReviewWorkbenchTabs
+          active="policies"
+          onChange={(view) => {
+            if (view === "inbox") {
+              onShowInbox()
+            } else if (view === "development") {
+              onShowDevelopment()
+            }
+          }}
+        />
+      ) : null}
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
         {loading && (
           <IconLoader2 className="text-muted-foreground size-6 animate-spin" />

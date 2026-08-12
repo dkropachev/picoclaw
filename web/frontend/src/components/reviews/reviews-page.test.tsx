@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { useBlocker } from "@tanstack/react-router"
 import {
   act,
   fireEvent,
@@ -37,6 +38,15 @@ import {
   type ReviewsRouteSearch,
 } from "@/components/reviews/reviews-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
+
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@tanstack/react-router")>()
+  return {
+    ...original,
+    useBlocker: vi.fn(() => ({ status: "idle" })),
+  }
+})
 
 vi.mock("@/api/review-attention", async (importOriginal) => {
   const original =
@@ -211,6 +221,7 @@ describe("ReviewsPage", () => {
   })
 
   beforeEach(() => {
+    vi.mocked(useBlocker).mockClear()
     vi.mocked(chatAboutReview).mockReset()
     vi.mocked(dropReviewFinding).mockReset()
     vi.mocked(getReview).mockReset()
@@ -225,6 +236,70 @@ describe("ReviewsPage", () => {
 
     vi.mocked(listReviews).mockResolvedValue({ cases: [reviewCase] })
     vi.mocked(getReview).mockResolvedValue(detail)
+  })
+
+  it("opens a role-specific editor and preserves its portfolio return state", async () => {
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+    renderReviews(
+      {
+        view: "review",
+        case: ids.case,
+        repo: "octo/repo",
+        pr: 42,
+        filter: "role = review",
+      },
+      onSearchChange,
+    )
+
+    expect(await screen.findByRole("button", { name: "Drop" })).toBeVisible()
+
+    await user.click(
+      screen.getByRole("button", { name: "All pull request work" }),
+    )
+    expect(onSearchChange).toHaveBeenCalledWith(
+      {
+        repo: "octo/repo",
+        pr: 42,
+        filter: "role = review",
+        review_case: ids.case,
+      },
+      true,
+    )
+  })
+
+  it("blocks navigation after a standalone editor acquires unsaved text", async () => {
+    const user = userEvent.setup()
+    renderReviews({
+      view: "review",
+      case: ids.case,
+      repo: "octo/repo",
+      pr: 42,
+    })
+
+    const title = await screen.findByLabelText("Title")
+    await user.type(title, " changed")
+
+    await waitFor(() => {
+      const options = vi.mocked(useBlocker).mock.calls.at(-1)?.[0] as
+        | { shouldBlockFn: () => boolean; enableBeforeUnload?: () => boolean }
+        | undefined
+      expect(options?.shouldBlockFn()).toBe(true)
+      expect(options?.enableBeforeUnload?.()).toBe(true)
+    })
+    expect(screen.getByRole("button", { name: "Submit review" })).toBeDisabled()
+    expect(submitReview).not.toHaveBeenCalled()
+
+    await user.type(
+      screen.getByPlaceholderText(
+        "For example: make this concise and constructive",
+      ),
+      "Make this clearer",
+    )
+    expect(
+      screen.getByRole("button", { name: "Preview rephrase" }),
+    ).toBeDisabled()
+    expect(rephraseReviewFinding).not.toHaveBeenCalled()
   })
 
   it("opens the policy view without leaking the selected review into its URL state", async () => {
@@ -806,6 +881,37 @@ describe("ReviewsPage", () => {
         }),
       )
     })
+  })
+
+  it("does not apply an older rephrase preview over newer manual edits", async () => {
+    vi.mocked(rephraseReviewFinding).mockResolvedValue({
+      detail: { ...detail, case: { ...reviewCase, version: 4 } },
+      suggestion: {
+        title: "AI replacement title",
+        message: "AI replacement comment.",
+      },
+    })
+    const user = userEvent.setup()
+    renderReviews()
+
+    await user.type(
+      await screen.findByPlaceholderText(
+        "For example: make this concise and constructive",
+      ),
+      "Make this concise",
+    )
+    await user.click(screen.getByRole("button", { name: "Preview rephrase" }))
+    expect(await screen.findByText("AI replacement title")).toBeVisible()
+
+    const title = screen.getByLabelText("Title")
+    await user.clear(title)
+    await user.type(title, "Newer manual title")
+
+    expect(
+      screen.getByRole("button", { name: "Apply and save suggestion" }),
+    ).toBeDisabled()
+    expect(title).toHaveValue("Newer manual title")
+    expect(updateReviewFinding).not.toHaveBeenCalled()
   })
 
   it("drops and restores findings, and confirms submission before locking", async () => {
