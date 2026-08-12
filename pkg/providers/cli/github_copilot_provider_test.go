@@ -270,6 +270,60 @@ func TestGitHubCopilotTokenProviderDisablesAmbientLogin(t *testing.T) {
 	}
 }
 
+func TestGitHubCopilotTokenProviderReloadsTokenPerRequest(t *testing.T) {
+	origHTTPClient := githubCopilotHTTPClient
+	origTokenEndpoint := githubCopilotTokenEndpoint
+	origAPIBase := githubCopilotAPIBaseEndpoint
+	t.Cleanup(func() {
+		githubCopilotHTTPClient = origHTTPClient
+		githubCopilotTokenEndpoint = origTokenEndpoint
+		githubCopilotAPIBaseEndpoint = origAPIBase
+	})
+
+	exchangeHeaders := make(chan string, 2)
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot_internal/v2/token":
+			exchangeHeaders <- r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":"copilot-api-token","endpoints":{"api":%q}}`, srv.URL)
+		case "/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"copilot response"},"finish_reason":"stop"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	githubCopilotHTTPClient = srv.Client()
+	githubCopilotTokenEndpoint = srv.URL + "/copilot_internal/v2/token"
+	githubCopilotAPIBaseEndpoint = srv.URL
+
+	storedToken := "gho_first-token"
+	provider, err := NewGitHubCopilotProviderWithToken("gho_initial-token", "gpt-4.1")
+	if err != nil {
+		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v", err)
+	}
+	provider.SetTokenSource(func() (string, error) { return storedToken, nil })
+
+	for _, wantToken := range []string{"gho_first-token", "ghu_rotated-token"} {
+		storedToken = wantToken
+		if _, err := provider.Chat(
+			t.Context(),
+			[]Message{{Role: "user", Content: "hello"}},
+			nil,
+			"gpt-4.1",
+			nil,
+		); err != nil {
+			t.Fatalf("Chat() error = %v", err)
+		}
+		if got := <-exchangeHeaders; got != "token "+wantToken {
+			t.Fatalf("exchange Authorization = %q, want rotated GitHub token", got)
+		}
+	}
+}
+
 func TestGitHubCopilotTokenProviderRejectsUnsupportedToken(t *testing.T) {
 	origNewClient := newCopilotClient
 	t.Cleanup(func() { newCopilotClient = origNewClient })

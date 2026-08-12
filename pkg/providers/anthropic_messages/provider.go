@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
@@ -41,10 +42,12 @@ const (
 // Provider implements Anthropic Messages API via HTTP (without SDK).
 // It supports custom endpoints that use Anthropic's native message format.
 type Provider struct {
-	apiKey     string
-	apiBase    string
-	httpClient *http.Client
-	userAgent  string
+	apiKey         string
+	apiKeySource   func() (string, error)
+	apiKeySourceMu sync.RWMutex
+	apiBase        string
+	httpClient     *http.Client
+	userAgent      string
 }
 
 // NewProvider creates a new Anthropic Messages API provider.
@@ -70,6 +73,28 @@ func NewProviderWithTimeout(apiKey, apiBase, userAgent string, timeoutSeconds in
 	}
 }
 
+// SetAPIKeySource configures a function that resolves the API key for each
+// request. A nil source restores the fixed key supplied to NewProvider.
+func (p *Provider) SetAPIKeySource(source func() (string, error)) {
+	if p == nil {
+		return
+	}
+	p.apiKeySourceMu.Lock()
+	p.apiKeySource = source
+	p.apiKeySourceMu.Unlock()
+}
+
+func (p *Provider) apiKeyForRequest() (string, error) {
+	p.apiKeySourceMu.RLock()
+	source := p.apiKeySource
+	fixedKey := p.apiKey
+	p.apiKeySourceMu.RUnlock()
+	if source == nil {
+		return fixedKey, nil
+	}
+	return source()
+}
+
 // Chat sends messages to the Anthropic Messages API and returns the response.
 func (p *Provider) Chat(
 	ctx context.Context,
@@ -82,7 +107,11 @@ func (p *Provider) Chat(
 	if err != nil {
 		return nil, err
 	}
-	if p.apiKey == "" {
+	apiKey, err := p.apiKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("resolving Anthropic API key: %w", err)
+	}
+	if apiKey == "" {
 		return nil, fmt.Errorf("API key not configured")
 	}
 
@@ -112,7 +141,7 @@ func (p *Provider) Chat(
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", p.apiKey) //nolint:canonicalheader // Anthropic API requires exact header name
+	req.Header.Set("X-API-Key", apiKey) //nolint:canonicalheader // Anthropic API requires exact header name
 	req.Header.Set("Anthropic-Version", defaultAPIVersion)
 	if p.userAgent != "" {
 		req.Header.Set("User-Agent", p.userAgent)

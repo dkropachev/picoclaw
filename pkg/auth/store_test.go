@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -257,6 +260,494 @@ func TestSetCredentialConcurrentUpdatesPreserveAllCredentials(t *testing.T) {
 	}
 }
 
+func TestPersistCredentialIfCurrentCommitsWhenSourceIsCurrent(t *testing.T) {
+	setTestAuthHome(t)
+
+	expiresAt := time.Now().Add(-time.Hour).Round(time.Second)
+	if err := SetCredential("openai:work", &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    expiresAt,
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+	source, err := GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential() error: %v", err)
+	}
+	refreshed := &AuthCredential{
+		AccessToken:  "refreshed-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}
+
+	authoritative, err := PersistCredentialIfCurrent("openai:work", source, refreshed)
+	if err != nil {
+		t.Fatalf("PersistCredentialIfCurrent() error: %v", err)
+	}
+	if !reflect.DeepEqual(authoritative, refreshed) {
+		t.Fatalf("authoritative credential = %+v, want refreshed credential %+v", authoritative, refreshed)
+	}
+	stored, err := GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential() error: %v", err)
+	}
+	if !reflect.DeepEqual(stored, refreshed) {
+		t.Fatalf("stored credential = %+v, want refreshed credential %+v", stored, refreshed)
+	}
+}
+
+func TestPersistCredentialIfCurrentKeepsConcurrentRenewal(t *testing.T) {
+	setTestAuthHome(t)
+
+	if err := SetCredential("openai:work", &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential(expired) error: %v", err)
+	}
+	source, err := GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential() error: %v", err)
+	}
+	renewed := &AuthCredential{
+		AccessToken:  "renewed-token",
+		RefreshToken: "new-refresh-token",
+		ExpiresAt:    time.Now().Add(2 * time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		AccountID:    "renewed-account",
+	}
+	if err := SetCredential("openai:work", renewed); err != nil {
+		t.Fatalf("SetCredential(renewed) error: %v", err)
+	}
+	staleRefresh := &AuthCredential{
+		AccessToken:  "stale-refreshed-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}
+
+	authoritative, err := PersistCredentialIfCurrent("openai:work", source, staleRefresh)
+	if err != nil {
+		t.Fatalf("PersistCredentialIfCurrent() error: %v", err)
+	}
+	if !reflect.DeepEqual(authoritative, renewed) {
+		t.Fatalf("authoritative credential = %+v, want concurrent renewal %+v", authoritative, renewed)
+	}
+	stored, err := GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential() error: %v", err)
+	}
+	if !reflect.DeepEqual(stored, renewed) {
+		t.Fatalf("stored credential = %+v, want concurrent renewal %+v", stored, renewed)
+	}
+}
+
+func TestRefreshCredentialDetailedReportsIdenticalConcurrentRenewalNotCommitted(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential(expired) error: %v", err)
+	}
+	renewed := &AuthCredential{
+		AccessToken:  "renewed-token",
+		RefreshToken: "new-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		AccountID:    "renewed-account",
+	}
+
+	result, err := RefreshCredentialDetailed(
+		credentialID,
+		func(current *AuthCredential) bool { return current.NeedsRefresh() },
+		func(*AuthCredential) (*AuthCredential, error) {
+			if setErr := SetCredential(credentialID, renewed); setErr != nil {
+				t.Fatalf("SetCredential(renewed) error: %v", setErr)
+			}
+			return cloneCredential(renewed), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("RefreshCredentialDetailed() error: %v", err)
+	}
+	if result.Committed {
+		t.Fatal("Committed = true, want false for a concurrent UI replacement")
+	}
+	if !reflect.DeepEqual(result.Credential, renewed) {
+		t.Fatalf("credential = %+v, want concurrent renewal %+v", result.Credential, renewed)
+	}
+}
+
+func TestRefreshCredentialSerializesNetworkRefresh(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "rotating-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+
+	firstRefreshStarted := make(chan struct{})
+	releaseFirstRefresh := make(chan struct{})
+	var callsMu sync.Mutex
+	refreshCalls := 0
+	refresh := func(current *AuthCredential) (*AuthCredential, error) {
+		callsMu.Lock()
+		refreshCalls++
+		call := refreshCalls
+		callsMu.Unlock()
+		if call == 1 {
+			close(firstRefreshStarted)
+			<-releaseFirstRefresh
+		}
+		updated := *current
+		updated.AccessToken = "refreshed-token"
+		updated.RefreshToken = "next-rotating-refresh-token"
+		updated.ExpiresAt = time.Now().Add(time.Hour)
+		return &updated, nil
+	}
+	shouldRefresh := func(current *AuthCredential) bool {
+		return current != nil && current.NeedsRefresh() && current.RefreshToken != ""
+	}
+
+	results := make(chan *AuthCredential, 2)
+	errs := make(chan error, 2)
+	go func() {
+		result, err := RefreshCredential(credentialID, shouldRefresh, refresh)
+		results <- result
+		errs <- err
+	}()
+	<-firstRefreshStarted
+	go func() {
+		result, err := RefreshCredential(credentialID, shouldRefresh, refresh)
+		results <- result
+		errs <- err
+	}()
+	close(releaseFirstRefresh)
+
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("RefreshCredential() error: %v", err)
+		}
+		result := <-results
+		if result == nil || result.AccessToken != "refreshed-token" {
+			t.Fatalf("RefreshCredential() result = %+v, want refreshed credential", result)
+		}
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if refreshCalls != 1 {
+		t.Fatalf("network refresh calls = %d, want 1", refreshCalls)
+	}
+}
+
+func TestRefreshCredentialCanonicalizesNamedProviderAliases(t *testing.T) {
+	setTestAuthHome(t)
+	if err := SetCredential("antigravity:work", &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "antigravity",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+
+	loaded, err := GetCredential("google-antigravity:work")
+	if err != nil || loaded == nil || loaded.AccessToken != "expired-token" {
+		t.Fatalf("canonical alias lookup = (%+v, %v)", loaded, err)
+	}
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Credentials) != 1 || store.Credentials["google-antigravity:work"] == nil {
+		t.Fatalf("canonicalized store = %+v", store.Credentials)
+	}
+
+	var refreshCalls int
+	first, err := RefreshCredential(
+		"google-antigravity:work",
+		func(current *AuthCredential) bool { return current.NeedsRefresh() },
+		func(current *AuthCredential) (*AuthCredential, error) {
+			refreshCalls++
+			updated := *current
+			updated.AccessToken = "refreshed-token"
+			updated.ExpiresAt = time.Now().Add(time.Hour)
+			return &updated, nil
+		},
+	)
+	if err != nil || first == nil || first.AccessToken != "refreshed-token" {
+		t.Fatalf("first refresh = (%+v, %v)", first, err)
+	}
+	second, err := RefreshCredential(
+		"antigravity:work",
+		func(current *AuthCredential) bool { return current.NeedsRefresh() },
+		func(*AuthCredential) (*AuthCredential, error) {
+			refreshCalls++
+			return nil, fmt.Errorf("alias used a second refresh lock")
+		},
+	)
+	if err != nil || second == nil || second.AccessToken != "refreshed-token" {
+		t.Fatalf("alias refresh = (%+v, %v)", second, err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+}
+
+func TestRefreshCredentialSerializesAcrossProcessesAndAliases(t *testing.T) {
+	if os.Getenv("PICOCLAW_AUTH_REFRESH_HELPER") == "1" {
+		credentialID := os.Getenv("PICOCLAW_AUTH_REFRESH_CREDENTIAL_ID")
+		counterPath := os.Getenv("PICOCLAW_AUTH_REFRESH_COUNTER")
+		_, err := RefreshCredential(
+			credentialID,
+			func(current *AuthCredential) bool { return current.NeedsRefresh() },
+			func(current *AuthCredential) (*AuthCredential, error) {
+				counter, openErr := os.OpenFile(counterPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+				if openErr != nil {
+					return nil, openErr
+				}
+				_, writeErr := counter.WriteString("refresh\n")
+				closeErr := counter.Close()
+				if writeErr != nil {
+					return nil, writeErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				time.Sleep(150 * time.Millisecond)
+				updated := *current
+				updated.AccessToken = "process-refreshed-token"
+				updated.ExpiresAt = time.Now().Add(time.Hour)
+				return &updated, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("helper RefreshCredential() error: %v", err)
+		}
+		return
+	}
+
+	testRoot := setTestAuthHome(t)
+	credentialID := "google-antigravity:process-work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "rotating-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "google-antigravity",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+	counterPath := filepath.Join(testRoot, "refresh-counter")
+	ids := []string{"antigravity:process-work", "google-antigravity:process-work"}
+	commands := make([]*exec.Cmd, 0, len(ids))
+	outputs := make([]strings.Builder, len(ids))
+	for index, id := range ids {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRefreshCredentialSerializesAcrossProcessesAndAliases$")
+		cmd.Env = append(os.Environ(),
+			"PICOCLAW_AUTH_REFRESH_HELPER=1",
+			"PICOCLAW_AUTH_REFRESH_CREDENTIAL_ID="+id,
+			"PICOCLAW_AUTH_REFRESH_COUNTER="+counterPath,
+		)
+		cmd.Stdout = &outputs[index]
+		cmd.Stderr = &outputs[index]
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start helper: %v", err)
+		}
+		commands = append(commands, cmd)
+	}
+	for index, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("helper process error: %v\n%s", err, outputs[index].String())
+		}
+	}
+	data, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatalf("ReadFile(counter) error: %v", err)
+	}
+	if got := strings.Count(string(data), "refresh\n"); got != 1 {
+		t.Fatalf("cross-process refresh calls = %d, want 1; counter=%q", got, data)
+	}
+}
+
+func TestRefreshCredentialReturnsConcurrentRenewalAfterRefreshError(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+	renewed := &AuthCredential{
+		AccessToken:  "renewed-token",
+		RefreshToken: "new-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour).Round(time.Second),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}
+
+	got, err := RefreshCredential(
+		credentialID,
+		func(current *AuthCredential) bool { return current.NeedsRefresh() },
+		func(*AuthCredential) (*AuthCredential, error) {
+			if setErr := SetCredential(credentialID, renewed); setErr != nil {
+				t.Fatalf("SetCredential(renewed) error: %v", setErr)
+			}
+			return nil, fmt.Errorf("refresh token was rotated")
+		},
+	)
+	if err != nil {
+		t.Fatalf("RefreshCredential() error: %v", err)
+	}
+	if !reflect.DeepEqual(got, renewed) {
+		t.Fatalf("RefreshCredential() = %+v, want concurrent renewal %+v", got, renewed)
+	}
+}
+
+func TestRefreshCredentialReturnsConcurrentRenewalAfterNilRefreshResult(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+	renewed := &AuthCredential{
+		AccessToken: "renewed-token",
+		Provider:    "openai",
+		AuthMethod:  "token",
+	}
+
+	got, err := RefreshCredential(
+		credentialID,
+		func(current *AuthCredential) bool {
+			return current.AuthMethod == "oauth" && current.NeedsRefresh()
+		},
+		func(*AuthCredential) (*AuthCredential, error) {
+			if setErr := SetCredential(credentialID, renewed); setErr != nil {
+				t.Fatalf("SetCredential(renewed) error: %v", setErr)
+			}
+			return nil, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("RefreshCredential() error: %v", err)
+	}
+	if !reflect.DeepEqual(got, renewed) {
+		t.Fatalf("RefreshCredential() = %+v, want concurrent renewal %+v", got, renewed)
+	}
+}
+
+func TestRefreshCredentialReturnsChangedAuthoritativeCredentialForCallerRetry(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+
+	got, err := RefreshCredential(
+		credentialID,
+		func(current *AuthCredential) bool { return current.NeedsRefresh() },
+		func(*AuthCredential) (*AuthCredential, error) {
+			if setErr := SetCredential(credentialID, &AuthCredential{
+				AccessToken:  "different-expired-token",
+				RefreshToken: "different-refresh-token",
+				ExpiresAt:    time.Now().Add(-time.Minute),
+				Provider:     "openai",
+				AuthMethod:   "oauth",
+			}); setErr != nil {
+				t.Fatalf("SetCredential(replacement) error: %v", setErr)
+			}
+			return nil, fmt.Errorf("refresh failed")
+		},
+	)
+	if err != nil {
+		t.Fatalf("RefreshCredential() error = %v", err)
+	}
+	if got == nil || got.AccessToken != "different-expired-token" || !got.NeedsRefresh() {
+		t.Fatalf("RefreshCredential() = %+v, want changed authoritative credential for retry", got)
+	}
+}
+
+func TestPersistCredentialIfCurrentNormalizesAndValidatesProvider(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken: "old-token",
+		Provider:    "openai",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+	source, err := GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error: %v", err)
+	}
+
+	authoritative, err := PersistCredentialIfCurrent(credentialID, source, &AuthCredential{
+		AccessToken: "new-token",
+		AuthMethod:  "token",
+	})
+	if err != nil {
+		t.Fatalf("PersistCredentialIfCurrent() error: %v", err)
+	}
+	if authoritative.Provider != "openai" {
+		t.Fatalf("provider = %q, want openai", authoritative.Provider)
+	}
+
+	_, err = PersistCredentialIfCurrent(credentialID, authoritative, &AuthCredential{
+		AccessToken: "wrong-provider-token",
+		Provider:    "anthropic",
+		AuthMethod:  "token",
+	})
+	if err == nil {
+		t.Fatal("PersistCredentialIfCurrent() error = nil, want provider mismatch")
+	}
+	stored, getErr := GetCredential(credentialID)
+	if getErr != nil {
+		t.Fatalf("GetCredential() error: %v", getErr)
+	}
+	if !reflect.DeepEqual(stored, authoritative) {
+		t.Fatalf("stored credential = %+v, want unchanged %+v", stored, authoritative)
+	}
+}
+
 func TestNormalizeCredentialID(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -274,6 +765,12 @@ func TestNormalizeCredentialID(t *testing.T) {
 			provider:     "antigravity",
 			credentialID: "personal",
 			want:         "google-antigravity:personal",
+		},
+		{
+			name:         "antigravity alias default",
+			provider:     "google-antigravity",
+			credentialID: "antigravity",
+			want:         "google-antigravity",
 		},
 		{
 			name:         "provider mismatch",
@@ -383,7 +880,7 @@ func TestGetCredentialCanonicalizesLegacyAntigravityProvider(t *testing.T) {
 	}
 }
 
-func TestLoadStoreMergesAntigravityAliasesPreferringNewerExpiry(t *testing.T) {
+func TestLoadStoreKeepsAntigravityTokenBundleAtomicWhenNormalizingAliases(t *testing.T) {
 	tmpDir := setTestAuthHome(t)
 
 	legacyExpiry := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
@@ -436,11 +933,11 @@ func TestLoadStoreMergesAntigravityAliasesPreferringNewerExpiry(t *testing.T) {
 	if cred.AccessToken != "fresh-token" {
 		t.Fatalf("AccessToken = %q, want %q", cred.AccessToken, "fresh-token")
 	}
-	if cred.RefreshToken != "legacy-refresh" {
-		t.Fatalf("RefreshToken = %q, want %q", cred.RefreshToken, "legacy-refresh")
+	if cred.RefreshToken != "" {
+		t.Fatalf("RefreshToken = %q, want no token from stale alias", cred.RefreshToken)
 	}
-	if cred.Email != "legacy@example.com" {
-		t.Fatalf("Email = %q, want %q", cred.Email, "legacy@example.com")
+	if cred.Email != "" {
+		t.Fatalf("Email = %q, want no metadata from stale alias", cred.Email)
 	}
 	if cred.ProjectID != "project-2" {
 		t.Fatalf("ProjectID = %q, want %q", cred.ProjectID, "project-2")
@@ -502,11 +999,11 @@ func TestLoadStorePrefersCanonicalKeyWhenExpiryMatchesAlias(t *testing.T) {
 	if cred.AccessToken != "fresh-token" {
 		t.Fatalf("AccessToken = %q, want %q", cred.AccessToken, "fresh-token")
 	}
-	if cred.RefreshToken != "legacy-refresh" {
-		t.Fatalf("RefreshToken = %q, want %q", cred.RefreshToken, "legacy-refresh")
+	if cred.RefreshToken != "" {
+		t.Fatalf("RefreshToken = %q, want no token from stale alias", cred.RefreshToken)
 	}
-	if cred.Email != "legacy@example.com" {
-		t.Fatalf("Email = %q, want %q", cred.Email, "legacy@example.com")
+	if cred.Email != "" {
+		t.Fatalf("Email = %q, want no metadata from stale alias", cred.Email)
 	}
 	if cred.ProjectID != "project-2" {
 		t.Fatalf("ProjectID = %q, want %q", cred.ProjectID, "project-2")

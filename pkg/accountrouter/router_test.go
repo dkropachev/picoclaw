@@ -566,6 +566,162 @@ func TestStoreRenamesCorruptStateAndContinues(t *testing.T) {
 	}
 }
 
+func TestCredentialAuthInvalidationRecoversExactAliasAccountAcrossRoutersAfterRestart(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "account_router_state.json")
+	target := "credential:copilot:work"
+	sibling := "credential:copilot:worker"
+	cfg := &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "target",
+		Blocks: []config.AccountRouterBlock{
+			{
+				ID:       "target",
+				Type:     config.AccountRouterBlockTypeAccount,
+				Account:  target,
+				Fallback: "sibling",
+			},
+			{
+				ID:      "sibling",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: sibling,
+			},
+		},
+	}
+	accounts := map[string]Account{
+		target: {
+			Candidates: []providers.FallbackCandidate{credentialCandidate(target)},
+		},
+		sibling: {
+			Candidates: []providers.FallbackCandidate{credentialCandidate(sibling)},
+		},
+	}
+	newRouter := func(name string) *Router {
+		router := New(name, cfg, accounts, statePath)
+		if router == nil {
+			t.Fatalf("New(%q) returned nil", name)
+		}
+		return router
+	}
+
+	primary := newRouter("router-primary")
+	secondary := newRouter("router-secondary")
+	primarySelection := primary.Select("", SelectReasonInitial)
+	recordSelectionFailure(t, primary, primarySelection, target, providers.FailoverAuth)
+	recordSelectionFailure(t, primary, primarySelection, sibling, providers.FailoverAuth)
+	secondarySelection := secondary.Select("", SelectReasonInitial)
+	recordSelectionFailure(t, secondary, secondarySelection, target, providers.FailoverAuth)
+
+	if err := InvalidateCredentialAuthFailure(statePath, "github-copilot:work"); err != nil {
+		t.Fatalf("InvalidateCredentialAuthFailure() error = %v", err)
+	}
+
+	// Simulate the gateway starting after the launcher wrote the durable
+	// invalidation. The main state file still contains the old failure until a
+	// router operation consumes the sidecar generation.
+	stores.Delete(filepath.Clean(statePath))
+	restarted := newRouter("router-primary")
+	selection := restarted.Select("", SelectReasonInitial)
+	if got := selectedAccount(t, selection); got != target {
+		t.Fatalf("selected account after restart = %q, want %q", got, target)
+	}
+
+	for _, routerName := range []string{"router-primary", "router-secondary"} {
+		state := restarted.store.st.Routers[routerName].Accounts[target]
+		if state == nil || state.State != "operational" || state.Reason != "" ||
+			state.FailureCount != 0 || !state.UnavailableUntil.IsZero() ||
+			state.LastError != "" || state.AuthInvalidationGeneration == "" {
+			t.Fatalf("%s target state after invalidation = %#v", routerName, state)
+		}
+		if state.LastFailureAt.IsZero() {
+			t.Fatalf("%s target last failure history was erased", routerName)
+		}
+	}
+	siblingState := restarted.store.st.Routers["router-primary"].Accounts[sibling]
+	if siblingState == nil || siblingState.State != "unavailable" ||
+		siblingState.Reason != providers.FailoverAuth || siblingState.FailureCount != 1 {
+		t.Fatalf("prefix sibling state = %#v, want unchanged auth failure", siblingState)
+	}
+}
+
+func TestCredentialAuthInvalidationPreservesNonAuthHealth(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "account_router_state.json")
+	account := "credential:openai:work"
+	router := New("router-main", &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "account",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "account",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: account,
+		}},
+	}, map[string]Account{
+		account: {Candidates: []providers.FallbackCandidate{{
+			Provider:    "openai",
+			Model:       "gpt-4o",
+			IdentityKey: "account:" + account,
+		}}},
+	}, statePath)
+	if router == nil {
+		t.Fatal("New() returned nil")
+	}
+	selection := router.Select("", SelectReasonInitial)
+	recordSelectionFailure(t, router, selection, account, providers.FailoverRateLimit)
+	if err := InvalidateCredentialAuthFailure(statePath, "openai:work"); err != nil {
+		t.Fatalf("InvalidateCredentialAuthFailure() error = %v", err)
+	}
+	_ = router.Select("", SelectReasonInitial)
+
+	state := router.store.st.Routers["router-main"].Accounts[account]
+	if state == nil || state.State != "unavailable" ||
+		state.Reason != providers.FailoverRateLimit || state.FailureCount != 1 ||
+		state.AuthInvalidationGeneration == "" {
+		t.Fatalf("non-auth state after invalidation = %#v", state)
+	}
+}
+
+func TestCredentialAuthInvalidationFencesLatePreRenewalFailure(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "account_router_state.json")
+	account := "credential:openai:work"
+	router := New("router-main", &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "account",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "account",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: account,
+		}},
+	}, map[string]Account{
+		account: {Candidates: []providers.FallbackCandidate{{
+			Provider:    "openai",
+			Model:       "gpt-4o",
+			IdentityKey: "account:" + account,
+		}}},
+	}, statePath)
+	if router == nil {
+		t.Fatal("New() returned nil")
+	}
+
+	staleSelection := router.Select("", SelectReasonInitial)
+	if err := InvalidateCredentialAuthFailure(statePath, "openai:work"); err != nil {
+		t.Fatalf("InvalidateCredentialAuthFailure() error = %v", err)
+	}
+	recordSelectionFailure(t, router, staleSelection, account, providers.FailoverAuth)
+	state := router.store.st.Routers["router-main"].Accounts[account]
+	if state == nil || state.State != "operational" || state.FailureCount != 0 {
+		t.Fatalf("late pre-renewal auth result poisoned state: %#v", state)
+	}
+
+	// A request selected after renewal carries the new generation and may mark
+	// a genuine failure from the replacement credential.
+	freshSelection := router.Select("", SelectReasonInitial)
+	recordSelectionFailure(t, router, freshSelection, account, providers.FailoverAuth)
+	state = router.store.st.Routers["router-main"].Accounts[account]
+	if state == nil || state.State != "unavailable" ||
+		state.Reason != providers.FailoverAuth || state.FailureCount != 1 {
+		t.Fatalf("post-renewal auth failure was not recorded: %#v", state)
+	}
+}
+
 func newTestRouter(t *testing.T, cfg *config.AccountRouterConfig, now time.Time) *Router {
 	t.Helper()
 	router := New("router-main", cfg, map[string]Account{
@@ -620,6 +776,33 @@ func credentialCandidate(account string) providers.FallbackCandidate {
 		DisplayName: account,
 		IdentityKey: "account:" + account,
 	}
+}
+
+func recordSelectionFailure(
+	t *testing.T,
+	router *Router,
+	selection Selection,
+	account string,
+	reason providers.FailoverReason,
+) {
+	t.Helper()
+	for _, candidate := range selection.Candidates {
+		if selection.CandidateAccounts[candidate.StableKey()] != account {
+			continue
+		}
+		failure := errors.New("provider request failed")
+		router.RecordFallbackResult(selection, &providers.FallbackResult{
+			Attempts: []providers.FallbackAttempt{{
+				Provider:    candidate.Provider,
+				Model:       candidate.Model,
+				IdentityKey: candidate.StableKey(),
+				Reason:      reason,
+				Error:       failure,
+			}},
+		}, failure)
+		return
+	}
+	t.Fatalf("selection has no candidate for account %q", account)
 }
 
 func selectedAccount(t *testing.T, selection Selection) string {

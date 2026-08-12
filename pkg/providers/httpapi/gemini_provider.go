@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
@@ -22,12 +23,14 @@ const (
 )
 
 type GeminiProvider struct {
-	apiKey        string
-	apiBase       string
-	httpClient    *http.Client
-	extraBody     map[string]any
-	customHeaders map[string]string
-	userAgent     string
+	apiKey         string
+	apiKeySource   func() (string, error)
+	apiKeySourceMu sync.RWMutex
+	apiBase        string
+	httpClient     *http.Client
+	extraBody      map[string]any
+	customHeaders  map[string]string
+	userAgent      string
 }
 
 func NewGeminiProvider(
@@ -57,6 +60,28 @@ func NewGeminiProvider(
 	}
 }
 
+// SetAPIKeySource configures a function that resolves the API key for each
+// request. A nil source restores the fixed key supplied to NewGeminiProvider.
+func (p *GeminiProvider) SetAPIKeySource(source func() (string, error)) {
+	if p == nil {
+		return
+	}
+	p.apiKeySourceMu.Lock()
+	p.apiKeySource = source
+	p.apiKeySourceMu.Unlock()
+}
+
+func (p *GeminiProvider) apiKeyForRequest() (string, error) {
+	p.apiKeySourceMu.RLock()
+	source := p.apiKeySource
+	fixedKey := p.apiKey
+	p.apiKeySourceMu.RUnlock()
+	if source == nil {
+		return fixedKey, nil
+	}
+	return source()
+}
+
 func (p *GeminiProvider) SupportsThinking() bool {
 	return true
 }
@@ -77,6 +102,10 @@ func (p *GeminiProvider) Chat(
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
+	apiKey, err := p.apiKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("resolving Gemini API key: %w", err)
+	}
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	jsonData, err := json.Marshal(requestBody)
@@ -90,7 +119,7 @@ func (p *GeminiProvider) Chat(
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	p.applyHeaders(req)
+	p.applyHeaders(req, apiKey)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -149,6 +178,10 @@ func (p *GeminiProvider) ChatStreamEvents(
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
+	apiKey, err := p.apiKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("resolving Gemini API key: %w", err)
+	}
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	jsonData, err := json.Marshal(requestBody)
@@ -162,7 +195,7 @@ func (p *GeminiProvider) ChatStreamEvents(
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	p.applyHeaders(req)
+	p.applyHeaders(req, apiKey)
 	req.Header.Set("Accept", "text/event-stream")
 
 	// Streaming should not use a whole-request timeout; context cancellation is the guard.
@@ -216,10 +249,10 @@ func (b *geminiStreamingReadIdleTimeoutBody) Close() error {
 	return b.body.Close()
 }
 
-func (p *GeminiProvider) applyHeaders(req *http.Request) {
+func (p *GeminiProvider) applyHeaders(req *http.Request, apiKey string) {
 	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("X-Goog-Api-Key", p.apiKey)
+	if apiKey != "" {
+		req.Header.Set("X-Goog-Api-Key", apiKey)
 	}
 	if p.userAgent != "" {
 		req.Header.Set("User-Agent", p.userAgent)

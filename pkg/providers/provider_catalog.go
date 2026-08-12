@@ -52,6 +52,27 @@ func IsCreatableModelProvider(provider string) bool {
 	return ok && option.CreateAllowed
 }
 
+// SupportsAccountStoreCredentials reports whether the provider's runtime can
+// consume a credential managed by the account auth store. Most HTTP API
+// providers support a stored token/API key. Managed providers with specialized
+// transports are listed explicitly; ElevenLabs remains model-config-only until
+// its ASR runtime can resolve account-store credentials.
+func SupportsAccountStoreCredentials(provider string) bool {
+	option, ok := modelProviderOptionForName(provider)
+	if !ok || !option.CreateAllowed {
+		return false
+	}
+
+	switch option.ID {
+	case "openai", "anthropic", "antigravity", "github-copilot":
+		return true
+	case "elevenlabs":
+		return false
+	default:
+		return option.httpAPI
+	}
+}
+
 // SplitModelProviderAndID separates a legacy "provider/model" string into its
 // effective provider and canonical model ID. Unknown prefixes are treated as
 // part of the model ID and fall back to defaultProvider.

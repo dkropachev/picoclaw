@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 func TestOAuthLoginRejectsUnsupportedMethod(t *testing.T) {
@@ -96,6 +100,287 @@ func TestOAuthBrowserFlowCreatedAndQueried(t *testing.T) {
 	}
 	if flowResp.Method != oauthMethodBrowser {
 		t.Fatalf("flow method = %q, want %q", flowResp.Method, oauthMethodBrowser)
+	}
+}
+
+func TestOAuthBrowserLoginReplacesExpiredNamedCredentialWithoutTouchingSibling(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		AccessToken:  "expired-access-token",
+		RefreshToken: "expired-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		Email:        "work@example.com",
+	}); err != nil {
+		t.Fatalf("SetCredential expired error: %v", err)
+	}
+	sibling := &auth.AuthCredential{
+		AccessToken:  "personal-access-token",
+		RefreshToken: "personal-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour).UTC().Round(0),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		Email:        "personal@example.com",
+	}
+	if err := auth.SetCredential("openai:personal", sibling); err != nil {
+		t.Fatalf("SetCredential sibling error: %v", err)
+	}
+
+	oauthGeneratePKCE = func() (auth.PKCECodes, error) {
+		return auth.PKCECodes{CodeVerifier: "verifier-1", CodeChallenge: "challenge-1"}, nil
+	}
+	oauthGenerateState = func() (string, error) { return "state-1", nil }
+	oauthBuildAuthorizeURL = func(auth.OAuthProviderConfig, auth.PKCECodes, string, string) string {
+		return "https://example.com/authorize?state=state-1"
+	}
+	fresh := &auth.AuthCredential{
+		AccessToken:  "fresh-access-token",
+		RefreshToken: "fresh-refresh-token",
+		ExpiresAt:    time.Now().Add(2 * time.Hour).UTC().Round(0),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		Email:        "renewed@example.com",
+	}
+	oauthExchangeCodeForTokens = func(
+		auth.OAuthProviderConfig,
+		string,
+		string,
+		string,
+	) (*auth.AuthCredential, error) {
+		return fresh, nil
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		strings.NewReader(
+			`{"provider":"openai","credential_id":"openai:work","method":"browser"}`,
+		),
+	)
+	loginReq.Host = "localhost:18800"
+	loginReq.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d, body=%s", loginRec.Code, http.StatusOK, loginRec.Body.String())
+	}
+
+	var loginResp oauthFlowResponse
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("unmarshal login response: %v", err)
+	}
+	if loginResp.CredentialID != "openai:work" {
+		t.Fatalf("login credential_id = %q, want openai:work", loginResp.CredentialID)
+	}
+	if loginResp.FlowID == "" {
+		t.Fatal("login flow_id is empty")
+	}
+
+	callbackRec := httptest.NewRecorder()
+	callbackReq := httptest.NewRequest(
+		http.MethodGet,
+		"/oauth/callback?state=state-1&code=renewal-code",
+		nil,
+	)
+	mux.ServeHTTP(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want %d, body=%s", callbackRec.Code, http.StatusOK, callbackRec.Body.String())
+	}
+
+	flowRec := httptest.NewRecorder()
+	flowReq := httptest.NewRequest(http.MethodGet, "/api/oauth/flows/"+loginResp.FlowID, nil)
+	mux.ServeHTTP(flowRec, flowReq)
+	if flowRec.Code != http.StatusOK {
+		t.Fatalf("flow status = %d, want %d, body=%s", flowRec.Code, http.StatusOK, flowRec.Body.String())
+	}
+	var flowResp oauthFlowResponse
+	if err := json.Unmarshal(flowRec.Body.Bytes(), &flowResp); err != nil {
+		t.Fatalf("unmarshal flow response: %v", err)
+	}
+	if flowResp.Status != oauthFlowSuccess || flowResp.CredentialID != "openai:work" {
+		t.Fatalf("completed flow = %#v, want success for openai:work", flowResp)
+	}
+
+	store, err := auth.LoadStore()
+	if err != nil {
+		t.Fatalf("LoadStore error: %v", err)
+	}
+	if len(store.Credentials) != 2 {
+		t.Fatalf("credential count = %d, want 2: %#v", len(store.Credentials), store.Credentials)
+	}
+	renewed := store.Credentials["openai:work"]
+	if renewed == nil || *renewed != *fresh || renewed.IsExpired() {
+		t.Fatalf("renewed credential = %#v, want fresh non-expired tokens", renewed)
+	}
+	unchanged := store.Credentials["openai:personal"]
+	if unchanged == nil || *unchanged != *sibling {
+		t.Fatalf("sibling credential = %#v, want unchanged %#v", unchanged, sibling)
+	}
+}
+
+func TestOAuthTokenRenewalRecoversExactAccountRouterCredential(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	workspace := filepath.Join(filepath.Dir(configPath), "router-workspace")
+	cfg.Agents.Defaults.Workspace = workspace
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig error: %v", err)
+	}
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatalf("MkdirAll workspace error: %v", err)
+	}
+
+	const target = "credential:openai:work"
+	const sibling = "credential:openai:worker"
+	statePath := filepath.Join(workspace, "account_router_state.json")
+	router := accountrouter.New("router-main", &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "target",
+		Blocks: []config.AccountRouterBlock{
+			{
+				ID:       "target",
+				Type:     config.AccountRouterBlockTypeAccount,
+				Account:  target,
+				Fallback: "sibling",
+			},
+			{
+				ID:      "sibling",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: sibling,
+			},
+		},
+	}, map[string]accountrouter.Account{
+		target: {
+			Candidates: []providers.FallbackCandidate{{
+				Provider:    "openai",
+				Model:       "gpt-4o",
+				IdentityKey: "account:" + target,
+			}},
+		},
+		sibling: {
+			Candidates: []providers.FallbackCandidate{{
+				Provider:    "openai",
+				Model:       "gpt-4o",
+				IdentityKey: "account:" + sibling,
+			}},
+		},
+	}, statePath)
+	if router == nil {
+		t.Fatal("accountrouter.New() returned nil")
+	}
+	failedSelection := router.Select("", accountrouter.SelectReasonInitial)
+	failedCandidate := failedSelection.Candidates[0]
+	authFailure := errors.New("expired token")
+	router.RecordFallbackResult(failedSelection, &providers.FallbackResult{
+		Attempts: []providers.FallbackAttempt{{
+			Provider:    failedCandidate.Provider,
+			Model:       failedCandidate.Model,
+			IdentityKey: failedCandidate.StableKey(),
+			Reason:      providers.FailoverAuth,
+			Error:       authFailure,
+		}},
+	}, authFailure)
+	beforeRenewal := router.Select("", accountrouter.SelectReasonInitial)
+	if got := beforeRenewal.CandidateAccounts[beforeRenewal.Candidates[0].StableKey()]; got != sibling {
+		t.Fatalf("account before renewal = %q, want fallback %q", got, sibling)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		strings.NewReader(`{"provider":"openai","credential_id":"openai:work","method":"token","token":"fresh-token"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("renewal status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	afterRenewal := router.Select("", accountrouter.SelectReasonInitial)
+	if got := afterRenewal.CandidateAccounts[afterRenewal.Candidates[0].StableKey()]; got != target {
+		t.Fatalf("account after renewal = %q, want recovered %q", got, target)
+	}
+}
+
+func TestOAuthCredentialPersistenceTreatsRouterInvalidationAsBestEffort(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	defaultWorkspace := filepath.Join(filepath.Dir(configPath), "default-workspace")
+	workerWorkspace := filepath.Join(filepath.Dir(configPath), "worker-workspace")
+	cfg.Agents.Defaults.Workspace = defaultWorkspace
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "main", Default: true},
+		{ID: "worker", Workspace: workerWorkspace},
+	}
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig error: %v", err)
+	}
+
+	invalidatedPaths := make(map[string]bool)
+	oauthInvalidateCredentialAuth = func(statePath, credentialID string) error {
+		invalidatedPaths[filepath.Clean(statePath)] = true
+		if credentialID != "openai:work" {
+			t.Fatalf("invalidation credential ID = %q, want openai:work", credentialID)
+		}
+		return errors.New("injected invalidation failure")
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		strings.NewReader(`{"provider":"openai","credential_id":"openai:work","method":"token","token":"durable-token"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	wantPaths := []string{
+		filepath.Join(defaultWorkspace, "account_router_state.json"),
+		filepath.Join(workerWorkspace, "account_router_state.json"),
+	}
+	if len(invalidatedPaths) != len(wantPaths) {
+		t.Fatalf("invalidation paths = %v, want %v", invalidatedPaths, wantPaths)
+	}
+	for _, wantPath := range wantPaths {
+		if !invalidatedPaths[filepath.Clean(wantPath)] {
+			t.Fatalf("invalidation paths = %v, missing %q", invalidatedPaths, wantPath)
+		}
+	}
+	credential, err := auth.GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential error: %v", err)
+	}
+	if credential == nil || credential.AccessToken != "durable-token" {
+		t.Fatalf("persisted credential = %#v, want durable token", credential)
 	}
 }
 
@@ -443,7 +728,7 @@ func TestOAuthProvidersIncludesGitHubCopilotTokenLogin(t *testing.T) {
 	t.Fatal("github-copilot provider missing")
 }
 
-func TestOAuthProvidersIncludesCreatableModelProviders(t *testing.T) {
+func TestOAuthProvidersIncludesOnlyAccountStoreCapableModelProviders(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
 	resetOAuthHooks(t)
@@ -479,6 +764,63 @@ func TestOAuthProvidersIncludesCreatableModelProviders(t *testing.T) {
 		if len(status.Methods) != 1 || status.Methods[0] != oauthMethodToken {
 			t.Fatalf("%s methods = %#v, want token", provider, status.Methods)
 		}
+	}
+
+	for _, provider := range []string{"bedrock", "claude-cli", "codex-cli", "elevenlabs"} {
+		if _, ok := providersByID[provider]; ok {
+			t.Fatalf("%s must not be advertised by the account provider API", provider)
+		}
+	}
+
+	for _, provider := range []string{
+		oauthProviderOpenAI,
+		oauthProviderAnthropic,
+		oauthProviderGoogleAntigravity,
+		oauthProviderGitHubCopilot,
+	} {
+		if _, ok := providersByID[provider]; !ok {
+			t.Fatalf("special account provider %s missing from account provider list", provider)
+		}
+	}
+}
+
+func TestOAuthTokenLoginRejectsProvidersWithoutAccountStoreRuntime(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	for _, provider := range []string{"bedrock", "claude-cli", "codex-cli", "elevenlabs"} {
+		t.Run(provider, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/oauth/login",
+				bytes.NewBufferString(fmt.Sprintf(
+					`{"provider":%q,"method":"token","token":"must-not-be-saved"}`,
+					provider,
+				)),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "unsupported provider") {
+				t.Fatalf("body = %q, want unsupported provider error", rec.Body.String())
+			}
+			cred, err := auth.GetCredential(provider)
+			if err != nil {
+				t.Fatalf("GetCredential error: %v", err)
+			}
+			if cred != nil {
+				t.Fatalf("credential was persisted for unsupported account provider: %#v", cred)
+			}
+		})
 	}
 }
 
@@ -773,6 +1115,7 @@ func resetOAuthHooks(t *testing.T) {
 	origLoadStore := oauthLoadStore
 	origFetchProject := oauthFetchAntigravityProject
 	origFetchGoogleEmail := oauthFetchGoogleUserEmailFunc
+	origInvalidateCredentialAuth := oauthInvalidateCredentialAuth
 
 	t.Cleanup(func() {
 		oauthNow = origNow
@@ -788,5 +1131,6 @@ func resetOAuthHooks(t *testing.T) {
 		oauthLoadStore = origLoadStore
 		oauthFetchAntigravityProject = origFetchProject
 		oauthFetchGoogleUserEmailFunc = origFetchGoogleEmail
+		oauthInvalidateCredentialAuth = origInvalidateCredentialAuth
 	})
 }

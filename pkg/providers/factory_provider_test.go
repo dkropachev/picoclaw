@@ -18,7 +18,13 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
-type factoryStubProvider struct{}
+type factoryStubProvider struct {
+	tokenSource func() (string, error)
+}
+
+func (p *factoryStubProvider) SetTokenSource(source func() (string, error)) {
+	p.tokenSource = source
+}
 
 func (p *factoryStubProvider) Chat(
 	context.Context,
@@ -959,22 +965,24 @@ func TestCreateProviderFromConfig_GitHubCopilotTokenUsesCredentialID(t *testing.
 		newGitHubCopilotProviderWithToken = origNewCopilotProvider
 	})
 
+	storedToken := "gho_test-token"
 	getCredential = func(provider string) (*auth.AuthCredential, error) {
 		if provider != "github-copilot:work" {
 			t.Fatalf("provider = %q, want github-copilot:work", provider)
 		}
 		return &auth.AuthCredential{
-			AccessToken: "gho_test-token",
+			AccessToken: storedToken,
 			Provider:    "github-copilot",
 			AuthMethod:  "token",
 		}, nil
 	}
 
 	var gotToken, gotModel string
+	stub := &factoryStubProvider{}
 	newGitHubCopilotProviderWithToken = func(token string, model string) (LLMProvider, error) {
 		gotToken = token
 		gotModel = model
-		return &factoryStubProvider{}, nil
+		return stub, nil
 	}
 
 	cfg := &config.ModelConfig{
@@ -1000,6 +1008,243 @@ func TestCreateProviderFromConfig_GitHubCopilotTokenUsesCredentialID(t *testing.
 	}
 	if gotModel != "gpt-4.1" {
 		t.Fatalf("constructor model = %q, want gpt-4.1", gotModel)
+	}
+	if stub.tokenSource == nil {
+		t.Fatal("GitHub Copilot provider did not receive a request-time token source")
+	}
+	storedToken = "ghu_rotated-token"
+	rotatedToken, err := stub.tokenSource()
+	if err != nil {
+		t.Fatalf("token source error = %v", err)
+	}
+	if rotatedToken != "ghu_rotated-token" {
+		t.Fatalf("token source = %q, want rotated stored token", rotatedToken)
+	}
+}
+
+func TestCreateProviderFromConfig_StoredAPIKeyReloadsPerRequest(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() { getCredential = origGetCredential })
+
+	tests := []struct {
+		name       string
+		provider   string
+		model      string
+		authHeader string
+		gemini     bool
+		anthropic  bool
+	}{
+		{name: "OpenAI compatible", provider: "openrouter", model: "openai/gpt-4.1", authHeader: "Authorization"},
+		{name: "Minimax", provider: "minimax", model: "MiniMax-M2.1", authHeader: "Authorization"},
+		{name: "Gemini", provider: "gemini", model: "gemini-2.5-flash", authHeader: "X-Goog-Api-Key", gemini: true},
+		{name: "Anthropic Messages", provider: "anthropic-messages", model: "claude-sonnet-4-6", authHeader: "X-API-Key", anthropic: true},
+		{name: "Alibaba Anthropic", provider: "alibaba-coding-anthropic", model: "claude-sonnet-4-6", authHeader: "X-API-Key", anthropic: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			credentialID := tt.provider + ":rotating"
+			storedToken := "stored-key-one"
+			lookups := 0
+			getCredential = func(gotCredentialID string) (*auth.AuthCredential, error) {
+				if gotCredentialID != credentialID {
+					t.Fatalf("credential ID = %q, want %q", gotCredentialID, credentialID)
+				}
+				lookups++
+				return &auth.AuthCredential{
+					AccessToken: storedToken,
+					Provider:    tt.provider,
+					AuthMethod:  "token",
+				}, nil
+			}
+
+			headers := make(chan string, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				value := r.Header.Get(tt.authHeader)
+				if tt.authHeader == "Authorization" {
+					value = strings.TrimPrefix(value, "Bearer ")
+				}
+				headers <- value
+				w.Header().Set("Content-Type", "application/json")
+				if tt.gemini {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"candidates": []any{map[string]any{
+							"content":      map[string]any{"parts": []any{map[string]any{"text": "ok"}}},
+							"finishReason": "STOP",
+						}},
+					})
+					return
+				}
+				if tt.anthropic {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"content":     []any{map[string]any{"type": "text", "text": "ok"}},
+						"stop_reason": "end_turn",
+						"usage":       map[string]any{"input_tokens": 1, "output_tokens": 1},
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{
+						"message":       map[string]any{"content": "ok"},
+						"finish_reason": "stop",
+					}},
+				})
+			}))
+			defer server.Close()
+
+			cfg := &config.ModelConfig{
+				Provider:     tt.provider,
+				Model:        tt.model,
+				APIBase:      server.URL,
+				AuthMethod:   "token",
+				CredentialID: "rotating",
+			}
+			provider, modelID, err := CreateProviderFromConfig(cfg)
+			if err != nil {
+				t.Fatalf("CreateProviderFromConfig() error = %v", err)
+			}
+
+			for _, wantToken := range []string{"stored-key-one", "stored-key-two"} {
+				storedToken = wantToken
+				options := map[string]any(nil)
+				if tt.anthropic {
+					options = map[string]any{"max_tokens": 128}
+				}
+				if _, err := provider.Chat(
+					t.Context(),
+					[]Message{{Role: "user", Content: "hello"}},
+					nil,
+					modelID,
+					options,
+				); err != nil {
+					t.Fatalf("Chat() error = %v", err)
+				}
+				if gotToken := <-headers; gotToken != wantToken {
+					t.Fatalf("request token = %q, want %q", gotToken, wantToken)
+				}
+			}
+			if lookups != 3 {
+				t.Fatalf("credential lookups = %d, want 3 (construction plus two requests)", lookups)
+			}
+		})
+	}
+}
+
+func TestCreateProviderFromConfig_ConfigAPIKeyRemainsFixed(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() { getCredential = origGetCredential })
+	getCredential = func(credentialID string) (*auth.AuthCredential, error) {
+		t.Fatalf("credential store should not be read when api_key is configured: %s", credentialID)
+		return nil, nil
+	}
+
+	headers := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.ModelConfig{
+		Provider:     "openrouter",
+		Model:        "openai/gpt-4.1",
+		APIBase:      server.URL,
+		AuthMethod:   "token",
+		CredentialID: "ignored",
+	}
+	cfg.SetAPIKey("configured-key")
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+
+	for range 2 {
+		if _, err := provider.Chat(
+			t.Context(),
+			[]Message{{Role: "user", Content: "hello"}},
+			nil,
+			modelID,
+			nil,
+		); err != nil {
+			t.Fatalf("Chat() error = %v", err)
+		}
+		if got := <-headers; got != "Bearer configured-key" {
+			t.Fatalf("Authorization = %q, want fixed configured key", got)
+		}
+	}
+}
+
+func TestCreateProviderFromConfig_AzureStoredTokenReloadsPerRequest(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() { getCredential = origGetCredential })
+
+	storedToken := "azure-token-one"
+	lookups := 0
+	getCredential = func(credentialID string) (*auth.AuthCredential, error) {
+		if credentialID != "azure:rotating" {
+			t.Fatalf("credential ID = %q, want azure:rotating", credentialID)
+		}
+		lookups++
+		return &auth.AuthCredential{
+			AccessToken: storedToken,
+			Provider:    "azure",
+			AuthMethod:  "token",
+		}, nil
+	}
+
+	headers := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []any{map[string]any{
+				"type":    "message",
+				"content": []any{map[string]any{"type": "output_text", "text": "ok"}},
+			}},
+			"usage": map[string]any{
+				"input_tokens":          1,
+				"output_tokens":         1,
+				"total_tokens":          2,
+				"input_tokens_details":  map[string]any{"cached_tokens": 0},
+				"output_tokens_details": map[string]any{"reasoning_tokens": 0},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := &config.ModelConfig{
+		Provider:     "azure",
+		Model:        "deployment",
+		APIBase:      server.URL,
+		AuthMethod:   "token",
+		CredentialID: "rotating",
+	}
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+
+	for _, wantToken := range []string{"azure-token-one", "azure-token-two"} {
+		storedToken = wantToken
+		if _, err := provider.Chat(
+			t.Context(),
+			[]Message{{Role: "user", Content: "hello"}},
+			nil,
+			modelID,
+			nil,
+		); err != nil {
+			t.Fatalf("Chat() error = %v", err)
+		}
+		if got := <-headers; got != "Bearer "+wantToken {
+			t.Fatalf("Authorization = %q, want rotated Azure token", got)
+		}
+	}
+	if lookups != 3 {
+		t.Fatalf("credential lookups = %d, want 3 (construction plus two requests)", lookups)
 	}
 }
 

@@ -479,9 +479,16 @@ func extractPartThoughtSignature(thoughtSignature string, thoughtSignatureSnake 
 // --- Token source ---
 
 type antigravityTokenSourceDependencies struct {
-	getCredential  func(string) (*auth.AuthCredential, error)
-	setCredential  func(string, *auth.AuthCredential) error
-	refreshToken   func(*auth.AuthCredential, auth.OAuthProviderConfig) (*auth.AuthCredential, error)
+	getCredential     func(string) (*auth.AuthCredential, error)
+	refreshCredential func(
+		string,
+		func(*auth.AuthCredential) bool,
+		auth.RefreshCredentialFunc,
+	) (*auth.AuthCredential, error)
+	refreshToken func(
+		*auth.AuthCredential,
+		auth.OAuthProviderConfig,
+	) (*auth.AuthCredential, error)
 	fetchProjectID func(string) (string, error)
 }
 
@@ -498,10 +505,10 @@ func CreateAntigravityTokenSourceForCredential(credentialID string) func() (stri
 	return createAntigravityTokenSourceForCredential(
 		normalizedCredentialID,
 		antigravityTokenSourceDependencies{
-			getCredential:  auth.GetCredential,
-			setCredential:  auth.SetCredential,
-			refreshToken:   auth.RefreshAccessToken,
-			fetchProjectID: FetchAntigravityProjectID,
+			getCredential:     auth.GetCredential,
+			refreshCredential: auth.RefreshCredential,
+			refreshToken:      auth.RefreshAccessToken,
+			fetchProjectID:    FetchAntigravityProjectID,
 		},
 	)
 }
@@ -526,27 +533,45 @@ func createAntigravityTokenSourceForCredential(
 			return "", "", err
 		}
 
-		// Refresh if needed
 		if cred.NeedsRefresh() && cred.RefreshToken != "" {
-			oauthCfg := auth.GoogleAntigravityOAuthConfig()
-			refreshed, err := deps.refreshToken(cred, oauthCfg)
+			cred, err = deps.refreshCredential(
+				credentialID,
+				func(current *auth.AuthCredential) bool {
+					return current != nil &&
+						current.NeedsRefresh() &&
+						current.RefreshToken != ""
+				},
+				func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+					if validateErr := validateAntigravityCredential(credentialID, current); validateErr != nil {
+						return nil, validateErr
+					}
+					refreshed, refreshErr := deps.refreshToken(
+						current,
+						auth.GoogleAntigravityOAuthConfig(),
+					)
+					if refreshErr != nil {
+						return nil, refreshErr
+					}
+					if refreshed == nil {
+						return nil, fmt.Errorf("no credential returned")
+					}
+					refreshed.Email = current.Email
+					refreshed.ProjectID = ""
+					if validateErr := validateAntigravityCredential(credentialID, refreshed); validateErr != nil {
+						return nil, fmt.Errorf("refreshed token: %w", validateErr)
+					}
+					return refreshed, nil
+				},
+			)
 			if err != nil {
 				return "", "", fmt.Errorf("refreshing token: %w", err)
 			}
-			if refreshed == nil {
-				return "", "", fmt.Errorf("refreshing token: no credential returned")
+			if cred == nil {
+				return "", "", fmt.Errorf("credential %s was removed while refreshing", credentialID)
 			}
-			refreshed.Email = cred.Email
-			if refreshed.ProjectID == "" {
-				refreshed.ProjectID = cred.ProjectID
+			if err := validateAntigravityCredential(credentialID, cred); err != nil {
+				return "", "", err
 			}
-			if err := validateAntigravityCredential(credentialID, refreshed); err != nil {
-				return "", "", fmt.Errorf("refreshed token: %w", err)
-			}
-			if err := deps.setCredential(credentialID, refreshed); err != nil {
-				return "", "", fmt.Errorf("saving refreshed token: %w", err)
-			}
-			cred = refreshed
 		}
 
 		if cred.IsExpired() {
@@ -556,19 +581,57 @@ func createAntigravityTokenSourceForCredential(
 		}
 
 		projectID := cred.ProjectID
-		if projectID == "" {
-			// Try to fetch project ID from API
-			fetchedID, err := deps.fetchProjectID(cred.AccessToken)
-			if err != nil {
+		for attempts := 0; projectID == "" && attempts < 2; attempts++ {
+			resolved, fetchErr := deps.refreshCredential(
+				credentialID,
+				func(current *auth.AuthCredential) bool {
+					return current != nil && current.ProjectID == ""
+				},
+				func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+					if validateErr := validateAntigravityCredential(credentialID, current); validateErr != nil {
+						return nil, validateErr
+					}
+					fetchedID, fetchErr := deps.fetchProjectID(current.AccessToken)
+					if fetchErr != nil {
+						return nil, fetchErr
+					}
+					updated := *current
+					updated.ProjectID = fetchedID
+					return &updated, nil
+				},
+			)
+			if fetchErr != nil {
+				latest, loadErr := deps.getCredential(credentialID)
+				if loadErr == nil && latest != nil {
+					if validateErr := validateAntigravityCredential(credentialID, latest); validateErr != nil {
+						return "", "", validateErr
+					}
+					cred = latest
+				}
 				logger.WarnCF("provider.antigravity", "Could not fetch project ID, using fallback", map[string]any{
-					"error": err.Error(),
+					"error": fetchErr.Error(),
 				})
-				projectID = "rising-fact-p41fc" // Default fallback (same as OpenCode)
+				if cred.ProjectID != "" {
+					projectID = cred.ProjectID
+				} else if attempts == 1 {
+					projectID = "rising-fact-p41fc" // Default fallback (same as OpenCode)
+				}
 			} else {
-				projectID = fetchedID
-				cred.ProjectID = projectID
-				_ = deps.setCredential(credentialID, cred)
+				if resolved == nil {
+					return "", "", fmt.Errorf("credential %s was removed while fetching project ID", credentialID)
+				}
+				if err := validateAntigravityCredential(credentialID, resolved); err != nil {
+					return "", "", err
+				}
+				cred = resolved
+				projectID = resolved.ProjectID
 			}
+		}
+		if projectID == "" {
+			projectID = "rising-fact-p41fc"
+		}
+		if err := validateAntigravityCredential(credentialID, cred); err != nil {
+			return "", "", err
 		}
 
 		return cred.AccessToken, projectID, nil

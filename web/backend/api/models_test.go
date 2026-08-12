@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -4330,9 +4331,11 @@ func TestHandleFetchModels_AntigravityCredentialRefreshesBeforeLiveModelList(t *
 
 	oldFetch := fetchAntigravityModels
 	oldRefresh := refreshAntigravityCredential
+	oldResolveProject := resolveAntigravityProject
 	t.Cleanup(func() {
 		fetchAntigravityModels = oldFetch
 		refreshAntigravityCredential = oldRefresh
+		resolveAntigravityProject = oldResolveProject
 	})
 
 	var gotToken string
@@ -4365,6 +4368,12 @@ func TestHandleFetchModels_AntigravityCredentialRefreshesBeforeLiveModelList(t *
 			AuthMethod:   "oauth",
 		}, nil
 	}
+	resolveAntigravityProject = func(accessToken string) (string, error) {
+		if accessToken != "refreshed-token" {
+			t.Fatalf("project resolution token = %q, want refreshed token", accessToken)
+		}
+		return "refreshed-project", nil
+	}
 
 	if err := auth.SetCredential(
 		"google-antigravity:work",
@@ -4396,9 +4405,9 @@ func TestHandleFetchModels_AntigravityCredentialRefreshesBeforeLiveModelList(t *
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if gotToken != "refreshed-token" || gotProjectID != "cloud-code-project" {
+	if gotToken != "refreshed-token" || gotProjectID != "refreshed-project" {
 		t.Fatalf(
-			"live fetch auth = (%q, %q), want refreshed token and preserved project",
+			"live fetch auth = (%q, %q), want refreshed token and matching project",
 			gotToken,
 			gotProjectID,
 		)
@@ -4410,8 +4419,144 @@ func TestHandleFetchModels_AntigravityCredentialRefreshesBeforeLiveModelList(t *
 	if stored == nil ||
 		stored.AccessToken != "refreshed-token" ||
 		stored.Email != "work@example.com" ||
-		stored.ProjectID != "cloud-code-project" {
+		stored.ProjectID != "refreshed-project" {
 		t.Fatalf("stored refreshed credential = %+v", stored)
+	}
+}
+
+func TestFetchAntigravityCredentialModelsKeepsConcurrentRenewal(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldFetch := fetchAntigravityModels
+	oldRefresh := refreshAntigravityCredential
+	t.Cleanup(func() {
+		fetchAntigravityModels = oldFetch
+		refreshAntigravityCredential = oldRefresh
+	})
+
+	credentialID := "google-antigravity:work"
+	if err := auth.SetCredential(credentialID, &auth.AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "google-antigravity",
+		AuthMethod:   "oauth",
+		ProjectID:    "old-project",
+	}); err != nil {
+		t.Fatalf("SetCredential(expired) error = %v", err)
+	}
+	renewed := &auth.AuthCredential{
+		AccessToken:  "renewed-token",
+		RefreshToken: "new-refresh-token",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+		Provider:     "google-antigravity",
+		AuthMethod:   "oauth",
+		ProjectID:    "renewed-project",
+	}
+	refreshAntigravityCredential = func(
+		credential *auth.AuthCredential,
+		_ auth.OAuthProviderConfig,
+	) (*auth.AuthCredential, error) {
+		if credential.AccessToken != "expired-token" {
+			t.Fatalf("refresh credential = %+v, want expired credential", credential)
+		}
+		if err := auth.SetCredential(credentialID, renewed); err != nil {
+			t.Fatalf("SetCredential(renewed) error = %v", err)
+		}
+		return &auth.AuthCredential{
+			AccessToken:  "stale-refreshed-token",
+			RefreshToken: "old-refresh-token",
+			ExpiresAt:    time.Now().Add(time.Hour),
+			Provider:     "google-antigravity",
+			AuthMethod:   "oauth",
+			ProjectID:    "old-project",
+		}, nil
+	}
+	fetchAntigravityModels = func(
+		_ context.Context,
+		accessToken string,
+		projectID string,
+	) ([]providers.AntigravityModelInfo, error) {
+		if accessToken != "renewed-token" || projectID != "renewed-project" {
+			t.Fatalf("live fetch auth = (%q, %q), want concurrent renewal", accessToken, projectID)
+		}
+		return []providers.AntigravityModelInfo{{ID: "gemini-3-pro"}}, nil
+	}
+
+	models, live, err := fetchAntigravityCredentialModels(t.Context(), &config.ModelConfig{
+		Provider:     "antigravity",
+		AuthMethod:   "oauth",
+		CredentialID: credentialID,
+	})
+	if err != nil {
+		t.Fatalf("fetchAntigravityCredentialModels() error = %v", err)
+	}
+	if !live || len(models) != 1 || models[0].ID != "gemini-3-pro" {
+		t.Fatalf("fetch result = (%+v, %v), want renewed live result", models, live)
+	}
+	stored, err := auth.GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if stored == nil ||
+		stored.AccessToken != "renewed-token" ||
+		stored.RefreshToken != "new-refresh-token" {
+		t.Fatalf("stored credential = %+v, want concurrent renewal", stored)
+	}
+}
+
+func TestFetchAntigravityCredentialModelsRejectsProviderReplacementDuringProjectResolution(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldFetch := fetchAntigravityModels
+	oldRefreshModelCredential := refreshModelCredential
+	t.Cleanup(func() {
+		fetchAntigravityModels = oldFetch
+		refreshModelCredential = oldRefreshModelCredential
+	})
+
+	credentialID := "google-antigravity:work"
+	if err := auth.SetCredential(credentialID, &auth.AuthCredential{
+		AccessToken: "antigravity-token",
+		Provider:    "google-antigravity",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+	refreshModelCredential = func(
+		string,
+		func(*auth.AuthCredential) bool,
+		auth.RefreshCredentialFunc,
+	) (*auth.AuthCredential, error) {
+		return &auth.AuthCredential{
+			AccessToken: "other-provider-token",
+			ProjectID:   "other-provider-project",
+			Provider:    "openai",
+			AuthMethod:  "oauth",
+		}, nil
+	}
+	fetchCalled := false
+	fetchAntigravityModels = func(
+		context.Context,
+		string,
+		string,
+	) ([]providers.AntigravityModelInfo, error) {
+		fetchCalled = true
+		return nil, nil
+	}
+
+	_, _, err := fetchAntigravityCredentialModels(t.Context(), &config.ModelConfig{
+		Provider:     "antigravity",
+		AuthMethod:   "oauth",
+		CredentialID: credentialID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not antigravity") {
+		t.Fatalf("fetchAntigravityCredentialModels() error = %v, want provider mismatch", err)
+	}
+	if fetchCalled {
+		t.Fatal("model fetch ran with a cross-provider credential")
 	}
 }
 
@@ -4491,7 +4636,7 @@ func TestFetchModelsForAccountConfig_AntigravityCredentialValidationUsesFallback
 				Provider:    "google-antigravity",
 				AuthMethod:  "oauth",
 			},
-			wantError: "has no project ID",
+			wantError: "project lookup failed",
 		},
 	}
 	for _, tt := range tests {
@@ -4500,7 +4645,11 @@ func TestFetchModelsForAccountConfig_AntigravityCredentialValidationUsesFallback
 			defer cleanup()
 
 			oldFetch := fetchAntigravityModels
-			t.Cleanup(func() { fetchAntigravityModels = oldFetch })
+			oldResolveProject := resolveAntigravityProject
+			t.Cleanup(func() {
+				fetchAntigravityModels = oldFetch
+				resolveAntigravityProject = oldResolveProject
+			})
 			fetchCalled := false
 			fetchAntigravityModels = func(
 				context.Context,
@@ -4509,6 +4658,9 @@ func TestFetchModelsForAccountConfig_AntigravityCredentialValidationUsesFallback
 			) ([]providers.AntigravityModelInfo, error) {
 				fetchCalled = true
 				return nil, nil
+			}
+			resolveAntigravityProject = func(string) (string, error) {
+				return "", errors.New("project lookup failed")
 			}
 			if err := auth.SetCredential(
 				"google-antigravity:work",
@@ -4694,6 +4846,71 @@ func TestResolveAccountModelConfigRejectsCredentialProviderMismatch(t *testing.T
 	if _, err := resolveOpenAICodexCredential("openai:work"); err == nil ||
 		!strings.Contains(err.Error(), "not openai") {
 		t.Fatalf("resolveOpenAICodexCredential() error = %v, want provider mismatch", err)
+	}
+}
+
+func TestResolveOpenAICodexCredentialKeepsConcurrentRenewal(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldRefresh := refreshOpenAICodexCredential
+	t.Cleanup(func() { refreshOpenAICodexCredential = oldRefresh })
+
+	credentialID := "openai:work"
+	if err := auth.SetCredential(credentialID, &auth.AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		AccountID:    "old-account",
+	}); err != nil {
+		t.Fatalf("SetCredential(expired) error = %v", err)
+	}
+	renewed := &auth.AuthCredential{
+		AccessToken:  "renewed-token",
+		RefreshToken: "new-refresh-token",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		AccountID:    "renewed-account",
+	}
+	refreshOpenAICodexCredential = func(
+		credential *auth.AuthCredential,
+		_ auth.OAuthProviderConfig,
+	) (*auth.AuthCredential, error) {
+		if credential.AccessToken != "expired-token" {
+			t.Fatalf("refresh credential = %+v, want expired credential", credential)
+		}
+		if err := auth.SetCredential(credentialID, renewed); err != nil {
+			t.Fatalf("SetCredential(renewed) error = %v", err)
+		}
+		return &auth.AuthCredential{
+			AccessToken:  "stale-refreshed-token",
+			RefreshToken: "old-refresh-token",
+			ExpiresAt:    time.Now().Add(time.Hour),
+			Provider:     "openai",
+			AuthMethod:   "oauth",
+		}, nil
+	}
+
+	resolved, err := resolveOpenAICodexCredential(credentialID)
+	if err != nil {
+		t.Fatalf("resolveOpenAICodexCredential() error = %v", err)
+	}
+	if resolved.AccessToken != "renewed-token" ||
+		resolved.RefreshToken != "new-refresh-token" ||
+		resolved.AccountID != "renewed-account" {
+		t.Fatalf("resolved credential = %+v, want concurrent renewal", resolved)
+	}
+	stored, err := auth.GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if stored == nil ||
+		stored.AccessToken != "renewed-token" ||
+		stored.RefreshToken != "new-refresh-token" {
+		t.Fatalf("stored credential = %+v, want concurrent renewal", stored)
 	}
 }
 

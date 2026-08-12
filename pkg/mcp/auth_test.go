@@ -369,6 +369,50 @@ func TestOAuthTokenSourceDoesNotOverwriteReplacementCredential(t *testing.T) {
 	}
 }
 
+func TestOAuthTokenSourceRejectsCrossWiredCredentialBeforeRefresh(t *testing.T) {
+	setMCPAuthTestHome(t)
+
+	var refreshRequests atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		refreshRequests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer tokenServer.Close()
+
+	credentialID := "mcp:cross-wired"
+	original := &picoauth.AuthCredential{
+		AccessToken:   "expired-mcp-token",
+		RefreshToken:  "mcp-refresh",
+		ExpiresAt:     time.Now().Add(-time.Minute),
+		Provider:      "mcp",
+		AuthMethod:    "oauth",
+		OAuthTokenURL: tokenServer.URL,
+		OAuthClientID: "mcp-client",
+	}
+	if err := picoauth.SetCredential(credentialID, original); err != nil {
+		t.Fatal(err)
+	}
+	source, err := oauthTokenSourceForCredential(credentialID, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := picoauth.SetCredential(credentialID, &picoauth.AuthCredential{
+		AccessToken: "openai-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := source.Token(); err == nil || !strings.Contains(err.Error(), "changed provider") {
+		t.Fatalf("Token() error = %v, want provider mismatch", err)
+	}
+	if refreshRequests.Load() != 0 {
+		t.Fatalf("refresh requests = %d, want 0", refreshRequests.Load())
+	}
+}
+
 func TestSharedOAuthCredentialRefreshIsSerialized(t *testing.T) {
 	setMCPAuthTestHome(t)
 

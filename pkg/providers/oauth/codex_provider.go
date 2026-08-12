@@ -321,11 +321,71 @@ func CreateCodexTokenSource() func() (string, string, error) {
 	return CreateCodexTokenSourceForCredential("openai")
 }
 
+type codexTokenSourceDependencies struct {
+	refreshCredential func(
+		string,
+		func(*auth.AuthCredential) bool,
+		auth.RefreshCredentialFunc,
+	) (*auth.AuthCredential, error)
+	refreshToken func(
+		*auth.AuthCredential,
+		auth.OAuthProviderConfig,
+	) (*auth.AuthCredential, error)
+}
+
 func CreateCodexTokenSourceForCredential(credentialID string) func() (string, string, error) {
+	normalizedCredentialID, err := auth.NormalizeCredentialID("openai", credentialID)
+	if err != nil {
+		return func() (string, string, error) {
+			return "", "", fmt.Errorf("invalid OpenAI credential ID: %w", err)
+		}
+	}
+	return createCodexTokenSourceForCredential(
+		normalizedCredentialID,
+		codexTokenSourceDependencies{
+			refreshCredential: auth.RefreshCredential,
+			refreshToken:      auth.RefreshAccessToken,
+		},
+	)
+}
+
+func createCodexTokenSourceForCredential(
+	credentialID string,
+	deps codexTokenSourceDependencies,
+) func() (string, string, error) {
 	return func() (string, string, error) {
-		cred, err := auth.GetCredential(credentialID)
+		cred, err := deps.refreshCredential(
+			credentialID,
+			func(current *auth.AuthCredential) bool {
+				return current != nil &&
+					current.AuthMethod == "oauth" &&
+					current.NeedsRefresh() &&
+					current.RefreshToken != ""
+			},
+			func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+				provider, providerErr := auth.NormalizeCredentialID(current.Provider, "")
+				if providerErr != nil || provider != "openai" {
+					return nil, fmt.Errorf(
+						"credential %s belongs to provider %q, want openai",
+						credentialID,
+						current.Provider,
+					)
+				}
+				refreshed, refreshErr := deps.refreshToken(current, auth.OpenAIOAuthConfig())
+				if refreshErr != nil {
+					return nil, refreshErr
+				}
+				if refreshed == nil {
+					return nil, fmt.Errorf("no credential returned")
+				}
+				if refreshed.AccountID == "" {
+					refreshed.AccountID = current.AccountID
+				}
+				return refreshed, nil
+			},
+		)
 		if err != nil {
-			return "", "", fmt.Errorf("loading auth credentials: %w", err)
+			return "", "", fmt.Errorf("loading or refreshing auth credentials: %w", err)
 		}
 		if cred == nil {
 			return "", "", fmt.Errorf(
@@ -335,19 +395,13 @@ func CreateCodexTokenSourceForCredential(credentialID string) func() (string, st
 			)
 		}
 
-		if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {
-			oauthCfg := auth.OpenAIOAuthConfig()
-			refreshed, err := auth.RefreshAccessToken(cred, oauthCfg)
-			if err != nil {
-				return "", "", fmt.Errorf("refreshing token: %w", err)
-			}
-			if refreshed.AccountID == "" {
-				refreshed.AccountID = cred.AccountID
-			}
-			if err := auth.SetCredential(credentialID, refreshed); err != nil {
-				return "", "", fmt.Errorf("saving refreshed token: %w", err)
-			}
-			return refreshed.AccessToken, refreshed.AccountID, nil
+		provider, providerErr := auth.NormalizeCredentialID(cred.Provider, "")
+		if providerErr != nil || provider != "openai" {
+			return "", "", fmt.Errorf(
+				"credential %s belongs to provider %q, want openai",
+				credentialID,
+				cred.Provider,
+			)
 		}
 
 		return cred.AccessToken, cred.AccountID, nil

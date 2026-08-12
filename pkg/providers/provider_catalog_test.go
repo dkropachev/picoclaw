@@ -85,3 +85,31 @@ func TestResolveModelForProvider(t *testing.T) {
 		})
 	}
 }
+
+func TestSupportsAccountStoreCredentials(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     bool
+	}{
+		{provider: "openai", want: true},
+		{provider: "deepseek", want: true},
+		{provider: "gemini", want: true},
+		{provider: "antigravity", want: true},
+		{provider: "google-antigravity", want: true},
+		{provider: "copilot", want: true},
+		{provider: "bedrock", want: false},
+		{provider: "claude-cli", want: false},
+		{provider: "codex-cli", want: false},
+		{provider: "elevenlabs", want: false},
+		{provider: "router", want: false},
+		{provider: "unknown", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := SupportsAccountStoreCredentials(tt.provider); got != tt.want {
+				t.Fatalf("SupportsAccountStoreCredentials(%q) = %v, want %v", tt.provider, got, tt.want)
+			}
+		})
+	}
+}

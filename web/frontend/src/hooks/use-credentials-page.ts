@@ -32,10 +32,12 @@ export function useCredentialsPage() {
   const [providers, setProviders] = useState<OAuthProviderStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [credentialsRevision, setCredentialsRevision] = useState(0)
 
   const [activeAction, setActiveAction] = useState("")
   const [activeFlow, setActiveFlow] = useState<OAuthFlowState | null>(null)
   const actionTokenRef = useRef(0)
+  const providersRequestRef = useRef(0)
 
   const [watchFlowID, setWatchFlowID] = useState("")
   const [watchMode, setWatchMode] = useState<FlowWatchMode>("")
@@ -50,17 +52,28 @@ export function useCredentialsPage() {
   const [deviceSheetOpen, setDeviceSheetOpen] = useState(false)
   const [deviceFlow, setDeviceFlow] = useState<OAuthFlowState | null>(null)
 
-  const loadProviders = useCallback(async () => {
+  const loadProviders = useCallback(async (): Promise<boolean> => {
+    const request = ++providersRequestRef.current
     try {
       const data = await getOAuthProviders()
+      if (request !== providersRequestRef.current) {
+        return false
+      }
       setProviders(data.providers)
       setError("")
+      return true
     } catch (err) {
+      if (request !== providersRequestRef.current) {
+        return false
+      }
       setError(
         err instanceof Error ? err.message : t("credentials.errors.loadFailed"),
       )
+      return false
     } finally {
-      setLoading(false)
+      if (request === providersRequestRef.current) {
+        setLoading(false)
+      }
     }
   }, [t])
 
@@ -105,6 +118,9 @@ export function useCredentialsPage() {
         setWatchMode("")
         setActiveAction("")
         await loadProviders()
+        if (flow.status === "success") {
+          setCredentialsRevision((revision) => revision + 1)
+        }
       } catch (err) {
         if (canceled) {
           return
@@ -296,6 +312,7 @@ export function useCredentialsPage() {
       token: string,
       credentialID?: string,
     ): Promise<boolean> => {
+      const actionToken = bumpActionToken()
       const actionID = `${provider}:token`
       setActiveAction(actionID)
       setError("")
@@ -307,9 +324,22 @@ export function useCredentialsPage() {
           method: "token",
           token,
         })
-        await loadProviders()
+        if (!isActionTokenCurrent(actionToken)) {
+          return false
+        }
+        const providersLoaded = await loadProviders()
+        if (!isActionTokenCurrent(actionToken)) {
+          return false
+        }
+        if (!providersLoaded) {
+          return false
+        }
+        setCredentialsRevision((revision) => revision + 1)
         return true
       } catch (err) {
+        if (!isActionTokenCurrent(actionToken)) {
+          return false
+        }
         setError(
           err instanceof Error
             ? err.message
@@ -317,10 +347,12 @@ export function useCredentialsPage() {
         )
         return false
       } finally {
-        setActiveAction("")
+        if (isActionTokenCurrent(actionToken)) {
+          setActiveAction("")
+        }
       }
     },
-    [loadProviders, t],
+    [bumpActionToken, isActionTokenCurrent, loadProviders, t],
   )
 
   const doLogout = useCallback(
@@ -332,6 +364,7 @@ export function useCredentialsPage() {
       try {
         await logoutOAuth(provider, credentialID)
         await loadProviders()
+        setCredentialsRevision((revision) => revision + 1)
       } catch (err) {
         setError(
           err instanceof Error
@@ -411,6 +444,10 @@ export function useCredentialsPage() {
     setActiveFlow((prev) => (prev?.status === "pending" ? null : prev))
   }, [bumpActionToken])
 
+  const clearError = useCallback(() => {
+    setError("")
+  }, [])
+
   const logoutProviderLabel = logoutConfirmCredentialID
     ? `${getProviderLabel(logoutConfirmProvider)} (${logoutConfirmCredentialID})`
     : getProviderLabel(logoutConfirmProvider)
@@ -435,6 +472,7 @@ export function useCredentialsPage() {
     providers,
     loading,
     error,
+    credentialsRevision,
     activeAction,
     activeFlow,
     flowHint,
@@ -446,6 +484,7 @@ export function useCredentialsPage() {
     startBrowserOAuth,
     startOpenAIDeviceCode,
     stopLoading,
+    clearError,
     saveToken,
     askLogout,
     handleConfirmLogout,

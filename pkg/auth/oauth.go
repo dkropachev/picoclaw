@@ -482,9 +482,6 @@ func RefreshAccessToken(cred *AuthCredential, cfg OAuthProviderConfig) (*AuthCre
 	if cred.Email != "" && refreshed.Email == "" {
 		refreshed.Email = cred.Email
 	}
-	if cred.ProjectID != "" && refreshed.ProjectID == "" {
-		refreshed.ProjectID = cred.ProjectID
-	}
 	return refreshed, nil
 }
 

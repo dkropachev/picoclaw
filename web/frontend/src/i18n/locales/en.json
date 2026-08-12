@@ -295,7 +295,8 @@
     "defaultName": "Default",
     "actions": {
       "add": "Add Account",
-      "remove": "Remove"
+      "remove": "Remove",
+      "renew": "Renew login"
     },
     "fields": {
       "provider": "Provider",
@@ -323,6 +324,12 @@
       "tokenRequired": "Token is required.",
       "start": "Start Login",
       "save": "Save Account"
+    },
+    "renewal": {
+      "title": "Renew Account Login",
+      "description": "Replace the saved login for this account without changing its identity or routing.",
+      "start": "Start Renewal",
+      "save": "Save New Token"
     }
   },
   "models": {

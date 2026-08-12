@@ -17,6 +17,14 @@ type HTTPProvider struct {
 	delegate *openai_compat.Provider
 }
 
+// SetAPIKeySource configures request-time API key resolution.
+func (p *HTTPProvider) SetAPIKeySource(source func() (string, error)) {
+	if p == nil || p.delegate == nil {
+		return
+	}
+	p.delegate.SetAPIKeySource(source)
+}
+
 func NewHTTPProvider(apiKey, apiBase, proxy string) *HTTPProvider {
 	return &HTTPProvider{
 		delegate: openai_compat.NewProvider(apiKey, apiBase, proxy),

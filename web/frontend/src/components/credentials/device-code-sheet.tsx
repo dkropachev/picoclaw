@@ -70,7 +70,20 @@ export function DeviceCodeSheet({
           </div>
 
           {flow && (
-            <div className="bg-muted rounded-md border px-3 py-2 text-sm">
+            <div
+              role={
+                flow.status === "error" || flow.status === "expired"
+                  ? "alert"
+                  : "status"
+              }
+              aria-live={
+                flow.status === "error" || flow.status === "expired"
+                  ? "assertive"
+                  : "polite"
+              }
+              aria-atomic="true"
+              className="bg-muted rounded-md border px-3 py-2 text-sm"
+            >
               {flowHint}
             </div>
           )}

@@ -31,6 +31,53 @@ func TestGeminiProviderRejectsMissingModelBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestGeminiProviderAPIKeySourceReloadsForChatAndStream(t *testing.T) {
+	headers := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Get("X-Goog-Api-Key")
+		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer server.Close()
+
+	apiKey := "stored-key-one"
+	provider := NewGeminiProvider("initial-key", server.URL, "", "", 0, nil, nil)
+	provider.SetAPIKeySource(func() (string, error) { return apiKey, nil })
+
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"gemini-2.5-flash",
+		nil,
+	); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got := <-headers; got != "stored-key-one" {
+		t.Fatalf("Chat X-Goog-Api-Key = %q, want first stored key", got)
+	}
+
+	apiKey = "stored-key-two"
+	if _, err := provider.ChatStream(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"gemini-2.5-flash",
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if got := <-headers; got != "stored-key-two" {
+		t.Fatalf("ChatStream X-Goog-Api-Key = %q, want rotated stored key", got)
+	}
+}
+
 func TestGeminiProvider_ChatSeparatesThoughtAndToolCall(t *testing.T) {
 	var capturedBody map[string]any
 
