@@ -15,6 +15,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query"
+import { useBlocker } from "@tanstack/react-router"
 import {
   type FormEvent,
   type UIEvent,
@@ -82,15 +83,147 @@ import { cn } from "@/lib/utils"
 const REVIEW_PAGE_SIZE = 40
 
 export interface ReviewsRouteSearch {
-  view?: "development" | "policies"
+  view?: "review" | "development" | "policies"
   case?: string
   focus?: "chat"
   status?: ReviewCaseStatus
   repository?: string
   pull_number?: number
+  repo?: string
+  pr?: number
+  filter?: string
+  role?: "review" | "develop"
+  review_case?: string
 }
 
 export function ReviewsPage({
+  search,
+  onSearchChange,
+}: {
+  search: ReviewsRouteSearch
+  onSearchChange: (search: ReviewsRouteSearch, replace?: boolean) => void
+}) {
+  if (search.view === "review") {
+    return (
+      <StandaloneReviewPage search={search} onSearchChange={onSearchChange} />
+    )
+  }
+  return (
+    <ReviewCaseWorkbenchPage search={search} onSearchChange={onSearchChange} />
+  )
+}
+
+function StandaloneReviewPage({
+  search,
+  onSearchChange,
+}: {
+  search: ReviewsRouteSearch
+  onSearchChange: (search: ReviewsRouteSearch, replace?: boolean) => void
+}) {
+  const { t } = useTranslation()
+  const [dirtyFindingIDs, setDirtyFindingIDs] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [discardNavigationOpen, setDiscardNavigationOpen] = useState(false)
+  const proceedingNavigationRef = useRef(false)
+  const dirty = dirtyFindingIDs.size > 0
+  const shouldBlockNavigation = useCallback(() => dirty, [dirty])
+  const navigationBlocker = useBlocker({
+    shouldBlockFn: shouldBlockNavigation,
+    enableBeforeUnload: shouldBlockNavigation,
+    disabled: !dirty,
+    withResolver: true,
+  })
+  useEffect(() => {
+    if (navigationBlocker.status !== "blocked") return
+    setDiscardNavigationOpen(true)
+  }, [navigationBlocker])
+  const trackFindingDirty = useCallback((findingID: string, value: boolean) => {
+    setDirtyFindingIDs((current) => {
+      const next = new Set(current)
+      if (value) next.add(findingID)
+      else next.delete(findingID)
+      return next
+    })
+  }, [])
+  const changeDiscardNavigationOpen = (open: boolean) => {
+    if (!open && navigationBlocker.status === "blocked") {
+      if (!proceedingNavigationRef.current) navigationBlocker.reset()
+      proceedingNavigationRef.current = false
+    }
+    setDiscardNavigationOpen(open)
+  }
+  const discardAndNavigate = () => {
+    if (navigationBlocker.status !== "blocked") return
+    proceedingNavigationRef.current = true
+    setDirtyFindingIDs(new Set())
+    navigationBlocker.proceed()
+    setDiscardNavigationOpen(false)
+  }
+  const backSearch =
+    search.repo && search.pr
+      ? {
+          repo: search.repo,
+          pr: search.pr,
+          ...(search.filter ? { filter: search.filter } : {}),
+          ...(search.role ? { role: search.role } : {}),
+          ...(search.case ? { review_case: search.case } : {}),
+        }
+      : search.repo
+        ? {
+            repo: search.repo,
+            ...(search.filter ? { filter: search.filter } : {}),
+            ...(search.role ? { role: search.role } : {}),
+          }
+        : {}
+  return (
+    <div className="bg-background flex h-full min-h-0 flex-col">
+      <PageHeader title={t("pages.reviews.title", "Pull request reviews")}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => onSearchChange(backSearch, true)}
+        >
+          <IconArrowLeft />
+          {t("pages.reviews.detail.all_work", "All pull request work")}
+        </Button>
+      </PageHeader>
+      <div className="min-h-0 flex-1 overflow-auto p-3 lg:p-4">
+        <ReviewDetailPanel
+          caseID={search.case}
+          focusChat={search.focus === "chat"}
+          hiddenOnMobile={false}
+          onFindingDirtyChange={trackFindingDirty}
+          onBack={() => onSearchChange(backSearch, true)}
+        />
+      </div>
+      <AlertDialog
+        open={discardNavigationOpen}
+        onOpenChange={changeDiscardNavigationOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved review edits?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Unsaved finding text will be lost if you leave this editor.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={discardAndNavigate}
+            >
+              Discard changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+}
+
+function ReviewCaseWorkbenchPage({
   search,
   onSearchChange,
 }: {
@@ -454,11 +587,13 @@ function ReviewDetailPanel({
   caseID,
   focusChat,
   hiddenOnMobile,
+  onFindingDirtyChange,
   onBack,
 }: {
   caseID?: string
   focusChat: boolean
   hiddenOnMobile: boolean
+  onFindingDirtyChange?: (findingID: string, dirty: boolean) => void
   onBack: () => void
 }) {
   const { t } = useTranslation()
@@ -467,6 +602,9 @@ function ReviewDetailPanel({
   const [actionError, setActionError] = useState<string>()
   const [conflict, setConflict] = useState(false)
   const [submitOpen, setSubmitOpen] = useState(false)
+  const [dirtyFindingIDs, setDirtyFindingIDs] = useState<Set<string>>(
+    () => new Set(),
+  )
   const [reconcileResolution, setReconcileResolution] = useState<
     "submitted" | "absent"
   >()
@@ -486,8 +624,22 @@ function ReviewDetailPanel({
     setConflict(false)
     setBusyAction(undefined)
     setSubmitOpen(false)
+    setDirtyFindingIDs(new Set())
     setReconcileResolution(undefined)
   }, [caseID])
+
+  const trackFindingDirty = useCallback(
+    (findingID: string, dirty: boolean) => {
+      setDirtyFindingIDs((current) => {
+        const next = new Set(current)
+        if (dirty) next.add(findingID)
+        else next.delete(findingID)
+        return next
+      })
+      onFindingDirtyChange?.(findingID, dirty)
+    },
+    [onFindingDirtyChange],
+  )
 
   const acceptDetail = useCallback(
     (next: ReviewCaseDetail) => {
@@ -643,7 +795,7 @@ function ReviewDetailPanel({
   )
 
   const confirmSubmit = async () => {
-    if (!detail) {
+    if (!detail || dirtyFindingIDs.size > 0) {
       return
     }
     try {
@@ -680,6 +832,7 @@ function ReviewDetailPanel({
   const submitAllowed =
     detail?.case.status === "open" &&
     detail.case.active_findings > 0 &&
+    dirtyFindingIDs.size === 0 &&
     !busyAction
 
   return (
@@ -905,6 +1058,7 @@ function ReviewDetailPanel({
                       caseEditable={caseEditable}
                       locked={Boolean(busyAction)}
                       busyAction={busyAction}
+                      onDirtyChange={trackFindingDirty}
                       onSave={saveFinding}
                       onTransition={transitionFinding}
                       onRephrase={rephraseFinding}
@@ -1099,6 +1253,7 @@ function FindingCard({
   caseEditable,
   locked,
   busyAction,
+  onDirtyChange,
   onSave,
   onTransition,
   onRephrase,
@@ -1107,6 +1262,7 @@ function FindingCard({
   caseEditable: boolean
   locked: boolean
   busyAction?: string
+  onDirtyChange?: (findingID: string, dirty: boolean) => void
   onSave: (
     finding: ReviewFinding,
     draft: ReviewFindingDraft,
@@ -1129,11 +1285,17 @@ function FindingCard({
   useEffect(() => {
     if (finding.revision !== revisionRef.current) {
       revisionRef.current = finding.revision
+      setSuggestion(undefined)
       if (!dirty) {
         setDraft(findingDraft(finding))
       }
     }
   }, [dirty, finding])
+
+  useEffect(() => {
+    onDirtyChange?.(finding.id, dirty)
+    return () => onDirtyChange?.(finding.id, false)
+  }, [dirty, finding.id, onDirtyChange])
 
   const updateDraft = (patch: Partial<ReviewFindingDraft>) => {
     setDraft((current) => ({ ...current, ...patch }))
@@ -1222,7 +1384,7 @@ function FindingCard({
             type="button"
             size="sm"
             variant="ghost"
-            disabled={!caseEditable || locked}
+            disabled={!caseEditable || locked || dirty}
             onClick={() =>
               void onTransition(finding, false).catch(() => undefined)
             }
@@ -1425,7 +1587,7 @@ function FindingCard({
                 type="button"
                 variant="secondary"
                 size="sm"
-                disabled={!editorEnabled || instruction.trim() === ""}
+                disabled={!editorEnabled || dirty || instruction.trim() === ""}
                 onClick={() => void previewRephrase()}
               >
                 <IconSparkles />
@@ -1456,7 +1618,7 @@ function FindingCard({
                   <Button
                     type="button"
                     size="sm"
-                    disabled={locked}
+                    disabled={locked || dirty}
                     onClick={() => void applySuggestion()}
                   >
                     {t(

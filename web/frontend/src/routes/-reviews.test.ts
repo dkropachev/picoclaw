@@ -37,6 +37,61 @@ describe("reviews route search", () => {
     ).toEqual({ view: "policies" })
   })
 
+  it("keeps bounded portfolio selection and filter state", () => {
+    expect(
+      normalizeReviewsSearch({
+        repo: " octo/repo ",
+        pr: "84",
+        filter: " role = review ",
+        role: "develop",
+        review_case: caseID,
+        cursor: "server-owned",
+      }),
+    ).toEqual({
+      repo: "octo/repo",
+      pr: 84,
+      filter: "role = review",
+      role: "develop",
+      review_case: caseID,
+    })
+    expect(
+      normalizeReviewsSearch({
+        view: "review",
+        case: caseID,
+        repo: "octo/repo",
+        pr: 84,
+        filter: "status = pending",
+        role: "develop",
+        instruction: "private",
+      }),
+    ).toEqual({
+      view: "review",
+      case: caseID,
+      repo: "octo/repo",
+      pr: 84,
+      filter: "status = pending",
+      role: "review",
+    })
+
+    expect(
+      normalizeReviewsSearch({
+        view: "review",
+        case: "invalid",
+        repo: "octo/repo",
+        pr: 84,
+        role: "review",
+      }),
+    ).toEqual({ repo: "octo/repo", pr: 84, role: "review" })
+
+    expect(
+      normalizeReviewsSearch({
+        repo: "octo/repo",
+        pr: 84,
+        review_case: "invalid",
+      }),
+    ).toEqual({ repo: "octo/repo", pr: 84 })
+  })
+
   it("keeps only safe development selection and repository state", () => {
     expect(
       normalizeReviewsSearch({

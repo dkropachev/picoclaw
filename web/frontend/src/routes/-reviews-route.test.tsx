@@ -33,6 +33,12 @@ vi.mock("@/components/reviews/reviews-page", () => ({
   ),
 }))
 
+vi.mock("@/components/reviews/review-portfolio-page", () => ({
+  ReviewPortfolioPage: ({ search }: { search: ReviewsRouteSearch }) => (
+    <output data-testid="portfolio-search">{JSON.stringify(search)}</output>
+  ),
+}))
+
 vi.mock("@/components/reviews/review-attention-policies-page", () => ({
   ReviewAttentionPoliciesPage: ({
     onShowInbox,
@@ -57,6 +63,43 @@ vi.mock("@/features/chat/controller", () => ({
 }))
 
 describe("reviews route navigation", () => {
+  it("renders the repository portfolio with canonical filter and role state", async () => {
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: [
+          `/reviews?repo=%20octo%2Frepo%20&pr=84&filter=%20role%20%3D%20develop%20&role=develop&review_case=${caseID}&cursor=opaque`,
+        ],
+      }),
+      context: {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        }),
+      },
+    })
+
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        repo: "octo/repo",
+        pr: 84,
+        filter: "role = develop",
+        role: "develop",
+        review_case: caseID,
+      })
+    })
+    expect(screen.getByTestId("portfolio-search")).toHaveTextContent(
+      JSON.stringify({
+        repo: "octo/repo",
+        pr: 84,
+        filter: "role = develop",
+        role: "develop",
+        review_case: caseID,
+      }),
+    )
+  })
+
   it("replaces cursor, prompt, and malformed state with the canonical URL", async () => {
     const router = createRouter({
       routeTree,

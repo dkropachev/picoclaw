@@ -17,6 +17,8 @@
     "workflows": "Workflows",
     "git_workspaces": "Git Workspaces",
     "reviews": "PR Reviews",
+    "reviews_work": "Pull request work",
+    "reviews_configuration": "Configuration",
     "events": "Events",
     "services": "Services",
     "channels_group": "Channels",

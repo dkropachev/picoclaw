@@ -47,6 +47,7 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
   tourId?: string
+  reviewView?: "work" | "configuration"
 }
 
 interface NavSection {
@@ -83,11 +84,20 @@ const eventsNavItem: NavItem = {
   translateTitle: true,
 }
 
-const reviewsNavItem: NavItem = {
-  title: "navigation.reviews",
+const reviewsWorkNavItem: NavItem = {
+  title: "navigation.reviews_work",
   url: "/reviews",
   icon: IconGitPullRequest,
   translateTitle: true,
+  reviewView: "work",
+}
+
+const reviewsConfigurationNavItem: NavItem = {
+  title: "navigation.reviews_configuration",
+  url: "/reviews",
+  icon: IconSettings,
+  translateTitle: true,
+  reviewView: "configuration",
 }
 
 const configNavItem: NavItem = {
@@ -116,6 +126,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { i18n, t } = useTranslation()
   const { isMobile, setOpenMobile } = useSidebar()
   const currentPath = routerState.location.pathname
+  const currentSearch = routerState.location.search as
+    | Record<string, unknown>
+    | undefined
   const {
     channelItems,
     hasMoreChannels,
@@ -191,13 +204,24 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           },
         ],
       },
+      {
+        label: "navigation.reviews",
+        items: [reviewsWorkNavItem, reviewsConfigurationNavItem],
+      },
     ]
   }, [channelItems])
 
-  const renderNavItem = (item: NavItem) => {
-    const isActive =
+  const isNavItemActive = (item: NavItem) => {
+    const pathActive =
       currentPath === item.url ||
       (item.url !== "/" && currentPath.startsWith(`${item.url}/`))
+    if (!pathActive || item.reviewView == null) return pathActive
+    const configurationActive = currentSearch?.view === "policies"
+    return item.reviewView === (configurationActive ? "configuration" : "work")
+  }
+
+  const renderNavItem = (item: NavItem) => {
+    const isActive = isNavItemActive(item)
 
     const content = (
       <>
@@ -219,7 +243,23 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           data-tour={item.tourId}
           className={`h-9 px-3 ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium dark:bg-white/10 dark:text-white" : "text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"}`}
         >
-          <Link to={item.url}>{content}</Link>
+          <Link
+            to={item.url}
+            activeOptions={
+              item.reviewView == null ? undefined : { exact: true }
+            }
+            aria-current={isActive ? "page" : undefined}
+            data-status={isActive ? "active" : undefined}
+            search={
+              item.reviewView === "work"
+                ? {}
+                : item.reviewView === "configuration"
+                  ? { view: "policies" }
+                  : undefined
+            }
+          >
+            {content}
+          </Link>
         </SidebarMenuButton>
       </SidebarMenuItem>
     )
@@ -228,11 +268,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const renderServiceSection = (section: NavSection) => (
     <Collapsible
       key={section.label}
-      defaultOpen={section.items.some(
-        (item) =>
-          currentPath === item.url ||
-          (item.url !== "/" && currentPath.startsWith(`${item.url}/`)),
-      )}
+      defaultOpen={section.items.some(isNavItemActive)}
       className="group/service-section mb-1 last:mb-0"
     >
       <CollapsibleTrigger className="text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
@@ -292,7 +328,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </Collapsible>
 
         <Collapsible
-          defaultOpen={currentPath.startsWith("/agent/")}
+          defaultOpen={
+            currentPath.startsWith("/agent/") || currentPath === "/reviews"
+          }
           className="group/services-collapsible mb-1"
         >
           <SidebarGroup className="px-2 py-0">
@@ -311,7 +349,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>
-                  {renderNavItem(reviewsNavItem)}
                   {renderNavItem(eventsNavItem)}
                   {renderNavItem(logsNavItem)}
                 </SidebarMenu>

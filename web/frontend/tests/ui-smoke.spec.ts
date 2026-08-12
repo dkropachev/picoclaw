@@ -1034,6 +1034,95 @@ const reviewAttentionDetail = {
     submitted_at: "2026-07-30T12:04:01Z",
   },
 }
+const reviewProviderStatus = {
+  availability: "available",
+  connector: "primary",
+  repository: reviewAttentionCase.repository,
+  pull_number: reviewAttentionCase.pull_number,
+  pull_request: {
+    number: reviewAttentionCase.pull_number,
+    title: reviewAttentionCase.summary,
+    state: "open",
+    url: reviewAttentionCase.pull_url,
+    author: "octocat",
+    draft: false,
+    merged: false,
+    updated_at: "2026-08-12T12:00:00Z",
+  },
+  capabilities: { thread_resolution: false },
+  limitations: ["status_view"],
+} as const
+
+function reviewProviderSnapshot(threadResolved: boolean) {
+  return {
+    availability: "available",
+    connector: "primary",
+    repository: reviewAttentionCase.repository,
+    pull_number: reviewAttentionCase.pull_number,
+    pull_request: reviewProviderStatus.pull_request,
+    capabilities: { thread_resolution: true },
+    reviews: [
+      {
+        id: "provider-review-1",
+        state: "CHANGES_REQUESTED",
+        body: "Keep the optimistic concurrency guard.",
+        url: `${reviewAttentionCase.pull_url}#pullrequestreview-1`,
+        author: "provider-reviewer",
+        commit_id: reviewAttentionCase.head_sha,
+        submitted_at: "2026-08-12T11:00:00Z",
+      },
+      {
+        id: "provider-review-2",
+        state: "APPROVED",
+        body: "The follow-up is ready.",
+        url: `${reviewAttentionCase.pull_url}#pullrequestreview-2`,
+        author: "second-reviewer",
+        commit_id: reviewAttentionCase.head_sha,
+        submitted_at: "2026-08-12T11:30:00Z",
+      },
+    ],
+    review_history_complete: true,
+    threads_complete: true,
+    limitations: [],
+    threads: [
+      {
+        token: `rtt_${"c".repeat(43)}`,
+        is_resolved: threadResolved,
+        is_outdated: false,
+        is_collapsed: false,
+        can_resolve: true,
+        total_count: 1,
+        comments: [
+          {
+            body: "The write can replace newer state.",
+            path: "pkg/store.go",
+            line: 72,
+            author: "provider-reviewer",
+            created_at: "2026-08-12T11:01:00Z",
+            updated_at: "2026-08-12T11:02:00Z",
+            url: `${reviewAttentionCase.pull_url}#discussion_r1`,
+          },
+        ],
+      },
+      {
+        is_resolved: true,
+        is_outdated: true,
+        is_collapsed: false,
+        can_resolve: false,
+        total_count: 1,
+        comments: [
+          {
+            body: "This comment applies to an earlier diff.",
+            path: "pkg/legacy.go",
+            line: 10,
+            author: "second-reviewer",
+            created_at: "2026-08-12T10:00:00Z",
+          },
+        ],
+      },
+    ],
+  }
+}
 const prDevelopmentCaseID = `pdc_${"7".repeat(32)}`
 const prDevelopmentAttentionResponseToken = `sha256:${"b".repeat(64)}`
 const prDevelopmentCaseBase = {
@@ -1189,6 +1278,7 @@ async function mockLauncherApis(
     reviewAttentionPoliciesResponseText
   let currentReviewAttentionProjectionText =
     waitingReviewAttentionProjectionText
+  let reviewProviderThreadResolved = false
   let currentPRDevelopmentDetail: PRDevelopmentCaseDetail =
     structuredClone(prDevelopmentDetail)
   let currentPRDevelopmentAttentionProjectionText =
@@ -1859,6 +1949,19 @@ async function mockLauncherApis(
               contentType: "application/json",
               body: currentReviewAttentionProjectionText,
             })
+          }
+          case `/api/reviews/${reviewAttentionCaseID}/provider/thread`: {
+            const body = request.postDataJSON() as {
+              token: string
+              action: "resolve" | "unresolve"
+            }
+            expect(Object.keys(body).sort()).toEqual(["action", "token"])
+            expect(body.token).toBe(`rtt_${"c".repeat(43)}`)
+            reviewProviderThreadResolved = body.action === "resolve"
+            return json(
+              route,
+              reviewProviderSnapshot(reviewProviderThreadResolved),
+            )
           }
           case "/api/accounts/models/fetch": {
             const body = request.postDataJSON() as {
@@ -2753,6 +2856,13 @@ async function mockLauncherApis(
           })
         case `/api/reviews/${reviewAttentionCaseID}`:
           return json(route, reviewAttentionDetail)
+        case `/api/reviews/${reviewAttentionCaseID}/provider`:
+          return json(
+            route,
+            url.searchParams.get("view") === "status"
+              ? reviewProviderStatus
+              : reviewProviderSnapshot(reviewProviderThreadResolved),
+          )
         case `/api/reviews/${reviewAttentionCaseID}/attention`:
           return route.fulfill({
             status: 200,
@@ -3326,6 +3436,91 @@ test("submitted review attention handoff is canonical, focused, fenced, and cont
   expect(errors).toEqual([])
 })
 
+test("pull request work starts at repositories, filters PRs, separates roles, and opens configuration", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/reviews")
+
+  await expect(
+    page.getByRole("heading", { name: "Pull request work" }).last(),
+  ).toBeVisible()
+  const repository = page.getByRole("button", {
+    name: /octo\/repo 2 tracked pull requests/i,
+  })
+  await expect(repository).toContainText("Pending")
+  await expect(repository).toContainText("Needs action")
+  await expect(repository).toContainText("Closed")
+  await expect(repository).toContainText("Reviewing")
+  await expect(repository).toContainText("Developing")
+
+  await repository.click()
+  await expect(page).toHaveURL(/\/reviews\?repo=octo%2Frepo$/)
+  const query = page.getByRole("combobox", { name: "Filter pull requests" })
+  await query.fill("role = develop")
+  await page.getByRole("button", { name: "Search" }).click()
+  await expect(page).toHaveURL(/filter=role\+%3D\+develop/)
+  await expect(page.getByText("Feedback from @reviewer")).toBeVisible()
+  await expect(page.getByText(reviewAttentionCase.summary)).toHaveCount(0)
+
+  await query.fill("")
+  await page.getByRole("button", { name: "Search" }).click()
+  await page.getByRole("button", { name: /#42/ }).click()
+  await expect(
+    page.getByRole("heading", { name: "PicoClaw review" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Live provider review" }),
+  ).toBeVisible()
+  await expect(page.getByText("Current pull request state")).toBeVisible()
+  await expect(page.getByText("@provider-reviewer")).toHaveCount(2)
+  await expect(
+    page.getByText("Keep the optimistic concurrency guard."),
+  ).toBeVisible()
+  await expect(page.getByText("pkg/store.go:72")).toBeVisible()
+  await expect(
+    page.getByText("The write can replace newer state."),
+  ).toBeVisible()
+  await expect(page.getByText("pkg/legacy.go:10")).toBeVisible()
+  await expect(page.getByText("Outdated")).toBeVisible()
+  await page.getByRole("button", { name: "Resolve thread" }).click()
+  await expect(
+    page.getByRole("button", { name: "Reopen thread" }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: /View review case/ }).click()
+  await expect(page).toHaveURL(/view=review/)
+  await page.getByRole("button", { name: "All pull request work" }).click()
+  await expect(page).toHaveURL(/repo=octo%2Frepo.*pr=42.*role=review/)
+  await page.getByRole("button", { name: "octo/repo", exact: true }).click()
+  await page.getByRole("button", { name: /#84/ }).click()
+  await expect(
+    page.getByRole("heading", { name: "Development workspace" }),
+  ).toBeVisible()
+  await expect(page.getByText("Coming soon")).toBeVisible()
+
+  if ((page.viewportSize()?.width ?? 0) < 640) {
+    await page.getByRole("button", { name: "Toggle Sidebar" }).first().click()
+  }
+  const reviewsSection = page.getByRole("button", { name: "PR Reviews" })
+  if ((await reviewsSection.getAttribute("aria-expanded")) !== "true") {
+    await reviewsSection.click()
+  }
+  const workLink = page.getByRole("link", { name: "Pull request work" })
+  const configurationLink = page.getByRole("link", { name: "Configuration" })
+  await expect(workLink).toHaveAttribute("aria-current", "page")
+  await expect(configurationLink).not.toHaveAttribute("aria-current")
+  await configurationLink.click()
+  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
+  await expect(page.getByText("Decision gates request attention")).toBeVisible()
+  if ((page.viewportSize()?.width ?? 0) >= 640) {
+    await expect(workLink).not.toHaveAttribute("aria-current")
+    await expect(configurationLink).toHaveAttribute("aria-current", "page")
+  }
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
 test("captured PR feedback and advisory AI chat are canonical, plain text, and contained on mobile", async ({
   page,
 }) => {
@@ -3581,8 +3776,8 @@ test("review attention policy route is inert, accessible, and contained on deskt
 
   await expect(page).toHaveURL(/\/reviews\?view=policies$/)
   await expect(
-    page.getByRole("button", { name: "Attention policies" }),
-  ).toHaveAttribute("aria-current", "page")
+    page.getByRole("button", { name: "Pull request work" }),
+  ).toBeVisible()
   await expect(page.getByText("Decision gates request attention")).toBeVisible()
   await expect(
     page.getByText(/Changes affect only future decisions that have not pinned/),
@@ -3689,7 +3884,7 @@ test("review attention policy protects dirty navigation and boundary identities 
     }),
   ).toBe(true)
 
-  await page.getByRole("button", { name: "Review inbox", exact: true }).click()
+  await page.getByRole("button", { name: "Pull request work" }).click()
   const firstNavigation = page.getByRole("alertdialog", {
     name: "Discard unsaved policy changes?",
   })
@@ -3730,7 +3925,7 @@ test("review attention policy protects dirty navigation and boundary identities 
   await expect(validationAlert).toContainText(boundaryReviewAttentionRepository)
   await expectNoHorizontalOverflow(page)
 
-  await page.getByRole("button", { name: "Review inbox", exact: true }).click()
+  await page.getByRole("button", { name: "Pull request work" }).click()
   const secondNavigation = page.getByRole("alertdialog", {
     name: "Discard unsaved policy changes?",
   })
@@ -3738,9 +3933,7 @@ test("review attention policy protects dirty navigation and boundary identities 
   await secondNavigation
     .getByRole("button", { name: "Discard changes" })
     .click()
-  await expect(
-    page.getByRole("button", { name: "Review inbox", exact: true }),
-  ).toHaveAttribute("aria-current", "page")
+  await expect(page).toHaveURL(/\/reviews$/)
   expect(
     await page.evaluate(() => {
       const event = new Event("beforeunload", { cancelable: true })
@@ -3785,14 +3978,16 @@ test("review attention policy fences navigation until an in-flight save settles"
   await page.getByRole("button", { name: "Save policies" }).click()
   await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled()
   await expect(
-    page.getByRole("button", { name: "Review inbox", exact: true }),
+    page.getByRole("button", { name: "Pull request work" }),
   ).toBeDisabled()
 
   const services = page.getByRole("button", { name: "Services", exact: true })
   if (!(await services.isVisible())) {
     await page.getByRole("button", { name: "Toggle Sidebar" }).first().click()
   }
-  await services.click()
+  if ((await services.getAttribute("aria-expanded")) !== "true") {
+    await services.click()
+  }
   await page.getByRole("link", { name: "Models", exact: true }).click()
   const navigation = page.getByRole("alertdialog", {
     name: "Discard unsaved policy changes?",
