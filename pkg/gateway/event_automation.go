@@ -96,6 +96,7 @@ type eventReviewRuntime struct {
 	publicationProcess                   func(context.Context) (bool, error)
 	publicationReconciliationProcess     func(context.Context) (bool, error)
 	submitter                            reviews.Submitter
+	provider                             *reviews.GitHubProvider
 	attentionPolicies                    reviews.AttentionPolicySource
 	notificationMCP                      workflows.ToolRunner
 	mcpArtifactRoot                      string
@@ -213,6 +214,8 @@ func setupEventAutomationService(
 		}
 		pollNotifications := githubNotificationPollingEnabled(cfg)
 		reviewSubmission := githubReviewSubmissionReady(ctx, agentLoop)
+		reviewProviderRead := githubReviewProviderReadReady(ctx, agentLoop)
+		reviewProviderWrite := githubReviewProviderWriteReady(ctx, agentLoop)
 		if pollNotifications {
 			if err := validateGitHubNotificationPollingRuntime(
 				ctx,
@@ -222,7 +225,7 @@ func setupEventAutomationService(
 				return nil, err
 			}
 		}
-		if pollNotifications || reviewSubmission {
+		if pollNotifications || reviewSubmission || reviewProviderRead {
 			toolRunner, err := agent.NewWorkflowToolRunner(agentLoop, "")
 			if err != nil {
 				return nil, fmt.Errorf("initialize GitHub event MCP tools: %w", err)
@@ -234,6 +237,16 @@ func setupEventAutomationService(
 				pollNotifications,
 				reviewSubmission,
 			)
+			if reviewProviderRead {
+				reviewRuntime.provider, err = reviews.NewGitHubProvider(
+					toolRunner,
+					githubMCPArtifactRoot(cfg, agentLoop),
+					reviewProviderWrite,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("initialize GitHub review provider: %w", err)
+				}
+			}
 		}
 	} else if githubNotificationPollingEnabled(cfg) {
 		return nil, errors.New(
@@ -392,6 +405,7 @@ func newEventAutomationServiceWithReviews(
 		Agent:                        reviewRuntime.agent,
 		AgentID:                      reviewRuntime.agentID,
 		Submitter:                    reviewRuntime.submitter,
+		Provider:                     reviewRuntime.provider,
 		AcquireWorkingContextRuntime: reviewRuntime.acquireWorkingContextRuntime,
 	})
 	if err != nil {
@@ -814,6 +828,34 @@ func githubReviewSubmissionReady(
 	})
 }
 
+func githubReviewProviderReadReady(
+	ctx context.Context,
+	agentLoop *agent.AgentLoop,
+) bool {
+	if agentLoop == nil {
+		return false
+	}
+	return githubReviewProviderReadToolsReady(func(
+		occurrence workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode {
+		return agentLoop.ResolveWorkflowDependency(ctx, occurrence)
+	})
+}
+
+func githubReviewProviderWriteReady(
+	ctx context.Context,
+	agentLoop *agent.AgentLoop,
+) bool {
+	if agentLoop == nil {
+		return false
+	}
+	return githubReviewProviderWriteToolsReady(func(
+		occurrence workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode {
+		return agentLoop.ResolveWorkflowDependency(ctx, occurrence)
+	})
+}
+
 func githubPRDevelopmentRepairReady(
 	ctx context.Context,
 	runtime prDevelopmentRepairReadiness,
@@ -840,6 +882,34 @@ func githubPRDevelopmentRepairToolsReady(
 		Kind: workflows.WorkflowDependencyKindMCP,
 		Name: reviews.DefaultGitHubMCPServer + "/" +
 			reviews.GitHubPullRequestReadTool,
+	}) == workflows.WorkflowDependencyReadinessReady
+}
+
+func githubReviewProviderReadToolsReady(
+	resolve func(
+		workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode,
+) bool {
+	if resolve == nil {
+		return false
+	}
+	return resolve(workflows.WorkflowDependencyOccurrence{
+		Kind: workflows.WorkflowDependencyKindMCP,
+		Name: reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReadTool,
+	}) == workflows.WorkflowDependencyReadinessReady
+}
+
+func githubReviewProviderWriteToolsReady(
+	resolve func(
+		workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode,
+) bool {
+	if resolve == nil {
+		return false
+	}
+	return resolve(workflows.WorkflowDependencyOccurrence{
+		Kind: workflows.WorkflowDependencyKindMCP,
+		Name: reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReviewWriteTool,
 	}) == workflows.WorkflowDependencyReadinessReady
 }
 
