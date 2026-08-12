@@ -1952,12 +1952,12 @@ func fetchAntigravityCredentialModels(
 						current.Provider,
 					)
 				}
-				refreshed, err := refreshAntigravityCredential(
+				refreshed, credentialRefreshErr := refreshAntigravityCredential(
 					current,
 					auth.GoogleAntigravityOAuthConfig(),
 				)
-				if err != nil {
-					return nil, err
+				if credentialRefreshErr != nil {
+					return nil, credentialRefreshErr
 				}
 				if refreshed == nil {
 					return nil, fmt.Errorf("no credential returned")

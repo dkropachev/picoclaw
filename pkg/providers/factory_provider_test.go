@@ -1037,8 +1037,14 @@ func TestCreateProviderFromConfig_StoredAPIKeyReloadsPerRequest(t *testing.T) {
 		{name: "OpenAI compatible", provider: "openrouter", model: "openai/gpt-4.1", authHeader: "Authorization"},
 		{name: "Minimax", provider: "minimax", model: "MiniMax-M2.1", authHeader: "Authorization"},
 		{name: "Gemini", provider: "gemini", model: "gemini-2.5-flash", authHeader: "X-Goog-Api-Key", gemini: true},
-		{name: "Anthropic Messages", provider: "anthropic-messages", model: "claude-sonnet-4-6", authHeader: "X-API-Key", anthropic: true},
-		{name: "Alibaba Anthropic", provider: "alibaba-coding-anthropic", model: "claude-sonnet-4-6", authHeader: "X-API-Key", anthropic: true},
+		{
+			name: "Anthropic Messages", provider: "anthropic-messages", model: "claude-sonnet-4-6",
+			authHeader: "X-API-Key", anthropic: true,
+		},
+		{
+			name: "Alibaba Anthropic", provider: "alibaba-coding-anthropic", model: "claude-sonnet-4-6",
+			authHeader: "X-API-Key", anthropic: true,
+		},
 	}
 
 	for _, tt := range tests {

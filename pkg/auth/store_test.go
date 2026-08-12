@@ -325,8 +325,8 @@ func TestPersistCredentialIfCurrentKeepsConcurrentRenewal(t *testing.T) {
 		AuthMethod:   "oauth",
 		AccountID:    "renewed-account",
 	}
-	if err := SetCredential("openai:work", renewed); err != nil {
-		t.Fatalf("SetCredential(renewed) error: %v", err)
+	if setErr := SetCredential("openai:work", renewed); setErr != nil {
+		t.Fatalf("SetCredential(renewed) error: %v", setErr)
 	}
 	staleRefresh := &AuthCredential{
 		AccessToken:  "stale-refreshed-token",

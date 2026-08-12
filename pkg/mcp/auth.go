@@ -435,11 +435,3 @@ func cloneOAuthIPs(values []net.IP) []net.IP {
 	}
 	return cloned
 }
-
-func cloneOAuthToken(token *oauth2.Token) *oauth2.Token {
-	if token == nil {
-		return nil
-	}
-	cloned := *token
-	return &cloned
-}

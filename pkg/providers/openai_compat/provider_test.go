@@ -44,7 +44,9 @@ func TestProviderAPIKeySourceReloadsForChatAndStream(t *testing.T) {
 		headers <- r.Header.Get("Authorization")
 		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
+			_, _ = w.Write([]byte(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+			))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
 			return
 		}

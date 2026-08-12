@@ -179,18 +179,18 @@ func InvalidateCredentialAuthFailure(statePath, credentialID string) error {
 	}
 
 	statePath = filepath.Clean(statePath)
-	if _, err := os.Stat(statePath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if _, statErr := os.Stat(statePath); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
 			// No persisted router health exists to invalidate. Avoid creating
 			// workspace state as a side effect of onboarding a new credential.
 			return nil
 		}
-		return fmt.Errorf("stat account router state: %w", err)
+		return fmt.Errorf("stat account router state: %w", statErr)
 	}
 
 	generationBytes := make([]byte, 16)
-	if _, err := rand.Read(generationBytes); err != nil {
-		return fmt.Errorf("generate account router auth invalidation: %w", err)
+	if _, randomErr := rand.Read(generationBytes); randomErr != nil {
+		return fmt.Errorf("generate account router auth invalidation: %w", randomErr)
 	}
 	marker := credentialAuthInvalidation{
 		Version:      credentialAuthInvalidationVersion,
@@ -243,11 +243,12 @@ func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 			&selection,
 		)
 		selection.Candidates = dedupeCandidates(candidates)
+		invalidationGenerations := selection.accountAuthInvalidationGenerations
 		for _, candidate := range selection.Candidates {
 			if account := selection.CandidateAccounts[candidate.StableKey()]; account != "" {
 				selection.ProviderAccounts[providers.ModelKey(candidate.Provider, candidate.Model)] = account
-				if _, ok := selection.accountAuthInvalidationGenerations[account]; !ok {
-					selection.accountAuthInvalidationGenerations[account] = accountAuthInvalidationGeneration(rs, account)
+				if _, ok := invalidationGenerations[account]; !ok {
+					invalidationGenerations[account] = accountAuthInvalidationGeneration(rs, account)
 				}
 			}
 		}
@@ -732,7 +733,7 @@ func readCredentialAuthInvalidation(
 		return credentialAuthInvalidation{}, false
 	}
 	var marker credentialAuthInvalidation
-	if err := json.Unmarshal(data, &marker); err != nil ||
+	if unmarshalErr := json.Unmarshal(data, &marker); unmarshalErr != nil ||
 		marker.Version != credentialAuthInvalidationVersion ||
 		strings.TrimSpace(marker.Generation) == "" {
 		return credentialAuthInvalidation{}, false

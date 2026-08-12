@@ -237,8 +237,8 @@ func TestOAuthTokenRenewalRecoversExactAccountRouterCredential(t *testing.T) {
 	}
 	workspace := filepath.Join(filepath.Dir(configPath), "router-workspace")
 	cfg.Agents.Defaults.Workspace = workspace
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatalf("SaveConfig error: %v", err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig error: %v", saveErr)
 	}
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatalf("MkdirAll workspace error: %v", err)
@@ -336,8 +336,8 @@ func TestOAuthCredentialPersistenceTreatsRouterInvalidationAsBestEffort(t *testi
 		{ID: "main", Default: true},
 		{ID: "worker", Workspace: workerWorkspace},
 	}
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatalf("SaveConfig error: %v", err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig error: %v", saveErr)
 	}
 
 	invalidatedPaths := make(map[string]bool)
@@ -356,7 +356,9 @@ func TestOAuthCredentialPersistenceTreatsRouterInvalidationAsBestEffort(t *testi
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/api/oauth/login",
-		strings.NewReader(`{"provider":"openai","credential_id":"openai:work","method":"token","token":"durable-token"}`),
+		strings.NewReader(
+			`{"provider":"openai","credential_id":"openai:work","method":"token","token":"durable-token"}`,
+		),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)

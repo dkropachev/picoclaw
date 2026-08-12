@@ -405,7 +405,7 @@ func TestNewProvider(t *testing.T) {
 func TestProviderAPIKeySourceReloadsPerRequest(t *testing.T) {
 	headers := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		headers <- r.Header.Get("X-API-Key")
+		headers <- r.Header.Get("X-Api-Key")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"content":[{"type":"text","text":"ok"}],

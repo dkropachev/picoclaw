@@ -529,8 +529,8 @@ func createAntigravityTokenSourceForCredential(
 				credentialID,
 			)
 		}
-		if err := validateAntigravityCredential(credentialID, cred); err != nil {
-			return "", "", err
+		if validationErr := validateAntigravityCredential(credentialID, cred); validationErr != nil {
+			return "", "", validationErr
 		}
 
 		if cred.NeedsRefresh() && cred.RefreshToken != "" {

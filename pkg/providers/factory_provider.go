@@ -112,19 +112,19 @@ func createGitHubCopilotAuthProvider(cfg *config.ModelConfig, modelID string) (L
 			credentialID,
 		)
 	}
-	if err := validateCredentialProvider(credentialID, "github-copilot", cred); err != nil {
-		return nil, err
+	if validationErr := validateCredentialProvider(credentialID, "github-copilot", cred); validationErr != nil {
+		return nil, validationErr
 	}
 	token := strings.TrimSpace(cred.AccessToken)
-	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
-		return nil, fmt.Errorf("invalid GitHub Copilot credential %s: %w", credentialID, err)
+	if validationErr := auth.ValidateGitHubCopilotToken(token); validationErr != nil {
+		return nil, fmt.Errorf("invalid GitHub Copilot credential %s: %w", credentialID, validationErr)
 	}
 	provider, err := newGitHubCopilotProviderWithToken(token, modelID)
 	if err != nil {
 		return nil, err
 	}
 	reloadable, ok := provider.(interface {
-		SetTokenSource(func() (string, error))
+		SetTokenSource(tokenSource func() (string, error))
 	})
 	if !ok {
 		return nil, fmt.Errorf("GitHub Copilot token provider does not support credential reload")
@@ -196,7 +196,7 @@ func newCredentialAccessTokenSource(credentialID, provider string) func() (strin
 
 func configureCredentialAPIKeySource(
 	provider interface {
-		SetAPIKeySource(func() (string, error))
+		SetAPIKeySource(apiKeySource func() (string, error))
 	},
 	cfg *config.ModelConfig,
 	providerName string,

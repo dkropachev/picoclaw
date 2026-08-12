@@ -37,7 +37,9 @@ func TestGeminiProviderAPIKeySourceReloadsForChatAndStream(t *testing.T) {
 		headers <- r.Header.Get("X-Goog-Api-Key")
 		if strings.Contains(r.URL.Path, ":streamGenerateContent") {
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n"))
+			_, _ = w.Write([]byte(
+				"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+			))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

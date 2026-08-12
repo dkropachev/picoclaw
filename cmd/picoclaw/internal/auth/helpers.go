@@ -436,8 +436,8 @@ func authModelsCmd() error {
 			"not logged in to Google Antigravity.\nrun: picoclaw auth login --provider google-antigravity",
 		)
 	}
-	if err := validateAntigravityAuthCredential(cred); err != nil {
-		return err
+	if validationErr := validateAntigravityAuthCredential(cred); validationErr != nil {
+		return validationErr
 	}
 
 	// Refresh token if needed
@@ -448,8 +448,8 @@ func authModelsCmd() error {
 				return current != nil && current.NeedsRefresh() && current.RefreshToken != ""
 			},
 			func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
-				if err := validateAntigravityAuthCredential(current); err != nil {
-					return nil, err
+				if validationErr := validateAntigravityAuthCredential(current); validationErr != nil {
+					return nil, validationErr
 				}
 				return auth.RefreshAccessToken(current, auth.GoogleAntigravityOAuthConfig())
 			},
@@ -460,8 +460,8 @@ func authModelsCmd() error {
 		if refreshed == nil {
 			return fmt.Errorf("Antigravity credential was removed while refreshing")
 		}
-		if err := validateAntigravityAuthCredential(refreshed); err != nil {
-			return err
+		if validationErr := validateAntigravityAuthCredential(refreshed); validationErr != nil {
+			return validationErr
 		}
 		cred = refreshed
 	}
@@ -474,15 +474,15 @@ func authModelsCmd() error {
 				return current != nil && strings.TrimSpace(current.ProjectID) == ""
 			},
 			func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
-				if err := validateAntigravityAuthCredential(current); err != nil {
-					return nil, err
+				if validationErr := validateAntigravityAuthCredential(current); validationErr != nil {
+					return nil, validationErr
 				}
-				projectID, fetchErr := providers.FetchAntigravityProjectID(current.AccessToken)
+				fetchedProjectID, fetchErr := providers.FetchAntigravityProjectID(current.AccessToken)
 				if fetchErr != nil {
 					return nil, fetchErr
 				}
 				updated := *current
-				updated.ProjectID = projectID
+				updated.ProjectID = fetchedProjectID
 				return &updated, nil
 			},
 		)
@@ -492,8 +492,8 @@ func authModelsCmd() error {
 		if resolved == nil {
 			return fmt.Errorf("Antigravity credential was removed while resolving project")
 		}
-		if err := validateAntigravityAuthCredential(resolved); err != nil {
-			return err
+		if validationErr := validateAntigravityAuthCredential(resolved); validationErr != nil {
+			return validationErr
 		}
 		cred = resolved
 		projectID = resolved.ProjectID
