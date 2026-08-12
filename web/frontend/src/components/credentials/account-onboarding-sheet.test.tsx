@@ -27,6 +27,16 @@ const anthropicProvider: OAuthProviderStatus = {
   auth_method: "token",
 }
 
+const googleProvider: OAuthProviderStatus = {
+  provider: "google-antigravity",
+  credential_id: "google-antigravity",
+  display_name: "Google Antigravity",
+  methods: ["browser"],
+  logged_in: true,
+  status: "expired",
+  auth_method: "oauth",
+}
+
 interface RenderRenewalOptions {
   account?: OAuthProviderStatus
   open?: boolean
@@ -78,9 +88,9 @@ function renderRenewal(options: RenderRenewalOptions) {
 }
 
 async function renewalControls() {
-  const method = await screen.findByRole("combobox")
-  const provider = screen.getByDisplayValue(/OpenAI|Anthropic/)
-  const credentialID = screen.getByDisplayValue(/^(openai|anthropic)(:work)?$/)
+  const provider = await screen.findByLabelText("Provider")
+  const method = screen.getByLabelText("Login Method")
+  const credentialID = screen.getByLabelText("Credential ID")
 
   return { provider, method, credentialID }
 }
@@ -128,8 +138,9 @@ describe("AccountOnboardingSheet renewal mode", () => {
     expect(controls.provider).toHaveProperty("readOnly", true)
     expect(controls.credentialID).toHaveValue("anthropic:work")
     expect(controls.credentialID).toHaveProperty("readOnly", true)
-    expect(controls.method).toHaveTextContent("Token")
-    expect(controls.method).toBeEnabled()
+    expect(controls.method).toHaveValue("Token")
+    expect(controls.method).toHaveProperty("readOnly", true)
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument()
 
     await user.type(
       screen.getByPlaceholderText("Anthropic token"),
@@ -149,7 +160,7 @@ describe("AccountOnboardingSheet renewal mode", () => {
     expect(callbacks.onOpenChange).toHaveBeenCalledWith(false)
   })
 
-  it("keeps methods selectable while renewing the default provider key", async () => {
+  it("locks Codex renewal to device login", async () => {
     const user = userEvent.setup()
     const callbacks = renderRenewal({ account: openAIProvider })
     const controls = await renewalControls()
@@ -158,11 +169,9 @@ describe("AccountOnboardingSheet renewal mode", () => {
     expect(controls.provider).toHaveProperty("readOnly", true)
     expect(controls.credentialID).toHaveValue("openai")
     expect(controls.credentialID).toHaveProperty("readOnly", true)
-    expect(controls.method).toBeEnabled()
-
-    controls.method.focus()
-    await user.keyboard("{Enter}{ArrowDown}{Enter}")
-    expect(controls.method).toHaveTextContent("Device Code")
+    expect(controls.method).toHaveValue("Device Code")
+    expect(controls.method).toHaveProperty("readOnly", true)
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Start Renewal" }))
 
     await waitFor(() =>
@@ -176,8 +185,8 @@ describe("AccountOnboardingSheet renewal mode", () => {
   it("starts browser renewal for the exact named credential ID", async () => {
     const user = userEvent.setup()
     const account: OAuthProviderStatus = {
-      ...openAIProvider,
-      credential_id: "openai:work",
+      ...googleProvider,
+      credential_id: "google-antigravity:work",
     }
     const callbacks = renderRenewal({ account })
 
@@ -187,8 +196,8 @@ describe("AccountOnboardingSheet renewal mode", () => {
 
     await waitFor(() =>
       expect(callbacks.onStartBrowserOAuth).toHaveBeenCalledWith(
-        "openai",
-        "openai:work",
+        "google-antigravity",
+        "google-antigravity:work",
       ),
     )
     expect(callbacks.onOpenChange).toHaveBeenCalledWith(false)
@@ -274,7 +283,10 @@ describe("AccountOnboardingSheet renewal mode", () => {
     const pendingBrowser = new Promise<boolean>((resolve) => {
       resolveBrowser = resolve
     })
-    const account = { ...openAIProvider, credential_id: "openai:work" }
+    const account = {
+      ...googleProvider,
+      credential_id: "google-antigravity:work",
+    }
     const nextAccount = {
       ...anthropicProvider,
       credential_id: "anthropic:next",
@@ -287,8 +299,8 @@ describe("AccountOnboardingSheet renewal mode", () => {
     )
     await waitFor(() =>
       expect(view.onStartBrowserOAuth).toHaveBeenCalledWith(
-        "openai",
-        "openai:work",
+        "google-antigravity",
+        "google-antigravity:work",
       ),
     )
     expect(screen.getByRole("button", { name: "Start Renewal" })).toBeDisabled()

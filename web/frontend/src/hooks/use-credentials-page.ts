@@ -14,6 +14,10 @@ import {
 
 type FlowWatchMode = "" | "status" | "poll"
 
+interface StartDeviceCodeOptions {
+  openImmediately?: boolean
+}
+
 function getProviderLabel(provider: OAuthProvider | ""): string {
   if (provider === "openai") return "OpenAI"
   if (provider === "anthropic") return "Anthropic"
@@ -253,10 +257,18 @@ export function useCredentialsPage() {
   )
 
   const startOpenAIDeviceCode = useCallback(
-    async (credentialID?: string): Promise<boolean> => {
+    async (
+      credentialID?: string,
+      options: StartDeviceCodeOptions = {},
+    ): Promise<boolean> => {
+      const openImmediately = options.openImmediately === true
       const actionToken = bumpActionToken()
       setActiveAction("openai:device")
       setError("")
+      if (openImmediately) {
+        setDeviceFlow(null)
+        setDeviceSheetOpen(true)
+      }
 
       try {
         const resp = await loginOAuth({
@@ -293,6 +305,9 @@ export function useCredentialsPage() {
       } catch (err) {
         if (!isActionTokenCurrent(actionToken)) {
           return false
+        }
+        if (openImmediately) {
+          setDeviceSheetOpen(false)
         }
         setActiveAction("")
         setError(
@@ -415,6 +430,11 @@ export function useCredentialsPage() {
         return
       }
 
+      if (activeAction === "openai:device") {
+        bumpActionToken()
+        setActiveAction("")
+      }
+
       if (watchMode === "poll") {
         setWatchFlowID("")
         setWatchMode("")
@@ -431,7 +451,7 @@ export function useCredentialsPage() {
         setActiveFlow(null)
       }
     },
-    [activeAction, activeFlow, watchMode],
+    [activeAction, activeFlow, bumpActionToken, watchMode],
   )
 
   const stopLoading = useCallback(() => {

@@ -286,6 +286,10 @@
       "description": "Open the verification page and enter the code below. This page will refresh automatically.",
       "code": "User Code",
       "url": "Verification URL",
+      "copy": "Copy {{label}}",
+      "copied": "{{label}} copied",
+      "copyFailed": "Could not copy {{label}}",
+      "starting": "Starting device login...",
       "polling": "Polling login status...",
       "open": "Open Verification Page"
     }

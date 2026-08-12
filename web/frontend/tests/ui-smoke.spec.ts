@@ -4493,12 +4493,18 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   expect(errors).toEqual([])
 })
 
-test("expired named account login can be renewed with an exact replacement token", async ({
+test("Codex renewal opens device login directly for the exact account", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
   const credentialID = "openai:expired-work"
-  const replacementToken = "replacement-account-token"
+  const flowID = "device-renewal"
+  const userCode = "ABCD-EFGH"
+  const verifyURL = "https://auth.openai.com/device"
+  let releaseDeviceLogin!: () => void
+  const deviceLoginPending = new Promise<void>((resolve) => {
+    releaseDeviceLogin = resolve
+  })
 
   await gotoMockedRoute(page, "/accounts", {
     oauthProviders: [
@@ -4525,6 +4531,31 @@ test("expired named account login can be renewed with an exact replacement token
     ],
     codexAccountLimits: { accounts: [] },
   })
+  await page.route("**/api/oauth/login", async (route) => {
+    await deviceLoginPending
+    return json(route, {
+      status: "pending",
+      provider: "openai",
+      credential_id: credentialID,
+      method: "device_code",
+      flow_id: flowID,
+      user_code: userCode,
+      verify_url: verifyURL,
+      interval: 30,
+    })
+  })
+  await page.route(`**/api/oauth/flows/${flowID}/poll`, async (route) => {
+    return json(route, {
+      flow_id: flowID,
+      provider: "openai",
+      credential_id: credentialID,
+      method: "device_code",
+      status: "pending",
+      user_code: userCode,
+      verify_url: verifyURL,
+      interval: 30,
+    })
+  })
 
   const accountCard = page.locator("article").filter({
     has: page.getByRole("heading", { name: "expired-work" }),
@@ -4532,28 +4563,134 @@ test("expired named account login can be renewed with an exact replacement token
   await expect(accountCard.getByText("Expired", { exact: true })).toBeVisible()
   const renew = accountCard.getByRole("button", { name: "Renew login" })
   await expect(renew).toBeVisible()
+  const firstLoginRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return request.method() === "POST" && url.pathname === "/api/oauth/login"
+  })
+  const firstLoginResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return (
+      response.request().method() === "POST" &&
+      url.pathname === "/api/oauth/login"
+    )
+  })
   await renew.click()
 
-  const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
-  await expect(renewal).toBeVisible()
+  expect((await firstLoginRequest).postDataJSON()).toEqual({
+    provider: "openai",
+    credential_id: credentialID,
+    method: "device_code",
+  })
   await expect(
-    renewal.getByText(
-      "Replace the saved login for this account without changing its identity or routing.",
-    ),
-  ).toBeVisible()
-  const lockedIdentity = renewal.getByRole("textbox")
-  await expect(lockedIdentity).toHaveCount(2)
-  await expect(lockedIdentity.nth(0)).toHaveValue("OpenAI")
-  await expect(lockedIdentity.nth(0)).toHaveJSProperty("readOnly", true)
-  await expect(lockedIdentity.nth(1)).toHaveValue(credentialID)
-  await expect(lockedIdentity.nth(1)).toHaveJSProperty("readOnly", true)
+    page.getByRole("dialog", { name: "Renew Account Login" }),
+  ).toHaveCount(0)
+
+  const deviceLogin = page.getByRole("dialog", {
+    name: "OpenAI Device Login",
+  })
+  await expect(deviceLogin).toBeVisible()
+  await expect(deviceLogin.getByText("Starting device login...")).toBeVisible()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy User Code" }),
+  ).toBeDisabled()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy Verification URL" }),
+  ).toBeDisabled()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Open Verification Page" }),
+  ).toBeDisabled()
+
+  await deviceLogin.getByRole("button", { name: "Cancel" }).click()
+  await expect(deviceLogin).toBeHidden()
+  releaseDeviceLogin()
+  await firstLoginResponse
+  await page.waitForTimeout(100)
+  await expect(deviceLogin).toBeHidden()
+  await expect(renew).toBeEnabled()
+
+  const loginRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return request.method() === "POST" && url.pathname === "/api/oauth/login"
+  })
+  await renew.click()
+  expect((await loginRequest).postDataJSON()).toEqual({
+    provider: "openai",
+    credential_id: credentialID,
+    method: "device_code",
+  })
+  await expect(deviceLogin).toBeVisible()
+
+  await expect(deviceLogin.getByText(userCode)).toBeVisible()
+  await expect(deviceLogin.getByRole("link", { name: verifyURL })).toBeVisible()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy User Code" }),
+  ).toContainText("📋")
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy Verification URL" }),
+  ).toContainText("📋")
 
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
+  await deviceLogin.getByRole("button", { name: "Cancel" }).click()
+  expect(errors).toEqual([])
+})
 
-  await renewal.getByRole("combobox").click()
-  await page.getByRole("option", { name: "Token", exact: true }).click()
-  await renewal.getByPlaceholder("OpenAI token").fill(replacementToken)
+test("token account renewal keeps its method and exact identity locked", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const credentialID = "anthropic:expired-work"
+  const replacementToken = "replacement-account-token"
+
+  await gotoMockedRoute(page, "/accounts", {
+    oauthProviders: [
+      {
+        provider: "anthropic",
+        credential_id: "anthropic",
+        display_name: "Anthropic",
+        methods: ["token"],
+        logged_in: true,
+        status: "connected",
+        credentials: [
+          {
+            provider: "anthropic",
+            credential_id: credentialID,
+            display_name: "Anthropic",
+            methods: ["token"],
+            logged_in: true,
+            status: "expired",
+            auth_method: "token",
+          },
+        ],
+      },
+    ],
+    codexAccountLimits: { accounts: [] },
+  })
+
+  const accountCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "expired-work" }),
+  })
+  await accountCard.getByRole("button", { name: "Renew login" }).click()
+
+  const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
+  await expect(renewal).toBeVisible()
+  await expect(renewal.getByLabel("Provider")).toHaveValue("Anthropic")
+  await expect(renewal.getByLabel("Provider")).toHaveJSProperty(
+    "readOnly",
+    true,
+  )
+  await expect(renewal.getByLabel("Login Method")).toHaveValue("Token")
+  await expect(renewal.getByLabel("Login Method")).toHaveJSProperty(
+    "readOnly",
+    true,
+  )
+  await expect(renewal.getByLabel("Credential ID")).toHaveValue(credentialID)
+  await expect(renewal.getByLabel("Credential ID")).toHaveJSProperty(
+    "readOnly",
+    true,
+  )
+  await expect(renewal.getByRole("combobox")).toHaveCount(0)
+  await renewal.getByPlaceholder("Anthropic token").fill(replacementToken)
 
   const loginRequest = page.waitForRequest((request) => {
     const url = new URL(request.url())
@@ -4573,7 +4710,7 @@ test("expired named account login can be renewed with an exact replacement token
   await renewal.getByRole("button", { name: "Save New Token" }).click()
 
   expect((await loginRequest).postDataJSON()).toEqual({
-    provider: "openai",
+    provider: "anthropic",
     credential_id: credentialID,
     method: "token",
     token: replacementToken,
@@ -4587,26 +4724,26 @@ test("a rejected account renewal remains visible in its sheet", async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "desktop error smoke coverage")
-  const credentialID = "openai:expired-work"
+  const credentialID = "anthropic:expired-work"
 
   await gotoMockedRoute(page, "/accounts", {
     oauthProviders: [
       {
-        provider: "openai",
-        credential_id: "openai",
-        display_name: "OpenAI",
-        methods: ["browser", "device_code", "token"],
+        provider: "anthropic",
+        credential_id: "anthropic",
+        display_name: "Anthropic",
+        methods: ["token"],
         logged_in: true,
         status: "connected",
         credentials: [
           {
-            provider: "openai",
+            provider: "anthropic",
             credential_id: credentialID,
-            display_name: "OpenAI",
-            methods: ["browser", "device_code", "token"],
+            display_name: "Anthropic",
+            methods: ["token"],
             logged_in: true,
             status: "expired",
-            auth_method: "oauth",
+            auth_method: "token",
           },
         ],
       },
@@ -4626,8 +4763,6 @@ test("a rejected account renewal remains visible in its sheet", async ({
   })
   await accountCard.getByRole("button", { name: "Renew login" }).click()
   const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
-  await renewal.getByRole("combobox").click()
-  await page.getByRole("option", { name: "Token", exact: true }).click()
   await renewal.getByLabel("Token").fill("rejected-token")
   await renewal.getByRole("button", { name: "Save New Token" }).click()
 

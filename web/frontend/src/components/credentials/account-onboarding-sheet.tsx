@@ -27,6 +27,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 
+import { getAccountRenewalMethod } from "./account-renewal"
+
 const DEFAULT_PROVIDERS: OAuthProviderStatus[] = [
   {
     provider: "openai",
@@ -90,18 +92,6 @@ function actionKey(provider: OAuthProvider, method: OAuthMethod): string {
   return `${provider}:${method}`
 }
 
-function preferredRenewalMethod(
-  account: OAuthProviderStatus | undefined,
-): OAuthMethod {
-  if (!account) return "browser"
-  if (account.auth_method === "token" && account.methods.includes("token")) {
-    return "token"
-  }
-  if (account.methods.includes("browser")) return "browser"
-  if (account.methods.includes("device_code")) return "device_code"
-  return account.methods[0] ?? "token"
-}
-
 export function AccountOnboardingSheet({
   open,
   account,
@@ -118,7 +108,7 @@ export function AccountOnboardingSheet({
   const renewalMode = account != null
   const renewalCredentialID = account?.credential_id || account?.provider || ""
   const initialProvider = account?.provider ?? "openai"
-  const initialMethod = preferredRenewalMethod(account)
+  const initialMethod = getAccountRenewalMethod(account)
   const providerOptions = useMemo(() => {
     const merged = new Map<string, OAuthProviderStatus>()
     const add = (item: OAuthProviderStatus) => {
@@ -190,10 +180,10 @@ export function AccountOnboardingSheet({
     if (methods.length === 0) {
       return
     }
-    if (!methods.includes(method)) {
+    if (!renewalMode && !methods.includes(method)) {
       setMethod(methods[0] as OAuthMethod)
     }
-  }, [method, methods])
+  }, [method, methods, renewalMode])
 
   const validate = () => {
     const nextErrors: Record<string, string> = {}
@@ -324,27 +314,35 @@ export function AccountOnboardingSheet({
             </Field>
 
             <Field label={t("accounts.fields.method")} required>
-              <Select
-                value={method}
-                onValueChange={(value) => {
-                  setMethod(value as OAuthMethod)
-                  setErrors({})
-                }}
-              >
-                <SelectTrigger
-                  className="w-full"
+              {renewalMode ? (
+                <Input
+                  value={methodLabel(method)}
                   aria-label={t("accounts.fields.method")}
+                  readOnly
+                />
+              ) : (
+                <Select
+                  value={method}
+                  onValueChange={(value) => {
+                    setMethod(value as OAuthMethod)
+                    setErrors({})
+                  }}
                 >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {methods.map((item) => (
-                    <SelectItem key={item} value={item}>
-                      {methodLabel(item as OAuthMethod)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                  <SelectTrigger
+                    className="w-full"
+                    aria-label={t("accounts.fields.method")}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {methods.map((item) => (
+                      <SelectItem key={item} value={item}>
+                        {methodLabel(item as OAuthMethod)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </Field>
 
             {renewalMode ? (

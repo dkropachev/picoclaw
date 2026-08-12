@@ -248,6 +248,10 @@
       "description": "Otevřete ověřovací stránku a zadejte níže uvedený kód. Tato stránka se obnoví automaticky.",
       "code": "Uživatelský kód",
       "url": "Ověřovací URL",
+      "copy": "Kopírovat {{label}}",
+      "copied": "{{label}} zkopírováno",
+      "copyFailed": "{{label}} se nepodařilo zkopírovat",
+      "starting": "Spouštím přihlášení zařízení...",
       "polling": "Zjišťuji stav přihlášení...",
       "open": "Otevřít ověřovací stránku"
     }

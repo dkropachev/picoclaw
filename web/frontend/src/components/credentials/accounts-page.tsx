@@ -45,6 +45,7 @@ import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
 import { AccountOnboardingSheet } from "./account-onboarding-sheet"
+import { getAccountRenewalMethod } from "./account-renewal"
 import { CodexAccountLimitSummary } from "./codex-account-limits-panel"
 import { DeviceCodeSheet } from "./device-code-sheet"
 import { LogoutConfirmDialog } from "./logout-confirm-dialog"
@@ -840,6 +841,17 @@ function AccountsHomePage() {
 
   const handleRenewAccount = (account: OAuthProviderStatus) => {
     clearError()
+    if (
+      account.provider === "openai" &&
+      getAccountRenewalMethod(account) === "device_code"
+    ) {
+      setRenewalAccount(null)
+      setOnboardingOpen(false)
+      void startOpenAIDeviceCode(getAccountCredentialID(account), {
+        openImmediately: true,
+      })
+      return
+    }
     setRenewalAccount(account)
     setOnboardingOpen(true)
   }
