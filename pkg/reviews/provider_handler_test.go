@@ -52,7 +52,10 @@ func TestProviderHandlerRequiresExactStatusQueryAndThreadBody(t *testing.T) {
 	handler := &Handler{Service: newReviewTestService(t, store, nil, nil)}
 	for _, query := range []string{"?", "?view=", "?view=status&", "?view=status&view=status", "?other=status"} {
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, RuntimeRoutePrefix+"/"+serviceTestCaseID+"/provider"+query, nil))
+		handler.ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodGet, RuntimeRoutePrefix+"/"+serviceTestCaseID+"/provider"+query, nil),
+		)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("query %q status=%d body=%s", query, response.Code, response.Body.String())
 		}
@@ -84,7 +87,9 @@ func TestProviderHandlerRequiresExactStatusQueryAndThreadBody(t *testing.T) {
 }
 
 func TestProviderHandlerMethodContracts(t *testing.T) {
-	handler := &Handler{Service: newReviewTestService(t, &reviewServiceStore{getResult: serviceTestDetail(4)}, nil, nil)}
+	handler := &Handler{
+		Service: newReviewTestService(t, &reviewServiceStore{getResult: serviceTestDetail(4)}, nil, nil),
+	}
 	for _, test := range []struct{ method, path, allow string }{
 		{http.MethodPost, RuntimeRoutePrefix + "/" + serviceTestCaseID + "/provider", http.MethodGet},
 		{http.MethodGet, RuntimeRoutePrefix + "/" + serviceTestCaseID + "/provider/thread", http.MethodPost},

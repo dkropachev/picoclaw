@@ -224,12 +224,14 @@ func (provider *GitHubProvider) Snapshot(
 		availability = ProviderAvailabilityPartial
 	}
 	snapshot := ProviderSnapshot{
-		Availability:          availability,
-		Connector:             reviewCase.Connector,
-		Repository:            reviewCase.Repository,
-		PullNumber:            reviewCase.PullNumber,
-		PullRequest:           &pull,
-		Capabilities:          ProviderCapabilities{ThreadResolution: provider.WriteReady && threadsHaveTokens(threads)},
+		Availability: availability,
+		Connector:    reviewCase.Connector,
+		Repository:   reviewCase.Repository,
+		PullNumber:   reviewCase.PullNumber,
+		PullRequest:  &pull,
+		Capabilities: ProviderCapabilities{
+			ThreadResolution: provider.WriteReady && threadsHaveTokens(threads),
+		},
 		Reviews:               reviews,
 		ReviewHistoryComplete: reviewsComplete,
 		ThreadsComplete:       threadsComplete,
@@ -481,7 +483,11 @@ func (provider *GitHubProvider) readReviews(
 			break
 		}
 		var pageItems []providerReviewWire
-		if err := decodeProviderExactJSON(raw, &pageItems); err != nil || pageItems == nil || len(pageItems) > providerReviewsPerPage {
+		if err := decodeProviderExactJSON(
+			raw,
+			&pageItems,
+		); err != nil || pageItems == nil ||
+			len(pageItems) > providerReviewsPerPage {
 			return nil, false, nil, totalBytes, ErrProviderIncompatible
 		}
 		if len(pageItems) == 0 {
@@ -541,8 +547,10 @@ func projectProviderReview(wire providerReviewWire, pullURL string) (ProviderRev
 	if !validProviderText(author, providerMaximumAuthorBytes, false) {
 		return ProviderReview{}, ErrProviderIncompatible
 	}
-	return ProviderReview{ID: id, State: strings.ToLower(wire.State), Body: wire.Body,
-		URL: wire.HTMLURL, Author: author, CommitID: wire.CommitID, SubmittedAt: wire.SubmittedAt}, nil
+	return ProviderReview{
+		ID: id, State: strings.ToLower(wire.State), Body: wire.Body,
+		URL: wire.HTMLURL, Author: author, CommitID: wire.CommitID, SubmittedAt: wire.SubmittedAt,
+	}, nil
 }
 
 type providerThreadsWire struct {
@@ -555,7 +563,7 @@ type providerPageInfoWire struct {
 	EndCursor   string `json:"endCursor"`
 }
 type providerThreadWire struct {
-	ID          string
+	ID          string                      `json:"-"`
 	IsResolved  bool                        `json:"is_resolved"`
 	IsOutdated  bool                        `json:"is_outdated"`
 	IsCollapsed bool                        `json:"is_collapsed"`
@@ -600,14 +608,6 @@ func (wire *providerThreadWire) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-func (provider *GitHubProvider) readThreads(
-	ctx context.Context,
-	reviewCase eventing.ReviewCase,
-	initialBytes int,
-) ([]ProviderThread, bool, []string, int, error) {
-	return provider.readThreadsWithPublicBytes(ctx, reviewCase, initialBytes, 0)
-}
-
 func (provider *GitHubProvider) readThreadsWithPublicBytes(
 	ctx context.Context,
 	reviewCase eventing.ReviewCase,
@@ -641,8 +641,10 @@ func (provider *GitHubProvider) scanThreads(
 	seenThreadIDs := make(map[string]struct{})
 	expectedTotal := -1
 	for page := 1; page <= providerMaximumPages; page++ {
-		args := map[string]any{"method": "get_review_comments", "owner": owner, "repo": repo,
-			"pullNumber": reviewCase.PullNumber, "perPage": providerThreadsPerPage}
+		args := map[string]any{
+			"method": "get_review_comments", "owner": owner, "repo": repo,
+			"pullNumber": reviewCase.PullNumber, "perPage": providerThreadsPerPage,
+		}
 		if after != "" {
 			args["after"] = after
 		}
@@ -767,8 +769,13 @@ func (provider *GitHubProvider) projectThread(
 	wire providerThreadWire,
 ) (ProviderThread, []string, error) {
 	limitations := []string{}
-	thread := ProviderThread{IsResolved: wire.IsResolved, IsOutdated: wire.IsOutdated,
-		IsCollapsed: wire.IsCollapsed, TotalCount: wire.TotalCount, Comments: make([]ProviderThreadComment, 0, len(wire.Comments))}
+	thread := ProviderThread{
+		IsResolved:  wire.IsResolved,
+		IsOutdated:  wire.IsOutdated,
+		IsCollapsed: wire.IsCollapsed,
+		TotalCount:  wire.TotalCount,
+		Comments:    make([]ProviderThreadComment, 0, len(wire.Comments)),
+	}
 	if wire.TotalCount < 0 || wire.TotalCount < len(wire.Comments) {
 		return ProviderThread{}, nil, ErrProviderIncompatible
 	}
@@ -794,8 +801,15 @@ func (provider *GitHubProvider) projectThread(
 			copied := *line
 			line = &copied
 		}
-		thread.Comments = append(thread.Comments, ProviderThreadComment{Body: comment.Body, Path: comment.Path,
-			Line: line, Author: comment.Author, CreatedAt: comment.CreatedAt, UpdatedAt: comment.UpdatedAt, URL: comment.HTMLURL})
+		thread.Comments = append(thread.Comments, ProviderThreadComment{
+			Body:      comment.Body,
+			Path:      comment.Path,
+			Line:      line,
+			Author:    comment.Author,
+			CreatedAt: comment.CreatedAt,
+			UpdatedAt: comment.UpdatedAt,
+			URL:       comment.HTMLURL,
+		})
 	}
 	return thread, limitations, nil
 }
@@ -805,12 +819,16 @@ func (provider *GitHubProvider) findThreadID(
 	reviewCase eventing.ReviewCase,
 	token string,
 ) (string, bool, error) {
-	_, rawThreads, _, _, _, err := provider.scanThreads(ctx, reviewCase, 0, 0)
+	_, rawThreads, complete, limitations, totalBytes, err := provider.scanThreads(ctx, reviewCase, 0, 0)
+	_ = complete
+	_ = limitations
+	_ = totalBytes
 	if err != nil {
 		return "", false, err
 	}
 	for _, thread := range rawThreads {
-		if validProviderThreadID(thread.ID) && hmac.Equal([]byte(provider.threadToken(reviewCase.ID, thread.ID)), []byte(token)) {
+		if validProviderThreadID(thread.ID) &&
+			hmac.Equal([]byte(provider.threadToken(reviewCase.ID, thread.ID)), []byte(token)) {
 			return thread.ID, thread.IsResolved, nil
 		}
 	}
@@ -836,8 +854,10 @@ func (provider *GitHubProvider) run(ctx context.Context, tool string, args map[s
 	if server == "" {
 		server = DefaultGitHubMCPServer
 	}
-	return provider.Runner.RunTool(ctx, workflows.ToolRequest{Name: picomcp.CanonicalToolName(server, tool), Args: args,
-		MCP: true, MCPServer: server, MCPTool: tool})
+	return provider.Runner.RunTool(ctx, workflows.ToolRequest{
+		Name: picomcp.CanonicalToolName(server, tool), Args: args,
+		MCP: true, MCPServer: server, MCPTool: tool,
+	})
 }
 
 func (provider *GitHubProvider) exactJSON(outputs map[string]any, limit int) ([]byte, error) {
@@ -965,7 +985,8 @@ func decodeProviderExactJSON(raw []byte, destination any) error {
 
 func validProviderPullURL(raw, repository string, pullNumber int64) bool {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
 		return false
 	}
 	wantPath := "/" + repository + "/pull/" + strconv.FormatInt(pullNumber, 10)
@@ -975,19 +996,14 @@ func validProviderPullURL(raw, repository string, pullNumber int64) bool {
 func sameProviderPullURL(actual, expected string) bool {
 	a, errA := url.Parse(actual)
 	e, errE := url.Parse(expected)
-	return errA == nil && errE == nil && a.Scheme == "https" && e.Scheme == "https" && a.User == nil && e.User == nil && a.RawQuery == "" && a.Fragment == "" &&
-		strings.EqualFold(a.Host, e.Host) && strings.EqualFold(strings.TrimSuffix(a.Path, "/"), strings.TrimSuffix(e.Path, "/"))
-}
-
-func validOptionalProviderURL(raw string) bool {
-	if raw == "" {
-		return true
-	}
-	if len(raw) > providerMaximumURLBytes || !utf8.ValidString(raw) {
+	if errA != nil || errE != nil || a.Scheme != "https" || e.Scheme != "https" {
 		return false
 	}
-	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	if a.User != nil || e.User != nil || a.RawQuery != "" || a.Fragment != "" {
+		return false
+	}
+	return strings.EqualFold(a.Host, e.Host) &&
+		strings.EqualFold(strings.TrimSuffix(a.Path, "/"), strings.TrimSuffix(e.Path, "/"))
 }
 
 func providerURLBelongsToPull(raw string, pullURL string) bool {
@@ -1014,9 +1030,11 @@ func validOptionalProviderTime(raw string) bool {
 	_, err := time.Parse(time.RFC3339, raw)
 	return err == nil
 }
+
 func validProviderText(raw string, maximum int, required bool) bool {
 	return (!required || raw != "") && len(raw) <= maximum && utf8.ValidString(raw) && !strings.ContainsRune(raw, 0)
 }
+
 func validProviderNumericID(raw string) bool {
 	if raw == "" || len(raw) > 32 {
 		return false
@@ -1028,9 +1046,12 @@ func validProviderNumericID(raw string) bool {
 	}
 	return raw != "0"
 }
+
 func validProviderThreadID(raw string) bool {
-	return raw != "" && len(raw) <= providerMaximumThreadID && utf8.ValidString(raw) && raw == strings.TrimSpace(raw) && !strings.ContainsRune(raw, 0)
+	return raw != "" && len(raw) <= providerMaximumThreadID && utf8.ValidString(raw) && raw == strings.TrimSpace(raw) &&
+		!strings.ContainsRune(raw, 0)
 }
+
 func validProviderToken(raw string) bool {
 	if !strings.HasPrefix(raw, "rtt_") || len(raw) > 128 {
 		return false
@@ -1038,6 +1059,7 @@ func validProviderToken(raw string) bool {
 	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(raw, "rtt_"))
 	return err == nil && len(decoded) == sha256.Size
 }
+
 func threadsHaveTokens(threads []ProviderThread) bool {
 	for _, thread := range threads {
 		if thread.Token != "" {
@@ -1046,6 +1068,7 @@ func threadsHaveTokens(threads []ProviderThread) bool {
 	}
 	return false
 }
+
 func uniqueProviderLimitations(values []string) []string {
 	result := make([]string, 0, len(values))
 	seen := map[string]struct{}{}
@@ -1066,10 +1089,12 @@ func containsProviderLimitationValue(values []string, want string) bool {
 	}
 	return false
 }
+
 func providerPublicSizeReview(value ProviderReview) int {
 	raw, _ := json.Marshal(value)
 	return len(raw) + 1
 }
+
 func providerPublicSizeReviews(values []ProviderReview) int {
 	total := 0
 	for _, value := range values {
@@ -1077,6 +1102,7 @@ func providerPublicSizeReviews(values []ProviderReview) int {
 	}
 	return total
 }
+
 func providerPublicSizeThread(value ProviderThread) int {
 	raw, _ := json.Marshal(value)
 	return len(raw) + 1

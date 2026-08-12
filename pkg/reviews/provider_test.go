@@ -421,10 +421,12 @@ func (runner *providerTestRunner) RunTool(
 			if page == 2 && runner.overlapReviews {
 				body = "Same review returned on an overlapping second page"
 			}
-			response = []any{map[string]any{"id": 101, "state": "COMMENTED", "body": body,
+			response = []any{map[string]any{
+				"id": 101, "state": "COMMENTED", "body": body,
 				"html_url": "https://github.com/octo/repo/pull/42#pullrequestreview-101",
 				"user":     map[string]any{"login": "reviewer"}, "commit_id": strings.Repeat("a", 40),
-				"submitted_at": "2026-08-12T11:00:00Z"}}
+				"submitted_at": "2026-08-12T11:00:00Z",
+			}}
 		}
 	case "get_review_comments":
 		commentCount := runner.threadCommentCount
@@ -439,8 +441,10 @@ func (runner *providerTestRunner) RunTool(
 				"html_url": "https://github.com/octo/repo/pull/42#discussion_r1",
 			})
 		}
-		thread := map[string]any{"is_resolved": runner.resolved, "is_outdated": false, "is_collapsed": false,
-			"total_count": commentCount, "comments": comments}
+		thread := map[string]any{
+			"is_resolved": runner.resolved, "is_outdated": false, "is_collapsed": false,
+			"total_count": commentCount, "comments": comments,
+		}
 		if !runner.omitThreadID {
 			if runner.legacyUpperID {
 				thread["ID"] = providerTestThreadID
@@ -456,8 +460,10 @@ func (runner *providerTestRunner) RunTool(
 		if runner.threadListTotal != nil {
 			threadTotal = *runner.threadListTotal
 		}
-		response = map[string]any{"review_threads": []any{thread}, "totalCount": threadTotal,
-			"pageInfo": map[string]any{"hasNextPage": false}}
+		response = map[string]any{
+			"review_threads": []any{thread}, "totalCount": threadTotal,
+			"pageInfo": map[string]any{"hasNextPage": false},
+		}
 	default:
 		return nil, errors.New("unexpected read method")
 	}
@@ -475,6 +481,7 @@ func (runner *providerTestRunner) snapshot() []workflows.ToolRequest {
 	copy(result, runner.requests)
 	return result
 }
+
 func (runner *providerTestRunner) writeCount() int {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -489,10 +496,17 @@ func newProviderForTest(t *testing.T, runner workflows.ToolRunner, write bool) *
 	}
 	return provider
 }
+
 func providerTestCase() eventing.ReviewCase {
-	return eventing.ReviewCase{ID: "prc_11111111111111111111111111111111",
-		Connector: "github-main", Repository: "octo/repo", PullNumber: 42, PullURL: "https://github.com/octo/repo/pull/42"}
+	return eventing.ReviewCase{
+		ID:         "prc_11111111111111111111111111111111",
+		Connector:  "github-main",
+		Repository: "octo/repo",
+		PullNumber: 42,
+		PullURL:    "https://github.com/octo/repo/pull/42",
+	}
 }
+
 func cloneProviderRequest(request workflows.ToolRequest) workflows.ToolRequest {
 	copyRequest := request
 	copyRequest.Args = map[string]any{}
@@ -501,12 +515,15 @@ func cloneProviderRequest(request workflows.ToolRequest) workflows.ToolRequest {
 	}
 	return copyRequest
 }
+
 func assertProviderTool(t *testing.T, request workflows.ToolRequest, tool string, args map[string]any) {
 	t.Helper()
-	if request.Name != "mcp_github_"+tool || request.MCPServer != "github" || request.MCPTool != tool || !request.MCP || !reflect.DeepEqual(request.Args, args) {
+	if request.Name != "mcp_github_"+tool || request.MCPServer != "github" || request.MCPTool != tool || !request.MCP ||
+		!reflect.DeepEqual(request.Args, args) {
 		t.Fatalf("tool request = %#v", request)
 	}
 }
+
 func containsProviderLimitation(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

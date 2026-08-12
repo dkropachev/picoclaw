@@ -62,7 +62,8 @@ func acquireProviderArtifact(
 		return nil, err
 	}
 	var parentStat unix.Stat_t
-	if err := unix.Fstat(parentDescriptor, &parentStat); err != nil ||
+	parentStatErr := unix.Fstat(parentDescriptor, &parentStat)
+	if parentStatErr != nil ||
 		parentStat.Mode&unix.S_IFMT != unix.S_IFDIR ||
 		parentStat.Uid != uint32(unix.Geteuid()) ||
 		parentStat.Mode&0o022 != 0 {
