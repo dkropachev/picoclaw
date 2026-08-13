@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
@@ -92,6 +95,18 @@ func (h *reviewAttentionAPITestHarness) get(
 }
 
 func (h *reviewAttentionAPITestHarness) put(
+	t *testing.T,
+	revision string,
+	attention config.ReviewAttentionConfig,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	if normalized, err := attention.NamedRuleSets(); err == nil {
+		attention = normalized
+	}
+	return h.putExact(t, revision, attention)
+}
+
+func (h *reviewAttentionAPITestHarness) putExact(
 	t *testing.T,
 	revision string,
 	attention config.ReviewAttentionConfig,
@@ -195,6 +210,31 @@ func completeReviewAttentionPolicy() config.ReviewAttentionConfig {
 	}
 }
 
+func completeNamedReviewAttentionPolicy() config.ReviewAttentionConfig {
+	return config.ReviewAttentionConfig{
+		RuleSets: map[string]config.ReviewAttentionRuleSet{
+			"default": {
+				Name:  "Default",
+				Rules: map[string][]gatetypes.GateSpec{},
+			},
+			"strict": {
+				Name: "Strict review",
+				Rules: map[string][]gatetypes.GateSpec{
+					"review.ready": {{
+						ID: "strict", Kind: gatetypes.GateDeterministic,
+						When: "true", Title: "Strict", Questions: []any{"Continue?"},
+					}},
+				},
+			},
+		},
+		DefaultRuleSetID: "default",
+		RepositoryAssignments: map[string]string{
+			"Acme/One": "strict",
+			"Acme/Two": "strict",
+		},
+	}
+}
+
 func decodeReviewAttentionResponse(
 	t *testing.T,
 	recorder *httptest.ResponseRecorder,
@@ -213,8 +253,9 @@ func reviewAttentionConfigFromResponse(
 	response reviewAttentionPoliciesResponse,
 ) config.ReviewAttentionConfig {
 	return config.ReviewAttentionConfig{
-		Global:       response.Global,
-		Repositories: response.Repositories,
+		RuleSets:              response.RuleSets,
+		DefaultRuleSetID:      response.DefaultRuleSetID,
+		RepositoryAssignments: response.RepositoryAssignments,
 	}
 }
 
@@ -228,7 +269,7 @@ func requireReviewAttentionResponseCollections(
 	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("response json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())
 	}
-	for _, name := range []string{"global", "repositories"} {
+	for _, name := range []string{"rule_sets", "repository_assignments"} {
 		raw, exists := envelope[name]
 		if !exists || len(raw) == 0 || raw[0] != '{' {
 			t.Fatalf("response %q collection = %s; body=%s", name, raw, recorder.Body.String())
@@ -236,14 +277,12 @@ func requireReviewAttentionResponseCollections(
 	}
 	response := decodeReviewAttentionResponse(t, recorder)
 	got := reviewAttentionConfigFromResponse(response)
-	if want.Global == nil {
-		want.Global = map[string][]gatetypes.GateSpec{}
+	normalized, err := want.NamedRuleSets()
+	if err != nil {
+		t.Fatalf("normalize expected policy: %v", err)
 	}
-	if want.Repositories == nil {
-		want.Repositories = map[string]map[string]gatetypes.RepositoryGatePolicy{}
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("response policy = %#v, want %#v", got, want)
+	if !reflect.DeepEqual(got, normalized) {
+		t.Fatalf("response policy = %#v, want %#v", got, normalized)
 	}
 }
 
@@ -324,7 +363,11 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	}
 
 	getRecorder, getResponse := harness.get(t)
-	if !reflect.DeepEqual(reviewAttentionConfigFromResponse(getResponse), old) {
+	oldNormalized, err := old.NamedRuleSets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reviewAttentionConfigFromResponse(getResponse), oldNormalized) {
 		t.Fatalf("GET policies = %#v, want %#v", reviewAttentionConfigFromResponse(getResponse), old)
 	}
 	if !strings.HasPrefix(getResponse.CatalogRevision, "sha256:") ||
@@ -346,14 +389,39 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	}
 
 	next := completeReviewAttentionPolicy()
-	putRecorder := harness.put(t, getResponse.ConfigRevision, next)
+	nextNormalized, err := next.NamedRuleSets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, set := range nextNormalized.RuleSets {
+		if id != config.DefaultReviewAttentionRuleSetID {
+			set.Name = "Replacement repository rules"
+			nextNormalized.RuleSets[id] = set
+		}
+	}
+	for id, set := range oldNormalized.RuleSets {
+		if _, exists := nextNormalized.RuleSets[id]; !exists {
+			nextNormalized.RuleSets[id] = set
+		}
+	}
+	require.NoError(t, nextNormalized.Validate())
+	require.True(
+		t,
+		reviewAttentionRuleSetIdentitiesAreImmutable(old, nextNormalized),
+		"candidate must preserve existing set identities",
+	)
+	testConfig := config.DefaultConfig()
+	testConfig.Reviews.Attention = nextNormalized
+	_, sourceErr := validateReviewAttentionPolicyConfiguration(testConfig)
+	require.NoError(t, sourceErr)
+	putRecorder := harness.putExact(t, getResponse.ConfigRevision, nextNormalized)
 	if putRecorder.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d, body=%s", putRecorder.Code, putRecorder.Body.String())
 	}
 	putResponse := decodeReviewAttentionResponse(t, putRecorder)
 	if putResponse.ConfigRevision == getResponse.ConfigRevision ||
 		putResponse.CatalogRevision == getResponse.CatalogRevision ||
-		!reflect.DeepEqual(reviewAttentionConfigFromResponse(putResponse), next) {
+		!reflect.DeepEqual(reviewAttentionConfigFromResponse(putResponse), nextNormalized) {
 		t.Fatalf("PUT response = %#v", putResponse)
 	}
 	saved, _, err := config.LoadCurrentConfigSnapshot(harness.configPath)
@@ -363,17 +431,15 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	if saved.Gateway.Port != 23456 || saved.Agents.List[0].Name != "unrelated-agent-sentinel" {
 		t.Fatalf("PUT changed unrelated config: %#v", saved)
 	}
-	if _, exists := saved.Reviews.Attention.Global["review.old"]; exists {
-		t.Fatal("PUT merged instead of fully replacing global policies")
-	}
-	if _, exists := saved.Reviews.Attention.Repositories["Old/Repository"]; exists {
-		t.Fatal("PUT merged instead of fully replacing repository policies")
-	}
-	if len(saved.Reviews.Attention.Global["pr_development.before_push"]) != 4 {
+	require.Contains(t, saved.Reviews.Attention.RuleSets, oldNormalized.RepositoryAssignments["Old/Repository"])
+	require.NotContains(t, saved.Reviews.Attention.RepositoryAssignments, "Old/Repository")
+	defaultRules := saved.Reviews.Attention.RuleSets[config.DefaultReviewAttentionRuleSetID].Rules
+	if len(defaultRules["pr_development.before_push"]) != 4 {
 		t.Fatalf("saved policies = %#v", saved.Reviews.Attention)
 	}
-	repositoryPolicy := saved.Reviews.Attention.Repositories["Acme/Widgets"]["pr_development.before_push"]
-	questions, ok := repositoryPolicy.Gates[1].Questions.(map[string]any)
+	repositorySetID := saved.Reviews.Attention.RepositoryAssignments["Acme/Widgets"]
+	repositoryPolicy := saved.Reviews.Attention.RuleSets[repositorySetID].Rules["pr_development.before_push"]
+	questions, ok := repositoryPolicy[4].Questions.(map[string]any)
 	if !ok || questions["Foo"] != "one" || questions["foo"] != "two" {
 		t.Fatalf("saved case-sensitive questions = %#v", questions)
 	}
@@ -386,6 +452,104 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 		) {
 		t.Fatalf("GET after PUT changed the policy generation: %#v", roundTrip)
 	}
+}
+
+func TestReviewAttentionPoliciesNamedSetsShareAssignmentsAndFreezeNames(t *testing.T) {
+	resetGatewayTestState(t)
+	configured := completeNamedReviewAttentionPolicy()
+	harness := newReviewAttentionAPITestHarness(t, func(cfg *config.Config) {
+		cfg.Reviews.Attention = configured
+	})
+
+	getRecorder, current := harness.get(t)
+	var envelope map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(getRecorder.Body.Bytes(), &envelope))
+	require.NotContains(t, envelope, "global")
+	require.NotContains(t, envelope, "repositories")
+	require.Equal(t, "default", current.DefaultRuleSetID)
+	require.Equal(t, "strict", current.RepositoryAssignments["Acme/One"])
+	require.Equal(t, "strict", current.RepositoryAssignments["Acme/Two"])
+
+	candidate, err := reviewAttentionConfigFromResponse(current).NamedRuleSets()
+	require.NoError(t, err)
+	candidate.DefaultRuleSetID = "strict"
+	candidate.RepositoryAssignments["Acme/Default"] = "default"
+	strict := candidate.RuleSets["strict"]
+	strict.Rules["review.ready"][0].Title = "Changed behavior"
+	candidate.RuleSets["strict"] = strict
+	putRecorder := harness.putExact(t, current.ConfigRevision, candidate)
+	require.Equal(t, http.StatusOK, putRecorder.Code, putRecorder.Body.String())
+	saved := decodeReviewAttentionResponse(t, putRecorder)
+	require.Equal(t, "strict", saved.DefaultRuleSetID)
+	require.Equal(t, "default", saved.RepositoryAssignments["Acme/Default"])
+	require.Equal(t, "Changed behavior", saved.RuleSets["strict"].Rules["review.ready"][0].Title)
+
+	tests := []struct {
+		name   string
+		mutate func(*config.ReviewAttentionConfig)
+	}{
+		{
+			name: "rename existing set",
+			mutate: func(candidate *config.ReviewAttentionConfig) {
+				set := candidate.RuleSets["strict"]
+				set.Name = "Renamed"
+				candidate.RuleSets["strict"] = set
+			},
+		},
+		{
+			name: "rename built-in set",
+			mutate: func(candidate *config.ReviewAttentionConfig) {
+				set := candidate.RuleSets["default"]
+				set.Name = "Renamed default"
+				candidate.RuleSets["default"] = set
+			},
+		},
+		{
+			name: "delete assigned set",
+			mutate: func(candidate *config.ReviewAttentionConfig) {
+				delete(candidate.RuleSets, "strict")
+			},
+		},
+		{
+			name: "duplicate name",
+			mutate: func(candidate *config.ReviewAttentionConfig) {
+				candidate.RuleSets["copy"] = config.ReviewAttentionRuleSet{
+					Name: "strict REVIEW", Rules: map[string][]gatetypes.GateSpec{},
+				}
+			},
+		},
+		{
+			name: "unknown assignment",
+			mutate: func(candidate *config.ReviewAttentionConfig) {
+				candidate.RepositoryAssignments["Acme/Unknown"] = "missing"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, latest := harness.get(t)
+			invalid, cloneErr := reviewAttentionConfigFromResponse(latest).NamedRuleSets()
+			require.NoError(t, cloneErr)
+			test.mutate(&invalid)
+			recorder := harness.putExact(t, latest.ConfigRevision, invalid)
+			require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, recorder.Body.String())
+			require.Equal(t, reviewAttentionPoliciesInvalid, decodeReviewAttentionError(t, recorder))
+		})
+	}
+
+	_, latest := harness.get(t)
+	withUnused, err := reviewAttentionConfigFromResponse(latest).NamedRuleSets()
+	require.NoError(t, err)
+	withUnused.RuleSets["unused"] = config.ReviewAttentionRuleSet{
+		Name: "Unused", Rules: map[string][]gatetypes.GateSpec{},
+	}
+	created := harness.putExact(t, latest.ConfigRevision, withUnused)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+	createdSnapshot := decodeReviewAttentionResponse(t, created)
+	withoutUnused := reviewAttentionConfigFromResponse(createdSnapshot)
+	delete(withoutUnused.RuleSets, "unused")
+	deleted := harness.putExact(t, createdSnapshot.ConfigRevision, withoutUnused)
+	require.Equal(t, http.StatusOK, deleted.Code, deleted.Body.String())
 }
 
 func TestReviewAttentionPolicySavePreservesPersistedShapeAndSecurity(t *testing.T) {
@@ -601,6 +765,58 @@ func TestReviewAttentionPoliciesRejectLegacyWithoutMutation(t *testing.T) {
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("legacy policy request mutated config directory: before=%v after=%v", before, after)
 	}
+}
+
+func TestReviewAttentionPoliciesReportsLegacyMigrationBoundsWithoutDisablingRuntime(
+	t *testing.T,
+) {
+	resetGatewayTestState(t)
+	harness := newReviewAttentionAPITestHarness(t, func(cfg *config.Config) {
+		cfg.Reviews.Attention = oversizedLegacyReviewAttentionMigrationCatalog()
+	})
+
+	recorder := harness.request(t, http.MethodGet, reviewAttentionPoliciesPath, "", nil)
+	if recorder.Code != http.StatusConflict ||
+		decodeReviewAttentionError(t, recorder) != reviewAttentionLegacyMigrationExceedsBounds {
+		t.Fatalf("GET oversized legacy migration = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	cfg, _, err := config.LoadCurrentConfigSnapshot(harness.configPath)
+	if err != nil {
+		t.Fatalf("LoadCurrentConfigSnapshot() error = %v", err)
+	}
+	if _, err = newReviewAttentionPolicySource(cfg); err != nil {
+		t.Fatalf("newReviewAttentionPolicySource() disabled valid legacy runtime: %v", err)
+	}
+}
+
+func oversizedLegacyReviewAttentionMigrationCatalog() config.ReviewAttentionConfig {
+	attention := config.ReviewAttentionConfig{
+		Global: map[string][]gatetypes.GateSpec{
+			"review.ready": make([]gatetypes.GateSpec, 9),
+		},
+		Repositories: make(
+			map[string]map[string]gatetypes.RepositoryGatePolicy,
+			config.MaxReviewAttentionRepositories,
+		),
+	}
+	for index := range attention.Global["review.ready"] {
+		attention.Global["review.ready"][index] = gatetypes.GateSpec{
+			ID:   fmt.Sprintf("global_%d", index),
+			Kind: gatetypes.GateZero,
+		}
+	}
+	for index := range config.MaxReviewAttentionRepositories {
+		attention.Repositories[fmt.Sprintf("owner/repository-%d", index)] = map[string]gatetypes.RepositoryGatePolicy{
+			"review.ready": {
+				Mode: gatetypes.GatePolicyOverlay,
+				Gates: []gatetypes.GateSpec{
+					{ID: fmt.Sprintf("repository_%d", index), Kind: gatetypes.GateZero},
+				},
+			},
+		}
+	}
+	return attention
 }
 
 func TestReviewAttentionPoliciesResponsesAlwaysIncludeCatalogCollections(t *testing.T) {
@@ -828,10 +1044,11 @@ func TestReviewAttentionPoliciesStrictEnvelopeAndRoutes(t *testing.T) {
 }
 
 func TestReviewAttentionDuplicateScannerPreservesQuestionKeyCase(t *testing.T) {
-	raw := []byte(`{"expected_config_revision":"revision","repositories":{"Acme/Widgets":{` +
-		`"review.submitted":{"mode":"replace","gates":[{"id":"gate",` +
+	raw := []byte(`{"expected_config_revision":"revision","rule_sets":{"default":{` +
+		`"name":"Default","rules":{"review.submitted":[{"id":"gate",` +
 		`"kind":"deterministic","when":"true","title":"Review",` +
-		`"questions":{"Foo":"one","foo":"two"}}]}}}}`)
+		`"questions":{"Foo":"one","foo":"two"}}]}}},` +
+		`"default_rule_set_id":"default","repository_assignments":{}}`)
 	if err := rejectDuplicateReviewAttentionJSONKeys(raw); err != nil {
 		t.Fatalf("rejectDuplicateReviewAttentionJSONKeys() error = %v", err)
 	}
@@ -842,8 +1059,10 @@ func TestReviewAttentionPoliciesUseNumberAndFenceCAS(t *testing.T) {
 	harness := newReviewAttentionAPITestHarness(t, nil)
 	_, current := harness.get(t)
 	numericBody := `{"expected_config_revision":"` + current.ConfigRevision +
-		`","global":{"review.number":[{"id":"number","kind":"deterministic",` +
-		`"when":"true","title":"Exact number","questions":9007199254740993}]}}`
+		`","rule_sets":{"default":{"name":"Default","rules":{"review.number":[{` +
+		`"id":"number","kind":"deterministic","when":"true","title":"Exact number",` +
+		`"questions":9007199254740993}]}}},"default_rule_set_id":"default",` +
+		`"repository_assignments":{}}`
 	recorder := harness.request(
 		t,
 		http.MethodPut,
@@ -870,7 +1089,14 @@ func TestReviewAttentionPoliciesUseNumberAndFenceCAS(t *testing.T) {
 	_, afterNumeric := harness.get(t)
 	wasInjected := injectConcurrentAliasBeforeReviewAttentionCAS(harness.handler)
 	candidate := completeReviewAttentionPolicy()
-	conflict := harness.put(t, afterNumeric.ConfigRevision, candidate)
+	candidateNormalized, err := candidate.NamedRuleSets()
+	require.NoError(t, err)
+	for id, set := range afterNumeric.RuleSets {
+		if _, exists := candidateNormalized.RuleSets[id]; !exists {
+			candidateNormalized.RuleSets[id] = set
+		}
+	}
+	conflict := harness.putExact(t, afterNumeric.ConfigRevision, candidateNormalized)
 	if conflict.Code != http.StatusConflict ||
 		decodeReviewAttentionError(t, conflict) != reviewAttentionConfigRevisionMismatch {
 		t.Fatalf("CAS conflict = %d body=%s", conflict.Code, conflict.Body.String())
@@ -879,8 +1105,10 @@ func TestReviewAttentionPoliciesUseNumberAndFenceCAS(t *testing.T) {
 		t.Fatal("concurrent writer was not injected")
 	}
 	saved := requireConcurrentAlias(t, harness.configPath)
-	if _, exists := saved.Reviews.Attention.Global["pr_development.before_push"]; exists {
-		t.Fatal("stale attention policy candidate was persisted")
+	for _, set := range saved.Reviews.Attention.RuleSets {
+		if _, exists := set.Rules["pr_development.before_push"]; exists {
+			t.Fatal("stale attention policy candidate was persisted")
+		}
 	}
 }
 
@@ -999,23 +1227,22 @@ func TestReviewAttentionPoliciesRejectSemanticCatalogAndAgentReferences(t *testi
 	})
 	_, current := harness.get(t)
 	invalidEffective := config.ReviewAttentionConfig{
-		Global: map[string][]gatetypes.GateSpec{
-			"review.ready": {{
-				ID: "global", Kind: gatetypes.GateAIWorkingContext,
-				AgentID: "main", Criteria: "Ask", Title: "Global",
-			}},
-		},
-		Repositories: map[string]map[string]gatetypes.RepositoryGatePolicy{
-			"Acme/Widgets": {
+		RuleSets: map[string]config.ReviewAttentionRuleSet{
+			"default": {Name: "Default", Rules: map[string][]gatetypes.GateSpec{
 				"review.ready": {
-					Mode: gatetypes.GatePolicyOverlay,
-					Gates: []gatetypes.GateSpec{{
+					{
+						ID: "global", Kind: gatetypes.GateAIWorkingContext,
+						AgentID: "main", Criteria: "Ask", Title: "Global",
+					},
+					{
 						ID: "repository", Kind: gatetypes.GateAIWorkingContext,
 						AgentID: "reviewer", Criteria: "Ask", Title: "Repository",
-					}},
+					},
 				},
-			},
+			}},
 		},
+		DefaultRuleSetID:      "default",
+		RepositoryAssignments: map[string]string{},
 	}
 	if err := invalidEffective.Validate(); err == nil {
 		t.Fatal("config validation accepted an invalid effective working-context policy")

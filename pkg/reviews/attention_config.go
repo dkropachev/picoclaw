@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	sharedattention "github.com/sipeed/picoclaw/pkg/attention"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -23,9 +25,18 @@ const (
 	maxAttentionPolicyGateEntries              = gatetypes.MaxGatePolicyGateEntries
 	maxAttentionPolicyCatalogBytes             = gatetypes.MaxGatePolicyCatalogBytes
 	maxAttentionPolicyRepositoryBytes          = gatetypes.MaxGatePolicyRepositoryBytes
+	maxNamedAttentionRuleSets                  = maxAttentionPolicyRepositories + 1
+	maxNamedAttentionRuleSetIDBytes            = 64
+	maxNamedAttentionRuleSetNameBytes          = 128
+	defaultNamedAttentionRuleSetID             = "default"
+	defaultNamedAttentionRuleSetName           = "Default"
 
 	attentionPolicySelectionFormat = "review-attention-selection/v1"
+	namedAttentionCatalogFormat    = "review-attention-named-catalog/v1"
+	namedAttentionSelectionFormat  = "review-attention-named-selection/v1"
 )
+
+var namedAttentionRuleSetIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 // ConfigAttentionPolicySource is an immutable, validated policy catalog. Its
 // selected-policy revision intentionally excludes unrelated repositories and
@@ -36,6 +47,52 @@ type ConfigAttentionPolicySource struct {
 	agentIDs        []string
 	workingAgentIDs []string
 	revision        string
+	named           *namedAttentionPolicySource
+}
+
+type namedAttentionPolicySource struct {
+	defaultRuleSetID      string
+	ruleSets              map[string]map[string][]workflows.GateSpec
+	repositoryAssignments map[string]string
+}
+
+// NamedAttentionRuleSet is one already-validated reusable rule set. The source
+// keeps both its stable ID and immutable display name in catalog-generation
+// hashing, but selection identity depends only on the selected set and rule.
+type NamedAttentionRuleSet struct {
+	Name  string
+	Rules map[string][]workflows.GateSpec
+}
+
+type canonicalNamedAttentionSet struct {
+	ID    string                        `json:"id"`
+	Name  string                        `json:"name"`
+	Rules []canonicalNamedAttentionRule `json:"rules"`
+}
+
+type canonicalNamedAttentionRule struct {
+	DecisionPoint string               `json:"decision_point"`
+	Gates         []workflows.GateSpec `json:"gates"`
+}
+
+type canonicalNamedAttentionAssignment struct {
+	Repository string `json:"repository"`
+	RuleSetID  string `json:"rule_set_id"`
+}
+
+type canonicalNamedAttentionCatalog struct {
+	Format                string                              `json:"format"`
+	DefaultRuleSetID      string                              `json:"default_rule_set_id"`
+	RuleSets              []canonicalNamedAttentionSet        `json:"rule_sets"`
+	RepositoryAssignments []canonicalNamedAttentionAssignment `json:"repository_assignments"`
+}
+
+type canonicalNamedAttentionSelection struct {
+	Format        string               `json:"format"`
+	Repository    string               `json:"repository"`
+	DecisionPoint string               `json:"decision_point"`
+	RuleSetID     string               `json:"rule_set_id"`
+	Gates         []workflows.GateSpec `json:"gates"`
 }
 
 var _ sharedattention.PolicySource = (*ConfigAttentionPolicySource)(nil)
@@ -198,6 +255,159 @@ func NewConfigAttentionPolicySource(
 	return source, nil
 }
 
+// NewNamedConfigAttentionPolicySource builds the reusable-set representation.
+// Repository lookup remains case-insensitive and every snapshot is detached.
+func NewNamedConfigAttentionPolicySource(
+	ruleSets map[string]NamedAttentionRuleSet,
+	defaultRuleSetID string,
+	repositoryAssignments map[string]string,
+) (*ConfigAttentionPolicySource, error) {
+	if len(ruleSets) == 0 || len(ruleSets) > maxNamedAttentionRuleSets ||
+		defaultRuleSetID == "" ||
+		!namedAttentionRuleSetIDPattern.MatchString(defaultRuleSetID) {
+		return nil, fmt.Errorf("review attention named catalog requires a default rule set")
+	}
+	if _, exists := ruleSets[defaultRuleSetID]; !exists {
+		return nil, fmt.Errorf("review attention default rule set is unavailable")
+	}
+	if builtin, exists := ruleSets[defaultNamedAttentionRuleSetID]; !exists ||
+		builtin.Name != defaultNamedAttentionRuleSetName {
+		return nil, fmt.Errorf("review attention built-in default rule set is invalid")
+	}
+	if len(repositoryAssignments) > maxAttentionPolicyRepositories {
+		return nil, fmt.Errorf(
+			"review attention catalog exceeds %d repositories",
+			maxAttentionPolicyRepositories,
+		)
+	}
+	source := &ConfigAttentionPolicySource{
+		global:       make(map[string][]workflows.GateSpec),
+		repositories: make(map[string]map[string]workflows.RepositoryGatePolicy),
+	}
+	canonicalSets := make([]canonicalNamedAttentionSet, 0, len(ruleSets))
+	clonedRules := make(map[string]map[string][]workflows.GateSpec, len(ruleSets))
+	agentIDs := make(map[string]struct{})
+	workingAgentIDs := make(map[string]struct{})
+	policyEntries := 0
+	gateEntries := 0
+	foldedNames := make(map[string]struct{}, len(ruleSets))
+	for _, id := range sortedAttentionNamedRuleSetIDs(ruleSets) {
+		configured := ruleSets[id]
+		if len(id) > maxNamedAttentionRuleSetIDBytes ||
+			!namedAttentionRuleSetIDPattern.MatchString(id) ||
+			configured.Name == "" || configured.Name != strings.TrimSpace(configured.Name) ||
+			!utf8.ValidString(configured.Name) ||
+			len(configured.Name) > maxNamedAttentionRuleSetNameBytes ||
+			configured.Rules == nil ||
+			len(configured.Rules) > maxAttentionPolicyDecisionPoints {
+			return nil, fmt.Errorf("review attention named rule set %q is invalid", id)
+		}
+		foldedName := strings.ToLower(configured.Name)
+		if _, duplicate := foldedNames[foldedName]; duplicate {
+			return nil, fmt.Errorf("review attention named rule-set names collide")
+		}
+		foldedNames[foldedName] = struct{}{}
+		policyEntries += len(configured.Rules)
+		if policyEntries > maxAttentionPolicyEntries {
+			return nil, fmt.Errorf(
+				"review attention catalog exceeds %d policies",
+				maxAttentionPolicyEntries,
+			)
+		}
+		set := canonicalNamedAttentionSet{
+			ID: id, Name: configured.Name,
+			Rules: make([]canonicalNamedAttentionRule, 0, len(configured.Rules)),
+		}
+		clonedRules[id] = make(map[string][]workflows.GateSpec, len(configured.Rules))
+		for _, decisionPoint := range sortedAttentionGlobalDecisionPoints(configured.Rules) {
+			if !validAttentionDecisionPoint(decisionPoint) || configured.Rules[decisionPoint] == nil {
+				return nil, fmt.Errorf("review attention named decision point is invalid")
+			}
+			layer, err := cloneAttentionGlobalLayer(configured.Rules[decisionPoint])
+			if err != nil {
+				return nil, fmt.Errorf(
+					"review attention named rule %q/%q is invalid: %w",
+					id,
+					decisionPoint,
+					err,
+				)
+			}
+			gateEntries += len(layer)
+			if gateEntries > maxAttentionPolicyGateEntries {
+				return nil, fmt.Errorf(
+					"review attention catalog exceeds %d gate entries",
+					maxAttentionPolicyGateEntries,
+				)
+			}
+			collectAttentionAgentIDs(agentIDs, workingAgentIDs, layer)
+			clonedRules[id][decisionPoint] = layer
+			set.Rules = append(set.Rules, canonicalNamedAttentionRule{
+				DecisionPoint: decisionPoint,
+				Gates:         layer,
+			})
+		}
+		canonicalSets = append(canonicalSets, set)
+	}
+
+	assignments := make([]canonicalNamedAttentionAssignment, 0, len(repositoryAssignments))
+	for _, repository := range sortedAttentionNamedAssignments(repositoryAssignments) {
+		if repository != strings.TrimSpace(repository) ||
+			len(repository) > maxAttentionPolicyRepositoryBytes ||
+			!validRepository(repository) {
+			return nil, fmt.Errorf("review attention repository key is invalid")
+		}
+		canonicalRepository := strings.ToLower(repository)
+		if _, duplicate := source.repositories[canonicalRepository]; duplicate {
+			return nil, fmt.Errorf(
+				"review attention repository keys collide case-insensitively",
+			)
+		}
+		selectedID := repositoryAssignments[repository]
+		selected, exists := clonedRules[selectedID]
+		if !exists {
+			return nil, fmt.Errorf("review attention repository assignment is invalid")
+		}
+		// Reserve the case-folded key for collision detection. Named selection is
+		// resolved directly below rather than through legacy overlay modes.
+		source.repositories[canonicalRepository] = make(
+			map[string]workflows.RepositoryGatePolicy,
+			len(selected),
+		)
+		assignments = append(assignments, canonicalNamedAttentionAssignment{
+			Repository: canonicalRepository,
+			RuleSetID:  selectedID,
+		})
+	}
+	for decisionPoint, gates := range clonedRules[defaultRuleSetID] {
+		source.global[decisionPoint] = append([]workflows.GateSpec(nil), gates...)
+	}
+
+	source.agentIDs = sortedAttentionStringSet(agentIDs)
+	source.workingAgentIDs = sortedAttentionStringSet(workingAgentIDs)
+	encodedCatalog, err := json.Marshal(canonicalNamedAttentionCatalog{
+		Format:                namedAttentionCatalogFormat,
+		DefaultRuleSetID:      defaultRuleSetID,
+		RuleSets:              canonicalSets,
+		RepositoryAssignments: assignments,
+	})
+	if err != nil || len(encodedCatalog) > maxAttentionPolicyCatalogBytes {
+		return nil, fmt.Errorf("encode review attention named catalog")
+	}
+	source.revision = hashAttentionPolicyBytes(encodedCatalog)
+
+	// Preserve normalized selection metadata separately from the compatibility
+	// global/repository fields used by downstream policy resolution.
+	source.named = &namedAttentionPolicySource{
+		defaultRuleSetID:      defaultRuleSetID,
+		ruleSets:              clonedRules,
+		repositoryAssignments: make(map[string]string, len(assignments)),
+	}
+	for _, assignment := range assignments {
+		source.named.repositoryAssignments[assignment.Repository] = assignment.RuleSetID
+	}
+	return source, nil
+}
+
 // CatalogRevision is a content revision for the complete canonical catalog.
 func (source *ConfigAttentionPolicySource) CatalogRevision() string {
 	if source == nil {
@@ -248,6 +458,9 @@ func (source *ConfigAttentionPolicySource) WithReviewAttentionPolicy(
 	if use == nil {
 		return errors.New("review attention policy callback is required")
 	}
+	if source.named != nil {
+		return source.withNamedReviewAttentionPolicy(ctx, selector, use)
+	}
 	global, err := cloneAttentionGlobalLayer(source.global[selector.DecisionPoint])
 	if err != nil {
 		return ErrUnavailable
@@ -277,6 +490,36 @@ func (source *ConfigAttentionPolicySource) WithReviewAttentionPolicy(
 		Revision:   revision,
 		Global:     global,
 		Repository: repository,
+	})
+}
+
+func (source *ConfigAttentionPolicySource) withNamedReviewAttentionPolicy(
+	ctx context.Context,
+	selector AttentionPolicySelector,
+	use AttentionPolicyUse,
+) error {
+	canonicalRepository := strings.ToLower(selector.Repository)
+	ruleSetID := source.named.defaultRuleSetID
+	if assigned, exists := source.named.repositoryAssignments[canonicalRepository]; exists {
+		ruleSetID = assigned
+	}
+	gates, err := cloneAttentionGlobalLayer(source.named.ruleSets[ruleSetID][selector.DecisionPoint])
+	if err != nil {
+		return ErrUnavailable
+	}
+	revision, _, err := hashAttentionPolicyValue(canonicalNamedAttentionSelection{
+		Format:        namedAttentionSelectionFormat,
+		Repository:    canonicalRepository,
+		DecisionPoint: selector.DecisionPoint,
+		RuleSetID:     ruleSetID,
+		Gates:         gates,
+	})
+	if err != nil {
+		return ErrUnavailable
+	}
+	return use(ctx, AttentionPolicySnapshot{
+		Revision: revision,
+		Global:   gates,
 	})
 }
 
@@ -384,6 +627,42 @@ func sortedAttentionRepositoryDecisionPoints(
 	keys := make([]string, 0, len(policies))
 	for decisionPoint := range policies {
 		keys = append(keys, decisionPoint)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedAttentionNamedRuleSetIDs(
+	ruleSets map[string]NamedAttentionRuleSet,
+) []string {
+	keys := make([]string, 0, len(ruleSets))
+	for key := range ruleSets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedAttentionNamedAssignments(assignments map[string]string) []string {
+	keys := make([]string, 0, len(assignments))
+	for key := range assignments {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool {
+		leftFolded := strings.ToLower(keys[left])
+		rightFolded := strings.ToLower(keys[right])
+		if leftFolded == rightFolded {
+			return keys[left] < keys[right]
+		}
+		return leftFolded < rightFolded
+	})
+	return keys
+}
+
+func sortedAttentionStringSet(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	return keys

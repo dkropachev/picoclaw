@@ -1,8 +1,11 @@
 package config
 
 import (
+	"crypto/sha256"
 	"encoding"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -15,6 +18,13 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
+// ErrReviewAttentionLegacyMigrationExceedsBounds means a valid compact legacy
+// overlay catalog cannot be represented as standalone named sets within the
+// named-catalog limits. The legacy catalog remains valid for runtime use.
+var ErrReviewAttentionLegacyMigrationExceedsBounds = errors.New(
+	"legacy review attention catalog exceeds named migration bounds",
+)
+
 const (
 	MaxReviewAttentionDecisionPointBytes = gatetypes.MaxGatePolicyDecisionPointBytes
 	MaxReviewAttentionDecisionPoints     = gatetypes.MaxGatePolicyDecisionPoints
@@ -22,10 +32,16 @@ const (
 	MaxReviewAttentionPolicies           = gatetypes.MaxGatePolicyEntries
 	MaxReviewAttentionGateSpecs          = gatetypes.MaxGatePolicyGateEntries
 	MaxReviewAttentionConfigBytes        = gatetypes.MaxGatePolicyCatalogBytes
+	MaxReviewAttentionRuleSets           = MaxReviewAttentionRepositories + 1
+	MaxReviewAttentionRuleSetIDBytes     = 64
+	MaxReviewAttentionRuleSetNameBytes   = 128
+	DefaultReviewAttentionRuleSetID      = "default"
+	DefaultReviewAttentionRuleSetName    = "Default"
 )
 
 var (
 	reviewAttentionDecisionPointPattern  = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
+	reviewAttentionRuleSetIDPattern      = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 	reviewAttentionGateIDPattern         = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 	reviewAttentionAgentIDPattern        = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	reviewAttentionExpressionPathPattern = regexp.MustCompile(
@@ -43,9 +59,53 @@ type ReviewsConfig struct {
 
 // ReviewAttentionConfig stores global policies by decision point and exact
 // repository-local overrides selected by trusted base-repository identity.
+//
+//nolint:recvcheck // JSON requires pointer unmarshalling; read and validation APIs use values.
 type ReviewAttentionConfig struct {
-	Global       map[string][]gatetypes.GateSpec                      `json:"global,omitempty"`
-	Repositories map[string]map[string]gatetypes.RepositoryGatePolicy `json:"repositories,omitempty"`
+	Global                map[string][]gatetypes.GateSpec                      `json:"global,omitempty"`
+	Repositories          map[string]map[string]gatetypes.RepositoryGatePolicy `json:"repositories,omitempty"`
+	RuleSets              map[string]ReviewAttentionRuleSet                    `json:"rule_sets,omitempty"`
+	DefaultRuleSetID      string                                               `json:"default_rule_set_id,omitempty"`
+	RepositoryAssignments map[string]string                                    `json:"repository_assignments,omitempty"`
+}
+
+// UnmarshalJSON resets the representation before decoding. Config loading
+// overlays JSON onto DefaultConfig, whose legacy empty maps are intentionally
+// initialized for callers; without the reset a normalized document would
+// accidentally retain those maps and appear to mix both representations.
+func (config *ReviewAttentionConfig) UnmarshalJSON(data []byte) error {
+	type wire ReviewAttentionConfig
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*config = ReviewAttentionConfig(decoded)
+	if !config.UsesNamedRuleSets() {
+		if config.Global == nil {
+			config.Global = make(map[string][]gatetypes.GateSpec)
+		}
+		if config.Repositories == nil {
+			config.Repositories = make(
+				map[string]map[string]gatetypes.RepositoryGatePolicy,
+			)
+		}
+	}
+	return nil
+}
+
+// ReviewAttentionRuleSet is one reusable, named collection of decision rules.
+// The enclosing map key is its stable identity; Name is intentionally separate
+// so the management API can prevent renaming while allowing rules to change.
+type ReviewAttentionRuleSet struct {
+	Name  string                          `json:"name"`
+	Rules map[string][]gatetypes.GateSpec `json:"rules"`
+}
+
+// UsesNamedRuleSets reports whether the normalized reusable-set representation
+// is present. Legacy global/repository catalogs remain accepted for migration.
+func (config ReviewAttentionConfig) UsesNamedRuleSets() bool {
+	return config.RuleSets != nil || config.DefaultRuleSetID != "" ||
+		config.RepositoryAssignments != nil
 }
 
 // Validate rejects ambiguous repository identities, malformed structural gate
@@ -56,6 +116,13 @@ func (config ReviewsConfig) Validate() error {
 
 // Validate checks one complete review-attention policy tree.
 func (config ReviewAttentionConfig) Validate() error {
+	if config.UsesNamedRuleSets() {
+		return config.validateNamedRuleSets()
+	}
+	return config.validateLegacyCatalog()
+}
+
+func (config ReviewAttentionConfig) validateLegacyCatalog() error {
 	if len(config.Global) > MaxReviewAttentionDecisionPoints {
 		return fmt.Errorf(
 			"reviews.attention.global must contain at most %d decision points",
@@ -178,6 +245,362 @@ func (config ReviewAttentionConfig) Validate() error {
 		)
 	}
 	return nil
+}
+
+func (config ReviewAttentionConfig) validateNamedRuleSets() error {
+	if config.Global != nil || config.Repositories != nil {
+		return fmt.Errorf("reviews.attention cannot mix named rule sets with legacy global/repositories")
+	}
+	if config.DefaultRuleSetID == "" ||
+		len(config.DefaultRuleSetID) > MaxReviewAttentionRuleSetIDBytes ||
+		!reviewAttentionRuleSetIDPattern.MatchString(config.DefaultRuleSetID) {
+		return fmt.Errorf("reviews.attention.default_rule_set_id must name a canonical rule set")
+	}
+	if len(config.RuleSets) == 0 || len(config.RuleSets) > MaxReviewAttentionRuleSets {
+		return fmt.Errorf(
+			"reviews.attention.rule_sets must contain between 1 and %d rule sets",
+			MaxReviewAttentionRuleSets,
+		)
+	}
+	defaultSet, exists := config.RuleSets[DefaultReviewAttentionRuleSetID]
+	if !exists || defaultSet.Name != DefaultReviewAttentionRuleSetName {
+		return fmt.Errorf(
+			"reviews.attention.rule_sets[%q] must have name %q",
+			DefaultReviewAttentionRuleSetID,
+			DefaultReviewAttentionRuleSetName,
+		)
+	}
+	if _, exists := config.RuleSets[config.DefaultRuleSetID]; !exists {
+		return fmt.Errorf(
+			"reviews.attention.default_rule_set_id references unknown rule set %q",
+			config.DefaultRuleSetID,
+		)
+	}
+	if len(config.RepositoryAssignments) > MaxReviewAttentionRepositories {
+		return fmt.Errorf(
+			"reviews.attention.repository_assignments must contain at most %d repositories",
+			MaxReviewAttentionRepositories,
+		)
+	}
+
+	policyCount := 0
+	gateCount := 0
+	foldedNames := make(map[string]string, len(config.RuleSets))
+	for _, id := range sortedReviewAttentionKeys(config.RuleSets) {
+		if len(id) > MaxReviewAttentionRuleSetIDBytes ||
+			!reviewAttentionRuleSetIDPattern.MatchString(id) {
+			return fmt.Errorf(
+				"reviews.attention rule-set ID %q must match %s and be at most %d bytes",
+				id,
+				reviewAttentionRuleSetIDPattern.String(),
+				MaxReviewAttentionRuleSetIDBytes,
+			)
+		}
+		set := config.RuleSets[id]
+		if set.Name == "" || set.Name != strings.TrimSpace(set.Name) ||
+			!utf8.ValidString(set.Name) || len(set.Name) > MaxReviewAttentionRuleSetNameBytes {
+			return fmt.Errorf(
+				"reviews.attention.rule_sets[%q].name must be trimmed, nonempty UTF-8 of at most %d bytes",
+				id,
+				MaxReviewAttentionRuleSetNameBytes,
+			)
+		}
+		foldedName := strings.ToLower(set.Name)
+		if previous, duplicate := foldedNames[foldedName]; duplicate {
+			return fmt.Errorf(
+				"reviews.attention rule-set names %q and %q differ only by case",
+				previous,
+				set.Name,
+			)
+		}
+		foldedNames[foldedName] = set.Name
+		if set.Rules == nil {
+			return fmt.Errorf("reviews.attention.rule_sets[%q].rules must be an object, not null", id)
+		}
+		if len(set.Rules) > MaxReviewAttentionDecisionPoints {
+			return fmt.Errorf(
+				"reviews.attention.rule_sets[%q].rules must contain at most %d decision points",
+				id,
+				MaxReviewAttentionDecisionPoints,
+			)
+		}
+		policyCount += len(set.Rules)
+		for _, decisionPoint := range sortedReviewAttentionKeys(set.Rules) {
+			gates := set.Rules[decisionPoint]
+			if gates == nil {
+				return fmt.Errorf(
+					"reviews.attention.rule_sets[%q].rules[%q] must be an array, not null",
+					id,
+					decisionPoint,
+				)
+			}
+			if err := validateReviewAttentionDecisionPoint(decisionPoint); err != nil {
+				return fmt.Errorf("reviews.attention.rule_sets[%q].rules: %w", id, err)
+			}
+			if err := validateReviewAttentionGateList(
+				"reviews.attention.rule_sets["+id+"].rules["+decisionPoint+"]",
+				gates,
+			); err != nil {
+				return err
+			}
+			gateCount += len(gates)
+		}
+	}
+	if policyCount > MaxReviewAttentionPolicies {
+		return fmt.Errorf(
+			"reviews.attention must contain at most %d policies",
+			MaxReviewAttentionPolicies,
+		)
+	}
+	if gateCount > MaxReviewAttentionGateSpecs {
+		return fmt.Errorf(
+			"reviews.attention must contain at most %d gates",
+			MaxReviewAttentionGateSpecs,
+		)
+	}
+	foldedRepositories := make(map[string]string, len(config.RepositoryAssignments))
+	for _, repository := range sortedReviewAttentionKeys(config.RepositoryAssignments) {
+		if err := validateReviewAttentionRepository(repository, foldedRepositories); err != nil {
+			return err
+		}
+		id := config.RepositoryAssignments[repository]
+		if _, exists := config.RuleSets[id]; !exists {
+			return fmt.Errorf(
+				"reviews.attention.repository_assignments[%q] references unknown rule set %q",
+				repository,
+				id,
+			)
+		}
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("reviews.attention must contain durable JSON: %w", err)
+	}
+	if len(encoded) > MaxReviewAttentionConfigBytes {
+		return fmt.Errorf(
+			"reviews.attention exceeds %d encoded bytes",
+			MaxReviewAttentionConfigBytes,
+		)
+	}
+	return nil
+}
+
+func validateReviewAttentionRepository(
+	repository string,
+	foldedRepositories map[string]string,
+) error {
+	if repository == "" || repository != strings.TrimSpace(repository) ||
+		!utf8.ValidString(repository) || len(repository) > gatetypes.MaxGatePolicyRepositoryBytes ||
+		!githubRepositoryPattern.MatchString(repository) {
+		return fmt.Errorf(
+			"reviews.attention repository %q must be a trimmed owner/repo name of at most %d bytes",
+			repository,
+			gatetypes.MaxGatePolicyRepositoryBytes,
+		)
+	}
+	folded := strings.ToLower(repository)
+	if previous, exists := foldedRepositories[folded]; exists {
+		return fmt.Errorf(
+			"reviews.attention repositories %q and %q differ only by case",
+			previous,
+			repository,
+		)
+	}
+	foldedRepositories[folded] = repository
+	return nil
+}
+
+// NamedRuleSets returns a detached normalized catalog. Legacy repository
+// overlays are materialized into effective reusable sets so callers never need
+// to understand the retired two-layer representation.
+func (config ReviewAttentionConfig) NamedRuleSets() (ReviewAttentionConfig, error) {
+	if config.UsesNamedRuleSets() {
+		if err := config.Validate(); err != nil {
+			return ReviewAttentionConfig{}, err
+		}
+		return cloneNamedReviewAttentionConfig(config)
+	}
+	if err := config.Validate(); err != nil {
+		return ReviewAttentionConfig{}, err
+	}
+	normalized := ReviewAttentionConfig{
+		RuleSets: map[string]ReviewAttentionRuleSet{
+			DefaultReviewAttentionRuleSetID: {
+				Name:  DefaultReviewAttentionRuleSetName,
+				Rules: cloneReviewAttentionRules(config.Global),
+			},
+		},
+		DefaultRuleSetID:      DefaultReviewAttentionRuleSetID,
+		RepositoryAssignments: make(map[string]string),
+	}
+	usedIDs := map[string]struct{}{DefaultReviewAttentionRuleSetID: {}}
+	importedRuleSets := make(map[string]string)
+	for _, repository := range sortedReviewAttentionKeys(config.Repositories) {
+		policies := config.Repositories[repository]
+		pureInherit := true
+		decisions := make(map[string]struct{}, len(config.Global)+len(policies))
+		for decision := range config.Global {
+			decisions[decision] = struct{}{}
+		}
+		for decision, policy := range policies {
+			decisions[decision] = struct{}{}
+			if policy.Mode != gatetypes.GatePolicyInherit {
+				pureInherit = false
+			}
+		}
+		if pureInherit {
+			continue
+		}
+		rules := make(map[string][]gatetypes.GateSpec, len(decisions))
+		for _, decision := range sortedReviewAttentionKeys(decisions) {
+			policy, configured := policies[decision]
+			effective, err := resolveLegacyReviewAttentionPolicy(
+				config.Global[decision],
+				policy,
+				configured,
+				decision,
+			)
+			if err != nil {
+				return ReviewAttentionConfig{}, err
+			}
+			rules[decision] = effective
+		}
+		encodedRules, err := json.Marshal(rules)
+		if err != nil {
+			return ReviewAttentionConfig{}, fmt.Errorf(
+				"encode legacy review attention rules for %q: %w",
+				repository,
+				err,
+			)
+		}
+		if id, exists := importedRuleSets[string(encodedRules)]; exists {
+			normalized.RepositoryAssignments[repository] = id
+			continue
+		}
+		id := legacyReviewAttentionRuleSetID(encodedRules, usedIDs)
+		usedIDs[id] = struct{}{}
+		importedRuleSets[string(encodedRules)] = id
+		normalized.RuleSets[id] = ReviewAttentionRuleSet{
+			Name:  "Imported " + id,
+			Rules: rules,
+		}
+		normalized.RepositoryAssignments[repository] = id
+	}
+	if err := normalized.Validate(); err != nil {
+		return ReviewAttentionConfig{}, fmt.Errorf(
+			"%w: %v",
+			ErrReviewAttentionLegacyMigrationExceedsBounds,
+			err,
+		)
+	}
+	return normalized, nil
+}
+
+func resolveLegacyReviewAttentionPolicy(
+	global []gatetypes.GateSpec,
+	policy gatetypes.RepositoryGatePolicy,
+	hasPolicies bool,
+	decision string,
+) ([]gatetypes.GateSpec, error) {
+	if !hasPolicies {
+		return cloneReviewAttentionGates(global), nil
+	}
+	// The zero value is not a configured policy. Callers distinguish it by
+	// checking whether the exact decision exists in the repository map.
+	if policy.Mode == "" {
+		return cloneReviewAttentionGates(global), nil
+	}
+	switch policy.Mode {
+	case gatetypes.GatePolicyInherit:
+		return cloneReviewAttentionGates(global), nil
+	case gatetypes.GatePolicyDisable:
+		return []gatetypes.GateSpec{}, nil
+	case gatetypes.GatePolicyReplace:
+		return cloneReviewAttentionGates(policy.Gates), nil
+	case gatetypes.GatePolicyOverlay:
+		effective := cloneReviewAttentionGates(global)
+		positions := make(map[string]int, len(effective))
+		for index, gate := range effective {
+			positions[gate.ID] = index
+		}
+		for _, gate := range cloneReviewAttentionGates(policy.Gates) {
+			if index, exists := positions[gate.ID]; exists {
+				effective[index] = gate
+				continue
+			}
+			positions[gate.ID] = len(effective)
+			effective = append(effective, gate)
+		}
+		return effective, nil
+	default:
+		return nil, fmt.Errorf("legacy review attention policy %q has unsupported mode %q", decision, policy.Mode)
+	}
+}
+
+func legacyReviewAttentionRuleSetID(
+	encodedRules []byte,
+	used map[string]struct{},
+) string {
+	digest := sha256.Sum256(encodedRules)
+	base := "legacy_" + hex.EncodeToString(digest[:8])
+	for suffix := 0; ; suffix++ {
+		candidate := base
+		if suffix != 0 {
+			candidate = fmt.Sprintf("%s_%d", base, suffix)
+		}
+		if _, exists := used[candidate]; !exists {
+			return candidate
+		}
+	}
+}
+
+func cloneNamedReviewAttentionConfig(
+	config ReviewAttentionConfig,
+) (ReviewAttentionConfig, error) {
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return ReviewAttentionConfig{}, err
+	}
+	var cloned ReviewAttentionConfig
+	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+	decoder.UseNumber()
+	if err = decoder.Decode(&cloned); err != nil {
+		return ReviewAttentionConfig{}, err
+	}
+	if cloned.RuleSets == nil {
+		cloned.RuleSets = make(map[string]ReviewAttentionRuleSet)
+	}
+	if cloned.RepositoryAssignments == nil {
+		cloned.RepositoryAssignments = make(map[string]string)
+	}
+	return cloned, nil
+}
+
+func cloneReviewAttentionRules(
+	rules map[string][]gatetypes.GateSpec,
+) map[string][]gatetypes.GateSpec {
+	cloned := make(map[string][]gatetypes.GateSpec, len(rules))
+	for decision, gates := range rules {
+		cloned[decision] = cloneReviewAttentionGates(gates)
+	}
+	return cloned
+}
+
+func cloneReviewAttentionGates(gates []gatetypes.GateSpec) []gatetypes.GateSpec {
+	encoded, err := json.Marshal(gates)
+	if err != nil {
+		return nil
+	}
+	var cloned []gatetypes.GateSpec
+	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+	decoder.UseNumber()
+	if err = decoder.Decode(&cloned); err != nil {
+		return nil
+	}
+	if cloned == nil {
+		return []gatetypes.GateSpec{}
+	}
+	return cloned
 }
 
 func validateReviewAttentionDecisionPoint(value string) error {

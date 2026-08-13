@@ -179,7 +179,7 @@ describe("AppSidebar", () => {
     )
   })
 
-  it("groups pull request work and configuration in a collapsible PR Reviews section", async () => {
+  it("groups pull request work and attention rules in a collapsible PR Reviews section", async () => {
     pathname = "/reviews"
     const user = userEvent.setup()
 
@@ -188,49 +188,49 @@ describe("AppSidebar", () => {
     const trigger = screen.getByRole("button", { name: "PR Reviews" })
     expect(trigger).toHaveAttribute("aria-expanded", "true")
     const work = screen.getByRole("link", { name: "Pull request work" })
-    const configuration = screen.getByRole("link", {
-      name: "Configuration",
+    const attentionRules = screen.getByRole("link", {
+      name: "Rule sets",
     })
     expect(work).toHaveAttribute("href", "/reviews")
-    expect(configuration).toHaveAttribute("href", "/reviews?view=policies")
+    expect(attentionRules).toHaveAttribute("href", "/reviews?view=policies")
     expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
       "true",
     )
     expect(work).toHaveAttribute("aria-current", "page")
     expect(work).toHaveAttribute("data-status", "active")
-    expect(configuration).not.toHaveAttribute("aria-current")
-    expect(configuration).not.toHaveAttribute("data-status")
+    expect(attentionRules).not.toHaveAttribute("aria-current")
+    expect(attentionRules).not.toHaveAttribute("data-status")
     expect(
-      configuration.closest('[data-sidebar="menu-button"]'),
+      attentionRules.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "false")
 
     await user.click(trigger)
     expect(trigger).toHaveAttribute("aria-expanded", "false")
     expect(work).not.toBeVisible()
-    expect(configuration).not.toBeVisible()
+    expect(attentionRules).not.toBeVisible()
   })
 
-  it("marks only PR Reviews configuration active for the policies view", () => {
+  it("marks only PR Reviews attention rules active for the policies view", () => {
     pathname = "/reviews"
     routeSearch = { view: "policies" }
 
     renderSidebar()
 
     const work = screen.getByRole("link", { name: "Pull request work" })
-    const configuration = screen.getByRole("link", {
-      name: "Configuration",
+    const attentionRules = screen.getByRole("link", {
+      name: "Rule sets",
     })
     expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
       "false",
     )
     expect(
-      configuration.closest('[data-sidebar="menu-button"]'),
+      attentionRules.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "true")
     expect(work).not.toHaveAttribute("aria-current")
     expect(work).not.toHaveAttribute("data-status")
-    expect(configuration).toHaveAttribute("aria-current", "page")
-    expect(configuration).toHaveAttribute("data-status", "active")
+    expect(attentionRules).toHaveAttribute("aria-current", "page")
+    expect(attentionRules).toHaveAttribute("data-status", "active")
   })
 })

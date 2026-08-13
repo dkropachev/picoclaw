@@ -976,7 +976,7 @@ const channelCatalogResponse = {
 
 const boundaryReviewAttentionGateID = "g".repeat(64)
 const boundaryReviewAttentionRepository = `${"o".repeat(127)}/${"r".repeat(128)}`
-const reviewAttentionPoliciesResponseText = `{"global":{"custom.release_check":[],"pr_development.before_push":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.gate_subject.untrusted_target.review.has_findings == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]},"repositories":{"octo/repo":{"pr_development.before_push":{"mode":"overlay","gates":[{"id":"ask_owner","kind":"zero"},{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.gate_subject.untrusted_local_ci.plan_complete == false","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
+const reviewAttentionPoliciesResponseText = `{"rule_sets":{"default":{"name":"Default","rules":{"custom.release_check":[],"pr_development.before_push":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.gate_subject.untrusted_target.review.has_findings == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]}},"release_checks":{"name":"Release checks","rules":{"pr_development.before_push":[{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.gate_subject.untrusted_local_ci.plan_complete == false","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"default_rule_set_id":"default","repository_assignments":{"octo/repo":"release_checks"},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
 const reviewAttentionCaseID = `prc_${"1".repeat(32)}`
 const reviewAttentionResponseToken = `sha256:${"a".repeat(64)}`
 const reviewAttentionCase = {
@@ -3506,15 +3506,19 @@ test("pull request work starts at repositories, filters PRs, separates roles, an
     await reviewsSection.click()
   }
   const workLink = page.getByRole("link", { name: "Pull request work" })
-  const configurationLink = page.getByRole("link", { name: "Configuration" })
+  const configurationLink = page.getByRole("link", { name: "Rule sets" })
   await expect(workLink).toHaveAttribute("aria-current", "page")
   await expect(configurationLink).not.toHaveAttribute("aria-current")
   await configurationLink.click()
   await expect(page).toHaveURL(/\/reviews\?view=policies$/)
-  await expect(page.getByText("Decision gates request attention")).toBeVisible()
+  await expect(
+    page.getByText("Build reusable attention rule sets"),
+  ).toBeVisible()
   if ((page.viewportSize()?.width ?? 0) >= 640) {
     await expect(workLink).not.toHaveAttribute("aria-current")
     await expect(configurationLink).toHaveAttribute("aria-current", "page")
+  } else {
+    await expect(page.locator('[data-mobile="true"]')).toHaveCount(0)
   }
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
@@ -3778,32 +3782,27 @@ test("review attention policy route is inert, accessible, and contained on deskt
   await expect(
     page.getByRole("button", { name: "Pull request work" }),
   ).toBeVisible()
-  await expect(page.getByText("Decision gates request attention")).toBeVisible()
   await expect(
-    page.getByText(/Changes affect only future decisions that have not pinned/),
+    page.getByText("Build reusable attention rule sets"),
   ).toBeVisible()
   await expect(
-    page.getByText(/Saving only updates configuration; it does not run a gate/),
+    page.getByText(/built-in Default set always exists/),
   ).toBeVisible()
-  const decisionPoints = page.getByLabel("Decision point")
-  expect(
-    await decisionPoints.evaluateAll((fields) =>
-      fields.map((field) => (field as HTMLInputElement).value),
-    ),
-  ).toEqual(["custom.release_check", "pr_development.before_push"])
-  const decisionPoint = decisionPoints.nth(1)
-  const presetListID = await decisionPoint.getAttribute("list")
-  expect(presetListID).not.toBeNull()
-  expect(
-    await page
-      .locator(`#${presetListID} option`)
-      .evaluateAll((options) =>
-        options.map((option) => (option as HTMLOptionElement).value),
-      ),
-  ).toContain("pr_development.before_push")
+  await expect(
+    page.getByRole("link", { name: /Manage repository intake/ }),
+  ).toHaveAttribute("href", "/event-sources")
+  await page.getByText("What saving changes").click()
+  await expect(
+    page.getByText(/Saving replaces the full rule-set catalog/),
+  ).toBeVisible()
+  await expect(page.getByText("Known workflow moments")).toBeVisible()
+  await expect(page.getByText("Outgoing review submitted")).toBeVisible()
+  await expect(
+    page.getByText("Before pushing my PR changes", { exact: true }),
+  ).toBeVisible()
   expect(
     await page
-      .getByLabel("Gate type")
+      .getByLabel("How to decide")
       .evaluateAll((fields) =>
         fields.map((field) => (field as HTMLSelectElement).value),
       ),
@@ -3814,24 +3813,21 @@ test("review attention policy route is inert, accessible, and contained on deskt
     "zero",
   ])
 
-  await page.getByRole("button", { name: /octo\/repo/ }).click()
-  await expect(page.getByLabel("Override mode")).toHaveValue("overlay")
-  await expect(page.getByText("Effective repository policy")).toBeVisible()
+  await page.getByRole("button", { name: /Release checks/ }).click()
+  await expect(
+    page
+      .getByRole("region", { name: "Release checks" })
+      .getByText("Assigned repositories: 1", { exact: true }),
+  ).toBeVisible()
   const effectivePolicy = page.getByRole("article", {
-    name: "Decision policy 1",
+    name: "Attention rule 1",
   })
-  expect(
-    await effectivePolicy
-      .getByRole("list", { name: "Resolved gate order" })
-      .getByRole("listitem")
-      .evaluateAll((rows) => rows.map((row) => row.getAttribute("aria-label"))),
-  ).toEqual([
-    "1. ask_owner zero tombstoned",
-    "2. independent_check ai_isolated_context inherited",
-    "3. blocking_check deterministic inherited",
-    "4. no_attention zero inherited",
-    `5. ${boundaryReviewAttentionGateID} deterministic appended`,
-  ])
+  await expect(
+    effectivePolicy.getByRole("textbox", { name: "Check ID" }),
+  ).toHaveValue(boundaryReviewAttentionGateID)
+  await expect(effectivePolicy.getByLabel("How to decide")).toHaveValue(
+    "deterministic",
+  )
 
   await page.waitForTimeout(250)
   expect(reviewRequests.length).toBeGreaterThan(0)
@@ -3870,8 +3866,10 @@ test("review attention policy protects dirty navigation and boundary identities 
   const errors = collectPageErrors(page)
   await gotoMockedRoute(page, "/reviews?view=policies")
 
-  await page.getByRole("button", { name: /octo\/repo/ }).click()
-  await expect(page.getByText(boundaryReviewAttentionGateID)).toBeVisible()
+  await page.getByRole("button", { name: /Release checks/ }).click()
+  await expect(
+    page.getByRole("textbox", { name: "Check ID" }).first(),
+  ).toHaveValue(boundaryReviewAttentionGateID)
   await expectNoHorizontalOverflow(page)
 
   const title = page.getByLabel("Attention title").first()
@@ -3886,32 +3884,73 @@ test("review attention policy protects dirty navigation and boundary identities 
 
   await page.getByRole("button", { name: "Pull request work" }).click()
   const firstNavigation = page.getByRole("alertdialog", {
-    name: "Discard unsaved policy changes?",
+    name: "Discard unsaved rule changes?",
   })
   await expect(firstNavigation).toBeVisible()
   await firstNavigation.getByRole("button", { name: "Keep editing" }).click()
   await expect(page).toHaveURL(/\/reviews\?view=policies$/)
   await expect(title).toHaveValue("Keep this memory-only policy draft")
 
-  await page.getByRole("button", { name: "Add repository" }).click()
   await page
-    .getByRole("textbox", { name: "Repository", exact: true })
-    .fill(boundaryReviewAttentionRepository)
-  await page
-    .getByRole("button", { name: "Add decision policy" })
+    .getByRole("button", { name: "Assign repositories" })
     .first()
     .click()
-  const boundaryPolicy = page.getByRole("article", {
-    name: "Decision policy 1",
+  const repositoryDialog = page.getByRole("dialog", {
+    name: "Assign repositories to rule sets",
   })
-  await boundaryPolicy
-    .getByLabel("Decision point")
-    .fill("pr_development.before_push")
-  await boundaryPolicy.getByLabel("Override mode").selectOption("overlay")
-  await boundaryPolicy.getByRole("textbox", { name: "Gate ID" }).fill("local")
-  await boundaryPolicy
-    .getByLabel("Gate type")
-    .selectOption("ai_working_context")
+  await expectElementFitsViewport(
+    page,
+    '[role="dialog"]',
+    "repository override dialog",
+  )
+  await repositoryDialog
+    .getByRole("textbox", { name: "Repository" })
+    .fill(boundaryReviewAttentionRepository)
+  await repositoryDialog.getByRole("button", { name: "Add assignment" }).click()
+  await repositoryDialog.getByRole("button", { name: "Done" }).click()
+  await page
+    .getByRole("button", { name: "Add workflow moment" })
+    .first()
+    .click()
+  const ruleDialog = page.getByRole("dialog", {
+    name: "Add an attention rule",
+  })
+  await expectElementFitsViewport(
+    page,
+    '[role="dialog"]',
+    "attention rule dialog",
+  )
+  await ruleDialog
+    .getByLabel("When should this rule run?")
+    .selectOption("review.submitted")
+  await ruleDialog.getByRole("button", { name: "Add rule" }).click()
+  const boundaryPolicy = page.getByRole("article", {
+    name: "Attention rule 2",
+  })
+  await boundaryPolicy.getByRole("button", { name: "Add check" }).click()
+  const checkDialog = page.getByRole("dialog", {
+    name: "How should PicoClaw decide?",
+  })
+  await page.setViewportSize({ width: 320, height: 480 })
+  await expectElementFitsViewport(
+    page,
+    '[role="dialog"]',
+    "check choice dialog",
+  )
+  expect(
+    await checkDialog.evaluate((dialog) => {
+      const styles = getComputedStyle(dialog)
+      return {
+        overflowY: styles.overflowY,
+        scrollable: dialog.scrollHeight > dialog.clientHeight,
+      }
+    }),
+  ).toEqual({ overflowY: "auto", scrollable: true })
+  await checkDialog
+    .getByRole("button", { name: /Ask the agent already working on the PR/ })
+    .click()
+  await page.setViewportSize({ width: 320, height: 720 })
+  await boundaryPolicy.getByRole("textbox", { name: "Check ID" }).fill("local")
   await boundaryPolicy.getByLabel("AI agent").selectOption("reviewer")
   await boundaryPolicy
     .getByRole("textbox", { name: "Attention title" })
@@ -3919,15 +3958,16 @@ test("review attention policy protects dirty navigation and boundary identities 
   await boundaryPolicy
     .getByRole("textbox", { name: "What AI should look for" })
     .fill("Ask when repository intent cannot be inferred safely.")
-  const validationAlert = page
-    .getByRole("alert")
-    .filter({ hasText: "Fix policy errors before saving." })
-  await expect(validationAlert).toContainText(boundaryReviewAttentionRepository)
+  await expect(
+    page
+      .getByRole("region", { name: "Repository assignments" })
+      .getByText(boundaryReviewAttentionRepository, { exact: true }),
+  ).toBeVisible()
   await expectNoHorizontalOverflow(page)
 
   await page.getByRole("button", { name: "Pull request work" }).click()
   const secondNavigation = page.getByRole("alertdialog", {
-    name: "Discard unsaved policy changes?",
+    name: "Discard unsaved rule changes?",
   })
   await expect(secondNavigation).toBeVisible()
   await secondNavigation
@@ -3975,7 +4015,7 @@ test("review attention policy fences navigation until an in-flight save settles"
 
   const title = page.getByLabel("Attention title").first()
   await title.fill("Persist before leaving")
-  await page.getByRole("button", { name: "Save policies" }).click()
+  await page.getByRole("button", { name: "Save rule sets" }).click()
   await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled()
   await expect(
     page.getByRole("button", { name: "Pull request work" }),
@@ -3990,7 +4030,7 @@ test("review attention policy fences navigation until an in-flight save settles"
   }
   await page.getByRole("link", { name: "Models", exact: true }).click()
   const navigation = page.getByRole("alertdialog", {
-    name: "Discard unsaved policy changes?",
+    name: "Discard unsaved rule changes?",
   })
   await expect(navigation).toBeVisible()
   await expect(

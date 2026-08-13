@@ -1,11 +1,18 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import type { ComponentProps } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   type ReviewAttentionAgentCatalog,
-  ReviewAttentionAgentsAPIError,
   getReviewAttentionAgents,
 } from "@/api/review-attention-agents"
 import { parseExactJSON, stringifyExactJSON } from "@/api/review-attention-json"
@@ -42,6 +49,15 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>()
   return {
     ...actual,
+    Link: ({
+      to,
+      children,
+      ...props
+    }: ComponentProps<"a"> & { to: string }) => (
+      <a href={to} {...props}>
+        {children}
+      </a>
+    ),
     useBlocker: vi.fn(() => ({
       status: "idle",
       current: undefined,
@@ -89,959 +105,370 @@ describe("ReviewAttentionPoliciesPage", () => {
     vi.mocked(refreshGatewayState).mockReset()
     vi.mocked(showSaveSuccessOrRestartToast).mockReset()
 
-    vi.mocked(getReviewAttentionAgents).mockResolvedValue(agentCatalog())
+    vi.mocked(getReviewAttentionAgents).mockImplementation(
+      async ({ expectedConfigRevision }) =>
+        agentCatalog(expectedConfigRevision),
+    )
   })
 
-  it("shows loading, then renders every gate kind and repository override mode without executing anything", async () => {
+  it("starts with an immutable, inert built-in Default set and shows every known moment as Off", async () => {
     let resolvePolicies!: (snapshot: ReviewAttentionPolicySnapshot) => void
     vi.mocked(getReviewAttentionPolicies).mockReturnValue(
       new Promise((resolve) => {
         resolvePolicies = resolve
       }),
     )
-    const onShowInbox = vi.fn()
     const user = userEvent.setup()
-
+    const onShowInbox = vi.fn()
     renderPage(onShowInbox)
 
-    expect(screen.getByText("Loading review attention policies…")).toBeVisible()
-    expect(screen.getByRole("button", { name: "Review inbox" })).toBeVisible()
+    expect(screen.getByText("Loading attention rules…")).toBeVisible()
     expect(getReviewAttentionAgents).not.toHaveBeenCalled()
     await user.click(screen.getByRole("button", { name: "Review inbox" }))
     expect(onShowInbox).toHaveBeenCalledOnce()
 
-    await act(async () => resolvePolicies(mixedSnapshot()))
+    await act(async () => resolvePolicies(snapshot(emptyCatalog())))
 
     expect(
-      await screen.findByText("Decision gates request attention"),
+      await screen.findByRole("heading", {
+        name: "Build reusable attention rule sets",
+      }),
     ).toBeVisible()
     expect(
       screen.getByText(
-        "Use review.submitted for reviews you send, pr_development.review_attention_required for reviewer feedback on your PRs, and pr_development.before_push for the final local publication decision. Matching policies run when their runtime reaches that decision. Changes affect only future decisions that have not pinned a policy revision. Saving only updates configuration; it does not run a gate or model, edit code, run CI, invoke Git or push, acknowledge a review, resolve a review thread, or merge a pull request.",
+        "The built-in Default set always exists and begins with every known workflow moment Off. Configure it directly, or duplicate any set to create another permanent name, then make a set the default or assign it to repositories.",
       ),
     ).toBeVisible()
-    const decisionPoint = screen.getAllByLabelText("Decision point")[0]
-    const presets = document.getElementById(
-      decisionPoint.getAttribute("list") ?? "",
-    )
-    const presetOptions = Array.from(presets?.querySelectorAll("option") ?? [])
-    expect(presetOptions.map((option) => option.value)).toEqual([
-      "review.submitted",
-      "pr_development.review_attention_required",
-      "pr_development.before_push",
-    ])
-    expect(presetOptions.map((option) => option.label)).toEqual([
+    expect(
+      screen.getByText(
+        "This name is permanent. Duplicate the set when you need another named version.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("textbox", { name: /name/i }),
+    ).not.toBeInTheDocument()
+
+    const knownMoments = screen.getByRole("region", {
+      name: "Known workflow moments",
+    })
+    for (const label of [
       "Outgoing review submitted",
       "My PR development review needs attention",
       "Before pushing my PR changes",
-    ])
-    await waitFor(() => expect(getReviewAttentionAgents).toHaveBeenCalledOnce())
-    const initialAgentRequest = vi.mocked(getReviewAttentionAgents).mock
-      .calls[0][0]
-    expect(initialAgentRequest.expectedConfigRevision).toBe("config-revision-1")
-    expect(initialAgentRequest).not.toHaveProperty("cursor")
+    ]) {
+      const row = within(knownMoments).getByText(label).closest("li")
+      expect(row).not.toBeNull()
+      expect(within(row!).getByText("Off")).toBeVisible()
+    }
+    expect(screen.getByText("All moments Off")).toBeVisible()
     expect(
-      screen
-        .getAllByLabelText("Gate type")
-        .map((field) => (field as HTMLSelectElement).value),
-    ).toEqual([
-      "ai_working_context",
-      "ai_isolated_context",
-      "deterministic",
-      "zero",
-    ])
-    expect(screen.getAllByLabelText("What AI should look for")[0]).toHaveValue(
-      "Ask the owner only when repository intent is required.",
-    )
-    expect(screen.getByLabelText("Deterministic condition")).toHaveValue(
-      "inputs.gate_subject.untrusted_target.review.has_findings == true",
-    )
-    expect(
-      screen.getByText(
-        "Uses the AI already working on the problem and its current context. It asks you only when that AI decides your input is needed.",
-      ),
+      screen.getByText("Nothing triggers human attention in this rule set."),
     ).toBeVisible()
-    expect(
-      screen.getByText(
-        "Uses a separate private AI context over the code, findings, and other inputs supplied to this decision.",
-      ),
-    ).toBeVisible()
-    expect(
-      screen.getByText(
-        "Evaluates the configured condition without AI and asks the configured questions only when it matches. Decision data is available under inputs.gate_subject.",
-      ),
-    ).toBeVisible()
-    expect(
-      screen.getByText(
-        "For a working-context gate here, select the same agent that owns this PR's local development. An owner mismatch fails closed before publication.",
-      ),
-    ).toBeVisible()
-
-    await user.click(screen.getByRole("button", { name: /octo\/repo/ }))
-
-    expect(
-      screen
-        .getAllByLabelText("Override mode")
-        .map((field) => (field as HTMLSelectElement).value),
-    ).toEqual(["overlay", "disable", "inherit", "replace"])
-    expect(screen.getAllByText("Effective repository policy")).toHaveLength(4)
-    const beforePushPolicy = screen.getByRole("article", {
-      name: "Decision policy 1",
-    })
-    const resolvedGateRows = within(
-      within(beforePushPolicy).getByRole("list", {
-        name: "Resolved gate order",
-      }),
-    )
-      .getAllByRole("listitem")
-      .map((row) => row.getAttribute("aria-label"))
-    expect(resolvedGateRows).toEqual([
-      "1. ask_owner zero tombstoned",
-      "2. independent_check ai_isolated_context inherited",
-      "3. blocking_check deterministic inherited",
-      "4. no_attention zero inherited",
-      "5. repository_rule deterministic appended",
-    ])
-    expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
-
-    await user.click(screen.getByRole("button", { name: "Review inbox" }))
-    expect(onShowInbox).toHaveBeenCalledTimes(2)
-  })
-
-  it("keeps a custom decision point while offering the known before-push decision", async () => {
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
-      snapshot({
-        global: {
-          "custom.release_check": [{ id: "custom", kind: "zero" }],
-          "pr_development.before_push": [{ id: "before_push", kind: "zero" }],
-        },
-        repositories: {},
-      }),
-    )
-
-    renderPage()
-
-    const decisionPoints = await screen.findAllByLabelText("Decision point")
-    expect(
-      decisionPoints.map((field) => (field as HTMLInputElement).value),
-    ).toEqual(["custom.release_check", "pr_development.before_push"])
-    const decisionPoint = decisionPoints[0]
-    const presets = document.getElementById(
-      decisionPoint.getAttribute("list") ?? "",
+    const deleteButton = screen.getByRole("button", { name: "Delete" })
+    expect(deleteButton).toBeDisabled()
+    expect(deleteButton).toHaveAttribute(
+      "title",
+      "The built-in Default set cannot be deleted.",
     )
     expect(
-      Array.from(presets?.querySelectorAll("option") ?? []).map(
-        (option) => option.value,
-      ),
-    ).toContain("pr_development.before_push")
+      screen.queryByLabelText("Repository behavior"),
+    ).not.toBeInTheDocument()
     expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
   })
 
-  it("pages a large decision scope and defers whole-catalog validation while editing", async () => {
-    const revision = "large-policy-scope-revision"
-    const global = Object.fromEntries(
-      Array.from({ length: 9 }, (_, index) => [
-        `review.point_${String(index).padStart(2, "0")}`,
-        [{ id: `gate_${index}`, kind: "zero" as const }],
-      ]),
-    )
+  it("configures the built-in set and saves one exact normalized catalog with CAS", async () => {
     vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
-      snapshot(
-        { global, repositories: {} },
-        revision,
-        "catalog-large-policy-scope",
-      ),
+      snapshot(emptyCatalog()),
     )
-    vi.mocked(getReviewAttentionAgents).mockResolvedValue(
-      agentPage(revision, [{ id: "main", name: "Main" }]),
+    vi.mocked(putReviewAttentionPolicies).mockImplementation(async (catalog) =>
+      snapshot(catalog, "config-revision-2", "catalog-revision-2"),
     )
     const user = userEvent.setup()
     renderPage()
 
-    expect(await screen.findByText("Decision policies 1–8 of 9")).toBeVisible()
-    expect(screen.getAllByLabelText("Decision point")).toHaveLength(8)
-    expect(screen.getAllByLabelText("Decision point")[0]).toHaveValue(
-      "review.point_00",
-    )
-
-    await user.click(screen.getByRole("button", { name: "Next policies" }))
-    expect(screen.getByText("Decision policies 9–9 of 9")).toBeVisible()
-    const lastDecision = screen.getByLabelText("Decision point")
-    expect(lastDecision).toHaveValue("review.point_08")
-    await user.type(lastDecision, "x")
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Save policies" }),
-      ).toBeEnabled(),
-    )
-  })
-
-  it("associates actionable field errors and active scope state with their controls", async () => {
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(mixedSnapshot())
-    const user = userEvent.setup()
-    renderPage()
-
-    const globalScope = await screen.findByRole("button", {
-      name: /Global defaults/,
+    const knownMoments = await screen.findByRole("region", {
+      name: "Known workflow moments",
     })
-    const repositoryScope = screen.getByRole("button", { name: /octo\/repo/ })
-    expect(globalScope).toHaveAttribute("aria-pressed", "true")
-    expect(repositoryScope).toHaveAttribute("aria-pressed", "false")
-
-    const gateID = screen.getAllByLabelText("Gate ID")[0]
-    await user.clear(gateID)
-    await waitFor(() => expect(gateID).toHaveAttribute("aria-invalid", "true"))
-    const descriptionID = gateID.getAttribute("aria-describedby")
-    expect(descriptionID).toBeTruthy()
-    expect(document.getElementById(descriptionID!)).toHaveTextContent(
-      "Gate ID must",
-    )
-    expect(
-      screen.getByText(/Global · pr_development\.before_push · gate 1 · id/),
-    ).toBeVisible()
-
-    await user.click(repositoryScope)
-    expect(repositoryScope).toHaveAttribute("aria-pressed", "true")
-    expect(globalScope).toHaveAttribute("aria-pressed", "false")
-  })
-
-  it("adds and reorders a second gate, then saves a lossless full replacement against the captured revision", async () => {
-    const initial = replacementSnapshot()
-    vi.mocked(getReviewAttentionAgents).mockResolvedValue(
-      agentCatalog("config-revision-7"),
-    )
-    let resolveStaleRead!: (snapshot: ReviewAttentionPolicySnapshot) => void
-    vi.mocked(getReviewAttentionPolicies)
-      .mockResolvedValueOnce(initial)
-      .mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveStaleRead = resolve
-        }),
-      )
-    let resolveSave!: (snapshot: ReviewAttentionPolicySnapshot) => void
-    vi.mocked(putReviewAttentionPolicies).mockReturnValue(
-      new Promise((resolve) => {
-        resolveSave = resolve
-      }),
-    )
-    const user = userEvent.setup()
-    const onShowInbox = vi.fn()
-    const { client } = renderPage(onShowInbox)
-
-    await screen.findByRole("group", { name: "Gate 1" })
-    await user.click(screen.getByRole("button", { name: "Add gate" }))
-    const secondGate = screen.getByRole("group", { name: "Gate 2" })
-    await user.type(within(secondGate).getByLabelText("Gate ID"), "second_gate")
+    const reviewSubmittedRow = within(knownMoments)
+      .getByText("Outgoing review submitted")
+      .closest("li")
     await user.click(
-      within(secondGate).getByRole("button", { name: "Move gate up" }),
+      within(reviewSubmittedRow!).getByRole("button", { name: "Configure" }),
+    )
+    await user.click(screen.getByRole("button", { name: "Add rule" }))
+
+    expect(screen.getByLabelText("When this happens")).toHaveValue(
+      "review.submitted",
+    )
+    expect(
+      screen.getByText(
+        "No checks are configured, so this rule will not ask for attention.",
+      ),
+    ).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Add check" }))
+    await user.click(
+      screen.getByRole("button", {
+        name: /Ask when a fixed condition matches/,
+      }),
     )
 
-    expect(
-      screen
-        .getAllByLabelText("Gate ID")
-        .map((field) => (field as HTMLInputElement).value),
-    ).toEqual(["second_gate", "deterministic_gate"])
-    await user.click(screen.getByRole("button", { name: "Save policies" }))
+    expect(screen.getByLabelText("Check ID")).toHaveValue("confirm_with_owner")
+    expect(screen.getByLabelText("How to decide")).toHaveValue("deterministic")
+    await user.clear(screen.getByLabelText("Attention title"))
+    await user.type(
+      screen.getByLabelText("Attention title"),
+      "Release confirmation",
+    )
+    fireEvent.change(screen.getByLabelText("Questions JSON"), {
+      target: { value: exactQuestionsSource },
+    })
+
+    const save = screen.getByRole("button", { name: "Save rule sets" })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
 
     await waitFor(() =>
       expect(putReviewAttentionPolicies).toHaveBeenCalledOnce(),
     )
     const [catalog, expectedRevision] = vi.mocked(putReviewAttentionPolicies)
       .mock.calls[0]
-    expect(expectedRevision).toBe("config-revision-7")
-    expect(Object.keys(catalog.global)).toEqual(["pr_development.before_push"])
-    expect(
-      catalog.global["pr_development.before_push"].map((gate) => gate.id),
-    ).toEqual(["second_gate", "deterministic_gate"])
-    expect(catalog.global["pr_development.before_push"][0]).toEqual({
-      id: "second_gate",
-      kind: "zero",
+    expect(expectedRevision).toBe("config-revision-1")
+    expect(Object.keys(catalog.rule_sets)).toEqual(["default"])
+    expect(catalog.default_rule_set_id).toBe("default")
+    expect(Object.keys(catalog.repository_assignments)).toEqual([])
+    expect(catalog.rule_sets.default.name).toBe("Default")
+    const gate = catalog.rule_sets.default.rules["review.submitted"][0]
+    expect(gate).toMatchObject({
+      id: "confirm_with_owner",
+      kind: "deterministic",
+      when: "true",
+      title: "Release confirmation",
     })
+    expect(stringifyExactJSON(gate.questions!)).toBe(exactQuestionsSource)
+    expect(showSaveSuccessOrRestartToast).toHaveBeenCalledOnce()
+  })
+
+  it("duplicates an exact independent copy under a unique permanent name", async () => {
+    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
+      snapshot(catalogWithConfiguredDefault()),
+    )
+    const user = userEvent.setup()
+    renderPage()
+
+    expect(await screen.findByLabelText("Attention title")).toHaveValue(
+      "Original title",
+    )
+    await user.click(screen.getByRole("button", { name: "Duplicate" }))
+    const duplicateDialog = screen.getByRole("dialog", {
+      name: "Duplicate rule set",
+    })
+    const permanentName =
+      within(duplicateDialog).getByLabelText("New permanent name")
+    await user.type(permanentName, "default")
     expect(
-      stringifyExactJSON(
-        catalog.global["pr_development.before_push"][1].questions!,
+      within(duplicateDialog).getByText("Rule-set names must be unique."),
+    ).toBeVisible()
+    expect(
+      within(duplicateDialog).getByRole("button", {
+        name: "Create duplicate",
+      }),
+    ).toBeDisabled()
+
+    await user.clear(permanentName)
+    await user.type(permanentName, "Strict Reviews")
+    await user.click(
+      within(duplicateDialog).getByRole("button", {
+        name: "Create duplicate",
+      }),
+    )
+
+    const strictEditor = screen.getByRole("region", { name: "Strict Reviews" })
+    expect(
+      within(strictEditor).getByText(
+        "This name is permanent. Duplicate the set when you need another named version.",
       ),
-    ).toBe(exactQuestionsSource)
-    expect(Object.keys(catalog.repositories)).toEqual(["octo/keep"])
-    expect(
-      catalog.repositories["octo/keep"]["pr_development.before_push"],
-    ).toEqual({ mode: "inherit", gates: [] })
-    expect(screen.getAllByLabelText("Gate ID")[0]).toBeDisabled()
-    const inboxTab = screen.getByRole("button", { name: "Review inbox" })
-    expect(inboxTab).toBeDisabled()
-    await user.click(inboxTab)
-    expect(onShowInbox).not.toHaveBeenCalled()
-
-    // Simulate an external invalidation that starts an old read while the PUT
-    // is in flight. The successful replacement must cancel and supersede it.
-    let staleRefetch!: Promise<void>
-    act(() => {
-      staleRefetch = client.refetchQueries({
-        queryKey: ["reviews", "attention-policies"],
-        exact: true,
-      })
-    })
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2),
-    )
-
-    await act(async () =>
-      resolveSave({
-        ...catalog,
-        catalog_revision: "catalog-revision-8",
-        config_revision: "config-revision-8",
-        effects: { gateway_effect: "applied" },
-      }),
-    )
-    expect(showSaveSuccessOrRestartToast).toHaveBeenCalledWith(
-      expect.any(Function),
-      "Review attention policies saved.",
-      "review attention policies",
-      false,
-    )
-    expect(refreshGatewayState).not.toHaveBeenCalled()
-    expect(
-      client.getQueryData<ReviewAttentionAgentCatalog>([
-        "reviews",
-        "attention-policy-agents",
-        "config-revision-8",
-        "first",
-      ]),
-    ).toMatchObject({ config_revision: "config-revision-8" })
-    expect(
-      client.getQueryData<ReviewAttentionAgentCatalog>([
-        "reviews",
-        "attention-policy-agents",
-        "config-revision-7",
-        "first",
-      ]),
-    ).toBeUndefined()
-    expect(
-      client
-        .getQueryCache()
-        .findAll({ queryKey: ["reviews", "attention-policy-agents"] })
-        .map((query) => query.queryKey),
-    ).toEqual([
-      ["reviews", "attention-policy-agents", "config-revision-8", "first"],
-    ])
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Save policies" }),
-      ).toBeDisabled(),
-    )
-
-    await act(async () => {
-      resolveStaleRead(
-        conflictSnapshot(
-          "A stale read must not replace the saved generation",
-          "stale-revision",
-          '{"stale":9007199254740991}',
-        ),
-      )
-      await staleRefetch
-    })
-    expect(
-      screen
-        .getAllByLabelText("Gate ID")
-        .map((field) => (field as HTMLInputElement).value),
-    ).toEqual(["second_gate", "deterministic_gate"])
-  })
-
-  it("selects an agent on page two, keeps it on page one, and submits it against the same revision", async () => {
-    const revision = "paged-selection-revision"
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
-      conflictSnapshot("Choose a reviewer", revision, '{"value":1}'),
-    )
-    vi.mocked(getReviewAttentionAgents).mockImplementation(async (request) => {
-      expect(request.expectedConfigRevision).toBe(revision)
-      if (request.cursor === "256") {
-        return agentPage(revision, [{ id: "page-two", name: "Page Two" }])
-      }
-      expect(request).not.toHaveProperty("cursor")
-      return agentPage(
-        revision,
-        [
-          { id: "main", name: "Main" },
-          { id: "page-one", name: "Page One" },
-          { id: "reviewer", name: "Reviewer" },
-        ],
-        "256",
-      )
-    })
-    vi.mocked(putReviewAttentionPolicies).mockImplementation(
-      async (catalog) => ({
-        ...catalog,
-        catalog_revision: "catalog-paged-selection-next",
-        config_revision: "paged-selection-revision-next",
-        effects: { gateway_effect: "applied" },
-      }),
-    )
-    const user = userEvent.setup()
-    renderPage()
-
-    expect(
-      await screen.findByText("AI agent page 1 · 3 identities"),
-    ).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "Next agents" }))
-    expect(
-      await screen.findByText("AI agent page 2 · 1 identities"),
-    ).toBeVisible()
-
-    await user.selectOptions(screen.getByLabelText("AI agent"), "page-two")
-    expect(screen.getByLabelText("AI agent")).toHaveValue("page-two")
-    await user.click(screen.getByRole("button", { name: "Previous agents" }))
-    expect(
-      await screen.findByText("AI agent page 1 · 3 identities"),
-    ).toBeVisible()
-    expect(screen.getByLabelText("AI agent")).toHaveValue("page-two")
-    expect(
-      within(screen.getByLabelText("AI agent")).getByRole("option", {
-        name: "page-two (page-two)",
-      }),
-    ).toBeVisible()
-
-    await user.click(screen.getByRole("button", { name: "Save policies" }))
-    await waitFor(() =>
-      expect(putReviewAttentionPolicies).toHaveBeenCalledOnce(),
-    )
-    const [submitted, expectedRevision] = vi.mocked(putReviewAttentionPolicies)
-      .mock.calls[0]
-    expect(expectedRevision).toBe(revision)
-    expect(submitted.global["review.submitted"][0]).toMatchObject({
-      agent_id: "page-two",
-    })
-    expect(getReviewAttentionAgents).toHaveBeenCalledTimes(3)
-    for (const [request] of vi.mocked(getReviewAttentionAgents).mock.calls) {
-      expect(request.expectedConfigRevision).toBe(revision)
-    }
-  })
-
-  it("keeps only the active agent page cached and drops replaced or unselected prior-page options", async () => {
-    const revision = "three-page-revision"
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
-      conflictSnapshot("Bounded agent pages", revision, '{"value":1}'),
-    )
-    vi.mocked(getReviewAttentionAgents).mockImplementation(async (request) => {
-      if (request.cursor === "512") {
-        return agentPage(revision, [{ id: "page-three", name: "Page Three" }])
-      }
-      if (request.cursor === "256") {
-        return agentPage(
-          revision,
-          [{ id: "page-two", name: "Page Two" }],
-          "512",
-        )
-      }
-      return agentPage(
-        revision,
-        [
-          { id: "page-one", name: "Page One" },
-          { id: "reviewer", name: "Reviewer" },
-        ],
-        "256",
-      )
-    })
-    const user = userEvent.setup()
-    const { client } = renderPage()
-
-    const currentSelector = () => screen.getByLabelText("AI agent")
-    const initialSelector = await screen.findByLabelText("AI agent")
-    expect(
-      await within(initialSelector).findByRole("option", {
-        name: "Page One (page-one)",
-      }),
-    ).toBeVisible()
-    await expectOnlyAgentPageCached(client, revision, "first")
-
-    await user.click(screen.getByRole("button", { name: "Next agents" }))
-    expect(
-      await within(currentSelector()).findByRole("option", {
-        name: "Page Two (page-two)",
-      }),
     ).toBeVisible()
     expect(
-      within(currentSelector()).queryByRole("option", {
-        name: "Page One (page-one)",
-      }),
-    ).toBeNull()
-    await user.selectOptions(currentSelector(), "page-two")
-    await expectOnlyAgentPageCached(client, revision, "256")
-
-    await user.click(screen.getByRole("button", { name: "Next agents" }))
-    expect(
-      await within(currentSelector()).findByRole("option", {
-        name: "Page Three (page-three)",
-      }),
-    ).toBeVisible()
-    expect(
-      within(currentSelector()).getByRole("option", {
-        name: "page-two (page-two)",
-      }),
-    ).toBeVisible()
-    await user.selectOptions(currentSelector(), "page-three")
-    await waitFor(() =>
-      expect(
-        within(currentSelector()).queryByRole("option", {
-          name: "page-two (page-two)",
-        }),
-      ).toBeNull(),
+      within(strictEditor).queryByText("Current default"),
+    ).not.toBeInTheDocument()
+    expect(screen.getByLabelText("Questions JSON")).toHaveValue(
+      exactQuestionsSource,
     )
-    await expectOnlyAgentPageCached(client, revision, "512")
-  })
+    await user.clear(screen.getByLabelText("Attention title"))
+    await user.type(screen.getByLabelText("Attention title"), "Copy-only edit")
 
-  it("exposes each off-page selected identity only to its own gate", async () => {
-    const revision = "isolated-options-revision"
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
-      snapshot(
-        {
-          global: {
-            "review.submitted": [
-              {
-                id: "first_gate",
-                kind: "ai_working_context",
-                agent_id: "first-selected",
-                criteria: "Inspect the working context.",
-                title: "First gate",
-              },
-              {
-                id: "second_gate",
-                kind: "ai_isolated_context",
-                agent_id: "second-selected",
-                criteria: "Inspect an isolated context.",
-                title: "Second gate",
-              },
-            ],
-          },
-          repositories: {},
-        },
-        revision,
-        "catalog-isolated-options",
+    await selectRuleSet(user, "Default")
+    expect(screen.getByLabelText("Attention title")).toHaveValue(
+      "Original title",
+    )
+    await selectRuleSet(user, "Strict Reviews")
+    expect(screen.getByLabelText("Attention title")).toHaveValue(
+      "Copy-only edit",
+    )
+    expect(
+      screen.getByText(
+        "No repository-specific assignments. Every repository follows the current default.",
       ),
-    )
-    vi.mocked(getReviewAttentionAgents).mockResolvedValue(
-      agentPage(revision, [{ id: "page-agent", name: "Page Agent" }]),
-    )
-    renderPage()
-
-    const selectors = await screen.findAllByLabelText("AI agent")
-    await waitFor(() => expect(selectors[0]).toBeEnabled())
-    expect(
-      within(selectors[0]).getByRole("option", {
-        name: "first-selected (first-selected)",
-      }),
     ).toBeVisible()
-    expect(
-      within(selectors[0]).queryByRole("option", {
-        name: "second-selected (second-selected)",
-      }),
-    ).toBeNull()
-    expect(
-      within(selectors[1]).getByRole("option", {
-        name: "second-selected (second-selected)",
-      }),
-    ).toBeVisible()
-    expect(
-      within(selectors[1]).queryByRole("option", {
-        name: "first-selected (first-selected)",
-      }),
-    ).toBeNull()
+    expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
   })
 
-  it("keeps an off-page default agent usable when converting a gate to AI", async () => {
+  it("makes any set the fallback, assigns it to multiple repositories, and permits an explicit built-in assignment", async () => {
     vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
-      replacementSnapshot(),
+      snapshot(catalogWithNamedSets()),
     )
-    vi.mocked(getReviewAttentionAgents).mockResolvedValue({
-      agents: [{ id: "main", name: "Main" }],
-      default_agent_id: "off-page-default",
-      config_revision: "config-revision-7",
-    })
+    vi.mocked(putReviewAttentionPolicies).mockImplementation(async (catalog) =>
+      snapshot(catalog, "config-revision-2", "catalog-revision-2"),
+    )
     const user = userEvent.setup()
     renderPage()
 
-    expect(
-      await screen.findByText("AI agent page 1 · 1 identities"),
-    ).toBeVisible()
-    await user.selectOptions(
-      screen.getByLabelText("Gate type"),
-      "ai_working_context",
-    )
+    await selectRuleSet(user, "Strict Reviews")
+    await user.click(screen.getByRole("button", { name: "Make default" }))
+    expect(screen.getByText("Current default")).toBeVisible()
 
-    const agentSelector = screen.getByLabelText("AI agent")
-    expect(agentSelector).toHaveValue("off-page-default")
-    expect(
-      within(agentSelector).getByRole("option", {
-        name: "off-page-default (off-page-default)",
-      }),
-    ).toBeVisible()
+    await user.clear(screen.getByLabelText("Attention title"))
     await user.type(
-      screen.getByLabelText("What AI should look for"),
-      "Escalate only when repository-owner intent is required.",
+      screen.getByLabelText("Attention title"),
+      "Edited shared rule",
     )
-    expect(screen.getByRole("button", { name: "Save policies" })).toBeEnabled()
-  })
-
-  it("preserves the draft on a page-two 409 and reloads a clean first page at the new revision", async () => {
-    const oldRevision = "stale-agent-page-revision"
-    const newRevision = "fresh-agent-page-revision"
-    vi.mocked(getReviewAttentionPolicies)
-      .mockResolvedValueOnce(
-        conflictSnapshot("Original title", oldRevision, '{"value":1}'),
-      )
-      .mockResolvedValueOnce(
-        conflictSnapshot("Fresh title", newRevision, '{"value":2}'),
-      )
-    vi.mocked(getReviewAttentionAgents).mockImplementation(async (request) => {
-      if (request.expectedConfigRevision === newRevision) {
-        expect(request).not.toHaveProperty("cursor")
-        return agentPage(newRevision, [
-          { id: "main", name: "Main" },
-          { id: "reviewer", name: "Reviewer" },
-        ])
-      }
-      expect(request.expectedConfigRevision).toBe(oldRevision)
-      if (request.cursor === "256") {
-        throw new ReviewAttentionAgentsAPIError("config_revision_mismatch", 409)
-      }
-      expect(request).not.toHaveProperty("cursor")
-      return agentPage(
-        oldRevision,
-        [
-          { id: "main", name: "Main" },
-          { id: "reviewer", name: "Reviewer" },
-        ],
-        "256",
-      )
+    await user.click(
+      screen.getByRole("button", { name: "Assign repositories" }),
+    )
+    const assignmentDialog = screen.getByRole("dialog", {
+      name: "Assign repositories to rule sets",
     })
-    const user = userEvent.setup()
-    const { client } = renderPage()
+    const repository = within(assignmentDialog).getByLabelText("Repository")
+    const ruleSet = within(assignmentDialog).getByLabelText("Rule set")
+    expect(ruleSet).toHaveValue("strict")
 
+    await user.type(repository, "acme/one")
+    await user.click(
+      within(assignmentDialog).getByRole("button", { name: "Add assignment" }),
+    )
+    await user.type(repository, "acme/two")
+    await user.click(
+      within(assignmentDialog).getByRole("button", { name: "Add assignment" }),
+    )
+    await user.selectOptions(ruleSet, "default")
+    await user.type(repository, "acme/off")
+    await user.click(
+      within(assignmentDialog).getByRole("button", { name: "Add assignment" }),
+    )
+    await user.click(
+      within(assignmentDialog).getByRole("button", { name: "Done" }),
+    )
+
+    expect(screen.getByLabelText("Rule set for acme/one")).toHaveValue("strict")
+    expect(screen.getByLabelText("Rule set for acme/two")).toHaveValue("strict")
+    expect(screen.getByLabelText("Rule set for acme/off")).toHaveValue(
+      "default",
+    )
+    await user.click(
+      screen.getByRole("button", {
+        name: /Remove acme\/one assignment; it will follow the current default/,
+      }),
+    )
     expect(
-      await screen.findByText("AI agent page 1 · 2 identities"),
-    ).toBeVisible()
-    const title = await screen.findByLabelText("Attention title")
-    await user.clear(title)
-    await user.type(title, "Keep this draft after the agent 409")
-    await user.click(screen.getByRole("button", { name: "Next agents" }))
-    expect(
-      await screen.findByText(
-        "The configuration changed while loading agents. Your draft is preserved; reload the latest policies.",
-      ),
-    ).toBeVisible()
-    expect(title).toHaveValue("Keep this draft after the agent 409")
-    expect(screen.getByRole("button", { name: "Save policies" })).toBeDisabled()
-    expect(
-      screen.queryByRole("button", { name: "Retry agents" }),
+      screen.queryByLabelText("Rule set for acme/one"),
     ).not.toBeInTheDocument()
     expect(
-      screen.getByRole("button", { name: "Reload policies" }),
-    ).toBeVisible()
-    expect(getReviewAttentionAgents).toHaveBeenCalledTimes(2)
-    expect(getReviewAttentionPolicies).toHaveBeenCalledOnce()
-    expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
-
-    await user.click(screen.getByRole("button", { name: "Reload policies" }))
-    await user.click(
-      within(
-        screen.getByRole("alertdialog", {
-          name: "Discard this policy draft?",
-        }),
-      ).getByRole("button", { name: "Discard and reload" }),
-    )
-
-    await waitFor(() =>
-      expect(screen.getByLabelText("Attention title")).toHaveValue(
-        "Fresh title",
+      screen.getByText(
+        /Repositories without an assignment follow the current default: Strict Reviews/,
       ),
-    )
-    expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2)
-    expect(getReviewAttentionAgents).toHaveBeenCalledTimes(3)
-    expect(
-      vi.mocked(getReviewAttentionAgents).mock.calls.map(([request]) => ({
-        revision: request.expectedConfigRevision,
-        cursor: request.cursor,
-      })),
-    ).toEqual([
-      { revision: oldRevision, cursor: undefined },
-      { revision: oldRevision, cursor: "256" },
-      { revision: newRevision, cursor: undefined },
-    ])
-    await expectOnlyAgentPageCached(client, newRevision, "first")
-    expect(
-      client
-        .getQueryCache()
-        .findAll({ queryKey: ["reviews", "attention-policy-agents"] })
-        .some((query) => query.queryKey.includes(oldRevision)),
-    ).toBe(false)
-  })
+    ).toBeVisible()
 
-  it("preserves a newer policy generation observed before a delayed save response", async () => {
-    const initial = conflictSnapshot(
-      "Initial title",
-      "save-race-revision-a",
-      '{"value":1}',
-    )
-    const newer = conflictSnapshot(
-      "Generation C title",
-      "save-race-revision-c",
-      '{"value":3}',
-    )
-    vi.mocked(getReviewAttentionAgents)
-      .mockResolvedValueOnce(agentCatalog("save-race-revision-a"))
-      .mockResolvedValueOnce(agentCatalog("save-race-revision-c"))
-    let resolveNewerRead!: (snapshot: ReviewAttentionPolicySnapshot) => void
-    vi.mocked(getReviewAttentionPolicies)
-      .mockResolvedValueOnce(initial)
-      .mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveNewerRead = resolve
-        }),
-      )
-      .mockResolvedValue(newer)
-    let resolveSave!: (snapshot: ReviewAttentionPolicySnapshot) => void
-    vi.mocked(putReviewAttentionPolicies).mockReturnValue(
-      new Promise((resolve) => {
-        resolveSave = resolve
-      }),
-    )
-    const user = userEvent.setup()
-    const { client } = renderPage()
+    const save = screen.getByRole("button", { name: "Save rule sets" })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
 
-    const title = await screen.findByLabelText("Attention title")
-    await user.clear(title)
-    await user.type(title, "Keep local title until C is loaded")
-    await user.click(screen.getByRole("button", { name: "Save policies" }))
     await waitFor(() =>
       expect(putReviewAttentionPolicies).toHaveBeenCalledOnce(),
     )
-
-    let newerRefetch!: Promise<void>
-    act(() => {
-      newerRefetch = client.refetchQueries({
-        queryKey: ["reviews", "attention-policies"],
-        exact: true,
-      })
+    const [catalog, expectedRevision] = vi.mocked(putReviewAttentionPolicies)
+      .mock.calls[0]
+    expect(expectedRevision).toBe("config-revision-1")
+    expect(catalog.default_rule_set_id).toBe("strict")
+    expect(
+      Object.fromEntries(Object.entries(catalog.repository_assignments)),
+    ).toEqual({
+      "acme/off": "default",
+      "acme/two": "strict",
     })
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2),
+    expect(catalog.rule_sets.default.name).toBe("Default")
+    expect(catalog.rule_sets.strict.rules["review.submitted"][0].title).toBe(
+      "Edited shared rule",
     )
-    await act(async () => {
-      resolveNewerRead(newer)
-      await newerRefetch
-    })
-
-    const [savedCatalog] = vi.mocked(putReviewAttentionPolicies).mock.calls[0]
-    await act(async () =>
-      resolveSave({
-        ...savedCatalog,
-        catalog_revision: "save-race-catalog-b",
-        config_revision: "save-race-revision-b",
-        effects: { gateway_effect: "applied" },
-      }),
-    )
-
     expect(
-      await screen.findByText(
-        "The policies were saved, but a newer configuration generation was observed before the response completed. Your draft is preserved; reload the latest policies.",
+      stringifyExactJSON(
+        catalog.rule_sets.strict.rules["review.submitted"][0].questions!,
       ),
-    ).toBeVisible()
-    expect(title).toHaveValue("Keep local title until C is loaded")
-    expect(
-      client.getQueryData<ReviewAttentionPolicySnapshot>([
-        "reviews",
-        "attention-policies",
-      ]),
-    ).toMatchObject({ config_revision: "save-race-revision-c" })
-    expect(
-      client.getQueryData<ReviewAttentionAgentCatalog>([
-        "reviews",
-        "attention-policy-agents",
-        "save-race-revision-a",
-        "first",
-      ]),
-    ).toMatchObject({ config_revision: "save-race-revision-a" })
-    expect(showSaveSuccessOrRestartToast).toHaveBeenCalledOnce()
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Saving…" })).toBeNull(),
-    )
-
-    await user.click(screen.getByRole("button", { name: "Reload latest" }))
-    await user.click(
-      within(
-        screen.getByRole("alertdialog", {
-          name: "Discard this policy draft?",
-        }),
-      ).getByRole("button", { name: "Discard and reload" }),
-    )
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(3),
-    )
-    await waitFor(() =>
-      expect(getReviewAttentionAgents).toHaveBeenCalledTimes(2),
-    )
-    expect(
-      client.getQueryData<ReviewAttentionPolicySnapshot>([
-        "reviews",
-        "attention-policies",
-      ]),
-    ).toMatchObject({ config_revision: "save-race-revision-c" })
-    expect(
-      client.getQueryData<ReviewAttentionAgentCatalog>([
-        "reviews",
-        "attention-policy-agents",
-        "save-race-revision-c",
-        "first",
-      ]),
-    ).toMatchObject({ config_revision: "save-race-revision-c" })
-    await waitFor(() =>
-      expect(screen.getByLabelText("Attention title")).toHaveValue(
-        "Generation C title",
-      ),
-    )
+    ).toBe(exactQuestionsSource)
   })
 
-  it("locks the complete editor while a confirmed destructive reload is pending", async () => {
-    const initial = conflictSnapshot(
-      "Initial title",
-      "reload-revision-1",
-      '{"value":1}',
+  it("guards built-in, fallback, and assigned sets while confirming deletion of an unused set", async () => {
+    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
+      snapshot(catalogForDeletion()),
     )
-    const latest = conflictSnapshot(
-      "Authoritative title",
-      "reload-revision-2",
-      '{"value":2}',
-    )
-    vi.mocked(getReviewAttentionAgents)
-      .mockResolvedValueOnce(agentCatalog("reload-revision-1"))
-      .mockResolvedValueOnce(agentCatalog("reload-revision-2"))
-    let resolveReload!: (snapshot: ReviewAttentionPolicySnapshot) => void
-    vi.mocked(getReviewAttentionPolicies)
-      .mockResolvedValueOnce(initial)
-      .mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveReload = resolve
-        }),
-      )
     const user = userEvent.setup()
     renderPage()
 
-    const title = await screen.findByLabelText("Attention title")
-    await user.clear(title)
-    await user.type(title, "Unsaved local title")
-    await user.click(screen.getByRole("button", { name: "Reload" }))
-    await user.click(
-      within(
-        screen.getByRole("alertdialog", {
-          name: "Discard this policy draft?",
-        }),
-      ).getByRole("button", { name: "Discard and reload" }),
+    const deleteButton = await screen.findByRole("button", { name: "Delete" })
+    expect(deleteButton).toBeDisabled()
+    expect(deleteButton).toHaveAttribute(
+      "title",
+      "The built-in Default set cannot be deleted.",
     )
 
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2),
-    )
-    expect(title).toBeDisabled()
-    expect(screen.getByRole("button", { name: "Save policies" })).toBeDisabled()
-
-    await act(async () => resolveReload(latest))
-    await waitFor(() =>
-      expect(screen.getByLabelText("Attention title")).toHaveValue(
-        "Authoritative title",
-      ),
-    )
-    expect(screen.getByLabelText("Attention title")).toBeEnabled()
-  })
-
-  it("refreshes past an observed reload target when the config advances again", async () => {
-    const initial = conflictSnapshot(
-      "Generation A title",
-      "converge-revision-a",
-      '{"value":1}',
-    )
-    const observed = conflictSnapshot(
-      "Generation B title",
-      "converge-revision-b",
-      '{"value":2}',
-    )
-    const latest = conflictSnapshot(
-      "Generation C title",
-      "converge-revision-c",
-      '{"value":3}',
-    )
-    vi.mocked(getReviewAttentionAgents)
-      .mockResolvedValueOnce(agentCatalog("converge-revision-a"))
-      .mockResolvedValueOnce(agentCatalog("converge-revision-c"))
-    vi.mocked(getReviewAttentionPolicies)
-      .mockResolvedValueOnce(initial)
-      .mockResolvedValueOnce(latest)
-    const user = userEvent.setup()
-    const { client } = renderPage()
-
-    const title = await screen.findByLabelText("Attention title")
-    await user.clear(title)
-    await user.type(title, "Keep this draft across B and C")
-    act(() => {
-      client.setQueryData(["reviews", "attention-policies"], observed)
-    })
+    await selectRuleSet(user, "Current Fallback")
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled()
     expect(
-      await screen.findByText(
-        "A newer policy generation is available. Your draft has not been replaced.",
+      screen.getByText("Choose another default before deleting this set."),
+    ).toBeVisible()
+
+    await selectRuleSet(user, "Assigned")
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled()
+    expect(
+      screen.getByText(
+        "Remove its repository assignments before deleting this set.",
       ),
     ).toBeVisible()
 
-    await user.click(screen.getByRole("button", { name: "Reload latest" }))
+    await selectRuleSet(user, "Unused")
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled()
+    await user.click(screen.getByRole("button", { name: "Delete" }))
+    const confirmation = screen.getByRole("alertdialog", {
+      name: "Delete this rule set?",
+    })
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Cancel" }),
+    )
+    expect(ruleSetButton("Unused")).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "Delete" }))
     await user.click(
       within(
-        screen.getByRole("alertdialog", {
-          name: "Discard this policy draft?",
-        }),
-      ).getByRole("button", { name: "Discard and reload" }),
+        screen.getByRole("alertdialog", { name: "Delete this rule set?" }),
+      ).getByRole("button", { name: "Delete rule set" }),
     )
-
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2),
-    )
-    await waitFor(() =>
-      expect(getReviewAttentionAgents).toHaveBeenCalledTimes(2),
-    )
-    expect(
-      client.getQueryData<ReviewAttentionPolicySnapshot>([
-        "reviews",
-        "attention-policies",
-      ]),
-    ).toMatchObject({ config_revision: "converge-revision-c" })
-    expect(
-      client.getQueryData<ReviewAttentionAgentCatalog>([
-        "reviews",
-        "attention-policy-agents",
-        "converge-revision-c",
-        "first",
-      ]),
-    ).toMatchObject({ config_revision: "converge-revision-c" })
-    await waitFor(() =>
-      expect(screen.getByLabelText("Attention title")).toHaveValue(
-        "Generation C title",
-      ),
-    )
-    expect(screen.getByLabelText("Attention title")).not.toHaveValue(
-      "Generation B title",
-    )
+    expect(queryRuleSetButton("Unused")).not.toBeInTheDocument()
+    expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
   })
 
-  it("preserves a dirty draft after a 409, never retries, and requires explicit reload", async () => {
-    const initial = conflictSnapshot(
-      "Owner input may be needed",
-      "revision-1",
-      '{"value":9007199254740993,"__proto__":{"safe":true}}',
+  it("preserves a dirty draft on a CAS conflict and replaces it only after explicit reload confirmation", async () => {
+    const initial = snapshot(emptyCatalog())
+    const latest = snapshot(
+      {
+        rule_sets: {
+          default: { name: "Default", rules: {} },
+          server: { name: "Server Rules", rules: {} },
+        },
+        default_rule_set_id: "server",
+        repository_assignments: {},
+      },
+      "config-revision-2",
+      "catalog-revision-2",
     )
-    const latest = conflictSnapshot(
-      "Server-side title",
-      "revision-2",
-      '{"value":9007199254740995,"__proto__":{"safe":false}}',
-    )
-    vi.mocked(getReviewAttentionAgents)
-      .mockResolvedValueOnce(agentCatalog("revision-1"))
-      .mockResolvedValueOnce(agentCatalog("revision-2"))
     vi.mocked(getReviewAttentionPolicies)
       .mockResolvedValueOnce(initial)
       .mockResolvedValue(latest)
@@ -1051,210 +478,76 @@ describe("ReviewAttentionPoliciesPage", () => {
     const user = userEvent.setup()
     renderPage()
 
-    const title = await screen.findByLabelText("Attention title")
-    await user.clear(title)
-    await user.type(title, "Keep my local direction")
-    await user.click(screen.getByRole("button", { name: "Save policies" }))
+    await user.click(await screen.findByRole("button", { name: "Duplicate" }))
+    await user.type(screen.getByLabelText("New permanent name"), "Local Draft")
+    await user.click(screen.getByRole("button", { name: "Create duplicate" }))
+    expect(screen.getByRole("heading", { name: "Local Draft" })).toBeVisible()
 
+    await user.click(screen.getByRole("button", { name: "Save rule sets" }))
     expect(
       await screen.findByText(
-        "These policies changed elsewhere. Your draft is preserved; reload the latest version before saving.",
+        "These rules changed elsewhere. Your draft is preserved; reload the latest version before saving.",
       ),
     ).toBeVisible()
-    expect(screen.getByLabelText("Attention title")).toHaveValue(
-      "Keep my local direction",
-    )
-    expect(screen.getByRole("button", { name: "Save policies" })).toBeDisabled()
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2),
-    )
-    expect(putReviewAttentionPolicies).toHaveBeenCalledOnce()
-    expect(showSaveSuccessOrRestartToast).not.toHaveBeenCalled()
+    expect(screen.getByRole("heading", { name: "Local Draft" })).toBeVisible()
+    expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2)
 
     await user.click(screen.getByRole("button", { name: "Reload latest" }))
-    const reloadDialog = screen.getByRole("alertdialog", {
-      name: "Discard this policy draft?",
+    const reloadConfirmation = screen.getByRole("alertdialog", {
+      name: "Discard this rule draft?",
     })
-    expect(reloadDialog).toBeVisible()
+    expect(
+      within(reloadConfirmation).getByText(
+        "Reloading replaces every unsaved rule edit with the latest trusted configuration.",
+      ),
+    ).toBeVisible()
     await user.click(
-      within(reloadDialog).getByRole("button", {
+      within(reloadConfirmation).getByRole("button", {
         name: "Discard and reload",
       }),
     )
 
     await waitFor(() =>
-      expect(screen.getByLabelText("Attention title")).toHaveValue(
-        "Server-side title",
-      ),
+      expect(queryRuleSetButton("Local Draft")).not.toBeInTheDocument(),
     )
-    expect(screen.getByLabelText("Questions JSON (optional)")).toHaveValue(
-      '{"value":9007199254740995,"__proto__":{"safe":false}}',
-    )
-    expect(
-      screen.queryByText(
-        "These policies changed elsewhere. Your draft is preserved; reload the latest version before saving.",
-      ),
-    ).not.toBeInTheDocument()
-    expect(putReviewAttentionPolicies).toHaveBeenCalledOnce()
-  })
-
-  it("does not treat retained cache data as the latest generation when a conflict refetch fails", async () => {
-    const initial = conflictSnapshot(
-      "Initial server title",
-      "failed-reload-revision-1",
-      '{"value":1}',
-    )
-    const latest = conflictSnapshot(
-      "Recovered server title",
-      "failed-reload-revision-2",
-      '{"value":2}',
-    )
-    vi.mocked(getReviewAttentionAgents)
-      .mockResolvedValueOnce(agentCatalog("failed-reload-revision-1"))
-      .mockResolvedValueOnce(agentCatalog("failed-reload-revision-2"))
-    let resolveRecovery!: (snapshot: ReviewAttentionPolicySnapshot) => void
-    vi.mocked(getReviewAttentionPolicies)
-      .mockResolvedValueOnce(initial)
-      .mockRejectedValueOnce(new Error("latest generation unavailable"))
-      .mockReturnValueOnce(
-        new Promise((resolve) => {
-          resolveRecovery = resolve
-        }),
-      )
-    vi.mocked(putReviewAttentionPolicies).mockRejectedValueOnce(
-      new ReviewAttentionPoliciesAPIError("config_revision_mismatch", 409),
-    )
-    const user = userEvent.setup()
-    renderPage()
-
-    const title = await screen.findByLabelText("Attention title")
-    await user.clear(title)
-    await user.type(title, "Preserve this local title")
-    await user.click(screen.getByRole("button", { name: "Save policies" }))
-
-    expect(
-      await screen.findByText(
-        "These policies changed elsewhere, but the latest generation could not be loaded. Your draft is preserved; retry the reload before saving.",
-      ),
-    ).toBeVisible()
-    expect(title).toHaveValue("Preserve this local title")
-    expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(2)
-
-    await user.click(screen.getByRole("button", { name: "Reload latest" }))
-    await user.click(
-      within(
-        screen.getByRole("alertdialog", {
-          name: "Discard this policy draft?",
-        }),
-      ).getByRole("button", { name: "Discard and reload" }),
-    )
-    await waitFor(() =>
-      expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(3),
-    )
-    expect(title).toBeDisabled()
-    expect(title).toHaveValue("Preserve this local title")
-
-    await act(async () => resolveRecovery(latest))
-    await waitFor(() =>
-      expect(screen.getByLabelText("Attention title")).toHaveValue(
-        "Recovered server title",
-      ),
-    )
-  })
-
-  it("fails initial hydration closed and provides an explicit retry when the bounded agent catalog is malformed", async () => {
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(mixedSnapshot())
-    vi.mocked(getReviewAttentionAgents)
-      .mockRejectedValueOnce(new Error("invalid_attention_agents_response"))
-      .mockResolvedValueOnce(agentCatalog())
-    const user = userEvent.setup()
-    const onShowInbox = vi.fn()
-    renderPage(onShowInbox)
-
-    expect(
-      await screen.findByText(
-        "Review attention policies and configured agents could not be loaded as one trusted generation.",
-      ),
-    ).toBeVisible()
-    expect(screen.queryByLabelText("AI agent")).not.toBeInTheDocument()
-    expect(screen.queryByLabelText("Attention title")).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Review inbox" }))
-    expect(onShowInbox).toHaveBeenCalledOnce()
-
-    await user.click(screen.getByRole("button", { name: "Retry" }))
-
-    const title = (await screen.findAllByLabelText("Attention title"))[0]
-    expect(title).toHaveValue("Owner input may be needed")
-    await user.clear(title)
-    await user.type(title, "Edit only after trusted hydration")
-    expect(screen.getAllByLabelText("AI agent")[0]).toBeEnabled()
-    expect(title).toHaveValue("Edit only after trusted hydration")
-    expect(screen.getByRole("button", { name: "Save policies" })).toBeEnabled()
-    expect(getReviewAttentionAgents).toHaveBeenCalledTimes(2)
-  })
-
-  it("never hydrates or offers agents from a delayed mismatched config generation", async () => {
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(mixedSnapshot())
-    let resolveOldAgents!: (catalog: ReviewAttentionAgentCatalog) => void
-    vi.mocked(getReviewAttentionAgents).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveOldAgents = resolve
-      }),
-    )
-    const user = userEvent.setup()
-    renderPage()
-
-    expect(
-      await screen.findByText("Loading review attention policies…"),
-    ).toBeVisible()
-    expect(screen.queryByLabelText("Attention title")).not.toBeInTheDocument()
-    await act(async () =>
-      resolveOldAgents(agentCatalog("older-config-revision")),
-    )
-
-    expect(
-      await screen.findByText(
-        "Review attention policies and configured agents could not be loaded as one trusted generation.",
-      ),
-    ).toBeVisible()
-    expect(screen.queryByLabelText("AI agent")).not.toBeInTheDocument()
-    expect(screen.queryByLabelText("Attention title")).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole("button", { name: "Retry" }))
-    const title = (await screen.findAllByLabelText("Attention title"))[0]
-    expect(title).toHaveValue("Owner input may be needed")
-    expect(screen.getAllByLabelText("AI agent")[0]).toBeEnabled()
-    expect(getReviewAttentionAgents).toHaveBeenCalledTimes(2)
-  })
-
-  it("blocks saving when an agent refetch fails with retained catalog data", async () => {
-    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(mixedSnapshot())
-    vi.mocked(getReviewAttentionAgents)
-      .mockResolvedValueOnce(agentCatalog())
-      .mockRejectedValueOnce(new Error("agent refresh unavailable"))
-    const user = userEvent.setup()
-    const { client } = renderPage()
-
-    const title = await screen.findAllByLabelText("Attention title")
-    await user.clear(title[0])
-    await user.type(title[0], "Keep the draft after agent refresh failure")
-    await act(async () => {
-      await client.refetchQueries({
-        queryKey: ["reviews", "attention-policy-agents"],
-      })
+    expect(ruleSetButton("Server Rules")).toBeVisible()
+    await selectRuleSet(user, "Server Rules")
+    expect(screen.getByText("Current default")).toBeVisible()
+    expect(getReviewAttentionPolicies).toHaveBeenCalledTimes(3)
+    expect(getReviewAttentionAgents).toHaveBeenLastCalledWith({
+      expectedConfigRevision: "config-revision-2",
     })
+  })
+
+  it("fails initial hydration closed until agents from the same configuration generation arrive", async () => {
+    vi.mocked(getReviewAttentionPolicies).mockResolvedValue(
+      snapshot(emptyCatalog()),
+    )
+    vi.mocked(getReviewAttentionAgents)
+      .mockResolvedValueOnce(agentCatalog("older-config-revision"))
+      .mockResolvedValueOnce(agentCatalog("config-revision-1"))
+    const user = userEvent.setup()
+    renderPage()
 
     expect(
       await screen.findByText(
-        "Configured agents could not be loaded. AI gate validation and saving are paused; your policy draft is preserved.",
+        "Attention rules and configured agents could not be loaded as one trusted generation.",
       ),
     ).toBeVisible()
-    expect(title[0]).toHaveValue("Keep the draft after agent refresh failure")
-    expect(screen.getByRole("button", { name: "Save policies" })).toBeDisabled()
-    for (const selector of screen.getAllByLabelText("AI agent")) {
-      expect(selector).toBeDisabled()
-    }
-    expect(putReviewAttentionPolicies).not.toHaveBeenCalled()
+    expect(
+      screen.queryByRole("complementary", { name: "Rule sets" }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText("All moments Off")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Retry" }))
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Build reusable attention rule sets",
+      }),
+    ).toBeVisible()
+    expect(screen.getByText("All moments Off")).toBeVisible()
+    expect(getReviewAttentionAgents).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -1278,35 +571,102 @@ function renderPage(onShowInbox = vi.fn()) {
   return { ...view, client }
 }
 
-async function expectOnlyAgentPageCached(
-  client: QueryClient,
-  configRevision: string,
-  cursor: string,
+async function selectRuleSet(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string,
 ) {
-  await waitFor(() =>
-    expect(
-      client
-        .getQueryCache()
-        .findAll({ queryKey: ["reviews", "attention-policy-agents"] })
-        .map((query) => query.queryKey),
-    ).toEqual([["reviews", "attention-policy-agents", configRevision, cursor]]),
+  const list = await screen.findByRole("complementary", { name: "Rule sets" })
+  await user.click(
+    within(list).getByRole("button", {
+      name: new RegExp(`^${escapeRegExp(name)}`),
+    }),
   )
 }
 
-function agentPage(
-  configRevision: string,
-  agents: Array<{ id: string; name: string }>,
-  nextCursor?: string,
-): ReviewAttentionAgentCatalog {
+function ruleSetButton(name: string): HTMLElement {
+  return within(
+    screen.getByRole("complementary", { name: "Rule sets" }),
+  ).getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}`) })
+}
+
+function queryRuleSetButton(name: string): HTMLElement | null {
+  return within(
+    screen.getByRole("complementary", { name: "Rule sets" }),
+  ).queryByRole("button", {
+    name: new RegExp(`^${escapeRegExp(name)}`),
+  })
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function emptyCatalog(): ReviewAttentionPolicyCatalog {
   return {
-    agents,
-    default_agent_id: "main",
-    config_revision: configRevision,
-    ...(nextCursor === undefined ? {} : { next_cursor: nextCursor }),
+    rule_sets: { default: { name: "Default", rules: {} } },
+    default_rule_set_id: "default",
+    repository_assignments: {},
   }
 }
 
-function agentCatalog(configRevision = "config-revision-1") {
+function catalogWithConfiguredDefault(): ReviewAttentionPolicyCatalog {
+  return {
+    rule_sets: {
+      default: {
+        name: "Default",
+        rules: {
+          "review.submitted": [deterministicGate("Original title")],
+        },
+      },
+    },
+    default_rule_set_id: "default",
+    repository_assignments: {},
+  }
+}
+
+function catalogWithNamedSets(): ReviewAttentionPolicyCatalog {
+  return {
+    rule_sets: {
+      default: { name: "Default", rules: {} },
+      strict: {
+        name: "Strict Reviews",
+        rules: {
+          "review.submitted": [deterministicGate("Strict title")],
+        },
+      },
+      relaxed: { name: "Relaxed", rules: {} },
+    },
+    default_rule_set_id: "default",
+    repository_assignments: {},
+  }
+}
+
+function catalogForDeletion(): ReviewAttentionPolicyCatalog {
+  return {
+    rule_sets: {
+      default: { name: "Default", rules: {} },
+      current: { name: "Current Fallback", rules: {} },
+      assigned: { name: "Assigned", rules: {} },
+      unused: { name: "Unused", rules: {} },
+    },
+    default_rule_set_id: "current",
+    repository_assignments: { "acme/assigned": "assigned" },
+  }
+}
+
+function deterministicGate(title: string) {
+  return {
+    id: "confirm_owner",
+    kind: "deterministic" as const,
+    when: "true",
+    title,
+    questions: parseExactJSON(exactQuestionsSource),
+  }
+}
+
+function agentCatalog(
+  configRevision = "config-revision-1",
+): ReviewAttentionAgentCatalog {
   return {
     agents: [
       { id: "main", name: "Main" },
@@ -1315,112 +675,6 @@ function agentCatalog(configRevision = "config-revision-1") {
     default_agent_id: "main",
     config_revision: configRevision,
   }
-}
-
-function mixedSnapshot(): ReviewAttentionPolicySnapshot {
-  return snapshot({
-    global: {
-      "pr_development.before_push": [
-        {
-          id: "ask_owner",
-          kind: "ai_working_context",
-          agent_id: "main",
-          criteria: "Ask the owner only when repository intent is required.",
-          title: "Owner input may be needed",
-          questions: parseExactJSON('{"priority":9007199254740993}'),
-        },
-        {
-          id: "independent_check",
-          kind: "ai_isolated_context",
-          agent_id: "reviewer",
-          criteria: "Independently assess the submitted findings.",
-          title: "Independent review",
-        },
-        {
-          id: "blocking_check",
-          kind: "deterministic",
-          when: "inputs.gate_subject.untrusted_target.review.has_findings == true",
-          title: "Blocking finding",
-          questions: parseExactJSON('[{"id":"resolution"}]'),
-        },
-        { id: "no_attention", kind: "zero" },
-      ],
-    },
-    repositories: {
-      "octo/repo": {
-        "review.disabled": { mode: "disable", gates: [] },
-        "review.inherited": { mode: "inherit", gates: [] },
-        "pr_development.before_push": {
-          mode: "overlay",
-          gates: [
-            { id: "ask_owner", kind: "zero" },
-            {
-              id: "repository_rule",
-              kind: "deterministic",
-              when: "true",
-              title: "Repository rule",
-              questions: parseExactJSON("[]"),
-            },
-          ],
-        },
-        "review.replaced": {
-          mode: "replace",
-          gates: [{ id: "replacement_noop", kind: "zero" }],
-        },
-      },
-    },
-  })
-}
-
-function replacementSnapshot(): ReviewAttentionPolicySnapshot {
-  return snapshot(
-    {
-      global: {
-        "pr_development.before_push": [
-          {
-            id: "deterministic_gate",
-            kind: "deterministic",
-            when: "inputs.gate_subject.untrusted_target.review.has_findings == true",
-            title: "Blocking review",
-            questions: parseExactJSON(exactQuestionsSource),
-          },
-        ],
-      },
-      repositories: {
-        "octo/keep": {
-          "pr_development.before_push": { mode: "inherit", gates: [] },
-        },
-      },
-    },
-    "config-revision-7",
-    "catalog-revision-7",
-  )
-}
-
-function conflictSnapshot(
-  title: string,
-  revision: string,
-  questionsSource: string,
-): ReviewAttentionPolicySnapshot {
-  return snapshot(
-    {
-      global: {
-        "review.submitted": [
-          {
-            id: "ask_owner",
-            kind: "ai_isolated_context",
-            agent_id: "reviewer",
-            criteria: "Ask when the review needs repository-owner context.",
-            title,
-            questions: parseExactJSON(questionsSource),
-          },
-        ],
-      },
-      repositories: {},
-    },
-    revision,
-    `catalog-${revision}`,
-  )
 }
 
 function snapshot(

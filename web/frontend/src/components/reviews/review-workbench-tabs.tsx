@@ -32,7 +32,7 @@ export function ReviewWorkbenchTabs({
     },
     {
       id: "policies" as const,
-      label: t("pages.reviews.views.policies", "Attention policies"),
+      label: t("pages.reviews.views.policies", "Rule sets"),
       icon: IconSettings,
     },
   ]

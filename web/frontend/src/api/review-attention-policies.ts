@@ -18,12 +18,6 @@ export type ReviewAttentionGateKind =
   | "deterministic"
   | "zero"
 
-export type ReviewAttentionPolicyMode =
-  | "inherit"
-  | "overlay"
-  | "replace"
-  | "disable"
-
 export interface ReviewAttentionGate {
   id: string
   kind: ReviewAttentionGateKind
@@ -34,14 +28,18 @@ export interface ReviewAttentionGate {
   questions?: ExactJSONValue
 }
 
-export interface ReviewAttentionRepositoryPolicy {
-  mode: ReviewAttentionPolicyMode
-  gates: ReviewAttentionGate[]
+export const reviewAttentionBuiltInRuleSetID = "default"
+export const reviewAttentionBuiltInRuleSetName = "Default"
+
+export interface ReviewAttentionRuleSet {
+  name: string
+  rules: Record<string, ReviewAttentionGate[]>
 }
 
 export interface ReviewAttentionPolicyCatalog {
-  global: Record<string, ReviewAttentionGate[]>
-  repositories: Record<string, Record<string, ReviewAttentionRepositoryPolicy>>
+  rule_sets: Record<string, ReviewAttentionRuleSet>
+  default_rule_set_id: string
+  repository_assignments: Record<string, string>
 }
 
 export interface ReviewAttentionPolicySnapshot extends ReviewAttentionPolicyCatalog {
@@ -67,9 +65,13 @@ export class ReviewAttentionPoliciesAPIError extends Error {
 const attentionPoliciesPath = "/api/reviews/attention-policies"
 const attentionPolicyEnvelopeMaximumBytes = (1 << 20) + (64 << 10)
 const attentionPolicyErrorMaximumBytes = 64 << 10
-const maximumDecisionPoints = 128
+// One set per legacy repository override plus the built-in Default covers the
+// largest representable named migration; oversized expansion stays on the
+// legacy runtime and is rejected before this client receives a partial catalog.
+const maximumRuleSets = 1025
+const maximumDecisionPointsPerRuleSet = 128
 const maximumRepositories = 1024
-const maximumPolicies = 8192
+const maximumRules = 8192
 const maximumGates = 8192
 const maximumGatesPerPolicy = 64
 const maximumQuestionBytes = 128 << 10
@@ -82,16 +84,10 @@ const gateKinds = new Set<ReviewAttentionGateKind>([
   "deterministic",
   "zero",
 ])
-const policyModes = new Set<ReviewAttentionPolicyMode>([
-  "inherit",
-  "overlay",
-  "replace",
-  "disable",
-])
-
 const snapshotKeys = new Set([
-  "global",
-  "repositories",
+  "rule_sets",
+  "default_rule_set_id",
+  "repository_assignments",
   "catalog_revision",
   "config_revision",
   "effects",
@@ -105,7 +101,7 @@ const gateKeys = new Set([
   "title",
   "questions",
 ])
-const repositoryPolicyKeys = new Set(["mode", "gates"])
+const ruleSetKeys = new Set(["name", "rules"])
 const effectsKeys = new Set(["gateway_effect"])
 
 export async function getReviewAttentionPolicies(
@@ -128,8 +124,12 @@ export async function putReviewAttentionPolicies(
   const body = stringifyExactJSON(
     createExactJSONObject([
       ["expected_config_revision", expectedConfigRevision],
-      ["global", policyMapToExactJSON(catalog.global)],
-      ["repositories", repositoriesToExactJSON(catalog.repositories)],
+      ["rule_sets", ruleSetsToExactJSON(catalog.rule_sets)],
+      ["default_rule_set_id", catalog.default_rule_set_id],
+      [
+        "repository_assignments",
+        stringMapToExactJSON(catalog.repository_assignments),
+      ],
     ]),
     { maximumBytes: attentionPolicyEnvelopeMaximumBytes },
   )
@@ -200,30 +200,23 @@ function projectReviewAttentionPolicySnapshot(
 ): ReviewAttentionPolicySnapshot {
   const root = exactObject(value)
   onlyKeys(root, snapshotKeys)
-  const global = projectPolicyMap(root.global)
-  const repositoriesValue = exactObject(root.repositories)
-  if (Object.keys(repositoriesValue).length > maximumRepositories) invalid()
-
-  let policyCount = Object.keys(global).length
-  let gateCount = Object.values(global).reduce(
-    (total, gates) => total + gates.length,
-    0,
+  const ruleSets = projectRuleSets(root.rule_sets)
+  const defaultRuleSetID = exactString(root.default_rule_set_id)
+  const repositoryAssignments = projectStringMap(
+    root.repository_assignments,
+    maximumRepositories,
   )
-  const repositories =
-    emptyRecord<Record<string, ReviewAttentionRepositoryPolicy>>()
-  for (const repository of Object.keys(repositoriesValue)) {
-    const configured = exactObject(repositoriesValue[repository])
-    if (Object.keys(configured).length > maximumDecisionPoints) invalid()
-    const policies = emptyRecord<ReviewAttentionRepositoryPolicy>()
-    for (const decisionPoint of Object.keys(configured)) {
-      const policy = projectRepositoryPolicy(configured[decisionPoint])
-      policies[decisionPoint] = policy
-      policyCount += 1
-      gateCount += policy.gates.length
-    }
-    repositories[repository] = policies
+
+  let ruleCount = 0
+  let gateCount = 0
+  for (const ruleSet of Object.values(ruleSets)) {
+    ruleCount += Object.keys(ruleSet.rules).length
+    gateCount += Object.values(ruleSet.rules).reduce(
+      (total, gates) => total + gates.length,
+      0,
+    )
   }
-  if (policyCount > maximumPolicies || gateCount > maximumGates) invalid()
+  if (ruleCount > maximumRules || gateCount > maximumGates) invalid()
 
   const effects = exactObject(root.effects)
   onlyKeys(effects, effectsKeys)
@@ -233,8 +226,9 @@ function projectReviewAttentionPolicySnapshot(
   }
 
   const snapshot: ReviewAttentionPolicySnapshot = {
-    global,
-    repositories,
+    rule_sets: ruleSets,
+    default_rule_set_id: defaultRuleSetID,
+    repository_assignments: repositoryAssignments,
     catalog_revision: opaqueToken(root.catalog_revision),
     config_revision: configRevisionToken(root.config_revision),
     effects: { gateway_effect: gatewayEffect },
@@ -243,11 +237,29 @@ function projectReviewAttentionPolicySnapshot(
   return snapshot
 }
 
+function projectRuleSets(
+  value: ExactJSONValue | undefined,
+): Record<string, ReviewAttentionRuleSet> {
+  const configured = exactObject(value)
+  if (Object.keys(configured).length > maximumRuleSets) invalid()
+  const ruleSets = emptyRecord<ReviewAttentionRuleSet>()
+  for (const id of Object.keys(configured)) {
+    const ruleSet = exactObject(configured[id])
+    onlyKeys(ruleSet, ruleSetKeys)
+    ruleSets[id] = {
+      name: exactString(ruleSet.name),
+      rules: projectPolicyMap(ruleSet.rules),
+    }
+  }
+  return ruleSets
+}
+
 function projectPolicyMap(
   value: ExactJSONValue | undefined,
 ): Record<string, ReviewAttentionGate[]> {
   const configured = exactObject(value)
-  if (Object.keys(configured).length > maximumDecisionPoints) invalid()
+  if (Object.keys(configured).length > maximumDecisionPointsPerRuleSet)
+    invalid()
   const policies = emptyRecord<ReviewAttentionGate[]>()
   for (const decisionPoint of Object.keys(configured)) {
     policies[decisionPoint] = projectGateList(configured[decisionPoint])
@@ -255,21 +267,17 @@ function projectPolicyMap(
   return policies
 }
 
-function projectRepositoryPolicy(
+function projectStringMap(
   value: ExactJSONValue | undefined,
-): ReviewAttentionRepositoryPolicy {
-  const policy = exactObject(value)
-  onlyKeys(policy, repositoryPolicyKeys)
-  const mode = exactString(policy.mode)
-  if (!policyModes.has(mode as ReviewAttentionPolicyMode)) invalid()
-  const gates = policy.gates === undefined ? [] : projectGateList(policy.gates)
-  if (
-    ((mode === "inherit" || mode === "disable") && gates.length !== 0) ||
-    ((mode === "overlay" || mode === "replace") && gates.length === 0)
-  ) {
-    invalid()
+  maximumEntries: number,
+): Record<string, string> {
+  const configured = exactObject(value)
+  if (Object.keys(configured).length > maximumEntries) invalid()
+  const projected = emptyRecord<string>()
+  for (const key of Object.keys(configured)) {
+    projected[key] = exactString(configured[key])
   }
-  return { mode: mode as ReviewAttentionPolicyMode, gates }
+  return projected
 }
 
 function projectGateList(
@@ -393,28 +401,26 @@ function policyMapToExactJSON(
   )
 }
 
-function repositoriesToExactJSON(
-  repositories: ReviewAttentionPolicyCatalog["repositories"],
+function ruleSetsToExactJSON(
+  ruleSets: ReviewAttentionPolicyCatalog["rule_sets"],
 ): ExactJSONObject {
   return createExactJSONObject(
-    Object.keys(repositories).map((repository) => {
-      const policies = repositories[repository]
-      return [
-        repository,
-        createExactJSONObject(
-          Object.keys(policies).map((decisionPoint) => {
-            const policy = policies[decisionPoint]
-            return [
-              decisionPoint,
-              createExactJSONObject([
-                ["mode", policy.mode],
-                ["gates", policy.gates.map(gateToExactJSON)],
-              ]),
-            ] as const
-          }),
-        ),
-      ] as const
-    }),
+    Object.keys(ruleSets).map(
+      (id) =>
+        [
+          id,
+          createExactJSONObject([
+            ["name", ruleSets[id].name],
+            ["rules", policyMapToExactJSON(ruleSets[id].rules)],
+          ]),
+        ] as const,
+    ),
+  )
+}
+
+function stringMapToExactJSON(values: Record<string, string>): ExactJSONObject {
+  return createExactJSONObject(
+    Object.keys(values).map((key) => [key, values[key]] as const),
   )
 }
 
