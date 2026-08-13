@@ -1,14 +1,18 @@
 import {
   IconArrowDown,
   IconArrowUp,
+  IconCopy,
   IconDeviceFloppy,
+  IconExternalLink,
+  IconInfoCircle,
   IconLoader2,
   IconPlus,
   IconRefresh,
+  IconStar,
   IconTrash,
 } from "@tabler/icons-react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { useBlocker } from "@tanstack/react-router"
+import { Link, useBlocker } from "@tanstack/react-router"
 import {
   type FormEvent,
   type ReactNode,
@@ -30,27 +34,27 @@ import {
 import {
   type ReviewAttentionGateKind,
   ReviewAttentionPoliciesAPIError,
-  type ReviewAttentionPolicyMode,
   type ReviewAttentionPolicySnapshot,
   getReviewAttentionPolicies,
   putReviewAttentionPolicies,
+  reviewAttentionBuiltInRuleSetID,
 } from "@/api/review-attention-policies"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { PageHeader } from "@/components/page-header"
 import {
   type ReviewAttentionGateDraft,
-  type ReviewAttentionGlobalPolicyDraft,
   type ReviewAttentionPolicyDraft,
   type ReviewAttentionPolicyIssue,
-  type ReviewAttentionRepositoryPolicyDraft,
+  type ReviewAttentionRuleDraft,
+  type ReviewAttentionRuleSetDraft,
   convertReviewAttentionGateKind,
   createReviewAttentionEditorKeyFactory,
   createReviewAttentionGateDraft,
-  createReviewAttentionGlobalPolicyDraft,
-  createReviewAttentionRepositoryDraft,
-  createReviewAttentionRepositoryPolicyDraft,
+  createReviewAttentionRepositoryAssignmentDraft,
+  createReviewAttentionRuleDraft,
+  duplicateReviewAttentionRuleSetDraft,
+  foldReviewAttentionRuleSetName,
   reorderReviewAttentionGates,
-  resolveReviewAttentionPolicy,
   reviewAttentionPolicyDraftFromCatalog,
   validateReviewAttentionPolicyDraft,
 } from "@/components/reviews/review-attention-policy-model"
@@ -67,6 +71,14 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -76,6 +88,10 @@ import { cn } from "@/lib/utils"
 const policyQueryKey = ["reviews", "attention-policies"] as const
 const agentQueryKey = ["reviews", "attention-policy-agents"] as const
 const policyEditorPageSize = 8
+const customDecisionPointChoice = "__custom__"
+const repositoryNamePattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const decisionPointPattern = /^[a-z][a-z0-9._-]{0,127}$/
+const textEncoder = new TextEncoder()
 const knownAttentionDecisionPoints = [
   {
     value: "review.submitted",
@@ -96,16 +112,6 @@ const knownAttentionDecisionPoints = [
 
 function agentPageQueryKey(configRevision: string, cursor: string | undefined) {
   return [...agentQueryKey, configRevision, cursor ?? "first"] as const
-}
-
-type EditablePolicy =
-  | ReviewAttentionGlobalPolicyDraft
-  | ReviewAttentionRepositoryPolicyDraft
-
-interface PendingModeChange {
-  repositoryKey: string
-  policyKey: string
-  mode: ReviewAttentionPolicyMode
 }
 
 export function ReviewAttentionPoliciesPage({
@@ -129,15 +135,23 @@ export function ReviewAttentionPoliciesPage({
     useState<ReviewAttentionPolicySnapshot | null>(null)
   const [reloadTarget, setReloadTarget] =
     useState<ReviewAttentionPolicySnapshot | null>(null)
-  const [selectedScope, setSelectedScope] = useState("global")
-  const [repositorySearch, setRepositorySearch] = useState("")
+  const [selectedRuleSetKey, setSelectedRuleSetKey] = useState("")
+  const [assignmentDialogOpen, setAssignmentDialogOpen] = useState(false)
+  const [assignmentRepository, setAssignmentRepository] = useState("")
+  const [assignmentRuleSetID, setAssignmentRuleSetID] = useState("")
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false)
+  const [duplicateSourceKey, setDuplicateSourceKey] = useState("")
+  const [duplicateName, setDuplicateName] = useState("")
+  const [pendingDeleteRuleSetKey, setPendingDeleteRuleSetKey] = useState("")
+  const [ruleDialogOpen, setRuleDialogOpen] = useState(false)
+  const [newDecisionChoice, setNewDecisionChoice] = useState("")
+  const [newCustomDecisionPoint, setNewCustomDecisionPoint] = useState("")
   const [saving, setSaving] = useState(false)
   const [reloading, setReloading] = useState(false)
   const [serverError, setServerError] = useState("")
   const [conflicted, setConflicted] = useState(false)
   const [reloadConfirmOpen, setReloadConfirmOpen] = useState(false)
   const [discardNavigationOpen, setDiscardNavigationOpen] = useState(false)
-  const [pendingMode, setPendingMode] = useState<PendingModeChange | null>(null)
   const [agentCursor, setAgentCursor] = useState<string | undefined>()
   const [policyPage, setPolicyPage] = useState(0)
   const [trustedSelectedAgentIDs, setTrustedSelectedAgentIDs] = useState<
@@ -187,7 +201,13 @@ export function ReviewAttentionPoliciesPage({
       setSnapshot(next)
       setTrustedSelectedAgentIDs(new Set())
       setReloadTarget(null)
-      setSelectedScope("global")
+      setSelectedRuleSetKey(
+        nextDraft.ruleSets.find(
+          (ruleSet) => ruleSet.id === reviewAttentionBuiltInRuleSetID,
+        )?.editorKey ??
+          nextDraft.ruleSets[0]?.editorKey ??
+          "",
+      )
       setPolicyPage(0)
       setServerError("")
       setConflicted(false)
@@ -292,6 +312,8 @@ export function ReviewAttentionPoliciesPage({
   const previousAgentCursor = previousReviewAttentionAgentCursor(agentCursor)
   const agentPageNumber =
     agentCursor === undefined ? 1 : Number(agentCursor) / 256 + 1
+  const agentPagingAvailable =
+    agentCursor !== undefined || agentsQuery.data?.next_cursor !== undefined
   const deferredDraft = useDeferredValue(draft)
   const validationPending = deferredDraft !== draft
   const validation = useMemo(
@@ -302,6 +324,19 @@ export function ReviewAttentionPoliciesPage({
     [agentIDs, agentsUsable, deferredDraft],
   )
   const displayedValidation = validationPending ? null : validation
+  const hasAIGates = useMemo(
+    () =>
+      draft != null &&
+      draft.ruleSets
+        .flatMap((ruleSet) => ruleSet.rules)
+        .flatMap((policy) => policy.gates)
+        .some(
+          (gate) =>
+            gate.kind === "ai_working_context" ||
+            gate.kind === "ai_isolated_context",
+        ),
+    [draft],
+  )
 
   const navigationBusy = saving || reloading
   const shouldBlockNavigation = useCallback(
@@ -357,7 +392,7 @@ export function ReviewAttentionPoliciesPage({
         setServerError(
           t(
             "pages.reviews.policies.reload_error",
-            "The latest policies could not be loaded. Your draft is still preserved.",
+            "The latest rules could not be loaded. Your draft is still preserved.",
           ),
         )
         return
@@ -371,7 +406,7 @@ export function ReviewAttentionPoliciesPage({
         setServerError(
           t(
             "pages.reviews.policies.reload_generation_error",
-            "A matching policy and agent configuration generation could not be loaded. Your draft is still preserved; retry the reload.",
+            "A matching rule and agent configuration generation could not be loaded. Your draft is still preserved; retry the reload.",
           ),
         )
         return
@@ -382,7 +417,7 @@ export function ReviewAttentionPoliciesPage({
         setServerError(
           t(
             "pages.reviews.policies.reload_generation_error",
-            "A matching policy and agent configuration generation could not be loaded. Your draft is still preserved; retry the reload.",
+            "A matching rule and agent configuration generation could not be loaded. Your draft is still preserved; retry the reload.",
           ),
         )
         return
@@ -475,14 +510,14 @@ export function ReviewAttentionPoliciesPage({
         setServerError(
           t(
             "pages.reviews.policies.saved_newer_available",
-            "The policies were saved, but a newer configuration generation was observed before the response completed. Your draft is preserved; reload the latest policies.",
+            "The rules were saved, but a newer configuration generation was observed before the response completed. Your draft is preserved; reload the latest rules.",
           ),
         )
       }
       showSaveSuccessOrRestartToast(
         t,
-        t("pages.reviews.policies.saved", "Review attention policies saved."),
-        t("pages.reviews.policies.name", "review attention policies"),
+        t("pages.reviews.policies.saved", "Attention rules saved."),
+        t("pages.reviews.policies.name", "attention rules"),
         response.effects.gateway_effect === "restart_required",
       )
     } catch (error) {
@@ -494,7 +529,7 @@ export function ReviewAttentionPoliciesPage({
         setServerError(
           t(
             "pages.reviews.policies.conflict",
-            "These policies changed elsewhere. Your draft is preserved; reload the latest version before saving.",
+            "These rules changed elsewhere. Your draft is preserved; reload the latest version before saving.",
           ),
         )
         const latest = await policyQuery.refetch({ cancelRefetch: true })
@@ -508,7 +543,7 @@ export function ReviewAttentionPoliciesPage({
           setServerError(
             t(
               "pages.reviews.policies.conflict_reload_error",
-              "These policies changed elsewhere, but the latest generation could not be loaded. Your draft is preserved; retry the reload before saving.",
+              "These rules changed elsewhere, but the latest generation could not be loaded. Your draft is preserved; retry the reload before saving.",
             ),
           )
         }
@@ -516,7 +551,7 @@ export function ReviewAttentionPoliciesPage({
         setServerError(
           t(
             "pages.reviews.policies.save_error",
-            "The policies could not be saved. Your draft is still preserved.",
+            "The rules could not be saved. Your draft is still preserved.",
           ),
         )
       }
@@ -525,187 +560,268 @@ export function ReviewAttentionPoliciesPage({
     }
   }
 
-  const selectGlobal = () => {
-    setSelectedScope("global")
-    setPolicyPage(0)
-  }
-  const selectedRepository =
-    draft?.repositories.find(
-      (repository) => repository.editorKey === selectedScope,
-    ) ?? null
-  const selectedRepositoryIndex =
-    draft?.repositories.findIndex(
-      (repository) => repository.editorKey === selectedScope,
-    ) ?? -1
   const validationIssues = displayedValidation?.issues ?? []
-  const selectedRepositoryIssue = findReviewAttentionPolicyIssue(
-    validationIssues,
-    `repositories[${selectedRepositoryIndex}].repository`,
-  )
-  const visibleRepositories = useMemo(() => {
-    const search = repositorySearch.trim().toLowerCase()
-    if (draft == null || search === "") return draft?.repositories ?? []
-    return draft.repositories.filter((repository) =>
-      repository.repository.toLowerCase().includes(search),
-    )
-  }, [draft, repositorySearch])
+  const selectedRuleSet =
+    draft?.ruleSets.find((item) => item.editorKey === selectedRuleSetKey) ??
+    draft?.ruleSets[0] ??
+    null
+  const selectedRuleSetIndex =
+    draft?.ruleSets.findIndex(
+      (item) => item.editorKey === selectedRuleSet?.editorKey,
+    ) ?? -1
+  const assignedRepositoryCount =
+    draft?.repositoryAssignments.filter(
+      (assignment) => assignment.ruleSetID === selectedRuleSet?.id,
+    ).length ?? 0
+  const deleteRuleSetDisabledReason =
+    selectedRuleSet?.id === reviewAttentionBuiltInRuleSetID
+      ? t(
+          "pages.reviews.policies.rule_sets_delete_builtin_help",
+          "The built-in Default set cannot be deleted.",
+        )
+      : selectedRuleSet?.id === draft?.defaultRuleSetID
+        ? t(
+            "pages.reviews.policies.rule_sets_delete_current_help",
+            "Choose another default before deleting this set.",
+          )
+        : assignedRepositoryCount > 0
+          ? t(
+              "pages.reviews.policies.rule_sets_delete_assigned_help",
+              "Remove its repository assignments before deleting this set.",
+            )
+          : ""
 
-  const addRepository = () => {
-    const repository = createReviewAttentionRepositoryDraft(nextEditorKey)
-    setDraft((current) =>
-      current == null
-        ? current
-        : { ...current, repositories: [...current.repositories, repository] },
-    )
-    setSelectedScope(repository.editorKey)
-    setPolicyPage(0)
+  const openAssignmentDialog = () => {
+    setAssignmentRepository("")
+    setAssignmentRuleSetID(selectedRuleSet?.id ?? draft?.defaultRuleSetID ?? "")
+    setAssignmentDialogOpen(true)
   }
 
-  const removeRepository = (repositoryKey: string) => {
+  const normalizedNewRepository = assignmentRepository.trim()
+  const newRepositoryIssue = (() => {
+    if (normalizedNewRepository === "") return ""
+    if (
+      !repositoryNamePattern.test(normalizedNewRepository) ||
+      textEncoder.encode(normalizedNewRepository).byteLength > 256
+    ) {
+      return t(
+        "pages.reviews.policies.repository_format_error",
+        "Use the exact GitHub owner/repository name with letters, numbers, dot, underscore, or hyphen.",
+      )
+    }
+    if (
+      draft?.repositoryAssignments.some(
+        (assignment) =>
+          assignment.repository.toLowerCase() ===
+          normalizedNewRepository.toLowerCase(),
+      )
+    ) {
+      return t(
+        "pages.reviews.policies.repository_exists",
+        "This repository already has a rule-set assignment.",
+      )
+    }
+    return ""
+  })()
+
+  const addAssignment = () => {
+    if (
+      normalizedNewRepository === "" ||
+      newRepositoryIssue !== "" ||
+      !draft?.ruleSets.some((item) => item.id === assignmentRuleSetID)
+    )
+      return
+    const assignment =
+      createReviewAttentionRepositoryAssignmentDraft(nextEditorKey)
+    assignment.repository = normalizedNewRepository
+    assignment.ruleSetID = assignmentRuleSetID
     setDraft((current) =>
       current == null
         ? current
         : {
             ...current,
-            repositories: current.repositories.filter(
-              (repository) => repository.editorKey !== repositoryKey,
+            repositoryAssignments: [
+              ...current.repositoryAssignments,
+              assignment,
+            ],
+          },
+    )
+    setAssignmentRepository("")
+  }
+
+  const removeAssignment = (assignmentKey: string) => {
+    setDraft((current) =>
+      current == null
+        ? current
+        : {
+            ...current,
+            repositoryAssignments: current.repositoryAssignments.filter(
+              (assignment) => assignment.editorKey !== assignmentKey,
             ),
           },
     )
-    setSelectedScope("global")
-    setPolicyPage(0)
   }
 
-  const updateSelectedRepository = (
+  const updateSelectedRuleSet = (
     update: (
-      repository: NonNullable<typeof selectedRepository>,
-    ) => NonNullable<typeof selectedRepository>,
+      ruleSet: ReviewAttentionRuleSetDraft,
+    ) => ReviewAttentionRuleSetDraft,
   ) => {
-    if (selectedRepository == null) return
+    if (selectedRuleSet == null) return
     setDraft((current) =>
       current == null
         ? current
         : {
             ...current,
-            repositories: current.repositories.map((repository) =>
-              repository.editorKey === selectedRepository.editorKey
-                ? update(repository)
-                : repository,
+            ruleSets: current.ruleSets.map((ruleSet) =>
+              ruleSet.editorKey === selectedRuleSet.editorKey
+                ? update(ruleSet)
+                : ruleSet,
             ),
           },
     )
   }
+
+  const openRuleDialog = () => {
+    setNewDecisionChoice("")
+    setNewCustomDecisionPoint("")
+    setRuleDialogOpen(true)
+  }
+
+  const openKnownRuleDialog = (decisionPoint: string) => {
+    setNewDecisionChoice(decisionPoint)
+    setNewCustomDecisionPoint("")
+    setRuleDialogOpen(true)
+  }
+
+  const newDecisionPoint =
+    newDecisionChoice === customDecisionPointChoice
+      ? newCustomDecisionPoint.trim()
+      : newDecisionChoice
+  const newDecisionIssue = (() => {
+    if (newDecisionPoint === "") return ""
+    if (
+      !decisionPointPattern.test(newDecisionPoint) ||
+      textEncoder.encode(newDecisionPoint).byteLength > 128
+    ) {
+      return t(
+        "pages.reviews.policies.custom_decision_error",
+        "Use a lowercase identifier beginning with a letter; dots, underscores, and hyphens are allowed.",
+      )
+    }
+    const currentPolicies = selectedRuleSet?.rules
+    if (
+      currentPolicies?.some(
+        (policy) => policy.decisionPoint === newDecisionPoint,
+      )
+    ) {
+      return t(
+        "pages.reviews.policies.decision_exists",
+        "This rule set already has a rule for that moment.",
+      )
+    }
+    return ""
+  })()
 
   const addPolicy = () => {
-    if (draft == null) return
-    if (selectedRepository == null) {
-      const policy = createReviewAttentionGlobalPolicyDraft(nextEditorKey)
-      setPolicyPage(Math.floor(draft.global.length / policyEditorPageSize))
-      setDraft({ ...draft, global: [...draft.global, policy] })
-      return
-    }
-    const policy = createReviewAttentionRepositoryPolicyDraft(nextEditorKey)
+    if (draft == null || selectedRuleSet == null) return
+    if (newDecisionPoint === "" || newDecisionIssue !== "") return
+    const policy = createReviewAttentionRuleDraft(nextEditorKey)
+    policy.decisionPoint = newDecisionPoint
     setPolicyPage(
-      Math.floor(selectedRepository.policies.length / policyEditorPageSize),
+      Math.floor(selectedRuleSet.rules.length / policyEditorPageSize),
     )
-    updateSelectedRepository((repository) => ({
-      ...repository,
-      policies: [...repository.policies, policy],
+    updateSelectedRuleSet((ruleSet) => ({
+      ...ruleSet,
+      rules: [...ruleSet.rules, policy],
     }))
+    setRuleDialogOpen(false)
   }
 
-  const updatePolicy = (policyKey: string, next: EditablePolicy) => {
-    if (selectedRepository == null) {
-      setDraft((current) =>
-        current == null
-          ? current
-          : {
-              ...current,
-              global: current.global.map((policy) =>
-                policy.editorKey === policyKey
-                  ? (next as ReviewAttentionGlobalPolicyDraft)
-                  : policy,
-              ),
-            },
-      )
-      return
-    }
-    updateSelectedRepository((repository) => ({
-      ...repository,
-      policies: repository.policies.map((policy) =>
-        policy.editorKey === policyKey
-          ? (next as ReviewAttentionRepositoryPolicyDraft)
-          : policy,
+  const updatePolicy = (policyKey: string, next: ReviewAttentionRuleDraft) => {
+    updateSelectedRuleSet((ruleSet) => ({
+      ...ruleSet,
+      rules: ruleSet.rules.map((policy) =>
+        policy.editorKey === policyKey ? next : policy,
       ),
     }))
   }
 
   const removePolicy = (policyKey: string) => {
-    if (selectedRepository == null) {
-      setDraft((current) =>
-        current == null
-          ? current
-          : {
-              ...current,
-              global: current.global.filter(
-                (policy) => policy.editorKey !== policyKey,
-              ),
-            },
-      )
-      return
-    }
-    updateSelectedRepository((repository) => ({
-      ...repository,
-      policies: repository.policies.filter(
-        (policy) => policy.editorKey !== policyKey,
-      ),
+    updateSelectedRuleSet((ruleSet) => ({
+      ...ruleSet,
+      rules: ruleSet.rules.filter((policy) => policy.editorKey !== policyKey),
     }))
   }
 
-  const requestModeChange = (
-    policy: ReviewAttentionRepositoryPolicyDraft,
-    mode: ReviewAttentionPolicyMode,
-  ) => {
+  const openDuplicateDialog = (source: ReviewAttentionRuleSetDraft) => {
+    setDuplicateSourceKey(source.editorKey)
+    setDuplicateName("")
+    setDuplicateDialogOpen(true)
+  }
+
+  const duplicateSource =
+    draft?.ruleSets.find((item) => item.editorKey === duplicateSourceKey) ??
+    null
+  const normalizedDuplicateName = duplicateName.trim()
+  const duplicateNameIssue = (() => {
+    if (normalizedDuplicateName === "") return ""
+    if (textEncoder.encode(normalizedDuplicateName).byteLength > 128)
+      return "Keep the permanent name within 128 bytes."
     if (
-      selectedRepository == null ||
-      mode === policy.mode ||
-      (mode !== "inherit" && mode !== "disable") ||
-      policy.gates.length === 0
-    ) {
-      applyModeChange(policy, mode)
+      draft?.ruleSets.some(
+        (item) =>
+          foldReviewAttentionRuleSetName(item.name) ===
+          foldReviewAttentionRuleSetName(normalizedDuplicateName),
+      )
+    )
+      return "Rule-set names must be unique."
+    return ""
+  })()
+
+  const duplicateRuleSet = () => {
+    if (
+      draft == null ||
+      duplicateSource == null ||
+      normalizedDuplicateName === "" ||
+      duplicateNameIssue !== ""
+    )
       return
-    }
-    setPendingMode({
-      repositoryKey: selectedRepository.editorKey,
-      policyKey: policy.editorKey,
-      mode,
-    })
+    const id = createOpaqueRuleSetID(draft.ruleSets)
+    const copy = duplicateReviewAttentionRuleSetDraft(
+      duplicateSource,
+      id,
+      normalizedDuplicateName,
+      nextEditorKey,
+    )
+    setDraft({ ...draft, ruleSets: [...draft.ruleSets, copy] })
+    setSelectedRuleSetKey(copy.editorKey)
+    setPolicyPage(0)
+    setDuplicateDialogOpen(false)
   }
 
-  const applyModeChange = (
-    policy: ReviewAttentionRepositoryPolicyDraft,
-    mode: ReviewAttentionPolicyMode,
-  ) => {
-    let gates = policy.gates
-    if (mode === "inherit" || mode === "disable") gates = []
-    if ((mode === "overlay" || mode === "replace") && gates.length === 0) {
-      gates = [
-        createReviewAttentionGateDraft("zero", defaultAgentID, nextEditorKey),
-      ]
-    }
-    updatePolicy(policy.editorKey, { ...policy, mode, gates })
-  }
-
-  const confirmModeChange = () => {
-    if (pendingMode == null || draft == null) return
-    const repository = draft.repositories.find(
-      (candidate) => candidate.editorKey === pendingMode.repositoryKey,
+  const deletePendingRuleSet = () => {
+    if (draft == null || pendingDeleteRuleSetKey === "") return
+    const target = draft.ruleSets.find(
+      (item) => item.editorKey === pendingDeleteRuleSetKey,
     )
-    const policy = repository?.policies.find(
-      (candidate) => candidate.editorKey === pendingMode.policyKey,
+    if (target == null) return
+    const targetAssignmentCount = draft.repositoryAssignments.filter(
+      (assignment) => assignment.ruleSetID === target.id,
+    ).length
+    if (
+      target.id === draft.defaultRuleSetID ||
+      targetAssignmentCount > 0 ||
+      target.id === reviewAttentionBuiltInRuleSetID
     )
-    if (policy != null) applyModeChange(policy, pendingMode.mode)
-    setPendingMode(null)
+      return
+    const remaining = draft.ruleSets.filter(
+      (item) => item.editorKey !== target.editorKey,
+    )
+    setDraft({ ...draft, ruleSets: remaining })
+    setSelectedRuleSetKey(remaining[0]?.editorKey ?? "")
+    setPolicyPage(0)
+    setPendingDeleteRuleSetKey("")
   }
 
   const initialAgentGenerationMismatch =
@@ -717,6 +833,10 @@ export function ReviewAttentionPoliciesPage({
     snapshot == null &&
     policyQuery.data != null &&
     (agentsQuery.isError || initialAgentGenerationMismatch)
+  const legacyMigrationBlocked =
+    policyQuery.error instanceof ReviewAttentionPoliciesAPIError &&
+    policyQuery.error.code ===
+      "legacy_attention_policies_require_simplification"
 
   if (policyQuery.isPending || draft == null || snapshot == null) {
     if (policyQuery.isError || initialAgentHydrationFailed) {
@@ -726,12 +846,16 @@ export function ReviewAttentionPoliciesPage({
           onShowDevelopment={onShowDevelopment}
           standalone={standalone}
           title={t(
-            initialAgentHydrationFailed
-              ? "pages.reviews.policies.hydration_error"
-              : "pages.reviews.policies.load_error",
-            initialAgentHydrationFailed
-              ? "Review attention policies and configured agents could not be loaded as one trusted generation."
-              : "Review attention policies are unavailable.",
+            legacyMigrationBlocked
+              ? "pages.reviews.policies.legacy_migration_error"
+              : initialAgentHydrationFailed
+                ? "pages.reviews.policies.hydration_error"
+                : "pages.reviews.policies.load_error",
+            legacyMigrationBlocked
+              ? "The legacy attention catalog is valid and still active, but it is too large to convert into standalone rule sets. Simplify repeated repository overrides in configuration before using this editor."
+              : initialAgentHydrationFailed
+                ? "Attention rules and configured agents could not be loaded as one trusted generation."
+                : "Attention rules are unavailable.",
           )}
           action={
             <Button
@@ -765,17 +889,13 @@ export function ReviewAttentionPoliciesPage({
         onShowInbox={onShowInbox}
         onShowDevelopment={onShowDevelopment}
         standalone={standalone}
-        title={t(
-          "pages.reviews.policies.loading",
-          "Loading review attention policies…",
-        )}
+        title={t("pages.reviews.policies.loading", "Loading attention rules…")}
         loading
       />
     )
   }
 
-  const policies =
-    selectedRepository == null ? draft.global : selectedRepository.policies
+  const policies = selectedRuleSet?.rules ?? []
   const policyPageCount = Math.max(
     1,
     Math.ceil(policies.length / policyEditorPageSize),
@@ -791,10 +911,11 @@ export function ReviewAttentionPoliciesPage({
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
       <PageHeader
-        title={t("pages.reviews.title", "Pull request reviews")}
+        title={t("pages.reviews.policies.page_title", "Attention rules")}
+        className="h-auto min-h-14 flex-wrap gap-2 py-2 [&>div:last-child]:flex-wrap"
         titleExtra={
           <Badge variant="secondary">
-            {t("pages.reviews.policies.badge", "Policy configuration")}
+            {t("pages.reviews.policies.badge", "Human input")}
           </Badge>
         }
       >
@@ -842,7 +963,7 @@ export function ReviewAttentionPoliciesPage({
           )}
           {saving
             ? t("pages.reviews.policies.saving", "Saving…")
-            : t("pages.reviews.policies.save", "Save policies")}
+            : t("pages.reviews.policies.rule_sets_save", "Save rule sets")}
         </Button>
       </PageHeader>
 
@@ -868,23 +989,100 @@ export function ReviewAttentionPoliciesPage({
         <fieldset disabled={editorBusy} className="contents">
           <div className="min-h-0 flex-1 overflow-auto p-3 lg:p-4">
             <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-3">
-              <ConfigChangeNotice
-                kind="save"
-                title={t(
-                  "pages.reviews.policies.automatic_title",
-                  "Decision gates request attention",
-                )}
-                description={t(
-                  "pages.reviews.policies.automatic_description",
-                  "Use review.submitted for reviews you send, pr_development.review_attention_required for reviewer feedback on your PRs, and pr_development.before_push for the final local publication decision. Matching policies run when their runtime reaches that decision. Changes affect only future decisions that have not pinned a policy revision. Saving only updates configuration; it does not run a gate or model, edit code, run CI, invoke Git or push, acknowledge a review, resolve a review thread, or merge a pull request.",
-                )}
-              />
+              <section
+                aria-labelledby="attention-rules-introduction"
+                className="border-border bg-card rounded-xl border"
+              >
+                <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-start sm:justify-between sm:p-4">
+                  <div className="min-w-0">
+                    <h2
+                      id="attention-rules-introduction"
+                      className="font-semibold"
+                    >
+                      {t(
+                        "pages.reviews.policies.rule_sets_intro_title",
+                        "Build reusable attention rule sets",
+                      )}
+                    </h2>
+                    <p className="text-muted-foreground mt-1 max-w-3xl text-sm">
+                      {t(
+                        "pages.reviews.policies.rule_sets_intro_description",
+                        "The built-in Default set always exists and begins with every known workflow moment Off. Configure it directly, or duplicate any set to create another permanent name, then make a set the default or assign it to repositories.",
+                      )}
+                    </p>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" asChild>
+                    <Link to="/event-sources">
+                      {t(
+                        "pages.reviews.policies.rule_sets_manage_repositories",
+                        "Manage repository intake",
+                      )}
+                      <IconExternalLink className="size-4" />
+                    </Link>
+                  </Button>
+                </div>
+                <ol className="border-border bg-border grid gap-px border-t sm:grid-cols-3">
+                  {[
+                    [
+                      t(
+                        "pages.reviews.policies.rule_sets_step_pick",
+                        "1 · Pick a set",
+                      ),
+                      t(
+                        "pages.reviews.policies.rule_sets_step_pick_help",
+                        "Edit Default, or duplicate a set and give the copy a unique permanent name.",
+                      ),
+                    ],
+                    [
+                      t(
+                        "pages.reviews.policies.rule_sets_step_configure",
+                        "2 · Configure moments",
+                      ),
+                      t(
+                        "pages.reviews.policies.rule_sets_step_configure_help",
+                        "Add known or custom workflow moments and the checks that decide whether to pause.",
+                      ),
+                    ],
+                    [
+                      t(
+                        "pages.reviews.policies.rule_sets_step_apply",
+                        "3 · Apply the set",
+                      ),
+                      t(
+                        "pages.reviews.policies.rule_sets_step_apply_help",
+                        "Make one set the default and optionally assign another set to exact repositories.",
+                      ),
+                    ],
+                  ].map(([title, description]) => (
+                    <li key={title} className="bg-card p-3">
+                      <p className="text-xs font-semibold">{title}</p>
+                      <p className="text-muted-foreground mt-1 text-xs/5">
+                        {description}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+                <details className="border-border border-t px-3 py-2 text-xs sm:px-4">
+                  <summary className="text-muted-foreground cursor-pointer font-medium">
+                    {t(
+                      "pages.reviews.policies.rule_sets_save_effect_summary",
+                      "What saving changes",
+                    )}
+                  </summary>
+                  <p className="text-muted-foreground mt-2 max-w-5xl leading-5">
+                    {t(
+                      "pages.reviews.policies.rule_sets_save_effect_help",
+                      "Saving replaces the full rule-set catalog and assignments for future decisions that have not already pinned rules. It does not run AI, edit code, run CI, push, acknowledge a review, resolve a thread, or merge a pull request.",
+                    )}
+                  </p>
+                </details>
+              </section>
               {snapshot.effects.gateway_effect === "restart_required" && (
                 <ConfigChangeNotice
                   kind="restart"
                   title={t(
                     "pages.reviews.policies.restart_required",
-                    "The running gateway still needs a restart to use this policy generation.",
+                    "The running gateway still needs a restart to use this rule generation.",
                   )}
                 />
               )}
@@ -897,7 +1095,7 @@ export function ReviewAttentionPoliciesPage({
                     {serverError ||
                       t(
                         "pages.reviews.policies.newer_available",
-                        "A newer policy generation is available. Your draft has not been replaced.",
+                        "A newer rule generation is available. Your draft has not been replaced.",
                       )}
                   </span>
                   <Button
@@ -918,7 +1116,7 @@ export function ReviewAttentionPoliciesPage({
                   <span>
                     {t(
                       "pages.reviews.policies.agents_load_error",
-                      "Configured agents could not be loaded. AI gate validation and saving are paused; your policy draft is preserved.",
+                      "Configured agents could not be loaded. AI check validation and saving are paused; your rule draft is preserved.",
                     )}
                   </span>
                   <Button
@@ -947,11 +1145,11 @@ export function ReviewAttentionPoliciesPage({
                     {agentRevisionConflict
                       ? t(
                           "pages.reviews.policies.agent_revision_conflict",
-                          "The configuration changed while loading agents. Your draft is preserved; reload the latest policies.",
+                          "The configuration changed while loading agents. Your draft is preserved; reload the latest rules.",
                         )
                       : t(
                           "pages.reviews.policies.agent_generation_mismatch",
-                          "Policy and agent catalogs came from different configuration generations. Saving is paused; retry agents or reload the latest policies.",
+                          "Rule and agent catalogs came from different configuration generations. Saving is paused; retry agents or reload the latest rules.",
                         )}
                   </span>
                   <div className="flex flex-wrap gap-2">
@@ -983,65 +1181,67 @@ export function ReviewAttentionPoliciesPage({
                     >
                       {t(
                         "pages.reviews.policies.reload_policies",
-                        "Reload policies",
+                        "Reload rules",
                       )}
                     </Button>
                   </div>
                 </div>
               )}
-              {(agentsUsable ||
-                (agentCursor !== undefined && !agentRevisionConflict)) && (
-                <div
-                  role="group"
-                  aria-label={t(
-                    "pages.reviews.policies.agent_pages",
-                    "AI agent catalog pages",
-                  )}
-                  className="border-border bg-card flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm"
-                >
-                  <span className="text-muted-foreground">
-                    {t("pages.reviews.policies.agent_page", {
-                      defaultValue:
-                        "AI agent page {{page}} · {{count}} identities",
-                      page: agentPageNumber,
-                      count: agentsUsable
-                        ? (agentsQuery.data?.agents.length ?? 0)
-                        : 0,
-                    })}
-                  </span>
-                  <div className="flex gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        agentCursor === undefined || agentsQuery.isFetching
-                      }
-                      onClick={() => setAgentCursor(previousAgentCursor)}
-                    >
-                      {t(
-                        "pages.reviews.policies.previous_agents",
-                        "Previous agents",
-                      )}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        !agentsUsable ||
-                        agentsQuery.isFetching ||
-                        agentsQuery.data?.next_cursor === undefined
-                      }
-                      onClick={() =>
-                        setAgentCursor(agentsQuery.data?.next_cursor)
-                      }
-                    >
-                      {t("pages.reviews.policies.next_agents", "Next agents")}
-                    </Button>
+              {hasAIGates &&
+                agentPagingAvailable &&
+                (agentsUsable ||
+                  (agentCursor !== undefined && !agentRevisionConflict)) && (
+                  <div
+                    role="group"
+                    aria-label={t(
+                      "pages.reviews.policies.agent_pages",
+                      "AI agent catalog pages",
+                    )}
+                    className="border-border bg-card flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm"
+                  >
+                    <span className="text-muted-foreground">
+                      {t("pages.reviews.policies.agent_page", {
+                        defaultValue:
+                          "AI agent page {{page}} · {{count}} identities",
+                        page: agentPageNumber,
+                        count: agentsUsable
+                          ? (agentsQuery.data?.agents.length ?? 0)
+                          : 0,
+                      })}
+                    </span>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          agentCursor === undefined || agentsQuery.isFetching
+                        }
+                        onClick={() => setAgentCursor(previousAgentCursor)}
+                      >
+                        {t(
+                          "pages.reviews.policies.previous_agents",
+                          "Previous agents",
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          !agentsUsable ||
+                          agentsQuery.isFetching ||
+                          agentsQuery.data?.next_cursor === undefined
+                        }
+                        onClick={() =>
+                          setAgentCursor(agentsQuery.data?.next_cursor)
+                        }
+                      >
+                        {t("pages.reviews.policies.next_agents", "Next agents")}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
               {displayedValidation != null && !displayedValidation.valid && (
                 <div
                   role="alert"
@@ -1050,7 +1250,7 @@ export function ReviewAttentionPoliciesPage({
                   <p className="text-destructive text-sm font-medium">
                     {t(
                       "pages.reviews.policies.validation_title",
-                      "Fix policy errors before saving.",
+                      "Fix rule errors before saving.",
                     )}
                   </p>
                   <ul className="text-muted-foreground mt-2 space-y-1 text-xs">
@@ -1077,300 +1277,790 @@ export function ReviewAttentionPoliciesPage({
                 </div>
               )}
 
-              <div className="grid min-h-[480px] min-w-0 gap-3 lg:grid-cols-[minmax(250px,0.42fr)_minmax(0,1.58fr)]">
+              <div className="grid min-h-[480px] min-w-0 gap-3 lg:grid-cols-[minmax(280px,0.42fr)_minmax(0,1.58fr)]">
                 <aside
                   aria-label={t(
-                    "pages.reviews.policies.scopes",
-                    "Policy scopes",
+                    "pages.reviews.policies.rule_sets_list_aria",
+                    "Rule sets",
                   )}
                   className="border-border bg-card flex min-w-0 flex-col rounded-xl border"
                 >
-                  <div className="border-border space-y-2 border-b p-3">
-                    <Label htmlFor="policy-repository-search">
+                  <div className="border-border space-y-1 border-b p-3">
+                    <h2 className="text-sm font-semibold">
+                      {t("pages.reviews.policies.rule_sets_title", "Rule sets")}
+                    </h2>
+                    <p className="text-muted-foreground text-xs/5">
                       {t(
-                        "pages.reviews.policies.repository_search",
-                        "Find repository",
+                        "pages.reviews.policies.rule_sets_help",
+                        "Build a reusable set once, then make it the default or assign it to any number of repositories.",
                       )}
-                    </Label>
-                    <Input
-                      id="policy-repository-search"
-                      type="search"
-                      value={repositorySearch}
-                      onChange={(event) =>
-                        setRepositorySearch(event.target.value)
-                      }
-                      placeholder="owner/repository"
-                    />
+                    </p>
                   </div>
                   <div className="min-h-0 flex-1 space-y-1 overflow-auto p-2">
-                    <Button
-                      type="button"
-                      aria-pressed={selectedScope === "global"}
-                      variant={
-                        selectedScope === "global" ? "secondary" : "ghost"
-                      }
-                      className="w-full justify-start"
-                      onClick={selectGlobal}
-                    >
-                      {t(
-                        "pages.reviews.policies.global_defaults",
-                        "Global defaults",
-                      )}
-                      <Badge variant="outline" className="ml-auto">
-                        {draft.global.length}
-                      </Badge>
-                    </Button>
-                    {visibleRepositories.map((repository) => (
-                      <Button
-                        key={repository.editorKey}
-                        type="button"
-                        aria-pressed={selectedScope === repository.editorKey}
-                        variant={
-                          selectedScope === repository.editorKey
-                            ? "secondary"
-                            : "ghost"
-                        }
-                        className="w-full min-w-0 justify-start"
-                        onClick={() => {
-                          setSelectedScope(repository.editorKey)
-                          setPolicyPage(0)
-                        }}
-                      >
-                        <span className="truncate font-mono text-xs">
-                          {repository.repository ||
-                            t(
-                              "pages.reviews.policies.unnamed_repository",
-                              "Unnamed repository",
-                            )}
-                        </span>
-                        <Badge variant="outline" className="ml-auto">
-                          {repository.policies.length}
-                        </Badge>
-                      </Button>
-                    ))}
+                    {draft.ruleSets.map((ruleSet) => {
+                      const assignmentCount =
+                        draft.repositoryAssignments.filter(
+                          (assignment) => assignment.ruleSetID === ruleSet.id,
+                        ).length
+                      return (
+                        <Button
+                          key={ruleSet.editorKey}
+                          type="button"
+                          aria-pressed={
+                            selectedRuleSet?.editorKey === ruleSet.editorKey
+                          }
+                          variant={
+                            selectedRuleSet?.editorKey === ruleSet.editorKey
+                              ? "secondary"
+                              : "ghost"
+                          }
+                          className="h-auto w-full min-w-0 justify-start py-2"
+                          onClick={() => {
+                            setSelectedRuleSetKey(ruleSet.editorKey)
+                            setPolicyPage(0)
+                          }}
+                        >
+                          <span className="min-w-0 flex-1 text-left">
+                            <span className="block truncate font-medium">
+                              {ruleSet.name}
+                            </span>
+                            <span className="text-muted-foreground block text-xs font-normal">
+                              {ruleSet.id === draft.defaultRuleSetID
+                                ? t(
+                                    "pages.reviews.policies.rule_sets_current_default_short",
+                                    "Default for unassigned repositories",
+                                  )
+                                : t(
+                                    "pages.reviews.policies.rule_sets_repository_count",
+                                    {
+                                      defaultValue:
+                                        "{{count}} assigned repository",
+                                      defaultValue_other:
+                                        "{{count}} assigned repositories",
+                                      count: assignmentCount,
+                                    },
+                                  )}
+                            </span>
+                          </span>
+                          <Badge variant="outline" className="ml-2 shrink-0">
+                            {ruleSet.rules.length}
+                          </Badge>
+                        </Button>
+                      )
+                    })}
                   </div>
-                  <div className="border-border border-t p-2">
+                  <div className="border-border space-y-2 border-t p-2">
                     <Button
                       type="button"
                       variant="outline"
                       className="w-full"
-                      onClick={addRepository}
+                      disabled={selectedRuleSet == null}
+                      onClick={() => {
+                        if (selectedRuleSet != null)
+                          openDuplicateDialog(selectedRuleSet)
+                      }}
                     >
-                      <IconPlus className="size-4" />
+                      <IconCopy className="size-4" />
                       {t(
-                        "pages.reviews.policies.add_repository",
-                        "Add repository",
+                        "pages.reviews.policies.rule_sets_duplicate",
+                        "Duplicate selected set",
                       )}
                     </Button>
                   </div>
                 </aside>
 
-                <section
-                  aria-label={
-                    selectedRepository == null
-                      ? t(
-                          "pages.reviews.policies.global_defaults",
-                          "Global defaults",
-                        )
-                      : selectedRepository.repository ||
-                        t(
-                          "pages.reviews.policies.unnamed_repository",
-                          "Unnamed repository",
-                        )
-                  }
-                  className="min-w-0 space-y-3"
-                >
-                  <div className="border-border bg-card flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-end">
-                    <div className="min-w-0 flex-1">
-                      {selectedRepository == null ? (
-                        <>
-                          <h2 className="font-semibold">
+                <div className="min-w-0 space-y-3">
+                  {selectedRuleSet != null && (
+                    <section
+                      aria-labelledby="selected-rule-set-heading"
+                      className="min-w-0 space-y-3"
+                    >
+                      <div className="border-border bg-card flex flex-col gap-3 rounded-xl border p-3 sm:p-4">
+                        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h2
+                                id="selected-rule-set-heading"
+                                className="truncate font-semibold"
+                              >
+                                {selectedRuleSet.name}
+                              </h2>
+                              {selectedRuleSet.id ===
+                                draft.defaultRuleSetID && (
+                                <Badge>
+                                  {t(
+                                    "pages.reviews.policies.rule_sets_current_default_badge",
+                                    "Current default",
+                                  )}
+                                </Badge>
+                              )}
+                              <Badge variant="outline">
+                                {t(
+                                  "pages.reviews.policies.rule_sets_repository_count",
+                                  {
+                                    defaultValue:
+                                      "{{count}} assigned repository",
+                                    defaultValue_other:
+                                      "{{count}} assigned repositories",
+                                    count: assignedRepositoryCount,
+                                  },
+                                )}
+                              </Badge>
+                            </div>
+                            <p className="text-muted-foreground mt-1 text-xs/5">
+                              {t(
+                                "pages.reviews.policies.rule_sets_name_locked",
+                                "This name is permanent. Duplicate the set when you need another named version.",
+                              )}
+                            </p>
+                            <p className="text-muted-foreground mt-1 font-mono text-[11px]">
+                              {selectedRuleSet.id}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {selectedRuleSet.id !== draft.defaultRuleSetID && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() =>
+                                  setDraft({
+                                    ...draft,
+                                    defaultRuleSetID: selectedRuleSet.id,
+                                  })
+                                }
+                              >
+                                <IconStar className="size-4" />
+                                {t(
+                                  "pages.reviews.policies.rule_sets_make_default",
+                                  "Make default",
+                                )}
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() =>
+                                openDuplicateDialog(selectedRuleSet)
+                              }
+                            >
+                              <IconCopy className="size-4" />
+                              {t(
+                                "pages.reviews.policies.rule_sets_duplicate_short",
+                                "Duplicate",
+                              )}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              disabled={
+                                selectedRuleSet.id ===
+                                  reviewAttentionBuiltInRuleSetID ||
+                                selectedRuleSet.id === draft.defaultRuleSetID ||
+                                assignedRepositoryCount > 0
+                              }
+                              title={deleteRuleSetDisabledReason || undefined}
+                              onClick={() =>
+                                setPendingDeleteRuleSetKey(
+                                  selectedRuleSet.editorKey,
+                                )
+                              }
+                            >
+                              <IconTrash className="size-4" />
+                              {t(
+                                "pages.reviews.policies.rule_sets_delete",
+                                "Delete",
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                        {deleteRuleSetDisabledReason !== "" && (
+                          <p className="text-muted-foreground text-right text-xs">
+                            {deleteRuleSetDisabledReason}
+                          </p>
+                        )}
+                        <div className="border-border bg-muted/35 rounded-lg border p-3 text-xs/5">
+                          {t(
+                            "pages.reviews.policies.rule_sets_shared_edit_warning",
+                            "Edits affect every repository assigned to this set. Unassigned repositories use whichever set is the current default. Saved changes apply to future runs that have not already pinned rules.",
+                          )}
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={openAssignmentDialog}
+                          >
+                            <IconPlus className="size-4" />
                             {t(
-                              "pages.reviews.policies.global_defaults",
-                              "Global defaults",
+                              "pages.reviews.policies.rule_sets_assign_repository",
+                              "Assign repositories",
+                            )}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={openRuleDialog}
+                          >
+                            <IconPlus className="size-4" />
+                            {t(
+                              "pages.reviews.policies.rule_sets_add_moment",
+                              "Add workflow moment",
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+
+                      <RepositoryAssignmentsPanel
+                        draft={draft}
+                        onChange={setDraft}
+                        onAdd={openAssignmentDialog}
+                        onRemove={removeAssignment}
+                      />
+
+                      <section
+                        aria-labelledby="known-workflow-moments-heading"
+                        className="border-border bg-card rounded-xl border"
+                      >
+                        <div className="border-border border-b p-3 sm:p-4">
+                          <h2
+                            id="known-workflow-moments-heading"
+                            className="text-sm font-semibold"
+                          >
+                            {t(
+                              "pages.reviews.policies.rule_sets_known_moments",
+                              "Known workflow moments",
                             )}
                           </h2>
-                          <p className="text-muted-foreground mt-1 text-xs">
+                          <p className="text-muted-foreground mt-1 text-xs/5">
                             {t(
-                              "pages.reviews.policies.global_help",
-                              "These ordered policies apply to every repository unless a repository override changes them.",
+                              "pages.reviews.policies.rule_sets_known_moments_help",
+                              "Off means this set cannot request human input at that moment. Configure a moment and add at least one check to turn it on.",
                             )}
                           </p>
-                        </>
-                      ) : (
-                        <>
-                          <Label htmlFor="selected-policy-repository">
+                        </div>
+                        <ul className="divide-border divide-y">
+                          {knownAttentionDecisionPoints.map((decisionPoint) => {
+                            const ruleIndex = policies.findIndex(
+                              (rule) =>
+                                rule.decisionPoint === decisionPoint.value,
+                            )
+                            const configuredRule = policies[ruleIndex]
+                            const active =
+                              configuredRule?.gates.some(
+                                (gate) => gate.kind !== "zero",
+                              ) ?? false
+                            return (
+                              <li
+                                key={decisionPoint.value}
+                                className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between"
+                              >
+                                <div className="min-w-0">
+                                  <p className="text-sm font-medium">
+                                    {t(
+                                      decisionPoint.labelKey,
+                                      decisionPoint.label,
+                                    )}
+                                  </p>
+                                  <p className="text-muted-foreground mt-0.5 font-mono text-[11px] break-all">
+                                    {decisionPoint.value}
+                                  </p>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-2">
+                                  <Badge
+                                    variant={active ? "secondary" : "outline"}
+                                  >
+                                    {active
+                                      ? t(
+                                          "pages.reviews.policies.rule_sets_on_checks",
+                                          {
+                                            defaultValue:
+                                              "On · {{count}} check",
+                                            defaultValue_other:
+                                              "On · {{count}} checks",
+                                            count: configuredRule.gates.length,
+                                          },
+                                        )
+                                      : t(
+                                          "pages.reviews.policies.rule_sets_off",
+                                          "Off",
+                                        )}
+                                  </Badge>
+                                  {configuredRule == null ? (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() =>
+                                        openKnownRuleDialog(decisionPoint.value)
+                                      }
+                                    >
+                                      {t(
+                                        "pages.reviews.policies.rule_sets_configure_moment",
+                                        "Configure",
+                                      )}
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() =>
+                                        setPolicyPage(
+                                          Math.floor(
+                                            ruleIndex / policyEditorPageSize,
+                                          ),
+                                        )
+                                      }
+                                    >
+                                      {t(
+                                        "pages.reviews.policies.rule_sets_edit_moment",
+                                        "Edit below",
+                                      )}
+                                    </Button>
+                                  )}
+                                </div>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </section>
+
+                      {policyPageCount > 1 && (
+                        <div
+                          role="group"
+                          aria-label={t(
+                            "pages.reviews.policies.rule_sets_rule_pages",
+                            "Rule pages",
+                          )}
+                          className="border-border bg-card flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm"
+                        >
+                          <span className="text-muted-foreground">
+                            {t("pages.reviews.policies.rule_sets_rule_page", {
+                              defaultValue:
+                                "Workflow moments {{first}}–{{last}} of {{count}}",
+                              first: policyPageStart + 1,
+                              last: Math.min(
+                                policies.length,
+                                policyPageStart + policyEditorPageSize,
+                              ),
+                              count: policies.length,
+                            })}
+                          </span>
+                          <div className="flex gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={activePolicyPage === 0}
+                              onClick={() =>
+                                setPolicyPage(activePolicyPage - 1)
+                              }
+                            >
+                              {t(
+                                "pages.reviews.policies.rule_sets_previous_rules",
+                                "Previous",
+                              )}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={
+                                activePolicyPage + 1 === policyPageCount
+                              }
+                              onClick={() =>
+                                setPolicyPage(activePolicyPage + 1)
+                              }
+                            >
+                              {t(
+                                "pages.reviews.policies.rule_sets_next_rules",
+                                "Next",
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
+                      {policies.length === 0 ? (
+                        <div className="border-border bg-card rounded-xl border border-dashed p-6 text-center">
+                          <Badge variant="outline">
                             {t(
-                              "pages.reviews.policies.repository",
-                              "Repository",
+                              "pages.reviews.policies.rule_sets_all_off",
+                              "All moments Off",
                             )}
-                          </Label>
-                          <Input
-                            id="selected-policy-repository"
-                            aria-invalid={selectedRepositoryIssue != null}
-                            aria-describedby={
-                              selectedRepositoryIssue == null
-                                ? undefined
-                                : "selected-policy-repository-error"
+                          </Badge>
+                          <p className="mt-3 text-sm font-medium">
+                            {t(
+                              "pages.reviews.policies.rule_sets_empty",
+                              "Nothing triggers human attention in this rule set.",
+                            )}
+                          </p>
+                          <p className="text-muted-foreground mt-1 text-xs/5">
+                            {selectedRuleSet.id ===
+                            reviewAttentionBuiltInRuleSetID
+                              ? t(
+                                  "pages.reviews.policies.rule_sets_empty_default_help",
+                                  "This is the built-in Default starting behavior. Add a workflow moment only when PicoClaw should evaluate one or more checks.",
+                                )
+                              : t(
+                                  "pages.reviews.policies.rule_sets_empty_copy_help",
+                                  "Add a workflow moment only when PicoClaw should evaluate one or more checks for repositories using this set.",
+                                )}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="mt-3"
+                            onClick={openRuleDialog}
+                          >
+                            <IconPlus className="size-4" />
+                            {t(
+                              "pages.reviews.policies.rule_sets_add_moment",
+                              "Add workflow moment",
+                            )}
+                          </Button>
+                        </div>
+                      ) : (
+                        visiblePolicies.map((policy, visiblePolicyIndex) => (
+                          <RuleEditorCard
+                            key={policy.editorKey}
+                            policy={policy}
+                            policyIndex={policyPageStart + visiblePolicyIndex}
+                            policyPath={`ruleSets[${selectedRuleSetIndex}].rules[${policyPageStart + visiblePolicyIndex}]`}
+                            issues={validationIssues}
+                            agents={
+                              agentsUsable
+                                ? (agentsQuery.data?.agents ?? [])
+                                : []
                             }
-                            value={selectedRepository.repository}
-                            onChange={(event) =>
-                              updateSelectedRepository((repository) => ({
-                                ...repository,
-                                repository: event.target.value,
-                              }))
+                            agentsLoading={
+                              agentsQuery.isPending || agentsQuery.isFetching
                             }
-                            placeholder="owner/repository"
-                            spellCheck={false}
-                            autoComplete="off"
+                            agentsUnavailable={
+                              agentsQuery.isError || agentGenerationMismatch
+                            }
+                            defaultAgentID={defaultAgentID}
+                            nextEditorKey={nextEditorKey}
+                            onSelectAgent={trustSelectedAgent}
+                            onChange={(next) =>
+                              updatePolicy(policy.editorKey, next)
+                            }
+                            onRemove={() => removePolicy(policy.editorKey)}
                           />
-                          <ReviewAttentionFieldIssue
-                            id="selected-policy-repository-error"
-                            issue={selectedRepositoryIssue}
-                          />
-                        </>
+                        ))
                       )}
-                    </div>
-                    {selectedRepository != null && (
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        onClick={() =>
-                          removeRepository(selectedRepository.editorKey)
-                        }
-                      >
-                        <IconTrash className="size-4" />
-                        {t(
-                          "pages.reviews.policies.remove_repository",
-                          "Remove repository",
-                        )}
-                      </Button>
-                    )}
-                    <Button type="button" variant="outline" onClick={addPolicy}>
-                      <IconPlus className="size-4" />
-                      {t(
-                        "pages.reviews.policies.add_decision",
-                        "Add decision policy",
-                      )}
-                    </Button>
-                  </div>
-
-                  {policyPageCount > 1 && (
-                    <div
-                      role="group"
-                      aria-label={t(
-                        "pages.reviews.policies.policy_pages",
-                        "Decision policy pages",
-                      )}
-                      className="border-border bg-card flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm"
-                    >
-                      <span className="text-muted-foreground">
-                        {t("pages.reviews.policies.policy_page", {
-                          defaultValue:
-                            "Decision policies {{first}}–{{last}} of {{count}}",
-                          first: policyPageStart + 1,
-                          last: Math.min(
-                            policies.length,
-                            policyPageStart + policyEditorPageSize,
-                          ),
-                          count: policies.length,
-                        })}
-                      </span>
-                      <div className="flex gap-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={activePolicyPage === 0}
-                          onClick={() => setPolicyPage(activePolicyPage - 1)}
-                        >
-                          {t(
-                            "pages.reviews.policies.previous_policies",
-                            "Previous policies",
-                          )}
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={activePolicyPage + 1 === policyPageCount}
-                          onClick={() => setPolicyPage(activePolicyPage + 1)}
-                        >
-                          {t(
-                            "pages.reviews.policies.next_policies",
-                            "Next policies",
-                          )}
-                        </Button>
-                      </div>
-                    </div>
+                    </section>
                   )}
-
-                  {policies.length === 0 ? (
-                    <div className="border-border bg-card rounded-xl border border-dashed p-8 text-center">
-                      <p className="text-sm font-medium">
-                        {t(
-                          "pages.reviews.policies.empty",
-                          "No decision policies are configured in this scope.",
-                        )}
-                      </p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="mt-3"
-                        onClick={addPolicy}
-                      >
-                        <IconPlus className="size-4" />
-                        {t(
-                          "pages.reviews.policies.add_decision",
-                          "Add decision policy",
-                        )}
-                      </Button>
-                    </div>
-                  ) : (
-                    visiblePolicies.map((policy, visiblePolicyIndex) => (
-                      <PolicyEditorCard
-                        key={policy.editorKey}
-                        policy={policy}
-                        policyIndex={policyPageStart + visiblePolicyIndex}
-                        policyPath={
-                          selectedRepository == null
-                            ? `global[${policyPageStart + visiblePolicyIndex}]`
-                            : `repositories[${selectedRepositoryIndex}].policies[${policyPageStart + visiblePolicyIndex}]`
-                        }
-                        issues={validationIssues}
-                        repository={selectedRepository?.repository}
-                        agents={
-                          agentsUsable ? (agentsQuery.data?.agents ?? []) : []
-                        }
-                        agentsLoading={
-                          agentsQuery.isPending || agentsQuery.isFetching
-                        }
-                        agentsUnavailable={
-                          agentsQuery.isError || agentGenerationMismatch
-                        }
-                        defaultAgentID={defaultAgentID}
-                        catalog={displayedValidation?.catalog}
-                        nextEditorKey={nextEditorKey}
-                        onSelectAgent={trustSelectedAgent}
-                        onChange={(next) =>
-                          updatePolicy(policy.editorKey, next)
-                        }
-                        onRemove={() => removePolicy(policy.editorKey)}
-                        onModeChange={(mode) =>
-                          requestModeChange(
-                            policy as ReviewAttentionRepositoryPolicyDraft,
-                            mode,
-                          )
-                        }
-                      />
-                    ))
-                  )}
-                </section>
+                </div>
               </div>
             </div>
           </div>
         </fieldset>
       </form>
+
+      <Dialog
+        open={assignmentDialogOpen}
+        onOpenChange={setAssignmentDialogOpen}
+      >
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {t(
+                "pages.reviews.policies.rule_sets_assignment_title",
+                "Assign repositories to rule sets",
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              {t(
+                "pages.reviews.policies.rule_sets_assignment_description",
+                "Enter an exact owner/repository and choose the reusable set it should use. Add another row after each assignment if needed.",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="new-rule-set-repository">
+              {t(
+                "pages.reviews.policies.rule_sets_repository_label",
+                "Repository",
+              )}
+            </Label>
+            <Input
+              id="new-rule-set-repository"
+              value={assignmentRepository}
+              onChange={(event) => setAssignmentRepository(event.target.value)}
+              placeholder="owner/repository"
+              aria-invalid={newRepositoryIssue !== ""}
+              aria-describedby="new-rule-set-repository-help"
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <p
+              id="new-rule-set-repository-help"
+              className={cn(
+                "text-xs",
+                newRepositoryIssue
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              )}
+            >
+              {newRepositoryIssue ||
+                t(
+                  "pages.reviews.policies.rule_sets_repository_help",
+                  "Use the exact owner/repository name, for example acme/widgets.",
+                )}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="new-repository-rule-set">
+              {t(
+                "pages.reviews.policies.rule_sets_assignment_set_label",
+                "Rule set",
+              )}
+            </Label>
+            <select
+              id="new-repository-rule-set"
+              value={assignmentRuleSetID}
+              onChange={(event) => setAssignmentRuleSetID(event.target.value)}
+              className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 w-full rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
+            >
+              {draft.ruleSets.map((ruleSet) => (
+                <option key={ruleSet.id} value={ruleSet.id}>
+                  {ruleSet.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="border-border bg-muted/35 flex gap-2 rounded-lg border p-3 text-xs/5">
+            <IconInfoCircle className="mt-0.5 size-4 shrink-0" />
+            <p>
+              {t(
+                "pages.reviews.policies.rule_sets_intake_explanation",
+                "This assignment only chooses attention behavior. Configure GitHub intake separately under Event sources.",
+              )}{" "}
+              <Link
+                to="/event-sources"
+                className="font-medium underline underline-offset-2"
+              >
+                {t(
+                  "pages.reviews.policies.rule_sets_open_event_sources",
+                  "Open Event sources",
+                )}
+              </Link>
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAssignmentDialogOpen(false)}
+            >
+              {t("common.done", "Done")}
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                normalizedNewRepository === "" || newRepositoryIssue !== ""
+              }
+              onClick={addAssignment}
+            >
+              <IconPlus className="size-4" />
+              {t(
+                "pages.reviews.policies.rule_sets_add_assignment",
+                "Add assignment",
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={duplicateDialogOpen} onOpenChange={setDuplicateDialogOpen}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {t(
+                "pages.reviews.policies.rule_sets_duplicate_title",
+                "Duplicate rule set",
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              {t("pages.reviews.policies.rule_sets_duplicate_description", {
+                defaultValue:
+                  "Copy every rule and check from {{name}}. The new set will not become the default and will not receive any repository assignments.",
+                name: duplicateSource?.name ?? "",
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="duplicate-rule-set-name">
+              {t(
+                "pages.reviews.policies.rule_sets_duplicate_name",
+                "New permanent name",
+              )}
+            </Label>
+            <Input
+              id="duplicate-rule-set-name"
+              value={duplicateName}
+              onChange={(event) => setDuplicateName(event.target.value)}
+              aria-invalid={duplicateNameIssue !== ""}
+              aria-describedby="duplicate-rule-set-name-help"
+              autoComplete="off"
+            />
+            <p
+              id="duplicate-rule-set-name-help"
+              className={cn(
+                "text-xs",
+                duplicateNameIssue
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              )}
+            >
+              {duplicateNameIssue ||
+                t(
+                  "pages.reviews.policies.rule_sets_duplicate_name_help",
+                  "Names cannot be edited later. Pick a unique name that explains when this set should be used.",
+                )}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDuplicateDialogOpen(false)}
+            >
+              {t("common.cancel", "Cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                normalizedDuplicateName === "" || duplicateNameIssue !== ""
+              }
+              onClick={duplicateRuleSet}
+            >
+              <IconCopy className="size-4" />
+              {t(
+                "pages.reviews.policies.rule_sets_duplicate_action",
+                "Create duplicate",
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={ruleDialogOpen} onOpenChange={setRuleDialogOpen}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {t(
+                "pages.reviews.policies.add_rule_title",
+                "Add an attention rule",
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              {t("pages.reviews.policies.rule_sets_add_rule_description", {
+                defaultValue:
+                  "Choose a moment to configure inside {{name}}. A moment with no checks is Off.",
+                name: selectedRuleSet?.name ?? "",
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="new-attention-rule-moment">
+              {t(
+                "pages.reviews.policies.rule_moment",
+                "When should this rule run?",
+              )}
+            </Label>
+            <select
+              id="new-attention-rule-moment"
+              value={newDecisionChoice}
+              onChange={(event) => setNewDecisionChoice(event.target.value)}
+              aria-invalid={
+                newDecisionChoice !== customDecisionPointChoice &&
+                newDecisionIssue !== ""
+              }
+              aria-describedby={
+                newDecisionChoice !== customDecisionPointChoice &&
+                newDecisionIssue !== ""
+                  ? "new-attention-rule-error"
+                  : undefined
+              }
+              className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 w-full rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
+            >
+              <option value="">
+                {t("pages.reviews.policies.select_moment", "Select a moment")}
+              </option>
+              {knownAttentionDecisionPoints.map((decisionPoint) => (
+                <option key={decisionPoint.value} value={decisionPoint.value}>
+                  {t(decisionPoint.labelKey, decisionPoint.label)}
+                </option>
+              ))}
+              <option value={customDecisionPointChoice}>
+                {t(
+                  "pages.reviews.policies.custom_decision",
+                  "Custom workflow moment (advanced)",
+                )}
+              </option>
+            </select>
+          </div>
+          {newDecisionChoice === customDecisionPointChoice && (
+            <div className="space-y-2">
+              <Label htmlFor="new-custom-decision-point">
+                {t(
+                  "pages.reviews.policies.custom_decision_label",
+                  "Custom workflow identifier",
+                )}
+              </Label>
+              <Input
+                id="new-custom-decision-point"
+                value={newCustomDecisionPoint}
+                onChange={(event) =>
+                  setNewCustomDecisionPoint(event.target.value)
+                }
+                placeholder="custom.release_check"
+                aria-invalid={newDecisionIssue !== ""}
+                aria-describedby={
+                  newDecisionIssue === ""
+                    ? undefined
+                    : "new-attention-rule-error"
+                }
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          )}
+          {newDecisionIssue !== "" && (
+            <p
+              id="new-attention-rule-error"
+              className="text-destructive text-xs"
+              role="alert"
+            >
+              {newDecisionIssue}
+            </p>
+          )}
+          <div className="border-border bg-muted/35 rounded-lg border p-3 text-xs/5">
+            {t(
+              "pages.reviews.policies.rule_sets_rule_next",
+              "Next, add one or more checks that decide whether PicoClaw should ask for human input. Remove the moment to turn it Off again.",
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRuleDialogOpen(false)}
+            >
+              {t("common.cancel", "Cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={newDecisionPoint === "" || newDecisionIssue !== ""}
+              onClick={addPolicy}
+            >
+              {t("pages.reviews.policies.add_rule", "Add rule")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={reloadConfirmOpen} onOpenChange={setReloadConfirmOpen}>
         <AlertDialogContent>
@@ -1378,13 +2068,13 @@ export function ReviewAttentionPoliciesPage({
             <AlertDialogTitle>
               {t(
                 "pages.reviews.policies.reload_title",
-                "Discard this policy draft?",
+                "Discard this rule draft?",
               )}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {t(
                 "pages.reviews.policies.reload_description",
-                "Reloading replaces every unsaved policy edit with the latest trusted configuration.",
+                "Reloading replaces every unsaved rule edit with the latest trusted configuration.",
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -1408,7 +2098,7 @@ export function ReviewAttentionPoliciesPage({
             <AlertDialogTitle>
               {t(
                 "pages.reviews.policies.leave_title",
-                "Discard unsaved policy changes?",
+                "Discard unsaved rule changes?",
               )}
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -1434,23 +2124,23 @@ export function ReviewAttentionPoliciesPage({
       </AlertDialog>
 
       <AlertDialog
-        open={pendingMode != null}
+        open={pendingDeleteRuleSetKey !== ""}
         onOpenChange={(open) => {
-          if (!open) setPendingMode(null)
+          if (!open) setPendingDeleteRuleSetKey("")
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
               {t(
-                "pages.reviews.policies.mode_title",
-                "Remove this override's gates?",
+                "pages.reviews.policies.rule_sets_delete_title",
+                "Delete this rule set?",
               )}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {t(
-                "pages.reviews.policies.mode_description",
-                "Inherit and disable modes cannot keep repository gates. This removes them from the draft.",
+                "pages.reviews.policies.rule_sets_delete_description",
+                "This permanently removes the rule set and all of its configured workflow moments from this draft. This action takes effect when you save.",
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -1460,9 +2150,12 @@ export function ReviewAttentionPoliciesPage({
             </AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              onClick={confirmModeChange}
+              onClick={deletePendingRuleSet}
             >
-              {t("pages.reviews.policies.remove_gates", "Remove gates")}
+              {t(
+                "pages.reviews.policies.rule_sets_delete_confirm",
+                "Delete rule set",
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1471,54 +2164,39 @@ export function ReviewAttentionPoliciesPage({
   )
 }
 
-function PolicyEditorCard({
+function RuleEditorCard({
   policy,
   policyIndex,
   policyPath,
   issues,
-  repository,
   agents,
   agentsLoading,
   agentsUnavailable,
   defaultAgentID,
-  catalog,
   nextEditorKey,
   onSelectAgent,
   onChange,
   onRemove,
-  onModeChange,
 }: {
-  policy: EditablePolicy
+  policy: ReviewAttentionRuleDraft
   policyIndex: number
   policyPath: string
   issues: readonly ReviewAttentionPolicyIssue[]
-  repository?: string
   agents: ReviewAttentionAgent[]
   agentsLoading: boolean
   agentsUnavailable: boolean
   defaultAgentID: string
-  catalog?: Parameters<typeof resolveReviewAttentionPolicy>[0]
   nextEditorKey: (prefix: string) => string
   onSelectAgent: (agentID: string) => void
-  onChange: (policy: EditablePolicy) => void
+  onChange: (policy: ReviewAttentionRuleDraft) => void
   onRemove: () => void
-  onModeChange: (mode: ReviewAttentionPolicyMode) => void
 }) {
   const { t } = useTranslation()
-  const repositoryPolicy = "mode" in policy ? policy : null
-  const gatesEditable =
-    repositoryPolicy == null ||
-    repositoryPolicy.mode === "overlay" ||
-    repositoryPolicy.mode === "replace"
-  const preview =
-    catalog != null && repository != null && policy.decisionPoint !== ""
-      ? resolveReviewAttentionPolicy(catalog, repository, policy.decisionPoint)
-      : null
+  const [addGateOpen, setAddGateOpen] = useState(false)
   const decisionPointIssue = findReviewAttentionPolicyIssue(
     issues,
     `${policyPath}.decisionPoint`,
   )
-  const modeIssue = findReviewAttentionPolicyIssue(issues, `${policyPath}.mode`)
   const gatesIssue = findReviewAttentionPolicyIssue(
     issues,
     `${policyPath}.gates`,
@@ -1533,20 +2211,26 @@ function PolicyEditorCard({
     })
   }
 
-  const addGate = () => {
+  const addGate = (kind: ReviewAttentionGateKind) => {
     onChange({
       ...policy,
       gates: [
         ...policy.gates,
-        createReviewAttentionGateDraft("zero", defaultAgentID, nextEditorKey),
+        createReviewAttentionStarterGate(
+          kind,
+          defaultAgentID,
+          policy.gates,
+          nextEditorKey,
+        ),
       ],
     })
+    setAddGateOpen(false)
   }
 
   return (
     <article
       aria-label={t("pages.reviews.policies.decision_aria", {
-        defaultValue: "Decision policy {{number}}",
+        defaultValue: "Attention rule {{number}}",
         number: policyIndex + 1,
       })}
       className="border-border bg-card min-w-0 space-y-4 rounded-xl border p-3 sm:p-4"
@@ -1554,7 +2238,7 @@ function PolicyEditorCard({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <div className="min-w-0 flex-1">
           <Label htmlFor={`${policy.editorKey}-decision`}>
-            {t("pages.reviews.policies.decision_point", "Decision point")}
+            {t("pages.reviews.policies.decision_point", "When this happens")}
           </Label>
           <Input
             id={`${policy.editorKey}-decision`}
@@ -1583,16 +2267,13 @@ function PolicyEditorCard({
             ))}
           </datalist>
           <p className="text-muted-foreground mt-1 text-xs">
-            {t(
-              "pages.reviews.policies.decision_point_help",
-              "Choose a known product decision or enter a custom workflow decision point.",
-            )}
+            {attentionDecisionPointHelp(policy.decisionPoint, t)}
           </p>
           {policy.decisionPoint === "pr_development.before_push" && (
             <p className="text-muted-foreground mt-1 text-xs">
               {t(
                 "pages.reviews.policies.before_push_owner_help",
-                "For a working-context gate here, select the same agent that owns this PR's local development. An owner mismatch fails closed before publication.",
+                "For a working-agent check here, select the same agent that owns this PR's local development. An owner mismatch fails closed before publication.",
               )}
             </p>
           )}
@@ -1601,40 +2282,12 @@ function PolicyEditorCard({
             issue={decisionPointIssue}
           />
         </div>
-        {repositoryPolicy != null && (
-          <div className="min-w-[180px]">
-            <Label htmlFor={`${policy.editorKey}-mode`}>
-              {t("pages.reviews.policies.override_mode", "Override mode")}
-            </Label>
-            <select
-              id={`${policy.editorKey}-mode`}
-              aria-invalid={modeIssue != null}
-              aria-describedby={
-                modeIssue == null ? undefined : `${policy.editorKey}-mode-error`
-              }
-              value={repositoryPolicy.mode}
-              onChange={(event) =>
-                onModeChange(event.target.value as ReviewAttentionPolicyMode)
-              }
-              className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 w-full rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
-            >
-              <option value="inherit">Inherit</option>
-              <option value="overlay">Overlay</option>
-              <option value="replace">Replace</option>
-              <option value="disable">Disable</option>
-            </select>
-            <ReviewAttentionFieldIssue
-              id={`${policy.editorKey}-mode-error`}
-              issue={modeIssue}
-            />
-          </div>
-        )}
         <Button
           type="button"
           variant="ghost"
           size="icon"
           aria-label={t("pages.reviews.policies.remove_decision", {
-            defaultValue: "Remove decision policy {{number}}",
+            defaultValue: "Remove attention rule {{number}}",
             number: policyIndex + 1,
           })}
           title={t("pages.reviews.policies.remove_decision_short", "Remove")}
@@ -1644,137 +2297,321 @@ function PolicyEditorCard({
         </Button>
       </div>
 
-      {repositoryPolicy != null && (
-        <p className="text-muted-foreground text-xs">
-          {modeDescription(repositoryPolicy.mode, t)}
-        </p>
-      )}
-
-      {gatesEditable && (
-        <div
-          className="space-y-3"
-          aria-describedby={
-            gatesIssue == null ? undefined : `${policy.editorKey}-gates-error`
-          }
-        >
-          <ReviewAttentionFieldIssue
-            id={`${policy.editorKey}-gates-error`}
-            issue={gatesIssue}
-          />
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <h3 className="text-sm font-semibold">
-                {t("pages.reviews.policies.gates", "Ordered gates")}
-              </h3>
-              <p className="text-muted-foreground text-xs">
-                {t(
-                  "pages.reviews.policies.gates_help",
-                  "Add two or more gates to evaluate the same decision in configured order.",
-                )}
-              </p>
-            </div>
-            <Button type="button" variant="outline" size="sm" onClick={addGate}>
-              <IconPlus className="size-4" />
-              {t("pages.reviews.policies.add_gate", "Add gate")}
-            </Button>
-          </div>
-          {policy.gates.length === 0 ? (
-            <p className="border-border text-muted-foreground rounded-lg border border-dashed p-4 text-center text-xs">
-              {t(
-                "pages.reviews.policies.no_gates",
-                "This decision currently has no gates and is a no-op.",
-              )}
-            </p>
-          ) : (
-            policy.gates.map((gate, gateIndex) => (
-              <GateEditor
-                key={gate.editorKey}
-                gate={gate}
-                gateIndex={gateIndex}
-                gateCount={policy.gates.length}
-                gatePath={`${policyPath}.gates[${gateIndex}]`}
-                issues={issues}
-                agents={agents}
-                agentsLoading={agentsLoading}
-                agentsUnavailable={agentsUnavailable}
-                defaultAgentID={defaultAgentID}
-                onSelectAgent={onSelectAgent}
-                onChange={(next) => updateGate(gate.editorKey, next)}
-                onMove={(nextIndex) =>
-                  onChange({
-                    ...policy,
-                    gates: reorderReviewAttentionGates(
-                      policy.gates,
-                      gateIndex,
-                      nextIndex,
-                    ),
-                  })
-                }
-                onRemove={() =>
-                  onChange({
-                    ...policy,
-                    gates: policy.gates.filter(
-                      (candidate) => candidate.editorKey !== gate.editorKey,
-                    ),
-                  })
-                }
-              />
-            ))
-          )}
-        </div>
-      )}
-
-      {preview != null && (
-        <div className="border-border bg-muted/35 rounded-lg border p-3">
-          <div className="flex flex-wrap items-center gap-2">
+      <div
+        className="space-y-3"
+        aria-describedby={
+          gatesIssue == null ? undefined : `${policy.editorKey}-gates-error`
+        }
+      >
+        <ReviewAttentionFieldIssue
+          id={`${policy.editorKey}-gates-error`}
+          issue={gatesIssue}
+        />
+        <div className="flex items-center justify-between gap-2">
+          <div>
             <h3 className="text-sm font-semibold">
-              {t(
-                "pages.reviews.policies.effective_preview",
-                "Effective repository policy",
-              )}
+              {t("pages.reviews.policies.gates", "Checks (run in order)")}
             </h3>
-            {preview.noop && <Badge variant="outline">No-op</Badge>}
-          </div>
-          {preview.entries.length === 0 ? (
-            <p className="text-muted-foreground mt-1 text-xs">
+            <p className="text-muted-foreground text-xs">
               {t(
-                "pages.reviews.policies.effective_empty",
-                "No gate will request attention for this decision.",
+                "pages.reviews.policies.gates_help",
+                "Each check decides whether PicoClaw should ask for your input. Add more only when you need multiple checks at the same moment.",
               )}
             </p>
-          ) : (
-            <ol
-              aria-label={t(
-                "pages.reviews.policies.effective_gate_order",
-                "Resolved gate order",
-              )}
-              className="mt-2 flex min-w-0 flex-wrap gap-2"
-            >
-              {preview.entries.map((entry) => (
-                <li
-                  key={`${entry.effectivePosition}:${entry.gate.id}`}
-                  aria-label={`${entry.effectivePosition}. ${entry.gate.id} ${entry.gate.kind} ${entry.action}`}
-                  className="border-border bg-background flex max-w-full min-w-0 flex-wrap items-center gap-2 rounded-md border px-2 py-1 text-xs"
-                >
-                  <span className="text-muted-foreground shrink-0">
-                    {entry.effectivePosition}.
-                  </span>
-                  <span className="min-w-0 font-mono break-all">
-                    {entry.gate.id}
-                  </span>
-                  <Badge variant="secondary" className="shrink-0">
-                    {entry.gate.kind}
-                  </Badge>
-                  <Badge variant="outline" className="shrink-0">
-                    {entry.action}
-                  </Badge>
-                </li>
-              ))}
-            </ol>
-          )}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAddGateOpen(true)}
+          >
+            <IconPlus className="size-4" />
+            {t("pages.reviews.policies.add_gate", "Add check")}
+          </Button>
         </div>
-      )}
+        {policy.gates.length === 0 ? (
+          <p className="border-border text-muted-foreground rounded-lg border border-dashed p-4 text-center text-xs">
+            {t(
+              "pages.reviews.policies.no_gates",
+              "No checks are configured, so this rule will not ask for attention.",
+            )}
+          </p>
+        ) : (
+          policy.gates.map((gate, gateIndex) => (
+            <GateEditor
+              key={gate.editorKey}
+              gate={gate}
+              gateIndex={gateIndex}
+              gateCount={policy.gates.length}
+              gatePath={`${policyPath}.gates[${gateIndex}]`}
+              issues={issues}
+              agents={agents}
+              agentsLoading={agentsLoading}
+              agentsUnavailable={agentsUnavailable}
+              defaultAgentID={defaultAgentID}
+              onSelectAgent={onSelectAgent}
+              onChange={(next) => updateGate(gate.editorKey, next)}
+              onMove={(nextIndex) =>
+                onChange({
+                  ...policy,
+                  gates: reorderReviewAttentionGates(
+                    policy.gates,
+                    gateIndex,
+                    nextIndex,
+                  ),
+                })
+              }
+              onRemove={() =>
+                onChange({
+                  ...policy,
+                  gates: policy.gates.filter(
+                    (candidate) => candidate.editorKey !== gate.editorKey,
+                  ),
+                })
+              }
+            />
+          ))
+        )}
+      </div>
+
+      <Dialog open={addGateOpen} onOpenChange={setAddGateOpen}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {t(
+                "pages.reviews.policies.add_check_title",
+                "How should PicoClaw decide?",
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              {t(
+                "pages.reviews.policies.add_check_description",
+                "Choose a starting point. You can edit its details after adding it.",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <CheckKindButton
+              title={t(
+                "pages.reviews.policies.check_working_title",
+                "Ask the agent already working on the PR",
+              )}
+              description={t(
+                "pages.reviews.policies.check_working_description",
+                "Uses the current development conversation and asks you only when the agent needs human intent.",
+              )}
+              disabled={
+                defaultAgentID === "" || agentsLoading || agentsUnavailable
+              }
+              onClick={() => addGate("ai_working_context")}
+            />
+            <CheckKindButton
+              title={t(
+                "pages.reviews.policies.check_isolated_title",
+                "Run a fresh AI check",
+              )}
+              description={t(
+                "pages.reviews.policies.check_isolated_description",
+                "Uses a separate private AI context without the development conversation.",
+              )}
+              disabled={
+                defaultAgentID === "" || agentsLoading || agentsUnavailable
+              }
+              onClick={() => addGate("ai_isolated_context")}
+            />
+            <CheckKindButton
+              title={t(
+                "pages.reviews.policies.check_fixed_title",
+                "Ask when a fixed condition matches",
+              )}
+              description={t(
+                "pages.reviews.policies.check_fixed_description",
+                "Starts with an always-ask confirmation; edit the condition and question after adding it.",
+              )}
+              onClick={() => addGate("deterministic")}
+            />
+          </div>
+          {(defaultAgentID === "" || agentsLoading || agentsUnavailable) && (
+            <p className="text-muted-foreground text-xs">
+              {t(
+                "pages.reviews.policies.ai_check_unavailable",
+                "AI check choices are available after the configured agent catalog loads.",
+              )}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAddGateOpen(false)}
+            >
+              {t("common.cancel", "Cancel")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </article>
+  )
+}
+
+function RepositoryAssignmentsPanel({
+  draft,
+  onChange,
+  onAdd,
+  onRemove,
+}: {
+  draft: ReviewAttentionPolicyDraft
+  onChange: (draft: ReviewAttentionPolicyDraft) => void
+  onAdd: () => void
+  onRemove: (assignmentKey: string) => void
+}) {
+  const { t } = useTranslation()
+  const defaultRuleSet = draft.ruleSets.find(
+    (ruleSet) => ruleSet.id === draft.defaultRuleSetID,
+  )
+
+  return (
+    <section
+      aria-labelledby="repository-rule-set-assignments-heading"
+      className="border-border bg-card rounded-xl border"
+    >
+      <div className="border-border flex flex-col gap-2 border-b p-3 sm:flex-row sm:items-start sm:justify-between sm:p-4">
+        <div>
+          <h2
+            id="repository-rule-set-assignments-heading"
+            className="text-sm font-semibold"
+          >
+            {t(
+              "pages.reviews.policies.rule_sets_assignments_heading",
+              "Repository assignments",
+            )}
+          </h2>
+          <p className="text-muted-foreground mt-1 text-xs/5">
+            {t("pages.reviews.policies.rule_sets_assignments_help", {
+              defaultValue:
+                "An assignment picks exactly one rule set. Repositories without an assignment follow the current default: {{name}}.",
+              name: defaultRuleSet?.name ?? draft.defaultRuleSetID,
+            })}
+          </p>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={onAdd}>
+          <IconPlus className="size-4" />
+          {t(
+            "pages.reviews.policies.rule_sets_assignments_add",
+            "Add assignment",
+          )}
+        </Button>
+      </div>
+      {draft.repositoryAssignments.length === 0 ? (
+        <p className="text-muted-foreground p-4 text-center text-xs/5">
+          {t(
+            "pages.reviews.policies.rule_sets_assignments_empty",
+            "No repository-specific assignments. Every repository follows the current default.",
+          )}
+        </p>
+      ) : (
+        <ul className="divide-border divide-y">
+          {draft.repositoryAssignments.map((assignment) => (
+            <li
+              key={assignment.editorKey}
+              className="grid min-w-0 gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,0.8fr)_auto] sm:items-center"
+            >
+              <span className="min-w-0 font-mono text-xs break-all">
+                {assignment.repository}
+              </span>
+              <div>
+                <Label
+                  htmlFor={`${assignment.editorKey}-rule-set`}
+                  className="sr-only"
+                >
+                  {t(
+                    "pages.reviews.policies.rule_sets_assignment_for_repository",
+                    {
+                      defaultValue: "Rule set for {{repository}}",
+                      repository: assignment.repository,
+                    },
+                  )}
+                </Label>
+                <select
+                  id={`${assignment.editorKey}-rule-set`}
+                  value={assignment.ruleSetID}
+                  onChange={(event) =>
+                    onChange({
+                      ...draft,
+                      repositoryAssignments: draft.repositoryAssignments.map(
+                        (candidate) =>
+                          candidate.editorKey === assignment.editorKey
+                            ? {
+                                ...candidate,
+                                ruleSetID: event.target.value,
+                              }
+                            : candidate,
+                      ),
+                    })
+                  }
+                  className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 w-full rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
+                >
+                  {draft.ruleSets.map((ruleSet) => (
+                    <option key={ruleSet.id} value={ruleSet.id}>
+                      {ruleSet.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={t(
+                  "pages.reviews.policies.rule_sets_remove_assignment",
+                  {
+                    defaultValue:
+                      "Remove {{repository}} assignment; it will follow the current default",
+                    repository: assignment.repository,
+                  },
+                )}
+                title={t(
+                  "pages.reviews.policies.rule_sets_remove_assignment_short",
+                  "Remove assignment; follow default",
+                )}
+                onClick={() => onRemove(assignment.editorKey)}
+              >
+                <IconTrash className="size-4" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function CheckKindButton({
+  title,
+  description,
+  disabled = false,
+  onClick,
+}: {
+  title: string
+  description: string
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      className="h-auto min-w-0 justify-start p-3 text-left whitespace-normal"
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span className="min-w-0">
+        <span className="block font-medium">{title}</span>
+        <span className="text-muted-foreground mt-1 block text-xs font-normal">
+          {description}
+        </span>
+      </span>
+    </Button>
   )
 }
 
@@ -1808,6 +2645,8 @@ function GateEditor({
   onRemove: () => void
 }) {
   const { t } = useTranslation()
+  const [pendingKind, setPendingKind] =
+    useState<ReviewAttentionGateKind | null>(null)
   const fieldID = (field: string) => `${gate.editorKey}-${field}`
   const fieldIssue = (field: string) =>
     findReviewAttentionPolicyIssue(issues, `${gatePath}.${field}`)
@@ -1827,6 +2666,27 @@ function GateEditor({
     !agents.some((agent) => agent.id === selectedAgentID)
       ? [...agents, { id: selectedAgentID, name: "" }]
       : agents
+  const applyKindChange = (nextKind: ReviewAttentionGateKind) => {
+    const converted = convertReviewAttentionGateKind(
+      gate,
+      nextKind,
+      defaultAgentID,
+    )
+    onChange(
+      gate.kind === "zero"
+        ? withReviewAttentionGateStarterDefaults(converted)
+        : converted,
+    )
+    setPendingKind(null)
+  }
+  const requestKindChange = (nextKind: ReviewAttentionGateKind) => {
+    if (nextKind === gate.kind) return
+    if (reviewAttentionKindChangeLosesDetails(gate.kind, nextKind)) {
+      setPendingKind(nextKind)
+      return
+    }
+    applyKindChange(nextKind)
+  }
   const gateKindHelp = {
     ai_working_context: t(
       "pages.reviews.policies.ai_working_context_help",
@@ -1842,37 +2702,50 @@ function GateEditor({
     ),
     zero: t(
       "pages.reviews.policies.zero_help",
-      "A zero gate is an explicit no-op. In an overlay it can tombstone a global gate with the same ID.",
+      "This is an explicit no-op check and will not ask for attention.",
     ),
   }[gate.kind]
   return (
     <fieldset className="border-border min-w-0 space-y-3 rounded-lg border p-3">
       <legend className="px-1 text-xs font-medium">
         {t("pages.reviews.policies.gate_number", {
-          defaultValue: "Gate {{number}}",
+          defaultValue: "Check {{number}}",
           number: gateIndex + 1,
         })}
       </legend>
       <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(190px,0.7fr)_auto] sm:items-end">
         <div>
           <Label htmlFor={fieldID("id")}>
-            {t("pages.reviews.policies.gate_id", "Gate ID")}
+            {t("pages.reviews.policies.gate_id", "Check ID")}
           </Label>
           <Input
             id={fieldID("id")}
             aria-invalid={idIssue != null}
-            aria-describedby={idIssue == null ? undefined : fieldID("id-error")}
+            aria-describedby={
+              idIssue == null
+                ? fieldID("id-help")
+                : `${fieldID("id-help")} ${fieldID("id-error")}`
+            }
             value={gate.id}
             onChange={(event) => onChange({ ...gate, id: event.target.value })}
             placeholder="ask_owner"
             spellCheck={false}
             autoComplete="off"
           />
+          <p
+            id={fieldID("id-help")}
+            className="text-muted-foreground mt-1 text-xs"
+          >
+            {t(
+              "pages.reviews.policies.rule_sets_check_id_help",
+              "Stable identifier for this check inside the rule set.",
+            )}
+          </p>
           <ReviewAttentionFieldIssue id={fieldID("id-error")} issue={idIssue} />
         </div>
         <div>
           <Label htmlFor={fieldID("kind")}>
-            {t("pages.reviews.policies.gate_type", "Gate type")}
+            {t("pages.reviews.policies.gate_type", "How to decide")}
           </Label>
           <select
             id={fieldID("kind")}
@@ -1882,20 +2755,34 @@ function GateEditor({
             }
             value={gate.kind}
             onChange={(event) =>
-              onChange(
-                convertReviewAttentionGateKind(
-                  gate,
-                  event.target.value as ReviewAttentionGateKind,
-                  defaultAgentID,
-                ),
-              )
+              requestKindChange(event.target.value as ReviewAttentionGateKind)
             }
             className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 w-full rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
           >
-            <option value="ai_working_context">AI · working context</option>
-            <option value="ai_isolated_context">AI · isolated context</option>
-            <option value="deterministic">Deterministic</option>
-            <option value="zero">Zero / no-op</option>
+            <option value="ai_working_context">
+              {t(
+                "pages.reviews.policies.gate_type_working",
+                "Ask the agent working on the PR",
+              )}
+            </option>
+            <option value="ai_isolated_context">
+              {t(
+                "pages.reviews.policies.gate_type_isolated",
+                "Run a fresh AI check",
+              )}
+            </option>
+            <option value="deterministic">
+              {t(
+                "pages.reviews.policies.gate_type_fixed",
+                "Match a fixed condition",
+              )}
+            </option>
+            <option value="zero">
+              {t(
+                "pages.reviews.policies.gate_type_zero",
+                "No action (advanced)",
+              )}
+            </option>
           </select>
           <ReviewAttentionFieldIssue
             id={fieldID("kind-error")}
@@ -1909,7 +2796,7 @@ function GateEditor({
             size="icon"
             aria-label={t(
               "pages.reviews.policies.move_gate_up",
-              "Move gate up",
+              "Move check up",
             )}
             disabled={gateIndex === 0}
             onClick={() => onMove(gateIndex - 1)}
@@ -1922,7 +2809,7 @@ function GateEditor({
             size="icon"
             aria-label={t(
               "pages.reviews.policies.move_gate_down",
-              "Move gate down",
+              "Move check down",
             )}
             disabled={gateIndex + 1 === gateCount}
             onClick={() => onMove(gateIndex + 1)}
@@ -1933,7 +2820,7 @@ function GateEditor({
             type="button"
             variant="ghost"
             size="icon"
-            aria-label={t("pages.reviews.policies.remove_gate", "Remove gate")}
+            aria-label={t("pages.reviews.policies.remove_gate", "Remove check")}
             onClick={onRemove}
           >
             <IconTrash className="size-4" />
@@ -2073,7 +2960,7 @@ function GateEditor({
               <Label htmlFor={fieldID("when")}>
                 {t(
                   "pages.reviews.policies.condition",
-                  "Deterministic condition",
+                  "Fixed condition (advanced)",
                 )}
               </Label>
               <Input
@@ -2127,6 +3014,49 @@ function GateEditor({
           />
         </>
       )}
+
+      <AlertDialog
+        open={pendingKind != null}
+        onOpenChange={(open) => {
+          if (!open) setPendingKind(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t(
+                "pages.reviews.policies.change_check_type_title",
+                "Change how this check decides?",
+              )}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                "pages.reviews.policies.change_check_type_description",
+                "This removes details used only by the current choice, such as its AI instructions or fixed condition. Those values will not be restored if you switch back.",
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {t(
+                "pages.reviews.policies.keep_check_type",
+                "Keep current choice",
+              )}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (pendingKind != null) applyKindChange(pendingKind)
+              }}
+            >
+              {t(
+                "pages.reviews.policies.confirm_check_type",
+                "Change check type",
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </fieldset>
   )
 }
@@ -2190,49 +3120,65 @@ function reviewAttentionIssueLocation(
   draft: ReviewAttentionPolicyDraft,
   path: string,
 ): string {
-  const globalMatch = /^global\[(\d+)](?:\.gates\[(\d+)])?(?:\.(\w+))?/.exec(
-    path,
-  )
-  if (globalMatch != null) {
-    const policyIndex = Number(globalMatch[1])
-    const policy = draft.global[policyIndex]
-    const parts = [
-      "Global",
-      policy?.decisionPoint || `decision ${policyIndex + 1}`,
-    ]
-    if (globalMatch[2] !== undefined) {
-      const gateIndex = Number(globalMatch[2])
-      parts.push(policy?.gates[gateIndex]?.id || `gate ${gateIndex + 1}`)
+  const ruleSetMatch =
+    /^ruleSets\[(\d+)](?:\.rules\[(\d+)])?(?:\.gates\[(\d+)])?(?:\.(\w+))?/.exec(
+      path,
+    )
+  if (ruleSetMatch != null) {
+    const ruleSetIndex = Number(ruleSetMatch[1])
+    const ruleSet = draft.ruleSets[ruleSetIndex]
+    const parts = [ruleSet?.name || `rule set ${ruleSetIndex + 1}`]
+    if (ruleSetMatch[2] !== undefined) {
+      const ruleIndex = Number(ruleSetMatch[2])
+      const rule = ruleSet?.rules[ruleIndex]
+      parts.push(rule?.decisionPoint || `workflow moment ${ruleIndex + 1}`)
+      if (ruleSetMatch[3] !== undefined) {
+        const gateIndex = Number(ruleSetMatch[3])
+        parts.push(rule?.gates[gateIndex]?.id || `check ${gateIndex + 1}`)
+      }
     }
-    if (globalMatch[3] !== undefined) parts.push(globalMatch[3])
+    if (ruleSetMatch[4] !== undefined)
+      parts.push(reviewAttentionIssueFieldLabel(ruleSetMatch[4]))
     return parts.join(" · ")
   }
 
-  const repositoryMatch =
-    /^repositories\[(\d+)](?:\.policies\[(\d+)])?(?:\.gates\[(\d+)])?(?:\.(\w+))?/.exec(
-      path,
-    )
-  if (repositoryMatch != null) {
-    const repositoryIndex = Number(repositoryMatch[1])
-    const repository = draft.repositories[repositoryIndex]
+  const assignmentMatch = /^repositoryAssignments\[(\d+)](?:\.(\w+))?/.exec(
+    path,
+  )
+  if (assignmentMatch != null) {
+    const assignmentIndex = Number(assignmentMatch[1])
+    const assignment = draft.repositoryAssignments[assignmentIndex]
     const parts = [
-      "Repository",
-      repository?.repository || `scope ${repositoryIndex + 1}`,
+      "Repository assignment",
+      assignment?.repository || `assignment ${assignmentIndex + 1}`,
     ]
-    if (repositoryMatch[2] !== undefined) {
-      const policyIndex = Number(repositoryMatch[2])
-      const policy = repository?.policies[policyIndex]
-      parts.push(policy?.decisionPoint || `decision ${policyIndex + 1}`)
-      if (repositoryMatch[3] !== undefined) {
-        const gateIndex = Number(repositoryMatch[3])
-        parts.push(policy?.gates[gateIndex]?.id || `gate ${gateIndex + 1}`)
-      }
-    }
-    const field = repositoryMatch[4]
-    if (field !== undefined) parts.push(field)
+    const field = assignmentMatch[2]
+    if (field !== undefined) parts.push(reviewAttentionIssueFieldLabel(field))
     return parts.join(" · ")
   }
-  return path === "catalog" ? "Policy catalog" : path
+  if (path === "catalog") return "Rule catalog"
+  if (path === "ruleSets") return "Rule sets"
+  if (path === "defaultRuleSetID") return "Current default"
+  if (path === "repositoryAssignments") return "Repository assignments"
+  return path
+}
+
+function reviewAttentionIssueFieldLabel(field: string): string {
+  const labels: Record<string, string> = {
+    agentID: "AI agent",
+    criteria: "AI criteria",
+    decisionPoint: "workflow moment",
+    gates: "checks",
+    id: "Check ID",
+    kind: "how to decide",
+    name: "permanent name",
+    questionsSource: "questions",
+    repository: "repository name",
+    ruleSetID: "rule set",
+    title: "attention title",
+    when: "fixed condition",
+  }
+  return labels[field] ?? field
 }
 
 function ReviewAttentionFieldIssue({
@@ -2248,6 +3194,91 @@ function ReviewAttentionFieldIssue({
       {issue.message}
     </p>
   )
+}
+
+function createReviewAttentionStarterGate(
+  kind: ReviewAttentionGateKind,
+  defaultAgentID: string,
+  existingGates: readonly ReviewAttentionGateDraft[],
+  nextEditorKey: (prefix: string) => string,
+): ReviewAttentionGateDraft {
+  const gate = createReviewAttentionGateDraft(
+    kind,
+    defaultAgentID,
+    nextEditorKey,
+  )
+  const baseID = {
+    ai_working_context: "ask_working_agent",
+    ai_isolated_context: "independent_check",
+    deterministic: "confirm_with_owner",
+    zero: "no_attention",
+  }[kind]
+  const usedIDs = new Set(existingGates.map((candidate) => candidate.id))
+  let id = baseID
+  for (let suffix = 2; usedIDs.has(id); suffix += 1) {
+    id = `${baseID}_${suffix}`
+  }
+  return withReviewAttentionGateStarterDefaults({ ...gate, id })
+}
+
+function reviewAttentionKindChangeLosesDetails(
+  currentKind: ReviewAttentionGateKind,
+  nextKind: ReviewAttentionGateKind,
+): boolean {
+  if (currentKind === nextKind || currentKind === "zero") return false
+  const currentIsAI =
+    currentKind === "ai_working_context" ||
+    currentKind === "ai_isolated_context"
+  const nextIsAI =
+    nextKind === "ai_working_context" || nextKind === "ai_isolated_context"
+  return !(currentIsAI && nextIsAI)
+}
+
+function withReviewAttentionGateStarterDefaults(
+  gate: ReviewAttentionGateDraft,
+): ReviewAttentionGateDraft {
+  switch (gate.kind) {
+    case "ai_working_context":
+    case "ai_isolated_context":
+      return {
+        ...gate,
+        criteria:
+          gate.criteria ||
+          "Ask only when the decision requires human intent or preference that cannot be inferred safely.",
+        title: gate.title || "Your input is needed",
+      }
+    case "deterministic":
+      return {
+        ...gate,
+        title: gate.title || "Confirmation needed",
+        questionsSource:
+          gate.questionsSource === "[]"
+            ? '["Is it okay to continue?"]'
+            : gate.questionsSource,
+      }
+    case "zero":
+      return gate
+  }
+}
+
+function attentionDecisionPointHelp(
+  value: string,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
+  const known = knownAttentionDecisionPoints.find(
+    (decisionPoint) => decisionPoint.value === value,
+  )
+  if (known == null) {
+    return t(
+      "pages.reviews.policies.decision_point_help",
+      "This is a custom workflow moment. Use its exact lowercase decision identifier.",
+    )
+  }
+  return t("pages.reviews.policies.known_decision_point_help", {
+    defaultValue: "{{label}} · internal identifier: {{identifier}}",
+    label: t(known.labelKey, known.label),
+    identifier: known.value,
+  })
 }
 
 function PolicyPageState({
@@ -2268,7 +3299,10 @@ function PolicyPageState({
   const { t } = useTranslation()
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
-      <PageHeader title={t("pages.reviews.title", "Pull request reviews")}>
+      <PageHeader
+        title={t("pages.reviews.policies.page_title", "Attention rules")}
+        className="h-auto min-h-14 flex-wrap gap-2 py-2 [&>div:last-child]:flex-wrap"
+      >
         {standalone ? (
           <Button type="button" variant="outline" onClick={onShowInbox}>
             <IconArrowDown className="size-4 rotate-90" />
@@ -2299,34 +3333,6 @@ function PolicyPageState({
   )
 }
 
-function modeDescription(
-  mode: ReviewAttentionPolicyMode,
-  t: ReturnType<typeof useTranslation>["t"],
-): string {
-  switch (mode) {
-    case "inherit":
-      return t(
-        "pages.reviews.policies.mode_inherit_help",
-        "Use the global decision policy unchanged.",
-      )
-    case "overlay":
-      return t(
-        "pages.reviews.policies.mode_overlay_help",
-        "Replace matching global gate IDs in place, then append new repository gates.",
-      )
-    case "replace":
-      return t(
-        "pages.reviews.policies.mode_replace_help",
-        "Use only this repository's ordered gates.",
-      )
-    case "disable":
-      return t(
-        "pages.reviews.policies.mode_disable_help",
-        "Request no attention for this repository and decision point.",
-      )
-  }
-}
-
 function collectReviewAttentionAgentIDs(
   draft: ReviewAttentionPolicyDraft | null,
 ): ReadonlySet<string> {
@@ -2343,11 +3349,24 @@ function collectReviewAttentionAgentIDs(
       }
     }
   }
-  for (const policy of draft.global) collect(policy.gates)
-  for (const repository of draft.repositories) {
-    for (const policy of repository.policies) collect(policy.gates)
+  for (const ruleSet of draft.ruleSets) {
+    for (const rule of ruleSet.rules) collect(rule.gates)
   }
   return ids
+}
+
+function createOpaqueRuleSetID(
+  ruleSets: readonly ReviewAttentionRuleSetDraft[],
+): string {
+  const used = new Set(ruleSets.map((ruleSet) => ruleSet.id))
+  for (;;) {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    const candidate = `ruleset_${Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("")}`
+    if (!used.has(candidate)) return candidate
+  }
 }
 
 function previousReviewAttentionAgentCursor(

@@ -92,8 +92,8 @@ const reviewsWorkNavItem: NavItem = {
   reviewView: "work",
 }
 
-const reviewsConfigurationNavItem: NavItem = {
-  title: "navigation.reviews_configuration",
+const reviewsAttentionRulesNavItem: NavItem = {
+  title: "navigation.reviews_attention_rules",
   url: "/reviews",
   icon: IconSettings,
   translateTitle: true,
@@ -206,7 +206,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       },
       {
         label: "navigation.reviews",
-        items: [reviewsWorkNavItem, reviewsConfigurationNavItem],
+        items: [reviewsWorkNavItem, reviewsAttentionRulesNavItem],
       },
     ]
   }, [channelItems])

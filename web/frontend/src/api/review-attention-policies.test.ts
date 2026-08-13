@@ -8,6 +8,7 @@ import {
 } from "@/api/review-attention-json"
 import {
   ReviewAttentionPoliciesAPIError,
+  type ReviewAttentionPolicyCatalog,
   getReviewAttentionPolicies,
   putReviewAttentionPolicies,
 } from "@/api/review-attention-policies"
@@ -19,36 +20,43 @@ vi.mock("@/api/http", () => ({
 const mockedLauncherFetch = vi.mocked(launcherFetch)
 
 const responseBody = `{
-  "global": {
-    "pr_development.before_push": [
-      {
-        "id": "deterministic",
-        "kind": "deterministic",
-        "when": "true",
-        "title": "Confirm",
-        "questions": {
-          "limit": 9007199254740993,
-          "decimal": 1.2300e+400,
-          "__proto__": {"constructor": 9007199254740995},
-          "Foo": "one",
-          "foo": "two"
-        }
+  "rule_sets": {
+    "default": {
+      "name": "Default",
+      "rules": {
+        "pr_development.before_push": [
+          {
+            "id": "deterministic",
+            "kind": "deterministic",
+            "when": "true",
+            "title": "Confirm",
+            "questions": {
+              "limit": 9007199254740993,
+              "decimal": 1.2300e+400,
+              "__proto__": {"constructor": 9007199254740995},
+              "Foo": "one",
+              "foo": "two"
+            }
+          }
+        ]
       }
-    ]
+    },
+    "quiet": {"name": "Quiet", "rules": {}}
   },
-  "repositories": {
-    "Acme/Widgets": {
-      "pr_development.before_push": {
-        "mode": "overlay",
-        "gates": [{"id": "skip", "kind": "zero"}]
-      },
-      "review.disabled": {"mode": "disable"}
-    }
-  },
+  "default_rule_set_id": "default",
+  "repository_assignments": {"Acme/Widgets": "quiet"},
   "catalog_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "config_revision": "opaque-config-1",
   "effects": {"gateway_effect": "applied"}
 }`
+
+function emptyCatalog(): ReviewAttentionPolicyCatalog {
+  return {
+    rule_sets: { default: { name: "Default", rules: {} } },
+    default_rule_set_id: "default",
+    repository_assignments: {},
+  }
+}
 
 function rawJSONResponse(
   body: BodyInit,
@@ -66,7 +74,7 @@ describe("review attention policies API", () => {
     mockedLauncherFetch.mockReset()
   })
 
-  it("gets the strict catalog without rounding arbitrary question numbers", async () => {
+  it("gets the strict reusable-set catalog without rounding question numbers", async () => {
     mockedLauncherFetch.mockResolvedValue(rawJSONResponse(responseBody))
 
     const snapshot = await getReviewAttentionPolicies()
@@ -75,7 +83,9 @@ describe("review attention policies API", () => {
       "/api/reviews/attention-policies",
       expect.anything(),
     )
-    const questions = snapshot.global["pr_development.before_push"][0].questions
+    const questions =
+      snapshot.rule_sets.default.rules["pr_development.before_push"][0]
+        .questions
     expect(questions).toBeDefined()
     expect(stringifyExactJSON(questions!)).toBe(
       '{"limit":9007199254740993,"decimal":1.2300e+400,"__proto__":{"constructor":9007199254740995},"Foo":"one","foo":"two"}',
@@ -84,9 +94,8 @@ describe("review attention policies API", () => {
     if (!isExactJSONObject(questions)) throw new Error("object expected")
     expect(Object.getPrototypeOf(questions)).toBeNull()
     expect(Object.hasOwn(questions, "__proto__")).toBe(true)
-    expect(snapshot.repositories["Acme/Widgets"]["review.disabled"]).toEqual({
-      mode: "disable",
-      gates: [],
+    expect(snapshot.repository_assignments).toEqual({
+      "Acme/Widgets": "quiet",
     })
     expect(snapshot.effects.gateway_effect).toBe("applied")
   })
@@ -99,12 +108,17 @@ describe("review attention policies API", () => {
           responseBody
             .replace("opaque-config-1", "opaque-config-2")
             .replace(/a{64}/, "b".repeat(64))
-            .replace("Confirm", "Confirm locally"),
+            .replace("Confirm", "Confirm locally")
+            .replace(
+              '"repository_assignments": {"Acme/Widgets": "quiet"}',
+              '"repository_assignments": {}',
+            ),
         ),
       )
     const snapshot = await getReviewAttentionPolicies()
-    snapshot.global["pr_development.before_push"][0].title = "Confirm locally"
-    delete snapshot.repositories["Acme/Widgets"]["review.disabled"]
+    snapshot.rule_sets.default.rules["pr_development.before_push"][0].title =
+      "Confirm locally"
+    delete snapshot.repository_assignments["Acme/Widgets"]
 
     const saved = await putReviewAttentionPolicies(
       snapshot,
@@ -123,17 +137,16 @@ describe("review attention policies API", () => {
     expect(body).toContain("9007199254740993")
     expect(body).toContain("9007199254740995")
     expect(body).not.toContain("9007199254740992")
-    expect(body).not.toContain("review.disabled")
-    expect(body).toContain('"global":{')
-    expect(body).toContain('"repositories":{')
+    expect(body).not.toContain("Acme/Widgets")
 
     const request = parseExactJSON(body)
     expect(isExactJSONObject(request)).toBe(true)
     if (!isExactJSONObject(request)) throw new Error("object expected")
     expect(Object.keys(request)).toEqual([
       "expected_config_revision",
-      "global",
-      "repositories",
+      "rule_sets",
+      "default_rule_set_id",
+      "repository_assignments",
     ])
   })
 
@@ -167,10 +180,7 @@ describe("review attention policies API", () => {
       rawJSONResponse('{"error":"config_revision_mismatch"}', 409),
     )
 
-    const promise = putReviewAttentionPolicies(
-      { global: {}, repositories: {} },
-      "stale-revision",
-    )
+    const promise = putReviewAttentionPolicies(emptyCatalog(), "stale-revision")
     await expect(promise).rejects.toMatchObject({
       name: "ReviewAttentionPoliciesAPIError",
       status: 409,
@@ -179,6 +189,22 @@ describe("review attention policies API", () => {
     await expect(promise).rejects.toBeInstanceOf(
       ReviewAttentionPoliciesAPIError,
     )
+    expect(mockedLauncherFetch).toHaveBeenCalledOnce()
+  })
+
+  it("preserves the explicit legacy migration bounds conflict", async () => {
+    mockedLauncherFetch.mockResolvedValue(
+      rawJSONResponse(
+        '{"error":"legacy_attention_policies_require_simplification"}',
+        409,
+      ),
+    )
+
+    await expect(getReviewAttentionPolicies()).rejects.toMatchObject({
+      name: "ReviewAttentionPoliciesAPIError",
+      status: 409,
+      code: "legacy_attention_policies_require_simplification",
+    })
     expect(mockedLauncherFetch).toHaveBeenCalledOnce()
   })
 
@@ -191,7 +217,7 @@ describe("review attention policies API", () => {
       "x".repeat(4095),
     ]) {
       await expect(
-        putReviewAttentionPolicies({ global: {}, repositories: {} }, revision),
+        putReviewAttentionPolicies(emptyCatalog(), revision),
       ).rejects.toMatchObject({
         status: 400,
         code: "expected_config_revision_required",
@@ -227,7 +253,12 @@ describe("review attention policies API", () => {
         '"effects": {"gateway_effect": "applied"}',
         '"effects": {"gateway_effect": "applied"}, "raw_config": true',
       ),
-      responseBody.replace('"global": {', '"global": null, "ignored": {'),
+      responseBody.replace('"rule_sets": {', '"rule_sets": null, "ignored": {'),
+      responseBody.replace(
+        '"name": "Default",',
+        '"name": "Default", "secret": true,',
+      ),
+      responseBody.replace('"rules": {', '"rules": null, "ignored": {'),
       responseBody.replace('"kind": "deterministic"', '"kind": "future"'),
       responseBody.replace(
         '"id": "deterministic"',
@@ -238,21 +269,17 @@ describe("review attention policies API", () => {
         '"gateway_effect": "future"',
       ),
       responseBody.replace(
-        '"kind": "deterministic",\n        "when": "true",\n        "title": "Confirm",',
-        '"kind": "ai_isolated_context",\n        "criteria": "Ask",\n        "title": "Ask",',
+        '"kind": "deterministic",\n            "when": "true",\n            "title": "Confirm",',
+        '"kind": "ai_isolated_context",\n            "criteria": "Ask",\n            "title": "Ask",',
       ),
       responseBody.replace(
         '"kind": "deterministic",',
-        '"kind": "deterministic",\n        "agent_id": "main",',
+        '"kind": "deterministic",\n            "agent_id": "main",',
       ),
       responseBody.replace('"kind": "deterministic"', '"kind": "zero"'),
       responseBody.replace(
-        '"mode": "overlay",\n        "gates": [{"id": "skip", "kind": "zero"}]',
-        '"mode": "overlay"',
-      ),
-      responseBody.replace(
-        '"review.disabled": {"mode": "disable"}',
-        '"review.disabled": {"mode": "disable", "gates": [{"id": "hidden", "kind": "zero"}]}',
+        '"repository_assignments": {"Acme/Widgets": "quiet"}',
+        '"repository_assignments": {"Acme/Widgets": null}',
       ),
     ]
     for (const body of malformed) {
@@ -267,7 +294,7 @@ describe("review attention policies API", () => {
     }
   })
 
-  it("rejects semantically invalid catalogs before editor hydration", async () => {
+  it("rejects semantically invalid reusable-set catalogs before hydration", async () => {
     const zero = (id: string) => ({ id, kind: "zero" })
     const working = (id: string, agentID: string) => ({
       id,
@@ -276,52 +303,91 @@ describe("review attention policies API", () => {
       criteria: "Ask only when owner intent is required.",
       title: "Owner input",
     })
+    const validDefault = { name: "Default", rules: {} }
     const malformed = [
-      semanticResponse({ Bad: [] }, {}),
-      semanticResponse({ "review.submitted": [zero("Bad")] }, {}),
+      semanticResponse({}, "default", {}),
       semanticResponse(
-        { "review.submitted": [zero("duplicate"), zero("duplicate")] },
+        { default: { name: "Renamed", rules: {} } },
+        "default",
         {},
       ),
-      semanticResponse({}, { "Acme/Widgets": {}, "acme/widgets": {} }),
+      semanticResponse(
+        { default: validDefault, Bad: { name: "Bad", rules: {} } },
+        "default",
+        {},
+      ),
       semanticResponse(
         {
-          "review.submitted": [
-            {
-              id: "deterministic",
-              kind: "deterministic",
-              when: "1_e2",
-              title: "Confirm",
-              questions: [],
-            },
-          ],
+          default: validDefault,
+          one: { name: "Same", rules: {} },
+          two: { name: "same", rules: {} },
         },
+        "default",
         {},
       ),
+      semanticResponse({ default: validDefault }, "missing", {}),
+      semanticResponse({ default: validDefault }, "default", {
+        invalid: "default",
+      }),
+      semanticResponse({ default: validDefault }, "default", {
+        "Acme/Widgets": "missing",
+      }),
       semanticResponse(
         {
-          "review.submitted": [
-            {
-              id: "deterministic",
-              kind: "deterministic",
-              when: "true",
-              title: "x".repeat((4 << 10) + 1),
-              questions: [],
-            },
-          ],
+          default: {
+            name: "Default",
+            rules: { Bad: [] },
+          },
         },
+        "default",
         {},
       ),
       semanticResponse(
-        { "review.submitted": [working("global", "main")] },
         {
-          "Acme/Widgets": {
-            "review.submitted": {
-              mode: "overlay",
-              gates: [working("repository", "reviewer")],
+          default: {
+            name: "Default",
+            rules: {
+              "review.submitted": [zero("duplicate"), zero("duplicate")],
             },
           },
         },
+        "default",
+        {},
+      ),
+      semanticResponse(
+        {
+          default: {
+            name: "Default",
+            rules: {
+              "review.submitted": [
+                {
+                  id: "deterministic",
+                  kind: "deterministic",
+                  when: "1_e2",
+                  title: "Confirm",
+                  questions: [],
+                },
+              ],
+            },
+          },
+        },
+        "default",
+        {},
+      ),
+      semanticResponse(
+        {
+          default: {
+            name: "Default",
+            rules: {
+              "review.submitted": [
+                working("one", "main"),
+                working("two", "reviewer"),
+              ],
+            },
+          },
+        },
+        "default",
+        {},
       ),
     ]
     for (const body of malformed) {
@@ -405,26 +471,37 @@ describe("review attention policies API", () => {
 
 function responseWithQuestions(questions: string): string {
   return `{
-    "global": {
-      "review.submitted": [{
-        "id": "deterministic",
-        "kind": "deterministic",
-        "when": "true",
-        "title": "Confirm",
-        "questions": ${questions}
-      }]
+    "rule_sets": {
+      "default": {
+        "name": "Default",
+        "rules": {
+          "review.submitted": [{
+            "id": "deterministic",
+            "kind": "deterministic",
+            "when": "true",
+            "title": "Confirm",
+            "questions": ${questions}
+          }]
+        }
+      }
     },
-    "repositories": {},
+    "default_rule_set_id": "default",
+    "repository_assignments": {},
     "catalog_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "config_revision": "opaque-config-1",
     "effects": {"gateway_effect": "applied"}
   }`
 }
 
-function semanticResponse(global: unknown, repositories: unknown): string {
+function semanticResponse(
+  ruleSets: unknown,
+  defaultRuleSetID: unknown,
+  repositoryAssignments: unknown,
+): string {
   return JSON.stringify({
-    global,
-    repositories,
+    rule_sets: ruleSets,
+    default_rule_set_id: defaultRuleSetID,
+    repository_assignments: repositoryAssignments,
     catalog_revision:
       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     config_revision: "opaque-config-1",

@@ -16,11 +16,14 @@ import {
   convertReviewAttentionGateKind,
   createReviewAttentionEditorKeyFactory,
   createReviewAttentionGateDraft,
-  createReviewAttentionGlobalPolicyDraft,
-  createReviewAttentionRepositoryDraft,
-  createReviewAttentionRepositoryPolicyDraft,
+  createReviewAttentionRepositoryAssignmentDraft,
+  createReviewAttentionRuleDraft,
+  createReviewAttentionRuleSetDraft,
+  duplicateReviewAttentionRuleSetDraft,
+  isReviewAttentionPolicyCatalogSemanticallyValid,
   reorderReviewAttentionGates,
   resolveReviewAttentionPolicy,
+  resolveReviewAttentionRuleSet,
   reviewAttentionConditionError,
   reviewAttentionPolicyDraftFromCatalog,
   validateReviewAttentionPolicyDraft,
@@ -61,49 +64,59 @@ function deterministicGate(
 
 function validDraft(): ReviewAttentionPolicyDraft {
   return {
-    global: [
+    ruleSets: [
       {
-        editorKey: "global-1",
-        decisionPoint: "pr_development.before_push",
-        gates: [
-          aiGate("gate-1", "working"),
-          aiGate("gate-2", "isolated", "ai_isolated_context", "reviewer"),
-          deterministicGate("gate-3", "confirm"),
-          { editorKey: "gate-4", id: "off", kind: "zero" },
-        ],
-      },
-      {
-        editorKey: "global-2",
-        decisionPoint: "review.empty",
-        gates: [],
-      },
-    ],
-    repositories: [
-      {
-        editorKey: "repository-1",
-        repository: "Acme/Widgets",
-        policies: [
+        editorKey: "set-default",
+        id: "default",
+        name: "Default",
+        rules: [
           {
-            editorKey: "repository-policy-1",
+            editorKey: "rule-default",
             decisionPoint: "pr_development.before_push",
-            mode: "overlay",
             gates: [
-              { editorKey: "gate-5", id: "isolated", kind: "zero" },
-              deterministicGate("gate-6", "repository_rule"),
+              aiGate("gate-1", "working"),
+              aiGate("gate-2", "isolated", "ai_isolated_context", "reviewer"),
+              deterministicGate("gate-3", "confirm"),
+              { editorKey: "gate-4", id: "off", kind: "zero" },
             ],
           },
           {
-            editorKey: "repository-policy-2",
-            decisionPoint: "review.ready",
-            mode: "disable",
+            editorKey: "rule-empty",
+            decisionPoint: "review.empty",
             gates: [],
           },
         ],
       },
       {
-        editorKey: "repository-2",
+        editorKey: "set-release",
+        id: "release",
+        name: "Release checks",
+        rules: [
+          {
+            editorKey: "rule-release",
+            decisionPoint: "review.ready",
+            gates: [deterministicGate("gate-5", "approve_release")],
+          },
+        ],
+      },
+      {
+        editorKey: "set-quiet",
+        id: "quiet",
+        name: "Quiet",
+        rules: [],
+      },
+    ],
+    defaultRuleSetID: "release",
+    repositoryAssignments: [
+      {
+        editorKey: "assignment-1",
+        repository: "Acme/Widgets",
+        ruleSetID: "default",
+      },
+      {
+        editorKey: "assignment-2",
         repository: "Empty/Policies",
-        policies: [],
+        ruleSetID: "quiet",
       },
     ],
   }
@@ -117,24 +130,24 @@ function issueCodes(draft: ReviewAttentionPolicyDraft) {
   )
 }
 
-describe("review attention policy draft model", () => {
-  it("creates deterministic stable editor keys and kind-specific defaults", () => {
+describe("review attention reusable-set draft model", () => {
+  it("creates deterministic keys and kind-specific starter drafts", () => {
     const nextKey = createReviewAttentionEditorKeyFactory(7)
-    expect(createReviewAttentionGlobalPolicyDraft(nextKey)).toEqual({
-      editorKey: "global-policy-8",
+    expect(createReviewAttentionRuleSetDraft(nextKey, "team", "Team")).toEqual({
+      editorKey: "rule-set-8",
+      id: "team",
+      name: "Team",
+      rules: [],
+    })
+    expect(createReviewAttentionRuleDraft(nextKey)).toEqual({
+      editorKey: "rule-9",
       decisionPoint: "",
       gates: [],
     })
-    expect(createReviewAttentionRepositoryDraft(nextKey)).toEqual({
-      editorKey: "repository-9",
+    expect(createReviewAttentionRepositoryAssignmentDraft(nextKey)).toEqual({
+      editorKey: "repository-assignment-10",
       repository: "",
-      policies: [],
-    })
-    expect(createReviewAttentionRepositoryPolicyDraft(nextKey)).toEqual({
-      editorKey: "repository-policy-10",
-      decisionPoint: "",
-      mode: "inherit",
-      gates: [],
+      ruleSetID: "",
     })
     expect(
       createReviewAttentionGateDraft("deterministic", "main", nextKey),
@@ -148,7 +161,44 @@ describe("review attention policy draft model", () => {
     })
   })
 
-  it("converts gate kinds without retaining forbidden fields and reorders immutably", () => {
+  it("duplicates content under a new immutable identity and regenerates every editor key", () => {
+    const source = validDraft().ruleSets[0]
+    const nextKey = createReviewAttentionEditorKeyFactory(20)
+    const copy = duplicateReviewAttentionRuleSetDraft(
+      source,
+      "default_copy",
+      "Default copy",
+      nextKey,
+    )
+
+    expect(copy).toMatchObject({
+      editorKey: "rule-set-21",
+      id: "default_copy",
+      name: "Default copy",
+    })
+    expect(copy.rules.map((rule) => rule.editorKey)).toEqual([
+      "rule-22",
+      "rule-27",
+    ])
+    expect(copy.rules[0].gates.map((gate) => gate.editorKey)).toEqual([
+      "gate-23",
+      "gate-24",
+      "gate-25",
+      "gate-26",
+    ])
+    expect(copy.rules[0].gates.map((gate) => gate.id)).toEqual(
+      source.rules[0].gates.map((gate) => gate.id),
+    )
+    expect(copy.rules[0].gates[0]).not.toBe(source.rules[0].gates[0])
+    expect(copy.rules[0].gates[0]).toMatchObject({
+      questionsSource: '{"issue":9007199254740993,"Foo":1,"foo":2}',
+    })
+    expect(copy).not.toHaveProperty("defaultRuleSetID")
+    expect(copy).not.toHaveProperty("repositoryAssignments")
+    expect(source.editorKey).toBe("set-default")
+  })
+
+  it("converts gate kinds without forbidden fields and reorders immutably", () => {
     const source = aiGate("stable-key", "ask")
     if (source.kind !== "ai_working_context") throw new Error("fixture")
     const deterministic = convertReviewAttentionGateKind(
@@ -180,67 +230,87 @@ describe("review attention policy draft model", () => {
     expect(reorderReviewAttentionGates(gates, -1, 2)).toEqual(gates)
   })
 
-  it("round-trips catalogs into keyed drafts without rounding question numbers", () => {
+  it("round-trips normalized catalogs without rounding question numbers", () => {
     const catalog: ReviewAttentionPolicyCatalog = {
-      global: {
-        "review.submitted": [
-          {
-            id: "exact",
-            kind: "deterministic",
-            when: "true",
-            title: "Exact",
-            questions: parseExactJSON(
-              '{"large":9007199254740993,"Foo":1,"foo":2}',
-            ),
+      rule_sets: {
+        default: {
+          name: "Default",
+          rules: {
+            "review.submitted": [
+              {
+                id: "exact",
+                kind: "deterministic",
+                when: "true",
+                title: "Exact",
+                questions: parseExactJSON(
+                  '{"large":9007199254740993,"Foo":1,"foo":2}',
+                ),
+              },
+            ],
+            "review.empty": [],
           },
-        ],
-        "review.empty": [],
+        },
+        quiet: { name: "Quiet", rules: {} },
       },
-      repositories: { "Empty/Policies": {} },
+      default_rule_set_id: "quiet",
+      repository_assignments: { "Empty/Policies": "default" },
     }
     const draft = reviewAttentionPolicyDraftFromCatalog(catalog)
     const keys = [
-      ...draft.global.map((policy) => policy.editorKey),
-      ...draft.global.flatMap((policy) =>
-        policy.gates.map((gate) => gate.editorKey),
+      ...draft.ruleSets.map((ruleSet) => ruleSet.editorKey),
+      ...draft.ruleSets.flatMap((ruleSet) =>
+        ruleSet.rules.map((rule) => rule.editorKey),
       ),
-      ...draft.repositories.map((repository) => repository.editorKey),
+      ...draft.ruleSets.flatMap((ruleSet) =>
+        ruleSet.rules.flatMap((rule) =>
+          rule.gates.map((gate) => gate.editorKey),
+        ),
+      ),
+      ...draft.repositoryAssignments.map((assignment) => assignment.editorKey),
     ]
     expect(new Set(keys).size).toBe(keys.length)
+    expect(draft.defaultRuleSetID).toBe("quiet")
     const validation = validateReviewAttentionPolicyDraft(draft, agents)
     expect(validation.issues).toEqual([])
     expect(validation.catalog).toBeDefined()
     const questions =
-      validation.catalog?.global["review.submitted"][0].questions
+      validation.catalog?.rule_sets.default.rules["review.submitted"][0]
+        .questions
     expect(stringifyExactJSON(questions!)).toBe(
       '{"large":9007199254740993,"Foo":1,"foo":2}',
     )
-    expect(validation.catalog?.global["review.empty"]).toEqual([])
-    expect(validation.catalog?.repositories["Empty/Policies"]).toEqual(
-      Object.create(null),
+    expect(validation.catalog?.rule_sets.default.rules["review.empty"]).toEqual(
+      [],
     )
+    expect(validation.catalog?.repository_assignments).toEqual({
+      "Empty/Policies": "default",
+    })
   })
 
-  it("compiles a complete mixed catalog and reports deterministic metrics", () => {
+  it("compiles a complete catalog and reports order-independent metrics", () => {
     const validation = validateReviewAttentionPolicyDraft(validDraft(), agents)
     expect(validation.valid).toBe(true)
     expect(validation.issues).toEqual([])
     expect(validation.metrics).toMatchObject({
+      ruleSets: 3,
       repositories: 2,
-      policies: 4,
-      gates: 6,
+      rules: 3,
+      gates: 5,
     })
     expect(validation.metrics.canonicalBytes).toBeGreaterThan(0)
     expect(validation.metrics.requestBytes).toBeGreaterThan(0)
-    expect(
-      validation.catalog?.repositories["Acme/Widgets"][
-        "pr_development.before_push"
-      ],
-    ).toMatchObject({ mode: "overlay" })
+    expect(validation.catalog).toMatchObject({
+      default_rule_set_id: "release",
+      repository_assignments: {
+        "Acme/Widgets": "default",
+        "Empty/Policies": "quiet",
+      },
+    })
 
     const reordered = validDraft()
-    reordered.global.reverse()
-    reordered.repositories.reverse()
+    reordered.ruleSets.reverse()
+    reordered.ruleSets[2].rules.reverse()
+    reordered.repositoryAssignments.reverse()
     const reorderedValidation = validateReviewAttentionPolicyDraft(
       reordered,
       agents,
@@ -253,40 +323,67 @@ describe("review attention policy draft model", () => {
     )
   })
 
-  it("returns stable field issues for collection, mode, gate, and agent failures", () => {
+  it("enforces built-in identity, immutable name, references, and unique names", () => {
     const draft = validDraft()
-    draft.global.push({
-      editorKey: "duplicate-global",
+    draft.ruleSets[0].name = "Renamed"
+    draft.ruleSets[1].id = "Bad"
+    draft.ruleSets[2].name = "release CHECKS"
+    draft.defaultRuleSetID = "missing"
+    draft.repositoryAssignments[0].ruleSetID = "missing"
+    draft.repositoryAssignments.push({
+      editorKey: "assignment-collision",
+      repository: "acme/widgets",
+      ruleSetID: "default",
+    })
+
+    expect(issueCodes(draft)).toEqual(
+      expect.objectContaining(
+        new Set([
+          "rule_set.default_name",
+          "rule_set.id_invalid",
+          "rule_set.name_duplicate",
+          "rule_set.default_reference",
+          "rule_set.assignment_reference",
+          "repository.case_collision",
+        ]),
+      ),
+    )
+
+    const missingBuiltIn = validDraft()
+    missingBuiltIn.ruleSets = missingBuiltIn.ruleSets.slice(1)
+    expect(issueCodes(missingBuiltIn).has("rule_set.default_missing")).toBe(
+      true,
+    )
+  })
+
+  it("returns stable field issues for rule, gate, text, and agent failures", () => {
+    const draft = validDraft()
+    const selected = draft.ruleSets[0]
+    selected.rules.push({
+      editorKey: "duplicate-rule",
       decisionPoint: "pr_development.before_push",
       gates: [],
     })
-    draft.repositories.push({
-      editorKey: "repository-collision",
-      repository: "acme/widgets",
-      policies: [],
-    })
-    draft.repositories[0].policies[0].gates = []
-    const working = draft.global[0].gates[0]
-    if (working.kind === "ai_working_context") working.agentID = "missing"
-    draft.global[0].gates.push(
+    selected.rules[0].gates.push(
       aiGate("conflict", "other", "ai_working_context", "reviewer"),
     )
-    draft.global[0].gates.push({
-      ...draft.global[0].gates[3],
-      editorKey: "duplicate",
+    selected.rules[0].gates.push({
+      editorKey: "duplicate-gate",
       id: "other",
+      kind: "zero",
     })
-    const deterministic = draft.global[0].gates[2]
-    if (deterministic.kind === "deterministic")
+    const working = selected.rules[0].gates[0]
+    if (working.kind === "ai_working_context") working.agentID = "missing"
+    const deterministic = selected.rules[0].gates[2]
+    if (deterministic.kind === "deterministic") {
       deterministic.questionsSource = "null"
+    }
 
     const codes = issueCodes(draft)
     expect(codes).toEqual(
       expect.objectContaining(
         new Set([
           "decision_point.duplicate",
-          "repository.case_collision",
-          "mode.gates_required",
           "gate.agent_unavailable",
           "gate.working_agent_conflict",
           "gate.id_duplicate",
@@ -308,7 +405,7 @@ describe("review attention policy draft model", () => {
 
   it("checks exact JSON, Unicode scalars, and encoded question bounds", () => {
     const invalid = validDraft()
-    const working = invalid.global[0].gates[0]
+    const working = invalid.ruleSets[0].rules[0].gates[0]
     if (working.kind !== "ai_working_context") throw new Error("fixture")
     working.title = "bad\ud800"
     working.questionsSource = '{"same":1,"same":2}'
@@ -324,8 +421,7 @@ describe("review attention policy draft model", () => {
     working.questionsSource = JSON.stringify(
       "<".repeat(Math.floor((128 << 10) / 6) + 1),
     )
-    codes = issueCodes(invalid)
-    expect(codes.has("gate.questions_invalid")).toBe(true)
+    expect(issueCodes(invalid).has("gate.questions_invalid")).toBe(true)
 
     working.questionsSource = `${" ".repeat(128 << 10)}{"ok":true}`
     expect(issueCodes(invalid).has("gate.questions_invalid")).toBe(false)
@@ -335,6 +431,39 @@ describe("review attention policy draft model", () => {
     expect(issueCodes(invalid).has("gate.text_invalid")).toBe(true)
     working.title = "\ufeff"
     expect(issueCodes(invalid).has("gate.text_invalid")).toBe(false)
+  })
+
+  it("checks rule-set name whitespace, Unicode, byte, and duplicate-ID constraints", () => {
+    const draft = validDraft()
+    draft.ruleSets[1].name = " Release checks "
+    draft.ruleSets[2].id = "release"
+    expect(issueCodes(draft)).toEqual(
+      expect.objectContaining(
+        new Set(["rule_set.name_invalid", "rule_set.id_duplicate"]),
+      ),
+    )
+
+    draft.ruleSets[1].name = "bad\ud800"
+    expect(issueCodes(draft).has("rule_set.name_invalid")).toBe(true)
+    draft.ruleSets[1].name = "x".repeat(129)
+    expect(issueCodes(draft).has("rule_set.name_invalid")).toBe(true)
+
+    draft.ruleSets[1].name = "İ"
+    draft.ruleSets[2].name = "i"
+    expect(issueCodes(draft).has("rule_set.name_duplicate")).toBe(true)
+  })
+
+  it("semantically validates the normalized transport catalog", () => {
+    const valid = validateReviewAttentionPolicyDraft(
+      validDraft(),
+      agents,
+    ).catalog
+    expect(valid).toBeDefined()
+    expect(isReviewAttentionPolicyCatalogSemanticallyValid(valid!)).toBe(true)
+
+    const invalid = structuredClone(valid!)
+    invalid.default_rule_set_id = "missing"
+    expect(isReviewAttentionPolicyCatalogSemanticallyValid(invalid)).toBe(false)
   })
 })
 
@@ -395,8 +524,8 @@ describe("review attention deterministic condition validation", () => {
   })
 })
 
-describe("review attention effective policy resolution", () => {
-  const globalGates: ReviewAttentionGate[] = [
+describe("review attention reusable-set resolution", () => {
+  const defaultGates: ReviewAttentionGate[] = [
     {
       id: "ask",
       kind: "ai_isolated_context",
@@ -408,150 +537,70 @@ describe("review attention effective policy resolution", () => {
     { id: "identity", kind: "zero" },
   ]
 
-  function catalog(
-    mode: "inherit" | "overlay" | "replace" | "disable",
-    gates: ReviewAttentionGate[] = [],
-  ): ReviewAttentionPolicyCatalog {
+  function catalog(): ReviewAttentionPolicyCatalog {
     return {
-      global: { "pr_development.before_push": globalGates },
-      repositories: {
-        "Acme/Widgets": {
-          "pr_development.before_push": { mode, gates },
+      rule_sets: {
+        default: {
+          name: "Default",
+          rules: { "pr_development.before_push": defaultGates },
         },
+        quiet: { name: "Quiet", rules: {} },
       },
+      default_rule_set_id: "quiet",
+      repository_assignments: { "Acme/Widgets": "default" },
     }
   }
 
-  it("resolves absent and explicit inheritance", () => {
-    const inherited = resolveReviewAttentionPolicy(
-      {
-        global: { "pr_development.before_push": globalGates },
-        repositories: {},
-      },
-      "unknown/repo",
-      "pr_development.before_push",
-    )
-    expect(inherited).toMatchObject({
-      mode: "inherit",
-      overrideConfigured: false,
-      noop: false,
+  it("selects an exact repository assignment or the current fallback", () => {
+    expect(
+      resolveReviewAttentionRuleSet(catalog(), "unknown/repo"),
+    ).toMatchObject({
+      ruleSetID: "quiet",
+      ruleSetName: "Quiet",
+      assigned: false,
     })
-    expect(inherited.entries.map((entry) => entry.action)).toEqual([
-      "inherited",
-      "inherited",
-    ])
-
-    const explicit = resolveReviewAttentionPolicy(
-      catalog("inherit"),
-      "acme/widgets",
-      "pr_development.before_push",
-    )
-    expect(explicit.overrideConfigured).toBe(true)
-    expect(explicit.mode).toBe("inherit")
-  })
-
-  it("overlays stable slots, records a zero tombstone, and appends new IDs", () => {
-    const result = resolveReviewAttentionPolicy(
-      catalog("overlay", [
-        { id: "ask", kind: "zero" },
-        {
-          id: "confirm",
-          kind: "deterministic",
-          when: "true",
-          title: "Confirm",
-          questions: parseExactJSON('["Continue?"]'),
-        },
-      ]),
-      "acme/widgets",
-      "pr_development.before_push",
-    )
-    expect(result.entries.map(({ id, action }) => ({ id, action }))).toEqual([
-      { id: "ask", action: "tombstoned" },
-      { id: "identity", action: "inherited" },
-      { id: "confirm", action: "appended" },
-    ])
-    expect(result.entries[0]).toMatchObject({
-      globalPosition: 1,
-      repositoryPosition: 1,
-      effectivePosition: 1,
+    expect(
+      resolveReviewAttentionRuleSet(catalog(), "acme/widgets"),
+    ).toMatchObject({
+      ruleSetID: "default",
+      ruleSetName: "Default",
+      assigned: true,
     })
   })
 
-  it("supports replace/disable and returns detached question values", () => {
-    const replacement: ReviewAttentionGate = {
-      id: "replacement",
-      kind: "ai_isolated_context",
-      agent_id: "main",
-      criteria: "Ask",
-      title: "Replacement",
-      questions: parseExactJSON('{"prompt":"Original"}'),
-    }
-    const replaced = resolveReviewAttentionPolicy(
-      catalog("replace", [replacement]),
+  it("previews the selected decision and returns detached question values", () => {
+    const selected = resolveReviewAttentionPolicy(
+      catalog(),
       "ACME/WIDGETS",
       "pr_development.before_push",
     )
-    expect(replaced.entries[0].action).toBe("selected")
-    expect(replaced.entries[0].effectivePosition).toBe(1)
-    const questions = replaced.effective[0].questions as ExactJSONObject
+    expect(selected).toMatchObject({
+      ruleSetID: "default",
+      assigned: true,
+      noop: false,
+    })
+    expect(selected.entries.map((entry) => entry.action)).toEqual([
+      "assigned",
+      "assigned",
+    ])
+    const questions = selected.effective[0].questions as ExactJSONObject
     questions.prompt = "Changed"
-    expect(stringifyExactJSON(replacement.questions!)).toBe(
-      '{"prompt":"Original"}',
+    expect(stringifyExactJSON(defaultGates[0].questions!)).toBe(
+      '{"prompt":"Choose"}',
     )
 
     expect(
       resolveReviewAttentionPolicy(
-        catalog("disable"),
-        "Acme/Widgets",
+        catalog(),
+        "unknown/repo",
         "pr_development.before_push",
       ),
-    ).toMatchObject({ mode: "disable", entries: [], effective: [], noop: true })
-  })
-
-  it("flags invalid effective overlays without changing valid source layers", () => {
-    const draft: ReviewAttentionPolicyDraft = {
-      global: [
-        {
-          editorKey: "global",
-          decisionPoint: "review.ready",
-          gates: [
-            aiGate("global-working", "global", "ai_working_context", "main"),
-          ],
-        },
-      ],
-      repositories: [
-        {
-          editorKey: "repository",
-          repository: "Acme/Widgets",
-          policies: [
-            {
-              editorKey: "policy",
-              decisionPoint: "review.ready",
-              mode: "overlay",
-              gates: [
-                aiGate(
-                  "local-working",
-                  "local",
-                  "ai_working_context",
-                  "reviewer",
-                ),
-              ],
-            },
-          ],
-        },
-      ],
-    }
-    expect(issueCodes(draft).has("effective.working_agent_conflict")).toBe(true)
-
-    draft.global[0].gates = Array.from({ length: 64 }, (_, index) => ({
-      editorKey: `zero-${index}`,
-      id: `g${index.toString().padStart(2, "0")}`,
-      kind: "zero" as const,
-    }))
-    draft.repositories[0].policies[0].gates = [
-      { editorKey: "new", id: "new", kind: "zero" },
-    ]
-    const codes = issueCodes(draft)
-    expect(codes.has("effective.gate_limit")).toBe(true)
+    ).toMatchObject({
+      ruleSetID: "quiet",
+      assigned: false,
+      entries: [],
+      effective: [],
+      noop: true,
+    })
   })
 })

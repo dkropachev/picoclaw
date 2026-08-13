@@ -10,8 +10,11 @@ import type {
   ReviewAttentionGate,
   ReviewAttentionGateKind,
   ReviewAttentionPolicyCatalog,
-  ReviewAttentionPolicyMode,
-  ReviewAttentionRepositoryPolicy,
+  ReviewAttentionRuleSet,
+} from "@/api/review-attention-policies"
+import {
+  reviewAttentionBuiltInRuleSetID,
+  reviewAttentionBuiltInRuleSetName,
 } from "@/api/review-attention-policies"
 
 export const reviewAttentionGateKinds = [
@@ -20,13 +23,6 @@ export const reviewAttentionGateKinds = [
   "deterministic",
   "zero",
 ] as const satisfies readonly ReviewAttentionGateKind[]
-
-export const reviewAttentionPolicyModes = [
-  "inherit",
-  "overlay",
-  "replace",
-  "disable",
-] as const satisfies readonly ReviewAttentionPolicyMode[]
 
 export type ReviewAttentionEditorKeyFactory = (prefix: string) => string
 
@@ -53,28 +49,29 @@ export type ReviewAttentionGateDraft =
       kind: "zero"
     })
 
-export interface ReviewAttentionGlobalPolicyDraft {
+export interface ReviewAttentionRuleDraft {
   editorKey: string
   decisionPoint: string
   gates: ReviewAttentionGateDraft[]
 }
 
-export interface ReviewAttentionRepositoryPolicyDraft {
+export interface ReviewAttentionRuleSetDraft {
   editorKey: string
-  decisionPoint: string
-  mode: ReviewAttentionPolicyMode
-  gates: ReviewAttentionGateDraft[]
+  id: string
+  name: string
+  rules: ReviewAttentionRuleDraft[]
 }
 
-export interface ReviewAttentionRepositoryDraft {
+export interface ReviewAttentionRepositoryAssignmentDraft {
   editorKey: string
   repository: string
-  policies: ReviewAttentionRepositoryPolicyDraft[]
+  ruleSetID: string
 }
 
 export interface ReviewAttentionPolicyDraft {
-  global: ReviewAttentionGlobalPolicyDraft[]
-  repositories: ReviewAttentionRepositoryDraft[]
+  ruleSets: ReviewAttentionRuleSetDraft[]
+  defaultRuleSetID: string
+  repositoryAssignments: ReviewAttentionRepositoryAssignmentDraft[]
 }
 
 export interface ReviewAttentionPolicyIssue {
@@ -84,8 +81,9 @@ export interface ReviewAttentionPolicyIssue {
 }
 
 export interface ReviewAttentionPolicyMetrics {
+  ruleSets: number
   repositories: number
-  policies: number
+  rules: number
   gates: number
   canonicalBytes: number
   requestBytes: number
@@ -98,18 +96,11 @@ export interface ReviewAttentionPolicyValidation {
   catalog?: ReviewAttentionPolicyCatalog
 }
 
-export type ReviewAttentionResolutionAction =
-  | "inherited"
-  | "replaced"
-  | "tombstoned"
-  | "appended"
-  | "selected"
+export type ReviewAttentionResolutionAction = "default" | "assigned"
 
 export interface ReviewAttentionResolutionEntry {
   id: string
   action: ReviewAttentionResolutionAction
-  globalPosition?: number
-  repositoryPosition?: number
   effectivePosition: number
   gate: ReviewAttentionGate
 }
@@ -117,19 +108,31 @@ export interface ReviewAttentionResolutionEntry {
 export interface ReviewAttentionPolicyResolution {
   repository: string
   decisionPoint: string
-  overrideConfigured: boolean
-  mode: ReviewAttentionPolicyMode
+  ruleSetID: string
+  ruleSetName: string
+  assigned: boolean
   entries: ReviewAttentionResolutionEntry[]
   effective: ReviewAttentionGate[]
   noop: boolean
 }
 
+export interface ReviewAttentionRuleSetResolution {
+  repository: string
+  ruleSetID: string
+  ruleSetName: string
+  assigned: boolean
+  ruleSet: ReviewAttentionRuleSet
+}
+
 const limits = {
+  ruleSets: 1025,
   decisionPoints: 128,
   repositories: 1024,
-  policies: 8192,
+  rules: 8192,
   gates: 8192,
   gatesPerPolicy: 64,
+  ruleSetIDBytes: 64,
+  ruleSetNameBytes: 128,
   decisionPointBytes: 128,
   repositoryBytes: 256,
   gateIDBytes: 64,
@@ -145,6 +148,7 @@ const limits = {
 
 const decisionPointPattern = /^[a-z][a-z0-9._-]{0,127}$/
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const ruleSetIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
 const gateIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
 const agentIDPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const expressionPathPattern = /^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/
@@ -187,27 +191,54 @@ export function createReviewAttentionGateDraft(
   }
 }
 
-export function createReviewAttentionGlobalPolicyDraft(
+export function createReviewAttentionRuleDraft(
   nextKey: ReviewAttentionEditorKeyFactory,
-): ReviewAttentionGlobalPolicyDraft {
-  return { editorKey: nextKey("global-policy"), decisionPoint: "", gates: [] }
+): ReviewAttentionRuleDraft {
+  return { editorKey: nextKey("rule"), decisionPoint: "", gates: [] }
 }
 
-export function createReviewAttentionRepositoryDraft(
+export function createReviewAttentionRuleSetDraft(
   nextKey: ReviewAttentionEditorKeyFactory,
-): ReviewAttentionRepositoryDraft {
-  return { editorKey: nextKey("repository"), repository: "", policies: [] }
+  id = "",
+  name = "",
+): ReviewAttentionRuleSetDraft {
+  return { editorKey: nextKey("rule-set"), id, name, rules: [] }
 }
 
-export function createReviewAttentionRepositoryPolicyDraft(
+export function createReviewAttentionRepositoryAssignmentDraft(
   nextKey: ReviewAttentionEditorKeyFactory,
-): ReviewAttentionRepositoryPolicyDraft {
+): ReviewAttentionRepositoryAssignmentDraft {
   return {
-    editorKey: nextKey("repository-policy"),
-    decisionPoint: "",
-    mode: "inherit",
-    gates: [],
+    editorKey: nextKey("repository-assignment"),
+    repository: "",
+    ruleSetID: "",
   }
+}
+
+export function duplicateReviewAttentionRuleSetDraft(
+  source: ReviewAttentionRuleSetDraft,
+  id: string,
+  name: string,
+  nextKey: ReviewAttentionEditorKeyFactory,
+): ReviewAttentionRuleSetDraft {
+  return {
+    editorKey: nextKey("rule-set"),
+    id,
+    name,
+    rules: source.rules.map((rule) => ({
+      editorKey: nextKey("rule"),
+      decisionPoint: rule.decisionPoint,
+      gates: rule.gates.map((gate) => cloneGateDraft(gate, nextKey)),
+    })),
+  }
+}
+
+// Go's strings.ToLower uses the simple lowercase mapping for U+0130 while
+// JavaScript applies its multi-code-point special case. Normalize that one
+// unconditional expansion before lowercasing so client/server name uniqueness
+// decisions stay aligned.
+export function foldReviewAttentionRuleSetName(value: string): string {
+  return value.replaceAll("\u0130", "I").toLowerCase()
 }
 
 export function reviewAttentionPolicyDraftFromCatalog(
@@ -215,35 +246,38 @@ export function reviewAttentionPolicyDraftFromCatalog(
   nextKey = createReviewAttentionEditorKeyFactory(),
 ): ReviewAttentionPolicyDraft {
   return {
-    global: Object.keys(catalog.global)
+    ruleSets: Object.keys(catalog.rule_sets)
       .sort(compareText)
-      .map((decisionPoint) => ({
-        editorKey: nextKey("global-policy"),
-        decisionPoint,
-        gates: catalog.global[decisionPoint].map((gate) =>
-          gateDraftFromValue(gate, nextKey),
-        ),
+      .map((id) => ({
+        editorKey: nextKey("rule-set"),
+        id,
+        name: catalog.rule_sets[id].name,
+        rules: Object.keys(catalog.rule_sets[id].rules)
+          .sort(compareText)
+          .map((decisionPoint) => ({
+            editorKey: nextKey("rule"),
+            decisionPoint,
+            gates: catalog.rule_sets[id].rules[decisionPoint].map((gate) =>
+              gateDraftFromValue(gate, nextKey),
+            ),
+          })),
       })),
-    repositories: Object.keys(catalog.repositories)
+    defaultRuleSetID: catalog.default_rule_set_id,
+    repositoryAssignments: Object.keys(catalog.repository_assignments)
       .sort(compareRepositories)
       .map((repository) => ({
-        editorKey: nextKey("repository"),
+        editorKey: nextKey("repository-assignment"),
         repository,
-        policies: Object.keys(catalog.repositories[repository])
-          .sort(compareText)
-          .map((decisionPoint) => {
-            const policy = catalog.repositories[repository][decisionPoint]
-            return {
-              editorKey: nextKey("repository-policy"),
-              decisionPoint,
-              mode: policy.mode,
-              gates: policy.gates.map((gate) =>
-                gateDraftFromValue(gate, nextKey),
-              ),
-            }
-          }),
+        ruleSetID: catalog.repository_assignments[repository],
       })),
   }
+}
+
+function cloneGateDraft(
+  gate: ReviewAttentionGateDraft,
+  nextKey: ReviewAttentionEditorKeyFactory,
+): ReviewAttentionGateDraft {
+  return { ...gate, editorKey: nextKey("gate") }
 }
 
 function gateDraftFromValue(
@@ -342,148 +376,164 @@ export function validateReviewAttentionPolicyDraft(
   availableAgentIDs: ReadonlySet<string>,
 ): ReviewAttentionPolicyValidation {
   const issues: ReviewAttentionPolicyIssue[] = []
-  const global = nullRecord<ReviewAttentionGate[]>()
-  const repositories =
-    nullRecord<Record<string, ReviewAttentionRepositoryPolicy>>()
-  const globalNames = new Set<string>()
-  let policyCount = draft.global.length
+  const ruleSets = nullRecord<ReviewAttentionRuleSet>()
+  const repositoryAssignments = nullRecord<string>()
+  const ruleSetIDs = new Set<string>()
+  const foldedNames = new Map<string, string>()
+  let ruleCount = 0
   let gateCount = 0
 
-  if (draft.global.length > limits.decisionPoints) {
+  if (draft.ruleSets.length > limits.ruleSets) {
     addIssue(
       issues,
-      "global",
-      "limit.global_decision_points",
-      `At most ${limits.decisionPoints} global decision points are allowed.`,
+      "ruleSets",
+      "limit.rule_sets",
+      `At most ${limits.ruleSets} rule sets are allowed.`,
     )
   }
-  if (draft.repositories.length > limits.repositories) {
+  if (draft.repositoryAssignments.length > limits.repositories) {
     addIssue(
       issues,
-      "repositories",
+      "repositoryAssignments",
       "limit.repositories",
       `At most ${limits.repositories} repositories are allowed.`,
     )
   }
 
-  draft.global.forEach((policy, policyIndex) => {
-    const path = `global[${policyIndex}]`
-    validateDecisionPoint(policy.decisionPoint, `${path}.decisionPoint`, issues)
-    if (globalNames.has(policy.decisionPoint)) {
+  draft.ruleSets.forEach((ruleSet, ruleSetIndex) => {
+    const path = `ruleSets[${ruleSetIndex}]`
+    validateRuleSetID(ruleSet.id, `${path}.id`, issues)
+    validateRuleSetName(ruleSet.name, `${path}.name`, issues)
+    if (ruleSetIDs.has(ruleSet.id)) {
       addIssue(
         issues,
-        `${path}.decisionPoint`,
-        "decision_point.duplicate",
-        "Decision points must be unique in the global catalog.",
+        `${path}.id`,
+        "rule_set.id_duplicate",
+        "Rule set IDs must be unique.",
       )
     }
-    globalNames.add(policy.decisionPoint)
-    gateCount += policy.gates.length
-    const gates = compileGateList(
-      policy.gates,
-      `${path}.gates`,
-      availableAgentIDs,
-      issues,
-    )
-    if (!(policy.decisionPoint in global)) global[policy.decisionPoint] = gates
+    ruleSetIDs.add(ruleSet.id)
+
+    const foldedName = foldReviewAttentionRuleSetName(ruleSet.name)
+    const previousName = foldedNames.get(foldedName)
+    if (previousName !== undefined) {
+      addIssue(
+        issues,
+        `${path}.name`,
+        "rule_set.name_duplicate",
+        `Rule set names ${JSON.stringify(previousName)} and ${JSON.stringify(ruleSet.name)} differ only by case.`,
+      )
+    } else {
+      foldedNames.set(foldedName, ruleSet.name)
+    }
+    if (
+      ruleSet.id === reviewAttentionBuiltInRuleSetID &&
+      ruleSet.name !== reviewAttentionBuiltInRuleSetName
+    ) {
+      addIssue(
+        issues,
+        `${path}.name`,
+        "rule_set.default_name",
+        `The built-in rule set must be named ${JSON.stringify(reviewAttentionBuiltInRuleSetName)}.`,
+      )
+    }
+    if (ruleSet.rules.length > limits.decisionPoints) {
+      addIssue(
+        issues,
+        `${path}.rules`,
+        "limit.rule_set_decision_points",
+        `At most ${limits.decisionPoints} workflow moments are allowed per rule set.`,
+      )
+    }
+
+    ruleCount += ruleSet.rules.length
+    const rules = nullRecord<ReviewAttentionGate[]>()
+    const decisionPoints = new Set<string>()
+    ruleSet.rules.forEach((rule, ruleIndex) => {
+      const rulePath = `${path}.rules[${ruleIndex}]`
+      validateDecisionPoint(
+        rule.decisionPoint,
+        `${rulePath}.decisionPoint`,
+        issues,
+      )
+      if (decisionPoints.has(rule.decisionPoint)) {
+        addIssue(
+          issues,
+          `${rulePath}.decisionPoint`,
+          "decision_point.duplicate",
+          "Workflow moments must be unique within a rule set.",
+        )
+      }
+      decisionPoints.add(rule.decisionPoint)
+      gateCount += rule.gates.length
+      const gates = compileGateList(
+        rule.gates,
+        `${rulePath}.gates`,
+        availableAgentIDs,
+        issues,
+      )
+      if (!(rule.decisionPoint in rules)) rules[rule.decisionPoint] = gates
+    })
+    if (!(ruleSet.id in ruleSets)) {
+      ruleSets[ruleSet.id] = { name: ruleSet.name, rules }
+    }
   })
 
+  if (!ruleSetIDs.has(reviewAttentionBuiltInRuleSetID)) {
+    addIssue(
+      issues,
+      "ruleSets",
+      "rule_set.default_missing",
+      `The built-in ${JSON.stringify(reviewAttentionBuiltInRuleSetName)} rule set is required.`,
+    )
+  }
+
+  validateRuleSetID(draft.defaultRuleSetID, "defaultRuleSetID", issues)
+  if (!ruleSetIDs.has(draft.defaultRuleSetID)) {
+    addIssue(
+      issues,
+      "defaultRuleSetID",
+      "rule_set.default_reference",
+      "The default rule set must reference an existing rule set.",
+    )
+  }
+
   const foldedRepositories = new Map<string, string>()
-  draft.repositories.forEach((repository, repositoryIndex) => {
-    const path = `repositories[${repositoryIndex}]`
-    validateRepository(repository.repository, `${path}.repository`, issues)
-    const folded = repository.repository.toLowerCase()
+  draft.repositoryAssignments.forEach((assignment, assignmentIndex) => {
+    const path = `repositoryAssignments[${assignmentIndex}]`
+    validateRepository(assignment.repository, `${path}.repository`, issues)
+    const folded = assignment.repository.toLowerCase()
     const previous = foldedRepositories.get(folded)
     if (previous !== undefined) {
       addIssue(
         issues,
         `${path}.repository`,
         "repository.case_collision",
-        `Repository names ${JSON.stringify(previous)} and ${JSON.stringify(repository.repository)} differ only by case.`,
+        `Repository names ${JSON.stringify(previous)} and ${JSON.stringify(assignment.repository)} differ only by case.`,
       )
     } else {
-      foldedRepositories.set(folded, repository.repository)
+      foldedRepositories.set(folded, assignment.repository)
     }
-    if (repository.policies.length > limits.decisionPoints) {
+    validateRuleSetID(assignment.ruleSetID, `${path}.ruleSetID`, issues)
+    if (!ruleSetIDs.has(assignment.ruleSetID)) {
       addIssue(
         issues,
-        `${path}.policies`,
-        "limit.repository_decision_points",
-        `At most ${limits.decisionPoints} decision points are allowed per repository.`,
+        `${path}.ruleSetID`,
+        "rule_set.assignment_reference",
+        "Repository assignments must reference an existing rule set.",
       )
     }
-    policyCount += repository.policies.length
-    const policies = nullRecord<ReviewAttentionRepositoryPolicy>()
-    const names = new Set<string>()
-    repository.policies.forEach((policy, policyIndex) => {
-      const policyPath = `${path}.policies[${policyIndex}]`
-      validateDecisionPoint(
-        policy.decisionPoint,
-        `${policyPath}.decisionPoint`,
-        issues,
-      )
-      if (
-        !(reviewAttentionPolicyModes as readonly string[]).includes(policy.mode)
-      ) {
-        addIssue(
-          issues,
-          `${policyPath}.mode`,
-          "mode.invalid",
-          "Repository policy mode is unsupported.",
-        )
-      }
-      if (names.has(policy.decisionPoint)) {
-        addIssue(
-          issues,
-          `${policyPath}.decisionPoint`,
-          "decision_point.duplicate",
-          "Decision points must be unique within a repository.",
-        )
-      }
-      names.add(policy.decisionPoint)
-      gateCount += policy.gates.length
-      if (
-        (policy.mode === "inherit" || policy.mode === "disable") &&
-        policy.gates.length !== 0
-      ) {
-        addIssue(
-          issues,
-          `${policyPath}.gates`,
-          "mode.gates_forbidden",
-          `${policy.mode} policies cannot configure gates.`,
-        )
-      }
-      if (
-        (policy.mode === "overlay" || policy.mode === "replace") &&
-        policy.gates.length === 0
-      ) {
-        addIssue(
-          issues,
-          `${policyPath}.gates`,
-          "mode.gates_required",
-          `${policy.mode} policies require at least one gate.`,
-        )
-      }
-      const gates = compileGateList(
-        policy.gates,
-        `${policyPath}.gates`,
-        availableAgentIDs,
-        issues,
-      )
-      if (!(policy.decisionPoint in policies)) {
-        policies[policy.decisionPoint] = { mode: policy.mode, gates }
-      }
-    })
-    if (!(repository.repository in repositories))
-      repositories[repository.repository] = policies
+    if (!(assignment.repository in repositoryAssignments)) {
+      repositoryAssignments[assignment.repository] = assignment.ruleSetID
+    }
   })
 
-  if (policyCount > limits.policies) {
+  if (ruleCount > limits.rules) {
     addIssue(
       issues,
       "catalog",
-      "limit.policies",
-      `At most ${limits.policies} policies are allowed.`,
+      "limit.rules",
+      `At most ${limits.rules} attention rules are allowed.`,
     )
   }
   if (gateCount > limits.gates) {
@@ -491,14 +541,17 @@ export function validateReviewAttentionPolicyDraft(
       issues,
       "catalog",
       "limit.gates",
-      `At most ${limits.gates} configured gates are allowed.`,
+      `At most ${limits.gates} configured checks are allowed.`,
     )
   }
 
-  const candidate: ReviewAttentionPolicyCatalog = { global, repositories }
-  validateEffectivePolicies(candidate, issues)
+  const candidate: ReviewAttentionPolicyCatalog = {
+    rule_sets: ruleSets,
+    default_rule_set_id: draft.defaultRuleSetID,
+    repository_assignments: repositoryAssignments,
+  }
   const measuredCanonicalBytes = safeEncodedBytes(
-    canonicalCatalogValue(candidate),
+    configCatalogValue(candidate),
     true,
   )
   const measuredRequestBytes = safeEncodedBytes(
@@ -532,8 +585,9 @@ export function validateReviewAttentionPolicyDraft(
     valid: issues.length === 0,
     issues,
     metrics: {
-      repositories: draft.repositories.length,
-      policies: policyCount,
+      ruleSets: draft.ruleSets.length,
+      repositories: draft.repositoryAssignments.length,
+      rules: ruleCount,
       gates: gateCount,
       canonicalBytes,
       requestBytes,
@@ -559,9 +613,8 @@ export function isReviewAttentionPolicyCatalogSemanticallyValid(
       if (gate.agent_id !== undefined) declaredAgents.add(gate.agent_id)
     }
   }
-  for (const gates of Object.values(catalog.global)) collect(gates)
-  for (const policies of Object.values(catalog.repositories)) {
-    for (const policy of Object.values(policies)) collect(policy.gates)
+  for (const ruleSet of Object.values(catalog.rule_sets)) {
+    for (const gates of Object.values(ruleSet.rules)) collect(gates)
   }
   try {
     return validateReviewAttentionPolicyDraft(
@@ -584,7 +637,7 @@ function compileGateList(
       issues,
       path,
       "limit.policy_gates",
-      `A policy may contain at most ${limits.gatesPerPolicy} gates.`,
+      `An attention rule may contain at most ${limits.gatesPerPolicy} checks.`,
     )
   }
   const seen = new Set<string>()
@@ -597,7 +650,7 @@ function compileGateList(
         issues,
         `${gatePath}.kind`,
         "gate.kind_invalid",
-        "Gate kind is unsupported.",
+        "Check type is unsupported.",
       )
     }
     if (seen.has(draft.id)) {
@@ -605,7 +658,7 @@ function compileGateList(
         issues,
         `${gatePath}.id`,
         "gate.id_duplicate",
-        "Gate IDs must be unique within a policy layer.",
+        "Check IDs must be unique within this rule layer.",
       )
     }
     seen.add(draft.id)
@@ -637,7 +690,7 @@ function compileGateList(
             issues,
             `${gatePath}.agentID`,
             "gate.working_agent_conflict",
-            "Working-context gates in one policy must use one agent.",
+            "Working-agent checks in one rule must use one agent.",
           )
         }
         workingAgent = draft.agentID
@@ -716,7 +769,7 @@ function parseQuestions(
           issues,
           path,
           "gate.questions_required",
-          "Deterministic questions must be a non-null JSON value.",
+          "Fixed-condition questions must be a non-null JSON value.",
         )
       else
         addIssue(
@@ -742,48 +795,28 @@ function parseQuestions(
   }
 }
 
-function validateEffectivePolicies(
+export function resolveReviewAttentionRuleSet(
   catalog: ReviewAttentionPolicyCatalog,
-  issues: ReviewAttentionPolicyIssue[],
-) {
-  Object.keys(catalog.repositories)
-    .sort(compareRepositories)
-    .forEach((repository) => {
-      const policies = catalog.repositories[repository]
-      Object.keys(policies)
-        .sort(compareText)
-        .forEach((decisionPoint) => {
-          const policy = policies[decisionPoint]
-          if (policy.mode !== "overlay") return
-          const resolution = resolveReviewAttentionPolicy(
-            catalog,
-            repository,
-            decisionPoint,
-          )
-          if (resolution.effective.length > limits.gatesPerPolicy) {
-            addIssue(
-              issues,
-              `repositories[${JSON.stringify(repository)}].${decisionPoint}`,
-              "effective.gate_limit",
-              `The effective policy exceeds ${limits.gatesPerPolicy} gates.`,
-            )
-          }
-          let workingAgent = ""
-          resolution.effective.forEach((gate) => {
-            if (gate.kind !== "ai_working_context") return
-            const agent = gate.agent_id ?? ""
-            if (workingAgent !== "" && workingAgent !== agent) {
-              addIssue(
-                issues,
-                `repositories[${JSON.stringify(repository)}].${decisionPoint}`,
-                "effective.working_agent_conflict",
-                "The effective working-context gates must use one agent.",
-              )
-            }
-            workingAgent = agent
-          })
-        })
-    })
+  repository: string,
+): ReviewAttentionRuleSetResolution {
+  const configuredRepository = Object.keys(catalog.repository_assignments).find(
+    (candidate) => candidate.toLowerCase() === repository.toLowerCase(),
+  )
+  const assigned = configuredRepository !== undefined
+  const ruleSetID = assigned
+    ? catalog.repository_assignments[configuredRepository]
+    : catalog.default_rule_set_id
+  const ruleSet = catalog.rule_sets[ruleSetID]
+  if (ruleSet === undefined) {
+    throw new TypeError("attention rule set reference is unavailable")
+  }
+  return {
+    repository,
+    ruleSetID,
+    ruleSetName: ruleSet.name,
+    assigned,
+    ruleSet: cloneRuleSet(ruleSet),
+  }
 }
 
 export function resolveReviewAttentionPolicy(
@@ -791,103 +824,37 @@ export function resolveReviewAttentionPolicy(
   repository: string,
   decisionPoint: string,
 ): ReviewAttentionPolicyResolution {
-  const global = (catalog.global[decisionPoint] ?? []).map(cloneGate)
-  const configuredRepository = Object.keys(catalog.repositories).find(
-    (candidate) => candidate.toLowerCase() === repository.toLowerCase(),
-  )
-  const policy =
-    configuredRepository === undefined
-      ? undefined
-      : catalog.repositories[configuredRepository][decisionPoint]
-  if (policy === undefined || policy.mode === "inherit") {
-    const entries = global.map((gate, index) => ({
-      id: gate.id,
-      action: "inherited" as const,
-      globalPosition: index + 1,
-      effectivePosition: index + 1,
-      gate,
-    }))
-    return resolution(
-      repository,
-      decisionPoint,
-      policy !== undefined,
-      "inherit",
-      entries,
-    )
-  }
-  if (policy.mode === "disable") {
-    return resolution(repository, decisionPoint, true, "disable", [])
-  }
-  if (policy.mode === "replace") {
-    const entries = policy.gates.map((source, index) => {
-      const gate = cloneGate(source)
-      return {
-        id: gate.id,
-        action: "selected" as const,
-        repositoryPosition: index + 1,
-        effectivePosition: index + 1,
-        gate,
-      }
-    })
-    return resolution(repository, decisionPoint, true, "replace", entries)
-  }
-  const entries: ReviewAttentionResolutionEntry[] = global.map(
+  const selected = resolveReviewAttentionRuleSet(catalog, repository)
+  const action: ReviewAttentionResolutionAction = selected.assigned
+    ? "assigned"
+    : "default"
+  const entries = (selected.ruleSet.rules[decisionPoint] ?? []).map(
     (gate, index) => ({
       id: gate.id,
-      action: "inherited",
-      globalPosition: index + 1,
+      action,
       effectivePosition: index + 1,
-      gate,
+      gate: cloneGate(gate),
     }),
   )
-  const positions = new Map(entries.map((entry, index) => [entry.id, index]))
-  policy.gates.forEach((source, repositoryIndex) => {
-    const gate = cloneGate(source)
-    const effectiveIndex = positions.get(gate.id)
-    if (effectiveIndex !== undefined) {
-      const previous = entries[effectiveIndex]
-      entries[effectiveIndex] = {
-        id: gate.id,
-        action:
-          previous.gate.kind !== "zero" && gate.kind === "zero"
-            ? "tombstoned"
-            : "replaced",
-        globalPosition: effectiveIndex + 1,
-        repositoryPosition: repositoryIndex + 1,
-        effectivePosition: effectiveIndex + 1,
-        gate,
-      }
-      return
-    }
-    positions.set(gate.id, entries.length)
-    entries.push({
-      id: gate.id,
-      action: "appended",
-      repositoryPosition: repositoryIndex + 1,
-      effectivePosition: entries.length + 1,
-      gate,
-    })
-  })
-  return resolution(repository, decisionPoint, true, "overlay", entries)
-}
-
-function resolution(
-  repository: string,
-  decisionPoint: string,
-  overrideConfigured: boolean,
-  mode: ReviewAttentionPolicyMode,
-  entries: ReviewAttentionResolutionEntry[],
-): ReviewAttentionPolicyResolution {
   const effective = entries.map((entry) => cloneGate(entry.gate))
   return {
     repository,
     decisionPoint,
-    overrideConfigured,
-    mode,
+    ruleSetID: selected.ruleSetID,
+    ruleSetName: selected.ruleSetName,
+    assigned: selected.assigned,
     entries,
     effective,
     noop: effective.every((gate) => gate.kind === "zero"),
   }
+}
+
+function cloneRuleSet(ruleSet: ReviewAttentionRuleSet): ReviewAttentionRuleSet {
+  const rules = nullRecord<ReviewAttentionGate[]>()
+  for (const [decisionPoint, gates] of Object.entries(ruleSet.rules)) {
+    rules[decisionPoint] = gates.map(cloneGate)
+  }
+  return { name: ruleSet.name, rules }
 }
 
 function cloneGate(gate: ReviewAttentionGate): ReviewAttentionGate {
@@ -994,7 +961,45 @@ function validateDecisionPoint(
       issues,
       path,
       "decision_point.invalid",
-      "Decision point must start with a lowercase letter and contain only lowercase letters, digits, dot, underscore, or hyphen (128 bytes maximum).",
+      "Workflow moment must start with a lowercase letter and contain only lowercase letters, digits, dot, underscore, or hyphen (128 bytes maximum).",
+    )
+  }
+}
+
+function validateRuleSetID(
+  value: string,
+  path: string,
+  issues: ReviewAttentionPolicyIssue[],
+) {
+  if (
+    !ruleSetIDPattern.test(value) ||
+    encodedLength(value) > limits.ruleSetIDBytes
+  ) {
+    addIssue(
+      issues,
+      path,
+      "rule_set.id_invalid",
+      "Rule set ID must start with a lowercase letter and contain only lowercase letters, digits, underscore, or hyphen (64 bytes maximum).",
+    )
+  }
+}
+
+function validateRuleSetName(
+  value: string,
+  path: string,
+  issues: ReviewAttentionPolicyIssue[],
+) {
+  if (
+    trimGoSpace(value) === "" ||
+    trimGoSpace(value) !== value ||
+    !validUnicode(value) ||
+    encodedLength(value) > limits.ruleSetNameBytes
+  ) {
+    addIssue(
+      issues,
+      path,
+      "rule_set.name_invalid",
+      `Rule set name must be trimmed, nonblank valid UTF-8, and at most ${limits.ruleSetNameBytes} bytes.`,
     )
   }
 }
@@ -1027,7 +1032,7 @@ function validateGateID(
       issues,
       path,
       "gate.id_invalid",
-      "Gate ID must start with a lowercase letter and contain only lowercase letters, digits, underscore, or hyphen (64 bytes maximum).",
+      "Check ID must start with a lowercase letter and contain only lowercase letters, digits, underscore, or hyphen (64 bytes maximum).",
     )
   }
 }
@@ -1043,7 +1048,7 @@ function validateAgentID(
       issues,
       path,
       "gate.agent_invalid",
-      "AI gates require an exact canonical agent ID.",
+      "AI checks require an exact configured agent ID.",
     )
   } else if (!agents.has(value)) {
     addIssue(
@@ -1129,82 +1134,54 @@ function gateValue(gate: ReviewAttentionGate): ExactJSONValue {
 }
 
 function catalogValue(catalog: ReviewAttentionPolicyCatalog): ExactJSONValue {
-  const globalEntries = Object.keys(catalog.global)
+  const ruleSetEntries = Object.keys(catalog.rule_sets)
     .sort(compareText)
-    .map(
-      (decisionPoint) =>
-        [decisionPoint, catalog.global[decisionPoint].map(gateValue)] as const,
-    )
-  const repositoryEntries = Object.keys(catalog.repositories)
+    .map((id) => {
+      const ruleSet = catalog.rule_sets[id]
+      return [
+        id,
+        createExactJSONObject([
+          ["name", ruleSet.name],
+          [
+            "rules",
+            createExactJSONObject(
+              Object.keys(ruleSet.rules)
+                .sort(compareText)
+                .map(
+                  (decisionPoint) =>
+                    [
+                      decisionPoint,
+                      ruleSet.rules[decisionPoint].map(gateValue),
+                    ] as const,
+                ),
+            ),
+          ],
+        ]),
+      ] as const
+    })
+  const assignmentEntries = Object.keys(catalog.repository_assignments)
     .sort(compareRepositories)
     .map(
       (repository) =>
-        [
-          repository,
-          createExactJSONObject(
-            Object.keys(catalog.repositories[repository])
-              .sort(compareText)
-              .map((decisionPoint) => {
-                const policy = catalog.repositories[repository][decisionPoint]
-                return [
-                  decisionPoint,
-                  createExactJSONObject([
-                    ["mode", policy.mode],
-                    ["gates", policy.gates.map(gateValue)],
-                  ]),
-                ] as const
-              }),
-          ),
-        ] as const,
+        [repository, catalog.repository_assignments[repository]] as const,
     )
   return createExactJSONObject([
-    ["global", createExactJSONObject(globalEntries)],
-    ["repositories", createExactJSONObject(repositoryEntries)],
+    ["rule_sets", createExactJSONObject(ruleSetEntries)],
+    ["default_rule_set_id", catalog.default_rule_set_id],
+    ["repository_assignments", createExactJSONObject(assignmentEntries)],
   ])
 }
 
-function canonicalCatalogValue(
+function configCatalogValue(
   catalog: ReviewAttentionPolicyCatalog,
 ): ExactJSONValue {
-  const global = Object.keys(catalog.global)
-    .sort(compareText)
-    .map((decisionPoint) =>
-      createExactJSONObject([
-        ["decision_point", decisionPoint],
-        ["gates", catalog.global[decisionPoint].map(gateValue)],
-      ]),
-    )
-  const repositories = Object.keys(catalog.repositories)
-    .sort(compareRepositories)
-    .map((repository) =>
-      createExactJSONObject([
-        ["repository", repository.toLowerCase()],
-        [
-          "policies",
-          Object.keys(catalog.repositories[repository])
-            .sort(compareText)
-            .map((decisionPoint) => {
-              const policy = catalog.repositories[repository][decisionPoint]
-              return createExactJSONObject([
-                ["decision_point", decisionPoint],
-                [
-                  "policy",
-                  createExactJSONObject([
-                    ["mode", policy.mode],
-                    ...(policy.gates.length === 0
-                      ? []
-                      : [["gates", policy.gates.map(gateValue)] as const]),
-                  ]),
-                ],
-              ])
-            }),
-        ],
-      ]),
-    )
+  const value = catalogValue(catalog) as Record<string, ExactJSONValue>
   return createExactJSONObject([
-    ["format", "review-attention-catalog/v1"],
-    ["global", global],
-    ["repositories", repositories],
+    ["rule_sets", value.rule_sets],
+    ["default_rule_set_id", value.default_rule_set_id],
+    ...(Object.keys(catalog.repository_assignments).length === 0
+      ? []
+      : [["repository_assignments", value.repository_assignments] as const]),
   ])
 }
 
@@ -1215,8 +1192,9 @@ function requestCatalogValue(
   const value = catalogValue(catalog) as Record<string, ExactJSONValue>
   return createExactJSONObject([
     ["expected_config_revision", revision],
-    ["global", value.global],
-    ["repositories", value.repositories],
+    ["rule_sets", value.rule_sets],
+    ["default_rule_set_id", value.default_rule_set_id],
+    ["repository_assignments", value.repository_assignments],
   ])
 }
 

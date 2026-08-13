@@ -1829,7 +1829,7 @@ describe("PR development page", () => {
       true,
     )
 
-    await user.click(screen.getByRole("button", { name: "Attention policies" }))
+    await user.click(screen.getByRole("button", { name: "Rule sets" }))
     expect(onSearchChange).toHaveBeenLastCalledWith({ view: "policies" })
   })
 

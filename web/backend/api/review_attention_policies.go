@@ -23,6 +23,7 @@ const (
 	reviewAttentionPolicyInvalidRequest          = "invalid_attention_policy_request"
 	reviewAttentionPoliciesInvalid               = "invalid_attention_policies"
 	reviewAttentionPolicySaveFailed              = "attention_policy_save_failed"
+	reviewAttentionLegacyMigrationExceedsBounds  = "legacy_attention_policies_require_simplification"
 	reviewAttentionConfigRevisionMismatch        = "config_revision_mismatch"
 	reviewAttentionExpectedRevisionRequired      = "expected_config_revision_required"
 )
@@ -32,16 +33,27 @@ type reviewAttentionPolicyEffects struct {
 }
 
 type reviewAttentionPoliciesResponse struct {
-	Global          map[string][]gatetypes.GateSpec                      `json:"global"`
-	Repositories    map[string]map[string]gatetypes.RepositoryGatePolicy `json:"repositories"`
-	CatalogRevision string                                               `json:"catalog_revision"`
-	ConfigRevision  string                                               `json:"config_revision"`
-	Effects         reviewAttentionPolicyEffects                         `json:"effects"`
+	RuleSets              map[string]config.ReviewAttentionRuleSet `json:"rule_sets"`
+	DefaultRuleSetID      string                                   `json:"default_rule_set_id"`
+	RepositoryAssignments map[string]string                        `json:"repository_assignments"`
+	CatalogRevision       string                                   `json:"catalog_revision"`
+	ConfigRevision        string                                   `json:"config_revision"`
+	Effects               reviewAttentionPolicyEffects             `json:"effects"`
 }
 
 type reviewAttentionPoliciesPutRequest struct {
-	ExpectedConfigRevision *string `json:"expected_config_revision"`
-	config.ReviewAttentionConfig
+	ExpectedConfigRevision *string                                  `json:"expected_config_revision"`
+	RuleSets               map[string]config.ReviewAttentionRuleSet `json:"rule_sets"`
+	DefaultRuleSetID       string                                   `json:"default_rule_set_id"`
+	RepositoryAssignments  map[string]string                        `json:"repository_assignments"`
+}
+
+func (request reviewAttentionPoliciesPutRequest) attentionConfig() config.ReviewAttentionConfig {
+	return config.ReviewAttentionConfig{
+		RuleSets:              request.RuleSets,
+		DefaultRuleSetID:      request.DefaultRuleSetID,
+		RepositoryAssignments: request.RepositoryAssignments,
+	}
 }
 
 func (h *Handler) handleGetReviewAttentionPolicies(
@@ -145,7 +157,16 @@ func (h *Handler) handlePutReviewAttentionPolicies(
 		return
 	}
 
-	cfg.Reviews.Attention = request.ReviewAttentionConfig
+	candidate := request.attentionConfig()
+	if !reviewAttentionRuleSetIdentitiesAreImmutable(cfg.Reviews.Attention, candidate) {
+		writeReviewAPIError(
+			w,
+			http.StatusUnprocessableEntity,
+			reviewAttentionPoliciesInvalid,
+		)
+		return
+	}
+	cfg.Reviews.Attention = candidate
 	source, err := validateReviewAttentionPolicyConfiguration(cfg)
 	if err != nil {
 		writeReviewAPIError(
@@ -158,7 +179,7 @@ func (h *Handler) handlePutReviewAttentionPolicies(
 
 	revision, err := h.saveReviewAttention(
 		h.configPath,
-		request.ReviewAttentionConfig,
+		candidate,
 		currentRevision,
 	)
 	if errors.Is(err, config.ErrConfigRevisionMismatch) {
@@ -178,6 +199,40 @@ func (h *Handler) handlePutReviewAttentionPolicies(
 		return
 	}
 	writeReviewAttentionPoliciesJSON(w, cfg, source, revision)
+}
+
+func reviewAttentionRuleSetIdentitiesAreImmutable(
+	current config.ReviewAttentionConfig,
+	candidate config.ReviewAttentionConfig,
+) bool {
+	normalized, err := current.NamedRuleSets()
+	if err != nil {
+		return false
+	}
+	for id, previous := range normalized.RuleSets {
+		next, exists := candidate.RuleSets[id]
+		if exists && next.Name != previous.Name {
+			return false
+		}
+		if exists {
+			continue
+		}
+		if id == config.DefaultReviewAttentionRuleSetID ||
+			id == candidate.DefaultRuleSetID ||
+			reviewAttentionRuleSetIsAssigned(candidate.RepositoryAssignments, id) {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewAttentionRuleSetIsAssigned(assignments map[string]string, id string) bool {
+	for _, assigned := range assignments {
+		if assigned == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) handleReviewAttentionPoliciesMethodNotAllowed(
@@ -259,9 +314,9 @@ func decodeReviewAttentionPolicyRequest(
 	}
 	var envelope map[string]json.RawMessage
 	if err = json.Unmarshal(raw, &envelope); err != nil ||
-		explicitNullReviewAttentionCollection(envelope, "global") ||
-		explicitNullReviewAttentionCollection(envelope, "repositories") ||
-		explicitNullReviewAttentionPolicyGates(envelope) {
+		explicitNullReviewAttentionCollection(envelope, "rule_sets") ||
+		explicitNullReviewAttentionCollection(envelope, "repository_assignments") ||
+		explicitNullReviewAttentionRuleSetRules(envelope) {
 		writeReviewAPIError(
 			w,
 			http.StatusBadRequest,
@@ -306,35 +361,38 @@ func explicitNullReviewAttentionCollection(
 	return false
 }
 
-func explicitNullReviewAttentionPolicyGates(
+func explicitNullReviewAttentionRuleSetRules(
 	envelope map[string]json.RawMessage,
 ) bool {
-	var repositoriesRaw json.RawMessage
+	var ruleSetsRaw json.RawMessage
 	for key, raw := range envelope {
-		if foldAgentJSONKey(key) == foldAgentJSONKey("repositories") {
-			repositoriesRaw = raw
+		if foldAgentJSONKey(key) == foldAgentJSONKey("rule_sets") {
+			ruleSetsRaw = raw
 			break
 		}
 	}
-	if repositoriesRaw == nil {
+	if ruleSetsRaw == nil {
 		return false
 	}
 
-	var repositories map[string]json.RawMessage
-	if err := json.Unmarshal(repositoriesRaw, &repositories); err != nil {
+	var ruleSets map[string]json.RawMessage
+	if err := json.Unmarshal(ruleSetsRaw, &ruleSets); err != nil {
 		return false
 	}
-	for _, policiesRaw := range repositories {
-		var policies map[string]json.RawMessage
-		if err := json.Unmarshal(policiesRaw, &policies); err != nil {
+	for _, setRaw := range ruleSets {
+		var set map[string]json.RawMessage
+		if err := json.Unmarshal(setRaw, &set); err != nil {
 			continue
 		}
-		for _, policyRaw := range policies {
-			var policy map[string]json.RawMessage
-			if err := json.Unmarshal(policyRaw, &policy); err != nil {
-				continue
-			}
-			if explicitNullReviewAttentionCollection(policy, "gates") {
+		if explicitNullReviewAttentionCollection(set, "rules") {
+			return true
+		}
+		var rules map[string]json.RawMessage
+		if err := json.Unmarshal(set["rules"], &rules); err != nil {
+			continue
+		}
+		for _, gates := range rules {
+			if bytes.Equal(bytes.TrimSpace(gates), []byte("null")) {
 				return true
 			}
 		}
@@ -361,13 +419,9 @@ func reviewAttentionQuestionsExactKeySubtree(
 	if !strings.EqualFold(foldedKey, "questions") {
 		return false
 	}
-	// Global gates live at global.<decision-point>[]. Repository gates live at
-	// repositories.<repository>.<decision-point>.gates[]. A decision point or
-	// repository named "questions" must not switch its typed children into
-	// arbitrary-map semantics.
-	return (len(path) == 3 && strings.EqualFold(path[0], "global") && path[2] == "[]") ||
-		(len(path) == 5 && strings.EqualFold(path[0], "repositories") &&
-			strings.EqualFold(path[3], "gates") && path[4] == "[]")
+	// Named gates live at rule_sets.<id>.rules.<decision-point>[].
+	return len(path) == 5 && strings.EqualFold(path[0], "rule_sets") &&
+		strings.EqualFold(path[2], "rules") && path[4] == "[]"
 }
 
 func newReviewAttentionPolicySource(
@@ -379,9 +433,24 @@ func newReviewAttentionPolicySource(
 	if err := cfg.Reviews.Validate(); err != nil {
 		return nil, err
 	}
-	return reviews.NewConfigAttentionPolicySource(
-		cfg.Reviews.Attention.Global,
-		cfg.Reviews.Attention.Repositories,
+	if !cfg.Reviews.Attention.UsesNamedRuleSets() {
+		return reviews.NewConfigAttentionPolicySource(
+			cfg.Reviews.Attention.Global,
+			cfg.Reviews.Attention.Repositories,
+		)
+	}
+	attention, err := cfg.Reviews.Attention.NamedRuleSets()
+	if err != nil {
+		return nil, err
+	}
+	sets := make(map[string]reviews.NamedAttentionRuleSet, len(attention.RuleSets))
+	for id, set := range attention.RuleSets {
+		sets[id] = reviews.NamedAttentionRuleSet{Name: set.Name, Rules: set.Rules}
+	}
+	return reviews.NewNamedConfigAttentionPolicySource(
+		sets,
+		attention.DefaultRuleSetID,
+		attention.RepositoryAssignments,
 	)
 }
 
@@ -415,20 +484,25 @@ func writeReviewAttentionPoliciesJSON(
 	source *reviews.ConfigAttentionPolicySource,
 	configRevision string,
 ) {
-	attention := cfg.Reviews.Attention
-	if attention.Global == nil {
-		attention.Global = make(map[string][]gatetypes.GateSpec)
-	}
-	if attention.Repositories == nil {
-		attention.Repositories = make(
-			map[string]map[string]gatetypes.RepositoryGatePolicy,
-		)
+	attention, err := cfg.Reviews.Attention.NamedRuleSets()
+	if err != nil {
+		if errors.Is(err, config.ErrReviewAttentionLegacyMigrationExceedsBounds) {
+			writeReviewAPIError(
+				w,
+				http.StatusConflict,
+				reviewAttentionLegacyMigrationExceedsBounds,
+			)
+			return
+		}
+		writeReviewAPIError(w, http.StatusInternalServerError, reviewAttentionPoliciesUnavailable)
+		return
 	}
 	writeReviewJSON(w, http.StatusOK, reviewAttentionPoliciesResponse{
-		Global:          attention.Global,
-		Repositories:    attention.Repositories,
-		CatalogRevision: source.CatalogRevision(),
-		ConfigRevision:  configRevision,
+		RuleSets:              attention.RuleSets,
+		DefaultRuleSetID:      attention.DefaultRuleSetID,
+		RepositoryAssignments: attention.RepositoryAssignments,
+		CatalogRevision:       source.CatalogRevision(),
+		ConfigRevision:        configRevision,
 		Effects: reviewAttentionPolicyEffects{
 			GatewayEffect: agentEffectsForConfig(cfg).GatewayEffect,
 		},

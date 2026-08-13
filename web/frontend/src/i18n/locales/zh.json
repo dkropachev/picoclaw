@@ -12,7 +12,7 @@
     "tools": "工具",
     "reviews": "PR 审查",
     "reviews_work": "拉取请求工作",
-    "reviews_configuration": "配置",
+    "reviews_attention_rules": "规则集",
     "events": "事件",
     "mcp": "MCP 服务器",
     "services": "服务",

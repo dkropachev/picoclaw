@@ -314,9 +314,7 @@ describe("ReviewsPage", () => {
       onSearchChange,
     )
 
-    await user.click(
-      await screen.findByRole("button", { name: "Attention policies" }),
-    )
+    await user.click(await screen.findByRole("button", { name: "Rule sets" }))
     expect(onSearchChange).toHaveBeenCalledWith({ view: "policies" })
   })
 

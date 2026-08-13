@@ -5,6 +5,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,62 @@ func TestEventAutomationRejectsInvalidConfiguredAttentionBeforeStorage(
 	}
 	if _, statErr := os.Stat(databasePath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("Stat(%q) error = %v, want os.ErrNotExist", databasePath, statErr)
+	}
+}
+
+func TestConfiguredReviewAttentionKeepsOversizedLegacyMigrationActive(t *testing.T) {
+	attention := config.ReviewAttentionConfig{
+		Global: map[string][]workflows.GateSpec{
+			"review.ready": make([]workflows.GateSpec, 9),
+		},
+		Repositories: make(
+			map[string]map[string]workflows.RepositoryGatePolicy,
+			config.MaxReviewAttentionRepositories,
+		),
+	}
+	for index := range attention.Global["review.ready"] {
+		attention.Global["review.ready"][index] = workflows.GateSpec{
+			ID:   fmt.Sprintf("global_%d", index),
+			Kind: workflows.GateZero,
+		}
+	}
+	for index := range config.MaxReviewAttentionRepositories {
+		attention.Repositories[fmt.Sprintf("owner/repository-%d", index)] = map[string]workflows.RepositoryGatePolicy{
+			"review.ready": {
+				Mode: workflows.GatePolicyOverlay,
+				Gates: []workflows.GateSpec{
+					{ID: fmt.Sprintf("repository_%d", index), Kind: workflows.GateZero},
+				},
+			},
+		}
+	}
+	_, migrationErr := attention.NamedRuleSets()
+	if !errors.Is(migrationErr, config.ErrReviewAttentionLegacyMigrationExceedsBounds) {
+		t.Fatalf("NamedRuleSets() error = %v, want migration bounds", migrationErr)
+	}
+
+	source, err := configuredReviewAttentionPolicySourceForConfig(attention)
+	if err != nil {
+		t.Fatalf("configuredReviewAttentionPolicySourceForConfig() error = %v", err)
+	}
+	var snapshot reviews.AttentionPolicySnapshot
+	err = source.WithReviewAttentionPolicy(
+		context.Background(),
+		reviews.AttentionPolicySelector{
+			Repository: "owner/repository-1023", DecisionPoint: "review.ready",
+		},
+		func(_ context.Context, selected reviews.AttentionPolicySnapshot) error {
+			snapshot = selected
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("WithReviewAttentionPolicy() error = %v", err)
+	}
+	if len(snapshot.Global) != 9 || snapshot.Repository == nil ||
+		len(snapshot.Repository.Gates) != 1 ||
+		snapshot.Repository.Gates[0].ID != "repository_1023" {
+		t.Fatalf("selected legacy snapshot = %#v", snapshot)
 	}
 }
 

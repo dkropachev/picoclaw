@@ -14,14 +14,35 @@ func configuredReviewAttentionPolicySource(
 	if cfg == nil {
 		return nil, fmt.Errorf("review attention configuration is required")
 	}
-	source, err := reviews.NewConfigAttentionPolicySource(
-		cfg.Reviews.Attention.Global,
-		cfg.Reviews.Attention.Repositories,
-	)
+	source, err := configuredReviewAttentionPolicySourceForConfig(cfg.Reviews.Attention)
 	if err != nil {
 		return nil, fmt.Errorf("validate review attention policies: %w", err)
 	}
 	return source, nil
+}
+
+func configuredReviewAttentionPolicySourceForConfig(
+	attention config.ReviewAttentionConfig,
+) (*reviews.ConfigAttentionPolicySource, error) {
+	if !attention.UsesNamedRuleSets() {
+		return reviews.NewConfigAttentionPolicySource(
+			attention.Global,
+			attention.Repositories,
+		)
+	}
+	normalized, err := attention.NamedRuleSets()
+	if err != nil {
+		return nil, err
+	}
+	sets := make(map[string]reviews.NamedAttentionRuleSet, len(normalized.RuleSets))
+	for id, set := range normalized.RuleSets {
+		sets[id] = reviews.NamedAttentionRuleSet{Name: set.Name, Rules: set.Rules}
+	}
+	return reviews.NewNamedConfigAttentionPolicySource(
+		sets,
+		normalized.DefaultRuleSetID,
+		normalized.RepositoryAssignments,
+	)
 }
 
 func validateConfiguredReviewAttentionAgents(

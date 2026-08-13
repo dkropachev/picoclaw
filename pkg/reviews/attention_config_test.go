@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -206,6 +208,127 @@ func TestConfigAttentionPolicySourceResolvesEveryRepositoryModeAndNoop(t *testin
 			}
 		})
 	}
+}
+
+func TestNamedConfigAttentionPolicySourceSharesAssignmentsAndScopesRevisions(t *testing.T) {
+	defaultRules := map[string][]workflows.GateSpec{
+		"review.ready": {{
+			ID: "default_check", Kind: workflows.GateDeterministic,
+			When: "true", Title: "Default", Questions: []any{"Continue?"},
+		}},
+	}
+	strictRules := map[string][]workflows.GateSpec{
+		"review.ready": {{
+			ID: "strict_check", Kind: workflows.GateAIIsolatedContext,
+			AgentID: "reviewer", Criteria: "Ask", Title: "Strict",
+		}},
+	}
+	ruleSets := map[string]NamedAttentionRuleSet{
+		"default": {Name: "Default", Rules: defaultRules},
+		"strict":  {Name: "Strict", Rules: strictRules},
+		"unused": {
+			Name: "Unused",
+			Rules: map[string][]workflows.GateSpec{
+				"review.other": {{
+					ID: "working", Kind: workflows.GateAIWorkingContext,
+					AgentID: "main", Criteria: "Ask", Title: "Working",
+				}},
+			},
+		},
+	}
+	assignments := map[string]string{
+		"Acme/One": "strict",
+		"Acme/Two": "strict",
+	}
+	source, err := NewNamedConfigAttentionPolicySource(ruleSets, "default", assignments)
+	require.NoError(t, err)
+	require.Equal(t, []string{"main", "reviewer"}, source.AgentIDs())
+	require.Equal(t, []string{"main"}, source.WorkingContextAgentIDs())
+
+	unassigned := captureConfigAttentionSnapshot(t, source, AttentionPolicySelector{
+		Repository: "acme/other", DecisionPoint: "review.ready",
+	})
+	require.Equal(t, "default_check", unassigned.Global[0].ID)
+	require.Nil(t, unassigned.Repository)
+
+	first := captureConfigAttentionSnapshot(t, source, AttentionPolicySelector{
+		Repository: "acme/one", DecisionPoint: "review.ready",
+	})
+	second := captureConfigAttentionSnapshot(t, source, AttentionPolicySelector{
+		Repository: "ACME/TWO", DecisionPoint: "review.ready",
+	})
+	require.Equal(t, "strict_check", first.Global[0].ID)
+	require.Equal(t, "strict_check", second.Global[0].ID)
+	require.NotEqual(t, first.Revision, second.Revision)
+
+	first.Global[0].Criteria = "mutated"
+	detached := captureConfigAttentionSnapshot(t, source, AttentionPolicySelector{
+		Repository: "acme/one", DecisionPoint: "review.ready",
+	})
+	require.Equal(t, "Ask", detached.Global[0].Criteria)
+
+	changedDefault := cloneAttentionPolicyTestGlobal(defaultRules)
+	changedDefault["review.ready"][0].Title = "Changed default"
+	changedSets := map[string]NamedAttentionRuleSet{
+		"default": {Name: "Default", Rules: changedDefault},
+		"strict":  {Name: "Strict", Rules: strictRules},
+		"unused":  ruleSets["unused"],
+	}
+	changed, err := NewNamedConfigAttentionPolicySource(changedSets, "default", assignments)
+	require.NoError(t, err)
+	changedAssigned := captureConfigAttentionSnapshot(t, changed, AttentionPolicySelector{
+		Repository: "acme/one", DecisionPoint: "review.ready",
+	})
+	require.Equal(t, detached.Revision, changedAssigned.Revision)
+	require.NotEqual(t, source.CatalogRevision(), changed.CatalogRevision())
+
+	renamedUnused := map[string]NamedAttentionRuleSet{
+		"default": ruleSets["default"],
+		"strict":  ruleSets["strict"],
+		"unused":  {Name: "Renamed unused", Rules: ruleSets["unused"].Rules},
+	}
+	renamed, err := NewNamedConfigAttentionPolicySource(renamedUnused, "default", assignments)
+	require.NoError(t, err)
+	require.NotEqual(t, source.CatalogRevision(), renamed.CatalogRevision())
+	require.Equal(
+		t,
+		detached.Revision,
+		captureConfigAttentionSnapshot(t, renamed, AttentionPolicySelector{
+			Repository: "acme/one", DecisionPoint: "review.ready",
+		}).Revision,
+	)
+
+	reassigned, err := NewNamedConfigAttentionPolicySource(ruleSets, "default", map[string]string{
+		"Acme/One": "default",
+		"Acme/Two": "strict",
+	})
+	require.NoError(t, err)
+	require.NotEqual(
+		t,
+		detached.Revision,
+		captureConfigAttentionSnapshot(t, reassigned, AttentionPolicySelector{
+			Repository: "acme/one", DecisionPoint: "review.ready",
+		}).Revision,
+	)
+
+	selectedStrict, err := NewNamedConfigAttentionPolicySource(ruleSets, "strict", map[string]string{
+		"Acme/Default": "default",
+	})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"strict_check",
+		captureConfigAttentionSnapshot(t, selectedStrict, AttentionPolicySelector{
+			Repository: "acme/unassigned", DecisionPoint: "review.ready",
+		}).Global[0].ID,
+	)
+	require.Equal(
+		t,
+		"default_check",
+		captureConfigAttentionSnapshot(t, selectedStrict, AttentionPolicySelector{
+			Repository: "acme/default", DecisionPoint: "review.ready",
+		}).Global[0].ID,
+	)
 }
 
 func TestConfigAttentionPolicySourceRejectsInvalidCatalogs(t *testing.T) {

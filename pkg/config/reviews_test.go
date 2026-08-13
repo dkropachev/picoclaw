@@ -610,3 +610,269 @@ func validReviewAIGate(id string, kind gatetypes.GateKind, agentID string) gatet
 		},
 	}
 }
+
+func TestReviewAttentionNamedRuleSetsValidateAndProjectEmptyDefault(t *testing.T) {
+	normalized, err := (ReviewAttentionConfig{}).NamedRuleSets()
+	require.NoError(t, err)
+	require.Equal(t, DefaultReviewAttentionRuleSetID, normalized.DefaultRuleSetID)
+	require.Equal(t, DefaultReviewAttentionRuleSetName, normalized.RuleSets["default"].Name)
+	require.Empty(t, normalized.RuleSets["default"].Rules)
+	require.NotNil(t, normalized.RepositoryAssignments)
+	require.NoError(t, normalized.Validate())
+
+	configured := ReviewAttentionConfig{
+		RuleSets: map[string]ReviewAttentionRuleSet{
+			"default": {Name: "Default", Rules: map[string][]gatetypes.GateSpec{}},
+			"strict": {
+				Name: "Strict review",
+				Rules: map[string][]gatetypes.GateSpec{
+					"review.ready": {{ID: "off", Kind: gatetypes.GateZero}},
+				},
+			},
+		},
+		DefaultRuleSetID: "strict",
+		RepositoryAssignments: map[string]string{
+			"Acme/Default": "default",
+			"Acme/Strict":  "strict",
+		},
+	}
+	require.NoError(t, configured.Validate())
+	unicodeNames, err := cloneNamedReviewAttentionConfig(configured)
+	require.NoError(t, err)
+	strictSet := unicodeNames.RuleSets["strict"]
+	strictSet.Name = "Σ"
+	unicodeNames.RuleSets["strict"] = strictSet
+	unicodeNames.RuleSets["unicode"] = ReviewAttentionRuleSet{
+		Name: "ς", Rules: map[string][]gatetypes.GateSpec{},
+	}
+	require.NoError(t, unicodeNames.Validate(), "match JavaScript toLowerCase rather than EqualFold")
+	unicodeSet := unicodeNames.RuleSets["unicode"]
+	unicodeSet.Name = "σ"
+	unicodeNames.RuleSets["unicode"] = unicodeSet
+	require.ErrorContains(t, unicodeNames.Validate(), "differ only by case")
+	strictSet.Name = "İ"
+	unicodeNames.RuleSets["strict"] = strictSet
+	unicodeSet.Name = "i"
+	unicodeNames.RuleSets["unicode"] = unicodeSet
+	require.ErrorContains(t, unicodeNames.Validate(), "differ only by case")
+
+	tests := []struct {
+		name   string
+		mutate func(*ReviewAttentionConfig)
+		want   string
+	}{
+		{
+			name: "mixed legacy representation",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				candidate.Global = map[string][]gatetypes.GateSpec{}
+			},
+			want: "cannot mix",
+		},
+		{
+			name: "built-in removed",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				delete(candidate.RuleSets, "default")
+			},
+			want: `rule_sets["default"]`,
+		},
+		{
+			name: "built-in renamed",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				set := candidate.RuleSets["default"]
+				set.Name = "Renamed"
+				candidate.RuleSets["default"] = set
+			},
+			want: `must have name "Default"`,
+		},
+		{
+			name: "unknown selected default",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				candidate.DefaultRuleSetID = "missing"
+			},
+			want: "references unknown rule set",
+		},
+		{
+			name: "duplicate names",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				set := candidate.RuleSets["strict"]
+				set.Name = "default"
+				candidate.RuleSets["strict"] = set
+			},
+			want: "differ only by case",
+		},
+		{
+			name: "invalid id",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				candidate.RuleSets["Bad ID"] = ReviewAttentionRuleSet{
+					Name: "Bad", Rules: map[string][]gatetypes.GateSpec{},
+				}
+			},
+			want: "rule-set ID",
+		},
+		{
+			name: "nil rules",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				set := candidate.RuleSets["strict"]
+				set.Rules = nil
+				candidate.RuleSets["strict"] = set
+			},
+			want: "must be an object, not null",
+		},
+		{
+			name: "unknown assignment",
+			mutate: func(candidate *ReviewAttentionConfig) {
+				candidate.RepositoryAssignments["Acme/Strict"] = "missing"
+			},
+			want: "references unknown rule set",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate, cloneErr := cloneNamedReviewAttentionConfig(configured)
+			require.NoError(t, cloneErr)
+			test.mutate(&candidate)
+			require.ErrorContains(t, candidate.Validate(), test.want)
+		})
+	}
+}
+
+func TestReviewAttentionLegacyCatalogProjectsEffectiveRepositoryRuleSets(t *testing.T) {
+	legacy := ReviewAttentionConfig{
+		Global: map[string][]gatetypes.GateSpec{
+			"review.ready": {
+				{ID: "keep", Kind: gatetypes.GateZero},
+				{ID: "replace", Kind: gatetypes.GateZero},
+			},
+			"review.empty": {},
+		},
+		Repositories: map[string]map[string]gatetypes.RepositoryGatePolicy{
+			"Acme/Inherit": {
+				"review.ready": {Mode: gatetypes.GatePolicyInherit},
+			},
+			"Acme/Overlay": {
+				"review.ready": {
+					Mode: gatetypes.GatePolicyOverlay,
+					Gates: []gatetypes.GateSpec{
+						{ID: "replace", Kind: gatetypes.GateZero},
+						{ID: "append", Kind: gatetypes.GateZero},
+					},
+				},
+			},
+			"Acme/Disable": {
+				"review.ready": {Mode: gatetypes.GatePolicyDisable},
+			},
+			"Acme/Replace": {
+				"review.ready": {
+					Mode:  gatetypes.GatePolicyReplace,
+					Gates: []gatetypes.GateSpec{{ID: "only", Kind: gatetypes.GateZero}},
+				},
+			},
+		},
+	}
+	normalized, err := legacy.NamedRuleSets()
+	require.NoError(t, err)
+	require.NoError(t, normalized.Validate())
+	require.NotContains(t, normalized.RepositoryAssignments, "Acme/Inherit")
+	require.Len(t, normalized.RepositoryAssignments, 3)
+
+	overlay := normalized.RuleSets[normalized.RepositoryAssignments["Acme/Overlay"]]
+	require.Equal(t, []string{"keep", "replace", "append"}, []string{
+		overlay.Rules["review.ready"][0].ID,
+		overlay.Rules["review.ready"][1].ID,
+		overlay.Rules["review.ready"][2].ID,
+	})
+	require.NotNil(t, overlay.Rules["review.empty"])
+
+	disabled := normalized.RuleSets[normalized.RepositoryAssignments["Acme/Disable"]]
+	require.Contains(t, disabled.Rules, "review.ready")
+	require.Empty(t, disabled.Rules["review.ready"])
+	require.NotEqual(
+		t,
+		normalized.RepositoryAssignments["Acme/Disable"],
+		normalized.DefaultRuleSetID,
+	)
+
+	replaced := normalized.RuleSets[normalized.RepositoryAssignments["Acme/Replace"]]
+	require.Equal(t, "only", replaced.Rules["review.ready"][0].ID)
+}
+
+func TestReviewAttentionLegacyCatalogSharesIdenticalEffectiveRuleSetsAtRepositoryLimit(
+	t *testing.T,
+) {
+	globalGates := make([]gatetypes.GateSpec, 9)
+	for index := range globalGates {
+		globalGates[index] = gatetypes.GateSpec{
+			ID:   fmt.Sprintf("gate_%d", index),
+			Kind: gatetypes.GateZero,
+		}
+	}
+	legacy := ReviewAttentionConfig{
+		Global: map[string][]gatetypes.GateSpec{
+			"review.ready": globalGates,
+		},
+		Repositories: make(
+			map[string]map[string]gatetypes.RepositoryGatePolicy,
+			MaxReviewAttentionRepositories,
+		),
+	}
+	for index := range MaxReviewAttentionRepositories {
+		legacy.Repositories[fmt.Sprintf("owner/repository-%d", index)] = map[string]gatetypes.RepositoryGatePolicy{
+			"review.ready": {
+				Mode: gatetypes.GatePolicyOverlay,
+				Gates: []gatetypes.GateSpec{
+					{ID: "gate_0", Kind: gatetypes.GateZero},
+				},
+			},
+		}
+	}
+
+	normalized, err := legacy.NamedRuleSets()
+	require.NoError(t, err)
+	require.NoError(t, normalized.Validate())
+	require.Len(t, normalized.RuleSets, 2)
+	require.Len(t, normalized.RepositoryAssignments, MaxReviewAttentionRepositories)
+
+	var importedID string
+	for _, id := range normalized.RepositoryAssignments {
+		if importedID == "" {
+			importedID = id
+		}
+		require.Equal(t, importedID, id)
+	}
+	require.NotEqual(t, DefaultReviewAttentionRuleSetID, importedID)
+	require.Equal(t, globalGates, normalized.RuleSets[importedID].Rules["review.ready"])
+}
+
+func TestReviewAttentionLegacyCatalogReportsOnlyUnrepresentableNamedMigration(
+	t *testing.T,
+) {
+	legacy := ReviewAttentionConfig{
+		Global: map[string][]gatetypes.GateSpec{
+			"review.ready": make([]gatetypes.GateSpec, 9),
+		},
+		Repositories: make(
+			map[string]map[string]gatetypes.RepositoryGatePolicy,
+			MaxReviewAttentionRepositories,
+		),
+	}
+	for index := range legacy.Global["review.ready"] {
+		legacy.Global["review.ready"][index] = gatetypes.GateSpec{
+			ID:   fmt.Sprintf("global_%d", index),
+			Kind: gatetypes.GateZero,
+		}
+	}
+	for index := range MaxReviewAttentionRepositories {
+		legacy.Repositories[fmt.Sprintf("owner/repository-%d", index)] = map[string]gatetypes.RepositoryGatePolicy{
+			"review.ready": {
+				Mode: gatetypes.GatePolicyOverlay,
+				Gates: []gatetypes.GateSpec{
+					{ID: fmt.Sprintf("repository_%d", index), Kind: gatetypes.GateZero},
+				},
+			},
+		}
+	}
+
+	require.NoError(t, legacy.Validate())
+	_, err := legacy.NamedRuleSets()
+	require.ErrorIs(t, err, ErrReviewAttentionLegacyMigrationExceedsBounds)
+}
