@@ -15,16 +15,103 @@ const workflows: PRLifecycleGateProfile["workflows"] = {
     decision_point: "pr.review.start",
     stages: [{ id: "domain", kind: "zero" }],
   },
+  "pr.review.complete": {
+    id: "review-complete",
+    name: "Complete review",
+    purpose: "authorization",
+    decision_point: "pr.review.complete",
+    stages: [
+      {
+        id: "policy",
+        kind: "deterministic",
+        title: "Check review policy",
+        when: "true",
+      },
+    ],
+  },
+  "pr.finding.classify": {
+    id: "finding-classify",
+    name: "Classify finding",
+    purpose: "classification",
+    decision_point: "pr.finding.classify",
+    stages: [
+      {
+        id: "classify",
+        kind: "ai_working_context",
+        title: "Classify finding",
+        agent_id: "reviewer",
+        criteria: "Classify the finding scope.",
+      },
+      {
+        id: "verify",
+        kind: "ai_isolated_context",
+        title: "Verify classification",
+        agent_id: "reviewer",
+        criteria: "Verify the classification independently.",
+      },
+    ],
+  },
+  "pr.implementation.start": {
+    id: "implementation-start",
+    name: "Start implementation",
+    purpose: "authorization",
+    decision_point: "pr.implementation.start",
+    stages: [
+      {
+        id: "approve",
+        kind: "human",
+        title: "Approve implementation",
+        questions: ["Proceed?"],
+      },
+    ],
+  },
   "pr.implementation.complete": {
     id: "implementation-complete",
     name: "Complete implementation",
     purpose: "authorization",
     decision_point: "pr.implementation.complete",
     stages: [
-      { id: "scope", kind: "deterministic", when: "true" },
-      { id: "audit", kind: "ai_isolated_context", agent_id: "controller" },
-      { id: "approve", kind: "human", questions: ["Accept?"] },
+      {
+        id: "scope",
+        kind: "deterministic",
+        title: "Check scope",
+        when: "true",
+      },
+      {
+        id: "audit",
+        kind: "ai_isolated_context",
+        title: "Audit implementation",
+        agent_id: "controller",
+        criteria: "Confirm the implementation is complete.",
+      },
+      {
+        id: "approve",
+        kind: "human",
+        title: "Approve implementation",
+        questions: ["Accept?"],
+      },
     ],
+  },
+  "pr.review.publish": {
+    id: "review-publish",
+    name: "Publish review",
+    purpose: "authorization",
+    decision_point: "pr.review.publish",
+    stages: [
+      {
+        id: "approval",
+        kind: "human",
+        title: "",
+        questions: ["Publish?"],
+      },
+    ],
+  },
+  "pr.correction.promote": {
+    id: "correction-promote",
+    name: "Promote correction",
+    purpose: "authorization",
+    decision_point: "pr.correction.promote",
+    stages: [],
   },
 }
 
@@ -50,13 +137,22 @@ describe("PR lifecycle gate map", () => {
         "User action or explicitly configured automation; no built-in automatic workspace bridge",
       ),
     ).toBeInTheDocument()
-    expect(screen.getByText("Confirm purpose and scope")).toBeInTheDocument()
-    expect(screen.getByText("AI reviews the pull request")).toBeInTheDocument()
+    expect(screen.getByText("PR purpose and scope")).toBeInTheDocument()
+    expect(
+      screen.queryByText("Confirm purpose and scope"),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText("AI review")).toBeInTheDocument()
     expect(
       screen.getByText("Choose what to do with findings"),
     ).toBeInTheDocument()
-    expect(screen.getByText("Implement selected findings")).toBeInTheDocument()
+    expect(screen.getByText("Selected findings to fix")).toBeInTheDocument()
+    expect(
+      screen
+        .getByText("Selected findings to fix")
+        .closest('[data-flow-kind="data"]'),
+    ).toBeInTheDocument()
     expect(screen.getByText("Continue to implementation")).toBeInTheDocument()
+    expect(screen.getByText("AI implementation")).toBeInTheDocument()
     expect(screen.getByText("Check candidate scope")).toBeInTheDocument()
     expect(screen.getByText("Validate changes")).toBeInTheDocument()
     expect(screen.getByText("Deferred findings")).toBeInTheDocument()
@@ -81,22 +177,24 @@ describe("PR lifecycle gate map", () => {
       ),
     ).toBeInTheDocument()
 
-    const classify = screen.getByRole("button", { name: "Classify finding" })
+    const classify = screen.getByRole("button", {
+      name: "Decide ambiguous finding scope",
+    })
     expect(
       classify.closest('[data-flow-branch="findings-decision"]'),
     ).toBeInTheDocument()
     const scope = screen.getByRole("button", {
-      name: "Classify implementation",
+      name: "Allow large or adjacent work",
     })
     expect(
       scope.closest('[data-flow-branch="candidate-scope"]'),
     ).toBeInTheDocument()
 
     const nonOwned = screen.getByRole("button", {
-      name: "Authorize non-owned PR",
+      name: "Allow non-owned PR implementation",
     })
     const startImplementation = screen.getByRole("button", {
-      name: "Start implementation",
+      name: "Allow AI implementation",
     })
     expect(
       nonOwned.compareDocumentPosition(startImplementation) &
@@ -111,17 +209,17 @@ describe("PR lifecycle gate map", () => {
     expect(within(advancedRail!).getAllByRole("button")).toHaveLength(3)
     expect(
       within(advancedRail!).getByRole("button", {
-        name: "Confirm revised charter",
+        name: "Approve revised purpose and scope",
       }),
     ).toBeInTheDocument()
     expect(
       within(advancedRail!).getByRole("button", {
-        name: "Promote correction",
+        name: "Allow repository lesson",
       }),
     ).toBeInTheDocument()
     expect(
       within(advancedRail!).getByRole("button", {
-        name: "Resolve unknown result",
+        name: "Allow result reconciliation",
       }),
     ).toBeInTheDocument()
 
@@ -132,7 +230,12 @@ describe("PR lifecycle gate map", () => {
     expect(screen.queryByText("AI-W")).not.toBeInTheDocument()
     expect(screen.queryByText("AI-I")).not.toBeInTheDocument()
     expect(screen.queryByText("D → AI-I → H")).not.toBeInTheDocument()
-    expect(screen.queryByText(/fallback/i)).not.toBeInTheDocument()
+
+    const aiActions = Array.from(
+      container.querySelectorAll('[data-flow-kind="agent"]'),
+      (node) => node.querySelector("strong")?.textContent,
+    )
+    expect(aiActions).toEqual(["AI review", "AI implementation"])
   })
 
   it("renders every gate as an exact selectable decision point", () => {
@@ -154,24 +257,94 @@ describe("PR lifecycle gate map", () => {
       new Set(prLifecycleKnownDecisionPoints),
     )
 
-    const selected = screen.getByRole("button", { name: "Start review" })
+    const selected = screen.getByRole("button", { name: "Allow AI review" })
     expect(selected).toHaveAttribute("aria-pressed", "true")
     expect(selected).toHaveAttribute("data-gate-id", "pr.review.start")
+    expect(selected).toHaveAttribute("data-editor-title", "Start review")
     expect(selected).toHaveAttribute(
       "data-edit-href",
       "/pull-requests?view=gate-profiles&gate=pr.review.start",
     )
     expect(selected).toHaveAttribute("data-workflow-configured", "true")
+    expect(selected).toHaveAttribute("data-gate-format", "automatic")
     expect(selected).not.toHaveTextContent("pr.review.start")
+    expect(within(selected).getByText("Allow AI review")).toBeInTheDocument()
+    expect(
+      within(
+        screen.getByRole("button", { name: "Approve purpose and scope" }),
+      ).getByText("Approve purpose and scope"),
+    ).toBeInTheDocument()
 
     const fallback = screen.getByRole("button", {
-      name: "Complete review",
+      name: "Approve purpose and scope",
     })
     expect(fallback).toHaveAttribute("data-workflow-configured", "false")
-    expect(fallback).not.toHaveTextContent("FALLBACK")
+    expect(fallback).toHaveAttribute("data-gate-format", "user")
+    expect(within(fallback).getByText("default fallback")).toBeInTheDocument()
     expect(
-      screen.getByRole("button", { name: "Complete implementation" }),
+      screen.getByRole("button", { name: "Accept implementation" }),
     ).not.toHaveTextContent("D → AI-I → H")
+  })
+
+  it("summarizes workflow stages as human-friendly gate formats", () => {
+    render(
+      <PRLifecycleGateMap
+        selectedDecisionPoint="pr.review.start"
+        workflows={workflows}
+        onSelect={vi.fn()}
+      />,
+    )
+
+    const automatic = screen.getByRole("button", { name: "Allow AI review" })
+    expect(automatic).toHaveAttribute("data-gate-format", "automatic")
+    expect(within(automatic).getByText("Automatic")).toBeInTheDocument()
+
+    const rule = screen.getByRole("button", { name: "Accept review results" })
+    expect(rule).toHaveAttribute("data-gate-format", "rule")
+    expect(within(rule).getByText("Rule")).toBeInTheDocument()
+
+    const ai = screen.getByRole("button", {
+      name: "Decide ambiguous finding scope",
+    })
+    expect(ai).toHaveAttribute("data-gate-format", "ai")
+    expect(within(ai).getByText("AI")).toBeInTheDocument()
+    expect(ai).toHaveAccessibleDescription(/Gate format: AI\./)
+
+    const user = screen.getByRole("button", {
+      name: "Allow AI implementation",
+    })
+    expect(user).toHaveAttribute("data-gate-format", "user")
+    expect(within(user).getByText("User")).toBeInTheDocument()
+    expect(user).not.toHaveTextContent("default fallback")
+
+    const fallback = screen.getByRole("button", {
+      name: "Approve purpose and scope",
+    })
+    expect(fallback).toHaveAttribute("data-gate-format", "user")
+    expect(fallback).toHaveTextContent("default fallback")
+
+    const mixed = screen.getByRole("button", {
+      name: "Accept implementation",
+    })
+    expect(mixed).toHaveAttribute("data-gate-format", "mixed")
+    expect(within(mixed).getByText("Mixed")).toBeInTheDocument()
+    expect(within(mixed).getByText("Rule → AI → User")).toBeInTheDocument()
+    expect(mixed).toHaveAccessibleDescription(
+      /Gate format: Mixed\. Ordered composition: Rule, then AI, then User\./,
+    )
+
+    const needsSetup = screen.getByRole("button", {
+      name: "Allow repository lesson",
+    })
+    expect(needsSetup).toHaveAttribute("data-gate-format", "needs-setup")
+    expect(within(needsSetup).getByText("Needs setup")).toBeInTheDocument()
+
+    const invalidNonEmpty = screen.getByRole("button", {
+      name: "Allow review publication",
+    })
+    expect(invalidNonEmpty).toHaveAttribute("data-gate-format", "needs-setup")
+    expect(invalidNonEmpty).toHaveAttribute("data-workflow-configured", "true")
+    expect(within(invalidNonEmpty).getByText("Needs setup")).toBeInTheDocument()
   })
 
   it("selects gates with pointer, Enter, and Space interaction", () => {
@@ -184,13 +357,17 @@ describe("PR lifecycle gate map", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "Complete review" }))
+    fireEvent.click(
+      screen.getByRole("button", { name: "Accept review results" }),
+    )
     fireEvent.keyDown(
-      screen.getByRole("button", { name: "Classify finding" }),
+      screen.getByRole("button", { name: "Decide ambiguous finding scope" }),
       { key: "Enter" },
     )
     fireEvent.keyDown(
-      screen.getByRole("button", { name: "Authorize non-owned PR" }),
+      screen.getByRole("button", {
+        name: "Allow non-owned PR implementation",
+      }),
       { key: " " },
     )
 

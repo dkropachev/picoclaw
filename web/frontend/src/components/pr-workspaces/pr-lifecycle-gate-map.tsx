@@ -2,7 +2,10 @@ import { type KeyboardEvent, type ReactNode, useId } from "react"
 
 import {
   type PRLifecycleDecisionPoint,
+  type PRLifecycleGateKind,
   type PRLifecycleGateProfile,
+  type PRLifecycleGateWorkflow,
+  validatePRLifecycleGateWorkflow,
 } from "@/api/pr-lifecycle-gate-profiles"
 import { prLifecycleGateLabels } from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
 import { cn } from "@/lib/utils"
@@ -19,6 +22,7 @@ interface GateSpec {
   number: number
   decisionPoint: PRLifecycleDecisionPoint
   title: string
+  decisionTitle: string
   detail: string
 }
 
@@ -27,84 +31,98 @@ const gateSpecs = [
     number: 1,
     decisionPoint: "pr.charter.confirm",
     title: prLifecycleGateLabels["pr.charter.confirm"],
+    decisionTitle: "Approve purpose and scope",
     detail: "First charter revision",
   },
   {
     number: 2,
     decisionPoint: "pr.charter.reconfirm",
     title: prLifecycleGateLabels["pr.charter.reconfirm"],
+    decisionTitle: "Approve revised purpose and scope",
     detail: "Revised charter path",
   },
   {
     number: 3,
     decisionPoint: "pr.review.start",
     title: prLifecycleGateLabels["pr.review.start"],
+    decisionTitle: "Allow AI review",
     detail: "Before diff reaches the review agent",
   },
   {
     number: 4,
     decisionPoint: "pr.review.complete",
     title: prLifecycleGateLabels["pr.review.complete"],
+    decisionTitle: "Accept review results",
     detail: "Overall findings and coverage",
   },
   {
     number: 5,
     decisionPoint: "pr.finding.classify",
     title: prLifecycleGateLabels["pr.finding.classify"],
+    decisionTitle: "Decide ambiguous finding scope",
     detail: "Finding scope is ambiguous",
   },
   {
     number: 6,
     decisionPoint: "pr.implementation.eligibility",
     title: prLifecycleGateLabels["pr.implementation.eligibility"],
+    decisionTitle: "Allow non-owned PR implementation",
     detail: "Non-owned pull requests only",
   },
   {
     number: 7,
     decisionPoint: "pr.implementation.start",
     title: prLifecycleGateLabels["pr.implementation.start"],
+    decisionTitle: "Allow AI implementation",
     detail: "Before the pinned repair workspace",
   },
   {
     number: 8,
     decisionPoint: "pr.implementation.scope",
     title: prLifecycleGateLabels["pr.implementation.scope"],
+    decisionTitle: "Allow large or adjacent work",
     detail: "Large or adjacent candidate work",
   },
   {
     number: 9,
     decisionPoint: "pr.implementation.complete",
     title: prLifecycleGateLabels["pr.implementation.complete"],
+    decisionTitle: "Accept implementation",
     detail: "Validated, completion-audited candidate",
   },
   {
     number: 10,
     decisionPoint: "pr.review.publish",
     title: prLifecycleGateLabels["pr.review.publish"],
+    decisionTitle: "Allow review publication",
     detail: "Independent GitHub review effect",
   },
   {
     number: 11,
     decisionPoint: "pr.implementation.publish",
     title: prLifecycleGateLabels["pr.implementation.publish"],
+    decisionTitle: "Allow branch push",
     detail: "Independent branch push effect",
   },
   {
     number: 12,
     decisionPoint: "pr.deferred.publish",
     title: prLifecycleGateLabels["pr.deferred.publish"],
+    decisionTitle: "Allow follow-up issue",
     detail: "Per deferred group in ask mode",
   },
   {
     number: 13,
     decisionPoint: "pr.correction.promote",
     title: prLifecycleGateLabels["pr.correction.promote"],
+    decisionTitle: "Allow repository lesson",
     detail: "Optional repository-level learning",
   },
   {
     number: 14,
     decisionPoint: "pr.publication.reconcile",
     title: prLifecycleGateLabels["pr.publication.reconcile"],
+    decisionTitle: "Allow result reconciliation",
     detail: "Unknown provider outcomes only",
   },
 ] as const satisfies readonly GateSpec[]
@@ -114,6 +132,32 @@ const advancedGates = [
   { index: 12, condition: "A correction may become a repository lesson" },
   { index: 13, condition: "A GitHub write returned an unknown result" },
 ] as const
+
+type GateFormat = "automatic" | "rule" | "ai" | "user" | "mixed" | "needs-setup"
+type GateStageCategory = Exclude<GateFormat, "mixed" | "needs-setup">
+
+interface GateFormatSummary {
+  format: GateFormat
+  label: string
+  composition?: string
+  fallback: boolean
+  accessible: string
+}
+
+const stageCategory: Record<PRLifecycleGateKind, GateStageCategory> = {
+  zero: "automatic",
+  deterministic: "rule",
+  ai_working_context: "ai",
+  ai_isolated_context: "ai",
+  human: "user",
+}
+
+const gateFormatLabels: Record<GateStageCategory, string> = {
+  automatic: "Automatic",
+  rule: "Rule",
+  ai: "AI",
+  user: "User",
+}
 
 export function PRLifecycleGateMap({
   selectedDecisionPoint,
@@ -132,7 +176,7 @@ export function PRLifecycleGateMap({
       onSelect={onSelect}
       selected={selectedDecisionPoint === gateSpecs[index].decisionPoint}
       spec={gateSpecs[index]}
-      workflowConfigured={Boolean(workflows?.[gateSpecs[index].decisionPoint])}
+      workflow={workflows?.[gateSpecs[index].decisionPoint]}
     />
   )
 
@@ -162,14 +206,17 @@ export function PRLifecycleGateMap({
             edit its workflow.
           </p>
         </div>
-        <div
-          aria-label="Diagram legend"
-          className="text-muted-foreground flex max-w-3xl flex-wrap gap-1.5 text-xs"
-        >
-          <Legend label="action" variant="action" />
-          <Legend label="visible data" variant="data" />
-          <Legend label="GitHub" variant="external" />
-          <Legend label="editable gate" variant="gate" />
+        <div className="max-w-3xl space-y-1.5">
+          <div
+            aria-label="Diagram legend"
+            className="text-muted-foreground flex flex-wrap gap-1.5 text-xs"
+          >
+            <Legend label="action" variant="action" />
+            <Legend label="visible data" variant="data" />
+            <Legend label="GitHub" variant="external" />
+            <Legend label="editable gate" variant="gate" />
+          </div>
+          <GateFormatLegend />
         </div>
       </div>
 
@@ -179,8 +226,10 @@ export function PRLifecycleGateMap({
           The user or explicitly configured automation tracks the pull request
           in PicoClaw; there is no built-in automatic workspace bridge.
         </li>
-        <li>The user confirms the pull request purpose and scope.</li>
-        <li>Gate 1 confirms the charter, then Gate 3 starts AI review.</li>
+        <li>
+          The pull request purpose and scope are recorded as visible data.
+        </li>
+        <li>Gate 1 approves that authority, then Gate 3 allows review.</li>
         <li>Gate 4 accepts the completed review and presents the findings.</li>
         <li>
           Conditional Gate 5 classifies an ambiguous finding beside the user’s
@@ -228,18 +277,18 @@ export function PRLifecycleGateMap({
             <FlowConnector label="purpose · scope" />
             <FlowNode
               detail="Set the goal, success criteria, included work, and exclusions"
-              kind="action"
-              label="Confirm purpose and scope"
+              kind="data"
+              label="PR purpose and scope"
             />
-            <FlowConnector label="confirm" />
+            <FlowConnector label="approval" />
             {gate(0)}
-            <FlowConnector label="Run Review" />
+            <FlowConnector label="review request" />
             {gate(2)}
-            <FlowConnector label="confirmed PR" />
+            <FlowConnector label="allowed" />
             <FlowNode
-              detail="Review the pull request against its confirmed purpose"
+              detail="Analyze the pull request against its approved purpose and scope"
               kind="agent"
-              label="AI reviews the pull request"
+              label="AI review"
             />
             <FlowConnector label="findings" />
             {gate(3)}
@@ -273,9 +322,9 @@ export function PRLifecycleGateMap({
               >
                 <FlowNode
                   compact
-                  detail="Repair only the findings selected for this pull request"
-                  kind="action"
-                  label="Implement selected findings"
+                  detail="Findings chosen for repair in this pull request"
+                  kind="data"
+                  label="Selected findings to fix"
                 />
                 <ContinuationCue />
               </ChoiceLane>
@@ -312,11 +361,11 @@ export function PRLifecycleGateMap({
             </ConditionalGate>
             <FlowConnector label="then · owned PR skips #6" />
             {gate(6)}
-            <FlowConnector label="start implementation" />
+            <FlowConnector label="allowed" />
             <FlowNode
               detail="Prepare a focused fix for the selected findings"
               kind="agent"
-              label="AI implements the changes"
+              label="AI implementation"
             />
             <FlowConnector label="candidate changes" />
             <ScopeDecision gate={gate(7, true)} />
@@ -371,7 +420,8 @@ export function PRLifecycleGateMap({
       <ol aria-label="PR lifecycle gates" className="sr-only">
         {gateSpecs.map((spec) => (
           <li key={spec.decisionPoint}>
-            Gate {spec.number}: {spec.title}. {spec.detail}
+            Gate {spec.number}: {spec.decisionTitle}. Editor: {spec.title}.{" "}
+            {spec.detail}
             {selectedDecisionPoint === spec.decisionPoint
               ? ". Currently selected."
               : ""}
@@ -647,20 +697,22 @@ function AdvancedGate({
 
 function GateNode({
   spec,
-  workflowConfigured,
+  workflow,
   selected,
   compact,
   instanceID,
   onSelect,
 }: {
   spec: GateSpec
-  workflowConfigured: boolean
+  workflow?: PRLifecycleGateWorkflow
   selected: boolean
   compact: boolean
   instanceID: string
   onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
 }) {
+  const format = summarizeGateFormat(workflow, spec.decisionPoint)
   const descriptionID = `${instanceID}-gate-${spec.number}-description`
+  const formatID = `${instanceID}-gate-${spec.number}-format`
   const activate = () => onSelect(spec.decisionPoint)
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "Enter" && event.key !== " ") return
@@ -670,27 +722,30 @@ function GateNode({
 
   return (
     <button
-      aria-describedby={descriptionID}
-      aria-label={spec.title}
+      aria-describedby={`${descriptionID} ${formatID}`}
+      aria-label={spec.decisionTitle}
       aria-pressed={selected}
       className={cn(
-        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring flex min-h-28 w-56 shrink-0 flex-col rounded-xl border-2 p-3 text-left shadow-sm transition-colors outline-none focus-visible:ring-2",
+        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-56 shrink-0 flex-col rounded-xl border-2 p-3 text-left shadow-sm transition-colors outline-none focus-visible:ring-2",
         compact && "min-h-24 w-full p-2.5",
         selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
       )}
       data-decision-point={spec.decisionPoint}
+      data-decision-title={spec.decisionTitle}
       data-edit-href={`/pull-requests?view=gate-profiles&gate=${spec.decisionPoint}`}
+      data-editor-title={spec.title}
       data-flow-kind="gate"
+      data-gate-format={format.format}
       data-gate-id={spec.decisionPoint}
       data-gate-number={spec.number}
-      data-workflow-configured={workflowConfigured ? "true" : "false"}
+      data-workflow-configured={workflow ? "true" : "false"}
       onClick={activate}
       onKeyDown={handleKeyDown}
       type="button"
     >
       <span className="flex w-full items-start justify-between gap-2">
         <span className="text-primary text-[9px] font-bold tracking-wider">
-          EDIT GATE
+          GATE DECISION
         </span>
         <span
           className={cn(
@@ -701,17 +756,107 @@ function GateNode({
           {spec.number}
         </span>
       </span>
-      <strong className="mt-1 text-xs leading-snug">{spec.title}</strong>
+      <strong className="mt-1 text-xs leading-snug">
+        {spec.decisionTitle}
+      </strong>
       <span
         className="text-muted-foreground mt-1 text-[10px] leading-tight"
         id={descriptionID}
       >
         {spec.detail}
       </span>
-      <span className="text-primary mt-auto pt-2 text-[9px] font-bold tracking-wider">
+      <span className="mt-auto flex flex-wrap items-center gap-1.5 pt-2">
+        <span
+          className={cn(
+            "rounded-md border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase",
+            gateFormatClassName(format.format),
+          )}
+        >
+          {format.label}
+        </span>
+        {format.fallback ? (
+          <span className="text-muted-foreground text-[8px] font-semibold tracking-wider uppercase">
+            default fallback
+          </span>
+        ) : null}
+      </span>
+      {format.composition ? (
+        <span className="text-foreground mt-1 text-[9px] font-semibold">
+          {format.composition}
+        </span>
+      ) : null}
+      <span className="text-primary mt-1 text-[9px] font-bold tracking-wider">
         SELECT TO EDIT →
       </span>
+      <span className="sr-only" id={formatID}>
+        {format.accessible}
+      </span>
     </button>
+  )
+}
+
+function summarizeGateFormat(
+  workflow: PRLifecycleGateWorkflow | undefined,
+  decisionPoint: PRLifecycleDecisionPoint,
+): GateFormatSummary {
+  if (!workflow) {
+    return {
+      format: "user",
+      label: "User",
+      fallback: true,
+      accessible:
+        "Gate format: User. No workflow is configured, so the runtime uses the default human fallback.",
+    }
+  }
+  if (validatePRLifecycleGateWorkflow(workflow, decisionPoint).length > 0) {
+    return {
+      format: "needs-setup",
+      label: "Needs setup",
+      fallback: false,
+      accessible:
+        "Gate format: Needs setup. The configured workflow is incomplete or invalid.",
+    }
+  }
+
+  const categories = workflow.stages.map((stage) => stageCategory[stage.kind])
+  const uniqueCategories = new Set(categories)
+  if (uniqueCategories.size === 1) {
+    const category = categories[0]
+    const label = gateFormatLabels[category]
+    return {
+      format: category,
+      label,
+      fallback: false,
+      accessible: `Gate format: ${label}.`,
+    }
+  }
+
+  const orderedCategories = categories.filter(
+    (category, index) => index === 0 || category !== categories[index - 1],
+  )
+  const composition = orderedCategories
+    .map((category) => gateFormatLabels[category])
+    .join(" → ")
+  return {
+    format: "mixed",
+    label: "Mixed",
+    composition,
+    fallback: false,
+    accessible: `Gate format: Mixed. Ordered composition: ${orderedCategories
+      .map((category) => gateFormatLabels[category])
+      .join(", then ")}.`,
+  }
+}
+
+function gateFormatClassName(format: GateFormat) {
+  return cn(
+    format === "automatic" && "bg-muted text-muted-foreground",
+    format === "rule" && "bg-secondary text-secondary-foreground",
+    format === "ai" && "bg-primary/10 border-primary/40 text-primary",
+    format === "user" && "bg-accent text-accent-foreground",
+    format === "mixed" && "bg-primary text-primary-foreground",
+    format === "needs-setup" &&
+      "bg-destructive/10 border-destructive/50 text-destructive",
   )
 }
 
@@ -734,5 +879,35 @@ function Legend({
     >
       {label}
     </span>
+  )
+}
+
+function GateFormatLegend() {
+  const formats: { format: GateFormat; label: string }[] = [
+    { format: "automatic", label: "Automatic" },
+    { format: "rule", label: "Rule" },
+    { format: "ai", label: "AI" },
+    { format: "user", label: "User" },
+    { format: "mixed", label: "Mixed" },
+  ]
+
+  return (
+    <div
+      aria-label="Gate format legend"
+      className="text-muted-foreground flex flex-wrap items-center gap-1 text-[10px]"
+    >
+      <span className="mr-1 font-semibold">Gate format</span>
+      {formats.map(({ format, label }) => (
+        <span
+          className={cn(
+            "rounded-md border px-1.5 py-0.5 font-bold tracking-wider uppercase",
+            gateFormatClassName(format),
+          )}
+          key={format}
+        >
+          {label}
+        </span>
+      ))}
+    </div>
   )
 }

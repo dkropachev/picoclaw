@@ -152,6 +152,113 @@ export interface PRLifecycleGateProfileIssue {
   message: string
 }
 
+const prLifecycleGateIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
+
+export function validatePRLifecycleGateWorkflow(
+  workflow: PRLifecycleGateWorkflow,
+  decisionPoint: string,
+  workflowPath = "workflow",
+): PRLifecycleGateProfileIssue[] {
+  const issues: PRLifecycleGateProfileIssue[] = []
+  if (!prLifecycleGateIDPattern.test(workflow.id)) {
+    issues.push({
+      path: `${workflowPath}.id`,
+      message: "Workflow ID is invalid.",
+    })
+  }
+  if (!workflow.name.trim()) {
+    issues.push({
+      path: `${workflowPath}.name`,
+      message: "Workflow name is required.",
+    })
+  }
+  if (workflow.decision_point !== decisionPoint) {
+    issues.push({
+      path: `${workflowPath}.decision_point`,
+      message: "Workflow decision point does not match its catalog key.",
+    })
+  }
+  if (workflow.stages.length === 0) {
+    issues.push({
+      path: `${workflowPath}.stages`,
+      message: "Add at least one gate stage.",
+    })
+  }
+  const seen = new Set<string>()
+  workflow.stages.forEach((stage, index) => {
+    const path = `${workflowPath}.stages.${index}`
+    if (!prLifecycleGateIDPattern.test(stage.id) || seen.has(stage.id)) {
+      issues.push({
+        path: `${path}.id`,
+        message: "Stage ID must be unique.",
+      })
+    }
+    seen.add(stage.id)
+    if (stage.kind !== "zero" && !stage.title?.trim()) {
+      issues.push({
+        path: `${path}.title`,
+        message: "Stage title is required.",
+      })
+    }
+    if (stage.kind === "deterministic" && !stage.when?.trim()) {
+      issues.push({
+        path: `${path}.when`,
+        message: "Deterministic condition is required.",
+      })
+    }
+    if (
+      stage.kind === "deterministic" &&
+      (stage.agent_id != null ||
+        stage.criteria != null ||
+        stage.questions != null)
+    ) {
+      issues.push({
+        path,
+        message: "Deterministic stages can configure only title and condition.",
+      })
+    }
+    if (
+      (stage.kind === "ai_working_context" ||
+        stage.kind === "ai_isolated_context") &&
+      (!stage.agent_id?.trim() || !stage.criteria?.trim())
+    ) {
+      issues.push({
+        path,
+        message: "AI stages require an agent and criteria.",
+      })
+    }
+    if (stage.kind === "human" && !hasQuestions(stage.questions)) {
+      issues.push({
+        path: `${path}.questions`,
+        message: "Human stages require a question.",
+      })
+    }
+    if (
+      stage.kind === "human" &&
+      (stage.agent_id != null || stage.criteria != null)
+    ) {
+      issues.push({
+        path,
+        message: "Human stages cannot configure an agent or AI criteria.",
+      })
+    }
+    if (
+      stage.kind === "zero" &&
+      (stage.title != null ||
+        stage.when != null ||
+        stage.agent_id != null ||
+        stage.criteria != null ||
+        stage.questions != null)
+    ) {
+      issues.push({
+        path,
+        message: "Zero stages can contain only ID and kind.",
+      })
+    }
+  })
+  return issues
+}
+
 export function validatePRLifecycleGateProfiles(
   snapshot: Pick<
     PRLifecycleGateProfileSnapshot,
@@ -185,7 +292,6 @@ export function validatePRLifecycleGateProfiles(
     })
   }
   const profileIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
-  const stageIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
   const names = new Set<string>()
   for (const [profileID, profile] of Object.entries(snapshot.gate_profiles)) {
     if (!profileIDPattern.test(profileID)) {
@@ -211,103 +317,13 @@ export function validatePRLifecycleGateProfiles(
     names.add(foldedName)
     for (const [decisionPoint, workflow] of Object.entries(profile.workflows)) {
       const workflowPath = `gate_profiles.${profileID}.workflows.${decisionPoint}`
-      if (!stageIDPattern.test(workflow.id)) {
-        issues.push({
-          path: `${workflowPath}.id`,
-          message: "Workflow ID is invalid.",
-        })
-      }
-      if (!workflow.name.trim()) {
-        issues.push({
-          path: `${workflowPath}.name`,
-          message: "Workflow name is required.",
-        })
-      }
-      if (workflow.decision_point !== decisionPoint) {
-        issues.push({
-          path: `${workflowPath}.decision_point`,
-          message: "Workflow decision point does not match its catalog key.",
-        })
-      }
-      if (workflow.stages.length === 0) {
-        issues.push({
-          path: `${workflowPath}.stages`,
-          message: "Add at least one gate stage.",
-        })
-      }
-      const seen = new Set<string>()
-      workflow.stages.forEach((stage, index) => {
-        const path = `${workflowPath}.stages.${index}`
-        if (!stageIDPattern.test(stage.id) || seen.has(stage.id)) {
-          issues.push({
-            path: `${path}.id`,
-            message: "Stage ID must be unique.",
-          })
-        }
-        seen.add(stage.id)
-        if (stage.kind !== "zero" && !stage.title?.trim()) {
-          issues.push({
-            path: `${path}.title`,
-            message: "Stage title is required.",
-          })
-        }
-        if (stage.kind === "deterministic" && !stage.when?.trim()) {
-          issues.push({
-            path: `${path}.when`,
-            message: "Deterministic condition is required.",
-          })
-        }
-        if (
-          stage.kind === "deterministic" &&
-          (stage.agent_id != null ||
-            stage.criteria != null ||
-            stage.questions != null)
-        ) {
-          issues.push({
-            path,
-            message:
-              "Deterministic stages can configure only title and condition.",
-          })
-        }
-        if (
-          (stage.kind === "ai_working_context" ||
-            stage.kind === "ai_isolated_context") &&
-          (!stage.agent_id?.trim() || !stage.criteria?.trim())
-        ) {
-          issues.push({
-            path,
-            message: "AI stages require an agent and criteria.",
-          })
-        }
-        if (stage.kind === "human" && !hasQuestions(stage.questions)) {
-          issues.push({
-            path: `${path}.questions`,
-            message: "Human stages require a question.",
-          })
-        }
-        if (
-          stage.kind === "human" &&
-          (stage.agent_id != null || stage.criteria != null)
-        ) {
-          issues.push({
-            path,
-            message: "Human stages cannot configure an agent or AI criteria.",
-          })
-        }
-        if (
-          stage.kind === "zero" &&
-          (stage.title != null ||
-            stage.when != null ||
-            stage.agent_id != null ||
-            stage.criteria != null ||
-            stage.questions != null)
-        ) {
-          issues.push({
-            path,
-            message: "Zero stages can contain only ID and kind.",
-          })
-        }
-      })
+      issues.push(
+        ...validatePRLifecycleGateWorkflow(
+          workflow,
+          decisionPoint,
+          workflowPath,
+        ),
+      )
     }
   }
   for (const [repository, profileID] of Object.entries(
