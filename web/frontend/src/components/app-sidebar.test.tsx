@@ -179,58 +179,61 @@ describe("AppSidebar", () => {
     )
   })
 
-  it("groups pull request work and attention rules in a collapsible PR Reviews section", async () => {
-    pathname = "/reviews"
+  it("groups unified work and gate profiles in a collapsible Pull requests section", async () => {
+    pathname = "/pull-requests"
     const user = userEvent.setup()
 
     renderSidebar()
 
-    const trigger = screen.getByRole("button", { name: "PR Reviews" })
+    const trigger = screen.getByRole("button", { name: "Pull requests" })
     expect(trigger).toHaveAttribute("aria-expanded", "true")
     const work = screen.getByRole("link", { name: "Pull request work" })
-    const attentionRules = screen.getByRole("link", {
-      name: "Rule sets",
+    const gateProfiles = screen.getByRole("link", {
+      name: "Gate profiles",
     })
-    expect(work).toHaveAttribute("href", "/reviews")
-    expect(attentionRules).toHaveAttribute("href", "/reviews?view=policies")
+    expect(work).toHaveAttribute("href", "/pull-requests")
+    expect(gateProfiles).toHaveAttribute(
+      "href",
+      "/pull-requests?view=gate-profiles",
+    )
     expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
       "true",
     )
     expect(work).toHaveAttribute("aria-current", "page")
     expect(work).toHaveAttribute("data-status", "active")
-    expect(attentionRules).not.toHaveAttribute("aria-current")
-    expect(attentionRules).not.toHaveAttribute("data-status")
+    expect(gateProfiles).not.toHaveAttribute("aria-current")
+    expect(gateProfiles).not.toHaveAttribute("data-status")
     expect(
-      attentionRules.closest('[data-sidebar="menu-button"]'),
+      gateProfiles.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "false")
 
     await user.click(trigger)
     expect(trigger).toHaveAttribute("aria-expanded", "false")
     expect(work).not.toBeVisible()
-    expect(attentionRules).not.toBeVisible()
+    expect(gateProfiles).not.toBeVisible()
   })
 
-  it("marks only PR Reviews attention rules active for the policies view", () => {
-    pathname = "/reviews"
-    routeSearch = { view: "policies" }
+  it("marks only Pull requests gate profiles active for the configuration view", () => {
+    pathname = "/pull-requests"
+    routeSearch = { view: "gate-profiles" }
 
     renderSidebar()
 
     const work = screen.getByRole("link", { name: "Pull request work" })
-    const attentionRules = screen.getByRole("link", {
-      name: "Rule sets",
+    const gateProfiles = screen.getByRole("link", {
+      name: "Gate profiles",
     })
     expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
       "false",
     )
     expect(
-      attentionRules.closest('[data-sidebar="menu-button"]'),
+      gateProfiles.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "true")
     expect(work).not.toHaveAttribute("aria-current")
     expect(work).not.toHaveAttribute("data-status")
-    expect(attentionRules).toHaveAttribute("aria-current", "page")
-    expect(attentionRules).toHaveAttribute("data-status", "active")
+    expect(gateProfiles).toHaveAttribute("aria-current", "page")
+    expect(gateProfiles).toHaveAttribute("data-status", "active")
   })
 })

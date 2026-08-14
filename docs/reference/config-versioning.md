@@ -66,7 +66,7 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
 
 ### Version 6
 
-- **Introduction**: Trusted pull-request review attention policies.
+- **Historical introduction**: Trusted pull-request review attention policies.
 - **Changes**:
   - Added top-level `reviews.attention.global`, keyed by canonical decision
     point.
@@ -80,6 +80,29 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
 - **Auto-migration**: V5 configurations are backed up and migrated with a
   version-only transformation. Any already-present policy maps, including
   explicit empty decision or repository policies, are preserved semantically.
+
+> This section describes the historical v6 schema. The current breaking PR
+> workspace cutover removes `reviews` rather than preserving or translating it.
+
+### Current PR lifecycle configuration
+
+The current schema uses top-level `pr_lifecycle` for unified pull-request
+workspaces. It contains:
+
+- named `gate_profiles`, one `default_gate_profile_id`, and exact
+  `repository_assignments`;
+- independent review and completion adaptive-nudge minimum/maximum bounds;
+- monotonic `XS`, `S`, and `M` file, semantic-line, and module thresholds used
+  to derive the `XS` through `L` implementation size grade.
+
+The scoped authenticated settings API is
+`GET`/`PUT /api/pr-lifecycle/gate-profiles`. Writes are exact config-revision
+compare-and-swap operations and report that a gateway restart is required.
+
+`reviews` is no longer a supported top-level field or an empty compatibility
+placeholder. It is not auto-migrated to `pr_lifecycle`; recreate desired gate
+profiles explicitly. See [Pull Request Workspaces](../guides/pull-request-workspaces.md)
+and [PR Workspace V19 Cutover](../migration/pr-workspace-v19-cutover.md).
 
 ## How It Works
 

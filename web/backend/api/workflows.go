@@ -16,7 +16,6 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -530,7 +529,7 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		writeWorkflowRunNotFound(w)
 		return
 	}
-	if reviews.IsAttentionWorkflowRun(previousRun) {
+	if isPrivateInternalWorkflowRun(previousRun) {
 		writeWorkflowRunNotFound(w)
 		return
 	}
@@ -736,7 +735,7 @@ func (h *Handler) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err := store.GetRun(r.Context(), r.PathValue("run_id"))
-	if err != nil || reviews.IsAttentionWorkflowRun(run) {
+	if err != nil || isPrivateInternalWorkflowRun(run) {
 		writeWorkflowRunNotFound(w)
 		return
 	}
@@ -761,7 +760,7 @@ func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Requ
 	}
 	runID := r.PathValue("run_id")
 	run, err := store.GetRun(r.Context(), runID)
-	if err != nil || reviews.IsAttentionWorkflowRun(run) {
+	if err != nil || isPrivateInternalWorkflowRun(run) {
 		writeWorkflowRunNotFound(w)
 		return
 	}
@@ -791,7 +790,7 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 	}
 	runID := r.PathValue("run_id")
 	run, err := store.GetRun(r.Context(), runID)
-	if err != nil || reviews.IsAttentionWorkflowRun(run) {
+	if err != nil || isPrivateInternalWorkflowRun(run) {
 		writeWorkflowRunNotFound(w)
 		return
 	}
@@ -809,7 +808,7 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 	defer ticker.Stop()
 	for {
 		current, currentErr := store.GetRun(r.Context(), runID)
-		if currentErr != nil || reviews.IsAttentionWorkflowRun(current) {
+		if currentErr != nil || isPrivateInternalWorkflowRun(current) {
 			return
 		}
 		run = current
@@ -884,7 +883,7 @@ func projectWorkflowRunGraphWithoutAttention(
 		}
 	}
 	for _, node := range graph.Nodes {
-		if reviews.IsAttentionWorkflowRun(&workflows.Run{WorkflowRef: node.WorkflowRef}) {
+		if isPrivateInternalWorkflowRun(&workflows.Run{WorkflowRef: node.WorkflowRef}) {
 			hidden[strings.TrimSpace(node.ID)] = struct{}{}
 		}
 	}
@@ -927,7 +926,7 @@ func workflowRunVisible(
 		return false
 	}
 	run, err := store.GetRun(ctx, runID)
-	return err == nil && !reviews.IsAttentionWorkflowRun(run)
+	return err == nil && !isPrivateInternalWorkflowRun(run)
 }
 
 func writeWorkflowRunNotFound(w http.ResponseWriter) {
@@ -1483,12 +1482,37 @@ func pruneWorkflowRunStore(ctx context.Context, cfg *config.Config, store workfl
 	if days <= 0 {
 		return nil
 	}
-	_, err := reviews.PruneTerminalWorkflowRunsExceptAttention(
-		ctx,
-		store,
-		time.Now().UTC().AddDate(0, 0, -days),
-	)
-	return err
+	olderThan := time.Now().UTC().AddDate(0, 0, -days)
+	runs, err := store.ListRuns(ctx)
+	if err != nil {
+		return err
+	}
+	for index := range runs {
+		run := &runs[index]
+		if isPrivateInternalWorkflowRun(run) || !terminalBrowserWorkflowRun(run.Status) {
+			continue
+		}
+		completedAt := run.UpdatedAt
+		if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+			completedAt = *run.CompletedAt
+		}
+		if completedAt.Before(olderThan) {
+			if err = store.DeleteRun(ctx, run.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func terminalBrowserWorkflowRun(status string) bool {
+	switch status {
+	case workflows.RunStatusSucceeded, workflows.RunStatusFailed,
+		workflows.RunStatusCanceled, workflows.RunStatusSkipped:
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeOptionalWorkflowJSON(r *http.Request, dest any) error {

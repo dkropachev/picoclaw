@@ -79,7 +79,7 @@ func TestGitHubMCPConsumersUseExplicitDefaultAgentWorkspace(t *testing.T) {
 		t.Fatalf("githubMCPArtifactRoot() = %q, want %q", gotRoot, wantRoot)
 	}
 
-	runtime := newEventReviewRuntime(cfg, agentLoop, nil)
+	runtime := newEventReviewRuntime(cfg, agentLoop)
 	if runtime.mcpArtifactRoot != wantRoot {
 		t.Fatalf(
 			"initial review runtime artifact root = %q, want %q",
@@ -113,6 +113,9 @@ func TestEventAutomationIngressWithoutWorkflowsPersistsPendingEvent(t *testing.T
 	}
 	if service == nil || service.store == nil {
 		t.Fatal("setupEventAutomationService() did not open the durable event store")
+	}
+	if service.prWorkspaces == nil || service.operatorBackend == nil {
+		t.Fatal("setupEventAutomationService() did not compose the unified PR workspace operator")
 	}
 	if service.cancel == nil {
 		t.Fatal("service.cancel is nil with ingress enabled; retention worker was not configured")

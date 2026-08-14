@@ -35,6 +35,8 @@ type Handler struct {
 	mcpOAuthState               map[string]string
 	mcpOAuthLatestByServer      map[string]string
 	configMutationMu            sync.Mutex
+	prLifecycleEffectMu         sync.Mutex
+	prLifecyclePendingCatalog   string
 	workflowDevelopmentMu       sync.Mutex
 	workflowTriggerReviewOnce   sync.Once
 	workflowTriggerReviewKey    [32]byte
@@ -47,11 +49,6 @@ type Handler struct {
 	sessionDeleteAfterLookup    func()
 	saveToolStateConfig         func(string, *config.Config, string) (string, error)
 	saveConfigIfRevision        func(string, *config.Config, string) (string, error)
-	saveReviewAttention         func(
-		string,
-		config.ReviewAttentionConfig,
-		string,
-	) (string, error)
 }
 
 // NewHandler creates an instance of the API handler.
@@ -71,7 +68,6 @@ func NewHandler(configPath string) *Handler {
 		workflowTriggerReviewUsed:  make(map[[32]byte]int64),
 		saveToolStateConfig:        config.SaveConfigIfRevision,
 		saveConfigIfRevision:       config.SaveConfigIfRevision,
-		saveReviewAttention:        config.SaveReviewAttentionIfRevision,
 	}
 }
 
@@ -140,8 +136,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerGitWorkspaceRoutes(mux)
 	h.registerWorkflowRoutes(mux)
 	h.registerEventRoutes(mux)
-	h.registerReviewRoutes(mux)
-	h.registerPRDevelopmentRoutes(mux)
+	h.registerPRWorkspaceRoutes(mux)
+	h.registerPRLifecycleGateProfileRoutes(mux)
 
 	// OS startup / launch-at-login
 	h.registerStartupRoutes(mux)

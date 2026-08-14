@@ -8,70 +8,43 @@
 
 The web launcher provides authenticated browser management for configuration,
 models, OAuth credentials, tools, skills, MCP servers, sessions, gateway
-process lifecycle, startup behavior, update, and runtime version metadata.
-Full-config writes and workflow-specific config-coupled operations share one
-launcher mutation boundary so a scoped workflow settings response cannot pair
-values from one in-process config generation with another generation's
-revision.
-The authenticated launcher also exposes narrowly validated same-origin review
-APIs. Review-case operations project browser requests to the managed gateway
-using only the gateway process bearer and fixed request, response, redirect,
-and network boundaries. The case-owned attention subresource uses that same
-authority replacement to project one bounded lifecycle and resume one exact
-opaque-fenced private human task. Its canonical focused handoff stays inside
-the existing review conversation card, while generic workflow pages and
-mutations treat the reserved attention runs as absent. Review-attention policy
-management instead remains a
-launcher-local, revision-fenced configuration operation and is excluded from
-the generic config surface. The shared review workbench exposes it at the
-canonical `/reviews?view=policies` location, keeps the default portfolio URL clean,
-and provides editing and effect-status feedback without automatically launching
-any configured decision. That editor presents `pr_development.before_push` as
-a known decision alongside validated custom decision points inside reusable
-named rule sets. The fixed-name built-in `Default` set starts with every known
-moment Off, every set name remains immutable after creation, duplication creates
-a new permanent name, and operators can select one current fallback or assign a
-set to any number of exact repositories. A save changes only future
-publication decisions that have not already pinned a policy revision and has no
-model, code, CI, Git, review-thread, publication, or merge authority.
-The same authenticated shell now exposes the separate own-PR feedback
-view at `/reviews?view=development`. Exact `/api/pr-development` list/detail
-routes replace browser authority with the managed gateway process bearer and
-project only bounded captured-snapshot DTOs. The list-only coarse
-`attention_required` boolean is the server-validated union of current local-review
-and before-push publication input, supports five-second in-app polling, an accessible
-`Needs input` marker, and canonical chat focus; it is not an out-of-band notification,
-does not reveal which private gate source won, and is absent from case detail.
-Repository and pull-number filtering, cursor pagination,
-`pdc_` selection, plain-text feedback rendering, and deliberate external
-PR/review links remain inert. One exact same-origin chat route adds a
-bounded advisory conversation over that snapshot; it does not refresh GitHub
-or create a gate, checkout, Git operation, or provider mutation.
-The launcher starts the gateway in limited mode when no model alias is selected,
-so configuration and non-LLM services remain available. An execution context
-without a configured alias still fails locally with `no model configured`
-before any provider request. Gateway process readiness and model setup readiness
-are reported separately: the shared dashboard keeps a model-setup notice visible
-while the predefined `chat` alias has no explicit mapping, even when the gateway
-is healthy.
-Model management always exposes the predefined developer roles `chat`, `code`,
-`investigate`, `review`, and `fast`. These catalog entries carry no model
-mapping until the user configures one, so they provide stable vocabulary
-without restoring an implicit default model. Specialized custom aliases remain
-available separately from the developer catalog.
+process lifecycle, startup behavior, updates, and runtime metadata. Scoped
+configuration operations share one revision-fenced mutation boundary with the
+generic config surface.
+
+Pull-request work has one canonical launcher surface at `/pull-requests`.
+The launcher proxies the unified `/api/pr-workspaces` tree to the managed
+gateway, replaces browser authority with the process bearer, and exposes
+`/api/pr-lifecycle/gate-profiles` as the scoped configuration boundary.
+Review, implementation, corrections, nudges, gates, deferred work, and their
+separate publication actions render from one `prw_` aggregate. The former
+`/reviews`, `/api/reviews`, and `/api/pr-development` surfaces are removed
+and are not redirects.
+
+The launcher can start the gateway in limited mode when no model alias is
+selected, so non-model management remains available. Model-dependent execution
+continues to fail locally until a concrete model is configured.
 
 ## Reconstruction Notes
 
-- Similarity target: recreate authenticated launcher APIs for dashboard auth, config/model/OAuth/tool/skill/session/gateway/system management, and JSON error behavior.
-- Core types/functions: API handler/router, dashboard auth middleware/store, launcher config, model handlers, provider and MCP OAuth flow state, gateway process manager, startup/update/version handlers.
-- Runtime ordering: authenticate dashboard requests, load config, validate request body, mutate specific subsystem, save atomically where applicable, apply runtime side effects, return JSON.
-- Non-obvious constraints: secrets are preserved/redacted, logout is POST-only, login is rate-limited, OAuth flow state expires, feature-specific management stays outside the generic config form, and gateway logs remain inspectable after failures. Review-policy discoverability uses only one canonical fixed query value; policy content and revisions stay out of route or persisted browser state, and policy editing confers no run authority. Attention navigation uses only canonical `case` plus fixed `focus=chat`; response fences remain in memory, and the launcher never forwards browser authority or exposes the gateway bearer, private run/task/session/policy identity, input hashes, or raw upstream errors. The development view accepts only its fixed `view=development`, optional bounded repository, optional canonical positive pull number, and canonical `pdc_` selection; it stores no captured feedback or cursor in browser persistence and labels every provider/ref/SHA value as capture-time data.
-- Testability boundary: unexported session lookup/delete callbacks on the launcher handler are inert by default and exist only to place deterministic barriers in cross-store race regressions; production session behavior remains in the feature-owned session handlers.
+- Similarity target: authenticated launcher APIs and a responsive management UI
+  that replace browser credentials with narrow local-runtime authority.
+- Core types/functions: API handler/router, dashboard auth middleware, config
+  mutation coordinator, gateway process manager, PR-workspace proxy, lifecycle
+  gate-profile handler, typed frontend clients, and the pull-request route.
+- Runtime ordering: authenticate, canonicalize and bound the request, reject
+  cross-site mutation, load one exact config or PID generation, call the narrow
+  owner, validate and bound the response, then return non-cacheable JSON.
+- Non-obvious constraints: launcher reads never attach to or repair process
+  metadata; browser credentials are never forwarded; scoped config writes use
+  the public-plus-security revision; workspace mutations use workspace version,
+  request ID, and provider head fences; removed PR routes have no compatibility
+  handler.
 
 ## Requirements
 
-| ID                | Level  | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Rationale                                                                                                                                                      |
-| ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ID | Level | Requirement | Rationale |
+| --- | --- | --- | --- |
 | `FR-LAUNCHER-001` | MUST   | Dashboard access requires password setup/login and an HttpOnly session cookie; local bootstrap auto-login is loopback-only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Browser management must be gated.                                                                                                                              |
 | `FR-LAUNCHER-002` | MUST   | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, model API-key payloads, existing model secrets across equivalent model alias changes, and runtime log-level application.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Launcher config editing must not corrupt config or credentials.                                                                                                |
 | `FR-LAUNCHER-003` | MUST   | Account management and model-alias management are separate. `model_list[]` and credential records describe concrete provider accounts; a disabled persisted account does not suppress the enabled virtual account projected from its live credential. `model_aliases[]` maps exact user-facing names to a default concrete model ID, optional overrides keyed only by concrete accounts, and optional `disabled_accounts` where that alias must not run. The Models UI fetches every concrete account's advertised models, deduplicates the union for the default-model selector, scopes each account-override selector to models advertised by its selected account, lets users type to filter every alias model selector, shows account availability for every option, and edits aliases in a modal; when no enabled concrete account exists, model selectors and override creation remain disabled while the modal explains how to restore an account. Provider-account management and a global runtime-model selection are not duplicated there. Index-addressed model and alias updates and deletes require the opaque revision returned by the model-list read and reject stale revisions before interpreting an index. Account routers remain model-free, skip explicit disabled alias/account pairs, model-router terminals target aliases only, and chat uses independent account and alias selectors. No management path invents or persists a provider-default model. | Users need safe account and model administration without coupling an account graph to a model, overwriting a concurrent edit, deleting a shifted row, or silently selecting a provider model. |
@@ -84,78 +57,25 @@ available separately from the developer catalog.
 | `FR-LAUNCHER-010` | MUST   | The authenticated launcher composition registers the feature-owned MCP management and OAuth callback routes, exposes a dedicated Agent → MCP navigation entry, and removes MCP editing from the generic config form. Gateway restart detection includes enabled MCP discovery, server transport, custom-header, and nonsecret auth-revision changes. Shared forms announce validation errors and provide keyboard-accessible, labeled secret visibility controls.                                                                                                                                                                                                                                                                                                                                                                                                                                                        | MCP management must be easy to find, must not conflict with generic config saves, and must clearly apply runtime-relevant changes without weakening shared form accessibility. |
 | `FR-LAUNCHER-011` | MUST   | Full-config PUT/PATCH/reset, generic tool-state writes, agent policy mutations, workflow-specific settings, template-install, publish, and workflow Run/Retry admission are serialized by one handler mutation boundary. Every cooperating `SaveConfig` call also holds a config-path advisory process/file lock, with the opaque generation covering both public JSON and the security sidecar. Full-config PUT/PATCH, generic tool-state, agent policy, and workflow settings mutations load an update-safe snapshot and perform final compare-and-swap saves against that exact generation; reset holds the lock across backup, secret preservation, and replacement. Stable scoped reads derive their opaque revision from the same snapshot without migration, backup, or save side effects. Agent responses derive restart effects from that captured config and a read-only in-memory gateway snapshot without discovering processes, attaching to them, or sanitizing PID metadata. Workflow Run and Retry reacquire that same advisory lock after their final readiness fence, compare the current public-plus-security generation with the admitted generation, and retain the lock through exact compatibility checking and durable root-run creation. The authenticated launcher registers agent management routes and navigation, and the gateway restart signature includes the complete ordered agent policy while preserving nil-versus-empty distinctions. | Scoped or merge-patch management must not return values or effects from one config generation with another generation's revision, lose a concurrent secret-only update, overwrite a mutation from another launcher or gateway process, hide an unapplied agent policy change, mutate gateway process metadata during an agent read, or admit execution from one generation while another process publishes a replacement before the run exists. |
 | `FR-LAUNCHER-012` | MUST   | The authenticated launcher registers agent capability and activity routes without replacing existing management surfaces. Capability mutation holds the shared handler and advisory config boundaries through its final composite config/file fence and atomic workspace write, while gateway restart comparison combines the filesystem-pure config signature with only runtime-relevant `AGENT.md` frontmatter semantics. Activity is read-only: the gateway records a concrete numeric address from the listener that actually opened, including a single-stack localhost fallback; the launcher peeks PID authority without attachment, cleanup, or migration, rejects hostname and wildcard authority, validates the numeric target as loopback or a literal local-interface address, injects the process bearer into one exact bounded no-proxy/no-redirect request, forwards no browser credentials or ambient headers, and strictly reprojects the response. | Workspace policy must not race config ownership, prose-only edits must not spuriously require restart, and a browser activity view must not mutate process metadata or leak runtime bearer authority. |
-| `FR-LAUNCHER-013` | MUST   | The authenticated launcher registers the exact `/api/reviews` list/detail routes and their bounded chat, finding-edit, drop/restore/rephrase, submit, and reconcile mutations, and its primary sidebar exposes the dedicated `/reviews` workbench. It rejects noncanonical paths, unexpected queries, methods, encodings, content types, cross-site mutations, invalid identifiers, and oversized bodies before proxying one exact case route to the managed gateway. Proxying peeks PID authority without attaching, cleaning, or migrating process state; accepts only a numeric loopback or literal local-interface address; replaces browser credentials and ambient headers with the process bearer; disables proxy and redirect behavior; uses operation-specific timeouts; bounds the upstream response; and strictly reprojects status, content type, and JSON. The launcher-local exact `GET`/`PUT /api/reviews/attention-policies` subresource reads or fully replaces the trusted catalog under the shared mutation and public-plus-security compare-and-swap boundaries; its current-schema read is inert and its scoped save raw-patches only persisted `reviews.attention` without serializing environment/default state or rewriting the security sidecar. Its strict decoder rejects malformed encodings, unknown or case-colliding schema keys, duplicate keys, trailing JSON, excessive nesting or size, and lone Unicode surrogate escapes while preserving case-distinct keys only inside schema-declared arbitrary question maps. `GET /api/config` omits that catalog; broad config `PUT` preserves it exactly and accepts only a semantically empty `reviews` compatibility placeholder, while broad config `PATCH` rejects every case-insensitive `reviews` member. Gateway restart comparison includes the canonical catalog revision only while event ingress and workflows are both enabled and fails closed on an invalid active catalog. Gateway composition starts and stops the durable review controller, poller, and submission workers with event automation and registers the protected runtime review-case routes. The `/reviews` shell makes the editor discoverable through one policy control and canonical `view=policies` query, canonicalizes invalid or repeated values to the default inbox URL with no `view`, and places no policy, repository, question, agent, error, or revision data in route or browser storage. The editor reads the strict policy projection and bounded configured-agent catalog, preserves one lossless memory-only draft, submits one explicit revision-fenced replacement, retains dirty state on conflict or navigation, reports authoritative applied-versus-restart-required status, and never launches a decision, workflow, model, tool, provider, repository, or GitHub action. | Browser review operations and attention policy administration need discoverable same-origin authentication without exposing runtime bearer authority, forwarding browser credentials, accepting an open proxy surface, losing a concurrent config update, persisting ambient runtime state, bypassing the scoped policy boundary, persisting trusted policy in browser navigation state, or separating worker lifecycle from gateway ownership. |
-| `FR-LAUNCHER-014` | MUST   | The authenticated launcher registers exact case-owned `GET /api/reviews/{case}/attention` and `POST /api/reviews/{case}/attention/respond` routes and the canonical `/reviews?case={case}&focus=chat` workbench handoff. The proxy rejects noncanonical paths, all attention queries, unsupported methods/encodings/content types, cross-site response mutations, malformed or oversized JSON, and invalid case IDs before peeking PID authority without attachment, cleanup, migration, process inspection, or health probing. It requires a nonzero port and numeric loopback or literal current local-interface address; hostname, wildcard/unspecified, multicast or remote numeric, and incomplete authority fail before bearer request construction. It replaces every browser credential and ambient header with the process bearer and fixed safe headers, disables environment proxies and redirects, applies read-versus-AI response timeouts plus a one-MiB request and 32-MiB response bound, and strictly validates upstream JSON/content type before returning it. The browser client losslessly accepts only the bounded public attention DTO and lowercase `sha256:` fence, keeps the response and fence in memory, renders lifecycle/history/questions and the current editor inside the existing conversation card, and focuses it only after the selected case renders. Generic workflow routes omit or return not found for every exact reserved `inline/review-attention-gates/v1` run, including malformed impostors. Visible ordinary runs scrub direct hidden parent/caller, retry, child, and origin-root references; graphs omit hidden nodes and incident edges; and cancel/retry/task resume/task cancel return not found for every run in the normalized transitive parent/child/retry component. Readable ordinary component members remain visible only after scrubbing. Production workflow-store pruning preserves every exact reserved-reference run while ordinary terminal runs retain configured retention. An exact reserved task resume is classified as not found before workflow-disabled response or runtime construction; case attention may remain read-only without a response fence through the live gateway. | The launcher must replace browser authority rather than relay it, expose only the case-owned declassification, and prevent attention navigation, process discovery, retention, or generic workflow routes from becoming a private run/task/session/policy/input-hash/error oracle or alternate mutation surface. |
-| `FR-LAUNCHER-015` | MUST   | The authenticated launcher registers exact `GET /api/pr-development` and `GET /api/pr-development/{pdc_...}` routes for the own-PR development workbench. The list accepts at most one canonical `repository`, `pull_number`, `limit`, and opaque `cursor`; the detail accepts no query. Before any PID read, the proxy rejects path aliases, malformed percent encoding, unknown or repeated query members, noncanonical pull numbers or limits, invalid case IDs, request bodies, unsupported methods, and non-identity encodings. It peeks gateway authority without attachment, cleanup, migration, process inspection, or health probing; requires a nonzero port and numeric loopback or literal current local-interface address; replaces all browser credentials and ambient headers with the process bearer and fixed safe headers; disables environment proxies and redirects; and returns only one bounded, syntactically valid JSON response from the matching protected runtime route. The browser strictly validates the safe list/detail DTO, presents it at canonical `/reviews?view=development` with optional repository, optional pull number, and `pdc_` selection, keeps cursor and response data memory-only, renders captured feedback as plain text, and opens PR/review URLs only as explicit external links with opener isolation. The view labels provider state and all refs/SHAs as captured snapshots and represents replay as a separate visible case. Reads never refresh provider state or start a model, gate, workflow, checkout, filesystem write, Git/CI command, commit, push, merge, acknowledgement, provider request, or other mutation; `FR-LAUNCHER-016` owns the separate explicit advisory chat action. | A useful own-PR inbox needs the launcher's authenticated shell and authority replacement without turning captured feedback into live provider truth, exposing runtime provenance, or creating an implicit development/action surface. |
-| `FR-LAUNCHER-016` | MUST   | The authenticated launcher registers exact `POST /api/pr-development/{pdc_...}/chat` in addition to the inert reads. Before any PID read it rejects noncanonical or escaped aliases, extra segments, unsupported methods, every raw query or bare `?`, absent/ambiguous/cross-site browser provenance, streaming or missing-length input, non-identity or ambiguous encoding, and anything except one positive-length at-most-one-MiB `application/json` value with optional UTF-8 charset, valid UTF-8/Unicode scalars, bounded nesting, and exactly the case-sensitive keys `expected_version` and `content`; exact duplicates, case-colliding aliases, unknown members, and trailing values fail closed. The version is an integer from zero through 256 and content uses Go `strings.TrimSpace`, remains nonempty and NUL-free, and is at most 32 KiB. The launcher replaces all browser authority and ambient headers with the managed process bearer on one numeric-local no-proxy/no-redirect request to exact `POST /runtime/eventing/pr-development/{pdc_...}/chat`, applies a 120-second application timeout and 32-MiB syntactically valid JSON response bound, and relies on the shared protected server's 135-second write timeout to leave response headroom. The strict browser client accepts only the exact captured case plus a version equal to an at-most-256-entry contiguous transcript with unique public `pdm_` IDs, public `user` or `assistant` roles, canonical content and timestamps, at-most-64-KiB entries, and at-most-4-MiB total content. Success must bind the same case at exactly expected version plus two with the exact normalized user row at the expected ordinal and an assistant immediately after it. Chat-error detail must bind the same case at no earlier than the submitted version; list/detail errors never seed detail. Equal-or-older delayed refetches cannot replace a newer same-case cache entry. The case-keyed UI keeps detail, transcript, draft, mutation, and uncertain-submission state in memory only, disables duplicate submission while pending, and renders both roles as plain text in an accessible live log. Authoritative expected-version-plus-one reload with the matching user row clears the draft, reports the committed human/model-response failure, and suppresses blind retry; expected-version-plus-two with that row and the following assistant clears the error as a completed turn. Other failures retain uncommitted input. A refetch error is announced while retaining visible detail and draft; on narrow screens opening detail focuses Back and returning restores focus to the selected case. The UI identifies the agent as advisory over a historical captured snapshot and exposes no gate, checkout, edit, Git/CI, provider refresh, acknowledgement, publication, or merge control. | A per-PR conversation needs the same authenticated authority replacement and stale-state recovery as the workbench without turning the browser into an open model proxy or implying that discussion has inspected or changed code. |
-| `FR-LAUNCHER-017` | MUST   | The authenticated launcher registers exact `POST /api/pr-development/{pdc_...}/repair`. Before PID access it applies the same canonical path, same-origin provenance, identity encoding, JSON media, one-MiB body, Unicode, duplicate-key, depth, and trailing-value defenses as chat, but accepts exactly `expected_conversation_version`, `expected_repair_revision`, random canonical `prq_` request ID, and Go-trimmed nonempty at-most-4-KiB `instruction`. It replaces browser authority on one bounded numeric-local no-proxy/no-redirect request to the matching protected runtime route and returns its authoritative `202` detail. The strict client independently validates and monotonically merges conversation and repair revisions, takes unversioned repair capability from authoritative GETs while mutation detail may only downgrade it, and admits one optional `pds_` session, at most 64 contiguous `pdr_` attempts, all-or-none pinned public head fields, statuses, timestamps, at-most-4-KiB plain-text instruction/summary, and fixed error codes while rejecting every private or unknown field. The development view places an explicit Local development card between feedback and advisory chat, preserves one memory-only case-keyed draft, ambiguous request ID, and baseline next-attempt ordinal, and consumes ambiguous intent only when that exact response or history ordinal matches the submitted conversation version and canonical instruction. It requires a confirmation that the action edits only a local checkout and performs no review, CI, commit, push, or merge, disables another start while active, polls only during `queued`, `preparing`, or `running`, provides manual reload and an accessible live status, and shows newest-first history even when new starts are unavailable. A completed attempt is labeled local, unreviewed, untested, uncommitted, and unpushed; no path, diff, CI, commit, push, merge, reset, release, or provider control is rendered. | Explicit asynchronous repair needs authenticated admission, retry-stable intent, independent monotonic UI state, and truthful local-only language without placing checkout or publication authority in the browser. |
-| `FR-LAUNCHER-018` | MUST   | The existing authenticated own-PR list and case-owned attention proxy routes keep their exact request/response shapes while the server projects `attention_required` as the safe union of an actionable current local-review attention occurrence and an actionable current before-push publication decision. The browser accepts no source discriminator and infers none: a flagged own-PR row says `Needs input`, selection keeps the existing canonical `view=development&case={pdc_...}&focus=chat` handoff, and the shared conversation component is explicitly given only an own-PR presentation context. The containing section is source-neutral `Discuss and steer`, and that context uses the actor `Gate`, source-neutral lifecycle/error text, heading `PR decision gates`, response label `Reply to the current PR gate`, and displays `Your reply continues this gate; it does not directly edit code, run CI, push commits, acknowledge a review, or merge the pull request.` The advisory chat remains explicitly identified as AI, the outbound-review workbench retains its existing `AI attention` heading, actor, lifecycle, and response text, and no public DTO, route, browser-storage value, polling interval, public response-fence shape/authority, existing source-domain behavior, or mutation authority changes. | One case-owned response surface should truthfully cover both private decision sources without leaking their provenance, falsely labeling every gate as AI, weakening the existing safety boundary, or changing outbound-review language. |
-| `FR-LAUNCHER-019` | MUST   | The revision-fenced attention-policy editor presents `pr_development.before_push` as a known decision without restricting free-form custom decision-point input. It edits reusable named rule sets whose ordered decision gates may mix working-context AI, isolated-context AI, deterministic, and zero/no-op checks with each kind's relevant criteria, condition, structured-question controls, and explanatory text. The fixed ID `default` and immutable name `Default` always exist; its empty initial rules make every known moment Off, but its rules remain editable. Every set name is immutable after creation; duplicating a set asks for a new case-insensitively unique permanent name and deep-copies only its rules. Any live set may become the current fallback or be assigned to many exact repositories, and removing an assignment returns that repository to the fallback. The editor shows built-in, fallback, and assignment status plus the shared-set blast radius before saving. For a before-push working-context gate, it warns that the selected agent must be the same agent that owns the PR's local development and that an owner mismatch fails closed before publication. The strict `GET`/revision-fenced full-replacement `PUT /api/reviews/attention-policies` contract exposes only the normalized named catalog. A valid legacy global/repository catalog is materialized losslessly without being written; if distinct effective sets cannot fit named bounds, the editor reports an explicit simplify-before-migration conflict while the legacy runtime remains active. Saving affects only future publication decisions that have not pinned a policy revision and only updates configuration: it does not run a gate or model, edit code, run CI, invoke Git or push, acknowledge a review, resolve a review thread, or merge a pull request. | Before-push policy must be understandable, reusable, and assignable without creating a second policy language, invalidating custom integrations, changing an already-admitted publication, or turning configuration management into development or publication authority. |
-| `FR-LAUNCHER-020` | MUST   | An authenticated dashboard caller requests exact `GET /api/reviews/{prc_...}/provider`, optionally with only `view=status`, or same-origin `POST /api/reviews/{prc_...}/provider/thread` with exactly one opaque token and `resolve` or `unresolve` action. Before PID access, the launcher rejects noncanonical paths or encoding, unknown or repeated query, bare `?`, unsupported method or content encoding, invalid media type or browser provenance, malformed or oversized input, unknown or duplicate fields, and trailing JSON. It then peeks PID authority without attachment, cleanup, migration, process inspection, or health probing; requires a nonzero numeric loopback or literal current local-interface address; replaces every browser credential and ambient header with the managed process bearer and fixed safe headers; and makes one bounded no-proxy, no-redirect request to the exact protected runtime route. Status uses the ordinary short timeout; full reads and mutations use the provider timeout. The browser client percent-encodes the case ID, sends only the exact mutation fields, and strictly decodes duplicate-free bounded provider DTOs while validating collection and aggregate limits, types, URLs, timestamps, availability, completeness, pull identity, and thread-capability/token consistency. | The proxy itself changes no review, workflow, config, process, PID, Git, or provider state; only an explicit accepted upstream thread mutation may change its selected provider thread. Browser credentials, ambient headers, PID bearer, raw thread identity, malformed upstream error content, and provider artifacts are never forwarded or exposed. This API/client slice renders no provider UI and grants no review submission, push, merge, or generic provider authority. | Invalid or stale IDs or tokens, aliases, gateway authority, redirects, timeouts, response status, content type, size, syntax, duplicate fields, unknown fields, cardinality, or internal DTO relationships fail before use and map to bounded public errors; write errors are never presented as success. | Live provider data and narrow thread actions need authenticated authority replacement and strict browser declassification without opening the gateway, trusting provider-shaped JSON, or expanding browser write authority. |
-| `FR-LAUNCHER-021` | MUST   | The authenticated shared shell renders PR Reviews in the existing left Services navigation and the current route is any `/reviews` state. | PR Reviews is a keyboard-operable collapsible section, structurally parallel to Agent, with translated Pull request work and Configuration children. Pull request work links to clean `/reviews` and is active for every review workspace state except the policy view; Configuration links only to canonical `/reviews?view=policies` and is active only there. Services and PR Reviews open when a child is current, a collapsed section hides its children, and selecting either child closes the mobile sidebar. The portfolio has no duplicate page-local configuration navigation; the standalone policy editor keeps a clean return-to-work action and its existing dirty-navigation protection. All shipped locales provide both labels. | Expanding or collapsing changes only transient sidebar state; child navigation changes only canonical route search. Opening Configuration performs no config save, model or workflow call, provider read or write, review action, Git operation, push, acknowledgement, or merge; policy mutation remains only the explicit revision-fenced save under `FR-LAUNCHER-013` and `FR-LAUNCHER-019`. | Direct refresh on work or policies opens the correct nested section and marks exactly one child active, including `aria-current`. Unknown or repeated view values canonicalize to work; long labels, icon-collapsed desktop mode, keyboard focus, dark and light themes, and narrow widths remain usable. Leaving a dirty policy or review draft remains blocked by its existing confirmation boundary. | Review configuration belongs in global left navigation without duplicate workbench navigation, conflating work with configuration, or granting navigation execution authority. |
-
-For `FR-LAUNCHER-015`, the strict list response requires the additive list-only
-`attention_required` boolean while detail continues to reject it. With
-`FR-LAUNCHER-018`, that unchanged boolean is the safe union of current local-review
-and current before-push publication input. While the development view is open,
-the UI polls the list every five seconds, presents an accessible `Needs input`
-marker, and selecting a marked case replaces route
-state with canonical `view=development&case={pdc_...}&focus=chat`. Selecting an
-ordinary case clears focus. This is authenticated in-app discovery only and
-does not claim email, provider, or channel notification, and neither the marker
-nor the unchanged attention DTO reveals which private source supplied the gate.
-
-For `FR-LAUNCHER-017`, a newly fetched detail is authoritative for repair
-availability even when neither durable revision advanced, while a delayed
-mutation response cannot replace a newer cached capability result. An exact
-idempotent `202` replay may bind its matching attempt anywhere in retained
-history rather than only at the tail. Chat and repair share one per-case pending
-guard in the workbench so one browser cannot queue the short repair admission
-behind its own long advisory model call. `recovery_required` is accepted only
-with a complete public pin and changes the action to an explicit continuation
-that warns the user to inspect and preserve possible partial local edits. The
-4-KiB instruction and summary limits are jointly sized with the bounded case,
-256-message/4-MiB transcript, and 64-attempt aggregate so even worst-case JSON
-HTML escaping leaves both a maximum legal detail and its error wrapper within
-the launcher's 32-MiB response ceiling.
-
-`FR-LAUNCHER-013` also registers the exact launcher-local
-`GET /api/reviews/attention-agents` companion route. It requires one strong
-quoted `If-Match` for the policy response's complete-config revision and accepts
-only an optional canonical decimal cursor paired with that same revision. Each
-read-only page contains at most 256 canonically sorted configured identities,
-the effective default, the unchanged revision, and an optional next cursor;
-implicit `main` is the only identity for an empty list. Stale public or security
-state conflicts, while malformed/repeated headers or queries, noncanonical
-paths, unsupported methods, and invalid agent identity state fail through fixed
-non-cacheable errors without mutation. The separate policy read materializes a
-valid legacy global/repository catalog into named sets without writing it; if
-the distinct effective sets exceed named bounds, it returns a fixed
-simplify-before-migration conflict while legacy runtime selection remains active.
-
-For `FR-LAUNCHER-019`, the before-push entry is a known editor suggestion, not
-an allowlist: existing and new custom decision-point strings continue through
-the same validated catalog. Repository previews select the exact in-memory
-assignment or current fallback and show the same ordered gates that the runtime
-consumes. Editing a set affects every repository assigned to it, changing the
-fallback affects only unassigned repositories, and duplication copies neither
-relationship. Existing pinned publication decisions keep their captured policy;
-neither opening the editor nor saving a later catalog revisits them.
+| `FR-LAUNCHER-021` | MUST   | The authenticated shared shell renders one Pull requests section in the existing left Services navigation and treats canonical `/pull-requests` as the only PR-work route. | Pull requests is a keyboard-operable collapsible section, structurally parallel to Agent, with translated Pull request work and Gate profiles children. Pull request work links to clean `/pull-requests`; Gate profiles links only to canonical `/pull-requests?view=gate-profiles`. Services and Pull requests open when a child is current, exactly one child carries active state, and selecting either child closes the mobile sidebar. The removed `/reviews` route, legacy view values, and private query members receive no compatibility UI; invalid state is scrubbed to the applicable canonical location. | Expanding or collapsing changes only transient sidebar state; child navigation changes only canonical route search. Opening Gate profiles performs no config save, model or workflow call, provider read or write, review action, Git operation, push, acknowledgement, or merge. | Direct refresh on work, one `prw_` workspace, or gate profiles opens the correct nested section. Repeated or incompatible query values canonicalize away; long labels, icon-collapsed desktop mode, keyboard focus, dark and light themes, and narrow widths remain usable. | Review and implementation now share one discoverable shell without preserving a second, ambiguous navigation contract. |
+| `FR-LAUNCHER-022` | MUST   | The launcher frontend uses the unified PR-workspace and PR-lifecycle gate-profile clients and renders their portfolio, workspace, and ordered-stage editor components. | Every request uses `launcherFetch`; workspace mutations carry `expected_version` plus a random request ID and head-dependent actions also carry the exact provider revision, falling back to the verified head SHA only when that revision is absent. The workspace UI presents one lifecycle rail, strict charter/type editor, review and nudge history, scope matrix, implementation/validation evidence, corrections shared across review and implementation, review-result and implementation-branch publication, deferred issue drafts, typed gate responses, and combined activity. Review publication sends only the current in-scope finding IDs when present; implementation publication is a separate action. Both are phase- and provider-capability-gated, expose queued/running/succeeded/failed/unknown state, safe external result links and public error codes, and offer a separately fenced reconcile action only for unknown outcomes. Deferred issue publication remains a distinct control. The gate editor manages named profiles containing only workflow maps, exact `https://provider-origin|repository-id` assignments, global independent review/completion nudge bounds, global file/semantic-line/module scope thresholds, and ordered deterministic, working-context AI, isolated AI, human, and zero stages using the v2 core stage shape. | Reads and navigation do not create automation work. Saving the exact lifecycle configuration is one revision-fenced full replacement and does not execute a gate. Browser DTOs, drafts, filters, CAS conflicts, prompts, and request IDs remain memory-only; external PR and publication links require HTTPS and opener isolation. English keys define the feature vocabulary and other locales use the configured English fallback until translated. | Malformed or oversized JSON, invalid aggregate identity, unsafe publication URLs, legacy profile wrappers, invalid profile/stage IDs, missing stage-specific fields, non-monotonic scope thresholds, unordered nudge bounds, stale config/workspace/head revisions, unavailable secure randomness, and unknown publication results fail closed with retry or reconciliation controls. Components use semantic design tokens, shared controls, keyboard-operable actions, stable narrow layouts, and no direct fetch. | The new lifecycle requires an authenticated, consistent UI contract without leaking launcher/gateway authority or allowing stale browser state to steer PR work. |
 
 ## Data And State Model
 
-Launcher state includes dashboard password/session storage, launcher-specific
-config, provider and feature-owned OAuth flow maps, config file path, gateway
-process state/logs and restart signature, model catalog entries, model fetch
-auth method and credential IDs, startup settings, and update request status.
-The attention proxy and focused route add no launcher persistence: response
-drafts and opaque fences remain memory-only, while the gateway's case-owned
-projection remains authoritative after every read or response.
-The own-PR development proxy and advisory chat add no launcher persistence.
-Only the canonical `view`, optional repository and positive pull-number filters,
-and selected public case ID may appear in route state; cursors, feedback,
-conversation versions/messages, local drafts, captured DTOs, gateway authority,
-and all omitted provenance remain memory-only or outside the browser boundary.
+The launcher owns an HttpOnly dashboard session, process-local login throttles,
+a shared config mutation lock, public-plus-security config revisions, and
+managed gateway PID metadata. It does not own PR-workspace state.
+
+PR browser state is deliberately shallow: canonical route selection may contain
+one `workspace=prw_...` value or the fixed `view=gate-profiles`; filters,
+cursors, DTOs, drafts, request IDs, conflicts, prompts, private gate subjects,
+and provider reconciliation evidence remain memory-only. The gateway's unified
+aggregate is authoritative after every mutation.
+
+The lifecycle settings response contains named gate profiles, a default profile,
+exact repository assignments, independent review/completion nudge bounds,
+scope-size thresholds, a catalog digest, the config revision, and the
+`restart_required` effect.
 
 ## Surface Ownership
 
@@ -239,328 +159,64 @@ Owns: TEST web/backend/api/weixin*
 
 ## Auxiliary Interfaces
 
-| Type     | Surface                                                                                                                                                                                      | Contract                                                                                                                                                                                               | Requirement IDs                                         |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| HTTP     | `/api/auth*`, `/api/config*`, `/api/accounts/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*`                                                           | Authenticated launcher management endpoints.                                                                                                                                                           | `FR-LAUNCHER-001` through `FR-LAUNCHER-007`             |
-| HTTP     | Feature-owned `/api/workflows*` routes                                                                                                                                                       | Register workflow endpoints behind launcher authentication and shared bounded JSON response behavior; workflow projection, authoring, execution, and persistence semantics remain owned by the workflows and security-isolation features. Exact reserved review-attention runs are omitted/not found, visible ordinary relationships/graphs are scrubbed, transitive parent/child/retry components are mutation-fenced, and exact reserved runs are exempt from ordinary production retention. | `FR-LAUNCHER-001`, `FR-LAUNCHER-007`, `FR-LAUNCHER-014` |
-| HTTP     | Feature-owned `/api/mcp*` and `/mcp/oauth/callback` routes                                                                                                                                | Register MCP management behind launcher authentication, retain the bounded callback exception, and cancel outstanding flows during handler shutdown.                                                  | `FR-LAUNCHER-010`                                       |
-| HTTP     | Feature-owned `/api/agents*` routes                                                                                                                                                         | Register ordered agent policy reads, revision-fenced config/workspace mutations, and bounded activity proxying behind launcher authentication, navigation, strict JSON handling, and gateway restart reporting. | `FR-LAUNCHER-011`, `FR-LAUNCHER-012` |
-| HTTP     | Feature-owned `/api/reviews*` routes                                                                                                                                                        | Register review-case proxy operations, the case-owned attention projection/response proxy, and the launcher-local revision-fenced attention-policy subresource behind dashboard authentication and shared strict JSON/config-mutation boundaries. The policy schema exposes reusable immutable-name rule sets, one current fallback, exact repository assignments, the known before-push decision, and custom points; bounded legacy catalogs are materialized for the editor without an implicit write. | `FR-LAUNCHER-013`, `FR-LAUNCHER-014`, `FR-LAUNCHER-019` |
-| HTTP     | `GET /api/reviews/{case}/attention`, `POST /api/reviews/{case}/attention/respond`                                                                                                           | Replace browser authority with the PID bearer on one exact no-proxy/no-redirect bounded request, return only bounded syntactically valid JSON from the protected case-owned gateway route, require the browser client to validate the exact public attention DTO losslessly before use, and admit a response only through the same-origin JSON mutation boundary. | `FR-LAUNCHER-014` |
-| HTTP     | `GET /api/reviews/attention-agents`                                                                                                                                                         | Return only one fixed-size, revision-fenced page of canonical configured agent IDs and normalized names plus default/revision metadata; never expose the broader agent-management DTO or mutate config.    | `FR-LAUNCHER-013`                                       |
-| HTTP     | `GET /api/pr-development`, `GET /api/pr-development/{pdc_...}`                                                                                                                             | Authenticate the browser, replace its authority with the managed process bearer, and proxy only the exact bounded safe own-PR list/detail projections without refreshing or mutating captured state.       | `FR-LAUNCHER-015`                                       |
-| HTTP     | `GET /api/pr-development/{pdc_...}/attention`, `POST /api/pr-development/{pdc_...}/attention/respond`                                                                                    | Preserve the exact case-owned attention proxy and DTO while server-side validation safely selects at most one current local-review or before-push publication conversation; expose no private source identity or additional response authority. | `FR-LAUNCHER-018` |
-| HTTP     | `POST /api/pr-development/{pdc_...}/chat`                                                                                                                                                  | Before PID access, enforce the canonical no-query path, same-origin provenance, known nonstreaming length, identity-encoded JSON media type, exact two-key/case-sensitive bounded JSON shape, version range, and Go-trimmed content. Replace browser authority on one no-proxy/no-redirect numeric-local request, bound it to 120 seconds and its JSON response to 32 MiB, and keep the shared protected write timeout at 135 seconds. | `FR-LAUNCHER-016`                                       |
-| HTTP     | `POST /api/pr-development/{pdc_...}/repair`                                                                                                                                                | Strictly admit one same-origin, exact-shape, conversation-and-repair-fenced idempotent local-repair request before replacing browser authority and proxying the immediate asynchronous admission to the protected runtime. | `FR-LAUNCHER-017` |
-| Frontend | `/reviews`, `/reviews?view=policies`, `/reviews?case={case}&focus=chat`                                                                                                                       | Expose the default case inbox, one canonical Rule sets view, and the selected case's existing focused conversation card in the authenticated shared shell; retain policy and response drafts only in memory, protect dirty policy navigation, surface authoritative conflict/restart/attention state, and never place policy or response authority in the route. The editor keeps the built-in Default visible and editable with a locked name, duplicates sets under new permanent names, offers known before-push and custom points with ordered mixed gates, selects one fallback, assigns sets to exact repositories, explains shared effects, and provides owner-agent guidance without execution authority. | `FR-LAUNCHER-013`, `FR-LAUNCHER-014`, `FR-LAUNCHER-019` |
-| Frontend | `/reviews?view=development`                                                                                                                                                                  | Expose the own-PR captured-feedback list/detail, generic needs-input discovery, case-owned PR decision-gate conversation, explicit advisory conversation, and confirmed local-only repair lifecycle with only optional repository, optional positive pull number, and public case selection in canonical navigation. Render all untrusted text as plain text; keep cursors, DTOs, both revision dimensions, drafts, request identity, mutation, and ambiguity state out of persistence; merge conversation and repair state monotonically; poll only active repair work; retain detail/drafts through announced failures; preserve mobile focus order; and state that a gate reply does not directly edit, check, push, acknowledge, or merge. | `FR-LAUNCHER-015` through `FR-LAUNCHER-018` |
-| Go API   | `config.ConfigRevision`, `config.LoadConfigSnapshot`, `config.LoadConfigForUpdateSnapshot`, `config.SaveConfigIfRevision`, `config.WithConfigMutationLock`                                  | Derive, atomically capture, compare-and-save, or retain the canonical public-plus-security config generation under the shared process and advisory file lock.                                          | `FR-LAUNCHER-011`                                       |
-| CLI      | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate`                                                                                                                   | Non-browser setup, auth, and migration helpers.                                                                                                                                                        | `FR-LAUNCHER-002`, `FR-LAUNCHER-004`                    |
-| Config   | Launcher config file beside app config                                                                                                                                                       | Port/public/access options and dashboard auth migration.                                                                                                                                               | `FR-LAUNCHER-001`, `FR-LAUNCHER-006`                    |
-| Frontend | `web/frontend/AGENTS.md`, `docs/design/frontend-guidelines.md`, `docs/features/frontend-ownership.json`, `web/frontend/scripts/lint-ui-rules.mjs`, and `web/frontend/tests/ui-smoke.spec.ts` | Agent-facing launcher UI guidance plus static, formatting, accessibility, ownership, and mocked-route browser checks. Feature-specific UI behavior remains owned by the relevant product feature spec. | `FR-LAUNCHER-002`, `FR-LAUNCHER-007`, `FR-LAUNCHER-009` |
+| Type | Surface | Contract | Requirement IDs |
+| --- | --- | --- | --- |
+| HTTP | `/api/pr-workspaces*` | Authenticated, canonical, bounded proxy for the matching protected gateway tree; mutations require same-origin provenance and JSON. | `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
+| HTTP | `GET/PUT /api/pr-lifecycle/gate-profiles` | Read or revision-fenced replace the complete lifecycle catalog, nudge bounds, assignments, and scope thresholds. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
+| UI | `/pull-requests` | Portfolio, one aggregate workspace, and gate-profile editor under one navigation group. | `FR-LAUNCHER-009`, `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
+| HTTP | `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/agents*`, `/api/workflows*` | Existing authenticated management surfaces retain their scoped contracts and shared mutation fencing. | `FR-LAUNCHER-001` through `FR-LAUNCHER-012` |
 
 ## Algorithms And Ordering
 
-1. Route launcher requests through access control and dashboard authentication
-   before handler-specific parsing.
-2. For config and model writes, decode JSON, normalize account transport fields,
-   validate exact alias names/default models, reject account-router override keys,
-   and require model-router terminals to target aliases. Preserve stored secure
-   strings, keep account routers model-free, atomically validate an optional
-   `set_as_default` with the entry mutation, and store default `account_ref`
-   plus alias-valued `model_name` in the same compare-and-swap save. Require the
-   model-list read revision before interpreting an update or delete index. Then
-   write config and apply runtime log-level changes.
-3. Serialize full-config writes, generic tool-state writes, and
-   workflow-specific config-coupled operations through the handler mutation
-   boundary. Generic tool state and workflow settings atomically load an
-   update-safe public-plus-security snapshot under the config-path advisory
-   lock, compare the submitted revision when supplied, apply only their owned
-   fields, validate their scoped values, and then compare and save that exact
-   generation atomically under the same advisory lock shared by all config
-   saves. Hash both public JSON and security-sidecar bytes into the opaque
-   generation. Full PUT/PATCH
-   also compare-and-swap the generation they loaded; reset holds the same lock
-   for its complete backup-and-replace transaction. For workflow Run and
-   Retry, acquire the workflow mutation lock first, repeat the complete
-   readiness fence, then acquire the config-path advisory lock and reject any
-   generation change before holding both locks through exact compatibility
-   validation and durable root-run creation.
-4. For OAuth requests, create bounded flow state, redirect or poll provider
-   login, exchange callback state for credentials, then persist or clear
-   provider auth records. Token-backed account providers such as GitHub Copilot
-   validate the submitted token before storage and do not create a default
-   model alias or runnable model entry. The launcher accounts
-   page renders stored credentials and account-router aliases in one account
-   card grid while keeping new account onboarding behind an explicit add-account
-   surface. When an OpenAI OAuth account name is omitted, the saved credential ID
-   uses the email local-part as the provider-scoped suffix. OpenAI usage-limit
-   lookup uses Picoclaw credential records instead of Codex CLI config and maps
-   an upstream earned-reset count to the matching account summary without
-   exposing credentials or making the read path consume a reset.
-5. For model fetch requests, resolve stored model auth when a model index is
-   supplied, prefer explicit request credentials otherwise, route OpenAI
-   OAuth/token fetches to the ChatGPT Codex model list endpoint with a
-   Codex-compatible `client_version` new enough to surface GPT-5.6 subscription
-   models, expose GitHub Copilot static metadata models for Copilot requests,
-   and keep regular API-key fetches on the OpenAI-compatible `/models` path.
-6. For gateway lifecycle requests, inspect current process state first, allow
-   the `--allow-empty` child to start without a global model alias, execute
-   start/stop/restart transitions only when structurally valid, and retain log
-   buffers for status and diagnostics responses. Include the complete enabled MCP config,
-   including custom-header values, in the internal restart signature while
-   representing external bearer/OAuth token changes only through their
-   nonsecret revision so token bytes never enter the signature.
-7. Register feature-specific MCP handlers through the authenticated launcher
-   router, expose their dedicated route in the shared navigation shell, remove
-   their fields from the generic config editor, and cancel unfinished browser
-   login flows when the handler shuts down.
-8. Register the review route and sidebar destination behind dashboard
-   authentication. Canonicalize its fixed view selector before rendering; the
-   default portfolio omits it and the policy editor uses only `view=policies`.
-   Strictly and losslessly hydrate one memory-only policy draft plus the bounded
-   configured-agent catalog, issue one explicit full-replacement save with its
-   captured revision, rehydrate only from an authoritative success, and retain
-   dirty state on conflict or blocked navigation. Display current gateway
-   effect without invoking any review decision or runtime capability. Keep the
-   fixed-name built-in Default visible and editable with every known moment Off
-   when empty. Duplicate a set only under a new immutable unique name; select
-   any live set as the fallback; and assign one complete set to any number of
-   exact repositories. Offer `pr_development.before_push` as a known value while
-   preserving free-form custom decision points and ordered mixed working-context
-   AI, isolated-context AI, deterministic, and zero gates. Resolve the selected
-   assignment or fallback in memory before save, explain edits to a shared set,
-   and warn that a before-push working-context gate must select the
-   local-development owner agent. Submit the complete named catalog through the
-   policy API; materialize representable legacy catalogs without writing and
-   report an explicit conflict for unrepresentable expansion. The replacement
-   applies only to future unpinned decisions and performs no
-   model, code, CI, Git, push, acknowledgement, thread-resolution, or merge
-   action.
-9. For an attention read or response, first authenticate and match the one
-   canonical case subroute. Reject queries; for response, enforce same-origin
-   fetch metadata, JSON identity encoding/content type, the request bound, and
-   exactly one strict object. Peek the PID file without lifecycle checks and
-   require a nonzero port plus numeric loopback or literal current local-interface
-   authority; reject hostname, wildcard/unspecified, multicast, remote, or
-   incomplete authority before constructing a fresh request with only
-   the process bearer and fixed safe headers, disable proxies and redirects,
-   and apply the operation-specific deadline. Require one bounded JSON upstream
-   response and return its exact JSON bytes; the browser then strictly validates
-   the public attention DTO before use. In the workbench, retain the response
-   fence/draft only in memory, wait for the selected conversation
-   card, then honor canonical `focus=chat`. Generic workflow handlers classify
-   the exact reserved attention reference before list/detail/event/SSE/graph,
-   task, resume, cancel, or retry behavior and suppress it as absent. Scrub
-   direct hidden relationships and graph nodes/edges from readable ordinary
-   runs, and return not found for mutation anywhere in the normalized transitive
-   parent/child/retry component. Preserve exact reserved-reference runs from
-   production terminal retention. Classify exact reserved task resume before
-   workflow-disabled response or runtime construction.
-10. For an own-PR development read, authenticate and match exactly the list or
-   one canonical `pdc_` detail route. Strictly decode the list's optional
-   repository, pull number, limit, and opaque cursor; reject every query on
-   detail. Peek and validate gateway PID authority without lifecycle effects,
-   then make one bounded no-proxy/no-redirect request with replacement bearer
-   authority and fixed safe headers. Require bounded JSON before returning it.
-   The browser strictly validates the safe DTO, labels provider/ref/SHA values
-   as captured snapshots, renders feedback as plain text, keeps cursors and
-   responses memory-only, and treats replay as a separate case. No read invokes
-   provider refresh, a model, gate, conversation, workflow, repository, Git, or
-   mutation capability. Interpret the list-only `attention_required` field only
-   as server-validated generic input need: render `Needs input`, keep its source
-   unrepresented, and use the existing canonical focused-chat navigation. When
-   the unchanged case attention DTO is rendered inside this own-PR view, pass
-   only the presentation context that selects `PR decision gates`, the current
-   gate response label, and the no-direct-edit/CI/push/acknowledgement/merge
-   safety statement; retain the default outbound-review attention copy elsewhere.
-11. For an own-PR development chat, admit only the exact canonical case/chat
-   POST after rejecting a query or bare `?`, escaped aliases, ambiguous or
-   cross-site provenance, unknown/streaming length, invalid media/encoding/
-   Unicode, excessive depth or size, and every JSON shape except exact
-   case-sensitive `expected_version` plus `content`. Apply Go-compatible trim
-   semantics and local version/text bounds before PID access. Replace all
-   browser authority, make one no-proxy/no-redirect request with the 120-second
-   AI budget beneath the shared protected server's 135-second write timeout,
-   and accept only bounded valid JSON. The client validates the complete exact
-   case/transcript binding; success requires the submitted user row followed by
-   an assistant at exact version plus two, while safe error detail may be no
-   older than the submitted version. Keep per-case detail, draft, mutation, and
-   ambiguity state in memory; refuse equal-or-older delayed detail; disable
-   duplicate submission; recognize a matching version-plus-one human row as a
-   committed response failure and a matching version-plus-two pair as completed;
-   retain uncommitted input otherwise; announce live-log/refetch state; and
-   transfer focus predictably between mobile list and detail.
-12. For an own-PR local repair, require the exact canonical case/repair POST,
-   same-origin evidence, known bounded identity-encoded JSON, and exactly the
-   two optimistic revisions, random request ID, and normalized at-most-4-KiB
-   instruction before PID access. Replace browser authority and forward one
-   short admission request; accept `202` only as queued durable work. Keep the
-   per-case draft, ambiguous request ID, and baseline next-attempt ordinal in
-   memory; consume ambiguous intent only at that exact ordinal; require an
-   explicit local-only confirmation; merge conversation and repair revisions
-   independently; poll only an active attempt; announce status; retain terminal
-   history when starts are unavailable; and never label local edits as reviewed,
-   tested, committed, or pushed.
-13. Return JSON for success and error paths with status codes that match
-   validation, auth, not-found, conflict, or internal failure classes.
+For a PR-workspace request, the launcher first validates the exact path,
+escaping, query, method, content type, encoding, body bound, and same-origin
+provenance. It then peeks—but never attaches to—the managed process record,
+requires a numeric local address and bearer, disables redirects and environment
+proxies, replaces browser credentials with the process bearer, applies an
+operation-specific timeout, and accepts only bounded JSON. Provider-facing
+locations are reprojected only when safe.
+
+For a lifecycle settings write, the launcher strictly decodes one complete
+catalog, validates profiles and stage-specific fields, acquires the shared
+mutation boundary, reloads the exact update-safe config, compares the supplied
+revision, saves by compare-and-swap, and returns the new revision and restart
+effect. It never executes a gate while saving configuration.
+
+The frontend strictly validates workspace aggregates and publication URLs,
+keeps mutation drafts in memory, sends fresh random request IDs, and replaces
+local state only with an authoritative equal-or-newer aggregate. Unknown
+publication outcomes offer reconciliation, never blind retry.
 
 ## Cross-Feature Behavior
 
-Launcher surfaces expose other features but do not define them. Model management
-feeds agent conversations. Gateway endpoints control chat-channel runtime.
-Session endpoints are owned by session memory. Thread endpoints and
-thread-specific UI are owned by threads, while launcher management still owns
-shared authenticated dashboard layout and routing shell components.
-Workflow HTTP endpoints and dashboard routes are exposed through the launcher
-router and shared shell, including stateless structured-authoring helpers, while
-workflow definition, projection, authoring, run, graph, cancel, retry, and event
-semantics remain owned by the workflows and security-isolation features.
-Reviewed trigger routes keep their process-local signing key and bounded
-one-use bookkeeping on the authenticated launcher handler; token binding,
-admission, and execution semantics remain owned by those same feature specs.
-Event operator proxy endpoints and the Events dashboard route are likewise
-registered through the shared launcher router and navigation shell and inherit
-dashboard authentication. Event inspection, payload, replay, and live-gateway
-authorization semantics remain owned by event automation and security
-isolation.
-Review attention-policy persistence, reusable-set selection, and gate semantics
-remain owned by event automation and workflows, including the built-in Default,
-immutable names, duplication, current fallback, exact repository assignments,
-structured draft controls, and selected-set preview. Launcher management owns
-the exact authenticated policy subresource, route-shell discoverability and
-canonical query handling, its config-revision fence, bounded legacy
-materialization conflict, its isolation from generic config writes, and the
-gateway-effect projection returned by that subresource to authenticated
-management clients. Security isolation owns lossless transport, memory-only
-draft retention, conflict non-retry, and the rule that this management view has
-no execution authority. PR development owns the fixed
-`pr_development.before_push` runtime decision, policy pinning, and
-working-context owner-agent enforcement; exposing that value as a known editor
-choice changes neither those semantics nor the shared custom-point schema.
-Event automation owns the case-to-trigger-to-private-task validation, public
-attention lifecycle, opaque response-fence and exact-recovery semantics.
-Workflow execution remains private task/run authority. Launcher management owns
-the authenticated same-origin proxy, strict browser DTO boundary, canonical
-`case` plus `focus=chat` handoff into the existing conversation card, and
-suppression of the exact reserved run from generic workflow routes. This
-outgoing-review handoff does not claim inbound review feedback on the user's
-own PR or introduce a generic manual workflow launch surface.
-For that inbound own-PR feedback, event automation owns immutable capture and
-the safe runtime projection, launcher management owns the authenticated
-`/api/pr-development` proxy and canonical review-shell navigation, and security
-isolation owns the declassification boundary. This composition remains a
-read-only captured-snapshot viewer: it does not acquire model, gate, workflow,
-checkout, local-development, Git, CI, provider-refresh, acknowledgement, or
-submission authority.
-Git workspace config fields, API routes, sidebar navigation, and dashboard entry
-points are exposed through shared launcher surfaces, while workspace allocation,
-inventory, cleanup, drop, and retention semantics are owned by the git
-workspaces feature.
-MCP API registration, sidebar navigation, gateway restart signaling, and shared
-form accessibility compose through launcher-owned surfaces. Server lifecycle,
-tool discovery, credentials, probes, and OAuth protocol behavior remain owned by
-the MCP integration and security-isolation features.
+Durable External Event Automation owns PR-workspace lifecycle state, gateway
+runtime routes, provider adapters, and PR frontend feature components. Workflows
+owns the private staged gate compiler and human-task suspension. Security owns
+dashboard authentication, bearer replacement, config-secret handling, and
+network confinement. Git Workspaces owns pinned local candidates and branch
+push fences. The launcher composes these surfaces but gains no model, Git,
+provider, publication, or merge authority from navigation or configuration.
 
 ## Failure And Edge Cases
 
-- GET logout is rejected; logout requires POST JSON.
-- Login is rate-limited per client IP.
-- OAuth flow IDs expire and unknown states fail.
-- Config update preserves model API-key payloads and keeps existing model
-  secrets when equivalent provider/model/API-base entries are renamed.
-- A concurrent full-config or workflow-scoped write from the same or another
-  process that changes the config revision before a workflow settings
-  compare-and-swap receives a conflict; the scoped request does not write.
-- Model update preserves existing secrets unless explicitly changed and avoids
-  persisting blank secret placeholders for models with no key.
-- Account-router add/update rejects unknown, router, or ambiguous account
-  references as validation failures and does not persist API keys on router
-  entries.
-- Chat requires an enabled `account_ref` and an exact alias/model-router
-  selection. Missing aliases surface `no model configured`; fetched or raw
-  upstream IDs are never implicit selections.
-- Model-router add/update rejects non-alias terminals and stores the router graph
-  in `model_routers[]` instead of `model_list[]`.
-- Model-alias add/update rejects blank default models, duplicate names, unknown
-  override accounts, and any override keyed by an account router.
-- Model add/update rejects unsupported `reasoning_effort` values before saving.
-- OpenAI Codex model fetch fails with an actionable credential error when the
-  selected OAuth/token credential is missing or empty.
-- OpenAI Codex model fetch reports a concise upstream response detail when the
-  model list endpoint rejects the request.
-- Codex account-limit responses that omit earned-reset state leave the reset
-  summary hidden; supported zero-credit responses remain visible and do not
-  trigger redemption from the launcher read path.
-- GitHub Copilot model fetch does not call OpenAI-compatible `/models`; missing
-  credential-backed entries fail with a credential setup error, while
-  non-credential entries keep local bridge probing.
-- Public launcher access obeys configured host/CIDR policy.
-- Header controls collapse without clipping at extra-narrow mobile widths.
-- Global theme and CSS token changes preserve semantic colors instead of raw
-  ad hoc color values.
-- Generic config saves do not overwrite MCP settings or credentials managed on
-  the dedicated page.
-- An MCP server, discovery, custom-header, or credential-revision change reports
-  a required gateway restart. Custom-header config participates in the internal
-  hash, while external bearer/OAuth token bytes do not and neither value is
-  returned by the signature comparison.
-- Shared validation messages are announced to assistive technology, and secret
-  reveal controls remain keyboard reachable with an explicit accessible name.
-- Invalid, unknown, or repeated review `view` values canonicalize to the default
-  inbox URL; no policy content, repository, decision, question, agent, revision,
-  or error is copied into route state or browser persistence.
-- A dirty attention-policy draft blocks route and before-unload navigation. A
-  stale save retains the draft, performs no automatic rebase or retry, and
-  requires an explicit confirmed reload/discard before local work is lost.
-- The built-in Default rule set and every set name retain stable identity.
-  Duplication creates a new name without copying fallback or repository
-  assignments; removing an assignment returns the repository to the current
-  fallback.
-- Opening, editing, previewing, refreshing, resolving a policy conflict, or
-  saving a policy does not create a review decision or workflow run. Save only
-  replaces configuration and cannot run a gate or model, edit code, run CI,
-  invoke Git or push, acknowledge a review, resolve a review thread, or merge a
-  pull request. A publication decision that already pinned its policy is not
-  changed by a later save.
-- Attention routes reject repeated or unexpected queries, path aliases,
-  unsupported methods/encodings/content types, cross-site response attempts,
-  malformed or oversized request JSON, redirects, unsafe gateway authority,
-  upstream non-JSON, and oversized responses before returning a partial DTO or
-  changing a private task.
-- Browser cookies, authorization, fetch metadata, and ambient headers are never
-  forwarded to the gateway. The response never exposes the process bearer,
-  private run/task/workflow/session/policy identity, input hashes, trigger
-  fencing state, or raw upstream diagnostics; internal authorization failure is
-  projected as unavailability rather than a browser login challenge.
-- An attention response conflict retains the in-memory draft for deliberate
-  reload or exact retry. Navigation and polling do not mutate review or PID
-  state. Exact reserved attention runs cannot be inspected, resumed, canceled,
-  retried, or pruned through generic workflow surfaces; visible ordinary
-  relationships are scrubbed, and mutations across their normalized transitive
-  parent/child/retry component return not found before cascade or disabled-state
-  disclosure.
-- Own-PR development reads reject path aliases, unsafe or repeated filters,
-  invalid cursors or `pdc_` IDs, non-GET methods, bodies, unsafe gateway
-  authority, redirects, non-JSON upstream responses, and oversized responses
-  before returning any partial case. A missing case remains not found.
-- Own-PR development chat rejects a wrong method or suffix, raw query or bare
-  `?`, escaped alias, absent/ambiguous/cross-site provenance, streaming or
-  missing length, non-JSON or encoded body, wrong/case-colliding/duplicate keys,
-  multiple JSON values, excessive depth or size, or invalid Go-trimmed local
-  text before PID access. The browser adopts only strictly bound monotonic
-  detail. Failure keeps an uncommitted draft; authoritative version-plus-one
-  recovery with the matching user row records a committed response failure,
-  while the matching user/assistant pair at version plus two records success.
-- Development list/detail reads never refresh GitHub and never infer current
-  provider truth. A replay remains a distinct case, capture-time refs and SHAs
-  stay visibly qualified, feedback is rendered as plain text, and no cursor,
-  feedback, DTO, bearer, or internal provenance is persisted by the browser.
+Unauthenticated requests fail before config or process access. Noncanonical
+paths, repeated/unknown query keys, aliases for removed PR routes, cross-site
+mutations, missing or streaming bodies, unsafe encodings, oversized JSON,
+unknown fields, stale config/workspace/head revisions, unavailable runtime
+authority, redirects, non-local targets, malformed upstream JSON, and unsafe
+external URLs fail closed through bounded public errors.
+
+A gateway outage leaves configuration and other launcher management available.
+A PR mutation conflict retains the user's draft and requires refresh. An unknown
+provider effect retains reconciliation state. Narrow layouts preserve all
+controls without horizontal page overflow. No browser read, filter, selection,
+or settings navigation starts a model, workflow, checkout, provider effect, or
+publication.
 
 ## Acceptance Evidence
 
-| Requirement IDs                      | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Requirement IDs | Evidence |
+| --- | --- |
 | `FR-LAUNCHER-001`                    | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go), [web/backend/api/events_test.go](../../web/backend/api/events_test.go), [web/backend/api/workflow_jobs_editor_test.go](../../web/backend/api/workflow_jobs_editor_test.go), [web/backend/middleware/access_control_test.go](../../web/backend/middleware/access_control_test.go)                                                                                                                                                                                                                         |
 | `FR-LAUNCHER-002`, `FR-LAUNCHER-007` | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go)                                                                                                                                                                                                                                                                                                                                                                                               |
 | `FR-LAUNCHER-003`                    | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/model_aliases_test.go](../../web/backend/api/model_aliases_test.go), [web/backend/api/model_mutation_default_test.go](../../web/backend/api/model_mutation_default_test.go), [web/backend/api/model_update_revision_test.go](../../web/backend/api/model_update_revision_test.go), [web/backend/api/model_status_test.go](../../web/backend/api/model_status_test.go), [web/backend/api/model_catalog_test.go](../../web/backend/api/model_catalog_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/src/components/models/model-card.test.tsx](../../web/frontend/src/components/models/model-card.test.tsx), [web/frontend/src/components/models/model-mutation-default.test.tsx](../../web/frontend/src/components/models/model-mutation-default.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
@@ -571,38 +227,21 @@ the MCP integration and security-isolation features.
 | `FR-LAUNCHER-010`                    | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx](../../web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-LAUNCHER-011`                    | [pkg/config/mutation.go](../../pkg/config/mutation.go), [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [pkg/workflows/mutation_lock_test.go](../../pkg/workflows/mutation_lock_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_writer_cas_test.go](../../web/backend/api/config_writer_cas_test.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go), [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/workflow_settings_test.go](../../web/backend/api/workflow_settings_test.go), [web/backend/api/workflow_templates_test.go](../../web/backend/api/workflow_templates_test.go), [web/backend/api/workflow_publish_test.go](../../web/backend/api/workflow_publish_test.go), [web/backend/api/workflow_dependencies.go](../../web/backend/api/workflow_dependencies.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_run_readiness_test.go](../../web/backend/api/workflow_run_readiness_test.go), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-LAUNCHER-012`                    | [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-013`                    | [web/backend/api/reviews.go](../../web/backend/api/reviews.go), [web/backend/api/reviews_test.go](../../web/backend/api/reviews_test.go), [web/backend/api/review_attention_policies.go](../../web/backend/api/review_attention_policies.go), [web/backend/api/review_attention_policies_test.go](../../web/backend/api/review_attention_policies_test.go), [web/backend/api/review_attention_agents.go](../../web/backend/api/review_attention_agents.go), [web/backend/api/review_attention_agents_test.go](../../web/backend/api/review_attention_agents_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/gateway.go](../../web/backend/api/gateway.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [pkg/gateway/event_review_readiness_test.go](../../pkg/gateway/event_review_readiness_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [web/frontend/src/components/app-sidebar.tsx](../../web/frontend/src/components/app-sidebar.tsx), [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/src/api/review-attention-agents.test.ts](../../web/frontend/src/api/review-attention-agents.test.ts), [web/frontend/src/api/review-attention-policies.test.ts](../../web/frontend/src/api/review-attention-policies.test.ts), [web/frontend/src/components/reviews/review-attention-policies-page.test.tsx](../../web/frontend/src/components/reviews/review-attention-policies-page.test.tsx), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts) |
-| `FR-LAUNCHER-014`                    | [pkg/reviews/attention_bridge_test.go](../../pkg/reviews/attention_bridge_test.go), [pkg/reviews/attention_bridge_sqlite_test.go](../../pkg/reviews/attention_bridge_sqlite_test.go), [pkg/reviews/workflow_retention.go](../../pkg/reviews/workflow_retention.go), [web/backend/api/reviews.go](../../web/backend/api/reviews.go), [web/backend/api/reviews_test.go](../../web/backend/api/reviews_test.go), [web/backend/api/workflow_attention_privacy.go](../../web/backend/api/workflow_attention_privacy.go), [web/backend/api/review_attention_workflow_suppression_test.go](../../web/backend/api/review_attention_workflow_suppression_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_human_tasks.go](../../web/backend/api/workflow_human_tasks.go), [web/frontend/src/api/review-attention.test.ts](../../web/frontend/src/api/review-attention.test.ts), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-015`                    | [pkg/eventing/pr_development_store_sqlite_test.go](../../pkg/eventing/pr_development_store_sqlite_test.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [web/backend/main.go](../../web/backend/main.go), [web/backend/api/pr_development.go](../../web/backend/api/pr_development.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/backend/middleware/launcher_dashboard_auth_test.go](../../web/backend/middleware/launcher_dashboard_auth_test.go), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-016`                    | [pkg/channels/manager.go](../../pkg/channels/manager.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go), [web/backend/api/reviews.go](../../web/backend/api/reviews.go), [web/backend/api/pr_development.go](../../web/backend/api/pr_development.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/frontend/src/api/pr-development.ts](../../web/frontend/src/api/pr-development.ts), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/i18n/locales/en.json](../../web/frontend/src/i18n/locales/en.json), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-017`                    | [web/backend/api/pr_development.go](../../web/backend/api/pr_development.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/frontend/src/api/pr-development.ts](../../web/frontend/src/api/pr-development.ts), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/i18n/locales/en.json](../../web/frontend/src/i18n/locales/en.json), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-018`                    | [pkg/eventing/pr_development_publication_attention_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_attention_store_sqlite_test.go), [pkg/prdevelopment/publication_decision_test.go](../../pkg/prdevelopment/publication_decision_test.go), [pkg/prdevelopment/attention_bridge_test.go](../../pkg/prdevelopment/attention_bridge_test.go), [pkg/prdevelopment/publication_attention_bridge_test.go](../../pkg/prdevelopment/publication_attention_bridge_test.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [web/backend/api/pr_development.go](../../web/backend/api/pr_development.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/frontend/src/components/reviews/attention-conversation.tsx](../../web/frontend/src/components/reviews/attention-conversation.tsx), [web/frontend/src/components/reviews/attention-conversation.test.tsx](../../web/frontend/src/components/reviews/attention-conversation.test.tsx), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/i18n/locales/en.json](../../web/frontend/src/i18n/locales/en.json), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-019`                    | [web/backend/api/review_attention_policies_test.go](../../web/backend/api/review_attention_policies_test.go), [web/frontend/src/api/review-attention-policies.test.ts](../../web/frontend/src/api/review-attention-policies.test.ts), [web/frontend/src/components/reviews/review-attention-policy-model.test.ts](../../web/frontend/src/components/reviews/review-attention-policy-model.test.ts), [web/frontend/src/components/reviews/review-attention-policies-page.test.tsx](../../web/frontend/src/components/reviews/review-attention-policies-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-020`                    | [web/backend/api/reviews_test.go](../../web/backend/api/reviews_test.go), [web/frontend/src/api/review-provider.test.ts](../../web/frontend/src/api/review-provider.test.ts) |
-| `FR-LAUNCHER-021`                    | [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/src/components/reviews/review-portfolio-page.test.tsx](../../web/frontend/src/components/reviews/review-portfolio-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-LAUNCHER-021`                    | [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/src/routes/-pull-requests.test.ts](../../web/frontend/src/routes/-pull-requests.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-LAUNCHER-022`                    | [web/frontend/src/api/pr-workspaces.test.ts](../../web/frontend/src/api/pr-workspaces.test.ts), [web/frontend/src/api/pr-lifecycle-gate-profiles.test.ts](../../web/frontend/src/api/pr-lifecycle-gate-profiles.test.ts), [web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
 - [web/backend/api/router.go](../../web/backend/api/router.go)
-- [web/backend/main.go](../../web/backend/main.go)
+- [web/backend/api/pr_workspaces.go](../../web/backend/api/pr_workspaces.go)
+- [web/backend/api/pr_workspace_proxy.go](../../web/backend/api/pr_workspace_proxy.go)
+- [web/backend/api/pr_lifecycle_gate_profiles.go](../../web/backend/api/pr_lifecycle_gate_profiles.go)
 - [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
-- [web/backend/api/agent_capabilities.go](../../web/backend/api/agent_capabilities.go)
-- [web/backend/api/agent_activity.go](../../web/backend/api/agent_activity.go)
-- [web/backend/api/reviews.go](../../web/backend/api/reviews.go)
-- [web/backend/api/pr_development.go](../../web/backend/api/pr_development.go)
-- [pkg/channels/manager.go](../../pkg/channels/manager.go)
-- [web/backend/api/review_attention_policies.go](../../web/backend/api/review_attention_policies.go)
-- [web/backend/api/workflows.go](../../web/backend/api/workflows.go)
-- [web/backend/api/workflow_human_tasks.go](../../web/backend/api/workflow_human_tasks.go)
-- [pkg/config/mutation.go](../../pkg/config/mutation.go)
+- [web/backend/main.go](../../web/backend/main.go)
 - [web/backend/middleware](../../web/backend/middleware)
-- [web/backend/launcherconfig](../../web/backend/launcherconfig)
+- [pkg/config/mutation.go](../../pkg/config/mutation.go)
 - [web/frontend/src/components/app-sidebar.tsx](../../web/frontend/src/components/app-sidebar.tsx)
-- [web/frontend/src/components/shared-form.tsx](../../web/frontend/src/components/shared-form.tsx)
-- [web/frontend/src/api/review-attention-json.ts](../../web/frontend/src/api/review-attention-json.ts)
-- [web/frontend/src/api/review-attention.ts](../../web/frontend/src/api/review-attention.ts)
-- [web/frontend/src/api/review-provider.ts](../../web/frontend/src/api/review-provider.ts)
-- [web/frontend/src/api/pr-development.ts](../../web/frontend/src/api/pr-development.ts)
-- [web/frontend/src/components/reviews](../../web/frontend/src/components/reviews)
-- [web/frontend/src/i18n/locales/en.json](../../web/frontend/src/i18n/locales/en.json)
-- [web/frontend/src/routes/reviews.tsx](../../web/frontend/src/routes/reviews.tsx)
+- [web/frontend/src/routes/pull-requests.tsx](../../web/frontend/src/routes/pull-requests.tsx)
+- [web/frontend/src/api/pr-workspaces.ts](../../web/frontend/src/api/pr-workspaces.ts)
+- [web/frontend/src/api/pr-lifecycle-gate-profiles.ts](../../web/frontend/src/api/pr-lifecycle-gate-profiles.ts)
+- [web/frontend/src/components/pr-workspaces](../../web/frontend/src/components/pr-workspaces)

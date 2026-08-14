@@ -46,11 +46,12 @@ const (
 
 	streamAuxiliaryTombstoneTTL = 30 * time.Second
 
-	// Local protected AI routes have a 120-second application budget. Keep the
-	// shared server's connection write deadline beyond it so a completed,
-	// durable response is not discarded by the transport first.
+	// Unified PR workspace mutations may perform several bounded AI rounds
+	// behind a ten-minute launcher proxy budget. Keep the shared server's
+	// connection deadline beyond that outer budget so a committed response is
+	// never discarded by the inner transport first.
 	sharedHTTPReadTimeout  = 30 * time.Second
-	sharedHTTPWriteTimeout = 135 * time.Second
+	sharedHTTPWriteTimeout = 11 * time.Minute
 )
 
 var (

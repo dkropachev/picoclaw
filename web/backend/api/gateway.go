@@ -632,12 +632,6 @@ func computeEventIngressSignature(cfg *config.Config) string {
 		workflowDispatch.MaxConcurrentRuns = cfg.Workflows.EffectiveMaxConcurrentRuns()
 		workflowDispatch.DefaultTimeout = cfg.Workflows.EffectiveDefaultTimeout()
 		workflowDispatch.MaxCallDepth = cfg.Workflows.EffectiveMaxCallDepth()
-		attentionPolicies, err := newReviewAttentionPolicySource(cfg)
-		if err != nil {
-			workflowDispatch.AttentionCatalogRevision = "<invalid>"
-		} else {
-			workflowDispatch.AttentionCatalogRevision = attentionPolicies.CatalogRevision()
-		}
 	}
 	webhooks := make(map[string]eventWebhookSignature)
 	for name, webhook := range effective.Webhooks {
@@ -691,13 +685,12 @@ type eventWebhookSignature struct {
 }
 
 type eventWorkflowDispatchSignature struct {
-	Enabled                  bool          `json:"enabled"`
-	Workspace                string        `json:"workspace,omitempty"`
-	DefinitionsDir           string        `json:"definitions_dir,omitempty"`
-	MaxConcurrentRuns        int           `json:"max_concurrent_runs,omitempty"`
-	DefaultTimeout           time.Duration `json:"default_timeout,omitempty"`
-	MaxCallDepth             int           `json:"max_call_depth,omitempty"`
-	AttentionCatalogRevision string        `json:"attention_catalog_revision,omitempty"`
+	Enabled           bool          `json:"enabled"`
+	Workspace         string        `json:"workspace,omitempty"`
+	DefinitionsDir    string        `json:"definitions_dir,omitempty"`
+	MaxConcurrentRuns int           `json:"max_concurrent_runs,omitempty"`
+	DefaultTimeout    time.Duration `json:"default_timeout,omitempty"`
+	MaxCallDepth      int           `json:"max_call_depth,omitempty"`
 }
 
 func canonicalGitHubRepositories(repositories []string) []string {
@@ -1346,6 +1339,7 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 	}()
 
 	// Start a goroutine to probe pidFile and health, update runtime state once ready.
+	startedPRLifecycle := cfg.PRLifecycle.Effective()
 	go func() {
 		healthConfirmed := false
 		for i := 0; i < 30; i++ { // try for up to 15 seconds
@@ -1359,6 +1353,7 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 
 			// Poll for pidFile first — once available we have port/host/token.
 			if pd := ppid.ReadPidFileWithCheck(globalConfigDir()); pd != nil && pd.PID == pid {
+				confirmed := false
 				gateway.mu.Lock()
 				if gateway.cmd == cmd {
 					gateway.pidData = pd
@@ -1373,8 +1368,12 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 					}
 					gateway.picoToken = picoCfg.Token.String()
 					setGatewayRuntimeStatusLocked("running")
+					confirmed = true
 				}
 				gateway.mu.Unlock()
+				if confirmed {
+					h.markPRLifecycleGatewayApplied(startedPRLifecycle)
+				}
 				logger.InfoC("gateway", fmt.Sprintf("Gateway pidFile detected (PID: %d, port: %d)", pd.PID, pd.Port))
 				return
 			}
@@ -1386,13 +1385,16 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 			}
 			_, statusCode, err := h.getGatewayHealth(cfg, 1*time.Second)
 			if err == nil && statusCode == http.StatusOK {
+				confirmed := false
 				gateway.mu.Lock()
 				if gateway.cmd == cmd {
 					setGatewayRuntimeStatusLocked("running")
+					confirmed = true
 				}
 				gateway.mu.Unlock()
-				if !healthConfirmed {
+				if confirmed && !healthConfirmed {
 					healthConfirmed = true
+					h.markPRLifecycleGatewayApplied(startedPRLifecycle)
 					logger.InfoC("gateway", "Gateway health endpoint reachable; waiting for pid file")
 				}
 				continue

@@ -180,6 +180,9 @@ func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequ
 	}
 	outputs := workflowToolResultOutputs(result)
 	if result != nil && result.IsError {
+		if result.Err != nil {
+			return outputs, fmt.Errorf("%s: %w", result.ContentForLLM(), result.Err)
+		}
 		return outputs, fmt.Errorf("%s", result.ContentForLLM())
 	}
 	return outputs, nil

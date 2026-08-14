@@ -5144,6 +5144,42 @@ func TestWorkflowToolRunnerRequiresExactMCPIdentity(t *testing.T) {
 	})
 }
 
+func TestWorkflowToolRunnerPreservesPreDispatchValidationError(t *testing.T) {
+	manager := &workflowMCPRecordingManager{}
+	registry := tools.NewToolRegistry()
+	registry.Register(tools.NewMCPTool(
+		manager,
+		"github",
+		&sdkmcp.Tool{
+			Name: "issue_write",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"labels": map[string]any{
+						"type":  "array",
+						"items": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	))
+	runner := &workflowToolRunner{agentID: "main", registry: registry}
+
+	_, err := runner.RunTool(context.Background(), workflows.ToolRequest{
+		Name:      picomcp.CanonicalToolName("github", "issue_write"),
+		Args:      map[string]any{"labels": []string{"picoclaw"}},
+		MCP:       true,
+		MCPServer: "github",
+		MCPTool:   "issue_write",
+	})
+	if !errors.Is(err, workflows.ErrToolCallNotDispatched) {
+		t.Fatalf("RunTool() error = %v, want ErrToolCallNotDispatched", err)
+	}
+	if len(manager.calls) != 0 {
+		t.Fatalf("MCP calls = %#v, want no dispatch", manager.calls)
+	}
+}
+
 func TestWorkflowToolResultOutputsExposesJSONFields(t *testing.T) {
 	outputs := workflowToolResultOutputs(tools.SilentResult(`{
   "workspace": {

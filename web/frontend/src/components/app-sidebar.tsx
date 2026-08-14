@@ -47,7 +47,7 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
   tourId?: string
-  reviewView?: "work" | "configuration"
+  pullRequestView?: "work" | "configuration"
 }
 
 interface NavSection {
@@ -84,20 +84,20 @@ const eventsNavItem: NavItem = {
   translateTitle: true,
 }
 
-const reviewsWorkNavItem: NavItem = {
-  title: "navigation.reviews_work",
-  url: "/reviews",
+const pullRequestsWorkNavItem: NavItem = {
+  title: "navigation.pull_requests_work",
+  url: "/pull-requests",
   icon: IconGitPullRequest,
   translateTitle: true,
-  reviewView: "work",
+  pullRequestView: "work",
 }
 
-const reviewsAttentionRulesNavItem: NavItem = {
-  title: "navigation.reviews_attention_rules",
-  url: "/reviews",
+const pullRequestsGateProfilesNavItem: NavItem = {
+  title: "navigation.pull_requests_gate_profiles",
+  url: "/pull-requests",
   icon: IconSettings,
   translateTitle: true,
-  reviewView: "configuration",
+  pullRequestView: "configuration",
 }
 
 const configNavItem: NavItem = {
@@ -205,8 +205,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ],
       },
       {
-        label: "navigation.reviews",
-        items: [reviewsWorkNavItem, reviewsAttentionRulesNavItem],
+        label: "navigation.pull_requests",
+        items: [pullRequestsWorkNavItem, pullRequestsGateProfilesNavItem],
       },
     ]
   }, [channelItems])
@@ -215,9 +215,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const pathActive =
       currentPath === item.url ||
       (item.url !== "/" && currentPath.startsWith(`${item.url}/`))
-    if (!pathActive || item.reviewView == null) return pathActive
-    const configurationActive = currentSearch?.view === "policies"
-    return item.reviewView === (configurationActive ? "configuration" : "work")
+    if (!pathActive || item.pullRequestView == null) return pathActive
+    const configurationActive = currentSearch?.view === "gate-profiles"
+    return (
+      item.pullRequestView === (configurationActive ? "configuration" : "work")
+    )
   }
 
   const renderNavItem = (item: NavItem) => {
@@ -246,15 +248,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <Link
             to={item.url}
             activeOptions={
-              item.reviewView == null ? undefined : { exact: true }
+              item.pullRequestView == null ? undefined : { exact: true }
             }
             aria-current={isActive ? "page" : undefined}
             data-status={isActive ? "active" : undefined}
             search={
-              item.reviewView === "work"
+              item.pullRequestView === "work"
                 ? {}
-                : item.reviewView === "configuration"
-                  ? { view: "policies" }
+                : item.pullRequestView === "configuration"
+                  ? { view: "gate-profiles" }
                   : undefined
             }
           >
@@ -329,7 +331,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
         <Collapsible
           defaultOpen={
-            currentPath.startsWith("/agent/") || currentPath === "/reviews"
+            currentPath.startsWith("/agent/") ||
+            currentPath === "/pull-requests"
           }
           className="group/services-collapsible mb-1"
         >

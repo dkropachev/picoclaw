@@ -28,9 +28,9 @@ export function PageHeader({
         <SidebarTrigger className="text-muted-foreground hover:bg-muted hover:text-foreground hidden h-9 w-9 rounded-lg sm:flex [&>svg]:size-5">
           <IconMenu2 />
         </SidebarTrigger>
-        <h2 className="text-foreground/90 min-w-0 truncate text-lg font-medium">
+        <h1 className="text-foreground/90 min-w-0 truncate text-lg font-medium">
           {title}
-        </h2>
+        </h1>
         {titleExtra}
       </div>
       {children && <div className="flex items-center gap-2">{children}</div>}

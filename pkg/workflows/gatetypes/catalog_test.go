@@ -24,7 +24,7 @@ func TestCanonicalGatePolicyCatalogSortsAndNormalizesRepositoryCase(t *testing.T
 	}
 	text := string(encoded)
 	for _, expected := range []string{
-		`"format":"review-attention-catalog/v1"`,
+		`"format":"pr-lifecycle-gate-catalog/v2"`,
 		`"repository":"acme/repo"`,
 		`"repository":"zed/repo"`,
 	} {

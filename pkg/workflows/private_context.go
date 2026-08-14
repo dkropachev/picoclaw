@@ -500,7 +500,7 @@ func validatePrivateWorkflowAdmission(workflow *Workflow, request RunRequest) er
 	}
 	job, ok := workflow.Jobs[workflowGateJobID]
 	if !ok || strings.TrimSpace(job.Uses) != "" || job.Secrets != nil ||
-		len(job.Needs) != 0 || len(job.With) != 0 || len(job.Outputs) != 0 ||
+		len(job.Needs) != 0 || len(job.With) != 0 || !privateGateJobOutputsSafe(job.Outputs) ||
 		len(job.Steps) == 0 ||
 		strings.TrimSpace(job.If) != "" || job.ContinueOnError ||
 		strings.TrimSpace(job.Context.Session) != "" ||
@@ -540,6 +540,26 @@ func validatePrivateWorkflowAdmission(workflow *Workflow, request RunRequest) er
 		}
 	}
 	return nil
+}
+
+func privateGateJobOutputsSafe(outputs map[string]string) bool {
+	if len(outputs) == 0 {
+		return true
+	}
+	if len(outputs) != 1 {
+		return false
+	}
+	value, exists := outputs[workflowGateV2PassedJobOutput]
+	if !exists || strings.TrimSpace(value) == "" {
+		return false
+	}
+	matches := expressionPattern.FindAllStringSubmatch(value, -1)
+	if len(matches) != 1 || len(matches[0]) < 2 ||
+		strings.TrimSpace(matches[0][0]) != strings.TrimSpace(value) ||
+		validateExpressionSyntax(strings.TrimSpace(matches[0][1])) != nil {
+		return false
+	}
+	return true
 }
 
 // captureInitialPrivateWorkflow turns the caller-owned compiled workflow into

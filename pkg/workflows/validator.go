@@ -203,6 +203,17 @@ func validateExpressionSyntax(expr string) error {
 	if expr == "" {
 		return fmt.Errorf("expression is empty")
 	}
+	if terms, ok := splitExpressionLogicalAND(expr); ok {
+		if len(terms) > MaxWorkflowGateCount {
+			return fmt.Errorf("expression exceeds %d AND terms", MaxWorkflowGateCount)
+		}
+		for _, term := range terms {
+			if err := validateExpressionSyntax(term); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, op := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
 		if idx := strings.Index(expr, op); idx >= 0 {
 			if err := validateExpressionSyntax(expr[:idx]); err != nil {
@@ -258,7 +269,7 @@ func expressionReferenceTokens(expr string) []string {
 	out := make([]string, 0, len(matches))
 	for _, match := range matches {
 		switch match {
-		case "true", "false", "null", "not":
+		case "true", "false", "null", "not", "and":
 			continue
 		}
 		out = append(out, match)

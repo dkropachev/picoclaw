@@ -57,11 +57,11 @@ type Config struct {
 	// AccountRouters select one or more accounts through a static graph.
 	AccountRouters AccountRouterList `json:"account_routers" yaml:"account_routers"`
 	// ModelRouters route a chat model alias to one of several configured model aliases.
-	ModelRouters ModelRouterList `json:"model_routers"       yaml:"model_routers"`
-	Gateway      GatewayConfig   `json:"gateway"             yaml:"-"`
-	Events       EventsConfig    `json:"events,omitempty"    yaml:"events,omitempty"`
-	Reviews      ReviewsConfig   `json:"reviews,omitempty"   yaml:"-"`
-	Workflows    WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
+	ModelRouters ModelRouterList   `json:"model_routers"       yaml:"model_routers"`
+	Gateway      GatewayConfig     `json:"gateway"             yaml:"-"`
+	Events       EventsConfig      `json:"events,omitempty"    yaml:"events,omitempty"`
+	PRLifecycle  PRLifecycleConfig `json:"pr_lifecycle"       yaml:"-"`
+	Workflows    WorkflowsConfig   `json:"workflows,omitempty" yaml:"-"`
 	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
 	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`
 	Hooks         HooksConfig         `json:"hooks,omitempty"          yaml:"-"`
@@ -2587,8 +2587,14 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 	if err = cfg.ValidateTurnProfile(); err != nil {
 		return nil, err
 	}
-	if err = cfg.Reviews.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid reviews config: %w", err)
+	if cfg.PRLifecycle.IsZero() {
+		cfg.PRLifecycle = DefaultPRLifecycleConfig()
+	}
+	if err = cfg.PRLifecycle.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid PR lifecycle config: %w", err)
+	}
+	if err = cfg.PRLifecycle.ValidateAgentReferences(cfg.Agents); err != nil {
+		return nil, fmt.Errorf("invalid PR lifecycle config: %w", err)
 	}
 	cfg.Tools.Adaptation = cfg.Tools.Adaptation.Normalized()
 	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
@@ -2770,8 +2776,14 @@ func saveConfigUnlocked(path string, cfg *Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
 	}
-	if err := cfg.Reviews.Validate(); err != nil {
-		return fmt.Errorf("invalid reviews config: %w", err)
+	if cfg.PRLifecycle.IsZero() {
+		cfg.PRLifecycle = DefaultPRLifecycleConfig()
+	}
+	if err := cfg.PRLifecycle.Validate(); err != nil {
+		return fmt.Errorf("invalid PR lifecycle config: %w", err)
+	}
+	if err := cfg.PRLifecycle.ValidateAgentReferences(cfg.Agents); err != nil {
+		return fmt.Errorf("invalid PR lifecycle config: %w", err)
 	}
 	if err := cfg.Events.Ingress.ValidatePublicIdentities(
 		cfg.SensitiveDataValues()...,

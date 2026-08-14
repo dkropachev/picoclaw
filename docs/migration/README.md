@@ -8,3 +8,6 @@ versions.
   `account_ref` plus exact `model_aliases[]` selections.
 - [Configuration versioning](../reference/config-versioning.md): backup,
   migration, and downgrade rules for every schema version.
+- [PR Workspace V19 Cutover](pr-workspace-v19-cutover.md): prepare for the
+  destructive replacement of separate review/development records with unified
+  PR workspaces.

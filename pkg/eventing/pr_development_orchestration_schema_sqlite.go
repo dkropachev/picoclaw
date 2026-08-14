@@ -214,10 +214,6 @@ const (
 		schemaV14PRDevelopmentRepairOrchestrationLedgerIndex
 )
 
-func validateSchemaV14(ctx context.Context, conn *sql.Conn) error {
-	return validateSchemaV14ForVersion(ctx, conn, false)
-}
-
 func validateSchemaV14ForVersion(
 	ctx context.Context,
 	conn *sql.Conn,

@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// gatePolicyCatalogFormatV1 domain-separates the canonical representation used
-// for review-attention catalog sizing and revision hashes.
-const gatePolicyCatalogFormatV1 = "review-attention-catalog/v1"
+// gatePolicyCatalogFormatV2 domain-separates the canonical representation used
+// for PR-lifecycle gate-catalog sizing and revision hashes.
+const gatePolicyCatalogFormatV2 = "pr-lifecycle-gate-catalog/v2"
 
 type canonicalGatePolicyDecision struct {
 	DecisionPoint string     `json:"decision_point"`
@@ -36,7 +36,7 @@ func newCanonicalGatePolicyCatalog(
 	repositories map[string]map[string]RepositoryGatePolicy,
 ) canonicalGatePolicyCatalog {
 	catalog := canonicalGatePolicyCatalog{
-		Format:       gatePolicyCatalogFormatV1,
+		Format:       gatePolicyCatalogFormatV2,
 		Global:       make([]canonicalGatePolicyDecision, 0, len(global)),
 		Repositories: make([]canonicalRepositoryGatePolicyCatalog, 0, len(repositories)),
 	}

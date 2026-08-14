@@ -63,8 +63,8 @@ func TestBuiltInWorkflowTemplateRegistryIsUniqueAndValid(t *testing.T) {
 			t.Fatalf("template %q validation error = %v", template.name, err)
 		}
 	}
-	if len(names) != 4 {
-		t.Fatalf("built-in template count = %d, want 4", len(names))
+	if len(names) != 2 {
+		t.Fatalf("built-in template count = %d, want 2", len(names))
 	}
 }
 
@@ -91,21 +91,6 @@ func TestListWorkflowTemplatesReportsSafeStatesInConfiguredDirectory(t *testing.
 		WorkflowTemplateStateAvailable,
 		"",
 	)
-	assertWorkflowTemplateState(
-		t,
-		entries,
-		GitHubPRReviewWorkflowName,
-		WorkflowTemplateStateAvailable,
-		"",
-	)
-	assertWorkflowTemplateState(
-		t,
-		entries,
-		GitHubPRDevelopmentWorkflowName,
-		WorkflowTemplateStateAvailable,
-		"",
-	)
-
 	codeReviewPath := filepath.Join(workspace, "automation", "definitions", "code-review.yml")
 	if err := os.MkdirAll(filepath.Dir(codeReviewPath), 0o755); err != nil {
 		t.Fatal(err)

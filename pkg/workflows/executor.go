@@ -98,8 +98,8 @@ type RunRequest struct {
 	WorkflowRef  string
 	RetryOfRunID string
 	CallDepth    int
-	// PrivateRoot is accepted only for the trusted in-memory workflow emitted
-	// by CompileGateWorkflow. It is frozen before durable creation and omitted
+	// PrivateRoot is accepted only for a trusted in-memory workflow emitted by
+	// a gate compiler. It is frozen before durable creation and omitted
 	// from all ordinary run observations.
 	PrivateRoot *PrivateRootRequest
 	// frozenPrivateRoot is used only by retry. External callers cannot bypass
@@ -199,7 +199,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		return nil, fmt.Errorf("%w: human/task cannot run inside a reusable workflow call", ErrHumanTaskUnsupported)
 	}
 	var execution *workflowExecutionState
-	if workflowContainsHumanTask(workflow) {
+	// Every private workflow needs the same exact durable workflow snapshot for
+	// its run binding, even when a staged gate contains only AI steps and cannot
+	// suspend. Human-task workflows need it for the continuation cursor as
+	// before.
+	if workflowContainsHumanTask(workflow) || privateRoot != nil {
 		var executionErr error
 		execution, executionErr = newWorkflowExecutionState(workflow)
 		if executionErr != nil {

@@ -5,7 +5,6 @@ package eventing
 import (
 	"context"
 	"database/sql"
-	"fmt"
 )
 
 const (
@@ -33,17 +32,6 @@ const (
 );`
 	schemaV7 = schemaV7PRDevelopmentConversationsTable + "\n" +
 		schemaV7PRDevelopmentMessagesTable
-	schemaV7PRDevelopmentConversationBackfill = `
-		INSERT INTO pr_development_conversations (
-			case_id, version, content_bytes, transcript_digest
-		)
-		SELECT development_case.id, 0, 0, ?
-		FROM pr_development_cases development_case
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM pr_development_conversations conversation
-			WHERE conversation.case_id = development_case.id
-		)`
 )
 
 func validateSchemaV7(ctx context.Context, conn *sql.Conn) error {
@@ -73,31 +61,4 @@ func validateSchemaV7(ctx context.Context, conn *sql.Conn) error {
 			},
 		},
 	})
-}
-
-func backfillPRDevelopmentConversations(ctx context.Context, conn *sql.Conn) error {
-	if _, err := conn.ExecContext(
-		ctx,
-		schemaV7PRDevelopmentConversationBackfill,
-		emptyPRDevelopmentTranscriptDigest(),
-	); err != nil {
-		return err
-	}
-	var missing int64
-	if err := conn.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM pr_development_cases development_case
-		LEFT JOIN pr_development_conversations conversation
-			ON conversation.case_id = development_case.id
-		WHERE conversation.case_id IS NULL`,
-	).Scan(&missing); err != nil {
-		return err
-	}
-	if missing != 0 {
-		return fmt.Errorf(
-			"backfilled pull request development conversations are incomplete: %d missing",
-			missing,
-		)
-	}
-	return nil
 }

@@ -12,7 +12,6 @@ import type {
   MCPServer,
   MCPServerInput,
 } from "../src/api/mcp"
-import type { PRDevelopmentCaseDetail } from "../src/api/pr-development"
 
 const smokeRoutes = [
   "/",
@@ -20,6 +19,7 @@ const smokeRoutes = [
   "/accounts",
   "/events",
   "/event-sources",
+  "/pull-requests",
   "/logs",
   "/agent/agents",
   "/agent/git-workspaces",
@@ -974,204 +974,201 @@ const channelCatalogResponse = {
   ],
 }
 
-const boundaryReviewAttentionGateID = "g".repeat(64)
-const boundaryReviewAttentionRepository = `${"o".repeat(127)}/${"r".repeat(128)}`
-const reviewAttentionPoliciesResponseText = `{"rule_sets":{"default":{"name":"Default","rules":{"custom.release_check":[],"pr_development.before_push":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.gate_subject.untrusted_target.review.has_findings == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]}},"release_checks":{"name":"Release checks","rules":{"pr_development.before_push":[{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.gate_subject.untrusted_local_ci.plan_complete == false","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"default_rule_set_id":"default","repository_assignments":{"octo/repo":"release_checks"},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
-const reviewAttentionCaseID = `prc_${"1".repeat(32)}`
-const reviewAttentionResponseToken = `sha256:${"a".repeat(64)}`
-const reviewAttentionCase = {
-  id: reviewAttentionCaseID,
-  event_id: `ev_${"2".repeat(32)}`,
-  dispatch_id: `dsp_${"3".repeat(32)}`,
-  run_id: `wr_${"4".repeat(32)}`,
-  workflow_ref: "builtin://github-pr-review",
-  connector: "primary",
-  repository: "octo/repo",
-  pull_number: 42,
-  pull_url: "https://github.example.test/octo/repo/pull/42",
-  base_sha: "a".repeat(40),
-  head_sha: "b".repeat(40),
-  summary: "One correctness issue was submitted.",
-  tests: ["go test ./..."],
-  residual_risks: [],
-  status: "submitted",
-  version: 7,
-  active_findings: 1,
-  total_findings: 1,
-  created_at: "2026-07-30T12:00:00Z",
-  updated_at: "2026-07-30T12:04:01Z",
-  submitted_at: "2026-07-30T12:04:01Z",
-}
-const reviewAttentionDetail = {
-  case: reviewAttentionCase,
-  findings: [
+const prWorkspaceID = `prw_${"1".repeat(32)}`
+const prWorkspaceCharterID = `pcr_${"2".repeat(32)}`
+const prWorkspaceAggregate = {
+  workspace: {
+    id: prWorkspaceID,
+    provider: "github",
+    provider_origin: "https://github.com",
+    repository_id: "100",
+    repository: "octo/repo",
+    pull_request_id: "200",
+    pull_number: 42,
+    phase: "completion_audit",
+    execution_state: "waiting_user",
+    active_charter_id: prWorkspaceCharterID,
+    provider_head_sha: "b".repeat(40),
+    version: 4,
+    created_at: "2026-08-13T10:00:00Z",
+    updated_at: "2026-08-13T10:05:00Z",
+  },
+  provider_snapshot: {
+    provider: "github",
+    provider_origin: "https://github.com",
+    repository_id: "100",
+    repository: "octo/repo",
+    pull_request_id: "200",
+    pull_number: 42,
+    title: "Fix lost updates",
+    body: "Keep optimistic concurrency intact.",
+    author_id: "300",
+    author_login: "octocat",
+    authenticated_user_id: "300",
+    base_ref: "main",
+    base_sha: "a".repeat(40),
+    head_repository_id: "100",
+    head_ref: "fix/store",
+    head_sha: "b".repeat(40),
+    state: "open",
+    owned: true,
+    head_writable: true,
+    can_review: true,
+    can_create_issue: true,
+    provider_revision: "github-etag-4",
+    observed_at: "2026-08-13T10:00:00Z",
+  },
+  charters: [
     {
-      id: `prf_${"5".repeat(32)}`,
-      case_id: reviewAttentionCaseID,
-      ordinal: 0,
-      state: "active",
-      severity: "high",
-      title: "Preserve optimistic concurrency",
-      file: "pkg/store.go",
-      line: 72,
-      message: "This write can replace newer state.",
+      id: prWorkspaceCharterID,
       revision: 1,
-      created_at: "2026-07-30T12:00:00Z",
-      updated_at: "2026-07-30T12:00:00Z",
+      type: "fix",
+      goal: "Prevent lost updates.",
+      acceptance_criteria: ["Concurrent writes conflict."],
+      included_areas: ["pkg/store"],
+      excluded_areas: ["Broad refactor"],
+      non_goals: ["New storage engine"],
+      base_sha: "a".repeat(40),
+      head_sha: "b".repeat(40),
+      confirmed: true,
+      created_at: "2026-08-13T10:01:00Z",
+      confirmed_at: "2026-08-13T10:02:00Z",
     },
   ],
+  stage_runs: [
+    {
+      id: `psr_${"3".repeat(32)}`,
+      stage: "review",
+      state: "succeeded",
+      charter_id: prWorkspaceCharterID,
+      head_sha: "b".repeat(40),
+      attempt: 1,
+      summary: "Review completed after distinct coverage challenges.",
+      started_at: "2026-08-13T10:03:00Z",
+      finished_at: "2026-08-13T10:03:01Z",
+    },
+    {
+      id: `psr_${"6".repeat(32)}`,
+      stage: "implementation",
+      state: "succeeded",
+      charter_id: prWorkspaceCharterID,
+      head_sha: "b".repeat(40),
+      attempt: 1,
+      summary: "Implemented the confirmed charter.",
+      started_at: "2026-08-13T10:03:30Z",
+      finished_at: "2026-08-13T10:03:59Z",
+    },
+    {
+      id: `psr_${"4".repeat(32)}`,
+      stage: "completion_audit",
+      state: "succeeded",
+      charter_id: prWorkspaceCharterID,
+      head_sha: "b".repeat(40),
+      attempt: 1,
+      summary: "Implementation is complete within the charter.",
+      started_at: "2026-08-13T10:04:00Z",
+      finished_at: "2026-08-13T10:04:01Z",
+    },
+  ],
+  findings: [],
   messages: [],
-  submission: {
-    id: `prs_${"6".repeat(32)}`,
-    case_id: reviewAttentionCaseID,
-    draft_version: 6,
-    status: "submitted",
-    attempts: 1,
-    external_review_id: "9876",
-    external_url: reviewAttentionCase.pull_url,
-    created_at: "2026-07-30T12:04:00Z",
-    updated_at: "2026-07-30T12:04:01Z",
-    submitted_at: "2026-07-30T12:04:01Z",
-  },
+  corrections: [],
+  repository_lessons: [],
+  nudge_rounds: [
+    {
+      id: `pnr_${"5".repeat(32)}`,
+      stage_run_id: `psr_${"3".repeat(32)}`,
+      stage: "review",
+      round: 1,
+      minimum_rounds: 2,
+      hard_cap: 5,
+      strategy: "coverage_gaps",
+      challenge: "Inspect unchecked callers.",
+      variant_digest: "sha256:variant",
+      prompt_digest: "sha256:prompt",
+      state: "succeeded",
+      novel_findings: 0,
+      duplicate_count: 0,
+      resolved_findings: 0,
+      reward: 0.25,
+      reward_provenance: "retained_open",
+      created_at: "2026-08-13T10:04:00Z",
+    },
+  ],
+  deferred_groups: [],
+  repair_attempts: [
+    {
+      id: `pra_${"6".repeat(32)}`,
+      stage_run_id: `psr_${"6".repeat(32)}`,
+      number: 1,
+      state: "succeeded",
+      instruction: "Implement the confirmed charter.",
+      candidate_sha: "c".repeat(40),
+      scope: {
+        distance: "S0_exact",
+        size: "XS",
+        presence: "candidate_present",
+        files: 1,
+        semantic_lines: 5,
+        modules: 1,
+        estimated: false,
+        type_compatible: true,
+        confidence: 1,
+      },
+      prompt_digest: "sha256:repair",
+      started_at: "2026-08-13T10:03:30Z",
+      finished_at: "2026-08-13T10:03:45Z",
+    },
+  ],
+  validation_runs: [
+    {
+      id: `pvr_${"6".repeat(32)}`,
+      stage_run_id: `psr_${"6".repeat(32)}`,
+      state: "succeeded",
+      candidate_sha: "c".repeat(40),
+      checks: [{ id: "tests", name: "Tests", status: "passed" }],
+      started_at: "2026-08-13T10:03:45Z",
+      finished_at: "2026-08-13T10:03:50Z",
+    },
+  ],
+  gates: [],
+  publications: [],
+  activity: [],
 }
-const reviewProviderStatus = {
-  availability: "available",
-  connector: "primary",
-  repository: reviewAttentionCase.repository,
-  pull_number: reviewAttentionCase.pull_number,
-  pull_request: {
-    number: reviewAttentionCase.pull_number,
-    title: reviewAttentionCase.summary,
-    state: "open",
-    url: reviewAttentionCase.pull_url,
-    author: "octocat",
-    draft: false,
-    merged: false,
-    updated_at: "2026-08-12T12:00:00Z",
-  },
-  capabilities: { thread_resolution: false },
-  limitations: ["status_view"],
-} as const
 
-function reviewProviderSnapshot(threadResolved: boolean) {
-  return {
-    availability: "available",
-    connector: "primary",
-    repository: reviewAttentionCase.repository,
-    pull_number: reviewAttentionCase.pull_number,
-    pull_request: reviewProviderStatus.pull_request,
-    capabilities: { thread_resolution: true },
-    reviews: [
-      {
-        id: "provider-review-1",
-        state: "CHANGES_REQUESTED",
-        body: "Keep the optimistic concurrency guard.",
-        url: `${reviewAttentionCase.pull_url}#pullrequestreview-1`,
-        author: "provider-reviewer",
-        commit_id: reviewAttentionCase.head_sha,
-        submitted_at: "2026-08-12T11:00:00Z",
+const prLifecycleGateProfiles = {
+  gate_profiles: {
+    default: {
+      name: "Default",
+      workflows: {
+        "pr.review.complete": {
+          id: "review_complete",
+          name: "Review complete",
+          purpose: "authorization",
+          decision_point: "pr.review.complete",
+          stages: [{ id: "automatic", kind: "zero" }],
+        },
       },
-      {
-        id: "provider-review-2",
-        state: "APPROVED",
-        body: "The follow-up is ready.",
-        url: `${reviewAttentionCase.pull_url}#pullrequestreview-2`,
-        author: "second-reviewer",
-        commit_id: reviewAttentionCase.head_sha,
-        submitted_at: "2026-08-12T11:30:00Z",
-      },
-    ],
-    review_history_complete: true,
-    threads_complete: true,
-    limitations: [],
-    threads: [
-      {
-        token: `rtt_${"c".repeat(43)}`,
-        is_resolved: threadResolved,
-        is_outdated: false,
-        is_collapsed: false,
-        can_resolve: true,
-        total_count: 1,
-        comments: [
-          {
-            body: "The write can replace newer state.",
-            path: "pkg/store.go",
-            line: 72,
-            author: "provider-reviewer",
-            created_at: "2026-08-12T11:01:00Z",
-            updated_at: "2026-08-12T11:02:00Z",
-            url: `${reviewAttentionCase.pull_url}#discussion_r1`,
-          },
-        ],
-      },
-      {
-        is_resolved: true,
-        is_outdated: true,
-        is_collapsed: false,
-        can_resolve: false,
-        total_count: 1,
-        comments: [
-          {
-            body: "This comment applies to an earlier diff.",
-            path: "pkg/legacy.go",
-            line: 10,
-            author: "second-reviewer",
-            created_at: "2026-08-12T10:00:00Z",
-          },
-        ],
-      },
-    ],
-  }
-}
-const prDevelopmentCaseID = `pdc_${"7".repeat(32)}`
-const prDevelopmentAttentionResponseToken = `sha256:${"b".repeat(64)}`
-const prDevelopmentCaseBase = {
-  id: prDevelopmentCaseID,
-  repository: "octo/repo",
-  pull_number: 84,
-  pull_url: "https://github.example.test/octo/repo/pull/84",
-  pull_author: "octocat",
-  pull_state: "open",
-  pull_draft: false,
-  pull_merged: false,
-  head_repository: "octocat/repo",
-  head_ref: "fix/provider-feedback",
-  head_sha: "d".repeat(40),
-  review_author: "reviewer",
-  submitted_review_state: "changes_requested",
-  current_review_state: "changes_requested",
-  review_submitted_at: "2026-08-05T12:00:00Z",
-  review_url:
-    "https://github.example.test/octo/repo/pull/84#pullrequestreview-7",
-  captured_at: "2026-08-05T12:00:01Z",
-} as const
-const prDevelopmentSummary = {
-  ...prDevelopmentCaseBase,
-  attention_required: true,
-} as const
-const prDevelopmentDetail = {
-  case: {
-    ...prDevelopmentCaseBase,
-    base_repository: "octo/repo",
-    base_ref: "main",
-    base_sha: "e".repeat(40),
-    review_commit_sha: "f".repeat(40),
-    feedback:
-      'Please keep <a href="https://private.example.test">private-link-canary</a> as provider text.',
+    },
   },
-  conversation_version: 0,
-  messages: [] as Array<{
-    id: string
-    ordinal: number
-    role: "user" | "assistant"
-    content: string
-    created_at: string
-  }>,
-  repair_available: true,
-  repair_revision: 0,
-} satisfies PRDevelopmentCaseDetail
-const waitingReviewAttentionProjectionText = `{"case_version":7,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response_token":"${reviewAttentionResponseToken}"}]}`
-const waitingPRDevelopmentAttentionProjectionText = `{"case_version":0,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose how to address the review","questions":{"gate_id":"owner_input","reason":"The repair direction is ambiguous.","questions":["Preserve compatibility?"]},"response_token":"${prDevelopmentAttentionResponseToken}"}]}`
+  default_gate_profile_id: "default",
+  repository_assignments: {},
+  nudge: {
+    review_minimum_additional: 2,
+    review_maximum_additional: 5,
+    completion_minimum_additional: 2,
+    completion_maximum_additional: 5,
+  },
+  scope: {
+    xs: { files: 1, semantic_lines: 20, modules: 1 },
+    s: { files: 3, semantic_lines: 100, modules: 1 },
+    m: { files: 10, semantic_lines: 500, modules: 3 },
+  },
+  deferred_issues: { mode: "ask" },
+  catalog_revision: "sha256:catalog",
+  config_revision: "sha256:config",
+  effects: { gateway_effect: "applied" },
+}
 
 interface MockLauncherApiOptions {
   agentActivityRequests?: Array<{ method: string; path: string }>
@@ -1192,28 +1189,6 @@ interface MockLauncherApiOptions {
   modelResponse?: unknown
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
-  reviewAttentionPolicyPutGate?: Promise<void>
-  reviewAttentionResponseRequests?: Array<{
-    method: string
-    path: string
-    body: unknown
-  }>
-  prDevelopmentChatRequests?: Array<{
-    method: string
-    path: string
-    body: unknown
-  }>
-  prDevelopmentAttentionResponseRequests?: Array<{
-    method: string
-    path: string
-    body: unknown
-  }>
-  prDevelopmentRepairRequests?: Array<{
-    method: string
-    path: string
-    body: unknown
-  }>
-  prDevelopmentRepairCompletionGate?: Promise<void>
   statefulAgents?: boolean
   statefulMCP?: boolean
   gatewayRunning?: boolean
@@ -1273,17 +1248,6 @@ async function mockLauncherApis(
   let currentAgentRevision = 1
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
-  let currentReviewAttentionConfigRevision = "agent-revision-1"
-  let currentReviewAttentionPoliciesResponse =
-    reviewAttentionPoliciesResponseText
-  let currentReviewAttentionProjectionText =
-    waitingReviewAttentionProjectionText
-  let reviewProviderThreadResolved = false
-  let currentPRDevelopmentDetail: PRDevelopmentCaseDetail =
-    structuredClone(prDevelopmentDetail)
-  let currentPRDevelopmentAttentionProjectionText =
-    waitingPRDevelopmentAttentionProjectionText
-  let completingPRDevelopmentRepair = false
   let currentAgents: AgentInfo[] = [
     {
       id: "main",
@@ -1826,143 +1790,6 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
-          case `/api/pr-development/${prDevelopmentCaseID}/repair`: {
-            const body = request.postDataJSON() as {
-              expected_conversation_version: number
-              expected_repair_revision: number
-              request_id: string
-              instruction: string
-            }
-            expect(Object.keys(body).sort()).toEqual([
-              "expected_conversation_version",
-              "expected_repair_revision",
-              "instruction",
-              "request_id",
-            ])
-            expect(body.expected_conversation_version).toBe(
-              currentPRDevelopmentDetail.conversation_version,
-            )
-            expect(body.expected_repair_revision).toBe(
-              currentPRDevelopmentDetail.repair_revision,
-            )
-            expect(body.request_id).toMatch(/^prq_[0-9a-f]{32}$/)
-            options.prDevelopmentRepairRequests?.push({ method, path, body })
-
-            const repairRevision =
-              currentPRDevelopmentDetail.repair_revision + 1
-            currentPRDevelopmentDetail = {
-              ...currentPRDevelopmentDetail,
-              repair_revision: repairRevision,
-              repair_session: {
-                id: `pds_${"a".repeat(32)}`,
-                revision: repairRevision,
-                agent_id: "main",
-                attempts: [
-                  {
-                    id: `pdr_${"b".repeat(32)}`,
-                    ordinal: 0,
-                    status: "queued",
-                    conversation_version: body.expected_conversation_version,
-                    instruction: body.instruction,
-                    created_at: "2026-08-05T12:03:00Z",
-                    updated_at: "2026-08-05T12:03:00Z",
-                  },
-                ],
-              },
-              local_development: {
-                attempt_id: `pdr_${"b".repeat(32)}`,
-                attempt_ordinal: 0,
-                attempt_status: "queued",
-                no_changes: false,
-                review_status: "not_started",
-                review_finding_count: 0,
-                local_ready: false,
-                updated_at: "2026-08-05T12:03:00Z",
-              },
-            }
-            return json(route, currentPRDevelopmentDetail, 202)
-          }
-          case `/api/pr-development/${prDevelopmentCaseID}/chat`: {
-            const body = request.postDataJSON() as {
-              expected_version: number
-              content: string
-            }
-            options.prDevelopmentChatRequests?.push({ method, path, body })
-            expect(body.expected_version).toBe(
-              currentPRDevelopmentDetail.conversation_version,
-            )
-            currentPRDevelopmentDetail = {
-              ...currentPRDevelopmentDetail,
-              conversation_version: 2,
-              messages: [
-                {
-                  id: `pdm_${"8".repeat(32)}`,
-                  ordinal: 0,
-                  role: "user",
-                  content: body.content,
-                  created_at: "2026-08-05T12:01:00Z",
-                },
-                {
-                  id: `pdm_${"9".repeat(32)}`,
-                  ordinal: 1,
-                  role: "assistant",
-                  content:
-                    "<script>private-ai-canary</script> Start with a local reproduction.",
-                  created_at: "2026-08-05T12:01:01Z",
-                },
-              ],
-            }
-            return json(route, currentPRDevelopmentDetail)
-          }
-          case `/api/pr-development/${prDevelopmentCaseID}/attention/respond`: {
-            const body = request.postDataJSON() as {
-              expected_case_version: number
-              response_token: string
-              response: string
-            }
-            options.prDevelopmentAttentionResponseRequests?.push({
-              method,
-              path,
-              body,
-            })
-            currentPRDevelopmentAttentionProjectionText = `{"case_version":0,"status":"completed","can_respond":false,"turns":[{"status":"answered","title":"Choose how to address the review","questions":["Preserve compatibility?"],"response":${JSON.stringify(body.response)}}]}`
-            return route.fulfill({
-              status: 200,
-              contentType: "application/json",
-              body: currentPRDevelopmentAttentionProjectionText,
-            })
-          }
-          case `/api/reviews/${reviewAttentionCaseID}/attention/respond`: {
-            const body = request.postDataJSON() as {
-              expected_case_version: number
-              response_token: string
-              response: string
-            }
-            options.reviewAttentionResponseRequests?.push({
-              method,
-              path,
-              body,
-            })
-            currentReviewAttentionProjectionText = `{"case_version":7,"status":"completed","can_respond":false,"turns":[{"status":"answered","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response":${JSON.stringify(body.response)}}]}`
-            return route.fulfill({
-              status: 200,
-              contentType: "application/json",
-              body: currentReviewAttentionProjectionText,
-            })
-          }
-          case `/api/reviews/${reviewAttentionCaseID}/provider/thread`: {
-            const body = request.postDataJSON() as {
-              token: string
-              action: "resolve" | "unresolve"
-            }
-            expect(Object.keys(body).sort()).toEqual(["action", "token"])
-            expect(body.token).toBe(`rtt_${"c".repeat(43)}`)
-            reviewProviderThreadResolved = body.action === "resolve"
-            return json(
-              route,
-              reviewProviderSnapshot(reviewProviderThreadResolved),
-            )
-          }
           case "/api/accounts/models/fetch": {
             const body = request.postDataJSON() as {
               credential_id?: string
@@ -2637,24 +2464,6 @@ async function mockLauncherApis(
         }
       }
 
-      if (path === "/api/reviews/attention-policies" && method === "PUT") {
-        await options.reviewAttentionPolicyPutGate
-        const body = request.postData()
-        const prefix = `{"expected_config_revision":${JSON.stringify(currentReviewAttentionConfigRevision)},`
-        expect(body).not.toBeNull()
-        expect(body?.startsWith(prefix)).toBe(true)
-        expect(body).toContain("9007199254740993")
-        expect(body).toContain('"negativeZero":-0')
-        const catalog = body!.slice(prefix.length, -1)
-        currentReviewAttentionConfigRevision = "agent-revision-2"
-        currentReviewAttentionPoliciesResponse = `{${catalog},"catalog_revision":"catalog-revision-smoke-2","config_revision":"${currentReviewAttentionConfigRevision}","effects":{"gateway_effect":"applied"}}`
-        return route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: currentReviewAttentionPoliciesResponse,
-        })
-      }
-
       if (method !== "GET") {
         return json(route, { status: "ok" })
       }
@@ -2778,97 +2587,14 @@ async function mockLauncherApis(
           return json(route, gitWorkspaceResponse)
         case "/api/agents":
           return json(route, currentAgentsResponse())
-        case "/api/reviews/attention-agents":
-          expect(url.search).toBe("")
-          expect(await request.headerValue("If-Match")).toBe(
-            `"${currentReviewAttentionConfigRevision}"`,
-          )
+        case "/api/pr-workspaces":
           return json(route, {
-            agents: currentAgents.map(({ id, name }) => ({ id, name })),
-            default_agent_id: currentDefaultAgentID,
-            config_revision: currentReviewAttentionConfigRevision,
+            workspaces: [prWorkspaceAggregate.workspace],
           })
-        case "/api/reviews/attention-policies":
-          return route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: currentReviewAttentionPoliciesResponse,
-          })
-        case "/api/reviews":
-          return json(route, { cases: [reviewAttentionCase] })
-        case "/api/pr-development":
-          return json(route, { cases: [prDevelopmentSummary] })
-        case `/api/pr-development/${prDevelopmentCaseID}`: {
-          const repairSession = currentPRDevelopmentDetail.repair_session
-          const latestAttempt = repairSession?.attempts.at(-1)
-          if (
-            repairSession != null &&
-            latestAttempt?.status === "queued" &&
-            options.prDevelopmentRepairCompletionGate != null &&
-            !completingPRDevelopmentRepair
-          ) {
-            completingPRDevelopmentRepair = true
-            await options.prDevelopmentRepairCompletionGate
-            const repairRevision =
-              currentPRDevelopmentDetail.repair_revision + 1
-            currentPRDevelopmentDetail = {
-              ...currentPRDevelopmentDetail,
-              repair_revision: repairRevision,
-              repair_session: {
-                ...repairSession,
-                revision: repairRevision,
-                head_repository: "octocat/repo",
-                head_ref: "fix/provider-feedback",
-                head_sha: "1".repeat(40),
-                attempts: repairSession.attempts.map((attempt) => ({
-                  ...attempt,
-                  status: "completed",
-                  summary:
-                    '<img src=x onerror="private-summary-handler"> repair-summary-canary',
-                  updated_at: "2026-08-05T12:04:00Z",
-                })),
-              },
-              local_development: {
-                attempt_id: latestAttempt.id,
-                attempt_ordinal: latestAttempt.ordinal,
-                attempt_status: "completed",
-                summary:
-                  '<img src=x onerror="private-summary-handler"> repair-summary-canary',
-                commit_sha: "2".repeat(40),
-                no_changes: false,
-                ci_status: "passed",
-                ci_plan_digest: "3".repeat(64),
-                ci_result_digest: "4".repeat(64),
-                review_status: "pending",
-                review_finding_count: 0,
-                local_ready: false,
-                updated_at: "2026-08-05T12:04:00Z",
-              },
-            }
-          }
-          return json(route, currentPRDevelopmentDetail)
-        }
-        case `/api/pr-development/${prDevelopmentCaseID}/attention`:
-          return route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: currentPRDevelopmentAttentionProjectionText,
-          })
-        case `/api/reviews/${reviewAttentionCaseID}`:
-          return json(route, reviewAttentionDetail)
-        case `/api/reviews/${reviewAttentionCaseID}/provider`:
-          return json(
-            route,
-            url.searchParams.get("view") === "status"
-              ? reviewProviderStatus
-              : reviewProviderSnapshot(reviewProviderThreadResolved),
-          )
-        case `/api/reviews/${reviewAttentionCaseID}/attention`:
-          return route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: currentReviewAttentionProjectionText,
-          })
+        case `/api/pr-workspaces/${prWorkspaceID}`:
+          return json(route, prWorkspaceAggregate)
+        case "/api/pr-lifecycle/gate-profiles":
+          return json(route, prLifecycleGateProfiles)
         case "/api/events":
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
@@ -3282,6 +3008,15 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(hasHorizontalOverflow).toBe(false)
 }
 
+async function expectNoPersistentLoadingOrLoadError(page: Page) {
+  const unresolvedState = page
+    .locator("main")
+    .getByText(
+      /^(?:Loading\b|(?:Failed|Unable) to load\b|.*\b(?:is|are) unavailable\.?$)/i,
+    )
+  await expect(unresolvedState).toHaveCount(0)
+}
+
 async function expectElementFitsViewport(
   page: Page,
   selector: string,
@@ -3371,679 +3106,59 @@ for (const routePath of smokeRoutes) {
     await gotoMockedRoute(page, routePath)
     await expect(page.getByRole("button").first()).toBeVisible()
     await page.waitForTimeout(500)
+    await expectNoPersistentLoadingOrLoadError(page)
     await expectNoHorizontalOverflow(page)
     await expectNoSeriousA11yViolations(page)
     expect(errors).toEqual([])
   })
 }
 
-test("submitted review attention handoff is canonical, focused, fenced, and contained", async ({
+test("unified pull request workspace combines review, implementation, nudges, and gate profiles", async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
   const errors = collectPageErrors(page)
-  const responseRequests: Array<{
-    method: string
-    path: string
-    body: unknown
-  }> = []
   await gotoMockedRoute(
     page,
-    `/reviews?case=${reviewAttentionCaseID}&focus=chat&status=submitted&repository=octo%2Frepo&cursor=private-cursor-canary&run=private-run-canary&task=private-task-canary&questions=private-questions-canary`,
-    { reviewAttentionResponseRequests: responseRequests },
+    `/pull-requests?workspace=${prWorkspaceID}&cursor=private&prompt=private#secret`,
   )
 
   await expect(page).toHaveURL(
-    new RegExp(`/reviews\\?case=${reviewAttentionCaseID}&focus=chat$`),
+    new RegExp(`/pull-requests\\?workspace=${prWorkspaceID}$`),
   )
+  await expect(page.getByText("PR charter", { exact: true })).toBeVisible()
   await expect(
-    page.getByRole("heading", { name: "Review conversation" }),
-  ).toBeVisible()
-  const ordinaryChat = page.getByRole("textbox", {
-    name: "Message",
-    exact: true,
-  })
-  await expect(ordinaryChat).toBeDisabled()
-  const response = page.getByLabel("Reply to the AI attention request")
-  await expect(response).toBeVisible()
-  await expect(response).toBeFocused()
-  await expect(page.getByText('{"priority":9007199254740993}')).toBeVisible()
-  await expect(page.locator("body")).not.toContainText("private-run-canary")
-  await expect(page.locator("body")).not.toContainText("private-task-canary")
-  await expect(page.locator("body")).not.toContainText(
-    "private-questions-canary",
-  )
-
-  await response.fill("Keep v1")
-  await page.getByRole("button", { name: "Send attention reply" }).click()
-
-  await expect(
-    page.getByText("The attention conversation is complete."),
-  ).toBeVisible()
-  await expect(page.getByText("Keep v1", { exact: true })).toBeVisible()
-  expect(responseRequests).toEqual([
-    {
-      method: "POST",
-      path: `/api/reviews/${reviewAttentionCaseID}/attention/respond`,
-      body: {
-        expected_case_version: 7,
-        response_token: reviewAttentionResponseToken,
-        response: "Keep v1",
-      },
-    },
-  ])
-  await expectNoHorizontalOverflow(page)
-  await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
-})
-
-test("pull request work starts at repositories, filters PRs, separates roles, and opens configuration", async ({
-  page,
-}) => {
-  const errors = collectPageErrors(page)
-  await gotoMockedRoute(page, "/reviews")
-
-  await expect(
-    page.getByRole("heading", { name: "Pull request work" }).last(),
-  ).toBeVisible()
-  const repository = page.getByRole("button", {
-    name: /octo\/repo 2 tracked pull requests/i,
-  })
-  await expect(repository).toContainText("Pending")
-  await expect(repository).toContainText("Needs action")
-  await expect(repository).toContainText("Closed")
-  await expect(repository).toContainText("Reviewing")
-  await expect(repository).toContainText("Developing")
-
-  await repository.click()
-  await expect(page).toHaveURL(/\/reviews\?repo=octo%2Frepo$/)
-  const query = page.getByRole("combobox", { name: "Filter pull requests" })
-  await query.fill("role = develop")
-  await page.getByRole("button", { name: "Search" }).click()
-  await expect(page).toHaveURL(/filter=role\+%3D\+develop/)
-  await expect(page.getByText("Feedback from @reviewer")).toBeVisible()
-  await expect(page.getByText(reviewAttentionCase.summary)).toHaveCount(0)
-
-  await query.fill("")
-  await page.getByRole("button", { name: "Search" }).click()
-  await page.getByRole("button", { name: /#42/ }).click()
-  await expect(
-    page.getByRole("heading", { name: "PicoClaw review" }),
+    page.getByText("Review search and nudges", { exact: true }),
   ).toBeVisible()
   await expect(
-    page.getByRole("heading", { name: "Live provider review" }),
+    page.getByText("Implementation and validation", { exact: true }),
   ).toBeVisible()
-  await expect(page.getByText("Current pull request state")).toBeVisible()
-  await expect(page.getByText("@provider-reviewer")).toHaveCount(2)
+  // Both nudge controls stay visible in the unified workspace, but only the
+  // control authorized for the aggregate's current lifecycle phase is active.
+  await expect(page.getByRole("button", { name: "Find more" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Check again" })).toBeEnabled()
   await expect(
-    page.getByText("Keep the optimistic concurrency guard."),
-  ).toBeVisible()
-  await expect(page.getByText("pkg/store.go:72")).toBeVisible()
+    page.getByRole("button", { name: "Publish review" }),
+  ).toBeEnabled()
   await expect(
-    page.getByText("The write can replace newer state."),
-  ).toBeVisible()
-  await expect(page.getByText("pkg/legacy.go:10")).toBeVisible()
-  await expect(page.getByText("Outdated")).toBeVisible()
-  await page.getByRole("button", { name: "Resolve thread" }).click()
-  await expect(
-    page.getByRole("button", { name: "Reopen thread" }),
-  ).toBeVisible()
-  await page.getByRole("button", { name: /View review case/ }).click()
-  await expect(page).toHaveURL(/view=review/)
-  await page.getByRole("button", { name: "All pull request work" }).click()
-  await expect(page).toHaveURL(/repo=octo%2Frepo.*pr=42.*role=review/)
-  await page.getByRole("button", { name: "octo/repo", exact: true }).click()
-  await page.getByRole("button", { name: /#84/ }).click()
-  await expect(
-    page.getByRole("heading", { name: "Development workspace" }),
-  ).toBeVisible()
-  await expect(page.getByText("Coming soon")).toBeVisible()
-
-  if ((page.viewportSize()?.width ?? 0) < 640) {
-    await page.getByRole("button", { name: "Toggle Sidebar" }).first().click()
-  }
-  const reviewsSection = page.getByRole("button", { name: "PR Reviews" })
-  if ((await reviewsSection.getAttribute("aria-expanded")) !== "true") {
-    await reviewsSection.click()
-  }
-  const workLink = page.getByRole("link", { name: "Pull request work" })
-  const configurationLink = page.getByRole("link", { name: "Rule sets" })
-  await expect(workLink).toHaveAttribute("aria-current", "page")
-  await expect(configurationLink).not.toHaveAttribute("aria-current")
-  await configurationLink.click()
-  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
-  await expect(
-    page.getByText("Build reusable attention rule sets"),
-  ).toBeVisible()
-  if ((page.viewportSize()?.width ?? 0) >= 640) {
-    await expect(workLink).not.toHaveAttribute("aria-current")
-    await expect(configurationLink).toHaveAttribute("aria-current", "page")
-  } else {
-    await expect(page.locator('[data-mobile="true"]')).toHaveCount(0)
-  }
-  await expectNoHorizontalOverflow(page)
-  await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
-})
-
-test("captured PR feedback and advisory AI chat are canonical, plain text, and contained on mobile", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 375, height: 760 })
-  const errors = collectPageErrors(page)
-  const requests: Array<{ method: string; path: string }> = []
-  const chatRequests: Array<{ method: string; path: string; body: unknown }> =
-    []
-  const attentionResponseRequests: Array<{
-    method: string
-    path: string
-    body: unknown
-  }> = []
-  page.on("request", (request) => {
-    const path = new URL(request.url()).pathname
-    if (path.startsWith("/api/pr-development")) {
-      requests.push({ method: request.method(), path })
-    }
-  })
-
-  await gotoMockedRoute(
-    page,
-    `/reviews?view=development&case=${prDevelopmentCaseID}&repository=%20octo%2Frepo%20&pull_number=84&focus=chat&questions=private-questions-canary&cursor=private-cursor-canary`,
-    {
-      prDevelopmentChatRequests: chatRequests,
-      prDevelopmentAttentionResponseRequests: attentionResponseRequests,
-    },
-  )
-
-  await expect(page).toHaveURL(
-    new RegExp(
-      `/reviews\\?view=development&case=${prDevelopmentCaseID}&focus=chat$`,
-    ),
-  )
-  await expect(
-    page.getByRole("button", { name: "My PR feedback" }),
-  ).toHaveAttribute("aria-current", "page")
-  await expect(page.getByLabel("Pull request number")).toHaveValue("")
-  const feedback = page.getByTestId("pr-development-feedback")
-  await expect(feedback).toContainText("private-link-canary")
-  await expect(
-    page.getByRole("link", { name: "private-link-canary" }),
-  ).toHaveCount(0)
-  await expect(page.locator("body")).not.toContainText(
-    "private-questions-canary",
-  )
-  await expect(page.locator("body")).not.toContainText("private-cursor-canary")
-  await expect(page.getByText(/cannot inspect a checkout/i)).toBeVisible()
-  const attentionResponse = page.getByLabel("Reply to the current PR gate")
-  await expect(attentionResponse).toBeFocused()
-  await expect(
-    page.getByRole("heading", { name: "PR decision gates" }),
-  ).toBeVisible()
-  await expect(
-    page.getByText(
-      "Your reply continues this gate; it does not directly edit code, run CI, push commits, acknowledge a review, or merge the pull request.",
-    ),
-  ).toBeVisible()
-  await expect(page.getByText("Gate owner_input")).toBeVisible()
-  await attentionResponse.fill("Preserve compatibility")
-  await page.getByRole("button", { name: "Send attention reply" }).click()
-  await expect(
-    page.getByText("The PR gate conversation is complete."),
-  ).toBeVisible()
-  expect(attentionResponseRequests).toEqual([
-    {
-      method: "POST",
-      path: `/api/pr-development/${prDevelopmentCaseID}/attention/respond`,
-      body: {
-        expected_case_version: 0,
-        response_token: prDevelopmentAttentionResponseToken,
-        response: "Preserve compatibility",
-      },
-    },
-  ])
-  await expect(
-    page.getByRole("button", { name: /checkout|push/i }),
-  ).toHaveCount(0)
-  await expect(page.getByRole("link", { name: /Open PR/ })).toBeVisible()
-  await expect(page.getByRole("link", { name: /Open review/ })).toBeVisible()
-  await page
-    .getByLabel("Message AI about this feedback")
-    .fill("Explain the safe next step.")
-  await page.getByRole("button", { name: "Send" }).click()
-  const assistantMessage = page.getByTestId("pr-development-message-1")
-  await expect(assistantMessage).toContainText("private-ai-canary")
-  await expect(assistantMessage.locator("script")).toHaveCount(0)
-  expect(chatRequests).toEqual([
-    {
-      method: "POST",
-      path: `/api/pr-development/${prDevelopmentCaseID}/chat`,
-      body: {
-        expected_version: 0,
-        content: "Explain the safe next step.",
-      },
-    },
-  ])
-  await page.getByRole("button", { name: "Back to PR feedback" }).click()
-  await expect(
-    page.getByRole("heading", { name: "Feedback on my PRs" }),
-  ).toBeVisible()
-  await expect(page.getByText("Needs input")).toBeVisible()
-  await page.getByRole("button", { name: new RegExp(`octo/repo #84`) }).click()
-  await expect(page).toHaveURL(
-    new RegExp(
-      `/reviews\\?view=development&case=${prDevelopmentCaseID}&focus=chat$`,
-    ),
-  )
-  await expect(page.getByTestId("pr-development-feedback")).toContainText(
-    "private-link-canary",
-  )
-  expect(requests).toEqual(
-    expect.arrayContaining([
-      { method: "GET", path: "/api/pr-development" },
-      {
-        method: "GET",
-        path: `/api/pr-development/${prDevelopmentCaseID}`,
-      },
-      {
-        method: "POST",
-        path: `/api/pr-development/${prDevelopmentCaseID}/chat`,
-      },
-      {
-        method: "GET",
-        path: `/api/pr-development/${prDevelopmentCaseID}/attention`,
-      },
-    ]),
-  )
-  await expectNoHorizontalOverflow(page)
-  await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
-})
-
-test("local PR repair is explicitly confirmed, exactly fenced, plain text, and contained", async ({
-  page,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name !== "desktop",
-    "desktop PR repair smoke coverage",
-  )
-  const errors = collectPageErrors(page)
-  const repairRequests: NonNullable<
-    MockLauncherApiOptions["prDevelopmentRepairRequests"]
-  > = []
-  let releaseRepairCompletion!: () => void
-  const repairCompletionGate = new Promise<void>((resolve) => {
-    releaseRepairCompletion = resolve
-  })
-  const repairInstruction =
-    "Apply <script>repair-instruction-canary</script> in the local checkout."
-  const repairSummary =
-    '<img src=x onerror="private-summary-handler"> repair-summary-canary'
-
-  await gotoMockedRoute(
-    page,
-    `/reviews?view=development&case=${prDevelopmentCaseID}`,
-    {
-      prDevelopmentRepairRequests: repairRequests,
-      prDevelopmentRepairCompletionGate: repairCompletionGate,
-    },
-  )
-
-  await page
-    .getByLabel("Local repair instruction")
-    .fill(`  ${repairInstruction}  `)
-  await page.getByRole("button", { name: "Start local repair" }).click()
-
-  const confirmation = page.getByRole("alertdialog")
-  await expect(confirmation).toBeVisible()
-  await expect(confirmation).toContainText("pinned local copy")
-  await expect(confirmation).toContainText(
-    "run discovered local checks, record a commit when files changed, and review the result",
-  )
-  await expect(confirmation).toContainText("Nothing will be changed on GitHub.")
-  await confirmation.getByRole("button", { name: "Start local repair" }).click()
-
-  await expect(
-    page.getByRole("status").filter({ hasText: "Queued" }),
-  ).toBeVisible()
-  const attemptCard = page
-    .locator("li")
-    .filter({ hasText: "Attempt 1" })
-    .filter({ hasText: repairInstruction })
-  await expect(attemptCard).toBeVisible()
-  await expect(attemptCard.locator("script")).toHaveCount(0)
-  expect(repairRequests).toEqual([
-    {
-      method: "POST",
-      path: `/api/pr-development/${prDevelopmentCaseID}/repair`,
-      body: {
-        expected_conversation_version: 0,
-        expected_repair_revision: 0,
-        request_id: expect.stringMatching(/^prq_[0-9a-f]{32}$/),
-        instruction: repairInstruction,
-      },
-    },
-  ])
-
-  releaseRepairCompletion()
-  await expect(page.getByText(repairSummary, { exact: true })).toBeVisible({
-    timeout: 5_000,
-  })
-  await expect(
-    page.getByRole("status").filter({
-      hasText: "AI review pending",
-    }),
-  ).toBeVisible()
-  await expect(page.getByTestId("local-development-status")).toContainText(
-    "Recorded 22222222",
-  )
-  await expect(
-    page.getByTestId("local-development-status").getByText("Local CI"),
-  ).toBeVisible()
-  await expect(
-    page
-      .getByTestId("local-development-status")
-      .getByText("Passed", { exact: true }),
-  ).toBeVisible()
-  await expect(page.getByTestId("local-development-status")).toContainText(
-    "does not mean changes were pushed",
-  )
-  await expect(attemptCard.locator("img")).toHaveCount(0)
-  await expect(page.getByText("Pinned head")).toBeVisible()
-  await expectNoHorizontalOverflow(page)
-  await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
-})
-
-test("review attention policy route is inert, accessible, and contained on desktop and mobile", async ({
-  page,
-}) => {
-  const errors = collectPageErrors(page)
-  const reviewRequests: Array<{
-    path: string
-    method: string
-    body: string | null
-  }> = []
-  page.on("request", (request) => {
-    const path = new URL(request.url()).pathname
-    if (path.startsWith("/api/reviews")) {
-      reviewRequests.push({
-        path,
-        method: request.method(),
-        body: request.postData(),
-      })
-    }
-  })
-
-  await gotoMockedRoute(
-    page,
-    "/reviews?view=policies&case=private&questions=secret&revision=opaque",
-  )
-
-  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
-  await expect(
-    page.getByRole("button", { name: "Pull request work" }),
-  ).toBeVisible()
-  await expect(
-    page.getByText("Build reusable attention rule sets"),
-  ).toBeVisible()
-  await expect(
-    page.getByText(/built-in Default set always exists/),
-  ).toBeVisible()
-  await expect(
-    page.getByRole("link", { name: /Manage repository intake/ }),
-  ).toHaveAttribute("href", "/event-sources")
-  await page.getByText("What saving changes").click()
-  await expect(
-    page.getByText(/Saving replaces the full rule-set catalog/),
-  ).toBeVisible()
-  await expect(page.getByText("Known workflow moments")).toBeVisible()
-  await expect(page.getByText("Outgoing review submitted")).toBeVisible()
-  await expect(
-    page.getByText("Before pushing my PR changes", { exact: true }),
-  ).toBeVisible()
-  expect(
-    await page
-      .getByLabel("How to decide")
-      .evaluateAll((fields) =>
-        fields.map((field) => (field as HTMLSelectElement).value),
-      ),
-  ).toEqual([
-    "ai_working_context",
-    "ai_isolated_context",
-    "deterministic",
-    "zero",
-  ])
-
-  await page.getByRole("button", { name: /Release checks/ }).click()
-  await expect(
-    page
-      .getByRole("region", { name: "Release checks" })
-      .getByText("Assigned repositories: 1", { exact: true }),
-  ).toBeVisible()
-  const effectivePolicy = page.getByRole("article", {
-    name: "Attention rule 1",
-  })
-  await expect(
-    effectivePolicy.getByRole("textbox", { name: "Check ID" }),
-  ).toHaveValue(boundaryReviewAttentionGateID)
-  await expect(effectivePolicy.getByLabel("How to decide")).toHaveValue(
-    "deterministic",
-  )
-
-  await page.waitForTimeout(250)
-  expect(reviewRequests.length).toBeGreaterThan(0)
-  expect(reviewRequests).toEqual(
-    expect.arrayContaining([
-      {
-        path: "/api/reviews/attention-policies",
-        method: "GET",
-        body: null,
-      },
-      {
-        path: "/api/reviews/attention-agents",
-        method: "GET",
-        body: null,
-      },
-    ]),
-  )
-  expect(
-    reviewRequests.every(
-      ({ path, method, body }) =>
-        (path === "/api/reviews/attention-policies" ||
-          path === "/api/reviews/attention-agents") &&
-        method === "GET" &&
-        body === null,
-    ),
-  ).toBe(true)
-  await expectNoHorizontalOverflow(page)
-  await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
-})
-
-test("review attention policy protects dirty navigation and boundary identities at 320px", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 320, height: 720 })
-  const errors = collectPageErrors(page)
-  await gotoMockedRoute(page, "/reviews?view=policies")
-
-  await page.getByRole("button", { name: /Release checks/ }).click()
-  await expect(
-    page.getByRole("textbox", { name: "Check ID" }).first(),
-  ).toHaveValue(boundaryReviewAttentionGateID)
-  await expectNoHorizontalOverflow(page)
-
-  const title = page.getByLabel("Attention title").first()
-  await title.fill("Keep this memory-only policy draft")
-  expect(
-    await page.evaluate(() => {
-      const event = new Event("beforeunload", { cancelable: true })
-      window.dispatchEvent(event)
-      return event.defaultPrevented
-    }),
-  ).toBe(true)
-
-  await page.getByRole("button", { name: "Pull request work" }).click()
-  const firstNavigation = page.getByRole("alertdialog", {
-    name: "Discard unsaved rule changes?",
-  })
-  await expect(firstNavigation).toBeVisible()
-  await firstNavigation.getByRole("button", { name: "Keep editing" }).click()
-  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
-  await expect(title).toHaveValue("Keep this memory-only policy draft")
-
-  await page
-    .getByRole("button", { name: "Assign repositories" })
-    .first()
-    .click()
-  const repositoryDialog = page.getByRole("dialog", {
-    name: "Assign repositories to rule sets",
-  })
-  await expectElementFitsViewport(
-    page,
-    '[role="dialog"]',
-    "repository override dialog",
-  )
-  await repositoryDialog
-    .getByRole("textbox", { name: "Repository" })
-    .fill(boundaryReviewAttentionRepository)
-  await repositoryDialog.getByRole("button", { name: "Add assignment" }).click()
-  await repositoryDialog.getByRole("button", { name: "Done" }).click()
-  await page
-    .getByRole("button", { name: "Add workflow moment" })
-    .first()
-    .click()
-  const ruleDialog = page.getByRole("dialog", {
-    name: "Add an attention rule",
-  })
-  await expectElementFitsViewport(
-    page,
-    '[role="dialog"]',
-    "attention rule dialog",
-  )
-  await ruleDialog
-    .getByLabel("When should this rule run?")
-    .selectOption("review.submitted")
-  await ruleDialog.getByRole("button", { name: "Add rule" }).click()
-  const boundaryPolicy = page.getByRole("article", {
-    name: "Attention rule 2",
-  })
-  await boundaryPolicy.getByRole("button", { name: "Add check" }).click()
-  const checkDialog = page.getByRole("dialog", {
-    name: "How should PicoClaw decide?",
-  })
-  await page.setViewportSize({ width: 320, height: 480 })
-  await expectElementFitsViewport(
-    page,
-    '[role="dialog"]',
-    "check choice dialog",
-  )
-  expect(
-    await checkDialog.evaluate((dialog) => {
-      const styles = getComputedStyle(dialog)
-      return {
-        overflowY: styles.overflowY,
-        scrollable: dialog.scrollHeight > dialog.clientHeight,
-      }
-    }),
-  ).toEqual({ overflowY: "auto", scrollable: true })
-  await checkDialog
-    .getByRole("button", { name: /Ask the agent already working on the PR/ })
-    .click()
-  await page.setViewportSize({ width: 320, height: 720 })
-  await boundaryPolicy.getByRole("textbox", { name: "Check ID" }).fill("local")
-  await boundaryPolicy.getByLabel("AI agent").selectOption("reviewer")
-  await boundaryPolicy
-    .getByRole("textbox", { name: "Attention title" })
-    .fill("Repository owner input")
-  await boundaryPolicy
-    .getByRole("textbox", { name: "What AI should look for" })
-    .fill("Ask when repository intent cannot be inferred safely.")
-  await expect(
-    page
-      .getByRole("region", { name: "Repository assignments" })
-      .getByText(boundaryReviewAttentionRepository, { exact: true }),
-  ).toBeVisible()
-  await expectNoHorizontalOverflow(page)
-
-  await page.getByRole("button", { name: "Pull request work" }).click()
-  const secondNavigation = page.getByRole("alertdialog", {
-    name: "Discard unsaved rule changes?",
-  })
-  await expect(secondNavigation).toBeVisible()
-  await secondNavigation
-    .getByRole("button", { name: "Discard changes" })
-    .click()
-  await expect(page).toHaveURL(/\/reviews$/)
-  expect(
-    await page.evaluate(() => {
-      const event = new Event("beforeunload", { cancelable: true })
-      window.dispatchEvent(event)
-      return event.defaultPrevented
-    }),
-  ).toBe(false)
-  expect(errors).toEqual([])
-})
-
-test("review attention policy fences navigation until an in-flight save settles", async ({
-  page,
-}) => {
-  let releasePut!: () => void
-  const putGate = new Promise<void>((resolve) => {
-    releasePut = resolve
-  })
-  const errors = collectPageErrors(page)
-  const saveBoundaryRequests: Array<{ method: string; path: string }> = []
-  page.on("request", (request) => {
-    const path = new URL(request.url()).pathname
-    const method = request.method()
-    if (
-      new URL(page.url()).pathname !== "/reviews" ||
-      method === "GET" ||
-      method === "HEAD"
-    ) {
-      return
-    }
-    saveBoundaryRequests.push({
-      method,
-      path,
-    })
-  })
-  await gotoMockedRoute(page, "/reviews?view=policies", {
-    reviewAttentionPolicyPutGate: putGate,
-  })
-  saveBoundaryRequests.length = 0
-
-  const title = page.getByLabel("Attention title").first()
-  await title.fill("Persist before leaving")
-  await page.getByRole("button", { name: "Save rule sets" }).click()
-  await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled()
-  await expect(
-    page.getByRole("button", { name: "Pull request work" }),
+    page.getByRole("button", { name: "Publish implementation" }),
   ).toBeDisabled()
+  await expect(page.getByText("reward 0.25")).toBeVisible()
+  await expectNoSeriousA11yViolations(page)
 
-  const services = page.getByRole("button", { name: "Services", exact: true })
-  if (!(await services.isVisible())) {
-    await page.getByRole("button", { name: "Toggle Sidebar" }).first().click()
+  const pullRequests = page.getByRole("button", { name: "Pull requests" })
+  if ((await pullRequests.getAttribute("aria-expanded")) !== "true") {
+    await pullRequests.click()
   }
-  if ((await services.getAttribute("aria-expanded")) !== "true") {
-    await services.click()
-  }
-  await page.getByRole("link", { name: "Models", exact: true }).click()
-  const navigation = page.getByRole("alertdialog", {
-    name: "Discard unsaved rule changes?",
-  })
-  await expect(navigation).toBeVisible()
+  await page.getByRole("link", { name: "Gate profiles" }).click()
+  await expect(page).toHaveURL(/\/pull-requests\?view=gate-profiles$/)
   await expect(
-    navigation.getByRole("button", { name: "Discard changes" }),
-  ).toBeDisabled()
-  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
-
-  releasePut()
-  await expect(page).toHaveURL(/\/models$/)
-  await expect(navigation).toBeHidden()
-  expect(saveBoundaryRequests).toEqual([
-    { method: "PUT", path: "/api/reviews/attention-policies" },
-  ])
+    page.getByRole("heading", { name: "PR lifecycle gate profiles" }),
+  ).toBeVisible()
+  await expect(page.getByText("Review minimum")).toBeVisible()
+  await expect(page.getByText("XS modules")).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
 })
 

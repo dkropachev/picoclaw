@@ -8,8 +8,6 @@ import (
 )
 
 const (
-	maxPRDevelopmentAttentionPinnedPolicyBytes = 3 << 20
-
 	schemaV16PRDevelopmentAttentionTriggersTable = `CREATE TABLE IF NOT EXISTS pr_development_attention_triggers (
 	review_entry_id TEXT PRIMARY KEY,
 	review_entry_kind TEXT NOT NULL DEFAULT 'review' CHECK (review_entry_kind = 'review'),

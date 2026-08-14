@@ -373,9 +373,9 @@ func TestManagerSharedHTTPWriteTimeoutCoversProtectedAIBudget(t *testing.T) {
 		t.Fatal("SetupHTTPServer() did not create a server")
 	}
 	if m.httpServer.WriteTimeout != sharedHTTPWriteTimeout ||
-		m.httpServer.WriteTimeout <= 120*time.Second {
+		m.httpServer.WriteTimeout <= 10*time.Minute {
 		t.Fatalf(
-			"shared WriteTimeout = %s, want %s and greater than 120s",
+			"shared WriteTimeout = %s, want %s and greater than 10m",
 			m.httpServer.WriteTimeout,
 			sharedHTTPWriteTimeout,
 		)

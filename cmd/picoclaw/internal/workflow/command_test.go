@@ -38,22 +38,6 @@ func TestInstallWorkflowCommandInstallsGitHubIssueTriageWorkflow(t *testing.T) {
 	)
 }
 
-func TestInstallWorkflowCommandInstallsGitHubPRReviewWorkflow(t *testing.T) {
-	testInstallWorkflowCommand(
-		t,
-		"github-pr-review",
-		"workflows/github-pr-review.yml",
-	)
-}
-
-func TestInstallWorkflowCommandInstallsGitHubPRDevelopmentWorkflow(t *testing.T) {
-	testInstallWorkflowCommand(
-		t,
-		"github-pr-development",
-		"workflows/github-pr-development.yml",
-	)
-}
-
 func testInstallWorkflowCommand(t *testing.T, template string, ref string) {
 	t.Helper()
 	workspace := t.TempDir()
@@ -102,8 +86,6 @@ func TestInstallWorkflowCommandHelpListsAvailableTemplates(t *testing.T) {
 	for _, template := range []string{
 		"code-review",
 		"github-issue-triage",
-		"github-pr-review",
-		"github-pr-development",
 	} {
 		if !strings.Contains(out.String(), template) {
 			t.Fatalf("install help = %q, missing template %q", out.String(), template)

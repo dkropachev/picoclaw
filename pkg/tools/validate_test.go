@@ -3,9 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 // Ensure imports are used.
@@ -402,6 +405,9 @@ func TestValidateToolArgs_RegistryIntegration(t *testing.T) {
 	}
 	if result.Err == nil {
 		t.Error("expected Err to be set via WithError")
+	}
+	if !errors.Is(result.Err, workflows.ErrToolCallNotDispatched) {
+		t.Errorf("validation error = %v, want ErrToolCallNotDispatched", result.Err)
 	}
 
 	// Wrong type — should fail with validation error
