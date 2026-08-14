@@ -29,6 +29,49 @@ const workflows: PRLifecycleGateProfile["workflows"] = {
 }
 
 describe("PR lifecycle gate map", () => {
+  it("shows the real GitHub-triggered event and data flow around the gates", () => {
+    const { container } = render(
+      <PRLifecycleGateMap
+        selectedDecisionPoint="pr.charter.confirm"
+        workflows={workflows}
+        onSelect={vi.fn()}
+      />,
+    )
+
+    expect(
+      screen.getByRole("heading", {
+        name: "PR lifecycle event and data flow",
+      }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText("GitHub · pull_request.review_requested"),
+    ).toBeInTheDocument()
+    expect(screen.getByText("Durable event inbox")).toBeInTheDocument()
+    expect(screen.getByText("Explicit workspace handoff")).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "User clicks Track PR, or custom automation supplies the PR URL",
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByText("PicoClaw · review agent")).toBeInTheDocument()
+    expect(
+      screen.getByText("Findings, stage evidence, nudge records"),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText("PicoClaw · implementation agent"),
+    ).toBeInTheDocument()
+    expect(screen.getByText("Validation evidence")).toBeInTheDocument()
+    expect(screen.getAllByText("Canonical shared facts bundle")).toHaveLength(2)
+    expect(
+      container.querySelectorAll('[data-flow-kind="data"]'),
+    ).not.toHaveLength(0)
+    expect(
+      container.querySelector(
+        '[data-flow-edge="repo · PR # · reviewer · base/head SHA"]',
+      ),
+    ).toBeInTheDocument()
+  })
+
   it("renders every gate as an exact selectable decision point", () => {
     const { container } = render(
       <PRLifecycleGateMap
