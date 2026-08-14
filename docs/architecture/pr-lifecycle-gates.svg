@@ -1,253 +1,435 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="2720" viewBox="0 0 1920 2720" role="img" aria-labelledby="title desc" data-gate-map-version="3" data-profile="default">
-  <title id="title">PicoClaw pull-request event and data flow with editable lifecycle gates</title>
-  <desc id="desc">An end-to-end data-flow diagram beginning with a GitHub review request. It shows the event inbox and explicit workspace handoff, verified PR data, charter, review and nudge agents, findings, implementation, validation, publication and correction data, with all fourteen lifecycle gates linked to their editor locations.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="2050" viewBox="0 0 1920 2050" role="img" aria-labelledby="title desc" data-gate-map-version="4" data-profile="default">
+  <title id="title">PicoClaw pull-request action and data flow</title>
+  <desc id="desc">A clickable end-to-end map from a GitHub review assignment through an explicit user or configured-automation Track PR action, purpose and scope confirmation, AI review, finding decisions, implementation, scope resolution, validation, review comments, branch pushes, and deferred follow-up issues. Four exceptional gates are collected in an advanced rail. All fourteen numbered gates open their profile editor.</desc>
 
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#07111f"/>
-      <stop offset="0.52" stop-color="#0b1424"/>
+      <stop offset="0.58" stop-color="#0a1423"/>
       <stop offset="1" stop-color="#111827"/>
     </linearGradient>
-    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
-      <path d="M24 0H0V24" fill="none" stroke="#334155" stroke-width="0.7" opacity="0.2"/>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#334155" stroke-width="0.7" opacity="0.18"/>
     </pattern>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#020617" flood-opacity="0.5"/>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#020617" flood-opacity="0.45"/>
     </filter>
-    <filter id="focusGlow" x="-25%" y="-30%" width="150%" height="170%">
+    <filter id="focusGlow" x="-20%" y="-25%" width="140%" height="160%">
       <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#22d3ee" flood-opacity="0.8"/>
     </filter>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0L10 5L0 10Z" fill="#93a4ba"/>
+      <path d="M0 0L10 5L0 10Z" fill="#9fb3c8"/>
     </marker>
-    <marker id="arrowData" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0L10 5L0 10Z" fill="#38bdf8"/>
+    <marker id="arrowAgent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#2dd4bf"/>
     </marker>
-    <marker id="arrowLoop" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="arrowChoice" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#60a5fa"/>
+    </marker>
+    <marker id="arrowConditional" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0L10 5L0 10Z" fill="#fbbf24"/>
     </marker>
     <style>
-      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e5edf7; }
-      .title { font-size: 39px; font-weight: 800; letter-spacing: -0.7px; }
-      .subtitle { font-size: 16px; fill: #9fb0c5; }
-      .band { fill: #0c1728; stroke: #33475f; stroke-width: 1.3; }
-      .band-number { font-size: 13px; font-weight: 900; fill: #06212b; text-anchor: middle; }
-      .band-eyebrow { font-size: 10px; font-weight: 800; letter-spacing: 1.2px; fill: #67e8f9; }
-      .band-title { font-size: 19px; font-weight: 800; }
-      .node { stroke-width: 1.4; }
-      .external { fill: #202044; stroke: #818cf8; }
-      .action { fill: #0c2b2d; stroke: #2dd4bf; }
-      .agent { fill: #123044; stroke: #38bdf8; }
-      .data { fill: #111d30; stroke: #60a5fa; stroke-dasharray: 7 5; }
-      .gap { fill: #32131e; stroke: #fb7185; stroke-width: 2; stroke-dasharray: 8 5; }
-      .loop { fill: #30280e; stroke: #fbbf24; stroke-dasharray: 7 5; }
-      .effect { fill: #28183a; stroke: #c084fc; }
-      .hard { fill: #32131e; stroke: #fb7185; stroke-width: 2; }
-      .kind { font-size: 9px; font-weight: 900; letter-spacing: 1px; fill: #93c5fd; }
-      .gap-kind { fill: #fda4af; }
-      .loop-kind { fill: #fde68a; }
-      .node-title { font-size: 14px; font-weight: 800; }
-      .node-copy { font-size: 11px; fill: #aebed0; }
-      .tiny { font-size: 10px; fill: #8fa3bc; }
-      .route { fill: none; stroke: #93a4ba; stroke-width: 2; marker-end: url(#arrow); }
-      .route-data { fill: none; stroke: #38bdf8; stroke-width: 2.1; marker-end: url(#arrowData); }
-      .route-loop { fill: none; stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 8 6; marker-end: url(#arrowLoop); }
-      .route-conditional { fill: none; stroke: #93a4ba; stroke-width: 1.8; stroke-dasharray: 7 6; marker-end: url(#arrow); }
-      .branch-trunk { fill: none; stroke: #38bdf8; stroke-width: 2.1; }
-      .edge-label { font-size: 10px; font-weight: 750; fill: #a9bbcf; paint-order: stroke; stroke: #0c1728; stroke-width: 5px; stroke-linejoin: round; }
-      .gate-card { fill: #132137; stroke: #60a5fa; stroke-width: 2; transition: stroke 120ms ease, filter 120ms ease, fill 120ms ease; }
-      .gate-link.zero .gate-card { stroke: #4ade80; }
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #edf4fc; }
+      .page-title { font-size: 38px; font-weight: 800; letter-spacing: -0.7px; }
+      .subtitle { font-size: 16px; fill: #a5b6ca; }
+      .panel { fill: #0c1728; stroke: #30435a; stroke-width: 1.25; }
+      .panel-kicker { font-size: 11px; font-weight: 900; letter-spacing: 1.4px; fill: #67e8f9; }
+      .panel-title { font-size: 21px; font-weight: 800; }
+      .panel-note { font-size: 12.5px; fill: #93a6bd; }
+      .card { stroke-width: 1.5; }
+      .event-card { fill: #25163a; stroke: #c084fc; }
+      .user-card { fill: #11264a; stroke: #60a5fa; }
+      .agent-card { fill: #0b2b2d; stroke: #2dd4bf; }
+      .data-card { fill: #29240f; stroke: #fbbf24; }
+      .output-card { fill: #25163a; stroke: #c084fc; }
+      .card-kicker { font-size: 10.5px; font-weight: 900; letter-spacing: 1px; }
+      .card-title { font-size: 15px; font-weight: 800; }
+      .card-copy { font-size: 12.5px; fill: #adbed0; }
+      .data-copy { font-size: 12px; fill: #fde68a; }
+      .route { fill: none; stroke: #9fb3c8; stroke-width: 2.5; marker-end: url(#arrow); pointer-events: none; }
+      .route-agent { fill: none; stroke: #2dd4bf; stroke-width: 2.5; marker-end: url(#arrowAgent); pointer-events: none; }
+      .route-choice { fill: none; stroke: #60a5fa; stroke-width: 2.5; marker-end: url(#arrowChoice); pointer-events: none; }
+      .route-conditional { fill: none; stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 8 7; marker-end: url(#arrowConditional); pointer-events: none; }
+      .payload { font-size: 11.5px; font-weight: 800; fill: #dbe8f5; paint-order: stroke; stroke: #0a1423; stroke-width: 5px; stroke-linejoin: round; }
+      .payload-warn { fill: #fde68a; }
+      .gate-card { fill: #102035; stroke: #60a5fa; stroke-width: 2; transition: fill 120ms ease, stroke 120ms ease, filter 120ms ease; }
       .gate-link { cursor: pointer; outline: none; }
       .gate-link:hover .gate-card,
       .gate-link:focus .gate-card,
-      .gate-link:focus-visible .gate-card { fill: #16304b; stroke: #22d3ee; stroke-width: 3; filter: url(#focusGlow); }
-      .gate-kicker { font-size: 9px; font-weight: 900; letter-spacing: 1px; fill: #93c5fd; }
-      .gate-link.zero .gate-kicker { fill: #86efac; }
-      .gate-id { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; font-weight: 800; fill: #f8fafc; }
-      .gate-title { font-size: 11px; fill: #b9c7d8; }
-      .gate-number { font-size: 11px; font-weight: 900; fill: #07111f; text-anchor: middle; }
-      .legend { fill: #0d192a; stroke: #33475f; stroke-width: 1; }
+      .gate-link:focus-visible .gate-card { fill: #15304a; stroke: #22d3ee; stroke-width: 3.2; filter: url(#focusGlow); }
+      .gate-link:hover .edit-pill,
+      .gate-link:focus .edit-pill,
+      .gate-link:focus-visible .edit-pill { fill: #0e7490; }
+      .gate-number { font-size: 13px; font-weight: 900; fill: #07111f; text-anchor: middle; }
+      .gate-id { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12.5px; font-weight: 800; }
+      .gate-id-compact { font-size: 11px; }
+      .gate-copy { font-size: 12px; fill: #b8c7d8; }
+      .pill { font-size: 9.5px; font-weight: 900; letter-spacing: 0.7px; }
+      .legend-label { font-size: 11.5px; font-weight: 750; fill: #bdcad9; }
+      .advanced-panel { fill: #101827; stroke: #64748b; stroke-width: 1.3; stroke-dasharray: 7 6; }
+      .advanced-note { font-size: 12px; fill: #aab9ca; }
+      .safety { font-size: 11px; font-weight: 800; fill: #f5d0fe; }
     </style>
   </defs>
 
-  <rect width="1920" height="2720" fill="url(#background)"/>
-  <rect width="1920" height="2720" fill="url(#grid)"/>
+  <rect width="1920" height="2050" fill="url(#bg)"/>
+  <rect width="1920" height="2050" fill="url(#grid)"/>
 
-  <g transform="translate(44 30)">
-    <rect width="9" height="72" rx="4.5" fill="#2dd4bf"/>
-    <text x="27" y="36" class="title">PR event, data, agent, and gate flow</text>
-    <text x="28" y="67" class="subtitle">Start at the GitHub review assignment. Follow named payloads through durable data, explicit actions, AI work, editable gates, and independent provider effects.</text>
-    <g transform="translate(1495 14)">
-      <rect width="325" height="42" rx="21" fill="#0e3240" stroke="#22d3ee"/>
-      <text x="22" y="27" class="node-copy" fill="#cffafe">Click or focus any numbered gate to edit it</text>
+  <g transform="translate(42 30)">
+    <rect width="9" height="66" rx="4.5" fill="#2dd4bf"/>
+    <text x="27" y="34" class="page-title">Pull request: from review request to safe outcomes</text>
+    <text x="28" y="62" class="subtitle">Follow the action and data path. Every numbered gate is clickable and opens its profile editor.</text>
+    <g transform="translate(1500 9)">
+      <rect width="334" height="43" rx="21.5" fill="#0d3140" stroke="#22d3ee"/>
+      <text x="24" y="27" class="legend-label" fill="#cffafe">14 editable gates · click any numbered card</text>
     </g>
   </g>
 
-  <g transform="translate(44 118)">
-    <rect width="1832" height="58" rx="14" class="legend"/>
-    <g transform="translate(18 13)"><rect width="185" height="32" rx="9" class="external"/><text x="16" y="21" class="kind">GITHUB EVENT</text></g>
-    <g transform="translate(219 13)"><rect width="185" height="32" rx="9" class="action"/><text x="16" y="21" class="kind" fill="#99f6e4">EXPLICIT ACTION</text></g>
-    <g transform="translate(420 13)"><rect width="185" height="32" rx="9" class="agent"/><text x="16" y="21" class="kind">AI / SYSTEM ACTION</text></g>
-    <g transform="translate(621 13)"><rect width="185" height="32" rx="9" class="data"/><text x="16" y="21" class="kind">DURABLE DATA</text></g>
-    <g transform="translate(822 13)"><rect width="185" height="32" rx="9" class="gate-card"/><text x="16" y="21" class="gate-kicker">EDITABLE GATE</text></g>
-    <text x="1035" y="34" class="node-copy">Arrows name the data being transferred. Solid = normal path · dashed = conditional path or loop.</text>
+  <g id="legend" transform="translate(42 120)" filter="url(#shadow)">
+    <rect width="1836" height="88" rx="16" class="panel"/>
+    <text x="20" y="28" class="panel-kicker">VISUAL KEY</text>
+    <g transform="translate(20 40)">
+      <rect width="148" height="29" rx="8" class="event-card"/><text x="15" y="19" class="legend-label">GitHub event</text>
+      <rect x="164" width="174" height="29" rx="8" class="user-card"/><text x="179" y="19" class="legend-label">Explicit user action</text>
+      <rect x="354" width="154" height="29" rx="8" class="agent-card"/><text x="369" y="19" class="legend-label">AI / app action</text>
+      <rect x="524" width="156" height="29" rx="8" class="data-card"/><text x="539" y="19" class="legend-label">User-visible data</text>
+      <rect x="696" width="159" height="29" rx="8" class="output-card"/><text x="711" y="19" class="legend-label">GitHub outcome</text>
+      <rect x="871" width="192" height="29" rx="8" class="gate-card"/><text x="886" y="19" class="legend-label">Editable decision gate ↗</text>
+      <text x="1100" y="19" class="legend-label">Numbered gates open the profile editor; dashed paths are conditional.</text>
+    </g>
   </g>
 
-  <!-- 01: GitHub trigger and the real workspace handoff. -->
-  <g id="intake" transform="translate(44 198)">
-    <rect width="1832" height="300" rx="20" class="band"/>
-    <circle cx="30" cy="31" r="17" fill="#22d3ee"/><text x="30" y="36" class="band-number">01</text>
-    <text x="58" y="25" class="band-eyebrow">AUTOMATIC INGRESS, THEN AN EXPLICIT HANDOFF</text>
-    <text x="58" y="49" class="band-title">GitHub review request → generic event inbox → tracked PR workspace</text>
-
-    <g transform="translate(28 92)"><rect width="270" height="128" rx="14" class="node external"/><text x="16" y="23" class="kind">GITHUB EVENT</text><text x="16" y="52" class="node-title">You are requested to review</text><text x="16" y="76" class="node-copy">pull_request.review_requested</text><text x="16" y="99" class="node-copy">or read-only notification poll</text><text x="16" y="118" class="tiny">GitHub is never acknowledged or mutated here</text></g>
-    <path d="M298 156H374" class="route-data"/><text x="336" y="127" text-anchor="middle" class="edge-label">repo · PR # · reviewer</text><text x="336" y="142" text-anchor="middle" class="edge-label">base/head SHA</text>
-    <g transform="translate(374 92)"><rect width="272" height="128" rx="14" class="node agent"/><text x="16" y="23" class="kind">SYSTEM ACTION</text><text x="16" y="52" class="node-title">Verify, scope, redact, dedupe</text><text x="16" y="76" class="node-copy">HMAC webhook or provider-authenticated poll</text><text x="16" y="99" class="node-copy">target_user and target_reason are routing data</text></g>
-    <path d="M646 156H722" class="route-data"/><text x="684" y="134" text-anchor="middle" class="edge-label">authenticated</text><text x="684" y="149" text-anchor="middle" class="edge-label">event envelope</text>
-    <g transform="translate(722 92)"><rect width="272" height="128" rx="14" class="node data"/><text x="16" y="23" class="kind">DURABLE DATA</text><text x="16" y="52" class="node-title">Generic event inbox</text><text x="16" y="76" class="node-copy">redacted envelope + dedupe key</text><text x="16" y="99" class="node-copy">optional configured workflow dispatch</text></g>
-    <path d="M994 156H1070" class="route-conditional"/><text x="1032" y="128" text-anchor="middle" class="edge-label">NO BUILT-IN</text><text x="1032" y="143" text-anchor="middle" class="edge-label">PR BRIDGE</text>
-    <g transform="translate(1070 80)"><rect width="340" height="152" rx="14" class="node gap"/><text x="16" y="23" class="kind gap-kind">VISIBLE MANUAL / CUSTOM-AUTOMATION GAP</text><text x="16" y="52" class="node-title">Track PR explicitly</text><text x="16" y="77" class="node-copy">User supplies the PR URL in Pull Requests,</text><text x="16" y="97" class="node-copy">or a custom configured workflow does so.</text><text x="16" y="125" class="node-copy" fill="#fecdd3">The GitHub assignment alone does not create,</text><text x="16" y="144" class="node-copy" fill="#fecdd3">open, or start a PR workspace.</text></g>
-    <path d="M1410 156H1486" class="route-data"/><text x="1448" y="128" text-anchor="middle" class="edge-label">PR URL + exact</text><text x="1448" y="143" text-anchor="middle" class="edge-label">provider read</text>
-    <g transform="translate(1486 80)"><rect width="318" height="152" rx="14" class="node data"/><text x="16" y="23" class="kind">DURABLE DATA</text><text x="16" y="52" class="node-title">Verified provider snapshot</text><text x="16" y="76" class="node-copy">provider/repository/PR/viewer identity</text><text x="16" y="97" class="node-copy">base/head · author · state · refs</text><text x="16" y="118" class="node-copy">owned · head writable · can review</text><text x="16" y="139" class="node-copy">can create issue · optimistic fences</text></g>
+  <!-- Main flow panels -->
+  <g filter="url(#shadow)">
+    <rect x="42" y="232" width="1836" height="282" rx="19" class="panel"/>
+    <rect x="42" y="534" width="1836" height="566" rx="19" class="panel"/>
+    <rect x="42" y="1120" width="1836" height="500" rx="19" class="panel"/>
+    <rect x="42" y="1640" width="1836" height="180" rx="19" class="panel"/>
+    <rect x="42" y="1840" width="1836" height="185" rx="19" class="advanced-panel"/>
   </g>
 
-  <!-- 02: Charter and review data flow. -->
-  <g id="review" transform="translate(44 522)">
-    <rect width="1832" height="590" rx="20" class="band"/>
-    <circle cx="30" cy="31" r="17" fill="#22d3ee"/><text x="30" y="36" class="band-number">02</text>
-    <text x="58" y="25" class="band-eyebrow">AUTHORITY → EXPLICIT REVIEW → PERSISTED RESULTS</text>
-    <text x="58" y="49" class="band-title">Verified PR data → charter gates → review agent and nudges → finding gates</text>
+  <text x="66" y="266" class="panel-kicker">1 · RECEIVE AND ALIGN</text>
+  <text x="66" y="294" class="panel-title">After a review assignment, a user or configured workflow explicitly tracks the PR</text>
+  <text x="66" y="566" class="panel-kicker">2 · REVIEW AND CHOOSE</text>
+  <text x="66" y="594" class="panel-title">AI reviews; the user decides what to publish, fix, defer, or dismiss</text>
+  <text x="66" y="1152" class="panel-kicker">3 · IMPLEMENT, VALIDATE, PUBLISH</text>
+  <text x="66" y="1180" class="panel-title">Only selected findings enter the implementation path</text>
+  <text x="66" y="1672" class="panel-kicker">4 · DEFERRED WORK</text>
+  <text x="66" y="1700" class="panel-title">Deferred findings stay separate from the current PR</text>
+  <text x="66" y="1871" class="panel-kicker">ADVANCED · ONLY WHEN THE MAIN PATH HITS AN EXCEPTION</text>
+  <text x="66" y="1895" class="advanced-note">#2 changed purpose/scope · #6 non-owner authorization before #7 · #13 rare reusable correction · #14 unknown review, branch, or issue result.</text>
 
-    <g transform="translate(28 92)"><rect width="238" height="116" rx="14" class="node action"/><text x="16" y="23" class="kind" fill="#99f6e4">EXPLICIT ACTION</text><text x="16" y="51" class="node-title">AI draft or user charter</text><text x="16" y="75" class="node-copy">type · goal · acceptance criteria</text><text x="16" y="96" class="node-copy">included · excluded · non-goals</text></g>
-    <path d="M266 150H330" class="route-data"/><text x="298" y="136" text-anchor="middle" class="edge-label">draft</text>
-    <g transform="translate(330 92)"><rect width="238" height="116" rx="14" class="node data"/><text x="16" y="23" class="kind">DURABLE DATA</text><text x="16" y="51" class="node-title">Charter revision</text><text x="16" y="75" class="node-copy">fix · refactor · feature · docs · test</text><text x="16" y="96" class="node-copy">base/head fenced authority candidate</text></g>
-    <path d="M568 150H626" class="route-conditional"/><text x="597" y="128" text-anchor="middle" class="edge-label">first / revised</text>
+  <!-- Connectors are behind cards so every linked gate remains the interaction target. -->
+  <g id="routes" aria-hidden="true">
+    <!-- Receive and align -->
+    <path d="M340 385H380" class="route-choice"/>
+    <path d="M660 385H700" class="route-choice"/>
+    <path d="M970 385H1010" class="route"/>
+    <path d="M1330 385H1370" class="route-choice"/>
 
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.confirm" target="_top" aria-label="Edit gate 1, Confirm PR charter" data-gate-id="pr.charter.confirm" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.confirm"><title>Open pr.charter.confirm in the gate profile editor</title><g transform="translate(626 75)"><rect class="gate-card" width="270" height="82" rx="13"/><circle cx="244" cy="22" r="12" fill="#60a5fa"/><text x="244" y="26" class="gate-number">1</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN · FIRST CHARTER</text><text x="14" y="47" class="gate-id">pr.charter.confirm</text><text x="14" y="68" class="gate-title">Confirm PR charter</text></g></a>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit gate 2, Confirm revised PR charter" data-gate-id="pr.charter.reconfirm" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.reconfirm"><title>Open pr.charter.reconfirm in the gate profile editor</title><g transform="translate(626 165)"><rect class="gate-card" width="270" height="82" rx="13"/><circle cx="244" cy="22" r="12" fill="#60a5fa"/><text x="244" y="26" class="gate-number">2</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN · REVISED CHARTER</text><text x="14" y="47" class="gate-id">pr.charter.reconfirm</text><text x="14" y="68" class="gate-title">Confirm revised charter</text></g></a>
-    <path d="M896 150H960" class="route-data"/><text x="928" y="136" text-anchor="middle" class="edge-label">pass pins authority</text>
-    <g transform="translate(960 92)"><rect width="300" height="116" rx="14" class="node data"/><text x="16" y="23" class="kind">CANONICAL SHARED DATA</text><text x="16" y="51" class="node-title">Confirmed facts bundle</text><text x="16" y="75" class="node-copy">snapshot + charter + findings + guidance</text><text x="16" y="96" class="node-copy">corrections + lessons + prior evidence</text></g>
-    <path d="M1260 150H1318" class="route-data"/><text x="1289" y="128" text-anchor="middle" class="edge-label">explicit</text><text x="1289" y="143" text-anchor="middle" class="edge-label">Run Review</text>
-    <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.start" target="_top" aria-label="Edit gate 3, Start review" data-gate-id="pr.review.start" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.start"><title>Open pr.review.start in the gate profile editor</title><g transform="translate(1318 108)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#4ade80"/><text x="274" y="26" class="gate-number">3</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · ZERO</text><text x="14" y="47" class="gate-id">pr.review.start</text><text x="14" y="68" class="gate-title">Before diff reaches review agent</text></g></a>
-    <path d="M1618 150H1782V288H1636" class="route-data"/><text x="1714" y="134" text-anchor="middle" class="edge-label">exact diff + facts</text>
+    <!-- Review -->
+    <path d="M1670 440V500H200V625" class="route"/>
+    <text x="940" y="496" class="payload">tracked PR + confirmed purpose/scope</text>
+    <path d="M330 682H380" class="route-agent"/>
+    <path d="M670 682H720" class="route-agent"/>
+    <path d="M1000 682H1050" class="route"/>
+    <path d="M1370 682H1430" class="route-choice"/>
+    <path d="M1605 740V835" class="route-choice"/>
+    <text x="1618" y="792" class="payload">classification</text>
+    <path d="M1210 740V790H1395V835" class="route-conditional"/>
+    <text x="1195" y="782" class="payload payload-warn">clear scope bypass</text>
+    <path d="M1395 890H1350" class="route"/>
+    <path d="M1050 890H1000" class="route-choice"/>
+    <path d="M720 890H670" class="route"/>
 
-    <g transform="translate(1398 288)"><rect width="238" height="116" rx="14" class="node agent"/><text x="16" y="23" class="kind">AI ACTION</text><text x="16" y="51" class="node-title">Review every changed hunk</text><text x="16" y="75" class="node-copy">evidence · severity · scope · coverage</text><text x="16" y="96" class="node-copy">immutable provider-fenced diff</text></g>
-    <path d="M1398 346H1338" class="route-loop"/><text x="1368" y="332" text-anchor="middle" class="edge-label">initial result</text>
-    <g transform="translate(1080 288)"><rect width="258" height="116" rx="14" class="node loop"/><text x="16" y="23" class="kind loop-kind">AUTOMATIC BOUNDED LOOP</text><text x="16" y="51" class="node-title">Find more / find all nudges</text><text x="16" y="75" class="node-copy">runs even after zero findings</text><text x="16" y="96" class="node-copy">tries variants; stores novel/duplicate yield</text></g>
-    <path d="M1080 346H1020" class="route-data"/><text x="1050" y="320" text-anchor="middle" class="edge-label">findings + coverage</text><text x="1050" y="335" text-anchor="middle" class="edge-label">+ prompt digests</text>
-    <g transform="translate(720 288)"><rect width="300" height="116" rx="14" class="node data"/><text x="16" y="23" class="kind">DURABLE DATA</text><text x="16" y="51" class="node-title">Findings + stage evidence</text><text x="16" y="75" class="node-copy">S0–S3 · XS–L · type compatibility</text><text x="16" y="96" class="node-copy">coverage + nudge rounds + success history</text></g>
-    <path d="M720 346H654" class="route-conditional"/><text x="687" y="332" text-anchor="middle" class="edge-label">post-review</text>
-    <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.complete" target="_top" aria-label="Edit gate 4, Complete review" data-gate-id="pr.review.complete" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.complete"><title>Open pr.review.complete in the gate profile editor</title><g transform="translate(354 268)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#4ade80"/><text x="274" y="26" class="gate-number">4</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · ZERO · OVERALL RESULT</text><text x="14" y="47" class="gate-id">pr.review.complete</text><text x="14" y="68" class="gate-title">Accept review findings and coverage</text></g></a>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.finding.classify" target="_top" aria-label="Edit gate 5, Classify ambiguous finding" data-gate-id="pr.finding.classify" data-purpose="classification" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.finding.classify"><title>Open pr.finding.classify in the gate profile editor</title><g transform="translate(354 358)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#60a5fa"/><text x="274" y="26" class="gate-number">5</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN · PER AMBIGUOUS FINDING</text><text x="14" y="47" class="gate-id">pr.finding.classify</text><text x="14" y="68" class="gate-title">S1 / large S0: in scope, defer, revise, dismiss</text></g></a>
-    <path d="M354 346H290" class="route-data"/><text x="322" y="320" text-anchor="middle" class="edge-label">dispositions +</text><text x="322" y="335" text-anchor="middle" class="edge-label">corrections</text>
-    <g transform="translate(28 288)"><rect width="262" height="152" rx="14" class="node data"/><text x="16" y="23" class="kind">DURABLE TRIAGE DATA</text><text x="16" y="51" class="node-title">Classified finding set</text><text x="16" y="78" class="node-copy">S0 XS/S → in scope</text><text x="16" y="99" class="node-copy">S2/S3/incompatible → deferred</text><text x="16" y="120" class="node-copy">ambiguous → gate #5</text><text x="16" y="141" class="node-copy">review publish and implementation branch here</text></g>
-    <path d="M450 440V500H147" class="route-loop"/><text x="327" y="492" class="edge-label">revise → charter revision → gate #2; later head changes require explicit Refresh</text>
+    <!-- Fix branch into implementation -->
+    <path d="M1195 945V1086H175V1220" class="route-choice"/>
+    <text x="625" y="1080" class="payload">FIX-selected finding IDs + acceptance criteria</text>
+    <path d="M260 1272H290" class="route-agent"/>
+    <path d="M500 1272H530" class="route-agent"/>
+    <path d="M720 1272H750" class="route-conditional"/>
+    <path d="M950 1272H980" class="route-choice"/>
+    <path d="M720 1242V1205H1065V1220" class="route-agent"/>
+    <text x="790" y="1200" class="payload">within confirmed scope</text>
+    <path d="M625 1325V1390" class="route-conditional"/>
+    <text x="642" y="1362" class="payload payload-warn">outside PR scope</text>
+    <path d="M530 1450H505V1272H530" class="route-conditional"/>
+    <text x="545" y="1542" class="payload payload-warn">Any continued candidate is updated, then rechecked before validation</text>
+    <path d="M1150 1272H1180" class="route-agent"/>
+    <path d="M1380 1272H1410" class="route-choice"/>
+    <path d="M1610 1272H1640" class="route-choice"/>
+    <path d="M1065 1325V1570H395V1325" class="route-conditional"/>
+    <text x="655" y="1563" class="payload payload-warn">Checks fail or completion is revised → update candidate and repeat scope check</text>
+
+    <!-- Defer branch -->
+    <path d="M1245 945H1840V1755H1780" class="route-choice"/>
+    <text x="1530" y="1742" class="payload">DEFER-selected finding groups</text>
+    <path d="M1130 1475H1820V1755H1780" class="route-conditional"/>
+    <text x="1260" y="1468" class="payload payload-warn">defer follow-up</text>
+    <path d="M1380 1755H1320" class="route"/>
+    <path d="M990 1755H930" class="route-choice"/>
   </g>
 
-  <!-- 03: Implementation data and repair loops. -->
-  <g id="implementation" transform="translate(44 1136)">
-    <rect width="1832" height="610" rx="20" class="band"/>
-    <circle cx="30" cy="31" r="17" fill="#22d3ee"/><text x="30" y="36" class="band-number">03</text>
-    <text x="58" y="25" class="band-eyebrow">EXPLICIT RUN IMPLEMENTATION · DEFAULT MAXIMUM THREE REPAIR CYCLES</text>
-    <text x="58" y="49" class="band-title">Triaged in-scope findings → repair candidate → scope and type evidence → validation → completion</text>
+  <!-- User-visible actions and data -->
+  <g id="visible-actions">
+    <g transform="translate(70 330)">
+      <rect width="270" height="110" rx="14" class="card event-card"/>
+      <rect x="16" y="14" width="110" height="22" rx="11" fill="#581c87"/>
+      <text x="29" y="29" class="card-kicker" fill="#f3e8ff">GITHUB EVENT</text>
+      <text x="16" y="62" class="card-title">Review requested</text>
+      <text x="16" y="84" class="card-copy">pull_request.review_requested</text>
+    </g>
+    <g transform="translate(380 330)">
+      <rect width="280" height="110" rx="14" class="card user-card"/>
+      <rect x="16" y="14" width="218" height="22" rx="11" fill="#1e3a8a"/>
+      <text x="29" y="29" class="card-kicker" fill="#dbeafe">USER / CONFIGURED AUTOMATION</text>
+      <text x="16" y="62" class="card-title">Track PR in PicoClaw</text>
+      <text x="16" y="84" class="card-copy">Explicit action after the GitHub request</text>
+    </g>
+    <g transform="translate(700 330)">
+      <rect width="270" height="110" rx="14" class="card data-card"/>
+      <rect x="16" y="14" width="74" height="22" rx="11" fill="#713f12"/>
+      <text x="29" y="29" class="card-kicker" fill="#fef3c7">DATA</text>
+      <text x="16" y="62" class="card-title">Tracked pull request</text>
+      <text x="16" y="84" class="data-copy">repo · PR · base/head · changed files</text>
+    </g>
+    <g transform="translate(1370 330)">
+      <rect width="450" height="110" rx="14" class="card data-card"/>
+      <rect x="16" y="14" width="116" height="22" rx="11" fill="#713f12"/>
+      <text x="29" y="29" class="card-kicker" fill="#fef3c7">READY TO REVIEW</text>
+      <text x="16" y="62" class="card-title">Confirmed purpose and scope</text>
+      <text x="16" y="84" class="data-copy">goal · acceptance criteria · included / excluded work</text>
+    </g>
 
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.eligibility" target="_top" aria-label="Edit gate 6, Authorize non-owned PR implementation" data-gate-id="pr.implementation.eligibility" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.eligibility"><title>Open pr.implementation.eligibility in the gate profile editor</title><g transform="translate(28 90)"><rect class="gate-card" width="300" height="92" rx="13"/><circle cx="274" cy="22" r="12" fill="#60a5fa"/><text x="274" y="26" class="gate-number">6</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN · NON-OWNER ONLY</text><text x="14" y="47" class="gate-id">pr.implementation.eligibility</text><text x="14" y="69" class="gate-title">Authorize implementation on a non-owned PR</text><text x="14" y="84" class="tiny">Owned PR bypasses #6; writable head never bypassed</text></g></a>
-    <path d="M328 136H392" class="route-data"/><text x="360" y="122" text-anchor="middle" class="edge-label">eligible IDs</text>
-    <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.start" target="_top" aria-label="Edit gate 7, Start implementation" data-gate-id="pr.implementation.start" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.start"><title>Open pr.implementation.start in the gate profile editor</title><g transform="translate(392 95)"><rect class="gate-card" width="280" height="82" rx="13"/><circle cx="254" cy="22" r="12" fill="#4ade80"/><text x="254" y="26" class="gate-number">7</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · ZERO</text><text x="14" y="47" class="gate-id">pr.implementation.start</text><text x="14" y="68" class="gate-title">Before pinned repair workspace</text></g></a>
-    <path d="M672 136H736" class="route-data"/><text x="704" y="110" text-anchor="middle" class="edge-label">charter + findings</text><text x="704" y="125" text-anchor="middle" class="edge-label">+ shared facts</text>
-    <g transform="translate(736 90)"><rect width="270" height="92" rx="14" class="node agent"/><text x="16" y="23" class="kind">AI ACTION · EDIT-ONLY</text><text x="16" y="51" class="node-title">Implementation agent</text><text x="16" y="74" class="node-copy">pinned local Git workspace; authorized findings only</text></g>
-    <path d="M1006 136H1070" class="route-data"/><text x="1038" y="110" text-anchor="middle" class="edge-label">candidate diff + files</text><text x="1038" y="125" text-anchor="middle" class="edge-label">+ prompt digest</text>
-    <g transform="translate(1070 90)"><rect width="270" height="92" rx="14" class="node data"/><text x="16" y="23" class="kind">CANDIDATE DATA</text><text x="16" y="51" class="node-title">Exact candidate diff</text><text x="16" y="74" class="node-copy">SHA · changed files · semantic lines · modules</text></g>
-    <path d="M1340 136H1404" class="route-data"/><text x="1372" y="122" text-anchor="middle" class="edge-label">every hunk</text>
-    <g transform="translate(1404 80)"><rect width="400" height="112" rx="14" class="node agent"/><text x="16" y="23" class="kind">AI + DETERMINISTIC ACTION</text><text x="16" y="51" class="node-title">Isolated scope audit + type/size checks</text><text x="16" y="75" class="node-copy">one record per real hunk · S0–S3 · XS–L</text><text x="16" y="96" class="node-copy">candidate_present vs follow_up · PR-type compatibility</text></g>
-    <path d="M1604 192V220H179" class="branch-trunk"/>
-    <path d="M179 220V250" class="route-conditional"/><text x="215" y="215" class="edge-label">large S0 / S1 → profile gate</text>
-    <path d="M555 220V244" class="route-conditional"/><text x="555" y="215" text-anchor="middle" class="edge-label">candidate S2 / S3 / type mismatch → fixed hard policy</text>
-    <path d="M907 220V250" class="route-data"/><text x="907" y="215" text-anchor="middle" class="edge-label">small S0 → validate</text>
+    <g transform="translate(380 625)">
+      <rect width="290" height="115" rx="14" class="card agent-card"/>
+      <rect x="16" y="14" width="88" height="22" rx="11" fill="#134e4a"/>
+      <text x="29" y="29" class="card-kicker" fill="#ccfbf1">AI ACTION</text>
+      <text x="16" y="64" class="card-title">Review every changed area</text>
+      <text x="16" y="87" class="card-copy">Explain evidence, severity, and scope</text>
+    </g>
+    <g transform="translate(1050 625)">
+      <rect width="320" height="115" rx="14" class="card data-card"/>
+      <rect x="16" y="14" width="116" height="22" rx="11" fill="#713f12"/>
+      <text x="29" y="29" class="card-kicker" fill="#fef3c7">REVIEW DATA</text>
+      <text x="16" y="64" class="card-title">Findings and coverage</text>
+      <text x="16" y="87" class="data-copy">finding IDs · evidence · severity · changed areas</text>
+    </g>
+    <g transform="translate(1395 835)">
+      <rect width="385" height="110" rx="14" class="card data-card"/>
+      <rect x="16" y="14" width="132" height="22" rx="11" fill="#713f12"/>
+      <text x="29" y="29" class="card-kicker" fill="#fef3c7">TRIAGED DATA</text>
+      <text x="16" y="62" class="card-title">Findings with a clear disposition</text>
+      <text x="16" y="84" class="data-copy">fix · defer · dismiss · review-only</text>
+    </g>
+    <g transform="translate(1050 835)">
+      <rect width="300" height="110" rx="14" class="card user-card"/>
+      <rect x="16" y="14" width="112" height="22" rx="11" fill="#1e3a8a"/>
+      <text x="29" y="29" class="card-kicker" fill="#dbeafe">USER ACTION</text>
+      <text x="16" y="62" class="card-title">Choose the next action</text>
+      <text x="16" y="84" class="card-copy">Publish review · fix · defer · dismiss</text>
+    </g>
+    <g transform="translate(370 835)">
+      <rect width="300" height="110" rx="14" class="card output-card"/>
+      <rect x="16" y="14" width="114" height="22" rx="11" fill="#581c87"/>
+      <text x="29" y="29" class="card-kicker" fill="#f3e8ff">GITHUB OUTPUT</text>
+      <text x="16" y="62" class="card-title">Review comment</text>
+      <text x="16" y="85" class="safety">COMMENT ONLY · NEVER APPROVE</text>
+    </g>
 
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.scope" target="_top" aria-label="Edit gate 8, Decide implementation scope" data-gate-id="pr.implementation.scope" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.scope"><title>Open pr.implementation.scope in the gate profile editor</title><g transform="translate(28 250)"><rect class="gate-card" width="302" height="96" rx="13"/><circle cx="276" cy="22" r="12" fill="#60a5fa"/><text x="276" y="26" class="gate-number">8</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN · CONDITIONAL</text><text x="14" y="47" class="gate-id">pr.implementation.scope</text><text x="14" y="69" class="gate-title">Configurable: large S0 or S1 work</text><text x="14" y="86" class="tiny">Profile stages may pass, revise, defer, or block</text></g></a>
-    <g transform="translate(390 244)"><rect width="330" height="108" rx="14" class="node hard"/><text x="16" y="23" class="kind gap-kind">MANDATORY HARD-SCOPE RESOLUTION · SAME POINT, FIXED POLICY</text><text x="16" y="51" class="node-title">Candidate code cannot simply pass</text><text x="16" y="75" class="node-copy">remove code + clone deferred follow-up · revise charter · stop</text><text x="16" y="96" class="node-copy" fill="#fecdd3">This is not a fifteenth configurable gate.</text></g>
-    <path d="M179 346V380H907V346" class="route-data"/><text x="520" y="373" text-anchor="middle" class="edge-label">#8 pass → validation</text>
-    <g transform="translate(780 250)"><rect width="255" height="96" rx="14" class="node action"/><text x="16" y="23" class="kind" fill="#99f6e4">GIT / CI ACTION</text><text x="16" y="51" class="node-title">Validate exact candidate</text><text x="16" y="74" class="node-copy">checks bind candidate SHA</text></g>
-    <path d="M1035 298H1095" class="route-data"/><text x="1065" y="282" text-anchor="middle" class="edge-label">check evidence</text>
-    <g transform="translate(1095 244)"><rect width="300" height="108" rx="14" class="node agent"/><text x="16" y="23" class="kind">AI ACTION + AUTOMATIC NUDGES</text><text x="16" y="51" class="node-title">Completion audit</text><text x="16" y="75" class="node-copy">everything required done? anything outside scope?</text><text x="16" y="96" class="node-copy">Check again variants run even after “done”</text></g>
-    <path d="M1395 298H1455" class="route-data"/><text x="1425" y="275" text-anchor="middle" class="edge-label">no missing work</text><text x="1425" y="290" text-anchor="middle" class="edge-label">no drift</text>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit gate 9, Accept completed implementation" data-gate-id="pr.implementation.complete" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.complete"><title>Open pr.implementation.complete in the gate profile editor</title><g transform="translate(1455 250)"><rect class="gate-card" width="349" height="96" rx="13"/><circle cx="323" cy="22" r="12" fill="#60a5fa"/><text x="323" y="26" class="gate-number">9</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN</text><text x="14" y="47" class="gate-id">pr.implementation.complete</text><text x="14" y="69" class="gate-title">Accept validated, completion-audited candidate</text><text x="14" y="86" class="tiny">Pass stores retained commit + exact publication fence</text></g></a>
+    <g transform="translate(290 1220)">
+      <rect width="210" height="105" rx="14" class="card agent-card"/>
+      <rect x="14" y="12" width="88" height="21" rx="10.5" fill="#134e4a"/>
+      <text x="26" y="27" class="card-kicker" fill="#ccfbf1">AI ACTION</text>
+      <text x="14" y="61" class="card-title">Implement selected fixes</text>
+      <text x="14" y="83" class="card-copy">Update candidate changes</text>
+    </g>
+    <g transform="translate(530 1220)">
+      <rect width="190" height="105" rx="14" class="card agent-card"/>
+      <rect x="14" y="12" width="105" height="21" rx="10.5" fill="#134e4a"/>
+      <text x="26" y="27" class="card-kicker" fill="#ccfbf1">SCOPE CHECK</text>
+      <text x="14" y="61" class="card-title">Check candidate scope</text>
+      <text x="14" y="83" class="card-copy">Within · large/adjacent · outside</text>
+    </g>
+    <g transform="translate(980 1220)">
+      <rect width="170" height="105" rx="14" class="card agent-card"/>
+      <rect x="14" y="12" width="78" height="21" rx="10.5" fill="#134e4a"/>
+      <text x="26" y="27" class="card-kicker" fill="#ccfbf1">CHECKS</text>
+      <text x="14" y="61" class="card-title">Validate changes</text>
+      <text x="14" y="83" class="card-copy">Tests · lint · build</text>
+    </g>
+    <g transform="translate(1640 1220)">
+      <rect width="200" height="105" rx="14" class="card output-card"/>
+      <rect x="14" y="12" width="114" height="21" rx="10.5" fill="#581c87"/>
+      <text x="26" y="27" class="card-kicker" fill="#f3e8ff">GITHUB OUTPUT</text>
+      <text x="14" y="61" class="card-title">Implementation branch</text>
+      <text x="14" y="83" class="safety">PUSH ONLY · NEVER MERGE</text>
+    </g>
+    <g transform="translate(530 1390)">
+      <rect width="600" height="120" rx="14" class="card user-card"/>
+      <rect x="16" y="14" width="190" height="22" rx="11" fill="#1e3a8a"/>
+      <text x="29" y="29" class="card-kicker" fill="#dbeafe">OUTSIDE PR SCOPE</text>
+      <text x="16" y="63" class="card-title">Choose how to resolve the candidate</text>
+      <text x="16" y="87" class="card-copy">Remove extra code · revise purpose/scope (#2) · defer follow-up · stop</text>
+      <text x="16" y="107" class="data-copy">If implementation continues, update the candidate and repeat the scope check.</text>
+    </g>
 
-    <path d="M1220 352V424H870V182" class="route-loop"/><text x="1010" y="416" text-anchor="middle" class="edge-label">missing work or red validation → repair → scope audit → validate again</text>
-    <path d="M555 352V465H870V182" class="route-loop"/><text x="690" y="457" text-anchor="middle" class="edge-label">remove candidate code + defer follow-up → repair again</text>
-    <path d="M555 352V510H15V4" class="route-loop"/><text x="355" y="503" text-anchor="middle" class="edge-label">revise authority → charter section above → reconfirm (#2)</text>
-    <path d="M1395 324V548H147" class="route-conditional"/><text x="785" y="541" text-anchor="middle" class="edge-label">completion follow_up → deferred group; candidate_present drift → mandatory hard scope</text>
+    <g transform="translate(1380 1705)">
+      <rect width="400" height="100" rx="14" class="card data-card"/>
+      <rect x="15" y="12" width="117" height="21" rx="10.5" fill="#713f12"/>
+      <text x="27" y="27" class="card-kicker" fill="#fef3c7">DEFERRED DATA</text>
+      <text x="15" y="60" class="card-title">Grouped follow-up findings</text>
+      <text x="15" y="82" class="data-copy">No expansion of the current PR</text>
+    </g>
+    <g transform="translate(600 1705)">
+      <rect width="330" height="100" rx="14" class="card output-card"/>
+      <rect x="15" y="12" width="114" height="21" rx="10.5" fill="#581c87"/>
+      <text x="27" y="27" class="card-kicker" fill="#f3e8ff">GITHUB OUTPUT</text>
+      <text x="15" y="60" class="card-title">Follow-up issue</text>
+      <text x="15" y="82" class="card-copy">One issue per approved deferred group</text>
+    </g>
   </g>
 
-  <!-- 04: Three independent publication lanes. -->
-  <g id="publication" transform="translate(44 1770)">
-    <rect width="1832" height="472" rx="20" class="band"/>
-    <circle cx="30" cy="31" r="17" fill="#22d3ee"/><text x="30" y="36" class="band-number">04</text>
-    <text x="58" y="25" class="band-eyebrow">EXPLICIT QUEUE COMMANDS · FROZEN PAYLOADS · BACKGROUND PUBLICATION WORKER</text>
-    <text x="58" y="49" class="band-title">Review publication, branch publication, and deferred issue publication are independent effects</text>
+  <!-- All fourteen gates, in numeric keyboard order -->
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.confirm" target="_top" aria-label="Edit gate 1, Confirm PR charter" data-gate-id="pr.charter.confirm" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.confirm">
+    <title>Edit gate 1: Confirm purpose and scope</title>
+    <g transform="translate(1010 320)">
+      <rect class="gate-card" width="320" height="130" rx="15"/>
+      <circle cx="25" cy="25" r="14" fill="#60a5fa"/><text x="25" y="30" class="gate-number">1</text>
+      <text x="17" y="67" class="card-title">Confirm purpose and scope</text>
+      <text x="17" y="94" class="gate-copy">Required before review</text>
+    </g>
+  </a>
 
-    <g transform="translate(28 82)"><rect width="292" height="92" rx="14" class="node data"/><text x="16" y="23" class="kind">INPUT DATA</text><text x="16" y="51" class="node-title">Selected in-scope findings</text><text x="16" y="74" class="node-copy">review summary + exact provider head</text></g>
-    <path d="M320 128H382" class="route-data"/><text x="351" y="114" text-anchor="middle" class="edge-label">freeze + digest</text>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.publish" target="_top" aria-label="Edit gate 10, Publish GitHub review" data-gate-id="pr.review.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.publish"><title>Open pr.review.publish in the gate profile editor</title><g transform="translate(382 87)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#60a5fa"/><text x="274" y="26" class="gate-number">10</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN</text><text x="14" y="47" class="gate-id">pr.review.publish</text><text x="14" y="68" class="gate-title">Authorize frozen GitHub review</text></g></a>
-    <path d="M682 128H758" class="route-data"/><text x="720" y="114" text-anchor="middle" class="edge-label">pass → queued</text>
-    <g transform="translate(758 82)"><rect width="300" height="92" rx="14" class="node data"/><text x="16" y="23" class="kind">FROZEN DATA</text><text x="16" y="51" class="node-title">Review payload + stable marker</text><text x="16" y="74" class="node-copy">later workspace edits cannot change it</text></g>
-    <path d="M1058 128H1134" class="route-data"/><text x="1096" y="114" text-anchor="middle" class="edge-label">worker claim</text>
-    <g transform="translate(1134 82)"><rect width="250" height="92" rx="14" class="node agent"/><text x="16" y="23" class="kind">BACKGROUND WORKER</text><text x="16" y="51" class="node-title">Dispatch exact payload</text><text x="16" y="74" class="node-copy">head-fenced + idempotent</text></g>
-    <path d="M1384 128H1460" class="route-data"/><text x="1422" y="114" text-anchor="middle" class="edge-label">provider write</text>
-    <g transform="translate(1460 82)"><rect width="344" height="92" rx="14" class="node effect"/><text x="16" y="23" class="kind" fill="#e9d5ff">GITHUB OUTPUT</text><text x="16" y="51" class="node-title">Review comments + summary</text><text x="16" y="74" class="node-copy">never APPROVE or REQUEST_CHANGES</text></g>
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit gate 2, Confirm revised PR charter" data-gate-id="pr.charter.reconfirm" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.reconfirm">
+    <title>Edit gate 2: Confirm revised purpose or scope</title>
+    <g transform="translate(70 1910)">
+      <rect class="gate-card" width="390" height="95" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">2</text>
+      <text x="15" y="56" class="card-title">Confirm revised purpose or scope</text>
+      <text x="15" y="79" class="gate-copy">When the confirmed charter changes</text>
+    </g>
+  </a>
 
-    <g transform="translate(28 194)"><rect width="292" height="92" rx="14" class="node data"/><text x="16" y="23" class="kind">INPUT DATA</text><text x="16" y="51" class="node-title">Validated retained commit</text><text x="16" y="74" class="node-copy">publication fence + exact PR head</text></g>
-    <path d="M320 240H382" class="route-data"/><text x="351" y="226" text-anchor="middle" class="edge-label">freeze + digest</text>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.publish" target="_top" aria-label="Edit gate 11, Push implementation branch" data-gate-id="pr.implementation.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.publish"><title>Open pr.implementation.publish in the gate profile editor</title><g transform="translate(382 199)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#60a5fa"/><text x="274" y="26" class="gate-number">11</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN</text><text x="14" y="47" class="gate-id">pr.implementation.publish</text><text x="14" y="68" class="gate-title">Authorize exact candidate branch push</text></g></a>
-    <path d="M682 240H758" class="route-data"/><text x="720" y="226" text-anchor="middle" class="edge-label">pass → queued</text>
-    <g transform="translate(758 194)"><rect width="300" height="92" rx="14" class="node data"/><text x="16" y="23" class="kind">FROZEN DATA</text><text x="16" y="51" class="node-title">Branch payload + digest</text><text x="16" y="74" class="node-copy">base commit · tip · head ref</text></g>
-    <path d="M1058 240H1134" class="route-data"/><text x="1096" y="226" text-anchor="middle" class="edge-label">worker claim</text>
-    <g transform="translate(1134 194)"><rect width="250" height="92" rx="14" class="node agent"/><text x="16" y="23" class="kind">BACKGROUND WORKER</text><text x="16" y="51" class="node-title">Push exact retained commit</text><text x="16" y="74" class="node-copy">remote-head fenced</text></g>
-    <path d="M1384 240H1460" class="route-data"/><text x="1422" y="226" text-anchor="middle" class="edge-label">Git write</text>
-    <g transform="translate(1460 194)"><rect width="344" height="92" rx="14" class="node effect"/><text x="16" y="23" class="kind" fill="#e9d5ff">GIT / GITHUB OUTPUT</text><text x="16" y="51" class="node-title">Exact PR branch push</text><text x="16" y="74" class="node-copy">never merge authorization</text></g>
+  <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.start" target="_top" aria-label="Edit gate 3, Start review" data-gate-id="pr.review.start" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.start">
+    <title>Edit gate 3: Start AI review</title>
+    <g transform="translate(70 625)">
+      <rect class="gate-card" width="260" height="115" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">3</text>
+      <text x="15" y="65" class="card-title">Start AI review</text>
+      <text x="15" y="91" class="gate-copy">After purpose and scope are confirmed</text>
+    </g>
+  </a>
 
-    <g transform="translate(28 306)"><rect width="292" height="116" rx="14" class="node data"/><text x="16" y="23" class="kind">INPUT DATA</text><text x="16" y="51" class="node-title">One deferred finding group</text><text x="16" y="74" class="node-copy">editable/split/merge/link before publish</text><text x="16" y="97" class="node-copy">off · ask · automatic mode</text></g>
-    <path d="M320 364H382" class="route-data"/><text x="351" y="350" text-anchor="middle" class="edge-label">ask / auto</text>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit gate 12, Create deferred GitHub issue" data-gate-id="pr.deferred.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.deferred.publish"><title>Open pr.deferred.publish in the gate profile editor</title><g transform="translate(382 323)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#60a5fa"/><text x="274" y="26" class="gate-number">12</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN IN ASK MODE</text><text x="14" y="47" class="gate-id">pr.deferred.publish</text><text x="14" y="68" class="gate-title">Authorize follow-up issue creation</text></g></a>
-    <path d="M682 364H758" class="route-data"/><text x="720" y="350" text-anchor="middle" class="edge-label">pass → queued</text>
-    <g transform="translate(758 306)"><rect width="300" height="116" rx="14" class="node data"/><text x="16" y="23" class="kind">FROZEN DATA</text><text x="16" y="51" class="node-title">Issue title/body/labels/IDs</text><text x="16" y="74" class="node-copy">stable marker; automatic mode uses</text><text x="16" y="95" class="node-copy">a built-in explicit pass policy</text></g>
-    <path d="M1058 364H1134" class="route-data"/><text x="1096" y="350" text-anchor="middle" class="edge-label">worker claim</text>
-    <g transform="translate(1134 318)"><rect width="250" height="92" rx="14" class="node agent"/><text x="16" y="23" class="kind">BACKGROUND WORKER</text><text x="16" y="51" class="node-title">Create exact issue</text><text x="16" y="74" class="node-copy">marker-fenced recovery</text></g>
-    <path d="M1384 364H1460" class="route-data"/><text x="1422" y="350" text-anchor="middle" class="edge-label">provider write</text>
-    <g transform="translate(1460 318)"><rect width="344" height="92" rx="14" class="node effect"/><text x="16" y="23" class="kind" fill="#e9d5ff">GITHUB OUTPUT</text><text x="16" y="51" class="node-title">Follow-up issue</text><text x="16" y="74" class="node-copy">never expands the current PR scope</text></g>
-  </g>
+  <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.complete" target="_top" aria-label="Edit gate 4, Complete review" data-gate-id="pr.review.complete" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.complete">
+    <title>Edit gate 4: Complete review</title>
+    <g transform="translate(720 625)">
+      <rect class="gate-card" width="280" height="115" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">4</text>
+      <text x="15" y="65" class="card-title">Complete review</text>
+      <text x="15" y="91" class="gate-copy">Overall review decision</text>
+    </g>
+  </a>
 
-  <!-- 05: Corrections, shared context and unknown publication recovery. -->
-  <g id="learning-recovery" transform="translate(44 2266)">
-    <rect width="1832" height="362" rx="20" class="band"/>
-    <circle cx="30" cy="31" r="17" fill="#22d3ee"/><text x="30" y="36" class="band-number">05</text>
-    <text x="58" y="25" class="band-eyebrow">SHARED CORRECTIONS + UNKNOWN PROVIDER RESULTS</text>
-    <text x="58" y="49" class="band-title">Feedback changes later prompt data immediately; external ambiguity requires a separate gate</text>
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.finding.classify" target="_top" aria-label="Edit gate 5, Classify ambiguous finding" data-gate-id="pr.finding.classify" data-purpose="classification" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.finding.classify">
+    <title>Edit gate 5: Classify an ambiguous finding</title>
+    <g transform="translate(1430 625)">
+      <rect class="gate-card" width="350" height="115" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">5</text>
+      <text x="15" y="65" class="card-title">Classify ambiguous finding</text>
+      <text x="15" y="91" class="gate-copy">Fix · defer · revise · dismiss</text>
+    </g>
+  </a>
 
-    <g transform="translate(28 82)"><rect width="300" height="104" rx="14" class="node action"/><text x="16" y="23" class="kind" fill="#99f6e4">EXPLICIT USER ACTION</text><text x="16" y="51" class="node-title">Correction or guidance</text><text x="16" y="74" class="node-copy">wrong claim + corrected rule + evidence</text><text x="16" y="94" class="tiny">review · implementation · or both</text></g>
-    <path d="M328 134H394" class="route-data"/><text x="361" y="120" text-anchor="middle" class="edge-label">store now</text>
-    <g transform="translate(394 82)"><rect width="300" height="104" rx="14" class="node data"/><text x="16" y="23" class="kind">CANONICAL SHARED DATA</text><text x="16" y="51" class="node-title">Audience-specific facts bundle</text><text x="16" y="74" class="node-copy">feeds review, repair, scope, completion</text><text x="16" y="94" class="tiny">never grants gate, Git, or provider authority</text></g>
-    <path d="M694 134H760" class="route-conditional"/><text x="727" y="120" text-anchor="middle" class="edge-label">optional promote</text>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.correction.promote" target="_top" aria-label="Edit gate 13, Promote repository lesson" data-gate-id="pr.correction.promote" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.correction.promote"><title>Open pr.correction.promote in the gate profile editor</title><g transform="translate(760 93)"><rect class="gate-card" width="300" height="82" rx="13"/><circle cx="274" cy="22" r="12" fill="#60a5fa"/><text x="274" y="26" class="gate-number">13</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN</text><text x="14" y="47" class="gate-id">pr.correction.promote</text><text x="14" y="68" class="gate-title">Promote scoped repository lesson</text></g></a>
-    <path d="M1060 134H1126" class="route-data"/><text x="1093" y="120" text-anchor="middle" class="edge-label">pass</text>
-    <g transform="translate(1126 82)"><rect width="300" height="104" rx="14" class="node data"/><text x="16" y="23" class="kind">DURABLE LEARNING DATA</text><text x="16" y="51" class="node-title">Repository lesson</text><text x="16" y="74" class="node-copy">same repository + PR type + audience</text><text x="16" y="94" class="tiny">dispositions also reward nudge variants</text></g>
-    <path d="M1426 134H1804" class="route-loop"/><text x="1615" y="120" text-anchor="middle" class="edge-label">later prompts receive corrected context</text>
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.eligibility" target="_top" aria-label="Edit gate 6, Authorize non-owned PR implementation" data-gate-id="pr.implementation.eligibility" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.eligibility">
+    <title>Edit gate 6: Authorize implementation on a non-owned PR</title>
+    <g transform="translate(500 1910)">
+      <rect class="gate-card" width="390" height="95" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">6</text>
+      <text x="15" y="56" class="card-title">Authorize a non-owned PR</text>
+      <text x="15" y="79" class="gate-copy">Required before #7 for non-owner fixes</text>
+    </g>
+  </a>
 
-    <g transform="translate(28 222)"><rect width="300" height="104" rx="14" class="node data"/><text x="16" y="23" class="kind">PUBLICATION DATA</text><text x="16" y="51" class="node-title">Provider result is unknown</text><text x="16" y="74" class="node-copy">write may have happened; never retry blindly</text><text x="16" y="94" class="tiny">review · branch · or issue</text></g>
-    <path d="M328 274H394" class="route-data"/><text x="361" y="253" text-anchor="middle" class="edge-label">marker / head proof</text>
-    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit gate 14, Resolve ambiguous provider outcome" data-gate-id="pr.publication.reconcile" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.publication.reconcile"><title>Open pr.publication.reconcile in the gate profile editor</title><g transform="translate(394 233)"><rect class="gate-card" width="380" height="82" rx="13"/><circle cx="354" cy="22" r="12" fill="#60a5fa"/><text x="354" y="26" class="gate-number">14</text><text x="14" y="21" class="gate-kicker">EDITABLE GATE · HUMAN · UNKNOWN ONLY</text><text x="14" y="47" class="gate-id">pr.publication.reconcile</text><text x="14" y="68" class="gate-title">PASS re-observes · BLOCK assumes failure and unlocks</text></g></a>
-    <path d="M774 274H840" class="route-data"/><text x="807" y="253" text-anchor="middle" class="edge-label">pass</text>
-    <g transform="translate(840 222)"><rect width="300" height="104" rx="14" class="node agent"/><text x="16" y="23" class="kind">BOUNDED READ-ONLY ACTION</text><text x="16" y="51" class="node-title">Check provider again</text><text x="16" y="74" class="node-copy">exact marker or remote-head observation</text><text x="16" y="94" class="tiny">absence alone is not proof of failure</text></g>
-    <path d="M1140 274H1206" class="route-data"/><text x="1173" y="253" text-anchor="middle" class="edge-label">observed result</text>
-    <g transform="translate(1206 222)"><rect width="282" height="104" rx="14" class="node effect"/><text x="16" y="23" class="kind" fill="#e9d5ff">SAFE EXTERNAL EVIDENCE</text><text x="16" y="51" class="node-title">Recovered success</text><text x="16" y="74" class="node-copy">or remain unknown; no duplicate write</text></g>
-    <path d="M774 300H1554" class="route-conditional"/><text x="1164" y="294" text-anchor="middle" class="edge-label">block: explicitly assume failed</text>
-    <g transform="translate(1554 222)"><rect width="250" height="104" rx="14" class="node gap"/><text x="16" y="23" class="kind gap-kind">DELIBERATE UNLOCK</text><text x="16" y="51" class="node-title">Permit a new request</text><text x="16" y="74" class="node-copy">never an automatic retry</text></g>
-  </g>
+  <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.start" target="_top" aria-label="Edit gate 7, Start implementation" data-gate-id="pr.implementation.start" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.start">
+    <title>Edit gate 7: Start implementation</title>
+    <g transform="translate(70 1220)">
+      <rect class="gate-card" width="190" height="105" rx="14"/>
+      <circle cx="23" cy="23" r="13" fill="#60a5fa"/><text x="23" y="28" class="gate-number">7</text>
+      <text x="14" y="62" class="card-title">Start implementation</text>
+      <text x="14" y="87" class="gate-copy">Non-owner: #6 first</text>
+    </g>
+  </a>
 
-  <g transform="translate(44 2650)">
-    <text x="0" y="22" class="node-copy">Default profile stages: #3, #4, #7 = ZERO; the other eleven = HUMAN. Profiles may replace configurable gates with ordered ZERO, deterministic, AI-working, AI-isolated, and human stages. Any non-pass stops later stages.</text>
-    <text x="0" y="44" class="tiny">No merge authority · no automatic workspace creation from review_requested · no blind publication retry · no configurable bypass of hard candidate scope.</text>
-  </g>
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.scope" target="_top" aria-label="Edit gate 8, Decide large exact or necessary-adjacent implementation" data-gate-id="pr.implementation.scope" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.scope">
+    <title>Edit gate 8: Decide large or adjacent work</title>
+    <g transform="translate(750 1220)">
+      <rect class="gate-card" width="200" height="105" rx="14"/>
+      <circle cx="23" cy="23" r="13" fill="#60a5fa"/><text x="23" y="28" class="gate-number">8</text>
+      <text x="14" y="61" class="card-title">Decide large / adjacent</text>
+      <text x="14" y="86" class="gate-copy">Only when scope check flags it</text>
+    </g>
+  </a>
+
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit gate 9, Accept completed implementation" data-gate-id="pr.implementation.complete" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.complete">
+    <title>Edit gate 9: Accept completed implementation</title>
+    <g transform="translate(1180 1220)">
+      <rect class="gate-card" width="200" height="105" rx="14"/>
+      <circle cx="23" cy="23" r="13" fill="#60a5fa"/><text x="23" y="28" class="gate-number">9</text>
+      <text x="14" y="61" class="card-title">Accept completion</text>
+      <text x="14" y="86" class="gate-copy">After scope and checks pass</text>
+    </g>
+  </a>
+
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.publish" target="_top" aria-label="Edit gate 10, Publish GitHub review" data-gate-id="pr.review.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.publish">
+    <title>Edit gate 10: Publish a GitHub review comment</title>
+    <g transform="translate(720 835)">
+      <rect class="gate-card" width="280" height="110" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">10</text>
+      <text x="15" y="64" class="card-title">Publish review comment</text>
+      <text x="15" y="90" class="gate-copy">Only after user chooses publish</text>
+    </g>
+  </a>
+
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.publish" target="_top" aria-label="Edit gate 11, Push implementation branch" data-gate-id="pr.implementation.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.publish">
+    <title>Edit gate 11: Push the implementation branch</title>
+    <g transform="translate(1410 1220)">
+      <rect class="gate-card" width="200" height="105" rx="14"/>
+      <circle cx="23" cy="23" r="13" fill="#60a5fa"/><text x="23" y="28" class="gate-number">11</text>
+      <text x="14" y="61" class="card-title">Push branch</text>
+      <text x="14" y="86" class="gate-copy">Exact accepted candidate only</text>
+    </g>
+  </a>
+
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit gate 12, Create deferred GitHub issue" data-gate-id="pr.deferred.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.deferred.publish">
+    <title>Edit gate 12: Create a deferred follow-up issue</title>
+    <g transform="translate(990 1705)">
+      <rect class="gate-card" width="330" height="100" rx="14"/>
+      <circle cx="23" cy="23" r="13" fill="#60a5fa"/><text x="23" y="28" class="gate-number">12</text>
+      <text x="14" y="61" class="card-title">Create follow-up issue</text>
+      <text x="14" y="84" class="gate-copy">Only for user-approved deferred groups</text>
+    </g>
+  </a>
+
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.correction.promote" target="_top" aria-label="Edit gate 13, Promote repository lesson" data-gate-id="pr.correction.promote" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.correction.promote">
+    <title>Edit gate 13: Promote a reusable correction</title>
+    <g transform="translate(930 1910)">
+      <rect class="gate-card" width="390" height="95" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">13</text>
+      <text x="15" y="56" class="card-title">Promote a reusable correction</text>
+      <text x="15" y="79" class="gate-copy">Rare: only when guidance should be reused</text>
+    </g>
+  </a>
+
+  <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit gate 14, Resolve ambiguous provider outcome" data-gate-id="pr.publication.reconcile" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.publication.reconcile">
+    <title>Edit gate 14: Resolve an unknown GitHub outcome</title>
+    <g transform="translate(1360 1910)">
+      <rect class="gate-card" width="460" height="95" rx="14"/>
+      <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">14</text>
+      <text x="15" y="56" class="card-title">Resolve an unknown GitHub outcome</text>
+      <text x="15" y="79" class="gate-copy">Review comment · branch push · follow-up issue</text>
+    </g>
+  </a>
 </svg>

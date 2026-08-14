@@ -29,7 +29,7 @@ const workflows: PRLifecycleGateProfile["workflows"] = {
 }
 
 describe("PR lifecycle gate map", () => {
-  it("shows the real GitHub-triggered event and data flow around the gates", () => {
+  it("shows the user-visible review, implementation, and publication flow", () => {
     const { container } = render(
       <PRLifecycleGateMap
         selectedDecisionPoint="pr.charter.confirm"
@@ -40,36 +40,99 @@ describe("PR lifecycle gate map", () => {
 
     expect(
       screen.getByRole("heading", {
-        name: "PR lifecycle event and data flow",
+        name: "PR lifecycle gate flow",
       }),
     ).toBeInTheDocument()
-    expect(
-      screen.getByText("GitHub · pull_request.review_requested"),
-    ).toBeInTheDocument()
-    expect(screen.getByText("Durable event inbox")).toBeInTheDocument()
-    expect(screen.getByText("Explicit workspace handoff")).toBeInTheDocument()
+    expect(screen.getByText("GitHub review request")).toBeInTheDocument()
+    expect(screen.getByText("Track PR in PicoClaw")).toBeInTheDocument()
     expect(
       screen.getByText(
-        "User clicks Track PR, or custom automation supplies the PR URL",
+        "User action or explicitly configured automation; no built-in automatic workspace bridge",
       ),
     ).toBeInTheDocument()
-    expect(screen.getByText("PicoClaw · review agent")).toBeInTheDocument()
+    expect(screen.getByText("Confirm purpose and scope")).toBeInTheDocument()
+    expect(screen.getByText("AI reviews the pull request")).toBeInTheDocument()
     expect(
-      screen.getByText("Findings, stage evidence, nudge records"),
+      screen.getByText("Choose what to do with findings"),
     ).toBeInTheDocument()
+    expect(screen.getByText("Implement selected findings")).toBeInTheDocument()
+    expect(screen.getByText("Continue to implementation")).toBeInTheDocument()
+    expect(screen.getByText("Check candidate scope")).toBeInTheDocument()
+    expect(screen.getByText("Validate changes")).toBeInTheDocument()
+    expect(screen.getByText("Deferred findings")).toBeInTheDocument()
+    expect(screen.getByText("GitHub issues")).toBeInTheDocument()
     expect(
-      screen.getByText("PicoClaw · implementation agent"),
+      screen.getByRole("heading", { name: "Advanced / exception gates" }),
     ).toBeInTheDocument()
-    expect(screen.getByText("Validation evidence")).toBeInTheDocument()
-    expect(screen.getAllByText("Canonical shared facts bundle")).toHaveLength(2)
     expect(
       container.querySelectorAll('[data-flow-kind="data"]'),
     ).not.toHaveLength(0)
     expect(
-      container.querySelector(
-        '[data-flow-edge="repo · PR # · reviewer · base/head SHA"]',
+      container.querySelector('[data-flow-edge="accept completion"]'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "Remove extra code · revise purpose/scope · defer follow-up · stop",
       ),
     ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "↺ Repair candidate, then recheck scope before validation",
+      ),
+    ).toBeInTheDocument()
+
+    const classify = screen.getByRole("button", { name: "Classify finding" })
+    expect(
+      classify.closest('[data-flow-branch="findings-decision"]'),
+    ).toBeInTheDocument()
+    const scope = screen.getByRole("button", {
+      name: "Classify implementation",
+    })
+    expect(
+      scope.closest('[data-flow-branch="candidate-scope"]'),
+    ).toBeInTheDocument()
+
+    const nonOwned = screen.getByRole("button", {
+      name: "Authorize non-owned PR",
+    })
+    const startImplementation = screen.getByRole("button", {
+      name: "Start implementation",
+    })
+    expect(
+      nonOwned.compareDocumentPosition(startImplementation) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+
+    const advancedHeading = screen.getByRole("heading", {
+      name: "Advanced / exception gates",
+    })
+    const advancedRail = advancedHeading.closest("section")
+    expect(advancedRail).not.toBeNull()
+    expect(within(advancedRail!).getAllByRole("button")).toHaveLength(3)
+    expect(
+      within(advancedRail!).getByRole("button", {
+        name: "Confirm revised charter",
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(advancedRail!).getByRole("button", {
+        name: "Promote correction",
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(advancedRail!).getByRole("button", {
+        name: "Resolve unknown result",
+      }),
+    ).toBeInTheDocument()
+
+    expect(screen.queryByText(/nudge/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/prompt digest/i)).not.toBeInTheDocument()
+    expect(screen.queryByText("pr.review.start")).not.toBeInTheDocument()
+    expect(screen.queryByText("0")).not.toBeInTheDocument()
+    expect(screen.queryByText("AI-W")).not.toBeInTheDocument()
+    expect(screen.queryByText("AI-I")).not.toBeInTheDocument()
+    expect(screen.queryByText("D → AI-I → H")).not.toBeInTheDocument()
+    expect(screen.queryByText(/fallback/i)).not.toBeInTheDocument()
   })
 
   it("renders every gate as an exact selectable decision point", () => {
@@ -82,11 +145,14 @@ describe("PR lifecycle gate map", () => {
     )
 
     expect(screen.getAllByRole("button")).toHaveLength(14)
-    expect(
-      Array.from(container.querySelectorAll("[data-decision-point]")).map(
-        (node) => node.getAttribute("data-decision-point"),
-      ),
-    ).toEqual(prLifecycleKnownDecisionPoints)
+    const decisionPoints = Array.from(
+      container.querySelectorAll("[data-decision-point]"),
+      (node) => node.getAttribute("data-decision-point"),
+    )
+    expect(decisionPoints).toHaveLength(prLifecycleKnownDecisionPoints.length)
+    expect(new Set(decisionPoints)).toEqual(
+      new Set(prLifecycleKnownDecisionPoints),
+    )
 
     const selected = screen.getByRole("button", { name: "Start review" })
     expect(selected).toHaveAttribute("aria-pressed", "true")
@@ -96,21 +162,16 @@ describe("PR lifecycle gate map", () => {
       "/pull-requests?view=gate-profiles&gate=pr.review.start",
     )
     expect(selected).toHaveAttribute("data-workflow-configured", "true")
-    expect(within(selected).getByText("0")).toBeInTheDocument()
+    expect(selected).not.toHaveTextContent("pr.review.start")
 
     const fallback = screen.getByRole("button", {
       name: "Complete review",
     })
     expect(fallback).toHaveAttribute("data-workflow-configured", "false")
+    expect(fallback).not.toHaveTextContent("FALLBACK")
     expect(
-      within(fallback).getByText("NOT CONFIGURED · FALLBACK H"),
-    ).toBeInTheDocument()
-
-    expect(
-      within(
-        screen.getByRole("button", { name: "Complete implementation" }),
-      ).getByText("D → AI-I → H"),
-    ).toBeInTheDocument()
+      screen.getByRole("button", { name: "Complete implementation" }),
+    ).not.toHaveTextContent("D → AI-I → H")
   })
 
   it("selects gates with pointer, Enter, and Space interaction", () => {

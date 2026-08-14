@@ -2,9 +2,7 @@ import { type KeyboardEvent, type ReactNode, useId } from "react"
 
 import {
   type PRLifecycleDecisionPoint,
-  type PRLifecycleGateKind,
   type PRLifecycleGateProfile,
-  type PRLifecycleGateWorkflow,
 } from "@/api/pr-lifecycle-gate-profiles"
 import { prLifecycleGateLabels } from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
 import { cn } from "@/lib/utils"
@@ -53,7 +51,7 @@ const gateSpecs = [
     number: 5,
     decisionPoint: "pr.finding.classify",
     title: prLifecycleGateLabels["pr.finding.classify"],
-    detail: "Once per ambiguous S1 or large S0 finding",
+    detail: "Finding scope is ambiguous",
   },
   {
     number: 6,
@@ -71,7 +69,7 @@ const gateSpecs = [
     number: 8,
     decisionPoint: "pr.implementation.scope",
     title: prLifecycleGateLabels["pr.implementation.scope"],
-    detail: "Large S0 or S1 candidate work",
+    detail: "Large or adjacent candidate work",
   },
   {
     number: 9,
@@ -111,21 +109,11 @@ const gateSpecs = [
   },
 ] as const satisfies readonly GateSpec[]
 
-const stageLabels: Record<PRLifecycleGateKind, string> = {
-  zero: "0",
-  deterministic: "D",
-  ai_working_context: "AI-W",
-  ai_isolated_context: "AI-I",
-  human: "H",
-}
-
-const stageAccessibleLabels: Record<PRLifecycleGateKind, string> = {
-  zero: "automatic pass",
-  deterministic: "deterministic rule",
-  ai_working_context: "AI with working context",
-  ai_isolated_context: "AI with isolated context",
-  human: "human decision",
-}
+const advancedGates = [
+  { index: 1, condition: "Purpose or scope changed" },
+  { index: 12, condition: "A correction may become a repository lesson" },
+  { index: 13, condition: "A GitHub write returned an unknown result" },
+] as const
 
 export function PRLifecycleGateMap({
   selectedDecisionPoint,
@@ -137,13 +125,14 @@ export function PRLifecycleGateMap({
   const instanceID = useId().replaceAll(":", "")
   const titleID = `${instanceID}-title`
   const descriptionID = `${instanceID}-description`
-  const gate = (index: number) => (
+  const gate = (index: number, compact = false) => (
     <GateNode
+      compact={compact}
       instanceID={instanceID}
       onSelect={onSelect}
       selected={selectedDecisionPoint === gateSpecs[index].decisionPoint}
       spec={gateSpecs[index]}
-      workflow={workflows?.[gateSpecs[index].decisionPoint]}
+      workflowConfigured={Boolean(workflows?.[gateSpecs[index].decisionPoint])}
     />
   )
 
@@ -156,7 +145,7 @@ export function PRLifecycleGateMap({
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <h2 id={titleID} className="text-sm font-semibold">
-              PR lifecycle event and data flow
+              PR lifecycle gate flow
             </h2>
             {profileName ? (
               <span className="bg-muted/50 text-muted-foreground rounded-md border px-2 py-0.5 text-xs">
@@ -166,359 +155,228 @@ export function PRLifecycleGateMap({
           </div>
           <p
             id={descriptionID}
-            className="text-muted-foreground mt-1 max-w-4xl text-xs"
+            className="text-muted-foreground mt-1 max-w-3xl text-xs"
           >
-            Follow the payload from a GitHub review assignment through durable
-            workspace data, AI actions, editable gates, repair loops, and
-            independent GitHub effects. Select any numbered gate to edit it.
+            Follow the actions people see from a GitHub review request through
+            review, implementation, and publication. Select any numbered gate to
+            edit its workflow.
           </p>
         </div>
         <div
-          aria-label="Diagram node and gate-stage legend"
+          aria-label="Diagram legend"
           className="text-muted-foreground flex max-w-3xl flex-wrap gap-1.5 text-xs"
         >
-          <Legend label="external event" variant="external" />
-          <Legend label="explicit action" variant="action" />
-          <Legend label="durable data" variant="data" />
+          <Legend label="action" variant="action" />
+          <Legend label="visible data" variant="data" />
+          <Legend label="GitHub" variant="external" />
           <Legend label="editable gate" variant="gate" />
-          <StageLegend code="0" label="automatic" />
-          <StageLegend code="D" label="rule" />
-          <StageLegend code="AI-W" label="AI + context" />
-          <StageLegend code="AI-I" label="AI isolated" />
-          <StageLegend code="H" label="human" />
         </div>
       </div>
 
-      <div className="bg-muted/10 overflow-x-auto border-t">
+      <ol aria-label="PR lifecycle ordered flow" className="sr-only">
+        <li>GitHub sends a pull request review request.</li>
+        <li>
+          The user or explicitly configured automation tracks the pull request
+          in PicoClaw; there is no built-in automatic workspace bridge.
+        </li>
+        <li>The user confirms the pull request purpose and scope.</li>
+        <li>Gate 1 confirms the charter, then Gate 3 starts AI review.</li>
+        <li>Gate 4 accepts the completed review and presents the findings.</li>
+        <li>
+          Conditional Gate 5 classifies an ambiguous finding beside the user’s
+          findings decision.
+        </li>
+        <li>The user chooses to publish, fix, or defer findings.</li>
+        <li>Gate 10 publishes a review to GitHub.</li>
+        <li>
+          Conditional Gate 6 authorizes a non-owned pull request before Gate 7
+          starts implementation.
+        </li>
+        <li>
+          Gate 8 evaluates applicable candidate scope; outside-scope work is
+          resolved and rechecked before validation.
+        </li>
+        <li>Gate 9 accepts completion and Gate 11 pushes the branch.</li>
+        <li>Gate 12 creates GitHub issues for deferred work.</li>
+        <li>
+          Rare and conditional decisions are available in the exceptions rail.
+        </li>
+      </ol>
+
+      <div className="bg-muted/10 overflow-x-auto overscroll-x-contain border-t">
         <div
           aria-describedby={descriptionID}
-          className="min-w-[112rem] space-y-4 p-4"
+          className="min-w-[124rem] space-y-4 p-4"
           role="group"
         >
           <FlowBand
-            eyebrow="AUTOMATIC INGRESS, THEN AN EXPLICIT HANDOFF"
+            eyebrow="REVIEW"
             number="01"
-            title="GitHub review request → event inbox → tracked PR workspace"
+            title="GitHub request → explicit tracking → purpose and scope → findings"
           >
             <FlowNode
-              detail="You are added as a requested reviewer"
+              detail="A reviewer is requested on a pull request"
               kind="external"
-              label="GitHub · pull_request.review_requested"
+              label="GitHub review request"
             />
-            <FlowConnector label="repo · PR # · reviewer · base/head SHA" />
+            <FlowConnector label="explicit handoff" />
             <FlowNode
-              detail="Signed webhook or read-only notification poll"
-              kind="system"
-              label="PicoClaw · verify, scope, redact, dedupe"
-            />
-            <FlowConnector label="authenticated normalized envelope" />
-            <FlowNode
-              detail="Generic event; optional configured workflow dispatch"
-              kind="data"
-              label="Durable event inbox"
-            />
-            <FlowConnector conditional label="no built-in PR bridge" />
-            <FlowNode
-              detail="User clicks Track PR, or custom automation supplies the PR URL"
-              kind="gap"
-              label="Explicit workspace handoff"
-            />
-            <FlowConnector label="pull request URL" />
-            <FlowNode
-              detail="Resolve exact repository, PR, viewer, ownership, and capabilities"
+              detail="User action or explicitly configured automation; no built-in automatic workspace bridge"
               kind="action"
-              label="User / automation · Track PR"
+              label="Track PR in PicoClaw"
             />
-            <FlowConnector label="authoritative provider read" />
+            <FlowConnector label="purpose · scope" />
             <FlowNode
-              detail="Identity · base/head · author · writable/review/issue capabilities"
-              kind="data"
-              label="Verified provider snapshot"
-            />
-          </FlowBand>
-
-          <FlowBand
-            eyebrow="AUTHORITY DATA"
-            number="02"
-            title="Verified snapshot → charter → confirmed scope authority"
-          >
-            <FlowNode
-              detail="Explicit AI draft or user-authored draft"
+              detail="Set the goal, success criteria, included work, and exclusions"
               kind="action"
-              label="Charter agent + user"
+              label="Confirm purpose and scope"
             />
-            <FlowConnector label="type · goal · criteria · included/excluded" />
-            <FlowNode
-              detail="Fix · refactor · feature · documentation · test"
-              kind="data"
-              label="Draft charter revision"
-            />
-            <FlowConnector conditional label="first / revised" />
-            <BranchStack label="Alternative charter gates">
-              {gate(0)}
-              {gate(1)}
-            </BranchStack>
-            <FlowConnector label="pass pins authority" />
-            <FlowNode
-              detail="Provider snapshot + confirmed charter + guidance + corrections + lessons"
-              kind="data"
-              label="Canonical shared facts bundle"
-            />
-            <FlowConnector
-              conditional
-              label="revise loops to charter"
-              reverse
-            />
-            <FlowNode
-              detail="Head or charter changes stale dependent evidence and require explicit refresh"
-              kind="system"
-              label="Revision and head fences"
-            />
-          </FlowBand>
-
-          <FlowBand
-            eyebrow="EXPLICIT RUN REVIEW; NUDGES ARE AUTOMATIC INSIDE THE RUN"
-            number="03"
-            title="Shared facts + immutable diff → review agent → persisted finding data"
-          >
+            <FlowConnector label="confirm" />
+            {gate(0)}
+            <FlowConnector label="Run Review" />
             {gate(2)}
-            <FlowConnector label="snapshot + charter + corrections" />
+            <FlowConnector label="confirmed PR" />
             <FlowNode
-              detail="Loads exact provider-fenced unified diff"
-              kind="data"
-              label="Immutable review input"
-            />
-            <FlowConnector label="diff + audience projection" />
-            <FlowNode
-              detail="Initial scan of every changed path and hunk"
+              detail="Review the pull request against its confirmed purpose"
               kind="agent"
-              label="PicoClaw · review agent"
+              label="AI reviews the pull request"
             />
-            <FlowConnector label="findings + coverage evidence" />
-            <FlowNode
-              detail="Automatically asks for missed issues even after zero findings; tries and rewards variants"
-              kind="loop"
-              label="Bounded adaptive Find more loop"
-            />
-            <FlowConnector label="novel/duplicate results + prompt digests" />
-            <FlowNode
-              detail="Severity · evidence · S0–S3 · XS–L · type compatibility · coverage · nudge history"
-              kind="data"
-              label="Findings, stage evidence, nudge records"
-            />
+            <FlowConnector label="findings" />
+            {gate(3)}
+            <FlowConnector label="review ready" />
+            <FindingDecision gate={gate(4, true)} />
           </FlowBand>
 
-          <FlowBand
-            eyebrow="POST-REVIEW DECISIONS"
-            number="04"
-            title="Review result → completion gate + per-finding classification → triaged data"
-          >
-            <BranchStack label="Run after review output">
-              {gate(3)}
-              {gate(4)}
-            </BranchStack>
-            <FlowConnector label="#4 overall · #5 per ambiguous finding" />
-            <FlowNode
-              detail="S0 XS/S → in scope · S2/S3 or incompatible → deferred · ambiguous S1/large S0 → gate"
-              kind="system"
-              label="Deterministic scope and type split"
+          <section className="bg-background/60 rounded-xl border p-3">
+            <FlowHeading
+              eyebrow="FINDINGS DECISION"
+              number="02"
+              title="Publish, fix, and defer are separate choices"
             />
-            <FlowConnector label="disposition + user corrections" />
-            <FlowNode
-              detail="In scope · deferred · dismissed · revise charter"
-              kind="data"
-              label="Triaged finding set"
-            />
-            <FlowConnector conditional label="deferred findings" />
-            <FlowNode
-              detail="Editable, split/merge/linkable follow-up work"
-              kind="data"
-              label="Deferred groups"
-            />
-            <FlowConnector conditional label="in-scope finding IDs" />
-            <FlowNode
-              detail="User chooses implementation, review publication, or both independently"
-              kind="action"
-              label="Explicit next action"
-            />
-          </FlowBand>
+            <div className="grid grid-cols-3 gap-3">
+              <ChoiceLane
+                description="Send the selected findings as a GitHub review."
+                title="Publish review"
+              >
+                {gate(9)}
+                <FlowConnector label="publish" narrow />
+                <FlowNode
+                  compact
+                  detail="Review comments"
+                  kind="external"
+                  label="GitHub review"
+                />
+              </ChoiceLane>
+              <ChoiceLane
+                description="Repair only the findings selected for this pull request."
+                title="Fix findings"
+              >
+                <FlowNode
+                  compact
+                  detail="Repair only the findings selected for this pull request"
+                  kind="action"
+                  label="Implement selected findings"
+                />
+                <ContinuationCue />
+              </ChoiceLane>
+              <ChoiceLane
+                description="Keep follow-up work separate from the current change."
+                title="Defer work"
+              >
+                <FlowNode
+                  compact
+                  detail="Grouped follow-up work"
+                  kind="data"
+                  label="Deferred findings"
+                />
+                <FlowConnector label="create issue" narrow />
+                {gate(11)}
+                <FlowConnector label="publish" narrow />
+                <FlowNode
+                  compact
+                  detail="One issue per group"
+                  kind="external"
+                  label="GitHub issues"
+                />
+              </ChoiceLane>
+            </div>
+          </section>
 
           <FlowBand
-            eyebrow="EXPLICIT RUN IMPLEMENTATION"
-            number="05"
-            title="Authorized findings → repair candidate → exact scope audit"
+            eyebrow="IMPLEMENTATION"
+            number="03"
+            title="Selected findings → scoped fix → validation → branch"
           >
-            <BranchStack label="Ownership branch">
-              {gate(5)}
-              <FlowNode
-                compact
-                detail="Owned PR bypasses #6; writable head is still mandatory"
-                kind="system"
-                label="Owned + writable"
-              />
-            </BranchStack>
-            <FlowConnector label="eligible finding IDs" />
+            <ConditionalGate condition="Non-owned pull requests only">
+              {gate(5, true)}
+            </ConditionalGate>
+            <FlowConnector label="then · owned PR skips #6" />
             {gate(6)}
-            <FlowConnector label="charter + findings + shared facts" />
+            <FlowConnector label="start implementation" />
             <FlowNode
-              detail="Edit-only agent in a pinned local Git workspace"
+              detail="Prepare a focused fix for the selected findings"
               kind="agent"
-              label="PicoClaw · implementation agent"
+              label="AI implements the changes"
             />
-            <FlowConnector label="changed files + candidate diff + prompt digest" />
+            <FlowConnector label="candidate changes" />
+            <ScopeDecision gate={gate(7, true)} />
+            <FlowConnector label="accepted · in scope" />
             <FlowNode
-              detail="Every real hunk mapped; deterministic size and PR-type checks added"
-              kind="agent"
-              label="Isolated scope auditor"
-            />
-            <FlowConnector label="S0–S3 · XS–L · presence · evidence" />
-            <BranchStack label="Candidate scope branch">
-              {gate(7)}
-              <FlowNode
-                compact
-                detail="Candidate S2/S3/type mismatch: no pass; remove+defer, revise charter, or stop"
-                kind="hard"
-                label="Mandatory hard-scope resolution"
-              />
-            </BranchStack>
-          </FlowBand>
-
-          <FlowBand
-            eyebrow="REPAIR, VALIDATION, AND COMPLETENESS LOOPS"
-            number="06"
-            title="Candidate diff → CI evidence → completion search → accepted candidate"
-          >
-            <FlowNode
-              detail="Local checks are bound to the exact candidate SHA"
+              detail="Run tests and the required checks"
               kind="action"
-              label="Git / CI · validate candidate"
+              label="Validate changes"
             />
-            <FlowConnector label="check results + summaries" />
-            <FlowNode
-              detail="Red checks become in-scope repair findings and loop back to implementation"
-              kind="data"
-              label="Validation evidence"
-            />
-            <FlowConnector conditional label="green candidate" />
-            <FlowNode
-              detail="Checks every acceptance criterion, missing work, and out-of-scope code"
-              kind="agent"
-              label="PicoClaw · completion audit"
-            />
-            <FlowConnector label="automatic Check again variants" />
-            <FlowNode
-              detail="Missing work → repair · follow-up → defer · candidate drift → hard scope"
-              kind="loop"
-              label="Completion nudge and repair loop"
-            />
-            <FlowConnector label="no unresolved required work" />
+            <FlowConnector label="checks pass" />
             {gate(8)}
-            <FlowConnector label="pass + fresh context digest" />
+            <FlowConnector label="accept completion" />
+            {gate(10)}
+            <FlowConnector label="push" />
             <FlowNode
-              detail="Retained local commit + exact branch publication fence"
-              kind="data"
-              label="Authorized implementation candidate"
+              detail="Updated pull request branch"
+              kind="external"
+              label="GitHub branch"
             />
           </FlowBand>
 
-          <FlowBand
-            eyebrow="THREE INDEPENDENT PROVIDER EFFECTS"
-            number="07"
-            title="Frozen payloads → publication gates → background worker → GitHub"
+          <section
+            aria-labelledby={`${instanceID}-advanced-title`}
+            className="bg-background/60 rounded-xl border border-dashed p-3"
           >
-            <PublicationLane
-              gate={gate(9)}
-              input="Selected in-scope findings + review summary"
-              output="GitHub review comments · never approve/request changes"
-              payload="Frozen review payload + stable marker"
-            />
-            <PublicationLane
-              gate={gate(10)}
-              input="Validated retained commit + exact head fence"
-              output="Exact PR branch push · never merge"
-              payload="Frozen branch payload + digest"
-            />
-            <PublicationLane
-              gate={gate(11)}
-              input="One deferred group; ask/automatic/off policy"
-              output="GitHub follow-up issue + stable marker"
-              payload="Frozen issue title/body/labels/finding IDs"
-            />
-          </FlowBand>
-
-          <FlowBand
-            eyebrow="SHARED USER CORRECTIONS"
-            number="08"
-            title="Corrections update the same workspace context; promotion is separate"
-          >
-            <FlowNode
-              detail="Wrong claim + corrected rule + evidence + review/implementation/both applicability"
-              kind="action"
-              label="User records correction or guidance"
-            />
-            <FlowConnector label="stored immediately at charter + head fence" />
-            <FlowNode
-              detail="Audience-specific projections feed later review, repair, scope, and completion prompts"
-              kind="data"
-              label="Canonical shared facts bundle"
-            />
-            <FlowConnector conditional label="optional promote" />
-            {gate(12)}
-            <FlowConnector label="pass" />
-            <FlowNode
-              detail="Reusable only for the same repository, PR type, and audience"
-              kind="data"
-              label="Repository lesson"
-            />
-            <FlowConnector reverse label="dispositions reward nudge variants" />
-            <FlowNode
-              detail="Novel findings earn delayed outcomes; review and completion learn independently"
-              kind="data"
-              label="Nudge success history"
-            />
-          </FlowBand>
-
-          <FlowBand
-            eyebrow="AMBIGUOUS EXTERNAL RESULT; NEVER BLINDLY RETRY"
-            number="09"
-            title="Unknown review, branch, or issue write → reconciliation gate"
-          >
-            <FlowNode
-              detail="Provider may have applied the write even though PicoClaw did not receive a trustworthy result"
-              kind="data"
-              label="Publication state: unknown"
-            />
-            <FlowConnector label="publication ID + frozen marker/head proof" />
-            {gate(13)}
-            <FlowConnector label="pass: bounded read-only observation" />
-            <FlowNode
-              detail="Re-observe exact marker or remote head; success records safe external evidence"
-              kind="system"
-              label="Check provider again"
-            />
-            <FlowConnector conditional label="block: assume failed" />
-            <FlowNode
-              detail="Release the lock for a new deliberate request; absence alone is not proof"
-              kind="gap"
-              label="Unlock without blind retry"
-            />
-          </FlowBand>
+            <div className="mb-3 flex items-start justify-between gap-4">
+              <FlowHeading
+                eyebrow="CONDITIONAL"
+                number="04"
+                title="Advanced / exception gates"
+                titleID={`${instanceID}-advanced-title`}
+              />
+              <p className="text-muted-foreground max-w-xl text-right text-[11px] leading-snug">
+                These gates appear only when their condition applies and remain
+                editable here.
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              {advancedGates.map(({ index, condition }) => (
+                <AdvancedGate
+                  condition={condition}
+                  key={gateSpecs[index].number}
+                >
+                  {gate(index, true)}
+                </AdvancedGate>
+              ))}
+            </div>
+          </section>
         </div>
       </div>
 
       <ol aria-label="PR lifecycle gates" className="sr-only">
-        {gateSpecs.map((spec) => {
-          const summary = summarizeStages(workflows?.[spec.decisionPoint])
-          return (
-            <li key={spec.decisionPoint}>
-              Gate {spec.number}: {spec.title}, {spec.decisionPoint}.{" "}
-              {spec.detail}. {summary.accessible}
-              {selectedDecisionPoint === spec.decisionPoint
-                ? ". Currently selected."
-                : ""}
-            </li>
-          )
-        })}
+        {gateSpecs.map((spec) => (
+          <li key={spec.decisionPoint}>
+            Gate {spec.number}: {spec.title}. {spec.detail}
+            {selectedDecisionPoint === spec.decisionPoint
+              ? ". Currently selected."
+              : ""}
+          </li>
+        ))}
       </ol>
     </section>
   )
@@ -537,41 +395,47 @@ function FlowBand({
 }) {
   return (
     <section className="bg-background/60 rounded-xl border p-3">
-      <div className="mb-3 flex items-start gap-3">
-        <span className="bg-primary text-primary-foreground rounded-md px-2 py-1 font-mono text-xs font-bold">
-          {number}
-        </span>
-        <div>
-          <p className="text-primary text-[10px] font-semibold tracking-wider">
-            {eyebrow}
-          </p>
-          <h3 className="text-sm font-semibold">{title}</h3>
-        </div>
-      </div>
-      <div className="flex min-h-32 items-center">{children}</div>
+      <FlowHeading eyebrow={eyebrow} number={number} title={title} />
+      <div className="flex min-h-36 items-stretch">{children}</div>
     </section>
   )
 }
 
-type FlowKind =
-  | "external"
-  | "action"
-  | "agent"
-  | "system"
-  | "data"
-  | "gap"
-  | "loop"
-  | "hard"
+function FlowHeading({
+  number,
+  eyebrow,
+  title,
+  titleID,
+}: {
+  number: string
+  eyebrow: string
+  title: string
+  titleID?: string
+}) {
+  return (
+    <div className="mb-3 flex items-start gap-3">
+      <span className="bg-primary text-primary-foreground rounded-md px-2 py-1 font-mono text-xs font-bold">
+        {number}
+      </span>
+      <div>
+        <p className="text-primary text-[10px] font-semibold tracking-wider">
+          {eyebrow}
+        </p>
+        <h3 className="text-sm font-semibold" id={titleID}>
+          {title}
+        </h3>
+      </div>
+    </div>
+  )
+}
+
+type FlowKind = "external" | "action" | "agent" | "data"
 
 const flowKindLabel: Record<FlowKind, string> = {
-  external: "GITHUB EVENT",
-  action: "EXPLICIT ACTION",
+  external: "GITHUB",
+  action: "ACTION",
   agent: "AI ACTION",
-  system: "SYSTEM ACTION",
-  data: "DURABLE DATA",
-  gap: "HANDOFF / STOP",
-  loop: "BOUNDED LOOP",
-  hard: "HARD INVARIANT",
+  data: "VISIBLE DATA",
 }
 
 function FlowNode({
@@ -588,27 +452,16 @@ function FlowNode({
   return (
     <div
       className={cn(
-        "flex min-h-28 w-56 shrink-0 flex-col rounded-xl border p-3",
-        compact && "min-h-24 w-64",
+        "flex min-h-28 w-52 shrink-0 flex-col rounded-xl border p-3",
+        compact && "min-h-24 w-44",
         kind === "external" && "bg-accent/50 border-primary/40",
         kind === "action" && "bg-secondary",
         kind === "agent" && "bg-primary/5 border-primary/40",
-        kind === "system" && "bg-muted/40",
         kind === "data" && "bg-muted/30 border-dashed",
-        kind === "gap" &&
-          "bg-destructive/5 border-destructive/50 border-dashed",
-        kind === "loop" && "bg-accent/40 border-primary/50 border-dashed",
-        kind === "hard" && "bg-destructive/10 border-destructive/60",
       )}
       data-flow-kind={kind}
     >
-      <span
-        className={cn(
-          "text-muted-foreground text-[9px] font-bold tracking-wider",
-          kind === "hard" && "text-destructive",
-          kind === "gap" && "text-destructive",
-        )}
-      >
+      <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
         {flowKindLabel[kind]}
       </span>
       <strong className="mt-1 text-xs leading-snug">{label}</strong>
@@ -621,107 +474,192 @@ function FlowNode({
 
 function FlowConnector({
   label,
-  conditional = false,
-  reverse = false,
+  narrow = false,
 }: {
   label: string
-  conditional?: boolean
-  reverse?: boolean
+  narrow?: boolean
 }) {
   return (
     <div
-      aria-label={`Data flow: ${label}`}
-      className="flex w-32 shrink-0 flex-col items-center px-2 text-center"
+      aria-label={`Flow: ${label}`}
+      className={cn(
+        "flex w-20 shrink-0 flex-col items-center justify-center px-1 text-center",
+        narrow && "w-14",
+      )}
       data-flow-edge={label}
     >
-      <span className="text-muted-foreground mb-2 text-[9px] leading-tight font-medium">
+      <span className="text-foreground bg-background mb-1 rounded border px-1.5 py-0.5 text-[9px] leading-tight font-semibold">
         {label}
       </span>
       <div className="flex w-full items-center" aria-hidden="true">
-        {reverse ? (
-          <span className="text-primary text-lg leading-none">‹</span>
-        ) : null}
-        <span
-          className={cn(
-            "border-muted-foreground/60 grow border-t",
-            conditional && "border-dashed",
-          )}
-        />
-        {!reverse ? (
-          <span className="text-primary text-lg leading-none">›</span>
-        ) : null}
+        <span className="border-muted-foreground/60 grow border-t" />
+        <span className="text-primary text-lg leading-none">›</span>
       </div>
     </div>
   )
 }
 
-function BranchStack({
-  label,
+function ChoiceLane({
+  title,
+  description,
   children,
 }: {
-  label: string
+  title: string
+  description: string
   children: ReactNode
 }) {
   return (
-    <div className="bg-muted/20 w-72 shrink-0 space-y-2 rounded-xl border border-dashed p-2">
-      <p className="text-muted-foreground text-center text-[9px] font-semibold tracking-wider">
-        {label}
+    <section className="bg-muted/20 min-h-52 rounded-xl border p-3">
+      <h4 className="text-xs font-semibold">{title}</h4>
+      <p className="text-muted-foreground mt-1 text-[11px]">{description}</p>
+      <div className="mt-3 flex items-stretch">{children}</div>
+    </section>
+  )
+}
+
+function FindingDecision({ gate }: { gate: ReactNode }) {
+  return (
+    <div
+      className="bg-muted/20 w-[32rem] shrink-0 rounded-xl border p-3"
+      data-flow-branch="findings-decision"
+    >
+      <p className="text-primary text-[9px] font-bold tracking-wider">
+        FINDINGS DECISION
+      </p>
+      <div className="mt-2 grid grid-cols-[1fr_14rem] gap-2">
+        <div className="bg-secondary flex min-h-28 flex-col rounded-lg border p-3">
+          <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
+            ACTION
+          </span>
+          <strong className="mt-1 text-xs">
+            Choose what to do with findings
+          </strong>
+          <span className="text-muted-foreground mt-2 text-[11px] leading-snug">
+            Publish review · fix selected findings · defer follow-up
+          </span>
+        </div>
+        <ConditionalGate condition="Finding scope is ambiguous">
+          {gate}
+        </ConditionalGate>
+      </div>
+    </div>
+  )
+}
+
+function ContinuationCue() {
+  return (
+    <div
+      className="text-primary ml-3 flex w-32 shrink-0 flex-col items-center justify-center rounded-lg border border-dashed px-3 text-center"
+      data-flow-continuation="implementation"
+    >
+      <span className="text-2xl leading-none" aria-hidden="true">
+        ↓
+      </span>
+      <strong className="mt-1 text-[11px] leading-snug">
+        Continue to implementation
+      </strong>
+    </div>
+  )
+}
+
+function ConditionalGate({
+  condition,
+  children,
+}: {
+  condition: string
+  children: ReactNode
+}) {
+  return (
+    <div className="bg-muted/20 flex min-w-56 flex-col rounded-lg border border-dashed p-2">
+      <p className="text-muted-foreground mb-2 text-[9px] leading-snug font-bold tracking-wider">
+        CONDITIONAL · {condition}
       </p>
       {children}
     </div>
   )
 }
 
-function PublicationLane({
-  input,
-  gate,
-  payload,
-  output,
+function ScopeDecision({ gate }: { gate: ReactNode }) {
+  return (
+    <div
+      className="bg-muted/20 w-[43rem] shrink-0 rounded-xl border p-3"
+      data-flow-branch="candidate-scope"
+    >
+      <p className="text-primary text-[9px] font-bold tracking-wider">
+        CANDIDATE SCOPE DECISION
+      </p>
+      <h4 className="mt-1 text-xs font-semibold">Check candidate scope</h4>
+      <div className="mt-2 grid grid-cols-[14rem_1fr] gap-2">
+        <ConditionalGate condition="Large or adjacent candidate work">
+          {gate}
+        </ConditionalGate>
+        <div className="space-y-2">
+          <div
+            className="bg-primary/5 border-primary/40 rounded-lg border px-3 py-2"
+            data-scope-outcome="accepted"
+          >
+            <strong className="text-primary text-[10px]">
+              ACCEPTED / IN SCOPE
+            </strong>
+            <p className="text-muted-foreground mt-1 text-[10px]">
+              Continue to validation.
+            </p>
+          </div>
+          <div
+            className="bg-destructive/5 border-destructive/50 rounded-lg border border-dashed px-3 py-2"
+            data-scope-outcome="outside"
+          >
+            <strong className="text-destructive text-[10px]">
+              OUTSIDE SCOPE · USER CHOICE
+            </strong>
+            <p className="mt-1 text-[10px] font-semibold">
+              Remove extra code · revise purpose/scope · defer follow-up · stop
+            </p>
+            <p
+              className="text-muted-foreground mt-1 border-t border-dashed pt-1 text-[10px]"
+              data-flow-edge="repair and recheck scope"
+            >
+              ↺ Repair candidate, then recheck scope before validation
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AdvancedGate({
+  condition,
+  children,
 }: {
-  input: string
-  gate: ReactNode
-  payload: string
-  output: string
+  condition: string
+  children: ReactNode
 }) {
   return (
-    <div className="mr-3 grid w-[35rem] shrink-0 grid-cols-[1fr_1fr] gap-2 rounded-xl border p-2">
-      <div className="bg-muted/30 col-span-2 rounded-lg border border-dashed px-3 py-2">
-        <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
-          INPUT DATA
-        </span>
-        <p className="mt-0.5 text-[11px]">{input}</p>
-      </div>
-      {gate}
-      <div className="bg-muted/30 rounded-lg border border-dashed px-3 py-2">
-        <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
-          FROZEN DATA
-        </span>
-        <p className="mt-0.5 text-[11px]">{payload}</p>
-      </div>
-      <div className="bg-primary/5 border-primary/30 col-span-2 rounded-lg border px-3 py-2">
-        <span className="text-primary text-[9px] font-bold tracking-wider">
-          BACKGROUND WORKER → GITHUB OUTPUT
-        </span>
-        <p className="mt-0.5 text-[11px]">{output}</p>
-      </div>
+    <div className="bg-muted/20 flex min-w-0 flex-col rounded-xl border p-2">
+      <p className="text-muted-foreground mb-2 min-h-8 text-[10px] leading-snug font-semibold">
+        WHEN · {condition}
+      </p>
+      {children}
     </div>
   )
 }
 
 function GateNode({
   spec,
-  workflow,
+  workflowConfigured,
   selected,
+  compact,
   instanceID,
   onSelect,
 }: {
   spec: GateSpec
-  workflow?: PRLifecycleGateWorkflow
+  workflowConfigured: boolean
   selected: boolean
+  compact: boolean
   instanceID: string
   onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
 }) {
-  const summary = summarizeStages(workflow)
   const descriptionID = `${instanceID}-gate-${spec.number}-description`
   const activate = () => onSelect(spec.decisionPoint)
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -736,47 +674,42 @@ function GateNode({
       aria-label={spec.title}
       aria-pressed={selected}
       className={cn(
-        "bg-card hover:border-primary focus-visible:ring-ring flex min-h-28 w-full min-w-64 flex-col rounded-xl border-2 p-3 text-left transition-colors outline-none focus-visible:ring-2",
-        selected && "bg-primary/10 border-primary",
+        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring flex min-h-28 w-56 shrink-0 flex-col rounded-xl border-2 p-3 text-left shadow-sm transition-colors outline-none focus-visible:ring-2",
+        compact && "min-h-24 w-full p-2.5",
+        selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
       )}
       data-decision-point={spec.decisionPoint}
       data-edit-href={`/pull-requests?view=gate-profiles&gate=${spec.decisionPoint}`}
       data-flow-kind="gate"
       data-gate-id={spec.decisionPoint}
-      data-workflow-configured={workflow ? "true" : "false"}
+      data-gate-number={spec.number}
+      data-workflow-configured={workflowConfigured ? "true" : "false"}
       onClick={activate}
       onKeyDown={handleKeyDown}
       type="button"
     >
       <span className="flex w-full items-start justify-between gap-2">
         <span className="text-primary text-[9px] font-bold tracking-wider">
-          EDITABLE GATE
+          EDIT GATE
         </span>
         <span
           className={cn(
-            "bg-muted flex size-6 items-center justify-center rounded-full font-mono text-[10px] font-bold",
-            selected && "bg-primary text-primary-foreground",
+            "bg-primary text-primary-foreground flex size-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold",
+            selected && "ring-primary/30 ring-2",
           )}
         >
           {spec.number}
         </span>
       </span>
-      <span className="mt-1 font-mono text-[9px]">{spec.decisionPoint}</span>
-      <strong className="mt-1 text-xs">{spec.title}</strong>
+      <strong className="mt-1 text-xs leading-snug">{spec.title}</strong>
       <span
         className="text-muted-foreground mt-1 text-[10px] leading-tight"
         id={descriptionID}
       >
         {spec.detail}
       </span>
-      <span
-        className={cn(
-          "bg-muted text-muted-foreground mt-auto w-full rounded-md border px-2 py-1 text-center font-mono text-[9px] font-semibold",
-          summary.fallback && "border-primary/40 text-primary",
-          summary.invalid && "border-destructive/50 text-destructive",
-        )}
-      >
-        {summary.visual}
+      <span className="text-primary mt-auto pt-2 text-[9px] font-bold tracking-wider">
+        SELECT TO EDIT →
       </span>
     </button>
   )
@@ -802,43 +735,4 @@ function Legend({
       {label}
     </span>
   )
-}
-
-function StageLegend({ code, label }: { code: string; label: string }) {
-  return (
-    <span className="bg-muted/50 rounded-md border px-2 py-1">
-      <span className="text-foreground font-mono font-semibold">{code}</span>{" "}
-      {label}
-    </span>
-  )
-}
-
-function summarizeStages(workflow?: PRLifecycleGateWorkflow) {
-  if (!workflow) {
-    return {
-      visual: "NOT CONFIGURED · FALLBACK H",
-      accessible:
-        "No workflow is configured, so the runtime uses a fallback human gate.",
-      fallback: true,
-      invalid: false,
-    }
-  }
-  if (workflow.stages.length === 0) {
-    return {
-      visual: "NO STAGES · INVALID DRAFT",
-      accessible: "The configured workflow has no stages and is invalid.",
-      fallback: false,
-      invalid: true,
-    }
-  }
-  const visibleStages = workflow.stages.slice(0, 4)
-  const remaining = workflow.stages.length - visibleStages.length
-  const visual = [
-    ...visibleStages.map((stage) => stageLabels[stage.kind]),
-    ...(remaining > 0 ? [`+${remaining}`] : []),
-  ].join(" → ")
-  const accessible = `Configured stages, in order: ${workflow.stages
-    .map((stage) => stageAccessibleLabels[stage.kind])
-    .join(", then ")}.`
-  return { visual, accessible, fallback: false, invalid: false }
 }

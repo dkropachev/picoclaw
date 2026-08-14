@@ -3156,7 +3156,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     page.getByRole("heading", { name: "PR lifecycle gate profiles" }),
   ).toBeVisible()
   const gateMap = page
-    .getByRole("heading", { name: "PR lifecycle event and data flow" })
+    .getByRole("heading", { name: "PR lifecycle gate flow" })
     .locator("xpath=ancestor::section[1]")
   await expect(gateMap.locator("[data-decision-point]")).toHaveCount(14)
   await gateMap.getByRole("button", { name: "Complete review" }).click()
