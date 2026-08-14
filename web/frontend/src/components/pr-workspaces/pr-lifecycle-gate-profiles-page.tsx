@@ -10,10 +10,11 @@ import {
   IconTrash,
 } from "@tabler/icons-react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { type FormEvent, useEffect, useMemo, useState } from "react"
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import {
+  type PRLifecycleDecisionPoint,
   type PRLifecycleGateKind,
   type PRLifecycleGateProfile,
   type PRLifecycleGateProfileSnapshot,
@@ -28,6 +29,8 @@ import {
 } from "@/api/pr-lifecycle-gate-profiles"
 import { createPRWorkspaceRequestID } from "@/api/pr-workspaces"
 import { PageHeader } from "@/components/page-header"
+import { prLifecycleGateLabel } from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
+import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -70,8 +73,12 @@ const gateKinds: PRLifecycleGateKind[] = [
 
 export function PRLifecycleGateProfilesPage({
   onBack,
+  initialDecisionPoint,
+  onDecisionPointChange,
 }: {
   onBack: () => void
+  initialDecisionPoint?: PRLifecycleDecisionPoint
+  onDecisionPointChange?: (decisionPoint: PRLifecycleDecisionPoint) => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -80,15 +87,15 @@ export function PRLifecycleGateProfilesPage({
   )
   const [baseline, setBaseline] = useState("")
   const [selectedProfileID, setSelectedProfileID] = useState("")
-  const [selectedDecisionPoint, setSelectedDecisionPoint] = useState<string>(
-    prLifecycleKnownDecisionPoints[0],
-  )
+  const [selectedDecisionPoint, setSelectedDecisionPoint] =
+    useState<PRLifecycleDecisionPoint>(prLifecycleKnownDecisionPoints[0])
   const [newProfileID, setNewProfileID] = useState("")
   const [newProfileName, setNewProfileName] = useState("")
   const [newRepository, setNewRepository] = useState("")
   const [newStageKind, setNewStageKind] = useState<PRLifecycleGateKind>("human")
   const [error, setError] = useState("")
   const [discardOpen, setDiscardOpen] = useState(false)
+  const appliedDeepLink = useRef("")
   const query = useQuery({
     queryKey: profileQueryKey,
     queryFn: ({ signal }) => getPRLifecycleGateProfiles(signal),
@@ -99,8 +106,30 @@ export function PRLifecycleGateProfilesPage({
     const next = structuredClone(query.data)
     setDraft(next)
     setBaseline(JSON.stringify(next))
-    setSelectedProfileID(next.default_gate_profile_id)
-  }, [draft, query.data])
+    setSelectedProfileID(
+      initialDecisionPoint && next.gate_profiles.default
+        ? "default"
+        : next.default_gate_profile_id,
+    )
+  }, [draft, initialDecisionPoint, query.data])
+  useEffect(() => {
+    if (
+      !draft ||
+      !initialDecisionPoint ||
+      appliedDeepLink.current === initialDecisionPoint
+    ) {
+      return
+    }
+    appliedDeepLink.current = initialDecisionPoint
+    setSelectedDecisionPoint(initialDecisionPoint)
+    if (draft.gate_profiles.default) setSelectedProfileID("default")
+    const frame = window.requestAnimationFrame(() => {
+      const editor = document.getElementById("pr-gate-workflow-editor")
+      editor?.focus({ preventScroll: true })
+      editor?.scrollIntoView({ behavior: "smooth", block: "start" })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [draft, initialDecisionPoint])
   const dirty = draft != null && JSON.stringify(draft) !== baseline
   useEffect(() => {
     if (!dirty) return
@@ -159,6 +188,19 @@ export function PRLifecycleGateProfilesPage({
   }
   const selectedProfile = draft.gate_profiles[selectedProfileID]
   const workflow = selectedProfile?.workflows[selectedDecisionPoint]
+  const focusWorkflowEditor = () => {
+    window.requestAnimationFrame(() => {
+      const editor = document.getElementById("pr-gate-workflow-editor")
+      editor?.focus({ preventScroll: true })
+      editor?.scrollIntoView({ behavior: "smooth", block: "start" })
+    })
+  }
+  const selectDecisionPoint = (decisionPoint: PRLifecycleDecisionPoint) => {
+    appliedDeepLink.current = decisionPoint
+    setSelectedDecisionPoint(decisionPoint)
+    onDecisionPointChange?.(decisionPoint)
+    focusWorkflowEditor()
+  }
 
   const changeProfile = (update: (profile: PRLifecycleGateProfile) => void) => {
     setDraft((current) => {
@@ -288,6 +330,15 @@ export function PRLifecycleGateProfilesPage({
       </PageHeader>
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
         <div className="mx-auto grid w-full max-w-[96rem] gap-4 xl:grid-cols-[18rem_minmax(0,1fr)]">
+          {selectedProfile && (
+            <PRLifecycleGateMap
+              className="xl:col-span-2"
+              selectedDecisionPoint={selectedDecisionPoint}
+              workflows={selectedProfile.workflows}
+              profileName={selectedProfile.name}
+              onSelect={selectDecisionPoint}
+            />
+          )}
           <aside className="space-y-4">
             <Card size="sm">
               <CardHeader>
@@ -493,7 +544,13 @@ export function PRLifecycleGateProfilesPage({
                 </div>
               )}
               <ProfileTuning config={draft} onChange={changeConfig} />
-              <Card size="sm">
+              <Card
+                id="pr-gate-workflow-editor"
+                tabIndex={-1}
+                data-decision-point={selectedDecisionPoint}
+                className="scroll-mt-4 outline-none"
+                size="sm"
+              >
                 <CardHeader>
                   <CardTitle role="heading" aria-level={2}>
                     {t("prWorkspaces.gateProfiles.workflow")}
@@ -506,7 +563,9 @@ export function PRLifecycleGateProfilesPage({
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <Select
                       value={selectedDecisionPoint}
-                      onValueChange={setSelectedDecisionPoint}
+                      onValueChange={(value) =>
+                        selectDecisionPoint(value as PRLifecycleDecisionPoint)
+                      }
                     >
                       <SelectTrigger
                         className="min-w-0 flex-1"
@@ -517,9 +576,7 @@ export function PRLifecycleGateProfilesPage({
                       <SelectContent>
                         {prLifecycleKnownDecisionPoints.map((point) => (
                           <SelectItem key={point} value={point}>
-                            {t(`prWorkspaces.gateProfiles.decisions.${point}`, {
-                              defaultValue: point,
-                            })}
+                            {prLifecycleGateLabel(point)}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -981,19 +1038,6 @@ function GateStageEditor({
               onChange={(event) => patch({ title: event.target.value })}
             />
           </GateField>
-          {stage.kind !== "deterministic" && (
-            <GateField label={t("prWorkspaces.gateProfiles.when")}>
-              <Input
-                className="max-w-full min-w-0"
-                value={stage.when ?? ""}
-                aria-label={t("prWorkspaces.gateProfiles.when")}
-                onChange={(event) =>
-                  patch({ when: event.target.value || undefined })
-                }
-                placeholder="true"
-              />
-            </GateField>
-          )}
           {stage.kind === "deterministic" && (
             <GateField
               label={t("prWorkspaces.gateProfiles.condition")}

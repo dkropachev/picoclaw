@@ -102,6 +102,9 @@ export const prLifecycleKnownDecisionPoints = [
   "pr.publication.reconcile",
 ] as const
 
+export type PRLifecycleDecisionPoint =
+  (typeof prLifecycleKnownDecisionPoints)[number]
+
 export async function getPRLifecycleGateProfiles(
   signal?: AbortSignal,
 ): Promise<PRLifecycleGateProfileSnapshot> {

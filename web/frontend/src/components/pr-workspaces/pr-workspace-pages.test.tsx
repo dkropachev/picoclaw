@@ -2704,7 +2704,7 @@ describe("unified PR workspace pages", () => {
     ).toBeVisible()
 
     await user.click(screen.getByLabelText("Decision workflow"))
-    await user.click(screen.getByRole("option", { name: "pr.review.complete" }))
+    await user.click(screen.getByRole("option", { name: "Complete review" }))
     expect(screen.getByTestId("pr-gate-stage-controls")).toHaveClass(
       "flex-col",
       "sm:flex-row",
@@ -2725,6 +2725,36 @@ describe("unified PR workspace pages", () => {
         }),
       ),
     )
+  })
+
+  it("opens an exact gate deep link in the focused workflow editor", async () => {
+    const onDecisionPointChange = vi.fn()
+    mockedGetGateProfiles.mockResolvedValueOnce({
+      ...gateProfiles,
+      gate_profiles: {
+        ...gateProfiles.gate_profiles,
+        alternate: { name: "Alternate", workflows: {} },
+      },
+      default_gate_profile_id: "alternate",
+    })
+    const { container } = renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialDecisionPoint="pr.review.complete"
+        onDecisionPointChange={onDecisionPointChange}
+      />,
+    )
+
+    const editor = await waitFor(() => {
+      const value = container.querySelector<HTMLElement>(
+        "#pr-gate-workflow-editor",
+      )
+      expect(value).toHaveAttribute("data-decision-point", "pr.review.complete")
+      return value!
+    })
+    await waitFor(() => expect(editor).toHaveFocus())
+    expect(screen.getByLabelText("Profiles")).toHaveTextContent("Default")
+    expect(onDecisionPointChange).not.toHaveBeenCalled()
   })
 
   it("confirms before discarding an in-app gate-profile draft", async () => {
@@ -2840,7 +2870,7 @@ describe("unified PR workspace pages", () => {
 
     await screen.findByRole("heading", { name: "Decision workflow" })
     await user.click(screen.getByLabelText("Decision workflow"))
-    await user.click(screen.getByRole("option", { name: "pr.review.complete" }))
+    await user.click(screen.getByRole("option", { name: "Complete review" }))
 
     const editor = screen.getByTestId("pr-gate-stage-editor")
     expect(editor).toHaveClass("min-w-0", "max-w-full")
@@ -2857,5 +2887,8 @@ describe("unified PR workspace pages", () => {
       "min-w-0",
       "max-w-full",
     )
+    expect(
+      screen.queryByLabelText("Run condition (optional)"),
+    ).not.toBeInTheDocument()
   })
 })

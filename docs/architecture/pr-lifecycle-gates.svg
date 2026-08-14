@@ -1,482 +1,534 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="2820" viewBox="0 0 1920 2820" role="img" aria-labelledby="title desc">
-  <title id="title">PicoClaw pull-request lifecycle gates</title>
-  <desc id="desc">Architecture and lifecycle diagram showing the user, PicoClaw components and agents, Git and GitHub, all fourteen decision points in the effective Default PR lifecycle gate profile, the five configurable stage formats, adaptive nudging, deferred work, publication, and the non-configurable hard-scope gate.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1500" viewBox="0 0 1920 1500" role="img" aria-labelledby="title desc" data-gate-map-version="2" data-profile="default">
+  <title id="title">Interactive PicoClaw pull-request lifecycle gate map</title>
+  <desc id="desc">A gate-first action-flow diagram for the fourteen configurable PR lifecycle decision points. Every numbered gate is a link to its editor. The map also shows user, PicoClaw agents, Git and GitHub effects, conditional branches, nudging loops, deferred work, and the separate non-configurable hard-scope invariant.</desc>
 
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#08111f"/>
-      <stop offset="0.55" stop-color="#0b1425"/>
-      <stop offset="1" stop-color="#111827"/>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="0.55" stop-color="#0a1425"/>
+      <stop offset="1" stop-color="#101827"/>
     </linearGradient>
-    <linearGradient id="userGradient" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#172554"/>
-      <stop offset="1" stop-color="#1e3a8a"/>
+    <linearGradient id="picoBand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0b2731"/>
+      <stop offset="1" stop-color="#0b302e"/>
     </linearGradient>
-    <linearGradient id="picoGradient" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#082f49"/>
-      <stop offset="1" stop-color="#134e4a"/>
-    </linearGradient>
-    <linearGradient id="gitGradient" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3b0764"/>
-      <stop offset="1" stop-color="#581c87"/>
-    </linearGradient>
-    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
-      <circle cx="2" cy="2" r="1.2" fill="#334155" opacity="0.35"/>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#314158" stroke-width="0.7" opacity="0.22"/>
     </pattern>
-    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#020617" flood-opacity="0.55"/>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#020617" flood-opacity="0.5"/>
     </filter>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    <filter id="focusGlow" x="-20%" y="-25%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#22d3ee" flood-opacity="0.75"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#8fa3bc"/>
     </marker>
-    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#60a5fa"/>
+    <marker id="arrowPico" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#2dd4bf"/>
     </marker>
-    <marker id="arrowTeal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2dd4bf"/>
+    <marker id="arrowHuman" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#60a5fa"/>
     </marker>
-    <marker id="arrowPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c084fc"/>
+    <marker id="arrowGit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#c084fc"/>
     </marker>
-    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb7185"/>
+    <marker id="arrowWarn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#fb7185"/>
+    </marker>
+    <marker id="arrowFeedback" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#fbbf24"/>
     </marker>
     <style>
-      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e2e8f0; }
-      .title { font-size: 44px; font-weight: 800; letter-spacing: -0.8px; }
-      .subtitle { font-size: 20px; fill: #94a3b8; }
-      .sectionTitle { font-size: 25px; font-weight: 750; }
-      .panelTitle { font-size: 22px; font-weight: 750; }
-      .phaseTitle { font-size: 22px; font-weight: 800; }
-      .gateID { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 16px; font-weight: 750; fill: #f8fafc; }
-      .gateIDLong { font-size: 13px; }
-      .body { font-size: 17px; fill: #cbd5e1; }
-      .small { font-size: 14px; fill: #94a3b8; }
-      .tiny { font-size: 12px; fill: #94a3b8; }
-      .pill { font-size: 12px; font-weight: 800; letter-spacing: 0.7px; }
-      .number { font-size: 14px; font-weight: 850; fill: #08111f; }
-      .panel { fill: #101a2d; stroke: #334155; stroke-width: 1.5; }
-      .inner { fill: #0b1324; stroke: #334155; stroke-width: 1.25; }
-      .gate { fill: #111c31; stroke: #475569; stroke-width: 1.4; }
-      .agent { fill: #102a2d; stroke: #2dd4bf; stroke-width: 1.4; }
-      .provider { fill: #25133c; stroke: #a855f7; stroke-width: 1.4; }
-      .humanStroke { stroke: #60a5fa; }
-      .zeroStroke { stroke: #4ade80; }
-      .hard { fill: #34141f; stroke: #fb7185; stroke-width: 2; }
-      .flow { fill: none; stroke: #94a3b8; stroke-width: 2.2; marker-end: url(#arrow); }
-      .flowBlue { fill: none; stroke: #60a5fa; stroke-width: 2.4; marker-end: url(#arrowBlue); }
-      .flowTeal { fill: none; stroke: #2dd4bf; stroke-width: 2.4; marker-end: url(#arrowTeal); }
-      .flowPurple { fill: none; stroke: #c084fc; stroke-width: 2.4; marker-end: url(#arrowPurple); }
-      .flowRed { fill: none; stroke: #fb7185; stroke-width: 2.5; marker-end: url(#arrowRed); }
-      .feedback { fill: none; stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 8 7; marker-end: url(#arrow); }
-      .divider { stroke: #334155; stroke-width: 1; }
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e5edf7; }
+      .title { font-size: 39px; font-weight: 800; letter-spacing: -0.7px; }
+      .subtitle { font-size: 17px; fill: #9fb0c5; }
+      .phase-title { font-size: 20px; font-weight: 800; letter-spacing: 0.2px; }
+      .phase-subtitle { font-size: 12px; font-weight: 700; letter-spacing: 1px; fill: #7f94ad; }
+      .actor-title { font-size: 18px; font-weight: 800; }
+      .actor-copy { font-size: 13px; fill: #aebed0; }
+      .action-title { font-size: 14px; font-weight: 750; }
+      .action-copy { font-size: 12px; fill: #9fb0c5; }
+      .gate-id { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 14px; font-weight: 800; fill: #f8fafc; }
+      .gate-id-small { font-size: 12.5px; }
+      .gate-copy { font-size: 12.5px; fill: #b9c7d8; }
+      .gate-number { font-size: 13px; font-weight: 900; fill: #07111f; text-anchor: middle; }
+      .pill { font-size: 10.5px; font-weight: 900; letter-spacing: 0.7px; }
+      .tiny { font-size: 11px; fill: #8da0b7; }
+      .small { font-size: 13px; fill: #a8b8ca; }
+      .section-panel { fill: #0b1627; stroke: #2e4057; stroke-width: 1.25; }
+      .phase-panel { fill: #0e192b; stroke: #31445c; stroke-width: 1.2; }
+      .action { fill: #112034; stroke: #3a5069; stroke-width: 1.2; }
+      .pico-action { fill: #0b292b; stroke: #21877c; stroke-width: 1.25; }
+      .git-effect { fill: #251436; stroke: #8b5bb1; stroke-width: 1.25; }
+      .gate-card { fill: #111e33; stroke: #64748b; stroke-width: 1.6; transition: stroke 120ms ease, filter 120ms ease, fill 120ms ease; }
+      .gate-link { cursor: pointer; outline: none; }
+      .gate-link.human .gate-card { stroke: #60a5fa; }
+      .gate-link.zero .gate-card { stroke: #4ade80; }
+      .gate-link:hover .gate-card,
+      .gate-link:focus .gate-card,
+      .gate-link:focus-visible .gate-card { fill: #132942; stroke: #22d3ee; stroke-width: 3; filter: url(#focusGlow); }
+      .gate-link:hover .edit-pill,
+      .gate-link:focus .edit-pill,
+      .gate-link:focus-visible .edit-pill { fill: #0e7490; }
+      .route { fill: none; stroke: #8fa3bc; stroke-width: 2; marker-end: url(#arrow); pointer-events: none; }
+      .route-pico { fill: none; stroke: #2dd4bf; stroke-width: 2.2; marker-end: url(#arrowPico); pointer-events: none; }
+      .route-human { fill: none; stroke: #60a5fa; stroke-width: 2.1; marker-end: url(#arrowHuman); pointer-events: none; }
+      .route-git { fill: none; stroke: #c084fc; stroke-width: 2.1; marker-end: url(#arrowGit); pointer-events: none; }
+      .route-conditional { fill: none; stroke: #8fa3bc; stroke-width: 1.8; stroke-dasharray: 7 6; marker-end: url(#arrow); pointer-events: none; }
+      .route-feedback { fill: none; stroke: #fbbf24; stroke-width: 1.9; stroke-dasharray: 8 6; marker-end: url(#arrowFeedback); pointer-events: none; }
+      .route-warn { fill: none; stroke: #fb7185; stroke-width: 2.1; marker-end: url(#arrowWarn); pointer-events: none; }
+      .flow-label { font-size: 10.5px; font-weight: 750; fill: #91a5bc; paint-order: stroke; stroke: #0e192b; stroke-width: 4px; stroke-linejoin: round; }
+      .hard-scope { fill: #32131e; stroke: #fb7185; stroke-width: 1.8; }
+      .legend-box { fill: #0d192a; stroke: #33475f; stroke-width: 1; }
     </style>
   </defs>
 
-  <rect width="1920" height="2820" fill="url(#bg)"/>
-  <rect width="1920" height="2820" fill="url(#dots)"/>
+  <rect width="1920" height="1500" fill="url(#background)"/>
+  <rect width="1920" height="1500" fill="url(#grid)"/>
 
   <!-- Header -->
-  <g transform="translate(48 48)">
-    <rect x="0" y="0" width="12" height="76" rx="6" fill="#2dd4bf"/>
-    <text x="34" y="42" class="title">PR lifecycle gates · actors, agents, and Git effects</text>
-    <text x="35" y="76" class="subtitle">Effective built-in Default profile · 14 configurable decision points · ordered all-of stages · strict no-compatibility PR workspace</text>
-  </g>
-
-  <!-- Actor / component map -->
-  <g id="actors" filter="url(#shadow)">
-    <rect x="40" y="160" width="340" height="340" rx="22" fill="url(#userGradient)" stroke="#60a5fa" stroke-width="2"/>
-    <circle cx="90" cy="218" r="25" fill="#60a5fa" opacity="0.18"/>
-    <circle cx="90" cy="210" r="8" fill="#bfdbfe"/>
-    <path d="M73 236c3-14 31-14 34 0" fill="none" stroke="#bfdbfe" stroke-width="5" stroke-linecap="round"/>
-    <text x="130" y="220" class="panelTitle">User / PR owner</text>
-    <text x="68" y="273" class="body">• Defines and confirms the charter</text>
-    <text x="68" y="307" class="body">• Corrects AI and supplies guidance</text>
-    <text x="68" y="341" class="body">• Resolves ambiguous scope</text>
-    <text x="68" y="375" class="body">• Authorizes provider effects</text>
-    <text x="68" y="423" class="small">Human outcomes</text>
-    <rect x="68" y="440" width="58" height="26" rx="13" fill="#14532d"/><text x="84" y="458" class="pill" fill="#bbf7d0">PASS</text>
-    <rect x="134" y="440" width="68" height="26" rx="13" fill="#713f12"/><text x="148" y="458" class="pill" fill="#fde68a">REVISE</text>
-    <rect x="210" y="440" width="61" height="26" rx="13" fill="#3f3f46"/><text x="223" y="458" class="pill" fill="#e4e4e7">DEFER</text>
-    <rect x="279" y="440" width="65" height="26" rx="13" fill="#7f1d1d"/><text x="293" y="458" class="pill" fill="#fecaca">BLOCK</text>
-
-    <rect x="400" y="160" width="1080" height="340" rx="22" fill="url(#picoGradient)" stroke="#2dd4bf" stroke-width="2"/>
-    <text x="432" y="204" class="panelTitle">PicoClaw · unified PR workspace</text>
-    <text x="432" y="231" class="small">One provider snapshot, charter, findings set, correction history, gate ledger, and publication audit trail</text>
-
-    <rect x="430" y="255" width="222" height="82" rx="14" class="inner"/>
-    <text x="449" y="285" class="body" font-weight="700">Launcher UI + API</text>
-    <text x="449" y="312" class="small">Profile editor · lifecycle UX</text>
-
-    <rect x="674" y="255" width="222" height="82" rx="14" class="inner"/>
-    <text x="693" y="285" class="body" font-weight="700">Workspace service</text>
-    <text x="693" y="312" class="small">CAS state · frozen subjects</text>
-
-    <rect x="918" y="255" width="248" height="82" rx="14" class="inner"/>
-    <text x="937" y="285" class="body" font-weight="700">Profile resolver</text>
-    <text x="937" y="312" class="small">Repository → profile revision</text>
-
-    <rect x="1188" y="255" width="260" height="82" rx="14" class="inner"/>
-    <text x="1207" y="285" class="body" font-weight="700">Gate workflow executor</text>
-    <text x="1207" y="312" class="small">Ordered stages · resume same run</text>
-
-    <rect x="430" y="360" width="1018" height="108" rx="14" fill="#092327" stroke="#1f766e"/>
-    <text x="449" y="389" class="small" font-weight="800" fill="#99f6e4">PR AGENTS AND ISOLATED WORKERS</text>
-    <rect x="449" y="407" width="174" height="38" rx="12" fill="#134e4a"/><text x="473" y="432" class="body">Review agent</text>
-    <rect x="637" y="407" width="204" height="38" rx="12" fill="#134e4a"/><text x="661" y="432" class="body">Implementation agent</text>
-    <rect x="855" y="407" width="190" height="38" rx="12" fill="#134e4a"/><text x="879" y="432" class="body">Scope auditor</text>
-    <rect x="1059" y="407" width="184" height="38" rx="12" fill="#134e4a"/><text x="1083" y="432" class="body">Completion agent</text>
-    <rect x="1257" y="407" width="172" height="38" rx="12" fill="#134e4a"/><text x="1279" y="432" class="body">Gate AI agent</text>
-
-    <rect x="1500" y="160" width="380" height="340" rx="22" fill="url(#gitGradient)" stroke="#c084fc" stroke-width="2"/>
-    <circle cx="1553" cy="215" r="25" fill="#c084fc" opacity="0.18"/>
-    <path d="M1543 199v29m0-21h18v21m-18-8h18" fill="none" stroke="#e9d5ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="1543" cy="198" r="5" fill="#e9d5ff"/><circle cx="1543" cy="232" r="5" fill="#e9d5ff"/><circle cx="1561" cy="232" r="5" fill="#e9d5ff"/>
-    <text x="1593" y="220" class="panelTitle">Git / GitHub</text>
-    <text x="1528" y="273" class="body">• Read PR identity + exact diff</text>
-    <text x="1528" y="307" class="body">• Clone pinned local worktree</text>
-    <text x="1528" y="341" class="body">• Publish review comments</text>
-    <text x="1528" y="375" class="body">• Push implementation branch</text>
-    <text x="1528" y="409" class="body">• Create deferred GitHub issue</text>
-    <text x="1528" y="455" class="small">Stable markers + exact repository/head fences</text>
-  </g>
-
-  <path d="M380 286H430" class="flowBlue"/>
-  <text x="390" y="272" class="tiny">intent / answers</text>
-  <path d="M1448 292H1500" class="flowPurple"/>
-  <path d="M1500 325H1448" class="flowPurple"/>
-  <text x="1448" y="347" class="tiny" text-anchor="end">frozen evidence / result</text>
-  <path d="M652 296H674M896 296H918M1166 296H1188" class="flowTeal"/>
-  <path d="M1318 337V360" class="flowTeal"/>
-
-  <!-- Configurable stage formats -->
-  <g id="stage-formats" filter="url(#shadow)">
-    <rect x="40" y="540" width="1840" height="220" rx="22" class="panel"/>
-    <text x="68" y="580" class="sectionTitle">Gate profile execution model</text>
-    <text x="68" y="610" class="small">Repository assignment selects a profile. Each decision point is an ordered ALL-OF workflow; a non-pass stops later stages.</text>
-    <path d="M1080 582h275" class="flow"/>
-    <text x="1090" y="568" class="tiny">profile revision + frozen subject</text>
-    <rect x="1365" y="558" width="174" height="34" rx="17" fill="#14532d"/><text x="1395" y="580" class="pill" fill="#bbf7d0">ALL PASS</text>
-    <path d="M1540 575h110" class="flowTeal"/>
-    <rect x="1660" y="558" width="170" height="34" rx="17" fill="#134e4a"/><text x="1684" y="580" class="pill" fill="#99f6e4">AUTHORIZED</text>
-
-    <g transform="translate(68 632)">
-      <rect width="320" height="94" rx="14" fill="#10251b" stroke="#4ade80"/>
-      <rect x="14" y="13" width="72" height="24" rx="12" fill="#14532d"/><text x="29" y="30" class="pill" fill="#bbf7d0">ZERO</text>
-      <text x="15" y="61" class="body" font-weight="700">Immediate explicit pass</text>
-      <text x="15" y="82" class="tiny">Default domain-verified transitions</text>
-    </g>
-    <g transform="translate(432 632)">
-      <rect width="320" height="94" rx="14" fill="#30280e" stroke="#facc15"/>
-      <rect x="14" y="13" width="126" height="24" rx="12" fill="#713f12"/><text x="27" y="30" class="pill" fill="#fef08a">DETERMINISTIC</text>
-      <text x="15" y="61" class="body" font-weight="700">Bounded expression</text>
-      <text x="15" y="82" class="tiny">Evaluates the frozen gate subject</text>
-    </g>
-    <g transform="translate(796 632)">
-      <rect width="320" height="94" rx="14" fill="#35142e" stroke="#f472b6"/>
-      <rect x="14" y="13" width="128" height="24" rx="12" fill="#831843"/><text x="25" y="30" class="pill" fill="#fbcfe8">AI · WORKING</text>
-      <text x="15" y="61" class="body" font-weight="700">Protected PR context</text>
-      <text x="15" y="82" class="tiny">Agent-owned, frozen session snapshot</text>
-    </g>
-    <g transform="translate(1160 632)">
-      <rect width="320" height="94" rx="14" fill="#28153e" stroke="#c084fc"/>
-      <rect x="14" y="13" width="128" height="24" rx="12" fill="#581c87"/><text x="25" y="30" class="pill" fill="#e9d5ff">AI · ISOLATED</text>
-      <text x="15" y="61" class="body" font-weight="700">Ephemeral no-tool check</text>
-      <text x="15" y="82" class="tiny">Independent bounded evidence only</text>
-    </g>
-    <g transform="translate(1524 632)">
-      <rect width="306" height="94" rx="14" fill="#142348" stroke="#60a5fa"/>
-      <rect x="14" y="13" width="78" height="24" rx="12" fill="#1e3a8a"/><text x="27" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="15" y="61" class="body" font-weight="700">Suspend for user</text>
-      <text x="15" y="82" class="tiny">Pass · revise · defer · block</text>
+  <g transform="translate(44 34)">
+    <rect x="0" y="0" width="9" height="67" rx="4.5" fill="#2dd4bf"/>
+    <text x="27" y="35" class="title">PR lifecycle gate map</text>
+    <text x="28" y="65" class="subtitle">Action flow, authority boundaries, and all 14 configurable decision points in the built-in Default profile</text>
+    <g transform="translate(1496 11)">
+      <rect width="292" height="42" rx="21" fill="#0e3240" stroke="#22d3ee"/>
+      <path d="M20 12h15v15H20zm6 15v6m-6-6h12" fill="none" stroke="#a5f3fc" stroke-width="1.7" stroke-linecap="round"/>
+      <text x="47" y="27" class="small" fill="#cffafe">Click or focus any gate to edit it</text>
     </g>
   </g>
 
-  <!-- Lifecycle frame -->
-  <g id="lifecycle">
-    <rect x="40" y="800" width="1840" height="1910" rx="24" class="panel" filter="url(#shadow)"/>
-    <text x="70" y="845" class="sectionTitle">Effective Default profile · every decision point</text>
-    <text x="70" y="875" class="small">Default cards show their current stage type. Any configurable card can be replaced with an ordered combination of the five formats above.</text>
-    <rect x="70" y="892" width="1780" height="38" rx="10" fill="#0b1324"/>
-    <text x="92" y="917" class="pill" fill="#94a3b8">PHASE</text>
-    <text x="348" y="917" class="pill" fill="#94a3b8">DOMAIN WORK / AGENT</text>
-    <text x="805" y="917" class="pill" fill="#94a3b8">GATE DECISION POINT</text>
-    <text x="1420" y="917" class="pill" fill="#94a3b8">RESULT / GIT EFFECT</text>
-
-    <!-- Intake -->
-    <rect x="62" y="948" width="1796" height="126" rx="18" fill="#0d1728" stroke="#24334c"/>
-    <rect x="82" y="968" width="210" height="86" rx="14" fill="#1e293b" stroke="#64748b"/>
-    <text x="104" y="1003" class="phaseTitle">1 · Intake</text>
-    <text x="104" y="1031" class="small">Verified authority</text>
-    <rect x="332" y="966" width="402" height="90" rx="14" class="inner"/>
-    <text x="352" y="996" class="body" font-weight="700">Resolve and freeze PR identity</text>
-    <text x="352" y="1024" class="small">provider · repo · PR · author · base · head</text>
-    <text x="352" y="1045" class="tiny">Workspace version + provider revision become CAS fences</text>
-    <rect x="790" y="966" width="500" height="90" rx="14" fill="#111827" stroke="#475569" stroke-dasharray="7 6"/>
-    <text x="810" y="998" class="body" font-weight="700">No configurable profile gate</text>
-    <text x="810" y="1026" class="small">Provider and ownership checks fail closed in domain logic</text>
-    <rect x="1430" y="966" width="390" height="90" rx="14" class="provider"/>
-    <text x="1450" y="998" class="body" font-weight="700">GitHub PR + exact diff</text>
-    <text x="1450" y="1026" class="small">Immutable head snapshot returned to PicoClaw</text>
-    <path d="M734 1011H790M1290 1011H1430" class="flowPurple"/>
-
-    <!-- Charter -->
-    <rect x="62" y="1088" width="1796" height="226" rx="18" fill="#10182b" stroke="#293952"/>
-    <rect x="82" y="1108" width="210" height="186" rx="14" fill="#172554" stroke="#60a5fa"/>
-    <text x="104" y="1143" class="phaseTitle">2 · Charter</text>
-    <text x="104" y="1172" class="small">PR type + scope</text>
-    <text x="104" y="1210" class="tiny">Goal</text><text x="104" y="1232" class="tiny">Acceptance criteria</text>
-    <text x="104" y="1254" class="tiny">Included / excluded</text><text x="104" y="1276" class="tiny">Non-goals</text>
-    <rect x="332" y="1120" width="402" height="160" rx="14" class="inner"/>
-    <text x="352" y="1153" class="body" font-weight="700">User + charter drafting agent</text>
-    <text x="352" y="1183" class="small">Fix · refactor · feature · documentation · test</text>
-    <text x="352" y="1212" class="small">One confirmed revision becomes the authority</text>
-    <text x="352" y="1241" class="small">boundary for review and implementation.</text>
-    <text x="352" y="1268" class="tiny">Revision invalidates stale findings, gates, and publications</text>
-
-    <g transform="translate(790 1115)">
-      <rect width="470" height="82" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="26" r="16" fill="#60a5fa"/><text x="23" y="31" class="number">1</text>
-      <text x="55" y="27" class="gateID">pr.charter.confirm</text>
-      <rect x="352" y="12" width="92" height="24" rx="12" fill="#1e3a8a"/><text x="369" y="29" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="57" class="body">Confirm PR charter</text>
+  <!-- Actors and runtime ownership -->
+  <g id="actors" transform="translate(44 126)" filter="url(#shadow)">
+    <rect width="1832" height="132" rx="19" class="section-panel"/>
+    <g transform="translate(18 17)">
+      <rect width="250" height="98" rx="15" fill="#14254a" stroke="#60a5fa"/>
+      <circle cx="35" cy="36" r="19" fill="#1e3a8a"/>
+      <circle cx="35" cy="30" r="6" fill="#bfdbfe"/>
+      <path d="M24 48c2-10 20-10 22 0" fill="none" stroke="#bfdbfe" stroke-width="3.5" stroke-linecap="round"/>
+      <text x="67" y="34" class="actor-title">User / PR owner</text>
+      <text x="20" y="70" class="actor-copy">charter · corrections · scope choices</text>
+      <text x="20" y="89" class="actor-copy">provider-effect authorization</text>
     </g>
-    <g transform="translate(790 1210)">
-      <rect width="470" height="82" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="26" r="16" fill="#60a5fa"/><text x="23" y="31" class="number">2</text>
-      <text x="55" y="27" class="gateID">pr.charter.reconfirm</text>
-      <rect x="352" y="12" width="92" height="24" rx="12" fill="#1e3a8a"/><text x="369" y="29" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="57" class="body">Confirm revised PR charter</text>
+    <path d="M276 66H316" class="route-human"/>
+    <g transform="translate(316 17)">
+      <rect width="1136" height="98" rx="15" fill="url(#picoBand)" stroke="#2dd4bf"/>
+      <text x="20" y="31" class="actor-title">PicoClaw · one PR workspace and gate ledger</text>
+      <text x="20" y="54" class="actor-copy">One charter, frozen evidence, shared corrections, profile revision, subject digest, and publication audit trail</text>
+      <g transform="translate(20 66)">
+        <rect width="164" height="23" rx="11.5" fill="#134e4a"/><text x="18" y="16" class="pill" fill="#ccfbf1">REVIEW AGENT</text>
+        <rect x="174" width="194" height="23" rx="11.5" fill="#134e4a"/><text x="192" y="16" class="pill" fill="#ccfbf1">IMPLEMENTATION AGENT</text>
+        <rect x="378" width="163" height="23" rx="11.5" fill="#134e4a"/><text x="396" y="16" class="pill" fill="#ccfbf1">SCOPE AUDITOR</text>
+        <rect x="551" width="179" height="23" rx="11.5" fill="#134e4a"/><text x="569" y="16" class="pill" fill="#ccfbf1">COMPLETION AGENT</text>
+        <rect x="740" width="148" height="23" rx="11.5" fill="#134e4a"/><text x="758" y="16" class="pill" fill="#ccfbf1">GATE AI AGENT</text>
+        <rect x="898" width="194" height="23" rx="11.5" fill="#15334c"/><text x="916" y="16" class="pill" fill="#bae6fd">WORKFLOW EXECUTOR</text>
+      </g>
     </g>
-    <rect x="1320" y="1148" width="500" height="112" rx="14" fill="#10251b" stroke="#4ade80"/>
-    <text x="1342" y="1182" class="body" font-weight="700">Confirmed charter authority</text>
-    <text x="1342" y="1211" class="small">Pass → Review</text>
-    <text x="1342" y="1238" class="small">Revise → edit and explicitly reconfirm</text>
-    <path d="M734 1160H790M1260 1157H1320" class="flowBlue"/>
-    <path d="M1320 1238C1275 1288 1250 1288 1215 1292" class="feedback"/>
-
-    <!-- Review -->
-    <rect x="62" y="1328" width="1796" height="358" rx="18" fill="#0d1f27" stroke="#23514f"/>
-    <rect x="82" y="1348" width="210" height="318" rx="14" fill="#134e4a" stroke="#2dd4bf"/>
-    <text x="104" y="1383" class="phaseTitle">3 · Review</text>
-    <text x="104" y="1412" class="small">Exact frozen diff</text>
-    <text x="104" y="1452" class="tiny">Finding evidence</text><text x="104" y="1474" class="tiny">Severity</text>
-    <text x="104" y="1496" class="tiny">S0–S3 distance</text><text x="104" y="1518" class="tiny">XS–L size</text>
-    <text x="104" y="1540" class="tiny">Type compatibility</text><text x="104" y="1562" class="tiny">Coverage / residual risk</text>
-    <text x="104" y="1610" class="small">Nudges continue even</text><text x="104" y="1632" class="small">after “no issues.”</text>
-
-    <g transform="translate(332 1362)">
-      <rect width="402" height="84" rx="14" class="gate zeroStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#4ade80"/><text x="23" y="32" class="number">3</text>
-      <text x="55" y="28" class="gateID">pr.review.start</text>
-      <rect x="300" y="13" width="75" height="24" rx="12" fill="#14532d"/><text x="316" y="30" class="pill" fill="#bbf7d0">ZERO</text>
-      <text x="20" y="60" class="body">Domain-verified start</text>
+    <path d="M1452 66H1492" class="route-git"/>
+    <g transform="translate(1492 17)">
+      <rect width="322" height="98" rx="15" fill="#2a173d" stroke="#c084fc"/>
+      <circle cx="34" cy="34" r="18" fill="#581c87"/>
+      <path d="M27 23v23m0-16h14v16m-14-6h14" fill="none" stroke="#e9d5ff" stroke-width="2.6" stroke-linecap="round"/>
+      <text x="65" y="34" class="actor-title">Git / GitHub</text>
+      <text x="18" y="69" class="actor-copy">exact diff + pinned worktree</text>
+      <text x="18" y="88" class="actor-copy">review · branch · deferred issue</text>
     </g>
-    <rect x="780" y="1362" width="410" height="116" rx="14" class="agent"/>
-    <text x="802" y="1394" class="body" font-weight="700">Review agent</text>
-    <text x="802" y="1422" class="small">Checks every changed hunk against charter</text>
-    <text x="802" y="1450" class="small">Emits traceable findings + coverage</text>
-    <rect x="1236" y="1362" width="584" height="116" rx="14" fill="#30280e" stroke="#fbbf24"/>
-    <text x="1258" y="1394" class="body" font-weight="700">Adaptive “find more” loop</text>
-    <text x="1258" y="1422" class="small">Default: 2–5 additional rounds · varied wording</text>
-    <text x="1258" y="1450" class="small">Tracks novel/duplicate findings and later reward</text>
-    <path d="M734 1404H780M1190 1420H1236" class="flowTeal"/>
-    <path d="M1530 1478C1530 1510 1130 1508 1130 1478" class="feedback"/>
-
-    <g transform="translate(332 1510)">
-      <rect width="402" height="84" rx="14" class="gate zeroStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#4ade80"/><text x="23" y="32" class="number">4</text>
-      <text x="55" y="28" class="gateID">pr.review.complete</text>
-      <rect x="300" y="13" width="75" height="24" rx="12" fill="#14532d"/><text x="316" y="30" class="pill" fill="#bbf7d0">ZERO</text>
-      <text x="20" y="60" class="body">Domain-verified completion</text>
-    </g>
-    <g transform="translate(780 1510)">
-      <rect width="410" height="128" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#60a5fa"/><text x="23" y="32" class="number">5</text>
-      <text x="55" y="28" class="gateID">pr.finding.classify</text>
-      <rect x="292" y="13" width="92" height="24" rx="12" fill="#1e3a8a"/><text x="309" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="62" class="body">Ambiguous finding scope</text>
-      <rect x="20" y="82" width="112" height="23" rx="11" fill="#312e81"/><text x="31" y="98" class="pill" fill="#c7d2fe">CLASSIFY</text>
-      <text x="144" y="99" class="tiny">in scope / defer / revise / dismiss</text>
-    </g>
-    <rect x="1236" y="1510" width="584" height="128" rx="14" class="inner"/>
-    <text x="1258" y="1543" class="body" font-weight="700">Findings enter triage</text>
-    <text x="1258" y="1572" class="small">S0 exact · S1 necessary adjacent</text>
-    <text x="1258" y="1599" class="small">S2 related follow-up · S3 unrelated</text>
-    <text x="1258" y="1625" class="tiny">Type incompatibility independently blocks implementation</text>
-    <path d="M533 1446V1510M734 1552H780M1190 1574H1236" class="flow"/>
-
-    <!-- Triage and knowledge -->
-    <rect x="62" y="1700" width="1796" height="196" rx="18" fill="#171626" stroke="#4c3c68"/>
-    <rect x="82" y="1720" width="210" height="156" rx="14" fill="#312e81" stroke="#818cf8"/>
-    <text x="104" y="1755" class="phaseTitle">4 · Triage</text>
-    <text x="104" y="1784" class="small">Shared corrections</text>
-    <text x="104" y="1812" class="tiny">Review / implementation / both</text>
-    <text x="104" y="1834" class="tiny">Defer · dismiss · keep in scope</text>
-    <text x="104" y="1856" class="tiny">Group bounded follow-up work</text>
-    <rect x="332" y="1734" width="402" height="126" rx="14" class="inner"/>
-    <text x="352" y="1767" class="body" font-weight="700">One canonical facts bundle</text>
-    <text x="352" y="1796" class="small">Messages + corrections feed review and repair</text>
-    <text x="352" y="1824" class="small">Charter/head fenced; stale facts stay historical</text>
-    <text x="352" y="1850" class="tiny">A correction grants no Git or gate authority</text>
-    <rect x="780" y="1734" width="410" height="126" rx="14" fill="#221b32" stroke="#a78bfa"/>
-    <text x="802" y="1767" class="body" font-weight="700">Deferred work queue</text>
-    <text x="802" y="1796" class="small">Edit · split · merge · link existing issue</text>
-    <text x="802" y="1824" class="small">Locks after external publication/link</text>
-    <text x="802" y="1850" class="tiny">S2/S3 work is not silently implemented</text>
-    <g transform="translate(1236 1734)">
-      <rect width="584" height="126" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#60a5fa"/><text x="19" y="32" class="number">13</text>
-      <text x="55" y="28" class="gateID">pr.correction.promote</text>
-      <rect x="466" y="13" width="92" height="24" rx="12" fill="#1e3a8a"/><text x="483" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="62" class="body">Promote repository lesson</text>
-      <text x="20" y="91" class="small">Creates scoped reusable knowledge; never rewrites history</text>
-      <text x="20" y="113" class="tiny">AUTHORIZATION</text>
-    </g>
-    <path d="M734 1797H780" class="flowBlue"/>
-    <path d="M734 1831V1878H1208Q1236 1878 1236 1850" class="flowBlue"/>
-
-    <!-- Implementation -->
-    <rect x="62" y="1910" width="1796" height="438" rx="18" fill="#0c2225" stroke="#23665f"/>
-    <rect x="82" y="1930" width="210" height="398" rx="14" fill="#115e59" stroke="#2dd4bf"/>
-    <text x="104" y="1965" class="phaseTitle">5–7 · Build</text>
-    <text x="104" y="1994" class="small">Implementation</text>
-    <text x="104" y="2016" class="small">Validation</text>
-    <text x="104" y="2038" class="small">Completion audit</text>
-    <text x="104" y="2080" class="tiny">Pinned local Git worktree</text>
-    <text x="104" y="2102" class="tiny">Exact candidate SHA/tree</text>
-    <text x="104" y="2124" class="tiny">Local CI evidence</text>
-    <text x="104" y="2166" class="tiny">Completion asks:</text>
-    <text x="104" y="2188" class="tiny">• Is scoped work done?</text>
-    <text x="104" y="2210" class="tiny">• Is anything out of scope?</text>
-    <text x="104" y="2256" class="small">Branch push is still</text>
-    <text x="104" y="2278" class="small">separately gated.</text>
-
-    <g transform="translate(332 1944)">
-      <rect width="402" height="104" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#60a5fa"/><text x="23" y="32" class="number">6</text>
-      <text x="55" y="28" class="gateID gateIDLong">pr.implementation.eligibility</text>
-      <rect x="300" y="13" width="75" height="24" rx="12" fill="#1e3a8a"/><text x="316" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="62" class="body">Authorize non-owned PR</text>
-      <text x="20" y="87" class="tiny">Conditional ownership boundary</text>
-    </g>
-    <g transform="translate(780 1944)">
-      <rect width="410" height="104" rx="14" class="gate zeroStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#4ade80"/><text x="23" y="32" class="number">7</text>
-      <text x="55" y="28" class="gateID">pr.implementation.start</text>
-      <rect x="308" y="13" width="75" height="24" rx="12" fill="#14532d"/><text x="324" y="30" class="pill" fill="#bbf7d0">ZERO</text>
-      <text x="20" y="62" class="body">Domain-verified start</text>
-      <text x="20" y="87" class="tiny">Requires confirmed in-scope findings</text>
-    </g>
-    <rect x="1236" y="1944" width="584" height="104" rx="14" class="agent"/>
-    <text x="1258" y="1978" class="body" font-weight="700">Implementation / repair agent</text>
-    <text x="1258" y="2006" class="small">Edits only the pinned candidate for authorized findings</text>
-    <text x="1258" y="2033" class="tiny">Prompt digest binds edit authority and shared corrections</text>
-    <path d="M734 1996H780M1190 1996H1236" class="flowTeal"/>
-
-    <rect x="332" y="2070" width="402" height="116" rx="14" class="agent"/>
-    <text x="352" y="2104" class="body" font-weight="700">Isolated scope auditor</text>
-    <text x="352" y="2132" class="small">Maps every real candidate hunk to scope + size</text>
-    <text x="352" y="2160" class="tiny">Exact path · @@ header · semantic-line evidence</text>
-    <g transform="translate(780 2070)">
-      <rect width="410" height="116" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#60a5fa"/><text x="23" y="32" class="number">8</text>
-      <text x="55" y="28" class="gateID">pr.implementation.scope</text>
-      <rect x="308" y="13" width="75" height="24" rx="12" fill="#1e3a8a"/><text x="324" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="62" class="body">Large exact / S1 decision</text>
-      <text x="20" y="90" class="tiny">Configurable classification for otherwise allowable work</text>
-    </g>
-    <rect x="1236" y="2070" width="584" height="116" rx="14" class="hard"/>
-    <text x="1258" y="2102" class="body" font-weight="800" fill="#fecdd3">BUILT-IN HARD-SCOPE GATE · BYPASSES PROFILE</text>
-    <text x="1258" y="2131" class="small" fill="#fda4af">Candidate-present S2 / S3 / type-incompatible code</text>
-    <text x="1258" y="2158" class="tiny" fill="#fecdd3">Remove + defer · revise charter · block — PASS is impossible</text>
-    <path d="M734 2118H780" class="flowBlue"/>
-    <path d="M734 2160C810 2200 1160 2200 1236 2160" class="flowRed"/>
-
-    <rect x="332" y="2208" width="402" height="110" rx="14" class="inner"/>
-    <text x="352" y="2242" class="body" font-weight="700">Local validation</text>
-    <text x="352" y="2270" class="small">Checks bind to exact candidate SHA</text>
-    <text x="352" y="2296" class="tiny">Green evidence cannot excuse scope drift</text>
-    <rect x="780" y="2208" width="410" height="110" rx="14" class="agent"/>
-    <text x="802" y="2242" class="body" font-weight="700">Completion agent + nudges</text>
-    <text x="802" y="2270" class="small">Searches for missing and extra work</text>
-    <text x="802" y="2296" class="tiny">Default: 2–5 additional completion rounds</text>
-    <g transform="translate(1236 2208)">
-      <rect width="584" height="110" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#60a5fa"/><text x="23" y="32" class="number">9</text>
-      <text x="55" y="28" class="gateID">pr.implementation.complete</text>
-      <rect x="466" y="13" width="92" height="24" rx="12" fill="#1e3a8a"/><text x="483" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="62" class="body">Accept completed implementation</text>
-      <text x="20" y="89" class="tiny">Fresh candidate + scope + validation are rechecked</text>
-    </g>
-    <path d="M533 2186V2208M734 2263H780M1190 2263H1236" class="flowTeal"/>
-
-    <!-- Publication and recovery -->
-    <rect x="62" y="2362" width="1796" height="326" rx="18" fill="#20152d" stroke="#6b3d84"/>
-    <rect x="82" y="2382" width="210" height="286" rx="14" fill="#581c87" stroke="#c084fc"/>
-    <text x="104" y="2417" class="phaseTitle">8 · Publish</text>
-    <text x="104" y="2446" class="small">Three independent</text>
-    <text x="104" y="2468" class="small">provider effects</text>
-    <text x="104" y="2512" class="tiny">Review ≠ branch push</text>
-    <text x="104" y="2534" class="tiny">Branch push ≠ merge</text>
-    <text x="104" y="2556" class="tiny">Issue ≠ PR expansion</text>
-    <text x="104" y="2602" class="small">Unknown outcome</text>
-    <text x="104" y="2624" class="small">never means failed.</text>
-
-    <g transform="translate(332 2394)">
-      <rect width="430" height="78" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="25" r="16" fill="#60a5fa"/><text x="19" y="30" class="number">10</text>
-      <text x="55" y="26" class="gateID">pr.review.publish</text>
-      <rect x="321" y="11" width="84" height="23" rx="11" fill="#1e3a8a"/><text x="336" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="56" class="body">Publish GitHub review</text>
-    </g>
-    <g transform="translate(332 2486)">
-      <rect width="430" height="78" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="25" r="16" fill="#60a5fa"/><text x="19" y="30" class="number">11</text>
-      <text x="55" y="26" class="gateID">pr.implementation.publish</text>
-      <rect x="321" y="11" width="84" height="23" rx="11" fill="#1e3a8a"/><text x="336" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="56" class="body">Push implementation branch</text>
-    </g>
-    <g transform="translate(332 2578)">
-      <rect width="430" height="78" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="25" r="16" fill="#60a5fa"/><text x="19" y="30" class="number">12</text>
-      <text x="55" y="26" class="gateID">pr.deferred.publish</text>
-      <rect x="321" y="11" width="84" height="23" rx="11" fill="#1e3a8a"/><text x="336" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="56" class="body">Create GitHub follow-up issue</text>
-    </g>
-
-    <g transform="translate(820 2438)">
-      <rect width="530" height="164" rx="14" class="gate humanStroke"/>
-      <circle cx="28" cy="27" r="16" fill="#60a5fa"/><text x="19" y="32" class="number">14</text>
-      <text x="55" y="28" class="gateID">pr.publication.reconcile</text>
-      <rect x="416" y="13" width="88" height="24" rx="12" fill="#1e3a8a"/><text x="431" y="30" class="pill" fill="#bfdbfe">HUMAN</text>
-      <text x="20" y="64" class="body">Resolve ambiguous provider outcome</text>
-      <rect x="20" y="83" width="220" height="30" rx="15" fill="#164e63"/><text x="39" y="103" class="pill" fill="#a5f3fc">CHECK PROVIDER AGAIN</text>
-      <rect x="252" y="83" width="174" height="30" rx="15" fill="#7f1d1d"/><text x="272" y="103" class="pill" fill="#fecaca">ASSUME FAILED</text>
-      <text x="20" y="140" class="tiny">Read-only marker / exact remote-head check; revise and defer are invalid</text>
-    </g>
-
-    <rect x="1430" y="2394" width="390" height="78" rx="14" class="provider"/>
-    <text x="1450" y="2426" class="body" font-weight="700">GitHub review</text>
-    <text x="1450" y="2452" class="small">Pending → comments → submitted marker</text>
-    <rect x="1430" y="2486" width="390" height="78" rx="14" class="provider"/>
-    <text x="1450" y="2518" class="body" font-weight="700">Git branch push</text>
-    <text x="1450" y="2544" class="small">Exact candidate; workspace mutation fence</text>
-    <rect x="1430" y="2578" width="390" height="78" rx="14" class="provider"/>
-    <text x="1450" y="2610" class="body" font-weight="700">GitHub follow-up issue</text>
-    <text x="1450" y="2636" class="small">Stable marker prevents duplicate creation</text>
-    <path d="M762 2433H1430M762 2525H820M1350 2525H1430M762 2617H1430" class="flowPurple"/>
-    <path d="M1430 2460C1388 2460 1392 2480 1350 2480M1430 2552C1390 2552 1390 2560 1350 2560M1430 2632C1380 2632 1380 2595 1350 2595" class="feedback"/>
   </g>
 
-  <!-- Footer legend / invariants -->
-  <g transform="translate(40 2732)">
-    <rect width="1840" height="58" rx="16" fill="#0b1324" stroke="#334155"/>
-    <circle cx="28" cy="29" r="6" fill="#60a5fa"/><text x="43" y="35" class="small">user decision</text>
-    <circle cx="180" cy="29" r="6" fill="#2dd4bf"/><text x="195" y="35" class="small">PicoClaw / agent work</text>
-    <circle cx="405" cy="29" r="6" fill="#c084fc"/><text x="420" y="35" class="small">Git / GitHub effect</text>
-    <circle cx="610" cy="29" r="6" fill="#fb7185"/><text x="625" y="35" class="small">non-bypassable hard scope</text>
-    <text x="930" y="35" class="small">Every gate pins profile revision + subject digest + evidence; provider effects remain independently authorized.</text>
+  <!-- Gate-first lifecycle board. Connectors are rendered before cards so every gate remains the interaction target. -->
+  <g id="lifecycle" transform="translate(44 286)">
+    <rect width="1832" height="918" rx="21" class="section-panel" filter="url(#shadow)"/>
+
+    <rect x="14" y="14" width="300" height="890" rx="17" class="phase-panel"/>
+    <rect x="330" y="14" width="360" height="890" rx="17" class="phase-panel"/>
+    <rect x="706" y="14" width="465" height="890" rx="17" class="phase-panel"/>
+    <rect x="1187" y="14" width="631" height="890" rx="17" class="phase-panel"/>
+
+    <g aria-hidden="true">
+      <text x="36" y="47" class="phase-title">1 · Charter authority</text>
+      <text x="36" y="68" class="phase-subtitle">PR TYPE + INCLUDED / EXCLUDED SCOPE</text>
+      <line x1="32" y1="82" x2="296" y2="82" stroke="#33475f"/>
+
+      <text x="352" y="47" class="phase-title">2 · Review and triage</text>
+      <text x="352" y="68" class="phase-subtitle">EXACT DIFF · FINDINGS · ADAPTIVE NUDGES</text>
+      <line x1="348" y1="82" x2="672" y2="82" stroke="#33475f"/>
+
+      <text x="728" y="47" class="phase-title">3 · Scoped implementation</text>
+      <text x="728" y="68" class="phase-subtitle">PINNED WORKTREE · AUDIT · VALIDATE · COMPLETE</text>
+      <line x1="724" y1="82" x2="1153" y2="82" stroke="#33475f"/>
+
+      <text x="1209" y="47" class="phase-title">4 · Independent effects and learning</text>
+      <text x="1209" y="68" class="phase-subtitle">REVIEW ≠ BRANCH ≠ ISSUE · RECOVERY IS SEPARATE</text>
+      <line x1="1205" y1="82" x2="1800" y2="82" stroke="#33475f"/>
+    </g>
+
+    <!-- Charter routes: confirm and reconfirm are alternatives, not a sequence. -->
+    <rect x="36" y="106" width="256" height="48" rx="12" class="action"/>
+    <text x="164" y="127" text-anchor="middle" class="action-title">Draft or revise charter</text>
+    <text x="164" y="145" text-anchor="middle" class="action-copy">user + charter agent</text>
+    <path d="M113 154V180" class="route-human"/>
+    <path d="M230 154C302 190 302 282 230 306" class="route-conditional"/>
+    <text x="78" y="171" class="flow-label">initial</text>
+    <text x="253" y="230" class="flow-label">authority changed</text>
+    <path d="M164 272V286H304V414H220V432" class="route-human"/>
+    <path d="M164 398V432" class="route-human"/>
+    <rect x="36" y="432" width="256" height="54" rx="12" fill="#10291f" stroke="#4ade80"/>
+    <text x="164" y="455" text-anchor="middle" class="action-title">Confirmed charter revision</text>
+    <text x="164" y="475" text-anchor="middle" class="action-copy">authority for review + implementation</text>
+    <path d="M292 459H330V118" class="route-pico"/>
+    <path d="M72 306C20 286 20 150 72 130" class="route-feedback"/>
+    <text x="42" y="285" class="flow-label">revise</text>
+    <g transform="translate(36 526)">
+      <rect width="256" height="129" rx="13" fill="#0b1a2c" stroke="#2e4057"/>
+      <text x="16" y="28" class="action-title">Charter limits every later action</text>
+      <text x="16" y="53" class="action-copy">type: fix · refactor · feature</text>
+      <text x="16" y="74" class="action-copy">documentation · test</text>
+      <text x="16" y="99" class="action-copy">scope: goal · criteria · included</text>
+      <text x="16" y="120" class="action-copy">excluded · non-goals</text>
+    </g>
+
+    <!-- Review routes and adaptive nudge loop. -->
+    <path d="M510 188V210" class="route-pico"/>
+    <rect x="352" y="210" width="316" height="61" rx="12" class="pico-action"/>
+    <text x="370" y="235" class="action-title">Review agent scans every changed hunk</text>
+    <text x="370" y="256" class="action-copy">evidence · severity · coverage · scope distance</text>
+    <path d="M510 271V298" class="route-pico"/>
+    <rect x="352" y="298" width="316" height="46" rx="12" fill="#30280e" stroke="#fbbf24"/>
+    <text x="370" y="318" class="action-title" fill="#fef3c7">Adaptive “find more / find all” nudge</text>
+    <text x="370" y="336" class="action-copy">2–5 extra rounds · variants track novel yield</text>
+    <path d="M650 321C688 321 688 235 650 235" class="route-feedback"/>
+    <path d="M510 344V370" class="route-pico"/>
+    <path d="M510 462V488" class="route"/>
+    <rect x="352" y="488" width="316" height="42" rx="11" class="action"/>
+    <text x="510" y="514" text-anchor="middle" class="action-title">Only findings with ambiguous scope</text>
+    <path d="M510 530V552" class="route-conditional"/>
+    <path d="M668 416H692V141H706" class="route-pico"/>
+    <text x="672" y="406" class="flow-label">review can continue</text>
+    <path d="M668 416H690V90H1190V144H1209" class="route-git"/>
+    <text x="805" y="85" class="flow-label">review findings ready → independently offer review publication</text>
+    <path d="M668 602H690V170H706" class="route-conditional"/>
+    <text x="610" y="630" class="flow-label">in scope</text>
+    <path d="M668 622H696V704H1178V420H1209" class="route-conditional"/>
+    <text x="716" y="696" class="flow-label">defer S2/S3 follow-up; never silently implement</text>
+
+    <!-- Implementation routes. Non-owner eligibility is conditional; owner path bypasses it. -->
+    <path d="M706 141H728" class="route-conditional"/>
+    <text x="731" y="105" class="flow-label">non-owner</text>
+    <path d="M706 170H716V226H728" class="route-pico"/>
+    <text x="731" y="215" class="flow-label">owner</text>
+    <path d="M938 188V226" class="route-human"/>
+    <path d="M938 314V336" class="route-pico"/>
+    <rect x="728" y="336" width="421" height="57" rx="12" class="pico-action"/>
+    <text x="746" y="360" class="action-title">Implementation agent repairs authorized findings</text>
+    <text x="746" y="382" class="action-copy">pinned candidate · shared corrections · edit authority digest</text>
+    <path d="M938 393V418" class="route-pico"/>
+    <rect x="728" y="418" width="196" height="58" rx="12" class="pico-action"/>
+    <text x="746" y="442" class="action-title">Isolated scope audit</text>
+    <text x="746" y="464" class="action-copy">maps every real candidate hunk</text>
+    <path d="M924 447H946" class="route-human"/>
+    <path d="M826 476V526" class="route-warn"/>
+    <text x="835" y="503" class="flow-label">S2 / S3 / incompatible</text>
+    <path d="M728 457H704V676H728" class="route-conditional"/>
+    <text x="709" y="640" class="flow-label">small S0</text>
+    <path d="M1149 467H1162V638H826V648" class="route-human"/>
+    <text x="1017" y="633" class="flow-label">accepted large S0 / S1</text>
+    <path d="M728 576H712V365H728" class="route-warn"/>
+    <text x="719" y="559" class="flow-label">remove / revise</text>
+    <path d="M1149 576H1178V420H1209" class="route-conditional"/>
+    <text x="1158" y="558" class="flow-label">remove + defer</text>
+    <rect x="728" y="648" width="196" height="55" rx="12" class="action"/>
+    <text x="746" y="672" class="action-title">Local validation</text>
+    <text x="746" y="693" class="action-copy">checks bind exact candidate SHA</text>
+    <rect x="946" y="648" width="203" height="55" rx="12" fill="#30280e" stroke="#fbbf24"/>
+    <text x="962" y="671" class="action-title" fill="#fef3c7">Completion agent + nudges</text>
+    <text x="962" y="692" class="action-copy">missing work? extra work? fully done?</text>
+    <path d="M1132 674C1162 674 1162 613 1129 613" class="route-feedback"/>
+    <path d="M826 703V727H938" class="route-pico"/>
+    <path d="M1048 703V727" class="route-pico"/>
+    <path d="M938 819V842H706V365H728" class="route-feedback"/>
+    <text x="745" y="836" class="flow-label">revise or missing work → repair, re-audit, revalidate</text>
+    <path d="M1149 772H1178V282H1209" class="route-git"/>
+    <text x="1138" y="758" class="flow-label">accepted candidate</text>
+
+    <!-- Publication paths. These are independent requests, never an implied sequence. -->
+    <path d="M1547 188H1582" class="route-git"/>
+    <path d="M1547 326H1582" class="route-git"/>
+    <path d="M1547 464H1582" class="route-git"/>
+    <path d="M1687 219V500" class="route-conditional"/>
+    <path d="M1687 357V500" class="route-conditional"/>
+    <path d="M1687 495V500" class="route-conditional"/>
+    <text x="1792" y="487" text-anchor="end" class="flow-label">only if provider outcome is unknown</text>
+    <rect x="1209" y="632" width="285" height="53" rx="12" fill="#10293a" stroke="#22d3ee"/>
+    <text x="1226" y="655" class="action-title">PASS · check provider again</text>
+    <text x="1226" y="675" class="action-copy">bounded marker / remote-head observation</text>
+    <rect x="1514" y="632" width="282" height="53" rx="12" fill="#32131e" stroke="#fb7185"/>
+    <text x="1531" y="655" class="action-title">BLOCK · assume failed</text>
+    <text x="1531" y="675" class="action-copy">unlock for a new deliberate request</text>
+    <path d="M1504 612V622H1351V632" class="route-pico"/>
+    <path d="M1504 612V622H1655V632" class="route-warn"/>
+
+    <!-- Corrections feed both agents directly; promotion is a separate optional authorization. -->
+    <rect x="1209" y="725" width="285" height="62" rx="12" class="action"/>
+    <text x="1226" y="750" class="action-title">Shared correction + guidance bundle</text>
+    <text x="1226" y="772" class="action-copy">target review · implementation · or both</text>
+    <path d="M1494 756H1514" class="route-human"/>
+    <rect x="1514" y="856" width="282" height="43" rx="11" fill="#15283a" stroke="#38bdf8"/>
+    <text x="1655" y="882" text-anchor="middle" class="action-title">Scoped reusable repository lesson</text>
+    <path d="M1655 839V856" class="route-pico"/>
+    <path d="M1209 756H1178V875H510V271" class="route-feedback"/>
+    <path d="M1209 773H1166V858H938V393" class="route-feedback"/>
+    <text x="1018" y="872" class="flow-label">corrections feed prompts without granting Git or gate authority</text>
+
+    <!-- Configurable gate cards -->
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.confirm" target="_top" aria-label="Edit gate 1, Confirm PR charter" data-gate-id="pr.charter.confirm" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.confirm">
+      <title>Open pr.charter.confirm in the gate profile editor</title>
+      <g transform="translate(36 180)">
+        <rect class="gate-card" width="256" height="92" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">1</text>
+        <rect x="181" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="193" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="55" class="gate-id">pr.charter.confirm</text>
+        <text x="17" y="77" class="gate-copy">Confirm PR charter</text>
+        <rect class="edit-pill" x="214" y="66" width="28" height="16" rx="8" fill="#164e63"/><text x="220" y="78" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit gate 2, Confirm revised PR charter" data-gate-id="pr.charter.reconfirm" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.charter.reconfirm">
+      <title>Open pr.charter.reconfirm in the gate profile editor</title>
+      <g transform="translate(36 306)">
+        <rect class="gate-card" width="256" height="92" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">2</text>
+        <rect x="181" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="193" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="55" class="gate-id">pr.charter.reconfirm</text>
+        <text x="17" y="77" class="gate-copy">Confirm revised charter</text>
+        <rect class="edit-pill" x="214" y="66" width="28" height="16" rx="8" fill="#164e63"/><text x="220" y="78" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.start" target="_top" aria-label="Edit gate 3, Start review" data-gate-id="pr.review.start" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.start">
+      <title>Open pr.review.start in the gate profile editor</title>
+      <g transform="translate(352 100)">
+        <rect class="gate-card" width="316" height="88" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#4ade80"/><text x="24" y="29" class="gate-number">3</text>
+        <rect x="249" y="12" width="51" height="22" rx="11" fill="#14532d"/><text x="260" y="27" class="pill" fill="#bbf7d0">ZERO</text>
+        <text x="17" y="54" class="gate-id">pr.review.start</text>
+        <text x="17" y="76" class="gate-copy">Domain-verified review start</text>
+        <rect class="edit-pill" x="272" y="64" width="28" height="16" rx="8" fill="#164e63"/><text x="278" y="76" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.complete" target="_top" aria-label="Edit gate 4, Complete review" data-gate-id="pr.review.complete" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.complete">
+      <title>Open pr.review.complete in the gate profile editor</title>
+      <g transform="translate(352 370)">
+        <rect class="gate-card" width="316" height="92" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#4ade80"/><text x="24" y="29" class="gate-number">4</text>
+        <rect x="249" y="12" width="51" height="22" rx="11" fill="#14532d"/><text x="260" y="27" class="pill" fill="#bbf7d0">ZERO</text>
+        <text x="17" y="55" class="gate-id">pr.review.complete</text>
+        <text x="17" y="77" class="gate-copy">Domain-verified review completion</text>
+        <rect class="edit-pill" x="272" y="65" width="28" height="16" rx="8" fill="#164e63"/><text x="278" y="77" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.finding.classify" target="_top" aria-label="Edit gate 5, Classify ambiguous finding" data-gate-id="pr.finding.classify" data-purpose="classification" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.finding.classify">
+      <title>Open pr.finding.classify in the gate profile editor</title>
+      <g transform="translate(352 552)">
+        <rect class="gate-card" width="316" height="100" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">5</text>
+        <rect x="239" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="251" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="55" class="gate-id">pr.finding.classify</text>
+        <text x="17" y="77" class="gate-copy">Classify ambiguous finding scope</text>
+        <text x="17" y="93" class="tiny">in scope · defer · revise · dismiss</text>
+        <rect class="edit-pill" x="272" y="77" width="28" height="16" rx="8" fill="#164e63"/><text x="278" y="89" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.eligibility" target="_top" aria-label="Edit gate 6, Authorize non-owned PR implementation" data-gate-id="pr.implementation.eligibility" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.eligibility">
+      <title>Open pr.implementation.eligibility in the gate profile editor</title>
+      <g transform="translate(728 100)">
+        <rect class="gate-card" width="421" height="88" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">6</text>
+        <rect x="344" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="356" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="54" class="gate-id gate-id-small">pr.implementation.eligibility</text>
+        <text x="17" y="76" class="gate-copy">Conditional: authorize implementation on a non-owned PR</text>
+        <rect class="edit-pill" x="377" y="64" width="28" height="16" rx="8" fill="#164e63"/><text x="383" y="76" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link zero" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.start" target="_top" aria-label="Edit gate 7, Start implementation" data-gate-id="pr.implementation.start" data-purpose="authorization" data-default-stage="zero" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.start">
+      <title>Open pr.implementation.start in the gate profile editor</title>
+      <g transform="translate(728 226)">
+        <rect class="gate-card" width="421" height="88" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#4ade80"/><text x="24" y="29" class="gate-number">7</text>
+        <rect x="354" y="12" width="51" height="22" rx="11" fill="#14532d"/><text x="365" y="27" class="pill" fill="#bbf7d0">ZERO</text>
+        <text x="17" y="54" class="gate-id">pr.implementation.start</text>
+        <text x="17" y="76" class="gate-copy">Domain-verified implementation start</text>
+        <rect class="edit-pill" x="377" y="64" width="28" height="16" rx="8" fill="#164e63"/><text x="383" y="76" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.scope" target="_top" aria-label="Edit gate 8, Decide large exact or necessary-adjacent implementation" data-gate-id="pr.implementation.scope" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.scope">
+      <title>Open pr.implementation.scope in the gate profile editor</title>
+      <g transform="translate(946 418)">
+        <rect class="gate-card" width="203" height="98" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">8</text>
+        <rect x="126" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="138" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="14" y="54" class="gate-id gate-id-small">pr.implementation.scope</text>
+        <text x="14" y="76" class="gate-copy">Decide large S0 / S1 work</text>
+        <text x="14" y="92" class="tiny">otherwise allowable only</text>
+        <rect class="edit-pill" x="159" y="76" width="28" height="16" rx="8" fill="#164e63"/><text x="165" y="88" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <g transform="translate(728 526)" aria-label="Non-configurable hard-scope invariant">
+      <rect class="hard-scope" width="421" height="100" rx="14"/>
+      <rect x="14" y="12" width="194" height="22" rx="11" fill="#7f1d1d"/><text x="27" y="27" class="pill" fill="#fecdd3">HARD INVARIANT · NOT GATE 15</text>
+      <text x="14" y="58" class="action-title" fill="#fecdd3">Candidate contains S2 / S3 or type-incompatible code</text>
+      <text x="14" y="80" class="action-copy" fill="#fda4af">remove + defer · revise charter · block</text>
+      <text x="14" y="95" class="tiny" fill="#fecdd3">PASS is impossible; this bypasses profile configuration</text>
+    </g>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit gate 9, Accept completed implementation" data-gate-id="pr.implementation.complete" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.complete">
+      <title>Open pr.implementation.complete in the gate profile editor</title>
+      <g transform="translate(728 727)">
+        <rect class="gate-card" width="421" height="92" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">9</text>
+        <rect x="344" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="356" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="55" class="gate-id gate-id-small">pr.implementation.complete</text>
+        <text x="17" y="77" class="gate-copy">Accept scoped + validated completion</text>
+        <rect class="edit-pill" x="377" y="65" width="28" height="16" rx="8" fill="#164e63"/><text x="383" y="77" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.review.publish" target="_top" aria-label="Edit gate 10, Publish GitHub review" data-gate-id="pr.review.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.review.publish">
+      <title>Open pr.review.publish in the gate profile editor</title>
+      <g transform="translate(1209 100)">
+        <rect class="gate-card" width="338" height="88" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">10</text>
+        <rect x="261" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="273" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="54" class="gate-id">pr.review.publish</text>
+        <text x="17" y="76" class="gate-copy">Authorize GitHub review publication</text>
+        <rect class="edit-pill" x="294" y="64" width="28" height="16" rx="8" fill="#164e63"/><text x="300" y="76" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+    <g transform="translate(1582 116)">
+      <rect class="git-effect" width="210" height="58" rx="12"/>
+      <text x="16" y="25" class="action-title">GitHub review</text>
+      <text x="16" y="46" class="action-copy">stable marker + exact findings</text>
+    </g>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.publish" target="_top" aria-label="Edit gate 11, Push implementation branch" data-gate-id="pr.implementation.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.implementation.publish">
+      <title>Open pr.implementation.publish in the gate profile editor</title>
+      <g transform="translate(1209 238)">
+        <rect class="gate-card" width="338" height="88" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">11</text>
+        <rect x="261" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="273" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="54" class="gate-id gate-id-small">pr.implementation.publish</text>
+        <text x="17" y="76" class="gate-copy">Authorize exact candidate branch push</text>
+        <rect class="edit-pill" x="294" y="64" width="28" height="16" rx="8" fill="#164e63"/><text x="300" y="76" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+    <g transform="translate(1582 254)">
+      <rect class="git-effect" width="210" height="58" rx="12"/>
+      <text x="16" y="25" class="action-title">Git branch push</text>
+      <text x="16" y="46" class="action-copy">not PR merge authorization</text>
+    </g>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit gate 12, Create deferred GitHub issue" data-gate-id="pr.deferred.publish" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.deferred.publish">
+      <title>Open pr.deferred.publish in the gate profile editor</title>
+      <g transform="translate(1209 376)">
+        <rect class="gate-card" width="338" height="88" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">12</text>
+        <rect x="261" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="273" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="54" class="gate-id">pr.deferred.publish</text>
+        <text x="17" y="76" class="gate-copy">Ask mode: create follow-up issue</text>
+        <rect class="edit-pill" x="294" y="64" width="28" height="16" rx="8" fill="#164e63"/><text x="300" y="76" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+    <g transform="translate(1582 392)">
+      <rect class="git-effect" width="210" height="58" rx="12"/>
+      <text x="16" y="25" class="action-title">GitHub follow-up issue</text>
+      <text x="16" y="46" class="action-copy">stable marker; no PR expansion</text>
+    </g>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit gate 14, Resolve ambiguous provider outcome" data-gate-id="pr.publication.reconcile" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.publication.reconcile">
+      <title>Open pr.publication.reconcile in the gate profile editor</title>
+      <g transform="translate(1209 500)">
+        <rect class="gate-card" width="587" height="112" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">14</text>
+        <rect x="510" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="522" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="17" y="55" class="gate-id">pr.publication.reconcile</text>
+        <text x="17" y="78" class="gate-copy">Resolve an unknown provider outcome — never retry blindly</text>
+        <text x="17" y="98" class="tiny">only PASS = reobserve or BLOCK = assume failed; revise / defer invalid</text>
+        <rect class="edit-pill" x="543" y="83" width="28" height="16" rx="8" fill="#164e63"/><text x="549" y="95" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+
+    <a class="gate-link human" href="/pull-requests?view=gate-profiles&amp;gate=pr.correction.promote" target="_top" aria-label="Edit gate 13, Promote repository lesson" data-gate-id="pr.correction.promote" data-purpose="authorization" data-default-stage="human" data-edit-href="/pull-requests?view=gate-profiles&amp;gate=pr.correction.promote">
+      <title>Open pr.correction.promote in the gate profile editor</title>
+      <g transform="translate(1514 725)">
+        <rect class="gate-card" width="282" height="114" rx="14"/>
+        <circle cx="24" cy="24" r="14" fill="#60a5fa"/><text x="24" y="29" class="gate-number">13</text>
+        <rect x="205" y="12" width="61" height="22" rx="11" fill="#1e3a8a"/><text x="217" y="27" class="pill" fill="#bfdbfe">HUMAN</text>
+        <text x="15" y="55" class="gate-id gate-id-small">pr.correction.promote</text>
+        <text x="15" y="77" class="gate-copy">Promote repository lesson</text>
+        <text x="15" y="97" class="tiny">optional; never rewrites history</text>
+        <rect class="edit-pill" x="238" y="86" width="28" height="16" rx="8" fill="#164e63"/><text x="244" y="98" class="pill" fill="#a5f3fc">↗</text>
+      </g>
+    </a>
+  </g>
+
+  <!-- Execution legend -->
+  <g id="legend" transform="translate(44 1230)" filter="url(#shadow)">
+    <rect width="1832" height="226" rx="19" class="section-panel"/>
+    <text x="22" y="34" class="phase-title">How each gate executes</text>
+    <text x="273" y="34" class="small">A profile maps a decision point to an ordered ALL-OF stage workflow. Any non-pass stops later stages; a missing workflow falls back to HUMAN.</text>
+
+    <g transform="translate(22 54)">
+      <rect width="222" height="62" rx="12" fill="#10251b" stroke="#4ade80"/>
+      <rect x="12" y="11" width="49" height="20" rx="10" fill="#14532d"/><text x="22" y="25" class="pill" fill="#bbf7d0">ZERO</text>
+      <text x="12" y="49" class="action-copy">immediate explicit pass</text>
+    </g>
+    <g transform="translate(257 54)">
+      <rect width="300" height="62" rx="12" fill="#30280e" stroke="#facc15"/>
+      <rect x="12" y="11" width="117" height="20" rx="10" fill="#713f12"/><text x="22" y="25" class="pill" fill="#fef08a">DETERMINISTIC</text>
+      <text x="12" y="49" class="action-copy">bounded expression on frozen subject</text>
+    </g>
+    <g transform="translate(570 54)">
+      <rect width="298" height="62" rx="12" fill="#35142e" stroke="#f472b6"/>
+      <rect x="12" y="11" width="105" height="20" rx="10" fill="#831843"/><text x="22" y="25" class="pill" fill="#fbcfe8">AI · WORKING</text>
+      <text x="12" y="49" class="action-copy">protected agent-owned PR context</text>
+    </g>
+    <g transform="translate(881 54)">
+      <rect width="298" height="62" rx="12" fill="#28153e" stroke="#c084fc"/>
+      <rect x="12" y="11" width="108" height="20" rx="10" fill="#581c87"/><text x="22" y="25" class="pill" fill="#e9d5ff">AI · ISOLATED</text>
+      <text x="12" y="49" class="action-copy">ephemeral no-tool evidence check</text>
+    </g>
+    <g transform="translate(1192 54)">
+      <rect width="284" height="62" rx="12" fill="#142348" stroke="#60a5fa"/>
+      <rect x="12" y="11" width="62" height="20" rx="10" fill="#1e3a8a"/><text x="22" y="25" class="pill" fill="#bfdbfe">HUMAN</text>
+      <text x="12" y="49" class="action-copy">suspend for an explicit user outcome</text>
+    </g>
+    <g transform="translate(1489 54)">
+      <rect width="321" height="62" rx="12" fill="#0f2132" stroke="#22d3ee"/>
+      <text x="14" y="25" class="action-title" fill="#cffafe">Default profile: 11 HUMAN + 3 ZERO</text>
+      <text x="14" y="49" class="action-copy">cards above show current default first stage</text>
+    </g>
+
+    <line x1="22" y1="134" x2="1810" y2="134" stroke="#33475f"/>
+    <g transform="translate(22 150)">
+      <text x="0" y="20" class="small">Human outcomes</text>
+      <rect x="130" width="64" height="28" rx="14" fill="#14532d"/><text x="146" y="19" class="pill" fill="#bbf7d0">PASS</text>
+      <rect x="204" width="74" height="28" rx="14" fill="#713f12"/><text x="218" y="19" class="pill" fill="#fde68a">REVISE</text>
+      <rect x="288" width="69" height="28" rx="14" fill="#3f3f46"/><text x="301" y="19" class="pill" fill="#e4e4e7">DEFER</text>
+      <rect x="367" width="69" height="28" rx="14" fill="#7f1d1d"/><text x="380" y="19" class="pill" fill="#fecaca">BLOCK</text>
+      <circle cx="494" cy="14" r="5" fill="#60a5fa"/><text x="508" y="20" class="small">user</text>
+      <circle cx="579" cy="14" r="5" fill="#2dd4bf"/><text x="593" y="20" class="small">PicoClaw / agent</text>
+      <circle cx="741" cy="14" r="5" fill="#c084fc"/><text x="755" y="20" class="small">Git / GitHub</text>
+      <circle cx="876" cy="14" r="5" fill="#fb7185"/><text x="890" y="20" class="small">hard invariant</text>
+      <text x="1042" y="20" class="small">Every result binds profile revision + frozen subject digest + evidence.</text>
+    </g>
+    <rect x="22" y="190" width="1788" height="25" rx="12.5" fill="#0c2430"/>
+    <text x="916" y="208" text-anchor="middle" class="tiny" fill="#a5f3fc">The red hard-scope invariant shares the implementation-scope boundary, but it is not a fifteenth configurable profile gate and cannot be bypassed.</text>
   </g>
 </svg>

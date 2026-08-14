@@ -1,6 +1,10 @@
 import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
+import {
+  type PRLifecycleDecisionPoint,
+  prLifecycleKnownDecisionPoints,
+} from "@/api/pr-lifecycle-gate-profiles"
 import { PRLifecycleGateProfilesPage } from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
 import { PRWorkspacePage } from "@/components/pr-workspaces/pr-workspace-page"
 import { PRWorkspacePortfolioPage } from "@/components/pr-workspaces/pr-workspace-portfolio-page"
@@ -10,13 +14,20 @@ const workspaceIDPattern = /^prw_[0-9a-f]{32}$/
 export interface PullRequestsRouteSearch {
   workspace?: string
   view?: "gate-profiles"
+  gate?: PRLifecycleDecisionPoint
 }
 
 export function normalizePullRequestsSearch(
   raw: Record<string, unknown>,
 ): PullRequestsRouteSearch {
   if (Object.hasOwn(raw, "view")) {
-    return raw.view === "gate-profiles" ? { view: "gate-profiles" } : {}
+    if (raw.view !== "gate-profiles") return {}
+    const gate =
+      typeof raw.gate === "string" &&
+      (prLifecycleKnownDecisionPoints as readonly string[]).includes(raw.gate)
+        ? (raw.gate as PRLifecycleDecisionPoint)
+        : undefined
+    return gate ? { view: "gate-profiles", gate } : { view: "gate-profiles" }
   }
   return typeof raw.workspace === "string" &&
     workspaceIDPattern.test(raw.workspace)
@@ -64,7 +75,15 @@ function PullRequestsRoutePage() {
   )
 
   if (search.view === "gate-profiles") {
-    return <PRLifecycleGateProfilesPage onBack={() => changeSearch({})} />
+    return (
+      <PRLifecycleGateProfilesPage
+        onBack={() => changeSearch({})}
+        initialDecisionPoint={search.gate}
+        onDecisionPointChange={(gate) =>
+          changeSearch({ view: "gate-profiles", gate })
+        }
+      />
+    )
   }
   if (search.workspace) {
     return (

@@ -3155,6 +3155,18 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expect(
     page.getByRole("heading", { name: "PR lifecycle gate profiles" }),
   ).toBeVisible()
+  const gateMap = page
+    .getByRole("heading", { name: "PR lifecycle gate flow" })
+    .locator("xpath=ancestor::section[1]")
+  await expect(gateMap.locator("[data-decision-point]")).toHaveCount(14)
+  await gateMap.getByRole("button", { name: "Complete review" }).click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\?view=gate-profiles&gate=pr\.review\.complete$/,
+  )
+  await expect(page.locator("#pr-gate-workflow-editor")).toHaveAttribute(
+    "data-decision-point",
+    "pr.review.complete",
+  )
   await expect(page.getByText("Review minimum")).toBeVisible()
   await expect(page.getByText("XS modules")).toBeVisible()
   await expectNoHorizontalOverflow(page)

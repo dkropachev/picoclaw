@@ -4,13 +4,15 @@ import {
   createMemoryHistory,
   createRouter,
 } from "@tanstack/react-router"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
 import { describe, expect, it, vi } from "vitest"
 
 import { routeTree } from "@/routeTree.gen"
 
 const workspaceID = `prw_${"a".repeat(32)}`
+const gate = "pr.review.complete" as const
+const mockedGateProfilePage = vi.hoisted(() => vi.fn())
 
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
@@ -36,7 +38,23 @@ vi.mock("@/components/pr-workspaces/pr-workspace-page", () => ({
 }))
 
 vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-profiles-page", () => ({
-  PRLifecycleGateProfilesPage: () => <output>Gate profile editor</output>,
+  PRLifecycleGateProfilesPage: (props: {
+    initialDecisionPoint?: string
+    onDecisionPointChange: (gate: string) => void
+  }) => {
+    mockedGateProfilePage(props)
+    return (
+      <div>
+        <output>Gate profile editor</output>
+        <button
+          type="button"
+          onClick={() => props.onDecisionPointChange("pr.implementation.scope")}
+        >
+          Select scope gate
+        </button>
+      </div>
+    )
+  },
 }))
 
 vi.mock("@/features/chat/controller", () => ({
@@ -79,6 +97,36 @@ describe("pull requests route navigation", () => {
       expect(router.state.location.search).toEqual({ view: "gate-profiles" })
     })
     expect(screen.getByText("Gate profile editor")).toBeVisible()
+  })
+
+  it("passes an allowlisted gate deep link to the profile editor", async () => {
+    const router = routerAt(`/pull-requests?view=gate-profiles&gate=${gate}`)
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "gate-profiles",
+        gate,
+      })
+    })
+    expect(mockedGateProfilePage).toHaveBeenCalledWith(
+      expect.objectContaining({ initialDecisionPoint: gate }),
+    )
+  })
+
+  it("keeps an in-page gate selection in the canonical URL", async () => {
+    const router = routerAt("/pull-requests?view=gate-profiles")
+    render(<RouterProvider router={router} />)
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select scope gate" }),
+    )
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "gate-profiles",
+        gate: "pr.implementation.scope",
+      })
+    })
   })
 
   it("drops removed review and development views", async () => {
