@@ -171,6 +171,10 @@ Owns: CODE pkg/prworkspace/**
 Owns: CODE pkg/reviews/provider.go
 Owns: CODE pkg/reviews/submitter.go
 Owns: CODE pkg/prworkspace/localci/**
+<!-- Retired v19 paths remain owned here so their destructive cutover is governed. -->
+Owns: CODE pkg/attention/**
+Owns: CODE pkg/reviews/**
+Owns: CODE pkg/prdevelopment/**
 Owns: CODE pkg/config/config.go
 Owns: CODE pkg/config/events.go
 Owns: CODE pkg/config/pr_lifecycle.go
@@ -193,11 +197,19 @@ Owns: CODE web/frontend/src/api/events.ts
 Owns: CODE web/frontend/src/api/pr-workspaces.ts
 Owns: CODE web/frontend/src/api/pr-workspace-gates.ts
 Owns: CODE web/frontend/src/api/pr-lifecycle-gate-profiles.ts
+Owns: CODE web/frontend/src/api/review-provider.ts
+Owns: CODE web/frontend/src/api/reviews.ts
+Owns: CODE web/frontend/src/api/pr-development.ts
+Owns: CODE web/frontend/src/api/pr-development-attention.ts
+Owns: CODE web/frontend/src/api/review-attention.ts
+Owns: CODE web/frontend/src/api/review-attention-*.ts
 Owns: CODE web/frontend/src/components/events/**
 Owns: CODE web/frontend/src/components/pr-workspaces/**
+Owns: CODE web/frontend/src/components/reviews/**
 Owns: CODE web/frontend/src/routes/event-sources.tsx
 Owns: CODE web/frontend/src/routes/events.tsx
 Owns: CODE web/frontend/src/routes/pull-requests.tsx
+Owns: CODE web/frontend/src/routes/reviews.tsx
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
 Owns: CONFIG.events.ingress.webhooks*
