@@ -74,8 +74,10 @@ aggregate is authoritative after every mutation.
 
 The lifecycle settings response contains named gate profiles, a default profile,
 exact repository assignments, independent review/completion nudge bounds,
-scope-size thresholds, a catalog digest, the config revision, and the
-`restart_required` effect.
+scope-size thresholds, the normalized Review and Implementation flow graph and
+its content revision, a catalog digest, the config revision, and the
+`restart_required` effect. The browser renders that graph directly; it does not
+carry a second hard-coded PR lifecycle topology.
 
 ## Surface Ownership
 

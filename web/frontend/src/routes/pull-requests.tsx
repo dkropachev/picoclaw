@@ -3,8 +3,8 @@ import { useCallback, useEffect, useMemo } from "react"
 
 import {
   type PRLifecycleDecisionPoint,
+  isPRLifecycleDecisionPoint,
   isPRLifecycleGateProfileID,
-  prLifecycleKnownDecisionPoints,
 } from "@/api/pr-lifecycle-gate-profiles"
 import { PRLifecycleGateProfilesPage } from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
 import { PRWorkspacePage } from "@/components/pr-workspaces/pr-workspace-page"
@@ -28,11 +28,7 @@ export function normalizePullRequestsSearch(
       typeof raw.profile === "string" && isPRLifecycleGateProfileID(raw.profile)
         ? raw.profile
         : undefined
-    const gate =
-      typeof raw.gate === "string" &&
-      (prLifecycleKnownDecisionPoints as readonly string[]).includes(raw.gate)
-        ? (raw.gate as PRLifecycleDecisionPoint)
-        : undefined
+    const gate = isPRLifecycleDecisionPoint(raw.gate) ? raw.gate : undefined
     if (gate) {
       return { view: "gate-profiles", profile: profile ?? "default", gate }
     }

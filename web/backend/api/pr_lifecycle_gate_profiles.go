@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/prworkspace/lifecycleflow"
 )
 
 const (
@@ -24,6 +25,8 @@ type prLifecycleGateProfilesResponse struct {
 	Nudge                 config.PRLifecycleNudgeConfig            `json:"nudge"`
 	Scope                 config.PRLifecycleScopeConfig            `json:"scope"`
 	DeferredIssues        config.PRLifecycleDeferredIssueConfig    `json:"deferred_issues"`
+	Flow                  lifecycleflow.Graph                      `json:"flow"`
+	FlowRevision          string                                   `json:"flow_revision"`
 	CatalogRevision       string                                   `json:"catalog_revision"`
 	ConfigRevision        string                                   `json:"config_revision"`
 	Effects               struct {
@@ -98,7 +101,7 @@ func (h *Handler) handlePutPRLifecycleGateProfiles(w http.ResponseWriter, r *htt
 		RepositoryAssignments: request.RepositoryAssignments, Nudge: request.Nudge,
 		Scope: request.Scope, DeferredIssues: request.DeferredIssues,
 	}
-	if err := candidate.Validate(); err != nil {
+	if err := candidate.Validate(); err != nil || !prLifecycleGateProfilesUseKnownDecisionPoints(candidate) {
 		writePRWorkspaceAPIError(w, http.StatusUnprocessableEntity, "invalid_gate_profiles")
 		return
 	}
@@ -145,17 +148,30 @@ func (h *Handler) handlePutPRLifecycleGateProfiles(w http.ResponseWriter, r *htt
 	)
 }
 
+func prLifecycleGateProfilesUseKnownDecisionPoints(lifecycle config.PRLifecycleConfig) bool {
+	for _, profile := range lifecycle.GateProfiles {
+		for decisionPoint := range profile.Workflows {
+			if !lifecycleflow.IsKnownDecisionPoint(decisionPoint) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func writePRLifecycleGateProfiles(
 	w http.ResponseWriter,
 	lifecycle config.PRLifecycleConfig,
 	configRevision string,
 	gatewayEffect string,
 ) {
+	flow, flowRevision := lifecycleflow.Default()
 	catalogRevision := prLifecycleGateProfilesCatalogRevision(lifecycle)
 	response := prLifecycleGateProfilesResponse{
 		GateProfiles: lifecycle.GateProfiles, DefaultGateProfileID: lifecycle.DefaultGateProfileID,
 		RepositoryAssignments: lifecycle.RepositoryAssignments, Nudge: lifecycle.Nudge,
-		Scope: lifecycle.Scope, DeferredIssues: lifecycle.DeferredIssues,
+		Scope: lifecycle.Scope, DeferredIssues: lifecycle.DeferredIssues, Flow: flow,
+		FlowRevision:    flowRevision,
 		CatalogRevision: catalogRevision,
 		ConfigRevision:  configRevision,
 	}
@@ -166,7 +182,11 @@ func writePRLifecycleGateProfiles(
 }
 
 func prLifecycleGateProfilesCatalogRevision(lifecycle config.PRLifecycleConfig) string {
-	encoded, _ := json.Marshal(lifecycle)
+	_, flowRevision := lifecycleflow.Default()
+	encoded, _ := json.Marshal(struct {
+		Lifecycle    config.PRLifecycleConfig `json:"lifecycle"`
+		FlowRevision string                   `json:"flow_revision"`
+	}{Lifecycle: lifecycle, FlowRevision: flowRevision})
 	digest := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(digest[:])
 }

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/prlifecycle"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
@@ -178,6 +179,9 @@ func (config PRLifecycleConfig) Validate() error {
 			return fmt.Errorf("PR lifecycle profile %q has too many workflows", id)
 		}
 		for point, workflow := range profile.Workflows {
+			if !prlifecycle.IsDecisionPoint(point) {
+				return fmt.Errorf("PR lifecycle profile %q has unknown decision point %q", id, point)
+			}
 			if point != workflow.DecisionPoint {
 				return fmt.Errorf("PR lifecycle profile %q workflow key does not match decision point", id)
 			}

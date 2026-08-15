@@ -131,6 +131,26 @@ describe("pull requests route navigation", () => {
     )
   })
 
+  it("drops a malformed gate identity before opening the profile editor", async () => {
+    const router = routerAt(
+      "/pull-requests?view=gate-profiles&profile=strict&gate=pr.review",
+    )
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "gate-profiles",
+        profile: "strict",
+      })
+    })
+    expect(mockedGateProfilePage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        initialProfileID: "strict",
+        initialDecisionPoint: undefined,
+      }),
+    )
+  })
+
   it("moves from the profile list to a distinct editor URL", async () => {
     const router = routerAt("/pull-requests?view=gate-profiles")
     render(<RouterProvider router={router} />)

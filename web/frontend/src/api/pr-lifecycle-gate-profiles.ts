@@ -62,6 +62,48 @@ export interface PRLifecycleDeferredIssueConfig {
   mode: PRLifecycleDeferredIssueMode
 }
 
+export type PRLifecycleFlowNodeKind = "action" | "gate"
+
+export interface PRLifecycleFlowNode {
+  id: string
+  kind: PRLifecycleFlowNodeKind
+  title: string
+  description: string
+  operation?: string
+  decision_point?: PRLifecycleDecisionPoint
+  safeguard?: string
+  ordinal?: number
+  editable: boolean
+}
+
+export type PRLifecycleFlowEdgeMode =
+  | "linear"
+  | "choice"
+  | "parallel"
+  | "optional"
+
+export interface PRLifecycleFlowEdge {
+  from: string
+  to: string
+  mode: PRLifecycleFlowEdgeMode
+  outcome?: string
+  label?: string
+  loop: boolean
+}
+
+export interface PRLifecycleFlow {
+  id: string
+  title: string
+  entry: string
+  nodes: PRLifecycleFlowNode[]
+  edges: PRLifecycleFlowEdge[]
+}
+
+export interface PRLifecycleFlowCatalog {
+  schema: string
+  flows: PRLifecycleFlow[]
+}
+
 export interface PRLifecycleGateProfileSnapshot {
   gate_profiles: Record<string, PRLifecycleGateProfile>
   default_gate_profile_id: string
@@ -69,6 +111,8 @@ export interface PRLifecycleGateProfileSnapshot {
   nudge: PRLifecycleNudgeConfig
   scope: PRLifecycleScopeConfig
   deferred_issues: PRLifecycleDeferredIssueConfig
+  flow: PRLifecycleFlowCatalog
+  flow_revision: string
   catalog_revision: string
   config_revision: string
   effects: { gateway_effect: "applied" | "restart_required" }
@@ -85,25 +129,36 @@ export interface PutPRLifecycleGateProfilesInput {
   deferred_issues: PRLifecycleDeferredIssueConfig
 }
 
-export const prLifecycleKnownDecisionPoints = [
-  "pr.charter.confirm",
-  "pr.charter.reconfirm",
-  "pr.review.start",
-  "pr.review.complete",
-  "pr.finding.classify",
-  "pr.implementation.eligibility",
-  "pr.implementation.start",
-  "pr.implementation.scope",
-  "pr.implementation.complete",
-  "pr.review.publish",
-  "pr.implementation.publish",
-  "pr.deferred.publish",
-  "pr.correction.promote",
-  "pr.publication.reconcile",
-] as const
+export type PRLifecycleDecisionPoint = string
 
-export type PRLifecycleDecisionPoint =
-  (typeof prLifecycleKnownDecisionPoints)[number]
+const prLifecycleDecisionPointPattern = /^pr(?:\.[a-z][a-z0-9_-]*){2,7}$/
+
+const prLifecycleDecisionPointOrdinals: Readonly<Record<string, number>> = {
+  "pr.charter.confirm": 1,
+  "pr.charter.reconfirm": 2,
+  "pr.review.start": 3,
+  "pr.review.complete": 4,
+  "pr.finding.classify": 5,
+  "pr.implementation.eligibility": 6,
+  "pr.implementation.start": 7,
+  "pr.implementation.scope": 8,
+  "pr.implementation.complete": 9,
+  "pr.review.publish": 10,
+  "pr.implementation.publish": 11,
+  "pr.deferred.publish": 12,
+  "pr.correction.promote": 13,
+  "pr.publication.reconcile": 14,
+}
+
+export function isPRLifecycleDecisionPoint(
+  value: unknown,
+): value is PRLifecycleDecisionPoint {
+  return (
+    typeof value === "string" &&
+    value.length <= 128 &&
+    prLifecycleDecisionPointPattern.test(value)
+  )
+}
 
 export async function getPRLifecycleGateProfiles(
   signal?: AbortSignal,
@@ -166,6 +221,12 @@ export function validatePRLifecycleGateWorkflow(
   workflowPath = "workflow",
 ): PRLifecycleGateProfileIssue[] {
   const issues: PRLifecycleGateProfileIssue[] = []
+  if (!isPRLifecycleDecisionPoint(decisionPoint)) {
+    issues.push({
+      path: `${workflowPath}.decision_point`,
+      message: "Decision point is invalid.",
+    })
+  }
   if (!prLifecycleGateIDPattern.test(workflow.id)) {
     issues.push({
       path: `${workflowPath}.id`,
@@ -274,9 +335,58 @@ export function validatePRLifecycleGateProfiles(
     | "nudge"
     | "scope"
     | "deferred_issues"
+    | "flow"
   >,
 ): PRLifecycleGateProfileIssue[] {
   const issues: PRLifecycleGateProfileIssue[] = []
+  const declaredDecisionPoints = new Set<PRLifecycleDecisionPoint>()
+  const ordinalByDecisionPoint = new Map<PRLifecycleDecisionPoint, number>()
+  const decisionPointByOrdinal = new Map<number, PRLifecycleDecisionPoint>()
+  snapshot.flow.flows.forEach((flow, flowIndex) => {
+    flow.nodes.forEach((node, nodeIndex) => {
+      if (node.kind !== "gate" || !node.editable) return
+      if (!isPRLifecycleDecisionPoint(node.decision_point)) {
+        issues.push({
+          path: `flow.flows.${flowIndex}.nodes.${nodeIndex}.decision_point`,
+          message: "Editable gates require a canonical decision point.",
+        })
+        return
+      }
+      declaredDecisionPoints.add(node.decision_point)
+      const expectedOrdinal =
+        prLifecycleDecisionPointOrdinals[node.decision_point]
+      if (
+        !Number.isSafeInteger(node.ordinal) ||
+        node.ordinal === undefined ||
+        expectedOrdinal === undefined ||
+        node.ordinal !== expectedOrdinal ||
+        (ordinalByDecisionPoint.has(node.decision_point) &&
+          ordinalByDecisionPoint.get(node.decision_point) !== node.ordinal) ||
+        (decisionPointByOrdinal.has(node.ordinal) &&
+          decisionPointByOrdinal.get(node.ordinal) !== node.decision_point)
+      ) {
+        issues.push({
+          path: `flow.flows.${flowIndex}.nodes.${nodeIndex}.ordinal`,
+          message:
+            "Editable gate ordinal must preserve the 1–14 catalog order.",
+        })
+        return
+      }
+      ordinalByDecisionPoint.set(node.decision_point, node.ordinal)
+      decisionPointByOrdinal.set(node.ordinal, node.decision_point)
+    })
+  })
+  if (
+    decisionPointByOrdinal.size !== 14 ||
+    Array.from({ length: 14 }, (_, index) => index + 1).some(
+      (ordinal) => !decisionPointByOrdinal.has(ordinal),
+    )
+  ) {
+    issues.push({
+      path: "flow.flows",
+      message: "Editable gate ordinals must cover the complete 1–14 catalog.",
+    })
+  }
   const profileIDs = Object.keys(snapshot.gate_profiles)
   if (profileIDs.length === 0) {
     issues.push({
@@ -322,6 +432,13 @@ export function validatePRLifecycleGateProfiles(
     names.add(foldedName)
     for (const [decisionPoint, workflow] of Object.entries(profile.workflows)) {
       const workflowPath = `gate_profiles.${profileID}.workflows.${decisionPoint}`
+      if (!declaredDecisionPoints.has(decisionPoint)) {
+        issues.push({
+          path: workflowPath,
+          message:
+            "Workflow decision point is not declared by the lifecycle flow.",
+        })
+      }
       issues.push(
         ...validatePRLifecycleGateWorkflow(
           workflow,
@@ -394,6 +511,8 @@ function projectPRLifecycleGateProfileSnapshot(
     "nudge",
     "scope",
     "deferred_issues",
+    "flow",
+    "flow_revision",
     "catalog_revision",
     "config_revision",
     "effects",
@@ -408,12 +527,299 @@ function projectPRLifecycleGateProfileSnapshot(
     nudge: projectNudge(root.nudge),
     scope: projectScope(root.scope),
     deferred_issues: projectDeferredIssues(root.deferred_issues),
+    flow: projectFlowCatalog(root.flow),
+    flow_revision: flowRevisionValue(root.flow_revision),
     catalog_revision: stringValue(root.catalog_revision),
     config_revision: stringValue(root.config_revision),
     effects: projectEffects(root.effects),
   }
   if (validatePRLifecycleGateProfiles(snapshot).length > 0) malformed()
   return snapshot
+}
+
+function projectFlowCatalog(value: unknown): PRLifecycleFlowCatalog {
+  const catalog = record(value)
+  onlyKeys(catalog, ["schema", "flows"])
+  if (!Array.isArray(catalog.flows) || catalog.flows.length !== 2) malformed()
+  const result = {
+    schema: nonBlankStringValue(catalog.schema),
+    flows: catalog.flows.map(projectFlow),
+  }
+  if (
+    result.schema !== "pr-lifecycle-flow/v1" ||
+    result.flows[0].id !== "review" ||
+    result.flows[1].id !== "implementation"
+  ) {
+    malformed()
+  }
+  const flowIDs = new Set<string>()
+  const nodeIDs = new Set<string>()
+  const ordinalByDecisionPoint = new Map<PRLifecycleDecisionPoint, number>()
+  const decisionPointByOrdinal = new Map<number, PRLifecycleDecisionPoint>()
+  for (const flow of result.flows) {
+    if (flowIDs.has(flow.id)) malformed()
+    flowIDs.add(flow.id)
+    for (const node of flow.nodes) {
+      if (nodeIDs.has(node.id)) malformed()
+      nodeIDs.add(node.id)
+      if (!node.editable) continue
+      const decisionPoint = node.decision_point!
+      const ordinal = node.ordinal!
+      if (
+        (ordinalByDecisionPoint.has(decisionPoint) &&
+          ordinalByDecisionPoint.get(decisionPoint) !== ordinal) ||
+        (decisionPointByOrdinal.has(ordinal) &&
+          decisionPointByOrdinal.get(ordinal) !== decisionPoint)
+      ) {
+        malformed()
+      }
+      ordinalByDecisionPoint.set(decisionPoint, ordinal)
+      decisionPointByOrdinal.set(ordinal, decisionPoint)
+    }
+  }
+  if (
+    decisionPointByOrdinal.size !== 14 ||
+    Array.from({ length: 14 }, (_, index) => index + 1).some(
+      (ordinal) => !decisionPointByOrdinal.has(ordinal),
+    )
+  ) {
+    malformed()
+  }
+  return result
+}
+
+function projectFlow(value: unknown): PRLifecycleFlow {
+  const source = record(value)
+  onlyKeys(source, ["id", "title", "entry", "nodes", "edges"])
+  if (
+    !Array.isArray(source.nodes) ||
+    source.nodes.length === 0 ||
+    source.nodes.length > 256 ||
+    !Array.isArray(source.edges) ||
+    source.edges.length > 1024
+  ) {
+    malformed()
+  }
+  const flow: PRLifecycleFlow = {
+    id: graphIDValue(source.id),
+    title: textValue(source.title, 256),
+    entry: graphIDValue(source.entry),
+    nodes: source.nodes.map(projectFlowNode),
+    edges: source.edges.map(projectFlowEdge),
+  }
+  validateProjectedFlow(flow)
+  return flow
+}
+
+function projectFlowNode(value: unknown): PRLifecycleFlowNode {
+  const source = record(value)
+  onlyKeys(source, [
+    "id",
+    "kind",
+    "title",
+    "description",
+    "operation",
+    "decision_point",
+    "safeguard",
+    "ordinal",
+    "editable",
+  ])
+  const kind = stringValue(source.kind)
+  if (kind !== "action" && kind !== "gate") malformed()
+  const operation = optionalGraphID(source, "operation")
+  const decisionPoint = optionalNonBlankString(source, "decision_point")
+  const safeguard = optionalGraphID(source, "safeguard")
+  const ordinal = optionalInteger(source, "ordinal")
+  const editable = booleanValue(source.editable)
+  if (
+    decisionPoint !== undefined &&
+    !isPRLifecycleDecisionPoint(decisionPoint)
+  ) {
+    malformed()
+  }
+  const expectedOrdinal =
+    decisionPoint === undefined
+      ? undefined
+      : prLifecycleDecisionPointOrdinals[decisionPoint]
+  if (
+    (kind === "action" &&
+      (editable ||
+        operation === undefined ||
+        decisionPoint !== undefined ||
+        safeguard !== undefined ||
+        ordinal !== undefined)) ||
+    (kind === "gate" &&
+      (operation !== undefined ||
+        (editable &&
+          (decisionPoint === undefined ||
+            safeguard !== undefined ||
+            ordinal === undefined ||
+            expectedOrdinal === undefined ||
+            ordinal !== expectedOrdinal)) ||
+        (!editable &&
+          (safeguard === undefined ||
+            decisionPoint !== undefined ||
+            ordinal !== undefined))))
+  ) {
+    malformed()
+  }
+  return {
+    id: graphIDValue(source.id),
+    kind,
+    title: textValue(source.title, 256),
+    description: textValue(source.description, 1024),
+    ...(operation === undefined ? {} : { operation }),
+    ...(decisionPoint === undefined ? {} : { decision_point: decisionPoint }),
+    ...(safeguard === undefined ? {} : { safeguard }),
+    ...(ordinal === undefined ? {} : { ordinal }),
+    editable,
+  }
+}
+
+function projectFlowEdge(value: unknown): PRLifecycleFlowEdge {
+  const source = record(value)
+  onlyKeys(source, ["from", "to", "mode", "outcome", "label", "loop"])
+  const mode = stringValue(source.mode)
+  if (
+    mode !== "linear" &&
+    mode !== "choice" &&
+    mode !== "parallel" &&
+    mode !== "optional"
+  ) {
+    malformed()
+  }
+  return {
+    from: graphIDValue(source.from),
+    to: graphIDValue(source.to),
+    mode,
+    ...optionalGraphIDProperty(source, "outcome"),
+    ...optionalTextProperty(source, "label", 256),
+    loop: booleanValue(source.loop),
+  }
+}
+
+function validateProjectedFlow(flow: PRLifecycleFlow) {
+  const nodes = new Map<string, PRLifecycleFlowNode>()
+  for (const node of flow.nodes) {
+    if (nodes.has(node.id)) malformed()
+    nodes.set(node.id, node)
+  }
+  if (!nodes.has(flow.entry)) malformed()
+
+  const outgoing = new Map<string, PRLifecycleFlowEdge[]>()
+  const adjacency = new Map<string, string[]>()
+  const indegree = new Map(flow.nodes.map((node) => [node.id, 0]))
+  const edgeKeys = new Set<string>()
+  for (const edge of flow.edges) {
+    if (!nodes.has(edge.from) || !nodes.has(edge.to) || edge.from === edge.to) {
+      malformed()
+    }
+    const key = `${edge.from}\u0000${edge.to}`
+    if (edgeKeys.has(key)) malformed()
+    edgeKeys.add(key)
+    const sourceEdges = outgoing.get(edge.from) ?? []
+    sourceEdges.push(edge)
+    outgoing.set(edge.from, sourceEdges)
+    if (!edge.loop) {
+      adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to])
+      indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1)
+    }
+  }
+
+  for (const edges of outgoing.values()) {
+    if (edges.length === 1) {
+      if (
+        (edges[0].mode !== "linear" && edges[0].mode !== "optional") ||
+        edges[0].label !== undefined ||
+        edges[0].outcome !== undefined
+      ) {
+        malformed()
+      }
+      continue
+    }
+    const optional = edges.filter((edge) => edge.mode === "optional")
+    const primary = edges.filter((edge) => edge.mode !== "optional")
+    const primaryMode = primary[0]?.mode
+    if (
+      (primaryMode === "linear" && primary.length !== 1) ||
+      (primaryMode === "choice" && primary.length < 2) ||
+      primary.some((edge) => edge.mode !== primaryMode)
+    ) {
+      malformed()
+    }
+    const outcomes = new Set<string>()
+    const labels = new Set<string>()
+    for (const edge of primary) {
+      if (edge.mode === "linear") {
+        if (
+          edge.label === undefined ||
+          !oneOrTwoWords(edge.label) ||
+          edge.outcome !== undefined ||
+          labels.has(edge.label.toLocaleLowerCase())
+        ) {
+          malformed()
+        }
+        labels.add(edge.label.toLocaleLowerCase())
+        continue
+      }
+      if (
+        edge.label === undefined ||
+        !oneOrTwoWords(edge.label) ||
+        (edge.mode === "choice" && edge.outcome === undefined) ||
+        (edge.mode !== "choice" && edge.outcome !== undefined) ||
+        (edge.outcome !== undefined && outcomes.has(edge.outcome)) ||
+        labels.has(edge.label.toLocaleLowerCase())
+      ) {
+        malformed()
+      }
+      if (edge.outcome !== undefined) outcomes.add(edge.outcome)
+      labels.add(edge.label.toLocaleLowerCase())
+    }
+    for (const edge of optional) {
+      if (
+        edge.outcome !== undefined ||
+        edge.label === undefined ||
+        !oneOrTwoWords(edge.label) ||
+        labels.has(edge.label.toLocaleLowerCase())
+      ) {
+        malformed()
+      }
+      labels.add(edge.label.toLocaleLowerCase())
+    }
+  }
+
+  for (const edge of flow.edges) {
+    if (!edge.loop || reachesNode(edge.to, edge.from, adjacency)) continue
+    malformed()
+  }
+
+  const reached = new Set<string>([flow.entry])
+  const pending = [flow.entry]
+  while (pending.length > 0) {
+    const current = pending.shift()!
+    for (const edge of outgoing.get(current) ?? []) {
+      if (reached.has(edge.to)) continue
+      reached.add(edge.to)
+      pending.push(edge.to)
+    }
+  }
+  if (reached.size !== flow.nodes.length) malformed()
+
+  const roots = flow.nodes
+    .filter((node) => indegree.get(node.id) === 0)
+    .map((node) => node.id)
+  const topological = [...roots]
+  let visited = 0
+  while (topological.length > 0) {
+    const current = topological.shift()!
+    visited++
+    for (const target of adjacency.get(current) ?? []) {
+      const next = (indegree.get(target) ?? 0) - 1
+      indegree.set(target, next)
+      if (next === 0) topological.push(target)
+    }
+  }
+  if (visited !== flow.nodes.length) malformed()
 }
 
 function projectDeferredIssues(value: unknown): PRLifecycleDeferredIssueConfig {
@@ -445,11 +851,13 @@ function projectWorkflow(value: unknown): PRLifecycleGateWorkflow {
     malformed()
   }
   if (!Array.isArray(workflow.stages)) malformed()
+  const decisionPoint = stringValue(workflow.decision_point)
+  if (!isPRLifecycleDecisionPoint(decisionPoint)) malformed()
   return {
     id: stringValue(workflow.id),
     name: stringValue(workflow.name),
     purpose,
-    decision_point: stringValue(workflow.decision_point),
+    decision_point: decisionPoint,
     stages: workflow.stages.map(projectStage),
   }
 }
@@ -567,6 +975,124 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[]) {
 function stringValue(value: unknown): string {
   if (typeof value !== "string" || value.length === 0) malformed()
   return value
+}
+
+const graphIDPattern = /^[a-z][a-z0-9_.-]{0,127}$/
+const disallowedTextCharacterPattern = /[\p{Cc}\p{Cf}]/u
+
+function graphIDValue(value: unknown): string {
+  const result = stringValue(value)
+  if (!graphIDPattern.test(result)) malformed()
+  return result
+}
+
+function nonBlankStringValue(value: unknown): string {
+  const result = stringValue(value)
+  if (!result.trim() || result !== result.trim()) malformed()
+  return result
+}
+
+function textValue(value: unknown, maximumBytes: number): string {
+  const result = nonBlankStringValue(value)
+  if (
+    new TextEncoder().encode(result).length > maximumBytes ||
+    !hasValidUTF16(result) ||
+    disallowedTextCharacterPattern.test(result)
+  ) {
+    malformed()
+  }
+  return result
+}
+
+function hasValidUTF16(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xdc00 || next > 0xdfff) return false
+      index++
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
+
+function flowRevisionValue(value: unknown): string {
+  const result = stringValue(value)
+  if (!/^sha256:[a-f0-9]{64}$/.test(result)) malformed()
+  return result
+}
+
+function booleanValue(value: unknown): boolean {
+  if (typeof value !== "boolean") malformed()
+  return value
+}
+
+function optionalNonBlankString(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  if (value[key] === undefined) return undefined
+  return nonBlankStringValue(value[key])
+}
+
+function optionalGraphID(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  if (value[key] === undefined) return undefined
+  return graphIDValue(value[key])
+}
+
+function optionalGraphIDProperty(
+  value: Record<string, unknown>,
+  key: string,
+): Record<string, string> {
+  const result = optionalGraphID(value, key)
+  return result === undefined ? {} : { [key]: result }
+}
+
+function optionalTextProperty(
+  value: Record<string, unknown>,
+  key: string,
+  maximumBytes: number,
+): Record<string, string> {
+  const result =
+    value[key] === undefined ? undefined : textValue(value[key], maximumBytes)
+  return result === undefined ? {} : { [key]: result }
+}
+
+function optionalInteger(
+  value: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  if (value[key] === undefined) return undefined
+  return integerValue(value[key])
+}
+
+function oneOrTwoWords(value: string): boolean {
+  const words = value.trim().split(/\s+/)
+  return words.length >= 1 && words.length <= 2
+}
+
+function reachesNode(
+  from: string,
+  target: string,
+  adjacency: Map<string, string[]>,
+): boolean {
+  const seen = new Set<string>([from])
+  const pending = [from]
+  while (pending.length > 0) {
+    const current = pending.shift()!
+    if (current === target) return true
+    for (const next of adjacency.get(current) ?? []) {
+      if (seen.has(next)) continue
+      seen.add(next)
+      pending.push(next)
+    }
+  }
+  return false
 }
 
 function integerValue(value: unknown): number {

@@ -31,7 +31,6 @@ import {
 } from "@/api/pr-lifecycle-gate-profiles"
 import { createPRWorkspaceRequestID } from "@/api/pr-workspaces"
 import { PageHeader } from "@/components/page-header"
-import { prLifecycleGateDecisionLabels } from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
 import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
 import {
   AlertDialog,
@@ -156,6 +155,20 @@ export function PRLifecycleGateProfilesPage({
     setLocalDecisionPoint(null)
     onProfileChange?.()
   }, [draft, onProfileChange, selectedProfileID])
+  useEffect(() => {
+    if (!draft || !selectedDecisionPoint) return
+    const declared = draft.flow.flows.some((flow) =>
+      flow.nodes.some(
+        (node) =>
+          node.kind === "gate" &&
+          node.editable &&
+          node.decision_point === selectedDecisionPoint,
+      ),
+    )
+    if (declared) return
+    setLocalDecisionPoint(null)
+    onDecisionPointChange?.()
+  }, [draft, onDecisionPointChange, selectedDecisionPoint])
   const issues = useMemo(
     () => (draft ? validatePRLifecycleGateProfiles(draft) : []),
     [draft],
@@ -181,6 +194,8 @@ export function PRLifecycleGateProfilesPage({
         }
         return {
           ...current,
+          flow: structuredClone(saved.flow),
+          flow_revision: saved.flow_revision,
           catalog_revision: saved.catalog_revision,
           config_revision: saved.config_revision,
           effects: structuredClone(saved.effects),
@@ -221,6 +236,16 @@ export function PRLifecycleGateProfilesPage({
     selectedProfile && selectedDecisionPoint
       ? selectedProfile.workflows[selectedDecisionPoint]
       : undefined
+  const selectedGateNode = selectedDecisionPoint
+    ? draft.flow.flows
+        .flatMap((flow) => flow.nodes)
+        .find(
+          (node) =>
+            node.kind === "gate" &&
+            node.editable &&
+            node.decision_point === selectedDecisionPoint,
+        )
+    : undefined
   const selectProfile = (profileID?: string) => {
     setLocalProfileID(profileID ?? "")
     setLocalDecisionPoint(null)
@@ -294,12 +319,7 @@ export function PRLifecycleGateProfilesPage({
       if (profile.workflows[selectedDecisionPoint]) return
       profile.workflows[selectedDecisionPoint] = {
         id: workflowID(selectedDecisionPoint),
-        name: t(
-          `prWorkspaces.gateProfiles.decisions.${selectedDecisionPoint}`,
-          {
-            defaultValue: selectedDecisionPoint,
-          },
-        ),
+        name: selectedGateNode?.title ?? selectedDecisionPoint,
         purpose:
           selectedDecisionPoint === "pr.finding.classify"
             ? "classification"
@@ -390,6 +410,8 @@ export function PRLifecycleGateProfilesPage({
           {selectedProfile && (
             <PRLifecycleGateMap
               className="xl:col-span-2"
+              flow={draft.flow}
+              flowRevision={draft.flow_revision}
               selectedDecisionPoint={selectedDecisionPoint ?? undefined}
               workflows={selectedProfile.workflows}
               profileName={selectedProfile.name}
@@ -726,7 +748,9 @@ export function PRLifecycleGateProfilesPage({
                   <DialogHeader className="border-border border-b px-5 py-4 pr-14">
                     <DialogTitle>
                       {selectedDecisionPoint
-                        ? prLifecycleGateDecisionLabels[selectedDecisionPoint]
+                        ? (selectedGateNode?.title ??
+                          workflow?.name ??
+                          selectedDecisionPoint)
                         : t("prWorkspaces.gateProfiles.workflow")}
                     </DialogTitle>
                     <DialogDescription>

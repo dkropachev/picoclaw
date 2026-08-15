@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,6 +46,49 @@ func TestPRLifecycleDeferredIssueModesAreExact(t *testing.T) {
 	candidate.DeferredIssues.Mode = "prompt"
 	if err := candidate.Validate(); err == nil {
 		t.Fatal("invalid deferred issue mode accepted")
+	}
+}
+
+func TestPRLifecycleRejectsDecisionPointsOutsideClosedCatalog(t *testing.T) {
+	addUnknownDecisionPoint := func(candidate *PRLifecycleConfig) {
+		profile := candidate.GateProfiles[DefaultPRLifecycleGateProfileID]
+		workflow := profile.Workflows["pr.charter.confirm"]
+		workflow.ID = "pr-custom-undeclared"
+		workflow.Name = "pr.custom.undeclared"
+		workflow.DecisionPoint = "pr.custom.undeclared"
+		profile.Workflows[workflow.DecisionPoint] = workflow
+		candidate.GateProfiles[DefaultPRLifecycleGateProfileID] = profile
+	}
+
+	candidate := DefaultPRLifecycleConfig()
+	addUnknownDecisionPoint(&candidate)
+	if err := candidate.Validate(); err == nil || !strings.Contains(err.Error(), `unknown decision point "pr.custom.undeclared"`) {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := DefaultConfig()
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited Config
+	if err := json.Unmarshal(data, &edited); err != nil {
+		t.Fatal(err)
+	}
+	addUnknownDecisionPoint(&edited.PRLifecycle)
+	data, err = json.Marshal(&edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), `unknown decision point "pr.custom.undeclared"`) {
+		t.Fatalf("LoadConfig() error = %v", err)
 	}
 }
 

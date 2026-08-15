@@ -1,25 +1,21 @@
-import {
-  type KeyboardEvent,
-  type ReactNode,
-  useEffect,
-  useId,
-  useState,
-} from "react"
+import { type KeyboardEvent, useEffect, useId, useMemo, useState } from "react"
 
 import {
   type PRLifecycleDecisionPoint,
+  type PRLifecycleFlow,
+  type PRLifecycleFlowCatalog,
+  type PRLifecycleFlowEdge,
+  type PRLifecycleFlowNode,
   type PRLifecycleGateKind,
   type PRLifecycleGateProfile,
   type PRLifecycleGateWorkflow,
   validatePRLifecycleGateWorkflow,
 } from "@/api/pr-lifecycle-gate-profiles"
-import {
-  prLifecycleGateDecisionLabels,
-  prLifecycleGateLabels,
-} from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
 import { cn } from "@/lib/utils"
 
 interface PRLifecycleGateMapProps {
+  flow: PRLifecycleFlowCatalog
+  flowRevision: string
   selectedDecisionPoint?: PRLifecycleDecisionPoint
   workflows?: PRLifecycleGateProfile["workflows"]
   profileID?: string
@@ -28,175 +24,13 @@ interface PRLifecycleGateMapProps {
   className?: string
 }
 
-interface GateSpec {
-  number: number
-  decisionPoint: PRLifecycleDecisionPoint
-  title: string
-  decisionTitle: string
-  detail: string
-  condition?: string
-}
-
-const gateSpecs = [
-  {
-    number: 1,
-    decisionPoint: "pr.charter.confirm",
-    title: prLifecycleGateLabels["pr.charter.confirm"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.charter.confirm"],
-    detail: "Checks that the pull request goal and boundaries are approved.",
-  },
-  {
-    number: 2,
-    decisionPoint: "pr.charter.reconfirm",
-    title: prLifecycleGateLabels["pr.charter.reconfirm"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.charter.reconfirm"],
-    detail: "Reconfirms authority after the purpose or scope changes.",
-    condition: "Purpose or scope changed",
-  },
-  {
-    number: 3,
-    decisionPoint: "pr.review.start",
-    title: prLifecycleGateLabels["pr.review.start"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.review.start"],
-    detail: "Decides whether AI may review the approved pull request scope.",
-  },
-  {
-    number: 4,
-    decisionPoint: "pr.review.complete",
-    title: prLifecycleGateLabels["pr.review.complete"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.review.complete"],
-    detail: "Checks review coverage and findings before follow-up begins.",
-  },
-  {
-    number: 5,
-    decisionPoint: "pr.finding.classify",
-    title: prLifecycleGateLabels["pr.finding.classify"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.finding.classify"],
-    detail:
-      "Resolves whether an ambiguous finding belongs in this pull request.",
-    condition: "Finding scope is ambiguous",
-  },
-  {
-    number: 6,
-    decisionPoint: "pr.implementation.eligibility",
-    title: prLifecycleGateLabels["pr.implementation.eligibility"],
-    decisionTitle:
-      prLifecycleGateDecisionLabels["pr.implementation.eligibility"],
-    detail: "Authorizes fixes on a pull request PicoClaw does not own.",
-    condition: "Pull request is non-owned",
-  },
-  {
-    number: 7,
-    decisionPoint: "pr.implementation.start",
-    title: prLifecycleGateLabels["pr.implementation.start"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.start"],
-    detail: "Decides whether AI may implement the selected findings.",
-  },
-  {
-    number: 8,
-    decisionPoint: "pr.implementation.scope",
-    title: prLifecycleGateLabels["pr.implementation.scope"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.scope"],
-    detail: "Authorizes large exact or necessary adjacent code after audits.",
-    condition: "Candidate work is large exact or necessary adjacent",
-  },
-  {
-    number: 9,
-    decisionPoint: "pr.implementation.complete",
-    title: prLifecycleGateLabels["pr.implementation.complete"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.complete"],
-    detail: "Confirms the scoped changes are complete and validated.",
-  },
-  {
-    number: 10,
-    decisionPoint: "pr.review.publish",
-    title: prLifecycleGateLabels["pr.review.publish"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.review.publish"],
-    detail: "Approves posting the selected findings to GitHub.",
-  },
-  {
-    number: 11,
-    decisionPoint: "pr.implementation.publish",
-    title: prLifecycleGateLabels["pr.implementation.publish"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.publish"],
-    detail: "Approves pushing the accepted changes to the pull request branch.",
-  },
-  {
-    number: 12,
-    decisionPoint: "pr.deferred.publish",
-    title: prLifecycleGateLabels["pr.deferred.publish"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.deferred.publish"],
-    detail: "Approves creating GitHub issues for deferred work.",
-    condition: "Deferred issue mode asks first",
-  },
-  {
-    number: 13,
-    decisionPoint: "pr.correction.promote",
-    title: prLifecycleGateLabels["pr.correction.promote"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.correction.promote"],
-    detail: "Approves promoting a correction into repository guidance.",
-    condition: "A correction may become guidance",
-  },
-  {
-    number: 14,
-    decisionPoint: "pr.publication.reconcile",
-    title: prLifecycleGateLabels["pr.publication.reconcile"],
-    decisionTitle: prLifecycleGateDecisionLabels["pr.publication.reconcile"],
-    detail: "Approves checking GitHub before retrying an uncertain write.",
-    condition: "A GitHub write result is unknown",
-  },
-] as const satisfies readonly GateSpec[]
-
-type LifecycleFlowView = "review" | "implementation"
-
-const implementationOnlyDecisionPoints = new Set<PRLifecycleDecisionPoint>([
-  "pr.implementation.eligibility",
-  "pr.implementation.start",
-  "pr.implementation.scope",
-  "pr.implementation.complete",
-  "pr.implementation.publish",
-])
-
-const reviewOnlyDecisionPoints = new Set<PRLifecycleDecisionPoint>([
-  "pr.charter.confirm",
-  "pr.review.start",
-  "pr.review.complete",
-  "pr.finding.classify",
-  "pr.review.publish",
-])
-
-function flowViewForDecisionPoint(
-  decisionPoint: PRLifecycleDecisionPoint | undefined,
-): LifecycleFlowView | undefined {
-  if (!decisionPoint) return undefined
-  return implementationOnlyDecisionPoints.has(decisionPoint)
-    ? "implementation"
-    : reviewOnlyDecisionPoints.has(decisionPoint)
-      ? "review"
-      : undefined
-}
-
-const flowGateIndexes = {
-  review: [0, 1, 2, 3, 4, 9, 11, 12, 13],
-  implementation: [1, 5, 6, 7, 8, 10, 11, 12, 13],
-} as const satisfies Record<LifecycleFlowView, readonly number[]>
-
-const flowSummaries = {
-  review: [
-    "GitHub review work is tracked and bounded by a confirmed PR charter.",
-    "AI reviews the approved scope before findings are classified and accepted.",
-    "Findings become in-scope, deferred, or dismissed without coupling review publication to implementation.",
-    "In-scope findings may be published, implemented, or both; deferred work may become GitHub issues.",
-  ],
-  implementation: [
-    "Selected in-scope findings enter a separately authorized implementation flow.",
-    "AI changes the candidate, then an isolated audit checks every changed hunk against the charter.",
-    "Hard scope violations stop before validation; allowed code is validated and audited for completion.",
-    "Incomplete work loops back to implementation, while accepted work may be pushed to the pull request branch.",
-  ],
-} as const satisfies Record<LifecycleFlowView, readonly string[]>
-
-type GateFormat = "automatic" | "rule" | "ai" | "user" | "mixed" | "needs-setup"
+type GateFormat =
+  | "automatic"
+  | "deterministic"
+  | "ai"
+  | "user"
+  | "mixed"
+  | "needs-setup"
 type GateStageCategory = Exclude<GateFormat, "mixed" | "needs-setup">
 
 interface GateFormatSummary {
@@ -207,9 +41,25 @@ interface GateFormatSummary {
   accessible: string
 }
 
+interface FlowContinuation {
+  kind: "continuation"
+  id: string
+  edge: PRLifecycleFlowEdge
+  edgeIndex: number
+}
+
+type FlowLayoutItem = PRLifecycleFlowNode | FlowContinuation
+
+interface FlowLayout {
+  ranks: FlowLayoutItem[][]
+  nodeByID: Map<string, PRLifecycleFlowNode>
+  incoming: Map<string, PRLifecycleFlowEdge[]>
+  outgoing: Map<string, PRLifecycleFlowEdge[]>
+}
+
 const stageCategory: Record<PRLifecycleGateKind, GateStageCategory> = {
   zero: "automatic",
-  deterministic: "rule",
+  deterministic: "deterministic",
   ai_working_context: "ai",
   ai_isolated_context: "ai",
   human: "user",
@@ -217,12 +67,14 @@ const stageCategory: Record<PRLifecycleGateKind, GateStageCategory> = {
 
 const gateFormatLabels: Record<GateStageCategory, string> = {
   automatic: "Automatic",
-  rule: "Rule",
+  deterministic: "Deterministic",
   ai: "AI",
   user: "User",
 }
 
 export function PRLifecycleGateMap({
+  flow,
+  flowRevision,
   selectedDecisionPoint,
   workflows,
   profileID,
@@ -233,24 +85,33 @@ export function PRLifecycleGateMap({
   const instanceID = useId().replaceAll(":", "")
   const titleID = `${instanceID}-title`
   const descriptionID = `${instanceID}-description`
-  const [activeView, setActiveView] = useState<LifecycleFlowView>(
-    () => flowViewForDecisionPoint(selectedDecisionPoint) ?? "review",
-  )
+  const initialFlow =
+    findDecisionPointFlow(flow, selectedDecisionPoint)?.id ?? flow.flows[0].id
+  const [activeFlowID, setActiveFlowID] = useState(initialFlow)
+
   useEffect(() => {
-    const owningView = flowViewForDecisionPoint(selectedDecisionPoint)
-    if (owningView) setActiveView(owningView)
-  }, [selectedDecisionPoint])
-  const gate = (index: number, compact = false) => (
-    <GateNode
-      compact={compact}
-      instanceID={instanceID}
-      onSelect={onSelect}
-      selected={selectedDecisionPoint === gateSpecs[index].decisionPoint}
-      spec={gateSpecs[index]}
-      workflow={workflows?.[gateSpecs[index].decisionPoint]}
-      profileID={profileID}
-    />
-  )
+    setActiveFlowID((current) => {
+      const currentFlow = flow.flows.find(
+        (candidate) => candidate.id === current,
+      )
+      if (
+        selectedDecisionPoint &&
+        currentFlow &&
+        flowContainsDecisionPoint(currentFlow, selectedDecisionPoint)
+      ) {
+        return current
+      }
+      return (
+        findDecisionPointFlow(flow, selectedDecisionPoint)?.id ??
+        currentFlow?.id ??
+        flow.flows[0].id
+      )
+    })
+  }, [flow, selectedDecisionPoint])
+
+  const activeFlow =
+    flow.flows.find((candidate) => candidate.id === activeFlowID) ??
+    flow.flows[0]
 
   return (
     <section
@@ -259,6 +120,8 @@ export function PRLifecycleGateMap({
         "bg-card min-w-0 overflow-hidden rounded-xl border",
         className,
       )}
+      data-flow-revision={flowRevision}
+      data-flow-schema={flow.schema}
     >
       <div className="flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
@@ -276,16 +139,14 @@ export function PRLifecycleGateMap({
             id={descriptionID}
             className="text-muted-foreground mt-1 max-w-3xl text-xs"
           >
-            Review and implementation have separate flows. Each box is either an
-            action or an editable gate; labeled arrows appear only where the
-            flow branches.
+            Choose a workflow, follow its actions and branches, and select an
+            editable gate to change its policy.
           </p>
         </div>
         <div className="max-w-3xl min-w-0 space-y-1.5">
           <div
             aria-label="Diagram legend"
             className="text-muted-foreground flex flex-wrap gap-1.5 text-xs"
-            role="group"
           >
             <Legend label="Action" variant="action" />
             <Legend label="Editable gate" variant="gate" />
@@ -305,512 +166,98 @@ export function PRLifecycleGateMap({
           data-gate-map-content
           role="group"
         >
-          <FlowViewTabs
-            activeView={activeView}
+          <FlowTabs
+            activeFlowID={activeFlow.id}
+            flows={flow.flows}
             instanceID={instanceID}
-            onChange={setActiveView}
+            onChange={setActiveFlowID}
           />
 
-          <ActiveFlowSummary activeView={activeView} />
-
-          {activeView === "review" ? (
-            <div
-              aria-labelledby={`${instanceID}-review-tab`}
-              data-flow-view="review"
-              id={`${instanceID}-review-panel`}
-              role="tabpanel"
-              tabIndex={0}
-            >
-              <div className="space-y-4">
-                <FlowBand
-                  eyebrow="REVIEW WORKFLOW"
-                  number="01"
-                  title="Request → scope → review"
-                >
-                  <ActionNode
-                    detail="GitHub assigns the pull request to a reviewer."
-                    label="Request PR review"
+          {flow.flows.map((candidate, index) => {
+            const active = candidate.id === activeFlow.id
+            return (
+              <div
+                aria-labelledby={`${instanceID}-flow-${index}-tab`}
+                data-flow-view={candidate.id}
+                hidden={!active}
+                id={`${instanceID}-flow-${index}-panel`}
+                key={candidate.id}
+                role="tabpanel"
+                tabIndex={active ? 0 : undefined}
+              >
+                {active ? (
+                  <FlowGraph
+                    flow={candidate}
+                    instanceID={instanceID}
+                    onSelect={onSelect}
+                    profileID={profileID}
+                    selectedDecisionPoint={selectedDecisionPoint}
+                    workflows={workflows}
                   />
-                  <FlowConnector />
-                  <ActionNode
-                    detail="A user or configured automation opens it in PicoClaw."
-                    label="Track pull request"
-                  />
-                  <FlowConnector />
-                  <ActionNode
-                    detail="Record the goal, included work, and exclusions."
-                    label="Define purpose and scope"
-                  />
-                  <FlowSplit
-                    columns={2}
-                    label="Charter approval"
-                    splitID="charter-approval"
-                  >
-                    <BranchPath label="First scope" target="charter-first">
-                      {gate(0, true)}
-                    </BranchPath>
-                    <BranchPath label="Revised" target="charter-revised">
-                      {gate(1, true)}
-                    </BranchPath>
-                  </FlowSplit>
-                  <FlowConnector />
-                  {gate(2)}
-                  <FlowConnector />
-                  <ActionNode
-                    detail="AI checks changed areas against the approved scope."
-                    label="Review pull request"
-                  />
-                  <FlowConnector />
-                  {gate(3)}
-                </FlowBand>
-
-                <FlowBand
-                  eyebrow="REVIEW WORKFLOW"
-                  number="02"
-                  title="Classify → disposition"
-                >
-                  <ActionNode
-                    detail="Compare each finding with the confirmed charter."
-                    label="Assess finding scope"
-                  />
-                  <FlowSplit
-                    columns={2}
-                    label="Finding classification"
-                    splitID="finding-classification"
-                  >
-                    <BranchPath label="Clear" target="finding-clear">
-                      <ActionNode
-                        compact
-                        detail="Apply the deterministic charter and PR-type result."
-                        label="Classify automatically"
-                      />
-                    </BranchPath>
-                    <BranchPath label="Ambiguous" target="finding-ambiguous">
-                      {gate(4, true)}
-                    </BranchPath>
-                  </FlowSplit>
-                  <FlowSplit
-                    columns={3}
-                    label="Finding disposition"
-                    splitID="finding-disposition"
-                  >
-                    <BranchPath label="In scope" target="finding-in-scope">
-                      <ActionNode
-                        compact
-                        detail="Make it available to review publication and implementation."
-                        label="Keep in pull request"
-                      />
-                    </BranchPath>
-                    <BranchPath label="Defer" target="finding-defer">
-                      <ActionNode
-                        compact
-                        detail="Group related follow-up work outside this pull request."
-                        label="Group deferred findings"
-                      />
-                      <FlowConnector />
-                      {gate(11)}
-                      <FlowConnector />
-                      <ActionNode
-                        compact
-                        detail="Create one GitHub issue for each approved group."
-                        label="Create follow-up issues"
-                      />
-                    </BranchPath>
-                    <BranchPath label="Dismiss" target="finding-dismiss">
-                      <ActionNode
-                        compact
-                        detail="Close the finding without publishing or implementing it."
-                        label="Dismiss finding"
-                      />
-                    </BranchPath>
-                  </FlowSplit>
-                </FlowBand>
-
-                <FlowLaneSection
-                  columns={2}
-                  eyebrow="REVIEW WORKFLOW"
-                  number="03"
-                  title="Use in-scope findings"
-                  titleID={`${instanceID}-review-use-title`}
-                >
-                  <FlowLane title="Review publication">
-                    <ActionNode
-                      compact
-                      detail="Choose in-scope findings for the GitHub review."
-                      label="Select review findings"
-                    />
-                    <FlowConnector />
-                    {gate(9, true)}
-                    <FlowConnector />
-                    <ActionNode
-                      compact
-                      detail="Post the approved findings to GitHub."
-                      label="Publish GitHub review"
-                    />
-                  </FlowLane>
-                  <FlowLane title="Implementation handoff">
-                    <ActionNode
-                      compact
-                      detail="Choose findings that implementation will fix; review selection remains independent."
-                      label="Select implementation findings"
-                    />
-                  </FlowLane>
-                </FlowLaneSection>
-
-                <FlowLaneSection
-                  columns={2}
-                  conditional
-                  eyebrow="REVIEW WORKFLOW"
-                  number="04"
-                  title="Review follow-up gates"
-                  titleID={`${instanceID}-review-follow-up-title`}
-                >
-                  <FlowLane title="User correction">
-                    <ActionNode
-                      compact
-                      detail="Store feedback for review, implementation, or both."
-                      label="Record user correction"
-                    />
-                    <FlowConnector />
-                    {gate(12, true)}
-                    <FlowConnector />
-                    <ActionNode
-                      compact
-                      detail="Add the approved correction to repository guidance."
-                      label="Save repository guidance"
-                    />
-                  </FlowLane>
-                  <FlowLane title="Unknown GitHub result">
-                    <ActionNode
-                      compact
-                      detail="A GitHub write may have succeeded without confirmation."
-                      label="Receive unknown result"
-                    />
-                    <FlowConnector />
-                    {gate(13, true)}
-                    <FlowConnector />
-                    <ActionNode
-                      compact
-                      detail="Re-observe GitHub or allow a safe retry."
-                      label="Resolve publication result"
-                    />
-                  </FlowLane>
-                </FlowLaneSection>
+                ) : null}
               </div>
-            </div>
-          ) : (
-            <div
-              aria-labelledby={`${instanceID}-implementation-tab`}
-              data-flow-view="implementation"
-              id={`${instanceID}-implementation-panel`}
-              role="tabpanel"
-              tabIndex={0}
-            >
-              <div className="space-y-4">
-                <FlowBand
-                  eyebrow="IMPLEMENTATION WORKFLOW"
-                  number="01"
-                  title="Authorize → implement → audit"
-                >
-                  <ActionNode
-                    detail="Bring in the findings chosen for this pull request."
-                    label="Load selected findings"
-                  />
-                  <FlowConnector />
-                  {gate(5)}
-                  <FlowConnector />
-                  {gate(6)}
-                  <FlowConnector />
-                  <ActionNode
-                    detail="AI changes only code required by the selected findings."
-                    label="Implement selected fixes"
-                  />
-                  <FlowConnector />
-                  <ActionNode
-                    detail="Classify every changed hunk against scope, type, and size."
-                    label="Audit candidate scope"
-                  />
-                  <FlowSplit
-                    columns={2}
-                    label="Candidate scope result"
-                    splitID="candidate-scope-result"
-                  >
-                    <BranchPath label="Safe path" target="scope-safe">
-                      <ActionNode
-                        compact
-                        detail="Run tests and every required project check."
-                        label="Validate changes"
-                      />
-                      <FlowSplit
-                        columns={2}
-                        label="Validation result"
-                        splitID="validation-result"
-                        stacked
-                      >
-                        <BranchPath label="Passed" target="validation-passed">
-                          <ActionNode
-                            compact
-                            detail="AI checks missing work and candidate scope drift."
-                            label="Audit completion"
-                          />
-                          <FlowSplit
-                            columns={2}
-                            label="Completion audit result"
-                            splitID="completion-audit-result"
-                            stacked
-                          >
-                            <BranchPath
-                              label="No gaps"
-                              target="completion-done"
-                            >
-                              <ActionNode
-                                compact
-                                detail="Check completion findings against the final candidate scope."
-                                label="Check final scope"
-                              />
-                              <FlowSplit
-                                columns={2}
-                                label="Final scope result"
-                                splitID="final-scope-result"
-                                stacked
-                              >
-                                <BranchPath
-                                  label="Allowed"
-                                  target="final-scope-allowed"
-                                >
-                                  {gate(7, true)}
-                                  <FlowConnector />
-                                  {gate(8, true)}
-                                  <FlowConnector />
-                                  {gate(10, true)}
-                                  <FlowConnector />
-                                  <ActionNode
-                                    compact
-                                    detail="Push the accepted candidate to the pull request branch."
-                                    label="Push accepted changes"
-                                  />
-                                </BranchPath>
-                                <BranchPath
-                                  label="Hard stop"
-                                  target="final-scope-hard"
-                                >
-                                  <ActionNode
-                                    compact
-                                    detail="Use the locked scope resolution before acceptance or publication."
-                                    label="Return to hard-scope gate"
-                                    loopTarget="scope-hard-stop"
-                                  />
-                                </BranchPath>
-                              </FlowSplit>
-                            </BranchPath>
-                            <BranchPath
-                              label="More work"
-                              target="completion-more"
-                            >
-                              <ActionNode
-                                compact
-                                detail="Repair missing work or drift, then validate and audit again."
-                                label="Resume implementation"
-                              />
-                            </BranchPath>
-                          </FlowSplit>
-                        </BranchPath>
-                        <BranchPath label="Failed" target="validation-failed">
-                          <ActionNode
-                            compact
-                            detail="Fix failed checks, then validate the candidate again."
-                            label="Repair validation failures"
-                          />
-                        </BranchPath>
-                      </FlowSplit>
-                    </BranchPath>
-                    <BranchPath label="Hard stop" target="scope-hard-stop">
-                      <RequiredGateNode />
-                      <FlowSplit
-                        columns={2}
-                        label="Hard scope resolution"
-                        splitID="hard-scope-resolution"
-                        stacked
-                      >
-                        <BranchPath label="Remove code" target="scope-remove">
-                          <ActionNode
-                            compact
-                            detail="Remove candidate code, track follow-up, then audit scope again."
-                            label="Remove and defer"
-                          />
-                        </BranchPath>
-                        <BranchPath label="Revise scope" target="scope-revise">
-                          <ActionNode
-                            compact
-                            detail="Change the PR charter to authorize the candidate."
-                            label="Revise PR charter"
-                          />
-                          <FlowConnector />
-                          {gate(1, true)}
-                        </BranchPath>
-                        <BranchPath label="Stop" target="scope-stop">
-                          <ActionNode
-                            compact
-                            detail="Leave the candidate blocked and end implementation."
-                            label="Stop implementation"
-                          />
-                        </BranchPath>
-                      </FlowSplit>
-                    </BranchPath>
-                  </FlowSplit>
-                </FlowBand>
-
-                <FlowLaneSection
-                  columns={3}
-                  conditional
-                  eyebrow="IMPLEMENTATION WORKFLOW"
-                  number="02"
-                  title="Implementation follow-up gates"
-                  titleID={`${instanceID}-implementation-follow-up-title`}
-                >
-                  <FlowLane title="Deferred audit finding">
-                    <ActionNode
-                      compact
-                      detail="Group follow-up work found during completion audit."
-                      label="Group deferred findings"
-                    />
-                    <FlowConnector />
-                    {gate(11, true)}
-                    <FlowConnector />
-                    <ActionNode
-                      compact
-                      detail="Create one GitHub issue for each approved group."
-                      label="Create follow-up issues"
-                    />
-                  </FlowLane>
-                  <FlowLane title="User correction">
-                    <ActionNode
-                      compact
-                      detail="Store feedback for review, implementation, or both."
-                      label="Record user correction"
-                    />
-                    <FlowConnector />
-                    {gate(12, true)}
-                    <FlowConnector />
-                    <ActionNode
-                      compact
-                      detail="Add the approved correction to repository guidance."
-                      label="Save repository guidance"
-                    />
-                  </FlowLane>
-                  <FlowLane title="Unknown GitHub result">
-                    <ActionNode
-                      compact
-                      detail="A push or issue write may lack confirmation."
-                      label="Receive unknown result"
-                    />
-                    <FlowConnector />
-                    {gate(13, true)}
-                    <FlowConnector />
-                    <ActionNode
-                      compact
-                      detail="Re-observe GitHub or allow a safe retry."
-                      label="Resolve publication result"
-                    />
-                  </FlowLane>
-                </FlowLaneSection>
-              </div>
-            </div>
-          )}
+            )
+          })}
         </div>
       </div>
-
-      <ol aria-label={`${activeView} workflow gates`} className="sr-only">
-        {flowGateIndexes[activeView].map((index) => {
-          const spec = gateSpecs[index]
-          return (
-            <li key={spec.decisionPoint}>
-              Gate {spec.number}: {spec.decisionTitle}. Editor: {spec.title}.{" "}
-              {spec.detail}
-              {selectedDecisionPoint === spec.decisionPoint
-                ? ". Currently selected."
-                : ""}
-            </li>
-          )
-        })}
-      </ol>
     </section>
   )
 }
 
-function ActiveFlowSummary({ activeView }: { activeView: LifecycleFlowView }) {
-  return (
-    <ol aria-label={`${activeView} workflow ordered flow`} className="sr-only">
-      {flowSummaries[activeView].map((summary) => (
-        <li key={summary}>{summary}</li>
-      ))}
-    </ol>
-  )
-}
-
-function FlowViewTabs({
-  activeView,
+function FlowTabs({
+  activeFlowID,
+  flows,
   instanceID,
   onChange,
 }: {
-  activeView: LifecycleFlowView
+  activeFlowID: string
+  flows: PRLifecycleFlow[]
   instanceID: string
-  onChange: (view: LifecycleFlowView) => void
+  onChange: (flowID: string) => void
 }) {
-  const views: Array<{
-    value: LifecycleFlowView
-    title: string
-    description: string
-  }> = [
-    {
-      value: "review",
-      title: "Review workflow",
-      description: "Review changes and choose what happens to findings.",
-    },
-    {
-      value: "implementation",
-      title: "Implementation workflow",
-      description: "Fix selected findings, enforce scope, and publish code.",
-    },
-  ]
-  const selectAndFocus = (view: LifecycleFlowView) => {
-    onChange(view)
+  const selectAndFocus = (index: number) => {
+    const flow = flows[index]
+    onChange(flow.id)
     window.requestAnimationFrame(() => {
       document
-        .getElementById(`${instanceID}-${view}-tab`)
+        .getElementById(`${instanceID}-flow-${index}-tab`)
         ?.focus({ preventScroll: true })
     })
   }
   const handleKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
-    view: LifecycleFlowView,
+    index: number,
   ) => {
-    let next: LifecycleFlowView | undefined
+    let nextIndex: number | undefined
     if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      next = view === "review" ? "implementation" : "review"
+      nextIndex = (index - 1 + flows.length) % flows.length
     } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      next = view === "review" ? "implementation" : "review"
+      nextIndex = (index + 1) % flows.length
     } else if (event.key === "Home") {
-      next = "review"
+      nextIndex = 0
     } else if (event.key === "End") {
-      next = "implementation"
+      nextIndex = flows.length - 1
     }
-    if (!next) return
+    if (nextIndex === undefined) return
     event.preventDefault()
-    selectAndFocus(next)
+    selectAndFocus(nextIndex)
   }
 
   return (
     <div
       aria-label="PR workflow view"
-      className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2"
+      className={responsiveGridClass(flows.length)}
       role="tablist"
     >
-      {views.map(({ value, title, description }) => {
-        const selected = value === activeView
+      {flows.map((flow, index) => {
+        const selected = flow.id === activeFlowID
+        const actionCount = flow.nodes.filter(
+          (node) => node.kind === "action",
+        ).length
+        const gateCount = flow.nodes.length - actionCount
         return (
           <button
-            aria-controls={`${instanceID}-${value}-panel`}
+            aria-controls={`${instanceID}-flow-${index}-panel`}
             aria-selected={selected}
             className={cn(
               "focus-visible:ring-ring flex min-w-0 flex-col rounded-lg border px-3 py-2 text-left transition-colors outline-none focus-visible:ring-2",
@@ -818,18 +265,18 @@ function FlowViewTabs({
                 ? "border-primary bg-primary/10"
                 : "bg-background hover:bg-muted/50",
             )}
-            data-flow-view-tab={value}
-            id={`${instanceID}-${value}-tab`}
-            key={value}
-            onClick={() => onChange(value)}
-            onKeyDown={(event) => handleKeyDown(event, value)}
+            data-flow-view-tab={flow.id}
+            id={`${instanceID}-flow-${index}-tab`}
+            key={flow.id}
+            onClick={() => onChange(flow.id)}
+            onKeyDown={(event) => handleKeyDown(event, index)}
             role="tab"
             tabIndex={selected ? 0 : -1}
             type="button"
           >
-            <strong className="text-xs">{title}</strong>
+            <strong className="text-xs">{flow.title}</strong>
             <span className="text-muted-foreground mt-1 text-[11px] leading-snug">
-              {description}
+              {actionCount} actions · {gateCount} gates
             </span>
           </button>
         )
@@ -838,307 +285,322 @@ function FlowViewTabs({
   )
 }
 
-function FlowBand({
-  number,
-  eyebrow,
-  title,
-  children,
+function FlowGraph({
+  flow,
+  instanceID,
+  onSelect,
+  profileID,
+  selectedDecisionPoint,
+  workflows,
 }: {
-  number: string
-  eyebrow: string
-  title: string
-  children: ReactNode
+  flow: PRLifecycleFlow
+  instanceID: string
+  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  profileID?: string
+  selectedDecisionPoint?: PRLifecycleDecisionPoint
+  workflows?: PRLifecycleGateProfile["workflows"]
 }) {
+  const layout = useMemo(() => createFlowLayout(flow), [flow])
+
   return (
-    <section className="bg-background/60 rounded-xl border p-3">
-      <FlowHeading eyebrow={eyebrow} number={number} title={title} />
-      <div className="mx-auto flex w-full max-w-3xl min-w-0 flex-col items-stretch gap-2">
-        {children}
+    <section
+      aria-label={`${flow.title} graph`}
+      className="bg-background/60 min-w-0 rounded-xl border p-3"
+      data-flow-graph={flow.id}
+    >
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-primary text-[10px] font-semibold tracking-wider uppercase">
+            Workflow flow
+          </p>
+          <h3 className="text-sm font-semibold">{flow.title}</h3>
+        </div>
+        <span className="text-muted-foreground rounded-md border px-2 py-1 font-mono text-[10px]">
+          {flow.nodes.length} nodes
+        </span>
+      </div>
+
+      <div className="mx-auto w-full max-w-5xl min-w-0 space-y-1">
+        {layout.ranks.map((nodes, rank) => (
+          <div
+            className={responsiveGridClass(nodes.length)}
+            data-flow-rank={rank}
+            key={rank}
+          >
+            {nodes.map((item) =>
+              item.kind === "continuation" ? (
+                <ContinuationRail item={item} key={item.id} />
+              ) : (
+                <FlowNodeCell
+                  flowNode={item}
+                  instanceID={instanceID}
+                  key={item.id}
+                  layout={layout}
+                  onSelect={onSelect}
+                  profileID={profileID}
+                  selectedDecisionPoint={selectedDecisionPoint}
+                  workflows={workflows}
+                />
+              ),
+            )}
+          </div>
+        ))}
       </div>
     </section>
   )
 }
 
-function FlowHeading({
-  number,
-  eyebrow,
-  title,
-  titleID,
+function FlowNodeCell({
+  flowNode,
+  instanceID,
+  layout,
+  onSelect,
+  profileID,
+  selectedDecisionPoint,
+  workflows,
 }: {
-  number: string
-  eyebrow: string
-  title: string
-  titleID?: string
+  flowNode: PRLifecycleFlowNode
+  instanceID: string
+  layout: FlowLayout
+  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  profileID?: string
+  selectedDecisionPoint?: PRLifecycleDecisionPoint
+  workflows?: PRLifecycleGateProfile["workflows"]
 }) {
+  const incoming = layout.incoming.get(flowNode.id) ?? []
+  const outgoing = layout.outgoing.get(flowNode.id) ?? []
+  const forward = outgoing.filter((edge) => !edge.loop)
+  const loops = outgoing.filter((edge) => edge.loop)
   return (
-    <div className="mb-3 flex items-start gap-3">
-      <span className="bg-primary text-primary-foreground rounded-md px-2 py-1 font-mono text-xs font-bold">
-        {number}
-      </span>
-      <div>
-        <p className="text-primary text-[10px] font-semibold tracking-wider">
-          {eyebrow}
-        </p>
-        <h3 className="text-sm font-semibold" id={titleID}>
-          {title}
-        </h3>
-      </div>
+    <div
+      className="flex min-w-0 flex-col"
+      data-flow-cell={flowNode.id}
+      data-flow-incoming-count={incoming.length}
+    >
+      {incoming.map((edge) => {
+        const source = layout.nodeByID.get(edge.from)!
+        return (
+          <EdgeRoute
+            edge={edge}
+            key={`${edge.from}:${edge.to}:${edge.mode}:${edge.outcome ?? ""}`}
+            showLabel={(layout.outgoing.get(edge.from) ?? []).length > 1}
+            source={source}
+            sourceEdges={layout.outgoing.get(edge.from) ?? []}
+            target={flowNode}
+          />
+        )
+      })}
+      <GraphNode
+        flowNode={flowNode}
+        instanceID={instanceID}
+        onSelect={onSelect}
+        profileID={profileID}
+        selected={
+          flowNode.decision_point === selectedDecisionPoint && flowNode.editable
+        }
+        workflow={
+          flowNode.decision_point
+            ? workflows?.[flowNode.decision_point]
+            : undefined
+        }
+      />
+      {outgoing.length > 1 && forward.length > 0 ? (
+        <BranchLaunches
+          edges={forward}
+          nodeByID={layout.nodeByID}
+          source={flowNode}
+        />
+      ) : null}
+      {loops.map((edge) => (
+        <EdgeRoute
+          edge={edge}
+          key={`${edge.from}:${edge.to}:${edge.mode}:${edge.outcome ?? ""}`}
+          showLabel={outgoing.length > 1}
+          source={flowNode}
+          sourceEdges={outgoing}
+          target={layout.nodeByID.get(edge.to)!}
+        />
+      ))}
     </div>
   )
 }
 
-function ActionNode({
-  label,
-  detail,
-  compact = false,
-  loopTarget,
+function BranchLaunches({
+  edges,
+  nodeByID,
+  source,
 }: {
-  label: string
-  detail: string
-  compact?: boolean
-  loopTarget?: string
+  edges: PRLifecycleFlowEdge[]
+  nodeByID: Map<string, PRLifecycleFlowNode>
+  source: PRLifecycleFlowNode
 }) {
   return (
     <div
-      className={cn(
-        "bg-secondary flex min-h-20 w-full min-w-0 flex-col rounded-xl border p-3",
-        compact && "min-h-16",
-      )}
+      aria-label={`${source.title} route launches`}
+      className="border-primary/20 bg-muted/10 mt-1 min-w-0 space-y-1 rounded-lg border p-1.5"
+      data-flow-launches={source.id}
+      role="group"
+    >
+      {edges.map((edge) => {
+        const target = nodeByID.get(edge.to)!
+        const label = edge.label ?? "Primary"
+        return (
+          <div
+            aria-label={`${label} route from ${source.title} to ${target.title}`}
+            className={cn(
+              "flex min-w-0 items-center gap-1.5 text-[10px] leading-snug",
+              edge.mode === "optional" && "text-muted-foreground",
+            )}
+            data-flow-edge-key={flowEdgeKey(edge)}
+            data-flow-launch
+            data-flow-launch-target={edge.to}
+            data-flow-source={edge.from}
+            key={flowEdgeKey(edge)}
+            role="group"
+          >
+            <span
+              className="bg-background text-foreground shrink-0 rounded border px-1.5 py-0.5 font-semibold"
+              data-flow-launch-label
+            >
+              {label}
+            </span>
+            <span aria-hidden="true" className="text-primary shrink-0">
+              →
+            </span>
+            <span
+              className="min-w-0 [overflow-wrap:anywhere]"
+              data-flow-launch-target-title
+            >
+              {target.title}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function GraphNode({
+  flowNode,
+  instanceID,
+  onSelect,
+  profileID,
+  selected,
+  workflow,
+}: {
+  flowNode: PRLifecycleFlowNode
+  instanceID: string
+  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  profileID?: string
+  selected: boolean
+  workflow?: PRLifecycleGateWorkflow
+}) {
+  if (flowNode.kind === "action") return <ActionNode node={flowNode} />
+  if (!flowNode.editable) return <LockedGateNode node={flowNode} />
+  return (
+    <EditableGateNode
+      instanceID={instanceID}
+      node={flowNode}
+      number={flowNode.ordinal}
+      onSelect={onSelect}
+      profileID={profileID}
+      selected={selected}
+      workflow={workflow}
+    />
+  )
+}
+
+function ContinuationRail({ item }: { item: FlowContinuation }) {
+  return (
+    <div
+      aria-hidden="true"
+      className="text-primary/60 flex min-h-24 min-w-0 flex-col items-center justify-center text-lg leading-none"
+      data-flow-continuation-for={`${item.edge.from}:${item.edge.to}`}
+      data-flow-edge-key={flowEdgeKey(item.edge)}
+      data-flow-continuation-target={item.edge.to}
+    >
+      <span className="border-primary/40 min-h-14 flex-1 border-l-2" />
+      <span>↓</span>
+    </div>
+  )
+}
+
+function ActionNode({ node }: { node: PRLifecycleFlowNode }) {
+  return (
+    <div
+      className="bg-secondary flex min-h-20 w-full min-w-0 flex-col rounded-xl border p-3 [overflow-wrap:anywhere]"
       data-flow-kind="action"
-      data-flow-loop-target={loopTarget}
+      data-flow-node-id={node.id}
+      data-flow-operation={node.operation}
     >
       <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
         ACTION
       </span>
-      <strong className="mt-1 text-xs leading-snug">{label}</strong>
+      <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
       <span
         className="text-muted-foreground mt-2 text-[11px] leading-snug"
         data-flow-description
       >
-        {detail}
+        {node.description}
       </span>
     </div>
   )
 }
 
-function FlowConnector() {
+function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
   return (
     <div
-      aria-hidden="true"
-      className="text-primary flex h-9 w-full min-w-0 shrink-0 items-center justify-center text-xl leading-none"
-      data-flow-edge="linear"
-    >
-      ↓
-    </div>
-  )
-}
-
-function FlowSplit({
-  splitID,
-  label,
-  columns,
-  children,
-  stacked = false,
-}: {
-  splitID: string
-  label: string
-  columns: 2 | 3
-  children: ReactNode
-  stacked?: boolean
-}) {
-  return (
-    <div
-      aria-label={`${label} branches`}
-      className="w-full min-w-0"
-      data-flow-branch={splitID}
-      role="group"
-    >
-      <div
-        aria-hidden="true"
-        className="text-muted-foreground mb-1 flex min-w-0 items-center gap-2 text-[9px] font-bold tracking-wider uppercase"
-        data-flow-split-label
-      >
-        <span className="bg-border h-px min-w-3 flex-1" />
-        <span className="min-w-0 text-center">{label}</span>
-        <span className="bg-border h-px min-w-3 flex-1" />
-      </div>
-      <div
-        className={cn(
-          "grid min-w-0 grid-cols-1 gap-3",
-          !stacked && columns === 2 && "sm:grid-cols-2",
-          !stacked && columns === 3 && "lg:grid-cols-3",
-        )}
-        data-flow-layout={stacked ? "stacked" : "columns"}
-      >
-        {children}
-      </div>
-    </div>
-  )
-}
-
-function BranchPath({
-  label,
-  target,
-  children,
-}: {
-  label: string
-  target: string
-  children: ReactNode
-}) {
-  return (
-    <div
-      aria-label={`${label} branch`}
-      className="border-primary/25 flex min-w-0 flex-col rounded-l-lg border-l-2 pl-2"
-      data-flow-branch-path={label}
-      data-flow-branch-rail
-      role="group"
-    >
-      <div
-        className="flex h-14 min-w-0 flex-col items-center justify-center text-center"
-        data-flow-branch-edge={label}
-        data-flow-target={target}
-      >
-        <span
-          className="bg-background text-foreground rounded border px-2 py-0.5 text-[10px] font-semibold"
-          data-flow-branch-label
-        >
-          {label}
-        </span>
-        <span className="text-primary mt-1 text-lg leading-none" aria-hidden>
-          ↓
-        </span>
-      </div>
-      <div
-        className="flex min-w-0 flex-1 flex-col gap-2"
-        data-flow-branch-target={target}
-      >
-        {children}
-      </div>
-    </div>
-  )
-}
-
-function FlowLaneSection({
-  columns,
-  conditional = false,
-  eyebrow,
-  number,
-  title,
-  titleID,
-  children,
-}: {
-  columns: 2 | 3
-  conditional?: boolean
-  eyebrow: string
-  number: string
-  title: string
-  titleID: string
-  children: ReactNode
-}) {
-  return (
-    <section
-      aria-labelledby={titleID}
-      className={cn(
-        "bg-background/60 rounded-xl border p-3",
-        conditional && "border-dashed",
-      )}
-    >
-      <FlowHeading
-        eyebrow={`${eyebrow}${conditional ? " · CONDITIONAL" : ""}`}
-        number={number}
-        title={title}
-        titleID={titleID}
-      />
-      {conditional ? (
-        <p className="text-muted-foreground mt-1 text-[11px] leading-snug">
-          These connected paths appear only when their starting condition
-          occurs.
-        </p>
-      ) : null}
-      <div
-        className={cn(
-          "mx-auto mt-3 grid w-full max-w-3xl min-w-0 grid-cols-1 gap-3",
-          columns === 2 && "sm:grid-cols-2",
-          columns === 3 && "lg:grid-cols-3",
-        )}
-      >
-        {children}
-      </div>
-    </section>
-  )
-}
-
-function FlowLane({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section
-      aria-label={`${title} flow`}
-      className="bg-muted/10 flex min-w-0 flex-col rounded-xl border p-2.5"
-      data-flow-lane={title}
-    >
-      <h4 className="text-muted-foreground mb-2 text-[10px] font-bold tracking-wider uppercase">
-        {title}
-      </h4>
-      <div className="flex min-w-0 flex-1 flex-col gap-2">{children}</div>
-    </section>
-  )
-}
-
-function RequiredGateNode() {
-  return (
-    <div
-      aria-label="Resolve candidate code outside the confirmed charter or PR type"
-      className="border-destructive/70 bg-destructive/5 flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 shadow-sm"
+      aria-label={node.title}
+      className="border-destructive/70 bg-destructive/5 flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 [overflow-wrap:anywhere] shadow-sm"
       data-flow-kind="gate"
-      data-required-gate="hard-scope"
+      data-flow-node-id={node.id}
+      data-required-gate={node.safeguard}
       role="group"
     >
       <span className="flex w-full items-start justify-between gap-2">
         <span className="text-destructive text-[9px] font-bold tracking-wider">
-          REQUIRED USER GATE
+          LOCKED SAFEGUARD
         </span>
         <span className="border-destructive/40 text-destructive rounded border px-1.5 py-0.5 text-[8px] font-bold tracking-wider uppercase">
           Locked
         </span>
       </span>
-      <strong className="mt-1 text-xs leading-snug">Resolve hard scope</strong>
-      <span className="text-destructive mt-1 text-[9px] leading-snug font-semibold">
-        WHEN · Candidate code is S2, S3, or PR-type incompatible
-      </span>
+      <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
       <span
         className="text-muted-foreground mt-1 text-[10px] leading-tight"
         data-gate-description
       >
-        Stops before validation and requires removal, charter revision, or stop.
+        {node.description}
       </span>
       <span className="text-muted-foreground mt-auto pt-2 text-[9px] font-bold tracking-wider uppercase">
-        User · fixed safeguard
+        Fixed · not editable
       </span>
     </div>
   )
 }
 
-function GateNode({
-  spec,
-  workflow,
+function EditableGateNode({
+  instanceID,
+  node,
+  number,
+  onSelect,
   profileID,
   selected,
-  compact,
-  instanceID,
-  onSelect,
+  workflow,
 }: {
-  spec: GateSpec
-  workflow?: PRLifecycleGateWorkflow
+  instanceID: string
+  node: PRLifecycleFlowNode
+  number?: number
+  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
   profileID?: string
   selected: boolean
-  compact: boolean
-  instanceID: string
-  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  workflow?: PRLifecycleGateWorkflow
 }) {
-  const format = summarizeGateFormat(workflow, spec.decisionPoint)
-  const descriptionID = `${instanceID}-gate-${spec.number}-description`
-  const conditionID = `${instanceID}-gate-${spec.number}-condition`
-  const formatID = `${instanceID}-gate-${spec.number}-format`
-  const activate = () => onSelect(spec.decisionPoint)
+  const decisionPoint = node.decision_point!
+  const format = summarizeGateFormat(workflow, decisionPoint)
+  const descriptionID = `${instanceID}-${node.id}-description`
+  const formatID = `${instanceID}-${node.id}-format`
+  const activate = () => onSelect(decisionPoint)
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "Enter" && event.key !== " ") return
     event.preventDefault()
@@ -1147,24 +609,24 @@ function GateNode({
 
   return (
     <button
-      aria-describedby={`${descriptionID}${spec.condition ? ` ${conditionID}` : ""} ${formatID}`}
+      aria-describedby={`${descriptionID} ${formatID}`}
       aria-expanded={selected}
       aria-haspopup="dialog"
-      aria-label={spec.decisionTitle}
+      aria-label={node.title}
       aria-pressed={selected}
       className={cn(
-        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 text-left shadow-sm transition-colors outline-none focus-visible:ring-2",
-        compact && "min-h-24 p-2.5",
+        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 text-left [overflow-wrap:anywhere] shadow-sm transition-colors outline-none focus-visible:ring-2",
         selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
       )}
-      data-decision-point={spec.decisionPoint}
-      data-decision-title={spec.decisionTitle}
-      data-edit-href={gateEditorHref(profileID, spec.decisionPoint)}
-      data-editor-title={spec.title}
+      data-decision-point={decisionPoint}
+      data-decision-title={node.title}
+      data-edit-href={gateEditorHref(profileID, decisionPoint)}
+      data-editor-title={node.title}
       data-flow-kind="gate"
+      data-flow-node-id={node.id}
       data-gate-format={format.format}
-      data-gate-id={spec.decisionPoint}
-      data-gate-number={spec.number}
+      data-gate-id={decisionPoint}
+      data-gate-number={number}
       data-workflow-configured={workflow ? "true" : "false"}
       onClick={activate}
       onKeyDown={handleKeyDown}
@@ -1172,35 +634,26 @@ function GateNode({
     >
       <span className="flex w-full items-start justify-between gap-2">
         <span className="text-primary text-[9px] font-bold tracking-wider">
-          GATE DECISION
+          EDITABLE GATE
         </span>
-        <span
-          className={cn(
-            "bg-primary text-primary-foreground flex size-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold",
-            selected && "ring-primary/30 ring-2",
-          )}
-        >
-          {spec.number}
-        </span>
+        {number ? (
+          <span
+            className={cn(
+              "bg-primary text-primary-foreground flex size-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold",
+              selected && "ring-primary/30 ring-2",
+            )}
+          >
+            {number}
+          </span>
+        ) : null}
       </span>
-      <strong className="mt-1 text-xs leading-snug">
-        {spec.decisionTitle}
-      </strong>
-      {spec.condition ? (
-        <span
-          className="text-primary mt-1 text-[9px] leading-snug font-semibold"
-          data-gate-condition
-          id={conditionID}
-        >
-          WHEN · {spec.condition}
-        </span>
-      ) : null}
+      <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
       <span
         className="text-muted-foreground mt-1 text-[10px] leading-tight"
         data-gate-description
         id={descriptionID}
       >
-        {spec.detail}
+        {node.description}
       </span>
       <span className="mt-auto flex flex-wrap items-center gap-1.5 pt-2">
         <span
@@ -1232,12 +685,218 @@ function GateNode({
   )
 }
 
+function EdgeRoute({
+  edge,
+  showLabel,
+  source,
+  sourceEdges,
+  target,
+}: {
+  edge: PRLifecycleFlowEdge
+  showLabel: boolean
+  source: PRLifecycleFlowNode
+  sourceEdges: PRLifecycleFlowEdge[]
+  target: PRLifecycleFlowNode
+}) {
+  const displayLabel = showLabel ? (edge.label ?? "Primary") : undefined
+  const describedLabel = edge.label ?? "primary"
+  const routeComposition = [
+    ...new Set(sourceEdges.map((candidate) => candidate.mode)),
+  ].join("+")
+  const routeDescription =
+    edge.mode === "choice"
+      ? `${describedLabel} choice leads to`
+      : edge.mode === "parallel"
+        ? `also follows ${describedLabel} to`
+        : edge.mode === "optional"
+          ? edge.label
+            ? `optionally follows ${edge.label} to`
+            : "optionally continues to"
+          : "continues to"
+  return (
+    <div
+      aria-label={`${source.title} ${routeDescription} ${target.title}${edge.loop ? ", loop" : ""}`}
+      className={cn(
+        "text-primary flex min-h-14 w-full min-w-0 flex-col items-center justify-center text-center",
+        showLabel && "border-primary/20 rounded-lg border-x",
+        edge.mode === "optional" && "text-muted-foreground",
+        edge.loop &&
+          "border-primary/40 bg-primary/5 my-1 rounded-lg border border-dashed px-2 py-2",
+      )}
+      data-flow-branch={showLabel ? source.id : undefined}
+      data-flow-branch-edge={displayLabel}
+      data-flow-branch-path={displayLabel}
+      data-flow-branch-target={edge.to}
+      data-flow-edge={edge.mode}
+      data-flow-edge-key={flowEdgeKey(edge)}
+      data-flow-incoming-for={edge.loop ? undefined : edge.to}
+      data-flow-loop-target={edge.loop ? edge.to : undefined}
+      data-flow-optional={edge.mode === "optional" ? "true" : undefined}
+      data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
+      data-flow-placement={edge.loop ? "source" : "target"}
+      data-flow-route-composition={showLabel ? routeComposition : undefined}
+      data-flow-route-mode={showLabel ? edge.mode : undefined}
+      data-flow-source={edge.from}
+      data-flow-target={edge.to}
+      role="group"
+      title={edge.loop ? `Returns to ${target.title}` : undefined}
+    >
+      {showLabel ? (
+        <span
+          className={cn(
+            "text-muted-foreground mb-1 text-[8px] font-bold tracking-wider uppercase",
+            edge.mode === "parallel" && "text-primary",
+          )}
+          data-flow-route-heading
+        >
+          {routeModeVisibleLabel(edge.mode)}
+        </span>
+      ) : null}
+      {displayLabel ? (
+        <span
+          className="bg-background text-foreground rounded border px-2 py-0.5 text-[10px] font-semibold [overflow-wrap:anywhere]"
+          data-flow-branch-label
+        >
+          {displayLabel}
+        </span>
+      ) : null}
+      {edge.loop && showLabel ? (
+        <span
+          className="text-muted-foreground mt-1 text-[10px] leading-snug [overflow-wrap:anywhere]"
+          data-flow-loop-target-title={edge.to}
+        >
+          Returns to {target.title}
+        </span>
+      ) : null}
+      <span className="mt-1 text-lg leading-none" aria-hidden="true">
+        {edge.loop ? "↺" : "↓"}
+      </span>
+    </div>
+  )
+}
+
+function createFlowLayout(flow: PRLifecycleFlow): FlowLayout {
+  const nodeByID = new Map(flow.nodes.map((node) => [node.id, node]))
+  const incoming = new Map<string, PRLifecycleFlowEdge[]>()
+  const outgoing = new Map<string, PRLifecycleFlowEdge[]>()
+  const adjacency = new Map<string, string[]>()
+  const indegree = new Map(flow.nodes.map((node) => [node.id, 0]))
+  for (const edge of flow.edges) {
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge])
+    if (edge.loop) continue
+    incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge])
+    adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to])
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1)
+  }
+
+  const rankByNode = new Map<string, number>()
+  const pending = flow.nodes
+    .filter((node) => indegree.get(node.id) === 0)
+    .map((node) => node.id)
+  for (const id of pending) rankByNode.set(id, id === flow.entry ? 0 : 0)
+  const visited = new Set<string>()
+  while (pending.length > 0) {
+    const current = pending.shift()!
+    visited.add(current)
+    const currentRank = rankByNode.get(current) ?? 0
+    for (const target of adjacency.get(current) ?? []) {
+      rankByNode.set(
+        target,
+        Math.max(rankByNode.get(target) ?? 0, currentRank + 1),
+      )
+      const remaining = (indegree.get(target) ?? 0) - 1
+      indegree.set(target, remaining)
+      if (remaining === 0) pending.push(target)
+    }
+  }
+  let fallbackRank = Math.max(0, ...rankByNode.values()) + 1
+  for (const node of flow.nodes) {
+    if (visited.has(node.id)) continue
+    rankByNode.set(node.id, fallbackRank++)
+  }
+  const maxRank = Math.max(0, ...rankByNode.values())
+  const nodeOrder = new Map(flow.nodes.map((node, index) => [node.id, index]))
+  const ranks = Array.from({ length: maxRank + 1 }, (_, rank) => {
+    const items: FlowLayoutItem[] = flow.nodes.filter(
+      (node) => rankByNode.get(node.id) === rank,
+    )
+    flow.edges.forEach((edge, edgeIndex) => {
+      if (edge.loop) return
+      const fromRank = rankByNode.get(edge.from) ?? 0
+      const toRank = rankByNode.get(edge.to) ?? fromRank + 1
+      if (fromRank < rank && rank < toRank) {
+        items.push({
+          kind: "continuation",
+          id: `${edge.from}:${edge.to}:${edge.outcome ?? ""}:${rank}`,
+          edge,
+          edgeIndex,
+        })
+      }
+    })
+    return items.sort((left, right) => {
+      const leftOrder = layoutItemOrder(left, nodeOrder, flow.edges.length)
+      const rightOrder = layoutItemOrder(right, nodeOrder, flow.edges.length)
+      return leftOrder - rightOrder
+    })
+  }).filter((nodes) => nodes.length > 0)
+  return { ranks, nodeByID, incoming, outgoing }
+}
+
+function layoutItemOrder(
+  item: FlowLayoutItem,
+  nodeOrder: Map<string, number>,
+  edgeCount: number,
+): number {
+  if (item.kind !== "continuation") return nodeOrder.get(item.id) ?? 0
+  const source = nodeOrder.get(item.edge.from) ?? 0
+  const target = nodeOrder.get(item.edge.to) ?? source
+  return (source + target) / 2 + item.edgeIndex / Math.max(1, edgeCount * 100)
+}
+
+function flowEdgeKey(edge: PRLifecycleFlowEdge): string {
+  return `${edge.from}:${edge.to}`
+}
+
+function findDecisionPointFlow(
+  catalog: PRLifecycleFlowCatalog,
+  decisionPoint: PRLifecycleDecisionPoint | undefined,
+): PRLifecycleFlow | undefined {
+  if (!decisionPoint) return undefined
+  return catalog.flows.find((flow) =>
+    flowContainsDecisionPoint(flow, decisionPoint),
+  )
+}
+
+function flowContainsDecisionPoint(
+  flow: PRLifecycleFlow,
+  decisionPoint: PRLifecycleDecisionPoint,
+): boolean {
+  return flow.nodes.some(
+    (node) => node.editable && node.decision_point === decisionPoint,
+  )
+}
+
+function routeModeVisibleLabel(mode: PRLifecycleFlowEdge["mode"]): string {
+  if (mode === "linear") return "Primary path"
+  if (mode === "choice") return "Choice"
+  if (mode === "parallel") return "All required"
+  return "Optional paths"
+}
+
+function responsiveGridClass(count: number): string {
+  return cn(
+    "grid min-w-0 grid-cols-1 gap-3",
+    count === 2 && "sm:grid-cols-2",
+    count >= 3 && "sm:grid-cols-2 lg:grid-cols-3",
+  )
+}
+
 function gateEditorHref(
   profileID: string | undefined,
   decisionPoint: PRLifecycleDecisionPoint,
 ): string {
   const profile = profileID ? `&profile=${encodeURIComponent(profileID)}` : ""
-  return `/pull-requests?view=gate-profiles${profile}&gate=${decisionPoint}`
+  return `/pull-requests?view=gate-profiles${profile}&gate=${encodeURIComponent(decisionPoint)}`
 }
 
 function summarizeGateFormat(
@@ -1296,7 +955,7 @@ function summarizeGateFormat(
 function gateFormatClassName(format: GateFormat) {
   return cn(
     format === "automatic" && "bg-muted text-muted-foreground",
-    format === "rule" && "bg-secondary text-secondary-foreground",
+    format === "deterministic" && "bg-secondary text-secondary-foreground",
     format === "ai" && "bg-primary/10 border-primary/40 text-primary",
     format === "user" && "bg-accent text-accent-foreground",
     format === "mixed" && "bg-primary text-primary-foreground",
@@ -1330,7 +989,7 @@ function Legend({
 function GateFormatLegend() {
   const formats: { format: GateFormat; label: string }[] = [
     { format: "automatic", label: "Automatic" },
-    { format: "rule", label: "Rule" },
+    { format: "deterministic", label: "Deterministic" },
     { format: "ai", label: "AI" },
     { format: "user", label: "User" },
     { format: "mixed", label: "Mixed" },
@@ -1340,7 +999,6 @@ function GateFormatLegend() {
     <div
       aria-label="Gate format legend"
       className="text-muted-foreground flex flex-wrap items-center gap-1 text-[10px]"
-      role="group"
     >
       <span className="mr-1 font-semibold">Gate format</span>
       {formats.map(({ format, label }) => (

@@ -7,14 +7,61 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/prworkspace/lifecycleflow"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
+
+func TestPRLifecycleGateProfilesResponsesIncludeCanonicalFlow(t *testing.T) {
+	_, _, mux := prLifecycleGateProfileTestServer(t)
+	wantFlow, wantRevision := lifecycleflow.Default()
+
+	current := getPRLifecycleGateProfilesForTest(t, mux)
+	if current.FlowRevision != wantRevision || !reflect.DeepEqual(current.Flow, wantFlow) {
+		t.Fatalf("GET flow revision = %q flow = %#v", current.FlowRevision, current.Flow)
+	}
+	if current.Flow.Schema != lifecycleflow.SchemaV1 || len(current.Flow.Flows) != 2 ||
+		current.Flow.Flows[0].ID != "review" || current.Flow.Flows[1].ID != "implementation" {
+		t.Fatalf("GET flow envelope = %#v", current.Flow)
+	}
+
+	response := putPRLifecycleGateProfilesForTest(
+		t,
+		mux,
+		current.ConfigRevision,
+		mixedPRLifecycleCandidate(),
+		nil,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d body=%s", response.Code, response.Body.String())
+	}
+	var saved prLifecycleGateProfilesResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.FlowRevision != wantRevision || !reflect.DeepEqual(saved.Flow, wantFlow) {
+		t.Fatalf("PUT flow revision = %q flow = %#v", saved.FlowRevision, saved.Flow)
+	}
+}
+
+func TestDefaultPRLifecycleProfileMatchesFlowDecisionCatalog(t *testing.T) {
+	profile := config.DefaultPRLifecycleConfig().GateProfiles[config.DefaultPRLifecycleGateProfileID]
+	got := make([]string, 0, len(profile.Workflows))
+	for decisionPoint := range profile.Workflows {
+		got = append(got, decisionPoint)
+	}
+	sort.Strings(got)
+	if want := lifecycleflow.KnownDecisionPoints(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("default profile decision points = %v, want %v", got, want)
+	}
+}
 
 func TestPRLifecycleGateProfilesPutSavesValidMixedProfile(t *testing.T) {
 	configPath, _, mux := prLifecycleGateProfileTestServer(t)
@@ -198,6 +245,39 @@ func TestPRLifecycleGateProfilesPutRejectsUnknownAgentsBeforePersistence(t *test
 	}
 	if _, exists := reloaded.PRLifecycle.Effective().GateProfiles["mixed"]; exists {
 		t.Fatal("profile with an unknown agent was persisted")
+	}
+}
+
+func TestPRLifecycleGateProfilesPutRejectsDecisionPointOutsideFlow(t *testing.T) {
+	configPath, _, mux := prLifecycleGateProfileTestServer(t)
+	current := getPRLifecycleGateProfilesForTest(t, mux)
+	candidate := config.DefaultPRLifecycleConfig()
+	profile := candidate.GateProfiles[config.DefaultPRLifecycleGateProfileID]
+	profile.Workflows["pr.custom.undeclared"] = gatetypes.GateWorkflowSpec{
+		ID:            "custom-undeclared",
+		Name:          "Undeclared decision",
+		Purpose:       gatetypes.GatePurposeAuthorization,
+		DecisionPoint: "pr.custom.undeclared",
+		Stages: []gatetypes.GateStageSpec{{
+			ID: "automatic", Kind: gatetypes.GateZero,
+		}},
+	}
+	candidate.GateProfiles[config.DefaultPRLifecycleGateProfileID] = profile
+	if err := candidate.Validate(); err == nil || !strings.Contains(err.Error(), "unknown decision point") {
+		t.Fatalf("core lifecycle validation error = %v", err)
+	}
+
+	response := putPRLifecycleGateProfilesForTest(t, mux, current.ConfigRevision, candidate, nil)
+	if response.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(response.Body.String(), "invalid_gate_profiles") {
+		t.Fatalf("PUT status = %d body=%s", response.Code, response.Body.String())
+	}
+	reloaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := reloaded.PRLifecycle.Effective().GateProfiles[config.DefaultPRLifecycleGateProfileID].Workflows["pr.custom.undeclared"]; exists {
+		t.Fatal("workflow decision point outside the lifecycle flow was persisted")
 	}
 }
 

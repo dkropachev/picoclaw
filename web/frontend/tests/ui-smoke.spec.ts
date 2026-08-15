@@ -18,6 +18,7 @@ import type {
   MCPServer,
   MCPServerInput,
 } from "../src/api/mcp"
+import prLifecycleFlowFixture from "./fixtures/pr-lifecycle-flow.json" with { type: "json" }
 
 const smokeRoutes = [
   "/",
@@ -1171,6 +1172,7 @@ const prLifecycleGateProfiles = {
     m: { files: 10, semantic_lines: 500, modules: 3 },
   },
   deferred_issues: { mode: "ask" },
+  ...prLifecycleFlowFixture,
   catalog_revision: "sha256:catalog",
   config_revision: "sha256:config",
   effects: { gateway_effect: "applied" },
@@ -3111,6 +3113,507 @@ async function expectGateMapFits(gateMap: Locator) {
     })
 }
 
+async function expectActiveGateFlowContract(
+  gateMap: Locator,
+  view: "review" | "implementation",
+) {
+  const panel = gateMap.locator(`[data-flow-view="${view}"]`)
+  await expect(panel).toBeVisible()
+
+  const expectedFlow = prLifecycleFlowFixture.flow.flows.find(
+    (flow) => flow.id === view,
+  )
+  expect(expectedFlow, `${view} flow fixture`).toBeDefined()
+
+  const contract = await panel.evaluate((flow) => {
+    const actions = Array.from(
+      flow.querySelectorAll<HTMLElement>('[data-flow-kind="action"]'),
+    )
+    const editableGates = Array.from(
+      flow.querySelectorAll<HTMLElement>(
+        'button[data-flow-kind="gate"][data-gate-id]',
+      ),
+    )
+    const linearEdges = Array.from(
+      flow.querySelectorAll<HTMLElement>('[data-flow-edge="linear"]'),
+    )
+    const semanticEdges = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
+    )
+
+    return {
+      actionCount: actions.length,
+      editableGateCount: editableGates.length,
+      invalidActions: actions
+        .filter(
+          (action) =>
+            action.matches("button, a, [data-gate-id]") ||
+            action.querySelector("[data-gate-id]") != null ||
+            action.querySelector("[data-flow-description]") == null,
+        )
+        .map((action) => action.textContent?.trim().slice(0, 60) ?? "action"),
+      invalidEditableGates: editableGates
+        .filter(
+          (gate) =>
+            gate.querySelector("[data-gate-description]") == null ||
+            gate.dataset.gateNumber == null ||
+            gate.dataset.gateFormat == null ||
+            gate.closest('[data-flow-kind="action"]') != null,
+        )
+        .map((gate) => gate.dataset.gateId ?? "gate"),
+      invalidLinearEdges: linearEdges
+        .filter((edge) => {
+          const siblingCount = semanticEdges.filter(
+            (candidate) =>
+              candidate.dataset.flowSource === edge.dataset.flowSource,
+          ).length
+          const label = edge.querySelector<HTMLElement>(
+            "[data-flow-branch-label]",
+          )
+          if (siblingCount === 1) {
+            return (
+              label != null || !/^[↓↺]$/.test(edge.textContent?.trim() ?? "")
+            )
+          }
+          const words = label?.textContent?.trim().split(/\s+/) ?? []
+          return words.length < 1 || words.length > 2
+        })
+        .map((edge) => edge.textContent?.trim() ?? "edge"),
+      invalidBranchLabels: Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-branch-label]"),
+      )
+        .filter((label) => {
+          const words = label.textContent?.trim().split(/\s+/) ?? []
+          return words.length < 1 || words.length > 2
+        })
+        .map((label) => label.textContent?.trim() ?? "branch"),
+    }
+  })
+
+  expect(contract.actionCount).toBe(
+    expectedFlow!.nodes.filter((node) => node.kind === "action").length,
+  )
+  expect(contract.editableGateCount).toBe(
+    expectedFlow!.nodes.filter((node) => node.kind === "gate" && node.editable)
+      .length,
+  )
+  expect(contract.invalidActions).toEqual([])
+  expect(contract.invalidEditableGates).toEqual([])
+  expect(contract.invalidLinearEdges).toEqual([])
+  expect(contract.invalidBranchLabels).toEqual([])
+
+  const renderedEdges = await panel
+    .locator("[data-flow-edge]")
+    .evaluateAll((edges) =>
+      edges.map((edge) => {
+        const route = edge as HTMLElement
+        const label = route
+          .querySelector<HTMLElement>("[data-flow-branch-label]")
+          ?.textContent?.trim()
+        return [
+          route.dataset.flowSource,
+          route.dataset.flowTarget,
+          route.dataset.flowEdge,
+          label ?? "",
+          route.dataset.flowLoopTarget ? "loop" : "forward",
+        ].join("|")
+      }),
+    )
+  const outgoingCounts = new Map<string, number>()
+  for (const edge of expectedFlow!.edges) {
+    outgoingCounts.set(edge.from, (outgoingCounts.get(edge.from) ?? 0) + 1)
+  }
+  const expectedEdges = expectedFlow!.edges.map((edge) =>
+    [
+      edge.from,
+      edge.to,
+      edge.mode,
+      (outgoingCounts.get(edge.from) ?? 0) > 1 ? (edge.label ?? "Primary") : "",
+      edge.loop ? "loop" : "forward",
+    ].join("|"),
+  )
+  expect(renderedEdges.sort()).toEqual(expectedEdges.sort())
+
+  const visibleRouteGroups = await panel
+    .locator("[data-flow-route-mode]")
+    .evaluateAll((groups) => [
+      ...new Set(
+        groups.map((group) => {
+          const item = group as HTMLElement
+          return [
+            item.closest<HTMLElement>("[data-flow-branch]")?.dataset.flowBranch,
+            item.dataset.flowRouteMode,
+            item
+              .querySelector<HTMLElement>("[data-flow-route-heading]")
+              ?.textContent?.trim(),
+          ].join("|")
+        }),
+      ),
+    ])
+  const routeModeHeadings: Record<string, string> = {
+    choice: "Choice",
+    linear: "Primary path",
+    optional: "Optional paths",
+    parallel: "All required",
+  }
+  const edgesBySource = new Map<
+    string,
+    Array<(typeof prLifecycleFlowFixture.flow.flows)[number]["edges"][number]>
+  >()
+  for (const edge of expectedFlow!.edges) {
+    edgesBySource.set(edge.from, [
+      ...(edgesBySource.get(edge.from) ?? []),
+      edge,
+    ])
+  }
+  const expectedRouteGroups = [...edgesBySource.entries()].flatMap(
+    ([source, edges]) => {
+      if (edges.length < 2) return []
+      return [...new Set(edges.map((edge) => edge.mode))].map((mode) =>
+        [source, mode, routeModeHeadings[mode]].join("|"),
+      )
+    },
+  )
+  expect(visibleRouteGroups.sort()).toEqual(expectedRouteGroups.sort())
+
+  const renderedGates = await panel
+    .locator("[data-decision-point]")
+    .evaluateAll((gates) =>
+      gates.map((gate) => {
+        const item = gate as HTMLElement
+        return {
+          decisionPoint: item.dataset.decisionPoint ?? "",
+          nodeID: item.dataset.flowNodeId ?? "",
+          ordinal: item.dataset.gateNumber ?? "",
+        }
+      }),
+    )
+  const expectedGates = expectedFlow!.nodes
+    .filter(
+      (node) =>
+        node.kind === "gate" && node.editable && node.decision_point != null,
+    )
+    .map((node) => ({
+      decisionPoint: node.decision_point ?? "",
+      nodeID: node.id,
+      ordinal: String(node.ordinal ?? ""),
+    }))
+  const byNodeID = (left: { nodeID: string }, right: { nodeID: string }) =>
+    left.nodeID.localeCompare(right.nodeID)
+  expect(renderedGates.sort(byNodeID)).toEqual(expectedGates.sort(byNodeID))
+
+  return renderedGates
+}
+
+async function expectGeneratedBranchLabels(
+  gateMap: Locator,
+  sourceID: string,
+  labels: string[],
+) {
+  const renderedLabels = await gateMap
+    .locator(
+      `[data-flow-edge][data-flow-source="${sourceID}"] [data-flow-branch-label]`,
+    )
+    .allTextContents()
+  expect(renderedLabels.map((label) => label.trim()).sort()).toEqual(
+    [...labels].sort(),
+  )
+}
+
+async function expectForwardEdgeGeometry(
+  gateMap: Locator,
+  view: "review" | "implementation",
+) {
+  const panel = gateMap.locator(`[data-flow-view="${view}"]`)
+  const expectedFlow = prLifecycleFlowFixture.flow.flows.find(
+    (flow) => flow.id === view,
+  )!
+  const outgoingCounts = new Map<string, number>()
+  for (const edge of expectedFlow.edges) {
+    outgoingCounts.set(edge.from, (outgoingCounts.get(edge.from) ?? 0) + 1)
+  }
+  const expectedForwardCount = expectedFlow.edges.filter(
+    (edge) => !edge.loop,
+  ).length
+  const expectedLoopCount = expectedFlow.edges.filter(
+    (edge) => edge.loop,
+  ).length
+  const expectedLaunchCount = expectedFlow.edges.filter(
+    (edge) => !edge.loop && (outgoingCounts.get(edge.from) ?? 0) > 1,
+  ).length
+
+  const result = await panel.evaluate((flow) => {
+    const tolerance = 3
+    const issues: string[] = []
+    const semanticEdges = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
+    )
+    const forwardEdges = semanticEdges.filter(
+      (edge) => edge.dataset.flowLoopTarget == null,
+    )
+    const loopEdges = semanticEdges.filter(
+      (edge) => edge.dataset.flowLoopTarget != null,
+    )
+    const centerX = (element: Element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.left + rect.width / 2
+    }
+
+    for (const edge of forwardEdges) {
+      const key = edge.dataset.flowEdgeKey ?? "missing-key"
+      const targetID = edge.dataset.flowTarget
+      const cell = edge.closest<HTMLElement>("[data-flow-cell]")
+      if (!targetID || cell?.dataset.flowCell !== targetID) {
+        issues.push(
+          `${key}: connector cell ${cell?.dataset.flowCell ?? "missing"} != target ${targetID ?? "missing"}`,
+        )
+        continue
+      }
+      const target = Array.from(
+        cell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+      ).find((node) => node.dataset.flowNodeId === targetID)
+      if (!target) {
+        issues.push(`${key}: target node missing from target cell`)
+        continue
+      }
+      if (
+        (edge.compareDocumentPosition(target) &
+          Node.DOCUMENT_POSITION_FOLLOWING) ===
+        0
+      ) {
+        issues.push(`${key}: connector does not precede target`)
+      }
+      const edgeRect = edge.getBoundingClientRect()
+      const targetRect = target.getBoundingClientRect()
+      if (edgeRect.width <= 0 || edgeRect.height <= 0) {
+        issues.push(`${key}: connector has no visible geometry`)
+      }
+      if (Math.abs(centerX(edge) - centerX(target)) > tolerance) {
+        issues.push(`${key}: connector and target centers diverge`)
+      }
+      if (edgeRect.bottom > targetRect.top + 1) {
+        issues.push(`${key}: connector overlaps or follows target`)
+      }
+      const label = edge.querySelector<HTMLElement>("[data-flow-branch-label]")
+      if (label && Math.abs(centerX(label) - centerX(target)) > tolerance) {
+        issues.push(`${key}: branch label does not point at target center`)
+      }
+      const incoming = Array.from(cell.children).filter(
+        (child): child is HTMLElement =>
+          child instanceof HTMLElement &&
+          child.matches('[data-flow-edge][data-flow-placement="target"]'),
+      )
+      if (
+        incoming.at(-1) === edge &&
+        Math.abs(targetRect.top - edgeRect.bottom) > 1
+      ) {
+        issues.push(`${key}: final incoming connector does not touch target`)
+      }
+    }
+
+    for (const edge of loopEdges) {
+      const key = edge.dataset.flowEdgeKey ?? "missing-key"
+      const sourceID = edge.dataset.flowSource
+      const targetID = edge.dataset.flowLoopTarget
+      const sourceCell = edge.closest<HTMLElement>("[data-flow-cell]")
+      if (!sourceID || sourceCell?.dataset.flowCell !== sourceID) {
+        issues.push(`${key}: loop is not attached to its source cell`)
+        continue
+      }
+      const sourceNode = Array.from(
+        sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+      ).find((node) => node.dataset.flowNodeId === sourceID)
+      if (
+        !sourceNode ||
+        (edge.compareDocumentPosition(sourceNode) &
+          Node.DOCUMENT_POSITION_PRECEDING) ===
+          0
+      ) {
+        issues.push(`${key}: loop does not follow its source node`)
+      }
+      if (
+        sourceNode &&
+        Math.abs(centerX(edge) - centerX(sourceNode)) > tolerance
+      ) {
+        issues.push(`${key}: loop and source centers diverge`)
+      }
+
+      const siblingCount = semanticEdges.filter(
+        (candidate) => candidate.dataset.flowSource === sourceID,
+      ).length
+      const label = edge
+        .querySelector<HTMLElement>("[data-flow-branch-label]")
+        ?.textContent?.trim()
+      const targetTitle = edge.querySelector<HTMLElement>(
+        "[data-flow-loop-target-title]",
+      )
+      if (siblingCount > 1) {
+        const targetNode = Array.from(
+          flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+        ).find((node) => node.dataset.flowNodeId === targetID)
+        const nodeTitle = targetNode
+          ?.querySelector<HTMLElement>("strong")
+          ?.textContent?.trim()
+        const words = label?.split(/\s+/) ?? []
+        if (
+          words.length < 1 ||
+          words.length > 2 ||
+          targetTitle?.dataset.flowLoopTargetTitle !== targetID ||
+          !nodeTitle ||
+          targetTitle.textContent?.trim() !== `Returns to ${nodeTitle}`
+        ) {
+          issues.push(`${key}: multi-way loop target clue is incomplete`)
+        }
+      } else if (label || targetTitle || edge.textContent?.trim() !== "↺") {
+        issues.push(`${key}: singleton loop must remain unlabeled`)
+      }
+    }
+
+    const launches = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-launch]"),
+    )
+    for (const launch of launches) {
+      const key = launch.dataset.flowEdgeKey ?? "missing-key"
+      const sourceID = launch.dataset.flowSource
+      const targetID = launch.dataset.flowLaunchTarget
+      const sourceCell = launch.closest<HTMLElement>("[data-flow-cell]")
+      if (!sourceID || sourceCell?.dataset.flowCell !== sourceID) {
+        issues.push(`${key}: launch is not attached to its source cell`)
+      }
+      const sourceNode = sourceCell
+        ? Array.from(
+            sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+          ).find((node) => node.dataset.flowNodeId === sourceID)
+        : undefined
+      if (
+        !sourceNode ||
+        (launch.compareDocumentPosition(sourceNode) &
+          Node.DOCUMENT_POSITION_PRECEDING) ===
+          0
+      ) {
+        issues.push(`${key}: launch does not follow its source node`)
+      }
+      const semantic = semanticEdges.filter(
+        (edge) => edge.dataset.flowEdgeKey === key,
+      )
+      if (
+        semantic.length !== 1 ||
+        semantic[0]?.dataset.flowTarget !== targetID ||
+        semantic[0]?.closest<HTMLElement>("[data-flow-cell]")?.dataset
+          .flowCell !== targetID
+      ) {
+        issues.push(`${key}: launch does not resolve to one target connector`)
+      }
+      const label = launch
+        .querySelector<HTMLElement>("[data-flow-launch-label]")
+        ?.textContent?.trim()
+      const targetTitle = launch
+        .querySelector<HTMLElement>("[data-flow-launch-target-title]")
+        ?.textContent?.trim()
+      const words = label?.split(/\s+/) ?? []
+      if (
+        words.length < 1 ||
+        words.length > 2 ||
+        label?.includes("undefined") ||
+        !targetTitle ||
+        !launch.textContent?.includes("→")
+      ) {
+        issues.push(`${key}: launch clue is incomplete`)
+      }
+    }
+
+    for (const rail of flow.querySelectorAll<HTMLElement>(
+      "[data-flow-continuation-for]",
+    )) {
+      const matches = semanticEdges.filter(
+        (edge) => edge.dataset.flowEdgeKey === rail.dataset.flowEdgeKey,
+      )
+      if (matches.length !== 1) {
+        issues.push(
+          `${rail.dataset.flowEdgeKey ?? "missing-key"}: continuation does not map to one edge`,
+        )
+      }
+    }
+
+    return {
+      forwardCount: forwardEdges.length,
+      issues,
+      launchCount: launches.length,
+      loopCount: loopEdges.length,
+    }
+  })
+
+  expect(result.forwardCount).toBe(expectedForwardCount)
+  expect(result.launchCount).toBe(expectedLaunchCount)
+  expect(result.loopCount).toBe(expectedLoopCount)
+  expect(result.issues).toEqual([])
+}
+
+async function expectBranchLaunchTargets(
+  gateMap: Locator,
+  sourceID: string,
+  expected: Array<{ label: string; target: string }>,
+) {
+  const actual = await gateMap
+    .locator(`[data-flow-launches="${sourceID}"] [data-flow-launch]`)
+    .evaluateAll((launches) =>
+      launches.map((launch) => {
+        const item = launch as HTMLElement
+        return {
+          label:
+            item
+              .querySelector<HTMLElement>("[data-flow-launch-label]")
+              ?.textContent?.trim() ?? "",
+          target: item.dataset.flowLaunchTarget ?? "",
+        }
+      }),
+    )
+  expect(actual).toEqual(expected)
+}
+
+async function expectLoopBranchTarget(
+  gateMap: Locator,
+  sourceID: string,
+  expected: { label: string; target: string; targetTitle: string },
+) {
+  const loop = gateMap.locator(
+    `[data-flow-cell="${sourceID}"] > [data-flow-edge][data-flow-loop-target]`,
+  )
+  await expect(loop).toHaveCount(1)
+  const actual = await loop.evaluate((route) => {
+    const item = route as HTMLElement
+    return {
+      label:
+        item
+          .querySelector<HTMLElement>("[data-flow-branch-label]")
+          ?.textContent?.trim() ?? "",
+      target: item.dataset.flowLoopTarget ?? "",
+      targetTitle:
+        item
+          .querySelector<HTMLElement>("[data-flow-loop-target-title]")
+          ?.textContent?.trim() ?? "",
+    }
+  })
+  expect(actual).toEqual(expected)
+}
+
+const expectedGateOrdinals: Record<string, string> = {
+  "pr.charter.confirm": "1",
+  "pr.charter.reconfirm": "2",
+  "pr.review.start": "3",
+  "pr.review.complete": "4",
+  "pr.finding.classify": "5",
+  "pr.implementation.eligibility": "6",
+  "pr.implementation.start": "7",
+  "pr.implementation.scope": "8",
+  "pr.implementation.complete": "9",
+  "pr.review.publish": "10",
+  "pr.implementation.publish": "11",
+  "pr.deferred.publish": "12",
+  "pr.correction.promote": "13",
+  "pr.publication.reconcile": "14",
+}
+
 async function expectGateDialogFits(gateDialog: Locator) {
   await expect
     .poll(
@@ -3329,28 +3832,204 @@ test("unified pull request workspace combines review, implementation, nudges, an
   })
   await expect(reviewFlowTab).toHaveAttribute("aria-selected", "true")
   await expect(implementationFlowTab).toHaveAttribute("aria-selected", "false")
+  const reviewFlow = gateMap.locator('[data-flow-view="review"]')
+  const implementationFlow = gateMap.locator(
+    '[data-flow-view="implementation"]',
+  )
+  await expect(reviewFlow).toBeVisible()
+  await expect(implementationFlow).toBeHidden()
+  await expect(reviewFlow.locator('[data-flow-graph="review"]')).toBeVisible()
+  await expect(
+    implementationFlow.locator('[data-flow-graph="implementation"]'),
+  ).toHaveCount(0)
   await expect(gateMap.locator("[data-decision-point]")).toHaveCount(9)
+  const renderedGateInstances = await expectActiveGateFlowContract(
+    gateMap,
+    "review",
+  )
+  await expectForwardEdgeGeometry(gateMap, "review")
+  await expectGeneratedBranchLabels(gateMap, "review_define_charter", [
+    "First scope",
+    "Revised",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_process_result", [
+    "Findings",
+    "No findings",
+    "Correction",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_assess_scope", [
+    "Clear",
+    "Ambiguous",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_route_classified", [
+    "In scope",
+    "Defer",
+    "Dismiss",
+    "Revise",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_keep_in_scope", [
+    "Review",
+    "Implement",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_group_deferred", [
+    "Link existing",
+    "Create",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_publish_github", [
+    "Confirmed",
+    "Unknown",
+    "Failed",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "review_gate_reconcile", [
+    "Re-observe",
+    "Assume failed",
+  ])
+  await expectLoopBranchTarget(gateMap, "review_resolve_publication", {
+    label: "Still unknown",
+    target: "review_gate_reconcile",
+    targetTitle: "Returns to Resolve unknown publication",
+  })
   await expectGateMapFits(gateMap)
 
-  for (const width of [390, 768, 1024, 1536, 1920, 320]) {
+  for (const width of [390, 768, 1024, 1280, 1536, 1920, 320]) {
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
+    if (width === 1280 || width === 320) {
+      await expectForwardEdgeGeometry(gateMap, "review")
+    }
     await expectNoHorizontalOverflow(page)
   }
   await implementationFlowTab.click()
   await expect(implementationFlowTab).toHaveAttribute("aria-selected", "true")
   await expect(reviewFlowTab).toHaveAttribute("aria-selected", "false")
-  await expect(gateMap.locator("[data-decision-point]")).toHaveCount(9)
-  await expect(gateMap.getByText("Implement selected fixes")).toBeVisible()
-  await expect(gateMap.getByText("Audit completion")).toBeVisible()
+  await expect(implementationFlow).toBeVisible()
+  await expect(reviewFlow).toBeHidden()
   await expect(
-    gateMap.locator('[data-required-gate="hard-scope"]'),
+    implementationFlow.locator('[data-flow-graph="implementation"]'),
   ).toBeVisible()
+  await expect(reviewFlow.locator('[data-flow-graph="review"]')).toHaveCount(0)
+  await expect(gateMap.locator("[data-decision-point]")).toHaveCount(10)
+  renderedGateInstances.push(
+    ...(await expectActiveGateFlowContract(gateMap, "implementation")),
+  )
+  await expectBranchLaunchTargets(gateMap, "implementation_check_ownership", [
+    { label: "Owned", target: "implementation_gate_start" },
+    { label: "Non-owned", target: "implementation_gate_eligibility" },
+    { label: "Read-only", target: "implementation_stop" },
+  ])
+  await expectGeneratedBranchLabels(gateMap, "implementation_check_ownership", [
+    "Owned",
+    "Non-owned",
+    "Read-only",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "implementation_scope_audit", [
+    "Safe path",
+    "Hard stop",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "implementation_validate", [
+    "Passed",
+    "Fixable",
+    "Invalid checks",
+    "Unreliable",
+  ])
+  await expectGeneratedBranchLabels(
+    gateMap,
+    "implementation_completion_audit",
+    ["Candidate", "Deferred"],
+  )
+  await expectGeneratedBranchLabels(
+    gateMap,
+    "implementation_route_completion",
+    ["Missing", "No gaps"],
+  )
+  await expectGeneratedBranchLabels(
+    gateMap,
+    "implementation_final_scope_check",
+    ["Direct", "Policy", "Hard stop"],
+  )
+  await expectGeneratedBranchLabels(
+    gateMap,
+    "implementation_start_joint_gates",
+    ["Scope", "Complete"],
+  )
+  await expectGeneratedBranchLabels(gateMap, "implementation_push", [
+    "Confirmed",
+    "Unknown",
+    "Failed",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "implementation_result", [
+    "Done",
+    "Correction",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "implementation_hard_scope", [
+    "Remove code",
+    "Revise scope",
+    "Stop",
+  ])
+  await expectGeneratedBranchLabels(
+    gateMap,
+    "implementation_remove_and_defer",
+    ["Repair", "Follow-up"],
+  )
+  await expectGeneratedBranchLabels(gateMap, "implementation_group_deferred", [
+    "Link existing",
+    "Create",
+  ])
+  await expectGeneratedBranchLabels(gateMap, "implementation_gate_reconcile", [
+    "Re-observe",
+    "Assume failed",
+  ])
+  await expectLoopBranchTarget(gateMap, "implementation_resolve_publication", {
+    label: "Still unknown",
+    target: "implementation_gate_reconcile",
+    targetTitle: "Returns to Resolve unknown publication",
+  })
+  await expectLoopBranchTarget(gateMap, "implementation_remove_and_defer", {
+    label: "Repair",
+    target: "implementation_run_ai",
+    targetTitle: "Returns to Implement selected fixes",
+  })
+  for (const gate of renderedGateInstances) {
+    expect(gate.ordinal, gate.decisionPoint).toBe(
+      expectedGateOrdinals[gate.decisionPoint],
+    )
+  }
+  expect(
+    [
+      ...new Set(renderedGateInstances.map((gate) => gate.decisionPoint)),
+    ].sort(),
+  ).toEqual(Object.keys(expectedGateOrdinals).sort())
+  await expect(
+    gateMap.locator('[data-flow-node-id="implementation_run_ai"]'),
+  ).toContainText("Implement selected fixes")
+  await expect(
+    gateMap.locator('[data-flow-node-id="implementation_completion_audit"]'),
+  ).toContainText("Audit completion")
+  const lockedSafeguard = gateMap.locator(
+    '[data-required-gate="pr.scope.hard"]',
+  )
+  await expect(lockedSafeguard).toBeVisible()
+  await expect(lockedSafeguard).toHaveAttribute("role", "group")
+  expect(
+    await lockedSafeguard.evaluate(
+      (safeguard) =>
+        safeguard.matches("button, a, input, select, textarea, [tabindex]") ||
+        safeguard.querySelector("[data-gate-id]") != null,
+    ),
+  ).toBe(false)
+  await lockedSafeguard.click()
+  await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(0)
+  await expect(page).toHaveURL(
+    /\/pull-requests\?view=gate-profiles&profile=default$/,
+  )
   await expect(gateMap.getByText("Request PR review")).toHaveCount(0)
 
-  for (const width of [390, 768, 1024, 1536, 1920, 320]) {
+  for (const width of [390, 768, 1024, 1280, 1536, 1920, 320]) {
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
+    if (width === 1280 || width === 320) {
+      await expectForwardEdgeGeometry(gateMap, "implementation")
+    }
     await expectNoHorizontalOverflow(page)
   }
   await expectNoSeriousA11yViolations(page)
@@ -3370,6 +4049,15 @@ test("unified pull request workspace combines review, implementation, nudges, an
   )
   await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(1)
   await expect(gateDialog.getByLabel("Workflow name")).toBeVisible()
+  await expectGateDialogFits(gateDialog)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  await gateDialog.getByRole("button", { name: "Done" }).click()
+  await expect(gateDialog).toBeHidden()
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await gateMap.getByRole("button", { name: "Accept review results" }).click()
+  await expect(gateDialog).toBeVisible()
   await expectGateDialogFits(gateDialog)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)

@@ -62,6 +62,18 @@ declared GitHub MCP comment action.
 Pull-request review and implementation are no longer installed workflow templates;
 the unified PR workspace invokes its private staged gates and isolated model
 operations directly through the existing workflow and agent runtimes.
+Their user-visible topology is declared separately in the strict
+`pr-lifecycle-flow/v1` manifest at
+`pkg/prworkspace/lifecycleflow/manifest.yaml`. That manifest is the source of
+truth for the separate Review and Implementation diagrams: ordered action and
+gate nodes, short labels on real forks, explicit retry loops, editable gate
+decision points, and locked safeguards. The launcher parses and validates the
+manifest server-side, exposes the normalized graph and its content revision
+with the gate-profile catalog, and the browser derives gate format from the
+selected profile's ordered stages. Diagram layout is responsive presentation
+state and is deliberately absent from YAML. Run
+`go generate ./pkg/prworkspace/lifecycleflow` to refresh the checked-in
+standalone SVG and browser-test fixture from that same normalized graph.
 Workflows can also suspend at a `human/task` step without holding a process or
 runtime lease. The run stores the exact admitted workflow snapshot, completed
 outputs, pending task, and restart cursor, then resumes that same definition

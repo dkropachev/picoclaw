@@ -220,6 +220,162 @@ const gateProfiles: PRLifecycleGateProfileSnapshot = {
     m: { files: 10, semantic_lines: 500, modules: 3 },
   },
   deferred_issues: { mode: "ask" },
+  flow: {
+    schema: "pr-lifecycle-flow/v1",
+    flows: [
+      {
+        id: "review",
+        title: "Review workflow",
+        entry: "review_complete",
+        nodes: [
+          {
+            id: "charter_confirm",
+            kind: "gate",
+            title: "Approve purpose and scope",
+            description: "Checks the initial PR charter.",
+            decision_point: "pr.charter.confirm",
+            ordinal: 1,
+            editable: true,
+          },
+          {
+            id: "charter_reconfirm",
+            kind: "gate",
+            title: "Approve revised purpose and scope",
+            description: "Checks a revised PR charter.",
+            decision_point: "pr.charter.reconfirm",
+            ordinal: 2,
+            editable: true,
+          },
+          {
+            id: "review_start",
+            kind: "gate",
+            title: "Allow AI review",
+            description: "Checks whether review may begin.",
+            decision_point: "pr.review.start",
+            ordinal: 3,
+            editable: true,
+          },
+          {
+            id: "review_complete",
+            kind: "gate",
+            title: "Accept review results",
+            description: "Checks review coverage before follow-up begins.",
+            decision_point: "pr.review.complete",
+            ordinal: 4,
+            editable: true,
+          },
+          {
+            id: "finding_classify",
+            kind: "gate",
+            title: "Decide ambiguous finding scope",
+            description: "Classifies an ambiguous finding.",
+            decision_point: "pr.finding.classify",
+            ordinal: 5,
+            editable: true,
+          },
+          {
+            id: "review_publish",
+            kind: "gate",
+            title: "Allow review publication",
+            description: "Checks whether the review may be published.",
+            decision_point: "pr.review.publish",
+            ordinal: 10,
+            editable: true,
+          },
+          {
+            id: "deferred_publish",
+            kind: "gate",
+            title: "Allow follow-up issue",
+            description: "Checks whether a follow-up issue may be created.",
+            decision_point: "pr.deferred.publish",
+            ordinal: 12,
+            editable: true,
+          },
+          {
+            id: "correction_promote",
+            kind: "gate",
+            title: "Allow repository lesson",
+            description: "Checks whether correction guidance may be saved.",
+            decision_point: "pr.correction.promote",
+            ordinal: 13,
+            editable: true,
+          },
+          {
+            id: "publication_reconcile",
+            kind: "gate",
+            title: "Resolve unknown publication",
+            description: "Checks how an unknown provider result is resolved.",
+            decision_point: "pr.publication.reconcile",
+            ordinal: 14,
+            editable: true,
+          },
+        ],
+        edges: [],
+      },
+      {
+        id: "implementation",
+        title: "Implementation workflow",
+        entry: "implementation_start",
+        nodes: [
+          {
+            id: "implementation_start",
+            kind: "action",
+            title: "Load selected findings",
+            description: "Bring selected findings into implementation.",
+            operation: "pr.implementation.findings.load",
+            editable: false,
+          },
+          {
+            id: "implementation_eligibility",
+            kind: "gate",
+            title: "Allow non-owned PR implementation",
+            description: "Checks implementation authority.",
+            decision_point: "pr.implementation.eligibility",
+            ordinal: 6,
+            editable: true,
+          },
+          {
+            id: "implementation_start_gate",
+            kind: "gate",
+            title: "Allow AI implementation",
+            description: "Checks whether implementation may begin.",
+            decision_point: "pr.implementation.start",
+            ordinal: 7,
+            editable: true,
+          },
+          {
+            id: "implementation_scope",
+            kind: "gate",
+            title: "Allow large or adjacent work",
+            description: "Checks policy-gated candidate scope.",
+            decision_point: "pr.implementation.scope",
+            ordinal: 8,
+            editable: true,
+          },
+          {
+            id: "implementation_complete",
+            kind: "gate",
+            title: "Accept implementation",
+            description: "Checks whether implementation is complete.",
+            decision_point: "pr.implementation.complete",
+            ordinal: 9,
+            editable: true,
+          },
+          {
+            id: "implementation_publish",
+            kind: "gate",
+            title: "Allow branch push",
+            description: "Checks whether the branch may be pushed.",
+            decision_point: "pr.implementation.publish",
+            ordinal: 11,
+            editable: true,
+          },
+        ],
+        edges: [],
+      },
+    ],
+  },
+  flow_revision: "sha256:flow",
   catalog_revision: "sha256:catalog",
   config_revision: "sha256:config",
   effects: { gateway_effect: "applied" },
@@ -2908,6 +3064,34 @@ describe("unified PR workspace pages", () => {
       "pr.review.complete",
     )
     expect(onDecisionPointChange).not.toHaveBeenCalled()
+  })
+
+  it("drops a well-formed gate deep link that is absent from the YAML graph", async () => {
+    const onDecisionPointChange = vi.fn()
+    function UnknownGateHarness() {
+      const [decisionPoint, setDecisionPoint] = useState<
+        PRLifecycleDecisionPoint | undefined
+      >("pr.review.ghost")
+      return (
+        <PRLifecycleGateProfilesPage
+          onBack={vi.fn()}
+          initialProfileID="default"
+          initialDecisionPoint={decisionPoint}
+          onDecisionPointChange={(next) => {
+            onDecisionPointChange(next)
+            setDecisionPoint(next)
+          }}
+        />
+      )
+    }
+    renderPage(<UnknownGateHarness />)
+
+    await screen.findByRole("button", { name: "Accept review results" })
+    await waitFor(() =>
+      expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined),
+    )
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    expect(document.querySelector("#pr-gate-workflow-editor")).toBeNull()
   })
 
   it("confirms before discarding an in-app gate-profile draft", async () => {

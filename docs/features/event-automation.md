@@ -167,6 +167,7 @@ alias, ID adapter, or configuration migration for legacy PR state.
 Owns: CODE pkg/eventing/**
 Owns: CODE pkg/eventing/webhook/**
 Owns: CODE pkg/eventing/channelmessage/**
+Owns: CODE pkg/prlifecycle/**
 Owns: CODE pkg/prworkspace/**
 Owns: CODE pkg/reviews/provider.go
 Owns: CODE pkg/reviews/submitter.go
@@ -230,6 +231,7 @@ Owns: CLI cmd/picoclaw/internal/events/*
 Owns: TEST pkg/eventing/*
 Owns: TEST pkg/eventing/webhook/*
 Owns: TEST pkg/eventing/channelmessage/*
+Owns: TEST pkg/prlifecycle/*
 Owns: TEST pkg/prworkspace/*
 Owns: TEST pkg/reviews/*
 Owns: TEST pkg/config/events*

@@ -194,10 +194,11 @@ fails closed instead of changing the gate's evidence. Retrying a suspended gate
 resumes the same gate; it does not repeat a completed review, repair, validation,
 or provider effect.
 
-The built-in profile defines decision points for charter confirmation and
-reconfirmation, review start and completion, implementation start, large exact
-scope, implementation completion, review publication, branch publication,
-deferred-issue publication, correction promotion, and ambiguous-publication
+The built-in profile defines 14 stable decision points: charter confirmation
+and reconfirmation; review start and completion; ambiguous-finding
+classification; non-owned implementation eligibility; implementation start,
+large-or-adjacent scope, and completion; review and branch publication;
+deferred-issue publication; correction promotion; and ambiguous-publication
 reconciliation. Candidate-present `S2`/`S3` or PR-type-incompatible work uses
 the separate non-configurable built-in human resolution gate described above;
 it is not the configurable large-exact-scope classification gate.
