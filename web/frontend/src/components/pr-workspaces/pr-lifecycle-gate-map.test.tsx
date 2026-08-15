@@ -241,6 +241,7 @@ describe("PR lifecycle gate map", () => {
   it("renders every gate as an exact selectable decision point", () => {
     const { container } = render(
       <PRLifecycleGateMap
+        profileID="strict"
         selectedDecisionPoint="pr.review.start"
         workflows={workflows}
         onSelect={vi.fn()}
@@ -259,11 +260,13 @@ describe("PR lifecycle gate map", () => {
 
     const selected = screen.getByRole("button", { name: "Allow AI review" })
     expect(selected).toHaveAttribute("aria-pressed", "true")
+    expect(selected).toHaveAttribute("aria-haspopup", "dialog")
+    expect(selected).toHaveAttribute("aria-expanded", "true")
     expect(selected).toHaveAttribute("data-gate-id", "pr.review.start")
     expect(selected).toHaveAttribute("data-editor-title", "Start review")
     expect(selected).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests?view=gate-profiles&gate=pr.review.start",
+      "/pull-requests?view=gate-profiles&profile=strict&gate=pr.review.start",
     )
     expect(selected).toHaveAttribute("data-workflow-configured", "true")
     expect(selected).toHaveAttribute("data-gate-format", "automatic")
@@ -278,6 +281,8 @@ describe("PR lifecycle gate map", () => {
     const fallback = screen.getByRole("button", {
       name: "Approve purpose and scope",
     })
+    expect(fallback).toHaveAttribute("aria-haspopup", "dialog")
+    expect(fallback).toHaveAttribute("aria-expanded", "false")
     expect(fallback).toHaveAttribute("data-workflow-configured", "false")
     expect(fallback).toHaveAttribute("data-gate-format", "user")
     expect(within(fallback).getByText("default fallback")).toBeInTheDocument()

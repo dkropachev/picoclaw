@@ -3155,20 +3155,41 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expect(
     page.getByRole("heading", { name: "PR lifecycle gate profiles" }),
   ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Edit Default profile" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "PR lifecycle gate flow" }),
+  ).toHaveCount(0)
+  await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(0)
+  await expect(page.getByText("Review minimum")).toBeVisible()
+  await expect(page.getByText("XS modules")).toBeVisible()
+
+  await page.getByRole("button", { name: "Edit Default profile" }).click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\?view=gate-profiles&profile=default$/,
+  )
+  await expect(
+    page.getByRole("heading", { name: "Edit Default gate profile" }),
+  ).toBeVisible()
   const gateMap = page
     .getByRole("heading", { name: "PR lifecycle gate flow" })
     .locator("xpath=ancestor::section[1]")
   await expect(gateMap.locator("[data-decision-point]")).toHaveCount(14)
   await gateMap.getByRole("button", { name: "Accept review results" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\?view=gate-profiles&gate=pr\.review\.complete$/,
+    /\/pull-requests\?view=gate-profiles&profile=default&gate=pr\.review\.complete$/,
   )
-  await expect(page.locator("#pr-gate-workflow-editor")).toHaveAttribute(
+  const gateDialog = page.getByRole("dialog", {
+    name: "Accept review results",
+  })
+  await expect(gateDialog).toBeVisible()
+  await expect(gateDialog.locator("#pr-gate-workflow-editor")).toHaveAttribute(
     "data-decision-point",
     "pr.review.complete",
   )
-  await expect(page.getByText("Review minimum")).toBeVisible()
-  await expect(page.getByText("XS modules")).toBeVisible()
+  await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(1)
+  await expect(gateDialog.getByLabel("Workflow name")).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

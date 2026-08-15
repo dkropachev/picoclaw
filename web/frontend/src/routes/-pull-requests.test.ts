@@ -19,7 +19,7 @@ describe("pull requests route search", () => {
     ).toEqual({ workspace: workspaceID })
   })
 
-  it("uses one canonical gate-profile view", () => {
+  it("uses the gate-profile view without a profile as the list", () => {
     expect(
       normalizePullRequestsSearch({
         view: "gate-profiles",
@@ -29,26 +29,53 @@ describe("pull requests route search", () => {
     ).toEqual({ view: "gate-profiles" })
   })
 
-  it("keeps one allowlisted gate in the gate-profile view", () => {
+  it("keeps one valid profile as the editor", () => {
+    expect(
+      normalizePullRequestsSearch({
+        view: "gate-profiles",
+        profile: "release_candidate-1",
+      }),
+    ).toEqual({ view: "gate-profiles", profile: "release_candidate-1" })
+  })
+
+  it("keeps an allowlisted gate with its profile as the modal", () => {
+    expect(
+      normalizePullRequestsSearch({
+        view: "gate-profiles",
+        profile: "strict",
+        gate,
+      }),
+    ).toEqual({ view: "gate-profiles", profile: "strict", gate })
+  })
+
+  it("attaches old gate-only deep links to the default profile", () => {
     expect(
       normalizePullRequestsSearch({
         view: "gate-profiles",
         gate,
       }),
-    ).toEqual({ view: "gate-profiles", gate })
+    ).toEqual({ view: "gate-profiles", profile: "default", gate })
   })
 
-  it("scrubs invalid, repeated, and out-of-context gates", () => {
+  it("scrubs invalid, repeated, and out-of-context profile state", () => {
     expect(
       normalizePullRequestsSearch({
         view: "gate-profiles",
+        profile: "Invalid Profile",
         gate: "pr.not-a-gate",
       }),
     ).toEqual({ view: "gate-profiles" })
     expect(
       normalizePullRequestsSearch({
         view: "gate-profiles",
+        profile: ["default"],
         gate: [gate],
+      }),
+    ).toEqual({ view: "gate-profiles" })
+    expect(
+      normalizePullRequestsSearch({
+        view: "gate-profiles",
+        profile: `a${"b".repeat(64)}`,
       }),
     ).toEqual({ view: "gate-profiles" })
     expect(normalizePullRequestsSearch({ gate })).toEqual({})
@@ -81,9 +108,15 @@ describe("pull requests route search", () => {
     ).toBe(true)
     expect(
       pullRequestsSearchIsCanonical(
-        { view: "gate-profiles", gate },
-        { view: "gate-profiles", gate },
+        { view: "gate-profiles", profile: "default", gate },
+        { view: "gate-profiles", profile: "default", gate },
       ),
     ).toBe(true)
+    expect(
+      pullRequestsSearchIsCanonical(
+        { view: "gate-profiles", gate },
+        { view: "gate-profiles", profile: "default", gate },
+      ),
+    ).toBe(false)
   })
 })

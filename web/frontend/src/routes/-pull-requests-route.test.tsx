@@ -39,18 +39,31 @@ vi.mock("@/components/pr-workspaces/pr-workspace-page", () => ({
 
 vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-profiles-page", () => ({
   PRLifecycleGateProfilesPage: (props: {
+    initialProfileID?: string
     initialDecisionPoint?: string
-    onDecisionPointChange: (gate: string) => void
+    onProfileChange: (profileID?: string) => void
+    onDecisionPointChange: (gate?: string) => void
   }) => {
     mockedGateProfilePage(props)
     return (
       <div>
-        <output>Gate profile editor</output>
+        <output>
+          {props.initialProfileID ? "Gate profile editor" : "Gate profile list"}
+        </output>
+        <button type="button" onClick={() => props.onProfileChange("strict")}>
+          Edit strict profile
+        </button>
+        <button type="button" onClick={() => props.onProfileChange()}>
+          Back to profiles
+        </button>
         <button
           type="button"
           onClick={() => props.onDecisionPointChange("pr.implementation.scope")}
         >
           Select scope gate
+        </button>
+        <button type="button" onClick={() => props.onDecisionPointChange()}>
+          Close gate
         </button>
       </div>
     )
@@ -87,7 +100,7 @@ describe("pull requests route navigation", () => {
     expect(screen.getByTestId("workspace-id")).toHaveTextContent(workspaceID)
   })
 
-  it("renders the exact gate-profile editor view", async () => {
+  it("renders the gate-profile list and scrubs unrelated state", async () => {
     const router = routerAt(
       `/pull-requests?view=gate-profiles&workspace=${workspaceID}&revision=private`,
     )
@@ -96,26 +109,53 @@ describe("pull requests route navigation", () => {
     await waitFor(() => {
       expect(router.state.location.search).toEqual({ view: "gate-profiles" })
     })
-    expect(screen.getByText("Gate profile editor")).toBeVisible()
+    expect(screen.getByText("Gate profile list")).toBeVisible()
   })
 
-  it("passes an allowlisted gate deep link to the profile editor", async () => {
+  it("canonicalizes a gate-only deep link to the default profile editor", async () => {
     const router = routerAt(`/pull-requests?view=gate-profiles&gate=${gate}`)
     render(<RouterProvider router={router} />)
 
     await waitFor(() => {
       expect(router.state.location.search).toEqual({
         view: "gate-profiles",
+        profile: "default",
         gate,
       })
     })
     expect(mockedGateProfilePage).toHaveBeenCalledWith(
-      expect.objectContaining({ initialDecisionPoint: gate }),
+      expect.objectContaining({
+        initialProfileID: "default",
+        initialDecisionPoint: gate,
+      }),
     )
   })
 
-  it("keeps an in-page gate selection in the canonical URL", async () => {
+  it("moves from the profile list to a distinct editor URL", async () => {
     const router = routerAt("/pull-requests?view=gate-profiles")
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByText("Gate profile list")).toBeVisible()
+    fireEvent.click(screen.getByRole("button", { name: "Edit strict profile" }))
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "gate-profiles",
+        profile: "strict",
+      })
+    })
+    expect(screen.getByText("Gate profile editor")).toBeVisible()
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to profiles" }))
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "gate-profiles",
+      })
+    })
+    expect(screen.getByText("Gate profile list")).toBeVisible()
+  })
+
+  it("opens and closes a gate modal while preserving the profile", async () => {
+    const router = routerAt("/pull-requests?view=gate-profiles&profile=strict")
     render(<RouterProvider router={router} />)
 
     fireEvent.click(
@@ -124,7 +164,16 @@ describe("pull requests route navigation", () => {
     await waitFor(() => {
       expect(router.state.location.search).toEqual({
         view: "gate-profiles",
+        profile: "strict",
         gate: "pr.implementation.scope",
+      })
+    })
+
+    fireEvent.click(screen.getByRole("button", { name: "Close gate" }))
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "gate-profiles",
+        profile: "strict",
       })
     })
   })

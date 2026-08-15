@@ -152,6 +152,12 @@ export interface PRLifecycleGateProfileIssue {
   message: string
 }
 
+export const prLifecycleGateProfileIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
+
+export function isPRLifecycleGateProfileID(value: string): boolean {
+  return prLifecycleGateProfileIDPattern.test(value)
+}
+
 const prLifecycleGateIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
 
 export function validatePRLifecycleGateWorkflow(
@@ -291,10 +297,9 @@ export function validatePRLifecycleGateProfiles(
         "The built-in Default profile is required and cannot be renamed.",
     })
   }
-  const profileIDPattern = /^[a-z][a-z0-9_-]{0,63}$/
   const names = new Set<string>()
   for (const [profileID, profile] of Object.entries(snapshot.gate_profiles)) {
-    if (!profileIDPattern.test(profileID)) {
+    if (!isPRLifecycleGateProfileID(profileID)) {
       issues.push({
         path: `gate_profiles.${profileID}`,
         message: "Invalid profile ID.",

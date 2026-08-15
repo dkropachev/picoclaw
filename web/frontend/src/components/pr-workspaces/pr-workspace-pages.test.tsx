@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import type { ReactNode } from "react"
+import { type ReactNode, useState } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  type PRLifecycleDecisionPoint,
   type PRLifecycleGateProfileSnapshot,
   getPRLifecycleGateProfiles,
   putPRLifecycleGateProfiles,
@@ -2669,7 +2670,7 @@ describe("unified PR workspace pages", () => {
     ).toBeVisible()
   })
 
-  it("edits exact global tuning alongside ordered gate profiles", async () => {
+  it("keeps the profile list separate from the selected profile editor", async () => {
     const user = userEvent.setup()
     renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
 
@@ -2684,31 +2685,46 @@ describe("unified PR workspace pages", () => {
     expect(
       screen.getByRole("heading", {
         level: 2,
-        name: "Repository assignments",
-      }),
-    ).toBeVisible()
-    expect(
-      screen.getByRole("heading", {
-        level: 2,
         name: "Nudge and scope defaults",
       }),
     ).toBeVisible()
-    expect(
-      screen.getByRole("heading", { level: 2, name: "Decision workflow" }),
-    ).toBeVisible()
+    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
+      "data-profile-view",
+      "list",
+    )
+    expect(screen.getByText("1 configured gate · 0 repositories")).toBeVisible()
     expect(screen.getByText("Review minimum")).toBeVisible()
     expect(screen.getByText("Deferred issue handling")).toBeVisible()
     expect(screen.getByText("XS modules")).toBeVisible()
     expect(
-      screen.getByPlaceholderText("https://github.com|repository-id"),
-    ).toBeVisible()
+      screen.queryByRole("heading", { name: "PR lifecycle gate flow" }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByPlaceholderText("https://github.com|repository-id"),
+    ).not.toBeInTheDocument()
+    expect(
+      document.querySelector("#pr-gate-workflow-editor"),
+    ).not.toBeInTheDocument()
 
-    await user.click(screen.getByLabelText("Decision workflow"))
-    await user.click(screen.getByRole("option", { name: "Complete review" }))
-    expect(screen.getByTestId("pr-gate-stage-controls")).toHaveClass(
-      "flex-col",
-      "sm:flex-row",
-    )
+    const profileID = screen.getByLabelText("Stable profile ID")
+    const profileName = screen.getByLabelText("Profile name")
+    const addProfile = screen.getByRole("button", { name: "Add profile" })
+    await user.type(profileID, "Bad Profile")
+    await user.type(profileName, "Unreachable")
+    expect(profileID).toHaveAttribute("aria-invalid", "true")
+    expect(addProfile).toBeDisabled()
+    expect(screen.queryByText("Unreachable")).not.toBeInTheDocument()
+    await user.clear(profileID)
+    await user.clear(profileName)
+    await user.type(profileID, "default")
+    await user.type(profileName, "Duplicate")
+    expect(profileID).toHaveAttribute("aria-invalid", "true")
+    expect(addProfile).toBeDisabled()
+    expect(
+      screen.getByText("A profile with this ID already exists."),
+    ).toBeVisible()
+    await user.clear(profileID)
+    await user.clear(profileName)
 
     const minimum = screen.getAllByRole("spinbutton")[0]
     await user.clear(minimum)
@@ -2725,35 +2741,172 @@ describe("unified PR workspace pages", () => {
         }),
       ),
     )
+
+    await user.click(
+      screen.getByRole("button", { name: "Edit Default profile" }),
+    )
+    expect(
+      screen.getByRole("heading", { name: "Edit Default gate profile" }),
+    ).toBeVisible()
+    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
+      "data-profile-view",
+      "editor",
+    )
+    expect(
+      screen.getByRole("heading", { name: "PR lifecycle gate flow" }),
+    ).toBeVisible()
+    expect(
+      screen.getByPlaceholderText("https://github.com|repository-id"),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("heading", { name: "Nudge and scope defaults" }),
+    ).not.toBeInTheDocument()
+    expect(
+      document.querySelector("#pr-gate-workflow-editor"),
+    ).not.toBeInTheDocument()
   })
 
-  it("opens an exact gate deep link in the focused workflow editor", async () => {
+  it("opens gate details only in a dialog and reports when it closes", async () => {
+    const user = userEvent.setup()
+    const onDecisionPointChange = vi.fn()
+
+    function GateEditorHarness() {
+      const [decisionPoint, setDecisionPoint] =
+        useState<PRLifecycleDecisionPoint>()
+      return (
+        <PRLifecycleGateProfilesPage
+          onBack={vi.fn()}
+          initialProfileID="default"
+          initialDecisionPoint={decisionPoint}
+          onDecisionPointChange={(next) => {
+            onDecisionPointChange(next)
+            setDecisionPoint(next)
+          }}
+        />
+      )
+    }
+
+    renderPage(<GateEditorHarness />)
+
+    const trigger = await screen.findByRole("button", {
+      name: "Accept review results",
+    })
+    expect(trigger).toHaveAttribute("aria-haspopup", "dialog")
+    expect(trigger).toHaveAttribute("aria-expanded", "false")
+    expect(
+      document.querySelector("#pr-gate-workflow-editor"),
+    ).not.toBeInTheDocument()
+
+    await user.click(trigger)
+
+    const dialog = screen.getByRole("dialog", {
+      name: "Accept review results",
+    })
+    expect(dialog).toBeVisible()
+    expect(trigger).toHaveAttribute("aria-expanded", "true")
+    const editor = dialog.querySelector("#pr-gate-workflow-editor")
+    expect(editor).toHaveAttribute("data-decision-point", "pr.review.complete")
+    expect(document.querySelectorAll("#pr-gate-workflow-editor")).toHaveLength(
+      1,
+    )
+    expect(onDecisionPointChange).toHaveBeenLastCalledWith("pr.review.complete")
+
+    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+    expect(
+      screen.queryByRole("dialog", { name: "Accept review results" }),
+    ).not.toBeInTheDocument()
+    expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined)
+    await waitFor(() => expect(trigger).toHaveFocus())
+    expect(trigger).toHaveAttribute("aria-expanded", "false")
+  })
+
+  it("preserves edits made while a gate-profile save is in flight", async () => {
+    const user = userEvent.setup()
+    let resolveSave!: (value: PRLifecycleGateProfileSnapshot) => void
+    mockedPutGateProfiles.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve
+        }),
+    )
+    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
+
+    const minimum = (await screen.findAllByRole("spinbutton"))[0]
+    await user.clear(minimum)
+    await user.type(minimum, "3")
+    await user.click(screen.getByRole("button", { name: "Save profiles" }))
+    await waitFor(() => expect(mockedPutGateProfiles).toHaveBeenCalledTimes(1))
+
+    await user.clear(minimum)
+    await user.type(minimum, "4")
+    await act(async () => {
+      resolveSave({
+        ...gateProfiles,
+        config_revision: "sha256:after-first-save",
+        nudge: {
+          ...gateProfiles.nudge,
+          review_minimum_additional: 3,
+        },
+      })
+    })
+
+    await waitFor(() => expect(minimum).toHaveValue(4))
+    expect(screen.getByRole("button", { name: "Save profiles" })).toBeEnabled()
+    await user.click(screen.getByRole("button", { name: "Save profiles" }))
+    await waitFor(() => expect(mockedPutGateProfiles).toHaveBeenCalledTimes(2))
+    expect(mockedPutGateProfiles).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        expected_config_revision: "sha256:after-first-save",
+        nudge: expect.objectContaining({ review_minimum_additional: 4 }),
+      }),
+    )
+  })
+
+  it("opens an alternate-profile gate deep link in the correct dialog", async () => {
     const onDecisionPointChange = vi.fn()
     mockedGetGateProfiles.mockResolvedValueOnce({
       ...gateProfiles,
       gate_profiles: {
         ...gateProfiles.gate_profiles,
-        alternate: { name: "Alternate", workflows: {} },
+        alternate: {
+          name: "Alternate",
+          workflows: {
+            "pr.review.complete": {
+              id: "alternate_review_complete",
+              name: "Alternate review completion",
+              purpose: "authorization",
+              decision_point: "pr.review.complete",
+              stages: [{ id: "automatic", kind: "zero" }],
+            },
+          },
+        },
       },
       default_gate_profile_id: "alternate",
     })
-    const { container } = renderPage(
+    renderPage(
       <PRLifecycleGateProfilesPage
         onBack={vi.fn()}
+        initialProfileID="alternate"
         initialDecisionPoint="pr.review.complete"
         onDecisionPointChange={onDecisionPointChange}
       />,
     )
 
-    const editor = await waitFor(() => {
-      const value = container.querySelector<HTMLElement>(
-        "#pr-gate-workflow-editor",
-      )
-      expect(value).toHaveAttribute("data-decision-point", "pr.review.complete")
-      return value!
+    const dialog = await screen.findByRole("dialog", {
+      name: "Accept review results",
     })
-    await waitFor(() => expect(editor).toHaveFocus())
-    expect(screen.getByLabelText("Profiles")).toHaveTextContent("Default")
+    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
+      "data-profile-view",
+      "editor",
+    )
+    expect(within(dialog).getByText(/Alternate ·/)).toBeVisible()
+    expect(
+      within(dialog).getByDisplayValue("Alternate review completion"),
+    ).toBeVisible()
+    expect(dialog.querySelector("#pr-gate-workflow-editor")).toHaveAttribute(
+      "data-decision-point",
+      "pr.review.complete",
+    )
     expect(onDecisionPointChange).not.toHaveBeenCalled()
   })
 
@@ -2866,29 +3019,37 @@ describe("unified PR workspace pages", () => {
         },
       },
     })
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
 
-    await screen.findByRole("heading", { name: "Decision workflow" })
-    await user.click(screen.getByLabelText("Decision workflow"))
-    await user.click(screen.getByRole("option", { name: "Complete review" }))
-
-    const editor = screen.getByTestId("pr-gate-stage-editor")
+    await user.click(
+      await screen.findByRole("button", { name: "Accept review results" }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Accept review results",
+    })
+    const editor = within(dialog).getByTestId("pr-gate-stage-editor")
     expect(editor).toHaveClass("min-w-0", "max-w-full")
-    expect(screen.getByLabelText("Stable stage ID")).toHaveClass("min-w-0")
-    expect(screen.getByLabelText("Stage type")).toHaveClass(
+    expect(within(dialog).getByLabelText("Stable stage ID")).toHaveClass(
+      "min-w-0",
+    )
+    expect(within(dialog).getByLabelText("Stage type")).toHaveClass(
       "min-w-0",
       "max-w-full",
     )
-    expect(screen.getByLabelText("AI criteria")).toHaveClass(
-      "min-w-0",
-      "max-w-full",
-    )
-    expect(screen.getByLabelText("AI criteria").parentElement).toHaveClass(
+    expect(within(dialog).getByLabelText("AI criteria")).toHaveClass(
       "min-w-0",
       "max-w-full",
     )
     expect(
-      screen.queryByLabelText("Run condition (optional)"),
+      within(dialog).getByLabelText("AI criteria").parentElement,
+    ).toHaveClass("min-w-0", "max-w-full")
+    expect(
+      within(dialog).queryByLabelText("Run condition (optional)"),
     ).not.toBeInTheDocument()
   })
 })

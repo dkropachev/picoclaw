@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo } from "react"
 
 import {
   type PRLifecycleDecisionPoint,
+  isPRLifecycleGateProfileID,
   prLifecycleKnownDecisionPoints,
 } from "@/api/pr-lifecycle-gate-profiles"
 import { PRLifecycleGateProfilesPage } from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
@@ -14,6 +15,7 @@ const workspaceIDPattern = /^prw_[0-9a-f]{32}$/
 export interface PullRequestsRouteSearch {
   workspace?: string
   view?: "gate-profiles"
+  profile?: string
   gate?: PRLifecycleDecisionPoint
 }
 
@@ -22,12 +24,21 @@ export function normalizePullRequestsSearch(
 ): PullRequestsRouteSearch {
   if (Object.hasOwn(raw, "view")) {
     if (raw.view !== "gate-profiles") return {}
+    const profile =
+      typeof raw.profile === "string" && isPRLifecycleGateProfileID(raw.profile)
+        ? raw.profile
+        : undefined
     const gate =
       typeof raw.gate === "string" &&
       (prLifecycleKnownDecisionPoints as readonly string[]).includes(raw.gate)
         ? (raw.gate as PRLifecycleDecisionPoint)
         : undefined
-    return gate ? { view: "gate-profiles", gate } : { view: "gate-profiles" }
+    if (gate) {
+      return { view: "gate-profiles", profile: profile ?? "default", gate }
+    }
+    return profile
+      ? { view: "gate-profiles", profile }
+      : { view: "gate-profiles" }
   }
   return typeof raw.workspace === "string" &&
     workspaceIDPattern.test(raw.workspace)
@@ -78,10 +89,23 @@ function PullRequestsRoutePage() {
     return (
       <PRLifecycleGateProfilesPage
         onBack={() => changeSearch({})}
+        initialProfileID={search.profile}
         initialDecisionPoint={search.gate}
-        onDecisionPointChange={(gate) =>
-          changeSearch({ view: "gate-profiles", gate })
+        onProfileChange={(profile) =>
+          changeSearch(
+            profile
+              ? { view: "gate-profiles", profile }
+              : { view: "gate-profiles" },
+          )
         }
+        onDecisionPointChange={(gate) => {
+          const profile = search.profile ?? "default"
+          changeSearch(
+            gate
+              ? { view: "gate-profiles", profile, gate }
+              : { view: "gate-profiles", profile },
+          )
+        }}
       />
     )
   }

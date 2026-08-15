@@ -7,12 +7,16 @@ import {
   type PRLifecycleGateWorkflow,
   validatePRLifecycleGateWorkflow,
 } from "@/api/pr-lifecycle-gate-profiles"
-import { prLifecycleGateLabels } from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
+import {
+  prLifecycleGateDecisionLabels,
+  prLifecycleGateLabels,
+} from "@/components/pr-workspaces/pr-lifecycle-gate-catalog"
 import { cn } from "@/lib/utils"
 
 interface PRLifecycleGateMapProps {
-  selectedDecisionPoint: PRLifecycleDecisionPoint
+  selectedDecisionPoint?: PRLifecycleDecisionPoint
   workflows?: PRLifecycleGateProfile["workflows"]
+  profileID?: string
   profileName?: string
   onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
   className?: string
@@ -31,98 +35,99 @@ const gateSpecs = [
     number: 1,
     decisionPoint: "pr.charter.confirm",
     title: prLifecycleGateLabels["pr.charter.confirm"],
-    decisionTitle: "Approve purpose and scope",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.charter.confirm"],
     detail: "First charter revision",
   },
   {
     number: 2,
     decisionPoint: "pr.charter.reconfirm",
     title: prLifecycleGateLabels["pr.charter.reconfirm"],
-    decisionTitle: "Approve revised purpose and scope",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.charter.reconfirm"],
     detail: "Revised charter path",
   },
   {
     number: 3,
     decisionPoint: "pr.review.start",
     title: prLifecycleGateLabels["pr.review.start"],
-    decisionTitle: "Allow AI review",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.review.start"],
     detail: "Before diff reaches the review agent",
   },
   {
     number: 4,
     decisionPoint: "pr.review.complete",
     title: prLifecycleGateLabels["pr.review.complete"],
-    decisionTitle: "Accept review results",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.review.complete"],
     detail: "Overall findings and coverage",
   },
   {
     number: 5,
     decisionPoint: "pr.finding.classify",
     title: prLifecycleGateLabels["pr.finding.classify"],
-    decisionTitle: "Decide ambiguous finding scope",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.finding.classify"],
     detail: "Finding scope is ambiguous",
   },
   {
     number: 6,
     decisionPoint: "pr.implementation.eligibility",
     title: prLifecycleGateLabels["pr.implementation.eligibility"],
-    decisionTitle: "Allow non-owned PR implementation",
+    decisionTitle:
+      prLifecycleGateDecisionLabels["pr.implementation.eligibility"],
     detail: "Non-owned pull requests only",
   },
   {
     number: 7,
     decisionPoint: "pr.implementation.start",
     title: prLifecycleGateLabels["pr.implementation.start"],
-    decisionTitle: "Allow AI implementation",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.start"],
     detail: "Before the pinned repair workspace",
   },
   {
     number: 8,
     decisionPoint: "pr.implementation.scope",
     title: prLifecycleGateLabels["pr.implementation.scope"],
-    decisionTitle: "Allow large or adjacent work",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.scope"],
     detail: "Large or adjacent candidate work",
   },
   {
     number: 9,
     decisionPoint: "pr.implementation.complete",
     title: prLifecycleGateLabels["pr.implementation.complete"],
-    decisionTitle: "Accept implementation",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.complete"],
     detail: "Validated, completion-audited candidate",
   },
   {
     number: 10,
     decisionPoint: "pr.review.publish",
     title: prLifecycleGateLabels["pr.review.publish"],
-    decisionTitle: "Allow review publication",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.review.publish"],
     detail: "Independent GitHub review effect",
   },
   {
     number: 11,
     decisionPoint: "pr.implementation.publish",
     title: prLifecycleGateLabels["pr.implementation.publish"],
-    decisionTitle: "Allow branch push",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.publish"],
     detail: "Independent branch push effect",
   },
   {
     number: 12,
     decisionPoint: "pr.deferred.publish",
     title: prLifecycleGateLabels["pr.deferred.publish"],
-    decisionTitle: "Allow follow-up issue",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.deferred.publish"],
     detail: "Per deferred group in ask mode",
   },
   {
     number: 13,
     decisionPoint: "pr.correction.promote",
     title: prLifecycleGateLabels["pr.correction.promote"],
-    decisionTitle: "Allow repository lesson",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.correction.promote"],
     detail: "Optional repository-level learning",
   },
   {
     number: 14,
     decisionPoint: "pr.publication.reconcile",
     title: prLifecycleGateLabels["pr.publication.reconcile"],
-    decisionTitle: "Allow result reconciliation",
+    decisionTitle: prLifecycleGateDecisionLabels["pr.publication.reconcile"],
     detail: "Unknown provider outcomes only",
   },
 ] as const satisfies readonly GateSpec[]
@@ -162,6 +167,7 @@ const gateFormatLabels: Record<GateStageCategory, string> = {
 export function PRLifecycleGateMap({
   selectedDecisionPoint,
   workflows,
+  profileID,
   profileName,
   onSelect,
   className,
@@ -177,6 +183,7 @@ export function PRLifecycleGateMap({
       selected={selectedDecisionPoint === gateSpecs[index].decisionPoint}
       spec={gateSpecs[index]}
       workflow={workflows?.[gateSpecs[index].decisionPoint]}
+      profileID={profileID}
     />
   )
 
@@ -203,7 +210,7 @@ export function PRLifecycleGateMap({
           >
             Follow the actions people see from a GitHub review request through
             review, implementation, and publication. Select any numbered gate to
-            edit its workflow.
+            open its workflow settings.
           </p>
         </div>
         <div className="max-w-3xl space-y-1.5">
@@ -698,6 +705,7 @@ function AdvancedGate({
 function GateNode({
   spec,
   workflow,
+  profileID,
   selected,
   compact,
   instanceID,
@@ -705,6 +713,7 @@ function GateNode({
 }: {
   spec: GateSpec
   workflow?: PRLifecycleGateWorkflow
+  profileID?: string
   selected: boolean
   compact: boolean
   instanceID: string
@@ -723,6 +732,8 @@ function GateNode({
   return (
     <button
       aria-describedby={`${descriptionID} ${formatID}`}
+      aria-expanded={selected}
+      aria-haspopup="dialog"
       aria-label={spec.decisionTitle}
       aria-pressed={selected}
       className={cn(
@@ -732,7 +743,7 @@ function GateNode({
       )}
       data-decision-point={spec.decisionPoint}
       data-decision-title={spec.decisionTitle}
-      data-edit-href={`/pull-requests?view=gate-profiles&gate=${spec.decisionPoint}`}
+      data-edit-href={gateEditorHref(profileID, spec.decisionPoint)}
       data-editor-title={spec.title}
       data-flow-kind="gate"
       data-gate-format={format.format}
@@ -786,13 +797,21 @@ function GateNode({
         </span>
       ) : null}
       <span className="text-primary mt-1 text-[9px] font-bold tracking-wider">
-        SELECT TO EDIT →
+        OPEN SETTINGS →
       </span>
       <span className="sr-only" id={formatID}>
         {format.accessible}
       </span>
     </button>
   )
+}
+
+function gateEditorHref(
+  profileID: string | undefined,
+  decisionPoint: PRLifecycleDecisionPoint,
+): string {
+  const profile = profileID ? `&profile=${encodeURIComponent(profileID)}` : ""
+  return `/pull-requests?view=gate-profiles${profile}&gate=${decisionPoint}`
 }
 
 function summarizeGateFormat(

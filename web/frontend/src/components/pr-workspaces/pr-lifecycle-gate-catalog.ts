@@ -17,6 +17,23 @@ export const prLifecycleGateLabels = {
   "pr.publication.reconcile": "Resolve unknown result",
 } as const satisfies Record<PRLifecycleDecisionPoint, string>
 
+export const prLifecycleGateDecisionLabels = {
+  "pr.charter.confirm": "Approve purpose and scope",
+  "pr.charter.reconfirm": "Approve revised purpose and scope",
+  "pr.review.start": "Allow AI review",
+  "pr.review.complete": "Accept review results",
+  "pr.finding.classify": "Decide ambiguous finding scope",
+  "pr.implementation.eligibility": "Allow non-owned PR implementation",
+  "pr.implementation.start": "Allow AI implementation",
+  "pr.implementation.scope": "Allow large or adjacent work",
+  "pr.implementation.complete": "Accept implementation",
+  "pr.review.publish": "Allow review publication",
+  "pr.implementation.publish": "Allow branch push",
+  "pr.deferred.publish": "Allow follow-up issue",
+  "pr.correction.promote": "Allow repository lesson",
+  "pr.publication.reconcile": "Allow result reconciliation",
+} as const satisfies Record<PRLifecycleDecisionPoint, string>
+
 export function prLifecycleGateLabel(
   decisionPoint: PRLifecycleDecisionPoint,
 ): string {
