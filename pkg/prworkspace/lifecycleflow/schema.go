@@ -16,8 +16,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/prlifecycle"
 	"gopkg.in/yaml.v3"
+
+	"github.com/sipeed/picoclaw/pkg/prlifecycle"
 )
 
 const (
