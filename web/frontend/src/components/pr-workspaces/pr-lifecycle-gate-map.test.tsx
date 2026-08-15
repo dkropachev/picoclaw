@@ -164,6 +164,12 @@ describe("PR lifecycle gate map", () => {
       container.querySelectorAll('[data-flow-kind="data"]'),
     ).not.toHaveLength(0)
     expect(
+      container.querySelector("[data-gate-map-viewport]"),
+    ).toBeInTheDocument()
+    expect(
+      container.querySelector("[data-gate-map-content]"),
+    ).toBeInTheDocument()
+    expect(
       container.querySelector('[data-flow-edge="accept completion"]'),
     ).toBeInTheDocument()
     expect(

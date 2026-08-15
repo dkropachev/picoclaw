@@ -1,5 +1,11 @@
 import AxeBuilder from "@axe-core/playwright"
-import { type Page, type Route, expect, test } from "@playwright/test"
+import {
+  type Locator,
+  type Page,
+  type Route,
+  expect,
+  test,
+} from "@playwright/test"
 
 import type {
   AgentCapabilitiesResponse,
@@ -3008,6 +3014,127 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(hasHorizontalOverflow).toBe(false)
 }
 
+async function expectGateMapFits(gateMap: Locator) {
+  await expect
+    .poll(
+      () =>
+        gateMap.evaluate((map) => {
+          const viewport = map.querySelector<HTMLElement>(
+            "[data-gate-map-viewport]",
+          )
+          const content = map.querySelector<HTMLElement>(
+            "[data-gate-map-content]",
+          )
+          if (!viewport || !content) {
+            return {
+              contentOverflow: true,
+              outOfBounds: ["missing responsive map container"],
+              undersizedGates: ["missing responsive map container"],
+              viewportOverflow: true,
+            }
+          }
+
+          const tolerance = 1
+          const viewportRect = viewport.getBoundingClientRect()
+          const targets = content.querySelectorAll<HTMLElement>(
+            [
+              "[data-gate-id]",
+              "[data-flow-kind]",
+              "[data-flow-edge]",
+              "[data-flow-branch]",
+              "[data-flow-continuation]",
+              "[data-scope-outcome]",
+            ].join(","),
+          )
+          const outOfBounds = Array.from(targets)
+            .filter((target) => {
+              const rect = target.getBoundingClientRect()
+              return (
+                rect.left < viewportRect.left - tolerance ||
+                rect.right > viewportRect.right + tolerance
+              )
+            })
+            .map(
+              (target) =>
+                target.dataset.gateId ??
+                target.dataset.flowEdge ??
+                target.dataset.flowKind ??
+                target.dataset.flowBranch ??
+                target.dataset.flowContinuation ??
+                target.dataset.scopeOutcome ??
+                target.tagName.toLowerCase(),
+            )
+          const undersizedGates = Array.from(
+            content.querySelectorAll<HTMLElement>("[data-gate-id]"),
+          )
+            .filter((gate) => {
+              const rect = gate.getBoundingClientRect()
+              return rect.width < 24 || rect.height < 24
+            })
+            .map((gate) => gate.dataset.gateId ?? "unknown gate")
+
+          return {
+            contentOverflow:
+              content.scrollWidth > content.clientWidth + tolerance,
+            outOfBounds,
+            undersizedGates,
+            viewportOverflow:
+              viewport.scrollWidth > viewport.clientWidth + tolerance,
+          }
+        }),
+      { message: "gate map should reflow within its available width" },
+    )
+    .toEqual({
+      contentOverflow: false,
+      outOfBounds: [],
+      undersizedGates: [],
+      viewportOverflow: false,
+    })
+}
+
+async function expectGateDialogFits(gateDialog: Locator) {
+  await expect
+    .poll(
+      () =>
+        gateDialog.evaluate((dialog) => {
+          const tolerance = 1
+          const dialogRect = dialog.getBoundingClientRect()
+          const regions = [
+            dialog,
+            ...dialog.querySelectorAll<HTMLElement>(
+              [
+                '[data-slot="dialog-header"]',
+                "#pr-gate-workflow-editor",
+                '[data-slot="dialog-footer"]',
+                '[data-testid="pr-gate-stage-controls"]',
+                '[data-testid="pr-gate-stage-editor"]',
+              ].join(","),
+            ),
+          ]
+
+          return regions
+            .filter((region) => region.getClientRects().length > 0)
+            .filter((region) => {
+              const rect = region.getBoundingClientRect()
+              return (
+                region.scrollWidth > region.clientWidth + tolerance ||
+                rect.left < dialogRect.left - tolerance ||
+                rect.right > dialogRect.right + tolerance
+              )
+            })
+            .map(
+              (region) =>
+                region.id ||
+                region.dataset.testid ||
+                region.dataset.slot ||
+                region.tagName.toLowerCase(),
+            )
+        }),
+      { message: "gate dialog should fit its editor without clipping" },
+    )
+    .toEqual([])
+}
+
 async function expectNoPersistentLoadingOrLoadError(page: Page) {
   const unresolvedState = page
     .locator("main")
@@ -3176,6 +3303,13 @@ test("unified pull request workspace combines review, implementation, nudges, an
     .getByRole("heading", { name: "PR lifecycle gate flow" })
     .locator("xpath=ancestor::section[1]")
   await expect(gateMap.locator("[data-decision-point]")).toHaveCount(14)
+  await expectGateMapFits(gateMap)
+
+  for (const width of [390, 768, 1024, 1536, 1920, 320]) {
+    await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
+    await expectGateMapFits(gateMap)
+    await expectNoHorizontalOverflow(page)
+  }
   await gateMap.getByRole("button", { name: "Accept review results" }).click()
   await expect(page).toHaveURL(
     /\/pull-requests\?view=gate-profiles&profile=default&gate=pr\.review\.complete$/,
@@ -3190,6 +3324,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
   )
   await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(1)
   await expect(gateDialog.getByLabel("Workflow name")).toBeVisible()
+  await expectGateDialogFits(gateDialog)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

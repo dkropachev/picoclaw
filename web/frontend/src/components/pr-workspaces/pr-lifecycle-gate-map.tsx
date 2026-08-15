@@ -190,16 +190,19 @@ export function PRLifecycleGateMap({
   return (
     <section
       aria-labelledby={titleID}
-      className={cn("bg-card overflow-hidden rounded-xl border", className)}
+      className={cn(
+        "bg-card min-w-0 overflow-hidden rounded-xl border",
+        className,
+      )}
     >
       <div className="flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
+        <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 id={titleID} className="text-sm font-semibold">
               PR lifecycle gate flow
             </h2>
             {profileName ? (
-              <span className="bg-muted/50 text-muted-foreground rounded-md border px-2 py-0.5 text-xs">
+              <span className="bg-muted/50 text-muted-foreground min-w-0 rounded-md border px-2 py-0.5 text-xs [overflow-wrap:anywhere]">
                 Profile · {profileName}
               </span>
             ) : null}
@@ -213,7 +216,7 @@ export function PRLifecycleGateMap({
             open its workflow settings.
           </p>
         </div>
-        <div className="max-w-3xl space-y-1.5">
+        <div className="max-w-3xl min-w-0 space-y-1.5">
           <div
             aria-label="Diagram legend"
             className="text-muted-foreground flex flex-wrap gap-1.5 text-xs"
@@ -259,10 +262,14 @@ export function PRLifecycleGateMap({
         </li>
       </ol>
 
-      <div className="bg-muted/10 overflow-x-auto overscroll-x-contain border-t">
+      <div
+        className="bg-muted/10 w-full overflow-hidden border-t"
+        data-gate-map-viewport
+      >
         <div
           aria-describedby={descriptionID}
-          className="min-w-[124rem] space-y-4 p-4"
+          className="w-full min-w-0 space-y-4 p-4"
+          data-gate-map-content
           role="group"
         >
           <FlowBand
@@ -309,13 +316,13 @@ export function PRLifecycleGateMap({
               number="02"
               title="Publish, fix, and defer are separate choices"
             />
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-3">
               <ChoiceLane
                 description="Send the selected findings as a GitHub review."
                 title="Publish review"
               >
                 {gate(9)}
-                <FlowConnector label="publish" narrow />
+                <FlowConnector label="publish" />
                 <FlowNode
                   compact
                   detail="Review comments"
@@ -345,9 +352,9 @@ export function PRLifecycleGateMap({
                   kind="data"
                   label="Deferred findings"
                 />
-                <FlowConnector label="create issue" narrow />
+                <FlowConnector label="create issue" />
                 {gate(11)}
-                <FlowConnector label="publish" narrow />
+                <FlowConnector label="publish" />
                 <FlowNode
                   compact
                   detail="One issue per group"
@@ -398,19 +405,19 @@ export function PRLifecycleGateMap({
             aria-labelledby={`${instanceID}-advanced-title`}
             className="bg-background/60 rounded-xl border border-dashed p-3"
           >
-            <div className="mb-3 flex items-start justify-between gap-4">
+            <div className="mb-3 flex flex-col items-start justify-between gap-2 lg:flex-row lg:gap-4">
               <FlowHeading
                 eyebrow="CONDITIONAL"
                 number="04"
                 title="Advanced / exception gates"
                 titleID={`${instanceID}-advanced-title`}
               />
-              <p className="text-muted-foreground max-w-xl text-right text-[11px] leading-snug">
+              <p className="text-muted-foreground max-w-xl text-left text-[11px] leading-snug lg:text-right">
                 These gates appear only when their condition applies and remain
                 editable here.
               </p>
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-3">
               {advancedGates.map(({ index, condition }) => (
                 <AdvancedGate
                   condition={condition}
@@ -453,7 +460,9 @@ function FlowBand({
   return (
     <section className="bg-background/60 rounded-xl border p-3">
       <FlowHeading eyebrow={eyebrow} number={number} title={title} />
-      <div className="flex min-h-36 items-stretch">{children}</div>
+      <div className="mx-auto flex w-full max-w-3xl min-w-0 flex-col items-stretch gap-2">
+        {children}
+      </div>
     </section>
   )
 }
@@ -509,8 +518,8 @@ function FlowNode({
   return (
     <div
       className={cn(
-        "flex min-h-28 w-52 shrink-0 flex-col rounded-xl border p-3",
-        compact && "min-h-24 w-44",
+        "flex min-h-28 w-full min-w-0 flex-col rounded-xl border p-3",
+        compact && "min-h-24",
         kind === "external" && "bg-accent/50 border-primary/40",
         kind === "action" && "bg-secondary",
         kind === "agent" && "bg-primary/5 border-primary/40",
@@ -529,29 +538,19 @@ function FlowNode({
   )
 }
 
-function FlowConnector({
-  label,
-  narrow = false,
-}: {
-  label: string
-  narrow?: boolean
-}) {
+function FlowConnector({ label }: { label: string }) {
   return (
     <div
       aria-label={`Flow: ${label}`}
-      className={cn(
-        "flex w-20 shrink-0 flex-col items-center justify-center px-1 text-center",
-        narrow && "w-14",
-      )}
+      className="flex h-12 w-full min-w-0 shrink-0 flex-col items-center justify-center px-1 text-center"
       data-flow-edge={label}
     >
       <span className="text-foreground bg-background mb-1 rounded border px-1.5 py-0.5 text-[9px] leading-tight font-semibold">
         {label}
       </span>
-      <div className="flex w-full items-center" aria-hidden="true">
-        <span className="border-muted-foreground/60 grow border-t" />
-        <span className="text-primary text-lg leading-none">›</span>
-      </div>
+      <span className="text-primary text-lg leading-none" aria-hidden>
+        ↓
+      </span>
     </div>
   )
 }
@@ -569,7 +568,9 @@ function ChoiceLane({
     <section className="bg-muted/20 min-h-52 rounded-xl border p-3">
       <h4 className="text-xs font-semibold">{title}</h4>
       <p className="text-muted-foreground mt-1 text-[11px]">{description}</p>
-      <div className="mt-3 flex items-stretch">{children}</div>
+      <div className="mt-3 flex min-w-0 flex-col items-stretch gap-2">
+        {children}
+      </div>
     </section>
   )
 }
@@ -577,13 +578,13 @@ function ChoiceLane({
 function FindingDecision({ gate }: { gate: ReactNode }) {
   return (
     <div
-      className="bg-muted/20 w-[32rem] shrink-0 rounded-xl border p-3"
+      className="bg-muted/20 w-full min-w-0 rounded-xl border p-3"
       data-flow-branch="findings-decision"
     >
       <p className="text-primary text-[9px] font-bold tracking-wider">
         FINDINGS DECISION
       </p>
-      <div className="mt-2 grid grid-cols-[1fr_14rem] gap-2">
+      <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]">
         <div className="bg-secondary flex min-h-28 flex-col rounded-lg border p-3">
           <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
             ACTION
@@ -606,7 +607,7 @@ function FindingDecision({ gate }: { gate: ReactNode }) {
 function ContinuationCue() {
   return (
     <div
-      className="text-primary ml-3 flex w-32 shrink-0 flex-col items-center justify-center rounded-lg border border-dashed px-3 text-center"
+      className="text-primary flex min-h-20 w-full min-w-0 flex-col items-center justify-center rounded-lg border border-dashed px-3 text-center"
       data-flow-continuation="implementation"
     >
       <span className="text-2xl leading-none" aria-hidden="true">
@@ -627,7 +628,7 @@ function ConditionalGate({
   children: ReactNode
 }) {
   return (
-    <div className="bg-muted/20 flex min-w-56 flex-col rounded-lg border border-dashed p-2">
+    <div className="bg-muted/20 flex w-full min-w-0 flex-col rounded-lg border border-dashed p-2">
       <p className="text-muted-foreground mb-2 text-[9px] leading-snug font-bold tracking-wider">
         CONDITIONAL · {condition}
       </p>
@@ -639,14 +640,14 @@ function ConditionalGate({
 function ScopeDecision({ gate }: { gate: ReactNode }) {
   return (
     <div
-      className="bg-muted/20 w-[43rem] shrink-0 rounded-xl border p-3"
+      className="bg-muted/20 w-full min-w-0 rounded-xl border p-3"
       data-flow-branch="candidate-scope"
     >
       <p className="text-primary text-[9px] font-bold tracking-wider">
         CANDIDATE SCOPE DECISION
       </p>
       <h4 className="mt-1 text-xs font-semibold">Check candidate scope</h4>
-      <div className="mt-2 grid grid-cols-[14rem_1fr] gap-2">
+      <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(12rem,14rem)_minmax(0,1fr)]">
         <ConditionalGate condition="Large or adjacent candidate work">
           {gate}
         </ConditionalGate>
@@ -737,8 +738,8 @@ function GateNode({
       aria-label={spec.decisionTitle}
       aria-pressed={selected}
       className={cn(
-        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-56 shrink-0 flex-col rounded-xl border-2 p-3 text-left shadow-sm transition-colors outline-none focus-visible:ring-2",
-        compact && "min-h-24 w-full p-2.5",
+        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 text-left shadow-sm transition-colors outline-none focus-visible:ring-2",
+        compact && "min-h-24 p-2.5",
         selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
       )}
       data-decision-point={spec.decisionPoint}

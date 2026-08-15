@@ -386,7 +386,7 @@ export function PRLifecycleGateProfilesPage({
         </Button>
       </PageHeader>
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
-        <div className="mx-auto grid w-full max-w-[96rem] gap-4 xl:grid-cols-[18rem_minmax(0,1fr)]">
+        <div className="mx-auto grid w-full max-w-[96rem] min-w-0 gap-4 xl:grid-cols-[18rem_minmax(0,1fr)]">
           {selectedProfile && (
             <PRLifecycleGateMap
               className="xl:col-span-2"
@@ -398,7 +398,10 @@ export function PRLifecycleGateProfilesPage({
             />
           )}
           <aside
-            className={cn("space-y-4", !selectedProfile && "xl:col-span-2")}
+            className={cn(
+              "min-w-0 space-y-4",
+              !selectedProfile && "xl:col-span-2",
+            )}
           >
             {!selectedProfile && (
               <Card size="sm">
@@ -546,7 +549,7 @@ export function PRLifecycleGateProfilesPage({
                   <CardTitle role="heading" aria-level={2}>
                     {t("prWorkspaces.gateProfiles.profileSettings")}
                   </CardTitle>
-                  <CardDescription className="font-mono">
+                  <CardDescription className="font-mono [overflow-wrap:anywhere]">
                     {selectedProfileID}
                   </CardDescription>
                 </CardHeader>
@@ -801,9 +804,9 @@ export function PRLifecycleGateProfilesPage({
                             </Select>
                           </GateField>
                         </div>
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+                        <div className="flex min-w-0 flex-col items-stretch gap-2 border-t pt-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                           <div
-                            className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row"
+                            className="flex w-full min-w-0 flex-none flex-col gap-2 sm:w-auto sm:flex-1 sm:flex-row"
                             data-testid="pr-gate-stage-controls"
                           >
                             <Select
@@ -841,7 +844,7 @@ export function PRLifecycleGateProfilesPage({
                           </div>
                           <Button
                             variant="ghost"
-                            className="text-destructive"
+                            className="text-destructive w-full sm:w-auto"
                             onClick={() =>
                               changeProfile((profile) => {
                                 if (selectedDecisionPoint) {
