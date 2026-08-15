@@ -1,4 +1,10 @@
-import { type KeyboardEvent, type ReactNode, useId } from "react"
+import {
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useState,
+} from "react"
 
 import {
   type PRLifecycleDecisionPoint,
@@ -28,6 +34,7 @@ interface GateSpec {
   title: string
   decisionTitle: string
   detail: string
+  condition?: string
 }
 
 const gateSpecs = [
@@ -36,35 +43,38 @@ const gateSpecs = [
     decisionPoint: "pr.charter.confirm",
     title: prLifecycleGateLabels["pr.charter.confirm"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.charter.confirm"],
-    detail: "First charter revision",
+    detail: "Checks that the pull request goal and boundaries are approved.",
   },
   {
     number: 2,
     decisionPoint: "pr.charter.reconfirm",
     title: prLifecycleGateLabels["pr.charter.reconfirm"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.charter.reconfirm"],
-    detail: "Revised charter path",
+    detail: "Reconfirms authority after the purpose or scope changes.",
+    condition: "Purpose or scope changed",
   },
   {
     number: 3,
     decisionPoint: "pr.review.start",
     title: prLifecycleGateLabels["pr.review.start"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.review.start"],
-    detail: "Before diff reaches the review agent",
+    detail: "Decides whether AI may review the approved pull request scope.",
   },
   {
     number: 4,
     decisionPoint: "pr.review.complete",
     title: prLifecycleGateLabels["pr.review.complete"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.review.complete"],
-    detail: "Overall findings and coverage",
+    detail: "Checks review coverage and findings before follow-up begins.",
   },
   {
     number: 5,
     decisionPoint: "pr.finding.classify",
     title: prLifecycleGateLabels["pr.finding.classify"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.finding.classify"],
-    detail: "Finding scope is ambiguous",
+    detail:
+      "Resolves whether an ambiguous finding belongs in this pull request.",
+    condition: "Finding scope is ambiguous",
   },
   {
     number: 6,
@@ -72,71 +82,119 @@ const gateSpecs = [
     title: prLifecycleGateLabels["pr.implementation.eligibility"],
     decisionTitle:
       prLifecycleGateDecisionLabels["pr.implementation.eligibility"],
-    detail: "Non-owned pull requests only",
+    detail: "Authorizes fixes on a pull request PicoClaw does not own.",
+    condition: "Pull request is non-owned",
   },
   {
     number: 7,
     decisionPoint: "pr.implementation.start",
     title: prLifecycleGateLabels["pr.implementation.start"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.start"],
-    detail: "Before the pinned repair workspace",
+    detail: "Decides whether AI may implement the selected findings.",
   },
   {
     number: 8,
     decisionPoint: "pr.implementation.scope",
     title: prLifecycleGateLabels["pr.implementation.scope"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.scope"],
-    detail: "Large or adjacent candidate work",
+    detail: "Authorizes large exact or necessary adjacent code after audits.",
+    condition: "Candidate work is large exact or necessary adjacent",
   },
   {
     number: 9,
     decisionPoint: "pr.implementation.complete",
     title: prLifecycleGateLabels["pr.implementation.complete"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.complete"],
-    detail: "Validated, completion-audited candidate",
+    detail: "Confirms the scoped changes are complete and validated.",
   },
   {
     number: 10,
     decisionPoint: "pr.review.publish",
     title: prLifecycleGateLabels["pr.review.publish"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.review.publish"],
-    detail: "Independent GitHub review effect",
+    detail: "Approves posting the selected findings to GitHub.",
   },
   {
     number: 11,
     decisionPoint: "pr.implementation.publish",
     title: prLifecycleGateLabels["pr.implementation.publish"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.implementation.publish"],
-    detail: "Independent branch push effect",
+    detail: "Approves pushing the accepted changes to the pull request branch.",
   },
   {
     number: 12,
     decisionPoint: "pr.deferred.publish",
     title: prLifecycleGateLabels["pr.deferred.publish"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.deferred.publish"],
-    detail: "Per deferred group in ask mode",
+    detail: "Approves creating GitHub issues for deferred work.",
+    condition: "Deferred issue mode asks first",
   },
   {
     number: 13,
     decisionPoint: "pr.correction.promote",
     title: prLifecycleGateLabels["pr.correction.promote"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.correction.promote"],
-    detail: "Optional repository-level learning",
+    detail: "Approves promoting a correction into repository guidance.",
+    condition: "A correction may become guidance",
   },
   {
     number: 14,
     decisionPoint: "pr.publication.reconcile",
     title: prLifecycleGateLabels["pr.publication.reconcile"],
     decisionTitle: prLifecycleGateDecisionLabels["pr.publication.reconcile"],
-    detail: "Unknown provider outcomes only",
+    detail: "Approves checking GitHub before retrying an uncertain write.",
+    condition: "A GitHub write result is unknown",
   },
 ] as const satisfies readonly GateSpec[]
 
-const advancedGates = [
-  { index: 1, condition: "Purpose or scope changed" },
-  { index: 12, condition: "A correction may become a repository lesson" },
-  { index: 13, condition: "A GitHub write returned an unknown result" },
-] as const
+type LifecycleFlowView = "review" | "implementation"
+
+const implementationOnlyDecisionPoints = new Set<PRLifecycleDecisionPoint>([
+  "pr.implementation.eligibility",
+  "pr.implementation.start",
+  "pr.implementation.scope",
+  "pr.implementation.complete",
+  "pr.implementation.publish",
+])
+
+const reviewOnlyDecisionPoints = new Set<PRLifecycleDecisionPoint>([
+  "pr.charter.confirm",
+  "pr.review.start",
+  "pr.review.complete",
+  "pr.finding.classify",
+  "pr.review.publish",
+])
+
+function flowViewForDecisionPoint(
+  decisionPoint: PRLifecycleDecisionPoint | undefined,
+): LifecycleFlowView | undefined {
+  if (!decisionPoint) return undefined
+  return implementationOnlyDecisionPoints.has(decisionPoint)
+    ? "implementation"
+    : reviewOnlyDecisionPoints.has(decisionPoint)
+      ? "review"
+      : undefined
+}
+
+const flowGateIndexes = {
+  review: [0, 1, 2, 3, 4, 9, 11, 12, 13],
+  implementation: [1, 5, 6, 7, 8, 10, 11, 12, 13],
+} as const satisfies Record<LifecycleFlowView, readonly number[]>
+
+const flowSummaries = {
+  review: [
+    "GitHub review work is tracked and bounded by a confirmed PR charter.",
+    "AI reviews the approved scope before findings are classified and accepted.",
+    "Findings become in-scope, deferred, or dismissed without coupling review publication to implementation.",
+    "In-scope findings may be published, implemented, or both; deferred work may become GitHub issues.",
+  ],
+  implementation: [
+    "Selected in-scope findings enter a separately authorized implementation flow.",
+    "AI changes the candidate, then an isolated audit checks every changed hunk against the charter.",
+    "Hard scope violations stop before validation; allowed code is validated and audited for completion.",
+    "Incomplete work loops back to implementation, while accepted work may be pushed to the pull request branch.",
+  ],
+} as const satisfies Record<LifecycleFlowView, readonly string[]>
 
 type GateFormat = "automatic" | "rule" | "ai" | "user" | "mixed" | "needs-setup"
 type GateStageCategory = Exclude<GateFormat, "mixed" | "needs-setup">
@@ -175,6 +233,13 @@ export function PRLifecycleGateMap({
   const instanceID = useId().replaceAll(":", "")
   const titleID = `${instanceID}-title`
   const descriptionID = `${instanceID}-description`
+  const [activeView, setActiveView] = useState<LifecycleFlowView>(
+    () => flowViewForDecisionPoint(selectedDecisionPoint) ?? "review",
+  )
+  useEffect(() => {
+    const owningView = flowViewForDecisionPoint(selectedDecisionPoint)
+    if (owningView) setActiveView(owningView)
+  }, [selectedDecisionPoint])
   const gate = (index: number, compact = false) => (
     <GateNode
       compact={compact}
@@ -211,56 +276,24 @@ export function PRLifecycleGateMap({
             id={descriptionID}
             className="text-muted-foreground mt-1 max-w-3xl text-xs"
           >
-            Follow the actions people see from a GitHub review request through
-            review, implementation, and publication. Select any numbered gate to
-            open its workflow settings.
+            Review and implementation have separate flows. Each box is either an
+            action or an editable gate; labeled arrows appear only where the
+            flow branches.
           </p>
         </div>
         <div className="max-w-3xl min-w-0 space-y-1.5">
           <div
             aria-label="Diagram legend"
             className="text-muted-foreground flex flex-wrap gap-1.5 text-xs"
+            role="group"
           >
-            <Legend label="action" variant="action" />
-            <Legend label="visible data" variant="data" />
-            <Legend label="GitHub" variant="external" />
-            <Legend label="editable gate" variant="gate" />
+            <Legend label="Action" variant="action" />
+            <Legend label="Editable gate" variant="gate" />
+            <Legend label="Locked safeguard" variant="required" />
           </div>
           <GateFormatLegend />
         </div>
       </div>
-
-      <ol aria-label="PR lifecycle ordered flow" className="sr-only">
-        <li>GitHub sends a pull request review request.</li>
-        <li>
-          The user or explicitly configured automation tracks the pull request
-          in PicoClaw; there is no built-in automatic workspace bridge.
-        </li>
-        <li>
-          The pull request purpose and scope are recorded as visible data.
-        </li>
-        <li>Gate 1 approves that authority, then Gate 3 allows review.</li>
-        <li>Gate 4 accepts the completed review and presents the findings.</li>
-        <li>
-          Conditional Gate 5 classifies an ambiguous finding beside the user’s
-          findings decision.
-        </li>
-        <li>The user chooses to publish, fix, or defer findings.</li>
-        <li>Gate 10 publishes a review to GitHub.</li>
-        <li>
-          Conditional Gate 6 authorizes a non-owned pull request before Gate 7
-          starts implementation.
-        </li>
-        <li>
-          Gate 8 evaluates applicable candidate scope; outside-scope work is
-          resolved and rechecked before validation.
-        </li>
-        <li>Gate 9 accepts completion and Gate 11 pushes the branch.</li>
-        <li>Gate 12 creates GitHub issues for deferred work.</li>
-        <li>
-          Rare and conditional decisions are available in the exceptions rail.
-        </li>
-      </ol>
 
       <div
         className="bg-muted/10 w-full overflow-hidden border-t"
@@ -272,177 +305,536 @@ export function PRLifecycleGateMap({
           data-gate-map-content
           role="group"
         >
-          <FlowBand
-            eyebrow="REVIEW"
-            number="01"
-            title="GitHub request → explicit tracking → purpose and scope → findings"
-          >
-            <FlowNode
-              detail="A reviewer is requested on a pull request"
-              kind="external"
-              label="GitHub review request"
-            />
-            <FlowConnector label="explicit handoff" />
-            <FlowNode
-              detail="User action or explicitly configured automation; no built-in automatic workspace bridge"
-              kind="action"
-              label="Track PR in PicoClaw"
-            />
-            <FlowConnector label="purpose · scope" />
-            <FlowNode
-              detail="Set the goal, success criteria, included work, and exclusions"
-              kind="data"
-              label="PR purpose and scope"
-            />
-            <FlowConnector label="approval" />
-            {gate(0)}
-            <FlowConnector label="review request" />
-            {gate(2)}
-            <FlowConnector label="allowed" />
-            <FlowNode
-              detail="Analyze the pull request against its approved purpose and scope"
-              kind="agent"
-              label="AI review"
-            />
-            <FlowConnector label="findings" />
-            {gate(3)}
-            <FlowConnector label="review ready" />
-            <FindingDecision gate={gate(4, true)} />
-          </FlowBand>
+          <FlowViewTabs
+            activeView={activeView}
+            instanceID={instanceID}
+            onChange={setActiveView}
+          />
 
-          <section className="bg-background/60 rounded-xl border p-3">
-            <FlowHeading
-              eyebrow="FINDINGS DECISION"
-              number="02"
-              title="Publish, fix, and defer are separate choices"
-            />
-            <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-3">
-              <ChoiceLane
-                description="Send the selected findings as a GitHub review."
-                title="Publish review"
-              >
-                {gate(9)}
-                <FlowConnector label="publish" />
-                <FlowNode
-                  compact
-                  detail="Review comments"
-                  kind="external"
-                  label="GitHub review"
-                />
-              </ChoiceLane>
-              <ChoiceLane
-                description="Repair only the findings selected for this pull request."
-                title="Fix findings"
-              >
-                <FlowNode
-                  compact
-                  detail="Findings chosen for repair in this pull request"
-                  kind="data"
-                  label="Selected findings to fix"
-                />
-                <ContinuationCue />
-              </ChoiceLane>
-              <ChoiceLane
-                description="Keep follow-up work separate from the current change."
-                title="Defer work"
-              >
-                <FlowNode
-                  compact
-                  detail="Grouped follow-up work"
-                  kind="data"
-                  label="Deferred findings"
-                />
-                <FlowConnector label="create issue" />
-                {gate(11)}
-                <FlowConnector label="publish" />
-                <FlowNode
-                  compact
-                  detail="One issue per group"
-                  kind="external"
-                  label="GitHub issues"
-                />
-              </ChoiceLane>
-            </div>
-          </section>
+          <ActiveFlowSummary activeView={activeView} />
 
-          <FlowBand
-            eyebrow="IMPLEMENTATION"
-            number="03"
-            title="Selected findings → scoped fix → validation → branch"
-          >
-            <ConditionalGate condition="Non-owned pull requests only">
-              {gate(5, true)}
-            </ConditionalGate>
-            <FlowConnector label="then · owned PR skips #6" />
-            {gate(6)}
-            <FlowConnector label="allowed" />
-            <FlowNode
-              detail="Prepare a focused fix for the selected findings"
-              kind="agent"
-              label="AI implementation"
-            />
-            <FlowConnector label="candidate changes" />
-            <ScopeDecision gate={gate(7, true)} />
-            <FlowConnector label="accepted · in scope" />
-            <FlowNode
-              detail="Run tests and the required checks"
-              kind="action"
-              label="Validate changes"
-            />
-            <FlowConnector label="checks pass" />
-            {gate(8)}
-            <FlowConnector label="accept completion" />
-            {gate(10)}
-            <FlowConnector label="push" />
-            <FlowNode
-              detail="Updated pull request branch"
-              kind="external"
-              label="GitHub branch"
-            />
-          </FlowBand>
-
-          <section
-            aria-labelledby={`${instanceID}-advanced-title`}
-            className="bg-background/60 rounded-xl border border-dashed p-3"
-          >
-            <div className="mb-3 flex flex-col items-start justify-between gap-2 lg:flex-row lg:gap-4">
-              <FlowHeading
-                eyebrow="CONDITIONAL"
-                number="04"
-                title="Advanced / exception gates"
-                titleID={`${instanceID}-advanced-title`}
-              />
-              <p className="text-muted-foreground max-w-xl text-left text-[11px] leading-snug lg:text-right">
-                These gates appear only when their condition applies and remain
-                editable here.
-              </p>
-            </div>
-            <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-3">
-              {advancedGates.map(({ index, condition }) => (
-                <AdvancedGate
-                  condition={condition}
-                  key={gateSpecs[index].number}
+          {activeView === "review" ? (
+            <div
+              aria-labelledby={`${instanceID}-review-tab`}
+              data-flow-view="review"
+              id={`${instanceID}-review-panel`}
+              role="tabpanel"
+              tabIndex={0}
+            >
+              <div className="space-y-4">
+                <FlowBand
+                  eyebrow="REVIEW WORKFLOW"
+                  number="01"
+                  title="Request → scope → review"
                 >
-                  {gate(index, true)}
-                </AdvancedGate>
-              ))}
+                  <ActionNode
+                    detail="GitHub assigns the pull request to a reviewer."
+                    label="Request PR review"
+                  />
+                  <FlowConnector />
+                  <ActionNode
+                    detail="A user or configured automation opens it in PicoClaw."
+                    label="Track pull request"
+                  />
+                  <FlowConnector />
+                  <ActionNode
+                    detail="Record the goal, included work, and exclusions."
+                    label="Define purpose and scope"
+                  />
+                  <FlowSplit
+                    columns={2}
+                    label="Charter approval"
+                    splitID="charter-approval"
+                  >
+                    <BranchPath label="First scope" target="charter-first">
+                      {gate(0, true)}
+                    </BranchPath>
+                    <BranchPath label="Revised" target="charter-revised">
+                      {gate(1, true)}
+                    </BranchPath>
+                  </FlowSplit>
+                  <FlowConnector />
+                  {gate(2)}
+                  <FlowConnector />
+                  <ActionNode
+                    detail="AI checks changed areas against the approved scope."
+                    label="Review pull request"
+                  />
+                  <FlowConnector />
+                  {gate(3)}
+                </FlowBand>
+
+                <FlowBand
+                  eyebrow="REVIEW WORKFLOW"
+                  number="02"
+                  title="Classify → disposition"
+                >
+                  <ActionNode
+                    detail="Compare each finding with the confirmed charter."
+                    label="Assess finding scope"
+                  />
+                  <FlowSplit
+                    columns={2}
+                    label="Finding classification"
+                    splitID="finding-classification"
+                  >
+                    <BranchPath label="Clear" target="finding-clear">
+                      <ActionNode
+                        compact
+                        detail="Apply the deterministic charter and PR-type result."
+                        label="Classify automatically"
+                      />
+                    </BranchPath>
+                    <BranchPath label="Ambiguous" target="finding-ambiguous">
+                      {gate(4, true)}
+                    </BranchPath>
+                  </FlowSplit>
+                  <FlowSplit
+                    columns={3}
+                    label="Finding disposition"
+                    splitID="finding-disposition"
+                  >
+                    <BranchPath label="In scope" target="finding-in-scope">
+                      <ActionNode
+                        compact
+                        detail="Make it available to review publication and implementation."
+                        label="Keep in pull request"
+                      />
+                    </BranchPath>
+                    <BranchPath label="Defer" target="finding-defer">
+                      <ActionNode
+                        compact
+                        detail="Group related follow-up work outside this pull request."
+                        label="Group deferred findings"
+                      />
+                      <FlowConnector />
+                      {gate(11)}
+                      <FlowConnector />
+                      <ActionNode
+                        compact
+                        detail="Create one GitHub issue for each approved group."
+                        label="Create follow-up issues"
+                      />
+                    </BranchPath>
+                    <BranchPath label="Dismiss" target="finding-dismiss">
+                      <ActionNode
+                        compact
+                        detail="Close the finding without publishing or implementing it."
+                        label="Dismiss finding"
+                      />
+                    </BranchPath>
+                  </FlowSplit>
+                </FlowBand>
+
+                <FlowLaneSection
+                  columns={2}
+                  eyebrow="REVIEW WORKFLOW"
+                  number="03"
+                  title="Use in-scope findings"
+                  titleID={`${instanceID}-review-use-title`}
+                >
+                  <FlowLane title="Review publication">
+                    <ActionNode
+                      compact
+                      detail="Choose in-scope findings for the GitHub review."
+                      label="Select review findings"
+                    />
+                    <FlowConnector />
+                    {gate(9, true)}
+                    <FlowConnector />
+                    <ActionNode
+                      compact
+                      detail="Post the approved findings to GitHub."
+                      label="Publish GitHub review"
+                    />
+                  </FlowLane>
+                  <FlowLane title="Implementation handoff">
+                    <ActionNode
+                      compact
+                      detail="Choose findings that implementation will fix; review selection remains independent."
+                      label="Select implementation findings"
+                    />
+                  </FlowLane>
+                </FlowLaneSection>
+
+                <FlowLaneSection
+                  columns={2}
+                  conditional
+                  eyebrow="REVIEW WORKFLOW"
+                  number="04"
+                  title="Review follow-up gates"
+                  titleID={`${instanceID}-review-follow-up-title`}
+                >
+                  <FlowLane title="User correction">
+                    <ActionNode
+                      compact
+                      detail="Store feedback for review, implementation, or both."
+                      label="Record user correction"
+                    />
+                    <FlowConnector />
+                    {gate(12, true)}
+                    <FlowConnector />
+                    <ActionNode
+                      compact
+                      detail="Add the approved correction to repository guidance."
+                      label="Save repository guidance"
+                    />
+                  </FlowLane>
+                  <FlowLane title="Unknown GitHub result">
+                    <ActionNode
+                      compact
+                      detail="A GitHub write may have succeeded without confirmation."
+                      label="Receive unknown result"
+                    />
+                    <FlowConnector />
+                    {gate(13, true)}
+                    <FlowConnector />
+                    <ActionNode
+                      compact
+                      detail="Re-observe GitHub or allow a safe retry."
+                      label="Resolve publication result"
+                    />
+                  </FlowLane>
+                </FlowLaneSection>
+              </div>
             </div>
-          </section>
+          ) : (
+            <div
+              aria-labelledby={`${instanceID}-implementation-tab`}
+              data-flow-view="implementation"
+              id={`${instanceID}-implementation-panel`}
+              role="tabpanel"
+              tabIndex={0}
+            >
+              <div className="space-y-4">
+                <FlowBand
+                  eyebrow="IMPLEMENTATION WORKFLOW"
+                  number="01"
+                  title="Authorize → implement → audit"
+                >
+                  <ActionNode
+                    detail="Bring in the findings chosen for this pull request."
+                    label="Load selected findings"
+                  />
+                  <FlowConnector />
+                  {gate(5)}
+                  <FlowConnector />
+                  {gate(6)}
+                  <FlowConnector />
+                  <ActionNode
+                    detail="AI changes only code required by the selected findings."
+                    label="Implement selected fixes"
+                  />
+                  <FlowConnector />
+                  <ActionNode
+                    detail="Classify every changed hunk against scope, type, and size."
+                    label="Audit candidate scope"
+                  />
+                  <FlowSplit
+                    columns={2}
+                    label="Candidate scope result"
+                    splitID="candidate-scope-result"
+                  >
+                    <BranchPath label="Safe path" target="scope-safe">
+                      <ActionNode
+                        compact
+                        detail="Run tests and every required project check."
+                        label="Validate changes"
+                      />
+                      <FlowSplit
+                        columns={2}
+                        label="Validation result"
+                        splitID="validation-result"
+                        stacked
+                      >
+                        <BranchPath label="Passed" target="validation-passed">
+                          <ActionNode
+                            compact
+                            detail="AI checks missing work and candidate scope drift."
+                            label="Audit completion"
+                          />
+                          <FlowSplit
+                            columns={2}
+                            label="Completion audit result"
+                            splitID="completion-audit-result"
+                            stacked
+                          >
+                            <BranchPath
+                              label="No gaps"
+                              target="completion-done"
+                            >
+                              <ActionNode
+                                compact
+                                detail="Check completion findings against the final candidate scope."
+                                label="Check final scope"
+                              />
+                              <FlowSplit
+                                columns={2}
+                                label="Final scope result"
+                                splitID="final-scope-result"
+                                stacked
+                              >
+                                <BranchPath
+                                  label="Allowed"
+                                  target="final-scope-allowed"
+                                >
+                                  {gate(7, true)}
+                                  <FlowConnector />
+                                  {gate(8, true)}
+                                  <FlowConnector />
+                                  {gate(10, true)}
+                                  <FlowConnector />
+                                  <ActionNode
+                                    compact
+                                    detail="Push the accepted candidate to the pull request branch."
+                                    label="Push accepted changes"
+                                  />
+                                </BranchPath>
+                                <BranchPath
+                                  label="Hard stop"
+                                  target="final-scope-hard"
+                                >
+                                  <ActionNode
+                                    compact
+                                    detail="Use the locked scope resolution before acceptance or publication."
+                                    label="Return to hard-scope gate"
+                                    loopTarget="scope-hard-stop"
+                                  />
+                                </BranchPath>
+                              </FlowSplit>
+                            </BranchPath>
+                            <BranchPath
+                              label="More work"
+                              target="completion-more"
+                            >
+                              <ActionNode
+                                compact
+                                detail="Repair missing work or drift, then validate and audit again."
+                                label="Resume implementation"
+                              />
+                            </BranchPath>
+                          </FlowSplit>
+                        </BranchPath>
+                        <BranchPath label="Failed" target="validation-failed">
+                          <ActionNode
+                            compact
+                            detail="Fix failed checks, then validate the candidate again."
+                            label="Repair validation failures"
+                          />
+                        </BranchPath>
+                      </FlowSplit>
+                    </BranchPath>
+                    <BranchPath label="Hard stop" target="scope-hard-stop">
+                      <RequiredGateNode />
+                      <FlowSplit
+                        columns={2}
+                        label="Hard scope resolution"
+                        splitID="hard-scope-resolution"
+                        stacked
+                      >
+                        <BranchPath label="Remove code" target="scope-remove">
+                          <ActionNode
+                            compact
+                            detail="Remove candidate code, track follow-up, then audit scope again."
+                            label="Remove and defer"
+                          />
+                        </BranchPath>
+                        <BranchPath label="Revise scope" target="scope-revise">
+                          <ActionNode
+                            compact
+                            detail="Change the PR charter to authorize the candidate."
+                            label="Revise PR charter"
+                          />
+                          <FlowConnector />
+                          {gate(1, true)}
+                        </BranchPath>
+                        <BranchPath label="Stop" target="scope-stop">
+                          <ActionNode
+                            compact
+                            detail="Leave the candidate blocked and end implementation."
+                            label="Stop implementation"
+                          />
+                        </BranchPath>
+                      </FlowSplit>
+                    </BranchPath>
+                  </FlowSplit>
+                </FlowBand>
+
+                <FlowLaneSection
+                  columns={3}
+                  conditional
+                  eyebrow="IMPLEMENTATION WORKFLOW"
+                  number="02"
+                  title="Implementation follow-up gates"
+                  titleID={`${instanceID}-implementation-follow-up-title`}
+                >
+                  <FlowLane title="Deferred audit finding">
+                    <ActionNode
+                      compact
+                      detail="Group follow-up work found during completion audit."
+                      label="Group deferred findings"
+                    />
+                    <FlowConnector />
+                    {gate(11, true)}
+                    <FlowConnector />
+                    <ActionNode
+                      compact
+                      detail="Create one GitHub issue for each approved group."
+                      label="Create follow-up issues"
+                    />
+                  </FlowLane>
+                  <FlowLane title="User correction">
+                    <ActionNode
+                      compact
+                      detail="Store feedback for review, implementation, or both."
+                      label="Record user correction"
+                    />
+                    <FlowConnector />
+                    {gate(12, true)}
+                    <FlowConnector />
+                    <ActionNode
+                      compact
+                      detail="Add the approved correction to repository guidance."
+                      label="Save repository guidance"
+                    />
+                  </FlowLane>
+                  <FlowLane title="Unknown GitHub result">
+                    <ActionNode
+                      compact
+                      detail="A push or issue write may lack confirmation."
+                      label="Receive unknown result"
+                    />
+                    <FlowConnector />
+                    {gate(13, true)}
+                    <FlowConnector />
+                    <ActionNode
+                      compact
+                      detail="Re-observe GitHub or allow a safe retry."
+                      label="Resolve publication result"
+                    />
+                  </FlowLane>
+                </FlowLaneSection>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
-      <ol aria-label="PR lifecycle gates" className="sr-only">
-        {gateSpecs.map((spec) => (
-          <li key={spec.decisionPoint}>
-            Gate {spec.number}: {spec.decisionTitle}. Editor: {spec.title}.{" "}
-            {spec.detail}
-            {selectedDecisionPoint === spec.decisionPoint
-              ? ". Currently selected."
-              : ""}
-          </li>
-        ))}
+      <ol aria-label={`${activeView} workflow gates`} className="sr-only">
+        {flowGateIndexes[activeView].map((index) => {
+          const spec = gateSpecs[index]
+          return (
+            <li key={spec.decisionPoint}>
+              Gate {spec.number}: {spec.decisionTitle}. Editor: {spec.title}.{" "}
+              {spec.detail}
+              {selectedDecisionPoint === spec.decisionPoint
+                ? ". Currently selected."
+                : ""}
+            </li>
+          )
+        })}
       </ol>
     </section>
+  )
+}
+
+function ActiveFlowSummary({ activeView }: { activeView: LifecycleFlowView }) {
+  return (
+    <ol aria-label={`${activeView} workflow ordered flow`} className="sr-only">
+      {flowSummaries[activeView].map((summary) => (
+        <li key={summary}>{summary}</li>
+      ))}
+    </ol>
+  )
+}
+
+function FlowViewTabs({
+  activeView,
+  instanceID,
+  onChange,
+}: {
+  activeView: LifecycleFlowView
+  instanceID: string
+  onChange: (view: LifecycleFlowView) => void
+}) {
+  const views: Array<{
+    value: LifecycleFlowView
+    title: string
+    description: string
+  }> = [
+    {
+      value: "review",
+      title: "Review workflow",
+      description: "Review changes and choose what happens to findings.",
+    },
+    {
+      value: "implementation",
+      title: "Implementation workflow",
+      description: "Fix selected findings, enforce scope, and publish code.",
+    },
+  ]
+  const selectAndFocus = (view: LifecycleFlowView) => {
+    onChange(view)
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`${instanceID}-${view}-tab`)
+        ?.focus({ preventScroll: true })
+    })
+  }
+  const handleKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    view: LifecycleFlowView,
+  ) => {
+    let next: LifecycleFlowView | undefined
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      next = view === "review" ? "implementation" : "review"
+    } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      next = view === "review" ? "implementation" : "review"
+    } else if (event.key === "Home") {
+      next = "review"
+    } else if (event.key === "End") {
+      next = "implementation"
+    }
+    if (!next) return
+    event.preventDefault()
+    selectAndFocus(next)
+  }
+
+  return (
+    <div
+      aria-label="PR workflow view"
+      className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2"
+      role="tablist"
+    >
+      {views.map(({ value, title, description }) => {
+        const selected = value === activeView
+        return (
+          <button
+            aria-controls={`${instanceID}-${value}-panel`}
+            aria-selected={selected}
+            className={cn(
+              "focus-visible:ring-ring flex min-w-0 flex-col rounded-lg border px-3 py-2 text-left transition-colors outline-none focus-visible:ring-2",
+              selected
+                ? "border-primary bg-primary/10"
+                : "bg-background hover:bg-muted/50",
+            )}
+            data-flow-view-tab={value}
+            id={`${instanceID}-${value}-tab`}
+            key={value}
+            onClick={() => onChange(value)}
+            onKeyDown={(event) => handleKeyDown(event, value)}
+            role="tab"
+            tabIndex={selected ? 0 : -1}
+            type="button"
+          >
+            <strong className="text-xs">{title}</strong>
+            <span className="text-muted-foreground mt-1 text-[11px] leading-snug">
+              {description}
+            </span>
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
@@ -495,210 +887,232 @@ function FlowHeading({
   )
 }
 
-type FlowKind = "external" | "action" | "agent" | "data"
-
-const flowKindLabel: Record<FlowKind, string> = {
-  external: "GITHUB",
-  action: "ACTION",
-  agent: "AI ACTION",
-  data: "VISIBLE DATA",
-}
-
-function FlowNode({
+function ActionNode({
   label,
   detail,
-  kind,
   compact = false,
+  loopTarget,
 }: {
   label: string
   detail: string
-  kind: FlowKind
   compact?: boolean
+  loopTarget?: string
 }) {
   return (
     <div
       className={cn(
-        "flex min-h-28 w-full min-w-0 flex-col rounded-xl border p-3",
-        compact && "min-h-24",
-        kind === "external" && "bg-accent/50 border-primary/40",
-        kind === "action" && "bg-secondary",
-        kind === "agent" && "bg-primary/5 border-primary/40",
-        kind === "data" && "bg-muted/30 border-dashed",
+        "bg-secondary flex min-h-20 w-full min-w-0 flex-col rounded-xl border p-3",
+        compact && "min-h-16",
       )}
-      data-flow-kind={kind}
+      data-flow-kind="action"
+      data-flow-loop-target={loopTarget}
     >
       <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
-        {flowKindLabel[kind]}
+        ACTION
       </span>
       <strong className="mt-1 text-xs leading-snug">{label}</strong>
-      <span className="text-muted-foreground mt-2 text-[11px] leading-snug">
+      <span
+        className="text-muted-foreground mt-2 text-[11px] leading-snug"
+        data-flow-description
+      >
         {detail}
       </span>
     </div>
   )
 }
 
-function FlowConnector({ label }: { label: string }) {
+function FlowConnector() {
   return (
     <div
-      aria-label={`Flow: ${label}`}
-      className="flex h-12 w-full min-w-0 shrink-0 flex-col items-center justify-center px-1 text-center"
-      data-flow-edge={label}
+      aria-hidden="true"
+      className="text-primary flex h-9 w-full min-w-0 shrink-0 items-center justify-center text-xl leading-none"
+      data-flow-edge="linear"
     >
-      <span className="text-foreground bg-background mb-1 rounded border px-1.5 py-0.5 text-[9px] leading-tight font-semibold">
-        {label}
-      </span>
-      <span className="text-primary text-lg leading-none" aria-hidden>
-        ↓
-      </span>
+      ↓
     </div>
   )
 }
 
-function ChoiceLane({
-  title,
-  description,
+function FlowSplit({
+  splitID,
+  label,
+  columns,
+  children,
+  stacked = false,
+}: {
+  splitID: string
+  label: string
+  columns: 2 | 3
+  children: ReactNode
+  stacked?: boolean
+}) {
+  return (
+    <div
+      aria-label={`${label} branches`}
+      className="w-full min-w-0"
+      data-flow-branch={splitID}
+      role="group"
+    >
+      <div
+        aria-hidden="true"
+        className="text-muted-foreground mb-1 flex min-w-0 items-center gap-2 text-[9px] font-bold tracking-wider uppercase"
+        data-flow-split-label
+      >
+        <span className="bg-border h-px min-w-3 flex-1" />
+        <span className="min-w-0 text-center">{label}</span>
+        <span className="bg-border h-px min-w-3 flex-1" />
+      </div>
+      <div
+        className={cn(
+          "grid min-w-0 grid-cols-1 gap-3",
+          !stacked && columns === 2 && "sm:grid-cols-2",
+          !stacked && columns === 3 && "lg:grid-cols-3",
+        )}
+        data-flow-layout={stacked ? "stacked" : "columns"}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function BranchPath({
+  label,
+  target,
   children,
 }: {
-  title: string
-  description: string
+  label: string
+  target: string
   children: ReactNode
 }) {
   return (
-    <section className="bg-muted/20 min-h-52 rounded-xl border p-3">
-      <h4 className="text-xs font-semibold">{title}</h4>
-      <p className="text-muted-foreground mt-1 text-[11px]">{description}</p>
-      <div className="mt-3 flex min-w-0 flex-col items-stretch gap-2">
+    <div
+      aria-label={`${label} branch`}
+      className="border-primary/25 flex min-w-0 flex-col rounded-l-lg border-l-2 pl-2"
+      data-flow-branch-path={label}
+      data-flow-branch-rail
+      role="group"
+    >
+      <div
+        className="flex h-14 min-w-0 flex-col items-center justify-center text-center"
+        data-flow-branch-edge={label}
+        data-flow-target={target}
+      >
+        <span
+          className="bg-background text-foreground rounded border px-2 py-0.5 text-[10px] font-semibold"
+          data-flow-branch-label
+        >
+          {label}
+        </span>
+        <span className="text-primary mt-1 text-lg leading-none" aria-hidden>
+          ↓
+        </span>
+      </div>
+      <div
+        className="flex min-w-0 flex-1 flex-col gap-2"
+        data-flow-branch-target={target}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function FlowLaneSection({
+  columns,
+  conditional = false,
+  eyebrow,
+  number,
+  title,
+  titleID,
+  children,
+}: {
+  columns: 2 | 3
+  conditional?: boolean
+  eyebrow: string
+  number: string
+  title: string
+  titleID: string
+  children: ReactNode
+}) {
+  return (
+    <section
+      aria-labelledby={titleID}
+      className={cn(
+        "bg-background/60 rounded-xl border p-3",
+        conditional && "border-dashed",
+      )}
+    >
+      <FlowHeading
+        eyebrow={`${eyebrow}${conditional ? " · CONDITIONAL" : ""}`}
+        number={number}
+        title={title}
+        titleID={titleID}
+      />
+      {conditional ? (
+        <p className="text-muted-foreground mt-1 text-[11px] leading-snug">
+          These connected paths appear only when their starting condition
+          occurs.
+        </p>
+      ) : null}
+      <div
+        className={cn(
+          "mx-auto mt-3 grid w-full max-w-3xl min-w-0 grid-cols-1 gap-3",
+          columns === 2 && "sm:grid-cols-2",
+          columns === 3 && "lg:grid-cols-3",
+        )}
+      >
         {children}
       </div>
     </section>
   )
 }
 
-function FindingDecision({ gate }: { gate: ReactNode }) {
+function FlowLane({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div
-      className="bg-muted/20 w-full min-w-0 rounded-xl border p-3"
-      data-flow-branch="findings-decision"
+    <section
+      aria-label={`${title} flow`}
+      className="bg-muted/10 flex min-w-0 flex-col rounded-xl border p-2.5"
+      data-flow-lane={title}
     >
-      <p className="text-primary text-[9px] font-bold tracking-wider">
-        FINDINGS DECISION
-      </p>
-      <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,14rem)]">
-        <div className="bg-secondary flex min-h-28 flex-col rounded-lg border p-3">
-          <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
-            ACTION
-          </span>
-          <strong className="mt-1 text-xs">
-            Choose what to do with findings
-          </strong>
-          <span className="text-muted-foreground mt-2 text-[11px] leading-snug">
-            Publish review · fix selected findings · defer follow-up
-          </span>
-        </div>
-        <ConditionalGate condition="Finding scope is ambiguous">
-          {gate}
-        </ConditionalGate>
-      </div>
-    </div>
+      <h4 className="text-muted-foreground mb-2 text-[10px] font-bold tracking-wider uppercase">
+        {title}
+      </h4>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">{children}</div>
+    </section>
   )
 }
 
-function ContinuationCue() {
+function RequiredGateNode() {
   return (
     <div
-      className="text-primary flex min-h-20 w-full min-w-0 flex-col items-center justify-center rounded-lg border border-dashed px-3 text-center"
-      data-flow-continuation="implementation"
+      aria-label="Resolve candidate code outside the confirmed charter or PR type"
+      className="border-destructive/70 bg-destructive/5 flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 shadow-sm"
+      data-flow-kind="gate"
+      data-required-gate="hard-scope"
+      role="group"
     >
-      <span className="text-2xl leading-none" aria-hidden="true">
-        ↓
+      <span className="flex w-full items-start justify-between gap-2">
+        <span className="text-destructive text-[9px] font-bold tracking-wider">
+          REQUIRED USER GATE
+        </span>
+        <span className="border-destructive/40 text-destructive rounded border px-1.5 py-0.5 text-[8px] font-bold tracking-wider uppercase">
+          Locked
+        </span>
       </span>
-      <strong className="mt-1 text-[11px] leading-snug">
-        Continue to implementation
-      </strong>
-    </div>
-  )
-}
-
-function ConditionalGate({
-  condition,
-  children,
-}: {
-  condition: string
-  children: ReactNode
-}) {
-  return (
-    <div className="bg-muted/20 flex w-full min-w-0 flex-col rounded-lg border border-dashed p-2">
-      <p className="text-muted-foreground mb-2 text-[9px] leading-snug font-bold tracking-wider">
-        CONDITIONAL · {condition}
-      </p>
-      {children}
-    </div>
-  )
-}
-
-function ScopeDecision({ gate }: { gate: ReactNode }) {
-  return (
-    <div
-      className="bg-muted/20 w-full min-w-0 rounded-xl border p-3"
-      data-flow-branch="candidate-scope"
-    >
-      <p className="text-primary text-[9px] font-bold tracking-wider">
-        CANDIDATE SCOPE DECISION
-      </p>
-      <h4 className="mt-1 text-xs font-semibold">Check candidate scope</h4>
-      <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(12rem,14rem)_minmax(0,1fr)]">
-        <ConditionalGate condition="Large or adjacent candidate work">
-          {gate}
-        </ConditionalGate>
-        <div className="space-y-2">
-          <div
-            className="bg-primary/5 border-primary/40 rounded-lg border px-3 py-2"
-            data-scope-outcome="accepted"
-          >
-            <strong className="text-primary text-[10px]">
-              ACCEPTED / IN SCOPE
-            </strong>
-            <p className="text-muted-foreground mt-1 text-[10px]">
-              Continue to validation.
-            </p>
-          </div>
-          <div
-            className="bg-destructive/5 border-destructive/50 rounded-lg border border-dashed px-3 py-2"
-            data-scope-outcome="outside"
-          >
-            <strong className="text-destructive text-[10px]">
-              OUTSIDE SCOPE · USER CHOICE
-            </strong>
-            <p className="mt-1 text-[10px] font-semibold">
-              Remove extra code · revise purpose/scope · defer follow-up · stop
-            </p>
-            <p
-              className="text-muted-foreground mt-1 border-t border-dashed pt-1 text-[10px]"
-              data-flow-edge="repair and recheck scope"
-            >
-              ↺ Repair candidate, then recheck scope before validation
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AdvancedGate({
-  condition,
-  children,
-}: {
-  condition: string
-  children: ReactNode
-}) {
-  return (
-    <div className="bg-muted/20 flex min-w-0 flex-col rounded-xl border p-2">
-      <p className="text-muted-foreground mb-2 min-h-8 text-[10px] leading-snug font-semibold">
-        WHEN · {condition}
-      </p>
-      {children}
+      <strong className="mt-1 text-xs leading-snug">Resolve hard scope</strong>
+      <span className="text-destructive mt-1 text-[9px] leading-snug font-semibold">
+        WHEN · Candidate code is S2, S3, or PR-type incompatible
+      </span>
+      <span
+        className="text-muted-foreground mt-1 text-[10px] leading-tight"
+        data-gate-description
+      >
+        Stops before validation and requires removal, charter revision, or stop.
+      </span>
+      <span className="text-muted-foreground mt-auto pt-2 text-[9px] font-bold tracking-wider uppercase">
+        User · fixed safeguard
+      </span>
     </div>
   )
 }
@@ -722,6 +1136,7 @@ function GateNode({
 }) {
   const format = summarizeGateFormat(workflow, spec.decisionPoint)
   const descriptionID = `${instanceID}-gate-${spec.number}-description`
+  const conditionID = `${instanceID}-gate-${spec.number}-condition`
   const formatID = `${instanceID}-gate-${spec.number}-format`
   const activate = () => onSelect(spec.decisionPoint)
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -732,7 +1147,7 @@ function GateNode({
 
   return (
     <button
-      aria-describedby={`${descriptionID} ${formatID}`}
+      aria-describedby={`${descriptionID}${spec.condition ? ` ${conditionID}` : ""} ${formatID}`}
       aria-expanded={selected}
       aria-haspopup="dialog"
       aria-label={spec.decisionTitle}
@@ -771,8 +1186,18 @@ function GateNode({
       <strong className="mt-1 text-xs leading-snug">
         {spec.decisionTitle}
       </strong>
+      {spec.condition ? (
+        <span
+          className="text-primary mt-1 text-[9px] leading-snug font-semibold"
+          data-gate-condition
+          id={conditionID}
+        >
+          WHEN · {spec.condition}
+        </span>
+      ) : null}
       <span
         className="text-muted-foreground mt-1 text-[10px] leading-tight"
+        data-gate-description
         id={descriptionID}
       >
         {spec.detail}
@@ -885,16 +1310,16 @@ function Legend({
   variant,
 }: {
   label: string
-  variant: "external" | "action" | "data" | "gate"
+  variant: "action" | "gate" | "required"
 }) {
   return (
     <span
       className={cn(
         "rounded-md border px-2 py-1",
-        variant === "external" && "bg-accent/50 border-primary/40",
         variant === "action" && "bg-secondary",
-        variant === "data" && "bg-muted/30 border-dashed",
         variant === "gate" && "bg-primary/10 border-primary",
+        variant === "required" &&
+          "bg-destructive/5 border-destructive/60 text-destructive",
       )}
     >
       {label}
@@ -915,6 +1340,7 @@ function GateFormatLegend() {
     <div
       aria-label="Gate format legend"
       className="text-muted-foreground flex flex-wrap items-center gap-1 text-[10px]"
+      role="group"
     >
       <span className="mr-1 font-semibold">Gate format</span>
       {formats.map(({ format, label }) => (

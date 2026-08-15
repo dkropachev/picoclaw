@@ -3030,6 +3030,7 @@ async function expectGateMapFits(gateMap: Locator) {
               contentOverflow: true,
               outOfBounds: ["missing responsive map container"],
               undersizedGates: ["missing responsive map container"],
+              undersizedFlowNodes: ["missing responsive map container"],
               viewportOverflow: true,
             }
           }
@@ -3042,8 +3043,11 @@ async function expectGateMapFits(gateMap: Locator) {
               "[data-flow-kind]",
               "[data-flow-edge]",
               "[data-flow-branch]",
-              "[data-flow-continuation]",
-              "[data-scope-outcome]",
+              "[data-flow-branch-path]",
+              "[data-flow-branch-edge]",
+              "[data-flow-branch-label]",
+              "[data-flow-branch-target]",
+              "[data-flow-view-tab]",
             ].join(","),
           )
           const outOfBounds = Array.from(targets)
@@ -3060,8 +3064,10 @@ async function expectGateMapFits(gateMap: Locator) {
                 target.dataset.flowEdge ??
                 target.dataset.flowKind ??
                 target.dataset.flowBranch ??
-                target.dataset.flowContinuation ??
-                target.dataset.scopeOutcome ??
+                target.dataset.flowBranchPath ??
+                target.dataset.flowBranchEdge ??
+                target.dataset.flowBranchTarget ??
+                target.dataset.flowViewTab ??
                 target.tagName.toLowerCase(),
             )
           const undersizedGates = Array.from(
@@ -3072,12 +3078,24 @@ async function expectGateMapFits(gateMap: Locator) {
               return rect.width < 24 || rect.height < 24
             })
             .map((gate) => gate.dataset.gateId ?? "unknown gate")
+          const undersizedFlowNodes = Array.from(
+            content.querySelectorAll<HTMLElement>("[data-flow-kind]"),
+          )
+            .filter((node) => node.getBoundingClientRect().width < 128)
+            .map(
+              (node) =>
+                node.dataset.gateId ??
+                node.dataset.requiredGate ??
+                node.textContent?.trim().slice(0, 40) ??
+                "unknown flow node",
+            )
 
           return {
             contentOverflow:
               content.scrollWidth > content.clientWidth + tolerance,
             outOfBounds,
             undersizedGates,
+            undersizedFlowNodes,
             viewportOverflow:
               viewport.scrollWidth > viewport.clientWidth + tolerance,
           }
@@ -3088,6 +3106,7 @@ async function expectGateMapFits(gateMap: Locator) {
       contentOverflow: false,
       outOfBounds: [],
       undersizedGates: [],
+      undersizedFlowNodes: [],
       viewportOverflow: false,
     })
 }
@@ -3302,7 +3321,15 @@ test("unified pull request workspace combines review, implementation, nudges, an
   const gateMap = page
     .getByRole("heading", { name: "PR lifecycle gate flow" })
     .locator("xpath=ancestor::section[1]")
-  await expect(gateMap.locator("[data-decision-point]")).toHaveCount(14)
+  const reviewFlowTab = gateMap.getByRole("tab", {
+    name: /^Review workflow/,
+  })
+  const implementationFlowTab = gateMap.getByRole("tab", {
+    name: /^Implementation workflow/,
+  })
+  await expect(reviewFlowTab).toHaveAttribute("aria-selected", "true")
+  await expect(implementationFlowTab).toHaveAttribute("aria-selected", "false")
+  await expect(gateMap.locator("[data-decision-point]")).toHaveCount(9)
   await expectGateMapFits(gateMap)
 
   for (const width of [390, 768, 1024, 1536, 1920, 320]) {
@@ -3310,6 +3337,25 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await expectGateMapFits(gateMap)
     await expectNoHorizontalOverflow(page)
   }
+  await implementationFlowTab.click()
+  await expect(implementationFlowTab).toHaveAttribute("aria-selected", "true")
+  await expect(reviewFlowTab).toHaveAttribute("aria-selected", "false")
+  await expect(gateMap.locator("[data-decision-point]")).toHaveCount(9)
+  await expect(gateMap.getByText("Implement selected fixes")).toBeVisible()
+  await expect(gateMap.getByText("Audit completion")).toBeVisible()
+  await expect(
+    gateMap.locator('[data-required-gate="hard-scope"]'),
+  ).toBeVisible()
+  await expect(gateMap.getByText("Request PR review")).toHaveCount(0)
+
+  for (const width of [390, 768, 1024, 1536, 1920, 320]) {
+    await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
+    await expectGateMapFits(gateMap)
+    await expectNoHorizontalOverflow(page)
+  }
+  await expectNoSeriousA11yViolations(page)
+  await reviewFlowTab.click()
+  await expect(reviewFlowTab).toHaveAttribute("aria-selected", "true")
   await gateMap.getByRole("button", { name: "Accept review results" }).click()
   await expect(page).toHaveURL(
     /\/pull-requests\?view=gate-profiles&profile=default&gate=pr\.review\.complete$/,
