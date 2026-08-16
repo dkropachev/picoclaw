@@ -114,6 +114,11 @@ export function PRLifecycleGateProfilesPage({
   const lastOpenedDecisionPoint = useRef<PRLifecycleDecisionPoint | null>(
     initialDecisionPoint ?? null,
   )
+  const lastOpenedGateTrigger = useRef<HTMLButtonElement | null>(null)
+  const openedFromGateTrigger = useRef(false)
+  const pendingTriggeredDecisionPoint = useRef<PRLifecycleDecisionPoint | null>(
+    null,
+  )
   const selectedProfileID = onProfileChange
     ? (initialProfileID ?? (initialDecisionPoint ? "default" : ""))
     : localProfileID
@@ -141,6 +146,12 @@ export function PRLifecycleGateProfilesPage({
   useEffect(() => {
     if (initialDecisionPoint) {
       lastOpenedDecisionPoint.current = initialDecisionPoint
+      if (pendingTriggeredDecisionPoint.current === initialDecisionPoint) {
+        pendingTriggeredDecisionPoint.current = null
+      } else {
+        lastOpenedGateTrigger.current = null
+        openedFromGateTrigger.current = false
+      }
     }
   }, [initialDecisionPoint])
   useEffect(() => {
@@ -232,10 +243,6 @@ export function PRLifecycleGateProfilesPage({
     return <GateProfilesState text={t("prWorkspaces.gateProfiles.loading")} />
   }
   const selectedProfile = draft.gate_profiles[selectedProfileID]
-  const workflow =
-    selectedProfile && selectedDecisionPoint
-      ? selectedProfile.workflows[selectedDecisionPoint]
-      : undefined
   const selectedGateNode = selectedDecisionPoint
     ? draft.flow.flows
         .flatMap((flow) => flow.nodes)
@@ -246,12 +253,25 @@ export function PRLifecycleGateProfilesPage({
             node.decision_point === selectedDecisionPoint,
         )
     : undefined
+  const activeDecisionPoint = selectedGateNode ? selectedDecisionPoint : null
+  const workflow =
+    selectedProfile && activeDecisionPoint
+      ? selectedProfile.workflows[activeDecisionPoint]
+      : undefined
   const selectProfile = (profileID?: string) => {
     setLocalProfileID(profileID ?? "")
     setLocalDecisionPoint(null)
     onProfileChange?.(profileID)
   }
   const selectDecisionPoint = (decisionPoint: PRLifecycleDecisionPoint) => {
+    const activeElement = document.activeElement
+    openedFromGateTrigger.current = true
+    lastOpenedGateTrigger.current =
+      activeElement instanceof HTMLButtonElement &&
+      activeElement.dataset.gateId === decisionPoint
+        ? activeElement
+        : null
+    pendingTriggeredDecisionPoint.current = decisionPoint
     lastOpenedDecisionPoint.current = decisionPoint
     setLocalDecisionPoint(decisionPoint)
     onDecisionPointChange?.(decisionPoint)
@@ -725,7 +745,7 @@ export function PRLifecycleGateProfilesPage({
                 <GateProfileIssues error={error} issues={issues} />
               )}
               <Dialog
-                open={selectedDecisionPoint != null}
+                open={activeDecisionPoint != null}
                 onOpenChange={(open) => {
                   if (!open) closeDecisionPoint()
                 }}
@@ -734,9 +754,18 @@ export function PRLifecycleGateProfilesPage({
                   className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl lg:max-w-4xl"
                   onCloseAutoFocus={(event) => {
                     event.preventDefault()
+                    const trigger = lastOpenedGateTrigger.current
+                    const restoreByDecisionPoint =
+                      !openedFromGateTrigger.current
                     const decisionPoint = lastOpenedDecisionPoint.current
-                    if (!decisionPoint) return
                     window.requestAnimationFrame(() => {
+                      if (trigger) {
+                        if (trigger.isConnected) {
+                          trigger.focus({ preventScroll: true })
+                        }
+                        return
+                      }
+                      if (!restoreByDecisionPoint || !decisionPoint) return
                       document
                         .querySelector<HTMLButtonElement>(
                           `button[data-gate-id="${decisionPoint}"]`,
@@ -747,10 +776,10 @@ export function PRLifecycleGateProfilesPage({
                 >
                   <DialogHeader className="border-border border-b px-5 py-4 pr-14">
                     <DialogTitle>
-                      {selectedDecisionPoint
+                      {activeDecisionPoint
                         ? (selectedGateNode?.title ??
                           workflow?.name ??
-                          selectedDecisionPoint)
+                          activeDecisionPoint)
                         : t("prWorkspaces.gateProfiles.workflow")}
                     </DialogTitle>
                     <DialogDescription>
@@ -760,7 +789,7 @@ export function PRLifecycleGateProfilesPage({
                   </DialogHeader>
                   <div
                     id="pr-gate-workflow-editor"
-                    data-decision-point={selectedDecisionPoint ?? undefined}
+                    data-decision-point={activeDecisionPoint ?? undefined}
                     className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto px-5 py-4"
                   >
                     {(error || issues.length > 0) && (

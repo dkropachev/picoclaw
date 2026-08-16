@@ -2948,7 +2948,9 @@ describe("unified PR workspace pages", () => {
       name: "Accept review results",
     })
     expect(trigger).toHaveAttribute("aria-haspopup", "dialog")
-    expect(trigger).toHaveAttribute("aria-expanded", "false")
+    expect(trigger).not.toHaveAttribute("aria-expanded")
+    expect(trigger).not.toHaveAttribute("aria-pressed")
+    expect(trigger).not.toHaveAttribute("data-gate-selected")
     expect(
       document.querySelector("#pr-gate-workflow-editor"),
     ).not.toBeInTheDocument()
@@ -2959,7 +2961,7 @@ describe("unified PR workspace pages", () => {
       name: "Accept review results",
     })
     expect(dialog).toBeVisible()
-    expect(trigger).toHaveAttribute("aria-expanded", "true")
+    expect(trigger).toHaveAttribute("data-gate-selected", "true")
     const editor = dialog.querySelector("#pr-gate-workflow-editor")
     expect(editor).toHaveAttribute("data-decision-point", "pr.review.complete")
     expect(document.querySelectorAll("#pr-gate-workflow-editor")).toHaveLength(
@@ -2973,7 +2975,49 @@ describe("unified PR workspace pages", () => {
     ).not.toBeInTheDocument()
     expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined)
     await waitFor(() => expect(trigger).toHaveFocus())
-    expect(trigger).toHaveAttribute("aria-expanded", "false")
+    expect(trigger).not.toHaveAttribute("data-gate-selected")
+    expect(trigger).not.toHaveAttribute("aria-expanded")
+    expect(trigger).not.toHaveAttribute("aria-pressed")
+  })
+
+  it("returns dialog focus to the exact repeated gate trigger", async () => {
+    const user = userEvent.setup()
+    const repeatedGateProfiles = structuredClone(gateProfiles)
+    const implementationFlow = repeatedGateProfiles.flow.flows.find(
+      (flow) => flow.id === "implementation",
+    )!
+    const completionGate = implementationFlow.nodes.find(
+      (node) => node.id === "implementation_complete",
+    )!
+    implementationFlow.nodes.push({
+      ...completionGate,
+      id: "implementation_complete_direct",
+    })
+    mockedGetGateProfiles.mockResolvedValueOnce(repeatedGateProfiles)
+
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+
+    await user.click(
+      await screen.findByRole("tab", { name: /^Implementation workflow/ }),
+    )
+    const triggers = screen.getAllByRole("button", {
+      name: "Accept implementation",
+    })
+    expect(triggers).toHaveLength(2)
+
+    await user.click(triggers[1])
+    const dialog = screen.getByRole("dialog", {
+      name: "Accept implementation",
+    })
+    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+
+    await waitFor(() => expect(triggers[1]).toHaveFocus())
+    expect(triggers[0]).not.toHaveFocus()
   })
 
   it("preserves edits made while a gate-profile save is in flight", async () => {
@@ -3066,8 +3110,56 @@ describe("unified PR workspace pages", () => {
     expect(onDecisionPointChange).not.toHaveBeenCalled()
   })
 
+  it("returns deep-linked dialog focus to its declared gate", async () => {
+    const user = userEvent.setup()
+
+    function DeepLinkedGateHarness() {
+      const [decisionPoint, setDecisionPoint] = useState<
+        PRLifecycleDecisionPoint | undefined
+      >("pr.review.complete")
+      return (
+        <PRLifecycleGateProfilesPage
+          onBack={vi.fn()}
+          initialProfileID="default"
+          initialDecisionPoint={decisionPoint}
+          onDecisionPointChange={(next) => {
+            setDecisionPoint(next)
+          }}
+        />
+      )
+    }
+
+    renderPage(<DeepLinkedGateHarness />)
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Accept review results",
+    })
+    const trigger = screen.getByRole("button", {
+      name: "Accept review results",
+      hidden: true,
+    })
+    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+
+    await waitFor(() => expect(trigger).toHaveFocus())
+  })
+
   it("drops a well-formed gate deep link that is absent from the YAML graph", async () => {
     const onDecisionPointChange = vi.fn()
+    const insertedDialogs: HTMLElement[] = []
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const addedNode of record.addedNodes) {
+          if (!(addedNode instanceof HTMLElement)) continue
+          if (addedNode.matches('[role="dialog"]')) {
+            insertedDialogs.push(addedNode)
+          }
+          insertedDialogs.push(
+            ...addedNode.querySelectorAll<HTMLElement>('[role="dialog"]'),
+          )
+        }
+      }
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
     function UnknownGateHarness() {
       const [decisionPoint, setDecisionPoint] = useState<
         PRLifecycleDecisionPoint | undefined
@@ -3084,12 +3176,17 @@ describe("unified PR workspace pages", () => {
         />
       )
     }
-    renderPage(<UnknownGateHarness />)
+    try {
+      renderPage(<UnknownGateHarness />)
 
-    await screen.findByRole("button", { name: "Accept review results" })
-    await waitFor(() =>
-      expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined),
-    )
+      await screen.findByRole("button", { name: "Accept review results" })
+      await waitFor(() =>
+        expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined),
+      )
+    } finally {
+      observer.disconnect()
+    }
+    expect(insertedDialogs).toHaveLength(0)
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
     expect(document.querySelector("#pr-gate-workflow-editor")).toBeNull()
   })

@@ -543,7 +543,17 @@ function renderMap(
   )
 }
 
-function expectTargetCellContract(
+const routeModeHeadings: Record<
+  PRLifecycleFlow["edges"][number]["mode"],
+  string
+> = {
+  linear: "Primary path",
+  choice: "Choice",
+  parallel: "All required",
+  optional: "Optional paths",
+}
+
+function expectFlowRenderingContract(
   container: HTMLElement,
   expectedFlow: PRLifecycleFlow,
 ) {
@@ -555,8 +565,12 @@ function expectTargetCellContract(
   )
   expect(semanticEdges).toHaveLength(expectedFlow.edges.length)
   const outgoing = new Map<string, PRLifecycleFlow["edges"]>()
+  const incoming = new Map<string, PRLifecycleFlow["edges"]>()
   for (const edge of expectedFlow.edges) {
     outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge])
+    if (!edge.loop) {
+      incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge])
+    }
   }
 
   for (const expectedEdge of expectedFlow.edges) {
@@ -565,56 +579,102 @@ function expectTargetCellContract(
       (edge) => edge.dataset.flowEdgeKey === edgeKey,
     )
     expect(matches, edgeKey).toHaveLength(1)
-    const edge = matches[0]
-    const expectedCellID = expectedEdge.loop
-      ? expectedEdge.from
-      : expectedEdge.to
-    const cell = edge.closest<HTMLElement>("[data-flow-cell]")
-    expect(cell, edgeKey).not.toBeNull()
-    expect(cell, edgeKey).toHaveAttribute("data-flow-cell", expectedCellID)
-    const node = cell!.querySelector<HTMLElement>(
-      `[data-flow-node-id="${expectedCellID}"]`,
+    expect(matches[0], `${edgeKey} semantic marker`).not.toBeVisible()
+    expect(matches[0], edgeKey).toHaveAttribute(
+      "data-flow-source",
+      expectedEdge.from,
     )
-    expect(node, edgeKey).not.toBeNull()
-    const relation = edge.compareDocumentPosition(node!)
-    if (expectedEdge.loop) {
+    expect(matches[0], edgeKey).toHaveAttribute(
+      "data-flow-target",
+      expectedEdge.to,
+    )
+    expect(matches[0], edgeKey).toHaveAttribute(
+      "data-flow-edge",
+      expectedEdge.mode,
+    )
+  }
+
+  const targetConnectors = Array.from(
+    graph.querySelectorAll<HTMLElement>("[data-flow-target-connector]"),
+  )
+  expect(targetConnectors).toHaveLength(incoming.size)
+  for (const [targetID, edges] of incoming) {
+    const connectors = targetConnectors.filter(
+      (connector) => connector.dataset.flowTargetConnector === targetID,
+    )
+    expect(connectors, `${targetID} visible incoming connector`).toHaveLength(1)
+    const connector = connectors[0]
+    expect(connector).toBeVisible()
+    expect(connector).toHaveTextContent(/^\s*↓\s*$/)
+    expect(connector).toHaveAttribute(
+      "data-flow-incoming-count",
+      String(edges.length),
+    )
+    if (edges.length > 1) {
+      expect(connector).toHaveAttribute("data-flow-merge", "true")
+    } else {
+      expect(connector).not.toHaveAttribute("data-flow-merge")
+    }
+    expect(connector.querySelector("[data-flow-branch-label]")).toBeNull()
+    const cell = connector.closest<HTMLElement>("[data-flow-cell]")
+    expect(cell).toHaveAttribute("data-flow-cell", targetID)
+    const target = cell!.querySelector<HTMLElement>(
+      `[data-flow-node-id="${targetID}"]`,
+    )
+    expect(target, targetID).not.toBeNull()
+    expect(
+      connector.compareDocumentPosition(target!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      `${targetID} connector must precede its target node`,
+    ).toBeTruthy()
+  }
+
+  for (const [sourceID, edges] of outgoing) {
+    if (edges.length === 1) {
+      const edge = edges[0]
       expect(
-        relation & Node.DOCUMENT_POSITION_PRECEDING,
-        `${edgeKey} loop must follow its source node`,
-      ).toBeTruthy()
-      const targetTitle = edge.querySelector<HTMLElement>(
+        graph.querySelectorAll(
+          `[data-flow-launch][data-flow-edge-key="${edge.from}:${edge.to}"]`,
+        ),
+        `${sourceID} singleton route must not render as a fork row`,
+      ).toHaveLength(0)
+      if (!edge.loop) continue
+
+      const connector = graph.querySelector<HTMLElement>(
+        `[data-flow-cell="${sourceID}"] [data-flow-loop-connector]`,
+      )
+      expect(connector, `${sourceID} singleton loop connector`).not.toBeNull()
+      expect(connector).toBeVisible()
+      expect(connector).toHaveTextContent("↺")
+      const targetTitle = connector!.querySelector<HTMLElement>(
         "[data-flow-loop-target-title]",
       )
-      if ((outgoing.get(expectedEdge.from) ?? []).length > 1) {
-        expect(targetTitle, `${edgeKey} loop target title`).toHaveAttribute(
-          "data-flow-loop-target-title",
-          expectedEdge.to,
-        )
-        expect(targetTitle, edgeKey).toHaveTextContent(
-          `Returns to ${
-            expectedFlow.nodes.find((node) => node.id === expectedEdge.to)!
-              .title
-          }`,
-        )
-      } else {
-        expect(targetTitle, `${edgeKey} singleton loop target title`).toBeNull()
-      }
-    } else {
-      expect(
-        relation & Node.DOCUMENT_POSITION_FOLLOWING,
-        `${edgeKey} connector must precede its target node`,
-      ).toBeTruthy()
-    }
-  }
-  for (const [sourceID, edges] of outgoing) {
-    if (edges.length < 2) continue
-    for (const edge of edges.filter((candidate) => !candidate.loop)) {
-      const edgeKey = `${edge.from}:${edge.to}`
-      const launch = graph.querySelector<HTMLElement>(
-        `[data-flow-launch][data-flow-edge-key="${edgeKey}"]`,
+      expect(targetTitle).toHaveAttribute(
+        "data-flow-loop-target-title",
+        edge.to,
       )
-      expect(launch, `${edgeKey} source launch`).not.toBeNull()
-      expect(launch!.closest("[data-flow-cell]"), edgeKey).toHaveAttribute(
+      expect(targetTitle).toHaveTextContent(
+        `Return to ${
+          expectedFlow.nodes.find((node) => node.id === edge.to)!.title
+        }`,
+      )
+      continue
+    }
+
+    const launches = Array.from(
+      graph.querySelectorAll<HTMLElement>(
+        `[data-flow-launches="${sourceID}"] [data-flow-launch]`,
+      ),
+    )
+    expect(launches, `${sourceID} source routes`).toHaveLength(edges.length)
+    for (const edge of edges) {
+      const edgeKey = `${edge.from}:${edge.to}`
+      const matchingLaunches = launches.filter(
+        (launch) => launch.dataset.flowEdgeKey === edgeKey,
+      )
+      expect(matchingLaunches, `${edgeKey} source launch`).toHaveLength(1)
+      const launch = matchingLaunches[0]
+      expect(launch.closest("[data-flow-cell]"), edgeKey).toHaveAttribute(
         "data-flow-cell",
         sourceID,
       )
@@ -622,19 +682,44 @@ function expectTargetCellContract(
         "data-flow-launch-target",
         edge.to,
       )
-      expect(
-        launch!.querySelector("[data-flow-launch-target-title]"),
-        edgeKey,
-      ).toHaveTextContent(
-        expectedFlow.nodes.find((node) => node.id === edge.to)!.title,
-      )
       const label = launch!
         .querySelector("[data-flow-launch-label]")!
         .textContent!.trim()
       expect(label, edgeKey).not.toContain("undefined")
-      expect(label.split(/\s+/), edgeKey).toHaveLength(1)
+      expect(label.split(/\s+/).length, edgeKey).toBeGreaterThanOrEqual(1)
+      expect(label.split(/\s+/).length, edgeKey).toBeLessThanOrEqual(2)
+      expect(launch, edgeKey).toHaveAttribute("data-flow-route-mode", edge.mode)
+      if (edge.loop) {
+        expect(launch).toHaveTextContent("↺")
+        expect(
+          launch.querySelector("[data-flow-loop-target-title]"),
+        ).toHaveTextContent(
+          `Return to ${
+            expectedFlow.nodes.find((node) => node.id === edge.to)!.title
+          }`,
+        )
+      } else {
+        expect(
+          launch.querySelector("[data-flow-launch-target-title]"),
+          edgeKey,
+        ).toHaveTextContent(
+          expectedFlow.nodes.find((node) => node.id === edge.to)!.title,
+        )
+      }
+    }
+
+    for (const mode of new Set(edges.map((edge) => edge.mode))) {
+      const groups = graph.querySelectorAll<HTMLElement>(
+        `[data-flow-launches="${sourceID}"] [data-flow-route-group][data-flow-route-mode="${mode}"]`,
+      )
+      expect(groups, `${sourceID} ${mode} route group`).toHaveLength(1)
+      expect(
+        groups[0].querySelector("[data-flow-route-heading]"),
+      ).toHaveTextContent(routeModeHeadings[mode])
     }
   }
+
+  expect(graph.querySelectorAll("[data-flow-continuation-for]")).toHaveLength(0)
 }
 
 describe("PR lifecycle gate map", () => {
@@ -675,7 +760,7 @@ describe("PR lifecycle gate map", () => {
     expect(implementationTab).toHaveAttribute("aria-selected", "true")
     expect(
       screen.getByRole("button", { name: "Accept implementation" }),
-    ).toHaveAttribute("aria-pressed", "true")
+    ).toHaveAttribute("data-gate-selected", "true")
 
     fireEvent.keyDown(implementationTab, { key: "ArrowLeft" })
     expect(reviewTab).toHaveAttribute("aria-selected", "true")
@@ -713,9 +798,7 @@ describe("PR lifecycle gate map", () => {
     expect(within(locked).queryByRole("button")).toBeNull()
 
     fireEvent.click(notificationGate)
-    fireEvent.keyDown(screen.getByRole("button", { name: "Allow review" }), {
-      key: "Enter",
-    })
+    fireEvent.click(screen.getByRole("button", { name: "Allow review" }))
     expect(onSelect).toHaveBeenNthCalledWith(1, "pr.review.publish")
     expect(onSelect).toHaveBeenNthCalledWith(2, "pr.review.start")
   })
@@ -725,6 +808,7 @@ describe("PR lifecycle gate map", () => {
     const graph = container.querySelector<HTMLElement>(
       '[data-flow-graph="review"]',
     )!
+    expectFlowRenderingContract(container, reviewFlow)
     const renderedEdges = Array.from(
       graph.querySelectorAll<HTMLElement>("[data-flow-edge]"),
     )
@@ -749,20 +833,23 @@ describe("PR lifecycle gate map", () => {
       )
     expect(renderedContract).toEqual(expectedContract)
 
-    for (const edge of graph.querySelectorAll('[data-flow-edge="linear"]')) {
-      expect(edge.querySelector("[data-flow-branch-label]")).toBeNull()
-      expect(edge.textContent?.trim()).toBe("↓")
+    expect(
+      graph.querySelectorAll(
+        "[data-flow-target-connector] [data-flow-branch-label]",
+      ),
+    ).toHaveLength(0)
+    for (const label of graph.querySelectorAll("[data-flow-branch-label]")) {
+      expect(label.closest("[data-flow-launch]")).not.toBeNull()
     }
 
     const choices = Array.from(
       graph.querySelectorAll<HTMLElement>(
-        '[data-flow-branch="r_choice"][data-flow-route-mode="choice"]',
+        '[data-flow-launches="r_choice"] [data-flow-launch][data-flow-route-mode="choice"]',
       ),
     )
     expect(choices).toHaveLength(2)
     for (const choice of choices) {
-      expect(choice).toHaveAccessibleName(/choice leads to/i)
-      expect(within(choice).getByText("Choice")).toBeInTheDocument()
+      expect(choice).toHaveAccessibleName(/route from/i)
     }
     expect(
       choices.map(
@@ -773,48 +860,85 @@ describe("PR lifecycle gate map", () => {
 
     const parallels = Array.from(
       graph.querySelectorAll<HTMLElement>(
-        '[data-flow-branch="r_parallel"][data-flow-route-mode="parallel"]',
+        '[data-flow-launches="r_parallel"] [data-flow-launch][data-flow-route-mode="parallel"]',
       ),
     )
     expect(parallels).toHaveLength(2)
     for (const parallel of parallels) {
-      expect(parallel).toHaveAttribute("data-flow-parallel", "true")
-      expect(parallel).toHaveAccessibleName(/also follows/i)
-      expect(within(parallel).getByText("All required")).toBeInTheDocument()
+      expect(parallel).toHaveAccessibleName(/route from/i)
     }
 
     const optional = graph.querySelector<HTMLElement>(
-      '[data-flow-branch="r_choice"][data-flow-route-mode="optional"]',
+      '[data-flow-launches="r_choice"] [data-flow-launch][data-flow-route-mode="optional"]',
     )!
-    expect(optional).toHaveAttribute("data-flow-optional", "true")
-    expect(optional).toHaveAccessibleName(/optionally follows/i)
-    expect(within(optional).getByText("Optional paths")).toBeInTheDocument()
+    expect(optional).toHaveAccessibleName(/route from/i)
 
-    for (const label of graph.querySelectorAll("[data-flow-branch-label]")) {
+    for (const label of graph.querySelectorAll(
+      "[data-flow-launch] [data-flow-branch-label]",
+    )) {
       expect(label.textContent!.trim().split(/\s+/)).toHaveLength(1)
     }
 
-    const singletonOptional = graph.querySelector<HTMLElement>(
-      '[data-flow-edge="optional"][data-flow-source="r_store"]',
+    const singletonOptionalConnector = graph.querySelector<HTMLElement>(
+      '[data-flow-target-connector="r_fallback_gate"]',
     )!
-    expect(singletonOptional).toHaveAccessibleName(
+    expect(singletonOptionalConnector.textContent?.trim()).toBe("↓")
+    expect(singletonOptionalConnector).toHaveAttribute(
+      "data-flow-optional",
+      "true",
+    )
+    expect(singletonOptionalConnector).toHaveAttribute(
+      "data-flow-route-mode",
+      "optional",
+    )
+    expect(singletonOptionalConnector).toHaveAccessibleName(
       /optionally continues to approve deferred output/i,
     )
-    expect(singletonOptional).not.toHaveAccessibleName(/undefined/i)
-    expect(singletonOptional.textContent?.trim()).toBe("↓")
     expect(
-      singletonOptional.querySelector("[data-flow-branch-label]"),
+      singletonOptionalConnector.querySelector("[data-flow-branch-label]"),
     ).toBeNull()
   })
 
-  it("places every connector in its declared endpoint cell", () => {
+  it("keeps every singleton forward path in the rank before its target", () => {
     const { container } = renderMap()
-    expectTargetCellContract(container, reviewFlow)
+
+    for (const expectedFlow of [reviewFlow, implementationFlow]) {
+      if (expectedFlow.id === "implementation") {
+        fireEvent.click(
+          screen.getByRole("tab", { name: /^Implementation workflow/ }),
+        )
+      }
+      const graph = container.querySelector<HTMLElement>(
+        `[data-flow-graph="${expectedFlow.id}"]`,
+      )!
+      const outgoing = new Map<string, PRLifecycleFlow["edges"]>()
+      for (const edge of expectedFlow.edges) {
+        outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge])
+      }
+      const rank = (nodeID: string) =>
+        Number(
+          graph
+            .querySelector(`[data-flow-node-id="${nodeID}"]`)
+            ?.closest<HTMLElement>("[data-flow-rank]")?.dataset.flowRank,
+        )
+
+      for (const edge of expectedFlow.edges) {
+        if (edge.loop || (outgoing.get(edge.from) ?? []).length !== 1) continue
+        expect(rank(edge.to) - rank(edge.from), `${edge.from}:${edge.to}`).toBe(
+          1,
+        )
+      }
+    }
+  })
+
+  it("keeps semantic edges exact while rendering one connector per target", () => {
+    const { container } = renderMap()
+    expectFlowRenderingContract(container, reviewFlow)
 
     fireEvent.click(
       screen.getByRole("tab", { name: /^Implementation workflow/ }),
     )
-    expectTargetCellContract(container, implementationFlow)
+    expectFlowRenderingContract(container, implementationFlow)
   })
 
   it("keeps ownership branches attached to the correct gates", () => {
@@ -835,7 +959,7 @@ describe("PR lifecycle gate map", () => {
       '[data-flow-graph="implementation"]',
     )!
 
-    expectTargetCellContract(container, ownershipFlow)
+    expectFlowRenderingContract(container, ownershipFlow)
     expect(
       Array.from(
         graph.querySelectorAll<HTMLElement>(
@@ -844,31 +968,14 @@ describe("PR lifecycle gate map", () => {
       ).map((label) => label.textContent?.trim()),
     ).toEqual(["Owned", "Non-owned", "Read-only"])
     expect(
-      graph
-        .querySelector(
-          '[data-flow-edge-key="ownership_check:ownership_start"][data-flow-edge]',
-        )
-        ?.closest("[data-flow-cell]"),
-    ).toHaveAttribute("data-flow-cell", "ownership_start")
+      graph.querySelector('[data-flow-target-connector="ownership_start"]'),
+    ).toHaveAttribute("data-flow-incoming-count", "2")
     expect(
-      graph
-        .querySelector(
-          '[data-flow-edge-key="ownership_check:ownership_eligibility"][data-flow-edge]',
-        )
-        ?.closest("[data-flow-cell]"),
-    ).toHaveAttribute("data-flow-cell", "ownership_eligibility")
-    expect(
-      graph
-        .querySelector(
-          '[data-flow-edge-key="ownership_check:ownership_stop"][data-flow-edge]',
-        )
-        ?.closest("[data-flow-cell]"),
-    ).toHaveAttribute("data-flow-cell", "ownership_stop")
-    expect(
-      graph.querySelectorAll(
-        '[data-flow-continuation-for="ownership_check:ownership_start"]',
-      ),
-    ).toHaveLength(1)
+      graph.querySelector('[data-flow-target-connector="ownership_start"]'),
+    ).toHaveAttribute("data-flow-merge", "true")
+    expect(graph.querySelectorAll("[data-flow-continuation-for]")).toHaveLength(
+      0,
+    )
   })
 
   it("uses a visible primary fallback for an unlabeled mixed branch", () => {
@@ -894,91 +1001,72 @@ describe("PR lifecycle gate map", () => {
     )!
     expect(launch).toHaveTextContent(/Primary.*Route audit result/s)
     expect(launch).toHaveAccessibleName(
-      /Primary route from Audit implementation to Route audit result/i,
+      /Primary route from Audit implementation leads to Route audit result/i,
     )
     expect(container).not.toHaveTextContent("undefined")
   })
 
   it("groups optional sidecars separately from choice and required primary paths", () => {
     const { container } = renderMap()
-    const choiceWithOptional = Array.from(
-      container.querySelectorAll<HTMLElement>('[data-flow-branch="r_choice"]'),
-    )!
-    expect(choiceWithOptional).toHaveLength(3)
-    for (const route of choiceWithOptional) {
-      expect(route).toHaveAttribute(
-        "data-flow-route-composition",
-        "choice+optional",
-      )
-    }
-    expect(
-      choiceWithOptional.filter(
-        (route) => route.dataset.flowRouteMode === "choice",
-      ),
-    ).toHaveLength(2)
-    expect(
-      choiceWithOptional.filter(
-        (route) => route.dataset.flowRouteMode === "optional",
-      ),
-    ).toHaveLength(1)
-    expect(
-      choiceWithOptional.filter((route) => route.dataset.flowEdge === "choice"),
-    ).toHaveLength(2)
-    expect(
-      choiceWithOptional.filter(
-        (route) => route.dataset.flowEdge === "optional",
-      ),
-    ).toHaveLength(1)
-
-    const parallelWithOptional = Array.from(
+    const choiceGroups = Array.from(
       container.querySelectorAll<HTMLElement>(
-        '[data-flow-branch="r_parallel"]',
+        '[data-flow-launches="r_choice"] [data-flow-route-group]',
       ),
-    )!
-    expect(parallelWithOptional).toHaveLength(3)
-    for (const route of parallelWithOptional) {
-      expect(route).toHaveAttribute(
-        "data-flow-route-composition",
-        "parallel+optional",
-      )
-    }
+    )
+    expect(choiceGroups).toHaveLength(2)
+    expect(choiceGroups.map((group) => group.dataset.flowRouteMode)).toEqual([
+      "choice",
+      "optional",
+    ])
     expect(
-      parallelWithOptional.filter(
-        (route) => route.dataset.flowRouteMode === "parallel",
+      choiceGroups.map((group) =>
+        group
+          .querySelector<HTMLElement>("[data-flow-route-heading]")
+          ?.textContent?.trim(),
       ),
-    ).toHaveLength(2)
+    ).toEqual(["Choice", "Optional paths"])
+    expect(choiceGroups[0].querySelectorAll("[data-flow-launch]")).toHaveLength(
+      2,
+    )
+    expect(choiceGroups[1].querySelectorAll("[data-flow-launch]")).toHaveLength(
+      1,
+    )
+
+    const parallelGroups = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '[data-flow-launches="r_parallel"] [data-flow-route-group]',
+      ),
+    )
+    expect(parallelGroups).toHaveLength(2)
+    expect(parallelGroups.map((group) => group.dataset.flowRouteMode)).toEqual([
+      "parallel",
+      "optional",
+    ])
     expect(
-      parallelWithOptional.filter(
-        (route) => route.dataset.flowRouteMode === "optional",
-      ),
-    ).toHaveLength(1)
+      parallelGroups[0].querySelector("[data-flow-route-heading]"),
+    ).toHaveTextContent("All required")
+    expect(
+      parallelGroups[1].querySelector("[data-flow-route-heading]"),
+    ).toHaveTextContent("Optional paths")
 
     fireEvent.click(
       screen.getByRole("tab", { name: /^Implementation workflow/ }),
     )
-    const singleRequiredWithOptional = Array.from(
-      container.querySelectorAll<HTMLElement>('[data-flow-branch="i_audit"]'),
-    )!
-    expect(singleRequiredWithOptional).toHaveLength(2)
-    for (const route of singleRequiredWithOptional) {
-      expect(route).toHaveAttribute(
-        "data-flow-route-composition",
-        "linear+optional",
-      )
-    }
-    expect(
-      singleRequiredWithOptional.find(
-        (route) => route.dataset.flowRouteMode === "linear",
+    const mixedGroups = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '[data-flow-launches="i_audit"] [data-flow-route-group]',
       ),
+    )
+    expect(mixedGroups).toHaveLength(2)
+    expect(
+      mixedGroups.find((group) => group.dataset.flowRouteMode === "linear"),
     ).toHaveTextContent(/Primary path.*Candidate/s)
     expect(
-      singleRequiredWithOptional.find(
-        (route) => route.dataset.flowRouteMode === "optional",
-      ),
+      mixedGroups.find((group) => group.dataset.flowRouteMode === "optional"),
     ).toHaveTextContent(/Optional paths.*Metrics/s)
   })
 
-  it("uses continuation rails for an unequal branch merge without duplicating its edge", () => {
+  it("collapses a two-parent linear merge into one visible target connector", () => {
     const { container } = renderMap()
     const graph = container.querySelector<HTMLElement>(
       '[data-flow-graph="review"]',
@@ -990,33 +1078,55 @@ describe("PR lifecycle gate map", () => {
     const rails = graph.querySelectorAll(
       '[data-flow-continuation-for="r_short:r_merge"]',
     )
-    expect(rails).toHaveLength(1)
-    expect(rails[0]).toHaveAttribute("data-flow-edge-key", "r_short:r_merge")
-    expect(rails[0].closest("[data-flow-rank]")).toContainElement(
-      graph.querySelector('[data-flow-node-id="r_long_gate"]'),
-    )
+    expect(rails).toHaveLength(0)
     expect(
       graph.querySelectorAll('[data-flow-node-id="r_merge"]'),
     ).toHaveLength(1)
+    const connector = graph.querySelector<HTMLElement>(
+      '[data-flow-target-connector="r_merge"]',
+    )!
+    expect(connector).toBeVisible()
+    expect(connector).toHaveAttribute("data-flow-incoming-count", "2")
+    expect(connector).toHaveAttribute("data-flow-merge", "true")
+    expect(connector.textContent?.trim()).toBe("↓")
+    expect(
+      connector.parentElement?.querySelectorAll(
+        '[data-flow-target-connector="r_merge"]',
+      ),
+    ).toHaveLength(1)
+    expect(connector.querySelector("[data-flow-branch-label]")).toBeNull()
+    const mergeEdges = graph.querySelectorAll(
+      '[data-flow-edge][data-flow-target="r_merge"]',
+    )
+    expect(mergeEdges).toHaveLength(2)
+    for (const edge of mergeEdges) expect(edge).not.toBeVisible()
     expect(graph.querySelectorAll("[data-flow-edge]")).toHaveLength(
       reviewFlow.edges.length,
     )
   })
 
-  it("shows loops without adding a branch label or duplicate edge", () => {
+  it("names the target of every singleton loop without duplicating its edge", () => {
     const { container } = renderMap("pr.implementation.start")
     const graph = container.querySelector('[data-flow-graph="implementation"]')!
     expect(graph.querySelectorAll("[data-flow-edge]")).toHaveLength(
       implementationFlow.edges.length,
     )
-    const loop = graph.querySelector(
-      '[data-flow-loop-target="i_work"]',
-    ) as HTMLElement
-    expect(loop).toHaveAttribute("data-flow-edge", "linear")
-    expect(loop).toHaveAttribute("title", "Returns to Implement fixes")
-    expect(loop.textContent?.trim()).toBe("↺")
+    const loop = graph.querySelector<HTMLElement>(
+      '[data-flow-cell="i_retry"] [data-flow-loop-connector]',
+    )!
+    expect(loop).toBeVisible()
+    expect(loop).toHaveTextContent("↺")
+    expect(loop).toHaveTextContent("Return to Implement fixes")
     expect(loop.querySelector("[data-flow-branch-label]")).toBeNull()
-    expect(loop.querySelector("[data-flow-loop-target-title]")).toBeNull()
+    expect(loop.querySelector("[data-flow-loop-target-title]")).toHaveAttribute(
+      "data-flow-loop-target-title",
+      "i_work",
+    )
+    expect(
+      graph.querySelectorAll(
+        '[data-flow-edge-key="i_retry:i_work"][data-flow-edge]',
+      ),
+    ).toHaveLength(1)
   })
 
   it("names the exact target of a loop in a multi-way route", () => {
@@ -1056,9 +1166,9 @@ describe("PR lifecycle gate map", () => {
       '[data-flow-graph="implementation"]',
     )!
 
-    expectTargetCellContract(container, multiLoopFlow)
+    expectFlowRenderingContract(container, multiLoopFlow)
     const loop = graph.querySelector<HTMLElement>(
-      '[data-flow-edge-key="i_retry:i_work"][data-flow-edge]',
+      '[data-flow-edge-key="i_retry:i_work"][data-flow-launch]',
     )!
     expect(loop.querySelector("[data-flow-branch-label]")).toHaveTextContent(
       "Repair",
@@ -1067,9 +1177,21 @@ describe("PR lifecycle gate map", () => {
       "data-flow-loop-target-title",
       "i_work",
     )
-    expect(loop).toHaveTextContent(/Repair.*Returns to Implement fixes.*↺/s)
+    expect(loop).toHaveTextContent(/Repair.*↺.*Return to Implement fixes/s)
     expect(
-      graph.querySelectorAll('[data-flow-edge-key="i_retry:i_work"]'),
+      graph.querySelectorAll(
+        '[data-flow-edge-key="i_retry:i_work"][data-flow-edge]',
+      ),
+    ).toHaveLength(1)
+    expect(
+      graph.querySelectorAll(
+        '[data-flow-edge-key="i_retry:i_work"][data-flow-launch]',
+      ),
+    ).toHaveLength(1)
+    expect(
+      graph.querySelectorAll(
+        '[data-flow-launches="i_retry"] [data-flow-route-group][data-flow-route-mode="parallel"]',
+      ),
     ).toHaveLength(1)
   })
 

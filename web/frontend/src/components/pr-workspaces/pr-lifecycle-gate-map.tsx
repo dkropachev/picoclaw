@@ -41,17 +41,8 @@ interface GateFormatSummary {
   accessible: string
 }
 
-interface FlowContinuation {
-  kind: "continuation"
-  id: string
-  edge: PRLifecycleFlowEdge
-  edgeIndex: number
-}
-
-type FlowLayoutItem = PRLifecycleFlowNode | FlowContinuation
-
 interface FlowLayout {
-  ranks: FlowLayoutItem[][]
+  ranks: PRLifecycleFlowNode[][]
   nodeByID: Map<string, PRLifecycleFlowNode>
   incoming: Map<string, PRLifecycleFlowEdge[]>
   outgoing: Map<string, PRLifecycleFlowEdge[]>
@@ -88,6 +79,15 @@ export function PRLifecycleGateMap({
   const initialFlow =
     findDecisionPointFlow(flow, selectedDecisionPoint)?.id ?? flow.flows[0].id
   const [activeFlowID, setActiveFlowID] = useState(initialFlow)
+  const [selectedNodeID, setSelectedNodeID] = useState<string | undefined>(
+    () =>
+      flow.flows
+        .find((candidate) => candidate.id === initialFlow)
+        ?.nodes.find(
+          (node) =>
+            node.editable && node.decision_point === selectedDecisionPoint,
+        )?.id,
+  )
 
   useEffect(() => {
     setActiveFlowID((current) => {
@@ -113,11 +113,31 @@ export function PRLifecycleGateMap({
     flow.flows.find((candidate) => candidate.id === activeFlowID) ??
     flow.flows[0]
 
+  useEffect(() => {
+    if (!selectedDecisionPoint) {
+      setSelectedNodeID(undefined)
+      return
+    }
+    setSelectedNodeID((current) => {
+      const currentNode = activeFlow.nodes.find((node) => node.id === current)
+      if (
+        currentNode?.editable &&
+        currentNode.decision_point === selectedDecisionPoint
+      ) {
+        return current
+      }
+      return activeFlow.nodes.find(
+        (node) =>
+          node.editable && node.decision_point === selectedDecisionPoint,
+      )?.id
+    })
+  }, [activeFlow, selectedDecisionPoint])
+
   return (
     <section
       aria-labelledby={titleID}
       className={cn(
-        "bg-card min-w-0 overflow-hidden rounded-xl border",
+        "bg-card @container/flow min-w-0 overflow-hidden rounded-xl border",
         className,
       )}
       data-flow-revision={flowRevision}
@@ -189,9 +209,12 @@ export function PRLifecycleGateMap({
                   <FlowGraph
                     flow={candidate}
                     instanceID={instanceID}
-                    onSelect={onSelect}
+                    onSelect={(node) => {
+                      setSelectedNodeID(node.id)
+                      onSelect(node.decision_point!)
+                    }}
                     profileID={profileID}
-                    selectedDecisionPoint={selectedDecisionPoint}
+                    selectedNodeID={selectedNodeID}
                     workflows={workflows}
                   />
                 ) : null}
@@ -254,7 +277,12 @@ function FlowTabs({
         const actionCount = flow.nodes.filter(
           (node) => node.kind === "action",
         ).length
-        const gateCount = flow.nodes.length - actionCount
+        const editableGateCount = flow.nodes.filter(
+          (node) => node.kind === "gate" && node.editable,
+        ).length
+        const safeguardCount = flow.nodes.filter(
+          (node) => node.kind === "gate" && !node.editable,
+        ).length
         return (
           <button
             aria-controls={`${instanceID}-flow-${index}-panel`}
@@ -276,7 +304,9 @@ function FlowTabs({
           >
             <strong className="text-xs">{flow.title}</strong>
             <span className="text-muted-foreground mt-1 text-[11px] leading-snug">
-              {actionCount} actions · {gateCount} gates
+              {actionCount} actions · {editableGateCount} editable gate
+              {editableGateCount === 1 ? " placement" : " placements"}
+              {safeguardCount > 0 ? ` · ${safeguardCount} safeguards` : ""}
             </span>
           </button>
         )
@@ -290,14 +320,14 @@ function FlowGraph({
   instanceID,
   onSelect,
   profileID,
-  selectedDecisionPoint,
+  selectedNodeID,
   workflows,
 }: {
   flow: PRLifecycleFlow
   instanceID: string
-  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  onSelect: (node: PRLifecycleFlowNode) => void
   profileID?: string
-  selectedDecisionPoint?: PRLifecycleDecisionPoint
+  selectedNodeID?: string
   workflows?: PRLifecycleGateProfile["workflows"]
 }) {
   const layout = useMemo(() => createFlowLayout(flow), [flow])
@@ -305,44 +335,28 @@ function FlowGraph({
   return (
     <section
       aria-label={`${flow.title} graph`}
-      className="bg-background/60 min-w-0 rounded-xl border p-3"
+      className="bg-background/60 @container/flow min-w-0 rounded-xl border p-3"
       data-flow-graph={flow.id}
     >
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-primary text-[10px] font-semibold tracking-wider uppercase">
-            Workflow flow
-          </p>
-          <h3 className="text-sm font-semibold">{flow.title}</h3>
-        </div>
-        <span className="text-muted-foreground rounded-md border px-2 py-1 font-mono text-[10px]">
-          {flow.nodes.length} nodes
-        </span>
-      </div>
-
-      <div className="mx-auto w-full max-w-5xl min-w-0 space-y-1">
+      <div className="mx-auto w-full max-w-7xl min-w-0 space-y-1">
         {layout.ranks.map((nodes, rank) => (
           <div
             className={responsiveGridClass(nodes.length)}
             data-flow-rank={rank}
             key={rank}
           >
-            {nodes.map((item) =>
-              item.kind === "continuation" ? (
-                <ContinuationRail item={item} key={item.id} />
-              ) : (
-                <FlowNodeCell
-                  flowNode={item}
-                  instanceID={instanceID}
-                  key={item.id}
-                  layout={layout}
-                  onSelect={onSelect}
-                  profileID={profileID}
-                  selectedDecisionPoint={selectedDecisionPoint}
-                  workflows={workflows}
-                />
-              ),
-            )}
+            {nodes.map((node) => (
+              <FlowNodeCell
+                flowNode={node}
+                instanceID={instanceID}
+                key={node.id}
+                layout={layout}
+                onSelect={onSelect}
+                profileID={profileID}
+                selectedNodeID={selectedNodeID}
+                workflows={workflows}
+              />
+            ))}
           </div>
         ))}
       </div>
@@ -356,71 +370,60 @@ function FlowNodeCell({
   layout,
   onSelect,
   profileID,
-  selectedDecisionPoint,
+  selectedNodeID,
   workflows,
 }: {
   flowNode: PRLifecycleFlowNode
   instanceID: string
   layout: FlowLayout
-  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  onSelect: (node: PRLifecycleFlowNode) => void
   profileID?: string
-  selectedDecisionPoint?: PRLifecycleDecisionPoint
+  selectedNodeID?: string
   workflows?: PRLifecycleGateProfile["workflows"]
 }) {
   const incoming = layout.incoming.get(flowNode.id) ?? []
   const outgoing = layout.outgoing.get(flowNode.id) ?? []
-  const forward = outgoing.filter((edge) => !edge.loop)
-  const loops = outgoing.filter((edge) => edge.loop)
+  const singletonLoop =
+    outgoing.length === 1 && outgoing[0].loop ? outgoing[0] : undefined
   return (
     <div
       className="flex min-w-0 flex-col"
       data-flow-cell={flowNode.id}
       data-flow-incoming-count={incoming.length}
     >
-      {incoming.map((edge) => {
-        const source = layout.nodeByID.get(edge.from)!
-        return (
-          <EdgeRoute
-            edge={edge}
-            key={`${edge.from}:${edge.to}:${edge.mode}:${edge.outcome ?? ""}`}
-            showLabel={(layout.outgoing.get(edge.from) ?? []).length > 1}
-            source={source}
-            sourceEdges={layout.outgoing.get(edge.from) ?? []}
-            target={flowNode}
-          />
-        )
-      })}
+      {incoming.length > 0 ? (
+        <TargetConnector
+          edges={incoming}
+          nodeByID={layout.nodeByID}
+          target={flowNode}
+        />
+      ) : null}
       <GraphNode
         flowNode={flowNode}
         instanceID={instanceID}
-        onSelect={onSelect}
+        onSelect={() => onSelect(flowNode)}
         profileID={profileID}
-        selected={
-          flowNode.decision_point === selectedDecisionPoint && flowNode.editable
-        }
+        selected={flowNode.id === selectedNodeID && flowNode.editable}
         workflow={
           flowNode.decision_point
             ? workflows?.[flowNode.decision_point]
             : undefined
         }
       />
-      {outgoing.length > 1 && forward.length > 0 ? (
+      {outgoing.length > 1 ? (
         <BranchLaunches
-          edges={forward}
+          edges={outgoing}
           nodeByID={layout.nodeByID}
           source={flowNode}
         />
       ) : null}
-      {loops.map((edge) => (
-        <EdgeRoute
-          edge={edge}
-          key={`${edge.from}:${edge.to}:${edge.mode}:${edge.outcome ?? ""}`}
-          showLabel={outgoing.length > 1}
+      {singletonLoop ? (
+        <LoopConnector
+          edge={singletonLoop}
           source={flowNode}
-          sourceEdges={outgoing}
-          target={layout.nodeByID.get(edge.to)!}
+          target={layout.nodeByID.get(singletonLoop.to)!}
         />
-      ))}
+      ) : null}
     </div>
   )
 }
@@ -434,49 +437,190 @@ function BranchLaunches({
   nodeByID: Map<string, PRLifecycleFlowNode>
   source: PRLifecycleFlowNode
 }) {
+  const modes = [
+    ...new Set(edges.map((edge) => edge.mode)),
+  ] as PRLifecycleFlowEdge["mode"][]
+  const routeComposition = modes.join("+")
   return (
     <div
-      aria-label={`${source.title} route launches`}
-      className="border-primary/20 bg-muted/10 mt-1 min-w-0 space-y-1 rounded-lg border p-1.5"
+      aria-label={`${source.title} branches`}
+      className="border-primary/20 bg-muted/10 mt-2 min-w-0 space-y-2 rounded-lg border p-2"
       data-flow-launches={source.id}
       role="group"
     >
-      {edges.map((edge) => {
-        const target = nodeByID.get(edge.to)!
-        const label = edge.label ?? "Primary"
-        return (
-          <div
-            aria-label={`${label} route from ${source.title} to ${target.title}`}
-            className={cn(
-              "flex min-w-0 items-center gap-1.5 text-[10px] leading-snug",
-              edge.mode === "optional" && "text-muted-foreground",
-            )}
-            data-flow-edge-key={flowEdgeKey(edge)}
-            data-flow-launch
-            data-flow-launch-target={edge.to}
-            data-flow-source={edge.from}
-            key={flowEdgeKey(edge)}
-            role="group"
+      {modes.map((mode) => (
+        <div
+          className="min-w-0 space-y-1"
+          data-flow-route-composition={routeComposition}
+          data-flow-route-group={source.id}
+          data-flow-route-mode={mode}
+          key={mode}
+        >
+          <span
+            className="text-muted-foreground block text-[10px] font-bold tracking-wider uppercase"
+            data-flow-route-heading
           >
-            <span
-              className="bg-background text-foreground shrink-0 rounded border px-1.5 py-0.5 font-semibold"
-              data-flow-launch-label
-            >
-              {label}
-            </span>
-            <span aria-hidden="true" className="text-primary shrink-0">
-              →
-            </span>
-            <span
-              className="min-w-0 [overflow-wrap:anywhere]"
-              data-flow-launch-target-title
-            >
-              {target.title}
-            </span>
-          </div>
-        )
-      })}
+            {routeModeVisibleLabel(mode)}
+          </span>
+          {edges
+            .filter((edge) => edge.mode === mode)
+            .map((edge) => {
+              const target = nodeByID.get(edge.to)!
+              const label = edge.label ?? "Primary"
+              return (
+                <div
+                  aria-label={`${label} route from ${source.title} ${edge.loop ? "returns" : "leads"} to ${target.title}`}
+                  className={cn(
+                    "flex min-w-0 items-center gap-1.5 text-[11px] leading-snug",
+                    edge.mode === "optional" && "text-muted-foreground",
+                  )}
+                  data-flow-branch={source.id}
+                  data-flow-branch-edge={label}
+                  data-flow-branch-path={label}
+                  data-flow-branch-target={edge.to}
+                  data-flow-edge-key={flowEdgeKey(edge)}
+                  data-flow-launch
+                  data-flow-launch-target={edge.to}
+                  data-flow-loop-connector={edge.loop ? edge.to : undefined}
+                  data-flow-optional={
+                    edge.mode === "optional" ? "true" : undefined
+                  }
+                  data-flow-parallel={
+                    edge.mode === "parallel" ? "true" : undefined
+                  }
+                  data-flow-route-mode={edge.mode}
+                  data-flow-source={edge.from}
+                  key={flowEdgeKey(edge)}
+                  role="group"
+                >
+                  {edge.loop ? <SemanticEdge edge={edge} /> : null}
+                  <span
+                    className="bg-background text-foreground shrink-0 rounded border px-1.5 py-0.5 font-semibold"
+                    data-flow-branch-label
+                    data-flow-launch-label
+                  >
+                    {label}
+                  </span>
+                  <span aria-hidden="true" className="text-primary shrink-0">
+                    {edge.loop ? "↺" : "→"}
+                  </span>
+                  <span
+                    className="min-w-0 [overflow-wrap:anywhere]"
+                    data-flow-launch-target-title
+                    data-flow-loop-target-title={
+                      edge.loop ? edge.to : undefined
+                    }
+                  >
+                    {edge.loop ? `Return to ${target.title}` : target.title}
+                  </span>
+                </div>
+              )
+            })}
+        </div>
+      ))}
     </div>
+  )
+}
+
+function TargetConnector({
+  edges,
+  nodeByID,
+  target,
+}: {
+  edges: PRLifecycleFlowEdge[]
+  nodeByID: Map<string, PRLifecycleFlowNode>
+  target: PRLifecycleFlowNode
+}) {
+  const source = nodeByID.get(edges[0].from)!
+  const singletonMode = edges.length === 1 ? edges[0].mode : undefined
+  const optional = singletonMode === "optional"
+  const accessibleName =
+    edges.length > 1
+      ? `${edges.length} paths merge into ${target.title}`
+      : optional
+        ? `${source.title} optionally continues to ${target.title}`
+        : `${source.title} continues to ${target.title}`
+  return (
+    <div
+      aria-label={accessibleName}
+      className={cn(
+        "text-primary flex min-h-10 w-full min-w-0 items-end justify-center text-center",
+        optional && "text-muted-foreground",
+      )}
+      data-flow-incoming-count={edges.length}
+      data-flow-merge={edges.length > 1 ? "true" : undefined}
+      data-flow-optional={optional ? "true" : undefined}
+      data-flow-route-mode={singletonMode}
+      data-flow-target-connector={target.id}
+      role="img"
+    >
+      {edges.map((edge) => (
+        <SemanticEdge edge={edge} key={flowEdgeKey(edge)} />
+      ))}
+      <span
+        className="flex flex-col items-center justify-end text-lg leading-none"
+        aria-hidden="true"
+      >
+        <span
+          className={cn(
+            "border-primary/40 h-3 border-l",
+            optional && "border-muted-foreground border-dashed",
+          )}
+          data-flow-connector-stem
+        />
+        <span>↓</span>
+      </span>
+    </div>
+  )
+}
+
+function LoopConnector({
+  edge,
+  source,
+  target,
+}: {
+  edge: PRLifecycleFlowEdge
+  source: PRLifecycleFlowNode
+  target: PRLifecycleFlowNode
+}) {
+  return (
+    <div
+      aria-label={`${source.title} returns to ${target.title}`}
+      className="border-primary/40 bg-primary/5 text-primary my-2 flex min-w-0 items-center justify-center gap-2 rounded-lg border border-dashed px-2 py-2 text-[11px] leading-snug"
+      data-flow-edge-key={flowEdgeKey(edge)}
+      data-flow-loop-connector={edge.to}
+      data-flow-source={edge.from}
+      role="group"
+    >
+      <SemanticEdge edge={edge} />
+      <span className="text-lg leading-none" aria-hidden="true">
+        ↺
+      </span>
+      <span
+        className="text-foreground min-w-0 [overflow-wrap:anywhere]"
+        data-flow-loop-target-title={edge.to}
+      >
+        Return to {target.title}
+      </span>
+    </div>
+  )
+}
+
+function SemanticEdge({ edge }: { edge: PRLifecycleFlowEdge }) {
+  return (
+    <span
+      aria-hidden="true"
+      data-flow-edge={edge.mode}
+      data-flow-edge-key={flowEdgeKey(edge)}
+      data-flow-loop-target={edge.loop ? edge.to : undefined}
+      data-flow-optional={edge.mode === "optional" ? "true" : undefined}
+      data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
+      data-flow-placement={edge.loop ? "source" : "target"}
+      data-flow-semantic-edge
+      data-flow-source={edge.from}
+      data-flow-target={edge.to}
+      hidden
+    />
   )
 }
 
@@ -490,7 +634,7 @@ function GraphNode({
 }: {
   flowNode: PRLifecycleFlowNode
   instanceID: string
-  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  onSelect: () => void
   profileID?: string
   selected: boolean
   workflow?: PRLifecycleGateWorkflow
@@ -507,21 +651,6 @@ function GraphNode({
       selected={selected}
       workflow={workflow}
     />
-  )
-}
-
-function ContinuationRail({ item }: { item: FlowContinuation }) {
-  return (
-    <div
-      aria-hidden="true"
-      className="text-primary/60 flex min-h-24 min-w-0 flex-col items-center justify-center text-lg leading-none"
-      data-flow-continuation-for={`${item.edge.from}:${item.edge.to}`}
-      data-flow-edge-key={flowEdgeKey(item.edge)}
-      data-flow-continuation-target={item.edge.to}
-    >
-      <span className="border-primary/40 min-h-14 flex-1 border-l-2" />
-      <span>↓</span>
-    </div>
   )
 }
 
@@ -557,23 +686,15 @@ function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
       data-required-gate={node.safeguard}
       role="group"
     >
-      <span className="flex w-full items-start justify-between gap-2">
-        <span className="text-destructive text-[9px] font-bold tracking-wider">
-          LOCKED SAFEGUARD
-        </span>
-        <span className="border-destructive/40 text-destructive rounded border px-1.5 py-0.5 text-[8px] font-bold tracking-wider uppercase">
-          Locked
-        </span>
+      <span className="border-destructive/40 text-destructive w-fit rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase">
+        Locked safeguard
       </span>
       <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
       <span
-        className="text-muted-foreground mt-1 text-[10px] leading-tight"
+        className="text-muted-foreground mt-1 text-[11px] leading-snug"
         data-gate-description
       >
         {node.description}
-      </span>
-      <span className="text-muted-foreground mt-auto pt-2 text-[9px] font-bold tracking-wider uppercase">
-        Fixed · not editable
       </span>
     </div>
   )
@@ -591,7 +712,7 @@ function EditableGateNode({
   instanceID: string
   node: PRLifecycleFlowNode
   number?: number
-  onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
+  onSelect: () => void
   profileID?: string
   selected: boolean
   workflow?: PRLifecycleGateWorkflow
@@ -600,20 +721,13 @@ function EditableGateNode({
   const format = summarizeGateFormat(workflow, decisionPoint)
   const descriptionID = `${instanceID}-${node.id}-description`
   const formatID = `${instanceID}-${node.id}-format`
-  const activate = () => onSelect(decisionPoint)
-  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== "Enter" && event.key !== " ") return
-    event.preventDefault()
-    activate()
-  }
+  const activate = onSelect
 
   return (
     <button
       aria-describedby={`${descriptionID} ${formatID}`}
-      aria-expanded={selected}
       aria-haspopup="dialog"
       aria-label={node.title}
-      aria-pressed={selected}
       className={cn(
         "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 text-left [overflow-wrap:anywhere] shadow-sm transition-colors outline-none focus-visible:ring-2",
         selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
@@ -627,15 +741,12 @@ function EditableGateNode({
       data-gate-format={format.format}
       data-gate-id={decisionPoint}
       data-gate-number={number}
+      data-gate-selected={selected ? "true" : undefined}
       data-workflow-configured={workflow ? "true" : "false"}
       onClick={activate}
-      onKeyDown={handleKeyDown}
       type="button"
     >
-      <span className="flex w-full items-start justify-between gap-2">
-        <span className="text-primary text-[9px] font-bold tracking-wider">
-          EDITABLE GATE
-        </span>
+      <span className="flex w-full justify-end">
         {number ? (
           <span
             className={cn(
@@ -649,7 +760,7 @@ function EditableGateNode({
       </span>
       <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
       <span
-        className="text-muted-foreground mt-1 text-[10px] leading-tight"
+        className="text-muted-foreground mt-1 text-[11px] leading-snug"
         data-gate-description
         id={descriptionID}
       >
@@ -665,113 +776,23 @@ function EditableGateNode({
           {format.label}
         </span>
         {format.fallback ? (
-          <span className="text-muted-foreground text-[8px] font-semibold tracking-wider uppercase">
+          <span className="text-muted-foreground text-[9px] font-semibold tracking-wider uppercase">
             default fallback
           </span>
         ) : null}
       </span>
       {format.composition ? (
-        <span className="text-foreground mt-1 text-[9px] font-semibold">
+        <span className="text-foreground mt-1 text-[10px] font-semibold">
           {format.composition}
         </span>
       ) : null}
-      <span className="text-primary mt-1 text-[9px] font-bold tracking-wider">
-        OPEN SETTINGS →
+      <span className="text-primary mt-1 text-[10px] font-bold tracking-wider">
+        Edit gate →
       </span>
       <span className="sr-only" id={formatID}>
         {format.accessible}
       </span>
     </button>
-  )
-}
-
-function EdgeRoute({
-  edge,
-  showLabel,
-  source,
-  sourceEdges,
-  target,
-}: {
-  edge: PRLifecycleFlowEdge
-  showLabel: boolean
-  source: PRLifecycleFlowNode
-  sourceEdges: PRLifecycleFlowEdge[]
-  target: PRLifecycleFlowNode
-}) {
-  const displayLabel = showLabel ? (edge.label ?? "Primary") : undefined
-  const describedLabel = edge.label ?? "primary"
-  const routeComposition = [
-    ...new Set(sourceEdges.map((candidate) => candidate.mode)),
-  ].join("+")
-  const routeDescription =
-    edge.mode === "choice"
-      ? `${describedLabel} choice leads to`
-      : edge.mode === "parallel"
-        ? `also follows ${describedLabel} to`
-        : edge.mode === "optional"
-          ? edge.label
-            ? `optionally follows ${edge.label} to`
-            : "optionally continues to"
-          : "continues to"
-  return (
-    <div
-      aria-label={`${source.title} ${routeDescription} ${target.title}${edge.loop ? ", loop" : ""}`}
-      className={cn(
-        "text-primary flex min-h-14 w-full min-w-0 flex-col items-center justify-center text-center",
-        showLabel && "border-primary/20 rounded-lg border-x",
-        edge.mode === "optional" && "text-muted-foreground",
-        edge.loop &&
-          "border-primary/40 bg-primary/5 my-1 rounded-lg border border-dashed px-2 py-2",
-      )}
-      data-flow-branch={showLabel ? source.id : undefined}
-      data-flow-branch-edge={displayLabel}
-      data-flow-branch-path={displayLabel}
-      data-flow-branch-target={edge.to}
-      data-flow-edge={edge.mode}
-      data-flow-edge-key={flowEdgeKey(edge)}
-      data-flow-incoming-for={edge.loop ? undefined : edge.to}
-      data-flow-loop-target={edge.loop ? edge.to : undefined}
-      data-flow-optional={edge.mode === "optional" ? "true" : undefined}
-      data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
-      data-flow-placement={edge.loop ? "source" : "target"}
-      data-flow-route-composition={showLabel ? routeComposition : undefined}
-      data-flow-route-mode={showLabel ? edge.mode : undefined}
-      data-flow-source={edge.from}
-      data-flow-target={edge.to}
-      role="group"
-      title={edge.loop ? `Returns to ${target.title}` : undefined}
-    >
-      {showLabel ? (
-        <span
-          className={cn(
-            "text-muted-foreground mb-1 text-[8px] font-bold tracking-wider uppercase",
-            edge.mode === "parallel" && "text-primary",
-          )}
-          data-flow-route-heading
-        >
-          {routeModeVisibleLabel(edge.mode)}
-        </span>
-      ) : null}
-      {displayLabel ? (
-        <span
-          className="bg-background text-foreground rounded border px-2 py-0.5 text-[10px] font-semibold [overflow-wrap:anywhere]"
-          data-flow-branch-label
-        >
-          {displayLabel}
-        </span>
-      ) : null}
-      {edge.loop && showLabel ? (
-        <span
-          className="text-muted-foreground mt-1 text-[10px] leading-snug [overflow-wrap:anywhere]"
-          data-flow-loop-target-title={edge.to}
-        >
-          Returns to {target.title}
-        </span>
-      ) : null}
-      <span className="mt-1 text-lg leading-none" aria-hidden="true">
-        {edge.loop ? "↺" : "↓"}
-      </span>
-    </div>
   )
 }
 
@@ -814,43 +835,33 @@ function createFlowLayout(flow: PRLifecycleFlow): FlowLayout {
     if (visited.has(node.id)) continue
     rankByNode.set(node.id, fallbackRank++)
   }
+
+  // Pull short paths down toward their next node instead of drawing detached
+  // continuation rails through unrelated ranks. A singleton forward path is
+  // therefore always shown in the rank immediately before its destination;
+  // longer fork paths remain identifiable by their labelled source routes.
+  for (const nodeID of [...visited].reverse()) {
+    const targets = adjacency.get(nodeID) ?? []
+    if (targets.length !== 1 || (outgoing.get(nodeID) ?? []).length !== 1) {
+      continue
+    }
+    const latestRank = (rankByNode.get(targets[0]) ?? 1) - 1
+    if (latestRank > (rankByNode.get(nodeID) ?? 0)) {
+      rankByNode.set(nodeID, latestRank)
+    }
+  }
+
   const maxRank = Math.max(0, ...rankByNode.values())
   const nodeOrder = new Map(flow.nodes.map((node, index) => [node.id, index]))
-  const ranks = Array.from({ length: maxRank + 1 }, (_, rank) => {
-    const items: FlowLayoutItem[] = flow.nodes.filter(
-      (node) => rankByNode.get(node.id) === rank,
-    )
-    flow.edges.forEach((edge, edgeIndex) => {
-      if (edge.loop) return
-      const fromRank = rankByNode.get(edge.from) ?? 0
-      const toRank = rankByNode.get(edge.to) ?? fromRank + 1
-      if (fromRank < rank && rank < toRank) {
-        items.push({
-          kind: "continuation",
-          id: `${edge.from}:${edge.to}:${edge.outcome ?? ""}:${rank}`,
-          edge,
-          edgeIndex,
-        })
-      }
-    })
-    return items.sort((left, right) => {
-      const leftOrder = layoutItemOrder(left, nodeOrder, flow.edges.length)
-      const rightOrder = layoutItemOrder(right, nodeOrder, flow.edges.length)
-      return leftOrder - rightOrder
-    })
-  }).filter((nodes) => nodes.length > 0)
+  const ranks = Array.from({ length: maxRank + 1 }, (_, rank) =>
+    flow.nodes
+      .filter((node) => rankByNode.get(node.id) === rank)
+      .sort(
+        (left, right) =>
+          (nodeOrder.get(left.id) ?? 0) - (nodeOrder.get(right.id) ?? 0),
+      ),
+  ).filter((nodes) => nodes.length > 0)
   return { ranks, nodeByID, incoming, outgoing }
-}
-
-function layoutItemOrder(
-  item: FlowLayoutItem,
-  nodeOrder: Map<string, number>,
-  edgeCount: number,
-): number {
-  if (item.kind !== "continuation") return nodeOrder.get(item.id) ?? 0
-  const source = nodeOrder.get(item.edge.from) ?? 0
-  const target = nodeOrder.get(item.edge.to) ?? source
-  return (source + target) / 2 + item.edgeIndex / Math.max(1, edgeCount * 100)
 }
 
 function flowEdgeKey(edge: PRLifecycleFlowEdge): string {
@@ -886,8 +897,12 @@ function routeModeVisibleLabel(mode: PRLifecycleFlowEdge["mode"]): string {
 function responsiveGridClass(count: number): string {
   return cn(
     "grid min-w-0 grid-cols-1 gap-3",
-    count === 2 && "sm:grid-cols-2",
-    count >= 3 && "sm:grid-cols-2 lg:grid-cols-3",
+    count === 2 && "@2xs/flow:grid-cols-2",
+    count === 3 && "@2xs/flow:grid-cols-2 @md/flow:grid-cols-3",
+    count === 4 &&
+      "@2xs/flow:grid-cols-2 @md/flow:grid-cols-3 @xl/flow:grid-cols-4",
+    count >= 5 &&
+      "@2xs/flow:grid-cols-2 @md/flow:grid-cols-3 @xl/flow:grid-cols-4 @3xl/flow:grid-cols-5",
   )
 }
 

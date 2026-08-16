@@ -3043,12 +3043,11 @@ async function expectGateMapFits(gateMap: Locator) {
             [
               "[data-gate-id]",
               "[data-flow-kind]",
-              "[data-flow-edge]",
-              "[data-flow-branch]",
-              "[data-flow-branch-path]",
-              "[data-flow-branch-edge]",
-              "[data-flow-branch-label]",
-              "[data-flow-branch-target]",
+              "[data-flow-target-connector]",
+              "[data-flow-loop-connector]",
+              "[data-flow-launch]",
+              "[data-flow-route-group]",
+              "[data-flow-launch-label]",
               "[data-flow-view-tab]",
             ].join(","),
           )
@@ -3063,12 +3062,11 @@ async function expectGateMapFits(gateMap: Locator) {
             .map(
               (target) =>
                 target.dataset.gateId ??
-                target.dataset.flowEdge ??
                 target.dataset.flowKind ??
-                target.dataset.flowBranch ??
-                target.dataset.flowBranchPath ??
-                target.dataset.flowBranchEdge ??
-                target.dataset.flowBranchTarget ??
+                target.dataset.flowTargetConnector ??
+                target.dataset.flowLoopTarget ??
+                target.dataset.flowLaunchTarget ??
+                target.dataset.flowRouteMode ??
                 target.dataset.flowViewTab ??
                 target.tagName.toLowerCase(),
             )
@@ -3134,11 +3132,11 @@ async function expectActiveGateFlowContract(
         'button[data-flow-kind="gate"][data-gate-id]',
       ),
     )
-    const linearEdges = Array.from(
-      flow.querySelectorAll<HTMLElement>('[data-flow-edge="linear"]'),
-    )
     const semanticEdges = Array.from(
       flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
+    )
+    const launchLabels = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-launch-label]"),
     )
 
     return {
@@ -3161,32 +3159,26 @@ async function expectActiveGateFlowContract(
             gate.closest('[data-flow-kind="action"]') != null,
         )
         .map((gate) => gate.dataset.gateId ?? "gate"),
-      invalidLinearEdges: linearEdges
-        .filter((edge) => {
-          const siblingCount = semanticEdges.filter(
-            (candidate) =>
-              candidate.dataset.flowSource === edge.dataset.flowSource,
-          ).length
-          const label = edge.querySelector<HTMLElement>(
-            "[data-flow-branch-label]",
-          )
-          if (siblingCount === 1) {
-            return (
-              label != null || !/^[↓↺]$/.test(edge.textContent?.trim() ?? "")
-            )
-          }
-          const words = label?.textContent?.trim().split(/\s+/) ?? []
-          return words.length < 1 || words.length > 2
-        })
-        .map((edge) => edge.textContent?.trim() ?? "edge"),
-      invalidBranchLabels: Array.from(
-        flow.querySelectorAll<HTMLElement>("[data-flow-branch-label]"),
-      )
+      visibleSemanticEdges: semanticEdges
+        .filter(
+          (edge) =>
+            !edge.hidden && window.getComputedStyle(edge).display !== "none",
+        )
+        .map((edge) => edge.dataset.flowEdgeKey ?? "semantic edge"),
+      invalidLaunchLabels: launchLabels
         .filter((label) => {
           const words = label.textContent?.trim().split(/\s+/) ?? []
           return words.length < 1 || words.length > 2
         })
-        .map((label) => label.textContent?.trim() ?? "branch"),
+        .map((label) => label.textContent?.trim() ?? "launch"),
+      duplicatedTargetLabels: Array.from(
+        flow.querySelectorAll<HTMLElement>(
+          [
+            "[data-flow-target-connector] [data-flow-launch-label]",
+            "[data-flow-target-connector] [data-flow-branch-label]",
+          ].join(","),
+        ),
+      ).map((label) => label.textContent?.trim() ?? "duplicated label"),
     }
   })
 
@@ -3199,57 +3191,51 @@ async function expectActiveGateFlowContract(
   )
   expect(contract.invalidActions).toEqual([])
   expect(contract.invalidEditableGates).toEqual([])
-  expect(contract.invalidLinearEdges).toEqual([])
-  expect(contract.invalidBranchLabels).toEqual([])
+  expect(contract.visibleSemanticEdges).toEqual([])
+  expect(contract.invalidLaunchLabels).toEqual([])
+  expect(contract.duplicatedTargetLabels).toEqual([])
 
   const renderedEdges = await panel
     .locator("[data-flow-edge]")
     .evaluateAll((edges) =>
       edges.map((edge) => {
         const route = edge as HTMLElement
-        const label = route
-          .querySelector<HTMLElement>("[data-flow-branch-label]")
-          ?.textContent?.trim()
         return [
           route.dataset.flowSource,
           route.dataset.flowTarget,
           route.dataset.flowEdge,
-          label ?? "",
           route.dataset.flowLoopTarget ? "loop" : "forward",
+          route.dataset.flowEdgeKey,
         ].join("|")
       }),
     )
-  const outgoingCounts = new Map<string, number>()
-  for (const edge of expectedFlow!.edges) {
-    outgoingCounts.set(edge.from, (outgoingCounts.get(edge.from) ?? 0) + 1)
-  }
   const expectedEdges = expectedFlow!.edges.map((edge) =>
     [
       edge.from,
       edge.to,
       edge.mode,
-      (outgoingCounts.get(edge.from) ?? 0) > 1 ? (edge.label ?? "Primary") : "",
       edge.loop ? "loop" : "forward",
+      `${edge.from}:${edge.to}`,
     ].join("|"),
   )
   expect(renderedEdges.sort()).toEqual(expectedEdges.sort())
 
   const visibleRouteGroups = await panel
-    .locator("[data-flow-route-mode]")
-    .evaluateAll((groups) => [
-      ...new Set(
-        groups.map((group) => {
-          const item = group as HTMLElement
-          return [
-            item.closest<HTMLElement>("[data-flow-branch]")?.dataset.flowBranch,
-            item.dataset.flowRouteMode,
-            item
-              .querySelector<HTMLElement>("[data-flow-route-heading]")
-              ?.textContent?.trim(),
-          ].join("|")
-        }),
-      ),
-    ])
+    .locator("[data-flow-route-group][data-flow-route-mode]")
+    .evaluateAll((groups) =>
+      groups.map((group) => {
+        const item = group as HTMLElement
+        return [
+          item.dataset.flowSource ??
+            item.closest<HTMLElement>("[data-flow-launches]")?.dataset
+              .flowLaunches,
+          item.dataset.flowRouteMode,
+          item
+            .querySelector<HTMLElement>("[data-flow-route-heading]")
+            ?.textContent?.trim(),
+        ].join("|")
+      }),
+    )
   const routeModeHeadings: Record<string, string> = {
     choice: "Choice",
     linear: "Primary path",
@@ -3311,242 +3297,366 @@ async function expectGeneratedBranchLabels(
   labels: string[],
 ) {
   const renderedLabels = await gateMap
-    .locator(
-      `[data-flow-edge][data-flow-source="${sourceID}"] [data-flow-branch-label]`,
-    )
+    .locator(`[data-flow-launches="${sourceID}"] [data-flow-launch-label]`)
     .allTextContents()
   expect(renderedLabels.map((label) => label.trim()).sort()).toEqual(
     [...labels].sort(),
   )
 }
 
-async function expectForwardEdgeGeometry(
+async function expectFlowConnectorContract(
   gateMap: Locator,
   view: "review" | "implementation",
 ) {
   const panel = gateMap.locator(`[data-flow-view="${view}"]`)
+  await expect(panel).toBeVisible()
   const expectedFlow = prLifecycleFlowFixture.flow.flows.find(
     (flow) => flow.id === view,
   )!
-  const outgoingCounts = new Map<string, number>()
+  const outgoing = new Map<string, Array<(typeof expectedFlow.edges)[number]>>()
+  const incoming = new Map<string, Array<(typeof expectedFlow.edges)[number]>>()
   for (const edge of expectedFlow.edges) {
-    outgoingCounts.set(edge.from, (outgoingCounts.get(edge.from) ?? 0) + 1)
+    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge])
+    if (!edge.loop) {
+      incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge])
+    }
   }
-  const expectedForwardCount = expectedFlow.edges.filter(
-    (edge) => !edge.loop,
-  ).length
-  const expectedLoopCount = expectedFlow.edges.filter(
-    (edge) => edge.loop,
-  ).length
-  const expectedLaunchCount = expectedFlow.edges.filter(
-    (edge) => !edge.loop && (outgoingCounts.get(edge.from) ?? 0) > 1,
-  ).length
+  const nodeTitles = new Map(
+    expectedFlow.nodes.map((node) => [node.id, node.title]),
+  )
+  const targetSpecs = [...incoming.entries()].map(([target, edges]) => ({
+    incoming: edges.length,
+    merge: edges.length > 1,
+    mode: edges.length === 1 ? edges[0].mode : undefined,
+    optional: edges.length === 1 && edges[0].mode === "optional",
+    source: edges.length === 1 ? edges[0].from : undefined,
+    target,
+  }))
+  const singletonForwardSpecs = expectedFlow.edges
+    .filter(
+      (edge) => !edge.loop && (outgoing.get(edge.from) ?? []).length === 1,
+    )
+    .map((edge) => ({ source: edge.from, target: edge.to }))
+  const launchSpecs = expectedFlow.edges
+    .filter((edge) => (outgoing.get(edge.from) ?? []).length > 1)
+    .map((edge) => ({
+      key: `${edge.from}:${edge.to}`,
+      label: edge.label ?? "Primary",
+      loop: edge.loop,
+      mode: edge.mode,
+      source: edge.from,
+      target: edge.to,
+      targetTitle: edge.loop
+        ? `Return to ${nodeTitles.get(edge.to) ?? edge.to}`
+        : (nodeTitles.get(edge.to) ?? edge.to),
+    }))
+  const loopSpecs = expectedFlow.edges
+    .filter((edge) => edge.loop)
+    .map((edge) => ({
+      branched: (outgoing.get(edge.from) ?? []).length > 1,
+      key: `${edge.from}:${edge.to}`,
+      label: edge.label ?? "Primary",
+      source: edge.from,
+      target: edge.to,
+      targetTitle: `Return to ${nodeTitles.get(edge.to) ?? edge.to}`,
+    }))
 
-  const result = await panel.evaluate((flow) => {
-    const tolerance = 3
-    const issues: string[] = []
-    const semanticEdges = Array.from(
-      flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
-    )
-    const forwardEdges = semanticEdges.filter(
-      (edge) => edge.dataset.flowLoopTarget == null,
-    )
-    const loopEdges = semanticEdges.filter(
-      (edge) => edge.dataset.flowLoopTarget != null,
-    )
-    const centerX = (element: Element) => {
-      const rect = element.getBoundingClientRect()
-      return rect.left + rect.width / 2
-    }
-
-    for (const edge of forwardEdges) {
-      const key = edge.dataset.flowEdgeKey ?? "missing-key"
-      const targetID = edge.dataset.flowTarget
-      const cell = edge.closest<HTMLElement>("[data-flow-cell]")
-      if (!targetID || cell?.dataset.flowCell !== targetID) {
-        issues.push(
-          `${key}: connector cell ${cell?.dataset.flowCell ?? "missing"} != target ${targetID ?? "missing"}`,
+  await panel.evaluate(() => document.fonts.ready)
+  await panel.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => resolve()),
         )
-        continue
-      }
-      const target = Array.from(
-        cell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-      ).find((node) => node.dataset.flowNodeId === targetID)
-      if (!target) {
-        issues.push(`${key}: target node missing from target cell`)
-        continue
-      }
-      if (
-        (edge.compareDocumentPosition(target) &
-          Node.DOCUMENT_POSITION_FOLLOWING) ===
-        0
-      ) {
-        issues.push(`${key}: connector does not precede target`)
-      }
-      const edgeRect = edge.getBoundingClientRect()
-      const targetRect = target.getBoundingClientRect()
-      if (edgeRect.width <= 0 || edgeRect.height <= 0) {
-        issues.push(`${key}: connector has no visible geometry`)
-      }
-      if (Math.abs(centerX(edge) - centerX(target)) > tolerance) {
-        issues.push(`${key}: connector and target centers diverge`)
-      }
-      if (edgeRect.bottom > targetRect.top + 1) {
-        issues.push(`${key}: connector overlaps or follows target`)
-      }
-      const label = edge.querySelector<HTMLElement>("[data-flow-branch-label]")
-      if (label && Math.abs(centerX(label) - centerX(target)) > tolerance) {
-        issues.push(`${key}: branch label does not point at target center`)
-      }
-      const incoming = Array.from(cell.children).filter(
-        (child): child is HTMLElement =>
-          child instanceof HTMLElement &&
-          child.matches('[data-flow-edge][data-flow-placement="target"]'),
-      )
-      if (
-        incoming.at(-1) === edge &&
-        Math.abs(targetRect.top - edgeRect.bottom) > 1
-      ) {
-        issues.push(`${key}: final incoming connector does not touch target`)
-      }
-    }
+      }),
+  )
 
-    for (const edge of loopEdges) {
-      const key = edge.dataset.flowEdgeKey ?? "missing-key"
-      const sourceID = edge.dataset.flowSource
-      const targetID = edge.dataset.flowLoopTarget
-      const sourceCell = edge.closest<HTMLElement>("[data-flow-cell]")
-      if (!sourceID || sourceCell?.dataset.flowCell !== sourceID) {
-        issues.push(`${key}: loop is not attached to its source cell`)
-        continue
-      }
-      const sourceNode = Array.from(
-        sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-      ).find((node) => node.dataset.flowNodeId === sourceID)
-      if (
-        !sourceNode ||
-        (edge.compareDocumentPosition(sourceNode) &
-          Node.DOCUMENT_POSITION_PRECEDING) ===
-          0
-      ) {
-        issues.push(`${key}: loop does not follow its source node`)
-      }
-      if (
-        sourceNode &&
-        Math.abs(centerX(edge) - centerX(sourceNode)) > tolerance
-      ) {
-        issues.push(`${key}: loop and source centers diverge`)
+  const result = await panel.evaluate(
+    (flow, expected) => {
+      const tolerance = 3
+      const issues: string[] = []
+      const semanticEdges = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
+      )
+      const targetConnectors = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-target-connector]"),
+      )
+      const loopConnectors = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-loop-connector]"),
+      )
+      const centerX = (element: Element) => {
+        const rect = element.getBoundingClientRect()
+        return rect.left + rect.width / 2
       }
 
-      const siblingCount = semanticEdges.filter(
-        (candidate) => candidate.dataset.flowSource === sourceID,
-      ).length
-      const label = edge
-        .querySelector<HTMLElement>("[data-flow-branch-label]")
-        ?.textContent?.trim()
-      const targetTitle = edge.querySelector<HTMLElement>(
-        "[data-flow-loop-target-title]",
-      )
-      if (siblingCount > 1) {
-        const targetNode = Array.from(
-          flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-        ).find((node) => node.dataset.flowNodeId === targetID)
-        const nodeTitle = targetNode
-          ?.querySelector<HTMLElement>("strong")
-          ?.textContent?.trim()
-        const words = label?.split(/\s+/) ?? []
-        if (
-          words.length < 1 ||
-          words.length > 2 ||
-          targetTitle?.dataset.flowLoopTargetTitle !== targetID ||
-          !nodeTitle ||
-          targetTitle.textContent?.trim() !== `Returns to ${nodeTitle}`
-        ) {
-          issues.push(`${key}: multi-way loop target clue is incomplete`)
+      for (const spec of expected.targets) {
+        const matches = targetConnectors.filter(
+          (connector) => connector.dataset.flowTargetConnector === spec.target,
+        )
+        if (matches.length !== 1) {
+          issues.push(`${spec.target}: expected one visible target connector`)
+          continue
         }
-      } else if (label || targetTitle || edge.textContent?.trim() !== "↺") {
-        issues.push(`${key}: singleton loop must remain unlabeled`)
-      }
-    }
-
-    const launches = Array.from(
-      flow.querySelectorAll<HTMLElement>("[data-flow-launch]"),
-    )
-    for (const launch of launches) {
-      const key = launch.dataset.flowEdgeKey ?? "missing-key"
-      const sourceID = launch.dataset.flowSource
-      const targetID = launch.dataset.flowLaunchTarget
-      const sourceCell = launch.closest<HTMLElement>("[data-flow-cell]")
-      if (!sourceID || sourceCell?.dataset.flowCell !== sourceID) {
-        issues.push(`${key}: launch is not attached to its source cell`)
-      }
-      const sourceNode = sourceCell
-        ? Array.from(
-            sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-          ).find((node) => node.dataset.flowNodeId === sourceID)
-        : undefined
-      if (
-        !sourceNode ||
-        (launch.compareDocumentPosition(sourceNode) &
-          Node.DOCUMENT_POSITION_PRECEDING) ===
+        const connector = matches[0]
+        const cell = connector.closest<HTMLElement>("[data-flow-cell]")
+        if (cell?.dataset.flowCell !== spec.target) {
+          issues.push(`${spec.target}: connector is outside its target cell`)
+          continue
+        }
+        const target = Array.from(
+          cell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+        ).find((node) => node.dataset.flowNodeId === spec.target)
+        if (!target) {
+          issues.push(`${spec.target}: target node missing from target cell`)
+          continue
+        }
+        if (
+          (connector.compareDocumentPosition(target) &
+            Node.DOCUMENT_POSITION_FOLLOWING) ===
           0
-      ) {
-        issues.push(`${key}: launch does not follow its source node`)
+        ) {
+          issues.push(`${spec.target}: connector does not precede target`)
+        }
+        const connectorRect = connector.getBoundingClientRect()
+        const targetRect = target.getBoundingClientRect()
+        if (connectorRect.width <= 0 || connectorRect.height <= 0) {
+          issues.push(`${spec.target}: connector has no visible geometry`)
+        }
+        if (Math.abs(centerX(connector) - centerX(target)) > tolerance) {
+          issues.push(`${spec.target}: connector and target centers diverge`)
+        }
+        if (Math.abs(targetRect.top - connectorRect.bottom) > tolerance) {
+          issues.push(`${spec.target}: connector does not touch target`)
+        }
+        if (connector.dataset.flowIncomingCount !== String(spec.incoming)) {
+          issues.push(`${spec.target}: incoming count is incorrect`)
+        }
+        if (
+          (spec.merge && connector.dataset.flowMerge !== "true") ||
+          (!spec.merge && connector.dataset.flowMerge === "true")
+        ) {
+          issues.push(`${spec.target}: merge state is incorrect`)
+        }
+        if ((connector.textContent?.match(/↓/g) ?? []).length !== 1) {
+          issues.push(`${spec.target}: connector must render exactly one arrow`)
+        }
+        if (
+          spec.incoming === 1 &&
+          connector.dataset.flowRouteMode !== spec.mode
+        ) {
+          issues.push(`${spec.target}: singleton route mode is incorrect`)
+        }
+        if (
+          spec.optional &&
+          (connector.dataset.flowOptional !== "true" ||
+            !connector.getAttribute("aria-label")?.includes("optionally") ||
+            window.getComputedStyle(
+              connector.querySelector<HTMLElement>(
+                "[data-flow-connector-stem]",
+              )!,
+            ).borderLeftStyle !== "dashed")
+        ) {
+          issues.push(`${spec.target}: optional connector is not distinct`)
+        }
+        if (
+          connector.querySelector(
+            "[data-flow-launch-label], [data-flow-branch-label]",
+          )
+        ) {
+          issues.push(`${spec.target}: connector duplicates a branch label`)
+        }
       }
-      const semantic = semanticEdges.filter(
-        (edge) => edge.dataset.flowEdgeKey === key,
-      )
-      if (
-        semantic.length !== 1 ||
-        semantic[0]?.dataset.flowTarget !== targetID ||
-        semantic[0]?.closest<HTMLElement>("[data-flow-cell]")?.dataset
-          .flowCell !== targetID
-      ) {
-        issues.push(`${key}: launch does not resolve to one target connector`)
-      }
-      const label = launch
-        .querySelector<HTMLElement>("[data-flow-launch-label]")
-        ?.textContent?.trim()
-      const targetTitle = launch
-        .querySelector<HTMLElement>("[data-flow-launch-target-title]")
-        ?.textContent?.trim()
-      const words = label?.split(/\s+/) ?? []
-      if (
-        words.length < 1 ||
-        words.length > 2 ||
-        label?.includes("undefined") ||
-        !targetTitle ||
-        !launch.textContent?.includes("→")
-      ) {
-        issues.push(`${key}: launch clue is incomplete`)
-      }
-    }
 
-    for (const rail of flow.querySelectorAll<HTMLElement>(
-      "[data-flow-continuation-for]",
-    )) {
-      const matches = semanticEdges.filter(
-        (edge) => edge.dataset.flowEdgeKey === rail.dataset.flowEdgeKey,
-      )
-      if (matches.length !== 1) {
-        issues.push(
-          `${rail.dataset.flowEdgeKey ?? "missing-key"}: continuation does not map to one edge`,
+      for (const spec of expected.loops) {
+        const matches = loopConnectors.filter(
+          (connector) => connector.dataset.flowEdgeKey === spec.key,
         )
+        if (matches.length !== 1) {
+          issues.push(`${spec.key}: expected one visible loop connector`)
+          continue
+        }
+        const connector = matches[0]
+        const sourceCell = connector.closest<HTMLElement>("[data-flow-cell]")
+        if (sourceCell?.dataset.flowCell !== spec.source) {
+          issues.push(`${spec.key}: loop is not attached to its source cell`)
+          continue
+        }
+        const sourceNode = Array.from(
+          sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+        ).find((node) => node.dataset.flowNodeId === spec.source)
+        if (
+          !sourceNode ||
+          (connector.compareDocumentPosition(sourceNode) &
+            Node.DOCUMENT_POSITION_PRECEDING) ===
+            0
+        ) {
+          issues.push(`${spec.key}: loop does not follow its source node`)
+        }
+        if (
+          sourceNode &&
+          Math.abs(centerX(connector) - centerX(sourceNode)) > tolerance
+        ) {
+          issues.push(`${spec.key}: loop and source centers diverge`)
+        }
+        if (connector.dataset.flowLoopConnector !== spec.target) {
+          issues.push(`${spec.key}: loop target is incorrect`)
+        }
+        const targetTitle = connector.querySelector<HTMLElement>(
+          "[data-flow-loop-target-title]",
+        )
+        const titleRect = targetTitle?.getBoundingClientRect()
+        if (
+          targetTitle?.textContent?.trim() !== spec.targetTitle ||
+          !titleRect ||
+          titleRect.width <= 0 ||
+          titleRect.height <= 0
+        ) {
+          issues.push(`${spec.key}: loop target text is missing or hidden`)
+        }
+        if ((connector.textContent?.match(/↺/g) ?? []).length !== 1) {
+          issues.push(`${spec.key}: loop must render exactly one return arrow`)
+        }
+        const branchLabel = connector
+          .querySelector<HTMLElement>("[data-flow-launch-label]")
+          ?.textContent?.trim()
+        if (
+          (spec.branched && branchLabel !== spec.label) ||
+          (!spec.branched && branchLabel != null)
+        ) {
+          issues.push(`${spec.key}: loop branch label state is incorrect`)
+        }
       }
-    }
 
-    return {
-      forwardCount: forwardEdges.length,
-      issues,
-      launchCount: launches.length,
-      loopCount: loopEdges.length,
-    }
-  })
+      const launches = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-launch]"),
+      )
+      for (const spec of expected.launches) {
+        const matches = launches.filter(
+          (launch) => launch.dataset.flowEdgeKey === spec.key,
+        )
+        if (matches.length !== 1) {
+          issues.push(`${spec.key}: expected one source launch row`)
+          continue
+        }
+        const launch = matches[0]
+        const sourceCell = launch.closest<HTMLElement>("[data-flow-cell]")
+        if (sourceCell?.dataset.flowCell !== spec.source) {
+          issues.push(`${spec.key}: launch is not attached to its source cell`)
+        }
+        const sourceNode = sourceCell
+          ? Array.from(
+              sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+            ).find((node) => node.dataset.flowNodeId === spec.source)
+          : undefined
+        if (
+          !sourceNode ||
+          (launch.compareDocumentPosition(sourceNode) &
+            Node.DOCUMENT_POSITION_PRECEDING) ===
+            0
+        ) {
+          issues.push(`${spec.key}: launch does not follow its source node`)
+        }
+        const semantic = semanticEdges.filter(
+          (edge) => edge.dataset.flowEdgeKey === spec.key,
+        )
+        if (
+          semantic.length !== 1 ||
+          semantic[0]?.dataset.flowSource !== spec.source ||
+          semantic[0]?.dataset.flowTarget !== spec.target
+        ) {
+          issues.push(
+            `${spec.key}: launch does not resolve to one semantic edge`,
+          )
+        }
+        const label = launch
+          .querySelector<HTMLElement>("[data-flow-launch-label]")
+          ?.textContent?.trim()
+        const targetTitle = launch
+          .querySelector<HTMLElement>("[data-flow-launch-target-title]")
+          ?.textContent?.trim()
+        const routeGroup = launch.closest<HTMLElement>(
+          "[data-flow-route-group][data-flow-route-mode]",
+        )
+        if (
+          label !== spec.label ||
+          targetTitle !== spec.targetTitle ||
+          launch.dataset.flowLaunchTarget !== spec.target ||
+          routeGroup?.dataset.flowRouteMode !== spec.mode ||
+          !launch.textContent?.includes(spec.loop ? "↺" : "→")
+        ) {
+          issues.push(`${spec.key}: launch clue or route mode is incomplete`)
+        }
+      }
 
-  expect(result.forwardCount).toBe(expectedForwardCount)
-  expect(result.launchCount).toBe(expectedLaunchCount)
-  expect(result.loopCount).toBe(expectedLoopCount)
+      if (
+        flow.querySelector(
+          "[data-flow-continuation-for], [data-flow-continuation-tail]",
+        )
+      ) {
+        issues.push("continuation rails must not be rendered")
+      }
+
+      for (const spec of expected.singletonForwards) {
+        const sourceRank = Number(
+          flow
+            .querySelector(`[data-flow-node-id="${spec.source}"]`)
+            ?.closest<HTMLElement>("[data-flow-rank]")?.dataset.flowRank,
+        )
+        const targetRank = Number(
+          flow
+            .querySelector(`[data-flow-node-id="${spec.target}"]`)
+            ?.closest<HTMLElement>("[data-flow-rank]")?.dataset.flowRank,
+        )
+        if (targetRank !== sourceRank + 1) {
+          issues.push(
+            `${spec.source}:${spec.target}: singleton path skips a visible rank`,
+          )
+        }
+      }
+
+      return {
+        issues,
+        launchCount: launches.length,
+        loopConnectorCount: loopConnectors.length,
+        targetConnectorCount: targetConnectors.length,
+      }
+    },
+    {
+      launches: launchSpecs,
+      loops: loopSpecs,
+      singletonForwards: singletonForwardSpecs,
+      targets: targetSpecs,
+    },
+  )
+
+  expect(result.targetConnectorCount).toBe(targetSpecs.length)
+  expect(result.launchCount).toBe(launchSpecs.length)
+  expect(result.loopConnectorCount).toBe(loopSpecs.length)
   expect(result.issues).toEqual([])
+}
+
+async function expectMergedTarget(
+  gateMap: Locator,
+  targetID: string,
+  incomingCount: number,
+) {
+  await expect(
+    gateMap.locator(`[data-flow-edge][data-flow-target="${targetID}"]`),
+  ).toHaveCount(incomingCount)
+  const connector = gateMap.locator(
+    `[data-flow-target-connector="${targetID}"]`,
+  )
+  await expect(connector).toHaveCount(1)
+  await expect(connector).toHaveAttribute(
+    "data-flow-incoming-count",
+    String(incomingCount),
+  )
+  await expect(connector).toHaveAttribute("data-flow-merge", "true")
+  expect(await connector.textContent()).toMatch(/↓/)
+  expect((await connector.textContent())?.match(/↓/g)).toHaveLength(1)
+  await expect(
+    connector.locator("[data-flow-launch-label], [data-flow-branch-label]"),
+  ).toHaveCount(0)
 }
 
 async function expectBranchLaunchTargets(
@@ -3574,20 +3684,16 @@ async function expectBranchLaunchTargets(
 async function expectLoopBranchTarget(
   gateMap: Locator,
   sourceID: string,
-  expected: { label: string; target: string; targetTitle: string },
+  expected: { target: string; targetTitle: string },
 ) {
   const loop = gateMap.locator(
-    `[data-flow-cell="${sourceID}"] > [data-flow-edge][data-flow-loop-target]`,
+    `[data-flow-cell="${sourceID}"] [data-flow-loop-connector]`,
   )
   await expect(loop).toHaveCount(1)
   const actual = await loop.evaluate((route) => {
     const item = route as HTMLElement
     return {
-      label:
-        item
-          .querySelector<HTMLElement>("[data-flow-branch-label]")
-          ?.textContent?.trim() ?? "",
-      target: item.dataset.flowLoopTarget ?? "",
+      target: item.dataset.flowLoopConnector ?? "",
       targetTitle:
         item
           .querySelector<HTMLElement>("[data-flow-loop-target-title]")
@@ -3847,7 +3953,8 @@ test("unified pull request workspace combines review, implementation, nudges, an
     gateMap,
     "review",
   )
-  await expectForwardEdgeGeometry(gateMap, "review")
+  await expectFlowConnectorContract(gateMap, "review")
+  await expectMergedTarget(gateMap, "review_route_classified", 2)
   await expectGeneratedBranchLabels(gateMap, "review_define_charter", [
     "First scope",
     "Revised",
@@ -3885,9 +3992,8 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Assume failed",
   ])
   await expectLoopBranchTarget(gateMap, "review_resolve_publication", {
-    label: "Still unknown",
     target: "review_gate_reconcile",
-    targetTitle: "Returns to Resolve unknown publication",
+    targetTitle: "Return to Resolve unknown publication",
   })
   await expectGateMapFits(gateMap)
 
@@ -3895,7 +4001,8 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
     if (width === 1280 || width === 320) {
-      await expectForwardEdgeGeometry(gateMap, "review")
+      await expectFlowConnectorContract(gateMap, "review")
+      await expectNoSeriousA11yViolations(page)
     }
     await expectNoHorizontalOverflow(page)
   }
@@ -3912,6 +4019,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
   renderedGateInstances.push(
     ...(await expectActiveGateFlowContract(gateMap, "implementation")),
   )
+  await expectFlowConnectorContract(gateMap, "implementation")
   await expectBranchLaunchTargets(gateMap, "implementation_check_ownership", [
     { label: "Owned", target: "implementation_gate_start" },
     { label: "Non-owned", target: "implementation_gate_eligibility" },
@@ -3980,14 +4088,12 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Assume failed",
   ])
   await expectLoopBranchTarget(gateMap, "implementation_resolve_publication", {
-    label: "Still unknown",
     target: "implementation_gate_reconcile",
-    targetTitle: "Returns to Resolve unknown publication",
+    targetTitle: "Return to Resolve unknown publication",
   })
   await expectLoopBranchTarget(gateMap, "implementation_remove_and_defer", {
-    label: "Repair",
     target: "implementation_run_ai",
-    targetTitle: "Returns to Implement selected fixes",
+    targetTitle: "Return to Implement selected fixes",
   })
   for (const gate of renderedGateInstances) {
     expect(gate.ordinal, gate.decisionPoint).toBe(
@@ -4028,7 +4134,8 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
     if (width === 1280 || width === 320) {
-      await expectForwardEdgeGeometry(gateMap, "implementation")
+      await expectFlowConnectorContract(gateMap, "implementation")
+      await expectNoSeriousA11yViolations(page)
     }
     await expectNoHorizontalOverflow(page)
   }
