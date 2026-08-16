@@ -768,7 +768,7 @@ describe("PR lifecycle gate map", () => {
     expect(implementationTab).toHaveAttribute("aria-selected", "true")
   })
 
-  it("renders actions, editable gates, locked safeguards, and manifest ordinals", () => {
+  it("renders actions, named editable gates, and locked safeguards", () => {
     const onSelect = vi.fn()
     const { container } = renderMap("pr.review.start", onSelect)
 
@@ -781,14 +781,18 @@ describe("PR lifecycle gate map", () => {
     }
     expect(
       screen.getByRole("button", { name: "Allow review" }),
-    ).toHaveAttribute("data-gate-number", "3")
+    ).toHaveAttribute("data-gate-name", "Allow review")
     expect(
       screen.getByRole("button", { name: "Accept review coverage" }),
-    ).toHaveAttribute("data-gate-number", "4")
+    ).toHaveAttribute("data-gate-name", "Accept review coverage")
     const notificationGate = screen.getByRole("button", {
       name: "Approve notification",
     })
-    expect(notificationGate).toHaveAttribute("data-gate-number", "10")
+    expect(notificationGate).toHaveAttribute(
+      "data-gate-name",
+      "Approve notification",
+    )
+    expect(container.querySelectorAll("[data-gate-number]")).toHaveLength(0)
     expect(notificationGate).toHaveAttribute(
       "data-edit-href",
       "/pull-requests?view=gate-profiles&profile=strict%20profile&gate=pr.review.publish",

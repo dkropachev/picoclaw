@@ -645,7 +645,6 @@ function GraphNode({
     <EditableGateNode
       instanceID={instanceID}
       node={flowNode}
-      number={flowNode.ordinal}
       onSelect={onSelect}
       profileID={profileID}
       selected={selected}
@@ -703,7 +702,6 @@ function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
 function EditableGateNode({
   instanceID,
   node,
-  number,
   onSelect,
   profileID,
   selected,
@@ -711,7 +709,6 @@ function EditableGateNode({
 }: {
   instanceID: string
   node: PRLifecycleFlowNode
-  number?: number
   onSelect: () => void
   profileID?: string
   selected: boolean
@@ -740,25 +737,13 @@ function EditableGateNode({
       data-flow-node-id={node.id}
       data-gate-format={format.format}
       data-gate-id={decisionPoint}
-      data-gate-number={number}
+      data-gate-name={node.title}
       data-gate-selected={selected ? "true" : undefined}
       data-workflow-configured={workflow ? "true" : "false"}
       onClick={activate}
       type="button"
     >
-      <span className="flex w-full justify-end">
-        {number ? (
-          <span
-            className={cn(
-              "bg-primary text-primary-foreground flex size-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold",
-              selected && "ring-primary/30 ring-2",
-            )}
-          >
-            {number}
-          </span>
-        ) : null}
-      </span>
-      <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
+      <strong className="text-xs leading-snug">{node.title}</strong>
       <span
         className="text-muted-foreground mt-1 text-[11px] leading-snug"
         data-gate-description

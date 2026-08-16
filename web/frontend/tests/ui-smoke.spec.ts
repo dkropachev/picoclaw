@@ -3154,7 +3154,9 @@ async function expectActiveGateFlowContract(
         .filter(
           (gate) =>
             gate.querySelector("[data-gate-description]") == null ||
-            gate.dataset.gateNumber == null ||
+            gate.dataset.gateName == null ||
+            !gate.textContent?.includes(gate.dataset.gateName) ||
+            gate.dataset.gateNumber != null ||
             gate.dataset.gateFormat == null ||
             gate.closest('[data-flow-kind="action"]') != null,
         )
@@ -3269,8 +3271,8 @@ async function expectActiveGateFlowContract(
         const item = gate as HTMLElement
         return {
           decisionPoint: item.dataset.decisionPoint ?? "",
+          name: item.dataset.gateName ?? "",
           nodeID: item.dataset.flowNodeId ?? "",
-          ordinal: item.dataset.gateNumber ?? "",
         }
       }),
     )
@@ -3281,8 +3283,8 @@ async function expectActiveGateFlowContract(
     )
     .map((node) => ({
       decisionPoint: node.decision_point ?? "",
+      name: node.title,
       nodeID: node.id,
-      ordinal: String(node.ordinal ?? ""),
     }))
   const byNodeID = (left: { nodeID: string }, right: { nodeID: string }) =>
     left.nodeID.localeCompare(right.nodeID)
@@ -3703,23 +3705,6 @@ async function expectLoopBranchTarget(
   expect(actual).toEqual(expected)
 }
 
-const expectedGateOrdinals: Record<string, string> = {
-  "pr.charter.confirm": "1",
-  "pr.charter.reconfirm": "2",
-  "pr.review.start": "3",
-  "pr.review.complete": "4",
-  "pr.finding.classify": "5",
-  "pr.implementation.eligibility": "6",
-  "pr.implementation.start": "7",
-  "pr.implementation.scope": "8",
-  "pr.implementation.complete": "9",
-  "pr.review.publish": "10",
-  "pr.implementation.publish": "11",
-  "pr.deferred.publish": "12",
-  "pr.correction.promote": "13",
-  "pr.publication.reconcile": "14",
-}
-
 async function expectGateDialogFits(gateDialog: Locator) {
   await expect
     .poll(
@@ -4095,16 +4080,23 @@ test("unified pull request workspace combines review, implementation, nudges, an
     target: "implementation_run_ai",
     targetTitle: "Return to Implement selected fixes",
   })
-  for (const gate of renderedGateInstances) {
-    expect(gate.ordinal, gate.decisionPoint).toBe(
-      expectedGateOrdinals[gate.decisionPoint],
-    )
-  }
+  expect(renderedGateInstances.every((gate) => gate.name.length > 0)).toBe(true)
+  const expectedDecisionPoints = [
+    ...new Set(
+      prLifecycleFlowFixture.flow.flows.flatMap((flow) =>
+        flow.nodes.flatMap((node) =>
+          node.kind === "gate" && node.editable && node.decision_point
+            ? [node.decision_point]
+            : [],
+        ),
+      ),
+    ),
+  ]
   expect(
     [
       ...new Set(renderedGateInstances.map((gate) => gate.decisionPoint)),
     ].sort(),
-  ).toEqual(Object.keys(expectedGateOrdinals).sort())
+  ).toEqual(expectedDecisionPoints.sort())
   await expect(
     gateMap.locator('[data-flow-node-id="implementation_run_ai"]'),
   ).toContainText("Implement selected fixes")
