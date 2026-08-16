@@ -3043,10 +3043,9 @@ async function expectGateMapFits(gateMap: Locator) {
             [
               "[data-gate-id]",
               "[data-flow-kind]",
-              "[data-flow-target-connector]",
+              "[data-flow-node-cell]",
+              "[data-flow-visible-edge-key]",
               "[data-flow-loop-connector]",
-              "[data-flow-launch]",
-              "[data-flow-route-group]",
               "[data-flow-launch-label]",
               "[data-flow-view-tab]",
             ].join(","),
@@ -3063,10 +3062,9 @@ async function expectGateMapFits(gateMap: Locator) {
               (target) =>
                 target.dataset.gateId ??
                 target.dataset.flowKind ??
-                target.dataset.flowTargetConnector ??
+                target.dataset.flowNodeCell ??
+                target.dataset.flowVisibleEdgeKey ??
                 target.dataset.flowLoopTarget ??
-                target.dataset.flowLaunchTarget ??
-                target.dataset.flowRouteMode ??
                 target.dataset.flowViewTab ??
                 target.tagName.toLowerCase(),
             )
@@ -3135,8 +3133,17 @@ async function expectActiveGateFlowContract(
     const semanticEdges = Array.from(
       flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
     )
+    const visibleEdges = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-visible-edge-key]"),
+    )
     const flowNodes = Array.from(
       flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+    )
+    const nodeCells = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-node-cell]"),
+    )
+    const bands = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-band]"),
     )
     const launchLabels = Array.from(
       flow.querySelectorAll<HTMLElement>("[data-flow-launch-label]"),
@@ -3177,24 +3184,20 @@ async function expectActiveGateFlowContract(
         })
         .map((label) => label.textContent?.trim() ?? "launch"),
       flowNodeIDs: flowNodes.map((node) => node.dataset.flowNodeId ?? ""),
-      invalidConnectorMarkers: Array.from(
-        flow.querySelectorAll<HTMLElement>("[data-flow-target-connector]"),
-      )
-        .filter((connector) => {
-          const arrows = (connector.textContent?.match(/↓/g) ?? []).length
-          if (connector.dataset.flowMerge === "true") {
-            return (
-              arrows !== 0 ||
-              connector.querySelector("[data-flow-merge-label]") == null ||
-              !connector.textContent?.includes("◆")
-            )
-          }
-          return arrows !== 1
-        })
-        .map(
-          (connector) =>
-            connector.dataset.flowTargetConnector ?? "target connector",
-        ),
+      nodeCellIDs: nodeCells.map((cell) => cell.dataset.flowNodeCell ?? ""),
+      invalidBands: bands.flatMap((band) => {
+        const directCells = Array.from(band.children).filter((child) =>
+          (child as HTMLElement).hasAttribute("data-flow-node-cell"),
+        )
+        return directCells.length === 0 ||
+          band.dataset.flowBandCount !== String(directCells.length)
+          ? [band.dataset.flowBand ?? "unnamed band"]
+          : []
+      }),
+      bandIndexes: bands.map((band) => Number(band.dataset.flowBand)),
+      visibleEdgeKeys: visibleEdges.map(
+        (edge) => edge.dataset.flowVisibleEdgeKey ?? "",
+      ),
     }
   })
 
@@ -3209,9 +3212,18 @@ async function expectActiveGateFlowContract(
   expect(contract.invalidEditableGates).toEqual([])
   expect(contract.visibleSemanticEdges).toEqual([])
   expect(contract.invalidLaunchLabels).toEqual([])
-  expect(contract.invalidConnectorMarkers).toEqual([])
+  expect(contract.invalidBands).toEqual([])
+  expect(contract.bandIndexes).toEqual(
+    Array.from({ length: contract.bandIndexes.length }, (_, index) => index),
+  )
   expect(contract.flowNodeIDs.sort()).toEqual(
     expectedFlow!.nodes.map((node) => node.id).sort(),
+  )
+  expect(contract.nodeCellIDs.sort()).toEqual(
+    expectedFlow!.nodes.map((node) => node.id).sort(),
+  )
+  expect(contract.visibleEdgeKeys.sort()).toEqual(
+    expectedFlow!.edges.map((edge) => `${edge.from}:${edge.to}`).sort(),
   )
 
   const renderedEdges = await panel
@@ -3238,48 +3250,6 @@ async function expectActiveGateFlowContract(
     ].join("|"),
   )
   expect(renderedEdges.sort()).toEqual(expectedEdges.sort())
-
-  const visibleRouteGroups = await panel
-    .locator("[data-flow-route-group][data-flow-route-mode]")
-    .evaluateAll((groups) =>
-      groups.map((group) => {
-        const item = group as HTMLElement
-        return [
-          item.dataset.flowSource ??
-            item.closest<HTMLElement>("[data-flow-launches]")?.dataset
-              .flowLaunches,
-          item.dataset.flowRouteMode,
-          item
-            .querySelector<HTMLElement>("[data-flow-route-heading]")
-            ?.textContent?.trim(),
-        ].join("|")
-      }),
-    )
-  const routeModeHeadings: Record<string, string> = {
-    choice: "Choice",
-    linear: "Primary path",
-    optional: "Optional paths",
-    parallel: "All required",
-  }
-  const edgesBySource = new Map<
-    string,
-    Array<(typeof prLifecycleFlowFixture.flow.flows)[number]["edges"][number]>
-  >()
-  for (const edge of expectedFlow!.edges) {
-    edgesBySource.set(edge.from, [
-      ...(edgesBySource.get(edge.from) ?? []),
-      edge,
-    ])
-  }
-  const expectedRouteGroups = [...edgesBySource.entries()].flatMap(
-    ([source, edges]) => {
-      if (edges.length < 2) return []
-      return [...new Set(edges.map((edge) => edge.mode))].map((mode) =>
-        [source, mode, routeModeHeadings[mode]].join("|"),
-      )
-    },
-  )
-  expect(visibleRouteGroups.sort()).toEqual(expectedRouteGroups.sort())
 
   const renderedGates = await panel
     .locator("[data-decision-point]")
@@ -3320,8 +3290,8 @@ async function expectGeneratedBranchLabels(
     .evaluateAll(
       (labels, source) =>
         labels.flatMap((label) =>
-          label.closest<HTMLElement>("[data-flow-launches]")?.dataset
-            .flowLaunches === source
+          (label as HTMLElement).dataset.flowSource === source ||
+          (label as HTMLElement).dataset.flowEdgeKey?.startsWith(`${source}:`)
             ? [label.textContent ?? ""]
             : [],
         ),
@@ -3332,110 +3302,315 @@ async function expectGeneratedBranchLabels(
   )
 }
 
-async function expectBranchOwnership(
+async function expectTerminalBranchReleased(
   gateMap: Locator,
-  sourceID: string,
-  targetID: string,
-  expected: {
-    contains?: string[]
-    excludes?: string[]
-    reference?: boolean
-  },
+  terminalNodeID: string,
+  initialSurvivorID: string,
+  laterSurvivorID: string,
 ) {
-  const lane = gateMap.locator(
-    `[data-flow-branch-lane][data-flow-branch-source="${sourceID}"][data-flow-branch-target="${targetID}"]`,
+  const result = await gateMap.evaluate(
+    (map, nodeIDs) => {
+      const [terminalID, initialID, laterID] = nodeIDs
+      const findCell = (nodeID: string) =>
+        map.querySelector<HTMLElement>(`[data-flow-node-cell="${nodeID}"]`)
+      const terminal = findCell(terminalID)
+      const initial = findCell(initialID)
+      const later = findCell(laterID)
+      if (!terminal || !initial || !later) {
+        return {
+          error: "missing reclamation node",
+          horizontalOverlap: 0,
+          initialBandIndex: -1,
+          initialWidth: 0,
+          laterBelowTerminal: false,
+          laterBandIndex: -1,
+          laterTerminalOccurrences: -1,
+          laterWidth: 0,
+          terminalBandIndex: -1,
+          terminalWidth: 0,
+        }
+      }
+      const bands = Array.from(
+        map.querySelectorAll<HTMLElement>("[data-flow-band]"),
+      )
+      const terminalBand = terminal.closest<HTMLElement>("[data-flow-band]")
+      const initialBand = initial.closest<HTMLElement>("[data-flow-band]")
+      const laterBand = later.closest<HTMLElement>("[data-flow-band]")
+      const terminalBandIndex = bands.indexOf(terminalBand!)
+      const initialBandIndex = bands.indexOf(initialBand!)
+      const laterBandIndex = bands.indexOf(laterBand!)
+      const terminalRect = terminal.getBoundingClientRect()
+      const initialRect = initial.getBoundingClientRect()
+      const laterRect = later.getBoundingClientRect()
+      const horizontalOverlap = Math.max(
+        0,
+        Math.min(terminalRect.right, laterRect.right) -
+          Math.max(terminalRect.left, laterRect.left),
+      )
+      const laterTerminalOccurrences = bands
+        .slice(terminalBandIndex + 1)
+        .reduce(
+          (count, band) =>
+            count +
+            band.querySelectorAll(`[data-flow-node-cell="${terminalID}"]`)
+              .length,
+          0,
+        )
+      return {
+        error: "",
+        horizontalOverlap,
+        initialBandIndex,
+        initialWidth: initialRect.width,
+        laterBelowTerminal: laterRect.top >= terminalRect.bottom - 1,
+        laterBandIndex,
+        laterTerminalOccurrences,
+        laterWidth: laterRect.width,
+        terminalBandIndex,
+        terminalWidth: terminalRect.width,
+      }
+    },
+    [terminalNodeID, initialSurvivorID, laterSurvivorID],
   )
-  await expect(lane).toHaveCount(1)
-  for (const nodeID of expected.contains ?? []) {
-    await expect(lane.locator(`[data-flow-node-id="${nodeID}"]`)).toHaveCount(1)
-  }
-  for (const nodeID of expected.excludes ?? []) {
-    await expect(lane.locator(`[data-flow-node-id="${nodeID}"]`)).toHaveCount(0)
-  }
-  if (expected.reference !== undefined) {
-    await expect(
-      lane.locator(`[data-flow-reference="${targetID}"]`),
-    ).toHaveCount(expected.reference ? 1 : 0)
-  }
+
+  expect(result.error).toBe("")
+  expect(result.initialBandIndex).toBe(result.terminalBandIndex)
+  expect(result.laterBandIndex).toBeGreaterThan(result.terminalBandIndex)
+  expect(result.laterBelowTerminal).toBe(true)
+  expect(result.laterTerminalOccurrences).toBe(0)
+  expect(result.horizontalOverlap).toBeGreaterThan(1)
+  expect(result.laterWidth).toBeGreaterThanOrEqual(
+    Math.max(result.initialWidth, result.terminalWidth) * 1.25,
+  )
 }
 
-async function expectBranchDescendantsFitTheirLane(gateMap: Locator) {
+async function expectFlowBandsUseOneColumn(
+  gateMap: Locator,
+  view: "review" | "implementation",
+) {
   const issues = await gateMap
-    .locator("[data-flow-branch-lane]")
-    .evaluateAll((lanes) => {
+    .locator(`[data-flow-view="${view}"] [data-flow-band]`)
+    .evaluateAll((bands) =>
+      bands.flatMap((band) => {
+        const cells = Array.from(
+          band.querySelectorAll<HTMLElement>(":scope > [data-flow-node-cell]"),
+        )
+        if (cells.length < 2) return []
+        const rects = cells.map((cell) => cell.getBoundingClientRect())
+        const first = rects[0]
+        return rects.some(
+          (rect) =>
+            Math.abs(rect.left - first.left) > 1 ||
+            Math.abs(rect.width - first.width) > 1,
+        )
+          ? [(band as HTMLElement).dataset.flowBand ?? "unknown band"]
+          : []
+      }),
+    )
+  expect(issues).toEqual([])
+}
+
+async function expectBranchLabelsDoNotOverlap(
+  gateMap: Locator,
+  view: "review" | "implementation",
+) {
+  const issues = await gateMap
+    .locator(`[data-flow-view="${view}"] [data-flow-launch-label]`)
+    .evaluateAll((labels) => {
       const tolerance = 1
-      return lanes.flatMap((lane) => {
-        const laneRect = lane.getBoundingClientRect()
-        return Array.from(
-          lane.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-        ).flatMap((node) => {
-          const nodeRect = node.getBoundingClientRect()
-          return nodeRect.left < laneRect.left - tolerance ||
-            nodeRect.right > laneRect.right + tolerance
+      const visible = labels.flatMap((label) => {
+        const item = label as HTMLElement | SVGGraphicsElement
+        const rect = item.getBoundingClientRect()
+        const edgeKey = (item as HTMLElement).dataset.flowEdgeKey ?? "unknown"
+        if (rect.width <= 0 || rect.height <= 0) {
+          return [{ edgeKey, error: `${edgeKey}: label has no geometry`, rect }]
+        }
+        return [{ edgeKey, error: "", rect }]
+      })
+      const collisions = visible.flatMap((left, leftIndex) => {
+        if (left.error) return [left.error]
+        return visible.slice(leftIndex + 1).flatMap((right) => {
+          if (right.error) return []
+          const overlapWidth =
+            Math.min(left.rect.right, right.rect.right) -
+            Math.max(left.rect.left, right.rect.left)
+          const overlapHeight =
+            Math.min(left.rect.bottom, right.rect.bottom) -
+            Math.max(left.rect.top, right.rect.top)
+          return overlapWidth > tolerance && overlapHeight > tolerance
+            ? [`${left.edgeKey}:${right.edgeKey}: branch labels overlap`]
+            : []
+        })
+      })
+      return [
+        ...visible.flatMap((label) => (label.error ? [label.error] : [])),
+        ...collisions,
+      ]
+    })
+  expect(issues).toEqual([])
+
+  const occlusions = await gateMap
+    .locator(`[data-flow-view="${view}"]`)
+    .evaluate((flow) => {
+      const tolerance = 1
+      const labels = Array.from(
+        flow.querySelectorAll<SVGGraphicsElement>(
+          "svg [data-flow-launch-label]",
+        ),
+      )
+      const cards = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+      )
+      return labels.flatMap((label) => {
+        const labelRect = label.getBoundingClientRect()
+        const edgeKey = label.dataset.flowEdgeKey ?? "unknown"
+        return cards.flatMap((card) => {
+          const cardRect = card.getBoundingClientRect()
+          const overlapWidth =
+            Math.min(labelRect.right, cardRect.right) -
+            Math.max(labelRect.left, cardRect.left)
+          const overlapHeight =
+            Math.min(labelRect.bottom, cardRect.bottom) -
+            Math.max(labelRect.top, cardRect.top)
+          return overlapWidth > tolerance && overlapHeight > tolerance
             ? [
-                `${(lane as HTMLElement).dataset.flowBranchSource}:${
-                  (lane as HTMLElement).dataset.flowBranchTarget
-                } leaks ${node.dataset.flowNodeId}`,
+                `${edgeKey}:${card.dataset.flowNodeId ?? "unknown"}: branch label is hidden by a node`,
               ]
             : []
         })
       })
     })
-  expect(issues).toEqual([])
+  expect(occlusions).toEqual([])
 }
 
-async function expectSingleBranchGrid(
+async function expectForwardPathsAvoidNodeCards(
   gateMap: Locator,
-  sourceID: string,
-  targetIDs: string[],
+  view: "review" | "implementation",
 ) {
-  const grid = gateMap.locator(`[data-flow-branch-group="${sourceID}"]`)
-  await expect(grid).toHaveCount(1)
-  const actualTargets = await grid.evaluate((branchGrid) =>
-    Array.from(branchGrid.children).flatMap((child) => {
-      const lane = child as HTMLElement
-      return lane.dataset.flowBranchSource ===
-        (branchGrid as HTMLElement).dataset.flowBranchGroup
-        ? [lane.dataset.flowBranchTarget ?? ""]
-        : []
-    }),
+  const expectedFlow = prLifecycleFlowFixture.flow.flows.find(
+    (flow) => flow.id === view,
+  )!
+  const outgoingBySource = new Map<
+    string,
+    Array<(typeof expectedFlow.edges)[number]>
+  >()
+  for (const edge of expectedFlow.edges) {
+    outgoingBySource.set(edge.from, [
+      ...(outgoingBySource.get(edge.from) ?? []),
+      edge,
+    ])
+  }
+  const loopAndForwardSources = [...outgoingBySource.entries()].flatMap(
+    ([source, edges]) =>
+      edges.some((edge) => edge.loop) && edges.some((edge) => !edge.loop)
+        ? [source]
+        : [],
   )
-  expect(actualTargets).toEqual(targetIDs)
-}
 
-async function expectBranchGridSharesFirstRow(
-  gateMap: Locator,
-  sourceID: string,
-) {
-  const tops = await gateMap
-    .locator(`[data-flow-branch-group="${sourceID}"]`)
-    .evaluate((branchGrid) =>
-      Array.from(branchGrid.children).map(
-        (child) => child.getBoundingClientRect().top,
-      ),
-    )
-  expect(new Set(tops.map((top) => Math.round(top))).size).toBe(1)
-}
-
-async function expectSharedContinuationsShareLevel(
-  gateMap: Locator,
-  sourceID: string,
-  targetIDs: string[],
-) {
-  const levels = await Promise.all(
-    targetIDs.map((targetID) =>
-      gateMap
-        .locator(
-          `[data-flow-shared-continuations="${sourceID}"] [data-flow-shared-continuation="${targetID}"]`,
-        )
-        .evaluate(
-          (continuation) =>
-            continuation.closest<HTMLElement>("[data-flow-shared-level]")
-              ?.dataset.flowSharedLevel ?? "missing",
+  const issues = await gateMap
+    .locator(`[data-flow-view="${view}"]`)
+    .evaluate((flow, mixedSources) => {
+      const borderTolerance = 4
+      const sampleSpacing = 4
+      const issues: string[] = []
+      const cards = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+      ).map((card) => ({
+        id: card.dataset.flowNodeId ?? "unknown",
+        item: card,
+        rect: card.getBoundingClientRect(),
+      }))
+      const cardByID = new Map(cards.map((card) => [card.id, card]))
+      const paths = Array.from(
+        flow.querySelectorAll<SVGPathElement>(
+          "path[data-flow-visible-edge-key]",
         ),
-    ),
-  )
-  expect(new Set(levels).size).toBe(1)
+      )
+
+      const screenPointAt = (path: SVGPathElement, distance: number) => {
+        const point = path.getPointAtLength(distance)
+        const matrix = path.getScreenCTM()
+        if (!matrix) return undefined
+        const screenPoint = path.ownerSVGElement!.createSVGPoint()
+        screenPoint.x = point.x
+        screenPoint.y = point.y
+        return screenPoint.matrixTransform(matrix)
+      }
+
+      for (const path of paths) {
+        const key = path.dataset.flowVisibleEdgeKey ?? "unknown"
+        const source = path.dataset.flowSource ?? ""
+        const target = path.dataset.flowTarget ?? ""
+        const length = path.getTotalLength()
+        if (length <= 0) {
+          issues.push(`${key}: forward path has no geometry`)
+          continue
+        }
+        const nonEndpoints = cards.filter(
+          (card) => card.id !== source && card.id !== target,
+        )
+        let collision: string | undefined
+        const sampleCount = Math.max(1, Math.ceil(length / sampleSpacing))
+        for (let sample = 0; sample <= sampleCount && !collision; sample += 1) {
+          const point = screenPointAt(path, (length * sample) / sampleCount)
+          if (!point) {
+            collision = `${key}: forward path has no screen transform`
+            break
+          }
+          for (const card of nonEndpoints) {
+            if (
+              point.x > card.rect.left + borderTolerance &&
+              point.x < card.rect.right - borderTolerance &&
+              point.y > card.rect.top + borderTolerance &&
+              point.y < card.rect.bottom - borderTolerance
+            ) {
+              collision = `${key}: crosses ${card.id}`
+              break
+            }
+          }
+        }
+        if (collision) issues.push(collision)
+      }
+
+      for (const sourceID of mixedSources) {
+        const card = cardByID.get(sourceID)
+        const cell = flow.querySelector<HTMLElement>(
+          `[data-flow-node-cell="${sourceID}"]`,
+        )
+        const loop = cell?.querySelector<HTMLElement>(
+          "[data-flow-loop-connector]",
+        )
+        const forwardPaths = paths.filter(
+          (path) => path.dataset.flowSource === sourceID,
+        )
+        if (!card || !cell || !loop || forwardPaths.length === 0) {
+          issues.push(`${sourceID}: mixed loop/forward geometry is incomplete`)
+          continue
+        }
+        const cardRect = card.rect
+        const cellRect = cell.getBoundingClientRect()
+        for (const path of forwardPaths) {
+          const point = screenPointAt(path, 0)
+          const key = path.dataset.flowVisibleEdgeKey ?? "unknown"
+          if (
+            !point ||
+            Math.abs(point.x - (cardRect.left + cardRect.width / 2)) > 2 ||
+            Math.abs(point.y - cardRect.bottom) > 2
+          ) {
+            issues.push(`${key}: does not start at the source card bottom`)
+            continue
+          }
+          if (
+            cellRect.bottom - cardRect.bottom > borderTolerance &&
+            Math.abs(point.y - cellRect.bottom) <= borderTolerance
+          ) {
+            issues.push(`${key}: starts at the loop-encompassing cell bottom`)
+          }
+        }
+      }
+
+      return issues
+    }, loopAndForwardSources)
+  expect(issues).toEqual([])
 }
 
 async function expectFlowConnectorContract(
@@ -3447,48 +3622,13 @@ async function expectFlowConnectorContract(
   const expectedFlow = prLifecycleFlowFixture.flow.flows.find(
     (flow) => flow.id === view,
   )!
-  const outgoing = new Map<string, Array<(typeof expectedFlow.edges)[number]>>()
-  const incoming = new Map<string, Array<(typeof expectedFlow.edges)[number]>>()
-  for (const edge of expectedFlow.edges) {
-    outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge])
-    if (!edge.loop) {
-      incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge])
-    }
-  }
-  const nodeTitles = new Map(
-    expectedFlow.nodes.map((node) => [node.id, node.title]),
-  )
-  const targetSpecs = [...incoming.entries()].map(([target, edges]) => ({
-    incoming: edges.length,
-    merge: edges.length > 1,
-    mode: edges.length === 1 ? edges[0].mode : undefined,
-    optional: edges.length === 1 && edges[0].mode === "optional",
-    source: edges.length === 1 ? edges[0].from : undefined,
-    target,
-  }))
-  const launchSpecs = expectedFlow.edges
-    .filter((edge) => (outgoing.get(edge.from) ?? []).length > 1)
-    .map((edge) => ({
-      key: `${edge.from}:${edge.to}`,
-      label: edge.label ?? "Primary",
-      loop: edge.loop,
-      mode: edge.mode,
-      source: edge.from,
-      target: edge.to,
-      targetTitle: edge.loop
-        ? `Return to ${nodeTitles.get(edge.to) ?? edge.to}`
-        : (nodeTitles.get(edge.to) ?? edge.to),
-    }))
-  const loopSpecs = expectedFlow.edges
-    .filter((edge) => edge.loop)
-    .map((edge) => ({
-      branched: (outgoing.get(edge.from) ?? []).length > 1,
-      key: `${edge.from}:${edge.to}`,
-      label: edge.label ?? "Primary",
-      source: edge.from,
-      target: edge.to,
-      targetTitle: `Return to ${nodeTitles.get(edge.to) ?? edge.to}`,
-    }))
+  const forwardIncomingCounts = expectedFlow.edges.reduce((counts, edge) => {
+    if (!edge.loop) counts.set(edge.to, (counts.get(edge.to) ?? 0) + 1)
+    return counts
+  }, new Map<string, number>())
+  const mergeTargets = [...forwardIncomingCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([target]) => target)
 
   await panel.evaluate(() => document.fonts.ready)
   await panel.evaluate(
@@ -3502,288 +3642,147 @@ async function expectFlowConnectorContract(
 
   const result = await panel.evaluate(
     (flow, expected) => {
-      const tolerance = 3
       const issues: string[] = []
       const semanticEdges = Array.from(
         flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
       )
       const visibleEdges = Array.from(
-        flow.querySelectorAll<HTMLElement>("[data-flow-visible-edge-key]"),
+        flow.querySelectorAll<SVGGeometryElement>(
+          "[data-flow-visible-edge-key]",
+        ),
       )
-      const targetConnectors = Array.from(
-        flow.querySelectorAll<HTMLElement>("[data-flow-target-connector]"),
+      const bands = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-band]"),
       )
-      const loopConnectors = Array.from(
-        flow.querySelectorAll<HTMLElement>("[data-flow-loop-connector]"),
+      const nodeCells = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-node-cell]"),
       )
-      const centerX = (element: Element) => {
-        const rect = element.getBoundingClientRect()
-        return rect.left + rect.width / 2
-      }
 
-      for (const spec of expected.targets) {
-        const matches = targetConnectors.filter(
-          (connector) => connector.dataset.flowTargetConnector === spec.target,
+      for (const [index, band] of bands.entries()) {
+        const cells = Array.from(band.children).filter((child) =>
+          (child as HTMLElement).hasAttribute("data-flow-node-cell"),
         )
-        if (matches.length !== 1) {
-          issues.push(`${spec.target}: expected one visible target connector`)
-          continue
-        }
-        const connector = matches[0]
-        const cell = connector.closest<HTMLElement>("[data-flow-cell]")
-        if (cell?.dataset.flowCell !== spec.target) {
-          issues.push(`${spec.target}: connector is outside its target cell`)
-          continue
-        }
-        const target = Array.from(
-          cell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-        ).find((node) => node.dataset.flowNodeId === spec.target)
-        if (!target) {
-          issues.push(`${spec.target}: target node missing from target cell`)
-          continue
-        }
         if (
-          (connector.compareDocumentPosition(target) &
-            Node.DOCUMENT_POSITION_FOLLOWING) ===
-          0
+          band.dataset.flowBand !== String(index) ||
+          cells.length === 0 ||
+          band.dataset.flowBandCount !== String(cells.length)
         ) {
-          issues.push(`${spec.target}: connector does not precede target`)
-        }
-        const connectorRect = connector.getBoundingClientRect()
-        const targetRect = target.getBoundingClientRect()
-        if (connectorRect.width <= 0 || connectorRect.height <= 0) {
-          issues.push(`${spec.target}: connector has no visible geometry`)
-        }
-        if (Math.abs(centerX(connector) - centerX(target)) > tolerance) {
-          issues.push(`${spec.target}: connector and target centers diverge`)
-        }
-        if (Math.abs(targetRect.top - connectorRect.bottom) > tolerance) {
-          issues.push(`${spec.target}: connector does not touch target`)
-        }
-        if (connector.dataset.flowIncomingCount !== String(spec.incoming)) {
-          issues.push(`${spec.target}: incoming count is incorrect`)
-        }
-        if (
-          (spec.merge && connector.dataset.flowMerge !== "true") ||
-          (!spec.merge && connector.dataset.flowMerge === "true")
-        ) {
-          issues.push(`${spec.target}: merge state is incorrect`)
-        }
-        const arrows = (connector.textContent?.match(/↓/g) ?? []).length
-        if (
-          (spec.merge &&
-            (arrows !== 0 ||
-              !connector.textContent?.includes(
-                `${spec.incoming} paths merge`,
-              ) ||
-              !connector.textContent?.includes("◆"))) ||
-          (!spec.merge && arrows !== 1)
-        ) {
-          issues.push(`${spec.target}: connector marker is incorrect`)
-        }
-        if (
-          spec.merge &&
-          connector.dataset.flowMergeContributors !==
-            expected.incomingSources[spec.target]?.join(" ")
-        ) {
-          issues.push(`${spec.target}: merge contributors are incorrect`)
-        }
-        if (
-          spec.incoming === 1 &&
-          connector.dataset.flowRouteMode !== spec.mode
-        ) {
-          issues.push(`${spec.target}: singleton route mode is incorrect`)
-        }
-        if (
-          spec.optional &&
-          (connector.dataset.flowOptional !== "true" ||
-            !connector.getAttribute("aria-label")?.includes("optionally") ||
-            window.getComputedStyle(
-              connector.querySelector<HTMLElement>(
-                "[data-flow-connector-stem]",
-              )!,
-            ).borderLeftStyle !== "dashed")
-        ) {
-          issues.push(`${spec.target}: optional connector is not distinct`)
+          issues.push(`band ${index}: index or node count is invalid`)
         }
       }
 
-      for (const spec of expected.loops) {
-        const matches = loopConnectors.filter(
-          (connector) => connector.dataset.flowEdgeKey === spec.key,
+      for (const nodeID of expected.nodeIDs) {
+        const cells = nodeCells.filter(
+          (cell) => cell.dataset.flowNodeCell === nodeID,
         )
-        if (matches.length !== 1) {
-          issues.push(`${spec.key}: expected one visible loop connector`)
+        if (cells.length !== 1) {
+          issues.push(`${nodeID}: expected one node cell`)
           continue
         }
-        const connector = matches[0]
-        const sourceCell = connector.closest<HTMLElement>("[data-flow-cell]")
-        if (sourceCell?.dataset.flowCell !== spec.source) {
-          issues.push(`${spec.key}: loop is not attached to its source cell`)
-          continue
-        }
-        const sourceNode = Array.from(
-          sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-        ).find((node) => node.dataset.flowNodeId === spec.source)
         if (
-          !sourceNode ||
-          (connector.compareDocumentPosition(sourceNode) &
-            Node.DOCUMENT_POSITION_PRECEDING) ===
-            0
+          cells[0].querySelectorAll(`[data-flow-node-id="${nodeID}"]`)
+            .length !== 1 ||
+          cells[0].querySelector("[data-flow-node-cell]") != null
         ) {
-          issues.push(`${spec.key}: loop does not follow its source node`)
-        }
-        if (
-          sourceNode &&
-          Math.abs(centerX(connector) - centerX(sourceNode)) > tolerance
-        ) {
-          issues.push(`${spec.key}: loop and source centers diverge`)
-        }
-        if (connector.dataset.flowLoopConnector !== spec.target) {
-          issues.push(`${spec.key}: loop target is incorrect`)
-        }
-        const targetTitle = connector.querySelector<HTMLElement>(
-          "[data-flow-loop-target-title]",
-        )
-        const titleRect = targetTitle?.getBoundingClientRect()
-        if (
-          targetTitle?.textContent?.trim() !== spec.targetTitle ||
-          !titleRect ||
-          titleRect.width <= 0 ||
-          titleRect.height <= 0
-        ) {
-          issues.push(`${spec.key}: loop target text is missing or hidden`)
-        }
-        if ((connector.textContent?.match(/↺/g) ?? []).length !== 1) {
-          issues.push(`${spec.key}: loop must render exactly one return arrow`)
-        }
-        const branchLabel = connector
-          .querySelector<HTMLElement>("[data-flow-launch-label]")
-          ?.textContent?.trim()
-        if (
-          (spec.branched && branchLabel !== spec.label) ||
-          (!spec.branched && branchLabel != null)
-        ) {
-          issues.push(`${spec.key}: loop branch label state is incorrect`)
+          issues.push(`${nodeID}: node cell is missing or recursively nested`)
         }
       }
 
-      const launches = Array.from(
-        flow.querySelectorAll<HTMLElement>("[data-flow-launch]"),
-      )
-      for (const spec of expected.launches) {
-        const matches = launches.filter(
-          (launch) => launch.dataset.flowEdgeKey === spec.key,
-        )
-        if (matches.length !== 1) {
-          issues.push(`${spec.key}: expected one source launch row`)
-          continue
-        }
-        const launch = matches[0]
-        const launchGroup = launch.closest<HTMLElement>("[data-flow-launches]")
-        const sourceCell = launchGroup?.closest<HTMLElement>("[data-flow-cell]")
-        if (sourceCell?.dataset.flowCell !== spec.source) {
-          issues.push(`${spec.key}: launch is not attached to its source cell`)
-        }
-        const sourceNode = sourceCell
-          ? Array.from(
-              sourceCell.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
-            ).find((node) => node.dataset.flowNodeId === spec.source)
-          : undefined
-        if (
-          !sourceNode ||
-          (launch.compareDocumentPosition(sourceNode) &
-            Node.DOCUMENT_POSITION_PRECEDING) ===
-            0
-        ) {
-          issues.push(`${spec.key}: launch does not follow its source node`)
-        }
+      for (const edge of expected.edges) {
         const semantic = semanticEdges.filter(
-          (edge) => edge.dataset.flowEdgeKey === spec.key,
+          (item) => item.dataset.flowEdgeKey === edge.key,
         )
-        if (
-          semantic.length !== 1 ||
-          semantic[0]?.dataset.flowSource !== spec.source ||
-          semantic[0]?.dataset.flowTarget !== spec.target
-        ) {
-          issues.push(
-            `${spec.key}: launch does not resolve to one semantic edge`,
-          )
+        const visible = visibleEdges.filter(
+          (item) => item.dataset.flowVisibleEdgeKey === edge.key,
+        )
+        if (semantic.length !== 1 || visible.length !== 1) {
+          issues.push(`${edge.key}: edge must render exactly once`)
+          continue
         }
-        const label = launch
-          .querySelector<HTMLElement>("[data-flow-launch-label]")
-          ?.textContent?.trim()
-        const targetTitle = launch
-          .querySelector<HTMLElement>("[data-flow-launch-target-title]")
-          ?.textContent?.trim()
+        const path = visible[0]
         if (
-          label !== spec.label ||
-          launch.dataset.flowLaunchTarget !== spec.target ||
-          launch.dataset.flowRouteMode !== spec.mode ||
-          !launch.textContent?.includes(spec.loop ? "↺" : "↓")
+          path.dataset.flowSource !== edge.source ||
+          path.dataset.flowTarget !== edge.target ||
+          path.dataset.flowRouteMode !== edge.mode
         ) {
-          issues.push(`${spec.key}: launch clue or route mode is incomplete`)
+          issues.push(`${edge.key}: visible edge metadata is incomplete`)
         }
-        if (spec.loop && targetTitle !== spec.targetTitle) {
-          issues.push(`${spec.key}: loop target title is incomplete`)
-        } else if (!spec.loop) {
-          const directTarget = launch.hasAttribute("data-flow-target-connector")
-          if (
-            (directTarget &&
-              launch.closest<HTMLElement>("[data-flow-cell]")?.dataset
-                .flowCell !== spec.target) ||
-            (!directTarget && !targetTitle?.endsWith(spec.targetTitle))
-          ) {
-            issues.push(`${spec.key}: launch target is not owned or named`)
+        if (!edge.loop && path.tagName.toLowerCase() !== "path") {
+          issues.push(`${edge.key}: forward edge is not an SVG path`)
+        }
+        if (!edge.loop && !path.getAttribute("d")) {
+          issues.push(`${edge.key}: forward edge has no measured path`)
+        }
+        if (!edge.loop) {
+          const hasArrow = path.hasAttribute("marker-end")
+          const merged = expected.mergeTargets.includes(edge.target)
+          if (merged === hasArrow) {
+            issues.push(
+              `${edge.key}: ${merged ? "merged edge has an arrow" : "single edge has no arrow"}`,
+            )
           }
         }
       }
 
+      const diamondTargets = Array.from(
+        flow.querySelectorAll<SVGElement>("[data-flow-merge-diamond]"),
+      ).map((diamond) => diamond.dataset.flowMergeDiamond ?? "")
+      const stemTargets = Array.from(
+        flow.querySelectorAll<SVGElement>("[data-flow-merge-stem]"),
+      ).map((stem) => stem.dataset.flowMergeStem ?? "")
       if (
-        flow.querySelector(
-          "[data-flow-continuation-for], [data-flow-continuation-tail]",
-        )
+        [...diamondTargets].sort().join("|") !==
+        [...expected.mergeTargets].sort().join("|")
       ) {
-        issues.push("continuation rails must not be rendered")
+        issues.push("merge diamonds do not match all merge targets")
+      }
+      if (
+        [...stemTargets].sort().join("|") !==
+        [...expected.mergeTargets].sort().join("|")
+      ) {
+        issues.push("merge stems do not match all merge targets")
       }
 
-      if (flow.querySelector("[data-flow-rank], [data-flow-placeholder]")) {
-        issues.push("rank placeholders must not be rendered")
-      }
-
-      for (const edgeKey of expected.edgeKeys) {
-        const markers = visibleEdges.filter(
-          (edge) => edge.dataset.flowVisibleEdgeKey === edgeKey,
-        )
-        if (markers.length !== 1) {
-          issues.push(`${edgeKey}: expected one visible edge marker`)
+      const nodeRects = nodeCells.map((cell) => ({
+        id: cell.dataset.flowNodeCell ?? "unknown",
+        rect: cell.getBoundingClientRect(),
+      }))
+      for (let leftIndex = 0; leftIndex < nodeRects.length; leftIndex += 1) {
+        for (
+          let rightIndex = leftIndex + 1;
+          rightIndex < nodeRects.length;
+          rightIndex += 1
+        ) {
+          const left = nodeRects[leftIndex]
+          const right = nodeRects[rightIndex]
+          const overlapWidth =
+            Math.min(left.rect.right, right.rect.right) -
+            Math.max(left.rect.left, right.rect.left)
+          const overlapHeight =
+            Math.min(left.rect.bottom, right.rect.bottom) -
+            Math.max(left.rect.top, right.rect.top)
+          if (overlapWidth > 1 && overlapHeight > 1) {
+            issues.push(`${left.id}:${right.id}: node cells overlap`)
+          }
         }
       }
 
-      return {
-        issues,
-        launchCount: launches.length,
-        loopConnectorCount: loopConnectors.length,
-        targetConnectorCount: targetConnectors.length,
-      }
+      return { bandCount: bands.length, issues }
     },
     {
-      edgeKeys: expectedFlow.edges.map((edge) => `${edge.from}:${edge.to}`),
-      incomingSources: Object.fromEntries(
-        [...incoming.entries()].map(([target, edges]) => [
-          target,
-          edges.map((edge) => edge.from),
-        ]),
-      ),
-      launches: launchSpecs,
-      loops: loopSpecs,
-      targets: targetSpecs,
+      edges: expectedFlow.edges.map((edge) => ({
+        key: `${edge.from}:${edge.to}`,
+        loop: edge.loop,
+        mode: edge.mode,
+        source: edge.from,
+        target: edge.to,
+      })),
+      mergeTargets,
+      nodeIDs: expectedFlow.nodes.map((node) => node.id),
     },
   )
 
-  expect(result.targetConnectorCount).toBe(targetSpecs.length)
-  expect(result.launchCount).toBe(launchSpecs.length)
-  expect(result.loopConnectorCount).toBe(loopSpecs.length)
+  expect(result.bandCount).toBeGreaterThan(0)
   expect(result.issues).toEqual([])
 }
 
@@ -3793,22 +3792,23 @@ async function expectMergedTarget(
   incomingCount: number,
 ) {
   await expect(
-    gateMap.locator(`[data-flow-edge][data-flow-target="${targetID}"]`),
+    gateMap.locator(
+      `[data-flow-visible-edge-key][data-flow-target="${targetID}"]`,
+    ),
   ).toHaveCount(incomingCount)
-  const connector = gateMap.locator(
-    `[data-flow-target-connector="${targetID}"]`,
-  )
-  await expect(connector).toHaveCount(1)
-  await expect(connector).toHaveAttribute(
-    "data-flow-incoming-count",
-    String(incomingCount),
-  )
-  await expect(connector).toHaveAttribute("data-flow-merge", "true")
-  await expect(connector).toContainText(`${incomingCount} paths merge`)
-  await expect(connector).toContainText("◆")
-  expect((await connector.textContent())?.match(/↓/g) ?? []).toHaveLength(0)
   await expect(
-    connector.locator("[data-flow-launch-label], [data-flow-branch-label]"),
+    gateMap.locator(`[data-flow-node-cell="${targetID}"]`),
+  ).toHaveCount(1)
+  await expect(
+    gateMap.locator(`[data-flow-node-id="${targetID}"]`),
+  ).toHaveCount(1)
+  await expect(
+    gateMap.locator(`[data-flow-merge-diamond="${targetID}"]`),
+  ).toHaveCount(1)
+  await expect(
+    gateMap.locator(
+      `[data-flow-visible-edge-key][data-flow-target="${targetID}"][marker-end]`,
+    ),
   ).toHaveCount(0)
 }
 
@@ -3817,28 +3817,17 @@ async function expectBranchLaunchTargets(
   sourceID: string,
   expected: Array<{ label: string; target: string }>,
 ) {
-  const actual = await gateMap.locator("[data-flow-launch]").evaluateAll(
-    (launches, source) =>
-      launches.flatMap((launch) => {
-        const item = launch as HTMLElement
-        if (
-          item.closest<HTMLElement>("[data-flow-launches]")?.dataset
-            .flowLaunches !== source
-        ) {
-          return []
+  const actual = await gateMap
+    .locator(`[data-flow-launch-label][data-flow-source="${sourceID}"]`)
+    .evaluateAll((labels) =>
+      labels.map((label) => {
+        const item = label as HTMLElement
+        return {
+          label: item.textContent?.trim() ?? "",
+          target: item.dataset.flowTarget ?? "",
         }
-        return [
-          {
-            label:
-              item
-                .querySelector<HTMLElement>("[data-flow-launch-label]")
-                ?.textContent?.trim() ?? "",
-            target: item.dataset.flowLaunchTarget ?? "",
-          },
-        ]
       }),
-    sourceID,
-  )
+    )
   expect(actual).toEqual(expected)
 }
 
@@ -3848,7 +3837,7 @@ async function expectLoopBranchTarget(
   expected: { target: string; targetTitle: string },
 ) {
   const loop = gateMap.locator(
-    `[data-flow-cell="${sourceID}"] [data-flow-loop-connector]`,
+    `[data-flow-node-cell="${sourceID}"] [data-flow-loop-connector]`,
   )
   await expect(loop).toHaveCount(1)
   const actual = await loop.evaluate((route) => {
@@ -4108,11 +4097,6 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "No findings",
     "Correction",
   ])
-  await expectSingleBranchGrid(gateMap, "review_process_result", [
-    "review_assess_scope",
-    "review_finish",
-    "review_record_correction",
-  ])
   await expectGeneratedBranchLabels(gateMap, "review_assess_scope", [
     "Clear",
     "Ambiguous",
@@ -4131,70 +4115,6 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Link existing",
     "Create",
   ])
-  await expectBranchOwnership(
-    gateMap,
-    "review_process_result",
-    "review_assess_scope",
-    {
-      contains: ["review_assess_scope", "review_route_classified"],
-      excludes: ["review_record_correction", "review_save_guidance"],
-    },
-  )
-  await expectBranchOwnership(
-    gateMap,
-    "review_process_result",
-    "review_record_correction",
-    {
-      contains: [
-        "review_record_correction",
-        "review_gate_correction_promote",
-        "review_save_guidance",
-      ],
-      excludes: ["review_assess_scope", "review_route_classified"],
-    },
-  )
-  await expectBranchOwnership(
-    gateMap,
-    "review_route_classified",
-    "review_keep_in_scope",
-    {
-      contains: [
-        "review_keep_in_scope",
-        "review_select_review_findings",
-        "review_select_implementation_findings",
-      ],
-      excludes: [
-        "review_group_deferred",
-        "review_dismiss_finding",
-        "review_revise_charter",
-      ],
-    },
-  )
-  await expectBranchOwnership(
-    gateMap,
-    "review_route_classified",
-    "review_group_deferred",
-    {
-      contains: [
-        "review_group_deferred",
-        "review_link_followup_issue",
-        "review_gate_deferred_publish",
-      ],
-      excludes: [
-        "review_select_review_findings",
-        "review_select_implementation_findings",
-      ],
-    },
-  )
-  await expectBranchOwnership(
-    gateMap,
-    "review_route_classified",
-    "review_dismiss_finding",
-    {
-      contains: ["review_dismiss_finding"],
-      excludes: ["review_select_review_findings", "review_link_followup_issue"],
-    },
-  )
   await expectGeneratedBranchLabels(gateMap, "review_publish_github", [
     "Confirmed",
     "Unknown",
@@ -4208,18 +4128,25 @@ test("unified pull request workspace combines review, implementation, nudges, an
     target: "review_gate_reconcile",
     targetTitle: "Return to Resolve unknown publication",
   })
-  await expectBranchDescendantsFitTheirLane(gateMap)
   await expectGateMapFits(gateMap)
 
   for (const width of [390, 768, 1024, 1280, 1536, 1920, 320]) {
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
+    await expectFlowConnectorContract(gateMap, "review")
+    await expectForwardPathsAvoidNodeCards(gateMap, "review")
+    await expectBranchLabelsDoNotOverlap(gateMap, "review")
+    if (width === 1280) {
+      await expectTerminalBranchReleased(
+        gateMap,
+        "review_select_implementation_findings",
+        "review_select_review_findings",
+        "review_gate_publish",
+      )
+    } else if (width === 320) {
+      await expectFlowBandsUseOneColumn(gateMap, "review")
+    }
     if (width === 1280 || width === 320) {
-      await expectFlowConnectorContract(gateMap, "review")
-      await expectBranchDescendantsFitTheirLane(gateMap)
-      if (width === 1280) {
-        await expectBranchGridSharesFirstRow(gateMap, "review_process_result")
-      }
       await expectNoSeriousA11yViolations(page)
     }
     await expectNoHorizontalOverflow(page)
@@ -4248,34 +4175,6 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Non-owned",
     "Read-only",
   ])
-  await expectBranchOwnership(
-    gateMap,
-    "implementation_check_ownership",
-    "implementation_gate_start",
-    {
-      excludes: ["implementation_gate_eligibility", "implementation_stop"],
-      reference: true,
-    },
-  )
-  await expectBranchOwnership(
-    gateMap,
-    "implementation_check_ownership",
-    "implementation_gate_eligibility",
-    {
-      contains: ["implementation_gate_eligibility"],
-      excludes: ["implementation_gate_start", "implementation_stop"],
-      reference: false,
-    },
-  )
-  await expectBranchOwnership(
-    gateMap,
-    "implementation_check_ownership",
-    "implementation_stop",
-    {
-      excludes: ["implementation_gate_start", "implementation_stop"],
-      reference: true,
-    },
-  )
   await expectGeneratedBranchLabels(gateMap, "implementation_scope_audit", [
     "Safe path",
     "Hard stop",
@@ -4291,10 +4190,6 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "implementation_completion_audit",
     ["Candidate", "Deferred"],
   )
-  await expectSingleBranchGrid(gateMap, "implementation_completion_audit", [
-    "implementation_route_completion",
-    "implementation_group_deferred",
-  ])
   await expectGeneratedBranchLabels(
     gateMap,
     "implementation_route_completion",
@@ -4314,10 +4209,6 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Confirmed",
     "Unknown",
     "Failed",
-  ])
-  await expectSharedContinuationsShareLevel(gateMap, "implementation_push", [
-    "implementation_result",
-    "implementation_retry_publication",
   ])
   await expectGeneratedBranchLabels(gateMap, "implementation_result", [
     "Done",
@@ -4349,7 +4240,6 @@ test("unified pull request workspace combines review, implementation, nudges, an
     target: "implementation_run_ai",
     targetTitle: "Return to Implement selected fixes",
   })
-  await expectBranchDescendantsFitTheirLane(gateMap)
   expect(renderedGateInstances.every((gate) => gate.name.length > 0)).toBe(true)
   const expectedDecisionPoints = [
     ...new Set(
@@ -4395,9 +4285,20 @@ test("unified pull request workspace combines review, implementation, nudges, an
   for (const width of [390, 768, 1024, 1280, 1536, 1920, 320]) {
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
+    await expectFlowConnectorContract(gateMap, "implementation")
+    await expectForwardPathsAvoidNodeCards(gateMap, "implementation")
+    await expectBranchLabelsDoNotOverlap(gateMap, "implementation")
+    if (width === 1280) {
+      await expectTerminalBranchReleased(
+        gateMap,
+        "implementation_validation_blocked",
+        "implementation_completion_audit",
+        "implementation_route_completion",
+      )
+    } else if (width === 320) {
+      await expectFlowBandsUseOneColumn(gateMap, "implementation")
+    }
     if (width === 1280 || width === 320) {
-      await expectFlowConnectorContract(gateMap, "implementation")
-      await expectBranchDescendantsFitTheirLane(gateMap)
       await expectNoSeriousA11yViolations(page)
     }
     await expectNoHorizontalOverflow(page)

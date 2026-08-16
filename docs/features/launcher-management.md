@@ -77,7 +77,12 @@ exact repository assignments, independent review/completion nudge bounds,
 scope-size thresholds, the normalized Review and Implementation flow graph and
 its content revision, a catalog digest, the config revision, and the
 `restart_required` effect. The browser renders that graph directly; it does not
-carry a second hard-coded PR lifecycle topology.
+carry a second hard-coded PR lifecycle topology. Each workflow diagram lays out
+only the nodes present in an active topological band, so a completed route does
+not reserve an empty column in later bands. Responsive measured connectors keep
+the exact source, target, branch label, loop, and merge relationships visible as
+those bands reflow, while gate nodes remain keyboard-operable controls that open
+the gate editor dialog.
 
 ## Surface Ownership
 

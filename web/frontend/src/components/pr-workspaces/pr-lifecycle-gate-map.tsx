@@ -1,4 +1,13 @@
-import { type KeyboardEvent, useEffect, useId, useMemo, useState } from "react"
+import {
+  type KeyboardEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 
 import {
   type PRLifecycleDecisionPoint,
@@ -42,14 +51,28 @@ interface GateFormatSummary {
 }
 
 interface FlowLayout {
-  roots: PRLifecycleFlowNode[]
-  dominatorChildren: Map<string, PRLifecycleFlowNode[]>
-  forwardDescendants: Map<string, Set<string>>
-  immediateDominator: Map<string, string>
+  bands: PRLifecycleFlowNode[][]
   nodeByID: Map<string, PRLifecycleFlowNode>
   incoming: Map<string, PRLifecycleFlowEdge[]>
   outgoing: Map<string, PRLifecycleFlowEdge[]>
-  topologicalOrder: Map<string, number>
+  rankByNode: Map<string, number>
+}
+
+interface MeasuredFlowEdge {
+  edge: PRLifecycleFlowEdge
+  endX: number
+  endY: number
+  labelX: number
+  labelY: number
+  path: string
+  startX: number
+  startY: number
+}
+
+interface FlowGeometry {
+  edges: MeasuredFlowEdge[]
+  height: number
+  width: number
 }
 
 const stageCategory: Record<PRLifecycleGateKind, GateStageCategory> = {
@@ -177,6 +200,7 @@ export function PRLifecycleGateMap({
             <Legend label="Locked safeguard" variant="required" />
           </div>
           <GateFormatLegend />
+          <FlowRouteLegend />
         </div>
       </div>
 
@@ -335,168 +359,50 @@ function FlowGraph({
   workflows?: PRLifecycleGateProfile["workflows"]
 }) {
   const layout = useMemo(() => createFlowLayout(flow), [flow])
+  const canvasRef = useRef<HTMLDivElement>(null)
+  const geometry = useFlowGeometry(canvasRef, flow, layout)
 
   return (
     <section
       aria-label={`${flow.title} graph`}
       className="bg-background/60 @container/flow min-w-0 rounded-xl border p-3"
+      data-flow-band-count={layout.bands.length}
       data-flow-graph={flow.id}
     >
-      <div className="mx-auto w-full max-w-7xl min-w-0 space-y-1">
-        {layout.roots.map((node) => (
-          <FlowNodeCell
-            flowNode={node}
-            instanceID={instanceID}
-            key={node.id}
-            layout={layout}
-            onSelect={onSelect}
-            profileID={profileID}
-            selectedNodeID={selectedNodeID}
-            workflows={workflows}
-          />
-        ))}
-      </div>
-    </section>
-  )
-}
-
-function FlowNodeCell({
-  branchEdge,
-  flowNode,
-  instanceID,
-  layout,
-  onSelect,
-  profileID,
-  selectedNodeID,
-  workflows,
-}: {
-  branchEdge?: PRLifecycleFlowEdge
-  flowNode: PRLifecycleFlowNode
-  instanceID: string
-  layout: FlowLayout
-  onSelect: (node: PRLifecycleFlowNode) => void
-  profileID?: string
-  selectedNodeID?: string
-  workflows?: PRLifecycleGateProfile["workflows"]
-}) {
-  const incoming = layout.incoming.get(flowNode.id) ?? []
-  const outgoing = layout.outgoing.get(flowNode.id) ?? []
-  const forward = outgoing.filter((edge) => !edge.loop)
-  const singletonLoop =
-    outgoing.length === 1 && outgoing[0].loop ? outgoing[0] : undefined
-  const ownedBranchTargets = new Set(
-    outgoing.flatMap((edge) =>
-      !edge.loop &&
-      layout.immediateDominator.get(edge.to) === flowNode.id &&
-      (layout.incoming.get(edge.to) ?? []).length === 1
-        ? [edge.to]
-        : [],
-    ),
-  )
-  const directChild =
-    outgoing.length === 1 &&
-    !outgoing[0].loop &&
-    layout.immediateDominator.get(outgoing[0].to) === flowNode.id
-      ? layout.nodeByID.get(outgoing[0].to)
-      : undefined
-  const renderedChildren = new Set(
-    outgoing.length > 1
-      ? ownedBranchTargets
-      : directChild
-        ? [directChild.id]
-        : [],
-  )
-  const sharedContinuations = (
-    layout.dominatorChildren.get(flowNode.id) ?? []
-  ).filter((child) => !renderedChildren.has(child.id))
-  const sharedContinuationLevels = groupSharedContinuations(
-    sharedContinuations,
-    layout,
-  )
-  return (
-    <div
-      className="flex min-w-0 flex-col"
-      data-flow-cell={flowNode.id}
-      data-flow-incoming-count={incoming.length}
-    >
-      {incoming.length > 0 ? (
-        <TargetConnector
-          branchEdge={branchEdge}
-          edges={incoming}
-          nodeByID={layout.nodeByID}
-          target={flowNode}
-        />
-      ) : null}
-      <GraphNode
-        flowNode={flowNode}
-        instanceID={instanceID}
-        onSelect={() => onSelect(flowNode)}
-        profileID={profileID}
-        selected={flowNode.id === selectedNodeID && flowNode.editable}
-        workflow={
-          flowNode.decision_point
-            ? workflows?.[flowNode.decision_point]
-            : undefined
-        }
-      />
-      {outgoing.length > 1 ? (
-        <BranchLaunches
-          edges={outgoing}
+      <div
+        className="relative mx-auto w-full max-w-7xl min-w-0 px-7 py-1"
+        data-flow-canvas
+        ref={canvasRef}
+      >
+        <FlowEdgeOverlay
+          flow={flow}
+          geometry={geometry}
           instanceID={instanceID}
           layout={layout}
-          nodeByID={layout.nodeByID}
-          onSelect={onSelect}
-          profileID={profileID}
-          selectedNodeID={selectedNodeID}
-          source={flowNode}
-          workflows={workflows}
         />
-      ) : null}
-      {singletonLoop ? (
-        <LoopConnector
-          edge={singletonLoop}
-          source={flowNode}
-          target={layout.nodeByID.get(singletonLoop.to)!}
-        />
-      ) : null}
-      {outgoing.length === 1 && forward.length === 1 ? (
-        directChild ? (
-          <FlowNodeCell
-            flowNode={directChild}
-            instanceID={instanceID}
-            layout={layout}
-            onSelect={onSelect}
-            profileID={profileID}
-            selectedNodeID={selectedNodeID}
-            workflows={workflows}
-          />
-        ) : (
-          <FlowReference
-            edge={forward[0]}
-            source={flowNode}
-            target={layout.nodeByID.get(forward[0].to)!}
-          />
-        )
-      ) : null}
-      {sharedContinuations.length > 0 ? (
         <div
-          className="min-w-0 space-y-1"
-          data-flow-shared-continuations={flowNode.id}
+          className="relative z-10 flex min-w-0 flex-col gap-16"
+          data-flow-bands
         >
-          {sharedContinuationLevels.map((children, level) => (
+          {layout.bands.map((nodes, band) => (
             <div
-              className="grid min-w-0 [grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr))] items-start gap-3"
-              data-flow-shared-level={level}
-              key={level}
+              className={flowBandGridClass(nodes.length)}
+              data-flow-band={band}
+              data-flow-band-count={nodes.length}
+              key={band}
             >
-              {children.map((child) => (
+              {nodes.map((node) => (
                 <div
-                  className="min-w-0 self-start"
-                  data-flow-shared-continuation={child.id}
-                  key={child.id}
+                  className={cn(
+                    "min-w-0",
+                    nodes.length === 1 && "mx-auto w-full max-w-2xl",
+                  )}
+                  data-flow-node-cell={node.id}
+                  data-flow-node-rank={band}
+                  key={node.id}
                 >
                   <FlowNodeCell
-                    flowNode={child}
+                    flowNode={node}
                     instanceID={instanceID}
                     layout={layout}
                     onSelect={onSelect}
@@ -509,332 +415,665 @@ function FlowNodeCell({
             </div>
           ))}
         </div>
-      ) : null}
-    </div>
+        <div hidden>
+          {flow.edges
+            .filter((edge) => !edge.loop)
+            .map((edge) => (
+              <SemanticEdge edge={edge} key={flowEdgeKey(edge)} />
+            ))}
+        </div>
+      </div>
+    </section>
   )
 }
 
-function groupSharedContinuations(
-  children: PRLifecycleFlowNode[],
-  layout: FlowLayout,
-): PRLifecycleFlowNode[][] {
-  // Immediate-dominator siblings are not necessarily sequential. Keep
-  // incomparable continuations on one level; only move a child down when a
-  // forward path from another shared child actually reaches it.
-  const ordered = [...children].sort(
-    (left, right) =>
-      (layout.topologicalOrder.get(left.id) ?? 0) -
-      (layout.topologicalOrder.get(right.id) ?? 0),
-  )
-  const levelByID = new Map<string, number>()
-  for (const child of ordered) {
-    let level = 0
-    for (const candidate of ordered) {
-      if (candidate.id === child.id) continue
-      if (!layout.forwardDescendants.get(candidate.id)?.has(child.id)) continue
-      level = Math.max(level, (levelByID.get(candidate.id) ?? 0) + 1)
-    }
-    levelByID.set(child.id, level)
-  }
-  const maxLevel = Math.max(-1, ...levelByID.values())
-  return Array.from({ length: maxLevel + 1 }, (_, level) =>
-    ordered.filter((child) => levelByID.get(child.id) === level),
-  )
-}
-
-function BranchLaunches({
-  edges,
+function FlowNodeCell({
+  flowNode,
   instanceID,
   layout,
-  nodeByID,
   onSelect,
   profileID,
   selectedNodeID,
-  source,
   workflows,
 }: {
-  edges: PRLifecycleFlowEdge[]
+  flowNode: PRLifecycleFlowNode
   instanceID: string
   layout: FlowLayout
-  nodeByID: Map<string, PRLifecycleFlowNode>
   onSelect: (node: PRLifecycleFlowNode) => void
   profileID?: string
   selectedNodeID?: string
-  source: PRLifecycleFlowNode
   workflows?: PRLifecycleGateProfile["workflows"]
 }) {
-  const modes = [
-    ...new Set(edges.map((edge) => edge.mode)),
-  ] as PRLifecycleFlowEdge["mode"][]
-  const routeComposition = modes.join("+")
+  const incoming = layout.incoming.get(flowNode.id) ?? []
+  const outgoing = layout.outgoing.get(flowNode.id) ?? []
+  const loops = outgoing.filter((edge) => edge.loop)
   return (
     <div
-      aria-label={`${source.title} branches`}
-      className="border-primary/20 bg-muted/10 mt-2 min-w-0 space-y-3 border-y py-2"
-      data-flow-launches={source.id}
-      data-flow-route-composition={routeComposition}
-      role="group"
+      className="flex min-w-0 flex-col"
+      data-flow-cell={flowNode.id}
+      data-flow-incoming-count={incoming.length}
     >
-      <div className="flex min-w-0 flex-wrap gap-1 px-1">
-        {modes.map((mode) => (
-          <span
-            className="border-primary/20 bg-background/60 text-muted-foreground rounded border px-1.5 py-0.5 text-[10px] font-bold tracking-wider uppercase"
-            data-flow-route-group={source.id}
-            data-flow-route-mode={mode}
-            data-flow-source={source.id}
-            key={mode}
-          >
-            <span data-flow-route-heading>{routeModeVisibleLabel(mode)}</span>
-          </span>
-        ))}
-      </div>
-      <div
-        className="grid min-w-0 [grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr))] items-start gap-3"
-        data-flow-branch-group={source.id}
+      <GraphNode
+        flowNode={flowNode}
+        instanceID={instanceID}
+        onSelect={() => onSelect(flowNode)}
+        profileID={profileID}
+        selected={flowNode.id === selectedNodeID && flowNode.editable}
+        workflow={
+          flowNode.decision_point
+            ? workflows?.[flowNode.decision_point]
+            : undefined
+        }
+      />
+      {loops.map((edge) => (
+        <LoopConnector
+          branched={outgoing.length > 1}
+          edge={edge}
+          key={flowEdgeKey(edge)}
+          source={flowNode}
+          target={layout.nodeByID.get(edge.to)!}
+        />
+      ))}
+    </div>
+  )
+}
+
+function useFlowGeometry(
+  canvasRef: RefObject<HTMLDivElement | null>,
+  flow: PRLifecycleFlow,
+  layout: FlowLayout,
+): FlowGeometry {
+  const [geometry, setGeometry] = useState<FlowGeometry>({
+    edges: [],
+    height: 0,
+    width: 0,
+  })
+  const signatureRef = useRef("")
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    let animationFrame: number | undefined
+    const measure = () => {
+      const canvasRect = canvas.getBoundingClientRect()
+      const cells = Array.from(
+        canvas.querySelectorAll<HTMLElement>("[data-flow-node-cell]"),
+      )
+      const cellByID = new Map(
+        cells.flatMap((cell) => {
+          const nodeID = cell.dataset.flowNodeCell
+          return nodeID ? [[nodeID, cell] as const] : []
+        }),
+      )
+      const cellRect = new Map(
+        cells.map((cell) => [cell, cell.getBoundingClientRect()]),
+      )
+      const nodeByID = new Map(
+        Array.from(
+          canvas.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+        ).flatMap((node) => {
+          const nodeID = node.dataset.flowNodeId
+          return nodeID ? [[nodeID, node] as const] : []
+        }),
+      )
+      const measuredEdges: MeasuredFlowEdge[] = []
+      const gutterTracks = {
+        left: [] as Array<Array<[number, number]>>,
+        right: [] as Array<Array<[number, number]>>,
+      }
+
+      for (const edge of flow.edges) {
+        if (edge.loop) continue
+        const sourceCell = cellByID.get(edge.from)
+        const targetCell = cellByID.get(edge.to)
+        const sourceNode = nodeByID.get(edge.from)
+        const targetNode = nodeByID.get(edge.to)
+        if (!sourceCell || !targetCell || !sourceNode || !targetNode) continue
+
+        const sourceCellRect = cellRect.get(sourceCell)!
+        const sourceRect = sourceNode.getBoundingClientRect()
+        const targetCellRect = cellRect.get(targetCell)!
+        const targetRect = targetNode.getBoundingClientRect()
+        const startX = sourceRect.left - canvasRect.left + sourceRect.width / 2
+        const startY = sourceRect.bottom - canvasRect.top
+        const endX = targetRect.left - canvasRect.left + targetRect.width / 2
+        const endY = targetRect.top - canvasRect.top
+        const outgoing = layout.outgoing.get(edge.from) ?? []
+        const edgeIndex = Math.max(
+          0,
+          outgoing.findIndex(
+            (candidate) => flowEdgeKey(candidate) === flowEdgeKey(edge),
+          ),
+        )
+        const split = outgoing.length > 1
+        const sourceRank = layout.rankByNode.get(edge.from) ?? 0
+        const targetRank = layout.rankByNode.get(edge.to) ?? sourceRank + 1
+        const sourceBandCells = Array.from(
+          sourceCell.parentElement?.querySelectorAll<HTMLElement>(
+            ":scope > [data-flow-node-cell]",
+          ) ?? [],
+        )
+        const targetBandCells = Array.from(
+          targetCell.parentElement?.querySelectorAll<HTMLElement>(
+            ":scope > [data-flow-node-cell]",
+          ) ?? [],
+        )
+        const sourceRowCells = sourceBandCells.filter(
+          (cell) => Math.abs(cellRect.get(cell)!.top - sourceCellRect.top) <= 1,
+        )
+        const targetRowCells = targetBandCells.filter(
+          (cell) => Math.abs(cellRect.get(cell)!.top - targetCellRect.top) <= 1,
+        )
+        const sourceRowBottom =
+          Math.max(
+            ...sourceRowCells.map((cell) => {
+              const nodeID = cell.dataset.flowNodeCell
+              return nodeID
+                ? (nodeByID.get(nodeID)?.getBoundingClientRect().bottom ??
+                    cellRect.get(cell)!.bottom)
+                : cellRect.get(cell)!.bottom
+            }),
+          ) - canvasRect.top
+        const targetRowTop =
+          Math.min(
+            ...targetRowCells.map((cell) => {
+              const nodeID = cell.dataset.flowNodeCell
+              return nodeID
+                ? (nodeByID.get(nodeID)?.getBoundingClientRect().top ??
+                    cellRect.get(cell)!.top)
+                : cellRect.get(cell)!.top
+            }),
+          ) - canvasRect.top
+        const sourceHasRowsBelow = sourceBandCells.some(
+          (cell) => cellRect.get(cell)!.top > sourceCellRect.top + 1,
+        )
+        const targetHasRowsAbove = targetBandCells.some(
+          (cell) => cellRect.get(cell)!.top < targetCellRect.top - 1,
+        )
+        const sourceHasLoopBelow =
+          sourceCell.querySelector("[data-flow-loop-connector]") != null
+        const needsGutter =
+          targetRank - sourceRank > 1 ||
+          sourceHasRowsBelow ||
+          targetHasRowsAbove ||
+          sourceHasLoopBelow
+        const merged = (layout.incoming.get(edge.to) ?? []).length > 1
+        const pathEndY = merged ? endY - 10 : endY
+        const upperY = Math.min(
+          (sourceHasLoopBelow ? startY : sourceRowBottom) + 4,
+          pathEndY - 12,
+        )
+        const lowerY = Math.max(upperY + 8, targetRowTop - (merged ? 14 : 4))
+        let labelX: number
+        let labelY: number
+        let path: string
+
+        if (needsGutter) {
+          const preferredSide =
+            Math.abs(startX - endX) < 32
+              ? edgeIndex % 2 === 0
+                ? "left"
+                : "right"
+              : startX < canvasRect.width / 2
+                ? "left"
+                : "right"
+          const alternateSide = preferredSide === "left" ? "right" : "left"
+          const interval: [number, number] = [
+            Math.min(upperY, lowerY),
+            Math.max(upperY, lowerY),
+          ]
+          const availableTrack = (side: "left" | "right") => {
+            const existing = gutterTracks[side].findIndex((track) =>
+              track.every(
+                ([start, end]) =>
+                  end < interval[0] - 2 || start > interval[1] + 2,
+              ),
+            )
+            return existing === -1 ? gutterTracks[side].length : existing
+          }
+          const preferredTrack = availableTrack(preferredSide)
+          const alternateTrack = availableTrack(alternateSide)
+          const side =
+            preferredTrack <= alternateTrack + 1 ? preferredSide : alternateSide
+          const track = side === preferredSide ? preferredTrack : alternateTrack
+          gutterTracks[side][track] ??= []
+          gutterTracks[side][track].push(interval)
+          const trackX =
+            side === "left"
+              ? 5 + track * 3.5
+              : canvasRect.width - 5 - track * 3.5
+          path = flowPath([
+            [startX, startY],
+            [startX, upperY],
+            [trackX, upperY],
+            [trackX, lowerY],
+            [endX, lowerY],
+            [endX, pathEndY],
+          ])
+          if (targetHasRowsAbove) {
+            labelX = endX
+            labelY = targetRowTop - 12
+          } else {
+            labelX = (startX + trackX) / 2
+            labelY = upperY - 7
+          }
+        } else if (split && Math.abs(startX - endX) < 32) {
+          const portOffset =
+            (edgeIndex - (outgoing.length - 1) / 2) *
+            Math.min(22, 60 / outgoing.length)
+          const portX = startX + portOffset
+          path = flowPath([
+            [startX, startY],
+            [startX, upperY],
+            [portX, upperY],
+            [portX, lowerY],
+            [endX, lowerY],
+            [endX, pathEndY],
+          ])
+          labelX = portX
+          labelY = upperY - 7
+        } else {
+          const middleY = upperY + (lowerY - upperY) / 2
+          path = flowPath([
+            [startX, startY],
+            [startX, upperY],
+            [startX, middleY],
+            [endX, middleY],
+            [endX, lowerY],
+            [endX, pathEndY],
+          ])
+          labelX = (startX + endX) / 2
+          labelY = middleY - 7
+        }
+
+        if (split) {
+          const incoming = layout.incoming.get(edge.to) ?? []
+          const labeledIncoming = incoming.filter(
+            (candidate) =>
+              (layout.outgoing.get(candidate.from) ?? []).length > 1,
+          )
+          const placement = flowIncomingLabelPlacement(
+            labeledIncoming,
+            edge,
+            canvasRect.width,
+            endX,
+          )
+          labelX = placement.x
+          labelY = targetRowTop - (merged ? 30 + placement.row * 22 : 12)
+        }
+
+        measuredEdges.push({
+          edge,
+          endX,
+          endY,
+          labelX,
+          labelY,
+          path,
+          startX,
+          startY,
+        })
+      }
+
+      const next: FlowGeometry = {
+        edges: measuredEdges,
+        height: canvasRect.height,
+        width: canvasRect.width,
+      }
+      const signature = JSON.stringify([
+        roundFlowCoordinate(next.width),
+        roundFlowCoordinate(next.height),
+        ...next.edges.flatMap((edge) => [
+          flowEdgeKey(edge.edge),
+          edge.path,
+          roundFlowCoordinate(edge.labelX),
+          roundFlowCoordinate(edge.labelY),
+        ]),
+      ])
+      if (signature === signatureRef.current) return
+      signatureRef.current = signature
+      setGeometry(next)
+    }
+    const scheduleMeasure = () => {
+      if (animationFrame !== undefined) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+      animationFrame = window.requestAnimationFrame(measure)
+    }
+
+    measure()
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(scheduleMeasure)
+    observer?.observe(canvas)
+    for (const cell of canvas.querySelectorAll<HTMLElement>(
+      "[data-flow-node-cell]",
+    )) {
+      observer?.observe(cell)
+    }
+    window.addEventListener("resize", scheduleMeasure)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener("resize", scheduleMeasure)
+      if (animationFrame !== undefined) {
+        window.cancelAnimationFrame(animationFrame)
+      }
+    }
+  }, [canvasRef, flow, layout])
+
+  return geometry
+}
+
+function FlowEdgeOverlay({
+  flow,
+  geometry,
+  instanceID,
+  layout,
+}: {
+  flow: PRLifecycleFlow
+  geometry: FlowGeometry
+  instanceID: string
+  layout: FlowLayout
+}) {
+  const markerID = `${instanceID}-${flow.id}-edge-arrow`
+  const measuredByKey = new Map(
+    geometry.edges.map((edge) => [flowEdgeKey(edge.edge), edge]),
+  )
+  const mergeTargets = [...layout.incoming.entries()].filter(
+    ([, edges]) => edges.length > 1,
+  )
+
+  return (
+    <>
+      <svg
+        aria-hidden="true"
+        className="text-primary pointer-events-none absolute inset-0 z-0 size-full overflow-hidden"
+        data-flow-edge-overlay
+        preserveAspectRatio="none"
+        viewBox={`0 0 ${Math.max(1, geometry.width)} ${Math.max(1, geometry.height)}`}
       >
-        {edges.map((edge) => {
-          const target = nodeByID.get(edge.to)!
-          const owned =
-            !edge.loop &&
-            layout.immediateDominator.get(edge.to) === source.id &&
-            (layout.incoming.get(edge.to) ?? []).length === 1
+        <defs>
+          <marker
+            id={markerID}
+            markerHeight="8"
+            markerUnits="userSpaceOnUse"
+            markerWidth="8"
+            orient="auto"
+            refX="7"
+            refY="4"
+            viewBox="0 0 8 8"
+          >
+            <path className="fill-primary" d="M 0 0 L 8 4 L 0 8 z" />
+          </marker>
+        </defs>
+        {flow.edges
+          .filter((edge) => !edge.loop)
+          .map((edge) => {
+            const key = flowEdgeKey(edge)
+            const measured = measuredByKey.get(key)
+            const outgoing = layout.outgoing.get(edge.from) ?? []
+            const branched = outgoing.length > 1
+            const merged = (layout.incoming.get(edge.to) ?? []).length > 1
+            const label = branched ? (edge.label ?? "Primary") : undefined
+            return (
+              <g key={key}>
+                <path
+                  className={cn(
+                    "fill-none stroke-current",
+                    edge.mode === "optional" &&
+                      "opacity-65 [stroke-dasharray:5_4]",
+                    !measured && "opacity-0",
+                  )}
+                  d={measured?.path ?? "M 0 0"}
+                  data-flow-branch={branched ? edge.from : undefined}
+                  data-flow-branch-edge={label}
+                  data-flow-branch-target={branched ? edge.to : undefined}
+                  data-flow-edge-key={key}
+                  data-flow-launch={branched ? true : undefined}
+                  data-flow-launch-target={branched ? edge.to : undefined}
+                  data-flow-optional={
+                    edge.mode === "optional" ? "true" : undefined
+                  }
+                  data-flow-parallel={
+                    edge.mode === "parallel" ? "true" : undefined
+                  }
+                  data-flow-route-mode={edge.mode}
+                  data-flow-source={edge.from}
+                  data-flow-target={edge.to}
+                  data-flow-visible-edge-key={key}
+                  markerEnd={merged ? undefined : `url(#${markerID})`}
+                  strokeWidth={edge.mode === "parallel" ? "2.5" : "1.5"}
+                  vectorEffect="non-scaling-stroke"
+                />
+                {label && measured ? (
+                  <FlowEdgeLabel
+                    edge={edge}
+                    label={label}
+                    width={geometry.width}
+                    x={measured.labelX}
+                    y={measured.labelY}
+                  />
+                ) : null}
+              </g>
+            )
+          })}
+        {mergeTargets.map(([targetID, edges]) => {
+          const measured = measuredByKey.get(flowEdgeKey(edges[0]))
+          if (!measured) return null
+          const size = 7
+          const diamondY = measured.endY - 10
           return (
-            <div
-              aria-label={`${edge.label ?? "Primary"} branch from ${source.title}`}
-              className="border-primary/20 bg-background/40 min-w-0 self-start rounded-lg border py-2"
-              data-flow-branch-lane
-              data-flow-branch-source={source.id}
-              data-flow-branch-target={edge.to}
-              data-flow-edge-key={flowEdgeKey(edge)}
-              data-flow-route-mode={edge.mode}
-              key={flowEdgeKey(edge)}
-              role="group"
-            >
-              {owned ? (
-                <FlowNodeCell
-                  branchEdge={edge}
-                  flowNode={target}
-                  instanceID={instanceID}
-                  layout={layout}
-                  onSelect={onSelect}
-                  profileID={profileID}
-                  selectedNodeID={selectedNodeID}
-                  workflows={workflows}
-                />
-              ) : (
-                <FlowReference
-                  branched
-                  edge={edge}
-                  source={source}
-                  target={target}
-                />
-              )}
-            </div>
+            <g key={targetID}>
+              <line
+                className="stroke-current"
+                data-flow-merge-stem={targetID}
+                strokeWidth="1.5"
+                vectorEffect="non-scaling-stroke"
+                x1={measured.endX}
+                x2={measured.endX}
+                y1={diamondY + 5}
+                y2={measured.endY}
+              />
+              <rect
+                className="fill-background stroke-current"
+                data-flow-merge-diamond={targetID}
+                height={size}
+                strokeWidth="1.5"
+                transform={`rotate(45 ${measured.endX} ${diamondY})`}
+                vectorEffect="non-scaling-stroke"
+                width={size}
+                x={measured.endX - size / 2}
+                y={diamondY - size / 2}
+              />
+            </g>
           )
         })}
+      </svg>
+      <div
+        aria-label={`${flow.title} connections`}
+        className="sr-only"
+        role="list"
+      >
+        {flow.edges
+          .filter((edge) => !edge.loop)
+          .map((edge) => {
+            const source = layout.nodeByID.get(edge.from)!
+            const target = layout.nodeByID.get(edge.to)!
+            const merged = (layout.incoming.get(edge.to) ?? []).length > 1
+            return (
+              <span key={flowEdgeKey(edge)} role="listitem">
+                {edge.label ? `${edge.label}: ` : ""}
+                {source.title} {flowRouteAccessibleRelation(edge.mode)}{" "}
+                {target.title}
+                {merged ? ", where it merges with other routes" : ""}
+              </span>
+            )
+          })}
       </div>
-    </div>
+    </>
   )
 }
 
-function FlowReference({
-  branched = false,
+function FlowEdgeLabel({
   edge,
-  source,
-  target,
+  label,
+  width,
+  x,
+  y,
 }: {
-  branched?: boolean
   edge: PRLifecycleFlowEdge
-  source: PRLifecycleFlowNode
-  target: PRLifecycleFlowNode
+  label: string
+  width: number
+  x: number
+  y: number
 }) {
-  const label = edge.label ?? "Primary"
-  const loop = edge.loop
-  const targetText = loop ? `Return to ${target.title}` : target.title
+  const labelWidth = flowEdgeLabelWidth(label)
+  const centerX = Math.max(
+    labelWidth / 2 + 2,
+    Math.min(width - labelWidth / 2 - 2, x),
+  )
   return (
-    <div
-      aria-label={`${branched ? `${label} route from ` : ""}${source.title} ${loop ? "returns" : "continues"} to ${target.title}`}
-      className={cn(
-        "text-primary my-1 flex min-h-10 min-w-0 flex-col items-center justify-end text-center text-[11px] leading-snug",
-        loop &&
-          "border-primary/30 bg-primary/5 my-2 min-h-0 flex-row justify-center gap-2 rounded-lg border border-dashed px-2 py-2 text-left",
-        edge.mode === "optional" && "text-muted-foreground",
-      )}
-      data-flow-branch={branched ? source.id : undefined}
-      data-flow-branch-edge={branched ? label : undefined}
-      data-flow-branch-path={branched ? label : undefined}
-      data-flow-branch-target={branched ? edge.to : undefined}
+    <g
       data-flow-edge-key={flowEdgeKey(edge)}
-      data-flow-launch={branched ? true : undefined}
-      data-flow-launch-target={branched ? edge.to : undefined}
-      data-flow-loop-connector={loop ? edge.to : undefined}
-      data-flow-optional={edge.mode === "optional" ? "true" : undefined}
-      data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
-      data-flow-reference={edge.to}
+      data-flow-launch-label
       data-flow-route-mode={edge.mode}
       data-flow-source={edge.from}
-      data-flow-visible-edge-key={flowEdgeKey(edge)}
-      role="group"
+      data-flow-target={edge.to}
+      transform={`translate(${centerX} ${y})`}
     >
-      {loop ? <SemanticEdge edge={edge} /> : null}
-      {branched ? (
-        <span
-          className="bg-background text-foreground shrink-0 rounded border px-1.5 py-0.5 font-semibold"
-          data-flow-branch-label
-          data-flow-launch-label
-        >
-          {label}
-        </span>
-      ) : null}
-      {loop ? (
-        <span className="shrink-0 text-base leading-none" aria-hidden="true">
-          ↺
-        </span>
-      ) : (
-        <span
-          className="flex flex-col items-center justify-end text-lg leading-none"
-          aria-hidden="true"
-        >
-          <span
-            className={cn(
-              "border-primary/40 h-3 border-l",
-              edge.mode === "optional" &&
-                "border-muted-foreground border-dashed",
-            )}
-            data-flow-connector-stem
-          />
-          <span>↓</span>
-        </span>
-      )}
-      <span
-        className={cn(
-          "text-foreground min-w-0 [overflow-wrap:anywhere]",
-          !loop && "sr-only",
-        )}
-        data-flow-launch-target-title={branched ? edge.to : undefined}
-        data-flow-loop-target-title={loop ? edge.to : undefined}
+      <rect
+        className="fill-background stroke-border"
+        height="18"
+        rx="4"
+        width={labelWidth}
+        x={-labelWidth / 2}
+        y="-9"
+      />
+      <text
+        className="fill-foreground text-[10px] font-semibold"
+        dominantBaseline="central"
+        textAnchor="middle"
       >
-        {targetText}
-      </span>
-    </div>
+        {label}
+      </text>
+    </g>
   )
 }
 
-function TargetConnector({
-  branchEdge,
-  edges,
-  nodeByID,
-  target,
-}: {
-  branchEdge?: PRLifecycleFlowEdge
-  edges: PRLifecycleFlowEdge[]
-  nodeByID: Map<string, PRLifecycleFlowNode>
-  target: PRLifecycleFlowNode
-}) {
-  const source = nodeByID.get(edges[0].from)!
-  const singletonMode = edges.length === 1 ? edges[0].mode : undefined
-  const optional = singletonMode === "optional"
-  const merge = edges.length > 1
-  const branchLabel = branchEdge?.label ?? (branchEdge ? "Primary" : undefined)
-  const accessibleName = branchEdge
-    ? `${branchLabel} route from ${source.title} ${optional ? "optionally leads" : "leads"} to ${target.title}`
-    : merge
-      ? `${edges.length} paths merge into ${target.title}`
-      : optional
-        ? `${source.title} optionally continues to ${target.title}`
-        : `${source.title} continues to ${target.title}`
-  return (
-    <div
-      aria-label={accessibleName}
-      className={cn(
-        "text-primary flex min-h-10 w-full min-w-0 items-end justify-center text-center",
-        optional && "text-muted-foreground",
-      )}
-      data-flow-incoming-count={edges.length}
-      data-flow-branch={branchEdge?.from}
-      data-flow-branch-edge={branchLabel}
-      data-flow-branch-path={branchLabel}
-      data-flow-branch-target={branchEdge?.to}
-      data-flow-edge-key={branchEdge ? flowEdgeKey(branchEdge) : undefined}
-      data-flow-launch={branchEdge ? true : undefined}
-      data-flow-launch-target={branchEdge?.to}
-      data-flow-merge={merge ? "true" : undefined}
-      data-flow-merge-contributors={
-        merge ? edges.map((edge) => edge.from).join(" ") : undefined
-      }
-      data-flow-optional={optional ? "true" : undefined}
-      data-flow-parallel={singletonMode === "parallel" ? "true" : undefined}
-      data-flow-route-mode={singletonMode}
-      data-flow-source={branchEdge?.from}
-      data-flow-target-connector={target.id}
-      data-flow-visible-edge-key={!merge ? flowEdgeKey(edges[0]) : undefined}
-      role={branchEdge ? "group" : "img"}
-    >
-      {edges.map((edge) => (
-        <SemanticEdge edge={edge} key={flowEdgeKey(edge)} />
-      ))}
-      {merge ? (
-        <span
-          className="flex flex-col items-center justify-end text-lg leading-none"
-          aria-hidden="true"
-        >
-          <span
-            className="bg-background text-foreground mb-1 rounded border px-1.5 py-0.5 text-[10px] leading-snug font-semibold"
-            data-flow-merge-label
-          >
-            {edges.length} paths merge
-          </span>
-          <span className="border-primary/40 h-3 border-l" />
-          <span>◆</span>
-        </span>
-      ) : (
-        <span
-          className="flex flex-col items-center justify-end text-lg leading-none"
-          aria-hidden="true"
-        >
-          {branchLabel ? (
-            <span
-              className="bg-background text-foreground mb-1 rounded border px-1.5 py-0.5 text-[11px] leading-snug font-semibold"
-              data-flow-branch-label
-              data-flow-launch-label
-            >
-              {branchLabel}
-            </span>
-          ) : null}
-          <span
-            className={cn(
-              "border-primary/40 h-3 border-l",
-              optional && "border-muted-foreground border-dashed",
-            )}
-            data-flow-connector-stem
-          />
-          <span>↓</span>
-        </span>
-      )}
-    </div>
+function flowEdgeLabelWidth(label: string): number {
+  return Math.max(36, Math.min(120, label.length * 6.2 + 14))
+}
+
+function flowIncomingLabelPlacement(
+  incoming: PRLifecycleFlowEdge[],
+  selected: PRLifecycleFlowEdge,
+  canvasWidth: number,
+  anchorX: number,
+): { row: number; x: number } {
+  const gap = 8
+  const availableWidth = Math.max(36, canvasWidth - 8)
+  const rows: Array<{
+    items: Array<{ key: string; width: number }>
+    width: number
+  }> = []
+
+  for (const edge of incoming) {
+    const item = {
+      key: flowEdgeKey(edge),
+      width: flowEdgeLabelWidth(edge.label ?? "Primary"),
+    }
+    let row = rows.at(-1)
+    if (
+      !row ||
+      (row.items.length > 0 && row.width + gap + item.width > availableWidth)
+    ) {
+      row = { items: [], width: 0 }
+      rows.push(row)
+    }
+    if (row.items.length > 0) row.width += gap
+    row.items.push(item)
+    row.width += item.width
+  }
+
+  const selectedKey = flowEdgeKey(selected)
+  const rowIndex = Math.max(
+    0,
+    rows.findIndex((row) => row.items.some((item) => item.key === selectedKey)),
   )
+  const row = rows[rowIndex]
+  if (!row) return { row: 0, x: anchorX }
+
+  const left = Math.max(
+    4,
+    Math.min(canvasWidth - row.width - 4, anchorX - row.width / 2),
+  )
+  let cursor = left
+  for (const item of row.items) {
+    if (item.key === selectedKey) {
+      return { row: rowIndex, x: cursor + item.width / 2 }
+    }
+    cursor += item.width + gap
+  }
+  return { row: rowIndex, x: anchorX }
+}
+
+function flowPath(points: Array<[number, number]>): string {
+  return points
+    .map(
+      ([x, y], index) =>
+        `${index === 0 ? "M" : "L"} ${roundFlowCoordinate(x)} ${roundFlowCoordinate(y)}`,
+    )
+    .join(" ")
+}
+
+function roundFlowCoordinate(value: number): number {
+  return Math.round(value * 10) / 10
 }
 
 function LoopConnector({
+  branched,
   edge,
   source,
   target,
 }: {
+  branched: boolean
   edge: PRLifecycleFlowEdge
   source: PRLifecycleFlowNode
   target: PRLifecycleFlowNode
 }) {
+  const label = branched ? (edge.label ?? "Primary") : undefined
   return (
     <div
-      aria-label={`${source.title} returns to ${target.title}`}
+      aria-label={`${label ? `${label} ` : ""}${flowRouteAccessibleRelation(edge.mode)} ${target.title}, returning from ${source.title}`}
       className="border-primary/40 bg-primary/5 text-primary my-2 flex min-w-0 items-center justify-center gap-2 rounded-lg border border-dashed px-2 py-2 text-[11px] leading-snug"
+      data-flow-branch={branched ? edge.from : undefined}
+      data-flow-branch-edge={label}
+      data-flow-branch-target={branched ? edge.to : undefined}
       data-flow-edge-key={flowEdgeKey(edge)}
+      data-flow-launch={branched ? "true" : undefined}
+      data-flow-launch-target={branched ? edge.to : undefined}
       data-flow-loop-connector={edge.to}
+      data-flow-optional={edge.mode === "optional" ? "true" : undefined}
+      data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
+      data-flow-route-mode={edge.mode}
       data-flow-source={edge.from}
+      data-flow-target={edge.to}
       data-flow-visible-edge-key={flowEdgeKey(edge)}
       role="group"
     >
       <SemanticEdge edge={edge} />
+      {label ? (
+        <span
+          className="bg-background text-foreground shrink-0 rounded border px-1.5 py-0.5 font-semibold"
+          data-flow-edge-key={flowEdgeKey(edge)}
+          data-flow-launch-label
+          data-flow-source={edge.from}
+          data-flow-target={edge.to}
+        >
+          {label}
+        </span>
+      ) : null}
       <span className="text-lg leading-none" aria-hidden="true">
         ↺
       </span>
@@ -857,13 +1096,27 @@ function SemanticEdge({ edge }: { edge: PRLifecycleFlowEdge }) {
       data-flow-loop-target={edge.loop ? edge.to : undefined}
       data-flow-optional={edge.mode === "optional" ? "true" : undefined}
       data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
-      data-flow-placement={edge.loop ? "source" : "target"}
       data-flow-semantic-edge
       data-flow-source={edge.from}
       data-flow-target={edge.to}
       hidden
     />
   )
+}
+
+function flowRouteAccessibleRelation(
+  mode: PRLifecycleFlowEdge["mode"],
+): string {
+  switch (mode) {
+    case "choice":
+      return "can choose the route to"
+    case "parallel":
+      return "must also continue to"
+    case "optional":
+      return "can optionally continue to"
+    default:
+      return "continues to"
+  }
 }
 
 function GraphNode({
@@ -1024,47 +1277,49 @@ function EditableGateNode({
 }
 
 /**
- * Assigns every forward node to its closest dominating branch. Unlike global
- * topological ranks, this keeps a descendant inside the branch that owns it.
- * Multi-parent nodes stay with their common dominator and render once after
- * the contributing branch references. Loop edges remain source-side links.
+ * Assigns forward nodes to compact topological bands. A band contains only
+ * nodes that actually run at that depth, so a route that has ended cannot keep
+ * an empty column alive below it. Measured edges preserve exact lineage while
+ * later bands independently reuse the available width.
  */
 function createFlowLayout(flow: PRLifecycleFlow): FlowLayout {
   const nodeByID = new Map(flow.nodes.map((node) => [node.id, node]))
+  const nodeOrder = new Map(flow.nodes.map((node, index) => [node.id, index]))
   const incoming = new Map<string, PRLifecycleFlowEdge[]>()
   const outgoing = new Map<string, PRLifecycleFlowEdge[]>()
+  const adjacency = new Map<string, string[]>()
+  const indegree = new Map(flow.nodes.map((node) => [node.id, 0]))
+
   for (const edge of flow.edges) {
     outgoing.set(edge.from, [...(outgoing.get(edge.from) ?? []), edge])
     if (edge.loop) continue
     incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge])
+    adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to])
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1)
   }
 
-  const nodeOrder = new Map(flow.nodes.map((node, index) => [node.id, index]))
-  const forwardAdjacency = new Map<string, string[]>()
-  const pendingIndegree = new Map(
-    flow.nodes.map((node) => [node.id, (incoming.get(node.id) ?? []).length]),
-  )
-  for (const node of flow.nodes) {
-    forwardAdjacency.set(
-      node.id,
-      (outgoing.get(node.id) ?? [])
-        .filter((edge) => !edge.loop)
-        .map((edge) => edge.to),
-    )
-  }
+  const rankByNode = new Map<string, number>()
   const pending = flow.nodes
-    .filter((node) => (pendingIndegree.get(node.id) ?? 0) === 0)
-    .sort(
-      (left, right) =>
-        (nodeOrder.get(left.id) ?? 0) - (nodeOrder.get(right.id) ?? 0),
-    )
-  const topologicalIDs: string[] = []
+    .filter((node) => (indegree.get(node.id) ?? 0) === 0)
+    .sort((left, right) => {
+      if (left.id === flow.entry) return -1
+      if (right.id === flow.entry) return 1
+      return (nodeOrder.get(left.id) ?? 0) - (nodeOrder.get(right.id) ?? 0)
+    })
+  for (const node of pending) rankByNode.set(node.id, 0)
+
+  const visited = new Set<string>()
   while (pending.length > 0) {
     const current = pending.shift()!
-    topologicalIDs.push(current.id)
-    for (const targetID of forwardAdjacency.get(current.id) ?? []) {
-      const remaining = (pendingIndegree.get(targetID) ?? 0) - 1
-      pendingIndegree.set(targetID, remaining)
+    visited.add(current.id)
+    const currentRank = rankByNode.get(current.id) ?? 0
+    for (const targetID of adjacency.get(current.id) ?? []) {
+      rankByNode.set(
+        targetID,
+        Math.max(rankByNode.get(targetID) ?? 0, currentRank + 1),
+      )
+      const remaining = (indegree.get(targetID) ?? 0) - 1
+      indegree.set(targetID, remaining)
       if (remaining !== 0) continue
       pending.push(nodeByID.get(targetID)!)
       pending.sort(
@@ -1073,119 +1328,58 @@ function createFlowLayout(flow: PRLifecycleFlow): FlowLayout {
       )
     }
   }
+
+  let fallbackRank = Math.max(0, ...rankByNode.values()) + 1
   for (const node of flow.nodes) {
-    if (!topologicalIDs.includes(node.id)) topologicalIDs.push(node.id)
+    if (visited.has(node.id)) continue
+    rankByNode.set(node.id, fallbackRank)
+    fallbackRank += 1
   }
-  const topologicalOrder = new Map(
-    topologicalIDs.map((nodeID, index) => [nodeID, index]),
+
+  const rawRanks = [...new Set(rankByNode.values())].sort(
+    (left, right) => left - right,
   )
-  const forwardDescendants = new Map<string, Set<string>>()
-  for (const nodeID of [...topologicalIDs].reverse()) {
-    const descendants = new Set<string>()
-    for (const targetID of forwardAdjacency.get(nodeID) ?? []) {
-      descendants.add(targetID)
-      for (const descendant of forwardDescendants.get(targetID) ?? []) {
-        descendants.add(descendant)
-      }
-    }
-    forwardDescendants.set(nodeID, descendants)
+  const compactRank = new Map(rawRanks.map((rank, index) => [rank, index]))
+  for (const [nodeID, rank] of rankByNode) {
+    rankByNode.set(nodeID, compactRank.get(rank)!)
   }
 
-  const roots = flow.nodes.filter(
-    (node) =>
-      node.id === flow.entry || (incoming.get(node.id) ?? []).length === 0,
-  )
-  roots.sort((left, right) => {
-    if (left.id === flow.entry) return -1
-    if (right.id === flow.entry) return 1
-    return (nodeOrder.get(left.id) ?? 0) - (nodeOrder.get(right.id) ?? 0)
-  })
+  const bands = Array.from({ length: rawRanks.length }, (_, rank) =>
+    flow.nodes
+      .filter((node) => rankByNode.get(node.id) === rank)
+      .sort(
+        (left, right) =>
+          (nodeOrder.get(left.id) ?? 0) - (nodeOrder.get(right.id) ?? 0),
+      ),
+  ).filter((nodes) => nodes.length > 0)
 
-  const allNodeIDs = new Set(flow.nodes.map((node) => node.id))
-  const rootIDs = new Set(roots.map((node) => node.id))
-  const dominators = new Map<string, Set<string>>()
-  for (const node of flow.nodes) {
-    dominators.set(
-      node.id,
-      rootIDs.has(node.id) ? new Set([node.id]) : new Set(allNodeIDs),
-    )
-  }
-
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const node of flow.nodes) {
-      if (rootIDs.has(node.id)) continue
-      const predecessors = incoming.get(node.id) ?? []
-      let next =
-        predecessors.length > 0
-          ? new Set(dominators.get(predecessors[0].from) ?? [])
-          : new Set<string>()
-      for (const edge of predecessors.slice(1)) {
-        const predecessorDominators = dominators.get(edge.from) ?? new Set()
-        next = new Set(
-          [...next].filter((candidate) => predecessorDominators.has(candidate)),
-        )
-      }
-      next.add(node.id)
-      const current = dominators.get(node.id)!
-      if (
-        next.size !== current.size ||
-        [...next].some((candidate) => !current.has(candidate))
-      ) {
-        dominators.set(node.id, next)
-        changed = true
-      }
-    }
-  }
-
-  const immediateDominator = new Map<string, string>()
-  for (const node of flow.nodes) {
-    const strictDominators = [...(dominators.get(node.id) ?? [])]
-      .filter((candidate) => candidate !== node.id)
-      .sort((left, right) => {
-        const depthDifference =
-          (dominators.get(right)?.size ?? 0) - (dominators.get(left)?.size ?? 0)
-        if (depthDifference !== 0) return depthDifference
-        return (nodeOrder.get(left) ?? 0) - (nodeOrder.get(right) ?? 0)
+  const horizontalPosition = new Map<string, number>()
+  for (const nodes of bands) {
+    const predecessorPosition = (node: PRLifecycleFlowNode) => {
+      const positions = (incoming.get(node.id) ?? []).flatMap((edge) => {
+        const position = horizontalPosition.get(edge.from)
+        return position === undefined ? [] : [position]
       })
-    if (strictDominators[0]) {
-      immediateDominator.set(node.id, strictDominators[0])
+      return positions.length > 0
+        ? positions.reduce((sum, position) => sum + position, 0) /
+            positions.length
+        : Number.POSITIVE_INFINITY
+    }
+    nodes.sort((left, right) => {
+      const leftPosition = predecessorPosition(left)
+      const rightPosition = predecessorPosition(right)
+      if (leftPosition !== rightPosition) return leftPosition - rightPosition
+      return (nodeOrder.get(left.id) ?? 0) - (nodeOrder.get(right.id) ?? 0)
+    })
+    for (const [index, node] of nodes.entries()) {
+      horizontalPosition.set(
+        node.id,
+        nodes.length === 1 ? 0.5 : index / (nodes.length - 1),
+      )
     }
   }
 
-  const dominatorChildren = new Map<string, PRLifecycleFlowNode[]>()
-  for (const node of flow.nodes) {
-    const parent = immediateDominator.get(node.id)
-    if (!parent) continue
-    dominatorChildren.set(parent, [
-      ...(dominatorChildren.get(parent) ?? []),
-      node,
-    ])
-  }
-  for (const children of dominatorChildren.values()) {
-    children.sort(
-      (left, right) =>
-        (topologicalOrder.get(left.id) ?? 0) -
-        (topologicalOrder.get(right.id) ?? 0),
-    )
-  }
-
-  const dominated = new Set(immediateDominator.keys())
-  for (const node of flow.nodes) {
-    if (!dominated.has(node.id) && !rootIDs.has(node.id)) roots.push(node)
-  }
-
-  return {
-    dominatorChildren,
-    forwardDescendants,
-    immediateDominator,
-    incoming,
-    nodeByID,
-    outgoing,
-    roots,
-    topologicalOrder,
-  }
+  return { bands, incoming, nodeByID, outgoing, rankByNode }
 }
 
 function flowEdgeKey(edge: PRLifecycleFlowEdge): string {
@@ -1211,13 +1405,6 @@ function flowContainsDecisionPoint(
   )
 }
 
-function routeModeVisibleLabel(mode: PRLifecycleFlowEdge["mode"]): string {
-  if (mode === "linear") return "Primary path"
-  if (mode === "choice") return "Choice"
-  if (mode === "parallel") return "All required"
-  return "Optional paths"
-}
-
 function responsiveGridClass(count: number): string {
   return cn(
     "grid min-w-0 grid-cols-1 gap-3",
@@ -1227,6 +1414,17 @@ function responsiveGridClass(count: number): string {
       "@2xs/flow:grid-cols-2 @md/flow:grid-cols-3 @xl/flow:grid-cols-4",
     count >= 5 &&
       "@2xs/flow:grid-cols-2 @md/flow:grid-cols-3 @xl/flow:grid-cols-4 @3xl/flow:grid-cols-5",
+  )
+}
+
+function flowBandGridClass(count: number): string {
+  return cn(
+    "grid min-w-0 grid-cols-1 items-start gap-x-3 gap-y-10",
+    count === 2 && "@xl/flow:grid-cols-2",
+    count === 3 && "@md/flow:grid-cols-3",
+    count === 4 && "@3xl/flow:grid-cols-4",
+    count === 5 && "@5xl/flow:grid-cols-5",
+    count === 6 && "@7xl/flow:grid-cols-6",
   )
 }
 
@@ -1349,6 +1547,31 @@ function GateFormatLegend() {
           key={format}
         >
           {label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function FlowRouteLegend() {
+  const routes = [
+    { label: "Next / choice", line: "border-t" },
+    { label: "All required", line: "border-t-[3px]" },
+    { label: "Optional", line: "border-t border-dashed" },
+  ]
+  return (
+    <div
+      aria-label="Route connector legend"
+      className="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px]"
+    >
+      <span className="font-semibold">Routes</span>
+      {routes.map((route) => (
+        <span className="flex items-center gap-1" key={route.label}>
+          <span
+            aria-hidden="true"
+            className={cn("border-primary w-4", route.line)}
+          />
+          {route.label}
         </span>
       ))}
     </div>
