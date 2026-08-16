@@ -86,7 +86,9 @@ the gate editor dialog. Plain compact cards represent actions without a repeated
 type label; editable gates are full-card controls labeled by gate format, and
 locked safeguards retain a distinct non-interactive treatment. Adjacent branch
 families use separate curved ports so unrelated routes do not form false visual
-junctions.
+junctions. Gutter routes reserve exterior source ports and distinct launch
+shelves, and use a background underlay to keep neighboring connectors visually
+separate.
 
 ## Surface Ownership
 

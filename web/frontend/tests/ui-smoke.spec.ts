@@ -3346,6 +3346,97 @@ async function expectReviewForkUsesDistinctCurves(gateMap: Locator) {
   }
 }
 
+async function expectProcessReviewRoutesStayDistinct(
+  gateMap: Locator,
+  width: number,
+) {
+  const keys = {
+    correction: "review_process_result:review_record_correction",
+    findings: "review_process_result:review_assess_scope",
+    noFindings: "review_process_result:review_finish",
+  }
+  const geometry = await gateMap
+    .locator('[data-flow-view="review"]')
+    .evaluate((flow, edgeKeys) => {
+      const edge = (key: string) => {
+        const path = Array.from(
+          flow.querySelectorAll<SVGPathElement>("[data-flow-visible-edge-key]"),
+        ).find((candidate) => candidate.dataset.flowVisibleEdgeKey === key)!
+        const start = path.getPointAtLength(0)
+        const length = path.getTotalLength()
+        const points = Array.from(
+          { length: Math.ceil(length / 2) + 1 },
+          (_, index) => {
+            const point = path.getPointAtLength(Math.min(index * 2, length))
+            return { x: point.x, y: point.y }
+          },
+        )
+        const departure = points.find(
+          (point) => Math.abs(point.x - start.x) > 1,
+        )
+        return {
+          launchDirection: Math.sign((departure?.x ?? start.x) - start.x),
+          launchDrop: (departure?.y ?? start.y) - start.y,
+          points,
+          shape: path.dataset.flowShape ?? "",
+          startX: start.x,
+        }
+      }
+      return {
+        correction: edge(edgeKeys.correction),
+        findings: edge(edgeKeys.findings),
+        haloCount: Array.from(
+          flow.querySelectorAll<SVGPathElement>("[data-flow-edge-halo]"),
+        ).filter(
+          (candidate) => candidate.dataset.flowEdgeHalo === edgeKeys.noFindings,
+        ).length,
+        noFindings: edge(edgeKeys.noFindings),
+      }
+    }, keys)
+
+  if (width === 1280) {
+    expect(geometry.findings.shape).toBe("curve")
+    expect(geometry.correction.shape).toBe("curve")
+    expect(geometry.findings.startX).toBeLessThan(geometry.correction.startX)
+  }
+  expect(geometry.noFindings.shape).toBe("orthogonal")
+  const startPorts = [
+    geometry.findings.startX,
+    geometry.correction.startX,
+    geometry.noFindings.startX,
+  ].sort((left, right) => left - right)
+  expect(startPorts[1] - startPorts[0]).toBeGreaterThan(20)
+  expect(startPorts[2] - startPorts[1]).toBeGreaterThan(20)
+  expect(geometry.haloCount).toBe(1)
+
+  for (const [name, left, right] of [
+    ["Findings / Correction", geometry.findings, geometry.correction],
+    ["Findings / No findings", geometry.findings, geometry.noFindings],
+    ["Correction / No findings", geometry.correction, geometry.noFindings],
+  ] as const) {
+    let clearance = Number.POSITIVE_INFINITY
+    for (const leftPoint of left.points) {
+      for (const rightPoint of right.points) {
+        clearance = Math.min(
+          clearance,
+          Math.hypot(leftPoint.x - rightPoint.x, leftPoint.y - rightPoint.y),
+        )
+      }
+    }
+    expect(clearance, `${name} launch clearance at ${width}px`).toBeGreaterThan(
+      6,
+    )
+  }
+
+  expect(geometry.noFindings.launchDrop).toBeGreaterThanOrEqual(9)
+  expect(Math.abs(geometry.noFindings.launchDirection)).toBe(1)
+  if (geometry.noFindings.launchDirection > 0) {
+    expect(geometry.noFindings.startX).toBe(startPorts[2])
+  } else {
+    expect(geometry.noFindings.startX).toBe(startPorts[0])
+  }
+}
+
 async function expectTerminalBranchReleased(
   gateMap: Locator,
   terminalNodeID: string,
@@ -3695,6 +3786,9 @@ async function expectFlowConnectorContract(
           "[data-flow-visible-edge-key]",
         ),
       )
+      const edgeHalos = Array.from(
+        flow.querySelectorAll<SVGPathElement>("[data-flow-edge-halo]"),
+      )
       const bands = Array.from(
         flow.querySelectorAll<HTMLElement>("[data-flow-band]"),
       )
@@ -3759,6 +3853,13 @@ async function expectFlowConnectorContract(
         }
         if (
           !edge.loop &&
+          (path.parentElement?.dataset.flowEdgeLayer !== edge.key ||
+            path.parentElement?.parentElement !== path.ownerSVGElement)
+        ) {
+          issues.push(`${edge.key}: forward edge has no isolated paint layer`)
+        }
+        if (
+          !edge.loop &&
           path.dataset.flowShape !== "curve" &&
           path.dataset.flowShape !== "orthogonal"
         ) {
@@ -3771,6 +3872,33 @@ async function expectFlowConnectorContract(
             issues.push(
               `${edge.key}: ${merged ? "merged edge has an arrow" : "single edge has no arrow"}`,
             )
+          }
+          const halos = edgeHalos.filter(
+            (halo) => halo.dataset.flowEdgeHalo === edge.key,
+          )
+          const orthogonal = path.dataset.flowShape === "orthogonal"
+          if (halos.length !== (orthogonal ? 1 : 0)) {
+            issues.push(
+              `${edge.key}: ${orthogonal ? "orthogonal edge needs one halo" : "curve must not have a halo"}`,
+            )
+          } else if (orthogonal) {
+            const halo = halos[0]
+            const haloWidth = Number(halo.getAttribute("stroke-width"))
+            const pathWidth = Number(path.getAttribute("stroke-width"))
+            if (halo.getAttribute("d") !== path.getAttribute("d")) {
+              issues.push(`${edge.key}: halo geometry differs from its edge`)
+            }
+            if (haloWidth < pathWidth + 4) {
+              issues.push(`${edge.key}: halo does not provide enough clearance`)
+            }
+            if (
+              halo.parentElement !== path.parentElement ||
+              halo.nextElementSibling !== path
+            ) {
+              issues.push(
+                `${edge.key}: halo must paint immediately before its edge`,
+              )
+            }
           }
         }
       }
@@ -4186,6 +4314,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await expectGateMapFits(gateMap)
     await expectFlowConnectorContract(gateMap, "review")
     await expectForwardPathsAvoidNodeCards(gateMap, "review")
+    await expectProcessReviewRoutesStayDistinct(gateMap, width)
     await expectBranchLabelsDoNotOverlap(gateMap, "review")
     if (width === 1280) {
       await expectReviewForkUsesDistinctCurves(gateMap)
