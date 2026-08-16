@@ -697,13 +697,18 @@ describe("PR lifecycle gate map", () => {
     for (const action of container.querySelectorAll(
       '[data-flow-kind="action"]',
     )) {
+      expect(action).toHaveAttribute("data-flow-element", "action")
       expect(action).toHaveAttribute("data-flow-operation")
+      expect(action.matches("button, a, [role=button]")).toBe(false)
       expect(action.querySelector("[data-gate-id]")).toBeNull()
       expect(action.querySelector("[data-flow-description]")).not.toBeNull()
+      expect(
+        within(action as HTMLElement).queryByText("ACTION", { exact: true }),
+      ).toBeNull()
     }
-    expect(
-      screen.getByRole("button", { name: "Allow review" }),
-    ).toHaveAttribute("data-gate-name", "Allow review")
+    const reviewGate = screen.getByRole("button", { name: "Allow review" })
+    expect(reviewGate).toHaveAttribute("data-gate-name", "Allow review")
+    expect(reviewGate).toHaveAttribute("data-flow-element", "editable-gate")
     expect(
       screen.getByRole("button", { name: "Accept review coverage" }),
     ).toHaveAttribute("data-gate-name", "Accept review coverage")
@@ -720,8 +725,10 @@ describe("PR lifecycle gate map", () => {
       "/pull-requests?view=gate-profiles&profile=strict%20profile&gate=pr.review.publish",
     )
     const locked = screen.getByRole("group", { name: "Protect audit archive" })
+    expect(locked).toHaveAttribute("data-flow-element", "locked-safeguard")
     expect(locked).toHaveAttribute("data-required-gate", "audit_archive")
     expect(within(locked).queryByRole("button")).toBeNull()
+    expect(screen.queryByText(/^Edit gate(?:\s*→)?$/)).toBeNull()
 
     fireEvent.click(notificationGate)
     fireEvent.click(screen.getByRole("button", { name: "Allow review" }))

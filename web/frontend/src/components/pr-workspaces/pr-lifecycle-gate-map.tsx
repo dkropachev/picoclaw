@@ -186,8 +186,8 @@ export function PRLifecycleGateMap({
             id={descriptionID}
             className="text-muted-foreground mt-1 max-w-3xl text-xs"
           >
-            Choose a workflow, follow its actions and branches, and select an
-            editable gate to change its policy.
+            Plain cards are actions. Select a highlighted gate to change its
+            policy.
           </p>
         </div>
         <div className="max-w-3xl min-w-0 space-y-1.5">
@@ -195,7 +195,6 @@ export function PRLifecycleGateMap({
             aria-label="Diagram legend"
             className="text-muted-foreground flex flex-wrap gap-1.5 text-xs"
           >
-            <Legend label="Action" variant="action" />
             <Legend label="Editable gate" variant="gate" />
             <Legend label="Locked safeguard" variant="required" />
           </div>
@@ -535,18 +534,28 @@ function useFlowGeometry(
         const sourceRect = sourceNode.getBoundingClientRect()
         const targetCellRect = cellRect.get(targetCell)!
         const targetRect = targetNode.getBoundingClientRect()
-        const startX = sourceRect.left - canvasRect.left + sourceRect.width / 2
-        const startY = sourceRect.bottom - canvasRect.top
-        const endX = targetRect.left - canvasRect.left + targetRect.width / 2
-        const endY = targetRect.top - canvasRect.top
         const outgoing = layout.outgoing.get(edge.from) ?? []
+        const forwardOutgoing = outgoing.filter((candidate) => !candidate.loop)
         const edgeIndex = Math.max(
           0,
-          outgoing.findIndex(
+          forwardOutgoing.findIndex(
             (candidate) => flowEdgeKey(candidate) === flowEdgeKey(edge),
           ),
         )
         const split = outgoing.length > 1
+        const sourcePortOffset =
+          forwardOutgoing.length > 1
+            ? (edgeIndex - (forwardOutgoing.length - 1) / 2) *
+              Math.min(24, 72 / forwardOutgoing.length)
+            : 0
+        const startX =
+          sourceRect.left -
+          canvasRect.left +
+          sourceRect.width / 2 +
+          sourcePortOffset
+        const startY = sourceRect.bottom - canvasRect.top
+        const endX = targetRect.left - canvasRect.left + targetRect.width / 2
+        const endY = targetRect.top - canvasRect.top
         const sourceRank = layout.rankByNode.get(edge.from) ?? 0
         const targetRank = layout.rankByNode.get(edge.to) ?? sourceRank + 1
         const sourceBandCells = Array.from(
@@ -658,31 +667,17 @@ function useFlowGeometry(
             labelX = (startX + trackX) / 2
             labelY = upperY - 7
           }
-        } else if (split && Math.abs(startX - endX) < 32) {
-          const portOffset =
-            (edgeIndex - (outgoing.length - 1) / 2) *
-            Math.min(22, 60 / outgoing.length)
-          const portX = startX + portOffset
-          path = flowPath([
-            [startX, startY],
-            [startX, upperY],
-            [portX, upperY],
-            [portX, lowerY],
-            [endX, lowerY],
-            [endX, pathEndY],
-          ])
-          labelX = portX
-          labelY = upperY - 7
         } else {
           const middleY = upperY + (lowerY - upperY) / 2
-          path = flowPath([
-            [startX, startY],
-            [startX, upperY],
-            [startX, middleY],
-            [endX, middleY],
-            [endX, lowerY],
-            [endX, pathEndY],
-          ])
+          path = flowCurvePath(
+            startX,
+            startY,
+            upperY,
+            middleY,
+            endX,
+            lowerY,
+            pathEndY,
+          )
           labelX = (startX + endX) / 2
           labelY = middleY - 7
         }
@@ -839,6 +834,9 @@ function FlowEdgeOverlay({
                     edge.mode === "parallel" ? "true" : undefined
                   }
                   data-flow-route-mode={edge.mode}
+                  data-flow-shape={
+                    measured?.path.includes(" C ") ? "curve" : "orthogonal"
+                  }
                   data-flow-source={edge.from}
                   data-flow-target={edge.to}
                   data-flow-visible-edge-key={key}
@@ -1027,6 +1025,23 @@ function flowPath(points: Array<[number, number]>): string {
     .join(" ")
 }
 
+function flowCurvePath(
+  startX: number,
+  startY: number,
+  upperY: number,
+  middleY: number,
+  endX: number,
+  lowerY: number,
+  endY: number,
+): string {
+  return [
+    `M ${roundFlowCoordinate(startX)} ${roundFlowCoordinate(startY)}`,
+    `L ${roundFlowCoordinate(startX)} ${roundFlowCoordinate(upperY)}`,
+    `C ${roundFlowCoordinate(startX)} ${roundFlowCoordinate(middleY)} ${roundFlowCoordinate(endX)} ${roundFlowCoordinate(middleY)} ${roundFlowCoordinate(endX)} ${roundFlowCoordinate(lowerY)}`,
+    `L ${roundFlowCoordinate(endX)} ${roundFlowCoordinate(endY)}`,
+  ].join(" ")
+}
+
 function roundFlowCoordinate(value: number): number {
   return Math.round(value * 10) / 10
 }
@@ -1151,17 +1166,15 @@ function GraphNode({
 function ActionNode({ node }: { node: PRLifecycleFlowNode }) {
   return (
     <div
-      className="bg-secondary flex min-h-20 w-full min-w-0 flex-col rounded-xl border p-3 [overflow-wrap:anywhere]"
+      className="bg-secondary/70 flex min-h-16 w-full min-w-0 flex-col rounded-lg border px-2.5 py-2 [overflow-wrap:anywhere]"
+      data-flow-element="action"
       data-flow-kind="action"
       data-flow-node-id={node.id}
       data-flow-operation={node.operation}
     >
-      <span className="text-muted-foreground text-[9px] font-bold tracking-wider">
-        ACTION
-      </span>
-      <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
+      <strong className="text-xs leading-snug">{node.title}</strong>
       <span
-        className="text-muted-foreground mt-2 text-[11px] leading-snug"
+        className="text-muted-foreground mt-1 text-[11px] leading-snug"
         data-flow-description
       >
         {node.description}
@@ -1174,14 +1187,15 @@ function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
   return (
     <div
       aria-label={node.title}
-      className="border-destructive/70 bg-destructive/5 flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 [overflow-wrap:anywhere] shadow-sm"
+      className="border-destructive/70 bg-destructive/5 flex min-h-20 w-full min-w-0 flex-col rounded-lg border-2 px-2.5 py-2 [overflow-wrap:anywhere] shadow-sm"
+      data-flow-element="locked-safeguard"
       data-flow-kind="gate"
       data-flow-node-id={node.id}
       data-required-gate={node.safeguard}
       role="group"
     >
       <span className="border-destructive/40 text-destructive w-fit rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase">
-        Locked safeguard
+        Safeguard · locked
       </span>
       <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
       <span
@@ -1221,13 +1235,14 @@ function EditableGateNode({
       aria-haspopup="dialog"
       aria-label={node.title}
       className={cn(
-        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-28 w-full min-w-0 flex-col rounded-xl border-2 p-3 text-left [overflow-wrap:anywhere] shadow-sm transition-colors outline-none focus-visible:ring-2",
+        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-20 w-full min-w-0 cursor-pointer flex-col rounded-lg border-2 px-2.5 py-2 text-left [overflow-wrap:anywhere] shadow-sm transition-[background-color,border-color,box-shadow] outline-none hover:shadow-md focus-visible:ring-2",
         selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
       )}
       data-decision-point={decisionPoint}
       data-decision-title={node.title}
       data-edit-href={gateEditorHref(profileID, decisionPoint)}
       data-editor-title={node.title}
+      data-flow-element="editable-gate"
       data-flow-kind="gate"
       data-flow-node-id={node.id}
       data-gate-format={format.format}
@@ -1238,7 +1253,19 @@ function EditableGateNode({
       onClick={activate}
       type="button"
     >
-      <strong className="text-xs leading-snug">{node.title}</strong>
+      <span className="flex flex-wrap items-start justify-between gap-1.5">
+        <strong className="min-w-24 flex-1 text-xs leading-snug">
+          {node.title}
+        </strong>
+        <span
+          className={cn(
+            "shrink-0 rounded-md border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase",
+            gateFormatClassName(format.format),
+          )}
+        >
+          {format.label} gate
+        </span>
+      </span>
       <span
         className="text-muted-foreground mt-1 text-[11px] leading-snug"
         data-gate-description
@@ -1246,29 +1273,18 @@ function EditableGateNode({
       >
         {node.description}
       </span>
-      <span className="mt-auto flex flex-wrap items-center gap-1.5 pt-2">
-        <span
-          className={cn(
-            "rounded-md border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase",
-            gateFormatClassName(format.format),
-          )}
-        >
-          {format.label}
-        </span>
-        {format.fallback ? (
+      {format.fallback ? (
+        <span className="mt-auto flex flex-wrap items-center gap-1.5 pt-1.5">
           <span className="text-muted-foreground text-[9px] font-semibold tracking-wider uppercase">
             default fallback
           </span>
-        ) : null}
-      </span>
+        </span>
+      ) : null}
       {format.composition ? (
         <span className="text-foreground mt-1 text-[10px] font-semibold">
           {format.composition}
         </span>
       ) : null}
-      <span className="text-primary mt-1 text-[10px] font-bold tracking-wider">
-        Edit gate →
-      </span>
       <span className="sr-only" id={formatID}>
         {format.accessible}
       </span>
@@ -1506,13 +1522,12 @@ function Legend({
   variant,
 }: {
   label: string
-  variant: "action" | "gate" | "required"
+  variant: "gate" | "required"
 }) {
   return (
     <span
       className={cn(
         "rounded-md border px-2 py-1",
-        variant === "action" && "bg-secondary",
         variant === "gate" && "bg-primary/10 border-primary",
         variant === "required" &&
           "bg-destructive/5 border-destructive/60 text-destructive",

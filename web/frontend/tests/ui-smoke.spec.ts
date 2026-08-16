@@ -3156,19 +3156,28 @@ async function expectActiveGateFlowContract(
         .filter(
           (action) =>
             action.matches("button, a, [data-gate-id]") ||
+            action.dataset.flowElement !== "action" ||
             action.querySelector("[data-gate-id]") != null ||
-            action.querySelector("[data-flow-description]") == null,
+            action.querySelector("[data-flow-description]") == null ||
+            Array.from(action.querySelectorAll("*")).some(
+              (element) => element.textContent?.trim() === "ACTION",
+            ),
         )
         .map((action) => action.textContent?.trim().slice(0, 60) ?? "action"),
       invalidEditableGates: editableGates
         .filter(
           (gate) =>
             gate.querySelector("[data-gate-description]") == null ||
+            gate.dataset.flowElement !== "editable-gate" ||
             gate.dataset.gateName == null ||
             !gate.textContent?.includes(gate.dataset.gateName) ||
+            window.getComputedStyle(gate).cursor !== "pointer" ||
             gate.dataset.gateNumber != null ||
             gate.dataset.gateFormat == null ||
-            gate.closest('[data-flow-kind="action"]') != null,
+            gate.closest('[data-flow-kind="action"]') != null ||
+            Array.from(gate.querySelectorAll("*")).some((element) =>
+              /^Edit gate(?:\s*→)?$/.test(element.textContent?.trim() ?? ""),
+            ),
         )
         .map((gate) => gate.dataset.gateId ?? "gate"),
       visibleSemanticEdges: semanticEdges
@@ -3300,6 +3309,41 @@ async function expectGeneratedBranchLabels(
   expect(renderedLabels.map((label) => label.trim()).sort()).toEqual(
     [...labels].sort(),
   )
+}
+
+async function expectReviewForkUsesDistinctCurves(gateMap: Locator) {
+  const edgeKeys = [
+    "review_keep_in_scope:review_select_review_findings",
+    "review_keep_in_scope:review_select_implementation_findings",
+    "review_group_deferred:review_link_followup_issue",
+    "review_group_deferred:review_gate_deferred_publish",
+  ]
+  const paths = await gateMap.locator('[data-flow-view="review"]').evaluate(
+    (flow, keys) =>
+      keys.map((key) => {
+        const path = flow.querySelector<SVGPathElement>(
+          `[data-flow-visible-edge-key="${key}"]`,
+        )!
+        const start = path.getPointAtLength(0)
+        return {
+          d: path.getAttribute("d") ?? "",
+          key,
+          shape: path.dataset.flowShape,
+          source: path.dataset.flowSource,
+          startX: start.x,
+        }
+      }),
+    edgeKeys,
+  )
+
+  expect(paths.map((path) => path.shape)).toEqual(edgeKeys.map(() => "curve"))
+  expect(new Set(paths.map((path) => path.d)).size).toBe(edgeKeys.length)
+  for (const source of ["review_keep_in_scope", "review_group_deferred"]) {
+    const startPorts = paths
+      .filter((path) => path.source === source)
+      .map((path) => Math.round(path.startX * 10) / 10)
+    expect(new Set(startPorts).size).toBe(startPorts.length)
+  }
 }
 
 async function expectTerminalBranchReleased(
@@ -3712,6 +3756,13 @@ async function expectFlowConnectorContract(
         }
         if (!edge.loop && !path.getAttribute("d")) {
           issues.push(`${edge.key}: forward edge has no measured path`)
+        }
+        if (
+          !edge.loop &&
+          path.dataset.flowShape !== "curve" &&
+          path.dataset.flowShape !== "orthogonal"
+        ) {
+          issues.push(`${edge.key}: forward edge has no route shape`)
         }
         if (!edge.loop) {
           const hasArrow = path.hasAttribute("marker-end")
@@ -4137,6 +4188,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await expectForwardPathsAvoidNodeCards(gateMap, "review")
     await expectBranchLabelsDoNotOverlap(gateMap, "review")
     if (width === 1280) {
+      await expectReviewForkUsesDistinctCurves(gateMap)
       await expectTerminalBranchReleased(
         gateMap,
         "review_select_implementation_findings",
@@ -4268,6 +4320,27 @@ test("unified pull request workspace combines review, implementation, nudges, an
   )
   await expect(lockedSafeguard).toBeVisible()
   await expect(lockedSafeguard).toHaveAttribute("role", "group")
+  await expect(lockedSafeguard).toHaveAttribute(
+    "data-flow-element",
+    "locked-safeguard",
+  )
+  const elementTreatments = await implementationFlow.evaluate((flow) => {
+    const selectors = [
+      '[data-flow-element="action"]',
+      '[data-flow-element="editable-gate"]',
+      '[data-flow-element="locked-safeguard"]',
+    ]
+    return selectors.map((selector) => {
+      const element = flow.querySelector<HTMLElement>(selector)!
+      const style = window.getComputedStyle(element)
+      return [
+        style.backgroundColor,
+        style.borderTopColor,
+        style.borderTopWidth,
+      ].join("|")
+    })
+  })
+  expect(new Set(elementTreatments).size).toBe(3)
   expect(
     await lockedSafeguard.evaluate(
       (safeguard) =>
@@ -4306,7 +4379,17 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expectNoSeriousA11yViolations(page)
   await reviewFlowTab.click()
   await expect(reviewFlowTab).toHaveAttribute("aria-selected", "true")
-  await gateMap.getByRole("button", { name: "Accept review results" }).click()
+  const acceptReviewResults = gateMap.getByRole("button", {
+    name: "Accept review results",
+  })
+  const acceptReviewResultsBox = await acceptReviewResults.boundingBox()
+  expect(acceptReviewResultsBox).not.toBeNull()
+  await acceptReviewResults.click({
+    position: {
+      x: acceptReviewResultsBox!.width - 10,
+      y: acceptReviewResultsBox!.height - 10,
+    },
+  })
   await expect(page).toHaveURL(
     /\/pull-requests\?view=gate-profiles&profile=default&gate=pr\.review\.complete$/,
   )

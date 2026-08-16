@@ -82,7 +82,11 @@ only the nodes present in an active topological band, so a completed route does
 not reserve an empty column in later bands. Responsive measured connectors keep
 the exact source, target, branch label, loop, and merge relationships visible as
 those bands reflow, while gate nodes remain keyboard-operable controls that open
-the gate editor dialog.
+the gate editor dialog. Plain compact cards represent actions without a repeated
+type label; editable gates are full-card controls labeled by gate format, and
+locked safeguards retain a distinct non-interactive treatment. Adjacent branch
+families use separate curved ports so unrelated routes do not form false visual
+junctions.
 
 ## Surface Ownership
 
