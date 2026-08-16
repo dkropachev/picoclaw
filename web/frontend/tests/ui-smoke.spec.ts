@@ -3135,6 +3135,9 @@ async function expectActiveGateFlowContract(
     const semanticEdges = Array.from(
       flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
     )
+    const flowNodes = Array.from(
+      flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+    )
     const launchLabels = Array.from(
       flow.querySelectorAll<HTMLElement>("[data-flow-launch-label]"),
     )
@@ -3173,14 +3176,25 @@ async function expectActiveGateFlowContract(
           return words.length < 1 || words.length > 2
         })
         .map((label) => label.textContent?.trim() ?? "launch"),
-      duplicatedTargetLabels: Array.from(
-        flow.querySelectorAll<HTMLElement>(
-          [
-            "[data-flow-target-connector] [data-flow-launch-label]",
-            "[data-flow-target-connector] [data-flow-branch-label]",
-          ].join(","),
+      flowNodeIDs: flowNodes.map((node) => node.dataset.flowNodeId ?? ""),
+      invalidConnectorMarkers: Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-target-connector]"),
+      )
+        .filter((connector) => {
+          const arrows = (connector.textContent?.match(/↓/g) ?? []).length
+          if (connector.dataset.flowMerge === "true") {
+            return (
+              arrows !== 0 ||
+              connector.querySelector("[data-flow-merge-label]") == null ||
+              !connector.textContent?.includes("◆")
+            )
+          }
+          return arrows !== 1
+        })
+        .map(
+          (connector) =>
+            connector.dataset.flowTargetConnector ?? "target connector",
         ),
-      ).map((label) => label.textContent?.trim() ?? "duplicated label"),
     }
   })
 
@@ -3195,7 +3209,10 @@ async function expectActiveGateFlowContract(
   expect(contract.invalidEditableGates).toEqual([])
   expect(contract.visibleSemanticEdges).toEqual([])
   expect(contract.invalidLaunchLabels).toEqual([])
-  expect(contract.duplicatedTargetLabels).toEqual([])
+  expect(contract.invalidConnectorMarkers).toEqual([])
+  expect(contract.flowNodeIDs.sort()).toEqual(
+    expectedFlow!.nodes.map((node) => node.id).sort(),
+  )
 
   const renderedEdges = await panel
     .locator("[data-flow-edge]")
@@ -3299,11 +3316,126 @@ async function expectGeneratedBranchLabels(
   labels: string[],
 ) {
   const renderedLabels = await gateMap
-    .locator(`[data-flow-launches="${sourceID}"] [data-flow-launch-label]`)
-    .allTextContents()
+    .locator("[data-flow-launch-label]")
+    .evaluateAll(
+      (labels, source) =>
+        labels.flatMap((label) =>
+          label.closest<HTMLElement>("[data-flow-launches]")?.dataset
+            .flowLaunches === source
+            ? [label.textContent ?? ""]
+            : [],
+        ),
+      sourceID,
+    )
   expect(renderedLabels.map((label) => label.trim()).sort()).toEqual(
     [...labels].sort(),
   )
+}
+
+async function expectBranchOwnership(
+  gateMap: Locator,
+  sourceID: string,
+  targetID: string,
+  expected: {
+    contains?: string[]
+    excludes?: string[]
+    reference?: boolean
+  },
+) {
+  const lane = gateMap.locator(
+    `[data-flow-branch-lane][data-flow-branch-source="${sourceID}"][data-flow-branch-target="${targetID}"]`,
+  )
+  await expect(lane).toHaveCount(1)
+  for (const nodeID of expected.contains ?? []) {
+    await expect(lane.locator(`[data-flow-node-id="${nodeID}"]`)).toHaveCount(1)
+  }
+  for (const nodeID of expected.excludes ?? []) {
+    await expect(lane.locator(`[data-flow-node-id="${nodeID}"]`)).toHaveCount(0)
+  }
+  if (expected.reference !== undefined) {
+    await expect(
+      lane.locator(`[data-flow-reference="${targetID}"]`),
+    ).toHaveCount(expected.reference ? 1 : 0)
+  }
+}
+
+async function expectBranchDescendantsFitTheirLane(gateMap: Locator) {
+  const issues = await gateMap
+    .locator("[data-flow-branch-lane]")
+    .evaluateAll((lanes) => {
+      const tolerance = 1
+      return lanes.flatMap((lane) => {
+        const laneRect = lane.getBoundingClientRect()
+        return Array.from(
+          lane.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+        ).flatMap((node) => {
+          const nodeRect = node.getBoundingClientRect()
+          return nodeRect.left < laneRect.left - tolerance ||
+            nodeRect.right > laneRect.right + tolerance
+            ? [
+                `${(lane as HTMLElement).dataset.flowBranchSource}:${
+                  (lane as HTMLElement).dataset.flowBranchTarget
+                } leaks ${node.dataset.flowNodeId}`,
+              ]
+            : []
+        })
+      })
+    })
+  expect(issues).toEqual([])
+}
+
+async function expectSingleBranchGrid(
+  gateMap: Locator,
+  sourceID: string,
+  targetIDs: string[],
+) {
+  const grid = gateMap.locator(`[data-flow-branch-group="${sourceID}"]`)
+  await expect(grid).toHaveCount(1)
+  const actualTargets = await grid.evaluate((branchGrid) =>
+    Array.from(branchGrid.children).flatMap((child) => {
+      const lane = child as HTMLElement
+      return lane.dataset.flowBranchSource ===
+        (branchGrid as HTMLElement).dataset.flowBranchGroup
+        ? [lane.dataset.flowBranchTarget ?? ""]
+        : []
+    }),
+  )
+  expect(actualTargets).toEqual(targetIDs)
+}
+
+async function expectBranchGridSharesFirstRow(
+  gateMap: Locator,
+  sourceID: string,
+) {
+  const tops = await gateMap
+    .locator(`[data-flow-branch-group="${sourceID}"]`)
+    .evaluate((branchGrid) =>
+      Array.from(branchGrid.children).map(
+        (child) => child.getBoundingClientRect().top,
+      ),
+    )
+  expect(new Set(tops.map((top) => Math.round(top))).size).toBe(1)
+}
+
+async function expectSharedContinuationsShareLevel(
+  gateMap: Locator,
+  sourceID: string,
+  targetIDs: string[],
+) {
+  const levels = await Promise.all(
+    targetIDs.map((targetID) =>
+      gateMap
+        .locator(
+          `[data-flow-shared-continuations="${sourceID}"] [data-flow-shared-continuation="${targetID}"]`,
+        )
+        .evaluate(
+          (continuation) =>
+            continuation.closest<HTMLElement>("[data-flow-shared-level]")
+              ?.dataset.flowSharedLevel ?? "missing",
+        ),
+    ),
+  )
+  expect(new Set(levels).size).toBe(1)
 }
 
 async function expectFlowConnectorContract(
@@ -3334,11 +3466,6 @@ async function expectFlowConnectorContract(
     source: edges.length === 1 ? edges[0].from : undefined,
     target,
   }))
-  const singletonForwardSpecs = expectedFlow.edges
-    .filter(
-      (edge) => !edge.loop && (outgoing.get(edge.from) ?? []).length === 1,
-    )
-    .map((edge) => ({ source: edge.from, target: edge.to }))
   const launchSpecs = expectedFlow.edges
     .filter((edge) => (outgoing.get(edge.from) ?? []).length > 1)
     .map((edge) => ({
@@ -3379,6 +3506,9 @@ async function expectFlowConnectorContract(
       const issues: string[] = []
       const semanticEdges = Array.from(
         flow.querySelectorAll<HTMLElement>("[data-flow-edge]"),
+      )
+      const visibleEdges = Array.from(
+        flow.querySelectorAll<HTMLElement>("[data-flow-visible-edge-key]"),
       )
       const targetConnectors = Array.from(
         flow.querySelectorAll<HTMLElement>("[data-flow-target-connector]"),
@@ -3439,8 +3569,24 @@ async function expectFlowConnectorContract(
         ) {
           issues.push(`${spec.target}: merge state is incorrect`)
         }
-        if ((connector.textContent?.match(/↓/g) ?? []).length !== 1) {
-          issues.push(`${spec.target}: connector must render exactly one arrow`)
+        const arrows = (connector.textContent?.match(/↓/g) ?? []).length
+        if (
+          (spec.merge &&
+            (arrows !== 0 ||
+              !connector.textContent?.includes(
+                `${spec.incoming} paths merge`,
+              ) ||
+              !connector.textContent?.includes("◆"))) ||
+          (!spec.merge && arrows !== 1)
+        ) {
+          issues.push(`${spec.target}: connector marker is incorrect`)
+        }
+        if (
+          spec.merge &&
+          connector.dataset.flowMergeContributors !==
+            expected.incomingSources[spec.target]?.join(" ")
+        ) {
+          issues.push(`${spec.target}: merge contributors are incorrect`)
         }
         if (
           spec.incoming === 1 &&
@@ -3459,13 +3605,6 @@ async function expectFlowConnectorContract(
             ).borderLeftStyle !== "dashed")
         ) {
           issues.push(`${spec.target}: optional connector is not distinct`)
-        }
-        if (
-          connector.querySelector(
-            "[data-flow-launch-label], [data-flow-branch-label]",
-          )
-        ) {
-          issues.push(`${spec.target}: connector duplicates a branch label`)
         }
       }
 
@@ -3541,7 +3680,8 @@ async function expectFlowConnectorContract(
           continue
         }
         const launch = matches[0]
-        const sourceCell = launch.closest<HTMLElement>("[data-flow-cell]")
+        const launchGroup = launch.closest<HTMLElement>("[data-flow-launches]")
+        const sourceCell = launchGroup?.closest<HTMLElement>("[data-flow-cell]")
         if (sourceCell?.dataset.flowCell !== spec.source) {
           issues.push(`${spec.key}: launch is not attached to its source cell`)
         }
@@ -3576,17 +3716,26 @@ async function expectFlowConnectorContract(
         const targetTitle = launch
           .querySelector<HTMLElement>("[data-flow-launch-target-title]")
           ?.textContent?.trim()
-        const routeGroup = launch.closest<HTMLElement>(
-          "[data-flow-route-group][data-flow-route-mode]",
-        )
         if (
           label !== spec.label ||
-          targetTitle !== spec.targetTitle ||
           launch.dataset.flowLaunchTarget !== spec.target ||
-          routeGroup?.dataset.flowRouteMode !== spec.mode ||
-          !launch.textContent?.includes(spec.loop ? "↺" : "→")
+          launch.dataset.flowRouteMode !== spec.mode ||
+          !launch.textContent?.includes(spec.loop ? "↺" : "↓")
         ) {
           issues.push(`${spec.key}: launch clue or route mode is incomplete`)
+        }
+        if (spec.loop && targetTitle !== spec.targetTitle) {
+          issues.push(`${spec.key}: loop target title is incomplete`)
+        } else if (!spec.loop) {
+          const directTarget = launch.hasAttribute("data-flow-target-connector")
+          if (
+            (directTarget &&
+              launch.closest<HTMLElement>("[data-flow-cell]")?.dataset
+                .flowCell !== spec.target) ||
+            (!directTarget && !targetTitle?.endsWith(spec.targetTitle))
+          ) {
+            issues.push(`${spec.key}: launch target is not owned or named`)
+          }
         }
       }
 
@@ -3598,21 +3747,16 @@ async function expectFlowConnectorContract(
         issues.push("continuation rails must not be rendered")
       }
 
-      for (const spec of expected.singletonForwards) {
-        const sourceRank = Number(
-          flow
-            .querySelector(`[data-flow-node-id="${spec.source}"]`)
-            ?.closest<HTMLElement>("[data-flow-rank]")?.dataset.flowRank,
+      if (flow.querySelector("[data-flow-rank], [data-flow-placeholder]")) {
+        issues.push("rank placeholders must not be rendered")
+      }
+
+      for (const edgeKey of expected.edgeKeys) {
+        const markers = visibleEdges.filter(
+          (edge) => edge.dataset.flowVisibleEdgeKey === edgeKey,
         )
-        const targetRank = Number(
-          flow
-            .querySelector(`[data-flow-node-id="${spec.target}"]`)
-            ?.closest<HTMLElement>("[data-flow-rank]")?.dataset.flowRank,
-        )
-        if (targetRank !== sourceRank + 1) {
-          issues.push(
-            `${spec.source}:${spec.target}: singleton path skips a visible rank`,
-          )
+        if (markers.length !== 1) {
+          issues.push(`${edgeKey}: expected one visible edge marker`)
         }
       }
 
@@ -3624,9 +3768,15 @@ async function expectFlowConnectorContract(
       }
     },
     {
+      edgeKeys: expectedFlow.edges.map((edge) => `${edge.from}:${edge.to}`),
+      incomingSources: Object.fromEntries(
+        [...incoming.entries()].map(([target, edges]) => [
+          target,
+          edges.map((edge) => edge.from),
+        ]),
+      ),
       launches: launchSpecs,
       loops: loopSpecs,
-      singletonForwards: singletonForwardSpecs,
       targets: targetSpecs,
     },
   )
@@ -3654,8 +3804,9 @@ async function expectMergedTarget(
     String(incomingCount),
   )
   await expect(connector).toHaveAttribute("data-flow-merge", "true")
-  expect(await connector.textContent()).toMatch(/↓/)
-  expect((await connector.textContent())?.match(/↓/g)).toHaveLength(1)
+  await expect(connector).toContainText(`${incomingCount} paths merge`)
+  await expect(connector).toContainText("◆")
+  expect((await connector.textContent())?.match(/↓/g) ?? []).toHaveLength(0)
   await expect(
     connector.locator("[data-flow-launch-label], [data-flow-branch-label]"),
   ).toHaveCount(0)
@@ -3666,20 +3817,28 @@ async function expectBranchLaunchTargets(
   sourceID: string,
   expected: Array<{ label: string; target: string }>,
 ) {
-  const actual = await gateMap
-    .locator(`[data-flow-launches="${sourceID}"] [data-flow-launch]`)
-    .evaluateAll((launches) =>
-      launches.map((launch) => {
+  const actual = await gateMap.locator("[data-flow-launch]").evaluateAll(
+    (launches, source) =>
+      launches.flatMap((launch) => {
         const item = launch as HTMLElement
-        return {
-          label:
-            item
-              .querySelector<HTMLElement>("[data-flow-launch-label]")
-              ?.textContent?.trim() ?? "",
-          target: item.dataset.flowLaunchTarget ?? "",
+        if (
+          item.closest<HTMLElement>("[data-flow-launches]")?.dataset
+            .flowLaunches !== source
+        ) {
+          return []
         }
+        return [
+          {
+            label:
+              item
+                .querySelector<HTMLElement>("[data-flow-launch-label]")
+                ?.textContent?.trim() ?? "",
+            target: item.dataset.flowLaunchTarget ?? "",
+          },
+        ]
       }),
-    )
+    sourceID,
+  )
   expect(actual).toEqual(expected)
 }
 
@@ -3949,6 +4108,11 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "No findings",
     "Correction",
   ])
+  await expectSingleBranchGrid(gateMap, "review_process_result", [
+    "review_assess_scope",
+    "review_finish",
+    "review_record_correction",
+  ])
   await expectGeneratedBranchLabels(gateMap, "review_assess_scope", [
     "Clear",
     "Ambiguous",
@@ -3967,6 +4131,70 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Link existing",
     "Create",
   ])
+  await expectBranchOwnership(
+    gateMap,
+    "review_process_result",
+    "review_assess_scope",
+    {
+      contains: ["review_assess_scope", "review_route_classified"],
+      excludes: ["review_record_correction", "review_save_guidance"],
+    },
+  )
+  await expectBranchOwnership(
+    gateMap,
+    "review_process_result",
+    "review_record_correction",
+    {
+      contains: [
+        "review_record_correction",
+        "review_gate_correction_promote",
+        "review_save_guidance",
+      ],
+      excludes: ["review_assess_scope", "review_route_classified"],
+    },
+  )
+  await expectBranchOwnership(
+    gateMap,
+    "review_route_classified",
+    "review_keep_in_scope",
+    {
+      contains: [
+        "review_keep_in_scope",
+        "review_select_review_findings",
+        "review_select_implementation_findings",
+      ],
+      excludes: [
+        "review_group_deferred",
+        "review_dismiss_finding",
+        "review_revise_charter",
+      ],
+    },
+  )
+  await expectBranchOwnership(
+    gateMap,
+    "review_route_classified",
+    "review_group_deferred",
+    {
+      contains: [
+        "review_group_deferred",
+        "review_link_followup_issue",
+        "review_gate_deferred_publish",
+      ],
+      excludes: [
+        "review_select_review_findings",
+        "review_select_implementation_findings",
+      ],
+    },
+  )
+  await expectBranchOwnership(
+    gateMap,
+    "review_route_classified",
+    "review_dismiss_finding",
+    {
+      contains: ["review_dismiss_finding"],
+      excludes: ["review_select_review_findings", "review_link_followup_issue"],
+    },
+  )
   await expectGeneratedBranchLabels(gateMap, "review_publish_github", [
     "Confirmed",
     "Unknown",
@@ -3980,6 +4208,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     target: "review_gate_reconcile",
     targetTitle: "Return to Resolve unknown publication",
   })
+  await expectBranchDescendantsFitTheirLane(gateMap)
   await expectGateMapFits(gateMap)
 
   for (const width of [390, 768, 1024, 1280, 1536, 1920, 320]) {
@@ -3987,6 +4216,10 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await expectGateMapFits(gateMap)
     if (width === 1280 || width === 320) {
       await expectFlowConnectorContract(gateMap, "review")
+      await expectBranchDescendantsFitTheirLane(gateMap)
+      if (width === 1280) {
+        await expectBranchGridSharesFirstRow(gateMap, "review_process_result")
+      }
       await expectNoSeriousA11yViolations(page)
     }
     await expectNoHorizontalOverflow(page)
@@ -4015,6 +4248,34 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Non-owned",
     "Read-only",
   ])
+  await expectBranchOwnership(
+    gateMap,
+    "implementation_check_ownership",
+    "implementation_gate_start",
+    {
+      excludes: ["implementation_gate_eligibility", "implementation_stop"],
+      reference: true,
+    },
+  )
+  await expectBranchOwnership(
+    gateMap,
+    "implementation_check_ownership",
+    "implementation_gate_eligibility",
+    {
+      contains: ["implementation_gate_eligibility"],
+      excludes: ["implementation_gate_start", "implementation_stop"],
+      reference: false,
+    },
+  )
+  await expectBranchOwnership(
+    gateMap,
+    "implementation_check_ownership",
+    "implementation_stop",
+    {
+      excludes: ["implementation_gate_start", "implementation_stop"],
+      reference: true,
+    },
+  )
   await expectGeneratedBranchLabels(gateMap, "implementation_scope_audit", [
     "Safe path",
     "Hard stop",
@@ -4030,6 +4291,10 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "implementation_completion_audit",
     ["Candidate", "Deferred"],
   )
+  await expectSingleBranchGrid(gateMap, "implementation_completion_audit", [
+    "implementation_route_completion",
+    "implementation_group_deferred",
+  ])
   await expectGeneratedBranchLabels(
     gateMap,
     "implementation_route_completion",
@@ -4049,6 +4314,10 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Confirmed",
     "Unknown",
     "Failed",
+  ])
+  await expectSharedContinuationsShareLevel(gateMap, "implementation_push", [
+    "implementation_result",
+    "implementation_retry_publication",
   ])
   await expectGeneratedBranchLabels(gateMap, "implementation_result", [
     "Done",
@@ -4080,6 +4349,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     target: "implementation_run_ai",
     targetTitle: "Return to Implement selected fixes",
   })
+  await expectBranchDescendantsFitTheirLane(gateMap)
   expect(renderedGateInstances.every((gate) => gate.name.length > 0)).toBe(true)
   const expectedDecisionPoints = [
     ...new Set(
@@ -4127,6 +4397,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await expectGateMapFits(gateMap)
     if (width === 1280 || width === 320) {
       await expectFlowConnectorContract(gateMap, "implementation")
+      await expectBranchDescendantsFitTheirLane(gateMap)
       await expectNoSeriousA11yViolations(page)
     }
     await expectNoHorizontalOverflow(page)
