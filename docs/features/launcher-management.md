@@ -93,7 +93,17 @@ an exterior gutter to the earlier target, rather than detached return callouts;
 an explicit branch label stays on the rail, while an unlabeled return adds no
 visible text. Return rails are remeasured with the responsive bands, preserve
 their workflow edge mode, and expose one semantic "returns to" relationship to
-assistive technology without duplicating the visual connector.
+assistive technology without duplicating the visual connector. The map uses
+theme-aware semantic colors across every element: actions and each gate format
+have distinct tinted surfaces and borders; safeguards retain a warning color;
+linear, choice, parallel, optional, return, and merge connectors color their
+paths, arrowheads, labels, and legend samples consistently. Text labels, border
+weights, dash patterns, and return geometry remain the authoritative cues, so
+color reinforces rather than replaces the workflow semantics. Actions are blue;
+automatic, deterministic, AI, user, mixed, and needs-setup gates use green,
+cyan, violet, amber, fuchsia, and rose respectively; locked safeguards stay
+red. Linear, choice, parallel, optional, return, and merge routes use blue,
+indigo, green, amber, rose, and cyan.
 
 ## Surface Ownership
 
