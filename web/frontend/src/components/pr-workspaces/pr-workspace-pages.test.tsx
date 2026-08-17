@@ -36,6 +36,64 @@ import { PRWorkspacePage } from "@/components/pr-workspaces/pr-workspace-page"
 import { PRWorkspacePortfolioPage } from "@/components/pr-workspaces/pr-workspace-portfolio-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
 
+const mockedNavigationBlocker = vi.hoisted(() => ({
+  current: {
+    status: "idle" as "idle" | "blocked",
+    current: undefined,
+    next: undefined,
+    action: undefined,
+    proceed: undefined as (() => void) | undefined,
+    reset: undefined as (() => void) | undefined,
+  },
+}))
+
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@tanstack/react-router")>()
+  return {
+    ...original,
+    useBlocker: vi.fn(() => mockedNavigationBlocker.current),
+    useRouter: vi.fn(() => ({
+      navigate: vi.fn(),
+      history: {
+        location: {
+          href: "/pull-requests/settings",
+          state: {
+            key: "test-entry",
+            __TSR_key: "test-entry",
+            __TSR_index: 0,
+          },
+        },
+        replace: vi.fn(),
+        subscribe: vi.fn(() => vi.fn()),
+      },
+    })),
+  }
+})
+
+function setMockNavigationIdle() {
+  mockedNavigationBlocker.current = {
+    status: "idle",
+    current: undefined,
+    next: undefined,
+    action: undefined,
+    proceed: undefined,
+    reset: undefined,
+  }
+}
+
+function setMockNavigationBlocked() {
+  const release = () => setMockNavigationIdle()
+  mockedNavigationBlocker.current = {
+    status: "blocked",
+    current: undefined,
+    next: undefined,
+    action: undefined,
+    proceed: release,
+    reset: release,
+  }
+}
+
 vi.mock("@/api/pr-workspaces", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/api/pr-workspaces")>()
   return {
@@ -402,10 +460,13 @@ const mockedRespondGate = vi.mocked(respondPRWorkspaceGate)
 const mockedGetGateProfiles = vi.mocked(getPRLifecycleGateProfiles)
 const mockedPutGateProfiles = vi.mocked(putPRLifecycleGateProfiles)
 
-function renderPage(node: ReactNode) {
-  const client = new QueryClient({
+function createTestQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
+}
+
+function renderPage(node: ReactNode, client = createTestQueryClient()) {
   return Object.assign(
     render(
       <QueryClientProvider client={client}>
@@ -441,6 +502,7 @@ describe("unified PR workspace pages", () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    setMockNavigationIdle()
     mockedList.mockResolvedValue({
       workspaces: [aggregate.workspace],
     })
@@ -2826,9 +2888,19 @@ describe("unified PR workspace pages", () => {
     ).toBeVisible()
   })
 
-  it("keeps the profile list separate from the selected profile editor", async () => {
+  it("keeps the profiles page list-only and delegates profile navigation", async () => {
     const user = userEvent.setup()
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
+    const onOpenSettings = vi.fn()
+    const onProfileChange = vi.fn()
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        page="profiles"
+        onOpenProfiles={vi.fn()}
+        onOpenSettings={onOpenSettings}
+        onProfileChange={onProfileChange}
+      />,
+    )
 
     expect(
       await screen.findByRole("heading", {
@@ -2838,20 +2910,23 @@ describe("unified PR workspace pages", () => {
     expect(
       screen.getByRole("heading", { level: 2, name: "Profiles" }),
     ).toBeVisible()
-    expect(
-      screen.getByRole("heading", {
-        level: 2,
-        name: "Nudge and scope defaults",
-      }),
-    ).toBeVisible()
     expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
       "data-profile-view",
-      "list",
+      "profiles",
     )
     expect(screen.getByText("1 configured gate · 0 repositories")).toBeVisible()
-    expect(screen.getByText("Review minimum")).toBeVisible()
-    expect(screen.getByText("Deferred issue handling")).toBeVisible()
-    expect(screen.getByText("XS modules")).toBeVisible()
+    expect(screen.getByRole("button", { name: "Profiles" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    )
+    expect(
+      screen.getByRole("button", { name: "Lifecycle settings" }),
+    ).not.toHaveAttribute("aria-current")
+    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
+    expect(
+      screen.queryByText("Deferred issue handling"),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText("XS modules")).not.toBeInTheDocument()
     expect(
       screen.queryByRole("heading", { name: "PR lifecycle gate flow" }),
     ).not.toBeInTheDocument()
@@ -2882,44 +2957,76 @@ describe("unified PR workspace pages", () => {
     await user.clear(profileID)
     await user.clear(profileName)
 
-    const minimum = screen.getAllByRole("spinbutton")[0]
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    await user.click(screen.getByRole("button", { name: "Save profiles" }))
-    await waitFor(() =>
-      expect(mockedPutGateProfiles).toHaveBeenCalledWith(
-        expect.objectContaining({
-          expected_config_revision: "sha256:config",
-          gate_profiles: gateProfiles.gate_profiles,
-          nudge: expect.objectContaining({ review_minimum_additional: 3 }),
-          scope: gateProfiles.scope,
-          deferred_issues: { mode: "ask" },
-        }),
-      ),
-    )
-
     await user.click(
       screen.getByRole("button", { name: "Edit Default profile" }),
     )
+    expect(onProfileChange).toHaveBeenLastCalledWith("default")
+    expect(screen.getByRole("heading", { name: "Profiles" })).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "Lifecycle settings" }))
+    expect(onOpenSettings).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
+  })
+
+  it("shows one lifecycle-settings tab at a time and reports tab navigation", async () => {
+    const user = userEvent.setup()
+    const onOpenProfiles = vi.fn()
+    const onSettingsTabChange = vi.fn()
+
+    function SettingsHarness() {
+      const [tab, setTab] = useState<"nudging" | "scope" | "deferred">(
+        "nudging",
+      )
+      return (
+        <PRLifecycleGateProfilesPage
+          onBack={vi.fn()}
+          page="settings"
+          settingsTab={tab}
+          onOpenProfiles={onOpenProfiles}
+          onOpenSettings={vi.fn()}
+          onSettingsTabChange={(next) => {
+            onSettingsTabChange(next)
+            setTab(next)
+          }}
+        />
+      )
+    }
+
+    renderPage(<SettingsHarness />)
+
     expect(
-      screen.getByRole("heading", { name: "Edit Default gate profile" }),
+      await screen.findByRole("heading", { name: "Lifecycle settings" }),
     ).toBeVisible()
     expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
       "data-profile-view",
-      "editor",
+      "settings",
     )
+    expect(screen.getByText("Review minimum")).toBeVisible()
+    expect(screen.getByText("Completion maximum")).toBeVisible()
+    expect(screen.queryByText("XS files")).not.toBeInTheDocument()
     expect(
-      screen.getByRole("heading", { name: "PR lifecycle gate flow" }),
-    ).toBeVisible()
-    expect(
-      screen.getByPlaceholderText("https://github.com|repository-id"),
-    ).toBeVisible()
-    expect(
-      screen.queryByRole("heading", { name: "Nudge and scope defaults" }),
+      screen.queryByText("Deferred issue handling"),
     ).not.toBeInTheDocument()
+    expect(screen.queryByRole("heading", { name: "Profiles" })).toBeNull()
+
+    screen.getByRole("tab", { name: "Nudging" }).focus()
+    await user.keyboard("{ArrowRight}")
+    expect(onSettingsTabChange).toHaveBeenLastCalledWith("scope")
+    expect(screen.getByText("XS files")).toBeVisible()
+    expect(screen.getByText("M modules")).toBeVisible()
+    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
     expect(
-      document.querySelector("#pr-gate-workflow-editor"),
+      screen.queryByText("Deferred issue handling"),
     ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("tab", { name: "Deferred issues" }))
+    expect(onSettingsTabChange).toHaveBeenLastCalledWith("deferred")
+    expect(screen.getByText("Deferred issue handling")).toBeVisible()
+    expect(screen.queryByText("XS files")).not.toBeInTheDocument()
+    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Profiles" }))
+    expect(onOpenProfiles).toHaveBeenCalledTimes(1)
   })
 
   it("opens gate details only in a dialog and reports when it closes", async () => {
@@ -2980,6 +3087,81 @@ describe("unified PR workspace pages", () => {
     expect(trigger).not.toHaveAttribute("aria-pressed")
   })
 
+  it("keeps profile flow and gate modal navigation route-controlled", async () => {
+    const user = userEvent.setup()
+    const onProfileChange = vi.fn()
+    const onDecisionPointChange = vi.fn()
+    const onFlowChange = vi.fn()
+    const onDiscardOpenChange = vi.fn()
+
+    function ControlledEditorHarness() {
+      const [profileID, setProfileID] = useState<string | undefined>("default")
+      const [decisionPoint, setDecisionPoint] =
+        useState<PRLifecycleDecisionPoint>()
+      const [flowID, setFlowID] = useState<"review" | "implementation">(
+        "review",
+      )
+      const [discardOpen, setDiscardOpen] = useState(false)
+      return (
+        <PRLifecycleGateProfilesPage
+          onBack={vi.fn()}
+          page="profile"
+          initialProfileID={profileID}
+          initialDecisionPoint={decisionPoint}
+          activeFlowID={flowID}
+          discardOpen={discardOpen}
+          onProfileChange={(next) => {
+            onProfileChange(next)
+            setProfileID(next)
+          }}
+          onDecisionPointChange={(next) => {
+            onDecisionPointChange(next)
+            setDecisionPoint(next)
+          }}
+          onFlowChange={(next) => {
+            onFlowChange(next)
+            setFlowID(next)
+          }}
+          onDiscardOpenChange={(open) => {
+            onDiscardOpenChange(open)
+            setDiscardOpen(open)
+          }}
+        />
+      )
+    }
+
+    renderPage(<ControlledEditorHarness />)
+
+    expect(
+      await screen.findByRole("heading", { name: "Edit Default gate profile" }),
+    ).toBeVisible()
+    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
+      "data-profile-view",
+      "profile",
+    )
+    await user.click(
+      screen.getByRole("tab", { name: /^Implementation workflow/ }),
+    )
+    expect(onFlowChange).toHaveBeenLastCalledWith("implementation")
+    expect(
+      screen.getByRole("tab", { name: /^Implementation workflow/ }),
+    ).toHaveAttribute("aria-selected", "true")
+
+    await user.click(screen.getByRole("tab", { name: /^Review workflow/ }))
+    await user.click(
+      screen.getByRole("button", { name: "Accept review results" }),
+    )
+    expect(onDecisionPointChange).toHaveBeenLastCalledWith("pr.review.complete")
+    const dialog = screen.getByRole("dialog", {
+      name: "Accept review results",
+    })
+    const workflowName = within(dialog).getByLabelText("Workflow name")
+    await user.clear(workflowName)
+    await user.type(workflowName, "Route-controlled review completion")
+    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+    expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined)
+  })
+
   it("returns dialog focus to the exact repeated gate trigger", async () => {
     const user = userEvent.setup()
     const repeatedGateProfiles = structuredClone(gateProfiles)
@@ -3029,7 +3211,7 @@ describe("unified PR workspace pages", () => {
           resolveSave = resolve
         }),
     )
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
+    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />)
 
     const minimum = (await screen.findAllByRole("spinbutton"))[0]
     await user.clear(minimum)
@@ -3097,7 +3279,7 @@ describe("unified PR workspace pages", () => {
     })
     expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
       "data-profile-view",
-      "editor",
+      "profile",
     )
     expect(within(dialog).getByText(/Alternate ·/)).toBeVisible()
     expect(
@@ -3108,6 +3290,39 @@ describe("unified PR workspace pages", () => {
       "pr.review.complete",
     )
     expect(onDecisionPointChange).not.toHaveBeenCalled()
+  })
+
+  it("uses the URL-selected flow for shared gate modal metadata", async () => {
+    const shared = structuredClone(gateProfiles)
+    shared.flow.flows[1].nodes.push({
+      id: "implementation_deferred_publish",
+      kind: "gate",
+      title: "Approve implementation follow-up",
+      description: "Approve deferred work found during implementation.",
+      decision_point: "pr.deferred.publish",
+      ordinal: 12,
+      editable: true,
+    })
+    mockedGetGateProfiles.mockResolvedValue(shared)
+
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        activeFlowID="implementation"
+        initialDecisionPoint="pr.deferred.publish"
+        initialProfileID="default"
+        onBack={vi.fn()}
+        onDecisionPointChange={vi.fn()}
+        onFlowChange={vi.fn()}
+        onProfileChange={vi.fn()}
+        page="profile"
+      />,
+    )
+
+    expect(
+      await screen.findByRole("dialog", {
+        name: "Approve implementation follow-up",
+      }),
+    ).toBeVisible()
   })
 
   it("returns deep-linked dialog focus to its declared gate", async () => {
@@ -3191,10 +3406,59 @@ describe("unified PR workspace pages", () => {
     expect(document.querySelector("#pr-gate-workflow-editor")).toBeNull()
   })
 
-  it("confirms before discarding an in-app gate-profile draft", async () => {
+  it("resets a dirty draft through the controlled discard modal", async () => {
+    const user = userEvent.setup()
+    const onDiscardOpenChange = vi.fn()
+    function DiscardHarness() {
+      const [open, setOpen] = useState(false)
+      return (
+        <>
+          <PRLifecycleGateProfilesPage
+            discardOpen={open}
+            onBack={vi.fn()}
+            onDiscardOpenChange={(next) => {
+              onDiscardOpenChange(next)
+              setOpen(next)
+            }}
+            page="settings"
+          />
+          <button type="button" onClick={() => setOpen(true)}>
+            Open controlled discard
+          </button>
+        </>
+      )
+    }
+    renderPage(<DiscardHarness />)
+
+    const minimum = (await screen.findAllByRole("spinbutton"))[0]
+    await user.clear(minimum)
+    await user.type(minimum, "3")
+    setMockNavigationBlocked()
+    await user.click(
+      screen.getByRole("button", { name: "Open controlled discard" }),
+    )
+
+    expect(
+      screen.getByRole("alertdialog", {
+        name: "Discard gate profile changes?",
+      }),
+    ).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Keep editing" }))
+    expect(minimum).toHaveValue(3)
+
+    setMockNavigationBlocked()
+    await user.click(
+      screen.getByRole("button", { name: "Open controlled discard" }),
+    )
+    await user.click(screen.getByRole("button", { name: "Discard changes" }))
+    expect(onDiscardOpenChange).toHaveBeenLastCalledWith(false)
+    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(2)
+  })
+
+  it("defers a dirty header exit until discard is confirmed", async () => {
     const user = userEvent.setup()
     const onBack = vi.fn()
-    renderPage(<PRLifecycleGateProfilesPage onBack={onBack} />)
+    renderPage(<PRLifecycleGateProfilesPage onBack={onBack} page="settings" />)
 
     const minimum = (await screen.findAllByRole("spinbutton"))[0]
     await user.clear(minimum)
@@ -3204,20 +3468,98 @@ describe("unified PR workspace pages", () => {
     )
 
     expect(onBack).not.toHaveBeenCalled()
-    expect(
-      screen.getByRole("alertdialog", {
-        name: "Discard gate profile changes?",
-      }),
-    ).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "Keep editing" }))
-    expect(minimum).toHaveValue(3)
+    const discard = screen.getByRole("alertdialog", {
+      name: "Discard gate profile changes?",
+    })
+    await user.click(
+      within(discard).getByRole("button", { name: "Keep editing" }),
+    )
     expect(onBack).not.toHaveBeenCalled()
 
     await user.click(
       screen.getByRole("button", { name: "Back to pull request work" }),
     )
+    const reopenedDiscard = screen.getByRole("alertdialog", {
+      name: "Discard gate profile changes?",
+    })
+    await user.click(
+      within(reopenedDiscard).getByRole("button", { name: "Discard changes" }),
+    )
+    expect(onBack).toHaveBeenCalledOnce()
+  })
+
+  it("caches an unsaved configuration draft across pages and clears it on discard", async () => {
+    const user = userEvent.setup()
+    const client = createTestQueryClient()
+    const first = renderPage(
+      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
+      client,
+    )
+
+    const minimum = (await screen.findAllByRole("spinbutton"))[0]
+    await user.clear(minimum)
+    await user.type(minimum, "3")
+    expect(minimum).toHaveValue(3)
+    first.unmount()
+
+    function CachedDiscardHarness() {
+      const [open, setOpen] = useState(false)
+      return (
+        <>
+          <PRLifecycleGateProfilesPage
+            discardOpen={open}
+            onBack={vi.fn()}
+            onDiscardOpenChange={setOpen}
+            page="settings"
+          />
+          <button type="button" onClick={() => setOpen(true)}>
+            Open cached discard
+          </button>
+        </>
+      )
+    }
+    const second = renderPage(<CachedDiscardHarness />, client)
+    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(3)
+
+    setMockNavigationBlocked()
+    await user.click(
+      screen.getByRole("button", { name: "Open cached discard" }),
+    )
     await user.click(screen.getByRole("button", { name: "Discard changes" }))
-    expect(onBack).toHaveBeenCalledTimes(1)
+    second.unmount()
+
+    renderPage(
+      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
+      client,
+    )
+    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(2)
+  })
+
+  it("refreshes a clean cached configuration from the server", async () => {
+    const client = createTestQueryClient()
+    const first = renderPage(
+      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
+      client,
+    )
+    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(2)
+    first.unmount()
+
+    mockedGetGateProfiles.mockResolvedValue({
+      ...gateProfiles,
+      config_revision: "sha256:new-config",
+      nudge: {
+        ...gateProfiles.nudge,
+        review_minimum_additional: 4,
+      },
+    })
+    renderPage(
+      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
+      client,
+    )
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("spinbutton")[0]).toHaveValue(4),
+    )
   })
 
   it("keeps a saved restart-required gate-profile effect visible", async () => {
@@ -3227,7 +3569,7 @@ describe("unified PR workspace pages", () => {
       config_revision: "sha256:restart-required",
       effects: { gateway_effect: "restart_required" },
     })
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
+    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />)
 
     const minimum = (await screen.findAllByRole("spinbutton"))[0]
     await user.clear(minimum)
@@ -3254,7 +3596,7 @@ describe("unified PR workspace pages", () => {
         ...gateProfiles,
         effects: { gateway_effect: "applied" },
       })
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} />)
+    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />)
 
     const minimum = (await screen.findAllByRole("spinbutton"))[0]
     expect(await screen.findByText("Gateway restart required")).toBeVisible()

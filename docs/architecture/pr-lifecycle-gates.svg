@@ -128,21 +128,21 @@
       <text x="369.0" y="712.0" class="node-title"><tspan x="369.0" dy="0.0">Define purpose and scope</tspan></text>
       <text x="369.0" y="747.0" class="node-copy"><tspan x="369.0" dy="0.0">Record the goal, included work, and</tspan><tspan x="369.0" dy="15.0">exclusions.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.charter.confirm" target="_top" aria-label="Edit Approve purpose and scope" data-decision-point="pr.charter.confirm">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.charter.confirm" target="_top" aria-label="Edit Approve purpose and scope" data-decision-point="pr.charter.confirm">
       <rect x="209.0" y="876.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="223.0" y="896.0" class="node-kind gate-kind">GATE 1</text>
       <text x="471.0" y="896.0" class="format">USER</text>
       <text x="223.0" y="920.0" class="node-title"><tspan x="223.0" dy="0.0">Approve purpose and scope</tspan></text>
       <text x="223.0" y="955.0" class="node-copy"><tspan x="223.0" dy="0.0">Checks that the pull request goal and</tspan><tspan x="223.0" dy="15.0">boundaries are approved.</tspan></text>
     </a>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit Approve revised purpose and scope" data-decision-point="pr.charter.reconfirm">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit Approve revised purpose and scope" data-decision-point="pr.charter.reconfirm">
       <rect x="501.0" y="876.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="515.0" y="896.0" class="node-kind gate-kind">GATE 2</text>
       <text x="763.0" y="896.0" class="format">USER</text>
       <text x="515.0" y="920.0" class="node-title"><tspan x="515.0" dy="0.0">Approve revised purpose and scope</tspan></text>
       <text x="515.0" y="955.0" class="node-copy"><tspan x="515.0" dy="0.0">Reconfirms authority after the purpose or</tspan><tspan x="515.0" dy="15.0">scope changes.</tspan></text>
     </a>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.review.start" target="_top" aria-label="Edit Allow AI review" data-decision-point="pr.review.start">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.review.start" target="_top" aria-label="Edit Allow AI review" data-decision-point="pr.review.start">
       <rect x="355.0" y="1084.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="369.0" y="1104.0" class="node-kind gate-kind">GATE 3</text>
       <text x="617.0" y="1104.0" class="format">AUTOMATIC</text>
@@ -155,7 +155,7 @@
       <text x="369.0" y="1336.0" class="node-title"><tspan x="369.0" dy="0.0">Review pull request</tspan></text>
       <text x="369.0" y="1371.0" class="node-copy"><tspan x="369.0" dy="0.0">AI checks changed areas against the</tspan><tspan x="369.0" dy="15.0">approved scope.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.review.complete" target="_top" aria-label="Edit Accept review results" data-decision-point="pr.review.complete">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.review.complete" target="_top" aria-label="Edit Accept review results" data-decision-point="pr.review.complete">
       <rect x="355.0" y="1500.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="369.0" y="1520.0" class="node-kind gate-kind">GATE 4</text>
       <text x="617.0" y="1520.0" class="format">AUTOMATIC</text>
@@ -180,7 +180,7 @@
       <text x="77.0" y="2168.0" class="node-title"><tspan x="77.0" dy="0.0">Classify automatically</tspan></text>
       <text x="77.0" y="2203.0" class="node-copy"><tspan x="77.0" dy="0.0">Apply the deterministic charter and pull</tspan><tspan x="77.0" dy="15.0">request type result.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.finding.classify" target="_top" aria-label="Edit Decide ambiguous finding scope" data-decision-point="pr.finding.classify">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.finding.classify" target="_top" aria-label="Edit Decide ambiguous finding scope" data-decision-point="pr.finding.classify">
       <rect x="355.0" y="2124.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="369.0" y="2144.0" class="node-kind gate-kind">GATE 5</text>
       <text x="617.0" y="2144.0" class="format">USER</text>
@@ -211,7 +211,7 @@
       <text x="77.0" y="2926.0" class="node-title"><tspan x="77.0" dy="0.0">Link existing issue</tspan></text>
       <text x="77.0" y="2961.0" class="node-copy"><tspan x="77.0" dy="0.0">Attach the deferred group to an existing</tspan><tspan x="77.0" dy="15.0">GitHub issue.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit Allow follow-up issue" data-decision-point="pr.deferred.publish">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit Allow follow-up issue" data-decision-point="pr.deferred.publish">
       <rect x="355.0" y="2882.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="369.0" y="2902.0" class="node-kind gate-kind">GATE 12</text>
       <text x="617.0" y="2902.0" class="format">USER</text>
@@ -242,7 +242,7 @@
       <text x="661.0" y="2926.0" class="node-title"><tspan x="661.0" dy="0.0">Select review findings</tspan></text>
       <text x="661.0" y="2961.0" class="node-copy"><tspan x="661.0" dy="0.0">Choose in-scope findings for the GitHub</tspan><tspan x="661.0" dy="15.0">review.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.review.publish" target="_top" aria-label="Edit Allow review publication" data-decision-point="pr.review.publish">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.review.publish" target="_top" aria-label="Edit Allow review publication" data-decision-point="pr.review.publish">
       <rect x="501.0" y="3224.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="515.0" y="3244.0" class="node-kind gate-kind">GATE 10</text>
       <text x="763.0" y="3244.0" class="format">USER</text>
@@ -273,7 +273,7 @@
       <text x="515.0" y="1960.0" class="node-title"><tspan x="515.0" dy="0.0">Record user correction</tspan></text>
       <text x="515.0" y="1995.0" class="node-copy"><tspan x="515.0" dy="0.0">Store feedback for review,</tspan><tspan x="515.0" dy="15.0">implementation, or both.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.correction.promote" target="_top" aria-label="Edit Allow repository lesson" data-decision-point="pr.correction.promote">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.correction.promote" target="_top" aria-label="Edit Allow repository lesson" data-decision-point="pr.correction.promote">
       <rect x="647.0" y="2124.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="661.0" y="2144.0" class="node-kind gate-kind">GATE 13</text>
       <text x="909.0" y="2144.0" class="format">USER</text>
@@ -286,7 +286,7 @@
       <text x="515.0" y="2376.0" class="node-title"><tspan x="515.0" dy="0.0">Save repository guidance</tspan></text>
       <text x="515.0" y="2411.0" class="node-copy"><tspan x="515.0" dy="0.0">Add the approved correction to repository</tspan><tspan x="515.0" dy="15.0">guidance.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit Resolve unknown publication" data-decision-point="pr.publication.reconcile">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=review&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit Resolve unknown publication" data-decision-point="pr.publication.reconcile">
       <rect x="355.0" y="3640.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="369.0" y="3660.0" class="node-kind gate-kind">GATE 14</text>
       <text x="617.0" y="3660.0" class="format">USER</text>
@@ -409,14 +409,14 @@
       <text x="1303.0" y="504.0" class="node-title"><tspan x="1303.0" dy="0.0">Check PR ownership</tspan></text>
       <text x="1303.0" y="539.0" class="node-copy"><tspan x="1303.0" dy="0.0">Determine whether the implementation</tspan><tspan x="1303.0" dy="15.0">eligibility gate is required.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.implementation.eligibility" target="_top" aria-label="Edit Allow non-owned PR implementation" data-decision-point="pr.implementation.eligibility">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.implementation.eligibility" target="_top" aria-label="Edit Allow non-owned PR implementation" data-decision-point="pr.implementation.eligibility">
       <rect x="1289.0" y="668.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1303.0" y="688.0" class="node-kind gate-kind">GATE 6</text>
       <text x="1551.0" y="688.0" class="format">USER</text>
       <text x="1303.0" y="712.0" class="node-title"><tspan x="1303.0" dy="0.0">Allow non-owned PR implementation</tspan></text>
       <text x="1303.0" y="747.0" class="node-copy"><tspan x="1303.0" dy="0.0">Authorizes fixes on a pull request</tspan><tspan x="1303.0" dy="15.0">PicoClaw does not own.</tspan></text>
     </a>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.implementation.start" target="_top" aria-label="Edit Allow AI implementation" data-decision-point="pr.implementation.start">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.implementation.start" target="_top" aria-label="Edit Allow AI implementation" data-decision-point="pr.implementation.start">
       <rect x="1289.0" y="876.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1303.0" y="896.0" class="node-kind gate-kind">GATE 7</text>
       <text x="1551.0" y="896.0" class="format">AUTOMATIC</text>
@@ -489,14 +489,14 @@
       <text x="1303.0" y="2510.0" class="node-title"><tspan x="1303.0" dy="0.0">Check final scope</tspan></text>
       <text x="1303.0" y="2545.0" class="node-copy"><tspan x="1303.0" dy="0.0">Check completion findings against the</tspan><tspan x="1303.0" dy="15.0">final candidate scope.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.implementation.scope" target="_top" aria-label="Edit Allow large or adjacent work" data-decision-point="pr.implementation.scope">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.implementation.scope" target="_top" aria-label="Edit Allow large or adjacent work" data-decision-point="pr.implementation.scope">
       <rect x="997.0" y="2882.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1011.0" y="2902.0" class="node-kind gate-kind">GATE 8</text>
       <text x="1259.0" y="2902.0" class="format">USER</text>
       <text x="1011.0" y="2926.0" class="node-title"><tspan x="1011.0" dy="0.0">Allow large or adjacent work</tspan></text>
       <text x="1011.0" y="2961.0" class="node-copy"><tspan x="1011.0" dy="0.0">Authorizes large exact or necessary</tspan><tspan x="1011.0" dy="15.0">adjacent code after audits.</tspan></text>
     </a>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit Accept implementation" data-decision-point="pr.implementation.complete">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit Accept implementation" data-decision-point="pr.implementation.complete">
       <rect x="997.0" y="2674.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1011.0" y="2694.0" class="node-kind gate-kind">GATE 9</text>
       <text x="1259.0" y="2694.0" class="format">USER</text>
@@ -509,7 +509,7 @@
       <text x="1303.0" y="2718.0" class="node-title"><tspan x="1303.0" dy="0.0">Start completion gates</tspan></text>
       <text x="1303.0" y="2753.0" class="node-copy"><tspan x="1303.0" dy="0.0">Start scope and completion authorization</tspan><tspan x="1303.0" dy="15.0">together for policy-gated work.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit Accept implementation" data-decision-point="pr.implementation.complete">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.implementation.complete" target="_top" aria-label="Edit Accept implementation" data-decision-point="pr.implementation.complete">
       <rect x="1289.0" y="2882.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1303.0" y="2902.0" class="node-kind gate-kind">GATE 9</text>
       <text x="1551.0" y="2902.0" class="format">USER</text>
@@ -528,7 +528,7 @@
       <text x="1011.0" y="3476.0" class="node-title"><tspan x="1011.0" dy="0.0">Queue branch publication</tspan></text>
       <text x="1011.0" y="3511.0" class="node-copy"><tspan x="1011.0" dy="0.0">A user selects the accepted candidate for</tspan><tspan x="1011.0" dy="15.0">publication to the PR branch.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.implementation.publish" target="_top" aria-label="Edit Allow branch push" data-decision-point="pr.implementation.publish">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.implementation.publish" target="_top" aria-label="Edit Allow branch push" data-decision-point="pr.implementation.publish">
       <rect x="1143.0" y="3774.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1157.0" y="3794.0" class="node-kind gate-kind">GATE 11</text>
       <text x="1405.0" y="3794.0" class="format">USER</text>
@@ -577,7 +577,7 @@
       <text x="1303.0" y="3476.0" class="node-title"><tspan x="1303.0" dy="0.0">Link existing issue</tspan></text>
       <text x="1303.0" y="3511.0" class="node-copy"><tspan x="1303.0" dy="0.0">Attach the deferred group to an existing</tspan><tspan x="1303.0" dy="15.0">GitHub issue.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit Allow follow-up issue" data-decision-point="pr.deferred.publish">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.deferred.publish" target="_top" aria-label="Edit Allow follow-up issue" data-decision-point="pr.deferred.publish">
       <rect x="1581.0" y="3432.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1595.0" y="3452.0" class="node-kind gate-kind">GATE 12</text>
       <text x="1843.0" y="3452.0" class="format">USER</text>
@@ -596,7 +596,7 @@
       <text x="1157.0" y="3060.0" class="node-title"><tspan x="1157.0" dy="0.0">Revise PR charter</tspan></text>
       <text x="1157.0" y="3095.0" class="node-copy"><tspan x="1157.0" dy="0.0">Change the pull request charter before</tspan><tspan x="1157.0" dy="15.0">the pull request is reviewed again.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit Approve revised purpose and scope" data-decision-point="pr.charter.reconfirm">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.charter.reconfirm" target="_top" aria-label="Edit Approve revised purpose and scope" data-decision-point="pr.charter.reconfirm">
       <rect x="1581.0" y="3224.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1595.0" y="3244.0" class="node-kind gate-kind">GATE 2</text>
       <text x="1843.0" y="3244.0" class="format">USER</text>
@@ -621,7 +621,7 @@
       <text x="1449.0" y="4858.0" class="node-title"><tspan x="1449.0" dy="0.0">Record user correction</tspan></text>
       <text x="1449.0" y="4893.0" class="node-copy"><tspan x="1449.0" dy="0.0">Store feedback for review,</tspan><tspan x="1449.0" dy="15.0">implementation, or both.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.correction.promote" target="_top" aria-label="Edit Allow repository lesson" data-decision-point="pr.correction.promote">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.correction.promote" target="_top" aria-label="Edit Allow repository lesson" data-decision-point="pr.correction.promote">
       <rect x="1289.0" y="5022.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1303.0" y="5042.0" class="node-kind gate-kind">GATE 13</text>
       <text x="1551.0" y="5042.0" class="format">USER</text>
@@ -634,7 +634,7 @@
       <text x="1303.0" y="5274.0" class="node-title"><tspan x="1303.0" dy="0.0">Save repository guidance</tspan></text>
       <text x="1303.0" y="5309.0" class="node-copy"><tspan x="1303.0" dy="0.0">Add the approved correction to repository</tspan><tspan x="1303.0" dy="15.0">guidance.</tspan></text>
     </g>
-    <a class="gate-link" href="/pull-requests?view=gate-profiles&amp;profile=default&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit Resolve unknown publication" data-decision-point="pr.publication.reconcile">
+    <a class="gate-link" href="/pull-requests/profiles/default?flow=implementation&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit Resolve unknown publication" data-decision-point="pr.publication.reconcile">
       <rect x="1289.0" y="4190.0" width="276.0" height="118.0" rx="12" class="node gate"/>
       <text x="1303.0" y="4210.0" class="node-kind gate-kind">GATE 14</text>
       <text x="1551.0" y="4210.0" class="format">USER</text>

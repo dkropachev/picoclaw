@@ -17,8 +17,9 @@
     "workflows": "Workflows",
     "git_workspaces": "Git Workspaces",
     "pull_requests": "Pull requests",
-    "pull_requests_work": "Pull request work",
+    "pull_requests_work": "Work",
     "pull_requests_gate_profiles": "Gate profiles",
+    "pull_requests_lifecycle_settings": "Lifecycle settings",
     "events": "Events",
     "services": "Services",
     "channels_group": "Channels",
@@ -2131,6 +2132,18 @@
       "keepEditing": "Keep editing",
       "discardChanges": "Discard changes",
       "profiles": "Profiles",
+      "configurationPages": "PR lifecycle configuration",
+      "lifecycleSettings": "Lifecycle settings",
+      "settingsTabs": {
+        "nudging": "Nudging",
+        "scope": "Scope grades",
+        "deferred": "Deferred issues"
+      },
+      "settingsTabHelp": {
+        "nudging": "Set the minimum and maximum extra review and completion passes.",
+        "scope": "Define the file, semantic-line, and module thresholds for XS, S, and M changes.",
+        "deferred": "Choose whether deferred findings stay local, require approval, or queue automatically."
+      },
       "profilesHelp": "Choose a profile to edit its gate flow, or create a reusable profile for another repository policy.",
       "editProfile": "Edit profile",
       "editProfileNamed": "Edit {{name}} profile",

@@ -25,13 +25,17 @@ import { cn } from "@/lib/utils"
 interface PRLifecycleGateMapProps {
   flow: PRLifecycleFlowCatalog
   flowRevision: string
+  activeFlowID?: PRLifecycleFlowID
   selectedDecisionPoint?: PRLifecycleDecisionPoint
   workflows?: PRLifecycleGateProfile["workflows"]
   profileID?: string
   profileName?: string
+  onFlowChange?: (flowID: PRLifecycleFlowID) => void
   onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
   className?: string
 }
+
+export type PRLifecycleFlowID = "review" | "implementation"
 
 type GateFormat =
   | "automatic"
@@ -93,10 +97,12 @@ const gateFormatLabels: Record<GateStageCategory, string> = {
 export function PRLifecycleGateMap({
   flow,
   flowRevision,
+  activeFlowID: controlledActiveFlowID,
   selectedDecisionPoint,
   workflows,
   profileID,
   profileName,
+  onFlowChange,
   onSelect,
   className,
 }: PRLifecycleGateMapProps) {
@@ -104,8 +110,12 @@ export function PRLifecycleGateMap({
   const titleID = `${instanceID}-title`
   const descriptionID = `${instanceID}-description`
   const initialFlow =
-    findDecisionPointFlow(flow, selectedDecisionPoint)?.id ?? flow.flows[0].id
-  const [activeFlowID, setActiveFlowID] = useState(initialFlow)
+    flow.flows.find((candidate) => candidate.id === controlledActiveFlowID)
+      ?.id ??
+    findDecisionPointFlow(flow, selectedDecisionPoint)?.id ??
+    flow.flows[0].id
+  const [localActiveFlowID, setLocalActiveFlowID] = useState(initialFlow)
+  const lastFlowCorrection = useRef<string | undefined>(undefined)
   const [selectedNodeID, setSelectedNodeID] = useState<string | undefined>(
     () =>
       flow.flows
@@ -117,9 +127,12 @@ export function PRLifecycleGateMap({
   )
 
   useEffect(() => {
-    setActiveFlowID((current) => {
+    setLocalActiveFlowID((current) => {
       const currentFlow = flow.flows.find(
         (candidate) => candidate.id === current,
+      )
+      const controlledFlow = flow.flows.find(
+        (candidate) => candidate.id === controlledActiveFlowID,
       )
       if (
         selectedDecisionPoint &&
@@ -130,15 +143,55 @@ export function PRLifecycleGateMap({
       }
       return (
         findDecisionPointFlow(flow, selectedDecisionPoint)?.id ??
+        controlledFlow?.id ??
         currentFlow?.id ??
         flow.flows[0].id
       )
     })
-  }, [flow, selectedDecisionPoint])
 
+    const requestedFlow = flow.flows.find(
+      (candidate) => candidate.id === controlledActiveFlowID,
+    )
+    if (
+      requestedFlow &&
+      selectedDecisionPoint &&
+      flowContainsDecisionPoint(requestedFlow, selectedDecisionPoint)
+    ) {
+      lastFlowCorrection.current = undefined
+      return
+    }
+    const selectedFlow = findDecisionPointFlow(flow, selectedDecisionPoint)
+    if (
+      !selectedFlow ||
+      controlledActiveFlowID === undefined ||
+      selectedFlow.id === controlledActiveFlowID ||
+      !isPRLifecycleFlowID(selectedFlow.id) ||
+      !onFlowChange
+    ) {
+      lastFlowCorrection.current = undefined
+      return
+    }
+
+    const correction = `${controlledActiveFlowID}:${selectedDecisionPoint}:${selectedFlow.id}`
+    if (lastFlowCorrection.current === correction) return
+    lastFlowCorrection.current = correction
+    onFlowChange(selectedFlow.id)
+  }, [controlledActiveFlowID, flow, onFlowChange, selectedDecisionPoint])
+
+  const controlledActiveFlow = flow.flows.find(
+    (candidate) => candidate.id === controlledActiveFlowID,
+  )
   const activeFlow =
-    flow.flows.find((candidate) => candidate.id === activeFlowID) ??
+    controlledActiveFlow ??
+    flow.flows.find((candidate) => candidate.id === localActiveFlowID) ??
     flow.flows[0]
+
+  const selectFlow = (flowID: string) => {
+    setLocalActiveFlowID(flowID)
+    if (flowID !== controlledActiveFlowID && isPRLifecycleFlowID(flowID)) {
+      onFlowChange?.(flowID)
+    }
+  }
 
   useEffect(() => {
     if (!selectedDecisionPoint) {
@@ -217,7 +270,7 @@ export function PRLifecycleGateMap({
             activeFlowID={activeFlow.id}
             flows={flow.flows}
             instanceID={instanceID}
-            onChange={setActiveFlowID}
+            onChange={selectFlow}
           />
 
           {flow.flows.map((candidate, index) => {
@@ -238,6 +291,7 @@ export function PRLifecycleGateMap({
                     instanceID={instanceID}
                     onSelect={(node) => {
                       setSelectedNodeID(node.id)
+                      selectFlow(candidate.id)
                       onSelect(node.decision_point!)
                     }}
                     profileID={profileID}
@@ -401,6 +455,7 @@ function FlowGraph({
                   key={node.id}
                 >
                   <FlowNodeCell
+                    flowID={flow.id}
                     flowNode={node}
                     instanceID={instanceID}
                     layout={layout}
@@ -425,6 +480,7 @@ function FlowGraph({
 }
 
 function FlowNodeCell({
+  flowID,
   flowNode,
   instanceID,
   layout,
@@ -433,6 +489,7 @@ function FlowNodeCell({
   selectedNodeID,
   workflows,
 }: {
+  flowID: string
   flowNode: PRLifecycleFlowNode
   instanceID: string
   layout: FlowLayout
@@ -449,6 +506,7 @@ function FlowNodeCell({
       data-flow-incoming-count={incoming.length}
     >
       <GraphNode
+        flowID={flowID}
         flowNode={flowNode}
         instanceID={instanceID}
         onSelect={() => onSelect(flowNode)}
@@ -1496,6 +1554,7 @@ function flowRouteAccessibleRelation(
 }
 
 function GraphNode({
+  flowID,
   flowNode,
   instanceID,
   onSelect,
@@ -1503,6 +1562,7 @@ function GraphNode({
   selected,
   workflow,
 }: {
+  flowID: string
   flowNode: PRLifecycleFlowNode
   instanceID: string
   onSelect: () => void
@@ -1514,6 +1574,7 @@ function GraphNode({
   if (!flowNode.editable) return <LockedGateNode node={flowNode} />
   return (
     <EditableGateNode
+      flowID={flowID}
       instanceID={instanceID}
       node={flowNode}
       onSelect={onSelect}
@@ -1570,6 +1631,7 @@ function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
 }
 
 function EditableGateNode({
+  flowID,
   instanceID,
   node,
   onSelect,
@@ -1577,6 +1639,7 @@ function EditableGateNode({
   selected,
   workflow,
 }: {
+  flowID: string
   instanceID: string
   node: PRLifecycleFlowNode
   onSelect: () => void
@@ -1601,7 +1664,7 @@ function EditableGateNode({
       )}
       data-decision-point={decisionPoint}
       data-decision-title={node.title}
-      data-edit-href={gateEditorHref(profileID, decisionPoint)}
+      data-edit-href={gateEditorHref(profileID, flowID, decisionPoint)}
       data-editor-title={node.title}
       data-flow-element="editable-gate"
       data-flow-kind="gate"
@@ -1807,10 +1870,15 @@ function flowBandGridClass(count: number): string {
 
 function gateEditorHref(
   profileID: string | undefined,
+  flowID: string,
   decisionPoint: PRLifecycleDecisionPoint,
-): string {
-  const profile = profileID ? `&profile=${encodeURIComponent(profileID)}` : ""
-  return `/pull-requests?view=gate-profiles${profile}&gate=${encodeURIComponent(decisionPoint)}`
+): string | undefined {
+  if (!profileID) return undefined
+  return `/pull-requests/profiles/${encodeURIComponent(profileID)}?flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
+}
+
+function isPRLifecycleFlowID(flowID: string): flowID is PRLifecycleFlowID {
+  return flowID === "review" || flowID === "implementation"
 }
 
 function summarizeGateFormat(

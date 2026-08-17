@@ -25,6 +25,9 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ThreadsSearchRouteImport } from './routes/threads.search'
 import { Route as ThreadsOpenRouteImport } from './routes/threads.open'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
+import { Route as PullRequestsSettingsRouteImport } from './routes/pull-requests_.settings'
+import { Route as PullRequestsProfilesRouteImport } from './routes/pull-requests_.profiles'
+import { Route as PullRequestsWorkspaceIDRouteImport } from './routes/pull-requests_.$workspaceID'
 import { Route as ConfigRawRouteImport } from './routes/config.raw'
 import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
 import { Route as AgentWorkflowsRouteImport } from './routes/agent/workflows'
@@ -35,6 +38,7 @@ import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
+import { Route as PullRequestsProfilesProfileIDRouteImport } from './routes/pull-requests_.profiles.$profileID'
 import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
 import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
 
@@ -118,6 +122,21 @@ const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsRoute,
 } as any)
+const PullRequestsSettingsRoute = PullRequestsSettingsRouteImport.update({
+  id: '/pull-requests_/settings',
+  path: '/pull-requests/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PullRequestsProfilesRoute = PullRequestsProfilesRouteImport.update({
+  id: '/pull-requests_/profiles',
+  path: '/pull-requests/profiles',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PullRequestsWorkspaceIDRoute = PullRequestsWorkspaceIDRouteImport.update({
+  id: '/pull-requests_/$workspaceID',
+  path: '/pull-requests/$workspaceID',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ConfigRawRoute = ConfigRawRouteImport.update({
   id: '/raw',
   path: '/raw',
@@ -168,6 +187,12 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
+const PullRequestsProfilesProfileIDRoute =
+  PullRequestsProfilesProfileIDRouteImport.update({
+    id: '/$profileID',
+    path: '/$profileID',
+    getParentRoute: () => PullRequestsProfilesRoute,
+  } as any)
 const AccountsAccountRouterNewRoute =
   AccountsAccountRouterNewRouteImport.update({
     id: '/account-router/new',
@@ -204,11 +229,15 @@ export interface FileRoutesByFullPath {
   '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
+  '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
+  '/pull-requests/profiles': typeof PullRequestsProfilesRouteWithChildren
+  '/pull-requests/settings': typeof PullRequestsSettingsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/pull-requests/profiles/$profileID': typeof PullRequestsProfilesProfileIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesByTo {
@@ -234,11 +263,15 @@ export interface FileRoutesByTo {
   '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
+  '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
+  '/pull-requests/profiles': typeof PullRequestsProfilesRouteWithChildren
+  '/pull-requests/settings': typeof PullRequestsSettingsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/pull-requests/profiles/$profileID': typeof PullRequestsProfilesProfileIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesById {
@@ -265,11 +298,15 @@ export interface FileRoutesById {
   '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
+  '/pull-requests_/$workspaceID': typeof PullRequestsWorkspaceIDRoute
+  '/pull-requests_/profiles': typeof PullRequestsProfilesRouteWithChildren
+  '/pull-requests_/settings': typeof PullRequestsSettingsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/pull-requests_/profiles/$profileID': typeof PullRequestsProfilesProfileIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRouteTypes {
@@ -297,11 +334,15 @@ export interface FileRouteTypes {
     | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
+    | '/pull-requests/$workspaceID'
+    | '/pull-requests/profiles'
+    | '/pull-requests/settings'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/pull-requests/profiles/$profileID'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -327,11 +368,15 @@ export interface FileRouteTypes {
     | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
+    | '/pull-requests/$workspaceID'
+    | '/pull-requests/profiles'
+    | '/pull-requests/settings'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/pull-requests/profiles/$profileID'
     | '/threads/open/$threadId'
   id:
     | '__root__'
@@ -357,11 +402,15 @@ export interface FileRouteTypes {
     | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
+    | '/pull-requests_/$workspaceID'
+    | '/pull-requests_/profiles'
+    | '/pull-requests_/settings'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/pull-requests_/profiles/$profileID'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
 }
@@ -379,6 +428,9 @@ export interface RootRouteChildren {
   ModelsRoute: typeof ModelsRoute
   PullRequestsRoute: typeof PullRequestsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
+  PullRequestsWorkspaceIDRoute: typeof PullRequestsWorkspaceIDRoute
+  PullRequestsProfilesRoute: typeof PullRequestsProfilesRouteWithChildren
+  PullRequestsSettingsRoute: typeof PullRequestsSettingsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -495,6 +547,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsThreadIdRouteImport
       parentRoute: typeof ThreadsRoute
     }
+    '/pull-requests_/settings': {
+      id: '/pull-requests_/settings'
+      path: '/pull-requests/settings'
+      fullPath: '/pull-requests/settings'
+      preLoaderRoute: typeof PullRequestsSettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/pull-requests_/profiles': {
+      id: '/pull-requests_/profiles'
+      path: '/pull-requests/profiles'
+      fullPath: '/pull-requests/profiles'
+      preLoaderRoute: typeof PullRequestsProfilesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/pull-requests_/$workspaceID': {
+      id: '/pull-requests_/$workspaceID'
+      path: '/pull-requests/$workspaceID'
+      fullPath: '/pull-requests/$workspaceID'
+      preLoaderRoute: typeof PullRequestsWorkspaceIDRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/config/raw': {
       id: '/config/raw'
       path: '/raw'
@@ -564,6 +637,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/threads/open/$threadId'
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
+    }
+    '/pull-requests_/profiles/$profileID': {
+      id: '/pull-requests_/profiles/$profileID'
+      path: '/$profileID'
+      fullPath: '/pull-requests/profiles/$profileID'
+      preLoaderRoute: typeof PullRequestsProfilesProfileIDRouteImport
+      parentRoute: typeof PullRequestsProfilesRoute
     }
     '/accounts/account-router/new': {
       id: '/accounts/account-router/new'
@@ -668,6 +748,17 @@ const ThreadsRouteChildren: ThreadsRouteChildren = {
 const ThreadsRouteWithChildren =
   ThreadsRoute._addFileChildren(ThreadsRouteChildren)
 
+interface PullRequestsProfilesRouteChildren {
+  PullRequestsProfilesProfileIDRoute: typeof PullRequestsProfilesProfileIDRoute
+}
+
+const PullRequestsProfilesRouteChildren: PullRequestsProfilesRouteChildren = {
+  PullRequestsProfilesProfileIDRoute: PullRequestsProfilesProfileIDRoute,
+}
+
+const PullRequestsProfilesRouteWithChildren =
+  PullRequestsProfilesRoute._addFileChildren(PullRequestsProfilesRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChannelsRouteRoute: ChannelsRouteRouteWithChildren,
@@ -682,6 +773,9 @@ const rootRouteChildren: RootRouteChildren = {
   ModelsRoute: ModelsRoute,
   PullRequestsRoute: PullRequestsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
+  PullRequestsWorkspaceIDRoute: PullRequestsWorkspaceIDRoute,
+  PullRequestsProfilesRoute: PullRequestsProfilesRouteWithChildren,
+  PullRequestsSettingsRoute: PullRequestsSettingsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -175,8 +175,11 @@ rounds. A bounded maximum prevents open-ended model loops.
 ## Gates
 
 Gate profiles are configured from **Pull requests → Gate profiles**, the
-canonical `/pull-requests?view=gate-profiles` view. Profiles may be assigned to
-specific canonical repositories; all others use the configured default.
+canonical `/pull-requests/profiles` page. Global nudge, scope-grade, and
+deferred-issue settings live under `/pull-requests/settings`; each profile has
+its own `/pull-requests/profiles/:profileID?flow=review|implementation` editor.
+Profiles may be assigned to specific canonical repositories; all others use
+the configured default.
 
 A decision point is an ordered all-of workflow. Supported stage formats are:
 

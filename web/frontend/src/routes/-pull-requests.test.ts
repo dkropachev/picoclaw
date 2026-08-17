@@ -1,122 +1,128 @@
 import { describe, expect, it } from "vitest"
 
-import {
-  normalizePullRequestsSearch,
-  pullRequestsSearchIsCanonical,
-} from "@/routes/pull-requests"
+import { normalizePRProfilesSearch } from "@/routes/pull-requests_.profiles"
+import { normalizePRProfileEditorSearch } from "@/routes/pull-requests_.profiles.$profileID"
+import { normalizePRLifecycleSettingsSearch } from "@/routes/pull-requests_.settings"
 
-const workspaceID = `prw_${"a".repeat(32)}`
 const gate = "pr.review.complete" as const
+const workspaceID = `prw_${"a".repeat(32)}`
 
-describe("pull requests route search", () => {
-  it("keeps only one valid public workspace selection", () => {
+describe("pull request profiles search", () => {
+  it("keeps only the discard modal identity on the profile list", () => {
     expect(
-      normalizePullRequestsSearch({
-        workspace: workspaceID,
-        cursor: "server-owned",
-        prompt: "private",
-      }),
-    ).toEqual({ workspace: workspaceID })
-  })
-
-  it("uses the gate-profile view without a profile as the list", () => {
+      normalizePRProfilesSearch({ from: workspaceID, dialog: "discard" }),
+    ).toEqual({
+      from: workspaceID,
+      dialog: "discard",
+    })
     expect(
-      normalizePullRequestsSearch({
+      normalizePRProfilesSearch({
+        dialog: "other",
+        flow: "implementation",
+        gate,
+        profile: "strict",
         view: "gate-profiles",
-        workspace: workspaceID,
-        config_revision: "private",
       }),
-    ).toEqual({ view: "gate-profiles" })
+    ).toEqual({})
   })
 
-  it("keeps one valid profile as the editor", () => {
+  it("rejects repeated and non-string modal values", () => {
     expect(
-      normalizePullRequestsSearch({
-        view: "gate-profiles",
-        profile: "release_candidate-1",
+      normalizePRProfilesSearch({
+        from: [workspaceID],
+        dialog: ["discard"],
       }),
-    ).toEqual({ view: "gate-profiles", profile: "release_candidate-1" })
+    ).toEqual({})
+    expect(
+      normalizePRProfilesSearch({ from: "prw_INVALID", dialog: true }),
+    ).toEqual({})
+  })
+})
+
+describe("pull request profile editor search", () => {
+  it("defaults to review and keeps a discard prompt owned by its gate", () => {
+    expect(normalizePRProfileEditorSearch({})).toEqual({ flow: "review" })
+    expect(normalizePRProfileEditorSearch({ gate })).toEqual({
+      flow: "review",
+      gate,
+    })
+    expect(
+      normalizePRProfileEditorSearch({
+        flow: "implementation",
+        from: workspaceID,
+        gate: "pr.implementation.scope",
+      }),
+    ).toEqual({
+      flow: "implementation",
+      from: workspaceID,
+      gate: "pr.implementation.scope",
+    })
+    expect(
+      normalizePRProfileEditorSearch({
+        flow: "implementation",
+        gate,
+        dialog: "discard",
+      }),
+    ).toEqual({ flow: "implementation", gate, dialog: "discard" })
   })
 
-  it("keeps an allowlisted gate with its profile as the modal", () => {
+  it("scrubs legacy, unknown, malformed, and repeated state", () => {
     expect(
-      normalizePullRequestsSearch({
+      normalizePRProfileEditorSearch({
         view: "gate-profiles",
         profile: "strict",
-        gate,
+        workspace: workspaceID,
       }),
-    ).toEqual({ view: "gate-profiles", profile: "strict", gate })
-  })
-
-  it("attaches old gate-only deep links to the default profile", () => {
+    ).toEqual({ flow: "review" })
     expect(
-      normalizePullRequestsSearch({
-        view: "gate-profiles",
-        gate,
-      }),
-    ).toEqual({ view: "gate-profiles", profile: "default", gate })
-  })
-
-  it("scrubs invalid, repeated, and out-of-context profile state", () => {
-    expect(
-      normalizePullRequestsSearch({
-        view: "gate-profiles",
-        profile: "Invalid Profile",
+      normalizePRProfileEditorSearch({
+        flow: "development",
         gate: "pr.not-a-gate",
+        dialog: "delete",
       }),
-    ).toEqual({ view: "gate-profiles" })
+    ).toEqual({ flow: "review" })
     expect(
-      normalizePullRequestsSearch({
-        view: "gate-profiles",
-        profile: ["default"],
+      normalizePRProfileEditorSearch({
+        flow: ["implementation"],
+        from: [workspaceID],
         gate: [gate],
+        dialog: ["discard"],
       }),
-    ).toEqual({ view: "gate-profiles" })
+    ).toEqual({ flow: "review" })
+  })
+})
+
+describe("pull request lifecycle settings search", () => {
+  it("uses nudging by default and accepts each settings tab", () => {
+    expect(normalizePRLifecycleSettingsSearch({})).toEqual({ tab: "nudging" })
+    expect(normalizePRLifecycleSettingsSearch({ tab: "nudging" })).toEqual({
+      tab: "nudging",
+    })
+    expect(normalizePRLifecycleSettingsSearch({ tab: "scope" })).toEqual({
+      tab: "scope",
+    })
+    expect(normalizePRLifecycleSettingsSearch({ tab: "deferred" })).toEqual({
+      tab: "deferred",
+    })
+  })
+
+  it("keeps discard on its owning tab and scrubs all other route state", () => {
     expect(
-      normalizePullRequestsSearch({
+      normalizePRLifecycleSettingsSearch({
+        tab: "scope",
+        from: workspaceID,
+        dialog: "discard",
         view: "gate-profiles",
-        profile: `a${"b".repeat(64)}`,
+        gate,
       }),
-    ).toEqual({ view: "gate-profiles" })
-    expect(normalizePullRequestsSearch({ gate })).toEqual({})
-  })
-
-  it("rejects legacy, malformed, repeated, and unknown route state", () => {
-    for (const raw of [
-      { view: "review", case: `prc_${"b".repeat(32)}` },
-      { view: "development", case: `pdc_${"c".repeat(32)}` },
-      { view: ["gate-profiles"] },
-      { workspace: `prw_${"A".repeat(32)}` },
-      { workspace: [workspaceID] },
-    ]) {
-      expect(normalizePullRequestsSearch(raw)).toEqual({})
-    }
-  })
-
-  it("detects unknown or sensitive noncanonical state", () => {
+    ).toEqual({ tab: "scope", from: workspaceID, dialog: "discard" })
     expect(
-      pullRequestsSearchIsCanonical(
-        { workspace: workspaceID, cursor: "opaque" },
-        { workspace: workspaceID },
-      ),
-    ).toBe(false)
-    expect(
-      pullRequestsSearchIsCanonical(
-        { view: "gate-profiles" },
-        { view: "gate-profiles" },
-      ),
-    ).toBe(true)
-    expect(
-      pullRequestsSearchIsCanonical(
-        { view: "gate-profiles", profile: "default", gate },
-        { view: "gate-profiles", profile: "default", gate },
-      ),
-    ).toBe(true)
-    expect(
-      pullRequestsSearchIsCanonical(
-        { view: "gate-profiles", gate },
-        { view: "gate-profiles", profile: "default", gate },
-      ),
-    ).toBe(false)
+      normalizePRLifecycleSettingsSearch({
+        tab: ["deferred"],
+        from: [workspaceID],
+        dialog: ["discard"],
+        workspace: workspaceID,
+      }),
+    ).toEqual({ tab: "nudging" })
   })
 })

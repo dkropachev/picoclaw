@@ -47,7 +47,8 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
   tourId?: string
-  pullRequestView?: "work" | "configuration"
+  pullRequestView?: "work" | "profiles" | "settings"
+  search?: Record<string, string>
 }
 
 interface NavSection {
@@ -94,10 +95,19 @@ const pullRequestsWorkNavItem: NavItem = {
 
 const pullRequestsGateProfilesNavItem: NavItem = {
   title: "navigation.pull_requests_gate_profiles",
-  url: "/pull-requests",
+  url: "/pull-requests/profiles",
   icon: IconSettings,
   translateTitle: true,
-  pullRequestView: "configuration",
+  pullRequestView: "profiles",
+}
+
+const pullRequestsLifecycleSettingsNavItem: NavItem = {
+  title: "navigation.pull_requests_lifecycle_settings",
+  url: "/pull-requests/settings",
+  icon: IconRoute,
+  translateTitle: true,
+  pullRequestView: "settings",
+  search: { tab: "nudging" },
 }
 
 const configNavItem: NavItem = {
@@ -129,6 +139,24 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const currentSearch = routerState.location.search as
     | Record<string, unknown>
     | undefined
+  const originWorkspace =
+    typeof currentSearch?.from === "string" &&
+    /^prw_[0-9a-f]{32}$/.test(currentSearch.from)
+      ? currentSearch.from
+      : undefined
+  const pullRequestDestination =
+    currentPath === "/pull-requests" ||
+    currentPath.startsWith("/pull-requests/")
+      ? currentPath
+      : null
+  const [servicesOpen, setServicesOpen] = useAutoRevealCollapsible(
+    pullRequestDestination,
+    currentPath.startsWith("/agent/") || pullRequestDestination != null,
+  )
+  const [pullRequestsOpen, setPullRequestsOpen] = useAutoRevealCollapsible(
+    pullRequestDestination,
+    pullRequestDestination != null,
+  )
   const {
     channelItems,
     hasMoreChannels,
@@ -206,24 +234,66 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       },
       {
         label: "navigation.pull_requests",
-        items: [pullRequestsWorkNavItem, pullRequestsGateProfilesNavItem],
+        items: [
+          pullRequestsWorkNavItem,
+          pullRequestsGateProfilesNavItem,
+          pullRequestsLifecycleSettingsNavItem,
+        ],
       },
     ]
   }, [channelItems])
 
   const isNavItemActive = (item: NavItem) => {
+    if (item.pullRequestView === "work") {
+      return (
+        currentPath === "/pull-requests" ||
+        currentPath.startsWith("/pull-requests/prw_")
+      )
+    }
+    if (item.pullRequestView === "profiles") {
+      return (
+        currentPath === "/pull-requests/profiles" ||
+        currentPath.startsWith("/pull-requests/profiles/")
+      )
+    }
+    if (item.pullRequestView === "settings") {
+      return (
+        currentPath === "/pull-requests/settings" ||
+        currentPath.startsWith("/pull-requests/settings/")
+      )
+    }
     const pathActive =
       currentPath === item.url ||
       (item.url !== "/" && currentPath.startsWith(`${item.url}/`))
-    if (!pathActive || item.pullRequestView == null) return pathActive
-    const configurationActive = currentSearch?.view === "gate-profiles"
-    return (
-      item.pullRequestView === (configurationActive ? "configuration" : "work")
-    )
+    return pathActive
   }
 
   const renderNavItem = (item: NavItem) => {
     const isActive = isNavItemActive(item)
+    const linkTo =
+      item.pullRequestView === "work" && originWorkspace
+        ? `/pull-requests/${originWorkspace}`
+        : item.url
+    const linkSearch =
+      item.pullRequestView === "profiles"
+        ? originWorkspace
+          ? { from: originWorkspace }
+          : undefined
+        : item.pullRequestView === "settings"
+          ? {
+              tab: "nudging",
+              ...(originWorkspace ? { from: originWorkspace } : {}),
+            }
+          : item.search
+    const prParent = currentPath.startsWith("/pull-requests/profiles")
+      ? "profiles"
+      : currentPath === "/pull-requests/settings"
+        ? "settings"
+        : currentPath.startsWith("/pull-requests/prw_")
+          ? "workspace"
+          : currentPath === "/pull-requests"
+            ? "portfolio"
+            : undefined
 
     const content = (
       <>
@@ -246,18 +316,28 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           className={`h-9 px-3 ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium dark:bg-white/10 dark:text-white" : "text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"}`}
         >
           <Link
-            to={item.url}
+            to={linkTo}
             activeOptions={
-              item.pullRequestView == null ? undefined : { exact: true }
+              item.pullRequestView === "work" ? { exact: true } : undefined
             }
             aria-current={isActive ? "page" : undefined}
             data-status={isActive ? "active" : undefined}
-            search={
-              item.pullRequestView === "work"
-                ? {}
-                : item.pullRequestView === "configuration"
-                  ? { view: "gate-profiles" }
-                  : undefined
+            search={linkSearch}
+            state={
+              item.pullRequestView && prParent
+                ? (previous) => ({
+                    ...previous,
+                    prParent,
+                    prParentIndex: previous.__TSR_index,
+                    prParentKey: previous.__TSR_key,
+                    ...(prParent === "workspace" || prParent === "portfolio"
+                      ? {
+                          prWorkIndex: previous.__TSR_index,
+                          prWorkKey: previous.__TSR_key,
+                        }
+                      : {}),
+                  })
+                : undefined
             }
           >
             {content}
@@ -270,7 +350,21 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const renderServiceSection = (section: NavSection) => (
     <Collapsible
       key={section.label}
-      defaultOpen={section.items.some(isNavItemActive)}
+      defaultOpen={
+        section.label === "navigation.pull_requests"
+          ? undefined
+          : section.items.some(isNavItemActive)
+      }
+      open={
+        section.label === "navigation.pull_requests"
+          ? pullRequestsOpen
+          : undefined
+      }
+      onOpenChange={
+        section.label === "navigation.pull_requests"
+          ? setPullRequestsOpen
+          : undefined
+      }
       className="group/service-section mb-1 last:mb-0"
     >
       <CollapsibleTrigger className="text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
@@ -330,10 +424,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </Collapsible>
 
         <Collapsible
-          defaultOpen={
-            currentPath.startsWith("/agent/") ||
-            currentPath === "/pull-requests"
-          }
+          open={servicesOpen}
+          onOpenChange={setServicesOpen}
           className="group/services-collapsible mb-1"
         >
           <SidebarGroup className="px-2 py-0">
@@ -363,4 +455,24 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       <SidebarRail />
     </Sidebar>
   )
+}
+
+function useAutoRevealCollapsible(
+  activeDestination: string | null,
+  initiallyOpen: boolean,
+): [boolean, React.Dispatch<React.SetStateAction<boolean>>] {
+  const [open, setOpen] = React.useState(initiallyOpen)
+  const previousDestination = React.useRef(activeDestination)
+
+  React.useEffect(() => {
+    if (
+      activeDestination != null &&
+      activeDestination !== previousDestination.current
+    ) {
+      setOpen(true)
+    }
+    previousDestination.current = activeDestination
+  }, [activeDestination])
+
+  return [open, setOpen]
 }

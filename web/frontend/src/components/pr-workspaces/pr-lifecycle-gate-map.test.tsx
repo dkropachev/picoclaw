@@ -762,6 +762,118 @@ describe("PR lifecycle gate map", () => {
     expect(implementationTab).toHaveAttribute("aria-selected", "true")
   })
 
+  it("lets a controller own the active flow while tabs report requested changes", () => {
+    const onFlowChange = vi.fn()
+    const onSelect = vi.fn()
+    const props = {
+      flow,
+      flowRevision: `sha256:${"b".repeat(64)}`,
+      onFlowChange,
+      onSelect,
+      profileID: "strict profile",
+      profileName: "Strict profile",
+      workflows,
+    } as const
+    const { rerender } = render(
+      <PRLifecycleGateMap {...props} activeFlowID="review" />,
+    )
+    const reviewTab = screen.getByRole("tab", { name: /^Review workflow/ })
+    const implementationTab = screen.getByRole("tab", {
+      name: /^Implementation workflow/,
+    })
+
+    fireEvent.click(implementationTab)
+
+    expect(onFlowChange).toHaveBeenLastCalledWith("implementation")
+    expect(reviewTab).toHaveAttribute("aria-selected", "true")
+    expect(implementationTab).toHaveAttribute("aria-selected", "false")
+
+    rerender(<PRLifecycleGateMap {...props} activeFlowID="implementation" />)
+
+    expect(implementationTab).toHaveAttribute("aria-selected", "true")
+    expect(screen.getByText("Load implementation batch")).toBeInTheDocument()
+    const implementationGate = screen.getByRole("button", {
+      name: "Accept implementation",
+    })
+    expect(implementationGate).toHaveAttribute(
+      "data-edit-href",
+      "/pull-requests/profiles/strict%20profile?flow=implementation&gate=pr.implementation.complete",
+    )
+
+    onFlowChange.mockClear()
+    fireEvent.click(implementationGate)
+    expect(onFlowChange).not.toHaveBeenCalled()
+    expect(onSelect).toHaveBeenCalledWith("pr.implementation.complete")
+  })
+
+  it("reports the selected gate's flow when it disagrees with the controller", () => {
+    const onFlowChange = vi.fn()
+    const { rerender } = render(
+      <PRLifecycleGateMap
+        activeFlowID="review"
+        flow={flow}
+        flowRevision={`sha256:${"b".repeat(64)}`}
+        onFlowChange={onFlowChange}
+        onSelect={vi.fn()}
+        selectedDecisionPoint="pr.implementation.complete"
+        workflows={workflows}
+      />,
+    )
+
+    expect(onFlowChange).toHaveBeenCalledOnce()
+    expect(onFlowChange).toHaveBeenCalledWith("implementation")
+    expect(
+      screen.getByRole("tab", { name: /^Review workflow/ }),
+    ).toHaveAttribute("aria-selected", "true")
+
+    rerender(
+      <PRLifecycleGateMap
+        activeFlowID="implementation"
+        flow={flow}
+        flowRevision={`sha256:${"b".repeat(64)}`}
+        onFlowChange={onFlowChange}
+        onSelect={vi.fn()}
+        selectedDecisionPoint="pr.implementation.complete"
+        workflows={workflows}
+      />,
+    )
+
+    expect(
+      screen.getByRole("button", { name: "Accept implementation" }),
+    ).toHaveAttribute("data-gate-selected", "true")
+    expect(onFlowChange).toHaveBeenCalledOnce()
+  })
+
+  it("keeps a shared gate in the explicitly selected flow", () => {
+    const onFlowChange = vi.fn()
+    const sharedFlow = structuredClone(flow)
+    sharedFlow.flows[1].nodes.push({
+      id: "i_deferred_publish",
+      kind: "gate",
+      title: "Approve implementation follow-up",
+      description: "Approve deferred implementation work.",
+      decision_point: "pr.deferred.publish",
+      ordinal: 12,
+      editable: true,
+    })
+    render(
+      <PRLifecycleGateMap
+        activeFlowID="implementation"
+        flow={sharedFlow}
+        flowRevision={`sha256:${"b".repeat(64)}`}
+        onFlowChange={onFlowChange}
+        onSelect={vi.fn()}
+        selectedDecisionPoint="pr.deferred.publish"
+        workflows={workflows}
+      />,
+    )
+
+    expect(onFlowChange).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole("tab", { name: /^Implementation workflow/ }),
+    ).toHaveAttribute("aria-selected", "true")
+  })
+
   it("renders actions, named editable gates, and locked safeguards", () => {
     const onSelect = vi.fn()
     const { container } = renderMap("pr.review.start", onSelect)
@@ -794,7 +906,7 @@ describe("PR lifecycle gate map", () => {
     expect(container.querySelectorAll("[data-gate-number]")).toHaveLength(0)
     expect(notificationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests?view=gate-profiles&profile=strict%20profile&gate=pr.review.publish",
+      "/pull-requests/profiles/strict%20profile?flow=review&gate=pr.review.publish",
     )
     const locked = screen.getByRole("group", { name: "Protect audit archive" })
     expect(locked).toHaveAttribute("data-flow-element", "locked-safeguard")

@@ -241,7 +241,7 @@ func renderSVGFlow(output *bytes.Buffer, layout svgFlowLayout, panelHeight float
 	}
 
 	for _, node := range layout.flow.Nodes {
-		renderSVGNode(output, node, layout.positions[node.ID], gateFormats[node.DecisionPoint])
+		renderSVGNode(output, layout.flow.ID, node, layout.positions[node.ID], gateFormats[node.DecisionPoint])
 	}
 	output.WriteString("  </g>\n")
 }
@@ -254,7 +254,7 @@ func renderSVGEdgeLabel(output *bytes.Buffer, edge Edge, x, y float64) {
 	fmt.Fprintf(output, "    <g data-edge-outcome=\"%s\"><rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"22\" rx=\"11\" class=\"edge-label-bg\"/><text x=\"%.1f\" y=\"%.1f\" class=\"edge-label\">%s</text></g>\n", escapeXML(edge.Outcome), x-width/2, y-14, width, x, y+1, escapeXML(edge.Label))
 }
 
-func renderSVGNode(output *bytes.Buffer, node Node, point svgPoint, gateFormat string) {
+func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoint, gateFormat string) {
 	className := "action"
 	kindLabel := "ACTION"
 	kindClass := "action-kind"
@@ -269,7 +269,7 @@ func renderSVGNode(output *bytes.Buffer, node Node, point svgPoint, gateFormat s
 	}
 
 	if node.Kind == NodeGate && node.Editable {
-		href := "/pull-requests?view=gate-profiles&profile=default&gate=" + url.QueryEscape(node.DecisionPoint)
+		href := "/pull-requests/profiles/default?flow=" + url.QueryEscape(flowID) + "&gate=" + url.QueryEscape(node.DecisionPoint)
 		fmt.Fprintf(output, "    <a class=\"gate-link\" href=\"%s\" target=\"_top\" aria-label=\"Edit %s\" data-decision-point=\"%s\">\n", escapeXML(href), escapeXML(node.Title), escapeXML(node.DecisionPoint))
 	} else {
 		fmt.Fprintf(output, "    <g data-flow-kind=\"%s\" data-node-id=\"%s\"%s>\n", escapeXML(string(node.Kind)), escapeXML(node.ID), optionalSVGAttribute("data-safeguard", node.Safeguard))

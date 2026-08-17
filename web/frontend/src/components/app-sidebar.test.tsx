@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Provider } from "jotai"
 import type { AnchorHTMLAttributes, ReactNode } from "react"
@@ -14,42 +14,32 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
     to,
-    search,
     activeOptions,
+    search,
+    state: _state,
     ...props
   }: {
     children: ReactNode
     to: string
-    search?: Record<string, unknown>
     activeOptions?: { exact?: boolean; includeSearch?: boolean }
+    search?: Record<string, string>
+    state?: unknown
   } & AnchorHTMLAttributes<HTMLAnchorElement>) =>
     (() => {
+      void _state
       const pathActive = activeOptions?.exact
         ? pathname === to
         : pathname === to || (to !== "/" && pathname.startsWith(`${to}/`))
-      const searchActive =
-        activeOptions?.includeSearch === false ||
-        (activeOptions?.exact
-          ? JSON.stringify(routeSearch) === JSON.stringify(search ?? {})
-          : Object.entries(search ?? {}).every(
-              ([key, value]) => routeSearch[key] === value,
-            ))
-      const nativeActive = pathActive && searchActive
 
       return (
         <a
           {...props}
           href={
             search && Object.keys(search).length > 0
-              ? `${to}?${new URLSearchParams(
-                  Object.entries(search).map(([key, value]) => [
-                    key,
-                    String(value),
-                  ]),
-                ).toString()}`
+              ? `${to}?${new URLSearchParams(search).toString()}`
               : to
           }
-          {...(nativeActive
+          {...(pathActive
             ? { "aria-current": "page", "data-status": "active" }
             : {})}
         >
@@ -75,7 +65,7 @@ vi.mock("@/hooks/use-sidebar-channels", () => ({
 }))
 
 function renderSidebar() {
-  render(
+  return render(
     <Provider>
       <SidebarProvider>
         <AppSidebar collapsible="none" />
@@ -179,7 +169,7 @@ describe("AppSidebar", () => {
     )
   })
 
-  it("groups unified work and gate profiles in a collapsible Pull requests section", async () => {
+  it("links each Pull requests destination to a first-class URL", async () => {
     pathname = "/pull-requests"
     const user = userEvent.setup()
 
@@ -187,14 +177,18 @@ describe("AppSidebar", () => {
 
     const trigger = screen.getByRole("button", { name: "Pull requests" })
     expect(trigger).toHaveAttribute("aria-expanded", "true")
-    const work = screen.getByRole("link", { name: "Pull request work" })
+    const work = screen.getByRole("link", { name: "Work" })
     const gateProfiles = screen.getByRole("link", {
       name: "Gate profiles",
     })
+    const lifecycleSettings = screen.getByRole("link", {
+      name: "Lifecycle settings",
+    })
     expect(work).toHaveAttribute("href", "/pull-requests")
-    expect(gateProfiles).toHaveAttribute(
+    expect(gateProfiles).toHaveAttribute("href", "/pull-requests/profiles")
+    expect(lifecycleSettings).toHaveAttribute(
       "href",
-      "/pull-requests?view=gate-profiles",
+      "/pull-requests/settings?tab=nudging",
     )
     expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
@@ -204,6 +198,7 @@ describe("AppSidebar", () => {
     expect(work).toHaveAttribute("data-status", "active")
     expect(gateProfiles).not.toHaveAttribute("aria-current")
     expect(gateProfiles).not.toHaveAttribute("data-status")
+    expect(lifecycleSettings).not.toHaveAttribute("aria-current")
     expect(
       gateProfiles.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "false")
@@ -212,28 +207,131 @@ describe("AppSidebar", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "false")
     expect(work).not.toBeVisible()
     expect(gateProfiles).not.toBeVisible()
+    expect(lifecycleSettings).not.toBeVisible()
   })
 
-  it("marks only Pull requests gate profiles active for the configuration view", () => {
-    pathname = "/pull-requests"
-    routeSearch = { view: "gate-profiles" }
+  it.each([
+    ["/pull-requests", "Work"],
+    ["/pull-requests/prw_example", "Work"],
+    ["/pull-requests/profiles", "Gate profiles"],
+    ["/pull-requests/profiles/default/edit", "Gate profiles"],
+    ["/pull-requests/settings", "Lifecycle settings"],
+    ["/pull-requests/settings/review", "Lifecycle settings"],
+  ])("marks only %s navigation active", (route, activeName) => {
+    pathname = route
 
     renderSidebar()
 
-    const work = screen.getByRole("link", { name: "Pull request work" })
-    const gateProfiles = screen.getByRole("link", {
-      name: "Gate profiles",
-    })
-    expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
-      "data-active",
-      "false",
+    for (const name of ["Work", "Gate profiles", "Lifecycle settings"]) {
+      const link = screen.getByRole("link", { name })
+      const active = name === activeName
+      expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+        "data-active",
+        String(active),
+      )
+      if (active) {
+        expect(link).toHaveAttribute("aria-current", "page")
+        expect(link).toHaveAttribute("data-status", "active")
+      } else {
+        expect(link).not.toHaveAttribute("aria-current")
+        expect(link).not.toHaveAttribute("data-status")
+      }
+    }
+  })
+
+  it("preserves the originating workspace across configuration links", () => {
+    const workspaceID = `prw_${"a".repeat(32)}`
+    pathname = "/pull-requests/profiles/default"
+    routeSearch = { flow: "review", from: workspaceID }
+
+    renderSidebar()
+
+    expect(screen.getByRole("link", { name: "Work" })).toHaveAttribute(
+      "href",
+      `/pull-requests/${workspaceID}`,
+    )
+    expect(screen.getByRole("link", { name: "Gate profiles" })).toHaveAttribute(
+      "href",
+      `/pull-requests/profiles?from=${workspaceID}`,
     )
     expect(
-      gateProfiles.closest('[data-sidebar="menu-button"]'),
-    ).toHaveAttribute("data-active", "true")
-    expect(work).not.toHaveAttribute("aria-current")
-    expect(work).not.toHaveAttribute("data-status")
-    expect(gateProfiles).toHaveAttribute("aria-current", "page")
-    expect(gateProfiles).toHaveAttribute("data-status", "active")
+      screen.getByRole("link", { name: "Lifecycle settings" }),
+    ).toHaveAttribute(
+      "href",
+      `/pull-requests/settings?tab=nudging&from=${workspaceID}`,
+    )
+  })
+
+  it("reveals a PR destination after navigation while preserving manual collapse", async () => {
+    const user = userEvent.setup()
+    const view = renderSidebar()
+    const services = screen.getByRole("button", { name: "Services" })
+
+    expect(services).toHaveAttribute("aria-expanded", "false")
+
+    pathname = "/pull-requests/profiles/default"
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+
+    await waitFor(() =>
+      expect(services).toHaveAttribute("aria-expanded", "true"),
+    )
+    const pullRequests = screen.getByRole("button", {
+      name: "Pull requests",
+    })
+    expect(pullRequests).toHaveAttribute("aria-expanded", "true")
+    expect(screen.getByRole("link", { name: "Gate profiles" })).toBeVisible()
+
+    await user.click(pullRequests)
+    expect(pullRequests).toHaveAttribute("aria-expanded", "false")
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    expect(pullRequests).toHaveAttribute("aria-expanded", "false")
+
+    pathname = "/pull-requests/settings"
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    await waitFor(() =>
+      expect(pullRequests).toHaveAttribute("aria-expanded", "true"),
+    )
+
+    await user.click(services)
+    expect(services).toHaveAttribute("aria-expanded", "false")
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    expect(services).toHaveAttribute("aria-expanded", "false")
+
+    pathname = "/pull-requests/prw_example"
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    await waitFor(() =>
+      expect(services).toHaveAttribute("aria-expanded", "true"),
+    )
+    expect(screen.getByRole("link", { name: "Work" })).toBeVisible()
   })
 })

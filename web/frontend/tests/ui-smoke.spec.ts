@@ -4358,12 +4358,10 @@ test("unified pull request workspace combines review, implementation, nudges, an
   const errors = collectPageErrors(page)
   await gotoMockedRoute(
     page,
-    `/pull-requests?workspace=${prWorkspaceID}&cursor=private&prompt=private#secret`,
+    `/pull-requests/${prWorkspaceID}?cursor=private&prompt=private#secret`,
   )
 
-  await expect(page).toHaveURL(
-    new RegExp(`/pull-requests\\?workspace=${prWorkspaceID}$`),
-  )
+  await expect(page).toHaveURL(new RegExp(`/pull-requests/${prWorkspaceID}$`))
   await expect(page.getByText("PR charter", { exact: true })).toBeVisible()
   await expect(
     page.getByText("Review search and nudges", { exact: true }),
@@ -4385,11 +4383,41 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expectNoSeriousA11yViolations(page)
 
   const pullRequests = page.getByRole("button", { name: "Pull requests" })
-  if ((await pullRequests.getAttribute("aria-expanded")) !== "true") {
-    await pullRequests.click()
-  }
+  await expect(pullRequests).toHaveAttribute("aria-expanded", "true")
+  await expect(
+    page.getByRole("link", { name: "Work", exact: true }),
+  ).toHaveAttribute("aria-current", "page")
+
+  // A PR destination reached through browser history must reveal both sidebar
+  // ancestors again, even if the user collapsed the PR section elsewhere.
+  await page.getByRole("link", { name: "Models", exact: true }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  await pullRequests.click()
+  await expect(pullRequests).toHaveAttribute("aria-expanded", "false")
+  await pullRequests.click()
   await page.getByRole("link", { name: "Gate profiles" }).click()
-  await expect(page).toHaveURL(/\/pull-requests\?view=gate-profiles$/)
+  await expect(page).toHaveURL(/\/pull-requests\/profiles$/)
+  await expect(
+    page.getByRole("link", { name: "Gate profiles" }),
+  ).toHaveAttribute("aria-current", "page")
+  await page.goBack()
+  await expect(page).toHaveURL(/\/models$/)
+  await pullRequests.click()
+  await expect(pullRequests).toHaveAttribute("aria-expanded", "false")
+  await page.goBack()
+  await expect(page).toHaveURL(new RegExp(`/pull-requests/${prWorkspaceID}$`))
+  await expect(pullRequests).toHaveAttribute("aria-expanded", "true")
+  await expect(
+    page.getByRole("link", { name: "Work", exact: true }),
+  ).toHaveAttribute("aria-current", "page")
+  const workspaceHistoryIndex = await page.evaluate(
+    () => window.history.state?.__TSR_index,
+  )
+
+  await page.getByRole("button", { name: "Configure gate profile" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/profiles\\?from=${prWorkspaceID}$`),
+  )
   await expect(
     page.getByRole("heading", { name: "PR lifecycle gate profiles" }),
   ).toBeVisible()
@@ -4400,12 +4428,177 @@ test("unified pull request workspace combines review, implementation, nudges, an
     page.getByRole("heading", { name: "PR lifecycle gate flow" }),
   ).toHaveCount(0)
   await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(0)
-  await expect(page.getByText("Review minimum")).toBeVisible()
-  await expect(page.getByText("XS modules")).toBeVisible()
+  await expect(page.getByLabel("Stable profile ID")).toBeVisible()
+  await expect(page.getByLabel("Review minimum")).toHaveCount(0)
+  await expect(page.getByLabel("XS modules")).toHaveCount(0)
+  await expect(page.getByLabel("Deferred issue handling")).toHaveCount(0)
+
+  const configurationTabs = page.getByRole("navigation", {
+    name: "PR lifecycle configuration",
+  })
+  const profilesPageTab = configurationTabs.getByRole("button", {
+    name: "Profiles",
+  })
+  const settingsPageTab = configurationTabs.getByRole("button", {
+    name: "Lifecycle settings",
+  })
+  await expect(profilesPageTab).toHaveAttribute("aria-current", "page")
+  await settingsPageTab.click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
+  )
+  await expect(
+    page.getByRole("heading", { name: "Lifecycle settings", exact: true }),
+  ).toBeVisible()
+  await expect(settingsPageTab).toHaveAttribute("aria-current", "page")
+  await expect(
+    page.getByRole("button", { name: "Edit Default profile" }),
+  ).toHaveCount(0)
+
+  const lifecycleTabs = page.getByRole("tablist", {
+    name: "Lifecycle settings",
+  })
+  const nudgingTab = lifecycleTabs.getByRole("tab", { name: "Nudging" })
+  const scopeTab = lifecycleTabs.getByRole("tab", { name: "Scope grades" })
+  const deferredTab = lifecycleTabs.getByRole("tab", {
+    name: "Deferred issues",
+  })
+  await expect(nudgingTab).toHaveAttribute("aria-selected", "true")
+  await expect(page.getByLabel("Review minimum")).toBeVisible()
+  await expect(page.getByLabel("XS modules")).toHaveCount(0)
+  await expect(page.getByLabel("Deferred issue handling")).toHaveCount(0)
+
+  await scopeTab.click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=scope&from=${prWorkspaceID}$`),
+  )
+  await expect(scopeTab).toHaveAttribute("aria-selected", "true")
+  await expect(page.getByLabel("Review minimum")).toHaveCount(0)
+  await expect(page.getByLabel("XS modules")).toBeVisible()
+  await expect(page.getByLabel("Deferred issue handling")).toHaveCount(0)
+  await page.goBack()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
+  )
+  await expect(nudgingTab).toHaveAttribute("aria-selected", "true")
+  await page.goForward()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=scope&from=${prWorkspaceID}$`),
+  )
+  await expect(scopeTab).toHaveAttribute("aria-selected", "true")
+
+  await deferredTab.click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=deferred&from=${prWorkspaceID}$`),
+  )
+  await expect(deferredTab).toHaveAttribute("aria-selected", "true")
+  await expect(page.getByLabel("Review minimum")).toHaveCount(0)
+  await expect(page.getByLabel("XS modules")).toHaveCount(0)
+  await expect(page.getByLabel("Deferred issue handling")).toBeVisible()
+
+  await nudgingTab.click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
+  )
+  const reviewMinimum = page.getByLabel("Review minimum")
+  const originalReviewMinimum = await reviewMinimum.inputValue()
+  await reviewMinimum.fill(String(Number(originalReviewMinimum) + 1))
+  await page.getByRole("link", { name: "Models", exact: true }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}&dialog=discard$`,
+    ),
+  )
+  const discardDialog = page.getByRole("alertdialog", {
+    name: "Discard gate profile changes?",
+  })
+  await expect(discardDialog).toBeVisible()
+  await discardDialog.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
+  )
+  await expect(reviewMinimum).toHaveValue(
+    String(Number(originalReviewMinimum) + 1),
+  )
+
+  await page.getByRole("link", { name: "Models", exact: true }).click()
+  await discardDialog.getByRole("button", { name: "Discard changes" }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  await page.goBack()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
+  )
+  await expect(page.getByLabel("Review minimum")).toHaveValue(
+    originalReviewMinimum,
+  )
+
+  await page
+    .getByLabel("Review minimum")
+    .fill(String(Number(originalReviewMinimum) + 1))
+  const settingsHistoryIndex = await page.evaluate(
+    () => window.history.state?.__TSR_index,
+  )
+  await page.evaluate(
+    ({ current, target }) => window.history.go(target - current),
+    { current: settingsHistoryIndex, target: workspaceHistoryIndex },
+  )
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}&dialog=discard$`,
+    ),
+  )
+  await expect(discardDialog).toBeVisible()
+  await expect
+    .poll(() => page.evaluate(() => window.history.state?.__TSR_index))
+    .toBe(workspaceHistoryIndex)
+  await discardDialog.getByRole("button", { name: "Keep editing" }).click()
+  await expect
+    .poll(() => page.evaluate(() => window.history.state?.__TSR_index))
+    .toBe(settingsHistoryIndex)
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
+  )
+  await expect(page.getByLabel("Review minimum")).toHaveValue(
+    String(Number(originalReviewMinimum) + 1),
+  )
+
+  await page.getByRole("button", { name: "Back to pull request work" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}&dialog=discard$`,
+    ),
+  )
+  await expect(discardDialog).toBeVisible()
+  await discardDialog.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page.getByLabel("Review minimum")).toHaveValue(
+    String(Number(originalReviewMinimum) + 1),
+  )
+  await page.evaluate(
+    ({ current, target }) => window.history.go(target - current),
+    { current: settingsHistoryIndex, target: workspaceHistoryIndex },
+  )
+  await expect(discardDialog).toBeVisible()
+  await discardDialog.getByRole("button", { name: "Discard changes" }).click()
+  await expect(page).toHaveURL(new RegExp(`/pull-requests/${prWorkspaceID}$`))
+  await expect
+    .poll(() => page.evaluate(() => window.history.state?.__TSR_index))
+    .toBe(workspaceHistoryIndex)
+  await page.getByRole("button", { name: "Configure gate profile" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/profiles\\?from=${prWorkspaceID}$`),
+  )
+  await expect(
+    page.getByRole("button", { name: "Edit Default profile" }),
+  ).toBeVisible()
+  await expect(page.getByLabel("Review minimum")).toHaveCount(0)
+  await expect(page.getByLabel("XS modules")).toHaveCount(0)
+  await expect(page.getByLabel("Deferred issue handling")).toHaveCount(0)
 
   await page.getByRole("button", { name: "Edit Default profile" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\?view=gate-profiles&profile=default$/,
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}$`,
+    ),
   )
   await expect(
     page.getByRole("heading", { name: "Edit Default gate profile" }),
@@ -4504,8 +4697,30 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await expectNoHorizontalOverflow(page)
   }
   await implementationFlowTab.click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=implementation&from=${prWorkspaceID}$`,
+    ),
+  )
   await expect(implementationFlowTab).toHaveAttribute("aria-selected", "true")
   await expect(reviewFlowTab).toHaveAttribute("aria-selected", "false")
+  await expect(implementationFlow).toBeVisible()
+  await expect(reviewFlow).toBeHidden()
+  await page.goBack()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}$`,
+    ),
+  )
+  await expect(reviewFlowTab).toHaveAttribute("aria-selected", "true")
+  await expect(reviewFlow).toBeVisible()
+  await page.goForward()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=implementation&from=${prWorkspaceID}$`,
+    ),
+  )
+  await expect(implementationFlowTab).toHaveAttribute("aria-selected", "true")
   await expect(implementationFlow).toBeVisible()
   await expect(reviewFlow).toBeHidden()
   await expect(
@@ -4651,7 +4866,9 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await lockedSafeguard.click()
   await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(0)
   await expect(page).toHaveURL(
-    /\/pull-requests\?view=gate-profiles&profile=default$/,
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=implementation&from=${prWorkspaceID}$`,
+    ),
   )
   await expect(gateMap.getByText("Request PR review")).toHaveCount(0)
 
@@ -4678,6 +4895,11 @@ test("unified pull request workspace combines review, implementation, nudges, an
   }
   await expectNoSeriousA11yViolations(page)
   await reviewFlowTab.click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}$`,
+    ),
+  )
   await expect(reviewFlowTab).toHaveAttribute("aria-selected", "true")
   const acceptReviewResults = gateMap.getByRole("button", {
     name: "Accept review results",
@@ -4691,11 +4913,27 @@ test("unified pull request workspace combines review, implementation, nudges, an
     },
   })
   await expect(page).toHaveURL(
-    /\/pull-requests\?view=gate-profiles&profile=default&gate=pr\.review\.complete$/,
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}&gate=pr\\.review\\.complete$`,
+    ),
   )
   const gateDialog = page.getByRole("dialog", {
     name: "Accept review results",
   })
+  await expect(gateDialog).toBeVisible()
+  await page.goBack()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}$`,
+    ),
+  )
+  await expect(gateDialog).toBeHidden()
+  await page.goForward()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}&gate=pr\\.review\\.complete$`,
+    ),
+  )
   await expect(gateDialog).toBeVisible()
   await expect(gateDialog.locator("#pr-gate-workflow-editor")).toHaveAttribute(
     "data-decision-point",
@@ -4706,15 +4944,64 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expectGateDialogFits(gateDialog)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
+  const workflowName = gateDialog.getByLabel("Workflow name")
+  const originalWorkflowName = await workflowName.inputValue()
+  await workflowName.fill(`${originalWorkflowName} edited`)
+  const profileGateHistoryIndex = await page.evaluate(
+    () => window.history.state?.__TSR_index,
+  )
+  await page.evaluate(
+    ({ current, target }) => window.history.go(target - current),
+    { current: profileGateHistoryIndex, target: workspaceHistoryIndex },
+  )
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}&gate=pr\\.review\\.complete&dialog=discard$`,
+    ),
+  )
+  await expect(discardDialog).toBeVisible()
+  await discardDialog.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}&gate=pr\\.review\\.complete$`,
+    ),
+  )
+  await expect(gateDialog).toBeVisible()
+  await expect(workflowName).toHaveValue(`${originalWorkflowName} edited`)
+  await expect
+    .poll(() => page.evaluate(() => window.history.state?.__TSR_index))
+    .toBe(profileGateHistoryIndex)
+  await workflowName.fill(originalWorkflowName)
   await gateDialog.getByRole("button", { name: "Done" }).click()
   await expect(gateDialog).toBeHidden()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}$`,
+    ),
+  )
 
   await page.setViewportSize({ width: 1280, height: 900 })
   await gateMap.getByRole("button", { name: "Accept review results" }).click()
   await expect(gateDialog).toBeVisible()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}&gate=pr\\.review\\.complete$`,
+    ),
+  )
   await expectGateDialogFits(gateDialog)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
+  await gateDialog.getByRole("button", { name: "Done" }).click()
+  await expect(gateDialog).toBeHidden()
+  await page.getByRole("button", { name: "Back to gate profiles" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/pull-requests/profiles\\?from=${prWorkspaceID}$`),
+  )
+  await expect(
+    page.getByRole("button", { name: "Save profiles" }),
+  ).toBeDisabled()
+  await page.getByRole("button", { name: "Back to pull request work" }).click()
+  await expect(page).toHaveURL(new RegExp(`/pull-requests/${prWorkspaceID}$`))
   expect(errors).toEqual([])
 })
 
