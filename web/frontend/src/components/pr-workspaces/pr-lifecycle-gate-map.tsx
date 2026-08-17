@@ -90,16 +90,6 @@ const gateFormatLabels: Record<GateStageCategory, string> = {
   user: "User",
 }
 
-type FlowRouteTone = "linear" | "choice" | "parallel" | "optional" | "return"
-
-const flowRouteTones: FlowRouteTone[] = [
-  "linear",
-  "choice",
-  "parallel",
-  "optional",
-  "return",
-]
-
 export function PRLifecycleGateMap({
   flow,
   flowRevision,
@@ -205,7 +195,6 @@ export function PRLifecycleGateMap({
             aria-label="Diagram legend"
             className="text-muted-foreground flex flex-wrap gap-1.5 text-xs"
           >
-            <Legend label="Action" variant="action" />
             <Legend label="Editable gate" variant="gate" />
             <Legend label="Locked safeguard" variant="required" />
           </div>
@@ -1142,11 +1131,6 @@ function useFlowGeometry(
   return geometry
 }
 
-function flowRouteTone(edge: PRLifecycleFlowEdge): FlowRouteTone {
-  if (edge.loop) return "return"
-  return edge.mode
-}
-
 function FlowEdgeOverlay({
   flow,
   geometry,
@@ -1158,12 +1142,7 @@ function FlowEdgeOverlay({
   instanceID: string
   layout: FlowLayout
 }) {
-  const markerIDByTone = new Map(
-    flowRouteTones.map((tone) => [
-      tone,
-      `${instanceID}-${flow.id}-${tone}-edge-arrow`,
-    ]),
-  )
+  const markerID = `${instanceID}-${flow.id}-edge-arrow`
   const measuredByKey = new Map(
     geometry.edges.map((edge) => [flowEdgeKey(edge.edge), edge]),
   )
@@ -1178,38 +1157,27 @@ function FlowEdgeOverlay({
     <>
       <svg
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 z-0 size-full overflow-hidden"
+        className="text-primary pointer-events-none absolute inset-0 z-0 size-full overflow-hidden"
         data-flow-edge-overlay
         preserveAspectRatio="none"
         viewBox={`0 0 ${Math.max(1, geometry.width)} ${Math.max(1, geometry.height)}`}
       >
         <defs>
-          {flowRouteTones.map((tone) => (
-            <marker
-              data-flow-arrow-marker={tone}
-              data-flow-tone={tone}
-              id={markerIDByTone.get(tone)}
-              key={tone}
-              markerHeight="8"
-              markerUnits="userSpaceOnUse"
-              markerWidth="8"
-              orient="auto"
-              refX="7"
-              refY="4"
-              viewBox="0 0 8 8"
-            >
-              <path
-                className="flow-route-fill"
-                d="M 0 0 L 8 4 L 0 8 z"
-                data-flow-arrowhead={tone}
-                data-flow-tone={tone}
-              />
-            </marker>
-          ))}
+          <marker
+            id={markerID}
+            markerHeight="8"
+            markerUnits="userSpaceOnUse"
+            markerWidth="8"
+            orient="auto"
+            refX="7"
+            refY="4"
+            viewBox="0 0 8 8"
+          >
+            <path className="fill-primary" d="M 0 0 L 8 4 L 0 8 z" />
+          </marker>
         </defs>
         {visibleEdges.map((edge) => {
           const key = flowEdgeKey(edge)
-          const tone = flowRouteTone(edge)
           const measured = measuredByKey.get(key)
           const outgoing = layout.outgoing.get(edge.from) ?? []
           const branched = outgoing.length > 1
@@ -1217,11 +1185,7 @@ function FlowEdgeOverlay({
             !edge.loop && (layout.incoming.get(edge.to) ?? []).length > 1
           const label = branched ? (edge.label ?? "Primary") : undefined
           return (
-            <g
-              data-flow-edge-layer={key}
-              data-flow-tone={tone}
-              key={`path-${key}`}
-            >
+            <g data-flow-edge-layer={key} key={`path-${key}`}>
               {measured && !measured.path.includes(" C ") ? (
                 <path
                   className="stroke-background fill-none"
@@ -1235,8 +1199,9 @@ function FlowEdgeOverlay({
               ) : null}
               <path
                 className={cn(
-                  "flow-route-color fill-none stroke-current",
-                  edge.mode === "optional" && "[stroke-dasharray:5_4]",
+                  "fill-none stroke-current",
+                  edge.mode === "optional" &&
+                    "opacity-65 [stroke-dasharray:5_4]",
                   !measured && "opacity-0",
                 )}
                 d={measured?.path ?? "M 0 0"}
@@ -1264,11 +1229,8 @@ function FlowEdgeOverlay({
                 }
                 data-flow-source={edge.from}
                 data-flow-target={edge.to}
-                data-flow-tone={tone}
                 data-flow-visible-edge-key={key}
-                markerEnd={
-                  merged ? undefined : `url(#${markerIDByTone.get(tone)})`
-                }
+                markerEnd={merged ? undefined : `url(#${markerID})`}
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 strokeWidth={edge.mode === "parallel" ? "2.5" : "1.5"}
@@ -1283,11 +1245,10 @@ function FlowEdgeOverlay({
           const size = 7
           const diamondY = measured.endY - 10
           return (
-            <g data-flow-tone="merge" key={targetID}>
+            <g key={targetID}>
               <line
-                className="flow-route-color stroke-current"
+                className="stroke-current"
                 data-flow-merge-stem={targetID}
-                data-flow-tone="merge"
                 strokeWidth="1.5"
                 vectorEffect="non-scaling-stroke"
                 x1={measured.endX}
@@ -1296,9 +1257,8 @@ function FlowEdgeOverlay({
                 y2={measured.endY}
               />
               <rect
-                className="flow-route-label-surface"
+                className="fill-background stroke-current"
                 data-flow-merge-diamond={targetID}
-                data-flow-tone="merge"
                 height={size}
                 strokeWidth="1.5"
                 transform={`rotate(45 ${measured.endX} ${diamondY})`}
@@ -1372,7 +1332,6 @@ function FlowEdgeLabel({
   y: number
 }) {
   const labelWidth = flowEdgeLabelWidth(label)
-  const tone = flowRouteTone(edge)
   const centerX = Math.max(
     labelWidth / 2 + 2,
     Math.min(width - labelWidth / 2 - 2, x),
@@ -1384,13 +1343,10 @@ function FlowEdgeLabel({
       data-flow-route-mode={edge.mode}
       data-flow-source={edge.from}
       data-flow-target={edge.to}
-      data-flow-tone={tone}
       transform={`translate(${centerX} ${y})`}
     >
       <rect
-        className="flow-route-label-surface"
-        data-flow-label-surface={tone}
-        data-flow-tone={tone}
+        className="fill-background stroke-border"
         height="18"
         rx="4"
         width={labelWidth}
@@ -1398,9 +1354,7 @@ function FlowEdgeLabel({
         y="-9"
       />
       <text
-        className="flow-route-label-text text-[10px] font-semibold"
-        data-flow-label-text={tone}
-        data-flow-tone={tone}
+        className="fill-foreground text-[10px] font-semibold"
         dominantBaseline="central"
         textAnchor="middle"
       >
@@ -1573,12 +1527,11 @@ function GraphNode({
 function ActionNode({ node }: { node: PRLifecycleFlowNode }) {
   return (
     <div
-      className="flow-node-surface flex min-h-16 w-full min-w-0 flex-col rounded-lg border px-2.5 py-2 [overflow-wrap:anywhere] shadow-sm"
+      className="bg-secondary/70 flex min-h-16 w-full min-w-0 flex-col rounded-lg border px-2.5 py-2 [overflow-wrap:anywhere]"
       data-flow-element="action"
       data-flow-kind="action"
       data-flow-node-id={node.id}
       data-flow-operation={node.operation}
-      data-flow-tone="action"
     >
       <strong className="text-xs leading-snug">{node.title}</strong>
       <span
@@ -1595,18 +1548,14 @@ function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
   return (
     <div
       aria-label={node.title}
-      className="flow-node-surface flex min-h-20 w-full min-w-0 flex-col rounded-lg border-2 px-2.5 py-2 [overflow-wrap:anywhere] shadow-sm"
+      className="border-destructive/70 bg-destructive/5 flex min-h-20 w-full min-w-0 flex-col rounded-lg border-2 px-2.5 py-2 [overflow-wrap:anywhere] shadow-sm"
       data-flow-element="locked-safeguard"
       data-flow-kind="gate"
       data-flow-node-id={node.id}
-      data-flow-tone="safeguard"
       data-required-gate={node.safeguard}
       role="group"
     >
-      <span
-        className="flow-tone-badge w-fit rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase"
-        data-flow-tone="safeguard"
-      >
+      <span className="border-destructive/40 text-destructive w-fit rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase">
         Safeguard · locked
       </span>
       <strong className="mt-1 text-xs leading-snug">{node.title}</strong>
@@ -1647,8 +1596,8 @@ function EditableGateNode({
       aria-haspopup="dialog"
       aria-label={node.title}
       className={cn(
-        "flow-node-surface focus-visible:ring-ring focus-visible:ring-offset-background relative flex min-h-20 w-full min-w-0 cursor-pointer flex-col rounded-lg border-2 px-2.5 py-2 text-left [overflow-wrap:anywhere] shadow-sm transition-[background-color,border-color,box-shadow] outline-none hover:shadow-md focus-visible:ring-2 focus-visible:ring-offset-2",
-        format.format === "needs-setup" && "[border-style:dashed]",
+        "bg-primary/5 border-primary/60 hover:bg-primary/10 hover:border-primary focus-visible:ring-ring relative flex min-h-20 w-full min-w-0 cursor-pointer flex-col rounded-lg border-2 px-2.5 py-2 text-left [overflow-wrap:anywhere] shadow-sm transition-[background-color,border-color,box-shadow] outline-none hover:shadow-md focus-visible:ring-2",
+        selected && "bg-primary/10 border-primary ring-primary/30 ring-2",
       )}
       data-decision-point={decisionPoint}
       data-decision-title={node.title}
@@ -1657,7 +1606,6 @@ function EditableGateNode({
       data-flow-element="editable-gate"
       data-flow-kind="gate"
       data-flow-node-id={node.id}
-      data-flow-tone={`gate-${format.format}`}
       data-gate-format={format.format}
       data-gate-id={decisionPoint}
       data-gate-name={node.title}
@@ -1672,9 +1620,9 @@ function EditableGateNode({
         </strong>
         <span
           className={cn(
-            "flow-tone-badge shrink-0 rounded-md border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase",
+            "shrink-0 rounded-md border px-1.5 py-0.5 text-[9px] font-bold tracking-wider uppercase",
+            gateFormatClassName(format.format),
           )}
-          data-flow-tone={`gate-${format.format}`}
         >
           {format.label} gate
         </span>
@@ -1918,24 +1866,33 @@ function summarizeGateFormat(
   }
 }
 
+function gateFormatClassName(format: GateFormat) {
+  return cn(
+    format === "automatic" && "bg-muted text-muted-foreground",
+    format === "deterministic" && "bg-secondary text-secondary-foreground",
+    format === "ai" && "bg-primary/10 border-primary/40 text-primary",
+    format === "user" && "bg-accent text-accent-foreground",
+    format === "mixed" && "bg-primary text-primary-foreground",
+    format === "needs-setup" &&
+      "bg-destructive/10 border-destructive/50 text-destructive",
+  )
+}
+
 function Legend({
   label,
   variant,
 }: {
   label: string
-  variant: "action" | "gate" | "required"
+  variant: "gate" | "required"
 }) {
-  const tone =
-    variant === "action"
-      ? "action"
-      : variant === "gate"
-        ? "editable-gate"
-        : "safeguard"
   return (
     <span
-      className="flow-tone-badge rounded-md border px-2 py-1"
-      data-flow-legend="element"
-      data-flow-tone={tone}
+      className={cn(
+        "rounded-md border px-2 py-1",
+        variant === "gate" && "bg-primary/10 border-primary",
+        variant === "required" &&
+          "bg-destructive/5 border-destructive/60 text-destructive",
+      )}
     >
       {label}
     </span>
@@ -1949,7 +1906,6 @@ function GateFormatLegend() {
     { format: "ai", label: "AI" },
     { format: "user", label: "User" },
     { format: "mixed", label: "Mixed" },
-    { format: "needs-setup", label: "Needs setup" },
   ]
 
   return (
@@ -1960,9 +1916,10 @@ function GateFormatLegend() {
       <span className="mr-1 font-semibold">Gate format</span>
       {formats.map(({ format, label }) => (
         <span
-          className="flow-tone-badge rounded-md border px-1.5 py-0.5 font-bold tracking-wider uppercase"
-          data-flow-legend="gate-format"
-          data-flow-tone={`gate-${format}`}
+          className={cn(
+            "rounded-md border px-1.5 py-0.5 font-bold tracking-wider uppercase",
+            gateFormatClassName(format),
+          )}
           key={format}
         >
           {label}
@@ -1973,12 +1930,10 @@ function GateFormatLegend() {
 }
 
 function FlowRouteLegend() {
-  const routes: Array<{ label: string; tone: FlowRouteTone }> = [
-    { label: "Next", tone: "linear" },
-    { label: "Choice", tone: "choice" },
-    { label: "All required", tone: "parallel" },
-    { label: "Optional", tone: "optional" },
-    { label: "Return", tone: "return" },
+  const routes = [
+    { label: "Next / choice", line: "border-t" },
+    { label: "All required", line: "border-t-[3px]" },
+    { label: "Optional", line: "border-t border-dashed" },
   ]
   return (
     <div
@@ -1987,57 +1942,20 @@ function FlowRouteLegend() {
     >
       <span className="font-semibold">Routes</span>
       {routes.map((route) => (
-        <span
-          className="flex items-center gap-1"
-          data-flow-legend="route"
-          data-flow-tone={route.tone}
-          key={route.tone}
-        >
-          <FlowRouteLegendSample tone={route.tone} />
+        <span className="flex items-center gap-1" key={route.label}>
+          <span
+            aria-hidden="true"
+            className={cn("border-primary w-4", route.line)}
+          />
           {route.label}
         </span>
       ))}
+      <span className="flex items-center gap-1">
+        <span aria-hidden="true" className="text-primary text-sm leading-none">
+          ↩
+        </span>
+        Return
+      </span>
     </div>
-  )
-}
-
-function FlowRouteLegendSample({ tone }: { tone: FlowRouteTone }) {
-  if (tone === "return") {
-    return (
-      <svg
-        aria-hidden="true"
-        className="flow-route-color h-3 w-6 overflow-visible"
-        data-flow-tone={tone}
-        viewBox="0 0 24 12"
-      >
-        <path
-          className="fill-none stroke-current"
-          d="M 22 10 H 9 Q 4 10 4 5 V 3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth="1.5"
-        />
-        <path className="fill-current" d="M 1 4 L 4 0 L 7 4 z" />
-      </svg>
-    )
-  }
-  return (
-    <svg
-      aria-hidden="true"
-      className="flow-route-color h-3 w-6 overflow-visible"
-      data-flow-tone={tone}
-      viewBox="0 0 24 12"
-    >
-      <path
-        className={cn(
-          "fill-none stroke-current",
-          tone === "optional" && "[stroke-dasharray:4_3]",
-        )}
-        d="M 1 6 H 18"
-        strokeLinecap="round"
-        strokeWidth={tone === "parallel" ? "3" : "1.5"}
-      />
-      <path className="fill-current" d="M 17 2 L 23 6 L 17 10 z" />
-    </svg>
   )
 }
