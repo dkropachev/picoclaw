@@ -80,8 +80,6 @@ interface GateProfilesPageProps {
   onDecisionPointChange?: (gate?: string) => void
   onFlowChange?: (flow: "review" | "implementation") => void
   onDiscardOpenChange?: (open: boolean) => void
-  onOpenProfiles?: () => void
-  onOpenSettings?: () => void
   onSettingsTabChange?: (tab: "nudging" | "scope" | "deferred") => void
 }
 
@@ -132,12 +130,6 @@ vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-profiles-page", () => ({
           onClick={() => props.onDiscardOpenChange?.(false)}
         >
           Close discard
-        </button>
-        <button type="button" onClick={props.onOpenProfiles}>
-          Profiles section
-        </button>
-        <button type="button" onClick={props.onOpenSettings}>
-          Settings section
         </button>
         <button
           type="button"
@@ -387,12 +379,11 @@ describe("pull requests route navigation", () => {
   })
 
   it("keeps settings separate, preserves its workspace origin, and gives every tab a URL", async () => {
-    const router = routerAt(`/pull-requests/profiles?from=${workspaceID}`)
+    const router = routerAt(
+      `/pull-requests/settings?tab=nudging&from=${workspaceID}`,
+    )
     render(<RouterProvider router={router} />)
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Settings section" }),
-    )
     await expectLocation(router, "/pull-requests/settings", {
       tab: "nudging",
       from: workspaceID,
@@ -408,11 +399,6 @@ describe("pull requests route navigation", () => {
       from: workspaceID,
     })
     expect(screen.getByTestId("settings-tab")).toHaveTextContent("deferred")
-
-    fireEvent.click(screen.getByRole("button", { name: "Profiles section" }))
-    await expectLocation(router, "/pull-requests/profiles", {
-      from: workspaceID,
-    })
 
     fireEvent.click(screen.getByRole("button", { name: "Back" }))
     await expectLocation(router, `/pull-requests/${workspaceID}`)

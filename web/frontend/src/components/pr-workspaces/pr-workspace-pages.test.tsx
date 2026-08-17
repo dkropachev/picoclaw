@@ -2890,14 +2890,11 @@ describe("unified PR workspace pages", () => {
 
   it("keeps the profiles page list-only and delegates profile navigation", async () => {
     const user = userEvent.setup()
-    const onOpenSettings = vi.fn()
     const onProfileChange = vi.fn()
     renderPage(
       <PRLifecycleGateProfilesPage
         onBack={vi.fn()}
         page="profiles"
-        onOpenProfiles={vi.fn()}
-        onOpenSettings={onOpenSettings}
         onProfileChange={onProfileChange}
       />,
     )
@@ -2915,13 +2912,11 @@ describe("unified PR workspace pages", () => {
       "profiles",
     )
     expect(screen.getByText("1 configured gate · 0 repositories")).toBeVisible()
-    expect(screen.getByRole("button", { name: "Profiles" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    )
     expect(
-      screen.getByRole("button", { name: "Lifecycle settings" }),
-    ).not.toHaveAttribute("aria-current")
+      screen.queryByRole("navigation", {
+        name: "PR lifecycle configuration",
+      }),
+    ).not.toBeInTheDocument()
     expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
     expect(
       screen.queryByText("Deferred issue handling"),
@@ -2962,15 +2957,10 @@ describe("unified PR workspace pages", () => {
     )
     expect(onProfileChange).toHaveBeenLastCalledWith("default")
     expect(screen.getByRole("heading", { name: "Profiles" })).toBeVisible()
-
-    await user.click(screen.getByRole("button", { name: "Lifecycle settings" }))
-    expect(onOpenSettings).toHaveBeenCalledTimes(1)
-    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
   })
 
   it("shows one lifecycle-settings tab at a time and reports tab navigation", async () => {
     const user = userEvent.setup()
-    const onOpenProfiles = vi.fn()
     const onSettingsTabChange = vi.fn()
 
     function SettingsHarness() {
@@ -2982,8 +2972,6 @@ describe("unified PR workspace pages", () => {
           onBack={vi.fn()}
           page="settings"
           settingsTab={tab}
-          onOpenProfiles={onOpenProfiles}
-          onOpenSettings={vi.fn()}
           onSettingsTabChange={(next) => {
             onSettingsTabChange(next)
             setTab(next)
@@ -3024,9 +3012,6 @@ describe("unified PR workspace pages", () => {
     expect(screen.getByText("Deferred issue handling")).toBeVisible()
     expect(screen.queryByText("XS files")).not.toBeInTheDocument()
     expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole("button", { name: "Profiles" }))
-    expect(onOpenProfiles).toHaveBeenCalledTimes(1)
   })
 
   it("opens gate details only in a dialog and reports when it closes", async () => {

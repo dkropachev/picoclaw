@@ -4433,24 +4433,21 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expect(page.getByLabel("XS modules")).toHaveCount(0)
   await expect(page.getByLabel("Deferred issue handling")).toHaveCount(0)
 
-  const configurationTabs = page.getByRole("navigation", {
-    name: "PR lifecycle configuration",
-  })
-  const profilesPageTab = configurationTabs.getByRole("button", {
-    name: "Profiles",
-  })
-  const settingsPageTab = configurationTabs.getByRole("button", {
+  await expect(
+    page.getByRole("navigation", { name: "PR lifecycle configuration" }),
+  ).toHaveCount(0)
+  const lifecycleSettingsLink = page.getByRole("link", {
     name: "Lifecycle settings",
+    exact: true,
   })
-  await expect(profilesPageTab).toHaveAttribute("aria-current", "page")
-  await settingsPageTab.click()
+  await lifecycleSettingsLink.click()
   await expect(page).toHaveURL(
     new RegExp(`/pull-requests/settings\\?tab=nudging&from=${prWorkspaceID}$`),
   )
   await expect(
     page.getByRole("heading", { name: "Lifecycle settings", exact: true }),
   ).toBeVisible()
-  await expect(settingsPageTab).toHaveAttribute("aria-current", "page")
+  await expect(lifecycleSettingsLink).toHaveAttribute("aria-current", "page")
   await expect(
     page.getByRole("button", { name: "Edit Default profile" }),
   ).toHaveCount(0)

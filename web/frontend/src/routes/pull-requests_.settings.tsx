@@ -120,19 +120,6 @@ function PullRequestLifecycleSettingsRoutePage() {
             })),
         })
       }
-      onOpenProfiles={() =>
-        void navigate({
-          to: "/pull-requests/profiles",
-          search: search.from ? { from: search.from } : {},
-          state: (previous) =>
-            updatePRNavigationState(previous, (current) => ({
-              prParent: "settings",
-              prParentIndex: current.__TSR_index,
-              prParentKey: current.__TSR_key,
-            })),
-        })
-      }
-      onOpenSettings={() => undefined}
       onSettingsTabChange={(tab) =>
         void navigate({
           to: "/pull-requests/settings",

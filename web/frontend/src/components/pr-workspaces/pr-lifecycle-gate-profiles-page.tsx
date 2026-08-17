@@ -132,8 +132,6 @@ export function PRLifecycleGateProfilesPage({
   onDecisionPointChange,
   onFlowChange,
   onDiscardOpenChange,
-  onOpenProfiles,
-  onOpenSettings,
   onSettingsTabChange,
 }: {
   onBack: () => void
@@ -147,8 +145,6 @@ export function PRLifecycleGateProfilesPage({
   onDecisionPointChange?: (decisionPoint?: PRLifecycleDecisionPoint) => void
   onFlowChange?: (flowID: "review" | "implementation") => void
   onDiscardOpenChange?: (open: boolean) => void | Promise<void>
-  onOpenProfiles?: () => void
-  onOpenSettings?: () => void
   onSettingsTabChange?: (tab: PRLifecycleSettingsTab) => void
 }) {
   const { t } = useTranslation()
@@ -734,15 +730,6 @@ export function PRLifecycleGateProfilesPage({
           {t("prWorkspaces.gateProfiles.save")}
         </Button>
       </PageHeader>
-      {!selectedProfile && onOpenProfiles && onOpenSettings && (
-        <div className="px-4 pb-4 md:px-6">
-          <ConfigurationPageTabs
-            active={resolvedPage === "settings" ? "settings" : "profiles"}
-            onProfiles={onOpenProfiles}
-            onSettings={onOpenSettings}
-          />
-        </div>
-      )}
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
         <div className="mx-auto grid w-full max-w-[96rem] min-w-0 gap-4 xl:grid-cols-[18rem_minmax(0,1fr)]">
           {selectedProfile && (
@@ -1391,43 +1378,6 @@ function GateProfileIssues({
         </ul>
       )}
     </div>
-  )
-}
-
-function ConfigurationPageTabs({
-  active,
-  onProfiles,
-  onSettings,
-}: {
-  active: "profiles" | "settings"
-  onProfiles: () => void
-  onSettings: () => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <nav
-      aria-label={t("prWorkspaces.gateProfiles.configurationPages")}
-      className="bg-muted/40 grid w-full max-w-xl grid-cols-2 gap-1 rounded-lg border p-1"
-    >
-      <Button
-        aria-current={active === "profiles" ? "page" : undefined}
-        size="sm"
-        type="button"
-        variant={active === "profiles" ? "secondary" : "ghost"}
-        onClick={onProfiles}
-      >
-        {t("prWorkspaces.gateProfiles.profiles")}
-      </Button>
-      <Button
-        aria-current={active === "settings" ? "page" : undefined}
-        size="sm"
-        type="button"
-        variant={active === "settings" ? "secondary" : "ghost"}
-        onClick={onSettings}
-      >
-        {t("prWorkspaces.gateProfiles.lifecycleSettings")}
-      </Button>
-    </nav>
   )
 }
 

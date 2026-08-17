@@ -114,22 +114,6 @@ function PullRequestProfilesRoutePage() {
             })),
         })
       }
-      onOpenProfiles={() => undefined}
-      onOpenSettings={() =>
-        void navigate({
-          to: "/pull-requests/settings",
-          search: {
-            tab: "nudging",
-            ...(search.from ? { from: search.from } : {}),
-          },
-          state: (previous) =>
-            updatePRNavigationState(previous, (current) => ({
-              prParent: "profiles",
-              prParentIndex: current.__TSR_index,
-              prParentKey: current.__TSR_key,
-            })),
-        })
-      }
       onProfileChange={(profileID) => {
         if (!profileID || !isPRLifecycleGateProfileID(profileID)) return
         void navigate({
