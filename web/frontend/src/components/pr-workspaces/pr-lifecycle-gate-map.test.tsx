@@ -543,6 +543,25 @@ function renderMap(
   )
 }
 
+function flowTestRect(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): DOMRect {
+  return {
+    bottom: y + height,
+    height,
+    left: x,
+    right: x + width,
+    top: y,
+    width,
+    x,
+    y,
+    toJSON: () => ({}),
+  } as DOMRect
+}
+
 function expectFlowRenderingContract(
   container: HTMLElement,
   expectedFlow: PRLifecycleFlow,
@@ -625,6 +644,59 @@ function expectFlowRenderingContract(
       "data-flow-route-mode",
       expectedEdge.mode,
     )
+    expect(visibleMatches[0].tagName.toLowerCase(), `${edgeKey} path`).toBe(
+      "path",
+    )
+    expect(
+      visibleMatches[0].getAttribute("d"),
+      `${edgeKey} measured path`,
+    ).toBeTruthy()
+    if (expectedEdge.loop) {
+      expect(visibleMatches[0], `${edgeKey} loop marker`).toHaveAttribute(
+        "data-flow-loop",
+        "true",
+      )
+      expect(visibleMatches[0], `${edgeKey} loop target`).toHaveAttribute(
+        "data-flow-loop-target",
+        expectedEdge.to,
+      )
+      expect(visibleMatches[0], `${edgeKey} back-edge shape`).toHaveAttribute(
+        "data-flow-shape",
+        "back-edge",
+      )
+      expect(visibleMatches[0], `${edgeKey} return arrow`).toHaveAttribute(
+        "marker-end",
+      )
+    } else {
+      expect(visibleMatches[0], `${edgeKey} is not a loop`).not.toHaveAttribute(
+        "data-flow-loop",
+      )
+    }
+  }
+
+  expect(graph.querySelector("[data-flow-loop-connector]")).toBeNull()
+
+  const connectionItems = Array.from(
+    graph.querySelectorAll<HTMLElement>(
+      `[aria-label="${expectedFlow.title} connections"] [role="listitem"]`,
+    ),
+  )
+  expect(connectionItems).toHaveLength(expectedFlow.edges.length)
+  for (const expectedEdge of expectedFlow.edges.filter((edge) => edge.loop)) {
+    const source = expectedFlow.nodes.find(
+      (node) => node.id === expectedEdge.from,
+    )!
+    const target = expectedFlow.nodes.find(
+      (node) => node.id === expectedEdge.to,
+    )!
+    const expectedText = `${expectedEdge.label ? `${expectedEdge.label}: ` : ""}${source.title} returns to ${target.title}`
+    expect(
+      connectionItems.filter(
+        (item) =>
+          item.textContent?.replace(/\s+/g, " ").trim() === expectedText,
+      ),
+      `${expectedEdge.from}:${expectedEdge.to} accessible return`,
+    ).toHaveLength(1)
   }
 
   const terminalNodeIDs = expectedFlow.nodes
@@ -994,30 +1066,44 @@ describe("PR lifecycle gate map", () => {
     )
   })
 
-  it("names the target of every singleton loop without duplicating its edge", () => {
+  it("renders a singleton loop as an unlabeled SVG back-edge", () => {
     const { container } = renderMap("pr.implementation.start")
     const graph = container.querySelector('[data-flow-graph="implementation"]')!
     expect(graph.querySelectorAll("[data-flow-edge]")).toHaveLength(
       implementationFlow.edges.length,
     )
-    const loop = graph.querySelector<HTMLElement>(
-      '[data-flow-node-cell="i_retry"] [data-flow-loop-connector]',
+    const loop = graph.querySelector<SVGPathElement>(
+      'path[data-flow-visible-edge-key="i_retry:i_work"]',
     )!
-    expect(loop).toBeVisible()
-    expect(loop).toHaveTextContent("↺")
-    expect(loop).toHaveTextContent("Return to Implement fixes")
-    expect(loop.querySelector("[data-flow-loop-target-title]")).toHaveAttribute(
-      "data-flow-loop-target-title",
-      "i_work",
-    )
+    expect(loop).toHaveAttribute("data-flow-loop", "true")
+    expect(loop).toHaveAttribute("data-flow-loop-target", "i_work")
+    expect(loop).toHaveAttribute("data-flow-shape", "back-edge")
+    expect(loop).toHaveAttribute("data-flow-source", "i_retry")
+    expect(loop).toHaveAttribute("data-flow-target", "i_work")
+    expect(loop).toHaveAttribute("data-flow-route-mode", "linear")
+    expect(loop).toHaveAttribute("marker-end")
+    expect(loop.getAttribute("d")).toBeTruthy()
+    expect(
+      graph.querySelector(
+        '[data-flow-launch-label][data-flow-edge-key="i_retry:i_work"]',
+      ),
+    ).toBeNull()
+    expect(graph.querySelector("[data-flow-loop-connector]")).toBeNull()
     expect(
       graph.querySelectorAll(
         '[data-flow-edge-key="i_retry:i_work"][data-flow-edge]',
       ),
     ).toHaveLength(1)
+    expect(
+      Array.from(graph.querySelectorAll('[role="listitem"]')).filter(
+        (item) =>
+          item.textContent?.replace(/\s+/g, " ").trim() ===
+          "Resume implementation returns to Implement fixes",
+      ),
+    ).toHaveLength(1)
   })
 
-  it("names the exact target of a loop in a multi-way route", () => {
+  it("keeps a branched loop label on its SVG back-edge", () => {
     const multiLoopFlow = structuredClone(implementationFlow)
     multiLoopFlow.nodes.push({
       id: "i_followup",
@@ -1055,15 +1141,18 @@ describe("PR lifecycle gate map", () => {
     )!
 
     expectFlowRenderingContract(container, multiLoopFlow)
-    const loop = graph.querySelector<HTMLElement>(
-      '[data-flow-edge-key="i_retry:i_work"][data-flow-loop-connector]',
+    const loop = graph.querySelector<SVGPathElement>(
+      'path[data-flow-visible-edge-key="i_retry:i_work"]',
     )!
-    expect(loop).toHaveTextContent("Repair")
-    expect(loop.querySelector("[data-flow-loop-target-title]")).toHaveAttribute(
-      "data-flow-loop-target-title",
-      "i_work",
-    )
-    expect(loop).toHaveTextContent(/Repair.*↺.*Return to Implement fixes/s)
+    expect(loop).toHaveAttribute("data-flow-loop", "true")
+    expect(loop).toHaveAttribute("data-flow-loop-target", "i_work")
+    expect(loop).toHaveAttribute("data-flow-shape", "back-edge")
+    const label = graph.querySelector<SVGElement>(
+      '[data-flow-launch-label][data-flow-edge-key="i_retry:i_work"]',
+    )!
+    expect(label).toHaveTextContent("Repair")
+    expect(label).toHaveAttribute("data-flow-source", "i_retry")
+    expect(label).toHaveAttribute("data-flow-target", "i_work")
     expect(
       graph.querySelectorAll(
         '[data-flow-edge-key="i_retry:i_work"][data-flow-edge]',
@@ -1071,9 +1160,87 @@ describe("PR lifecycle gate map", () => {
     ).toHaveLength(1)
     expect(
       graph.querySelectorAll(
-        '[data-flow-edge-key="i_retry:i_work"][data-flow-loop-connector]',
+        'path[data-flow-visible-edge-key="i_retry:i_work"][data-flow-loop="true"]',
       ),
     ).toHaveLength(1)
+    expect(graph.querySelector("[data-flow-loop-connector]")).toBeNull()
+    expect(
+      Array.from(graph.querySelectorAll('[role="listitem"]')).filter(
+        (item) =>
+          item.textContent?.replace(/\s+/g, " ").trim() ===
+          "Repair: Resume implementation returns to Implement fixes",
+      ),
+    ).toHaveLength(1)
+  })
+
+  it("gives multiple returns from one source distinct ports and launch shelves", () => {
+    const twoLoopFlow = structuredClone(implementationFlow)
+    twoLoopFlow.nodes.push({
+      id: "i_work_alternate",
+      kind: "action",
+      title: "Alternate implementation anchor",
+      description: "Provide a second earlier return target for route geometry.",
+      operation: "pr.implementation.alternate",
+      editable: false,
+    })
+    twoLoopFlow.edges.find(
+      (edge) => edge.from === "i_retry" && edge.loop,
+    )!.label = "Repair"
+    twoLoopFlow.edges.push({
+      from: "i_retry",
+      to: "i_work_alternate",
+      mode: "choice",
+      label: "Rework",
+      loop: true,
+    })
+
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.hasAttribute("data-flow-canvas")) {
+          return flowTestRect(0, 0, 1_200, 4_000)
+        }
+        const cell = this.matches("[data-flow-node-cell]")
+          ? this
+          : this.closest<HTMLElement>("[data-flow-node-cell]")
+        if (cell) {
+          const rank = Number(cell.dataset.flowNodeRank ?? 0)
+          return flowTestRect(400, 40 + rank * 140, 400, 64)
+        }
+        return flowTestRect(0, 0, 0, 0)
+      })
+
+    try {
+      const { container } = render(
+        <PRLifecycleGateMap
+          flow={{
+            schema: "pr-lifecycle-flow/v1",
+            flows: [reviewFlow, twoLoopFlow],
+          }}
+          flowRevision={`sha256:${"a".repeat(64)}`}
+          onSelect={vi.fn()}
+          selectedDecisionPoint="pr.implementation.start"
+          workflows={workflows}
+        />,
+      )
+      const loops = Array.from(
+        container.querySelectorAll<SVGPathElement>(
+          'path[data-flow-source="i_retry"][data-flow-loop="true"]',
+        ),
+      )
+      expect(loops).toHaveLength(2)
+      const launches = loops.map((loop) => {
+        const match = loop
+          .getAttribute("d")
+          ?.match(/^M (-?[\d.]+) (-?[\d.]+) L (-?[\d.]+) (-?[\d.]+)/)
+        expect(match, loop.dataset.flowVisibleEdgeKey).not.toBeNull()
+        return { sourceX: Number(match![1]), shelfY: Number(match![4]) }
+      })
+      expect(new Set(launches.map((launch) => launch.sourceX)).size).toBe(2)
+      expect(new Set(launches.map((launch) => launch.shelfY)).size).toBe(2)
+    } finally {
+      rectSpy.mockRestore()
+    }
   })
 
   it("derives gate-format labels from stages", () => {

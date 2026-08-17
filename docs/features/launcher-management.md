@@ -88,7 +88,12 @@ locked safeguards retain a distinct non-interactive treatment. Adjacent branch
 families use separate curved ports so unrelated routes do not form false visual
 junctions. Gutter routes reserve exterior source ports and distinct launch
 shelves, and use a background underlay to keep neighboring connectors visually
-separate.
+separate. Backward edges are connected SVG return rails from the source through
+an exterior gutter to the earlier target, rather than detached return callouts;
+an explicit branch label stays on the rail, while an unlabeled return adds no
+visible text. Return rails are remeasured with the responsive bands, preserve
+their workflow edge mode, and expose one semantic "returns to" relationship to
+assistive technology without duplicating the visual connector.
 
 ## Surface Ownership
 

@@ -369,7 +369,7 @@ function FlowGraph({
       data-flow-graph={flow.id}
     >
       <div
-        className="relative mx-auto w-full max-w-7xl min-w-0 px-7 py-1"
+        className="relative mx-auto w-full max-w-7xl min-w-0 px-12 py-8"
         data-flow-canvas
         ref={canvasRef}
       >
@@ -415,11 +415,9 @@ function FlowGraph({
           ))}
         </div>
         <div hidden>
-          {flow.edges
-            .filter((edge) => !edge.loop)
-            .map((edge) => (
-              <SemanticEdge edge={edge} key={flowEdgeKey(edge)} />
-            ))}
+          {flow.edges.map((edge) => (
+            <SemanticEdge edge={edge} key={flowEdgeKey(edge)} />
+          ))}
         </div>
       </div>
     </section>
@@ -444,8 +442,6 @@ function FlowNodeCell({
   workflows?: PRLifecycleGateProfile["workflows"]
 }) {
   const incoming = layout.incoming.get(flowNode.id) ?? []
-  const outgoing = layout.outgoing.get(flowNode.id) ?? []
-  const loops = outgoing.filter((edge) => edge.loop)
   return (
     <div
       className="flex min-w-0 flex-col"
@@ -464,15 +460,6 @@ function FlowNodeCell({
             : undefined
         }
       />
-      {loops.map((edge) => (
-        <LoopConnector
-          branched={outgoing.length > 1}
-          edge={edge}
-          key={flowEdgeKey(edge)}
-          source={flowNode}
-          target={layout.nodeByID.get(edge.to)!}
-        />
-      ))}
     </div>
   )
 }
@@ -516,134 +503,393 @@ function useFlowGeometry(
           return nodeID ? [[nodeID, node] as const] : []
         }),
       )
+      const measurementByID = new Map<
+        string,
+        {
+          hasRowsAbove: boolean
+          hasRowsBelow: boolean
+          nodeRect: DOMRect
+          rowBottom: number
+          rowTop: number
+        }
+      >()
+
+      for (const [nodeID, node] of nodeByID) {
+        const cell = cellByID.get(nodeID)
+        if (!cell) continue
+        const measuredCell = cellRect.get(cell)!
+        const bandCells = Array.from(
+          cell.parentElement?.querySelectorAll<HTMLElement>(
+            ":scope > [data-flow-node-cell]",
+          ) ?? [],
+        )
+        const rowCells = bandCells.filter(
+          (candidate) =>
+            Math.abs(cellRect.get(candidate)!.top - measuredCell.top) <= 1,
+        )
+        const rowNodeRects = rowCells.map((candidate) => {
+          const candidateID = candidate.dataset.flowNodeCell
+          return candidateID
+            ? (nodeByID.get(candidateID)?.getBoundingClientRect() ??
+                cellRect.get(candidate)!)
+            : cellRect.get(candidate)!
+        })
+        measurementByID.set(nodeID, {
+          hasRowsAbove: bandCells.some(
+            (candidate) => cellRect.get(candidate)!.top < measuredCell.top - 1,
+          ),
+          hasRowsBelow: bandCells.some(
+            (candidate) => cellRect.get(candidate)!.top > measuredCell.top + 1,
+          ),
+          nodeRect: node.getBoundingClientRect(),
+          rowBottom:
+            Math.max(...rowNodeRects.map((candidate) => candidate.bottom)) -
+            canvasRect.top,
+          rowTop:
+            Math.min(...rowNodeRects.map((candidate) => candidate.top)) -
+            canvasRect.top,
+        })
+      }
+
       const measuredEdges: MeasuredFlowEdge[] = []
-      const gutterTracks = {
+      const edgeOrder = new Map(
+        flow.edges.map((edge, index) => [flowEdgeKey(edge), index]),
+      )
+      const availableTrack = (
+        tracks: Array<Array<[number, number]>>,
+        interval: [number, number],
+      ) => {
+        const existing = tracks.findIndex((track) =>
+          track.every(
+            ([start, end]) => end < interval[0] - 2 || start > interval[1] + 2,
+          ),
+        )
+        return existing === -1 ? tracks.length : existing
+      }
+      const centerXForNode = (nodeID: string) => {
+        const measured = measurementByID.get(nodeID)
+        return measured
+          ? measured.nodeRect.left -
+              canvasRect.left +
+              measured.nodeRect.width / 2
+          : canvasRect.width / 2
+      }
+      const laneOffset = (available: number, index: number, count: number) => {
+        const usable = Math.max(8, available)
+        if (count <= 1) return Math.max(4, Math.min(12, usable / 2))
+        const first = Math.max(4, Math.min(10, usable / 3))
+        const last = Math.max(
+          first,
+          Math.min(first + (count - 1) * 10, usable - 10),
+        )
+        return first + ((last - first) * index) / (count - 1)
+      }
+      const nextNodeTopAfter = (y: number) => {
+        const candidates = [...measurementByID.values()]
+          .map((measurement) => measurement.nodeRect.top - canvasRect.top)
+          .filter((top) => top > y + 1)
+        return candidates.length > 0
+          ? Math.min(...candidates)
+          : canvasRect.height
+      }
+      const previousNodeBottomBefore = (y: number) => {
+        const candidates = [...measurementByID.values()]
+          .map((measurement) => measurement.nodeRect.bottom - canvasRect.top)
+          .filter((bottom) => bottom < y - 1)
+        return candidates.length > 0 ? Math.max(...candidates) : 0
+      }
+      const fieldLeft = Math.min(
+        ...[...measurementByID.values()].map(
+          (measurement) => measurement.nodeRect.left - canvasRect.left,
+        ),
+      )
+      const fieldRight = Math.max(
+        ...[...measurementByID.values()].map(
+          (measurement) => measurement.nodeRect.right - canvasRect.left,
+        ),
+      )
+      const preferredSideForEdge = (edge: PRLifecycleFlowEdge) => {
+        const outgoing = layout.outgoing.get(edge.from) ?? []
+        const edgeIndex = Math.max(
+          0,
+          outgoing.findIndex(
+            (candidate) => flowEdgeKey(candidate) === flowEdgeKey(edge),
+          ),
+        )
+        return flowPreferredGutterSide(
+          centerXForNode(edge.from),
+          centerXForNode(edge.to),
+          edgeIndex,
+          canvasRect.width,
+        )
+      }
+      const loopTrackPlans = {
         left: [] as Array<Array<[number, number]>>,
         right: [] as Array<Array<[number, number]>>,
       }
+      const loopPlans = new Map<
+        string,
+        { interval: [number, number]; side: "left" | "right"; track: number }
+      >()
+      // Return rails claim the outer tracks first. Their broad intervals keep
+      // later forward detours from being painted on top of a back edge.
+      const loopCandidates = flow.edges
+        .filter((edge) => edge.loop)
+        .flatMap((edge) => {
+          const source = measurementByID.get(edge.from)
+          const target = measurementByID.get(edge.to)
+          if (!source || !target) return []
+          const interval: [number, number] = [
+            previousNodeBottomBefore(target.rowTop),
+            nextNodeTopAfter(source.rowBottom),
+          ]
+          return [{ edge, interval }]
+        })
+        .sort((left, right) => {
+          const spanDifference =
+            right.interval[1] -
+            right.interval[0] -
+            (left.interval[1] - left.interval[0])
+          if (Math.abs(spanDifference) > 1) return spanDifference
+          return (
+            (edgeOrder.get(flowEdgeKey(left.edge)) ?? 0) -
+            (edgeOrder.get(flowEdgeKey(right.edge)) ?? 0)
+          )
+        })
 
-      for (const edge of flow.edges) {
-        if (edge.loop) continue
-        const sourceCell = cellByID.get(edge.from)
-        const targetCell = cellByID.get(edge.to)
-        const sourceNode = nodeByID.get(edge.from)
-        const targetNode = nodeByID.get(edge.to)
-        if (!sourceCell || !targetCell || !sourceNode || !targetNode) continue
+      for (const { edge, interval } of loopCandidates) {
+        const sourceX = centerXForNode(edge.from)
+        const targetX = centerXForNode(edge.to)
+        const preferredSide = preferredSideForEdge(edge)
+        const choices = (["left", "right"] as const).map((side) => {
+          const track = availableTrack(loopTrackPlans[side], interval)
+          const railX =
+            side === "left" ? 5 + track * 8 : canvasRect.width - 5 - track * 8
+          const endpointTravel =
+            Math.abs(sourceX - railX) + Math.abs(targetX - railX)
+          const clearance =
+            side === "left" ? fieldLeft - railX : railX - fieldRight
+          const intrusionPenalty =
+            clearance < 4 ? 100_000 + (4 - clearance) * 1_000 : 0
+          const trackPenalty =
+            track * Math.max(56, Math.min(104, canvasRect.width * 0.08))
+          const preferencePenalty = side === preferredSide ? 0 : 0.25
+          return {
+            score:
+              intrusionPenalty +
+              endpointTravel +
+              trackPenalty +
+              preferencePenalty,
+            side,
+            track,
+          }
+        })
+        choices.sort((left, right) => {
+          if (Math.abs(left.score - right.score) > 0.1) {
+            return left.score - right.score
+          }
+          const preferLeft = (edgeOrder.get(flowEdgeKey(edge)) ?? 0) % 2 === 0
+          return left.side === (preferLeft ? "left" : "right") ? -1 : 1
+        })
+        const selected = choices[0]
+        loopTrackPlans[selected.side][selected.track] ??= []
+        loopTrackPlans[selected.side][selected.track].push(interval)
+        loopPlans.set(flowEdgeKey(edge), {
+          interval,
+          side: selected.side,
+          track: selected.track,
+        })
+      }
 
-        const sourceCellRect = cellRect.get(sourceCell)!
-        const sourceRect = sourceNode.getBoundingClientRect()
-        const targetCellRect = cellRect.get(targetCell)!
-        const targetRect = targetNode.getBoundingClientRect()
+      const gutterPlans = new Map(loopPlans)
+      // Plan every remaining gutter route before assigning source ports. A
+      // route must keep the same side and track in every per-edge calculation.
+      const plannedTracks = {
+        left: loopTrackPlans.left.map((track) => [...track]),
+        right: loopTrackPlans.right.map((track) => [...track]),
+      }
+      const plannedSourceSides = {
+        left: new Map<string, number>(),
+        right: new Map<string, number>(),
+      }
+      for (const edge of flow.edges.filter((candidate) => candidate.loop)) {
+        const side = loopPlans.get(flowEdgeKey(edge))?.side
+        if (!side) continue
+        plannedSourceSides[side].set(
+          edge.from,
+          (plannedSourceSides[side].get(edge.from) ?? 0) + 1,
+        )
+      }
+      const needsMeasuredGutter = (edge: PRLifecycleFlowEdge) => {
+        if (edge.loop) return true
+        const source = measurementByID.get(edge.from)
+        const target = measurementByID.get(edge.to)
+        if (!source || !target) return false
+        const sourceRank = layout.rankByNode.get(edge.from) ?? 0
+        const targetRank = layout.rankByNode.get(edge.to) ?? sourceRank + 1
+        return (
+          targetRank - sourceRank > 1 ||
+          source.hasRowsBelow ||
+          target.hasRowsAbove
+        )
+      }
+      const forwardGutterCandidates = flow.edges
+        .filter((edge) => !edge.loop && needsMeasuredGutter(edge))
+        .flatMap((edge) => {
+          const source = measurementByID.get(edge.from)
+          const target = measurementByID.get(edge.to)
+          if (!source || !target) return []
+          const interval: [number, number] = [
+            Math.min(source.rowBottom, target.rowTop),
+            Math.max(source.rowBottom, target.rowTop),
+          ]
+          return [{ edge, interval }]
+        })
+        .sort((left, right) => {
+          const spanDifference =
+            right.interval[1] -
+            right.interval[0] -
+            (left.interval[1] - left.interval[0])
+          if (Math.abs(spanDifference) > 1) return spanDifference
+          return (
+            (edgeOrder.get(flowEdgeKey(left.edge)) ?? 0) -
+            (edgeOrder.get(flowEdgeKey(right.edge)) ?? 0)
+          )
+        })
+
+      for (const { edge, interval } of forwardGutterCandidates) {
+        const sourceX = centerXForNode(edge.from)
+        const targetX = centerXForNode(edge.to)
+        const preferredSide = preferredSideForEdge(edge)
+        const choices = (["left", "right"] as const).map((side) => {
+          const track = availableTrack(plannedTracks[side], interval)
+          const railX =
+            side === "left" ? 5 + track * 8 : canvasRect.width - 5 - track * 8
+          const clearance =
+            side === "left" ? fieldLeft - railX : railX - fieldRight
+          const intrusionPenalty =
+            clearance < 4 ? 100_000 + (4 - clearance) * 1_000 : 0
+          const endpointTravel =
+            Math.abs(sourceX - railX) + Math.abs(targetX - railX)
+          const trackPenalty = track * 64
+          const sourceFanoutPenalty =
+            (plannedSourceSides[side].get(edge.from) ?? 0) *
+            Math.max(320, canvasRect.width)
+          const preferencePenalty = side === preferredSide ? 0 : 0.25
+          return {
+            score:
+              intrusionPenalty +
+              endpointTravel * 0.25 +
+              trackPenalty +
+              sourceFanoutPenalty +
+              preferencePenalty,
+            side,
+            track,
+          }
+        })
+        choices.sort((left, right) => {
+          if (Math.abs(left.score - right.score) > 0.1) {
+            return left.score - right.score
+          }
+          const preferLeft = (edgeOrder.get(flowEdgeKey(edge)) ?? 0) % 2 === 0
+          return left.side === (preferLeft ? "left" : "right") ? -1 : 1
+        })
+        const selected = choices[0]
+        plannedTracks[selected.side][selected.track] ??= []
+        plannedTracks[selected.side][selected.track].push(interval)
+        plannedSourceSides[selected.side].set(
+          edge.from,
+          (plannedSourceSides[selected.side].get(edge.from) ?? 0) + 1,
+        )
+        gutterPlans.set(flowEdgeKey(edge), {
+          interval,
+          side: selected.side,
+          track: selected.track,
+        })
+      }
+
+      const orderedEdges = [...flow.edges].sort((left, right) => {
+        if (Boolean(left.loop) !== Boolean(right.loop)) {
+          return left.loop ? -1 : 1
+        }
+        if (left.loop && right.loop) {
+          const leftPlan = loopPlans.get(flowEdgeKey(left))
+          const rightPlan = loopPlans.get(flowEdgeKey(right))
+          const leftSpan = leftPlan
+            ? leftPlan.interval[1] - leftPlan.interval[0]
+            : 0
+          const rightSpan = rightPlan
+            ? rightPlan.interval[1] - rightPlan.interval[0]
+            : 0
+          if (Math.abs(leftSpan - rightSpan) > 1) return rightSpan - leftSpan
+        }
+        return (
+          (edgeOrder.get(flowEdgeKey(left)) ?? 0) -
+          (edgeOrder.get(flowEdgeKey(right)) ?? 0)
+        )
+      })
+
+      for (const edge of orderedEdges) {
+        const sourceMeasurement = measurementByID.get(edge.from)
+        const targetMeasurement = measurementByID.get(edge.to)
+        if (!sourceMeasurement || !targetMeasurement) continue
+
+        const sourceRect = sourceMeasurement.nodeRect
+        const targetRect = targetMeasurement.nodeRect
         const outgoing = layout.outgoing.get(edge.from) ?? []
-        const forwardOutgoing = outgoing.filter((candidate) => !candidate.loop)
         const sourceCenterX =
           sourceRect.left - canvasRect.left + sourceRect.width / 2
-        const endX = targetRect.left - canvasRect.left + targetRect.width / 2
+        let endX = targetRect.left - canvasRect.left + targetRect.width / 2
         const endY = targetRect.top - canvasRect.top
         const sourceRank = layout.rankByNode.get(edge.from) ?? 0
-        const sourceBandCells = Array.from(
-          sourceCell.parentElement?.querySelectorAll<HTMLElement>(
-            ":scope > [data-flow-node-cell]",
-          ) ?? [],
-        )
-        const targetBandCells = Array.from(
-          targetCell.parentElement?.querySelectorAll<HTMLElement>(
-            ":scope > [data-flow-node-cell]",
-          ) ?? [],
-        )
-        const sourceRowCells = sourceBandCells.filter(
-          (cell) => Math.abs(cellRect.get(cell)!.top - sourceCellRect.top) <= 1,
-        )
-        const targetRowCells = targetBandCells.filter(
-          (cell) => Math.abs(cellRect.get(cell)!.top - targetCellRect.top) <= 1,
-        )
-        const sourceRowBottom =
-          Math.max(
-            ...sourceRowCells.map((cell) => {
-              const nodeID = cell.dataset.flowNodeCell
-              return nodeID
-                ? (nodeByID.get(nodeID)?.getBoundingClientRect().bottom ??
-                    cellRect.get(cell)!.bottom)
-                : cellRect.get(cell)!.bottom
-            }),
-          ) - canvasRect.top
-        const targetRowTop =
-          Math.min(
-            ...targetRowCells.map((cell) => {
-              const nodeID = cell.dataset.flowNodeCell
-              return nodeID
-                ? (nodeByID.get(nodeID)?.getBoundingClientRect().top ??
-                    cellRect.get(cell)!.top)
-                : cellRect.get(cell)!.top
-            }),
-          ) - canvasRect.top
-        const sourceHasRowsBelow = sourceBandCells.some(
-          (cell) => cellRect.get(cell)!.top > sourceCellRect.top + 1,
-        )
-        const targetHasRowsAbove = targetBandCells.some(
-          (cell) => cellRect.get(cell)!.top < targetCellRect.top - 1,
-        )
-        const sourceHasLoopBelow =
-          sourceCell.querySelector("[data-flow-loop-connector]") != null
+        const sourceRowBottom = sourceMeasurement.rowBottom
+        const targetRowTop = targetMeasurement.rowTop
         const targetXFor = (candidate: PRLifecycleFlowEdge) => {
-          const candidateTarget = nodeByID.get(candidate.to)
-          const candidateRect = candidateTarget?.getBoundingClientRect()
-          return candidateRect
-            ? candidateRect.left - canvasRect.left + candidateRect.width / 2
-            : sourceCenterX
+          return centerXForNode(candidate.to)
         }
         const needsGutterFor = (candidate: PRLifecycleFlowEdge) => {
+          if (candidate.loop) return true
           const candidateRank =
             layout.rankByNode.get(candidate.to) ?? sourceRank + 1
           if (
             candidateRank - sourceRank > 1 ||
-            sourceHasRowsBelow ||
-            sourceHasLoopBelow
+            sourceMeasurement.hasRowsBelow
           ) {
             return true
           }
-          const candidateTargetCell = cellByID.get(candidate.to)
-          const candidateTargetRect = candidateTargetCell
-            ? cellRect.get(candidateTargetCell)
-            : undefined
-          if (!candidateTargetCell || !candidateTargetRect) return false
-          const candidateBandCells = Array.from(
-            candidateTargetCell.parentElement?.querySelectorAll<HTMLElement>(
-              ":scope > [data-flow-node-cell]",
-            ) ?? [],
-          )
-          return candidateBandCells.some(
-            (cell) => cellRect.get(cell)!.top < candidateTargetRect.top - 1,
-          )
+          return measurementByID.get(candidate.to)?.hasRowsAbove ?? false
         }
         const gutterSideFor = (candidate: PRLifecycleFlowEdge) => {
-          const candidateIndex = Math.max(
-            0,
-            forwardOutgoing.findIndex(
-              (item) => flowEdgeKey(item) === flowEdgeKey(candidate),
-            ),
-          )
-          return flowPreferredGutterSide(
-            sourceCenterX,
-            targetXFor(candidate),
-            candidateIndex,
-            canvasRect.width,
+          return (
+            gutterPlans.get(flowEdgeKey(candidate))?.side ??
+            preferredSideForEdge(candidate)
           )
         }
         const portGroupFor = (candidate: PRLifecycleFlowEdge) => {
           if (!needsGutterFor(candidate)) return 1
           return gutterSideFor(candidate) === "left" ? 0 : 2
         }
-        const portOrderedOutgoing = [...forwardOutgoing].sort((left, right) => {
-          const groupDifference = portGroupFor(left) - portGroupFor(right)
+        const portOrderedOutgoing = [...outgoing].sort((left, right) => {
+          const leftGroup = portGroupFor(left)
+          const rightGroup = portGroupFor(right)
+          const groupDifference = leftGroup - rightGroup
           if (groupDifference !== 0) return groupDifference
+          if (leftGroup !== 1) {
+            const leftPlan = gutterPlans.get(flowEdgeKey(left))
+            const rightPlan = gutterPlans.get(flowEdgeKey(right))
+            const trackDifference =
+              (leftPlan?.track ?? 0) - (rightPlan?.track ?? 0)
+            if (trackDifference !== 0) {
+              return leftGroup === 0 ? trackDifference : -trackDifference
+            }
+          }
           const targetDifference = targetXFor(left) - targetXFor(right)
           if (Math.abs(targetDifference) > 1) return targetDifference
           return (
-            forwardOutgoing.findIndex(
+            outgoing.findIndex(
               (candidate) => flowEdgeKey(candidate) === flowEdgeKey(left),
             ) -
-            forwardOutgoing.findIndex(
+            outgoing.findIndex(
               (candidate) => flowEdgeKey(candidate) === flowEdgeKey(right),
             )
           )
@@ -655,37 +901,116 @@ function useFlowGeometry(
           ),
         )
         const split = outgoing.length > 1
+        const sourcePortSpan = Math.max(24, Math.min(96, sourceRect.width - 32))
         const sourcePortOffset =
-          forwardOutgoing.length > 1
-            ? (portIndex - (forwardOutgoing.length - 1) / 2) *
-              Math.min(36, 96 / (forwardOutgoing.length - 1))
+          outgoing.length > 1
+            ? (portIndex - (outgoing.length - 1) / 2) *
+              Math.min(36, sourcePortSpan / (outgoing.length - 1))
             : 0
         const startX = sourceCenterX + sourcePortOffset
         const startY = sourceRect.bottom - canvasRect.top
         const needsGutter = needsGutterFor(edge)
         const gutterSide = needsGutter ? gutterSideFor(edge) : undefined
-        const sidePeers = gutterSide
-          ? portOrderedOutgoing.filter(
-              (candidate) =>
-                needsGutterFor(candidate) &&
-                gutterSideFor(candidate) === gutterSide,
-            )
-          : []
-        const sidePeerIndex = Math.max(
+        const gutterPeers = portOrderedOutgoing.filter(needsGutterFor)
+        const gutterPeerIndex = Math.max(
           0,
-          sidePeers.findIndex(
+          gutterPeers.findIndex(
             (candidate) => flowEdgeKey(candidate) === flowEdgeKey(edge),
           ),
         )
-        const gutterDepth =
-          gutterSide === "right"
-            ? Math.max(0, sidePeers.length - sidePeerIndex - 1)
-            : sidePeerIndex
+
+        if (edge.loop) {
+          const loopPlan = loopPlans.get(flowEdgeKey(edge))
+          if (!loopPlan) continue
+          const targetSidePeers = flow.edges.filter(
+            (candidate) =>
+              candidate.loop &&
+              candidate.to === edge.to &&
+              loopPlans.get(flowEdgeKey(candidate))?.side === loopPlan.side,
+          )
+          const targetPeerIndex = Math.max(
+            0,
+            targetSidePeers.findIndex(
+              (candidate) => flowEdgeKey(candidate) === flowEdgeKey(edge),
+            ),
+          )
+          const targetInset = Math.min(
+            16 + targetPeerIndex * 12,
+            Math.max(16, targetRect.width / 2 - 16),
+          )
+          endX =
+            loopPlan.side === "left"
+              ? targetRect.left - canvasRect.left + targetInset
+              : targetRect.right - canvasRect.left - targetInset
+          const sourceGap = nextNodeTopAfter(sourceRowBottom) - sourceRowBottom
+          const targetGap =
+            targetRowTop - previousNodeBottomBefore(targetRowTop)
+          const sourceShelfOffset = laneOffset(
+            sourceGap,
+            gutterPeerIndex,
+            Math.max(1, gutterPeers.length),
+          )
+          const sourceShelfY = sourceRowBottom + sourceShelfOffset
+          const loopSourcePeers = portOrderedOutgoing.filter(
+            (candidate) => candidate.loop,
+          )
+          const loopSourcePeerIndex = Math.max(
+            0,
+            loopSourcePeers.findIndex(
+              (candidate) => flowEdgeKey(candidate) === flowEdgeKey(edge),
+            ),
+          )
+          const labelOffset = split
+            ? Math.max(
+                10,
+                sourceGap -
+                  10 -
+                  (loopSourcePeers.length - loopSourcePeerIndex - 1) * 20,
+              )
+            : sourceShelfOffset
+          const targetShelfY =
+            targetRowTop -
+            laneOffset(
+              targetGap,
+              targetPeerIndex,
+              Math.max(1, targetSidePeers.length),
+            )
+          const trackX =
+            loopPlan.side === "left"
+              ? 5 + loopPlan.track * 8
+              : canvasRect.width - 5 - loopPlan.track * 8
+          measuredEdges.push({
+            edge,
+            endX,
+            endY,
+            labelX: trackX,
+            labelY: sourceRowBottom + labelOffset,
+            path: flowPath([
+              [startX, startY],
+              [startX, sourceShelfY],
+              [trackX, sourceShelfY],
+              [trackX, targetShelfY],
+              [endX, targetShelfY],
+              [endX, endY],
+            ]),
+            startX,
+            startY,
+          })
+          continue
+        }
+
         const merged = (layout.incoming.get(edge.to) ?? []).length > 1
         const pathEndY = merged ? endY - 10 : endY
+        const sourceGap = nextNodeTopAfter(sourceRowBottom) - sourceRowBottom
         const upperY = Math.min(
-          (sourceHasLoopBelow ? startY : sourceRowBottom) +
-            (needsGutter && !sourceHasLoopBelow ? 12 + gutterDepth * 10 : 4),
+          sourceRowBottom +
+            (needsGutter
+              ? laneOffset(
+                  sourceGap,
+                  gutterPeerIndex,
+                  Math.max(1, gutterPeers.length),
+                )
+              : 4),
           pathEndY - 12,
         )
         const lowerY = Math.max(upperY + 8, targetRowTop - (merged ? 14 : 4))
@@ -695,26 +1020,9 @@ function useFlowGeometry(
 
         if (needsGutter) {
           const side = gutterSide!
-          const interval: [number, number] = [
-            Math.min(upperY, lowerY),
-            Math.max(upperY, lowerY),
-          ]
-          const availableTrack = (side: "left" | "right") => {
-            const existing = gutterTracks[side].findIndex((track) =>
-              track.every(
-                ([start, end]) =>
-                  end < interval[0] - 2 || start > interval[1] + 2,
-              ),
-            )
-            return existing === -1 ? gutterTracks[side].length : existing
-          }
-          const track = availableTrack(side)
-          gutterTracks[side][track] ??= []
-          gutterTracks[side][track].push(interval)
+          const track = gutterPlans.get(flowEdgeKey(edge))?.track ?? 0
           const trackX =
-            side === "left"
-              ? 5 + track * 3.5
-              : canvasRect.width - 5 - track * 3.5
+            side === "left" ? 5 + track * 8 : canvasRect.width - 5 - track * 8
           path = flowPath([
             [startX, startY],
             [startX, upperY],
@@ -723,7 +1031,7 @@ function useFlowGeometry(
             [endX, lowerY],
             [endX, pathEndY],
           ])
-          if (targetHasRowsAbove) {
+          if (targetMeasurement.hasRowsAbove) {
             labelX = endX
             labelY = targetRowTop - 12
           } else {
@@ -842,6 +1150,8 @@ function FlowEdgeOverlay({
     ([, edges]) => edges.length > 1,
   )
   const forwardEdges = flow.edges.filter((edge) => !edge.loop)
+  const loopEdges = flow.edges.filter((edge) => edge.loop)
+  const visibleEdges = [...loopEdges, ...forwardEdges]
 
   return (
     <>
@@ -866,12 +1176,13 @@ function FlowEdgeOverlay({
             <path className="fill-primary" d="M 0 0 L 8 4 L 0 8 z" />
           </marker>
         </defs>
-        {forwardEdges.map((edge) => {
+        {visibleEdges.map((edge) => {
           const key = flowEdgeKey(edge)
           const measured = measuredByKey.get(key)
           const outgoing = layout.outgoing.get(edge.from) ?? []
           const branched = outgoing.length > 1
-          const merged = (layout.incoming.get(edge.to) ?? []).length > 1
+          const merged =
+            !edge.loop && (layout.incoming.get(edge.to) ?? []).length > 1
           const label = branched ? (edge.label ?? "Primary") : undefined
           return (
             <g data-flow-edge-layer={key} key={`path-${key}`}>
@@ -900,6 +1211,8 @@ function FlowEdgeOverlay({
                 data-flow-edge-key={key}
                 data-flow-launch={branched ? true : undefined}
                 data-flow-launch-target={branched ? edge.to : undefined}
+                data-flow-loop={edge.loop ? "true" : undefined}
+                data-flow-loop-target={edge.loop ? edge.to : undefined}
                 data-flow-optional={
                   edge.mode === "optional" ? "true" : undefined
                 }
@@ -908,7 +1221,11 @@ function FlowEdgeOverlay({
                 }
                 data-flow-route-mode={edge.mode}
                 data-flow-shape={
-                  measured?.path.includes(" C ") ? "curve" : "orthogonal"
+                  edge.loop
+                    ? "back-edge"
+                    : measured?.path.includes(" C ")
+                      ? "curve"
+                      : "orthogonal"
                 }
                 data-flow-source={edge.from}
                 data-flow-target={edge.to}
@@ -953,7 +1270,7 @@ function FlowEdgeOverlay({
             </g>
           )
         })}
-        {forwardEdges.map((edge) => {
+        {visibleEdges.map((edge) => {
           const measured = measuredByKey.get(flowEdgeKey(edge))
           const branched = (layout.outgoing.get(edge.from) ?? []).length > 1
           const label = branched ? (edge.label ?? "Primary") : undefined
@@ -974,15 +1291,24 @@ function FlowEdgeOverlay({
         className="sr-only"
         role="list"
       >
-        {forwardEdges.map((edge) => {
+        {visibleEdges.map((edge) => {
           const source = layout.nodeByID.get(edge.from)!
           const target = layout.nodeByID.get(edge.to)!
-          const merged = (layout.incoming.get(edge.to) ?? []).length > 1
+          const merged =
+            !edge.loop && (layout.incoming.get(edge.to) ?? []).length > 1
           return (
             <span key={flowEdgeKey(edge)} role="listitem">
               {edge.label ? `${edge.label}: ` : ""}
-              {source.title} {flowRouteAccessibleRelation(edge.mode)}{" "}
-              {target.title}
+              {edge.loop ? (
+                <>
+                  {source.title} returns to {target.title}
+                </>
+              ) : (
+                <>
+                  {source.title} {flowRouteAccessibleRelation(edge.mode)}{" "}
+                  {target.title}
+                </>
+              )}
               {merged ? ", where it merges with other routes" : ""}
             </span>
           )
@@ -1135,62 +1461,6 @@ function flowCurvePath(
 
 function roundFlowCoordinate(value: number): number {
   return Math.round(value * 10) / 10
-}
-
-function LoopConnector({
-  branched,
-  edge,
-  source,
-  target,
-}: {
-  branched: boolean
-  edge: PRLifecycleFlowEdge
-  source: PRLifecycleFlowNode
-  target: PRLifecycleFlowNode
-}) {
-  const label = branched ? (edge.label ?? "Primary") : undefined
-  return (
-    <div
-      aria-label={`${label ? `${label} ` : ""}${flowRouteAccessibleRelation(edge.mode)} ${target.title}, returning from ${source.title}`}
-      className="border-primary/40 bg-primary/5 text-primary my-2 flex min-w-0 items-center justify-center gap-2 rounded-lg border border-dashed px-2 py-2 text-[11px] leading-snug"
-      data-flow-branch={branched ? edge.from : undefined}
-      data-flow-branch-edge={label}
-      data-flow-branch-target={branched ? edge.to : undefined}
-      data-flow-edge-key={flowEdgeKey(edge)}
-      data-flow-launch={branched ? "true" : undefined}
-      data-flow-launch-target={branched ? edge.to : undefined}
-      data-flow-loop-connector={edge.to}
-      data-flow-optional={edge.mode === "optional" ? "true" : undefined}
-      data-flow-parallel={edge.mode === "parallel" ? "true" : undefined}
-      data-flow-route-mode={edge.mode}
-      data-flow-source={edge.from}
-      data-flow-target={edge.to}
-      data-flow-visible-edge-key={flowEdgeKey(edge)}
-      role="group"
-    >
-      <SemanticEdge edge={edge} />
-      {label ? (
-        <span
-          className="bg-background text-foreground shrink-0 rounded border px-1.5 py-0.5 font-semibold"
-          data-flow-edge-key={flowEdgeKey(edge)}
-          data-flow-launch-label
-          data-flow-source={edge.from}
-          data-flow-target={edge.to}
-        >
-          {label}
-        </span>
-      ) : null}
-      <span className="text-lg leading-none" aria-hidden="true">
-        ↺
-      </span>
-      <span
-        className="text-foreground min-w-0 [overflow-wrap:anywhere]"
-        data-flow-loop-target-title={edge.to}
-      >
-        Return to {target.title}
-      </span>
-    </div>
-  )
 }
 
 function SemanticEdge({ edge }: { edge: PRLifecycleFlowEdge }) {
@@ -1680,6 +1950,12 @@ function FlowRouteLegend() {
           {route.label}
         </span>
       ))}
+      <span className="flex items-center gap-1">
+        <span aria-hidden="true" className="text-primary text-sm leading-none">
+          ↩
+        </span>
+        Return
+      </span>
     </div>
   )
 }

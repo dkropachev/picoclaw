@@ -3045,7 +3045,6 @@ async function expectGateMapFits(gateMap: Locator) {
               "[data-flow-kind]",
               "[data-flow-node-cell]",
               "[data-flow-visible-edge-key]",
-              "[data-flow-loop-connector]",
               "[data-flow-launch-label]",
               "[data-flow-view-tab]",
             ].join(","),
@@ -3617,7 +3616,7 @@ async function expectBranchLabelsDoNotOverlap(
   expect(occlusions).toEqual([])
 }
 
-async function expectForwardPathsAvoidNodeCards(
+async function expectPathsAvoidNodeCards(
   gateMap: Locator,
   view: "review" | "implementation",
 ) {
@@ -3677,7 +3676,7 @@ async function expectForwardPathsAvoidNodeCards(
         const target = path.dataset.flowTarget ?? ""
         const length = path.getTotalLength()
         if (length <= 0) {
-          issues.push(`${key}: forward path has no geometry`)
+          issues.push(`${key}: path has no geometry`)
           continue
         }
         const nonEndpoints = cards.filter(
@@ -3688,7 +3687,7 @@ async function expectForwardPathsAvoidNodeCards(
         for (let sample = 0; sample <= sampleCount && !collision; sample += 1) {
           const point = screenPointAt(path, (length * sample) / sampleCount)
           if (!point) {
-            collision = `${key}: forward path has no screen transform`
+            collision = `${key}: path has no screen transform`
             break
           }
           for (const card of nonEndpoints) {
@@ -3698,7 +3697,7 @@ async function expectForwardPathsAvoidNodeCards(
               point.y > card.rect.top + borderTolerance &&
               point.y < card.rect.bottom - borderTolerance
             ) {
-              collision = `${key}: crosses ${card.id}`
+              collision = `${key}: crosses ${card.id} at ${point.x.toFixed(1)},${point.y.toFixed(1)} inside ${card.rect.left.toFixed(1)},${card.rect.top.toFixed(1)}-${card.rect.right.toFixed(1)},${card.rect.bottom.toFixed(1)} with ${path.getAttribute("d")}`
               break
             }
           }
@@ -3708,37 +3707,45 @@ async function expectForwardPathsAvoidNodeCards(
 
       for (const sourceID of mixedSources) {
         const card = cardByID.get(sourceID)
-        const cell = flow.querySelector<HTMLElement>(
-          `[data-flow-node-cell="${sourceID}"]`,
-        )
-        const loop = cell?.querySelector<HTMLElement>(
-          "[data-flow-loop-connector]",
-        )
-        const forwardPaths = paths.filter(
+        const sourcePaths = paths.filter(
           (path) => path.dataset.flowSource === sourceID,
         )
-        if (!card || !cell || !loop || forwardPaths.length === 0) {
+        const loopPaths = sourcePaths.filter(
+          (path) => path.dataset.flowLoop === "true",
+        )
+        const forwardPaths = sourcePaths.filter(
+          (path) => path.dataset.flowLoop !== "true",
+        )
+        if (!card || loopPaths.length === 0 || forwardPaths.length === 0) {
           issues.push(`${sourceID}: mixed loop/forward geometry is incomplete`)
           continue
         }
         const cardRect = card.rect
-        const cellRect = cell.getBoundingClientRect()
-        for (const path of forwardPaths) {
+        const starts: Array<{ key: string; x: number; y: number }> = []
+        for (const path of sourcePaths) {
           const point = screenPointAt(path, 0)
           const key = path.dataset.flowVisibleEdgeKey ?? "unknown"
           if (
             !point ||
-            Math.abs(point.x - (cardRect.left + cardRect.width / 2)) > 2 ||
+            point.x < cardRect.left - borderTolerance ||
+            point.x > cardRect.right + borderTolerance ||
             Math.abs(point.y - cardRect.bottom) > 2
           ) {
             issues.push(`${key}: does not start at the source card bottom`)
             continue
           }
-          if (
-            cellRect.bottom - cardRect.bottom > borderTolerance &&
-            Math.abs(point.y - cellRect.bottom) <= borderTolerance
-          ) {
-            issues.push(`${key}: starts at the loop-encompassing cell bottom`)
+          starts.push({ key, x: point.x, y: point.y })
+        }
+        for (let left = 0; left < starts.length; left += 1) {
+          for (let right = left + 1; right < starts.length; right += 1) {
+            if (
+              Math.abs(starts[left].x - starts[right].x) <= 2 &&
+              Math.abs(starts[left].y - starts[right].y) <= 2
+            ) {
+              issues.push(
+                `${starts[left].key}:${starts[right].key}: share one source port`,
+              )
+            }
           }
         }
       }
@@ -3789,12 +3796,24 @@ async function expectFlowConnectorContract(
       const edgeHalos = Array.from(
         flow.querySelectorAll<SVGPathElement>("[data-flow-edge-halo]"),
       )
+      const connectionItems = Array.from(
+        flow.querySelectorAll<HTMLElement>(
+          `[aria-label="${expected.title} connections"] [role="listitem"]`,
+        ),
+      )
       const bands = Array.from(
         flow.querySelectorAll<HTMLElement>("[data-flow-band]"),
       )
       const nodeCells = Array.from(
         flow.querySelectorAll<HTMLElement>("[data-flow-node-cell]"),
       )
+
+      if (flow.querySelector("[data-flow-loop-connector]")) {
+        issues.push("loops must not render as detached inline callouts")
+      }
+      if (connectionItems.length !== expected.edges.length) {
+        issues.push("accessible connection list does not match the manifest")
+      }
 
       for (const [index, band] of bands.entries()) {
         const cells = Array.from(band.children).filter((child) =>
@@ -3837,6 +3856,16 @@ async function expectFlowConnectorContract(
           issues.push(`${edge.key}: edge must render exactly once`)
           continue
         }
+        if (
+          semantic[0].dataset.flowSource !== edge.source ||
+          semantic[0].dataset.flowTarget !== edge.target ||
+          semantic[0].dataset.flowEdge !== edge.mode ||
+          (edge.loop
+            ? semantic[0].dataset.flowLoopTarget !== edge.target
+            : semantic[0].hasAttribute("data-flow-loop-target"))
+        ) {
+          issues.push(`${edge.key}: semantic edge metadata is incomplete`)
+        }
         const path = visible[0]
         if (
           path.dataset.flowSource !== edge.source ||
@@ -3845,27 +3874,37 @@ async function expectFlowConnectorContract(
         ) {
           issues.push(`${edge.key}: visible edge metadata is incomplete`)
         }
-        if (!edge.loop && path.tagName.toLowerCase() !== "path") {
-          issues.push(`${edge.key}: forward edge is not an SVG path`)
+        if (path.tagName.toLowerCase() !== "path") {
+          issues.push(`${edge.key}: visible edge is not an SVG path`)
         }
-        if (!edge.loop && !path.getAttribute("d")) {
-          issues.push(`${edge.key}: forward edge has no measured path`)
-        }
-        if (
-          !edge.loop &&
-          (path.parentElement?.dataset.flowEdgeLayer !== edge.key ||
-            path.parentElement?.parentElement !== path.ownerSVGElement)
-        ) {
-          issues.push(`${edge.key}: forward edge has no isolated paint layer`)
+        if (!path.getAttribute("d")) {
+          issues.push(`${edge.key}: visible edge has no measured path`)
         }
         if (
-          !edge.loop &&
-          path.dataset.flowShape !== "curve" &&
-          path.dataset.flowShape !== "orthogonal"
+          path.parentElement?.dataset.flowEdgeLayer !== edge.key ||
+          path.parentElement?.parentElement !== path.ownerSVGElement
         ) {
-          issues.push(`${edge.key}: forward edge has no route shape`)
+          issues.push(`${edge.key}: visible edge has no isolated paint layer`)
         }
-        if (!edge.loop) {
+        if (edge.loop) {
+          if (
+            path.dataset.flowLoop !== "true" ||
+            path.dataset.flowLoopTarget !== edge.target ||
+            path.dataset.flowShape !== "back-edge"
+          ) {
+            issues.push(`${edge.key}: loop is not marked as a back-edge`)
+          }
+          if (!path.hasAttribute("marker-end")) {
+            issues.push(`${edge.key}: loop has no return arrow`)
+          }
+        } else {
+          if (
+            path.hasAttribute("data-flow-loop") ||
+            (path.dataset.flowShape !== "curve" &&
+              path.dataset.flowShape !== "orthogonal")
+          ) {
+            issues.push(`${edge.key}: forward edge has no route shape`)
+          }
           const hasArrow = path.hasAttribute("marker-end")
           const merged = expected.mergeTargets.includes(edge.target)
           if (merged === hasArrow) {
@@ -3873,33 +3912,157 @@ async function expectFlowConnectorContract(
               `${edge.key}: ${merged ? "merged edge has an arrow" : "single edge has no arrow"}`,
             )
           }
-          const halos = edgeHalos.filter(
-            (halo) => halo.dataset.flowEdgeHalo === edge.key,
+        }
+        const halos = edgeHalos.filter(
+          (halo) => halo.dataset.flowEdgeHalo === edge.key,
+        )
+        const needsHalo = edge.loop || path.dataset.flowShape === "orthogonal"
+        if (halos.length !== (needsHalo ? 1 : 0)) {
+          issues.push(
+            `${edge.key}: ${needsHalo ? "routed edge needs one halo" : "curve must not have a halo"}`,
           )
-          const orthogonal = path.dataset.flowShape === "orthogonal"
-          if (halos.length !== (orthogonal ? 1 : 0)) {
-            issues.push(
-              `${edge.key}: ${orthogonal ? "orthogonal edge needs one halo" : "curve must not have a halo"}`,
-            )
-          } else if (orthogonal) {
-            const halo = halos[0]
-            const haloWidth = Number(halo.getAttribute("stroke-width"))
-            const pathWidth = Number(path.getAttribute("stroke-width"))
-            if (halo.getAttribute("d") !== path.getAttribute("d")) {
-              issues.push(`${edge.key}: halo geometry differs from its edge`)
-            }
-            if (haloWidth < pathWidth + 4) {
-              issues.push(`${edge.key}: halo does not provide enough clearance`)
-            }
-            if (
-              halo.parentElement !== path.parentElement ||
-              halo.nextElementSibling !== path
-            ) {
-              issues.push(
-                `${edge.key}: halo must paint immediately before its edge`,
-              )
-            }
+        } else if (needsHalo) {
+          const halo = halos[0]
+          const haloWidth = Number(halo.getAttribute("stroke-width"))
+          const pathWidth = Number(path.getAttribute("stroke-width"))
+          if (halo.getAttribute("d") !== path.getAttribute("d")) {
+            issues.push(`${edge.key}: halo geometry differs from its edge`)
           }
+          if (haloWidth < pathWidth + 4) {
+            issues.push(`${edge.key}: halo does not provide enough clearance`)
+          }
+          if (
+            halo.parentElement !== path.parentElement ||
+            halo.nextElementSibling !== path
+          ) {
+            issues.push(
+              `${edge.key}: halo must paint immediately before its edge`,
+            )
+          }
+        }
+
+        if (edge.loop) {
+          const labels = Array.from(
+            flow.querySelectorAll<SVGElement>(
+              `[data-flow-launch-label][data-flow-edge-key="${edge.key}"]`,
+            ),
+          )
+          const expectedLabel = edge.branched ? edge.label : undefined
+          if (labels.length !== (expectedLabel ? 1 : 0)) {
+            issues.push(
+              `${edge.key}: ${expectedLabel ? "branched loop needs one label" : "singleton loop must not have a label"}`,
+            )
+          } else if (
+            expectedLabel &&
+            labels[0].textContent?.replace(/\s+/g, " ").trim() !== expectedLabel
+          ) {
+            issues.push(`${edge.key}: loop label differs from the manifest`)
+          }
+
+          const accessibleText = `${expectedLabel ? `${expectedLabel}: ` : ""}${edge.sourceTitle} returns to ${edge.targetTitle}`
+          const accessibleMatches = connectionItems.filter(
+            (item) =>
+              item.textContent?.replace(/\s+/g, " ").trim() === accessibleText,
+          )
+          if (accessibleMatches.length !== 1) {
+            issues.push(
+              `${edge.key}: accessible return is missing or duplicated`,
+            )
+          }
+        }
+      }
+
+      const overlay = flow.querySelector<SVGSVGElement>(
+        "svg[data-flow-edge-overlay]",
+      )
+      const cardByID = new Map(
+        Array.from(
+          flow.querySelectorAll<HTMLElement>("[data-flow-node-id]"),
+        ).map((card) => [
+          card.dataset.flowNodeId ?? "",
+          card.getBoundingClientRect(),
+        ]),
+      )
+      const cardRects = [...cardByID.values()]
+      const fieldLeft = Math.min(...cardRects.map((rect) => rect.left))
+      const fieldRight = Math.max(...cardRects.map((rect) => rect.right))
+      const overlayRect = overlay?.getBoundingClientRect()
+      const loopTargetPorts = new Map<string, number[]>()
+      for (const edge of expected.edges.filter((item) => item.loop)) {
+        const path = visibleEdges.find(
+          (item) => item.dataset.flowVisibleEdgeKey === edge.key,
+        ) as SVGPathElement | undefined
+        const sourceRect = cardByID.get(edge.source)
+        const targetRect = cardByID.get(edge.target)
+        if (!path || !sourceRect || !targetRect || !overlayRect) continue
+        const length = path.getTotalLength()
+        if (length <= 0) {
+          issues.push(`${edge.key}: loop path has no geometry`)
+          continue
+        }
+        const matrix = path.getScreenCTM()
+        if (!matrix) {
+          issues.push(`${edge.key}: loop path has no screen transform`)
+          continue
+        }
+        const screenPointAt = (distance: number) => {
+          const point = path.getPointAtLength(distance)
+          const screenPoint = path.ownerSVGElement!.createSVGPoint()
+          screenPoint.x = point.x
+          screenPoint.y = point.y
+          return screenPoint.matrixTransform(matrix)
+        }
+        const start = screenPointAt(0)
+        const end = screenPointAt(length)
+        if (
+          start.x < sourceRect.left - 3 ||
+          start.x > sourceRect.right + 3 ||
+          Math.abs(start.y - sourceRect.bottom) > 3
+        ) {
+          issues.push(`${edge.key}: loop is not attached to its source bottom`)
+        }
+        if (
+          end.x < targetRect.left - 3 ||
+          end.x > targetRect.right + 3 ||
+          Math.abs(end.y - targetRect.top) > 3
+        ) {
+          issues.push(`${edge.key}: loop is not attached to its target top`)
+        }
+        loopTargetPorts.set(edge.target, [
+          ...(loopTargetPorts.get(edge.target) ?? []),
+          end.x,
+        ])
+
+        let usesOuterRail = false
+        const sampleCount = Math.max(8, Math.ceil(length / 6))
+        for (let sample = 0; sample <= sampleCount; sample += 1) {
+          const point = screenPointAt((length * sample) / sampleCount)
+          if (
+            point.x < overlayRect.left - 2 ||
+            point.x > overlayRect.right + 2 ||
+            point.y < overlayRect.top - 2 ||
+            point.y > overlayRect.bottom + 2
+          ) {
+            issues.push(`${edge.key}: loop leaves the connector canvas`)
+            break
+          }
+          if (point.x < fieldLeft - 3 || point.x > fieldRight + 3) {
+            usesOuterRail = true
+          }
+        }
+        if (!usesOuterRail) {
+          issues.push(`${edge.key}: loop has no outer return rail`)
+        }
+      }
+      for (const [target, ports] of loopTargetPorts) {
+        if (ports.length < 2) continue
+        const distinctPorts = ports.filter(
+          (port, index) =>
+            ports.findIndex((candidate) => Math.abs(candidate - port) <= 2) ===
+            index,
+        )
+        if (distinctPorts.length !== ports.length) {
+          issues.push(`${target}: multiple loops share one target port`)
         }
       }
 
@@ -3950,14 +4113,23 @@ async function expectFlowConnectorContract(
     },
     {
       edges: expectedFlow.edges.map((edge) => ({
+        branched:
+          expectedFlow.edges.filter((candidate) => candidate.from === edge.from)
+            .length > 1,
         key: `${edge.from}:${edge.to}`,
+        label: edge.label,
         loop: edge.loop,
         mode: edge.mode,
         source: edge.from,
+        sourceTitle: expectedFlow.nodes.find((node) => node.id === edge.from)!
+          .title,
         target: edge.to,
+        targetTitle: expectedFlow.nodes.find((node) => node.id === edge.to)!
+          .title,
       })),
       mergeTargets,
       nodeIDs: expectedFlow.nodes.map((node) => node.id),
+      title: expectedFlow.title,
     },
   )
 
@@ -4013,22 +4185,21 @@ async function expectBranchLaunchTargets(
 async function expectLoopBranchTarget(
   gateMap: Locator,
   sourceID: string,
-  expected: { target: string; targetTitle: string },
+  expected: { label: string; target: string },
 ) {
   const loop = gateMap.locator(
-    `[data-flow-node-cell="${sourceID}"] [data-flow-loop-connector]`,
+    `path[data-flow-source="${sourceID}"][data-flow-loop="true"]`,
   )
   await expect(loop).toHaveCount(1)
-  const actual = await loop.evaluate((route) => {
-    const item = route as HTMLElement
-    return {
-      target: item.dataset.flowLoopConnector ?? "",
-      targetTitle:
-        item
-          .querySelector<HTMLElement>("[data-flow-loop-target-title]")
-          ?.textContent?.trim() ?? "",
-    }
-  })
+  const edgeKey = await loop.getAttribute("data-flow-visible-edge-key")
+  const label = gateMap.locator(
+    `[data-flow-launch-label][data-flow-edge-key="${edgeKey}"]`,
+  )
+  await expect(label).toHaveCount(1)
+  const actual = {
+    label: (await label.textContent())?.trim() ?? "",
+    target: (await loop.getAttribute("data-flow-loop-target")) ?? "",
+  }
   expect(actual).toEqual(expected)
 }
 
@@ -4304,8 +4475,8 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Assume failed",
   ])
   await expectLoopBranchTarget(gateMap, "review_resolve_publication", {
+    label: "Still unknown",
     target: "review_gate_reconcile",
-    targetTitle: "Return to Resolve unknown publication",
   })
   await expectGateMapFits(gateMap)
 
@@ -4313,7 +4484,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
     await expectFlowConnectorContract(gateMap, "review")
-    await expectForwardPathsAvoidNodeCards(gateMap, "review")
+    await expectPathsAvoidNodeCards(gateMap, "review")
     await expectProcessReviewRoutesStayDistinct(gateMap, width)
     await expectBranchLabelsDoNotOverlap(gateMap, "review")
     if (width === 1280) {
@@ -4414,12 +4585,12 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "Assume failed",
   ])
   await expectLoopBranchTarget(gateMap, "implementation_resolve_publication", {
+    label: "Still unknown",
     target: "implementation_gate_reconcile",
-    targetTitle: "Return to Resolve unknown publication",
   })
   await expectLoopBranchTarget(gateMap, "implementation_remove_and_defer", {
+    label: "Repair",
     target: "implementation_run_ai",
-    targetTitle: "Return to Implement selected fixes",
   })
   expect(renderedGateInstances.every((gate) => gate.name.length > 0)).toBe(true)
   const expectedDecisionPoints = [
@@ -4488,7 +4659,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     await page.setViewportSize({ width, height: width >= 1920 ? 1080 : 900 })
     await expectGateMapFits(gateMap)
     await expectFlowConnectorContract(gateMap, "implementation")
-    await expectForwardPathsAvoidNodeCards(gateMap, "implementation")
+    await expectPathsAvoidNodeCards(gateMap, "implementation")
     await expectBranchLabelsDoNotOverlap(gateMap, "implementation")
     if (width === 1280) {
       await expectTerminalBranchReleased(
