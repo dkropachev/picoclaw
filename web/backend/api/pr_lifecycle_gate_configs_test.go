@@ -32,7 +32,7 @@ func TestPRLifecycleGateConfigsResponsesUseV3ContractAndCanonicalFlow(t *testing
 	}
 	for _, key := range []string{
 		"gate-configs", "default-gate-config", "repository-assignments", "nudge",
-		"scope", "deferred-issues", "gate-catalog", "flow", "flow-revision",
+		"scope", "gate-catalog", "flow", "flow-revision",
 		"catalog-revision", "config-revision", "effects",
 	} {
 		if _, exists := raw[key]; !exists {
@@ -48,15 +48,25 @@ func TestPRLifecycleGateConfigsResponsesUseV3ContractAndCanonicalFlow(t *testing
 	if current.FlowRevision != wantRevision || !reflect.DeepEqual(current.Flow, wantFlow) {
 		t.Fatalf("GET flow revision = %q flow = %#v", current.FlowRevision, current.Flow)
 	}
+	if current.Effects.GatewayEffect != "applied" || current.Effects.DeferredPolicyEffect != "applied" {
+		t.Fatalf("initial effects = %#v", current.Effects)
+	}
 	builtin := current.GateConfigs[config.DefaultPRLifecycleGateConfigID]
 	if builtin.Name != config.DefaultPRLifecycleGateConfigName || len(builtin.Bindings) != 0 {
 		t.Fatalf("built-in gate configuration = %#v", builtin)
+	}
+	if builtin.DeferredIssues.Mode != config.PRLifecycleDeferredIssuesAsk {
+		t.Fatalf("built-in deferred issue policy = %#v", builtin.DeferredIssues)
 	}
 	if len(current.GateCatalog) < 14 || current.GateCatalog["pr.charter.confirm"].GateRef != "gates.charter-confirm" ||
 		current.GateCatalog["pr.charter.confirm"].DefaultAction == nil ||
 		current.GateCatalog["pr.charter.confirm"].Prompt == "" ||
 		len(current.GateCatalog["pr.charter.confirm"].Fields) == 0 {
 		t.Fatalf("built-in gate catalog = %#v", current.GateCatalog)
+	}
+	if current.GateCatalog["pr.charter.confirm"].SourceAISupported ||
+		!current.GateCatalog["pr.finding.classify"].SourceAISupported {
+		t.Fatalf("source AI gate support = %#v", current.GateCatalog)
 	}
 }
 
@@ -114,6 +124,41 @@ func TestPRLifecycleGateConfigsGatewayEffectTracksExactSavedGeneration(t *testin
 	restartedHandler.registerPRLifecycleGateConfigRoutes(restartedMux)
 	if got := getPRLifecycleGateConfigsForTest(t, restartedMux).Effects.GatewayEffect; got != "applied" {
 		t.Fatalf("new handler gateway effect = %q", got)
+	}
+}
+
+func TestPRLifecycleGateConfigsDeferredEffectTracksOnlyActivePolicyRouting(t *testing.T) {
+	_, handler, mux := prLifecycleGateConfigTestServer(t)
+	active := config.DefaultPRLifecycleConfig()
+	handler.markPRLifecycleGatewayApplied(active)
+	initial := getPRLifecycleGateConfigsForTest(t, mux)
+
+	unrelated := active
+	unrelated.Nudge.ReviewMinimumAdditional++
+	put := putPRLifecycleGateConfigsForTest(t, mux, initial.ConfigRevision, unrelated, nil)
+	if put.Code != http.StatusOK {
+		t.Fatalf("unrelated PUT status = %d body=%s", put.Code, put.Body.String())
+	}
+	saved := decodePRLifecycleGateConfigsResponse(t, put.Body.Bytes())
+	if saved.Effects.GatewayEffect != "restart-required" || saved.Effects.DeferredPolicyEffect != "applied" {
+		t.Fatalf("unrelated effects = %#v", saved.Effects)
+	}
+
+	handler.markPRLifecycleGatewayApplied(unrelated)
+	current := getPRLifecycleGateConfigsForTest(t, mux)
+	changed := unrelated
+	defaultConfig := changed.GateConfigs[config.DefaultPRLifecycleGateConfigID]
+	defaultConfig.DeferredIssues.Mode = config.PRLifecycleDeferredIssuesOff
+	changed.GateConfigs = map[string]config.PRLifecycleGateConfig{
+		config.DefaultPRLifecycleGateConfigID: defaultConfig,
+	}
+	put = putPRLifecycleGateConfigsForTest(t, mux, current.ConfigRevision, changed, nil)
+	if put.Code != http.StatusOK {
+		t.Fatalf("deferred PUT status = %d body=%s", put.Code, put.Body.String())
+	}
+	saved = decodePRLifecycleGateConfigsResponse(t, put.Body.Bytes())
+	if saved.Effects.DeferredPolicyEffect != "restart-required" {
+		t.Fatalf("deferred effects = %#v", saved.Effects)
 	}
 }
 
@@ -397,14 +442,13 @@ func prLifecycleGateConfigsPutRequestForTest(
 		RepositoryAssignments:  candidate.RepositoryAssignments,
 		Nudge:                  candidate.Nudge,
 		Scope:                  candidate.Scope,
-		DeferredIssues:         candidate.DeferredIssues,
 	}
 }
 
 func mixedPRLifecycleGateConfigCandidate() config.PRLifecycleConfig {
 	candidate := config.DefaultPRLifecycleConfig()
 	candidate.GateConfigs["mixed"] = config.PRLifecycleGateConfig{
-		Name: "Mixed",
+		Name: "Mixed", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAutomatic},
 		Bindings: []config.PRLifecycleGateBinding{
 			{
 				WorkflowRef: "workflows/pr-lifecycle.yml", GateRef: "gates.charter-confirm",

@@ -50,7 +50,11 @@ func (store *EventingStore) Create(ctx context.Context, input CreateInput) (Muta
 	if err != nil {
 		return MutationResult{}, mapEventingStoreError(err)
 	}
-	return MutationResult{Aggregate: fromEventingAggregate(aggregate), Replayed: existed || !created}, nil
+	converted, convertErr := fromEventingAggregate(aggregate)
+	if convertErr != nil {
+		return MutationResult{}, convertErr
+	}
+	return MutationResult{Aggregate: converted, Replayed: existed || !created}, nil
 }
 
 func (store *EventingStore) Get(ctx context.Context, workspaceID string) (Aggregate, error) {
@@ -61,7 +65,7 @@ func (store *EventingStore) Get(ctx context.Context, workspaceID string) (Aggreg
 	if err != nil {
 		return Aggregate{}, mapEventingStoreError(err)
 	}
-	return fromEventingAggregate(aggregate), nil
+	return fromEventingAggregate(aggregate)
 }
 
 func (store *EventingStore) List(ctx context.Context, filter ListFilter) (Page, error) {
@@ -97,10 +101,14 @@ func (store *EventingStore) Mutate(ctx context.Context, mutation Mutation) (Muta
 		mutation.ExpectedVersion < 1 || !validRequestID(mutation.RequestID) {
 		return MutationResult{}, ErrInvalid
 	}
+	eventPatch, err := toEventingPatch(mutation.WorkspaceID, mutation.ExpectedVersion, mutation.RequestID, mutation.Patch)
+	if err != nil {
+		return MutationResult{}, fmt.Errorf("%w: encode protected finding provenance: %v", ErrInvalid, err)
+	}
 	result, err := store.store.ApplyPRWorkspacePatch(ctx, eventing.PRWorkspacePatchMutation{
 		WorkspaceID: mutation.WorkspaceID, ExpectedVersion: mutation.ExpectedVersion,
 		RequestID: mutation.RequestID,
-		Patch:     toEventingPatch(mutation.WorkspaceID, mutation.ExpectedVersion, mutation.RequestID, mutation.Patch),
+		Patch:     eventPatch,
 	})
 	if err != nil {
 		mapped := mapEventingStoreError(err)
@@ -112,7 +120,11 @@ func (store *EventingStore) Mutate(ctx context.Context, mutation Mutation) (Muta
 		}
 		return MutationResult{}, mapped
 	}
-	return MutationResult{Aggregate: fromEventingAggregate(result.Aggregate), Replayed: result.Replayed}, nil
+	converted, convertErr := fromEventingAggregate(result.Aggregate)
+	if convertErr != nil {
+		return MutationResult{}, convertErr
+	}
+	return MutationResult{Aggregate: converted, Replayed: result.Replayed}, nil
 }
 
 func mapEventingStoreError(err error) error {
@@ -134,7 +146,7 @@ func mapEventingStoreError(err error) error {
 	}
 }
 
-func toEventingPatch(workspaceID string, version int64, requestID string, patch AggregatePatch) eventing.PRWorkspacePatch {
+func toEventingPatch(workspaceID string, version int64, requestID string, patch AggregatePatch) (eventing.PRWorkspacePatch, error) {
 	result := eventing.PRWorkspacePatch{}
 	if patch.Phase != nil {
 		value := eventing.PRWorkspacePhase(*patch.Phase)
@@ -165,7 +177,11 @@ func toEventingPatch(workspaceID string, version int64, requestID string, patch 
 		result.ReplaceStageRuns = append(result.ReplaceStageRuns, toEventingStageRun(value, version))
 	}
 	for _, value := range patch.UpsertFindings {
-		result.UpsertFindings = append(result.UpsertFindings, toEventingFinding(value))
+		finding, err := toEventingFinding(value)
+		if err != nil {
+			return eventing.PRWorkspacePatch{}, err
+		}
+		result.UpsertFindings = append(result.UpsertFindings, finding)
 		if value.Disposition != FindingDeferred {
 			result.UpsertDeferredItems = append(result.UpsertDeferredItems, eventing.PRDeferredGroupItem{
 				PRWorkspaceRecord: eventing.PRWorkspaceRecord{ID: stableID("pdi_", workspaceID, value.ID)},
@@ -234,7 +250,7 @@ func toEventingPatch(workspaceID string, version int64, requestID string, patch 
 			EntityID: value.EntityID, Metadata: value.Metadata,
 		})
 	}
-	return result
+	return result, nil
 }
 
 func toEventingProvider(value ProviderSnapshot) eventing.PRProviderSnapshot {
@@ -293,8 +309,8 @@ func toEventingStageRun(value StageRun, version int64) eventing.PRStageRun {
 	}
 }
 
-func toEventingFinding(value Finding) eventing.PRFinding {
-	return eventing.PRFinding{
+func toEventingFinding(value Finding) (eventing.PRFinding, error) {
+	result := eventing.PRFinding{
 		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, value.UpdatedAt),
 		Origin:            string(value.Origin), StageRunID: value.OriginRunID, NudgeRoundID: value.NudgeRoundID,
 		Fingerprint: value.Fingerprint, Severity: value.Severity, Title: value.Title,
@@ -310,6 +326,18 @@ func toEventingFinding(value Finding) eventing.PRFinding {
 		ScopeChangeEvidence: toEventingScopeChanges(value.Scope.ChangeEvidence),
 		NudgeReward:         cloneFloatPointer(value.NudgeReward), RewardSource: value.RewardSource, Version: value.Version,
 	}
+	if value.source != nil {
+		source := eventing.PRFindingSourceExecution{
+			ExecutionID: value.source.ExecutionID, WorkspaceID: value.source.WorkspaceID,
+			Binding: value.source.Binding, AgentID: value.source.AgentID,
+			Session: value.source.Session, SessionRevision: value.source.SessionRevision,
+			Tools: value.source.Tools,
+		}
+		if err := result.SetProtectedSourceExecution(&source); err != nil {
+			return eventing.PRFinding{}, err
+		}
+	}
+	return result, nil
 }
 
 func toEventingMessage(value Message) eventing.PRMessage {
@@ -585,7 +613,7 @@ func toEventingPublication(value Publication) eventing.PRPublication {
 	return publication
 }
 
-func fromEventingAggregate(value eventing.PRWorkspaceAggregate) Aggregate {
+func fromEventingAggregate(value eventing.PRWorkspaceAggregate) (Aggregate, error) {
 	result := Aggregate{
 		Workspace:        fromEventingWorkspace(value.Workspace),
 		ProviderSnapshot: fromEventingProvider(value.ProviderSnapshot),
@@ -597,7 +625,11 @@ func fromEventingAggregate(value eventing.PRWorkspaceAggregate) Aggregate {
 		result.StageRuns = append(result.StageRuns, fromEventingStageRun(item))
 	}
 	for _, item := range value.Findings {
-		result.Findings = append(result.Findings, fromEventingFinding(item))
+		finding, err := fromEventingFinding(item)
+		if err != nil {
+			return Aggregate{}, err
+		}
+		result.Findings = append(result.Findings, finding)
 	}
 	for _, item := range value.Messages {
 		result.Messages = append(result.Messages, fromEventingMessage(item))
@@ -632,7 +664,7 @@ func fromEventingAggregate(value eventing.PRWorkspaceAggregate) Aggregate {
 			EntityID: item.EntityID, Metadata: item.Metadata, CreatedAt: item.CreatedAt,
 		})
 	}
-	return result
+	return result, nil
 }
 
 func fromEventingWorkspace(value eventing.PRWorkspace) Workspace {
@@ -691,8 +723,8 @@ func fromEventingStageRun(value eventing.PRStageRun) StageRun {
 	return result
 }
 
-func fromEventingFinding(value eventing.PRFinding) Finding {
-	return Finding{
+func fromEventingFinding(value eventing.PRFinding) (Finding, error) {
+	result := Finding{
 		ID: value.ID, Fingerprint: value.Fingerprint, Origin: FindingOrigin(value.Origin),
 		OriginRunID: value.StageRunID, NudgeRoundID: value.NudgeRoundID,
 		Severity: value.Severity, Title: value.Title, File: value.File, Line: cloneIntPointer(value.Line),
@@ -711,6 +743,20 @@ func fromEventingFinding(value eventing.PRFinding) Finding {
 		RewardSource: value.RewardSource, Version: value.Version,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
+	if persisted, ok := value.ProtectedSourceExecution(); ok {
+		source := AIExecutionSource{
+			ExecutionID: persisted.ExecutionID, WorkspaceID: persisted.WorkspaceID,
+			Binding: persisted.Binding, AgentID: persisted.AgentID,
+			Session: persisted.Session, SessionRevision: persisted.SessionRevision,
+			Tools: persisted.Tools,
+		}
+		if !validAIExecutionSource(&source) {
+			return Finding{}, fmt.Errorf("%w: protected finding source is invalid", ErrInvalid)
+		}
+		result.source = &source
+		result.SourceAvailable = true
+	}
+	return result, nil
 }
 
 func fromEventingMessage(value eventing.PRMessage) Message {

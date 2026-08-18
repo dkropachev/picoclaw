@@ -466,6 +466,7 @@ const gateCatalog: Record<string, PRLifecycleGateCatalogEntry> =
             {
               workflowRef: "workflows/pr-lifecycle.yml",
               gateRef: `gates.${node.decision_point.replaceAll(".", "-")}`,
+              sourceAISupported: node.decision_point === "pr.finding.classify",
               workflowRevision: "revision-1",
               defaultAction: { type },
               effectiveAction: { type },
@@ -480,6 +481,7 @@ const gateCatalog: Record<string, PRLifecycleGateCatalogEntry> =
 function renderMap(
   selectedDecisionPoint = "pr.review.start",
   onSelect = vi.fn(),
+  catalog = gateCatalog,
 ) {
   return render(
     <PRLifecycleGateMap
@@ -489,7 +491,7 @@ function renderMap(
       configID="strict profile"
       configName="Strict profile"
       selectedDecisionPoint={selectedDecisionPoint}
-      gateCatalog={gateCatalog}
+      gateCatalog={catalog}
     />,
   )
 }
@@ -1318,6 +1320,9 @@ describe("PR lifecycle gate map", () => {
       container.querySelector('[data-gate-id="pr.review.publish"]'),
     ).toHaveAttribute("data-gate-format", "ai")
     expect(
+      container.querySelector('[data-gate-id="pr.review.publish"]'),
+    ).toHaveTextContent("AI · Ephemeral")
+    expect(
       container.querySelector('[data-gate-id="pr.deferred.publish"]'),
     ).toHaveAttribute("data-gate-format", "user")
     expect(
@@ -1336,6 +1341,68 @@ describe("PR lifecycle gate map", () => {
     expect(
       container.querySelector('[data-gate-id="pr.implementation.complete"]'),
     ).toHaveTextContent("Workflow")
+  })
+
+  it("distinguishes private and originating AI session profiles", () => {
+    const sourceCatalog = structuredClone(gateCatalog)
+    sourceCatalog["pr.review.publish"] = {
+      ...sourceCatalog["pr.review.publish"],
+      sourceAISupported: true,
+      defaultAction: {
+        type: "ai",
+        prompt: "Recheck the originating review.",
+        session: "source",
+      },
+      effectiveAction: {
+        type: "ai",
+        prompt: "Recheck the originating review.",
+        session: "source",
+      },
+    }
+    const { container, rerender } = renderMap(
+      "pr.review.publish",
+      vi.fn(),
+      sourceCatalog,
+    )
+    expect(
+      container.querySelector('[data-gate-id="pr.review.publish"]'),
+    ).toHaveTextContent("AI · Originating snapshot")
+
+    sourceCatalog["pr.review.publish"] = {
+      ...sourceCatalog["pr.review.publish"],
+      defaultAction: {
+        type: "ai",
+        agentID: "main",
+        prompt: "Recheck privately.",
+        session: "private",
+        history: "read_only",
+        cache: "session",
+        tools: "none",
+      },
+      effectiveAction: {
+        type: "ai",
+        agentID: "main",
+        prompt: "Recheck privately.",
+        session: "private",
+        history: "read_only",
+        cache: "session",
+        tools: "none",
+      },
+    }
+    rerender(
+      <PRLifecycleGateMap
+        flow={flow}
+        flowRevision={`sha256:${"b".repeat(64)}`}
+        onSelect={vi.fn()}
+        configID="strict profile"
+        configName="Strict profile"
+        selectedDecisionPoint="pr.review.publish"
+        gateCatalog={sourceCatalog}
+      />,
+    )
+    expect(
+      container.querySelector('[data-gate-id="pr.review.publish"]'),
+    ).toHaveTextContent("AI · Private")
   })
 
   it("renders a changed topology directly from the supplied catalog", () => {

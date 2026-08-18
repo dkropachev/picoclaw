@@ -345,7 +345,7 @@ func (store *MemoryStore) Mutate(ctx context.Context, mutation Mutation) (Mutati
 		!validRequestID(mutation.RequestID) {
 		return MutationResult{}, ErrInvalid
 	}
-	fingerprint, err := fingerprintValue(mutation.Patch)
+	fingerprint, err := fingerprintAggregatePatch(mutation.Patch, mutation.WorkspaceID)
 	if err != nil {
 		return MutationResult{}, ErrInvalid
 	}
@@ -401,6 +401,15 @@ func applyPatch(aggregate *Aggregate, patch AggregatePatch) error {
 	aggregate.Charters = append(aggregate.Charters, patch.AppendCharters...)
 	aggregate.StageRuns = replaceByID(aggregate.StageRuns, patch.ReplaceStageRuns, func(value StageRun) string { return value.ID })
 	aggregate.StageRuns = append(aggregate.StageRuns, patch.AppendStageRuns...)
+	for _, finding := range patch.UpsertFindings {
+		if err := validateFindingSourceForWorkspace(finding, aggregate.Workspace.ID); err != nil {
+			return err
+		}
+		if existing, index := findFinding(aggregate.Findings, finding.ID); index >= 0 &&
+			!equalOptionalAIExecutionSource(existing.source, finding.source) {
+			return ErrConflict
+		}
+	}
 	aggregate.Findings = upsertByID(aggregate.Findings, patch.UpsertFindings, func(value Finding) string { return value.ID })
 	aggregate.Messages = append(aggregate.Messages, patch.AppendMessages...)
 	aggregate.Corrections = replaceByID(aggregate.Corrections, patch.ReplaceCorrections, func(value Correction) string { return value.ID })
@@ -423,6 +432,52 @@ func applyPatch(aggregate *Aggregate, patch AggregatePatch) error {
 		aggregate.Activity = append(aggregate.Activity, activity)
 	}
 	return nil
+}
+
+func fingerprintAggregatePatch(patch AggregatePatch, workspaceID string) (string, error) {
+	base, err := fingerprintValue(patch)
+	if err != nil {
+		return "", err
+	}
+	type findingSource struct {
+		FindingID string             `json:"finding-id"`
+		Source    *AIExecutionSource `json:"source,omitempty"`
+	}
+	sources := make([]findingSource, 0, len(patch.UpsertFindings))
+	for _, finding := range patch.UpsertFindings {
+		if err := validateFindingSourceForWorkspace(finding, workspaceID); err != nil {
+			return "", err
+		}
+		sources = append(sources, findingSource{
+			FindingID: finding.ID,
+			Source:    cloneAIExecutionSource(finding.source),
+		})
+	}
+	return fingerprintValue(struct {
+		Base    string          `json:"base"`
+		Sources []findingSource `json:"finding-sources"`
+	}{Base: base, Sources: sources})
+}
+
+func validateFindingSourceForWorkspace(finding Finding, workspaceID string) error {
+	if finding.source == nil {
+		if finding.SourceAvailable {
+			return ErrInvalid
+		}
+		return nil
+	}
+	if !finding.SourceAvailable || !validAIExecutionSource(finding.source) ||
+		finding.source.WorkspaceID != workspaceID {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func equalOptionalAIExecutionSource(left, right *AIExecutionSource) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return sameAIExecutionSource(left, right)
 }
 
 func replaceByID[T any](current, replacements []T, id func(T) string) []T {
@@ -480,6 +535,12 @@ func cloneAggregate(value Aggregate) Aggregate {
 	for index := range cloned.StageRuns {
 		if index < len(value.StageRuns) {
 			cloned.StageRuns[index].inputWorkspaceVersion = value.StageRuns[index].inputWorkspaceVersion
+		}
+	}
+	for index := range cloned.Findings {
+		if index < len(value.Findings) {
+			cloned.Findings[index].source = cloneAIExecutionSource(value.Findings[index].source)
+			cloned.Findings[index].SourceAvailable = cloned.Findings[index].source != nil
 		}
 	}
 	for index := range cloned.RepairAttempts {

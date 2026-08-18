@@ -181,8 +181,8 @@ Gate configurations are managed from **Pull requests → Gate configurations** a
 `/pull-requests/gate-configs`. Each named configuration has its own
 `/pull-requests/gate-configs/:configID?flow=review|implementation` editor and
 may be assigned to exact canonical repositories; all other repositories use the
-configured default. Nudging, scope grades, and deferred-issue policy remain at
-`/pull-requests/settings`.
+configured default. Each named configuration also owns its deferred-issue
+policy. Global nudging and scope grades remain at `/pull-requests/settings`.
 
 The application workflow owns static gate declarations. A declaration looks
 like this:
@@ -233,6 +233,14 @@ At `gate/exec`, exactly one complete action supplies values:
 - `workflow` invokes a bounded action workflow that may safely compose
   deterministic work, no-tool AI, and further `gate/exec` decisions.
 
+An AI action can use an `ephemeral`, `private`, or `source` session profile.
+`source` stores only the prompt and `session: source`; the catalog exposes it
+only for `gates.finding-classify`, whose subject is one finding. At execution,
+trusted PR provenance resolves the same originating agent and an exact
+protected read-only snapshot of the finding-producing transcript. Cache and
+tools remain pinned to `none`. Missing, stale, mixed, cross-workspace, or
+ambiguous provenance fails closed without falling back to another profile.
+
 A Gate configuration contains exact `(workflow-ref, gate-ref)` bindings. A
 binding's complete `action` atomically replaces the workflow
 `default-action`; fields never merge across them. With no binding, the
@@ -264,7 +272,9 @@ version and rejects duplicate group or finding membership rather than silently
 deduplicating it. Group membership is durable, so removing a finding from a
 group does not reappear after reload.
 
-`pr_lifecycle.deferred-issues.mode` controls follow-up issue handling:
+Each Gate configuration owns its follow-up issue policy at
+`pr_lifecycle.gate-configs.<config-id>.deferred-issues.mode`. Repository
+assignment selects the policy together with that configuration's Gate actions:
 
 - `off` refuses new issue publications and cancels an already queued one before
   any provider call;
@@ -355,10 +365,12 @@ The current top-level configuration is `pr_lifecycle`:
     "gate-configs": {
       "default": {
         "name": "Default",
+        "deferred-issues": { "mode": "ask" },
         "bindings": []
       },
       "strict": {
         "name": "Strict",
+        "deferred-issues": { "mode": "off" },
         "bindings": [
           {
             "workflow-ref": "workflows/pr-lifecycle.yml",
@@ -382,20 +394,23 @@ The current top-level configuration is `pr_lifecycle`:
       "xs": { "files": 1, "semantic-lines": 20, "modules": 1 },
       "s": { "files": 3, "semantic-lines": 100, "modules": 1 },
       "m": { "files": 10, "semantic-lines": 500, "modules": 3 }
-    },
-    "deferred-issues": {
-      "mode": "ask"
     }
   }
 }
 ```
 
 Use `GET` and revision-fenced `PUT /api/pr-lifecycle/gate-configs` for the
-scoped settings surface. Writes replace the complete Gate configuration catalog
-and global lifecycle settings. Validation rejects unknown or duplicate exact
-bindings, relative gate refs, partial actions, unknown AI agents, nonmonotonic
-scope thresholds, and retired Gate V2 configuration fields. A successful update reports
-`restart_required` until a gateway start loads that exact saved generation.
+scoped settings surface. Writes replace the complete Gate configuration catalog,
+including every configuration's deferred-issue policy, and the shared lifecycle
+settings. The retired top-level `pr_lifecycle.deferred-issues` field is rejected;
+it is not migrated or used as a fallback. Validation rejects unknown or
+duplicate exact bindings, relative gate refs, partial actions, unknown AI
+agents, nonmonotonic scope thresholds, and retired Gate V2 configuration
+fields. A successful update reports `gateway-effect: restart-required` until a
+gateway start loads that exact saved generation. Its separate
+`deferred-policy-effect` remains `applied` when only unrelated Gate, nudge, or
+scope configuration changed, so issue controls are withheld only while the
+active deferred routing policy is actually stale.
 
 The removed `reviews` configuration and Gate V2 keys are not accepted as
 compatibility placeholders and are not migrated into `pr_lifecycle`.

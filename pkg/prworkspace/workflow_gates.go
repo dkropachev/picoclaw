@@ -137,6 +137,16 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 		}
 		compilation.PrivateRoot.ReadOnlySession = &ref
 	}
+	if effectiveAction.Type == gatetypes.GateActionAI && effectiveAction.Session == workflows.AgentSessionSource {
+		source, sourceErr := sourceForGateSubject(request.Subject, request.WorkspaceID)
+		if sourceErr != nil {
+			return GateRun{}, sourceErr
+		}
+		compilation.PrivateRoot.ReadOnlySession = &workflows.ReadOnlySessionRef{
+			AgentID: source.AgentID, Session: source.Session,
+			ExpectedRevision: source.SessionRevision,
+		}
+	}
 	pinned := pinnedPRLifecycleGateV3{
 		Version: "3", WorkflowRef: entry.WorkflowRef, WorkflowRevision: entry.WorkflowRevision,
 		GateRef: entry.GateRef, Gate: entry.Gate, ConfigID: configID,

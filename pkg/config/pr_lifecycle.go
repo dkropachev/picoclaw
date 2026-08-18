@@ -53,7 +53,6 @@ type PRLifecycleConfig struct {
 	RepositoryAssignments map[string]string                `json:"repository-assignments,omitempty"`
 	Nudge                 PRLifecycleNudgeConfig           `json:"nudge"`
 	Scope                 PRLifecycleScopeConfig           `json:"scope"`
-	DeferredIssues        PRLifecycleDeferredIssueConfig   `json:"deferred-issues"`
 }
 
 func (config *PRLifecycleConfig) UnmarshalJSON(data []byte) error {
@@ -89,8 +88,9 @@ type PRLifecycleDeferredIssueConfig struct {
 // PRLifecycleGateConfig is a named, assignable collection of workflow gate
 // overrides. Bindings are matched by the exact pair (workflow-ref, gate-ref).
 type PRLifecycleGateConfig struct {
-	Name     string                   `json:"name"`
-	Bindings []PRLifecycleGateBinding `json:"bindings"`
+	Name           string                         `json:"name"`
+	Bindings       []PRLifecycleGateBinding       `json:"bindings"`
+	DeferredIssues PRLifecycleDeferredIssueConfig `json:"deferred-issues"`
 }
 
 type PRLifecycleGateBinding struct {
@@ -121,8 +121,7 @@ type PRLifecycleSizeThreshold struct {
 func (config PRLifecycleConfig) IsZero() bool {
 	return config.GateConfigs == nil && config.DefaultGateConfigID == "" &&
 		config.RepositoryAssignments == nil && config.Nudge == (PRLifecycleNudgeConfig{}) &&
-		config.Scope == (PRLifecycleScopeConfig{}) &&
-		config.DeferredIssues == (PRLifecycleDeferredIssueConfig{})
+		config.Scope == (PRLifecycleScopeConfig{})
 }
 
 func (config PRLifecycleConfig) Effective() PRLifecycleConfig {
@@ -136,8 +135,9 @@ func DefaultPRLifecycleConfig() PRLifecycleConfig {
 	return PRLifecycleConfig{
 		GateConfigs: map[string]PRLifecycleGateConfig{
 			DefaultPRLifecycleGateConfigID: {
-				Name:     DefaultPRLifecycleGateConfigName,
-				Bindings: []PRLifecycleGateBinding{},
+				Name:           DefaultPRLifecycleGateConfigName,
+				Bindings:       []PRLifecycleGateBinding{},
+				DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAsk},
 			},
 		},
 		DefaultGateConfigID:   DefaultPRLifecycleGateConfigID,
@@ -151,7 +151,6 @@ func DefaultPRLifecycleConfig() PRLifecycleConfig {
 			S:  PRLifecycleSizeThreshold{Files: 3, SemanticLines: 100, Modules: 1},
 			M:  PRLifecycleSizeThreshold{Files: 10, SemanticLines: 500, Modules: 3},
 		},
-		DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAsk},
 	}
 }
 
@@ -167,7 +166,7 @@ func (config PRLifecycleConfig) Validate() error {
 	}
 	defaultConfig, exists := config.GateConfigs[DefaultPRLifecycleGateConfigID]
 	if !exists || defaultConfig.Name != DefaultPRLifecycleGateConfigName || len(defaultConfig.Bindings) != 0 {
-		return errors.New("PR lifecycle built-in default gate configuration must exist unchanged and contain no overrides")
+		return errors.New("PR lifecycle built-in default gate configuration must retain its name and contain no gate overrides")
 	}
 
 	names := make(map[string]string, len(config.GateConfigs))
@@ -183,6 +182,9 @@ func (config PRLifecycleConfig) Validate() error {
 			return fmt.Errorf("PR lifecycle gate configurations %q and %q have duplicate names", previous, id)
 		}
 		names[foldedName] = id
+		if err := gateConfig.DeferredIssues.Validate(); err != nil {
+			return fmt.Errorf("PR lifecycle gate configuration %q: %w", id, err)
+		}
 		totalBindings += len(gateConfig.Bindings)
 		if totalBindings > MaxPRLifecycleGateBindings {
 			return fmt.Errorf("PR lifecycle gate bindings exceed %d", MaxPRLifecycleGateBindings)
@@ -226,9 +228,6 @@ func (config PRLifecycleConfig) Validate() error {
 	if err := config.Scope.Validate(); err != nil {
 		return err
 	}
-	if err := config.DeferredIssues.Validate(); err != nil {
-		return err
-	}
 	encoded, err := json.Marshal(config)
 	if err != nil || len(encoded) > MaxPRLifecycleConfigBytes {
 		return fmt.Errorf("PR lifecycle config exceeds %d bytes", MaxPRLifecycleConfigBytes)
@@ -255,6 +254,10 @@ func validatePRLifecycleGateBinding(binding PRLifecycleGateBinding) error {
 	}
 	if err := validatePRLifecycleGateAction(*binding.Action); err != nil {
 		return err
+	}
+	if binding.Action.Type == gatetypes.GateActionAI && binding.Action.Session == "source" &&
+		(binding.WorkflowRef != PRLifecycleWorkflowRef || binding.GateRef != "gates.finding-classify") {
+		return errors.New("source AI action is supported only for the single-finding classification gate")
 	}
 	return nil
 }
@@ -284,6 +287,9 @@ func validatePRLifecycleGateAction(action gatetypes.GateAction) error {
 	}
 	switch action.Type {
 	case gatetypes.GateActionAI:
+		if action.Session == "source" {
+			return nil
+		}
 		if !validPRLifecycleActionIdentifier(action.AgentID) {
 			return errors.New("AI action agent-id must be kebab-case")
 		}
@@ -344,7 +350,7 @@ func (config PRLifecycleConfig) ValidateAgentReferences(agents AgentsConfig) err
 	var references []reference
 	for configID, gateConfig := range config.GateConfigs {
 		for _, binding := range gateConfig.Bindings {
-			if binding.Action == nil || string(binding.Action.Type) != "ai" {
+			if binding.Action == nil || string(binding.Action.Type) != "ai" || binding.Action.Session == "source" {
 				continue
 			}
 			references = append(references, reference{
@@ -423,11 +429,11 @@ func (config PRLifecycleConfig) ConfigForRepository(
 	if err := config.Validate(); err != nil {
 		return "", PRLifecycleGateConfig{}, "", err
 	}
-	identity := strings.ToLower(strings.TrimSuffix(providerOrigin, "/") + "|" + repositoryID)
+	identity := strings.ToLower(strings.TrimRight(providerOrigin, "/") + "|" + repositoryID)
 	configID := config.DefaultGateConfigID
 	for candidate, assigned := range config.RepositoryAssignments {
 		parts := strings.Split(candidate, "|")
-		if strings.ToLower(strings.TrimSuffix(parts[0], "/")+"|"+parts[1]) == identity {
+		if strings.ToLower(strings.TrimRight(parts[0], "/")+"|"+parts[1]) == identity {
 			configID = assigned
 			break
 		}
@@ -446,10 +452,14 @@ func PRLifecycleGateConfigRevision(id string, gateConfig PRLifecycleGateConfig) 
 		return bindings[left].GateRef < bindings[right].GateRef
 	})
 	encoded, err := json.Marshal(struct {
-		ID       string                   `json:"id"`
-		Name     string                   `json:"name"`
-		Bindings []PRLifecycleGateBinding `json:"bindings"`
-	}{ID: id, Name: gateConfig.Name, Bindings: bindings})
+		ID             string                         `json:"id"`
+		Name           string                         `json:"name"`
+		Bindings       []PRLifecycleGateBinding       `json:"bindings"`
+		DeferredIssues PRLifecycleDeferredIssueConfig `json:"deferred-issues"`
+	}{
+		ID: id, Name: gateConfig.Name, Bindings: bindings,
+		DeferredIssues: gateConfig.DeferredIssues,
+	})
 	if err != nil {
 		return "", err
 	}

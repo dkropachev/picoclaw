@@ -297,6 +297,16 @@ func newEventAutomationServiceWithRuntime(
 		}
 	}
 	lifecycle := cfg.PRLifecycle.Effective()
+	deferredModeForRepository := func(providerOrigin, repositoryID string) prworkspace.DeferredIssueMode {
+		_, gateConfig, _, resolveErr := lifecycle.ConfigForRepository(providerOrigin, repositoryID)
+		if resolveErr != nil {
+			return prworkspace.DeferredIssuesOff
+		}
+		return prworkspace.DeferredIssueMode(gateConfig.DeferredIssues.Mode)
+	}
+	defaultDeferredMode := prworkspace.DeferredIssueMode(
+		lifecycle.GateConfigs[lifecycle.DefaultGateConfigID].DeferredIssues.Mode,
+	)
 	gateEvaluator := &prworkspace.WorkflowGateEvaluator{
 		Config: lifecycle, Executor: executor,
 	}
@@ -322,13 +332,14 @@ func newEventAutomationServiceWithRuntime(
 		}
 	}
 	prWorkspaceService, err := prworkspace.NewService(prworkspace.ServiceConfig{
-		Store:             prworkspace.NewEventingStore(store),
-		Provider:          provider,
-		ReviewEvidence:    reviewEvidence,
-		CandidateEvidence: implementationRuntime,
-		AI:                isolatedAI,
-		Gates:             gateEvaluator,
-		DeferredIssueMode: prworkspace.DeferredIssueMode(lifecycle.DeferredIssues.Mode),
+		Store:                          prworkspace.NewEventingStore(store),
+		Provider:                       provider,
+		ReviewEvidence:                 reviewEvidence,
+		CandidateEvidence:              implementationRuntime,
+		AI:                             isolatedAI,
+		Gates:                          gateEvaluator,
+		DeferredIssueMode:              defaultDeferredMode,
+		DeferredIssueModeForRepository: deferredModeForRepository,
 	})
 	if err != nil {
 		return nil, closeSetup(err)
@@ -369,7 +380,6 @@ func newEventAutomationServiceWithRuntime(
 		ReviewNudgePolicy:     reviewNudgePolicy,
 		CompletionNudgePolicy: completionNudgePolicy,
 		SizePolicy:            sizePolicy,
-		DeferredIssueMode:     prworkspace.DeferredIssueMode(lifecycle.DeferredIssues.Mode),
 	})
 	if err != nil {
 		return nil, closeSetup(err)

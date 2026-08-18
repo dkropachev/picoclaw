@@ -63,7 +63,7 @@ func (service *Service) QueueDeferredPublication(ctx context.Context, request Qu
 		}
 		return aggregate, ErrConflict
 	}
-	if service.deferredIssueMode == DeferredIssuesOff {
+	if service.deferredMode(aggregate) == DeferredIssuesOff {
 		return aggregate, ErrConflict
 	}
 	group, ok := findDeferredGroup(aggregate.DeferredGroups, request.GroupID)
@@ -139,7 +139,7 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 	if !ok || group.PublicationID != publication.ID {
 		return aggregate, ErrConflict
 	}
-	if service.deferredIssueMode == DeferredIssuesOff {
+	if service.deferredMode(aggregate) == DeferredIssuesOff {
 		now := service.now().UTC()
 		publication.State, publication.PublicErrorCode, publication.UpdatedAt = ExecutionCanceled, "deferred_issue_publication_disabled", now
 		group.PublicationID = ""
@@ -222,7 +222,7 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 }
 
 func (service *Service) deferredPublicationGate(ctx context.Context, aggregate Aggregate, subject map[string]any) (GateRun, error) {
-	if service.deferredIssueMode != DeferredIssuesAutomatic {
+	if service.deferredMode(aggregate) != DeferredIssuesAutomatic {
 		return service.startGate(ctx, aggregate, "pr.deferred.publish", subject)
 	}
 	digest, err := fingerprintValue(subject)

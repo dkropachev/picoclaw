@@ -149,8 +149,7 @@ func TestPRWorkspacePublicationWorkerDispatchesFrozenReviewAfterSQLiteRestart(t 
 
 	queueService, err := prworkspace.NewService(prworkspace.ServiceConfig{
 		Store: durableStore, Gates: restartPublicationPassingGates{now: queuedAt},
-		DeferredIssueMode: prworkspace.DeferredIssuesAsk,
-		Now:               func() time.Time { return queuedAt },
+		Now: func() time.Time { return queuedAt },
 	})
 	require.NoError(t, err)
 	queued, err := queueService.QueueReviewPublication(ctx, prworkspace.QueueReviewPublicationRequest{
@@ -187,8 +186,7 @@ func TestPRWorkspacePublicationWorkerDispatchesFrozenReviewAfterSQLiteRestart(t 
 	restartedStore := prworkspace.NewEventingStore(reopened)
 	restartedService, err := prworkspace.NewService(prworkspace.ServiceConfig{
 		Store: restartedStore, Gates: restartPublicationPassingGates{now: restartedAt},
-		DeferredIssueMode: prworkspace.DeferredIssuesAsk,
-		Now:               func() time.Time { return restartedAt },
+		Now: func() time.Time { return restartedAt },
 	})
 	require.NoError(t, err)
 	publisher := &restartCapturingReviewPublisher{result: prworkspace.ReviewPublicationResult{

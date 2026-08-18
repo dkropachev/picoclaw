@@ -160,6 +160,7 @@ func TestValidateGateActionV3EnforcesAtomicShapes(t *testing.T) {
 	valid := []GateAction{
 		{Type: GateActionHuman},
 		{Type: GateActionAI, AgentID: "reviewer", Prompt: "Decide", Session: "ephemeral", Tools: "none"},
+		{Type: GateActionAI, Prompt: "Decide from source", Session: AgentSessionSource},
 		{Type: GateActionDeterministic, Fields: map[string]any{}},
 		{Type: GateActionWorkflow, WorkflowRef: "workflows/gates/decide.yaml"},
 	}
@@ -171,6 +172,7 @@ func TestValidateGateActionV3EnforcesAtomicShapes(t *testing.T) {
 	invalid := []GateAction{
 		{Type: GateActionHuman, Prompt: "not allowed"},
 		{Type: GateActionAI, AgentID: "reviewer"},
+		{Type: GateActionAI, AgentID: "reviewer", Prompt: "Invalid source", Session: AgentSessionSource},
 		{Type: GateActionDeterministic},
 		{Type: GateActionWorkflow, WorkflowRef: "not-local"},
 	}

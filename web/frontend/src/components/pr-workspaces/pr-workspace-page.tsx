@@ -20,7 +20,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { getPRLifecycleGateConfigs } from "@/api/pr-lifecycle-gate-configs"
+import {
+  type PRLifecycleGateConfigSnapshot,
+  getPRLifecycleGateConfigs,
+} from "@/api/pr-lifecycle-gate-configs"
 import { respondPRWorkspaceGate } from "@/api/pr-workspace-gates"
 import {
   type PRWorkspace,
@@ -462,6 +465,16 @@ export function PRWorkspacePage({
   const implementation = canImplementWorkspace(workspace)
   const latestEvidence = latestValidation(workspace)
   const latestRepair = latestRepairAttempt(workspace)
+  const deferredPolicyRestartPending =
+    lifecycleSettingsQuery.data?.effects.deferredPolicyEffect ===
+    "restart-required"
+  const deferredIssueMode = deferredPolicyRestartPending
+    ? undefined
+    : resolveDeferredIssueMode(
+        lifecycleSettingsQuery.data,
+        record.provider_origin,
+        record.repository_id,
+      )
   const selectedFindingIDs = workspace.findings
     .filter((finding) => finding.disposition === "in_scope")
     .map((finding) => finding.id)
@@ -657,7 +670,8 @@ export function PRWorkspacePage({
             />
             <DeferredPanel
               workspace={workspace}
-              mode={lifecycleSettingsQuery.data?.deferredIssues.mode}
+              mode={deferredIssueMode}
+              runtimeRestartPending={deferredPolicyRestartPending}
               settingsLoading={lifecycleSettingsQuery.isFetching}
               settingsError={lifecycleSettingsQuery.isError}
               onRetrySettings={() => void lifecycleSettingsQuery.refetch()}
@@ -3167,10 +3181,31 @@ function publicationLocksCurrentHead(
   ].includes(publication.state)
 }
 
+function resolveDeferredIssueMode(
+  snapshot: PRLifecycleGateConfigSnapshot | undefined,
+  providerOrigin: string,
+  repositoryID: string,
+): "off" | "ask" | "automatic" | undefined {
+  if (!snapshot) return undefined
+  const identity =
+    `${providerOrigin.replace(/\/+$/u, "")}|${repositoryID}`.toLowerCase()
+  const assignment = Object.entries(snapshot.repositoryAssignments).find(
+    ([candidate]) =>
+      candidate
+        .split("|")
+        .map((part, index) => (index === 0 ? part.replace(/\/+$/u, "") : part))
+        .join("|")
+        .toLowerCase() === identity,
+  )
+  const configID = assignment?.[1] ?? snapshot.defaultGateConfig
+  return snapshot.gateConfigs[configID]?.deferredIssues.mode
+}
+
 function DeferredPanel({
   workspace,
   onCommand,
   mode,
+  runtimeRestartPending = false,
   settingsLoading = false,
   settingsError = false,
   onRetrySettings,
@@ -3179,6 +3214,7 @@ function DeferredPanel({
   workspace: PRWorkspace
   onCommand: (command: DeferredCommand, onSuccess?: () => void) => void
   mode?: "off" | "ask" | "automatic"
+  runtimeRestartPending?: boolean
   settingsLoading?: boolean
   settingsError?: boolean
   onRetrySettings?: () => void
@@ -3202,7 +3238,16 @@ function DeferredPanel({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
-        {settingsLoading && !mode && (
+        {runtimeRestartPending && (
+          <div
+            className="border-warning/50 bg-warning/10 flex items-start gap-2 rounded-md border p-2 text-xs"
+            role="status"
+          >
+            <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <p>{t("prWorkspaces.deferred.runtimeRestartPending")}</p>
+          </div>
+        )}
+        {settingsLoading && !mode && !runtimeRestartPending && (
           <p
             className="text-muted-foreground text-xs"
             role="status"

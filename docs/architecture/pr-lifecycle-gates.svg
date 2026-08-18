@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="5428" viewBox="0 0 1920 5428" role="img" aria-labelledby="title desc" data-source="pkg/prworkspace/lifecycleflow/manifest.yaml" data-flow-schema="pr-lifecycle-flow/v1" data-flow-revision="sha256:fb1f77977329f3878de13b97faa3f8e634a3958d70503f08c77727f267444c4c">
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="5428" viewBox="0 0 1920 5428" role="img" aria-labelledby="title desc" data-source="pkg/prworkspace/lifecycleflow/manifest.yaml" data-flow-schema="pr-lifecycle-flow/v1" data-flow-revision="sha256:62ea13f235d94897100b6a32ba115a8f9d23edf8553ab65e7aabb94d54d7479a">
   <title id="title">PicoClaw pull-request lifecycle gates</title>
   <desc id="desc">Review and implementation action flow generated from the canonical PR lifecycle YAML manifest. Editable gates link to their gate-profile editor; locked safeguards are not interactive.</desc>
   <defs>
@@ -40,7 +40,7 @@
   <rect width="1920" height="5428" fill="url(#page-bg)"/>
   <text x="40" y="57" class="page-title">PR lifecycle gate flow</text>
   <text x="40" y="86" class="page-copy">Generated from YAML · actions describe work · gates decide whether and how the flow continues</text>
-  <text x="40" y="112" class="revision">sha256:fb1f77977329f3878de13b97faa3f8e634a3958d70503f08c77727f267444c4c</text>
+  <text x="40" y="112" class="revision">sha256:62ea13f235d94897100b6a32ba115a8f9d23edf8553ab65e7aabb94d54d7479a</text>
   <g aria-label="Legend" transform="translate(40 128)">
     <rect width="15" height="15" rx="4" class="action"/><text x="22" y="12" class="legend">Action</text>
     <rect x="82" width="15" height="15" rx="4" class="gate"/><text x="104" y="12" class="legend">Editable gate</text>
@@ -63,8 +63,8 @@
     <path d="M 493.0 1618.0 C 493.0 1663.0, 493.0 1663.0, 493.0 1708.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
     <path d="M 493.0 1826.0 C 493.0 1871.0, 347.0 1871.0, 347.0 1916.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
     <g data-edge-outcome="findings"><rect x="382.0" y="1857.0" width="76.0" height="22" rx="11" class="edge-label-bg"/><text x="420.0" y="1872.0" class="edge-label">Findings</text></g>
-    <path d="M 493.0 1826.0 C 493.0 2941.0, 493.0 2941.0, 493.0 4056.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="no_findings"><rect x="444.5" y="2927.0" width="97.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="2942.0" class="edge-label">No findings</text></g>
+    <path d="M 493.0 1826.0 C 493.0 2874.0, 493.0 2874.0, 493.0 3922.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="no_findings"><rect x="444.5" y="2860.0" width="97.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="2875.0" class="edge-label">No findings</text></g>
     <path d="M 493.0 1826.0 C 493.0 1871.0, 639.0 1871.0, 639.0 1916.0" class="edge edge-optional" data-flow-edge="forward" data-edge-mode="optional"/>
     <g data-edge-outcome=""><rect x="521.0" y="1857.0" width="90.0" height="22" rx="11" class="edge-label-bg"/><text x="566.0" y="1872.0" class="edge-label">Correction</text></g>
     <path d="M 639.0 2034.0 C 639.0 2079.0, 785.0 2079.0, 785.0 2124.0" class="edge edge-optional" data-flow-edge="forward" data-edge-mode="optional"/>
@@ -88,28 +88,25 @@
     <g data-edge-outcome="existing"><rect x="291.5" y="2756.0" width="111.0" height="22" rx="11" class="edge-label-bg"/><text x="347.0" y="2771.0" class="edge-label">Link existing</text></g>
     <path d="M 493.0 2658.0 C 493.0 2770.0, 493.0 2770.0, 493.0 2882.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
     <g data-edge-outcome="create"><rect x="462.0" y="2756.0" width="62.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="2771.0" class="edge-label">Create</text></g>
-    <path d="M 493.0 3000.0 C 493.0 3112.0, 347.0 3112.0, 347.0 3224.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
-    <path d="M 201.0 2658.0 C 201.0 2770.0, 785.0 2770.0, 785.0 2882.0" class="edge edge-optional" data-flow-edge="forward" data-edge-mode="optional"/>
-    <g data-edge-outcome=""><rect x="462.0" y="2756.0" width="62.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="2771.0" class="edge-label">Review</text></g>
-    <path d="M 201.0 2658.0 C 201.0 2837.0, 493.0 2837.0, 493.0 3016.0" class="edge edge-optional" data-flow-edge="forward" data-edge-mode="optional"/>
-    <g data-edge-outcome=""><rect x="305.5" y="2823.0" width="83.0" height="22" rx="11" class="edge-label-bg"/><text x="347.0" y="2838.0" class="edge-label">Implement</text></g>
-    <path d="M 785.0 3000.0 C 785.0 3112.0, 639.0 3112.0, 639.0 3224.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
-    <path d="M 639.0 3342.0 C 639.0 3387.0, 493.0 3387.0, 493.0 3432.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
-    <path d="M 493.0 3550.0 C 493.0 3803.0, 493.0 3803.0, 493.0 4056.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="confirmed"><rect x="451.5" y="3789.0" width="83.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="3804.0" class="edge-label">Confirmed</text></g>
-    <path d="M 493.0 3550.0 C 493.0 3595.0, 493.0 3595.0, 493.0 3640.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="unknown"><rect x="458.5" y="3581.0" width="69.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="3596.0" class="edge-label">Unknown</text></g>
-    <path d="M 493.0 3550.0 C 493.0 3699.0, 639.0 3699.0, 639.0 3848.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="failed"><rect x="535.0" y="3685.0" width="62.0" height="22" rx="11" class="edge-label-bg"/><text x="566.0" y="3700.0" class="edge-label">Failed</text></g>
-    <path d="M 493.0 3758.0 C 493.0 3803.0, 347.0 3803.0, 347.0 3848.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="reobserve"><rect x="375.0" y="3789.0" width="90.0" height="22" rx="11" class="edge-label-bg"/><text x="420.0" y="3804.0" class="edge-label">Re-observe</text></g>
-    <path d="M 493.0 3758.0 C 493.0 3803.0, 639.0 3803.0, 639.0 3848.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="assume_failed"><rect x="510.5" y="3789.0" width="111.0" height="22" rx="11" class="edge-label-bg"/><text x="566.0" y="3804.0" class="edge-label">Assume failed</text></g>
-    <path d="M 347.0 3966.0 C 347.0 4011.0, 493.0 4011.0, 493.0 4056.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
-    <g data-edge-outcome="confirmed"><rect x="378.5" y="3997.0" width="83.0" height="22" rx="11" class="edge-label-bg"/><text x="420.0" y="4012.0" class="edge-label">Confirmed</text></g>
-    <path d="M 209.0 3907.0 C 49.0 3907.0, 49.0 3699.0, 355.0 3699.0" class="loop edge-choice" data-flow-edge="loop" data-edge-mode="choice"/>
-    <g data-edge-outcome="still_unknown"><rect x="35.5" y="3789.0" width="111.0" height="22" rx="11" class="edge-label-bg"/><text x="91.0" y="3804.0" class="edge-label">Still unknown</text></g>
-    <path d="M 501.0 3907.0 C 49.0 3907.0, 49.0 3283.0, 501.0 3283.0" class="loop edge-linear" data-flow-edge="loop" data-edge-mode="linear"/>
+    <path d="M 493.0 3000.0 C 493.0 3045.0, 347.0 3045.0, 347.0 3090.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
+    <path d="M 201.0 2658.0 C 201.0 2770.0, 785.0 2770.0, 785.0 2882.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
+    <path d="M 785.0 3000.0 C 785.0 3045.0, 639.0 3045.0, 639.0 3090.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
+    <path d="M 639.0 3208.0 C 639.0 3253.0, 493.0 3253.0, 493.0 3298.0" class="edge edge-linear" data-flow-edge="forward" data-edge-mode="linear"/>
+    <path d="M 493.0 3416.0 C 493.0 3669.0, 493.0 3669.0, 493.0 3922.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="confirmed"><rect x="451.5" y="3655.0" width="83.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="3670.0" class="edge-label">Confirmed</text></g>
+    <path d="M 493.0 3416.0 C 493.0 3461.0, 493.0 3461.0, 493.0 3506.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="unknown"><rect x="458.5" y="3447.0" width="69.0" height="22" rx="11" class="edge-label-bg"/><text x="493.0" y="3462.0" class="edge-label">Unknown</text></g>
+    <path d="M 493.0 3416.0 C 493.0 3565.0, 639.0 3565.0, 639.0 3714.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="failed"><rect x="535.0" y="3551.0" width="62.0" height="22" rx="11" class="edge-label-bg"/><text x="566.0" y="3566.0" class="edge-label">Failed</text></g>
+    <path d="M 493.0 3624.0 C 493.0 3669.0, 347.0 3669.0, 347.0 3714.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="reobserve"><rect x="375.0" y="3655.0" width="90.0" height="22" rx="11" class="edge-label-bg"/><text x="420.0" y="3670.0" class="edge-label">Re-observe</text></g>
+    <path d="M 493.0 3624.0 C 493.0 3669.0, 639.0 3669.0, 639.0 3714.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="assume_failed"><rect x="510.5" y="3655.0" width="111.0" height="22" rx="11" class="edge-label-bg"/><text x="566.0" y="3670.0" class="edge-label">Assume failed</text></g>
+    <path d="M 347.0 3832.0 C 347.0 3877.0, 493.0 3877.0, 493.0 3922.0" class="edge edge-choice" data-flow-edge="forward" data-edge-mode="choice"/>
+    <g data-edge-outcome="confirmed"><rect x="378.5" y="3863.0" width="83.0" height="22" rx="11" class="edge-label-bg"/><text x="420.0" y="3878.0" class="edge-label">Confirmed</text></g>
+    <path d="M 209.0 3773.0 C 49.0 3773.0, 49.0 3565.0, 355.0 3565.0" class="loop edge-choice" data-flow-edge="loop" data-edge-mode="choice"/>
+    <g data-edge-outcome="still_unknown"><rect x="35.5" y="3655.0" width="111.0" height="22" rx="11" class="edge-label-bg"/><text x="91.0" y="3670.0" class="edge-label">Still unknown</text></g>
+    <path d="M 501.0 3773.0 C 49.0 3773.0, 49.0 3149.0, 501.0 3149.0" class="loop edge-linear" data-flow-edge="loop" data-edge-mode="linear"/>
     <g data-flow-kind="action" data-node-id="review_request">
       <rect x="355.0" y="252.0" width="276.0" height="118.0" rx="12" class="node action"/>
       <text x="369.0" y="272.0" class="node-kind action-kind">ACTION</text>
@@ -197,7 +194,7 @@
       <rect x="63.0" y="2540.0" width="276.0" height="118.0" rx="12" class="node action"/>
       <text x="77.0" y="2560.0" class="node-kind action-kind">ACTION</text>
       <text x="77.0" y="2584.0" class="node-title"><tspan x="77.0" dy="0.0">Keep in pull request</tspan></text>
-      <text x="77.0" y="2619.0" class="node-copy"><tspan x="77.0" dy="0.0">Make the finding independently available</tspan><tspan x="77.0" dy="15.0">to review publication and implementation.</tspan></text>
+      <text x="77.0" y="2619.0" class="node-copy"><tspan x="77.0" dy="0.0">Retain the finding as an in-scope review</tspan><tspan x="77.0" dy="15.0">result.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="review_group_deferred">
       <rect x="355.0" y="2540.0" width="276.0" height="118.0" rx="12" class="node action"/>
@@ -219,16 +216,16 @@
       <text x="369.0" y="2961.0" class="node-copy"><tspan x="369.0" dy="0.0">Approves creating GitHub issues for</tspan><tspan x="369.0" dy="15.0">deferred work.</tspan></text>
     </a>
     <g data-flow-kind="action" data-node-id="review_create_followup_issues">
-      <rect x="209.0" y="3224.0" width="276.0" height="118.0" rx="12" class="node action"/>
-      <text x="223.0" y="3244.0" class="node-kind action-kind">ACTION</text>
-      <text x="223.0" y="3268.0" class="node-title"><tspan x="223.0" dy="0.0">Create follow-up issues</tspan></text>
-      <text x="223.0" y="3303.0" class="node-copy"><tspan x="223.0" dy="0.0">Create one GitHub issue for each approved</tspan><tspan x="223.0" dy="15.0">deferred group.</tspan></text>
+      <rect x="209.0" y="3090.0" width="276.0" height="118.0" rx="12" class="node action"/>
+      <text x="223.0" y="3110.0" class="node-kind action-kind">ACTION</text>
+      <text x="223.0" y="3134.0" class="node-title"><tspan x="223.0" dy="0.0">Create follow-up issues</tspan></text>
+      <text x="223.0" y="3169.0" class="node-copy"><tspan x="223.0" dy="0.0">Create one GitHub issue for each approved</tspan><tspan x="223.0" dy="15.0">deferred group.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="review_dismiss_finding">
       <rect x="647.0" y="2540.0" width="276.0" height="118.0" rx="12" class="node action"/>
       <text x="661.0" y="2560.0" class="node-kind action-kind">ACTION</text>
       <text x="661.0" y="2584.0" class="node-title"><tspan x="661.0" dy="0.0">Dismiss finding</tspan></text>
-      <text x="661.0" y="2619.0" class="node-copy"><tspan x="661.0" dy="0.0">Close the finding without publishing or</tspan><tspan x="661.0" dy="15.0">implementing it.</tspan></text>
+      <text x="661.0" y="2619.0" class="node-copy"><tspan x="661.0" dy="0.0">Close the finding without publishing it.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="review_revise_charter">
       <rect x="355.0" y="2674.0" width="276.0" height="118.0" rx="12" class="node action"/>
@@ -243,35 +240,29 @@
       <text x="661.0" y="2961.0" class="node-copy"><tspan x="661.0" dy="0.0">Choose in-scope findings for the GitHub</tspan><tspan x="661.0" dy="15.0">review.</tspan></text>
     </g>
     <a class="gate-link" href="/pull-requests/gate-configs/default?flow=review&amp;gate=pr.review.publish" target="_top" aria-label="Edit Allow review publication" data-decision-point="pr.review.publish">
-      <rect x="501.0" y="3224.0" width="276.0" height="118.0" rx="12" class="node gate"/>
-      <text x="515.0" y="3244.0" class="node-kind gate-kind">GATE</text>
-      <text x="763.0" y="3244.0" class="format">HUMAN</text>
-      <text x="515.0" y="3268.0" class="node-title"><tspan x="515.0" dy="0.0">Allow review publication</tspan></text>
-      <text x="515.0" y="3303.0" class="node-copy"><tspan x="515.0" dy="0.0">Approves posting the selected findings to</tspan><tspan x="515.0" dy="15.0">GitHub.</tspan></text>
+      <rect x="501.0" y="3090.0" width="276.0" height="118.0" rx="12" class="node gate"/>
+      <text x="515.0" y="3110.0" class="node-kind gate-kind">GATE</text>
+      <text x="763.0" y="3110.0" class="format">HUMAN</text>
+      <text x="515.0" y="3134.0" class="node-title"><tspan x="515.0" dy="0.0">Allow review publication</tspan></text>
+      <text x="515.0" y="3169.0" class="node-copy"><tspan x="515.0" dy="0.0">Approves posting the selected findings to</tspan><tspan x="515.0" dy="15.0">GitHub.</tspan></text>
     </a>
     <g data-flow-kind="action" data-node-id="review_publish_github">
-      <rect x="355.0" y="3432.0" width="276.0" height="118.0" rx="12" class="node action"/>
-      <text x="369.0" y="3452.0" class="node-kind action-kind">ACTION</text>
-      <text x="369.0" y="3476.0" class="node-title"><tspan x="369.0" dy="0.0">Publish GitHub review</tspan></text>
-      <text x="369.0" y="3511.0" class="node-copy"><tspan x="369.0" dy="0.0">Post the approved findings to GitHub.</tspan></text>
+      <rect x="355.0" y="3298.0" width="276.0" height="118.0" rx="12" class="node action"/>
+      <text x="369.0" y="3318.0" class="node-kind action-kind">ACTION</text>
+      <text x="369.0" y="3342.0" class="node-title"><tspan x="369.0" dy="0.0">Publish GitHub review</tspan></text>
+      <text x="369.0" y="3377.0" class="node-copy"><tspan x="369.0" dy="0.0">Post the approved findings to GitHub.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="review_finish">
-      <rect x="355.0" y="4056.0" width="276.0" height="118.0" rx="12" class="node action"/>
-      <text x="369.0" y="4076.0" class="node-kind action-kind">ACTION</text>
-      <text x="369.0" y="4100.0" class="node-title"><tspan x="369.0" dy="0.0">Finish review</tspan></text>
-      <text x="369.0" y="4135.0" class="node-copy"><tspan x="369.0" dy="0.0">Leave the reviewed pull request ready for</tspan><tspan x="369.0" dy="15.0">its selected follow-up.</tspan></text>
-    </g>
-    <g data-flow-kind="action" data-node-id="review_select_implementation_findings">
-      <rect x="355.0" y="3016.0" width="276.0" height="118.0" rx="12" class="node action"/>
-      <text x="369.0" y="3036.0" class="node-kind action-kind">ACTION</text>
-      <text x="369.0" y="3060.0" class="node-title"><tspan x="369.0" dy="0.0">Select implementation findings</tspan></text>
-      <text x="369.0" y="3095.0" class="node-copy"><tspan x="369.0" dy="0.0">Choose findings that the separate</tspan><tspan x="369.0" dy="15.0">implementation workflow will fix.</tspan></text>
+      <rect x="355.0" y="3922.0" width="276.0" height="118.0" rx="12" class="node action"/>
+      <text x="369.0" y="3942.0" class="node-kind action-kind">ACTION</text>
+      <text x="369.0" y="3966.0" class="node-title"><tspan x="369.0" dy="0.0">Finish review</tspan></text>
+      <text x="369.0" y="4001.0" class="node-copy"><tspan x="369.0" dy="0.0">Leave the reviewed pull request ready for</tspan><tspan x="369.0" dy="15.0">its selected follow-up.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="review_record_correction">
       <rect x="501.0" y="1916.0" width="276.0" height="118.0" rx="12" class="node action"/>
       <text x="515.0" y="1936.0" class="node-kind action-kind">ACTION</text>
       <text x="515.0" y="1960.0" class="node-title"><tspan x="515.0" dy="0.0">Record user correction</tspan></text>
-      <text x="515.0" y="1995.0" class="node-copy"><tspan x="515.0" dy="0.0">Store feedback for review,</tspan><tspan x="515.0" dy="15.0">implementation, or both.</tspan></text>
+      <text x="515.0" y="1995.0" class="node-copy"><tspan x="515.0" dy="0.0">Store feedback with the audience selected</tspan><tspan x="515.0" dy="15.0">by the user.</tspan></text>
     </g>
     <a class="gate-link" href="/pull-requests/gate-configs/default?flow=review&amp;gate=pr.correction.promote" target="_top" aria-label="Edit Allow repository lesson" data-decision-point="pr.correction.promote">
       <rect x="647.0" y="2124.0" width="276.0" height="118.0" rx="12" class="node gate"/>
@@ -287,23 +278,23 @@
       <text x="515.0" y="2411.0" class="node-copy"><tspan x="515.0" dy="0.0">Add the approved correction to repository</tspan><tspan x="515.0" dy="15.0">guidance.</tspan></text>
     </g>
     <a class="gate-link" href="/pull-requests/gate-configs/default?flow=review&amp;gate=pr.publication.reconcile" target="_top" aria-label="Edit Resolve unknown publication" data-decision-point="pr.publication.reconcile">
-      <rect x="355.0" y="3640.0" width="276.0" height="118.0" rx="12" class="node gate"/>
-      <text x="369.0" y="3660.0" class="node-kind gate-kind">GATE</text>
-      <text x="617.0" y="3660.0" class="format">HUMAN</text>
-      <text x="369.0" y="3684.0" class="node-title"><tspan x="369.0" dy="0.0">Resolve unknown publication</tspan></text>
-      <text x="369.0" y="3719.0" class="node-copy"><tspan x="369.0" dy="0.0">Chooses whether to re-observe GitHub or</tspan><tspan x="369.0" dy="15.0">assume the write failed.</tspan></text>
+      <rect x="355.0" y="3506.0" width="276.0" height="118.0" rx="12" class="node gate"/>
+      <text x="369.0" y="3526.0" class="node-kind gate-kind">GATE</text>
+      <text x="617.0" y="3526.0" class="format">HUMAN</text>
+      <text x="369.0" y="3550.0" class="node-title"><tspan x="369.0" dy="0.0">Resolve unknown publication</tspan></text>
+      <text x="369.0" y="3585.0" class="node-copy"><tspan x="369.0" dy="0.0">Chooses whether to re-observe GitHub or</tspan><tspan x="369.0" dy="15.0">assume the write failed.</tspan></text>
     </a>
     <g data-flow-kind="action" data-node-id="review_resolve_publication">
-      <rect x="209.0" y="3848.0" width="276.0" height="118.0" rx="12" class="node action"/>
-      <text x="223.0" y="3868.0" class="node-kind action-kind">ACTION</text>
-      <text x="223.0" y="3892.0" class="node-title"><tspan x="223.0" dy="0.0">Observe publication</tspan></text>
-      <text x="223.0" y="3927.0" class="node-copy"><tspan x="223.0" dy="0.0">Check GitHub for the exact review</tspan><tspan x="223.0" dy="15.0">publication again.</tspan></text>
+      <rect x="209.0" y="3714.0" width="276.0" height="118.0" rx="12" class="node action"/>
+      <text x="223.0" y="3734.0" class="node-kind action-kind">ACTION</text>
+      <text x="223.0" y="3758.0" class="node-title"><tspan x="223.0" dy="0.0">Observe publication</tspan></text>
+      <text x="223.0" y="3793.0" class="node-copy"><tspan x="223.0" dy="0.0">Check GitHub for the exact review</tspan><tspan x="223.0" dy="15.0">publication again.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="review_retry_publication">
-      <rect x="501.0" y="3848.0" width="276.0" height="118.0" rx="12" class="node action"/>
-      <text x="515.0" y="3868.0" class="node-kind action-kind">ACTION</text>
-      <text x="515.0" y="3892.0" class="node-title"><tspan x="515.0" dy="0.0">Retry publication</tspan></text>
-      <text x="515.0" y="3927.0" class="node-copy"><tspan x="515.0" dy="0.0">Queue a fresh review publication after</tspan><tspan x="515.0" dy="15.0">the prior write is assumed failed.</tspan></text>
+      <rect x="501.0" y="3714.0" width="276.0" height="118.0" rx="12" class="node action"/>
+      <text x="515.0" y="3734.0" class="node-kind action-kind">ACTION</text>
+      <text x="515.0" y="3758.0" class="node-title"><tspan x="515.0" dy="0.0">Retry publication</tspan></text>
+      <text x="515.0" y="3793.0" class="node-copy"><tspan x="515.0" dy="0.0">Queue a fresh review publication after</tspan><tspan x="515.0" dy="15.0">the prior write is assumed failed.</tspan></text>
     </g>
   </g>
   <g data-flow-id="implementation">
@@ -611,11 +602,11 @@
       <text x="1595.0" y="3476.0" class="node-title"><tspan x="1595.0" dy="0.0">Approve revised purpose and scope</tspan></text>
       <text x="1595.0" y="3511.0" class="node-copy"><tspan x="1595.0" dy="0.0">Reconfirms authority after the purpose or</tspan><tspan x="1595.0" dy="15.0">scope changes.</tspan></text>
     </a>
-    <g data-flow-kind="action" data-node-id="implementation_return_to_review">
+    <g data-flow-kind="action" data-node-id="implementation_call_review">
       <rect x="1289.0" y="3774.0" width="276.0" height="118.0" rx="12" class="node action"/>
       <text x="1303.0" y="3794.0" class="node-kind action-kind">ACTION</text>
-      <text x="1303.0" y="3818.0" class="node-title"><tspan x="1303.0" dy="0.0">Return to review</tspan></text>
-      <text x="1303.0" y="3853.0" class="node-copy"><tspan x="1303.0" dy="0.0">Re-review the pull request under the</tspan><tspan x="1303.0" dy="15.0">revised and reconfirmed charter.</tspan></text>
+      <text x="1303.0" y="3818.0" class="node-title"><tspan x="1303.0" dy="0.0">Run review workflow</tspan></text>
+      <text x="1303.0" y="3853.0" class="node-copy"><tspan x="1303.0" dy="0.0">Invoke the isolated review workflow under</tspan><tspan x="1303.0" dy="15.0">the revised and reconfirmed charter.</tspan></text>
     </g>
     <g data-flow-kind="action" data-node-id="implementation_stop">
       <rect x="1289.0" y="3224.0" width="276.0" height="118.0" rx="12" class="node action"/>

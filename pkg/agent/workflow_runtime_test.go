@@ -448,6 +448,31 @@ func TestWorkflowAgentRunnerPrivateCaptureRevisionFenceExactAndCompatible(t *tes
 	}
 }
 
+func TestWorkflowAgentRunnerPrivateCaptureRejectsCanonicalKeyScopeMismatch(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	reader := agent.Sessions.(session.SnapshotReader)
+	snapshot, found, err := reader.ReadSessionSnapshot(t.Context(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("source snapshot = (%#v, %v, %v)", snapshot, found, err)
+	}
+	snapshot.Key = session.BuildOpaqueSessionKey("different-canonical-owner")
+	agent.Sessions = &workflowFixedSnapshotSessionStore{
+		SessionStore: agent.Sessions,
+		snapshot:     snapshot,
+	}
+	_, err = (&workflowAgentRunner{loop: loop}).CaptureReadOnlySession(
+		t.Context(),
+		workflows.ReadOnlySessionRef{AgentID: "main", Session: canonicalKey},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match its declared scope") {
+		t.Fatalf("CaptureReadOnlySession() error = %v, want key/scope rejection", err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("corrupt capture reached provider %d time(s), want zero", len(calls))
+	}
+}
+
 func TestWorkflowAgentRunnerPrivateCaptureRejectsMutationBeforeLiveMediaRead(t *testing.T) {
 	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
 	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
@@ -1030,13 +1055,17 @@ func TestWorkflowAgentRunnerReadOnlyRejectsOwnerMismatchAndToolCalls(t *testing.
 	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
 	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
 	metadata := agent.Sessions.(session.MetadataAwareSessionStore)
-	metadata.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
-		Version: session.ScopeVersionV1,
-		AgentID: "support",
-		Channel: "web",
-	}, nil)
+	original, found, err := agent.Sessions.(session.SnapshotReader).ReadSessionSnapshot(
+		t.Context(), canonicalKey,
+	)
+	if err != nil || !found || original.Scope == nil {
+		t.Fatalf("original snapshot = (%#v, %v, %v)", original, found, err)
+	}
+	foreignScope := session.CloneScope(original.Scope)
+	foreignScope.AgentID = "support"
+	metadata.EnsureSessionMetadata(canonicalKey, foreignScope, nil)
 
-	_, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), workflows.AgentRequest{
+	_, err = (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), workflows.AgentRequest{
 		AgentID: "main",
 		Session: canonicalKey,
 		History: "read_only",
@@ -1050,11 +1079,7 @@ func TestWorkflowAgentRunnerReadOnlyRejectsOwnerMismatchAndToolCalls(t *testing.
 		t.Fatalf("owner mismatch provider calls = %d, want 0", len(calls))
 	}
 
-	metadata.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
-		Version: session.ScopeVersionV1,
-		AgentID: "main",
-		Channel: "web",
-	}, nil)
+	metadata.EnsureSessionMetadata(canonicalKey, original.Scope, nil)
 	provider.setResponses([]string{""})
 	provider.toolCall = true
 	_, err = (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), workflows.AgentRequest{
@@ -4547,6 +4572,18 @@ func (s *workflowSnapshotReadCountingSessionStore) ReadSessionSnapshot(
 	return s.reader.ReadSessionSnapshot(ctx, key)
 }
 
+type workflowFixedSnapshotSessionStore struct {
+	session.SessionStore
+	snapshot session.SessionSnapshot
+}
+
+func (s *workflowFixedSnapshotSessionStore) ReadSessionSnapshot(
+	context.Context,
+	string,
+) (session.SessionSnapshot, bool, error) {
+	return workflowCloneSessionSnapshot(s.snapshot), true, nil
+}
+
 type workflowSnapshotReadSpyMediaStore struct {
 	media.MediaStore
 	snapshotReads atomic.Int64
@@ -4697,25 +4734,179 @@ func newWorkflowReadOnlyTestLoop(
 	if agent == nil {
 		t.Fatal("default agent is nil")
 	}
-	canonicalKey := session.BuildOpaqueSessionKey("agent:main:web:direct:review")
+	scope := &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "web",
+		Account: "default",
+		Dimensions: []string{
+			"chat",
+		},
+		Values: map[string]string{"chat": "review"},
+	}
+	canonicalKey := session.BuildSessionKey(*scope)
 	alias := "agent:main:web:direct:review"
 	metadata, ok := agent.Sessions.(session.MetadataAwareSessionStore)
 	if !ok {
 		t.Fatalf("session store %T is not metadata aware", agent.Sessions)
 	}
-	metadata.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
-		Version: session.ScopeVersionV1,
-		AgentID: "main",
-		Channel: "web",
-		Dimensions: []string{
-			"chat",
-		},
-		Values: map[string]string{"chat": "review"},
-	}, []string{alias})
+	metadata.EnsureSessionMetadata(canonicalKey, scope, []string{alias})
 	agent.Sessions.AddMessage(canonicalKey, "user", "existing problem context")
 	agent.Sessions.AddMessage(canonicalKey, "assistant", "existing analysis")
 	agent.Sessions.SetSummary(canonicalKey, "existing decision summary")
 	return loop, agent, canonicalKey, alias
+}
+
+func TestWorkflowAgentSourceSessionCapturesRepairTranscriptAndReplaysExactPrompt(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{
+		"not json",
+		`{"findings":[]}`,
+	}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	capture := &workflows.AgentSourceCapture{
+		ExecutionID: "aix_11111111111111111111111111111111",
+		WorkspaceID: "prw_11111111111111111111111111111111",
+		Binding:     "sha256:source-binding",
+	}
+	request := workflowEphemeralTestRequest("Review this change.")
+	request.PrivateContext = true
+	request.IsolatedSystemPrompt = "Exact isolated review system prompt."
+	request.SourceCapture = capture
+	request.Output = &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type":     "object",
+			"required": []any{"findings"},
+			"properties": map[string]any{
+				"findings": map[string]any{"type": "array"},
+			},
+		},
+	}
+	runner := &workflowAgentRunner{loop: loop}
+	first, err := runner.RunAgent(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey, _ := first["source_session"].(string)
+	revision, _ := first["source_revision"].(string)
+	if sessionKey == "" || revision == "" || first["source_tools"] != workflows.AgentToolsNone {
+		t.Fatalf("source outputs = %#v", first)
+	}
+	second, err := runner.RunAgent(t.Context(), request)
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("source replay = %#v, error = %v", second, err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 2 {
+		t.Fatalf("provider calls after duplicate = %d, want initial plus repair only", len(calls))
+	}
+	changed := request
+	changed.Prompt = "Review a different change."
+	if _, err := runner.RunAgent(t.Context(), changed); err == nil ||
+		!strings.Contains(err.Error(), "different request") {
+		t.Fatalf("changed duplicate error = %v, want identity mismatch", err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 2 {
+		t.Fatalf("provider calls after changed duplicate = %d, want 2", len(calls))
+	}
+	frozen, err := runner.CaptureReadOnlySession(t.Context(), workflows.ReadOnlySessionRef{
+		AgentID: "main", Session: sessionKey, ExpectedRevision: revision,
+	})
+	if err != nil || frozen == nil || len(frozen.Snapshot.History) != 4 ||
+		frozen.Snapshot.History[0].Content != workflowAgentMessage(request) ||
+		frozen.Snapshot.History[1].Content != "not json" ||
+		!strings.Contains(frozen.Snapshot.History[2].Content, "previous response did not satisfy") ||
+		frozen.Snapshot.History[3].Content != `{"findings":[]}` {
+		t.Fatalf("captured source = %#v, error = %v", frozen, err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(agent.Workspace, "AGENTS.md"),
+		[]byte("CHANGED-DEFAULT-SYSTEM-CANARY"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	provider.setResponses([]string{"source follow-up"})
+	sourceOutputs, err := runner.RunAgent(t.Context(), workflows.AgentRequest{
+		AgentID:               "main",
+		Prompt:                "Find any remaining issues.",
+		History:               "read_only",
+		Cache:                 "none",
+		Tools:                 workflows.AgentToolsNone,
+		PrivateContext:        true,
+		FrozenReadOnlySession: frozen,
+	})
+	if err != nil || sourceOutputs["text"] != "source follow-up" {
+		t.Fatalf("source follow-up = %#v, error = %v", sourceOutputs, err)
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 || calls[0].toolCount != 0 {
+		t.Fatalf("source provider calls = %#v, want one no-tool call", calls)
+	}
+	if len(calls[0].messages) != 6 || calls[0].messages[0].Role != "system" ||
+		calls[0].messages[0].Content != request.IsolatedSystemPrompt ||
+		!workflowMessagesContain(calls[0].messages, "not json") ||
+		!workflowMessagesContain(calls[0].messages, "previous response did not satisfy") ||
+		workflowMessagesContain(calls[0].messages, "CHANGED-DEFAULT-SYSTEM-CANARY") ||
+		workflowMessagesContain(calls[0].messages, workflowAgentSourceMetadataPrefix) {
+		t.Fatalf("source provider context = %#v", calls[0].messages)
+	}
+}
+
+func TestWorkflowAgentSourceSessionSerializesConcurrentDuplicateExecution(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{`{"findings":[]}`},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	loop, _, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	runner := &workflowAgentRunner{loop: loop}
+	request := workflowEphemeralTestRequest("Review concurrently.")
+	request.PrivateContext = true
+	request.IsolatedSystemPrompt = "Exact concurrent review system prompt."
+	request.SourceCapture = &workflows.AgentSourceCapture{
+		ExecutionID: "aix_22222222222222222222222222222222",
+		WorkspaceID: "prw_22222222222222222222222222222222",
+		Binding:     "sha256:concurrent-source-binding",
+	}
+	request.Output = &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type":     "object",
+			"required": []any{"findings"},
+			"properties": map[string]any{
+				"findings": map[string]any{"type": "array"},
+			},
+		},
+	}
+	type result struct {
+		outputs map[string]any
+		err     error
+	}
+	results := make(chan result, 2)
+	go func() {
+		outputs, err := runner.RunAgent(t.Context(), request)
+		results <- result{outputs: outputs, err: err}
+	}()
+	<-provider.started
+	go func() {
+		outputs, err := runner.RunAgent(t.Context(), request)
+		results <- result{outputs: outputs, err: err}
+	}()
+	close(provider.release)
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent errors = (%v, %v)", first.err, second.err)
+	}
+	if !reflect.DeepEqual(first.outputs, second.outputs) {
+		t.Fatalf("concurrent outputs differ: %#v and %#v", first.outputs, second.outputs)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 1 {
+		t.Fatalf("concurrent provider calls = %d, want 1", len(calls))
+	}
 }
 
 func workflowEphemeralTestRequest(prompt string) workflows.AgentRequest {

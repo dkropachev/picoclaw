@@ -54,6 +54,56 @@ func TestMemoryStoreRejectsProviderIdentityChange(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreBindsAndFreezesFindingSourceProvenance(t *testing.T) {
+	store := NewMemoryStore()
+	created, err := store.Create(context.Background(), testCreateInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := testAIExecutionSource("aix_11111111111111111111111111111111")
+	finding := Finding{
+		ID: "pfn_11111111111111111111111111111111", Fingerprint: "sha256:finding",
+		SourceAvailable: true, source: source, Version: 1,
+	}
+	mutation := Mutation{
+		WorkspaceID: created.Aggregate.Workspace.ID, ExpectedVersion: 1,
+		RequestID: "request-source-provenance-01",
+		Patch:     AggregatePatch{UpsertFindings: []Finding{finding}},
+	}
+	stored, err := store.Mutate(context.Background(), mutation)
+	if err != nil || stored.Aggregate.Findings[0].source == nil {
+		t.Fatalf("source mutation = %#v, %v", stored, err)
+	}
+
+	changed := finding
+	changedSource := *source
+	changedSource.SessionRevision = "sha256:changed-source-revision"
+	changed.source = &changedSource
+	mutation.Patch = AggregatePatch{UpsertFindings: []Finding{changed}}
+	if _, err := store.Mutate(context.Background(), mutation); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("changed replay error = %v", err)
+	}
+	mutation.RequestID = "request-source-provenance-02"
+	mutation.ExpectedVersion = stored.Aggregate.Workspace.Version
+	if _, err := store.Mutate(context.Background(), mutation); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retarget source error = %v", err)
+	}
+
+	removed := finding
+	removed.SourceAvailable, removed.source = false, nil
+	mutation.RequestID = "request-source-provenance-03"
+	mutation.Patch = AggregatePatch{UpsertFindings: []Finding{removed}}
+	if _, err := store.Mutate(context.Background(), mutation); !errors.Is(err, ErrConflict) {
+		t.Fatalf("remove source error = %v", err)
+	}
+
+	mutation.RequestID = "request-source-provenance-04"
+	mutation.Patch = AggregatePatch{UpsertFindings: []Finding{finding}}
+	if _, err := store.Mutate(context.Background(), mutation); err != nil {
+		t.Fatalf("same source update error = %v", err)
+	}
+}
+
 func testCreateInput() CreateInput {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	provider := ProviderSnapshot{

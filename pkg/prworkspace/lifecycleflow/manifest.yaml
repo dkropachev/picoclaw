@@ -82,7 +82,7 @@ flows:
       - id: review_keep_in_scope
         kind: action
         title: Keep in pull request
-        description: Make the finding independently available to review publication and implementation.
+        description: Retain the finding as an in-scope review result.
         operation: pr.finding.keep_in_scope
       - id: review_group_deferred
         kind: action
@@ -109,7 +109,7 @@ flows:
       - id: review_dismiss_finding
         kind: action
         title: Dismiss finding
-        description: Close the finding without publishing or implementing it.
+        description: Close the finding without publishing it.
         operation: pr.finding.dismiss
       - id: review_revise_charter
         kind: action
@@ -138,15 +138,10 @@ flows:
         title: Finish review
         description: Leave the reviewed pull request ready for its selected follow-up.
         operation: pr.review.finish
-      - id: review_select_implementation_findings
-        kind: action
-        title: Select implementation findings
-        description: Choose findings that the separate implementation workflow will fix.
-        operation: pr.implementation.findings.select
       - id: review_record_correction
         kind: action
         title: Record user correction
-        description: Store feedback for review, implementation, or both.
+        description: Store feedback with the audience selected by the user.
         operation: pr.correction.record
       - id: review_gate_correction_promote
         kind: gate
@@ -284,12 +279,7 @@ flows:
         mode: linear
       - from: review_keep_in_scope
         to: review_select_review_findings
-        mode: optional
-        label: Review
-      - from: review_keep_in_scope
-        to: review_select_implementation_findings
-        mode: optional
-        label: Implement
+        mode: linear
       - from: review_select_review_findings
         to: review_gate_publish
         mode: linear
@@ -530,11 +520,11 @@ flows:
         decision_point: pr.charter.reconfirm
         ordinal: 2
         editable: true
-      - id: implementation_return_to_review
+      - id: implementation_call_review
         kind: action
-        title: Return to review
-        description: Re-review the pull request under the revised and reconfirmed charter.
-        operation: pr.implementation.return_review
+        title: Run review workflow
+        description: Invoke the isolated review workflow under the revised and reconfirmed charter.
+        operation: pr.review.invoke
       - id: implementation_stop
         kind: action
         title: Stop implementation
@@ -800,5 +790,5 @@ flows:
         to: implementation_gate_charter_reconfirm
         mode: linear
       - from: implementation_gate_charter_reconfirm
-        to: implementation_return_to_review
+        to: implementation_call_review
         mode: linear

@@ -17,7 +17,7 @@ export interface PRLifecycleGateAction {
   type: PRLifecycleGateActionType
   agentID?: string
   prompt?: string
-  session?: "ephemeral" | "private"
+  session?: "ephemeral" | "private" | "source"
   history?: "none" | "read_only" | "read_write"
   cache?: "none" | "session" | "agent"
   tools?: "none" | "inherit"
@@ -34,6 +34,7 @@ export interface PRLifecycleGateBinding {
 export interface PRLifecycleGateConfig {
   name: string
   bindings: PRLifecycleGateBinding[]
+  deferredIssues: { mode: PRLifecycleDeferredIssueModeV3 }
 }
 
 export type PRLifecycleGateCatalogField =
@@ -56,6 +57,7 @@ export type PRLifecycleGateCatalogField =
 export interface PRLifecycleGateCatalogEntry {
   workflowRef: string
   gateRef: string
+  sourceAISupported: boolean
   prompt?: string
   fields?: PRLifecycleGateCatalogField[]
   workflowRevision?: string
@@ -91,13 +93,15 @@ export interface PRLifecycleGateConfigSnapshot {
   repositoryAssignments: Record<string, string>
   nudge: PRLifecycleNudgeConfigV3
   scope: PRLifecycleScopeConfigV3
-  deferredIssues: { mode: PRLifecycleDeferredIssueModeV3 }
   gateCatalog: Record<string, PRLifecycleGateCatalogEntry>
   flow: PRLifecycleFlowCatalog
   flowRevision: string
   catalogRevision: string
   configRevision: string
-  effects: { gatewayEffect: "applied" | "restart-required" }
+  effects: {
+    gatewayEffect: "applied" | "restart-required"
+    deferredPolicyEffect: "applied" | "restart-required"
+  }
 }
 
 export interface PutPRLifecycleGateConfigsInput {
@@ -108,7 +112,6 @@ export interface PutPRLifecycleGateConfigsInput {
   repositoryAssignments: Record<string, string>
   nudge: PRLifecycleNudgeConfigV3
   scope: PRLifecycleScopeConfigV3
-  deferredIssues: { mode: PRLifecycleDeferredIssueModeV3 }
 }
 
 export interface PRLifecycleGateConfigIssue {
@@ -131,7 +134,8 @@ export function validatePRLifecycleGateConfigs(
     | "repositoryAssignments"
     | "nudge"
     | "scope"
-  >,
+  > &
+    Partial<Pick<PRLifecycleGateConfigSnapshot, "gateCatalog">>,
 ): PRLifecycleGateConfigIssue[] {
   const issues: PRLifecycleGateConfigIssue[] = []
   const configIDs = Object.keys(snapshot.gateConfigs)
@@ -156,6 +160,16 @@ export function validatePRLifecycleGateConfigs(
       issues.push({
         path: `${path}.name`,
         message: "Configuration name is required.",
+      })
+    }
+    if (
+      config.deferredIssues.mode !== "off" &&
+      config.deferredIssues.mode !== "ask" &&
+      config.deferredIssues.mode !== "automatic"
+    ) {
+      issues.push({
+        path: `${path}.deferred-issues.mode`,
+        message: "Deferred issue mode must be off, ask, or automatic.",
       })
     }
     const bindingKeys = new Set<string>()
@@ -184,6 +198,24 @@ export function validatePRLifecycleGateConfigs(
       bindingKeys.add(key)
       if (binding.action)
         validateAction(binding.action, `${bindingPath}.action`, issues)
+      if (
+        snapshot.gateCatalog !== undefined &&
+        binding.action?.type === "ai" &&
+        binding.action.session === "source"
+      ) {
+        const catalogEntry = Object.values(snapshot.gateCatalog ?? {}).find(
+          (entry) =>
+            entry.workflowRef === binding.workflowRef &&
+            entry.gateRef === binding.gateRef,
+        )
+        if (catalogEntry?.sourceAISupported !== true) {
+          issues.push({
+            path: `${bindingPath}.action.session`,
+            message:
+              "Originating snapshots require a Gate that publishes a source-bearing finding.",
+          })
+        }
+      }
     }
   }
   for (const [repository, configID] of Object.entries(
@@ -257,7 +289,8 @@ function validateAction(
   issues: PRLifecycleGateConfigIssue[],
 ) {
   if (action.type === "ai") {
-    if (!action.agentID?.trim()) {
+    const sourceSession = action.session === "source"
+    if (!sourceSession && !action.agentID?.trim()) {
       issues.push({
         path: `${path}.agent-id`,
         message: "AI actions require an agent ID.",
@@ -271,23 +304,33 @@ function validateAction(
     }
     const ephemeral = action.session === "ephemeral"
     const privateSession = action.session === "private"
-    if (!ephemeral && !privateSession) {
+    if (!ephemeral && !privateSession && !sourceSession) {
       issues.push({
         path: `${path}.session`,
-        message: "AI session must be ephemeral or private.",
+        message: "AI session must be ephemeral, private, or source.",
       })
     } else if (
-      action.tools !== "none" ||
-      (ephemeral && (action.history !== "none" || action.cache !== "none")) ||
+      (ephemeral &&
+        (action.history !== "none" ||
+          action.cache !== "none" ||
+          action.tools !== "none")) ||
       (privateSession &&
         (action.history !== "read_only" ||
-          (action.cache !== "none" && action.cache !== "session")))
+          (action.cache !== "none" && action.cache !== "session") ||
+          action.tools !== "none")) ||
+      (sourceSession &&
+        (action.agentID !== undefined ||
+          action.history !== undefined ||
+          action.cache !== undefined ||
+          action.tools !== undefined))
     ) {
       issues.push({
         path,
         message: ephemeral
           ? "Ephemeral AI requires history, cache, and tools set to none."
-          : "Private AI requires read-only history, none/session cache, and no tools.",
+          : privateSession
+            ? "Private AI requires an explicit agent, read-only history, none/session cache, and no tools."
+            : "Source AI derives the originating agent, history, cache, and tools; those fields must be omitted.",
       })
     }
   }
@@ -411,13 +454,13 @@ function serializeInput(input: PutPRLifecycleGateConfigsInput) {
         },
       ]),
     ),
-    "deferred-issues": input.deferredIssues,
   }
 }
 
 function serializeConfig(config: PRLifecycleGateConfig) {
   return {
     name: config.name,
+    "deferred-issues": config.deferredIssues,
     bindings: config.bindings.map((binding) => ({
       "workflow-ref": binding.workflowRef,
       "gate-ref": binding.gateRef,
@@ -450,7 +493,6 @@ function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
     "repository-assignments",
     "nudge",
     "scope",
-    "deferred-issues",
     "gate-catalog",
     "flow",
     "flow-revision",
@@ -467,7 +509,6 @@ function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
     ),
     nudge: projectNudge(root.nudge),
     scope: projectScope(root.scope),
-    deferredIssues: projectDeferredIssues(root["deferred-issues"]),
     gateCatalog: projectMap(root["gate-catalog"], projectCatalogEntry),
     flow: projectPRLifecycleFlowCatalog(root.flow),
     flowRevision: stringValue(root["flow-revision"]),
@@ -475,17 +516,27 @@ function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
     configRevision: stringValue(root["config-revision"]),
     effects: projectEffects(root.effects),
   }
-  if (validatePRLifecycleGateConfigs(snapshot).length > 0) malformed()
+  if (
+    validatePRLifecycleGateConfigs({
+      gateConfigs: snapshot.gateConfigs,
+      defaultGateConfig: snapshot.defaultGateConfig,
+      repositoryAssignments: snapshot.repositoryAssignments,
+      nudge: snapshot.nudge,
+      scope: snapshot.scope,
+    }).length > 0
+  )
+    malformed()
   return snapshot
 }
 
 function projectConfig(value: unknown): PRLifecycleGateConfig {
   const source = asRecord(value)
-  onlyKeys(source, ["name", "bindings"])
+  onlyKeys(source, ["name", "bindings", "deferred-issues"])
   if (!Array.isArray(source.bindings)) malformed()
   return {
     name: stringValue(source.name),
     bindings: source.bindings.map(projectBinding),
+    deferredIssues: projectDeferredIssues(source["deferred-issues"]),
   }
 }
 
@@ -531,6 +582,7 @@ function projectAction(value: unknown): PRLifecycleGateAction {
     ...optionalEnumProperty(source, "session", "session", [
       "ephemeral",
       "private",
+      "source",
     ] as const),
     ...optionalEnumProperty(source, "history", "history", [
       "none",
@@ -560,6 +612,7 @@ function projectCatalogEntry(value: unknown): PRLifecycleGateCatalogEntry {
   onlyKeys(source, [
     "workflow-ref",
     "gate-ref",
+    "source-ai-supported",
     "prompt",
     "fields",
     "workflow-revision",
@@ -577,6 +630,7 @@ function projectCatalogEntry(value: unknown): PRLifecycleGateCatalogEntry {
   return {
     workflowRef: stringValue(source["workflow-ref"]),
     gateRef: stringValue(source["gate-ref"]),
+    sourceAISupported: booleanValue(source["source-ai-supported"]),
     ...optionalString(source, "prompt", "prompt"),
     ...(source.fields === undefined
       ? {}
@@ -710,11 +764,17 @@ function projectEffects(
   value: unknown,
 ): PRLifecycleGateConfigSnapshot["effects"] {
   const source = asRecord(value)
-  onlyKeys(source, ["gateway-effect"])
+  onlyKeys(source, ["gateway-effect", "deferred-policy-effect"])
   const gatewayEffect = stringValue(source["gateway-effect"])
+  const deferredPolicyEffect = stringValue(source["deferred-policy-effect"])
   if (gatewayEffect !== "applied" && gatewayEffect !== "restart-required")
     malformed()
-  return { gatewayEffect }
+  if (
+    deferredPolicyEffect !== "applied" &&
+    deferredPolicyEffect !== "restart-required"
+  )
+    malformed()
+  return { gatewayEffect, deferredPolicyEffect }
 }
 
 function projectMap<T>(

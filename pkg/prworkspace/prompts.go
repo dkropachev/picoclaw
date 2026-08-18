@@ -74,7 +74,15 @@ func CompilePrompt(stage PromptStage, bundle PRContextBundle, challenge string) 
 	if len(challenge) > maxCorrectionText {
 		return CompiledPrompt{}, errors.New("prompt challenge is too large")
 	}
-	encoded, err := json.Marshal(bundle)
+	promptContext := any(bundle)
+	if stage == PromptReviewSearch || stage == PromptReviewNudge {
+		// Review has a reusable, implementation-neutral contract. Re-project at
+		// the final serialization boundary as well, so a direct trusted caller
+		// cannot reintroduce write capability or implementation-only context by
+		// constructing the legacy shared bundle itself.
+		promptContext = reviewWorkflowContext(bundle)
+	}
+	encoded, err := json.Marshal(promptContext)
 	if err != nil || len(encoded) > maxContextBundleBytes {
 		return CompiledPrompt{}, errors.New("PR context bundle is invalid or too large")
 	}

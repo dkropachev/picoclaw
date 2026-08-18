@@ -161,6 +161,12 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 			PinnedPolicy: policy, PinnedSubject: subject,
 		},
 	}
+	sourceExecution := &AIExecutionSource{
+		ExecutionID: "aix_11111111111111111111111111111111", WorkspaceID: workspaceID,
+		Binding: "sha256:source-binding", AgentID: "main",
+		SessionRevision: "sha256:source-revision", Tools: "none",
+	}
+	sourceExecution.Session = aiExecutionSourceSessionKey(sourceExecution)
 	patch := AggregatePatch{
 		Phase: pointer(PhaseImplementation), ExecutionState: pointer(ExecutionWaitingGate),
 		ActiveCharterID: &charterID,
@@ -204,6 +210,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 				TypeCompatible: true, Confidence: .9, CharterClauses: []string{"non-goal"}, Explanation: "follow-up only",
 			}}},
 			Disposition: FindingDeferred, NudgeReward: &reward, RewardSource: "user_disposition",
+			SourceAvailable: true, source: sourceExecution,
 			Version: 1, CreatedAt: now, UpdatedAt: now,
 		}},
 		AppendMessages: []Message{{
@@ -279,6 +286,12 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.Equal(t, publicationPayload, mutated.Aggregate.Publications[0].payload)
 	require.Equal(t, []string{findingID}, mutated.Aggregate.DeferredGroups[0].FindingIDs)
 	require.Equal(t, WorkFollowUp, mutated.Aggregate.Findings[0].Scope.Presence)
+	require.True(t, mutated.Aggregate.Findings[0].SourceAvailable)
+	require.NotNil(t, mutated.Aggregate.Findings[0].source)
+	require.Equal(t, sourceExecution.Session, mutated.Aggregate.Findings[0].source.Session)
+	projected, err := json.Marshal(mutated.Aggregate)
+	require.NoError(t, err)
+	require.NotContains(t, string(projected), sourceExecution.Session)
 	require.Equal(t, "pkg/worker/followup.go", mutated.Aggregate.Findings[0].Scope.ChangeEvidence[0].Path)
 	require.Equal(t, WorkCandidatePresent, mutated.Aggregate.RepairAttempts[0].Scope.Presence)
 	require.Equal(t, "@@ -10 +10 @@", mutated.Aggregate.RepairAttempts[0].Scope.ChangeEvidence[0].Hunk)
@@ -363,6 +376,9 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.True(t, historicalReplay.Replayed)
 	require.Equal(t, int64(2), historicalReplay.Aggregate.Workspace.Version)
 	require.Equal(t, ExecutionWaitingGate, historicalReplay.Aggregate.StageRuns[0].State)
+	require.True(t, historicalReplay.Aggregate.Findings[0].SourceAvailable)
+	require.NotNil(t, historicalReplay.Aggregate.Findings[0].source)
+	require.Equal(t, sourceExecution.Session, historicalReplay.Aggregate.Findings[0].source.Session)
 	finding := finalized.Aggregate.Findings[0]
 	finding.Disposition, finding.Version = FindingDismissed, finding.Version+1
 	removed, err := store.Mutate(ctx, Mutation{

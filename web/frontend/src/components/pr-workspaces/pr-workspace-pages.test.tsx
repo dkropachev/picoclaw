@@ -243,7 +243,18 @@ const lifecycleFlow =
   prLifecycleFlowFixture.flow as unknown as PRLifecycleFlowCatalog
 
 const gateConfigs: PRLifecycleGateConfigSnapshot = {
-  gateConfigs: { default: { name: "Default", bindings: [] } },
+  gateConfigs: {
+    default: {
+      name: "Default",
+      bindings: [],
+      deferredIssues: { mode: "ask" },
+    },
+    editable: {
+      name: "Editable",
+      bindings: [],
+      deferredIssues: { mode: "ask" },
+    },
+  },
   defaultGateConfig: "default",
   repositoryAssignments: {},
   nudge: {
@@ -257,7 +268,6 @@ const gateConfigs: PRLifecycleGateConfigSnapshot = {
     s: { files: 3, semanticLines: 100, modules: 1 },
     m: { files: 10, semanticLines: 500, modules: 3 },
   },
-  deferredIssues: { mode: "ask" },
   gateCatalog: Object.fromEntries(
     lifecycleFlow.flows.flatMap((flow) =>
       flow.nodes.flatMap((node) =>
@@ -268,6 +278,8 @@ const gateConfigs: PRLifecycleGateConfigSnapshot = {
                 {
                   workflowRef: "workflows/pr-lifecycle.yml",
                   gateRef: `gates.${node.decision_point.replace(/^pr\./, "").replaceAll(".", "-")}`,
+                  sourceAISupported:
+                    node.decision_point === "pr.finding.classify",
                   prompt: `Complete ${node.title}.`,
                   fields: [
                     {
@@ -298,7 +310,7 @@ const gateConfigs: PRLifecycleGateConfigSnapshot = {
   flowRevision: prLifecycleFlowFixture.flow_revision,
   catalogRevision: "sha256:catalog",
   configRevision: "sha256:config",
-  effects: { gatewayEffect: "applied" },
+  effects: { gatewayEffect: "applied", deferredPolicyEffect: "applied" },
 }
 
 const mockedList = vi.mocked(listPRWorkspaces)
@@ -1678,7 +1690,12 @@ describe("unified PR workspace pages", () => {
     }
     mockedGetGateConfigs.mockResolvedValue({
       ...gateConfigs,
-      deferredIssues: { mode: "automatic" },
+      gateConfigs: {
+        default: {
+          ...gateConfigs.gateConfigs.default,
+          deferredIssues: { mode: "automatic" },
+        },
+      },
     })
     mockedGet.mockResolvedValue(suppressedWorkspace)
     mockedDeferredGroup.mockResolvedValue(suppressedWorkspace)
@@ -1721,6 +1738,86 @@ describe("unified PR workspace pages", () => {
         },
       ),
     )
+  })
+
+  it("does not present a saved deferred policy as active before restart", async () => {
+    const findingID = `pfn_${"a".repeat(32)}`
+    const groupID = `pdg_${"b".repeat(32)}`
+    const scope = {
+      distance: "S2_related_followup" as const,
+      size: "S" as const,
+      files: 1,
+      semantic_lines: 12,
+      modules: 1,
+      estimated: true,
+      type_compatible: true,
+      confidence: 0.9,
+    }
+    mockedGet.mockResolvedValue({
+      ...aggregate,
+      findings: [
+        {
+          id: findingID,
+          fingerprint: "sha256:restart-pending",
+          origin: "review",
+          severity: "medium",
+          title: "Restart pending follow-up",
+          message: "Wait for the configured policy to become active.",
+          scope,
+          disposition: "deferred",
+          version: 1,
+          created_at: "2026-08-13T10:03:00Z",
+          updated_at: "2026-08-13T10:03:00Z",
+        },
+      ],
+      deferred_groups: [
+        {
+          id: groupID,
+          title: "Restart pending group",
+          body: "Do not publish with an unconfirmed runtime policy.",
+          finding_ids: [findingID],
+          scope,
+          publication_suppressed: true,
+          version: 1,
+          created_at: "2026-08-13T10:04:00Z",
+          updated_at: "2026-08-13T10:04:00Z",
+        },
+      ],
+    })
+    mockedGetGateConfigs.mockResolvedValue({
+      ...gateConfigs,
+      gateConfigs: {
+        ...gateConfigs.gateConfigs,
+        default: {
+          ...gateConfigs.gateConfigs.default,
+          deferredIssues: { mode: "automatic" },
+        },
+      },
+      effects: {
+        gatewayEffect: "restart-required",
+        deferredPolicyEffect: "restart-required",
+      },
+    })
+
+    renderPage(
+      <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
+    )
+
+    expect(
+      await screen.findByText(/saved deferred issue policy is waiting/i),
+    ).toBeVisible()
+    expect(
+      screen.queryByText(/Follow-up issues are created automatically/i),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "Retry automatic issue sync" }),
+    ).not.toBeInTheDocument()
+    const group = within(
+      screen.getByRole("article", { name: "Restart pending group" }),
+    )
+    expect(
+      group.queryByRole("button", { name: "Retry issue publication" }),
+    ).not.toBeInTheDocument()
   })
 
   it("does not mistake unavailable deferred settings for publication being off", async () => {
@@ -2169,7 +2266,17 @@ describe("unified PR workspace pages", () => {
   it("retains deferred work but hides GitHub issue actions when publication is off", async () => {
     mockedGetGateConfigs.mockResolvedValue({
       ...gateConfigs,
-      deferredIssues: { mode: "off" },
+      repositoryAssignments: {
+        "https://github.com|100": "no-publication",
+      },
+      gateConfigs: {
+        ...gateConfigs.gateConfigs,
+        "no-publication": {
+          name: "No publication",
+          bindings: [],
+          deferredIssues: { mode: "off" },
+        },
+      },
     })
     mockedGet.mockResolvedValue({
       ...aggregate,
@@ -2376,20 +2483,92 @@ describe("unified PR workspace pages", () => {
     )
   })
 
-  it("shows Gate configuration defaults and creates an atomic AI override", async () => {
+  it("edits deferred issue policy on the named Gate configuration", async () => {
     const user = userEvent.setup()
     renderPage(
       <PRLifecycleGateConfigsPage
         activeFlowID="review"
-        initialDecisionPoint="pr.charter.confirm"
         initialConfigID="default"
         onBack={vi.fn()}
         page="config"
       />,
     )
 
+    const mode = await screen.findByRole("combobox", {
+      name: "Deferred issue mode",
+    })
+    expect(mode).toHaveTextContent("Ask")
+    await user.click(mode)
+    await user.click(screen.getByRole("option", { name: "Automatic" }))
+    await user.click(screen.getByRole("button", { name: "Save configuration" }))
+
+    await waitFor(() =>
+      expect(mockedPutGateConfigs).toHaveBeenCalledWith(
+        expect.objectContaining({
+          gateConfigs: expect.objectContaining({
+            default: expect.objectContaining({
+              deferredIssues: { mode: "automatic" },
+            }),
+          }),
+        }),
+      ),
+    )
+  })
+
+  it("keeps only the built-in default name and Gate bindings read only", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <PRLifecycleGateConfigsPage
+        activeFlowID="review"
+        initialConfigID="default"
+        onBack={vi.fn()}
+        page="config"
+      />,
+    )
+
+    const name = await screen.findByLabelText("Configuration name")
+    expect(name).toHaveValue("Default")
+    expect(name).toBeDisabled()
+    expect(
+      screen.getByRole("combobox", { name: "Deferred issue mode" }),
+    ).toBeEnabled()
+    await user.hover(
+      screen.getByRole("button", {
+        name: "Why Configuration name is fixed",
+      }),
+    )
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /built-in default configuration has a fixed name/i,
+    )
+
+    await user.click(
+      screen.getByRole("button", { name: "Approve purpose and scope" }),
+    )
     const dialog = await screen.findByRole("dialog", {
       name: "Approve purpose and scope",
+    })
+    expect(
+      within(dialog).getByRole("combobox", { name: "Execution action" }),
+    ).toBeDisabled()
+    expect(within(dialog).getByRole("note")).toHaveTextContent(
+      /create a custom configuration to override Gate actions/i,
+    )
+  })
+
+  it("shows Gate configuration defaults and creates an atomic AI override", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <PRLifecycleGateConfigsPage
+        activeFlowID="review"
+        initialDecisionPoint="pr.finding.classify"
+        initialConfigID="editable"
+        onBack={vi.fn()}
+        page="config"
+      />,
+    )
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Decide ambiguous finding scope",
     })
     expect(within(dialog).getByText("Workflow default")).toBeVisible()
     expect(within(dialog).getAllByText("Human").length).toBeGreaterThan(0)
@@ -2407,25 +2586,112 @@ describe("unified PR workspace pages", () => {
     )
     await user.click(screen.getByRole("option", { name: "AI" }))
     expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
-    expect(within(dialog).getAllByText("AI · main")).toHaveLength(2)
+    expect(within(dialog).getAllByText("AI · main · Ephemeral")).toHaveLength(2)
     expect(
       within(dialog).getByRole("combobox", { name: "Session" }),
     ).toHaveTextContent("Ephemeral")
+    expect(within(dialog).getByLabelText("History")).toHaveValue("None")
+    expect(within(dialog).getByLabelText("History")).toBeDisabled()
+    expect(within(dialog).getByLabelText("Cache")).toHaveValue("None")
+    expect(within(dialog).getByLabelText("Cache")).toBeDisabled()
+    expect(within(dialog).getByLabelText("Tools")).toHaveValue("None")
+    expect(within(dialog).getByLabelText("Tools")).toBeDisabled()
+
+    await user.click(within(dialog).getByRole("combobox", { name: "Session" }))
+    await user.click(
+      screen.getByRole("option", { name: "Originating snapshot" }),
+    )
+    expect(within(dialog).getByLabelText("Agent ID")).toHaveValue(
+      "Same originating agent",
+    )
+    expect(within(dialog).getByLabelText("Agent ID")).toBeDisabled()
+    expect(within(dialog).getByLabelText("History")).toHaveValue(
+      "Exact source snapshot (read only)",
+    )
+    expect(within(dialog).getByLabelText("Cache")).toHaveValue("None")
+    expect(within(dialog).getByLabelText("Tools")).toHaveValue("None")
+    expect(within(dialog).getByLabelText("AI prompt")).toBeEnabled()
     expect(
-      within(dialog).getByRole("combobox", { name: "History" }),
-    ).toHaveTextContent("None")
+      within(dialog).getByText(/stops without falling back/i),
+    ).toBeVisible()
+    await user.hover(
+      within(dialog).getByRole("button", { name: "Why Tools is fixed" }),
+    )
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /same policy.*tool authority remains none/i,
+    )
+
+    await user.click(within(dialog).getByRole("combobox", { name: "Session" }))
+    await user.click(screen.getByRole("option", { name: "Private snapshot" }))
+    expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
+    expect(within(dialog).getByLabelText("Agent ID")).toBeEnabled()
+    expect(within(dialog).getByLabelText("History")).toHaveValue("Read only")
+    expect(within(dialog).getByLabelText("History")).toBeDisabled()
     expect(
       within(dialog).getByRole("combobox", { name: "Cache" }),
-    ).toHaveTextContent("None")
-    expect(
-      within(dialog).getByRole("combobox", { name: "Tools" }),
-    ).toHaveTextContent("None")
+    ).toHaveTextContent("Session")
+    expect(within(dialog).getByLabelText("Tools")).toHaveValue("None")
+    expect(within(dialog).getByLabelText("Tools")).toBeDisabled()
+
+    await user.click(within(dialog).getByRole("combobox", { name: "Session" }))
+    await user.click(screen.getByRole("option", { name: "Ephemeral" }))
+    expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
+    expect(within(dialog).getByLabelText("Agent ID")).toBeEnabled()
     await user.click(
       within(dialog).getByRole("button", { name: "Close — keep draft" }),
     )
     expect(
       screen.getByRole("button", { name: "Save configuration" }),
     ).toBeEnabled()
+  })
+
+  it("preserves an inherited unsupported source snapshot visibly", async () => {
+    mockedGetGateConfigs.mockResolvedValueOnce({
+      ...gateConfigs,
+      gateCatalog: {
+        ...gateConfigs.gateCatalog,
+        "pr.charter.confirm": {
+          ...gateConfigs.gateCatalog["pr.charter.confirm"],
+          defaultAction: {
+            type: "ai",
+            prompt: "Recheck the originating finding.",
+            session: "source",
+          },
+          effectiveAction: {
+            type: "ai",
+            prompt: "Recheck the originating finding.",
+            session: "source",
+          },
+        },
+      },
+    })
+    renderPage(
+      <PRLifecycleGateConfigsPage
+        activeFlowID="review"
+        initialDecisionPoint="pr.charter.confirm"
+        initialConfigID="editable"
+        onBack={vi.fn()}
+        page="config"
+      />,
+    )
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Approve purpose and scope",
+    })
+    expect(within(dialog).getByLabelText("Session")).toHaveValue(
+      "Originating snapshot",
+    )
+    expect(within(dialog).getByLabelText("Session")).toBeDisabled()
+    expect(within(dialog).getByLabelText("AI prompt")).toHaveValue(
+      "Recheck the originating finding.",
+    )
+    expect(within(dialog).getByLabelText("AI prompt")).toBeDisabled()
+    expect(
+      within(dialog).getByText(/inherits its published workflow default/i),
+    ).toBeVisible()
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      /does not publish a source-bearing finding/i,
+    )
   })
 
   it("preserves edits made while a Gate configuration save is in flight", async () => {
@@ -2439,7 +2705,7 @@ describe("unified PR workspace pages", () => {
     renderPage(
       <PRLifecycleGateConfigsPage
         activeFlowID="review"
-        initialConfigID="default"
+        initialConfigID="editable"
         onBack={vi.fn()}
         page="config"
       />,
@@ -2457,7 +2723,11 @@ describe("unified PR workspace pages", () => {
         ...gateConfigs,
         gateConfigs: {
           ...gateConfigs.gateConfigs,
-          default: { name: "Submitted name", bindings: [] },
+          editable: {
+            name: "Submitted name",
+            bindings: [],
+            deferredIssues: { mode: "ask" },
+          },
         },
         configRevision: "sha256:config-2",
       })

@@ -357,7 +357,7 @@ func TestAutomaticDeferredPolicyQueuesEligibleGroupsAndHonorsSuppression(t *test
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	service, aggregate := publicationTestService(t, DeferredIssuesAutomatic, passingGates{}, now)
 	handler, err := NewHTTPHandler(HTTPConfig{
-		Service: service, IssuePublisher: &countingIssuePublisher{}, DeferredIssueMode: DeferredIssuesAutomatic,
+		Service: service, IssuePublisher: &countingIssuePublisher{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +381,7 @@ func TestAutomaticDeferredPolicyQueuesEligibleGroupsAndHonorsSuppression(t *test
 		t.Fatal(err)
 	}
 	handler2, _ := NewHTTPHandler(HTTPConfig{
-		Service: service2, IssuePublisher: &countingIssuePublisher{}, DeferredIssueMode: DeferredIssuesAutomatic,
+		Service: service2, IssuePublisher: &countingIssuePublisher{},
 	})
 	unchanged, err := handler2.applyDeferredIssuePolicy(
 		httptest.NewRequest("POST", "/runtime/eventing/pr-workspaces", nil),
@@ -397,7 +397,7 @@ func TestAutomaticDeferredPolicyFailureSurfacesAndPolicyRetryQueuesIt(t *testing
 	service, aggregate := publicationTestService(t, DeferredIssuesAutomatic, passingGates{}, now)
 	service.store = &failAutomaticMutationStore{Store: service.store, remaining: 1}
 	handler, err := NewHTTPHandler(HTTPConfig{
-		Service: service, IssuePublisher: &countingIssuePublisher{}, DeferredIssueMode: DeferredIssuesAutomatic,
+		Service: service, IssuePublisher: &countingIssuePublisher{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -481,7 +481,7 @@ func TestAutomaticDeferredSyncPreservesCurrentOnPremutationRegroupFailure(t *tes
 	}
 	aggregate = seeded.Aggregate
 	handler, err := NewHTTPHandler(HTTPConfig{
-		Service: service, IssuePublisher: &countingIssuePublisher{}, DeferredIssueMode: DeferredIssuesAutomatic,
+		Service: service, IssuePublisher: &countingIssuePublisher{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -541,7 +541,7 @@ func TestAutomaticDeferredSyncReloadsPartialMultiGroupSuccess(t *testing.T) {
 	aggregate = seeded.Aggregate
 	service.store = &failNthGetStore{Store: service.store, failAt: 3}
 	handler, err := NewHTTPHandler(HTTPConfig{
-		Service: service, IssuePublisher: &countingIssuePublisher{}, DeferredIssueMode: DeferredIssuesAutomatic,
+		Service: service, IssuePublisher: &countingIssuePublisher{},
 	})
 	if err != nil {
 		t.Fatal(err)

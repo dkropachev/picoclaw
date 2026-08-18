@@ -1,12 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -265,6 +270,52 @@ type workflowAgentRunOptions struct {
 
 const maxWorkflowIsolatedSystemPromptBytes = 64 << 10
 
+const (
+	workflowAgentSourceMetadataPrefix        = "picoclaw/workflow-agent-source/v1\x00"
+	workflowAgentSourceMetadataVersion       = 1
+	maxWorkflowAgentSourceIdentityBytes      = 512
+	maxWorkflowAgentSourceMetadataBytes      = 128 << 10
+	maxWorkflowAgentSourceTranscriptBytes    = 7 << 20
+	maxWorkflowAgentSourceTranscriptMessages = 64
+)
+
+// A small fixed lock set serializes identical protected source identities in
+// one process without retaining an unbounded map of execution IDs. Hash
+// collisions only serialize unrelated private captures; they cannot merge
+// their independently bound snapshots.
+var workflowAgentSourceExecutionLocks [256]sync.Mutex
+
+type workflowAgentSourceMetadataV1 struct {
+	Version            int    `json:"version"`
+	ExecutionID        string `json:"execution-id"`
+	WorkspaceID        string `json:"workspace-id"`
+	Binding            string `json:"binding"`
+	AgentID            string `json:"agent-id"`
+	Tools              string `json:"tools"`
+	SystemPrompt       string `json:"system-prompt"`
+	RequestRevision    string `json:"request-revision"`
+	TranscriptRevision string `json:"transcript-revision"`
+}
+
+type workflowAgentSourceStore interface {
+	session.ScopeAdmitter
+	session.SnapshotReader
+	session.SnapshotReplacer
+}
+
+type workflowAgentSourceExecution struct {
+	capture         workflows.AgentSourceCapture
+	agentID         string
+	key             string
+	scope           session.SessionScope
+	store           workflowAgentSourceStore
+	requestRevision string
+	systemPrompt    string
+	initialRevision string
+	replay          *session.SessionSnapshot
+	unlock          func()
+}
+
 type workflowAgentTextRunner func(message string, noHistoryOverride bool, runOptions workflowAgentRunOptions) (string, error)
 
 func (r *workflowAgentRunner) CaptureReadOnlySession(
@@ -402,6 +453,17 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			)
 		}
 	}
+	if req.SourceCapture != nil {
+		if !ephemeralDecision || !req.PrivateContext || privateDecision ||
+			strings.TrimSpace(req.Tools) != workflows.AgentToolsNone ||
+			historyModeInput != "none" || strings.TrimSpace(req.Cache) != "none" ||
+			isolatedSystemPrompt == "" || !workflowAgentDeliveryEmpty(req.Delivery) {
+			return nil, fmt.Errorf("source capture requires a private isolated no-tool AI request")
+		}
+		if err := validateWorkflowAgentSourceCapture(*req.SourceCapture); err != nil {
+			return nil, err
+		}
+	}
 	isolatedDecision := readOnlyDecision || ephemeralDecision
 	if !isolatedDecision {
 		if hooksErr := r.loop.ensureHooksInitialized(ctx); hooksErr != nil {
@@ -438,6 +500,22 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	if message == "" {
 		return nil, fmt.Errorf("agent workflow step message is required")
 	}
+	var sourceExecution *workflowAgentSourceExecution
+	if req.SourceCapture != nil {
+		sourceExecution, err = beginWorkflowAgentSourceExecution(
+			ctx,
+			agent,
+			agentID,
+			*req.SourceCapture,
+			message,
+			isolatedSystemPrompt,
+			req.Output,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer sourceExecution.unlock()
+	}
 	sessionKey := strings.TrimSpace(req.Session)
 	if ephemeralDecision {
 		sessionKey = r.ephemeralSessionKey()
@@ -445,8 +523,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		sessionKey = "workflow:agent:" + agentID
 	}
 	var (
-		readOnlySnapshot *session.SessionSnapshot
-		historyRevision  string
+		readOnlySnapshot    *session.SessionSnapshot
+		historyRevision     string
+		privateSystemPrompt string
 	)
 	if readOnlyDecision {
 		var (
@@ -474,6 +553,20 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		readOnlySnapshot = &snapshot
 		historyRevision = revision
 		if privateDecision {
+			if isWorkflowAgentSourceSnapshot(snapshot) {
+				metadata, metadataErr := decodeWorkflowAgentSourceSnapshot(
+					snapshot,
+					agentID,
+					"",
+				)
+				if metadataErr != nil {
+					return nil, metadataErr
+				}
+				privateSystemPrompt = metadata.SystemPrompt
+				// The summary is a private metadata envelope, not conversational
+				// context. Never render it as a provider-visible summary.
+				readOnlySnapshot.Summary = ""
+			}
 			sessionKey = workflowPrivateSessionIdentity(agentID, revision)
 		} else {
 			sessionKey = snapshot.Key
@@ -543,6 +636,8 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					ReasoningEffortOverride: strings.TrimSpace(runOptions.ReasoningEffort),
 					DisableTools:            true,
 					DisablePromptCache:      disablePromptCache,
+					SystemPromptOverride:    privateSystemPrompt,
+					SuppressDefaultContext:  privateSystemPrompt != "",
 				},
 				runMessage,
 				sideQuestionExecutionOptions{
@@ -635,9 +730,30 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	requestedRunOptions := workflowAgentRunOptions{
 		NoTools: workflowAgentToolsDisabled(req.Tools),
 	}
-	response, err := runOnce(message, false, requestedRunOptions)
-	if err != nil {
-		return nil, err
+	var (
+		response         string
+		sourceTranscript []providers.Message
+		sourceReplayed   bool
+	)
+	if sourceExecution != nil && sourceExecution.replay != nil {
+		sourceTranscript = session.CloneMessages(sourceExecution.replay.History)
+		response = sourceTranscript[len(sourceTranscript)-1].Content
+		sourceReplayed = true
+	} else {
+		if sourceExecution != nil {
+			sourceTranscript = append(sourceTranscript, providers.Message{
+				Role: "user", Content: message,
+			})
+		}
+		response, err = runOnce(message, false, requestedRunOptions)
+		if err != nil {
+			return nil, err
+		}
+		if sourceExecution != nil {
+			sourceTranscript = append(sourceTranscript, providers.Message{
+				Role: "assistant", Content: response,
+			})
+		}
 	}
 	outputs := workflowAgentBaseOutputs(
 		response,
@@ -662,9 +778,23 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	if req.Output != nil && req.Output.Enabled() {
 		structured := workflows.ValidateAgentStructuredOutput(response, req.Output)
 		repairs := 0
+		if sourceReplayed {
+			repairs = len(sourceTranscript)/2 - 1
+		}
 		for !structured.Valid && repairs < req.Output.RepairAttempts {
+			if sourceReplayed {
+				return outputs, fmt.Errorf(
+					"completed source session has invalid structured output: %s",
+					structured.Error,
+				)
+			}
 			repairs++
 			repairMessage := workflowStructuredRepairMessage(response, structured.Error, req.Output)
+			if sourceExecution != nil {
+				sourceTranscript = append(sourceTranscript, providers.Message{
+					Role: "user", Content: repairMessage,
+				})
+			}
 			repaired, repairErr := runOnce(repairMessage, true, requestedRunOptions)
 			if repairErr != nil {
 				outputs["structured_valid"] = false
@@ -672,6 +802,11 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				return outputs, repairErr
 			}
 			response = repaired
+			if sourceExecution != nil {
+				sourceTranscript = append(sourceTranscript, providers.Message{
+					Role: "assistant", Content: response,
+				})
+			}
 			outputs["text"] = response
 			structured = workflows.ValidateAgentStructuredOutput(response, req.Output)
 		}
@@ -690,7 +825,426 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			return outputs, fmt.Errorf("agent structured output invalid: %s", structured.Error)
 		}
 	}
+	if sourceExecution != nil {
+		source, sourceErr := sourceExecution.complete(ctx, sourceTranscript)
+		if sourceErr != nil {
+			return outputs, sourceErr
+		}
+		for key, value := range source {
+			outputs[key] = value
+		}
+	}
 	return outputs, nil
+}
+
+func validateWorkflowAgentSourceCapture(capture workflows.AgentSourceCapture) error {
+	values := [...]struct {
+		label string
+		value string
+	}{
+		{label: "execution", value: capture.ExecutionID},
+		{label: "workspace", value: capture.WorkspaceID},
+		{label: "binding", value: capture.Binding},
+	}
+	for _, item := range values {
+		if item.value == "" || item.value != strings.TrimSpace(item.value) ||
+			item.value != strings.ToLower(item.value) ||
+			!utf8.ValidString(item.value) || strings.ContainsRune(item.value, '\x00') ||
+			len(item.value) > maxWorkflowAgentSourceIdentityBytes {
+			return fmt.Errorf("source capture %s identity is invalid", item.label)
+		}
+	}
+	return nil
+}
+
+func workflowAgentSourceScope(
+	capture workflows.AgentSourceCapture,
+	agentID string,
+) (session.SessionScope, string, error) {
+	if err := validateWorkflowAgentSourceCapture(capture); err != nil {
+		return session.SessionScope{}, "", err
+	}
+	if agentID != strings.TrimSpace(agentID) || !routing.IsCanonicalAgentID(agentID) {
+		return session.SessionScope{}, "", fmt.Errorf("source capture agent identity is invalid")
+	}
+	scope := session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: agentID,
+		Channel: "review",
+		Account: routing.DefaultAccountID,
+		Dimensions: []string{
+			"execution",
+			"workspace",
+			"binding",
+		},
+		Values: map[string]string{
+			"execution": capture.ExecutionID,
+			"workspace": capture.WorkspaceID,
+			"binding":   capture.Binding,
+		},
+	}
+	return scope, session.BuildSessionKey(scope), nil
+}
+
+func workflowAgentSourceRequestRevision(
+	capture workflows.AgentSourceCapture,
+	agentID string,
+	message string,
+	systemPrompt string,
+	output *workflows.AgentOutputContract,
+) (string, error) {
+	if message == "" || !utf8.ValidString(message) || strings.ContainsRune(message, '\x00') {
+		return "", fmt.Errorf("source capture message is invalid")
+	}
+	if err := validateWorkflowAgentSourceSystemPrompt(systemPrompt); err != nil {
+		return "", err
+	}
+	if output != nil && output.RepairAttempts*2+2 > maxWorkflowAgentSourceTranscriptMessages {
+		return "", fmt.Errorf("source capture repair transcript exceeds its bound")
+	}
+	encoded, err := json.Marshal(struct {
+		Version      int                            `json:"version"`
+		ExecutionID  string                         `json:"execution-id"`
+		WorkspaceID  string                         `json:"workspace-id"`
+		Binding      string                         `json:"binding"`
+		AgentID      string                         `json:"agent-id"`
+		Tools        string                         `json:"tools"`
+		Message      string                         `json:"message"`
+		SystemPrompt string                         `json:"system-prompt"`
+		Output       *workflows.AgentOutputContract `json:"output"`
+	}{
+		Version:      workflowAgentSourceMetadataVersion,
+		ExecutionID:  capture.ExecutionID,
+		WorkspaceID:  capture.WorkspaceID,
+		Binding:      capture.Binding,
+		AgentID:      agentID,
+		Tools:        workflows.AgentToolsNone,
+		Message:      message,
+		SystemPrompt: systemPrompt,
+		Output:       output,
+	})
+	if err != nil || len(encoded) > maxWorkflowAgentSourceTranscriptBytes {
+		return "", fmt.Errorf("source capture request exceeds its bound")
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+func validateWorkflowAgentSourceSystemPrompt(systemPrompt string) error {
+	if systemPrompt == "" || systemPrompt != strings.TrimSpace(systemPrompt) ||
+		!utf8.ValidString(systemPrompt) || strings.ContainsRune(systemPrompt, '\x00') ||
+		len(systemPrompt) > maxWorkflowIsolatedSystemPromptBytes {
+		return fmt.Errorf("source capture system prompt is invalid")
+	}
+	return nil
+}
+
+func lockWorkflowAgentSourceExecution(key string) func() {
+	sum := sha256.Sum256([]byte(key))
+	lock := &workflowAgentSourceExecutionLocks[sum[0]]
+	lock.Lock()
+	return lock.Unlock
+}
+
+func beginWorkflowAgentSourceExecution(
+	ctx context.Context,
+	agent *AgentInstance,
+	agentID string,
+	capture workflows.AgentSourceCapture,
+	message string,
+	systemPrompt string,
+	output *workflows.AgentOutputContract,
+) (*workflowAgentSourceExecution, error) {
+	if agent == nil || agent.Sessions == nil {
+		return nil, fmt.Errorf("source session store is unavailable")
+	}
+	store, ok := agent.Sessions.(workflowAgentSourceStore)
+	if !ok {
+		return nil, fmt.Errorf("source session store lacks exact snapshot support")
+	}
+	scope, key, err := workflowAgentSourceScope(capture, agentID)
+	if err != nil {
+		return nil, err
+	}
+	requestRevision, err := workflowAgentSourceRequestRevision(
+		capture, agentID, message, systemPrompt, output,
+	)
+	if err != nil {
+		return nil, err
+	}
+	unlock := lockWorkflowAgentSourceExecution(key)
+	fail := func(err error) (*workflowAgentSourceExecution, error) {
+		unlock()
+		return nil, err
+	}
+	if _, err := store.AdmitSessionScope(ctx, session.SessionScopeAdmission{
+		Key: key, Scope: session.CloneScope(&scope), Mode: session.ScopeAdmissionReview,
+	}); err != nil {
+		return fail(fmt.Errorf("admit source session: %w", err))
+	}
+	previous, err := readWorkflowAgentSourceSession(ctx, store, key, scope)
+	if err != nil {
+		return fail(err)
+	}
+	execution := &workflowAgentSourceExecution{
+		capture:         capture,
+		agentID:         agentID,
+		key:             key,
+		scope:           scope,
+		store:           store,
+		requestRevision: requestRevision,
+		systemPrompt:    systemPrompt,
+		initialRevision: previous.Revision,
+		unlock:          unlock,
+	}
+	if len(previous.History) == 0 && previous.Summary == "" {
+		return execution, nil
+	}
+	if len(previous.History) == 0 || previous.Summary == "" {
+		return fail(fmt.Errorf("source session contains an incomplete protected snapshot"))
+	}
+	if _, err := decodeWorkflowAgentSourceSnapshot(previous, agentID, requestRevision); err != nil {
+		return fail(err)
+	}
+	execution.replay = &previous
+	return execution, nil
+}
+
+func readWorkflowAgentSourceSession(
+	ctx context.Context,
+	store session.SnapshotReader,
+	key string,
+	scope session.SessionScope,
+) (session.SessionSnapshot, error) {
+	snapshot, found, err := store.ReadSessionSnapshot(ctx, key)
+	if err != nil {
+		return session.SessionSnapshot{}, fmt.Errorf("read source session: %w", err)
+	}
+	if !found || snapshot.Key != key || snapshot.Revision == "" ||
+		len(snapshot.Aliases) != 0 || !reflect.DeepEqual(snapshot.Scope, &scope) ||
+		session.BuildSessionKey(scope) != snapshot.Key {
+		return session.SessionSnapshot{}, fmt.Errorf(
+			"read source session: invalid protected snapshot",
+		)
+	}
+	return workflowCloneSessionSnapshot(snapshot), nil
+}
+
+func isWorkflowAgentSourceScope(scope *session.SessionScope) bool {
+	return scope != nil && scope.Version == session.ScopeVersionV1 &&
+		scope.Channel == "review" &&
+		reflect.DeepEqual(scope.Dimensions, []string{"execution", "workspace", "binding"}) &&
+		len(scope.Values) == 3
+}
+
+func isWorkflowAgentSourceSnapshot(snapshot session.SessionSnapshot) bool {
+	return isWorkflowAgentSourceScope(snapshot.Scope) ||
+		strings.HasPrefix(snapshot.Summary, workflowAgentSourceMetadataPrefix)
+}
+
+func decodeWorkflowAgentSourceSnapshot(
+	snapshot session.SessionSnapshot,
+	agentID string,
+	wantRequestRevision string,
+) (workflowAgentSourceMetadataV1, error) {
+	invalid := func(detail string) (workflowAgentSourceMetadataV1, error) {
+		return workflowAgentSourceMetadataV1{}, fmt.Errorf(
+			"source session metadata is invalid: %s",
+			detail,
+		)
+	}
+	if !isWorkflowAgentSourceScope(snapshot.Scope) || snapshot.Scope.AgentID != agentID ||
+		snapshot.Key != session.BuildSessionKey(*snapshot.Scope) {
+		return invalid("scope binding")
+	}
+	if !strings.HasPrefix(snapshot.Summary, workflowAgentSourceMetadataPrefix) {
+		return invalid("missing versioned envelope")
+	}
+	raw := []byte(strings.TrimPrefix(snapshot.Summary, workflowAgentSourceMetadataPrefix))
+	if len(raw) == 0 || len(raw) > maxWorkflowAgentSourceMetadataBytes || !utf8.Valid(raw) {
+		return invalid("envelope bound")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var metadata workflowAgentSourceMetadataV1
+	if err := decoder.Decode(&metadata); err != nil {
+		return invalid("envelope encoding")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return invalid("trailing envelope data")
+	}
+	canonical, err := json.Marshal(metadata)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return invalid("non-canonical envelope")
+	}
+	if metadata.Version != workflowAgentSourceMetadataVersion ||
+		metadata.ExecutionID != snapshot.Scope.Values["execution"] ||
+		metadata.WorkspaceID != snapshot.Scope.Values["workspace"] ||
+		metadata.Binding != snapshot.Scope.Values["binding"] ||
+		metadata.AgentID != agentID || metadata.Tools != workflows.AgentToolsNone ||
+		!workflowAgentSourceRevisionValid(metadata.RequestRevision) ||
+		!workflowAgentSourceRevisionValid(metadata.TranscriptRevision) {
+		return invalid("identity binding")
+	}
+	if wantRequestRevision != "" && metadata.RequestRevision != wantRequestRevision {
+		return invalid("execution identity already contains a different request")
+	}
+	if err := validateWorkflowAgentSourceSystemPrompt(metadata.SystemPrompt); err != nil {
+		return invalid("system prompt")
+	}
+	transcriptRevision, err := workflowAgentSourceTranscriptRevision(snapshot.History)
+	if err != nil || transcriptRevision != metadata.TranscriptRevision {
+		return invalid("transcript binding")
+	}
+	return metadata, nil
+}
+
+func workflowAgentSourceRevisionValid(revision string) bool {
+	if len(revision) != len("sha256:")+sha256.Size*2 ||
+		!strings.HasPrefix(revision, "sha256:") {
+		return false
+	}
+	for _, character := range revision[len("sha256:"):] {
+		if (character < '0' || character > '9') &&
+			(character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func workflowAgentSourceTranscriptRevision(history []providers.Message) (string, error) {
+	if len(history) < 2 || len(history) > maxWorkflowAgentSourceTranscriptMessages ||
+		len(history)%2 != 0 {
+		return "", fmt.Errorf("source transcript shape is invalid")
+	}
+	for index, message := range history {
+		role := "user"
+		if index%2 == 1 {
+			role = "assistant"
+		}
+		if message.Role != role || !utf8.ValidString(message.Content) ||
+			strings.ContainsRune(message.Content, '\x00') ||
+			!reflect.DeepEqual(message, providers.Message{Role: role, Content: message.Content}) {
+			return "", fmt.Errorf("source transcript message %d is invalid", index)
+		}
+	}
+	encoded, err := json.Marshal(history)
+	if err != nil || len(encoded) > maxWorkflowAgentSourceTranscriptBytes {
+		return "", fmt.Errorf("source transcript exceeds its bound")
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+func encodeWorkflowAgentSourceMetadata(metadata workflowAgentSourceMetadataV1) (string, error) {
+	encoded, err := json.Marshal(metadata)
+	if err != nil || len(encoded) > maxWorkflowAgentSourceMetadataBytes {
+		return "", fmt.Errorf("source session metadata exceeds its bound")
+	}
+	return workflowAgentSourceMetadataPrefix + string(encoded), nil
+}
+
+func (execution *workflowAgentSourceExecution) complete(
+	ctx context.Context,
+	history []providers.Message,
+) (map[string]any, error) {
+	if execution == nil {
+		return nil, fmt.Errorf("source execution is unavailable")
+	}
+	if execution.replay != nil {
+		return workflowAgentSourceOutputs(
+			&execution.capture,
+			execution.agentID,
+			execution.key,
+			execution.replay.Revision,
+		), nil
+	}
+	transcriptRevision, err := workflowAgentSourceTranscriptRevision(history)
+	if err != nil {
+		return nil, err
+	}
+	metadata := workflowAgentSourceMetadataV1{
+		Version:            workflowAgentSourceMetadataVersion,
+		ExecutionID:        execution.capture.ExecutionID,
+		WorkspaceID:        execution.capture.WorkspaceID,
+		Binding:            execution.capture.Binding,
+		AgentID:            execution.agentID,
+		Tools:              workflows.AgentToolsNone,
+		SystemPrompt:       execution.systemPrompt,
+		RequestRevision:    execution.requestRevision,
+		TranscriptRevision: transcriptRevision,
+	}
+	summary, err := encodeWorkflowAgentSourceMetadata(metadata)
+	if err != nil {
+		return nil, err
+	}
+	replacement := session.SessionSnapshotReplacement{
+		Key:              execution.key,
+		History:          session.CloneMessages(history),
+		Summary:          summary,
+		Scope:            session.CloneScope(&execution.scope),
+		ExpectedRevision: execution.initialRevision,
+	}
+	if err := execution.store.ReplaceSessionSnapshot(ctx, replacement); err != nil {
+		if !errors.Is(err, session.ErrSnapshotConflict) {
+			return nil, fmt.Errorf("persist source session: %w", err)
+		}
+		concurrent, readErr := readWorkflowAgentSourceSession(
+			ctx, execution.store, execution.key, execution.scope,
+		)
+		if readErr != nil || concurrent.Summary != summary ||
+			!reflect.DeepEqual(concurrent.History, history) {
+			return nil, fmt.Errorf("persist source session: conflicting completed execution")
+		}
+		if _, decodeErr := decodeWorkflowAgentSourceSnapshot(
+			concurrent, execution.agentID, execution.requestRevision,
+		); decodeErr != nil {
+			return nil, decodeErr
+		}
+		return workflowAgentSourceOutputs(
+			&execution.capture,
+			execution.agentID,
+			execution.key,
+			concurrent.Revision,
+		), nil
+	}
+	verified, err := readWorkflowAgentSourceSession(
+		ctx, execution.store, execution.key, execution.scope,
+	)
+	if err != nil || verified.Summary != summary ||
+		!reflect.DeepEqual(verified.History, history) {
+		return nil, fmt.Errorf("verify source session: invalid persisted snapshot")
+	}
+	if _, err := decodeWorkflowAgentSourceSnapshot(
+		verified, execution.agentID, execution.requestRevision,
+	); err != nil {
+		return nil, err
+	}
+	return workflowAgentSourceOutputs(
+		&execution.capture,
+		execution.agentID,
+		execution.key,
+		verified.Revision,
+	), nil
+}
+
+func workflowAgentSourceOutputs(
+	capture *workflows.AgentSourceCapture,
+	agentID string,
+	sessionKey string,
+	revision string,
+) map[string]any {
+	return map[string]any{
+		"source_execution_id": capture.ExecutionID,
+		"source_workspace_id": capture.WorkspaceID,
+		"source_binding":      capture.Binding,
+		"source_agent_id":     agentID,
+		"source_session":      sessionKey,
+		"source_revision":     revision,
+		"source_tools":        workflows.AgentToolsNone,
+	}
 }
 
 func workflowAgentDeliveryEmpty(delivery workflows.Delivery) bool {
@@ -757,6 +1311,11 @@ func workflowFrozenReadOnlySessionSnapshot(
 	}
 	if err := workflowReadOnlySessionOwner(snapshot, agentID); err != nil {
 		return session.SessionSnapshot{}, "", err
+	}
+	if snapshot.Scope != nil && session.BuildSessionKey(*snapshot.Scope) != snapshot.Key {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session key does not match its declared scope",
+		)
 	}
 	revision, err := workflowSessionSnapshotRevision(snapshot)
 	if err != nil {
@@ -852,6 +1411,11 @@ func workflowReadOnlySessionSnapshot(
 	}
 	if ownerErr := workflowReadOnlySessionOwner(snapshot, agentID); ownerErr != nil {
 		return session.SessionSnapshot{}, "", ownerErr
+	}
+	if snapshot.Scope != nil && session.BuildSessionKey(*snapshot.Scope) != snapshot.Key {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent session key does not match its declared scope",
+		)
 	}
 	revision, err := workflowSessionSnapshotRevision(snapshot)
 	if err != nil {

@@ -25,6 +25,9 @@ func TestPRLifecycleGateCatalogExactlyCoversDecisionPoints(t *testing.T) {
 		if err := gatetypes.ValidateGateAction(*entry.Gate.DefaultAction); err != nil {
 			t.Fatalf("catalog[%d] default action: %v", index, err)
 		}
+		if entry.SourceAISupported != (entry.DecisionPoint == "pr.finding.classify") {
+			t.Fatalf("catalog[%d] source AI support = %t", index, entry.SourceAISupported)
+		}
 	}
 
 	// Returned definitions must not expose mutable catalog storage.

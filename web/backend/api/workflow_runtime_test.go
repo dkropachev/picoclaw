@@ -34,16 +34,21 @@ func TestWebWorkflowRuntimeForwardsReadOnlySessionCapture(t *testing.T) {
 	if instance == nil {
 		t.Fatal("default agent is nil")
 	}
-	key := session.BuildOpaqueSessionKey("agent:main:web:direct:private-capture")
+	scope := session.SessionScope{
+		Version: session.ScopeVersionV1, AgentID: "main", Channel: "web",
+		Account: "default", Dimensions: []string{"fixture"},
+		Values: map[string]string{"fixture": "private-capture"},
+	}
+	key := session.BuildSessionKey(scope)
 	metadata, ok := instance.Sessions.(session.MetadataAwareSessionStore)
 	if !ok {
 		t.Fatalf("session store %T is not metadata aware", instance.Sessions)
 	}
-	metadata.EnsureSessionMetadata(key, &session.SessionScope{
-		Version: session.ScopeVersionV1,
-		AgentID: "main",
-		Channel: "web",
-	}, []string{"agent:main:web:direct:private-capture"})
+	metadata.EnsureSessionMetadata(
+		key,
+		session.CloneScope(&scope),
+		[]string{"agent:main:web:direct:private-capture"},
+	)
 	instance.Sessions.AddMessage(key, "user", "frozen web capture evidence")
 
 	frozen, err := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{

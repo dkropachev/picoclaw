@@ -27,8 +27,7 @@ const workspaceIDPattern = /^prw_[0-9a-f]{32}$/
 export function normalizePRLifecycleSettingsSearch(
   raw: Record<string, unknown>,
 ): PRLifecycleSettingsSearch {
-  const tab: PRLifecycleSettingsTab =
-    raw.tab === "scope" || raw.tab === "deferred" ? raw.tab : "nudging"
+  const tab: PRLifecycleSettingsTab = raw.tab === "scope" ? raw.tab : "nudging"
   const from =
     typeof raw.from === "string" && workspaceIDPattern.test(raw.from)
       ? raw.from

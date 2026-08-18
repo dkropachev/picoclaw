@@ -133,6 +133,48 @@ describe("PR workspace API", () => {
     })
   })
 
+  it("projects only the safe source-availability marker for findings", async () => {
+    mockedLauncherFetch.mockResolvedValue(
+      jsonResponse({
+        ...aggregate,
+        findings: [
+          {
+            id: `pfn_${"7".repeat(32)}`,
+            fingerprint: "sha256:source-available",
+            origin: "review",
+            origin_run_id: `psr_${"8".repeat(32)}`,
+            source_available: true,
+            source_execution: { session: "must-not-project" },
+            severity: "medium",
+            title: "Source-backed finding",
+            message: "This finding retains a protected AI source snapshot.",
+            scope: {
+              distance: "S0_exact",
+              size: "XS",
+              presence: "candidate_present",
+              files: 1,
+              semantic_lines: 1,
+              modules: 1,
+              estimated: false,
+              type_compatible: true,
+              confidence: 1,
+            },
+            disposition: "open",
+            version: 1,
+            created_at: "2026-08-13T10:03:00Z",
+            updated_at: "2026-08-13T10:03:00Z",
+          },
+        ],
+      }),
+    )
+
+    const workspace = await getPRWorkspace(workspaceRecord.id)
+    expect(workspace.findings[0]).toMatchObject({
+      sourceAvailable: true,
+    })
+    expect(workspace.findings[0]).not.toHaveProperty("source_execution")
+  })
+
   it("projects workspace corrections before a charter exists", async () => {
     mockedLauncherFetch.mockResolvedValue(
       jsonResponse({

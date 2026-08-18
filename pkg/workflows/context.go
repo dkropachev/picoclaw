@@ -138,7 +138,16 @@ const (
 	AgentToolsNone        = "none"
 	AgentSessionEphemeral = "ephemeral"
 	AgentSessionPrivate   = "private"
+	AgentSessionSource    = "source"
 )
+
+// AgentSourceCapture asks a trusted private AI adapter to retain the exact
+// finding-producing turn as a protected, read-only source session.
+type AgentSourceCapture struct {
+	ExecutionID string
+	WorkspaceID string
+	Binding     string
+}
 
 type AgentRequest struct {
 	AgentID          string
@@ -160,6 +169,7 @@ type AgentRequest struct {
 	// workflow root. Runners must keep provider diagnostics out of ordinary
 	// runtime events and shared health-state error fields for this request.
 	PrivateContext bool
+	SourceCapture  *AgentSourceCapture
 	// IsolatedSystemPrompt replaces the configured agent's default system,
 	// bootstrap, memory, skill, contributor, and dynamic context for one trusted
 	// private ephemeral request. The workflow runner rejects it on every broader

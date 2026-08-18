@@ -19,10 +19,13 @@ const (
 // Runtime adapters must execute it without tools, history, cache, hooks, or a
 // durable user session.
 type IsolatedAIRequest struct {
-	Operation    string
-	SystemPrompt string
-	UserPrompt   string
-	Schema       map[string]any
+	Operation         string
+	SystemPrompt      string
+	UserPrompt        string
+	Schema            map[string]any
+	SourceExecutionID string
+	SourceWorkspaceID string
+	SourceBinding     string
 }
 
 type IsolatedAIRunner interface {
@@ -76,6 +79,7 @@ type ReviewPass struct {
 	Summary  string         `json:"summary"`
 	Findings []AgentFinding `json:"findings"`
 	Coverage Coverage       `json:"coverage"`
+	source   *AIExecutionSource
 }
 
 type CompletionPass struct {
@@ -84,6 +88,7 @@ type CompletionPass struct {
 	Missing    []CompletionFinding `json:"missing_in_scope"`
 	OutOfScope []CompletionFinding `json:"out_of_scope"`
 	Coverage   Coverage            `json:"coverage"`
+	source     *AIExecutionSource
 }
 
 type NudgeChallenge struct {
@@ -106,6 +111,7 @@ type ReviewRound struct {
 	Result         ReviewPass
 	NovelFindings  int
 	DuplicateCount int
+	Source         *AIExecutionSource
 }
 
 type CompletionRound struct {
@@ -120,6 +126,7 @@ type CompletionRound struct {
 	Result         CompletionPass
 	NovelFindings  int
 	DuplicateCount int
+	Source         *AIExecutionSource
 }
 
 type AIController struct {
@@ -142,7 +149,7 @@ func (controller AIController) RunReviewSearch(
 	if err != nil {
 		return nil, err
 	}
-	initial, err := controller.runReview(ctx, "review.initial", initialPrompt)
+	initial, err := controller.runReview(ctx, "review.initial", initialPrompt, bundle.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +158,7 @@ func (controller AIController) RunReviewSearch(
 		PromptDigest: initialPrompt.Digest,
 		State:        ExecutionSucceeded,
 		Result:       initial,
+		Source:       initial.source,
 	}}
 	seen := newSemanticFindingSet()
 	seedSemanticSeenFindings(seen, bundle.Findings)
@@ -174,13 +182,14 @@ func (controller AIController) RunReviewSearch(
 			return append(rounds, round), promptErr
 		}
 		round.PromptDigest = prompt.Digest
-		result, runErr := controller.runReview(ctx, "review.nudge", prompt)
+		result, runErr := controller.runReview(ctx, "review.nudge", prompt, bundle.WorkspaceID)
 		if runErr != nil {
 			round.State, round.PublicError = ExecutionFailed, "nudge_ai_failed"
 			return append(rounds, round), runErr
 		}
 		novel, duplicates = countNovelFindings(result.Findings, seen)
 		round.State, round.Result = ExecutionSucceeded, result
+		round.Source = result.source
 		round.NovelFindings, round.DuplicateCount = novel, duplicates
 		rounds = append(rounds, round)
 		previousNovel = novel > 0
@@ -209,7 +218,7 @@ func (controller AIController) RunReviewNudge(
 		return round, err
 	}
 	round.PromptDigest = prompt.Digest
-	result, err := controller.runReview(ctx, "review.nudge", prompt)
+	result, err := controller.runReview(ctx, "review.nudge", prompt, bundle.WorkspaceID)
 	if err != nil {
 		round.State, round.PublicError = ExecutionFailed, "nudge_ai_failed"
 		return round, err
@@ -218,6 +227,7 @@ func (controller AIController) RunReviewNudge(
 	seedSemanticSeenFindings(seen, bundle.Findings)
 	round.NovelFindings, round.DuplicateCount = countNovelFindings(result.Findings, seen)
 	round.State, round.Result = ExecutionSucceeded, result
+	round.Source = result.source
 	return round, nil
 }
 
@@ -237,11 +247,11 @@ func (controller AIController) RunCompletionAudit(
 	if err != nil {
 		return nil, err
 	}
-	initial, err := controller.runCompletion(ctx, "completion.initial", initialPrompt)
+	initial, err := controller.runCompletion(ctx, "completion.initial", initialPrompt, bundle.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
-	rounds := []CompletionRound{{Initial: true, PromptDigest: initialPrompt.Digest, State: ExecutionSucceeded, Result: initial}}
+	rounds := []CompletionRound{{Initial: true, PromptDigest: initialPrompt.Digest, State: ExecutionSucceeded, Result: initial, Source: initial.source}}
 	seen := findingFingerprintSet(nil)
 	seedSeenFindings(seen, bundle.Findings)
 	novel, duplicates := countNovelCompletionFindings(append(append([]CompletionFinding{}, initial.Missing...), initial.OutOfScope...), seen)
@@ -264,7 +274,7 @@ func (controller AIController) RunCompletionAudit(
 			return append(rounds, round), promptErr
 		}
 		round.PromptDigest = prompt.Digest
-		result, runErr := controller.runCompletion(ctx, "completion.nudge", prompt)
+		result, runErr := controller.runCompletion(ctx, "completion.nudge", prompt, bundle.WorkspaceID)
 		if runErr != nil {
 			round.State, round.PublicError = ExecutionFailed, "nudge_ai_failed"
 			return append(rounds, round), runErr
@@ -272,6 +282,7 @@ func (controller AIController) RunCompletionAudit(
 		findings := append(append([]CompletionFinding{}, result.Missing...), result.OutOfScope...)
 		novel, duplicates = countNovelCompletionFindings(findings, seen)
 		round.State, round.Result = ExecutionSucceeded, result
+		round.Source = result.source
 		round.NovelFindings, round.DuplicateCount = novel, duplicates
 		rounds = append(rounds, round)
 		previousNovel = novel > 0
@@ -300,7 +311,7 @@ func (controller AIController) RunCompletionNudge(
 		return round, err
 	}
 	round.PromptDigest = prompt.Digest
-	result, err := controller.runCompletion(ctx, "completion.nudge", prompt)
+	result, err := controller.runCompletion(ctx, "completion.nudge", prompt, bundle.WorkspaceID)
 	if err != nil {
 		round.State, round.PublicError = ExecutionFailed, "nudge_ai_failed"
 		return round, err
@@ -310,6 +321,7 @@ func (controller AIController) RunCompletionNudge(
 	findings := append(append([]CompletionFinding{}, result.Missing...), result.OutOfScope...)
 	round.NovelFindings, round.DuplicateCount = countNovelCompletionFindings(findings, seen)
 	round.State, round.Result = ExecutionSucceeded, result
+	round.Source = result.source
 	return round, nil
 }
 
@@ -341,14 +353,17 @@ func (controller AIController) RunScopeAudit(ctx context.Context, bundle PRConte
 	return result, prompt.Digest, nil
 }
 
-func (controller AIController) runReview(ctx context.Context, operation string, prompt CompiledPrompt) (ReviewPass, error) {
+func (controller AIController) runReview(ctx context.Context, operation string, prompt CompiledPrompt, workspaceID string) (ReviewPass, error) {
 	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: operation, SystemPrompt: prompt.SystemPrompt, UserPrompt: prompt.UserPrompt,
-		Schema: reviewSchema(),
+		Schema: reviewSchema(), SourceExecutionID: sourceAIExecutionID(workspaceID, operation, prompt.Digest),
+		SourceWorkspaceID: workspaceID, SourceBinding: prompt.Digest,
 	})
 	if err != nil {
 		return ReviewPass{}, err
 	}
+	source := aiExecutionSourceFromValue(value)
+	value = aiValueWithoutSource(value)
 	var result ReviewPass
 	if err := decodeStructured(value, &result); err != nil {
 		return ReviewPass{}, fmt.Errorf("decode review result: %w", err)
@@ -356,17 +371,21 @@ func (controller AIController) runReview(ctx context.Context, operation string, 
 	if err := validateReviewPass(result); err != nil {
 		return ReviewPass{}, err
 	}
+	result.source = source
 	return result, nil
 }
 
-func (controller AIController) runCompletion(ctx context.Context, operation string, prompt CompiledPrompt) (CompletionPass, error) {
+func (controller AIController) runCompletion(ctx context.Context, operation string, prompt CompiledPrompt, workspaceID string) (CompletionPass, error) {
 	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: operation, SystemPrompt: prompt.SystemPrompt, UserPrompt: prompt.UserPrompt,
-		Schema: completionSchema(),
+		Schema: completionSchema(), SourceExecutionID: sourceAIExecutionID(workspaceID, operation, prompt.Digest),
+		SourceWorkspaceID: workspaceID, SourceBinding: prompt.Digest,
 	})
 	if err != nil {
 		return CompletionPass{}, err
 	}
+	source := aiExecutionSourceFromValue(value)
+	value = aiValueWithoutSource(value)
 	var result CompletionPass
 	if err := decodeStructured(value, &result); err != nil {
 		return CompletionPass{}, fmt.Errorf("decode completion result: %w", err)
@@ -395,7 +414,46 @@ func (controller AIController) runCompletion(ctx context.Context, operation stri
 			return CompletionPass{}, errors.New("missing-in-scope list contains work classified outside the charter or PR type")
 		}
 	}
+	result.source = source
 	return result, nil
+}
+
+func sourceAIExecutionID(workspaceID, operation, promptDigest string) string {
+	return stableID("aix_", workspaceID, operation, promptDigest)
+}
+
+func aiExecutionSourceFromValue(value map[string]any) *AIExecutionSource {
+	raw, ok := value["__source-execution"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	text := func(key string) string {
+		candidate, _ := raw[key].(string)
+		return candidate
+	}
+	source := &AIExecutionSource{
+		ExecutionID: text("source_execution_id"), WorkspaceID: text("source_workspace_id"),
+		Binding: text("source_binding"), AgentID: text("source_agent_id"),
+		Session: text("source_session"), SessionRevision: text("source_revision"),
+		Tools: text("source_tools"),
+	}
+	if !validAIExecutionSource(source) {
+		return nil
+	}
+	return source
+}
+
+func aiValueWithoutSource(value map[string]any) map[string]any {
+	if _, exists := value["__source-execution"]; !exists {
+		return value
+	}
+	cloned := make(map[string]any, len(value)-1)
+	for key, item := range value {
+		if key != "__source-execution" {
+			cloned[key] = item
+		}
+	}
+	return cloned
 }
 
 func (controller AIController) planChallenge(ctx context.Context, stage NudgeStage, strategy NudgeStrategy, variantOrdinal int, bundle PRContextBundle, prior any) NudgeChallenge {

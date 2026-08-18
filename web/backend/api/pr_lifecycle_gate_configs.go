@@ -24,14 +24,15 @@ const (
 )
 
 type prLifecycleGateCatalogEntry struct {
-	WorkflowRef      string                `json:"workflow-ref"`
-	GateRef          string                `json:"gate-ref"`
-	WorkflowRevision string                `json:"workflow-revision,omitempty"`
-	Prompt           string                `json:"prompt"`
-	Fields           []gatetypes.GateField `json:"fields,omitempty"`
-	DefaultAction    *gatetypes.GateAction `json:"default-action,omitempty"`
-	EffectiveAction  *gatetypes.GateAction `json:"effective-action,omitempty"`
-	ActionSource     string                `json:"action-source,omitempty"`
+	WorkflowRef       string                `json:"workflow-ref"`
+	GateRef           string                `json:"gate-ref"`
+	WorkflowRevision  string                `json:"workflow-revision,omitempty"`
+	SourceAISupported bool                  `json:"source-ai-supported"`
+	Prompt            string                `json:"prompt"`
+	Fields            []gatetypes.GateField `json:"fields,omitempty"`
+	DefaultAction     *gatetypes.GateAction `json:"default-action,omitempty"`
+	EffectiveAction   *gatetypes.GateAction `json:"effective-action,omitempty"`
+	ActionSource      string                `json:"action-source,omitempty"`
 }
 
 type prLifecycleGateConfigsResponse struct {
@@ -40,14 +41,14 @@ type prLifecycleGateConfigsResponse struct {
 	RepositoryAssignments map[string]string                       `json:"repository-assignments"`
 	Nudge                 config.PRLifecycleNudgeConfig           `json:"nudge"`
 	Scope                 config.PRLifecycleScopeConfig           `json:"scope"`
-	DeferredIssues        config.PRLifecycleDeferredIssueConfig   `json:"deferred-issues"`
 	GateCatalog           map[string]prLifecycleGateCatalogEntry  `json:"gate-catalog"`
 	Flow                  lifecycleflow.Graph                     `json:"flow"`
 	FlowRevision          string                                  `json:"flow-revision"`
 	CatalogRevision       string                                  `json:"catalog-revision"`
 	ConfigRevision        string                                  `json:"config-revision"`
 	Effects               struct {
-		GatewayEffect string `json:"gateway-effect"`
+		GatewayEffect        string `json:"gateway-effect"`
+		DeferredPolicyEffect string `json:"deferred-policy-effect"`
 	} `json:"effects"`
 }
 
@@ -59,7 +60,6 @@ type prLifecycleGateConfigsPutRequest struct {
 	RepositoryAssignments  map[string]string                       `json:"repository-assignments"`
 	Nudge                  config.PRLifecycleNudgeConfig           `json:"nudge"`
 	Scope                  config.PRLifecycleScopeConfig           `json:"scope"`
-	DeferredIssues         config.PRLifecycleDeferredIssueConfig   `json:"deferred-issues"`
 }
 
 func (h *Handler) registerPRLifecycleGateConfigRoutes(mux *http.ServeMux) {
@@ -83,11 +83,13 @@ func (h *Handler) handleGetPRLifecycleGateConfigs(w http.ResponseWriter, r *http
 		writePRWorkspaceAPIError(w, http.StatusInternalServerError, "configuration_unavailable")
 		return
 	}
+	gatewayEffect, deferredEffect := h.prLifecycleEffects()
 	writePRLifecycleGateConfigs(
 		w,
 		cfg.PRLifecycle.Effective(),
 		revision,
-		h.prLifecycleGatewayEffect(),
+		gatewayEffect,
+		deferredEffect,
 	)
 }
 
@@ -116,7 +118,7 @@ func (h *Handler) handlePutPRLifecycleGateConfigs(w http.ResponseWriter, r *http
 	candidate := config.PRLifecycleConfig{
 		GateConfigs: request.GateConfigs, DefaultGateConfigID: request.DefaultGateConfigID,
 		RepositoryAssignments: request.RepositoryAssignments, Nudge: request.Nudge,
-		Scope: request.Scope, DeferredIssues: request.DeferredIssues,
+		Scope: request.Scope,
 	}
 	if err := candidate.Validate(); err != nil || validatePRLifecycleGateCatalogBindings(candidate) != nil {
 		writePRWorkspaceAPIError(w, http.StatusUnprocessableEntity, "invalid_gate_configs")
@@ -144,6 +146,7 @@ func (h *Handler) handlePutPRLifecycleGateConfigs(w http.ResponseWriter, r *http
 	cfg.PRLifecycle = candidate
 	effectiveCandidate := candidate.Effective()
 	catalogRevision := prLifecycleGateConfigsCatalogRevision(effectiveCandidate)
+	deferredRevision := prLifecycleDeferredPolicyRevision(effectiveCandidate)
 	// Serialize the saved generation and its pending effect with gateway start
 	// completion. A concurrent gateway start can then clear only the exact
 	// configuration it loaded, never a newer save.
@@ -151,6 +154,7 @@ func (h *Handler) handlePutPRLifecycleGateConfigs(w http.ResponseWriter, r *http
 	newRevision, err := config.SaveConfigIfRevision(h.configPath, cfg, revision)
 	if err == nil {
 		h.prLifecyclePendingCatalog = catalogRevision
+		h.prLifecyclePendingDeferred = deferredRevision
 	}
 	h.prLifecycleEffectMu.Unlock()
 	if errors.Is(err, config.ErrConfigRevisionMismatch) {
@@ -161,11 +165,13 @@ func (h *Handler) handlePutPRLifecycleGateConfigs(w http.ResponseWriter, r *http
 		writePRWorkspaceAPIError(w, http.StatusInternalServerError, "configuration_save_failed")
 		return
 	}
+	gatewayEffect, deferredEffect := h.prLifecycleEffects()
 	writePRLifecycleGateConfigs(
 		w,
 		effectiveCandidate,
 		newRevision,
-		h.prLifecycleGatewayEffect(),
+		gatewayEffect,
+		deferredEffect,
 	)
 }
 
@@ -282,18 +288,20 @@ func writePRLifecycleGateConfigs(
 	lifecycle config.PRLifecycleConfig,
 	configRevision string,
 	gatewayEffect string,
+	deferredPolicyEffect string,
 ) {
 	flow, flowRevision := lifecycleflow.Default()
 	catalogRevision := prLifecycleGateConfigsCatalogRevision(lifecycle)
 	response := prLifecycleGateConfigsResponse{
 		GateConfigs: lifecycle.GateConfigs, DefaultGateConfigID: lifecycle.DefaultGateConfigID,
 		RepositoryAssignments: lifecycle.RepositoryAssignments, Nudge: lifecycle.Nudge,
-		Scope: lifecycle.Scope, DeferredIssues: lifecycle.DeferredIssues,
+		Scope:       lifecycle.Scope,
 		GateCatalog: make(map[string]prLifecycleGateCatalogEntry), Flow: flow,
 		FlowRevision: flowRevision, CatalogRevision: catalogRevision, ConfigRevision: configRevision,
 	}
 	response.GateCatalog = prLifecycleGateConfigCatalog(lifecycle)
 	response.Effects.GatewayEffect = gatewayEffect
+	response.Effects.DeferredPolicyEffect = deferredPolicyEffect
 	setPRWorkspaceResponseHeaders(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(response)
@@ -315,8 +323,9 @@ func prLifecycleGateConfigCatalog(
 		}
 		entry := prLifecycleGateCatalogEntry{
 			WorkflowRef: source.WorkflowRef, GateRef: source.GateRef,
-			WorkflowRevision: source.WorkflowRevision,
-			Prompt:           source.Gate.Prompt, Fields: clonePRLifecycleGateCatalogFields(source.Gate.Fields),
+			WorkflowRevision:  source.WorkflowRevision,
+			SourceAISupported: source.SourceAISupported,
+			Prompt:            source.Gate.Prompt, Fields: clonePRLifecycleGateCatalogFields(source.Gate.Fields),
 			DefaultAction:   clonePRLifecycleGateCatalogAction(source.Gate.DefaultAction),
 			EffectiveAction: clonePRLifecycleGateCatalogAction(source.Gate.DefaultAction),
 			ActionSource:    "workflow-default",
@@ -367,13 +376,19 @@ func prLifecycleGateConfigsCatalogRevision(lifecycle config.PRLifecycleConfig) s
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func (h *Handler) prLifecycleGatewayEffect() string {
+func (h *Handler) prLifecycleEffects() (string, string) {
 	h.prLifecycleEffectMu.Lock()
 	defer h.prLifecycleEffectMu.Unlock()
+	gatewayEffect := "applied"
+	deferredEffect := "applied"
 	if h.prLifecyclePendingCatalog != "" {
-		return "restart-required"
+		gatewayEffect = "restart-required"
+		if h.prLifecycleAppliedDeferred == "" ||
+			h.prLifecycleAppliedDeferred != h.prLifecyclePendingDeferred {
+			deferredEffect = "restart-required"
+		}
 	}
-	return "applied"
+	return gatewayEffect, deferredEffect
 }
 
 // markPRLifecycleGatewayApplied records the exact lifecycle configuration
@@ -381,12 +396,38 @@ func (h *Handler) prLifecycleGatewayEffect() string {
 // saved while the process was starting, in which case its restart-required
 // effect must remain.
 func (h *Handler) markPRLifecycleGatewayApplied(lifecycle config.PRLifecycleConfig) {
-	catalogRevision := prLifecycleGateConfigsCatalogRevision(lifecycle.Effective())
+	effective := lifecycle.Effective()
+	catalogRevision := prLifecycleGateConfigsCatalogRevision(effective)
+	deferredRevision := prLifecycleDeferredPolicyRevision(effective)
 	h.prLifecycleEffectMu.Lock()
 	defer h.prLifecycleEffectMu.Unlock()
+	h.prLifecycleAppliedDeferred = deferredRevision
 	if h.prLifecyclePendingCatalog == catalogRevision {
 		h.prLifecyclePendingCatalog = ""
+		h.prLifecyclePendingDeferred = ""
 	}
+}
+
+func prLifecycleDeferredPolicyRevision(lifecycle config.PRLifecycleConfig) string {
+	used := map[string]struct{}{lifecycle.DefaultGateConfigID: {}}
+	assignments := make(map[string]string, len(lifecycle.RepositoryAssignments))
+	for identity, configID := range lifecycle.RepositoryAssignments {
+		parts := strings.Split(identity, "|")
+		canonical := strings.ToLower(strings.TrimRight(parts[0], "/") + "|" + parts[1])
+		assignments[canonical] = configID
+		used[configID] = struct{}{}
+	}
+	modes := make(map[string]config.PRLifecycleDeferredIssueMode, len(used))
+	for configID := range used {
+		modes[configID] = lifecycle.GateConfigs[configID].DeferredIssues.Mode
+	}
+	encoded, _ := json.Marshal(struct {
+		Default     string                                         `json:"default-gate-config"`
+		Assignments map[string]string                              `json:"repository-assignments"`
+		Modes       map[string]config.PRLifecycleDeferredIssueMode `json:"deferred-issue-modes"`
+	}{Default: lifecycle.DefaultGateConfigID, Assignments: assignments, Modes: modes})
+	digest := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func validPRLifecycleGateConfigRequest(r *http.Request) bool {

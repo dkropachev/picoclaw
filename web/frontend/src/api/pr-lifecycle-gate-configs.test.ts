@@ -26,9 +26,11 @@ const wireSnapshot = {
     default: {
       name: "Default",
       bindings: [],
+      "deferred-issues": { mode: "ask" },
     },
     automated: {
       name: "Automated",
+      "deferred-issues": { mode: "automatic" },
       bindings: [
         {
           "workflow-ref": "workflows/pr-lifecycle.yml",
@@ -61,11 +63,11 @@ const wireSnapshot = {
     s: { files: 3, "semantic-lines": 100, modules: 1 },
     m: { files: 10, "semantic-lines": 500, modules: 3 },
   },
-  "deferred-issues": { mode: "ask" },
   "gate-catalog": {
     "pr.charter.reconfirm": {
       "workflow-ref": "workflows/pr-lifecycle.yml",
       "gate-ref": "gates.charter-reconfirm",
+      "source-ai-supported": false,
       prompt: "Review the revised charter.",
       fields: [
         {
@@ -98,7 +100,10 @@ const wireSnapshot = {
   "flow-revision": "flow-1",
   "catalog-revision": "catalog-1",
   "config-revision": "config-1",
-  effects: { "gateway-effect": "applied" },
+  effects: {
+    "gateway-effect": "applied",
+    "deferred-policy-effect": "applied",
+  },
 }
 
 describe("PR lifecycle Gate configurations", () => {
@@ -117,6 +122,14 @@ describe("PR lifecycle Gate configurations", () => {
     expect(snapshot.defaultGateConfig).toBe("default")
     expect(snapshot.nudge.reviewMinimumAdditional).toBe(1)
     expect(snapshot.scope.xs.semanticLines).toBe(20)
+    expect(snapshot.gateConfigs.automated.deferredIssues.mode).toBe("automatic")
+    expect(snapshot.effects).toEqual({
+      gatewayEffect: "applied",
+      deferredPolicyEffect: "applied",
+    })
+    expect(snapshot.gateCatalog["pr.charter.reconfirm"].sourceAISupported).toBe(
+      false,
+    )
     expect(snapshot.gateCatalog["pr.charter.reconfirm"].fields).toEqual([
       {
         id: "action",
@@ -159,7 +172,6 @@ describe("PR lifecycle Gate configurations", () => {
       repositoryAssignments: snapshot.repositoryAssignments,
       nudge: snapshot.nudge,
       scope: snapshot.scope,
-      deferredIssues: snapshot.deferredIssues,
     })
 
     const request = mockedRequest.mock.calls.find(
@@ -171,6 +183,14 @@ describe("PR lifecycle Gate configurations", () => {
       "request-id": "request-1",
       "default-gate-config": "default",
     })
+    const serializedConfigs = body["gate-configs"] as Record<
+      string,
+      Record<string, unknown>
+    >
+    expect(serializedConfigs.automated["deferred-issues"]).toEqual({
+      mode: "automatic",
+    })
+    expect(body).not.toHaveProperty("deferred-issues")
     expect(JSON.stringify(body)).not.toContain("_")
   })
 
@@ -198,6 +218,62 @@ describe("PR lifecycle Gate configurations", () => {
   it("rejects AI policy values outside the closed runtime vocabulary", async () => {
     const invalid = structuredClone(wireSnapshot)
     invalid["gate-configs"].automated.bindings[0].action.session = "ambient"
+    mockedRequest.mockResolvedValue(invalid)
+
+    await expect(getPRLifecycleGateConfigs()).rejects.toMatchObject({
+      code: "malformed_response",
+    })
+  })
+
+  it("round-trips the minimal originating-session AI profile", async () => {
+    const source = structuredClone(wireSnapshot)
+    const sourceAction = source["gate-configs"].automated.bindings[0]
+      .action as unknown as Record<string, unknown>
+    for (const key of ["agent-id", "history", "cache", "tools"])
+      delete sourceAction[key]
+    Object.assign(sourceAction, {
+      type: "ai",
+      prompt: "Recheck the originating finding.",
+      session: "source",
+    })
+    mockedRequest.mockResolvedValue(source)
+
+    const snapshot = await getPRLifecycleGateConfigs()
+    expect(snapshot.gateConfigs.automated.bindings[0].action).toEqual({
+      type: "ai",
+      prompt: "Recheck the originating finding.",
+      session: "source",
+    })
+
+    mockedRequest.mockResolvedValueOnce(source)
+    await putPRLifecycleGateConfigs({
+      expectedConfigRevision: snapshot.configRevision,
+      requestID: "request-source",
+      gateConfigs: snapshot.gateConfigs,
+      defaultGateConfig: snapshot.defaultGateConfig,
+      repositoryAssignments: snapshot.repositoryAssignments,
+      nudge: snapshot.nudge,
+      scope: snapshot.scope,
+    })
+    const request = mockedRequest.mock.calls.at(-1)?.[1]
+    const body = JSON.parse(String(request?.body))
+    expect(body["gate-configs"].automated.bindings[0].action).toEqual(
+      source["gate-configs"].automated.bindings[0].action,
+    )
+  })
+
+  it("rejects partial or mismatched originating-session profiles", async () => {
+    const invalid = structuredClone(wireSnapshot)
+    const invalidAction = invalid["gate-configs"].automated.bindings[0]
+      .action as unknown as Record<string, unknown>
+    for (const key of ["agent-id", "history", "cache"])
+      delete invalidAction[key]
+    Object.assign(invalidAction, {
+      type: "ai",
+      prompt: "Recheck.",
+      session: "source",
+      tools: "none",
+    })
     mockedRequest.mockResolvedValue(invalid)
 
     await expect(getPRLifecycleGateConfigs()).rejects.toMatchObject({

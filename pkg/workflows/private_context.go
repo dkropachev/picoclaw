@@ -258,6 +258,12 @@ func validateFrozenReadOnlySessionWithContext(
 	owner := ""
 	if frozen.Snapshot.Scope != nil {
 		owner = frozen.Snapshot.Scope.AgentID
+		if session.BuildSessionKey(*frozen.Snapshot.Scope) != key {
+			return fmt.Errorf(
+				"%w: captured session key does not match its declared scope",
+				ErrPrivateWorkflowContext,
+			)
+		}
 	} else if legacy := session.ParseLegacyAgentSessionKey(key); legacy != nil {
 		owner = legacy.AgentID
 	}

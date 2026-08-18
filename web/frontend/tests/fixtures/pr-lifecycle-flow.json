@@ -120,7 +120,7 @@
             "id": "review_keep_in_scope",
             "kind": "action",
             "title": "Keep in pull request",
-            "description": "Make the finding independently available to review publication and implementation.",
+            "description": "Retain the finding as an in-scope review result.",
             "operation": "pr.finding.keep_in_scope",
             "editable": false
           },
@@ -161,7 +161,7 @@
             "id": "review_dismiss_finding",
             "kind": "action",
             "title": "Dismiss finding",
-            "description": "Close the finding without publishing or implementing it.",
+            "description": "Close the finding without publishing it.",
             "operation": "pr.finding.dismiss",
             "editable": false
           },
@@ -207,18 +207,10 @@
             "editable": false
           },
           {
-            "id": "review_select_implementation_findings",
-            "kind": "action",
-            "title": "Select implementation findings",
-            "description": "Choose findings that the separate implementation workflow will fix.",
-            "operation": "pr.implementation.findings.select",
-            "editable": false
-          },
-          {
             "id": "review_record_correction",
             "kind": "action",
             "title": "Record user correction",
-            "description": "Store feedback for review, implementation, or both.",
+            "description": "Store feedback with the audience selected by the user.",
             "operation": "pr.correction.record",
             "editable": false
           },
@@ -450,15 +442,7 @@
           {
             "from": "review_keep_in_scope",
             "to": "review_select_review_findings",
-            "mode": "optional",
-            "label": "Review",
-            "loop": false
-          },
-          {
-            "from": "review_keep_in_scope",
-            "to": "review_select_implementation_findings",
-            "mode": "optional",
-            "label": "Implement",
+            "mode": "linear",
             "loop": false
           },
           {
@@ -824,11 +808,11 @@
             "ordinal": 2
           },
           {
-            "id": "implementation_return_to_review",
+            "id": "implementation_call_review",
             "kind": "action",
-            "title": "Return to review",
-            "description": "Re-review the pull request under the revised and reconfirmed charter.",
-            "operation": "pr.implementation.return_review",
+            "title": "Run review workflow",
+            "description": "Invoke the isolated review workflow under the revised and reconfirmed charter.",
+            "operation": "pr.review.invoke",
             "editable": false
           },
           {
@@ -1271,7 +1255,7 @@
           },
           {
             "from": "implementation_gate_charter_reconfirm",
-            "to": "implementation_return_to_review",
+            "to": "implementation_call_review",
             "mode": "linear",
             "loop": false
           }
@@ -1279,5 +1263,5 @@
       }
     ]
   },
-  "flow_revision": "sha256:fb1f77977329f3878de13b97faa3f8e634a3958d70503f08c77727f267444c4c"
+  "flow_revision": "sha256:62ea13f235d94897100b6a32ba115a8f9d23edf8553ab65e7aabb94d54d7479a"
 }

@@ -2062,6 +2062,7 @@
       "settingsLoading": "Loading deferred issue settings…",
       "settingsError": "Deferred issue settings are unavailable. Issue publication controls are disabled until the settings load.",
       "settingsRefreshError": "Deferred issue settings could not be refreshed. Using the last loaded setting.",
+      "runtimeRestartPending": "The saved deferred issue policy is waiting for a Gateway restart. The active runtime policy may still be different, so issue publication controls are disabled.",
       "retrySettings": "Retry settings",
       "items": "findings",
       "publish": "Publish issue",

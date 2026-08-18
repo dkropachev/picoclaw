@@ -66,25 +66,29 @@ type CandidateEvidence struct {
 }
 
 type ServiceConfig struct {
-	Store             Store
-	Provider          ProviderResolver
-	ReviewEvidence    ReviewEvidenceLoader
-	CandidateEvidence CandidateEvidenceLoader
-	AI                IsolatedAIRunner
-	Gates             GateEvaluator
-	DeferredIssueMode DeferredIssueMode
-	Now               func() time.Time
+	Store                          Store
+	Provider                       ProviderResolver
+	ReviewEvidence                 ReviewEvidenceLoader
+	CandidateEvidence              CandidateEvidenceLoader
+	AI                             IsolatedAIRunner
+	ReviewWorkflow                 ReviewWorkflowExecutor
+	Gates                          GateEvaluator
+	DeferredIssueMode              DeferredIssueMode
+	DeferredIssueModeForRepository func(providerOrigin, repositoryID string) DeferredIssueMode
+	Now                            func() time.Time
 }
 
 type Service struct {
-	store             Store
-	provider          ProviderResolver
-	reviewEvidence    ReviewEvidenceLoader
-	candidateEvidence CandidateEvidenceLoader
-	ai                AIController
-	gates             GateEvaluator
-	deferredIssueMode DeferredIssueMode
-	now               func() time.Time
+	store                          Store
+	provider                       ProviderResolver
+	reviewEvidence                 ReviewEvidenceLoader
+	candidateEvidence              CandidateEvidenceLoader
+	ai                             AIController
+	reviewWorkflow                 ReviewWorkflowExecutor
+	gates                          GateEvaluator
+	deferredIssueMode              DeferredIssueMode
+	deferredIssueModeForRepository func(providerOrigin, repositoryID string) DeferredIssueMode
+	now                            func() time.Time
 }
 
 var implementationSideEffectClaims = struct {
@@ -106,12 +110,34 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	reviewWorkflow := config.ReviewWorkflow
+	if reviewWorkflow == nil {
+		reviewWorkflow = newIsolatedReviewWorkflow(config.AI)
+	}
 	return &Service{
 		store: newPublicationFencedStore(config.Store), provider: config.Provider, reviewEvidence: config.ReviewEvidence,
 		candidateEvidence: config.CandidateEvidence,
-		ai:                AIController{Runner: config.AI}, gates: config.Gates,
-		deferredIssueMode: config.DeferredIssueMode, now: now,
+		ai:                AIController{Runner: config.AI}, reviewWorkflow: reviewWorkflow, gates: config.Gates,
+		deferredIssueMode:              config.DeferredIssueMode,
+		deferredIssueModeForRepository: config.DeferredIssueModeForRepository, now: now,
 	}, nil
+}
+
+func (service *Service) deferredMode(aggregate Aggregate) DeferredIssueMode {
+	if service != nil && service.deferredIssueModeForRepository != nil {
+		mode := service.deferredIssueModeForRepository(
+			aggregate.Workspace.ProviderOrigin,
+			aggregate.Workspace.RepositoryID,
+		)
+		if validDeferredIssueMode(mode) {
+			return mode
+		}
+		return DeferredIssuesOff
+	}
+	if service == nil || !validDeferredIssueMode(service.deferredIssueMode) {
+		return DeferredIssuesOff
+	}
+	return service.deferredIssueMode
 }
 
 // claimImplementation serializes the side-effecting implementation operation
@@ -393,9 +419,8 @@ func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmChart
 	if gateCompletedWith(gate, "approve") {
 		charter.Confirmed = true
 		charter.ConfirmedAt = &now
-		phase, state, activeID := PhaseReview, ExecutionQueued, charter.ID
 		patch.ReplaceCharters = []Charter{charter}
-		patch.Phase, patch.ExecutionState, patch.ActiveCharterID = &phase, &state, &activeID
+		queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
 		patch.Activity = append(patch.Activity, Activity{Kind: "charter.confirmed", Actor: "gate", EntityID: charter.ID, Summary: "PR charter confirmed", CreatedAt: now})
 	} else {
 		state := ExecutionWaitingGate
@@ -538,18 +563,21 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 	}
 	bundle := reviewContextBundle(aggregate)
 	bundle.CandidateDiff = evidence.UnifiedDiff
-	stats := NudgeStrategyStats(aggregate.NudgeRounds, NudgeReviewSearch)
-	var rounds []ReviewRound
-	var runErr error
+	mode := ReviewWorkflowFull
 	if manualNudge {
-		var round ReviewRound
-		round, runErr = service.ai.RunReviewNudge(ctx, bundle, stats)
-		rounds = []ReviewRound{round}
-	} else {
-		rounds, runErr = service.ai.RunReviewSearch(ctx, bundle, request.NudgePolicy, stats)
+		mode = ReviewWorkflowAdditional
 	}
+	reviewResult, runErr := service.reviewWorkflow.ExecuteReviewWorkflow(ctx, ReviewWorkflowRequest{
+		Mode: mode, Handoff: newReviewWorkflowHandoff(aggregate.Workspace, charter),
+		Context: reviewWorkflowContext(bundle), NudgePolicy: request.NudgePolicy,
+		StrategyStats: NudgeStrategyStats(aggregate.NudgeRounds, NudgeReviewSearch),
+	})
+	rounds := reviewResult.Rounds
 	if runErr != nil && len(rounds) == 0 {
 		return Aggregate{}, runErr
+	}
+	if resultErr := validateReviewWorkflowResult(mode, request.NudgePolicy, reviewResult, runErr); resultErr != nil {
+		return aggregate, resultErr
 	}
 	now := service.now().UTC()
 	runID := stableID("psr_", aggregate.Workspace.ID, request.RequestID)
@@ -873,7 +901,7 @@ func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, poi
 	if !prlifecycle.IsDecisionPoint(point) {
 		return GateRun{}, false, fmt.Errorf("%w: unknown PR lifecycle decision point %q", ErrInvalid, point)
 	}
-	digest, err := fingerprintValue(subject)
+	digest, err := fingerprintGateSubject(subject)
 	if err != nil {
 		return GateRun{}, false, err
 	}
@@ -973,6 +1001,7 @@ func materializeReviewRounds(aggregate Aggregate, runID string, rounds []ReviewR
 				Evidence: candidate.Evidence, Impact: candidate.Impact,
 				Recommendation: candidate.Recommendation, Validation: candidate.Validation,
 				Scope: agentFindingScope(candidate), Disposition: reviewFindingDisposition(agentFindingScope(candidate)),
+				SourceAvailable: round.Source != nil, source: cloneAIExecutionSource(round.Source),
 				Version: 1, CreatedAt: now, UpdatedAt: now,
 			})
 		}

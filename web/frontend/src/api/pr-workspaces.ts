@@ -201,6 +201,7 @@ export interface PRWorkspaceFinding {
   fingerprint: string
   origin: PRWorkspaceFindingOrigin
   origin_run_id?: string
+  sourceAvailable?: boolean
   severity: PRWorkspaceFindingSeverity
   title: string
   message: string
@@ -1292,6 +1293,10 @@ function projectScopeChange(
 
 function projectFinding(value: Record<string, unknown>): PRWorkspaceFinding {
   const originRunID = optionalString(value.origin_run_id)
+  const sourceAvailable =
+    value.source_available == null
+      ? undefined
+      : booleanValue(value.source_available)
   const file = optionalString(value.file)
   const line = optionalNonNegativeInteger(value.line)
   const evidence = optionalString(value.evidence)
@@ -1303,6 +1308,7 @@ function projectFinding(value: Record<string, unknown>): PRWorkspaceFinding {
     fingerprint: requiredString(value.fingerprint),
     origin: enumValue(value.origin, findingOrigins),
     ...(originRunID === undefined ? {} : { origin_run_id: originRunID }),
+    ...(sourceAvailable === undefined ? {} : { sourceAvailable }),
     severity: requiredString(value.severity),
     title: requiredString(value.title),
     ...(file === undefined ? {} : { file }),

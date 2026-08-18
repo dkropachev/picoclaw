@@ -313,7 +313,8 @@ type PRFinding struct {
 	DeferredGroupID     string               `json:"deferred_group_id,omitempty"`
 	NudgeReward         *float64             `json:"nudge_reward,omitempty"`
 	RewardSource        string               `json:"reward_source,omitempty"`
-	Version             int64                `json:"version"`
+	protectedSource     *PRFindingSourceExecution
+	Version             int64 `json:"version"`
 }
 
 type PRFindingEvent struct {

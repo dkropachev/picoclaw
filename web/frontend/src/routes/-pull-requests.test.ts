@@ -93,7 +93,7 @@ describe("pull request Gate configuration editor search", () => {
 })
 
 describe("pull request lifecycle settings search", () => {
-  it("uses nudging by default and accepts each settings tab", () => {
+  it("uses nudging by default and accepts the remaining settings tabs", () => {
     expect(normalizePRLifecycleSettingsSearch({})).toEqual({ tab: "nudging" })
     expect(normalizePRLifecycleSettingsSearch({ tab: "nudging" })).toEqual({
       tab: "nudging",
@@ -102,7 +102,7 @@ describe("pull request lifecycle settings search", () => {
       tab: "scope",
     })
     expect(normalizePRLifecycleSettingsSearch({ tab: "deferred" })).toEqual({
-      tab: "deferred",
+      tab: "nudging",
     })
   })
 

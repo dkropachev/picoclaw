@@ -1332,8 +1332,7 @@ func (r *scriptedGateAgentRunner) CaptureReadOnlySession(
 	return &FrozenReadOnlySession{
 		AgentID: ref.AgentID,
 		Snapshot: session.SessionSnapshot{
-			Key:   ref.Session,
-			Scope: &session.SessionScope{AgentID: ref.AgentID},
+			Key: ref.Session,
 		},
 		HistoryRevision: "sha256:scripted-gate-snapshot",
 		FrozenMedia:     media.FrozenSet{Version: media.FrozenSetVersion},

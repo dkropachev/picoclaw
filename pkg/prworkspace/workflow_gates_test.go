@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
@@ -35,6 +37,9 @@ func (agent *prGateV3Agent) CaptureReadOnlySession(
 	}
 	if !found {
 		return nil, errors.New("gate session was not found")
+	}
+	if ref.ExpectedRevision != "" && snapshot.Revision != ref.ExpectedRevision {
+		return nil, errors.New("gate session revision changed before capture")
 	}
 	return &workflows.FrozenReadOnlySession{
 		AgentID: ref.AgentID, Snapshot: snapshot,
@@ -114,7 +119,7 @@ func TestWorkflowGateEvaluatorAppliesExactRepositoryActionOverride(t *testing.T)
 		},
 	}
 	configured.GateConfigs["automatic"] = config.PRLifecycleGateConfig{
-		Name: "Automatic",
+		Name: "Automatic", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef,
 			GateRef:     "gates.charter-confirm",
@@ -171,6 +176,85 @@ func TestWorkflowGateEvaluatorUsesDedicatedHardScopeForm(t *testing.T) {
 		if option.ID == "approve" {
 			t.Fatal("hard-scope form exposed forbidden approve option")
 		}
+	}
+}
+
+func TestWorkflowGateEvaluatorUsesExactOriginatingSessionForSourceAI(t *testing.T) {
+	backend, closeStore := newGateWorkingContextTestBackend(t, t.TempDir())
+	defer closeStore()
+	contextRequest := testGateWorkingContextRequest("main")
+	source := &AIExecutionSource{
+		ExecutionID: "aix_11111111111111111111111111111111",
+		WorkspaceID: contextRequest.WorkspaceID, Binding: "sha256:source-binding",
+		AgentID: "main", Tools: workflows.AgentToolsNone,
+	}
+	source.Session = aiExecutionSourceSessionKey(source)
+	scope := aiExecutionSourceSessionScope(source)
+	if _, err := backend.AdmitSessionScope(t.Context(), session.SessionScopeAdmission{
+		Key: source.Session, Scope: session.CloneScope(&scope), Mode: session.ScopeAdmissionReview,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reserved, found, err := backend.ReadSessionSnapshot(t.Context(), source.Session)
+	if err != nil || !found {
+		t.Fatalf("reserved source session = %#v, found=%v, error=%v", reserved, found, err)
+	}
+	if err := backend.ReplaceSessionSnapshot(t.Context(), session.SessionSnapshotReplacement{
+		Key: source.Session,
+		History: []providers.Message{
+			{Role: "user", Content: "Review the exact source change."},
+			{Role: "assistant", Content: `{"findings":[{"title":"Source finding"}]}`},
+		},
+		Scope: session.CloneScope(&scope), ExpectedRevision: reserved.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	persisted, found, err := backend.ReadSessionSnapshot(t.Context(), source.Session)
+	if err != nil || !found || !reflect.DeepEqual(persisted.Scope, &scope) {
+		t.Fatalf("persisted source session = %#v, found=%v, error=%v", persisted, found, err)
+	}
+	source.SessionRevision = persisted.Revision
+	finding := Finding{
+		ID: "pfn_11111111111111111111111111111111", Fingerprint: "sha256:finding",
+		Origin: FindingOriginReview, Severity: "high", Title: "Source finding", Message: "Check it",
+		Scope:       ScopeAssessment{Distance: ScopeNecessaryAdjacent, Size: ChangeSizeS, Presence: WorkCandidatePresent, TypeCompatible: true, Confidence: 1},
+		Disposition: FindingOpen, SourceAvailable: true, source: source,
+	}
+	action := gatetypes.GateAction{
+		Type: gatetypes.GateActionAI, Session: workflows.AgentSessionSource,
+		Prompt: "Reassess the source finding.",
+	}
+	configured := config.DefaultPRLifecycleConfig()
+	configured.GateConfigs["source"] = config.PRLifecycleGateConfig{
+		Name: "Source", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
+		Bindings: []config.PRLifecycleGateBinding{{
+			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.finding-classify", Action: &action,
+		}},
+	}
+	configured.DefaultGateConfigID = "source"
+	agent := &prGateV3Agent{reader: backend, fieldValues: map[string]any{
+		"action": "keep-in-pr", "explanation": "Confirmed from originating context.",
+	}}
+	workspace := t.TempDir()
+	evaluator := &WorkflowGateEvaluator{
+		Config: configured,
+		Executor: &workflows.Executor{
+			WorkspaceDir: workspace, Store: workflows.NewFileRunStore(workspace), Agents: agent,
+		},
+	}
+	request := testPRLifecycleGateRequest("pr.finding.classify", map[string]any{"finding": finding})
+	request.WorkspaceID = contextRequest.WorkspaceID
+	gate, err := evaluator.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gateCompletedWith(gate, "keep-in-pr") || len(agent.captures) != 1 ||
+		agent.captures[0].AgentID != source.AgentID ||
+		agent.captures[0].Session != source.Session ||
+		agent.captures[0].ExpectedRevision != source.SessionRevision ||
+		len(agent.requests) != 1 || agent.requests[0].FrozenReadOnlySession == nil ||
+		agent.requests[0].Tools != workflows.AgentToolsNone {
+		t.Fatalf("source gate = %#v captures=%#v requests=%#v", gate, agent.captures, agent.requests)
 	}
 }
 
@@ -237,7 +321,7 @@ jobs:
 	}
 	configured := config.DefaultPRLifecycleConfig()
 	configured.GateConfigs["multi"] = config.PRLifecycleGateConfig{
-		Name: "Multi-step",
+		Name: "Multi-step", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,
 		}},

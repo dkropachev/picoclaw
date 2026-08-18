@@ -60,6 +60,120 @@ type prWorkspaceMutationRecord struct {
 	status    string
 }
 
+// prFindingPersistence is the only SQLite wire representation allowed to
+// carry protected finding provenance. PRFinding's ordinary JSON remains a
+// public projection; the protected member is decoded separately and strictly.
+type prFindingPersistence struct {
+	PRFinding
+	SourceExecution json.RawMessage `json:"source-execution,omitempty"`
+}
+
+type prWorkspaceFindingSourceSidecar struct {
+	FindingIndex int                      `json:"finding-index"`
+	FindingID    string                   `json:"finding-id"`
+	Source       PRFindingSourceExecution `json:"source"`
+}
+
+// prWorkspacePatchPersistence binds protected provenance into canonical patch
+// identity without exposing it through PRWorkspacePatch.MarshalJSON.
+type prWorkspacePatchPersistence struct {
+	Patch                   PRWorkspacePatch                  `json:"patch"`
+	ProtectedFindingSources []prWorkspaceFindingSourceSidecar `json:"protected-finding-sources,omitempty"`
+}
+
+func marshalPRFindingPersistence(finding PRFinding) ([]byte, error) {
+	persisted := prFindingPersistence{PRFinding: finding}
+	if source, ok := finding.ProtectedSourceExecution(); ok {
+		if err := validatePRFindingSourceExecution(source); err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(source)
+		if err != nil {
+			return nil, err
+		}
+		persisted.SourceExecution = raw
+	}
+	return json.Marshal(persisted)
+}
+
+func decodePRFindingPersistence(payload []byte) (PRFinding, error) {
+	if len(payload) < 2 || len(payload) > MaxPRWorkspaceRecordBytes {
+		return PRFinding{}, fmt.Errorf("%w: persisted finding has %d bytes, maximum %d", ErrInvalidPRWorkspace, len(payload), MaxPRWorkspaceRecordBytes)
+	}
+	var persisted prFindingPersistence
+	if err := decodeStrictPRWorkspaceJSON(payload, &persisted); err != nil {
+		return PRFinding{}, err
+	}
+	if len(persisted.SourceExecution) == 0 {
+		return persisted.PRFinding, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(persisted.SourceExecution), []byte("null")) {
+		return PRFinding{}, fmt.Errorf("%w: finding source execution must be an object", ErrInvalidPRWorkspace)
+	}
+	if len(persisted.SourceExecution) > 32<<10 {
+		return PRFinding{}, fmt.Errorf("%w: finding source execution exceeds 32768 bytes", ErrInvalidPRWorkspace)
+	}
+	var source PRFindingSourceExecution
+	if err := decodeStrictPRWorkspaceJSON(persisted.SourceExecution, &source); err != nil {
+		return PRFinding{}, fmt.Errorf("%w: decode finding source execution: %v", ErrInvalidPRWorkspace, err)
+	}
+	if err := persisted.PRFinding.SetProtectedSourceExecution(&source); err != nil {
+		return PRFinding{}, err
+	}
+	return persisted.PRFinding, nil
+}
+
+func marshalPRWorkspacePatchPersistence(patch PRWorkspacePatch) ([]byte, error) {
+	persisted := prWorkspacePatchPersistence{Patch: patch}
+	for index := range patch.UpsertFindings {
+		source, ok := patch.UpsertFindings[index].ProtectedSourceExecution()
+		if !ok {
+			continue
+		}
+		if err := validatePRFindingSourceExecution(source); err != nil {
+			return nil, err
+		}
+		persisted.ProtectedFindingSources = append(persisted.ProtectedFindingSources, prWorkspaceFindingSourceSidecar{
+			FindingIndex: index,
+			FindingID:    patch.UpsertFindings[index].ID,
+			Source:       source,
+		})
+	}
+	return json.Marshal(persisted)
+}
+
+func decodePRWorkspacePatchPersistence(payload []byte) (PRWorkspacePatch, error) {
+	var persisted prWorkspacePatchPersistence
+	if err := decodeStrictPRWorkspaceJSON(payload, &persisted); err != nil {
+		return PRWorkspacePatch{}, err
+	}
+	seen := make(map[int]struct{}, len(persisted.ProtectedFindingSources))
+	for _, sidecar := range persisted.ProtectedFindingSources {
+		if sidecar.FindingIndex < 0 || sidecar.FindingIndex >= len(persisted.Patch.UpsertFindings) {
+			return PRWorkspacePatch{}, fmt.Errorf("%w: finding source index is out of range", ErrInvalidPRWorkspace)
+		}
+		if _, duplicate := seen[sidecar.FindingIndex]; duplicate {
+			return PRWorkspacePatch{}, fmt.Errorf("%w: duplicate finding source index", ErrInvalidPRWorkspace)
+		}
+		seen[sidecar.FindingIndex] = struct{}{}
+		finding := &persisted.Patch.UpsertFindings[sidecar.FindingIndex]
+		if sidecar.FindingID == "" || sidecar.FindingID != finding.ID {
+			return PRWorkspacePatch{}, fmt.Errorf("%w: finding source identity does not match patch", ErrInvalidPRWorkspace)
+		}
+		if err := finding.SetProtectedSourceExecution(&sidecar.Source); err != nil {
+			return PRWorkspacePatch{}, err
+		}
+	}
+	return persisted.Patch, nil
+}
+
+func marshalPRWorkspaceRecordPersistence(value any) ([]byte, error) {
+	if finding, ok := value.(*PRFinding); ok {
+		return marshalPRFindingPersistence(*finding)
+	}
+	return json.Marshal(value)
+}
+
 // SetPRWorkspaceIngressCutover advances the process-wide inbox cutover for one
 // source/connector pair. The cursor is independent of any PR workspace so a
 // migration can establish it before the first workspace exists.
@@ -564,19 +678,19 @@ func (s *Store) ApplyPRWorkspacePatch(
 	if err := validatePRWorkspaceRequestID(input.RequestID); err != nil {
 		return PRWorkspacePatchResult{}, err
 	}
-	rawPatch, err := json.Marshal(input.Patch)
+	rawPatch, err := marshalPRWorkspacePatchPersistence(input.Patch)
 	if err != nil {
 		return PRWorkspacePatchResult{}, fmt.Errorf("%w: encode patch: %v", ErrInvalidPRWorkspace, err)
 	}
-	var normalizedPatch PRWorkspacePatch
-	if err := decodeStrictPRWorkspaceJSON(rawPatch, &normalizedPatch); err != nil {
+	normalizedPatch, err := decodePRWorkspacePatchPersistence(rawPatch)
+	if err != nil {
 		return PRWorkspacePatchResult{}, err
 	}
 	if err := validatePRWorkspacePatch(&normalizedPatch); err != nil {
 		return PRWorkspacePatchResult{}, err
 	}
 	input.Patch = normalizedPatch
-	canonical, err := json.Marshal(input.Patch)
+	canonical, err := marshalPRWorkspacePatchPersistence(input.Patch)
 	if err != nil {
 		return PRWorkspacePatchResult{}, fmt.Errorf("%w: encode normalized patch: %v", ErrInvalidPRWorkspace, err)
 	}
@@ -999,7 +1113,7 @@ func applyPRWorkspaceRecord(
 	if err := validatePRWorkspaceReferences(ctx, conn, workspace.ID, record.value); err != nil {
 		return "", false, err
 	}
-	payload, err := json.Marshal(record.value)
+	payload, err := marshalPRWorkspaceRecordPersistence(record.value)
 	if err != nil {
 		return "", false, fmt.Errorf("%w: encode mutation record: %v", ErrInvalidPRWorkspace, err)
 	}
@@ -1328,7 +1442,7 @@ func validatePRWorkspaceAggregateReferences(ctx context.Context, conn *sql.Conn,
 		}
 		return err
 	}
-	findings, err := loadPRWorkspaceRecords[PRFinding](ctx, conn, "pr_findings", workspaceID)
+	findings, err := loadPRWorkspaceFindings(ctx, conn, workspaceID)
 	if err != nil {
 		return err
 	}
@@ -1431,11 +1545,17 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		}
 		return nil
 	case *PRFinding:
-		var old PRFinding
-		if err := json.Unmarshal(existing, &old); err != nil {
+		old, err := decodePRFindingPersistence(existing)
+		if err != nil {
 			return err
 		}
-		return equal("finding provenance", []string{old.Origin, old.StageRunID, old.NudgeRoundID, old.ExternalID, old.Fingerprint}, []string{value.Origin, value.StageRunID, value.NudgeRoundID, value.ExternalID, value.Fingerprint})
+		if err := equal("finding provenance", []string{old.Origin, old.StageRunID, old.NudgeRoundID, old.ExternalID, old.Fingerprint}, []string{value.Origin, value.StageRunID, value.NudgeRoundID, value.ExternalID, value.Fingerprint}); err != nil {
+			return err
+		}
+		if !equalProtectedPRFindingSource(old, *value) {
+			return conflict("finding source execution")
+		}
+		return nil
 	case *PRConversation:
 		var old PRConversation
 		if err := json.Unmarshal(existing, &old); err != nil {
@@ -1640,15 +1760,15 @@ func validatePRDeferredGroupItem(ctx context.Context, conn *sql.Conn, workspaceI
 	if err := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_findings WHERE id = ? AND workspace_id = ?`, item.FindingID, workspaceID).Scan(&findingPayload); err != nil {
 		return err
 	}
-	var finding PRFinding
-	if err := json.Unmarshal(findingPayload, &finding); err != nil {
+	finding, err := decodePRFindingPersistence(findingPayload)
+	if err != nil {
 		return err
 	}
 	if finding.Disposition != PRFindingDeferred {
 		return fmt.Errorf("%w: only deferred findings may join deferred groups", ErrPRWorkspaceConflict)
 	}
 	var existingID string
-	err := conn.QueryRowContext(ctx, `SELECT id FROM pr_deferred_group_items
+	err = conn.QueryRowContext(ctx, `SELECT id FROM pr_deferred_group_items
 		WHERE workspace_id = ? AND finding_id = ? AND id <> ?`, workspaceID, item.FindingID, item.ID).Scan(&existingID)
 	if err == nil {
 		return fmt.Errorf("%w: finding already belongs to deferred group", ErrPRWorkspaceConflict)
@@ -2019,6 +2139,14 @@ func validatePRWorkspaceRecord(value any) error {
 		if record.ActualMetrics != nil {
 			if err := validatePRChangeMetrics(*record.ActualMetrics); err != nil {
 				return err
+			}
+		}
+		if source, ok := record.ProtectedSourceExecution(); ok {
+			if err := validatePRFindingSourceExecution(source); err != nil {
+				return err
+			}
+			if record.WorkspaceID != "" && source.WorkspaceID != record.WorkspaceID {
+				return fmt.Errorf("%w: finding source belongs to another workspace", ErrPRWorkspaceConflict)
 			}
 		}
 	case *PRFindingEvent:
@@ -2882,6 +3010,30 @@ func loadPRWorkspaceRecords[T any](ctx context.Context, conn *sql.Conn, table, w
 	return result, rows.Err()
 }
 
+func loadPRWorkspaceFindings(ctx context.Context, conn *sql.Conn, workspaceID string) ([]PRFinding, error) {
+	rows, err := conn.QueryContext(ctx, "SELECT payload_json FROM pr_findings WHERE workspace_id = ? ORDER BY ordinal", workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []PRFinding
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		finding, err := decodePRFindingPersistence(payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode pr_findings record: %w", err)
+		}
+		if err := validatePRWorkspaceRecord(&finding); err != nil {
+			return nil, fmt.Errorf("validate pr_findings record: %w", err)
+		}
+		result = append(result, finding)
+	}
+	return result, rows.Err()
+}
+
 func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID string) (PRWorkspaceAggregate, error) {
 	workspace, err := getPRWorkspaceRecord(ctx, conn, workspaceID)
 	if err != nil {
@@ -2906,7 +3058,7 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 	if result.StageRuns, err = loadPRWorkspaceRecords[PRStageRun](ctx, conn, "pr_stage_runs", workspaceID); err != nil {
 		return result, err
 	}
-	if result.Findings, err = loadPRWorkspaceRecords[PRFinding](ctx, conn, "pr_findings", workspaceID); err != nil {
+	if result.Findings, err = loadPRWorkspaceFindings(ctx, conn, workspaceID); err != nil {
 		return result, err
 	}
 	if result.FindingEvents, err = loadPRWorkspaceRecords[PRFindingEvent](ctx, conn, "pr_finding_events", workspaceID); err != nil {
@@ -3253,6 +3405,21 @@ func decodePRWorkspaceHistoryRecords(records map[string][]byte, target any, stri
 		_ = json.Unmarshal(values[j], &right)
 		return left.Ordinal < right.Ordinal
 	})
+	if findings, ok := target.(*[]PRFinding); ok {
+		decoded := make([]PRFinding, 0, len(values))
+		for _, payload := range values {
+			finding, err := decodePRFindingPersistence(payload)
+			if err != nil {
+				return fmt.Errorf("decode pr_findings history record: %w", err)
+			}
+			if err := validatePRWorkspaceRecord(&finding); err != nil {
+				return fmt.Errorf("validate pr_findings history record: %w", err)
+			}
+			decoded = append(decoded, finding)
+		}
+		*findings = decoded
+		return nil
+	}
 	encoded, err := json.Marshal(values)
 	if err != nil {
 		return err

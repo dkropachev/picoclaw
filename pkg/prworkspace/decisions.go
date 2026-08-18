@@ -462,9 +462,8 @@ func (service *Service) gateActionPatch(aggregate Aggregate, gate GateRun) (Aggr
 		}
 		now := service.now().UTC()
 		charter.Confirmed, charter.ConfirmedAt = true, &now
-		phase, state, active := PhaseReview, ExecutionQueued, charter.ID
 		patch.ReplaceCharters = []Charter{charter}
-		patch.Phase, patch.ExecutionState, patch.ActiveCharterID = &phase, &state, &active
+		queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
 	case "pr.correction.promote":
 		correction, ok := findCorrection(aggregate.Corrections, gate.TargetID)
 		if !ok {
@@ -472,7 +471,7 @@ func (service *Service) gateActionPatch(aggregate Aggregate, gate GateRun) (Aggr
 		}
 		return service.correctionPromotionPatch(aggregate, correction)
 	case "pr.deferred.publish":
-		if service.deferredIssueMode == DeferredIssuesOff {
+		if service.deferredMode(aggregate) == DeferredIssuesOff {
 			return AggregatePatch{}, ErrConflict
 		}
 		group, ok := findDeferredGroup(aggregate.DeferredGroups, gate.TargetID)

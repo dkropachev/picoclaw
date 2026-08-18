@@ -944,7 +944,7 @@ func materializeCompletionRounds(aggregate Aggregate, runID string, rounds []Com
 			case "candidate_drift":
 				disposition, target, indexes = FindingOpen, &candidateDrift, materializedDrift
 			}
-			finding := completionFindingRecord(existing, exists, id, fingerprint, runID, roundID, candidate, disposition, now)
+			finding := completionFindingRecord(existing, exists, id, fingerprint, runID, roundID, candidate, disposition, round.Source, now)
 			if index, duplicate := indexes[fingerprint]; duplicate {
 				(*target)[index] = finding
 			} else {
@@ -1017,7 +1017,7 @@ func completionRoundsMatchCandidateScope(rounds []CompletionRound, scope ScopeAs
 	return true
 }
 
-func completionFindingRecord(existing Finding, reuse bool, id, fingerprint, runID, roundID string, candidate CompletionFinding, disposition FindingDisposition, now time.Time) Finding {
+func completionFindingRecord(existing Finding, reuse bool, id, fingerprint, runID, roundID string, candidate CompletionFinding, disposition FindingDisposition, source *AIExecutionSource, now time.Time) Finding {
 	createdAt, version := now, int64(1)
 	origin, originRunID, nudgeRoundID := FindingOriginNudge, runID, roundID
 	var nudgeReward *float64
@@ -1026,6 +1026,10 @@ func completionFindingRecord(existing Finding, reuse bool, id, fingerprint, runI
 		createdAt, version = existing.CreatedAt, existing.Version+1
 		origin, originRunID, nudgeRoundID = existing.Origin, existing.OriginRunID, existing.NudgeRoundID
 		nudgeReward, rewardSource = existing.NudgeReward, existing.RewardSource
+		// Finding provenance is immutable. Reusing an older finding preserves
+		// either its exact source or its deliberate lack of one; a later AI round
+		// cannot retarget the same durable finding to a different session.
+		source = existing.source
 	}
 	return Finding{
 		ID: id, Fingerprint: fingerprint, Origin: origin, OriginRunID: originRunID,
@@ -1035,8 +1039,17 @@ func completionFindingRecord(existing Finding, reuse bool, id, fingerprint, runI
 		Recommendation: candidate.Recommendation, Validation: candidate.Validation,
 		Scope: completionFindingScope(candidate), Disposition: disposition,
 		NudgeReward: nudgeReward, RewardSource: rewardSource,
+		SourceAvailable: source != nil, source: cloneAIExecutionSource(source),
 		Version: version, CreatedAt: createdAt, UpdatedAt: now,
 	}
+}
+
+func cloneAIExecutionSource(source *AIExecutionSource) *AIExecutionSource {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	return &cloned
 }
 
 func appendUniqueString(values []string, value string) []string {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 const (
@@ -127,6 +129,79 @@ func TestServiceIntakeCharterConfirmAndZeroFindingNudges(t *testing.T) {
 			round.HardCap != DefaultNudgePolicy().MaximumAdditionalRounds {
 			t.Fatalf("persisted nudge policy = min %d cap %d", round.MinimumRounds, round.HardCap)
 		}
+	}
+}
+
+func TestServiceDeferredModeUsesRepositoryGateConfiguration(t *testing.T) {
+	lifecycle := config.DefaultPRLifecycleConfig()
+	lifecycle.GateConfigs["off"] = config.PRLifecycleGateConfig{
+		Name: "No deferred issues", Bindings: []config.PRLifecycleGateBinding{},
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{
+			Mode: config.PRLifecycleDeferredIssuesOff,
+		},
+	}
+	lifecycle.GateConfigs["automatic"] = config.PRLifecycleGateConfig{
+		Name: "Automatic deferred issues", Bindings: []config.PRLifecycleGateBinding{},
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{
+			Mode: config.PRLifecycleDeferredIssuesAutomatic,
+		},
+	}
+	lifecycle.RepositoryAssignments["https://github.com|repo-off"] = "off"
+	lifecycle.RepositoryAssignments["https://github.com|repo-automatic"] = "automatic"
+	if err := lifecycle.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	resolver := func(providerOrigin, repositoryID string) DeferredIssueMode {
+		_, selected, _, err := lifecycle.ConfigForRepository(providerOrigin, repositoryID)
+		if err != nil {
+			return DeferredIssuesOff
+		}
+		return DeferredIssueMode(selected.DeferredIssues.Mode)
+	}
+	service, err := NewService(ServiceConfig{
+		Store: NewMemoryStore(), DeferredIssueMode: DeferredIssuesAsk,
+		DeferredIssueModeForRepository: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		origin     string
+		repository string
+		want       DeferredIssueMode
+	}{
+		{name: "default", origin: "https://github.com", repository: "repo-default", want: DeferredIssuesAsk},
+		{name: "assigned off", origin: "HTTPS://GITHUB.COM/", repository: "repo-off", want: DeferredIssuesOff},
+		{name: "assigned automatic", origin: "https://github.com/", repository: "repo-automatic", want: DeferredIssuesAutomatic},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			aggregate := Aggregate{Workspace: Workspace{
+				ProviderOrigin: test.origin, RepositoryID: test.repository,
+			}}
+			if got := service.deferredMode(aggregate); got != test.want {
+				t.Fatalf("deferredMode() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestServiceDeferredModeInvalidRepositoryResolutionFailsClosed(t *testing.T) {
+	service, err := NewService(ServiceConfig{
+		Store: NewMemoryStore(), DeferredIssueMode: DeferredIssuesAsk,
+		DeferredIssueModeForRepository: func(string, string) DeferredIssueMode {
+			return DeferredIssueMode("invalid")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate := Aggregate{Workspace: Workspace{
+		ProviderOrigin: "https://github.com", RepositoryID: "repo",
+	}}
+	if got := service.deferredMode(aggregate); got != DeferredIssuesOff {
+		t.Fatalf("invalid repository policy resolved to %q, want fail-closed off", got)
 	}
 }
 

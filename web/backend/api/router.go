@@ -37,6 +37,8 @@ type Handler struct {
 	configMutationMu            sync.Mutex
 	prLifecycleEffectMu         sync.Mutex
 	prLifecyclePendingCatalog   string
+	prLifecycleAppliedDeferred  string
+	prLifecyclePendingDeferred  string
 	workflowDevelopmentMu       sync.Mutex
 	workflowTriggerReviewOnce   sync.Once
 	workflowTriggerReviewKey    [32]byte

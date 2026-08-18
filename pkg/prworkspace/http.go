@@ -35,7 +35,6 @@ type HTTPConfig struct {
 	ReviewNudgePolicy     NudgePolicy
 	CompletionNudgePolicy NudgePolicy
 	SizePolicy            SizePolicy
-	DeferredIssueMode     DeferredIssueMode
 }
 
 type DeferredIssueMode string
@@ -60,7 +59,6 @@ type HTTPHandler struct {
 	reviewNudgePolicy     NudgePolicy
 	completionNudgePolicy NudgePolicy
 	sizePolicy            SizePolicy
-	deferredIssueMode     DeferredIssueMode
 }
 
 func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
@@ -85,12 +83,6 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	if !config.SizePolicy.Valid() {
 		return nil, errors.New("invalid PR workspace size policy")
 	}
-	if config.DeferredIssueMode == "" {
-		config.DeferredIssueMode = config.Service.deferredIssueMode
-	}
-	if !validDeferredIssueMode(config.DeferredIssueMode) || config.DeferredIssueMode != config.Service.deferredIssueMode {
-		return nil, errors.New("invalid PR workspace deferred issue mode")
-	}
 	return &HTTPHandler{
 		service: config.Service, implementation: config.Implementation,
 		issuePublisher: config.IssuePublisher, reviewPublisher: config.ReviewPublisher,
@@ -98,7 +90,6 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 		reviewNudgePolicy:     config.ReviewNudgePolicy,
 		completionNudgePolicy: config.CompletionNudgePolicy,
 		sizePolicy:            config.SizePolicy,
-		deferredIssueMode:     config.DeferredIssueMode,
 	}, nil
 }
 
@@ -529,15 +520,15 @@ func (handler *HTTPHandler) serveDeferred(response http.ResponseWriter, request 
 		return
 	}
 	if len(tail) == 2 && tail[1] == "automatic-sync" && request.Method == http.MethodPost {
-		if handler.deferredIssueMode != DeferredIssuesAutomatic {
-			writeHTTPError(response, http.StatusConflict, "automatic_deferred_issues_disabled", nil)
-			return
-		}
 		if !validMutationEnvelope(workspaceID, body.ExpectedVersion, body.RequestID) {
 			writeHTTPResult(response, Aggregate{}, ErrInvalid)
 			return
 		}
 		aggregate, err := handler.service.Get(request.Context(), workspaceID)
+		if err == nil && handler.service.deferredMode(aggregate) != DeferredIssuesAutomatic {
+			writeHTTPError(response, http.StatusConflict, "automatic_deferred_issues_disabled", nil)
+			return
+		}
 		if err == nil && aggregate.Workspace.Version != body.ExpectedVersion {
 			err = ErrConflict
 		}
@@ -587,7 +578,12 @@ func (handler *HTTPHandler) serveDeferred(response http.ResponseWriter, request 
 			RequestID: body.RequestID, ExistingIssueURL: body.ExistingIssueURL,
 		})
 	case "publish":
-		if handler.deferredIssueMode == DeferredIssuesOff {
+		current, getErr := handler.service.Get(request.Context(), workspaceID)
+		if getErr != nil {
+			writeHTTPResult(response, current, getErr)
+			return
+		}
+		if handler.service.deferredMode(current) == DeferredIssuesOff {
 			writeHTTPError(response, http.StatusConflict, "deferred_issue_publication_disabled", nil)
 			return
 		}
@@ -658,7 +654,7 @@ func (handler *HTTPHandler) serveGate(response http.ResponseWriter, request *htt
 		WorkspaceID: workspaceID, GateRunID: tail[1], ExpectedVersion: body.ExpectedVersion,
 		RequestID: body.RequestID, FieldValues: body.FieldValues,
 	})
-	if err == nil && handler.deferredIssueMode == DeferredIssuesAutomatic {
+	if err == nil && handler.service.deferredMode(aggregate) == DeferredIssuesAutomatic {
 		var automatic Aggregate
 		automatic, err = handler.applyDeferredIssuePolicy(request, aggregate, body.RequestID)
 		if automatic.Workspace.ID != "" {
@@ -736,7 +732,7 @@ func (handler *HTTPHandler) applyDeferredIssuePolicy(
 	aggregate Aggregate,
 	requestID string,
 ) (Aggregate, error) {
-	if handler.deferredIssueMode != DeferredIssuesAutomatic {
+	if handler.service.deferredMode(aggregate) != DeferredIssuesAutomatic {
 		return aggregate, nil
 	}
 	if hasUngroupedDeferredFindings(aggregate) {

@@ -70,7 +70,7 @@ vi.mock("@/components/pr-workspaces/pr-workspace-page", () => ({
 
 interface GateConfigsPageProps {
   page?: "configs" | "config" | "settings"
-  settingsTab?: "nudging" | "scope" | "deferred"
+  settingsTab?: "nudging" | "scope"
   initialConfigID?: string
   initialDecisionPoint?: string
   activeFlowID?: "review" | "implementation"
@@ -80,7 +80,7 @@ interface GateConfigsPageProps {
   onDecisionPointChange?: (gate?: string) => void
   onFlowChange?: (flow: "review" | "implementation") => void
   onDiscardOpenChange?: (open: boolean) => void
-  onSettingsTabChange?: (tab: "nudging" | "scope" | "deferred") => void
+  onSettingsTabChange?: (tab: "nudging" | "scope") => void
 }
 
 vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-configs-page", () => ({
@@ -133,9 +133,9 @@ vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-configs-page", () => ({
         </button>
         <button
           type="button"
-          onClick={() => props.onSettingsTabChange?.("deferred")}
+          onClick={() => props.onSettingsTabChange?.("scope")}
         >
-          Deferred tab
+          Scope tab
         </button>
       </div>
     )
@@ -386,7 +386,7 @@ describe("pull requests route navigation", () => {
     expect(screen.getByTestId("discard-open")).toHaveTextContent("closed")
   })
 
-  it("keeps settings separate, preserves its workspace origin, and gives every tab a URL", async () => {
+  it("keeps settings separate, preserves its workspace origin, and gives every remaining tab a URL", async () => {
     const router = routerAt(
       `/pull-requests/settings?tab=nudging&from=${workspaceID}`,
     )
@@ -401,12 +401,12 @@ describe("pull requests route navigation", () => {
     )
     expect(screen.getByTestId("settings-tab")).toHaveTextContent("nudging")
 
-    fireEvent.click(screen.getByRole("button", { name: "Deferred tab" }))
+    fireEvent.click(screen.getByRole("button", { name: "Scope tab" }))
     await expectLocation(router, "/pull-requests/settings", {
-      tab: "deferred",
+      tab: "scope",
       from: workspaceID,
     })
-    expect(screen.getByTestId("settings-tab")).toHaveTextContent("deferred")
+    expect(screen.getByTestId("settings-tab")).toHaveTextContent("scope")
 
     fireEvent.click(screen.getByRole("button", { name: "Back" }))
     await expectLocation(router, `/pull-requests/${workspaceID}`)

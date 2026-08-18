@@ -111,14 +111,18 @@ func ValidateGateAction(action GateAction) error {
 			return errors.New("human gate action cannot configure AI, fields, or workflow-ref")
 		}
 	case GateActionAI:
-		if strings.TrimSpace(action.AgentID) == "" {
-			return errors.New("AI gate action requires agent-id")
-		}
 		if strings.TrimSpace(action.Prompt) == "" {
 			return errors.New("AI gate action requires prompt")
 		}
 		if hasFields || hasWorkflow {
 			return errors.New("AI gate action cannot configure fields or workflow-ref")
+		}
+		if action.Session == "source" {
+			if action.AgentID != "" || action.History != "" || action.Cache != "" || action.Tools != "" {
+				return errors.New("source AI gate action derives agent, history, cache, and tools")
+			}
+		} else if strings.TrimSpace(action.AgentID) == "" {
+			return errors.New("AI gate action requires agent-id")
 		}
 	case GateActionDeterministic:
 		if action.Fields == nil {

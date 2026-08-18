@@ -107,8 +107,7 @@ func TestDefaultManifestPreservesCriticalLifecycleTopology(t *testing.T) {
 		{review, "review_gate_classify", "review_route_classified", "", EdgeLinear, false},
 		{review, "review_route_classified", "review_revise_charter", "revise", EdgeChoice, false},
 		{review, "review_revise_charter", "review_gate_charter_reconfirm", "", EdgeLinear, true},
-		{review, "review_keep_in_scope", "review_select_review_findings", "", EdgeOptional, false},
-		{review, "review_keep_in_scope", "review_select_implementation_findings", "", EdgeOptional, false},
+		{review, "review_keep_in_scope", "review_select_review_findings", "", EdgeLinear, false},
 		{review, "review_group_deferred", "review_link_followup_issue", "existing", EdgeChoice, false},
 		{review, "review_group_deferred", "review_gate_deferred_publish", "create", EdgeChoice, false},
 		{review, "review_publish_github", "review_retry_publication", "failed", EdgeChoice, false},
@@ -137,7 +136,7 @@ func TestDefaultManifestPreservesCriticalLifecycleTopology(t *testing.T) {
 		{implementation, "implementation_remove_and_defer", "implementation_group_deferred", "", EdgeParallel, false},
 		{implementation, "implementation_group_deferred", "implementation_link_followup_issue", "existing", EdgeChoice, false},
 		{implementation, "implementation_group_deferred", "implementation_gate_deferred_publish", "create", EdgeChoice, false},
-		{implementation, "implementation_gate_charter_reconfirm", "implementation_return_to_review", "", EdgeLinear, false},
+		{implementation, "implementation_gate_charter_reconfirm", "implementation_call_review", "", EdgeLinear, false},
 		{implementation, "implementation_gate_reconcile", "implementation_resolve_publication", "reobserve", EdgeChoice, false},
 		{implementation, "implementation_gate_reconcile", "implementation_retry_publication", "assume_failed", EdgeChoice, false},
 		{implementation, "implementation_resolve_publication", "implementation_gate_reconcile", "still_unknown", EdgeChoice, true},
@@ -169,6 +168,26 @@ func TestDefaultManifestPreservesCriticalLifecycleTopology(t *testing.T) {
 				t.Fatalf("node %q ordinal = %d, want %d", node.ID, node.Ordinal, decisionPointOrdinals[node.DecisionPoint])
 			}
 		}
+	}
+}
+
+func TestDefaultReviewFlowIsImplementationNeutralAndReusable(t *testing.T) {
+	graph, _ := Default()
+	review := normalizedFlow(t, graph, "review")
+	implementation := normalizedFlow(t, graph, "implementation")
+
+	for _, node := range review.Nodes {
+		if strings.Contains(node.Operation, "pr.implementation.") ||
+			strings.Contains(strings.ToLower(node.Title+" "+node.Description), "implementation") {
+			t.Fatalf("review workflow contains implementation-specific node %#v", node)
+		}
+	}
+	call := normalizedNode(t, implementation, "implementation_call_review")
+	if call.Kind != NodeAction || call.Operation != "pr.review.invoke" {
+		t.Fatalf("implementation review invocation = %#v", call)
+	}
+	if edge := normalizedEdge(t, implementation, "implementation_gate_charter_reconfirm", call.ID); edge.Mode != EdgeLinear {
+		t.Fatalf("implementation review handoff edge = %#v", edge)
 	}
 }
 
@@ -470,7 +489,7 @@ func TestParseRejectsInvalidEdgesForksReachabilityAndLoops(t *testing.T) {
 		{
 			name: "optional edge outcome",
 			mutate: func(document *manifestDocument) {
-				findRawEdge(t, document, "review_keep_in_scope", "review_select_review_findings").Outcome = "confirmed"
+				findRawEdge(t, document, "review_process_result", "review_record_correction").Outcome = "confirmed"
 			},
 			want: "optional edge",
 		},

@@ -1139,7 +1139,16 @@ const prWorkspaceAggregate = {
 
 const prLifecycleGateConfigs = {
   "gate-configs": {
-    default: { name: "Default", bindings: [] },
+    default: {
+      name: "Default",
+      bindings: [],
+      "deferred-issues": { mode: "ask" },
+    },
+    editable: {
+      name: "Editable",
+      bindings: [],
+      "deferred-issues": { mode: "ask" },
+    },
   },
   "default-gate-config": "default",
   "repository-assignments": {},
@@ -1154,7 +1163,6 @@ const prLifecycleGateConfigs = {
     s: { files: 3, "semantic-lines": 100, modules: 1 },
     m: { files: 10, "semantic-lines": 500, modules: 3 },
   },
-  "deferred-issues": { mode: "ask" },
   "gate-catalog": Object.fromEntries(
     prLifecycleFlowFixture.flow.flows.flatMap((flow) =>
       flow.nodes.flatMap((node) =>
@@ -1165,6 +1173,8 @@ const prLifecycleGateConfigs = {
                 {
                   "workflow-ref": "workflows/pr-lifecycle.yml",
                   "gate-ref": `gates.${node.decision_point.replace(/^pr\./, "").replaceAll(".", "-")}`,
+                  "source-ai-supported":
+                    node.decision_point === "pr.finding.classify",
                   prompt: `Complete ${node.title}.`,
                   fields: [
                     {
@@ -1194,7 +1204,10 @@ const prLifecycleGateConfigs = {
   "flow-revision": prLifecycleFlowFixture.flow_revision,
   "catalog-revision": "sha256:catalog",
   "config-revision": "sha256:config",
-  effects: { "gateway-effect": "applied" },
+  effects: {
+    "gateway-effect": "applied",
+    "deferred-policy-effect": "applied",
+  },
 }
 
 interface MockLauncherApiOptions {
@@ -3156,10 +3169,50 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   await expect(page).toHaveURL(
     /\/pull-requests\/gate-configs\/default\?flow=review$/,
   )
+  await expect(
+    page.getByRole("textbox", { name: "Configuration name" }),
+  ).toHaveValue("Default")
+  await expect(
+    page.getByRole("textbox", { name: "Configuration name" }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("combobox", { name: "Deferred issue mode" }),
+  ).toBeEnabled()
+  await page
+    .getByRole("button", { name: "Why Configuration name is fixed" })
+    .focus()
+  await expect(page.getByRole("tooltip")).toContainText(
+    "built-in default configuration has a fixed name",
+  )
 
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
   await expect(page).toHaveURL(
     /\/pull-requests\/gate-configs\/default\?flow=review&gate=pr\.charter\.confirm$/,
+  )
+  const lockedDialog = page.getByRole("dialog", {
+    name: "Approve purpose and scope",
+  })
+  await expect(
+    lockedDialog.getByRole("combobox", { name: "Execution action" }),
+  ).toBeDisabled()
+  await expect(lockedDialog.getByRole("note")).toContainText(
+    "Create a custom configuration to override Gate actions",
+  )
+  await lockedDialog.getByRole("button", { name: "Close — keep draft" }).click()
+  await page
+    .getByRole("button", { name: "Back to Gate configurations" })
+    .click()
+  await expect(page).toHaveURL(/\/pull-requests\/gate-configs$/)
+
+  await page
+    .getByRole("button", { name: "Edit Editable Gate configuration" })
+    .click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\/gate-configs\/editable\?flow=review$/,
+  )
+  await page.getByRole("button", { name: "Approve purpose and scope" }).click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\/gate-configs\/editable\?flow=review&gate=pr\.charter\.confirm$/,
   )
   const dialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
@@ -3175,10 +3228,106 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   await dialog.getByRole("combobox", { name: "Execution action" }).click()
   await page.getByRole("option", { name: "AI", exact: true }).click()
   await expect(dialog.getByLabel("Agent ID")).toHaveValue("main")
+  await dialog.getByRole("combobox", { name: "Session" }).click()
+  await expect(
+    page.getByRole("option", { name: "Originating snapshot" }),
+  ).toHaveCount(0)
+  await page.keyboard.press("Escape")
   await dialog.getByRole("button", { name: "Close — keep draft" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/default\?flow=review$/,
+    /\/pull-requests\/gate-configs\/editable\?flow=review$/,
   )
+
+  await page
+    .getByRole("button", { name: "Decide ambiguous finding scope" })
+    .click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\/gate-configs\/editable\?flow=review&gate=pr\.finding\.classify$/,
+  )
+  const sourceDialog = page.getByRole("dialog", {
+    name: "Decide ambiguous finding scope",
+  })
+  await sourceDialog.getByRole("combobox", { name: "Execution action" }).click()
+  await page.getByRole("option", { name: "AI", exact: true }).click()
+
+  await expect(sourceDialog.getByLabel("Agent ID")).toHaveValue("main")
+  await expect(sourceDialog.getByLabel("Agent ID")).toBeEnabled()
+  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveValue(
+    "None",
+  )
+  await expect(
+    sourceDialog.getByLabel("History", { exact: true }),
+  ).toBeDisabled()
+  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toHaveValue(
+    "None",
+  )
+  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toBeDisabled()
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveValue(
+    "None",
+  )
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toBeDisabled()
+  await sourceDialog.getByRole("button", { name: "Why Tools is fixed" }).focus()
+  await expect(page.getByRole("tooltip")).toContainText(
+    "Ephemeral Gate actions are isolated",
+  )
+
+  await sourceDialog.getByRole("combobox", { name: "Session" }).click()
+  await page.getByRole("option", { name: "Private snapshot" }).click()
+  await expect(sourceDialog.getByLabel("Agent ID")).toBeEnabled()
+  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveValue(
+    "Read only",
+  )
+  await expect(
+    sourceDialog.getByLabel("History", { exact: true }),
+  ).toBeDisabled()
+  await expect(
+    sourceDialog.getByRole("combobox", { name: "Cache" }),
+  ).toHaveText("Session")
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveValue(
+    "None",
+  )
+  await sourceDialog
+    .getByRole("button", { name: "Why History is fixed" })
+    .focus()
+  await expect(
+    page.getByRole("tooltip", { name: /one frozen read-only snapshot/i }),
+  ).toBeVisible()
+
+  await sourceDialog.getByRole("combobox", { name: "Session" }).click()
+  await page.getByRole("option", { name: "Originating snapshot" }).click()
+  await expect(
+    sourceDialog.getByLabel("Agent ID", { exact: true }),
+  ).toHaveValue("Same originating agent")
+  await expect(
+    sourceDialog.getByLabel("Agent ID", { exact: true }),
+  ).toBeDisabled()
+  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveValue(
+    "Exact source snapshot (read only)",
+  )
+  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toHaveValue(
+    "None",
+  )
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveValue(
+    "None",
+  )
+  await sourceDialog.getByRole("button", { name: "Why Cache is fixed" }).focus()
+  await expect(
+    page.getByRole("tooltip", {
+      name: /only the exact read-only snapshot supplies prior context/i,
+    }),
+  ).toBeVisible()
+  await sourceDialog.getByRole("button", { name: "Why Tools is fixed" }).focus()
+  await expect(
+    page.getByRole("tooltip", { name: /enforces that same policy/i }),
+  ).toBeVisible()
+  await sourceDialog.getByRole("button", { name: "Close — keep draft" }).click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\/gate-configs\/editable\?flow=review$/,
+  )
+  await expectNoSeriousA11yViolations(page)
+  await expect(
+    page.getByRole("combobox", { name: "Deferred issue mode" }),
+  ).toHaveText("Ask")
 
   if ((page.viewportSize()?.width ?? 1280) < 640) {
     await page.getByRole("button", { name: "Toggle Sidebar" }).click()
@@ -3187,6 +3336,9 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   await expect(page).toHaveURL(/\/pull-requests\/settings\?tab=nudging$/)
   await page.getByRole("tab", { name: "Scope grades" }).click()
   await expect(page).toHaveURL(/\/pull-requests\/settings\?tab=scope$/)
+  await expect(page.getByRole("tab", { name: "Deferred issues" })).toHaveCount(
+    0,
+  )
   await expectNoSeriousA11yViolations(page)
 })
 

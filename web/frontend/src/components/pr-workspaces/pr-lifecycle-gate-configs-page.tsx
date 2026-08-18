@@ -2,6 +2,7 @@ import {
   IconAlertTriangle,
   IconArrowLeft,
   IconDeviceFloppy,
+  IconInfoCircle,
   IconPencil,
   IconPlus,
   IconRefresh,
@@ -15,6 +16,7 @@ import {
   type KeyboardEvent,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useState,
 } from "react"
@@ -72,13 +74,19 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
 const configQueryKey = ["pr-lifecycle", "gate-configs"] as const
 const configDraftQueryKey = ["pr-lifecycle", "gate-configs", "draft"] as const
 
 export type PRLifecycleConfigurationPage = "configs" | "config" | "settings"
-export type PRLifecycleSettingsTab = "nudging" | "scope" | "deferred"
+export type PRLifecycleSettingsTab = "nudging" | "scope"
 
 interface CachedGateConfigDraft {
   baseline: string
@@ -229,7 +237,6 @@ export function PRLifecycleGateConfigsPage({
         repositoryAssignments: value.repositoryAssignments,
         nudge: value.nudge,
         scope: value.scope,
-        deferredIssues: value.deferredIssues,
       }),
     onSuccess: (next, submitted) => {
       const saved = structuredClone(next)
@@ -330,7 +337,11 @@ export function PRLifecycleGateConfigsPage({
     const name = newConfigName.trim()
     if (!isPRLifecycleGateConfigID(id) || !name || draft.gateConfigs[id]) return
     updateDraft((next) => {
-      next.gateConfigs[id] = { name, bindings: [] }
+      next.gateConfigs[id] = {
+        name,
+        bindings: [],
+        deferredIssues: { mode: "ask" },
+      }
     })
     setNewConfigID("")
     setNewConfigName("")
@@ -469,6 +480,11 @@ export function PRLifecycleGateConfigsPage({
               newRepository={newRepository}
               onNewRepositoryChange={setNewRepository}
               onChange={updateSelectedConfig}
+              onDeferredIssueModeChange={(mode) =>
+                updateSelectedConfig(
+                  (config) => void (config.deferredIssues.mode = mode),
+                )
+              }
               onMakeDefault={() =>
                 updateDraft((next) => {
                   next.defaultGateConfig = selectedConfigID
@@ -508,6 +524,7 @@ export function PRLifecycleGateConfigsPage({
         nodeTitle={selectedGateNode?.title ?? selectedDecisionPoint ?? "Gate"}
         nodeDescription={selectedGateNode?.description}
         catalogEntry={selectedCatalogEntry}
+        readOnly={selectedConfigID === "default"}
         binding={
           selectedCatalogEntry
             ? selectedConfig?.bindings.find(
@@ -521,7 +538,7 @@ export function PRLifecycleGateConfigsPage({
           if (!open) closeDecisionPoint()
         }}
         onActionChange={(action) => {
-          if (!selectedCatalogEntry) return
+          if (!selectedCatalogEntry || selectedConfigID === "default") return
           updateSelectedConfig((config) => {
             const index = config.bindings.findIndex(
               (binding) =>
@@ -626,6 +643,10 @@ function ConfigList({
                   {assignmentCount}{" "}
                   {assignmentCount === 1 ? "repository" : "repositories"}
                 </p>
+                <p className="text-muted-foreground text-xs">
+                  Deferred issues ·{" "}
+                  {deferredIssueModeLabel(config.deferredIssues.mode)}
+                </p>
                 <div className="mt-auto flex flex-wrap gap-2">
                   <Button
                     size="sm"
@@ -694,6 +715,7 @@ function ConfigSettings({
   newRepository,
   onNewRepositoryChange,
   onChange,
+  onDeferredIssueModeChange,
   onMakeDefault,
   onAddRepository,
   onRemoveRepository,
@@ -705,6 +727,9 @@ function ConfigSettings({
   newRepository: string
   onNewRepositoryChange: (value: string) => void
   onChange: (update: (config: PRLifecycleGateConfig) => void) => void
+  onDeferredIssueModeChange: (
+    mode: PRLifecycleGateConfig["deferredIssues"]["mode"],
+  ) => void
   onMakeDefault: () => void
   onAddRepository: () => void
   onRemoveRepository: (repository: string) => void
@@ -717,15 +742,25 @@ function ConfigSettings({
       </CardHeader>
       <CardContent className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-3">
-          <GateField label="Configuration name">
-            <Input
-              aria-label="Configuration name"
-              value={config.name}
-              onChange={(event) =>
-                onChange((current) => void (current.name = event.target.value))
-              }
+          {configID === "default" ? (
+            <LockedField
+              description="The built-in default configuration has a fixed name. Create a custom configuration to choose another name."
+              label="Configuration name"
+              value="Default"
             />
-          </GateField>
+          ) : (
+            <GateField label="Configuration name">
+              <Input
+                aria-label="Configuration name"
+                value={config.name}
+                onChange={(event) =>
+                  onChange(
+                    (current) => void (current.name = event.target.value),
+                  )
+                }
+              />
+            </GateField>
+          )}
           {configID === defaultConfigID ? (
             <Badge variant="secondary">Default configuration</Badge>
           ) : (
@@ -733,6 +768,29 @@ function ConfigSettings({
               Make default
             </Button>
           )}
+          <GateField label="Deferred issue mode">
+            <Select
+              value={config.deferredIssues.mode}
+              onValueChange={(value) =>
+                onDeferredIssueModeChange(
+                  value as PRLifecycleGateConfig["deferredIssues"]["mode"],
+                )
+              }
+            >
+              <SelectTrigger aria-label="Deferred issue mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="off">Off</SelectItem>
+                <SelectItem value="ask">Ask</SelectItem>
+                <SelectItem value="automatic">Automatic</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground mt-1.5 text-xs">
+              Controls whether deferred findings for repositories using this
+              configuration can become GitHub issues.
+            </p>
+          </GateField>
         </div>
         <div className="space-y-2">
           <Label>Repository assignments</Label>
@@ -786,6 +844,7 @@ function GateActionDialog({
   nodeDescription,
   catalogEntry,
   binding,
+  readOnly,
   onOpenChange,
   onActionChange,
 }: {
@@ -794,6 +853,7 @@ function GateActionDialog({
   nodeDescription?: string
   catalogEntry?: PRLifecycleGateConfigSnapshot["gateCatalog"][string]
   binding?: { action?: PRLifecycleGateAction }
+  readOnly: boolean
   onOpenChange: (open: boolean) => void
   onActionChange: (action?: PRLifecycleGateAction) => void
 }) {
@@ -801,8 +861,18 @@ function GateActionDialog({
   const defaultAction = catalogEntry?.defaultAction
   const effectiveAction = override ?? defaultAction
   const mode = override?.type ?? "inherit"
+  const displayedAIAction = (
+    override?.type === "ai"
+      ? override
+      : override === undefined && effectiveAction?.type === "ai"
+        ? effectiveAction
+        : undefined
+  ) as (PRLifecycleGateAction & { type: "ai" }) | undefined
   const [deterministicFields, setDeterministicFields] = useState("")
   const [deterministicError, setDeterministicError] = useState("")
+  const readOnlyDescriptionID = useId()
+  const readOnlyDescription =
+    "The built-in default configuration always uses published workflow Gate actions. Create a custom configuration to override Gate actions."
 
   useEffect(() => {
     setDeterministicFields(
@@ -814,6 +884,7 @@ function GateActionDialog({
   }, [open, override])
 
   const changeMode = (next: string) => {
+    if (readOnly) return
     if (next === "inherit") {
       onActionChange()
       return
@@ -823,7 +894,7 @@ function GateActionDialog({
   }
 
   const patchAction = (patch: Partial<PRLifecycleGateAction>) => {
-    if (!override) return
+    if (readOnly || !override) return
     onActionChange({ ...override, ...patch })
   }
 
@@ -877,9 +948,28 @@ function GateActionDialog({
 
               <GateRequestSummary catalogEntry={catalogEntry} />
 
+              {readOnly && (
+                <p
+                  className="bg-muted/30 rounded-lg border p-3 text-sm"
+                  id={readOnlyDescriptionID}
+                  role="note"
+                >
+                  {readOnlyDescription}
+                </p>
+              )}
+
               <GateField label="Execution action">
-                <Select value={mode} onValueChange={changeMode}>
-                  <SelectTrigger aria-label="Execution action">
+                <Select
+                  disabled={readOnly}
+                  value={mode}
+                  onValueChange={changeMode}
+                >
+                  <SelectTrigger
+                    aria-describedby={
+                      readOnly ? readOnlyDescriptionID : undefined
+                    }
+                    aria-label="Execution action"
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -906,107 +996,18 @@ function GateActionDialog({
                 </p>
               )}
 
-              {override?.type === "ai" && (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <GateField label="Agent ID">
-                    <Input
-                      aria-label="Agent ID"
-                      value={override.agentID ?? ""}
-                      onChange={(event) =>
-                        patchAction({ agentID: event.target.value })
-                      }
-                    />
-                  </GateField>
-                  <GateField label="Session">
-                    <Select
-                      value={override.session ?? "ephemeral"}
-                      onValueChange={(session) =>
-                        patchAction({
-                          session: session as "ephemeral" | "private",
-                          history: session === "private" ? "read_only" : "none",
-                          cache: session === "private" ? "session" : "none",
-                          tools: "none",
-                        })
-                      }
-                    >
-                      <SelectTrigger aria-label="Session">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="ephemeral">Ephemeral</SelectItem>
-                        <SelectItem value="private">Private</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </GateField>
-                  <GateField label="History">
-                    <Select
-                      value={override.history ?? "none"}
-                      onValueChange={(history) =>
-                        patchAction({
-                          history: history as
-                            | "none"
-                            | "read_only"
-                            | "read_write",
-                        })
-                      }
-                    >
-                      <SelectTrigger aria-label="History">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {override.session === "private" ? (
-                          <SelectItem value="read_only">Read only</SelectItem>
-                        ) : (
-                          <SelectItem value="none">None</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                  </GateField>
-                  <GateField label="Cache">
-                    <Select
-                      value={override.cache ?? "none"}
-                      onValueChange={(cache) =>
-                        patchAction({
-                          cache: cache as "none" | "session" | "agent",
-                        })
-                      }
-                    >
-                      <SelectTrigger aria-label="Cache">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">None</SelectItem>
-                        {override.session === "private" && (
-                          <SelectItem value="session">Session</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
-                  </GateField>
-                  <GateField className="sm:col-span-2" label="Prompt">
-                    <Textarea
-                      aria-label="AI prompt"
-                      value={override.prompt ?? ""}
-                      onChange={(event) =>
-                        patchAction({ prompt: event.target.value })
-                      }
-                    />
-                  </GateField>
-                  <GateField className="sm:col-span-2" label="Tools">
-                    <Select
-                      value={override.tools ?? "none"}
-                      onValueChange={(tools) =>
-                        patchAction({ tools: tools as "none" | "inherit" })
-                      }
-                    >
-                      <SelectTrigger aria-label="Tools">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">None</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </GateField>
-                </div>
+              {displayedAIAction && (
+                <AIActionFields
+                  action={displayedAIAction}
+                  inherited={readOnly || override === undefined}
+                  lockExplanation={readOnly ? readOnlyDescription : undefined}
+                  sourceAISupported={catalogEntry.sourceAISupported}
+                  onChange={
+                    override?.type === "ai"
+                      ? (action) => onActionChange(action)
+                      : undefined
+                  }
+                />
               )}
 
               {override?.type === "deterministic" && (
@@ -1016,6 +1017,10 @@ function GateActionDialog({
                     className="min-h-40 font-mono text-xs"
                     value={deterministicFields}
                     aria-invalid={Boolean(deterministicError)}
+                    aria-describedby={
+                      readOnly ? readOnlyDescriptionID : undefined
+                    }
+                    disabled={readOnly}
                     onChange={(event) => {
                       const value = event.target.value
                       setDeterministicFields(value)
@@ -1050,6 +1055,10 @@ function GateActionDialog({
                 <GateField label="Action workflow reference">
                   <Input
                     aria-label="Action workflow reference"
+                    aria-describedby={
+                      readOnly ? readOnlyDescriptionID : undefined
+                    }
+                    disabled={readOnly}
                     value={override.workflowRef ?? ""}
                     onChange={(event) =>
                       patchAction({ workflowRef: event.target.value })
@@ -1135,6 +1144,330 @@ function GateRequestSummary({
   )
 }
 
+type AISessionMode = NonNullable<PRLifecycleGateAction["session"]>
+
+const aiSessionLabels: Record<AISessionMode, string> = {
+  ephemeral: "Ephemeral",
+  private: "Private snapshot",
+  source: "Originating snapshot",
+}
+
+const aiSessionDescriptions: Record<AISessionMode, string> = {
+  ephemeral:
+    "Runs an isolated request with no session history, cache, or tool authority.",
+  private:
+    "Reads a frozen private PR context for the selected agent without changing its history.",
+  source:
+    "Reads the exact protected snapshot captured from the AI run that produced this Gate's finding, using the same agent and the same pinned no-tool policy.",
+}
+
+function AIActionFields({
+  action,
+  inherited,
+  lockExplanation,
+  sourceAISupported,
+  onChange,
+}: {
+  action: PRLifecycleGateAction & { type: "ai" }
+  inherited: boolean
+  lockExplanation?: string
+  sourceAISupported: boolean
+  onChange?: (action: PRLifecycleGateAction) => void
+}) {
+  const session = action.session ?? "ephemeral"
+  const promptDescriptionID = useId()
+  const fixedByWorkflow =
+    lockExplanation ??
+    "This value is defined by the published workflow default. Select AI as an override to change it."
+  const describeEnforced = (reason: string) =>
+    inherited ? `${reason} ${fixedByWorkflow}` : reason
+  const replaceSession = (next: AISessionMode) =>
+    onChange?.(aiActionForSession(action, next))
+
+  return (
+    <section aria-label="AI execution profile" className="space-y-3">
+      {inherited && (
+        <p className="bg-muted/30 rounded-lg border p-3 text-sm">
+          {lockExplanation ??
+            "Effective AI settings are read only because this Gate inherits its published workflow default."}
+        </p>
+      )}
+      {session === "source" && !sourceAISupported && (
+        <div
+          className="border-destructive/50 bg-destructive/5 text-destructive rounded-lg border p-3 text-sm"
+          role="alert"
+        >
+          This Gate does not publish a source-bearing finding, so an originating
+          snapshot cannot run here. The existing value is preserved for
+          recovery; choose another session before saving.
+        </div>
+      )}
+      {session === "source" && sourceAISupported && (
+        <div
+          className="border-warning/50 bg-warning/10 rounded-lg border p-3 text-sm"
+          role="note"
+        >
+          The exact originating snapshot is resolved separately for each Gate
+          execution. If its provenance, snapshot, or agent is unavailable or
+          ambiguous, execution stops without falling back. Tool authority stays
+          pinned to None.
+        </div>
+      )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        {inherited ? (
+          <LockedField
+            description={describeEnforced(aiSessionDescriptions[session])}
+            label="Session"
+            value={aiSessionLabels[session]}
+          />
+        ) : (
+          <GateField label="Session">
+            <Select
+              value={session}
+              onValueChange={(value) => replaceSession(value as AISessionMode)}
+            >
+              <SelectTrigger aria-label="Session">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ephemeral">Ephemeral</SelectItem>
+                <SelectItem value="private">Private snapshot</SelectItem>
+                {sourceAISupported ? (
+                  <SelectItem value="source">Originating snapshot</SelectItem>
+                ) : session === "source" ? (
+                  <SelectItem disabled value="source">
+                    Originating snapshot — unsupported
+                  </SelectItem>
+                ) : null}
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground mt-1.5 text-xs">
+              {aiSessionDescriptions[session]}
+            </p>
+          </GateField>
+        )}
+
+        {inherited ? (
+          <LockedField
+            description={describeEnforced(
+              session === "source"
+                ? "The exact source snapshot pins the originating agent."
+                : `The workflow selects agent ${action.agentID ?? "Unavailable"}.`,
+            )}
+            label="Agent ID"
+            value={
+              session === "source"
+                ? "Same originating agent"
+                : (action.agentID ?? "Unavailable")
+            }
+          />
+        ) : session === "source" ? (
+          <LockedField
+            description="The exact source snapshot pins the same agent that produced the finding. This Gate configuration cannot replace it."
+            label="Agent ID"
+            value="Same originating agent"
+          />
+        ) : (
+          <GateField label="Agent ID">
+            <Input
+              aria-label="Agent ID"
+              value={action.agentID ?? ""}
+              onChange={(event) =>
+                onChange?.({ ...action, agentID: event.target.value })
+              }
+            />
+          </GateField>
+        )}
+
+        <LockedField
+          description={describeEnforced(
+            session === "ephemeral"
+              ? "Ephemeral Gate actions have no session and therefore cannot read or write history."
+              : session === "private"
+                ? "Private Gate actions inspect one frozen read-only snapshot and cannot append to it."
+                : "The Gate reads the exact protected snapshot captured from the originating session without appending to it.",
+          )}
+          label="History"
+          value={
+            session === "ephemeral"
+              ? "None"
+              : session === "private"
+                ? "Read only"
+                : "Exact source snapshot (read only)"
+          }
+        />
+
+        {inherited ? (
+          <LockedField
+            description={describeEnforced(
+              session === "source"
+                ? "The source profile pins cache to None; only the exact read-only snapshot supplies prior context."
+                : action.cache === "session"
+                  ? "The private snapshot may use its session cache."
+                  : "This AI profile does not use a cache.",
+            )}
+            label="Cache"
+            value={session === "source" ? "None" : cacheLabel(action.cache)}
+          />
+        ) : session === "private" ? (
+          <GateField label="Cache">
+            <Select
+              value={action.cache ?? "session"}
+              onValueChange={(cache) =>
+                onChange?.({ ...action, cache: cache as "none" | "session" })
+              }
+            >
+              <SelectTrigger aria-label="Cache">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                <SelectItem value="session">Session</SelectItem>
+              </SelectContent>
+            </Select>
+          </GateField>
+        ) : (
+          <LockedField
+            description={
+              session === "ephemeral"
+                ? "Ephemeral Gate actions create no session cache."
+                : "The source profile pins cache to None; only the exact read-only snapshot supplies prior context."
+            }
+            label="Cache"
+            value="None"
+          />
+        )}
+
+        <GateField className="sm:col-span-2" label="Prompt">
+          <Textarea
+            aria-label="AI prompt"
+            disabled={inherited}
+            value={action.prompt ?? ""}
+            aria-describedby={inherited ? promptDescriptionID : undefined}
+            onChange={(event) =>
+              onChange?.({ ...action, prompt: event.target.value })
+            }
+          />
+          {inherited && (
+            <p
+              className="text-muted-foreground mt-1.5 text-xs"
+              id={promptDescriptionID}
+            >
+              {fixedByWorkflow}
+            </p>
+          )}
+        </GateField>
+
+        <LockedField
+          className="sm:col-span-2"
+          description={describeEnforced(
+            session === "ephemeral"
+              ? "Ephemeral Gate actions are isolated and have no tool authority."
+              : session === "private"
+                ? "Private Gate actions inspect frozen PR evidence; tools are disabled."
+                : "The source run used a pinned no-tool policy. This Gate enforces that same policy, so tool authority remains None.",
+          )}
+          label="Tools"
+          value="None"
+        />
+      </div>
+    </section>
+  )
+}
+
+function aiActionForSession(
+  action: PRLifecycleGateAction & { type: "ai" },
+  session: AISessionMode,
+): PRLifecycleGateAction {
+  const prompt = action.prompt ?? "Complete every required Gate field."
+  if (session === "source") {
+    return {
+      type: "ai",
+      prompt,
+      session,
+    }
+  }
+  const agentID = action.agentID || "main"
+  if (session === "private") {
+    return {
+      type: "ai",
+      agentID,
+      prompt,
+      session,
+      history: "read_only",
+      cache: "session",
+      tools: "none",
+    }
+  }
+  return {
+    type: "ai",
+    agentID,
+    prompt,
+    session,
+    history: "none",
+    cache: "none",
+    tools: "none",
+  }
+}
+
+function cacheLabel(cache: PRLifecycleGateAction["cache"]): string {
+  if (cache === "session") return "Session"
+  if (cache === "agent") return "Agent"
+  return "None"
+}
+
+function deferredIssueModeLabel(
+  mode: PRLifecycleGateConfig["deferredIssues"]["mode"],
+): string {
+  if (mode === "automatic") return "Automatic"
+  return mode === "off" ? "Off" : "Ask"
+}
+
+function LockedField({
+  className,
+  description,
+  label,
+  value,
+}: {
+  className?: string
+  description: string
+  label: string
+  value: string
+}) {
+  const descriptionID = useId()
+  return (
+    <GateField className={className} label={label}>
+      <div className="flex min-w-0 items-center gap-2">
+        <Input
+          aria-describedby={descriptionID}
+          aria-label={label}
+          className="min-w-0"
+          data-enforced-setting
+          disabled
+          value={value}
+        />
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                aria-label={`Why ${label} is fixed`}
+                className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex size-8 shrink-0 items-center justify-center rounded-md outline-none focus-visible:ring-2"
+                type="button"
+              >
+                <IconInfoCircle className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{description}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+      <span className="sr-only" id={descriptionID}>
+        {description}
+      </span>
+    </GateField>
+  )
+}
+
 function defaultActionForType(
   type: PRLifecycleGateActionType,
 ): PRLifecycleGateAction {
@@ -1160,8 +1493,15 @@ function defaultActionForType(
 
 function actionLabel(action: PRLifecycleGateAction | undefined): string {
   if (!action) return "Unavailable"
-  if (action.type === "ai")
-    return action.agentID ? `AI · ${action.agentID}` : "AI"
+  if (action.type === "ai") {
+    const session = action.session
+      ? aiSessionLabels[action.session]
+      : "Unknown session"
+    if (action.session === "source") return `AI · ${session}`
+    return action.agentID
+      ? `AI · ${action.agentID} · ${session}`
+      : `AI · ${session}`
+  }
   if (action.type === "workflow")
     return action.workflowRef ? `Workflow · ${action.workflowRef}` : "Workflow"
   return action.type === "human" ? "Human" : "Deterministic"
@@ -1186,7 +1526,6 @@ function SettingsTabs({
   const tabs: Array<{ id: PRLifecycleSettingsTab; label: string }> = [
     { id: "nudging", label: "Nudging" },
     { id: "scope", label: "Scope grades" },
-    { id: "deferred", label: "Deferred issues" },
   ]
   const handleKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
@@ -1211,7 +1550,7 @@ function SettingsTabs({
   return (
     <div
       aria-label="PR lifecycle settings"
-      className="bg-muted/40 grid gap-1 rounded-lg border p-1 sm:grid-cols-3"
+      className="bg-muted/40 grid gap-1 rounded-lg border p-1 sm:grid-cols-2"
       role="tablist"
     >
       {tabs.map((tab, index) => (
@@ -1256,18 +1595,12 @@ function LifecycleSettings({
       >
         <CardHeader>
           <CardTitle>
-            {tab === "nudging"
-              ? "Nudging"
-              : tab === "scope"
-                ? "Scope grades"
-                : "Deferred issues"}
+            {tab === "nudging" ? "Nudging" : "Scope grades"}
           </CardTitle>
           <CardDescription>
             {tab === "nudging"
               ? "Control additional AI attempts after an apparently complete review or implementation."
-              : tab === "scope"
-                ? "Define file, semantic-line, and module boundaries for PR scope grades."
-                : "Choose whether deferred findings can become GitHub issues."}
+              : "Define file, semantic-line, and module boundaries for PR scope grades."}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -1342,31 +1675,6 @@ function LifecycleSettings({
                 }
               />,
             ])}
-          {tab === "deferred" && (
-            <GateField label="Deferred issue mode">
-              <Select
-                value={config.deferredIssues.mode}
-                onValueChange={(value) =>
-                  onChange(
-                    (next) =>
-                      void (next.deferredIssues.mode = value as
-                        | "off"
-                        | "ask"
-                        | "automatic"),
-                  )
-                }
-              >
-                <SelectTrigger aria-label="Deferred issue mode">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="off">Off</SelectItem>
-                  <SelectItem value="ask">Ask</SelectItem>
-                  <SelectItem value="automatic">Automatic</SelectItem>
-                </SelectContent>
-              </Select>
-            </GateField>
-          )}
         </CardContent>
       </Card>
     </div>

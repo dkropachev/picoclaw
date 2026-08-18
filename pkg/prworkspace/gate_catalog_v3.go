@@ -27,11 +27,12 @@ var prLifecycleGateWorkflowYAML []byte
 // static workflow gate it executes. DecisionPoint remains application routing
 // metadata; GateRef is the only configuration identity.
 type PRLifecycleGateCatalogEntry struct {
-	DecisionPoint    string
-	WorkflowRef      string
-	WorkflowRevision string
-	GateRef          string
-	Gate             gatetypes.GateDefinition
+	DecisionPoint     string
+	WorkflowRef       string
+	WorkflowRevision  string
+	GateRef           string
+	Gate              gatetypes.GateDefinition
+	SourceAISupported bool
 }
 
 var prLifecycleDecisionGateRefs = map[string]string{
@@ -156,11 +157,12 @@ func PRLifecycleGateCatalog() ([]PRLifecycleGateCatalogEntry, error) {
 		gateRef := prLifecycleDecisionGateRefs[point.ID]
 		gate := workflow.Gates[strings.TrimPrefix(gateRef, "gates.")]
 		result = append(result, PRLifecycleGateCatalogEntry{
-			DecisionPoint:    point.ID,
-			WorkflowRef:      PRLifecycleWorkflowRef,
-			WorkflowRevision: revision,
-			GateRef:          gateRef,
-			Gate:             clonePRLifecycleGateDefinition(gate),
+			DecisionPoint:     point.ID,
+			WorkflowRef:       PRLifecycleWorkflowRef,
+			WorkflowRevision:  revision,
+			GateRef:           gateRef,
+			Gate:              clonePRLifecycleGateDefinition(gate),
+			SourceAISupported: point.ID == "pr.finding.classify",
 		})
 	}
 	return result, nil

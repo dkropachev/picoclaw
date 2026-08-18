@@ -200,27 +200,42 @@ type ScopeChange struct {
 }
 
 type Finding struct {
-	ID             string             `json:"id"`
-	Fingerprint    string             `json:"fingerprint"`
-	Origin         FindingOrigin      `json:"origin"`
-	OriginRunID    string             `json:"origin_run_id,omitempty"`
-	NudgeRoundID   string             `json:"nudge_round_id,omitempty"`
-	Severity       string             `json:"severity"`
-	Title          string             `json:"title"`
-	File           string             `json:"file,omitempty"`
-	Line           *int               `json:"line,omitempty"`
-	Message        string             `json:"message"`
-	Evidence       string             `json:"evidence,omitempty"`
-	Impact         string             `json:"impact,omitempty"`
-	Recommendation string             `json:"recommendation,omitempty"`
-	Validation     string             `json:"validation,omitempty"`
-	Scope          ScopeAssessment    `json:"scope"`
-	Disposition    FindingDisposition `json:"disposition"`
-	NudgeReward    *float64           `json:"nudge_reward,omitempty"`
-	RewardSource   string             `json:"reward_source,omitempty"`
-	Version        int64              `json:"version"`
-	CreatedAt      time.Time          `json:"created_at"`
-	UpdatedAt      time.Time          `json:"updated_at"`
+	ID              string             `json:"id"`
+	Fingerprint     string             `json:"fingerprint"`
+	Origin          FindingOrigin      `json:"origin"`
+	OriginRunID     string             `json:"origin_run_id,omitempty"`
+	NudgeRoundID    string             `json:"nudge_round_id,omitempty"`
+	Severity        string             `json:"severity"`
+	Title           string             `json:"title"`
+	File            string             `json:"file,omitempty"`
+	Line            *int               `json:"line,omitempty"`
+	Message         string             `json:"message"`
+	Evidence        string             `json:"evidence,omitempty"`
+	Impact          string             `json:"impact,omitempty"`
+	Recommendation  string             `json:"recommendation,omitempty"`
+	Validation      string             `json:"validation,omitempty"`
+	Scope           ScopeAssessment    `json:"scope"`
+	Disposition     FindingDisposition `json:"disposition"`
+	NudgeReward     *float64           `json:"nudge_reward,omitempty"`
+	RewardSource    string             `json:"reward_source,omitempty"`
+	SourceAvailable bool               `json:"source_available,omitempty"`
+	Version         int64              `json:"version"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	source          *AIExecutionSource
+}
+
+// AIExecutionSource is private durable provenance for one finding-producing
+// AI execution. Raw session capabilities never enter the PR workspace HTTP
+// projection.
+type AIExecutionSource struct {
+	ExecutionID     string `json:"execution-id"`
+	WorkspaceID     string `json:"workspace-id"`
+	Binding         string `json:"binding"`
+	AgentID         string `json:"agent-id"`
+	Session         string `json:"session"`
+	SessionRevision string `json:"session-revision"`
+	Tools           string `json:"tools"`
 }
 
 type Correction struct {

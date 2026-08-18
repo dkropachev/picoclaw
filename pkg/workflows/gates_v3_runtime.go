@@ -47,6 +47,7 @@ const (
 	GateFieldLongText  = gatetypes.GateFieldLongText
 	GateFieldBoolean   = gatetypes.GateFieldBoolean
 	GateFieldSelect    = gatetypes.GateFieldSelect
+	GateSessionSource  = AgentSessionSource
 )
 
 // GateActionResolveRequest is detached before being given to an injected
@@ -458,6 +459,10 @@ func (e *Executor) resolveGateAction(
 		"action":            action,
 		"action-revision":   revision,
 	}
+	if run.privateRoot != nil {
+		pinned["private-root-revision"] = run.privateRoot.Revision
+		pinned["private-run-binding"] = run.privateRoot.RunBinding
+	}
 	encoded, encodeErr := json.Marshal(pinned)
 	if encodeErr != nil {
 		return resolvedGateAction{}, fmt.Errorf("encode gate execution input: %w", encodeErr)
@@ -492,6 +497,12 @@ func validateRuntimeGateAction(action GateAction) error {
 	}
 	switch action.Type {
 	case GateActionAI:
+		if action.Session == AgentSessionSource {
+			if action.AgentID != "" || action.History != "" || action.Cache != "" || action.Tools != "" {
+				return fmt.Errorf("source AI action derives agent, history, cache, and tools")
+			}
+			return nil
+		}
 		if action.AgentID != strings.TrimSpace(action.AgentID) || !routing.IsCanonicalAgentID(action.AgentID) {
 			return fmt.Errorf("agent-id must be an exact canonical agent ID")
 		}
@@ -746,6 +757,8 @@ func (e *Executor) executeAIGateAction(
 		return nil, fmt.Errorf("agent runner not configured")
 	}
 	private := execCtx.privateValues != nil || execCtx.frozenReadOnlySession != nil
+	sourceMode := resolved.Action.Session == AgentSessionSource
+	agentID := resolved.Action.AgentID
 	tools := strings.TrimSpace(resolved.Action.Tools)
 	if tools == "" {
 		tools = AgentToolsInherit
@@ -753,6 +766,16 @@ func (e *Executor) executeAIGateAction(
 	history := strings.TrimSpace(resolved.Action.History)
 	cache := strings.TrimSpace(resolved.Action.Cache)
 	sessionMode := strings.TrimSpace(resolved.Action.Session)
+	if sourceMode {
+		if execCtx.frozenReadOnlySession == nil {
+			return nil, fmt.Errorf("source AI gate action requires originating execution provenance")
+		}
+		agentID = execCtx.frozenReadOnlySession.AgentID
+		history = "read_only"
+		cache = "none"
+		tools = AgentToolsNone
+		sessionMode = AgentSessionPrivate
+	}
 	if sessionMode == AgentSessionPrivate {
 		if execCtx.frozenReadOnlySession == nil {
 			return nil, fmt.Errorf("private AI gate action requires a frozen read-only session")
@@ -779,7 +802,7 @@ func (e *Executor) executeAIGateAction(
 		return nil, fmt.Errorf("read-only AI gate action requires a frozen session")
 	}
 	if history == "read_only" && execCtx.frozenReadOnlySession != nil {
-		if execCtx.frozenReadOnlySession.AgentID != resolved.Action.AgentID {
+		if execCtx.frozenReadOnlySession.AgentID != agentID {
 			return nil, fmt.Errorf(
 				"%w: read-only agent does not match captured session",
 				ErrPrivateWorkflowContext,
@@ -805,7 +828,7 @@ func (e *Executor) executeAIGateAction(
 		isolatedSystemPrompt = strings.TrimSpace(resolved.Action.Prompt)
 	}
 	outputs, err := e.Agents.RunAgent(ctx, AgentRequest{
-		AgentID:               resolved.Action.AgentID,
+		AgentID:               agentID,
 		Prompt:                prompt,
 		Session:               sessionKey,
 		EphemeralSession:      sessionMode == AgentSessionEphemeral,
