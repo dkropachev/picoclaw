@@ -1,6 +1,7 @@
 import {
   IconAdjustments,
   IconAlertTriangle,
+  IconGitBranch,
   IconGitPullRequest,
   IconPlus,
   IconRefresh,
@@ -41,10 +42,12 @@ import { cn } from "@/lib/utils"
 
 export function PRWorkspacePortfolioPage({
   onOpenWorkspace,
-  onOpenGateConfigs,
+  onOpenWorkflowConfigurations,
+  onOpenRepositoryAssignments,
 }: {
   onOpenWorkspace: (workspaceID: string) => void
-  onOpenGateConfigs?: () => void
+  onOpenWorkflowConfigurations?: () => void
+  onOpenRepositoryAssignments?: () => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -127,17 +130,31 @@ export function PRWorkspacePortfolioPage({
           </Badge>
         }
       >
-        {onOpenGateConfigs && (
+        {onOpenWorkflowConfigurations && (
           <Button
             type="button"
             variant="outline"
             aria-label={t("prWorkspaces.portfolio.gates")}
             title={t("prWorkspaces.portfolio.gates")}
-            onClick={onOpenGateConfigs}
+            onClick={onOpenWorkflowConfigurations}
           >
             <IconAdjustments />
             <span className="hidden sm:inline">
               {t("prWorkspaces.portfolio.gates")}
+            </span>
+          </Button>
+        )}
+        {onOpenRepositoryAssignments && (
+          <Button
+            type="button"
+            variant="outline"
+            aria-label={t("prWorkspaces.portfolio.assignments")}
+            title={t("prWorkspaces.portfolio.assignments")}
+            onClick={onOpenRepositoryAssignments}
+          >
+            <IconGitBranch />
+            <span className="hidden sm:inline">
+              {t("prWorkspaces.portfolio.assignments")}
             </span>
           </Button>
         )}

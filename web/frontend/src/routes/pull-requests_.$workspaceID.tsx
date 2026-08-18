@@ -63,9 +63,9 @@ function PullRequestWorkspaceRoutePage() {
         }
         fallback()
       }}
-      onOpenGateConfigs={() =>
+      onOpenWorkflowConfigurations={() =>
         void navigate({
-          to: "/pull-requests/gate-configs",
+          to: "/pull-requests/workflow-configurations",
           search: { from: workspaceID },
           state: (previous) =>
             updatePRNavigationState(previous, (current) => ({

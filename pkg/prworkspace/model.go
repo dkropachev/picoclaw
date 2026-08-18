@@ -499,10 +499,10 @@ type GateFindingEvidence struct {
 // the browser. It pins the exact private policy/subject and workflow cursor
 // needed to resume a staged human gate after restart.
 type gateRuntime struct {
-	ConfigID      string
-	WorkflowRunID string
-	PinnedPolicy  json.RawMessage
-	PinnedSubject json.RawMessage
+	WorkflowConfigurationID string
+	WorkflowRunID           string
+	PinnedPolicy            json.RawMessage
+	PinnedSubject           json.RawMessage
 }
 
 type PublicationKind string

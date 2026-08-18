@@ -105,7 +105,7 @@ func TestWorkflowGateEvaluatorRejectsWorkingContextChangedBeforeFreeze(t *testin
 		Prompt:  "Check the exact PR workspace context.",
 		Session: workflows.AgentSessionPrivate, History: "read_only", Cache: "none", Tools: workflows.AgentToolsNone,
 	}
-	configured.GateConfigs["working"] = config.PRLifecycleGateConfig{
+	configured.WorkflowConfigurations["working"] = config.PRLifecycleWorkflowConfiguration{
 		Name: "Working only", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,

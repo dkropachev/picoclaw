@@ -18,7 +18,7 @@ import {
   IconSparkles,
   IconTools,
 } from "@tabler/icons-react"
-import { Link, useRouterState } from "@tanstack/react-router"
+import { type HistoryState, Link, useRouterState } from "@tanstack/react-router"
 import * as React from "react"
 import { useTranslation } from "react-i18next"
 
@@ -40,6 +40,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { useSidebarChannels } from "@/hooks/use-sidebar-channels"
+import { asPRNavigationState } from "@/routes/-pr-navigation"
 
 interface NavItem {
   title: string
@@ -47,7 +48,11 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
   tourId?: string
-  pullRequestView?: "work" | "gate-configs" | "settings"
+  pullRequestView?:
+    | "work"
+    | "workflow-configurations"
+    | "repository-assignments"
+    | "settings"
   search?: Record<string, string>
 }
 
@@ -93,12 +98,20 @@ const pullRequestsWorkNavItem: NavItem = {
   pullRequestView: "work",
 }
 
-const pullRequestsGateConfigsNavItem: NavItem = {
-  title: "navigation.pull_requests_gate_configs",
-  url: "/pull-requests/gate-configs",
+const pullRequestsWorkflowConfigurationsNavItem: NavItem = {
+  title: "navigation.pull_requests_workflow_configurations",
+  url: "/pull-requests/workflow-configurations",
   icon: IconSettings,
   translateTitle: true,
-  pullRequestView: "gate-configs",
+  pullRequestView: "workflow-configurations",
+}
+
+const pullRequestsRepositoryAssignmentsNavItem: NavItem = {
+  title: "navigation.pull_requests_repository_assignments",
+  url: "/pull-requests/repository-assignments",
+  icon: IconGitBranch,
+  translateTitle: true,
+  pullRequestView: "repository-assignments",
 }
 
 const pullRequestsLifecycleSettingsNavItem: NavItem = {
@@ -236,7 +249,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         label: "navigation.pull_requests",
         items: [
           pullRequestsWorkNavItem,
-          pullRequestsGateConfigsNavItem,
+          pullRequestsWorkflowConfigurationsNavItem,
+          pullRequestsRepositoryAssignmentsNavItem,
           pullRequestsLifecycleSettingsNavItem,
         ],
       },
@@ -250,11 +264,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         currentPath.startsWith("/pull-requests/prw_")
       )
     }
-    if (item.pullRequestView === "gate-configs") {
+    if (item.pullRequestView === "workflow-configurations") {
       return (
-        currentPath === "/pull-requests/gate-configs" ||
-        currentPath.startsWith("/pull-requests/gate-configs/")
+        currentPath === "/pull-requests/workflow-configurations" ||
+        currentPath.startsWith("/pull-requests/workflow-configurations/")
       )
+    }
+    if (item.pullRequestView === "repository-assignments") {
+      return currentPath === "/pull-requests/repository-assignments"
     }
     if (item.pullRequestView === "settings") {
       return (
@@ -275,25 +292,33 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ? `/pull-requests/${originWorkspace}`
         : item.url
     const linkSearch =
-      item.pullRequestView === "gate-configs"
+      item.pullRequestView === "workflow-configurations"
         ? originWorkspace
           ? { from: originWorkspace }
           : undefined
-        : item.pullRequestView === "settings"
-          ? {
-              tab: "nudging",
-              ...(originWorkspace ? { from: originWorkspace } : {}),
-            }
-          : item.search
-    const prParent = currentPath.startsWith("/pull-requests/gate-configs")
-      ? "gate-configs"
-      : currentPath === "/pull-requests/settings"
-        ? "settings"
-        : currentPath.startsWith("/pull-requests/prw_")
-          ? "workspace"
-          : currentPath === "/pull-requests"
-            ? "portfolio"
+        : item.pullRequestView === "repository-assignments"
+          ? originWorkspace
+            ? { from: originWorkspace }
             : undefined
+          : item.pullRequestView === "settings"
+            ? {
+                tab: "nudging",
+                ...(originWorkspace ? { from: originWorkspace } : {}),
+              }
+            : item.search
+    const prParent = currentPath.startsWith(
+      "/pull-requests/workflow-configurations",
+    )
+      ? "workflow-configurations"
+      : currentPath === "/pull-requests/repository-assignments"
+        ? "repository-assignments"
+        : currentPath === "/pull-requests/settings"
+          ? "settings"
+          : currentPath.startsWith("/pull-requests/prw_")
+            ? "workspace"
+            : currentPath === "/pull-requests"
+              ? "portfolio"
+              : undefined
 
     const content = (
       <>
@@ -325,18 +350,21 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             search={linkSearch}
             state={
               item.pullRequestView && prParent
-                ? (previous) => ({
-                    ...previous,
-                    prParent,
-                    prParentIndex: previous.__TSR_index,
-                    prParentKey: previous.__TSR_key,
-                    ...(prParent === "workspace" || prParent === "portfolio"
-                      ? {
-                          prWorkIndex: previous.__TSR_index,
-                          prWorkKey: previous.__TSR_key,
-                        }
-                      : {}),
-                  })
+                ? (previous: HistoryState) => {
+                    const current = asPRNavigationState(previous)
+                    return {
+                      ...previous,
+                      prParent,
+                      prParentIndex: current.__TSR_index,
+                      prParentKey: current.__TSR_key,
+                      ...(prParent === "workspace" || prParent === "portfolio"
+                        ? {
+                            prWorkIndex: current.__TSR_index,
+                            prWorkKey: current.__TSR_key,
+                          }
+                        : {}),
+                    }
+                  }
                 : undefined
             }
           >

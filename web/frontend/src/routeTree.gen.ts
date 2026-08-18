@@ -25,8 +25,9 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ThreadsSearchRouteImport } from './routes/threads.search'
 import { Route as ThreadsOpenRouteImport } from './routes/threads.open'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
+import { Route as PullRequestsWorkflowConfigurationsRouteImport } from './routes/pull-requests_.workflow-configurations'
 import { Route as PullRequestsSettingsRouteImport } from './routes/pull-requests_.settings'
-import { Route as PullRequestsGateConfigsRouteImport } from './routes/pull-requests_.gate-configs'
+import { Route as PullRequestsRepositoryAssignmentsRouteImport } from './routes/pull-requests_.repository-assignments'
 import { Route as PullRequestsWorkspaceIDRouteImport } from './routes/pull-requests_.$workspaceID'
 import { Route as ConfigRawRouteImport } from './routes/config.raw'
 import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
@@ -38,7 +39,7 @@ import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
-import { Route as PullRequestsGateConfigsConfigIDRouteImport } from './routes/pull-requests_.gate-configs.$configID'
+import { Route as PullRequestsWorkflowConfigurationsConfigurationIDRouteImport } from './routes/pull-requests_.workflow-configurations.$configurationID'
 import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
 import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
 
@@ -122,16 +123,23 @@ const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsRoute,
 } as any)
+const PullRequestsWorkflowConfigurationsRoute =
+  PullRequestsWorkflowConfigurationsRouteImport.update({
+    id: '/pull-requests_/workflow-configurations',
+    path: '/pull-requests/workflow-configurations',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const PullRequestsSettingsRoute = PullRequestsSettingsRouteImport.update({
   id: '/pull-requests_/settings',
   path: '/pull-requests/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PullRequestsGateConfigsRoute = PullRequestsGateConfigsRouteImport.update({
-  id: '/pull-requests_/gate-configs',
-  path: '/pull-requests/gate-configs',
-  getParentRoute: () => rootRouteImport,
-} as any)
+const PullRequestsRepositoryAssignmentsRoute =
+  PullRequestsRepositoryAssignmentsRouteImport.update({
+    id: '/pull-requests_/repository-assignments',
+    path: '/pull-requests/repository-assignments',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const PullRequestsWorkspaceIDRoute = PullRequestsWorkspaceIDRouteImport.update({
   id: '/pull-requests_/$workspaceID',
   path: '/pull-requests/$workspaceID',
@@ -187,11 +195,11 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
-const PullRequestsGateConfigsConfigIDRoute =
-  PullRequestsGateConfigsConfigIDRouteImport.update({
-    id: '/$configID',
-    path: '/$configID',
-    getParentRoute: () => PullRequestsGateConfigsRoute,
+const PullRequestsWorkflowConfigurationsConfigurationIDRoute =
+  PullRequestsWorkflowConfigurationsConfigurationIDRouteImport.update({
+    id: '/$configurationID',
+    path: '/$configurationID',
+    getParentRoute: () => PullRequestsWorkflowConfigurationsRoute,
   } as any)
 const AccountsAccountRouterNewRoute =
   AccountsAccountRouterNewRouteImport.update({
@@ -230,14 +238,15 @@ export interface FileRoutesByFullPath {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests/gate-configs': typeof PullRequestsGateConfigsRouteWithChildren
+  '/pull-requests/repository-assignments': typeof PullRequestsRepositoryAssignmentsRoute
   '/pull-requests/settings': typeof PullRequestsSettingsRoute
+  '/pull-requests/workflow-configurations': typeof PullRequestsWorkflowConfigurationsRouteWithChildren
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
-  '/pull-requests/gate-configs/$configID': typeof PullRequestsGateConfigsConfigIDRoute
+  '/pull-requests/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesByTo {
@@ -264,14 +273,15 @@ export interface FileRoutesByTo {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests/gate-configs': typeof PullRequestsGateConfigsRouteWithChildren
+  '/pull-requests/repository-assignments': typeof PullRequestsRepositoryAssignmentsRoute
   '/pull-requests/settings': typeof PullRequestsSettingsRoute
+  '/pull-requests/workflow-configurations': typeof PullRequestsWorkflowConfigurationsRouteWithChildren
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
-  '/pull-requests/gate-configs/$configID': typeof PullRequestsGateConfigsConfigIDRoute
+  '/pull-requests/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesById {
@@ -299,14 +309,15 @@ export interface FileRoutesById {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/pull-requests_/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests_/gate-configs': typeof PullRequestsGateConfigsRouteWithChildren
+  '/pull-requests_/repository-assignments': typeof PullRequestsRepositoryAssignmentsRoute
   '/pull-requests_/settings': typeof PullRequestsSettingsRoute
+  '/pull-requests_/workflow-configurations': typeof PullRequestsWorkflowConfigurationsRouteWithChildren
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
-  '/pull-requests_/gate-configs/$configID': typeof PullRequestsGateConfigsConfigIDRoute
+  '/pull-requests_/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRouteTypes {
@@ -335,14 +346,15 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/pull-requests/$workspaceID'
-    | '/pull-requests/gate-configs'
+    | '/pull-requests/repository-assignments'
     | '/pull-requests/settings'
+    | '/pull-requests/workflow-configurations'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
-    | '/pull-requests/gate-configs/$configID'
+    | '/pull-requests/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -369,14 +381,15 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/pull-requests/$workspaceID'
-    | '/pull-requests/gate-configs'
+    | '/pull-requests/repository-assignments'
     | '/pull-requests/settings'
+    | '/pull-requests/workflow-configurations'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
-    | '/pull-requests/gate-configs/$configID'
+    | '/pull-requests/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   id:
     | '__root__'
@@ -403,14 +416,15 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/pull-requests_/$workspaceID'
-    | '/pull-requests_/gate-configs'
+    | '/pull-requests_/repository-assignments'
     | '/pull-requests_/settings'
+    | '/pull-requests_/workflow-configurations'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
-    | '/pull-requests_/gate-configs/$configID'
+    | '/pull-requests_/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
 }
@@ -429,8 +443,9 @@ export interface RootRouteChildren {
   PullRequestsRoute: typeof PullRequestsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
   PullRequestsWorkspaceIDRoute: typeof PullRequestsWorkspaceIDRoute
-  PullRequestsGateConfigsRoute: typeof PullRequestsGateConfigsRouteWithChildren
+  PullRequestsRepositoryAssignmentsRoute: typeof PullRequestsRepositoryAssignmentsRoute
   PullRequestsSettingsRoute: typeof PullRequestsSettingsRoute
+  PullRequestsWorkflowConfigurationsRoute: typeof PullRequestsWorkflowConfigurationsRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -547,6 +562,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsThreadIdRouteImport
       parentRoute: typeof ThreadsRoute
     }
+    '/pull-requests_/workflow-configurations': {
+      id: '/pull-requests_/workflow-configurations'
+      path: '/pull-requests/workflow-configurations'
+      fullPath: '/pull-requests/workflow-configurations'
+      preLoaderRoute: typeof PullRequestsWorkflowConfigurationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/pull-requests_/settings': {
       id: '/pull-requests_/settings'
       path: '/pull-requests/settings'
@@ -554,11 +576,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PullRequestsSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests_/gate-configs': {
-      id: '/pull-requests_/gate-configs'
-      path: '/pull-requests/gate-configs'
-      fullPath: '/pull-requests/gate-configs'
-      preLoaderRoute: typeof PullRequestsGateConfigsRouteImport
+    '/pull-requests_/repository-assignments': {
+      id: '/pull-requests_/repository-assignments'
+      path: '/pull-requests/repository-assignments'
+      fullPath: '/pull-requests/repository-assignments'
+      preLoaderRoute: typeof PullRequestsRepositoryAssignmentsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pull-requests_/$workspaceID': {
@@ -638,12 +660,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
     }
-    '/pull-requests_/gate-configs/$configID': {
-      id: '/pull-requests_/gate-configs/$configID'
-      path: '/$configID'
-      fullPath: '/pull-requests/gate-configs/$configID'
-      preLoaderRoute: typeof PullRequestsGateConfigsConfigIDRouteImport
-      parentRoute: typeof PullRequestsGateConfigsRoute
+    '/pull-requests_/workflow-configurations/$configurationID': {
+      id: '/pull-requests_/workflow-configurations/$configurationID'
+      path: '/$configurationID'
+      fullPath: '/pull-requests/workflow-configurations/$configurationID'
+      preLoaderRoute: typeof PullRequestsWorkflowConfigurationsConfigurationIDRouteImport
+      parentRoute: typeof PullRequestsWorkflowConfigurationsRoute
     }
     '/accounts/account-router/new': {
       id: '/accounts/account-router/new'
@@ -748,18 +770,19 @@ const ThreadsRouteChildren: ThreadsRouteChildren = {
 const ThreadsRouteWithChildren =
   ThreadsRoute._addFileChildren(ThreadsRouteChildren)
 
-interface PullRequestsGateConfigsRouteChildren {
-  PullRequestsGateConfigsConfigIDRoute: typeof PullRequestsGateConfigsConfigIDRoute
+interface PullRequestsWorkflowConfigurationsRouteChildren {
+  PullRequestsWorkflowConfigurationsConfigurationIDRoute: typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
 }
 
-const PullRequestsGateConfigsRouteChildren: PullRequestsGateConfigsRouteChildren =
+const PullRequestsWorkflowConfigurationsRouteChildren: PullRequestsWorkflowConfigurationsRouteChildren =
   {
-    PullRequestsGateConfigsConfigIDRoute: PullRequestsGateConfigsConfigIDRoute,
+    PullRequestsWorkflowConfigurationsConfigurationIDRoute:
+      PullRequestsWorkflowConfigurationsConfigurationIDRoute,
   }
 
-const PullRequestsGateConfigsRouteWithChildren =
-  PullRequestsGateConfigsRoute._addFileChildren(
-    PullRequestsGateConfigsRouteChildren,
+const PullRequestsWorkflowConfigurationsRouteWithChildren =
+  PullRequestsWorkflowConfigurationsRoute._addFileChildren(
+    PullRequestsWorkflowConfigurationsRouteChildren,
   )
 
 const rootRouteChildren: RootRouteChildren = {
@@ -777,8 +800,11 @@ const rootRouteChildren: RootRouteChildren = {
   PullRequestsRoute: PullRequestsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
   PullRequestsWorkspaceIDRoute: PullRequestsWorkspaceIDRoute,
-  PullRequestsGateConfigsRoute: PullRequestsGateConfigsRouteWithChildren,
+  PullRequestsRepositoryAssignmentsRoute:
+    PullRequestsRepositoryAssignmentsRoute,
   PullRequestsSettingsRoute: PullRequestsSettingsRoute,
+  PullRequestsWorkflowConfigurationsRoute:
+    PullRequestsWorkflowConfigurationsRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

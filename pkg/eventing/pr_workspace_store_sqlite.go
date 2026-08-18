@@ -1639,15 +1639,15 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		}
 		immutable := func(v PRGateRun) any {
 			return struct {
-				Decision, Target, PolicyRevision       string
-				WorkflowRef, WorkflowRevision, GateRef string
-				ConfigID, ConfigRevision               string
-				Policy                                 json.RawMessage
-				PolicyHash, SubjectRevision            string
-				Subject                                json.RawMessage
-				SubjectHash                            string
-				Evidence                               json.RawMessage
-			}{v.DecisionPoint, v.TargetID, v.PolicyRevision, v.WorkflowRef, v.WorkflowRevision, v.GateRef, v.ConfigID, v.ConfigRevision, v.PinnedPolicy, v.PinnedPolicyHash, v.SubjectRevision, v.PinnedSubject, v.PinnedSubjectHash, v.Evidence}
+				Decision, Target, PolicyRevision                       string
+				WorkflowRef, WorkflowRevision, GateRef                 string
+				WorkflowConfigurationID, WorkflowConfigurationRevision string
+				Policy                                                 json.RawMessage
+				PolicyHash, SubjectRevision                            string
+				Subject                                                json.RawMessage
+				SubjectHash                                            string
+				Evidence                                               json.RawMessage
+			}{v.DecisionPoint, v.TargetID, v.PolicyRevision, v.WorkflowRef, v.WorkflowRevision, v.GateRef, v.WorkflowConfigurationID, v.WorkflowConfigurationRevision, v.PinnedPolicy, v.PinnedPolicyHash, v.SubjectRevision, v.PinnedSubject, v.PinnedSubjectHash, v.Evidence}
 		}
 		return equal("gate pinned inputs", immutable(old), immutable(*value))
 	case *PRPublication:
@@ -2409,8 +2409,8 @@ func validatePRWorkspaceRecord(value any) error {
 		for field, item := range map[string]string{
 			"decision point": record.DecisionPoint, "policy revision": record.PolicyRevision,
 			"workflow ref": record.WorkflowRef, "workflow revision": record.WorkflowRevision,
-			"gate ref": record.GateRef, "gate config ID": record.ConfigID,
-			"gate config revision": record.ConfigRevision, "pinned policy hash": record.PinnedPolicyHash,
+			"gate ref": record.GateRef, "workflow configuration ID": record.WorkflowConfigurationID,
+			"workflow configuration revision": record.WorkflowConfigurationRevision, "pinned policy hash": record.PinnedPolicyHash,
 			"subject revision": record.SubjectRevision, "pinned subject hash": record.PinnedSubjectHash,
 		} {
 			if err := validatePRWorkspaceString(field, item, maxPRWorkspaceIdentityBytes, true); err != nil {

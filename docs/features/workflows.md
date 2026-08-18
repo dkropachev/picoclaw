@@ -71,7 +71,7 @@ gate nodes, short labels on real forks, explicit retry loops, editable gates,
 and locked safeguards. The launcher parses and validates the
 manifest server-side, exposes the normalized graph and its content revision
 with the static workflow gate catalog, and the browser derives each gate's
-format from its workflow default plus the selected Gate configuration's exact
+format from its workflow default plus the selected Workflow configuration's exact
 action override. Diagram layout is responsive presentation
 state and is deliberately absent from YAML. Run
 `go generate ./pkg/prworkspace/lifecycleflow` to refresh the checked-in
@@ -104,7 +104,7 @@ cardinality. Execution resolves exactly one action—`human`, `ai`,
 `deterministic`, or `workflow`—and returns validated `field-values` plus actor,
 execution, action-revision, and input-hash metadata. The gate runtime does not
 interpret those values: ordinary application workflow logic chooses the next
-action. The PR workspace selects one repository Gate configuration and supplies
+action. The PR workspace selects one repository Workflow configuration and supplies
 one frozen subject; configuration can replace only the complete action for an
 exact `(workflow-ref, gate-ref)` binding.
 
@@ -870,7 +870,7 @@ dependency admission, tool policy, isolation, or provider authorization.
 Gate V3 owns static form validation, exact action resolution, private
 compilation, typed `field-values`, and durable continuation for one selected
 `gate/exec` invocation and frozen subject. The PR workspace owns repository
-Gate-configuration selection, subject construction, application-specific
+Workflow-configuration selection, subject construction, application-specific
 branching, and lifecycle transition. AI actions may use only their explicitly
 declared ephemeral or captured read-only context; Human and deterministic
 actions gain no ambient session. Private action workflows may compose only

@@ -297,8 +297,8 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 			PRWorkspaceRecord: PRWorkspaceRecord{ID: gateID}, DecisionPoint: "pr.implementation.complete",
 			State: PRExecutionSucceeded, PolicyRevision: "sha256:policy-v3",
 			WorkflowRef: "workflows/pr-lifecycle.yml", WorkflowRevision: "sha256:workflow-v3",
-			GateRef: "gates.implementation-complete", ConfigID: "default",
-			ConfigRevision: "config-v1", PinnedPolicy: json.RawMessage(`{"version":"3"}`),
+			GateRef: "gates.implementation-complete", WorkflowConfigurationID: "default",
+			WorkflowConfigurationRevision: "config-v1", PinnedPolicy: json.RawMessage(`{"version":"4"}`),
 			PinnedPolicyHash: "policy-hash", SubjectRevision: "subject-v1",
 			PinnedSubject: json.RawMessage(`{"head_sha":"bbbbbbbb"}`), PinnedSubjectHash: "subject-hash",
 			WorkflowRunID: "wr_gate-v3", RuntimePresent: true, CurrentStageID: "",
@@ -358,7 +358,7 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 	assert.Equal(t, "workflows/pr-lifecycle.yml", result.Aggregate.GateRuns[0].WorkflowRef)
 	assert.Equal(t, "sha256:workflow-v3", result.Aggregate.GateRuns[0].WorkflowRevision)
 	assert.Equal(t, "gates.implementation-complete", result.Aggregate.GateRuns[0].GateRef)
-	assert.Equal(t, "config-v1", result.Aggregate.GateRuns[0].ConfigRevision)
+	assert.Equal(t, "config-v1", result.Aggregate.GateRuns[0].WorkflowConfigurationRevision)
 	assert.Equal(t, map[string]any{"action": "accept", "note": "validated"}, result.Aggregate.GateRuns[0].Turns[0].FieldValues)
 	assert.Equal(t, "human", result.Aggregate.GateRuns[0].Turns[0].ActorKind)
 	assert.JSONEq(t, `{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`, string(result.Aggregate.GateRuns[0].Turns[0].GateForm))
@@ -450,7 +450,7 @@ func TestPRWorkspaceGateV3PersistedLoadRejectsRetiredFields(t *testing.T) {
 			"decision_point":"pr.review.publish","state":"waiting_user",
 			"policy-revision":"policy-v3","workflow-ref":"workflows/pr-lifecycle.yml",
 			"workflow-revision":"workflow-v3","gate-ref":"gates.review-publish",
-			"config-id":"default","config-revision":"config-v3",
+			"workflow-configuration-id":"default","workflow-configuration-revision":"config-v3",
 			"pinned_policy":{},"pinned_policy_hash":"policy-v3",
 			"subject_revision":"subject-v3","pinned_subject":{},
 			"pinned_subject_hash":"subject-v3","turns":[{

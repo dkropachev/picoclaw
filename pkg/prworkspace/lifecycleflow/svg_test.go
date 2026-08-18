@@ -51,7 +51,7 @@ func TestRenderSVGUsesNormalizedGraphAndClickableGates(t *testing.T) {
 			t.Fatalf("SVG missing %q", expected)
 		}
 	}
-	if !strings.Contains(text, `/pull-requests/gate-configs/default?flow=review&amp;gate=`) {
+	if !strings.Contains(text, `/pull-requests/workflow-configurations/default?flow=review&amp;gate=`) {
 		t.Fatal("editable gate URL is not XML-safe")
 	}
 }

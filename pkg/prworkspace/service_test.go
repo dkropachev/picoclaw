@@ -132,15 +132,15 @@ func TestServiceIntakeCharterConfirmAndZeroFindingNudges(t *testing.T) {
 	}
 }
 
-func TestServiceDeferredModeUsesRepositoryGateConfiguration(t *testing.T) {
+func TestServiceDeferredModeUsesRepositoryWorkflowConfiguration(t *testing.T) {
 	lifecycle := config.DefaultPRLifecycleConfig()
-	lifecycle.GateConfigs["off"] = config.PRLifecycleGateConfig{
+	lifecycle.WorkflowConfigurations["off"] = config.PRLifecycleWorkflowConfiguration{
 		Name: "No deferred issues", Bindings: []config.PRLifecycleGateBinding{},
 		DeferredIssues: config.PRLifecycleDeferredIssueConfig{
 			Mode: config.PRLifecycleDeferredIssuesOff,
 		},
 	}
-	lifecycle.GateConfigs["automatic"] = config.PRLifecycleGateConfig{
+	lifecycle.WorkflowConfigurations["automatic"] = config.PRLifecycleWorkflowConfiguration{
 		Name: "Automatic deferred issues", Bindings: []config.PRLifecycleGateBinding{},
 		DeferredIssues: config.PRLifecycleDeferredIssueConfig{
 			Mode: config.PRLifecycleDeferredIssuesAutomatic,
@@ -152,7 +152,7 @@ func TestServiceDeferredModeUsesRepositoryGateConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := func(providerOrigin, repositoryID string) DeferredIssueMode {
-		_, selected, _, err := lifecycle.ConfigForRepository(providerOrigin, repositoryID)
+		_, selected, _, err := lifecycle.WorkflowConfigurationForRepository(providerOrigin, repositoryID)
 		if err != nil {
 			return DeferredIssuesOff
 		}

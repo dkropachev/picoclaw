@@ -1,22 +1,26 @@
 import { describe, expect, it } from "vitest"
 
-import { normalizePRGateConfigsSearch } from "@/routes/pull-requests_.gate-configs"
-import { normalizePRGateConfigEditorSearch } from "@/routes/pull-requests_.gate-configs.$configID"
+import { normalizePRRepositoryAssignmentsSearch } from "@/routes/pull-requests_.repository-assignments"
 import { normalizePRLifecycleSettingsSearch } from "@/routes/pull-requests_.settings"
+import { normalizePRWorkflowConfigurationsSearch } from "@/routes/pull-requests_.workflow-configurations"
+import { normalizePRWorkflowConfigurationEditorSearch } from "@/routes/pull-requests_.workflow-configurations.$configurationID"
 
 const gate = "pr.review.complete" as const
 const workspaceID = `prw_${"a".repeat(32)}`
 
-describe("pull request Gate configurations search", () => {
+describe("pull request Workflow configurations search", () => {
   it("keeps only the discard modal identity on the configuration list", () => {
     expect(
-      normalizePRGateConfigsSearch({ from: workspaceID, dialog: "discard" }),
+      normalizePRWorkflowConfigurationsSearch({
+        from: workspaceID,
+        dialog: "discard",
+      }),
     ).toEqual({
       from: workspaceID,
       dialog: "discard",
     })
     expect(
-      normalizePRGateConfigsSearch({
+      normalizePRWorkflowConfigurationsSearch({
         dialog: "other",
         flow: "implementation",
         gate,
@@ -28,26 +32,31 @@ describe("pull request Gate configurations search", () => {
 
   it("rejects repeated and non-string modal values", () => {
     expect(
-      normalizePRGateConfigsSearch({
+      normalizePRWorkflowConfigurationsSearch({
         from: [workspaceID],
         dialog: ["discard"],
       }),
     ).toEqual({})
     expect(
-      normalizePRGateConfigsSearch({ from: "prw_INVALID", dialog: true }),
+      normalizePRWorkflowConfigurationsSearch({
+        from: "prw_INVALID",
+        dialog: true,
+      }),
     ).toEqual({})
   })
 })
 
-describe("pull request Gate configuration editor search", () => {
+describe("pull request Workflow configuration editor search", () => {
   it("defaults to review and keeps a discard prompt owned by its gate", () => {
-    expect(normalizePRGateConfigEditorSearch({})).toEqual({ flow: "review" })
-    expect(normalizePRGateConfigEditorSearch({ gate })).toEqual({
+    expect(normalizePRWorkflowConfigurationEditorSearch({})).toEqual({
+      flow: "review",
+    })
+    expect(normalizePRWorkflowConfigurationEditorSearch({ gate })).toEqual({
       flow: "review",
       gate,
     })
     expect(
-      normalizePRGateConfigEditorSearch({
+      normalizePRWorkflowConfigurationEditorSearch({
         flow: "implementation",
         from: workspaceID,
         gate: "pr.implementation.scope",
@@ -58,7 +67,7 @@ describe("pull request Gate configuration editor search", () => {
       gate: "pr.implementation.scope",
     })
     expect(
-      normalizePRGateConfigEditorSearch({
+      normalizePRWorkflowConfigurationEditorSearch({
         flow: "implementation",
         gate,
         dialog: "discard",
@@ -68,27 +77,46 @@ describe("pull request Gate configuration editor search", () => {
 
   it("scrubs legacy, unknown, malformed, and repeated state", () => {
     expect(
-      normalizePRGateConfigEditorSearch({
+      normalizePRWorkflowConfigurationEditorSearch({
         view: "retired",
         profile: "strict",
         workspace: workspaceID,
       }),
     ).toEqual({ flow: "review" })
     expect(
-      normalizePRGateConfigEditorSearch({
+      normalizePRWorkflowConfigurationEditorSearch({
         flow: "development",
         gate: "pr.not-a-gate",
         dialog: "delete",
       }),
     ).toEqual({ flow: "review" })
     expect(
-      normalizePRGateConfigEditorSearch({
+      normalizePRWorkflowConfigurationEditorSearch({
         flow: ["implementation"],
         from: [workspaceID],
         gate: [gate],
         dialog: ["discard"],
       }),
     ).toEqual({ flow: "review" })
+  })
+})
+
+describe("pull request repository assignments search", () => {
+  it("keeps only its workspace origin and discard dialog", () => {
+    expect(
+      normalizePRRepositoryAssignmentsSearch({
+        from: workspaceID,
+        dialog: "discard",
+        flow: "review",
+        gate,
+      }),
+    ).toEqual({ from: workspaceID, dialog: "discard" })
+    expect(
+      normalizePRRepositoryAssignmentsSearch({
+        from: [workspaceID],
+        dialog: ["discard"],
+      }),
+    ).toEqual({})
   })
 })
 

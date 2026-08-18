@@ -7,7 +7,6 @@ import {
   IconPlus,
   IconRefresh,
   IconSettingsAutomation,
-  IconTrash,
 } from "@tabler/icons-react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useBlocker } from "@tanstack/react-router"
@@ -25,14 +24,14 @@ import { type PRLifecycleDecisionPoint } from "@/api/pr-lifecycle-flow"
 import {
   type PRLifecycleGateAction,
   type PRLifecycleGateActionType,
-  type PRLifecycleGateConfig,
-  type PRLifecycleGateConfigIssue,
-  type PRLifecycleGateConfigSnapshot,
-  getPRLifecycleGateConfigs,
-  isPRLifecycleGateConfigID,
-  putPRLifecycleGateConfigs,
-  validatePRLifecycleGateConfigs,
-} from "@/api/pr-lifecycle-gate-configs"
+  type PRLifecycleWorkflowConfiguration,
+  type PRLifecycleWorkflowConfigurationIssue,
+  type PRLifecycleWorkflowConfigurationSnapshot,
+  getPRLifecycleWorkflowConfigurations,
+  isPRLifecycleWorkflowConfigurationID,
+  putPRLifecycleWorkflowConfigurations,
+  validatePRLifecycleWorkflowConfigurations,
+} from "@/api/pr-lifecycle-workflow-configurations"
 import { createPRWorkspaceRequestID } from "@/api/pr-workspaces"
 import { PageHeader } from "@/components/page-header"
 import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
@@ -82,18 +81,22 @@ import {
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
-const configQueryKey = ["pr-lifecycle", "gate-configs"] as const
-const configDraftQueryKey = ["pr-lifecycle", "gate-configs", "draft"] as const
+const configQueryKey = ["pr-lifecycle", "workflow-configurations"] as const
+const configDraftQueryKey = [
+  "pr-lifecycle",
+  "workflow-configurations",
+  "draft",
+] as const
 
 export type PRLifecycleConfigurationPage = "configs" | "config" | "settings"
 export type PRLifecycleSettingsTab = "nudging" | "scope"
 
-interface CachedGateConfigDraft {
+interface CachedWorkflowConfigurationDraft {
   baseline: string
-  draft: PRLifecycleGateConfigSnapshot
+  draft: PRLifecycleWorkflowConfigurationSnapshot
 }
 
-interface GatePageProps {
+interface WorkflowConfigurationPageProps {
   onBack: () => void
   page?: PRLifecycleConfigurationPage
   settingsTab?: PRLifecycleSettingsTab
@@ -108,7 +111,7 @@ interface GatePageProps {
   onSettingsTabChange?: (tab: PRLifecycleSettingsTab) => void
 }
 
-export function PRLifecycleGateConfigsPage({
+export function PRLifecycleWorkflowConfigurationsPage({
   onBack,
   page,
   settingsTab = "nudging",
@@ -121,22 +124,24 @@ export function PRLifecycleGateConfigsPage({
   onFlowChange,
   onDiscardOpenChange,
   onSettingsTabChange,
-}: GatePageProps) {
+}: WorkflowConfigurationPageProps) {
   const queryClient = useQueryClient()
   const cachedDraft =
-    queryClient.getQueryData<CachedGateConfigDraft>(configDraftQueryKey)
+    queryClient.getQueryData<CachedWorkflowConfigurationDraft>(
+      configDraftQueryKey,
+    )
   const cachedDirty =
     cachedDraft != null &&
     JSON.stringify(cachedDraft.draft) !== cachedDraft.baseline
-  const [draft, setDraft] = useState<PRLifecycleGateConfigSnapshot | null>(
-    () => (cachedDirty ? structuredClone(cachedDraft.draft) : null),
-  )
+  const [draft, setDraft] =
+    useState<PRLifecycleWorkflowConfigurationSnapshot | null>(() =>
+      cachedDirty ? structuredClone(cachedDraft.draft) : null,
+    )
   const [baseline, setBaseline] = useState(() =>
     cachedDirty ? cachedDraft.baseline : "",
   )
   const [newConfigID, setNewConfigID] = useState("")
   const [newConfigName, setNewConfigName] = useState("")
-  const [newRepository, setNewRepository] = useState("")
   const [localConfigID, setLocalConfigID] = useState(initialConfigID ?? "")
   const [localDecisionPoint, setLocalDecisionPoint] =
     useState<PRLifecycleDecisionPoint | null>(initialDecisionPoint ?? null)
@@ -162,7 +167,7 @@ export function PRLifecycleGateConfigsPage({
 
   const query = useQuery({
     queryKey: configQueryKey,
-    queryFn: ({ signal }) => getPRLifecycleGateConfigs(signal),
+    queryFn: ({ signal }) => getPRLifecycleWorkflowConfigurations(signal),
     retry: false,
   })
 
@@ -176,14 +181,21 @@ export function PRLifecycleGateConfigsPage({
 
   useEffect(() => {
     if (!draft || !baseline) return
-    queryClient.setQueryData<CachedGateConfigDraft>(configDraftQueryKey, {
-      baseline,
-      draft,
-    })
+    queryClient.setQueryData<CachedWorkflowConfigurationDraft>(
+      configDraftQueryKey,
+      {
+        baseline,
+        draft,
+      },
+    )
   }, [baseline, draft, queryClient])
 
   useEffect(() => {
-    if (!draft || !selectedConfigID || draft.gateConfigs[selectedConfigID])
+    if (
+      !draft ||
+      !selectedConfigID ||
+      draft.workflowConfigurations[selectedConfigID]
+    )
       return
     setLocalConfigID("")
     setLocalDecisionPoint(null)
@@ -199,8 +211,8 @@ export function PRLifecycleGateConfigsPage({
       next: { pathname: string }
     }) => {
       const isConfigurationPath = (pathname: string) =>
-        pathname === "/pull-requests/gate-configs" ||
-        pathname.startsWith("/pull-requests/gate-configs/") ||
+        pathname === "/pull-requests/workflow-configurations" ||
+        pathname.startsWith("/pull-requests/workflow-configurations/") ||
         pathname === "/pull-requests/settings"
       return (
         dirty &&
@@ -224,17 +236,16 @@ export function PRLifecycleGateConfigsPage({
   }, [blocker.status, onDiscardOpenChange, resolvedDiscardOpen])
 
   const issues = useMemo(
-    () => (draft ? validatePRLifecycleGateConfigs(draft) : []),
+    () => (draft ? validatePRLifecycleWorkflowConfigurations(draft) : []),
     [draft],
   )
   const saveMutation = useMutation({
-    mutationFn: (value: PRLifecycleGateConfigSnapshot) =>
-      putPRLifecycleGateConfigs({
+    mutationFn: (value: PRLifecycleWorkflowConfigurationSnapshot) =>
+      putPRLifecycleWorkflowConfigurations({
         expectedConfigRevision: value.configRevision,
         requestID: createPRWorkspaceRequestID(),
-        gateConfigs: value.gateConfigs,
-        defaultGateConfig: value.defaultGateConfig,
-        repositoryAssignments: value.repositoryAssignments,
+        workflowConfigurations: value.workflowConfigurations,
+        defaultWorkflowConfiguration: value.defaultWorkflowConfiguration,
         nudge: value.nudge,
         scope: value.scope,
       }),
@@ -259,32 +270,43 @@ export function PRLifecycleGateConfigsPage({
       setBaseline(nextBaseline)
       setError("")
       queryClient.setQueryData(configQueryKey, next)
-      queryClient.setQueryData<CachedGateConfigDraft>(configDraftQueryKey, {
-        baseline: nextBaseline,
-        draft: saved,
+      queryClient.setQueryData<CachedWorkflowConfigurationDraft>(
+        configDraftQueryKey,
+        {
+          baseline: nextBaseline,
+          draft: saved,
+        },
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ["pr-lifecycle", "repository-assignments"],
       })
     },
     onError: (failure) =>
       setError(
         failure instanceof Error
           ? failure.message
-          : "Gate configurations could not be saved.",
+          : "Workflow configurations could not be saved.",
       ),
   })
 
   if (query.isPending)
-    return <GateConfigsState text="Loading Gate configurations…" />
+    return (
+      <WorkflowConfigurationsState text="Loading Workflow configurations…" />
+    )
   if (query.isError) {
     return (
-      <GateConfigsState
-        text="Gate configurations are unavailable."
+      <WorkflowConfigurationsState
+        text="Workflow configurations are unavailable."
         action={<Button onClick={() => void query.refetch()}>Retry</Button>}
       />
     )
   }
-  if (!draft) return <GateConfigsState text="Loading Gate configurations…" />
+  if (!draft)
+    return (
+      <WorkflowConfigurationsState text="Loading Workflow configurations…" />
+    )
 
-  const selectedConfig = draft.gateConfigs[selectedConfigID]
+  const selectedConfig = draft.workflowConfigurations[selectedConfigID]
   const selectedGateNode = selectedDecisionPoint
     ? draft.flow.flows
         .flatMap((flow) => flow.nodes)
@@ -300,7 +322,7 @@ export function PRLifecycleGateConfigsPage({
     : undefined
 
   const updateDraft = (
-    update: (next: PRLifecycleGateConfigSnapshot) => void,
+    update: (next: PRLifecycleWorkflowConfigurationSnapshot) => void,
   ) => {
     setDraft((current) => {
       if (!current) return current
@@ -310,10 +332,10 @@ export function PRLifecycleGateConfigsPage({
     })
   }
   const updateSelectedConfig = (
-    update: (config: PRLifecycleGateConfig) => void,
+    update: (config: PRLifecycleWorkflowConfiguration) => void,
   ) =>
     updateDraft((next) => {
-      const config = next.gateConfigs[selectedConfigID]
+      const config = next.workflowConfigurations[selectedConfigID]
       if (config) update(config)
     })
 
@@ -335,9 +357,14 @@ export function PRLifecycleGateConfigsPage({
     event.preventDefault()
     const id = newConfigID.trim()
     const name = newConfigName.trim()
-    if (!isPRLifecycleGateConfigID(id) || !name || draft.gateConfigs[id]) return
+    if (
+      !isPRLifecycleWorkflowConfigurationID(id) ||
+      !name ||
+      draft.workflowConfigurations[id]
+    )
+      return
     updateDraft((next) => {
-      next.gateConfigs[id] = {
+      next.workflowConfigurations[id] = {
         name,
         bindings: [],
         deferredIssues: { mode: "ask" },
@@ -372,10 +399,13 @@ export function PRLifecycleGateConfigsPage({
       const nextBaseline = JSON.stringify(saved)
       setDraft(saved)
       setBaseline(nextBaseline)
-      queryClient.setQueryData<CachedGateConfigDraft>(configDraftQueryKey, {
-        baseline: nextBaseline,
-        draft: saved,
-      })
+      queryClient.setQueryData<CachedWorkflowConfigurationDraft>(
+        configDraftQueryKey,
+        {
+          baseline: nextBaseline,
+          draft: saved,
+        },
+      )
     }
     setLocalDiscardOpen(false)
     await onDiscardOpenChange?.(false)
@@ -386,17 +416,17 @@ export function PRLifecycleGateConfigsPage({
   return (
     <div
       className="bg-background flex h-full min-h-0 flex-col"
-      data-testid="pr-gate-configs"
+      data-testid="pr-workflow-configurations"
       data-config-view={resolvedPage}
       aria-busy={saveMutation.isPending}
     >
       <PageHeader
         title={
           selectedConfig
-            ? `Edit ${selectedConfig.name} Gate configuration`
+            ? `Edit ${selectedConfig.name} Workflow configuration`
             : resolvedPage === "settings"
               ? "PR lifecycle settings"
-              : "Gate configurations"
+              : "Workflow configurations"
         }
         titleExtra={<Badge variant="outline">v3</Badge>}
       >
@@ -404,8 +434,10 @@ export function PRLifecycleGateConfigsPage({
           type="button"
           variant="ghost"
           size="icon"
-          aria-label={selectedConfig ? "Back to Gate configurations" : "Back"}
-          title={selectedConfig ? "Back to Gate configurations" : "Back"}
+          aria-label={
+            selectedConfig ? "Back to Workflow configurations" : "Back"
+          }
+          title={selectedConfig ? "Back to Workflow configurations" : "Back"}
           onClick={requestBack}
         >
           <IconArrowLeft />
@@ -433,7 +465,7 @@ export function PRLifecycleGateConfigsPage({
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
         <div className="mx-auto w-full max-w-[96rem] min-w-0 space-y-4">
           {(error || issues.length > 0) && (
-            <GateConfigIssues error={error} issues={issues} />
+            <WorkflowConfigurationIssues error={error} issues={issues} />
           )}
           {draft.effects.gatewayEffect === "restart-required" && (
             <RestartNotice />
@@ -465,7 +497,7 @@ export function PRLifecycleGateConfigsPage({
               onEdit={selectConfig}
               onMakeDefault={(configID) =>
                 updateDraft((next) => {
-                  next.defaultGateConfig = configID
+                  next.defaultWorkflowConfiguration = configID
                 })
               }
             />
@@ -475,10 +507,7 @@ export function PRLifecycleGateConfigsPage({
             <ConfigSettings
               config={selectedConfig}
               configID={selectedConfigID}
-              defaultConfigID={draft.defaultGateConfig}
-              repositoryAssignments={draft.repositoryAssignments}
-              newRepository={newRepository}
-              onNewRepositoryChange={setNewRepository}
+              defaultConfigID={draft.defaultWorkflowConfiguration}
               onChange={updateSelectedConfig}
               onDeferredIssueModeChange={(mode) =>
                 updateSelectedConfig(
@@ -487,20 +516,7 @@ export function PRLifecycleGateConfigsPage({
               }
               onMakeDefault={() =>
                 updateDraft((next) => {
-                  next.defaultGateConfig = selectedConfigID
-                })
-              }
-              onAddRepository={() => {
-                const repository = newRepository.trim()
-                if (!repository) return
-                updateDraft((next) => {
-                  next.repositoryAssignments[repository] = selectedConfigID
-                })
-                setNewRepository("")
-              }}
-              onRemoveRepository={(repository) =>
-                updateDraft((next) => {
-                  delete next.repositoryAssignments[repository]
+                  next.defaultWorkflowConfiguration = selectedConfigID
                 })
               }
             />
@@ -518,9 +534,10 @@ export function PRLifecycleGateConfigsPage({
       </div>
 
       <GateActionDialog
-        open={Boolean(
-          selectedConfig && selectedGateNode && selectedDecisionPoint,
-        )}
+        open={
+          !resolvedDiscardOpen &&
+          Boolean(selectedConfig && selectedGateNode && selectedDecisionPoint)
+        }
         nodeTitle={selectedGateNode?.title ?? selectedDecisionPoint ?? "Gate"}
         nodeDescription={selectedGateNode?.description}
         catalogEntry={selectedCatalogEntry}
@@ -564,11 +581,11 @@ export function PRLifecycleGateConfigsPage({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Discard Gate configuration changes?
+              Discard Workflow configuration changes?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Your unsaved Gate configuration and lifecycle setting changes will
-              be lost.
+              Your unsaved Workflow configuration and lifecycle setting changes
+              will be lost.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -593,7 +610,7 @@ function ConfigList({
   onEdit,
   onMakeDefault,
 }: {
-  draft: PRLifecycleGateConfigSnapshot
+  draft: PRLifecycleWorkflowConfigurationSnapshot
   newConfigID: string
   newConfigName: string
   onConfigIDChange: (value: string) => void
@@ -605,7 +622,7 @@ function ConfigList({
   return (
     <Card size="sm">
       <CardHeader>
-        <CardTitle>Gate configurations</CardTitle>
+        <CardTitle>Workflow configurations</CardTitle>
         <CardDescription>
           Select how each published workflow Gate is executed. Workflows provide
           the defaults; configurations only store overrides.
@@ -614,12 +631,9 @@ function ConfigList({
       <CardContent className="space-y-4">
         <div
           className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
-          aria-label="Gate configurations"
+          aria-label="Workflow configurations"
         >
-          {Object.entries(draft.gateConfigs).map(([id, config]) => {
-            const assignmentCount = Object.values(
-              draft.repositoryAssignments,
-            ).filter((configID) => configID === id).length
+          {Object.entries(draft.workflowConfigurations).map(([id, config]) => {
             return (
               <div
                 className="border-border bg-muted/15 flex min-w-0 flex-col gap-3 rounded-lg border p-3"
@@ -629,7 +643,7 @@ function ConfigList({
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <strong className="truncate text-sm">{config.name}</strong>
-                    {id === draft.defaultGateConfig && (
+                    {id === draft.defaultWorkflowConfiguration && (
                       <Badge variant="secondary">Default</Badge>
                     )}
                   </div>
@@ -639,9 +653,7 @@ function ConfigList({
                 </div>
                 <p className="text-muted-foreground text-xs">
                   {config.bindings.length}{" "}
-                  {config.bindings.length === 1 ? "override" : "overrides"} ·{" "}
-                  {assignmentCount}{" "}
-                  {assignmentCount === 1 ? "repository" : "repositories"}
+                  {config.bindings.length === 1 ? "override" : "overrides"}
                 </p>
                 <p className="text-muted-foreground text-xs">
                   Deferred issues ·{" "}
@@ -651,11 +663,11 @@ function ConfigList({
                   <Button
                     size="sm"
                     onClick={() => onEdit(id)}
-                    aria-label={`Edit ${config.name} Gate configuration`}
+                    aria-label={`Edit ${config.name} Workflow configuration`}
                   >
                     <IconPencil /> Edit
                   </Button>
-                  {id !== draft.defaultGateConfig && (
+                  {id !== draft.defaultWorkflowConfiguration && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -691,9 +703,9 @@ function ConfigList({
             size="sm"
             variant="outline"
             disabled={
-              !isPRLifecycleGateConfigID(newConfigID) ||
+              !isPRLifecycleWorkflowConfigurationID(newConfigID) ||
               !newConfigName.trim() ||
-              Boolean(draft.gateConfigs[newConfigID])
+              Boolean(draft.workflowConfigurations[newConfigID])
             }
           >
             <IconPlus /> Add configuration
@@ -711,28 +723,18 @@ function ConfigSettings({
   config,
   configID,
   defaultConfigID,
-  repositoryAssignments,
-  newRepository,
-  onNewRepositoryChange,
   onChange,
   onDeferredIssueModeChange,
   onMakeDefault,
-  onAddRepository,
-  onRemoveRepository,
 }: {
-  config: PRLifecycleGateConfig
+  config: PRLifecycleWorkflowConfiguration
   configID: string
   defaultConfigID: string
-  repositoryAssignments: Record<string, string>
-  newRepository: string
-  onNewRepositoryChange: (value: string) => void
-  onChange: (update: (config: PRLifecycleGateConfig) => void) => void
+  onChange: (update: (config: PRLifecycleWorkflowConfiguration) => void) => void
   onDeferredIssueModeChange: (
-    mode: PRLifecycleGateConfig["deferredIssues"]["mode"],
+    mode: PRLifecycleWorkflowConfiguration["deferredIssues"]["mode"],
   ) => void
   onMakeDefault: () => void
-  onAddRepository: () => void
-  onRemoveRepository: (repository: string) => void
 }) {
   return (
     <Card size="sm">
@@ -740,99 +742,54 @@ function ConfigSettings({
         <CardTitle>Configuration settings</CardTitle>
         <CardDescription className="font-mono">{configID}</CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-4 lg:grid-cols-2">
-        <div className="space-y-3">
-          {configID === "default" ? (
-            <LockedField
-              description="The built-in default configuration has a fixed name. Create a custom configuration to choose another name."
-              label="Configuration name"
-              value="Default"
-            />
-          ) : (
-            <GateField label="Configuration name">
-              <Input
-                aria-label="Configuration name"
-                value={config.name}
-                onChange={(event) =>
-                  onChange(
-                    (current) => void (current.name = event.target.value),
-                  )
-                }
-              />
-            </GateField>
-          )}
-          {configID === defaultConfigID ? (
-            <Badge variant="secondary">Default configuration</Badge>
-          ) : (
-            <Button size="sm" variant="outline" onClick={onMakeDefault}>
-              Make default
-            </Button>
-          )}
-          <GateField label="Deferred issue mode">
-            <Select
-              value={config.deferredIssues.mode}
-              onValueChange={(value) =>
-                onDeferredIssueModeChange(
-                  value as PRLifecycleGateConfig["deferredIssues"]["mode"],
-                )
-              }
-            >
-              <SelectTrigger aria-label="Deferred issue mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="off">Off</SelectItem>
-                <SelectItem value="ask">Ask</SelectItem>
-                <SelectItem value="automatic">Automatic</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-muted-foreground mt-1.5 text-xs">
-              Controls whether deferred findings for repositories using this
-              configuration can become GitHub issues.
-            </p>
-          </GateField>
-        </div>
-        <div className="space-y-2">
-          <Label>Repository assignments</Label>
-          <form
-            className="flex gap-2"
-            onSubmit={(event) => {
-              event.preventDefault()
-              onAddRepository()
-            }}
-          >
+      <CardContent className="space-y-3">
+        {configID === "default" ? (
+          <LockedField
+            description="The built-in default configuration has a fixed name. Create a custom configuration to choose another name."
+            label="Configuration name"
+            value="Default"
+          />
+        ) : (
+          <GateField label="Configuration name">
             <Input
-              aria-label="Repository assignment"
-              placeholder="https://github.com|repository-id"
-              value={newRepository}
-              onChange={(event) => onNewRepositoryChange(event.target.value)}
+              aria-label="Configuration name"
+              value={config.name}
+              onChange={(event) =>
+                onChange((current) => void (current.name = event.target.value))
+              }
             />
-            <Button
-              size="icon"
-              type="submit"
-              variant="outline"
-              aria-label="Add repository assignment"
-            >
-              <IconPlus />
-            </Button>
-          </form>
-          {Object.entries(repositoryAssignments)
-            .filter(([, assigned]) => assigned === configID)
-            .map(([repository]) => (
-              <div className="flex items-center gap-2 text-xs" key={repository}>
-                <span className="min-w-0 flex-1 truncate">{repository}</span>
-                <Button
-                  className="size-7"
-                  size="icon"
-                  variant="ghost"
-                  aria-label={`Remove ${repository}`}
-                  onClick={() => onRemoveRepository(repository)}
-                >
-                  <IconTrash />
-                </Button>
-              </div>
-            ))}
-        </div>
+          </GateField>
+        )}
+        {configID === defaultConfigID ? (
+          <Badge variant="secondary">Default configuration</Badge>
+        ) : (
+          <Button size="sm" variant="outline" onClick={onMakeDefault}>
+            Make default
+          </Button>
+        )}
+        <GateField label="Deferred issue mode">
+          <Select
+            value={config.deferredIssues.mode}
+            onValueChange={(value) =>
+              onDeferredIssueModeChange(
+                value as PRLifecycleWorkflowConfiguration["deferredIssues"]["mode"],
+              )
+            }
+          >
+            <SelectTrigger aria-label="Deferred issue mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">Off</SelectItem>
+              <SelectItem value="ask">Ask</SelectItem>
+              <SelectItem value="automatic">Automatic</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-muted-foreground mt-1.5 text-xs">
+            Controls whether deferred findings for repositories using this
+            configuration can become GitHub issues.
+          </p>
+        </GateField>
       </CardContent>
     </Card>
   )
@@ -851,7 +808,7 @@ function GateActionDialog({
   open: boolean
   nodeTitle: string
   nodeDescription?: string
-  catalogEntry?: PRLifecycleGateConfigSnapshot["gateCatalog"][string]
+  catalogEntry?: PRLifecycleWorkflowConfigurationSnapshot["gateCatalog"][string]
   binding?: { action?: PRLifecycleGateAction }
   readOnly: boolean
   onOpenChange: (open: boolean) => void
@@ -1071,7 +1028,7 @@ function GateActionDialog({
         </div>
         <DialogFooter className="border-border border-t px-5 py-3">
           <p className="text-muted-foreground mr-auto text-xs">
-            Changes remain a draft until the Gate configuration is saved.
+            Changes remain a draft until the Workflow configuration is saved.
           </p>
           <DialogClose asChild>
             <Button variant="outline">Close — keep draft</Button>
@@ -1085,7 +1042,7 @@ function GateActionDialog({
 function GateRequestSummary({
   catalogEntry,
 }: {
-  catalogEntry: PRLifecycleGateConfigSnapshot["gateCatalog"][string]
+  catalogEntry: PRLifecycleWorkflowConfigurationSnapshot["gateCatalog"][string]
 }) {
   const fields = catalogEntry.fields ?? []
   return (
@@ -1263,7 +1220,7 @@ function AIActionFields({
           />
         ) : session === "source" ? (
           <LockedField
-            description="The exact source snapshot pins the same agent that produced the finding. This Gate configuration cannot replace it."
+            description="The exact source snapshot pins the same agent that produced the finding. This Workflow configuration cannot replace it."
             label="Agent ID"
             value="Same originating agent"
           />
@@ -1417,7 +1374,7 @@ function cacheLabel(cache: PRLifecycleGateAction["cache"]): string {
 }
 
 function deferredIssueModeLabel(
-  mode: PRLifecycleGateConfig["deferredIssues"]["mode"],
+  mode: PRLifecycleWorkflowConfiguration["deferredIssues"]["mode"],
 ): string {
   if (mode === "automatic") return "Automatic"
   return mode === "off" ? "Off" : "Ask"
@@ -1579,8 +1536,10 @@ function LifecycleSettings({
   onTabChange,
   tab,
 }: {
-  config: PRLifecycleGateConfigSnapshot
-  onChange: (update: (config: PRLifecycleGateConfigSnapshot) => void) => void
+  config: PRLifecycleWorkflowConfigurationSnapshot
+  onChange: (
+    update: (config: PRLifecycleWorkflowConfigurationSnapshot) => void,
+  ) => void
   onTabChange?: (tab: PRLifecycleSettingsTab) => void
   tab: PRLifecycleSettingsTab
 }) {
@@ -1723,12 +1682,12 @@ function GateField({
   )
 }
 
-function GateConfigIssues({
+function WorkflowConfigurationIssues({
   error,
   issues,
 }: {
   error: string
-  issues: PRLifecycleGateConfigIssue[]
+  issues: PRLifecycleWorkflowConfigurationIssue[]
 }) {
   return (
     <div
@@ -1736,7 +1695,7 @@ function GateConfigIssues({
       role="alert"
     >
       {error ||
-        `${issues.length} Gate configuration ${issues.length === 1 ? "issue" : "issues"}.`}
+        `${issues.length} Workflow configuration ${issues.length === 1 ? "issue" : "issues"}.`}
       {issues.length > 0 && (
         <ul className="mt-1 list-disc pl-5">
           {issues.slice(0, 8).map((issue) => (
@@ -1758,15 +1717,15 @@ function RestartNotice() {
       <div>
         <strong>Gateway restart required</strong>
         <p className="text-muted-foreground mt-0.5 text-xs">
-          Saved Gate configurations will apply to future executions after the
-          gateway restarts.
+          Saved Workflow configurations will apply to future executions after
+          the gateway restarts.
         </p>
       </div>
     </div>
   )
 }
 
-function GateConfigsState({
+function WorkflowConfigurationsState({
   text,
   action,
 }: {

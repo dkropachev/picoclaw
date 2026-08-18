@@ -179,13 +179,23 @@ describe("AppSidebar", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true")
     const work = screen.getByRole("link", { name: "Work" })
     const gateProfiles = screen.getByRole("link", {
-      name: "Gate configurations",
+      name: "Workflow configurations",
+    })
+    const repositoryAssignments = screen.getByRole("link", {
+      name: "Repository assignments",
     })
     const lifecycleSettings = screen.getByRole("link", {
       name: "Lifecycle settings",
     })
     expect(work).toHaveAttribute("href", "/pull-requests")
-    expect(gateProfiles).toHaveAttribute("href", "/pull-requests/gate-configs")
+    expect(gateProfiles).toHaveAttribute(
+      "href",
+      "/pull-requests/workflow-configurations",
+    )
+    expect(repositoryAssignments).toHaveAttribute(
+      "href",
+      "/pull-requests/repository-assignments",
+    )
     expect(lifecycleSettings).toHaveAttribute(
       "href",
       "/pull-requests/settings?tab=nudging",
@@ -199,6 +209,7 @@ describe("AppSidebar", () => {
     expect(gateProfiles).not.toHaveAttribute("aria-current")
     expect(gateProfiles).not.toHaveAttribute("data-status")
     expect(lifecycleSettings).not.toHaveAttribute("aria-current")
+    expect(repositoryAssignments).not.toHaveAttribute("aria-current")
     expect(
       gateProfiles.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "false")
@@ -207,14 +218,19 @@ describe("AppSidebar", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "false")
     expect(work).not.toBeVisible()
     expect(gateProfiles).not.toBeVisible()
+    expect(repositoryAssignments).not.toBeVisible()
     expect(lifecycleSettings).not.toBeVisible()
   })
 
   it.each([
     ["/pull-requests", "Work"],
     ["/pull-requests/prw_example", "Work"],
-    ["/pull-requests/gate-configs", "Gate configurations"],
-    ["/pull-requests/gate-configs/default/edit", "Gate configurations"],
+    ["/pull-requests/workflow-configurations", "Workflow configurations"],
+    [
+      "/pull-requests/workflow-configurations/default/edit",
+      "Workflow configurations",
+    ],
+    ["/pull-requests/repository-assignments", "Repository assignments"],
     ["/pull-requests/settings", "Lifecycle settings"],
     ["/pull-requests/settings/review", "Lifecycle settings"],
   ])("marks only %s navigation active", (route, activeName) => {
@@ -222,7 +238,12 @@ describe("AppSidebar", () => {
 
     renderSidebar()
 
-    for (const name of ["Work", "Gate configurations", "Lifecycle settings"]) {
+    for (const name of [
+      "Work",
+      "Workflow configurations",
+      "Repository assignments",
+      "Lifecycle settings",
+    ]) {
       const link = screen.getByRole("link", { name })
       const active = name === activeName
       expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
@@ -241,7 +262,7 @@ describe("AppSidebar", () => {
 
   it("preserves the originating workspace across configuration links", () => {
     const workspaceID = `prw_${"a".repeat(32)}`
-    pathname = "/pull-requests/gate-configs/default"
+    pathname = "/pull-requests/workflow-configurations/default"
     routeSearch = { flow: "review", from: workspaceID }
 
     renderSidebar()
@@ -251,8 +272,17 @@ describe("AppSidebar", () => {
       `/pull-requests/${workspaceID}`,
     )
     expect(
-      screen.getByRole("link", { name: "Gate configurations" }),
-    ).toHaveAttribute("href", `/pull-requests/gate-configs?from=${workspaceID}`)
+      screen.getByRole("link", { name: "Workflow configurations" }),
+    ).toHaveAttribute(
+      "href",
+      `/pull-requests/workflow-configurations?from=${workspaceID}`,
+    )
+    expect(
+      screen.getByRole("link", { name: "Repository assignments" }),
+    ).toHaveAttribute(
+      "href",
+      `/pull-requests/repository-assignments?from=${workspaceID}`,
+    )
     expect(
       screen.getByRole("link", { name: "Lifecycle settings" }),
     ).toHaveAttribute(
@@ -268,7 +298,7 @@ describe("AppSidebar", () => {
 
     expect(services).toHaveAttribute("aria-expanded", "false")
 
-    pathname = "/pull-requests/gate-configs/default"
+    pathname = "/pull-requests/workflow-configurations/default"
     view.rerender(
       <Provider>
         <SidebarProvider>
@@ -285,7 +315,7 @@ describe("AppSidebar", () => {
     })
     expect(pullRequests).toHaveAttribute("aria-expanded", "true")
     expect(
-      screen.getByRole("link", { name: "Gate configurations" }),
+      screen.getByRole("link", { name: "Workflow configurations" }),
     ).toBeVisible()
 
     await user.click(pullRequests)

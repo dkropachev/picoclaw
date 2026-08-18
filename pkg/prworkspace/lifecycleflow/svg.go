@@ -269,7 +269,7 @@ func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoin
 	}
 
 	if node.Kind == NodeGate && node.Editable {
-		href := "/pull-requests/gate-configs/default?flow=" + url.QueryEscape(flowID) + "&gate=" + url.QueryEscape(node.DecisionPoint)
+		href := "/pull-requests/workflow-configurations/default?flow=" + url.QueryEscape(flowID) + "&gate=" + url.QueryEscape(node.DecisionPoint)
 		fmt.Fprintf(output, "    <a class=\"gate-link\" href=\"%s\" target=\"_top\" aria-label=\"Edit %s\" data-decision-point=\"%s\">\n", escapeXML(href), escapeXML(node.Title), escapeXML(node.DecisionPoint))
 	} else {
 		fmt.Fprintf(output, "    <g data-flow-kind=\"%s\" data-node-id=\"%s\"%s>\n", escapeXML(string(node.Kind)), escapeXML(node.ID), optionalSVGAttribute("data-safeguard", node.Safeguard))

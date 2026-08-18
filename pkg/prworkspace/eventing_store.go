@@ -498,8 +498,8 @@ func toEventingValidation(value ValidationRun) eventing.PRValidationRun {
 }
 
 func toEventingGate(value GateRun) eventing.PRGateRun {
-	configID := "default"
-	configRevision := "unversioned"
+	workflowConfigurationID := "default"
+	workflowConfigurationRevision := "unversioned"
 	policyRevision := value.PolicyRevision
 	if policyRevision == "" {
 		policyRevision = "unversioned"
@@ -509,21 +509,21 @@ func toEventingGate(value GateRun) eventing.PRGateRun {
 	var policy, subject json.RawMessage
 	runtimePresent := value.runtime != nil
 	if value.runtime != nil {
-		if value.runtime.ConfigID != "" {
-			configID = value.runtime.ConfigID
+		if value.runtime.WorkflowConfigurationID != "" {
+			workflowConfigurationID = value.runtime.WorkflowConfigurationID
 		}
 		workflowRunID = value.runtime.WorkflowRunID
 		policy = cloneOptionalGateJSON(value.runtime.PinnedPolicy)
 		subject = cloneOptionalGateJSON(value.runtime.PinnedSubject)
 	}
-	var pinned pinnedPRLifecycleGateV3
-	if len(policy) > 0 && json.Unmarshal(policy, &pinned) == nil && pinned.Version == "3" {
+	var pinned pinnedPRLifecycleGateV4
+	if len(policy) > 0 && json.Unmarshal(policy, &pinned) == nil && pinned.Version == "4" {
 		workflowRef, workflowRevision, gateRef = pinned.WorkflowRef, pinned.WorkflowRevision, pinned.GateRef
-		if pinned.ConfigID != "" {
-			configID = pinned.ConfigID
+		if pinned.WorkflowConfigurationID != "" {
+			workflowConfigurationID = pinned.WorkflowConfigurationID
 		}
-		if pinned.ConfigRevision != "" {
-			configRevision = pinned.ConfigRevision
+		if pinned.WorkflowConfigurationRevision != "" {
+			workflowConfigurationRevision = pinned.WorkflowConfigurationRevision
 		}
 	}
 	if gateRef == "" {
@@ -571,7 +571,7 @@ func toEventingGate(value GateRun) eventing.PRGateRun {
 		State:          eventing.PRExecutionState(value.State),
 		PolicyRevision: policyRevision,
 		WorkflowRef:    workflowRef, WorkflowRevision: workflowRevision, GateRef: gateRef,
-		ConfigID: configID, ConfigRevision: configRevision,
+		WorkflowConfigurationID: workflowConfigurationID, WorkflowConfigurationRevision: workflowConfigurationRevision,
 		PinnedPolicy: policy, PinnedPolicyHash: persistenceDigest(policy),
 		SubjectRevision: subjectRevision, PinnedSubject: subject, PinnedSubjectHash: persistenceDigest(subject),
 		WorkflowRunID: workflowRunID, RuntimePresent: runtimePresent, CurrentStageID: currentStageID,
@@ -905,7 +905,7 @@ func fromEventingGate(value eventing.PRGateRun) GateRun {
 	}
 	if value.RuntimePresent {
 		result.runtime = &gateRuntime{
-			ConfigID: value.ConfigID, WorkflowRunID: value.WorkflowRunID,
+			WorkflowConfigurationID: value.WorkflowConfigurationID, WorkflowRunID: value.WorkflowRunID,
 			PinnedPolicy:  cloneOptionalGateJSON(value.PinnedPolicy),
 			PinnedSubject: cloneOptionalGateJSON(value.PinnedSubject),
 		}

@@ -5,7 +5,7 @@ import {
   type PRLifecycleFlow,
   type PRLifecycleFlowCatalog,
 } from "@/api/pr-lifecycle-flow"
-import { type PRLifecycleGateCatalogEntry } from "@/api/pr-lifecycle-gate-configs"
+import { type PRLifecycleGateCatalogEntry } from "@/api/pr-lifecycle-workflow-configurations"
 import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
 
 const reviewFlow: PRLifecycleFlow = {
@@ -750,7 +750,7 @@ describe("PR lifecycle gate map", () => {
     })
     expect(implementationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests/gate-configs/strict%20profile?flow=implementation&gate=pr.implementation.complete",
+      "/pull-requests/workflow-configurations/strict%20profile?flow=implementation&gate=pr.implementation.complete",
     )
 
     onFlowChange.mockClear()
@@ -859,7 +859,7 @@ describe("PR lifecycle gate map", () => {
     expect(container.querySelectorAll("[data-gate-number]")).toHaveLength(0)
     expect(notificationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests/gate-configs/strict%20profile?flow=review&gate=pr.review.publish",
+      "/pull-requests/workflow-configurations/strict%20profile?flow=review&gate=pr.review.publish",
     )
     const locked = screen.getByRole("group", { name: "Protect audit archive" })
     expect(locked).toHaveAttribute("data-flow-element", "locked-safeguard")

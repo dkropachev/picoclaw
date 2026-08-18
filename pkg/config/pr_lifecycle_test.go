@@ -14,12 +14,12 @@ func TestDefaultPRLifecycleConfigUsesInheritedWorkflowDefaults(t *testing.T) {
 	if err := candidate.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if candidate.DefaultGateConfigID != DefaultPRLifecycleGateConfigID {
-		t.Fatalf("default gate configuration = %q", candidate.DefaultGateConfigID)
+	if candidate.DefaultWorkflowConfigurationID != DefaultPRLifecycleWorkflowConfigurationID {
+		t.Fatalf("default workflow configuration = %q", candidate.DefaultWorkflowConfigurationID)
 	}
-	builtin := candidate.GateConfigs[DefaultPRLifecycleGateConfigID]
-	if builtin.Name != DefaultPRLifecycleGateConfigName || len(builtin.Bindings) != 0 {
-		t.Fatalf("built-in gate configuration = %#v", builtin)
+	builtin := candidate.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID]
+	if builtin.Name != DefaultPRLifecycleWorkflowConfigurationName || len(builtin.Bindings) != 0 {
+		t.Fatalf("built-in workflow configuration = %#v", builtin)
 	}
 	if len(candidate.RepositoryAssignments) != 0 ||
 		builtin.DeferredIssues.Mode != PRLifecycleDeferredIssuesAsk {
@@ -35,27 +35,27 @@ func TestPRLifecycleConfigAcceptsAtomicGateActionOverrides(t *testing.T) {
 	if err := candidate.ValidateAgentReferences(AgentsConfig{}); err != nil {
 		t.Fatalf("ValidateAgentReferences() error = %v", err)
 	}
-	configID, selected, revision, err := candidate.ConfigForRepository(
+	workflowConfigurationID, selected, revision, err := candidate.WorkflowConfigurationForRepository(
 		"https://github.com/", "repo-42",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configID != "automated" || selected.Name != "Automated" || revision == "" {
-		t.Fatalf("selected = %q %#v %q", configID, selected, revision)
+	if workflowConfigurationID != "automated" || selected.Name != "Automated" || revision == "" {
+		t.Fatalf("selected = %q %#v %q", workflowConfigurationID, selected, revision)
 	}
 }
 
-func TestPRLifecycleGateConfigRevisionIgnoresBindingOrder(t *testing.T) {
-	candidate := lifecycleConfigWithOverrides().GateConfigs["automated"]
-	left, err := PRLifecycleGateConfigRevision("automated", candidate)
+func TestPRLifecycleWorkflowConfigurationRevisionIgnoresBindingOrder(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides().WorkflowConfigurations["automated"]
+	left, err := PRLifecycleWorkflowConfigurationRevision("automated", candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for leftIndex, rightIndex := 0, len(candidate.Bindings)-1; leftIndex < rightIndex; leftIndex, rightIndex = leftIndex+1, rightIndex-1 {
 		candidate.Bindings[leftIndex], candidate.Bindings[rightIndex] = candidate.Bindings[rightIndex], candidate.Bindings[leftIndex]
 	}
-	right, err := PRLifecycleGateConfigRevision("automated", candidate)
+	right, err := PRLifecycleWorkflowConfigurationRevision("automated", candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,100 +64,108 @@ func TestPRLifecycleGateConfigRevisionIgnoresBindingOrder(t *testing.T) {
 	}
 }
 
-func TestPRLifecycleGateConfigRevisionIncludesDeferredIssuePolicy(t *testing.T) {
-	candidate := lifecycleConfigWithOverrides().GateConfigs["automated"]
-	before, err := PRLifecycleGateConfigRevision("automated", candidate)
+func TestPRLifecycleWorkflowConfigurationRevisionIncludesDeferredIssuePolicy(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides().WorkflowConfigurations["automated"]
+	before, err := PRLifecycleWorkflowConfigurationRevision("automated", candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	candidate.DeferredIssues.Mode = PRLifecycleDeferredIssuesOff
-	after, err := PRLifecycleGateConfigRevision("automated", candidate)
+	after, err := PRLifecycleWorkflowConfigurationRevision("automated", candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if before == after {
-		t.Fatal("deferred issue policy did not change the Gate configuration revision")
+		t.Fatal("deferred issue policy did not change the Workflow configuration revision")
 	}
 }
 
-func TestPRLifecycleConfigRejectsInvalidGateConfigurations(t *testing.T) {
+func TestPRLifecycleConfigRejectsInvalidWorkflowConfigurations(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*PRLifecycleConfig)
 		want   string
 	}{
-		{name: "missing configs", mutate: func(c *PRLifecycleConfig) { c.GateConfigs = nil }, want: "must contain"},
-		{name: "missing default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultGateConfigID = "" }, want: "default gate configuration is required"},
-		{name: "unknown default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultGateConfigID = "missing" }, want: "does not exist"},
+		{name: "missing configs", mutate: func(c *PRLifecycleConfig) { c.WorkflowConfigurations = nil }, want: "must contain"},
+		{name: "missing default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultWorkflowConfigurationID = "" }, want: "default workflow configuration is required"},
+		{name: "unknown default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultWorkflowConfigurationID = "missing" }, want: "does not exist"},
 		{name: "renamed builtin", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs[DefaultPRLifecycleGateConfigID]
+			v := c.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID]
 			v.Name = "Renamed"
-			c.GateConfigs[DefaultPRLifecycleGateConfigID] = v
+			c.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID] = v
 		}, want: "built-in default"},
 		{name: "builtin override", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs[DefaultPRLifecycleGateConfigID]
+			v := c.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID]
 			v.Bindings = append(v.Bindings, validHumanBinding())
-			c.GateConfigs[DefaultPRLifecycleGateConfigID] = v
+			c.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID] = v
 		}, want: "built-in default"},
 		{name: "snake config id", mutate: func(c *PRLifecycleConfig) {
-			c.GateConfigs["bad_id"] = PRLifecycleGateConfig{Name: "Bad", Bindings: []PRLifecycleGateBinding{}}
+			c.WorkflowConfigurations["bad_id"] = PRLifecycleWorkflowConfiguration{Name: "Bad", Bindings: []PRLifecycleGateBinding{}}
 		}, want: "invalid identity"},
 		{name: "duplicate name", mutate: func(c *PRLifecycleConfig) {
-			c.GateConfigs["another"] = PRLifecycleGateConfig{
+			c.WorkflowConfigurations["another"] = PRLifecycleWorkflowConfiguration{
 				Name: "automated", Bindings: []PRLifecycleGateBinding{},
 				DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAsk},
 			}
 		}, want: "duplicate names"},
+		{name: "nil bindings", mutate: func(c *PRLifecycleConfig) {
+			v := c.WorkflowConfigurations["automated"]
+			v.Bindings = nil
+			c.WorkflowConfigurations["automated"] = v
+		}, want: "bindings are required"},
 		{name: "duplicate binding", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings = append(v.Bindings, v.Bindings[0])
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "duplicate binding"},
 		{name: "relative workflow ref", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].WorkflowRef = "pr-lifecycle.yml"
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "workflow-ref is invalid"},
 		{name: "runtime gate ref", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].GateRef = "${{ gates.charter-decision }}"
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "static full path"},
 		{name: "relative gate ref", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].GateRef = "charter-decision"
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "static full path"},
 		{name: "partial human action", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionHuman, Prompt: "not allowed"}
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "human gate action"},
 		{name: "partial AI action", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionAI, AgentID: "main"}
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "requires prompt"},
 		{name: "partial workflow action", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionWorkflow}
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "requires workflow-ref"},
 		{name: "unsafe private AI defaults", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			action := *v.Bindings[0].Action
 			action.Tools = "inherit"
 			v.Bindings[0].Action = &action
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "requires tools: none"},
 		{name: "noncanonical workflow action ref", mutate: func(c *PRLifecycleConfig) {
-			v := c.GateConfigs["automated"]
+			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[2].Action.WorkflowRef = "workflows/gate-actions/publication"
-			c.GateConfigs["automated"] = v
+			c.WorkflowConfigurations["automated"] = v
 		}, want: "workflow-ref is invalid"},
 		{name: "unknown assignment", mutate: func(c *PRLifecycleConfig) {
 			c.RepositoryAssignments["https://github.com|repo-42"] = "missing"
 		}, want: "selects missing"},
+		{name: "nil assignments", mutate: func(c *PRLifecycleConfig) {
+			c.RepositoryAssignments = nil
+		}, want: "assignments are required"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -173,9 +181,9 @@ func TestPRLifecycleConfigRejectsInvalidGateConfigurations(t *testing.T) {
 
 func TestPRLifecycleConfigBindingMayExplicitlyInheritWorkflowDefault(t *testing.T) {
 	candidate := lifecycleConfigWithOverrides()
-	gateConfig := candidate.GateConfigs["automated"]
-	gateConfig.Bindings[0].Action = nil
-	candidate.GateConfigs["automated"] = gateConfig
+	workflowConfiguration := candidate.WorkflowConfigurations["automated"]
+	workflowConfiguration.Bindings[0].Action = nil
+	candidate.WorkflowConfigurations["automated"] = workflowConfiguration
 	if err := candidate.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
@@ -183,11 +191,11 @@ func TestPRLifecycleConfigBindingMayExplicitlyInheritWorkflowDefault(t *testing.
 
 func TestPRLifecycleConfigRejectsUnknownOverrideAgent(t *testing.T) {
 	candidate := lifecycleConfigWithOverrides()
-	config := candidate.GateConfigs["automated"]
+	config := candidate.WorkflowConfigurations["automated"]
 	action := *config.Bindings[0].Action
 	action.AgentID = "missing-agent"
 	config.Bindings[0].Action = &action
-	candidate.GateConfigs["automated"] = config
+	candidate.WorkflowConfigurations["automated"] = config
 	if err := candidate.Validate(); err != nil {
 		t.Fatalf("shape validation error = %v", err)
 	}
@@ -212,7 +220,7 @@ func TestPRLifecycleConfigWireNamesAreKebabCase(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"gate-configs", "default-gate-config", "repository-assignments",
+		"workflow-configurations", "default-workflow-configuration", "repository-assignments",
 		"deferred-issues", "workflow-ref", "gate-ref", "agent-id",
 		"review-minimum-additional", "semantic-lines",
 	} {
@@ -226,8 +234,9 @@ func TestPRLifecycleConfigRejectsRetiredAndUnknownWireFields(t *testing.T) {
 	for _, raw := range []string{
 		`{"gate-profiles":{},"default-gate-profile":"default"}`,
 		`{"gate_profiles":{},"default_gate_profile_id":"default"}`,
+		`{"gate-configs":{},"default-gate-config":"default"}`,
 		`{"gate-configs":{},"default-gate-config":"default","unknown":true}`,
-		`{"gate-configs":{}} {}`,
+		`{"workflow-configurations":{}} {}`,
 	} {
 		var decoded PRLifecycleConfig
 		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
@@ -243,11 +252,11 @@ func TestPRLifecycleDeferredIssueModesAndThresholdsRemainExact(t *testing.T) {
 		PRLifecycleDeferredIssuesAutomatic,
 	} {
 		candidate := DefaultPRLifecycleConfig()
-		candidate.GateConfigs["mode"] = PRLifecycleGateConfig{
+		candidate.WorkflowConfigurations["mode"] = PRLifecycleWorkflowConfiguration{
 			Name: "Mode", Bindings: []PRLifecycleGateBinding{},
 			DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: mode},
 		}
-		candidate.DefaultGateConfigID = "mode"
+		candidate.DefaultWorkflowConfigurationID = "mode"
 		if err := candidate.Validate(); err != nil {
 			t.Fatalf("mode %q: %v", mode, err)
 		}
@@ -261,7 +270,7 @@ func TestPRLifecycleDeferredIssueModesAndThresholdsRemainExact(t *testing.T) {
 
 func lifecycleConfigWithOverrides() PRLifecycleConfig {
 	candidate := DefaultPRLifecycleConfig()
-	candidate.GateConfigs["automated"] = PRLifecycleGateConfig{
+	candidate.WorkflowConfigurations["automated"] = PRLifecycleWorkflowConfiguration{
 		Name: "Automated", DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAutomatic},
 		Bindings: []PRLifecycleGateBinding{
 			{
@@ -291,7 +300,7 @@ func lifecycleConfigWithOverrides() PRLifecycleConfig {
 			},
 		},
 	}
-	candidate.DefaultGateConfigID = "automated"
+	candidate.DefaultWorkflowConfigurationID = "automated"
 	candidate.RepositoryAssignments["https://github.com|repo-42"] = "automated"
 	return candidate
 }
@@ -306,18 +315,18 @@ func validHumanBinding() PRLifecycleGateBinding {
 
 func TestPRLifecycleConfigSelectionIsCaseInsensitiveForRepositoryIdentity(t *testing.T) {
 	candidate := lifecycleConfigWithOverrides()
-	id, selected, _, err := candidate.ConfigForRepository("HTTPS://GITHUB.COM", "REPO-42")
+	id, selected, _, err := candidate.WorkflowConfigurationForRepository("HTTPS://GITHUB.COM", "REPO-42")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "automated" || !reflect.DeepEqual(selected, candidate.GateConfigs["automated"]) {
+	if id != "automated" || !reflect.DeepEqual(selected, candidate.WorkflowConfigurations["automated"]) {
 		t.Fatalf("selection = %q %#v", id, selected)
 	}
 }
 
 func TestPRLifecycleConfigSelectionNormalizesAllTrailingOriginSlashes(t *testing.T) {
 	candidate := lifecycleConfigWithOverrides()
-	id, _, _, err := candidate.ConfigForRepository("HTTPS://GITHUB.COM///", "REPO-42")
+	id, _, _, err := candidate.WorkflowConfigurationForRepository("HTTPS://GITHUB.COM///", "REPO-42")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,9 +335,18 @@ func TestPRLifecycleConfigSelectionNormalizesAllTrailingOriginSlashes(t *testing
 	}
 }
 
+func TestPRLifecycleConfigRejectsCanonicalRepositoryAssignmentCollision(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides()
+	candidate.RepositoryAssignments["HTTPS://GITHUB.COM///|REPO-42"] = "automated"
+	err := candidate.Validate()
+	if err == nil || !strings.Contains(err.Error(), "collide") {
+		t.Fatalf("Validate() error = %v, want canonical collision", err)
+	}
+}
+
 func TestPRLifecycleConfigAcceptsOnlyMinimalSourceAIAction(t *testing.T) {
 	candidate := DefaultPRLifecycleConfig()
-	candidate.GateConfigs["source"] = PRLifecycleGateConfig{
+	candidate.WorkflowConfigurations["source"] = PRLifecycleWorkflowConfiguration{
 		Name: "Originating session", DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAsk},
 		Bindings: []PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.finding-classify",
@@ -338,24 +356,24 @@ func TestPRLifecycleConfigAcceptsOnlyMinimalSourceAIAction(t *testing.T) {
 			},
 		}},
 	}
-	candidate.DefaultGateConfigID = "source"
+	candidate.DefaultWorkflowConfigurationID = "source"
 	if err := candidate.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	invalid := candidate
-	config := invalid.GateConfigs["source"]
+	config := invalid.WorkflowConfigurations["source"]
 	action := *config.Bindings[0].Action
 	action.AgentID, action.Tools = "main", "none"
 	config.Bindings[0].Action = &action
-	invalid.GateConfigs = map[string]PRLifecycleGateConfig{
-		"default": candidate.GateConfigs["default"], "source": config,
+	invalid.WorkflowConfigurations = map[string]PRLifecycleWorkflowConfiguration{
+		"default": candidate.WorkflowConfigurations["default"], "source": config,
 	}
 	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "derives agent") {
 		t.Fatalf("source action with derived fields error = %v", err)
 	}
 
 	unsupported := DefaultPRLifecycleConfig()
-	unsupported.GateConfigs["source"] = PRLifecycleGateConfig{
+	unsupported.WorkflowConfigurations["source"] = PRLifecycleWorkflowConfiguration{
 		Name: "Unsupported source", DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAsk},
 		Bindings: []PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm",
@@ -365,7 +383,7 @@ func TestPRLifecycleConfigAcceptsOnlyMinimalSourceAIAction(t *testing.T) {
 			},
 		}},
 	}
-	unsupported.DefaultGateConfigID = "source"
+	unsupported.DefaultWorkflowConfigurationID = "source"
 	if err := unsupported.Validate(); err == nil || !strings.Contains(err.Error(), "single-finding classification") {
 		t.Fatalf("unsupported source gate error = %v", err)
 	}

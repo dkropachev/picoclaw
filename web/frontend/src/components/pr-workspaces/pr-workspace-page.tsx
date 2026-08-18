@@ -21,9 +21,9 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import {
-  type PRLifecycleGateConfigSnapshot,
-  getPRLifecycleGateConfigs,
-} from "@/api/pr-lifecycle-gate-configs"
+  type PRLifecycleRepositoryAssignmentSnapshot,
+  getPRLifecycleRepositoryAssignments,
+} from "@/api/pr-lifecycle-repository-assignments"
 import { respondPRWorkspaceGate } from "@/api/pr-workspace-gates"
 import {
   type PRWorkspace,
@@ -139,11 +139,11 @@ interface GuidanceDraft {
 export function PRWorkspacePage({
   workspaceID,
   onBack,
-  onOpenGateConfigs,
+  onOpenWorkflowConfigurations,
 }: {
   workspaceID: string
   onBack: () => void
-  onOpenGateConfigs?: () => void
+  onOpenWorkflowConfigurations?: () => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -166,9 +166,9 @@ export function PRWorkspacePage({
       keepLatestWorkspace(await getPRWorkspace(workspaceID, signal)),
     refetchInterval: 3_000,
   })
-  const lifecycleSettingsQuery = useQuery({
-    queryKey: ["pr-lifecycle", "gate-configs"],
-    queryFn: ({ signal }) => getPRLifecycleGateConfigs(signal),
+  const repositoryAssignmentsQuery = useQuery({
+    queryKey: ["pr-lifecycle", "repository-assignments"],
+    queryFn: ({ signal }) => getPRLifecycleRepositoryAssignments(signal),
     retry: false,
     staleTime: 30_000,
   })
@@ -466,12 +466,12 @@ export function PRWorkspacePage({
   const latestEvidence = latestValidation(workspace)
   const latestRepair = latestRepairAttempt(workspace)
   const deferredPolicyRestartPending =
-    lifecycleSettingsQuery.data?.effects.deferredPolicyEffect ===
+    repositoryAssignmentsQuery.data?.effects.deferredPolicyEffect ===
     "restart-required"
   const deferredIssueMode = deferredPolicyRestartPending
     ? undefined
     : resolveDeferredIssueMode(
-        lifecycleSettingsQuery.data,
+        repositoryAssignmentsQuery.data,
         record.provider_origin,
         record.repository_id,
       )
@@ -565,7 +565,7 @@ export function PRWorkspacePage({
                     fieldValues,
                   })
                 }
-                onOpenConfigs={onOpenGateConfigs}
+                onOpenConfigs={onOpenWorkflowConfigurations}
                 busy={gateMutation.isPending}
               />
             </aside>
@@ -672,9 +672,9 @@ export function PRWorkspacePage({
               workspace={workspace}
               mode={deferredIssueMode}
               runtimeRestartPending={deferredPolicyRestartPending}
-              settingsLoading={lifecycleSettingsQuery.isFetching}
-              settingsError={lifecycleSettingsQuery.isError}
-              onRetrySettings={() => void lifecycleSettingsQuery.refetch()}
+              settingsLoading={repositoryAssignmentsQuery.isFetching}
+              settingsError={repositoryAssignmentsQuery.isError}
+              onRetrySettings={() => void repositoryAssignmentsQuery.refetch()}
               onCommand={(command, onSuccess) =>
                 deferredMutation.mutate(
                   { workspace, command },
@@ -752,7 +752,7 @@ export function PRWorkspacePage({
                     fieldValues,
                   })
                 }
-                onOpenConfigs={onOpenGateConfigs}
+                onOpenConfigs={onOpenWorkflowConfigurations}
                 busy={gateMutation.isPending}
               />
             )}
@@ -3182,7 +3182,7 @@ function publicationLocksCurrentHead(
 }
 
 function resolveDeferredIssueMode(
-  snapshot: PRLifecycleGateConfigSnapshot | undefined,
+  snapshot: PRLifecycleRepositoryAssignmentSnapshot | undefined,
   providerOrigin: string,
   repositoryID: string,
 ): "off" | "ask" | "automatic" | undefined {
@@ -3197,8 +3197,8 @@ function resolveDeferredIssueMode(
         .join("|")
         .toLowerCase() === identity,
   )
-  const configID = assignment?.[1] ?? snapshot.defaultGateConfig
-  return snapshot.gateConfigs[configID]?.deferredIssues.mode
+  const configID = assignment?.[1] ?? snapshot.defaultWorkflowConfiguration
+  return snapshot.workflowConfigurations[configID]?.deferredIssues.mode
 }
 
 function DeferredPanel({

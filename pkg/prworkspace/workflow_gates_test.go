@@ -72,7 +72,7 @@ func TestWorkflowGateEvaluatorPresentsGenericHumanFormAndReturnsFieldValues(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gate.State != ExecutionWaitingUser || gate.runtime == nil || gate.runtime.ConfigID != "default" ||
+	if gate.State != ExecutionWaitingUser || gate.runtime == nil || gate.runtime.WorkflowConfigurationID != "default" ||
 		gate.runtime.WorkflowRunID == "" || len(gate.Turns) != 1 {
 		t.Fatalf("started gate = %#v", gate)
 	}
@@ -118,7 +118,7 @@ func TestWorkflowGateEvaluatorAppliesExactRepositoryActionOverride(t *testing.T)
 			"action": "revise", "explanation": "Configured policy requires revision.",
 		},
 	}
-	configured.GateConfigs["automatic"] = config.PRLifecycleGateConfig{
+	configured.WorkflowConfigurations["automatic"] = config.PRLifecycleWorkflowConfiguration{
 		Name: "Automatic", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef,
@@ -145,7 +145,7 @@ func TestWorkflowGateEvaluatorAppliesExactRepositoryActionOverride(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gate.State != ExecutionSucceeded || !gateCompletedWith(gate, "revise") || gate.runtime.ConfigID != "automatic" ||
+	if gate.State != ExecutionSucceeded || !gateCompletedWith(gate, "revise") || gate.runtime.WorkflowConfigurationID != "automatic" ||
 		len(gate.Turns) != 1 || gate.Turns[0].ActorKind != "deterministic" ||
 		gate.Turns[0].FieldValues["action"] != "revise" {
 		t.Fatalf("automatic gate = %#v", gate)
@@ -225,13 +225,13 @@ func TestWorkflowGateEvaluatorUsesExactOriginatingSessionForSourceAI(t *testing.
 		Prompt: "Reassess the source finding.",
 	}
 	configured := config.DefaultPRLifecycleConfig()
-	configured.GateConfigs["source"] = config.PRLifecycleGateConfig{
+	configured.WorkflowConfigurations["source"] = config.PRLifecycleWorkflowConfiguration{
 		Name: "Source", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.finding-classify", Action: &action,
 		}},
 	}
-	configured.DefaultGateConfigID = "source"
+	configured.DefaultWorkflowConfigurationID = "source"
 	agent := &prGateV3Agent{reader: backend, fieldValues: map[string]any{
 		"action": "keep-in-pr", "explanation": "Confirmed from originating context.",
 	}}
@@ -320,13 +320,13 @@ jobs:
 		Type: gatetypes.GateActionWorkflow, WorkflowRef: "workflows/actions/multi.yml",
 	}
 	configured := config.DefaultPRLifecycleConfig()
-	configured.GateConfigs["multi"] = config.PRLifecycleGateConfig{
+	configured.WorkflowConfigurations["multi"] = config.PRLifecycleWorkflowConfiguration{
 		Name: "Multi-step", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,
 		}},
 	}
-	configured.DefaultGateConfigID = "multi"
+	configured.DefaultWorkflowConfigurationID = "multi"
 	executor := &workflows.Executor{WorkspaceDir: workspace, Store: workflows.NewFileRunStore(workspace)}
 	evaluator := &WorkflowGateEvaluator{Config: configured, Executor: executor}
 	gate, err := evaluator.Start(t.Context(), testPRLifecycleGateRequest(

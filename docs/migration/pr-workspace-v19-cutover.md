@@ -24,7 +24,7 @@ one schema transaction.
 
 The cutover does not translate `prc_`, `pdc_`, or private development-thread
 identities into `prw_` workspaces. It also does not translate old review
-attention policies or Gate V2 definitions into Gate V3 configurations.
+attention policies or Gate V2 definitions into Workflow configurations.
 
 Databases declaring v1 through v17 are rejected. Upgrade an archival copy with
 the older release chain if historical inspection is required; do not point the
@@ -37,7 +37,7 @@ cutover is acceptable.
 - Create or resolve each active pull request as a new workspace.
 - Recreate any needed charter, finding disposition, or deferred follow-up from
   the archived information.
-- Recreate `pr_lifecycle.gate-configs`, choose `default-gate-config`, assign
+- Recreate `pr_lifecycle.workflow-configurations`, choose `default-workflow-configuration`, assign
   repositories, and review nudge and size thresholds. Each override must bind
   an exact `(workflow-ref, gates.<gate-id>)` pair and replace one complete
   action.

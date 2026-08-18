@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  getPRLifecycleGateConfigs,
-  putPRLifecycleGateConfigs,
-  validatePRLifecycleGateConfigs,
-} from "@/api/pr-lifecycle-gate-configs"
+  getPRLifecycleWorkflowConfigurations,
+  putPRLifecycleWorkflowConfigurations,
+  validatePRLifecycleWorkflowConfigurations,
+} from "@/api/pr-lifecycle-workflow-configurations"
 import { requestPRWorkspaceJSON } from "@/api/pr-workspaces"
 
 vi.mock("@/api/pr-lifecycle-flow", () => ({
@@ -22,7 +22,7 @@ vi.mock("@/api/pr-workspaces", async (importOriginal) => {
 const mockedRequest = vi.mocked(requestPRWorkspaceJSON)
 
 const wireSnapshot = {
-  "gate-configs": {
+  "workflow-configurations": {
     default: {
       name: "Default",
       bindings: [],
@@ -48,10 +48,7 @@ const wireSnapshot = {
       ],
     },
   },
-  "default-gate-config": "default",
-  "repository-assignments": {
-    "https://github.com|100": "automated",
-  },
+  "default-workflow-configuration": "default",
   nudge: {
     "review-minimum-additional": 1,
     "review-maximum-additional": 3,
@@ -106,23 +103,25 @@ const wireSnapshot = {
   },
 }
 
-describe("PR lifecycle Gate configurations", () => {
+describe("PR lifecycle Workflow configurations", () => {
   beforeEach(() => mockedRequest.mockReset())
 
   it("projects the kebab-case wire contract into idiomatic client fields", async () => {
     mockedRequest.mockResolvedValue(wireSnapshot)
 
-    const snapshot = await getPRLifecycleGateConfigs()
+    const snapshot = await getPRLifecycleWorkflowConfigurations()
 
     expect(mockedRequest).toHaveBeenCalledWith(
-      "/api/pr-lifecycle/gate-configs",
+      "/api/pr-lifecycle/workflow-configurations",
       undefined,
       undefined,
     )
-    expect(snapshot.defaultGateConfig).toBe("default")
+    expect(snapshot.defaultWorkflowConfiguration).toBe("default")
     expect(snapshot.nudge.reviewMinimumAdditional).toBe(1)
     expect(snapshot.scope.xs.semanticLines).toBe(20)
-    expect(snapshot.gateConfigs.automated.deferredIssues.mode).toBe("automatic")
+    expect(snapshot.workflowConfigurations.automated.deferredIssues.mode).toBe(
+      "automatic",
+    )
     expect(snapshot.effects).toEqual({
       gatewayEffect: "applied",
       deferredPolicyEffect: "applied",
@@ -144,7 +143,7 @@ describe("PR lifecycle Gate configurations", () => {
         ],
       },
     ])
-    expect(snapshot.gateConfigs.automated.bindings[0]).toEqual({
+    expect(snapshot.workflowConfigurations.automated.bindings[0]).toEqual({
       workflowRef: "workflows/pr-lifecycle.yml",
       gateRef: "gates.charter-confirm",
       action: {
@@ -161,15 +160,14 @@ describe("PR lifecycle Gate configurations", () => {
 
   it("writes only kebab-case configuration fields", async () => {
     mockedRequest.mockResolvedValue(wireSnapshot)
-    const snapshot = await getPRLifecycleGateConfigs()
+    const snapshot = await getPRLifecycleWorkflowConfigurations()
     mockedRequest.mockResolvedValueOnce(wireSnapshot)
 
-    await putPRLifecycleGateConfigs({
+    await putPRLifecycleWorkflowConfigurations({
       expectedConfigRevision: snapshot.configRevision,
       requestID: "request-1",
-      gateConfigs: snapshot.gateConfigs,
-      defaultGateConfig: snapshot.defaultGateConfig,
-      repositoryAssignments: snapshot.repositoryAssignments,
+      workflowConfigurations: snapshot.workflowConfigurations,
+      defaultWorkflowConfiguration: snapshot.defaultWorkflowConfiguration,
       nudge: snapshot.nudge,
       scope: snapshot.scope,
     })
@@ -181,9 +179,9 @@ describe("PR lifecycle Gate configurations", () => {
     expect(body).toMatchObject({
       "expected-config-revision": "config-1",
       "request-id": "request-1",
-      "default-gate-config": "default",
+      "default-workflow-configuration": "default",
     })
-    const serializedConfigs = body["gate-configs"] as Record<
+    const serializedConfigs = body["workflow-configurations"] as Record<
       string,
       Record<string, unknown>
     >
@@ -191,13 +189,14 @@ describe("PR lifecycle Gate configurations", () => {
       mode: "automatic",
     })
     expect(body).not.toHaveProperty("deferred-issues")
+    expect(body).not.toHaveProperty("repository-assignments")
     expect(JSON.stringify(body)).not.toContain("_")
   })
 
   it("rejects invalid local references and incomplete atomic overrides", async () => {
     mockedRequest.mockResolvedValue(wireSnapshot)
-    const snapshot = await getPRLifecycleGateConfigs()
-    snapshot.gateConfigs.automated.bindings = [
+    const snapshot = await getPRLifecycleWorkflowConfigurations()
+    snapshot.workflowConfigurations.automated.bindings = [
       {
         workflowRef: "workflows/pr-lifecycle",
         gateRef: "charter-decision",
@@ -205,7 +204,7 @@ describe("PR lifecycle Gate configurations", () => {
       },
     ]
 
-    expect(validatePRLifecycleGateConfigs(snapshot)).toEqual(
+    expect(validatePRLifecycleWorkflowConfigurations(snapshot)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ message: expect.stringContaining("gates.") }),
         expect.objectContaining({
@@ -215,19 +214,53 @@ describe("PR lifecycle Gate configurations", () => {
     )
   })
 
+  it("matches backend workflow configuration identity and name validation", async () => {
+    mockedRequest.mockResolvedValue(wireSnapshot)
+    const snapshot = await getPRLifecycleWorkflowConfigurations()
+    snapshot.workflowConfigurations["bad--id"] = {
+      name: " Automated ",
+      deferredIssues: { mode: "ask" },
+      bindings: [],
+    }
+
+    expect(validatePRLifecycleWorkflowConfigurations(snapshot)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "workflow-configurations.bad--id",
+          message: expect.stringContaining("kebab-case"),
+        }),
+        expect.objectContaining({
+          path: "workflow-configurations.bad--id.name",
+          message: expect.stringContaining("trimmed"),
+        }),
+      ]),
+    )
+
+    snapshot.workflowConfigurations["bad--id"].name = "AUTOMATED"
+    expect(validatePRLifecycleWorkflowConfigurations(snapshot)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "workflow-configurations.bad--id.name",
+          message: expect.stringContaining("duplicates"),
+        }),
+      ]),
+    )
+  })
+
   it("rejects AI policy values outside the closed runtime vocabulary", async () => {
     const invalid = structuredClone(wireSnapshot)
-    invalid["gate-configs"].automated.bindings[0].action.session = "ambient"
+    invalid["workflow-configurations"].automated.bindings[0].action.session =
+      "ambient"
     mockedRequest.mockResolvedValue(invalid)
 
-    await expect(getPRLifecycleGateConfigs()).rejects.toMatchObject({
+    await expect(getPRLifecycleWorkflowConfigurations()).rejects.toMatchObject({
       code: "malformed_response",
     })
   })
 
   it("round-trips the minimal originating-session AI profile", async () => {
     const source = structuredClone(wireSnapshot)
-    const sourceAction = source["gate-configs"].automated.bindings[0]
+    const sourceAction = source["workflow-configurations"].automated.bindings[0]
       .action as unknown as Record<string, unknown>
     for (const key of ["agent-id", "history", "cache", "tools"])
       delete sourceAction[key]
@@ -238,34 +271,35 @@ describe("PR lifecycle Gate configurations", () => {
     })
     mockedRequest.mockResolvedValue(source)
 
-    const snapshot = await getPRLifecycleGateConfigs()
-    expect(snapshot.gateConfigs.automated.bindings[0].action).toEqual({
+    const snapshot = await getPRLifecycleWorkflowConfigurations()
+    expect(
+      snapshot.workflowConfigurations.automated.bindings[0].action,
+    ).toEqual({
       type: "ai",
       prompt: "Recheck the originating finding.",
       session: "source",
     })
 
     mockedRequest.mockResolvedValueOnce(source)
-    await putPRLifecycleGateConfigs({
+    await putPRLifecycleWorkflowConfigurations({
       expectedConfigRevision: snapshot.configRevision,
       requestID: "request-source",
-      gateConfigs: snapshot.gateConfigs,
-      defaultGateConfig: snapshot.defaultGateConfig,
-      repositoryAssignments: snapshot.repositoryAssignments,
+      workflowConfigurations: snapshot.workflowConfigurations,
+      defaultWorkflowConfiguration: snapshot.defaultWorkflowConfiguration,
       nudge: snapshot.nudge,
       scope: snapshot.scope,
     })
     const request = mockedRequest.mock.calls.at(-1)?.[1]
     const body = JSON.parse(String(request?.body))
-    expect(body["gate-configs"].automated.bindings[0].action).toEqual(
-      source["gate-configs"].automated.bindings[0].action,
-    )
+    expect(
+      body["workflow-configurations"].automated.bindings[0].action,
+    ).toEqual(source["workflow-configurations"].automated.bindings[0].action)
   })
 
   it("rejects partial or mismatched originating-session profiles", async () => {
     const invalid = structuredClone(wireSnapshot)
-    const invalidAction = invalid["gate-configs"].automated.bindings[0]
-      .action as unknown as Record<string, unknown>
+    const invalidAction = invalid["workflow-configurations"].automated
+      .bindings[0].action as unknown as Record<string, unknown>
     for (const key of ["agent-id", "history", "cache"])
       delete invalidAction[key]
     Object.assign(invalidAction, {
@@ -276,7 +310,7 @@ describe("PR lifecycle Gate configurations", () => {
     })
     mockedRequest.mockResolvedValue(invalid)
 
-    await expect(getPRLifecycleGateConfigs()).rejects.toMatchObject({
+    await expect(getPRLifecycleWorkflowConfigurations()).rejects.toMatchObject({
       code: "malformed_response",
     })
   })

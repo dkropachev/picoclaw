@@ -36,9 +36,22 @@ function PullRequestsRoutePage() {
             })),
         })
       }
-      onOpenGateConfigs={() =>
+      onOpenWorkflowConfigurations={() =>
         void navigate({
-          to: "/pull-requests/gate-configs",
+          to: "/pull-requests/workflow-configurations",
+          state: (previous) =>
+            updatePRNavigationState(previous, (current) => ({
+              prParent: "portfolio",
+              prParentIndex: current.__TSR_index,
+              prParentKey: current.__TSR_key,
+              prWorkIndex: current.__TSR_index,
+              prWorkKey: current.__TSR_key,
+            })),
+        })
+      }
+      onOpenRepositoryAssignments={() =>
+        void navigate({
+          to: "/pull-requests/repository-assignments",
           state: (previous) =>
             updatePRNavigationState(previous, (current) => ({
               prParent: "portfolio",

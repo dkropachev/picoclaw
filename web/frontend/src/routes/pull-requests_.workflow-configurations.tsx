@@ -7,24 +7,24 @@ import {
 } from "@tanstack/react-router"
 import { useEffect, useMemo } from "react"
 
-import { isPRLifecycleGateConfigID } from "@/api/pr-lifecycle-gate-configs"
-import { PRLifecycleGateConfigsPage } from "@/components/pr-workspaces/pr-lifecycle-gate-configs-page"
+import { isPRLifecycleWorkflowConfigurationID } from "@/api/pr-lifecycle-workflow-configurations"
+import { PRLifecycleWorkflowConfigurationsPage } from "@/components/pr-workspaces/pr-lifecycle-workflow-configurations-page"
 import {
   asPRNavigationState,
   goToMarkedPRHistory,
   updatePRNavigationState,
 } from "@/routes/-pr-navigation"
 
-export interface PRGateConfigsSearch {
+export interface PRWorkflowConfigurationsSearch {
   from?: string
   dialog?: "discard"
 }
 
 const workspaceIDPattern = /^prw_[0-9a-f]{32}$/
 
-export function normalizePRGateConfigsSearch(
+export function normalizePRWorkflowConfigurationsSearch(
   raw: Record<string, unknown>,
-): PRGateConfigsSearch {
+): PRWorkflowConfigurationsSearch {
   const from =
     typeof raw.from === "string" && workspaceIDPattern.test(raw.from)
       ? raw.from
@@ -35,7 +35,7 @@ export function normalizePRGateConfigsSearch(
   }
 }
 
-function PullRequestGateConfigsRoutePage() {
+function PullRequestWorkflowConfigurationsRoutePage() {
   const navigate = useNavigate()
   const router = useRouter()
   const locationState = useLocation({
@@ -45,11 +45,11 @@ function PullRequestGateConfigsRoutePage() {
   const locationSearch = useLocation({ select: (location) => location.search })
   const locationHash = useLocation({ select: (location) => location.hash })
   const search = useMemo(
-    () => normalizePRGateConfigsSearch({ ...locationSearch }),
+    () => normalizePRWorkflowConfigurationsSearch({ ...locationSearch }),
     [locationSearch],
   )
   const canonical =
-    pathname !== "/pull-requests/gate-configs" ||
+    pathname !== "/pull-requests/workflow-configurations" ||
     (locationHash === "" &&
       Object.keys(locationSearch).length === Object.keys(search).length &&
       Object.entries(search).every(
@@ -60,18 +60,18 @@ function PullRequestGateConfigsRoutePage() {
   useEffect(() => {
     if (canonical) return
     void navigate({
-      to: "/pull-requests/gate-configs",
+      to: "/pull-requests/workflow-configurations",
       search,
       hash: "",
       replace: true,
     })
   }, [canonical, navigate, search])
 
-  if (pathname !== "/pull-requests/gate-configs") return <Outlet />
+  if (pathname !== "/pull-requests/workflow-configurations") return <Outlet />
   if (!canonical) return null
 
   return (
-    <PRLifecycleGateConfigsPage
+    <PRLifecycleWorkflowConfigurationsPage
       page="configs"
       discardOpen={search.dialog === "discard"}
       onBack={() => {
@@ -102,7 +102,7 @@ function PullRequestGateConfigsRoutePage() {
       }}
       onDiscardOpenChange={(open) =>
         navigate({
-          to: "/pull-requests/gate-configs",
+          to: "/pull-requests/workflow-configurations",
           search: {
             ...(search.from ? { from: search.from } : {}),
             ...(open ? { dialog: "discard" as const } : {}),
@@ -115,17 +115,17 @@ function PullRequestGateConfigsRoutePage() {
         })
       }
       onConfigChange={(configID) => {
-        if (!configID || !isPRLifecycleGateConfigID(configID)) return
+        if (!configID || !isPRLifecycleWorkflowConfigurationID(configID)) return
         void navigate({
-          to: "/pull-requests/gate-configs/$configID",
-          params: { configID },
+          to: "/pull-requests/workflow-configurations/$configurationID",
+          params: { configurationID: configID },
           search: {
             flow: "review",
             ...(search.from ? { from: search.from } : {}),
           },
           state: (previous) =>
             updatePRNavigationState(previous, (current) => ({
-              prParent: "gate-configs",
+              prParent: "workflow-configurations",
               prParentIndex: current.__TSR_index,
               prParentKey: current.__TSR_key,
             })),
@@ -135,7 +135,9 @@ function PullRequestGateConfigsRoutePage() {
   )
 }
 
-export const Route = createFileRoute("/pull-requests_/gate-configs")({
-  validateSearch: normalizePRGateConfigsSearch,
-  component: PullRequestGateConfigsRoutePage,
-})
+export const Route = createFileRoute("/pull-requests_/workflow-configurations")(
+  {
+    validateSearch: normalizePRWorkflowConfigurationsSearch,
+    component: PullRequestWorkflowConfigurationsRoutePage,
+  },
+)

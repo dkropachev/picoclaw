@@ -20,7 +20,7 @@ import {
   type PRLifecycleGateAction,
   type PRLifecycleGateBinding,
   type PRLifecycleGateCatalogEntry,
-} from "@/api/pr-lifecycle-gate-configs"
+} from "@/api/pr-lifecycle-workflow-configurations"
 import { cn } from "@/lib/utils"
 
 interface PRLifecycleGateMapProps {
@@ -1879,7 +1879,7 @@ function gateEditorHref(
   decisionPoint: PRLifecycleDecisionPoint,
 ): string | undefined {
   if (!configID) return undefined
-  return `/pull-requests/gate-configs/${encodeURIComponent(configID)}?flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
+  return `/pull-requests/workflow-configurations/${encodeURIComponent(configID)}?flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
 }
 
 function isPRLifecycleFlowID(flowID: string): flowID is PRLifecycleFlowID {
@@ -1927,7 +1927,7 @@ function summarizeGateAction(
     accessible: `Gate action: ${label}. ${
       inherited
         ? "Inherited from the published workflow default."
-        : "Overridden by this Gate configuration."
+        : "Overridden by this Workflow configuration."
     }`,
   }
 }

@@ -89,23 +89,31 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
 The current schema uses top-level `pr_lifecycle` for unified pull-request
 workspaces. It contains:
 
-- named `gate-configs`, one `default-gate-config`, exact
+- named `workflow-configurations`, one `default-workflow-configuration`, exact
   `repository-assignments`, and atomic action overrides bound by the exact pair
   `workflow-ref` plus full `gate-ref: gates.<id>`;
 - independent review and completion adaptive-nudge minimum/maximum bounds;
 - monotonic `XS`, `S`, and `M` file, semantic-line, and module thresholds used
   to derive the `XS` through `L` implementation size grade.
 
-The scoped authenticated settings API is
-`GET`/`PUT /api/pr-lifecycle/gate-configs`. Writes are exact config-revision
-compare-and-swap operations and report that a gateway restart is required.
+The authenticated scoped APIs are split by ownership:
+
+- `GET`/`PUT /api/pr-lifecycle/workflow-configurations` owns the named
+  configurations, default selection, nudge bounds, and scope thresholds;
+- `GET`/`PUT /api/pr-lifecycle/repository-assignments` owns only exact
+  repository assignments and projects name/deferred-policy summaries for the
+  selectable configurations.
+
+Both writes use the same exact full-config revision compare-and-swap fence,
+preserve the other endpoint's fields server-side, and report whether a gateway
+restart is required. Removing an assigned configuration fails atomically.
 Configuration action precedence is exact: a matching binding replaces the
 complete workflow `default-action`; without a binding the default is used; if
 neither exists, execution fails closed. Partial action merging is unsupported.
 
 `reviews` is no longer a supported top-level field or an empty compatibility
-placeholder. It is not auto-migrated to `pr_lifecycle`; recreate desired gate
-configurations explicitly. Gate V2 serialized fields are unknown to the current
+placeholder. It is not auto-migrated to `pr_lifecycle`; recreate desired
+workflow configurations explicitly. Gate V2 serialized fields are unknown to the current
 schema and are rejected rather than migrated.
 See [Pull Request Workspaces](../guides/pull-request-workspaces.md)
 and [PR Workspace V19 Cutover](../migration/pr-workspace-v19-cutover.md).

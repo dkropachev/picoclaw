@@ -177,10 +177,11 @@ rounds. A bounded maximum prevents open-ended model loops.
 
 ## Gates
 
-Gate configurations are managed from **Pull requests → Gate configurations** at
-`/pull-requests/gate-configs`. Each named configuration has its own
-`/pull-requests/gate-configs/:configID?flow=review|implementation` editor and
-may be assigned to exact canonical repositories; all other repositories use the
+Workflow configurations are managed from **Pull requests → Workflow configurations** at
+`/pull-requests/workflow-configurations`. Each named configuration has its own
+`/pull-requests/workflow-configurations/:configurationID?flow=review|implementation`
+editor. Repository selection is a separate UI at
+`/pull-requests/repository-assignments`; all unassigned repositories use the
 configured default. Each named configuration also owns its deferred-issue
 policy. Global nudging and scope grades remain at `/pull-requests/settings`.
 
@@ -241,7 +242,7 @@ protected read-only snapshot of the finding-producing transcript. Cache and
 tools remain pinned to `none`. Missing, stale, mixed, cross-workspace, or
 ambiguous provenance fails closed without falling back to another profile.
 
-A Gate configuration contains exact `(workflow-ref, gate-ref)` bindings. A
+A Workflow configuration contains exact `(workflow-ref, gate-ref)` bindings. A
 binding's complete `action` atomically replaces the workflow
 `default-action`; fields never merge across them. With no binding, the
 workflow default is used. With neither, execution fails closed.
@@ -272,8 +273,8 @@ version and rejects duplicate group or finding membership rather than silently
 deduplicating it. Group membership is durable, so removing a finding from a
 group does not reappear after reload.
 
-Each Gate configuration owns its follow-up issue policy at
-`pr_lifecycle.gate-configs.<config-id>.deferred-issues.mode`. Repository
+Each Workflow configuration owns its follow-up issue policy at
+`pr_lifecycle.workflow-configurations.<configuration-id>.deferred-issues.mode`. Repository
 assignment selects the policy together with that configuration's Gate actions:
 
 - `off` refuses new issue publications and cancels an already queued one before
@@ -362,7 +363,7 @@ The current top-level configuration is `pr_lifecycle`:
 ```json
 {
   "pr_lifecycle": {
-    "gate-configs": {
+    "workflow-configurations": {
       "default": {
         "name": "Default",
         "deferred-issues": { "mode": "ask" },
@@ -380,7 +381,7 @@ The current top-level configuration is `pr_lifecycle`:
         ]
       }
     },
-    "default-gate-config": "default",
+    "default-workflow-configuration": "default",
     "repository-assignments": {
       "https://github.com|123456": "strict"
     },
@@ -399,10 +400,14 @@ The current top-level configuration is `pr_lifecycle`:
 }
 ```
 
-Use `GET` and revision-fenced `PUT /api/pr-lifecycle/gate-configs` for the
-scoped settings surface. Writes replace the complete Gate configuration catalog,
-including every configuration's deferred-issue policy, and the shared lifecycle
-settings. The retired top-level `pr_lifecycle.deferred-issues` field is rejected;
+Use revision-fenced `GET`/`PUT /api/pr-lifecycle/workflow-configurations` for
+the workflow configuration catalog, including every configuration's
+deferred-issue policy, and the shared lifecycle settings. Use
+`GET`/`PUT /api/pr-lifecycle/repository-assignments` for the independent
+repository assignment surface. Both PUTs compare the same full config revision,
+preserve fields owned by the other endpoint, validate the complete lifecycle,
+and reject removal of an assigned configuration. The retired top-level
+`pr_lifecycle.deferred-issues` field is rejected;
 it is not migrated or used as a fallback. Validation rejects unknown or
 duplicate exact bindings, relative gate refs, partial actions, unknown AI
 agents, nonmonotonic scope thresholds, and retired Gate V2 configuration
@@ -423,7 +428,8 @@ The authenticated launcher proxies one bounded API tree:
 - `/api/pr-workspaces`
 - `/api/pr-workspaces/{prw_...}` and its charter, run, finding, correction,
   message, deferred-group, gate, and publication subresources
-- `/api/pr-lifecycle/gate-configs`
+- `/api/pr-lifecycle/workflow-configurations`
+- `/api/pr-lifecycle/repository-assignments`
 
 The managed gateway owns the matching protected runtime tree at
 `/runtime/eventing/pr-workspaces`. Browser credentials are replaced with the

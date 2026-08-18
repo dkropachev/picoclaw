@@ -139,7 +139,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerWorkflowRoutes(mux)
 	h.registerEventRoutes(mux)
 	h.registerPRWorkspaceRoutes(mux)
-	h.registerPRLifecycleGateConfigRoutes(mux)
+	h.registerPRLifecycleWorkflowConfigurationRoutes(mux)
 
 	// OS startup / launch-at-login
 	h.registerStartupRoutes(mux)

@@ -298,14 +298,14 @@ func newEventAutomationServiceWithRuntime(
 	}
 	lifecycle := cfg.PRLifecycle.Effective()
 	deferredModeForRepository := func(providerOrigin, repositoryID string) prworkspace.DeferredIssueMode {
-		_, gateConfig, _, resolveErr := lifecycle.ConfigForRepository(providerOrigin, repositoryID)
+		_, workflowConfiguration, _, resolveErr := lifecycle.WorkflowConfigurationForRepository(providerOrigin, repositoryID)
 		if resolveErr != nil {
 			return prworkspace.DeferredIssuesOff
 		}
-		return prworkspace.DeferredIssueMode(gateConfig.DeferredIssues.Mode)
+		return prworkspace.DeferredIssueMode(workflowConfiguration.DeferredIssues.Mode)
 	}
 	defaultDeferredMode := prworkspace.DeferredIssueMode(
-		lifecycle.GateConfigs[lifecycle.DefaultGateConfigID].DeferredIssues.Mode,
+		lifecycle.WorkflowConfigurations[lifecycle.DefaultWorkflowConfigurationID].DeferredIssues.Mode,
 	)
 	gateEvaluator := &prworkspace.WorkflowGateEvaluator{
 		Config: lifecycle, Executor: executor,

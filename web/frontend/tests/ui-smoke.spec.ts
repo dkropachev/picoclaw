@@ -1137,8 +1137,8 @@ const prWorkspaceAggregate = {
   activity: [],
 }
 
-const prLifecycleGateConfigs = {
-  "gate-configs": {
+const prLifecycleWorkflowConfigurations = {
+  "workflow-configurations": {
     default: {
       name: "Default",
       bindings: [],
@@ -1150,8 +1150,7 @@ const prLifecycleGateConfigs = {
       "deferred-issues": { mode: "ask" },
     },
   },
-  "default-gate-config": "default",
-  "repository-assignments": {},
+  "default-workflow-configuration": "default",
   nudge: {
     "review-minimum-additional": 2,
     "review-maximum-additional": 5,
@@ -1203,6 +1202,26 @@ const prLifecycleGateConfigs = {
   flow: prLifecycleFlowFixture.flow,
   "flow-revision": prLifecycleFlowFixture.flow_revision,
   "catalog-revision": "sha256:catalog",
+  "config-revision": "sha256:config",
+  effects: {
+    "gateway-effect": "applied",
+    "deferred-policy-effect": "applied",
+  },
+}
+
+const prLifecycleRepositoryAssignments = {
+  "workflow-configurations": {
+    default: {
+      name: "Default",
+      "deferred-issues": { mode: "ask" },
+    },
+    editable: {
+      name: "Editable",
+      "deferred-issues": { mode: "ask" },
+    },
+  },
+  "default-workflow-configuration": "default",
+  "repository-assignments": {},
   "config-revision": "sha256:config",
   effects: {
     "gateway-effect": "applied",
@@ -2633,8 +2652,10 @@ async function mockLauncherApis(
           })
         case `/api/pr-workspaces/${prWorkspaceID}`:
           return json(route, prWorkspaceAggregate)
-        case "/api/pr-lifecycle/gate-configs":
-          return json(route, prLifecycleGateConfigs)
+        case "/api/pr-lifecycle/workflow-configurations":
+          return json(route, prLifecycleWorkflowConfigurations)
+        case "/api/pr-lifecycle/repository-assignments":
+          return json(route, prLifecycleRepositoryAssignments)
         case "/api/events":
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
@@ -3153,21 +3174,21 @@ for (const routePath of smokeRoutes) {
   })
 }
 
-test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
+test("Workflow configurations use canonical pages, tabs, and modal URLs", async ({
   page,
 }) => {
   test.setTimeout(60_000)
-  await gotoMockedRoute(page, "/pull-requests/gate-configs")
+  await gotoMockedRoute(page, "/pull-requests/workflow-configurations")
 
-  await expect(page).toHaveURL(/\/pull-requests\/gate-configs$/)
+  await expect(page).toHaveURL(/\/pull-requests\/workflow-configurations$/)
   await expect(
-    page.getByRole("heading", { name: "Gate configurations" }),
+    page.getByRole("heading", { name: "Workflow configurations" }),
   ).toBeVisible()
   await page
-    .getByRole("button", { name: "Edit Default Gate configuration" })
+    .getByRole("button", { name: "Edit Default Workflow configuration" })
     .click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/default\?flow=review$/,
+    /\/pull-requests\/workflow-configurations\/default\?flow=review$/,
   )
   await expect(
     page.getByRole("textbox", { name: "Configuration name" }),
@@ -3187,7 +3208,7 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
 
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/default\?flow=review&gate=pr\.charter\.confirm$/,
+    /\/pull-requests\/workflow-configurations\/default\?flow=review&gate=pr\.charter\.confirm$/,
   )
   const lockedDialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
@@ -3200,19 +3221,19 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   )
   await lockedDialog.getByRole("button", { name: "Close — keep draft" }).click()
   await page
-    .getByRole("button", { name: "Back to Gate configurations" })
+    .getByRole("button", { name: "Back to Workflow configurations" })
     .click()
-  await expect(page).toHaveURL(/\/pull-requests\/gate-configs$/)
+  await expect(page).toHaveURL(/\/pull-requests\/workflow-configurations$/)
 
   await page
-    .getByRole("button", { name: "Edit Editable Gate configuration" })
+    .getByRole("button", { name: "Edit Editable Workflow configuration" })
     .click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/editable\?flow=review$/,
+    /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
   )
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/editable\?flow=review&gate=pr\.charter\.confirm$/,
+    /\/pull-requests\/workflow-configurations\/editable\?flow=review&gate=pr\.charter\.confirm$/,
   )
   const dialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
@@ -3235,14 +3256,14 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   await page.keyboard.press("Escape")
   await dialog.getByRole("button", { name: "Close — keep draft" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/editable\?flow=review$/,
+    /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
   )
 
   await page
     .getByRole("button", { name: "Decide ambiguous finding scope" })
     .click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/editable\?flow=review&gate=pr\.finding\.classify$/,
+    /\/pull-requests\/workflow-configurations\/editable\?flow=review&gate=pr\.finding\.classify$/,
   )
   const sourceDialog = page.getByRole("dialog", {
     name: "Decide ambiguous finding scope",
@@ -3322,7 +3343,7 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   ).toBeVisible()
   await sourceDialog.getByRole("button", { name: "Close — keep draft" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/gate-configs\/editable\?flow=review$/,
+    /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
   )
   await expectNoSeriousA11yViolations(page)
   await expect(
@@ -3339,6 +3360,70 @@ test("Gate configurations use canonical pages, tabs, and modal URLs", async ({
   await expect(page.getByRole("tab", { name: "Deferred issues" })).toHaveCount(
     0,
   )
+  await expectNoSeriousA11yViolations(page)
+})
+
+test("Workflow configuration discard owns the modal focus trap", async ({
+  page,
+}) => {
+  await gotoMockedRoute(
+    page,
+    "/pull-requests/workflow-configurations/editable?flow=review&gate=pr.finding.classify&dialog=discard",
+  )
+
+  const discard = page.getByRole("alertdialog", {
+    name: "Discard Workflow configuration changes?",
+  })
+  await expect(discard).toBeVisible()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+
+  await discard.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page).toHaveURL(
+    /\/pull-requests\/workflow-configurations\/editable\?flow=review&gate=pr\.finding\.classify$/,
+  )
+  await expect(
+    page.getByRole("dialog", { name: "Decide ambiguous finding scope" }),
+  ).toBeVisible()
+})
+
+test("Repository assignments have a separate canonical UI and URL", async ({
+  page,
+}) => {
+  await gotoMockedRoute(page, "/pull-requests/repository-assignments")
+
+  await expect(page).toHaveURL(/\/pull-requests\/repository-assignments$/)
+  await expect(
+    page.getByRole("heading", { name: "Repository assignments" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Repository routing" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Save assignments" }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("textbox", { name: "Configuration name" }),
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: /edit .*workflow configuration/i }),
+  ).toHaveCount(0)
+
+  await page
+    .getByRole("textbox", { name: "Repository identity" })
+    .fill("https://github.com|100")
+  await page.getByRole("combobox", { name: "Workflow configuration" }).click()
+  await page.getByRole("option", { name: "Editable" }).click()
+  await page.getByRole("button", { name: "Add assignment" }).click()
+  await expect(page.getByText("https://github.com|100")).toBeVisible()
+  await expect(
+    page.getByRole("combobox", {
+      name: "Workflow configuration for https://github.com|100",
+    }),
+  ).toHaveText("Editable")
+  await expect(
+    page.getByRole("button", { name: "Save assignments" }),
+  ).toBeEnabled()
+  await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
 })
 

@@ -4,7 +4,12 @@ export interface PRNavigationState extends HistoryState {
   key?: string
   __TSR_key?: string
   __TSR_index: number
-  prParent?: "portfolio" | "workspace" | "gate-configs" | "settings"
+  prParent?:
+    | "portfolio"
+    | "workspace"
+    | "workflow-configurations"
+    | "repository-assignments"
+    | "settings"
   prParentIndex?: number
   prParentKey?: string
   prOverlay?: "gate" | "discard"

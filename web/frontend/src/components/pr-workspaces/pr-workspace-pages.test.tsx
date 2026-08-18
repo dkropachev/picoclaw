@@ -6,10 +6,14 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { type PRLifecycleFlowCatalog } from "@/api/pr-lifecycle-flow"
 import {
-  type PRLifecycleGateConfigSnapshot,
-  getPRLifecycleGateConfigs,
-  putPRLifecycleGateConfigs,
-} from "@/api/pr-lifecycle-gate-configs"
+  type PRLifecycleRepositoryAssignmentSnapshot,
+  getPRLifecycleRepositoryAssignments,
+} from "@/api/pr-lifecycle-repository-assignments"
+import {
+  type PRLifecycleWorkflowConfigurationSnapshot,
+  getPRLifecycleWorkflowConfigurations,
+  putPRLifecycleWorkflowConfigurations,
+} from "@/api/pr-lifecycle-workflow-configurations"
 import { respondPRWorkspaceGate } from "@/api/pr-workspace-gates"
 import {
   type PRWorkspace,
@@ -31,7 +35,7 @@ import {
   syncPRWorkspaceAutomaticDeferredIssues,
   updatePRWorkspaceDeferredGroup,
 } from "@/api/pr-workspaces"
-import { PRLifecycleGateConfigsPage } from "@/components/pr-workspaces/pr-lifecycle-gate-configs-page"
+import { PRLifecycleWorkflowConfigurationsPage } from "@/components/pr-workspaces/pr-lifecycle-workflow-configurations-page"
 import { PRWorkspacePage } from "@/components/pr-workspaces/pr-workspace-page"
 import { PRWorkspacePortfolioPage } from "@/components/pr-workspaces/pr-workspace-portfolio-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
@@ -115,13 +119,29 @@ vi.mock("@/api/pr-workspace-gates", () => ({
   respondPRWorkspaceGate: vi.fn(),
 }))
 
-vi.mock("@/api/pr-lifecycle-gate-configs", async (importOriginal) => {
+vi.mock(
+  "@/api/pr-lifecycle-workflow-configurations",
+  async (importOriginal) => {
+    const original =
+      await importOriginal<
+        typeof import("@/api/pr-lifecycle-workflow-configurations")
+      >()
+    return {
+      ...original,
+      getPRLifecycleWorkflowConfigurations: vi.fn(),
+      putPRLifecycleWorkflowConfigurations: vi.fn(),
+    }
+  },
+)
+
+vi.mock("@/api/pr-lifecycle-repository-assignments", async (importOriginal) => {
   const original =
-    await importOriginal<typeof import("@/api/pr-lifecycle-gate-configs")>()
+    await importOriginal<
+      typeof import("@/api/pr-lifecycle-repository-assignments")
+    >()
   return {
     ...original,
-    getPRLifecycleGateConfigs: vi.fn(),
-    putPRLifecycleGateConfigs: vi.fn(),
+    getPRLifecycleRepositoryAssignments: vi.fn(),
   }
 })
 
@@ -242,8 +262,8 @@ const aggregate: PRWorkspace = {
 const lifecycleFlow =
   prLifecycleFlowFixture.flow as unknown as PRLifecycleFlowCatalog
 
-const gateConfigs: PRLifecycleGateConfigSnapshot = {
-  gateConfigs: {
+const workflowConfigurations: PRLifecycleWorkflowConfigurationSnapshot = {
+  workflowConfigurations: {
     default: {
       name: "Default",
       bindings: [],
@@ -255,8 +275,7 @@ const gateConfigs: PRLifecycleGateConfigSnapshot = {
       deferredIssues: { mode: "ask" },
     },
   },
-  defaultGateConfig: "default",
-  repositoryAssignments: {},
+  defaultWorkflowConfiguration: "default",
   nudge: {
     reviewMinimumAdditional: 2,
     reviewMaximumAdditional: 5,
@@ -313,6 +332,25 @@ const gateConfigs: PRLifecycleGateConfigSnapshot = {
   effects: { gatewayEffect: "applied", deferredPolicyEffect: "applied" },
 }
 
+const repositoryAssignments: PRLifecycleRepositoryAssignmentSnapshot = {
+  workflowConfigurations: Object.fromEntries(
+    Object.entries(workflowConfigurations.workflowConfigurations).map(
+      ([configurationID, configuration]) => [
+        configurationID,
+        {
+          name: configuration.name,
+          deferredIssues: configuration.deferredIssues,
+        },
+      ],
+    ),
+  ),
+  defaultWorkflowConfiguration:
+    workflowConfigurations.defaultWorkflowConfiguration,
+  repositoryAssignments: {},
+  configRevision: workflowConfigurations.configRevision,
+  effects: workflowConfigurations.effects,
+}
+
 const mockedList = vi.mocked(listPRWorkspaces)
 const mockedCreate = vi.mocked(createPRWorkspace)
 const mockedGet = vi.mocked(getPRWorkspace)
@@ -331,8 +369,13 @@ const mockedUpdateDeferred = vi.mocked(updatePRWorkspaceDeferredGroup)
 const mockedPublishPhase = vi.mocked(publishPRWorkspacePhase)
 const mockedReconcilePublication = vi.mocked(reconcilePRWorkspacePublication)
 const mockedRespondGate = vi.mocked(respondPRWorkspaceGate)
-const mockedGetGateConfigs = vi.mocked(getPRLifecycleGateConfigs)
-const mockedPutGateConfigs = vi.mocked(putPRLifecycleGateConfigs)
+const mockedGetWorkflowConfigurations = vi.mocked(
+  getPRLifecycleWorkflowConfigurations,
+)
+const mockedPutWorkflowConfigurations = vi.mocked(
+  putPRLifecycleWorkflowConfigurations,
+)
+const mockedGetAssignments = vi.mocked(getPRLifecycleRepositoryAssignments)
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -395,8 +438,9 @@ describe("unified PR workspace pages", () => {
     mockedPublishPhase.mockResolvedValue(aggregate)
     mockedReconcilePublication.mockResolvedValue(aggregate)
     mockedRespondGate.mockResolvedValue(aggregate)
-    mockedGetGateConfigs.mockResolvedValue(gateConfigs)
-    mockedPutGateConfigs.mockResolvedValue(gateConfigs)
+    mockedGetWorkflowConfigurations.mockResolvedValue(workflowConfigurations)
+    mockedPutWorkflowConfigurations.mockResolvedValue(workflowConfigurations)
+    mockedGetAssignments.mockResolvedValue(repositoryAssignments)
     vi.mocked(createPRWorkspaceRequestID).mockReturnValue(
       `prq_${"9".repeat(32)}`,
     )
@@ -408,7 +452,7 @@ describe("unified PR workspace pages", () => {
     renderPage(
       <PRWorkspacePortfolioPage
         onOpenWorkspace={onOpen}
-        onOpenGateConfigs={vi.fn()}
+        onOpenWorkflowConfigurations={vi.fn()}
       />,
     )
 
@@ -716,7 +760,7 @@ describe("unified PR workspace pages", () => {
       <PRWorkspacePage
         workspaceID={aggregate.workspace.id}
         onBack={vi.fn()}
-        onOpenGateConfigs={vi.fn()}
+        onOpenWorkflowConfigurations={vi.fn()}
       />,
     )
 
@@ -1688,11 +1732,11 @@ describe("unified PR workspace pages", () => {
         },
       ],
     }
-    mockedGetGateConfigs.mockResolvedValue({
-      ...gateConfigs,
-      gateConfigs: {
+    mockedGetAssignments.mockResolvedValue({
+      ...repositoryAssignments,
+      workflowConfigurations: {
         default: {
-          ...gateConfigs.gateConfigs.default,
+          ...repositoryAssignments.workflowConfigurations.default,
           deferredIssues: { mode: "automatic" },
         },
       },
@@ -1784,12 +1828,12 @@ describe("unified PR workspace pages", () => {
         },
       ],
     })
-    mockedGetGateConfigs.mockResolvedValue({
-      ...gateConfigs,
-      gateConfigs: {
-        ...gateConfigs.gateConfigs,
+    mockedGetAssignments.mockResolvedValue({
+      ...repositoryAssignments,
+      workflowConfigurations: {
+        ...repositoryAssignments.workflowConfigurations,
         default: {
-          ...gateConfigs.gateConfigs.default,
+          ...repositoryAssignments.workflowConfigurations.default,
           deferredIssues: { mode: "automatic" },
         },
       },
@@ -1865,7 +1909,7 @@ describe("unified PR workspace pages", () => {
         },
       ],
     })
-    mockedGetGateConfigs.mockRejectedValueOnce(new Error("settings offline"))
+    mockedGetAssignments.mockRejectedValueOnce(new Error("settings offline"))
 
     renderPage(
       <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
@@ -2264,16 +2308,15 @@ describe("unified PR workspace pages", () => {
   })
 
   it("retains deferred work but hides GitHub issue actions when publication is off", async () => {
-    mockedGetGateConfigs.mockResolvedValue({
-      ...gateConfigs,
+    mockedGetAssignments.mockResolvedValue({
+      ...repositoryAssignments,
       repositoryAssignments: {
         "https://github.com|100": "no-publication",
       },
-      gateConfigs: {
-        ...gateConfigs.gateConfigs,
+      workflowConfigurations: {
+        ...repositoryAssignments.workflowConfigurations,
         "no-publication": {
           name: "No publication",
-          bindings: [],
           deferredIssues: { mode: "off" },
         },
       },
@@ -2483,10 +2526,10 @@ describe("unified PR workspace pages", () => {
     )
   })
 
-  it("edits deferred issue policy on the named Gate configuration", async () => {
+  it("edits deferred issue policy on the named Workflow configuration", async () => {
     const user = userEvent.setup()
     renderPage(
-      <PRLifecycleGateConfigsPage
+      <PRLifecycleWorkflowConfigurationsPage
         activeFlowID="review"
         initialConfigID="default"
         onBack={vi.fn()}
@@ -2503,9 +2546,9 @@ describe("unified PR workspace pages", () => {
     await user.click(screen.getByRole("button", { name: "Save configuration" }))
 
     await waitFor(() =>
-      expect(mockedPutGateConfigs).toHaveBeenCalledWith(
+      expect(mockedPutWorkflowConfigurations).toHaveBeenCalledWith(
         expect.objectContaining({
-          gateConfigs: expect.objectContaining({
+          workflowConfigurations: expect.objectContaining({
             default: expect.objectContaining({
               deferredIssues: { mode: "automatic" },
             }),
@@ -2518,7 +2561,7 @@ describe("unified PR workspace pages", () => {
   it("keeps only the built-in default name and Gate bindings read only", async () => {
     const user = userEvent.setup()
     renderPage(
-      <PRLifecycleGateConfigsPage
+      <PRLifecycleWorkflowConfigurationsPage
         activeFlowID="review"
         initialConfigID="default"
         onBack={vi.fn()}
@@ -2555,10 +2598,10 @@ describe("unified PR workspace pages", () => {
     )
   })
 
-  it("shows Gate configuration defaults and creates an atomic AI override", async () => {
+  it("shows Workflow configuration defaults and creates an atomic AI override", async () => {
     const user = userEvent.setup()
     renderPage(
-      <PRLifecycleGateConfigsPage
+      <PRLifecycleWorkflowConfigurationsPage
         activeFlowID="review"
         initialDecisionPoint="pr.finding.classify"
         initialConfigID="editable"
@@ -2646,12 +2689,12 @@ describe("unified PR workspace pages", () => {
   })
 
   it("preserves an inherited unsupported source snapshot visibly", async () => {
-    mockedGetGateConfigs.mockResolvedValueOnce({
-      ...gateConfigs,
+    mockedGetWorkflowConfigurations.mockResolvedValueOnce({
+      ...workflowConfigurations,
       gateCatalog: {
-        ...gateConfigs.gateCatalog,
+        ...workflowConfigurations.gateCatalog,
         "pr.charter.confirm": {
-          ...gateConfigs.gateCatalog["pr.charter.confirm"],
+          ...workflowConfigurations.gateCatalog["pr.charter.confirm"],
           defaultAction: {
             type: "ai",
             prompt: "Recheck the originating finding.",
@@ -2666,7 +2709,7 @@ describe("unified PR workspace pages", () => {
       },
     })
     renderPage(
-      <PRLifecycleGateConfigsPage
+      <PRLifecycleWorkflowConfigurationsPage
         activeFlowID="review"
         initialDecisionPoint="pr.charter.confirm"
         initialConfigID="editable"
@@ -2694,16 +2737,16 @@ describe("unified PR workspace pages", () => {
     )
   })
 
-  it("preserves edits made while a Gate configuration save is in flight", async () => {
+  it("preserves edits made while a Workflow configuration save is in flight", async () => {
     const user = userEvent.setup()
-    let resolveSave!: (value: PRLifecycleGateConfigSnapshot) => void
-    mockedPutGateConfigs.mockReturnValueOnce(
+    let resolveSave!: (value: PRLifecycleWorkflowConfigurationSnapshot) => void
+    mockedPutWorkflowConfigurations.mockReturnValueOnce(
       new Promise((resolve) => {
         resolveSave = resolve
       }),
     )
     renderPage(
-      <PRLifecycleGateConfigsPage
+      <PRLifecycleWorkflowConfigurationsPage
         activeFlowID="review"
         initialConfigID="editable"
         onBack={vi.fn()}
@@ -2720,9 +2763,9 @@ describe("unified PR workspace pages", () => {
 
     await act(async () => {
       resolveSave({
-        ...gateConfigs,
-        gateConfigs: {
-          ...gateConfigs.gateConfigs,
+        ...workflowConfigurations,
+        workflowConfigurations: {
+          ...workflowConfigurations.workflowConfigurations,
           editable: {
             name: "Submitted name",
             bindings: [],

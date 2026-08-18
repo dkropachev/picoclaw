@@ -31,7 +31,7 @@ export interface PRLifecycleGateBinding {
   action?: PRLifecycleGateAction
 }
 
-export interface PRLifecycleGateConfig {
+export interface PRLifecycleWorkflowConfiguration {
   name: string
   bindings: PRLifecycleGateBinding[]
   deferredIssues: { mode: PRLifecycleDeferredIssueModeV3 }
@@ -87,10 +87,9 @@ export interface PRLifecycleScopeConfigV3 {
 
 export type PRLifecycleDeferredIssueModeV3 = "off" | "ask" | "automatic"
 
-export interface PRLifecycleGateConfigSnapshot {
-  gateConfigs: Record<string, PRLifecycleGateConfig>
-  defaultGateConfig: string
-  repositoryAssignments: Record<string, string>
+export interface PRLifecycleWorkflowConfigurationSnapshot {
+  workflowConfigurations: Record<string, PRLifecycleWorkflowConfiguration>
+  defaultWorkflowConfiguration: string
   nudge: PRLifecycleNudgeConfigV3
   scope: PRLifecycleScopeConfigV3
   gateCatalog: Record<string, PRLifecycleGateCatalogEntry>
@@ -104,63 +103,80 @@ export interface PRLifecycleGateConfigSnapshot {
   }
 }
 
-export interface PutPRLifecycleGateConfigsInput {
+export interface PutPRLifecycleWorkflowConfigurationsInput {
   expectedConfigRevision: string
   requestID: string
-  gateConfigs: Record<string, PRLifecycleGateConfig>
-  defaultGateConfig: string
-  repositoryAssignments: Record<string, string>
+  workflowConfigurations: Record<string, PRLifecycleWorkflowConfiguration>
+  defaultWorkflowConfiguration: string
   nudge: PRLifecycleNudgeConfigV3
   scope: PRLifecycleScopeConfigV3
 }
 
-export interface PRLifecycleGateConfigIssue {
+export interface PRLifecycleWorkflowConfigurationIssue {
   path: string
   message: string
 }
 
-export const prLifecycleGateConfigIDPattern = /^[a-z][a-z0-9-]{0,63}$/
+export const prLifecycleWorkflowConfigurationIDPattern =
+  /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const gateRefPattern = /^gates\.[a-z][a-z0-9-]{0,63}$/
 
-export function isPRLifecycleGateConfigID(value: string): boolean {
-  return prLifecycleGateConfigIDPattern.test(value)
+export function isPRLifecycleWorkflowConfigurationID(value: string): boolean {
+  return prLifecycleWorkflowConfigurationIDPattern.test(value)
 }
 
-export function validatePRLifecycleGateConfigs(
+export function validatePRLifecycleWorkflowConfigurations(
   snapshot: Pick<
-    PRLifecycleGateConfigSnapshot,
-    | "gateConfigs"
-    | "defaultGateConfig"
-    | "repositoryAssignments"
+    PRLifecycleWorkflowConfigurationSnapshot,
+    | "workflowConfigurations"
+    | "defaultWorkflowConfiguration"
     | "nudge"
     | "scope"
   > &
-    Partial<Pick<PRLifecycleGateConfigSnapshot, "gateCatalog">>,
-): PRLifecycleGateConfigIssue[] {
-  const issues: PRLifecycleGateConfigIssue[] = []
-  const configIDs = Object.keys(snapshot.gateConfigs)
+    Partial<Pick<PRLifecycleWorkflowConfigurationSnapshot, "gateCatalog">>,
+): PRLifecycleWorkflowConfigurationIssue[] {
+  const issues: PRLifecycleWorkflowConfigurationIssue[] = []
+  const configIDs = Object.keys(snapshot.workflowConfigurations)
   if (configIDs.length === 0) {
     issues.push({
-      path: "gate-configs",
-      message: "Add at least one Gate configuration.",
+      path: "workflow-configurations",
+      message: "Add at least one Workflow configuration.",
     })
   }
-  if (!snapshot.gateConfigs[snapshot.defaultGateConfig]) {
+  if (!snapshot.workflowConfigurations[snapshot.defaultWorkflowConfiguration]) {
     issues.push({
-      path: "default-gate-config",
-      message: "The default Gate configuration does not exist.",
+      path: "default-workflow-configuration",
+      message: "The default Workflow configuration does not exist.",
     })
   }
-  for (const [configID, config] of Object.entries(snapshot.gateConfigs)) {
-    const path = `gate-configs.${configID}`
-    if (!isPRLifecycleGateConfigID(configID)) {
+  const names = new Map<string, string>()
+  for (const [configID, config] of Object.entries(
+    snapshot.workflowConfigurations,
+  )) {
+    const path = `workflow-configurations.${configID}`
+    if (!isPRLifecycleWorkflowConfigurationID(configID)) {
       issues.push({ path, message: "Configuration ID must use kebab-case." })
     }
-    if (!config.name.trim()) {
+    if (
+      !config.name ||
+      config.name !== config.name.trim() ||
+      new TextEncoder().encode(config.name).length > 128
+    ) {
       issues.push({
         path: `${path}.name`,
-        message: "Configuration name is required.",
+        message:
+          "Workflow configuration name must be trimmed, non-empty, and at most 128 bytes.",
       })
+    }
+    const foldedName = config.name.toLowerCase()
+    const previousNameOwner = names.get(foldedName)
+    if (previousNameOwner !== undefined) {
+      issues.push({
+        path: `${path}.name`,
+        message: `Workflow configuration name duplicates ${previousNameOwner} ignoring case.`,
+      })
+    } else {
+      names.set(foldedName, configID)
     }
     if (
       config.deferredIssues.mode !== "off" &&
@@ -218,22 +234,6 @@ export function validatePRLifecycleGateConfigs(
       }
     }
   }
-  for (const [repository, configID] of Object.entries(
-    snapshot.repositoryAssignments,
-  )) {
-    if (!repository.trim()) {
-      issues.push({
-        path: "repository-assignments",
-        message: "Repository assignment key is required.",
-      })
-    }
-    if (!snapshot.gateConfigs[configID]) {
-      issues.push({
-        path: `repository-assignments.${repository}`,
-        message: "Repository assignment references a missing configuration.",
-      })
-    }
-  }
   validateRange(
     snapshot.nudge.reviewMinimumAdditional,
     snapshot.nudge.reviewMaximumAdditional,
@@ -267,7 +267,7 @@ function validateRange(
   minimum: number,
   maximum: number,
   path: string,
-  issues: PRLifecycleGateConfigIssue[],
+  issues: PRLifecycleWorkflowConfigurationIssue[],
 ) {
   if (
     !Number.isSafeInteger(minimum) ||
@@ -286,7 +286,7 @@ function validateRange(
 function validateAction(
   action: PRLifecycleGateAction,
   path: string,
-  issues: PRLifecycleGateConfigIssue[],
+  issues: PRLifecycleWorkflowConfigurationIssue[],
 ) {
   if (action.type === "ai") {
     const sourceSession = action.session === "source"
@@ -397,25 +397,25 @@ function isCanonicalWorkflowRef(value: string): boolean {
     .every((part) => part !== "" && part !== "." && part !== "..")
 }
 
-export async function getPRLifecycleGateConfigs(
+export async function getPRLifecycleWorkflowConfigurations(
   signal?: AbortSignal,
-): Promise<PRLifecycleGateConfigSnapshot> {
+): Promise<PRLifecycleWorkflowConfigurationSnapshot> {
   return projectSnapshot(
     await requestPRWorkspaceJSON<unknown>(
-      "/api/pr-lifecycle/gate-configs",
+      "/api/pr-lifecycle/workflow-configurations",
       undefined,
       signal,
     ),
   )
 }
 
-export async function putPRLifecycleGateConfigs(
-  input: PutPRLifecycleGateConfigsInput,
+export async function putPRLifecycleWorkflowConfigurations(
+  input: PutPRLifecycleWorkflowConfigurationsInput,
   signal?: AbortSignal,
-): Promise<PRLifecycleGateConfigSnapshot> {
+): Promise<PRLifecycleWorkflowConfigurationSnapshot> {
   return projectSnapshot(
     await requestPRWorkspaceJSON<unknown>(
-      "/api/pr-lifecycle/gate-configs",
+      "/api/pr-lifecycle/workflow-configurations",
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -426,18 +426,17 @@ export async function putPRLifecycleGateConfigs(
   )
 }
 
-function serializeInput(input: PutPRLifecycleGateConfigsInput) {
+function serializeInput(input: PutPRLifecycleWorkflowConfigurationsInput) {
   return {
     "expected-config-revision": input.expectedConfigRevision,
     "request-id": input.requestID,
-    "gate-configs": Object.fromEntries(
-      Object.entries(input.gateConfigs).map(([id, config]) => [
+    "workflow-configurations": Object.fromEntries(
+      Object.entries(input.workflowConfigurations).map(([id, config]) => [
         id,
         serializeConfig(config),
       ]),
     ),
-    "default-gate-config": input.defaultGateConfig,
-    "repository-assignments": input.repositoryAssignments,
+    "default-workflow-configuration": input.defaultWorkflowConfiguration,
     nudge: {
       "review-minimum-additional": input.nudge.reviewMinimumAdditional,
       "review-maximum-additional": input.nudge.reviewMaximumAdditional,
@@ -457,7 +456,7 @@ function serializeInput(input: PutPRLifecycleGateConfigsInput) {
   }
 }
 
-function serializeConfig(config: PRLifecycleGateConfig) {
+function serializeConfig(config: PRLifecycleWorkflowConfiguration) {
   return {
     name: config.name,
     "deferred-issues": config.deferredIssues,
@@ -485,12 +484,13 @@ function serializeAction(action: PRLifecycleGateAction) {
   }
 }
 
-function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
+function projectSnapshot(
+  value: unknown,
+): PRLifecycleWorkflowConfigurationSnapshot {
   const root = asRecord(value)
   onlyKeys(root, [
-    "gate-configs",
-    "default-gate-config",
-    "repository-assignments",
+    "workflow-configurations",
+    "default-workflow-configuration",
     "nudge",
     "scope",
     "gate-catalog",
@@ -500,12 +500,13 @@ function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
     "config-revision",
     "effects",
   ])
-  const snapshot: PRLifecycleGateConfigSnapshot = {
-    gateConfigs: projectMap(root["gate-configs"], projectConfig),
-    defaultGateConfig: stringValue(root["default-gate-config"]),
-    repositoryAssignments: projectMap(
-      root["repository-assignments"],
-      stringValue,
+  const snapshot: PRLifecycleWorkflowConfigurationSnapshot = {
+    workflowConfigurations: projectMap(
+      root["workflow-configurations"],
+      projectConfig,
+    ),
+    defaultWorkflowConfiguration: stringValue(
+      root["default-workflow-configuration"],
     ),
     nudge: projectNudge(root.nudge),
     scope: projectScope(root.scope),
@@ -517,10 +518,9 @@ function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
     effects: projectEffects(root.effects),
   }
   if (
-    validatePRLifecycleGateConfigs({
-      gateConfigs: snapshot.gateConfigs,
-      defaultGateConfig: snapshot.defaultGateConfig,
-      repositoryAssignments: snapshot.repositoryAssignments,
+    validatePRLifecycleWorkflowConfigurations({
+      workflowConfigurations: snapshot.workflowConfigurations,
+      defaultWorkflowConfiguration: snapshot.defaultWorkflowConfiguration,
       nudge: snapshot.nudge,
       scope: snapshot.scope,
     }).length > 0
@@ -529,7 +529,7 @@ function projectSnapshot(value: unknown): PRLifecycleGateConfigSnapshot {
   return snapshot
 }
 
-function projectConfig(value: unknown): PRLifecycleGateConfig {
+function projectConfig(value: unknown): PRLifecycleWorkflowConfiguration {
   const source = asRecord(value)
   onlyKeys(source, ["name", "bindings", "deferred-issues"])
   if (!Array.isArray(source.bindings)) malformed()
@@ -601,7 +601,7 @@ function projectAction(value: unknown): PRLifecycleGateAction {
     ...(source.fields === undefined ? {} : { fields: asRecord(source.fields) }),
     ...optionalString(source, "workflow-ref", "workflowRef"),
   }
-  const issues: PRLifecycleGateConfigIssue[] = []
+  const issues: PRLifecycleWorkflowConfigurationIssue[] = []
   validateAction(action, "action", issues)
   if (issues.length > 0) malformed()
   return action
@@ -762,7 +762,7 @@ function projectDeferredIssues(value: unknown): {
 
 function projectEffects(
   value: unknown,
-): PRLifecycleGateConfigSnapshot["effects"] {
+): PRLifecycleWorkflowConfigurationSnapshot["effects"] {
   const source = asRecord(value)
   onlyKeys(source, ["gateway-effect", "deferred-policy-effect"])
   const gatewayEffect = stringValue(source["gateway-effect"])

@@ -549,26 +549,26 @@ type PRGateTurn struct {
 
 type PRGateRun struct {
 	PRWorkspaceRecord
-	DecisionPoint     string           `json:"decision_point"`
-	TargetID          string           `json:"target_id,omitempty"`
-	State             PRExecutionState `json:"state"`
-	PolicyRevision    string           `json:"policy-revision"`
-	WorkflowRef       string           `json:"workflow-ref,omitempty"`
-	WorkflowRevision  string           `json:"workflow-revision,omitempty"`
-	GateRef           string           `json:"gate-ref,omitempty"`
-	ConfigID          string           `json:"config-id"`
-	ConfigRevision    string           `json:"config-revision"`
-	PinnedPolicy      json.RawMessage  `json:"pinned_policy"`
-	PinnedPolicyHash  string           `json:"pinned_policy_hash"`
-	SubjectRevision   string           `json:"subject_revision"`
-	PinnedSubject     json.RawMessage  `json:"pinned_subject"`
-	PinnedSubjectHash string           `json:"pinned_subject_hash"`
-	WorkflowRunID     string           `json:"workflow_run_id,omitempty"`
-	RuntimePresent    bool             `json:"runtime_present,omitempty"`
-	CurrentStageID    string           `json:"current_stage_id,omitempty"`
-	Turns             []PRGateTurn     `json:"turns,omitempty"`
-	Evidence          json.RawMessage  `json:"evidence,omitempty"`
-	FinishedAt        *time.Time       `json:"finished_at,omitempty"`
+	DecisionPoint                 string           `json:"decision_point"`
+	TargetID                      string           `json:"target_id,omitempty"`
+	State                         PRExecutionState `json:"state"`
+	PolicyRevision                string           `json:"policy-revision"`
+	WorkflowRef                   string           `json:"workflow-ref,omitempty"`
+	WorkflowRevision              string           `json:"workflow-revision,omitempty"`
+	GateRef                       string           `json:"gate-ref,omitempty"`
+	WorkflowConfigurationID       string           `json:"workflow-configuration-id"`
+	WorkflowConfigurationRevision string           `json:"workflow-configuration-revision"`
+	PinnedPolicy                  json.RawMessage  `json:"pinned_policy"`
+	PinnedPolicyHash              string           `json:"pinned_policy_hash"`
+	SubjectRevision               string           `json:"subject_revision"`
+	PinnedSubject                 json.RawMessage  `json:"pinned_subject"`
+	PinnedSubjectHash             string           `json:"pinned_subject_hash"`
+	WorkflowRunID                 string           `json:"workflow_run_id,omitempty"`
+	RuntimePresent                bool             `json:"runtime_present,omitempty"`
+	CurrentStageID                string           `json:"current_stage_id,omitempty"`
+	Turns                         []PRGateTurn     `json:"turns,omitempty"`
+	Evidence                      json.RawMessage  `json:"evidence,omitempty"`
+	FinishedAt                    *time.Time       `json:"finished_at,omitempty"`
 }
 
 type PRPublication struct {

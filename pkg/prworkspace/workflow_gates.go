@@ -17,7 +17,7 @@ import (
 )
 
 // WorkflowGateEvaluator executes the application-owned PR gate selected by a
-// lifecycle decision point. A repository gate configuration can atomically
+// lifecycle decision point. A repository workflow configuration can atomically
 // replace the workflow's default action, but cannot replace the form, prompt,
 // gate identity, or application interpretation of returned field values.
 type WorkflowGateEvaluator struct {
@@ -27,15 +27,15 @@ type WorkflowGateEvaluator struct {
 	Now            func() time.Time
 }
 
-type pinnedPRLifecycleGateV3 struct {
-	Version          string                   `json:"version"`
-	WorkflowRef      string                   `json:"workflow-ref"`
-	WorkflowRevision string                   `json:"workflow-revision"`
-	GateRef          string                   `json:"gate-ref"`
-	Gate             gatetypes.GateDefinition `json:"gate"`
-	ConfigID         string                   `json:"config-id"`
-	ConfigRevision   string                   `json:"config-revision"`
-	ActionRevision   string                   `json:"action-revision"`
+type pinnedPRLifecycleGateV4 struct {
+	Version                       string                   `json:"version"`
+	WorkflowRef                   string                   `json:"workflow-ref"`
+	WorkflowRevision              string                   `json:"workflow-revision"`
+	GateRef                       string                   `json:"gate-ref"`
+	Gate                          gatetypes.GateDefinition `json:"gate"`
+	WorkflowConfigurationID       string                   `json:"workflow-configuration-id"`
+	WorkflowConfigurationRevision string                   `json:"workflow-configuration-revision"`
+	ActionRevision                string                   `json:"action-revision"`
 }
 
 type fixedPRLifecycleGateActionResolver struct {
@@ -74,7 +74,7 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 		return GateRun{}, fmt.Errorf("%w: unknown PR lifecycle decision point %q", ErrInvalid, request.DecisionPoint)
 	}
 	configured := evaluator.Config.Effective()
-	configID, gateConfig, configRevision, err := configured.ConfigForRepository(
+	workflowConfigurationID, workflowConfiguration, workflowConfigurationRevision, err := configured.WorkflowConfigurationForRepository(
 		request.ProviderOrigin,
 		request.RepositoryID,
 	)
@@ -85,7 +85,7 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 	if err != nil {
 		return GateRun{}, err
 	}
-	override, err := configuredPRLifecycleGateAction(gateConfig, entry.WorkflowRef, entry.GateRef)
+	override, err := configuredPRLifecycleGateAction(workflowConfiguration, entry.WorkflowRef, entry.GateRef)
 	if err != nil {
 		return GateRun{}, err
 	}
@@ -96,7 +96,7 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 	if effectiveAction == nil {
 		return GateRun{}, fmt.Errorf("gate %q has no configured action or default-action", entry.GateRef)
 	}
-	actionRevision, err := prLifecycleActionRevision(entry, configID, configRevision, effectiveAction)
+	actionRevision, err := prLifecycleActionRevision(entry, workflowConfigurationID, workflowConfigurationRevision, effectiveAction)
 	if err != nil {
 		return GateRun{}, err
 	}
@@ -147,16 +147,16 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 			ExpectedRevision: source.SessionRevision,
 		}
 	}
-	pinned := pinnedPRLifecycleGateV3{
-		Version: "3", WorkflowRef: entry.WorkflowRef, WorkflowRevision: entry.WorkflowRevision,
-		GateRef: entry.GateRef, Gate: entry.Gate, ConfigID: configID,
-		ConfigRevision: configRevision, ActionRevision: actionRevision,
+	pinned := pinnedPRLifecycleGateV4{
+		Version: "4", WorkflowRef: entry.WorkflowRef, WorkflowRevision: entry.WorkflowRevision,
+		GateRef: entry.GateRef, Gate: entry.Gate, WorkflowConfigurationID: workflowConfigurationID,
+		WorkflowConfigurationRevision: workflowConfigurationRevision, ActionRevision: actionRevision,
 	}
 	pinnedPolicy, err := json.Marshal(pinned)
 	if err != nil {
 		return GateRun{}, err
 	}
-	policyRevision := prLifecyclePolicyRevision(entry.WorkflowRevision, configRevision, actionRevision)
+	policyRevision := prLifecyclePolicyRevision(entry.WorkflowRevision, workflowConfigurationRevision, actionRevision)
 	now := evaluator.now()
 	gate := GateRun{
 		ID: stableID(
@@ -166,7 +166,7 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 		State:         ExecutionRunning, PolicyRevision: policyRevision,
 		SubjectRevision: request.SubjectDigest, Evidence: projectGateEvidence(normalizedSubject), CreatedAt: now,
 		runtime: &gateRuntime{
-			ConfigID: configID, PinnedPolicy: pinnedPolicy, PinnedSubject: subjectJSON,
+			WorkflowConfigurationID: workflowConfigurationID, PinnedPolicy: pinnedPolicy, PinnedSubject: subjectJSON,
 		},
 	}
 	runtimeExecutor := *evaluator.Executor
@@ -197,7 +197,7 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 		}
 		projected.PolicyRevision = prLifecyclePolicyRevision(
 			entry.WorkflowRevision,
-			configRevision,
+			workflowConfigurationRevision,
 			resolvedRevision,
 		)
 		projected.ID = stableID(
@@ -217,11 +217,11 @@ func latestGateActionRevision(turns []GateTurn) string {
 }
 
 func configuredPRLifecycleGateAction(
-	gateConfig config.PRLifecycleGateConfig,
+	workflowConfiguration config.PRLifecycleWorkflowConfiguration,
 	workflowRef string,
 	gateRef string,
 ) (*workflows.GateAction, error) {
-	for _, binding := range gateConfig.Bindings {
+	for _, binding := range workflowConfiguration.Bindings {
 		if binding.WorkflowRef != workflowRef || binding.GateRef != gateRef {
 			continue
 		}
@@ -237,17 +237,17 @@ func configuredPRLifecycleGateAction(
 
 func prLifecycleActionRevision(
 	entry PRLifecycleGateCatalogEntry,
-	configID string,
-	configRevision string,
+	workflowConfigurationID string,
+	workflowConfigurationRevision string,
 	action *gatetypes.GateAction,
 ) (string, error) {
 	encoded, err := json.Marshal(struct {
-		WorkflowRevision string                `json:"workflow-revision"`
-		GateRef          string                `json:"gate-ref"`
-		ConfigID         string                `json:"config-id"`
-		ConfigRevision   string                `json:"config-revision"`
-		Action           *gatetypes.GateAction `json:"action"`
-	}{entry.WorkflowRevision, entry.GateRef, configID, configRevision, action})
+		WorkflowRevision              string                `json:"workflow-revision"`
+		GateRef                       string                `json:"gate-ref"`
+		WorkflowConfigurationID       string                `json:"workflow-configuration-id"`
+		WorkflowConfigurationRevision string                `json:"workflow-configuration-revision"`
+		Action                        *gatetypes.GateAction `json:"action"`
+	}{entry.WorkflowRevision, entry.GateRef, workflowConfigurationID, workflowConfigurationRevision, action})
 	if err != nil {
 		return "", err
 	}
@@ -353,8 +353,8 @@ func (evaluator *WorkflowGateEvaluator) project(ctx context.Context, gate GateRu
 	if err != nil {
 		return GateRun{}, err
 	}
-	var pinned pinnedPRLifecycleGateV3
-	if err := json.Unmarshal(gate.runtime.PinnedPolicy, &pinned); err != nil || pinned.Version != "3" {
+	var pinned pinnedPRLifecycleGateV4
+	if err := json.Unmarshal(gate.runtime.PinnedPolicy, &pinned); err != nil || pinned.Version != "4" {
 		return GateRun{}, errors.New("pinned gate policy is invalid")
 	}
 	resultTurn := GateTurn{StageID: "gate", Kind: "gate", Title: pinned.Gate.Prompt, Status: "pending"}

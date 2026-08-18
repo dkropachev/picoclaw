@@ -140,7 +140,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	messageID := stableID("pms_", workspaceID, "message")
 	reward := .75
 	finished := now.Add(time.Minute)
-	policy := json.RawMessage(`{"version":"3","workflow-ref":"workflows/pr-lifecycle.yml","workflow-revision":"sha256:test-workflow","gate-ref":"gates.implementation-complete","config-id":"strict","config-revision":"sha256:test-config","action-revision":"sha256:test-action"}`)
+	policy := json.RawMessage(`{"version":"4","workflow-ref":"workflows/pr-lifecycle.yml","workflow-revision":"sha256:test-workflow","gate-ref":"gates.implementation-complete","workflow-configuration-id":"strict","workflow-configuration-revision":"sha256:test-config","action-revision":"sha256:test-action"}`)
 	subject := json.RawMessage(`{"repair_id":"` + repairID + `"}`)
 	publicationPayload, publicationDigest, err := encodePublicationPayload(issuePublicationPayload{
 		ProviderOrigin: provider.ProviderOrigin, RepositoryID: provider.RepositoryID, Repository: provider.Repository,
@@ -157,7 +157,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 			GateForm: &GateForm{GateRef: "gates.implementation-complete", Prompt: "Complete?"},
 		}}, CreatedAt: now,
 		runtime: &gateRuntime{
-			ConfigID: "strict", WorkflowRunID: "workflow-private-1",
+			WorkflowConfigurationID: "strict", WorkflowRunID: "workflow-private-1",
 			PinnedPolicy: policy, PinnedSubject: subject,
 		},
 	}
