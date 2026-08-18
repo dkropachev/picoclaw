@@ -2600,6 +2600,32 @@ describe("unified PR workspace pages", () => {
 
   it("shows Workflow configuration defaults and creates an atomic AI override", async () => {
     const user = userEvent.setup()
+    const classifyGate =
+      workflowConfigurations.gateCatalog["pr.finding.classify"]
+    mockedGetWorkflowConfigurations.mockResolvedValueOnce({
+      ...workflowConfigurations,
+      gateCatalog: {
+        ...workflowConfigurations.gateCatalog,
+        "pr.finding.classify": {
+          ...classifyGate,
+          fields: [
+            ...(classifyGate.fields ?? []),
+            {
+              id: "affected-areas",
+              type: "select",
+              label: "Affected areas",
+              required: false,
+              minSelections: 1,
+              maxSelections: 2,
+              options: [
+                { id: "implementation", label: "Implementation" },
+                { id: "tests", label: "Tests" },
+              ],
+            },
+          ],
+        },
+      },
+    })
     renderPage(
       <PRLifecycleWorkflowConfigurationsPage
         activeFlowID="review"
@@ -2613,75 +2639,94 @@ describe("unified PR workspace pages", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Decide ambiguous finding scope",
     })
-    expect(within(dialog).getByText("Workflow default")).toBeVisible()
-    expect(within(dialog).getAllByText("Human").length).toBeGreaterThan(0)
     expect(
-      within(dialog).getByRole("heading", { name: "Gate request" }),
+      within(dialog).getByRole("combobox", { name: "Execution action" }),
+    ).toHaveTextContent("Use workflow default (Human)")
+    expect(
+      within(dialog).getByRole("combobox", { name: "Execution action" }),
+    ).toHaveClass("w-full", "min-w-0")
+    expect(
+      within(dialog).getByRole("heading", { name: "Expected answer" }),
     ).toBeVisible()
     expect(within(dialog).getByText("What should happen?")).toBeVisible()
     expect(
-      within(dialog).getByText(
-        /Approve \(approve\), Request revision \(revise\)/,
-      ),
+      within(dialog).getByText("Choose one: Approve · Request revision"),
     ).toBeVisible()
+    expect(
+      within(dialog).getByText("Choose 1–2: Implementation · Tests"),
+    ).toBeVisible()
+    expect(
+      within(dialog).queryByText("Workflow reference"),
+    ).not.toBeInTheDocument()
+    expect(
+      within(dialog).queryByText(/Approve \(approve\)/),
+    ).not.toBeInTheDocument()
     await user.click(
       within(dialog).getByRole("combobox", { name: "Execution action" }),
     )
     await user.click(screen.getByRole("option", { name: "AI" }))
     expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
-    expect(within(dialog).getAllByText("AI · main · Ephemeral")).toHaveLength(2)
     expect(
       within(dialog).getByRole("combobox", { name: "Session" }),
     ).toHaveTextContent("Ephemeral")
-    expect(within(dialog).getByLabelText("History")).toHaveValue("None")
-    expect(within(dialog).getByLabelText("History")).toBeDisabled()
-    expect(within(dialog).getByLabelText("Cache")).toHaveValue("None")
-    expect(within(dialog).getByLabelText("Cache")).toBeDisabled()
-    expect(within(dialog).getByLabelText("Tools")).toHaveValue("None")
-    expect(within(dialog).getByLabelText("Tools")).toBeDisabled()
+    expect(
+      within(dialog).getByText(/no history, cache, or tools/i),
+    ).toBeVisible()
+    expect(within(dialog).queryByLabelText("History")).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText("Tools")).not.toBeInTheDocument()
 
     await user.click(within(dialog).getByRole("combobox", { name: "Session" }))
     await user.click(
       screen.getByRole("option", { name: "Originating snapshot" }),
     )
-    expect(within(dialog).getByLabelText("Agent ID")).toHaveValue(
-      "Same originating agent",
-    )
-    expect(within(dialog).getByLabelText("Agent ID")).toBeDisabled()
-    expect(within(dialog).getByLabelText("History")).toHaveValue(
-      "Exact source snapshot (read only)",
-    )
-    expect(within(dialog).getByLabelText("Cache")).toHaveValue("None")
-    expect(within(dialog).getByLabelText("Tools")).toHaveValue("None")
+    expect(within(dialog).queryByLabelText("Agent ID")).not.toBeInTheDocument()
     expect(within(dialog).getByLabelText("AI prompt")).toBeEnabled()
     expect(
-      within(dialog).getByText(/stops without falling back/i),
+      within(dialog).getByText(
+        /same originating agent.*exact read-only snapshot.*no cache or tools/i,
+      ),
     ).toBeVisible()
-    await user.hover(
-      within(dialog).getByRole("button", { name: "Why Tools is fixed" }),
-    )
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      /same policy.*tool authority remains none/i,
-    )
+    expect(within(dialog).getByText(/stops execution/i)).toBeVisible()
 
     await user.click(within(dialog).getByRole("combobox", { name: "Session" }))
     await user.click(screen.getByRole("option", { name: "Private snapshot" }))
     expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
     expect(within(dialog).getByLabelText("Agent ID")).toBeEnabled()
-    expect(within(dialog).getByLabelText("History")).toHaveValue("Read only")
-    expect(within(dialog).getByLabelText("History")).toBeDisabled()
     expect(
       within(dialog).getByRole("combobox", { name: "Cache" }),
     ).toHaveTextContent("Session")
-    expect(within(dialog).getByLabelText("Tools")).toHaveValue("None")
-    expect(within(dialog).getByLabelText("Tools")).toBeDisabled()
+    expect(
+      within(dialog).getByText(
+        /frozen read-only history.*session cache.*no tools/i,
+      ),
+    ).toBeVisible()
+    expect(within(dialog).queryByLabelText("History")).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText("Tools")).not.toBeInTheDocument()
 
     await user.click(within(dialog).getByRole("combobox", { name: "Session" }))
     await user.click(screen.getByRole("option", { name: "Ephemeral" }))
     expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
     expect(within(dialog).getByLabelText("Agent ID")).toBeEnabled()
     await user.click(
-      within(dialog).getByRole("button", { name: "Close — keep draft" }),
+      within(dialog).getByRole("combobox", { name: "Execution action" }),
+    )
+    await user.click(screen.getByRole("option", { name: "Deterministic" }))
+    expect(
+      within(dialog).getByLabelText("Deterministic field expressions"),
+    ).toHaveValue("{}")
+    expect(
+      within(dialog).getByText("implementation", { selector: "code" }),
+    ).not.toBeVisible()
+    await user.click(within(dialog).getByText("JSON keys and allowed values"))
+    expect(
+      within(dialog).getByText("action", { selector: "code" }),
+    ).toBeVisible()
+    expect(
+      within(dialog).getByText("implementation", { selector: "code" }),
+    ).toBeVisible()
+    expect(within(dialog).getByText(/Array of option IDs/)).toBeVisible()
+    await user.click(
+      within(dialog).getByRole("button", { name: "Done editing" }),
     )
     expect(
       screen.getByRole("button", { name: "Save configuration" }),
@@ -2721,16 +2766,16 @@ describe("unified PR workspace pages", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Approve purpose and scope",
     })
-    expect(within(dialog).getByLabelText("Session")).toHaveValue(
-      "Originating snapshot",
-    )
-    expect(within(dialog).getByLabelText("Session")).toBeDisabled()
-    expect(within(dialog).getByLabelText("AI prompt")).toHaveValue(
-      "Recheck the originating finding.",
-    )
-    expect(within(dialog).getByLabelText("AI prompt")).toBeDisabled()
     expect(
-      within(dialog).getByText(/inherits its published workflow default/i),
+      within(dialog).getByRole("combobox", { name: "Execution action" }),
+    ).toHaveTextContent("Use workflow default (AI · Originating snapshot)")
+    expect(within(dialog).queryByLabelText("Session")).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText("AI prompt")).not.toBeInTheDocument()
+    expect(
+      within(dialog).getByText("Recheck the originating finding."),
+    ).toBeVisible()
+    expect(
+      within(dialog).getByText(/defined by the workflow default/i),
     ).toBeVisible()
     expect(within(dialog).getByRole("alert")).toHaveTextContent(
       /does not publish a source-bearing finding/i,

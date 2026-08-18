@@ -24,6 +24,7 @@ import { type PRLifecycleDecisionPoint } from "@/api/pr-lifecycle-flow"
 import {
   type PRLifecycleGateAction,
   type PRLifecycleGateActionType,
+  type PRLifecycleGateCatalogField,
   type PRLifecycleWorkflowConfiguration,
   type PRLifecycleWorkflowConfigurationIssue,
   type PRLifecycleWorkflowConfigurationSnapshot,
@@ -875,46 +876,6 @@ function GateActionDialog({
             </div>
           ) : (
             <>
-              <dl className="bg-muted/30 grid min-w-0 gap-3 rounded-lg border p-3 text-xs sm:grid-cols-2">
-                <Metadata
-                  label="Workflow reference"
-                  value={catalogEntry.workflowRef}
-                />
-                <Metadata label="Gate reference" value={catalogEntry.gateRef} />
-                <Metadata
-                  label="Published revision"
-                  value={catalogEntry.workflowRevision ?? "Unavailable"}
-                />
-                <Metadata
-                  label="Workflow default"
-                  value={actionLabel(defaultAction)}
-                />
-                <Metadata
-                  label="Override"
-                  value={
-                    override
-                      ? actionLabel(override)
-                      : "None — inherit workflow default"
-                  }
-                />
-                <Metadata
-                  label="Effective action"
-                  value={actionLabel(effectiveAction)}
-                />
-              </dl>
-
-              <GateRequestSummary catalogEntry={catalogEntry} />
-
-              {readOnly && (
-                <p
-                  className="bg-muted/30 rounded-lg border p-3 text-sm"
-                  id={readOnlyDescriptionID}
-                  role="note"
-                >
-                  {readOnlyDescription}
-                </p>
-              )}
-
               <GateField label="Execution action">
                 <Select
                   disabled={readOnly}
@@ -926,12 +887,13 @@ function GateActionDialog({
                       readOnly ? readOnlyDescriptionID : undefined
                     }
                     aria-label="Execution action"
+                    className="w-full min-w-0 *:data-[slot=select-value]:min-w-0"
                   >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="inherit">
-                      Use workflow default
+                      Use workflow default ({actionLabel(defaultAction)})
                     </SelectItem>
                     <SelectItem value="human">Human</SelectItem>
                     <SelectItem value="ai">AI</SelectItem>
@@ -939,25 +901,21 @@ function GateActionDialog({
                     <SelectItem value="workflow">Workflow</SelectItem>
                   </SelectContent>
                 </Select>
-                <p className="text-muted-foreground mt-1.5 text-xs">
-                  “Use workflow default” removes this configuration’s binding
-                  override.
-                </p>
+                {readOnly && (
+                  <p
+                    className="text-muted-foreground mt-1.5 text-xs"
+                    id={readOnlyDescriptionID}
+                    role="note"
+                  >
+                    {readOnlyDescription}
+                  </p>
+                )}
               </GateField>
-
-              {override?.type === "human" && (
-                <p className="bg-muted/30 rounded-lg border p-3 text-sm">
-                  The workflow pauses at <code>gate/exec</code>, shows the
-                  Gate’s generic fields to a user, validates the reply, and
-                  resumes with <code>field-values</code>.
-                </p>
-              )}
 
               {displayedAIAction && (
                 <AIActionFields
                   action={displayedAIAction}
                   inherited={readOnly || override === undefined}
-                  lockExplanation={readOnly ? readOnlyDescription : undefined}
                   sourceAISupported={catalogEntry.sourceAISupported}
                   onChange={
                     override?.type === "ai"
@@ -968,44 +926,49 @@ function GateActionDialog({
               )}
 
               {override?.type === "deterministic" && (
-                <GateField label="Field expressions (JSON)">
-                  <Textarea
-                    aria-label="Deterministic field expressions"
-                    className="min-h-40 font-mono text-xs"
-                    value={deterministicFields}
-                    aria-invalid={Boolean(deterministicError)}
-                    aria-describedby={
-                      readOnly ? readOnlyDescriptionID : undefined
-                    }
-                    disabled={readOnly}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      setDeterministicFields(value)
-                      try {
-                        const parsed: unknown = JSON.parse(value)
-                        if (
-                          typeof parsed !== "object" ||
-                          parsed === null ||
-                          Array.isArray(parsed)
-                        )
-                          throw new Error()
-                        setDeterministicError("")
-                        patchAction({
-                          fields: parsed as Record<string, unknown>,
-                        })
-                      } catch {
-                        setDeterministicError(
-                          "Enter a JSON object keyed by Gate field ID.",
-                        )
+                <>
+                  <GateField label="Field expressions (JSON)">
+                    <Textarea
+                      aria-label="Deterministic field expressions"
+                      className="min-h-40 font-mono text-xs"
+                      value={deterministicFields}
+                      aria-invalid={Boolean(deterministicError)}
+                      aria-describedby={
+                        readOnly ? readOnlyDescriptionID : undefined
                       }
-                    }}
+                      disabled={readOnly}
+                      onChange={(event) => {
+                        const value = event.target.value
+                        setDeterministicFields(value)
+                        try {
+                          const parsed: unknown = JSON.parse(value)
+                          if (
+                            typeof parsed !== "object" ||
+                            parsed === null ||
+                            Array.isArray(parsed)
+                          )
+                            throw new Error()
+                          setDeterministicError("")
+                          patchAction({
+                            fields: parsed as Record<string, unknown>,
+                          })
+                        } catch {
+                          setDeterministicError(
+                            "Enter a JSON object keyed by Gate field ID.",
+                          )
+                        }
+                      }}
+                    />
+                    {deterministicError && (
+                      <p className="text-destructive mt-1 text-xs">
+                        {deterministicError}
+                      </p>
+                    )}
+                  </GateField>
+                  <DeterministicFieldReference
+                    fields={catalogEntry.fields ?? []}
                   />
-                  {deterministicError && (
-                    <p className="text-destructive mt-1 text-xs">
-                      {deterministicError}
-                    </p>
-                  )}
-                </GateField>
+                </>
               )}
 
               {override?.type === "workflow" && (
@@ -1023,15 +986,14 @@ function GateActionDialog({
                   />
                 </GateField>
               )}
+
+              <GateAnswerPreview catalogEntry={catalogEntry} />
             </>
           )}
         </div>
         <DialogFooter className="border-border border-t px-5 py-3">
-          <p className="text-muted-foreground mr-auto text-xs">
-            Changes remain a draft until the Workflow configuration is saved.
-          </p>
           <DialogClose asChild>
-            <Button variant="outline">Close — keep draft</Button>
+            <Button>Done editing</Button>
           </DialogClose>
         </DialogFooter>
       </DialogContent>
@@ -1039,7 +1001,7 @@ function GateActionDialog({
   )
 }
 
-function GateRequestSummary({
+function GateAnswerPreview({
   catalogEntry,
 }: {
   catalogEntry: PRLifecycleWorkflowConfigurationSnapshot["gateCatalog"][string]
@@ -1047,57 +1009,113 @@ function GateRequestSummary({
   const fields = catalogEntry.fields ?? []
   return (
     <section
-      aria-labelledby="pr-gate-request-title"
-      className="min-w-0 space-y-2 rounded-lg border p-3"
+      aria-labelledby="pr-gate-answer-preview-title"
+      className="bg-muted/20 min-w-0 space-y-2 rounded-lg border p-3"
     >
       <div>
-        <h3 className="text-sm font-semibold" id="pr-gate-request-title">
-          Gate request
+        <h3 className="text-sm font-semibold" id="pr-gate-answer-preview-title">
+          Expected answer
         </h3>
         <p className="text-muted-foreground mt-1 text-xs leading-snug">
-          {catalogEntry.prompt ??
-            "The published workflow did not project a Gate prompt."}
+          {catalogEntry.prompt ?? "No additional instructions."}
         </p>
       </div>
       {fields.length === 0 ? (
-        <p className="text-muted-foreground text-xs">
-          No published Gate fields are available.
-        </p>
+        <p className="text-muted-foreground text-xs">No answer is required.</p>
       ) : (
-        <ul className="grid min-w-0 gap-2 sm:grid-cols-2">
+        <ul className="divide-border min-w-0 divide-y text-xs">
           {fields.map((field) => (
-            <li
-              className="bg-muted/20 min-w-0 rounded-md border p-2 text-xs"
-              key={field.id}
-            >
-              <div className="flex min-w-0 flex-wrap items-start justify-between gap-1.5">
+            <li className="min-w-0 py-2 first:pt-0 last:pb-0" key={field.id}>
+              <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
                 <strong className="min-w-0 [overflow-wrap:anywhere]">
                   {field.label}
                 </strong>
-                <Badge variant="outline">{field.type}</Badge>
-              </div>
-              <code className="text-muted-foreground mt-1 block [overflow-wrap:anywhere]">
-                {field.id}
-              </code>
-              <p className="text-muted-foreground mt-1">
-                {field.type === "select"
-                  ? `${field.minSelections}–${field.maxSelections} selections`
-                  : field.required
-                    ? "Required"
-                    : "Optional"}
+                <span className="text-muted-foreground">
+                  {field.required ? "Required" : "Optional"}
+                </span>
               </p>
-              {field.type === "select" && (
-                <p className="mt-1 [overflow-wrap:anywhere]">
-                  {field.options
-                    .map((option) => `${option.label} (${option.id})`)
-                    .join(", ")}
-                </p>
-              )}
+              <p className="text-muted-foreground mt-0.5 [overflow-wrap:anywhere]">
+                {answerFieldPreview(field)}
+              </p>
             </li>
           ))}
         </ul>
       )}
     </section>
+  )
+}
+
+function answerFieldPreview(field: PRLifecycleGateCatalogField): string {
+  if (field.type === "select") {
+    const choices = field.options.map((option) => option.label)
+    const instruction = selectCardinalityInstruction(
+      field.minSelections,
+      field.maxSelections,
+    )
+    return choices.length > 0
+      ? `${instruction}: ${choices.join(" · ")}`
+      : `${instruction} option`
+  }
+  if (field.type === "boolean") return "Yes · No"
+  return field.type === "long-text" ? "Written response" : "Short response"
+}
+
+function selectCardinalityInstruction(minimum: number, maximum: number) {
+  if (minimum === 1 && maximum === 1) return "Choose one"
+  if (minimum === maximum) return `Choose ${minimum}`
+  if (minimum === 0) return `Choose up to ${maximum}`
+  return `Choose ${minimum}–${maximum}`
+}
+
+function DeterministicFieldReference({
+  fields,
+}: {
+  fields: PRLifecycleGateCatalogField[]
+}) {
+  return (
+    <details className="bg-muted/20 min-w-0 rounded-lg border p-3 text-xs">
+      <summary className="cursor-pointer font-semibold">
+        JSON keys and allowed values
+      </summary>
+      <p className="text-muted-foreground mt-2 leading-snug">
+        Use these workflow-defined IDs in the JSON object. Values may also be
+        workflow expressions.
+      </p>
+      {fields.length === 0 ? (
+        <p className="text-muted-foreground mt-2">This Gate has no fields.</p>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {fields.map((field) => (
+            <li className="min-w-0 [overflow-wrap:anywhere]" key={field.id}>
+              <code>{field.id}</code>
+              <span className="text-muted-foreground"> — {field.label}: </span>
+              <DeterministicValueReference field={field} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
+  )
+}
+
+function DeterministicValueReference({
+  field,
+}: {
+  field: PRLifecycleGateCatalogField
+}) {
+  if (field.type === "boolean") return <span>Boolean</span>
+  if (field.type !== "select") return <span>Text</span>
+  const prefix = field.maxSelections > 1 ? "Array of option IDs" : "Option ID"
+  return (
+    <span>
+      {prefix}:{" "}
+      {field.options.map((option, index) => (
+        <span key={option.id}>
+          {index > 0 && ", "}
+          <code>{option.id}</code> ({option.label})
+        </span>
+      ))}
+    </span>
   )
 }
 
@@ -1109,75 +1127,43 @@ const aiSessionLabels: Record<AISessionMode, string> = {
   source: "Originating snapshot",
 }
 
-const aiSessionDescriptions: Record<AISessionMode, string> = {
-  ephemeral:
-    "Runs an isolated request with no session history, cache, or tool authority.",
-  private:
-    "Reads a frozen private PR context for the selected agent without changing its history.",
-  source:
-    "Reads the exact protected snapshot captured from the AI run that produced this Gate's finding, using the same agent and the same pinned no-tool policy.",
-}
-
 function AIActionFields({
   action,
   inherited,
-  lockExplanation,
   sourceAISupported,
   onChange,
 }: {
   action: PRLifecycleGateAction & { type: "ai" }
   inherited: boolean
-  lockExplanation?: string
   sourceAISupported: boolean
   onChange?: (action: PRLifecycleGateAction) => void
 }) {
   const session = action.session ?? "ephemeral"
-  const promptDescriptionID = useId()
-  const fixedByWorkflow =
-    lockExplanation ??
-    "This value is defined by the published workflow default. Select AI as an override to change it."
-  const describeEnforced = (reason: string) =>
-    inherited ? `${reason} ${fixedByWorkflow}` : reason
   const replaceSession = (next: AISessionMode) =>
     onChange?.(aiActionForSession(action, next))
+  const profileSummary = aiExecutionProfileSummary(action, session, inherited)
 
   return (
     <section aria-label="AI execution profile" className="space-y-3">
-      {inherited && (
-        <p className="bg-muted/30 rounded-lg border p-3 text-sm">
-          {lockExplanation ??
-            "Effective AI settings are read only because this Gate inherits its published workflow default."}
-        </p>
-      )}
       {session === "source" && !sourceAISupported && (
         <div
           className="border-destructive/50 bg-destructive/5 text-destructive rounded-lg border p-3 text-sm"
           role="alert"
         >
           This Gate does not publish a source-bearing finding, so an originating
-          snapshot cannot run here. The existing value is preserved for
-          recovery; choose another session before saving.
+          snapshot cannot run here. Use a custom Workflow configuration with a
+          supported session, or publish a source-bearing finding for this Gate.
         </div>
       )}
-      {session === "source" && sourceAISupported && (
-        <div
-          className="border-warning/50 bg-warning/10 rounded-lg border p-3 text-sm"
-          role="note"
-        >
-          The exact originating snapshot is resolved separately for each Gate
-          execution. If its provenance, snapshot, or agent is unavailable or
-          ambiguous, execution stops without falling back. Tool authority stays
-          pinned to None.
-        </div>
-      )}
+      <p
+        className="bg-muted/30 text-muted-foreground rounded-lg border p-2.5 text-xs leading-snug"
+        data-ai-profile-summary
+      >
+        <strong className="text-foreground">{aiSessionLabels[session]}.</strong>{" "}
+        {profileSummary}
+      </p>
       <div className="grid gap-3 sm:grid-cols-2">
-        {inherited ? (
-          <LockedField
-            description={describeEnforced(aiSessionDescriptions[session])}
-            label="Session"
-            value={aiSessionLabels[session]}
-          />
-        ) : (
+        {!inherited && (
           <GateField label="Session">
             <Select
               value={session}
@@ -1198,33 +1184,10 @@ function AIActionFields({
                 ) : null}
               </SelectContent>
             </Select>
-            <p className="text-muted-foreground mt-1.5 text-xs">
-              {aiSessionDescriptions[session]}
-            </p>
           </GateField>
         )}
 
-        {inherited ? (
-          <LockedField
-            description={describeEnforced(
-              session === "source"
-                ? "The exact source snapshot pins the originating agent."
-                : `The workflow selects agent ${action.agentID ?? "Unavailable"}.`,
-            )}
-            label="Agent ID"
-            value={
-              session === "source"
-                ? "Same originating agent"
-                : (action.agentID ?? "Unavailable")
-            }
-          />
-        ) : session === "source" ? (
-          <LockedField
-            description="The exact source snapshot pins the same agent that produced the finding. This Workflow configuration cannot replace it."
-            label="Agent ID"
-            value="Same originating agent"
-          />
-        ) : (
+        {!inherited && session !== "source" && (
           <GateField label="Agent ID">
             <Input
               aria-label="Agent ID"
@@ -1236,37 +1199,7 @@ function AIActionFields({
           </GateField>
         )}
 
-        <LockedField
-          description={describeEnforced(
-            session === "ephemeral"
-              ? "Ephemeral Gate actions have no session and therefore cannot read or write history."
-              : session === "private"
-                ? "Private Gate actions inspect one frozen read-only snapshot and cannot append to it."
-                : "The Gate reads the exact protected snapshot captured from the originating session without appending to it.",
-          )}
-          label="History"
-          value={
-            session === "ephemeral"
-              ? "None"
-              : session === "private"
-                ? "Read only"
-                : "Exact source snapshot (read only)"
-          }
-        />
-
-        {inherited ? (
-          <LockedField
-            description={describeEnforced(
-              session === "source"
-                ? "The source profile pins cache to None; only the exact read-only snapshot supplies prior context."
-                : action.cache === "session"
-                  ? "The private snapshot may use its session cache."
-                  : "This AI profile does not use a cache.",
-            )}
-            label="Cache"
-            value={session === "source" ? "None" : cacheLabel(action.cache)}
-          />
-        ) : session === "private" ? (
+        {!inherited && session === "private" && (
           <GateField label="Cache">
             <Select
               value={action.cache ?? "session"}
@@ -1283,53 +1216,46 @@ function AIActionFields({
               </SelectContent>
             </Select>
           </GateField>
-        ) : (
-          <LockedField
-            description={
-              session === "ephemeral"
-                ? "Ephemeral Gate actions create no session cache."
-                : "The source profile pins cache to None; only the exact read-only snapshot supplies prior context."
-            }
-            label="Cache"
-            value="None"
-          />
         )}
 
-        <GateField className="sm:col-span-2" label="Prompt">
-          <Textarea
-            aria-label="AI prompt"
-            disabled={inherited}
-            value={action.prompt ?? ""}
-            aria-describedby={inherited ? promptDescriptionID : undefined}
-            onChange={(event) =>
-              onChange?.({ ...action, prompt: event.target.value })
-            }
-          />
-          {inherited && (
+        <GateField className="sm:col-span-2" label="AI instruction">
+          {inherited ? (
             <p
-              className="text-muted-foreground mt-1.5 text-xs"
-              id={promptDescriptionID}
+              className="bg-muted/20 min-h-10 rounded-md border px-3 py-2 text-sm [overflow-wrap:anywhere]"
+              data-ai-instruction
             >
-              {fixedByWorkflow}
+              {action.prompt || "No additional AI instruction."}
             </p>
+          ) : (
+            <Textarea
+              aria-label="AI prompt"
+              value={action.prompt ?? ""}
+              onChange={(event) =>
+                onChange?.({ ...action, prompt: event.target.value })
+              }
+            />
           )}
         </GateField>
-
-        <LockedField
-          className="sm:col-span-2"
-          description={describeEnforced(
-            session === "ephemeral"
-              ? "Ephemeral Gate actions are isolated and have no tool authority."
-              : session === "private"
-                ? "Private Gate actions inspect frozen PR evidence; tools are disabled."
-                : "The source run used a pinned no-tool policy. This Gate enforces that same policy, so tool authority remains None.",
-          )}
-          label="Tools"
-          value="None"
-        />
       </div>
     </section>
   )
+}
+
+function aiExecutionProfileSummary(
+  action: PRLifecycleGateAction & { type: "ai" },
+  session: AISessionMode,
+  inherited: boolean,
+): string {
+  const inheritedSuffix = inherited ? " Defined by the workflow default." : ""
+  if (session === "source") {
+    return `Same originating agent · exact read-only snapshot · no cache or tools. Missing or ambiguous source evidence stops execution.${inheritedSuffix}`
+  }
+  const agent = action.agentID ? `Agent ${action.agentID} · ` : ""
+  if (session === "private") {
+    const cache = action.cache === "session" ? "session cache" : "no cache"
+    return `${agent}frozen read-only history · ${cache} · no tools.${inheritedSuffix}`
+  }
+  return `${agent}no history, cache, or tools.${inheritedSuffix}`
 }
 
 function aiActionForSession(
@@ -1365,12 +1291,6 @@ function aiActionForSession(
     cache: "none",
     tools: "none",
   }
-}
-
-function cacheLabel(cache: PRLifecycleGateAction["cache"]): string {
-  if (cache === "session") return "Session"
-  if (cache === "agent") return "Agent"
-  return "None"
 }
 
 function deferredIssueModeLabel(
@@ -1462,15 +1382,6 @@ function actionLabel(action: PRLifecycleGateAction | undefined): string {
   if (action.type === "workflow")
     return action.workflowRef ? `Workflow · ${action.workflowRef}` : "Workflow"
   return action.type === "human" ? "Human" : "Deterministic"
-}
-
-function Metadata({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-muted-foreground font-semibold">{label}</dt>
-      <dd className="mt-0.5 [overflow-wrap:anywhere]">{value}</dd>
-    </div>
-  )
 }
 
 function SettingsTabs({

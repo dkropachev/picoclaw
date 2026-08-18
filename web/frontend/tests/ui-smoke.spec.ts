@@ -3219,7 +3219,7 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   await expect(lockedDialog.getByRole("note")).toContainText(
     "Create a custom configuration to override Gate actions",
   )
-  await lockedDialog.getByRole("button", { name: "Close — keep draft" }).click()
+  await lockedDialog.getByRole("button", { name: "Done editing" }).click()
   await page
     .getByRole("button", { name: "Back to Workflow configurations" })
     .click()
@@ -3239,13 +3239,17 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
     name: "Approve purpose and scope",
   })
   await expect(
-    dialog.getByText("Workflow default", { exact: true }),
-  ).toBeVisible()
-  await expect(dialog.getByText("Human", { exact: true }).first()).toBeVisible()
+    dialog.getByRole("combobox", { name: "Execution action" }),
+  ).toContainText("Use workflow default (Human)")
   await expect(
-    dialog.getByRole("heading", { name: "Gate request" }),
+    dialog.getByRole("heading", { name: "Expected answer" }),
   ).toBeVisible()
   await expect(dialog.getByText("What should happen?")).toBeVisible()
+  await expect(
+    dialog.getByText("Choose one: Approve · Request revision"),
+  ).toBeVisible()
+  await expect(dialog.getByText("Workflow reference")).toHaveCount(0)
+  await expect(dialog.getByText(/Approve \(approve\)/)).toHaveCount(0)
   await dialog.getByRole("combobox", { name: "Execution action" }).click()
   await page.getByRole("option", { name: "AI", exact: true }).click()
   await expect(dialog.getByLabel("Agent ID")).toHaveValue("main")
@@ -3254,7 +3258,7 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
     page.getByRole("option", { name: "Originating snapshot" }),
   ).toHaveCount(0)
   await page.keyboard.press("Escape")
-  await dialog.getByRole("button", { name: "Close — keep draft" }).click()
+  await dialog.getByRole("button", { name: "Done editing" }).click()
   await expect(page).toHaveURL(
     /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
   )
@@ -3273,75 +3277,53 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
 
   await expect(sourceDialog.getByLabel("Agent ID")).toHaveValue("main")
   await expect(sourceDialog.getByLabel("Agent ID")).toBeEnabled()
-  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveValue(
-    "None",
-  )
   await expect(
-    sourceDialog.getByLabel("History", { exact: true }),
-  ).toBeDisabled()
-  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toHaveValue(
-    "None",
+    sourceDialog.getByText(/no history, cache, or tools/i),
+  ).toBeVisible()
+  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveCount(
+    0,
   )
-  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toBeDisabled()
-  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveValue(
-    "None",
-  )
-  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toBeDisabled()
-  await sourceDialog.getByRole("button", { name: "Why Tools is fixed" }).focus()
-  await expect(page.getByRole("tooltip")).toContainText(
-    "Ephemeral Gate actions are isolated",
-  )
+  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toHaveCount(0)
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveCount(0)
 
   await sourceDialog.getByRole("combobox", { name: "Session" }).click()
   await page.getByRole("option", { name: "Private snapshot" }).click()
   await expect(sourceDialog.getByLabel("Agent ID")).toBeEnabled()
-  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveValue(
-    "Read only",
-  )
-  await expect(
-    sourceDialog.getByLabel("History", { exact: true }),
-  ).toBeDisabled()
   await expect(
     sourceDialog.getByRole("combobox", { name: "Cache" }),
   ).toHaveText("Session")
-  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveValue(
-    "None",
-  )
-  await sourceDialog
-    .getByRole("button", { name: "Why History is fixed" })
-    .focus()
   await expect(
-    page.getByRole("tooltip", { name: /one frozen read-only snapshot/i }),
+    sourceDialog.getByText(
+      /frozen read-only history.*session cache.*no tools/i,
+    ),
   ).toBeVisible()
+  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveCount(
+    0,
+  )
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveCount(0)
 
   await sourceDialog.getByRole("combobox", { name: "Session" }).click()
   await page.getByRole("option", { name: "Originating snapshot" }).click()
   await expect(
-    sourceDialog.getByLabel("Agent ID", { exact: true }),
-  ).toHaveValue("Same originating agent")
-  await expect(
-    sourceDialog.getByLabel("Agent ID", { exact: true }),
-  ).toBeDisabled()
-  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveValue(
-    "Exact source snapshot (read only)",
-  )
-  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toHaveValue(
-    "None",
-  )
-  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveValue(
-    "None",
-  )
-  await sourceDialog.getByRole("button", { name: "Why Cache is fixed" }).focus()
-  await expect(
-    page.getByRole("tooltip", {
-      name: /only the exact read-only snapshot supplies prior context/i,
-    }),
+    sourceDialog.getByText(
+      /same originating agent.*exact read-only snapshot.*no cache or tools/i,
+    ),
   ).toBeVisible()
-  await sourceDialog.getByRole("button", { name: "Why Tools is fixed" }).focus()
+  await expect(sourceDialog.getByText(/stops execution/i)).toBeVisible()
   await expect(
-    page.getByRole("tooltip", { name: /enforces that same policy/i }),
-  ).toBeVisible()
-  await sourceDialog.getByRole("button", { name: "Close — keep draft" }).click()
+    sourceDialog.getByLabel("Agent ID", { exact: true }),
+  ).toHaveCount(0)
+  await expect(sourceDialog.getByLabel("History", { exact: true })).toHaveCount(
+    0,
+  )
+  await expect(sourceDialog.getByLabel("Cache", { exact: true })).toHaveCount(0)
+  await expect(sourceDialog.getByLabel("Tools", { exact: true })).toHaveCount(0)
+  await sourceDialog.getByRole("combobox", { name: "Execution action" }).click()
+  await page.getByRole("option", { name: "Deterministic" }).click()
+  await sourceDialog.getByText("JSON keys and allowed values").click()
+  await expect(sourceDialog.getByText("action", { exact: true })).toBeVisible()
+  await expect(sourceDialog.getByText("approve", { exact: true })).toBeVisible()
+  await sourceDialog.getByRole("button", { name: "Done editing" }).click()
   await expect(page).toHaveURL(
     /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
   )
