@@ -28,6 +28,57 @@ func TestDefaultPRLifecycleConfigIsValidAndSerious(t *testing.T) {
 	if config.DeferredIssues.Mode != PRLifecycleDeferredIssuesAsk {
 		t.Fatalf("deferred issue defaults = %#v", config.DeferredIssues)
 	}
+	for point, want := range map[string]string{
+		"pr.charter.confirm":   "Approve the PR purpose, type, included scope, exclusions, and non-goals?",
+		"pr.charter.reconfirm": "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+	} {
+		workflow := profile.Workflows[point]
+		questions, ok := workflow.Stages[0].Questions.([]any)
+		if !ok || len(questions) != 1 || questions[0] != want {
+			t.Fatalf("default charter questions for %q = %#v, want %q", point, workflow.Stages[0].Questions, want)
+		}
+	}
+	for point, want := range map[string]string{
+		"pr.charter.confirm":   "Confirm PR charter",
+		"pr.charter.reconfirm": "Confirm revised PR charter",
+	} {
+		if got := profile.Workflows[point].Name; got != want {
+			t.Fatalf("default workflow name for %q = %q, want %q", point, got, want)
+		}
+	}
+}
+
+func TestPRLifecycleRejectsWorkflowPurposeOutsideDecisionPointContract(t *testing.T) {
+	tests := []struct {
+		point        string
+		wrongPurpose gatetypes.GatePurpose
+		wantPurpose  gatetypes.GatePurpose
+	}{
+		{
+			point: "pr.charter.reconfirm", wrongPurpose: gatetypes.GatePurposeClassification,
+			wantPurpose: gatetypes.GatePurposeAuthorization,
+		},
+		{
+			point: "pr.finding.classify", wrongPurpose: gatetypes.GatePurposeAuthorization,
+			wantPurpose: gatetypes.GatePurposeClassification,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.point, func(t *testing.T) {
+			candidate := DefaultPRLifecycleConfig()
+			profile := candidate.GateProfiles[DefaultPRLifecycleGateProfileID]
+			workflow := profile.Workflows[test.point]
+			workflow.Purpose = test.wrongPurpose
+			profile.Workflows[test.point] = workflow
+			candidate.GateProfiles[DefaultPRLifecycleGateProfileID] = profile
+
+			err := candidate.Validate()
+			want := "purpose must be \"" + string(test.wantPurpose) + "\""
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Validate() error = %v, want %q", err, want)
+			}
+		})
+	}
 }
 
 func TestPRLifecycleDeferredIssueModesAreExact(t *testing.T) {

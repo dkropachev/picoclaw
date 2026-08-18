@@ -197,6 +197,16 @@ fails closed instead of changing the gate's evidence. Retrying a suspended gate
 resumes the same gate; it does not repeat a completed review, repair, validation,
 or provider effect.
 
+Each decision point owns one fixed purpose: ambiguous-finding classification is
+`classification`; the other built-in decision points are `authorization`.
+Profiles configure how a decision is reached, not how the product interprets
+it. The editor therefore shows purpose as read-only, keeps workflow and stage
+identifiers under **Advanced settings**, and explains when one decision point
+is shared by both lifecycle flows. Removing a custom workflow restores the
+default Human fallback; it never disables the gate. Charter confirmation and
+reconfirmation warn before the final Human stage is removed or changed to an
+automated stage.
+
 The built-in profile defines 14 stable decision points: charter confirmation
 and reconfirmation; review start and completion; ambiguous-finding
 classification; non-owned implementation eligibility; implementation start,

@@ -150,6 +150,31 @@ const prLifecycleDecisionPointOrdinals: Readonly<Record<string, number>> = {
   "pr.publication.reconcile": 14,
 }
 
+const prLifecycleDecisionPointPurposes: Readonly<
+  Record<string, PRLifecycleGatePurpose>
+> = {
+  "pr.charter.confirm": "authorization",
+  "pr.charter.reconfirm": "authorization",
+  "pr.review.start": "authorization",
+  "pr.review.complete": "authorization",
+  "pr.finding.classify": "classification",
+  "pr.implementation.eligibility": "authorization",
+  "pr.implementation.start": "authorization",
+  "pr.implementation.scope": "authorization",
+  "pr.implementation.complete": "authorization",
+  "pr.review.publish": "authorization",
+  "pr.implementation.publish": "authorization",
+  "pr.deferred.publish": "authorization",
+  "pr.correction.promote": "authorization",
+  "pr.publication.reconcile": "authorization",
+}
+
+export function getPRLifecycleDecisionPointPurpose(
+  decisionPoint: string,
+): PRLifecycleGatePurpose | undefined {
+  return prLifecycleDecisionPointPurposes[decisionPoint]
+}
+
 export function isPRLifecycleDecisionPoint(
   value: unknown,
 ): value is PRLifecycleDecisionPoint {
@@ -243,6 +268,13 @@ export function validatePRLifecycleGateWorkflow(
     issues.push({
       path: `${workflowPath}.decision_point`,
       message: "Workflow decision point does not match its catalog key.",
+    })
+  }
+  const expectedPurpose = getPRLifecycleDecisionPointPurpose(decisionPoint)
+  if (expectedPurpose && workflow.purpose !== expectedPurpose) {
+    issues.push({
+      path: `${workflowPath}.purpose`,
+      message: `Purpose must be ${expectedPurpose} for this decision point.`,
     })
   }
   if (workflow.stages.length === 0) {

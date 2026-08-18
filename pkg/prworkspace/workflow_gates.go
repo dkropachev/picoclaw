@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/prlifecycle"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
@@ -26,6 +27,9 @@ type WorkflowGateEvaluator struct {
 func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateRequest) (GateRun, error) {
 	if evaluator == nil || request.WorkspaceID == "" || request.DecisionPoint == "" || request.SubjectDigest == "" {
 		return GateRun{}, ErrInvalid
+	}
+	if err := validatePRLifecycleGateIdentity(request.DecisionPoint, request.Purpose); err != nil {
+		return GateRun{}, err
 	}
 	configured := evaluator.Config.Effective()
 	profileID, profile, profileRevision, err := configured.ProfileForRepository(request.ProviderOrigin, request.RepositoryID)
@@ -313,9 +317,23 @@ func fallbackConfiguredHumanGate(now time.Time, request GateRequest, profileID, 
 		DecisionPoint: request.DecisionPoint, Purpose: request.Purpose,
 		State: ExecutionWaitingUser, PolicyRevision: revision,
 		SubjectRevision: request.SubjectDigest, Evidence: projectGateEvidence(request.Subject), CreatedAt: now,
-		Turns:   []GateTurn{{StageID: "fallback-human", Kind: "human", Title: "Authorization required", Status: "waiting", Questions: []string{"Approve this action?"}}},
+		Turns:   []GateTurn{{StageID: "fallback-human", Kind: "human", Title: "Decision required", Status: "waiting", Questions: []string{"Review the evidence and choose an available outcome."}}},
 		runtime: &gateRuntime{ProfileID: profileID},
 	}
+}
+
+func validatePRLifecycleGateIdentity(point, purpose string) error {
+	expected, exists := prlifecycle.DecisionPointPurpose(point)
+	if !exists {
+		return fmt.Errorf("%w: unknown PR lifecycle decision point %q", ErrInvalid, point)
+	}
+	if string(expected) != purpose {
+		return fmt.Errorf(
+			"%w: PR lifecycle decision point %q requires purpose %q",
+			ErrInvalid, point, expected,
+		)
+	}
+	return nil
 }
 
 func (evaluator *WorkflowGateEvaluator) now() time.Time {

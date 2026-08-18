@@ -254,6 +254,22 @@ const gateProfiles: PRLifecycleGateProfileSnapshot = {
     default: {
       name: "Default",
       workflows: {
+        "pr.charter.reconfirm": {
+          id: "pr-charter-reconfirm",
+          name: "Confirm revised PR charter",
+          purpose: "authorization",
+          decision_point: "pr.charter.reconfirm",
+          stages: [
+            {
+              id: "human-reconfirm",
+              kind: "human",
+              title: "Confirm revised PR charter",
+              questions: [
+                "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+              ],
+            },
+          ],
+        },
         "pr.review.complete": {
           id: "review_complete",
           name: "Review complete",
@@ -426,6 +442,15 @@ const gateProfiles: PRLifecycleGateProfileSnapshot = {
             description: "Checks whether the branch may be pushed.",
             decision_point: "pr.implementation.publish",
             ordinal: 11,
+            editable: true,
+          },
+          {
+            id: "implementation_charter_reconfirm",
+            kind: "gate",
+            title: "Approve revised purpose and scope",
+            description: "Checks a revised PR charter.",
+            decision_point: "pr.charter.reconfirm",
+            ordinal: 2,
             editable: true,
           },
         ],
@@ -2911,7 +2936,9 @@ describe("unified PR workspace pages", () => {
       "data-profile-view",
       "profiles",
     )
-    expect(screen.getByText("1 configured gate · 0 repositories")).toBeVisible()
+    expect(
+      screen.getByText("2 configured gates · 0 repositories"),
+    ).toBeVisible()
     expect(
       screen.queryByRole("navigation", {
         name: "PR lifecycle configuration",
@@ -3061,7 +3088,7 @@ describe("unified PR workspace pages", () => {
     )
     expect(onDecisionPointChange).toHaveBeenLastCalledWith("pr.review.complete")
 
-    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
     expect(
       screen.queryByRole("dialog", { name: "Accept review results" }),
     ).not.toBeInTheDocument()
@@ -3070,6 +3097,325 @@ describe("unified PR workspace pages", () => {
     expect(trigger).not.toHaveAttribute("data-gate-selected")
     expect(trigger).not.toHaveAttribute("aria-expanded")
     expect(trigger).not.toHaveAttribute("aria-pressed")
+  })
+
+  it("explains the shared revised-charter gate and hides machine fields under Advanced", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Approve revised purpose and scope",
+      }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Approve revised purpose and scope",
+    })
+    expect(within(dialog).getByLabelText("Purpose")).toHaveValue(
+      "Authorization",
+    )
+    expect(within(dialog).getByLabelText("Purpose")).toHaveAttribute("readonly")
+    expect(
+      within(dialog).queryByRole("combobox", { name: "Purpose" }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(dialog).getByText(
+        "Shared by Review workflow and Implementation workflow. Changes here apply to every occurrence.",
+      ),
+    ).toBeVisible()
+    expect(
+      within(dialog).getByText(
+        "Pass confirms the charter and queues review. Revise or Defer waits for user action. Block stops execution.",
+      ),
+    ).toBeVisible()
+    expect(within(dialog).getByLabelText("Human question")).toHaveValue(
+      "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+    )
+    expect(
+      within(dialog).getByRole("combobox", { name: "New stage type" }),
+    ).toHaveTextContent("Human")
+    expect(
+      within(dialog).getByRole("button", { name: "Add stage" }),
+    ).toBeEnabled()
+
+    const advanced = within(dialog).getByRole("button", {
+      name: "Advanced settings",
+    })
+    expect(advanced).toHaveAttribute("aria-expanded", "false")
+    expect(
+      within(dialog).queryByLabelText("Workflow name"),
+    ).not.toBeInTheDocument()
+    expect(
+      within(dialog).queryByLabelText("Stable stage ID"),
+    ).not.toBeInTheDocument()
+    await user.click(advanced)
+    expect(advanced).toHaveAttribute("aria-expanded", "true")
+    expect(within(dialog).getByLabelText("Workflow name")).toHaveValue(
+      "Confirm revised PR charter",
+    )
+    expect(within(dialog).getByLabelText("Decision point")).toHaveValue(
+      "pr.charter.reconfirm",
+    )
+    expect(within(dialog).getByLabelText("Stable stage ID")).toHaveValue(
+      "human-reconfirm",
+    )
+    expect(
+      within(dialog).getByRole("button", {
+        name: "Save all lifecycle changes",
+      }),
+    ).toBeDisabled()
+
+    const stageID = within(dialog).getByLabelText("Stable stage ID")
+    await user.clear(stageID)
+    await user.type(stageID, "human-reconfirm-custom")
+    expect(stageID).toHaveFocus()
+    expect(stageID).toHaveValue("human-reconfirm-custom")
+
+    await user.click(
+      within(dialog).getByRole("combobox", { name: "New stage type" }),
+    )
+    await user.click(screen.getByRole("option", { name: "Deterministic" }))
+    await user.click(within(dialog).getByRole("button", { name: "Add stage" }))
+    expect(within(dialog).getAllByTestId("pr-gate-stage-editor")).toHaveLength(
+      2,
+    )
+    expect(
+      within(dialog).getAllByRole("combobox", { name: "Stage type" })[1],
+    ).toHaveTextContent("Deterministic")
+  })
+
+  it("requires explicit confirmation before changing the final charter Human stage", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Approve revised purpose and scope",
+      }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Approve revised purpose and scope",
+    })
+    const stageType = within(dialog).getByRole("combobox", {
+      name: "Stage type",
+    })
+    await user.click(stageType)
+    await user.click(screen.getByRole("option", { name: "Zero · pass" }))
+
+    const warning = within(dialog).getByRole("alert")
+    expect(warning).toHaveTextContent("Remove the final Human approval?")
+    expect(stageType).toHaveTextContent("Human")
+    await user.click(
+      within(warning).getByRole("button", { name: "Keep Human approval" }),
+    )
+    expect(warning).not.toBeInTheDocument()
+    await waitFor(() => expect(stageType).toHaveFocus())
+    expect(stageType).toHaveTextContent("Human")
+
+    await user.click(stageType)
+    await user.click(screen.getByRole("option", { name: "Zero · pass" }))
+    await user.click(
+      within(within(dialog).getByRole("alert")).getByRole("button", {
+        name: "Remove Human requirement",
+      }),
+    )
+    expect(stageType).toHaveTextContent("Zero · pass")
+    expect(
+      within(dialog).getByRole("button", {
+        name: "Save all lifecycle changes",
+      }),
+    ).toBeEnabled()
+
+    await user.click(stageType)
+    await user.click(screen.getByRole("option", { name: "Human" }))
+    expect(stageType).toHaveTextContent("Human")
+    expect(within(dialog).getByLabelText("Stage title")).toHaveValue(
+      "Confirm revised PR charter",
+    )
+    expect(within(dialog).getByLabelText("Human question")).toHaveValue(
+      "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+    )
+  })
+
+  it("requires explicit confirmation before deleting the final charter Human stage", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Approve revised purpose and scope",
+      }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Approve revised purpose and scope",
+    })
+    const remove = within(dialog).getByRole("button", {
+      name: "Remove stage",
+    })
+    await user.click(remove)
+    const warning = within(dialog).getByRole("alert")
+    expect(warning).toHaveTextContent("Remove the final Human approval?")
+    expect(within(dialog).getAllByTestId("pr-gate-stage-editor")).toHaveLength(
+      1,
+    )
+    await waitFor(() => expect(warning).toHaveFocus())
+    await user.keyboard("{Escape}")
+    expect(dialog).toBeVisible()
+    expect(warning).not.toBeInTheDocument()
+    await waitFor(() => expect(remove).toHaveFocus())
+
+    await user.click(remove)
+    await user.click(
+      within(within(dialog).getByRole("alert")).getByRole("button", {
+        name: "Remove Human requirement",
+      }),
+    )
+    expect(
+      within(dialog).queryByTestId("pr-gate-stage-editor"),
+    ).not.toBeInTheDocument()
+    expect(
+      within(dialog).getByText(
+        "Add at least one stage before saving this workflow.",
+      ),
+    ).toBeVisible()
+  })
+
+  it("limits the Human warning to the sole Human stage of charter gates", async () => {
+    const user = userEvent.setup()
+    const twoHumans = structuredClone(gateProfiles)
+    twoHumans.gate_profiles.default.workflows[
+      "pr.charter.reconfirm"
+    ].stages.push({
+      id: "human-reconfirm-second",
+      kind: "human",
+      title: "Second charter approval",
+      questions: ["Approve the revised charter again?"],
+    })
+    mockedGetGateProfiles.mockResolvedValueOnce(twoHumans)
+    const first = renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Approve revised purpose and scope",
+      }),
+    )
+    let dialog = screen.getByRole("dialog", {
+      name: "Approve revised purpose and scope",
+    })
+    await user.click(
+      within(dialog).getAllByRole("button", { name: "Remove stage" })[0],
+    )
+    expect(
+      within(dialog).queryByText("Remove the final Human approval?"),
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getAllByTestId("pr-gate-stage-editor")).toHaveLength(
+      1,
+    )
+    first.unmount()
+
+    const nonCharter = structuredClone(gateProfiles)
+    nonCharter.gate_profiles.default.workflows["pr.review.complete"].stages = [
+      {
+        id: "human-review-complete",
+        kind: "human",
+        title: "Accept review",
+        questions: ["Accept this review?"],
+      },
+    ]
+    mockedGetGateProfiles.mockResolvedValueOnce(nonCharter)
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+    await user.click(
+      await screen.findByRole("button", { name: "Accept review results" }),
+    )
+    dialog = screen.getByRole("dialog", { name: "Accept review results" })
+    await user.click(
+      within(dialog).getByRole("button", { name: "Remove stage" }),
+    )
+    expect(
+      within(dialog).queryByText("Remove the final Human approval?"),
+    ).not.toBeInTheDocument()
+    expect(
+      within(dialog).queryByTestId("pr-gate-stage-editor"),
+    ).not.toBeInTheDocument()
+  })
+
+  it("explains and confirms reverting a custom workflow to the Human fallback", async () => {
+    const user = userEvent.setup()
+    renderPage(
+      <PRLifecycleGateProfilesPage
+        onBack={vi.fn()}
+        initialProfileID="default"
+      />,
+    )
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Approve revised purpose and scope",
+      }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Approve revised purpose and scope",
+    })
+    const useDefault = within(dialog).getByRole("button", {
+      name: "Use default Human gate",
+    })
+    expect(useDefault).toHaveAccessibleDescription(
+      "Removes custom stages; the gate remains active and pauses for a user decision.",
+    )
+    await user.click(useDefault)
+    const warning = within(dialog).getByRole("alert")
+    expect(warning).toHaveTextContent(
+      "The gate stays active and falls back to a built-in Human decision.",
+    )
+    await user.click(
+      within(warning).getByRole("button", { name: "Keep custom workflow" }),
+    )
+    await waitFor(() => expect(useDefault).toHaveFocus())
+
+    await user.click(useDefault)
+    await user.click(
+      within(within(dialog).getByRole("alert")).getByRole("button", {
+        name: "Use default Human gate",
+      }),
+    )
+    expect(
+      within(dialog).getByText(
+        "This profile uses the default Human gate. It remains active and pauses for a user decision.",
+      ),
+    ).toBeVisible()
+    expect(
+      within(dialog).getByRole("button", {
+        name: "Configure custom workflow",
+      }),
+    ).toBeEnabled()
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", {
+          name: "Configure custom workflow",
+        }),
+      ).toHaveFocus(),
+    )
   })
 
   it("keeps profile flow and gate modal navigation route-controlled", async () => {
@@ -3140,11 +3486,35 @@ describe("unified PR workspace pages", () => {
     const dialog = screen.getByRole("dialog", {
       name: "Accept review results",
     })
+    expect(
+      within(dialog).queryByLabelText("Workflow name"),
+    ).not.toBeInTheDocument()
+    await user.click(
+      within(dialog).getByRole("button", { name: "Advanced settings" }),
+    )
     const workflowName = within(dialog).getByLabelText("Workflow name")
     await user.clear(workflowName)
     await user.type(workflowName, "Route-controlled review completion")
-    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
     expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined)
+
+    await user.click(
+      screen.getByRole("button", { name: "Accept review results" }),
+    )
+    const reopened = screen.getByRole("dialog", {
+      name: "Accept review results",
+    })
+    await user.click(
+      within(reopened).getByRole("button", { name: "Advanced settings" }),
+    )
+    expect(within(reopened).getByLabelText("Workflow name")).toHaveValue(
+      "Route-controlled review completion",
+    )
+    expect(
+      within(reopened).getByRole("button", {
+        name: "Save all lifecycle changes",
+      }),
+    ).toBeEnabled()
   })
 
   it("returns dialog focus to the exact repeated gate trigger", async () => {
@@ -3181,7 +3551,7 @@ describe("unified PR workspace pages", () => {
     const dialog = screen.getByRole("dialog", {
       name: "Accept implementation",
     })
-    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
 
     await waitFor(() => expect(triggers[1]).toHaveFocus())
     expect(triggers[0]).not.toHaveFocus()
@@ -3230,6 +3600,7 @@ describe("unified PR workspace pages", () => {
   })
 
   it("opens an alternate-profile gate deep link in the correct dialog", async () => {
+    const user = userEvent.setup()
     const onDecisionPointChange = vi.fn()
     mockedGetGateProfiles.mockResolvedValueOnce({
       ...gateProfiles,
@@ -3266,7 +3637,14 @@ describe("unified PR workspace pages", () => {
       "data-profile-view",
       "profile",
     )
-    expect(within(dialog).getByText(/Alternate ·/)).toBeVisible()
+    expect(
+      within(dialog).getByText(
+        "Alternate profile · Configure this decision workflow.",
+      ),
+    ).toBeVisible()
+    await user.click(
+      within(dialog).getByRole("button", { name: "Advanced settings" }),
+    )
     expect(
       within(dialog).getByDisplayValue("Alternate review completion"),
     ).toBeVisible()
@@ -3338,7 +3716,7 @@ describe("unified PR workspace pages", () => {
       name: "Accept review results",
       hidden: true,
     })
-    await user.click(within(dialog).getByRole("button", { name: "Done" }))
+    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
 
     await waitFor(() => expect(trigger).toHaveFocus())
   })
@@ -3642,6 +4020,9 @@ describe("unified PR workspace pages", () => {
     })
     const editor = within(dialog).getByTestId("pr-gate-stage-editor")
     expect(editor).toHaveClass("min-w-0", "max-w-full")
+    await user.click(
+      within(dialog).getByRole("button", { name: "Advanced settings" }),
+    )
     expect(within(dialog).getByLabelText("Stable stage ID")).toHaveClass(
       "min-w-0",
     )

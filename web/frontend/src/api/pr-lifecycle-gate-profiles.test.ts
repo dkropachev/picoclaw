@@ -5,6 +5,7 @@ import {
   type PRLifecycleFlowCatalog,
   type PRLifecycleGateProfileSnapshot,
   createPRLifecycleGateStage,
+  getPRLifecycleDecisionPointPurpose,
   getPRLifecycleGateProfiles,
   isPRLifecycleDecisionPoint,
   validatePRLifecycleGateProfiles,
@@ -238,6 +239,15 @@ describe("PR lifecycle gate profiles", () => {
     expect(isPRLifecycleDecisionPoint("review.complete")).toBe(false)
     expect(isPRLifecycleDecisionPoint("pr.Review.complete")).toBe(false)
     expect(isPRLifecycleDecisionPoint("pr.review")).toBe(false)
+    expect(getPRLifecycleDecisionPointPurpose("pr.charter.reconfirm")).toBe(
+      "authorization",
+    )
+    expect(getPRLifecycleDecisionPointPurpose("pr.finding.classify")).toBe(
+      "classification",
+    )
+    expect(
+      getPRLifecycleDecisionPointPurpose("pr.review.ghost"),
+    ).toBeUndefined()
     expect(
       isPRLifecycleDecisionPoint(
         "pr.review.complete.extra.extra.extra.extra.extra.extra",
@@ -275,6 +285,17 @@ describe("PR lifecycle gate profiles", () => {
     expect(validatePRLifecycleGateProfiles(snapshot)).toContainEqual({
       path: "gate_profiles.default.workflows.pr.review.ghost",
       message: "Workflow decision point is not declared by the lifecycle flow.",
+    })
+  })
+
+  it("locks each configured workflow to its catalog purpose", () => {
+    const snapshot = cloneSnapshot()
+    snapshot.gate_profiles.default.workflows["pr.review.complete"].purpose =
+      "classification"
+
+    expect(validatePRLifecycleGateProfiles(snapshot)).toContainEqual({
+      path: "gate_profiles.default.workflows.pr.review.complete.purpose",
+      message: "Purpose must be authorization for this decision point.",
     })
   })
 

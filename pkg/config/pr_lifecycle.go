@@ -105,8 +105,8 @@ func DefaultPRLifecycleConfig() PRLifecycleConfig {
 }
 
 func defaultPRLifecycleGateProfile() PRLifecycleGateProfile {
-	human := func(id, title string) gatetypes.GateStageSpec {
-		return gatetypes.GateStageSpec{ID: id, Kind: gatetypes.GateHuman, Title: title, Questions: []any{"Approve this action?"}}
+	human := func(id, title, question string) gatetypes.GateStageSpec {
+		return gatetypes.GateStageSpec{ID: id, Kind: gatetypes.GateHuman, Title: title, Questions: []any{question}}
 	}
 	zero := func(id string) gatetypes.GateStageSpec {
 		return gatetypes.GateStageSpec{ID: id, Kind: gatetypes.GateZero}
@@ -117,6 +117,11 @@ func defaultPRLifecycleGateProfile() PRLifecycleGateProfile {
 			Purpose: gatetypes.GatePurposeAuthorization, DecisionPoint: point, Stages: stages,
 		}
 	}
+	namedAuthorization := func(point, name string, stages ...gatetypes.GateStageSpec) gatetypes.GateWorkflowSpec {
+		workflow := authorization(point, stages...)
+		workflow.Name = name
+		return workflow
+	}
 	classification := func(point string, stages ...gatetypes.GateStageSpec) gatetypes.GateWorkflowSpec {
 		return gatetypes.GateWorkflowSpec{
 			ID: strings.ReplaceAll(point, ".", "-"), Name: point,
@@ -126,26 +131,79 @@ func defaultPRLifecycleGateProfile() PRLifecycleGateProfile {
 	return PRLifecycleGateProfile{
 		Name: DefaultPRLifecycleGateProfileName,
 		Workflows: map[string]gatetypes.GateWorkflowSpec{
-			"pr.charter.confirm":   authorization("pr.charter.confirm", human("human-confirm", "Confirm PR charter")),
-			"pr.charter.reconfirm": authorization("pr.charter.reconfirm", human("human-reconfirm", "Confirm revised PR charter")),
-			"pr.review.start":      authorization("pr.review.start", zero("verified-by-domain")),
-			"pr.review.complete":   authorization("pr.review.complete", zero("verified-by-domain")),
+			"pr.charter.confirm": namedAuthorization(
+				"pr.charter.confirm",
+				"Confirm PR charter",
+				human(
+					"human-confirm",
+					"Confirm PR charter",
+					"Approve the PR purpose, type, included scope, exclusions, and non-goals?",
+				),
+			),
+			"pr.charter.reconfirm": namedAuthorization(
+				"pr.charter.reconfirm",
+				"Confirm revised PR charter",
+				human(
+					"human-reconfirm",
+					"Confirm revised PR charter",
+					"Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+				),
+			),
+			"pr.review.start":    authorization("pr.review.start", zero("verified-by-domain")),
+			"pr.review.complete": authorization("pr.review.complete", zero("verified-by-domain")),
 			"pr.finding.classify": classification(
 				"pr.finding.classify",
-				human("human-finding-scope", "Classify an ambiguous finding for this PR"),
+				human(
+					"human-finding-scope",
+					"Classify an ambiguous finding for this PR",
+					"How should this finding be classified against the confirmed PR charter?",
+				),
 			),
 			"pr.implementation.eligibility": authorization(
 				"pr.implementation.eligibility",
-				human("human-eligibility", "Authorize implementation on a pull request not owned by the current user"),
+				human(
+					"human-eligibility",
+					"Authorize implementation on a pull request not owned by the current user",
+					"Authorize implementation even though the pull request is not owned by the current user?",
+				),
 			),
-			"pr.implementation.start":    authorization("pr.implementation.start", zero("verified-by-domain")),
-			"pr.implementation.scope":    authorization("pr.implementation.scope", human("human-scope", "Classify a large exact-scope or necessary-adjacent implementation")),
-			"pr.implementation.complete": authorization("pr.implementation.complete", human("human-complete", "Accept completed implementation")),
-			"pr.review.publish":          authorization("pr.review.publish", human("human-review-publish", "Publish GitHub review")),
-			"pr.implementation.publish":  authorization("pr.implementation.publish", human("human-push", "Push implementation")),
-			"pr.deferred.publish":        authorization("pr.deferred.publish", human("human-issue", "Create GitHub follow-up issue")),
-			"pr.correction.promote":      authorization("pr.correction.promote", human("human-lesson", "Promote repository lesson")),
-			"pr.publication.reconcile":   authorization("pr.publication.reconcile", human("human-reconcile", "Resolve ambiguous provider outcome")),
+			"pr.implementation.start": authorization("pr.implementation.start", zero("verified-by-domain")),
+			"pr.implementation.scope": authorization(
+				"pr.implementation.scope",
+				human(
+					"human-scope",
+					"Classify a large exact-scope or necessary-adjacent implementation",
+					"Authorize this large exact-scope or necessary-adjacent implementation?",
+				),
+			),
+			"pr.implementation.complete": authorization(
+				"pr.implementation.complete",
+				human(
+					"human-complete",
+					"Accept completed implementation",
+					"Is the requested implementation complete within the confirmed PR scope?",
+				),
+			),
+			"pr.review.publish": authorization(
+				"pr.review.publish",
+				human("human-review-publish", "Publish GitHub review", "Publish this review and its findings to GitHub?"),
+			),
+			"pr.implementation.publish": authorization(
+				"pr.implementation.publish",
+				human("human-push", "Push implementation", "Push the completed implementation to the pull request branch?"),
+			),
+			"pr.deferred.publish": authorization(
+				"pr.deferred.publish",
+				human("human-issue", "Create GitHub follow-up issue", "Create a GitHub follow-up issue for these deferred findings?"),
+			),
+			"pr.correction.promote": authorization(
+				"pr.correction.promote",
+				human("human-lesson", "Promote repository lesson", "Promote this correction to a reusable repository lesson?"),
+			),
+			"pr.publication.reconcile": authorization(
+				"pr.publication.reconcile",
+				human("human-reconcile", "Resolve ambiguous provider outcome", "Resolve this ambiguous GitHub publication outcome?"),
+			),
 		},
 	}
 }
@@ -179,11 +237,18 @@ func (config PRLifecycleConfig) Validate() error {
 			return fmt.Errorf("PR lifecycle profile %q has too many workflows", id)
 		}
 		for point, workflow := range profile.Workflows {
-			if !prlifecycle.IsDecisionPoint(point) {
+			purpose, known := prlifecycle.DecisionPointPurpose(point)
+			if !known {
 				return fmt.Errorf("PR lifecycle profile %q has unknown decision point %q", id, point)
 			}
 			if point != workflow.DecisionPoint {
 				return fmt.Errorf("PR lifecycle profile %q workflow key does not match decision point", id)
+			}
+			if workflow.Purpose != purpose {
+				return fmt.Errorf(
+					"PR lifecycle profile %q workflow %q purpose must be %q, got %q",
+					id, point, purpose, workflow.Purpose,
+				)
 			}
 			if err := validatePRLifecycleGateWorkflow(workflow); err != nil {
 				return fmt.Errorf("PR lifecycle profile %q workflow %q: %w", id, point, err)

@@ -867,6 +867,9 @@ func (service *Service) startGate(ctx context.Context, aggregate Aggregate, poin
 // staged gates resumable: approving a gate authorizes the next retry without
 // evaluating a second policy or appending a duplicate gate run.
 func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, point, purpose string, subject map[string]any) (GateRun, bool, error) {
+	if err := validatePRLifecycleGateIdentity(point, purpose); err != nil {
+		return GateRun{}, false, err
+	}
 	digest, err := fingerprintValue(subject)
 	if err != nil {
 		return GateRun{}, false, err
@@ -886,13 +889,13 @@ func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, poi
 		})
 		return gate, true, startErr
 	}
-	// Missing authorization configuration is a visible fallback human gate.
+	// Missing gate configuration is a visible fallback human decision.
 	now := service.now().UTC()
 	return GateRun{
 		ID:            stableID("pgr_", aggregate.Workspace.ID, point, digest),
 		DecisionPoint: point, Purpose: purpose, State: ExecutionWaitingUser,
-		SubjectRevision: digest, PolicyRevision: "builtin:fallback-human-v1",
-		Turns:     []GateTurn{{StageID: "fallback-human", Kind: "human", Title: "Authorization required", Status: "waiting", Questions: []string{"Approve this action?"}}},
+		SubjectRevision: digest, PolicyRevision: "builtin:fallback-human-v2",
+		Turns:     []GateTurn{{StageID: "fallback-human", Kind: "human", Title: "Decision required", Status: "waiting", Questions: []string{"Review the evidence and choose an available outcome."}}},
 		CreatedAt: now,
 	}, true, nil
 }

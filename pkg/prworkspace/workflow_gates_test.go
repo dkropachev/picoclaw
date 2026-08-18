@@ -346,6 +346,68 @@ func TestWorkflowGateEvaluatorRetryReconcilesTerminalRunAfterAggregatePersistenc
 	}
 }
 
+func TestGateFallbackRequiresCatalogDecisionPointAndPurpose(t *testing.T) {
+	configured := config.DefaultPRLifecycleConfig()
+	profile := configured.GateProfiles[config.DefaultPRLifecycleGateProfileID]
+	delete(profile.Workflows, "pr.charter.reconfirm")
+	configured.GateProfiles[config.DefaultPRLifecycleGateProfileID] = profile
+	evaluator := &WorkflowGateEvaluator{Config: configured}
+	request := GateRequest{
+		WorkspaceID: "prw_11111111111111111111111111111111", WorkspaceVersion: 1,
+		DecisionPoint: "pr.charter.reconfirm", Purpose: "authorization",
+		Subject:       map[string]any{"charter": "revised"},
+		SubjectDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+	}
+	gate, err := evaluator.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate.State != ExecutionWaitingUser || len(gate.Turns) != 1 ||
+		gate.Turns[0].Title != "Decision required" ||
+		len(gate.Turns[0].Questions) != 1 ||
+		gate.Turns[0].Questions[0] != "Review the evidence and choose an available outcome." {
+		t.Fatalf("fallback gate = %#v", gate)
+	}
+
+	service := &Service{now: func() time.Time {
+		return time.Date(2026, 8, 17, 20, 0, 0, 0, time.UTC)
+	}}
+	aggregate := Aggregate{Workspace: Workspace{ID: request.WorkspaceID}}
+	builtin, created, err := service.ensureGate(
+		t.Context(), aggregate, request.DecisionPoint, request.Purpose, request.Subject,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || builtin.PolicyRevision != "builtin:fallback-human-v2" ||
+		len(builtin.Turns) != 1 || builtin.Turns[0].Title != "Decision required" ||
+		len(builtin.Turns[0].Questions) != 1 ||
+		builtin.Turns[0].Questions[0] != "Review the evidence and choose an available outcome." {
+		t.Fatalf("builtin fallback gate = %#v", builtin)
+	}
+	for _, test := range []struct {
+		name    string
+		point   string
+		purpose string
+	}{
+		{name: "unknown", point: "pr.unknown.gate", purpose: "authorization"},
+		{name: "mismatched", point: "pr.charter.reconfirm", purpose: "classification"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := request
+			invalid.DecisionPoint, invalid.Purpose = test.point, test.purpose
+			if _, err := evaluator.Start(t.Context(), invalid); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("WorkflowGateEvaluator.Start() error = %v, want ErrInvalid", err)
+			}
+			if _, _, err := service.ensureGate(
+				t.Context(), aggregate, test.point, test.purpose, invalid.Subject,
+			); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Service.ensureGate() error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
 func mustListWorkflowGateTasks(t *testing.T, executor *workflows.Executor, runID string) []workflows.WorkflowHumanTask {
 	t.Helper()
 	tasks, err := executor.ListHumanTasks(t.Context(), runID)

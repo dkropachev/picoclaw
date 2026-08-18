@@ -3,7 +3,9 @@ import {
   IconArrowDown,
   IconArrowLeft,
   IconArrowUp,
+  IconChevronDown,
   IconDeviceFloppy,
+  IconLock,
   IconPencil,
   IconPlus,
   IconRefresh,
@@ -29,10 +31,10 @@ import {
   type PRLifecycleGateProfile,
   type PRLifecycleGateProfileIssue,
   type PRLifecycleGateProfileSnapshot,
-  type PRLifecycleGatePurpose,
   type PRLifecycleGateStage,
   type PRLifecycleGateWorkflow,
   createPRLifecycleGateStage,
+  getPRLifecycleDecisionPointPurpose,
   getPRLifecycleGateProfiles,
   isPRLifecycleGateProfileID,
   putPRLifecycleGateProfiles,
@@ -60,6 +62,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import {
   Dialog,
   DialogClose,
@@ -120,6 +127,15 @@ interface SettledBrowserEntry {
   state: PRNavigationState
 }
 
+type PendingGateWorkflowChange =
+  | { action: "use_default_human" }
+  | { action: "remove_last_human"; stageIndex: number }
+  | {
+      action: "replace_last_human"
+      stageIndex: number
+      nextKind: PRLifecycleGateKind
+    }
+
 export function PRLifecycleGateProfilesPage({
   onBack,
   page,
@@ -178,6 +194,9 @@ export function PRLifecycleGateProfilesPage({
   const [newProfileName, setNewProfileName] = useState("")
   const [newRepository, setNewRepository] = useState("")
   const [newStageKind, setNewStageKind] = useState<PRLifecycleGateKind>("human")
+  const [workflowAdvancedOpen, setWorkflowAdvancedOpen] = useState(false)
+  const [pendingGateWorkflowChange, setPendingGateWorkflowChange] =
+    useState<PendingGateWorkflowChange | null>(null)
   const [error, setError] = useState("")
   const [localDiscardOpen, setLocalDiscardOpen] = useState(false)
   const resolvedDiscardOpen = Boolean(discardOpen || localDiscardOpen)
@@ -205,6 +224,16 @@ export function PRLifecycleGateProfilesPage({
         ? (initialDecisionPoint ?? null)
         : localDecisionPoint
       : null
+  useEffect(() => {
+    setWorkflowAdvancedOpen(false)
+    setPendingGateWorkflowChange(null)
+  }, [selectedDecisionPoint])
+  useEffect(() => {
+    if (!pendingGateWorkflowChange) return
+    window.requestAnimationFrame(() => {
+      document.getElementById("pr-gate-workflow-warning")?.focus()
+    })
+  }, [pendingGateWorkflowChange])
   const query = useQuery({
     queryKey: profileQueryKey,
     queryFn: ({ signal }) => getPRLifecycleGateProfiles(signal),
@@ -525,6 +554,23 @@ export function PRLifecycleGateProfilesPage({
     selectedProfile && activeDecisionPoint
       ? selectedProfile.workflows[activeDecisionPoint]
       : undefined
+  const expectedPurpose = activeDecisionPoint
+    ? getPRLifecycleDecisionPointPurpose(activeDecisionPoint)
+    : undefined
+  const selectedGateFlowTitles = activeDecisionPoint
+    ? draft.flow.flows
+        .filter((flow) =>
+          flow.nodes.some(
+            (node) =>
+              node.kind === "gate" &&
+              node.editable &&
+              node.decision_point === activeDecisionPoint,
+          ),
+        )
+        .map((flow) => flow.title)
+    : []
+  const charterAuthorityGate =
+    isCharterAuthorityDecisionPoint(activeDecisionPoint)
   const selectProfile = (profileID?: string) => {
     setLocalProfileID(profileID ?? "")
     setLocalDecisionPoint(null)
@@ -610,9 +656,8 @@ export function PRLifecycleGateProfilesPage({
         id: workflowID(selectedDecisionPoint),
         name: selectedGateNode?.title ?? selectedDecisionPoint,
         purpose:
-          selectedDecisionPoint === "pr.finding.classify"
-            ? "classification"
-            : "authorization",
+          getPRLifecycleDecisionPointPurpose(selectedDecisionPoint) ??
+          "authorization",
         decision_point: selectedDecisionPoint,
         stages: [],
       }
@@ -621,7 +666,107 @@ export function PRLifecycleGateProfilesPage({
   const addStage = () => {
     changeWorkflow((current) => {
       const id = nextStageID(current.stages)
-      current.stages.push(createPRLifecycleGateStage(newStageKind, id))
+      const stage = createPRLifecycleGateStage(newStageKind, id)
+      if (newStageKind === "human" && selectedDecisionPoint) {
+        const charterDefaults = charterHumanStageDefaults(selectedDecisionPoint)
+        if (charterDefaults) {
+          stage.title = charterDefaults.title
+          stage.questions = [charterDefaults.question]
+        }
+      }
+      current.stages.push(stage)
+    })
+  }
+  const replaceStageKind = (
+    stageIndex: number,
+    nextKind: PRLifecycleGateKind,
+  ) => {
+    changeWorkflow((current) => {
+      const stage = current.stages[stageIndex]
+      if (!stage) return
+      const next = createPRLifecycleGateStage(nextKind, stage.id)
+      const charterDefaults =
+        nextKind === "human" && selectedDecisionPoint
+          ? charterHumanStageDefaults(selectedDecisionPoint)
+          : undefined
+      current.stages[stageIndex] = {
+        ...next,
+        ...(nextKind === "zero"
+          ? {}
+          : { title: stage.title?.trim() || charterDefaults?.title || "" }),
+        ...(charterDefaults ? { questions: [charterDefaults.question] } : {}),
+      }
+    })
+  }
+  const isLastCharterHumanStage = (stageIndex: number) =>
+    charterAuthorityGate &&
+    workflow?.stages[stageIndex]?.kind === "human" &&
+    workflow.stages.filter((stage) => stage.kind === "human").length === 1
+  const requestStageKindChange = (
+    stageIndex: number,
+    nextKind: PRLifecycleGateKind,
+  ) => {
+    if (workflow?.stages[stageIndex]?.kind === nextKind) return
+    if (nextKind !== "human" && isLastCharterHumanStage(stageIndex)) {
+      setPendingGateWorkflowChange({
+        action: "replace_last_human",
+        stageIndex,
+        nextKind,
+      })
+      return
+    }
+    replaceStageKind(stageIndex, nextKind)
+  }
+  const requestStageRemoval = (stageIndex: number) => {
+    if (isLastCharterHumanStage(stageIndex)) {
+      setPendingGateWorkflowChange({
+        action: "remove_last_human",
+        stageIndex,
+      })
+      return
+    }
+    changeWorkflow((current) => {
+      current.stages.splice(stageIndex, 1)
+    })
+  }
+  const confirmGateWorkflowChange = () => {
+    const pending = pendingGateWorkflowChange
+    if (!pending) return
+    if (pending.action === "use_default_human") {
+      changeProfile((profile) => {
+        if (selectedDecisionPoint) {
+          delete profile.workflows[selectedDecisionPoint]
+        }
+      })
+    } else if (pending.action === "remove_last_human") {
+      changeWorkflow((current) => {
+        current.stages.splice(pending.stageIndex, 1)
+      })
+    } else {
+      replaceStageKind(pending.stageIndex, pending.nextKind)
+    }
+    setPendingGateWorkflowChange(null)
+    window.requestAnimationFrame(() => {
+      const id =
+        pending.action === "use_default_human"
+          ? "pr-gate-configure-custom-workflow"
+          : "pr-gate-stage-controls"
+      document.getElementById(id)?.focus()
+    })
+  }
+  const cancelGateWorkflowChange = () => {
+    const pending = pendingGateWorkflowChange
+    setPendingGateWorkflowChange(null)
+    window.requestAnimationFrame(() => {
+      const id =
+        pending?.action === "use_default_human"
+          ? "pr-gate-use-default-human"
+          : pending?.action === "replace_last_human"
+            ? `pr-gate-stage-kind-${pending.stageIndex}`
+            : pending?.action === "remove_last_human"
+              ? `pr-gate-stage-remove-${pending.stageIndex}`
+              : "pr-gate-stage-controls"
+      document.getElementById(id)?.focus()
     })
   }
   const requestBack = () => {
@@ -1075,6 +1220,12 @@ export function PRLifecycleGateProfilesPage({
               >
                 <DialogContent
                   className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl lg:max-w-4xl"
+                  showCloseButton={false}
+                  onEscapeKeyDown={(event) => {
+                    if (!pendingGateWorkflowChange) return
+                    event.preventDefault()
+                    cancelGateWorkflowChange()
+                  }}
                   onCloseAutoFocus={(event) => {
                     event.preventDefault()
                     const trigger = lastOpenedGateTrigger.current
@@ -1097,7 +1248,7 @@ export function PRLifecycleGateProfilesPage({
                     })
                   }}
                 >
-                  <DialogHeader className="border-border border-b px-5 py-4 pr-14">
+                  <DialogHeader className="border-border border-b px-5 py-4">
                     <DialogTitle>
                       {activeDecisionPoint
                         ? (selectedGateNode?.title ??
@@ -1106,8 +1257,9 @@ export function PRLifecycleGateProfilesPage({
                         : t("prWorkspaces.gateProfiles.workflow")}
                     </DialogTitle>
                     <DialogDescription>
-                      {selectedProfile.name} ·{" "}
-                      {t("prWorkspaces.gateProfiles.workflowHelp")}
+                      {t("prWorkspaces.gateProfiles.profileContext", {
+                        name: selectedProfile.name,
+                      })}
                     </DialogDescription>
                   </DialogHeader>
                   <div
@@ -1118,99 +1270,155 @@ export function PRLifecycleGateProfilesPage({
                     {(error || issues.length > 0) && (
                       <GateProfileIssues error={error} issues={issues} />
                     )}
-                    {!workflow && (
-                      <Button onClick={addDecisionPoint}>
-                        <IconPlus />
-                        {t("prWorkspaces.gateProfiles.addWorkflow")}
-                      </Button>
-                    )}
+                    <div
+                      className="bg-muted/30 min-w-0 space-y-2 rounded-lg border p-3"
+                      data-testid="pr-gate-context"
+                    >
+                      <p className="text-sm leading-snug">
+                        {selectedGateNode?.description ??
+                          t("prWorkspaces.gateProfiles.workflowHelp")}
+                      </p>
+                      {selectedGateFlowTitles.length > 1 && (
+                        <p className="text-muted-foreground text-xs leading-snug">
+                          {t("prWorkspaces.gateProfiles.sharedAcrossFlows", {
+                            flows: selectedGateFlowTitles.join(" and "),
+                          })}
+                        </p>
+                      )}
+                      <p className="text-muted-foreground text-xs leading-snug">
+                        {charterAuthorityGate
+                          ? t("prWorkspaces.gateProfiles.charterOutcomeHelp")
+                          : t("prWorkspaces.gateProfiles.workflowHelp")}
+                      </p>
+                    </div>
                     {workflow ? (
                       <>
-                        <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-                          <GateField
-                            label={t("prWorkspaces.gateProfiles.workflowName")}
-                          >
-                            <Input
-                              value={workflow.name}
-                              aria-label={t(
-                                "prWorkspaces.gateProfiles.workflowName",
-                              )}
-                              onChange={(event) =>
-                                changeWorkflow((current) => {
-                                  current.name = event.target.value
-                                })
-                              }
-                            />
-                          </GateField>
+                        <div className="max-w-md min-w-0">
                           <GateField
                             label={t("prWorkspaces.gateProfiles.purpose")}
                           >
-                            <Select
-                              value={workflow.purpose}
-                              onValueChange={(value) =>
-                                changeWorkflow((current) => {
-                                  current.purpose =
-                                    value as PRLifecycleGatePurpose
-                                })
-                              }
+                            <Input
+                              readOnly
+                              value={t(
+                                `prWorkspaces.gateProfiles.purposes.${expectedPurpose ?? workflow.purpose}`,
+                              )}
+                              aria-label={t(
+                                "prWorkspaces.gateProfiles.purpose",
+                              )}
+                              aria-describedby="pr-gate-purpose-help"
+                              className="bg-muted/40"
+                            />
+                            <p
+                              className="text-muted-foreground mt-1.5 flex items-center gap-1 text-xs"
+                              id="pr-gate-purpose-help"
                             >
-                              <SelectTrigger
-                                className="w-full"
-                                aria-label={t(
-                                  "prWorkspaces.gateProfiles.purpose",
-                                )}
-                              >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {(
-                                  [
-                                    "attention",
-                                    "authorization",
-                                    "classification",
-                                  ] as const
-                                ).map((purpose) => (
-                                  <SelectItem key={purpose} value={purpose}>
-                                    {t(
-                                      `prWorkspaces.gateProfiles.purposes.${purpose}`,
-                                    )}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
+                              <IconLock className="size-3" aria-hidden="true" />
+                              {t("prWorkspaces.gateProfiles.purposeLockedHelp")}
+                            </p>
                           </GateField>
                         </div>
+                        <Collapsible
+                          open={workflowAdvancedOpen}
+                          onOpenChange={setWorkflowAdvancedOpen}
+                        >
+                          <CollapsibleTrigger asChild>
+                            <Button
+                              aria-controls="pr-gate-advanced-settings"
+                              className="px-2"
+                              size="sm"
+                              type="button"
+                              variant="ghost"
+                            >
+                              {t("prWorkspaces.gateProfiles.advancedSettings")}
+                              <IconChevronDown
+                                aria-hidden="true"
+                                className={cn(
+                                  "size-4 transition-transform",
+                                  workflowAdvancedOpen && "rotate-180",
+                                )}
+                              />
+                            </Button>
+                          </CollapsibleTrigger>
+                          <CollapsibleContent
+                            className="bg-muted/20 mt-2 grid min-w-0 gap-3 rounded-lg border p-3 sm:grid-cols-2"
+                            id="pr-gate-advanced-settings"
+                          >
+                            <GateField
+                              label={t(
+                                "prWorkspaces.gateProfiles.workflowName",
+                              )}
+                            >
+                              <Input
+                                value={workflow.name}
+                                aria-label={t(
+                                  "prWorkspaces.gateProfiles.workflowName",
+                                )}
+                                onChange={(event) =>
+                                  changeWorkflow((current) => {
+                                    current.name = event.target.value
+                                  })
+                                }
+                              />
+                            </GateField>
+                            <GateField
+                              label={t(
+                                "prWorkspaces.gateProfiles.decisionPoint",
+                              )}
+                            >
+                              <Input
+                                aria-label={t(
+                                  "prWorkspaces.gateProfiles.decisionPoint",
+                                )}
+                                className="bg-muted/40 font-mono text-xs"
+                                readOnly
+                                value={activeDecisionPoint ?? ""}
+                              />
+                            </GateField>
+                          </CollapsibleContent>
+                        </Collapsible>
                         <div className="flex min-w-0 flex-col items-stretch gap-2 border-t pt-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                           <div
                             className="flex w-full min-w-0 flex-none flex-col gap-2 sm:w-auto sm:flex-1 sm:flex-row"
+                            id="pr-gate-stage-controls"
+                            tabIndex={-1}
                             data-testid="pr-gate-stage-controls"
                           >
-                            <Select
-                              value={newStageKind}
-                              onValueChange={(value) =>
-                                setNewStageKind(value as PRLifecycleGateKind)
-                              }
+                            <GateField
+                              className="w-full sm:min-w-44 sm:flex-1"
+                              label={t(
+                                "prWorkspaces.gateProfiles.newStageType",
+                              )}
                             >
-                              <SelectTrigger
-                                className="w-full min-w-0 sm:min-w-44"
-                                aria-label={t(
-                                  "prWorkspaces.gateProfiles.addStage",
-                                )}
+                              <Select
+                                disabled={pendingGateWorkflowChange != null}
+                                value={newStageKind}
+                                onValueChange={(value) =>
+                                  setNewStageKind(value as PRLifecycleGateKind)
+                                }
                               >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {gateKinds.map((kind) => (
-                                  <SelectItem key={kind} value={kind}>
-                                    {t(
-                                      `prWorkspaces.gateProfiles.kinds.${kind}`,
-                                    )}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
+                                <SelectTrigger
+                                  className="w-full min-w-0"
+                                  aria-label={t(
+                                    "prWorkspaces.gateProfiles.newStageType",
+                                  )}
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {gateKinds.map((kind) => (
+                                    <SelectItem key={kind} value={kind}>
+                                      {t(
+                                        `prWorkspaces.gateProfiles.kinds.${kind}`,
+                                      )}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </GateField>
                             <Button
-                              className="w-full sm:w-auto"
+                              className="w-full sm:mt-6 sm:w-auto"
+                              disabled={pendingGateWorkflowChange != null}
+                              id="pr-gate-add-stage"
                               variant="outline"
                               onClick={addStage}
                             >
@@ -1218,23 +1426,39 @@ export function PRLifecycleGateProfilesPage({
                               {t("prWorkspaces.gateProfiles.addStage")}
                             </Button>
                           </div>
-                          <Button
-                            variant="ghost"
-                            className="text-destructive w-full sm:w-auto"
-                            onClick={() =>
-                              changeProfile((profile) => {
-                                if (selectedDecisionPoint) {
-                                  delete profile.workflows[
-                                    selectedDecisionPoint
-                                  ]
-                                }
-                              })
-                            }
-                          >
-                            <IconTrash />
-                            {t("prWorkspaces.gateProfiles.removeWorkflow")}
-                          </Button>
+                          <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:max-w-64 sm:items-end">
+                            <Button
+                              aria-describedby="pr-gate-default-human-help"
+                              className="w-full sm:w-auto"
+                              disabled={pendingGateWorkflowChange != null}
+                              id="pr-gate-use-default-human"
+                              variant="ghost"
+                              onClick={() =>
+                                setPendingGateWorkflowChange({
+                                  action: "use_default_human",
+                                })
+                              }
+                            >
+                              <IconRefresh />
+                              {t("prWorkspaces.gateProfiles.useDefaultHuman")}
+                            </Button>
+                            <span
+                              className="text-muted-foreground text-[11px] leading-snug"
+                              id="pr-gate-default-human-help"
+                            >
+                              {t(
+                                "prWorkspaces.gateProfiles.useDefaultHumanHelp",
+                              )}
+                            </span>
+                          </div>
                         </div>
+                        {pendingGateWorkflowChange && (
+                          <GateWorkflowChangeWarning
+                            pending={pendingGateWorkflowChange}
+                            onCancel={cancelGateWorkflowChange}
+                            onConfirm={confirmGateWorkflowChange}
+                          />
+                        )}
                         <div className="min-w-0 space-y-2">
                           {workflow.stages.length === 0 ? (
                             <p className="text-muted-foreground py-6 text-center text-sm">
@@ -1243,10 +1467,12 @@ export function PRLifecycleGateProfilesPage({
                           ) : (
                             workflow.stages.map((stage, index) => (
                               <GateStageEditor
-                                key={stage.id}
+                                key={`${activeDecisionPoint}:${index}`}
                                 stage={stage}
                                 index={index}
                                 count={workflow.stages.length}
+                                disabled={pendingGateWorkflowChange != null}
+                                showAdvanced={workflowAdvancedOpen}
                                 onChange={(next) =>
                                   changeWorkflow((current) => {
                                     current.stages[index] = next
@@ -1269,36 +1495,54 @@ export function PRLifecycleGateProfilesPage({
                                     ]
                                   })
                                 }
-                                onRemove={() =>
-                                  changeWorkflow((current) => {
-                                    current.stages.splice(index, 1)
-                                  })
+                                onKindChange={(kind) =>
+                                  requestStageKindChange(index, kind)
                                 }
+                                onRemove={() => requestStageRemoval(index)}
                               />
                             ))
                           )}
                         </div>
                       </>
                     ) : (
-                      <p className="text-muted-foreground py-10 text-center text-sm">
-                        {t("prWorkspaces.gateProfiles.workflowOff")}
-                      </p>
+                      <div className="flex flex-col items-center gap-3 py-8 text-center">
+                        <p className="text-muted-foreground max-w-lg text-sm leading-snug">
+                          {t("prWorkspaces.gateProfiles.workflowOff")}
+                        </p>
+                        <Button
+                          id="pr-gate-configure-custom-workflow"
+                          onClick={addDecisionPoint}
+                        >
+                          <IconPlus />
+                          {t("prWorkspaces.gateProfiles.addWorkflow")}
+                        </Button>
+                      </div>
                     )}
                   </div>
                   <DialogFooter className="border-border border-t px-5 py-3">
+                    <p className="text-muted-foreground mr-auto max-w-md text-xs leading-snug">
+                      {t("prWorkspaces.gateProfiles.saveAllHelp")}
+                    </p>
                     <DialogClose asChild>
                       <Button variant="outline">
-                        {t("prWorkspaces.gateProfiles.done")}
+                        {t(
+                          dirty
+                            ? "prWorkspaces.gateProfiles.closeKeepDraft"
+                            : "prWorkspaces.gateProfiles.close",
+                        )}
                       </Button>
                     </DialogClose>
                     <Button
                       disabled={
-                        !dirty || issues.length > 0 || saveMutation.isPending
+                        !dirty ||
+                        issues.length > 0 ||
+                        saveMutation.isPending ||
+                        pendingGateWorkflowChange != null
                       }
                       onClick={() => saveMutation.mutate(draft)}
                     >
                       <IconDeviceFloppy />
-                      {t("prWorkspaces.gateProfiles.save")}
+                      {t("prWorkspaces.gateProfiles.saveAllChanges")}
                     </Button>
                   </DialogFooter>
                 </DialogContent>
@@ -1636,27 +1880,26 @@ function GateStageEditor({
   stage,
   index,
   count,
+  disabled,
+  showAdvanced,
   onChange,
+  onKindChange,
   onMove,
   onRemove,
 }: {
   stage: PRLifecycleGateStage
   index: number
   count: number
+  disabled: boolean
+  showAdvanced: boolean
   onChange: (stage: PRLifecycleGateStage) => void
+  onKindChange: (kind: PRLifecycleGateKind) => void
   onMove: (offset: number) => void
   onRemove: () => void
 }) {
   const { t } = useTranslation()
   const patch = (update: Partial<PRLifecycleGateStage>) =>
     onChange({ ...stage, ...update })
-  const changeKind = (kind: PRLifecycleGateKind) => {
-    const next = createPRLifecycleGateStage(kind, stage.id)
-    onChange({
-      ...next,
-      ...(kind === "zero" ? {} : { title: stage.title ?? "" }),
-    })
-  }
   return (
     <article
       className="border-border max-w-full min-w-0 rounded-md border p-3"
@@ -1664,19 +1907,15 @@ function GateStageEditor({
     >
       <div className="flex max-w-full min-w-0 flex-wrap items-center gap-2">
         <Badge variant="secondary">{index + 1}</Badge>
-        <Input
-          className="min-w-0 flex-1 basis-36"
-          value={stage.id}
-          onChange={(event) => patch({ id: event.target.value })}
-          aria-label={t("prWorkspaces.gateProfiles.stageID")}
-        />
         <Select
+          disabled={disabled}
           value={stage.kind}
-          onValueChange={(value) => changeKind(value as PRLifecycleGateKind)}
+          onValueChange={(value) => onKindChange(value as PRLifecycleGateKind)}
         >
           <SelectTrigger
+            id={`pr-gate-stage-kind-${index}`}
             size="sm"
-            className="max-w-full min-w-0"
+            className="max-w-full min-w-0 flex-1"
             aria-label={t("prWorkspaces.gateProfiles.stageKind")}
           >
             <SelectValue />
@@ -1693,7 +1932,7 @@ function GateStageEditor({
           size="icon"
           variant="ghost"
           className="size-8"
-          disabled={index === 0}
+          disabled={disabled || index === 0}
           onClick={() => onMove(-1)}
           aria-label={t("prWorkspaces.gateProfiles.moveUp")}
         >
@@ -1703,7 +1942,7 @@ function GateStageEditor({
           size="icon"
           variant="ghost"
           className="size-8"
-          disabled={index === count - 1}
+          disabled={disabled || index === count - 1}
           onClick={() => onMove(1)}
           aria-label={t("prWorkspaces.gateProfiles.moveDown")}
         >
@@ -1713,17 +1952,33 @@ function GateStageEditor({
           size="icon"
           variant="ghost"
           className="text-destructive size-8"
+          disabled={disabled}
+          id={`pr-gate-stage-remove-${index}`}
           onClick={onRemove}
           aria-label={t("prWorkspaces.gateProfiles.removeStage")}
         >
           <IconTrash />
         </Button>
       </div>
+      {showAdvanced && (
+        <div className="mt-3">
+          <GateField label={t("prWorkspaces.gateProfiles.stageID")}>
+            <Input
+              className="max-w-full min-w-0 font-mono text-xs"
+              disabled={disabled}
+              value={stage.id}
+              onChange={(event) => patch({ id: event.target.value })}
+              aria-label={t("prWorkspaces.gateProfiles.stageID")}
+            />
+          </GateField>
+        </div>
+      )}
       {stage.kind !== "zero" && (
         <div className="mt-3 grid max-w-full min-w-0 gap-3 md:grid-cols-2">
           <GateField label={t("prWorkspaces.gateProfiles.stageTitle")}>
             <Input
               className="max-w-full min-w-0"
+              disabled={disabled}
               value={stage.title ?? ""}
               aria-label={t("prWorkspaces.gateProfiles.stageTitle")}
               onChange={(event) => patch({ title: event.target.value })}
@@ -1736,6 +1991,7 @@ function GateStageEditor({
             >
               <Textarea
                 className="max-w-full min-w-0"
+                disabled={disabled}
                 value={stage.when ?? ""}
                 aria-label={t("prWorkspaces.gateProfiles.condition")}
                 onChange={(event) => patch({ when: event.target.value })}
@@ -1748,6 +2004,7 @@ function GateStageEditor({
               <GateField label={t("prWorkspaces.gateProfiles.agent")}>
                 <Input
                   className="max-w-full min-w-0"
+                  disabled={disabled}
                   value={stage.agent_id ?? ""}
                   aria-label={t("prWorkspaces.gateProfiles.agent")}
                   onChange={(event) => patch({ agent_id: event.target.value })}
@@ -1759,6 +2016,7 @@ function GateStageEditor({
               >
                 <Textarea
                   className="max-w-full min-w-0"
+                  disabled={disabled}
                   value={stage.criteria ?? ""}
                   aria-label={t("prWorkspaces.gateProfiles.criteria")}
                   onChange={(event) => patch({ criteria: event.target.value })}
@@ -1773,6 +2031,7 @@ function GateStageEditor({
             >
               <Textarea
                 className="max-w-full min-w-0"
+                disabled={disabled}
                 value={firstQuestion(stage.questions)}
                 aria-label={t("prWorkspaces.gateProfiles.question")}
                 onChange={(event) => patch({ questions: [event.target.value] })}
@@ -1787,6 +2046,68 @@ function GateStageEditor({
         </p>
       )}
     </article>
+  )
+}
+
+function GateWorkflowChangeWarning({
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  pending: PendingGateWorkflowChange
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { t } = useTranslation()
+  const useDefault = pending.action === "use_default_human"
+  return (
+    <div
+      className="border-warning/60 bg-warning/10 focus-visible:ring-ring/30 min-w-0 rounded-lg border p-3 outline-none focus-visible:ring-2"
+      id="pr-gate-workflow-warning"
+      role="alert"
+      tabIndex={-1}
+    >
+      <strong className="text-sm">
+        {t(
+          useDefault
+            ? "prWorkspaces.gateProfiles.defaultHumanWarningTitle"
+            : "prWorkspaces.gateProfiles.lastHumanWarningTitle",
+        )}
+      </strong>
+      <p className="text-muted-foreground mt-1 text-xs leading-snug">
+        {t(
+          useDefault
+            ? "prWorkspaces.gateProfiles.defaultHumanWarningDescription"
+            : "prWorkspaces.gateProfiles.lastHumanWarningDescription",
+          pending.action === "replace_last_human"
+            ? {
+                type: t(`prWorkspaces.gateProfiles.kinds.${pending.nextKind}`),
+              }
+            : undefined,
+        )}
+      </p>
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        <Button size="sm" type="button" variant="outline" onClick={onCancel}>
+          {t(
+            useDefault
+              ? "prWorkspaces.gateProfiles.keepCustomWorkflow"
+              : "prWorkspaces.gateProfiles.keepHumanApproval",
+          )}
+        </Button>
+        <Button
+          size="sm"
+          type="button"
+          variant={useDefault ? "secondary" : "destructive"}
+          onClick={onConfirm}
+        >
+          {t(
+            useDefault
+              ? "prWorkspaces.gateProfiles.confirmDefaultHuman"
+              : "prWorkspaces.gateProfiles.confirmRemoveHuman",
+          )}
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -1850,6 +2171,38 @@ function GateProfilesState({
 
 function workflowID(decisionPoint: string): string {
   return `workflow_${decisionPoint.replaceAll(".", "_")}`.slice(0, 64)
+}
+
+function isCharterAuthorityDecisionPoint(
+  decisionPoint: string | null,
+): boolean {
+  return (
+    decisionPoint === "pr.charter.confirm" ||
+    decisionPoint === "pr.charter.reconfirm"
+  )
+}
+
+function charterHumanStageDefaults(decisionPoint: string):
+  | {
+      title: string
+      question: string
+    }
+  | undefined {
+  if (decisionPoint === "pr.charter.confirm") {
+    return {
+      title: "Confirm PR charter",
+      question:
+        "Approve the PR purpose, type, included scope, exclusions, and non-goals?",
+    }
+  }
+  if (decisionPoint === "pr.charter.reconfirm") {
+    return {
+      title: "Confirm revised PR charter",
+      question:
+        "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+    }
+  }
+  return undefined
 }
 
 function firstQuestion(value: unknown): string {

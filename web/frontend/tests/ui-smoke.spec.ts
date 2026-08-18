@@ -1148,6 +1148,22 @@ const prLifecycleGateProfiles = {
     default: {
       name: "Default",
       workflows: {
+        "pr.charter.reconfirm": {
+          id: "pr-charter-reconfirm",
+          name: "Confirm revised PR charter",
+          purpose: "authorization",
+          decision_point: "pr.charter.reconfirm",
+          stages: [
+            {
+              id: "human-reconfirm",
+              kind: "human",
+              title: "Confirm revised PR charter",
+              questions: [
+                "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
+              ],
+            },
+          ],
+        },
         "pr.review.complete": {
           id: "review_complete",
           name: "Review complete",
@@ -4621,6 +4637,65 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expect(
     implementationFlow.locator('[data-flow-graph="implementation"]'),
   ).toHaveCount(0)
+
+  await gateMap
+    .getByRole("button", { name: "Approve revised purpose and scope" })
+    .click()
+  const revisedCharterDialog = page.getByRole("dialog", {
+    name: "Approve revised purpose and scope",
+  })
+  await expect(revisedCharterDialog).toBeVisible()
+  await expect(revisedCharterDialog.getByLabel("Purpose")).toHaveValue(
+    "Authorization",
+  )
+  await expect(revisedCharterDialog.getByLabel("Purpose")).toHaveAttribute(
+    "readonly",
+  )
+  await expect(
+    revisedCharterDialog.getByText(
+      "Shared by Review workflow and Implementation workflow. Changes here apply to every occurrence.",
+    ),
+  ).toBeVisible()
+  await expect(
+    revisedCharterDialog.getByRole("combobox", { name: "New stage type" }),
+  ).toContainText("Human")
+  await expect(revisedCharterDialog.getByLabel("Workflow name")).toHaveCount(0)
+  await revisedCharterDialog
+    .getByRole("button", { name: "Advanced settings" })
+    .click()
+  await expect(revisedCharterDialog.getByLabel("Workflow name")).toHaveValue(
+    "Confirm revised PR charter",
+  )
+  await expect(revisedCharterDialog.getByLabel("Stable stage ID")).toHaveValue(
+    "human-reconfirm",
+  )
+
+  const revisedCharterStageType = revisedCharterDialog.getByRole("combobox", {
+    name: "Stage type",
+    exact: true,
+  })
+  await revisedCharterStageType.click()
+  await page.getByRole("option", { name: "Zero · pass" }).click()
+  const humanRemovalWarning = revisedCharterDialog.getByRole("alert")
+  await expect(humanRemovalWarning).toContainText(
+    "Remove the final Human approval?",
+  )
+  await expect(revisedCharterStageType).toHaveText("Human")
+  await expect(humanRemovalWarning).toBeFocused()
+  await page.keyboard.press("Escape")
+  await expect(humanRemovalWarning).toHaveCount(0)
+  await expect(revisedCharterDialog).toBeVisible()
+  await expect(revisedCharterStageType).toBeFocused()
+  await expectNoSeriousA11yViolations(page)
+  await expectGateDialogFits(revisedCharterDialog)
+  await revisedCharterDialog.getByRole("button", { name: "Close" }).click()
+  await expect(revisedCharterDialog).toBeHidden()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/pull-requests/profiles/default\\?flow=review&from=${prWorkspaceID}$`,
+    ),
+  )
+
   await expect(gateMap.locator("[data-decision-point]")).toHaveCount(9)
   const renderedGateInstances = await expectActiveGateFlowContract(
     gateMap,
@@ -4937,6 +5012,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
     "pr.review.complete",
   )
   await expect(page.locator("#pr-gate-workflow-editor")).toHaveCount(1)
+  await gateDialog.getByRole("button", { name: "Advanced settings" }).click()
   await expect(gateDialog.getByLabel("Workflow name")).toBeVisible()
   await expectGateDialogFits(gateDialog)
   await expectNoHorizontalOverflow(page)
@@ -4964,12 +5040,13 @@ test("unified pull request workspace combines review, implementation, nudges, an
     ),
   )
   await expect(gateDialog).toBeVisible()
+  await gateDialog.getByRole("button", { name: "Advanced settings" }).click()
   await expect(workflowName).toHaveValue(`${originalWorkflowName} edited`)
   await expect
     .poll(() => page.evaluate(() => window.history.state?.__TSR_index))
     .toBe(profileGateHistoryIndex)
   await workflowName.fill(originalWorkflowName)
-  await gateDialog.getByRole("button", { name: "Done" }).click()
+  await gateDialog.getByRole("button", { name: /^Close/ }).click()
   await expect(gateDialog).toBeHidden()
   await expect(page).toHaveURL(
     new RegExp(
@@ -4988,7 +5065,7 @@ test("unified pull request workspace combines review, implementation, nudges, an
   await expectGateDialogFits(gateDialog)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
-  await gateDialog.getByRole("button", { name: "Done" }).click()
+  await gateDialog.getByRole("button", { name: /^Close/ }).click()
   await expect(gateDialog).toBeHidden()
   await page.getByRole("button", { name: "Back to gate profiles" }).click()
   await expect(page).toHaveURL(
