@@ -14,15 +14,12 @@ type RespondGateRequest struct {
 	GateRunID       string
 	ExpectedVersion int64
 	RequestID       string
-	Decision        GateOutcome
-	Answers         map[string]any
-	Comment         string
+	FieldValues     map[string]any
 }
 
 func (service *Service) RespondGate(ctx context.Context, request RespondGateRequest) (Aggregate, error) {
 	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
-		!validOpaqueID(request.GateRunID, "pgr_") || !validGateOutcome(request.Decision) ||
-		!validBoundedText(strings.TrimSpace(request.Comment), maxCorrectionText, true) {
+		!validOpaqueID(request.GateRunID, "pgr_") || request.FieldValues == nil {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -34,52 +31,52 @@ func (service *Service) RespondGate(ctx context.Context, request RespondGateRequ
 		aggregate.Workspace.Version != request.ExpectedVersion {
 		return aggregate, ErrConflict
 	}
-	hardScopeResolution := gate.DecisionPoint == "pr.implementation.scope" && gateHasHardCandidateScope(aggregate, gate)
-	if hardScopeResolution && request.Decision == GatePass {
-		return aggregate, fmt.Errorf("%w: candidate code outside the charter or PR type cannot be approved without removal or charter revision", ErrInvalid)
-	}
-	if gate.DecisionPoint == "pr.publication.reconcile" &&
-		(request.Decision == GateRevise || request.Decision == GateDefer) {
-		return aggregate, unsupportedPublicationReconciliationOutcome(request.Decision)
-	}
-	if request.Decision == GatePass {
-		if completionGate, found := implementationCompletionGateForPass(aggregate.Gates, gate); found {
-			fresh, freshnessErr := implementationCompletionGateFresh(aggregate, completionGate)
-			if freshnessErr != nil {
-				return aggregate, freshnessErr
-			}
-			if !fresh {
-				return service.invalidateImplementationCompletionGate(ctx, request, aggregate, completionGate)
-			}
-		}
+	normalizedValues, actionErr := validateSubmittedGateFieldValues(gate, request.FieldValues)
+	if actionErr != nil {
+		return aggregate, fmt.Errorf("%w: %v", ErrInvalid, actionErr)
 	}
 	originalEvidence := gate.Evidence
-	if gate.PolicyRevision == "builtin:hard-scope-resolution-v1" {
-		gate = answerFallbackGate(gate, request.Decision, request.Answers, strings.TrimSpace(request.Comment), service.now().UTC())
-	} else if service.gates != nil {
-		gate, err = service.gates.Respond(ctx, gate, request.Decision, request.Answers, strings.TrimSpace(request.Comment))
+	if service.gates != nil {
+		gate, err = service.gates.Respond(ctx, gate, normalizedValues)
 		if err != nil {
 			return Aggregate{}, err
 		}
 	} else {
-		gate = answerFallbackGate(gate, request.Decision, request.Answers, strings.TrimSpace(request.Comment), service.now().UTC())
-	}
-	if gate.DecisionPoint == "pr.publication.reconcile" &&
-		(gate.Outcome == GateRevise || gate.Outcome == GateDefer) {
-		return aggregate, unsupportedPublicationReconciliationOutcome(gate.Outcome)
+		gate = answerFallbackGate(gate, normalizedValues, service.now().UTC())
 	}
 	// The public evidence is a frozen projection of the private subject. A gate
-	// responder may advance turns and outcome, but cannot rewrite the evidence
+	// responder may advance turns and field values, but cannot rewrite the evidence
 	// that determines whether hard scope is passable.
 	gate.Evidence = originalEvidence
-	patch, err := service.gateOutcomePatch(aggregate, gate)
+	if gate.State == ExecutionSucceeded {
+		action := gateAction(gate)
+		if action == "" {
+			return aggregate, errors.New("completed PR lifecycle gate returned no action field")
+		}
+		hardScopeResolution := gate.DecisionPoint == "pr.implementation.hard-scope" && gateHasHardCandidateScope(aggregate, gate)
+		if hardScopeResolution && action == "approve" {
+			return aggregate, fmt.Errorf("%w: candidate code outside the charter or PR type cannot be approved without removal or charter revision", ErrInvalid)
+		}
+		if action == gateProgressAction(gate.DecisionPoint) {
+			if completionGate, found := implementationCompletionGateForPass(aggregate.Gates, gate); found {
+				fresh, freshnessErr := implementationCompletionGateFresh(aggregate, completionGate)
+				if freshnessErr != nil {
+					return aggregate, freshnessErr
+				}
+				if !fresh {
+					return service.invalidateImplementationCompletionGate(ctx, request, aggregate, completionGate)
+				}
+			}
+		}
+	}
+	patch, err := service.gateActionPatch(aggregate, gate)
 	if err != nil {
 		return aggregate, err
 	}
 	patch.ReplaceGates = append(patch.ReplaceGates, gate)
 	patch.Activity = append(patch.Activity, Activity{
 		Kind: "gate.responded", Actor: "user", EntityID: gate.ID,
-		Summary: fmt.Sprintf("Gate answered: %s", gate.Outcome), CreatedAt: service.now().UTC(),
+		Summary: gateResponseActivitySummary(gate), CreatedAt: service.now().UTC(),
 	})
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
@@ -89,6 +86,15 @@ func (service *Service) RespondGate(ctx context.Context, request RespondGateRequ
 		return result.Aggregate, err
 	}
 	return result.Aggregate, nil
+}
+
+func gateResponseActivitySummary(gate GateRun) string {
+	for index := len(gate.Turns) - 1; index >= 0; index-- {
+		if action, ok := gate.Turns[index].FieldValues["action"].(string); ok && action != "" {
+			return "Gate answered: " + action
+		}
+	}
+	return "Gate answered"
 }
 
 func pinGateSubject(gate GateRun, subject map[string]any) (GateRun, error) {
@@ -118,7 +124,7 @@ func implementationCompletionGateForPass(gates []GateRun, answered GateRun) (Gat
 	for index := len(gates) - 1; index >= 0; index-- {
 		gate := gates[index]
 		if gate.DecisionPoint == "pr.implementation.complete" && gate.TargetID == answered.TargetID &&
-			gate.State == ExecutionSucceeded && gate.Outcome == GatePass {
+			gateCompletedWith(gate, "accept") {
 			return gate, true
 		}
 	}
@@ -129,7 +135,7 @@ func passedImplementationCompletionGate(gates []GateRun, repairID string) (GateR
 	for index := len(gates) - 1; index >= 0; index-- {
 		gate := gates[index]
 		if gate.DecisionPoint == "pr.implementation.complete" && gate.TargetID == repairID &&
-			gate.State == ExecutionSucceeded && gate.Outcome == GatePass {
+			gateCompletedWith(gate, "accept") {
 			return gate, true
 		}
 	}
@@ -296,7 +302,7 @@ func (service *Service) PromoteCorrection(ctx context.Context, request PromoteCo
 	if !ok || correction.Promoted || aggregate.Workspace.Version != request.ExpectedVersion {
 		return aggregate, ErrConflict
 	}
-	gate, err := service.startGate(ctx, aggregate, "pr.correction.promote", "authorization", map[string]any{
+	gate, err := service.startGate(ctx, aggregate, "pr.correction.promote", map[string]any{
 		"correction":    correction,
 		"repository_id": aggregate.Workspace.RepositoryID,
 	})
@@ -305,7 +311,7 @@ func (service *Service) PromoteCorrection(ctx context.Context, request PromoteCo
 	}
 	gate.TargetID = correction.ID
 	patch := AggregatePatch{AppendGates: []GateRun{gate}}
-	if gate.Outcome == GatePass && gate.State == ExecutionSucceeded {
+	if gateCompletedWith(gate, "promote") {
 		promotion, promotionErr := service.correctionPromotionPatch(aggregate, correction)
 		if promotionErr != nil {
 			return aggregate, promotionErr
@@ -327,39 +333,51 @@ func (service *Service) PromoteCorrection(ctx context.Context, request PromoteCo
 	return result.Aggregate, nil
 }
 
-func (service *Service) gateOutcomePatch(aggregate Aggregate, gate GateRun) (AggregatePatch, error) {
+func (service *Service) gateActionPatch(aggregate Aggregate, gate GateRun) (AggregatePatch, error) {
 	patch := AggregatePatch{}
 	if gate.State != ExecutionSucceeded {
 		state := ExecutionWaitingGate
 		patch.ExecutionState = &state
 		return patch, nil
 	}
-	if gate.DecisionPoint == "pr.implementation.scope" && gateHasHardCandidateScope(aggregate, gate) {
-		return service.hardImplementationScopeOutcomePatch(aggregate, gate)
+	action := gateAction(gate)
+	if action == "" {
+		return AggregatePatch{}, ErrInvalid
+	}
+	if gate.DecisionPoint == "pr.implementation.hard-scope" {
+		if !gateHasHardCandidateScope(aggregate, gate) {
+			return AggregatePatch{}, ErrInvalid
+		}
+		return service.implementationScopeResolutionActionPatch(aggregate, gate, true)
+	}
+	if gate.DecisionPoint == "pr.implementation.scope" && action != "approve" {
+		return service.implementationScopeResolutionActionPatch(aggregate, gate, false)
 	}
 	if gate.DecisionPoint == "pr.finding.classify" {
 		finding, index := findFinding(aggregate.Findings, gate.TargetID)
 		if index < 0 || finding.Disposition != FindingOpen {
 			return AggregatePatch{}, ErrConflict
 		}
-		switch gate.Outcome {
-		case GatePass:
+		switch action {
+		case "keep-in-pr":
 			if !scopeCanUseClassificationGate(finding.Scope) {
 				return AggregatePatch{}, ErrConflict
 			}
 			finding.Disposition = FindingInScope
-		case GateDefer:
+		case "defer-follow-up":
 			finding.Disposition = FindingDeferred
-		case GateBlock:
+		case "dismiss":
 			finding.Disposition = FindingDismissed
-		case GateRevise:
+		case "revise-charter":
 			finding.Disposition = FindingOpen
+		default:
+			return AggregatePatch{}, ErrInvalid
 		}
 		finding.Version++
 		finding.UpdatedAt = service.now().UTC()
 		patch.UpsertFindings = []Finding{finding}
 		phase, state := PhaseTriage, ExecutionWaitingUser
-		if gate.Outcome == GateRevise {
+		if action == "revise-charter" {
 			phase = PhaseCharter
 			patch.Activity = append(patch.Activity, Activity{
 				Kind: "finding.needs_charter_revision", Actor: "gate", EntityID: finding.ID,
@@ -375,19 +393,19 @@ func (service *Service) gateOutcomePatch(aggregate Aggregate, gate GateRun) (Agg
 		patch.Phase, patch.ExecutionState = &phase, &state
 		return patch, nil
 	}
-	if gate.Outcome != GatePass {
+	if action != gateProgressAction(gate.DecisionPoint) {
 		if gate.DecisionPoint == "pr.deferred.publish" {
 			group, ok := findDeferredGroup(aggregate.DeferredGroups, gate.TargetID)
 			if ok && group.PublicationID != "" {
 				if publication, found := findPublication(aggregate.Publications, group.PublicationID); found {
 					publication.State = ExecutionBlocked
-					publication.PublicErrorCode = "publication_gate_" + string(gate.Outcome)
+					publication.PublicErrorCode = "publication_gate_" + action
 					publication.UpdatedAt = service.now().UTC()
 					patch.ReplacePublications = []Publication{publication}
 				}
 				group.PublicationID = ""
 				group.PublicationSuppressed = true
-				group.SuppressionReason = "publication_gate_" + string(gate.Outcome)
+				group.SuppressionReason = "publication_gate_" + action
 				group.Version++
 				group.UpdatedAt = service.now().UTC()
 				patch.UpsertDeferred = []DeferredGroup{group}
@@ -400,7 +418,7 @@ func (service *Service) gateOutcomePatch(aggregate Aggregate, gate GateRun) (Agg
 				return AggregatePatch{}, ErrConflict
 			}
 			state := ExecutionWaitingUser
-			if gate.Outcome == GateBlock {
+			if action == "assume-failed" {
 				publication.State = ExecutionFailed
 				publication.PublicErrorCode = "publication_assumed_failed_by_user"
 				publication.UpdatedAt = service.now().UTC()
@@ -418,18 +436,18 @@ func (service *Service) gateOutcomePatch(aggregate Aggregate, gate GateRun) (Agg
 			return patch, nil
 		}
 		state := ExecutionBlocked
-		if gate.Outcome == GateRevise || gate.Outcome == GateDefer {
+		if action == "revise" || action == "revise-charter" {
 			state = ExecutionWaitingUser
 		}
 		patch.ExecutionState = &state
-		if gate.DecisionPoint == "pr.charter.confirm" && gate.Outcome == GateRevise {
+		if gate.DecisionPoint == "pr.charter.confirm" && action == "revise" {
 			phase := PhaseCharter
 			patch.Phase = &phase
 		}
 		if gate.DecisionPoint == "pr.review.publish" || gate.DecisionPoint == "pr.implementation.publish" {
 			if publication, ok := findPublication(aggregate.Publications, gate.TargetID); ok {
 				publication.State = ExecutionBlocked
-				publication.PublicErrorCode = "publication_gate_" + string(gate.Outcome)
+				publication.PublicErrorCode = "publication_gate_" + action
 				publication.UpdatedAt = service.now().UTC()
 				patch.ReplacePublications = []Publication{publication}
 			}
@@ -568,7 +586,7 @@ func unresolvedDecisionPoint(values []GateRun, answered GateRun, decisionPoint s
 
 func classificationNeedsCharterRevision(values []GateRun) bool {
 	for _, gate := range values {
-		if gate.DecisionPoint == "pr.finding.classify" && gate.State == ExecutionSucceeded && gate.Outcome == GateRevise {
+		if gate.DecisionPoint == "pr.finding.classify" && gateCompletedWith(gate, "revise-charter") {
 			return true
 		}
 	}
@@ -590,7 +608,7 @@ func implementationGatesPassed(values []GateRun, answered GateRun) bool {
 			continue
 		}
 		if _, tracked := required[value.DecisionPoint]; tracked {
-			required[value.DecisionPoint] = value.State == ExecutionSucceeded && value.Outcome == GatePass
+			required[value.DecisionPoint] = gateAllowsProgress(value)
 		}
 	}
 	for _, passed := range required {
@@ -602,7 +620,7 @@ func implementationGatesPassed(values []GateRun, answered GateRun) bool {
 }
 
 func gateHasHardCandidateScope(aggregate Aggregate, gate GateRun) bool {
-	if gate.PolicyRevision == "builtin:hard-scope-resolution-v1" || gate.Evidence.HardScope {
+	if gate.Evidence.HardScope {
 		return true
 	}
 	if gate.Evidence.Scope != nil && HardCandidateScopeBlocker(*gate.Evidence.Scope) {
@@ -623,8 +641,13 @@ func gateHasHardCandidateScope(aggregate Aggregate, gate GateRun) bool {
 	return false
 }
 
-func (service *Service) hardImplementationScopeOutcomePatch(aggregate Aggregate, gate GateRun) (AggregatePatch, error) {
-	if gate.Outcome == GatePass {
+func (service *Service) implementationScopeResolutionActionPatch(
+	aggregate Aggregate,
+	gate GateRun,
+	hard bool,
+) (AggregatePatch, error) {
+	action := gateAction(gate)
+	if hard && action == "approve" {
 		return AggregatePatch{}, fmt.Errorf("%w: hard candidate scope cannot pass an authorization gate", ErrInvalid)
 	}
 	now := service.now().UTC()
@@ -645,10 +668,11 @@ func (service *Service) hardImplementationScopeOutcomePatch(aggregate Aggregate,
 			patch.ReplaceStageRuns = append(patch.ReplaceStageRuns, stage)
 		}
 	}
-	switch gate.Outcome {
-	case GateDefer:
-		wanted := make(map[string]struct{}, len(gate.Evidence.HardScopeFindingIDs))
-		for _, id := range gate.Evidence.HardScopeFindingIDs {
+	switch action {
+	case "defer-follow-up":
+		findingIDs := gate.Evidence.ScopeResolutionIDs
+		wanted := make(map[string]struct{}, len(findingIDs))
+		for _, id := range findingIDs {
 			wanted[id] = struct{}{}
 		}
 		for _, finding := range aggregate.Findings {
@@ -683,10 +707,10 @@ func (service *Service) hardImplementationScopeOutcomePatch(aggregate Aggregate,
 			Kind: "implementation.scope_removal_requested", Actor: "user", EntityID: gate.TargetID,
 			Summary: "Candidate scope drift must be removed; follow-up work was deferred", CreatedAt: now,
 		})
-	case GateRevise:
+	case "revise-charter":
 		phase, state := PhaseCharter, ExecutionWaitingUser
 		patch.Phase, patch.ExecutionState = &phase, &state
-	case GateBlock:
+	case "stop":
 		state := ExecutionBlocked
 		patch.ExecutionState = &state
 	default:
@@ -728,14 +752,12 @@ func (service *Service) correctionPromotionPatch(aggregate Aggregate, correction
 	return AggregatePatch{ReplaceCorrections: []Correction{correction}, AppendLessons: []RepositoryLesson{lesson}}, nil
 }
 
-func answerFallbackGate(gate GateRun, decision GateOutcome, answers map[string]any, comment string, now time.Time) GateRun {
-	gate.Outcome, gate.State, gate.FinishedAt = decision, ExecutionSucceeded, &now
+func answerFallbackGate(gate GateRun, fieldValues map[string]any, now time.Time) GateRun {
+	gate.State, gate.FinishedAt = ExecutionSucceeded, &now
 	for index := range gate.Turns {
 		if gate.Turns[index].Status == "waiting" {
 			gate.Turns[index].Status = "answered"
-			gate.Turns[index].Outcome = decision
-			gate.Turns[index].Answers = answers
-			gate.Turns[index].Comment = comment
+			gate.Turns[index].FieldValues = fieldValues
 			break
 		}
 	}
@@ -758,15 +780,6 @@ func findCorrection(values []Correction, id string) (Correction, bool) {
 		}
 	}
 	return Correction{}, false
-}
-
-func validGateOutcome(value GateOutcome) bool {
-	switch value {
-	case GatePass, GateRevise, GateDefer, GateBlock:
-		return true
-	default:
-		return false
-	}
 }
 
 type RefreshProviderRequest struct {

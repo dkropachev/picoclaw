@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from "vitest"
 import {
   type PRLifecycleFlow,
   type PRLifecycleFlowCatalog,
-  type PRLifecycleGateProfile,
-} from "@/api/pr-lifecycle-gate-profiles"
+} from "@/api/pr-lifecycle-flow"
+import { type PRLifecycleGateCatalogEntry } from "@/api/pr-lifecycle-gate-configs"
 import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
 
 const reviewFlow: PRLifecycleFlow = {
@@ -446,85 +446,36 @@ const flow: PRLifecycleFlowCatalog = {
   flows: [reviewFlow, implementationFlow],
 }
 
-const workflows: PRLifecycleGateProfile["workflows"] = {
-  "pr.review.start": {
-    id: "review_start",
-    name: "Start review",
-    purpose: "authorization",
-    decision_point: "pr.review.start",
-    stages: [{ id: "automatic", kind: "zero" }],
-  },
-  "pr.review.complete": {
-    id: "review_complete",
-    name: "Complete review",
-    purpose: "authorization",
-    decision_point: "pr.review.complete",
-    stages: [
-      {
-        id: "policy",
-        kind: "deterministic",
-        title: "Check coverage",
-        when: "coverage.complete",
-      },
-    ],
-  },
-  "pr.review.publish": {
-    id: "review_publish",
-    name: "Publish review",
-    purpose: "authorization",
-    decision_point: "pr.review.publish",
-    stages: [
-      {
-        id: "reviewer",
-        kind: "ai_isolated_context",
-        title: "Check publication",
-        agent_id: "reviewer",
-        criteria: "Confirm the findings are ready to publish.",
-      },
-    ],
-  },
-  "pr.implementation.start": {
-    id: "implementation_start",
-    name: "Start implementation",
-    purpose: "authorization",
-    decision_point: "pr.implementation.start",
-    stages: [
-      {
-        id: "approval",
-        kind: "human",
-        title: "Approve implementation",
-        questions: ["Proceed?"],
-      },
-    ],
-  },
-  "pr.implementation.complete": {
-    id: "implementation_complete",
-    name: "Complete implementation",
-    purpose: "authorization",
-    decision_point: "pr.implementation.complete",
-    stages: [
-      {
-        id: "scope",
-        kind: "deterministic",
-        title: "Check scope",
-        when: "scope.accepted",
-      },
-      {
-        id: "audit",
-        kind: "ai_isolated_context",
-        title: "Audit completion",
-        agent_id: "controller",
-        criteria: "Confirm implementation is complete.",
-      },
-      {
-        id: "approval",
-        kind: "human",
-        title: "Approve changes",
-        questions: ["Accept?"],
-      },
-    ],
-  },
-}
+const gateCatalog: Record<string, PRLifecycleGateCatalogEntry> =
+  Object.fromEntries(
+    flow.flows.flatMap((candidate) =>
+      candidate.nodes.flatMap((node) => {
+        if (!node.decision_point) return []
+        const type =
+          node.decision_point === "pr.review.publish"
+            ? "ai"
+            : node.decision_point === "pr.implementation.complete"
+              ? "workflow"
+              : node.decision_point === "pr.review.start" ||
+                  node.decision_point === "pr.review.complete"
+                ? "deterministic"
+                : "human"
+        return [
+          [
+            node.decision_point,
+            {
+              workflowRef: "workflows/pr-lifecycle.yml",
+              gateRef: `gates.${node.decision_point.replaceAll(".", "-")}`,
+              workflowRevision: "revision-1",
+              defaultAction: { type },
+              effectiveAction: { type },
+              actionSource: "workflow-default",
+            } satisfies PRLifecycleGateCatalogEntry,
+          ],
+        ]
+      }),
+    ),
+  )
 
 function renderMap(
   selectedDecisionPoint = "pr.review.start",
@@ -535,10 +486,10 @@ function renderMap(
       flow={flow}
       flowRevision={`sha256:${"b".repeat(64)}`}
       onSelect={onSelect}
-      profileID="strict profile"
-      profileName="Strict profile"
+      configID="strict profile"
+      configName="Strict profile"
       selectedDecisionPoint={selectedDecisionPoint}
-      workflows={workflows}
+      gateCatalog={gateCatalog}
     />,
   )
 }
@@ -770,9 +721,9 @@ describe("PR lifecycle gate map", () => {
       flowRevision: `sha256:${"b".repeat(64)}`,
       onFlowChange,
       onSelect,
-      profileID: "strict profile",
-      profileName: "Strict profile",
-      workflows,
+      configID: "strict profile",
+      configName: "Strict profile",
+      gateCatalog,
     } as const
     const { rerender } = render(
       <PRLifecycleGateMap {...props} activeFlowID="review" />,
@@ -797,7 +748,7 @@ describe("PR lifecycle gate map", () => {
     })
     expect(implementationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests/profiles/strict%20profile?flow=implementation&gate=pr.implementation.complete",
+      "/pull-requests/gate-configs/strict%20profile?flow=implementation&gate=pr.implementation.complete",
     )
 
     onFlowChange.mockClear()
@@ -816,7 +767,7 @@ describe("PR lifecycle gate map", () => {
         onFlowChange={onFlowChange}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.implementation.complete"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
 
@@ -834,7 +785,7 @@ describe("PR lifecycle gate map", () => {
         onFlowChange={onFlowChange}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.implementation.complete"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
 
@@ -864,7 +815,7 @@ describe("PR lifecycle gate map", () => {
         onFlowChange={onFlowChange}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.deferred.publish"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
 
@@ -906,7 +857,7 @@ describe("PR lifecycle gate map", () => {
     expect(container.querySelectorAll("[data-gate-number]")).toHaveLength(0)
     expect(notificationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests/profiles/strict%20profile?flow=review&gate=pr.review.publish",
+      "/pull-requests/gate-configs/strict%20profile?flow=review&gate=pr.review.publish",
     )
     const locked = screen.getByRole("group", { name: "Protect audit archive" })
     expect(locked).toHaveAttribute("data-flow-element", "locked-safeguard")
@@ -1031,7 +982,7 @@ describe("PR lifecycle gate map", () => {
         flowRevision={`sha256:${"d".repeat(64)}`}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.implementation.start"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
     const graph = container.querySelector<HTMLElement>(
@@ -1076,7 +1027,7 @@ describe("PR lifecycle gate map", () => {
         flowRevision={`sha256:${"e".repeat(64)}`}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.implementation.start"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
     const launch = container.querySelector<HTMLElement>(
@@ -1245,7 +1196,7 @@ describe("PR lifecycle gate map", () => {
         flowRevision={`sha256:${"f".repeat(64)}`}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.implementation.start"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
     const graph = container.querySelector<HTMLElement>(
@@ -1332,7 +1283,7 @@ describe("PR lifecycle gate map", () => {
           flowRevision={`sha256:${"a".repeat(64)}`}
           onSelect={vi.fn()}
           selectedDecisionPoint="pr.implementation.start"
-          workflows={workflows}
+          gateCatalog={gateCatalog}
         />,
       )
       const loops = Array.from(
@@ -1355,11 +1306,11 @@ describe("PR lifecycle gate map", () => {
     }
   })
 
-  it("derives gate-format labels from stages", () => {
+  it("derives Gate action labels from the published Gate catalog", () => {
     const { container } = renderMap()
     expect(
       container.querySelector('[data-gate-id="pr.review.start"]'),
-    ).toHaveAttribute("data-gate-format", "automatic")
+    ).toHaveAttribute("data-gate-format", "deterministic")
     expect(
       container.querySelector('[data-gate-id="pr.review.complete"]'),
     ).toHaveAttribute("data-gate-format", "deterministic")
@@ -1371,7 +1322,7 @@ describe("PR lifecycle gate map", () => {
     ).toHaveAttribute("data-gate-format", "user")
     expect(
       container.querySelector('[data-gate-id="pr.deferred.publish"]'),
-    ).toHaveTextContent("default fallback")
+    ).toHaveTextContent("workflow default")
 
     fireEvent.click(
       screen.getByRole("tab", { name: /^Implementation workflow/ }),
@@ -1381,10 +1332,10 @@ describe("PR lifecycle gate map", () => {
     ).toHaveAttribute("data-gate-format", "user")
     expect(
       container.querySelector('[data-gate-id="pr.implementation.complete"]'),
-    ).toHaveAttribute("data-gate-format", "mixed")
+    ).toHaveAttribute("data-gate-format", "workflow")
     expect(
       container.querySelector('[data-gate-id="pr.implementation.complete"]'),
-    ).toHaveTextContent("Deterministic → AI → User")
+    ).toHaveTextContent("Workflow")
   })
 
   it("renders a changed topology directly from the supplied catalog", () => {
@@ -1411,7 +1362,7 @@ describe("PR lifecycle gate map", () => {
         flowRevision={`sha256:${"c".repeat(64)}`}
         onSelect={vi.fn()}
         selectedDecisionPoint="pr.review.start"
-        workflows={workflows}
+        gateCatalog={gateCatalog}
       />,
     )
 

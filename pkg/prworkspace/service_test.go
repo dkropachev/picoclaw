@@ -72,18 +72,10 @@ func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[
 type passingGates struct{}
 
 func (passingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	return GateRun{
-		ID:            stableID("pgr_", request.WorkspaceID, request.DecisionPoint),
-		DecisionPoint: request.DecisionPoint, Purpose: request.Purpose,
-		State: ExecutionSucceeded, Outcome: GatePass, PolicyRevision: "sha256:policy",
-		SubjectRevision: request.SubjectDigest, CreatedAt: now, FinishedAt: &now,
-	}, nil
+	return testSucceededGate(request), nil
 }
-func (passingGates) Respond(_ context.Context, gate GateRun, decision GateOutcome, _ map[string]any, _ string) (GateRun, error) {
-	gate.Outcome = decision
-	gate.State = ExecutionSucceeded
-	return gate, nil
+func (passingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
+	return answerTestGate(gate, fieldValues), nil
 }
 
 func TestServiceIntakeCharterConfirmAndZeroFindingNudges(t *testing.T) {
@@ -142,7 +134,7 @@ func TestMissingAuthorizationConfigCreatesHumanGate(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	service, _ := NewService(ServiceConfig{Store: NewMemoryStore(), Now: func() time.Time { return now }})
 	aggregate := Aggregate{Workspace: Workspace{ID: "prw_11111111111111111111111111111111"}}
-	gate, err := service.startGate(context.Background(), aggregate, "pr.charter.confirm", "authorization", map[string]any{"x": "y"})
+	gate, err := service.startGate(context.Background(), aggregate, "pr.charter.confirm", map[string]any{"x": "y"})
 	if err != nil {
 		t.Fatal(err)
 	}

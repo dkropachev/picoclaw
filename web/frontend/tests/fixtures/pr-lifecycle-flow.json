@@ -753,6 +753,15 @@
             "kind": "gate",
             "title": "Resolve hard scope",
             "description": "Stops candidate code that is outside scope or incompatible with the pull request type.",
+            "decision_point": "pr.implementation.hard-scope",
+            "editable": true,
+            "ordinal": 15
+          },
+          {
+            "id": "implementation_hard_scope_guard",
+            "kind": "gate",
+            "title": "Enforce hard scope",
+            "description": "Prevents candidate code outside the charter or pull request type from being approved as-is.",
             "safeguard": "pr.scope.hard",
             "editable": false
           },
@@ -940,7 +949,7 @@
           },
           {
             "from": "implementation_scope_audit",
-            "to": "implementation_hard_scope",
+            "to": "implementation_hard_scope_guard",
             "mode": "choice",
             "outcome": "hard_stop",
             "label": "Hard stop",
@@ -1044,7 +1053,7 @@
           },
           {
             "from": "implementation_final_scope_check",
-            "to": "implementation_hard_scope",
+            "to": "implementation_hard_scope_guard",
             "mode": "choice",
             "outcome": "hard_stop",
             "label": "Hard stop",
@@ -1189,6 +1198,12 @@
             "loop": false
           },
           {
+            "from": "implementation_hard_scope_guard",
+            "to": "implementation_hard_scope",
+            "mode": "linear",
+            "loop": false
+          },
+          {
             "from": "implementation_hard_scope",
             "to": "implementation_remove_and_defer",
             "mode": "choice",
@@ -1264,5 +1279,5 @@
       }
     ]
   },
-  "flow_revision": "sha256:93b7d8427d057e57f2a39b458713b9bfd32f2162cdccf975a021aa9865d5afdf"
+  "flow_revision": "sha256:fb1f77977329f3878de13b97faa3f8e634a3958d70503f08c77727f267444c4c"
 }

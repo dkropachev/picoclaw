@@ -112,7 +112,7 @@ func (service *Service) QueueReviewPublication(ctx context.Context, request Queu
 	if publicationLocksHead(aggregate.Publications, PublicationGitHubReview, request.ExpectedHeadSHA) {
 		return aggregate, ErrConflict
 	}
-	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.review.publish", "authorization", map[string]any{
+	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.review.publish", map[string]any{
 		"publication": publication, "request": authorizationRequest,
 		"provider_revision": aggregate.ProviderSnapshot.ProviderRevision,
 	})
@@ -124,7 +124,7 @@ func (service *Service) QueueReviewPublication(ctx context.Context, request Queu
 	if gateNew {
 		patch.AppendGates = []GateRun{gate}
 	}
-	if gate.Outcome != GatePass || gate.State != ExecutionSucceeded {
+	if !gateCompletedWith(gate, "publish") {
 		publication.State = ExecutionWaitingGate
 		patch.AppendPublications[0] = publication
 		state := ExecutionWaitingGate
@@ -208,7 +208,7 @@ func (service *Service) QueueBranchPublication(ctx context.Context, request Queu
 	if validation, ok := latestValidationForRepair(aggregate.ValidationRuns, repair); ok {
 		gateSubject["validation"] = validation
 	}
-	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.implementation.publish", "authorization", gateSubject)
+	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.implementation.publish", gateSubject)
 	if err != nil {
 		return aggregate, err
 	}
@@ -217,7 +217,7 @@ func (service *Service) QueueBranchPublication(ctx context.Context, request Queu
 	if gateNew {
 		patch.AppendGates = []GateRun{gate}
 	}
-	if gate.Outcome != GatePass || gate.State != ExecutionSucceeded {
+	if !gateCompletedWith(gate, "publish") {
 		publication.State = ExecutionWaitingGate
 		patch.AppendPublications[0] = publication
 		state := ExecutionWaitingGate
@@ -651,8 +651,8 @@ func latestPublishableRepair(aggregate Aggregate, head string) (RepairAttempt, b
 
 func hardScopeGateTargetsRepair(gates []GateRun, repairID string) bool {
 	for _, gate := range gates {
-		if gate.DecisionPoint == "pr.implementation.scope" && gate.TargetID == repairID &&
-			(gate.PolicyRevision == "builtin:hard-scope-resolution-v1" || gate.Evidence.HardScope) {
+		if gate.DecisionPoint == "pr.implementation.hard-scope" && gate.TargetID == repairID &&
+			gate.Evidence.HardScope {
 			return true
 		}
 	}

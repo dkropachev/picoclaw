@@ -25,7 +25,6 @@ const (
 	prRepairAttemptIDPrefix     = "pra_"
 	prValidationRunIDPrefix     = "pvr_"
 	prGateRunIDPrefix           = "pgr_"
-	prGateDecisionIDPrefix      = "pgd_"
 	prPublicationIDPrefix       = "ppb_"
 	prOperationIntentIDPrefix   = "poi_"
 	prIngressWatermarkIDPrefix  = "piw_"
@@ -140,15 +139,6 @@ type PRScopeChange struct {
 	CharterClauses []string        `json:"charter_clauses,omitempty"`
 	Explanation    string          `json:"explanation,omitempty"`
 }
-
-type PRGateOutcome string
-
-const (
-	PRGatePass   PRGateOutcome = "pass"
-	PRGateRevise PRGateOutcome = "revise"
-	PRGateDefer  PRGateOutcome = "defer"
-	PRGateBlock  PRGateOutcome = "block"
-)
 
 type PRPublicationKind string
 
@@ -544,25 +534,29 @@ type PRValidationRun struct {
 }
 
 type PRGateTurn struct {
-	StageID   string         `json:"stage_id"`
-	Kind      string         `json:"kind"`
-	Title     string         `json:"title"`
-	Status    string         `json:"status"`
-	Outcome   PRGateOutcome  `json:"outcome,omitempty"`
-	Questions []string       `json:"questions,omitempty"`
-	Answers   map[string]any `json:"answers,omitempty"`
-	Comment   string         `json:"comment,omitempty"`
+	StageID        string          `json:"stage_id"`
+	Kind           string          `json:"kind"`
+	Title          string          `json:"title"`
+	Status         string          `json:"status"`
+	GateForm       json.RawMessage `json:"gate-form,omitempty"`
+	FieldValues    map[string]any  `json:"field-values,omitempty"`
+	ActorKind      string          `json:"actor-kind,omitempty"`
+	ExecutionID    string          `json:"execution-id,omitempty"`
+	ActionRevision string          `json:"action-revision,omitempty"`
+	InputHash      string          `json:"input-hash,omitempty"`
 }
 
 type PRGateRun struct {
 	PRWorkspaceRecord
 	DecisionPoint     string           `json:"decision_point"`
-	Purpose           string           `json:"purpose"`
 	TargetID          string           `json:"target_id,omitempty"`
 	State             PRExecutionState `json:"state"`
-	Outcome           PRGateOutcome    `json:"outcome,omitempty"`
-	ProfileID         string           `json:"profile_id"`
-	ProfileRevision   string           `json:"profile_revision"`
+	PolicyRevision    string           `json:"policy-revision"`
+	WorkflowRef       string           `json:"workflow-ref,omitempty"`
+	WorkflowRevision  string           `json:"workflow-revision,omitempty"`
+	GateRef           string           `json:"gate-ref,omitempty"`
+	ConfigID          string           `json:"config-id"`
+	ConfigRevision    string           `json:"config-revision"`
 	PinnedPolicy      json.RawMessage  `json:"pinned_policy"`
 	PinnedPolicyHash  string           `json:"pinned_policy_hash"`
 	SubjectRevision   string           `json:"subject_revision"`
@@ -574,18 +568,6 @@ type PRGateRun struct {
 	Turns             []PRGateTurn     `json:"turns,omitempty"`
 	Evidence          json.RawMessage  `json:"evidence,omitempty"`
 	FinishedAt        *time.Time       `json:"finished_at,omitempty"`
-}
-
-type PRGateDecision struct {
-	PRWorkspaceRecord
-	GateRunID string          `json:"gate_run_id"`
-	StageID   string          `json:"stage_id"`
-	Kind      string          `json:"kind"`
-	Outcome   PRGateOutcome   `json:"outcome"`
-	Actor     string          `json:"actor"`
-	Answers   json.RawMessage `json:"answers,omitempty"`
-	Comment   string          `json:"comment,omitempty"`
-	Reason    string          `json:"reason,omitempty"`
 }
 
 type PRPublication struct {
@@ -682,7 +664,6 @@ type PRWorkspaceAggregate struct {
 	RepairAttempts    []PRRepairAttempt            `json:"repair_attempts"`
 	ValidationRuns    []PRValidationRun            `json:"validation_runs"`
 	GateRuns          []PRGateRun                  `json:"gate_runs"`
-	GateDecisions     []PRGateDecision             `json:"gate_decisions"`
 	Publications      []PRPublication              `json:"publications"`
 	OperationIntents  []PRWorkspaceOperationIntent `json:"operation_intents"`
 	IngressWatermarks []PRIngressWatermark         `json:"ingress_watermarks"`
@@ -740,7 +721,6 @@ const (
 	PRMutationRepairAttempt     PRWorkspaceMutationKind = "repair_attempt"
 	PRMutationValidationRun     PRWorkspaceMutationKind = "validation_run"
 	PRMutationGateRun           PRWorkspaceMutationKind = "gate_run"
-	PRMutationGateDecision      PRWorkspaceMutationKind = "gate_decision"
 	PRMutationPublication       PRWorkspaceMutationKind = "publication"
 	PRMutationOperationIntent   PRWorkspaceMutationKind = "operation_intent"
 	PRMutationIngressWatermark  PRWorkspaceMutationKind = "ingress_watermark"
@@ -802,7 +782,6 @@ type PRWorkspacePatch struct {
 	ReplaceValidationRuns   []PRValidationRun            `json:"replace_validation_runs,omitempty"`
 	AppendGateRuns          []PRGateRun                  `json:"append_gate_runs,omitempty"`
 	ReplaceGateRuns         []PRGateRun                  `json:"replace_gate_runs,omitempty"`
-	AppendGateDecisions     []PRGateDecision             `json:"append_gate_decisions,omitempty"`
 	AppendPublications      []PRPublication              `json:"append_publications,omitempty"`
 	ReplacePublications     []PRPublication              `json:"replace_publications,omitempty"`
 	AppendOperationIntents  []PRWorkspaceOperationIntent `json:"append_operation_intents,omitempty"`

@@ -700,7 +700,7 @@ func validatePRWorkspacePatch(patch *PRWorkspacePatch) error {
 		}
 		count++
 	}
-	for _, records := range [][]int{{len(patch.AppendCharters), len(patch.ReplaceCharters)}, {len(patch.AppendStageRuns), len(patch.ReplaceStageRuns)}, {len(patch.UpsertFindings)}, {len(patch.AppendFindingEvents)}, {len(patch.AppendConversations), len(patch.ReplaceConversations)}, {len(patch.AppendMessages)}, {len(patch.AppendCorrections), len(patch.ReplaceCorrections)}, {len(patch.AppendLessons), len(patch.ReplaceLessons)}, {len(patch.AppendNudgeRounds), len(patch.ReplaceNudgeRounds)}, {len(patch.AppendNudgeRewards)}, {len(patch.UpsertDeferredGroups)}, {len(patch.UpsertDeferredItems)}, {len(patch.AppendRepairAttempts), len(patch.ReplaceRepairAttempts)}, {len(patch.AppendValidationRuns), len(patch.ReplaceValidationRuns)}, {len(patch.AppendGateRuns), len(patch.ReplaceGateRuns)}, {len(patch.AppendGateDecisions)}, {len(patch.AppendPublications), len(patch.ReplacePublications)}, {len(patch.AppendOperationIntents), len(patch.ReplaceOperationIntents)}, {len(patch.UpsertIngressWatermarks)}, {len(patch.AppendActivity)}} {
+	for _, records := range [][]int{{len(patch.AppendCharters), len(patch.ReplaceCharters)}, {len(patch.AppendStageRuns), len(patch.ReplaceStageRuns)}, {len(patch.UpsertFindings)}, {len(patch.AppendFindingEvents)}, {len(patch.AppendConversations), len(patch.ReplaceConversations)}, {len(patch.AppendMessages)}, {len(patch.AppendCorrections), len(patch.ReplaceCorrections)}, {len(patch.AppendLessons), len(patch.ReplaceLessons)}, {len(patch.AppendNudgeRounds), len(patch.ReplaceNudgeRounds)}, {len(patch.AppendNudgeRewards)}, {len(patch.UpsertDeferredGroups)}, {len(patch.UpsertDeferredItems)}, {len(patch.AppendRepairAttempts), len(patch.ReplaceRepairAttempts)}, {len(patch.AppendValidationRuns), len(patch.ReplaceValidationRuns)}, {len(patch.AppendGateRuns), len(patch.ReplaceGateRuns)}, {len(patch.AppendPublications), len(patch.ReplacePublications)}, {len(patch.AppendOperationIntents), len(patch.ReplaceOperationIntents)}, {len(patch.UpsertIngressWatermarks)}, {len(patch.AppendActivity)}} {
 		for _, size := range records {
 			count += size
 		}
@@ -845,10 +845,6 @@ func prWorkspacePatchRecords(patch *PRWorkspacePatch) []*prWorkspaceMutationReco
 	for i := range patch.ReplaceGateRuns {
 		v := &patch.ReplaceGateRuns[i]
 		add("pr_gate_runs", prGateRunIDPrefix, false, v, &v.PRWorkspaceRecord, string(v.State), false)
-	}
-	for i := range patch.AppendGateDecisions {
-		v := &patch.AppendGateDecisions[i]
-		add("pr_gate_decisions", prGateDecisionIDPrefix, true, v, &v.PRWorkspaceRecord, string(v.Outcome), true)
 	}
 	for i := range patch.AppendPublications {
 		v := &patch.AppendPublications[i]
@@ -1299,8 +1295,6 @@ func validatePRWorkspaceReferences(
 			return err
 		}
 		return require("pr_repair_attempts", record.RepairAttemptID, "repair_attempt_id")
-	case *PRGateDecision:
-		return require("pr_gate_runs", record.GateRunID, "gate_run_id")
 	case *PRPublication:
 		if err := require("pr_gate_runs", record.GateRunID, "gate_run_id"); err != nil {
 			return err
@@ -1525,13 +1519,15 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		}
 		immutable := func(v PRGateRun) any {
 			return struct {
-				Decision, Target, Purpose, Profile, ProfileRevision string
-				Policy                                              json.RawMessage
-				PolicyHash, SubjectRevision                         string
-				Subject                                             json.RawMessage
-				SubjectHash                                         string
-				Evidence                                            json.RawMessage
-			}{v.DecisionPoint, v.TargetID, v.Purpose, v.ProfileID, v.ProfileRevision, v.PinnedPolicy, v.PinnedPolicyHash, v.SubjectRevision, v.PinnedSubject, v.PinnedSubjectHash, v.Evidence}
+				Decision, Target, PolicyRevision       string
+				WorkflowRef, WorkflowRevision, GateRef string
+				ConfigID, ConfigRevision               string
+				Policy                                 json.RawMessage
+				PolicyHash, SubjectRevision            string
+				Subject                                json.RawMessage
+				SubjectHash                            string
+				Evidence                               json.RawMessage
+			}{v.DecisionPoint, v.TargetID, v.PolicyRevision, v.WorkflowRef, v.WorkflowRevision, v.GateRef, v.ConfigID, v.ConfigRevision, v.PinnedPolicy, v.PinnedPolicyHash, v.SubjectRevision, v.PinnedSubject, v.PinnedSubjectHash, v.Evidence}
 		}
 		return equal("gate pinned inputs", immutable(old), immutable(*value))
 	case *PRPublication:
@@ -1800,12 +1796,6 @@ func decodePRWorkspaceMutation(
 			return nil, nil, err
 		}
 		record = prWorkspaceMutationRecord{"pr_gate_runs", prGateRunIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
-	case PRMutationGateDecision:
-		value := new(PRGateDecision)
-		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
-			return nil, nil, err
-		}
-		record = prWorkspaceMutationRecord{"pr_gate_decisions", prGateDecisionIDPrefix, true, "upsert", value, &value.PRWorkspaceRecord, string(value.Outcome)}
 	case PRMutationPublication:
 		value := new(PRPublication)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
@@ -2288,7 +2278,13 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validatePRExecutionState(record.State); err != nil {
 			return err
 		}
-		for field, item := range map[string]string{"decision point": record.DecisionPoint, "gate purpose": record.Purpose, "profile ID": record.ProfileID, "profile revision": record.ProfileRevision, "pinned policy hash": record.PinnedPolicyHash, "subject revision": record.SubjectRevision, "pinned subject hash": record.PinnedSubjectHash} {
+		for field, item := range map[string]string{
+			"decision point": record.DecisionPoint, "policy revision": record.PolicyRevision,
+			"workflow ref": record.WorkflowRef, "workflow revision": record.WorkflowRevision,
+			"gate ref": record.GateRef, "gate config ID": record.ConfigID,
+			"gate config revision": record.ConfigRevision, "pinned policy hash": record.PinnedPolicyHash,
+			"subject revision": record.SubjectRevision, "pinned subject hash": record.PinnedSubjectHash,
+		} {
 			if err := validatePRWorkspaceString(field, item, maxPRWorkspaceIdentityBytes, true); err != nil {
 				return err
 			}
@@ -2302,24 +2298,13 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validatePRWorkspaceRaw("gate evidence", record.Evidence); err != nil {
 			return err
 		}
-		if record.Outcome != "" && !validPRGateOutcome(record.Outcome) {
-			return fmt.Errorf("%w: invalid gate outcome", ErrInvalidPRWorkspace)
-		}
 		if len(record.Turns) > maxPRWorkspaceListEntries {
 			return fmt.Errorf("%w: gate turns exceed bound", ErrInvalidPRWorkspace)
 		}
-	case *PRGateDecision:
-		meta = &record.PRWorkspaceRecord
-		if !validPRGateOutcome(record.Outcome) {
-			return invalidPRWorkspaceField("gate outcome", string(record.Outcome), 32, true)
-		}
-		for field, item := range map[string]string{"gate run ID": record.GateRunID, "gate stage ID": record.StageID, "gate kind": record.Kind, "gate actor": record.Actor} {
-			if err := validatePRWorkspaceString(field, item, maxPRWorkspaceIdentityBytes, true); err != nil {
-				return err
+		for index := range record.Turns {
+			if err := validatePRGateTurn(record.Turns[index]); err != nil {
+				return fmt.Errorf("%w: gate turn %d: %v", ErrInvalidPRWorkspace, index, err)
 			}
-		}
-		if err := validatePRWorkspaceRaw("gate answers", record.Answers); err != nil {
-			return err
 		}
 	case *PRPublication:
 		meta = &record.PRWorkspaceRecord
@@ -2684,12 +2669,46 @@ func validatePRScopeProjection(presence PRWorkPresence, changes []PRScopeChange)
 	return nil
 }
 
-func validPRGateOutcome(value PRGateOutcome) bool {
-	switch value {
-	case PRGatePass, PRGateRevise, PRGateDefer, PRGateBlock:
-		return true
+func validatePRGateTurn(turn PRGateTurn) error {
+	for field, item := range map[string]string{
+		"stage ID":        turn.StageID,
+		"kind":            turn.Kind,
+		"status":          turn.Status,
+		"title":           turn.Title,
+		"actor kind":      turn.ActorKind,
+		"execution ID":    turn.ExecutionID,
+		"action revision": turn.ActionRevision,
+		"input hash":      turn.InputHash,
+	} {
+		required := field == "stage ID" || field == "kind" || field == "status"
+		maximum := maxPRWorkspaceIdentityBytes
+		if field == "title" {
+			maximum = maxPRWorkspaceTextBytes
+		}
+		if err := validatePRWorkspaceString("gate turn "+field, item, maximum, required); err != nil {
+			return err
+		}
 	}
-	return false
+	if turn.ActorKind != "" {
+		switch turn.ActorKind {
+		case "human", "ai", "deterministic", "workflow":
+		default:
+			return invalidPRWorkspaceField("gate turn actor kind", turn.ActorKind, maxPRWorkspaceIdentityBytes, true)
+		}
+	}
+	if err := validatePRWorkspaceRaw("gate form", turn.GateForm); err != nil {
+		return err
+	}
+	if turn.FieldValues != nil {
+		encoded, err := json.Marshal(turn.FieldValues)
+		if err != nil {
+			return fmt.Errorf("%w: gate field values are not valid JSON", ErrInvalidPRWorkspace)
+		}
+		if err := validatePRWorkspaceRaw("gate field values", encoded); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validPRPublicationKind(value PRPublicationKind) bool {
@@ -2844,8 +2863,19 @@ func loadPRWorkspaceRecords[T any](ctx context.Context, conn *sql.Conn, table, w
 			return nil, err
 		}
 		var value T
-		if err := json.Unmarshal(payload, &value); err != nil {
-			return nil, fmt.Errorf("decode %s record: %w", table, err)
+		var decodeErr error
+		if table == "pr_gate_runs" {
+			decodeErr = decodeStrictPRWorkspaceJSON(payload, &value)
+		} else {
+			decodeErr = json.Unmarshal(payload, &value)
+		}
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode %s record: %w", table, decodeErr)
+		}
+		if table == "pr_gate_runs" {
+			if err := validatePRWorkspaceRecord(&value); err != nil {
+				return nil, fmt.Errorf("validate %s record: %w", table, err)
+			}
 		}
 		result = append(result, value)
 	}
@@ -2934,9 +2964,6 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 		return result, err
 	}
 	if result.GateRuns, err = loadPRWorkspaceRecords[PRGateRun](ctx, conn, "pr_gate_runs", workspaceID); err != nil {
-		return result, err
-	}
-	if result.GateDecisions, err = loadPRWorkspaceRecords[PRGateDecision](ctx, conn, "pr_gate_decisions", workspaceID); err != nil {
 		return result, err
 	}
 	if result.Publications, err = loadPRWorkspaceRecords[PRPublication](ctx, conn, "pr_publications", workspaceID); err != nil {
@@ -3174,7 +3201,9 @@ func loadPRWorkspaceAggregateAtVersion(ctx context.Context, conn *sql.Conn, work
 	if err := json.Unmarshal(workspacePayload, &result.Workspace); err != nil {
 		return result, err
 	}
-	decode := func(table string, target any) error { return decodePRWorkspaceHistoryRecords(records[table], target) }
+	decode := func(table string, target any) error {
+		return decodePRWorkspaceHistoryRecords(records[table], target, table == "pr_gate_runs")
+	}
 	if err := decode("pr_provider_snapshots", &result.ProviderSnapshots); err != nil {
 		return result, err
 	}
@@ -3192,7 +3221,7 @@ func loadPRWorkspaceAggregateAtVersion(ctx context.Context, conn *sql.Conn, work
 		"pr_finding_events": &result.FindingEvents, "pr_conversations": &result.Conversations, "pr_messages": &result.Messages,
 		"pr_corrections": &result.Corrections, "pr_repository_lesson_view": &result.RepositoryLessons, "pr_nudge_rounds": &result.NudgeRounds,
 		"pr_nudge_rewards": &result.NudgeRewards, "pr_deferred_groups": &result.DeferredGroups, "pr_repair_attempts": &result.RepairAttempts,
-		"pr_validation_runs": &result.ValidationRuns, "pr_gate_runs": &result.GateRuns, "pr_gate_decisions": &result.GateDecisions,
+		"pr_validation_runs": &result.ValidationRuns, "pr_gate_runs": &result.GateRuns,
 		"pr_publications": &result.Publications, "pr_operation_intents": &result.OperationIntents, "pr_ingress_watermarks": &result.IngressWatermarks,
 		"pr_activity": &result.Activity,
 	} {
@@ -3208,7 +3237,7 @@ func loadPRWorkspaceAggregateAtVersion(ctx context.Context, conn *sql.Conn, work
 	return result, nil
 }
 
-func decodePRWorkspaceHistoryRecords(records map[string][]byte, target any) error {
+func decodePRWorkspaceHistoryRecords(records map[string][]byte, target any, strict bool) error {
 	if len(records) == 0 {
 		return nil
 	}
@@ -3227,6 +3256,19 @@ func decodePRWorkspaceHistoryRecords(records map[string][]byte, target any) erro
 	encoded, err := json.Marshal(values)
 	if err != nil {
 		return err
+	}
+	if strict {
+		if err := decodeStrictPRWorkspaceJSON(encoded, target); err != nil {
+			return err
+		}
+		if gates, ok := target.(*[]PRGateRun); ok {
+			for index := range *gates {
+				if err := validatePRWorkspaceRecord(&(*gates)[index]); err != nil {
+					return fmt.Errorf("validate pr_gate_runs history record: %w", err)
+				}
+			}
+		}
+		return nil
 	}
 	return json.Unmarshal(encoded, target)
 }

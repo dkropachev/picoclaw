@@ -1,7 +1,6 @@
 import {
   type PRWorkspace,
   PRWorkspaceAPIError,
-  type PRWorkspaceGateOutcome,
   type PRWorkspaceGateSummary,
   type PRWorkspaceMutationFence,
   projectPRWorkspaceGateSummary,
@@ -49,9 +48,7 @@ export async function respondPRWorkspaceGate(
   workspaceID: string,
   gateRunID: string,
   input: PRWorkspaceMutationFence & {
-    outcome: PRWorkspaceGateOutcome
-    answers: Record<string, string>
-    comment?: string
+    fieldValues: Record<string, unknown>
   },
   signal?: AbortSignal,
 ): Promise<PRWorkspace> {
@@ -60,7 +57,11 @@ export async function respondPRWorkspaceGate(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        expected_version: input.expected_version,
+        request_id: input.request_id,
+        "field-values": input.fieldValues,
+      }),
     },
     signal,
   )

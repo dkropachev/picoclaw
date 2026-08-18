@@ -259,7 +259,7 @@ func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoin
 	kindLabel := "ACTION"
 	kindClass := "action-kind"
 	if node.Kind == NodeGate {
-		className, kindLabel, kindClass = "gate", fmt.Sprintf("GATE %d", node.Ordinal), "gate-kind"
+		className, kindLabel, kindClass = "gate", "GATE", "gate-kind"
 		if !node.Editable {
 			className, kindLabel, kindClass = "safeguard", "LOCKED GATE", "safeguard-kind"
 		}
@@ -269,7 +269,7 @@ func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoin
 	}
 
 	if node.Kind == NodeGate && node.Editable {
-		href := "/pull-requests/profiles/default?flow=" + url.QueryEscape(flowID) + "&gate=" + url.QueryEscape(node.DecisionPoint)
+		href := "/pull-requests/gate-configs/default?flow=" + url.QueryEscape(flowID) + "&gate=" + url.QueryEscape(node.DecisionPoint)
 		fmt.Fprintf(output, "    <a class=\"gate-link\" href=\"%s\" target=\"_top\" aria-label=\"Edit %s\" data-decision-point=\"%s\">\n", escapeXML(href), escapeXML(node.Title), escapeXML(node.DecisionPoint))
 	} else {
 		fmt.Fprintf(output, "    <g data-flow-kind=\"%s\" data-node-id=\"%s\"%s>\n", escapeXML(string(node.Kind)), escapeXML(node.ID), optionalSVGAttribute("data-safeguard", node.Safeguard))

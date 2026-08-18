@@ -12,6 +12,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/prlifecycle"
+	"github.com/sipeed/picoclaw/pkg/workflows"
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 const (
@@ -37,7 +41,6 @@ type GateRequest struct {
 	ProviderOrigin   string
 	RepositoryID     string
 	DecisionPoint    string
-	Purpose          string
 	Subject          map[string]any
 	SubjectDigest    string
 	WorkingContext   PRContextBundle
@@ -45,7 +48,7 @@ type GateRequest struct {
 
 type GateEvaluator interface {
 	Start(ctx context.Context, request GateRequest) (GateRun, error)
-	Respond(ctx context.Context, gate GateRun, decision GateOutcome, answers map[string]any, comment string) (GateRun, error)
+	Respond(ctx context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error)
 }
 
 // CandidateEvidenceLoader recovers the exact immutable candidate reviewed by
@@ -377,7 +380,7 @@ func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmChart
 	if !ready || aggregate.Workspace.Version != request.ExpectedVersion || charterConfirmationPending(aggregate) {
 		return aggregate, ErrConflict
 	}
-	gate, err := service.startGate(ctx, aggregate, decisionPoint, "authorization", map[string]any{"charter": charter})
+	gate, err := service.startGate(ctx, aggregate, decisionPoint, map[string]any{"charter": charter})
 	if err != nil {
 		return Aggregate{}, err
 	}
@@ -387,7 +390,7 @@ func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmChart
 		AppendGates: []GateRun{gate},
 		Activity:    []Activity{{Kind: "gate.started", Actor: "system", EntityID: gate.ID, Summary: "Charter confirmation gate started", CreatedAt: now}},
 	}
-	if gate.Outcome == GatePass && gate.State == ExecutionSucceeded {
+	if gateCompletedWith(gate, "approve") {
 		charter.Confirmed = true
 		charter.ConfirmedAt = &now
 		phase, state, activeID := PhaseReview, ExecutionQueued, charter.ID
@@ -496,7 +499,7 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 	if manualNudge && !hasSuccessfulStageAtHead(aggregate.StageRuns, "review", charter.ID, charter.HeadSHA) {
 		return aggregate, ErrConflict
 	}
-	startGate, startGateNew, err := service.ensureGate(ctx, aggregate, "pr.review.start", "authorization", map[string]any{
+	startGate, startGateNew, err := service.ensureGate(ctx, aggregate, "pr.review.start", map[string]any{
 		"charter":           charter,
 		"provider_revision": aggregate.ProviderSnapshot.ProviderRevision,
 		"base_sha":          aggregate.ProviderSnapshot.BaseSHA,
@@ -506,7 +509,7 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 		return Aggregate{}, err
 	}
 	startGate.TargetID = charter.ID
-	if startGate.Outcome != GatePass || startGate.State != ExecutionSucceeded {
+	if !gateCompletedWith(startGate, "continue") {
 		state := ExecutionWaitingGate
 		patch := AggregatePatch{ExecutionState: &state}
 		if startGateNew {
@@ -577,7 +580,7 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 		patch.AppendGates = append(patch.AppendGates, startGate)
 	}
 	if runErr == nil {
-		completeGate, completeGateNew, gateErr := service.ensureGate(ctx, aggregate, "pr.review.complete", "authorization", map[string]any{
+		completeGate, completeGateNew, gateErr := service.ensureGate(ctx, aggregate, "pr.review.complete", map[string]any{
 			"charter": charter, "stage": stage, "findings": findings, "nudge_rounds": nudges,
 		})
 		if gateErr != nil {
@@ -587,7 +590,7 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 		if completeGateNew {
 			patch.AppendGates = append(patch.AppendGates, completeGate)
 		}
-		if completeGate.Outcome != GatePass || completeGate.State != ExecutionSucceeded {
+		if !gateCompletedWith(completeGate, "accept") {
 			stage.State = ExecutionWaitingGate
 			patch.AppendStageRuns[0] = stage
 			phase, state = PhaseReview, ExecutionWaitingGate
@@ -623,7 +626,7 @@ func (service *Service) classifyReviewFindings(ctx context.Context, aggregate Ag
 		if finding.Disposition != FindingOpen {
 			continue
 		}
-		gate, isNew, err := service.ensureGate(ctx, aggregate, "pr.finding.classify", "classification", map[string]any{
+		gate, isNew, err := service.ensureGate(ctx, aggregate, "pr.finding.classify", map[string]any{
 			"charter": charter, "finding": *finding, "scope_action": DecideScope(finding.Scope),
 		})
 		if err != nil {
@@ -637,14 +640,14 @@ func (service *Service) classifyReviewFindings(ctx context.Context, aggregate Ag
 			waiting = true
 			continue
 		}
-		switch gate.Outcome {
-		case GatePass:
+		switch gateAction(gate) {
+		case "keep-in-pr":
 			finding.Disposition = FindingInScope
-		case GateDefer:
+		case "defer-follow-up":
 			finding.Disposition = FindingDeferred
-		case GateBlock:
+		case "dismiss":
 			finding.Disposition = FindingDismissed
-		case GateRevise:
+		case "revise-charter":
 			needsCharterRevision = true
 		}
 	}
@@ -701,7 +704,7 @@ func (service *Service) DecideFinding(ctx context.Context, request FindingDecisi
 			if !ready || !charter.Confirmed {
 				return aggregate, ErrConflict
 			}
-			gate, isNew, gateErr := service.ensureGate(ctx, aggregate, "pr.finding.classify", "classification", map[string]any{
+			gate, isNew, gateErr := service.ensureGate(ctx, aggregate, "pr.finding.classify", map[string]any{
 				"charter": charter, "finding": finding, "proposed_scope": request.Scope, "scope_action": action,
 			})
 			if gateErr != nil {
@@ -725,14 +728,14 @@ func (service *Service) DecideFinding(ctx context.Context, request FindingDecisi
 				}
 				return result.Aggregate, nil
 			}
-			switch gate.Outcome {
-			case GatePass:
+			switch gateAction(gate) {
+			case "keep-in-pr":
 				// Continue below and persist the accepted in-scope correction.
-			case GateDefer:
+			case "defer-follow-up":
 				request.Disposition = FindingDeferred
-			case GateBlock:
+			case "dismiss":
 				request.Disposition = FindingDismissed
-			case GateRevise:
+			case "revise-charter":
 				phase, state := PhaseCharter, ExecutionWaitingUser
 				result, mutateErr := service.store.Mutate(ctx, Mutation{
 					WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID,
@@ -858,17 +861,17 @@ func (service *Service) AddCorrection(ctx context.Context, request AddCorrection
 	return result.Aggregate, nil
 }
 
-func (service *Service) startGate(ctx context.Context, aggregate Aggregate, point, purpose string, subject map[string]any) (GateRun, error) {
-	gate, _, err := service.ensureGate(ctx, aggregate, point, purpose, subject)
+func (service *Service) startGate(ctx context.Context, aggregate Aggregate, point string, subject map[string]any) (GateRun, error) {
+	gate, _, err := service.ensureGate(ctx, aggregate, point, subject)
 	return gate, err
 }
 
 // ensureGate reuses the exact pinned gate for a subject. This makes human and
 // staged gates resumable: approving a gate authorizes the next retry without
 // evaluating a second policy or appending a duplicate gate run.
-func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, point, purpose string, subject map[string]any) (GateRun, bool, error) {
-	if err := validatePRLifecycleGateIdentity(point, purpose); err != nil {
-		return GateRun{}, false, err
+func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, point string, subject map[string]any) (GateRun, bool, error) {
+	if !prlifecycle.IsDecisionPoint(point) {
+		return GateRun{}, false, fmt.Errorf("%w: unknown PR lifecycle decision point %q", ErrInvalid, point)
 	}
 	digest, err := fingerprintValue(subject)
 	if err != nil {
@@ -876,7 +879,7 @@ func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, poi
 	}
 	for index := len(aggregate.Gates) - 1; index >= 0; index-- {
 		gate := aggregate.Gates[index]
-		if gate.DecisionPoint == point && gate.Purpose == purpose && gate.SubjectRevision == digest {
+		if gate.DecisionPoint == point && gate.SubjectRevision == digest {
 			return gate, false, nil
 		}
 	}
@@ -884,20 +887,57 @@ func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, poi
 		gate, startErr := service.gates.Start(ctx, GateRequest{
 			WorkspaceID: aggregate.Workspace.ID, WorkspaceVersion: aggregate.Workspace.Version,
 			ProviderOrigin: aggregate.Workspace.ProviderOrigin,
-			RepositoryID:   aggregate.Workspace.RepositoryID, DecisionPoint: point, Purpose: purpose,
+			RepositoryID:   aggregate.Workspace.RepositoryID, DecisionPoint: point,
 			Subject: subject, SubjectDigest: digest, WorkingContext: contextBundle(aggregate),
 		})
 		return gate, true, startErr
 	}
-	// Missing gate configuration is a visible fallback human decision.
+	// A service without an executor may still apply the published workflow's
+	// literal Human or deterministic default. It never substitutes Human for a
+	// different action mode; AI/workflow defaults fail closed.
+	entry, catalogErr := prLifecycleGateCatalogEntry(point)
+	if catalogErr != nil {
+		return GateRun{}, false, catalogErr
+	}
 	now := service.now().UTC()
-	return GateRun{
+	gate := GateRun{
 		ID:            stableID("pgr_", aggregate.Workspace.ID, point, digest),
-		DecisionPoint: point, Purpose: purpose, State: ExecutionWaitingUser,
-		SubjectRevision: digest, PolicyRevision: "builtin:fallback-human-v2",
-		Turns:     []GateTurn{{StageID: "fallback-human", Kind: "human", Title: "Decision required", Status: "waiting", Questions: []string{"Review the evidence and choose an available outcome."}}},
+		DecisionPoint: point, SubjectRevision: digest,
+		PolicyRevision: "builtin:workflow-default-v3", Evidence: projectGateEvidence(subject),
 		CreatedAt: now,
-	}, true, nil
+	}
+	if entry.Gate.DefaultAction == nil {
+		return GateRun{}, false, fmt.Errorf("gate %q has no default-action", entry.GateRef)
+	}
+	switch entry.Gate.DefaultAction.Type {
+	case gatetypes.GateActionHuman:
+		gate.State = ExecutionWaitingUser
+		gate.Turns = []GateTurn{{
+			StageID: "fallback-human", Kind: "human", ActorKind: "human",
+			Title: entry.Gate.Prompt, Status: "waiting",
+			GateForm: &GateForm{GateRef: entry.GateRef, Prompt: entry.Gate.Prompt, Fields: entry.Gate.Fields},
+		}}
+	case gatetypes.GateActionDeterministic:
+		values, valueErr := workflows.ValidateGateFieldValues(
+			entry.Gate.Fields,
+			entry.Gate.DefaultAction.Fields,
+		)
+		if valueErr != nil {
+			return GateRun{}, false, fmt.Errorf("gate %q deterministic default: %w", entry.GateRef, valueErr)
+		}
+		gate.State, gate.FinishedAt = ExecutionSucceeded, &now
+		gate.Turns = []GateTurn{{
+			StageID: "fallback-deterministic", Kind: "deterministic", ActorKind: "deterministic",
+			Title: entry.Gate.Prompt, Status: "answered", FieldValues: values,
+		}}
+	default:
+		return GateRun{}, false, fmt.Errorf(
+			"gate %q default action %q requires the workflow executor",
+			entry.GateRef,
+			entry.Gate.DefaultAction.Type,
+		)
+	}
+	return gate, true, nil
 }
 
 func materializeReviewRounds(aggregate Aggregate, runID string, rounds []ReviewRound, policy NudgePolicy, now time.Time) ([]Finding, []NudgeRoundRecord) {

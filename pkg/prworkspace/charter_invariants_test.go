@@ -142,7 +142,7 @@ func TestDelayedCharterGateCannotActivateSupersededDraft(t *testing.T) {
 	}
 	rejected, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: input.Workspace.ID, GateRunID: waiting.Gates[0].ID,
-		ExpectedVersion: advanced.Aggregate.Workspace.Version, RequestID: "request-pass-superseded-charter-gate", Decision: GatePass,
+		ExpectedVersion: advanced.Aggregate.Workspace.Version, RequestID: "request-pass-superseded-charter-gate", FieldValues: map[string]any{"action": "approve"},
 	})
 	if !errors.Is(err, ErrConflict) || rejected.Workspace.ActiveCharterID != "" || rejected.Charters[0].Confirmed {
 		t.Fatalf("delayed gate activated superseded charter: workspace=%#v charters=%#v err=%v", rejected.Workspace, rejected.Charters, err)
@@ -202,7 +202,7 @@ func TestRevisedCharterUsesReconfirmationAndInvalidatesEvidence(t *testing.T) {
 		t.Fatalf("revised charter was not activated: workspace=%#v err=%v", confirmed.Workspace, err)
 	}
 	gate := confirmed.Gates[len(confirmed.Gates)-1]
-	if gate.DecisionPoint != "pr.charter.reconfirm" || gate.Outcome != GatePass {
+	if gate.DecisionPoint != "pr.charter.reconfirm" || !gateCompletedWith(gate, "approve") {
 		t.Fatalf("revised charter skipped reconfirmation: %#v", gate)
 	}
 }

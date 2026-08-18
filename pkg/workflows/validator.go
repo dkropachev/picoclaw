@@ -13,6 +13,7 @@ import (
 	"github.com/adhocore/gronx"
 
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 type ValidationError struct {
@@ -56,7 +57,9 @@ func Validate(workflow *Workflow) error {
 	errs = append(errs, validateCommandTrigger("on.command", workflow.On.Command)...)
 	errs = append(errs, validateRuntimeEventTrigger("on.runtime_event", workflow.On.RuntimeEvent)...)
 	errs = append(errs, validateEventTrigger("on.event", workflow.On.Event)...)
+	errs = append(errs, validateGateDefinitions(workflow.Gates)...)
 	errs = append(errs, validateJobs(workflow.Jobs)...)
+	errs = append(errs, validateGateExecSteps(workflow)...)
 	errs = append(errs, validateHumanTaskWorkflow(workflow)...)
 	if len(errs) > 0 {
 		sort.SliceStable(errs, func(i, j int) bool {
@@ -550,7 +553,7 @@ func validRunDelivery(value string) bool {
 }
 
 func validStepUses(value string) bool {
-	if value == "human/task" {
+	if value == "human/task" || value == GateExecUses {
 		return true
 	}
 	for _, prefix := range []string{"agent/", "tool/", "mcp/", "function/"} {
@@ -559,6 +562,187 @@ func validStepUses(value string) bool {
 		}
 	}
 	return false
+}
+
+func validateGateDefinitions(gates map[string]GateDefinition) ValidationErrors {
+	var errs ValidationErrors
+	if len(gates) > gatetypes.MaxGateDefinitionCount {
+		errs = append(errs, ValidationError{
+			Path:    "gates",
+			Message: fmt.Sprintf("cannot contain more than %d gates", gatetypes.MaxGateDefinitionCount),
+		})
+	}
+	for id, gate := range gates {
+		path := "gates." + id
+		if !gatetypes.GateIDPattern.MatchString(id) || len(id) > gatetypes.MaxGateDefinitionIDBytes {
+			errs = append(errs, ValidationError{
+				Path:    path,
+				Message: "gate ID must be canonical kebab-case",
+			})
+		}
+		if strings.TrimSpace(gate.Prompt) == "" || !utf8.ValidString(gate.Prompt) ||
+			len(gate.Prompt) > gatetypes.MaxGatePromptBytes {
+			errs = append(errs, ValidationError{
+				Path: path + ".prompt",
+				Message: fmt.Sprintf(
+					"must be nonblank valid UTF-8 and at most %d bytes",
+					gatetypes.MaxGatePromptBytes,
+				),
+			})
+		}
+		if len(gate.Fields) > gatetypes.MaxGateFieldCount {
+			errs = append(errs, ValidationError{
+				Path:    path + ".fields",
+				Message: fmt.Sprintf("cannot contain more than %d fields", gatetypes.MaxGateFieldCount),
+			})
+		}
+		seenFields := make(map[string]bool, len(gate.Fields))
+		for index, field := range gate.Fields {
+			fieldPath := fmt.Sprintf("%s.fields[%d]", path, index)
+			if !gatetypes.GateIDPattern.MatchString(field.ID) || len(field.ID) > gatetypes.MaxGateFieldIDBytes {
+				errs = append(errs, ValidationError{
+					Path: fieldPath + ".id", Message: "must be canonical kebab-case",
+				})
+			}
+			if seenFields[field.ID] {
+				errs = append(errs, ValidationError{Path: fieldPath + ".id", Message: "duplicate field ID"})
+			}
+			seenFields[field.ID] = true
+			if strings.TrimSpace(field.Label) == "" || !utf8.ValidString(field.Label) ||
+				len(field.Label) > gatetypes.MaxGateFieldLabelBytes {
+				errs = append(errs, ValidationError{
+					Path: fieldPath + ".label",
+					Message: fmt.Sprintf(
+						"must be nonblank valid UTF-8 and at most %d bytes",
+						gatetypes.MaxGateFieldLabelBytes,
+					),
+				})
+			}
+			switch field.Type {
+			case GateFieldShortText, GateFieldLongText, GateFieldBoolean:
+				if field.MinSelections != 0 || field.MaxSelections != 0 || len(field.Options) != 0 {
+					errs = append(errs, ValidationError{
+						Path:    fieldPath,
+						Message: "non-select fields cannot configure selections or options",
+					})
+				}
+			case GateFieldSelect:
+				if field.Required {
+					errs = append(errs, ValidationError{
+						Path:    fieldPath + ".required",
+						Message: "select requiredness is expressed by min-selections",
+					})
+				}
+				if field.MinSelections < 0 || field.MaxSelections < 1 ||
+					field.MinSelections > field.MaxSelections || field.MaxSelections > len(field.Options) {
+					errs = append(errs, ValidationError{
+						Path:    fieldPath,
+						Message: "select cardinality must satisfy 0 <= min-selections <= max-selections <= option count",
+					})
+				}
+				if len(field.Options) > gatetypes.MaxGateFieldOptionCount {
+					errs = append(errs, ValidationError{
+						Path: fieldPath + ".options",
+						Message: fmt.Sprintf(
+							"cannot contain more than %d options", gatetypes.MaxGateFieldOptionCount,
+						),
+					})
+				}
+				seenOptions := make(map[string]bool, len(field.Options))
+				for optionIndex, option := range field.Options {
+					optionPath := fmt.Sprintf("%s.options[%d]", fieldPath, optionIndex)
+					if !gatetypes.GateIDPattern.MatchString(option.ID) ||
+						len(option.ID) > gatetypes.MaxGateFieldOptionIDBytes {
+						errs = append(errs, ValidationError{
+							Path: optionPath + ".id", Message: "must be canonical kebab-case",
+						})
+					}
+					if seenOptions[option.ID] {
+						errs = append(errs, ValidationError{
+							Path: optionPath + ".id", Message: "duplicate option ID",
+						})
+					}
+					seenOptions[option.ID] = true
+					if strings.TrimSpace(option.Label) == "" || !utf8.ValidString(option.Label) ||
+						len(option.Label) > gatetypes.MaxGateFieldOptionLabelBytes {
+						errs = append(errs, ValidationError{
+							Path: optionPath + ".label",
+							Message: fmt.Sprintf(
+								"must be nonblank valid UTF-8 and at most %d bytes",
+								gatetypes.MaxGateFieldOptionLabelBytes,
+							),
+						})
+					}
+				}
+			default:
+				errs = append(errs, ValidationError{Path: fieldPath + ".type", Message: "unsupported field type"})
+			}
+		}
+		if gate.DefaultAction != nil {
+			if err := validateRuntimeGateAction(*gate.DefaultAction); err != nil {
+				errs = append(errs, ValidationError{Path: path + ".default-action", Message: err.Error()})
+			}
+			if workflowValueReferencesSecrets(gate.DefaultAction.Prompt) ||
+				workflowValueReferencesSecrets(gate.DefaultAction.Fields) {
+				errs = append(errs, ValidationError{
+					Path:    path + ".default-action",
+					Message: "gate actions cannot reference secrets",
+				})
+			}
+		}
+	}
+	return errs
+}
+
+func validateGateExecSteps(workflow *Workflow) ValidationErrors {
+	if workflow == nil {
+		return nil
+	}
+	var errs ValidationErrors
+	for jobID, job := range workflow.Jobs {
+		for index, step := range job.Steps {
+			if strings.TrimSpace(step.Uses) != GateExecUses {
+				continue
+			}
+			path := fmt.Sprintf("jobs.%s.steps[%d]", jobID, index)
+			if step.ContinueOnError {
+				errs = append(errs, ValidationError{
+					Path: path + ".continue-on-error", Message: "gate/exec cannot continue on error",
+				})
+			}
+			for key, value := range step.With {
+				if key != "gate-ref" {
+					errs = append(errs, ValidationError{
+						Path: path + ".with." + key, Message: "unsupported gate/exec option",
+					})
+				}
+				if workflowValueReferencesSecrets(value) {
+					errs = append(errs, ValidationError{
+						Path: path + ".with." + key, Message: "gate/exec cannot reference secrets",
+					})
+				}
+			}
+			raw, exists := step.With["gate-ref"]
+			ref, stringValue := raw.(string)
+			if !exists || !stringValue {
+				errs = append(errs, ValidationError{
+					Path: path + ".with.gate-ref", Message: "gate-ref is required and must be a string",
+				})
+				continue
+			}
+			canonical, err := canonicalGateRef(ref)
+			if err != nil {
+				errs = append(errs, ValidationError{Path: path + ".with.gate-ref", Message: err.Error()})
+				continue
+			}
+			if _, exists := workflow.Gates[strings.TrimPrefix(canonical, "gates.")]; !exists {
+				errs = append(errs, ValidationError{
+					Path: path + ".with.gate-ref", Message: "referenced gate does not exist",
+				})
+			}
+		}
+	}
+	return errs
 }
 
 func validateHumanTaskWorkflow(workflow *Workflow) ValidationErrors {
@@ -596,6 +780,20 @@ func workflowContainsHumanTask(workflow *Workflow) bool {
 	for _, job := range workflow.Jobs {
 		for _, step := range job.Steps {
 			if strings.TrimSpace(step.Uses) == "human/task" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func workflowContainsGateExec(workflow *Workflow) bool {
+	if workflow == nil {
+		return false
+	}
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if strings.TrimSpace(step.Uses) == GateExecUses {
 				return true
 			}
 		}

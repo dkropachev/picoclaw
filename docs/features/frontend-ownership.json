@@ -91,14 +91,16 @@
       "patterns": [
         "web/frontend/src/api/event-sources.ts",
         "web/frontend/src/api/events.ts",
-        "web/frontend/src/api/pr-lifecycle-gate-profiles.ts",
+        "web/frontend/src/api/pr-lifecycle-flow.ts",
+        "web/frontend/src/api/pr-lifecycle-gate-configs.ts",
         "web/frontend/src/api/pr-workspace-gates.ts",
         "web/frontend/src/api/pr-workspaces.ts",
         "web/frontend/src/components/events/**",
         "web/frontend/src/components/pr-workspaces/**",
         "web/frontend/src/routes/event-sources.tsx",
         "web/frontend/src/routes/events.tsx",
-        "web/frontend/src/routes/pull-requests.tsx"
+        "web/frontend/src/routes/pull-requests.tsx",
+        "web/frontend/src/routes/pull-requests_*.tsx"
       ]
     },
     {

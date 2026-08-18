@@ -89,19 +89,25 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
 The current schema uses top-level `pr_lifecycle` for unified pull-request
 workspaces. It contains:
 
-- named `gate_profiles`, one `default_gate_profile_id`, and exact
-  `repository_assignments`;
+- named `gate-configs`, one `default-gate-config`, exact
+  `repository-assignments`, and atomic action overrides bound by the exact pair
+  `workflow-ref` plus full `gate-ref: gates.<id>`;
 - independent review and completion adaptive-nudge minimum/maximum bounds;
 - monotonic `XS`, `S`, and `M` file, semantic-line, and module thresholds used
   to derive the `XS` through `L` implementation size grade.
 
 The scoped authenticated settings API is
-`GET`/`PUT /api/pr-lifecycle/gate-profiles`. Writes are exact config-revision
+`GET`/`PUT /api/pr-lifecycle/gate-configs`. Writes are exact config-revision
 compare-and-swap operations and report that a gateway restart is required.
+Configuration action precedence is exact: a matching binding replaces the
+complete workflow `default-action`; without a binding the default is used; if
+neither exists, execution fails closed. Partial action merging is unsupported.
 
 `reviews` is no longer a supported top-level field or an empty compatibility
 placeholder. It is not auto-migrated to `pr_lifecycle`; recreate desired gate
-profiles explicitly. See [Pull Request Workspaces](../guides/pull-request-workspaces.md)
+configurations explicitly. Gate V2 serialized fields are unknown to the current
+schema and are rejected rather than migrated.
+See [Pull Request Workspaces](../guides/pull-request-workspaces.md)
 and [PR Workspace V19 Cutover](../migration/pr-workspace-v19-cutover.md).
 
 ## How It Works

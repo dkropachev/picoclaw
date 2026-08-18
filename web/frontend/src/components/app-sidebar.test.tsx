@@ -179,13 +179,13 @@ describe("AppSidebar", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true")
     const work = screen.getByRole("link", { name: "Work" })
     const gateProfiles = screen.getByRole("link", {
-      name: "Gate profiles",
+      name: "Gate configurations",
     })
     const lifecycleSettings = screen.getByRole("link", {
       name: "Lifecycle settings",
     })
     expect(work).toHaveAttribute("href", "/pull-requests")
-    expect(gateProfiles).toHaveAttribute("href", "/pull-requests/profiles")
+    expect(gateProfiles).toHaveAttribute("href", "/pull-requests/gate-configs")
     expect(lifecycleSettings).toHaveAttribute(
       "href",
       "/pull-requests/settings?tab=nudging",
@@ -213,8 +213,8 @@ describe("AppSidebar", () => {
   it.each([
     ["/pull-requests", "Work"],
     ["/pull-requests/prw_example", "Work"],
-    ["/pull-requests/profiles", "Gate profiles"],
-    ["/pull-requests/profiles/default/edit", "Gate profiles"],
+    ["/pull-requests/gate-configs", "Gate configurations"],
+    ["/pull-requests/gate-configs/default/edit", "Gate configurations"],
     ["/pull-requests/settings", "Lifecycle settings"],
     ["/pull-requests/settings/review", "Lifecycle settings"],
   ])("marks only %s navigation active", (route, activeName) => {
@@ -222,7 +222,7 @@ describe("AppSidebar", () => {
 
     renderSidebar()
 
-    for (const name of ["Work", "Gate profiles", "Lifecycle settings"]) {
+    for (const name of ["Work", "Gate configurations", "Lifecycle settings"]) {
       const link = screen.getByRole("link", { name })
       const active = name === activeName
       expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
@@ -241,7 +241,7 @@ describe("AppSidebar", () => {
 
   it("preserves the originating workspace across configuration links", () => {
     const workspaceID = `prw_${"a".repeat(32)}`
-    pathname = "/pull-requests/profiles/default"
+    pathname = "/pull-requests/gate-configs/default"
     routeSearch = { flow: "review", from: workspaceID }
 
     renderSidebar()
@@ -250,10 +250,9 @@ describe("AppSidebar", () => {
       "href",
       `/pull-requests/${workspaceID}`,
     )
-    expect(screen.getByRole("link", { name: "Gate profiles" })).toHaveAttribute(
-      "href",
-      `/pull-requests/profiles?from=${workspaceID}`,
-    )
+    expect(
+      screen.getByRole("link", { name: "Gate configurations" }),
+    ).toHaveAttribute("href", `/pull-requests/gate-configs?from=${workspaceID}`)
     expect(
       screen.getByRole("link", { name: "Lifecycle settings" }),
     ).toHaveAttribute(
@@ -269,7 +268,7 @@ describe("AppSidebar", () => {
 
     expect(services).toHaveAttribute("aria-expanded", "false")
 
-    pathname = "/pull-requests/profiles/default"
+    pathname = "/pull-requests/gate-configs/default"
     view.rerender(
       <Provider>
         <SidebarProvider>
@@ -285,7 +284,9 @@ describe("AppSidebar", () => {
       name: "Pull requests",
     })
     expect(pullRequests).toHaveAttribute("aria-expanded", "true")
-    expect(screen.getByRole("link", { name: "Gate profiles" })).toBeVisible()
+    expect(
+      screen.getByRole("link", { name: "Gate configurations" }),
+    ).toBeVisible()
 
     await user.click(pullRequests)
     expect(pullRequests).toHaveAttribute("aria-expanded", "false")

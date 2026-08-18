@@ -470,21 +470,51 @@ func toEventingValidation(value ValidationRun) eventing.PRValidationRun {
 }
 
 func toEventingGate(value GateRun) eventing.PRGateRun {
-	profileID := "builtin"
+	configID := "default"
+	configRevision := "unversioned"
+	policyRevision := value.PolicyRevision
+	if policyRevision == "" {
+		policyRevision = "unversioned"
+	}
+	var workflowRef, workflowRevision, gateRef string
 	var workflowRunID string
 	var policy, subject json.RawMessage
 	runtimePresent := value.runtime != nil
 	if value.runtime != nil {
-		if value.runtime.ProfileID != "" {
-			profileID = value.runtime.ProfileID
+		if value.runtime.ConfigID != "" {
+			configID = value.runtime.ConfigID
 		}
 		workflowRunID = value.runtime.WorkflowRunID
 		policy = cloneOptionalGateJSON(value.runtime.PinnedPolicy)
 		subject = cloneOptionalGateJSON(value.runtime.PinnedSubject)
 	}
-	profileRevision := value.PolicyRevision
-	if profileRevision == "" {
-		profileRevision = "unversioned"
+	var pinned pinnedPRLifecycleGateV3
+	if len(policy) > 0 && json.Unmarshal(policy, &pinned) == nil && pinned.Version == "3" {
+		workflowRef, workflowRevision, gateRef = pinned.WorkflowRef, pinned.WorkflowRevision, pinned.GateRef
+		if pinned.ConfigID != "" {
+			configID = pinned.ConfigID
+		}
+		if pinned.ConfigRevision != "" {
+			configRevision = pinned.ConfigRevision
+		}
+	}
+	if gateRef == "" {
+		for _, turn := range value.Turns {
+			if turn.GateForm != nil && turn.GateForm.GateRef != "" {
+				gateRef = turn.GateForm.GateRef
+				break
+			}
+		}
+	}
+	if gateRef != "" && (workflowRef == "" || workflowRevision == "") {
+		if catalog, err := PRLifecycleGateCatalog(); err == nil {
+			for _, entry := range catalog {
+				if entry.GateRef == gateRef {
+					workflowRef, workflowRevision = entry.WorkflowRef, entry.WorkflowRevision
+					break
+				}
+			}
+		}
 	}
 	subjectRevision := value.SubjectRevision
 	if subjectRevision == "" {
@@ -494,10 +524,14 @@ func toEventingGate(value GateRun) eventing.PRGateRun {
 	evidence, _ := json.Marshal(value.Evidence)
 	currentStageID := ""
 	for _, turn := range value.Turns {
+		gateForm, _ := json.Marshal(turn.GateForm)
+		if turn.GateForm == nil {
+			gateForm = nil
+		}
 		turns = append(turns, eventing.PRGateTurn{
 			StageID: turn.StageID, Kind: turn.Kind, Title: turn.Title, Status: turn.Status,
-			Outcome: eventing.PRGateOutcome(turn.Outcome), Questions: append([]string(nil), turn.Questions...),
-			Answers: turn.Answers, Comment: turn.Comment,
+			GateForm: gateForm, FieldValues: turn.FieldValues, ActorKind: turn.ActorKind,
+			ExecutionID: turn.ExecutionID, ActionRevision: turn.ActionRevision, InputHash: turn.InputHash,
 		})
 		if currentStageID == "" && (turn.Status == "waiting" || turn.Status == "running") {
 			currentStageID = turn.StageID
@@ -505,9 +539,11 @@ func toEventingGate(value GateRun) eventing.PRGateRun {
 	}
 	return eventing.PRGateRun{
 		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, timeFromPointer(value.FinishedAt, value.CreatedAt)),
-		DecisionPoint:     value.DecisionPoint, Purpose: value.Purpose, TargetID: value.TargetID,
-		State: eventing.PRExecutionState(value.State), Outcome: eventing.PRGateOutcome(value.Outcome),
-		ProfileID: profileID, ProfileRevision: profileRevision,
+		DecisionPoint:     value.DecisionPoint, TargetID: value.TargetID,
+		State:          eventing.PRExecutionState(value.State),
+		PolicyRevision: policyRevision,
+		WorkflowRef:    workflowRef, WorkflowRevision: workflowRevision, GateRef: gateRef,
+		ConfigID: configID, ConfigRevision: configRevision,
 		PinnedPolicy: policy, PinnedPolicyHash: persistenceDigest(policy),
 		SubjectRevision: subjectRevision, PinnedSubject: subject, PinnedSubjectHash: persistenceDigest(subject),
 		WorkflowRunID: workflowRunID, RuntimePresent: runtimePresent, CurrentStageID: currentStageID,
@@ -800,23 +836,30 @@ func fromEventingValidation(value eventing.PRValidationRun) ValidationRun {
 func fromEventingGate(value eventing.PRGateRun) GateRun {
 	turns := make([]GateTurn, 0, len(value.Turns))
 	for _, turn := range value.Turns {
+		var gateForm *GateForm
+		if len(turn.GateForm) > 0 {
+			var decoded GateForm
+			if json.Unmarshal(turn.GateForm, &decoded) == nil {
+				gateForm = &decoded
+			}
+		}
 		turns = append(turns, GateTurn{
 			StageID: turn.StageID, Kind: turn.Kind, Title: turn.Title, Status: turn.Status,
-			Outcome: GateOutcome(turn.Outcome), Questions: append([]string(nil), turn.Questions...),
-			Answers: turn.Answers, Comment: turn.Comment,
+			GateForm: gateForm, FieldValues: turn.FieldValues, ActorKind: turn.ActorKind,
+			ExecutionID: turn.ExecutionID, ActionRevision: turn.ActionRevision, InputHash: turn.InputHash,
 		})
 	}
 	var evidence GateEvidence
 	_ = json.Unmarshal(value.Evidence, &evidence)
 	result := GateRun{
 		ID: value.ID, DecisionPoint: value.DecisionPoint, TargetID: value.TargetID,
-		Purpose: value.Purpose, State: ExecutionState(value.State), Outcome: GateOutcome(value.Outcome),
-		PolicyRevision: value.ProfileRevision, SubjectRevision: value.SubjectRevision,
+		State:          ExecutionState(value.State),
+		PolicyRevision: value.PolicyRevision, SubjectRevision: value.SubjectRevision,
 		Turns: turns, Evidence: evidence, CreatedAt: value.CreatedAt, FinishedAt: cloneTimePointer(value.FinishedAt),
 	}
 	if value.RuntimePresent {
 		result.runtime = &gateRuntime{
-			ProfileID: value.ProfileID, WorkflowRunID: value.WorkflowRunID,
+			ConfigID: value.ConfigID, WorkflowRunID: value.WorkflowRunID,
 			PinnedPolicy:  cloneOptionalGateJSON(value.PinnedPolicy),
 			PinnedSubject: cloneOptionalGateJSON(value.PinnedSubject),
 		}

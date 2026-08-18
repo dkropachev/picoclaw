@@ -3,416 +3,301 @@ package prworkspace
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
-	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/workflows"
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
-var errGateAggregatePersistence = errors.New("gate aggregate persistence failed")
-
-type failGateAggregatePersistenceOnceStore struct {
-	Store
-	remaining int
+type prGateV3Agent struct {
+	reader      session.SnapshotReader
+	fieldValues map[string]any
+	captures    []workflows.ReadOnlySessionRef
+	requests    []workflows.AgentRequest
 }
 
-type mixedAssignedGateAgent struct {
-	reader   session.SnapshotReader
-	captures []workflows.ReadOnlySessionRef
-	requests []workflows.AgentRequest
-}
-
-func (agent *mixedAssignedGateAgent) CaptureReadOnlySession(
+func (agent *prGateV3Agent) CaptureReadOnlySession(
 	ctx context.Context,
 	ref workflows.ReadOnlySessionRef,
 ) (*workflows.FrozenReadOnlySession, error) {
 	agent.captures = append(agent.captures, ref)
+	if agent.reader == nil {
+		return nil, errors.New("session reader is unavailable")
+	}
 	snapshot, found, err := agent.reader.ReadSessionSnapshot(ctx, ref.Session)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
-		return nil, errors.New("mixed gate session was not found")
+		return nil, errors.New("gate session was not found")
 	}
 	return &workflows.FrozenReadOnlySession{
 		AgentID: ref.AgentID, Snapshot: snapshot,
-		HistoryRevision: "sha256:mixed-assigned-gate-history",
+		HistoryRevision: "sha256:pr-gate-v3-history",
 		FrozenMedia:     media.FrozenSet{Version: media.FrozenSetVersion},
 	}, nil
 }
 
-func (agent *mixedAssignedGateAgent) RunAgent(
+func (agent *prGateV3Agent) RunAgent(
 	_ context.Context,
 	request workflows.AgentRequest,
 ) (map[string]any, error) {
 	agent.requests = append(agent.requests, request)
-	response := fmt.Sprintf(`{"outcome":"pass","reason":"%s passed","questions":[]}`, request.AgentID)
-	structured := workflows.ValidateAgentStructuredOutput(response, request.Output)
-	if !structured.Valid {
-		return nil, fmt.Errorf("mixed gate response is invalid: %s", structured.Error)
-	}
 	return map[string]any{
-		"text": response, "structured": structured.Structured,
-		"structured_json": structured.RawJSON, "structured_valid": true,
+		"structured": map[string]any{"field-values": cloneAnyMap(agent.fieldValues)},
 	}, nil
 }
 
-func TestWorkflowGateEvaluatorExecutesAssignedMixedProfileWithFrozenWorkingContext(t *testing.T) {
-	now := time.Date(2026, 8, 14, 0, 30, 0, 0, time.UTC)
-	configured := config.DefaultPRLifecycleConfig()
-	configured.GateProfiles["mixed"] = config.PRLifecycleGateProfile{
-		Name: "Mixed execution",
-		Workflows: map[string]workflows.GateWorkflowSpec{
-			"pr.charter.confirm": {
-				ID: "mixed-charter", Name: "Mixed charter gate",
-				Purpose: workflows.GatePurposeAuthorization, DecisionPoint: "pr.charter.confirm",
-				Stages: []workflows.GateStageSpec{
-					{ID: "explicit", Kind: workflows.GateZero},
-					{ID: "verified", Kind: workflows.GateDeterministic, Title: "Verified subject", When: "inputs.gate_subject.verified == true"},
-					{ID: "isolated", Kind: workflows.GateAIIsolatedContext, Title: "Isolated audit", AgentID: "reviewer", Criteria: "Check the frozen subject."},
-					{ID: "working", Kind: workflows.GateAIWorkingContext, Title: "Workspace discussion", AgentID: "main", Criteria: "Check unresolved workspace guidance."},
-					{ID: "human", Kind: workflows.GateHuman, Title: "Final approval", Questions: []any{"Approve the charter?"}},
-				},
-			},
-		},
-	}
-	configured.RepositoryAssignments["https://github.com|repo-assigned"] = "mixed"
-	if err := configured.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	lower, err := memory.NewJSONLStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = lower.Close() })
-	sessions := session.NewJSONLBackend(lower)
-	agent := &mixedAssignedGateAgent{reader: sessions}
-	workflowWorkspace := t.TempDir()
+func TestWorkflowGateEvaluatorPresentsGenericHumanFormAndReturnsFieldValues(t *testing.T) {
+	workspace := t.TempDir()
 	executor := &workflows.Executor{
-		WorkspaceDir: workflowWorkspace,
-		Store:        workflows.NewFileRunStore(workflowWorkspace),
-		Agents:       agent,
+		WorkspaceDir: workspace,
+		Store:        workflows.NewFileRunStore(workspace),
 	}
-	binder := &SessionGateWorkingContextBinder{
-		Acquire: func(ctx context.Context, agentID string) (context.Context, session.SessionStore, func(), error) {
-			if agentID != "main" {
-				return ctx, nil, func() {}, fmt.Errorf("unexpected working-context agent %q", agentID)
-			}
-			return ctx, sessions, func() {}, nil
-		},
-	}
-	evaluator := &WorkflowGateEvaluator{
-		Config: configured, Executor: executor, WorkingContext: binder,
-		Now: func() time.Time { return now },
-	}
-	workspaceID := "prw_11111111111111111111111111111111"
-	gate, err := evaluator.Start(t.Context(), GateRequest{
-		WorkspaceID: workspaceID, WorkspaceVersion: 7,
-		ProviderOrigin: "https://github.com", RepositoryID: "repo-assigned",
-		DecisionPoint: "pr.charter.confirm", Purpose: "authorization",
-		Subject:       map[string]any{"verified": true, "charter": map[string]any{"type": "feature"}},
-		SubjectDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-		WorkingContext: PRContextBundle{
-			WorkspaceID: workspaceID,
-			Provider:    ProviderSnapshot{Repository: "octo/repo", HeadSHA: "head"},
-			Messages: []Message{{
-				ID: "pms_11111111111111111111111111111111", Role: "user",
-				Content: "Keep the compatibility decision explicit.", CreatedAt: now,
-			}},
-			Corrections: []Correction{{
-				ID: "pco_11111111111111111111111111111111", OriginalClaim: "implicit compatibility",
-				Correction: "No backward compatibility is required.", CreatedAt: now,
-			}},
-		},
+	evaluator := &WorkflowGateEvaluator{Config: config.DefaultPRLifecycleConfig(), Executor: executor}
+	request := testPRLifecycleGateRequest("pr.charter.confirm", map[string]any{
+		"charter": map[string]any{"type": "feature", "goal": "Add gate forms"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gate.runtime == nil || gate.runtime.ProfileID != "mixed" ||
-		gate.State != ExecutionWaitingUser || len(gate.Turns) != 5 {
-		t.Fatalf("started mixed gate = %#v", gate)
-	}
-	for _, index := range []int{0, 1, 2, 3} {
-		if gate.Turns[index].Status != "answered" || gate.Turns[index].Outcome != GatePass {
-			t.Fatalf("started turn %d = %#v", index, gate.Turns[index])
-		}
-	}
-	if gate.Turns[4].Status != "waiting" {
-		t.Fatalf("human turn = %#v, want waiting", gate.Turns[4])
-	}
-	if len(agent.captures) != 1 || agent.captures[0].AgentID != "main" ||
-		agent.captures[0].Session == "" || agent.captures[0].ExpectedRevision == "" {
-		t.Fatalf("working-context captures = %#v", agent.captures)
-	}
-	if len(agent.requests) != 2 || !agent.requests[0].EphemeralSession ||
-		agent.requests[0].FrozenReadOnlySession != nil || agent.requests[1].EphemeralSession ||
-		agent.requests[1].FrozenReadOnlySession == nil {
-		t.Fatalf("mixed AI requests = %#v", agent.requests)
-	}
-	history := agent.requests[1].FrozenReadOnlySession.Snapshot.History
-	if len(history) != 2 || !strings.Contains(history[0].Content, "No backward compatibility is required.") ||
-		history[1].Content != "Keep the compatibility decision explicit." {
-		t.Fatalf("frozen working-context history = %#v", history)
-	}
-
-	completed, err := evaluator.Respond(t.Context(), gate, GatePass, map[string]any{"approved": true}, "Approved.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if completed.State != ExecutionSucceeded || completed.Outcome != GatePass {
-		t.Fatalf("completed mixed gate = %#v", completed)
-	}
-	for index, turn := range completed.Turns {
-		if turn.Status != "answered" || turn.Outcome != GatePass {
-			t.Fatalf("completed turn %d = %#v", index, turn)
-		}
-	}
-}
-
-func (store *failGateAggregatePersistenceOnceStore) Mutate(ctx context.Context, mutation Mutation) (MutationResult, error) {
-	if store.remaining > 0 && len(mutation.Patch.ReplaceGates) > 0 {
-		store.remaining--
-		current, _ := store.Store.Get(ctx, mutation.WorkspaceID)
-		return MutationResult{Aggregate: current}, errGateAggregatePersistence
-	}
-	return store.Store.Mutate(ctx, mutation)
-}
-
-func TestWorkflowGateEvaluatorNormalizesTypedDomainSubject(t *testing.T) {
-	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
-	evaluator := &WorkflowGateEvaluator{
-		Config: config.DefaultPRLifecycleConfig(),
-		Now:    func() time.Time { return now },
-	}
-	gate, err := evaluator.Start(t.Context(), GateRequest{
-		WorkspaceID:    "prw_11111111111111111111111111111111",
-		ProviderOrigin: "https://github.com",
-		RepositoryID:   "1333775490",
-		DecisionPoint:  "pr.charter.confirm",
-		Purpose:        "authorization",
-		SubjectDigest:  "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-		Subject: map[string]any{
-			"charter": Charter{
-				ID: "pcr_11111111111111111111111111111111", Revision: 1,
-				Type: PRTypeFeature, Goal: "Add time-aware greetings",
-				CreatedAt: now,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gate.State != ExecutionWaitingUser || len(gate.Turns) != 1 ||
-		gate.Turns[0].Kind != "human" || gate.runtime == nil {
-		t.Fatalf("gate = %#v", gate)
-	}
-	if gate.Evidence.CharterType != PRTypeFeature || gate.Evidence.CharterGoal != "Add time-aware greetings" {
-		t.Fatalf("gate evidence = %#v", gate.Evidence)
-	}
-}
-
-func TestTurnsFromCompilationProjectsPersistedHumanStep(t *testing.T) {
-	configured := config.DefaultPRLifecycleConfig()
-	_, profile, _, err := configured.ProfileForRepository("https://github.com", "1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	compilation, err := workflows.CompileGateWorkflowV2(
-		profile.Workflows["pr.charter.confirm"],
-		map[string]any{"charter": map[string]any{"type": "feature"}},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stepID := compilation.Stages[0].StepID
-	run := &workflows.Run{Steps: map[string]workflows.StepExecution{
-		"gates/" + stepID: {
-			ID: stepID, Status: workflows.RunStatusSucceeded,
-			Outputs: map[string]any{"response": map[string]any{
-				"decision": "pass", "answers": map[string]any{"approved": true},
-				"comment": "Charter is appropriately bounded.",
-			}},
-		},
-	}}
-	turns := turnsFromCompilation(compilation, run)
-	if len(turns) != 1 || turns[0].Status != "answered" || turns[0].Outcome != GatePass ||
-		turns[0].Answers["approved"] != true || turns[0].Comment != "Charter is appropriately bounded." {
-		t.Fatalf("turns = %#v", turns)
-	}
-}
-
-func TestWorkflowGateEvaluatorRetryReconcilesTerminalRunAfterAggregatePersistenceFailure(t *testing.T) {
-	now := time.Date(2026, 8, 14, 1, 0, 0, 0, time.UTC)
-	workflowWorkspace := t.TempDir()
-	executor := &workflows.Executor{
-		WorkspaceDir: workflowWorkspace,
-		Store:        workflows.NewFileRunStore(workflowWorkspace),
-	}
-	evaluator := &WorkflowGateEvaluator{
-		Config: config.DefaultPRLifecycleConfig(), Executor: executor,
-		Now: func() time.Time { return now },
-	}
-	input := testCreateInput()
-	input.Provider.ProviderOrigin = "https://github.com"
-	input.Provider.RepositoryID = "repo-gate-recovery"
-	input.Workspace.ProviderOrigin = input.Provider.ProviderOrigin
-	input.Workspace.RepositoryID = input.Provider.RepositoryID
-	input.Workspace.Phase = PhaseCharter
-	baseStore := NewMemoryStore()
-	created, err := baseStore.Create(t.Context(), input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	charter := Charter{
-		ID: "pcr_33333333333333333333333333333333", Revision: 1, Type: PRTypeFix,
-		Goal: "Recover a committed workflow decision", BaseSHA: input.Provider.BaseSHA,
-		HeadSHA: input.Provider.HeadSHA, CreatedAt: now,
-	}
-	subject := map[string]any{"charter": charter}
-	subjectDigest, err := fingerprintValue(subject)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gate, err := evaluator.Start(t.Context(), GateRequest{
-		WorkspaceID: input.Workspace.ID, ProviderOrigin: input.Provider.ProviderOrigin,
-		RepositoryID: input.Provider.RepositoryID, DecisionPoint: "pr.charter.confirm",
-		Purpose: "authorization", Subject: subject, SubjectDigest: subjectDigest,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	gate.TargetID = charter.ID
-	if gate.State != ExecutionWaitingUser || gate.runtime == nil || gate.runtime.WorkflowRunID == "" {
-		t.Fatalf("workflow gate = %#v", gate)
-	}
-	waitingState := ExecutionWaitingGate
-	seeded, err := baseStore.Mutate(t.Context(), Mutation{
-		WorkspaceID: input.Workspace.ID, ExpectedVersion: created.Aggregate.Workspace.Version,
-		RequestID: "request-seed-workflow-gate-recovery",
-		Patch: AggregatePatch{
-			ExecutionState: &waitingState, AppendCharters: []Charter{charter}, AppendGates: []GateRun{gate},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	failingStore := &failGateAggregatePersistenceOnceStore{Store: baseStore, remaining: 1}
-	service, err := NewService(ServiceConfig{Store: failingStore, Gates: evaluator, Now: func() time.Time { return now }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := RespondGateRequest{
-		WorkspaceID: input.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: seeded.Aggregate.Workspace.Version,
-		RequestID:       "request-answer-workflow-before-aggregate-failure",
-		Decision:        GatePass, Answers: map[string]any{"approved": true}, Comment: "Approved.",
-	}
-	failed, err := service.RespondGate(t.Context(), request)
-	if !errors.Is(err, errGateAggregatePersistence) {
-		t.Fatalf("first RespondGate() error = %v", err)
-	}
-	if failed.Workspace.Version != seeded.Aggregate.Workspace.Version {
-		t.Fatalf("failed aggregate version = %d, want %d", failed.Workspace.Version, seeded.Aggregate.Workspace.Version)
-	}
-	for _, task := range mustListWorkflowGateTasks(t, executor, gate.runtime.WorkflowRunID) {
-		if task.Status == workflows.HumanTaskStatusWaiting {
-			t.Fatalf("workflow task remained waiting after committed response: %#v", task)
-		}
-	}
-	stillWaiting, err := baseStore.Get(t.Context(), input.Workspace.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	persistedGate, _ := findGate(stillWaiting.Gates, gate.ID)
-	if persistedGate.State != ExecutionWaitingUser {
-		t.Fatalf("aggregate gate unexpectedly changed after failed mutation: %#v", persistedGate)
-	}
-
-	request.RequestID = "request-reconcile-terminal-workflow-gate"
-	reconciled, err := service.RespondGate(t.Context(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconciledGate, found := findGate(reconciled.Gates, gate.ID)
-	if !found || reconciledGate.State != ExecutionSucceeded || reconciledGate.Outcome != GatePass ||
-		reconciled.Workspace.Phase != PhaseReview || !reconciled.Charters[0].Confirmed {
-		t.Fatalf("reconciled aggregate = workspace %#v gate %#v charter %#v", reconciled.Workspace, reconciledGate, reconciled.Charters)
-	}
-}
-
-func TestGateFallbackRequiresCatalogDecisionPointAndPurpose(t *testing.T) {
-	configured := config.DefaultPRLifecycleConfig()
-	profile := configured.GateProfiles[config.DefaultPRLifecycleGateProfileID]
-	delete(profile.Workflows, "pr.charter.reconfirm")
-	configured.GateProfiles[config.DefaultPRLifecycleGateProfileID] = profile
-	evaluator := &WorkflowGateEvaluator{Config: configured}
-	request := GateRequest{
-		WorkspaceID: "prw_11111111111111111111111111111111", WorkspaceVersion: 1,
-		DecisionPoint: "pr.charter.reconfirm", Purpose: "authorization",
-		Subject:       map[string]any{"charter": "revised"},
-		SubjectDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-	}
 	gate, err := evaluator.Start(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gate.State != ExecutionWaitingUser || len(gate.Turns) != 1 ||
-		gate.Turns[0].Title != "Decision required" ||
-		len(gate.Turns[0].Questions) != 1 ||
-		gate.Turns[0].Questions[0] != "Review the evidence and choose an available outcome." {
-		t.Fatalf("fallback gate = %#v", gate)
+	if gate.State != ExecutionWaitingUser || gate.runtime == nil || gate.runtime.ConfigID != "default" ||
+		gate.runtime.WorkflowRunID == "" || len(gate.Turns) != 1 {
+		t.Fatalf("started gate = %#v", gate)
+	}
+	turn := gate.Turns[0]
+	if turn.GateForm == nil || turn.GateForm.GateRef != "gates.charter-confirm" ||
+		turn.ActorKind != "human" || turn.ExecutionID == "" || turn.ActionRevision == "" ||
+		turn.InputHash == "" || len(turn.GateForm.Fields) != 2 {
+		t.Fatalf("generic Human turn = %#v", turn)
+	}
+	reconciledStart, err := evaluator.Start(t.Context(), request)
+	if err != nil || reconciledStart.ID != gate.ID || reconciledStart.runtime == nil ||
+		reconciledStart.runtime.WorkflowRunID != gate.runtime.WorkflowRunID {
+		t.Fatalf("reconciled start = %#v, error = %v", reconciledStart, err)
+	}
+	runs, err := executor.Store.ListRuns(t.Context())
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("outer gate runs after replay = %#v, error = %v", runs, err)
 	}
 
-	service := &Service{now: func() time.Time {
-		return time.Date(2026, 8, 17, 20, 0, 0, 0, time.UTC)
-	}}
-	aggregate := Aggregate{Workspace: Workspace{ID: request.WorkspaceID}}
-	builtin, created, err := service.ensureGate(
-		t.Context(), aggregate, request.DecisionPoint, request.Purpose, request.Subject,
+	fieldValues := map[string]any{"action": "approve", "explanation": "Scope is explicit."}
+	completed, err := evaluator.Respond(t.Context(), gate, fieldValues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.State != ExecutionSucceeded || !gateCompletedWith(completed, "approve") ||
+		completed.Turns[0].FieldValues["action"] != "approve" ||
+		completed.Turns[0].ActorKind != "human" {
+		t.Fatalf("completed gate = %#v", completed)
+	}
+	// A repeated delivery reconciles the durable terminal workflow rather than
+	// requiring an impossible second Human response.
+	reconciled, err := evaluator.Respond(t.Context(), gate, fieldValues)
+	if err != nil || !gateCompletedWith(reconciled, "approve") {
+		t.Fatalf("reconciled gate = %#v, error = %v", reconciled, err)
+	}
+}
+
+func TestWorkflowGateEvaluatorAppliesExactRepositoryActionOverride(t *testing.T) {
+	configured := config.DefaultPRLifecycleConfig()
+	action := gatetypes.GateAction{
+		Type: gatetypes.GateActionDeterministic,
+		Fields: map[string]any{
+			"action": "revise", "explanation": "Configured policy requires revision.",
+		},
+	}
+	configured.GateConfigs["automatic"] = config.PRLifecycleGateConfig{
+		Name: "Automatic",
+		Bindings: []config.PRLifecycleGateBinding{{
+			WorkflowRef: PRLifecycleWorkflowRef,
+			GateRef:     "gates.charter-confirm",
+			Action:      &action,
+		}},
+	}
+	configured.RepositoryAssignments["https://github.com|repo-v3"] = "automatic"
+	if err := configured.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	evaluator := &WorkflowGateEvaluator{
+		Config: configured,
+		Executor: &workflows.Executor{
+			WorkspaceDir: workspace,
+			Store:        workflows.NewFileRunStore(workspace),
+		},
+	}
+	gate, err := evaluator.Start(t.Context(), testPRLifecycleGateRequest(
+		"pr.charter.confirm",
+		map[string]any{"charter": map[string]any{"type": "fix"}},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate.State != ExecutionSucceeded || !gateCompletedWith(gate, "revise") || gate.runtime.ConfigID != "automatic" ||
+		len(gate.Turns) != 1 || gate.Turns[0].ActorKind != "deterministic" ||
+		gate.Turns[0].FieldValues["action"] != "revise" {
+		t.Fatalf("automatic gate = %#v", gate)
+	}
+}
+
+func TestWorkflowGateEvaluatorUsesDedicatedHardScopeForm(t *testing.T) {
+	workspace := t.TempDir()
+	evaluator := &WorkflowGateEvaluator{
+		Config: config.DefaultPRLifecycleConfig(),
+		Executor: &workflows.Executor{
+			WorkspaceDir: workspace,
+			Store:        workflows.NewFileRunStore(workspace),
+		},
+	}
+	request := testPRLifecycleGateRequest("pr.implementation.hard-scope", map[string]any{
+		"scope": map[string]any{"distance": "S3_unrelated"},
+	})
+	gate, err := evaluator.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := gate.Turns[0].GateForm
+	if form == nil || form.GateRef != prLifecycleHardScopeGateRef || len(form.Fields) == 0 {
+		t.Fatalf("hard-scope form = %#v", form)
+	}
+	for _, option := range form.Fields[0].Options {
+		if option.ID == "approve" {
+			t.Fatal("hard-scope form exposed forbidden approve option")
+		}
+	}
+}
+
+func TestWorkflowGateEvaluatorProjectsEveryNestedWorkflowHumanTurn(t *testing.T) {
+	workspace := t.TempDir()
+	actionsDir := filepath.Join(workspace, "workflows", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := `
+name: Multi-step gate action
+gates:
+  confirm:
+    prompt: Confirm the first check.
+    fields:
+      - id: confirmed
+        type: boolean
+        label: Confirmed
+        required: true
+    default-action: {type: human}
+  confirm-again:
+    prompt: Confirm the second check.
+    fields:
+      - id: confirmed
+        type: boolean
+        label: Confirmed
+        required: true
+    default-action: {type: human}
+  result:
+    prompt: Produce the application result.
+    fields:
+      - id: action
+        type: select
+        label: Action
+        min-selections: 1
+        max-selections: 1
+        options: [{id: approve, label: Approve}]
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: deterministic
+      fields: {action: approve, explanation: Checks completed.}
+on:
+  workflow_call:
+    outputs:
+      field-values:
+        value: ${{ jobs.decide.outputs.field-values }}
+jobs:
+  decide:
+    runs-on: picoclaw
+    outputs:
+      field-values: ${{ steps.result.outputs.field-values }}
+    steps:
+      - {id: first, uses: gate/exec, with: {gate-ref: gates.confirm}}
+      - {id: second, uses: gate/exec, with: {gate-ref: gates.confirm-again}}
+      - {id: result, uses: gate/exec, with: {gate-ref: gates.result}}
+`
+	if err := os.WriteFile(filepath.Join(actionsDir, "multi.yml"), []byte(child), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	action := gatetypes.GateAction{
+		Type: gatetypes.GateActionWorkflow, WorkflowRef: "workflows/actions/multi.yml",
+	}
+	configured := config.DefaultPRLifecycleConfig()
+	configured.GateConfigs["multi"] = config.PRLifecycleGateConfig{
+		Name: "Multi-step",
+		Bindings: []config.PRLifecycleGateBinding{{
+			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,
+		}},
+	}
+	configured.DefaultGateConfigID = "multi"
+	executor := &workflows.Executor{WorkspaceDir: workspace, Store: workflows.NewFileRunStore(workspace)}
+	evaluator := &WorkflowGateEvaluator{Config: configured, Executor: executor}
+	gate, err := evaluator.Start(t.Context(), testPRLifecycleGateRequest(
+		"pr.charter.confirm", map[string]any{"charter": map[string]any{"type": "feature"}},
+	))
+	if err != nil || gate.State != ExecutionWaitingUser || len(gate.Turns) != 1 ||
+		gate.Turns[0].GateForm == nil || gate.Turns[0].GateForm.GateRef != "gates.confirm" {
+		t.Fatalf("first nested form = %#v, error = %v", gate, err)
+	}
+	gate, err = evaluator.Respond(t.Context(), gate, map[string]any{"confirmed": true})
+	if err != nil || gate.State != ExecutionWaitingUser || len(gate.Turns) != 2 ||
+		gate.Turns[0].FieldValues["confirmed"] != true ||
+		gate.Turns[1].GateForm == nil || gate.Turns[1].GateForm.GateRef != "gates.confirm-again" {
+		t.Fatalf("second nested form = %#v, error = %v", gate, err)
+	}
+	gate, err = evaluator.Respond(t.Context(), gate, map[string]any{"confirmed": true})
+	if err != nil || gate.State != ExecutionSucceeded || len(gate.Turns) != 3 ||
+		gate.Turns[1].FieldValues["confirmed"] != true || gateAction(gate) != "approve" ||
+		gate.Turns[2].ActorKind != "workflow" || gate.Turns[2].ActionRevision == "" {
+		t.Fatalf("nested workflow result = %#v, error = %v", gate, err)
+	}
+}
+
+func TestWorkflowGateEvaluatorRejectsInvalidIdentityAndFieldValues(t *testing.T) {
+	workspace := t.TempDir()
+	evaluator := &WorkflowGateEvaluator{
+		Config: config.DefaultPRLifecycleConfig(),
+		Executor: &workflows.Executor{
+			WorkspaceDir: workspace,
+			Store:        workflows.NewFileRunStore(workspace),
+		},
+	}
+	invalid := testPRLifecycleGateRequest("pr.unknown", map[string]any{"subject": true})
+	if _, err := evaluator.Start(t.Context(), invalid); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown decision point error = %v", err)
+	}
+	waiting, err := evaluator.Start(
+		t.Context(),
+		testPRLifecycleGateRequest("pr.charter.confirm", map[string]any{"subject": true}),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !created || builtin.PolicyRevision != "builtin:fallback-human-v2" ||
-		len(builtin.Turns) != 1 || builtin.Turns[0].Title != "Decision required" ||
-		len(builtin.Turns[0].Questions) != 1 ||
-		builtin.Turns[0].Questions[0] != "Review the evidence and choose an available outcome." {
-		t.Fatalf("builtin fallback gate = %#v", builtin)
-	}
-	for _, test := range []struct {
-		name    string
-		point   string
-		purpose string
-	}{
-		{name: "unknown", point: "pr.unknown.gate", purpose: "authorization"},
-		{name: "mismatched", point: "pr.charter.reconfirm", purpose: "classification"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			invalid := request
-			invalid.DecisionPoint, invalid.Purpose = test.point, test.purpose
-			if _, err := evaluator.Start(t.Context(), invalid); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("WorkflowGateEvaluator.Start() error = %v, want ErrInvalid", err)
-			}
-			if _, _, err := service.ensureGate(
-				t.Context(), aggregate, test.point, test.purpose, invalid.Subject,
-			); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("Service.ensureGate() error = %v, want ErrInvalid", err)
-			}
-		})
+	if _, err := evaluator.Respond(
+		t.Context(), waiting, map[string]any{"action": "not-an-option"},
+	); !errors.Is(err, workflows.ErrHumanTaskResponseInvalid) {
+		t.Fatalf("invalid field-values error = %v", err)
 	}
 }
 
-func mustListWorkflowGateTasks(t *testing.T, executor *workflows.Executor, runID string) []workflows.WorkflowHumanTask {
-	t.Helper()
-	tasks, err := executor.ListHumanTasks(t.Context(), runID)
-	if err != nil {
-		t.Fatal(err)
+func testPRLifecycleGateRequest(decisionPoint string, subject map[string]any) GateRequest {
+	digest, _ := fingerprintValue(subject)
+	return GateRequest{
+		WorkspaceID: "prw_11111111111111111111111111111111", WorkspaceVersion: 7,
+		ProviderOrigin: "https://github.com", RepositoryID: "repo-v3",
+		DecisionPoint: decisionPoint, Subject: subject, SubjectDigest: digest,
 	}
-	return tasks
 }

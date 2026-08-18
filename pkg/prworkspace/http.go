@@ -630,9 +630,7 @@ func (handler *HTTPHandler) serveDeferred(response http.ResponseWriter, request 
 
 type gateHTTPBody struct {
 	mutationFence
-	Outcome GateOutcome    `json:"outcome"`
-	Answers map[string]any `json:"answers"`
-	Comment string         `json:"comment"`
+	FieldValues map[string]any `json:"field-values"`
 }
 
 func (handler *HTTPHandler) serveGate(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
@@ -656,20 +654,9 @@ func (handler *HTTPHandler) serveGate(response http.ResponseWriter, request *htt
 	if !decodeHTTPBody(response, request, &body) {
 		return
 	}
-	if handler.deferredIssueMode == DeferredIssuesOff && body.Outcome == GatePass {
-		current, getErr := handler.service.Get(request.Context(), workspaceID)
-		if getErr != nil {
-			writeHTTPResult(response, current, getErr)
-			return
-		}
-		if gate, found := findGate(current.Gates, tail[1]); found && gate.DecisionPoint == "pr.deferred.publish" {
-			writeHTTPError(response, http.StatusConflict, "deferred_issue_publication_disabled", nil)
-			return
-		}
-	}
 	aggregate, err := handler.service.RespondGate(request.Context(), RespondGateRequest{
 		WorkspaceID: workspaceID, GateRunID: tail[1], ExpectedVersion: body.ExpectedVersion,
-		RequestID: body.RequestID, Decision: body.Outcome, Answers: body.Answers, Comment: body.Comment,
+		RequestID: body.RequestID, FieldValues: body.FieldValues,
 	})
 	if err == nil && handler.deferredIssueMode == DeferredIssuesAutomatic {
 		var automatic Aggregate

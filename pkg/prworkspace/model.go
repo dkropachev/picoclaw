@@ -3,6 +3,8 @@ package prworkspace
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 // PRType is the single primary change type authorized by a confirmed charter.
@@ -87,16 +89,6 @@ type WorkPresence string
 const (
 	WorkCandidatePresent WorkPresence = "candidate_present"
 	WorkFollowUp         WorkPresence = "follow_up"
-)
-
-// GateOutcome is the only policy result accepted by lifecycle transitions.
-type GateOutcome string
-
-const (
-	GatePass   GateOutcome = "pass"
-	GateRevise GateOutcome = "revise"
-	GateDefer  GateOutcome = "defer"
-	GateBlock  GateOutcome = "block"
 )
 
 type FindingOrigin string
@@ -415,23 +407,31 @@ type ValidationRun struct {
 }
 
 type GateTurn struct {
-	StageID   string         `json:"stage_id"`
-	Kind      string         `json:"kind"`
-	Title     string         `json:"title"`
-	Status    string         `json:"status"`
-	Outcome   GateOutcome    `json:"outcome,omitempty"`
-	Questions []string       `json:"questions,omitempty"`
-	Answers   map[string]any `json:"answers,omitempty"`
-	Comment   string         `json:"comment,omitempty"`
+	StageID        string         `json:"stage_id"`
+	Kind           string         `json:"kind"`
+	Title          string         `json:"title"`
+	Status         string         `json:"status"`
+	GateForm       *GateForm      `json:"gate-form,omitempty"`
+	FieldValues    map[string]any `json:"field-values,omitempty"`
+	ActorKind      string         `json:"actor-kind,omitempty"`
+	ExecutionID    string         `json:"execution-id,omitempty"`
+	ActionRevision string         `json:"action-revision,omitempty"`
+	InputHash      string         `json:"input-hash,omitempty"`
+}
+
+// GateForm is the generic, browser-safe request defined by an application
+// workflow. Its fields have no lifecycle-specific result semantics.
+type GateForm struct {
+	GateRef string                `json:"gate-ref"`
+	Prompt  string                `json:"prompt"`
+	Fields  []gatetypes.GateField `json:"fields,omitempty"`
 }
 
 type GateRun struct {
 	ID              string         `json:"id"`
 	DecisionPoint   string         `json:"decision_point"`
 	TargetID        string         `json:"target_id,omitempty"`
-	Purpose         string         `json:"purpose"`
 	State           ExecutionState `json:"state"`
-	Outcome         GateOutcome    `json:"outcome,omitempty"`
 	PolicyRevision  string         `json:"policy_revision"`
 	SubjectRevision string         `json:"subject_revision"`
 	Turns           []GateTurn     `json:"turns"`
@@ -452,6 +452,7 @@ type GateEvidence struct {
 	Scope               *ScopeAssessment      `json:"scope,omitempty"`
 	HardScope           bool                  `json:"hard_scope,omitempty"`
 	HardScopeFindingIDs []string              `json:"hard_scope_finding_ids,omitempty"`
+	ScopeResolutionIDs  []string              `json:"scope-resolution-finding-ids,omitempty"`
 	ValidationState     ExecutionState        `json:"validation_state,omitempty"`
 	ValidationChecks    []ValidationCheck     `json:"validation_checks,omitempty"`
 	FindingIDs          []string              `json:"finding_ids,omitempty"`
@@ -483,7 +484,7 @@ type GateFindingEvidence struct {
 // the browser. It pins the exact private policy/subject and workflow cursor
 // needed to resume a staged human gate after restart.
 type gateRuntime struct {
-	ProfileID     string
+	ConfigID      string
 	WorkflowRunID string
 	PinnedPolicy  json.RawMessage
 	PinnedSubject json.RawMessage

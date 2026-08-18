@@ -1,0 +1,322 @@
+# Built-in static gate catalog. The PR application selects one gate and
+# CompileGateWorkflowV3 emits the executable gate/exec job for that invocation.
+name: PR lifecycle gates
+
+on:
+  manual: {}
+
+gates:
+  charter-confirm:
+    prompt: Review the pull request purpose, type, included scope, exclusions, and non-goals.
+    fields:
+      - id: action
+        type: select
+        label: What should happen?
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: approve
+            label: Approve charter
+          - id: revise
+            label: Request revision
+          - id: stop
+            label: Stop pull request
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  charter-reconfirm:
+    prompt: Review the revised pull request purpose, type, included scope, exclusions, and non-goals.
+    fields:
+      - id: action
+        type: select
+        label: What should happen?
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: approve
+            label: Approve revised charter
+          - id: revise
+            label: Request another revision
+          - id: stop
+            label: Stop pull request
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  review-start:
+    prompt: Decide whether review may start.
+    fields:
+      - id: action
+        type: select
+        label: Review start decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: continue
+            label: Start review
+          - id: stop
+            label: Stop
+    default-action:
+      type: deterministic
+      fields:
+        action: continue
+
+  review-complete:
+    prompt: Decide whether review is complete.
+    fields:
+      - id: action
+        type: select
+        label: Review completion decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: accept
+            label: Accept review
+          - id: revise
+            label: Continue review
+          - id: stop
+            label: Stop
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: deterministic
+      fields:
+        action: accept
+
+  finding-classify:
+    prompt: Decide where this ambiguous finding belongs.
+    fields:
+      - id: action
+        type: select
+        label: Finding disposition
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: keep-in-pr
+            label: Keep in this pull request
+          - id: defer-follow-up
+            label: Defer to follow-up
+          - id: dismiss
+            label: Dismiss finding
+          - id: revise-charter
+            label: Revise charter
+      - id: explanation
+        type: long-text
+        label: Explanation
+        required: true
+    default-action:
+      type: human
+
+  implementation-eligibility:
+    prompt: Decide whether implementation is authorized for this pull request.
+    fields:
+      - id: action
+        type: select
+        label: Eligibility decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: authorize
+            label: Authorize implementation
+          - id: decline
+            label: Decline implementation
+          - id: stop
+            label: Stop
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  implementation-start:
+    prompt: Decide whether implementation may start.
+    fields:
+      - id: action
+        type: select
+        label: Implementation start decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: continue
+            label: Start implementation
+          - id: stop
+            label: Stop
+    default-action:
+      type: deterministic
+      fields:
+        action: continue
+
+  implementation-scope:
+    prompt: Decide whether the proposed implementation belongs in this pull request.
+    fields:
+      - id: action
+        type: select
+        label: Scope decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: approve
+            label: Approve current scope
+          - id: defer-follow-up
+            label: Remove code and defer follow-up
+          - id: revise-charter
+            label: Revise and reconfirm charter
+          - id: stop
+            label: Stop implementation
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  implementation-hard-scope:
+    prompt: Candidate code is outside the confirmed charter or pull request type and cannot be approved as-is.
+    fields:
+      - id: action
+        type: select
+        label: Required resolution
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: defer-follow-up
+            label: Remove the code and defer follow-up work
+          - id: revise-charter
+            label: Revise and reconfirm the charter
+          - id: stop
+            label: Stop implementation
+      - id: explanation
+        type: long-text
+        label: Explanation
+        required: true
+    default-action:
+      type: human
+
+  implementation-complete:
+    prompt: Decide whether the implementation is complete within the confirmed scope.
+    fields:
+      - id: action
+        type: select
+        label: Completion decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: accept
+            label: Accept implementation
+          - id: revise
+            label: Continue implementation
+          - id: stop
+            label: Stop
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  review-publish:
+    prompt: Decide whether to publish the review and findings.
+    fields:
+      - id: action
+        type: select
+        label: Publication decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: publish
+            label: Publish review
+          - id: revise
+            label: Revise review
+          - id: stop
+            label: Keep local
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  implementation-publish:
+    prompt: Decide whether to push the implementation to the pull request branch.
+    fields:
+      - id: action
+        type: select
+        label: Publication decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: publish
+            label: Push implementation
+          - id: revise
+            label: Revise implementation
+          - id: stop
+            label: Do not push
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  deferred-publish:
+    prompt: Decide whether to create a GitHub follow-up issue for deferred findings.
+    fields:
+      - id: action
+        type: select
+        label: Follow-up decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: publish
+            label: Create follow-up issue
+          - id: revise
+            label: Revise issue draft
+          - id: stop
+            label: Keep local
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  correction-promote:
+    prompt: Decide whether to promote this correction into repository guidance.
+    fields:
+      - id: action
+        type: select
+        label: Promotion decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: promote
+            label: Promote repository lesson
+          - id: revise
+            label: Revise lesson
+          - id: stop
+            label: Keep correction local
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
+
+  publication-reconcile:
+    prompt: Resolve this ambiguous provider publication outcome.
+    fields:
+      - id: action
+        type: select
+        label: Reconciliation decision
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: recheck-provider
+            label: Check provider again
+          - id: assume-failed
+            label: Assume publication failed
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human

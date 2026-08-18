@@ -268,20 +268,6 @@ const (
 	schemaV19PRGateRunsListIndex = `CREATE INDEX IF NOT EXISTS pr_gate_runs_list
 	ON pr_gate_runs(workspace_id, status, updated_at DESC, id DESC);`
 
-	schemaV19PRGateDecisionsTable = `CREATE TABLE IF NOT EXISTS pr_gate_decisions (
-	id TEXT PRIMARY KEY,
-	workspace_id TEXT NOT NULL REFERENCES pr_workspaces(id) ON DELETE CASCADE,
-	ordinal INTEGER NOT NULL CHECK (ordinal > 0),
-	status TEXT NOT NULL CHECK (status IN ('pass', 'revise', 'defer', 'block')),
-	payload_json BLOB NOT NULL CHECK (length(payload_json) >= 2 AND length(payload_json) <= 1048576),
-	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL,
-	UNIQUE (workspace_id, ordinal),
-	CHECK (updated_at >= created_at)
-);`
-	schemaV19PRGateDecisionsListIndex = `CREATE INDEX IF NOT EXISTS pr_gate_decisions_list
-	ON pr_gate_decisions(workspace_id, status, updated_at DESC, id DESC);`
-
 	schemaV19PRPublicationsTable = `CREATE TABLE IF NOT EXISTS pr_publications (
 	id TEXT PRIMARY KEY,
 	workspace_id TEXT NOT NULL REFERENCES pr_workspaces(id) ON DELETE CASCADE,
@@ -410,7 +396,6 @@ const (
 		schemaV19PRRepairAttemptsTable + "\n" + schemaV19PRRepairAttemptsListIndex + "\n" +
 		schemaV19PRValidationRunsTable + "\n" + schemaV19PRValidationRunsListIndex + "\n" +
 		schemaV19PRGateRunsTable + "\n" + schemaV19PRGateRunsListIndex + "\n" +
-		schemaV19PRGateDecisionsTable + "\n" + schemaV19PRGateDecisionsListIndex + "\n" +
 		schemaV19PRPublicationsTable + "\n" + schemaV19PRPublicationsListIndex + "\n" + schemaV19PRPublicationsClaimIndex + "\n" +
 		schemaV19PROperationIntentsTable + "\n" + schemaV19PROperationIntentsListIndex + "\n" + schemaV19PROperationIntentsClaimIndex + "\n" +
 		schemaV19PRIngressWatermarksTable + "\n" + schemaV19PRIngressWatermarksListIndex + "\n" +
@@ -445,7 +430,6 @@ var prWorkspaceSchemaEntries = []prWorkspaceSchemaEntry{
 	{"pr_repair_attempts", schemaV19PRRepairAttemptsTable, "pr_repair_attempts_list", schemaV19PRRepairAttemptsListIndex, true},
 	{"pr_validation_runs", schemaV19PRValidationRunsTable, "pr_validation_runs_list", schemaV19PRValidationRunsListIndex, true},
 	{"pr_gate_runs", schemaV19PRGateRunsTable, "pr_gate_runs_list", schemaV19PRGateRunsListIndex, true},
-	{"pr_gate_decisions", schemaV19PRGateDecisionsTable, "pr_gate_decisions_list", schemaV19PRGateDecisionsListIndex, true},
 	{"pr_publications", schemaV19PRPublicationsTable, "pr_publications_list", schemaV19PRPublicationsListIndex, true},
 	{"pr_operation_intents", schemaV19PROperationIntentsTable, "pr_operation_intents_list", schemaV19PROperationIntentsListIndex, true},
 	{"pr_ingress_watermarks", schemaV19PRIngressWatermarksTable, "pr_ingress_watermarks_list", schemaV19PRIngressWatermarksListIndex, true},

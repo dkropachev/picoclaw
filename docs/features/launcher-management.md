@@ -16,7 +16,7 @@ Pull-request work has one canonical launcher route family rooted at
 `/pull-requests`.
 The launcher proxies the unified `/api/pr-workspaces` tree to the managed
 gateway, replaces browser authority with the process bearer, and exposes
-`/api/pr-lifecycle/gate-profiles` as the scoped configuration boundary.
+`/api/pr-lifecycle/gate-configs` as the scoped configuration boundary.
 Review, implementation, corrections, nudges, gates, deferred work, and their
 separate publication actions render from one `prw_` aggregate. The former
 `/reviews`, `/api/reviews`, and `/api/pr-development` surfaces are removed
@@ -32,7 +32,7 @@ continues to fail locally until a concrete model is configured.
   that replace browser credentials with narrow local-runtime authority.
 - Core types/functions: API handler/router, dashboard auth middleware, config
   mutation coordinator, gateway process manager, PR-workspace proxy, lifecycle
-  gate-profile handler, typed frontend clients, and the pull-request route.
+  Gate-configuration handler, typed frontend clients, and the pull-request route.
 - Runtime ordering: authenticate, canonicalize and bound the request, reject
   cross-site mutation, load one exact config or PID generation, call the narrow
   owner, validate and bound the response, then return non-cacheable JSON.
@@ -58,8 +58,8 @@ continues to fail locally until a concrete model is configured.
 | `FR-LAUNCHER-010` | MUST   | The authenticated launcher composition registers the feature-owned MCP management and OAuth callback routes, exposes a dedicated Agent → MCP navigation entry, and removes MCP editing from the generic config form. Gateway restart detection includes enabled MCP discovery, server transport, custom-header, and nonsecret auth-revision changes. Shared forms announce validation errors and provide keyboard-accessible, labeled secret visibility controls.                                                                                                                                                                                                                                                                                                                                                                                                                                                        | MCP management must be easy to find, must not conflict with generic config saves, and must clearly apply runtime-relevant changes without weakening shared form accessibility. |
 | `FR-LAUNCHER-011` | MUST   | Full-config PUT/PATCH/reset, generic tool-state writes, agent policy mutations, workflow-specific settings, template-install, publish, and workflow Run/Retry admission are serialized by one handler mutation boundary. Every cooperating `SaveConfig` call also holds a config-path advisory process/file lock, with the opaque generation covering both public JSON and the security sidecar. Full-config PUT/PATCH, generic tool-state, agent policy, and workflow settings mutations load an update-safe snapshot and perform final compare-and-swap saves against that exact generation; reset holds the lock across backup, secret preservation, and replacement. Stable scoped reads derive their opaque revision from the same snapshot without migration, backup, or save side effects. Agent responses derive restart effects from that captured config and a read-only in-memory gateway snapshot without discovering processes, attaching to them, or sanitizing PID metadata. Workflow Run and Retry reacquire that same advisory lock after their final readiness fence, compare the current public-plus-security generation with the admitted generation, and retain the lock through exact compatibility checking and durable root-run creation. The authenticated launcher registers agent management routes and navigation, and the gateway restart signature includes the complete ordered agent policy while preserving nil-versus-empty distinctions. | Scoped or merge-patch management must not return values or effects from one config generation with another generation's revision, lose a concurrent secret-only update, overwrite a mutation from another launcher or gateway process, hide an unapplied agent policy change, mutate gateway process metadata during an agent read, or admit execution from one generation while another process publishes a replacement before the run exists. |
 | `FR-LAUNCHER-012` | MUST   | The authenticated launcher registers agent capability and activity routes without replacing existing management surfaces. Capability mutation holds the shared handler and advisory config boundaries through its final composite config/file fence and atomic workspace write, while gateway restart comparison combines the filesystem-pure config signature with only runtime-relevant `AGENT.md` frontmatter semantics. Activity is read-only: the gateway records a concrete numeric address from the listener that actually opened, including a single-stack localhost fallback; the launcher peeks PID authority without attachment, cleanup, or migration, rejects hostname and wildcard authority, validates the numeric target as loopback or a literal local-interface address, injects the process bearer into one exact bounded no-proxy/no-redirect request, forwards no browser credentials or ambient headers, and strictly reprojects the response. | Workspace policy must not race config ownership, prose-only edits must not spuriously require restart, and a browser activity view must not mutate process metadata or leak runtime bearer authority. |
-| `FR-LAUNCHER-021` | MUST   | The authenticated shared shell renders one Pull requests section in the existing left Services navigation and owns the canonical `/pull-requests` route family. | Pull requests is a keyboard-operable collapsible section, structurally parallel to Agent, with Work, Gate profiles, and Lifecycle settings children. Work links to `/pull-requests`; profiles and settings use first-class sibling paths; a workspace uses `/pull-requests/:workspaceID`. Services and Pull requests automatically reveal the active child after client navigation while preserving a manual collapse on the current destination. Exactly one child carries active state and selecting a child closes the mobile sidebar. Removed review/development views and the former `view=gate-profiles` query receive no compatibility UI. | Page and tab navigation push canonical history. In-app page Back and modal close traverse their marked parent entries; direct deep-link close replaces to the canonical parent. A validated `from=prw_...` and marked work-history index preserve the originating workspace across profile/settings navigation. A dirty configuration draft blocks every attempt to leave configuration and uses one URL-backed discard decision before proceeding. Opening configuration performs no config save, model or workflow call, provider read or write, review action, Git operation, push, acknowledgement, or merge. | Direct refresh on the portfolio, one workspace, profile list, profile editor, lifecycle-settings tab, gate modal, or discard modal opens exactly that surface. Back/Forward traverses settings tabs and Review/Implementation flows; invalid, repeated, or out-of-context state canonicalizes before rendering. | First-class destinations and URL-owned tabs remove hidden sidebar state, lost workspace context, and ambiguous same-path navigation. |
-| `FR-LAUNCHER-022` | MUST   | The launcher frontend uses the unified PR-workspace and PR-lifecycle gate-profile clients and renders their portfolio, workspace, profile list, lifecycle-settings tabs, and ordered-stage editor components. | Every request uses `launcherFetch`; workspace mutations carry `expected_version` plus a random request ID and head-dependent actions also carry the exact provider revision, falling back to the verified head SHA only when that revision is absent. The workspace UI presents one lifecycle rail, strict charter/type editor, review and nudge history, scope matrix, implementation/validation evidence, corrections shared across review and implementation, review-result and implementation-branch publication, deferred issue drafts, typed gate responses, and combined activity. Review publication sends only the current in-scope finding IDs when present; implementation publication is a separate action. Both are phase- and provider-capability-gated, expose queued/running/succeeded/failed/unknown state, safe external result links and public error codes, and offer a separately fenced reconcile action only for unknown outcomes. Deferred issue publication remains a distinct control. Profiles are a list-only surface; one profile editor owns its name, assignments, URL-controlled Review/Implementation flow, and gate modal; sibling Nudging, Scope grades, and Deferred issues tabs own global settings. The editor supports ordered deterministic, working-context AI, isolated AI, human, and zero stages using the v2 core stage shape. Decision-point purpose is catalog-owned and read-only; shared-flow context and outcome consequences are visible; machine identifiers are disclosed under Advanced settings; restoring the default workflow explicitly retains a Human fallback; and changing or deleting the final Human stage of either charter-authority gate requires an inline confirmation. | Reads and navigation do not create automation work. Saving the exact lifecycle configuration is one revision-fenced full replacement and does not execute a gate. The shared in-memory draft survives configuration-route changes; explicit discard resets it to the server snapshot. Browser DTOs, filters, CAS conflicts, prompts, and request IDs remain memory-only; external PR and publication links require HTTPS and opener isolation. English keys define the feature vocabulary and other locales use the configured English fallback until translated. | Malformed or oversized JSON, invalid aggregate identity, unsafe publication URLs, legacy profile wrappers, decision-point purpose mismatches, invalid profile/stage IDs, missing stage-specific fields, non-monotonic scope thresholds, unordered nudge bounds, stale config/workspace/head revisions, unavailable secure randomness, and unknown publication results fail closed with retry or reconciliation controls. Components use semantic design tokens, shared controls, keyboard-operable actions, stable narrow layouts, and no direct fetch. | The new lifecycle requires an authenticated, consistent UI contract without leaking launcher/gateway authority or allowing stale browser state to steer PR work. |
+| `FR-LAUNCHER-021` | MUST | The authenticated shared shell owns the canonical `/pull-requests` route family. | Pull requests has Work, Gate configurations, and Lifecycle settings children. Canonical destinations are `/pull-requests`, `/pull-requests/:workspaceID`, `/pull-requests/gate-configs`, `/pull-requests/gate-configs/:configID`, and `/pull-requests/settings`; each settings tab, gate modal, and discard modal has URL-owned state. Retired Gate V2 paths and query-driven views have no compatibility UI. Navigation preserves a validated workspace origin, blocks dirty-draft exits behind one URL-backed discard decision, and performs no model, workflow, Git, provider, or publication action. | Invalid or repeated state canonicalizes before rendering; refresh and Back/Forward reopen the exact list, editor, flow, tab, or modal. | First-class routes prevent hidden tab state and ambiguous same-path navigation. |
+| `FR-LAUNCHER-022` | MUST | The launcher renders the unified PR workspace and Gate V3 configuration surfaces. | The workspace renders generic Gate forms and submits only `field-values`; the configuration list/editor shows the Review and Implementation flow graph, static `(workflow-ref, gate-ref)`, workflow `default-action`, exact configuration override, and effective `human`, `ai`, `deterministic`, or `workflow` action. Named configurations are assignable per repository. Global Nudging, Scope grades, and Deferred issues remain separate settings tabs. Saving is one full revision-fenced replacement and never executes a gate. The shared draft survives configuration-route changes and explicit discard restores the server snapshot. | Malformed static forms, invalid kebab IDs or refs, partial action overrides, unknown agents, stale revisions, retired Gate V2 configuration and result fields, unsafe URLs, and unknown provider outcomes fail closed. | The UI must expose one generic gate contract without leaking private workflow state or giving configuration reads execution authority. |
 
 ## Data And State Model
 
@@ -68,9 +68,10 @@ a shared config mutation lock, public-plus-security config revisions, and
 managed gateway PID metadata. It does not own PR-workspace state.
 
 PR browser state is deliberately shallow. Workspaces use
-`/pull-requests/prw_...`; named profiles use `/pull-requests/profiles` and
-`/pull-requests/profiles/:profileID`; global lifecycle settings use
-`/pull-requests/settings`. The profile flow, settings tab, gate editor, active
+`/pull-requests/prw_...`; named Gate configurations use
+`/pull-requests/gate-configs` and `/pull-requests/gate-configs/:configID`;
+global lifecycle settings use `/pull-requests/settings`. The configuration
+flow, settings tab, Gate editor, active
 discard decision, and optional validated workspace origin are the only public
 query state. A direct discard URL remains a stable modal surface and closes to
 its owner when no blocked navigation is pending. Filters, cursors, DTOs, draft
@@ -78,11 +79,13 @@ bodies, request IDs, conflicts, prompts, private gate subjects, and provider
 reconciliation evidence remain memory-only.
 The gateway's unified aggregate is authoritative after every mutation.
 
-The lifecycle settings response contains named gate profiles, a default profile,
-exact repository assignments, independent review/completion nudge bounds,
-scope-size thresholds, the normalized Review and Implementation flow graph and
-its content revision, a catalog digest, the config revision, and the
-`restart_required` effect. The browser renders that graph directly; it does not
+The lifecycle settings response contains named Gate configurations, a default
+configuration, exact repository assignments and atomic gate-action bindings,
+independent review/completion nudge bounds, scope-size thresholds, the resolved
+Gate catalog, the normalized
+Review and Implementation flow graph and its content revision, a catalog
+digest, the config revision, and the `restart-required` effect. The browser
+renders that graph directly; it does not
 carry a second hard-coded PR lifecycle topology. Each workflow diagram lays out
 only the nodes present in an active topological band, so a completed route does
 not reserve an empty column in later bands. Responsive measured connectors keep
@@ -186,8 +189,8 @@ Owns: TEST web/backend/api/weixin*
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | HTTP | `/api/pr-workspaces*` | Authenticated, canonical, bounded proxy for the matching protected gateway tree; mutations require same-origin provenance and JSON. | `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
-| HTTP | `GET/PUT /api/pr-lifecycle/gate-profiles` | Read or revision-fenced replace the complete lifecycle catalog, nudge bounds, assignments, and scope thresholds. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
-| UI | `/pull-requests`, `/pull-requests/:workspaceID`, `/pull-requests/profiles*`, `/pull-requests/settings` | Portfolio, one aggregate workspace, named-profile pages, URL-owned workflow/modal state, and tabbed lifecycle settings under one navigation group. | `FR-LAUNCHER-009`, `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
+| HTTP | `GET/PUT /api/pr-lifecycle/gate-configs` | Read or revision-fenced replace the complete lifecycle catalog, nudge bounds, assignments, and scope thresholds. | `FR-LAUNCHER-011`, `FR-LAUNCHER-022` |
+| UI | `/pull-requests`, `/pull-requests/:workspaceID`, `/pull-requests/gate-configs*`, `/pull-requests/settings` | Portfolio, one aggregate workspace, named Gate configuration pages, URL-owned Gate/discard modal state, and tabbed lifecycle settings under one navigation group. | `FR-LAUNCHER-009`, `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
 | HTTP | `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/agents*`, `/api/workflows*` | Existing authenticated management surfaces retain their scoped contracts and shared mutation fencing. | `FR-LAUNCHER-001` through `FR-LAUNCHER-012` |
 
 ## Algorithms And Ordering
@@ -201,7 +204,7 @@ operation-specific timeout, and accepts only bounded JSON. Provider-facing
 locations are reprojected only when safe.
 
 For a lifecycle settings write, the launcher strictly decodes one complete
-catalog, validates profiles and stage-specific fields, acquires the shared
+catalog, validates Gate bindings and atomic action overrides, acquires the shared
 mutation boundary, reloads the exact update-safe config, compares the supplied
 revision, saves by compare-and-swap, and returns the new revision and restart
 effect. It never executes a gate while saving configuration.
@@ -215,7 +218,8 @@ publication outcomes offer reconciliation, never blind retry.
 
 Durable External Event Automation owns PR-workspace lifecycle state, gateway
 runtime routes, provider adapters, and PR frontend feature components. Workflows
-owns the private staged gate compiler and human-task suspension. Security owns
+owns static gate declarations, `gate/exec`, action resolution, and private
+continuation. Security owns
 dashboard authentication, bearer replacement, config-secret handling, and
 network confinement. Git Workspaces owns pinned local candidates and branch
 push fences. The launcher composes these surfaces but gains no model, Git,
@@ -252,24 +256,24 @@ publication.
 | `FR-LAUNCHER-011`                    | [pkg/config/mutation.go](../../pkg/config/mutation.go), [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [pkg/workflows/mutation_lock_test.go](../../pkg/workflows/mutation_lock_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_writer_cas_test.go](../../web/backend/api/config_writer_cas_test.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go), [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/workflow_settings_test.go](../../web/backend/api/workflow_settings_test.go), [web/backend/api/workflow_templates_test.go](../../web/backend/api/workflow_templates_test.go), [web/backend/api/workflow_publish_test.go](../../web/backend/api/workflow_publish_test.go), [web/backend/api/workflow_dependencies.go](../../web/backend/api/workflow_dependencies.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_run_readiness_test.go](../../web/backend/api/workflow_run_readiness_test.go), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-LAUNCHER-012`                    | [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-LAUNCHER-021`                    | [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/src/routes/-pull-requests.test.ts](../../web/frontend/src/routes/-pull-requests.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-LAUNCHER-022`                    | [web/frontend/src/api/pr-workspaces.test.ts](../../web/frontend/src/api/pr-workspaces.test.ts), [web/frontend/src/api/pr-lifecycle-gate-profiles.test.ts](../../web/frontend/src/api/pr-lifecycle-gate-profiles.test.ts), [web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-LAUNCHER-022`                    | [web/frontend/src/api/pr-workspaces.test.ts](../../web/frontend/src/api/pr-workspaces.test.ts), [web/frontend/src/api/pr-lifecycle-gate-configs.test.ts](../../web/frontend/src/api/pr-lifecycle-gate-configs.test.ts), [web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
 - [web/backend/api/router.go](../../web/backend/api/router.go)
 - [web/backend/api/pr_workspaces.go](../../web/backend/api/pr_workspaces.go)
 - [web/backend/api/pr_workspace_proxy.go](../../web/backend/api/pr_workspace_proxy.go)
-- [web/backend/api/pr_lifecycle_gate_profiles.go](../../web/backend/api/pr_lifecycle_gate_profiles.go)
+- [web/backend/api/pr_lifecycle_gate_configs.go](../../web/backend/api/pr_lifecycle_gate_configs.go)
 - [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
 - [web/backend/main.go](../../web/backend/main.go)
 - [web/backend/middleware](../../web/backend/middleware)
 - [pkg/config/mutation.go](../../pkg/config/mutation.go)
 - [web/frontend/src/components/app-sidebar.tsx](../../web/frontend/src/components/app-sidebar.tsx)
 - [web/frontend/src/routes/pull-requests.tsx](../../web/frontend/src/routes/pull-requests.tsx)
-- [web/frontend/src/routes/pull-requests_.profiles.tsx](../../web/frontend/src/routes/pull-requests_.profiles.tsx)
-- [web/frontend/src/routes/pull-requests_.profiles.$profileID.tsx](../../web/frontend/src/routes/pull-requests_.profiles.$profileID.tsx)
+- [web/frontend/src/routes/pull-requests_.gate-configs.tsx](../../web/frontend/src/routes/pull-requests_.gate-configs.tsx)
+- [web/frontend/src/routes/pull-requests_.gate-configs.$configID.tsx](../../web/frontend/src/routes/pull-requests_.gate-configs.$configID.tsx)
 - [web/frontend/src/routes/pull-requests_.settings.tsx](../../web/frontend/src/routes/pull-requests_.settings.tsx)
 - [web/frontend/src/routes/pull-requests_.$workspaceID.tsx](../../web/frontend/src/routes/pull-requests_.$workspaceID.tsx)
 - [web/frontend/src/api/pr-workspaces.ts](../../web/frontend/src/api/pr-workspaces.ts)
-- [web/frontend/src/api/pr-lifecycle-gate-profiles.ts](../../web/frontend/src/api/pr-lifecycle-gate-profiles.ts)
+- [web/frontend/src/api/pr-lifecycle-gate-configs.ts](../../web/frontend/src/api/pr-lifecycle-gate-configs.ts)
 - [web/frontend/src/components/pr-workspaces](../../web/frontend/src/components/pr-workspaces)

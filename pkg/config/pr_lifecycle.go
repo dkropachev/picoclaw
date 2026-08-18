@@ -1,37 +1,77 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/sipeed/picoclaw/pkg/prlifecycle"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 const (
-	DefaultPRLifecycleGateProfileID   = "default"
-	DefaultPRLifecycleGateProfileName = "Default"
-	MaxPRLifecycleGateProfiles        = 256
-	MaxPRLifecycleAssignments         = 8192
-	MaxPRLifecycleDecisionPoints      = 128
-	MaxPRLifecycleConfigBytes         = 4 << 20
+	DefaultPRLifecycleGateConfigID   = "default"
+	DefaultPRLifecycleGateConfigName = "Default"
+	MaxPRLifecycleGateConfigs        = 256
+	MaxPRLifecycleAssignments        = 8192
+	MaxPRLifecycleGateBindings       = 8192
+	MaxPRLifecycleConfigBytes        = 4 << 20
+	PRLifecycleWorkflowRef           = "workflows/pr-lifecycle.yml"
 )
 
-var prLifecycleProfileIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var (
+	prLifecycleConfigIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+	prLifecycleGateRefPattern  = regexp.MustCompile(`^gates\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+	prLifecycleBuiltInGateRefs = map[string]struct{}{
+		"gates.charter-confirm": {}, "gates.charter-reconfirm": {},
+		"gates.review-start": {}, "gates.review-complete": {},
+		"gates.finding-classify": {}, "gates.implementation-eligibility": {},
+		"gates.implementation-start": {}, "gates.implementation-scope": {},
+		"gates.implementation-hard-scope": {}, "gates.implementation-complete": {},
+		"gates.review-publish": {}, "gates.implementation-publish": {},
+		"gates.deferred-publish": {}, "gates.correction-promote": {},
+		"gates.publication-reconcile": {},
+	}
+)
 
+// PRLifecycleConfig contains the repository-selected gate action overrides and
+// the lifecycle settings that are independent of workflow gate execution.
+//
+// A binding is an atomic replacement for the default action declared by the
+// referenced workflow gate. Missing bindings deliberately inherit that
+// workflow default; no field-by-field merge exists.
 type PRLifecycleConfig struct {
-	GateProfiles          map[string]PRLifecycleGateProfile `json:"gate_profiles"`
-	DefaultGateProfileID  string                            `json:"default_gate_profile_id"`
-	RepositoryAssignments map[string]string                 `json:"repository_assignments,omitempty"`
-	Nudge                 PRLifecycleNudgeConfig            `json:"nudge"`
-	Scope                 PRLifecycleScopeConfig            `json:"scope"`
-	DeferredIssues        PRLifecycleDeferredIssueConfig    `json:"deferred_issues"`
+	GateConfigs           map[string]PRLifecycleGateConfig `json:"gate-configs"`
+	DefaultGateConfigID   string                           `json:"default-gate-config"`
+	RepositoryAssignments map[string]string                `json:"repository-assignments,omitempty"`
+	Nudge                 PRLifecycleNudgeConfig           `json:"nudge"`
+	Scope                 PRLifecycleScopeConfig           `json:"scope"`
+	DeferredIssues        PRLifecycleDeferredIssueConfig   `json:"deferred-issues"`
+}
+
+func (config *PRLifecycleConfig) UnmarshalJSON(data []byte) error {
+	type plain PRLifecycleConfig
+	var decoded plain
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("PR lifecycle config contains trailing JSON")
+		}
+		return err
+	}
+	*config = PRLifecycleConfig(decoded)
+	return nil
 }
 
 type PRLifecycleDeferredIssueMode string
@@ -46,16 +86,24 @@ type PRLifecycleDeferredIssueConfig struct {
 	Mode PRLifecycleDeferredIssueMode `json:"mode"`
 }
 
-type PRLifecycleGateProfile struct {
-	Name      string                                `json:"name"`
-	Workflows map[string]gatetypes.GateWorkflowSpec `json:"workflows"`
+// PRLifecycleGateConfig is a named, assignable collection of workflow gate
+// overrides. Bindings are matched by the exact pair (workflow-ref, gate-ref).
+type PRLifecycleGateConfig struct {
+	Name     string                   `json:"name"`
+	Bindings []PRLifecycleGateBinding `json:"bindings"`
+}
+
+type PRLifecycleGateBinding struct {
+	WorkflowRef string                `json:"workflow-ref"`
+	GateRef     string                `json:"gate-ref"`
+	Action      *gatetypes.GateAction `json:"action,omitempty"`
 }
 
 type PRLifecycleNudgeConfig struct {
-	ReviewMinimumAdditional     int `json:"review_minimum_additional"`
-	ReviewMaximumAdditional     int `json:"review_maximum_additional"`
-	CompletionMinimumAdditional int `json:"completion_minimum_additional"`
-	CompletionMaximumAdditional int `json:"completion_maximum_additional"`
+	ReviewMinimumAdditional     int `json:"review-minimum-additional"`
+	ReviewMaximumAdditional     int `json:"review-maximum-additional"`
+	CompletionMinimumAdditional int `json:"completion-minimum-additional"`
+	CompletionMaximumAdditional int `json:"completion-maximum-additional"`
 }
 
 type PRLifecycleScopeConfig struct {
@@ -66,12 +114,12 @@ type PRLifecycleScopeConfig struct {
 
 type PRLifecycleSizeThreshold struct {
 	Files         int `json:"files"`
-	SemanticLines int `json:"semantic_lines"`
+	SemanticLines int `json:"semantic-lines"`
 	Modules       int `json:"modules"`
 }
 
 func (config PRLifecycleConfig) IsZero() bool {
-	return config.GateProfiles == nil && config.DefaultGateProfileID == "" &&
+	return config.GateConfigs == nil && config.DefaultGateConfigID == "" &&
 		config.RepositoryAssignments == nil && config.Nudge == (PRLifecycleNudgeConfig{}) &&
 		config.Scope == (PRLifecycleScopeConfig{}) &&
 		config.DeferredIssues == (PRLifecycleDeferredIssueConfig{})
@@ -86,10 +134,13 @@ func (config PRLifecycleConfig) Effective() PRLifecycleConfig {
 
 func DefaultPRLifecycleConfig() PRLifecycleConfig {
 	return PRLifecycleConfig{
-		GateProfiles: map[string]PRLifecycleGateProfile{
-			DefaultPRLifecycleGateProfileID: defaultPRLifecycleGateProfile(),
+		GateConfigs: map[string]PRLifecycleGateConfig{
+			DefaultPRLifecycleGateConfigID: {
+				Name:     DefaultPRLifecycleGateConfigName,
+				Bindings: []PRLifecycleGateBinding{},
+			},
 		},
-		DefaultGateProfileID:  DefaultPRLifecycleGateProfileID,
+		DefaultGateConfigID:   DefaultPRLifecycleGateConfigID,
 		RepositoryAssignments: make(map[string]string),
 		Nudge: PRLifecycleNudgeConfig{
 			ReviewMinimumAdditional: 2, ReviewMaximumAdditional: 5,
@@ -104,162 +155,59 @@ func DefaultPRLifecycleConfig() PRLifecycleConfig {
 	}
 }
 
-func defaultPRLifecycleGateProfile() PRLifecycleGateProfile {
-	human := func(id, title, question string) gatetypes.GateStageSpec {
-		return gatetypes.GateStageSpec{ID: id, Kind: gatetypes.GateHuman, Title: title, Questions: []any{question}}
-	}
-	zero := func(id string) gatetypes.GateStageSpec {
-		return gatetypes.GateStageSpec{ID: id, Kind: gatetypes.GateZero}
-	}
-	authorization := func(point string, stages ...gatetypes.GateStageSpec) gatetypes.GateWorkflowSpec {
-		return gatetypes.GateWorkflowSpec{
-			ID: strings.ReplaceAll(point, ".", "-"), Name: point,
-			Purpose: gatetypes.GatePurposeAuthorization, DecisionPoint: point, Stages: stages,
-		}
-	}
-	namedAuthorization := func(point, name string, stages ...gatetypes.GateStageSpec) gatetypes.GateWorkflowSpec {
-		workflow := authorization(point, stages...)
-		workflow.Name = name
-		return workflow
-	}
-	classification := func(point string, stages ...gatetypes.GateStageSpec) gatetypes.GateWorkflowSpec {
-		return gatetypes.GateWorkflowSpec{
-			ID: strings.ReplaceAll(point, ".", "-"), Name: point,
-			Purpose: gatetypes.GatePurposeClassification, DecisionPoint: point, Stages: stages,
-		}
-	}
-	return PRLifecycleGateProfile{
-		Name: DefaultPRLifecycleGateProfileName,
-		Workflows: map[string]gatetypes.GateWorkflowSpec{
-			"pr.charter.confirm": namedAuthorization(
-				"pr.charter.confirm",
-				"Confirm PR charter",
-				human(
-					"human-confirm",
-					"Confirm PR charter",
-					"Approve the PR purpose, type, included scope, exclusions, and non-goals?",
-				),
-			),
-			"pr.charter.reconfirm": namedAuthorization(
-				"pr.charter.reconfirm",
-				"Confirm revised PR charter",
-				human(
-					"human-reconfirm",
-					"Confirm revised PR charter",
-					"Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
-				),
-			),
-			"pr.review.start":    authorization("pr.review.start", zero("verified-by-domain")),
-			"pr.review.complete": authorization("pr.review.complete", zero("verified-by-domain")),
-			"pr.finding.classify": classification(
-				"pr.finding.classify",
-				human(
-					"human-finding-scope",
-					"Classify an ambiguous finding for this PR",
-					"How should this finding be classified against the confirmed PR charter?",
-				),
-			),
-			"pr.implementation.eligibility": authorization(
-				"pr.implementation.eligibility",
-				human(
-					"human-eligibility",
-					"Authorize implementation on a pull request not owned by the current user",
-					"Authorize implementation even though the pull request is not owned by the current user?",
-				),
-			),
-			"pr.implementation.start": authorization("pr.implementation.start", zero("verified-by-domain")),
-			"pr.implementation.scope": authorization(
-				"pr.implementation.scope",
-				human(
-					"human-scope",
-					"Classify a large exact-scope or necessary-adjacent implementation",
-					"Authorize this large exact-scope or necessary-adjacent implementation?",
-				),
-			),
-			"pr.implementation.complete": authorization(
-				"pr.implementation.complete",
-				human(
-					"human-complete",
-					"Accept completed implementation",
-					"Is the requested implementation complete within the confirmed PR scope?",
-				),
-			),
-			"pr.review.publish": authorization(
-				"pr.review.publish",
-				human("human-review-publish", "Publish GitHub review", "Publish this review and its findings to GitHub?"),
-			),
-			"pr.implementation.publish": authorization(
-				"pr.implementation.publish",
-				human("human-push", "Push implementation", "Push the completed implementation to the pull request branch?"),
-			),
-			"pr.deferred.publish": authorization(
-				"pr.deferred.publish",
-				human("human-issue", "Create GitHub follow-up issue", "Create a GitHub follow-up issue for these deferred findings?"),
-			),
-			"pr.correction.promote": authorization(
-				"pr.correction.promote",
-				human("human-lesson", "Promote repository lesson", "Promote this correction to a reusable repository lesson?"),
-			),
-			"pr.publication.reconcile": authorization(
-				"pr.publication.reconcile",
-				human("human-reconcile", "Resolve ambiguous provider outcome", "Resolve this ambiguous GitHub publication outcome?"),
-			),
-		},
-	}
-}
-
 func (config PRLifecycleConfig) Validate() error {
-	if len(config.GateProfiles) == 0 || len(config.GateProfiles) > MaxPRLifecycleGateProfiles {
-		return fmt.Errorf("PR lifecycle gate profiles must contain between 1 and %d entries", MaxPRLifecycleGateProfiles)
+	if len(config.GateConfigs) == 0 || len(config.GateConfigs) > MaxPRLifecycleGateConfigs {
+		return fmt.Errorf("PR lifecycle gate configurations must contain between 1 and %d entries", MaxPRLifecycleGateConfigs)
 	}
-	if config.DefaultGateProfileID == "" {
-		return errors.New("PR lifecycle default gate profile is required")
+	if config.DefaultGateConfigID == "" {
+		return errors.New("PR lifecycle default gate configuration is required")
 	}
-	if _, exists := config.GateProfiles[config.DefaultGateProfileID]; !exists {
-		return errors.New("PR lifecycle default gate profile does not exist")
+	if _, exists := config.GateConfigs[config.DefaultGateConfigID]; !exists {
+		return errors.New("PR lifecycle default gate configuration does not exist")
 	}
-	defaultProfile, exists := config.GateProfiles[DefaultPRLifecycleGateProfileID]
-	if !exists || defaultProfile.Name != DefaultPRLifecycleGateProfileName {
-		return errors.New("PR lifecycle built-in default profile is missing or renamed")
+	defaultConfig, exists := config.GateConfigs[DefaultPRLifecycleGateConfigID]
+	if !exists || defaultConfig.Name != DefaultPRLifecycleGateConfigName || len(defaultConfig.Bindings) != 0 {
+		return errors.New("PR lifecycle built-in default gate configuration must exist unchanged and contain no overrides")
 	}
-	names := make(map[string]string, len(config.GateProfiles))
-	for id, profile := range config.GateProfiles {
-		if !prLifecycleProfileIDPattern.MatchString(id) || profile.Name == "" ||
-			profile.Name != strings.TrimSpace(profile.Name) || len(profile.Name) > 128 {
-			return fmt.Errorf("PR lifecycle profile %q has invalid identity", id)
+
+	names := make(map[string]string, len(config.GateConfigs))
+	totalBindings := 0
+	for id, gateConfig := range config.GateConfigs {
+		if len(id) > 64 || !prLifecycleConfigIDPattern.MatchString(id) ||
+			gateConfig.Name == "" || gateConfig.Name != strings.TrimSpace(gateConfig.Name) ||
+			len(gateConfig.Name) > 128 {
+			return fmt.Errorf("PR lifecycle gate configuration %q has invalid identity", id)
 		}
-		foldedName := strings.ToLower(profile.Name)
+		foldedName := strings.ToLower(gateConfig.Name)
 		if previous := names[foldedName]; previous != "" {
-			return fmt.Errorf("PR lifecycle profiles %q and %q have duplicate names", previous, id)
+			return fmt.Errorf("PR lifecycle gate configurations %q and %q have duplicate names", previous, id)
 		}
 		names[foldedName] = id
-		if len(profile.Workflows) > MaxPRLifecycleDecisionPoints {
-			return fmt.Errorf("PR lifecycle profile %q has too many workflows", id)
+		totalBindings += len(gateConfig.Bindings)
+		if totalBindings > MaxPRLifecycleGateBindings {
+			return fmt.Errorf("PR lifecycle gate bindings exceed %d", MaxPRLifecycleGateBindings)
 		}
-		for point, workflow := range profile.Workflows {
-			purpose, known := prlifecycle.DecisionPointPurpose(point)
-			if !known {
-				return fmt.Errorf("PR lifecycle profile %q has unknown decision point %q", id, point)
+		seenBindings := make(map[string]struct{}, len(gateConfig.Bindings))
+		for index, binding := range gateConfig.Bindings {
+			if err := validatePRLifecycleGateBinding(binding); err != nil {
+				return fmt.Errorf("PR lifecycle gate configuration %q binding %d: %w", id, index, err)
 			}
-			if point != workflow.DecisionPoint {
-				return fmt.Errorf("PR lifecycle profile %q workflow key does not match decision point", id)
-			}
-			if workflow.Purpose != purpose {
+			key := binding.WorkflowRef + "\x00" + binding.GateRef
+			if _, duplicate := seenBindings[key]; duplicate {
 				return fmt.Errorf(
-					"PR lifecycle profile %q workflow %q purpose must be %q, got %q",
-					id, point, purpose, workflow.Purpose,
+					"PR lifecycle gate configuration %q contains duplicate binding for workflow %q gate %q",
+					id, binding.WorkflowRef, binding.GateRef,
 				)
 			}
-			if err := validatePRLifecycleGateWorkflow(workflow); err != nil {
-				return fmt.Errorf("PR lifecycle profile %q workflow %q: %w", id, point, err)
-			}
+			seenBindings[key] = struct{}{}
 		}
 	}
+
 	if len(config.RepositoryAssignments) > MaxPRLifecycleAssignments {
 		return fmt.Errorf("PR lifecycle repository assignments exceed %d", MaxPRLifecycleAssignments)
 	}
 	foldedRepositories := make(map[string]string, len(config.RepositoryAssignments))
-	for identity, profileID := range config.RepositoryAssignments {
+	for identity, configID := range config.RepositoryAssignments {
 		if !validPRLifecycleRepositoryIdentity(identity) {
 			return fmt.Errorf("PR lifecycle repository identity %q is invalid", identity)
 		}
@@ -268,8 +216,8 @@ func (config PRLifecycleConfig) Validate() error {
 			return fmt.Errorf("PR lifecycle repository identities %q and %q collide", previous, identity)
 		}
 		foldedRepositories[folded] = identity
-		if _, exists := config.GateProfiles[profileID]; !exists {
-			return fmt.Errorf("PR lifecycle repository %q selects missing profile %q", identity, profileID)
+		if _, exists := config.GateConfigs[configID]; !exists {
+			return fmt.Errorf("PR lifecycle repository %q selects missing gate configuration %q", identity, configID)
 		}
 	}
 	if err := config.Nudge.Validate(); err != nil {
@@ -288,10 +236,96 @@ func (config PRLifecycleConfig) Validate() error {
 	return nil
 }
 
-// ValidateAgentReferences rejects profiles that name an AI agent the runtime
-// cannot instantiate from the same full configuration. Shape validation stays
-// independent so scoped editors can validate a candidate before loading the
-// current agent catalog, then perform this exact reference check under CAS.
+func validatePRLifecycleGateBinding(binding PRLifecycleGateBinding) error {
+	if !validPRLifecycleWorkflowRef(binding.WorkflowRef) {
+		return errors.New("workflow-ref is invalid")
+	}
+	if !prLifecycleGateRefPattern.MatchString(binding.GateRef) || len(binding.GateRef) > 128 {
+		return errors.New("gate-ref must be a static full path in the form gates.<kebab-case-id>")
+	}
+	if binding.WorkflowRef == PRLifecycleWorkflowRef {
+		if _, exists := prLifecycleBuiltInGateRefs[binding.GateRef]; !exists {
+			return errors.New("gate-ref is not published by the built-in PR lifecycle workflow")
+		}
+	}
+	if binding.Action == nil {
+		// An explicit binding without an action means "use workflow default".
+		// When Action is present it is validated as one complete atomic override.
+		return nil
+	}
+	if err := validatePRLifecycleGateAction(*binding.Action); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validPRLifecycleWorkflowRef(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 1024 ||
+		strings.Contains(value, "${{") || strings.HasPrefix(value, "draft:") ||
+		strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	if !strings.HasPrefix(value, "workflows/") || strings.Contains(value, "\\") ||
+		path.Clean(value) != value {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || component == "." || component == ".." {
+			return false
+		}
+	}
+	extension := strings.ToLower(path.Ext(value))
+	return extension == ".yml" || extension == ".yaml"
+}
+
+func validatePRLifecycleGateAction(action gatetypes.GateAction) error {
+	if err := gatetypes.ValidateGateAction(action); err != nil {
+		return fmt.Errorf("action override is invalid: %w", err)
+	}
+	switch action.Type {
+	case gatetypes.GateActionAI:
+		if !validPRLifecycleActionIdentifier(action.AgentID) {
+			return errors.New("AI action agent-id must be kebab-case")
+		}
+		if action.Tools != "none" {
+			return errors.New("AI action over private PR evidence requires tools: none")
+		}
+		switch action.Session {
+		case "ephemeral":
+			if action.History != "none" || action.Cache != "none" {
+				return errors.New("ephemeral AI action requires history: none and cache: none")
+			}
+		case "private":
+			if action.History != "read_only" || action.Cache != "none" && action.Cache != "session" {
+				return errors.New("private AI action requires history: read_only and cache: none or session")
+			}
+		default:
+			return errors.New("AI action session must be ephemeral or private")
+		}
+	case gatetypes.GateActionDeterministic:
+		for id := range action.Fields {
+			if len(id) > 64 || !prLifecycleConfigIDPattern.MatchString(id) {
+				return fmt.Errorf("deterministic action field %q is invalid", id)
+			}
+		}
+		encoded, err := json.Marshal(action.Fields)
+		if err != nil || len(encoded) > 1<<20 {
+			return errors.New("deterministic action fields are invalid or too large")
+		}
+	case gatetypes.GateActionWorkflow:
+		if !validPRLifecycleWorkflowRef(action.WorkflowRef) {
+			return errors.New("workflow action workflow-ref is invalid")
+		}
+	}
+	return nil
+}
+
+func validPRLifecycleActionIdentifier(value string) bool {
+	return len(value) <= 64 && prLifecycleConfigIDPattern.MatchString(value)
+}
+
+// ValidateAgentReferences rejects configuration overrides that name an AI
+// agent the runtime cannot instantiate from the same full configuration.
 func (config PRLifecycleConfig) ValidateAgentReferences(agents AgentsConfig) error {
 	known := make(map[string]struct{}, len(agents.List)+1)
 	if len(agents.List) == 0 {
@@ -302,39 +336,37 @@ func (config PRLifecycleConfig) ValidateAgentReferences(agents AgentsConfig) err
 		}
 	}
 	type reference struct {
-		profileID     string
-		decisionPoint string
-		stageID       string
-		agentID       string
+		configID    string
+		workflowRef string
+		gateRef     string
+		agentID     string
 	}
 	var references []reference
-	for profileID, profile := range config.GateProfiles {
-		for decisionPoint, workflow := range profile.Workflows {
-			for _, stage := range workflow.Stages {
-				if stage.Kind != gatetypes.GateAIWorkingContext && stage.Kind != gatetypes.GateAIIsolatedContext {
-					continue
-				}
-				references = append(references, reference{
-					profileID: profileID, decisionPoint: decisionPoint,
-					stageID: stage.ID, agentID: stage.AgentID,
-				})
+	for configID, gateConfig := range config.GateConfigs {
+		for _, binding := range gateConfig.Bindings {
+			if binding.Action == nil || string(binding.Action.Type) != "ai" {
+				continue
 			}
+			references = append(references, reference{
+				configID: configID, workflowRef: binding.WorkflowRef,
+				gateRef: binding.GateRef, agentID: binding.Action.AgentID,
+			})
 		}
 	}
 	sort.Slice(references, func(left, right int) bool {
-		if references[left].profileID != references[right].profileID {
-			return references[left].profileID < references[right].profileID
+		if references[left].configID != references[right].configID {
+			return references[left].configID < references[right].configID
 		}
-		if references[left].decisionPoint != references[right].decisionPoint {
-			return references[left].decisionPoint < references[right].decisionPoint
+		if references[left].workflowRef != references[right].workflowRef {
+			return references[left].workflowRef < references[right].workflowRef
 		}
-		return references[left].stageID < references[right].stageID
+		return references[left].gateRef < references[right].gateRef
 	})
 	for _, candidate := range references {
 		if _, exists := known[candidate.agentID]; !exists {
 			return fmt.Errorf(
-				"PR lifecycle profile %q workflow %q stage %q selects unknown agent %q",
-				candidate.profileID, candidate.decisionPoint, candidate.stageID, candidate.agentID,
+				"PR lifecycle gate configuration %q workflow %q gate %q selects unknown agent %q",
+				candidate.configID, candidate.workflowRef, candidate.gateRef, candidate.agentID,
 			)
 		}
 	}
@@ -350,10 +382,6 @@ func (config PRLifecycleDeferredIssueConfig) Validate() error {
 	default:
 		return errors.New("PR lifecycle deferred issue mode must be off, ask, or automatic")
 	}
-}
-
-func validatePRLifecycleGateWorkflow(workflow gatetypes.GateWorkflowSpec) error {
-	return gatetypes.ValidateGateWorkflowSpecV2(workflow)
 }
 
 func (config PRLifecycleNudgeConfig) Validate() error {
@@ -389,42 +417,39 @@ func validPRLifecycleRepositoryIdentity(value string) bool {
 		value == strings.TrimSpace(value) && len(value) <= 1024
 }
 
-func (config PRLifecycleConfig) ProfileForRepository(providerOrigin, repositoryID string) (string, PRLifecycleGateProfile, string, error) {
+func (config PRLifecycleConfig) ConfigForRepository(
+	providerOrigin, repositoryID string,
+) (string, PRLifecycleGateConfig, string, error) {
 	if err := config.Validate(); err != nil {
-		return "", PRLifecycleGateProfile{}, "", err
+		return "", PRLifecycleGateConfig{}, "", err
 	}
 	identity := strings.ToLower(strings.TrimSuffix(providerOrigin, "/") + "|" + repositoryID)
-	profileID := config.DefaultGateProfileID
+	configID := config.DefaultGateConfigID
 	for candidate, assigned := range config.RepositoryAssignments {
-		if strings.ToLower(strings.TrimSuffix(strings.Split(candidate, "|")[0], "/")+"|"+strings.Split(candidate, "|")[1]) == identity {
-			profileID = assigned
+		parts := strings.Split(candidate, "|")
+		if strings.ToLower(strings.TrimSuffix(parts[0], "/")+"|"+parts[1]) == identity {
+			configID = assigned
 			break
 		}
 	}
-	profile := config.GateProfiles[profileID]
-	revision, err := PRLifecycleProfileRevision(profileID, profile)
-	return profileID, profile, revision, err
+	gateConfig := config.GateConfigs[configID]
+	revision, err := PRLifecycleGateConfigRevision(configID, gateConfig)
+	return configID, gateConfig, revision, err
 }
 
-func PRLifecycleProfileRevision(id string, profile PRLifecycleGateProfile) (string, error) {
-	points := make([]string, 0, len(profile.Workflows))
-	for point := range profile.Workflows {
-		points = append(points, point)
-	}
-	sort.Strings(points)
-	canonical := struct {
-		ID        string            `json:"id"`
-		Name      string            `json:"name"`
-		Workflows []json.RawMessage `json:"workflows"`
-	}{ID: id, Name: profile.Name}
-	for _, point := range points {
-		encoded, err := gatetypes.CanonicalGateWorkflowSpecJSON(profile.Workflows[point])
-		if err != nil {
-			return "", err
+func PRLifecycleGateConfigRevision(id string, gateConfig PRLifecycleGateConfig) (string, error) {
+	bindings := append([]PRLifecycleGateBinding(nil), gateConfig.Bindings...)
+	sort.Slice(bindings, func(left, right int) bool {
+		if bindings[left].WorkflowRef != bindings[right].WorkflowRef {
+			return bindings[left].WorkflowRef < bindings[right].WorkflowRef
 		}
-		canonical.Workflows = append(canonical.Workflows, encoded)
-	}
-	encoded, err := json.Marshal(canonical)
+		return bindings[left].GateRef < bindings[right].GateRef
+	})
+	encoded, err := json.Marshal(struct {
+		ID       string                   `json:"id"`
+		Name     string                   `json:"name"`
+		Bindings []PRLifecycleGateBinding `json:"bindings"`
+	}{ID: id, Name: gateConfig.Name, Bindings: bindings})
 	if err != nil {
 		return "", err
 	}

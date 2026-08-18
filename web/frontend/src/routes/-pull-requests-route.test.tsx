@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { routeTree } from "@/routeTree.gen"
 
 const workspaceID = `prw_${"a".repeat(32)}`
-const mockedGateProfilePage = vi.hoisted(() => vi.fn())
+const mockedGateConfigPage = vi.hoisted(() => vi.fn())
 
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
@@ -29,18 +29,18 @@ vi.mock("@/components/app-layout", () => ({
 vi.mock("@/components/pr-workspaces/pr-workspace-portfolio-page", () => ({
   PRWorkspacePortfolioPage: ({
     onOpenWorkspace,
-    onOpenGateProfiles,
+    onOpenGateConfigs,
   }: {
     onOpenWorkspace: (workspaceID: string) => void
-    onOpenGateProfiles: () => void
+    onOpenGateConfigs: () => void
   }) => (
     <div>
       <output>Workspace portfolio</output>
       <button type="button" onClick={() => onOpenWorkspace(workspaceID)}>
         Open workspace
       </button>
-      <button type="button" onClick={onOpenGateProfiles}>
-        Open profiles from portfolio
+      <button type="button" onClick={onOpenGateConfigs}>
+        Open Gate configurations from portfolio
       </button>
     </div>
   ),
@@ -50,46 +50,46 @@ vi.mock("@/components/pr-workspaces/pr-workspace-page", () => ({
   PRWorkspacePage: ({
     workspaceID: selected,
     onBack,
-    onOpenGateProfiles,
+    onOpenGateConfigs,
   }: {
     workspaceID: string
     onBack: () => void
-    onOpenGateProfiles: () => void
+    onOpenGateConfigs: () => void
   }) => (
     <div>
       <output data-testid="workspace-id">{selected}</output>
       <button type="button" onClick={onBack}>
         Back to portfolio
       </button>
-      <button type="button" onClick={onOpenGateProfiles}>
-        Open profiles from workspace
+      <button type="button" onClick={onOpenGateConfigs}>
+        Open Gate configurations from workspace
       </button>
     </div>
   ),
 }))
 
-interface GateProfilesPageProps {
-  page?: "profiles" | "profile" | "settings"
+interface GateConfigsPageProps {
+  page?: "configs" | "config" | "settings"
   settingsTab?: "nudging" | "scope" | "deferred"
-  initialProfileID?: string
+  initialConfigID?: string
   initialDecisionPoint?: string
   activeFlowID?: "review" | "implementation"
   discardOpen?: boolean
   onBack: () => void
-  onProfileChange?: (profileID?: string) => void
+  onConfigChange?: (configID?: string) => void
   onDecisionPointChange?: (gate?: string) => void
   onFlowChange?: (flow: "review" | "implementation") => void
   onDiscardOpenChange?: (open: boolean) => void
   onSettingsTabChange?: (tab: "nudging" | "scope" | "deferred") => void
 }
 
-vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-profiles-page", () => ({
-  PRLifecycleGateProfilesPage: (props: GateProfilesPageProps) => {
-    mockedGateProfilePage(props)
+vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-configs-page", () => ({
+  PRLifecycleGateConfigsPage: (props: GateConfigsPageProps) => {
+    mockedGateConfigPage(props)
     return (
       <div>
         <output data-testid="configuration-page">{props.page}</output>
-        <output data-testid="profile-id">{props.initialProfileID}</output>
+        <output data-testid="config-id">{props.initialConfigID}</output>
         <output data-testid="flow-id">{props.activeFlowID}</output>
         <output data-testid="gate-id">{props.initialDecisionPoint}</output>
         <output data-testid="settings-tab">{props.settingsTab}</output>
@@ -99,11 +99,11 @@ vi.mock("@/components/pr-workspaces/pr-lifecycle-gate-profiles-page", () => ({
         <button type="button" onClick={props.onBack}>
           Back
         </button>
-        <button type="button" onClick={() => props.onProfileChange?.("strict")}>
-          Edit strict profile
+        <button type="button" onClick={() => props.onConfigChange?.("strict")}>
+          Edit strict configuration
         </button>
-        <button type="button" onClick={() => props.onProfileChange?.()}>
-          Back to profiles
+        <button type="button" onClick={() => props.onConfigChange?.()}>
+          Back to Gate configurations
         </button>
         <button
           type="button"
@@ -171,11 +171,11 @@ async function expectLocation(
 }
 
 describe("pull requests route navigation", () => {
-  beforeEach(() => mockedGateProfilePage.mockClear())
+  beforeEach(() => mockedGateConfigPage.mockClear())
 
   it("scrubs the retired query-based views from the portfolio URL", async () => {
     const router = routerAt(
-      `/pull-requests?view=gate-profiles&profile=strict&workspace=${workspaceID}#private`,
+      `/pull-requests?view=retired&legacy=strict&workspace=${workspaceID}#private`,
     )
     render(<RouterProvider router={router} />)
 
@@ -183,7 +183,7 @@ describe("pull requests route navigation", () => {
     expect(screen.getByText("Workspace portfolio")).toBeVisible()
   })
 
-  it("opens a workspace at its own URL and reaches profiles from there", async () => {
+  it("opens a workspace at its own URL and reaches Gate configurations from there", async () => {
     const router = routerAt("/pull-requests")
     render(<RouterProvider router={router} />)
 
@@ -194,27 +194,33 @@ describe("pull requests route navigation", () => {
     expect(screen.getByTestId("workspace-id")).toHaveTextContent(workspaceID)
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Open profiles from workspace" }),
+      screen.getByRole("button", {
+        name: "Open Gate configurations from workspace",
+      }),
     )
-    await expectLocation(router, "/pull-requests/profiles", {
+    await expectLocation(router, "/pull-requests/gate-configs", {
       from: workspaceID,
     })
     expect(screen.getByTestId("configuration-page")).toHaveTextContent(
-      "profiles",
+      "configs",
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit strict profile" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit strict configuration" }),
+    )
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "review",
       from: workspaceID,
     })
     fireEvent.click(screen.getByRole("button", { name: "Implementation flow" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "implementation",
       from: workspaceID,
     })
-    fireEvent.click(screen.getByRole("button", { name: "Back to profiles" }))
-    await expectLocation(router, "/pull-requests/profiles", {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Back to Gate configurations" }),
+    )
+    await expectLocation(router, "/pull-requests/gate-configs", {
       from: workspaceID,
     })
 
@@ -222,16 +228,16 @@ describe("pull requests route navigation", () => {
     await expectLocation(router, `/pull-requests/${workspaceID}`)
   })
 
-  it("opens profiles directly from the portfolio", async () => {
+  it("opens Gate configurations directly from the portfolio", async () => {
     const router = routerAt("/pull-requests")
     render(<RouterProvider router={router} />)
 
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "Open profiles from portfolio",
+        name: "Open Gate configurations from portfolio",
       }),
     )
-    await expectLocation(router, "/pull-requests/profiles")
+    await expectLocation(router, "/pull-requests/gate-configs")
   })
 
   it("scrubs private workspace state and redirects an invalid workspace", async () => {
@@ -250,86 +256,88 @@ describe("pull requests route navigation", () => {
     expect(screen.getByText("Workspace portfolio")).toBeVisible()
   })
 
-  it("gives the profile list and each profile editor distinct URLs", async () => {
+  it("gives the Gate configuration list and each Gate configuration editor distinct URLs", async () => {
     const router = routerAt(
-      "/pull-requests/profiles?view=gate-profiles&profile=strict#private",
+      "/pull-requests/gate-configs?view=retired&legacy=strict#private",
     )
     render(<RouterProvider router={router} />)
 
-    await expectLocation(router, "/pull-requests/profiles")
+    await expectLocation(router, "/pull-requests/gate-configs")
     expect(screen.getByTestId("configuration-page")).toHaveTextContent(
-      "profiles",
+      "configs",
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit strict profile" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit strict configuration" }),
+    )
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "review",
     })
-    expect(screen.getByTestId("configuration-page")).toHaveTextContent(
-      "profile",
-    )
-    expect(screen.getByTestId("profile-id")).toHaveTextContent("strict")
+    expect(screen.getByTestId("configuration-page")).toHaveTextContent("config")
+    expect(screen.getByTestId("config-id")).toHaveTextContent("strict")
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to profiles" }))
-    await expectLocation(router, "/pull-requests/profiles")
+    fireEvent.click(
+      screen.getByRole("button", { name: "Back to Gate configurations" }),
+    )
+    await expectLocation(router, "/pull-requests/gate-configs")
   })
 
-  it("deep-links a profile flow and gate modal while scrubbing extra state", async () => {
+  it("deep-links a Gate configuration flow and gate modal while scrubbing extra state", async () => {
     const router = routerAt(
-      "/pull-requests/profiles/strict?flow=implementation&gate=pr.implementation.scope&view=gate-profiles#private",
+      "/pull-requests/gate-configs/strict?flow=implementation&gate=pr.implementation.scope&view=retired#private",
     )
     render(<RouterProvider router={router} />)
 
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "implementation",
       gate: "pr.implementation.scope",
     })
-    expect(mockedGateProfilePage).toHaveBeenLastCalledWith(
+    expect(mockedGateConfigPage).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        page: "profile",
+        page: "config",
         activeFlowID: "implementation",
-        initialProfileID: "strict",
+        initialConfigID: "strict",
         initialDecisionPoint: "pr.implementation.scope",
       }),
     )
   })
 
-  it("redirects an invalid profile path to the profile list", async () => {
+  it("redirects an invalid Gate configuration path to the Gate configuration list", async () => {
     const router = routerAt(
-      "/pull-requests/profiles/Invalid%20Profile?flow=implementation",
+      "/pull-requests/gate-configs/Invalid%20Config?flow=implementation",
     )
     render(<RouterProvider router={router} />)
 
-    await expectLocation(router, "/pull-requests/profiles")
+    await expectLocation(router, "/pull-requests/gate-configs")
     expect(screen.getByTestId("configuration-page")).toHaveTextContent(
-      "profiles",
+      "configs",
     )
   })
 
   it("writes flow and gate selection to history without reopening a closed gate", async () => {
-    const router = routerAt("/pull-requests/profiles/strict?flow=review")
+    const router = routerAt("/pull-requests/gate-configs/strict?flow=review")
     render(<RouterProvider router={router} />)
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Implementation flow" }),
     )
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "implementation",
     })
 
     fireEvent.click(screen.getByRole("button", { name: "Select scope gate" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "implementation",
       gate: "pr.implementation.scope",
     })
 
     fireEvent.click(screen.getByRole("button", { name: "Close gate" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "implementation",
     })
 
     act(() => router.history.back())
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "review",
     })
     expect(screen.getByTestId("gate-id")).toBeEmptyDOMElement()
@@ -337,27 +345,27 @@ describe("pull requests route navigation", () => {
 
   it("preserves a gate while correcting its workflow context", async () => {
     const router = routerAt(
-      "/pull-requests/profiles/strict?flow=review&gate=pr.implementation.scope",
+      "/pull-requests/gate-configs/strict?flow=review&gate=pr.implementation.scope",
     )
     render(<RouterProvider router={router} />)
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Implementation flow" }),
     )
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "implementation",
       gate: "pr.implementation.scope",
     })
   })
 
-  it("keeps the owning gate while opening and closing profile discard", async () => {
+  it("keeps the owning gate while opening and closing Gate configuration discard", async () => {
     const router = routerAt(
-      "/pull-requests/profiles/strict?flow=review&gate=pr.review.complete",
+      "/pull-requests/gate-configs/strict?flow=review&gate=pr.review.complete",
     )
     render(<RouterProvider router={router} />)
 
     fireEvent.click(await screen.findByRole("button", { name: "Open discard" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "review",
       gate: "pr.review.complete",
       dialog: "discard",
@@ -365,13 +373,13 @@ describe("pull requests route navigation", () => {
     expect(screen.getByTestId("discard-open")).toHaveTextContent("open")
 
     fireEvent.click(screen.getByRole("button", { name: "Close discard" }))
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "review",
       gate: "pr.review.complete",
     })
 
     act(() => router.history.back())
-    await expectLocation(router, "/pull-requests/profiles/strict", {
+    await expectLocation(router, "/pull-requests/gate-configs/strict", {
       flow: "review",
       gate: "pr.review.complete",
     })
@@ -406,7 +414,7 @@ describe("pull requests route navigation", () => {
 
   it("canonicalizes settings deep links and URL-backs the discard modal", async () => {
     const router = routerAt(
-      "/pull-requests/settings?tab=scope&dialog=discard&view=gate-profiles#private",
+      "/pull-requests/settings?tab=scope&dialog=discard&view=retired#private",
     )
     render(<RouterProvider router={router} />)
 
@@ -414,7 +422,7 @@ describe("pull requests route navigation", () => {
       tab: "scope",
       dialog: "discard",
     })
-    expect(mockedGateProfilePage).toHaveBeenLastCalledWith(
+    expect(mockedGateConfigPage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         page: "settings",
         settingsTab: "scope",

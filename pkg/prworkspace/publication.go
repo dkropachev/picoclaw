@@ -96,7 +96,7 @@ func (service *Service) QueueDeferredPublication(ctx context.Context, request Qu
 		AppendGates:        []GateRun{gate},
 		AppendPublications: []Publication{publication},
 	}
-	if gate.Outcome == GatePass && gate.State == ExecutionSucceeded {
+	if gateCompletedWith(gate, "publish") {
 		publication.State = ExecutionQueued
 	} else {
 		publication.State = ExecutionWaitingGate
@@ -223,18 +223,32 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 
 func (service *Service) deferredPublicationGate(ctx context.Context, aggregate Aggregate, subject map[string]any) (GateRun, error) {
 	if service.deferredIssueMode != DeferredIssuesAutomatic {
-		return service.startGate(ctx, aggregate, "pr.deferred.publish", "authorization", subject)
+		return service.startGate(ctx, aggregate, "pr.deferred.publish", subject)
 	}
 	digest, err := fingerprintValue(subject)
 	if err != nil {
 		return GateRun{}, err
 	}
+	entry, err := prLifecycleGateCatalogEntry("pr.deferred.publish")
+	if err != nil {
+		return GateRun{}, err
+	}
+	if entry.Gate.DefaultAction == nil || entry.Gate.DefaultAction.Type != "human" {
+		return GateRun{}, errors.New("automatic deferred publication requires the published deferred gate")
+	}
 	now := service.now().UTC()
+	actionRevision := prLifecyclePolicyRevision(entry.WorkflowRevision, "automatic-deferred-issues-v3")
 	return GateRun{
 		ID:            stableID("pgr_", aggregate.Workspace.ID, "pr.deferred.publish", digest),
-		DecisionPoint: "pr.deferred.publish", Purpose: "authorization",
-		State: ExecutionSucceeded, Outcome: GatePass,
-		PolicyRevision: "builtin:automatic-deferred-issues-v1", SubjectRevision: digest,
+		DecisionPoint: "pr.deferred.publish", State: ExecutionSucceeded,
+		PolicyRevision: actionRevision, SubjectRevision: digest,
+		Turns: []GateTurn{{
+			StageID: "automatic", Kind: "deterministic", ActorKind: "deterministic", Status: "answered",
+			ExecutionID:    stableID("ge_", aggregate.Workspace.ID, digest, "automatic-deferred"),
+			ActionRevision: actionRevision, InputHash: digest,
+			GateForm:    &GateForm{GateRef: entry.GateRef, Prompt: entry.Gate.Prompt, Fields: entry.Gate.Fields},
+			FieldValues: map[string]any{"action": "publish"},
+		}},
 		Evidence: projectGateEvidence(subject), CreatedAt: now, FinishedAt: &now,
 	}, nil
 }

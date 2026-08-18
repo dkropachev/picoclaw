@@ -1,53 +1,53 @@
 import { describe, expect, it } from "vitest"
 
-import { normalizePRProfilesSearch } from "@/routes/pull-requests_.profiles"
-import { normalizePRProfileEditorSearch } from "@/routes/pull-requests_.profiles.$profileID"
+import { normalizePRGateConfigsSearch } from "@/routes/pull-requests_.gate-configs"
+import { normalizePRGateConfigEditorSearch } from "@/routes/pull-requests_.gate-configs.$configID"
 import { normalizePRLifecycleSettingsSearch } from "@/routes/pull-requests_.settings"
 
 const gate = "pr.review.complete" as const
 const workspaceID = `prw_${"a".repeat(32)}`
 
-describe("pull request profiles search", () => {
-  it("keeps only the discard modal identity on the profile list", () => {
+describe("pull request Gate configurations search", () => {
+  it("keeps only the discard modal identity on the configuration list", () => {
     expect(
-      normalizePRProfilesSearch({ from: workspaceID, dialog: "discard" }),
+      normalizePRGateConfigsSearch({ from: workspaceID, dialog: "discard" }),
     ).toEqual({
       from: workspaceID,
       dialog: "discard",
     })
     expect(
-      normalizePRProfilesSearch({
+      normalizePRGateConfigsSearch({
         dialog: "other",
         flow: "implementation",
         gate,
         profile: "strict",
-        view: "gate-profiles",
+        view: "retired",
       }),
     ).toEqual({})
   })
 
   it("rejects repeated and non-string modal values", () => {
     expect(
-      normalizePRProfilesSearch({
+      normalizePRGateConfigsSearch({
         from: [workspaceID],
         dialog: ["discard"],
       }),
     ).toEqual({})
     expect(
-      normalizePRProfilesSearch({ from: "prw_INVALID", dialog: true }),
+      normalizePRGateConfigsSearch({ from: "prw_INVALID", dialog: true }),
     ).toEqual({})
   })
 })
 
-describe("pull request profile editor search", () => {
+describe("pull request Gate configuration editor search", () => {
   it("defaults to review and keeps a discard prompt owned by its gate", () => {
-    expect(normalizePRProfileEditorSearch({})).toEqual({ flow: "review" })
-    expect(normalizePRProfileEditorSearch({ gate })).toEqual({
+    expect(normalizePRGateConfigEditorSearch({})).toEqual({ flow: "review" })
+    expect(normalizePRGateConfigEditorSearch({ gate })).toEqual({
       flow: "review",
       gate,
     })
     expect(
-      normalizePRProfileEditorSearch({
+      normalizePRGateConfigEditorSearch({
         flow: "implementation",
         from: workspaceID,
         gate: "pr.implementation.scope",
@@ -58,7 +58,7 @@ describe("pull request profile editor search", () => {
       gate: "pr.implementation.scope",
     })
     expect(
-      normalizePRProfileEditorSearch({
+      normalizePRGateConfigEditorSearch({
         flow: "implementation",
         gate,
         dialog: "discard",
@@ -68,21 +68,21 @@ describe("pull request profile editor search", () => {
 
   it("scrubs legacy, unknown, malformed, and repeated state", () => {
     expect(
-      normalizePRProfileEditorSearch({
-        view: "gate-profiles",
+      normalizePRGateConfigEditorSearch({
+        view: "retired",
         profile: "strict",
         workspace: workspaceID,
       }),
     ).toEqual({ flow: "review" })
     expect(
-      normalizePRProfileEditorSearch({
+      normalizePRGateConfigEditorSearch({
         flow: "development",
         gate: "pr.not-a-gate",
         dialog: "delete",
       }),
     ).toEqual({ flow: "review" })
     expect(
-      normalizePRProfileEditorSearch({
+      normalizePRGateConfigEditorSearch({
         flow: ["implementation"],
         from: [workspaceID],
         gate: [gate],
@@ -112,7 +112,7 @@ describe("pull request lifecycle settings search", () => {
         tab: "scope",
         from: workspaceID,
         dialog: "discard",
-        view: "gate-profiles",
+        view: "retired",
         gate,
       }),
     ).toEqual({ tab: "scope", from: workspaceID, dialog: "discard" })

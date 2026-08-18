@@ -127,7 +127,7 @@ export function canImplementWorkspace(workspace: PRWorkspace): {
     const eligibility = workspace.gates.find(
       (gate) => gate.decision_point === "pr.implementation.eligibility",
     )
-    if (eligibility?.outcome !== "pass") {
+    if (eligibility?.state !== "succeeded") {
       return { allowed: false, reason: "eligibility_gate" }
     }
   }

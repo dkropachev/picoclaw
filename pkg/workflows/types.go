@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 	"gopkg.in/yaml.v3"
 )
 
 type Workflow struct {
-	Name string           `json:"name,omitempty" yaml:"name,omitempty"`
-	On   WorkflowTriggers `json:"on,omitempty"   yaml:"on,omitempty"`
-	Jobs map[string]Job   `json:"jobs"           yaml:"jobs"`
+	Name  string                              `json:"name,omitempty"  yaml:"name,omitempty"`
+	On    WorkflowTriggers                    `json:"on,omitempty"    yaml:"on,omitempty"`
+	Gates map[string]gatetypes.GateDefinition `json:"gates,omitempty" yaml:"gates,omitempty"`
+	Jobs  map[string]Job                      `json:"jobs"            yaml:"jobs"`
 
 	// privateRootRevision authenticates the exact in-memory workflow emitted by
 	// the trusted gate compiler. It is deliberately absent from YAML/JSON, so
@@ -18,6 +20,7 @@ type Workflow struct {
 	// private-root execution and a caller cannot mutate a compiled workflow
 	// before admission.
 	privateRootRevision string
+	privateRootKind     string
 }
 
 type WorkflowTriggers struct {
@@ -165,6 +168,10 @@ func (w *Workflow) UnmarshalYAML(value *yaml.Node) error {
 			}
 		case "on", "true":
 			if err := val.Decode(&w.On); err != nil {
+				return err
+			}
+		case "gates":
+			if err := val.Decode(&w.Gates); err != nil {
 				return err
 			}
 		case "jobs":

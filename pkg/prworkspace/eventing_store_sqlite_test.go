@@ -9,9 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
-	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,13 +35,7 @@ func TestEventingStoreConfiguredFallbackGateRoundTripsAndResponds(t *testing.T) 
 	})
 	require.NoError(t, err)
 
-	lifecycle := config.DefaultPRLifecycleConfig()
-	lifecycle.GateProfiles["issue-only"] = config.PRLifecycleGateProfile{
-		Name: "Issue-only profile", Workflows: map[string]gatetypes.GateWorkflowSpec{},
-	}
-	lifecycle.RepositoryAssignments["https://github.com|1"] = "issue-only"
-	evaluator := &WorkflowGateEvaluator{Config: lifecycle, Now: func() time.Time { return now }}
-	service, err := NewService(ServiceConfig{Store: store, Gates: evaluator, Now: func() time.Time { return now }})
+	service, err := NewService(ServiceConfig{Store: store, Now: func() time.Time { return now }})
 	require.NoError(t, err)
 
 	waiting, err := service.ConfirmCharter(ctx, ConfirmCharterRequest{
@@ -53,19 +45,48 @@ func TestEventingStoreConfiguredFallbackGateRoundTripsAndResponds(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, waiting.Gates, 1)
 	require.Equal(t, ExecutionWaitingUser, waiting.Gates[0].State)
-	require.NotNil(t, waiting.Gates[0].runtime)
-	require.Empty(t, waiting.Gates[0].runtime.PinnedPolicy)
-	require.Empty(t, waiting.Gates[0].runtime.PinnedSubject)
+	require.Nil(t, waiting.Gates[0].runtime)
+	require.NotNil(t, waiting.Gates[0].Turns[0].GateForm)
 
 	confirmed, err := service.RespondGate(ctx, RespondGateRequest{
 		WorkspaceID: input.Workspace.ID, GateRunID: waiting.Gates[0].ID,
 		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-answer-durable-fallback-gate",
-		Decision: GatePass,
+		FieldValues: map[string]any{"action": "approve"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, PhaseReview, confirmed.Workspace.Phase)
 	require.Equal(t, charter.ID, confirmed.Workspace.ActiveCharterID)
 	require.True(t, confirmed.Charters[0].Confirmed)
+}
+
+func TestEventingStorePersistsAutomaticDeferredGateV3Metadata(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	raw, err := eventing.Open(ctx, filepath.Join(t.TempDir(), "automatic-gate.sqlite"), eventing.WithClock(func() time.Time { return now }))
+	require.NoError(t, err)
+	store := NewEventingStore(raw)
+	input := testCreateInput()
+	input.Provider.BaseSHA = "base-commit"
+	input.Provider.HeadRepositoryID = input.Provider.RepositoryID
+	input.Provider.HeadRepository = input.Provider.Repository
+	created, err := store.Create(ctx, input)
+	require.NoError(t, err)
+	service := &Service{deferredIssueMode: DeferredIssuesAutomatic, now: func() time.Time { return now }}
+	gate, err := service.deferredPublicationGate(ctx, created.Aggregate, map[string]any{
+		"group": map[string]any{"id": "pdg_11111111111111111111111111111111"},
+	})
+	require.NoError(t, err)
+	mutated, err := store.Mutate(ctx, Mutation{
+		WorkspaceID: created.Aggregate.Workspace.ID, ExpectedVersion: created.Aggregate.Workspace.Version,
+		RequestID: "request-persist-automatic-gate-v3", Patch: AggregatePatch{AppendGates: []GateRun{gate}},
+	})
+	require.NoError(t, err)
+	require.Len(t, mutated.Aggregate.Gates, 1)
+	persisted := mutated.Aggregate.Gates[0]
+	require.True(t, gateCompletedWith(persisted, "publish"))
+	require.NotNil(t, persisted.Turns[0].GateForm)
+	require.Equal(t, "gates.deferred-publish", persisted.Turns[0].GateForm.GateRef)
+	require.NotEmpty(t, persisted.Turns[0].ActionRevision)
 }
 
 func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing.T) {
@@ -119,7 +140,7 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	messageID := stableID("pms_", workspaceID, "message")
 	reward := .75
 	finished := now.Add(time.Minute)
-	policy := json.RawMessage(`{"stages":[{"id":"authorize","type":"human"}]}`)
+	policy := json.RawMessage(`{"version":"3","workflow-ref":"workflows/pr-lifecycle.yml","workflow-revision":"sha256:test-workflow","gate-ref":"gates.implementation-complete","config-id":"strict","config-revision":"sha256:test-config","action-revision":"sha256:test-action"}`)
 	subject := json.RawMessage(`{"repair_id":"` + repairID + `"}`)
 	publicationPayload, publicationDigest, err := encodePublicationPayload(issuePublicationPayload{
 		ProviderOrigin: provider.ProviderOrigin, RepositoryID: provider.RepositoryID, Repository: provider.Repository,
@@ -128,12 +149,15 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.NoError(t, err)
 	gate := GateRun{
 		ID: gateID, DecisionPoint: "pr.implementation.complete", TargetID: repairID,
-		Purpose: "authorization", State: ExecutionWaitingUser,
+		State:          ExecutionWaitingUser,
 		PolicyRevision: "policy-v3", SubjectRevision: "subject-v4",
 		Evidence: GateEvidence{CharterType: PRTypeFix, CharterGoal: "remove the race", CandidateSHA: "tip-commit", ChangedFiles: []string{"pkg/worker/run.go"}},
-		Turns:    []GateTurn{{StageID: "authorize", Kind: "human", Status: "waiting"}}, CreatedAt: now,
+		Turns: []GateTurn{{
+			StageID: "authorize", Kind: "human", Status: "waiting",
+			GateForm: &GateForm{GateRef: "gates.implementation-complete", Prompt: "Complete?"},
+		}}, CreatedAt: now,
 		runtime: &gateRuntime{
-			ProfileID: "strict", WorkflowRunID: "workflow-private-1",
+			ConfigID: "strict", WorkflowRunID: "workflow-private-1",
 			PinnedPolicy: policy, PinnedSubject: subject,
 		},
 	}

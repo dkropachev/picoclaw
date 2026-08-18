@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/workflows"
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 func TestSessionGateWorkingContextBinderSeparatesAgentOwnership(t *testing.T) {
@@ -86,7 +87,12 @@ func TestWorkflowGateEvaluatorRejectsWorkingContextChangedBeforeFreeze(t *testin
 	backend, closeStore := newGateWorkingContextTestBackend(t, t.TempDir())
 	defer closeStore()
 	baseBinder := testGateWorkingContextBinder(backend)
-	agent := &mixedAssignedGateAgent{reader: backend}
+	agent := &prGateV3Agent{
+		reader: backend,
+		fieldValues: map[string]any{
+			"action": "approve",
+		},
+	}
 	workspace := t.TempDir()
 	executor := &workflows.Executor{
 		WorkspaceDir: workspace,
@@ -94,18 +100,16 @@ func TestWorkflowGateEvaluatorRejectsWorkingContextChangedBeforeFreeze(t *testin
 		Agents:       agent,
 	}
 	configured := config.DefaultPRLifecycleConfig()
-	configured.GateProfiles["working"] = config.PRLifecycleGateProfile{
+	action := gatetypes.GateAction{
+		Type: gatetypes.GateActionAI, AgentID: "main",
+		Prompt:  "Check the exact PR workspace context.",
+		Session: workflows.AgentSessionPrivate, History: "read_only", Cache: "none", Tools: workflows.AgentToolsNone,
+	}
+	configured.GateConfigs["working"] = config.PRLifecycleGateConfig{
 		Name: "Working only",
-		Workflows: map[string]workflows.GateWorkflowSpec{
-			"pr.charter.confirm": {
-				ID: "working-charter", Name: "Working charter", Purpose: workflows.GatePurposeAuthorization,
-				DecisionPoint: "pr.charter.confirm",
-				Stages: []workflows.GateStageSpec{{
-					ID: "working", Kind: workflows.GateAIWorkingContext, Title: "Working",
-					AgentID: "main", Criteria: "Check the exact PR workspace context.",
-				}},
-			},
-		},
+		Bindings: []config.PRLifecycleGateBinding{{
+			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,
+		}},
 	}
 	configured.RepositoryAssignments["https://github.com|repo-stale"] = "working"
 	evaluator := &WorkflowGateEvaluator{
@@ -116,7 +120,7 @@ func TestWorkflowGateEvaluatorRejectsWorkingContextChangedBeforeFreeze(t *testin
 	_, err := evaluator.Start(t.Context(), GateRequest{
 		WorkspaceID: request.WorkspaceID, WorkspaceVersion: request.WorkspaceVersion,
 		ProviderOrigin: "https://github.com", RepositoryID: "repo-stale",
-		DecisionPoint: "pr.charter.confirm", Purpose: "authorization",
+		DecisionPoint:  "pr.charter.confirm",
 		Subject:        map[string]any{"charter": map[string]any{"type": "fix"}},
 		SubjectDigest:  "sha256:2222222222222222222222222222222222222222222222222222222222222222",
 		WorkingContext: request.Context,

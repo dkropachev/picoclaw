@@ -127,7 +127,7 @@ func (service *Service) RunImplementation(
 	defer service.releaseImplementation(request.WorkspaceID)
 	var authorizationGates []GateRun
 	if !aggregate.ProviderSnapshot.Owned {
-		eligibility, eligibilityNew, gateErr := service.ensureGate(ctx, aggregate, "pr.implementation.eligibility", "authorization", map[string]any{
+		eligibility, eligibilityNew, gateErr := service.ensureGate(ctx, aggregate, "pr.implementation.eligibility", map[string]any{
 			"owned": false, "head_writable": true, "provider": aggregate.ProviderSnapshot,
 		})
 		if gateErr != nil {
@@ -137,7 +137,7 @@ func (service *Service) RunImplementation(
 		if eligibilityNew {
 			authorizationGates = append(authorizationGates, eligibility)
 		}
-		if eligibility.Outcome != GatePass || eligibility.State != ExecutionSucceeded {
+		if !gateCompletedWith(eligibility, "authorize") {
 			state := ExecutionWaitingGate
 			result, mutateErr := service.store.Mutate(ctx, Mutation{
 				WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
@@ -150,7 +150,7 @@ func (service *Service) RunImplementation(
 			return result.Aggregate, nil
 		}
 	}
-	startGate, startGateNew, err := service.ensureGate(ctx, aggregate, "pr.implementation.start", "authorization", map[string]any{
+	startGate, startGateNew, err := service.ensureGate(ctx, aggregate, "pr.implementation.start", map[string]any{
 		"charter": charter, "findings": selected, "owned": aggregate.ProviderSnapshot.Owned,
 	})
 	if err != nil {
@@ -160,7 +160,7 @@ func (service *Service) RunImplementation(
 	if startGateNew {
 		authorizationGates = append(authorizationGates, startGate)
 	}
-	if startGate.Outcome != GatePass || startGate.State != ExecutionSucceeded {
+	if !gateCompletedWith(startGate, "continue") {
 		state := ExecutionWaitingGate
 		result, mutateErr := service.store.Mutate(ctx, Mutation{
 			WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
@@ -425,7 +425,7 @@ func (service *Service) RunImplementation(
 			"charter": charter, "repair": attempt, "validation": validation, "completion_rounds": rounds,
 			"implementation_context_revision": contextRevision,
 		}
-		completeGate, gateErr := service.startGate(ctx, aggregate, "pr.implementation.complete", "authorization", completeSubject)
+		completeGate, gateErr := service.startGate(ctx, aggregate, "pr.implementation.complete", completeSubject)
 		if gateErr != nil {
 			return Aggregate{}, gateErr
 		}
@@ -588,7 +588,7 @@ func implementationCompletionContextRevision(aggregate Aggregate) (string, error
 
 func allGatesPassed(gates []GateRun) bool {
 	for _, gate := range gates {
-		if gate.Outcome != GatePass || gate.State != ExecutionSucceeded {
+		if !gateAllowsProgress(gate) {
 			return false
 		}
 	}
@@ -635,7 +635,7 @@ func findingClassificationPassed(gates []GateRun, findingID string) bool {
 	for index := len(gates) - 1; index >= 0; index-- {
 		gate := gates[index]
 		if gate.DecisionPoint == "pr.finding.classify" && gate.TargetID == findingID {
-			return gate.State == ExecutionSucceeded && gate.Outcome == GatePass
+			return gateCompletedWith(gate, "keep-in-pr")
 		}
 	}
 	return false
@@ -647,7 +647,7 @@ func findingRemovalAuthorized(gates []GateRun, finding Finding) bool {
 	}
 	for index := len(gates) - 1; index >= 0; index-- {
 		gate := gates[index]
-		if gate.DecisionPoint != "pr.implementation.scope" || gate.State != ExecutionSucceeded || gate.Outcome != GateDefer {
+		if gate.DecisionPoint != "pr.implementation.hard-scope" || !gateCompletedWith(gate, "defer-follow-up") {
 			continue
 		}
 		for _, id := range gate.Evidence.HardScopeFindingIDs {
@@ -885,32 +885,14 @@ func (service *Service) startImplementationScopeGate(
 	candidateDrift []Finding,
 ) (GateRun, error) {
 	if !hasHardCandidateScope(scope, candidateDrift) {
-		return service.startGate(ctx, aggregate, "pr.implementation.scope", "authorization", subject)
+		return service.startGate(ctx, aggregate, "pr.implementation.scope", subject)
 	}
-	digest, err := fingerprintValue(subject)
-	if err != nil {
-		return GateRun{}, err
-	}
-	for index := len(aggregate.Gates) - 1; index >= 0; index-- {
-		gate := aggregate.Gates[index]
-		if gate.DecisionPoint == "pr.implementation.scope" && gate.Purpose == "authorization" &&
-			gate.SubjectRevision == digest {
-			return gate, nil
-		}
-	}
-	now := service.now().UTC()
-	return GateRun{
-		ID:            stableID("pgr_", aggregate.Workspace.ID, "pr.implementation.scope", digest, "hard-resolution"),
-		DecisionPoint: "pr.implementation.scope", Purpose: "authorization",
-		State: ExecutionWaitingUser, PolicyRevision: "builtin:hard-scope-resolution-v1",
-		SubjectRevision: digest, Evidence: projectGateEvidence(subject),
-		Turns: []GateTurn{{
-			StageID: "human-hard-scope-resolution", Kind: "human",
-			Title: "Resolve candidate code outside the confirmed charter or PR type", Status: "waiting",
-			Questions: []string{"Choose defer to remove the candidate code and track it as follow-up, revise to change and reconfirm the charter, or block to stop. Pass is not allowed."},
-		}},
-		CreatedAt: now,
-	}, nil
+	return service.startGate(
+		ctx,
+		aggregate,
+		"pr.implementation.hard-scope",
+		subject,
+	)
 }
 
 func materializeCompletionRounds(aggregate Aggregate, runID string, rounds []CompletionRound, policy NudgePolicy, now time.Time, namespaceParts ...string) ([]Finding, []Finding, []Finding, []NudgeRoundRecord) {

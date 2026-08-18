@@ -36,9 +36,9 @@ function PullRequestsRoutePage() {
             })),
         })
       }
-      onOpenGateProfiles={() =>
+      onOpenGateConfigs={() =>
         void navigate({
-          to: "/pull-requests/profiles",
+          to: "/pull-requests/gate-configs",
           state: (previous) =>
             updatePRNavigationState(previous, (current) => ({
               prParent: "portfolio",

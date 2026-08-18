@@ -8,10 +8,8 @@ import (
 // authorizePublicationReconciliation implements the deliberately two-action
 // recovery contract shared by issue, review, and branch publications:
 //
-//   - pass: re-observe the provider;
-//   - block: assume the external write failed and unlock a fresh publication;
-//   - revise/defer: unsupported, because persisting either as a terminal gate
-//     would strand the unchanged unknown publication behind a reusable subject.
+//   - recheck-provider: re-observe the provider;
+//   - assume-failed: unlock a fresh publication.
 //
 // The returned bool is true only when the caller may perform provider reads.
 func (service *Service) authorizePublicationReconciliation(
@@ -23,7 +21,7 @@ func (service *Service) authorizePublicationReconciliation(
 	requestID string,
 	activitySummary string,
 ) (Aggregate, bool, error) {
-	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.publication.reconcile", "authorization", map[string]any{
+	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.publication.reconcile", map[string]any{
 		"publication": publication, "request": authorizationRequest,
 		"provider_revision": aggregate.ProviderSnapshot.ProviderRevision,
 	})
@@ -33,8 +31,8 @@ func (service *Service) authorizePublicationReconciliation(
 	gate.TargetID = publication.ID
 
 	if gate.State == ExecutionSucceeded {
-		switch gate.Outcome {
-		case GatePass:
+		switch gateAction(gate) {
+		case "recheck-provider":
 			if !gateNew {
 				return aggregate, true, nil
 			}
@@ -49,8 +47,8 @@ func (service *Service) authorizePublicationReconciliation(
 				},
 			})
 			return authorized.Aggregate, mutateErr == nil, mutateErr
-		case GateBlock:
-			patch, patchErr := service.gateOutcomePatch(aggregate, gate)
+		case "assume-failed":
+			patch, patchErr := service.gateActionPatch(aggregate, gate)
 			if patchErr != nil {
 				return aggregate, false, patchErr
 			}
@@ -66,40 +64,13 @@ func (service *Service) authorizePublicationReconciliation(
 				RequestID: requestID, Patch: patch,
 			})
 			return resolved.Aggregate, false, mutateErr
-		case GateRevise, GateDefer:
-			if gateNew {
-				return aggregate, false, unsupportedPublicationReconciliationOutcome(gate.Outcome)
-			}
-			// Repair an already-persisted terminal outcome from an interrupted or
-			// older process. Touching the publication changes the next gate subject,
-			// while staling this gate prevents it from being presented as actionable.
-			now := service.now().UTC()
-			gate.State = ExecutionStale
-			publication.UpdatedAt = now
-			publication.PublicErrorCode = "reconcile_outcome_rejected_" + string(gate.Outcome)
-			state := ExecutionWaitingUser
-			repaired, mutateErr := service.store.Mutate(ctx, Mutation{
-				WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: expectedVersion,
-				RequestID: requestID, Patch: AggregatePatch{
-					ExecutionState: &state, ReplaceGates: []GateRun{gate},
-					ReplacePublications: []Publication{publication},
-					Activity: []Activity{{
-						Kind: "publication.reconcile_outcome_rejected", Actor: "system", EntityID: publication.ID,
-						Summary: "Unsupported reconciliation outcome discarded; choose re-observe or assume failed", CreatedAt: now,
-					}},
-				},
-			})
-			if mutateErr != nil {
-				return repaired.Aggregate, false, mutateErr
-			}
-			return repaired.Aggregate, false, unsupportedPublicationReconciliationOutcome(gate.Outcome)
 		default:
-			return aggregate, false, fmt.Errorf("%w: publication reconciliation returned no supported outcome", ErrInvalid)
+			return aggregate, false, fmt.Errorf("%w: publication reconciliation returned no supported action", ErrInvalid)
 		}
 	}
 
-	if gate.Outcome != "" {
-		return aggregate, false, fmt.Errorf("%w: unresolved publication reconciliation gate has an outcome", ErrInvalid)
+	if gateAction(gate) != "" {
+		return aggregate, false, fmt.Errorf("%w: unresolved publication reconciliation gate has field-values", ErrInvalid)
 	}
 	state := ExecutionWaitingGate
 	if !gateNew && aggregate.Workspace.ExecutionState == state {
@@ -118,12 +89,4 @@ func (service *Service) authorizePublicationReconciliation(
 		RequestID: requestID, Patch: patch,
 	})
 	return waiting.Aggregate, false, mutateErr
-}
-
-func unsupportedPublicationReconciliationOutcome(outcome GateOutcome) error {
-	return fmt.Errorf(
-		"%w: publication reconciliation does not support %q; choose pass to re-observe or block to assume failed",
-		ErrInvalid,
-		outcome,
-	)
 }

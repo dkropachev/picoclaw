@@ -130,6 +130,7 @@ func projectGateEvidence(subject any) GateEvidence {
 		result.FindingCount += len(drift)
 		for _, finding := range drift {
 			result.FindingIDs = append(result.FindingIDs, finding.ID)
+			result.ScopeResolutionIDs = append(result.ScopeResolutionIDs, finding.ID)
 			result.ChangedFiles = append(result.ChangedFiles, finding.File)
 			if HardCandidateScopeBlocker(finding.Scope) {
 				result.HardScope = true
@@ -154,6 +155,7 @@ func projectGateEvidence(subject any) GateEvidence {
 	result.ChangedFiles = uniqueSortedGateEvidence(result.ChangedFiles)
 	result.FindingIDs = uniqueSortedGateEvidence(result.FindingIDs)
 	result.HardScopeFindingIDs = uniqueSortedGateEvidence(result.HardScopeFindingIDs)
+	result.ScopeResolutionIDs = uniqueSortedGateEvidence(result.ScopeResolutionIDs)
 	if result.FindingCount < len(result.FindingIDs) {
 		result.FindingCount = len(result.FindingIDs)
 	}

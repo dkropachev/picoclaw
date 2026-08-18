@@ -576,7 +576,7 @@ describe("PR workspace API", () => {
     })
   })
 
-  it("projects untitled zero gates from the workflow contract", async () => {
+  it("projects automatic Gate execution metadata and field values", async () => {
     mockedLauncherFetch.mockResolvedValue(
       jsonResponse({
         ...aggregate,
@@ -584,21 +584,24 @@ describe("PR workspace API", () => {
           {
             id: `pgr_${"9".repeat(32)}`,
             decision_point: "pr.review.start",
-            purpose: "authorization",
             state: "succeeded",
-            outcome: "pass",
             policy_revision: "sha256:policy",
             subject_revision: "sha256:subject",
             turns: [
               {
                 stage_id: "verified-by-domain",
-                kind: "zero",
+                kind: "gate/exec",
                 title: "",
-                status: "answered",
-                outcome: "pass",
+                status: "succeeded",
+                "actor-kind": "deterministic",
+                "execution-id": "gate-execution-1",
+                "action-revision": "action-1",
+                "input-hash": "sha256:input",
+                "field-values": { action: "approve" },
               },
             ],
             created_at: "2026-08-13T10:02:00Z",
+            finished_at: "2026-08-13T10:02:01Z",
           },
         ],
       }),
@@ -609,10 +612,14 @@ describe("PR workspace API", () => {
         {
           turns: [
             {
-              kind: "zero",
+              kind: "gate/exec",
               title: "",
-              status: "answered",
-              outcome: "pass",
+              status: "succeeded",
+              actor_kind: "deterministic",
+              execution_id: "gate-execution-1",
+              action_revision: "action-1",
+              input_hash: "sha256:input",
+              field_values: { action: "approve" },
             },
           ],
         },

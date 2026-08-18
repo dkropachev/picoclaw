@@ -20,7 +20,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { getPRLifecycleGateProfiles } from "@/api/pr-lifecycle-gate-profiles"
+import { getPRLifecycleGateConfigs } from "@/api/pr-lifecycle-gate-configs"
 import { respondPRWorkspaceGate } from "@/api/pr-workspace-gates"
 import {
   type PRWorkspace,
@@ -30,7 +30,7 @@ import {
   type PRWorkspaceCorrectionKind,
   type PRWorkspaceDeferredAction,
   type PRWorkspaceFindingDisposition,
-  type PRWorkspaceGateOutcome,
+  type PRWorkspaceGateField,
   type PRWorkspacePhase,
   type PRWorkspaceScopeAssessment,
   type PRWorkspaceType,
@@ -136,11 +136,11 @@ interface GuidanceDraft {
 export function PRWorkspacePage({
   workspaceID,
   onBack,
-  onOpenGateProfiles,
+  onOpenGateConfigs,
 }: {
   workspaceID: string
   onBack: () => void
-  onOpenGateProfiles?: () => void
+  onOpenGateConfigs?: () => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -164,8 +164,8 @@ export function PRWorkspacePage({
     refetchInterval: 3_000,
   })
   const lifecycleSettingsQuery = useQuery({
-    queryKey: ["pr-lifecycle", "gate-profiles"],
-    queryFn: ({ signal }) => getPRLifecycleGateProfiles(signal),
+    queryKey: ["pr-lifecycle", "gate-configs"],
+    queryFn: ({ signal }) => getPRLifecycleGateConfigs(signal),
     retry: false,
     staleTime: 30_000,
   })
@@ -425,61 +425,19 @@ export function PRWorkspacePage({
     mutationFn: ({
       workspace,
       gateID,
-      outcome,
-      answers,
-      comment,
+      fieldValues,
     }: {
       workspace: PRWorkspace
       gateID: string
-      outcome: PRWorkspaceGateOutcome
-      answers: Record<string, string>
-      comment: string
+      fieldValues: Record<string, unknown>
     }) => {
       const latestWorkspace = keepLatestWorkspace(workspace)
       return respondPRWorkspaceGate(workspaceID, gateID, {
         ...mutationFence(latestWorkspace),
-        outcome,
-        answers,
-        ...(comment.trim() ? { comment: comment.trim() } : {}),
+        fieldValues,
       })
     },
-    onSuccess: (nextWorkspace, variables) => {
-      updateWorkspace(nextWorkspace)
-      if (variables.outcome !== "pass") return
-      const gate = variables.workspace.gates.find(
-        (candidate) => candidate.id === variables.gateID,
-      )
-      if (gate?.decision_point !== "pr.publication.reconcile") return
-      const publication = nextWorkspace.publications.find(
-        (candidate) => candidate.id === gate.target_id,
-      )
-      if (
-        !publication ||
-        (publication.state !== "unknown" && publication.state !== "running")
-      ) {
-        return
-      }
-      if (
-        publication.kind === "github_review" ||
-        publication.kind === "branch_push"
-      ) {
-        publicationReconcileMutation.mutate({
-          workspace: nextWorkspace,
-          publicationID: publication.id,
-        })
-        return
-      }
-      if (publication.kind === "github_issue" && publication.target_id) {
-        deferredMutation.mutate({
-          workspace: nextWorkspace,
-          command: {
-            action: "reconcile",
-            groupID: publication.target_id,
-            publicationID: publication.id,
-          },
-        })
-      }
-    },
+    onSuccess: updateWorkspace,
     onError: handleError,
   })
 
@@ -587,16 +545,14 @@ export function PRWorkspacePage({
             <aside className="min-w-0 xl:sticky xl:top-0 xl:col-start-3 xl:row-start-1 xl:self-start">
               <GatePanel
                 workspace={workspace}
-                onRespond={(gateID, outcome, answers, comment) =>
+                onRespond={(gateID, fieldValues) =>
                   gateMutation.mutate({
                     workspace,
                     gateID,
-                    outcome,
-                    answers,
-                    comment,
+                    fieldValues,
                   })
                 }
-                onOpenProfiles={onOpenGateProfiles}
+                onOpenConfigs={onOpenGateConfigs}
                 busy={gateMutation.isPending}
               />
             </aside>
@@ -701,7 +657,7 @@ export function PRWorkspacePage({
             />
             <DeferredPanel
               workspace={workspace}
-              mode={lifecycleSettingsQuery.data?.deferred_issues.mode}
+              mode={lifecycleSettingsQuery.data?.deferredIssues.mode}
               settingsLoading={lifecycleSettingsQuery.isFetching}
               settingsError={lifecycleSettingsQuery.isError}
               onRetrySettings={() => void lifecycleSettingsQuery.refetch()}
@@ -775,16 +731,14 @@ export function PRWorkspacePage({
             {!pendingGate && (
               <GatePanel
                 workspace={workspace}
-                onRespond={(gateID, outcome, answers, comment) =>
+                onRespond={(gateID, fieldValues) =>
                   gateMutation.mutate({
                     workspace,
                     gateID,
-                    outcome,
-                    answers,
-                    comment,
+                    fieldValues,
                   })
                 }
-                onOpenProfiles={onOpenGateProfiles}
+                onOpenConfigs={onOpenGateConfigs}
                 busy={gateMutation.isPending}
               />
             )}
@@ -2534,17 +2488,12 @@ function ScopeMatrixPanel({ workspace }: { workspace: PRWorkspace }) {
 function GatePanel({
   workspace,
   onRespond,
-  onOpenProfiles,
+  onOpenConfigs,
   busy,
 }: {
   workspace: PRWorkspace
-  onRespond: (
-    gateID: string,
-    outcome: PRWorkspaceGateOutcome,
-    answers: Record<string, string>,
-    comment: string,
-  ) => void
-  onOpenProfiles?: () => void
+  onRespond: (gateID: string, fieldValues: Record<string, unknown>) => void
+  onOpenConfigs?: () => void
   busy: boolean
 }) {
   const { t } = useTranslation()
@@ -2561,24 +2510,15 @@ function GatePanel({
       (turn) => turn.status === "waiting_user" || turn.status === "waiting",
     ) ??
     pending?.turns.at(-1)
-  const waitingForHuman =
-    pending?.state === "waiting_user" && pendingTurn?.kind === "human"
-  const hardScopeResolution =
-    pending != null && isHardCandidateScopeGate(workspace, pending)
-  const publicationReconciliation =
-    pending?.decision_point === "pr.publication.reconcile"
-  const outcomes: Array<"pass" | "revise" | "defer" | "block"> =
-    hardScopeResolution
-      ? ["defer", "revise", "block"]
-      : publicationReconciliation
-        ? ["pass", "block"]
-        : ["pass", "revise", "defer", "block"]
-  const [answers, setAnswers] = useState<Record<string, string>>({})
-  const [comment, setComment] = useState("")
+  const form = pendingTurn?.gate_form
+  const waitingForHuman = pending?.state === "waiting_user" && Boolean(form)
+  const [fieldValues, setFieldValues] = useState<Record<string, unknown>>({})
   useEffect(() => {
-    setAnswers({})
-    setComment("")
+    setFieldValues({})
   }, [pending?.id, pendingTurn?.stage_id])
+  const valid = form?.fields.every((field) =>
+    isGateFieldValueValid(field, fieldValues[field.id]),
+  )
   return (
     <Card size="sm" data-testid="pr-gates" aria-busy={busy}>
       <CardHeader>
@@ -2587,7 +2527,7 @@ function GatePanel({
         </CardTitle>
         <CardDescription>
           {t("prWorkspaces.gates.progress", {
-            complete: workspace.gates.filter((gate) => gate.outcome).length,
+            complete: workspace.gates.filter((gate) => gate.finished_at).length,
             total: workspace.gates.length,
           })}
         </CardDescription>
@@ -2604,62 +2544,27 @@ function GatePanel({
             <GateEvidence gate={pending} />
             {waitingForHuman ? (
               <>
-                {pendingTurn.questions?.map((question, index) => {
-                  const answerID = `question_${index + 1}`
-                  return (
-                    <Field key={answerID} label={question}>
-                      <Input
-                        value={answers[answerID] ?? ""}
-                        aria-label={question}
-                        onChange={(event) =>
-                          setAnswers((current) => ({
-                            ...current,
-                            [answerID]: event.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                  )
-                })}
-                <Field label={t("prWorkspaces.gates.comment")}>
-                  <Textarea
-                    value={comment}
-                    aria-label={t("prWorkspaces.gates.comment")}
-                    onChange={(event) => setComment(event.target.value)}
+                <p className="text-sm leading-snug">{form?.prompt}</p>
+                {form?.fields.map((field) => (
+                  <GenericGateField
+                    field={field}
+                    key={field.id}
+                    value={fieldValues[field.id]}
+                    onChange={(value) =>
+                      setFieldValues((current) => ({
+                        ...current,
+                        [field.id]: value,
+                      }))
+                    }
                   />
-                </Field>
-                <div
-                  className={cn(
-                    "grid gap-2",
-                    hardScopeResolution ? "sm:grid-cols-3" : "grid-cols-2",
-                  )}
+                ))}
+                <Button
+                  className="w-full"
+                  disabled={busy || !valid}
+                  onClick={() => onRespond(pending.id, fieldValues)}
                 >
-                  {outcomes.map((outcome) => (
-                    <Button
-                      key={outcome}
-                      size="sm"
-                      variant={
-                        outcome === "pass"
-                          ? "default"
-                          : outcome === "block"
-                            ? "destructive"
-                            : "outline"
-                      }
-                      disabled={busy}
-                      onClick={() =>
-                        onRespond(pending.id, outcome, answers, comment)
-                      }
-                    >
-                      {t(
-                        hardScopeResolution
-                          ? `prWorkspaces.gates.hardScopeOutcomes.${outcome}`
-                          : publicationReconciliation
-                            ? `prWorkspaces.gates.publicationReconcileOutcomes.${outcome}`
-                            : `prWorkspaces.gates.outcomes.${outcome}`,
-                      )}
-                    </Button>
-                  ))}
-                </div>
+                  Submit Gate response
+                </Button>
               </>
             ) : (
               <p
@@ -2681,14 +2586,14 @@ function GatePanel({
             )}
           </div>
         )}
-        {onOpenProfiles && (
+        {onOpenConfigs && (
           <Button
             className="w-full"
             variant="outline"
             size="sm"
-            onClick={onOpenProfiles}
+            onClick={onOpenConfigs}
           >
-            {t("prWorkspaces.gates.configure")}
+            Configure Gates
           </Button>
         )}
       </CardContent>
@@ -2696,28 +2601,151 @@ function GatePanel({
   )
 }
 
-function isHardCandidateScopeGate(
-  workspace: PRWorkspace,
-  gate: PRWorkspace["gates"][number],
-): boolean {
-  if (gate.decision_point !== "pr.implementation.scope") return false
-  if (gate.policy_revision === "builtin:hard-scope-resolution-v1") return true
-  const evidence = gate.evidence
-  if (!evidence) return false
-  if (evidence.hard_scope) return true
-  const findingIDs = evidence.finding_ids ?? []
-  const scopes = [
-    ...(evidence.scope ? [evidence.scope] : []),
-    ...workspace.findings
-      .filter((finding) => findingIDs.includes(finding.id))
-      .map((finding) => finding.scope),
-  ]
-  return scopes.some(
-    (scope) =>
-      scope.presence === "candidate_present" &&
-      (!scope.type_compatible ||
-        (scope.distance !== "S0_exact" &&
-          scope.distance !== "S1_necessary_adjacent")),
+function GenericGateField({
+  field,
+  value,
+  onChange,
+}: {
+  field: PRWorkspaceGateField
+  value: unknown
+  onChange: (value: unknown) => void
+}) {
+  const required =
+    field.required || (field.type === "select" && field.min_selections > 0)
+  const label = `${field.label}${required ? " *" : ""}`
+  if (field.type === "long-text") {
+    return (
+      <Field label={label}>
+        <Textarea
+          aria-label={field.label}
+          required={field.required}
+          value={typeof value === "string" ? value : ""}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </Field>
+    )
+  }
+  if (field.type === "short-text") {
+    return (
+      <Field label={label}>
+        <Input
+          aria-label={field.label}
+          required={field.required}
+          value={typeof value === "string" ? value : ""}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </Field>
+    )
+  }
+  if (field.type === "boolean") {
+    return (
+      <Field label={label}>
+        <Select
+          value={typeof value === "boolean" ? String(value) : "unset"}
+          onValueChange={(next) =>
+            onChange(next === "unset" ? undefined : next === "true")
+          }
+        >
+          <SelectTrigger aria-label={field.label}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {!field.required && (
+              <SelectItem value="unset">No answer</SelectItem>
+            )}
+            <SelectItem value="true">Yes</SelectItem>
+            <SelectItem value="false">No</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+    )
+  }
+  if (field.max_selections === 1) {
+    return (
+      <Field label={label}>
+        <Select
+          value={typeof value === "string" ? value : "unset"}
+          onValueChange={(next) =>
+            onChange(next === "unset" ? undefined : next)
+          }
+        >
+          <SelectTrigger aria-label={field.label}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {field.min_selections === 0 && (
+              <SelectItem value="unset">No selection</SelectItem>
+            )}
+            {field.options.map((option) => (
+              <SelectItem key={option.id} value={option.id}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+    )
+  }
+  const selected = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : []
+  return (
+    <fieldset className="space-y-1.5">
+      <legend className="text-sm font-medium">{label}</legend>
+      <div className="space-y-1 rounded-md border p-2">
+        {field.options.map((option) => (
+          <label
+            className="hover:bg-muted flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm"
+            key={option.id}
+          >
+            <input
+              checked={selected.includes(option.id)}
+              className="accent-primary size-4"
+              type="checkbox"
+              onChange={(event) =>
+                onChange(
+                  event.target.checked
+                    ? [...selected, option.id]
+                    : selected.filter((id) => id !== option.id),
+                )
+              }
+            />
+            {option.label}
+          </label>
+        ))}
+      </div>
+      <p className="text-muted-foreground text-xs">
+        Select {field.min_selections}–{field.max_selections}.
+      </p>
+    </fieldset>
+  )
+}
+
+function isGateFieldValueValid(field: PRWorkspaceGateField, value: unknown) {
+  if (field.type === "short-text" || field.type === "long-text") {
+    return (
+      !field.required || (typeof value === "string" && value.trim().length > 0)
+    )
+  }
+  if (field.type === "boolean")
+    return !field.required || typeof value === "boolean"
+  if (field.max_selections === 1) {
+    const selected =
+      typeof value === "string" &&
+      field.options.some((option) => option.id === value)
+    return selected || field.min_selections === 0
+  }
+  if (!Array.isArray(value)) return field.min_selections === 0
+  const selections = value.filter(
+    (entry): entry is string => typeof entry === "string",
+  )
+  return (
+    selections.length >= field.min_selections &&
+    selections.length <= field.max_selections &&
+    new Set(selections).size === selections.length &&
+    selections.every((selection) =>
+      field.options.some((option) => option.id === selection),
+    )
   )
 }
 
@@ -2729,8 +2757,6 @@ function GateEvidence({ gate }: { gate: PRWorkspace["gates"][number] }) {
         {t("prWorkspaces.gates.evidence")}
       </summary>
       <dl className="text-muted-foreground mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1">
-        <dt>{t("prWorkspaces.gates.purpose")}</dt>
-        <dd>{gate.purpose}</dd>
         <dt>{t("prWorkspaces.gates.policy")}</dt>
         <dd className="truncate" title={gate.policy_revision}>
           {shortDigest(gate.policy_revision)}
@@ -2914,20 +2940,23 @@ function GateEvidence({ gate }: { gate: PRWorkspace["gates"][number] }) {
                 {turn.kind} · {turn.status}
               </span>
             </div>
-            {turn.outcome && (
-              <p>
-                {t("prWorkspaces.gates.result")}: {turn.outcome}
-              </p>
-            )}
-            {turn.comment && (
-              <p>
-                {t("prWorkspaces.gates.comment")}: {turn.comment}
-              </p>
-            )}
-            {turn.answers && Object.keys(turn.answers).length > 0 && (
-              <pre className="mt-1 overflow-auto break-all whitespace-pre-wrap">
-                {JSON.stringify(turn.answers, null, 2)}
-              </pre>
+            {turn.field_values && Object.keys(turn.field_values).length > 0 && (
+              <dl className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1">
+                {Object.entries(turn.field_values).map(([fieldID, value]) => (
+                  <div className="contents" key={fieldID}>
+                    <dt className="font-medium">{fieldID}</dt>
+                    <dd className="[overflow-wrap:anywhere]">
+                      {Array.isArray(value)
+                        ? value.join(", ")
+                        : typeof value === "boolean"
+                          ? value
+                            ? "Yes"
+                            : "No"
+                          : String(value)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
             )}
           </li>
         ))}

@@ -15,11 +15,12 @@ import {
   type PRLifecycleFlowCatalog,
   type PRLifecycleFlowEdge,
   type PRLifecycleFlowNode,
-  type PRLifecycleGateKind,
-  type PRLifecycleGateProfile,
-  type PRLifecycleGateWorkflow,
-  validatePRLifecycleGateWorkflow,
-} from "@/api/pr-lifecycle-gate-profiles"
+} from "@/api/pr-lifecycle-flow"
+import {
+  type PRLifecycleGateAction,
+  type PRLifecycleGateBinding,
+  type PRLifecycleGateCatalogEntry,
+} from "@/api/pr-lifecycle-gate-configs"
 import { cn } from "@/lib/utils"
 
 interface PRLifecycleGateMapProps {
@@ -27,9 +28,10 @@ interface PRLifecycleGateMapProps {
   flowRevision: string
   activeFlowID?: PRLifecycleFlowID
   selectedDecisionPoint?: PRLifecycleDecisionPoint
-  workflows?: PRLifecycleGateProfile["workflows"]
-  profileID?: string
-  profileName?: string
+  gateCatalog?: Record<string, PRLifecycleGateCatalogEntry>
+  bindings?: PRLifecycleGateBinding[]
+  configID?: string
+  configName?: string
   onFlowChange?: (flowID: PRLifecycleFlowID) => void
   onSelect: (decisionPoint: PRLifecycleDecisionPoint) => void
   className?: string
@@ -37,19 +39,10 @@ interface PRLifecycleGateMapProps {
 
 export type PRLifecycleFlowID = "review" | "implementation"
 
-type GateFormat =
-  | "automatic"
-  | "deterministic"
-  | "ai"
-  | "user"
-  | "mixed"
-  | "needs-setup"
-type GateStageCategory = Exclude<GateFormat, "mixed" | "needs-setup">
-
+type GateFormat = "deterministic" | "ai" | "user" | "workflow" | "needs-setup"
 interface GateFormatSummary {
   format: GateFormat
   label: string
-  composition?: string
   fallback: boolean
   accessible: string
 }
@@ -79,29 +72,15 @@ interface FlowGeometry {
   width: number
 }
 
-const stageCategory: Record<PRLifecycleGateKind, GateStageCategory> = {
-  zero: "automatic",
-  deterministic: "deterministic",
-  ai_working_context: "ai",
-  ai_isolated_context: "ai",
-  human: "user",
-}
-
-const gateFormatLabels: Record<GateStageCategory, string> = {
-  automatic: "Automatic",
-  deterministic: "Deterministic",
-  ai: "AI",
-  user: "User",
-}
-
 export function PRLifecycleGateMap({
   flow,
   flowRevision,
   activeFlowID: controlledActiveFlowID,
   selectedDecisionPoint,
-  workflows,
-  profileID,
-  profileName,
+  gateCatalog,
+  bindings,
+  configID,
+  configName,
   onFlowChange,
   onSelect,
   className,
@@ -229,9 +208,9 @@ export function PRLifecycleGateMap({
             <h2 id={titleID} className="text-sm font-semibold">
               PR lifecycle gate flow
             </h2>
-            {profileName ? (
+            {configName ? (
               <span className="bg-muted/50 text-muted-foreground min-w-0 rounded-md border px-2 py-0.5 text-xs [overflow-wrap:anywhere]">
-                Profile · {profileName}
+                Configuration · {configName}
               </span>
             ) : null}
           </div>
@@ -287,6 +266,7 @@ export function PRLifecycleGateMap({
               >
                 {active ? (
                   <FlowGraph
+                    bindings={bindings}
                     flow={candidate}
                     instanceID={instanceID}
                     onSelect={(node) => {
@@ -294,9 +274,9 @@ export function PRLifecycleGateMap({
                       selectFlow(candidate.id)
                       onSelect(node.decision_point!)
                     }}
-                    profileID={profileID}
+                    configID={configID}
                     selectedNodeID={selectedNodeID}
-                    workflows={workflows}
+                    gateCatalog={gateCatalog}
                   />
                 ) : null}
               </div>
@@ -397,19 +377,21 @@ function FlowTabs({
 }
 
 function FlowGraph({
+  bindings,
   flow,
   instanceID,
   onSelect,
-  profileID,
+  configID,
   selectedNodeID,
-  workflows,
+  gateCatalog,
 }: {
+  bindings?: PRLifecycleGateBinding[]
   flow: PRLifecycleFlow
   instanceID: string
   onSelect: (node: PRLifecycleFlowNode) => void
-  profileID?: string
+  configID?: string
   selectedNodeID?: string
-  workflows?: PRLifecycleGateProfile["workflows"]
+  gateCatalog?: Record<string, PRLifecycleGateCatalogEntry>
 }) {
   const layout = useMemo(() => createFlowLayout(flow), [flow])
   const canvasRef = useRef<HTMLDivElement>(null)
@@ -455,14 +437,15 @@ function FlowGraph({
                   key={node.id}
                 >
                   <FlowNodeCell
+                    bindings={bindings}
                     flowID={flow.id}
                     flowNode={node}
                     instanceID={instanceID}
                     layout={layout}
                     onSelect={onSelect}
-                    profileID={profileID}
+                    configID={configID}
                     selectedNodeID={selectedNodeID}
-                    workflows={workflows}
+                    gateCatalog={gateCatalog}
                   />
                 </div>
               ))}
@@ -480,23 +463,25 @@ function FlowGraph({
 }
 
 function FlowNodeCell({
+  bindings,
   flowID,
   flowNode,
   instanceID,
   layout,
   onSelect,
-  profileID,
+  configID,
   selectedNodeID,
-  workflows,
+  gateCatalog,
 }: {
+  bindings?: PRLifecycleGateBinding[]
   flowID: string
   flowNode: PRLifecycleFlowNode
   instanceID: string
   layout: FlowLayout
   onSelect: (node: PRLifecycleFlowNode) => void
-  profileID?: string
+  configID?: string
   selectedNodeID?: string
-  workflows?: PRLifecycleGateProfile["workflows"]
+  gateCatalog?: Record<string, PRLifecycleGateCatalogEntry>
 }) {
   const incoming = layout.incoming.get(flowNode.id) ?? []
   return (
@@ -510,11 +495,22 @@ function FlowNodeCell({
         flowNode={flowNode}
         instanceID={instanceID}
         onSelect={() => onSelect(flowNode)}
-        profileID={profileID}
+        configID={configID}
         selected={flowNode.id === selectedNodeID && flowNode.editable}
-        workflow={
+        gateCatalogEntry={
           flowNode.decision_point
-            ? workflows?.[flowNode.decision_point]
+            ? gateCatalog?.[flowNode.decision_point]
+            : undefined
+        }
+        binding={
+          flowNode.decision_point && gateCatalog?.[flowNode.decision_point]
+            ? bindings?.find(
+                (binding) =>
+                  binding.workflowRef ===
+                    gateCatalog[flowNode.decision_point!].workflowRef &&
+                  binding.gateRef ===
+                    gateCatalog[flowNode.decision_point!].gateRef,
+              )
             : undefined
         }
       />
@@ -1554,21 +1550,23 @@ function flowRouteAccessibleRelation(
 }
 
 function GraphNode({
+  binding,
   flowID,
   flowNode,
   instanceID,
   onSelect,
-  profileID,
+  configID,
   selected,
-  workflow,
+  gateCatalogEntry,
 }: {
+  binding?: PRLifecycleGateBinding
   flowID: string
   flowNode: PRLifecycleFlowNode
   instanceID: string
   onSelect: () => void
-  profileID?: string
+  configID?: string
   selected: boolean
-  workflow?: PRLifecycleGateWorkflow
+  gateCatalogEntry?: PRLifecycleGateCatalogEntry
 }) {
   if (flowNode.kind === "action") return <ActionNode node={flowNode} />
   if (!flowNode.editable) return <LockedGateNode node={flowNode} />
@@ -1578,9 +1576,10 @@ function GraphNode({
       instanceID={instanceID}
       node={flowNode}
       onSelect={onSelect}
-      profileID={profileID}
+      configID={configID}
       selected={selected}
-      workflow={workflow}
+      binding={binding}
+      gateCatalogEntry={gateCatalogEntry}
     />
   )
 }
@@ -1631,24 +1630,32 @@ function LockedGateNode({ node }: { node: PRLifecycleFlowNode }) {
 }
 
 function EditableGateNode({
+  binding,
   flowID,
   instanceID,
   node,
   onSelect,
-  profileID,
+  configID,
   selected,
-  workflow,
+  gateCatalogEntry,
 }: {
+  binding?: PRLifecycleGateBinding
   flowID: string
   instanceID: string
   node: PRLifecycleFlowNode
   onSelect: () => void
-  profileID?: string
+  configID?: string
   selected: boolean
-  workflow?: PRLifecycleGateWorkflow
+  gateCatalogEntry?: PRLifecycleGateCatalogEntry
 }) {
   const decisionPoint = node.decision_point!
-  const format = summarizeGateFormat(workflow, decisionPoint)
+  const resolvedAction =
+    binding?.action ??
+    gateCatalogEntry?.defaultAction ??
+    gateCatalogEntry?.effectiveAction
+  const format = resolvedAction
+    ? summarizeGateAction(resolvedAction, binding?.action === undefined)
+    : needsSetupGateFormat()
   const descriptionID = `${instanceID}-${node.id}-description`
   const formatID = `${instanceID}-${node.id}-format`
   const activate = onSelect
@@ -1664,7 +1671,7 @@ function EditableGateNode({
       )}
       data-decision-point={decisionPoint}
       data-decision-title={node.title}
-      data-edit-href={gateEditorHref(profileID, flowID, decisionPoint)}
+      data-edit-href={gateEditorHref(configID, flowID, decisionPoint)}
       data-editor-title={node.title}
       data-flow-element="editable-gate"
       data-flow-kind="gate"
@@ -1673,7 +1680,10 @@ function EditableGateNode({
       data-gate-id={decisionPoint}
       data-gate-name={node.title}
       data-gate-selected={selected ? "true" : undefined}
-      data-workflow-configured={workflow ? "true" : "false"}
+      data-workflow-configured={gateCatalogEntry ? "true" : "false"}
+      data-action-source={
+        binding?.action ? "config-override" : "workflow-default"
+      }
       onClick={activate}
       type="button"
     >
@@ -1687,7 +1697,7 @@ function EditableGateNode({
             gateFormatClassName(format.format),
           )}
         >
-          {format.label} gate
+          {format.label}
         </span>
       </span>
       <span
@@ -1700,13 +1710,8 @@ function EditableGateNode({
       {format.fallback ? (
         <span className="mt-auto flex flex-wrap items-center gap-1.5 pt-1.5">
           <span className="text-muted-foreground text-[9px] font-semibold tracking-wider uppercase">
-            default fallback
+            workflow default
           </span>
-        </span>
-      ) : null}
-      {format.composition ? (
-        <span className="text-foreground mt-1 text-[10px] font-semibold">
-          {format.composition}
         </span>
       ) : null}
       <span className="sr-only" id={formatID}>
@@ -1869,78 +1874,66 @@ function flowBandGridClass(count: number): string {
 }
 
 function gateEditorHref(
-  profileID: string | undefined,
+  configID: string | undefined,
   flowID: string,
   decisionPoint: PRLifecycleDecisionPoint,
 ): string | undefined {
-  if (!profileID) return undefined
-  return `/pull-requests/profiles/${encodeURIComponent(profileID)}?flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
+  if (!configID) return undefined
+  return `/pull-requests/gate-configs/${encodeURIComponent(configID)}?flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
 }
 
 function isPRLifecycleFlowID(flowID: string): flowID is PRLifecycleFlowID {
   return flowID === "review" || flowID === "implementation"
 }
 
-function summarizeGateFormat(
-  workflow: PRLifecycleGateWorkflow | undefined,
-  decisionPoint: PRLifecycleDecisionPoint,
-): GateFormatSummary {
-  if (!workflow) {
-    return {
-      format: "user",
-      label: "User",
-      fallback: true,
-      accessible:
-        "Gate format: User. No workflow is configured, so the runtime uses the default human fallback.",
-    }
-  }
-  if (validatePRLifecycleGateWorkflow(workflow, decisionPoint).length > 0) {
-    return {
-      format: "needs-setup",
-      label: "Needs setup",
-      fallback: false,
-      accessible:
-        "Gate format: Needs setup. The configured workflow is incomplete or invalid.",
-    }
-  }
-
-  const categories = workflow.stages.map((stage) => stageCategory[stage.kind])
-  const uniqueCategories = new Set(categories)
-  if (uniqueCategories.size === 1) {
-    const category = categories[0]
-    const label = gateFormatLabels[category]
-    return {
-      format: category,
-      label,
-      fallback: false,
-      accessible: `Gate format: ${label}.`,
-    }
-  }
-
-  const orderedCategories = categories.filter(
-    (category, index) => index === 0 || category !== categories[index - 1],
-  )
-  const composition = orderedCategories
-    .map((category) => gateFormatLabels[category])
-    .join(" → ")
+function needsSetupGateFormat(): GateFormatSummary {
   return {
-    format: "mixed",
-    label: "Mixed",
-    composition,
+    format: "needs-setup",
+    label: "Needs setup",
     fallback: false,
-    accessible: `Gate format: Mixed. Ordered composition: ${orderedCategories
-      .map((category) => gateFormatLabels[category])
-      .join(", then ")}.`,
+    accessible:
+      "Gate action: Needs setup. Publish the workflow Gate and its default action.",
+  }
+}
+
+function summarizeGateAction(
+  action: PRLifecycleGateAction,
+  inherited: boolean,
+): GateFormatSummary {
+  const label =
+    action.type === "human"
+      ? "Human"
+      : action.type === "ai"
+        ? "AI"
+        : action.type === "deterministic"
+          ? "Deterministic"
+          : "Workflow"
+  const format: GateFormat =
+    action.type === "human"
+      ? "user"
+      : action.type === "ai"
+        ? "ai"
+        : action.type === "deterministic"
+          ? "deterministic"
+          : "workflow"
+  return {
+    format,
+    label,
+    fallback: inherited,
+    accessible: `Gate action: ${label}. ${
+      inherited
+        ? "Inherited from the published workflow default."
+        : "Overridden by this Gate configuration."
+    }`,
   }
 }
 
 function gateFormatClassName(format: GateFormat) {
   return cn(
-    format === "automatic" && "bg-muted text-muted-foreground",
     format === "deterministic" && "bg-secondary text-secondary-foreground",
     format === "ai" && "bg-primary/10 border-primary/40 text-primary",
     format === "user" && "bg-accent text-accent-foreground",
-    format === "mixed" && "bg-primary text-primary-foreground",
+    format === "workflow" && "bg-primary text-primary-foreground",
     format === "needs-setup" &&
       "bg-destructive/10 border-destructive/50 text-destructive",
   )
@@ -1969,19 +1962,18 @@ function Legend({
 
 function GateFormatLegend() {
   const formats: { format: GateFormat; label: string }[] = [
-    { format: "automatic", label: "Automatic" },
     { format: "deterministic", label: "Deterministic" },
     { format: "ai", label: "AI" },
-    { format: "user", label: "User" },
-    { format: "mixed", label: "Mixed" },
+    { format: "user", label: "Human" },
+    { format: "workflow", label: "Workflow" },
   ]
 
   return (
     <div
-      aria-label="Gate format legend"
+      aria-label="Gate action legend"
       className="text-muted-foreground flex flex-wrap items-center gap-1 text-[10px]"
     >
-      <span className="mr-1 font-semibold">Gate format</span>
+      <span className="mr-1 font-semibold">Gate action</span>
       {formats.map(({ format, label }) => (
         <span
           className={cn(

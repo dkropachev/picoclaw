@@ -26,7 +26,7 @@ import { Route as ThreadsSearchRouteImport } from './routes/threads.search'
 import { Route as ThreadsOpenRouteImport } from './routes/threads.open'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
 import { Route as PullRequestsSettingsRouteImport } from './routes/pull-requests_.settings'
-import { Route as PullRequestsProfilesRouteImport } from './routes/pull-requests_.profiles'
+import { Route as PullRequestsGateConfigsRouteImport } from './routes/pull-requests_.gate-configs'
 import { Route as PullRequestsWorkspaceIDRouteImport } from './routes/pull-requests_.$workspaceID'
 import { Route as ConfigRawRouteImport } from './routes/config.raw'
 import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
@@ -38,7 +38,7 @@ import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
-import { Route as PullRequestsProfilesProfileIDRouteImport } from './routes/pull-requests_.profiles.$profileID'
+import { Route as PullRequestsGateConfigsConfigIDRouteImport } from './routes/pull-requests_.gate-configs.$configID'
 import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
 import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
 
@@ -127,9 +127,9 @@ const PullRequestsSettingsRoute = PullRequestsSettingsRouteImport.update({
   path: '/pull-requests/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PullRequestsProfilesRoute = PullRequestsProfilesRouteImport.update({
-  id: '/pull-requests_/profiles',
-  path: '/pull-requests/profiles',
+const PullRequestsGateConfigsRoute = PullRequestsGateConfigsRouteImport.update({
+  id: '/pull-requests_/gate-configs',
+  path: '/pull-requests/gate-configs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PullRequestsWorkspaceIDRoute = PullRequestsWorkspaceIDRouteImport.update({
@@ -187,11 +187,11 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
-const PullRequestsProfilesProfileIDRoute =
-  PullRequestsProfilesProfileIDRouteImport.update({
-    id: '/$profileID',
-    path: '/$profileID',
-    getParentRoute: () => PullRequestsProfilesRoute,
+const PullRequestsGateConfigsConfigIDRoute =
+  PullRequestsGateConfigsConfigIDRouteImport.update({
+    id: '/$configID',
+    path: '/$configID',
+    getParentRoute: () => PullRequestsGateConfigsRoute,
   } as any)
 const AccountsAccountRouterNewRoute =
   AccountsAccountRouterNewRouteImport.update({
@@ -230,14 +230,14 @@ export interface FileRoutesByFullPath {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests/profiles': typeof PullRequestsProfilesRouteWithChildren
+  '/pull-requests/gate-configs': typeof PullRequestsGateConfigsRouteWithChildren
   '/pull-requests/settings': typeof PullRequestsSettingsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
-  '/pull-requests/profiles/$profileID': typeof PullRequestsProfilesProfileIDRoute
+  '/pull-requests/gate-configs/$configID': typeof PullRequestsGateConfigsConfigIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesByTo {
@@ -264,14 +264,14 @@ export interface FileRoutesByTo {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests/profiles': typeof PullRequestsProfilesRouteWithChildren
+  '/pull-requests/gate-configs': typeof PullRequestsGateConfigsRouteWithChildren
   '/pull-requests/settings': typeof PullRequestsSettingsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
-  '/pull-requests/profiles/$profileID': typeof PullRequestsProfilesProfileIDRoute
+  '/pull-requests/gate-configs/$configID': typeof PullRequestsGateConfigsConfigIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesById {
@@ -299,14 +299,14 @@ export interface FileRoutesById {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/pull-requests_/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests_/profiles': typeof PullRequestsProfilesRouteWithChildren
+  '/pull-requests_/gate-configs': typeof PullRequestsGateConfigsRouteWithChildren
   '/pull-requests_/settings': typeof PullRequestsSettingsRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
-  '/pull-requests_/profiles/$profileID': typeof PullRequestsProfilesProfileIDRoute
+  '/pull-requests_/gate-configs/$configID': typeof PullRequestsGateConfigsConfigIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRouteTypes {
@@ -335,14 +335,14 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/pull-requests/$workspaceID'
-    | '/pull-requests/profiles'
+    | '/pull-requests/gate-configs'
     | '/pull-requests/settings'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
-    | '/pull-requests/profiles/$profileID'
+    | '/pull-requests/gate-configs/$configID'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -369,14 +369,14 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/pull-requests/$workspaceID'
-    | '/pull-requests/profiles'
+    | '/pull-requests/gate-configs'
     | '/pull-requests/settings'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
-    | '/pull-requests/profiles/$profileID'
+    | '/pull-requests/gate-configs/$configID'
     | '/threads/open/$threadId'
   id:
     | '__root__'
@@ -403,14 +403,14 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/pull-requests_/$workspaceID'
-    | '/pull-requests_/profiles'
+    | '/pull-requests_/gate-configs'
     | '/pull-requests_/settings'
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
-    | '/pull-requests_/profiles/$profileID'
+    | '/pull-requests_/gate-configs/$configID'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
 }
@@ -429,7 +429,7 @@ export interface RootRouteChildren {
   PullRequestsRoute: typeof PullRequestsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
   PullRequestsWorkspaceIDRoute: typeof PullRequestsWorkspaceIDRoute
-  PullRequestsProfilesRoute: typeof PullRequestsProfilesRouteWithChildren
+  PullRequestsGateConfigsRoute: typeof PullRequestsGateConfigsRouteWithChildren
   PullRequestsSettingsRoute: typeof PullRequestsSettingsRoute
 }
 
@@ -554,11 +554,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PullRequestsSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests_/profiles': {
-      id: '/pull-requests_/profiles'
-      path: '/pull-requests/profiles'
-      fullPath: '/pull-requests/profiles'
-      preLoaderRoute: typeof PullRequestsProfilesRouteImport
+    '/pull-requests_/gate-configs': {
+      id: '/pull-requests_/gate-configs'
+      path: '/pull-requests/gate-configs'
+      fullPath: '/pull-requests/gate-configs'
+      preLoaderRoute: typeof PullRequestsGateConfigsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pull-requests_/$workspaceID': {
@@ -638,12 +638,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
     }
-    '/pull-requests_/profiles/$profileID': {
-      id: '/pull-requests_/profiles/$profileID'
-      path: '/$profileID'
-      fullPath: '/pull-requests/profiles/$profileID'
-      preLoaderRoute: typeof PullRequestsProfilesProfileIDRouteImport
-      parentRoute: typeof PullRequestsProfilesRoute
+    '/pull-requests_/gate-configs/$configID': {
+      id: '/pull-requests_/gate-configs/$configID'
+      path: '/$configID'
+      fullPath: '/pull-requests/gate-configs/$configID'
+      preLoaderRoute: typeof PullRequestsGateConfigsConfigIDRouteImport
+      parentRoute: typeof PullRequestsGateConfigsRoute
     }
     '/accounts/account-router/new': {
       id: '/accounts/account-router/new'
@@ -748,16 +748,19 @@ const ThreadsRouteChildren: ThreadsRouteChildren = {
 const ThreadsRouteWithChildren =
   ThreadsRoute._addFileChildren(ThreadsRouteChildren)
 
-interface PullRequestsProfilesRouteChildren {
-  PullRequestsProfilesProfileIDRoute: typeof PullRequestsProfilesProfileIDRoute
+interface PullRequestsGateConfigsRouteChildren {
+  PullRequestsGateConfigsConfigIDRoute: typeof PullRequestsGateConfigsConfigIDRoute
 }
 
-const PullRequestsProfilesRouteChildren: PullRequestsProfilesRouteChildren = {
-  PullRequestsProfilesProfileIDRoute: PullRequestsProfilesProfileIDRoute,
-}
+const PullRequestsGateConfigsRouteChildren: PullRequestsGateConfigsRouteChildren =
+  {
+    PullRequestsGateConfigsConfigIDRoute: PullRequestsGateConfigsConfigIDRoute,
+  }
 
-const PullRequestsProfilesRouteWithChildren =
-  PullRequestsProfilesRoute._addFileChildren(PullRequestsProfilesRouteChildren)
+const PullRequestsGateConfigsRouteWithChildren =
+  PullRequestsGateConfigsRoute._addFileChildren(
+    PullRequestsGateConfigsRouteChildren,
+  )
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -774,7 +777,7 @@ const rootRouteChildren: RootRouteChildren = {
   PullRequestsRoute: PullRequestsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
   PullRequestsWorkspaceIDRoute: PullRequestsWorkspaceIDRoute,
-  PullRequestsProfilesRoute: PullRequestsProfilesRouteWithChildren,
+  PullRequestsGateConfigsRoute: PullRequestsGateConfigsRouteWithChildren,
   PullRequestsSettingsRoute: PullRequestsSettingsRoute,
 }
 export const routeTree = rootRouteImport

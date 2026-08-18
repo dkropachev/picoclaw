@@ -75,7 +75,7 @@ func (service *Service) UpdateFinding(ctx context.Context, request UpdateFinding
 
 func hardScopeFindingPinned(gates []GateRun, findingID string) bool {
 	for _, gate := range gates {
-		if gate.DecisionPoint != "pr.implementation.scope" || !gate.Evidence.HardScope {
+		if gate.DecisionPoint != "pr.implementation.hard-scope" || !gate.Evidence.HardScope {
 			continue
 		}
 		for _, id := range gate.Evidence.HardScopeFindingIDs {
@@ -235,7 +235,7 @@ func (service *Service) runCompletionAudit(ctx context.Context, request RunCompl
 		if _, existing := findGate(aggregate.Gates, scopeGate.ID); !existing {
 			patch.AppendGates = append(patch.AppendGates, scopeGate)
 		}
-		if scopeGate.State == ExecutionSucceeded && scopeGate.Outcome == GatePass &&
+		if gateCompletedWith(scopeGate, "approve") &&
 			!hasHardCandidateScope(latestRepair.Scope, candidateDrift) {
 			phase, state = aggregate.Workspace.Phase, ExecutionWaitingUser
 			patch.Phase, patch.ExecutionState = &phase, &state

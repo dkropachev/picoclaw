@@ -2,86 +2,222 @@ package config
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
-func TestDefaultPRLifecycleConfigIsValidAndSerious(t *testing.T) {
-	config := DefaultPRLifecycleConfig()
-	if err := config.Validate(); err != nil {
-		t.Fatal(err)
+func TestDefaultPRLifecycleConfigUsesInheritedWorkflowDefaults(t *testing.T) {
+	candidate := DefaultPRLifecycleConfig()
+	if err := candidate.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
 	}
-	profile := config.GateProfiles[DefaultPRLifecycleGateProfileID]
-	for _, point := range []string{"pr.charter.confirm", "pr.implementation.complete", "pr.deferred.publish", "pr.correction.promote"} {
-		workflow, exists := profile.Workflows[point]
-		if !exists || len(workflow.Stages) == 0 || workflow.Stages[0].Kind != "human" {
-			t.Fatalf("default authorization %q = %#v", point, workflow)
-		}
+	if candidate.DefaultGateConfigID != DefaultPRLifecycleGateConfigID {
+		t.Fatalf("default gate configuration = %q", candidate.DefaultGateConfigID)
 	}
-	if config.Nudge.ReviewMinimumAdditional != 2 || config.Nudge.CompletionMinimumAdditional != 2 {
-		t.Fatalf("nudge defaults = %#v", config.Nudge)
+	builtin := candidate.GateConfigs[DefaultPRLifecycleGateConfigID]
+	if builtin.Name != DefaultPRLifecycleGateConfigName || len(builtin.Bindings) != 0 {
+		t.Fatalf("built-in gate configuration = %#v", builtin)
 	}
-	if config.DeferredIssues.Mode != PRLifecycleDeferredIssuesAsk {
-		t.Fatalf("deferred issue defaults = %#v", config.DeferredIssues)
-	}
-	for point, want := range map[string]string{
-		"pr.charter.confirm":   "Approve the PR purpose, type, included scope, exclusions, and non-goals?",
-		"pr.charter.reconfirm": "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
-	} {
-		workflow := profile.Workflows[point]
-		questions, ok := workflow.Stages[0].Questions.([]any)
-		if !ok || len(questions) != 1 || questions[0] != want {
-			t.Fatalf("default charter questions for %q = %#v, want %q", point, workflow.Stages[0].Questions, want)
-		}
-	}
-	for point, want := range map[string]string{
-		"pr.charter.confirm":   "Confirm PR charter",
-		"pr.charter.reconfirm": "Confirm revised PR charter",
-	} {
-		if got := profile.Workflows[point].Name; got != want {
-			t.Fatalf("default workflow name for %q = %q, want %q", point, got, want)
-		}
+	if len(candidate.RepositoryAssignments) != 0 ||
+		candidate.DeferredIssues.Mode != PRLifecycleDeferredIssuesAsk {
+		t.Fatalf("default lifecycle = %#v", candidate)
 	}
 }
 
-func TestPRLifecycleRejectsWorkflowPurposeOutsideDecisionPointContract(t *testing.T) {
+func TestPRLifecycleConfigAcceptsAtomicGateActionOverrides(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides()
+	if err := candidate.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if err := candidate.ValidateAgentReferences(AgentsConfig{}); err != nil {
+		t.Fatalf("ValidateAgentReferences() error = %v", err)
+	}
+	configID, selected, revision, err := candidate.ConfigForRepository(
+		"https://github.com/", "repo-42",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configID != "automated" || selected.Name != "Automated" || revision == "" {
+		t.Fatalf("selected = %q %#v %q", configID, selected, revision)
+	}
+}
+
+func TestPRLifecycleGateConfigRevisionIgnoresBindingOrder(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides().GateConfigs["automated"]
+	left, err := PRLifecycleGateConfigRevision("automated", candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for leftIndex, rightIndex := 0, len(candidate.Bindings)-1; leftIndex < rightIndex; leftIndex, rightIndex = leftIndex+1, rightIndex-1 {
+		candidate.Bindings[leftIndex], candidate.Bindings[rightIndex] = candidate.Bindings[rightIndex], candidate.Bindings[leftIndex]
+	}
+	right, err := PRLifecycleGateConfigRevision("automated", candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != right {
+		t.Fatalf("revisions differ by binding order: %q != %q", left, right)
+	}
+}
+
+func TestPRLifecycleConfigRejectsInvalidGateConfigurations(t *testing.T) {
 	tests := []struct {
-		point        string
-		wrongPurpose gatetypes.GatePurpose
-		wantPurpose  gatetypes.GatePurpose
+		name   string
+		mutate func(*PRLifecycleConfig)
+		want   string
 	}{
-		{
-			point: "pr.charter.reconfirm", wrongPurpose: gatetypes.GatePurposeClassification,
-			wantPurpose: gatetypes.GatePurposeAuthorization,
-		},
-		{
-			point: "pr.finding.classify", wrongPurpose: gatetypes.GatePurposeAuthorization,
-			wantPurpose: gatetypes.GatePurposeClassification,
-		},
+		{name: "missing configs", mutate: func(c *PRLifecycleConfig) { c.GateConfigs = nil }, want: "must contain"},
+		{name: "missing default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultGateConfigID = "" }, want: "default gate configuration is required"},
+		{name: "unknown default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultGateConfigID = "missing" }, want: "does not exist"},
+		{name: "renamed builtin", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs[DefaultPRLifecycleGateConfigID]
+			v.Name = "Renamed"
+			c.GateConfigs[DefaultPRLifecycleGateConfigID] = v
+		}, want: "built-in default"},
+		{name: "builtin override", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs[DefaultPRLifecycleGateConfigID]
+			v.Bindings = append(v.Bindings, validHumanBinding())
+			c.GateConfigs[DefaultPRLifecycleGateConfigID] = v
+		}, want: "built-in default"},
+		{name: "snake config id", mutate: func(c *PRLifecycleConfig) {
+			c.GateConfigs["bad_id"] = PRLifecycleGateConfig{Name: "Bad", Bindings: []PRLifecycleGateBinding{}}
+		}, want: "invalid identity"},
+		{name: "duplicate name", mutate: func(c *PRLifecycleConfig) {
+			c.GateConfigs["another"] = PRLifecycleGateConfig{Name: "automated", Bindings: []PRLifecycleGateBinding{}}
+		}, want: "duplicate names"},
+		{name: "duplicate binding", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings = append(v.Bindings, v.Bindings[0])
+			c.GateConfigs["automated"] = v
+		}, want: "duplicate binding"},
+		{name: "relative workflow ref", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[0].WorkflowRef = "pr-lifecycle.yml"
+			c.GateConfigs["automated"] = v
+		}, want: "workflow-ref is invalid"},
+		{name: "runtime gate ref", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[0].GateRef = "${{ gates.charter-decision }}"
+			c.GateConfigs["automated"] = v
+		}, want: "static full path"},
+		{name: "relative gate ref", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[0].GateRef = "charter-decision"
+			c.GateConfigs["automated"] = v
+		}, want: "static full path"},
+		{name: "partial human action", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionHuman, Prompt: "not allowed"}
+			c.GateConfigs["automated"] = v
+		}, want: "human gate action"},
+		{name: "partial AI action", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionAI, AgentID: "main"}
+			c.GateConfigs["automated"] = v
+		}, want: "requires prompt"},
+		{name: "partial workflow action", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionWorkflow}
+			c.GateConfigs["automated"] = v
+		}, want: "requires workflow-ref"},
+		{name: "unsafe private AI defaults", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			action := *v.Bindings[0].Action
+			action.Tools = "inherit"
+			v.Bindings[0].Action = &action
+			c.GateConfigs["automated"] = v
+		}, want: "requires tools: none"},
+		{name: "noncanonical workflow action ref", mutate: func(c *PRLifecycleConfig) {
+			v := c.GateConfigs["automated"]
+			v.Bindings[2].Action.WorkflowRef = "workflows/gate-actions/publication"
+			c.GateConfigs["automated"] = v
+		}, want: "workflow-ref is invalid"},
+		{name: "unknown assignment", mutate: func(c *PRLifecycleConfig) {
+			c.RepositoryAssignments["https://github.com|repo-42"] = "missing"
+		}, want: "selects missing"},
 	}
 	for _, test := range tests {
-		t.Run(test.point, func(t *testing.T) {
-			candidate := DefaultPRLifecycleConfig()
-			profile := candidate.GateProfiles[DefaultPRLifecycleGateProfileID]
-			workflow := profile.Workflows[test.point]
-			workflow.Purpose = test.wrongPurpose
-			profile.Workflows[test.point] = workflow
-			candidate.GateProfiles[DefaultPRLifecycleGateProfileID] = profile
-
+		t.Run(test.name, func(t *testing.T) {
+			candidate := lifecycleConfigWithOverrides()
+			test.mutate(&candidate)
 			err := candidate.Validate()
-			want := "purpose must be \"" + string(test.wantPurpose) + "\""
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("Validate() error = %v, want %q", err, want)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
 			}
 		})
 	}
 }
 
-func TestPRLifecycleDeferredIssueModesAreExact(t *testing.T) {
+func TestPRLifecycleConfigBindingMayExplicitlyInheritWorkflowDefault(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides()
+	gateConfig := candidate.GateConfigs["automated"]
+	gateConfig.Bindings[0].Action = nil
+	candidate.GateConfigs["automated"] = gateConfig
+	if err := candidate.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestPRLifecycleConfigRejectsUnknownOverrideAgent(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides()
+	config := candidate.GateConfigs["automated"]
+	action := *config.Bindings[0].Action
+	action.AgentID = "missing-agent"
+	config.Bindings[0].Action = &action
+	candidate.GateConfigs["automated"] = config
+	if err := candidate.Validate(); err != nil {
+		t.Fatalf("shape validation error = %v", err)
+	}
+	if err := candidate.ValidateAgentReferences(AgentsConfig{}); err == nil ||
+		!strings.Contains(err.Error(), "unknown agent") {
+		t.Fatalf("ValidateAgentReferences() error = %v", err)
+	}
+}
+
+func TestPRLifecycleConfigWireNamesAreKebabCase(t *testing.T) {
+	encoded, err := json.Marshal(lifecycleConfigWithOverrides())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"gate_configs", "default_gate_config", "repository_assignments",
+		"deferred_issues", "workflow_ref", "gate_ref", "agent_id",
+		"review_minimum_additional", "semantic_lines",
+	} {
+		if strings.Contains(string(encoded), `"`+forbidden+`"`) {
+			t.Fatalf("wire JSON contains snake-case key %q: %s", forbidden, encoded)
+		}
+	}
+	for _, required := range []string{
+		"gate-configs", "default-gate-config", "repository-assignments",
+		"deferred-issues", "workflow-ref", "gate-ref", "agent-id",
+		"review-minimum-additional", "semantic-lines",
+	} {
+		if !strings.Contains(string(encoded), `"`+required+`"`) {
+			t.Fatalf("wire JSON omits kebab-case key %q: %s", required, encoded)
+		}
+	}
+}
+
+func TestPRLifecycleConfigRejectsRetiredAndUnknownWireFields(t *testing.T) {
+	for _, raw := range []string{
+		`{"gate-profiles":{},"default-gate-profile":"default"}`,
+		`{"gate_profiles":{},"default_gate_profile_id":"default"}`,
+		`{"gate-configs":{},"default-gate-config":"default","unknown":true}`,
+		`{"gate-configs":{}} {}`,
+	} {
+		var decoded PRLifecycleConfig
+		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
+			t.Fatalf("retired/unknown PR lifecycle config was accepted: %s", raw)
+		}
+	}
+}
+
+func TestPRLifecycleDeferredIssueModesAndThresholdsRemainExact(t *testing.T) {
 	for _, mode := range []PRLifecycleDeferredIssueMode{
 		PRLifecycleDeferredIssuesOff,
 		PRLifecycleDeferredIssuesAsk,
@@ -94,175 +230,64 @@ func TestPRLifecycleDeferredIssueModesAreExact(t *testing.T) {
 		}
 	}
 	candidate := DefaultPRLifecycleConfig()
-	candidate.DeferredIssues.Mode = "prompt"
-	if err := candidate.Validate(); err == nil {
-		t.Fatal("invalid deferred issue mode accepted")
+	candidate.Scope.S.Files = candidate.Scope.XS.Files - 1
+	if err := candidate.Validate(); err == nil || !strings.Contains(err.Error(), "monotonic") {
+		t.Fatalf("non-monotonic scope error = %v", err)
 	}
 }
 
-func TestPRLifecycleRejectsDecisionPointsOutsideClosedCatalog(t *testing.T) {
-	addUnknownDecisionPoint := func(candidate *PRLifecycleConfig) {
-		profile := candidate.GateProfiles[DefaultPRLifecycleGateProfileID]
-		workflow := profile.Workflows["pr.charter.confirm"]
-		workflow.ID = "pr-custom-undeclared"
-		workflow.Name = "pr.custom.undeclared"
-		workflow.DecisionPoint = "pr.custom.undeclared"
-		profile.Workflows[workflow.DecisionPoint] = workflow
-		candidate.GateProfiles[DefaultPRLifecycleGateProfileID] = profile
-	}
-
+func lifecycleConfigWithOverrides() PRLifecycleConfig {
 	candidate := DefaultPRLifecycleConfig()
-	addUnknownDecisionPoint(&candidate)
-	if err := candidate.Validate(); err == nil || !strings.Contains(err.Error(), `unknown decision point "pr.custom.undeclared"`) {
-		t.Fatalf("Validate() error = %v", err)
-	}
-
-	path := filepath.Join(t.TempDir(), "config.json")
-	cfg := DefaultConfig()
-	if err := SaveConfig(path, cfg); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var edited Config
-	if err := json.Unmarshal(data, &edited); err != nil {
-		t.Fatal(err)
-	}
-	addUnknownDecisionPoint(&edited.PRLifecycle)
-	data, err = json.Marshal(&edited)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), `unknown decision point "pr.custom.undeclared"`) {
-		t.Fatalf("LoadConfig() error = %v", err)
-	}
-}
-
-func TestPRLifecycleProfileAssignmentUsesProviderRepositoryIdentity(t *testing.T) {
-	config := DefaultPRLifecycleConfig()
-	config.RepositoryAssignments["https://github.example|123"] = "default"
-	id, _, revision, err := config.ProfileForRepository("https://github.example/", "123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "default" || len(revision) != len("sha256:")+64 {
-		t.Fatalf("profile = %q revision=%q", id, revision)
-	}
-}
-
-func TestPRLifecycleValidationUsesRuntimeGateSemantics(t *testing.T) {
-	tests := []struct {
-		name      string
-		stages    []gatetypes.GateStageSpec
-		wantError string
-	}{
-		{
-			name: "valid mixed workflow",
-			stages: []gatetypes.GateStageSpec{
-				{ID: "zero", Kind: gatetypes.GateZero},
-				{ID: "condition", Kind: gatetypes.GateDeterministic, Title: "Condition", When: "inputs.gate_subject.ready == true"},
-				{ID: "isolated", Kind: gatetypes.GateAIIsolatedContext, Title: "Isolated", AgentID: "reviewer", Criteria: "Check evidence."},
-				{ID: "working", Kind: gatetypes.GateAIWorkingContext, Title: "Working", AgentID: "main", Criteria: "Check discussion."},
-				{ID: "human", Kind: gatetypes.GateHuman, Title: "Approve", Questions: []any{"Approve?"}},
+	candidate.GateConfigs["automated"] = PRLifecycleGateConfig{
+		Name: "Automated",
+		Bindings: []PRLifecycleGateBinding{
+			{
+				WorkflowRef: "workflows/pr-lifecycle.yml",
+				GateRef:     "gates.charter-confirm",
+				Action: &gatetypes.GateAction{
+					Type: gatetypes.GateActionAI, AgentID: "main",
+					Prompt:  "Review the charter and complete the gate fields.",
+					Session: "ephemeral", History: "none", Cache: "none", Tools: "none",
+				},
+			},
+			{
+				WorkflowRef: "workflows/pr-lifecycle.yml",
+				GateRef:     "gates.finding-classify",
+				Action: &gatetypes.GateAction{
+					Type:   gatetypes.GateActionDeterministic,
+					Fields: map[string]any{"action": "keep-in-pr"},
+				},
+			},
+			{
+				WorkflowRef: "workflows/pr-lifecycle.yml",
+				GateRef:     "gates.review-publish",
+				Action: &gatetypes.GateAction{
+					Type:        gatetypes.GateActionWorkflow,
+					WorkflowRef: "workflows/gate-actions/publication.yml",
+				},
 			},
 		},
-		{
-			name: "malformed deterministic expression",
-			stages: []gatetypes.GateStageSpec{{
-				ID: "condition", Kind: gatetypes.GateDeterministic, Title: "Condition",
-				When: "inputs.gate_subject.ready ==",
-			}},
-			wantError: "unsupported expression syntax",
-		},
-		{
-			name: "noncanonical agent",
-			stages: []gatetypes.GateStageSpec{{
-				ID: "working", Kind: gatetypes.GateAIWorkingContext, Title: "Working",
-				AgentID: "Main", Criteria: "Check discussion.",
-			}},
-			wantError: "agent",
-		},
-		{
-			name: "mixed working owners",
-			stages: []gatetypes.GateStageSpec{
-				{ID: "first", Kind: gatetypes.GateAIWorkingContext, Title: "First", AgentID: "main", Criteria: "Check one."},
-				{ID: "second", Kind: gatetypes.GateAIWorkingContext, Title: "Second", AgentID: "reviewer", Criteria: "Check two."},
-			},
-			wantError: "one session-owning agent",
-		},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			candidate := DefaultPRLifecycleConfig()
-			workflow := candidate.GateProfiles[DefaultPRLifecycleGateProfileID].Workflows["pr.charter.confirm"]
-			workflow.Stages = test.stages
-			profile := candidate.GateProfiles[DefaultPRLifecycleGateProfileID]
-			profile.Workflows["pr.charter.confirm"] = workflow
-			candidate.GateProfiles[DefaultPRLifecycleGateProfileID] = profile
-			err := candidate.Validate()
-			if test.wantError == "" {
-				if err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("Validate() error = %v, want %q", err, test.wantError)
-			}
-		})
+	candidate.DefaultGateConfigID = "automated"
+	candidate.RepositoryAssignments["https://github.com|repo-42"] = "automated"
+	return candidate
+}
+
+func validHumanBinding() PRLifecycleGateBinding {
+	return PRLifecycleGateBinding{
+		WorkflowRef: "workflows/pr-lifecycle.yml",
+		GateRef:     "gates.charter-confirm",
+		Action:      &gatetypes.GateAction{Type: gatetypes.GateActionHuman},
 	}
 }
 
-func TestFullConfigRejectsUnknownPRLifecycleGateAgents(t *testing.T) {
-	workflowWithAgent := func(agentID string) PRLifecycleConfig {
-		candidate := DefaultPRLifecycleConfig()
-		profile := candidate.GateProfiles[DefaultPRLifecycleGateProfileID]
-		workflow := profile.Workflows["pr.charter.confirm"]
-		workflow.Stages = []gatetypes.GateStageSpec{{
-			ID: "ai", Kind: gatetypes.GateAIIsolatedContext, AgentID: agentID,
-			Title: "Check", Criteria: "Check the charter.",
-		}}
-		profile.Workflows["pr.charter.confirm"] = workflow
-		candidate.GateProfiles[DefaultPRLifecycleGateProfileID] = profile
-		return candidate
+func TestPRLifecycleConfigSelectionIsCaseInsensitiveForRepositoryIdentity(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides()
+	id, selected, _, err := candidate.ConfigForRepository("HTTPS://GITHUB.COM", "REPO-42")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	t.Run("unknown canonical agent", func(t *testing.T) {
-		cfg := DefaultConfig()
-		cfg.Agents.List = []AgentConfig{{ID: "main", Default: true}}
-		cfg.PRLifecycle = workflowWithAgent("ghost")
-		if err := cfg.PRLifecycle.Validate(); err != nil {
-			t.Fatalf("shape validation unexpectedly failed: %v", err)
-		}
-		err := SaveConfig(filepath.Join(t.TempDir(), "config.json"), cfg)
-		if err == nil || !strings.Contains(err.Error(), `unknown agent "ghost"`) {
-			t.Fatalf("SaveConfig() error = %v, want unknown ghost agent", err)
-		}
-	})
-
-	t.Run("configured exact agent", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "config.json")
-		cfg := DefaultConfig()
-		cfg.Agents.List = []AgentConfig{{ID: "main", Default: true}, {ID: "reviewer"}}
-		cfg.PRLifecycle = workflowWithAgent("reviewer")
-		if err := SaveConfig(path, cfg); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadConfig(path); err != nil {
-			t.Fatalf("LoadConfig() rejected saved exact agent reference: %v", err)
-		}
-	})
-
-	t.Run("implicit main agent", func(t *testing.T) {
-		cfg := DefaultConfig()
-		cfg.PRLifecycle = workflowWithAgent("main")
-		if err := cfg.PRLifecycle.ValidateAgentReferences(cfg.Agents); err != nil {
-			t.Fatal(err)
-		}
-	})
+	if id != "automated" || !reflect.DeepEqual(selected, candidate.GateConfigs["automated"]) {
+		t.Fatalf("selection = %q %#v", id, selected)
+	}
 }

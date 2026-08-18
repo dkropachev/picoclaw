@@ -5,11 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
-	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/prworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/lifecycleflow"
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
@@ -50,18 +49,27 @@ func main() {
 }
 
 func defaultGateFormats(graph lifecycleflow.Graph) (map[string]string, error) {
-	profile := config.DefaultPRLifecycleConfig().GateProfiles[config.DefaultPRLifecycleGateProfileID]
+	catalog, err := prworkspace.PRLifecycleGateCatalog()
+	if err != nil {
+		return nil, err
+	}
+	byDecisionPoint := make(map[string]prworkspace.PRLifecycleGateCatalogEntry, len(catalog))
+	for _, entry := range catalog {
+		if _, exists := byDecisionPoint[entry.DecisionPoint]; !exists {
+			byDecisionPoint[entry.DecisionPoint] = entry
+		}
+	}
 	formats := make(map[string]string)
 	for _, flow := range graph.Flows {
 		for _, node := range flow.Nodes {
 			if node.Kind != lifecycleflow.NodeGate || !node.Editable {
 				continue
 			}
-			workflow, exists := profile.Workflows[node.DecisionPoint]
+			entry, exists := byDecisionPoint[node.DecisionPoint]
 			if !exists {
-				return nil, fmt.Errorf("default gate profile is missing manifest decision point %q", node.DecisionPoint)
+				return nil, fmt.Errorf("gate workflow is missing manifest decision point %q", node.DecisionPoint)
 			}
-			format, err := workflowFormat(workflow.Stages)
+			format, err := workflowFormat(entry.Gate.DefaultAction)
 			if err != nil {
 				return nil, fmt.Errorf("default gate %q: %w", node.DecisionPoint, err)
 			}
@@ -71,36 +79,22 @@ func defaultGateFormats(graph lifecycleflow.Graph) (map[string]string, error) {
 	return formats, nil
 }
 
-func workflowFormat(stages []gatetypes.GateStageSpec) (string, error) {
-	categories := make(map[string]struct{})
-	for _, stage := range stages {
-		var category string
-		switch stage.Kind {
-		case gatetypes.GateZero:
-			category = "automatic"
-		case gatetypes.GateDeterministic:
-			category = "rule"
-		case gatetypes.GateAIWorkingContext, gatetypes.GateAIIsolatedContext:
-			category = "ai"
-		case gatetypes.GateHuman:
-			category = "user"
-		default:
-			return "", fmt.Errorf("unknown stage kind %q", stage.Kind)
-		}
-		categories[category] = struct{}{}
-	}
-	if len(categories) == 0 {
+func workflowFormat(action *gatetypes.GateAction) (string, error) {
+	if action == nil {
 		return "needs setup", nil
 	}
-	if len(categories) > 1 {
-		return "mixed", nil
+	switch action.Type {
+	case gatetypes.GateActionHuman:
+		return "human", nil
+	case gatetypes.GateActionAI:
+		return "ai", nil
+	case gatetypes.GateActionDeterministic:
+		return "rule", nil
+	case gatetypes.GateActionWorkflow:
+		return "workflow", nil
+	default:
+		return "", fmt.Errorf("unknown gate action type %q", action.Type)
 	}
-	values := make([]string, 0, len(categories))
-	for category := range categories {
-		values = append(values, category)
-	}
-	sort.Strings(values)
-	return values[0], nil
 }
 
 func writeAtomic(path string, data []byte) error {

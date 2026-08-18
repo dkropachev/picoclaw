@@ -48,27 +48,15 @@ func (candidateIdentityValidation) Validate(_ context.Context, request Validatio
 type implementationAuthorizationWaitingGates struct{}
 
 func (implementationAuthorizationWaitingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	gate := GateRun{
-		ID:            stableID("pgr_", request.WorkspaceID, request.DecisionPoint, request.SubjectDigest),
-		DecisionPoint: request.DecisionPoint, Purpose: request.Purpose,
-		State: ExecutionSucceeded, Outcome: GatePass, PolicyRevision: "sha256:policy",
-		SubjectRevision: request.SubjectDigest, CreatedAt: now, FinishedAt: &now,
-	}
-	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.complete" {
-		gate.State, gate.Outcome, gate.FinishedAt = ExecutionWaitingUser, "", nil
-		gate.Turns = []GateTurn{{
-			StageID: "human", Kind: "human", Title: "Approve implementation", Status: "waiting",
-			Questions: []string{"Approve this exact candidate?"},
-		}}
+	gate := testSucceededGate(request)
+	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.hard-scope" || request.DecisionPoint == "pr.implementation.complete" {
+		gate = testWaitingGate(request)
 	}
 	return gate, nil
 }
 
-func (implementationAuthorizationWaitingGates) Respond(_ context.Context, gate GateRun, decision GateOutcome, _ map[string]any, _ string) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	gate.State, gate.Outcome, gate.FinishedAt = ExecutionSucceeded, decision, &now
-	return gate, nil
+func (implementationAuthorizationWaitingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
+	return answerTestGate(gate, fieldValues), nil
 }
 
 func (repair *completionFinalizingRepair) FinalizeRepair(_ context.Context, _ string, result RepairResult) (RepairResult, error) {
@@ -110,27 +98,15 @@ func (*blockingBranchPublisher) ReconcileBranch(context.Context, BranchPublicati
 }
 
 func (completionWaitingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	gate := GateRun{
-		ID:            stableID("pgr_", request.WorkspaceID, request.DecisionPoint, request.SubjectDigest),
-		DecisionPoint: request.DecisionPoint, Purpose: request.Purpose,
-		State: ExecutionSucceeded, Outcome: GatePass, PolicyRevision: "sha256:policy",
-		SubjectRevision: request.SubjectDigest, CreatedAt: now, FinishedAt: &now,
-	}
+	gate := testSucceededGate(request)
 	if request.DecisionPoint == "pr.implementation.complete" {
-		gate.State, gate.Outcome, gate.FinishedAt = ExecutionWaitingUser, "", nil
-		gate.Turns = []GateTurn{{
-			StageID: "human", Kind: "human", Title: "Approve completion", Status: "waiting",
-			Questions: []string{"Is the exact candidate complete within the confirmed scope?"},
-		}}
+		gate = testWaitingGate(request)
 	}
 	return gate, nil
 }
 
-func (completionWaitingGates) Respond(_ context.Context, gate GateRun, decision GateOutcome, _ map[string]any, _ string) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	gate.State, gate.Outcome, gate.FinishedAt = ExecutionSucceeded, decision, &now
-	return gate, nil
+func (completionWaitingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
+	return answerTestGate(gate, fieldValues), nil
 }
 
 func implementationWaitingOnCompletion(t *testing.T) (*Service, Aggregate, GateRun) {
@@ -169,11 +145,11 @@ func implementationWaitingOnCompletion(t *testing.T) (*Service, Aggregate, GateR
 	return nil, Aggregate{}, GateRun{}
 }
 
-func TestCurrentImplementationCompletionGateCanPass(t *testing.T) {
+func TestCurrentImplementationCompletionGateCanAccept(t *testing.T) {
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-pass-current-completion", Decision: GatePass,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-pass-current-completion", FieldValues: map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +159,7 @@ func TestCurrentImplementationCompletionGateCanPass(t *testing.T) {
 	}
 }
 
-func TestFinalizedImplementationScopeThenCompletionGatesCanPass(t *testing.T) {
+func TestFinalizedImplementationScopeThenCompletionGatesCanApprove(t *testing.T) {
 	service, aggregate := readyImplementationService(t)
 	provider := aggregate.ProviderSnapshot
 	provider.State = "open"
@@ -231,14 +207,14 @@ func TestFinalizedImplementationScopeThenCompletionGatesCanPass(t *testing.T) {
 	}
 	scopeApproved, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waiting.Workspace.ID, GateRunID: scopeGate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-pass-finalized-scope", Decision: GatePass,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-pass-finalized-scope", FieldValues: map[string]any{"action": "approve"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: scopeApproved.Workspace.ID, GateRunID: completionGate.ID,
-		ExpectedVersion: scopeApproved.Workspace.Version, RequestID: "request-pass-finalized-completion", Decision: GatePass,
+		ExpectedVersion: scopeApproved.Workspace.Version, RequestID: "request-pass-finalized-completion", FieldValues: map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +269,7 @@ func TestImplementationCompletionGateRejectsLaterGuidanceAndCorrection(t *testin
 			staled, err := service.RespondGate(context.Background(), RespondGateRequest{
 				WorkspaceID: changed.Workspace.ID, GateRunID: gate.ID,
 				ExpectedVersion: changed.Workspace.Version, RequestID: "request-pass-stale-completion-" + string(rune('a'+testIndex)),
-				Decision: GatePass,
+				FieldValues: map[string]any{"action": "accept"},
 			})
 			if !errors.Is(err, ErrConflict) {
 				t.Fatalf("stale completion response error = %v", err)
@@ -327,7 +303,7 @@ func TestImplementationCompletionGateRejectsLaterCompletionAuditEvidence(t *test
 	}
 	staled, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: audited.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: audited.Workspace.Version, RequestID: "request-pass-after-later-audit", Decision: GatePass,
+		ExpectedVersion: audited.Workspace.Version, RequestID: "request-pass-after-later-audit", FieldValues: map[string]any{"action": "accept"},
 	})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale completion response error = %v", err)
@@ -367,7 +343,7 @@ func TestImplementationCompletionGateRejectsSupersededRepair(t *testing.T) {
 	}
 	staled, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: seeded.Aggregate.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: seeded.Aggregate.Workspace.Version, RequestID: "request-pass-superseded-repair", Decision: GatePass,
+		ExpectedVersion: seeded.Aggregate.Workspace.Version, RequestID: "request-pass-superseded-repair", FieldValues: map[string]any{"action": "accept"},
 	})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("superseded completion response error = %v", err)
@@ -382,7 +358,7 @@ func TestBranchPublicationRejectsGuidanceAddedAfterCompletionApproval(t *testing
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-guidance", Decision: GatePass,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-guidance", FieldValues: map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -412,7 +388,7 @@ func TestBranchDispatchRechecksCompletionAuthorization(t *testing.T) {
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-queue", Decision: GatePass,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-queue", FieldValues: map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +428,7 @@ func TestRunningBranchPublicationFencesCompletionContextMutations(t *testing.T) 
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-concurrent-push", Decision: GatePass,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-concurrent-push", FieldValues: map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -526,7 +502,7 @@ func assertStaleCompletionNeutralized(t *testing.T, aggregate Aggregate, gateID 
 	if stage.Stage != "implementation" || stage.State != ExecutionBlocked || stage.PublicError != "completion_authorization_stale" {
 		t.Fatalf("stale implementation stage = %#v", stage)
 	}
-	if gate.Outcome != GatePass && aggregate.Findings[0].Disposition == FindingFixed {
+	if gateAction(gate) != "accept" && aggregate.Findings[0].Disposition == FindingFixed {
 		t.Fatalf("stale completion marked finding fixed: %#v", aggregate.Findings[0])
 	}
 }

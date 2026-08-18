@@ -20,11 +20,15 @@ type restartPublicationPassingGates struct {
 func (gates restartPublicationPassingGates) Start(_ context.Context, request prworkspace.GateRequest) (prworkspace.GateRun, error) {
 	finished := gates.now
 	return prworkspace.GateRun{
-		ID:              "pgr_11111111111111111111111111111111",
-		DecisionPoint:   request.DecisionPoint,
-		Purpose:         request.Purpose,
-		State:           prworkspace.ExecutionSucceeded,
-		Outcome:         prworkspace.GatePass,
+		ID:            "pgr_11111111111111111111111111111111",
+		DecisionPoint: request.DecisionPoint,
+		State:         prworkspace.ExecutionSucceeded,
+		Turns: []prworkspace.GateTurn{{
+			StageID: "gate", Kind: "deterministic", ActorKind: "deterministic", Status: "answered",
+			ExecutionID: "ge_restart-review", ActionRevision: "sha256:restart-action", InputHash: "sha256:restart-input",
+			FieldValues: map[string]any{"action": "publish"},
+			GateForm:    &prworkspace.GateForm{GateRef: "gates.review-publish", Prompt: "Publish?"},
+		}},
 		PolicyRevision:  "restart-integration-v1",
 		SubjectRevision: request.SubjectDigest,
 		CreatedAt:       gates.now,
@@ -35,12 +39,10 @@ func (gates restartPublicationPassingGates) Start(_ context.Context, request prw
 func (restartPublicationPassingGates) Respond(
 	_ context.Context,
 	gate prworkspace.GateRun,
-	decision prworkspace.GateOutcome,
-	_ map[string]any,
-	_ string,
+	fieldValues map[string]any,
 ) (prworkspace.GateRun, error) {
 	gate.State = prworkspace.ExecutionSucceeded
-	gate.Outcome = decision
+	gate.Turns = []prworkspace.GateTurn{{Status: "answered", FieldValues: fieldValues}}
 	return gate, nil
 }
 

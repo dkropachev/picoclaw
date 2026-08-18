@@ -42,7 +42,7 @@ func TestRenderSVGUsesNormalizedGraphAndClickableGates(t *testing.T) {
 		`data-decision-point="pr.review.start"`,
 		`data-safeguard="pr.scope.hard"`,
 		`gate=pr.review.start`,
-		`GATE 3`,
+		`>GATE</text>`,
 		`MIXED`,
 		`Hard stop`,
 		`data-flow-edge="loop"`,
@@ -51,7 +51,7 @@ func TestRenderSVGUsesNormalizedGraphAndClickableGates(t *testing.T) {
 			t.Fatalf("SVG missing %q", expected)
 		}
 	}
-	if !strings.Contains(text, `/pull-requests/profiles/default?flow=review&amp;gate=`) {
+	if !strings.Contains(text, `/pull-requests/gate-configs/default?flow=review&amp;gate=`) {
 		t.Fatal("editable gate URL is not XML-safe")
 	}
 }

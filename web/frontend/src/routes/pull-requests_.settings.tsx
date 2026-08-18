@@ -7,9 +7,9 @@ import {
 import { useEffect, useMemo } from "react"
 
 import {
-  PRLifecycleGateProfilesPage,
+  PRLifecycleGateConfigsPage,
   type PRLifecycleSettingsTab,
-} from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
+} from "@/components/pr-workspaces/pr-lifecycle-gate-configs-page"
 import {
   asPRNavigationState,
   goToMarkedPRHistory,
@@ -79,7 +79,7 @@ function PullRequestLifecycleSettingsRoutePage() {
     ...(search.from ? { from: search.from } : {}),
   } as const
   return (
-    <PRLifecycleGateProfilesPage
+    <PRLifecycleGateConfigsPage
       discardOpen={search.dialog === "discard"}
       page="settings"
       settingsTab={search.tab}

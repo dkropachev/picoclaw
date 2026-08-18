@@ -59,9 +59,9 @@ Scope distance and implementation size are independent:
 | `S3_unrelated` | Outside the chartered area | Block from implementation and defer or dismiss |
 
 Change size is graded `XS`, `S`, `M`, or `L` from files, semantic lines, and
-modules. Size does not make an out-of-scope change acceptable. The default
-profile sends a large exact-scope implementation to a human scope gate and
-blocks related, unrelated, or type-incompatible implementation work.
+modules. Size does not make an out-of-scope change acceptable. The application
+invokes its configured scope gate for large exact work and uses a dedicated
+hard-scope gate for related, unrelated, or type-incompatible candidate code.
 
 The UI also distinguishes `candidate_present` work from a `follow_up`. A
 follow-up can be deferred because it is not in the candidate. Deferring a
@@ -72,20 +72,23 @@ charter.
 
 An isolated scope audit that classifies any candidate-present hunk as
 `S2_related_followup`, `S3_unrelated`, or incompatible with the charter's PR
-type stops implementation before validation and finalization. It opens a
-built-in human hard-scope gate that a configurable profile cannot weaken. The
-UI reports the scope and size grades and offers only these outcomes:
+type stops implementation before validation and finalization. It opens the
+static `gates.implementation-hard-scope` form. Its execution action is
+configurable, but neither configuration nor an AI response can add an option
+that the workflow did not declare. The UI reports the scope and size grades and
+offers only these field values:
 
-- **Remove code + defer follow-up** (`defer`) authorizes another repair to
+- **Remove code + defer follow-up** (`defer-follow-up`) authorizes another repair to
   remove the candidate-present code and clones the finding as deferred
   follow-up work for grouping and issue tracking;
-- **Revise and reconfirm charter** (`revise`) returns the workspace to charter
+- **Revise and reconfirm charter** (`revise-charter`) returns the workspace to charter
   revision, and implementation cannot continue until the new revision is
   explicitly confirmed;
-- **Stop implementation** (`block`) leaves implementation blocked.
+- **Stop implementation** (`stop`) leaves implementation blocked.
 
-`pass` is unavailable for this gate. It cannot be supplied through the API to
-bypass hard scope. Branch-publication eligibility independently rechecks the
+No approval option exists for this gate. An unknown or ordinary-scope option
+cannot be supplied through the API to bypass hard scope. Branch-publication
+eligibility independently rechecks the
 current findings, repair assessment, and the gate's immutable hard-scope flag,
 so editing a finding or retaining a stale successful gate cannot make that
 candidate publishable. The exact hard-resolution finding IDs are pinned in the
@@ -174,47 +177,81 @@ rounds. A bounded maximum prevents open-ended model loops.
 
 ## Gates
 
-Gate profiles are configured from **Pull requests → Gate profiles**, the
-canonical `/pull-requests/profiles` page. Global nudge, scope-grade, and
-deferred-issue settings live under `/pull-requests/settings`; each profile has
-its own `/pull-requests/profiles/:profileID?flow=review|implementation` editor.
-Profiles may be assigned to specific canonical repositories; all others use
-the configured default.
+Gate configurations are managed from **Pull requests → Gate configurations** at
+`/pull-requests/gate-configs`. Each named configuration has its own
+`/pull-requests/gate-configs/:configID?flow=review|implementation` editor and
+may be assigned to exact canonical repositories; all other repositories use the
+configured default. Nudging, scope grades, and deferred-issue policy remain at
+`/pull-requests/settings`.
 
-A decision point is an ordered all-of workflow. Supported stage formats are:
+The application workflow owns static gate declarations. A declaration looks
+like this:
 
-- `zero`: immediate explicit pass;
-- `deterministic`: evaluate a bounded expression over the frozen subject;
-- `ai_working_context`: evaluate with an agent-owned, protected, revision-fenced
-  session derived from the bounded current workspace context;
-- `ai_isolated_context`: evaluate with an ephemeral, no-tool context;
-- `human`: suspend until the user chooses `pass`, `revise`, `defer`, or `block`.
+```yaml
+gates:
+  implementation-complete:
+    prompt: Decide whether implementation is complete within scope.
+    fields:
+      - id: action
+        type: select
+        label: What should happen?
+        min-selections: 1
+        max-selections: 1
+        options:
+          - id: accept
+            label: Accept implementation
+          - id: revise
+            label: Continue implementation
+      - id: explanation
+        type: long-text
+        label: Explanation
+    default-action:
+      type: human
 
-Later stages run only after every earlier stage passes. Gate specifications,
-subjects, and results are digest-pinned and stored privately. A working-context
-snapshot is frozen before the workflow run; an intervening session mutation
-fails closed instead of changing the gate's evidence. Retrying a suspended gate
-resumes the same gate; it does not repeat a completed review, repair, validation,
-or provider effect.
+jobs:
+  completion:
+    runs-on: picoclaw
+    steps:
+      - id: decide
+        uses: gate/exec
+        with:
+          gate-ref: gates.implementation-complete
+```
 
-Each decision point owns one fixed purpose: ambiguous-finding classification is
-`classification`; the other built-in decision points are `authorization`.
-Profiles configure how a decision is reached, not how the product interprets
-it. The editor therefore shows purpose as read-only, keeps workflow and stage
-identifiers under **Advanced settings**, and explains when one decision point
-is shared by both lifecycle flows. Removing a custom workflow restores the
-default Human fallback; it never disables the gate. Charter confirmation and
-reconfirmation warn before the final Human stage is removed or changed to an
-automated stage.
+Gate, field, and option IDs use kebab-case. Fields are `short-text`,
+`long-text`, `boolean`, or `select`. A select option's `id` is its
+submitted value; `min-selections` and `max-selections` describe whether it
+is optional, single-select, or multi-select. Options are static. There is no
+separate option value, conditional visibility, presentation mode, Purpose, or
+universal gate-result field.
 
-The built-in profile defines 14 stable decision points: charter confirmation
-and reconfirmation; review start and completion; ambiguous-finding
-classification; non-owned implementation eligibility; implementation start,
-large-or-adjacent scope, and completion; review and branch publication;
-deferred-issue publication; correction promotion; and ambiguous-publication
-reconciliation. Candidate-present `S2`/`S3` or PR-type-incompatible work uses
-the separate non-configurable built-in human resolution gate described above;
-it is not the configurable large-exact-scope classification gate.
+At `gate/exec`, exactly one complete action supplies values:
+
+- `human` shows the generic form, validates the reply, and durably resumes;
+- `ai` asks the configured agent for schema-constrained field values;
+- `deterministic` evaluates the configured complete field map;
+- `workflow` invokes a bounded action workflow that may safely compose
+  deterministic work, no-tool AI, and further `gate/exec` decisions.
+
+A Gate configuration contains exact `(workflow-ref, gate-ref)` bindings. A
+binding's complete `action` atomically replaces the workflow
+`default-action`; fields never merge across them. With no binding, the
+workflow default is used. With neither, execution fails closed.
+
+Every action returns `field-values`, `actor-kind`, `execution-id`,
+`action-revision`, and `input-hash`. The gate runtime only validates and
+records these values. The PR application decides what `accept`, `revise`,
+`defer-follow-up`, `dismiss`, `publish`, or any other option means and
+branches accordingly. A suspended form remains bound to the exact workflow,
+configuration, action, subject, and input revision across restart and replay.
+
+Review and implementation share one catalog but remain separate flows in the
+diagram. A gate reused by both flows has one static identity and one
+configuration binding. The hard-scope variant is a separate static gate with no
+approval option. Retired Gate V2 serialized definitions, fixed result buttons,
+persisted decision rows, old routes, and waiting V2 tasks
+have no compatibility or migration path.
+
 
 ## Deferred Work
 
@@ -227,19 +264,20 @@ version and rejects duplicate group or finding membership rather than silently
 deduplicating it. Group membership is durable, so removing a finding from a
 group does not reappear after reload.
 
-`pr_lifecycle.deferred_issues.mode` controls follow-up issue handling:
+`pr_lifecycle.deferred-issues.mode` controls follow-up issue handling:
 
 - `off` refuses new issue publications and cancels an already queued one before
   any provider call;
 - `ask` waits for the configured `pr.deferred.publish` gate;
-- `automatic` groups eligible deferred findings and queues them under a durable
-  built-in explicit-pass policy, without pretending that user consent was
-  supplied by another gate.
+- `automatic` groups eligible deferred findings and invokes the publication
+  gate's deterministic workflow default, without pretending that another gate
+  supplied user consent.
 
-Creating a GitHub issue remains a separate publication. If its authorization
-gate returns `revise`, `defer`, or `block`, the publication is blocked and the
-group records durable `publication_suppressed` state with the reason. Automatic
-policy skips that group on later mutations. An explicit **Publish/Retry** action
+Creating a GitHub issue remains a separate publication. Only the
+application-specific `publish` value queues it; values such as `revise` or
+`stop` keep it local and the group records durable
+`publication_suppressed` state with the selected reason. Automatic policy skips
+that group on later mutations. An explicit **Publish/Retry** action
 clears suppression and starts a new authorization attempt. Every attempt uses a
 stable marker so an ambiguous provider response can be reconciled without
 blindly creating a duplicate issue.
@@ -273,13 +311,12 @@ candidate scope blocker or hard-scope repair attempt is current.
 Each effect durably reports states such as `queued`, `waiting_gate`, `running`,
 `succeeded`, `failed`, `stale`, or `unknown`. An interrupted or ambiguous
 external request is `unknown`, not proof of failure. The UI first opens the
-separate `pr.publication.reconcile` gate with exactly two human actions:
-**Check provider again** (`pass`) authorizes a bounded read-only marker or
-exact-remote-head check, while **Assume failed** (`block`) explicitly records
-that choice and releases the publication/group lock for a new deliberate
-request. `revise` and `defer` are not valid reconciliation responses because a
-terminal non-decision would strand the publication; persisted results from an
-older build are staled and replaced with a fresh two-action gate. Merely failing
+separate `gates.publication-reconcile` form with exactly two static options:
+**Check provider again** (`recheck-provider`) authorizes a bounded read-only
+marker or exact-remote-head check, while **Assume failed** (`assume-failed`)
+records that choice and releases the publication/group lock for a new deliberate
+request. Other values are invalid because they would strand the publication;
+persisted V2 results are rejected rather than translated. Merely failing
 to find an issue marker does not prove absence and does not auto-create another
 issue. Unsafe or cross-repository result URLs are never accepted as success.
 
@@ -315,42 +352,54 @@ The current top-level configuration is `pr_lifecycle`:
 ```json
 {
   "pr_lifecycle": {
-    "gate_profiles": {
+    "gate-configs": {
       "default": {
         "name": "Default",
-        "workflows": {}
+        "bindings": []
+      },
+      "strict": {
+        "name": "Strict",
+        "bindings": [
+          {
+            "workflow-ref": "workflows/pr-lifecycle.yml",
+            "gate-ref": "gates.review-publish",
+            "action": { "type": "human" }
+          }
+        ]
       }
     },
-    "default_gate_profile_id": "default",
-    "repository_assignments": {},
+    "default-gate-config": "default",
+    "repository-assignments": {
+      "https://github.com|123456": "strict"
+    },
     "nudge": {
-      "review_minimum_additional": 2,
-      "review_maximum_additional": 5,
-      "completion_minimum_additional": 2,
-      "completion_maximum_additional": 5
+      "review-minimum-additional": 2,
+      "review-maximum-additional": 5,
+      "completion-minimum-additional": 2,
+      "completion-maximum-additional": 5
     },
     "scope": {
-      "xs": { "files": 1, "semantic_lines": 20, "modules": 1 },
-      "s": { "files": 3, "semantic_lines": 100, "modules": 1 },
-      "m": { "files": 10, "semantic_lines": 500, "modules": 3 }
+      "xs": { "files": 1, "semantic-lines": 20, "modules": 1 },
+      "s": { "files": 3, "semantic-lines": 100, "modules": 1 },
+      "m": { "files": 10, "semantic-lines": 500, "modules": 3 }
     },
-    "deferred_issues": {
+    "deferred-issues": {
       "mode": "ask"
     }
   }
 }
 ```
 
-Use `GET` and revision-fenced `PUT /api/pr-lifecycle/gate-profiles` for the
-scoped settings surface. Saving validates the same V2 stage semantics used by
-runtime compilation and also rejects AI agents absent from the full config. A
-successful update reports `restart_required` because the gateway freezes the
-catalog and policies for one runtime generation. Subsequent GETs keep that
-effect until a PID or health-confirmed gateway start loads the exact saved
-catalog; a failed start or a start using an older catalog cannot clear it.
+Use `GET` and revision-fenced `PUT /api/pr-lifecycle/gate-configs` for the
+scoped settings surface. Writes replace the complete Gate configuration catalog
+and global lifecycle settings. Validation rejects unknown or duplicate exact
+bindings, relative gate refs, partial actions, unknown AI agents, nonmonotonic
+scope thresholds, and retired Gate V2 configuration fields. A successful update reports
+`restart_required` until a gateway start loads that exact saved generation.
 
-The removed `reviews` configuration is not accepted as a compatibility
-placeholder and is not migrated into `pr_lifecycle`.
+The removed `reviews` configuration and Gate V2 keys are not accepted as
+compatibility placeholders and are not migrated into `pr_lifecycle`.
+
 
 ## HTTP Surfaces
 
@@ -359,7 +408,7 @@ The authenticated launcher proxies one bounded API tree:
 - `/api/pr-workspaces`
 - `/api/pr-workspaces/{prw_...}` and its charter, run, finding, correction,
   message, deferred-group, gate, and publication subresources
-- `/api/pr-lifecycle/gate-profiles`
+- `/api/pr-lifecycle/gate-configs`
 
 The managed gateway owns the matching protected runtime tree at
 `/runtime/eventing/pr-workspaces`. Browser credentials are replaced with the

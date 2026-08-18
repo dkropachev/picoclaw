@@ -47,7 +47,7 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
   tourId?: string
-  pullRequestView?: "work" | "profiles" | "settings"
+  pullRequestView?: "work" | "gate-configs" | "settings"
   search?: Record<string, string>
 }
 
@@ -93,12 +93,12 @@ const pullRequestsWorkNavItem: NavItem = {
   pullRequestView: "work",
 }
 
-const pullRequestsGateProfilesNavItem: NavItem = {
-  title: "navigation.pull_requests_gate_profiles",
-  url: "/pull-requests/profiles",
+const pullRequestsGateConfigsNavItem: NavItem = {
+  title: "navigation.pull_requests_gate_configs",
+  url: "/pull-requests/gate-configs",
   icon: IconSettings,
   translateTitle: true,
-  pullRequestView: "profiles",
+  pullRequestView: "gate-configs",
 }
 
 const pullRequestsLifecycleSettingsNavItem: NavItem = {
@@ -236,7 +236,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         label: "navigation.pull_requests",
         items: [
           pullRequestsWorkNavItem,
-          pullRequestsGateProfilesNavItem,
+          pullRequestsGateConfigsNavItem,
           pullRequestsLifecycleSettingsNavItem,
         ],
       },
@@ -250,10 +250,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         currentPath.startsWith("/pull-requests/prw_")
       )
     }
-    if (item.pullRequestView === "profiles") {
+    if (item.pullRequestView === "gate-configs") {
       return (
-        currentPath === "/pull-requests/profiles" ||
-        currentPath.startsWith("/pull-requests/profiles/")
+        currentPath === "/pull-requests/gate-configs" ||
+        currentPath.startsWith("/pull-requests/gate-configs/")
       )
     }
     if (item.pullRequestView === "settings") {
@@ -275,7 +275,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ? `/pull-requests/${originWorkspace}`
         : item.url
     const linkSearch =
-      item.pullRequestView === "profiles"
+      item.pullRequestView === "gate-configs"
         ? originWorkspace
           ? { from: originWorkspace }
           : undefined
@@ -285,8 +285,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               ...(originWorkspace ? { from: originWorkspace } : {}),
             }
           : item.search
-    const prParent = currentPath.startsWith("/pull-requests/profiles")
-      ? "profiles"
+    const prParent = currentPath.startsWith("/pull-requests/gate-configs")
+      ? "gate-configs"
       : currentPath === "/pull-requests/settings"
         ? "settings"
         : currentPath.startsWith("/pull-requests/prw_")

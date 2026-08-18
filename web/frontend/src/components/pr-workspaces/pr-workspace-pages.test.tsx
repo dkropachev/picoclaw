@@ -1,15 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { type ReactNode, useState } from "react"
+import { type ReactNode } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { type PRLifecycleFlowCatalog } from "@/api/pr-lifecycle-flow"
 import {
-  type PRLifecycleDecisionPoint,
-  type PRLifecycleGateProfileSnapshot,
-  getPRLifecycleGateProfiles,
-  putPRLifecycleGateProfiles,
-} from "@/api/pr-lifecycle-gate-profiles"
+  type PRLifecycleGateConfigSnapshot,
+  getPRLifecycleGateConfigs,
+  putPRLifecycleGateConfigs,
+} from "@/api/pr-lifecycle-gate-configs"
 import { respondPRWorkspaceGate } from "@/api/pr-workspace-gates"
 import {
   type PRWorkspace,
@@ -31,10 +31,12 @@ import {
   syncPRWorkspaceAutomaticDeferredIssues,
   updatePRWorkspaceDeferredGroup,
 } from "@/api/pr-workspaces"
-import { PRLifecycleGateProfilesPage } from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
+import { PRLifecycleGateConfigsPage } from "@/components/pr-workspaces/pr-lifecycle-gate-configs-page"
 import { PRWorkspacePage } from "@/components/pr-workspaces/pr-workspace-page"
 import { PRWorkspacePortfolioPage } from "@/components/pr-workspaces/pr-workspace-portfolio-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
+
+import prLifecycleFlowFixture from "../../../tests/fixtures/pr-lifecycle-flow.json" with { type: "json" }
 
 const mockedNavigationBlocker = vi.hoisted(() => ({
   current: {
@@ -82,18 +84,6 @@ function setMockNavigationIdle() {
   }
 }
 
-function setMockNavigationBlocked() {
-  const release = () => setMockNavigationIdle()
-  mockedNavigationBlocker.current = {
-    status: "blocked",
-    current: undefined,
-    next: undefined,
-    action: undefined,
-    proceed: release,
-    reset: release,
-  }
-}
-
 vi.mock("@/api/pr-workspaces", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/api/pr-workspaces")>()
   return {
@@ -125,13 +115,13 @@ vi.mock("@/api/pr-workspace-gates", () => ({
   respondPRWorkspaceGate: vi.fn(),
 }))
 
-vi.mock("@/api/pr-lifecycle-gate-profiles", async (importOriginal) => {
+vi.mock("@/api/pr-lifecycle-gate-configs", async (importOriginal) => {
   const original =
-    await importOriginal<typeof import("@/api/pr-lifecycle-gate-profiles")>()
+    await importOriginal<typeof import("@/api/pr-lifecycle-gate-configs")>()
   return {
     ...original,
-    getPRLifecycleGateProfiles: vi.fn(),
-    putPRLifecycleGateProfiles: vi.fn(),
+    getPRLifecycleGateConfigs: vi.fn(),
+    putPRLifecycleGateConfigs: vi.fn(),
   }
 })
 
@@ -249,219 +239,66 @@ const aggregate: PRWorkspace = {
   activity: [],
 }
 
-const gateProfiles: PRLifecycleGateProfileSnapshot = {
-  gate_profiles: {
-    default: {
-      name: "Default",
-      workflows: {
-        "pr.charter.reconfirm": {
-          id: "pr-charter-reconfirm",
-          name: "Confirm revised PR charter",
-          purpose: "authorization",
-          decision_point: "pr.charter.reconfirm",
-          stages: [
-            {
-              id: "human-reconfirm",
-              kind: "human",
-              title: "Confirm revised PR charter",
-              questions: [
-                "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
-              ],
-            },
-          ],
-        },
-        "pr.review.complete": {
-          id: "review_complete",
-          name: "Review complete",
-          purpose: "authorization",
-          decision_point: "pr.review.complete",
-          stages: [{ id: "automatic", kind: "zero" }],
-        },
-      },
-    },
-  },
-  default_gate_profile_id: "default",
-  repository_assignments: {},
+const lifecycleFlow =
+  prLifecycleFlowFixture.flow as unknown as PRLifecycleFlowCatalog
+
+const gateConfigs: PRLifecycleGateConfigSnapshot = {
+  gateConfigs: { default: { name: "Default", bindings: [] } },
+  defaultGateConfig: "default",
+  repositoryAssignments: {},
   nudge: {
-    review_minimum_additional: 2,
-    review_maximum_additional: 5,
-    completion_minimum_additional: 2,
-    completion_maximum_additional: 5,
+    reviewMinimumAdditional: 2,
+    reviewMaximumAdditional: 5,
+    completionMinimumAdditional: 2,
+    completionMaximumAdditional: 5,
   },
   scope: {
-    xs: { files: 1, semantic_lines: 20, modules: 1 },
-    s: { files: 3, semantic_lines: 100, modules: 1 },
-    m: { files: 10, semantic_lines: 500, modules: 3 },
+    xs: { files: 1, semanticLines: 20, modules: 1 },
+    s: { files: 3, semanticLines: 100, modules: 1 },
+    m: { files: 10, semanticLines: 500, modules: 3 },
   },
-  deferred_issues: { mode: "ask" },
-  flow: {
-    schema: "pr-lifecycle-flow/v1",
-    flows: [
-      {
-        id: "review",
-        title: "Review workflow",
-        entry: "review_complete",
-        nodes: [
-          {
-            id: "charter_confirm",
-            kind: "gate",
-            title: "Approve purpose and scope",
-            description: "Checks the initial PR charter.",
-            decision_point: "pr.charter.confirm",
-            ordinal: 1,
-            editable: true,
-          },
-          {
-            id: "charter_reconfirm",
-            kind: "gate",
-            title: "Approve revised purpose and scope",
-            description: "Checks a revised PR charter.",
-            decision_point: "pr.charter.reconfirm",
-            ordinal: 2,
-            editable: true,
-          },
-          {
-            id: "review_start",
-            kind: "gate",
-            title: "Allow AI review",
-            description: "Checks whether review may begin.",
-            decision_point: "pr.review.start",
-            ordinal: 3,
-            editable: true,
-          },
-          {
-            id: "review_complete",
-            kind: "gate",
-            title: "Accept review results",
-            description: "Checks review coverage before follow-up begins.",
-            decision_point: "pr.review.complete",
-            ordinal: 4,
-            editable: true,
-          },
-          {
-            id: "finding_classify",
-            kind: "gate",
-            title: "Decide ambiguous finding scope",
-            description: "Classifies an ambiguous finding.",
-            decision_point: "pr.finding.classify",
-            ordinal: 5,
-            editable: true,
-          },
-          {
-            id: "review_publish",
-            kind: "gate",
-            title: "Allow review publication",
-            description: "Checks whether the review may be published.",
-            decision_point: "pr.review.publish",
-            ordinal: 10,
-            editable: true,
-          },
-          {
-            id: "deferred_publish",
-            kind: "gate",
-            title: "Allow follow-up issue",
-            description: "Checks whether a follow-up issue may be created.",
-            decision_point: "pr.deferred.publish",
-            ordinal: 12,
-            editable: true,
-          },
-          {
-            id: "correction_promote",
-            kind: "gate",
-            title: "Allow repository lesson",
-            description: "Checks whether correction guidance may be saved.",
-            decision_point: "pr.correction.promote",
-            ordinal: 13,
-            editable: true,
-          },
-          {
-            id: "publication_reconcile",
-            kind: "gate",
-            title: "Resolve unknown publication",
-            description: "Checks how an unknown provider result is resolved.",
-            decision_point: "pr.publication.reconcile",
-            ordinal: 14,
-            editable: true,
-          },
-        ],
-        edges: [],
-      },
-      {
-        id: "implementation",
-        title: "Implementation workflow",
-        entry: "implementation_start",
-        nodes: [
-          {
-            id: "implementation_start",
-            kind: "action",
-            title: "Load selected findings",
-            description: "Bring selected findings into implementation.",
-            operation: "pr.implementation.findings.load",
-            editable: false,
-          },
-          {
-            id: "implementation_eligibility",
-            kind: "gate",
-            title: "Allow non-owned PR implementation",
-            description: "Checks implementation authority.",
-            decision_point: "pr.implementation.eligibility",
-            ordinal: 6,
-            editable: true,
-          },
-          {
-            id: "implementation_start_gate",
-            kind: "gate",
-            title: "Allow AI implementation",
-            description: "Checks whether implementation may begin.",
-            decision_point: "pr.implementation.start",
-            ordinal: 7,
-            editable: true,
-          },
-          {
-            id: "implementation_scope",
-            kind: "gate",
-            title: "Allow large or adjacent work",
-            description: "Checks policy-gated candidate scope.",
-            decision_point: "pr.implementation.scope",
-            ordinal: 8,
-            editable: true,
-          },
-          {
-            id: "implementation_complete",
-            kind: "gate",
-            title: "Accept implementation",
-            description: "Checks whether implementation is complete.",
-            decision_point: "pr.implementation.complete",
-            ordinal: 9,
-            editable: true,
-          },
-          {
-            id: "implementation_publish",
-            kind: "gate",
-            title: "Allow branch push",
-            description: "Checks whether the branch may be pushed.",
-            decision_point: "pr.implementation.publish",
-            ordinal: 11,
-            editable: true,
-          },
-          {
-            id: "implementation_charter_reconfirm",
-            kind: "gate",
-            title: "Approve revised purpose and scope",
-            description: "Checks a revised PR charter.",
-            decision_point: "pr.charter.reconfirm",
-            ordinal: 2,
-            editable: true,
-          },
-        ],
-        edges: [],
-      },
-    ],
-  },
-  flow_revision: "sha256:flow",
-  catalog_revision: "sha256:catalog",
-  config_revision: "sha256:config",
-  effects: { gateway_effect: "applied" },
+  deferredIssues: { mode: "ask" },
+  gateCatalog: Object.fromEntries(
+    lifecycleFlow.flows.flatMap((flow) =>
+      flow.nodes.flatMap((node) =>
+        node.decision_point
+          ? [
+              [
+                node.decision_point,
+                {
+                  workflowRef: "workflows/pr-lifecycle.yml",
+                  gateRef: `gates.${node.decision_point.replace(/^pr\./, "").replaceAll(".", "-")}`,
+                  prompt: `Complete ${node.title}.`,
+                  fields: [
+                    {
+                      id: "action",
+                      type: "select" as const,
+                      label: "What should happen?",
+                      required: true,
+                      minSelections: 1,
+                      maxSelections: 1,
+                      options: [
+                        { id: "approve", label: "Approve" },
+                        { id: "revise", label: "Request revision" },
+                      ],
+                    },
+                  ],
+                  workflowRevision: "workflow-revision-1",
+                  defaultAction: { type: "human" as const },
+                  effectiveAction: { type: "human" as const },
+                  actionSource: "workflow-default" as const,
+                },
+              ] as const,
+            ]
+          : [],
+      ),
+    ),
+  ),
+  flow: lifecycleFlow,
+  flowRevision: prLifecycleFlowFixture.flow_revision,
+  catalogRevision: "sha256:catalog",
+  configRevision: "sha256:config",
+  effects: { gatewayEffect: "applied" },
 }
 
 const mockedList = vi.mocked(listPRWorkspaces)
@@ -482,8 +319,8 @@ const mockedUpdateDeferred = vi.mocked(updatePRWorkspaceDeferredGroup)
 const mockedPublishPhase = vi.mocked(publishPRWorkspacePhase)
 const mockedReconcilePublication = vi.mocked(reconcilePRWorkspacePublication)
 const mockedRespondGate = vi.mocked(respondPRWorkspaceGate)
-const mockedGetGateProfiles = vi.mocked(getPRLifecycleGateProfiles)
-const mockedPutGateProfiles = vi.mocked(putPRLifecycleGateProfiles)
+const mockedGetGateConfigs = vi.mocked(getPRLifecycleGateConfigs)
+const mockedPutGateConfigs = vi.mocked(putPRLifecycleGateConfigs)
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -546,8 +383,8 @@ describe("unified PR workspace pages", () => {
     mockedPublishPhase.mockResolvedValue(aggregate)
     mockedReconcilePublication.mockResolvedValue(aggregate)
     mockedRespondGate.mockResolvedValue(aggregate)
-    mockedGetGateProfiles.mockResolvedValue(gateProfiles)
-    mockedPutGateProfiles.mockResolvedValue(gateProfiles)
+    mockedGetGateConfigs.mockResolvedValue(gateConfigs)
+    mockedPutGateConfigs.mockResolvedValue(gateConfigs)
     vi.mocked(createPRWorkspaceRequestID).mockReturnValue(
       `prq_${"9".repeat(32)}`,
     )
@@ -559,7 +396,7 @@ describe("unified PR workspace pages", () => {
     renderPage(
       <PRWorkspacePortfolioPage
         onOpenWorkspace={onOpen}
-        onOpenGateProfiles={vi.fn()}
+        onOpenGateConfigs={vi.fn()}
       />,
     )
 
@@ -662,304 +499,7 @@ describe("unified PR workspace pages", () => {
     expect(guidance).toHaveValue("Preserve this unsaved guidance draft.")
   })
 
-  it("prioritizes a waiting gate and clears its private draft when the gate changes", async () => {
-    const user = userEvent.setup()
-    const firstGateID = `pgr_${"1".repeat(32)}`
-    const secondGateID = `pgr_${"2".repeat(32)}`
-    const firstGate: PRWorkspace["gates"][number] = {
-      id: firstGateID,
-      decision_point: "pr.review.complete",
-      purpose: "authorization",
-      state: "waiting_user",
-      policy_revision: "sha256:first-policy",
-      subject_revision: "sha256:first-subject",
-      turns: [
-        {
-          stage_id: "first-human",
-          kind: "human",
-          title: "Approve first gate",
-          status: "waiting_user",
-          questions: ["Is the first review complete?"],
-        },
-      ],
-      created_at: "2026-08-13T10:05:00Z",
-    }
-    const secondGate: PRWorkspace["gates"][number] = {
-      id: secondGateID,
-      decision_point: "pr.implementation.complete",
-      purpose: "authorization",
-      state: "queued",
-      policy_revision: "sha256:second-policy",
-      subject_revision: "sha256:second-subject",
-      turns: [
-        {
-          stage_id: "second-human",
-          kind: "human",
-          title: "Approve second gate",
-          status: "queued",
-          questions: ["Is the implementation fully complete?"],
-        },
-      ],
-      created_at: "2026-08-13T10:06:00Z",
-    }
-    const firstWorkspace: PRWorkspace = {
-      ...aggregate,
-      workspace: { ...aggregate.workspace, execution_state: "waiting_gate" },
-      gates: [firstGate, secondGate],
-    }
-    const secondWorkspace: PRWorkspace = {
-      ...firstWorkspace,
-      workspace: {
-        ...firstWorkspace.workspace,
-        execution_state: "waiting_user",
-        version: 5,
-      },
-      gates: [
-        {
-          ...firstGate,
-          state: "succeeded",
-          outcome: "pass",
-          turns: [
-            {
-              ...firstGate.turns[0],
-              status: "succeeded",
-              outcome: "pass",
-            },
-          ],
-          finished_at: "2026-08-13T10:06:30Z",
-        },
-        {
-          ...secondGate,
-          state: "waiting_user",
-          turns: [{ ...secondGate.turns[0], status: "waiting_user" }],
-        },
-      ],
-    }
-    const completedWorkspace: PRWorkspace = {
-      ...secondWorkspace,
-      workspace: {
-        ...secondWorkspace.workspace,
-        execution_state: "succeeded",
-        version: 6,
-      },
-      gates: [
-        secondWorkspace.gates[0],
-        {
-          ...secondWorkspace.gates[1],
-          state: "succeeded",
-          outcome: "pass",
-          turns: [
-            {
-              ...secondWorkspace.gates[1].turns[0],
-              status: "succeeded",
-              outcome: "pass",
-            },
-          ],
-          finished_at: "2026-08-13T10:07:30Z",
-        },
-      ],
-    }
-    mockedGet.mockResolvedValue(firstWorkspace)
-    mockedRespondGate
-      .mockResolvedValueOnce(secondWorkspace)
-      .mockResolvedValueOnce(completedWorkspace)
-
-    const { queryClient } = renderPage(
-      <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
-    )
-
-    const gatePanel = await screen.findByTestId("pr-gates")
-    const charter = screen.getByTestId("pr-stage-charter")
-    expect(
-      gatePanel.compareDocumentPosition(charter) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy()
-
-    await user.type(
-      screen.getByLabelText("Is the first review complete?"),
-      "Yes, after checking callers.",
-    )
-    await user.type(
-      screen.getByLabelText("Decision comment"),
-      "Only for the first gate",
-    )
-    await user.click(screen.getByRole("button", { name: "Pass" }))
-
-    await waitFor(() =>
-      expect(mockedRespondGate).toHaveBeenCalledWith(
-        aggregate.workspace.id,
-        firstGateID,
-        expect.objectContaining({
-          outcome: "pass",
-          answers: { question_1: "Yes, after checking callers." },
-          comment: "Only for the first gate",
-        }),
-      ),
-    )
-    const nextAnswer = await screen.findByLabelText(
-      "Is the implementation fully complete?",
-    )
-    expect(nextAnswer).toHaveValue("")
-    expect(screen.getByLabelText("Decision comment")).toHaveValue("")
-    expect(screen.getByTestId("pr-gates")).toHaveAttribute("aria-busy", "false")
-
-    // A poll started before the first response may finish afterward. It must not
-    // replace the version-5 aggregate used by the newly displayed gate.
-    mockedGet.mockResolvedValue(firstWorkspace)
-    await queryClient.refetchQueries({
-      queryKey: ["pr-workspace", aggregate.workspace.id],
-    })
-    expect(
-      screen.getByLabelText("Is the implementation fully complete?"),
-    ).toBeVisible()
-
-    await user.click(screen.getByRole("button", { name: "Pass" }))
-    await waitFor(() =>
-      expect(mockedRespondGate).toHaveBeenNthCalledWith(
-        2,
-        aggregate.workspace.id,
-        secondGateID,
-        expect.objectContaining({
-          expected_version: 5,
-          outcome: "pass",
-          answers: {},
-        }),
-      ),
-    )
-  })
-
-  it("clears private gate input when the next human stage uses the same gate", async () => {
-    const user = userEvent.setup()
-    const gateID = `pgr_${"3".repeat(32)}`
-    const firstWorkspace: PRWorkspace = {
-      ...aggregate,
-      workspace: {
-        ...aggregate.workspace,
-        execution_state: "waiting_user",
-      },
-      gates: [
-        {
-          id: gateID,
-          decision_point: "pr.implementation.complete",
-          purpose: "authorization",
-          state: "waiting_user",
-          policy_revision: "sha256:two-human-policy",
-          subject_revision: "sha256:two-human-subject",
-          turns: [
-            {
-              stage_id: "human-scope",
-              kind: "human",
-              title: "Confirm scope",
-              status: "waiting_user",
-              questions: ["Is the candidate within the confirmed scope?"],
-            },
-            {
-              stage_id: "human-completion",
-              kind: "human",
-              title: "Confirm completion",
-              status: "queued",
-              questions: ["Is the candidate fully complete?"],
-            },
-          ],
-          created_at: "2026-08-13T10:05:00Z",
-        },
-      ],
-    }
-    const secondWorkspace: PRWorkspace = {
-      ...firstWorkspace,
-      workspace: { ...firstWorkspace.workspace, version: 5 },
-      gates: [
-        {
-          ...firstWorkspace.gates[0],
-          turns: [
-            {
-              ...firstWorkspace.gates[0].turns[0],
-              status: "succeeded",
-              outcome: "pass",
-            },
-            {
-              ...firstWorkspace.gates[0].turns[1],
-              status: "waiting_user",
-            },
-          ],
-        },
-      ],
-    }
-    const completedWorkspace: PRWorkspace = {
-      ...secondWorkspace,
-      workspace: {
-        ...secondWorkspace.workspace,
-        execution_state: "succeeded",
-        version: 6,
-      },
-      gates: [
-        {
-          ...secondWorkspace.gates[0],
-          state: "succeeded",
-          outcome: "pass",
-          turns: [
-            secondWorkspace.gates[0].turns[0],
-            {
-              ...secondWorkspace.gates[0].turns[1],
-              status: "succeeded",
-              outcome: "pass",
-            },
-          ],
-        },
-      ],
-    }
-    mockedGet.mockResolvedValue(firstWorkspace)
-    mockedRespondGate
-      .mockResolvedValueOnce(secondWorkspace)
-      .mockResolvedValueOnce(completedWorkspace)
-
-    renderPage(
-      <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
-    )
-
-    await user.type(
-      await screen.findByLabelText(
-        "Is the candidate within the confirmed scope?",
-      ),
-      "Yes, every changed hunk is exact-scope.",
-    )
-    await user.type(
-      screen.getByLabelText("Decision comment"),
-      "Scope-stage-only comment",
-    )
-    await user.click(screen.getByRole("button", { name: "Pass" }))
-
-    const completionAnswer = await screen.findByLabelText(
-      "Is the candidate fully complete?",
-    )
-    expect(completionAnswer).toHaveValue("")
-    expect(screen.getByLabelText("Decision comment")).toHaveValue("")
-
-    await user.type(completionAnswer, "Yes, all acceptance criteria pass.")
-    await user.type(
-      screen.getByLabelText("Decision comment"),
-      "Completion-stage-only comment",
-    )
-    await user.click(screen.getByRole("button", { name: "Pass" }))
-
-    await waitFor(() =>
-      expect(mockedRespondGate).toHaveBeenNthCalledWith(
-        2,
-        aggregate.workspace.id,
-        gateID,
-        expect.objectContaining({
-          expected_version: 5,
-          outcome: "pass",
-          answers: {
-            question_1: "Yes, all acceptance criteria pass.",
-          },
-          comment: "Completion-stage-only comment",
-        }),
-      ),
-    )
-  })
-
-  it("keeps automatic gate stages read-only until a human turn is waiting", async () => {
+  it("keeps automatic Gate actions read-only unless a Human form is waiting", async () => {
     const gateID = `pgr_${"4".repeat(32)}`
     mockedGet.mockResolvedValue({
       ...aggregate,
@@ -971,7 +511,6 @@ describe("unified PR workspace pages", () => {
         {
           id: gateID,
           decision_point: "pr.implementation.complete",
-          purpose: "authorization",
           state: "waiting_gate",
           policy_revision: "sha256:automatic-policy",
           subject_revision: "sha256:automatic-subject",
@@ -997,7 +536,7 @@ describe("unified PR workspace pages", () => {
       within(gates).getAllByText("Check completion independently")[0],
     ).toBeVisible()
     expect(within(gates).getByRole("status")).toHaveTextContent(
-      /Automatic gate checks are still running/i,
+      /configured Gate action is still running/i,
     )
     expect(
       within(gates).queryByLabelText("Decision comment"),
@@ -1165,7 +704,7 @@ describe("unified PR workspace pages", () => {
       <PRWorkspacePage
         workspaceID={aggregate.workspace.id}
         onBack={vi.fn()}
-        onOpenGateProfiles={vi.fn()}
+        onOpenGateConfigs={vi.fn()}
       />,
     )
 
@@ -1834,7 +1373,6 @@ describe("unified PR workspace pages", () => {
         {
           id: `pgr_${"6".repeat(32)}`,
           decision_point: "pr.implementation.scope",
-          purpose: "authorization",
           state: "waiting_user",
           policy_revision: "sha256:policy-revision",
           subject_revision: "sha256:subject-revision",
@@ -1844,7 +1382,6 @@ describe("unified PR workspace pages", () => {
               kind: "human",
               title: "Approve exact large scope",
               status: "waiting_user",
-              questions: ["Is this exact work still appropriate for this PR?"],
             },
           ],
           evidence: {
@@ -1920,91 +1457,6 @@ describe("unified PR workspace pages", () => {
     expect(
       screen.getByText("Publish this exact implementation summary."),
     ).toBeVisible()
-  })
-
-  it("routes candidate-present implementation drift through its scope gate", async () => {
-    const driftID = `pfn_${"7".repeat(32)}`
-    mockedGet.mockResolvedValue({
-      ...aggregate,
-      workspace: {
-        ...aggregate.workspace,
-        phase: "implementation",
-        execution_state: "waiting_gate",
-      },
-      findings: [
-        {
-          id: driftID,
-          fingerprint: "sha256:candidate-drift",
-          origin: "implementation",
-          severity: "high",
-          title: "Adjacent cleanup is already in the candidate",
-          message: "Remove or explicitly resolve this candidate change.",
-          scope: {
-            distance: "S2_related_followup",
-            size: "S",
-            presence: "candidate_present",
-            files: 1,
-            semantic_lines: 18,
-            modules: 1,
-            estimated: false,
-            type_compatible: true,
-            confidence: 0.97,
-          },
-          disposition: "open",
-          version: 1,
-          created_at: "2026-08-13T10:03:00Z",
-          updated_at: "2026-08-13T10:03:00Z",
-        },
-      ],
-      gates: [
-        {
-          id: `pgr_${"8".repeat(32)}`,
-          decision_point: "pr.implementation.scope",
-          purpose: "authorization",
-          target_id: `pra_${"9".repeat(32)}`,
-          state: "waiting_user",
-          policy_revision: "builtin:hard-scope-resolution-v1",
-          subject_revision: "sha256:hard-scope",
-          turns: [
-            {
-              stage_id: "human-hard-scope-resolution",
-              kind: "human",
-              title: "Resolve candidate code outside the confirmed charter",
-              status: "waiting",
-            },
-          ],
-          evidence: { finding_ids: [driftID] },
-          created_at: "2026-08-13T10:04:00Z",
-        },
-      ],
-    })
-    renderPage(
-      <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
-    )
-
-    const finding = within(
-      (
-        await screen.findByText("Adjacent cleanup is already in the candidate")
-      ).closest("article")!,
-    )
-    expect(
-      finding.getByText(/Resolve the implementation scope gate/),
-    ).toBeVisible()
-    expect(
-      finding.queryByRole("button", { name: "Defer from this PR" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.getByRole("button", { name: "Remove code + defer follow-up" }),
-    ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "Revise and reconfirm charter" }),
-    ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "Stop implementation" }),
-    ).toBeVisible()
-    expect(
-      screen.queryByRole("button", { name: "Pass" }),
-    ).not.toBeInTheDocument()
   })
 
   it("publishes review and implementation separately and reconciles unknown outcomes", async () => {
@@ -2123,111 +1575,6 @@ describe("unified PR workspace pages", () => {
     )
   })
 
-  it("continues reconciliation immediately after its human gate passes", async () => {
-    const user = userEvent.setup()
-    const publicationID = `ppb_${"7".repeat(32)}`
-    const gateID = `pgr_${"8".repeat(32)}`
-    const waiting: PRWorkspace = {
-      ...aggregate,
-      workspace: {
-        ...aggregate.workspace,
-        execution_state: "waiting_user",
-      },
-      publications: [
-        {
-          id: publicationID,
-          kind: "github_review",
-          state: "unknown",
-          expected_head_sha: aggregate.provider_snapshot.head_sha,
-          payload_digest: "sha256:review-publication",
-          public_error_code: "provider_outcome_unknown",
-          attempts: 1,
-          created_at: "2026-08-13T10:06:00Z",
-          updated_at: "2026-08-13T10:06:01Z",
-        },
-      ],
-      gates: [
-        {
-          id: gateID,
-          decision_point: "pr.publication.reconcile",
-          target_id: publicationID,
-          purpose: "authorization",
-          state: "waiting_user",
-          policy_revision: "sha256:policy",
-          subject_revision: "sha256:subject",
-          turns: [
-            {
-              stage_id: "human-reconcile",
-              kind: "human",
-              title: "Resolve ambiguous provider outcome",
-              status: "waiting",
-            },
-          ],
-          created_at: "2026-08-13T10:06:02Z",
-        },
-      ],
-    }
-    const authorized: PRWorkspace = {
-      ...waiting,
-      workspace: { ...waiting.workspace, version: 5 },
-      gates: [
-        {
-          ...waiting.gates[0],
-          state: "succeeded",
-          outcome: "pass",
-          turns: [
-            {
-              ...waiting.gates[0].turns[0],
-              status: "answered",
-              outcome: "pass",
-            },
-          ],
-        },
-      ],
-    }
-    mockedGet.mockResolvedValue(waiting)
-    mockedRespondGate.mockResolvedValue(authorized)
-    mockedReconcilePublication.mockResolvedValue({
-      ...authorized,
-      publications: [
-        {
-          ...authorized.publications[0],
-          state: "succeeded",
-          public_error_code: "",
-        },
-      ],
-    })
-
-    renderPage(
-      <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
-    )
-    expect(
-      await screen.findByRole("button", { name: "Check provider again" }),
-    ).toBeVisible()
-    expect(screen.getByRole("button", { name: "Assume failed" })).toBeVisible()
-    for (const unavailableOutcome of ["Pass", "Revise", "Defer", "Block"]) {
-      expect(
-        screen.queryByRole("button", { name: unavailableOutcome }),
-      ).not.toBeInTheDocument()
-    }
-    await user.click(
-      screen.getByRole("button", { name: "Check provider again" }),
-    )
-
-    await waitFor(() =>
-      expect(mockedReconcilePublication).toHaveBeenCalledWith(
-        aggregate.workspace.id,
-        publicationID,
-        {
-          expected_version: 5,
-          request_id: `prq_${"9".repeat(32)}`,
-          expected_head_revision:
-            authorized.provider_snapshot.provider_revision,
-        },
-      ),
-    )
-  })
-
   it("publishes an in-scope finding set in the review request", async () => {
     const user = userEvent.setup()
     const findingID = `pfn_${"8".repeat(32)}`
@@ -2329,9 +1676,9 @@ describe("unified PR workspace pages", () => {
         },
       ],
     }
-    mockedGetGateProfiles.mockResolvedValue({
-      ...gateProfiles,
-      deferred_issues: { mode: "automatic" },
+    mockedGetGateConfigs.mockResolvedValue({
+      ...gateConfigs,
+      deferredIssues: { mode: "automatic" },
     })
     mockedGet.mockResolvedValue(suppressedWorkspace)
     mockedDeferredGroup.mockResolvedValue(suppressedWorkspace)
@@ -2421,7 +1768,7 @@ describe("unified PR workspace pages", () => {
         },
       ],
     })
-    mockedGetGateProfiles.mockRejectedValueOnce(new Error("settings offline"))
+    mockedGetGateConfigs.mockRejectedValueOnce(new Error("settings offline"))
 
     renderPage(
       <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
@@ -2820,9 +2167,9 @@ describe("unified PR workspace pages", () => {
   })
 
   it("retains deferred work but hides GitHub issue actions when publication is off", async () => {
-    mockedGetGateProfiles.mockResolvedValue({
-      ...gateProfiles,
-      deferred_issues: { mode: "off" },
+    mockedGetGateConfigs.mockResolvedValue({
+      ...gateConfigs,
+      deferredIssues: { mode: "off" },
     })
     mockedGet.mockResolvedValue({
       ...aggregate,
@@ -2913,1132 +2260,212 @@ describe("unified PR workspace pages", () => {
     ).toBeVisible()
   })
 
-  it("keeps the profiles page list-only and delegates profile navigation", async () => {
+  it("renders a generic Gate form and submits only field values", async () => {
     const user = userEvent.setup()
-    const onProfileChange = vi.fn()
+    const gateID = `pgr_${"8".repeat(32)}`
+    mockedGet.mockResolvedValue({
+      ...aggregate,
+      workspace: { ...aggregate.workspace, execution_state: "waiting_user" },
+      gates: [
+        {
+          id: gateID,
+          decision_point: "pr.charter.reconfirm",
+          state: "waiting_user",
+          policy_revision: "sha256:gate-v3",
+          subject_revision: "sha256:subject",
+          turns: [
+            {
+              stage_id: "gate-exec",
+              kind: "gate/exec",
+              title: "Reconfirm charter",
+              status: "waiting_user",
+              actor_kind: "human",
+              action_revision: "action-1",
+              gate_form: {
+                gate_ref: "gates.charter-confirm",
+                prompt: "Review the revised charter.",
+                fields: [
+                  {
+                    id: "action",
+                    type: "select",
+                    label: "What should happen?",
+                    required: true,
+                    min_selections: 1,
+                    max_selections: 1,
+                    options: [
+                      { id: "approve", label: "Approve" },
+                      { id: "revise", label: "Request revision" },
+                    ],
+                  },
+                  {
+                    id: "explanation",
+                    type: "long-text",
+                    label: "Explanation",
+                    required: true,
+                  },
+                  {
+                    id: "confirmed",
+                    type: "boolean",
+                    label: "Confirm evidence",
+                    required: true,
+                  },
+                  {
+                    id: "affected-areas",
+                    type: "select",
+                    label: "Affected areas",
+                    required: false,
+                    min_selections: 1,
+                    max_selections: 2,
+                    options: [
+                      { id: "implementation", label: "Implementation" },
+                      { id: "tests", label: "Tests" },
+                    ],
+                  },
+                  {
+                    id: "reference",
+                    type: "short-text",
+                    label: "Reference",
+                    required: false,
+                  },
+                ],
+              },
+            },
+          ],
+          created_at: "2026-08-13T10:05:00Z",
+        },
+      ],
+    })
+    mockedRespondGate.mockResolvedValue({
+      ...aggregate,
+      workspace: { ...aggregate.workspace, execution_state: "succeeded" },
+    })
+
     renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        page="profiles"
-        onProfileChange={onProfileChange}
-      />,
+      <PRWorkspacePage workspaceID={aggregate.workspace.id} onBack={vi.fn()} />,
     )
 
-    expect(
-      await screen.findByRole("heading", {
-        name: "PR lifecycle gate profiles",
-      }),
-    ).toBeVisible()
-    expect(
-      screen.getByRole("heading", { level: 2, name: "Profiles" }),
-    ).toBeVisible()
-    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
-      "data-profile-view",
-      "profiles",
-    )
-    expect(
-      screen.getByText("2 configured gates · 0 repositories"),
-    ).toBeVisible()
-    expect(
-      screen.queryByRole("navigation", {
-        name: "PR lifecycle configuration",
-      }),
-    ).not.toBeInTheDocument()
-    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
-    expect(
-      screen.queryByText("Deferred issue handling"),
-    ).not.toBeInTheDocument()
-    expect(screen.queryByText("XS modules")).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("heading", { name: "PR lifecycle gate flow" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByPlaceholderText("https://github.com|repository-id"),
-    ).not.toBeInTheDocument()
-    expect(
-      document.querySelector("#pr-gate-workflow-editor"),
-    ).not.toBeInTheDocument()
-
-    const profileID = screen.getByLabelText("Stable profile ID")
-    const profileName = screen.getByLabelText("Profile name")
-    const addProfile = screen.getByRole("button", { name: "Add profile" })
-    await user.type(profileID, "Bad Profile")
-    await user.type(profileName, "Unreachable")
-    expect(profileID).toHaveAttribute("aria-invalid", "true")
-    expect(addProfile).toBeDisabled()
-    expect(screen.queryByText("Unreachable")).not.toBeInTheDocument()
-    await user.clear(profileID)
-    await user.clear(profileName)
-    await user.type(profileID, "default")
-    await user.type(profileName, "Duplicate")
-    expect(profileID).toHaveAttribute("aria-invalid", "true")
-    expect(addProfile).toBeDisabled()
-    expect(
-      screen.getByText("A profile with this ID already exists."),
-    ).toBeVisible()
-    await user.clear(profileID)
-    await user.clear(profileName)
-
+    expect(await screen.findByText("Review the revised charter.")).toBeVisible()
     await user.click(
-      screen.getByRole("button", { name: "Edit Default profile" }),
+      screen.getByRole("combobox", { name: "What should happen?" }),
     )
-    expect(onProfileChange).toHaveBeenLastCalledWith("default")
-    expect(screen.getByRole("heading", { name: "Profiles" })).toBeVisible()
-  })
-
-  it("shows one lifecycle-settings tab at a time and reports tab navigation", async () => {
-    const user = userEvent.setup()
-    const onSettingsTabChange = vi.fn()
-
-    function SettingsHarness() {
-      const [tab, setTab] = useState<"nudging" | "scope" | "deferred">(
-        "nudging",
-      )
-      return (
-        <PRLifecycleGateProfilesPage
-          onBack={vi.fn()}
-          page="settings"
-          settingsTab={tab}
-          onSettingsTabChange={(next) => {
-            onSettingsTabChange(next)
-            setTab(next)
-          }}
-        />
-      )
-    }
-
-    renderPage(<SettingsHarness />)
-
-    expect(
-      await screen.findByRole("heading", { name: "Lifecycle settings" }),
-    ).toBeVisible()
-    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
-      "data-profile-view",
-      "settings",
-    )
-    expect(screen.getByText("Review minimum")).toBeVisible()
-    expect(screen.getByText("Completion maximum")).toBeVisible()
-    expect(screen.queryByText("XS files")).not.toBeInTheDocument()
-    expect(
-      screen.queryByText("Deferred issue handling"),
-    ).not.toBeInTheDocument()
-    expect(screen.queryByRole("heading", { name: "Profiles" })).toBeNull()
-
-    screen.getByRole("tab", { name: "Nudging" }).focus()
-    await user.keyboard("{ArrowRight}")
-    expect(onSettingsTabChange).toHaveBeenLastCalledWith("scope")
-    expect(screen.getByText("XS files")).toBeVisible()
-    expect(screen.getByText("M modules")).toBeVisible()
-    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
-    expect(
-      screen.queryByText("Deferred issue handling"),
-    ).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole("tab", { name: "Deferred issues" }))
-    expect(onSettingsTabChange).toHaveBeenLastCalledWith("deferred")
-    expect(screen.getByText("Deferred issue handling")).toBeVisible()
-    expect(screen.queryByText("XS files")).not.toBeInTheDocument()
-    expect(screen.queryByText("Review minimum")).not.toBeInTheDocument()
-  })
-
-  it("opens gate details only in a dialog and reports when it closes", async () => {
-    const user = userEvent.setup()
-    const onDecisionPointChange = vi.fn()
-
-    function GateEditorHarness() {
-      const [decisionPoint, setDecisionPoint] =
-        useState<PRLifecycleDecisionPoint>()
-      return (
-        <PRLifecycleGateProfilesPage
-          onBack={vi.fn()}
-          initialProfileID="default"
-          initialDecisionPoint={decisionPoint}
-          onDecisionPointChange={(next) => {
-            onDecisionPointChange(next)
-            setDecisionPoint(next)
-          }}
-        />
-      )
-    }
-
-    renderPage(<GateEditorHarness />)
-
-    const trigger = await screen.findByRole("button", {
-      name: "Accept review results",
-    })
-    expect(trigger).toHaveAttribute("aria-haspopup", "dialog")
-    expect(trigger).not.toHaveAttribute("aria-expanded")
-    expect(trigger).not.toHaveAttribute("aria-pressed")
-    expect(trigger).not.toHaveAttribute("data-gate-selected")
-    expect(
-      document.querySelector("#pr-gate-workflow-editor"),
-    ).not.toBeInTheDocument()
-
-    await user.click(trigger)
-
-    const dialog = screen.getByRole("dialog", {
-      name: "Accept review results",
-    })
-    expect(dialog).toBeVisible()
-    expect(trigger).toHaveAttribute("data-gate-selected", "true")
-    const editor = dialog.querySelector("#pr-gate-workflow-editor")
-    expect(editor).toHaveAttribute("data-decision-point", "pr.review.complete")
-    expect(document.querySelectorAll("#pr-gate-workflow-editor")).toHaveLength(
-      1,
-    )
-    expect(onDecisionPointChange).toHaveBeenLastCalledWith("pr.review.complete")
-
-    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
-    expect(
-      screen.queryByRole("dialog", { name: "Accept review results" }),
-    ).not.toBeInTheDocument()
-    expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined)
-    await waitFor(() => expect(trigger).toHaveFocus())
-    expect(trigger).not.toHaveAttribute("data-gate-selected")
-    expect(trigger).not.toHaveAttribute("aria-expanded")
-    expect(trigger).not.toHaveAttribute("aria-pressed")
-  })
-
-  it("explains the shared revised-charter gate and hides machine fields under Advanced", async () => {
-    const user = userEvent.setup()
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-
+    await user.click(screen.getByRole("option", { name: "Request revision" }))
+    await user.type(screen.getByLabelText("Explanation"), "Scope is unclear.")
+    await user.click(screen.getByRole("combobox", { name: "Confirm evidence" }))
+    await user.click(screen.getByRole("option", { name: "Yes" }))
+    await user.click(screen.getByRole("checkbox", { name: "Implementation" }))
+    await user.click(screen.getByRole("checkbox", { name: "Tests" }))
+    await user.type(screen.getByLabelText("Reference"), "charter-v2")
     await user.click(
-      await screen.findByRole("button", {
-        name: "Approve revised purpose and scope",
-      }),
+      screen.getByRole("button", { name: "Submit Gate response" }),
     )
-    const dialog = screen.getByRole("dialog", {
-      name: "Approve revised purpose and scope",
-    })
-    expect(within(dialog).getByLabelText("Purpose")).toHaveValue(
-      "Authorization",
-    )
-    expect(within(dialog).getByLabelText("Purpose")).toHaveAttribute("readonly")
-    expect(
-      within(dialog).queryByRole("combobox", { name: "Purpose" }),
-    ).not.toBeInTheDocument()
-    expect(
-      within(dialog).getByText(
-        "Shared by Review workflow and Implementation workflow. Changes here apply to every occurrence.",
-      ),
-    ).toBeVisible()
-    expect(
-      within(dialog).getByText(
-        "Pass confirms the charter and queues review. Revise or Defer waits for user action. Block stops execution.",
-      ),
-    ).toBeVisible()
-    expect(within(dialog).getByLabelText("Human question")).toHaveValue(
-      "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
-    )
-    expect(
-      within(dialog).getByRole("combobox", { name: "New stage type" }),
-    ).toHaveTextContent("Human")
-    expect(
-      within(dialog).getByRole("button", { name: "Add stage" }),
-    ).toBeEnabled()
 
-    const advanced = within(dialog).getByRole("button", {
-      name: "Advanced settings",
-    })
-    expect(advanced).toHaveAttribute("aria-expanded", "false")
-    expect(
-      within(dialog).queryByLabelText("Workflow name"),
-    ).not.toBeInTheDocument()
-    expect(
-      within(dialog).queryByLabelText("Stable stage ID"),
-    ).not.toBeInTheDocument()
-    await user.click(advanced)
-    expect(advanced).toHaveAttribute("aria-expanded", "true")
-    expect(within(dialog).getByLabelText("Workflow name")).toHaveValue(
-      "Confirm revised PR charter",
-    )
-    expect(within(dialog).getByLabelText("Decision point")).toHaveValue(
-      "pr.charter.reconfirm",
-    )
-    expect(within(dialog).getByLabelText("Stable stage ID")).toHaveValue(
-      "human-reconfirm",
-    )
-    expect(
-      within(dialog).getByRole("button", {
-        name: "Save all lifecycle changes",
-      }),
-    ).toBeDisabled()
-
-    const stageID = within(dialog).getByLabelText("Stable stage ID")
-    await user.clear(stageID)
-    await user.type(stageID, "human-reconfirm-custom")
-    expect(stageID).toHaveFocus()
-    expect(stageID).toHaveValue("human-reconfirm-custom")
-
-    await user.click(
-      within(dialog).getByRole("combobox", { name: "New stage type" }),
-    )
-    await user.click(screen.getByRole("option", { name: "Deterministic" }))
-    await user.click(within(dialog).getByRole("button", { name: "Add stage" }))
-    expect(within(dialog).getAllByTestId("pr-gate-stage-editor")).toHaveLength(
-      2,
-    )
-    expect(
-      within(dialog).getAllByRole("combobox", { name: "Stage type" })[1],
-    ).toHaveTextContent("Deterministic")
-  })
-
-  it("requires explicit confirmation before changing the final charter Human stage", async () => {
-    const user = userEvent.setup()
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Approve revised purpose and scope",
-      }),
-    )
-    const dialog = screen.getByRole("dialog", {
-      name: "Approve revised purpose and scope",
-    })
-    const stageType = within(dialog).getByRole("combobox", {
-      name: "Stage type",
-    })
-    await user.click(stageType)
-    await user.click(screen.getByRole("option", { name: "Zero · pass" }))
-
-    const warning = within(dialog).getByRole("alert")
-    expect(warning).toHaveTextContent("Remove the final Human approval?")
-    expect(stageType).toHaveTextContent("Human")
-    await user.click(
-      within(warning).getByRole("button", { name: "Keep Human approval" }),
-    )
-    expect(warning).not.toBeInTheDocument()
-    await waitFor(() => expect(stageType).toHaveFocus())
-    expect(stageType).toHaveTextContent("Human")
-
-    await user.click(stageType)
-    await user.click(screen.getByRole("option", { name: "Zero · pass" }))
-    await user.click(
-      within(within(dialog).getByRole("alert")).getByRole("button", {
-        name: "Remove Human requirement",
-      }),
-    )
-    expect(stageType).toHaveTextContent("Zero · pass")
-    expect(
-      within(dialog).getByRole("button", {
-        name: "Save all lifecycle changes",
-      }),
-    ).toBeEnabled()
-
-    await user.click(stageType)
-    await user.click(screen.getByRole("option", { name: "Human" }))
-    expect(stageType).toHaveTextContent("Human")
-    expect(within(dialog).getByLabelText("Stage title")).toHaveValue(
-      "Confirm revised PR charter",
-    )
-    expect(within(dialog).getByLabelText("Human question")).toHaveValue(
-      "Approve the revised PR purpose, type, included scope, exclusions, and non-goals?",
-    )
-  })
-
-  it("requires explicit confirmation before deleting the final charter Human stage", async () => {
-    const user = userEvent.setup()
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Approve revised purpose and scope",
-      }),
-    )
-    const dialog = screen.getByRole("dialog", {
-      name: "Approve revised purpose and scope",
-    })
-    const remove = within(dialog).getByRole("button", {
-      name: "Remove stage",
-    })
-    await user.click(remove)
-    const warning = within(dialog).getByRole("alert")
-    expect(warning).toHaveTextContent("Remove the final Human approval?")
-    expect(within(dialog).getAllByTestId("pr-gate-stage-editor")).toHaveLength(
-      1,
-    )
-    await waitFor(() => expect(warning).toHaveFocus())
-    await user.keyboard("{Escape}")
-    expect(dialog).toBeVisible()
-    expect(warning).not.toBeInTheDocument()
-    await waitFor(() => expect(remove).toHaveFocus())
-
-    await user.click(remove)
-    await user.click(
-      within(within(dialog).getByRole("alert")).getByRole("button", {
-        name: "Remove Human requirement",
-      }),
-    )
-    expect(
-      within(dialog).queryByTestId("pr-gate-stage-editor"),
-    ).not.toBeInTheDocument()
-    expect(
-      within(dialog).getByText(
-        "Add at least one stage before saving this workflow.",
-      ),
-    ).toBeVisible()
-  })
-
-  it("limits the Human warning to the sole Human stage of charter gates", async () => {
-    const user = userEvent.setup()
-    const twoHumans = structuredClone(gateProfiles)
-    twoHumans.gate_profiles.default.workflows[
-      "pr.charter.reconfirm"
-    ].stages.push({
-      id: "human-reconfirm-second",
-      kind: "human",
-      title: "Second charter approval",
-      questions: ["Approve the revised charter again?"],
-    })
-    mockedGetGateProfiles.mockResolvedValueOnce(twoHumans)
-    const first = renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Approve revised purpose and scope",
-      }),
-    )
-    let dialog = screen.getByRole("dialog", {
-      name: "Approve revised purpose and scope",
-    })
-    await user.click(
-      within(dialog).getAllByRole("button", { name: "Remove stage" })[0],
-    )
-    expect(
-      within(dialog).queryByText("Remove the final Human approval?"),
-    ).not.toBeInTheDocument()
-    expect(within(dialog).getAllByTestId("pr-gate-stage-editor")).toHaveLength(
-      1,
-    )
-    first.unmount()
-
-    const nonCharter = structuredClone(gateProfiles)
-    nonCharter.gate_profiles.default.workflows["pr.review.complete"].stages = [
-      {
-        id: "human-review-complete",
-        kind: "human",
-        title: "Accept review",
-        questions: ["Accept this review?"],
-      },
-    ]
-    mockedGetGateProfiles.mockResolvedValueOnce(nonCharter)
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-    await user.click(
-      await screen.findByRole("button", { name: "Accept review results" }),
-    )
-    dialog = screen.getByRole("dialog", { name: "Accept review results" })
-    await user.click(
-      within(dialog).getByRole("button", { name: "Remove stage" }),
-    )
-    expect(
-      within(dialog).queryByText("Remove the final Human approval?"),
-    ).not.toBeInTheDocument()
-    expect(
-      within(dialog).queryByTestId("pr-gate-stage-editor"),
-    ).not.toBeInTheDocument()
-  })
-
-  it("explains and confirms reverting a custom workflow to the Human fallback", async () => {
-    const user = userEvent.setup()
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Approve revised purpose and scope",
-      }),
-    )
-    const dialog = screen.getByRole("dialog", {
-      name: "Approve revised purpose and scope",
-    })
-    const useDefault = within(dialog).getByRole("button", {
-      name: "Use default Human gate",
-    })
-    expect(useDefault).toHaveAccessibleDescription(
-      "Removes custom stages; the gate remains active and pauses for a user decision.",
-    )
-    await user.click(useDefault)
-    const warning = within(dialog).getByRole("alert")
-    expect(warning).toHaveTextContent(
-      "The gate stays active and falls back to a built-in Human decision.",
-    )
-    await user.click(
-      within(warning).getByRole("button", { name: "Keep custom workflow" }),
-    )
-    await waitFor(() => expect(useDefault).toHaveFocus())
-
-    await user.click(useDefault)
-    await user.click(
-      within(within(dialog).getByRole("alert")).getByRole("button", {
-        name: "Use default Human gate",
-      }),
-    )
-    expect(
-      within(dialog).getByText(
-        "This profile uses the default Human gate. It remains active and pauses for a user decision.",
-      ),
-    ).toBeVisible()
-    expect(
-      within(dialog).getByRole("button", {
-        name: "Configure custom workflow",
-      }),
-    ).toBeEnabled()
     await waitFor(() =>
-      expect(
-        within(dialog).getByRole("button", {
-          name: "Configure custom workflow",
+      expect(mockedRespondGate).toHaveBeenCalledWith(
+        aggregate.workspace.id,
+        gateID,
+        expect.objectContaining({
+          fieldValues: {
+            action: "revise",
+            explanation: "Scope is unclear.",
+            confirmed: true,
+            "affected-areas": ["implementation", "tests"],
+            reference: "charter-v2",
+          },
         }),
-      ).toHaveFocus(),
+      ),
     )
   })
 
-  it("keeps profile flow and gate modal navigation route-controlled", async () => {
+  it("shows Gate configuration defaults and creates an atomic AI override", async () => {
     const user = userEvent.setup()
-    const onProfileChange = vi.fn()
-    const onDecisionPointChange = vi.fn()
-    const onFlowChange = vi.fn()
-    const onDiscardOpenChange = vi.fn()
-
-    function ControlledEditorHarness() {
-      const [profileID, setProfileID] = useState<string | undefined>("default")
-      const [decisionPoint, setDecisionPoint] =
-        useState<PRLifecycleDecisionPoint>()
-      const [flowID, setFlowID] = useState<"review" | "implementation">(
-        "review",
-      )
-      const [discardOpen, setDiscardOpen] = useState(false)
-      return (
-        <PRLifecycleGateProfilesPage
-          onBack={vi.fn()}
-          page="profile"
-          initialProfileID={profileID}
-          initialDecisionPoint={decisionPoint}
-          activeFlowID={flowID}
-          discardOpen={discardOpen}
-          onProfileChange={(next) => {
-            onProfileChange(next)
-            setProfileID(next)
-          }}
-          onDecisionPointChange={(next) => {
-            onDecisionPointChange(next)
-            setDecisionPoint(next)
-          }}
-          onFlowChange={(next) => {
-            onFlowChange(next)
-            setFlowID(next)
-          }}
-          onDiscardOpenChange={(open) => {
-            onDiscardOpenChange(open)
-            setDiscardOpen(open)
-          }}
-        />
-      )
-    }
-
-    renderPage(<ControlledEditorHarness />)
-
-    expect(
-      await screen.findByRole("heading", { name: "Edit Default gate profile" }),
-    ).toBeVisible()
-    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
-      "data-profile-view",
-      "profile",
-    )
-    await user.click(
-      screen.getByRole("tab", { name: /^Implementation workflow/ }),
-    )
-    expect(onFlowChange).toHaveBeenLastCalledWith("implementation")
-    expect(
-      screen.getByRole("tab", { name: /^Implementation workflow/ }),
-    ).toHaveAttribute("aria-selected", "true")
-
-    await user.click(screen.getByRole("tab", { name: /^Review workflow/ }))
-    await user.click(
-      screen.getByRole("button", { name: "Accept review results" }),
-    )
-    expect(onDecisionPointChange).toHaveBeenLastCalledWith("pr.review.complete")
-    const dialog = screen.getByRole("dialog", {
-      name: "Accept review results",
-    })
-    expect(
-      within(dialog).queryByLabelText("Workflow name"),
-    ).not.toBeInTheDocument()
-    await user.click(
-      within(dialog).getByRole("button", { name: "Advanced settings" }),
-    )
-    const workflowName = within(dialog).getByLabelText("Workflow name")
-    await user.clear(workflowName)
-    await user.type(workflowName, "Route-controlled review completion")
-    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
-    expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined)
-
-    await user.click(
-      screen.getByRole("button", { name: "Accept review results" }),
-    )
-    const reopened = screen.getByRole("dialog", {
-      name: "Accept review results",
-    })
-    await user.click(
-      within(reopened).getByRole("button", { name: "Advanced settings" }),
-    )
-    expect(within(reopened).getByLabelText("Workflow name")).toHaveValue(
-      "Route-controlled review completion",
-    )
-    expect(
-      within(reopened).getByRole("button", {
-        name: "Save all lifecycle changes",
-      }),
-    ).toBeEnabled()
-  })
-
-  it("returns dialog focus to the exact repeated gate trigger", async () => {
-    const user = userEvent.setup()
-    const repeatedGateProfiles = structuredClone(gateProfiles)
-    const implementationFlow = repeatedGateProfiles.flow.flows.find(
-      (flow) => flow.id === "implementation",
-    )!
-    const completionGate = implementationFlow.nodes.find(
-      (node) => node.id === "implementation_complete",
-    )!
-    implementationFlow.nodes.push({
-      ...completionGate,
-      id: "implementation_complete_direct",
-    })
-    mockedGetGateProfiles.mockResolvedValueOnce(repeatedGateProfiles)
-
     renderPage(
-      <PRLifecycleGateProfilesPage
+      <PRLifecycleGateConfigsPage
+        activeFlowID="review"
+        initialDecisionPoint="pr.charter.confirm"
+        initialConfigID="default"
         onBack={vi.fn()}
-        initialProfileID="default"
+        page="config"
       />,
     )
 
+    const dialog = await screen.findByRole("dialog", {
+      name: "Approve purpose and scope",
+    })
+    expect(within(dialog).getByText("Workflow default")).toBeVisible()
+    expect(within(dialog).getAllByText("Human").length).toBeGreaterThan(0)
+    expect(
+      within(dialog).getByRole("heading", { name: "Gate request" }),
+    ).toBeVisible()
+    expect(within(dialog).getByText("What should happen?")).toBeVisible()
+    expect(
+      within(dialog).getByText(
+        /Approve \(approve\), Request revision \(revise\)/,
+      ),
+    ).toBeVisible()
     await user.click(
-      await screen.findByRole("tab", { name: /^Implementation workflow/ }),
+      within(dialog).getByRole("combobox", { name: "Execution action" }),
     )
-    const triggers = screen.getAllByRole("button", {
-      name: "Accept implementation",
-    })
-    expect(triggers).toHaveLength(2)
-
-    await user.click(triggers[1])
-    const dialog = screen.getByRole("dialog", {
-      name: "Accept implementation",
-    })
-    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
-
-    await waitFor(() => expect(triggers[1]).toHaveFocus())
-    expect(triggers[0]).not.toHaveFocus()
+    await user.click(screen.getByRole("option", { name: "AI" }))
+    expect(within(dialog).getByLabelText("Agent ID")).toHaveValue("main")
+    expect(within(dialog).getAllByText("AI · main")).toHaveLength(2)
+    expect(
+      within(dialog).getByRole("combobox", { name: "Session" }),
+    ).toHaveTextContent("Ephemeral")
+    expect(
+      within(dialog).getByRole("combobox", { name: "History" }),
+    ).toHaveTextContent("None")
+    expect(
+      within(dialog).getByRole("combobox", { name: "Cache" }),
+    ).toHaveTextContent("None")
+    expect(
+      within(dialog).getByRole("combobox", { name: "Tools" }),
+    ).toHaveTextContent("None")
+    await user.click(
+      within(dialog).getByRole("button", { name: "Close — keep draft" }),
+    )
+    expect(
+      screen.getByRole("button", { name: "Save configuration" }),
+    ).toBeEnabled()
   })
 
-  it("preserves edits made while a gate-profile save is in flight", async () => {
+  it("preserves edits made while a Gate configuration save is in flight", async () => {
     const user = userEvent.setup()
-    let resolveSave!: (value: PRLifecycleGateProfileSnapshot) => void
-    mockedPutGateProfiles.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveSave = resolve
-        }),
+    let resolveSave!: (value: PRLifecycleGateConfigSnapshot) => void
+    mockedPutGateConfigs.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSave = resolve
+      }),
     )
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />)
+    renderPage(
+      <PRLifecycleGateConfigsPage
+        activeFlowID="review"
+        initialConfigID="default"
+        onBack={vi.fn()}
+        page="config"
+      />,
+    )
 
-    const minimum = (await screen.findAllByRole("spinbutton"))[0]
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    await user.click(screen.getByRole("button", { name: "Save profiles" }))
-    await waitFor(() => expect(mockedPutGateProfiles).toHaveBeenCalledTimes(1))
+    const name = await screen.findByLabelText("Configuration name")
+    await user.clear(name)
+    await user.type(name, "Submitted name")
+    await user.click(screen.getByRole("button", { name: "Save configuration" }))
+    await user.clear(name)
+    await user.type(name, "Continued editing")
 
-    await user.clear(minimum)
-    await user.type(minimum, "4")
     await act(async () => {
       resolveSave({
-        ...gateProfiles,
-        config_revision: "sha256:after-first-save",
-        nudge: {
-          ...gateProfiles.nudge,
-          review_minimum_additional: 3,
+        ...gateConfigs,
+        gateConfigs: {
+          ...gateConfigs.gateConfigs,
+          default: { name: "Submitted name", bindings: [] },
         },
+        configRevision: "sha256:config-2",
       })
     })
 
-    await waitFor(() => expect(minimum).toHaveValue(4))
-    expect(screen.getByRole("button", { name: "Save profiles" })).toBeEnabled()
-    await user.click(screen.getByRole("button", { name: "Save profiles" }))
-    await waitFor(() => expect(mockedPutGateProfiles).toHaveBeenCalledTimes(2))
-    expect(mockedPutGateProfiles).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        expected_config_revision: "sha256:after-first-save",
-        nudge: expect.objectContaining({ review_minimum_additional: 4 }),
-      }),
-    )
-  })
-
-  it("opens an alternate-profile gate deep link in the correct dialog", async () => {
-    const user = userEvent.setup()
-    const onDecisionPointChange = vi.fn()
-    mockedGetGateProfiles.mockResolvedValueOnce({
-      ...gateProfiles,
-      gate_profiles: {
-        ...gateProfiles.gate_profiles,
-        alternate: {
-          name: "Alternate",
-          workflows: {
-            "pr.review.complete": {
-              id: "alternate_review_complete",
-              name: "Alternate review completion",
-              purpose: "authorization",
-              decision_point: "pr.review.complete",
-              stages: [{ id: "automatic", kind: "zero" }],
-            },
-          },
-        },
-      },
-      default_gate_profile_id: "alternate",
-    })
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="alternate"
-        initialDecisionPoint="pr.review.complete"
-        onDecisionPointChange={onDecisionPointChange}
-      />,
-    )
-
-    const dialog = await screen.findByRole("dialog", {
-      name: "Accept review results",
-    })
-    expect(screen.getByTestId("pr-gate-profiles")).toHaveAttribute(
-      "data-profile-view",
-      "profile",
-    )
+    await waitFor(() => expect(name).toHaveValue("Continued editing"))
     expect(
-      within(dialog).getByText(
-        "Alternate profile · Configure this decision workflow.",
-      ),
-    ).toBeVisible()
-    await user.click(
-      within(dialog).getByRole("button", { name: "Advanced settings" }),
-    )
-    expect(
-      within(dialog).getByDisplayValue("Alternate review completion"),
-    ).toBeVisible()
-    expect(dialog.querySelector("#pr-gate-workflow-editor")).toHaveAttribute(
-      "data-decision-point",
-      "pr.review.complete",
-    )
-    expect(onDecisionPointChange).not.toHaveBeenCalled()
-  })
-
-  it("uses the URL-selected flow for shared gate modal metadata", async () => {
-    const shared = structuredClone(gateProfiles)
-    shared.flow.flows[1].nodes.push({
-      id: "implementation_deferred_publish",
-      kind: "gate",
-      title: "Approve implementation follow-up",
-      description: "Approve deferred work found during implementation.",
-      decision_point: "pr.deferred.publish",
-      ordinal: 12,
-      editable: true,
-    })
-    mockedGetGateProfiles.mockResolvedValue(shared)
-
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        activeFlowID="implementation"
-        initialDecisionPoint="pr.deferred.publish"
-        initialProfileID="default"
-        onBack={vi.fn()}
-        onDecisionPointChange={vi.fn()}
-        onFlowChange={vi.fn()}
-        onProfileChange={vi.fn()}
-        page="profile"
-      />,
-    )
-
-    expect(
-      await screen.findByRole("dialog", {
-        name: "Approve implementation follow-up",
-      }),
-    ).toBeVisible()
-  })
-
-  it("returns deep-linked dialog focus to its declared gate", async () => {
-    const user = userEvent.setup()
-
-    function DeepLinkedGateHarness() {
-      const [decisionPoint, setDecisionPoint] = useState<
-        PRLifecycleDecisionPoint | undefined
-      >("pr.review.complete")
-      return (
-        <PRLifecycleGateProfilesPage
-          onBack={vi.fn()}
-          initialProfileID="default"
-          initialDecisionPoint={decisionPoint}
-          onDecisionPointChange={(next) => {
-            setDecisionPoint(next)
-          }}
-        />
-      )
-    }
-
-    renderPage(<DeepLinkedGateHarness />)
-
-    const dialog = await screen.findByRole("dialog", {
-      name: "Accept review results",
-    })
-    const trigger = screen.getByRole("button", {
-      name: "Accept review results",
-      hidden: true,
-    })
-    await user.click(within(dialog).getByRole("button", { name: /^Close/ }))
-
-    await waitFor(() => expect(trigger).toHaveFocus())
-  })
-
-  it("drops a well-formed gate deep link that is absent from the YAML graph", async () => {
-    const onDecisionPointChange = vi.fn()
-    const insertedDialogs: HTMLElement[] = []
-    const observer = new MutationObserver((records) => {
-      for (const record of records) {
-        for (const addedNode of record.addedNodes) {
-          if (!(addedNode instanceof HTMLElement)) continue
-          if (addedNode.matches('[role="dialog"]')) {
-            insertedDialogs.push(addedNode)
-          }
-          insertedDialogs.push(
-            ...addedNode.querySelectorAll<HTMLElement>('[role="dialog"]'),
-          )
-        }
-      }
-    })
-    observer.observe(document.body, { childList: true, subtree: true })
-    function UnknownGateHarness() {
-      const [decisionPoint, setDecisionPoint] = useState<
-        PRLifecycleDecisionPoint | undefined
-      >("pr.review.ghost")
-      return (
-        <PRLifecycleGateProfilesPage
-          onBack={vi.fn()}
-          initialProfileID="default"
-          initialDecisionPoint={decisionPoint}
-          onDecisionPointChange={(next) => {
-            onDecisionPointChange(next)
-            setDecisionPoint(next)
-          }}
-        />
-      )
-    }
-    try {
-      renderPage(<UnknownGateHarness />)
-
-      await screen.findByRole("button", { name: "Accept review results" })
-      await waitFor(() =>
-        expect(onDecisionPointChange).toHaveBeenLastCalledWith(undefined),
-      )
-    } finally {
-      observer.disconnect()
-    }
-    expect(insertedDialogs).toHaveLength(0)
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
-    expect(document.querySelector("#pr-gate-workflow-editor")).toBeNull()
-  })
-
-  it("resets a dirty draft through the controlled discard modal", async () => {
-    const user = userEvent.setup()
-    const onDiscardOpenChange = vi.fn()
-    function DiscardHarness() {
-      const [open, setOpen] = useState(false)
-      return (
-        <>
-          <PRLifecycleGateProfilesPage
-            discardOpen={open}
-            onBack={vi.fn()}
-            onDiscardOpenChange={(next) => {
-              onDiscardOpenChange(next)
-              setOpen(next)
-            }}
-            page="settings"
-          />
-          <button type="button" onClick={() => setOpen(true)}>
-            Open controlled discard
-          </button>
-        </>
-      )
-    }
-    renderPage(<DiscardHarness />)
-
-    const minimum = (await screen.findAllByRole("spinbutton"))[0]
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    setMockNavigationBlocked()
-    await user.click(
-      screen.getByRole("button", { name: "Open controlled discard" }),
-    )
-
-    expect(
-      screen.getByRole("alertdialog", {
-        name: "Discard gate profile changes?",
-      }),
-    ).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "Keep editing" }))
-    expect(minimum).toHaveValue(3)
-
-    setMockNavigationBlocked()
-    await user.click(
-      screen.getByRole("button", { name: "Open controlled discard" }),
-    )
-    await user.click(screen.getByRole("button", { name: "Discard changes" }))
-    expect(onDiscardOpenChange).toHaveBeenLastCalledWith(false)
-    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(2)
-  })
-
-  it("defers a dirty header exit until discard is confirmed", async () => {
-    const user = userEvent.setup()
-    const onBack = vi.fn()
-    renderPage(<PRLifecycleGateProfilesPage onBack={onBack} page="settings" />)
-
-    const minimum = (await screen.findAllByRole("spinbutton"))[0]
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    await user.click(
-      screen.getByRole("button", { name: "Back to pull request work" }),
-    )
-
-    expect(onBack).not.toHaveBeenCalled()
-    const discard = screen.getByRole("alertdialog", {
-      name: "Discard gate profile changes?",
-    })
-    await user.click(
-      within(discard).getByRole("button", { name: "Keep editing" }),
-    )
-    expect(onBack).not.toHaveBeenCalled()
-
-    await user.click(
-      screen.getByRole("button", { name: "Back to pull request work" }),
-    )
-    const reopenedDiscard = screen.getByRole("alertdialog", {
-      name: "Discard gate profile changes?",
-    })
-    await user.click(
-      within(reopenedDiscard).getByRole("button", { name: "Discard changes" }),
-    )
-    expect(onBack).toHaveBeenCalledOnce()
-  })
-
-  it("caches an unsaved configuration draft across pages and clears it on discard", async () => {
-    const user = userEvent.setup()
-    const client = createTestQueryClient()
-    const first = renderPage(
-      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
-      client,
-    )
-
-    const minimum = (await screen.findAllByRole("spinbutton"))[0]
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    expect(minimum).toHaveValue(3)
-    first.unmount()
-
-    function CachedDiscardHarness() {
-      const [open, setOpen] = useState(false)
-      return (
-        <>
-          <PRLifecycleGateProfilesPage
-            discardOpen={open}
-            onBack={vi.fn()}
-            onDiscardOpenChange={setOpen}
-            page="settings"
-          />
-          <button type="button" onClick={() => setOpen(true)}>
-            Open cached discard
-          </button>
-        </>
-      )
-    }
-    const second = renderPage(<CachedDiscardHarness />, client)
-    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(3)
-
-    setMockNavigationBlocked()
-    await user.click(
-      screen.getByRole("button", { name: "Open cached discard" }),
-    )
-    await user.click(screen.getByRole("button", { name: "Discard changes" }))
-    second.unmount()
-
-    renderPage(
-      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
-      client,
-    )
-    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(2)
-  })
-
-  it("refreshes a clean cached configuration from the server", async () => {
-    const client = createTestQueryClient()
-    const first = renderPage(
-      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
-      client,
-    )
-    expect((await screen.findAllByRole("spinbutton"))[0]).toHaveValue(2)
-    first.unmount()
-
-    mockedGetGateProfiles.mockResolvedValue({
-      ...gateProfiles,
-      config_revision: "sha256:new-config",
-      nudge: {
-        ...gateProfiles.nudge,
-        review_minimum_additional: 4,
-      },
-    })
-    renderPage(
-      <PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />,
-      client,
-    )
-
-    await waitFor(() =>
-      expect(screen.getAllByRole("spinbutton")[0]).toHaveValue(4),
-    )
-  })
-
-  it("keeps a saved restart-required gate-profile effect visible", async () => {
-    const user = userEvent.setup()
-    mockedPutGateProfiles.mockResolvedValue({
-      ...gateProfiles,
-      config_revision: "sha256:restart-required",
-      effects: { gateway_effect: "restart_required" },
-    })
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />)
-
-    const minimum = (await screen.findAllByRole("spinbutton"))[0]
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    await user.click(screen.getByRole("button", { name: "Save profiles" }))
-
-    expect(await screen.findByText("Gateway restart required")).toBeVisible()
-    expect(
-      screen.getByText(
-        "Gate profiles were saved, but the running gateway must be restarted before future PR decisions use them.",
-      ),
-    ).toBeVisible()
-    expect(screen.getByRole("button", { name: "Save profiles" })).toBeDisabled()
-  })
-
-  it("clears a restart-required banner after the launcher reports profiles applied", async () => {
-    const user = userEvent.setup()
-    mockedGetGateProfiles
-      .mockResolvedValueOnce({
-        ...gateProfiles,
-        effects: { gateway_effect: "restart_required" },
-      })
-      .mockResolvedValue({
-        ...gateProfiles,
-        effects: { gateway_effect: "applied" },
-      })
-    renderPage(<PRLifecycleGateProfilesPage onBack={vi.fn()} page="settings" />)
-
-    const minimum = (await screen.findAllByRole("spinbutton"))[0]
-    expect(await screen.findByText("Gateway restart required")).toBeVisible()
-    await user.clear(minimum)
-    await user.type(minimum, "3")
-    await user.click(
-      screen.getByRole("button", { name: "Refresh pull request work" }),
-    )
-
-    await waitFor(() =>
-      expect(
-        screen.queryByText("Gateway restart required"),
-      ).not.toBeInTheDocument(),
-    )
-    expect(minimum).toHaveValue(3)
-    expect(screen.getByRole("button", { name: "Save profiles" })).toBeEnabled()
-  })
-
-  it("keeps mixed gate stage editors shrinkable on mobile", async () => {
-    const user = userEvent.setup()
-    mockedGetGateProfiles.mockResolvedValue({
-      ...gateProfiles,
-      gate_profiles: {
-        default: {
-          ...gateProfiles.gate_profiles.default,
-          workflows: {
-            "pr.review.complete": {
-              ...gateProfiles.gate_profiles.default.workflows[
-                "pr.review.complete"
-              ],
-              stages: [
-                {
-                  id: "isolated_review_completion",
-                  kind: "ai_isolated_context",
-                  title: "Independently verify review completion",
-                  agent_id: "controller",
-                  criteria:
-                    "Verify all bounded review evidence without widening the pull request scope.",
-                },
-              ],
-            },
-          },
-        },
-      },
-    })
-    renderPage(
-      <PRLifecycleGateProfilesPage
-        onBack={vi.fn()}
-        initialProfileID="default"
-      />,
-    )
-
-    await user.click(
-      await screen.findByRole("button", { name: "Accept review results" }),
-    )
-    const dialog = screen.getByRole("dialog", {
-      name: "Accept review results",
-    })
-    const editor = within(dialog).getByTestId("pr-gate-stage-editor")
-    expect(editor).toHaveClass("min-w-0", "max-w-full")
-    await user.click(
-      within(dialog).getByRole("button", { name: "Advanced settings" }),
-    )
-    expect(within(dialog).getByLabelText("Stable stage ID")).toHaveClass(
-      "min-w-0",
-    )
-    expect(within(dialog).getByLabelText("Stage type")).toHaveClass(
-      "min-w-0",
-      "max-w-full",
-    )
-    expect(within(dialog).getByLabelText("AI criteria")).toHaveClass(
-      "min-w-0",
-      "max-w-full",
-    )
-    expect(
-      within(dialog).getByLabelText("AI criteria").parentElement,
-    ).toHaveClass("min-w-0", "max-w-full")
-    expect(
-      within(dialog).queryByLabelText("Run condition (optional)"),
-    ).not.toBeInTheDocument()
+      screen.getByRole("button", { name: "Save configuration" }),
+    ).toBeEnabled()
   })
 })

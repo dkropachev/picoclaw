@@ -52,7 +52,8 @@ func TestReviewHumanGatesResumeWithoutRerunningAIAndUseExactDiff(t *testing.T) {
 	}
 	ai := &captureReviewAI{}
 	service, err := NewService(ServiceConfig{
-		Store: store, AI: ai, ReviewEvidence: serviceReviewEvidence{}, Now: func() time.Time { return now },
+		Store: store, AI: ai, ReviewEvidence: serviceReviewEvidence{}, Gates: testAllWaitingGates{},
+		Now: func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +68,7 @@ func TestReviewHumanGatesResumeWithoutRerunningAIAndUseExactDiff(t *testing.T) {
 	afterStart, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waitingStart.Workspace.ID, GateRunID: waitingStart.Gates[0].ID,
 		ExpectedVersion: waitingStart.Workspace.Version, RequestID: "request-00000004",
-		Decision: GatePass, Comment: "review it",
+		FieldValues: map[string]any{"action": "continue"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +84,7 @@ func TestReviewHumanGatesResumeWithoutRerunningAIAndUseExactDiff(t *testing.T) {
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waitingComplete.Workspace.ID, GateRunID: waitingComplete.Gates[1].ID,
 		ExpectedVersion: waitingComplete.Workspace.Version, RequestID: "request-00000006",
-		Decision: GatePass, Comment: "accept review",
+		FieldValues: map[string]any{"action": "accept"},
 	})
 	if err != nil || completed.Workspace.Phase != PhaseTriage || completed.StageRuns[0].State != ExecutionSucceeded || ai.calls != 1 {
 		t.Fatalf("completed = phase %q stage %q calls %d err %v", completed.Workspace.Phase, completed.StageRuns[0].State, ai.calls, err)
@@ -203,8 +204,9 @@ func TestReviewAndImplementationPublicationsShareOneAggregate(t *testing.T) {
 	}
 	completionGate, err := pinGateSubject(GateRun{
 		ID:            stableID("pgr_", readyToPush.Aggregate.Workspace.ID, "completed-implementation"),
-		DecisionPoint: "pr.implementation.complete", TargetID: repair.ID, Purpose: "authorization",
-		State: ExecutionSucceeded, Outcome: GatePass, PolicyRevision: "sha256:policy",
+		DecisionPoint: "pr.implementation.complete", TargetID: repair.ID,
+		State: ExecutionSucceeded, PolicyRevision: "sha256:policy",
+		Turns:           []GateTurn{{Status: "answered", FieldValues: map[string]any{"action": "accept"}}},
 		SubjectRevision: completionDigest, CreatedAt: now, FinishedAt: &now,
 	}, completionSubject)
 	if err != nil {

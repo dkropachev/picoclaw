@@ -10,16 +10,16 @@ import { useEffect, useMemo } from "react"
 import {
   type PRLifecycleDecisionPoint,
   isPRLifecycleDecisionPoint,
-  isPRLifecycleGateProfileID,
-} from "@/api/pr-lifecycle-gate-profiles"
-import { PRLifecycleGateProfilesPage } from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
+} from "@/api/pr-lifecycle-flow"
+import { isPRLifecycleGateConfigID } from "@/api/pr-lifecycle-gate-configs"
+import { PRLifecycleGateConfigsPage } from "@/components/pr-workspaces/pr-lifecycle-gate-configs-page"
 import {
   asPRNavigationState,
   goToMarkedPRHistory,
   updatePRNavigationState,
 } from "@/routes/-pr-navigation"
 
-export interface PRProfileEditorSearch {
+export interface PRGateConfigEditorSearch {
   flow: "review" | "implementation"
   from?: string
   gate?: PRLifecycleDecisionPoint
@@ -28,16 +28,16 @@ export interface PRProfileEditorSearch {
 
 const workspaceIDPattern = /^prw_[0-9a-f]{32}$/
 
-export function normalizePRProfileEditorSearch(
+export function normalizePRGateConfigEditorSearch(
   raw: Record<string, unknown>,
-): PRProfileEditorSearch {
-  const flow: PRProfileEditorSearch["flow"] =
+): PRGateConfigEditorSearch {
+  const flow: PRGateConfigEditorSearch["flow"] =
     raw.flow === "implementation" ? "implementation" : "review"
   const from =
     typeof raw.from === "string" && workspaceIDPattern.test(raw.from)
       ? raw.from
       : undefined
-  const base: Pick<PRProfileEditorSearch, "flow" | "from"> = {
+  const base: Pick<PRGateConfigEditorSearch, "flow" | "from"> = {
     flow,
     ...(from ? { from } : {}),
   }
@@ -48,8 +48,8 @@ export function normalizePRProfileEditorSearch(
   }
 }
 
-function PullRequestProfileEditorRoutePage() {
-  const { profileID } = Route.useParams()
+function PullRequestGateConfigEditorRoutePage() {
+  const { configID } = Route.useParams()
   const navigate = useNavigate()
   const router = useRouter()
   const locationState = useLocation({
@@ -59,11 +59,11 @@ function PullRequestProfileEditorRoutePage() {
   const locationSearch = useLocation({ select: (location) => location.search })
   const locationHash = useLocation({ select: (location) => location.hash })
   const search = useMemo(
-    () => normalizePRProfileEditorSearch({ ...locationSearch }),
+    () => normalizePRGateConfigEditorSearch({ ...locationSearch }),
     [locationSearch],
   )
   const canonical =
-    pathname !== `/pull-requests/profiles/${profileID}` ||
+    pathname !== `/pull-requests/gate-configs/${configID}` ||
     (locationHash === "" &&
       Object.keys(locationSearch).length === Object.keys(search).length &&
       Object.entries(search).every(
@@ -74,13 +74,13 @@ function PullRequestProfileEditorRoutePage() {
   useEffect(() => {
     if (canonical) return
     void navigate({
-      to: "/pull-requests/profiles/$profileID",
-      params: { profileID },
+      to: "/pull-requests/gate-configs/$configID",
+      params: { configID },
       search,
       hash: "",
       replace: true,
     })
-  }, [canonical, navigate, profileID, search])
+  }, [canonical, configID, navigate, search])
 
   if (!canonical) return null
   const parentSearch = {
@@ -91,15 +91,15 @@ function PullRequestProfileEditorRoutePage() {
     ...parentSearch,
     ...(search.gate ? { gate: search.gate } : {}),
   } as const
-  const returnToProfiles = () => {
+  const returnToConfigs = () => {
     const fallback = () =>
       void navigate({
-        to: "/pull-requests/profiles",
+        to: "/pull-requests/gate-configs",
         search: search.from ? { from: search.from } : {},
         replace: true,
       })
     if (
-      locationState.prParent === "profiles" &&
+      locationState.prParent === "gate-configs" &&
       locationState.prParentKey &&
       goToMarkedPRHistory(
         router.history,
@@ -114,18 +114,18 @@ function PullRequestProfileEditorRoutePage() {
     fallback()
   }
   return (
-    <PRLifecycleGateProfilesPage
+    <PRLifecycleGateConfigsPage
       activeFlowID={search.flow}
       discardOpen={search.dialog === "discard"}
       initialDecisionPoint={search.gate}
-      initialProfileID={profileID}
-      page="profile"
-      onBack={returnToProfiles}
+      initialConfigID={configID}
+      page="config"
+      onBack={returnToConfigs}
       onDecisionPointChange={(gate) => {
         if (gate) {
           void navigate({
-            to: "/pull-requests/profiles/$profileID",
-            params: { profileID },
+            to: "/pull-requests/gate-configs/$configID",
+            params: { configID },
             search: { ...parentSearch, gate },
             state: (previous) =>
               updatePRNavigationState(previous, () => ({
@@ -139,16 +139,16 @@ function PullRequestProfileEditorRoutePage() {
           return
         }
         void navigate({
-          to: "/pull-requests/profiles/$profileID",
-          params: { profileID },
+          to: "/pull-requests/gate-configs/$configID",
+          params: { configID },
           search: parentSearch,
           replace: true,
         })
       }}
       onDiscardOpenChange={(open) =>
         navigate({
-          to: "/pull-requests/profiles/$profileID",
-          params: { profileID },
+          to: "/pull-requests/gate-configs/$configID",
+          params: { configID },
           search: open
             ? { ...discardOwnerSearch, dialog: "discard" }
             : discardOwnerSearch,
@@ -161,8 +161,8 @@ function PullRequestProfileEditorRoutePage() {
       }
       onFlowChange={(flow) =>
         void navigate({
-          to: "/pull-requests/profiles/$profileID",
-          params: { profileID },
+          to: "/pull-requests/gate-configs/$configID",
+          params: { configID },
           search: {
             flow,
             ...(search.from ? { from: search.from } : {}),
@@ -175,22 +175,22 @@ function PullRequestProfileEditorRoutePage() {
             })),
         })
       }
-      onProfileChange={(nextProfileID) => {
-        if (!nextProfileID) {
-          returnToProfiles()
+      onConfigChange={(nextConfigID) => {
+        if (!nextConfigID) {
+          returnToConfigs()
           return
         }
-        if (!isPRLifecycleGateProfileID(nextProfileID)) return
+        if (!isPRLifecycleGateConfigID(nextConfigID)) return
         void navigate({
-          to: "/pull-requests/profiles/$profileID",
-          params: { profileID: nextProfileID },
+          to: "/pull-requests/gate-configs/$configID",
+          params: { configID: nextConfigID },
           search: {
             flow: "review",
             ...(search.from ? { from: search.from } : {}),
           },
           state: (previous) =>
             updatePRNavigationState(previous, (current) => ({
-              prParent: "profiles",
+              prParent: "gate-configs",
               prParentIndex: current.__TSR_index,
               prParentKey: current.__TSR_key,
             })),
@@ -200,16 +200,16 @@ function PullRequestProfileEditorRoutePage() {
   )
 }
 
-export const Route = createFileRoute("/pull-requests_/profiles/$profileID")({
-  validateSearch: normalizePRProfileEditorSearch,
+export const Route = createFileRoute("/pull-requests_/gate-configs/$configID")({
+  validateSearch: normalizePRGateConfigEditorSearch,
   beforeLoad: ({ params, search }) => {
-    if (!isPRLifecycleGateProfileID(params.profileID)) {
+    if (!isPRLifecycleGateConfigID(params.configID)) {
       throw redirect({
-        to: "/pull-requests/profiles",
+        to: "/pull-requests/gate-configs",
         search: search.from ? { from: search.from } : {},
         replace: true,
       })
     }
   },
-  component: PullRequestProfileEditorRoutePage,
+  component: PullRequestGateConfigEditorRoutePage,
 })

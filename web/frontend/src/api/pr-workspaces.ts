@@ -67,7 +67,6 @@ export type PRWorkspacePublicationKind =
   | "branch_push"
   | "github_issue"
 export type PRWorkspacePublicationPhase = "review" | "implementation"
-export type PRWorkspaceGateOutcome = "pass" | "revise" | "defer" | "block"
 export type PRWorkspaceNudgeStrategy =
   | "acceptance_criteria"
   | "adversarial"
@@ -301,19 +300,54 @@ export interface PRWorkspaceGateTurn {
   kind: string
   title: string
   status: string
-  outcome?: PRWorkspaceGateOutcome
-  questions?: string[]
-  answers?: Record<string, unknown>
-  comment?: string
+  gate_form?: PRWorkspaceGateForm
+  field_values?: Record<string, unknown>
+  actor_kind?: "human" | "ai" | "deterministic" | "workflow"
+  execution_id?: string
+  action_revision?: string
+  input_hash?: string
+}
+
+export type PRWorkspaceGateField =
+  | {
+      id: string
+      type: "short-text"
+      label: string
+      required: boolean
+    }
+  | {
+      id: string
+      type: "long-text"
+      label: string
+      required: boolean
+    }
+  | {
+      id: string
+      type: "boolean"
+      label: string
+      required: boolean
+    }
+  | {
+      id: string
+      type: "select"
+      label: string
+      required: boolean
+      min_selections: number
+      max_selections: number
+      options: Array<{ id: string; label: string }>
+    }
+
+export interface PRWorkspaceGateForm {
+  gate_ref: string
+  prompt: string
+  fields: PRWorkspaceGateField[]
 }
 
 export interface PRWorkspaceGateSummary {
   id: string
   decision_point: string
-  purpose: "attention" | "authorization" | "classification"
   target_id?: string
   state: PRWorkspaceExecutionState
-  outcome?: PRWorkspaceGateOutcome
   policy_revision: string
   subject_revision: string
   turns: PRWorkspaceGateTurn[]
@@ -1014,17 +1048,6 @@ const nudgeStrategies = new Set<PRWorkspaceNudgeStrategy>([
   "integration_boundaries",
   "validation_adequacy",
 ])
-const gateOutcomes = new Set<PRWorkspaceGateOutcome>([
-  "pass",
-  "revise",
-  "defer",
-  "block",
-])
-const gatePurposes = new Set<PRWorkspaceGateSummary["purpose"]>([
-  "attention",
-  "authorization",
-  "classification",
-])
 const publicationKinds = new Set<PRWorkspacePublicationKind>([
   "github_review",
   "branch_push",
@@ -1487,16 +1510,13 @@ function projectGateRecord(
   value: Record<string, unknown>,
 ): PRWorkspaceGateSummary {
   const targetID = optionalString(value.target_id)
-  const outcome = optionalEnum(value.outcome, gateOutcomes)
   const finishedAt = optionalString(value.finished_at)
   const evidence = projectGateEvidence(value.evidence)
   return {
     id: requiredString(value.id),
     decision_point: requiredString(value.decision_point),
     ...(targetID === undefined ? {} : { target_id: targetID }),
-    purpose: enumValue(value.purpose, gatePurposes),
     state: enumValue(value.state, executionStates),
-    ...(outcome === undefined ? {} : { outcome }),
     policy_revision: requiredString(value.policy_revision),
     subject_revision: requiredString(value.subject_revision),
     turns: optionalProjectedArray(value.turns, projectGateTurn),
@@ -1598,21 +1618,84 @@ function projectGatePublicationFinding(
 }
 
 function projectGateTurn(value: Record<string, unknown>): PRWorkspaceGateTurn {
-  const outcome = optionalEnum(value.outcome, gateOutcomes)
-  const questions = optionalStringArray(value.questions)
-  const answers = optionalRecord(value.answers)
-  const comment = optionalString(value.comment)
+  const gateForm = projectGateForm(value["gate-form"])
+  const fieldValues = optionalRecord(value["field-values"])
+  const actorKind = optionalEnum(
+    value["actor-kind"],
+    new Set(["human", "ai", "deterministic", "workflow"] as const),
+  )
+  const actionRevision = optionalString(value["action-revision"])
+  const executionID = optionalString(value["execution-id"])
+  const inputHash = optionalString(value["input-hash"])
   return {
     stage_id: requiredString(value.stage_id),
     kind: requiredString(value.kind),
-    // Zero gates intentionally carry no title because they are an explicit,
-    // automatic pass in the gate workflow contract.
     title: stringValue(value.title),
     status: requiredString(value.status),
-    ...(outcome === undefined ? {} : { outcome }),
-    ...(questions === undefined ? {} : { questions }),
-    ...(answers === undefined ? {} : { answers }),
-    ...(comment === undefined ? {} : { comment }),
+    ...(gateForm === undefined ? {} : { gate_form: gateForm }),
+    ...(fieldValues === undefined ? {} : { field_values: fieldValues }),
+    ...(actorKind === undefined ? {} : { actor_kind: actorKind }),
+    ...(executionID === undefined ? {} : { execution_id: executionID }),
+    ...(actionRevision === undefined
+      ? {}
+      : { action_revision: actionRevision }),
+    ...(inputHash === undefined ? {} : { input_hash: inputHash }),
+  }
+}
+
+function projectGateForm(value: unknown): PRWorkspaceGateForm | undefined {
+  if (value == null) return undefined
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.fields) ||
+    value.fields.length > 64
+  )
+    malformed()
+  const fieldIDs = new Set<string>()
+  return {
+    gate_ref: requiredString(value["gate-ref"]),
+    prompt: requiredString(value.prompt),
+    fields: value.fields.map((entry) => {
+      if (!isRecord(entry)) malformed()
+      const id = requiredString(entry.id)
+      if (fieldIDs.has(id)) malformed()
+      fieldIDs.add(id)
+      const label = requiredString(entry.label)
+      const required =
+        entry.required === undefined ? false : booleanValue(entry.required)
+      const type = requiredString(entry.type)
+      if (type === "short-text" || type === "long-text" || type === "boolean") {
+        return { id, label, required, type }
+      }
+      if (type !== "select" || !Array.isArray(entry.options)) malformed()
+      const minimum = optionalNonNegativeInteger(entry["min-selections"]) ?? 0
+      const maximum = optionalNonNegativeInteger(entry["max-selections"]) ?? 1
+      if (
+        maximum < 1 ||
+        minimum > maximum ||
+        entry.options.length === 0 ||
+        entry.options.length > 128 ||
+        maximum > entry.options.length
+      ) {
+        malformed()
+      }
+      const optionIDs = new Set<string>()
+      return {
+        id,
+        label,
+        required,
+        type,
+        min_selections: minimum,
+        max_selections: maximum,
+        options: entry.options.map((option) => {
+          if (!isRecord(option)) malformed()
+          const optionID = requiredString(option.id)
+          if (optionIDs.has(optionID)) malformed()
+          optionIDs.add(optionID)
+          return { id: optionID, label: requiredString(option.label) }
+        }),
+      }
+    }),
   }
 }
 

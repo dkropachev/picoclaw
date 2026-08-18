@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 func completionFindingFixture(presence WorkPresence, distance ScopeDistance, size ChangeSize, compatible bool) CompletionFinding {
@@ -179,23 +177,15 @@ func TestImplementationDoesNotCompleteWhenCompletionAuditRepeatsExistingFinding(
 type scopeWaitingGates struct{}
 
 func (scopeWaitingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	gate := GateRun{
-		ID:            stableID("pgr_", request.WorkspaceID, request.DecisionPoint, request.SubjectDigest),
-		DecisionPoint: request.DecisionPoint, Purpose: request.Purpose, SubjectRevision: request.SubjectDigest,
-		PolicyRevision: "sha256:policy", State: ExecutionSucceeded, Outcome: GatePass, CreatedAt: now, FinishedAt: &now,
-	}
-	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.finding.classify" {
-		gate.State, gate.Outcome, gate.FinishedAt = ExecutionWaitingUser, "", nil
-		gate.Turns = []GateTurn{{StageID: "human", Kind: "human", Status: "waiting", Questions: []string{"Classify this scope?"}}}
+	gate := testSucceededGate(request)
+	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.hard-scope" || request.DecisionPoint == "pr.finding.classify" {
+		gate = testWaitingGate(request)
 	}
 	return gate, nil
 }
 
-func (scopeWaitingGates) Respond(_ context.Context, gate GateRun, decision GateOutcome, _ map[string]any, _ string) (GateRun, error) {
-	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	gate.State, gate.Outcome, gate.FinishedAt = ExecutionSucceeded, decision, &now
-	return gate, nil
+func (scopeWaitingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
+	return answerTestGate(gate, fieldValues), nil
 }
 
 func TestCandidatePresentCompletionScopeDriftWaitsForExplicitScopeGate(t *testing.T) {
@@ -228,7 +218,7 @@ func TestCandidatePresentCompletionScopeDriftWaitsForExplicitScopeGate(t *testin
 		}
 	}
 	for index := range result.Gates {
-		if result.Gates[index].DecisionPoint == "pr.implementation.scope" {
+		if result.Gates[index].DecisionPoint == "pr.implementation.hard-scope" {
 			scopeGate = &result.Gates[index]
 		}
 	}
@@ -250,13 +240,13 @@ func TestCandidatePresentCompletionScopeDriftWaitsForExplicitScopeGate(t *testin
 	}
 	if _, passErr := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: result.Workspace.ID, GateRunID: scopeGate.ID,
-		ExpectedVersion: result.Workspace.Version, RequestID: "request-00000021", Decision: GatePass,
+		ExpectedVersion: result.Workspace.Version, RequestID: "request-00000021", FieldValues: map[string]any{"action": "approve"},
 	}); passErr == nil {
 		t.Fatal("hard candidate scope accepted a generic gate pass")
 	}
 	resolved, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: result.Workspace.ID, GateRunID: scopeGate.ID,
-		ExpectedVersion: result.Workspace.Version, RequestID: "request-00000022", Decision: GateDefer,
+		ExpectedVersion: result.Workspace.Version, RequestID: "request-00000022", FieldValues: map[string]any{"action": "defer-follow-up"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +290,7 @@ func TestCandidatePresentCompletionScopeDriftWaitsForExplicitScopeGate(t *testin
 	}
 }
 
-func TestHardRepairScopeCannotReachPublicationThroughGatePass(t *testing.T) {
+func TestHardRepairScopeCannotReachPublicationThroughGateApproval(t *testing.T) {
 	tests := []struct {
 		name       string
 		distance   ScopeDistance
@@ -333,20 +323,45 @@ func TestHardRepairScopeCannotReachPublicationThroughGatePass(t *testing.T) {
 			}
 			var scopeGate *GateRun
 			for index := range result.Gates {
-				if result.Gates[index].DecisionPoint == "pr.implementation.scope" {
+				if result.Gates[index].DecisionPoint == "pr.implementation.hard-scope" {
 					scopeGate = &result.Gates[index]
 				}
 			}
-			if scopeGate == nil || scopeGate.PolicyRevision != "builtin:hard-scope-resolution-v1" {
+			if scopeGate == nil || !scopeGate.Evidence.HardScope {
 				t.Fatalf("hard resolution gate missing: %#v", result.Gates)
 			}
 			if _, err = service.RespondGate(context.Background(), RespondGateRequest{
 				WorkspaceID: result.Workspace.ID, GateRunID: scopeGate.ID,
-				ExpectedVersion: result.Workspace.Version, RequestID: "request-00000031", Decision: GatePass,
+				ExpectedVersion: result.Workspace.Version, RequestID: "request-00000031",
+				FieldValues: map[string]any{"action": "approve"},
 			}); err == nil {
 				t.Fatal("hard repair scope accepted pass")
 			}
 		})
+	}
+}
+
+func TestOrdinaryImplementationScopeActionsDeferOrReviseAsAdvertised(t *testing.T) {
+	service, aggregate := readyImplementationService(t)
+	finding := aggregate.Findings[0]
+	gate := GateRun{
+		ID: "pgr_99999999999999999999999999999999", DecisionPoint: "pr.implementation.scope",
+		TargetID: "pra_99999999999999999999999999999999", State: ExecutionSucceeded,
+		Evidence: GateEvidence{FindingIDs: []string{finding.ID}, ScopeResolutionIDs: []string{finding.ID}},
+		Turns:    []GateTurn{{Status: "answered", FieldValues: map[string]any{"action": "defer-follow-up"}}},
+	}
+	deferred, err := service.gateActionPatch(aggregate, gate)
+	if err != nil || deferred.Phase == nil || *deferred.Phase != PhaseImplementation ||
+		deferred.ExecutionState == nil || *deferred.ExecutionState != ExecutionQueued ||
+		len(deferred.UpsertFindings) != 2 || deferred.UpsertFindings[1].Disposition != FindingDeferred ||
+		deferred.UpsertFindings[1].Scope.Presence != WorkFollowUp {
+		t.Fatalf("ordinary defer patch = %#v, error = %v", deferred, err)
+	}
+	gate.Turns[0].FieldValues = map[string]any{"action": "revise-charter"}
+	revised, err := service.gateActionPatch(aggregate, gate)
+	if err != nil || revised.Phase == nil || *revised.Phase != PhaseCharter ||
+		revised.ExecutionState == nil || *revised.ExecutionState != ExecutionWaitingUser {
+		t.Fatalf("ordinary revise patch = %#v, error = %v", revised, err)
 	}
 }
 
@@ -655,7 +670,7 @@ func TestAmbiguousReviewFindingStartsClassificationGate(t *testing.T) {
 	}
 	service, err := NewService(ServiceConfig{
 		Store: store, AI: ambiguousReviewAI{}, ReviewEvidence: serviceReviewEvidence{},
-		Gates: &WorkflowGateEvaluator{Config: config.DefaultPRLifecycleConfig(), Now: func() time.Time { return now }},
+		Gates: scopeWaitingGates{},
 		Now:   func() time.Time { return now },
 	})
 	if err != nil {
@@ -680,7 +695,7 @@ func TestAmbiguousReviewFindingStartsClassificationGate(t *testing.T) {
 	t.Fatalf("classification gate missing: %#v", result.Gates)
 }
 
-func TestExactLargeFindingBecomesSelectableOnlyAfterClassificationGatePass(t *testing.T) {
+func TestExactLargeFindingBecomesSelectableOnlyAfterClassificationApproval(t *testing.T) {
 	service, aggregate := readyImplementationService(t)
 	service.gates = scopeWaitingGates{}
 	finding := aggregate.Findings[0]
@@ -707,7 +722,7 @@ func TestExactLargeFindingBecomesSelectableOnlyAfterClassificationGatePass(t *te
 	}
 	accepted, err := service.RespondGate(context.Background(), RespondGateRequest{
 		WorkspaceID: waiting.Workspace.ID, GateRunID: waiting.Gates[0].ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-00000052", Decision: GatePass,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-00000052", FieldValues: map[string]any{"action": "keep-in-pr"},
 	})
 	if err != nil || accepted.Findings[0].Disposition != FindingInScope {
 		t.Fatalf("classification pass = findings %#v err %v", accepted.Findings, err)

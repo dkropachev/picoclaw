@@ -122,5 +122,6 @@ func TestProjectGateEvidencePinsHardScopeAndOnlyResolutionFindings(t *testing.T)
 	})
 	require.True(t, evidence.HardScope)
 	require.Equal(t, []string{drift.ID}, evidence.HardScopeFindingIDs)
+	require.Equal(t, []string{drift.ID}, evidence.ScopeResolutionIDs)
 	require.Equal(t, []string{repairFinding.ID, drift.ID}, evidence.FindingIDs)
 }

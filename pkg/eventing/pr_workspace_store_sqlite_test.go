@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -293,15 +295,19 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 		}},
 		AppendGateRuns: []PRGateRun{{
 			PRWorkspaceRecord: PRWorkspaceRecord{ID: gateID}, DecisionPoint: "pr.implementation.complete",
-			Purpose: "authorization", State: PRExecutionWaitingUser, ProfileID: "default",
-			ProfileRevision: "profile-v1", PinnedPolicy: json.RawMessage(`{"stages":[]}`),
+			State: PRExecutionSucceeded, PolicyRevision: "sha256:policy-v3",
+			WorkflowRef: "workflows/pr-lifecycle.yml", WorkflowRevision: "sha256:workflow-v3",
+			GateRef: "gates.implementation-complete", ConfigID: "default",
+			ConfigRevision: "config-v1", PinnedPolicy: json.RawMessage(`{"version":"3"}`),
 			PinnedPolicyHash: "policy-hash", SubjectRevision: "subject-v1",
 			PinnedSubject: json.RawMessage(`{"head_sha":"bbbbbbbb"}`), PinnedSubjectHash: "subject-hash",
-		}},
-		AppendGateDecisions: []PRGateDecision{{
-			PRWorkspaceRecord: PRWorkspaceRecord{ID: "pgd_00000000000000000000000000000001"},
-			GateRunID:         gateID, StageID: "human", Kind: "human", Outcome: PRGatePass,
-			Actor: "octo", Answers: json.RawMessage(`{"confirmed":true}`),
+			WorkflowRunID: "wr_gate-v3", RuntimePresent: true, CurrentStageID: "",
+			Turns: []PRGateTurn{{
+				StageID: "gate-exec", Kind: "human", Title: "Accept implementation", Status: "answered",
+				GateForm:    json.RawMessage(`{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`),
+				FieldValues: map[string]any{"action": "accept", "note": "validated"}, ActorKind: "human",
+				ExecutionID: "ge_implementation-complete", ActionRevision: "sha256:action-v3", InputHash: "sha256:input-v3",
+			}},
 		}},
 		AppendPublications: []PRPublication{{
 			PRWorkspaceRecord: PRWorkspaceRecord{ID: "ppb_00000000000000000000000000000001"},
@@ -348,7 +354,14 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 	assert.Len(t, result.Aggregate.RepairAttempts, 1)
 	assert.Len(t, result.Aggregate.ValidationRuns, 1)
 	assert.Len(t, result.Aggregate.GateRuns, 1)
-	assert.Len(t, result.Aggregate.GateDecisions, 1)
+	assert.Equal(t, "sha256:policy-v3", result.Aggregate.GateRuns[0].PolicyRevision)
+	assert.Equal(t, "workflows/pr-lifecycle.yml", result.Aggregate.GateRuns[0].WorkflowRef)
+	assert.Equal(t, "sha256:workflow-v3", result.Aggregate.GateRuns[0].WorkflowRevision)
+	assert.Equal(t, "gates.implementation-complete", result.Aggregate.GateRuns[0].GateRef)
+	assert.Equal(t, "config-v1", result.Aggregate.GateRuns[0].ConfigRevision)
+	assert.Equal(t, map[string]any{"action": "accept", "note": "validated"}, result.Aggregate.GateRuns[0].Turns[0].FieldValues)
+	assert.Equal(t, "human", result.Aggregate.GateRuns[0].Turns[0].ActorKind)
+	assert.JSONEq(t, `{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`, string(result.Aggregate.GateRuns[0].Turns[0].GateForm))
 	assert.Len(t, result.Aggregate.Publications, 1)
 	assert.Len(t, result.Aggregate.OperationIntents, 1)
 	assert.Len(t, result.Aggregate.Activity, 1)
@@ -378,6 +391,126 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 		RequestID: "req_atomic_patch_1", Patch: patch,
 	})
 	assert.ErrorIs(t, err, ErrPRWorkspaceConflict)
+}
+
+func TestPRWorkspaceGateV3PersistenceHasNoDecisionCompatibilitySurface(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "gate-v3.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	var tableCount int
+	require.NoError(t, store.db.QueryRowContext(
+		ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'pr_gate_decisions'`,
+	).Scan(&tableCount))
+	assert.Zero(t, tableCount)
+
+	for _, retired := range []string{
+		`{"purpose":"authorization"}`,
+		`{"outcome":"pass"}`,
+		`{"profile_id":"default"}`,
+		`{"profile_revision":"profile-v2"}`,
+		`{"turns":[{"outcome":"pass"}]}`,
+		`{"turns":[{"questions":["Approve?"]}]}`,
+		`{"turns":[{"answers":{"approved":true}}]}`,
+		`{"turns":[{"comment":"approved"}]}`,
+	} {
+		var gate PRGateRun
+		assert.Error(t, decodeStrictPRWorkspaceJSON([]byte(retired), &gate), retired)
+	}
+
+	encoded, err := json.Marshal(PRWorkspaceAggregate{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "gate_decisions")
+}
+
+func TestPRWorkspaceGateV3PersistedLoadRejectsRetiredFields(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	legacyGateID := "pgr_00000000000000000000000000000099"
+	legacyPayload := func(workspaceID string) []byte {
+		return []byte(fmt.Sprintf(`{
+			"id":%q,"workspace_id":%q,"ordinal":1,
+			"created_at":%q,"updated_at":%q,
+			"decision_point":"pr.review.publish","purpose":"authorization",
+			"state":"waiting_user","outcome":"pass",
+			"profile_id":"default","profile_revision":"profile-v2",
+			"pinned_policy":{},"pinned_policy_hash":"legacy-policy",
+			"subject_revision":"legacy-subject","pinned_subject":{},
+			"pinned_subject_hash":"legacy-subject","turns":[{
+				"stage_id":"human","kind":"human","title":"Approve",
+				"status":"waiting","questions":["Approve?"],"outcome":"pass"
+			}]
+		}`, workspaceID, workspaceID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)))
+	}
+	legacyTurnPayload := func(workspaceID string) []byte {
+		return []byte(fmt.Sprintf(`{
+			"id":%q,"workspace_id":%q,"ordinal":1,
+			"created_at":%q,"updated_at":%q,
+			"decision_point":"pr.review.publish","state":"waiting_user",
+			"policy-revision":"policy-v3","workflow-ref":"workflows/pr-lifecycle.yml",
+			"workflow-revision":"workflow-v3","gate-ref":"gates.review-publish",
+			"config-id":"default","config-revision":"config-v3",
+			"pinned_policy":{},"pinned_policy_hash":"policy-v3",
+			"subject_revision":"subject-v3","pinned_subject":{},
+			"pinned_subject_hash":"subject-v3","turns":[{
+				"stage_id":"gate-exec","kind":"human","title":"Publish",
+				"status":"waiting","questions":["Publish?"],"outcome":"pass"
+			}]
+		}`, legacyGateID, workspaceID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)))
+	}
+
+	t.Run("current aggregate", func(t *testing.T) {
+		store := openPRWorkspaceTestStore(t, newMutableClock(now))
+		aggregate := createPRWorkspaceForTest(t, store, now)
+		_, err := store.db.ExecContext(context.Background(), `INSERT INTO pr_gate_runs (
+			id, workspace_id, ordinal, status, payload_json, created_at, updated_at
+		) VALUES (?, ?, 1, 'waiting_user', ?, ?, ?)`, legacyGateID, aggregate.Workspace.ID,
+			legacyPayload(aggregate.Workspace.ID), toDBTime(now), toDBTime(now))
+		require.NoError(t, err)
+
+		conn, err := store.db.Conn(context.Background())
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = loadPRWorkspaceAggregate(context.Background(), conn, aggregate.Workspace.ID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown field")
+	})
+
+	t.Run("historical aggregate", func(t *testing.T) {
+		store := openPRWorkspaceTestStore(t, newMutableClock(now))
+		aggregate := createPRWorkspaceForTest(t, store, now)
+		var sequence int
+		require.NoError(t, store.db.QueryRowContext(context.Background(), `SELECT coalesce(max(sequence), -1) + 1
+			FROM pr_workspace_history WHERE workspace_id = ? AND version = 1`, aggregate.Workspace.ID).Scan(&sequence))
+		_, err := store.db.ExecContext(context.Background(), `INSERT INTO pr_workspace_history (
+			id, workspace_id, version, sequence, record_table, record_id, payload_json, created_at
+		) VALUES (?, ?, 1, ?, 'pr_gate_runs', ?, ?, ?)`,
+			"phs_00000000000000000000000000000099", aggregate.Workspace.ID, sequence,
+			legacyGateID, legacyPayload(aggregate.Workspace.ID), toDBTime(now))
+		require.NoError(t, err)
+
+		_, err = store.getPRWorkspaceAtVersion(context.Background(), aggregate.Workspace.ID, 1)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown field")
+	})
+
+	t.Run("retired turn fields", func(t *testing.T) {
+		store := openPRWorkspaceTestStore(t, newMutableClock(now))
+		aggregate := createPRWorkspaceForTest(t, store, now)
+		_, err := store.db.ExecContext(context.Background(), `INSERT INTO pr_gate_runs (
+			id, workspace_id, ordinal, status, payload_json, created_at, updated_at
+		) VALUES (?, ?, 1, 'waiting_user', ?, ?, ?)`, legacyGateID, aggregate.Workspace.ID,
+			legacyTurnPayload(aggregate.Workspace.ID), toDBTime(now), toDBTime(now))
+		require.NoError(t, err)
+		conn, err := store.db.Conn(context.Background())
+		require.NoError(t, err)
+		defer conn.Close()
+
+		_, err = loadPRWorkspaceAggregate(context.Background(), conn, aggregate.Workspace.ID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown field")
+	})
 }
 
 func TestPRWorkspaceStalePatchRollsBackEveryChild(t *testing.T) {

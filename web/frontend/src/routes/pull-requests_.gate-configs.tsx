@@ -7,24 +7,24 @@ import {
 } from "@tanstack/react-router"
 import { useEffect, useMemo } from "react"
 
-import { isPRLifecycleGateProfileID } from "@/api/pr-lifecycle-gate-profiles"
-import { PRLifecycleGateProfilesPage } from "@/components/pr-workspaces/pr-lifecycle-gate-profiles-page"
+import { isPRLifecycleGateConfigID } from "@/api/pr-lifecycle-gate-configs"
+import { PRLifecycleGateConfigsPage } from "@/components/pr-workspaces/pr-lifecycle-gate-configs-page"
 import {
   asPRNavigationState,
   goToMarkedPRHistory,
   updatePRNavigationState,
 } from "@/routes/-pr-navigation"
 
-export interface PRProfilesSearch {
+export interface PRGateConfigsSearch {
   from?: string
   dialog?: "discard"
 }
 
 const workspaceIDPattern = /^prw_[0-9a-f]{32}$/
 
-export function normalizePRProfilesSearch(
+export function normalizePRGateConfigsSearch(
   raw: Record<string, unknown>,
-): PRProfilesSearch {
+): PRGateConfigsSearch {
   const from =
     typeof raw.from === "string" && workspaceIDPattern.test(raw.from)
       ? raw.from
@@ -35,7 +35,7 @@ export function normalizePRProfilesSearch(
   }
 }
 
-function PullRequestProfilesRoutePage() {
+function PullRequestGateConfigsRoutePage() {
   const navigate = useNavigate()
   const router = useRouter()
   const locationState = useLocation({
@@ -45,11 +45,11 @@ function PullRequestProfilesRoutePage() {
   const locationSearch = useLocation({ select: (location) => location.search })
   const locationHash = useLocation({ select: (location) => location.hash })
   const search = useMemo(
-    () => normalizePRProfilesSearch({ ...locationSearch }),
+    () => normalizePRGateConfigsSearch({ ...locationSearch }),
     [locationSearch],
   )
   const canonical =
-    pathname !== "/pull-requests/profiles" ||
+    pathname !== "/pull-requests/gate-configs" ||
     (locationHash === "" &&
       Object.keys(locationSearch).length === Object.keys(search).length &&
       Object.entries(search).every(
@@ -60,19 +60,19 @@ function PullRequestProfilesRoutePage() {
   useEffect(() => {
     if (canonical) return
     void navigate({
-      to: "/pull-requests/profiles",
+      to: "/pull-requests/gate-configs",
       search,
       hash: "",
       replace: true,
     })
   }, [canonical, navigate, search])
 
-  if (pathname !== "/pull-requests/profiles") return <Outlet />
+  if (pathname !== "/pull-requests/gate-configs") return <Outlet />
   if (!canonical) return null
 
   return (
-    <PRLifecycleGateProfilesPage
-      page="profiles"
+    <PRLifecycleGateConfigsPage
+      page="configs"
       discardOpen={search.dialog === "discard"}
       onBack={() => {
         const fallback = () => {
@@ -102,7 +102,7 @@ function PullRequestProfilesRoutePage() {
       }}
       onDiscardOpenChange={(open) =>
         navigate({
-          to: "/pull-requests/profiles",
+          to: "/pull-requests/gate-configs",
           search: {
             ...(search.from ? { from: search.from } : {}),
             ...(open ? { dialog: "discard" as const } : {}),
@@ -114,18 +114,18 @@ function PullRequestProfilesRoutePage() {
             })),
         })
       }
-      onProfileChange={(profileID) => {
-        if (!profileID || !isPRLifecycleGateProfileID(profileID)) return
+      onConfigChange={(configID) => {
+        if (!configID || !isPRLifecycleGateConfigID(configID)) return
         void navigate({
-          to: "/pull-requests/profiles/$profileID",
-          params: { profileID },
+          to: "/pull-requests/gate-configs/$configID",
+          params: { configID },
           search: {
             flow: "review",
             ...(search.from ? { from: search.from } : {}),
           },
           state: (previous) =>
             updatePRNavigationState(previous, (current) => ({
-              prParent: "profiles",
+              prParent: "gate-configs",
               prParentIndex: current.__TSR_index,
               prParentKey: current.__TSR_key,
             })),
@@ -135,7 +135,7 @@ function PullRequestProfilesRoutePage() {
   )
 }
 
-export const Route = createFileRoute("/pull-requests_/profiles")({
-  validateSearch: normalizePRProfilesSearch,
-  component: PullRequestProfilesRoutePage,
+export const Route = createFileRoute("/pull-requests_/gate-configs")({
+  validateSearch: normalizePRGateConfigsSearch,
+  component: PullRequestGateConfigsRoutePage,
 })

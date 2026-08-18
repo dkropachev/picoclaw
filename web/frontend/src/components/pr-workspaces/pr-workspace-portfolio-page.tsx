@@ -41,10 +41,10 @@ import { cn } from "@/lib/utils"
 
 export function PRWorkspacePortfolioPage({
   onOpenWorkspace,
-  onOpenGateProfiles,
+  onOpenGateConfigs,
 }: {
   onOpenWorkspace: (workspaceID: string) => void
-  onOpenGateProfiles?: () => void
+  onOpenGateConfigs?: () => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -127,13 +127,13 @@ export function PRWorkspacePortfolioPage({
           </Badge>
         }
       >
-        {onOpenGateProfiles && (
+        {onOpenGateConfigs && (
           <Button
             type="button"
             variant="outline"
             aria-label={t("prWorkspaces.portfolio.gates")}
             title={t("prWorkspaces.portfolio.gates")}
-            onClick={onOpenGateProfiles}
+            onClick={onOpenGateConfigs}
           >
             <IconAdjustments />
             <span className="hidden sm:inline">

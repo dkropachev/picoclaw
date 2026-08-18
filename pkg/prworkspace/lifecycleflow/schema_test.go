@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -305,7 +306,7 @@ func TestParseRejectsInvalidFlowAndNodeSemantics(t *testing.T) {
 		{
 			name: "locked decision point",
 			mutate: func(document *manifestDocument) {
-				node := findRawNode(t, document, "implementation_hard_scope")
+				node := findRawNode(t, document, "implementation_hard_scope_guard")
 				node.DecisionPoint = "pr.implementation.scope"
 			},
 			want: "locked gate may not declare a decision point",
@@ -313,7 +314,7 @@ func TestParseRejectsInvalidFlowAndNodeSemantics(t *testing.T) {
 		{
 			name: "unknown safeguard",
 			mutate: func(document *manifestDocument) {
-				findRawNode(t, document, "implementation_hard_scope").Safeguard = "pr.scope.unknown"
+				findRawNode(t, document, "implementation_hard_scope_guard").Safeguard = "pr.scope.unknown"
 			},
 			want: "unknown safeguard",
 		},
@@ -334,13 +335,18 @@ func TestParseRejectsInvalidFlowAndNodeSemantics(t *testing.T) {
 		{
 			name: "missing mandatory safeguard",
 			mutate: func(document *manifestDocument) {
-				node := findRawNode(t, document, "implementation_hard_scope")
-				value := true
-				ordinal := 8
-				node.Editable = &value
-				node.Safeguard = ""
-				node.DecisionPoint = "pr.implementation.scope"
-				node.Ordinal = &ordinal
+				flow := &document.Flows[1]
+				for index := range flow.Edges {
+					if flow.Edges[index].To == "implementation_hard_scope_guard" {
+						flow.Edges[index].To = "implementation_hard_scope"
+					}
+				}
+				flow.Edges = slices.DeleteFunc(flow.Edges, func(edge manifestEdge) bool {
+					return edge.From == "implementation_hard_scope_guard"
+				})
+				flow.Nodes = slices.DeleteFunc(flow.Nodes, func(node manifestNode) bool {
+					return node.ID == "implementation_hard_scope_guard"
+				})
 			},
 			want: "missing safeguard \"pr.scope.hard\"",
 		},
