@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Provider } from "jotai"
 import type { AnchorHTMLAttributes, ReactNode } from "react"
@@ -14,42 +14,32 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
     to,
-    search,
     activeOptions,
+    search,
+    state: _state,
     ...props
   }: {
     children: ReactNode
     to: string
-    search?: Record<string, unknown>
     activeOptions?: { exact?: boolean; includeSearch?: boolean }
+    search?: Record<string, string>
+    state?: unknown
   } & AnchorHTMLAttributes<HTMLAnchorElement>) =>
     (() => {
+      void _state
       const pathActive = activeOptions?.exact
         ? pathname === to
         : pathname === to || (to !== "/" && pathname.startsWith(`${to}/`))
-      const searchActive =
-        activeOptions?.includeSearch === false ||
-        (activeOptions?.exact
-          ? JSON.stringify(routeSearch) === JSON.stringify(search ?? {})
-          : Object.entries(search ?? {}).every(
-              ([key, value]) => routeSearch[key] === value,
-            ))
-      const nativeActive = pathActive && searchActive
 
       return (
         <a
           {...props}
           href={
             search && Object.keys(search).length > 0
-              ? `${to}?${new URLSearchParams(
-                  Object.entries(search).map(([key, value]) => [
-                    key,
-                    String(value),
-                  ]),
-                ).toString()}`
+              ? `${to}?${new URLSearchParams(search).toString()}`
               : to
           }
-          {...(nativeActive
+          {...(pathActive
             ? { "aria-current": "page", "data-status": "active" }
             : {})}
         >
@@ -75,7 +65,7 @@ vi.mock("@/hooks/use-sidebar-channels", () => ({
 }))
 
 function renderSidebar() {
-  render(
+  return render(
     <Provider>
       <SidebarProvider>
         <AppSidebar collapsible="none" />
@@ -179,58 +169,200 @@ describe("AppSidebar", () => {
     )
   })
 
-  it("groups pull request work and attention rules in a collapsible PR Reviews section", async () => {
-    pathname = "/reviews"
+  it("links each Pull requests destination to a first-class URL", async () => {
+    pathname = "/pull-requests"
     const user = userEvent.setup()
 
     renderSidebar()
 
-    const trigger = screen.getByRole("button", { name: "PR Reviews" })
+    const trigger = screen.getByRole("button", { name: "Pull requests" })
     expect(trigger).toHaveAttribute("aria-expanded", "true")
-    const work = screen.getByRole("link", { name: "Pull request work" })
-    const attentionRules = screen.getByRole("link", {
-      name: "Rule sets",
+    const work = screen.getByRole("link", { name: "Work" })
+    const gateProfiles = screen.getByRole("link", {
+      name: "Workflow configurations",
     })
-    expect(work).toHaveAttribute("href", "/reviews")
-    expect(attentionRules).toHaveAttribute("href", "/reviews?view=policies")
+    const repositoryAssignments = screen.getByRole("link", {
+      name: "Repository assignments",
+    })
+    const lifecycleSettings = screen.getByRole("link", {
+      name: "Lifecycle settings",
+    })
+    expect(work).toHaveAttribute("href", "/pull-requests")
+    expect(gateProfiles).toHaveAttribute(
+      "href",
+      "/pull-requests/workflow-configurations",
+    )
+    expect(repositoryAssignments).toHaveAttribute(
+      "href",
+      "/pull-requests/repository-assignments",
+    )
+    expect(lifecycleSettings).toHaveAttribute(
+      "href",
+      "/pull-requests/settings?tab=nudging",
+    )
     expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
       "true",
     )
     expect(work).toHaveAttribute("aria-current", "page")
     expect(work).toHaveAttribute("data-status", "active")
-    expect(attentionRules).not.toHaveAttribute("aria-current")
-    expect(attentionRules).not.toHaveAttribute("data-status")
+    expect(gateProfiles).not.toHaveAttribute("aria-current")
+    expect(gateProfiles).not.toHaveAttribute("data-status")
+    expect(lifecycleSettings).not.toHaveAttribute("aria-current")
+    expect(repositoryAssignments).not.toHaveAttribute("aria-current")
     expect(
-      attentionRules.closest('[data-sidebar="menu-button"]'),
+      gateProfiles.closest('[data-sidebar="menu-button"]'),
     ).toHaveAttribute("data-active", "false")
 
     await user.click(trigger)
     expect(trigger).toHaveAttribute("aria-expanded", "false")
     expect(work).not.toBeVisible()
-    expect(attentionRules).not.toBeVisible()
+    expect(gateProfiles).not.toBeVisible()
+    expect(repositoryAssignments).not.toBeVisible()
+    expect(lifecycleSettings).not.toBeVisible()
   })
 
-  it("marks only PR Reviews attention rules active for the policies view", () => {
-    pathname = "/reviews"
-    routeSearch = { view: "policies" }
+  it.each([
+    ["/pull-requests", "Work"],
+    ["/pull-requests/prw_example", "Work"],
+    ["/pull-requests/workflow-configurations", "Workflow configurations"],
+    [
+      "/pull-requests/workflow-configurations/default/edit",
+      "Workflow configurations",
+    ],
+    ["/pull-requests/repository-assignments", "Repository assignments"],
+    ["/pull-requests/settings", "Lifecycle settings"],
+    ["/pull-requests/settings/review", "Lifecycle settings"],
+  ])("marks only %s navigation active", (route, activeName) => {
+    pathname = route
 
     renderSidebar()
 
-    const work = screen.getByRole("link", { name: "Pull request work" })
-    const attentionRules = screen.getByRole("link", {
-      name: "Rule sets",
-    })
-    expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
-      "data-active",
-      "false",
+    for (const name of [
+      "Work",
+      "Workflow configurations",
+      "Repository assignments",
+      "Lifecycle settings",
+    ]) {
+      const link = screen.getByRole("link", { name })
+      const active = name === activeName
+      expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+        "data-active",
+        String(active),
+      )
+      if (active) {
+        expect(link).toHaveAttribute("aria-current", "page")
+        expect(link).toHaveAttribute("data-status", "active")
+      } else {
+        expect(link).not.toHaveAttribute("aria-current")
+        expect(link).not.toHaveAttribute("data-status")
+      }
+    }
+  })
+
+  it("preserves the originating workspace across configuration links", () => {
+    const workspaceID = `prw_${"a".repeat(32)}`
+    pathname = "/pull-requests/workflow-configurations/default"
+    routeSearch = { flow: "review", from: workspaceID }
+
+    renderSidebar()
+
+    expect(screen.getByRole("link", { name: "Work" })).toHaveAttribute(
+      "href",
+      `/pull-requests/${workspaceID}`,
     )
     expect(
-      attentionRules.closest('[data-sidebar="menu-button"]'),
-    ).toHaveAttribute("data-active", "true")
-    expect(work).not.toHaveAttribute("aria-current")
-    expect(work).not.toHaveAttribute("data-status")
-    expect(attentionRules).toHaveAttribute("aria-current", "page")
-    expect(attentionRules).toHaveAttribute("data-status", "active")
+      screen.getByRole("link", { name: "Workflow configurations" }),
+    ).toHaveAttribute(
+      "href",
+      `/pull-requests/workflow-configurations?from=${workspaceID}`,
+    )
+    expect(
+      screen.getByRole("link", { name: "Repository assignments" }),
+    ).toHaveAttribute(
+      "href",
+      `/pull-requests/repository-assignments?from=${workspaceID}`,
+    )
+    expect(
+      screen.getByRole("link", { name: "Lifecycle settings" }),
+    ).toHaveAttribute(
+      "href",
+      `/pull-requests/settings?tab=nudging&from=${workspaceID}`,
+    )
+  })
+
+  it("reveals a PR destination after navigation while preserving manual collapse", async () => {
+    const user = userEvent.setup()
+    const view = renderSidebar()
+    const services = screen.getByRole("button", { name: "Services" })
+
+    expect(services).toHaveAttribute("aria-expanded", "false")
+
+    pathname = "/pull-requests/workflow-configurations/default"
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+
+    await waitFor(() =>
+      expect(services).toHaveAttribute("aria-expanded", "true"),
+    )
+    const pullRequests = screen.getByRole("button", {
+      name: "Pull requests",
+    })
+    expect(pullRequests).toHaveAttribute("aria-expanded", "true")
+    expect(
+      screen.getByRole("link", { name: "Workflow configurations" }),
+    ).toBeVisible()
+
+    await user.click(pullRequests)
+    expect(pullRequests).toHaveAttribute("aria-expanded", "false")
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    expect(pullRequests).toHaveAttribute("aria-expanded", "false")
+
+    pathname = "/pull-requests/settings"
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    await waitFor(() =>
+      expect(pullRequests).toHaveAttribute("aria-expanded", "true"),
+    )
+
+    await user.click(services)
+    expect(services).toHaveAttribute("aria-expanded", "false")
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    expect(services).toHaveAttribute("aria-expanded", "false")
+
+    pathname = "/pull-requests/prw_example"
+    view.rerender(
+      <Provider>
+        <SidebarProvider>
+          <AppSidebar collapsible="none" />
+        </SidebarProvider>
+      </Provider>,
+    )
+    await waitFor(() =>
+      expect(services).toHaveAttribute("aria-expanded", "true"),
+    )
+    expect(screen.getByRole("link", { name: "Work" })).toBeVisible()
   })
 })

@@ -77,11 +77,19 @@ func TestGitHubSubmitterUsesPendingReviewProtocolInOrder(t *testing.T) {
 		"repo":       "gocql",
 		"pullNumber": int64(42),
 		"commitID":   strings.Repeat("a", 40),
+		"body":       submitReviewRecoveryBody(request),
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("create args = %#v, want %#v", got, want)
 	}
 	if _, exists := runner.requests[1].Args["event"]; exists {
 		t.Fatal("create args unexpectedly contain event")
+	}
+	createBody, ok := runner.requests[1].Args["body"].(string)
+	if !ok || strings.Count(createBody, request.Marker) != 1 ||
+		!strings.Contains(createBody, request.Findings[0].Message) ||
+		!strings.Contains(createBody, request.Findings[1].Message) ||
+		!strings.Contains(createBody, request.Findings[2].Message) {
+		t.Fatalf("create body is not marker-bearing complete recovery evidence: %q", createBody)
 	}
 
 	assertSubmitToolIdentity(
@@ -407,8 +415,8 @@ func TestGitHubSubmitterRejectsMalformedOrUnboundedHeadReadsBeforeWrite(t *testi
 		{name: "trailing JSON", text: `{"head":{"sha":"` + validSHA + `"}} {}`},
 		{
 			name: "excessive JSON nesting",
-			text: `{"padding":` + strings.Repeat("[", maxReviewJSONDepth+1) +
-				`0` + strings.Repeat("]", maxReviewJSONDepth+1) +
+			text: `{"padding":` + strings.Repeat("[", maxSubmitJSONDepth+1) +
+				`0` + strings.Repeat("]", maxSubmitJSONDepth+1) +
 				`,"head":{"sha":"` + validSHA + `"}}`,
 		},
 		{name: "oversized", text: strings.Repeat(" ", maxSubmitPullRequestReadBytes+1)},
@@ -530,6 +538,58 @@ func TestGitHubSubmitterStopsAtFirstToolErrorWithoutRetryOrDelete(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestGitHubSubmitterRecoversPendingReviewWithoutCreatingOrAddingComments(t *testing.T) {
+	line := 27
+	request := validSubmitRequest()
+	request.Findings = []SubmitFinding{
+		{
+			ID: "prf_line", Title: "Queue item can be lost", File: "pkg/queue/worker.go", Line: &line,
+			Message: "Restore the item before returning from this error path.",
+		},
+		{
+			ID: "prf_body", Title: "Migration risk",
+			Message: "The rollout plan does not cover existing queued data.",
+		},
+	}
+	runner := &submitRecordingRunner{}
+	result, err := (&GitHubSubmitter{Runner: runner}).SubmitPending(context.Background(), request)
+	if err != nil {
+		t.Fatalf("SubmitPending() error = %v", err)
+	}
+	if result.BodyFindings != len(request.Findings) || len(runner.requests) != 2 {
+		t.Fatalf("SubmitPending() result=%#v calls=%d", result, len(runner.requests))
+	}
+	assertSubmitToolIdentity(t, runner.requests[0], DefaultGitHubMCPServer, GitHubPullRequestReadTool)
+	assertSubmitToolIdentity(t, runner.requests[1], DefaultGitHubMCPServer, GitHubPullRequestReviewWriteTool)
+	args := runner.requests[1].Args
+	if args["method"] != "submit_pending" || args["event"] != "COMMENT" {
+		t.Fatalf("recovery submit args = %#v", args)
+	}
+	body, ok := args["body"].(string)
+	if !ok || strings.Count(body, request.Marker) != 1 ||
+		!strings.Contains(body, request.Findings[0].Message) ||
+		!strings.Contains(body, request.Findings[1].Message) {
+		t.Fatalf("recovery body = %q", body)
+	}
+	for _, call := range runner.requests {
+		if call.MCPTool == GitHubPendingReviewCommentTool || call.Args["method"] == "create" {
+			t.Fatalf("recovery performed a duplicate write: %#v", call)
+		}
+	}
+}
+
+func TestGitHubSubmitterPendingRecoveryWriteFailureIsAmbiguous(t *testing.T) {
+	failure := errors.New("submit result lost")
+	runner := &submitRecordingRunner{failCall: 2, err: failure}
+	_, err := (&GitHubSubmitter{Runner: runner}).SubmitPending(context.Background(), validSubmitRequest())
+	var stageErr *SubmitStageError
+	if !errors.Is(err, failure) || !errors.As(err, &stageErr) ||
+		stageErr.Stage != SubmitStageRecoverPending || !stageErr.ExternalStateMayHaveChanged ||
+		stageErr.CompletedCalls != 0 || len(runner.requests) != 2 {
+		t.Fatalf("pending recovery error=%v stage=%#v calls=%d", err, stageErr, len(runner.requests))
 	}
 }
 

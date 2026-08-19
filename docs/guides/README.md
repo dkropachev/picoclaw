@@ -7,6 +7,8 @@ Task-oriented guides for setup, configuration, and common PicoClaw workflows.
 - [Configuration Guide](configuration.md): environment variables, workspace layout, routing, and sandbox settings.
 - [Session Guide](session-guide.md): how session scope affects memory sharing, summaries, and isolation.
 - [Routing Guide](routing-guide.md): agent dispatch, session overrides, and light-model routing.
+- [Pull Request Workspaces](pull-request-workspaces.md): review, implement,
+  validate, gate, and publish one pull request from a shared workspace.
 - [Chat Apps Configuration](chat-apps.md): supported chat platforms and channel-specific setup paths.
 - [Providers & Model Configuration](providers.md): `model_list`, providers, and model routing.
 - [Spawn & Async Tasks](spawn-tasks.md): background work, long-running tasks, and sub-agent orchestration.

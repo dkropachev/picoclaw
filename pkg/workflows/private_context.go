@@ -258,6 +258,12 @@ func validateFrozenReadOnlySessionWithContext(
 	owner := ""
 	if frozen.Snapshot.Scope != nil {
 		owner = frozen.Snapshot.Scope.AgentID
+		if session.BuildSessionKey(*frozen.Snapshot.Scope) != key {
+			return fmt.Errorf(
+				"%w: captured session key does not match its declared scope",
+				ErrPrivateWorkflowContext,
+			)
+		}
 	} else if legacy := session.ParseLegacyAgentSessionKey(key); legacy != nil {
 		owner = legacy.AgentID
 	}
@@ -492,6 +498,9 @@ func validatePrivateWorkflowAdmission(workflow *Workflow, request RunRequest) er
 	if initial && (workflow == nil || workflow.privateRootRevision == "") {
 		return ErrPrivateWorkflowContext
 	}
+	if workflow != nil && workflow.privateRootKind == privateRootKindGateActionV3 {
+		return validatePrivateGateActionWorkflowAdmission(workflow)
+	}
 	if workflow == nil || len(workflow.Jobs) != 1 ||
 		len(workflow.On.Schedule) != 0 || workflow.On.ChannelMessage != nil ||
 		workflow.On.Command != nil || workflow.On.RuntimeEvent != nil ||
@@ -500,7 +509,7 @@ func validatePrivateWorkflowAdmission(workflow *Workflow, request RunRequest) er
 	}
 	job, ok := workflow.Jobs[workflowGateJobID]
 	if !ok || strings.TrimSpace(job.Uses) != "" || job.Secrets != nil ||
-		len(job.Needs) != 0 || len(job.With) != 0 || len(job.Outputs) != 0 ||
+		len(job.Needs) != 0 || len(job.With) != 0 || !privateGateJobOutputsSafe(job.Outputs) ||
 		len(job.Steps) == 0 ||
 		strings.TrimSpace(job.If) != "" || job.ContinueOnError ||
 		strings.TrimSpace(job.Context.Session) != "" ||
@@ -514,6 +523,19 @@ func validatePrivateWorkflowAdmission(workflow *Workflow, request RunRequest) er
 		}
 		if uses == "human/task" {
 			if strings.TrimSpace(step.Context.Delivery) != "" {
+				return fmt.Errorf("%w: compiled gate target is unsafe", ErrPrivateWorkflowContext)
+			}
+			continue
+		}
+		if uses == GateExecUses {
+			if strings.TrimSpace(step.Context.Delivery) != "" || len(step.With) != 1 {
+				return fmt.Errorf("%w: compiled gate target is unsafe", ErrPrivateWorkflowContext)
+			}
+			ref, ok := step.With["gate-ref"].(string)
+			if !ok {
+				return fmt.Errorf("%w: compiled gate target is unsafe", ErrPrivateWorkflowContext)
+			}
+			if _, err := gateDefinitionForRef(workflow, ref); err != nil {
 				return fmt.Errorf("%w: compiled gate target is unsafe", ErrPrivateWorkflowContext)
 			}
 			continue
@@ -542,6 +564,70 @@ func validatePrivateWorkflowAdmission(workflow *Workflow, request RunRequest) er
 	return nil
 }
 
+func validatePrivateGateActionWorkflowAdmission(workflow *Workflow) error {
+	if workflow == nil || workflow.On.WorkflowCall == nil ||
+		strings.TrimSpace(workflow.On.WorkflowCall.Outputs["field-values"].Value) == "" ||
+		len(workflow.On.WorkflowCall.Outputs) != 1 || len(workflow.On.WorkflowCall.Secrets) != 0 ||
+		len(workflow.On.Schedule) != 0 || workflow.On.ChannelMessage != nil ||
+		workflow.On.Command != nil || workflow.On.RuntimeEvent != nil || workflow.On.Event != nil {
+		return fmt.Errorf("%w: compiled gate action workflow shape changed", ErrPrivateWorkflowContext)
+	}
+	for _, input := range workflow.On.WorkflowCall.Inputs {
+		if input.Required {
+			return fmt.Errorf("%w: private gate action workflow requires unsupported inputs", ErrPrivateWorkflowContext)
+		}
+	}
+	for gateID, gate := range workflow.Gates {
+		if gate.DefaultAction == nil {
+			continue
+		}
+		action := *gate.DefaultAction
+		switch action.Type {
+		case GateActionHuman, GateActionDeterministic, GateActionWorkflow:
+			// Human forms are static, deterministic actions only produce typed
+			// values, and nested workflow actions pass through this admission
+			// boundary recursively.
+		case GateActionAI:
+			if action.Session != AgentSessionEphemeral || action.History != "none" ||
+				action.Cache != "none" || action.Tools != AgentToolsNone {
+				return fmt.Errorf(
+					"%w: private gate %q AI action must be isolated with no tools",
+					ErrPrivateWorkflowContext,
+					gateID,
+				)
+			}
+		default:
+			return fmt.Errorf("%w: private gate action is unsafe", ErrPrivateWorkflowContext)
+		}
+	}
+	for _, job := range workflow.Jobs {
+		if strings.TrimSpace(job.Uses) != "" || job.Secrets != nil || len(job.With) != 0 ||
+			strings.TrimSpace(job.Context.Session) != "" ||
+			strings.TrimSpace(job.Context.Delivery) != "" {
+			return fmt.Errorf("%w: private gate action workflow target is unsafe", ErrPrivateWorkflowContext)
+		}
+		for _, step := range job.Steps {
+			if strings.TrimSpace(step.Uses) != GateExecUses || step.ContinueOnError ||
+				strings.TrimSpace(step.Context.Session) != "" ||
+				strings.TrimSpace(step.Context.Delivery) != "" {
+				return fmt.Errorf("%w: private gate action workflow target is unsafe", ErrPrivateWorkflowContext)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidatePrivateGateActionWorkflow verifies that a published workflow is safe
+// to execute as an action over a private gate subject. Callers must load and
+// structurally Validate the exact workflow snapshot before invoking it.
+func ValidatePrivateGateActionWorkflow(workflow *Workflow) error {
+	return validatePrivateGateActionWorkflowAdmission(workflow)
+}
+
+func privateGateJobOutputsSafe(outputs map[string]string) bool {
+	return len(outputs) == 0
+}
+
 // captureInitialPrivateWorkflow turns the caller-owned compiled workflow into
 // the one immutable JSON snapshot used by all later admission and execution.
 // The compiler stamp is checked against exactly the bytes decoded here.
@@ -567,6 +653,7 @@ func captureInitialPrivateWorkflow(workflow *Workflow) (*Workflow, error) {
 		return nil, ErrPrivateWorkflowContext
 	}
 	snapshot.privateRootRevision = workflow.privateRootRevision
+	snapshot.privateRootKind = workflow.privateRootKind
 	return &snapshot, nil
 }
 
@@ -650,6 +737,13 @@ func validatePrivateRootForWorkflow(
 	}
 	if wantAgentID == "" {
 		if root.ReadOnlySession != nil {
+			// V3 gate actions are configuration-resolved after durable
+			// admission, so the selected private-session agent is not encoded
+			// in the one-step catalog workflow. executeAIGateAction validates
+			// that the resolved agent matches this frozen session before use.
+			if workflowContainsGateExec(workflow) {
+				return nil
+			}
 			return fmt.Errorf(
 				"%w: unused read-only session",
 				ErrPrivateWorkflowContext,

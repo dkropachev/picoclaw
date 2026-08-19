@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 type ToolEntry struct {
@@ -359,7 +360,7 @@ func (r *ToolRegistry) executeWithContext(
 		}
 		logger.WarnCF("tool", "Tool argument validation failed", fields)
 		return ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", name, err)).
-			WithError(fmt.Errorf("argument validation failed: %w", err))
+			WithError(fmt.Errorf("%w: argument validation failed: %w", workflows.ErrToolCallNotDispatched, err))
 	}
 
 	// Inject channel/chatID into ctx so tools read them via ToolChannel(ctx)/ToolChatID(ctx).

@@ -10,9 +10,6 @@
     "hub": "Hub",
     "skills": "技能",
     "tools": "工具",
-    "reviews": "PR 审查",
-    "reviews_work": "拉取请求工作",
-    "reviews_attention_rules": "规则集",
     "events": "事件",
     "mcp": "MCP 服务器",
     "services": "服务",
@@ -171,7 +168,8 @@
     "saveChangesTitle": "有未保存的配置更改",
     "restartRequiredTitle": "需要重启服务",
     "restartRequiredDesc": "{{name}} 的最新配置已保存。重启服务后才能正式生效。",
-    "fix": "修复"
+    "fix": "修复",
+    "skipToContent": "跳转到主要内容"
   },
   "labels": {
     "loading": "加载中..."
@@ -1237,6 +1235,11 @@
       "log_level_error": "更新日志等级失败。",
       "clear": "清空日志",
       "empty": "等待日志中..."
+    }
+  },
+  "prWorkspaces": {
+    "implementation": {
+      "retry": "重试实现"
     }
   },
   "tour": {

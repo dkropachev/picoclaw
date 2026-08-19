@@ -10,9 +10,6 @@
     "hub": "Hub",
     "skills": "Dovednosti",
     "tools": "Nástroje",
-    "reviews": "Kontroly PR",
-    "reviews_work": "Práce s pull requesty",
-    "reviews_attention_rules": "Sady pravidel",
     "events": "Události",
     "mcp": "MCP servery",
     "services": "Služby",
@@ -167,6 +164,7 @@
     "reset": "Resetovat",
     "confirm": "Potvrdit",
     "fix": "Opravit",
+    "skipToContent": "Přejít na hlavní obsah",
     "saveChangesTitle": "Máte neuložené změny konfigurace",
     "restartRequiredTitle": "Vyžadován restart gateway",
     "restartRequiredDesc": "Nejnovější konfigurace {{name}} byla uložena. Pro aktivaci restartujte gateway."
@@ -1235,6 +1233,11 @@
       "log_level_error": "Aktualizace úrovně logování selhala.",
       "clear": "Vymazat logy",
       "empty": "Čekám na logy..."
+    }
+  },
+  "prWorkspaces": {
+    "implementation": {
+      "retry": "Zopakovat implementaci"
     }
   },
   "tour": {

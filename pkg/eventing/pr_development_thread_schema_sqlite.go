@@ -5,7 +5,6 @@ package eventing
 import (
 	"context"
 	"database/sql"
-	"fmt"
 )
 
 const (
@@ -114,95 +113,4 @@ func validateSchemaV9(ctx context.Context, conn *sql.Conn) error {
 			},
 		},
 	})
-}
-
-func backfillPRDevelopmentThreads(ctx context.Context, conn *sql.Conn) error {
-	var preexisting int64
-	if err := conn.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM pr_development_threads) +
-			(SELECT COUNT(*) FROM pr_development_thread_cases)`,
-	).Scan(&preexisting); err != nil {
-		return err
-	}
-	if preexisting != 0 {
-		return fmt.Errorf("schema-v9 thread tables are not empty before legacy backfill")
-	}
-
-	rows, err := conn.QueryContext(ctx, `
-		SELECT id FROM pr_development_cases ORDER BY created_at, id`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	caseIDs := make([]string, 0)
-	for rows.Next() {
-		var caseID string
-		if scanErr := rows.Scan(&caseID); scanErr != nil {
-			return scanErr
-		}
-		caseIDs = append(caseIDs, caseID)
-	}
-	if err = rows.Err(); err != nil {
-		return err
-	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-
-	for _, caseID := range caseIDs {
-		stored, loadErr := getPRDevelopmentCaseRecord(ctx, conn, caseID)
-		if loadErr != nil {
-			return loadErr
-		}
-		threadID, idErr := newPrefixedID(prDevelopmentThreadIDPrefix)
-		if idErr != nil {
-			return idErr
-		}
-		identityHash := prDevelopmentLegacyThreadIdentityHash(caseID)
-		previousHash := emptyPRDevelopmentThreadCasesDigest()
-		link := PRDevelopmentThreadCaseLink{
-			CaseID:       caseID,
-			Ordinal:      0,
-			LinkedAt:     stored.Case.CreatedAt,
-			PreviousHash: previousHash,
-		}
-		link.LinkHash, loadErr = extendPRDevelopmentThreadCasesDigest(
-			threadID,
-			identityHash,
-			stored.CaptureHash,
-			link,
-		)
-		if loadErr != nil {
-			return loadErr
-		}
-		if _, execErr := conn.ExecContext(ctx, `
-			INSERT INTO pr_development_threads (
-				id, identity_kind, legacy_case_id, case_count,
-				identity_hash, cases_digest, created_at, updated_at
-			) VALUES (?, 'legacy', ?, 1, ?, ?, ?, ?)`,
-			threadID,
-			caseID,
-			identityHash,
-			link.LinkHash,
-			toDBTime(stored.Case.CreatedAt),
-			toDBTime(stored.Case.CreatedAt),
-		); execErr != nil {
-			return execErr
-		}
-		if _, execErr := conn.ExecContext(ctx, `
-			INSERT INTO pr_development_thread_cases (
-				case_id, thread_id, ordinal, linked_at,
-				previous_hash, link_hash
-			) VALUES (?, ?, 0, ?, ?, ?)`,
-			caseID,
-			threadID,
-			toDBTime(link.LinkedAt),
-			link.PreviousHash,
-			link.LinkHash,
-		); execErr != nil {
-			return execErr
-		}
-	}
-	return validatePRDevelopmentThreadCoverage(ctx, conn)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -37,15 +37,51 @@ func workflowRunStore(ctx context.Context) (*workflows.FileRunStore, error) {
 	store := workflows.NewFileRunStore(cfg.WorkspacePath())
 	days := cfg.Workflows.EffectiveRetentionDays()
 	if days > 0 {
-		if _, err := reviews.PruneTerminalWorkflowRunsExceptAttention(
-			ctx,
-			store,
-			time.Now().UTC().AddDate(0, 0, -days),
+		if err := pruneCLIWorkflowRuns(
+			ctx, store, time.Now().UTC().AddDate(0, 0, -days),
 		); err != nil {
 			return nil, err
 		}
 	}
 	return store, nil
+}
+
+func pruneCLIWorkflowRuns(
+	ctx context.Context,
+	store workflows.RunStore,
+	olderThan time.Time,
+) error {
+	runs, err := store.ListRuns(ctx)
+	if err != nil {
+		return err
+	}
+	for index := range runs {
+		run := &runs[index]
+		if strings.HasPrefix(strings.TrimSpace(run.WorkflowRef), "inline/pr-lifecycle/") ||
+			!terminalCLIWorkflowRun(run.Status) {
+			continue
+		}
+		completedAt := run.UpdatedAt
+		if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+			completedAt = *run.CompletedAt
+		}
+		if completedAt.Before(olderThan) {
+			if err = store.DeleteRun(ctx, run.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func terminalCLIWorkflowRun(status string) bool {
+	switch status {
+	case workflows.RunStatusSucceeded, workflows.RunStatusFailed,
+		workflows.RunStatusCanceled, workflows.RunStatusSkipped:
+		return true
+	default:
+		return false
+	}
 }
 
 func workflowRuntimeCompatibility() workflows.RuntimeCompatibility {

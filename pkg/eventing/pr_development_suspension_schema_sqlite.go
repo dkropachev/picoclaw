@@ -5,7 +5,6 @@ package eventing
 import (
 	"context"
 	"database/sql"
-	"fmt"
 )
 
 const (
@@ -434,94 +433,6 @@ const (
 		schemaV17PRDevelopmentControllerSuspensionsSuspendClaimableIndex + "\n" +
 		schemaV17PRDevelopmentControllerSuspensionsResumeClaimableIndex
 )
-
-const schemaV17PRDevelopmentControllerColumns = `id, thread_id, owner_session_id, agent_id,
-	revision, phase, line_id, workspace_id, source_clone_url, source_ref, source_commit,
-	source_tree, line_version, mutation_epoch, tip_commit, tree, current_attempt_id,
-	lease_kind, lease_owner, lease_token, lease_until, lease_epoch, claims,
-	mutation_reservation_key, fence_count, fences_digest, created_at, updated_at`
-
-func migrateSchemaV17(ctx context.Context, conn *sql.Conn) error {
-	if _, err := conn.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
-		return fmt.Errorf("defer controller foreign keys: %w", err)
-	}
-	backupSQL := `CREATE TEMP TABLE pr_development_thread_controllers_v17_backup AS SELECT ` +
-		schemaV17PRDevelopmentControllerColumns + ` FROM pr_development_thread_controllers`
-	if _, err := conn.ExecContext(ctx, backupSQL); err != nil {
-		return fmt.Errorf("snapshot v16 controllers: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, `DROP TABLE pr_development_thread_controllers`); err != nil {
-		return fmt.Errorf("replace v16 controllers: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, schemaV17PRDevelopmentControllersTable); err != nil {
-		return fmt.Errorf("create v17 controllers: %w", err)
-	}
-	copySQL := `INSERT INTO pr_development_thread_controllers (` +
-		schemaV17PRDevelopmentControllerColumns + `) SELECT ` +
-		schemaV17PRDevelopmentControllerColumns +
-		` FROM pr_development_thread_controllers_v17_backup`
-	if _, err := conn.ExecContext(ctx, copySQL); err != nil {
-		return fmt.Errorf("restore v16 controllers: %w", err)
-	}
-	for _, query := range []string{
-		`SELECT count(*) FROM (
-			SELECT ` + schemaV17PRDevelopmentControllerColumns + `
-			FROM pr_development_thread_controllers_v17_backup
-			EXCEPT
-			SELECT ` + schemaV17PRDevelopmentControllerColumns + `
-			FROM pr_development_thread_controllers
-		)`,
-		`SELECT count(*) FROM (
-			SELECT ` + schemaV17PRDevelopmentControllerColumns + `
-			FROM pr_development_thread_controllers
-			EXCEPT
-			SELECT ` + schemaV17PRDevelopmentControllerColumns + `
-			FROM pr_development_thread_controllers_v17_backup
-		)`,
-	} {
-		var differences int
-		if err := conn.QueryRowContext(ctx, query).Scan(&differences); err != nil {
-			return fmt.Errorf("verify preserved v16 controllers: %w", err)
-		}
-		if differences != 0 {
-			return fmt.Errorf("verify preserved v16 controllers: %d rows differ", differences)
-		}
-	}
-	if _, err := conn.ExecContext(ctx, `DROP TABLE pr_development_thread_controllers_v17_backup`); err != nil {
-		return fmt.Errorf("drop v16 controller snapshot: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx,
-		schemaV10PRDevelopmentControllerWorkspaceIndex+"\n"+
-			schemaV10PRDevelopmentControllerReservationIndex+"\n"+
-			schemaV10PRDevelopmentControllerLeaseIndex+"\n"+schemaV17,
-	); err != nil {
-		return fmt.Errorf("create eventing schema v17: %w", err)
-	}
-	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
-	if err != nil {
-		return fmt.Errorf("check v17 foreign keys: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		var table string
-		var rowID sql.NullInt64
-		var parent string
-		var foreignKey int
-		if err := rows.Scan(&table, &rowID, &parent, &foreignKey); err != nil {
-			return fmt.Errorf("scan v17 foreign-key violation: %w", err)
-		}
-		return fmt.Errorf("v17 foreign-key violation: table=%s rowid=%v parent=%s key=%d",
-			table, rowID, parent, foreignKey)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate v17 foreign-key check: %w", err)
-	}
-	return nil
-}
-
-func validateSchemaV17(ctx context.Context, conn *sql.Conn) error {
-	return validateSchemaV17ForVersion(ctx, conn, false)
-}
 
 func validateSchemaV17ForVersion(
 	ctx context.Context,

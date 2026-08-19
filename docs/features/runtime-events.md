@@ -55,6 +55,7 @@ Owns: CODE web/backend/api/agent_activity*
 Owns: CONFIG.events.logging*
 Owns: TEST pkg/events/*
 Owns: TEST pkg/config/events*
+Owns: TEST pkg/gateway/agent_activity_test.go *
 Owns: EVENT *
 
 ## Auxiliary Interfaces

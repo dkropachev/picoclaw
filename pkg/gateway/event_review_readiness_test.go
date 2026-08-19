@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"reflect"
 	"testing"
 
@@ -50,95 +49,80 @@ func TestGitHubReviewSubmissionReadinessRequiresReadAndWriteTools(t *testing.T) 
 	}
 }
 
-func TestGitHubPRDevelopmentRepairReadinessRequiresPullRequestRead(t *testing.T) {
-	want := reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReadTool
-	called := 0
-	if !githubPRDevelopmentRepairToolsReady(func(
-		occurrence workflows.WorkflowDependencyOccurrence,
-	) workflows.WorkflowDependencyReadinessCode {
-		called++
-		if occurrence.Kind != workflows.WorkflowDependencyKindMCP ||
-			occurrence.Name != want {
-			t.Fatalf("repair dependency = %#v, want MCP %q", occurrence, want)
-		}
-		return workflows.WorkflowDependencyReadinessReady
-	}) {
-		t.Fatal("ready pull_request_read dependency reported unavailable")
+func TestGitHubReviewProviderReadReadiness(t *testing.T) {
+	want := []string{
+		reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReadTool,
+		reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubGetMeTool,
+		reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubSearchRepositoriesTool,
 	}
-	if called != 1 {
-		t.Fatalf("repair readiness resolver calls = %d, want 1", called)
-	}
-	if githubPRDevelopmentRepairToolsReady(func(
-		workflows.WorkflowDependencyOccurrence,
-	) workflows.WorkflowDependencyReadinessCode {
-		return workflows.WorkflowDependencyReadinessUnavailable
-	}) {
-		t.Fatal("unavailable pull_request_read dependency reported ready")
-	}
-	if githubPRDevelopmentRepairToolsReady(nil) {
-		t.Fatal("nil repair dependency resolver reported ready")
-	}
-}
-
-func TestGitHubReviewProviderReadAndWriteReadinessAreIndependent(t *testing.T) {
-	readName := reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReadTool
-	writeName := reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubPullRequestReviewWriteTool
 	readiness := map[string]workflows.WorkflowDependencyReadinessCode{
-		readName:  workflows.WorkflowDependencyReadinessReady,
-		writeName: workflows.WorkflowDependencyReadinessUnavailable,
+		want[0]: workflows.WorkflowDependencyReadinessReady,
+		want[1]: workflows.WorkflowDependencyReadinessReady,
+		want[2]: workflows.WorkflowDependencyReadinessReady,
 	}
+	var seen []string
 	resolve := func(occurrence workflows.WorkflowDependencyOccurrence) workflows.WorkflowDependencyReadinessCode {
 		if occurrence.Kind != workflows.WorkflowDependencyKindMCP {
 			t.Fatalf("dependency kind = %q", occurrence.Kind)
 		}
+		seen = append(seen, occurrence.Name)
 		return readiness[occurrence.Name]
 	}
 	if !githubReviewProviderReadToolsReady(resolve) {
 		t.Fatal("ready provider read reported unavailable")
 	}
-	if githubReviewProviderWriteToolsReady(resolve) {
-		t.Fatal("unavailable provider write reported ready")
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("resolved tools = %#v, want %#v", seen, want)
 	}
-	readiness[writeName] = workflows.WorkflowDependencyReadinessReady
-	if !githubReviewProviderWriteToolsReady(resolve) {
-		t.Fatal("ready provider write reported unavailable")
+	for _, missing := range want {
+		t.Run(missing, func(t *testing.T) {
+			readiness[missing] = workflows.WorkflowDependencyReadinessUnavailable
+			if githubReviewProviderReadToolsReady(resolve) {
+				t.Fatalf("provider read ready with missing tool %q", missing)
+			}
+			readiness[missing] = workflows.WorkflowDependencyReadinessReady
+		})
 	}
-	readiness[readName] = workflows.WorkflowDependencyReadinessUnavailable
-	if githubReviewProviderReadToolsReady(resolve) {
-		t.Fatal("unavailable provider read reported ready")
-	}
-	if !githubReviewProviderWriteToolsReady(resolve) {
-		t.Fatal("provider write readiness was incorrectly coupled to read")
-	}
-	if githubReviewProviderReadToolsReady(nil) || githubReviewProviderWriteToolsReady(nil) {
+	if githubReviewProviderReadToolsReady(nil) {
 		t.Fatal("nil resolver reported provider readiness")
 	}
 }
 
-func TestGitHubPRDevelopmentRepairReadinessOnlyRequiresProviderRead(t *testing.T) {
-	runtime := &gatewayRepairReadinessFake{
-		dependency: workflows.WorkflowDependencyReadinessReady,
+func TestGitHubPRWorkspaceIssuePublicationReadinessRequiresCreateAndSearch(t *testing.T) {
+	want := []string{
+		reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubIssueWriteTool,
+		reviews.DefaultGitHubMCPServer + "/" + reviews.GitHubSearchIssuesTool,
 	}
-	if !githubPRDevelopmentRepairReady(context.Background(), runtime) {
-		t.Fatal("ready pull_request_read dependency reported unavailable")
+	var seen []string
+	if !githubPRWorkspaceIssuePublicationToolsReady(func(
+		occurrence workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode {
+		if occurrence.Kind != workflows.WorkflowDependencyKindMCP {
+			t.Fatalf("dependency kind = %q, want MCP", occurrence.Kind)
+		}
+		seen = append(seen, occurrence.Name)
+		return workflows.WorkflowDependencyReadinessReady
+	}) {
+		t.Fatal("ready issue publication tools reported unavailable")
 	}
-
-	runtime.dependency = workflows.WorkflowDependencyReadinessUnavailable
-	if githubPRDevelopmentRepairReady(context.Background(), runtime) {
-		t.Fatal("unavailable MCP dependency reported ready")
+	if !reflect.DeepEqual(seen, want) {
+		t.Fatalf("resolved tools = %#v, want %#v", seen, want)
 	}
-	if githubPRDevelopmentRepairReady(context.Background(), nil) {
-		t.Fatal("nil repair runtime reported ready")
+	for _, missing := range want {
+		t.Run(missing, func(t *testing.T) {
+			if githubPRWorkspaceIssuePublicationToolsReady(func(
+				occurrence workflows.WorkflowDependencyOccurrence,
+			) workflows.WorkflowDependencyReadinessCode {
+				if occurrence.Name == missing {
+					return workflows.WorkflowDependencyReadinessUnavailable
+				}
+				return workflows.WorkflowDependencyReadinessReady
+			}) {
+				t.Fatalf("readiness true with missing tool %q", missing)
+			}
+		})
 	}
-}
-
-type gatewayRepairReadinessFake struct {
-	dependency workflows.WorkflowDependencyReadinessCode
-}
-
-func (runtime *gatewayRepairReadinessFake) ResolveWorkflowDependency(
-	context.Context,
-	workflows.WorkflowDependencyOccurrence,
-) workflows.WorkflowDependencyReadinessCode {
-	return runtime.dependency
+	if githubPRWorkspaceIssuePublicationToolsReady(nil) {
+		t.Fatal("nil resolver reported issue publication ready")
+	}
 }

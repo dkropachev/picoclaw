@@ -22,6 +22,10 @@ const (
 	DefaultGitHubMCPServer = "github"
 
 	GitHubPullRequestReadTool        = "pull_request_read"
+	GitHubGetMeTool                  = "get_me"
+	GitHubSearchRepositoriesTool     = "search_repositories"
+	GitHubIssueWriteTool             = "issue_write"
+	GitHubSearchIssuesTool           = "search_issues"
 	GitHubPullRequestReviewWriteTool = "pull_request_review_write"
 	GitHubPendingReviewCommentTool   = "add_comment_to_pending_review"
 
@@ -34,12 +38,87 @@ const (
 	maxSubmitReviewBodyBytes            = 64 << 10
 	maxSubmitMarkerBytes                = 1 << 10
 	maxSubmitPullRequestReadBytes       = 1 << 20
+	maxSubmitJSONDepth                  = 128
 	maxSubmitFindings                   = 200
 	maxSubmitPullNumber           int64 = 1<<31 - 1
 	maxSubmitLine                       = 1<<31 - 1
 )
 
+func rejectDuplicateReviewJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var decodeValue func(int) error
+	decodeValue = func(depth int) error {
+		if depth > maxSubmitJSONDepth {
+			return ErrInvalidSubmitRequest
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delim, compound := token.(json.Delim)
+		if !compound {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				nameToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := nameToken.(string)
+				if !ok {
+					return ErrInvalidSubmitRequest
+				}
+				if _, duplicate := seen[name]; duplicate {
+					return ErrInvalidSubmitRequest
+				}
+				seen[name] = struct{}{}
+				if err := decodeValue(depth + 1); err != nil {
+					return err
+				}
+			}
+			closing, err := decoder.Token()
+			if err != nil || closing != json.Delim('}') {
+				return ErrInvalidSubmitRequest
+			}
+		case '[':
+			for decoder.More() {
+				if err := decodeValue(depth + 1); err != nil {
+					return err
+				}
+			}
+			closing, err := decoder.Token()
+			if err != nil || closing != json.Delim(']') {
+				return ErrInvalidSubmitRequest
+			}
+		default:
+			return ErrInvalidSubmitRequest
+		}
+		return nil
+	}
+	if err := decodeValue(0); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return ErrInvalidSubmitRequest
+		}
+		return err
+	}
+	return nil
+}
+
 var ErrInvalidSubmitRequest = errors.New("invalid GitHub review submission")
+
+// Submitter is the exact GitHub review-publication boundary used by the
+// unified PR workspace.
+type Submitter interface {
+	Submit(ctx context.Context, request SubmitRequest) (SubmitResult, error)
+	SubmitPending(ctx context.Context, request SubmitRequest) (SubmitResult, error)
+}
 
 // SubmitFinding is one finding in the caller's immutable active-finding
 // snapshot. It intentionally has no dropped-state field: the durable worker
@@ -79,11 +158,12 @@ type SubmitResult struct {
 type SubmitStage string
 
 const (
-	SubmitStageValidate      SubmitStage = "validate"
-	SubmitStageVerifyHead    SubmitStage = "verify_pull_request_head"
-	SubmitStageCreatePending SubmitStage = "create_pending_review"
-	SubmitStageAddComment    SubmitStage = "add_pending_review_comment"
-	SubmitStageSubmitPending SubmitStage = "submit_pending_review"
+	SubmitStageValidate       SubmitStage = "validate"
+	SubmitStageVerifyHead     SubmitStage = "verify_pull_request_head"
+	SubmitStageCreatePending  SubmitStage = "create_pending_review"
+	SubmitStageAddComment     SubmitStage = "add_pending_review_comment"
+	SubmitStageSubmitPending  SubmitStage = "submit_pending_review"
+	SubmitStageRecoverPending SubmitStage = "recover_pending_review"
 )
 
 // SubmitStageError reports where submission stopped. When
@@ -151,7 +231,8 @@ type GitHubSubmitter struct {
 // Submit performs the complex-review protocol exactly once:
 //
 //  1. read the pull request and verify its current head revision;
-//  2. create a pending review without an event;
+//  2. create a pending review without an event, with a complete recovery body
+//     and publication marker;
 //  3. add every file-scoped finding to that pending review;
 //  4. submit it as COMMENT with summary, body-only findings, and marker.
 //
@@ -191,6 +272,7 @@ func (s *GitHubSubmitter) Submit(
 	}
 
 	finalBody := submitReviewBody(request)
+	recoveryBody := submitReviewRecoveryBody(request)
 	completedCalls := 0
 	pending, err := s.run(
 		ctx,
@@ -202,6 +284,7 @@ func (s *GitHubSubmitter) Submit(
 			"repo":       request.Repo,
 			"pullNumber": request.PullNumber,
 			"commitID":   request.HeadSHA,
+			"body":       recoveryBody,
 		},
 	)
 	if err != nil {
@@ -241,13 +324,16 @@ func (s *GitHubSubmitter) Submit(
 			GitHubPendingReviewCommentTool,
 			args,
 		); commentErr != nil {
-			return SubmitResult{}, externalSubmitError(
-				SubmitStageAddComment,
-				index,
-				finding.ID,
-				completedCalls,
-				commentErr,
-			)
+			return SubmitResult{
+					InlineComments: inlineComments, BodyFindings: bodyFindings,
+					PendingReview: pending,
+				}, externalSubmitError(
+					SubmitStageAddComment,
+					index,
+					finding.ID,
+					completedCalls,
+					commentErr,
+				)
 		}
 		completedCalls++
 		inlineComments++
@@ -267,13 +353,16 @@ func (s *GitHubSubmitter) Submit(
 		},
 	)
 	if err != nil {
-		return SubmitResult{}, externalSubmitError(
-			SubmitStageSubmitPending,
-			-1,
-			"",
-			completedCalls,
-			err,
-		)
+		return SubmitResult{
+				InlineComments: inlineComments, BodyFindings: bodyFindings,
+				PendingReview: pending,
+			}, externalSubmitError(
+				SubmitStageSubmitPending,
+				-1,
+				"",
+				completedCalls,
+				err,
+			)
 	}
 
 	return SubmitResult{
@@ -281,6 +370,58 @@ func (s *GitHubSubmitter) Submit(
 		BodyFindings:    bodyFindings,
 		PendingReview:   pending,
 		SubmittedReview: submitted,
+	}, nil
+}
+
+// SubmitPending safely completes a marker-bearing pending review discovered
+// during ambiguous-publication reconciliation. It never creates a review or
+// adds more inline comments. The recovery body includes every finding, so a
+// partially completed comment loop cannot lose review information.
+func (s *GitHubSubmitter) SubmitPending(
+	ctx context.Context,
+	request SubmitRequest,
+) (SubmitResult, error) {
+	server := DefaultGitHubMCPServer
+	if s != nil && s.Server != "" {
+		server = s.Server
+	}
+	if err := validateSubmitRequest(ctx, s, server, request); err != nil {
+		return SubmitResult{}, &SubmitStageError{
+			Stage: SubmitStageValidate, FindingIndex: -1, Err: err,
+		}
+	}
+	currentHead, err := s.readPullRequestHead(ctx, server, request)
+	if err != nil {
+		return SubmitResult{}, &SubmitStageError{
+			Stage: SubmitStageVerifyHead, FindingIndex: -1, Err: err,
+		}
+	}
+	if currentHead != request.HeadSHA {
+		return SubmitResult{}, &SubmitStageError{
+			Stage: SubmitStageVerifyHead, FindingIndex: -1,
+			Err: &PullRequestHeadChangedError{Expected: request.HeadSHA, Actual: currentHead},
+		}
+	}
+	submitted, err := s.run(
+		ctx,
+		server,
+		GitHubPullRequestReviewWriteTool,
+		map[string]any{
+			"method":     "submit_pending",
+			"owner":      request.Owner,
+			"repo":       request.Repo,
+			"pullNumber": request.PullNumber,
+			"event":      "COMMENT",
+			"body":       submitReviewRecoveryBody(request),
+		},
+	)
+	if err != nil {
+		return SubmitResult{}, externalSubmitError(
+			SubmitStageRecoverPending, -1, "", 0, err,
+		)
+	}
+	return SubmitResult{
+		BodyFindings: len(request.Findings), SubmittedReview: submitted,
 	}, nil
 }
 
@@ -511,12 +652,16 @@ func validateSubmitRequest(
 			return err
 		}
 	}
-	if body := submitReviewBody(request); len(body) > maxSubmitReviewBodyBytes {
-		return fmt.Errorf(
-			"%w: submitted review body exceeds %d bytes",
-			ErrInvalidSubmitRequest,
-			maxSubmitReviewBodyBytes,
-		)
+	for name, body := range map[string]string{
+		"submitted review": submitReviewBody(request),
+		"recovery review":  submitReviewRecoveryBody(request),
+	} {
+		if len(body) > maxSubmitReviewBodyBytes || strings.Count(body, request.Marker) != 1 {
+			return fmt.Errorf(
+				"%w: %s body exceeds %d bytes or does not contain exactly one marker",
+				ErrInvalidSubmitRequest, name, maxSubmitReviewBodyBytes,
+			)
+		}
 	}
 	return nil
 }
@@ -676,5 +821,28 @@ func submitReviewBody(request SubmitRequest) string {
 		sections = append(sections, bodyFindings.String())
 	}
 	sections = append(sections, request.Marker)
+	return strings.Join(sections, "\n\n")
+}
+
+func submitReviewRecoveryBody(request SubmitRequest) string {
+	sections := make([]string, 1, 3)
+	sections[0] = request.Summary
+	var findings strings.Builder
+	findings.WriteString("### Review findings")
+	for _, finding := range request.Findings {
+		findings.WriteString("\n\n#### ")
+		findings.WriteString(finding.Title)
+		if finding.File != "" {
+			findings.WriteString(" (`")
+			findings.WriteString(finding.File)
+			if finding.Line != nil {
+				fmt.Fprintf(&findings, ":%d", *finding.Line)
+			}
+			findings.WriteString("`)")
+		}
+		findings.WriteString("\n\n")
+		findings.WriteString(finding.Message)
+	}
+	sections = append(sections, findings.String(), request.Marker)
 	return strings.Join(sections, "\n\n")
 }

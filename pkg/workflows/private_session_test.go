@@ -25,11 +25,19 @@ func (r *revisionFenceAgentRunner) CaptureReadOnlySession(
 	ref ReadOnlySessionRef,
 ) (*FrozenReadOnlySession, error) {
 	r.captures = append(r.captures, ref)
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    ref.AgentID,
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"fixture"},
+		Values:     map[string]string{"fixture": "revision-fence"},
+	}
 	return &FrozenReadOnlySession{
 		AgentID: ref.AgentID,
 		Snapshot: session.SessionSnapshot{
-			Key:      session.BuildOpaqueSessionKey("agent:main:web:revision-fence"),
-			Scope:    &session.SessionScope{Version: session.ScopeVersionV1, AgentID: ref.AgentID},
+			Key:      session.BuildSessionKey(scope),
+			Scope:    &scope,
 			Revision: r.captureRevision,
 		},
 		HistoryRevision: "sha256:revision-fence-fixture",
@@ -360,10 +368,18 @@ func TestPrivateGateAdmissionBindsValuesAndRejectsFreshRetryProvenance(t *testin
 }
 
 func TestFrozenReadOnlySessionJSONPreservesRuntimeMessageMetadata(t *testing.T) {
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"fixture"},
+		Values:     map[string]string{"fixture": "private-json"},
+	}
 	want := FrozenReadOnlySession{
 		AgentID: "main",
 		Snapshot: session.SessionSnapshot{
-			Key: "agent:main:web:private",
+			Key: session.BuildSessionKey(scope),
 			History: []providers.Message{{
 				Role:         "assistant",
 				Content:      "decision context",
@@ -396,7 +412,7 @@ func TestFrozenReadOnlySessionJSONPreservesRuntimeMessageMetadata(t *testing.T) 
 				},
 			}},
 			Summary: "summary",
-			Scope:   &session.SessionScope{Version: 1, AgentID: "main"},
+			Scope:   &scope,
 		},
 		HistoryRevision: "sha256:exact",
 		FrozenMedia: media.FrozenSet{
@@ -524,6 +540,12 @@ func TestFrozenReadOnlySessionMediaTamperAndStrictJSONFailClosed(t *testing.T) {
 				value.Snapshot.History[0].Attachments[0].ContentType = "application/json"
 			},
 		},
+		{
+			name: "canonical key scope mismatch",
+			mutate: func(value *FrozenReadOnlySession) {
+				value.Snapshot.Key = session.BuildOpaqueSessionKey("different-private-scope")
+			},
+		},
 	}
 	for _, test := range mutations {
 		t.Run(test.name, func(t *testing.T) {
@@ -598,10 +620,18 @@ func TestFrozenReadOnlySessionMediaTamperAndStrictJSONFailClosed(t *testing.T) {
 
 func frozenReadOnlySessionWithMedia(t *testing.T, base64Data string) FrozenReadOnlySession {
 	t.Helper()
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"fixture"},
+		Values:     map[string]string{"fixture": "private-media"},
+	}
 	snapshot, frozenMedia, err := session.FreezeSessionSnapshotMedia(
 		context.Background(),
 		session.SessionSnapshot{
-			Key: "agent:main:web:private-media",
+			Key: session.BuildSessionKey(scope),
 			History: []providers.Message{{
 				Role:    "user",
 				Content: "review this evidence",
@@ -611,10 +641,7 @@ func frozenReadOnlySessionWithMedia(t *testing.T, base64Data string) FrozenReadO
 					ContentType: "text/plain",
 				}},
 			}},
-			Scope: &session.SessionScope{
-				Version: session.ScopeVersionV1,
-				AgentID: "main",
-			},
+			Scope: &scope,
 		},
 		nil,
 	)

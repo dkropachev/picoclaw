@@ -12,7 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
-func TestCLIWorkflowRetentionPreservesReviewAttentionRuns(t *testing.T) {
+func TestCLIWorkflowRetentionPreservesPRLifecycleRuns(t *testing.T) {
 	workspace := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = workspace
@@ -25,9 +25,9 @@ func TestCLIWorkflowRetentionPreservesReviewAttentionRuns(t *testing.T) {
 
 	store := workflows.NewFileRunStore(workspace)
 	old := time.Now().UTC().Add(-72 * time.Hour)
-	attention := &workflows.Run{
+	gate := &workflows.Run{
 		ID:          "wr_55555555555555555555555555555555",
-		WorkflowRef: "inline/review-attention-gates/v1",
+		WorkflowRef: "inline/pr-lifecycle/pr.review.complete/digest",
 		Status:      workflows.RunStatusSucceeded,
 		CreatedAt:   old,
 		UpdatedAt:   old,
@@ -41,7 +41,7 @@ func TestCLIWorkflowRetentionPreservesReviewAttentionRuns(t *testing.T) {
 		UpdatedAt:   old,
 		CompletedAt: &old,
 	}
-	for _, run := range []*workflows.Run{attention, ordinary} {
+	for _, run := range []*workflows.Run{gate, ordinary} {
 		if err := store.CreateRun(context.Background(), run); err != nil {
 			t.Fatalf("CreateRun(%s) error = %v", run.ID, err)
 		}
@@ -49,8 +49,8 @@ func TestCLIWorkflowRetentionPreservesReviewAttentionRuns(t *testing.T) {
 	if _, err := workflowRunStore(context.Background()); err != nil {
 		t.Fatalf("workflowRunStore() error = %v", err)
 	}
-	if _, err := store.GetRun(context.Background(), attention.ID); err != nil {
-		t.Fatalf("retained attention GetRun() error = %v", err)
+	if _, err := store.GetRun(context.Background(), gate.ID); err != nil {
+		t.Fatalf("retained PR lifecycle gate GetRun() error = %v", err)
 	}
 	if _, err := store.GetRun(context.Background(), ordinary.ID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired ordinary GetRun() error = %v, want not exist", err)

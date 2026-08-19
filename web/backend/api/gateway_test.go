@@ -124,6 +124,38 @@ func resetGatewayTestState(t *testing.T) {
 	})
 }
 
+// stopHandlerStartedGatewayProcess terminates a process started through
+// startGatewayLocked and waits for the handler-owned waiter goroutine to reap
+// it. Tests must not call cmd.Wait themselves: startGatewayLocked owns the
+// single Wait call, and concurrent Wait calls race inside os/exec.Cmd.
+func stopHandlerStartedGatewayProcess(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+
+	if cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			t.Errorf("Kill(handler-started gateway) error = %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		gateway.mu.Lock()
+		waiterFinished := gateway.cmd != cmd
+		gateway.mu.Unlock()
+		if waiterFinished {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("timed out waiting for handler-started gateway waiter")
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestPicoGatewayProtocol(t *testing.T) {
 	resetGatewayTestState(t)
 
@@ -340,12 +372,7 @@ func TestStartGatewayLocked_UsesReloadedConfigForBootSignature(t *testing.T) {
 	bootSignature := gateway.bootConfigSignature
 	gateway.mu.Unlock()
 	t.Cleanup(func() {
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		if cmd != nil {
-			_ = cmd.Wait()
-		}
+		stopHandlerStartedGatewayProcess(t, cmd)
 	})
 
 	updatedCfg, err := config.LoadConfig(configPath)
@@ -407,12 +434,7 @@ func TestStartGatewayLockedCapturesRuntimeSignatureBeforeChildStart(t *testing.T
 	bootSignature := gateway.bootConfigSignature
 	gateway.mu.Unlock()
 	t.Cleanup(func() {
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		if cmd != nil {
-			_ = cmd.Wait()
-		}
+		stopHandlerStartedGatewayProcess(t, cmd)
 	})
 
 	updatedCfg, err := config.LoadConfig(configPath)

@@ -251,241 +251,43 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if version > schemaVersion {
 		return fmt.Errorf("%w: database=%d supported=%d", ErrSchemaTooNew, version, schemaVersion)
 	}
-	if version < 1 {
-		if _, err = conn.ExecContext(ctx, schemaV1); err != nil {
-			return fmt.Errorf("create eventing schema v1: %w", err)
+	switch version {
+	case 0:
+		if _, err = conn.ExecContext(ctx, schemaV1+"\n"+schemaV2); err != nil {
+			return fmt.Errorf("create retained eventing schema: %w", err)
 		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
-			return fmt.Errorf("record eventing schema v1: %w", err)
+		if err = validateRetainedSchemaV19(ctx, conn); err != nil {
+			return err
 		}
+		if _, err = conn.ExecContext(ctx, schemaV19PRWorkspace); err != nil {
+			return fmt.Errorf("create pull request workspace schema v19: %w", err)
+		}
+	case 18:
+		if err = validateLegacySchemaV18(ctx, conn); err != nil {
+			return fmt.Errorf("validate eventing schema v18 before destructive cutover: %w", err)
+		}
+		if err = dropLegacyPRSchemaV19(ctx, conn); err != nil {
+			return fmt.Errorf("drop legacy pull request schema: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, schemaV19PRWorkspace); err != nil {
+			return fmt.Errorf("create pull request workspace schema v19: %w", err)
+		}
+	case 19:
+		// Already current; validation below is intentionally non-repairing.
+	default:
+		return fmt.Errorf("%w: schema versions 1 through 17 are not supported; database=%d", ErrSchemaInvalid, version)
 	}
-	if err = validateSchemaV1(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v1: %w", err)
+	if err = validateLegacyPRSchemaAbsentV19(ctx, conn); err != nil {
+		return err
 	}
-	if version < 2 {
-		if _, err = conn.ExecContext(ctx, schemaV2); err != nil {
-			return fmt.Errorf("create eventing schema v2: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
-			return fmt.Errorf("record eventing schema v2: %w", err)
-		}
+	if err = validateRetainedSchemaV19(ctx, conn); err != nil {
+		return err
 	}
-	if err = validateSchemaV2(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v2: %w", err)
+	if err = validateSchemaV19PRWorkspace(ctx, conn); err != nil {
+		return fmt.Errorf("validate pull request workspace schema v19: %w", err)
 	}
-	if version < 3 {
-		if _, err = conn.ExecContext(ctx, schemaV3); err != nil {
-			return fmt.Errorf("create eventing schema v3: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
-			return fmt.Errorf("record eventing schema v3: %w", err)
-		}
-	}
-	if err = validateSchemaV3(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v3: %w", err)
-	}
-	if version < 4 {
-		if _, err = conn.ExecContext(ctx, schemaV4); err != nil {
-			return fmt.Errorf("create eventing schema v4: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
-			return fmt.Errorf("record eventing schema v4: %w", err)
-		}
-	}
-	if err = validateSchemaV4(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v4: %w", err)
-	}
-	if version < 5 {
-		if _, err = conn.ExecContext(ctx, schemaV5); err != nil {
-			return fmt.Errorf("create eventing schema v5: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
-			return fmt.Errorf("record eventing schema v5: %w", err)
-		}
-	}
-	if err = validateSchemaV5(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v5: %w", err)
-	}
-	if version < 6 {
-		if _, err = conn.ExecContext(ctx, schemaV6); err != nil {
-			return fmt.Errorf("create eventing schema v6: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 6"); err != nil {
-			return fmt.Errorf("record eventing schema v6: %w", err)
-		}
-	}
-	if err = validateSchemaV6(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v6: %w", err)
-	}
-	if version < 7 {
-		if _, err = conn.ExecContext(ctx, schemaV7); err != nil {
-			return fmt.Errorf("create eventing schema v7: %w", err)
-		}
-		if err = validateSchemaV7(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v7: %w", err)
-		}
-		if err = backfillPRDevelopmentConversations(ctx, conn); err != nil {
-			return fmt.Errorf(
-				"backfill eventing schema v7 conversations: %w",
-				err,
-			)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 7"); err != nil {
-			return fmt.Errorf("record eventing schema v7: %w", err)
-		}
-	} else if err = validateSchemaV7(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v7: %w", err)
-	}
-	if version < 8 {
-		if _, err = conn.ExecContext(ctx, schemaV8); err != nil {
-			return fmt.Errorf("create eventing schema v8: %w", err)
-		}
-		if err = validateSchemaV8(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v8: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
-			return fmt.Errorf("record eventing schema v8: %w", err)
-		}
-	} else if err = validateSchemaV8(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v8: %w", err)
-	}
-	if version < 9 {
-		if _, err = conn.ExecContext(ctx, schemaV9); err != nil {
-			return fmt.Errorf("create eventing schema v9: %w", err)
-		}
-		if err = validateSchemaV9(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v9: %w", err)
-		}
-		if err = backfillPRDevelopmentThreads(ctx, conn); err != nil {
-			return fmt.Errorf("backfill eventing schema v9 threads: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 9"); err != nil {
-			return fmt.Errorf("record eventing schema v9: %w", err)
-		}
-	} else if err = validateSchemaV9(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v9: %w", err)
-	}
-	if version < 10 {
-		if _, err = conn.ExecContext(ctx, schemaV10); err != nil {
-			return fmt.Errorf("create eventing schema v10: %w", err)
-		}
-		if err = validateSchemaV10(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v10: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 10"); err != nil {
-			return fmt.Errorf("record eventing schema v10: %w", err)
-		}
-	} else if err = validateSchemaV10ForVersion(
-		ctx,
-		conn,
-		version >= 17,
-		version >= 18,
-	); err != nil {
-		return fmt.Errorf("validate eventing schema v10: %w", err)
-	}
-	if version < 11 {
-		if _, err = conn.ExecContext(ctx, schemaV11); err != nil {
-			return fmt.Errorf("create eventing schema v11: %w", err)
-		}
-		if err = validateSchemaV11(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v11: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 11"); err != nil {
-			return fmt.Errorf("record eventing schema v11: %w", err)
-		}
-	} else if err = validateSchemaV11ForVersion(ctx, conn, version >= 15); err != nil {
-		return fmt.Errorf("validate eventing schema v11: %w", err)
-	}
-	if version < 12 {
-		if _, err = conn.ExecContext(ctx, schemaV12); err != nil {
-			return fmt.Errorf("create eventing schema v12: %w", err)
-		}
-		if err = validateSchemaV12(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v12: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 12"); err != nil {
-			return fmt.Errorf("record eventing schema v12: %w", err)
-		}
-	} else if err = validateSchemaV12(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v12: %w", err)
-	}
-	if version < 13 {
-		if _, err = conn.ExecContext(ctx, schemaV13); err != nil {
-			return fmt.Errorf("create eventing schema v13: %w", err)
-		}
-		if err = validateSchemaV13(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v13: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 13"); err != nil {
-			return fmt.Errorf("record eventing schema v13: %w", err)
-		}
-	} else if err = validateSchemaV13(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v13: %w", err)
-	}
-	if version < 14 {
-		if _, err = conn.ExecContext(ctx, schemaV14); err != nil {
-			return fmt.Errorf("create eventing schema v14: %w", err)
-		}
-		if err = validateSchemaV14(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v14: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 14"); err != nil {
-			return fmt.Errorf("record eventing schema v14: %w", err)
-		}
-	} else if err = validateSchemaV14ForVersion(ctx, conn, version >= 18); err != nil {
-		return fmt.Errorf("validate eventing schema v14: %w", err)
-	}
-	if version < 15 {
-		if _, err = conn.ExecContext(ctx, schemaV15); err != nil {
-			return fmt.Errorf("create eventing schema v15: %w", err)
-		}
-		if err = validateSchemaV15(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v15: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 15"); err != nil {
-			return fmt.Errorf("record eventing schema v15: %w", err)
-		}
-	} else if err = validateSchemaV15(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v15: %w", err)
-	}
-	if version < 16 {
-		if _, err = conn.ExecContext(ctx, schemaV16); err != nil {
-			return fmt.Errorf("create eventing schema v16: %w", err)
-		}
-		if err = validateSchemaV16(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v16: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 16"); err != nil {
-			return fmt.Errorf("record eventing schema v16: %w", err)
-		}
-	} else if err = validateSchemaV16(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v16: %w", err)
-	}
-	if version < 17 {
-		if err = migrateSchemaV17(ctx, conn); err != nil {
-			return fmt.Errorf("migrate eventing schema v17: %w", err)
-		}
-		if err = validateSchemaV17(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v17: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 17"); err != nil {
-			return fmt.Errorf("record eventing schema v17: %w", err)
-		}
-	} else if err = validateSchemaV17ForVersion(ctx, conn, version >= 18); err != nil {
-		return fmt.Errorf("validate eventing schema v17: %w", err)
-	}
-	if version < 18 {
-		if _, err = conn.ExecContext(ctx, schemaV18); err != nil {
-			return fmt.Errorf("create eventing schema v18: %w", err)
-		}
-		if err = validateSchemaV18(ctx, conn); err != nil {
-			return fmt.Errorf("validate eventing schema v18: %w", err)
-		}
-		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 18"); err != nil {
-			return fmt.Errorf("record eventing schema v18: %w", err)
-		}
-	} else if err = validateSchemaV18(ctx, conn); err != nil {
-		return fmt.Errorf("validate eventing schema v18: %w", err)
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 19"); err != nil {
+		return fmt.Errorf("record eventing schema v19: %w", err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
@@ -1302,11 +1104,6 @@ const eventMetadataColumns = `
 
 type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-type rowsQueryer interface {
-	rowQueryer
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 func (s *Store) getWith(ctx context.Context, queryer rowQueryer, query string, args ...any) (StoredEvent, error) {
@@ -2345,14 +2142,6 @@ func (s *Store) Prune(ctx context.Context, before time.Time, limit int) (int64, 
 			  AND NOT EXISTS (
 				SELECT 1 FROM event_inbox replay
 				WHERE replay.replay_of = e.id
-			  )
-			  AND NOT EXISTS (
-				SELECT 1 FROM pr_review_cases review_case
-				WHERE review_case.event_id = e.id
-			  )
-			  AND NOT EXISTS (
-				SELECT 1 FROM pr_development_cases development_case
-				WHERE development_case.event_id = e.id
 			  )
 			ORDER BY e.received_at ASC, e.id ASC
 			LIMIT ?

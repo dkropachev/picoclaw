@@ -40,8 +40,7 @@ const (
 	routeDispatches
 	routeDispatch
 	routeReplay
-	routeReviews
-	routePRDevelopment
+	routePRWorkspaces
 )
 
 type operatorRoute struct {
@@ -140,18 +139,12 @@ func (backend *Backend) serveHTTP(
 		}
 		w.Header().Set("Location", RoutePrefix+"events/"+result.Event.ID)
 		writeOperatorJSON(w, http.StatusCreated, result)
-	case routeReviews:
-		if backend.reviews == nil {
+	case routePRWorkspaces:
+		if backend.prWorkspaces == nil {
 			writeOperatorStatus(w, http.StatusNotFound)
 			return
 		}
-		backend.reviews.ServeHTTP(w, request)
-	case routePRDevelopment:
-		if backend.prDevelopment == nil {
-			writeOperatorStatus(w, http.StatusNotFound)
-			return
-		}
-		backend.prDevelopment.ServeHTTP(w, request)
+		backend.prWorkspaces.ServeHTTP(w, request)
 	default:
 		writeOperatorStatus(w, http.StatusNotFound)
 	}
@@ -171,13 +164,9 @@ func routeFromRequest(request *http.Request) operatorRoute {
 	case RoutePrefix + "dispatches":
 		return operatorRoute{kind: routeDispatches, method: http.MethodGet}
 	}
-	if path == RoutePrefix+"reviews" ||
-		strings.HasPrefix(path, RoutePrefix+"reviews/") {
-		return operatorRoute{kind: routeReviews}
-	}
-	if path == RoutePrefix+"pr-development" ||
-		strings.HasPrefix(path, RoutePrefix+"pr-development/") {
-		return operatorRoute{kind: routePRDevelopment}
+	if path == RoutePrefix+"pr-workspaces" ||
+		strings.HasPrefix(path, RoutePrefix+"pr-workspaces/") {
+		return operatorRoute{kind: routePRWorkspaces}
 	}
 	if strings.HasPrefix(path, RoutePrefix+"dispatches/") {
 		segments := strings.Split(

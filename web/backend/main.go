@@ -661,7 +661,7 @@ func main() {
 
 	// Frontend Embedded Assets
 	registerEmbedRoutes(mux)
-	canonicalPathMux := api.GuardPRDevelopmentCanonicalPaths(mux)
+	canonicalPathMux := api.GuardPRWorkspaceCanonicalPaths(mux)
 
 	accessControlledMux, err := middleware.IPAllowlist(middleware.IPAllowlistConfig{
 		AllowedCIDRs:         launcherCfg.AllowedCIDRs,

@@ -1904,10 +1904,6 @@ func (r *privateGateSecurityAgentRunner) CaptureReadOnlySession(
 		Snapshot: session.SessionSnapshot{
 			Key:     r.captureKey,
 			Summary: r.captureSummary,
-			Scope: &session.SessionScope{
-				Version: session.ScopeVersionV1,
-				AgentID: ref.AgentID,
-			},
 		},
 		HistoryRevision: r.historyRevision,
 		FrozenMedia:     media.FrozenSet{Version: media.FrozenSetVersion},

@@ -38,24 +38,29 @@ var (
 // human/task step. Workflow definitions and execution cursors are persisted
 // separately and are never part of this projection.
 type WorkflowHumanTask struct {
-	ID             string         `json:"id"`
-	RunID          string         `json:"run_id"`
-	WorkflowRef    string         `json:"workflow_ref"`
-	JobID          string         `json:"job_id"`
-	StepID         string         `json:"step_id"`
-	Status         string         `json:"status"`
-	Revision       uint64         `json:"revision"`
-	InputHash      string         `json:"input_hash"`
-	Title          string         `json:"title"`
-	Questions      any            `json:"questions"`
-	ResponseSchema map[string]any `json:"response_schema,omitempty"`
-	ResponseID     string         `json:"response_id,omitempty"`
-	Response       any            `json:"response,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	AnsweredAt     *time.Time     `json:"answered_at,omitempty"`
-	CanceledAt     *time.Time     `json:"canceled_at,omitempty"`
-	RetryAt        *time.Time     `json:"retry_at,omitempty"`
+	ID             string                          `json:"id"`
+	RunID          string                          `json:"run_id"`
+	WorkflowRef    string                          `json:"workflow_ref"`
+	JobID          string                          `json:"job_id"`
+	StepID         string                          `json:"step_id"`
+	Status         string                          `json:"status"`
+	Revision       uint64                          `json:"revision"`
+	InputHash      string                          `json:"input_hash"`
+	Title          string                          `json:"title"`
+	Questions      any                             `json:"questions"`
+	ResponseSchema map[string]any                  `json:"response_schema,omitempty"`
+	GateForm       *GateForm                       `json:"gate-form,omitempty"`
+	ActorKind      string                          `json:"actor-kind,omitempty"`
+	ExecutionID    string                          `json:"execution-id,omitempty"`
+	ActionRevision string                          `json:"action-revision,omitempty"`
+	GateWorkflow   *gateActionWorkflowContinuation `json:"gate-workflow,omitempty"`
+	ResponseID     string                          `json:"response_id,omitempty"`
+	Response       any                             `json:"response,omitempty"`
+	CreatedAt      time.Time                       `json:"created_at"`
+	UpdatedAt      time.Time                       `json:"updated_at"`
+	AnsweredAt     *time.Time                      `json:"answered_at,omitempty"`
+	CanceledAt     *time.Time                      `json:"canceled_at,omitempty"`
+	RetryAt        *time.Time                      `json:"retry_at,omitempty"`
 }
 
 type HumanTaskResumeRequest struct {
@@ -201,8 +206,10 @@ func validateWaitingHumanTaskCheckpoint(run *Run, task WorkflowHumanTask) error 
 	if stepID == "" {
 		stepID = fmt.Sprintf("step_%d", cursor.StepIndex+1)
 	}
-	if stepID != task.StepID || strings.TrimSpace(step.Uses) != "human/task" ||
-		humanTaskID(run.ID, task.JobID, task.StepID) != task.ID {
+	uses := strings.TrimSpace(step.Uses)
+	if stepID != task.StepID || uses != "human/task" && uses != GateExecUses ||
+		uses == GateExecUses && task.GateForm == nil && task.GateWorkflow == nil ||
+		!validHumanTaskID(run.ID, task) {
 		return ErrHumanTaskConflict
 	}
 	stepExecution, exists := run.Steps[task.JobID+"/"+task.StepID]
@@ -227,7 +234,9 @@ func validateAnsweredHumanTaskCheckpoint(run *Run, task WorkflowHumanTask) error
 		if stepID == "" {
 			stepID = fmt.Sprintf("step_%d", index+1)
 		}
-		if stepID == task.StepID && strings.TrimSpace(step.Uses) == "human/task" {
+		uses := strings.TrimSpace(step.Uses)
+		if stepID == task.StepID && (uses == "human/task" ||
+			uses == GateExecUses && (task.GateForm != nil || task.GateWorkflow != nil)) {
 			stepIndex = index
 			break
 		}
@@ -261,6 +270,20 @@ func (e *Executor) ListHumanTasks(ctx context.Context, runID string) ([]Workflow
 func humanTaskID(runID, jobID, stepID string) string {
 	digest := sha256.Sum256([]byte(runID + "\x00" + jobID + "\x00" + stepID))
 	return "ht_" + hex.EncodeToString(digest[:16])
+}
+
+func gateProxyHumanTaskID(runID, jobID, stepID, childTaskID string) string {
+	digest := sha256.Sum256([]byte(
+		runID + "\x00" + jobID + "\x00" + stepID + "\x00" + childTaskID,
+	))
+	return "htg_" + hex.EncodeToString(digest[:16])
+}
+
+func validHumanTaskID(runID string, task WorkflowHumanTask) bool {
+	if task.GateWorkflow != nil {
+		return gateProxyHumanTaskID(runID, task.JobID, task.StepID, task.GateWorkflow.ChildTaskID) == task.ID
+	}
+	return humanTaskID(runID, task.JobID, task.StepID) == task.ID
 }
 
 func newWorkflowHumanTask(run *Run, jobID, stepID string, with map[string]any) (WorkflowHumanTask, error) {
@@ -321,7 +344,72 @@ func newWorkflowHumanTask(run *Run, jobID, stepID string, with map[string]any) (
 	}, nil
 }
 
+func newWorkflowGateHumanTask(
+	run *Run,
+	jobID string,
+	stepID string,
+	resolved resolvedGateAction,
+) (WorkflowHumanTask, error) {
+	if run == nil {
+		return WorkflowHumanTask{}, fmt.Errorf("run is required")
+	}
+	form := GateForm{
+		GateRef: resolved.GateRef,
+		Prompt:  resolved.Gate.Prompt,
+		Fields:  cloneGateDefinition(resolved.Gate).Fields,
+	}
+	schema := gateFieldValuesSchema(form.Fields)
+	payload := map[string]any{"gate-form": form, "response-schema": schema}
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) > MaxHumanTaskPayloadBytes {
+		return WorkflowHumanTask{}, fmt.Errorf(
+			"gate/exec Human form is invalid or exceeds %d bytes",
+			MaxHumanTaskPayloadBytes,
+		)
+	}
+	title := strings.TrimSpace(form.Prompt)
+	if len(title) > MaxHumanTaskTitleBytes {
+		title = form.GateRef
+	}
+	now := time.Now().UTC()
+	return WorkflowHumanTask{
+		ID:             humanTaskID(run.ID, jobID, stepID),
+		RunID:          run.ID,
+		WorkflowRef:    run.WorkflowRef,
+		JobID:          jobID,
+		StepID:         stepID,
+		Status:         HumanTaskStatusWaiting,
+		Revision:       1,
+		InputHash:      resolved.InputHash,
+		Title:          title,
+		Questions:      cloneJSONValue(form),
+		ResponseSchema: cloneMap(schema),
+		GateForm:       &form,
+		ActorKind:      GateActorHuman,
+		ExecutionID:    resolved.ExecutionID,
+		ActionRevision: resolved.ActionRevision,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil
+}
+
 func humanTaskStepOutputs(task WorkflowHumanTask) map[string]any {
+	if task.GateForm != nil {
+		response, _ := task.Response.(map[string]any)
+		fieldValues, _ := response["field-values"].(map[string]any)
+		return map[string]any{
+			"field-values":    cloneMap(fieldValues),
+			"actor-kind":      GateActorHuman,
+			"execution-id":    task.ExecutionID,
+			"action-revision": task.ActionRevision,
+			"input-hash":      task.InputHash,
+		}
+	}
+	if task.GateWorkflow != nil {
+		continuation := *task.GateWorkflow
+		continuation.Gate = cloneGateDefinition(continuation.Gate)
+		task.GateWorkflow = &continuation
+	}
 	return map[string]any{
 		"task_id":     task.ID,
 		"input_hash":  task.InputHash,
@@ -349,6 +437,19 @@ func validateHumanTaskResume(task WorkflowHumanTask, req HumanTaskResumeRequest)
 	if err != nil || len(encoded) > MaxHumanTaskPayloadBytes {
 		return fmt.Errorf("%w: response exceeds %d bytes", ErrHumanTaskResponseInvalid, MaxHumanTaskPayloadBytes)
 	}
+	if task.GateForm != nil {
+		response, ok := req.Response.(map[string]any)
+		if !ok || len(response) != 1 {
+			return fmt.Errorf("%w: gate response must contain only field-values", ErrHumanTaskResponseInvalid)
+		}
+		fieldValues, exists := response["field-values"]
+		if !exists {
+			return fmt.Errorf("%w: gate response requires field-values", ErrHumanTaskResponseInvalid)
+		}
+		if _, err := validateGateFieldValues(task.GateForm.Fields, fieldValues); err != nil {
+			return fmt.Errorf("%w: %v", ErrHumanTaskResponseInvalid, err)
+		}
+	}
 	if len(task.ResponseSchema) > 0 {
 		if err := validateJSONSchemaValue(req.Response, task.ResponseSchema, "$"); err != nil {
 			return fmt.Errorf("%w: %v", ErrHumanTaskResponseInvalid, err)
@@ -361,6 +462,11 @@ func cloneWorkflowHumanTask(task WorkflowHumanTask) WorkflowHumanTask {
 	task.Questions = cloneJSONValue(task.Questions)
 	task.ResponseSchema = cloneMap(task.ResponseSchema)
 	task.Response = cloneJSONValue(task.Response)
+	if task.GateForm != nil {
+		form := *task.GateForm
+		form.Fields = cloneGateDefinition(GateDefinition{Fields: form.Fields}).Fields
+		task.GateForm = &form
+	}
 	if task.AnsweredAt != nil {
 		value := *task.AnsweredAt
 		task.AnsweredAt = &value

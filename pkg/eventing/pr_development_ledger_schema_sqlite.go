@@ -100,10 +100,6 @@ const (
 		schemaV11PRDevelopmentLedgerCheckpointsTable
 )
 
-func validateSchemaV11(ctx context.Context, conn *sql.Conn) error {
-	return validateSchemaV11ForVersion(ctx, conn, false)
-}
-
 func validateSchemaV11ForVersion(
 	ctx context.Context,
 	conn *sql.Conn,

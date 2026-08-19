@@ -118,6 +118,18 @@ func evalIf(expr string, ctx expressionContext) (bool, error) {
 
 func evalExpression(expr string, ctx expressionContext) (any, error) {
 	expr = strings.TrimSpace(expr)
+	if terms, ok := splitExpressionLogicalAND(expr); ok {
+		for _, term := range terms {
+			value, err := evalExpression(term, ctx)
+			if err != nil {
+				return nil, err
+			}
+			if !truthy(value) {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
 	for _, op := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
 		if idx := strings.Index(expr, op); idx >= 0 {
 			left, err := evalComparisonOperand(expr[:idx], ctx)
@@ -156,6 +168,51 @@ func evalExpression(expr string, ctx expressionContext) (any, error) {
 		return n, nil
 	}
 	return lookupPath(expr, ctx)
+}
+
+// splitExpressionLogicalAND recognizes the deliberately small additive AND
+// grammar without treating literal text inside quoted operands as syntax.
+// Parentheses and OR remain unsupported, keeping evaluation bounded and
+// preserving the existing comparison/not grammar.
+func splitExpressionLogicalAND(expression string) ([]string, bool) {
+	const operator = " and "
+	var (
+		parts   []string
+		start   int
+		quote   byte
+		escaped bool
+	)
+	for index := 0; index < len(expression); index++ {
+		character := expression[index]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if character == '\\' {
+				escaped = true
+				continue
+			}
+			if character == quote {
+				quote = 0
+			}
+			continue
+		}
+		if character == '\'' || character == '"' {
+			quote = character
+			continue
+		}
+		if strings.HasPrefix(expression[index:], operator) {
+			parts = append(parts, strings.TrimSpace(expression[start:index]))
+			index += len(operator) - 1
+			start = index + 1
+		}
+	}
+	if len(parts) == 0 {
+		return nil, false
+	}
+	parts = append(parts, strings.TrimSpace(expression[start:]))
+	return parts, true
 }
 
 func evalComparisonOperand(expr string, ctx expressionContext) (any, error) {

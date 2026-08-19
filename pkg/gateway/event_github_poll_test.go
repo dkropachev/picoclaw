@@ -32,7 +32,7 @@ func TestEventAutomationRunsOnePollOnlyGitHubIngressLoop(t *testing.T) {
 		},
 	}
 	runner := &gatewayNotificationPollRunner{}
-	service, err := newEventAutomationServiceWithReviews(
+	service, err := newEventAutomationServiceWithRuntime(
 		context.Background(),
 		cfg,
 		nil,
@@ -41,7 +41,7 @@ func TestEventAutomationRunsOnePollOnlyGitHubIngressLoop(t *testing.T) {
 		eventReviewRuntime{notificationMCP: runner},
 	)
 	if err != nil {
-		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+		t.Fatalf("newEventAutomationServiceWithRuntime() error = %v", err)
 	}
 	if service == nil || service.githubPoller == nil {
 		t.Fatal("GitHub notification poller was not configured")

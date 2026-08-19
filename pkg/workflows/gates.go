@@ -586,6 +586,14 @@ func normalizeWorkflowGateCondition(value string) (string, error) {
 
 func validateWorkflowGateConditionOperands(expression string) error {
 	expression = strings.TrimSpace(expression)
+	if terms, ok := splitExpressionLogicalAND(expression); ok {
+		for _, term := range terms {
+			if err := validateWorkflowGateConditionOperands(term); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, operator := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
 		if index := strings.Index(expression, operator); index >= 0 {
 			if err := validateWorkflowGateConditionOperands(expression[:index]); err != nil {
@@ -628,6 +636,13 @@ func validateWorkflowGateConditionPaths(condition string, inputs map[string]any)
 
 func workflowGateConditionPaths(expression string) []string {
 	expression = strings.TrimSpace(expression)
+	if terms, ok := splitExpressionLogicalAND(expression); ok {
+		paths := make([]string, 0, len(terms))
+		for _, term := range terms {
+			paths = append(paths, workflowGateConditionPaths(term)...)
+		}
+		return paths
+	}
 	for _, operator := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
 		if index := strings.Index(expression, operator); index >= 0 {
 			left := workflowGateConditionPaths(expression[:index])
@@ -760,6 +775,13 @@ func workflowGateInputExpression(gateID, field string) string {
 
 func lowerWorkflowGateCondition(expression string) string {
 	expression = strings.TrimSpace(expression)
+	if terms, ok := splitExpressionLogicalAND(expression); ok {
+		lowered := make([]string, 0, len(terms))
+		for _, term := range terms {
+			lowered = append(lowered, lowerWorkflowGateCondition(term))
+		}
+		return strings.Join(lowered, " and ")
+	}
 	for _, operator := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
 		if index := strings.Index(expression, operator); index >= 0 {
 			return lowerWorkflowGateCondition(expression[:index]) + operator +

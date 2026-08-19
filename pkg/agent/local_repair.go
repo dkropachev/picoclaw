@@ -31,7 +31,7 @@ const (
 	DefaultLocalRepairMaxTokens     = 8192
 
 	maxLocalRepairInstructionBytes = 64 << 10
-	maxLocalRepairContextBytes     = 512 << 10
+	maxLocalRepairContextBytes     = 2 << 20
 	maxLocalRepairAnswerBytes      = 64 << 10
 	maxLocalRepairPathBytes        = 4096
 	maxLocalRepairPatchBytes       = 1 << 20
@@ -114,9 +114,10 @@ type LocalRepairRequest struct {
 // LocalRepairResult deliberately omits the checkout path and every provider,
 // session, account, or Git capability.
 type LocalRepairResult struct {
-	Content     string
-	Iterations  int
-	WorkspaceID string
+	Content      string
+	Iterations   int
+	WorkspaceID  string
+	PromptDigest string
 }
 
 // LocalRepairRunner runs an isolated edit-only model loop over an exact pinned
@@ -192,6 +193,7 @@ func (runner *LocalRepairRunner) Run(
 	if contextText != "" && !validLocalRepairText(contextText, maxLocalRepairContextBytes) {
 		return LocalRepairResult{}, fmt.Errorf("%w: context is invalid", ErrLocalRepairInvalid)
 	}
+	promptDigest := localRepairFullPromptDigest(instruction, contextText)
 
 	operationErr := runner.workspaces.WithPinnedOperation(
 		ctx,
@@ -211,6 +213,7 @@ func (runner *LocalRepairRunner) Run(
 				instruction,
 				contextText,
 			)
+			result.PromptDigest = promptDigest
 			return returnErr
 		},
 	)
@@ -321,6 +324,15 @@ func localRepairUserMessage(instruction, contextText string) string {
 			"\n\nREPOSITORY CONTEXT:\n(no additional context supplied)"
 	}
 	return "TASK FROM USER:\n" + instruction + "\n\nREPOSITORY CONTEXT:\n" + contextText
+}
+
+func localRepairFullPromptDigest(instruction, contextText string) string {
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("picoclaw-local-repair-full-prompt-v1\x00"))
+	_, _ = digest.Write([]byte(localRepairSystemPrompt))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(localRepairUserMessage(instruction, contextText)))
+	return fmt.Sprintf("sha256:%x", digest.Sum(nil))
 }
 
 func validLocalRepairText(value string, maximum int) bool {

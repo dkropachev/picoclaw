@@ -1,0 +1,794 @@
+schema: pr-lifecycle-flow/v1
+flows:
+  - id: review
+    title: Review workflow
+    entry: review_request
+    nodes:
+      - id: review_request
+        kind: action
+        title: Request PR review
+        description: GitHub assigns the pull request to a reviewer.
+        operation: github.review.requested
+      - id: review_track
+        kind: action
+        title: Track pull request
+        description: A user or configured automation opens the pull request in PicoClaw.
+        operation: pr.workspace.track
+      - id: review_define_charter
+        kind: action
+        title: Define purpose and scope
+        description: Record the goal, included work, and exclusions.
+        operation: pr.charter.define
+      - id: review_gate_charter_confirm
+        kind: gate
+        title: Approve purpose and scope
+        description: Checks that the pull request goal and boundaries are approved.
+        decision_point: pr.charter.confirm
+        ordinal: 1
+        editable: true
+      - id: review_gate_charter_reconfirm
+        kind: gate
+        title: Approve revised purpose and scope
+        description: Reconfirms authority after the purpose or scope changes.
+        decision_point: pr.charter.reconfirm
+        ordinal: 2
+        editable: true
+      - id: review_gate_start
+        kind: gate
+        title: Allow AI review
+        description: Decides whether AI may review the approved pull request scope.
+        decision_point: pr.review.start
+        ordinal: 3
+        editable: true
+      - id: review_run_ai
+        kind: action
+        title: Review pull request
+        description: AI checks changed areas against the approved scope.
+        operation: pr.review.run
+      - id: review_gate_complete
+        kind: gate
+        title: Accept review results
+        description: Checks review coverage and findings before follow-up begins.
+        decision_point: pr.review.complete
+        ordinal: 4
+        editable: true
+      - id: review_process_result
+        kind: action
+        title: Process review results
+        description: Route review findings and any user correction without mixing their authority.
+        operation: pr.review.result.handle
+      - id: review_assess_scope
+        kind: action
+        title: Assess finding scope
+        description: Compare each finding with the confirmed charter.
+        operation: pr.finding.scope.assess
+      - id: review_classify_automatic
+        kind: action
+        title: Classify automatically
+        description: Apply the deterministic charter and pull request type result.
+        operation: pr.finding.classify_automatic
+      - id: review_gate_classify
+        kind: gate
+        title: Decide ambiguous finding scope
+        description: Assigns the disposition of a policy-ambiguous finding.
+        decision_point: pr.finding.classify
+        ordinal: 5
+        editable: true
+      - id: review_route_classified
+        kind: action
+        title: Route classified finding
+        description: Follow the disposition already assigned automatically or by the classification gate.
+        operation: pr.finding.classification.route
+      - id: review_keep_in_scope
+        kind: action
+        title: Keep in pull request
+        description: Retain the finding as an in-scope review result.
+        operation: pr.finding.keep_in_scope
+      - id: review_group_deferred
+        kind: action
+        title: Group deferred findings
+        description: Group related follow-up work outside this pull request.
+        operation: pr.deferred.group
+      - id: review_link_followup_issue
+        kind: action
+        title: Link existing issue
+        description: Attach the deferred group to an existing GitHub issue.
+        operation: github.issue.link
+      - id: review_gate_deferred_publish
+        kind: gate
+        title: Allow follow-up issue
+        description: Approves creating GitHub issues for deferred work.
+        decision_point: pr.deferred.publish
+        ordinal: 12
+        editable: true
+      - id: review_create_followup_issues
+        kind: action
+        title: Create follow-up issues
+        description: Create one GitHub issue for each approved deferred group.
+        operation: github.issue.create
+      - id: review_dismiss_finding
+        kind: action
+        title: Dismiss finding
+        description: Close the finding without publishing it.
+        operation: pr.finding.dismiss
+      - id: review_revise_charter
+        kind: action
+        title: Revise PR charter
+        description: Change the pull request charter before reviewing against it again.
+        operation: pr.charter.revise
+      - id: review_select_review_findings
+        kind: action
+        title: Select review findings
+        description: Choose in-scope findings for the GitHub review.
+        operation: pr.review.findings.select
+      - id: review_gate_publish
+        kind: gate
+        title: Allow review publication
+        description: Approves posting the selected findings to GitHub.
+        decision_point: pr.review.publish
+        ordinal: 10
+        editable: true
+      - id: review_publish_github
+        kind: action
+        title: Publish GitHub review
+        description: Post the approved findings to GitHub.
+        operation: github.review.publish
+      - id: review_finish
+        kind: action
+        title: Finish review
+        description: Leave the reviewed pull request ready for its selected follow-up.
+        operation: pr.review.finish
+      - id: review_record_correction
+        kind: action
+        title: Record user correction
+        description: Store feedback with the audience selected by the user.
+        operation: pr.correction.record
+      - id: review_gate_correction_promote
+        kind: gate
+        title: Allow repository lesson
+        description: Approves promoting a correction into repository guidance.
+        decision_point: pr.correction.promote
+        ordinal: 13
+        editable: true
+      - id: review_save_guidance
+        kind: action
+        title: Save repository guidance
+        description: Add the approved correction to repository guidance.
+        operation: pr.guidance.save
+      - id: review_gate_reconcile
+        kind: gate
+        title: Resolve unknown publication
+        description: Chooses whether to re-observe GitHub or assume the write failed.
+        decision_point: pr.publication.reconcile
+        ordinal: 14
+        editable: true
+      - id: review_resolve_publication
+        kind: action
+        title: Observe publication
+        description: Check GitHub for the exact review publication again.
+        operation: pr.publication.resolve
+      - id: review_retry_publication
+        kind: action
+        title: Retry publication
+        description: Queue a fresh review publication after the prior write is assumed failed.
+        operation: pr.publication.retry
+    edges:
+      - from: review_request
+        to: review_track
+        mode: linear
+      - from: review_track
+        to: review_define_charter
+        mode: linear
+      - from: review_define_charter
+        to: review_gate_charter_confirm
+        mode: choice
+        outcome: first_scope
+        label: First scope
+      - from: review_define_charter
+        to: review_gate_charter_reconfirm
+        mode: choice
+        outcome: revised
+        label: Revised
+      - from: review_gate_charter_confirm
+        to: review_gate_start
+        mode: linear
+      - from: review_gate_charter_reconfirm
+        to: review_gate_start
+        mode: linear
+      - from: review_gate_start
+        to: review_run_ai
+        mode: linear
+      - from: review_run_ai
+        to: review_gate_complete
+        mode: linear
+      - from: review_gate_complete
+        to: review_process_result
+        mode: linear
+      - from: review_process_result
+        to: review_assess_scope
+        mode: choice
+        outcome: findings
+        label: Findings
+      - from: review_process_result
+        to: review_finish
+        mode: choice
+        outcome: no_findings
+        label: No findings
+      - from: review_process_result
+        to: review_record_correction
+        mode: optional
+        label: Correction
+      - from: review_record_correction
+        to: review_gate_correction_promote
+        mode: optional
+      - from: review_gate_correction_promote
+        to: review_save_guidance
+        mode: linear
+      - from: review_assess_scope
+        to: review_classify_automatic
+        mode: choice
+        outcome: clear
+        label: Clear
+      - from: review_assess_scope
+        to: review_gate_classify
+        mode: choice
+        outcome: ambiguous
+        label: Ambiguous
+      - from: review_classify_automatic
+        to: review_route_classified
+        mode: linear
+      - from: review_gate_classify
+        to: review_route_classified
+        mode: linear
+      - from: review_route_classified
+        to: review_keep_in_scope
+        mode: choice
+        outcome: in_scope
+        label: In scope
+      - from: review_route_classified
+        to: review_group_deferred
+        mode: choice
+        outcome: deferred
+        label: Defer
+      - from: review_route_classified
+        to: review_dismiss_finding
+        mode: choice
+        outcome: dismissed
+        label: Dismiss
+      - from: review_route_classified
+        to: review_revise_charter
+        mode: choice
+        outcome: revise
+        label: Revise
+      - from: review_revise_charter
+        to: review_gate_charter_reconfirm
+        mode: linear
+        loop: true
+      - from: review_group_deferred
+        to: review_link_followup_issue
+        mode: choice
+        outcome: existing
+        label: Link existing
+      - from: review_group_deferred
+        to: review_gate_deferred_publish
+        mode: choice
+        outcome: create
+        label: Create
+      - from: review_gate_deferred_publish
+        to: review_create_followup_issues
+        mode: linear
+      - from: review_keep_in_scope
+        to: review_select_review_findings
+        mode: linear
+      - from: review_select_review_findings
+        to: review_gate_publish
+        mode: linear
+      - from: review_gate_publish
+        to: review_publish_github
+        mode: linear
+      - from: review_publish_github
+        to: review_finish
+        mode: choice
+        outcome: confirmed
+        label: Confirmed
+      - from: review_publish_github
+        to: review_gate_reconcile
+        mode: choice
+        outcome: unknown
+        label: Unknown
+      - from: review_publish_github
+        to: review_retry_publication
+        mode: choice
+        outcome: failed
+        label: Failed
+      - from: review_gate_reconcile
+        to: review_resolve_publication
+        mode: choice
+        outcome: reobserve
+        label: Re-observe
+      - from: review_gate_reconcile
+        to: review_retry_publication
+        mode: choice
+        outcome: assume_failed
+        label: Assume failed
+      - from: review_resolve_publication
+        to: review_finish
+        mode: choice
+        outcome: confirmed
+        label: Confirmed
+      - from: review_resolve_publication
+        to: review_gate_reconcile
+        mode: choice
+        outcome: still_unknown
+        label: Still unknown
+        loop: true
+      - from: review_retry_publication
+        to: review_gate_publish
+        mode: linear
+        loop: true
+
+  - id: implementation
+    title: Implementation workflow
+    entry: implementation_load_findings
+    nodes:
+      - id: implementation_load_findings
+        kind: action
+        title: Load selected findings
+        description: Bring in the in-scope findings chosen for this pull request.
+        operation: pr.implementation.findings.load
+      - id: implementation_check_ownership
+        kind: action
+        title: Check PR ownership
+        description: Determine whether the implementation eligibility gate is required.
+        operation: pr.implementation.ownership.check
+      - id: implementation_gate_eligibility
+        kind: gate
+        title: Allow non-owned PR implementation
+        description: Authorizes fixes on a pull request PicoClaw does not own.
+        decision_point: pr.implementation.eligibility
+        ordinal: 6
+        editable: true
+      - id: implementation_gate_start
+        kind: gate
+        title: Allow AI implementation
+        description: Decides whether AI may implement the selected findings.
+        decision_point: pr.implementation.start
+        ordinal: 7
+        editable: true
+      - id: implementation_run_ai
+        kind: action
+        title: Implement selected fixes
+        description: AI changes only code required by the selected findings.
+        operation: pr.implementation.run
+      - id: implementation_scope_audit
+        kind: action
+        title: Audit candidate scope
+        description: Classify every changed hunk against scope, type, and size.
+        operation: pr.implementation.scope.audit
+      - id: implementation_validate
+        kind: action
+        title: Validate changes
+        description: Run tests and every required project check.
+        operation: pr.implementation.validate
+      - id: implementation_validation_blocked
+        kind: action
+        title: Block invalid validation
+        description: Stop because the required validation definition is missing or invalid.
+        operation: pr.implementation.stop
+      - id: implementation_validation_failed
+        kind: action
+        title: Fail unreliable validation
+        description: Stop because validation evidence mismatched the candidate or infrastructure failed.
+        operation: pr.implementation.stop
+      - id: implementation_repair_validation
+        kind: action
+        title: Repair validation failures
+        description: Fix failed checks before validating the candidate again.
+        operation: pr.implementation.validation.repair
+      - id: implementation_completion_audit
+        kind: action
+        title: Audit completion
+        description: AI checks missing work, deferred follow-up, and candidate scope drift.
+        operation: pr.implementation.completion.audit
+      - id: implementation_route_completion
+        kind: action
+        title: Route completion result
+        description: Continue with the candidate when complete or repair missing work.
+        operation: pr.implementation.completion.route
+      - id: implementation_resume
+        kind: action
+        title: Resume implementation
+        description: Repair missing work before validating and auditing again.
+        operation: pr.implementation.resume
+      - id: implementation_finalize_candidate
+        kind: action
+        title: Finalize candidate
+        description: Materialize the validated repair as the candidate that completion gates will authorize.
+        operation: pr.implementation.candidate.finalize
+      - id: implementation_final_scope_check
+        kind: action
+        title: Check final scope
+        description: Check completion findings against the final candidate scope.
+        operation: pr.implementation.final_scope.check
+      - id: implementation_gate_scope_policy
+        kind: gate
+        title: Allow large or adjacent work
+        description: Authorizes large exact or necessary adjacent code after audits.
+        decision_point: pr.implementation.scope
+        ordinal: 8
+        editable: true
+      - id: implementation_gate_complete_direct
+        kind: gate
+        title: Accept implementation
+        description: Confirms the scoped changes are complete and validated.
+        decision_point: pr.implementation.complete
+        ordinal: 9
+        editable: true
+      - id: implementation_start_joint_gates
+        kind: action
+        title: Start completion gates
+        description: Start scope and completion authorization together for policy-gated work.
+        operation: pr.implementation.gates.start
+      - id: implementation_gate_complete_policy
+        kind: gate
+        title: Accept implementation
+        description: Confirms the policy-gated changes are complete and validated.
+        decision_point: pr.implementation.complete
+        ordinal: 9
+        editable: true
+      - id: implementation_completion_gates_join
+        kind: action
+        title: Join completion gates
+        description: Continue only after both scope and completion authorization pass.
+        operation: pr.implementation.gates.join
+      - id: implementation_queue_branch
+        kind: action
+        title: Queue branch publication
+        description: A user selects the accepted candidate for publication to the PR branch.
+        operation: pr.implementation.branch.queue
+      - id: implementation_gate_publish
+        kind: gate
+        title: Allow branch push
+        description: Approves pushing the accepted changes to the pull request branch.
+        decision_point: pr.implementation.publish
+        ordinal: 11
+        editable: true
+      - id: implementation_push
+        kind: action
+        title: Push accepted changes
+        description: Push the accepted candidate to the pull request branch.
+        operation: github.branch.push
+      - id: implementation_result
+        kind: action
+        title: Handle implementation result
+        description: Finish accepted work or record a user correction.
+        operation: pr.implementation.result.handle
+      - id: implementation_finish
+        kind: action
+        title: Finish implementation
+        description: Leave the accepted pull request branch ready for its next lifecycle step.
+        operation: pr.implementation.finish
+      - id: implementation_hard_scope
+        kind: gate
+        title: Resolve hard scope
+        description: Stops candidate code that is outside scope or incompatible with the pull request type.
+        decision_point: pr.implementation.hard-scope
+        ordinal: 15
+        editable: true
+      - id: implementation_hard_scope_guard
+        kind: gate
+        title: Enforce hard scope
+        description: Prevents candidate code outside the charter or pull request type from being approved as-is.
+        safeguard: pr.scope.hard
+        editable: false
+      - id: implementation_remove_and_defer
+        kind: action
+        title: Queue removal and defer
+        description: Queue a repair to remove candidate code and clone its follow-up work as deferred.
+        operation: pr.implementation.scope.remove_defer
+      - id: implementation_group_deferred
+        kind: action
+        title: Group deferred findings
+        description: Group follow-up work found during the implementation audit.
+        operation: pr.deferred.group
+      - id: implementation_link_followup_issue
+        kind: action
+        title: Link existing issue
+        description: Attach the deferred group to an existing GitHub issue.
+        operation: github.issue.link
+      - id: implementation_gate_deferred_publish
+        kind: gate
+        title: Allow follow-up issue
+        description: Approves creating GitHub issues for deferred implementation work.
+        decision_point: pr.deferred.publish
+        ordinal: 12
+        editable: true
+      - id: implementation_create_followup_issues
+        kind: action
+        title: Create follow-up issues
+        description: Create one GitHub issue for each approved deferred group.
+        operation: github.issue.create
+      - id: implementation_revise_charter
+        kind: action
+        title: Revise PR charter
+        description: Change the pull request charter before the pull request is reviewed again.
+        operation: pr.charter.revise
+      - id: implementation_gate_charter_reconfirm
+        kind: gate
+        title: Approve revised purpose and scope
+        description: Reconfirms authority after the purpose or scope changes.
+        decision_point: pr.charter.reconfirm
+        ordinal: 2
+        editable: true
+      - id: implementation_call_review
+        kind: action
+        title: Run review workflow
+        description: Invoke the isolated review workflow under the revised and reconfirmed charter.
+        operation: pr.review.invoke
+      - id: implementation_stop
+        kind: action
+        title: Stop implementation
+        description: Leave the candidate blocked and end implementation.
+        operation: pr.implementation.stop
+      - id: implementation_record_correction
+        kind: action
+        title: Record user correction
+        description: Store feedback for review, implementation, or both.
+        operation: pr.correction.record
+      - id: implementation_gate_correction_promote
+        kind: gate
+        title: Allow repository lesson
+        description: Approves promoting a correction into repository guidance.
+        decision_point: pr.correction.promote
+        ordinal: 13
+        editable: true
+      - id: implementation_save_guidance
+        kind: action
+        title: Save repository guidance
+        description: Add the approved correction to repository guidance.
+        operation: pr.guidance.save
+      - id: implementation_gate_reconcile
+        kind: gate
+        title: Resolve unknown publication
+        description: Chooses whether to re-observe GitHub or assume the write failed.
+        decision_point: pr.publication.reconcile
+        ordinal: 14
+        editable: true
+      - id: implementation_resolve_publication
+        kind: action
+        title: Observe publication
+        description: Check GitHub for the exact branch publication again.
+        operation: pr.publication.resolve
+      - id: implementation_retry_publication
+        kind: action
+        title: Retry publication
+        description: Queue a fresh branch publication after the prior write is assumed failed.
+        operation: pr.publication.retry
+    edges:
+      - from: implementation_load_findings
+        to: implementation_check_ownership
+        mode: linear
+      - from: implementation_check_ownership
+        to: implementation_gate_start
+        mode: choice
+        outcome: owned
+        label: Owned
+      - from: implementation_check_ownership
+        to: implementation_gate_eligibility
+        mode: choice
+        outcome: non_owned
+        label: Non-owned
+      - from: implementation_check_ownership
+        to: implementation_stop
+        mode: choice
+        outcome: read_only
+        label: Read-only
+      - from: implementation_gate_eligibility
+        to: implementation_gate_start
+        mode: linear
+      - from: implementation_gate_start
+        to: implementation_run_ai
+        mode: linear
+      - from: implementation_run_ai
+        to: implementation_scope_audit
+        mode: linear
+      - from: implementation_scope_audit
+        to: implementation_validate
+        mode: choice
+        outcome: safe
+        label: Safe path
+      - from: implementation_scope_audit
+        to: implementation_hard_scope_guard
+        mode: choice
+        outcome: hard_stop
+        label: Hard stop
+      - from: implementation_validate
+        to: implementation_completion_audit
+        mode: choice
+        outcome: passed
+        label: Passed
+      - from: implementation_validate
+        to: implementation_repair_validation
+        mode: choice
+        outcome: fixable
+        label: Fixable
+      - from: implementation_validate
+        to: implementation_validation_blocked
+        mode: choice
+        outcome: invalid_definition
+        label: Invalid checks
+      - from: implementation_validate
+        to: implementation_validation_failed
+        mode: choice
+        outcome: unreliable
+        label: Unreliable
+      - from: implementation_repair_validation
+        to: implementation_run_ai
+        mode: linear
+        loop: true
+      - from: implementation_completion_audit
+        to: implementation_route_completion
+        mode: parallel
+        label: Candidate
+      - from: implementation_completion_audit
+        to: implementation_group_deferred
+        mode: optional
+        label: Deferred
+      - from: implementation_route_completion
+        to: implementation_resume
+        mode: choice
+        outcome: missing
+        label: Missing
+      - from: implementation_route_completion
+        to: implementation_finalize_candidate
+        mode: choice
+        outcome: complete
+        label: No gaps
+      - from: implementation_resume
+        to: implementation_run_ai
+        mode: linear
+        loop: true
+      - from: implementation_finalize_candidate
+        to: implementation_final_scope_check
+        mode: linear
+      - from: implementation_final_scope_check
+        to: implementation_gate_complete_direct
+        mode: choice
+        outcome: direct
+        label: Direct
+      - from: implementation_final_scope_check
+        to: implementation_start_joint_gates
+        mode: choice
+        outcome: policy
+        label: Policy
+      - from: implementation_final_scope_check
+        to: implementation_hard_scope_guard
+        mode: choice
+        outcome: hard_stop
+        label: Hard stop
+      - from: implementation_start_joint_gates
+        to: implementation_gate_scope_policy
+        mode: parallel
+        label: Scope
+      - from: implementation_start_joint_gates
+        to: implementation_gate_complete_policy
+        mode: parallel
+        label: Complete
+      - from: implementation_gate_scope_policy
+        to: implementation_completion_gates_join
+        mode: linear
+      - from: implementation_gate_complete_policy
+        to: implementation_completion_gates_join
+        mode: linear
+      - from: implementation_completion_gates_join
+        to: implementation_queue_branch
+        mode: linear
+      - from: implementation_gate_complete_direct
+        to: implementation_queue_branch
+        mode: linear
+      - from: implementation_queue_branch
+        to: implementation_gate_publish
+        mode: linear
+      - from: implementation_gate_publish
+        to: implementation_push
+        mode: linear
+      - from: implementation_push
+        to: implementation_result
+        mode: choice
+        outcome: confirmed
+        label: Confirmed
+      - from: implementation_push
+        to: implementation_gate_reconcile
+        mode: choice
+        outcome: unknown
+        label: Unknown
+      - from: implementation_push
+        to: implementation_retry_publication
+        mode: choice
+        outcome: failed
+        label: Failed
+      - from: implementation_gate_reconcile
+        to: implementation_resolve_publication
+        mode: choice
+        outcome: reobserve
+        label: Re-observe
+      - from: implementation_gate_reconcile
+        to: implementation_retry_publication
+        mode: choice
+        outcome: assume_failed
+        label: Assume failed
+      - from: implementation_resolve_publication
+        to: implementation_result
+        mode: choice
+        outcome: confirmed
+        label: Confirmed
+      - from: implementation_resolve_publication
+        to: implementation_gate_reconcile
+        mode: choice
+        outcome: still_unknown
+        label: Still unknown
+        loop: true
+      - from: implementation_retry_publication
+        to: implementation_queue_branch
+        mode: linear
+        loop: true
+      - from: implementation_result
+        to: implementation_finish
+        mode: linear
+        label: Done
+      - from: implementation_result
+        to: implementation_record_correction
+        mode: optional
+        label: Correction
+      - from: implementation_record_correction
+        to: implementation_gate_correction_promote
+        mode: optional
+      - from: implementation_gate_correction_promote
+        to: implementation_save_guidance
+        mode: linear
+      - from: implementation_hard_scope_guard
+        to: implementation_hard_scope
+        mode: linear
+      - from: implementation_hard_scope
+        to: implementation_remove_and_defer
+        mode: choice
+        outcome: remove_code
+        label: Remove code
+      - from: implementation_hard_scope
+        to: implementation_revise_charter
+        mode: choice
+        outcome: revise_scope
+        label: Revise scope
+      - from: implementation_hard_scope
+        to: implementation_stop
+        mode: choice
+        outcome: stop
+        label: Stop
+      - from: implementation_remove_and_defer
+        to: implementation_run_ai
+        mode: parallel
+        label: Repair
+        loop: true
+      - from: implementation_remove_and_defer
+        to: implementation_group_deferred
+        mode: parallel
+        label: Follow-up
+      - from: implementation_group_deferred
+        to: implementation_link_followup_issue
+        mode: choice
+        outcome: existing
+        label: Link existing
+      - from: implementation_group_deferred
+        to: implementation_gate_deferred_publish
+        mode: choice
+        outcome: create
+        label: Create
+      - from: implementation_gate_deferred_publish
+        to: implementation_create_followup_issues
+        mode: linear
+      - from: implementation_revise_charter
+        to: implementation_gate_charter_reconfirm
+        mode: linear
+      - from: implementation_gate_charter_reconfirm
+        to: implementation_call_review
+        mode: linear

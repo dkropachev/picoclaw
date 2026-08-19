@@ -10,9 +10,6 @@
     "hub": "Hub",
     "skills": "Skills",
     "tools": "Ferramentas",
-    "reviews": "Revisões de PR",
-    "reviews_work": "Trabalho de pull requests",
-    "reviews_attention_rules": "Conjuntos de regras",
     "events": "Eventos",
     "mcp": "Servidores MCP",
     "services": "Serviços",
@@ -169,6 +166,7 @@
     "reset": "Redefinir",
     "confirm": "Confirmar",
     "fix": "Corrigir",
+    "skipToContent": "Ir para o conteúdo principal",
     "saveChangesTitle": "Você tem alterações de configuração não salvas",
     "restartRequiredTitle": "Reinício do gateway necessário",
     "restartRequiredDesc": "A configuração mais recente de {{name}} foi salva. Reinicie o gateway para que tenha efeito."
@@ -1237,6 +1235,11 @@
       "log_level_error": "Falha ao atualizar nível de log.",
       "clear": "Limpar logs",
       "empty": "Aguardando logs..."
+    }
+  },
+  "prWorkspaces": {
+    "implementation": {
+      "retry": "Tentar implementação novamente"
     }
   },
   "tour": {

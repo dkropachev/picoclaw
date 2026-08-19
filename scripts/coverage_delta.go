@@ -118,9 +118,11 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 		return fmt.Errorf("%d failure(s):\n%s", len(failures), strings.Join(failures, "\n"))
 	}
 
-	fmt.Printf("coverage delta: scoped global %s -> %s; %s; feature coverage ok\n",
+	fmt.Printf("coverage delta: scoped global %s -> %s (uncovered statement debt %d -> %d); %s; feature coverage ok\n",
 		formatCoverage(baseProfile.Global),
 		formatCoverage(headProfile.Global),
+		uncoveredStatements(baseProfile.Global),
+		uncoveredStatements(headProfile.Global),
 		changedLineStatus(plan.ChangedLines),
 	)
 	return nil
@@ -850,7 +852,9 @@ func compareCoverage(
 	var failures []string
 	if summaryRegressed(baseProfile.Global, headProfile.Global) {
 		failures = append(failures, fmt.Sprintf(
-			"scoped Go statement coverage decreased: %s -> %s",
+			"scoped Go uncovered statement debt increased: %d -> %d (coverage %s -> %s)",
+			uncoveredStatements(baseProfile.Global),
+			uncoveredStatements(headProfile.Global),
 			formatCoverage(baseProfile.Global),
 			formatCoverage(headProfile.Global),
 		))
@@ -869,8 +873,10 @@ func compareCoverage(
 		}
 		if featureSummaryRegressed(baseSummary, headSummary) {
 			failures = append(failures, fmt.Sprintf(
-				"%s Go statement coverage decreased: %s -> %s",
+				"%s Go uncovered statement debt increased: %d -> %d (coverage %s -> %s)",
 				spec.RelPath,
+				uncoveredStatements(baseSummary),
+				uncoveredStatements(headSummary),
 				formatCoverage(baseSummary),
 				formatCoverage(headSummary),
 			))
@@ -1042,11 +1048,16 @@ func isGoProductionCoverageFile(path string) bool {
 }
 
 func summaryRegressed(base, head coverageSummary) bool {
-	return head.CoveredStatements < base.CoveredStatements
+	return uncoveredStatements(head) > uncoveredStatements(base)
 }
 
 func featureSummaryRegressed(base, head coverageSummary) bool {
-	return head.CoveredStatements+featureCoverageRegressionToleranceStatements < base.CoveredStatements
+	return uncoveredStatements(head) >
+		uncoveredStatements(base)+featureCoverageRegressionToleranceStatements
+}
+
+func uncoveredStatements(summary coverageSummary) int {
+	return summary.TotalStatements - summary.CoveredStatements
 }
 
 func coveragePercent(summary coverageSummary) float64 {

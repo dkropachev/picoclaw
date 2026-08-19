@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -10,11 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
-
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 var (
@@ -135,122 +130,6 @@ func loadCurrentConfigSnapshot(
 	return cfg, revision, nil
 }
 
-// SaveReviewAttentionIfRevision replaces only the persisted
-// reviews.attention JSON member when the exact public-plus-security revision is
-// still current. It deliberately does not serialize a loaded Config: loaded
-// management views contain environment overrides and derived defaults that a
-// policy-only mutation must not persist. The security sidecar is never written.
-func SaveReviewAttentionIfRevision(
-	path string,
-	attention ReviewAttentionConfig,
-	expectedRevision string,
-) (string, error) {
-	if err := attention.Validate(); err != nil {
-		return "", fmt.Errorf("invalid reviews attention config: %w", err)
-	}
-
-	unlock, err := lockConfigMutation(path)
-	if err != nil {
-		return "", err
-	}
-	defer unlock()
-
-	currentRevision, err := ConfigRevision(path)
-	if err != nil {
-		return "", err
-	}
-	if currentRevision != expectedRevision {
-		return "", ErrConfigRevisionMismatch
-	}
-	if err = validateConfigSnapshotPresence(path); err != nil {
-		return "", err
-	}
-	requiresMigration, err := configSnapshotRequiresMigration(path)
-	if err != nil {
-		return "", err
-	}
-	if requiresMigration {
-		return "", ErrConfigMigrationRequired
-	}
-
-	document, err := loadReviewAttentionPublicDocument(path)
-	if err != nil {
-		return "", err
-	}
-	reviews, err := reviewAttentionRawObject(document["reviews"])
-	if err != nil {
-		return "", err
-	}
-	encodedAttention, err := json.Marshal(attention)
-	if err != nil {
-		return "", fmt.Errorf("encode reviews attention config: %w", err)
-	}
-	reviews["attention"] = encodedAttention
-	encodedReviews, err := json.Marshal(reviews)
-	if err != nil {
-		return "", fmt.Errorf("encode reviews config: %w", err)
-	}
-	document["reviews"] = encodedReviews
-
-	encodedDocument, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode scoped config update: %w", err)
-	}
-	if err = fileutil.WriteFileAtomic(path, encodedDocument, 0o600); err != nil {
-		return "", err
-	}
-	return ConfigRevision(path)
-}
-
-func loadReviewAttentionPublicDocument(
-	path string,
-) (map[string]json.RawMessage, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		return minimalCurrentConfigDocument(), nil
-	}
-	trimmed := bytes.TrimSpace(raw)
-	var document map[string]json.RawMessage
-	if err = json.Unmarshal(raw, &document); err != nil {
-		return nil, fmt.Errorf("decode persisted config for scoped update: %w", err)
-	}
-	if document == nil {
-		if bytes.Equal(trimmed, []byte("null")) {
-			return minimalCurrentConfigDocument(), nil
-		}
-		return nil, errors.New("persisted config must be a JSON object")
-	}
-
-	versionRaw, hasVersion := document["version"]
-	if !hasVersion {
-		// The ordinary loader treats a small empty object as the default config.
-		// Once reviews are added it is no longer small, so materialize only the
-		// schema version required to keep that same interpretation.
-		if len(raw) <= 10 && len(document) == 0 {
-			document["version"] = json.RawMessage(strconv.Itoa(CurrentVersion))
-			return document, nil
-		}
-		return nil, errors.New("persisted config version is required")
-	}
-	var version int
-	if err = json.Unmarshal(versionRaw, &version); err != nil {
-		return nil, fmt.Errorf("decode persisted config version: %w", err)
-	}
-	if version != CurrentVersion {
-		return nil, fmt.Errorf("persisted config version %d is not current", version)
-	}
-	return document, nil
-}
-
-func minimalCurrentConfigDocument() map[string]json.RawMessage {
-	return map[string]json.RawMessage{
-		"version": json.RawMessage(strconv.Itoa(CurrentVersion)),
-	}
-}
-
 func validateConfigSnapshotPresence(path string) error {
 	_, publicMissing, err := configRevisionFile(path)
 	if err != nil {
@@ -267,27 +146,6 @@ func validateConfigSnapshotPresence(path string) error {
 		return errors.New("security config exists without public config")
 	}
 	return nil
-}
-
-func reviewAttentionRawObject(
-	raw json.RawMessage,
-) (map[string]json.RawMessage, error) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return make(map[string]json.RawMessage), nil
-	}
-	var reviews map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &reviews); err != nil {
-		return nil, fmt.Errorf("decode persisted reviews config: %w", err)
-	}
-	if reviews == nil {
-		return nil, errors.New("persisted reviews config must be a JSON object")
-	}
-	for key := range reviews {
-		if strings.EqualFold(key, "attention") && key != "attention" {
-			return nil, errors.New("persisted reviews attention key must be canonical")
-		}
-	}
-	return reviews, nil
 }
 
 // LoadConfigForUpdateSnapshot atomically loads the update-safe config and its

@@ -35,6 +35,7 @@ type Executor struct {
 	Tools                ToolRunner
 	Agents               AgentRunner
 	Functions            FunctionRunner
+	GateActions          GateActionResolver
 	RuntimeEvents        RuntimeEventPublisher
 	RuntimeCompatibility RuntimeCompatibility
 	MaxCallDepth         int
@@ -98,8 +99,8 @@ type RunRequest struct {
 	WorkflowRef  string
 	RetryOfRunID string
 	CallDepth    int
-	// PrivateRoot is accepted only for the trusted in-memory workflow emitted
-	// by CompileGateWorkflow. It is frozen before durable creation and omitted
+	// PrivateRoot is accepted only for a trusted in-memory workflow emitted by
+	// a gate compiler. It is frozen before durable creation and omitted
 	// from all ordinary run observations.
 	PrivateRoot *PrivateRootRequest
 	// frozenPrivateRoot is used only by retry. External callers cannot bypass
@@ -136,6 +137,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if cloneErr != nil {
 		return nil, cloneErr
 	}
+	reconcilePrivateRunID := strings.TrimSpace(req.RunID) != "" && req.PrivateRoot != nil
 	if req.PrivateRoot != nil {
 		workflowSnapshot, snapshotErr := captureInitialPrivateWorkflow(req.Workflow)
 		if snapshotErr != nil {
@@ -199,7 +201,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		return nil, fmt.Errorf("%w: human/task cannot run inside a reusable workflow call", ErrHumanTaskUnsupported)
 	}
 	var execution *workflowExecutionState
-	if workflowContainsHumanTask(workflow) {
+	// Every private workflow needs the same exact durable workflow snapshot for
+	// its run binding, even when a staged gate contains only AI steps and cannot
+	// suspend. Human-task workflows need it for the continuation cursor as
+	// before.
+	if workflowContainsHumanTask(workflow) || workflowContainsGateExec(workflow) || privateRoot != nil {
 		var executionErr error
 		execution, executionErr = newWorkflowExecutionState(workflow)
 		if executionErr != nil {
@@ -280,6 +286,10 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		createErr = create()
 	}
 	if createErr != nil {
+		if reconcilePrivateRunID && (errors.Is(createErr, ErrRunAlreadyExists) ||
+			errors.Is(createErr, ErrPrivateWorkflowContext)) {
+			return e.reconcilePrivateCompiledGateRun(ctx, store, run)
+		}
 		return sanitizePrivateRunOutcome(run, nil, createErr)
 	}
 	if req.OnRunPersisted != nil {
@@ -630,7 +640,22 @@ func (e *Executor) ResumeHumanTask(
 		Session:  run.Session,
 		Delivery: run.Delivery,
 	}
-	outputs, runErr := e.executeWorkflow(ctx, store, run, workflow, runReq, &cursor)
+	var outputs map[string]any
+	var runErr error
+	if task.GateWorkflow != nil {
+		var waiting bool
+		waiting, runErr = e.resumeGateActionWorkflowProxy(
+			ctx, store, run, task, response,
+		)
+		if waiting && runErr == nil {
+			return e.persistWorkflowWait(store, run, cloneMap(run.Outputs))
+		}
+	}
+	if runErr == nil {
+		outputs, runErr = e.executeWorkflow(ctx, store, run, workflow, runReq, &cursor)
+	} else {
+		outputs = cloneMap(run.Outputs)
+	}
 	if errors.Is(context.Cause(ctx), ErrHumanTaskConflict) {
 		return nil, ErrHumanTaskConflict
 	}
@@ -801,6 +826,8 @@ func (e *Executor) CancelHumanTask(
 	if !ok {
 		return nil, ErrHumanTaskUnsupported
 	}
+	previous, _ := store.GetRun(ctx, runID)
+	childRunID := gateActionChildRunForTask(previous, taskID)
 	run, err := taskStore.CancelHumanTask(ctx, runID, taskID, reason)
 	if err != nil {
 		if IsPrivateWorkflowRun(run) {
@@ -810,6 +837,12 @@ func (e *Executor) CancelHumanTask(
 		return run, err
 	}
 	if run != nil && run.Status == RunStatusCanceled {
+		if childRunID != "" {
+			childExecutor := *e
+			childExecutor.Store = store
+			childExecutor.GateActions = nil
+			_, _ = childExecutor.CancelRun(ctx, childRunID, reason)
+		}
 		e.publishCanceledRuntimeEvent(ctx, store, run, run.CancelReason)
 	}
 	if IsPrivateWorkflowRun(run) {
@@ -839,7 +872,21 @@ func (e *Executor) persistWorkflowWait(
 	taskID := humanTaskID(run.ID, cursor.JobID, stepID)
 	task, exists := run.humanTasks[taskID]
 	if !exists || task.Status != HumanTaskStatusWaiting {
-		return nil, ErrHumanTaskConflict
+		exists = false
+		for _, candidate := range run.humanTasks {
+			if candidate.Status != HumanTaskStatusWaiting ||
+				candidate.JobID != cursor.JobID || candidate.StepID != stepID ||
+				candidate.GateWorkflow == nil || !validHumanTaskID(run.ID, candidate) {
+				continue
+			}
+			if exists {
+				return nil, ErrHumanTaskConflict
+			}
+			task, exists = candidate, true
+		}
+		if !exists {
+			return nil, ErrHumanTaskConflict
+		}
 	}
 
 	// Publish the task, cursor, waiting step/job, and claimable run status in
@@ -907,6 +954,7 @@ func (e *Executor) CancelRun(ctx context.Context, runID, reason string) (*Run, e
 		store = NewFileRunStore(e.WorkspaceDir)
 	}
 	previous, _ := store.GetRun(ctx, runID)
+	childRunID := gateActionWaitingChildRun(previous)
 	run, err := store.CancelRun(ctx, runID, reason)
 	if err != nil {
 		privateRun := run
@@ -919,6 +967,12 @@ func (e *Executor) CancelRun(ctx context.Context, runID, reason string) (*Run, e
 		return nil, err
 	}
 	if run != nil && run.Status == RunStatusCanceled && (previous == nil || !isTerminalRunStatus(previous.Status)) {
+		if childRunID != "" {
+			childExecutor := *e
+			childExecutor.Store = store
+			childExecutor.GateActions = nil
+			_, _ = childExecutor.CancelRun(ctx, childRunID, reason)
+		}
 		e.publishCanceledRuntimeEvent(ctx, store, run, run.CancelReason)
 	}
 	if IsPrivateWorkflowRun(run) {
@@ -1726,9 +1780,10 @@ func (e *Executor) executeStep(
 		)
 		return stepExec, nil
 	}
-	if strings.TrimSpace(step.Uses) == "human/task" && workflowValueReferencesSecrets(step.With) {
+	uses := strings.TrimSpace(step.Uses)
+	if (uses == "human/task" || uses == GateExecUses) && workflowValueReferencesSecrets(step.With) {
 		stepExec.Status = RunStatusFailed
-		stepExec.Error = "human/task values cannot reference secrets"
+		stepExec.Error = uses + " values cannot reference secrets"
 		return stepExec, fmt.Errorf("%s", stepExec.Error)
 	}
 	with, err := renderMap(step.With, expressionCtxFrom(execCtx, jobs))
@@ -1737,7 +1792,7 @@ func (e *Executor) executeStep(
 		stepExec.Error = err.Error()
 		return stepExec, err
 	}
-	if strings.TrimSpace(step.Uses) == "human/task" {
+	if uses == "human/task" {
 		task, taskErr := newWorkflowHumanTask(run, jobID, stepID, with)
 		if taskErr != nil {
 			stepExec.Status = RunStatusFailed
@@ -1765,6 +1820,63 @@ func (e *Executor) executeStep(
 			"input_hash": task.InputHash,
 		}
 		return stepExec, workflowWaitingError{}
+	}
+	if uses == GateExecUses {
+		outputs, task, gateErr := e.executeGate(
+			ctx, run, jobID, stepID, with, execCtx, jobs, 0,
+		)
+		if gateErr != nil {
+			var waiting gateActionWorkflowWaitingError
+			if errors.As(gateErr, &waiting) {
+				proxy, proxyErr := e.newGateActionWorkflowProxyTask(
+					ctx, run, jobID, stepID, waiting,
+				)
+				if proxyErr != nil {
+					stepExec.Status = RunStatusFailed
+					stepExec.Error = proxyErr.Error()
+					return stepExec, proxyErr
+				}
+				task = &proxy
+			} else {
+				stepExec.Status = RunStatusFailed
+				stepExec.Error = gateErr.Error()
+				return stepExec, gateErr
+			}
+		}
+		if task != nil {
+			if run.execution == nil {
+				stepExec.Status = RunStatusFailed
+				stepExec.Error = ErrHumanTaskUnsupported.Error()
+				return stepExec, ErrHumanTaskUnsupported
+			}
+			if run.humanTasks == nil {
+				run.humanTasks = make(map[string]WorkflowHumanTask)
+			}
+			if _, exists := run.humanTasks[task.ID]; exists {
+				stepExec.Status = RunStatusFailed
+				stepExec.Error = ErrHumanTaskConflict.Error()
+				return stepExec, ErrHumanTaskConflict
+			}
+			run.humanTasks[task.ID] = *task
+			run.execution.Cursor = &WorkflowExecutionCursor{JobID: jobID, StepIndex: index}
+			stepExec.Status = RunStatusWaiting
+			stepExec.Outputs = map[string]any{
+				"execution-id": task.ExecutionID,
+				"input-hash":   task.InputHash,
+			}
+			return stepExec, workflowWaitingError{}
+		}
+		stepExec.Outputs = outputs
+		stepExec.Status = RunStatusSucceeded
+		e.appendEvent(
+			ctx,
+			store,
+			RunEvent{
+				Kind: "workflow.step.end", RunID: run.ID, JobID: jobID, StepID: stepID,
+				Payload: map[string]any{"outputs": outputs},
+			},
+		)
+		return stepExec, nil
 	}
 	stepTargetCtx := execCtx
 	stepTargetCtx.JobID = jobID

@@ -154,10 +154,6 @@ const (
 		schemaV10PRDevelopmentReviewFencesTable
 )
 
-func validateSchemaV10(ctx context.Context, conn *sql.Conn) error {
-	return validateSchemaV10ForVersion(ctx, conn, false, false)
-}
-
 func validateSchemaV10ForVersion(
 	ctx context.Context,
 	conn *sql.Conn,

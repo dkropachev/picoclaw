@@ -122,8 +122,12 @@ plan derived from changed files and `Owns: CODE` mappings. The gate runs tests
 with `-coverpkg` for impacted feature-owned packages, includes Docker-backed
 integration suites when an impacted feature owns them, and fails when changed
 production Go lines are executable but uncovered. Coverage for impacted
-features must not lose percentage or covered statement count when their owned
-statement count does not shrink.
+features is guarded by uncovered-statement debt (`total statements - covered
+statements`), not by percentage or absolute covered-statement count. Global
+uncovered debt cannot increase; impacted feature debt retains a ten-statement
+tolerance. Deleting legacy code therefore does not fail solely because the
+coverage percentage or covered-statement count falls, provided the deletion
+does not add uncovered debt.
 
 ## Why This Format
 

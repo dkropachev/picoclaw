@@ -241,8 +241,9 @@ Session memory may consume the optional media snapshot capability to build a
 self-contained frozen set. That set's encoding, locator rewriting, limits, and
 restart behavior are owned by the session feature; this media-store capability
 only captures a reference that is live at the instant of the call.
-PR Development composes the optional sequential, suppression, and guarded-patch
-primitives for controller-only local repair. It owns checkout confinement and
+The unified PR-workspace implementation service composes the optional
+sequential, suppression, and guarded-patch primitives for controller-only
+local repair. It owns checkout confinement and
 lifecycle policy; these generic primitives do not grant workspace, Git,
 provider, commit, push, CI, or merge authority.
 
