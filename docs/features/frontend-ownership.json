@@ -98,6 +98,7 @@
         "web/frontend/src/api/pr-workspaces.ts",
         "web/frontend/src/components/events/**",
         "web/frontend/src/components/pr-workspaces/**",
+        "web/frontend/src/routes/-pr-navigation.ts",
         "web/frontend/src/routes/event-sources.tsx",
         "web/frontend/src/routes/events.tsx",
         "web/frontend/src/routes/pull-requests.tsx",

@@ -210,9 +210,11 @@ Owns: CODE web/frontend/src/api/review-attention-*.ts
 Owns: CODE web/frontend/src/components/events/**
 Owns: CODE web/frontend/src/components/pr-workspaces/**
 Owns: CODE web/frontend/src/components/reviews/**
+Owns: CODE web/frontend/src/routes/-pr-navigation.ts
 Owns: CODE web/frontend/src/routes/event-sources.tsx
 Owns: CODE web/frontend/src/routes/events.tsx
 Owns: CODE web/frontend/src/routes/pull-requests.tsx
+Owns: CODE web/frontend/src/routes/pull-requests_*.tsx
 Owns: CODE web/frontend/src/routes/reviews.tsx
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
