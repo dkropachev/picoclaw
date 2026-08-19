@@ -218,25 +218,76 @@ func layoutSVGFlow(flow Flow, panelX, panelWidth float64) (svgFlowLayout, error)
 
 func renderSVGFlow(output *bytes.Buffer, layout svgFlowLayout, panelHeight float64, gateFormats map[string]string) {
 	fmt.Fprintf(output, "  <g data-flow-id=\"%s\">\n", escapeXML(layout.flow.ID))
-	fmt.Fprintf(output, "    <rect x=\"%.1f\" y=\"%d\" width=\"%.1f\" height=\"%.1f\" rx=\"18\" class=\"panel\"/>\n", layout.x, svgPanelTop, layout.width, panelHeight)
-	fmt.Fprintf(output, "    <text x=\"%.1f\" y=\"%d\" class=\"panel-title\">%s</text>\n", layout.x+svgPanelPadding, svgPanelTop+34, escapeXML(layout.flow.Title))
-	fmt.Fprintf(output, "    <text x=\"%.1f\" y=\"%d\" class=\"panel-copy\">Entry · %s</text>\n", layout.x+svgPanelPadding, svgPanelTop+58, escapeXML(layout.flow.Entry))
+	fmt.Fprintf(
+		output,
+		"    <rect x=\"%.1f\" y=\"%d\" width=\"%.1f\" height=\"%.1f\" rx=\"18\" class=\"panel\"/>\n",
+		layout.x,
+		svgPanelTop,
+		layout.width,
+		panelHeight,
+	)
+	fmt.Fprintf(
+		output,
+		"    <text x=\"%.1f\" y=\"%d\" class=\"panel-title\">%s</text>\n",
+		layout.x+svgPanelPadding,
+		svgPanelTop+34,
+		escapeXML(layout.flow.Title),
+	)
+	fmt.Fprintf(
+		output,
+		"    <text x=\"%.1f\" y=\"%d\" class=\"panel-copy\">Entry · %s</text>\n",
+		layout.x+svgPanelPadding,
+		svgPanelTop+58,
+		escapeXML(layout.flow.Entry),
+	)
 
 	for _, edge := range layout.flow.Edges {
 		from := layout.positions[edge.From]
 		to := layout.positions[edge.To]
 		if edge.Loop {
 			loopX := layout.x + 9
-			path := fmt.Sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", from.x, from.y+from.height/2, loopX, from.y+from.height/2, loopX, to.y+to.height/2, to.x, to.y+to.height/2)
-			fmt.Fprintf(output, "    <path d=\"%s\" class=\"loop edge-%s\" data-flow-edge=\"loop\" data-edge-mode=\"%s\"/>\n", path, escapeXML(string(edge.Mode)), escapeXML(string(edge.Mode)))
+			path := fmt.Sprintf(
+				"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f",
+				from.x,
+				from.y+from.height/2,
+				loopX,
+				from.y+from.height/2,
+				loopX,
+				to.y+to.height/2,
+				to.x,
+				to.y+to.height/2,
+			)
+			fmt.Fprintf(
+				output,
+				"    <path d=\"%s\" class=\"loop edge-%s\" data-flow-edge=\"loop\" data-edge-mode=\"%s\"/>\n",
+				path,
+				escapeXML(string(edge.Mode)),
+				escapeXML(string(edge.Mode)),
+			)
 			renderSVGEdgeLabel(output, edge, loopX+42, (from.y+to.y+to.height)/2)
 			continue
 		}
 		startX, startY := from.x+from.width/2, from.y+from.height
 		endX, endY := to.x+to.width/2, to.y
 		middleY := (startY + endY) / 2
-		path := fmt.Sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", startX, startY, startX, middleY, endX, middleY, endX, endY)
-		fmt.Fprintf(output, "    <path d=\"%s\" class=\"edge edge-%s\" data-flow-edge=\"forward\" data-edge-mode=\"%s\"/>\n", path, escapeXML(string(edge.Mode)), escapeXML(string(edge.Mode)))
+		path := fmt.Sprintf(
+			"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f",
+			startX,
+			startY,
+			startX,
+			middleY,
+			endX,
+			middleY,
+			endX,
+			endY,
+		)
+		fmt.Fprintf(
+			output,
+			"    <path d=\"%s\" class=\"edge edge-%s\" data-flow-edge=\"forward\" data-edge-mode=\"%s\"/>\n",
+			path,
+			escapeXML(string(edge.Mode)),
+			escapeXML(string(edge.Mode)),
+		)
 		renderSVGEdgeLabel(output, edge, (startX+endX)/2, middleY)
 	}
 
@@ -251,7 +302,17 @@ func renderSVGEdgeLabel(output *bytes.Buffer, edge Edge, x, y float64) {
 		return
 	}
 	width := math.Max(58, float64(utf8.RuneCountInString(edge.Label))*7+20)
-	fmt.Fprintf(output, "    <g data-edge-outcome=\"%s\"><rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"22\" rx=\"11\" class=\"edge-label-bg\"/><text x=\"%.1f\" y=\"%.1f\" class=\"edge-label\">%s</text></g>\n", escapeXML(edge.Outcome), x-width/2, y-14, width, x, y+1, escapeXML(edge.Label))
+	fmt.Fprintf(
+		output,
+		"    <g data-edge-outcome=\"%s\"><rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"22\" rx=\"11\" class=\"edge-label-bg\"/><text x=\"%.1f\" y=\"%.1f\" class=\"edge-label\">%s</text></g>\n",
+		escapeXML(edge.Outcome),
+		x-width/2,
+		y-14,
+		width,
+		x,
+		y+1,
+		escapeXML(edge.Label),
+	)
 }
 
 func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoint, gateFormat string) {
@@ -269,15 +330,52 @@ func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoin
 	}
 
 	if node.Kind == NodeGate && node.Editable {
-		href := "/pull-requests/workflow-configurations/default?flow=" + url.QueryEscape(flowID) + "&gate=" + url.QueryEscape(node.DecisionPoint)
-		fmt.Fprintf(output, "    <a class=\"gate-link\" href=\"%s\" target=\"_top\" aria-label=\"Edit %s\" data-decision-point=\"%s\">\n", escapeXML(href), escapeXML(node.Title), escapeXML(node.DecisionPoint))
+		href := "/pull-requests/workflow-configurations/default?flow=" + url.QueryEscape(
+			flowID,
+		) + "&gate=" + url.QueryEscape(
+			node.DecisionPoint,
+		)
+		fmt.Fprintf(
+			output,
+			"    <a class=\"gate-link\" href=\"%s\" target=\"_top\" aria-label=\"Edit %s\" data-decision-point=\"%s\">\n",
+			escapeXML(href),
+			escapeXML(node.Title),
+			escapeXML(node.DecisionPoint),
+		)
 	} else {
-		fmt.Fprintf(output, "    <g data-flow-kind=\"%s\" data-node-id=\"%s\"%s>\n", escapeXML(string(node.Kind)), escapeXML(node.ID), optionalSVGAttribute("data-safeguard", node.Safeguard))
+		fmt.Fprintf(
+			output,
+			"    <g data-flow-kind=\"%s\" data-node-id=\"%s\"%s>\n",
+			escapeXML(string(node.Kind)),
+			escapeXML(node.ID),
+			optionalSVGAttribute("data-safeguard", node.Safeguard),
+		)
 	}
-	fmt.Fprintf(output, "      <rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" rx=\"12\" class=\"node %s\"/>\n", point.x, point.y, point.width, point.height, className)
-	fmt.Fprintf(output, "      <text x=\"%.1f\" y=\"%.1f\" class=\"node-kind %s\">%s</text>\n", point.x+14, point.y+20, kindClass, kindLabel)
+	fmt.Fprintf(
+		output,
+		"      <rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" rx=\"12\" class=\"node %s\"/>\n",
+		point.x,
+		point.y,
+		point.width,
+		point.height,
+		className,
+	)
+	fmt.Fprintf(
+		output,
+		"      <text x=\"%.1f\" y=\"%.1f\" class=\"node-kind %s\">%s</text>\n",
+		point.x+14,
+		point.y+20,
+		kindClass,
+		kindLabel,
+	)
 	if gateFormat != "" {
-		fmt.Fprintf(output, "      <text x=\"%.1f\" y=\"%.1f\" class=\"format\">%s</text>\n", point.x+point.width-14, point.y+20, escapeXML(strings.ToUpper(gateFormat)))
+		fmt.Fprintf(
+			output,
+			"      <text x=\"%.1f\" y=\"%.1f\" class=\"format\">%s</text>\n",
+			point.x+point.width-14,
+			point.y+20,
+			escapeXML(strings.ToUpper(gateFormat)),
+		)
 	}
 	renderSVGLines(output, node.Title, point.x+14, point.y+44, "node-title", max(18, int(point.width/8)), 17, 2)
 	renderSVGLines(output, node.Description, point.x+14, point.y+79, "node-copy", max(24, int(point.width/6.6)), 15, 2)
@@ -288,7 +386,15 @@ func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoin
 	}
 }
 
-func renderSVGLines(output *bytes.Buffer, value string, x, y float64, className string, maxRunes int, lineHeight float64, limit int) {
+func renderSVGLines(
+	output *bytes.Buffer,
+	value string,
+	x, y float64,
+	className string,
+	maxRunes int,
+	lineHeight float64,
+	limit int,
+) {
 	lines := wrapSVGText(value, maxRunes, limit)
 	fmt.Fprintf(output, "      <text x=\"%.1f\" y=\"%.1f\" class=\"%s\">", x, y, className)
 	for index, line := range lines {

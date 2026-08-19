@@ -105,8 +105,8 @@ func (h *Handler) handleGetPRLifecycleWorkflowConfigurations(w http.ResponseWrit
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
-	cfg, revision, err := config.LoadCurrentConfigForUpdateSnapshot(h.configPath)
-	if err != nil {
+	cfg, revision, loadErr := config.LoadCurrentConfigForUpdateSnapshot(h.configPath)
+	if loadErr != nil {
 		writePRWorkspaceAPIError(w, http.StatusInternalServerError, "configuration_unavailable")
 		return
 	}
@@ -125,7 +125,8 @@ func (h *Handler) handlePutPRLifecycleWorkflowConfigurations(w http.ResponseWrit
 		writePRWorkspaceAPIError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if r.Body == nil || strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])) != "application/json" {
+	if r.Body == nil ||
+		strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])) != "application/json" {
 		writePRWorkspaceAPIError(w, http.StatusBadRequest, "invalid_content_type")
 		return
 	}
@@ -168,12 +169,12 @@ func (h *Handler) handlePutPRLifecycleWorkflowConfigurations(w http.ResponseWrit
 	if prLifecycleRuntimeRevision(candidate) == prLifecycleRuntimeRevision(current) {
 		candidate = current
 	}
-	newRevision, err := h.savePRLifecycleConfig(cfg, candidate, revision)
-	if errors.Is(err, config.ErrConfigRevisionMismatch) {
+	newRevision, saveErr := h.savePRLifecycleConfig(cfg, candidate, revision)
+	if errors.Is(saveErr, config.ErrConfigRevisionMismatch) {
 		writePRWorkspaceAPIError(w, http.StatusConflict, "config_revision_mismatch")
 		return
 	}
-	if err != nil {
+	if saveErr != nil {
 		writePRWorkspaceAPIError(w, http.StatusInternalServerError, "configuration_save_failed")
 		return
 	}
@@ -188,8 +189,8 @@ func (h *Handler) handleGetPRLifecycleRepositoryAssignments(w http.ResponseWrite
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
-	cfg, revision, err := config.LoadCurrentConfigForUpdateSnapshot(h.configPath)
-	if err != nil {
+	cfg, revision, loadErr := config.LoadCurrentConfigForUpdateSnapshot(h.configPath)
+	if loadErr != nil {
 		writePRWorkspaceAPIError(w, http.StatusInternalServerError, "configuration_unavailable")
 		return
 	}
@@ -204,7 +205,8 @@ func (h *Handler) handlePutPRLifecycleRepositoryAssignments(w http.ResponseWrite
 		writePRWorkspaceAPIError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if r.Body == nil || strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])) != "application/json" {
+	if r.Body == nil ||
+		strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])) != "application/json" {
 		writePRWorkspaceAPIError(w, http.StatusBadRequest, "invalid_content_type")
 		return
 	}
@@ -242,12 +244,12 @@ func (h *Handler) handlePutPRLifecycleRepositoryAssignments(w http.ResponseWrite
 	if prLifecycleRuntimeRevision(candidate) == prLifecycleRuntimeRevision(current) {
 		candidate = current
 	}
-	newRevision, err := h.savePRLifecycleConfig(cfg, candidate, revision)
-	if errors.Is(err, config.ErrConfigRevisionMismatch) {
+	newRevision, saveErr := h.savePRLifecycleConfig(cfg, candidate, revision)
+	if errors.Is(saveErr, config.ErrConfigRevisionMismatch) {
 		writePRWorkspaceAPIError(w, http.StatusConflict, "config_revision_mismatch")
 		return
 	}
-	if err != nil {
+	if saveErr != nil {
 		writePRWorkspaceAPIError(w, http.StatusInternalServerError, "configuration_save_failed")
 		return
 	}
@@ -356,7 +358,12 @@ func validatePRLifecycleGateActionWorkflows(
 				}
 			case gatetypes.GateActionAI:
 				if _, exists := knownAgents[gate.DefaultAction.AgentID]; !exists {
-					return fmt.Errorf("gate action workflow %q gate %q selects unknown agent %q", ref, gateID, gate.DefaultAction.AgentID)
+					return fmt.Errorf(
+						"gate action workflow %q gate %q selects unknown agent %q",
+						ref,
+						gateID,
+						gate.DefaultAction.AgentID,
+					)
 				}
 			case gatetypes.GateActionWorkflow:
 				if err := validateRef(gate.DefaultAction.WorkflowRef, depth+1); err != nil {
@@ -417,10 +424,15 @@ func writePRLifecycleWorkflowConfigurations(
 	flow, flowRevision := lifecycleflow.Default()
 	catalogRevision := prLifecycleWorkflowConfigurationsCatalogRevision(lifecycle)
 	response := prLifecycleWorkflowConfigurationsResponse{
-		WorkflowConfigurations: lifecycle.WorkflowConfigurations, DefaultWorkflowConfigurationID: lifecycle.DefaultWorkflowConfigurationID,
-		Nudge: lifecycle.Nudge, Scope: lifecycle.Scope,
-		GateCatalog: make(map[string]prLifecycleGateCatalogEntry), Flow: flow,
-		FlowRevision: flowRevision, CatalogRevision: catalogRevision, ConfigRevision: configRevision,
+		WorkflowConfigurations:         lifecycle.WorkflowConfigurations,
+		DefaultWorkflowConfigurationID: lifecycle.DefaultWorkflowConfigurationID,
+		Nudge:                          lifecycle.Nudge,
+		Scope:                          lifecycle.Scope,
+		GateCatalog:                    make(map[string]prLifecycleGateCatalogEntry),
+		Flow:                           flow,
+		FlowRevision:                   flowRevision,
+		CatalogRevision:                catalogRevision,
+		ConfigRevision:                 configRevision,
 	}
 	response.GateCatalog = prLifecycleGateCatalog(lifecycle)
 	response.Effects.GatewayEffect = gatewayEffect

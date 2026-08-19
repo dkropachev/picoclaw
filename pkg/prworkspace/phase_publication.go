@@ -24,8 +24,8 @@ type ReviewPublicationResult struct {
 }
 
 type ReviewPublisher interface {
-	PublishReview(context.Context, ReviewPublicationRequest) (ReviewPublicationResult, error)
-	ReconcileReview(context.Context, ReviewPublicationRequest) (ReviewPublicationResult, bool, error)
+	PublishReview(ctx context.Context, request ReviewPublicationRequest) (ReviewPublicationResult, error)
+	ReconcileReview(ctx context.Context, request ReviewPublicationRequest) (ReviewPublicationResult, bool, error)
 }
 
 type reviewPublicationPayload struct {
@@ -46,8 +46,8 @@ type BranchPublicationResult struct {
 }
 
 type BranchPublisher interface {
-	PublishBranch(context.Context, BranchPublicationRequest) (BranchPublicationResult, error)
-	ReconcileBranch(context.Context, BranchPublicationRequest) (BranchPublicationResult, bool, error)
+	PublishBranch(ctx context.Context, request BranchPublicationRequest) (BranchPublicationResult, error)
+	ReconcileBranch(ctx context.Context, request BranchPublicationRequest) (BranchPublicationResult, bool, error)
 }
 
 type branchPublicationPayload struct {
@@ -64,8 +64,12 @@ type QueueReviewPublicationRequest struct {
 	FindingIDs      []string
 }
 
-func (service *Service) QueueReviewPublication(ctx context.Context, request QueueReviewPublicationRequest) (Aggregate, error) {
-	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || request.ExpectedHeadSHA == "" {
+func (service *Service) QueueReviewPublication(
+	ctx context.Context,
+	request QueueReviewPublicationRequest,
+) (Aggregate, error) {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		request.ExpectedHeadSHA == "" {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -130,7 +134,15 @@ func (service *Service) QueueReviewPublication(ctx context.Context, request Queu
 		state := ExecutionWaitingGate
 		patch.ExecutionState = &state
 	}
-	patch.Activity = []Activity{{Kind: "review.publication_requested", Actor: "user", EntityID: publication.ID, Summary: "GitHub review publication requested", CreatedAt: now}}
+	patch.Activity = []Activity{
+		{
+			Kind:      "review.publication_requested",
+			Actor:     "user",
+			EntityID:  publication.ID,
+			Summary:   "GitHub review publication requested",
+			CreatedAt: now,
+		},
+	}
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: patch,
@@ -145,8 +157,12 @@ type QueueBranchPublicationRequest struct {
 	ExpectedHeadSHA string
 }
 
-func (service *Service) QueueBranchPublication(ctx context.Context, request QueueBranchPublicationRequest) (Aggregate, error) {
-	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || request.ExpectedHeadSHA == "" {
+func (service *Service) QueueBranchPublication(
+	ctx context.Context,
+	request QueueBranchPublicationRequest,
+) (Aggregate, error) {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		request.ExpectedHeadSHA == "" {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -223,7 +239,15 @@ func (service *Service) QueueBranchPublication(ctx context.Context, request Queu
 		state := ExecutionWaitingGate
 		patch.ExecutionState = &state
 	}
-	patch.Activity = []Activity{{Kind: "branch.publication_requested", Actor: "user", EntityID: publication.ID, Summary: "PR branch publication requested", CreatedAt: now}}
+	patch.Activity = []Activity{
+		{
+			Kind:      "branch.publication_requested",
+			Actor:     "user",
+			EntityID:  publication.ID,
+			Summary:   "PR branch publication requested",
+			CreatedAt: now,
+		},
+	}
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: patch,
@@ -238,40 +262,59 @@ type DispatchPhasePublicationRequest struct {
 	RequestID       string
 }
 
-func (service *Service) DispatchReviewPublication(ctx context.Context, publisher ReviewPublisher, request DispatchPhasePublicationRequest) (Aggregate, error) {
+func (service *Service) DispatchReviewPublication(
+	ctx context.Context,
+	publisher ReviewPublisher,
+	request DispatchPhasePublicationRequest,
+) (Aggregate, error) {
 	if publisher == nil {
 		return Aggregate{}, ErrInvalid
 	}
-	return service.dispatchPhasePublication(ctx, request, func(aggregate Aggregate, publication Publication) (phasePublicationResult, error) {
-		var payload reviewPublicationPayload
-		if err := decodePinnedPublicationPayload(publication, &payload); err != nil {
-			return phasePublicationResult{}, err
-		}
-		if payload.Provider.HeadSHA != publication.ExpectedHeadSHA {
-			return phasePublicationResult{}, ErrConflict
-		}
-		result, err := publisher.PublishReview(ctx, ReviewPublicationRequest{
-			Provider: payload.Provider, Summary: payload.Summary,
-			Findings: payload.Findings, Marker: phasePublicationMarker(publication),
-		})
-		return phasePublicationResult{result.ExternalID, result.ExternalURL, result.Ambiguous}, err
-	})
+	return service.dispatchPhasePublication(
+		ctx,
+		request,
+		func(aggregate Aggregate, publication Publication) (phasePublicationResult, error) {
+			var payload reviewPublicationPayload
+			if err := decodePinnedPublicationPayload(publication, &payload); err != nil {
+				return phasePublicationResult{}, err
+			}
+			if payload.Provider.HeadSHA != publication.ExpectedHeadSHA {
+				return phasePublicationResult{}, ErrConflict
+			}
+			result, err := publisher.PublishReview(ctx, ReviewPublicationRequest{
+				Provider: payload.Provider, Summary: payload.Summary,
+				Findings: payload.Findings, Marker: phasePublicationMarker(publication),
+			})
+			return phasePublicationResult{result.ExternalID, result.ExternalURL, result.Ambiguous}, err
+		},
+	)
 }
 
-func (service *Service) DispatchBranchPublication(ctx context.Context, publisher BranchPublisher, request DispatchPhasePublicationRequest) (Aggregate, error) {
+func (service *Service) DispatchBranchPublication(
+	ctx context.Context,
+	publisher BranchPublisher,
+	request DispatchPhasePublicationRequest,
+) (Aggregate, error) {
 	if publisher == nil {
 		return Aggregate{}, ErrInvalid
 	}
-	return service.dispatchPhasePublication(ctx, request, func(aggregate Aggregate, publication Publication) (phasePublicationResult, error) {
-		var payload branchPublicationPayload
-		if err := decodePinnedPublicationPayload(publication, &payload); err != nil ||
-			payload.Fence == nil || payload.Provider.HeadSHA != publication.ExpectedHeadSHA {
-			return phasePublicationResult{}, ErrConflict
-		}
-		payload.Repair.PublicationFence = payload.Fence
-		result, err := publisher.PublishBranch(ctx, BranchPublicationRequest{Provider: payload.Provider, Repair: payload.Repair})
-		return phasePublicationResult{result.ExternalID, result.ExternalURL, result.Ambiguous}, err
-	})
+	return service.dispatchPhasePublication(
+		ctx,
+		request,
+		func(aggregate Aggregate, publication Publication) (phasePublicationResult, error) {
+			var payload branchPublicationPayload
+			if err := decodePinnedPublicationPayload(publication, &payload); err != nil ||
+				payload.Fence == nil || payload.Provider.HeadSHA != publication.ExpectedHeadSHA {
+				return phasePublicationResult{}, ErrConflict
+			}
+			payload.Repair.PublicationFence = payload.Fence
+			result, err := publisher.PublishBranch(
+				ctx,
+				BranchPublicationRequest{Provider: payload.Provider, Repair: payload.Repair},
+			)
+			return phasePublicationResult{result.ExternalID, result.ExternalURL, result.Ambiguous}, err
+		},
+	)
 }
 
 type phasePublicationResult struct {
@@ -285,7 +328,8 @@ func (service *Service) dispatchPhasePublication(
 	request DispatchPhasePublicationRequest,
 	publish func(Aggregate, Publication) (phasePublicationResult, error),
 ) (Aggregate, error) {
-	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || !validOpaqueID(request.PublicationID, "ppb_") {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		!validOpaqueID(request.PublicationID, "ppb_") {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -304,7 +348,15 @@ func (service *Service) dispatchPhasePublication(
 			WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 			RequestID: request.RequestID, Patch: AggregatePatch{
 				ReplacePublications: []Publication{publication},
-				Activity:            []Activity{{Kind: "publication.stale", Actor: "system", EntityID: publication.ID, Summary: "Publication head no longer matches the provider", CreatedAt: now}},
+				Activity: []Activity{
+					{
+						Kind:      "publication.stale",
+						Actor:     "system",
+						EntityID:  publication.ID,
+						Summary:   "Publication head no longer matches the provider",
+						CreatedAt: now,
+					},
+				},
 			},
 		})
 		return staled.Aggregate, staleErr
@@ -320,11 +372,14 @@ func (service *Service) dispatchPhasePublication(
 		}
 		if !fresh {
 			return service.invalidateImplementationCompletionGate(ctx, RespondGateRequest{
-				WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID,
+				WorkspaceID:     request.WorkspaceID,
+				ExpectedVersion: request.ExpectedVersion,
+				RequestID:       request.RequestID,
 			}, aggregate, completionGate)
 		}
 	}
-	publication.State, publication.Attempts, publication.UpdatedAt = ExecutionRunning, publication.Attempts+1, service.now().UTC()
+	publication.State, publication.Attempts, publication.UpdatedAt = ExecutionRunning, publication.Attempts+1, service.now().
+		UTC()
 	claimed, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID + ":claim", Patch: AggregatePatch{ReplacePublications: []Publication{publication}},
@@ -353,7 +408,15 @@ func (service *Service) dispatchPhasePublication(
 	}
 	patch := AggregatePatch{
 		ReplacePublications: []Publication{publication},
-		Activity:            []Activity{{Kind: "publication.finished", Actor: "system", EntityID: publication.ID, Summary: "PR publication finished", CreatedAt: finished}},
+		Activity: []Activity{
+			{
+				Kind:      "publication.finished",
+				Actor:     "system",
+				EntityID:  publication.ID,
+				Summary:   "PR publication finished",
+				CreatedAt: finished,
+			},
+		},
 	}
 	if success && publication.Kind == PublicationBranchPush {
 		phase, state := PhaseComplete, ExecutionSucceeded
@@ -380,8 +443,14 @@ type ReconcilePhasePublicationRequest struct {
 	RequestID       string
 }
 
-func (service *Service) ReconcilePhasePublication(ctx context.Context, review ReviewPublisher, branch BranchPublisher, request ReconcilePhasePublicationRequest) (Aggregate, error) {
-	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || !validOpaqueID(request.PublicationID, "ppb_") {
+func (service *Service) ReconcilePhasePublication(
+	ctx context.Context,
+	review ReviewPublisher,
+	branch BranchPublisher,
+	request ReconcilePhasePublicationRequest,
+) (Aggregate, error) {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		!validOpaqueID(request.PublicationID, "ppb_") {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -438,7 +507,10 @@ func (service *Service) ReconcilePhasePublication(ctx context.Context, review Re
 			return aggregate, ErrConflict
 		}
 		payload.Repair.PublicationFence = payload.Fence
-		observed, found, observeErr := branch.ReconcileBranch(ctx, BranchPublicationRequest{Provider: payload.Provider, Repair: payload.Repair})
+		observed, found, observeErr := branch.ReconcileBranch(
+			ctx,
+			BranchPublicationRequest{Provider: payload.Provider, Repair: payload.Repair},
+		)
 		if observeErr != nil {
 			return service.recordUnknownPhasePublication(ctx, aggregate, publication, request, observeErr)
 		}
@@ -457,7 +529,15 @@ func (service *Service) ReconcilePhasePublication(ctx context.Context, review Re
 				WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 				RequestID: request.RequestID, Patch: AggregatePatch{
 					ReplacePublications: []Publication{publication},
-					Activity:            []Activity{{Kind: "publication.recovered", Actor: "system", EntityID: publication.ID, Summary: "Requeued an interrupted PR publication", CreatedAt: publication.UpdatedAt}},
+					Activity: []Activity{
+						{
+							Kind:      "publication.recovered",
+							Actor:     "system",
+							EntityID:  publication.ID,
+							Summary:   "Requeued an interrupted PR publication",
+							CreatedAt: publication.UpdatedAt,
+						},
+					},
 				},
 				branchPublicationLeaseID: branchPublicationLeaseID(publication),
 			})
@@ -499,7 +579,15 @@ func (service *Service) recordUnknownPhasePublication(
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: AggregatePatch{
 			ReplacePublications: []Publication{publication},
-			Activity:            []Activity{{Kind: "publication.unknown", Actor: "system", EntityID: publication.ID, Summary: "PR publication outcome remains unknown", CreatedAt: now}},
+			Activity: []Activity{
+				{
+					Kind:      "publication.unknown",
+					Actor:     "system",
+					EntityID:  publication.ID,
+					Summary:   "PR publication outcome remains unknown",
+					CreatedAt: now,
+				},
+			},
 		},
 		branchPublicationLeaseID: branchPublicationLeaseID(publication),
 	})
@@ -557,7 +645,8 @@ func validPhasePublicationURL(publication Publication, raw string) bool {
 		return false
 	}
 	external, err := url.Parse(raw)
-	if err != nil || external.Scheme != "https" || external.Host == "" || external.User != nil || external.RawQuery != "" {
+	if err != nil || external.Scheme != "https" || external.Host == "" || external.User != nil ||
+		external.RawQuery != "" {
 		return false
 	}
 	origin, err := url.ParseRequestURI(provider.ProviderOrigin)
@@ -565,7 +654,13 @@ func validPhasePublicationURL(publication Publication, raw string) bool {
 		!strings.EqualFold(external.Host, origin.Host) {
 		return false
 	}
-	wantedPath := strings.TrimSuffix(origin.Path, "/") + "/" + provider.Repository + "/pull/" + strconv.FormatInt(provider.PullNumber, 10)
+	wantedPath := strings.TrimSuffix(
+		origin.Path,
+		"/",
+	) + "/" + provider.Repository + "/pull/" + strconv.FormatInt(
+		provider.PullNumber,
+		10,
+	)
 	return external.Path == wantedPath
 }
 
@@ -616,7 +711,12 @@ func publicationLocksHead(values []Publication, kind PublicationKind, head strin
 			continue
 		}
 		switch publication.State {
-		case ExecutionQueued, ExecutionRunning, ExecutionWaitingGate, ExecutionWaitingUser, ExecutionUnknown, ExecutionSucceeded:
+		case ExecutionQueued,
+			ExecutionRunning,
+			ExecutionWaitingGate,
+			ExecutionWaitingUser,
+			ExecutionUnknown,
+			ExecutionSucceeded:
 			return true
 		}
 	}
@@ -632,7 +732,8 @@ func latestPublishableRepair(aggregate Aggregate, head string) (RepairAttempt, b
 	}
 	for index := len(aggregate.RepairAttempts) - 1; index >= 0; index-- {
 		repair := aggregate.RepairAttempts[index]
-		if repair.State != ExecutionSucceeded || repair.CandidateSHA == "" || repair.PublicationFence == nil || repair.PublicationFence.BaseCommit != head {
+		if repair.State != ExecutionSucceeded || repair.CandidateSHA == "" || repair.PublicationFence == nil ||
+			repair.PublicationFence.BaseCommit != head {
 			continue
 		}
 		if HardCandidateScopeBlocker(repair.Scope) {

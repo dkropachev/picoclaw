@@ -39,8 +39,20 @@ func TestSharedContextIsCurrentFencedAndAudienceProjected(t *testing.T) {
 		Charters:         []Charter{charter}, StageRuns: []StageRun{currentStage, staleStage},
 		Findings: []Finding{currentFinding, staleFinding, unboundFinding},
 		Messages: []Message{
-			{ID: "review", Stage: "review", Content: "review guidance", CharterID: charter.ID, HeadSHA: charter.HeadSHA},
-			{ID: "impl", Stage: "implementation", Content: "implementation guidance", CharterID: charter.ID, HeadSHA: charter.HeadSHA},
+			{
+				ID:        "review",
+				Stage:     "review",
+				Content:   "review guidance",
+				CharterID: charter.ID,
+				HeadSHA:   charter.HeadSHA,
+			},
+			{
+				ID:        "impl",
+				Stage:     "implementation",
+				Content:   "implementation guidance",
+				CharterID: charter.ID,
+				HeadSHA:   charter.HeadSHA,
+			},
 			{ID: "both", Stage: "both", Content: "shared guidance", CharterID: charter.ID, HeadSHA: charter.HeadSHA},
 			{ID: "stale", Stage: "both", Content: "stale guidance", CharterID: charter.ID, HeadSHA: "head-old"},
 			{ID: "unbound", Stage: "both", Content: "unbound guidance", CharterID: charter.ID},
@@ -51,16 +63,52 @@ func TestSharedContextIsCurrentFencedAndAudienceProjected(t *testing.T) {
 			{ID: "impl", Applicability: CorrectionImplementationOnly, CharterID: charter.ID, HeadSHA: charter.HeadSHA},
 			{ID: "both", Applicability: CorrectionReviewAndImpl, CharterID: charter.ID, HeadSHA: charter.HeadSHA},
 			{ID: "old", Applicability: CorrectionReviewAndImpl, CharterID: charter.ID, HeadSHA: charter.HeadSHA},
-			{ID: "replacement", Applicability: CorrectionReviewAndImpl, CharterID: charter.ID, HeadSHA: charter.HeadSHA, SupersedesID: "old"},
+			{
+				ID:            "replacement",
+				Applicability: CorrectionReviewAndImpl,
+				CharterID:     charter.ID,
+				HeadSHA:       charter.HeadSHA,
+				SupersedesID:  "old",
+			},
 			{ID: "stale", Applicability: CorrectionReviewAndImpl, CharterID: charter.ID, HeadSHA: "head-old"},
 			{ID: "unbound", Applicability: CorrectionReviewAndImpl, CharterID: charter.ID},
 		},
 		RepositoryLessons: []RepositoryLesson{
-			{ID: "review", RepositoryID: "repo-1", PRType: PRTypeFix, Applicability: CorrectionReviewOnly, Active: true},
-			{ID: "impl", RepositoryID: "repo-1", PRType: PRTypeFix, Applicability: CorrectionImplementationOnly, Active: true},
-			{ID: "both", RepositoryID: "repo-1", PRType: PRTypeFix, Applicability: CorrectionReviewAndImpl, Active: true},
-			{ID: "other-repo", RepositoryID: "repo-2", PRType: PRTypeFix, Applicability: CorrectionReviewAndImpl, Active: true},
-			{ID: "other-type", RepositoryID: "repo-1", PRType: PRTypeFeature, Applicability: CorrectionReviewAndImpl, Active: true},
+			{
+				ID:            "review",
+				RepositoryID:  "repo-1",
+				PRType:        PRTypeFix,
+				Applicability: CorrectionReviewOnly,
+				Active:        true,
+			},
+			{
+				ID:            "impl",
+				RepositoryID:  "repo-1",
+				PRType:        PRTypeFix,
+				Applicability: CorrectionImplementationOnly,
+				Active:        true,
+			},
+			{
+				ID:            "both",
+				RepositoryID:  "repo-1",
+				PRType:        PRTypeFix,
+				Applicability: CorrectionReviewAndImpl,
+				Active:        true,
+			},
+			{
+				ID:            "other-repo",
+				RepositoryID:  "repo-2",
+				PRType:        PRTypeFix,
+				Applicability: CorrectionReviewAndImpl,
+				Active:        true,
+			},
+			{
+				ID:            "other-type",
+				RepositoryID:  "repo-1",
+				PRType:        PRTypeFeature,
+				Applicability: CorrectionReviewAndImpl,
+				Active:        true,
+			},
 			{ID: "revoked", RepositoryID: "repo-1", PRType: PRTypeFix, Applicability: CorrectionReviewAndImpl},
 		},
 		DeferredGroups: []DeferredGroup{
@@ -71,19 +119,39 @@ func TestSharedContextIsCurrentFencedAndAudienceProjected(t *testing.T) {
 
 	review := reviewContextBundle(aggregate)
 	implementation := implementationContextBundle(aggregate)
-	if idsOfFindings(review.Findings) != currentFinding.ID || idsOfFindings(implementation.Findings) != currentFinding.ID {
-		t.Fatalf("current findings review=%q implementation=%q", idsOfFindings(review.Findings), idsOfFindings(implementation.Findings))
+	if idsOfFindings(review.Findings) != currentFinding.ID ||
+		idsOfFindings(implementation.Findings) != currentFinding.ID {
+		t.Fatalf(
+			"current findings review=%q implementation=%q",
+			idsOfFindings(review.Findings),
+			idsOfFindings(implementation.Findings),
+		)
 	}
 	if idsOfMessages(review.Messages) != "review,both" || idsOfMessages(implementation.Messages) != "impl,both" {
-		t.Fatalf("messages review=%q implementation=%q", idsOfMessages(review.Messages), idsOfMessages(implementation.Messages))
+		t.Fatalf(
+			"messages review=%q implementation=%q",
+			idsOfMessages(review.Messages),
+			idsOfMessages(implementation.Messages),
+		)
 	}
-	if idsOfCorrections(review.Corrections) != "workspace,review,both,replacement" || idsOfCorrections(implementation.Corrections) != "workspace,impl,both,replacement" {
-		t.Fatalf("corrections review=%q implementation=%q", idsOfCorrections(review.Corrections), idsOfCorrections(implementation.Corrections))
+	if idsOfCorrections(review.Corrections) != "workspace,review,both,replacement" ||
+		idsOfCorrections(implementation.Corrections) != "workspace,impl,both,replacement" {
+		t.Fatalf(
+			"corrections review=%q implementation=%q",
+			idsOfCorrections(review.Corrections),
+			idsOfCorrections(implementation.Corrections),
+		)
 	}
-	if idsOfLessons(review.RepositoryLessons) != "review,both" || idsOfLessons(implementation.RepositoryLessons) != "impl,both" {
-		t.Fatalf("lessons review=%q implementation=%q", idsOfLessons(review.RepositoryLessons), idsOfLessons(implementation.RepositoryLessons))
+	if idsOfLessons(review.RepositoryLessons) != "review,both" ||
+		idsOfLessons(implementation.RepositoryLessons) != "impl,both" {
+		t.Fatalf(
+			"lessons review=%q implementation=%q",
+			idsOfLessons(review.RepositoryLessons),
+			idsOfLessons(implementation.RepositoryLessons),
+		)
 	}
-	if len(review.Deferred) != 1 || review.Deferred[0].FindingIDs[0] != currentFinding.ID || len(review.PriorEvidence) != 1 {
+	if len(review.Deferred) != 1 || review.Deferred[0].FindingIDs[0] != currentFinding.ID ||
+		len(review.PriorEvidence) != 1 {
 		t.Fatalf("deferred/evidence = %#v / %#v", review.Deferred, review.PriorEvidence)
 	}
 }
@@ -91,12 +159,15 @@ func TestSharedContextIsCurrentFencedAndAudienceProjected(t *testing.T) {
 func idsOfFindings(values []Finding) string {
 	return joinContextIDs(values, func(value Finding) string { return value.ID })
 }
+
 func idsOfMessages(values []Message) string {
 	return joinContextIDs(values, func(value Message) string { return value.ID })
 }
+
 func idsOfCorrections(values []Correction) string {
 	return joinContextIDs(values, func(value Correction) string { return value.ID })
 }
+
 func idsOfLessons(values []RepositoryLesson) string {
 	return joinContextIDs(values, func(value RepositoryLesson) string { return value.ID })
 }

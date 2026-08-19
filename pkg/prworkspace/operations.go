@@ -38,7 +38,10 @@ func (service *Service) UpdateFinding(ctx context.Context, request UpdateFinding
 		previousScope, previousErr := fingerprintValue(finding.Scope)
 		requestedScope, requestedErr := fingerprintValue(request.Scope)
 		if previousErr != nil || requestedErr != nil || previousScope != requestedScope {
-			return aggregate, fmt.Errorf("%w: hard candidate scope is frozen; resolve its gate or revise the charter", ErrInvalid)
+			return aggregate, fmt.Errorf(
+				"%w: hard candidate scope is frozen; resolve its gate or revise the charter",
+				ErrInvalid,
+			)
 		}
 	}
 	previous := finding
@@ -59,12 +62,21 @@ func (service *Service) UpdateFinding(ctx context.Context, request UpdateFinding
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID,
 		Patch: AggregatePatch{
-			UpsertFindings: []Finding{finding}, AppendCorrections: []Correction{correction},
+			UpsertFindings:    []Finding{finding},
+			AppendCorrections: []Correction{correction},
 			ReplaceNudgeRounds: recomputeNudgeRoundRewards(
 				aggregate.NudgeRounds,
 				upsertByID(aggregate.Findings, []Finding{finding}, func(value Finding) string { return value.ID }),
 			),
-			Activity: []Activity{{Kind: "finding.edited", Actor: "user", EntityID: finding.ID, Summary: "Finding corrected", CreatedAt: service.now().UTC()}},
+			Activity: []Activity{
+				{
+					Kind:      "finding.edited",
+					Actor:     "user",
+					EntityID:  finding.ID,
+					Summary:   "Finding corrected",
+					CreatedAt: service.now().UTC(),
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -119,9 +131,22 @@ func (service *Service) CancelStage(ctx context.Context, request CancelStageRequ
 	run.State, run.PublicError, run.FinishedAt = ExecutionCanceled, "canceled_by_user", &now
 	state := ExecutionCanceled
 	result, err := service.store.Mutate(ctx, Mutation{
-		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
-		RequestID: request.RequestID,
-		Patch:     AggregatePatch{ExecutionState: &state, ReplaceStageRuns: []StageRun{run}, Activity: []Activity{{Kind: "stage.canceled", Actor: "user", EntityID: run.ID, Summary: "Stage run canceled", CreatedAt: now}}},
+		WorkspaceID:     request.WorkspaceID,
+		ExpectedVersion: request.ExpectedVersion,
+		RequestID:       request.RequestID,
+		Patch: AggregatePatch{
+			ExecutionState:   &state,
+			ReplaceStageRuns: []StageRun{run},
+			Activity: []Activity{
+				{
+					Kind:      "stage.canceled",
+					Actor:     "user",
+					EntityID:  run.ID,
+					Summary:   "Stage run canceled",
+					CreatedAt: now,
+				},
+			},
+		},
 	})
 	if err != nil {
 		return result.Aggregate, err
@@ -140,7 +165,11 @@ func (service *Service) RunCompletionAudit(ctx context.Context, request RunCompl
 	return service.runCompletionAudit(ctx, request, false)
 }
 
-func (service *Service) runCompletionAudit(ctx context.Context, request RunCompletionAuditRequest, manualNudge bool) (Aggregate, error) {
+func (service *Service) runCompletionAudit(
+	ctx context.Context,
+	request RunCompletionAuditRequest,
+	manualNudge bool,
+) (Aggregate, error) {
 	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
 		return Aggregate{}, ErrInvalid
 	}
@@ -201,7 +230,13 @@ func (service *Service) runCompletionAudit(ctx context.Context, request RunCompl
 	}
 	now := service.now().UTC()
 	runID := stableID("psr_", aggregate.Workspace.ID, request.RequestID)
-	missing, deferred, candidateDrift, nudges := materializeCompletionRounds(aggregate, runID, rounds, request.NudgePolicy, now)
+	missing, deferred, candidateDrift, nudges := materializeCompletionRounds(
+		aggregate,
+		runID,
+		rounds,
+		request.NudgePolicy,
+		now,
+	)
 	state := ExecutionWaitingUser
 	phase := aggregate.Workspace.Phase
 	stageState, publicError := ExecutionSucceeded, ""
@@ -212,22 +247,51 @@ func (service *Service) runCompletionAudit(ctx context.Context, request RunCompl
 	} else if len(candidateDrift) > 0 {
 		phase, state = PhaseCompletionAudit, ExecutionWaitingGate
 	}
-	stage := StageRun{ID: runID, Stage: "completion_audit", State: stageState, PublicError: publicError, CharterID: charter.ID, HeadSHA: charter.HeadSHA, Attempt: countStageRuns(aggregate.StageRuns, "completion_audit") + 1, PromptDigest: rounds[0].PromptDigest, Summary: rounds[len(rounds)-1].Result.Summary, StartedAt: now, FinishedAt: &now}
+	stage := StageRun{
+		ID:           runID,
+		Stage:        "completion_audit",
+		State:        stageState,
+		PublicError:  publicError,
+		CharterID:    charter.ID,
+		HeadSHA:      charter.HeadSHA,
+		Attempt:      countStageRuns(aggregate.StageRuns, "completion_audit") + 1,
+		PromptDigest: rounds[0].PromptDigest,
+		Summary:      rounds[len(rounds)-1].Result.Summary,
+		StartedAt:    now,
+		FinishedAt:   &now,
+	}
 	stage.Evidence = completionStageEvidence(
 		runID, "completion_audit", stage.Summary, stage.PromptDigest, rounds,
 		append(append(append([]Finding(nil), missing...), deferred...), candidateDrift...),
 		map[string]any{"run": latestValidation}, now,
 	)
 	patch := AggregatePatch{
-		Phase: &phase, ExecutionState: &state, AppendStageRuns: []StageRun{stage},
-		UpsertFindings: append(append(missing, deferred...), candidateDrift...), AppendNudgeRounds: nudges,
-		Activity: []Activity{{Kind: "completion.audit_finished", Actor: "ai", EntityID: runID, Summary: fmt.Sprintf("Completion audit finished with %d rounds", len(rounds)), CreatedAt: now}},
+		Phase:             &phase,
+		ExecutionState:    &state,
+		AppendStageRuns:   []StageRun{stage},
+		UpsertFindings:    append(append(missing, deferred...), candidateDrift...),
+		AppendNudgeRounds: nudges,
+		Activity: []Activity{
+			{
+				Kind:      "completion.audit_finished",
+				Actor:     "ai",
+				EntityID:  runID,
+				Summary:   fmt.Sprintf("Completion audit finished with %d rounds", len(rounds)),
+				CreatedAt: now,
+			},
+		},
 	}
 	if runErr == nil && len(candidateDrift) > 0 {
 		scopeSubject := map[string]any{
 			"charter": charter, "repair": latestRepair, "candidate_drift": candidateDrift,
 		}
-		scopeGate, gateErr := service.startImplementationScopeGate(ctx, aggregate, scopeSubject, latestRepair.Scope, candidateDrift)
+		scopeGate, gateErr := service.startImplementationScopeGate(
+			ctx,
+			aggregate,
+			scopeSubject,
+			latestRepair.Scope,
+			candidateDrift,
+		)
 		if gateErr != nil {
 			return aggregate, gateErr
 		}
@@ -276,17 +340,36 @@ func (service *Service) RunNudge(ctx context.Context, request RunNudgeRequest) (
 		return aggregate, ErrConflict
 	}
 	if request.Stage == NudgeReviewSearch {
-		if aggregate.Workspace.Phase != PhaseTriage || !hasSuccessfulStageAtHead(aggregate.StageRuns, "review", charter.ID, charter.HeadSHA) {
+		if aggregate.Workspace.Phase != PhaseTriage ||
+			!hasSuccessfulStageAtHead(aggregate.StageRuns, "review", charter.ID, charter.HeadSHA) {
 			return aggregate, ErrConflict
 		}
-		return service.runReview(ctx, RunReviewRequest{WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID, NudgePolicy: NudgePolicy{MinimumAdditionalRounds: 1, MaximumAdditionalRounds: 1}}, true)
+		return service.runReview(
+			ctx,
+			RunReviewRequest{
+				WorkspaceID:     request.WorkspaceID,
+				ExpectedVersion: request.ExpectedVersion,
+				RequestID:       request.RequestID,
+				NudgePolicy:     NudgePolicy{MinimumAdditionalRounds: 1, MaximumAdditionalRounds: 1},
+			},
+			true,
+		)
 	}
 	if request.Stage == NudgeImplementationDone {
 		if !phaseAllowsCompletionAudit(aggregate.Workspace.Phase) ||
 			!hasSuccessfulStageAtHead(aggregate.StageRuns, "completion_audit", charter.ID, charter.HeadSHA) {
 			return aggregate, ErrConflict
 		}
-		return service.runCompletionAudit(ctx, RunCompletionAuditRequest{WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID, NudgePolicy: NudgePolicy{MinimumAdditionalRounds: 1, MaximumAdditionalRounds: 1}}, true)
+		return service.runCompletionAudit(
+			ctx,
+			RunCompletionAuditRequest{
+				WorkspaceID:     request.WorkspaceID,
+				ExpectedVersion: request.ExpectedVersion,
+				RequestID:       request.RequestID,
+				NudgePolicy:     NudgePolicy{MinimumAdditionalRounds: 1, MaximumAdditionalRounds: 1},
+			},
+			true,
+		)
 	}
 	return Aggregate{}, ErrInvalid
 }
@@ -310,13 +393,4 @@ func latestValidatedCandidate(aggregate Aggregate) (RepairAttempt, ValidationRun
 		return RepairAttempt{}, ValidationRun{}, false
 	}
 	return repair, validation, true
-}
-
-func latestUnresolvedGate(values []GateRun) (GateRun, error) {
-	for index := len(values) - 1; index >= 0; index-- {
-		if values[index].State == ExecutionWaitingGate || values[index].State == ExecutionWaitingUser {
-			return values[index], nil
-		}
-	}
-	return GateRun{}, errors.New("no unresolved gate")
 }

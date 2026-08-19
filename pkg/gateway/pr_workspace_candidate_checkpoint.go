@@ -82,9 +82,13 @@ func (store *prWorkspaceCandidateCheckpointStore) Save(checkpoint prWorkspaceCan
 	return nil
 }
 
-func (store *prWorkspaceCandidateCheckpointStore) Load(workspaceID string) (prWorkspaceCandidateCheckpoint, bool, error) {
+func (store *prWorkspaceCandidateCheckpointStore) Load(
+	workspaceID string,
+) (prWorkspaceCandidateCheckpoint, bool, error) {
 	if store == nil || stringsTrimmed(workspaceID) == "" {
-		return prWorkspaceCandidateCheckpoint{}, false, errors.New("PR workspace candidate checkpoint lookup is invalid")
+		return prWorkspaceCandidateCheckpoint{}, false, errors.New(
+			"PR workspace candidate checkpoint lookup is invalid",
+		)
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -112,7 +116,9 @@ func (store *prWorkspaceCandidateCheckpointStore) Load(workspaceID string) (prWo
 		return prWorkspaceCandidateCheckpoint{}, false, err
 	}
 	if checkpoint.WorkspaceID != workspaceID || !validPRWorkspaceCandidateCheckpointShape(checkpoint) {
-		return prWorkspaceCandidateCheckpoint{}, false, errors.New("PR workspace candidate checkpoint identity is invalid")
+		return prWorkspaceCandidateCheckpoint{}, false, errors.New(
+			"PR workspace candidate checkpoint identity is invalid",
+		)
 	}
 	return checkpoint, true, nil
 }

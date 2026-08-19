@@ -48,25 +48,48 @@ func (serviceAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[
 		return nil, context.Canceled
 	case "completion.initial", "completion.nudge":
 		return map[string]any{
-			"summary": "Complete", "complete": true,
-			"missing_in_scope": []any{}, "out_of_scope": []any{},
-			"coverage": map[string]any{"reviewed_areas": []any{}, "unreviewed_areas": []any{}, "tests_considered": []any{}, "residual_risks": []any{}},
+			"summary":          "Complete",
+			"complete":         true,
+			"missing_in_scope": []any{},
+			"out_of_scope":     []any{},
+			"coverage": map[string]any{
+				"reviewed_areas":   []any{},
+				"unreviewed_areas": []any{},
+				"tests_considered": []any{},
+				"residual_risks":   []any{},
+			},
 		}, nil
 	case "scope.audit":
 		return map[string]any{
-			"changes": []any{map[string]any{
-				"path": "pkg/retry.go", "hunk": testCandidateHunk, "module": "pkg/retry", "semantic_lines": 10,
-				"presence": "candidate_present", "scope_distance": "S0_exact", "change_size": "XS",
-				"type_compatible": true, "confidence": 1.0, "charter_clauses": []any{"goal"}, "explanation": "exact charter work",
-			}},
+			"changes": []any{
+				map[string]any{
+					"path":            "pkg/retry.go",
+					"hunk":            testCandidateHunk,
+					"module":          "pkg/retry",
+					"semantic_lines":  10,
+					"presence":        "candidate_present",
+					"scope_distance":  "S0_exact",
+					"change_size":     "XS",
+					"type_compatible": true,
+					"confidence":      1.0,
+					"charter_clauses": []any{"goal"},
+					"explanation":     "exact charter work",
+				},
+			},
 			"files": 1, "semantic_lines": 10, "modules": 1,
 			"worst_scope_distance": "S0_exact", "worst_change_size": "XS", "type_compatible": true, "confidence": 1.0,
 			"charter_clauses": []any{"goal"}, "explanation": "The candidate is exactly within the confirmed charter.",
 		}, nil
 	default:
 		return map[string]any{
-			"summary": "No findings", "findings": []any{},
-			"coverage": map[string]any{"reviewed_areas": []any{}, "unreviewed_areas": []any{}, "tests_considered": []any{}, "residual_risks": []any{}},
+			"summary":  "No findings",
+			"findings": []any{},
+			"coverage": map[string]any{
+				"reviewed_areas":   []any{},
+				"unreviewed_areas": []any{},
+				"tests_considered": []any{},
+				"residual_risks":   []any{},
+			},
 		}, nil
 	}
 }
@@ -76,6 +99,7 @@ type passingGates struct{}
 func (passingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
 	return testSucceededGate(request), nil
 }
+
 func (passingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
 	return answerTestGate(gate, fieldValues), nil
 }
@@ -102,7 +126,9 @@ func TestServiceIntakeCharterConfirmAndZeroFindingNudges(t *testing.T) {
 		t.Fatalf("create = %#v, %v", aggregate, err)
 	}
 	aggregate, err = service.DraftCharter(context.Background(), DraftCharterRequest{
-		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version, RequestID: "request-00000002",
+		WorkspaceID:     aggregate.Workspace.ID,
+		ExpectedVersion: aggregate.Workspace.Version,
+		RequestID:       "request-00000002",
 	})
 	if err != nil || len(aggregate.Charters) != 1 || aggregate.Charters[0].Confirmed {
 		t.Fatalf("draft = %#v, %v", aggregate.Charters, err)

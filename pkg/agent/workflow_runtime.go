@@ -325,9 +325,9 @@ func (r *workflowAgentRunner) CaptureReadOnlySession(
 	if r == nil || r.loop == nil {
 		return nil, fmt.Errorf("agent loop not configured")
 	}
-	leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
-	if err != nil {
-		return nil, err
+	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireRuntimeUse(ctx)
+	if acquireErr != nil {
+		return nil, acquireErr
 	}
 	defer releaseRuntime()
 
@@ -393,9 +393,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	if r == nil || r.loop == nil {
 		return nil, fmt.Errorf("agent loop not configured")
 	}
-	leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
-	if err != nil {
-		return nil, err
+	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireRuntimeUse(ctx)
+	if acquireErr != nil {
+		return nil, acquireErr
 	}
 	defer releaseRuntime()
 	ctx = leaseCtx
@@ -502,7 +502,8 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	}
 	var sourceExecution *workflowAgentSourceExecution
 	if req.SourceCapture != nil {
-		sourceExecution, err = beginWorkflowAgentSourceExecution(
+		var sourceErr error
+		sourceExecution, sourceErr = beginWorkflowAgentSourceExecution(
 			ctx,
 			agent,
 			agentID,
@@ -511,8 +512,8 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			isolatedSystemPrompt,
 			req.Output,
 		)
-		if err != nil {
-			return nil, err
+		if sourceErr != nil {
+			return nil, sourceErr
 		}
 		defer sourceExecution.unlock()
 	}
@@ -745,9 +746,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				Role: "user", Content: message,
 			})
 		}
-		response, err = runOnce(message, false, requestedRunOptions)
-		if err != nil {
-			return nil, err
+		var runErr error
+		response, runErr = runOnce(message, false, requestedRunOptions)
+		if runErr != nil {
+			return nil, runErr
 		}
 		if sourceExecution != nil {
 			sourceTranscript = append(sourceTranscript, providers.Message{
@@ -962,15 +964,15 @@ func beginWorkflowAgentSourceExecution(
 	if !ok {
 		return nil, fmt.Errorf("source session store lacks exact snapshot support")
 	}
-	scope, key, err := workflowAgentSourceScope(capture, agentID)
-	if err != nil {
-		return nil, err
+	scope, key, scopeErr := workflowAgentSourceScope(capture, agentID)
+	if scopeErr != nil {
+		return nil, scopeErr
 	}
-	requestRevision, err := workflowAgentSourceRequestRevision(
+	requestRevision, revisionErr := workflowAgentSourceRequestRevision(
 		capture, agentID, message, systemPrompt, output,
 	)
-	if err != nil {
-		return nil, err
+	if revisionErr != nil {
+		return nil, revisionErr
 	}
 	unlock := lockWorkflowAgentSourceExecution(key)
 	fail := func(err error) (*workflowAgentSourceExecution, error) {
@@ -982,9 +984,9 @@ func beginWorkflowAgentSourceExecution(
 	}); err != nil {
 		return fail(fmt.Errorf("admit source session: %w", err))
 	}
-	previous, err := readWorkflowAgentSourceSession(ctx, store, key, scope)
-	if err != nil {
-		return fail(err)
+	previous, readErr := readWorkflowAgentSourceSession(ctx, store, key, scope)
+	if readErr != nil {
+		return fail(readErr)
 	}
 	execution := &workflowAgentSourceExecution{
 		capture:         capture,
@@ -1074,8 +1076,8 @@ func decodeWorkflowAgentSourceSnapshot(
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return invalid("trailing envelope data")
 	}
-	canonical, err := json.Marshal(metadata)
-	if err != nil || !bytes.Equal(canonical, raw) {
+	canonical, marshalErr := json.Marshal(metadata)
+	if marshalErr != nil || !bytes.Equal(canonical, raw) {
 		return invalid("non-canonical envelope")
 	}
 	if metadata.Version != workflowAgentSourceMetadataVersion ||
@@ -1093,8 +1095,8 @@ func decodeWorkflowAgentSourceSnapshot(
 	if err := validateWorkflowAgentSourceSystemPrompt(metadata.SystemPrompt); err != nil {
 		return invalid("system prompt")
 	}
-	transcriptRevision, err := workflowAgentSourceTranscriptRevision(snapshot.History)
-	if err != nil || transcriptRevision != metadata.TranscriptRevision {
+	transcriptRevision, revisionErr := workflowAgentSourceTranscriptRevision(snapshot.History)
+	if revisionErr != nil || transcriptRevision != metadata.TranscriptRevision {
 		return invalid("transcript binding")
 	}
 	return metadata, nil
@@ -1161,9 +1163,9 @@ func (execution *workflowAgentSourceExecution) complete(
 			execution.replay.Revision,
 		), nil
 	}
-	transcriptRevision, err := workflowAgentSourceTranscriptRevision(history)
-	if err != nil {
-		return nil, err
+	transcriptRevision, revisionErr := workflowAgentSourceTranscriptRevision(history)
+	if revisionErr != nil {
+		return nil, revisionErr
 	}
 	metadata := workflowAgentSourceMetadataV1{
 		Version:            workflowAgentSourceMetadataVersion,
@@ -1176,9 +1178,9 @@ func (execution *workflowAgentSourceExecution) complete(
 		RequestRevision:    execution.requestRevision,
 		TranscriptRevision: transcriptRevision,
 	}
-	summary, err := encodeWorkflowAgentSourceMetadata(metadata)
-	if err != nil {
-		return nil, err
+	summary, encodeErr := encodeWorkflowAgentSourceMetadata(metadata)
+	if encodeErr != nil {
+		return nil, encodeErr
 	}
 	replacement := session.SessionSnapshotReplacement{
 		Key:              execution.key,

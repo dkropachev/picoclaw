@@ -127,9 +127,14 @@ func (service *Service) RunImplementation(
 	defer service.releaseImplementation(request.WorkspaceID)
 	var authorizationGates []GateRun
 	if !aggregate.ProviderSnapshot.Owned {
-		eligibility, eligibilityNew, gateErr := service.ensureGate(ctx, aggregate, "pr.implementation.eligibility", map[string]any{
-			"owned": false, "head_writable": true, "provider": aggregate.ProviderSnapshot,
-		})
+		eligibility, eligibilityNew, gateErr := service.ensureGate(
+			ctx,
+			aggregate,
+			"pr.implementation.eligibility",
+			map[string]any{
+				"owned": false, "head_writable": true, "provider": aggregate.ProviderSnapshot,
+			},
+		)
 		if gateErr != nil {
 			return Aggregate{}, gateErr
 		}
@@ -235,16 +240,34 @@ func (service *Service) RunImplementation(
 			setStageInPatch(&patch, stage)
 			break
 		}
-		deterministicSize := ClassifyChangeSize(len(repair.ChangedFiles), repair.SemanticLines, repair.Modules, request.SizePolicy)
+		deterministicSize := ClassifyChangeSize(
+			len(repair.ChangedFiles),
+			repair.SemanticLines,
+			repair.Modules,
+			request.SizePolicy,
+		)
 		actualScope := ScopeAssessment{
-			Distance: scopeAudit.WorstDistance, Size: worstChangeSize(scopeAudit.WorstSize, deterministicSize), Presence: WorkCandidatePresent,
-			Files: len(repair.ChangedFiles), SemanticLines: repair.SemanticLines, Modules: repair.Modules,
+			Distance:       scopeAudit.WorstDistance,
+			Size:           worstChangeSize(scopeAudit.WorstSize, deterministicSize),
+			Presence:       WorkCandidatePresent,
+			Files:          len(repair.ChangedFiles),
+			SemanticLines:  repair.SemanticLines,
+			Modules:        repair.Modules,
 			TypeCompatible: filesTypeCompatible(charter.Type, repair.ChangedFiles) && scopeAudit.TypeCompatible,
-			Confidence:     scopeAudit.Confidence, CharterClauses: append([]string(nil), scopeAudit.CharterClauses...),
-			Explanation: scopeAudit.Explanation, ChangeEvidence: append([]ScopeChange(nil), scopeAudit.Changes...),
+			Confidence:     scopeAudit.Confidence,
+			CharterClauses: append([]string(nil), scopeAudit.CharterClauses...),
+			Explanation:    scopeAudit.Explanation,
+			ChangeEvidence: append([]ScopeChange(nil), scopeAudit.Changes...),
 		}
 		repairFinish := service.now().UTC()
-		scopeBlockers := materializeCandidateScopeBlockers(aggregate, runID, charter.Type, scopeAudit, repairFinish, fmt.Sprint(cycle))
+		scopeBlockers := materializeCandidateScopeBlockers(
+			aggregate,
+			runID,
+			charter.Type,
+			scopeAudit,
+			repairFinish,
+			fmt.Sprint(cycle),
+		)
 		patch.UpsertFindings = append(patch.UpsertFindings, scopeBlockers...)
 		attempt := RepairAttempt{
 			ID:         stableID("pra_", aggregate.Workspace.ID, request.RequestID, fmt.Sprint(cycle)),
@@ -314,15 +337,38 @@ func (service *Service) RunImplementation(
 		}
 		if !validationGreen(validation) {
 			validationForNextRepair = validationRepairEvidence(validation)
-			workingFindings = []Finding{{
-				ID:          stableID("pfn_", aggregate.Workspace.ID, request.RequestID, "validation", fmt.Sprint(cycle)),
-				Fingerprint: stableID("sha256:", "validation", repair.CandidateSHA), Origin: FindingOriginImplementation,
-				OriginRunID: runID, Severity: "high", Title: "Validation remains non-green",
-				Message:     "Repair the failed validation checks before completion.",
-				Validation:  validationRepairSummary(validation),
-				Scope:       ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeXS, TypeCompatible: true, Confidence: 1},
-				Disposition: FindingInScope, Version: 1, CreatedAt: repairFinish, UpdatedAt: repairFinish,
-			}}
+			workingFindings = []Finding{
+				{
+					ID: stableID(
+						"pfn_",
+						aggregate.Workspace.ID,
+						request.RequestID,
+						"validation",
+						fmt.Sprint(cycle),
+					),
+					Fingerprint: stableID(
+						"sha256:",
+						"validation",
+						repair.CandidateSHA,
+					),
+					Origin:      FindingOriginImplementation,
+					OriginRunID: runID,
+					Severity:    "high",
+					Title:       "Validation remains non-green",
+					Message:     "Repair the failed validation checks before completion.",
+					Validation:  validationRepairSummary(validation),
+					Scope: ScopeAssessment{
+						Distance:       ScopeExact,
+						Size:           ChangeSizeXS,
+						TypeCompatible: true,
+						Confidence:     1,
+					},
+					Disposition: FindingInScope,
+					Version:     1,
+					CreatedAt:   repairFinish,
+					UpdatedAt:   repairFinish,
+				},
+			}
 			patch.UpsertFindings = append(patch.UpsertFindings, workingFindings...)
 			continue
 		}
@@ -340,7 +386,12 @@ func (service *Service) RunImplementation(
 		}
 		completionBundle.Validation = map[string]any{"run": validation}
 		durableRounds := append(append([]NudgeRoundRecord(nil), aggregate.NudgeRounds...), patch.AppendNudgeRounds...)
-		rounds, completionErr := service.ai.RunCompletionAudit(ctx, completionBundle, request.NudgePolicy, NudgeStrategyStats(durableRounds, NudgeImplementationDone))
+		rounds, completionErr := service.ai.RunCompletionAudit(
+			ctx,
+			completionBundle,
+			request.NudgePolicy,
+			NudgeStrategyStats(durableRounds, NudgeImplementationDone),
+		)
 		if completionErr != nil && len(rounds) == 0 {
 			delayedNudgeErr = completionErr
 			stage.State = ExecutionFailed
@@ -358,8 +409,19 @@ func (service *Service) RunImplementation(
 		}
 		materializationAggregate := aggregate
 		materializationAggregate.StageRuns = append(materializationAggregate.StageRuns, stage)
-		materializationAggregate.Findings = upsertByID(aggregate.Findings, patch.UpsertFindings, func(value Finding) string { return value.ID })
-		missing, deferred, candidateDrift, nudges := materializeCompletionRounds(materializationAggregate, runID, rounds, request.NudgePolicy, repairFinish, fmt.Sprint(cycle))
+		materializationAggregate.Findings = upsertByID(
+			aggregate.Findings,
+			patch.UpsertFindings,
+			func(value Finding) string { return value.ID },
+		)
+		missing, deferred, candidateDrift, nudges := materializeCompletionRounds(
+			materializationAggregate,
+			runID,
+			rounds,
+			request.NudgePolicy,
+			repairFinish,
+			fmt.Sprint(cycle),
+		)
 		stage.Evidence = completionStageEvidence(
 			runID, "implementation_completion", rounds[len(rounds)-1].Result.Summary, rounds[0].PromptDigest,
 			rounds, append(append(append([]Finding(nil), missing...), deferred...), candidateDrift...),
@@ -662,7 +724,14 @@ func findingRemovalAuthorized(gates []GateRun, finding Finding) bool {
 func implementationInstruction(charter Charter, findings []Finding, attempt int) string {
 	sort.Slice(findings, func(i, j int) bool { return findings[i].ID < findings[j].ID })
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "Implement confirmed charter %s (type %s), attempt %d.\nGoal: %s\n", charter.ID, charter.Type, attempt, charter.Goal)
+	fmt.Fprintf(
+		&builder,
+		"Implement confirmed charter %s (type %s), attempt %d.\nGoal: %s\n",
+		charter.ID,
+		charter.Type,
+		attempt,
+		charter.Goal,
+	)
 	builder.WriteString("Satisfy every acceptance criterion in the confirmed charter:\n")
 	for _, criterion := range charter.AcceptanceCriteria {
 		fmt.Fprintf(&builder, "- %s\n", criterion)
@@ -670,7 +739,13 @@ func implementationInstruction(charter Charter, findings []Finding, attempt int)
 	builder.WriteString("Also address these confirmed in-scope findings:\n")
 	for _, finding := range findings {
 		if finding.Scope.Presence == WorkCandidatePresent && DecideScope(finding.Scope) != ScopeActionProceed {
-			fmt.Fprintf(&builder, "- Remove candidate-present scope drift %s: %s — %s. Do not implement or expand it.\n", finding.ID, finding.Title, finding.Message)
+			fmt.Fprintf(
+				&builder,
+				"- Remove candidate-present scope drift %s: %s — %s. Do not implement or expand it.\n",
+				finding.ID,
+				finding.Title,
+				finding.Message,
+			)
 			continue
 		}
 		fmt.Fprintf(&builder, "- %s: %s — %s\n", finding.ID, finding.Title, finding.Message)
@@ -895,7 +970,14 @@ func (service *Service) startImplementationScopeGate(
 	)
 }
 
-func materializeCompletionRounds(aggregate Aggregate, runID string, rounds []CompletionRound, policy NudgePolicy, now time.Time, namespaceParts ...string) ([]Finding, []Finding, []Finding, []NudgeRoundRecord) {
+func materializeCompletionRounds(
+	aggregate Aggregate,
+	runID string,
+	rounds []CompletionRound,
+	policy NudgePolicy,
+	now time.Time,
+	namespaceParts ...string,
+) ([]Finding, []Finding, []Finding, []NudgeRoundRecord) {
 	namespace := runID
 	for _, part := range namespaceParts {
 		namespace += "\x00" + part
@@ -937,14 +1019,27 @@ func materializeCompletionRounds(aggregate Aggregate, runID string, rounds []Com
 			indexes := materializedDeferred
 			switch kind {
 			case "missing":
-				disposition, target, indexes = reviewFindingDisposition(completionFindingScope(candidate)), &missing, materializedMissing
+				disposition, target, indexes = reviewFindingDisposition(
+					completionFindingScope(candidate),
+				), &missing, materializedMissing
 				if disposition == FindingDeferred {
 					disposition = FindingOpen
 				}
 			case "candidate_drift":
 				disposition, target, indexes = FindingOpen, &candidateDrift, materializedDrift
 			}
-			finding := completionFindingRecord(existing, exists, id, fingerprint, runID, roundID, candidate, disposition, round.Source, now)
+			finding := completionFindingRecord(
+				existing,
+				exists,
+				id,
+				fingerprint,
+				runID,
+				roundID,
+				candidate,
+				disposition,
+				round.Source,
+				now,
+			)
 			if index, duplicate := indexes[fingerprint]; duplicate {
 				(*target)[index] = finding
 			} else {
@@ -1017,7 +1112,15 @@ func completionRoundsMatchCandidateScope(rounds []CompletionRound, scope ScopeAs
 	return true
 }
 
-func completionFindingRecord(existing Finding, reuse bool, id, fingerprint, runID, roundID string, candidate CompletionFinding, disposition FindingDisposition, source *AIExecutionSource, now time.Time) Finding {
+func completionFindingRecord(
+	existing Finding,
+	reuse bool,
+	id, fingerprint, runID, roundID string,
+	candidate CompletionFinding,
+	disposition FindingDisposition,
+	source *AIExecutionSource,
+	now time.Time,
+) Finding {
 	createdAt, version := now, int64(1)
 	origin, originRunID, nudgeRoundID := FindingOriginNudge, runID, roundID
 	var nudgeReward *float64
@@ -1074,11 +1177,6 @@ func worstChangeSize(values ...ChangeSize) ChangeSize {
 func scopeAuditMatchesCandidate(audit ScopeAuditPass, repair RepairResult) bool {
 	_, mismatch := bindScopeAuditCandidateEvidence(audit, repair)
 	return mismatch == ""
-}
-
-func scopeAuditCandidateMismatch(audit ScopeAuditPass, repair RepairResult) string {
-	_, mismatch := bindScopeAuditCandidateEvidence(audit, repair)
-	return mismatch
 }
 
 // bindScopeAuditCandidateEvidence treats the model's path and hunk coordinate
@@ -1244,7 +1342,9 @@ func exactCandidateDiffHunks(diff string, wanted map[string]struct{}) (map[strin
 	return result, true
 }
 
-var candidateHunkCoordinatePattern = regexp.MustCompile(`^(@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@)(?:[^\r\n]*)$`)
+var candidateHunkCoordinatePattern = regexp.MustCompile(
+	`^(@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@)(?:[^\r\n]*)$`,
+)
 
 // candidateHunkCoordinate returns the security-relevant identity of a unified
 // diff hunk. Git may append a best-effort function or section label after the
@@ -1293,14 +1393,4 @@ func parseCandidateDiffToken(value string) (string, string, bool) {
 		}
 	}
 	return "", "", false
-}
-
-func maxTime(values ...time.Time) time.Time {
-	var latest time.Time
-	for _, value := range values {
-		if value.After(latest) {
-			latest = value
-		}
-	}
-	return latest
 }

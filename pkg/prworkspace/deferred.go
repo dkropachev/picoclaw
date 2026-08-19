@@ -29,12 +29,13 @@ type RegroupDeferredRequest struct {
 }
 
 func (service *Service) RegroupDeferred(ctx context.Context, request RegroupDeferredRequest) (Aggregate, error) {
-	if service == nil || service.ai.Runner == nil || !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
+	if service == nil || service.ai.Runner == nil ||
+		!validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
 		return Aggregate{}, ErrInvalid
 	}
-	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
-	if err != nil {
-		return Aggregate{}, err
+	aggregate, getErr := service.store.Get(ctx, request.WorkspaceID)
+	if getErr != nil {
+		return Aggregate{}, getErr
 	}
 	if aggregate.Workspace.Version != request.ExpectedVersion {
 		return aggregate, ErrConflict
@@ -45,37 +46,44 @@ func (service *Service) RegroupDeferred(ctx context.Context, request RegroupDefe
 	}
 	bundle := contextBundle(aggregate)
 	bundle.Findings = deferred
-	prompt, err := CompilePrompt(PromptDeferredIssue, bundle, "")
-	if err != nil {
-		return Aggregate{}, err
+	prompt, promptErr := CompilePrompt(PromptDeferredIssue, bundle, "")
+	if promptErr != nil {
+		return Aggregate{}, promptErr
 	}
-	value, err := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: "deferred.group", SystemPrompt: prompt.SystemPrompt,
 		UserPrompt: prompt.UserPrompt, Schema: deferredGroupingSchema(),
 	})
-	if err != nil {
-		return Aggregate{}, err
+	if runErr != nil {
+		return Aggregate{}, runErr
 	}
 	var output DeferredGroupingOutput
 	if err := decodeStructured(value, &output); err != nil {
 		return Aggregate{}, errors.New("deferred grouping output is invalid")
 	}
 	now := service.now().UTC()
-	groups, err := validateAndMaterializeGroups(aggregate, deferred, output.Groups, request.RequestID, now)
-	if err != nil {
-		return Aggregate{}, err
+	groups, groupsErr := validateAndMaterializeGroups(aggregate, deferred, output.Groups, request.RequestID, now)
+	if groupsErr != nil {
+		return Aggregate{}, groupsErr
 	}
 	updates := append(groups, supersededDeferredDrafts(aggregate.DeferredGroups, now)...)
-	result, err := service.store.Mutate(ctx, Mutation{
+	result, mutateErr := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID,
 		Patch: AggregatePatch{
 			UpsertDeferred: updates,
-			Activity:       []Activity{{Kind: "deferred.regrouped", Actor: "ai", Summary: fmt.Sprintf("Deferred findings grouped into %d issue drafts", len(groups)), CreatedAt: service.now().UTC()}},
+			Activity: []Activity{
+				{
+					Kind:      "deferred.regrouped",
+					Actor:     "ai",
+					Summary:   fmt.Sprintf("Deferred findings grouped into %d issue drafts", len(groups)),
+					CreatedAt: service.now().UTC(),
+				},
+			},
 		},
 	})
-	if err != nil {
-		return result.Aggregate, err
+	if mutateErr != nil {
+		return result.Aggregate, mutateErr
 	}
 	return result.Aggregate, nil
 }
@@ -107,7 +115,15 @@ func (service *Service) UpdateDeferred(ctx context.Context, request UpdateDeferr
 	group.Title, group.Body, group.Labels = request.Title, request.Body, append([]string(nil), request.Labels...)
 	group.Version++
 	group.UpdatedAt = service.now().UTC()
-	return service.applyDeferredGroups(ctx, aggregate, request.ExpectedVersion, request.RequestID, []DeferredGroup{group}, "deferred.edited", "Deferred issue draft edited")
+	return service.applyDeferredGroups(
+		ctx,
+		aggregate,
+		request.ExpectedVersion,
+		request.RequestID,
+		[]DeferredGroup{group},
+		"deferred.edited",
+		"Deferred issue draft edited",
+	)
 }
 
 type SplitDeferredRequest struct {
@@ -159,7 +175,15 @@ func (service *Service) SplitDeferred(ctx context.Context, request SplitDeferred
 		Scope: group.Scope, Labels: append([]string(nil), group.Labels...), Version: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	return service.applyDeferredGroups(ctx, aggregate, request.ExpectedVersion, request.RequestID, []DeferredGroup{group, newGroup}, "deferred.split", "Deferred issue draft split")
+	return service.applyDeferredGroups(
+		ctx,
+		aggregate,
+		request.ExpectedVersion,
+		request.RequestID,
+		[]DeferredGroup{group, newGroup},
+		"deferred.split",
+		"Deferred issue draft split",
+	)
 }
 
 type MergeDeferredRequest struct {
@@ -227,7 +251,15 @@ func (service *Service) MergeDeferred(ctx context.Context, request MergeDeferred
 		group.UpdatedAt = now
 		updates = append(updates, group)
 	}
-	return service.applyDeferredGroups(ctx, aggregate, request.ExpectedVersion, request.RequestID, updates, "deferred.merged", "Deferred issue drafts merged")
+	return service.applyDeferredGroups(
+		ctx,
+		aggregate,
+		request.ExpectedVersion,
+		request.RequestID,
+		updates,
+		"deferred.merged",
+		"Deferred issue drafts merged",
+	)
 }
 
 type LinkDeferredRequest struct {
@@ -273,7 +305,14 @@ func (service *Service) LinkDeferred(ctx context.Context, request LinkDeferredRe
 				aggregate.NudgeRounds,
 				upsertByID(aggregate.Findings, rewardedFindings, func(value Finding) string { return value.ID }),
 			),
-			Activity: []Activity{{Kind: "deferred.linked", Actor: "user", Summary: "Deferred work linked to existing issue", CreatedAt: now}},
+			Activity: []Activity{
+				{
+					Kind:      "deferred.linked",
+					Actor:     "user",
+					Summary:   "Deferred work linked to existing issue",
+					CreatedAt: now,
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -297,7 +336,14 @@ func hasDuplicateStrings(values []string) bool {
 	return false
 }
 
-func (service *Service) applyDeferredGroups(ctx context.Context, aggregate Aggregate, expectedVersion int64, requestID string, groups []DeferredGroup, kind, summary string) (Aggregate, error) {
+func (service *Service) applyDeferredGroups(
+	ctx context.Context,
+	aggregate Aggregate,
+	expectedVersion int64,
+	requestID string,
+	groups []DeferredGroup,
+	kind, summary string,
+) (Aggregate, error) {
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: expectedVersion,
 		RequestID: requestID,
@@ -444,7 +490,13 @@ func aggregateScope(findings []Finding, ids []string) ScopeAssessment {
 	for _, id := range ids {
 		wanted[id] = struct{}{}
 	}
-	result := ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeXS, TypeCompatible: true, Confidence: 1, Estimated: true}
+	result := ScopeAssessment{
+		Distance:       ScopeExact,
+		Size:           ChangeSizeXS,
+		TypeCompatible: true,
+		Confidence:     1,
+		Estimated:      true,
+	}
 	for _, finding := range findings {
 		if _, exists := wanted[finding.ID]; !exists {
 			continue
@@ -529,9 +581,18 @@ func deferredGroupingSchema() map[string]any {
 					"type": "object", "additionalProperties": false,
 					"required": []any{"title", "body", "finding_ids", "labels"},
 					"properties": map[string]any{
-						"title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"},
-						"finding_ids": map[string]any{"type": "array", "maxItems": maxAIReviewFindings, "items": map[string]any{"type": "string"}},
-						"labels":      map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "string"}},
+						"title": map[string]any{"type": "string"},
+						"body":  map[string]any{"type": "string"},
+						"finding_ids": map[string]any{
+							"type":     "array",
+							"maxItems": maxAIReviewFindings,
+							"items":    map[string]any{"type": "string"},
+						},
+						"labels": map[string]any{
+							"type":     "array",
+							"maxItems": 32,
+							"items":    map[string]any{"type": "string"},
+						},
 					},
 				},
 			},

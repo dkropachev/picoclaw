@@ -96,7 +96,12 @@ func (evaluator *WorkflowGateEvaluator) Start(ctx context.Context, request GateR
 	if effectiveAction == nil {
 		return GateRun{}, fmt.Errorf("gate %q has no configured action or default-action", entry.GateRef)
 	}
-	actionRevision, err := prLifecycleActionRevision(entry, workflowConfigurationID, workflowConfigurationRevision, effectiveAction)
+	actionRevision, err := prLifecycleActionRevision(
+		entry,
+		workflowConfigurationID,
+		workflowConfigurationRevision,
+		effectiveAction,
+	)
 	if err != nil {
 		return GateRun{}, err
 	}
@@ -228,7 +233,7 @@ func configuredPRLifecycleGateAction(
 		if binding.Action == nil {
 			return nil, nil
 		}
-		action := workflows.GateAction(*binding.Action)
+		action := *binding.Action
 		action.Fields = cloneAnyMap(action.Fields)
 		return &action, nil
 	}
@@ -464,5 +469,7 @@ func (evaluator *WorkflowGateEvaluator) now() time.Time {
 	return time.Now().UTC()
 }
 
-var _ workflows.GateActionResolver = fixedPRLifecycleGateActionResolver{}
-var _ GateEvaluator = (*WorkflowGateEvaluator)(nil)
+var (
+	_ workflows.GateActionResolver = fixedPRLifecycleGateActionResolver{}
+	_ GateEvaluator                = (*WorkflowGateEvaluator)(nil)
+)

@@ -86,9 +86,21 @@ func TestPRLifecycleConfigRejectsInvalidWorkflowConfigurations(t *testing.T) {
 		mutate func(*PRLifecycleConfig)
 		want   string
 	}{
-		{name: "missing configs", mutate: func(c *PRLifecycleConfig) { c.WorkflowConfigurations = nil }, want: "must contain"},
-		{name: "missing default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultWorkflowConfigurationID = "" }, want: "default workflow configuration is required"},
-		{name: "unknown default selection", mutate: func(c *PRLifecycleConfig) { c.DefaultWorkflowConfigurationID = "missing" }, want: "does not exist"},
+		{
+			name:   "missing configs",
+			mutate: func(c *PRLifecycleConfig) { c.WorkflowConfigurations = nil },
+			want:   "must contain",
+		},
+		{
+			name:   "missing default selection",
+			mutate: func(c *PRLifecycleConfig) { c.DefaultWorkflowConfigurationID = "" },
+			want:   "default workflow configuration is required",
+		},
+		{
+			name:   "unknown default selection",
+			mutate: func(c *PRLifecycleConfig) { c.DefaultWorkflowConfigurationID = "missing" },
+			want:   "does not exist",
+		},
 		{name: "renamed builtin", mutate: func(c *PRLifecycleConfig) {
 			v := c.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID]
 			v.Name = "Renamed"
@@ -100,7 +112,10 @@ func TestPRLifecycleConfigRejectsInvalidWorkflowConfigurations(t *testing.T) {
 			c.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID] = v
 		}, want: "built-in default"},
 		{name: "snake config id", mutate: func(c *PRLifecycleConfig) {
-			c.WorkflowConfigurations["bad_id"] = PRLifecycleWorkflowConfiguration{Name: "Bad", Bindings: []PRLifecycleGateBinding{}}
+			c.WorkflowConfigurations["bad_id"] = PRLifecycleWorkflowConfiguration{
+				Name:     "Bad",
+				Bindings: []PRLifecycleGateBinding{},
+			}
 		}, want: "invalid identity"},
 		{name: "duplicate name", mutate: func(c *PRLifecycleConfig) {
 			c.WorkflowConfigurations["another"] = PRLifecycleWorkflowConfiguration{

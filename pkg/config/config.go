@@ -60,7 +60,7 @@ type Config struct {
 	ModelRouters ModelRouterList   `json:"model_routers"       yaml:"model_routers"`
 	Gateway      GatewayConfig     `json:"gateway"             yaml:"-"`
 	Events       EventsConfig      `json:"events,omitempty"    yaml:"events,omitempty"`
-	PRLifecycle  PRLifecycleConfig `json:"pr_lifecycle"       yaml:"-"`
+	PRLifecycle  PRLifecycleConfig `json:"pr_lifecycle"        yaml:"-"`
 	Workflows    WorkflowsConfig   `json:"workflows,omitempty" yaml:"-"`
 	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
 	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`

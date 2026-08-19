@@ -30,12 +30,14 @@ const (
 	privateRootKindGateActionV3 = "gate-action-v3"
 )
 
-type GateAction = gatetypes.GateAction
-type GateActionType = gatetypes.GateActionType
-type GateDefinition = gatetypes.GateDefinition
-type GateField = gatetypes.GateField
-type GateFieldOption = gatetypes.GateFieldOption
-type GateFieldType = gatetypes.GateFieldType
+type (
+	GateAction      = gatetypes.GateAction
+	GateActionType  = gatetypes.GateActionType
+	GateDefinition  = gatetypes.GateDefinition
+	GateField       = gatetypes.GateField
+	GateFieldOption = gatetypes.GateFieldOption
+	GateFieldType   = gatetypes.GateFieldType
+)
 
 const (
 	GateActionHuman         = gatetypes.GateActionHuman
@@ -74,7 +76,7 @@ type GateActionResolution struct {
 }
 
 type GateActionResolver interface {
-	ResolveGateAction(context.Context, GateActionResolveRequest) (GateActionResolution, error)
+	ResolveGateAction(ctx context.Context, request GateActionResolveRequest) (GateActionResolution, error)
 }
 
 // GateForm is the durable browser-safe form projected by a Human gate action.
@@ -103,17 +105,17 @@ func CompileGateWorkflowV3(
 	if workflow == nil {
 		return nil, fmt.Errorf("gate workflow is required")
 	}
-	gateRef, err := canonicalGateRef(gateRef)
-	if err != nil {
-		return nil, err
+	gateRef, canonicalErr := canonicalGateRef(gateRef)
+	if canonicalErr != nil {
+		return nil, canonicalErr
 	}
 	gateID := strings.TrimPrefix(gateRef, "gates.")
 	if _, exists := workflow.Gates[gateID]; !exists {
 		return nil, fmt.Errorf("gate-ref %q does not exist", gateRef)
 	}
-	encodedGates, err := json.Marshal(workflow.Gates)
-	if err != nil {
-		return nil, fmt.Errorf("clone workflow gates: %w", err)
+	encodedGates, marshalErr := json.Marshal(workflow.Gates)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("clone workflow gates: %w", marshalErr)
 	}
 	var gates map[string]GateDefinition
 	if err := decodeJSONWithNumbers(encodedGates, &gates); err != nil {
@@ -144,13 +146,13 @@ func CompileGateWorkflowV3(
 	if privateValues == nil {
 		privateValues = map[string]any{}
 	}
-	normalized, err := normalizeWorkflowGateValue(
+	normalized, normalizeErr := normalizeWorkflowGateValue(
 		"private gate values",
 		privateValues,
 		MaxWorkflowGateInputsBytes,
 	)
-	if err != nil {
-		return nil, err
+	if normalizeErr != nil {
+		return nil, normalizeErr
 	}
 	values, ok := normalized.(map[string]any)
 	if !ok {
@@ -181,9 +183,9 @@ func compileGateActionWorkflowV3(
 	if workflow == nil {
 		return nil, fmt.Errorf("gate action workflow is required")
 	}
-	encoded, err := json.Marshal(workflow)
-	if err != nil {
-		return nil, fmt.Errorf("clone gate action workflow: %w", err)
+	encoded, marshalErr := json.Marshal(workflow)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("clone gate action workflow: %w", marshalErr)
 	}
 	var compiled Workflow
 	if err := decodeJSONWithNumbers(encoded, &compiled); err != nil {
@@ -198,11 +200,11 @@ func compileGateActionWorkflowV3(
 	if privateValues == nil {
 		privateValues = map[string]any{}
 	}
-	normalized, err := normalizeWorkflowGateValue(
+	normalized, normalizeErr := normalizeWorkflowGateValue(
 		"private gate action values", privateValues, MaxWorkflowGateInputsBytes,
 	)
-	if err != nil {
-		return nil, err
+	if normalizeErr != nil {
+		return nil, normalizeErr
 	}
 	values, ok := normalized.(map[string]any)
 	if !ok {
@@ -828,16 +830,20 @@ func (e *Executor) executeAIGateAction(
 		isolatedSystemPrompt = strings.TrimSpace(resolved.Action.Prompt)
 	}
 	outputs, err := e.Agents.RunAgent(ctx, AgentRequest{
-		AgentID:               agentID,
-		Prompt:                prompt,
-		Session:               sessionKey,
-		EphemeralSession:      sessionMode == AgentSessionEphemeral,
-		History:               history,
-		Cache:                 cache,
-		Tools:                 tools,
-		Delivery:              execCtx.Delivery,
-		Inputs:                inputs,
-		Output:                &AgentOutputContract{Format: "json", Schema: gateFieldValuesSchema(resolved.Gate.Fields), RepairAttempts: 1},
+		AgentID:          agentID,
+		Prompt:           prompt,
+		Session:          sessionKey,
+		EphemeralSession: sessionMode == AgentSessionEphemeral,
+		History:          history,
+		Cache:            cache,
+		Tools:            tools,
+		Delivery:         execCtx.Delivery,
+		Inputs:           inputs,
+		Output: &AgentOutputContract{
+			Format:         "json",
+			Schema:         gateFieldValuesSchema(resolved.Gate.Fields),
+			RepairAttempts: 1,
+		},
 		PrivateContext:        private,
 		IsolatedSystemPrompt:  isolatedSystemPrompt,
 		FrozenReadOnlySession: frozenSession,

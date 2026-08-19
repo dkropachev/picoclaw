@@ -8,27 +8,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
-	"github.com/stretchr/testify/require"
 )
 
 type restartPublicationPassingGates struct {
 	now time.Time
 }
 
-func (gates restartPublicationPassingGates) Start(_ context.Context, request prworkspace.GateRequest) (prworkspace.GateRun, error) {
+func (gates restartPublicationPassingGates) Start(
+	_ context.Context,
+	request prworkspace.GateRequest,
+) (prworkspace.GateRun, error) {
 	finished := gates.now
 	return prworkspace.GateRun{
 		ID:            "pgr_11111111111111111111111111111111",
 		DecisionPoint: request.DecisionPoint,
 		State:         prworkspace.ExecutionSucceeded,
-		Turns: []prworkspace.GateTurn{{
-			StageID: "gate", Kind: "deterministic", ActorKind: "deterministic", Status: "answered",
-			ExecutionID: "ge_restart-review", ActionRevision: "sha256:restart-action", InputHash: "sha256:restart-input",
-			FieldValues: map[string]any{"action": "publish"},
-			GateForm:    &prworkspace.GateForm{GateRef: "gates.review-publish", Prompt: "Publish?"},
-		}},
+		Turns: []prworkspace.GateTurn{
+			{
+				StageID:        "gate",
+				Kind:           "deterministic",
+				ActorKind:      "deterministic",
+				Status:         "answered",
+				ExecutionID:    "ge_restart-review",
+				ActionRevision: "sha256:restart-action",
+				InputHash:      "sha256:restart-input",
+				FieldValues:    map[string]any{"action": "publish"},
+				GateForm:       &prworkspace.GateForm{GateRef: "gates.review-publish", Prompt: "Publish?"},
+			},
+		},
 		PolicyRevision:  "restart-integration-v1",
 		SubjectRevision: request.SubjectDigest,
 		CreatedAt:       gates.now,

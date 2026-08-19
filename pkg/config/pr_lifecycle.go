@@ -118,17 +118,17 @@ type PRLifecycleSizeThreshold struct {
 	Modules       int `json:"modules"`
 }
 
-func (config PRLifecycleConfig) IsZero() bool {
+func (config *PRLifecycleConfig) IsZero() bool {
 	return config.WorkflowConfigurations == nil && config.DefaultWorkflowConfigurationID == "" &&
 		config.RepositoryAssignments == nil && config.Nudge == (PRLifecycleNudgeConfig{}) &&
 		config.Scope == (PRLifecycleScopeConfig{})
 }
 
-func (config PRLifecycleConfig) Effective() PRLifecycleConfig {
+func (config *PRLifecycleConfig) Effective() PRLifecycleConfig {
 	if config.IsZero() {
 		return DefaultPRLifecycleConfig()
 	}
-	return config
+	return *config
 }
 
 func DefaultPRLifecycleConfig() PRLifecycleConfig {
@@ -154,9 +154,13 @@ func DefaultPRLifecycleConfig() PRLifecycleConfig {
 	}
 }
 
-func (config PRLifecycleConfig) Validate() error {
-	if len(config.WorkflowConfigurations) == 0 || len(config.WorkflowConfigurations) > MaxPRLifecycleWorkflowConfigurations {
-		return fmt.Errorf("PR lifecycle workflow configurations must contain between 1 and %d entries", MaxPRLifecycleWorkflowConfigurations)
+func (config *PRLifecycleConfig) Validate() error {
+	if len(config.WorkflowConfigurations) == 0 ||
+		len(config.WorkflowConfigurations) > MaxPRLifecycleWorkflowConfigurations {
+		return fmt.Errorf(
+			"PR lifecycle workflow configurations must contain between 1 and %d entries",
+			MaxPRLifecycleWorkflowConfigurations,
+		)
 	}
 	if config.DefaultWorkflowConfigurationID == "" {
 		return errors.New("PR lifecycle default workflow configuration is required")
@@ -165,8 +169,11 @@ func (config PRLifecycleConfig) Validate() error {
 		return errors.New("PR lifecycle default workflow configuration does not exist")
 	}
 	defaultConfiguration, exists := config.WorkflowConfigurations[DefaultPRLifecycleWorkflowConfigurationID]
-	if !exists || defaultConfiguration.Name != DefaultPRLifecycleWorkflowConfigurationName || len(defaultConfiguration.Bindings) != 0 {
-		return errors.New("PR lifecycle built-in default workflow configuration must retain its name and contain no gate overrides")
+	if !exists || defaultConfiguration.Name != DefaultPRLifecycleWorkflowConfigurationName ||
+		len(defaultConfiguration.Bindings) != 0 {
+		return errors.New(
+			"PR lifecycle built-in default workflow configuration must retain its name and contain no gate overrides",
+		)
 	}
 
 	names := make(map[string]string, len(config.WorkflowConfigurations))
@@ -229,7 +236,11 @@ func (config PRLifecycleConfig) Validate() error {
 		}
 		canonicalRepositories[canonical] = identity
 		if _, exists := config.WorkflowConfigurations[workflowConfigurationID]; !exists {
-			return fmt.Errorf("PR lifecycle repository %q selects missing workflow configuration %q", identity, workflowConfigurationID)
+			return fmt.Errorf(
+				"PR lifecycle repository %q selects missing workflow configuration %q",
+				identity,
+				workflowConfigurationID,
+			)
 		}
 	}
 	if err := config.Nudge.Validate(); err != nil {
@@ -342,7 +353,7 @@ func validPRLifecycleActionIdentifier(value string) bool {
 
 // ValidateAgentReferences rejects configuration overrides that name an AI
 // agent the runtime cannot instantiate from the same full configuration.
-func (config PRLifecycleConfig) ValidateAgentReferences(agents AgentsConfig) error {
+func (config *PRLifecycleConfig) ValidateAgentReferences(agents AgentsConfig) error {
 	known := make(map[string]struct{}, len(agents.List)+1)
 	if len(agents.List) == 0 {
 		known["main"] = struct{}{}
@@ -442,7 +453,7 @@ func CanonicalPRLifecycleRepositoryIdentity(providerOrigin, repositoryID string)
 	return strings.ToLower(strings.TrimRight(providerOrigin, "/") + "|" + repositoryID), nil
 }
 
-func (config PRLifecycleConfig) WorkflowConfigurationForRepository(
+func (config *PRLifecycleConfig) WorkflowConfigurationForRepository(
 	providerOrigin, repositoryID string,
 ) (string, PRLifecycleWorkflowConfiguration, string, error) {
 	if err := config.Validate(); err != nil {

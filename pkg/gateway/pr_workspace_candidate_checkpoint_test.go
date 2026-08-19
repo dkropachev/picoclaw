@@ -147,7 +147,11 @@ func TestPRWorkspaceCandidateCheckpointRestoresExactCandidateAfterManagerRestart
 	if err = runtime.saveCandidateCheckpoint(workspaceID, active); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(workspace.Path, "README.md"), []byte("# retained repair\n"), 0o644); err != nil {
+	if err = os.WriteFile(
+		filepath.Join(workspace.Path, "README.md"),
+		[]byte("# retained repair\n"),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err = runtime.capturePartialRepairCandidate(ctx, workspaceID, active); err != nil {
@@ -175,8 +179,12 @@ func TestPRWorkspaceCandidateCheckpointRestoresExactCandidateAfterManagerRestart
 		t.Fatal(err)
 	}
 	restarted := &prWorkspaceImplementationRuntime{
-		manager: restartedManager, checkpoints: restartedStore,
-		candidates: make(map[prWorkspaceCandidateKey]prWorkspaceCandidate), active: make(map[string]prWorkspaceCandidate),
+		manager:     restartedManager,
+		checkpoints: restartedStore,
+		candidates: make(
+			map[prWorkspaceCandidateKey]prWorkspaceCandidate,
+		),
+		active: make(map[string]prWorkspaceCandidate),
 	}
 	restored, found, err := restarted.restoreCheckpointedCandidate(
 		ctx, pin, restartedWorkspace.ID, lineID, charter,
@@ -188,12 +196,20 @@ func TestPRWorkspaceCandidateCheckpointRestoresExactCandidateAfterManagerRestart
 		t.Fatal("restored candidate was not available to validation")
 	}
 
-	if err = os.WriteFile(filepath.Join(workspace.Path, "README.md"), []byte("# out-of-band drift\n"), 0o644); err != nil {
+	if err = os.WriteFile(
+		filepath.Join(workspace.Path, "README.md"),
+		[]byte("# out-of-band drift\n"),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 	drifted := &prWorkspaceImplementationRuntime{
-		manager: restartedManager, checkpoints: restartedStore,
-		candidates: make(map[prWorkspaceCandidateKey]prWorkspaceCandidate), active: make(map[string]prWorkspaceCandidate),
+		manager:     restartedManager,
+		checkpoints: restartedStore,
+		candidates: make(
+			map[prWorkspaceCandidateKey]prWorkspaceCandidate,
+		),
+		active: make(map[string]prWorkspaceCandidate),
 	}
 	if _, _, err = drifted.restoreCheckpointedCandidate(ctx, pin, restartedWorkspace.ID, lineID, charter); err == nil {
 		t.Fatal("restoreCheckpointedCandidate() accepted content drift")
@@ -231,7 +247,11 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(workspace.Path, "README.md"), []byte("# finalized repair\n"), 0o644); err != nil {
+	if err = os.WriteFile(
+		filepath.Join(workspace.Path, "README.md"),
+		[]byte("# finalized repair\n"),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 	candidate, err := manager.SnapshotPinnedCandidate(ctx, gitworkspace.PinnedCandidateRequest{
@@ -319,9 +339,11 @@ func prWorkspaceCandidateCheckpointFixture() prWorkspaceCandidateCheckpoint {
 			Tip: "1111111111111111111111111111111111111111", Tree: "2222222222222222222222222222222222222222",
 		},
 		Candidate: gitworkspace.PinnedCandidate{
-			WorkspaceID: "gw-111111111111", ParentCommit: "1111111111111111111111111111111111111111",
-			Tree: "3333333333333333333333333333333333333333", CandidateDigest: "4444444444444444444444444444444444444444444444444444444444444444",
-			ChangedFiles: 2,
+			WorkspaceID:     "gw-111111111111",
+			ParentCommit:    "1111111111111111111111111111111111111111",
+			Tree:            "3333333333333333333333333333333333333333",
+			CandidateDigest: "4444444444444444444444444444444444444444444444444444444444444444",
+			ChangedFiles:    2,
 		},
 	}
 }

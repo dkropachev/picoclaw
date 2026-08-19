@@ -13,8 +13,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
-const PRLifecycleWorkflowRef = config.PRLifecycleWorkflowRef
-const prLifecycleHardScopeGateRef = "gates.implementation-hard-scope"
+const (
+	PRLifecycleWorkflowRef      = config.PRLifecycleWorkflowRef
+	prLifecycleHardScopeGateRef = "gates.implementation-hard-scope"
+)
 
 // prLifecycleGateWorkflowYAML is the built-in application-owned gate catalog.
 // Each PR lifecycle invocation compiles exactly one referenced gate from this

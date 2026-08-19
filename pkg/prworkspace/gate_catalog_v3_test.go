@@ -8,9 +8,9 @@ import (
 )
 
 func TestPRLifecycleGateCatalogExactlyCoversDecisionPoints(t *testing.T) {
-	catalog, err := PRLifecycleGateCatalog()
-	if err != nil {
-		t.Fatal(err)
+	catalog, catalogErr := PRLifecycleGateCatalog()
+	if catalogErr != nil {
+		t.Fatal(catalogErr)
 	}
 	points := prlifecycle.DecisionPoints()
 	if len(catalog) != len(points) {
@@ -32,9 +32,9 @@ func TestPRLifecycleGateCatalogExactlyCoversDecisionPoints(t *testing.T) {
 
 	// Returned definitions must not expose mutable catalog storage.
 	catalog[0].Gate.Fields[0].Options[0].Label = "mutated"
-	fresh, err := PRLifecycleGateCatalog()
-	if err != nil {
-		t.Fatal(err)
+	fresh, freshErr := PRLifecycleGateCatalog()
+	if freshErr != nil {
+		t.Fatal(freshErr)
 	}
 	if fresh[0].Gate.Fields[0].Options[0].Label == "mutated" {
 		t.Fatal("PRLifecycleGateCatalog returned shared mutable storage")

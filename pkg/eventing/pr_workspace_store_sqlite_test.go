@@ -136,12 +136,21 @@ func TestPRWorkspaceStageEvidenceTransitionUsesCanonicalJSONSemantics(t *testing
 				AcceptanceCriteria: []string{"The stage can finish with identical evidence"},
 				BaseSHA:            "aaaaaaaa", HeadSHA: "bbbbbbbb", CreatedBy: "system", ConfirmedAt: &confirmed,
 			}},
-			AppendStageRuns: []PRStageRun{{
-				PRWorkspaceRecord: PRWorkspaceRecord{ID: stageID}, Phase: PRWorkspaceImplementation,
-				Kind: "implementation", State: PRExecutionWaitingGate, Attempt: 1, CharterID: charterID,
-				WorkspaceVersion: aggregate.Workspace.Version, HeadSHA: "bbbbbbbb",
-				Evidence: json.RawMessage(`{"stage":"implementation_completion","validation":{"run":{"exact":9007199254740993,"checks":[{"name":"go test","status":"passed"}],"metrics":{"semantic_lines":10,"files":1}}}}`),
-			}},
+			AppendStageRuns: []PRStageRun{
+				{
+					PRWorkspaceRecord: PRWorkspaceRecord{ID: stageID},
+					Phase:             PRWorkspaceImplementation,
+					Kind:              "implementation",
+					State:             PRExecutionWaitingGate,
+					Attempt:           1,
+					CharterID:         charterID,
+					WorkspaceVersion:  aggregate.Workspace.Version,
+					HeadSHA:           "bbbbbbbb",
+					Evidence: json.RawMessage(
+						`{"stage":"implementation_completion","validation":{"run":{"exact":9007199254740993,"checks":[{"name":"go test","status":"passed"}],"metrics":{"semantic_lines":10,"files":1}}}}`,
+					),
+				},
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -149,7 +158,9 @@ func TestPRWorkspaceStageEvidenceTransitionUsesCanonicalJSONSemantics(t *testing
 
 	stage := created.Aggregate.StageRuns[0]
 	stage.State, stage.FinishedAt = PRExecutionSucceeded, &now
-	stage.Evidence = json.RawMessage(`{"validation":{"run":{"metrics":{"files":1,"semantic_lines":10},"checks":[{"status":"passed","name":"go test"}],"exact":9007199254740993}},"stage":"implementation_completion"}`)
+	stage.Evidence = json.RawMessage(
+		`{"validation":{"run":{"metrics":{"files":1,"semantic_lines":10},"checks":[{"status":"passed","name":"go test"}],"exact":9007199254740993}},"stage":"implementation_completion"}`,
+	)
 	transitioned, err := store.ApplyPRWorkspacePatch(context.Background(), PRWorkspacePatchMutation{
 		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: 2,
 		RequestID: "req_stage_evidence_canonical_transition",
@@ -159,7 +170,9 @@ func TestPRWorkspaceStageEvidenceTransitionUsesCanonicalJSONSemantics(t *testing
 	require.Equal(t, PRExecutionSucceeded, transitioned.Aggregate.StageRuns[0].State)
 
 	changed := transitioned.Aggregate.StageRuns[0]
-	changed.Evidence = json.RawMessage(`{"stage":"implementation_completion","validation":{"run":{"exact":9007199254740994,"checks":[{"name":"go test","status":"passed"}],"metrics":{"semantic_lines":10,"files":1}}}}`)
+	changed.Evidence = json.RawMessage(
+		`{"stage":"implementation_completion","validation":{"run":{"exact":9007199254740994,"checks":[{"name":"go test","status":"passed"}],"metrics":{"semantic_lines":10,"files":1}}}}`,
+	)
 	_, err = store.ApplyPRWorkspacePatch(context.Background(), PRWorkspacePatchMutation{
 		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: 3,
 		RequestID: "req_stage_evidence_semantic_change",
@@ -247,13 +260,21 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 			AppliesToReview: true, AppliesToImplement: true, CharterID: charterID,
 			HeadSHA: "bbbbbbbb",
 		}},
-		AppendLessons: []PRRepositoryLesson{{
-			PRWorkspaceRecord: PRWorkspaceRecord{ID: "prl_00000000000000000000000000000001"},
-			RepositoryID:      "repo-42", Status: PRRecordActive, Kind: "scope",
-			Content: "Lock owner is local to pkg/race", SourceCorrectionID: correctionID,
-			ApplicableTypes: []PRType{PRTypeFix}, ApplicablePhases: []PRWorkspacePhase{PRWorkspaceReview, PRWorkspaceImplementation},
-			ConfirmedBy: "octo",
-		}},
+		AppendLessons: []PRRepositoryLesson{
+			{
+				PRWorkspaceRecord:  PRWorkspaceRecord{ID: "prl_00000000000000000000000000000001"},
+				RepositoryID:       "repo-42",
+				Status:             PRRecordActive,
+				Kind:               "scope",
+				Content:            "Lock owner is local to pkg/race",
+				SourceCorrectionID: correctionID,
+				ApplicableTypes: []PRType{
+					PRTypeFix,
+				},
+				ApplicablePhases: []PRWorkspacePhase{PRWorkspaceReview, PRWorkspaceImplementation},
+				ConfirmedBy:      "octo",
+			},
+		},
 		AppendMessages: []PRMessage{{
 			PRWorkspaceRecord: PRWorkspaceRecord{ID: "pms_00000000000000000000000000000001"},
 			ConversationID:    conversationID, StageRunID: stageID, FindingID: findingID,
@@ -302,12 +323,22 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 			PinnedPolicyHash: "policy-hash", SubjectRevision: "subject-v1",
 			PinnedSubject: json.RawMessage(`{"head_sha":"bbbbbbbb"}`), PinnedSubjectHash: "subject-hash",
 			WorkflowRunID: "wr_gate-v3", RuntimePresent: true, CurrentStageID: "",
-			Turns: []PRGateTurn{{
-				StageID: "gate-exec", Kind: "human", Title: "Accept implementation", Status: "answered",
-				GateForm:    json.RawMessage(`{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`),
-				FieldValues: map[string]any{"action": "accept", "note": "validated"}, ActorKind: "human",
-				ExecutionID: "ge_implementation-complete", ActionRevision: "sha256:action-v3", InputHash: "sha256:input-v3",
-			}},
+			Turns: []PRGateTurn{
+				{
+					StageID: "gate-exec",
+					Kind:    "human",
+					Title:   "Accept implementation",
+					Status:  "answered",
+					GateForm: json.RawMessage(
+						`{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`,
+					),
+					FieldValues:    map[string]any{"action": "accept", "note": "validated"},
+					ActorKind:      "human",
+					ExecutionID:    "ge_implementation-complete",
+					ActionRevision: "sha256:action-v3",
+					InputHash:      "sha256:input-v3",
+				},
+			},
 		}},
 		AppendPublications: []PRPublication{{
 			PRWorkspaceRecord: PRWorkspaceRecord{ID: "ppb_00000000000000000000000000000001"},
@@ -359,15 +390,25 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 	assert.Equal(t, "sha256:workflow-v3", result.Aggregate.GateRuns[0].WorkflowRevision)
 	assert.Equal(t, "gates.implementation-complete", result.Aggregate.GateRuns[0].GateRef)
 	assert.Equal(t, "config-v1", result.Aggregate.GateRuns[0].WorkflowConfigurationRevision)
-	assert.Equal(t, map[string]any{"action": "accept", "note": "validated"}, result.Aggregate.GateRuns[0].Turns[0].FieldValues)
+	assert.Equal(
+		t,
+		map[string]any{"action": "accept", "note": "validated"},
+		result.Aggregate.GateRuns[0].Turns[0].FieldValues,
+	)
 	assert.Equal(t, "human", result.Aggregate.GateRuns[0].Turns[0].ActorKind)
-	assert.JSONEq(t, `{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`, string(result.Aggregate.GateRuns[0].Turns[0].GateForm))
+	assert.JSONEq(
+		t,
+		`{"gate-ref":"gates.implementation-complete","prompt":"Accept implementation?","fields":[]}`,
+		string(result.Aggregate.GateRuns[0].Turns[0].GateForm),
+	)
 	assert.Len(t, result.Aggregate.Publications, 1)
 	assert.Len(t, result.Aggregate.OperationIntents, 1)
 	assert.Len(t, result.Aggregate.Activity, 1)
 	assert.Equal(t, "finding.corrected", result.Aggregate.Activity[0].Kind)
 
-	statePayload, err := json.Marshal(PRWorkspaceStateChange{Phase: PRWorkspaceValidation, ExecutionState: PRExecutionQueued})
+	statePayload, err := json.Marshal(
+		PRWorkspaceStateChange{Phase: PRWorkspaceValidation, ExecutionState: PRExecutionQueued},
+	)
 	require.NoError(t, err)
 	stateResult, err := store.ApplyPRWorkspaceMutation(context.Background(), PRWorkspaceMutation{
 		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: 2,
@@ -382,7 +423,12 @@ func TestPRWorkspacePatchIsAtomicAndReplayReturnsOriginalAggregate(t *testing.T)
 	})
 	require.NoError(t, err)
 	assert.True(t, replay.Replayed)
-	assert.Equal(t, int64(2), replay.Aggregate.Workspace.Version, "replay returns original aggregate, not current state")
+	assert.Equal(
+		t,
+		int64(2),
+		replay.Aggregate.Workspace.Version,
+		"replay returns original aggregate, not current state",
+	)
 	assert.Equal(t, PRWorkspaceImplementation, replay.Aggregate.Workspace.Phase)
 
 	patch.Phase = ptrPRWorkspacePhase(PRWorkspacePublication)

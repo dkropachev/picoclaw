@@ -51,7 +51,12 @@ type prWorkspaceImplementationRuntime struct {
 	active     map[string]prWorkspaceCandidate
 }
 
-func newPRWorkspaceImplementationRuntime(loop *agent.AgentLoop, ci *localci.Runner, agentID string, acquire eventAutomationRuntimeAcquire) (*prWorkspaceImplementationRuntime, error) {
+func newPRWorkspaceImplementationRuntime(
+	loop *agent.AgentLoop,
+	ci *localci.Runner,
+	agentID string,
+	acquire eventAutomationRuntimeAcquire,
+) (*prWorkspaceImplementationRuntime, error) {
 	if loop == nil || ci == nil || agentID == "" {
 		return nil, errors.New("PR workspace implementation runtime is incomplete")
 	}
@@ -73,7 +78,10 @@ func newPRWorkspaceImplementationRuntime(loop *agent.AgentLoop, ci *localci.Runn
 	}, nil
 }
 
-func (runtime *prWorkspaceImplementationRuntime) Repair(ctx context.Context, request prworkspace.RepairRequest) (repairResult prworkspace.RepairResult, repairErr error) {
+func (runtime *prWorkspaceImplementationRuntime) Repair(
+	ctx context.Context,
+	request prworkspace.RepairRequest,
+) (repairResult prworkspace.RepairResult, repairErr error) {
 	defer func() {
 		if repairErr != nil {
 			logger.ErrorCF("pr-workspace", "PR workspace repair failed", map[string]any{
@@ -210,11 +218,14 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(ctx context.Context, req
 	if err != nil {
 		return prworkspace.RepairResult{}, err
 	}
-	review, err := runtime.manager.SnapshotPinnedCandidateReview(leaseCtx, gitworkspace.PinnedCandidateValidationRequest{
-		Pin: pin, WorkspaceID: candidate.WorkspaceID,
-		ExpectedParent: candidate.ParentCommit, ExpectedTree: candidate.Tree,
-		ExpectedCandidateDigest: candidate.CandidateDigest,
-	})
+	review, err := runtime.manager.SnapshotPinnedCandidateReview(
+		leaseCtx,
+		gitworkspace.PinnedCandidateValidationRequest{
+			Pin: pin, WorkspaceID: candidate.WorkspaceID,
+			ExpectedParent: candidate.ParentCommit, ExpectedTree: candidate.Tree,
+			ExpectedCandidateDigest: candidate.CandidateDigest,
+		},
+	)
 	if err != nil {
 		return prworkspace.RepairResult{}, err
 	}
@@ -279,8 +290,8 @@ func (runtime *prWorkspaceImplementationRuntime) capturePartialRepairCandidate(
 
 type prWorkspaceRepairBaselineSnapshotter interface {
 	SnapshotPinnedValidationCandidate(
-		context.Context,
-		gitworkspace.PinnedCandidateRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedCandidateRequest,
 	) (gitworkspace.PinnedCandidate, error)
 }
 
@@ -295,7 +306,10 @@ func snapshotPRWorkspaceRepairBaseline(
 	return manager.SnapshotPinnedValidationCandidate(ctx, request)
 }
 
-func (runtime *prWorkspaceImplementationRuntime) Validate(ctx context.Context, request prworkspace.ValidationRequest) (prworkspace.ValidationRun, error) {
+func (runtime *prWorkspaceImplementationRuntime) Validate(
+	ctx context.Context,
+	request prworkspace.ValidationRequest,
+) (prworkspace.ValidationRun, error) {
 	candidate, ok := runtime.lookup(request.WorkspaceID, request.CandidateSHA)
 	if runtime == nil || runtime.ci == nil || runtime.manager == nil || request.ID == "" || !ok {
 		return prworkspace.ValidationRun{}, errors.New("PR workspace candidate is unavailable")
@@ -326,8 +340,15 @@ func (runtime *prWorkspaceImplementationRuntime) Validate(ctx context.Context, r
 			name = step.StepID
 		}
 		run.Checks = append(run.Checks, prworkspace.ValidationCheck{
-			ID: step.StepID, Name: name, Status: string(step.Status),
-			Summary: publicLocalCISummary(step.Output, step.Status), ExitCode: &exitCode, DurationMS: step.DurationMillis,
+			ID:     step.StepID,
+			Name:   name,
+			Status: string(step.Status),
+			Summary: publicLocalCISummary(
+				step.Output,
+				step.Status,
+			),
+			ExitCode:   &exitCode,
+			DurationMS: step.DurationMillis,
 		})
 	}
 	if err == nil && result.Execution.Status == localci.StatusPassed {
@@ -394,7 +415,11 @@ func publicLocalCIStackStart(value string) int {
 	return -1
 }
 
-func (runtime *prWorkspaceImplementationRuntime) FinalizeRepair(ctx context.Context, workspaceID string, result prworkspace.RepairResult) (prworkspace.RepairResult, error) {
+func (runtime *prWorkspaceImplementationRuntime) FinalizeRepair(
+	ctx context.Context,
+	workspaceID string,
+	result prworkspace.RepairResult,
+) (prworkspace.RepairResult, error) {
 	candidate, ok := runtime.lookup(workspaceID, result.CandidateSHA)
 	if !ok || resultWorkspaceID(candidate) != workspaceID || result.WorkspaceID != candidate.candidate.WorkspaceID {
 		return result, errors.New("PR workspace candidate is unavailable")
@@ -432,7 +457,11 @@ func (runtime *prWorkspaceImplementationRuntime) FinalizeRepair(ctx context.Cont
 		BaseCommit:    candidate.pin.ExpectedCommit, Tip: committed.Commit, Tree: committed.Tree,
 	}
 	candidate.parked = &parked
-	if checkpointErr := runtime.saveFinalizedCandidateCheckpoint(workspaceID, candidate, result.PublicationFence); checkpointErr != nil {
+	if checkpointErr := runtime.saveFinalizedCandidateCheckpoint(
+		workspaceID,
+		candidate,
+		result.PublicationFence,
+	); checkpointErr != nil {
 		return result, checkpointErr
 	}
 	runtime.mu.Lock()
@@ -563,7 +592,9 @@ func (runtime *prWorkspaceImplementationRuntime) restoreCheckpointedCandidate(
 		return prWorkspaceCandidate{}, false, errors.New("PR workspace candidate checkpoint context changed")
 	}
 	if checkpoint.State == prWorkspaceCandidateCheckpointParked {
-		return prWorkspaceCandidate{}, false, errors.New("PR workspace candidate is already finalized and awaits aggregate reconciliation")
+		return prWorkspaceCandidate{}, false, errors.New(
+			"PR workspace candidate is already finalized and awaits aggregate reconciliation",
+		)
 	}
 	var lease gitworkspace.PinnedLineLease
 	if checkpoint.Lease.Version == 0 {
@@ -629,7 +660,10 @@ func (runtime *prWorkspaceImplementationRuntime) lookup(workspaceID, tree string
 	return candidate, ok
 }
 
-func (runtime *prWorkspaceImplementationRuntime) LoadCandidateEvidence(ctx context.Context, repair prworkspace.RepairAttempt) (prworkspace.CandidateEvidence, error) {
+func (runtime *prWorkspaceImplementationRuntime) LoadCandidateEvidence(
+	ctx context.Context,
+	repair prworkspace.RepairAttempt,
+) (prworkspace.CandidateEvidence, error) {
 	if runtime == nil || runtime.manager == nil || repair.PublicationFence == nil || repair.CandidateSHA == "" {
 		return prworkspace.CandidateEvidence{}, errors.New("PR workspace candidate evidence is unavailable")
 	}
@@ -652,8 +686,12 @@ func (runtime *prWorkspaceImplementationRuntime) LoadCandidateEvidence(ctx conte
 	return prworkspace.CandidateEvidence{
 		CandidateSHA: repair.CandidateSHA, CandidateDiff: review.UnifiedDiff,
 		Metrics: prworkspace.CandidateMetrics{
-			Files: len(review.ChangedPaths), SemanticLines: semanticChangedLines(review.UnifiedDiff),
-			Modules: changedPathModules(review.ChangedPaths), ChangedFiles: append([]string(nil), review.ChangedPaths...),
+			Files:         len(review.ChangedPaths),
+			SemanticLines: semanticChangedLines(review.UnifiedDiff),
+			Modules: changedPathModules(
+				review.ChangedPaths,
+			),
+			ChangedFiles: append([]string(nil), review.ChangedPaths...),
 		},
 		EvidenceDigest: review.ReviewDigest,
 	}, nil
@@ -709,11 +747,17 @@ func stablePRWorkspaceCommitIntentID(workspaceID, tree string) string {
 	return "pdcmt_" + hex.EncodeToString(digest[:16])
 }
 
-func (runtime *prWorkspaceImplementationRuntime) PublishBranch(ctx context.Context, request prworkspace.BranchPublicationRequest) (prworkspace.BranchPublicationResult, error) {
+func (runtime *prWorkspaceImplementationRuntime) PublishBranch(
+	ctx context.Context,
+	request prworkspace.BranchPublicationRequest,
+) (prworkspace.BranchPublicationResult, error) {
 	return runtime.publishOrReconcileBranch(ctx, request)
 }
 
-func (runtime *prWorkspaceImplementationRuntime) ReconcileBranch(ctx context.Context, request prworkspace.BranchPublicationRequest) (prworkspace.BranchPublicationResult, bool, error) {
+func (runtime *prWorkspaceImplementationRuntime) ReconcileBranch(
+	ctx context.Context,
+	request prworkspace.BranchPublicationRequest,
+) (prworkspace.BranchPublicationResult, bool, error) {
 	result, err := runtime.publishOrReconcileBranch(ctx, request)
 	if err != nil {
 		return result, false, err
@@ -721,20 +765,31 @@ func (runtime *prWorkspaceImplementationRuntime) ReconcileBranch(ctx context.Con
 	return result, result.ExternalID == request.Repair.CandidateSHA, nil
 }
 
-func (runtime *prWorkspaceImplementationRuntime) publishOrReconcileBranch(ctx context.Context, request prworkspace.BranchPublicationRequest) (prworkspace.BranchPublicationResult, error) {
+func (runtime *prWorkspaceImplementationRuntime) publishOrReconcileBranch(
+	ctx context.Context,
+	request prworkspace.BranchPublicationRequest,
+) (prworkspace.BranchPublicationResult, error) {
 	if runtime == nil || runtime.manager == nil || request.Repair.PublicationFence == nil ||
 		request.Provider.HeadSHA == "" || request.Repair.CandidateSHA == "" {
 		return prworkspace.BranchPublicationResult{}, errors.New("PR branch publisher is unavailable")
 	}
 	fence := request.Repair.PublicationFence
 	result, err := runtime.manager.PushPinnedLine(ctx, gitworkspace.PinnedLinePushRequest{
-		Repository: strings.TrimSuffix(request.Provider.ProviderOrigin, "/") + "/" + request.Provider.HeadRepository + ".git",
-		SourceRef:  request.Provider.HeadRef, ExpectedSourceCommit: fence.BaseCommit,
-		WorkspaceID: fence.GitWorkspaceID, LineID: fence.LineID,
-		ExpectedVersion: fence.LineVersion, ExpectedMutationEpoch: fence.MutationEpoch,
-		ExpectedParkIntentID: fence.ParkIntentID, ExpectedBase: fence.BaseCommit,
-		ExpectedTip: fence.Tip, ExpectedTree: fence.Tree,
-		ExpectedRemoteTip: request.Provider.HeadSHA,
+		Repository: strings.TrimSuffix(
+			request.Provider.ProviderOrigin,
+			"/",
+		) + "/" + request.Provider.HeadRepository + ".git",
+		SourceRef:             request.Provider.HeadRef,
+		ExpectedSourceCommit:  fence.BaseCommit,
+		WorkspaceID:           fence.GitWorkspaceID,
+		LineID:                fence.LineID,
+		ExpectedVersion:       fence.LineVersion,
+		ExpectedMutationEpoch: fence.MutationEpoch,
+		ExpectedParkIntentID:  fence.ParkIntentID,
+		ExpectedBase:          fence.BaseCommit,
+		ExpectedTip:           fence.Tip,
+		ExpectedTree:          fence.Tree,
+		ExpectedRemoteTip:     request.Provider.HeadSHA,
 	})
 	publication := prworkspace.BranchPublicationResult{
 		ExternalID: result.RemoteTip, ExternalURL: prWorkspacePullURL(request.Provider),

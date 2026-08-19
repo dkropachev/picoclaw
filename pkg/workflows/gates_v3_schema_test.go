@@ -9,7 +9,7 @@ import (
 )
 
 func TestGateV3WorkflowParsesAndValidatesCanonicalContract(t *testing.T) {
-	workflow, err := Parse([]byte(`
+	workflow, parseErr := Parse([]byte(`
 name: Pull request lifecycle
 gates:
   charter-decision:
@@ -42,8 +42,8 @@ jobs:
         with:
           gate-ref: gates.charter-decision
 `))
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
+	if parseErr != nil {
+		t.Fatalf("Parse() error = %v", parseErr)
 	}
 	if err := Validate(workflow); err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -107,7 +107,11 @@ func TestGateV3YAMLRejectsRemovedAndDynamicFields(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := Parse([]byte(test.yaml + "\njobs: {main: {runs-on: picoclaw, steps: [{uses: gate/exec, with: {gate-ref: gates.decision}}]}}\n"))
+			_, err := Parse(
+				[]byte(
+					test.yaml + "\njobs: {main: {runs-on: picoclaw, steps: [{uses: gate/exec, with: {gate-ref: gates.decision}}]}}\n",
+				),
+			)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Parse() error = %v, want %q", err, test.want)
 			}
@@ -137,8 +141,10 @@ func TestGateV3ValidationRejectsInvalidReferencesAndFields(t *testing.T) {
 		{name: "missing ref", gateID: "decision", gate: validGate, ref: "gates.other", want: "referenced gate does not exist"},
 		{name: "bad cardinality", gateID: "decision", gate: GateDefinition{
 			Prompt: "Decide",
-			Fields: []GateField{{ID: "action", Type: GateFieldSelect, Label: "Action", MaxSelections: 2,
-				Options: []GateFieldOption{{ID: "approve", Label: "Approve"}}}},
+			Fields: []GateField{{
+				ID: "action", Type: GateFieldSelect, Label: "Action", MaxSelections: 2,
+				Options: []GateFieldOption{{ID: "approve", Label: "Approve"}},
+			}},
 		}, ref: "gates.decision", want: "select cardinality"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

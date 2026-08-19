@@ -31,7 +31,7 @@ compatible with low-cost hardware.
 | `FR-PORT-001` | MUST | Makefile builds produce core binaries for supported Linux, Darwin, Windows, ARM, MIPS, RISC-V, and LoongArch targets. | Portability is a project-level promise. |
 | `FR-PORT-002` | MUST | Launcher builds include frontend assets and backend binary packaging for supported desktop targets. | Web UI distribution must be reproducible. |
 | `FR-PORT-003` | MUST | Updater downloads release assets, validates target platform naming, retries transient HTTP failures, and reports clear status. | Updates must be safe and diagnosable. |
-| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Coverage-delta execution clears inherited `PICOCLAW_HOME` and gives each compared Git ref a distinct fallback `HOME` for generation, package discovery, Go tests, and integration suites. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests, and tests that intentionally override `HOME` must retain fallback-home semantics. |
+| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Coverage-delta execution clears inherited `PICOCLAW_HOME`, gives each compared Git ref a distinct fallback `HOME` for generation, package discovery, Go tests, and integration suites, and compares uncovered-statement debt rather than percentage or covered-statement count. Global debt cannot increase, impacted feature debt retains a ten-statement tolerance, and deletion is not a regression when it adds no uncovered debt. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests, tests that intentionally override `HOME` must retain fallback-home semantics, and structural removals must not be mistaken for lost test coverage. |
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 
 ## Data And State Model
@@ -81,7 +81,10 @@ Owns: TEST scripts/portability_requirements_test.go *
    record metrics, and avoid importing benchmark behavior into runtime packages.
 6. Coverage-delta creates separate temporary runtime homes for the base and head
    worktrees, clears inherited `PICOCLAW_HOME`, and replaces inherited `HOME`
-   before executing code from either ref.
+   before executing code from either ref. It then compares each scoped profile's
+   uncovered-statement debt (`total statements - covered statements`), allowing
+   code removal when debt does not grow even if percentage or covered count
+   falls.
 
 ## Cross-Feature Behavior
 
@@ -99,6 +102,9 @@ credentialed release publishing.
 - Android and WhatsApp-native variants remain build-tag controlled.
 - Coverage comparison does not reuse launcher or test state across refs, even
   when the two revisions use incompatible lock-file or state formats.
+- Coverage comparison fails on any global uncovered-debt increase or an impacted
+  feature increase beyond ten statements; a percentage or covered-count drop
+  caused only by deleting code is not a failure.
 
 ## Acceptance Evidence
 

@@ -93,7 +93,7 @@ type ReviewWorkflowHandoff struct {
 // reusable children cannot yet suspend on PR Gates. This executor owns no PR
 // phase transitions, implementation selection, repair, or publication logic.
 type ReviewWorkflowExecutor interface {
-	ExecuteReviewWorkflow(context.Context, ReviewWorkflowRequest) (ReviewWorkflowResult, error)
+	ExecuteReviewWorkflow(ctx context.Context, request ReviewWorkflowRequest) (ReviewWorkflowResult, error)
 }
 
 type isolatedReviewWorkflow struct {

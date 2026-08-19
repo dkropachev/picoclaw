@@ -20,13 +20,34 @@ const (
 // interface here makes worker ordering, paging, and retry identities directly
 // testable without weakening the domain service API.
 type prWorkspacePublicationService interface {
-	List(context.Context, prworkspace.ListFilter) (prworkspace.Page, error)
-	Get(context.Context, string) (prworkspace.Aggregate, error)
-	DispatchIssuePublication(context.Context, prworkspace.IssuePublisher, prworkspace.DispatchIssuePublicationRequest) (prworkspace.Aggregate, error)
-	ReconcileIssuePublication(context.Context, prworkspace.IssuePublisher, prworkspace.ReconcileIssuePublicationRequest) (prworkspace.Aggregate, error)
-	DispatchReviewPublication(context.Context, prworkspace.ReviewPublisher, prworkspace.DispatchPhasePublicationRequest) (prworkspace.Aggregate, error)
-	DispatchBranchPublication(context.Context, prworkspace.BranchPublisher, prworkspace.DispatchPhasePublicationRequest) (prworkspace.Aggregate, error)
-	ReconcilePhasePublication(context.Context, prworkspace.ReviewPublisher, prworkspace.BranchPublisher, prworkspace.ReconcilePhasePublicationRequest) (prworkspace.Aggregate, error)
+	List(ctx context.Context, filter prworkspace.ListFilter) (prworkspace.Page, error)
+	Get(ctx context.Context, workspaceID string) (prworkspace.Aggregate, error)
+	DispatchIssuePublication(
+		ctx context.Context,
+		publisher prworkspace.IssuePublisher,
+		request prworkspace.DispatchIssuePublicationRequest,
+	) (prworkspace.Aggregate, error)
+	ReconcileIssuePublication(
+		ctx context.Context,
+		publisher prworkspace.IssuePublisher,
+		request prworkspace.ReconcileIssuePublicationRequest,
+	) (prworkspace.Aggregate, error)
+	DispatchReviewPublication(
+		ctx context.Context,
+		publisher prworkspace.ReviewPublisher,
+		request prworkspace.DispatchPhasePublicationRequest,
+	) (prworkspace.Aggregate, error)
+	DispatchBranchPublication(
+		ctx context.Context,
+		publisher prworkspace.BranchPublisher,
+		request prworkspace.DispatchPhasePublicationRequest,
+	) (prworkspace.Aggregate, error)
+	ReconcilePhasePublication(
+		ctx context.Context,
+		reviewPublisher prworkspace.ReviewPublisher,
+		branchPublisher prworkspace.BranchPublisher,
+		request prworkspace.ReconcilePhasePublicationRequest,
+	) (prworkspace.Aggregate, error)
 }
 
 type prWorkspacePublicationWorker struct {
@@ -104,17 +125,18 @@ func (worker *prWorkspacePublicationWorker) ProcessOne(ctx context.Context) (boo
 				}
 				switch publication.State {
 				case prworkspace.ExecutionRunning:
-					if publication.UpdatedAt.IsZero() || now.Before(publication.UpdatedAt.Add(prWorkspacePublicationRecoveryDelay)) {
+					if publication.UpdatedAt.IsZero() ||
+						now.Before(publication.UpdatedAt.Add(prWorkspacePublicationRecoveryDelay)) {
 						continue
 					}
 					if interrupted == nil || publicationWorkBefore(candidate, *interrupted) {
-						copy := candidate
-						interrupted = &copy
+						candidateCopy := candidate
+						interrupted = &candidateCopy
 					}
 				case prworkspace.ExecutionQueued:
 					if queued == nil || publicationWorkBefore(candidate, *queued) {
-						copy := candidate
-						queued = &copy
+						candidateCopy := candidate
+						queued = &candidateCopy
 					}
 				}
 			}
@@ -169,7 +191,10 @@ func publicationWorkBefore(left, right prWorkspacePublicationWork) bool {
 	return left.publication.ID < right.publication.ID
 }
 
-func (worker *prWorkspacePublicationWorker) dispatch(ctx context.Context, work prWorkspacePublicationWork) (bool, error) {
+func (worker *prWorkspacePublicationWorker) dispatch(
+	ctx context.Context,
+	work prWorkspacePublicationWork,
+) (bool, error) {
 	requestID := prWorkspacePublicationRequestID("dispatch", work.publication)
 	var err error
 	switch work.publication.Kind {
@@ -179,35 +204,55 @@ func (worker *prWorkspacePublicationWorker) dispatch(ctx context.Context, work p
 			ExpectedVersion: work.version, RequestID: requestID,
 		})
 	case prworkspace.PublicationGitHubReview:
-		_, err = worker.service.DispatchReviewPublication(ctx, worker.review, prworkspace.DispatchPhasePublicationRequest{
-			WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
-			ExpectedVersion: work.version, RequestID: requestID,
-		})
+		_, err = worker.service.DispatchReviewPublication(
+			ctx,
+			worker.review,
+			prworkspace.DispatchPhasePublicationRequest{
+				WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
+				ExpectedVersion: work.version, RequestID: requestID,
+			},
+		)
 	case prworkspace.PublicationBranchPush:
-		_, err = worker.service.DispatchBranchPublication(ctx, worker.branch, prworkspace.DispatchPhasePublicationRequest{
-			WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
-			ExpectedVersion: work.version, RequestID: requestID,
-		})
+		_, err = worker.service.DispatchBranchPublication(
+			ctx,
+			worker.branch,
+			prworkspace.DispatchPhasePublicationRequest{
+				WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
+				ExpectedVersion: work.version, RequestID: requestID,
+			},
+		)
 	default:
 		return false, nil
 	}
 	return true, publicationWorkerError(err)
 }
 
-func (worker *prWorkspacePublicationWorker) reconcile(ctx context.Context, work prWorkspacePublicationWork) (bool, error) {
+func (worker *prWorkspacePublicationWorker) reconcile(
+	ctx context.Context,
+	work prWorkspacePublicationWork,
+) (bool, error) {
 	requestID := prWorkspacePublicationRequestID("reconcile", work.publication)
 	var err error
 	switch work.publication.Kind {
 	case prworkspace.PublicationGitHubIssue:
-		_, err = worker.service.ReconcileIssuePublication(ctx, worker.issue, prworkspace.ReconcileIssuePublicationRequest{
-			WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
-			ExpectedVersion: work.version, RequestID: requestID,
-		})
+		_, err = worker.service.ReconcileIssuePublication(
+			ctx,
+			worker.issue,
+			prworkspace.ReconcileIssuePublicationRequest{
+				WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
+				ExpectedVersion: work.version, RequestID: requestID,
+			},
+		)
 	case prworkspace.PublicationGitHubReview, prworkspace.PublicationBranchPush:
-		_, err = worker.service.ReconcilePhasePublication(ctx, worker.review, worker.branch, prworkspace.ReconcilePhasePublicationRequest{
-			WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
-			ExpectedVersion: work.version, RequestID: requestID,
-		})
+		_, err = worker.service.ReconcilePhasePublication(
+			ctx,
+			worker.review,
+			worker.branch,
+			prworkspace.ReconcilePhasePublicationRequest{
+				WorkspaceID: work.workspaceID, PublicationID: work.publication.ID,
+				ExpectedVersion: work.version, RequestID: requestID,
+			},
+		)
 	default:
 		return false, nil
 	}

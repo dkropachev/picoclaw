@@ -637,7 +637,7 @@ func validateWorkflowGateConditionPaths(condition string, inputs map[string]any)
 func workflowGateConditionPaths(expression string) []string {
 	expression = strings.TrimSpace(expression)
 	if terms, ok := splitExpressionLogicalAND(expression); ok {
-		var paths []string
+		paths := make([]string, 0, len(terms))
 		for _, term := range terms {
 			paths = append(paths, workflowGateConditionPaths(term)...)
 		}

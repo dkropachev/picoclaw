@@ -17,22 +17,30 @@ func findingLine(value int) *int { return &value }
 func liveInitialReviewFindings() []AgentFinding {
 	return []AgentFinding{
 		{
-			Title: "Negative hours and hour 24 are accepted", File: "greeting/time_aware.go", Line: findingLine(11),
+			Title:          "Negative hours and hour 24 are accepted",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(11),
 			Message:        "The validity check rejects only values greater than 24. It therefore treats every negative hour and hour 24 as valid, contrary to the required inclusive range 0 through 23.",
 			CharterClauses: []string{validHourClause, testClause},
 		},
 		{
-			Title: "Period boundary hours 12 and 18 are misclassified", File: "greeting/time_aware.go", Line: findingLine(16),
+			Title:          "Period boundary hours 12 and 18 are misclassified",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(16),
 			Message:        "The comparisons include 12 in morning and 18 in afternoon. The charter requires afternoon to begin at 12 and evening to begin at 18.",
 			CharterClauses: []string{periodClause, testClause},
 		},
 		{
-			Title: "Blank names are not rendered as stranger", File: "greeting/time_aware.go", Line: findingLine(21),
+			Title:          "Blank names are not rendered as stranger",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(21),
 			Message:        "TimeAware trims the supplied name but directly concatenates the trimmed value. It does not replace an empty result with stranger as required.",
 			CharterClauses: []string{blankNameClause},
 		},
 		{
-			Title: "Required boundary and invalid-input test coverage is missing", File: "greeting/time_aware_test.go", Line: findingLine(8),
+			Title:          "Required boundary and invalid-input test coverage is missing",
+			File:           "greeting/time_aware_test.go",
+			Line:           findingLine(8),
 			Message:        "The test suite exercises only typical valid hours 9, 15, and 21 and one invalid value, 25. It does not exercise any period transition, the valid endpoints, negative invalid input, hour 24, trimming, or blank-name fallback.",
 			CharterClauses: []string{testClause, validHourClause, periodClause, blankNameClause},
 		},
@@ -42,22 +50,30 @@ func liveInitialReviewFindings() []AgentFinding {
 func liveFirstNudgeFindings() []AgentFinding {
 	return []AgentFinding{
 		{
-			Title: "Hour validation accepts negative hours and hour 24", File: "greeting/time_aware.go", Line: findingLine(12),
+			Title:          "Hour validation accepts negative hours and hour 24",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(12),
 			Message:        "The validation rejects only values greater than 24, so negative hours and 24 return successful greetings instead of ErrInvalidHour.",
 			CharterClauses: []string{validHourClause, testClause},
 		},
 		{
-			Title: "Noon and 18:00 use the preceding greeting periods", File: "greeting/time_aware.go", Line: findingLine(17),
+			Title:          "Noon and 18:00 use the preceding greeting periods",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(17),
 			Message:        "The inclusive comparisons assign hour 12 to morning and hour 18 to afternoon, contrary to the specified period boundaries.",
 			CharterClauses: []string{periodClause, testClause},
 		},
 		{
-			Title: "Blank names do not fall back to stranger", File: "greeting/time_aware.go", Line: findingLine(23),
+			Title:          "Blank names do not fall back to stranger",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(23),
 			Message:        "The name is trimmed but the result is concatenated directly, without replacing an empty trimmed value with stranger.",
 			CharterClauses: []string{blankNameClause},
 		},
 		{
-			Title: "Required boundary and invalid-input test coverage is missing", File: "greeting/time_aware_test.go", Line: findingLine(12),
+			Title:          "Required boundary and invalid-input test coverage is missing",
+			File:           "greeting/time_aware_test.go",
+			Line:           findingLine(12),
 			Message:        "The new tests cover only typical interior hours and one invalid high value; they do not exercise any period boundary, the valid-range endpoints, negative input, or hour 24.",
 			CharterClauses: []string{testClause, validHourClause},
 		},
@@ -67,17 +83,23 @@ func liveFirstNudgeFindings() []AgentFinding {
 func liveSecondNudgeFindings() []AgentFinding {
 	return []AgentFinding{
 		{
-			Title: "Hour validation accepts 24 and all negative values", File: "greeting/time_aware.go", Line: findingLine(11),
+			Title:          "Hour validation accepts 24 and all negative values",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(11),
 			Message:        "The validation rejects only hours greater than 24, so invalid inputs such as -1 and 24 proceed as successful greetings.",
 			CharterClauses: []string{validHourClause, testClause},
 		},
 		{
-			Title: "Noon and 18:00 are assigned to the wrong greeting periods", File: "greeting/time_aware.go", Line: findingLine(16),
+			Title:          "Noon and 18:00 are assigned to the wrong greeting periods",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(16),
 			Message:        "The inclusive comparisons make hour 12 morning and hour 18 afternoon, contrary to the specified ranges.",
 			CharterClauses: []string{periodClause, testClause},
 		},
 		{
-			Title: "Blank names are rendered as empty instead of stranger", File: "greeting/time_aware.go", Line: findingLine(21),
+			Title:          "Blank names are rendered as empty instead of stranger",
+			File:           "greeting/time_aware.go",
+			Line:           findingLine(21),
 			Message:        "The result directly concatenates the trimmed name without substituting stranger when trimming produces an empty string.",
 			CharterClauses: []string{blankNameClause},
 		},
@@ -122,16 +144,25 @@ func TestSemanticFindingSetPreservesRepeatedDefectAtDifferentLocations(t *testin
 	seen := newSemanticFindingSet()
 	repeated := []AgentFinding{
 		{
-			Title: "Nil input panics", File: "pkg/parse.go", Line: findingLine(10),
-			Message: "A nil request is dereferenced before validation.", CharterClauses: []string{"Invalid requests return an error."},
+			Title:          "Nil input panics",
+			File:           "pkg/parse.go",
+			Line:           findingLine(10),
+			Message:        "A nil request is dereferenced before validation.",
+			CharterClauses: []string{"Invalid requests return an error."},
 		},
 		{
-			Title: "Nil input panics", File: "pkg/parse.go", Line: findingLine(90),
-			Message: "A nil request is dereferenced before validation.", CharterClauses: []string{"Invalid requests return an error."},
+			Title:          "Nil input panics",
+			File:           "pkg/parse.go",
+			Line:           findingLine(90),
+			Message:        "A nil request is dereferenced before validation.",
+			CharterClauses: []string{"Invalid requests return an error."},
 		},
 		{
-			Title: "Nil input panics", File: "pkg/other.go", Line: findingLine(10),
-			Message: "A nil request is dereferenced before validation.", CharterClauses: []string{"Invalid requests return an error."},
+			Title:          "Nil input panics",
+			File:           "pkg/other.go",
+			Line:           findingLine(10),
+			Message:        "A nil request is dereferenced before validation.",
+			CharterClauses: []string{"Invalid requests return an error."},
 		},
 	}
 	if novel, duplicates := countNovelFindings(repeated, seen); novel != len(repeated) || duplicates != 0 {

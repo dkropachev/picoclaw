@@ -207,7 +207,14 @@ func (controller AIController) RunReviewNudge(
 	}
 	strategy := SelectNudgeStrategy(stats)
 	variantOrdinal := nudgeStrategyAttempts(stats, strategy)
-	challenge := controller.planChallenge(ctx, NudgeReviewSearch, strategy, variantOrdinal, bundle, bundle.PriorEvidence)
+	challenge := controller.planChallenge(
+		ctx,
+		NudgeReviewSearch,
+		strategy,
+		variantOrdinal,
+		bundle,
+		bundle.PriorEvidence,
+	)
 	round := ReviewRound{
 		Round: nudgeAttemptCount(stats) + 1, Strategy: strategy, Challenge: challenge.Challenge,
 		VariantDigest: nudgeVariantDigest(NudgeReviewSearch, challenge), State: ExecutionRunning,
@@ -251,10 +258,21 @@ func (controller AIController) RunCompletionAudit(
 	if err != nil {
 		return nil, err
 	}
-	rounds := []CompletionRound{{Initial: true, PromptDigest: initialPrompt.Digest, State: ExecutionSucceeded, Result: initial, Source: initial.source}}
+	rounds := []CompletionRound{
+		{
+			Initial:      true,
+			PromptDigest: initialPrompt.Digest,
+			State:        ExecutionSucceeded,
+			Result:       initial,
+			Source:       initial.source,
+		},
+	}
 	seen := findingFingerprintSet(nil)
 	seedSeenFindings(seen, bundle.Findings)
-	novel, duplicates := countNovelCompletionFindings(append(append([]CompletionFinding{}, initial.Missing...), initial.OutOfScope...), seen)
+	novel, duplicates := countNovelCompletionFindings(
+		append(append([]CompletionFinding{}, initial.Missing...), initial.OutOfScope...),
+		seen,
+	)
 	rounds[0].NovelFindings = novel
 	rounds[0].DuplicateCount = duplicates
 	previousNovel := novel > 0
@@ -300,7 +318,14 @@ func (controller AIController) RunCompletionNudge(
 	}
 	strategy := SelectNudgeStrategy(stats)
 	variantOrdinal := nudgeStrategyAttempts(stats, strategy)
-	challenge := controller.planChallenge(ctx, NudgeImplementationDone, strategy, variantOrdinal, bundle, bundle.PriorEvidence)
+	challenge := controller.planChallenge(
+		ctx,
+		NudgeImplementationDone,
+		strategy,
+		variantOrdinal,
+		bundle,
+		bundle.PriorEvidence,
+	)
 	round := CompletionRound{
 		Round: nudgeAttemptCount(stats) + 1, Strategy: strategy, Challenge: challenge.Challenge,
 		VariantDigest: nudgeVariantDigest(NudgeImplementationDone, challenge), State: ExecutionRunning,
@@ -325,7 +350,10 @@ func (controller AIController) RunCompletionNudge(
 	return round, nil
 }
 
-func (controller AIController) RunScopeAudit(ctx context.Context, bundle PRContextBundle) (ScopeAuditPass, string, error) {
+func (controller AIController) RunScopeAudit(
+	ctx context.Context,
+	bundle PRContextBundle,
+) (ScopeAuditPass, string, error) {
 	if controller.Runner == nil {
 		return ScopeAuditPass{}, "", errors.New("isolated AI runner is required")
 	}
@@ -353,7 +381,12 @@ func (controller AIController) RunScopeAudit(ctx context.Context, bundle PRConte
 	return result, prompt.Digest, nil
 }
 
-func (controller AIController) runReview(ctx context.Context, operation string, prompt CompiledPrompt, workspaceID string) (ReviewPass, error) {
+func (controller AIController) runReview(
+	ctx context.Context,
+	operation string,
+	prompt CompiledPrompt,
+	workspaceID string,
+) (ReviewPass, error) {
 	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: operation, SystemPrompt: prompt.SystemPrompt, UserPrompt: prompt.UserPrompt,
 		Schema: reviewSchema(), SourceExecutionID: sourceAIExecutionID(workspaceID, operation, prompt.Digest),
@@ -375,7 +408,12 @@ func (controller AIController) runReview(ctx context.Context, operation string, 
 	return result, nil
 }
 
-func (controller AIController) runCompletion(ctx context.Context, operation string, prompt CompiledPrompt, workspaceID string) (CompletionPass, error) {
+func (controller AIController) runCompletion(
+	ctx context.Context,
+	operation string,
+	prompt CompiledPrompt,
+	workspaceID string,
+) (CompletionPass, error) {
 	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: operation, SystemPrompt: prompt.SystemPrompt, UserPrompt: prompt.UserPrompt,
 		Schema: completionSchema(), SourceExecutionID: sourceAIExecutionID(workspaceID, operation, prompt.Digest),
@@ -411,7 +449,9 @@ func (controller AIController) runCompletion(ctx context.Context, operation stri
 	}
 	for _, finding := range result.Missing {
 		if !finding.TypeCompatible || finding.ScopeDistance != ScopeExact {
-			return CompletionPass{}, errors.New("missing-in-scope list contains work classified outside the charter or PR type")
+			return CompletionPass{}, errors.New(
+				"missing-in-scope list contains work classified outside the charter or PR type",
+			)
 		}
 	}
 	result.source = source
@@ -456,7 +496,14 @@ func aiValueWithoutSource(value map[string]any) map[string]any {
 	return cloned
 }
 
-func (controller AIController) planChallenge(ctx context.Context, stage NudgeStage, strategy NudgeStrategy, variantOrdinal int, bundle PRContextBundle, prior any) NudgeChallenge {
+func (controller AIController) planChallenge(
+	ctx context.Context,
+	stage NudgeStage,
+	strategy NudgeStrategy,
+	variantOrdinal int,
+	bundle PRContextBundle,
+	prior any,
+) NudgeChallenge {
 	request := map[string]any{
 		"stage": stage, "strategy_family": strategy,
 		"charter": bundle.Charter, "prior_rounds": prior, "variant_ordinal": variantOrdinal,
@@ -470,7 +517,8 @@ func (controller AIController) planChallenge(ctx context.Context, stage NudgeSta
 	value, err := controller.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation:    "nudge.plan",
 		SystemPrompt: `Generate one bounded challenge for another isolated agent. Preserve the exact charter and authority. Use durable variant history to explore untried wording and exploit strategies with confirmed delayed rewards. A missing reward, a failed attempt, or zero findings is unresolved and never success. Target a distinct coverage gap. Do not claim findings or request tools. Return only structured output.`,
-		UserPrompt:   string(encoded), Schema: nudgeChallengeSchema(),
+		UserPrompt:   string(encoded),
+		Schema:       nudgeChallengeSchema(),
 	})
 	if err == nil {
 		var result NudgeChallenge
@@ -705,40 +753,98 @@ func reviewSchema() map[string]any {
 
 func completionSchema() map[string]any {
 	return map[string]any{
-		"type": "object", "required": []any{"summary", "complete", "missing_in_scope", "out_of_scope", "coverage"}, "additionalProperties": false,
+		"type":                 "object",
+		"required":             []any{"summary", "complete", "missing_in_scope", "out_of_scope", "coverage"},
+		"additionalProperties": false,
 		"properties": map[string]any{
-			"summary": map[string]any{"type": "string"}, "complete": map[string]any{"type": "boolean"},
-			"missing_in_scope": map[string]any{"type": "array", "maxItems": maxAIReviewFindings, "items": completionFindingSchema()},
-			"out_of_scope":     map[string]any{"type": "array", "maxItems": maxAIReviewFindings, "items": completionFindingSchema()},
-			"coverage":         coverageSchema(),
+			"summary":  map[string]any{"type": "string"},
+			"complete": map[string]any{"type": "boolean"},
+			"missing_in_scope": map[string]any{
+				"type":     "array",
+				"maxItems": maxAIReviewFindings,
+				"items":    completionFindingSchema(),
+			},
+			"out_of_scope": map[string]any{
+				"type":     "array",
+				"maxItems": maxAIReviewFindings,
+				"items":    completionFindingSchema(),
+			},
+			"coverage": coverageSchema(),
 		},
 	}
 }
 
 func nudgeChallengeSchema() map[string]any {
 	return map[string]any{
-		"type": "object", "required": []any{"strategy_family", "coverage_target", "challenge", "expected_new_evidence", "reason_for_selection"}, "additionalProperties": false,
+		"type": "object",
+		"required": []any{
+			"strategy_family",
+			"coverage_target",
+			"challenge",
+			"expected_new_evidence",
+			"reason_for_selection",
+		},
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"strategy_family": map[string]any{"type": "string", "enum": stringValues(nudgeStrategies)},
-			"coverage_target": map[string]any{"type": "string"}, "challenge": map[string]any{"type": "string"},
-			"expected_new_evidence": map[string]any{"type": "string"}, "reason_for_selection": map[string]any{"type": "string"},
+			"coverage_target": map[string]any{"type": "string"},
+			"challenge":       map[string]any{"type": "string"},
+			"expected_new_evidence": map[string]any{
+				"type": "string",
+			},
+			"reason_for_selection": map[string]any{"type": "string"},
 		},
 	}
 }
 
 func scopeAuditSchema() map[string]any {
 	return map[string]any{
-		"type": "object", "required": []any{"changes", "files", "semantic_lines", "modules", "worst_scope_distance", "worst_change_size", "type_compatible", "confidence", "charter_clauses", "explanation"}, "additionalProperties": false,
+		"type": "object",
+		"required": []any{
+			"changes",
+			"files",
+			"semantic_lines",
+			"modules",
+			"worst_scope_distance",
+			"worst_change_size",
+			"type_compatible",
+			"confidence",
+			"charter_clauses",
+			"explanation",
+		},
+		"additionalProperties": false,
 		"properties": map[string]any{
-			"changes":              map[string]any{"type": "array", "maxItems": maxAIReviewFindings, "items": scopeChangeSchema()},
-			"files":                map[string]any{"type": "integer", "minimum": 0},
-			"semantic_lines":       map[string]any{"type": "integer", "minimum": 0},
-			"modules":              map[string]any{"type": "integer", "minimum": 0},
-			"worst_scope_distance": map[string]any{"type": "string", "enum": []any{string(ScopeExact), string(ScopeNecessaryAdjacent), string(ScopeRelatedFollowup), string(ScopeUnrelated)}},
-			"worst_change_size":    map[string]any{"type": "string", "enum": []any{string(ChangeSizeXS), string(ChangeSizeS), string(ChangeSizeM), string(ChangeSizeL)}},
-			"type_compatible":      map[string]any{"type": "boolean"}, "confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"charter_clauses": map[string]any{"type": "array", "maxItems": 128, "items": map[string]any{"type": "string"}},
-			"explanation":     map[string]any{"type": "string"},
+			"changes": map[string]any{
+				"type":     "array",
+				"maxItems": maxAIReviewFindings,
+				"items":    scopeChangeSchema(),
+			},
+			"files":          map[string]any{"type": "integer", "minimum": 0},
+			"semantic_lines": map[string]any{"type": "integer", "minimum": 0},
+			"modules":        map[string]any{"type": "integer", "minimum": 0},
+			"worst_scope_distance": map[string]any{
+				"type": "string",
+				"enum": []any{
+					string(ScopeExact),
+					string(ScopeNecessaryAdjacent),
+					string(ScopeRelatedFollowup),
+					string(ScopeUnrelated),
+				},
+			},
+			"worst_change_size": map[string]any{
+				"type": "string",
+				"enum": []any{string(ChangeSizeXS), string(ChangeSizeS), string(ChangeSizeM), string(ChangeSizeL)},
+			},
+			"type_compatible": map[string]any{
+				"type": "boolean",
+			},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"charter_clauses": map[string]any{
+				"type":     "array",
+				"maxItems": 128,
+				"items":    map[string]any{"type": "string"},
+			},
+			"explanation": map[string]any{"type": "string"},
 		},
 	}
 }
@@ -748,7 +854,10 @@ func completionFindingSchema() map[string]any {
 	required := schema["required"].([]any)
 	schema["required"] = append(required, "presence", "hunk", "module", "semantic_lines")
 	properties := schema["properties"].(map[string]any)
-	properties["presence"] = map[string]any{"type": "string", "enum": []any{string(WorkCandidatePresent), string(WorkFollowUp)}}
+	properties["presence"] = map[string]any{
+		"type": "string",
+		"enum": []any{string(WorkCandidatePresent), string(WorkFollowUp)},
+	}
 	properties["hunk"] = map[string]any{"type": "string"}
 	properties["module"] = map[string]any{"type": "string"}
 	properties["semantic_lines"] = map[string]any{"type": "integer", "minimum": 0}
@@ -757,36 +866,108 @@ func completionFindingSchema() map[string]any {
 
 func scopeChangeSchema() map[string]any {
 	return map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []any{"path", "hunk", "module", "semantic_lines", "presence", "scope_distance", "change_size", "type_compatible", "confidence", "charter_clauses", "explanation"},
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []any{
+			"path",
+			"hunk",
+			"module",
+			"semantic_lines",
+			"presence",
+			"scope_distance",
+			"change_size",
+			"type_compatible",
+			"confidence",
+			"charter_clauses",
+			"explanation",
+		},
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string"}, "hunk": map[string]any{"type": "string"},
-			"module": map[string]any{"type": "string"}, "semantic_lines": map[string]any{"type": "integer", "minimum": 1},
-			"presence":        map[string]any{"type": "string", "enum": []any{string(WorkCandidatePresent)}},
-			"scope_distance":  map[string]any{"type": "string", "enum": []any{string(ScopeExact), string(ScopeNecessaryAdjacent), string(ScopeRelatedFollowup), string(ScopeUnrelated)}},
-			"change_size":     map[string]any{"type": "string", "enum": []any{string(ChangeSizeXS), string(ChangeSizeS), string(ChangeSizeM), string(ChangeSizeL)}},
-			"type_compatible": map[string]any{"type": "boolean"}, "confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"charter_clauses": map[string]any{"type": "array", "maxItems": 128, "items": map[string]any{"type": "string"}},
-			"explanation":     map[string]any{"type": "string"},
+			"path": map[string]any{"type": "string"},
+			"hunk": map[string]any{"type": "string"},
+			"module": map[string]any{
+				"type": "string",
+			},
+			"semantic_lines": map[string]any{"type": "integer", "minimum": 1},
+			"presence":       map[string]any{"type": "string", "enum": []any{string(WorkCandidatePresent)}},
+			"scope_distance": map[string]any{
+				"type": "string",
+				"enum": []any{
+					string(ScopeExact),
+					string(ScopeNecessaryAdjacent),
+					string(ScopeRelatedFollowup),
+					string(ScopeUnrelated),
+				},
+			},
+			"change_size": map[string]any{
+				"type": "string",
+				"enum": []any{string(ChangeSizeXS), string(ChangeSizeS), string(ChangeSizeM), string(ChangeSizeL)},
+			},
+			"type_compatible": map[string]any{
+				"type": "boolean",
+			},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"charter_clauses": map[string]any{
+				"type":     "array",
+				"maxItems": 128,
+				"items":    map[string]any{"type": "string"},
+			},
+			"explanation": map[string]any{"type": "string"},
 		},
 	}
 }
 
 func agentFindingSchema() map[string]any {
 	return map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []any{"severity", "title", "message", "evidence", "impact", "recommendation", "validation", "scope_distance", "change_size", "type_compatible", "scope_confidence", "scope_explanation", "charter_clauses"},
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []any{
+			"severity",
+			"title",
+			"message",
+			"evidence",
+			"impact",
+			"recommendation",
+			"validation",
+			"scope_distance",
+			"change_size",
+			"type_compatible",
+			"scope_confidence",
+			"scope_explanation",
+			"charter_clauses",
+		},
 		"properties": map[string]any{
-			"severity": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"},
-			"file": map[string]any{"type": "string"}, "line": map[string]any{"type": "integer", "minimum": 1},
-			"message": map[string]any{"type": "string"}, "evidence": map[string]any{"type": "string"},
-			"impact": map[string]any{"type": "string"}, "recommendation": map[string]any{"type": "string"},
-			"validation":      map[string]any{"type": "string"},
-			"scope_distance":  map[string]any{"type": "string", "enum": []any{string(ScopeExact), string(ScopeNecessaryAdjacent), string(ScopeRelatedFollowup), string(ScopeUnrelated)}},
-			"change_size":     map[string]any{"type": "string", "enum": []any{string(ChangeSizeXS), string(ChangeSizeS), string(ChangeSizeM), string(ChangeSizeL)}},
-			"type_compatible": map[string]any{"type": "boolean"}, "scope_confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"severity":       map[string]any{"type": "string"},
+			"title":          map[string]any{"type": "string"},
+			"file":           map[string]any{"type": "string"},
+			"line":           map[string]any{"type": "integer", "minimum": 1},
+			"message":        map[string]any{"type": "string"},
+			"evidence":       map[string]any{"type": "string"},
+			"impact":         map[string]any{"type": "string"},
+			"recommendation": map[string]any{"type": "string"},
+			"validation":     map[string]any{"type": "string"},
+			"scope_distance": map[string]any{
+				"type": "string",
+				"enum": []any{
+					string(ScopeExact),
+					string(ScopeNecessaryAdjacent),
+					string(ScopeRelatedFollowup),
+					string(ScopeUnrelated),
+				},
+			},
+			"change_size": map[string]any{
+				"type": "string",
+				"enum": []any{string(ChangeSizeXS), string(ChangeSizeS), string(ChangeSizeM), string(ChangeSizeL)},
+			},
+			"type_compatible": map[string]any{
+				"type": "boolean",
+			},
+			"scope_confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
 			"scope_explanation": map[string]any{"type": "string"},
-			"charter_clauses":   map[string]any{"type": "array", "maxItems": 128, "items": map[string]any{"type": "string"}},
+			"charter_clauses": map[string]any{
+				"type":     "array",
+				"maxItems": 128,
+				"items":    map[string]any{"type": "string"},
+			},
 		},
 	}
 }
@@ -804,7 +985,8 @@ func coverageSchema() map[string]any {
 }
 
 func validAgentScope(distance ScopeDistance, size ChangeSize, confidence float64) bool {
-	validDistance := distance == ScopeExact || distance == ScopeNecessaryAdjacent || distance == ScopeRelatedFollowup || distance == ScopeUnrelated
+	validDistance := distance == ScopeExact || distance == ScopeNecessaryAdjacent || distance == ScopeRelatedFollowup ||
+		distance == ScopeUnrelated
 	validSize := size == ChangeSizeXS || size == ChangeSizeS || size == ChangeSizeM || size == ChangeSizeL
 	return validDistance && validSize && confidence >= 0 && confidence <= 1
 }

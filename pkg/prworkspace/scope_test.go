@@ -22,16 +22,24 @@ func TestClassifyChangeSizeUsesHighestExceededBoundary(t *testing.T) {
 }
 
 func TestDecideScopeNeverBypassesExternalWork(t *testing.T) {
-	if got := DecideScope(ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeS, TypeCompatible: true}); got != ScopeActionProceed {
+	if got := DecideScope(
+		ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeS, TypeCompatible: true},
+	); got != ScopeActionProceed {
 		t.Fatalf("exact small action = %q", got)
 	}
-	if got := DecideScope(ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeM, TypeCompatible: true}); got != ScopeActionGate {
+	if got := DecideScope(
+		ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeM, TypeCompatible: true},
+	); got != ScopeActionGate {
 		t.Fatalf("exact large action = %q", got)
 	}
-	if got := DecideScope(ScopeAssessment{Distance: ScopeNecessaryAdjacent, Size: ChangeSizeXS, TypeCompatible: true}); got != ScopeActionReviseOrDefer {
+	if got := DecideScope(
+		ScopeAssessment{Distance: ScopeNecessaryAdjacent, Size: ChangeSizeXS, TypeCompatible: true},
+	); got != ScopeActionReviseOrDefer {
 		t.Fatalf("adjacent action = %q", got)
 	}
-	if got := DecideScope(ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeXS, TypeCompatible: true}); got != ScopeActionDefer {
+	if got := DecideScope(
+		ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeXS, TypeCompatible: true},
+	); got != ScopeActionDefer {
 		t.Fatalf("follow-up action = %q", got)
 	}
 	if got := DecideScope(ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeXS}); got != ScopeActionReviseOrDefer {

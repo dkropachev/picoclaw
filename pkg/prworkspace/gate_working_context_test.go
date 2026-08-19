@@ -75,7 +75,10 @@ type staleAfterBindGateContext struct {
 	backend *session.JSONLBackend
 }
 
-func (stale staleAfterBindGateContext) Bind(ctx context.Context, request GateWorkingContextRequest) (workflows.ReadOnlySessionRef, error) {
+func (stale staleAfterBindGateContext) Bind(
+	ctx context.Context,
+	request GateWorkingContextRequest,
+) (workflows.ReadOnlySessionRef, error) {
 	ref, err := stale.binder.Bind(ctx, request)
 	if err == nil {
 		stale.backend.AddMessage(ref.Session, "user", "mutation after the exact projection")
@@ -106,7 +109,8 @@ func TestWorkflowGateEvaluatorRejectsWorkingContextChangedBeforeFreeze(t *testin
 		Session: workflows.AgentSessionPrivate, History: "read_only", Cache: "none", Tools: workflows.AgentToolsNone,
 	}
 	configured.WorkflowConfigurations["working"] = config.PRLifecycleWorkflowConfiguration{
-		Name: "Working only", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
+		Name:           "Working only",
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,
 		}},
@@ -133,7 +137,12 @@ func TestWorkflowGateEvaluatorRejectsWorkingContextChangedBeforeFreeze(t *testin
 		t.Fatal(listErr)
 	}
 	if len(runs) != 0 || len(agent.requests) != 0 || len(agent.captures) != 1 {
-		t.Fatalf("stale context effects = runs %d, requests %d, captures %d", len(runs), len(agent.requests), len(agent.captures))
+		t.Fatalf(
+			"stale context effects = runs %d, requests %d, captures %d",
+			len(runs),
+			len(agent.requests),
+			len(agent.captures),
+		)
 	}
 }
 

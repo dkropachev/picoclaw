@@ -101,7 +101,12 @@ func (store *EventingStore) Mutate(ctx context.Context, mutation Mutation) (Muta
 		mutation.ExpectedVersion < 1 || !validRequestID(mutation.RequestID) {
 		return MutationResult{}, ErrInvalid
 	}
-	eventPatch, err := toEventingPatch(mutation.WorkspaceID, mutation.ExpectedVersion, mutation.RequestID, mutation.Patch)
+	eventPatch, err := toEventingPatch(
+		mutation.WorkspaceID,
+		mutation.ExpectedVersion,
+		mutation.RequestID,
+		mutation.Patch,
+	)
 	if err != nil {
 		return MutationResult{}, fmt.Errorf("%w: encode protected finding provenance: %v", ErrInvalid, err)
 	}
@@ -146,7 +151,12 @@ func mapEventingStoreError(err error) error {
 	}
 }
 
-func toEventingPatch(workspaceID string, version int64, requestID string, patch AggregatePatch) (eventing.PRWorkspacePatch, error) {
+func toEventingPatch(
+	workspaceID string,
+	version int64,
+	requestID string,
+	patch AggregatePatch,
+) (eventing.PRWorkspacePatch, error) {
 	result := eventing.PRWorkspacePatch{}
 	if patch.Phase != nil {
 		value := eventing.PRWorkspacePhase(*patch.Phase)
@@ -245,9 +255,14 @@ func toEventingPatch(workspaceID string, version int64, requestID string, patch 
 	}
 	for index, value := range patch.Activity {
 		result.AppendActivity = append(result.AppendActivity, eventing.PRActivity{
-			PRWorkspaceRecord: eventing.PRWorkspaceRecord{ID: stableID("pac_", workspaceID, requestID, fmt.Sprint(index))},
-			Kind:              value.Kind, Actor: value.Actor, Summary: value.Summary,
-			EntityID: value.EntityID, Metadata: value.Metadata,
+			PRWorkspaceRecord: eventing.PRWorkspaceRecord{
+				ID: stableID("pac_", workspaceID, requestID, fmt.Sprint(index)),
+			},
+			Kind:     value.Kind,
+			Actor:    value.Actor,
+			Summary:  value.Summary,
+			EntityID: value.EntityID,
+			Metadata: value.Metadata,
 		})
 	}
 	return result, nil
@@ -275,12 +290,20 @@ func toEventingCharter(value Charter) eventing.PRCharterRevision {
 		status = eventing.PRRecordConfirmed
 	}
 	return eventing.PRCharterRevision{
-		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, value.CreatedAt),
-		Status:            status, Revision: value.Revision, Type: eventing.PRType(value.Type), Goal: value.Goal,
+		PRWorkspaceRecord:  toEventingRecord(value.ID, value.CreatedAt, value.CreatedAt),
+		Status:             status,
+		Revision:           value.Revision,
+		Type:               eventing.PRType(value.Type),
+		Goal:               value.Goal,
 		AcceptanceCriteria: append([]string(nil), value.AcceptanceCriteria...),
 		IncludedAreas:      append([]string(nil), value.IncludedAreas...),
-		Exclusions:         append([]string(nil), value.ExcludedAreas...), NonGoals: append([]string(nil), value.NonGoals...),
-		BaseSHA: value.BaseSHA, HeadSHA: value.HeadSHA, CreatedBy: "prworkspace",
+		Exclusions: append(
+			[]string(nil),
+			value.ExcludedAreas...),
+		NonGoals:    append([]string(nil), value.NonGoals...),
+		BaseSHA:     value.BaseSHA,
+		HeadSHA:     value.HeadSHA,
+		CreatedBy:   "prworkspace",
 		ConfirmedAt: cloneTimePointer(value.ConfirmedAt),
 	}
 }
@@ -299,32 +322,65 @@ func toEventingStageRun(value StageRun, version int64) eventing.PRStageRun {
 		inputVersion = version
 	}
 	return eventing.PRStageRun{
-		PRWorkspaceRecord: toEventingRecord(value.ID, value.StartedAt, timeFromPointer(value.FinishedAt, value.StartedAt)),
-		Phase:             phaseForStage(value.Stage), Kind: value.Stage,
-		State: eventing.PRExecutionState(value.State), Attempt: value.Attempt,
-		CharterID: value.CharterID, WorkspaceVersion: inputVersion, HeadSHA: value.HeadSHA,
-		PromptDigest: value.PromptDigest, Summary: value.Summary, PublicErrorCode: value.PublicError,
-		Evidence:  evidence,
-		StartedAt: started, FinishedAt: cloneTimePointer(value.FinishedAt),
+		PRWorkspaceRecord: toEventingRecord(
+			value.ID,
+			value.StartedAt,
+			timeFromPointer(value.FinishedAt, value.StartedAt),
+		),
+		Phase:            phaseForStage(value.Stage),
+		Kind:             value.Stage,
+		State:            eventing.PRExecutionState(value.State),
+		Attempt:          value.Attempt,
+		CharterID:        value.CharterID,
+		WorkspaceVersion: inputVersion,
+		HeadSHA:          value.HeadSHA,
+		PromptDigest:     value.PromptDigest,
+		Summary:          value.Summary,
+		PublicErrorCode:  value.PublicError,
+		Evidence:         evidence,
+		StartedAt:        started,
+		FinishedAt:       cloneTimePointer(value.FinishedAt),
 	}
 }
 
 func toEventingFinding(value Finding) (eventing.PRFinding, error) {
 	result := eventing.PRFinding{
 		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, value.UpdatedAt),
-		Origin:            string(value.Origin), StageRunID: value.OriginRunID, NudgeRoundID: value.NudgeRoundID,
-		Fingerprint: value.Fingerprint, Severity: value.Severity, Title: value.Title,
-		Message: value.Message, File: value.File, Line: cloneIntPointer(value.Line),
-		Evidence: value.Evidence, Impact: value.Impact, Recommendation: value.Recommendation,
-		Validation: value.Validation, Disposition: eventing.PRFindingDisposition(value.Disposition),
-		ScopeDistance: eventing.PRScopeDistance(value.Scope.Distance), ChangeSize: eventing.PRChangeSize(value.Scope.Size),
-		TypeCompatible: value.Scope.TypeCompatible, ClassificationConf: value.Scope.Confidence,
-		CharterClauses:   append([]string(nil), value.Scope.CharterClauses...),
-		EstimatedMetrics: eventing.PRChangeMetrics{Files: value.Scope.Files, SemanticLines: value.Scope.SemanticLines, Modules: value.Scope.Modules},
-		MetricsEstimated: value.Scope.Estimated, ScopeExplanation: value.Scope.Explanation,
+		Origin:            string(value.Origin),
+		StageRunID:        value.OriginRunID,
+		NudgeRoundID:      value.NudgeRoundID,
+		Fingerprint:       value.Fingerprint,
+		Severity:          value.Severity,
+		Title:             value.Title,
+		Message:           value.Message,
+		File:              value.File,
+		Line:              cloneIntPointer(value.Line),
+		Evidence:          value.Evidence,
+		Impact:            value.Impact,
+		Recommendation:    value.Recommendation,
+		Validation:        value.Validation,
+		Disposition:       eventing.PRFindingDisposition(value.Disposition),
+		ScopeDistance: eventing.PRScopeDistance(
+			value.Scope.Distance,
+		),
+		ChangeSize:         eventing.PRChangeSize(value.Scope.Size),
+		TypeCompatible:     value.Scope.TypeCompatible,
+		ClassificationConf: value.Scope.Confidence,
+		CharterClauses:     append([]string(nil), value.Scope.CharterClauses...),
+		EstimatedMetrics: eventing.PRChangeMetrics{
+			Files:         value.Scope.Files,
+			SemanticLines: value.Scope.SemanticLines,
+			Modules:       value.Scope.Modules,
+		},
+		MetricsEstimated:    value.Scope.Estimated,
+		ScopeExplanation:    value.Scope.Explanation,
 		ScopePresence:       eventing.PRWorkPresence(value.Scope.Presence),
 		ScopeChangeEvidence: toEventingScopeChanges(value.Scope.ChangeEvidence),
-		NudgeReward:         cloneFloatPointer(value.NudgeReward), RewardSource: value.RewardSource, Version: value.Version,
+		NudgeReward: cloneFloatPointer(
+			value.NudgeReward,
+		),
+		RewardSource: value.RewardSource,
+		Version:      value.Version,
 	}
 	if value.source != nil {
 		source := eventing.PRFindingSourceExecution{
@@ -375,11 +431,20 @@ func toEventingLesson(value RepositoryLesson) eventing.PRRepositoryLesson {
 		types = []eventing.PRType{eventing.PRType(value.PRType)}
 	}
 	return eventing.PRRepositoryLesson{
-		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, timeFromPointer(value.RevokedAt, value.CreatedAt)),
-		RepositoryID:      value.RepositoryID, Status: status, Kind: string(value.Kind), Content: value.Text,
-		SourceCorrectionID: value.CorrectionID, ApplicableTypes: types,
-		ApplicablePhases: lessonPhases(value.Applicability), ConfirmedBy: "user",
-		RevokedAt: cloneTimePointer(value.RevokedAt),
+		PRWorkspaceRecord: toEventingRecord(
+			value.ID,
+			value.CreatedAt,
+			timeFromPointer(value.RevokedAt, value.CreatedAt),
+		),
+		RepositoryID:       value.RepositoryID,
+		Status:             status,
+		Kind:               string(value.Kind),
+		Content:            value.Text,
+		SourceCorrectionID: value.CorrectionID,
+		ApplicableTypes:    types,
+		ApplicablePhases:   lessonPhases(value.Applicability),
+		ConfirmedBy:        "user",
+		RevokedAt:          cloneTimePointer(value.RevokedAt),
 	}
 }
 
@@ -424,16 +489,32 @@ func toEventingDeferredGroup(value DeferredGroup) eventing.PRDeferredGroup {
 	}
 	return eventing.PRDeferredGroup{
 		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, value.UpdatedAt),
-		Status:            status, Title: value.Title, Body: value.Body,
-		ScopeDistance: eventing.PRScopeDistance(value.Scope.Distance), ChangeSize: eventing.PRChangeSize(value.Scope.Size),
-		ScopeFiles: value.Scope.Files, ScopeSemanticLines: value.Scope.SemanticLines, ScopeModules: value.Scope.Modules,
-		ScopeEstimated: value.Scope.Estimated, ScopeTypeCompatible: value.Scope.TypeCompatible,
-		ScopeConfidence: value.Scope.Confidence, ScopeCharterClauses: append([]string(nil), value.Scope.CharterClauses...),
-		ScopeExplanation: value.Scope.Explanation, ScopePresence: eventing.PRWorkPresence(value.Scope.Presence),
-		ScopeChangeEvidence: toEventingScopeChanges(value.Scope.ChangeEvidence), Labels: append([]string(nil), value.Labels...),
-		DraftRevision: value.Version, ExternalURL: value.ExistingIssueURL,
-		PublicationID: value.PublicationID, PublicationSuppressed: value.PublicationSuppressed,
-		SuppressionReason: value.SuppressionReason, Version: value.Version,
+		Status:            status,
+		Title:             value.Title,
+		Body:              value.Body,
+		ScopeDistance: eventing.PRScopeDistance(
+			value.Scope.Distance,
+		),
+		ChangeSize:          eventing.PRChangeSize(value.Scope.Size),
+		ScopeFiles:          value.Scope.Files,
+		ScopeSemanticLines:  value.Scope.SemanticLines,
+		ScopeModules:        value.Scope.Modules,
+		ScopeEstimated:      value.Scope.Estimated,
+		ScopeTypeCompatible: value.Scope.TypeCompatible,
+		ScopeConfidence:     value.Scope.Confidence,
+		ScopeCharterClauses: append([]string(nil), value.Scope.CharterClauses...),
+		ScopeExplanation:    value.Scope.Explanation,
+		ScopePresence:       eventing.PRWorkPresence(value.Scope.Presence),
+		ScopeChangeEvidence: toEventingScopeChanges(
+			value.Scope.ChangeEvidence,
+		),
+		Labels:                append([]string(nil), value.Labels...),
+		DraftRevision:         value.Version,
+		ExternalURL:           value.ExistingIssueURL,
+		PublicationID:         value.PublicationID,
+		PublicationSuppressed: value.PublicationSuppressed,
+		SuppressionReason:     value.SuppressionReason,
+		Version:               value.Version,
 	}
 }
 
@@ -446,9 +527,13 @@ func toEventingRepair(value RepairAttempt) eventing.PRRepairAttempt {
 		tipCommit, tree = value.PublicationFence.Tip, value.PublicationFence.Tree
 		fence = &eventing.PRImplementationPublicationFence{
 			GitWorkspaceID: value.PublicationFence.GitWorkspaceID,
-			LineID:         value.PublicationFence.LineID, LineVersion: value.PublicationFence.LineVersion,
-			MutationEpoch: value.PublicationFence.MutationEpoch, ParkIntentID: value.PublicationFence.ParkIntentID,
-			BaseCommit: value.PublicationFence.BaseCommit, Tip: value.PublicationFence.Tip, Tree: value.PublicationFence.Tree,
+			LineID:         value.PublicationFence.LineID,
+			LineVersion:    value.PublicationFence.LineVersion,
+			MutationEpoch:  value.PublicationFence.MutationEpoch,
+			ParkIntentID:   value.PublicationFence.ParkIntentID,
+			BaseCommit:     value.PublicationFence.BaseCommit,
+			Tip:            value.PublicationFence.Tip,
+			Tree:           value.PublicationFence.Tree,
 		}
 	}
 	if baseCommit == "" {
@@ -459,21 +544,49 @@ func toEventingRepair(value RepairAttempt) eventing.PRRepairAttempt {
 		started = cloneTimePointer(&value.StartedAt)
 	}
 	return eventing.PRRepairAttempt{
-		PRWorkspaceRecord: toEventingRecord(value.ID, value.StartedAt, timeFromPointer(value.FinishedAt, value.StartedAt)),
-		StageRunID:        value.StageRunID, State: eventing.PRExecutionState(value.State), Attempt: value.Number,
-		Instruction: value.Instruction, RepairWorkspaceID: value.WorkspaceID, ResultSummary: value.ResultSummary,
-		FindingIDs: append([]string(nil), value.FindingIDs...), GoalDigest: persistenceDigest([]byte(value.Instruction)),
-		BaseCommit: baseCommit, TipCommit: tipCommit, CandidateSHA: value.CandidateSHA, Tree: tree,
+		PRWorkspaceRecord: toEventingRecord(
+			value.ID,
+			value.StartedAt,
+			timeFromPointer(value.FinishedAt, value.StartedAt),
+		),
+		StageRunID:        value.StageRunID,
+		State:             eventing.PRExecutionState(value.State),
+		Attempt:           value.Number,
+		Instruction:       value.Instruction,
+		RepairWorkspaceID: value.WorkspaceID,
+		ResultSummary:     value.ResultSummary,
+		FindingIDs: append(
+			[]string(nil),
+			value.FindingIDs...),
+		GoalDigest:   persistenceDigest([]byte(value.Instruction)),
+		BaseCommit:   baseCommit,
+		TipCommit:    tipCommit,
+		CandidateSHA: value.CandidateSHA,
+		Tree:         tree,
 		ChangedFiles: append([]string(nil), value.ChangedFiles...),
-		Metrics:      eventing.PRChangeMetrics{Files: value.Scope.Files, SemanticLines: value.Scope.SemanticLines, Modules: value.Scope.Modules},
-		ScopeDrift:   value.Scope.Distance != ScopeExact, TypeDrift: !value.Scope.TypeCompatible,
-		ScopeDistance: eventing.PRScopeDistance(value.Scope.Distance), ScopeChangeSize: eventing.PRChangeSize(value.Scope.Size),
-		ScopeEstimated: value.Scope.Estimated, ScopeTypeCompatible: value.Scope.TypeCompatible,
-		ScopeConfidence: value.Scope.Confidence, ScopeCharterClauses: append([]string(nil), value.Scope.CharterClauses...),
-		ScopeExplanation: value.Scope.Explanation, ScopePresence: eventing.PRWorkPresence(value.Scope.Presence),
+		Metrics: eventing.PRChangeMetrics{
+			Files:         value.Scope.Files,
+			SemanticLines: value.Scope.SemanticLines,
+			Modules:       value.Scope.Modules,
+		},
+		ScopeDrift: value.Scope.Distance != ScopeExact,
+		TypeDrift:  !value.Scope.TypeCompatible,
+		ScopeDistance: eventing.PRScopeDistance(
+			value.Scope.Distance,
+		),
+		ScopeChangeSize:     eventing.PRChangeSize(value.Scope.Size),
+		ScopeEstimated:      value.Scope.Estimated,
+		ScopeTypeCompatible: value.Scope.TypeCompatible,
+		ScopeConfidence:     value.Scope.Confidence,
+		ScopeCharterClauses: append([]string(nil), value.Scope.CharterClauses...),
+		ScopeExplanation:    value.Scope.Explanation,
+		ScopePresence:       eventing.PRWorkPresence(value.Scope.Presence),
 		ScopeChangeEvidence: toEventingScopeChanges(value.Scope.ChangeEvidence),
-		PromptDigest:        value.PromptDigest, ScopePromptDigest: value.ScopePromptDigest,
-		StartedAt: started, FinishedAt: cloneTimePointer(value.FinishedAt), PublicationFence: fence,
+		PromptDigest:        value.PromptDigest,
+		ScopePromptDigest:   value.ScopePromptDigest,
+		StartedAt:           started,
+		FinishedAt:          cloneTimePointer(value.FinishedAt),
+		PublicationFence:    fence,
 	}
 }
 
@@ -490,10 +603,18 @@ func toEventingValidation(value ValidationRun) eventing.PRValidationRun {
 		started = cloneTimePointer(&value.StartedAt)
 	}
 	return eventing.PRValidationRun{
-		PRWorkspaceRecord: toEventingRecord(value.ID, value.StartedAt, timeFromPointer(value.FinishedAt, value.StartedAt)),
-		StageRunID:        value.StageRunID, CandidateSHA: value.CandidateSHA,
-		State: eventing.PRExecutionState(value.State), Kind: "checks", Checks: checks,
-		StartedAt: started, FinishedAt: cloneTimePointer(value.FinishedAt),
+		PRWorkspaceRecord: toEventingRecord(
+			value.ID,
+			value.StartedAt,
+			timeFromPointer(value.FinishedAt, value.StartedAt),
+		),
+		StageRunID:   value.StageRunID,
+		CandidateSHA: value.CandidateSHA,
+		State:        eventing.PRExecutionState(value.State),
+		Kind:         "checks",
+		Checks:       checks,
+		StartedAt:    started,
+		FinishedAt:   cloneTimePointer(value.FinishedAt),
 	}
 }
 
@@ -566,16 +687,31 @@ func toEventingGate(value GateRun) eventing.PRGateRun {
 		}
 	}
 	return eventing.PRGateRun{
-		PRWorkspaceRecord: toEventingRecord(value.ID, value.CreatedAt, timeFromPointer(value.FinishedAt, value.CreatedAt)),
-		DecisionPoint:     value.DecisionPoint, TargetID: value.TargetID,
-		State:          eventing.PRExecutionState(value.State),
-		PolicyRevision: policyRevision,
-		WorkflowRef:    workflowRef, WorkflowRevision: workflowRevision, GateRef: gateRef,
-		WorkflowConfigurationID: workflowConfigurationID, WorkflowConfigurationRevision: workflowConfigurationRevision,
-		PinnedPolicy: policy, PinnedPolicyHash: persistenceDigest(policy),
-		SubjectRevision: subjectRevision, PinnedSubject: subject, PinnedSubjectHash: persistenceDigest(subject),
-		WorkflowRunID: workflowRunID, RuntimePresent: runtimePresent, CurrentStageID: currentStageID,
-		Turns: turns, Evidence: evidence, FinishedAt: cloneTimePointer(value.FinishedAt),
+		PRWorkspaceRecord: toEventingRecord(
+			value.ID,
+			value.CreatedAt,
+			timeFromPointer(value.FinishedAt, value.CreatedAt),
+		),
+		DecisionPoint:                 value.DecisionPoint,
+		TargetID:                      value.TargetID,
+		State:                         eventing.PRExecutionState(value.State),
+		PolicyRevision:                policyRevision,
+		WorkflowRef:                   workflowRef,
+		WorkflowRevision:              workflowRevision,
+		GateRef:                       gateRef,
+		WorkflowConfigurationID:       workflowConfigurationID,
+		WorkflowConfigurationRevision: workflowConfigurationRevision,
+		PinnedPolicy:                  policy,
+		PinnedPolicyHash:              persistenceDigest(policy),
+		SubjectRevision:               subjectRevision,
+		PinnedSubject:                 subject,
+		PinnedSubjectHash:             persistenceDigest(subject),
+		WorkflowRunID:                 workflowRunID,
+		RuntimePresent:                runtimePresent,
+		CurrentStageID:                currentStageID,
+		Turns:                         turns,
+		Evidence:                      evidence,
+		FinishedAt:                    cloneTimePointer(value.FinishedAt),
 	}
 }
 
@@ -696,12 +832,20 @@ func fromEventingProvider(value eventing.PRProviderSnapshot) ProviderSnapshot {
 
 func fromEventingCharter(value eventing.PRCharterRevision) Charter {
 	return Charter{
-		ID: value.ID, Revision: value.Revision, Type: PRType(value.Type), Goal: value.Goal,
+		ID:                 value.ID,
+		Revision:           value.Revision,
+		Type:               PRType(value.Type),
+		Goal:               value.Goal,
 		AcceptanceCriteria: append([]string(nil), value.AcceptanceCriteria...),
 		IncludedAreas:      append([]string(nil), value.IncludedAreas...),
-		ExcludedAreas:      append([]string(nil), value.Exclusions...), NonGoals: append([]string(nil), value.NonGoals...),
-		BaseSHA: value.BaseSHA, HeadSHA: value.HeadSHA,
-		Confirmed: value.Status == eventing.PRRecordConfirmed, CreatedAt: value.CreatedAt,
+		ExcludedAreas: append(
+			[]string(nil),
+			value.Exclusions...),
+		NonGoals:    append([]string(nil), value.NonGoals...),
+		BaseSHA:     value.BaseSHA,
+		HeadSHA:     value.HeadSHA,
+		Confirmed:   value.Status == eventing.PRRecordConfirmed,
+		CreatedAt:   value.CreatedAt,
 		ConfirmedAt: cloneTimePointer(value.ConfirmedAt),
 	}
 }
@@ -836,10 +980,17 @@ func fromEventingDeferredGroup(value eventing.PRDeferredGroup) DeferredGroup {
 
 func fromEventingRepair(value eventing.PRRepairAttempt) RepairAttempt {
 	result := RepairAttempt{
-		ID: value.ID, StageRunID: value.StageRunID, Number: value.Attempt,
-		State: ExecutionState(value.State), Instruction: value.Instruction,
-		WorkspaceID: value.RepairWorkspaceID, ResultSummary: value.ResultSummary,
-		ChangedFiles: append([]string(nil), value.ChangedFiles...), FindingIDs: append([]string(nil), value.FindingIDs...),
+		ID:            value.ID,
+		StageRunID:    value.StageRunID,
+		Number:        value.Attempt,
+		State:         ExecutionState(value.State),
+		Instruction:   value.Instruction,
+		WorkspaceID:   value.RepairWorkspaceID,
+		ResultSummary: value.ResultSummary,
+		ChangedFiles: append(
+			[]string(nil),
+			value.ChangedFiles...),
+		FindingIDs:   append([]string(nil), value.FindingIDs...),
 		CandidateSHA: value.CandidateSHA,
 		Scope: ScopeAssessment{
 			Distance: ScopeDistance(value.ScopeDistance), Size: ChangeSize(value.ScopeChangeSize),
@@ -849,16 +1000,21 @@ func fromEventingRepair(value eventing.PRRepairAttempt) RepairAttempt {
 			Confidence: value.ScopeConfidence, CharterClauses: append([]string(nil), value.ScopeCharterClauses...),
 			Explanation: value.ScopeExplanation, ChangeEvidence: fromEventingScopeChanges(value.ScopeChangeEvidence),
 		},
-		PromptDigest: value.PromptDigest, ScopePromptDigest: value.ScopePromptDigest,
-		StartedAt:  timeFromPointer(value.StartedAt, value.CreatedAt),
-		FinishedAt: cloneTimePointer(value.FinishedAt),
+		PromptDigest:      value.PromptDigest,
+		ScopePromptDigest: value.ScopePromptDigest,
+		StartedAt:         timeFromPointer(value.StartedAt, value.CreatedAt),
+		FinishedAt:        cloneTimePointer(value.FinishedAt),
 	}
 	if value.PublicationFence != nil {
 		result.PublicationFence = &ImplementationPublicationFence{
 			GitWorkspaceID: value.PublicationFence.GitWorkspaceID,
-			LineID:         value.PublicationFence.LineID, LineVersion: value.PublicationFence.LineVersion,
-			MutationEpoch: value.PublicationFence.MutationEpoch, ParkIntentID: value.PublicationFence.ParkIntentID,
-			BaseCommit: value.PublicationFence.BaseCommit, Tip: value.PublicationFence.Tip, Tree: value.PublicationFence.Tree,
+			LineID:         value.PublicationFence.LineID,
+			LineVersion:    value.PublicationFence.LineVersion,
+			MutationEpoch:  value.PublicationFence.MutationEpoch,
+			ParkIntentID:   value.PublicationFence.ParkIntentID,
+			BaseCommit:     value.PublicationFence.BaseCommit,
+			Tip:            value.PublicationFence.Tip,
+			Tree:           value.PublicationFence.Tree,
 		}
 	}
 	return result

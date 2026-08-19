@@ -312,14 +312,40 @@ func TestPRLifecycleWorkflowConfigurationsRequestsAreStrictAndOldRouteIsGone(t *
 	}{
 		{name: "wrong content type", body: encoded, contentType: "text/plain", fetchSite: "same-origin"},
 		{name: "cross site", body: encoded, contentType: "application/json", fetchSite: "cross-site"},
-		{name: "snake case field", body: append(append([]byte(nil), encoded[:len(encoded)-1]...), []byte(`,"request_id":"legacy"}`)...), contentType: "application/json", fetchSite: "same-origin"},
-		{name: "retired assignment field", body: append(append([]byte(nil), encoded[:len(encoded)-1]...), []byte(`,"repository-assignments":{}}`)...), contentType: "application/json", fetchSite: "same-origin"},
-		{name: "unknown field", body: append(append([]byte(nil), encoded[:len(encoded)-1]...), []byte(`,"unknown":true}`)...), contentType: "application/json", fetchSite: "same-origin"},
-		{name: "trailing value", body: append(append([]byte(nil), encoded...), []byte(` {}`)...), contentType: "application/json", fetchSite: "same-origin"},
+		{
+			name:        "snake case field",
+			body:        append(append([]byte(nil), encoded[:len(encoded)-1]...), []byte(`,"request_id":"legacy"}`)...),
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+		},
+		{
+			name: "retired assignment field",
+			body: append(
+				append([]byte(nil), encoded[:len(encoded)-1]...),
+				[]byte(`,"repository-assignments":{}}`)...),
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+		},
+		{
+			name:        "unknown field",
+			body:        append(append([]byte(nil), encoded[:len(encoded)-1]...), []byte(`,"unknown":true}`)...),
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+		},
+		{
+			name:        "trailing value",
+			body:        append(append([]byte(nil), encoded...), []byte(` {}`)...),
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPut, "http://launcher.local"+prLifecycleWorkflowConfigurationsPath, bytes.NewReader(test.body))
+			request := httptest.NewRequest(
+				http.MethodPut,
+				"http://launcher.local"+prLifecycleWorkflowConfigurationsPath,
+				bytes.NewReader(test.body),
+			)
 			request.Header.Set("Content-Type", test.contentType)
 			request.Header.Set("Sec-Fetch-Site", test.fetchSite)
 			response := httptest.NewRecorder()
@@ -401,7 +427,11 @@ func TestPRLifecycleRepositoryAssignmentsUseSafeIndependentProjection(t *testing
 	}
 	afterWorkflow := getPRLifecycleWorkflowConfigurationsForTest(t, mux)
 	if afterWorkflow.CatalogRevision != workflowResponse.CatalogRevision {
-		t.Fatalf("assignment changed public catalog revision: %q != %q", afterWorkflow.CatalogRevision, workflowResponse.CatalogRevision)
+		t.Fatalf(
+			"assignment changed public catalog revision: %q != %q",
+			afterWorkflow.CatalogRevision,
+			workflowResponse.CatalogRevision,
+		)
 	}
 	reloaded, err := config.LoadConfig(configPath)
 	if err != nil {
@@ -507,7 +537,8 @@ func TestPRLifecycleScopedNoOpPutsDoNotRequireRestart(t *testing.T) {
 		t.Fatalf("assignment no-op status = %d body=%s", putAssignments.Code, putAssignments.Body.String())
 	}
 	assignmentNoOp := decodePRLifecycleRepositoryAssignmentsResponse(t, putAssignments.Body.Bytes())
-	if assignmentNoOp.ConfigRevision != assignments.ConfigRevision || assignmentNoOp.Effects.GatewayEffect != "applied" {
+	if assignmentNoOp.ConfigRevision != assignments.ConfigRevision ||
+		assignmentNoOp.Effects.GatewayEffect != "applied" {
 		t.Fatalf("assignment no-op response = %#v", assignmentNoOp)
 	}
 }
@@ -725,7 +756,10 @@ jobs:
 	return configPath, handler, mux
 }
 
-func getPRLifecycleWorkflowConfigurationsForTest(t *testing.T, mux *http.ServeMux) prLifecycleWorkflowConfigurationsResponse {
+func getPRLifecycleWorkflowConfigurationsForTest(
+	t *testing.T,
+	mux *http.ServeMux,
+) prLifecycleWorkflowConfigurationsResponse {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, "http://launcher.local"+prLifecycleWorkflowConfigurationsPath, nil)
 	response := httptest.NewRecorder()
@@ -740,7 +774,10 @@ func getPRLifecycleWorkflowConfigurationsForTest(t *testing.T, mux *http.ServeMu
 	return result
 }
 
-func decodePRLifecycleWorkflowConfigurationsResponse(t *testing.T, body []byte) prLifecycleWorkflowConfigurationsResponse {
+func decodePRLifecycleWorkflowConfigurationsResponse(
+	t *testing.T,
+	body []byte,
+) prLifecycleWorkflowConfigurationsResponse {
 	t.Helper()
 	var result prLifecycleWorkflowConfigurationsResponse
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -823,7 +860,11 @@ func putPRLifecycleWorkflowConfigurationsForTest(
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPut, "http://launcher.local"+prLifecycleWorkflowConfigurationsPath, bytes.NewReader(encoded))
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"http://launcher.local"+prLifecycleWorkflowConfigurationsPath,
+		bytes.NewReader(encoded),
+	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	if mutate != nil {
@@ -851,7 +892,8 @@ func prLifecycleWorkflowConfigurationsPutRequestForTest(
 func mixedPRLifecycleWorkflowConfigurationCandidate() config.PRLifecycleConfig {
 	candidate := config.DefaultPRLifecycleConfig()
 	candidate.WorkflowConfigurations["mixed"] = config.PRLifecycleWorkflowConfiguration{
-		Name: "Mixed", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAutomatic},
+		Name:           "Mixed",
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAutomatic},
 		Bindings: []config.PRLifecycleGateBinding{
 			{
 				WorkflowRef: "workflows/pr-lifecycle.yml", GateRef: "gates.charter-confirm",
@@ -860,8 +902,13 @@ func mixedPRLifecycleWorkflowConfigurationCandidate() config.PRLifecycleConfig {
 			{
 				WorkflowRef: "workflows/pr-lifecycle.yml", GateRef: "gates.review-complete",
 				Action: &gatetypes.GateAction{
-					Type: gatetypes.GateActionAI, AgentID: "main", Prompt: "Review the evidence and complete the gate fields.",
-					Session: "ephemeral", History: "none", Cache: "none", Tools: "none",
+					Type:    gatetypes.GateActionAI,
+					AgentID: "main",
+					Prompt:  "Review the evidence and complete the gate fields.",
+					Session: "ephemeral",
+					History: "none",
+					Cache:   "none",
+					Tools:   "none",
 				},
 			},
 			{

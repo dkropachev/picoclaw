@@ -138,7 +138,6 @@ func TestStoreRejectsUnexpectedUniqueIndex(t *testing.T) {
 		"rogue_unique_source",
 		"rogue_unique'); DROP TABLE event_dispatches; --",
 	} {
-		indexName := indexName
 		t.Run(indexName, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "unexpected-unique-index.db")

@@ -21,7 +21,8 @@ func TestCompilePromptSeparatesStageAuthorityAndSharedFacts(t *testing.T) {
 	if review.SystemPrompt == repair.SystemPrompt || review.Digest == repair.Digest {
 		t.Fatal("review and repair authority collapsed into one prompt")
 	}
-	if !strings.Contains(review.UserPrompt, bundle.WorkspaceID) || !strings.Contains(repair.UserPrompt, bundle.WorkspaceID) {
+	if !strings.Contains(review.UserPrompt, bundle.WorkspaceID) ||
+		!strings.Contains(repair.UserPrompt, bundle.WorkspaceID) {
 		t.Fatal("shared facts absent from specialized prompt")
 	}
 }

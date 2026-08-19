@@ -30,7 +30,9 @@ func TestConfirmedCharterCannotBeReplacedBySaveOrAlternateConfirm(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(ServiceConfig{Store: store, AI: serviceAI{}, Gates: passingGates{}, Now: func() time.Time { return now }})
+	service, err := NewService(
+		ServiceConfig{Store: store, AI: serviceAI{}, Gates: passingGates{}, Now: func() time.Time { return now }},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,22 +41,40 @@ func TestConfirmedCharterCannotBeReplacedBySaveOrAlternateConfirm(t *testing.T) 
 		WorkspaceID: input.Workspace.ID, CharterID: alternate.ID,
 		ExpectedVersion: seeded.Aggregate.Workspace.Version, RequestID: "request-confirm-alternate-charter",
 	})
-	if !errors.Is(err, ErrConflict) || unchanged.Workspace.ActiveCharterID != active.ID || unchanged.Charters[1].Confirmed {
-		t.Fatalf("alternate charter bypassed revision: workspace=%#v charters=%#v err=%v", unchanged.Workspace, unchanged.Charters, err)
+	if !errors.Is(err, ErrConflict) || unchanged.Workspace.ActiveCharterID != active.ID ||
+		unchanged.Charters[1].Confirmed {
+		t.Fatalf(
+			"alternate charter bypassed revision: workspace=%#v charters=%#v err=%v",
+			unchanged.Workspace,
+			unchanged.Charters,
+			err,
+		)
 	}
 	unchanged, err = service.SaveCharter(context.Background(), SaveCharterRequest{
 		WorkspaceID: input.Workspace.ID, ExpectedVersion: seeded.Aggregate.Workspace.Version,
 		RequestID: "request-save-over-active-charter", Draft: charterInvariantDraft("replacement"),
 	})
-	if !errors.Is(err, ErrConflict) || len(unchanged.Charters) != 2 || unchanged.Workspace.ActiveCharterID != active.ID {
-		t.Fatalf("save bypassed active charter revision: workspace=%#v charters=%#v err=%v", unchanged.Workspace, unchanged.Charters, err)
+	if !errors.Is(err, ErrConflict) || len(unchanged.Charters) != 2 ||
+		unchanged.Workspace.ActiveCharterID != active.ID {
+		t.Fatalf(
+			"save bypassed active charter revision: workspace=%#v charters=%#v err=%v",
+			unchanged.Workspace,
+			unchanged.Charters,
+			err,
+		)
 	}
 	unchanged, err = service.DraftCharter(context.Background(), DraftCharterRequest{
 		WorkspaceID: input.Workspace.ID, ExpectedVersion: seeded.Aggregate.Workspace.Version,
 		RequestID: "request-draft-over-active-charter",
 	})
-	if !errors.Is(err, ErrConflict) || len(unchanged.Charters) != 2 || unchanged.Workspace.ActiveCharterID != active.ID {
-		t.Fatalf("AI draft bypassed active charter revision: workspace=%#v charters=%#v err=%v", unchanged.Workspace, unchanged.Charters, err)
+	if !errors.Is(err, ErrConflict) || len(unchanged.Charters) != 2 ||
+		unchanged.Workspace.ActiveCharterID != active.ID {
+		t.Fatalf(
+			"AI draft bypassed active charter revision: workspace=%#v charters=%#v err=%v",
+			unchanged.Workspace,
+			unchanged.Charters,
+			err,
+		)
 	}
 }
 
@@ -91,7 +111,12 @@ func TestOnlyNewestCharterDraftCanBeConfirmed(t *testing.T) {
 		ExpectedVersion: seeded.Aggregate.Workspace.Version, RequestID: "request-confirm-latest-draft",
 	})
 	if err != nil || confirmed.Workspace.ActiveCharterID != latest.ID || !confirmed.Charters[1].Confirmed {
-		t.Fatalf("latest draft was not confirmed: workspace=%#v charters=%#v err=%v", confirmed.Workspace, confirmed.Charters, err)
+		t.Fatalf(
+			"latest draft was not confirmed: workspace=%#v charters=%#v err=%v",
+			confirmed.Workspace,
+			confirmed.Charters,
+			err,
+		)
 	}
 }
 
@@ -141,11 +166,19 @@ func TestDelayedCharterGateCannotActivateSupersededDraft(t *testing.T) {
 		t.Fatal(err)
 	}
 	rejected, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: input.Workspace.ID, GateRunID: waiting.Gates[0].ID,
-		ExpectedVersion: advanced.Aggregate.Workspace.Version, RequestID: "request-pass-superseded-charter-gate", FieldValues: map[string]any{"action": "approve"},
+		WorkspaceID:     input.Workspace.ID,
+		GateRunID:       waiting.Gates[0].ID,
+		ExpectedVersion: advanced.Aggregate.Workspace.Version,
+		RequestID:       "request-pass-superseded-charter-gate",
+		FieldValues:     map[string]any{"action": "approve"},
 	})
 	if !errors.Is(err, ErrConflict) || rejected.Workspace.ActiveCharterID != "" || rejected.Charters[0].Confirmed {
-		t.Fatalf("delayed gate activated superseded charter: workspace=%#v charters=%#v err=%v", rejected.Workspace, rejected.Charters, err)
+		t.Fatalf(
+			"delayed gate activated superseded charter: workspace=%#v charters=%#v err=%v",
+			rejected.Workspace,
+			rejected.Charters,
+			err,
+		)
 	}
 }
 
@@ -191,7 +224,13 @@ func TestRevisedCharterUsesReconfirmationAndInvalidatesEvidence(t *testing.T) {
 	})
 	if err != nil || revised.Workspace.ActiveCharterID != "" || revised.StageRuns[0].State != ExecutionStale ||
 		revised.Publications[0].State != ExecutionStale {
-		t.Fatalf("revision did not invalidate dependent evidence: workspace=%#v stages=%#v pubs=%#v err=%v", revised.Workspace, revised.StageRuns, revised.Publications, err)
+		t.Fatalf(
+			"revision did not invalidate dependent evidence: workspace=%#v stages=%#v pubs=%#v err=%v",
+			revised.Workspace,
+			revised.StageRuns,
+			revised.Publications,
+			err,
+		)
 	}
 	replacement := revised.Charters[len(revised.Charters)-1]
 	confirmed, err := service.ConfirmCharter(context.Background(), ConfirmCharterRequest{

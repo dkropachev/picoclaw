@@ -71,14 +71,20 @@ func TestFallbackCharterGateTypedResponseConfirmsCharter(t *testing.T) {
 	})
 	service, _ := NewService(ServiceConfig{Store: store, Now: func() time.Time { return now }})
 	waiting, err := service.ConfirmCharter(context.Background(), ConfirmCharterRequest{
-		WorkspaceID: input.Workspace.ID, CharterID: charter.ID, ExpectedVersion: seed.Aggregate.Workspace.Version, RequestID: "request-00000041",
+		WorkspaceID:     input.Workspace.ID,
+		CharterID:       charter.ID,
+		ExpectedVersion: seed.Aggregate.Workspace.Version,
+		RequestID:       "request-00000041",
 	})
 	if err != nil || len(waiting.Gates) != 1 || waiting.Gates[0].State != ExecutionWaitingUser {
 		t.Fatalf("waiting gate = %#v, %v", waiting.Gates, err)
 	}
 	confirmed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: input.Workspace.ID, GateRunID: waiting.Gates[0].ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-00000042", FieldValues: map[string]any{"action": "approve"},
+		WorkspaceID:     input.Workspace.ID,
+		GateRunID:       waiting.Gates[0].ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-00000042",
+		FieldValues:     map[string]any{"action": "approve"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +162,8 @@ func TestCorrectionPromotionIsRepositoryScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(promoted.RepositoryLessons) != 1 || promoted.RepositoryLessons[0].RepositoryID != aggregate.Workspace.RepositoryID {
+	if len(promoted.RepositoryLessons) != 1 ||
+		promoted.RepositoryLessons[0].RepositoryID != aggregate.Workspace.RepositoryID {
 		t.Fatalf("lessons = %#v", promoted.RepositoryLessons)
 	}
 }

@@ -25,38 +25,41 @@ type prWorkspaceClaimCandidate struct {
 
 // ClaimPRWorkspaceOperations atomically fences a bounded, globally ordered
 // batch. It also recovers running intents whose previous lease expired.
-func (s *Store) ClaimPRWorkspaceOperations(ctx context.Context, input PRWorkspaceClaimRequest) ([]PRClaimedOperationIntent, error) {
+func (s *Store) ClaimPRWorkspaceOperations(
+	ctx context.Context,
+	input PRWorkspaceClaimRequest,
+) ([]PRClaimedOperationIntent, error) {
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
 	if err := validatePRWorkspaceClaimRequest(&input); err != nil {
 		return nil, err
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return nil, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return nil, clockErr
 	}
 	leaseUntil := now.Add(input.LeaseDuration)
 	var claimed []PRClaimedOperationIntent
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		candidates, err := loadPRWorkspaceClaimCandidates(ctx, conn, `SELECT id, workspace_id, payload_json
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		candidates, candidateErr := loadPRWorkspaceClaimCandidates(ctx, conn, `SELECT id, workspace_id, payload_json
 			FROM pr_operation_intents
 			WHERE (status = 'queued' AND available_at <= ?)
 				OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
 			ORDER BY available_at ASC, created_at ASC, id ASC LIMIT ?`, now, input.Limit)
-		if err != nil {
-			return err
+		if candidateErr != nil {
+			return candidateErr
 		}
 		claimed = make([]PRClaimedOperationIntent, 0, len(candidates))
 		changes := make(map[string][]*prWorkspaceMutationRecord)
 		for _, candidate := range candidates {
 			var intent PRWorkspaceOperationIntent
-			if err := json.Unmarshal(candidate.payload, &intent); err != nil {
-				return fmt.Errorf("decode claimed operation %s: %w", candidate.id, err)
+			if decodeErr := json.Unmarshal(candidate.payload, &intent); decodeErr != nil {
+				return fmt.Errorf("decode claimed operation %s: %w", candidate.id, decodeErr)
 			}
-			token, err := newPrefixedID(prLeaseTokenIDPrefix)
-			if err != nil {
-				return err
+			token, tokenErr := newPrefixedID(prLeaseTokenIDPrefix)
+			if tokenErr != nil {
+				return tokenErr
 			}
 			intent.State = PRExecutionRunning
 			intent.LeaseOwner = input.WorkerID
@@ -64,23 +67,23 @@ func (s *Store) ClaimPRWorkspaceOperations(ctx context.Context, input PRWorkspac
 			intent.LeaseUntil = &leaseUntil
 			intent.Attempts++
 			intent.UpdatedAt = now
-			if err := validatePRWorkspaceRecord(&intent); err != nil {
-				return err
+			if validationErr := validatePRWorkspaceRecord(&intent); validationErr != nil {
+				return validationErr
 			}
-			payload, err := json.Marshal(intent)
-			if err != nil {
-				return err
+			payload, marshalErr := json.Marshal(intent)
+			if marshalErr != nil {
+				return marshalErr
 			}
-			updated, err := conn.ExecContext(ctx, `UPDATE pr_operation_intents
+			updated, updateErr := conn.ExecContext(ctx, `UPDATE pr_operation_intents
 				SET status = 'running', lease_owner = ?, lease_token = ?, lease_until = ?,
 					attempts = ?, payload_json = ?, updated_at = ?
 				WHERE id = ? AND workspace_id = ?`, intent.LeaseOwner, intent.LeaseToken,
 				toDBTime(leaseUntil), intent.Attempts, payload, toDBTime(now), candidate.id, candidate.workspaceID)
-			if err != nil {
-				return err
+			if updateErr != nil {
+				return updateErr
 			}
-			if err := requirePRWorkspaceRowsAffected(updated, "operation claim"); err != nil {
-				return err
+			if affectedErr := requirePRWorkspaceRowsAffected(updated, "operation claim"); affectedErr != nil {
+				return affectedErr
 			}
 			claimed = append(claimed, PRClaimedOperationIntent{Intent: intent})
 			changes[candidate.workspaceID] = append(changes[candidate.workspaceID], &prWorkspaceMutationRecord{
@@ -88,52 +91,61 @@ func (s *Store) ClaimPRWorkspaceOperations(ctx context.Context, input PRWorkspac
 				meta: &intent.PRWorkspaceRecord, status: string(intent.State),
 			})
 		}
-		versions, err := advancePRWorkspaceWorkerHistory(ctx, conn, changes, now)
-		if err != nil {
-			return err
+		versions, historyErr := advancePRWorkspaceWorkerHistory(ctx, conn, changes, now)
+		if historyErr != nil {
+			return historyErr
 		}
 		for index := range claimed {
 			claimed[index].WorkspaceVersion = versions[claimed[index].Intent.WorkspaceID]
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("claim pull request operations: %w", s.dbError(err))
+	if transactionErr != nil {
+		return nil, fmt.Errorf("claim pull request operations: %w", s.dbError(transactionErr))
 	}
 	return claimed, nil
 }
 
 // FinishPRWorkspaceOperation accepts a result only from the live lease token.
-func (s *Store) FinishPRWorkspaceOperation(ctx context.Context, input PRWorkspaceOperationFinish) (PRClaimedOperationIntent, error) {
+func (s *Store) FinishPRWorkspaceOperation(
+	ctx context.Context,
+	input PRWorkspaceOperationFinish,
+) (PRClaimedOperationIntent, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRClaimedOperationIntent{}, err
 	}
 	input.IntentID = strings.TrimSpace(input.IntentID)
 	input.LeaseToken = strings.TrimSpace(input.LeaseToken)
-	if !validPrefixedID(input.IntentID, prOperationIntentIDPrefix) || !validPrefixedID(input.LeaseToken, prLeaseTokenIDPrefix) {
+	if !validPrefixedID(input.IntentID, prOperationIntentIDPrefix) ||
+		!validPrefixedID(input.LeaseToken, prLeaseTokenIDPrefix) {
 		return PRClaimedOperationIntent{}, fmt.Errorf("%w: invalid operation finish identity", ErrInvalidPRWorkspace)
 	}
 	if !validPRWorkspaceOperationFinishState(input.State) {
-		return PRClaimedOperationIntent{}, fmt.Errorf("%w: operation finish state must be terminal", ErrInvalidPRWorkspace)
+		return PRClaimedOperationIntent{}, fmt.Errorf(
+			"%w: operation finish state must be terminal",
+			ErrInvalidPRWorkspace,
+		)
 	}
 	if err := validatePRWorkspaceRaw("operation result", input.Result); err != nil {
 		return PRClaimedOperationIntent{}, err
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return PRClaimedOperationIntent{}, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return PRClaimedOperationIntent{}, clockErr
 	}
 	var result PRClaimedOperationIntent
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		var payload []byte
-		if err := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_operation_intents WHERE id = ?`, input.IntentID).Scan(&payload); err != nil {
-			return err
+		if queryErr := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_operation_intents WHERE id = ?`, input.IntentID).
+			Scan(&payload); queryErr != nil {
+			return queryErr
 		}
 		var intent PRWorkspaceOperationIntent
-		if err := json.Unmarshal(payload, &intent); err != nil {
-			return err
+		if decodeErr := json.Unmarshal(payload, &intent); decodeErr != nil {
+			return decodeErr
 		}
-		if intent.State != PRExecutionRunning || intent.LeaseToken != input.LeaseToken || intent.LeaseUntil == nil || !intent.LeaseUntil.After(now) {
+		if intent.State != PRExecutionRunning || intent.LeaseToken != input.LeaseToken || intent.LeaseUntil == nil ||
+			!intent.LeaseUntil.After(now) {
 			return fmt.Errorf("%w: operation lease is absent, expired, or superseded", ErrPRWorkspaceConflict)
 		}
 		intent.State = input.State
@@ -145,74 +157,82 @@ func (s *Store) FinishPRWorkspaceOperation(ctx context.Context, input PRWorkspac
 		intent.LeaseToken = ""
 		intent.LeaseUntil = nil
 		intent.UpdatedAt = now
-		if err := validatePRWorkspaceRecord(&intent); err != nil {
-			return err
+		if validationErr := validatePRWorkspaceRecord(&intent); validationErr != nil {
+			return validationErr
 		}
-		encoded, err := json.Marshal(intent)
-		if err != nil {
-			return err
+		encoded, marshalErr := json.Marshal(intent)
+		if marshalErr != nil {
+			return marshalErr
 		}
-		updated, err := conn.ExecContext(ctx, `UPDATE pr_operation_intents SET status = ?,
+		updated, updateErr := conn.ExecContext(ctx, `UPDATE pr_operation_intents SET status = ?,
 			lease_owner = '', lease_token = '', lease_until = NULL, payload_json = ?, updated_at = ?
 			WHERE id = ? AND workspace_id = ? AND status = 'running' AND lease_token = ?`,
 			intent.State, encoded, toDBTime(now), intent.ID, intent.WorkspaceID, input.LeaseToken)
-		if err != nil {
-			return err
+		if updateErr != nil {
+			return updateErr
 		}
-		if err := requirePRWorkspaceRowsAffected(updated, "operation finish"); err != nil {
-			return err
+		if affectedErr := requirePRWorkspaceRowsAffected(updated, "operation finish"); affectedErr != nil {
+			return affectedErr
 		}
-		record := &prWorkspaceMutationRecord{table: "pr_operation_intents", prefix: prOperationIntentIDPrefix,
-			value: &intent, meta: &intent.PRWorkspaceRecord, status: string(intent.State)}
-		versions, err := advancePRWorkspaceWorkerHistory(ctx, conn, map[string][]*prWorkspaceMutationRecord{
+		record := &prWorkspaceMutationRecord{
+			table: "pr_operation_intents", prefix: prOperationIntentIDPrefix,
+			value: &intent, meta: &intent.PRWorkspaceRecord, status: string(intent.State),
+		}
+		versions, historyErr := advancePRWorkspaceWorkerHistory(ctx, conn, map[string][]*prWorkspaceMutationRecord{
 			intent.WorkspaceID: {record},
 		}, now)
-		if err != nil {
-			return err
+		if historyErr != nil {
+			return historyErr
 		}
 		result = PRClaimedOperationIntent{Intent: intent, WorkspaceVersion: versions[intent.WorkspaceID]}
 		return nil
 	})
-	if err != nil {
-		return PRClaimedOperationIntent{}, fmt.Errorf("finish pull request operation: %w", s.dbError(err))
+	if transactionErr != nil {
+		return PRClaimedOperationIntent{}, fmt.Errorf(
+			"finish pull request operation: %w",
+			s.dbError(transactionErr),
+		)
 	}
 	return result, nil
 }
 
 // ClaimPRWorkspacePublications atomically fences pending work and recovers
 // claimed publications whose lease expired.
-func (s *Store) ClaimPRWorkspacePublications(ctx context.Context, input PRWorkspaceClaimRequest) ([]PRClaimedPublication, error) {
+func (s *Store) ClaimPRWorkspacePublications(
+	ctx context.Context,
+	input PRWorkspaceClaimRequest,
+) ([]PRClaimedPublication, error) {
 	if err := s.ready(ctx); err != nil {
 		return nil, err
 	}
 	if err := validatePRWorkspaceClaimRequest(&input); err != nil {
 		return nil, err
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return nil, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return nil, clockErr
 	}
 	leaseUntil := now.Add(input.LeaseDuration)
 	var claimed []PRClaimedPublication
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		candidates, err := loadPRWorkspaceClaimCandidates(ctx, conn, `SELECT id, workspace_id, payload_json
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		candidates, candidateErr := loadPRWorkspaceClaimCandidates(ctx, conn, `SELECT id, workspace_id, payload_json
 			FROM pr_publications
 			WHERE (status = 'pending' AND available_at <= ?)
 				OR (status = 'claimed' AND lease_until IS NOT NULL AND lease_until <= ?)
 			ORDER BY available_at ASC, created_at ASC, id ASC LIMIT ?`, now, input.Limit)
-		if err != nil {
-			return err
+		if candidateErr != nil {
+			return candidateErr
 		}
 		claimed = make([]PRClaimedPublication, 0, len(candidates))
 		changes := make(map[string][]*prWorkspaceMutationRecord)
 		for _, candidate := range candidates {
 			var publication PRPublication
-			if err := json.Unmarshal(candidate.payload, &publication); err != nil {
-				return fmt.Errorf("decode claimed publication %s: %w", candidate.id, err)
+			if decodeErr := json.Unmarshal(candidate.payload, &publication); decodeErr != nil {
+				return fmt.Errorf("decode claimed publication %s: %w", candidate.id, decodeErr)
 			}
-			token, err := newPrefixedID(prLeaseTokenIDPrefix)
-			if err != nil {
-				return err
+			token, tokenErr := newPrefixedID(prLeaseTokenIDPrefix)
+			if tokenErr != nil {
+				return tokenErr
 			}
 			publication.Status = PRPublicationClaimed
 			publication.ExecutionState = PRExecutionRunning
@@ -221,23 +241,23 @@ func (s *Store) ClaimPRWorkspacePublications(ctx context.Context, input PRWorksp
 			publication.LeaseUntil = &leaseUntil
 			publication.Attempts++
 			publication.UpdatedAt = now
-			if err := validatePRWorkspaceRecord(&publication); err != nil {
-				return err
+			if validationErr := validatePRWorkspaceRecord(&publication); validationErr != nil {
+				return validationErr
 			}
-			payload, err := json.Marshal(publication)
-			if err != nil {
-				return err
+			payload, marshalErr := json.Marshal(publication)
+			if marshalErr != nil {
+				return marshalErr
 			}
-			updated, err := conn.ExecContext(ctx, `UPDATE pr_publications
+			updated, updateErr := conn.ExecContext(ctx, `UPDATE pr_publications
 				SET status = 'claimed', lease_owner = ?, lease_token = ?, lease_until = ?,
 					attempts = ?, payload_json = ?, updated_at = ?
 				WHERE id = ? AND workspace_id = ?`, publication.LeaseOwner, publication.LeaseToken,
 				toDBTime(leaseUntil), publication.Attempts, payload, toDBTime(now), candidate.id, candidate.workspaceID)
-			if err != nil {
-				return err
+			if updateErr != nil {
+				return updateErr
 			}
-			if err := requirePRWorkspaceRowsAffected(updated, "publication claim"); err != nil {
-				return err
+			if affectedErr := requirePRWorkspaceRowsAffected(updated, "publication claim"); affectedErr != nil {
+				return affectedErr
 			}
 			claimed = append(claimed, PRClaimedPublication{Publication: publication})
 			changes[candidate.workspaceID] = append(changes[candidate.workspaceID], &prWorkspaceMutationRecord{
@@ -245,50 +265,61 @@ func (s *Store) ClaimPRWorkspacePublications(ctx context.Context, input PRWorksp
 				meta: &publication.PRWorkspaceRecord, status: string(publication.Status),
 			})
 		}
-		versions, err := advancePRWorkspaceWorkerHistory(ctx, conn, changes, now)
-		if err != nil {
-			return err
+		versions, historyErr := advancePRWorkspaceWorkerHistory(ctx, conn, changes, now)
+		if historyErr != nil {
+			return historyErr
 		}
 		for index := range claimed {
 			claimed[index].WorkspaceVersion = versions[claimed[index].Publication.WorkspaceID]
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("claim pull request publications: %w", s.dbError(err))
+	if transactionErr != nil {
+		return nil, fmt.Errorf("claim pull request publications: %w", s.dbError(transactionErr))
 	}
 	return claimed, nil
 }
 
 // FinishPRWorkspacePublication records a fenced published, failed, or unknown
 // outcome. Unknown is reserved for ambiguous provider responses.
-func (s *Store) FinishPRWorkspacePublication(ctx context.Context, input PRWorkspacePublicationFinish) (PRClaimedPublication, error) {
+func (s *Store) FinishPRWorkspacePublication(
+	ctx context.Context,
+	input PRWorkspacePublicationFinish,
+) (PRClaimedPublication, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRClaimedPublication{}, err
 	}
 	input.PublicationID = strings.TrimSpace(input.PublicationID)
 	input.LeaseToken = strings.TrimSpace(input.LeaseToken)
-	if !validPrefixedID(input.PublicationID, prPublicationIDPrefix) || !validPrefixedID(input.LeaseToken, prLeaseTokenIDPrefix) {
+	if !validPrefixedID(input.PublicationID, prPublicationIDPrefix) ||
+		!validPrefixedID(input.LeaseToken, prLeaseTokenIDPrefix) {
 		return PRClaimedPublication{}, fmt.Errorf("%w: invalid publication finish identity", ErrInvalidPRWorkspace)
 	}
-	if input.Status != PRPublicationPublished && input.Status != PRPublicationFailed && input.Status != PRPublicationUnknown {
-		return PRClaimedPublication{}, fmt.Errorf("%w: publication finish status must be terminal", ErrInvalidPRWorkspace)
+	if input.Status != PRPublicationPublished && input.Status != PRPublicationFailed &&
+		input.Status != PRPublicationUnknown {
+		return PRClaimedPublication{}, fmt.Errorf(
+			"%w: publication finish status must be terminal",
+			ErrInvalidPRWorkspace,
+		)
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return PRClaimedPublication{}, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return PRClaimedPublication{}, clockErr
 	}
 	var result PRClaimedPublication
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		var payload []byte
-		if err := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_publications WHERE id = ?`, input.PublicationID).Scan(&payload); err != nil {
-			return err
+		if queryErr := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_publications WHERE id = ?`, input.PublicationID).
+			Scan(&payload); queryErr != nil {
+			return queryErr
 		}
 		var publication PRPublication
-		if err := json.Unmarshal(payload, &publication); err != nil {
-			return err
+		if decodeErr := json.Unmarshal(payload, &publication); decodeErr != nil {
+			return decodeErr
 		}
-		if publication.Status != PRPublicationClaimed || publication.LeaseToken != input.LeaseToken || publication.LeaseUntil == nil || !publication.LeaseUntil.After(now) {
+		if publication.Status != PRPublicationClaimed || publication.LeaseToken != input.LeaseToken ||
+			publication.LeaseUntil == nil ||
+			!publication.LeaseUntil.After(now) {
 			return fmt.Errorf("%w: publication lease is absent, expired, or superseded", ErrPRWorkspaceConflict)
 		}
 		publication.Status = input.Status
@@ -319,36 +350,41 @@ func (s *Store) FinishPRWorkspacePublication(ctx context.Context, input PRWorksp
 		publication.LeaseToken = ""
 		publication.LeaseUntil = nil
 		publication.UpdatedAt = now
-		if err := validatePRWorkspaceRecord(&publication); err != nil {
-			return err
+		if validationErr := validatePRWorkspaceRecord(&publication); validationErr != nil {
+			return validationErr
 		}
-		encoded, err := json.Marshal(publication)
-		if err != nil {
-			return err
+		encoded, marshalErr := json.Marshal(publication)
+		if marshalErr != nil {
+			return marshalErr
 		}
-		updated, err := conn.ExecContext(ctx, `UPDATE pr_publications SET status = ?,
+		updated, updateErr := conn.ExecContext(ctx, `UPDATE pr_publications SET status = ?,
 			lease_owner = '', lease_token = '', lease_until = NULL, payload_json = ?, updated_at = ?
 			WHERE id = ? AND workspace_id = ? AND status = 'claimed' AND lease_token = ?`,
 			publication.Status, encoded, toDBTime(now), publication.ID, publication.WorkspaceID, input.LeaseToken)
-		if err != nil {
-			return err
+		if updateErr != nil {
+			return updateErr
 		}
-		if err := requirePRWorkspaceRowsAffected(updated, "publication finish"); err != nil {
-			return err
+		if affectedErr := requirePRWorkspaceRowsAffected(updated, "publication finish"); affectedErr != nil {
+			return affectedErr
 		}
-		record := &prWorkspaceMutationRecord{table: "pr_publications", prefix: prPublicationIDPrefix,
-			value: &publication, meta: &publication.PRWorkspaceRecord, status: string(publication.Status)}
-		versions, err := advancePRWorkspaceWorkerHistory(ctx, conn, map[string][]*prWorkspaceMutationRecord{
+		record := &prWorkspaceMutationRecord{
+			table: "pr_publications", prefix: prPublicationIDPrefix,
+			value: &publication, meta: &publication.PRWorkspaceRecord, status: string(publication.Status),
+		}
+		versions, historyErr := advancePRWorkspaceWorkerHistory(ctx, conn, map[string][]*prWorkspaceMutationRecord{
 			publication.WorkspaceID: {record},
 		}, now)
-		if err != nil {
-			return err
+		if historyErr != nil {
+			return historyErr
 		}
 		result = PRClaimedPublication{Publication: publication, WorkspaceVersion: versions[publication.WorkspaceID]}
 		return nil
 	})
-	if err != nil {
-		return PRClaimedPublication{}, fmt.Errorf("finish pull request publication: %w", s.dbError(err))
+	if transactionErr != nil {
+		return PRClaimedPublication{}, fmt.Errorf(
+			"finish pull request publication: %w",
+			s.dbError(transactionErr),
+		)
 	}
 	return result, nil
 }
@@ -362,12 +398,22 @@ func validatePRWorkspaceClaimRequest(input *PRWorkspaceClaimRequest) error {
 		return fmt.Errorf("%w: claim limit must be between 1 and %d", ErrInvalidPRWorkspace, maxPRWorkspaceClaimItems)
 	}
 	if input.LeaseDuration <= 0 || input.LeaseDuration > maxPRWorkspaceLease {
-		return fmt.Errorf("%w: lease duration must be positive and at most %s", ErrInvalidPRWorkspace, maxPRWorkspaceLease)
+		return fmt.Errorf(
+			"%w: lease duration must be positive and at most %s",
+			ErrInvalidPRWorkspace,
+			maxPRWorkspaceLease,
+		)
 	}
 	return nil
 }
 
-func loadPRWorkspaceClaimCandidates(ctx context.Context, conn *sql.Conn, query string, now time.Time, limit int) ([]prWorkspaceClaimCandidate, error) {
+func loadPRWorkspaceClaimCandidates(
+	ctx context.Context,
+	conn *sql.Conn,
+	query string,
+	now time.Time,
+	limit int,
+) ([]prWorkspaceClaimCandidate, error) {
 	rows, err := conn.QueryContext(ctx, query, toDBTime(now), toDBTime(now), limit)
 	if err != nil {
 		return nil, err
@@ -395,7 +441,12 @@ func requirePRWorkspaceRowsAffected(result sql.Result, action string) error {
 	return nil
 }
 
-func advancePRWorkspaceWorkerHistory(ctx context.Context, conn *sql.Conn, changes map[string][]*prWorkspaceMutationRecord, now time.Time) (map[string]int64, error) {
+func advancePRWorkspaceWorkerHistory(
+	ctx context.Context,
+	conn *sql.Conn,
+	changes map[string][]*prWorkspaceMutationRecord,
+	now time.Time,
+) (map[string]int64, error) {
 	workspaceIDs := make([]string, 0, len(changes))
 	for workspaceID := range changes {
 		workspaceIDs = append(workspaceIDs, workspaceID)

@@ -45,11 +45,18 @@ type countingReviewPublisher struct {
 	err    error
 }
 
-func (publisher *countingReviewPublisher) PublishReview(context.Context, ReviewPublicationRequest) (ReviewPublicationResult, error) {
+func (publisher *countingReviewPublisher) PublishReview(
+	context.Context,
+	ReviewPublicationRequest,
+) (ReviewPublicationResult, error) {
 	publisher.calls++
 	return publisher.result, publisher.err
 }
-func (*countingReviewPublisher) ReconcileReview(context.Context, ReviewPublicationRequest) (ReviewPublicationResult, bool, error) {
+
+func (*countingReviewPublisher) ReconcileReview(
+	context.Context,
+	ReviewPublicationRequest,
+) (ReviewPublicationResult, bool, error) {
 	return ReviewPublicationResult{}, false, nil
 }
 
@@ -60,11 +67,21 @@ type countingIssuePublisher struct {
 	found  bool
 }
 
-func (publisher *countingIssuePublisher) CreateIssue(context.Context, IssuePublicationRequest) (IssuePublicationResult, error) {
+func (publisher *countingIssuePublisher) CreateIssue(
+	context.Context,
+	IssuePublicationRequest,
+) (IssuePublicationResult, error) {
 	publisher.calls++
 	return publisher.result, publisher.err
 }
-func (publisher *countingIssuePublisher) FindIssueByMarker(context.Context, string, string, string, string) (IssuePublicationResult, bool, error) {
+
+func (publisher *countingIssuePublisher) FindIssueByMarker(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+) (IssuePublicationResult, bool, error) {
 	return publisher.result, publisher.found, publisher.err
 }
 
@@ -77,11 +94,17 @@ func (reconcileWaitingGates) Start(_ context.Context, request GateRequest) (Gate
 	}
 	return gate, nil
 }
+
 func (reconcileWaitingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
 	return answerTestGate(gate, fieldValues), nil
 }
 
-func publicationTestService(t *testing.T, mode DeferredIssueMode, gates GateEvaluator, now time.Time) (*Service, Aggregate) {
+func publicationTestService(
+	t *testing.T,
+	mode DeferredIssueMode,
+	gates GateEvaluator,
+	now time.Time,
+) (*Service, Aggregate) {
 	t.Helper()
 	store := NewMemoryStore()
 	input := testCreateInput()
@@ -96,20 +119,53 @@ func publicationTestService(t *testing.T, mode DeferredIssueMode, gates GateEval
 		BaseSHA: input.Provider.BaseSHA, HeadSHA: input.Provider.HeadSHA, Confirmed: true, CreatedAt: now,
 	}
 	stage := StageRun{
-		ID: "psr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Stage: "review", State: ExecutionSucceeded,
-		CharterID: charter.ID, HeadSHA: charter.HeadSHA, Attempt: 1, Summary: "retry review", StartedAt: now, FinishedAt: &now,
+		ID:         "psr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Stage:      "review",
+		State:      ExecutionSucceeded,
+		CharterID:  charter.ID,
+		HeadSHA:    charter.HeadSHA,
+		Attempt:    1,
+		Summary:    "retry review",
+		StartedAt:  now,
+		FinishedAt: &now,
 	}
 	inScope := Finding{
-		ID: "pfn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Fingerprint: "sha256:in-scope",
-		Origin: FindingOriginReview, OriginRunID: stage.ID, Title: "retry", Message: "fix retry",
-		Scope:       ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeXS, Presence: WorkCandidatePresent, TypeCompatible: true, Confidence: 1},
-		Disposition: FindingInScope, Version: 1, CreatedAt: now, UpdatedAt: now,
+		ID:          "pfn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Fingerprint: "sha256:in-scope",
+		Origin:      FindingOriginReview,
+		OriginRunID: stage.ID,
+		Title:       "retry",
+		Message:     "fix retry",
+		Scope: ScopeAssessment{
+			Distance:       ScopeExact,
+			Size:           ChangeSizeXS,
+			Presence:       WorkCandidatePresent,
+			TypeCompatible: true,
+			Confidence:     1,
+		},
+		Disposition: FindingInScope,
+		Version:     1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	deferred := Finding{
-		ID: "pfn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Fingerprint: "sha256:deferred",
-		Origin: FindingOriginReview, OriginRunID: stage.ID, Title: "follow-up", Message: "later",
-		Scope:       ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeS, Presence: WorkFollowUp, TypeCompatible: true, Confidence: 1},
-		Disposition: FindingDeferred, Version: 1, CreatedAt: now, UpdatedAt: now,
+		ID:          "pfn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Fingerprint: "sha256:deferred",
+		Origin:      FindingOriginReview,
+		OriginRunID: stage.ID,
+		Title:       "follow-up",
+		Message:     "later",
+		Scope: ScopeAssessment{
+			Distance:       ScopeRelatedFollowup,
+			Size:           ChangeSizeS,
+			Presence:       WorkFollowUp,
+			TypeCompatible: true,
+			Confidence:     1,
+		},
+		Disposition: FindingDeferred,
+		Version:     1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	group := DeferredGroup{
 		ID: "pdg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Title: "Follow-up", Body: "Track later",
@@ -126,7 +182,9 @@ func publicationTestService(t *testing.T, mode DeferredIssueMode, gates GateEval
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(ServiceConfig{Store: store, Gates: gates, DeferredIssueMode: mode, Now: func() time.Time { return now }})
+	service, err := NewService(
+		ServiceConfig{Store: store, Gates: gates, DeferredIssueMode: mode, Now: func() time.Time { return now }},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +224,10 @@ func TestTamperedPublicationNeverInvokesPublisher(t *testing.T) {
 	publication.payload = append([]byte(nil), publication.payload...)
 	publication.payload[len(publication.payload)-1] ^= 1
 	tampered, err := service.store.Mutate(context.Background(), Mutation{
-		WorkspaceID: queued.Workspace.ID, ExpectedVersion: queued.Workspace.Version,
-		RequestID: "request-review-tamper-store", Patch: AggregatePatch{ReplacePublications: []Publication{publication}},
+		WorkspaceID:     queued.Workspace.ID,
+		ExpectedVersion: queued.Workspace.Version,
+		RequestID:       "request-review-tamper-store",
+		Patch:           AggregatePatch{ReplacePublications: []Publication{publication}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +305,9 @@ func TestDeferredModeOffCancelsPreviouslyQueuedIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off, err := NewService(ServiceConfig{Store: ask.store, DeferredIssueMode: DeferredIssuesOff, Now: func() time.Time { return now }})
+	off, err := NewService(
+		ServiceConfig{Store: ask.store, DeferredIssueMode: DeferredIssuesOff, Now: func() time.Time { return now }},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,8 +316,15 @@ func TestDeferredModeOffCancelsPreviouslyQueuedIssue(t *testing.T) {
 		WorkspaceID: queued.Workspace.ID, PublicationID: queued.Publications[0].ID,
 		ExpectedVersion: queued.Workspace.Version, RequestID: "request-issue-off-dispatch",
 	})
-	if err != nil || publisher.calls != 0 || canceled.Publications[0].State != ExecutionCanceled || canceled.DeferredGroups[0].PublicationID != "" {
-		t.Fatalf("off cancellation = %#v groups=%#v calls=%d err=%v", canceled.Publications, canceled.DeferredGroups, publisher.calls, err)
+	if err != nil || publisher.calls != 0 || canceled.Publications[0].State != ExecutionCanceled ||
+		canceled.DeferredGroups[0].PublicationID != "" {
+		t.Fatalf(
+			"off cancellation = %#v groups=%#v calls=%d err=%v",
+			canceled.Publications,
+			canceled.DeferredGroups,
+			publisher.calls,
+			err,
+		)
 	}
 }
 
@@ -388,7 +457,12 @@ func TestAutomaticDeferredPolicyQueuesEligibleGroupsAndHonorsSuppression(t *test
 		suppressed.Aggregate, "request-auto-policy-suppressed",
 	)
 	if err != nil || len(unchanged.Publications) != 0 || !unchanged.DeferredGroups[0].PublicationSuppressed {
-		t.Fatalf("suppressed automatic policy = groups %#v pubs %#v err=%v", unchanged.DeferredGroups, unchanged.Publications, err)
+		t.Fatalf(
+			"suppressed automatic policy = groups %#v pubs %#v err=%v",
+			unchanged.DeferredGroups,
+			unchanged.Publications,
+			err,
+		)
 	}
 }
 
@@ -396,20 +470,20 @@ func TestAutomaticDeferredPolicyFailureSurfacesAndPolicyRetryQueuesIt(t *testing
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	service, aggregate := publicationTestService(t, DeferredIssuesAutomatic, passingGates{}, now)
 	service.store = &failAutomaticMutationStore{Store: service.store, remaining: 1}
-	handler, err := NewHTTPHandler(HTTPConfig{
+	handler, handlerErr := NewHTTPHandler(HTTPConfig{
 		Service: service, IssuePublisher: &countingIssuePublisher{},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if handlerErr != nil {
+		t.Fatal(handlerErr)
 	}
-	body, err := json.Marshal(map[string]any{
+	body, marshalErr := json.Marshal(map[string]any{
 		"expected_version": aggregate.Workspace.Version,
 		"request_id":       "request-auto-policy-http-retry",
 		"disposition":      FindingDeferred,
 		"reason":           "keep this as follow-up work",
 	})
-	if err != nil {
-		t.Fatal(err)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
 	}
 	path := RuntimeRoutePrefix + "/" + aggregate.Workspace.ID + "/findings/" + aggregate.DeferredGroups[0].FindingIDs[0] + "/disposition"
 	request := func() *http.Request {
@@ -432,16 +506,16 @@ func TestAutomaticDeferredPolicyFailureSurfacesAndPolicyRetryQueuesIt(t *testing
 	if current.Workspace.Version != aggregate.Workspace.Version+1 || len(current.Publications) != 0 {
 		t.Fatalf("primary mutation was not retained independently: %#v", current)
 	}
-	persisted, err := service.Get(context.Background(), aggregate.Workspace.ID)
-	if err != nil || persisted.Workspace.Version != current.Workspace.Version {
-		t.Fatalf("retained response does not match store: version=%d err=%v", persisted.Workspace.Version, err)
+	persisted, getErr := service.Get(context.Background(), aggregate.Workspace.ID)
+	if getErr != nil || persisted.Workspace.Version != current.Workspace.Version {
+		t.Fatalf("retained response does not match store: version=%d err=%v", persisted.Workspace.Version, getErr)
 	}
-	retryBody, err := json.Marshal(map[string]any{
+	retryBody, retryMarshalErr := json.Marshal(map[string]any{
 		"expected_version": current.Workspace.Version,
 		"request_id":       "request-auto-policy-sync-retry",
 	})
-	if err != nil {
-		t.Fatal(err)
+	if retryMarshalErr != nil {
+		t.Fatal(retryMarshalErr)
 	}
 	retry := httptest.NewRequest(
 		http.MethodPost,
@@ -460,7 +534,11 @@ func TestAutomaticDeferredPolicyFailureSurfacesAndPolicyRetryQueuesIt(t *testing
 	}
 	if len(result.Publications) != 1 || result.Publications[0].State != ExecutionQueued ||
 		result.DeferredGroups[0].PublicationID != result.Publications[0].ID {
-		t.Fatalf("automatic retry did not queue publication: groups=%#v publications=%#v", result.DeferredGroups, result.Publications)
+		t.Fatalf(
+			"automatic retry did not queue publication: groups=%#v publications=%#v",
+			result.DeferredGroups,
+			result.Publications,
+		)
 	}
 }
 
@@ -572,7 +650,11 @@ func TestAutomaticDeferredSyncReloadsPartialMultiGroupSuccess(t *testing.T) {
 	}
 	current := *failure.Current
 	if current.Workspace.Version != aggregate.Workspace.Version+1 || len(current.Publications) != 1 {
-		t.Fatalf("automatic partial failure hid committed progress: version=%d publications=%#v", current.Workspace.Version, current.Publications)
+		t.Fatalf(
+			"automatic partial failure hid committed progress: version=%d publications=%#v",
+			current.Workspace.Version,
+			current.Publications,
+		)
 	}
 	if current.DeferredGroups[0].PublicationID == "" || current.DeferredGroups[1].PublicationID != "" {
 		t.Fatalf("automatic partial group state = %#v", current.DeferredGroups)
@@ -590,10 +672,14 @@ func TestDeferredGateRejectionSuppressesAutomaticRequeue(t *testing.T) {
 		t.Fatal(err)
 	}
 	rejected, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: waiting.Gates[0].ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-issue-reject-gate", FieldValues: map[string]any{"action": "stop"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       waiting.Gates[0].ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-issue-reject-gate",
+		FieldValues:     map[string]any{"action": "stop"},
 	})
-	if err != nil || !rejected.DeferredGroups[0].PublicationSuppressed || rejected.DeferredGroups[0].PublicationID != "" {
+	if err != nil || !rejected.DeferredGroups[0].PublicationSuppressed ||
+		rejected.DeferredGroups[0].PublicationID != "" {
 		t.Fatalf("rejected group = %#v err=%v", rejected.DeferredGroups[0], err)
 	}
 }
@@ -617,17 +703,25 @@ func TestInterruptedIssueAbsenceBecomesUnknownAndHumanCanAssumeFailed(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknown, err := service.ReconcileIssuePublication(context.Background(), &countingIssuePublisher{}, ReconcileIssuePublicationRequest{
-		WorkspaceID: running.Aggregate.Workspace.ID, PublicationID: publication.ID,
-		ExpectedVersion: running.Aggregate.Workspace.Version, RequestID: "request-issue-recover",
-	})
+	unknown, err := service.ReconcileIssuePublication(
+		context.Background(),
+		&countingIssuePublisher{},
+		ReconcileIssuePublicationRequest{
+			WorkspaceID: running.Aggregate.Workspace.ID, PublicationID: publication.ID,
+			ExpectedVersion: running.Aggregate.Workspace.Version, RequestID: "request-issue-recover",
+		},
+	)
 	if err == nil || unknown.Publications[0].State != ExecutionUnknown {
 		t.Fatalf("recovery = %#v err=%v", unknown.Publications, err)
 	}
-	waiting, err := service.ReconcileIssuePublication(context.Background(), &countingIssuePublisher{}, ReconcileIssuePublicationRequest{
-		WorkspaceID: unknown.Workspace.ID, PublicationID: publication.ID,
-		ExpectedVersion: unknown.Workspace.Version, RequestID: "request-issue-reconcile-gate",
-	})
+	waiting, err := service.ReconcileIssuePublication(
+		context.Background(),
+		&countingIssuePublisher{},
+		ReconcileIssuePublicationRequest{
+			WorkspaceID: unknown.Workspace.ID, PublicationID: publication.ID,
+			ExpectedVersion: unknown.Workspace.Version, RequestID: "request-issue-reconcile-gate",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +730,8 @@ func TestInterruptedIssueAbsenceBecomesUnknownAndHumanCanAssumeFailed(t *testing
 		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID, ExpectedVersion: waiting.Workspace.Version,
 		RequestID: "request-issue-assume-failed", FieldValues: map[string]any{"action": "assume-failed"},
 	})
-	if err != nil || resolved.Publications[0].State != ExecutionFailed || resolved.DeferredGroups[0].PublicationID != "" {
+	if err != nil || resolved.Publications[0].State != ExecutionFailed ||
+		resolved.DeferredGroups[0].PublicationID != "" {
 		t.Fatalf("human resolution pubs=%#v groups=%#v err=%v", resolved.Publications, resolved.DeferredGroups, err)
 	}
 }
@@ -654,13 +749,19 @@ func TestIssueProviderErrorDuringRecoveryBecomesUnknown(t *testing.T) {
 	publication := queued.Publications[0]
 	publication.State, publication.UpdatedAt = ExecutionRunning, now.Add(-3*time.Minute)
 	running, _ := service.store.Mutate(context.Background(), Mutation{
-		WorkspaceID: queued.Workspace.ID, ExpectedVersion: queued.Workspace.Version,
-		RequestID: "request-issue-error-running", Patch: AggregatePatch{ReplacePublications: []Publication{publication}},
+		WorkspaceID:     queued.Workspace.ID,
+		ExpectedVersion: queued.Workspace.Version,
+		RequestID:       "request-issue-error-running",
+		Patch:           AggregatePatch{ReplacePublications: []Publication{publication}},
 	})
-	result, err := service.ReconcileIssuePublication(context.Background(), &countingIssuePublisher{err: errors.New("provider unavailable")}, ReconcileIssuePublicationRequest{
-		WorkspaceID: running.Aggregate.Workspace.ID, PublicationID: publication.ID,
-		ExpectedVersion: running.Aggregate.Workspace.Version, RequestID: "request-issue-error-reconcile",
-	})
+	result, err := service.ReconcileIssuePublication(
+		context.Background(),
+		&countingIssuePublisher{err: errors.New("provider unavailable")},
+		ReconcileIssuePublicationRequest{
+			WorkspaceID: running.Aggregate.Workspace.ID, PublicationID: publication.ID,
+			ExpectedVersion: running.Aggregate.Workspace.Version, RequestID: "request-issue-error-reconcile",
+		},
+	)
 	if err == nil || result.Publications[0].State != ExecutionUnknown {
 		t.Fatalf("provider error recovery = %#v err=%v", result.Publications, err)
 	}
@@ -676,15 +777,31 @@ func TestIssueReconciliationRejectsReviseAndDeferWithoutStrandingPublication(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknown := seedUnknownPublication(t, service, queued, queued.Publications[0], "request-issue-reconcile-actions-unknown")
-	waiting, err := service.ReconcileIssuePublication(context.Background(), &countingIssuePublisher{}, ReconcileIssuePublicationRequest{
-		WorkspaceID: unknown.Workspace.ID, PublicationID: unknown.Publications[0].ID,
-		ExpectedVersion: unknown.Workspace.Version, RequestID: "request-issue-reconcile-actions-gate",
-	})
+	unknown := seedUnknownPublication(
+		t,
+		service,
+		queued,
+		queued.Publications[0],
+		"request-issue-reconcile-actions-unknown",
+	)
+	waiting, err := service.ReconcileIssuePublication(
+		context.Background(),
+		&countingIssuePublisher{},
+		ReconcileIssuePublicationRequest{
+			WorkspaceID: unknown.Workspace.ID, PublicationID: unknown.Publications[0].ID,
+			ExpectedVersion: unknown.Workspace.Version, RequestID: "request-issue-reconcile-actions-gate",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved := rejectUnsupportedReconciliationOutcomesThenBlock(t, service, waiting, unknown.Publications[0].ID, "issue")
+	resolved := rejectUnsupportedReconciliationOutcomesThenBlock(
+		t,
+		service,
+		waiting,
+		unknown.Publications[0].ID,
+		"issue",
+	)
 	if resolved.DeferredGroups[0].PublicationID != "" {
 		t.Fatalf("assume-failed issue did not unlock deferred group: %#v", resolved.DeferredGroups[0])
 	}
@@ -708,15 +825,32 @@ func TestReviewReconciliationRejectsReviseAndDeferWithoutStrandingPublication(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknown := seedUnknownPublication(t, service, queued, queued.Publications[0], "request-review-reconcile-actions-unknown")
-	waiting, err := service.ReconcilePhasePublication(context.Background(), &countingReviewPublisher{}, nil, ReconcilePhasePublicationRequest{
-		WorkspaceID: unknown.Workspace.ID, PublicationID: unknown.Publications[0].ID,
-		ExpectedVersion: unknown.Workspace.Version, RequestID: "request-review-reconcile-actions-gate",
-	})
+	unknown := seedUnknownPublication(
+		t,
+		service,
+		queued,
+		queued.Publications[0],
+		"request-review-reconcile-actions-unknown",
+	)
+	waiting, err := service.ReconcilePhasePublication(
+		context.Background(),
+		&countingReviewPublisher{},
+		nil,
+		ReconcilePhasePublicationRequest{
+			WorkspaceID: unknown.Workspace.ID, PublicationID: unknown.Publications[0].ID,
+			ExpectedVersion: unknown.Workspace.Version, RequestID: "request-review-reconcile-actions-gate",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved := rejectUnsupportedReconciliationOutcomesThenBlock(t, service, waiting, unknown.Publications[0].ID, "review")
+	resolved := rejectUnsupportedReconciliationOutcomesThenBlock(
+		t,
+		service,
+		waiting,
+		unknown.Publications[0].ID,
+		"review",
+	)
 	requeued, err := service.QueueReviewPublication(context.Background(), QueueReviewPublicationRequest{
 		WorkspaceID: resolved.Workspace.ID, ExpectedVersion: resolved.Workspace.Version,
 		RequestID: "request-review-reconcile-actions-requeue", ExpectedHeadSHA: resolved.ProviderSnapshot.HeadSHA,
@@ -730,8 +864,11 @@ func TestReviewReconciliationRejectsReviseAndDeferWithoutStrandingPublication(t 
 func TestBranchReconciliationRejectsReviseAndDeferWithoutStrandingPublication(t *testing.T) {
 	service, waitingCompletion, completionGate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waitingCompletion.Workspace.ID, GateRunID: completionGate.ID,
-		ExpectedVersion: waitingCompletion.Workspace.Version, RequestID: "request-branch-reconcile-actions-complete", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     waitingCompletion.Workspace.ID,
+		GateRunID:       completionGate.ID,
+		ExpectedVersion: waitingCompletion.Workspace.Version,
+		RequestID:       "request-branch-reconcile-actions-complete",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -746,10 +883,15 @@ func TestBranchReconciliationRejectsReviseAndDeferWithoutStrandingPublication(t 
 	publication := queued.Publications[len(queued.Publications)-1]
 	unknown := seedUnknownPublication(t, service, queued, publication, "request-branch-reconcile-actions-unknown")
 	service.gates = reconcileWaitingGates{}
-	waiting, err := service.ReconcilePhasePublication(context.Background(), nil, &countingBranchPublisher{}, ReconcilePhasePublicationRequest{
-		WorkspaceID: unknown.Workspace.ID, PublicationID: publication.ID,
-		ExpectedVersion: unknown.Workspace.Version, RequestID: "request-branch-reconcile-actions-gate",
-	})
+	waiting, err := service.ReconcilePhasePublication(
+		context.Background(),
+		nil,
+		&countingBranchPublisher{},
+		ReconcilePhasePublicationRequest{
+			WorkspaceID: unknown.Workspace.ID, PublicationID: publication.ID,
+			ExpectedVersion: unknown.Workspace.Version, RequestID: "request-branch-reconcile-actions-gate",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -806,15 +948,24 @@ func rejectUnsupportedReconciliationOutcomesThenBlock(
 	unchangedGate, _ := findGate(unchanged.Gates, gate.ID)
 	if !errors.Is(err, ErrInvalid) || unchanged.Workspace.Version != waiting.Workspace.Version ||
 		publication.State != ExecutionUnknown || unchangedGate.State != ExecutionWaitingUser {
-		t.Fatalf("unsupported action stranded publication: workspace=%#v publication=%#v gate=%#v err=%v", unchanged.Workspace, publication, unchangedGate, err)
+		t.Fatalf(
+			"unsupported action stranded publication: workspace=%#v publication=%#v gate=%#v err=%v",
+			unchanged.Workspace,
+			publication,
+			unchangedGate,
+			err,
+		)
 	}
 	resolved, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       gate.ID,
 		ExpectedVersion: waiting.Workspace.Version,
-		RequestID:       "request-" + requestPrefix + "-assume-failed", FieldValues: map[string]any{"action": "assume-failed"},
+		RequestID:       "request-" + requestPrefix + "-assume-failed",
+		FieldValues:     map[string]any{"action": "assume-failed"},
 	})
 	publication, _ = findPublication(resolved.Publications, publicationID)
-	if err != nil || publication.State != ExecutionFailed || publication.PublicErrorCode != "publication_assumed_failed_by_user" {
+	if err != nil || publication.State != ExecutionFailed ||
+		publication.PublicErrorCode != "publication_assumed_failed_by_user" {
 		t.Fatalf("assume-failed did not resolve publication: publication=%#v err=%v", publication, err)
 	}
 	return resolved

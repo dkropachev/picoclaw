@@ -126,12 +126,12 @@ type PinnedLineParkRequest struct {
 // PinnedLineLease is controller-only evidence that one mutation reservation
 // owns the exact line version and tip. It exposes no path or internal branch.
 type PinnedLineLease struct {
-	WorkspaceID   string
-	Version       int64
-	MutationEpoch int64
-	Tip           string
-	Tree          string
-	AlreadyOwned  bool
+	WorkspaceID   string `json:"workspace_id"`
+	Version       int64  `json:"version"`
+	MutationEpoch int64  `json:"mutation_epoch"`
+	Tip           string `json:"tip"`
+	Tree          string `json:"tree"`
+	AlreadyOwned  bool   `json:"already_owned"`
 }
 
 // PinnedLineParkResult proves the retained commit and released mutation lease.

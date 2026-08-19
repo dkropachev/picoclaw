@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-type deferredAI struct{ serviceAI }
+type deferredAI struct{}
 
 func (deferredAI) RunIsolated(ctx context.Context, request IsolatedAIRequest) (map[string]any, error) {
 	if request.Operation == "deferred.group" {
@@ -34,10 +34,23 @@ func TestDeferredGroupingCoversEveryFinding(t *testing.T) {
 		CharterID: charter.ID, HeadSHA: charter.HeadSHA, Attempt: 1, StartedAt: now, FinishedAt: &now,
 	}
 	finding := Finding{
-		ID: "pfn_11111111111111111111111111111111", Fingerprint: "sha256:f",
-		Origin: FindingOriginReview, OriginRunID: stage.ID, Severity: "low", Title: "follow-up", Message: "later",
-		Scope:       ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeS, TypeCompatible: true, Confidence: 1},
-		Disposition: FindingDeferred, Version: 1, CreatedAt: now, UpdatedAt: now,
+		ID:          "pfn_11111111111111111111111111111111",
+		Fingerprint: "sha256:f",
+		Origin:      FindingOriginReview,
+		OriginRunID: stage.ID,
+		Severity:    "low",
+		Title:       "follow-up",
+		Message:     "later",
+		Scope: ScopeAssessment{
+			Distance:       ScopeRelatedFollowup,
+			Size:           ChangeSizeS,
+			TypeCompatible: true,
+			Confidence:     1,
+		},
+		Disposition: FindingDeferred,
+		Version:     1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	active := charter.ID
 	seed, _ := store.Mutate(context.Background(), Mutation{
@@ -47,8 +60,17 @@ func TestDeferredGroupingCoversEveryFinding(t *testing.T) {
 			AppendStageRuns: []StageRun{stage}, UpsertFindings: []Finding{finding},
 		},
 	})
-	service, _ := NewService(ServiceConfig{Store: store, AI: deferredAI{}, Gates: passingGates{}, Now: func() time.Time { return now }})
-	result, err := service.RegroupDeferred(context.Background(), RegroupDeferredRequest{WorkspaceID: input.Workspace.ID, ExpectedVersion: seed.Aggregate.Workspace.Version, RequestID: "request-00000031"})
+	service, _ := NewService(
+		ServiceConfig{Store: store, AI: deferredAI{}, Gates: passingGates{}, Now: func() time.Time { return now }},
+	)
+	result, err := service.RegroupDeferred(
+		context.Background(),
+		RegroupDeferredRequest{
+			WorkspaceID:     input.Workspace.ID,
+			ExpectedVersion: seed.Aggregate.Workspace.Version,
+			RequestID:       "request-00000031",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,10 +246,22 @@ func seededDeferredMutationService(t *testing.T) (*Service, Aggregate, []Deferre
 	findings := make([]Finding, len(findingIDs))
 	for index, id := range findingIDs {
 		findings[index] = Finding{
-			ID: id, Fingerprint: "sha256:deferred-" + id, Origin: FindingOriginReview,
-			Severity: "low", Title: "follow-up", Message: "track separately",
-			Scope:       ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeS, TypeCompatible: true, Confidence: 1},
-			Disposition: FindingDeferred, Version: 1, CreatedAt: now, UpdatedAt: now,
+			ID:          id,
+			Fingerprint: "sha256:deferred-" + id,
+			Origin:      FindingOriginReview,
+			Severity:    "low",
+			Title:       "follow-up",
+			Message:     "track separately",
+			Scope: ScopeAssessment{
+				Distance:       ScopeRelatedFollowup,
+				Size:           ChangeSizeS,
+				TypeCompatible: true,
+				Confidence:     1,
+			},
+			Disposition: FindingDeferred,
+			Version:     1,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 	}
 	groups := []DeferredGroup{
@@ -257,7 +291,13 @@ func seededDeferredMutationService(t *testing.T) (*Service, Aggregate, []Deferre
 	return service, seeded.Aggregate, groups
 }
 
-func replaceDeferredGroupForTest(t *testing.T, store Store, before Aggregate, group DeferredGroup, requestID string) Aggregate {
+func replaceDeferredGroupForTest(
+	t *testing.T,
+	store Store,
+	before Aggregate,
+	group DeferredGroup,
+	requestID string,
+) Aggregate {
 	t.Helper()
 	result, err := store.Mutate(t.Context(), Mutation{
 		WorkspaceID: before.Workspace.ID, ExpectedVersion: before.Workspace.Version,

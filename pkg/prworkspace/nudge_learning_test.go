@@ -52,7 +52,15 @@ func TestRunReviewPersistsFailedNudgeAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(ServiceConfig{Store: store, ReviewEvidence: serviceReviewEvidence{}, AI: failedReviewNudgeAI{}, Gates: passingGates{}, Now: func() time.Time { return now }})
+	service, err := NewService(
+		ServiceConfig{
+			Store:          store,
+			ReviewEvidence: serviceReviewEvidence{},
+			AI:             failedReviewNudgeAI{},
+			Gates:          passingGates{},
+			Now:            func() time.Time { return now },
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +197,15 @@ func TestRunReviewSelectsFromDurableWorkspaceLearning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(ServiceConfig{Store: store, ReviewEvidence: serviceReviewEvidence{}, AI: serviceAI{}, Gates: passingGates{}, Now: func() time.Time { return now }})
+	service, err := NewService(
+		ServiceConfig{
+			Store:          store,
+			ReviewEvidence: serviceReviewEvidence{},
+			AI:             serviceAI{},
+			Gates:          passingGates{},
+			Now:            func() time.Time { return now },
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -98,7 +98,12 @@ func marshalPRFindingPersistence(finding PRFinding) ([]byte, error) {
 
 func decodePRFindingPersistence(payload []byte) (PRFinding, error) {
 	if len(payload) < 2 || len(payload) > MaxPRWorkspaceRecordBytes {
-		return PRFinding{}, fmt.Errorf("%w: persisted finding has %d bytes, maximum %d", ErrInvalidPRWorkspace, len(payload), MaxPRWorkspaceRecordBytes)
+		return PRFinding{}, fmt.Errorf(
+			"%w: persisted finding has %d bytes, maximum %d",
+			ErrInvalidPRWorkspace,
+			len(payload),
+			MaxPRWorkspaceRecordBytes,
+		)
 	}
 	var persisted prFindingPersistence
 	if err := decodeStrictPRWorkspaceJSON(payload, &persisted); err != nil {
@@ -158,7 +163,10 @@ func decodePRWorkspacePatchPersistence(payload []byte) (PRWorkspacePatch, error)
 		seen[sidecar.FindingIndex] = struct{}{}
 		finding := &persisted.Patch.UpsertFindings[sidecar.FindingIndex]
 		if sidecar.FindingID == "" || sidecar.FindingID != finding.ID {
-			return PRWorkspacePatch{}, fmt.Errorf("%w: finding source identity does not match patch", ErrInvalidPRWorkspace)
+			return PRWorkspacePatch{}, fmt.Errorf(
+				"%w: finding source identity does not match patch",
+				ErrInvalidPRWorkspace,
+			)
 		}
 		if err := finding.SetProtectedSourceExecution(&sidecar.Source); err != nil {
 			return PRWorkspacePatch{}, err
@@ -187,11 +195,11 @@ func (s *Store) SetPRWorkspaceIngressCutover(ctx context.Context, watermark PRIn
 	if err := validatePRIngressCutoverWatermark(watermark); err != nil {
 		return err
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return clockErr
 	}
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		var receivedAt int64
 		var eventID string
 		err := conn.QueryRowContext(ctx, `SELECT inbox_received_at, inbox_event_id
@@ -221,14 +229,17 @@ func (s *Store) SetPRWorkspaceIngressCutover(ctx context.Context, watermark PRIn
 			watermark.InboxEventID, toDBTime(now), watermark.Source, watermark.Connector)
 		return err
 	})
-	if err != nil {
-		return fmt.Errorf("set pull request ingress cutover: %w", s.dbError(err))
+	if transactionErr != nil {
+		return fmt.Errorf("set pull request ingress cutover: %w", s.dbError(transactionErr))
 	}
 	return nil
 }
 
 // GetPRWorkspaceIngressCutover loads the process-wide cutover cursor.
-func (s *Store) GetPRWorkspaceIngressCutover(ctx context.Context, source, connector string) (PRIngressCutoverWatermark, error) {
+func (s *Store) GetPRWorkspaceIngressCutover(
+	ctx context.Context,
+	source, connector string,
+) (PRIngressCutoverWatermark, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRIngressCutoverWatermark{}, err
 	}
@@ -284,9 +295,9 @@ func (s *Store) CreatePRWorkspace(
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspaceAggregate{}, false, err
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return PRWorkspaceAggregate{}, false, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return PRWorkspaceAggregate{}, false, clockErr
 	}
 	input.RequestID = strings.TrimSpace(input.RequestID)
 	if err := validatePRWorkspaceRequestID(input.RequestID); err != nil {
@@ -312,20 +323,29 @@ func (s *Store) CreatePRWorkspace(
 	if err := validatePRProviderSnapshot(input.Provider); err != nil {
 		return PRWorkspaceAggregate{}, false, err
 	}
-	canonical, err := json.Marshal(struct {
+	canonical, marshalErr := json.Marshal(struct {
 		WorkspaceID    string             `json:"workspace_id,omitempty"`
 		Provider       PRProviderSnapshot `json:"provider"`
 		Phase          PRWorkspacePhase   `json:"phase"`
 		ExecutionState PRExecutionState   `json:"execution_state"`
 	}{input.WorkspaceID, input.Provider, input.Phase, input.ExecutionState})
-	if err != nil {
-		return PRWorkspaceAggregate{}, false, fmt.Errorf("%w: encode create request: %v", ErrInvalidPRWorkspace, err)
+	if marshalErr != nil {
+		return PRWorkspaceAggregate{}, false, fmt.Errorf(
+			"%w: encode create request: %v",
+			ErrInvalidPRWorkspace,
+			marshalErr,
+		)
 	}
 	requestHash := hashPRWorkspaceRequest("create", canonical)
 
 	var result prWorkspaceCreateResult
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		if replay, ok, replayErr := loadPRWorkspaceCreateReplay(ctx, conn, input.RequestID, requestHash); replayErr != nil {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		if replay, ok, replayErr := loadPRWorkspaceCreateReplay(
+			ctx,
+			conn,
+			input.RequestID,
+			requestHash,
+		); replayErr != nil {
 			return replayErr
 		} else if ok {
 			result = replay
@@ -338,10 +358,27 @@ func (s *Store) CreatePRWorkspace(
 		}
 		if findErr == nil {
 			if input.WorkspaceID != "" && input.WorkspaceID != workspace.ID {
-				return fmt.Errorf("%w: provider identity already has workspace %s", ErrPRWorkspaceConflict, workspace.ID)
+				return fmt.Errorf(
+					"%w: provider identity already has workspace %s",
+					ErrPRWorkspaceConflict,
+					workspace.ID,
+				)
 			}
-			result = prWorkspaceCreateResult{WorkspaceID: workspace.ID, WorkspaceVersion: workspace.Version, Created: false}
-			return insertPRWorkspaceRequest(ctx, conn, input.RequestID, workspace.ID, "create", requestHash, result, now)
+			result = prWorkspaceCreateResult{
+				WorkspaceID:      workspace.ID,
+				WorkspaceVersion: workspace.Version,
+				Created:          false,
+			}
+			return insertPRWorkspaceRequest(
+				ctx,
+				conn,
+				input.RequestID,
+				workspace.ID,
+				"create",
+				requestHash,
+				result,
+				now,
+			)
 		}
 
 		workspaceID := input.WorkspaceID
@@ -377,7 +414,11 @@ func (s *Store) CreatePRWorkspace(
 			return marshalErr
 		}
 		if len(providerJSON) > MaxPRWorkspaceRecordBytes {
-			return fmt.Errorf("%w: provider snapshot exceeds %d bytes", ErrInvalidPRWorkspace, MaxPRWorkspaceRecordBytes)
+			return fmt.Errorf(
+				"%w: provider snapshot exceeds %d bytes",
+				ErrInvalidPRWorkspace,
+				MaxPRWorkspaceRecordBytes,
+			)
 		}
 		if _, execErr := conn.ExecContext(ctx, `
 			INSERT INTO pr_workspaces (
@@ -403,19 +444,37 @@ func (s *Store) CreatePRWorkspace(
 		); execErr != nil {
 			return execErr
 		}
-		initialRecord := &prWorkspaceMutationRecord{table: "pr_provider_snapshots", prefix: prProviderSnapshotIDPrefix, immutable: true, mode: "append", value: &input.Provider, meta: &input.Provider.PRWorkspaceRecord, status: "observed"}
-		if historyErr := appendPRWorkspaceHistory(ctx, conn, workspaceID, 1, []*prWorkspaceMutationRecord{initialRecord}, now); historyErr != nil {
+		initialRecord := &prWorkspaceMutationRecord{
+			table:     "pr_provider_snapshots",
+			prefix:    prProviderSnapshotIDPrefix,
+			immutable: true,
+			mode:      "append",
+			value:     &input.Provider,
+			meta:      &input.Provider.PRWorkspaceRecord,
+			status:    "observed",
+		}
+		if historyErr := appendPRWorkspaceHistory(
+			ctx,
+			conn,
+			workspaceID,
+			1,
+			[]*prWorkspaceMutationRecord{initialRecord},
+			now,
+		); historyErr != nil {
 			return historyErr
 		}
 		result = prWorkspaceCreateResult{WorkspaceID: workspaceID, WorkspaceVersion: 1, Created: true}
 		return insertPRWorkspaceRequest(ctx, conn, input.RequestID, workspaceID, "create", requestHash, result, now)
 	})
-	if err != nil {
-		return PRWorkspaceAggregate{}, false, fmt.Errorf("create pull request workspace: %w", s.dbError(err))
+	if transactionErr != nil {
+		return PRWorkspaceAggregate{}, false, fmt.Errorf(
+			"create pull request workspace: %w",
+			s.dbError(transactionErr),
+		)
 	}
-	aggregate, err := s.getPRWorkspaceAtVersion(ctx, result.WorkspaceID, result.WorkspaceVersion)
-	if err != nil {
-		return PRWorkspaceAggregate{}, false, err
+	aggregate, loadErr := s.getPRWorkspaceAtVersion(ctx, result.WorkspaceID, result.WorkspaceVersion)
+	if loadErr != nil {
+		return PRWorkspaceAggregate{}, false, loadErr
 	}
 	return aggregate, result.Created, nil
 }
@@ -516,10 +575,14 @@ func (s *Store) ListPRWorkspaces(ctx context.Context, filter PRWorkspaceFilter) 
 		if *filter.NeedsAction {
 			operator = "IN"
 		}
-		clauses = append(clauses, "execution_state "+operator+" ('waiting_gate', 'waiting_user', 'failed', 'blocked', 'unknown')")
+		clauses = append(
+			clauses,
+			"execution_state "+operator+" ('waiting_gate', 'waiting_user', 'failed', 'blocked', 'unknown')",
+		)
 	}
 	if filter.After != nil {
-		if filter.After.UpdatedAt.IsZero() || !validPrefixedID(strings.TrimSpace(filter.After.ID), prWorkspaceIDPrefix) {
+		if filter.After.UpdatedAt.IsZero() ||
+			!validPrefixedID(strings.TrimSpace(filter.After.ID), prWorkspaceIDPrefix) {
 			return PRWorkspacePage{}, fmt.Errorf("%w: invalid workspace cursor", ErrInvalidPRWorkspace)
 		}
 		clauses = append(clauses, "(updated_at < ? OR (updated_at = ? AND id < ?))")
@@ -578,13 +641,13 @@ func (s *Store) ApplyPRWorkspaceMutation(
 	if err := validatePRWorkspaceRequestID(input.RequestID); err != nil {
 		return PRWorkspaceMutationResult{}, err
 	}
-	decoded, canonical, err := decodePRWorkspaceMutation(input.Kind, input.Payload)
-	if err != nil {
-		return PRWorkspaceMutationResult{}, err
+	decoded, canonical, decodeErr := decodePRWorkspaceMutation(input.Kind, input.Payload)
+	if decodeErr != nil {
+		return PRWorkspaceMutationResult{}, decodeErr
 	}
 	requestHash := hashPRWorkspaceRequest(string(input.Kind), canonical)
 	var result PRWorkspaceMutationResult
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		if replay, ok, replayErr := loadPRWorkspaceMutationReplay(ctx, conn, input, requestHash); replayErr != nil {
 			return replayErr
 		} else if ok {
@@ -596,7 +659,12 @@ func (s *Store) ApplyPRWorkspaceMutation(
 			return getErr
 		}
 		if workspace.Version != input.ExpectedVersion {
-			return fmt.Errorf("%w: workspace version got %d want %d", ErrPRWorkspaceConflict, workspace.Version, input.ExpectedVersion)
+			return fmt.Errorf(
+				"%w: workspace version got %d want %d",
+				ErrPRWorkspaceConflict,
+				workspace.Version,
+				input.ExpectedVersion,
+			)
 		}
 		now, clockErr := s.currentTime()
 		if clockErr != nil {
@@ -640,7 +708,14 @@ func (s *Store) ApplyPRWorkspaceMutation(
 		if affected != 1 {
 			return fmt.Errorf("%w: workspace changed during mutation", ErrPRWorkspaceConflict)
 		}
-		if historyErr := appendPRWorkspaceHistory(ctx, conn, workspace.ID, newVersion, changedRecords, now); historyErr != nil {
+		if historyErr := appendPRWorkspaceHistory(
+			ctx,
+			conn,
+			workspace.ID,
+			newVersion,
+			changedRecords,
+			now,
+		); historyErr != nil {
 			return historyErr
 		}
 		result = PRWorkspaceMutationResult{
@@ -648,10 +723,22 @@ func (s *Store) ApplyPRWorkspaceMutation(
 			RequestID: input.RequestID, Kind: input.Kind, EntityID: entityID,
 			Created: created, AppliedAt: now,
 		}
-		return insertPRWorkspaceRequest(ctx, conn, input.RequestID, workspace.ID, string(input.Kind), requestHash, result, now)
+		return insertPRWorkspaceRequest(
+			ctx,
+			conn,
+			input.RequestID,
+			workspace.ID,
+			string(input.Kind),
+			requestHash,
+			result,
+			now,
+		)
 	})
-	if err != nil {
-		return PRWorkspaceMutationResult{}, fmt.Errorf("apply pull request workspace mutation: %w", s.dbError(err))
+	if transactionErr != nil {
+		return PRWorkspaceMutationResult{}, fmt.Errorf(
+			"apply pull request workspace mutation: %w",
+			s.dbError(transactionErr),
+		)
 	}
 	return result, nil
 }
@@ -678,28 +765,32 @@ func (s *Store) ApplyPRWorkspacePatch(
 	if err := validatePRWorkspaceRequestID(input.RequestID); err != nil {
 		return PRWorkspacePatchResult{}, err
 	}
-	rawPatch, err := marshalPRWorkspacePatchPersistence(input.Patch)
-	if err != nil {
-		return PRWorkspacePatchResult{}, fmt.Errorf("%w: encode patch: %v", ErrInvalidPRWorkspace, err)
+	rawPatch, marshalErr := marshalPRWorkspacePatchPersistence(input.Patch)
+	if marshalErr != nil {
+		return PRWorkspacePatchResult{}, fmt.Errorf("%w: encode patch: %v", ErrInvalidPRWorkspace, marshalErr)
 	}
-	normalizedPatch, err := decodePRWorkspacePatchPersistence(rawPatch)
-	if err != nil {
-		return PRWorkspacePatchResult{}, err
+	normalizedPatch, decodeErr := decodePRWorkspacePatchPersistence(rawPatch)
+	if decodeErr != nil {
+		return PRWorkspacePatchResult{}, decodeErr
 	}
 	if err := validatePRWorkspacePatch(&normalizedPatch); err != nil {
 		return PRWorkspacePatchResult{}, err
 	}
 	input.Patch = normalizedPatch
-	canonical, err := marshalPRWorkspacePatchPersistence(input.Patch)
-	if err != nil {
-		return PRWorkspacePatchResult{}, fmt.Errorf("%w: encode normalized patch: %v", ErrInvalidPRWorkspace, err)
+	canonical, canonicalErr := marshalPRWorkspacePatchPersistence(input.Patch)
+	if canonicalErr != nil {
+		return PRWorkspacePatchResult{}, fmt.Errorf(
+			"%w: encode normalized patch: %v",
+			ErrInvalidPRWorkspace,
+			canonicalErr,
+		)
 	}
 	if len(canonical) > 16<<20 {
 		return PRWorkspacePatchResult{}, fmt.Errorf("%w: patch exceeds 16 MiB", ErrInvalidPRWorkspace)
 	}
 	requestHash := hashPRWorkspaceRequest("patch", canonical)
 	var result PRWorkspacePatchResult
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		if replay, ok, replayErr := loadPRWorkspacePatchReplay(ctx, conn, input, requestHash); replayErr != nil {
 			return replayErr
 		} else if ok {
@@ -712,7 +803,12 @@ func (s *Store) ApplyPRWorkspacePatch(
 			return getErr
 		}
 		if workspace.Version != input.ExpectedVersion {
-			return fmt.Errorf("%w: workspace version got %d want %d", ErrPRWorkspaceConflict, workspace.Version, input.ExpectedVersion)
+			return fmt.Errorf(
+				"%w: workspace version got %d want %d",
+				ErrPRWorkspaceConflict,
+				workspace.Version,
+				input.ExpectedVersion,
+			)
 		}
 		now, clockErr := s.currentTime()
 		if clockErr != nil {
@@ -739,17 +835,32 @@ func (s *Store) ApplyPRWorkspacePatch(
 					return err
 				}
 			}
-			if _, err := conn.ExecContext(ctx, `UPDATE pr_workspaces SET active_charter_id = ? WHERE id = ?`, charterID, workspace.ID); err != nil {
+			if _, err := conn.ExecContext(
+				ctx,
+				`UPDATE pr_workspaces SET active_charter_id = ? WHERE id = ?`,
+				charterID,
+				workspace.ID,
+			); err != nil {
 				return err
 			}
 		}
 		if input.Patch.Phase != nil {
-			if _, err := conn.ExecContext(ctx, `UPDATE pr_workspaces SET phase = ? WHERE id = ?`, *input.Patch.Phase, workspace.ID); err != nil {
+			if _, err := conn.ExecContext(
+				ctx,
+				`UPDATE pr_workspaces SET phase = ? WHERE id = ?`,
+				*input.Patch.Phase,
+				workspace.ID,
+			); err != nil {
 				return err
 			}
 		}
 		if input.Patch.ExecutionState != nil {
-			if _, err := conn.ExecContext(ctx, `UPDATE pr_workspaces SET execution_state = ? WHERE id = ?`, *input.Patch.ExecutionState, workspace.ID); err != nil {
+			if _, err := conn.ExecContext(
+				ctx,
+				`UPDATE pr_workspaces SET execution_state = ? WHERE id = ?`,
+				*input.Patch.ExecutionState,
+				workspace.ID,
+			); err != nil {
 				return err
 			}
 		}
@@ -766,7 +877,14 @@ func (s *Store) ApplyPRWorkspacePatch(
 		if affected != 1 {
 			return fmt.Errorf("%w: workspace changed during patch", ErrPRWorkspaceConflict)
 		}
-		if historyErr := appendPRWorkspaceHistory(ctx, conn, workspace.ID, newVersion, records, now); historyErr != nil {
+		if historyErr := appendPRWorkspaceHistory(
+			ctx,
+			conn,
+			workspace.ID,
+			newVersion,
+			records,
+			now,
+		); historyErr != nil {
 			return historyErr
 		}
 		aggregate, err := loadPRWorkspaceAggregateAtVersion(ctx, conn, workspace.ID, newVersion)
@@ -777,8 +895,11 @@ func (s *Store) ApplyPRWorkspacePatch(
 		receipt := prWorkspacePatchReceipt{WorkspaceID: workspace.ID, WorkspaceVersion: newVersion}
 		return insertPRWorkspaceRequest(ctx, conn, input.RequestID, workspace.ID, "patch", requestHash, receipt, now)
 	})
-	if err != nil {
-		return PRWorkspacePatchResult{}, fmt.Errorf("apply pull request workspace patch: %w", s.dbError(err))
+	if transactionErr != nil {
+		return PRWorkspacePatchResult{}, fmt.Errorf(
+			"apply pull request workspace patch: %w",
+			s.dbError(transactionErr),
+		)
 	}
 	return result, nil
 }
@@ -851,10 +972,29 @@ func prWorkspacePatchRecords(patch *PRWorkspacePatch) []*prWorkspaceMutationReco
 		if appendOnly {
 			mode = "append"
 		}
-		result = append(result, &prWorkspaceMutationRecord{table: table, prefix: prefix, immutable: immutable, mode: mode, value: value, meta: meta, status: status})
+		result = append(
+			result,
+			&prWorkspaceMutationRecord{
+				table:     table,
+				prefix:    prefix,
+				immutable: immutable,
+				mode:      mode,
+				value:     value,
+				meta:      meta,
+				status:    status,
+			},
+		)
 	}
 	if patch.ProviderSnapshot != nil {
-		add("pr_provider_snapshots", prProviderSnapshotIDPrefix, true, patch.ProviderSnapshot, &patch.ProviderSnapshot.PRWorkspaceRecord, "observed", true)
+		add(
+			"pr_provider_snapshots",
+			prProviderSnapshotIDPrefix,
+			true,
+			patch.ProviderSnapshot,
+			&patch.ProviderSnapshot.PRWorkspaceRecord,
+			"observed",
+			true,
+		)
 	}
 	for i := range patch.AppendCharters {
 		v := &patch.AppendCharters[i]
@@ -913,7 +1053,15 @@ func prWorkspacePatchRecords(patch *PRWorkspacePatch) []*prWorkspaceMutationReco
 	}
 	for i := range patch.ReplaceLessons {
 		v := &patch.ReplaceLessons[i]
-		add("pr_repository_lessons", prRepositoryLessonIDPrefix, false, v, &v.PRWorkspaceRecord, string(v.Status), false)
+		add(
+			"pr_repository_lessons",
+			prRepositoryLessonIDPrefix,
+			false,
+			v,
+			&v.PRWorkspaceRecord,
+			string(v.Status),
+			false,
+		)
 	}
 	for i := range patch.AppendMessages {
 		v := &patch.AppendMessages[i]
@@ -987,27 +1135,35 @@ func prWorkspacePatchRecords(patch *PRWorkspacePatch) []*prWorkspaceMutationReco
 	return result
 }
 
-func loadPRWorkspacePatchReplay(ctx context.Context, conn *sql.Conn, input PRWorkspacePatchMutation, requestHash string) (PRWorkspacePatchResult, bool, error) {
+func loadPRWorkspacePatchReplay(
+	ctx context.Context,
+	conn *sql.Conn,
+	input PRWorkspacePatchMutation,
+	requestHash string,
+) (PRWorkspacePatchResult, bool, error) {
 	var workspaceID, kind, storedHash string
 	var payload []byte
-	err := conn.QueryRowContext(ctx, `SELECT workspace_id, kind, request_hash, result_json
+	queryErr := conn.QueryRowContext(ctx, `SELECT workspace_id, kind, request_hash, result_json
 		FROM pr_workspace_requests WHERE request_id = ?`, input.RequestID).Scan(&workspaceID, &kind, &storedHash, &payload)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(queryErr, sql.ErrNoRows) {
 		return PRWorkspacePatchResult{}, false, nil
 	}
-	if err != nil {
-		return PRWorkspacePatchResult{}, false, err
+	if queryErr != nil {
+		return PRWorkspacePatchResult{}, false, queryErr
 	}
 	if workspaceID != input.WorkspaceID || kind != "patch" || storedHash != requestHash {
-		return PRWorkspacePatchResult{}, false, fmt.Errorf("%w: request ID reused with different content", ErrPRWorkspaceConflict)
+		return PRWorkspacePatchResult{}, false, fmt.Errorf(
+			"%w: request ID reused with different content",
+			ErrPRWorkspaceConflict,
+		)
 	}
 	var receipt prWorkspacePatchReceipt
 	if err := json.Unmarshal(payload, &receipt); err != nil {
 		return PRWorkspacePatchResult{}, false, fmt.Errorf("decode workspace patch replay: %w", err)
 	}
-	aggregate, err := loadPRWorkspaceAggregateAtVersion(ctx, conn, receipt.WorkspaceID, receipt.WorkspaceVersion)
-	if err != nil {
-		return PRWorkspacePatchResult{}, false, err
+	aggregate, loadErr := loadPRWorkspaceAggregateAtVersion(ctx, conn, receipt.WorkspaceID, receipt.WorkspaceVersion)
+	if loadErr != nil {
+		return PRWorkspacePatchResult{}, false, loadErr
 	}
 	return PRWorkspacePatchResult{Aggregate: aggregate}, true, nil
 }
@@ -1089,11 +1245,17 @@ func applyPRWorkspaceRecord(
 			waitingForGate := value.Status == PRPublicationUnknown &&
 				(value.ExecutionState == PRExecutionWaitingGate || value.ExecutionState == PRExecutionWaitingUser)
 			if (value.Status != PRPublicationPending && !waitingForGate) || value.Attempts != 0 {
-				return "", false, fmt.Errorf("%w: publication must start pending or gate-waiting with zero attempts", ErrInvalidPRWorkspace)
+				return "", false, fmt.Errorf(
+					"%w: publication must start pending or gate-waiting with zero attempts",
+					ErrInvalidPRWorkspace,
+				)
 			}
 		case *PRWorkspaceOperationIntent:
 			if value.State != PRExecutionQueued || value.Attempts != 0 {
-				return "", false, fmt.Errorf("%w: operation must start queued with zero attempts", ErrInvalidPRWorkspace)
+				return "", false, fmt.Errorf(
+					"%w: operation must start queued with zero attempts",
+					ErrInvalidPRWorkspace,
+				)
 			}
 		}
 	}
@@ -1118,7 +1280,12 @@ func applyPRWorkspaceRecord(
 		return "", false, fmt.Errorf("%w: encode mutation record: %v", ErrInvalidPRWorkspace, err)
 	}
 	if len(payload) < 2 || len(payload) > MaxPRWorkspaceRecordBytes {
-		return "", false, fmt.Errorf("%w: record payload has %d bytes, maximum %d", ErrInvalidPRWorkspace, len(payload), MaxPRWorkspaceRecordBytes)
+		return "", false, fmt.Errorf(
+			"%w: record payload has %d bytes, maximum %d",
+			ErrInvalidPRWorkspace,
+			len(payload),
+			MaxPRWorkspaceRecordBytes,
+		)
 	}
 	if created {
 		if err := insertPRWorkspaceRecord(ctx, conn, workspace.ID, record, payload); err != nil {
@@ -1169,7 +1336,13 @@ func applyPRWorkspaceRecord(
 	return record.meta.ID, created, nil
 }
 
-func insertPRWorkspaceRecord(ctx context.Context, conn *sql.Conn, workspaceID string, record *prWorkspaceMutationRecord, payload []byte) error {
+func insertPRWorkspaceRecord(
+	ctx context.Context,
+	conn *sql.Conn,
+	workspaceID string,
+	record *prWorkspaceMutationRecord,
+	payload []byte,
+) error {
 	var err error
 	switch value := record.value.(type) {
 	case *PRDeferredGroupItem:
@@ -1204,7 +1377,13 @@ func insertPRWorkspaceRecord(ctx context.Context, conn *sql.Conn, workspaceID st
 	return err
 }
 
-func updatePRWorkspaceRecord(ctx context.Context, conn *sql.Conn, workspaceID string, record *prWorkspaceMutationRecord, payload []byte) (sql.Result, error) {
+func updatePRWorkspaceRecord(
+	ctx context.Context,
+	conn *sql.Conn,
+	workspaceID string,
+	record *prWorkspaceMutationRecord,
+	payload []byte,
+) (sql.Result, error) {
 	switch value := record.value.(type) {
 	case *PRDeferredGroupItem:
 		return conn.ExecContext(ctx, `UPDATE pr_deferred_group_items SET status = ?,
@@ -1251,6 +1430,7 @@ func supersedeConfirmedPRCharters(
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	type charterRow struct {
 		id      string
 		charter PRCharterRevision
@@ -1344,7 +1524,8 @@ func validatePRWorkspaceReferences(
 		}
 	case *PRRepositoryLesson:
 		var repositoryID string
-		if err := conn.QueryRowContext(ctx, `SELECT repository_id FROM pr_workspaces WHERE id = ?`, workspaceID).Scan(&repositoryID); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT repository_id FROM pr_workspaces WHERE id = ?`, workspaceID).
+			Scan(&repositoryID); err != nil {
 			return err
 		}
 		if record.RepositoryID != repositoryID {
@@ -1436,15 +1617,16 @@ func validatePRWorkspaceAggregateReferences(ctx context.Context, conn *sql.Conn,
 			return nil
 		}
 		var found int
-		err := conn.QueryRowContext(ctx, "SELECT 1 FROM "+table+" WHERE id = ? AND workspace_id = ?", id, workspaceID).Scan(&found)
+		err := conn.QueryRowContext(ctx, "SELECT 1 FROM "+table+" WHERE id = ? AND workspace_id = ?", id, workspaceID).
+			Scan(&found)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: %s does not belong to workspace", ErrPRWorkspaceConflict, field)
 		}
 		return err
 	}
-	findings, err := loadPRWorkspaceFindings(ctx, conn, workspaceID)
-	if err != nil {
-		return err
+	findings, findingsErr := loadPRWorkspaceFindings(ctx, conn, workspaceID)
+	if findingsErr != nil {
+		return findingsErr
 	}
 	for _, finding := range findings {
 		if err := require("pr_nudge_rounds", finding.NudgeRoundID, "finding nudge_round_id"); err != nil {
@@ -1455,18 +1637,18 @@ func validatePRWorkspaceAggregateReferences(ctx context.Context, conn *sql.Conn,
 	for _, finding := range findings {
 		findingDisposition[finding.ID] = finding.Disposition
 	}
-	items, err := loadPRWorkspaceRecords[PRDeferredGroupItem](ctx, conn, "pr_deferred_group_items", workspaceID)
-	if err != nil {
-		return err
+	items, itemsErr := loadPRWorkspaceRecords[PRDeferredGroupItem](ctx, conn, "pr_deferred_group_items", workspaceID)
+	if itemsErr != nil {
+		return itemsErr
 	}
 	for _, item := range items {
 		if !item.Removed && findingDisposition[item.FindingID] != PRFindingDeferred {
 			return fmt.Errorf("%w: non-deferred finding remains in deferred group", ErrPRWorkspaceConflict)
 		}
 	}
-	rounds, err := loadPRWorkspaceRecords[PRNudgeRound](ctx, conn, "pr_nudge_rounds", workspaceID)
-	if err != nil {
-		return err
+	rounds, roundsErr := loadPRWorkspaceRecords[PRNudgeRound](ctx, conn, "pr_nudge_rounds", workspaceID)
+	if roundsErr != nil {
+		return roundsErr
 	}
 	for _, round := range rounds {
 		for _, findingID := range round.FindingIDs {
@@ -1475,9 +1657,9 @@ func validatePRWorkspaceAggregateReferences(ctx context.Context, conn *sql.Conn,
 			}
 		}
 	}
-	groups, err := loadPRWorkspaceRecords[PRDeferredGroup](ctx, conn, "pr_deferred_groups", workspaceID)
-	if err != nil {
-		return err
+	groups, groupsErr := loadPRWorkspaceRecords[PRDeferredGroup](ctx, conn, "pr_deferred_groups", workspaceID)
+	if groupsErr != nil {
+		return groupsErr
 	}
 	for _, group := range groups {
 		if err := require("pr_publications", group.PublicationID, "deferred publication_id"); err != nil {
@@ -1549,7 +1731,11 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		if err != nil {
 			return err
 		}
-		if err := equal("finding provenance", []string{old.Origin, old.StageRunID, old.NudgeRoundID, old.ExternalID, old.Fingerprint}, []string{value.Origin, value.StageRunID, value.NudgeRoundID, value.ExternalID, value.Fingerprint}); err != nil {
+		if err := equal(
+			"finding provenance",
+			[]string{old.Origin, old.StageRunID, old.NudgeRoundID, old.ExternalID, old.Fingerprint},
+			[]string{value.Origin, value.StageRunID, value.NudgeRoundID, value.ExternalID, value.Fingerprint},
+		); err != nil {
 			return err
 		}
 		if !equalProtectedPRFindingSource(old, *value) {
@@ -1561,7 +1747,11 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		if err := json.Unmarshal(existing, &old); err != nil {
 			return err
 		}
-		return equal("conversation identity", []string{old.Channel, string(old.Phase)}, []string{value.Channel, string(value.Phase)})
+		return equal(
+			"conversation identity",
+			[]string{old.Channel, string(old.Phase)},
+			[]string{value.Channel, string(value.Phase)},
+		)
 	case *PRCorrection:
 		var old PRCorrection
 		if err := json.Unmarshal(existing, &old); err != nil {
@@ -1631,7 +1821,11 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		if err := json.Unmarshal(existing, &old); err != nil {
 			return err
 		}
-		return equal("validation inputs", []string{old.StageRunID, old.RepairAttemptID, old.CandidateSHA, old.Kind, old.Command}, []string{value.StageRunID, value.RepairAttemptID, value.CandidateSHA, value.Kind, value.Command})
+		return equal(
+			"validation inputs",
+			[]string{old.StageRunID, old.RepairAttemptID, old.CandidateSHA, old.Kind, old.Command},
+			[]string{value.StageRunID, value.RepairAttemptID, value.CandidateSHA, value.Kind, value.Command},
+		)
 	case *PRGateRun:
 		var old PRGateRun
 		if err := json.Unmarshal(existing, &old); err != nil {
@@ -1711,7 +1905,11 @@ func validatePRWorkspaceRecordTransition(existing []byte, next any) error {
 		if err := json.Unmarshal(existing, &old); err != nil {
 			return err
 		}
-		return equal("ingress watermark identity", []string{old.Source, old.Connector}, []string{value.Source, value.Connector})
+		return equal(
+			"ingress watermark identity",
+			[]string{old.Source, old.Connector},
+			[]string{value.Source, value.Connector},
+		)
 	}
 	return nil
 }
@@ -1755,9 +1953,15 @@ func equalPRWorkspaceRawJSON(left, right json.RawMessage) (bool, error) {
 	return bytes.Equal(canonicalLeft, canonicalRight), nil
 }
 
-func validatePRDeferredGroupItem(ctx context.Context, conn *sql.Conn, workspaceID string, item *PRDeferredGroupItem) error {
+func validatePRDeferredGroupItem(
+	ctx context.Context,
+	conn *sql.Conn,
+	workspaceID string,
+	item *PRDeferredGroupItem,
+) error {
 	var findingPayload []byte
-	if err := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_findings WHERE id = ? AND workspace_id = ?`, item.FindingID, workspaceID).Scan(&findingPayload); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT payload_json FROM pr_findings WHERE id = ? AND workspace_id = ?`, item.FindingID, workspaceID).
+		Scan(&findingPayload); err != nil {
 		return err
 	}
 	finding, err := decodePRFindingPersistence(findingPayload)
@@ -1793,7 +1997,12 @@ func decodePRWorkspaceMutation(
 	payload json.RawMessage,
 ) (any, []byte, error) {
 	if len(payload) < 2 || len(payload) > MaxPRWorkspaceRecordBytes {
-		return nil, nil, fmt.Errorf("%w: mutation payload has %d bytes, maximum %d", ErrInvalidPRWorkspace, len(payload), MaxPRWorkspaceRecordBytes)
+		return nil, nil, fmt.Errorf(
+			"%w: mutation payload has %d bytes, maximum %d",
+			ErrInvalidPRWorkspace,
+			len(payload),
+			MaxPRWorkspaceRecordBytes,
+		)
 	}
 	if kind == PRMutationWorkspaceState {
 		var value PRWorkspaceStateChange
@@ -1818,67 +2027,155 @@ func decodePRWorkspaceMutation(
 			return nil, nil, err
 		}
 		normalizePRProviderSnapshot(value)
-		record = prWorkspaceMutationRecord{"pr_provider_snapshots", prProviderSnapshotIDPrefix, true, "upsert", value, &value.PRWorkspaceRecord, "observed"}
+		record = prWorkspaceMutationRecord{
+			"pr_provider_snapshots",
+			prProviderSnapshotIDPrefix,
+			true,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			"observed",
+		}
 	case PRMutationCharter:
 		value := new(PRCharterRevision)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_charter_revisions", prCharterRevisionIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Status)}
+		record = prWorkspaceMutationRecord{
+			"pr_charter_revisions",
+			prCharterRevisionIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Status),
+		}
 	case PRMutationStageRun:
 		value := new(PRStageRun)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_stage_runs", prStageRunIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
+		record = prWorkspaceMutationRecord{
+			"pr_stage_runs",
+			prStageRunIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.State),
+		}
 	case PRMutationFinding:
 		value := new(PRFinding)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_findings", prFindingIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Disposition)}
+		record = prWorkspaceMutationRecord{
+			"pr_findings",
+			prFindingIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Disposition),
+		}
 	case PRMutationFindingEvent:
 		value := new(PRFindingEvent)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_finding_events", prFindingEventIDPrefix, true, "upsert", value, &value.PRWorkspaceRecord, strings.TrimSpace(value.Kind)}
+		record = prWorkspaceMutationRecord{
+			"pr_finding_events",
+			prFindingEventIDPrefix,
+			true,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			strings.TrimSpace(value.Kind),
+		}
 	case PRMutationConversation:
 		value := new(PRConversation)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_conversations", prConversationIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Status)}
+		record = prWorkspaceMutationRecord{
+			"pr_conversations",
+			prConversationIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Status),
+		}
 	case PRMutationMessage:
 		value := new(PRMessage)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_messages", prMessageIDPrefix, true, "upsert", value, &value.PRWorkspaceRecord, strings.TrimSpace(value.Role)}
+		record = prWorkspaceMutationRecord{
+			"pr_messages",
+			prMessageIDPrefix,
+			true,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			strings.TrimSpace(value.Role),
+		}
 	case PRMutationCorrection:
 		value := new(PRCorrection)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_corrections", prCorrectionIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Status)}
+		record = prWorkspaceMutationRecord{
+			"pr_corrections",
+			prCorrectionIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Status),
+		}
 	case PRMutationRepositoryLesson:
 		value := new(PRRepositoryLesson)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_repository_lessons", prRepositoryLessonIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Status)}
+		record = prWorkspaceMutationRecord{
+			"pr_repository_lessons",
+			prRepositoryLessonIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Status),
+		}
 	case PRMutationNudgeRound:
 		value := new(PRNudgeRound)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_nudge_rounds", prNudgeRoundIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
+		record = prWorkspaceMutationRecord{
+			"pr_nudge_rounds",
+			prNudgeRoundIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.State),
+		}
 	case PRMutationNudgeReward:
 		value := new(PRNudgeReward)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_nudge_rewards", prNudgeRewardIDPrefix, true, "upsert", value, &value.PRWorkspaceRecord, "resolved"}
+		record = prWorkspaceMutationRecord{
+			"pr_nudge_rewards",
+			prNudgeRewardIDPrefix,
+			true,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			"resolved",
+		}
 	case PRMutationDeferredGroup:
 		value := new(PRDeferredGroup)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
@@ -1887,7 +2184,15 @@ func decodePRWorkspaceMutation(
 		if len(value.Items) != 0 {
 			return nil, nil, fmt.Errorf("%w: deferred group items require separate mutations", ErrInvalidPRWorkspace)
 		}
-		record = prWorkspaceMutationRecord{"pr_deferred_groups", prDeferredGroupIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Status)}
+		record = prWorkspaceMutationRecord{
+			"pr_deferred_groups",
+			prDeferredGroupIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Status),
+		}
 	case PRMutationDeferredGroupItem:
 		value := new(PRDeferredGroupItem)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
@@ -1897,49 +2202,113 @@ func decodePRWorkspaceMutation(
 		if value.Removed {
 			status = "removed"
 		}
-		record = prWorkspaceMutationRecord{"pr_deferred_group_items", prDeferredGroupItemIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, status}
+		record = prWorkspaceMutationRecord{
+			"pr_deferred_group_items",
+			prDeferredGroupItemIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			status,
+		}
 	case PRMutationRepairAttempt:
 		value := new(PRRepairAttempt)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_repair_attempts", prRepairAttemptIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
+		record = prWorkspaceMutationRecord{
+			"pr_repair_attempts",
+			prRepairAttemptIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.State),
+		}
 	case PRMutationValidationRun:
 		value := new(PRValidationRun)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_validation_runs", prValidationRunIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
+		record = prWorkspaceMutationRecord{
+			"pr_validation_runs",
+			prValidationRunIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.State),
+		}
 	case PRMutationGateRun:
 		value := new(PRGateRun)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_gate_runs", prGateRunIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
+		record = prWorkspaceMutationRecord{
+			"pr_gate_runs",
+			prGateRunIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.State),
+		}
 	case PRMutationPublication:
 		value := new(PRPublication)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_publications", prPublicationIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.Status)}
+		record = prWorkspaceMutationRecord{
+			"pr_publications",
+			prPublicationIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.Status),
+		}
 	case PRMutationOperationIntent:
 		value := new(PRWorkspaceOperationIntent)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_operation_intents", prOperationIntentIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, string(value.State)}
+		record = prWorkspaceMutationRecord{
+			"pr_operation_intents",
+			prOperationIntentIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			string(value.State),
+		}
 	case PRMutationIngressWatermark:
 		value := new(PRIngressWatermark)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_ingress_watermarks", prIngressWatermarkIDPrefix, false, "upsert", value, &value.PRWorkspaceRecord, "observed"}
+		record = prWorkspaceMutationRecord{
+			"pr_ingress_watermarks",
+			prIngressWatermarkIDPrefix,
+			false,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			"observed",
+		}
 	case PRMutationActivity:
 		value := new(PRActivity)
 		if err := decodeStrictPRWorkspaceJSON(payload, value); err != nil {
 			return nil, nil, err
 		}
-		record = prWorkspaceMutationRecord{"pr_activity", prActivityIDPrefix, true, "upsert", value, &value.PRWorkspaceRecord, value.Kind}
+		record = prWorkspaceMutationRecord{
+			"pr_activity",
+			prActivityIDPrefix,
+			true,
+			"upsert",
+			value,
+			&value.PRWorkspaceRecord,
+			value.Kind,
+		}
 	default:
 		return nil, nil, fmt.Errorf("%w: unsupported mutation kind %q", ErrInvalidPRWorkspace, kind)
 	}
@@ -2188,7 +2557,12 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validatePRWorkspaceString("message kind", record.Kind, 128, true); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("message content", record.Content, MaxPRWorkspaceMessageBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"message content",
+			record.Content,
+			MaxPRWorkspaceMessageBytes,
+			true,
+		); err != nil {
 			return err
 		}
 		for field, item := range map[string]string{"message charter ID": record.CharterID, "message head SHA": record.HeadSHA} {
@@ -2237,7 +2611,9 @@ func validatePRWorkspaceRecord(value any) error {
 		if record.Phase != PRWorkspaceReview && record.Phase != PRWorkspaceCompletionAudit {
 			return fmt.Errorf("%w: nudge phase must be review or completion_audit", ErrInvalidPRWorkspace)
 		}
-		if record.Round <= 0 || record.MinimumRounds < 0 || record.HardCap < record.MinimumRounds || record.HardCap > 10 || record.Round > record.HardCap {
+		if record.Round <= 0 || record.MinimumRounds < 0 || record.HardCap < record.MinimumRounds ||
+			record.HardCap > 10 ||
+			record.Round > record.HardCap {
 			return fmt.Errorf("%w: invalid nudge round budget", ErrInvalidPRWorkspace)
 		}
 		for field, item := range map[string]string{"stage run ID": record.StageRunID, "strategy family": record.StrategyFamily, "coverage target": record.CoverageTarget, "challenge digest": record.ChallengeDigest, "prompt digest": record.PromptDigest} {
@@ -2245,7 +2621,8 @@ func validatePRWorkspaceRecord(value any) error {
 				return err
 			}
 		}
-		if record.CandidateCount < 0 || record.NovelCount < 0 || record.DuplicateCount < 0 || record.NovelCount+record.DuplicateCount > record.CandidateCount {
+		if record.CandidateCount < 0 || record.NovelCount < 0 || record.DuplicateCount < 0 ||
+			record.NovelCount+record.DuplicateCount > record.CandidateCount {
 			return fmt.Errorf("%w: invalid nudge finding counts", ErrInvalidPRWorkspace)
 		}
 		if record.ResolvedFindings < 0 || record.ResolvedFindings > len(record.FindingIDs) {
@@ -2265,12 +2642,18 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validatePRWorkspaceString("nudge outcome", record.Outcome, 128, true); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("nudge provenance", record.Provenance, maxPRWorkspaceTextBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"nudge provenance",
+			record.Provenance,
+			maxPRWorkspaceTextBytes,
+			true,
+		); err != nil {
 			return err
 		}
 	case *PRDeferredGroup:
 		meta = &record.PRWorkspaceRecord
-		if record.Status != PRRecordDraft && record.Status != PRRecordActive && record.Status != PRRecordResolved && record.Status != PRRecordDismissed {
+		if record.Status != PRRecordDraft && record.Status != PRRecordActive && record.Status != PRRecordResolved &&
+			record.Status != PRRecordDismissed {
 			return invalidPRWorkspaceField("deferred group status", string(record.Status), 32, true)
 		}
 		if !validPRScopeDistance(record.ScopeDistance) || !validPRChangeSize(record.ChangeSize) {
@@ -2282,23 +2665,40 @@ func validatePRWorkspaceRecord(value any) error {
 		if record.Version <= 0 {
 			return fmt.Errorf("%w: deferred group version must be positive", ErrInvalidPRWorkspace)
 		}
-		if record.ScopeFiles < 0 || record.ScopeSemanticLines < 0 || record.ScopeModules < 0 || record.ScopeConfidence < 0 || record.ScopeConfidence > 1 {
+		if record.ScopeFiles < 0 || record.ScopeSemanticLines < 0 || record.ScopeModules < 0 ||
+			record.ScopeConfidence < 0 ||
+			record.ScopeConfidence > 1 {
 			return fmt.Errorf("%w: invalid deferred group scope assessment", ErrInvalidPRWorkspace)
 		}
 		if err := validatePRScopeProjection(record.ScopePresence, record.ScopeChangeEvidence); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("deferred group title", record.Title, maxPRWorkspaceTextBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"deferred group title",
+			record.Title,
+			maxPRWorkspaceTextBytes,
+			true,
+		); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("deferred group body", record.Body, maxPRWorkspaceBodyBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"deferred group body",
+			record.Body,
+			maxPRWorkspaceBodyBytes,
+			true,
+		); err != nil {
 			return err
 		}
 		if err := validatePRWorkspaceStringList("deferred labels", record.Labels, false); err != nil {
 			return err
 		}
 		if record.PublicationSuppressed {
-			if err := validatePRWorkspaceString("deferred suppression reason", record.SuppressionReason, 256, true); err != nil {
+			if err := validatePRWorkspaceString(
+				"deferred suppression reason",
+				record.SuppressionReason,
+				256,
+				true,
+			); err != nil {
 				return err
 			}
 		} else if record.SuppressionReason != "" {
@@ -2391,7 +2791,12 @@ func validatePRWorkspaceRecord(value any) error {
 			if err := validatePRWorkspaceString("validation check ID", check.ID, 256, true); err != nil {
 				return err
 			}
-			if err := validatePRWorkspaceString("validation check name", check.Name, maxPRWorkspaceTextBytes, true); err != nil {
+			if err := validatePRWorkspaceString(
+				"validation check name",
+				check.Name,
+				maxPRWorkspaceTextBytes,
+				true,
+			); err != nil {
 				return err
 			}
 			if err := validatePRWorkspaceString("validation check status", check.Status, 128, true); err != nil {
@@ -2450,7 +2855,12 @@ func validatePRWorkspaceRecord(value any) error {
 		if len(record.FindingIDs) > maxPRWorkspaceListEntries {
 			return fmt.Errorf("%w: publication finding IDs exceed bound", ErrInvalidPRWorkspace)
 		}
-		if err := validatePRWorkspaceString("publication request digest", record.RequestDigest, maxPRWorkspaceIdentityBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"publication request digest",
+			record.RequestDigest,
+			maxPRWorkspaceIdentityBytes,
+			true,
+		); err != nil {
 			return err
 		}
 		if err := validatePRWorkspaceRaw("publication request", record.Request); err != nil {
@@ -2470,7 +2880,12 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validateDBTimestamp("publication available_at", record.AvailableAt); err != nil {
 			return fmt.Errorf("%w: publication available_at is invalid", ErrInvalidPRWorkspace)
 		}
-		if err := validatePRWorkspaceLease(record.LeaseOwner, record.LeaseToken, record.LeaseUntil, record.Status == PRPublicationClaimed); err != nil {
+		if err := validatePRWorkspaceLease(
+			record.LeaseOwner,
+			record.LeaseToken,
+			record.LeaseUntil,
+			record.Status == PRPublicationClaimed,
+		); err != nil {
 			return err
 		}
 	case *PRWorkspaceOperationIntent:
@@ -2484,7 +2899,12 @@ func validatePRWorkspaceRecord(value any) error {
 		if record.InputWorkspaceVersion <= 0 {
 			return fmt.Errorf("%w: operation input workspace version must be positive", ErrInvalidPRWorkspace)
 		}
-		if err := validatePRWorkspaceString("operation input digest", record.InputDigest, maxPRWorkspaceIdentityBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"operation input digest",
+			record.InputDigest,
+			maxPRWorkspaceIdentityBytes,
+			true,
+		); err != nil {
 			return err
 		}
 		if err := validatePRWorkspaceRaw("operation input", record.Input); err != nil {
@@ -2502,7 +2922,12 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validateDBTimestamp("operation available_at", record.AvailableAt); err != nil {
 			return fmt.Errorf("%w: operation available_at is invalid", ErrInvalidPRWorkspace)
 		}
-		if err := validatePRWorkspaceLease(record.LeaseOwner, record.LeaseToken, record.LeaseUntil, record.State == PRExecutionRunning); err != nil {
+		if err := validatePRWorkspaceLease(
+			record.LeaseOwner,
+			record.LeaseToken,
+			record.LeaseUntil,
+			record.State == PRExecutionRunning,
+		); err != nil {
 			return err
 		}
 	case *PRIngressWatermark:
@@ -2527,7 +2952,12 @@ func validatePRWorkspaceRecord(value any) error {
 		if err := validatePRWorkspaceString("activity actor", record.Actor, 256, true); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("activity summary", record.Summary, maxPRWorkspaceTextBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"activity summary",
+			record.Summary,
+			maxPRWorkspaceTextBytes,
+			true,
+		); err != nil {
 			return err
 		}
 		if err := validatePRWorkspaceString("activity entity ID", record.EntityID, 256, false); err != nil {
@@ -2772,25 +3202,50 @@ func validatePRScopeProjection(presence PRWorkPresence, changes []PRScopeChange)
 		return fmt.Errorf("%w: scope change evidence exceeds bound", ErrInvalidPRWorkspace)
 	}
 	for _, change := range changes {
-		if err := validatePRWorkspaceString("scope change path", change.Path, maxPRWorkspaceTextBytes, true); err != nil {
+		if err := validatePRWorkspaceString(
+			"scope change path",
+			change.Path,
+			maxPRWorkspaceTextBytes,
+			true,
+		); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("scope change hunk", change.Hunk, maxPRWorkspaceTextBytes, false); err != nil {
+		if err := validatePRWorkspaceString(
+			"scope change hunk",
+			change.Hunk,
+			maxPRWorkspaceTextBytes,
+			false,
+		); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("scope change module", change.Module, maxPRWorkspaceTextBytes, false); err != nil {
+		if err := validatePRWorkspaceString(
+			"scope change module",
+			change.Module,
+			maxPRWorkspaceTextBytes,
+			false,
+		); err != nil {
 			return err
 		}
 		if change.SemanticLines < 0 || change.Confidence < 0 || change.Confidence > 1 {
 			return fmt.Errorf("%w: invalid scope change metrics", ErrInvalidPRWorkspace)
 		}
-		if !validPRWorkPresence(change.Presence) || !validPRScopeDistance(change.ScopeDistance) || !validPRChangeSize(change.ChangeSize) {
+		if !validPRWorkPresence(change.Presence) || !validPRScopeDistance(change.ScopeDistance) ||
+			!validPRChangeSize(change.ChangeSize) {
 			return fmt.Errorf("%w: invalid scope change classification", ErrInvalidPRWorkspace)
 		}
-		if err := validatePRWorkspaceStringList("scope change charter clauses", change.CharterClauses, false); err != nil {
+		if err := validatePRWorkspaceStringList(
+			"scope change charter clauses",
+			change.CharterClauses,
+			false,
+		); err != nil {
 			return err
 		}
-		if err := validatePRWorkspaceString("scope change explanation", change.Explanation, maxPRWorkspaceTextBytes, false); err != nil {
+		if err := validatePRWorkspaceString(
+			"scope change explanation",
+			change.Explanation,
+			maxPRWorkspaceTextBytes,
+			false,
+		); err != nil {
 			return err
 		}
 	}
@@ -2885,7 +3340,10 @@ func loadPRWorkspaceCreateReplay(
 		return prWorkspaceCreateResult{}, false, err
 	}
 	if kind != "create" || storedHash != requestHash {
-		return prWorkspaceCreateResult{}, false, fmt.Errorf("%w: request ID reused with different content", ErrPRWorkspaceConflict)
+		return prWorkspaceCreateResult{}, false, fmt.Errorf(
+			"%w: request ID reused with different content",
+			ErrPRWorkspaceConflict,
+		)
 	}
 	var result prWorkspaceCreateResult
 	if err := json.Unmarshal(payload, &result); err != nil {
@@ -2909,7 +3367,10 @@ func loadPRWorkspaceMutationReplay(
 		return PRWorkspaceMutationResult{}, false, err
 	}
 	if workspaceID != input.WorkspaceID || kind != string(input.Kind) || storedHash != requestHash {
-		return PRWorkspaceMutationResult{}, false, fmt.Errorf("%w: request ID reused with different content", ErrPRWorkspaceConflict)
+		return PRWorkspaceMutationResult{}, false, fmt.Errorf(
+			"%w: request ID reused with different content",
+			ErrPRWorkspaceConflict,
+		)
 	}
 	var result PRWorkspaceMutationResult
 	if err := json.Unmarshal(payload, &result); err != nil {
@@ -2973,13 +3434,12 @@ func scanPRWorkspace(scanner rowScanner) (PRWorkspace, error) {
 	return value, nil
 }
 
-type prWorkspaceJSONRow struct {
-	id      string
-	payload []byte
-}
-
 func loadPRWorkspaceRecords[T any](ctx context.Context, conn *sql.Conn, table, workspaceID string) ([]T, error) {
-	rows, err := conn.QueryContext(ctx, "SELECT payload_json FROM "+table+" WHERE workspace_id = ? ORDER BY ordinal", workspaceID)
+	rows, err := conn.QueryContext(
+		ctx,
+		"SELECT payload_json FROM "+table+" WHERE workspace_id = ? ORDER BY ordinal",
+		workspaceID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -3011,7 +3471,11 @@ func loadPRWorkspaceRecords[T any](ctx context.Context, conn *sql.Conn, table, w
 }
 
 func loadPRWorkspaceFindings(ctx context.Context, conn *sql.Conn, workspaceID string) ([]PRFinding, error) {
-	rows, err := conn.QueryContext(ctx, "SELECT payload_json FROM pr_findings WHERE workspace_id = ? ORDER BY ordinal", workspaceID)
+	rows, err := conn.QueryContext(
+		ctx,
+		"SELECT payload_json FROM pr_findings WHERE workspace_id = ? ORDER BY ordinal",
+		workspaceID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -3040,7 +3504,12 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 		return PRWorkspaceAggregate{}, err
 	}
 	result := PRWorkspaceAggregate{Workspace: workspace}
-	if result.ProviderSnapshots, err = loadPRWorkspaceRecords[PRProviderSnapshot](ctx, conn, "pr_provider_snapshots", workspaceID); err != nil {
+	if result.ProviderSnapshots, err = loadPRWorkspaceRecords[PRProviderSnapshot](
+		ctx,
+		conn,
+		"pr_provider_snapshots",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	for _, snapshot := range result.ProviderSnapshots {
@@ -3052,7 +3521,12 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 	if result.ProviderSnapshot.ID == "" {
 		return result, fmt.Errorf("%w: current provider snapshot is missing", ErrSchemaInvalid)
 	}
-	if result.Charters, err = loadPRWorkspaceRecords[PRCharterRevision](ctx, conn, "pr_charter_revisions", workspaceID); err != nil {
+	if result.Charters, err = loadPRWorkspaceRecords[PRCharterRevision](
+		ctx,
+		conn,
+		"pr_charter_revisions",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	if result.StageRuns, err = loadPRWorkspaceRecords[PRStageRun](ctx, conn, "pr_stage_runs", workspaceID); err != nil {
@@ -3061,28 +3535,58 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 	if result.Findings, err = loadPRWorkspaceFindings(ctx, conn, workspaceID); err != nil {
 		return result, err
 	}
-	if result.FindingEvents, err = loadPRWorkspaceRecords[PRFindingEvent](ctx, conn, "pr_finding_events", workspaceID); err != nil {
+	if result.FindingEvents, err = loadPRWorkspaceRecords[PRFindingEvent](
+		ctx,
+		conn,
+		"pr_finding_events",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
-	if result.Conversations, err = loadPRWorkspaceRecords[PRConversation](ctx, conn, "pr_conversations", workspaceID); err != nil {
+	if result.Conversations, err = loadPRWorkspaceRecords[PRConversation](
+		ctx,
+		conn,
+		"pr_conversations",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	if result.Messages, err = loadPRWorkspaceRecords[PRMessage](ctx, conn, "pr_messages", workspaceID); err != nil {
 		return result, err
 	}
-	if result.Corrections, err = loadPRWorkspaceRecords[PRCorrection](ctx, conn, "pr_corrections", workspaceID); err != nil {
+	if result.Corrections, err = loadPRWorkspaceRecords[PRCorrection](
+		ctx,
+		conn,
+		"pr_corrections",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	if result.RepositoryLessons, err = loadPRRepositoryLessonsForWorkspace(ctx, conn, workspace); err != nil {
 		return result, err
 	}
-	if result.NudgeRounds, err = loadPRWorkspaceRecords[PRNudgeRound](ctx, conn, "pr_nudge_rounds", workspaceID); err != nil {
+	if result.NudgeRounds, err = loadPRWorkspaceRecords[PRNudgeRound](
+		ctx,
+		conn,
+		"pr_nudge_rounds",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
-	if result.NudgeRewards, err = loadPRWorkspaceRecords[PRNudgeReward](ctx, conn, "pr_nudge_rewards", workspaceID); err != nil {
+	if result.NudgeRewards, err = loadPRWorkspaceRecords[PRNudgeReward](
+		ctx,
+		conn,
+		"pr_nudge_rewards",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
-	if result.DeferredGroups, err = loadPRWorkspaceRecords[PRDeferredGroup](ctx, conn, "pr_deferred_groups", workspaceID); err != nil {
+	if result.DeferredGroups, err = loadPRWorkspaceRecords[PRDeferredGroup](
+		ctx,
+		conn,
+		"pr_deferred_groups",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	itemsByGroup := make(map[string][]PRDeferredGroupItem)
@@ -3109,22 +3613,47 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 			}
 		}
 	}
-	if result.RepairAttempts, err = loadPRWorkspaceRecords[PRRepairAttempt](ctx, conn, "pr_repair_attempts", workspaceID); err != nil {
+	if result.RepairAttempts, err = loadPRWorkspaceRecords[PRRepairAttempt](
+		ctx,
+		conn,
+		"pr_repair_attempts",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
-	if result.ValidationRuns, err = loadPRWorkspaceRecords[PRValidationRun](ctx, conn, "pr_validation_runs", workspaceID); err != nil {
+	if result.ValidationRuns, err = loadPRWorkspaceRecords[PRValidationRun](
+		ctx,
+		conn,
+		"pr_validation_runs",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	if result.GateRuns, err = loadPRWorkspaceRecords[PRGateRun](ctx, conn, "pr_gate_runs", workspaceID); err != nil {
 		return result, err
 	}
-	if result.Publications, err = loadPRWorkspaceRecords[PRPublication](ctx, conn, "pr_publications", workspaceID); err != nil {
+	if result.Publications, err = loadPRWorkspaceRecords[PRPublication](
+		ctx,
+		conn,
+		"pr_publications",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
-	if result.OperationIntents, err = loadPRWorkspaceRecords[PRWorkspaceOperationIntent](ctx, conn, "pr_operation_intents", workspaceID); err != nil {
+	if result.OperationIntents, err = loadPRWorkspaceRecords[PRWorkspaceOperationIntent](
+		ctx,
+		conn,
+		"pr_operation_intents",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
-	if result.IngressWatermarks, err = loadPRWorkspaceRecords[PRIngressWatermark](ctx, conn, "pr_ingress_watermarks", workspaceID); err != nil {
+	if result.IngressWatermarks, err = loadPRWorkspaceRecords[PRIngressWatermark](
+		ctx,
+		conn,
+		"pr_ingress_watermarks",
+		workspaceID,
+	); err != nil {
 		return result, err
 	}
 	if result.Activity, err = loadPRWorkspaceRecords[PRActivity](ctx, conn, "pr_activity", workspaceID); err != nil {
@@ -3133,7 +3662,11 @@ func loadPRWorkspaceAggregate(ctx context.Context, conn *sql.Conn, workspaceID s
 	return result, nil
 }
 
-func loadPRRepositoryLessonsForWorkspace(ctx context.Context, conn *sql.Conn, workspace PRWorkspace) ([]PRRepositoryLesson, error) {
+func loadPRRepositoryLessonsForWorkspace(
+	ctx context.Context,
+	conn *sql.Conn,
+	workspace PRWorkspace,
+) ([]PRRepositoryLesson, error) {
 	rows, err := conn.QueryContext(ctx, `SELECT lesson.payload_json
 		FROM pr_repository_lessons AS lesson
 		JOIN pr_workspaces AS source ON source.id = lesson.workspace_id
@@ -3164,7 +3697,14 @@ type prWorkspaceHistoryValue struct {
 	payload []byte
 }
 
-func appendPRWorkspaceHistory(ctx context.Context, conn *sql.Conn, workspaceID string, version int64, records []*prWorkspaceMutationRecord, now time.Time) error {
+func appendPRWorkspaceHistory(
+	ctx context.Context,
+	conn *sql.Conn,
+	workspaceID string,
+	version int64,
+	records []*prWorkspaceMutationRecord,
+	now time.Time,
+) error {
 	workspace, err := getPRWorkspaceRecord(ctx, conn, workspaceID)
 	if err != nil {
 		return err
@@ -3202,6 +3742,7 @@ func appendPRWorkspaceHistory(ctx context.Context, conn *sql.Conn, workspaceID s
 		if err != nil {
 			return err
 		}
+		defer rows.Close()
 		ids := touched["pr_charter_revisions"]
 		if ids == nil {
 			ids = make(map[string]struct{})
@@ -3235,14 +3776,18 @@ func appendPRWorkspaceHistory(ctx context.Context, conn *sql.Conn, workspaceID s
 	})
 	for _, key := range keys {
 		var payload []byte
-		if err := conn.QueryRowContext(ctx, "SELECT payload_json FROM "+key.table+" WHERE id = ? AND workspace_id = ?", key.id, workspaceID).Scan(&payload); err != nil {
+		if err := conn.QueryRowContext(ctx, "SELECT payload_json FROM "+key.table+" WHERE id = ? AND workspace_id = ?", key.id, workspaceID).
+			Scan(&payload); err != nil {
 			return err
 		}
 		values = append(values, prWorkspaceHistoryValue{table: key.table, id: key.id, payload: payload})
 	}
 	if repositoryLessonTouched {
 		marker, _ := json.Marshal(map[string]int64{"workspace_version": version})
-		values = append(values, prWorkspaceHistoryValue{table: "pr_repository_lesson_view_marker", id: "view", payload: marker})
+		values = append(
+			values,
+			prWorkspaceHistoryValue{table: "pr_repository_lesson_view_marker", id: "view", payload: marker},
+		)
 		lessons, err := loadPRRepositoryLessonsForWorkspace(ctx, conn, workspace)
 		if err != nil {
 			return err
@@ -3252,7 +3797,10 @@ func appendPRWorkspaceHistory(ctx context.Context, conn *sql.Conn, workspaceID s
 			if err != nil {
 				return err
 			}
-			values = append(values, prWorkspaceHistoryValue{table: "pr_repository_lesson_view", id: lesson.ID, payload: payload})
+			values = append(
+				values,
+				prWorkspaceHistoryValue{table: "pr_repository_lesson_view", id: lesson.ID, payload: payload},
+			)
 		}
 	}
 	for sequence, value := range values {
@@ -3272,7 +3820,11 @@ func appendPRWorkspaceHistory(ctx context.Context, conn *sql.Conn, workspaceID s
 	return nil
 }
 
-func (s *Store) getPRWorkspaceAtVersion(ctx context.Context, workspaceID string, version int64) (PRWorkspaceAggregate, error) {
+func (s *Store) getPRWorkspaceAtVersion(
+	ctx context.Context,
+	workspaceID string,
+	version int64,
+) (PRWorkspaceAggregate, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRWorkspaceAggregate{}, err
 	}
@@ -3301,12 +3853,18 @@ func (s *Store) getPRWorkspaceAtVersion(ctx context.Context, workspaceID string,
 	return result, nil
 }
 
-func loadPRWorkspaceAggregateAtVersion(ctx context.Context, conn *sql.Conn, workspaceID string, version int64) (PRWorkspaceAggregate, error) {
+func loadPRWorkspaceAggregateAtVersion(
+	ctx context.Context,
+	conn *sql.Conn,
+	workspaceID string,
+	version int64,
+) (PRWorkspaceAggregate, error) {
 	if version <= 0 {
 		return PRWorkspaceAggregate{}, fmt.Errorf("%w: history version must be positive", ErrInvalidPRWorkspace)
 	}
 	var current int64
-	if err := conn.QueryRowContext(ctx, `SELECT version FROM pr_workspaces WHERE id = ?`, workspaceID).Scan(&current); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT version FROM pr_workspaces WHERE id = ?`, workspaceID).
+		Scan(&current); err != nil {
 		return PRWorkspaceAggregate{}, err
 	}
 	if version > current {

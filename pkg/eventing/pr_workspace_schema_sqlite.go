@@ -414,25 +414,91 @@ type prWorkspaceSchemaEntry struct {
 }
 
 var prWorkspaceSchemaEntries = []prWorkspaceSchemaEntry{
-	{"pr_provider_snapshots", schemaV19PRProviderSnapshotsTable, "pr_provider_snapshots_list", schemaV19PRProviderSnapshotsListIndex, true},
-	{"pr_charter_revisions", schemaV19PRCharterRevisionsTable, "pr_charter_revisions_list", schemaV19PRCharterRevisionsListIndex, true},
+	{
+		"pr_provider_snapshots",
+		schemaV19PRProviderSnapshotsTable,
+		"pr_provider_snapshots_list",
+		schemaV19PRProviderSnapshotsListIndex,
+		true,
+	},
+	{
+		"pr_charter_revisions",
+		schemaV19PRCharterRevisionsTable,
+		"pr_charter_revisions_list",
+		schemaV19PRCharterRevisionsListIndex,
+		true,
+	},
 	{"pr_stage_runs", schemaV19PRStageRunsTable, "pr_stage_runs_list", schemaV19PRStageRunsListIndex, true},
 	{"pr_findings", schemaV19PRFindingsTable, "pr_findings_list", schemaV19PRFindingsListIndex, true},
-	{"pr_finding_events", schemaV19PRFindingEventsTable, "pr_finding_events_list", schemaV19PRFindingEventsListIndex, true},
-	{"pr_conversations", schemaV19PRConversationsTable, "pr_conversations_list", schemaV19PRConversationsListIndex, true},
+	{
+		"pr_finding_events",
+		schemaV19PRFindingEventsTable,
+		"pr_finding_events_list",
+		schemaV19PRFindingEventsListIndex,
+		true,
+	},
+	{
+		"pr_conversations",
+		schemaV19PRConversationsTable,
+		"pr_conversations_list",
+		schemaV19PRConversationsListIndex,
+		true,
+	},
 	{"pr_messages", schemaV19PRMessagesTable, "pr_messages_list", schemaV19PRMessagesListIndex, true},
 	{"pr_corrections", schemaV19PRCorrectionsTable, "pr_corrections_list", schemaV19PRCorrectionsListIndex, true},
-	{"pr_repository_lessons", schemaV19PRRepositoryLessonsTable, "pr_repository_lessons_list", schemaV19PRRepositoryLessonsListIndex, true},
+	{
+		"pr_repository_lessons",
+		schemaV19PRRepositoryLessonsTable,
+		"pr_repository_lessons_list",
+		schemaV19PRRepositoryLessonsListIndex,
+		true,
+	},
 	{"pr_nudge_rounds", schemaV19PRNudgeRoundsTable, "pr_nudge_rounds_list", schemaV19PRNudgeRoundsListIndex, true},
 	{"pr_nudge_rewards", schemaV19PRNudgeRewardsTable, "pr_nudge_rewards_list", schemaV19PRNudgeRewardsListIndex, true},
-	{"pr_deferred_groups", schemaV19PRDeferredGroupsTable, "pr_deferred_groups_list", schemaV19PRDeferredGroupsListIndex, true},
-	{"pr_deferred_group_items", schemaV19PRDeferredGroupItemsTable, "pr_deferred_group_items_list", schemaV19PRDeferredGroupItemsListIndex, true},
-	{"pr_repair_attempts", schemaV19PRRepairAttemptsTable, "pr_repair_attempts_list", schemaV19PRRepairAttemptsListIndex, true},
-	{"pr_validation_runs", schemaV19PRValidationRunsTable, "pr_validation_runs_list", schemaV19PRValidationRunsListIndex, true},
+	{
+		"pr_deferred_groups",
+		schemaV19PRDeferredGroupsTable,
+		"pr_deferred_groups_list",
+		schemaV19PRDeferredGroupsListIndex,
+		true,
+	},
+	{
+		"pr_deferred_group_items",
+		schemaV19PRDeferredGroupItemsTable,
+		"pr_deferred_group_items_list",
+		schemaV19PRDeferredGroupItemsListIndex,
+		true,
+	},
+	{
+		"pr_repair_attempts",
+		schemaV19PRRepairAttemptsTable,
+		"pr_repair_attempts_list",
+		schemaV19PRRepairAttemptsListIndex,
+		true,
+	},
+	{
+		"pr_validation_runs",
+		schemaV19PRValidationRunsTable,
+		"pr_validation_runs_list",
+		schemaV19PRValidationRunsListIndex,
+		true,
+	},
 	{"pr_gate_runs", schemaV19PRGateRunsTable, "pr_gate_runs_list", schemaV19PRGateRunsListIndex, true},
 	{"pr_publications", schemaV19PRPublicationsTable, "pr_publications_list", schemaV19PRPublicationsListIndex, true},
-	{"pr_operation_intents", schemaV19PROperationIntentsTable, "pr_operation_intents_list", schemaV19PROperationIntentsListIndex, true},
-	{"pr_ingress_watermarks", schemaV19PRIngressWatermarksTable, "pr_ingress_watermarks_list", schemaV19PRIngressWatermarksListIndex, true},
+	{
+		"pr_operation_intents",
+		schemaV19PROperationIntentsTable,
+		"pr_operation_intents_list",
+		schemaV19PROperationIntentsListIndex,
+		true,
+	},
+	{
+		"pr_ingress_watermarks",
+		schemaV19PRIngressWatermarksTable,
+		"pr_ingress_watermarks_list",
+		schemaV19PRIngressWatermarksListIndex,
+		true,
+	},
 	{"pr_activity", schemaV19PRActivityTable, "pr_activity_list", schemaV19PRActivityListIndex, true},
 }
 
@@ -455,7 +521,15 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 		createSQL: schemaV19PRWorkspacesTable,
 		uniqueIndexes: []schemaUniqueIndexSpec{
 			{origin: "pk", columns: []schemaIndexColumn{binary("id")}},
-			{origin: "u", columns: []schemaIndexColumn{binary("provider"), binary("provider_origin"), binary("repository_id"), binary("pull_request_id")}},
+			{
+				origin: "u",
+				columns: []schemaIndexColumn{
+					binary("provider"),
+					binary("provider_origin"),
+					binary("repository_id"),
+					binary("pull_request_id"),
+				},
+			},
 		},
 	}); err != nil {
 		return err
@@ -472,18 +546,45 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 	for _, entry := range prWorkspaceSchemaEntries {
 		uniques := []schemaUniqueIndexSpec{{origin: "pk", columns: []schemaIndexColumn{binary("id")}}}
 		if entry.uniquePair {
-			uniques = append(uniques, schemaUniqueIndexSpec{origin: "u", columns: []schemaIndexColumn{binary("workspace_id"), binary("ordinal")}})
-		}
-		if entry.table == "pr_deferred_group_items" {
-			uniques = append(uniques,
-				schemaUniqueIndexSpec{origin: "u", columns: []schemaIndexColumn{binary("workspace_id"), binary("finding_id")}},
-				schemaUniqueIndexSpec{name: "pr_deferred_group_items_active_position", origin: "c", partial: true, columns: []schemaIndexColumn{binary("workspace_id"), binary("group_id"), binary("ordinal_in_group")}},
+			uniques = append(
+				uniques,
+				schemaUniqueIndexSpec{
+					origin:  "u",
+					columns: []schemaIndexColumn{binary("workspace_id"), binary("ordinal")},
+				},
 			)
 		}
-		if err := validateSchemaTable(ctx, conn, schemaTableSpec{name: entry.table, createSQL: entry.tableSQL, uniqueIndexes: uniques}); err != nil {
+		if entry.table == "pr_deferred_group_items" {
+			uniques = append(
+				uniques,
+				schemaUniqueIndexSpec{
+					origin:  "u",
+					columns: []schemaIndexColumn{binary("workspace_id"), binary("finding_id")},
+				},
+				schemaUniqueIndexSpec{
+					name:    "pr_deferred_group_items_active_position",
+					origin:  "c",
+					partial: true,
+					columns: []schemaIndexColumn{
+						binary("workspace_id"),
+						binary("group_id"),
+						binary("ordinal_in_group"),
+					},
+				},
+			)
+		}
+		if err := validateSchemaTable(
+			ctx,
+			conn,
+			schemaTableSpec{name: entry.table, createSQL: entry.tableSQL, uniqueIndexes: uniques},
+		); err != nil {
 			return err
 		}
-		if err := validateSchemaIndex(ctx, conn, schemaIndexSpec{name: entry.index, createSQL: entry.indexSQL}); err != nil {
+		if err := validateSchemaIndex(
+			ctx,
+			conn,
+			schemaIndexSpec{name: entry.index, createSQL: entry.indexSQL},
+		); err != nil {
 			return err
 		}
 	}
@@ -520,7 +621,11 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 	}); err != nil {
 		return err
 	}
-	if err := validateSchemaIndex(ctx, conn, schemaIndexSpec{name: "pr_workspace_requests_workspace", createSQL: schemaV19PRWorkspaceRequestsWorkspaceIndex}); err != nil {
+	if err := validateSchemaIndex(
+		ctx,
+		conn,
+		schemaIndexSpec{name: "pr_workspace_requests_workspace", createSQL: schemaV19PRWorkspaceRequestsWorkspaceIndex},
+	); err != nil {
 		return err
 	}
 	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
@@ -532,5 +637,9 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 	}); err != nil {
 		return err
 	}
-	return validateSchemaIndex(ctx, conn, schemaIndexSpec{name: "pr_workspace_history_replay", createSQL: schemaV19PRWorkspaceHistoryReplayIndex})
+	return validateSchemaIndex(
+		ctx,
+		conn,
+		schemaIndexSpec{name: "pr_workspace_history_replay", createSQL: schemaV19PRWorkspaceHistoryReplayIndex},
+	)
 }

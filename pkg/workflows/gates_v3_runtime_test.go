@@ -334,11 +334,11 @@ jobs:
 	workflow := testGateV3Workflow(&GateAction{
 		Type: GateActionWorkflow, WorkflowRef: "workflows/actions/revision.yml",
 	})
-	compiled, err := CompileGateWorkflowV3(
+	compiled, compileErr := CompileGateWorkflowV3(
 		workflow, "gates.decision", map[string]any{"gate-subject": map[string]any{"id": "one"}},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if compileErr != nil {
+		t.Fatal(compileErr)
 	}
 	store := NewFileRunStore(workspace)
 	executor := &Executor{WorkspaceDir: workspace, Store: store}
@@ -458,16 +458,16 @@ func TestPrivateCompiledGateRunIDReconcilesCanceledHumanRun(t *testing.T) {
 		Workflow: compiled.Workflow, WorkflowRef: "workflows/pr-lifecycle.yml",
 		PrivateRoot: compiled.PrivateRoot,
 	}
-	started, err := executor.Run(ctx, request)
-	if err != nil || started.Status != RunStatusWaiting {
-		t.Fatalf("Run() = (%#v, %v)", started, err)
+	started, runErr := executor.Run(ctx, request)
+	if runErr != nil || started.Status != RunStatusWaiting {
+		t.Fatalf("Run() = (%#v, %v)", started, runErr)
 	}
 	if _, err := executor.CancelRun(ctx, started.RunID, "operator canceled"); err != nil {
 		t.Fatal(err)
 	}
-	reconciled, err := executor.Run(ctx, request)
-	if !errors.Is(err, ErrRunCanceled) || reconciled == nil || reconciled.Status != RunStatusCanceled {
-		t.Fatalf("reconciled canceled Run() = (%#v, %v)", reconciled, err)
+	reconciled, reconcileErr := executor.Run(ctx, request)
+	if !errors.Is(reconcileErr, ErrRunCanceled) || reconciled == nil || reconciled.Status != RunStatusCanceled {
+		t.Fatalf("reconciled canceled Run() = (%#v, %v)", reconciled, reconcileErr)
 	}
 }
 
@@ -562,11 +562,11 @@ func TestPrivateCompiledGateRunIDReconcilesTerminalAIWithoutReplay(t *testing.T)
 		Type: GateActionAI, AgentID: "reviewer", Prompt: "Decide",
 		Session: AgentSessionEphemeral, History: "none", Cache: "none", Tools: AgentToolsNone,
 	})
-	compiled, err := CompileGateWorkflowV3(
+	compiled, compileErr := CompileGateWorkflowV3(
 		workflow, "gates.decision", map[string]any{"gate-subject": map[string]any{"id": "one"}},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if compileErr != nil {
+		t.Fatal(compileErr)
 	}
 	request := RunRequest{
 		RunID:    "wr_private_gate_reconcile_terminal",
@@ -780,7 +780,15 @@ jobs:
 	conflicting := secondRequest
 	conflicting.ResponseID = "other-response"
 	conflicting.Response = map[string]any{"field-values": map[string]any{"confirmed": false}}
-	if _, err := restarted.ResumeHumanTask(ctx, started.RunID, next.ID, conflicting); !errors.Is(err, ErrHumanTaskConflict) {
+	if _, err := restarted.ResumeHumanTask(
+		ctx,
+		started.RunID,
+		next.ID,
+		conflicting,
+	); !errors.Is(
+		err,
+		ErrHumanTaskConflict,
+	) {
 		t.Fatalf("conflicting ResumeHumanTask() error = %v", err)
 	}
 }
@@ -805,7 +813,12 @@ func TestPrivateGateActionWorkflowAdmissionRejectsEffectfulTargets(t *testing.T)
 		{name: "legacy Human task", step: Step{Uses: "human/task"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := validatePrivateGateActionWorkflowAdmission(base(test.step)); !errors.Is(err, ErrPrivateWorkflowContext) {
+			if err := validatePrivateGateActionWorkflowAdmission(
+				base(test.step),
+			); !errors.Is(
+				err,
+				ErrPrivateWorkflowContext,
+			) {
 				t.Fatalf("admission error = %v", err)
 			}
 		})
@@ -883,11 +896,11 @@ jobs:
 	outer := testGateV3Workflow(&GateAction{
 		Type: GateActionWorkflow, WorkflowRef: "workflows/actions/waiting.yml",
 	})
-	compiled, err := CompileGateWorkflowV3(
+	compiled, compileErr := CompileGateWorkflowV3(
 		outer, "gates.decision", map[string]any{"gate-subject": map[string]any{"id": "subject"}},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if compileErr != nil {
+		t.Fatal(compileErr)
 	}
 	const parentRunID = "wr_gate_parent_crash"
 	baseStore := NewFileRunStore(workspace)
@@ -901,15 +914,15 @@ jobs:
 	}); err == nil {
 		t.Fatal("Run() succeeded, want injected persistence failure")
 	}
-	runs, err := baseStore.ListRuns(ctx)
-	if err != nil {
-		t.Fatal(err)
+	runs, listErr := baseStore.ListRuns(ctx)
+	if listErr != nil {
+		t.Fatal(listErr)
 	}
 	var childRun *Run
 	for _, candidate := range runs {
 		if candidate.ID != parentRunID {
-			copy := candidate
-			childRun = &copy
+			candidateCopy := candidate
+			childRun = &candidateCopy
 		}
 	}
 	if len(runs) != 2 || childRun == nil || childRun.Status != RunStatusWaiting {
@@ -957,8 +970,8 @@ jobs:
 func onlyWaitingHumanTask(tasks map[string]WorkflowHumanTask) *WorkflowHumanTask {
 	for _, task := range tasks {
 		if task.Status == HumanTaskStatusWaiting {
-			copy := task
-			return &copy
+			taskCopy := task
+			return &taskCopy
 		}
 	}
 	return nil

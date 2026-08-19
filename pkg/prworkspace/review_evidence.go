@@ -15,5 +15,5 @@ type ReviewEvidence struct {
 // provider around evidence acquisition and fail if the expected revision
 // changes; it grants no model or provider-write capability.
 type ReviewEvidenceLoader interface {
-	LoadReviewEvidence(context.Context, ProviderSnapshot) (ReviewEvidence, error)
+	LoadReviewEvidence(ctx context.Context, provider ProviderSnapshot) (ReviewEvidence, error)
 }

@@ -67,7 +67,12 @@ func TestPRWorkspaceReviewPublishDoesNotTreatPendingResultAsSuccess(t *testing.T
 	runtime := &prWorkspaceReviewPublicationRuntime{submitter: submitter}
 	result, err := runtime.PublishReview(context.Background(), reviewReconciliationRequest())
 	if err == nil || !result.Ambiguous || result.ExternalID != "" || submitter.submitCalls != 1 {
-		t.Fatalf("pending create was recorded as publication success: result=%#v calls=%d err=%v", result, submitter.submitCalls, err)
+		t.Fatalf(
+			"pending create was recorded as publication success: result=%#v calls=%d err=%v",
+			result,
+			submitter.submitCalls,
+			err,
+		)
 	}
 }
 
@@ -117,7 +122,13 @@ func TestPRWorkspaceReviewReconciliationAcceptsOnlySubmittedComment(t *testing.T
 
 	result, found, err := runtime.ReconcileReview(context.Background(), request)
 	if err != nil || !found || result.Ambiguous || result.ExternalID != "101" || submitter.pendingCalls != 0 {
-		t.Fatalf("submitted COMMENT reconciliation = result %#v found=%v pending_calls=%d err=%v", result, found, submitter.pendingCalls, err)
+		t.Fatalf(
+			"submitted COMMENT reconciliation = result %#v found=%v pending_calls=%d err=%v",
+			result,
+			found,
+			submitter.pendingCalls,
+			err,
+		)
 	}
 }
 
@@ -135,7 +146,13 @@ func TestPRWorkspaceReviewReconciliationCompletesPendingThenReobservesComment(t 
 
 	result, found, err := runtime.ReconcileReview(context.Background(), request)
 	if err != nil || !found || result.ExternalID != "101" || submitter.pendingCalls != 1 {
-		t.Fatalf("pending recovery = result %#v found=%v pending_calls=%d err=%v", result, found, submitter.pendingCalls, err)
+		t.Fatalf(
+			"pending recovery = result %#v found=%v pending_calls=%d err=%v",
+			result,
+			found,
+			submitter.pendingCalls,
+			err,
+		)
 	}
 	if submitter.lastPendingRequest.Marker != request.Marker ||
 		submitter.lastPendingRequest.Summary != request.Summary ||
@@ -157,7 +174,13 @@ func TestPRWorkspaceReviewReconciliationNeverAcceptsPersistentPending(t *testing
 
 	result, found, err := runtime.ReconcileReview(context.Background(), request)
 	if err == nil || found || !result.Ambiguous || result.ExternalID != "101" || submitter.pendingCalls != 1 {
-		t.Fatalf("persistent pending review was accepted: result=%#v found=%v pending_calls=%d err=%v", result, found, submitter.pendingCalls, err)
+		t.Fatalf(
+			"persistent pending review was accepted: result=%#v found=%v pending_calls=%d err=%v",
+			result,
+			found,
+			submitter.pendingCalls,
+			err,
+		)
 	}
 }
 
@@ -177,7 +200,10 @@ func TestPRWorkspaceReviewReconciliationRejectsMalformedAndDuplicateMarkers(t *t
 		},
 		{
 			name: "duplicate marker in body",
-			raw:  reviewHistoryJSON(t, reviewHistoryRecord(request, "COMMENTED", 101, request.Marker+"\n"+request.Marker)),
+			raw: reviewHistoryJSON(
+				t,
+				reviewHistoryRecord(request, "COMMENTED", 101, request.Marker+"\n"+request.Marker),
+			),
 		},
 		{
 			name: "missing state",
@@ -219,7 +245,13 @@ func TestPRWorkspaceReviewReconciliationRejectsMalformedAndDuplicateMarkers(t *t
 			runtime := &prWorkspaceReviewPublicationRuntime{submitter: submitter, provider: provider}
 			result, found, err := runtime.ReconcileReview(context.Background(), request)
 			if err == nil || found || result.ExternalID != "" || submitter.pendingCalls != 0 {
-				t.Fatalf("malformed marker response accepted: result=%#v found=%v pending_calls=%d err=%v", result, found, submitter.pendingCalls, err)
+				t.Fatalf(
+					"malformed marker response accepted: result=%#v found=%v pending_calls=%d err=%v",
+					result,
+					found,
+					submitter.pendingCalls,
+					err,
+				)
 			}
 		})
 	}

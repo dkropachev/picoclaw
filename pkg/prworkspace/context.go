@@ -118,7 +118,12 @@ func currentContextMessages(aggregate Aggregate, charter Charter, hasCharter boo
 	return append([]Message(nil), eligible[start:]...)
 }
 
-func currentContextLessons(values []RepositoryLesson, repositoryID string, charter Charter, hasCharter bool) []RepositoryLesson {
+func currentContextLessons(
+	values []RepositoryLesson,
+	repositoryID string,
+	charter Charter,
+	hasCharter bool,
+) []RepositoryLesson {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]RepositoryLesson, 0, len(values))
 	for _, lesson := range values {
@@ -210,7 +215,8 @@ func filterMessagesFor(values []Message, wanted CorrectionApplicability) []Messa
 		stage := strings.ToLower(strings.TrimSpace(value.Stage))
 		if stage == "" || stage == "all" || stage == "both" || stage == "workspace" ||
 			wanted == CorrectionReviewOnly && (stage == "review" || stage == "triage") ||
-			wanted == CorrectionImplementationOnly && (stage == "implementation" || stage == "validation" || stage == "completion_audit" || stage == "publication") {
+			wanted == CorrectionImplementationOnly &&
+				(stage == "implementation" || stage == "validation" || stage == "completion_audit" || stage == "publication") {
 			out = append(out, value)
 		}
 	}
@@ -243,7 +249,12 @@ func nudgeLearningForStage(values []NudgeRoundRecord, stage NudgeStage) []NudgeL
 	return NudgeLearningExamples(filtered)
 }
 
-func reviewStageEvidence(runID, summary, promptDigest string, rounds []ReviewRound, findings []Finding, createdAt time.Time) *StageEvidence {
+func reviewStageEvidence(
+	runID, summary, promptDigest string,
+	rounds []ReviewRound,
+	findings []Finding,
+	createdAt time.Time,
+) *StageEvidence {
 	return &StageEvidence{
 		Stage: "review", RunID: runID, Summary: summary,
 		Coverage: mergeReviewCoverage(rounds), FindingIDs: findingIDs(findings),
@@ -251,7 +262,13 @@ func reviewStageEvidence(runID, summary, promptDigest string, rounds []ReviewRou
 	}
 }
 
-func completionStageEvidence(runID, stage, summary, promptDigest string, rounds []CompletionRound, findings []Finding, validation map[string]any, createdAt time.Time) *StageEvidence {
+func completionStageEvidence(
+	runID, stage, summary, promptDigest string,
+	rounds []CompletionRound,
+	findings []Finding,
+	validation map[string]any,
+	createdAt time.Time,
+) *StageEvidence {
 	return &StageEvidence{
 		Stage: stage, RunID: runID, Summary: summary,
 		Coverage: mergeCompletionCoverage(rounds), FindingIDs: findingIDs(findings),

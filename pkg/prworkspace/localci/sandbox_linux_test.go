@@ -197,8 +197,16 @@ func TestClassifySandboxExitSeparatesInfrastructureFromCodeFailures(t *testing.T
 		output string
 		want   Status
 	}{
-		{name: "dependency network", output: "go: downloading example.test/module v1.0.0\ndial tcp: lookup proxy.golang.org: connection refused", want: StatusInfrastructureError},
-		{name: "process ceiling", output: "runtime: failed to create new OS thread\nresource temporarily unavailable", want: StatusInfrastructureError},
+		{
+			name:   "dependency network",
+			output: "go: downloading example.test/module v1.0.0\ndial tcp: lookup proxy.golang.org: connection refused",
+			want:   StatusInfrastructureError,
+		},
+		{
+			name:   "process ceiling",
+			output: "runtime: failed to create new OS thread\nresource temporarily unavailable",
+			want:   StatusInfrastructureError,
+		},
 		{name: "ordinary assertion", output: "--- FAIL: TestGreeting\nwant hello, got goodbye", want: StatusFailed},
 	}
 	for _, test := range tests {

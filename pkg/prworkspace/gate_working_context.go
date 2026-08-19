@@ -27,15 +27,15 @@ type GateWorkingContextRequest struct {
 }
 
 type GateWorkingContextBinder interface {
-	Bind(context.Context, GateWorkingContextRequest) (workflows.ReadOnlySessionRef, error)
+	Bind(ctx context.Context, request GateWorkingContextRequest) (workflows.ReadOnlySessionRef, error)
 }
 
 // GateWorkingContextRuntimeAcquire pins the runtime generation while the
 // protected projection is written and returns the selected agent's exact
 // session store.
 type GateWorkingContextRuntimeAcquire func(
-	context.Context,
-	string,
+	ctx context.Context,
+	agentID string,
 ) (context.Context, session.SessionStore, func(), error)
 
 // SessionGateWorkingContextBinder stores one derived, protected session per PR
@@ -66,12 +66,12 @@ func (binder *SessionGateWorkingContextBinder) Bind(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	runtimeCtx, rawStore, release, err := binder.Acquire(ctx, request.AgentID)
-	if err != nil {
+	runtimeCtx, rawStore, release, acquireErr := binder.Acquire(ctx, request.AgentID)
+	if acquireErr != nil {
 		if release != nil {
 			release()
 		}
-		return workflows.ReadOnlySessionRef{}, fmt.Errorf("acquire PR gate working context: %w", err)
+		return workflows.ReadOnlySessionRef{}, fmt.Errorf("acquire PR gate working context: %w", acquireErr)
 	}
 	if runtimeCtx == nil || rawStore == nil || release == nil {
 		if release != nil {
@@ -87,9 +87,9 @@ func (binder *SessionGateWorkingContextBinder) Bind(
 	if !ok {
 		return workflows.ReadOnlySessionRef{}, errors.New("PR gate working-context store lacks exact snapshot support")
 	}
-	history, err := gateWorkingContextHistory(request)
-	if err != nil {
-		return workflows.ReadOnlySessionRef{}, err
+	history, historyErr := gateWorkingContextHistory(request)
+	if historyErr != nil {
+		return workflows.ReadOnlySessionRef{}, historyErr
 	}
 
 	// One process may start gates for the same aggregate concurrently before
@@ -112,9 +112,9 @@ func (binder *SessionGateWorkingContextBinder) Bind(
 	}); err != nil {
 		return workflows.ReadOnlySessionRef{}, fmt.Errorf("admit PR gate working context: %w", err)
 	}
-	previous, found, err := store.ReadSessionSnapshot(runtimeCtx, key)
-	if err != nil {
-		return workflows.ReadOnlySessionRef{}, fmt.Errorf("read PR gate working context: %w", err)
+	previous, found, readErr := store.ReadSessionSnapshot(runtimeCtx, key)
+	if readErr != nil {
+		return workflows.ReadOnlySessionRef{}, fmt.Errorf("read PR gate working context: %w", readErr)
 	}
 	if !found || previous.Key != key || previous.Revision == "" ||
 		!reflect.DeepEqual(previous.Scope, &scope) {
@@ -127,9 +127,9 @@ func (binder *SessionGateWorkingContextBinder) Bind(
 	if err := store.ReplaceSessionSnapshot(runtimeCtx, replacement); err != nil {
 		return workflows.ReadOnlySessionRef{}, fmt.Errorf("replace PR gate working context: %w", err)
 	}
-	verified, found, err := store.ReadSessionSnapshot(runtimeCtx, key)
-	if err != nil {
-		return workflows.ReadOnlySessionRef{}, fmt.Errorf("verify PR gate working context: %w", err)
+	verified, found, verifyErr := store.ReadSessionSnapshot(runtimeCtx, key)
+	if verifyErr != nil {
+		return workflows.ReadOnlySessionRef{}, fmt.Errorf("verify PR gate working context: %w", verifyErr)
 	}
 	if !found || verified.Key != key || verified.Revision == "" ||
 		verified.Revision == previous.Revision || !reflect.DeepEqual(verified.Scope, &scope) ||

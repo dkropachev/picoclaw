@@ -39,7 +39,7 @@ func TestControllerDelegatesProtectedPRWorkspaceSubtreeToActiveGeneration(t *tes
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
-	if got := response.Header().Get("X-PR-Workspaces-Generation"); got != "active" {
+	if got := response.Header().Get("X-Pr-Workspaces-Generation"); got != "active" {
 		t.Fatalf("generation header = %q", got)
 	}
 	if handler.calls != 1 || handler.method != http.MethodPost ||
@@ -119,6 +119,6 @@ func (handler *recordingPRWorkspaceHandler) ServeHTTP(w http.ResponseWriter, r *
 	handler.requestHeader = r.Header.Get("X-Delegation-Test")
 	body, _ := io.ReadAll(r.Body)
 	handler.body = string(body)
-	w.Header().Set("X-PR-Workspaces-Generation", "active")
+	w.Header().Set("X-Pr-Workspaces-Generation", "active")
 	w.WriteHeader(http.StatusAccepted)
 }

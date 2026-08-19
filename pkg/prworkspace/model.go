@@ -392,14 +392,14 @@ type RepairAttempt struct {
 // publish or reconcile one exact validated commit. It is persisted by the
 // production store but deliberately omitted from HTTP/JSON projections.
 type ImplementationPublicationFence struct {
-	GitWorkspaceID string
-	LineID         string
-	LineVersion    int64
-	MutationEpoch  int64
-	ParkIntentID   string
-	BaseCommit     string
-	Tip            string
-	Tree           string
+	GitWorkspaceID string `json:"git_workspace_id"`
+	LineID         string `json:"line_id"`
+	LineVersion    int64  `json:"line_version"`
+	MutationEpoch  int64  `json:"mutation_epoch"`
+	ParkIntentID   string `json:"park_intent_id"`
+	BaseCommit     string `json:"base_commit"`
+	Tip            string `json:"tip"`
+	Tree           string `json:"tree"`
 }
 
 type ValidationCheck struct {

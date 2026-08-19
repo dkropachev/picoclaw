@@ -806,16 +806,16 @@ type PRWorkspacePatchResult struct {
 // PRWorkspaceStore owns durable aggregate capture, inspection, and CAS
 // mutations. Request IDs are globally unique and replay their original result.
 type PRWorkspaceStore interface {
-	CreatePRWorkspace(context.Context, PRWorkspaceCreate) (PRWorkspaceAggregate, bool, error)
-	GetPRWorkspace(context.Context, string) (PRWorkspaceAggregate, error)
-	ListPRWorkspaces(context.Context, PRWorkspaceFilter) (PRWorkspacePage, error)
-	ApplyPRWorkspaceMutation(context.Context, PRWorkspaceMutation) (PRWorkspaceMutationResult, error)
-	ApplyPRWorkspacePatch(context.Context, PRWorkspacePatchMutation) (PRWorkspacePatchResult, error)
+	CreatePRWorkspace(ctx context.Context, input PRWorkspaceCreate) (PRWorkspaceAggregate, bool, error)
+	GetPRWorkspace(ctx context.Context, workspaceID string) (PRWorkspaceAggregate, error)
+	ListPRWorkspaces(ctx context.Context, filter PRWorkspaceFilter) (PRWorkspacePage, error)
+	ApplyPRWorkspaceMutation(ctx context.Context, input PRWorkspaceMutation) (PRWorkspaceMutationResult, error)
+	ApplyPRWorkspacePatch(ctx context.Context, input PRWorkspacePatchMutation) (PRWorkspacePatchResult, error)
 }
 
 type PRWorkspaceCutoverStore interface {
-	SetPRWorkspaceIngressCutover(context.Context, PRIngressCutoverWatermark) error
-	GetPRWorkspaceIngressCutover(context.Context, string, string) (PRIngressCutoverWatermark, error)
+	SetPRWorkspaceIngressCutover(ctx context.Context, watermark PRIngressCutoverWatermark) error
+	GetPRWorkspaceIngressCutover(ctx context.Context, source, connector string) (PRIngressCutoverWatermark, error)
 }
 
 // PRWorkspaceClaimRequest controls a bounded worker claim. LeaseDuration is
@@ -861,8 +861,8 @@ type PRWorkspacePublicationFinish struct {
 // PRWorkspaceWorkerStore exposes atomic cross-workspace claims and
 // lease-token-fenced completion for durable operations and publications.
 type PRWorkspaceWorkerStore interface {
-	ClaimPRWorkspaceOperations(context.Context, PRWorkspaceClaimRequest) ([]PRClaimedOperationIntent, error)
-	FinishPRWorkspaceOperation(context.Context, PRWorkspaceOperationFinish) (PRClaimedOperationIntent, error)
-	ClaimPRWorkspacePublications(context.Context, PRWorkspaceClaimRequest) ([]PRClaimedPublication, error)
-	FinishPRWorkspacePublication(context.Context, PRWorkspacePublicationFinish) (PRClaimedPublication, error)
+	ClaimPRWorkspaceOperations(ctx context.Context, input PRWorkspaceClaimRequest) ([]PRClaimedOperationIntent, error)
+	FinishPRWorkspaceOperation(ctx context.Context, input PRWorkspaceOperationFinish) (PRClaimedOperationIntent, error)
+	ClaimPRWorkspacePublications(ctx context.Context, input PRWorkspaceClaimRequest) ([]PRClaimedPublication, error)
+	FinishPRWorkspacePublication(ctx context.Context, input PRWorkspacePublicationFinish) (PRClaimedPublication, error)
 }

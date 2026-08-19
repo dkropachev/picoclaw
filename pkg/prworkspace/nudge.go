@@ -141,8 +141,10 @@ func NudgeStrategyStats(rounds []NudgeRoundRecord, stage NudgeStage) []NudgeStra
 		stat := byStrategy[round.Strategy]
 		stat.Strategy = round.Strategy
 		stat.Attempts++
-		if round.State == ExecutionSucceeded && round.Reward != nil && !math.IsNaN(*round.Reward) && !math.IsInf(*round.Reward, 0) &&
-			*round.Reward >= 0 && *round.Reward <= 1 {
+		if round.State == ExecutionSucceeded && round.Reward != nil && !math.IsNaN(*round.Reward) &&
+			!math.IsInf(*round.Reward, 0) &&
+			*round.Reward >= 0 &&
+			*round.Reward <= 1 {
 			stat.ResolvedRounds++
 			stat.RewardTotal += *round.Reward
 		}
@@ -365,7 +367,11 @@ func refreshNudgeRewardsForPatch(aggregate Aggregate, patch *AggregatePatch) {
 		return
 	}
 	findings := upsertByID(aggregate.Findings, patch.UpsertFindings, func(value Finding) string { return value.ID })
-	rounds := replaceByID(aggregate.NudgeRounds, patch.ReplaceNudgeRounds, func(value NudgeRoundRecord) string { return value.ID })
+	rounds := replaceByID(
+		aggregate.NudgeRounds,
+		patch.ReplaceNudgeRounds,
+		func(value NudgeRoundRecord) string { return value.ID },
+	)
 	rounds = append(rounds, patch.AppendNudgeRounds...)
 	for _, replacement := range recomputeNudgeRoundRewards(rounds, findings) {
 		appended := false

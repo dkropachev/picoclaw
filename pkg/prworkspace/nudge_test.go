@@ -54,7 +54,8 @@ func TestNudgeStrategyStatsUseOnlyDurableResolvedRewards(t *testing.T) {
 	if stats[0].Strategy != NudgeAcceptanceCriteria || stats[0].Attempts != 1 || stats[0].ResolvedRounds != 0 {
 		t.Fatalf("zero finding became reward evidence: %#v", stats[0])
 	}
-	if stats[1].Strategy != NudgeAdversarial || stats[1].Attempts != 1 || stats[1].ResolvedRounds != 1 || stats[1].RewardTotal != .75 {
+	if stats[1].Strategy != NudgeAdversarial || stats[1].Attempts != 1 || stats[1].ResolvedRounds != 1 ||
+		stats[1].RewardTotal != .75 {
 		t.Fatalf("resolved stat = %#v", stats[1])
 	}
 }
@@ -73,8 +74,22 @@ func TestSelectNudgeStrategyRotatesUnresolvedAttempts(t *testing.T) {
 func TestNudgeLearningExamplesPreserveVariantFeedbackWithoutInventingReward(t *testing.T) {
 	reward := 1.0
 	rounds := []NudgeRoundRecord{
-		{Stage: NudgeReviewSearch, State: ExecutionSucceeded, Strategy: NudgeCoverageGaps, Challenge: "found nothing", VariantDigest: "zero"},
-		{Stage: NudgeReviewSearch, State: ExecutionSucceeded, Strategy: NudgeValidation, Challenge: "check evidence", VariantDigest: "useful", Reward: &reward, RewardProvenance: "finding_outcomes"},
+		{
+			Stage:         NudgeReviewSearch,
+			State:         ExecutionSucceeded,
+			Strategy:      NudgeCoverageGaps,
+			Challenge:     "found nothing",
+			VariantDigest: "zero",
+		},
+		{
+			Stage:            NudgeReviewSearch,
+			State:            ExecutionSucceeded,
+			Strategy:         NudgeValidation,
+			Challenge:        "check evidence",
+			VariantDigest:    "useful",
+			Reward:           &reward,
+			RewardProvenance: "finding_outcomes",
+		},
 	}
 	examples := NudgeLearningExamples(rounds)
 	if len(examples) != 2 || examples[0].Reward != nil {

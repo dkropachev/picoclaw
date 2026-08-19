@@ -101,7 +101,8 @@ func validatePromptBundle(stage PromptStage, bundle PRContextBundle) error {
 	if stage != PromptCharterDraft && (bundle.Charter.ID == "" || !bundle.Charter.Confirmed) {
 		return errors.New("a confirmed PR charter is required")
 	}
-	if stage != PromptCharterDraft && bundle.Charter.Confirmed && bundle.Charter.HeadSHA != "" && bundle.Provider.HeadSHA != "" &&
+	if stage != PromptCharterDraft && bundle.Charter.Confirmed && bundle.Charter.HeadSHA != "" &&
+		bundle.Provider.HeadSHA != "" &&
 		bundle.Charter.HeadSHA != bundle.Provider.HeadSHA {
 		return errors.New("prompt charter and provider head do not match")
 	}

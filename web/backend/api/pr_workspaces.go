@@ -50,11 +50,11 @@ func pathTraversesPRWorkspace(requestPath string) bool {
 }
 
 const (
-	prWorkspaceAPIPath        = "/api/pr-workspaces"
-	prWorkspaceRuntimePath    = "/runtime/eventing/pr-workspaces"
-	prWorkspaceMaxBodyBytes   = 1 << 20
-	prWorkspaceMaxQueryBytes  = 8 << 10
-	prWorkspaceReadTimeout    = 10 * time.Second
+	prWorkspaceAPIPath       = "/api/pr-workspaces"
+	prWorkspaceRuntimePath   = "/runtime/eventing/pr-workspaces"
+	prWorkspaceMaxBodyBytes  = 1 << 20
+	prWorkspaceMaxQueryBytes = 8 << 10
+	prWorkspaceReadTimeout   = 10 * time.Second
 	// Review and implementation deliberately run several bounded AI rounds in
 	// one mutation. A ten-minute reverse-proxy deadline can cancel a healthy
 	// lifecycle run just before its durable aggregate mutation, especially when

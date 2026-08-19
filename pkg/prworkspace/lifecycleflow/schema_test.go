@@ -157,15 +157,32 @@ func TestDefaultManifestPreservesCriticalLifecycleTopology(t *testing.T) {
 	if got := outgoingTargets(review, "review_route_classified"); !reflect.DeepEqual(got, wantDispositionTargets) {
 		t.Fatalf("classification outcomes = %v, want %v", got, wantDispositionTargets)
 	}
-	if normalizedNode(t, implementation, "implementation_gate_scope_policy").DecisionPoint != "pr.implementation.scope" ||
-		normalizedNode(t, implementation, "implementation_gate_complete_policy").DecisionPoint != "pr.implementation.complete" ||
-		normalizedNode(t, implementation, "implementation_gate_complete_direct").DecisionPoint != "pr.implementation.complete" {
+	if normalizedNode(
+		t,
+		implementation,
+		"implementation_gate_scope_policy",
+	).DecisionPoint != "pr.implementation.scope" ||
+		normalizedNode(
+			t,
+			implementation,
+			"implementation_gate_complete_policy",
+		).DecisionPoint != "pr.implementation.complete" ||
+		normalizedNode(
+			t,
+			implementation,
+			"implementation_gate_complete_direct",
+		).DecisionPoint != "pr.implementation.complete" {
 		t.Fatal("conditional/joint implementation gate decision points changed")
 	}
 	for _, flow := range graph.Flows {
 		for _, node := range flow.Nodes {
 			if node.DecisionPoint != "" && node.Ordinal != decisionPointOrdinals[node.DecisionPoint] {
-				t.Fatalf("node %q ordinal = %d, want %d", node.ID, node.Ordinal, decisionPointOrdinals[node.DecisionPoint])
+				t.Fatalf(
+					"node %q ordinal = %d, want %d",
+					node.ID,
+					node.Ordinal,
+					decisionPointOrdinals[node.DecisionPoint],
+				)
 			}
 		}
 	}
@@ -186,7 +203,12 @@ func TestDefaultReviewFlowIsImplementationNeutralAndReusable(t *testing.T) {
 	if call.Kind != NodeAction || call.Operation != "pr.review.invoke" {
 		t.Fatalf("implementation review invocation = %#v", call)
 	}
-	if edge := normalizedEdge(t, implementation, "implementation_gate_charter_reconfirm", call.ID); edge.Mode != EdgeLinear {
+	if edge := normalizedEdge(
+		t,
+		implementation,
+		"implementation_gate_charter_reconfirm",
+		call.ID,
+	); edge.Mode != EdgeLinear {
 		t.Fatalf("implementation review handoff edge = %#v", edge)
 	}
 }
@@ -200,21 +222,45 @@ func TestParseRejectsUnsafeOrNonStrictYAML(t *testing.T) {
 	}{
 		{name: "empty", data: nil, want: "empty"},
 		{name: "oversized", data: []byte(strings.Repeat("x", MaxManifestBytes+1)), want: "exceeds"},
-		{name: "unknown root field", data: append(append([]byte(nil), source...), []byte("unknown: true\n")...), want: "field unknown not found"},
+		{
+			name: "unknown root field",
+			data: append(append([]byte(nil), source...), []byte("unknown: true\n")...),
+			want: "field unknown not found",
+		},
 		{
 			name: "unknown nested field",
-			data: []byte(strings.Replace(string(source), "        operation: github.review.requested", "        operation: github.review.requested\n        surprise: true", 1)),
+			data: []byte(
+				strings.Replace(
+					string(source),
+					"        operation: github.review.requested",
+					"        operation: github.review.requested\n        surprise: true",
+					1,
+				),
+			),
 			want: "field surprise not found",
 		},
 		{
 			name: "duplicate key",
-			data: []byte(strings.Replace(string(source), "schema: pr-lifecycle-flow/v1", "schema: pr-lifecycle-flow/v1\nschema: pr-lifecycle-flow/v1", 1)),
+			data: []byte(
+				strings.Replace(
+					string(source),
+					"schema: pr-lifecycle-flow/v1",
+					"schema: pr-lifecycle-flow/v1\nschema: pr-lifecycle-flow/v1",
+					1,
+				),
+			),
 			want: "duplicate key",
 		},
-		{name: "multiple documents", data: append(append([]byte(nil), source...), []byte("---\nschema: pr-lifecycle-flow/v1\n")...), want: "multiple YAML documents"},
+		{
+			name: "multiple documents",
+			data: append(append([]byte(nil), source...), []byte("---\nschema: pr-lifecycle-flow/v1\n")...),
+			want: "multiple YAML documents",
+		},
 		{
 			name: "anchor",
-			data: []byte(strings.Replace(string(source), "    title: Review workflow", "    title: &shared Review workflow", 1)),
+			data: []byte(
+				strings.Replace(string(source), "    title: Review workflow", "    title: &shared Review workflow", 1),
+			),
 			want: "aliases or anchors",
 		},
 	}

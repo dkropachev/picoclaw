@@ -106,7 +106,6 @@ func TestSchemaV19RejectsLegacyPRTablesInAlreadyCurrentDatabase(t *testing.T) {
 		"pr_development_contamination",
 		"PR_REVIEW_contamination",
 	} {
-		table := table
 		t.Run(table, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "contaminated-v19.db")
@@ -177,8 +176,8 @@ func installV18CutoverFixture(t *testing.T, db *sql.DB) {
 func TestSchemaV19RejectsVersionsOneThroughSeventeen(t *testing.T) {
 	t.Parallel()
 	for version := 1; version <= 17; version++ {
-		version := version
 		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "unsupported.db")
 			db := openSchemaTestDB(t, path)
 			_, err := db.Exec(`PRAGMA user_version = ` + strconv.Itoa(version))

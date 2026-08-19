@@ -119,7 +119,8 @@ func TestWorkflowGateEvaluatorAppliesExactRepositoryActionOverride(t *testing.T)
 		},
 	}
 	configured.WorkflowConfigurations["automatic"] = config.PRLifecycleWorkflowConfiguration{
-		Name: "Automatic", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
+		Name:           "Automatic",
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef,
 			GateRef:     "gates.charter-confirm",
@@ -145,8 +146,10 @@ func TestWorkflowGateEvaluatorAppliesExactRepositoryActionOverride(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gate.State != ExecutionSucceeded || !gateCompletedWith(gate, "revise") || gate.runtime.WorkflowConfigurationID != "automatic" ||
-		len(gate.Turns) != 1 || gate.Turns[0].ActorKind != "deterministic" ||
+	if gate.State != ExecutionSucceeded || !gateCompletedWith(gate, "revise") ||
+		gate.runtime.WorkflowConfigurationID != "automatic" ||
+		len(gate.Turns) != 1 ||
+		gate.Turns[0].ActorKind != "deterministic" ||
 		gate.Turns[0].FieldValues["action"] != "revise" {
 		t.Fatalf("automatic gate = %#v", gate)
 	}
@@ -195,9 +198,9 @@ func TestWorkflowGateEvaluatorUsesExactOriginatingSessionForSourceAI(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	reserved, found, err := backend.ReadSessionSnapshot(t.Context(), source.Session)
-	if err != nil || !found {
-		t.Fatalf("reserved source session = %#v, found=%v, error=%v", reserved, found, err)
+	reserved, found, readErr := backend.ReadSessionSnapshot(t.Context(), source.Session)
+	if readErr != nil || !found {
+		t.Fatalf("reserved source session = %#v, found=%v, error=%v", reserved, found, readErr)
 	}
 	if err := backend.ReplaceSessionSnapshot(t.Context(), session.SessionSnapshotReplacement{
 		Key: source.Session,
@@ -209,16 +212,28 @@ func TestWorkflowGateEvaluatorUsesExactOriginatingSessionForSourceAI(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	persisted, found, err := backend.ReadSessionSnapshot(t.Context(), source.Session)
-	if err != nil || !found || !reflect.DeepEqual(persisted.Scope, &scope) {
-		t.Fatalf("persisted source session = %#v, found=%v, error=%v", persisted, found, err)
+	persisted, found, readErr := backend.ReadSessionSnapshot(t.Context(), source.Session)
+	if readErr != nil || !found || !reflect.DeepEqual(persisted.Scope, &scope) {
+		t.Fatalf("persisted source session = %#v, found=%v, error=%v", persisted, found, readErr)
 	}
 	source.SessionRevision = persisted.Revision
 	finding := Finding{
-		ID: "pfn_11111111111111111111111111111111", Fingerprint: "sha256:finding",
-		Origin: FindingOriginReview, Severity: "high", Title: "Source finding", Message: "Check it",
-		Scope:       ScopeAssessment{Distance: ScopeNecessaryAdjacent, Size: ChangeSizeS, Presence: WorkCandidatePresent, TypeCompatible: true, Confidence: 1},
-		Disposition: FindingOpen, SourceAvailable: true, source: source,
+		ID:          "pfn_11111111111111111111111111111111",
+		Fingerprint: "sha256:finding",
+		Origin:      FindingOriginReview,
+		Severity:    "high",
+		Title:       "Source finding",
+		Message:     "Check it",
+		Scope: ScopeAssessment{
+			Distance:       ScopeNecessaryAdjacent,
+			Size:           ChangeSizeS,
+			Presence:       WorkCandidatePresent,
+			TypeCompatible: true,
+			Confidence:     1,
+		},
+		Disposition:     FindingOpen,
+		SourceAvailable: true,
+		source:          source,
 	}
 	action := gatetypes.GateAction{
 		Type: gatetypes.GateActionAI, Session: workflows.AgentSessionSource,
@@ -226,7 +241,8 @@ func TestWorkflowGateEvaluatorUsesExactOriginatingSessionForSourceAI(t *testing.
 	}
 	configured := config.DefaultPRLifecycleConfig()
 	configured.WorkflowConfigurations["source"] = config.PRLifecycleWorkflowConfiguration{
-		Name: "Source", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
+		Name:           "Source",
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.finding-classify", Action: &action,
 		}},
@@ -321,7 +337,8 @@ jobs:
 	}
 	configured := config.DefaultPRLifecycleConfig()
 	configured.WorkflowConfigurations["multi"] = config.PRLifecycleWorkflowConfiguration{
-		Name: "Multi-step", DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
+		Name:           "Multi-step",
+		DeferredIssues: config.PRLifecycleDeferredIssueConfig{Mode: config.PRLifecycleDeferredIssuesAsk},
 		Bindings: []config.PRLifecycleGateBinding{{
 			WorkflowRef: PRLifecycleWorkflowRef, GateRef: "gates.charter-confirm", Action: &action,
 		}},

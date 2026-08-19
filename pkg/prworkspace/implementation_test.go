@@ -53,7 +53,11 @@ func TestImplementationRepairReceivesSharedCurrentGuidanceAndSeparatePromptDiges
 	seeded, err := service.store.Mutate(context.Background(), Mutation{
 		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
 		RequestID: "request-00000060", Patch: AggregatePatch{
-			AppendMessages: []Message{message}, AppendCorrections: []Correction{correction}, AppendLessons: []RepositoryLesson{lesson},
+			AppendMessages: []Message{
+				message,
+			},
+			AppendCorrections: []Correction{correction},
+			AppendLessons:     []RepositoryLesson{lesson},
 		},
 	})
 	if err != nil {
@@ -84,7 +88,13 @@ type implementationValidation struct{}
 
 func (implementationValidation) Validate(_ context.Context, _ ValidationRequest) (ValidationRun, error) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	return ValidationRun{State: ExecutionSucceeded, CandidateSHA: "candidate", Checks: []ValidationCheck{{ID: "test", Name: "tests", Status: "passed"}}, StartedAt: now, FinishedAt: &now}, nil
+	return ValidationRun{
+		State:        ExecutionSucceeded,
+		CandidateSHA: "candidate",
+		Checks:       []ValidationCheck{{ID: "test", Name: "tests", Status: "passed"}},
+		StartedAt:    now,
+		FinishedAt:   &now,
+	}, nil
 }
 
 type infrastructureImplementationValidation struct{}
@@ -138,7 +148,10 @@ type statusImplementationValidation struct {
 	seen   []ValidationRequest
 }
 
-func (validation *statusImplementationValidation) Validate(_ context.Context, request ValidationRequest) (ValidationRun, error) {
+func (validation *statusImplementationValidation) Validate(
+	_ context.Context,
+	request ValidationRequest,
+) (ValidationRun, error) {
 	validation.calls++
 	validation.seen = append(validation.seen, request)
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
@@ -166,7 +179,12 @@ func TestImplementationStopsOnValidationInfrastructureFailureWithoutRepairingCod
 	}
 	stage := result.StageRuns[len(result.StageRuns)-1]
 	if repair.calls != 1 || len(result.RepairAttempts) != 1 || len(result.ValidationRuns) != 1 {
-		t.Fatalf("infrastructure failure retried code: repairs=%d attempts=%d validations=%d", repair.calls, len(result.RepairAttempts), len(result.ValidationRuns))
+		t.Fatalf(
+			"infrastructure failure retried code: repairs=%d attempts=%d validations=%d",
+			repair.calls,
+			len(result.RepairAttempts),
+			len(result.ValidationRuns),
+		)
 	}
 	if stage.State != ExecutionFailed || stage.PublicError != "validation_infrastructure_failed" {
 		t.Fatalf("implementation stage = %#v", stage)
@@ -238,15 +256,25 @@ func TestImplementationValidationDefinitionStatusesBlockWithoutCodeFinding(t *te
 			stage := result.StageRuns[len(result.StageRuns)-1]
 			if repair.calls != 1 || validation.calls != 1 || stage.State != ExecutionBlocked ||
 				stage.PublicError != test.publicError {
-				t.Fatalf("definition blocker result = stage %#v, repairs %d, validations %d", stage, repair.calls, validation.calls)
+				t.Fatalf(
+					"definition blocker result = stage %#v, repairs %d, validations %d",
+					stage,
+					repair.calls,
+					validation.calls,
+				)
 			}
 			for _, finding := range result.Findings {
 				if finding.Title == "Validation remains non-green" {
 					t.Fatalf("definition blocker became a code finding: %#v", finding)
 				}
 			}
-			if len(validation.seen) != 1 || validation.seen[0].ID == "" || result.ValidationRuns[0].ID != validation.seen[0].ID {
-				t.Fatalf("validation attempt identity was not assigned before execution: %#v / %#v", validation.seen, result.ValidationRuns)
+			if len(validation.seen) != 1 || validation.seen[0].ID == "" ||
+				result.ValidationRuns[0].ID != validation.seen[0].ID {
+				t.Fatalf(
+					"validation attempt identity was not assigned before execution: %#v / %#v",
+					validation.seen,
+					result.ValidationRuns,
+				)
 			}
 		})
 	}
@@ -257,7 +285,10 @@ type failThenPassImplementationValidation struct {
 	seen  []ValidationRequest
 }
 
-func (validation *failThenPassImplementationValidation) Validate(_ context.Context, request ValidationRequest) (ValidationRun, error) {
+func (validation *failThenPassImplementationValidation) Validate(
+	_ context.Context,
+	request ValidationRequest,
+) (ValidationRun, error) {
 	validation.calls++
 	validation.seen = append(validation.seen, request)
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
@@ -287,13 +318,19 @@ func TestImplementationFeedsBoundedValidationEvidenceIntoNextRepair(t *testing.T
 		t.Fatal(err)
 	}
 	if repair.calls != 2 || validation.calls != 2 || len(result.ValidationRuns) != 2 {
-		t.Fatalf("repair/validation cycles = %d/%d, runs=%d", repair.calls, validation.calls, len(result.ValidationRuns))
+		t.Fatalf(
+			"repair/validation cycles = %d/%d, runs=%d",
+			repair.calls,
+			validation.calls,
+			len(result.ValidationRuns),
+		)
 	}
 	if repair.last.Context.Validation == nil {
 		t.Fatal("second repair did not receive validation evidence")
 	}
 	encoded, err := json.Marshal(repair.last.Context.Validation)
-	if err != nil || len(encoded) > maxRepairValidationSummaryBytes+4096 || !strings.Contains(string(encoded), "missing RetryPolicy") {
+	if err != nil || len(encoded) > maxRepairValidationSummaryBytes+4096 ||
+		!strings.Contains(string(encoded), "missing RetryPolicy") {
 		t.Fatalf("bounded validation evidence = %d bytes, %v, %s", len(encoded), err, encoded)
 	}
 	if validation.seen[0].ID == "" || validation.seen[0].ID == validation.seen[1].ID {
@@ -422,11 +459,21 @@ func (failedCompletionNudgeAI) RunIsolated(_ context.Context, request IsolatedAI
 	switch request.Operation {
 	case "scope.audit":
 		return map[string]any{
-			"changes": []any{map[string]any{
-				"path": "pkg/retry.go", "hunk": testCandidateHunk, "module": "pkg/retry", "semantic_lines": 10,
-				"presence": "candidate_present", "scope_distance": "S0_exact", "change_size": "XS",
-				"type_compatible": true, "confidence": 1.0, "charter_clauses": []any{"goal"}, "explanation": "exact charter work",
-			}},
+			"changes": []any{
+				map[string]any{
+					"path":            "pkg/retry.go",
+					"hunk":            testCandidateHunk,
+					"module":          "pkg/retry",
+					"semantic_lines":  10,
+					"presence":        "candidate_present",
+					"scope_distance":  "S0_exact",
+					"change_size":     "XS",
+					"type_compatible": true,
+					"confidence":      1.0,
+					"charter_clauses": []any{"goal"},
+					"explanation":     "exact charter work",
+				},
+			},
 			"files": 1, "semantic_lines": 10, "modules": 1,
 			"worst_scope_distance": "S0_exact", "worst_change_size": "XS", "type_compatible": true, "confidence": 1.0,
 			"charter_clauses": []any{"goal"}, "explanation": "exact charter work",
@@ -463,7 +510,13 @@ func TestImplementationRunsRepairValidationAndCompletionNudges(t *testing.T) {
 	}
 	if repair.calls != 1 || result.Workspace.Phase != PhasePublication ||
 		len(result.RepairAttempts) != 1 || len(result.ValidationRuns) != 1 || len(result.NudgeRounds) != 2 {
-		t.Fatalf("result phase=%q repair=%d validation=%d nudges=%d", result.Workspace.Phase, len(result.RepairAttempts), len(result.ValidationRuns), len(result.NudgeRounds))
+		t.Fatalf(
+			"result phase=%q repair=%d validation=%d nudges=%d",
+			result.Workspace.Phase,
+			len(result.RepairAttempts),
+			len(result.ValidationRuns),
+			len(result.NudgeRounds),
+		)
 	}
 	if result.Findings[0].Disposition != FindingFixed {
 		t.Fatalf("finding disposition = %q", result.Findings[0].Disposition)
@@ -549,7 +602,11 @@ func TestImplementationPersistsFailedCompletionNudge(t *testing.T) {
 		t.Fatalf("failed completion attempt = %#v", result.NudgeRounds)
 	}
 	if len(result.RepairAttempts) != 1 || len(result.ValidationRuns) != 1 {
-		t.Fatalf("repair evidence lost: repairs=%d validation=%d", len(result.RepairAttempts), len(result.ValidationRuns))
+		t.Fatalf(
+			"repair evidence lost: repairs=%d validation=%d",
+			len(result.RepairAttempts),
+			len(result.ValidationRuns),
+		)
 	}
 }
 
@@ -564,16 +621,32 @@ func readyImplementationService(t *testing.T) (*Service, Aggregate) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	charter := Charter{ID: "pcr_11111111111111111111111111111111", Type: PRTypeFix, Goal: "fix", BaseSHA: input.Provider.BaseSHA, HeadSHA: input.Provider.HeadSHA, Confirmed: true, CreatedAt: now}
+	charter := Charter{
+		ID:        "pcr_11111111111111111111111111111111",
+		Type:      PRTypeFix,
+		Goal:      "fix",
+		BaseSHA:   input.Provider.BaseSHA,
+		HeadSHA:   input.Provider.HeadSHA,
+		Confirmed: true,
+		CreatedAt: now,
+	}
 	reviewStage := StageRun{
 		ID: "psr_11111111111111111111111111111111", Stage: "review", State: ExecutionSucceeded,
 		CharterID: charter.ID, HeadSHA: charter.HeadSHA, Attempt: 1, StartedAt: now, FinishedAt: &now,
 	}
 	finding := Finding{
-		ID: "pfn_11111111111111111111111111111111", Fingerprint: "sha256:finding",
-		Origin: FindingOriginReview, OriginRunID: reviewStage.ID, Severity: "high", Title: "retry bug", Message: "fix retry",
+		ID:          "pfn_11111111111111111111111111111111",
+		Fingerprint: "sha256:finding",
+		Origin:      FindingOriginReview,
+		OriginRunID: reviewStage.ID,
+		Severity:    "high",
+		Title:       "retry bug",
+		Message:     "fix retry",
 		Scope:       ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeXS, TypeCompatible: true, Confidence: 1},
-		Disposition: FindingInScope, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Disposition: FindingInScope,
+		Version:     1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	active := charter.ID
 	phase := PhaseTriage
@@ -587,7 +660,9 @@ func readyImplementationService(t *testing.T) (*Service, Aggregate) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(ServiceConfig{Store: store, AI: serviceAI{}, Gates: passingGates{}, Now: func() time.Time { return now }})
+	service, err := NewService(
+		ServiceConfig{Store: store, AI: serviceAI{}, Gates: passingGates{}, Now: func() time.Time { return now }},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

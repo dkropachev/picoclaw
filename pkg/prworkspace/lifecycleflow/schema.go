@@ -572,10 +572,20 @@ func validateForks(path string, outgoing map[string][]Edge) error {
 	for source, edges := range outgoing {
 		if len(edges) == 1 {
 			if edges[0].Label != "" || edges[0].Outcome != "" {
-				return fmt.Errorf("%s node %q has one outgoing edge, which must be unlabeled and outcome-free", path, source)
+				return fmt.Errorf(
+					"%s node %q has one outgoing edge, which must be unlabeled and outcome-free",
+					path,
+					source,
+				)
 			}
 			if edges[0].Mode != EdgeLinear && edges[0].Mode != EdgeOptional {
-				return fmt.Errorf("%s node %q has one outgoing edge, which must use mode %q or %q", path, source, EdgeLinear, EdgeOptional)
+				return fmt.Errorf(
+					"%s node %q has one outgoing edge, which must use mode %q or %q",
+					path,
+					source,
+					EdgeLinear,
+					EdgeOptional,
+				)
 			}
 			continue
 		}
@@ -613,15 +623,27 @@ func validateForks(path string, outgoing map[string][]Edge) error {
 		switch {
 		case choiceCount > 0:
 			if choiceCount < 2 || parallelCount != 0 || linearCount != 0 {
-				return fmt.Errorf("%s split node %q must use at least two choice edges plus only optional sidecars", path, source)
+				return fmt.Errorf(
+					"%s split node %q must use at least two choice edges plus only optional sidecars",
+					path,
+					source,
+				)
 			}
 		case parallelCount > 0:
 			if choiceCount != 0 || linearCount != 0 {
-				return fmt.Errorf("%s split node %q may combine parallel edges only with optional sidecars", path, source)
+				return fmt.Errorf(
+					"%s split node %q may combine parallel edges only with optional sidecars",
+					path,
+					source,
+				)
 			}
 		case linearCount > 0:
 			if linearCount != 1 || optionalCount == 0 {
-				return fmt.Errorf("%s split node %q may combine one linear edge only with optional sidecars", path, source)
+				return fmt.Errorf(
+					"%s split node %q may combine one linear edge only with optional sidecars",
+					path,
+					source,
+				)
 			}
 		case optionalCount == len(edges):
 			// Independent zero-or-more fan-out.

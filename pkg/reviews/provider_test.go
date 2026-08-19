@@ -72,11 +72,25 @@ func TestGitHubProviderRejectsInvalidEvidenceAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"", "octo", "octo/repo/extra", "/repo"} {
-		if _, readErr := provider.ReadWorkspacePullJSON(t.Context(), repository, 42); !errors.Is(readErr, ErrInvalidWorkspaceProviderRequest) {
+		if _, readErr := provider.ReadWorkspacePullJSON(
+			t.Context(),
+			repository,
+			42,
+		); !errors.Is(
+			readErr,
+			ErrInvalidWorkspaceProviderRequest,
+		) {
 			t.Fatalf("repository %q error = %v", repository, readErr)
 		}
 	}
-	if _, err = provider.ReadWorkspacePullJSON(t.Context(), "octo/repo", 0); !errors.Is(err, ErrInvalidWorkspaceProviderRequest) {
+	if _, err = provider.ReadWorkspacePullJSON(
+		t.Context(),
+		"octo/repo",
+		0,
+	); !errors.Is(
+		err,
+		ErrInvalidWorkspaceProviderRequest,
+	) {
 		t.Fatalf("pull zero error = %v", err)
 	}
 	if _, err = provider.ReadWorkspacePullJSON(t.Context(), "octo/repo", 42); !errors.Is(err, ErrProviderIncompatible) {
@@ -157,7 +171,15 @@ func TestGitHubProviderRoutesReconciliationIdentityAndIssueTools(t *testing.T) {
 		t.Fatalf("issue create args = %#v", requests[3].Args)
 	}
 	for _, page := range []int{0, MaxWorkspaceReviewHistoryPages + 1} {
-		if _, pageErr := provider.ReadWorkspaceReviewsJSON(t.Context(), "octo/repo", 42, page); !errors.Is(pageErr, ErrInvalidWorkspaceProviderRequest) {
+		if _, pageErr := provider.ReadWorkspaceReviewsJSON(
+			t.Context(),
+			"octo/repo",
+			42,
+			page,
+		); !errors.Is(
+			pageErr,
+			ErrInvalidWorkspaceProviderRequest,
+		) {
 			t.Fatalf("page %d error = %v", page, pageErr)
 		}
 	}
@@ -246,9 +268,18 @@ func TestGitHubProviderValidatesAndCopiesIssueCreateArgs(t *testing.T) {
 		{"owner": "octo", "repo": "repo", "title": "title", "assignees": []string{"hubot"}},
 	}
 	for index, args := range invalid {
-		if _, createErr := provider.CreateWorkspaceIssueJSON(t.Context(), args); !errors.Is(createErr, ErrInvalidWorkspaceProviderRequest) {
+		if _, createErr := provider.CreateWorkspaceIssueJSON(
+			t.Context(),
+			args,
+		); !errors.Is(
+			createErr,
+			ErrInvalidWorkspaceProviderRequest,
+		) {
 			t.Errorf("invalid issue args %d error = %v", index, createErr)
-		} else if !errors.Is(createErr, ErrWorkspaceProviderCallNotDispatched) {
+		} else if !errors.Is(
+			createErr,
+			ErrWorkspaceProviderCallNotDispatched,
+		) {
 			t.Errorf("invalid issue args %d were not marked pre-dispatch: %v", index, createErr)
 		}
 	}

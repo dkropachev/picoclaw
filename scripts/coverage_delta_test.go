@@ -9,6 +9,84 @@ import (
 	"unicode/utf8"
 )
 
+func TestCoverageRegressionTracksUncoveredStatementDebt(t *testing.T) {
+	tests := []struct {
+		name string
+		base coverageSummary
+		head coverageSummary
+		want bool
+	}{
+		{
+			name: "covered legacy deletion reduces debt",
+			base: coverageSummary{CoveredStatements: 22045, TotalStatements: 27866},
+			head: coverageSummary{CoveredStatements: 14524, TotalStatements: 19782},
+			want: false,
+		},
+		{
+			name: "new uncovered statement increases debt",
+			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
+			head: coverageSummary{CoveredStatements: 80, TotalStatements: 101},
+			want: true,
+		},
+		{
+			name: "additional coverage reduces debt",
+			base: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
+			head: coverageSummary{CoveredStatements: 81, TotalStatements: 100},
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := summaryRegressed(test.base, test.head); got != test.want {
+				t.Fatalf("summaryRegressed(%+v, %+v) = %t, want %t", test.base, test.head, got, test.want)
+			}
+		})
+	}
+}
+
+func TestFeatureCoverageRegressionAllowsTenUncoveredStatements(t *testing.T) {
+	base := coverageSummary{CoveredStatements: 80, TotalStatements: 100}
+	withinTolerance := coverageSummary{CoveredStatements: 80, TotalStatements: 110}
+	regressed := coverageSummary{CoveredStatements: 80, TotalStatements: 111}
+
+	if featureSummaryRegressed(base, withinTolerance) {
+		t.Fatal("featureSummaryRegressed() rejected the documented ten-statement tolerance")
+	}
+	if !featureSummaryRegressed(base, regressed) {
+		t.Fatal("featureSummaryRegressed() accepted an eleven-statement debt increase")
+	}
+}
+
+func TestCompareCoverageReportsUncoveredDebtAndCoverage(t *testing.T) {
+	spec := featureSpecMetadata{
+		RelPath: "docs/features/example.md",
+		Ownerships: []featureOwnership{
+			{Kind: "CODE", Pattern: "pkg/example/**"},
+		},
+	}
+	plan := coveragePlan{ImpactedFeature: map[string]bool{spec.RelPath: true}}
+	base := coverageProfile{
+		Global: coverageSummary{CoveredStatements: 80, TotalStatements: 100},
+		Files: map[string]coverageSummary{
+			"pkg/example/example.go": {CoveredStatements: 80, TotalStatements: 100},
+		},
+	}
+	head := coverageProfile{
+		Global: coverageSummary{CoveredStatements: 69, TotalStatements: 100},
+		Files: map[string]coverageSummary{
+			"pkg/example/example.go": {CoveredStatements: 69, TotalStatements: 100},
+		},
+	}
+
+	want := []string{
+		"scoped Go uncovered statement debt increased: 20 -> 31 (coverage 80.00% (80/100) -> 69.00% (69/100))",
+		"docs/features/example.md Go uncovered statement debt increased: 20 -> 31 (coverage 80.00% (80/100) -> 69.00% (69/100))",
+	}
+	if got := compareCoverage([]featureSpecMetadata{spec}, plan, base, head); !reflect.DeepEqual(got, want) {
+		t.Fatalf("compareCoverage() = %#v, want %#v", got, want)
+	}
+}
+
 func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	base := []string{
 		"PATH=/bin",
@@ -87,7 +165,11 @@ func TestTrimCommandOutputPreservesBuildAndPanicFailures(t *testing.T) {
 			output: "panic: test timed out after 10m0s\n" +
 				"running tests:\n\tTestBlocked (10m0s)\n" +
 				"FAIL\tgithub.com/sipeed/picoclaw/pkg/example\t600.00s\n",
-			want: []string{"panic: test timed out after 10m0s", "TestBlocked", "FAIL\tgithub.com/sipeed/picoclaw/pkg/example"},
+			want: []string{
+				"panic: test timed out after 10m0s",
+				"TestBlocked",
+				"FAIL\tgithub.com/sipeed/picoclaw/pkg/example",
+			},
 		},
 	}
 	for _, test := range tests {

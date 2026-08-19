@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -160,7 +159,12 @@ func (handler *HTTPHandler) serveRoot(response http.ResponseWriter, request *htt
 	}
 }
 
-func (handler *HTTPHandler) serveWorkspace(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveWorkspace(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) == 0 {
 		if request.Method != http.MethodGet {
 			writeHTTPMethod(response, http.MethodGet)
@@ -205,7 +209,12 @@ type mutationFence struct {
 	RequestID       string `json:"request_id"`
 }
 
-func (handler *HTTPHandler) serveRefresh(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveRefresh(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) != 1 || request.Method != http.MethodPost {
 		writeHTTPMethod(response, http.MethodPost)
 		return
@@ -232,7 +241,12 @@ type charterHTTPBody struct {
 	NonGoals                []string `json:"non_goals"`
 }
 
-func (handler *HTTPHandler) serveCharter(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveCharter(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	var body charterHTTPBody
 	if !decodeHTTPBody(response, request, &body) {
 		return
@@ -267,7 +281,12 @@ func (handler *HTTPHandler) serveCharter(response http.ResponseWriter, request *
 			return
 		}
 		aggregate, err := handler.service.ReviseCharter(request.Context(), ReviseCharterRequest{
-			SaveCharterRequest:      SaveCharterRequest{WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID, Draft: draft},
+			SaveCharterRequest: SaveCharterRequest{
+				WorkspaceID:     workspaceID,
+				ExpectedVersion: body.ExpectedVersion,
+				RequestID:       body.RequestID,
+				Draft:           draft,
+			},
 			ExpectedCharterRevision: body.ExpectedCharterRevision,
 		})
 		writeHTTPResult(response, aggregate, err)
@@ -302,7 +321,12 @@ type runHTTPBody struct {
 	Stage                NudgeStage `json:"stage"`
 }
 
-func (handler *HTTPHandler) serveRun(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveRun(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) != 1 || request.Method != http.MethodPost {
 		writeHTTPMethod(response, http.MethodPost)
 		return
@@ -311,7 +335,8 @@ func (handler *HTTPHandler) serveRun(response http.ResponseWriter, request *http
 	if !decodeHTTPBody(response, request, &body) {
 		return
 	}
-	if tail[0] != "nudge-runs" && !handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
+	if tail[0] != "nudge-runs" &&
+		!handler.matchHeadRevision(response, request, workspaceID, body.ExpectedVersion, body.ExpectedHeadRevision) {
 		return
 	}
 	var aggregate Aggregate
@@ -327,11 +352,15 @@ func (handler *HTTPHandler) serveRun(response http.ResponseWriter, request *http
 			writeHTTPError(response, http.StatusServiceUnavailable, "implementation_unavailable", nil)
 			return
 		}
-		aggregate, err = handler.service.RunImplementation(request.Context(), handler.implementation, RunImplementationRequest{
-			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
-			RequestID: body.RequestID, FindingIDs: body.FindingIDs,
-			NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
-		})
+		aggregate, err = handler.service.RunImplementation(
+			request.Context(),
+			handler.implementation,
+			RunImplementationRequest{
+				WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
+				RequestID: body.RequestID, FindingIDs: body.FindingIDs,
+				NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
+			},
+		)
 	case "completion-audits":
 		aggregate, err = handler.service.RunCompletionAudit(request.Context(), RunCompletionAuditRequest{
 			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
@@ -353,7 +382,12 @@ func (handler *HTTPHandler) serveRun(response http.ResponseWriter, request *http
 	writeHTTPResult(response, aggregate, err)
 }
 
-func (handler *HTTPHandler) serveStageRun(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveStageRun(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) != 3 || tail[2] != "cancel" || request.Method != http.MethodPost {
 		writeHTTPMethod(response, http.MethodPost)
 		return
@@ -381,7 +415,12 @@ type findingHTTPBody struct {
 	TypeCompatible bool               `json:"type_compatible"`
 }
 
-func (handler *HTTPHandler) serveFinding(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveFinding(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) < 2 || len(tail) > 3 {
 		writeHTTPError(response, http.StatusNotFound, "not_found", nil)
 		return
@@ -439,7 +478,12 @@ type correctionHTTPBody struct {
 	Reason        string                  `json:"reason"`
 }
 
-func (handler *HTTPHandler) serveCorrection(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveCorrection(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	var body correctionHTTPBody
 	if !decodeHTTPBody(response, request, &body) {
 		return
@@ -454,16 +498,21 @@ func (handler *HTTPHandler) serveCorrection(response http.ResponseWriter, reques
 		}
 		aggregate, err := handler.service.AddCorrection(request.Context(), AddCorrectionRequest{
 			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
-			Correction: Correction{Kind: body.Kind, Applicability: body.Applicability,
+			Correction: Correction{
+				Kind: body.Kind, Applicability: body.Applicability,
 				TargetType: targetType, TargetID: targetID, OriginalClaim: body.OriginalClaim,
-				Correction: body.Correction, Evidence: body.Reason},
+				Correction: body.Correction, Evidence: body.Reason,
+			},
 		})
 		writeHTTPResult(response, aggregate, err)
 		return
 	}
 	if len(tail) == 3 && tail[2] == "promote" && request.Method == http.MethodPost {
 		aggregate, err := handler.service.PromoteCorrection(request.Context(), PromoteCorrectionRequest{
-			WorkspaceID: workspaceID, CorrectionID: tail[1], ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
+			WorkspaceID:     workspaceID,
+			CorrectionID:    tail[1],
+			ExpectedVersion: body.ExpectedVersion,
+			RequestID:       body.RequestID,
 		})
 		writeHTTPResult(response, aggregate, err)
 		return
@@ -479,7 +528,12 @@ type messageHTTPBody struct {
 	Applicability    CorrectionApplicability `json:"applicability"`
 }
 
-func (handler *HTTPHandler) serveMessage(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveMessage(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) != 1 || request.Method != http.MethodPost {
 		writeHTTPMethod(response, http.MethodPost)
 		return
@@ -507,7 +561,12 @@ type deferredHTTPBody struct {
 	PublicationID    string   `json:"publication_id"`
 }
 
-func (handler *HTTPHandler) serveDeferred(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveDeferred(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	var body deferredHTTPBody
 	if !decodeHTTPBody(response, request, &body) {
 		return
@@ -592,7 +651,10 @@ func (handler *HTTPHandler) serveDeferred(response http.ResponseWriter, request 
 			return
 		}
 		aggregate, err = handler.service.QueueDeferredPublication(request.Context(), QueueDeferredPublicationRequest{
-			WorkspaceID: workspaceID, GroupID: groupID, ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
+			WorkspaceID:     workspaceID,
+			GroupID:         groupID,
+			ExpectedVersion: body.ExpectedVersion,
+			RequestID:       body.RequestID,
 		})
 	case "reconcile":
 		if handler.issuePublisher == nil {
@@ -613,10 +675,14 @@ func (handler *HTTPHandler) serveDeferred(response http.ResponseWriter, request 
 			}
 			publicationID = group.PublicationID
 		}
-		aggregate, err = handler.service.ReconcileIssuePublication(request.Context(), handler.issuePublisher, ReconcileIssuePublicationRequest{
-			WorkspaceID: workspaceID, PublicationID: publicationID,
-			ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
-		})
+		aggregate, err = handler.service.ReconcileIssuePublication(
+			request.Context(),
+			handler.issuePublisher,
+			ReconcileIssuePublicationRequest{
+				WorkspaceID: workspaceID, PublicationID: publicationID,
+				ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
+			},
+		)
 	default:
 		writeHTTPError(response, http.StatusNotFound, "not_found", nil)
 		return
@@ -629,7 +695,12 @@ type gateHTTPBody struct {
 	FieldValues map[string]any `json:"field-values"`
 }
 
-func (handler *HTTPHandler) serveGate(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) serveGate(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if len(tail) == 1 && request.Method == http.MethodGet {
 		aggregate, err := handler.service.Get(request.Context(), workspaceID)
 		if err != nil {
@@ -670,7 +741,12 @@ type publicationHTTPBody struct {
 	FindingIDs           []string `json:"finding_ids"`
 }
 
-func (handler *HTTPHandler) servePublication(response http.ResponseWriter, request *http.Request, workspaceID string, tail []string) {
+func (handler *HTTPHandler) servePublication(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
 	if request.Method != http.MethodPost || len(tail) < 2 || len(tail) > 3 {
 		writeHTTPMethod(response, http.MethodPost)
 		return
@@ -720,10 +796,15 @@ func (handler *HTTPHandler) servePublication(response http.ResponseWriter, reque
 		writeHTTPError(response, http.StatusNotFound, "not_found", nil)
 		return
 	}
-	aggregate, err = handler.service.ReconcilePhasePublication(request.Context(), handler.reviewPublisher, handler.branchPublisher, ReconcilePhasePublicationRequest{
-		WorkspaceID: workspaceID, PublicationID: tail[1], ExpectedVersion: body.ExpectedVersion,
-		RequestID: body.RequestID,
-	})
+	aggregate, err = handler.service.ReconcilePhasePublication(
+		request.Context(),
+		handler.reviewPublisher,
+		handler.branchPublisher,
+		ReconcilePhasePublicationRequest{
+			WorkspaceID: workspaceID, PublicationID: tail[1], ExpectedVersion: body.ExpectedVersion,
+			RequestID: body.RequestID,
+		},
+	)
 	writeHTTPResult(response, aggregate, err)
 }
 
@@ -775,7 +856,10 @@ func (handler *HTTPHandler) applyDeferredIssuePolicy(
 // and therefore return an empty aggregate; others happen after an earlier group
 // was queued successfully. Reloading here prevents the HTTP error response from
 // hiding either the caller's retained state or a partially committed advance.
-func (handler *HTTPHandler) deferredPolicyFailureAggregate(request *http.Request, retained, subordinate Aggregate) Aggregate {
+func (handler *HTTPHandler) deferredPolicyFailureAggregate(
+	request *http.Request,
+	retained, subordinate Aggregate,
+) Aggregate {
 	workspaceID := retained.Workspace.ID
 	best := retained
 	if subordinate.Workspace.ID == workspaceID && subordinate.Workspace.Version >= best.Workspace.Version {
@@ -805,7 +889,13 @@ func hasUngroupedDeferredFindings(aggregate Aggregate) bool {
 	return false
 }
 
-func (handler *HTTPHandler) matchHeadRevision(response http.ResponseWriter, request *http.Request, workspaceID string, expectedVersion int64, expected string) bool {
+func (handler *HTTPHandler) matchHeadRevision(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	expectedVersion int64,
+	expected string,
+) bool {
 	aggregate, err := handler.service.Get(request.Context(), workspaceID)
 	if err != nil {
 		writeHTTPResult(response, aggregate, err)
@@ -933,7 +1023,11 @@ func decodeWorkspaceCursor(value string) (WorkspaceCursor, error) {
 		UpdatedAt time.Time `json:"updated_at"`
 		ID        string    `json:"id"`
 	}
-	if err = json.Unmarshal(raw, &decoded); err != nil || decoded.UpdatedAt.IsZero() || !validOpaqueID(decoded.ID, "prw_") {
+	if err = json.Unmarshal(
+		raw,
+		&decoded,
+	); err != nil || decoded.UpdatedAt.IsZero() ||
+		!validOpaqueID(decoded.ID, "prw_") {
 		return WorkspaceCursor{}, ErrInvalid
 	}
 	return WorkspaceCursor{UpdatedAt: decoded.UpdatedAt, ID: decoded.ID}, nil
@@ -1087,12 +1181,3 @@ func validExecutionState(value ExecutionState) bool {
 }
 
 var _ http.Handler = (*HTTPHandler)(nil)
-
-// Keep route diagnostics private while retaining enough context in logs at
-// integration boundaries that wrap this handler.
-func httpRouteDiagnostic(request *http.Request) string {
-	if request == nil || request.URL == nil {
-		return "<nil>"
-	}
-	return fmt.Sprintf("%s %s", request.Method, request.URL.Path)
-}

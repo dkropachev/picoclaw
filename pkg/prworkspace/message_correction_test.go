@@ -18,17 +18,33 @@ func TestMessageHTTPAtomicallyRecordsCorrectionForSelectedPrompts(t *testing.T) 
 		wantReview         int
 		wantImplementation int
 	}{
-		{name: "both", applicability: CorrectionReviewAndImpl, wantApplicability: CorrectionReviewAndImpl, wantReview: 1, wantImplementation: 1},
+		{
+			name:               "both",
+			applicability:      CorrectionReviewAndImpl,
+			wantApplicability:  CorrectionReviewAndImpl,
+			wantReview:         1,
+			wantImplementation: 1,
+		},
 		{name: "default is both", wantApplicability: CorrectionReviewAndImpl, wantReview: 1, wantImplementation: 1},
-		{name: "review only", applicability: CorrectionReviewOnly, wantApplicability: CorrectionReviewOnly, wantReview: 1},
-		{name: "implementation only", applicability: CorrectionImplementationOnly, wantApplicability: CorrectionImplementationOnly, wantImplementation: 1},
+		{
+			name:              "review only",
+			applicability:     CorrectionReviewOnly,
+			wantApplicability: CorrectionReviewOnly,
+			wantReview:        1,
+		},
+		{
+			name:               "implementation only",
+			applicability:      CorrectionImplementationOnly,
+			wantApplicability:  CorrectionImplementationOnly,
+			wantImplementation: 1,
+		},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service, before := messageCorrectionTestService(t, NewMemoryStore())
-			handler, err := NewHTTPHandler(HTTPConfig{Service: service})
-			if err != nil {
-				t.Fatal(err)
+			handler, handlerErr := NewHTTPHandler(HTTPConfig{Service: service})
+			if handlerErr != nil {
+				t.Fatal(handlerErr)
 			}
 			body := map[string]any{
 				"expected_version":   before.Workspace.Version,
@@ -40,9 +56,9 @@ func TestMessageHTTPAtomicallyRecordsCorrectionForSelectedPrompts(t *testing.T) 
 			if test.applicability != "" {
 				body["applicability"] = test.applicability
 			}
-			encoded, err := json.Marshal(body)
-			if err != nil {
-				t.Fatal(err)
+			encoded, marshalErr := json.Marshal(body)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
 			}
 			request := httptest.NewRequest(
 				http.MethodPost,
@@ -61,9 +77,9 @@ func TestMessageHTTPAtomicallyRecordsCorrectionForSelectedPrompts(t *testing.T) 
 			}
 			assertMessageCorrectionResult(t, result, before.Workspace.Version, test.wantApplicability)
 
-			persisted, err := service.Get(context.Background(), before.Workspace.ID)
-			if err != nil {
-				t.Fatal(err)
+			persisted, getErr := service.Get(context.Background(), before.Workspace.ID)
+			if getErr != nil {
+				t.Fatal(getErr)
 			}
 			assertMessageCorrectionResult(t, persisted, before.Workspace.Version, test.wantApplicability)
 			reviewContext := reviewContextBundle(persisted)
@@ -114,7 +130,8 @@ func TestMessageHTTPRejectsInvalidCorrectionBeforeWritingMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Workspace.Version != before.Workspace.Version || len(persisted.Messages) != 0 || len(persisted.Corrections) != 0 {
+	if persisted.Workspace.Version != before.Workspace.Version || len(persisted.Messages) != 0 ||
+		len(persisted.Corrections) != 0 {
 		t.Fatalf("invalid correction caused a partial write: version=%d messages=%d corrections=%d",
 			persisted.Workspace.Version, len(persisted.Messages), len(persisted.Corrections))
 	}
@@ -155,7 +172,12 @@ func messageCorrectionTestService(t *testing.T, store Store) (*Service, Aggregat
 	return service, seeded.Aggregate
 }
 
-func assertMessageCorrectionResult(t *testing.T, result Aggregate, previousVersion int64, applicability CorrectionApplicability) {
+func assertMessageCorrectionResult(
+	t *testing.T,
+	result Aggregate,
+	previousVersion int64,
+	applicability CorrectionApplicability,
+) {
 	t.Helper()
 	if result.Workspace.Version != previousVersion+1 {
 		t.Fatalf("version = %d, want one atomic increment from %d", result.Workspace.Version, previousVersion)
@@ -165,13 +187,19 @@ func assertMessageCorrectionResult(t *testing.T, result Aggregate, previousVersi
 	}
 	message, correction := result.Messages[0], result.Corrections[0]
 	if correction.TargetType != "workspace" || correction.TargetID != result.Workspace.ID {
-		t.Fatalf("correction target = %q/%q, want workspace %q", correction.TargetType, correction.TargetID, result.Workspace.ID)
+		t.Fatalf(
+			"correction target = %q/%q, want workspace %q",
+			correction.TargetType,
+			correction.TargetID,
+			result.Workspace.ID,
+		)
 	}
 	if correction.Kind != CorrectionFactual || correction.Applicability != applicability ||
 		correction.Correction != message.Content || correction.CharterID != message.CharterID || correction.HeadSHA != message.HeadSHA {
 		t.Fatalf("correction does not mirror shared guidance: %#v message=%#v", correction, message)
 	}
-	if len(result.Activity) != 2 || result.Activity[0].Kind != "message.added" || result.Activity[1].Kind != "correction.added" {
+	if len(result.Activity) != 2 || result.Activity[0].Kind != "message.added" ||
+		result.Activity[1].Kind != "correction.added" {
 		t.Fatalf("activity = %#v", result.Activity)
 	}
 }

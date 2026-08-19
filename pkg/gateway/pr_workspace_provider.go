@@ -72,7 +72,10 @@ type prWorkspaceGitHubRepositorySearch struct {
 	Items             []prWorkspaceGitHubRepo `json:"items"`
 }
 
-func (resolver *prWorkspaceGitHubResolver) ResolvePullRequest(ctx context.Context, request prworkspace.ResolveRequest) (prworkspace.ProviderSnapshot, error) {
+func (resolver *prWorkspaceGitHubResolver) ResolvePullRequest(
+	ctx context.Context,
+	request prworkspace.ResolveRequest,
+) (prworkspace.ProviderSnapshot, error) {
 	if resolver == nil || resolver.provider == nil {
 		return prworkspace.ProviderSnapshot{}, errors.New("GitHub PR provider is unavailable")
 	}
@@ -224,7 +227,10 @@ func stableGitHubPullID(origin, repositoryID string, pullNumber int64) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func (resolver *prWorkspaceGitHubResolver) LoadReviewEvidence(ctx context.Context, expected prworkspace.ProviderSnapshot) (prworkspace.ReviewEvidence, error) {
+func (resolver *prWorkspaceGitHubResolver) LoadReviewEvidence(
+	ctx context.Context,
+	expected prworkspace.ProviderSnapshot,
+) (prworkspace.ReviewEvidence, error) {
 	if resolver == nil || resolver.provider == nil || expected.Repository == "" || expected.PullNumber < 1 {
 		return prworkspace.ReviewEvidence{}, errors.New("GitHub PR review evidence is unavailable")
 	}
@@ -304,7 +310,8 @@ func samePRWorkspacePullURL(raw, origin, repository string, number int64) bool {
 		return false
 	}
 	want := "/" + repository + "/pull/" + strconv.FormatInt(number, 10)
-	return strings.EqualFold(strings.TrimSuffix(parsed.Path, "/"), want) && parsed.RawQuery == "" && parsed.Fragment == ""
+	return strings.EqualFold(strings.TrimSuffix(parsed.Path, "/"), want) && parsed.RawQuery == "" &&
+		parsed.Fragment == ""
 }
 
 func samePRWorkspaceRepositoryURL(raw, origin, repository string) bool {
@@ -349,5 +356,7 @@ func githubScalarID(raw json.RawMessage) string {
 	return number.String()
 }
 
-var _ prworkspace.ProviderResolver = (*prWorkspaceGitHubResolver)(nil)
-var _ prworkspace.ReviewEvidenceLoader = (*prWorkspaceGitHubResolver)(nil)
+var (
+	_ prworkspace.ProviderResolver     = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.ReviewEvidenceLoader = (*prWorkspaceGitHubResolver)(nil)
+)

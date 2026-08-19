@@ -8,7 +8,10 @@ import (
 
 type fixedCandidateEvidenceLoader struct{ value CandidateEvidence }
 
-func (loader fixedCandidateEvidenceLoader) LoadCandidateEvidence(context.Context, RepairAttempt) (CandidateEvidence, error) {
+func (loader fixedCandidateEvidenceLoader) LoadCandidateEvidence(
+	context.Context,
+	RepairAttempt,
+) (CandidateEvidence, error) {
 	return loader.value, nil
 }
 
@@ -43,8 +46,14 @@ func TestStandaloneCompletionAuditLoadsExactCandidateEvidence(t *testing.T) {
 	}
 	diff := "diff --git a/pkg/retry.go b/pkg/retry.go\n+exact candidate line\n"
 	service.candidateEvidence = fixedCandidateEvidenceLoader{value: CandidateEvidence{
-		CandidateSHA: implemented.RepairAttempts[0].CandidateSHA, CandidateDiff: diff,
-		Metrics:        CandidateMetrics{Files: 1, SemanticLines: 1, Modules: 1, ChangedFiles: []string{"pkg/retry.go"}},
+		CandidateSHA:  implemented.RepairAttempts[0].CandidateSHA,
+		CandidateDiff: diff,
+		Metrics: CandidateMetrics{
+			Files:         1,
+			SemanticLines: 1,
+			Modules:       1,
+			ChangedFiles:  []string{"pkg/retry.go"},
+		},
 		EvidenceDigest: "sha256:exact-candidate",
 	}}
 	ai := &captureCompletionAI{}

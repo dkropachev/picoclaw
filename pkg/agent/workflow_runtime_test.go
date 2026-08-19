@@ -4784,18 +4784,18 @@ func TestWorkflowAgentSourceSessionCapturesRepairTranscriptAndReplaysExactPrompt
 		},
 	}
 	runner := &workflowAgentRunner{loop: loop}
-	first, err := runner.RunAgent(t.Context(), request)
-	if err != nil {
-		t.Fatal(err)
+	first, firstErr := runner.RunAgent(t.Context(), request)
+	if firstErr != nil {
+		t.Fatal(firstErr)
 	}
 	sessionKey, _ := first["source_session"].(string)
 	revision, _ := first["source_revision"].(string)
 	if sessionKey == "" || revision == "" || first["source_tools"] != workflows.AgentToolsNone {
 		t.Fatalf("source outputs = %#v", first)
 	}
-	second, err := runner.RunAgent(t.Context(), request)
-	if err != nil || !reflect.DeepEqual(first, second) {
-		t.Fatalf("source replay = %#v, error = %v", second, err)
+	second, secondErr := runner.RunAgent(t.Context(), request)
+	if secondErr != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("source replay = %#v, error = %v", second, secondErr)
 	}
 	if calls := provider.snapshotCalls(); len(calls) != 2 {
 		t.Fatalf("provider calls after duplicate = %d, want initial plus repair only", len(calls))
@@ -4809,15 +4809,15 @@ func TestWorkflowAgentSourceSessionCapturesRepairTranscriptAndReplaysExactPrompt
 	if calls := provider.snapshotCalls(); len(calls) != 2 {
 		t.Fatalf("provider calls after changed duplicate = %d, want 2", len(calls))
 	}
-	frozen, err := runner.CaptureReadOnlySession(t.Context(), workflows.ReadOnlySessionRef{
+	frozen, captureErr := runner.CaptureReadOnlySession(t.Context(), workflows.ReadOnlySessionRef{
 		AgentID: "main", Session: sessionKey, ExpectedRevision: revision,
 	})
-	if err != nil || frozen == nil || len(frozen.Snapshot.History) != 4 ||
+	if captureErr != nil || frozen == nil || len(frozen.Snapshot.History) != 4 ||
 		frozen.Snapshot.History[0].Content != workflowAgentMessage(request) ||
 		frozen.Snapshot.History[1].Content != "not json" ||
 		!strings.Contains(frozen.Snapshot.History[2].Content, "previous response did not satisfy") ||
 		frozen.Snapshot.History[3].Content != `{"findings":[]}` {
-		t.Fatalf("captured source = %#v, error = %v", frozen, err)
+		t.Fatalf("captured source = %#v, error = %v", frozen, captureErr)
 	}
 
 	if err := os.WriteFile(
@@ -4828,7 +4828,7 @@ func TestWorkflowAgentSourceSessionCapturesRepairTranscriptAndReplaysExactPrompt
 		t.Fatal(err)
 	}
 	provider.setResponses([]string{"source follow-up"})
-	sourceOutputs, err := runner.RunAgent(t.Context(), workflows.AgentRequest{
+	sourceOutputs, sourceErr := runner.RunAgent(t.Context(), workflows.AgentRequest{
 		AgentID:               "main",
 		Prompt:                "Find any remaining issues.",
 		History:               "read_only",
@@ -4837,8 +4837,8 @@ func TestWorkflowAgentSourceSessionCapturesRepairTranscriptAndReplaysExactPrompt
 		PrivateContext:        true,
 		FrozenReadOnlySession: frozen,
 	})
-	if err != nil || sourceOutputs["text"] != "source follow-up" {
-		t.Fatalf("source follow-up = %#v, error = %v", sourceOutputs, err)
+	if sourceErr != nil || sourceOutputs["text"] != "source follow-up" {
+		t.Fatalf("source follow-up = %#v, error = %v", sourceOutputs, sourceErr)
 	}
 	calls := provider.snapshotCalls()
 	if len(calls) != 1 || calls[0].toolCount != 0 {
@@ -4860,7 +4860,10 @@ func TestWorkflowAgentSourceSessionSerializesConcurrentDuplicateExecution(t *tes
 		started:   make(chan struct{}),
 		release:   make(chan struct{}),
 	}
-	loop, _, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	loop, store, agentID, sessionKey := newWorkflowReadOnlyTestLoop(t, provider)
+	_ = store
+	_ = agentID
+	_ = sessionKey
 	runner := &workflowAgentRunner{loop: loop}
 	request := workflowEphemeralTestRequest("Review concurrently.")
 	request.PrivateContext = true

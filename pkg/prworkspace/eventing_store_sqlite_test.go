@@ -9,14 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/eventing"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sipeed/picoclaw/pkg/eventing"
 )
 
 func TestEventingStoreConfiguredFallbackGateRoundTripsAndResponds(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
-	raw, err := eventing.Open(ctx, filepath.Join(t.TempDir(), "fallback-gate.sqlite"), eventing.WithClock(func() time.Time { return now }))
+	raw, err := eventing.Open(
+		ctx,
+		filepath.Join(t.TempDir(), "fallback-gate.sqlite"),
+		eventing.WithClock(func() time.Time { return now }),
+	)
 	require.NoError(t, err)
 	store := NewEventingStore(raw)
 
@@ -62,7 +67,11 @@ func TestEventingStoreConfiguredFallbackGateRoundTripsAndResponds(t *testing.T) 
 func TestEventingStorePersistsAutomaticDeferredGateV3Metadata(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
-	raw, err := eventing.Open(ctx, filepath.Join(t.TempDir(), "automatic-gate.sqlite"), eventing.WithClock(func() time.Time { return now }))
+	raw, err := eventing.Open(
+		ctx,
+		filepath.Join(t.TempDir(), "automatic-gate.sqlite"),
+		eventing.WithClock(func() time.Time { return now }),
+	)
 	require.NoError(t, err)
 	store := NewEventingStore(raw)
 	input := testCreateInput()
@@ -140,22 +149,38 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	messageID := stableID("pms_", workspaceID, "message")
 	reward := .75
 	finished := now.Add(time.Minute)
-	policy := json.RawMessage(`{"version":"4","workflow-ref":"workflows/pr-lifecycle.yml","workflow-revision":"sha256:test-workflow","gate-ref":"gates.implementation-complete","workflow-configuration-id":"strict","workflow-configuration-revision":"sha256:test-config","action-revision":"sha256:test-action"}`)
+	policy := json.RawMessage(
+		`{"version":"4","workflow-ref":"workflows/pr-lifecycle.yml","workflow-revision":"sha256:test-workflow","gate-ref":"gates.implementation-complete","workflow-configuration-id":"strict","workflow-configuration-revision":"sha256:test-config","action-revision":"sha256:test-action"}`,
+	)
 	subject := json.RawMessage(`{"repair_id":"` + repairID + `"}`)
 	publicationPayload, publicationDigest, err := encodePublicationPayload(issuePublicationPayload{
-		ProviderOrigin: provider.ProviderOrigin, RepositoryID: provider.RepositoryID, Repository: provider.Repository,
-		Title: "Adjacent cleanup", Body: "Create a follow-up", Labels: []string{"follow-up"}, FindingIDs: []string{findingID},
+		ProviderOrigin: provider.ProviderOrigin,
+		RepositoryID:   provider.RepositoryID,
+		Repository:     provider.Repository,
+		Title:          "Adjacent cleanup",
+		Body:           "Create a follow-up",
+		Labels:         []string{"follow-up"},
+		FindingIDs:     []string{findingID},
 	})
 	require.NoError(t, err)
 	gate := GateRun{
-		ID: gateID, DecisionPoint: "pr.implementation.complete", TargetID: repairID,
-		State:          ExecutionWaitingUser,
-		PolicyRevision: "policy-v3", SubjectRevision: "subject-v4",
-		Evidence: GateEvidence{CharterType: PRTypeFix, CharterGoal: "remove the race", CandidateSHA: "tip-commit", ChangedFiles: []string{"pkg/worker/run.go"}},
+		ID:              gateID,
+		DecisionPoint:   "pr.implementation.complete",
+		TargetID:        repairID,
+		State:           ExecutionWaitingUser,
+		PolicyRevision:  "policy-v3",
+		SubjectRevision: "subject-v4",
+		Evidence: GateEvidence{
+			CharterType:  PRTypeFix,
+			CharterGoal:  "remove the race",
+			CandidateSHA: "tip-commit",
+			ChangedFiles: []string{"pkg/worker/run.go"},
+		},
 		Turns: []GateTurn{{
 			StageID: "authorize", Kind: "human", Status: "waiting",
 			GateForm: &GateForm{GateRef: "gates.implementation-complete", Prompt: "Complete?"},
-		}}, CreatedAt: now,
+		}},
+		CreatedAt: now,
 		runtime: &gateRuntime{
 			WorkflowConfigurationID: "strict", WorkflowRunID: "workflow-private-1",
 			PinnedPolicy: policy, PinnedSubject: subject,
@@ -168,7 +193,8 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	}
 	sourceExecution.Session = aiExecutionSourceSessionKey(sourceExecution)
 	patch := AggregatePatch{
-		Phase: pointer(PhaseImplementation), ExecutionState: pointer(ExecutionWaitingGate),
+		Phase:           pointer(PhaseImplementation),
+		ExecutionState:  pointer(ExecutionWaitingGate),
 		ActiveCharterID: &charterID,
 		AppendCharters: []Charter{{
 			ID: charterID, Revision: 1, Type: PRTypeFix, Goal: "remove the race",
@@ -199,20 +225,57 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 			NovelFindings: 1, FindingIDs: []string{findingID}, ResolvedFindings: 1,
 			Reward: &reward, RewardProvenance: "user_disposition", CreatedAt: now,
 		}},
-		UpsertFindings: []Finding{{
-			ID: findingID, Fingerprint: "sha256:finding", Origin: FindingOriginNudge,
-			OriginRunID: stageID, NudgeRoundID: roundID, Severity: "medium", Title: "Adjacent cleanup",
-			Message: "track this separately", Impact: "maintainability", Recommendation: "follow up",
-			Validation: "add a regression test",
-			Scope: ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeS, Presence: WorkFollowUp, Files: 2, SemanticLines: 30, Modules: 1, Estimated: true, TypeCompatible: true, Confidence: .9, CharterClauses: []string{"non-goal"}, Explanation: "related but not required", ChangeEvidence: []ScopeChange{{
-				Path: "pkg/worker/followup.go", Hunk: "@@ -1 +1 @@", Module: "pkg", SemanticLines: 12,
-				Presence: WorkFollowUp, Distance: ScopeRelatedFollowup, Size: ChangeSizeS,
-				TypeCompatible: true, Confidence: .9, CharterClauses: []string{"non-goal"}, Explanation: "follow-up only",
-			}}},
-			Disposition: FindingDeferred, NudgeReward: &reward, RewardSource: "user_disposition",
-			SourceAvailable: true, source: sourceExecution,
-			Version: 1, CreatedAt: now, UpdatedAt: now,
-		}},
+		UpsertFindings: []Finding{
+			{
+				ID:             findingID,
+				Fingerprint:    "sha256:finding",
+				Origin:         FindingOriginNudge,
+				OriginRunID:    stageID,
+				NudgeRoundID:   roundID,
+				Severity:       "medium",
+				Title:          "Adjacent cleanup",
+				Message:        "track this separately",
+				Impact:         "maintainability",
+				Recommendation: "follow up",
+				Validation:     "add a regression test",
+				Scope: ScopeAssessment{
+					Distance:       ScopeRelatedFollowup,
+					Size:           ChangeSizeS,
+					Presence:       WorkFollowUp,
+					Files:          2,
+					SemanticLines:  30,
+					Modules:        1,
+					Estimated:      true,
+					TypeCompatible: true,
+					Confidence:     .9,
+					CharterClauses: []string{"non-goal"},
+					Explanation:    "related but not required",
+					ChangeEvidence: []ScopeChange{
+						{
+							Path:           "pkg/worker/followup.go",
+							Hunk:           "@@ -1 +1 @@",
+							Module:         "pkg",
+							SemanticLines:  12,
+							Presence:       WorkFollowUp,
+							Distance:       ScopeRelatedFollowup,
+							Size:           ChangeSizeS,
+							TypeCompatible: true,
+							Confidence:     .9,
+							CharterClauses: []string{"non-goal"},
+							Explanation:    "follow-up only",
+						},
+					},
+				},
+				Disposition:     FindingDeferred,
+				NudgeReward:     &reward,
+				RewardSource:    "user_disposition",
+				SourceAvailable: true,
+				source:          sourceExecution,
+				Version:         1,
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			},
+		},
 		AppendMessages: []Message{{
 			ID: messageID, Role: "user", Stage: "implementation", Content: "keep the patch narrow",
 			CharterID: charterID, HeadSHA: provider.HeadSHA, CreatedAt: now,
@@ -228,30 +291,80 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 			CorrectionID: correctionID, Kind: CorrectionScope, Applicability: CorrectionReviewAndImpl,
 			PRType: PRTypeFix, Text: "avoid adjacent cleanup in fixes", Active: true, CreatedAt: now,
 		}},
-		UpsertDeferred: []DeferredGroup{{
-			ID: groupID, Title: "Adjacent cleanup", Body: "Create a follow-up", FindingIDs: []string{findingID},
-			Scope: ScopeAssessment{Distance: ScopeRelatedFollowup, Size: ChangeSizeS, Presence: WorkFollowUp, Files: 2, SemanticLines: 30, Modules: 1, Estimated: true, TypeCompatible: true, Confidence: .9, ChangeEvidence: []ScopeChange{{
-				Path: "pkg/worker/followup.go", Presence: WorkFollowUp, Distance: ScopeRelatedFollowup,
-				Size: ChangeSizeS, TypeCompatible: true, Confidence: .9,
-			}}},
-			Labels: []string{"follow-up"}, PublicationID: publicationID, Version: 1, CreatedAt: now, UpdatedAt: now,
-		}},
-		AppendRepairs: []RepairAttempt{{
-			ID: repairID, StageRunID: stageID, Number: 1, State: ExecutionSucceeded,
-			Instruction: "fix only the selected race", WorkspaceID: "git-workspace-private",
-			ResultSummary: "fixed the race", ChangedFiles: []string{"pkg/worker/run.go"},
-			FindingIDs: []string{findingID}, CandidateSHA: "tip-commit",
-			Scope: ScopeAssessment{Distance: ScopeExact, Size: ChangeSizeXS, Presence: WorkCandidatePresent, Files: 1, SemanticLines: 8, Modules: 1, TypeCompatible: true, Confidence: 1, ChangeEvidence: []ScopeChange{{
-				Path: "pkg/worker/run.go", Hunk: "@@ -10 +10 @@", Module: "pkg", SemanticLines: 8,
-				Presence: WorkCandidatePresent, Distance: ScopeExact, Size: ChangeSizeXS, TypeCompatible: true, Confidence: 1,
-			}}},
-			PromptDigest: "sha256:repair", ScopePromptDigest: "sha256:scope", StartedAt: now, FinishedAt: &finished,
-			PublicationFence: &ImplementationPublicationFence{
-				GitWorkspaceID: "git-workspace-private", LineID: "line-private", LineVersion: 4,
-				MutationEpoch: 4, ParkIntentID: "park-private", BaseCommit: "base-commit",
-				Tip: "tip-commit", Tree: "tree-private",
+		UpsertDeferred: []DeferredGroup{
+			{
+				ID:         groupID,
+				Title:      "Adjacent cleanup",
+				Body:       "Create a follow-up",
+				FindingIDs: []string{findingID},
+				Scope: ScopeAssessment{
+					Distance:       ScopeRelatedFollowup,
+					Size:           ChangeSizeS,
+					Presence:       WorkFollowUp,
+					Files:          2,
+					SemanticLines:  30,
+					Modules:        1,
+					Estimated:      true,
+					TypeCompatible: true,
+					Confidence:     .9,
+					ChangeEvidence: []ScopeChange{{
+						Path: "pkg/worker/followup.go", Presence: WorkFollowUp, Distance: ScopeRelatedFollowup,
+						Size: ChangeSizeS, TypeCompatible: true, Confidence: .9,
+					}},
+				},
+				Labels:        []string{"follow-up"},
+				PublicationID: publicationID,
+				Version:       1,
+				CreatedAt:     now,
+				UpdatedAt:     now,
 			},
-		}},
+		},
+		AppendRepairs: []RepairAttempt{
+			{
+				ID:            repairID,
+				StageRunID:    stageID,
+				Number:        1,
+				State:         ExecutionSucceeded,
+				Instruction:   "fix only the selected race",
+				WorkspaceID:   "git-workspace-private",
+				ResultSummary: "fixed the race",
+				ChangedFiles:  []string{"pkg/worker/run.go"},
+				FindingIDs:    []string{findingID},
+				CandidateSHA:  "tip-commit",
+				Scope: ScopeAssessment{
+					Distance:       ScopeExact,
+					Size:           ChangeSizeXS,
+					Presence:       WorkCandidatePresent,
+					Files:          1,
+					SemanticLines:  8,
+					Modules:        1,
+					TypeCompatible: true,
+					Confidence:     1,
+					ChangeEvidence: []ScopeChange{
+						{
+							Path:           "pkg/worker/run.go",
+							Hunk:           "@@ -10 +10 @@",
+							Module:         "pkg",
+							SemanticLines:  8,
+							Presence:       WorkCandidatePresent,
+							Distance:       ScopeExact,
+							Size:           ChangeSizeXS,
+							TypeCompatible: true,
+							Confidence:     1,
+						},
+					},
+				},
+				PromptDigest:      "sha256:repair",
+				ScopePromptDigest: "sha256:scope",
+				StartedAt:         now,
+				FinishedAt:        &finished,
+				PublicationFence: &ImplementationPublicationFence{
+					GitWorkspaceID: "git-workspace-private", LineID: "line-private", LineVersion: 4,
+					MutationEpoch: 4, ParkIntentID: "park-private", BaseCommit: "base-commit",
+					Tip: "tip-commit", Tree: "tree-private",
+				},
+			},
+		},
 		AppendValidations: []ValidationRun{{
 			ID: validationID, StageRunID: stageID, State: ExecutionSucceeded, CandidateSHA: "tip-commit",
 			Checks:    []ValidationCheck{{ID: "go-test", Name: "go test", Status: "passed", DurationMS: 17}},
@@ -263,7 +376,9 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 			TargetID: groupID, FindingIDs: []string{findingID}, PayloadDigest: publicationDigest,
 			CreatedAt: now, UpdatedAt: now, payload: publicationPayload,
 		}},
-		Activity: []Activity{{Kind: "workspace.integration_test", Actor: "system", Summary: "round trip", CreatedAt: now}},
+		Activity: []Activity{
+			{Kind: "workspace.integration_test", Actor: "system", Summary: "round trip", CreatedAt: now},
+		},
 	}
 	mutation := Mutation{WorkspaceID: workspaceID, ExpectedVersion: 1, RequestID: "request-mutate-0001", Patch: patch}
 	mutated, err := store.Mutate(ctx, mutation)
@@ -329,12 +444,35 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 		return createdRelated.Aggregate
 	}
 
-	sameRepository := createRelatedWorkspace("pull-8", 8, provider.ProviderOrigin, provider.RepositoryID, provider.Repository)
-	require.Len(t, sameRepository.RepositoryLessons, 1, "active lessons must follow repository identity across pull requests")
+	sameRepository := createRelatedWorkspace(
+		"pull-8",
+		8,
+		provider.ProviderOrigin,
+		provider.RepositoryID,
+		provider.Repository,
+	)
+	require.Len(
+		t,
+		sameRepository.RepositoryLessons,
+		1,
+		"active lessons must follow repository identity across pull requests",
+	)
 	require.Equal(t, lessonID, sameRepository.RepositoryLessons[0].ID)
-	differentOrigin := createRelatedWorkspace("pull-9", 9, "https://other.example.test", provider.RepositoryID, provider.Repository)
+	differentOrigin := createRelatedWorkspace(
+		"pull-9",
+		9,
+		"https://other.example.test",
+		provider.RepositoryID,
+		provider.Repository,
+	)
 	require.Empty(t, differentOrigin.RepositoryLessons, "repository names and IDs must not cross provider origins")
-	differentRepository := createRelatedWorkspace("pull-10", 10, provider.ProviderOrigin, "repo-2", "octo/other-project")
+	differentRepository := createRelatedWorkspace(
+		"pull-10",
+		10,
+		provider.ProviderOrigin,
+		"repo-2",
+		"octo/other-project",
+	)
 	require.Empty(t, differentRepository.RepositoryLessons, "lessons must not cross provider repository IDs")
 
 	stage := mutated.Aggregate.StageRuns[0]

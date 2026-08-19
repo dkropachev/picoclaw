@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"strings"
 
@@ -24,7 +23,10 @@ type prWorkspaceGitHubIssueWire struct {
 	Body    string          `json:"body"`
 }
 
-func (publisher *prWorkspaceGitHubIssuePublisher) CreateIssue(ctx context.Context, request prworkspace.IssuePublicationRequest) (prworkspace.IssuePublicationResult, error) {
+func (publisher *prWorkspaceGitHubIssuePublisher) CreateIssue(
+	ctx context.Context,
+	request prworkspace.IssuePublicationRequest,
+) (prworkspace.IssuePublicationResult, error) {
 	if publisher == nil || publisher.provider == nil || request.Marker == "" {
 		return prworkspace.IssuePublicationResult{}, errors.New("GitHub issue publisher is unavailable")
 	}
@@ -50,14 +52,23 @@ func (publisher *prWorkspaceGitHubIssuePublisher) CreateIssue(ctx context.Contex
 		return prworkspace.IssuePublicationResult{Ambiguous: true}, err
 	}
 	if !issueURLBelongsToRepository(issueURL(issue), request.ProviderOrigin, request.Repository) {
-		return prworkspace.IssuePublicationResult{Ambiguous: true}, errors.New("GitHub issue response belongs to another repository")
+		return prworkspace.IssuePublicationResult{
+				Ambiguous: true,
+			}, errors.New(
+				"GitHub issue response belongs to another repository",
+			)
 	}
 	return prworkspace.IssuePublicationResult{ExternalID: issueID(issue), ExternalURL: issueURL(issue)}, nil
 }
 
-func (publisher *prWorkspaceGitHubIssuePublisher) FindIssueByMarker(ctx context.Context, providerOrigin, _ string, repository, marker string) (prworkspace.IssuePublicationResult, bool, error) {
+func (publisher *prWorkspaceGitHubIssuePublisher) FindIssueByMarker(
+	ctx context.Context,
+	providerOrigin, _ string,
+	repository, marker string,
+) (prworkspace.IssuePublicationResult, bool, error) {
 	owner, repo, repositoryOK := strings.Cut(repository, "/")
-	if publisher == nil || publisher.provider == nil || marker == "" || !repositoryOK || owner == "" || repo == "" || strings.Contains(repo, "/") {
+	if publisher == nil || publisher.provider == nil || marker == "" || !repositoryOK || owner == "" || repo == "" ||
+		strings.Contains(repo, "/") {
 		return prworkspace.IssuePublicationResult{}, false, prworkspace.ErrInvalid
 	}
 	raw, err := publisher.provider.SearchWorkspaceIssuesJSON(ctx, map[string]any{
@@ -78,7 +89,8 @@ func (publisher *prWorkspaceGitHubIssuePublisher) FindIssueByMarker(ctx context.
 	}
 	var matched []prWorkspaceGitHubIssueWire
 	for _, issue := range envelope.Items {
-		if strings.Contains(issue.Body, marker) && issueURLBelongsToRepository(issueURL(issue), providerOrigin, repository) {
+		if strings.Contains(issue.Body, marker) &&
+			issueURLBelongsToRepository(issueURL(issue), providerOrigin, repository) {
 			matched = append(matched, issue)
 		}
 	}
@@ -86,9 +98,14 @@ func (publisher *prWorkspaceGitHubIssuePublisher) FindIssueByMarker(ctx context.
 		return prworkspace.IssuePublicationResult{}, false, nil
 	}
 	if len(matched) != 1 {
-		return prworkspace.IssuePublicationResult{}, false, errors.New("multiple GitHub issues contain the publication marker")
+		return prworkspace.IssuePublicationResult{}, false, errors.New(
+			"multiple GitHub issues contain the publication marker",
+		)
 	}
-	return prworkspace.IssuePublicationResult{ExternalID: issueID(matched[0]), ExternalURL: issueURL(matched[0])}, true, nil
+	return prworkspace.IssuePublicationResult{
+		ExternalID:  issueID(matched[0]),
+		ExternalURL: issueURL(matched[0]),
+	}, true, nil
 }
 
 func issueURLBelongsToRepository(raw, origin, repository string) bool {
@@ -141,7 +158,3 @@ func issueURL(issue prWorkspaceGitHubIssueWire) string {
 }
 
 var _ prworkspace.IssuePublisher = (*prWorkspaceGitHubIssuePublisher)(nil)
-
-func ambiguousIssuePublicationError(err error) error {
-	return fmt.Errorf("GitHub issue publication outcome requires reconciliation: %w", err)
-}

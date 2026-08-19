@@ -22,7 +22,10 @@ func (*Store) ClaimPRWorkspaceOperations(context.Context, PRWorkspaceClaimReques
 	return nil, ErrUnsupportedPlatform
 }
 
-func (*Store) FinishPRWorkspaceOperation(context.Context, PRWorkspaceOperationFinish) (PRClaimedOperationIntent, error) {
+func (*Store) FinishPRWorkspaceOperation(
+	context.Context,
+	PRWorkspaceOperationFinish,
+) (PRClaimedOperationIntent, error) {
 	return PRClaimedOperationIntent{}, ErrUnsupportedPlatform
 }
 
@@ -30,7 +33,10 @@ func (*Store) ClaimPRWorkspacePublications(context.Context, PRWorkspaceClaimRequ
 	return nil, ErrUnsupportedPlatform
 }
 
-func (*Store) FinishPRWorkspacePublication(context.Context, PRWorkspacePublicationFinish) (PRClaimedPublication, error) {
+func (*Store) FinishPRWorkspacePublication(
+	context.Context,
+	PRWorkspacePublicationFinish,
+) (PRClaimedPublication, error) {
 	return PRClaimedPublication{}, ErrUnsupportedPlatform
 }
 

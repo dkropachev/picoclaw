@@ -1106,11 +1106,6 @@ type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-type rowsQueryer interface {
-	rowQueryer
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
 func (s *Store) getWith(ctx context.Context, queryer rowQueryer, query string, args ...any) (StoredEvent, error) {
 	event, err := scanStoredEvent(queryer.QueryRowContext(ctx, query, args...))
 	if err != nil {

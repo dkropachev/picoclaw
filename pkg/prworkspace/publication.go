@@ -38,7 +38,10 @@ type issuePublicationPayload struct {
 
 type IssuePublisher interface {
 	CreateIssue(ctx context.Context, request IssuePublicationRequest) (IssuePublicationResult, error)
-	FindIssueByMarker(ctx context.Context, providerOrigin, repositoryID, repository, marker string) (IssuePublicationResult, bool, error)
+	FindIssueByMarker(
+		ctx context.Context,
+		providerOrigin, repositoryID, repository, marker string,
+	) (IssuePublicationResult, bool, error)
 }
 
 type QueueDeferredPublicationRequest struct {
@@ -48,13 +51,17 @@ type QueueDeferredPublicationRequest struct {
 	RequestID       string
 }
 
-func (service *Service) QueueDeferredPublication(ctx context.Context, request QueueDeferredPublicationRequest) (Aggregate, error) {
-	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || !validOpaqueID(request.GroupID, "pdg_") {
+func (service *Service) QueueDeferredPublication(
+	ctx context.Context,
+	request QueueDeferredPublicationRequest,
+) (Aggregate, error) {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		!validOpaqueID(request.GroupID, "pdg_") {
 		return Aggregate{}, ErrInvalid
 	}
-	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
-	if err != nil {
-		return Aggregate{}, err
+	aggregate, getErr := service.store.Get(ctx, request.WorkspaceID)
+	if getErr != nil {
+		return Aggregate{}, getErr
 	}
 	publicationID := stableID("ppb_", aggregate.Workspace.ID, request.GroupID, request.RequestID)
 	if existing, found := findPublication(aggregate.Publications, publicationID); found {
@@ -75,21 +82,27 @@ func (service *Service) QueueDeferredPublication(ctx context.Context, request Qu
 		return aggregate, ErrConflict
 	}
 	now := service.now().UTC()
-	publication, err := deferredPublication(aggregate, group, request.RequestID, now)
-	if err != nil {
-		return aggregate, err
+	publication, publicationErr := deferredPublication(aggregate, group, request.RequestID, now)
+	if publicationErr != nil {
+		return aggregate, publicationErr
 	}
 	var authorizationRequest issuePublicationPayload
 	if err := decodePinnedPublicationPayload(publication, &authorizationRequest); err != nil {
 		return aggregate, err
 	}
 	gateSubject := map[string]any{
-		"group": group, "publication": publication, "request": authorizationRequest,
-		"provider": map[string]any{"origin": aggregate.ProviderSnapshot.ProviderOrigin, "repository_id": aggregate.ProviderSnapshot.RepositoryID, "can_create_issue": aggregate.ProviderSnapshot.CanCreateIssue},
+		"group":       group,
+		"publication": publication,
+		"request":     authorizationRequest,
+		"provider": map[string]any{
+			"origin":           aggregate.ProviderSnapshot.ProviderOrigin,
+			"repository_id":    aggregate.ProviderSnapshot.RepositoryID,
+			"can_create_issue": aggregate.ProviderSnapshot.CanCreateIssue,
+		},
 	}
-	gate, err := service.deferredPublicationGate(ctx, aggregate, gateSubject)
-	if err != nil {
-		return Aggregate{}, err
+	gate, gateErr := service.deferredPublicationGate(ctx, aggregate, gateSubject)
+	if gateErr != nil {
+		return Aggregate{}, gateErr
 	}
 	gate.TargetID = group.ID
 	patch := AggregatePatch{
@@ -107,8 +120,24 @@ func (service *Service) QueueDeferredPublication(ctx context.Context, request Qu
 	group.Version++
 	group.UpdatedAt = now
 	patch.UpsertDeferred = []DeferredGroup{group}
-	patch.Activity = []Activity{{Kind: "deferred.publication_queued", Actor: "user", EntityID: group.ID, Summary: "Deferred issue publication requested", CreatedAt: now}}
-	result, err := service.store.Mutate(ctx, Mutation{WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID, Patch: patch})
+	patch.Activity = []Activity{
+		{
+			Kind:      "deferred.publication_queued",
+			Actor:     "user",
+			EntityID:  group.ID,
+			Summary:   "Deferred issue publication requested",
+			CreatedAt: now,
+		},
+	}
+	result, err := service.store.Mutate(
+		ctx,
+		Mutation{
+			WorkspaceID:     request.WorkspaceID,
+			ExpectedVersion: request.ExpectedVersion,
+			RequestID:       request.RequestID,
+			Patch:           patch,
+		},
+	)
 	if err != nil {
 		return result.Aggregate, err
 	}
@@ -122,17 +151,22 @@ type DispatchIssuePublicationRequest struct {
 	RequestID       string
 }
 
-func (service *Service) DispatchIssuePublication(ctx context.Context, publisher IssuePublisher, request DispatchIssuePublicationRequest) (Aggregate, error) {
+func (service *Service) DispatchIssuePublication(
+	ctx context.Context,
+	publisher IssuePublisher,
+	request DispatchIssuePublicationRequest,
+) (Aggregate, error) {
 	if publisher == nil || !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
 		!validOpaqueID(request.PublicationID, "ppb_") {
 		return Aggregate{}, ErrInvalid
 	}
-	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
-	if err != nil {
-		return Aggregate{}, err
+	aggregate, getErr := service.store.Get(ctx, request.WorkspaceID)
+	if getErr != nil {
+		return Aggregate{}, getErr
 	}
 	publication, found := findPublication(aggregate.Publications, request.PublicationID)
-	if !found || publication.Kind != PublicationGitHubIssue || publication.State != ExecutionQueued || aggregate.Workspace.Version != request.ExpectedVersion {
+	if !found || publication.Kind != PublicationGitHubIssue || publication.State != ExecutionQueued ||
+		aggregate.Workspace.Version != request.ExpectedVersion {
 		return aggregate, ErrConflict
 	}
 	group, ok := findDeferredGroup(aggregate.DeferredGroups, publication.TargetID)
@@ -148,8 +182,17 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 		canceled, cancelErr := service.store.Mutate(ctx, Mutation{
 			WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 			RequestID: request.RequestID, Patch: AggregatePatch{
-				ReplacePublications: []Publication{publication}, UpsertDeferred: []DeferredGroup{group},
-				Activity: []Activity{{Kind: "issue.publication_canceled", Actor: "system", EntityID: publication.ID, Summary: "Deferred issue publication is disabled", CreatedAt: now}},
+				ReplacePublications: []Publication{publication},
+				UpsertDeferred:      []DeferredGroup{group},
+				Activity: []Activity{
+					{
+						Kind:      "issue.publication_canceled",
+						Actor:     "system",
+						EntityID:  publication.ID,
+						Summary:   "Deferred issue publication is disabled",
+						CreatedAt: now,
+					},
+				},
 			},
 		})
 		return canceled.Aggregate, cancelErr
@@ -163,12 +206,12 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 	publication.State = ExecutionRunning
 	publication.Attempts++
 	publication.UpdatedAt = service.now().UTC()
-	claimed, err := service.store.Mutate(ctx, Mutation{
+	claimed, claimErr := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID + ":claim", Patch: AggregatePatch{ReplacePublications: []Publication{publication}},
 	})
-	if err != nil {
-		return claimed.Aggregate, err
+	if claimErr != nil {
+		return claimed.Aggregate, claimErr
 	}
 	marker := publicationMarker(publication)
 	result, publishErr := publisher.CreateIssue(ctx, IssuePublicationRequest{
@@ -178,7 +221,11 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 	})
 	finished := service.now().UTC()
 	publication.UpdatedAt = finished
-	frozenProvider := ProviderSnapshot{ProviderOrigin: payload.ProviderOrigin, RepositoryID: payload.RepositoryID, Repository: payload.Repository}
+	frozenProvider := ProviderSnapshot{
+		ProviderOrigin: payload.ProviderOrigin,
+		RepositoryID:   payload.RepositoryID,
+		Repository:     payload.Repository,
+	}
 	if publishErr == nil && !result.Ambiguous && result.ExternalID != "" &&
 		validExistingDeferredIssueURL(frozenProvider, result.ExternalURL) {
 		publication.State = ExecutionSucceeded
@@ -190,7 +237,18 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 		publication.State = ExecutionFailed
 		publication.PublicErrorCode = "provider_issue_create_failed"
 	}
-	patch := AggregatePatch{ReplacePublications: []Publication{publication}, Activity: []Activity{{Kind: "issue.publication_finished", Actor: "system", EntityID: publication.ID, Summary: "Deferred issue publication finished", CreatedAt: finished}}}
+	patch := AggregatePatch{
+		ReplacePublications: []Publication{publication},
+		Activity: []Activity{
+			{
+				Kind:      "issue.publication_finished",
+				Actor:     "system",
+				EntityID:  publication.ID,
+				Summary:   "Deferred issue publication finished",
+				CreatedAt: finished,
+			},
+		},
+	}
 	if publication.State == ExecutionSucceeded {
 		rewarded := rewardDeferredFindings(claimed.Aggregate.Findings, payload.FindingIDs, "deferred_issue_published")
 		for index := range rewarded {
@@ -221,7 +279,11 @@ func (service *Service) DispatchIssuePublication(ctx context.Context, publisher 
 	return finalized.Aggregate, nil
 }
 
-func (service *Service) deferredPublicationGate(ctx context.Context, aggregate Aggregate, subject map[string]any) (GateRun, error) {
+func (service *Service) deferredPublicationGate(
+	ctx context.Context,
+	aggregate Aggregate,
+	subject map[string]any,
+) (GateRun, error) {
 	if service.deferredMode(aggregate) != DeferredIssuesAutomatic {
 		return service.startGate(ctx, aggregate, "pr.deferred.publish", subject)
 	}
@@ -260,8 +322,13 @@ type ReconcileIssuePublicationRequest struct {
 	RequestID       string
 }
 
-func (service *Service) ReconcileIssuePublication(ctx context.Context, publisher IssuePublisher, request ReconcileIssuePublicationRequest) (Aggregate, error) {
-	if publisher == nil || !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || !validOpaqueID(request.PublicationID, "ppb_") {
+func (service *Service) ReconcileIssuePublication(
+	ctx context.Context,
+	publisher IssuePublisher,
+	request ReconcileIssuePublicationRequest,
+) (Aggregate, error) {
+	if publisher == nil || !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		!validOpaqueID(request.PublicationID, "ppb_") {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -294,7 +361,11 @@ func (service *Service) ReconcileIssuePublication(ctx context.Context, publisher
 	if err != nil {
 		return service.recordUnknownIssuePublication(ctx, aggregate, publication, request, err)
 	}
-	frozenProvider := ProviderSnapshot{ProviderOrigin: payload.ProviderOrigin, RepositoryID: payload.RepositoryID, Repository: payload.Repository}
+	frozenProvider := ProviderSnapshot{
+		ProviderOrigin: payload.ProviderOrigin,
+		RepositoryID:   payload.RepositoryID,
+		Repository:     payload.Repository,
+	}
 	if !exists || observed.Ambiguous || strings.TrimSpace(observed.ExternalID) == "" ||
 		!validExistingDeferredIssueURL(frozenProvider, observed.ExternalURL) {
 		return service.recordUnknownIssuePublication(
@@ -338,7 +409,15 @@ func (service *Service) recordUnknownIssuePublication(
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: AggregatePatch{
 			ReplacePublications: []Publication{publication},
-			Activity:            []Activity{{Kind: "issue.publication_unknown", Actor: "system", EntityID: publication.ID, Summary: "Deferred issue publication outcome remains unknown", CreatedAt: now}},
+			Activity: []Activity{
+				{
+					Kind:      "issue.publication_unknown",
+					Actor:     "system",
+					EntityID:  publication.ID,
+					Summary:   "Deferred issue publication outcome remains unknown",
+					CreatedAt: now,
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -348,10 +427,16 @@ func (service *Service) recordUnknownIssuePublication(
 }
 
 func (service *Service) publicationRecoveryReady(publication Publication) bool {
-	return !publication.UpdatedAt.IsZero() && !service.now().UTC().Before(publication.UpdatedAt.Add(publicationRecoveryDelay))
+	return !publication.UpdatedAt.IsZero() &&
+		!service.now().UTC().Before(publication.UpdatedAt.Add(publicationRecoveryDelay))
 }
 
-func deferredPublication(aggregate Aggregate, group DeferredGroup, requestID string, now time.Time) (Publication, error) {
+func deferredPublication(
+	aggregate Aggregate,
+	group DeferredGroup,
+	requestID string,
+	now time.Time,
+) (Publication, error) {
 	pinnedPayload, payload, err := encodePublicationPayload(issuePublicationPayload{
 		ProviderOrigin: aggregate.ProviderSnapshot.ProviderOrigin,
 		RepositoryID:   aggregate.ProviderSnapshot.RepositoryID,
@@ -364,9 +449,15 @@ func deferredPublication(aggregate Aggregate, group DeferredGroup, requestID str
 		return Publication{}, err
 	}
 	return Publication{
-		ID: stableID("ppb_", aggregate.Workspace.ID, group.ID, requestID), Kind: PublicationGitHubIssue,
-		State: ExecutionQueued, TargetID: group.ID, FindingIDs: append([]string(nil), group.FindingIDs...), PayloadDigest: payload,
-		CreatedAt: now, UpdatedAt: now, payload: pinnedPayload,
+		ID:            stableID("ppb_", aggregate.Workspace.ID, group.ID, requestID),
+		Kind:          PublicationGitHubIssue,
+		State:         ExecutionQueued,
+		TargetID:      group.ID,
+		FindingIDs:    append([]string(nil), group.FindingIDs...),
+		PayloadDigest: payload,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		payload:       pinnedPayload,
 	}, nil
 }
 

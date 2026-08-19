@@ -24,7 +24,11 @@ func (repair *finalizedCandidateRepair) Repair(ctx context.Context, request Repa
 	return result, err
 }
 
-func (repair *finalizedCandidateRepair) FinalizeRepair(_ context.Context, _ string, result RepairResult) (RepairResult, error) {
+func (repair *finalizedCandidateRepair) FinalizeRepair(
+	_ context.Context,
+	_ string,
+	result RepairResult,
+) (RepairResult, error) {
 	result.CandidateSHA = finalizedCandidateCommit
 	result.PublicationFence = &ImplementationPublicationFence{
 		BaseCommit: "abcdef",
@@ -49,29 +53,51 @@ type implementationAuthorizationWaitingGates struct{}
 
 func (implementationAuthorizationWaitingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
 	gate := testSucceededGate(request)
-	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.hard-scope" || request.DecisionPoint == "pr.implementation.complete" {
+	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.hard-scope" ||
+		request.DecisionPoint == "pr.implementation.complete" {
 		gate = testWaitingGate(request)
 	}
 	return gate, nil
 }
 
-func (implementationAuthorizationWaitingGates) Respond(_ context.Context, gate GateRun, fieldValues map[string]any) (GateRun, error) {
+func (implementationAuthorizationWaitingGates) Respond(
+	_ context.Context,
+	gate GateRun,
+	fieldValues map[string]any,
+) (GateRun, error) {
 	return answerTestGate(gate, fieldValues), nil
 }
 
-func (repair *completionFinalizingRepair) FinalizeRepair(_ context.Context, _ string, result RepairResult) (RepairResult, error) {
-	result.PublicationFence = &ImplementationPublicationFence{BaseCommit: "abcdef", Tip: result.CandidateSHA, Tree: result.CandidateSHA}
+func (repair *completionFinalizingRepair) FinalizeRepair(
+	_ context.Context,
+	_ string,
+	result RepairResult,
+) (RepairResult, error) {
+	result.PublicationFence = &ImplementationPublicationFence{
+		BaseCommit: "abcdef",
+		Tip:        result.CandidateSHA,
+		Tree:       result.CandidateSHA,
+	}
 	return result, nil
 }
 
 type countingBranchPublisher struct{ calls int }
 
-func (publisher *countingBranchPublisher) PublishBranch(_ context.Context, request BranchPublicationRequest) (BranchPublicationResult, error) {
+func (publisher *countingBranchPublisher) PublishBranch(
+	_ context.Context,
+	request BranchPublicationRequest,
+) (BranchPublicationResult, error) {
 	publisher.calls++
-	return BranchPublicationResult{ExternalID: request.Repair.CandidateSHA, ExternalURL: "https://github.com/octo/repo/pull/3"}, nil
+	return BranchPublicationResult{
+		ExternalID:  request.Repair.CandidateSHA,
+		ExternalURL: "https://github.com/octo/repo/pull/3",
+	}, nil
 }
 
-func (*countingBranchPublisher) ReconcileBranch(context.Context, BranchPublicationRequest) (BranchPublicationResult, bool, error) {
+func (*countingBranchPublisher) ReconcileBranch(
+	context.Context,
+	BranchPublicationRequest,
+) (BranchPublicationResult, bool, error) {
 	return BranchPublicationResult{}, false, nil
 }
 
@@ -80,7 +106,10 @@ type blockingBranchPublisher struct {
 	release chan struct{}
 }
 
-func (publisher *blockingBranchPublisher) PublishBranch(ctx context.Context, request BranchPublicationRequest) (BranchPublicationResult, error) {
+func (publisher *blockingBranchPublisher) PublishBranch(
+	ctx context.Context,
+	request BranchPublicationRequest,
+) (BranchPublicationResult, error) {
 	close(publisher.started)
 	select {
 	case <-publisher.release:
@@ -93,7 +122,10 @@ func (publisher *blockingBranchPublisher) PublishBranch(ctx context.Context, req
 	}
 }
 
-func (*blockingBranchPublisher) ReconcileBranch(context.Context, BranchPublicationRequest) (BranchPublicationResult, bool, error) {
+func (*blockingBranchPublisher) ReconcileBranch(
+	context.Context,
+	BranchPublicationRequest,
+) (BranchPublicationResult, bool, error) {
 	return BranchPublicationResult{}, false, nil
 }
 
@@ -148,14 +180,21 @@ func implementationWaitingOnCompletion(t *testing.T) (*Service, Aggregate, GateR
 func TestCurrentImplementationCompletionGateCanAccept(t *testing.T) {
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-pass-current-completion", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       gate.ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-pass-current-completion",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if completed.Workspace.Phase != PhasePublication || completed.Findings[0].Disposition != FindingFixed {
-		t.Fatalf("fresh completion was not authorized: workspace=%#v findings=%#v", completed.Workspace, completed.Findings)
+		t.Fatalf(
+			"fresh completion was not authorized: workspace=%#v findings=%#v",
+			completed.Workspace,
+			completed.Findings,
+		)
 	}
 }
 
@@ -202,25 +241,36 @@ func TestFinalizedImplementationScopeThenCompletionGatesCanApprove(t *testing.T)
 			completionGate = gate
 		}
 	}
-	if scopeGate.ID == "" || completionGate.ID == "" || scopeGate.State != ExecutionWaitingUser || completionGate.State != ExecutionWaitingUser {
+	if scopeGate.ID == "" || completionGate.ID == "" || scopeGate.State != ExecutionWaitingUser ||
+		completionGate.State != ExecutionWaitingUser {
 		t.Fatalf("implementation authorization gates = %#v", waiting.Gates)
 	}
 	scopeApproved, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: scopeGate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-pass-finalized-scope", FieldValues: map[string]any{"action": "approve"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       scopeGate.ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-pass-finalized-scope",
+		FieldValues:     map[string]any{"action": "approve"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: scopeApproved.Workspace.ID, GateRunID: completionGate.ID,
-		ExpectedVersion: scopeApproved.Workspace.Version, RequestID: "request-pass-finalized-completion", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     scopeApproved.Workspace.ID,
+		GateRunID:       completionGate.ID,
+		ExpectedVersion: scopeApproved.Workspace.Version,
+		RequestID:       "request-pass-finalized-completion",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if completed.Workspace.Phase != PhasePublication || completed.Findings[0].Disposition != FindingFixed {
-		t.Fatalf("finalized completion was not authorized: workspace=%#v findings=%#v", completed.Workspace, completed.Findings)
+		t.Fatalf(
+			"finalized completion was not authorized: workspace=%#v findings=%#v",
+			completed.Workspace,
+			completed.Findings,
+		)
 	}
 }
 
@@ -250,9 +300,12 @@ func TestImplementationCompletionGateRejectsLaterGuidanceAndCorrection(t *testin
 					WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
 					RequestID: "request-later-implementation-correction",
 					Correction: Correction{
-						Kind: CorrectionImplementation, Applicability: CorrectionImplementationOnly,
-						TargetType: "workspace", TargetID: aggregate.Workspace.ID,
-						OriginalClaim: "Callbacks may be reordered", Correction: "Callback order is part of the contract",
+						Kind:          CorrectionImplementation,
+						Applicability: CorrectionImplementationOnly,
+						TargetType:    "workspace",
+						TargetID:      aggregate.Workspace.ID,
+						OriginalClaim: "Callbacks may be reordered",
+						Correction:    "Callback order is part of the contract",
 					},
 				})
 				if err != nil {
@@ -267,9 +320,11 @@ func TestImplementationCompletionGateRejectsLaterGuidanceAndCorrection(t *testin
 			service, waiting, gate := implementationWaitingOnCompletion(t)
 			changed := test.mutate(t, service, waiting)
 			staled, err := service.RespondGate(context.Background(), RespondGateRequest{
-				WorkspaceID: changed.Workspace.ID, GateRunID: gate.ID,
-				ExpectedVersion: changed.Workspace.Version, RequestID: "request-pass-stale-completion-" + string(rune('a'+testIndex)),
-				FieldValues: map[string]any{"action": "accept"},
+				WorkspaceID:     changed.Workspace.ID,
+				GateRunID:       gate.ID,
+				ExpectedVersion: changed.Workspace.Version,
+				RequestID:       "request-pass-stale-completion-" + string(rune('a'+testIndex)),
+				FieldValues:     map[string]any{"action": "accept"},
 			})
 			if !errors.Is(err, ErrConflict) {
 				t.Fatalf("stale completion response error = %v", err)
@@ -302,8 +357,11 @@ func TestImplementationCompletionGateRejectsLaterCompletionAuditEvidence(t *test
 		t.Fatal(err)
 	}
 	staled, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: audited.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: audited.Workspace.Version, RequestID: "request-pass-after-later-audit", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     audited.Workspace.ID,
+		GateRunID:       gate.ID,
+		ExpectedVersion: audited.Workspace.Version,
+		RequestID:       "request-pass-after-later-audit",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale completion response error = %v", err)
@@ -311,7 +369,8 @@ func TestImplementationCompletionGateRejectsLaterCompletionAuditEvidence(t *test
 	assertStaleCompletionNeutralized(t, staled, gate.ID)
 	foundMissing := false
 	for _, finding := range staled.Findings {
-		if finding.OriginRunID == audited.StageRuns[len(audited.StageRuns)-1].ID && finding.Disposition == FindingInScope {
+		if finding.OriginRunID == audited.StageRuns[len(audited.StageRuns)-1].ID &&
+			finding.Disposition == FindingInScope {
 			foundMissing = true
 		}
 	}
@@ -325,25 +384,44 @@ func TestImplementationCompletionGateRejectsSupersededRepair(t *testing.T) {
 	now := waiting.Workspace.UpdatedAt
 	priorStage := waiting.StageRuns[len(waiting.StageRuns)-1]
 	newStage := priorStage
-	newStage.ID, newStage.Attempt, newStage.State = stableID("psr_", waiting.Workspace.ID, "newer-repair"), priorStage.Attempt+1, ExecutionBlocked
+	newStage.ID, newStage.Attempt, newStage.State = stableID(
+		"psr_",
+		waiting.Workspace.ID,
+		"newer-repair",
+	), priorStage.Attempt+1, ExecutionBlocked
 	newStage.Evidence, newStage.PublicError, newStage.FinishedAt = nil, "completion_incomplete", &now
 	newAttempt := waiting.RepairAttempts[len(waiting.RepairAttempts)-1]
-	newAttempt.ID, newAttempt.StageRunID, newAttempt.Number = stableID("pra_", waiting.Workspace.ID, "newer-repair"), newStage.ID, newAttempt.Number+1
+	newAttempt.ID, newAttempt.StageRunID, newAttempt.Number = stableID(
+		"pra_",
+		waiting.Workspace.ID,
+		"newer-repair",
+	), newStage.ID, newAttempt.Number+1
 	newAttempt.CandidateSHA = "newer-candidate"
 	newValidation := waiting.ValidationRuns[len(waiting.ValidationRuns)-1]
-	newValidation.ID, newValidation.StageRunID, newValidation.CandidateSHA = stableID("pvr_", waiting.Workspace.ID, "newer-repair"), newStage.ID, newAttempt.CandidateSHA
+	newValidation.ID, newValidation.StageRunID, newValidation.CandidateSHA = stableID(
+		"pvr_",
+		waiting.Workspace.ID,
+		"newer-repair",
+	), newStage.ID, newAttempt.CandidateSHA
 	seeded, err := service.store.Mutate(context.Background(), Mutation{
 		WorkspaceID: waiting.Workspace.ID, ExpectedVersion: waiting.Workspace.Version,
 		RequestID: "request-seed-newer-repair", Patch: AggregatePatch{
-			AppendStageRuns: []StageRun{newStage}, AppendRepairs: []RepairAttempt{newAttempt}, AppendValidations: []ValidationRun{newValidation},
+			AppendStageRuns: []StageRun{
+				newStage,
+			},
+			AppendRepairs:     []RepairAttempt{newAttempt},
+			AppendValidations: []ValidationRun{newValidation},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	staled, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: seeded.Aggregate.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: seeded.Aggregate.Workspace.Version, RequestID: "request-pass-superseded-repair", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     seeded.Aggregate.Workspace.ID,
+		GateRunID:       gate.ID,
+		ExpectedVersion: seeded.Aggregate.Workspace.Version,
+		RequestID:       "request-pass-superseded-repair",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("superseded completion response error = %v", err)
@@ -357,8 +435,11 @@ func TestImplementationCompletionGateRejectsSupersededRepair(t *testing.T) {
 func TestBranchPublicationRejectsGuidanceAddedAfterCompletionApproval(t *testing.T) {
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-guidance", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       gate.ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-approve-before-guidance",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -387,8 +468,11 @@ func TestBranchPublicationRejectsGuidanceAddedAfterCompletionApproval(t *testing
 func TestBranchDispatchRechecksCompletionAuthorization(t *testing.T) {
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-queue", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       gate.ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-approve-before-queue",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +503,8 @@ func TestBranchDispatchRechecksCompletionAuthorization(t *testing.T) {
 	}
 	assertStaleCompletionNeutralized(t, staled, gate.ID)
 	stalePublication, found := findPublication(staled.Publications, publication.ID)
-	if !found || stalePublication.State != ExecutionStale || stalePublication.PublicErrorCode != "completion_authorization_stale" {
+	if !found || stalePublication.State != ExecutionStale ||
+		stalePublication.PublicErrorCode != "completion_authorization_stale" {
 		t.Fatalf("stale queued publication = %#v", staled.Publications)
 	}
 }
@@ -427,8 +512,11 @@ func TestBranchDispatchRechecksCompletionAuthorization(t *testing.T) {
 func TestRunningBranchPublicationFencesCompletionContextMutations(t *testing.T) {
 	service, waiting, gate := implementationWaitingOnCompletion(t)
 	completed, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: gate.ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-approve-before-concurrent-push", FieldValues: map[string]any{"action": "accept"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       gate.ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-approve-before-concurrent-push",
+		FieldValues:     map[string]any{"action": "accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -448,10 +536,14 @@ func TestRunningBranchPublicationFencesCompletionContextMutations(t *testing.T) 
 	}
 	dispatched := make(chan dispatchResult, 1)
 	go func() {
-		aggregate, dispatchErr := service.DispatchBranchPublication(context.Background(), publisher, DispatchPhasePublicationRequest{
-			WorkspaceID: queued.Workspace.ID, PublicationID: publication.ID,
-			ExpectedVersion: queued.Workspace.Version, RequestID: "request-dispatch-concurrent-push",
-		})
+		aggregate, dispatchErr := service.DispatchBranchPublication(
+			context.Background(),
+			publisher,
+			DispatchPhasePublicationRequest{
+				WorkspaceID: queued.Workspace.ID, PublicationID: publication.ID,
+				ExpectedVersion: queued.Workspace.Version, RequestID: "request-dispatch-concurrent-push",
+			},
+		)
 		dispatched <- dispatchResult{aggregate: aggregate, err: dispatchErr}
 	}()
 
@@ -473,7 +565,8 @@ func TestRunningBranchPublicationFencesCompletionContextMutations(t *testing.T) 
 		RequestID: "request-guidance-during-concurrent-push", Stage: "implementation",
 		Content: "This guidance must invalidate completion before any push.",
 	})
-	if !errors.Is(err, ErrConflict) || rejected.Workspace.Version != claimed.Workspace.Version || len(rejected.Messages) != len(claimed.Messages) {
+	if !errors.Is(err, ErrConflict) || rejected.Workspace.Version != claimed.Workspace.Version ||
+		len(rejected.Messages) != len(claimed.Messages) {
 		t.Fatalf("in-flight context mutation was not fenced: aggregate=%#v err=%v", rejected, err)
 	}
 
@@ -481,7 +574,11 @@ func TestRunningBranchPublicationFencesCompletionContextMutations(t *testing.T) 
 	result := <-dispatched
 	if result.err != nil || result.aggregate.Workspace.Phase != PhaseComplete ||
 		result.aggregate.Workspace.ExecutionState != ExecutionSucceeded {
-		t.Fatalf("branch publication did not finish after fenced mutation: workspace=%#v err=%v", result.aggregate.Workspace, result.err)
+		t.Fatalf(
+			"branch publication did not finish after fenced mutation: workspace=%#v err=%v",
+			result.aggregate.Workspace,
+			result.err,
+		)
 	}
 	if len(result.aggregate.Messages) != len(claimed.Messages) {
 		t.Fatalf("rejected guidance entered the completed aggregate: %#v", result.aggregate.Messages)
@@ -499,7 +596,8 @@ func assertStaleCompletionNeutralized(t *testing.T, aggregate Aggregate, gateID 
 	}
 	attempt := aggregate.RepairAttempts[0]
 	stage, _ := findStageRun(aggregate.StageRuns, attempt.StageRunID)
-	if stage.Stage != "implementation" || stage.State != ExecutionBlocked || stage.PublicError != "completion_authorization_stale" {
+	if stage.Stage != "implementation" || stage.State != ExecutionBlocked ||
+		stage.PublicError != "completion_authorization_stale" {
 		t.Fatalf("stale implementation stage = %#v", stage)
 	}
 	if gateAction(gate) != "accept" && aggregate.Findings[0].Disposition == FindingFixed {
@@ -540,8 +638,12 @@ func TestRunImplementationRequiresReviewAndCompletedTriage(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service, aggregate := readyImplementationService(t)
 			seeded, err := service.store.Mutate(context.Background(), Mutation{
-				WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
-				RequestID: "request-not-ready-implementation-" + string(rune('a'+testIndex)), Patch: test.mutate(aggregate),
+				WorkspaceID:     aggregate.Workspace.ID,
+				ExpectedVersion: aggregate.Workspace.Version,
+				RequestID: "request-not-ready-implementation-" + string(
+					rune('a'+testIndex),
+				),
+				Patch: test.mutate(aggregate),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -591,9 +693,15 @@ func TestRunImplementationAllowsFailedAndBlockedRetries(t *testing.T) {
 		now := aggregate.Workspace.UpdatedAt
 		phase, state := PhaseImplementation, ExecutionBlocked
 		prior := StageRun{
-			ID: stableID("psr_", aggregate.Workspace.ID, "blocked-retry"), Stage: "implementation",
-			State: ExecutionBlocked, PublicError: "completion_incomplete", CharterID: charter.ID, HeadSHA: charter.HeadSHA,
-			Attempt: 1, StartedAt: now, FinishedAt: &now,
+			ID:          stableID("psr_", aggregate.Workspace.ID, "blocked-retry"),
+			Stage:       "implementation",
+			State:       ExecutionBlocked,
+			PublicError: "completion_incomplete",
+			CharterID:   charter.ID,
+			HeadSHA:     charter.HeadSHA,
+			Attempt:     1,
+			StartedAt:   now,
+			FinishedAt:  &now,
 		}
 		seeded, err := service.store.Mutate(context.Background(), Mutation{
 			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,

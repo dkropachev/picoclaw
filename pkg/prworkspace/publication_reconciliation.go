@@ -56,8 +56,11 @@ func (service *Service) authorizePublicationReconciliation(
 				patch.AppendGates = append(patch.AppendGates, gate)
 			}
 			patch.Activity = append(patch.Activity, Activity{
-				Kind: "publication.reconcile_assumed_failed", Actor: "gate", EntityID: publication.ID,
-				Summary: "Publication assumed failed; a fresh publication may be requested", CreatedAt: service.now().UTC(),
+				Kind:      "publication.reconcile_assumed_failed",
+				Actor:     "gate",
+				EntityID:  publication.ID,
+				Summary:   "Publication assumed failed; a fresh publication may be requested",
+				CreatedAt: service.now().UTC(),
 			})
 			resolved, mutateErr := service.store.Mutate(ctx, Mutation{
 				WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: expectedVersion,
@@ -65,12 +68,18 @@ func (service *Service) authorizePublicationReconciliation(
 			})
 			return resolved.Aggregate, false, mutateErr
 		default:
-			return aggregate, false, fmt.Errorf("%w: publication reconciliation returned no supported action", ErrInvalid)
+			return aggregate, false, fmt.Errorf(
+				"%w: publication reconciliation returned no supported action",
+				ErrInvalid,
+			)
 		}
 	}
 
 	if gateAction(gate) != "" {
-		return aggregate, false, fmt.Errorf("%w: unresolved publication reconciliation gate has field-values", ErrInvalid)
+		return aggregate, false, fmt.Errorf(
+			"%w: unresolved publication reconciliation gate has field-values",
+			ErrInvalid,
+		)
 	}
 	state := ExecutionWaitingGate
 	if !gateNew && aggregate.Workspace.ExecutionState == state {
@@ -79,10 +88,15 @@ func (service *Service) authorizePublicationReconciliation(
 	patch := AggregatePatch{ExecutionState: &state}
 	if gateNew {
 		patch.AppendGates = []GateRun{gate}
-		patch.Activity = []Activity{{
-			Kind: "publication.reconcile_requested", Actor: "system", EntityID: publication.ID,
-			Summary: "Publication reconciliation requires re-observe or assume-failed authorization", CreatedAt: service.now().UTC(),
-		}}
+		patch.Activity = []Activity{
+			{
+				Kind:      "publication.reconcile_requested",
+				Actor:     "system",
+				EntityID:  publication.ID,
+				Summary:   "Publication reconciliation requires re-observe or assume-failed authorization",
+				CreatedAt: service.now().UTC(),
+			},
+		}
 	}
 	waiting, mutateErr := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: expectedVersion,

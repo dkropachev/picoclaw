@@ -2,10 +2,8 @@ package prworkspace
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -55,7 +53,7 @@ type GateEvaluator interface {
 // a standalone completion audit. Implementations must fence the returned diff
 // to the persisted repair publication tuple, including after process restart.
 type CandidateEvidenceLoader interface {
-	LoadCandidateEvidence(context.Context, RepairAttempt) (CandidateEvidence, error)
+	LoadCandidateEvidence(ctx context.Context, repair RepairAttempt) (CandidateEvidence, error)
 }
 
 type CandidateEvidence struct {
@@ -115,11 +113,18 @@ func NewService(config ServiceConfig) (*Service, error) {
 		reviewWorkflow = newIsolatedReviewWorkflow(config.AI)
 	}
 	return &Service{
-		store: newPublicationFencedStore(config.Store), provider: config.Provider, reviewEvidence: config.ReviewEvidence,
-		candidateEvidence: config.CandidateEvidence,
-		ai:                AIController{Runner: config.AI}, reviewWorkflow: reviewWorkflow, gates: config.Gates,
+		store: newPublicationFencedStore(
+			config.Store,
+		),
+		provider:                       config.Provider,
+		reviewEvidence:                 config.ReviewEvidence,
+		candidateEvidence:              config.CandidateEvidence,
+		ai:                             AIController{Runner: config.AI},
+		reviewWorkflow:                 reviewWorkflow,
+		gates:                          config.Gates,
 		deferredIssueMode:              config.DeferredIssueMode,
-		deferredIssueModeForRepository: config.DeferredIssueModeForRepository, now: now,
+		deferredIssueModeForRepository: config.DeferredIssueModeForRepository,
+		now:                            now,
 	}, nil
 }
 
@@ -172,16 +177,16 @@ func (service *Service) Create(ctx context.Context, request CreateWorkspaceReque
 	if !validRequestID(request.RequestID) || validateResolveRequest(request.Resolve) != nil {
 		return Aggregate{}, ErrInvalid
 	}
-	provider, err := service.provider.ResolvePullRequest(ctx, request.Resolve)
-	if err != nil {
-		return Aggregate{}, err
+	provider, resolveErr := service.provider.ResolvePullRequest(ctx, request.Resolve)
+	if resolveErr != nil {
+		return Aggregate{}, resolveErr
 	}
 	if err := validateProviderSnapshot(provider); err != nil {
 		return Aggregate{}, fmt.Errorf("%w: provider snapshot: %v", ErrInvalid, err)
 	}
 	now := service.now().UTC()
 	workspaceID := stableID("prw_", provider.ProviderOrigin, provider.RepositoryID, provider.PullRequestID)
-	result, err := service.store.Create(ctx, CreateInput{
+	result, createErr := service.store.Create(ctx, CreateInput{
 		RequestID: request.RequestID,
 		Workspace: Workspace{
 			ID: workspaceID, Provider: provider.Provider, ProviderOrigin: provider.ProviderOrigin,
@@ -192,8 +197,8 @@ func (service *Service) Create(ctx context.Context, request CreateWorkspaceReque
 		},
 		Provider: provider,
 	})
-	if err != nil {
-		return Aggregate{}, err
+	if createErr != nil {
+		return Aggregate{}, createErr
 	}
 	return result.Aggregate, nil
 }
@@ -231,12 +236,13 @@ type CharterDraftOutput struct {
 }
 
 func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRequest) (Aggregate, error) {
-	if service == nil || service.ai.Runner == nil || !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
+	if service == nil || service.ai.Runner == nil ||
+		!validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
 		return Aggregate{}, ErrInvalid
 	}
-	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
-	if err != nil {
-		return Aggregate{}, err
+	aggregate, getErr := service.store.Get(ctx, request.WorkspaceID)
+	if getErr != nil {
+		return Aggregate{}, getErr
 	}
 	if aggregate.Workspace.Version != request.ExpectedVersion ||
 		aggregate.Workspace.ProviderHeadSHA != aggregate.ProviderSnapshot.HeadSHA ||
@@ -244,16 +250,16 @@ func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRe
 		return aggregate, ErrConflict
 	}
 	bundle := contextBundle(aggregate)
-	prompt, err := CompilePrompt(PromptCharterDraft, bundle, "")
-	if err != nil {
-		return Aggregate{}, err
+	prompt, promptErr := CompilePrompt(PromptCharterDraft, bundle, "")
+	if promptErr != nil {
+		return Aggregate{}, promptErr
 	}
-	value, err := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
+	value, runErr := service.ai.Runner.RunIsolated(ctx, IsolatedAIRequest{
 		Operation: "charter.draft", SystemPrompt: prompt.SystemPrompt,
 		UserPrompt: prompt.UserPrompt, Schema: charterDraftSchema(),
 	})
-	if err != nil {
-		return Aggregate{}, err
+	if runErr != nil {
+		return Aggregate{}, runErr
 	}
 	var draft CharterDraftOutput
 	if err := decodeStructured(value, &draft); err != nil || validateCharterDraft(draft) != nil {
@@ -269,16 +275,26 @@ func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRe
 		CreatedAt: now,
 	}
 	phase, state := PhaseCharter, ExecutionWaitingUser
-	result, err := service.store.Mutate(ctx, Mutation{
+	result, mutateErr := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID,
 		Patch: AggregatePatch{
-			Phase: &phase, ExecutionState: &state, AppendCharters: []Charter{charter},
-			Activity: []Activity{{Kind: "charter.drafted", Actor: "ai", EntityID: charter.ID, Summary: "AI drafted PR charter", CreatedAt: now}},
+			Phase:          &phase,
+			ExecutionState: &state,
+			AppendCharters: []Charter{charter},
+			Activity: []Activity{
+				{
+					Kind:      "charter.drafted",
+					Actor:     "ai",
+					EntityID:  charter.ID,
+					Summary:   "AI drafted PR charter",
+					CreatedAt: now,
+				},
+			},
 		},
 	})
-	if err != nil {
-		return result.Aggregate, err
+	if mutateErr != nil {
+		return result.Aggregate, mutateErr
 	}
 	return result.Aggregate, nil
 }
@@ -291,7 +307,8 @@ type SaveCharterRequest struct {
 }
 
 func (service *Service) SaveCharter(ctx context.Context, request SaveCharterRequest) (Aggregate, error) {
-	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) || validateCharterDraft(request.Draft) != nil {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		validateCharterDraft(request.Draft) != nil {
 		return Aggregate{}, ErrInvalid
 	}
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
@@ -318,7 +335,15 @@ func (service *Service) SaveCharter(ctx context.Context, request SaveCharterRequ
 		RequestID: request.RequestID,
 		Patch: AggregatePatch{
 			AppendCharters: []Charter{charter},
-			Activity:       []Activity{{Kind: "charter.edited", Actor: "user", EntityID: charter.ID, Summary: "User edited PR charter", CreatedAt: now}},
+			Activity: []Activity{
+				{
+					Kind:      "charter.edited",
+					Actor:     "user",
+					EntityID:  charter.ID,
+					Summary:   "User edited PR charter",
+					CreatedAt: now,
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -342,7 +367,8 @@ func (service *Service) ReviseCharter(ctx context.Context, request ReviseCharter
 		return Aggregate{}, err
 	}
 	active, ok := aggregate.ActiveCharter()
-	if !ok || active.Revision != request.ExpectedCharterRevision || aggregate.Workspace.Version != request.ExpectedVersion {
+	if !ok || active.Revision != request.ExpectedCharterRevision ||
+		aggregate.Workspace.Version != request.ExpectedVersion {
 		return aggregate, ErrConflict
 	}
 	now := service.now().UTC()
@@ -356,9 +382,19 @@ func (service *Service) ReviseCharter(ctx context.Context, request ReviseCharter
 	}
 	phase, state, noActive := PhaseCharter, ExecutionWaitingUser, ""
 	patch := AggregatePatch{
-		Phase: &phase, ExecutionState: &state, ActiveCharterID: &noActive,
-		AppendCharters: []Charter{charter},
-		Activity:       []Activity{{Kind: "charter.revised", Actor: "user", EntityID: charter.ID, Summary: "PR charter revised; dependent evidence invalidated", CreatedAt: now}},
+		Phase:           &phase,
+		ExecutionState:  &state,
+		ActiveCharterID: &noActive,
+		AppendCharters:  []Charter{charter},
+		Activity: []Activity{
+			{
+				Kind:      "charter.revised",
+				Actor:     "user",
+				EntityID:  charter.ID,
+				Summary:   "PR charter revised; dependent evidence invalidated",
+				CreatedAt: now,
+			},
+		},
 	}
 	for _, stage := range aggregate.StageRuns {
 		if stage.CharterID == active.ID && stage.State != ExecutionCanceled && stage.State != ExecutionStale {
@@ -367,19 +403,29 @@ func (service *Service) ReviseCharter(ctx context.Context, request ReviseCharter
 		}
 	}
 	for _, gate := range aggregate.Gates {
-		if gate.State == ExecutionQueued || gate.State == ExecutionRunning || gate.State == ExecutionWaitingGate || gate.State == ExecutionWaitingUser {
+		if gate.State == ExecutionQueued || gate.State == ExecutionRunning || gate.State == ExecutionWaitingGate ||
+			gate.State == ExecutionWaitingUser {
 			gate.State = ExecutionStale
 			patch.ReplaceGates = append(patch.ReplaceGates, gate)
 		}
 	}
 	for _, publication := range aggregate.Publications {
-		if publication.State == ExecutionQueued || publication.State == ExecutionRunning || publication.State == ExecutionWaitingGate {
+		if publication.State == ExecutionQueued || publication.State == ExecutionRunning ||
+			publication.State == ExecutionWaitingGate {
 			publication.State, publication.PublicErrorCode = ExecutionStale, "charter_revised"
 			publication.UpdatedAt = now
 			patch.ReplacePublications = append(patch.ReplacePublications, publication)
 		}
 	}
-	result, err := service.store.Mutate(ctx, Mutation{WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID, Patch: patch})
+	result, err := service.store.Mutate(
+		ctx,
+		Mutation{
+			WorkspaceID:     request.WorkspaceID,
+			ExpectedVersion: request.ExpectedVersion,
+			RequestID:       request.RequestID,
+			Patch:           patch,
+		},
+	)
 	if err != nil {
 		return result.Aggregate, err
 	}
@@ -414,14 +460,31 @@ func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmChart
 	now := service.now().UTC()
 	patch := AggregatePatch{
 		AppendGates: []GateRun{gate},
-		Activity:    []Activity{{Kind: "gate.started", Actor: "system", EntityID: gate.ID, Summary: "Charter confirmation gate started", CreatedAt: now}},
+		Activity: []Activity{
+			{
+				Kind:      "gate.started",
+				Actor:     "system",
+				EntityID:  gate.ID,
+				Summary:   "Charter confirmation gate started",
+				CreatedAt: now,
+			},
+		},
 	}
 	if gateCompletedWith(gate, "approve") {
 		charter.Confirmed = true
 		charter.ConfirmedAt = &now
 		patch.ReplaceCharters = []Charter{charter}
 		queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
-		patch.Activity = append(patch.Activity, Activity{Kind: "charter.confirmed", Actor: "gate", EntityID: charter.ID, Summary: "PR charter confirmed", CreatedAt: now})
+		patch.Activity = append(
+			patch.Activity,
+			Activity{
+				Kind:      "charter.confirmed",
+				Actor:     "gate",
+				EntityID:  charter.ID,
+				Summary:   "PR charter confirmed",
+				CreatedAt: now,
+			},
+		)
 	} else {
 		state := ExecutionWaitingGate
 		patch.ExecutionState = &state
@@ -595,22 +658,44 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 	}
 	findings, nudges := materializeReviewRounds(aggregate, runID, rounds, request.NudgePolicy, now)
 	stage.Evidence = reviewStageEvidence(runID, stage.Summary, stage.PromptDigest, rounds, findings, now)
-	classificationGates, classificationWaiting, needsCharterRevision, classifyErr := service.classifyReviewFindings(ctx, aggregate, charter, findings)
+	classificationGates, classificationWaiting, needsCharterRevision, classifyErr := service.classifyReviewFindings(
+		ctx,
+		aggregate,
+		charter,
+		findings,
+	)
 	if classifyErr != nil {
 		return aggregate, classifyErr
 	}
 	patch := AggregatePatch{
-		Phase: &phase, ExecutionState: &state, AppendStageRuns: []StageRun{stage},
-		UpsertFindings: findings, AppendNudgeRounds: nudges, AppendGates: classificationGates,
-		Activity: []Activity{{Kind: "review.completed", Actor: "ai", EntityID: runID, Summary: fmt.Sprintf("Review search completed with %d rounds", len(rounds)), CreatedAt: now}},
+		Phase:             &phase,
+		ExecutionState:    &state,
+		AppendStageRuns:   []StageRun{stage},
+		UpsertFindings:    findings,
+		AppendNudgeRounds: nudges,
+		AppendGates:       classificationGates,
+		Activity: []Activity{
+			{
+				Kind:      "review.completed",
+				Actor:     "ai",
+				EntityID:  runID,
+				Summary:   fmt.Sprintf("Review search completed with %d rounds", len(rounds)),
+				CreatedAt: now,
+			},
+		},
 	}
 	if startGateNew {
 		patch.AppendGates = append(patch.AppendGates, startGate)
 	}
 	if runErr == nil {
-		completeGate, completeGateNew, gateErr := service.ensureGate(ctx, aggregate, "pr.review.complete", map[string]any{
-			"charter": charter, "stage": stage, "findings": findings, "nudge_rounds": nudges,
-		})
+		completeGate, completeGateNew, gateErr := service.ensureGate(
+			ctx,
+			aggregate,
+			"pr.review.complete",
+			map[string]any{
+				"charter": charter, "stage": stage, "findings": findings, "nudge_rounds": nudges,
+			},
+		)
 		if gateErr != nil {
 			return aggregate, gateErr
 		}
@@ -646,7 +731,12 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 	return result.Aggregate, nil
 }
 
-func (service *Service) classifyReviewFindings(ctx context.Context, aggregate Aggregate, charter Charter, findings []Finding) ([]GateRun, bool, bool, error) {
+func (service *Service) classifyReviewFindings(
+	ctx context.Context,
+	aggregate Aggregate,
+	charter Charter,
+	findings []Finding,
+) ([]GateRun, bool, bool, error) {
 	var gates []GateRun
 	waiting, needsCharterRevision := false, false
 	for index := range findings {
@@ -709,24 +799,37 @@ func (service *Service) DecideFinding(ctx context.Context, request FindingDecisi
 		previousScope, previousErr := fingerprintValue(finding.Scope)
 		requestedScope, requestedErr := fingerprintValue(request.Scope)
 		if previousErr != nil || requestedErr != nil || previousScope != requestedScope {
-			return aggregate, fmt.Errorf("%w: hard candidate scope is frozen; resolve its gate or revise the charter", ErrInvalid)
+			return aggregate, fmt.Errorf(
+				"%w: hard candidate scope is frozen; resolve its gate or revise the charter",
+				ErrInvalid,
+			)
 		}
 	}
 	if HardCandidateScopeBlocker(finding.Scope) &&
 		(request.Disposition == FindingDeferred || request.Disposition == FindingDismissed || request.Disposition == FindingFixed) {
-		return aggregate, fmt.Errorf("%w: candidate-present hard scope must be removed or resolved by a revised charter", ErrInvalid)
+		return aggregate, fmt.Errorf(
+			"%w: candidate-present hard scope must be removed or resolved by a revised charter",
+			ErrInvalid,
+		)
 	}
 	var classificationGates []GateRun
 	if request.Disposition == FindingInScope {
 		action := DecideScope(request.Scope)
 		if action != ScopeActionProceed {
 			if !scopeCanUseClassificationGate(request.Scope) || finding.Disposition != FindingOpen {
-				return aggregate, fmt.Errorf("%w: in-scope disposition requires charter revision or deferral (%s)", ErrInvalid, action)
+				return aggregate, fmt.Errorf(
+					"%w: in-scope disposition requires charter revision or deferral (%s)",
+					ErrInvalid,
+					action,
+				)
 			}
 			currentScopeDigest, currentDigestErr := fingerprintValue(finding.Scope)
 			proposedScopeDigest, proposedDigestErr := fingerprintValue(request.Scope)
 			if currentDigestErr != nil || proposedDigestErr != nil || currentScopeDigest != proposedScopeDigest {
-				return aggregate, fmt.Errorf("%w: update the finding scope before requesting classification", ErrInvalid)
+				return aggregate, fmt.Errorf(
+					"%w: update the finding scope before requesting classification",
+					ErrInvalid,
+				)
 			}
 			charter, ready := aggregate.ActiveCharter()
 			if !ready || !charter.Confirmed {
@@ -745,11 +848,17 @@ func (service *Service) DecideFinding(ctx context.Context, request FindingDecisi
 			if gate.State != ExecutionSucceeded {
 				state := ExecutionWaitingGate
 				result, mutateErr := service.store.Mutate(ctx, Mutation{
-					WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID,
-					Patch: AggregatePatch{ExecutionState: &state, AppendGates: classificationGates, Activity: []Activity{{
-						Kind: "finding.classification_requested", Actor: "user", EntityID: finding.ID,
-						Summary: "Finding classification gate requested", CreatedAt: service.now().UTC(),
-					}}},
+					WorkspaceID:     request.WorkspaceID,
+					ExpectedVersion: request.ExpectedVersion,
+					RequestID:       request.RequestID,
+					Patch: AggregatePatch{
+						ExecutionState: &state,
+						AppendGates:    classificationGates,
+						Activity: []Activity{{
+							Kind: "finding.classification_requested", Actor: "user", EntityID: finding.ID,
+							Summary: "Finding classification gate requested", CreatedAt: service.now().UTC(),
+						}},
+					},
 				})
 				if mutateErr != nil {
 					return result.Aggregate, mutateErr
@@ -766,11 +875,18 @@ func (service *Service) DecideFinding(ctx context.Context, request FindingDecisi
 			case "revise-charter":
 				phase, state := PhaseCharter, ExecutionWaitingUser
 				result, mutateErr := service.store.Mutate(ctx, Mutation{
-					WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID,
-					Patch: AggregatePatch{Phase: &phase, ExecutionState: &state, AppendGates: classificationGates, Activity: []Activity{{
-						Kind: "finding.needs_charter_revision", Actor: "gate", EntityID: finding.ID,
-						Summary: "Finding requires a charter revision", CreatedAt: service.now().UTC(),
-					}}},
+					WorkspaceID:     request.WorkspaceID,
+					ExpectedVersion: request.ExpectedVersion,
+					RequestID:       request.RequestID,
+					Patch: AggregatePatch{
+						Phase:          &phase,
+						ExecutionState: &state,
+						AppendGates:    classificationGates,
+						Activity: []Activity{{
+							Kind: "finding.needs_charter_revision", Actor: "gate", EntityID: finding.ID,
+							Summary: "Finding requires a charter revision", CreatedAt: service.now().UTC(),
+						}},
+					},
 				})
 				if mutateErr != nil {
 					return result.Aggregate, mutateErr
@@ -803,12 +919,24 @@ func (service *Service) DecideFinding(ctx context.Context, request FindingDecisi
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID,
 		Patch: AggregatePatch{
-			UpsertFindings: []Finding{finding}, AppendCorrections: []Correction{correction}, AppendGates: classificationGates,
+			UpsertFindings: []Finding{
+				finding,
+			},
+			AppendCorrections: []Correction{correction},
+			AppendGates:       classificationGates,
 			ReplaceNudgeRounds: recomputeNudgeRoundRewards(
 				aggregate.NudgeRounds,
 				upsertByID(aggregate.Findings, []Finding{finding}, func(value Finding) string { return value.ID }),
 			),
-			Activity: []Activity{{Kind: "finding.decided", Actor: "user", EntityID: finding.ID, Summary: "Finding disposition corrected", CreatedAt: now}},
+			Activity: []Activity{
+				{
+					Kind:      "finding.decided",
+					Actor:     "user",
+					EntityID:  finding.ID,
+					Summary:   "Finding disposition corrected",
+					CreatedAt: now,
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -864,7 +992,11 @@ func (service *Service) AddCorrection(ctx context.Context, request AddCorrection
 			return aggregate, ErrInvalid
 		}
 		if finding.NudgeRoundID != "" {
-			finding = setFindingNudgeReward(finding, NudgeReward(RewardRejected), "user_correction:"+string(correction.Kind))
+			finding = setFindingNudgeReward(
+				finding,
+				NudgeReward(RewardRejected),
+				"user_correction:"+string(correction.Kind),
+			)
 			finding.Version++
 			finding.UpdatedAt = correction.CreatedAt
 			correctedFindings = append(correctedFindings, finding)
@@ -872,7 +1004,11 @@ func (service *Service) AddCorrection(ctx context.Context, request AddCorrection
 	default:
 		return aggregate, ErrInvalid
 	}
-	findingsForReward := upsertByID(aggregate.Findings, correctedFindings, func(value Finding) string { return value.ID })
+	findingsForReward := upsertByID(
+		aggregate.Findings,
+		correctedFindings,
+		func(value Finding) string { return value.ID },
+	)
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID,
@@ -880,7 +1016,15 @@ func (service *Service) AddCorrection(ctx context.Context, request AddCorrection
 			AppendCorrections:  []Correction{correction},
 			UpsertFindings:     correctedFindings,
 			ReplaceNudgeRounds: recomputeNudgeRoundRewards(aggregate.NudgeRounds, findingsForReward),
-			Activity:           []Activity{{Kind: "correction.added", Actor: "user", EntityID: correction.ID, Summary: "User corrected AI", CreatedAt: correction.CreatedAt}},
+			Activity: []Activity{
+				{
+					Kind:      "correction.added",
+					Actor:     "user",
+					EntityID:  correction.ID,
+					Summary:   "User corrected AI",
+					CreatedAt: correction.CreatedAt,
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -889,7 +1033,12 @@ func (service *Service) AddCorrection(ctx context.Context, request AddCorrection
 	return result.Aggregate, nil
 }
 
-func (service *Service) startGate(ctx context.Context, aggregate Aggregate, point string, subject map[string]any) (GateRun, error) {
+func (service *Service) startGate(
+	ctx context.Context,
+	aggregate Aggregate,
+	point string,
+	subject map[string]any,
+) (GateRun, error) {
 	gate, _, err := service.ensureGate(ctx, aggregate, point, subject)
 	return gate, err
 }
@@ -897,7 +1046,12 @@ func (service *Service) startGate(ctx context.Context, aggregate Aggregate, poin
 // ensureGate reuses the exact pinned gate for a subject. This makes human and
 // staged gates resumable: approving a gate authorizes the next retry without
 // evaluating a second policy or appending a duplicate gate run.
-func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, point string, subject map[string]any) (GateRun, bool, error) {
+func (service *Service) ensureGate(
+	ctx context.Context,
+	aggregate Aggregate,
+	point string,
+	subject map[string]any,
+) (GateRun, bool, error) {
 	if !prlifecycle.IsDecisionPoint(point) {
 		return GateRun{}, false, fmt.Errorf("%w: unknown PR lifecycle decision point %q", ErrInvalid, point)
 	}
@@ -968,7 +1122,13 @@ func (service *Service) ensureGate(ctx context.Context, aggregate Aggregate, poi
 	return gate, true, nil
 }
 
-func materializeReviewRounds(aggregate Aggregate, runID string, rounds []ReviewRound, policy NudgePolicy, now time.Time) ([]Finding, []NudgeRoundRecord) {
+func materializeReviewRounds(
+	aggregate Aggregate,
+	runID string,
+	rounds []ReviewRound,
+	policy NudgePolicy,
+	now time.Time,
+) ([]Finding, []NudgeRoundRecord) {
 	charter, hasCharter := aggregate.ActiveCharter()
 	current := currentContextFindings(aggregate, charter, hasCharter)
 	known := newSemanticFindingSet()
@@ -985,7 +1145,14 @@ func materializeReviewRounds(aggregate Aggregate, runID string, rounds []ReviewR
 		var roundFindingIDs []string
 		for findingIndex, candidate := range round.Result.Findings {
 			fingerprint := agentFindingFingerprint(candidate)
-			id := stableID("pfn_", aggregate.Workspace.ID, runID, fmt.Sprint(roundIndex), fmt.Sprint(findingIndex), fingerprint)
+			id := stableID(
+				"pfn_",
+				aggregate.Workspace.ID,
+				runID,
+				fmt.Sprint(roundIndex),
+				fmt.Sprint(findingIndex),
+				fingerprint,
+			)
 			if _, exists := known.add(candidate, fingerprint, id); exists {
 				continue
 			}
@@ -995,14 +1162,29 @@ func materializeReviewRounds(aggregate Aggregate, runID string, rounds []ReviewR
 				origin = FindingOriginNudge
 			}
 			findings = append(findings, Finding{
-				ID: id, Fingerprint: fingerprint, Origin: origin,
-				OriginRunID: runID, NudgeRoundID: roundID, Severity: candidate.Severity, Title: candidate.Title,
-				File: candidate.File, Line: candidate.Line, Message: candidate.Message,
-				Evidence: candidate.Evidence, Impact: candidate.Impact,
-				Recommendation: candidate.Recommendation, Validation: candidate.Validation,
-				Scope: agentFindingScope(candidate), Disposition: reviewFindingDisposition(agentFindingScope(candidate)),
-				SourceAvailable: round.Source != nil, source: cloneAIExecutionSource(round.Source),
-				Version: 1, CreatedAt: now, UpdatedAt: now,
+				ID:             id,
+				Fingerprint:    fingerprint,
+				Origin:         origin,
+				OriginRunID:    runID,
+				NudgeRoundID:   roundID,
+				Severity:       candidate.Severity,
+				Title:          candidate.Title,
+				File:           candidate.File,
+				Line:           candidate.Line,
+				Message:        candidate.Message,
+				Evidence:       candidate.Evidence,
+				Impact:         candidate.Impact,
+				Recommendation: candidate.Recommendation,
+				Validation:     candidate.Validation,
+				Scope: agentFindingScope(
+					candidate,
+				),
+				Disposition:     reviewFindingDisposition(agentFindingScope(candidate)),
+				SourceAvailable: round.Source != nil,
+				source:          cloneAIExecutionSource(round.Source),
+				Version:         1,
+				CreatedAt:       now,
+				UpdatedAt:       now,
 			})
 		}
 		if round.Initial {
@@ -1072,7 +1254,8 @@ func reviewFindingDisposition(scope ScopeAssessment) FindingDisposition {
 func hasSuccessfulStageAtHead(values []StageRun, stage, charterID, headSHA string) bool {
 	for index := len(values) - 1; index >= 0; index-- {
 		value := values[index]
-		if value.Stage == stage && value.CharterID == charterID && value.HeadSHA == headSHA && value.State == ExecutionSucceeded {
+		if value.Stage == stage && value.CharterID == charterID && value.HeadSHA == headSHA &&
+			value.State == ExecutionSucceeded {
 			return true
 		}
 	}
@@ -1082,7 +1265,9 @@ func hasSuccessfulStageAtHead(values []StageRun, stage, charterID, headSHA strin
 func validateResolveRequest(request ResolveRequest) error {
 	if request.PullRequestURL != "" {
 		parsed, err := url.ParseRequestURI(request.PullRequestURL)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || request.ProviderOrigin != "" || request.Repository != "" || request.PullNumber != 0 {
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || request.ProviderOrigin != "" ||
+			request.Repository != "" ||
+			request.PullNumber != 0 {
 			return ErrInvalid
 		}
 		return nil
@@ -1151,23 +1336,6 @@ func stableID(prefix string, values ...string) string {
 	return prefix + hex.EncodeToString(digest.Sum(nil)[:16])
 }
 
-func randomRequestID() string {
-	buffer := make([]byte, 16)
-	if _, err := rand.Read(buffer); err != nil {
-		panic("secure random source unavailable")
-	}
-	return "req_" + hex.EncodeToString(buffer)
-}
-
-func findCharter(values []Charter, id string) (Charter, int) {
-	for index := range values {
-		if values[index].ID == id {
-			return values[index], index
-		}
-	}
-	return Charter{}, -1
-}
-
 func findFinding(values []Finding, id string) (Finding, int) {
 	for index := range values {
 		if values[index].ID == id {
@@ -1216,21 +1384,30 @@ func validCorrection(value Correction) bool {
 }
 
 func charterDraftSchema() map[string]any {
-	stringsArray := map[string]any{"type": "array", "maxItems": maxCharterItems, "items": map[string]any{"type": "string"}}
+	stringsArray := map[string]any{
+		"type":     "array",
+		"maxItems": maxCharterItems,
+		"items":    map[string]any{"type": "string"},
+	}
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"required": []any{"type", "goal", "acceptance_criteria", "included_areas", "excluded_areas", "non_goals"},
 		"properties": map[string]any{
-			"type": map[string]any{"type": "string", "enum": []any{string(PRTypeFix), string(PRTypeRefactor), string(PRTypeFeature), string(PRTypeDocumentation), string(PRTypeTest)}},
-			"goal": map[string]any{"type": "string"}, "acceptance_criteria": stringsArray,
-			"included_areas": stringsArray, "excluded_areas": stringsArray, "non_goals": stringsArray,
+			"type": map[string]any{
+				"type": "string",
+				"enum": []any{
+					string(PRTypeFix),
+					string(PRTypeRefactor),
+					string(PRTypeFeature),
+					string(PRTypeDocumentation),
+					string(PRTypeTest),
+				},
+			},
+			"goal":                map[string]any{"type": "string"},
+			"acceptance_criteria": stringsArray,
+			"included_areas":      stringsArray,
+			"excluded_areas":      stringsArray,
+			"non_goals":           stringsArray,
 		},
 	}
-}
-
-func encodeSubject(value any) map[string]any {
-	encoded, _ := json.Marshal(value)
-	var subject map[string]any
-	_ = json.Unmarshal(encoded, &subject)
-	return subject
 }

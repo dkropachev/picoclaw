@@ -825,7 +825,8 @@ func submitReviewBody(request SubmitRequest) string {
 }
 
 func submitReviewRecoveryBody(request SubmitRequest) string {
-	sections := []string{request.Summary}
+	sections := make([]string, 1, 3)
+	sections[0] = request.Summary
 	var findings strings.Builder
 	findings.WriteString("### Review findings")
 	for _, finding := range request.Findings {

@@ -166,8 +166,10 @@ func TestReviewWorkflowContextDropsAndRejectsImplementationOnlyInputs(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "candidate-metrics") || strings.Contains(string(encoded), "implementation evidence") ||
-		strings.Contains(string(encoded), "implementation guidance") || strings.Contains(string(encoded), "implementation correction") {
+	if strings.Contains(string(encoded), "candidate-metrics") ||
+		strings.Contains(string(encoded), "implementation evidence") ||
+		strings.Contains(string(encoded), "implementation guidance") ||
+		strings.Contains(string(encoded), "implementation correction") {
 		t.Fatalf("implementation-only data crossed review projection: %s", encoded)
 	}
 	reviewPrompt, err := CompilePrompt(PromptReviewSearch, bundle, "")
@@ -180,7 +182,11 @@ func TestReviewWorkflowContextDropsAndRejectsImplementationOnlyInputs(t *testing
 		"implementation guidance", "implementation correction",
 	} {
 		if strings.Contains(reviewPrompt.UserPrompt, forbidden) {
-			t.Fatalf("implementation-specific prompt field %q crossed review boundary: %s", forbidden, reviewPrompt.UserPrompt)
+			t.Fatalf(
+				"implementation-specific prompt field %q crossed review boundary: %s",
+				forbidden,
+				reviewPrompt.UserPrompt,
+			)
 		}
 	}
 
@@ -209,7 +215,11 @@ func TestReviewWorkflowResultRejectsMalformedExecutorOutput(t *testing.T) {
 		{name: "no rounds"},
 		{name: "too many", result: ReviewWorkflowResult{Rounds: []ReviewRound{succeeded, succeeded}}},
 		{name: "unbound failure", result: ReviewWorkflowResult{Rounds: []ReviewRound{failed}}},
-		{name: "unbound error", result: ReviewWorkflowResult{Rounds: []ReviewRound{succeeded}}, runErr: errors.New("failed")},
+		{
+			name:   "unbound error",
+			result: ReviewWorkflowResult{Rounds: []ReviewRound{succeeded}},
+			runErr: errors.New("failed"),
+		},
 		{name: "nonterminal", result: ReviewWorkflowResult{Rounds: []ReviewRound{{State: ExecutionRunning}}}},
 	}
 	for _, test := range tests {

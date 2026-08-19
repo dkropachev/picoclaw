@@ -35,7 +35,8 @@ func TestPRWorkspaceIssuePublisherNormalizesLabelsBeforeDispatch(t *testing.T) {
 	if err != nil || result.Ambiguous || result.ExternalID != "7" {
 		t.Fatalf("CreateIssue() = (%#v, %v)", result, err)
 	}
-	if request.MCPTool != reviews.GitHubIssueWriteTool || !reflect.DeepEqual(request.Args["labels"], []any{"picoclaw"}) {
+	if request.MCPTool != reviews.GitHubIssueWriteTool ||
+		!reflect.DeepEqual(request.Args["labels"], []any{"picoclaw"}) {
 		t.Fatalf("issue write request = %#v", request)
 	}
 }
@@ -48,8 +49,18 @@ func TestPRWorkspaceIssuePublisherDistinguishesPreDispatchAndAmbiguousFailures(t
 		wantAmbiguous bool
 	}{
 		{name: "adapter validation is definitely pre-dispatch", title: " ", wantAmbiguous: false},
-		{name: "runner validation is definitely pre-dispatch", title: "Deferred finding", runnerErr: workflows.ErrToolCallNotDispatched, wantAmbiguous: false},
-		{name: "transport failure remains ambiguous", title: "Deferred finding", runnerErr: errors.New("transport failed"), wantAmbiguous: true},
+		{
+			name:          "runner validation is definitely pre-dispatch",
+			title:         "Deferred finding",
+			runnerErr:     workflows.ErrToolCallNotDispatched,
+			wantAmbiguous: false,
+		},
+		{
+			name:          "transport failure remains ambiguous",
+			title:         "Deferred finding",
+			runnerErr:     errors.New("transport failed"),
+			wantAmbiguous: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

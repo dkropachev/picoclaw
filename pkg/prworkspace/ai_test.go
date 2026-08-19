@@ -23,14 +23,27 @@ func (runner *scriptedIsolatedAI) RunIsolated(_ context.Context, request Isolate
 	runner.reviewCalls++
 	if request.Operation == "completion.initial" || request.Operation == "completion.nudge" {
 		return map[string]any{
-			"summary": "No missing work found.", "complete": true,
-			"missing_in_scope": []any{}, "out_of_scope": []any{},
-			"coverage": map[string]any{"reviewed_areas": []any{}, "unreviewed_areas": []any{}, "tests_considered": []any{}, "residual_risks": []any{}},
+			"summary":          "No missing work found.",
+			"complete":         true,
+			"missing_in_scope": []any{},
+			"out_of_scope":     []any{},
+			"coverage": map[string]any{
+				"reviewed_areas":   []any{},
+				"unreviewed_areas": []any{},
+				"tests_considered": []any{},
+				"residual_risks":   []any{},
+			},
 		}, nil
 	}
 	return map[string]any{
-		"summary": "No findings.", "findings": []any{},
-		"coverage": map[string]any{"reviewed_areas": []any{}, "unreviewed_areas": []any{}, "tests_considered": []any{}, "residual_risks": []any{}},
+		"summary":  "No findings.",
+		"findings": []any{},
+		"coverage": map[string]any{
+			"reviewed_areas":   []any{},
+			"unreviewed_areas": []any{},
+			"tests_considered": []any{},
+			"residual_risks":   []any{},
+		},
 	}, nil
 }
 
@@ -93,7 +106,13 @@ func TestWordingPlannerReceivesDurableDelayedVariantFeedback(t *testing.T) {
 		VariantDigest: "sha256:useful", Challenge: "challenge validation evidence",
 		Reward: &reward, RewardProvenance: "green_validation",
 	}}
-	bundle.PriorEvidence = []StageEvidence{{Stage: "review", Summary: "prior coverage", Coverage: Coverage{UnreviewedAreas: []string{"retry cancellation"}}}}
+	bundle.PriorEvidence = []StageEvidence{
+		{
+			Stage:    "review",
+			Summary:  "prior coverage",
+			Coverage: Coverage{UnreviewedAreas: []string{"retry cancellation"}},
+		},
+	}
 	_, err := (AIController{Runner: runner}).RunReviewSearch(
 		context.Background(), bundle, NudgePolicy{MinimumAdditionalRounds: 1, MaximumAdditionalRounds: 1}, nil,
 	)

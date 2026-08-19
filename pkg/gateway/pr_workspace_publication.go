@@ -18,7 +18,10 @@ type prWorkspaceReviewPublicationRuntime struct {
 	provider  *reviews.GitHubProvider
 }
 
-func (runtime *prWorkspaceReviewPublicationRuntime) PublishReview(ctx context.Context, request prworkspace.ReviewPublicationRequest) (prworkspace.ReviewPublicationResult, error) {
+func (runtime *prWorkspaceReviewPublicationRuntime) PublishReview(
+	ctx context.Context,
+	request prworkspace.ReviewPublicationRequest,
+) (prworkspace.ReviewPublicationResult, error) {
 	if runtime == nil || runtime.submitter == nil {
 		return prworkspace.ReviewPublicationResult{}, errors.New("GitHub review publisher is unavailable")
 	}
@@ -43,8 +46,12 @@ func (runtime *prWorkspaceReviewPublicationRuntime) PublishReview(ctx context.Co
 	return publication, nil
 }
 
-func (runtime *prWorkspaceReviewPublicationRuntime) ReconcileReview(ctx context.Context, request prworkspace.ReviewPublicationRequest) (prworkspace.ReviewPublicationResult, bool, error) {
-	if runtime == nil || runtime.provider == nil || runtime.submitter == nil || strings.TrimSpace(request.Marker) == "" {
+func (runtime *prWorkspaceReviewPublicationRuntime) ReconcileReview(
+	ctx context.Context,
+	request prworkspace.ReviewPublicationRequest,
+) (prworkspace.ReviewPublicationResult, bool, error) {
+	if runtime == nil || runtime.provider == nil || runtime.submitter == nil ||
+		strings.TrimSpace(request.Marker) == "" {
 		return prworkspace.ReviewPublicationResult{}, false, errors.New("GitHub review reconciler is unavailable")
 	}
 	match, err := runtime.findReviewByMarker(ctx, request.Provider, request.Marker)
@@ -151,9 +158,14 @@ func (runtime *prWorkspaceReviewPublicationRuntime) findReviewByMarker(
 func samePRWorkspaceReviewURL(raw string, provider prworkspace.ProviderSnapshot, reviewID string) bool {
 	parsedID, idErr := strconv.ParseUint(reviewID, 10, 64)
 	external, err := url.Parse(raw)
-	if idErr != nil || parsedID == 0 || err != nil || external.Scheme != "https" || external.Host == "" || external.User != nil ||
-		external.Opaque != "" || external.RawPath != "" || external.RawQuery != "" || external.ForceQuery ||
-		external.RawFragment != "" || external.Fragment != "pullrequestreview-"+reviewID {
+	if idErr != nil || parsedID == 0 || err != nil || external.Scheme != "https" || external.Host == "" ||
+		external.User != nil ||
+		external.Opaque != "" ||
+		external.RawPath != "" ||
+		external.RawQuery != "" ||
+		external.ForceQuery ||
+		external.RawFragment != "" ||
+		external.Fragment != "pullrequestreview-"+reviewID {
 		return false
 	}
 	expected, err := url.Parse(prWorkspacePullURL(provider))
@@ -230,7 +242,12 @@ func safePRWorkspaceExternalURL(raw string) bool {
 }
 
 func prWorkspacePullURL(provider prworkspace.ProviderSnapshot) string {
-	return fmt.Sprintf("%s/%s/pull/%d", strings.TrimSuffix(provider.ProviderOrigin, "/"), provider.Repository, provider.PullNumber)
+	return fmt.Sprintf(
+		"%s/%s/pull/%d",
+		strings.TrimSuffix(provider.ProviderOrigin, "/"),
+		provider.Repository,
+		provider.PullNumber,
+	)
 }
 
 var _ prworkspace.ReviewPublisher = (*prWorkspaceReviewPublicationRuntime)(nil)

@@ -32,7 +32,10 @@ type fakePRWorkspacePublicationService struct {
 	reconcileErr error
 }
 
-func (service *fakePRWorkspacePublicationService) List(_ context.Context, filter prworkspace.ListFilter) (prworkspace.Page, error) {
+func (service *fakePRWorkspacePublicationService) List(
+	_ context.Context,
+	filter prworkspace.ListFilter,
+) (prworkspace.Page, error) {
 	service.listCalls = append(service.listCalls, filter)
 	index := len(service.listCalls) - 1
 	if index >= len(service.pages) {
@@ -41,7 +44,10 @@ func (service *fakePRWorkspacePublicationService) List(_ context.Context, filter
 	return service.pages[index], nil
 }
 
-func (service *fakePRWorkspacePublicationService) Get(_ context.Context, workspaceID string) (prworkspace.Aggregate, error) {
+func (service *fakePRWorkspacePublicationService) Get(
+	_ context.Context,
+	workspaceID string,
+) (prworkspace.Aggregate, error) {
 	if err := service.getErr[workspaceID]; err != nil {
 		return prworkspace.Aggregate{}, err
 	}
@@ -52,31 +58,52 @@ func (service *fakePRWorkspacePublicationService) Get(_ context.Context, workspa
 	return aggregate, nil
 }
 
-func (service *fakePRWorkspacePublicationService) DispatchIssuePublication(_ context.Context, publisher prworkspace.IssuePublisher, request prworkspace.DispatchIssuePublicationRequest) (prworkspace.Aggregate, error) {
+func (service *fakePRWorkspacePublicationService) DispatchIssuePublication(
+	_ context.Context,
+	publisher prworkspace.IssuePublisher,
+	request prworkspace.DispatchIssuePublicationRequest,
+) (prworkspace.Aggregate, error) {
 	service.dispatchIssuePublisher = publisher
 	service.dispatchIssueRequests = append(service.dispatchIssueRequests, request)
 	return prworkspace.Aggregate{}, service.dispatchErr
 }
 
-func (service *fakePRWorkspacePublicationService) ReconcileIssuePublication(_ context.Context, publisher prworkspace.IssuePublisher, request prworkspace.ReconcileIssuePublicationRequest) (prworkspace.Aggregate, error) {
+func (service *fakePRWorkspacePublicationService) ReconcileIssuePublication(
+	_ context.Context,
+	publisher prworkspace.IssuePublisher,
+	request prworkspace.ReconcileIssuePublicationRequest,
+) (prworkspace.Aggregate, error) {
 	service.reconcileIssuePublisher = publisher
 	service.reconcileIssueRequests = append(service.reconcileIssueRequests, request)
 	return prworkspace.Aggregate{}, service.reconcileErr
 }
 
-func (service *fakePRWorkspacePublicationService) DispatchReviewPublication(_ context.Context, publisher prworkspace.ReviewPublisher, request prworkspace.DispatchPhasePublicationRequest) (prworkspace.Aggregate, error) {
+func (service *fakePRWorkspacePublicationService) DispatchReviewPublication(
+	_ context.Context,
+	publisher prworkspace.ReviewPublisher,
+	request prworkspace.DispatchPhasePublicationRequest,
+) (prworkspace.Aggregate, error) {
 	service.dispatchReviewPublisher = publisher
 	service.dispatchReviewRequests = append(service.dispatchReviewRequests, request)
 	return prworkspace.Aggregate{}, service.dispatchErr
 }
 
-func (service *fakePRWorkspacePublicationService) DispatchBranchPublication(_ context.Context, publisher prworkspace.BranchPublisher, request prworkspace.DispatchPhasePublicationRequest) (prworkspace.Aggregate, error) {
+func (service *fakePRWorkspacePublicationService) DispatchBranchPublication(
+	_ context.Context,
+	publisher prworkspace.BranchPublisher,
+	request prworkspace.DispatchPhasePublicationRequest,
+) (prworkspace.Aggregate, error) {
 	service.dispatchBranchPublisher = publisher
 	service.dispatchBranchRequests = append(service.dispatchBranchRequests, request)
 	return prworkspace.Aggregate{}, service.dispatchErr
 }
 
-func (service *fakePRWorkspacePublicationService) ReconcilePhasePublication(_ context.Context, review prworkspace.ReviewPublisher, branch prworkspace.BranchPublisher, request prworkspace.ReconcilePhasePublicationRequest) (prworkspace.Aggregate, error) {
+func (service *fakePRWorkspacePublicationService) ReconcilePhasePublication(
+	_ context.Context,
+	review prworkspace.ReviewPublisher,
+	branch prworkspace.BranchPublisher,
+	request prworkspace.ReconcilePhasePublicationRequest,
+) (prworkspace.Aggregate, error) {
 	service.reconcileReview = review
 	service.reconcileBranch = branch
 	service.reconcilePhaseRequests = append(service.reconcilePhaseRequests, request)
@@ -85,31 +112,52 @@ func (service *fakePRWorkspacePublicationService) ReconcilePhasePublication(_ co
 
 type publicationWorkerIssuePublisher struct{}
 
-func (publicationWorkerIssuePublisher) CreateIssue(context.Context, prworkspace.IssuePublicationRequest) (prworkspace.IssuePublicationResult, error) {
+func (publicationWorkerIssuePublisher) CreateIssue(
+	context.Context,
+	prworkspace.IssuePublicationRequest,
+) (prworkspace.IssuePublicationResult, error) {
 	return prworkspace.IssuePublicationResult{}, nil
 }
 
-func (publicationWorkerIssuePublisher) FindIssueByMarker(context.Context, string, string, string, string) (prworkspace.IssuePublicationResult, bool, error) {
+func (publicationWorkerIssuePublisher) FindIssueByMarker(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+) (prworkspace.IssuePublicationResult, bool, error) {
 	return prworkspace.IssuePublicationResult{}, false, nil
 }
 
 type publicationWorkerReviewPublisher struct{}
 
-func (publicationWorkerReviewPublisher) PublishReview(context.Context, prworkspace.ReviewPublicationRequest) (prworkspace.ReviewPublicationResult, error) {
+func (publicationWorkerReviewPublisher) PublishReview(
+	context.Context,
+	prworkspace.ReviewPublicationRequest,
+) (prworkspace.ReviewPublicationResult, error) {
 	return prworkspace.ReviewPublicationResult{}, nil
 }
 
-func (publicationWorkerReviewPublisher) ReconcileReview(context.Context, prworkspace.ReviewPublicationRequest) (prworkspace.ReviewPublicationResult, bool, error) {
+func (publicationWorkerReviewPublisher) ReconcileReview(
+	context.Context,
+	prworkspace.ReviewPublicationRequest,
+) (prworkspace.ReviewPublicationResult, bool, error) {
 	return prworkspace.ReviewPublicationResult{}, false, nil
 }
 
 type publicationWorkerBranchPublisher struct{}
 
-func (publicationWorkerBranchPublisher) PublishBranch(context.Context, prworkspace.BranchPublicationRequest) (prworkspace.BranchPublicationResult, error) {
+func (publicationWorkerBranchPublisher) PublishBranch(
+	context.Context,
+	prworkspace.BranchPublicationRequest,
+) (prworkspace.BranchPublicationResult, error) {
 	return prworkspace.BranchPublicationResult{}, nil
 }
 
-func (publicationWorkerBranchPublisher) ReconcileBranch(context.Context, prworkspace.BranchPublicationRequest) (prworkspace.BranchPublicationResult, bool, error) {
+func (publicationWorkerBranchPublisher) ReconcileBranch(
+	context.Context,
+	prworkspace.BranchPublicationRequest,
+) (prworkspace.BranchPublicationResult, bool, error) {
 	return prworkspace.BranchPublicationResult{}, false, nil
 }
 
@@ -145,7 +193,12 @@ func TestPRWorkspacePublicationWorkerPagesAndPrioritizesInterruptedWork(t *testi
 	}
 	issue := publicationWorkerIssuePublisher{}
 	review := publicationWorkerReviewPublisher{}
-	worker := &prWorkspacePublicationWorker{service: service, issue: issue, review: review, now: func() time.Time { return now }}
+	worker := &prWorkspacePublicationWorker{
+		service: service,
+		issue:   issue,
+		review:  review,
+		now:     func() time.Time { return now },
+	}
 
 	processed, err := worker.ProcessOne(context.Background())
 	if err != nil {
@@ -226,27 +279,41 @@ func TestPRWorkspacePublicationWorkerDispatchesEachSupportedKind(t *testing.T) {
 			assert: func(t *testing.T, service *fakePRWorkspacePublicationService, publisher any) {
 				t.Helper()
 				if len(service.dispatchIssueRequests) != 1 || service.dispatchIssuePublisher != publisher {
-					t.Fatalf("issue dispatch = %#v, publisher = %#v", service.dispatchIssueRequests, service.dispatchIssuePublisher)
+					t.Fatalf(
+						"issue dispatch = %#v, publisher = %#v",
+						service.dispatchIssueRequests,
+						service.dispatchIssuePublisher,
+					)
 				}
 			},
 		},
 		{
-			name: "review", kind: prworkspace.PublicationGitHubReview,
+			name:      "review",
+			kind:      prworkspace.PublicationGitHubReview,
 			configure: func(worker *prWorkspacePublicationWorker) { worker.review = publicationWorkerReviewPublisher{} },
 			assert: func(t *testing.T, service *fakePRWorkspacePublicationService, publisher any) {
 				t.Helper()
 				if len(service.dispatchReviewRequests) != 1 || service.dispatchReviewPublisher != publisher {
-					t.Fatalf("review dispatch = %#v, publisher = %#v", service.dispatchReviewRequests, service.dispatchReviewPublisher)
+					t.Fatalf(
+						"review dispatch = %#v, publisher = %#v",
+						service.dispatchReviewRequests,
+						service.dispatchReviewPublisher,
+					)
 				}
 			},
 		},
 		{
-			name: "branch", kind: prworkspace.PublicationBranchPush,
+			name:      "branch",
+			kind:      prworkspace.PublicationBranchPush,
 			configure: func(worker *prWorkspacePublicationWorker) { worker.branch = publicationWorkerBranchPublisher{} },
 			assert: func(t *testing.T, service *fakePRWorkspacePublicationService, publisher any) {
 				t.Helper()
 				if len(service.dispatchBranchRequests) != 1 || service.dispatchBranchPublisher != publisher {
-					t.Fatalf("branch dispatch = %#v, publisher = %#v", service.dispatchBranchRequests, service.dispatchBranchPublisher)
+					t.Fatalf(
+						"branch dispatch = %#v, publisher = %#v",
+						service.dispatchBranchRequests,
+						service.dispatchBranchPublisher,
+					)
 				}
 			},
 		},
@@ -315,7 +382,11 @@ func TestPRWorkspacePublicationWorkerIgnoresUnsupportedKindAndAbsorbsCASRace(t *
 		t.Fatalf("ProcessOne() = (%v, %v), want (true, nil) for a CAS race", processed, err)
 	}
 	if len(service.dispatchIssueRequests) != 0 || len(service.dispatchReviewRequests) != 1 {
-		t.Fatalf("dispatch calls: issue=%d review=%d", len(service.dispatchIssueRequests), len(service.dispatchReviewRequests))
+		t.Fatalf(
+			"dispatch calls: issue=%d review=%d",
+			len(service.dispatchIssueRequests),
+			len(service.dispatchReviewRequests),
+		)
 	}
 }
 
@@ -329,7 +400,11 @@ func TestPRWorkspacePublicationWorkerRejectsRepeatedCursor(t *testing.T) {
 		},
 		aggregates: map[string]prworkspace.Aggregate{},
 	}
-	worker := &prWorkspacePublicationWorker{service: service, issue: publicationWorkerIssuePublisher{}, now: func() time.Time { return now }}
+	worker := &prWorkspacePublicationWorker{
+		service: service,
+		issue:   publicationWorkerIssuePublisher{},
+		now:     func() time.Time { return now },
+	}
 
 	processed, err := worker.ProcessOne(context.Background())
 	if err == nil || processed {
@@ -337,7 +412,10 @@ func TestPRWorkspacePublicationWorkerRejectsRepeatedCursor(t *testing.T) {
 	}
 }
 
-func publicationWorkerServiceWithPublications(workspaceID string, publications ...prworkspace.Publication) *fakePRWorkspacePublicationService {
+func publicationWorkerServiceWithPublications(
+	workspaceID string,
+	publications ...prworkspace.Publication,
+) *fakePRWorkspacePublicationService {
 	return &fakePRWorkspacePublicationService{
 		pages: []prworkspace.Page{{Workspaces: []prworkspace.Workspace{{ID: workspaceID}}}},
 		aggregates: map[string]prworkspace.Aggregate{
@@ -346,14 +424,23 @@ func publicationWorkerServiceWithPublications(workspaceID string, publications .
 	}
 }
 
-func publicationWorkerAggregate(workspaceID string, version int64, publications ...prworkspace.Publication) prworkspace.Aggregate {
+func publicationWorkerAggregate(
+	workspaceID string,
+	version int64,
+	publications ...prworkspace.Publication,
+) prworkspace.Aggregate {
 	return prworkspace.Aggregate{
 		Workspace:    prworkspace.Workspace{ID: workspaceID, Version: version},
 		Publications: append([]prworkspace.Publication(nil), publications...),
 	}
 }
 
-func publicationWorkerPublication(id string, kind prworkspace.PublicationKind, state prworkspace.ExecutionState, timestamp time.Time) prworkspace.Publication {
+func publicationWorkerPublication(
+	id string,
+	kind prworkspace.PublicationKind,
+	state prworkspace.ExecutionState,
+	timestamp time.Time,
+) prworkspace.Publication {
 	return prworkspace.Publication{
 		ID: id, Kind: kind, State: state,
 		CreatedAt: timestamp, UpdatedAt: timestamp,

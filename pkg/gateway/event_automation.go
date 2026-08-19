@@ -298,7 +298,10 @@ func newEventAutomationServiceWithRuntime(
 	}
 	lifecycle := cfg.PRLifecycle.Effective()
 	deferredModeForRepository := func(providerOrigin, repositoryID string) prworkspace.DeferredIssueMode {
-		_, workflowConfiguration, _, resolveErr := lifecycle.WorkflowConfigurationForRepository(providerOrigin, repositoryID)
+		_, workflowConfiguration, _, resolveErr := lifecycle.WorkflowConfigurationForRepository(
+			providerOrigin,
+			repositoryID,
+		)
 		if resolveErr != nil {
 			return prworkspace.DeferredIssuesOff
 		}

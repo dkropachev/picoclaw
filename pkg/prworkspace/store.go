@@ -242,7 +242,11 @@ func (store *MemoryStore) Create(ctx context.Context, input CreateInput) (Mutati
 	if err != nil {
 		return MutationResult{}, ErrInvalid
 	}
-	identity := workspaceIdentity(input.Workspace.ProviderOrigin, input.Workspace.RepositoryID, input.Workspace.PullRequestID)
+	identity := workspaceIdentity(
+		input.Workspace.ProviderOrigin,
+		input.Workspace.RepositoryID,
+		input.Workspace.PullRequestID,
+	)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if existingID := store.identities[identity]; existingID != "" {
@@ -397,9 +401,17 @@ func applyPatch(aggregate *Aggregate, patch AggregatePatch) error {
 		aggregate.Workspace.PullNumber = patch.Provider.PullNumber
 		aggregate.Workspace.ProviderHeadSHA = patch.Provider.HeadSHA
 	}
-	aggregate.Charters = replaceByID(aggregate.Charters, patch.ReplaceCharters, func(value Charter) string { return value.ID })
+	aggregate.Charters = replaceByID(
+		aggregate.Charters,
+		patch.ReplaceCharters,
+		func(value Charter) string { return value.ID },
+	)
 	aggregate.Charters = append(aggregate.Charters, patch.AppendCharters...)
-	aggregate.StageRuns = replaceByID(aggregate.StageRuns, patch.ReplaceStageRuns, func(value StageRun) string { return value.ID })
+	aggregate.StageRuns = replaceByID(
+		aggregate.StageRuns,
+		patch.ReplaceStageRuns,
+		func(value StageRun) string { return value.ID },
+	)
 	aggregate.StageRuns = append(aggregate.StageRuns, patch.AppendStageRuns...)
 	for _, finding := range patch.UpsertFindings {
 		if err := validateFindingSourceForWorkspace(finding, aggregate.Workspace.ID); err != nil {
@@ -410,22 +422,54 @@ func applyPatch(aggregate *Aggregate, patch AggregatePatch) error {
 			return ErrConflict
 		}
 	}
-	aggregate.Findings = upsertByID(aggregate.Findings, patch.UpsertFindings, func(value Finding) string { return value.ID })
+	aggregate.Findings = upsertByID(
+		aggregate.Findings,
+		patch.UpsertFindings,
+		func(value Finding) string { return value.ID },
+	)
 	aggregate.Messages = append(aggregate.Messages, patch.AppendMessages...)
-	aggregate.Corrections = replaceByID(aggregate.Corrections, patch.ReplaceCorrections, func(value Correction) string { return value.ID })
+	aggregate.Corrections = replaceByID(
+		aggregate.Corrections,
+		patch.ReplaceCorrections,
+		func(value Correction) string { return value.ID },
+	)
 	aggregate.Corrections = append(aggregate.Corrections, patch.AppendCorrections...)
-	aggregate.RepositoryLessons = replaceByID(aggregate.RepositoryLessons, patch.ReplaceLessons, func(value RepositoryLesson) string { return value.ID })
+	aggregate.RepositoryLessons = replaceByID(
+		aggregate.RepositoryLessons,
+		patch.ReplaceLessons,
+		func(value RepositoryLesson) string { return value.ID },
+	)
 	aggregate.RepositoryLessons = append(aggregate.RepositoryLessons, patch.AppendLessons...)
-	aggregate.NudgeRounds = replaceByID(aggregate.NudgeRounds, patch.ReplaceNudgeRounds, func(value NudgeRoundRecord) string { return value.ID })
+	aggregate.NudgeRounds = replaceByID(
+		aggregate.NudgeRounds,
+		patch.ReplaceNudgeRounds,
+		func(value NudgeRoundRecord) string { return value.ID },
+	)
 	aggregate.NudgeRounds = append(aggregate.NudgeRounds, patch.AppendNudgeRounds...)
-	aggregate.DeferredGroups = upsertByID(aggregate.DeferredGroups, patch.UpsertDeferred, func(value DeferredGroup) string { return value.ID })
-	aggregate.RepairAttempts = replaceByID(aggregate.RepairAttempts, patch.ReplaceRepairs, func(value RepairAttempt) string { return value.ID })
+	aggregate.DeferredGroups = upsertByID(
+		aggregate.DeferredGroups,
+		patch.UpsertDeferred,
+		func(value DeferredGroup) string { return value.ID },
+	)
+	aggregate.RepairAttempts = replaceByID(
+		aggregate.RepairAttempts,
+		patch.ReplaceRepairs,
+		func(value RepairAttempt) string { return value.ID },
+	)
 	aggregate.RepairAttempts = append(aggregate.RepairAttempts, patch.AppendRepairs...)
-	aggregate.ValidationRuns = replaceByID(aggregate.ValidationRuns, patch.ReplaceValidations, func(value ValidationRun) string { return value.ID })
+	aggregate.ValidationRuns = replaceByID(
+		aggregate.ValidationRuns,
+		patch.ReplaceValidations,
+		func(value ValidationRun) string { return value.ID },
+	)
 	aggregate.ValidationRuns = append(aggregate.ValidationRuns, patch.AppendValidations...)
 	aggregate.Gates = replaceByID(aggregate.Gates, patch.ReplaceGates, func(value GateRun) string { return value.ID })
 	aggregate.Gates = append(aggregate.Gates, patch.AppendGates...)
-	aggregate.Publications = replaceByID(aggregate.Publications, patch.ReplacePublications, func(value Publication) string { return value.ID })
+	aggregate.Publications = replaceByID(
+		aggregate.Publications,
+		patch.ReplacePublications,
+		func(value Publication) string { return value.ID },
+	)
 	aggregate.Publications = append(aggregate.Publications, patch.AppendPublications...)
 	for _, activity := range patch.Activity {
 		activity.Ordinal = int64(len(aggregate.Activity) + 1)

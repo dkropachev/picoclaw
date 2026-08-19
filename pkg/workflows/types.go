@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 	"gopkg.in/yaml.v3"
+
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 type Workflow struct {

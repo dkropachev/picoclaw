@@ -53,9 +53,13 @@ func (service *Service) RespondGate(ctx context.Context, request RespondGateRequ
 		if action == "" {
 			return aggregate, errors.New("completed PR lifecycle gate returned no action field")
 		}
-		hardScopeResolution := gate.DecisionPoint == "pr.implementation.hard-scope" && gateHasHardCandidateScope(aggregate, gate)
+		hardScopeResolution := gate.DecisionPoint == "pr.implementation.hard-scope" &&
+			gateHasHardCandidateScope(aggregate, gate)
 		if hardScopeResolution && action == "approve" {
-			return aggregate, fmt.Errorf("%w: candidate code outside the charter or PR type cannot be approved without removal or charter revision", ErrInvalid)
+			return aggregate, fmt.Errorf(
+				"%w: candidate code outside the charter or PR type cannot be approved without removal or charter revision",
+				ErrInvalid,
+			)
 		}
 		if action == gateProgressAction(gate.DecisionPoint) {
 			if completionGate, found := implementationCompletionGateForPass(aggregate.Gates, gate); found {
@@ -149,7 +153,7 @@ func implementationCompletionGateFresh(aggregate Aggregate, gate GateRun) (bool,
 	}
 	var subject map[string]any
 	if err := json.Unmarshal(gate.runtime.PinnedSubject, &subject); err != nil {
-		return false, nil
+		return false, fmt.Errorf("decode implementation completion gate subject: %w", err)
 	}
 	if persistenceDigest(gate.runtime.PinnedSubject) != gate.SubjectRevision {
 		return false, nil
@@ -252,10 +256,15 @@ func (service *Service) invalidateImplementationCompletionGate(
 			patch.ReplacePublications = append(patch.ReplacePublications, publication)
 		}
 	}
-	patch.Activity = []Activity{{
-		Kind: "implementation.completion_authorization_stale", Actor: "system", EntityID: gate.ID,
-		Summary: "Completion authorization became stale; review current guidance and findings, then rerun implementation", CreatedAt: now,
-	}}
+	patch.Activity = []Activity{
+		{
+			Kind:      "implementation.completion_authorization_stale",
+			Actor:     "system",
+			EntityID:  gate.ID,
+			Summary:   "Completion authorization became stale; review current guidance and findings, then rerun implementation",
+			CreatedAt: now,
+		},
+	}
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: patch,
@@ -263,7 +272,10 @@ func (service *Service) invalidateImplementationCompletionGate(
 	if err != nil {
 		return result.Aggregate, err
 	}
-	return result.Aggregate, fmt.Errorf("%w: completion authorization is stale; review the current aggregate and rerun implementation", ErrConflict)
+	return result.Aggregate, fmt.Errorf(
+		"%w: completion authorization is stale; review the current aggregate and rerun implementation",
+		ErrConflict,
+	)
 }
 
 func latestImplementationRepairID(aggregate Aggregate) string {
@@ -322,7 +334,15 @@ func (service *Service) PromoteCorrection(ctx context.Context, request PromoteCo
 		state := ExecutionWaitingGate
 		patch.ExecutionState = &state
 	}
-	patch.Activity = []Activity{{Kind: "correction.promotion_requested", Actor: "user", EntityID: correction.ID, Summary: "Repository lesson promotion requested", CreatedAt: service.now().UTC()}}
+	patch.Activity = []Activity{
+		{
+			Kind:      "correction.promotion_requested",
+			Actor:     "user",
+			EntityID:  correction.ID,
+			Summary:   "Repository lesson promotion requested",
+			CreatedAt: service.now().UTC(),
+		},
+	}
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: patch,
@@ -424,7 +444,11 @@ func (service *Service) gateActionPatch(aggregate Aggregate, gate GateRun) (Aggr
 				publication.UpdatedAt = service.now().UTC()
 				patch.ReplacePublications = []Publication{publication}
 				if publication.Kind == PublicationGitHubIssue {
-					if group, found := findDeferredGroup(aggregate.DeferredGroups, publication.TargetID); found && group.PublicationID == publication.ID {
+					if group, found := findDeferredGroup(
+						aggregate.DeferredGroups,
+						publication.TargetID,
+					); found &&
+						group.PublicationID == publication.ID {
 						group.PublicationID = ""
 						group.Version++
 						group.UpdatedAt = publication.UpdatedAt
@@ -537,7 +561,8 @@ func (service *Service) gateActionPatch(aggregate Aggregate, gate GateRun) (Aggr
 		patch.Phase, patch.ExecutionState = &phase, &state
 	case "pr.review.publish", "pr.implementation.publish":
 		publication, ok := findPublication(aggregate.Publications, gate.TargetID)
-		if !ok || publication.State != ExecutionWaitingGate || publication.ExpectedHeadSHA != aggregate.ProviderSnapshot.HeadSHA {
+		if !ok || publication.State != ExecutionWaitingGate ||
+			publication.ExpectedHeadSHA != aggregate.ProviderSnapshot.HeadSHA {
 			return AggregatePatch{}, ErrConflict
 		}
 		publication.State, publication.PublicErrorCode, publication.UpdatedAt = ExecutionQueued, "", service.now().UTC()
@@ -625,7 +650,11 @@ func gateHasHardCandidateScope(aggregate Aggregate, gate GateRun) bool {
 	if gate.Evidence.Scope != nil && HardCandidateScopeBlocker(*gate.Evidence.Scope) {
 		return true
 	}
-	if attempt, ok := findRepairAttempt(aggregate.RepairAttempts, gate.TargetID); ok && HardCandidateScopeBlocker(attempt.Scope) {
+	if attempt, ok := findRepairAttempt(
+		aggregate.RepairAttempts,
+		gate.TargetID,
+	); ok &&
+		HardCandidateScopeBlocker(attempt.Scope) {
 		return true
 	}
 	wanted := make(map[string]struct{}, len(gate.Evidence.FindingIDs))
@@ -788,35 +817,44 @@ type RefreshProviderRequest struct {
 }
 
 func (service *Service) RefreshProvider(ctx context.Context, request RefreshProviderRequest) (Aggregate, error) {
-	if service == nil || service.provider == nil || !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
+	if service == nil || service.provider == nil ||
+		!validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) {
 		return Aggregate{}, ErrInvalid
 	}
-	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
-	if err != nil {
-		return Aggregate{}, err
+	aggregate, getErr := service.store.Get(ctx, request.WorkspaceID)
+	if getErr != nil {
+		return Aggregate{}, getErr
 	}
-	provider, err := service.provider.ResolvePullRequest(ctx, ResolveRequest{
+	provider, resolveErr := service.provider.ResolvePullRequest(ctx, ResolveRequest{
 		ProviderOrigin: aggregate.Workspace.ProviderOrigin,
 		Repository:     aggregate.Workspace.Repository, PullNumber: aggregate.Workspace.PullNumber,
 	})
-	if err != nil {
-		return Aggregate{}, err
+	if resolveErr != nil {
+		return Aggregate{}, resolveErr
 	}
-	if err := validateProviderSnapshot(provider); err != nil || provider.RepositoryID != aggregate.Workspace.RepositoryID ||
-		provider.PullRequestID != aggregate.Workspace.PullRequestID || provider.ProviderOrigin != aggregate.Workspace.ProviderOrigin {
+	if err := validateProviderSnapshot(
+		provider,
+	); err != nil || provider.RepositoryID != aggregate.Workspace.RepositoryID ||
+		provider.PullRequestID != aggregate.Workspace.PullRequestID ||
+		provider.ProviderOrigin != aggregate.Workspace.ProviderOrigin {
 		return aggregate, errors.New("provider refresh identity mismatch")
 	}
 	patch := AggregatePatch{Provider: &provider}
-	if provider.HeadSHA != aggregate.ProviderSnapshot.HeadSHA || provider.BaseSHA != aggregate.ProviderSnapshot.BaseSHA {
+	if provider.HeadSHA != aggregate.ProviderSnapshot.HeadSHA ||
+		provider.BaseSHA != aggregate.ProviderSnapshot.BaseSHA {
 		for _, stage := range aggregate.StageRuns {
-			if stage.State == ExecutionQueued || stage.State == ExecutionRunning || stage.State == ExecutionWaitingGate || stage.State == ExecutionWaitingUser || stage.State == ExecutionSucceeded {
+			if stage.State == ExecutionQueued || stage.State == ExecutionRunning ||
+				stage.State == ExecutionWaitingGate ||
+				stage.State == ExecutionWaitingUser ||
+				stage.State == ExecutionSucceeded {
 				stage.State = ExecutionStale
 				stage.PublicError = "provider_revision_changed"
 				patch.ReplaceStageRuns = append(patch.ReplaceStageRuns, stage)
 			}
 		}
 		for _, gate := range aggregate.Gates {
-			if gate.State == ExecutionWaitingGate || gate.State == ExecutionWaitingUser || gate.State == ExecutionRunning {
+			if gate.State == ExecutionWaitingGate || gate.State == ExecutionWaitingUser ||
+				gate.State == ExecutionRunning {
 				gate.State = ExecutionStale
 				patch.ReplaceGates = append(patch.ReplaceGates, gate)
 			}
@@ -841,7 +879,14 @@ func (service *Service) RefreshProvider(ctx context.Context, request RefreshProv
 		phase, state := PhaseCharter, ExecutionWaitingUser
 		patch.Phase, patch.ExecutionState = &phase, &state
 	}
-	patch.Activity = []Activity{{Kind: "provider.refreshed", Actor: "system", Summary: "Provider snapshot refreshed", CreatedAt: service.now().UTC()}}
+	patch.Activity = []Activity{
+		{
+			Kind:      "provider.refreshed",
+			Actor:     "system",
+			Summary:   "Provider snapshot refreshed",
+			CreatedAt: service.now().UTC(),
+		},
+	}
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
 		RequestID: request.RequestID, Patch: patch,
@@ -894,7 +939,15 @@ func (service *Service) AddMessage(ctx context.Context, request AddMessageReques
 	}
 	patch := AggregatePatch{
 		AppendMessages: []Message{message},
-		Activity:       []Activity{{Kind: "message.added", Actor: "user", EntityID: message.ID, Summary: "Workspace message added", CreatedAt: now}},
+		Activity: []Activity{
+			{
+				Kind:      "message.added",
+				Actor:     "user",
+				EntityID:  message.ID,
+				Summary:   "Workspace message added",
+				CreatedAt: now,
+			},
+		},
 	}
 	if request.MarkAsCorrection {
 		correction := Correction{

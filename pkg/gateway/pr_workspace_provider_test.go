@@ -96,10 +96,11 @@ func TestPRWorkspaceGitHubResolverAcceptsCurrentMinimalPullContract(t *testing.T
 	}) {
 		t.Fatalf("pull request = %#v", requests[0])
 	}
-	if requests[1].MCPTool != reviews.GitHubSearchRepositoriesTool || !reflect.DeepEqual(requests[1].Args, map[string]any{
-		"query":          "picoclaw-pr-workspace-e2e-20260814 in:name user:dkropachev",
-		"minimal_output": false, "page": 1, "perPage": 100,
-	}) {
+	if requests[1].MCPTool != reviews.GitHubSearchRepositoriesTool ||
+		!reflect.DeepEqual(requests[1].Args, map[string]any{
+			"query":          "picoclaw-pr-workspace-e2e-20260814 in:name user:dkropachev",
+			"minimal_output": false, "page": 1, "perPage": 100,
+		}) {
 		t.Fatalf("repository request = %#v", requests[1])
 	}
 	if requests[2].MCPTool != reviews.GitHubGetMeTool || len(requests[2].Args) != 0 {
@@ -148,18 +149,28 @@ func TestExactPRWorkspaceRepositoryRejectsUnverifiedAuthority(t *testing.T) {
 		wantFound bool
 		wantError string
 	}{
-		"valid":              {raw: valid, wantFound: true},
-		"no exact match":     {raw: strings.ReplaceAll(valid, testPRWorkspaceRepository, "dkropachev/similar-repo")},
-		"incomplete search":  {raw: strings.Replace(valid, `"incomplete_results": false`, `"incomplete_results": true`, 1), wantError: "search response"},
+		"valid":          {raw: valid, wantFound: true},
+		"no exact match": {raw: strings.ReplaceAll(valid, testPRWorkspaceRepository, "dkropachev/similar-repo")},
+		"incomplete search": {
+			raw:       strings.Replace(valid, `"incomplete_results": false`, `"incomplete_results": true`, 1),
+			wantError: "search response",
+		},
 		"duplicate identity": {raw: duplicate, wantError: "identity is ambiguous"},
 		"missing permissions": {raw: strings.Replace(valid,
 			`"permissions": {"admin": true, "maintain": true, "push": true, "triage": true, "pull": true}`,
 			`"permissions": null`, 1), wantError: "authority is incomplete"},
-		"wrong provider URL": {raw: strings.Replace(valid, "https://github.com/dkropachev", "https://example.test/dkropachev", 1), wantError: "authority is incomplete"},
+		"wrong provider URL": {
+			raw:       strings.Replace(valid, "https://github.com/dkropachev", "https://example.test/dkropachev", 1),
+			wantError: "authority is incomplete",
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, found, err := exactPRWorkspaceRepository([]byte(test.raw), "https://github.com", testPRWorkspaceRepository)
+			_, found, err := exactPRWorkspaceRepository(
+				[]byte(test.raw),
+				"https://github.com",
+				testPRWorkspaceRepository,
+			)
 			if found != test.wantFound {
 				t.Fatalf("found = %t, want %t", found, test.wantFound)
 			}

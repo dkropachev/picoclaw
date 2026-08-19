@@ -109,12 +109,22 @@ func TestPublicationGateEvidenceShowsExactSafePreviewWithoutPrivateInputs(t *tes
 
 func TestProjectGateEvidencePinsHardScopeAndOnlyResolutionFindings(t *testing.T) {
 	repairFinding := Finding{
-		ID:    "pfn_11111111111111111111111111111111",
-		Scope: ScopeAssessment{Presence: WorkCandidatePresent, Distance: ScopeExact, Size: ChangeSizeXS, TypeCompatible: true},
+		ID: "pfn_11111111111111111111111111111111",
+		Scope: ScopeAssessment{
+			Presence:       WorkCandidatePresent,
+			Distance:       ScopeExact,
+			Size:           ChangeSizeXS,
+			TypeCompatible: true,
+		},
 	}
 	drift := Finding{
-		ID:    "pfn_22222222222222222222222222222222",
-		Scope: ScopeAssessment{Presence: WorkCandidatePresent, Distance: ScopeRelatedFollowup, Size: ChangeSizeXS, TypeCompatible: true},
+		ID: "pfn_22222222222222222222222222222222",
+		Scope: ScopeAssessment{
+			Presence:       WorkCandidatePresent,
+			Distance:       ScopeRelatedFollowup,
+			Size:           ChangeSizeXS,
+			TypeCompatible: true,
+		},
 	}
 	evidence := projectGateEvidence(map[string]any{
 		"repair": RepairAttempt{FindingIDs: []string{repairFinding.ID}},

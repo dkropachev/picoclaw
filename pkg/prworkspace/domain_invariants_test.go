@@ -8,7 +8,12 @@ import (
 	"time"
 )
 
-func completionFindingFixture(presence WorkPresence, distance ScopeDistance, size ChangeSize, compatible bool) CompletionFinding {
+func completionFindingFixture(
+	presence WorkPresence,
+	distance ScopeDistance,
+	size ChangeSize,
+	compatible bool,
+) CompletionFinding {
 	result := CompletionFinding{
 		AgentFinding: AgentFinding{
 			Severity: "high", Title: "retry bug", File: "pkg/retry.go", Message: "fix retry",
@@ -29,13 +34,25 @@ func TestCompletionMissingReopensMatchingUnresolvedFindingInsteadOfDroppingDupli
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	candidate := completionFindingFixture(WorkFollowUp, ScopeExact, ChangeSizeXS, true)
 	existing := Finding{
-		ID: "pfn_11111111111111111111111111111111", Fingerprint: agentFindingFingerprint(candidate.AgentFinding),
-		Origin: FindingOriginReview, OriginRunID: "psr_22222222222222222222222222222222", Severity: candidate.Severity, Title: candidate.Title,
-		File: candidate.File, Message: candidate.Message, Scope: completionFindingScope(candidate),
-		Disposition: FindingDeferred, Version: 4, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
+		ID:          "pfn_11111111111111111111111111111111",
+		Fingerprint: agentFindingFingerprint(candidate.AgentFinding),
+		Origin:      FindingOriginReview,
+		OriginRunID: "psr_22222222222222222222222222222222",
+		Severity:    candidate.Severity,
+		Title:       candidate.Title,
+		File:        candidate.File,
+		Message:     candidate.Message,
+		Scope:       completionFindingScope(candidate),
+		Disposition: FindingDeferred,
+		Version:     4,
+		CreatedAt:   now.Add(-time.Hour),
+		UpdatedAt:   now.Add(-time.Hour),
 	}
 	aggregate := Aggregate{
-		Workspace:        Workspace{ID: "prw_11111111111111111111111111111111", ActiveCharterID: "pcr_11111111111111111111111111111111"},
+		Workspace: Workspace{
+			ID:              "prw_11111111111111111111111111111111",
+			ActiveCharterID: "pcr_11111111111111111111111111111111",
+		},
 		ProviderSnapshot: ProviderSnapshot{HeadSHA: "head"},
 		Charters: []Charter{{
 			ID: "pcr_11111111111111111111111111111111", Confirmed: true, HeadSHA: "head",
@@ -47,11 +64,18 @@ func TestCompletionMissingReopensMatchingUnresolvedFindingInsteadOfDroppingDupli
 		Findings: []Finding{existing},
 	}
 	rounds := []CompletionRound{{Initial: true, Result: CompletionPass{Missing: []CompletionFinding{candidate}}}}
-	missing, deferred, drift, _ := materializeCompletionRounds(aggregate, "psr_11111111111111111111111111111111", rounds, ConfiguredNudgePolicy(0, 0), now)
+	missing, deferred, drift, _ := materializeCompletionRounds(
+		aggregate,
+		"psr_11111111111111111111111111111111",
+		rounds,
+		ConfiguredNudgePolicy(0, 0),
+		now,
+	)
 	if len(missing) != 1 || len(deferred) != 0 || len(drift) != 0 {
 		t.Fatalf("materialized missing=%#v deferred=%#v drift=%#v", missing, deferred, drift)
 	}
-	if missing[0].ID != existing.ID || missing[0].Version != existing.Version+1 || missing[0].Disposition != FindingInScope {
+	if missing[0].ID != existing.ID || missing[0].Version != existing.Version+1 ||
+		missing[0].Disposition != FindingInScope {
 		t.Fatalf("matching blocker was not reopened in place: %#v", missing[0])
 	}
 }
@@ -60,7 +84,10 @@ type invariantImplementationAI struct {
 	completion map[string]any
 }
 
-func (runner invariantImplementationAI) RunIsolated(_ context.Context, request IsolatedAIRequest) (map[string]any, error) {
+func (runner invariantImplementationAI) RunIsolated(
+	_ context.Context,
+	request IsolatedAIRequest,
+) (map[string]any, error) {
 	switch request.Operation {
 	case "scope.audit":
 		return exactScopeAuditFixture(), nil
@@ -102,11 +129,21 @@ func (runner hardRepairScopeAI) RunIsolated(_ context.Context, request IsolatedA
 
 func exactScopeAuditFixture() map[string]any {
 	return map[string]any{
-		"changes": []any{map[string]any{
-			"path": "pkg/retry.go", "hunk": testCandidateHunk, "module": "pkg/retry", "semantic_lines": 10,
-			"presence": "candidate_present", "scope_distance": "S0_exact", "change_size": "XS",
-			"type_compatible": true, "confidence": 1.0, "charter_clauses": []any{"fix retry"}, "explanation": "exact charter work",
-		}},
+		"changes": []any{
+			map[string]any{
+				"path":            "pkg/retry.go",
+				"hunk":            testCandidateHunk,
+				"module":          "pkg/retry",
+				"semantic_lines":  10,
+				"presence":        "candidate_present",
+				"scope_distance":  "S0_exact",
+				"change_size":     "XS",
+				"type_compatible": true,
+				"confidence":      1.0,
+				"charter_clauses": []any{"fix retry"},
+				"explanation":     "exact charter work",
+			},
+		},
 		"files": 1, "semantic_lines": 10, "modules": 1,
 		"worst_scope_distance": "S0_exact", "worst_change_size": "XS",
 		"type_compatible": true, "confidence": 1.0,
@@ -165,7 +202,8 @@ func TestImplementationDoesNotCompleteWhenCompletionAuditRepeatsExistingFinding(
 		t.Fatal(err)
 	}
 	implementationStage := result.StageRuns[len(result.StageRuns)-1]
-	if result.Workspace.Phase != PhaseImplementation || result.Workspace.ExecutionState != ExecutionBlocked || implementationStage.PublicError != "completion_incomplete" {
+	if result.Workspace.Phase != PhaseImplementation || result.Workspace.ExecutionState != ExecutionBlocked ||
+		implementationStage.PublicError != "completion_incomplete" {
 		t.Fatalf("false completion was admitted: workspace=%#v stage=%#v", result.Workspace, implementationStage)
 	}
 	reopened, index := findFinding(result.Findings, existing.ID)
@@ -178,7 +216,8 @@ type scopeWaitingGates struct{}
 
 func (scopeWaitingGates) Start(_ context.Context, request GateRequest) (GateRun, error) {
 	gate := testSucceededGate(request)
-	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.hard-scope" || request.DecisionPoint == "pr.finding.classify" {
+	if request.DecisionPoint == "pr.implementation.scope" || request.DecisionPoint == "pr.implementation.hard-scope" ||
+		request.DecisionPoint == "pr.finding.classify" {
 		gate = testWaitingGate(request)
 	}
 	return gate, nil
@@ -213,7 +252,8 @@ func TestCandidatePresentCompletionScopeDriftWaitsForExplicitScopeGate(t *testin
 	var drift *Finding
 	var scopeGate *GateRun
 	for index := range result.Findings {
-		if result.Findings[index].Scope.Presence == WorkCandidatePresent && result.Findings[index].Scope.Distance == ScopeRelatedFollowup {
+		if result.Findings[index].Scope.Presence == WorkCandidatePresent &&
+			result.Findings[index].Scope.Distance == ScopeRelatedFollowup {
 			drift = &result.Findings[index]
 		}
 	}
@@ -239,14 +279,20 @@ func TestCandidatePresentCompletionScopeDriftWaitsForExplicitScopeGate(t *testin
 		t.Fatal("mutable finding edit rewrote frozen hard-scope evidence")
 	}
 	if _, passErr := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: result.Workspace.ID, GateRunID: scopeGate.ID,
-		ExpectedVersion: result.Workspace.Version, RequestID: "request-00000021", FieldValues: map[string]any{"action": "approve"},
+		WorkspaceID:     result.Workspace.ID,
+		GateRunID:       scopeGate.ID,
+		ExpectedVersion: result.Workspace.Version,
+		RequestID:       "request-00000021",
+		FieldValues:     map[string]any{"action": "approve"},
 	}); passErr == nil {
 		t.Fatal("hard candidate scope accepted a generic gate pass")
 	}
 	resolved, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: result.Workspace.ID, GateRunID: scopeGate.ID,
-		ExpectedVersion: result.Workspace.Version, RequestID: "request-00000022", FieldValues: map[string]any{"action": "defer-follow-up"},
+		WorkspaceID:     result.Workspace.ID,
+		GateRunID:       scopeGate.ID,
+		ExpectedVersion: result.Workspace.Version,
+		RequestID:       "request-00000022",
+		FieldValues:     map[string]any{"action": "defer-follow-up"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -319,7 +365,11 @@ func TestHardRepairScopeCannotReachPublicationThroughGateApproval(t *testing.T) 
 			}
 			if len(result.ValidationRuns) != 0 || len(result.RepairAttempts) != 1 ||
 				result.RepairAttempts[0].PublicationFence != nil {
-				t.Fatalf("hard scope advanced into validation or finalization: repairs=%#v validations=%#v", result.RepairAttempts, result.ValidationRuns)
+				t.Fatalf(
+					"hard scope advanced into validation or finalization: repairs=%#v validations=%#v",
+					result.RepairAttempts,
+					result.ValidationRuns,
+				)
 			}
 			var scopeGate *GateRun
 			for index := range result.Gates {
@@ -419,7 +469,10 @@ func TestScopeAuditDefersUntrustedMetricsToDeterministicCandidateBinding(t *test
 	response["worst_change_size"] = string(ChangeSizeL)
 	response["type_compatible"] = false
 
-	audit, _, err := (AIController{Runner: fixedResponseAI{response: response}}).RunScopeAudit(context.Background(), testPromptBundle())
+	audit, _, err := (AIController{Runner: fixedResponseAI{response: response}}).RunScopeAudit(
+		context.Background(),
+		testPromptBundle(),
+	)
 	if err != nil {
 		t.Fatalf("scope audit rejected valid classifications with advisory metrics: %v", err)
 	}
@@ -489,14 +542,28 @@ func TestScopeAuditCanonicalizesRedistributedMultiHunkCounts(t *testing.T) {
 	audit := ScopeAuditPass{
 		Changes: []ScopeChange{
 			{
-				Path: "greeting/time_aware_test.go", Hunk: "@@ -1,2 +1,3 @@ copied label", Module: "tests", SemanticLines: 4,
-				Presence: WorkCandidatePresent, Distance: ScopeExact, Size: ChangeSizeXS,
-				TypeCompatible: true, Confidence: .9, Explanation: "exact charter test",
+				Path:           "greeting/time_aware_test.go",
+				Hunk:           "@@ -1,2 +1,3 @@ copied label",
+				Module:         "tests",
+				SemanticLines:  4,
+				Presence:       WorkCandidatePresent,
+				Distance:       ScopeExact,
+				Size:           ChangeSizeXS,
+				TypeCompatible: true,
+				Confidence:     .9,
+				Explanation:    "exact charter test",
 			},
 			{
-				Path: "greeting/time_aware_test.go", Hunk: "@@ -10 +11,2 @@", Module: "different-model-label", SemanticLines: 4,
-				Presence: WorkCandidatePresent, Distance: ScopeRelatedFollowup, Size: ChangeSizeS,
-				TypeCompatible: false, Confidence: .6, Explanation: "related scope drift",
+				Path:           "greeting/time_aware_test.go",
+				Hunk:           "@@ -10 +11,2 @@",
+				Module:         "different-model-label",
+				SemanticLines:  4,
+				Presence:       WorkCandidatePresent,
+				Distance:       ScopeRelatedFollowup,
+				Size:           ChangeSizeS,
+				TypeCompatible: false,
+				Confidence:     .6,
+				Explanation:    "related scope drift",
 			},
 		},
 		Files: 1, SemanticLines: 8, Modules: 2, WorstDistance: ScopeExact,
@@ -589,7 +656,9 @@ func TestCompletionCandidateEvidenceMustMatchPersistedScopeAudit(t *testing.T) {
 		Presence: WorkCandidatePresent, Distance: ScopeExact, Size: ChangeSizeXS,
 		TypeCompatible: true, Confidence: 1,
 	}}}
-	rounds := []CompletionRound{{State: ExecutionSucceeded, Result: CompletionPass{OutOfScope: []CompletionFinding{candidate}}}}
+	rounds := []CompletionRound{
+		{State: ExecutionSucceeded, Result: CompletionPass{OutOfScope: []CompletionFinding{candidate}}},
+	}
 	if !completionRoundsMatchCandidateScope(rounds, scope) {
 		t.Fatal("exact completion finding did not match persisted scope evidence")
 	}
@@ -635,13 +704,24 @@ func (ambiguousReviewAI) RunIsolated(_ context.Context, request IsolatedAIReques
 	}
 	return map[string]any{
 		"summary": "one adjacent finding",
-		"findings": []any{map[string]any{
-			"severity": "medium", "title": "adjacent retry cleanup", "file": "pkg/retry.go", "message": "cleanup is adjacent",
-			"evidence": "adjacent path", "impact": "maintenance", "recommendation": "triage explicitly", "validation": "review charter",
-			"scope_distance": "S1_necessary_adjacent", "change_size": "XS", "type_compatible": true,
-			"scope_confidence": 1.0, "scope_explanation": "necessary-adjacent rather than exact",
-			"charter_clauses": []any{"fix retry"},
-		}},
+		"findings": []any{
+			map[string]any{
+				"severity":          "medium",
+				"title":             "adjacent retry cleanup",
+				"file":              "pkg/retry.go",
+				"message":           "cleanup is adjacent",
+				"evidence":          "adjacent path",
+				"impact":            "maintenance",
+				"recommendation":    "triage explicitly",
+				"validation":        "review charter",
+				"scope_distance":    "S1_necessary_adjacent",
+				"change_size":       "XS",
+				"type_compatible":   true,
+				"scope_confidence":  1.0,
+				"scope_explanation": "necessary-adjacent rather than exact",
+				"charter_clauses":   []any{"fix retry"},
+			},
+		},
 		"coverage": coverageJSON(),
 	}, nil
 }
@@ -654,9 +734,15 @@ func TestAmbiguousReviewFindingStartsClassificationGate(t *testing.T) {
 	}
 	now := created.Aggregate.Workspace.CreatedAt
 	charter := Charter{
-		ID: "pcr_44444444444444444444444444444444", Revision: 1, Type: PRTypeFix,
-		Goal: "fix retry", AcceptanceCriteria: []string{"retry succeeds"}, BaseSHA: created.Aggregate.ProviderSnapshot.BaseSHA,
-		HeadSHA: created.Aggregate.ProviderSnapshot.HeadSHA, Confirmed: true, CreatedAt: now,
+		ID:                 "pcr_44444444444444444444444444444444",
+		Revision:           1,
+		Type:               PRTypeFix,
+		Goal:               "fix retry",
+		AcceptanceCriteria: []string{"retry succeeds"},
+		BaseSHA:            created.Aggregate.ProviderSnapshot.BaseSHA,
+		HeadSHA:            created.Aggregate.ProviderSnapshot.HeadSHA,
+		Confirmed:          true,
+		CreatedAt:          now,
 	}
 	phase, state, active := PhaseReview, ExecutionQueued, charter.ID
 	ready, err := store.Mutate(context.Background(), Mutation{
@@ -688,7 +774,8 @@ func TestAmbiguousReviewFindingStartsClassificationGate(t *testing.T) {
 		t.Fatalf("ambiguous finding bypassed triage: workspace=%#v findings=%#v", result.Workspace, result.Findings)
 	}
 	for _, gate := range result.Gates {
-		if gate.DecisionPoint == "pr.finding.classify" && gate.TargetID == result.Findings[0].ID && gate.State == ExecutionWaitingUser {
+		if gate.DecisionPoint == "pr.finding.classify" && gate.TargetID == result.Findings[0].ID &&
+			gate.State == ExecutionWaitingUser {
 			return
 		}
 	}
@@ -717,12 +804,22 @@ func TestExactLargeFindingBecomesSelectableOnlyAfterClassificationApproval(t *te
 		ExpectedVersion: seeded.Aggregate.Workspace.Version, RequestID: "request-00000051",
 		Disposition: FindingInScope, Scope: finding.Scope, Reason: "required but large",
 	})
-	if err != nil || waiting.Workspace.ExecutionState != ExecutionWaitingGate || len(waiting.Gates) != 1 || waiting.Findings[0].Disposition != FindingOpen {
-		t.Fatalf("classification request = workspace %#v gates %#v findings %#v err %v", waiting.Workspace, waiting.Gates, waiting.Findings, err)
+	if err != nil || waiting.Workspace.ExecutionState != ExecutionWaitingGate || len(waiting.Gates) != 1 ||
+		waiting.Findings[0].Disposition != FindingOpen {
+		t.Fatalf(
+			"classification request = workspace %#v gates %#v findings %#v err %v",
+			waiting.Workspace,
+			waiting.Gates,
+			waiting.Findings,
+			err,
+		)
 	}
 	accepted, err := service.RespondGate(context.Background(), RespondGateRequest{
-		WorkspaceID: waiting.Workspace.ID, GateRunID: waiting.Gates[0].ID,
-		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-00000052", FieldValues: map[string]any{"action": "keep-in-pr"},
+		WorkspaceID:     waiting.Workspace.ID,
+		GateRunID:       waiting.Gates[0].ID,
+		ExpectedVersion: waiting.Workspace.Version,
+		RequestID:       "request-00000052",
+		FieldValues:     map[string]any{"action": "keep-in-pr"},
 	})
 	if err != nil || accepted.Findings[0].Disposition != FindingInScope {
 		t.Fatalf("classification pass = findings %#v err %v", accepted.Findings, err)
@@ -738,8 +835,10 @@ func TestLifecycleOperationsRejectOutOfPhaseRuns(t *testing.T) {
 	implementationPhase := PhaseImplementation
 	implementationState := ExecutionRunning
 	seeded, seedErr := service.store.Mutate(context.Background(), Mutation{
-		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
-		RequestID: "request-00000019", Patch: AggregatePatch{Phase: &implementationPhase, ExecutionState: &implementationState},
+		WorkspaceID:     aggregate.Workspace.ID,
+		ExpectedVersion: aggregate.Workspace.Version,
+		RequestID:       "request-00000019",
+		Patch:           AggregatePatch{Phase: &implementationPhase, ExecutionState: &implementationState},
 	})
 	if seedErr != nil {
 		t.Fatal(seedErr)

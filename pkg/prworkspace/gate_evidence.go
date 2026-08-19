@@ -178,7 +178,9 @@ func projectScopeGateEvidence(value ScopeAssessment) ScopeAssessment {
 	result.ChangeEvidence = append([]ScopeChange(nil), value.ChangeEvidence...)
 	for index := range result.ChangeEvidence {
 		result.ChangeEvidence[index].Hunk = ""
-		result.ChangeEvidence[index].CharterClauses = append([]string(nil), result.ChangeEvidence[index].CharterClauses...)
+		result.ChangeEvidence[index].CharterClauses = append(
+			[]string(nil),
+			result.ChangeEvidence[index].CharterClauses...)
 	}
 	return result
 }

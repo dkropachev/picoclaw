@@ -51,7 +51,7 @@ func (finding *PRFinding) SetProtectedSourceExecution(source *PRFindingSourceExe
 // ProtectedSourceExecution returns a copy of the protected source capability.
 // It is an intentional internal adapter boundary; normal JSON marshaling never
 // calls it and therefore never exposes the capability.
-func (finding PRFinding) ProtectedSourceExecution() (PRFindingSourceExecution, bool) {
+func (finding *PRFinding) ProtectedSourceExecution() (PRFindingSourceExecution, bool) {
 	if finding.protectedSource == nil {
 		return PRFindingSourceExecution{}, false
 	}

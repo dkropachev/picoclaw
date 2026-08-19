@@ -11,9 +11,9 @@ import (
 )
 
 func TestMessageCorrectionPersistsAtomicallyInEventingStore(t *testing.T) {
-	raw, err := eventing.Open(context.Background(), filepath.Join(t.TempDir(), "message-correction.sqlite"))
-	if err != nil {
-		t.Fatal(err)
+	raw, openErr := eventing.Open(context.Background(), filepath.Join(t.TempDir(), "message-correction.sqlite"))
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	t.Cleanup(func() {
 		if err := raw.Close(); err != nil {
