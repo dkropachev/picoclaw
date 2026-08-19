@@ -294,7 +294,11 @@ export function PRLifecycleRepositoryAssignmentsPage({
     >
       <PageHeader
         title="Repository assignments"
-        titleExtra={<Badge variant="outline">PR lifecycle</Badge>}
+        titleExtra={
+          <Badge className="hidden sm:inline-flex" variant="outline">
+            PR lifecycle
+          </Badge>
+        }
       >
         <Button
           type="button"
@@ -319,10 +323,12 @@ export function PRLifecycleRepositoryAssignmentsPage({
         <Button
           type="button"
           disabled={!dirty || issues.length > 0 || saveMutation.isPending}
+          aria-label="Save assignments"
+          title="Save assignments"
           onClick={() => saveMutation.mutate(draft)}
         >
           <IconDeviceFloppy />
-          Save assignments
+          <span className="hidden sm:inline">Save assignments</span>
         </Button>
       </PageHeader>
 
