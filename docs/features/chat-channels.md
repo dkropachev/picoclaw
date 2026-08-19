@@ -57,7 +57,10 @@ message context, media references, and gateway log/status process state.
 Owns: CODE cmd/picoclaw/internal/gateway/**
 Owns: CODE pkg/bus/**
 Owns: CODE pkg/channels/**
-Owns: CODE pkg/gateway/**
+Owns: CODE pkg/gateway/channel_matrix.go
+Owns: CODE pkg/gateway/events.go
+Owns: CODE pkg/gateway/gateway.go
+Owns: CODE pkg/gateway/listen.go
 Owns: CODE pkg/health/**
 Owns: CODE web/backend/api/channels.go
 Owns: CODE web/backend/api/gateway*
@@ -85,7 +88,8 @@ Owns: HTTP POST /api/pico*
 Owns: HTTP GET /pico/*
 Owns: HTTP HEAD /pico/*
 Owns: TEST pkg/channels/*
-Owns: TEST pkg/gateway/*
+Owns: TEST pkg/gateway/gateway_test.go *
+Owns: TEST pkg/gateway/listen_test.go *
 Owns: TEST pkg/bus/*
 Owns: TEST pkg/health/*
 Owns: TEST cmd/picoclaw/internal/gateway/*

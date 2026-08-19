@@ -186,6 +186,9 @@ Owns: CODE pkg/workflows/event_dispatcher.go
 Owns: CODE pkg/agent/workflow_eventing.go
 Owns: CODE pkg/gateway/event_automation.go
 Owns: CODE pkg/gateway/pr_workspace_*.go
+Owns: CODE pkg/gateway/pr_development_*.go
+Owns: CODE pkg/gateway/review_attention_policy.go
+Owns: CODE pkg/gateway/review_working_context.go
 Owns: CODE pkg/gateway/event_webhook*
 Owns: CODE pkg/gateway/event_channel*
 Owns: CODE pkg/gateway/event_operator*
@@ -243,8 +246,7 @@ Owns: TEST pkg/config/events*
 Owns: TEST pkg/config/pr_lifecycle*
 Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
-Owns: TEST pkg/gateway/event_automation_test.go
-Owns: TEST pkg/gateway/event_review_readiness_test.go
+Owns: TEST pkg/gateway/event_*
 Owns: TEST pkg/gateway/pr_workspace_*
 Owns: TEST cmd/picoclaw/internal/events/*
 Owns: TEST web/backend/api/events_test.go

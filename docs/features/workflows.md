@@ -1456,6 +1456,7 @@ Owns: CLI cmd/picoclaw/internal/workflow/*
 Owns: HTTP * /api/workflows*
 Owns: TEST pkg/workflows/*
 Owns: TEST pkg/agent/workflow_runtime_test.go
+Owns: TEST pkg/gateway/workflow_authoring_test.go *
 Owns: TEST cmd/picoclaw/internal/workflow/*
 Owns: TEST web/backend/api/workflow_trigger_simulation_test.go
 Owns: TEST web/backend/api/workflow_human_tasks_test.go
