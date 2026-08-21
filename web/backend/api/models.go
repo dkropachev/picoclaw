@@ -54,17 +54,21 @@ type modelResponse struct {
 	Router       *config.AccountRouterConfig `json:"router,omitempty"`
 	ModelRouter  *config.ModelRouterConfig   `json:"model_router,omitempty"`
 	// Advanced fields
-	ConnectMode         string                      `json:"connect_mode,omitempty"`
-	Workspace           string                      `json:"workspace,omitempty"`
-	RPM                 int                         `json:"rpm,omitempty"`
-	MaxTokensField      string                      `json:"max_tokens_field,omitempty"`
-	RequestTimeout      int                         `json:"request_timeout,omitempty"`
-	ThinkingLevel       string                      `json:"thinking_level,omitempty"`
-	ReasoningEffort     string                      `json:"reasoning_effort,omitempty"`
-	ToolSchemaTransform string                      `json:"tool_schema_transform,omitempty"`
-	Streaming           config.ModelStreamingConfig `json:"streaming,omitempty"`
-	ExtraBody           map[string]any              `json:"extra_body,omitempty"`
-	CustomHeaders       map[string]string           `json:"custom_headers,omitempty"`
+	ConnectMode                 string                      `json:"connect_mode,omitempty"`
+	Workspace                   string                      `json:"workspace,omitempty"`
+	RPM                         int                         `json:"rpm,omitempty"`
+	MaxTokensField              string                      `json:"max_tokens_field,omitempty"`
+	RequestTimeout              int                         `json:"request_timeout,omitempty"`
+	ThinkingLevel               string                      `json:"thinking_level,omitempty"`
+	ReasoningEffort             string                      `json:"reasoning_effort,omitempty"`
+	InputPricePerMTok           float64                     `json:"input_price_per_1m,omitempty"`
+	OutputPricePerMTok          float64                     `json:"output_price_per_1m,omitempty"`
+	Subscription                bool                        `json:"subscription,omitempty"`
+	SubscriptionEquivalentModel string                      `json:"subscription_equivalent_model,omitempty"`
+	ToolSchemaTransform         string                      `json:"tool_schema_transform,omitempty"`
+	Streaming                   config.ModelStreamingConfig `json:"streaming,omitempty"`
+	ExtraBody                   map[string]any              `json:"extra_body,omitempty"`
+	CustomHeaders               map[string]string           `json:"custom_headers,omitempty"`
 	// Meta
 	Enabled   bool   `json:"enabled"`
 	Available bool   `json:"available"`
@@ -408,33 +412,37 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 	for i, m := range cfg.ModelList {
 		provider, modelID := providers.ExtractProtocol(m)
 		models = append(models, modelResponse{
-			Index:               i,
-			ModelName:           m.ModelName,
-			Provider:            provider,
-			Model:               modelID,
-			APIBase:             m.APIBase,
-			APIKey:              maskAPIKey(m.APIKey()),
-			Proxy:               m.Proxy,
-			AuthMethod:          m.AuthMethod,
-			CredentialID:        m.CredentialID,
-			Router:              m.Router,
-			ModelRouter:         m.ModelRouter,
-			ConnectMode:         m.ConnectMode,
-			Workspace:           m.Workspace,
-			RPM:                 m.RPM,
-			MaxTokensField:      m.MaxTokensField,
-			RequestTimeout:      m.RequestTimeout,
-			ThinkingLevel:       m.ThinkingLevel,
-			ReasoningEffort:     m.ReasoningEffort,
-			ToolSchemaTransform: m.ToolSchemaTransform,
-			Streaming:           m.Streaming,
-			ExtraBody:           m.ExtraBody,
-			CustomHeaders:       m.CustomHeaders,
-			Enabled:             m.Enabled,
-			Available:           modelStatuses[i].Available,
-			Status:              modelStatuses[i].Status,
-			IsDefault:           m.ModelName == defaultAccountRef,
-			IsVirtual:           m.IsVirtual(),
+			Index:                       i,
+			ModelName:                   m.ModelName,
+			Provider:                    provider,
+			Model:                       modelID,
+			APIBase:                     m.APIBase,
+			APIKey:                      maskAPIKey(m.APIKey()),
+			Proxy:                       m.Proxy,
+			AuthMethod:                  m.AuthMethod,
+			CredentialID:                m.CredentialID,
+			Router:                      m.Router,
+			ModelRouter:                 m.ModelRouter,
+			ConnectMode:                 m.ConnectMode,
+			Workspace:                   m.Workspace,
+			RPM:                         m.RPM,
+			MaxTokensField:              m.MaxTokensField,
+			RequestTimeout:              m.RequestTimeout,
+			ThinkingLevel:               m.ThinkingLevel,
+			ReasoningEffort:             m.ReasoningEffort,
+			InputPricePerMTok:           m.InputPricePerMTok,
+			OutputPricePerMTok:          m.OutputPricePerMTok,
+			Subscription:                m.Subscription,
+			SubscriptionEquivalentModel: m.SubscriptionEquivalentModel,
+			ToolSchemaTransform:         m.ToolSchemaTransform,
+			Streaming:                   m.Streaming,
+			ExtraBody:                   m.ExtraBody,
+			CustomHeaders:               m.CustomHeaders,
+			Enabled:                     m.Enabled,
+			Available:                   modelStatuses[i].Available,
+			Status:                      modelStatuses[i].Status,
+			IsDefault:                   m.ModelName == defaultAccountRef,
+			IsVirtual:                   m.IsVirtual(),
 		})
 	}
 	models = appendCredentialAccountModelResponses(models, defaultAccountRef)

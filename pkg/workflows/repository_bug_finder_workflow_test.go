@@ -1,0 +1,250 @@
+package workflows
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
+)
+
+func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) {
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "package service\n\nfunc Save() { /* missing version fence */ }\n"
+	writeTestFile(t, filepath.Join(repo, "service.go"), content)
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	gitCmd(t, repo, "add", "service.go")
+	gitCmd(t, repo, "commit", "-m", "initial")
+
+	agentRunner := &repositoryBugFinderTestAgent{t: t, content: content}
+	toolRunner := &repositoryBugFinderTestTools{repo: repo}
+	executor := &Executor{
+		WorkspaceDir: workspace,
+		Tools:        toolRunner,
+		Agents:       agentRunner,
+	}
+	request := RunRequest{
+		Workflow:    parseWorkflow(t, RepositoryBugFinderWorkflowYAML),
+		WorkflowRef: RepositoryBugFinderWorkflowRef,
+		Inputs: map[string]any{
+			"repository": repo, "ref": "HEAD", "target": "all",
+			"review_models": "review-a,review-b",
+		},
+	}
+	first, err := executor.Run(context.Background(), request)
+	if err != nil || first.Status != RunStatusSucceeded {
+		t.Fatalf("first run status=%q err=%v", first.Status, err)
+	}
+	if agentRunner.calls != 1 {
+		t.Fatalf("first agent calls=%d, want 1 visible managed request", agentRunner.calls)
+	}
+	state, found, err := repoaudit.NewStore(workspace).Get(repo)
+	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 1 {
+		t.Fatalf("first durable state found=%v err=%v state=%#v", found, err, state)
+	}
+	if state.Findings[0].File.BlobSHA == "" || state.Findings[0].CommitSHA == "" ||
+		len(state.Findings[0].ContextIDs) != 2 || len(state.Findings[0].Models) != 2 || len(state.Contexts) != 2 {
+		t.Fatalf("first finding provenance=%#v contexts=%d", state.Findings[0], len(state.Contexts))
+	}
+
+	request.RunID = ""
+	second, err := executor.Run(context.Background(), request)
+	if err != nil || second.Status != RunStatusSucceeded {
+		t.Fatalf("second run status=%q err=%v", second.Status, err)
+	}
+	if agentRunner.calls != 1 {
+		t.Fatalf("unchanged second run called agent; calls=%d", agentRunner.calls)
+	}
+	if second.Outputs["summary"] != "No changed reviewable files required model review." ||
+		second.Outputs["remainingFiles"] != 0 {
+		t.Fatalf("unchanged explicit outputs=%#v", second.Outputs)
+	}
+	after, _, err := repoaudit.NewStore(workspace).Get(repo)
+	if err != nil || len(after.Runs) != 1 || len(after.Findings) != 1 {
+		t.Fatalf("unchanged second run mutated review ledger: %#v err=%v", after, err)
+	}
+	if len(toolRunner.sessions) != 4 || toolRunner.sessions[0] != toolRunner.sessions[1] ||
+		toolRunner.sessions[2] != toolRunner.sessions[3] || toolRunner.sessions[0] == toolRunner.sessions[2] ||
+		!strings.HasPrefix(toolRunner.sessions[0], "workflow-run:") {
+		t.Fatalf("run-scoped git workspace sessions=%#v", toolRunner.sessions)
+	}
+}
+
+type repositoryBugFinderTestTools struct {
+	repo     string
+	sessions []string
+}
+
+func (runner *repositoryBugFinderTestTools) RunTool(
+	_ context.Context,
+	request ToolRequest,
+) (map[string]any, error) {
+	if request.Name != "git_workspace" {
+		return nil, fmt.Errorf("unexpected tool %q", request.Name)
+	}
+	runner.sessions = append(runner.sessions, request.Session)
+	switch request.Args["action"] {
+	case "acquire":
+		return map[string]any{"workspace": map[string]any{
+			"id": "gw-repository-review", "path": runner.repo,
+		}}, nil
+	case "release":
+		return map[string]any{"released": []any{}}, nil
+	default:
+		return nil, fmt.Errorf("unexpected git workspace action %#v", request.Args["action"])
+	}
+}
+
+type repositoryBugFinderTestAgent struct {
+	t       *testing.T
+	content string
+	calls   int
+}
+
+func (runner *repositoryBugFinderTestAgent) ResolveRepositoryReviewProfile(
+	_ context.Context,
+	agentID string,
+	requested []string,
+) (RepositoryReviewModelProfile, error) {
+	if agentID != "main" || !reflect.DeepEqual(requested, []string{"review-a", "review-b"}) {
+		runner.t.Fatalf("review profile agent=%q models=%#v", agentID, requested)
+	}
+	return RepositoryReviewModelProfile{
+		Revision: "sha256:test-model-graph", ReviewerModels: append([]string(nil), requested...),
+		MaxContentBytes: 64 << 10,
+	}, nil
+}
+
+func (runner *repositoryBugFinderTestAgent) RunAgent(
+	_ context.Context,
+	request AgentRequest,
+) (map[string]any, error) {
+	runner.calls++
+	if request.Tools != AgentToolsNone || request.ScopeContent != "frozen_git" ||
+		request.Session != "" || !request.EphemeralSession || !request.SuppressDefaultContext ||
+		request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt {
+		runner.t.Fatalf("review authority=%#v", request)
+	}
+	managed := request.Managed.(map[string]any)
+	if !reflect.DeepEqual(managed["reviewer_models"], []string{"review-a", "review-b"}) {
+		runner.t.Fatalf("resolved reviewer models=%#v", managed["reviewer_models"])
+	}
+	files, ok := request.Scope.([]map[string]any)
+	if !ok || len(files) != 1 || files[0]["content"] != runner.content {
+		runner.t.Fatalf("immutable review scope=%#v", request.Scope)
+	}
+	line := 3
+	finding := map[string]any{
+		"severity": "high", "title": "Save loses concurrent updates", "symbol": "Save", "file": "service.go",
+		"line": line, "message": "Save writes without a version fence.",
+		"evidence": "Concurrent callers overwrite the stored value.",
+		"impact":   "A successful update disappears.", "recommendation": "Use compare-and-swap.",
+		"validation": map[string]any{
+			"status": "confirmed", "summary": "Traced two writers through Save.",
+			"checks": []any{"two-writer interleaving"},
+		},
+	}
+	structured := map[string]any{
+		"summary": "Validated one bug.", "reviewedFiles": []any{"service.go"}, "findings": []any{finding},
+		"tests": []any{"two writer regression"}, "residualRisks": []any{},
+	}
+	scope := []map[string]any{{
+		"path": files[0]["path"], "fileHash": files[0]["fileHash"],
+		"sizeBytes": files[0]["sizeBytes"], "category": files[0]["category"],
+		"mode": files[0]["mode"],
+	}}
+	children := make([]map[string]any, 0, 8)
+	for index := 0; index < 8; index++ {
+		model := "review-a"
+		if index%2 == 1 {
+			model = "review-b"
+		}
+		childStructured := map[string]any{
+			"summary": fmt.Sprintf("challenge %d", index+1), "reviewedFiles": []any{"service.go"}, "findings": []any{},
+			"tests": []any{}, "residualRisks": []any{},
+		}
+		if index < 2 {
+			childStructured = structured
+		}
+		children = append(children, map[string]any{
+			"label": fmt.Sprintf("challenge %d", index+1), "valid": true,
+			"scope": scope, "model": map[string]any{"selected": model},
+			"structured": childStructured, "text": fmt.Sprintf("validated challenge %d", index+1),
+		})
+	}
+	return map[string]any{
+		"text": "validated", "structured": structured, "managed_children": children,
+		"managed": map[string]any{"optimization": map[string]any{
+			"model": map[string]any{"selected": "review-a"},
+		}},
+	}, nil
+}
+
+var (
+	_ AgentRunner                     = (*repositoryBugFinderTestAgent)(nil)
+	_ RepositoryReviewProfileResolver = (*repositoryBugFinderTestAgent)(nil)
+	_ ToolRunner                      = (*repositoryBugFinderTestTools)(nil)
+)
+
+func TestRepositoryBugFinderPromptIncludesBoundedChallengeNudges(t *testing.T) {
+	workflow := parseWorkflow(t, RepositoryBugFinderWorkflowYAML)
+	var review Step
+	for _, step := range workflow.Jobs["find_bugs"].Steps {
+		if step.ID == "review" {
+			review = step
+			break
+		}
+	}
+	contextText := fmt.Sprint(review.With["context"])
+	for _, expected := range []string{"correctness", "trust boundaries", "retries", "integration contracts"} {
+		if !strings.Contains(strings.ToLower(contextText), expected) {
+			t.Fatalf("review nudge context missing %q: %s", expected, contextText)
+		}
+	}
+}
+
+func TestRepositoryReviewAgentContextReservesDurableRecordTail(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancelParent()
+	child, cancelChild := repositoryReviewAgentContext(parent, true)
+	defer cancelChild()
+	parentDeadline, _ := parent.Deadline()
+	childDeadline, _ := child.Deadline()
+	if reserve := parentDeadline.Sub(childDeadline); reserve < 90*time.Millisecond {
+		t.Fatalf("durable record tail reserve=%s, want at least 90ms", reserve)
+	}
+	<-child.Done()
+	if parent.Err() != nil {
+		t.Fatalf("parent deadline expired with child; record tail was not reserved: %v", parent.Err())
+	}
+}
+
+func TestRepositoryBugFinderRejectsCredentialURLBeforeDurableRunCreation(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	_, err := (&Executor{Store: store}).Run(context.Background(), RunRequest{
+		Workflow:    parseWorkflow(t, RepositoryBugFinderWorkflowYAML),
+		WorkflowRef: RepositoryBugFinderWorkflowRef,
+		Inputs: map[string]any{
+			"repository":    "https://user:secret@github.com/owner/repo.git",
+			"review_models": "review-a,review-b",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "credentialed") {
+		t.Fatalf("credentialed repository admission error=%v", err)
+	}
+	if runs, listErr := store.ListRuns(context.Background()); listErr != nil || len(runs) != 0 {
+		t.Fatalf("credentialed repository was durably recorded: runs=%#v err=%v", runs, listErr)
+	}
+}

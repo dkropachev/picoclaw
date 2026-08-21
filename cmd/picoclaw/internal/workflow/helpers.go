@@ -131,6 +131,8 @@ type cliWorkflowRuntimeRunner struct {
 	loop       *agentloop.AgentLoop
 }
 
+var _ workflows.RepositoryReviewProfileResolver = (*cliWorkflowRuntimeRunner)(nil)
+
 func (r *cliWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.AgentRequest) (map[string]any, error) {
 	if r == nil {
 		return nil, fmt.Errorf("agent runner not configured")
@@ -141,6 +143,28 @@ func (r *cliWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.A
 		return nil, err
 	}
 	return agentloop.NewWorkflowAgentRunner(r.loop).RunAgent(ctx, req)
+}
+
+func (r *cliWorkflowRuntimeRunner) ResolveRepositoryReviewProfile(
+	ctx context.Context,
+	agentID string,
+	requestedReviewerModels []string,
+) (workflows.RepositoryReviewModelProfile, error) {
+	if r == nil {
+		return workflows.RepositoryReviewModelProfile{}, fmt.Errorf("agent runner not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensureLoopLocked(); err != nil {
+		return workflows.RepositoryReviewModelProfile{}, err
+	}
+	resolver, ok := agentloop.NewWorkflowAgentRunner(r.loop).(workflows.RepositoryReviewProfileResolver)
+	if !ok {
+		return workflows.RepositoryReviewModelProfile{}, fmt.Errorf(
+			"agent runner does not support repository review profiles",
+		)
+	}
+	return resolver.ResolveRepositoryReviewProfile(ctx, agentID, requestedReviewerModels)
 }
 
 func (r *cliWorkflowRuntimeRunner) RunTool(ctx context.Context, req workflows.ToolRequest) (map[string]any, error) {

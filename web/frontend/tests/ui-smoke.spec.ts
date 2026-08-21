@@ -21,6 +21,7 @@ const smokeRoutes = [
   "/events",
   "/event-sources",
   "/pull-requests",
+  "/repository-reviews",
   "/logs",
   "/agent/agents",
   "/agent/git-workspaces",
@@ -703,6 +704,11 @@ function workflowAuthoringCapabilities() {
       {
         name: "git.inventory",
         target: "function/git.inventory",
+        readiness: "ready",
+      },
+      {
+        name: "review.repository",
+        target: "function/review.repository",
         readiness: "ready",
       },
       {
@@ -2650,6 +2656,12 @@ async function mockLauncherApis(
           return json(route, {
             workspaces: [prWorkspaceAggregate.workspace],
           })
+        case "/api/repository-reviews":
+          return json(route, { repositories: [] })
+        case "/api/repository-reviews/automations":
+          return json(route, { automations: [] })
+        case "/api/repository-reviews/automation-options":
+          return json(route, { models: [], accounts: [] })
         case `/api/pr-workspaces/${prWorkspaceID}`:
           return json(route, prWorkspaceAggregate)
         case "/api/pr-lifecycle/workflow-configurations":

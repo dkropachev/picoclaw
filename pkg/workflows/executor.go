@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
@@ -41,6 +43,12 @@ type Executor struct {
 	MaxCallDepth         int
 	MaxConcurrentRuns    int
 	DefaultTimeout       time.Duration
+	// AgentUsageObserver receives one event for every provider response made by
+	// an agent step, wrapped with the exact run/job/step identity.
+	AgentUsageObserver AgentUsageEventObserver
+	// AgentCallAdmission is checked immediately before provider dispatch with
+	// the exact run/job/step identity.
+	AgentCallAdmission AgentCallAdmissionEventObserver
 	// WorkflowSnapshots is an immutable, pre-admitted reusable closure. When
 	// present, the executor uses these exact parsed bytes instead of reloading
 	// definitions after admission.
@@ -74,6 +82,62 @@ type Executor struct {
 		string,
 		func() (*Run, WorkflowHumanTask, bool, error),
 	) (*Run, WorkflowHumanTask, bool, error)
+}
+
+type workflowWorkspaceCleanup struct {
+	runner       ToolRunner
+	sessions     map[string]struct{}
+	frozenTokens map[string]struct{}
+}
+
+func (cleanup *workflowWorkspaceCleanup) trackFrozen(token string) {
+	if cleanup == nil || token == "" {
+		return
+	}
+	if cleanup.frozenTokens == nil {
+		cleanup.frozenTokens = make(map[string]struct{})
+	}
+	cleanup.frozenTokens[token] = struct{}{}
+}
+
+func (cleanup *workflowWorkspaceCleanup) track(session string) {
+	if cleanup == nil {
+		return
+	}
+	if cleanup.sessions == nil {
+		cleanup.sessions = make(map[string]struct{})
+	}
+	cleanup.sessions[session] = struct{}{}
+}
+
+func (cleanup *workflowWorkspaceCleanup) released(session string) {
+	if cleanup != nil {
+		delete(cleanup.sessions, session)
+	}
+}
+
+func (cleanup *workflowWorkspaceCleanup) releaseAll() error {
+	if cleanup == nil {
+		return nil
+	}
+	for token := range cleanup.frozenTokens {
+		discardNativeFrozenGitScope(token)
+	}
+	if cleanup.runner == nil || len(cleanup.sessions) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var releaseErr error
+	for session := range cleanup.sessions {
+		_, err := cleanup.runner.RunTool(ctx, ToolRequest{
+			Name: "git_workspace", Args: map[string]any{"action": "release"}, Session: session,
+		})
+		if err != nil {
+			releaseErr = errors.Join(releaseErr, err)
+		}
+	}
+	return releaseErr
 }
 
 type RuntimeEventPublisher interface {
@@ -169,6 +233,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 			return nil, ErrPrivateWorkflowContext
 		}
 		return nil, validateErr
+	}
+	if workflowRef == RepositoryBugFinderWorkflowRef {
+		if err := validateRepositoryBugFinderRepositoryInput(req.Inputs["repository"]); err != nil {
+			return nil, err
+		}
 	}
 	admittedExecutor, admissionErr := e.admitHumanTaskClosure(
 		ctx,
@@ -435,6 +504,21 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs},
 		nil,
 	)
+}
+
+func validateRepositoryBugFinderRepositoryInput(value any) error {
+	repository := strings.TrimSpace(fmt.Sprint(value))
+	if repository == "" || repository == "<nil>" {
+		return errors.New("repository bug finder repository is required")
+	}
+	if !strings.Contains(repository, "://") {
+		return nil
+	}
+	parsed, err := url.Parse(repository)
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("repository bug finder rejects credentialed or parameterized repository URLs")
+	}
+	return nil
 }
 
 func (e *Executor) createRun(ctx context.Context, store RunStore, run *Run, topLevel bool) error {
@@ -1323,22 +1407,27 @@ func (e *Executor) executeWorkflow(
 	workflow *Workflow,
 	req RunRequest,
 	resume *WorkflowExecutionCursor,
-) (map[string]any, error) {
+) (result map[string]any, returnErr error) {
+	cleanup := &workflowWorkspaceCleanup{runner: e.Tools}
+	defer func() {
+		returnErr = errors.Join(returnErr, cleanup.releaseAll())
+	}()
 	inputs, err := ResolveWorkflowCallInvocation(workflow.On.WorkflowCall, req.Inputs, req.Secrets)
 	if err != nil {
 		return nil, err
 	}
 	execCtx := ExecutionContext{
-		Inputs:       inputs,
-		Secrets:      cloneStringMap(req.Secrets),
-		Event:        cloneMap(req.Event),
-		Session:      strings.TrimSpace(req.Session),
-		Delivery:     req.Delivery,
-		Steps:        make(map[string]StepExecution),
-		Needs:        make(map[string]JobExecution),
-		WorkspaceDir: e.WorkspaceDir,
-		WorkflowRef:  run.WorkflowRef,
-		RunID:        run.ID,
+		Inputs:           inputs,
+		Secrets:          cloneStringMap(req.Secrets),
+		Event:            cloneMap(req.Event),
+		Session:          strings.TrimSpace(req.Session),
+		Delivery:         req.Delivery,
+		Steps:            make(map[string]StepExecution),
+		Needs:            make(map[string]JobExecution),
+		WorkspaceDir:     e.WorkspaceDir,
+		WorkflowRef:      run.WorkflowRef,
+		RunID:            run.ID,
+		workspaceCleanup: cleanup,
 	}
 	if run.privateRoot != nil {
 		execCtx.privateValues = cloneMap(run.privateRoot.Values)
@@ -2124,12 +2213,27 @@ func (e *Executor) runStepTarget(
 		if e.Tools == nil {
 			return nil, fmt.Errorf("tool runner not configured")
 		}
-		return e.Tools.RunTool(ctx, ToolRequest{
-			Name:     strings.TrimPrefix(uses, "tool/"),
+		toolName := strings.TrimPrefix(uses, "tool/")
+		toolSession := stepSession(step.Context, with, execCtx)
+		if toolName == "git_workspace" && strings.TrimSpace(execCtx.RunID) != "" {
+			toolSession = "workflow-run:" + strings.TrimSpace(execCtx.RunID) + ":git-workspace"
+		}
+		request := ToolRequest{
+			Name:     toolName,
 			Args:     with,
-			Session:  stepSession(step.Context, with, execCtx),
+			Session:  toolSession,
 			Delivery: stepDelivery(step.Context, execCtx),
-		})
+		}
+		outputs, err := e.Tools.RunTool(ctx, request)
+		if err == nil && request.Name == "git_workspace" && execCtx.workspaceCleanup != nil {
+			switch strings.TrimSpace(stringFromMap(with, "action")) {
+			case "acquire":
+				execCtx.workspaceCleanup.track(request.Session)
+			case "release":
+				execCtx.workspaceCleanup.released(request.Session)
+			}
+		}
+		return outputs, err
 	case strings.HasPrefix(uses, "mcp/"):
 		if e.Tools == nil {
 			return nil, fmt.Errorf("tool runner not configured")
@@ -2162,6 +2266,25 @@ func (e *Executor) runStepTarget(
 			sessionKey = ""
 		}
 		agentID := strings.TrimPrefix(uses, "agent/")
+		scope := with["scope"]
+		scopeContent := strings.TrimSpace(stringFromMap(with, "scope_content"))
+		switch scopeContent {
+		case "immutable_git":
+			var hydrateErr error
+			scope, hydrateErr = hydrateImmutableGitScope(ctx, scope, with, execCtx)
+			if hydrateErr != nil {
+				return nil, hydrateErr
+			}
+		case "frozen_git":
+			var consumeErr error
+			scope, consumeErr = consumeNativeFrozenGitScope(
+				execCtx,
+				stringFromMap(with, "scope_snapshot"),
+			)
+			if consumeErr != nil {
+				return nil, consumeErr
+			}
+		}
 		var frozenSession *FrozenReadOnlySession
 		if execCtx.frozenReadOnlySession != nil &&
 			strings.TrimSpace(stringFromMap(with, "history")) == "read_only" {
@@ -2174,23 +2297,63 @@ func (e *Executor) runStepTarget(
 			frozenSession = cloneFrozenReadOnlySession(execCtx.frozenReadOnlySession)
 			sessionKey = ""
 		}
-		outputs, runErr := e.Agents.RunAgent(ctx, AgentRequest{
-			AgentID:               agentID,
-			Message:               stringFromMap(with, "message"),
-			Prompt:                stringFromMap(with, "prompt"),
-			Context:               stringFromMap(with, "context"),
-			Session:               sessionKey,
-			EphemeralSession:      sessionMode == AgentSessionEphemeral,
-			History:               stringFromMap(with, "history"),
-			Cache:                 stringFromMap(with, "cache"),
-			Tools:                 agentToolsMode(with),
-			Delivery:              stepDelivery(step.Context, execCtx),
-			Inputs:                with,
-			Output:                output,
-			Managed:               with["managed"],
-			Scope:                 with["scope"],
-			PrivateContext:        execCtx.privateValues != nil || frozenSession != nil,
-			FrozenReadOnlySession: frozenSession,
+		repositoryReviewProfile := strings.TrimSpace(stringFromMap(with, "review_profile")) ==
+			"repository-bug-finder-v1"
+		suppressDefaultContext := sessionMode == AgentSessionEphemeral &&
+			agentToolsMode(with) == AgentToolsNone &&
+			(strings.TrimSpace(execCtx.WorkflowRef) == RepositoryBugFinderWorkflowRef &&
+				step.ID == "review" && scopeContent == "frozen_git" ||
+				repositoryReviewProfile && scopeContent == "immutable_git")
+		reviewSystemPrompt := ""
+		if suppressDefaultContext {
+			reviewSystemPrompt = RepositoryBugFinderSystemPrompt
+		}
+		agentCtx, cancelAgent := repositoryReviewAgentContext(ctx, suppressDefaultContext)
+		defer cancelAgent()
+		var usageObserver AgentUsageObserver
+		if e.AgentUsageObserver != nil {
+			var usageObserverMu sync.Mutex
+			usageObserver = func(usage AgentUsage) error {
+				usageObserverMu.Lock()
+				defer usageObserverMu.Unlock()
+				return e.AgentUsageObserver(AgentUsageEvent{
+					RunID:  execCtx.RunID,
+					JobID:  execCtx.JobID,
+					StepID: execCtx.StepID,
+					Usage:  usage,
+				})
+			}
+		}
+		var callAdmission AgentCallAdmission
+		if e.AgentCallAdmission != nil {
+			callAdmission = func() error {
+				return e.AgentCallAdmission(AgentCallAdmissionEvent{
+					RunID: execCtx.RunID, JobID: execCtx.JobID, StepID: execCtx.StepID,
+				})
+			}
+		}
+		outputs, runErr := e.Agents.RunAgent(agentCtx, AgentRequest{
+			AgentID:                agentID,
+			Message:                stringFromMap(with, "message"),
+			Prompt:                 stringFromMap(with, "prompt"),
+			Context:                stringFromMap(with, "context"),
+			Session:                sessionKey,
+			EphemeralSession:       sessionMode == AgentSessionEphemeral,
+			History:                stringFromMap(with, "history"),
+			Cache:                  stringFromMap(with, "cache"),
+			Tools:                  agentToolsMode(with),
+			Delivery:               stepDelivery(step.Context, execCtx),
+			Inputs:                 with,
+			Output:                 output,
+			Managed:                with["managed"],
+			Scope:                  scope,
+			ScopeContent:           scopeContent,
+			SuppressDefaultContext: suppressDefaultContext,
+			ReviewSystemPrompt:     reviewSystemPrompt,
+			PrivateContext:         execCtx.privateValues != nil || frozenSession != nil,
+			FrozenReadOnlySession:  frozenSession,
+			UsageObserver:          usageObserver,
+			CallAdmission:          callAdmission,
 		})
 		if frozenSession != nil && outputs != nil {
 			outputs["session"] = AgentSessionPrivate
@@ -2201,6 +2364,13 @@ func (e *Executor) runStepTarget(
 		return outputs, runErr
 	case strings.HasPrefix(uses, "function/"):
 		name := strings.TrimPrefix(uses, "function/")
+		if name == "review.repository" && strings.EqualFold(stringFromMap(with, "action"), "plan") {
+			var bindErr error
+			with, bindErr = e.bindRepositoryReviewModelProfile(ctx, with)
+			if bindErr != nil {
+				return nil, bindErr
+			}
+		}
 		if outputs, handled, err := RunNativeFunction(ctx, name, with, execCtx); handled {
 			return outputs, err
 		}
@@ -2211,6 +2381,108 @@ func (e *Executor) runStepTarget(
 	default:
 		return nil, fmt.Errorf("unsupported uses target %q", uses)
 	}
+}
+
+func repositoryReviewAgentContext(ctx context.Context, repositoryReview bool) (context.Context, context.CancelFunc) {
+	if !repositoryReview {
+		return ctx, func() {}
+	}
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return ctx, func() {}
+	}
+	remaining := time.Until(deadline)
+	reserve := 30 * time.Second
+	if remaining < 2*reserve {
+		reserve = remaining / 4
+	}
+	agentDeadline := deadline.Add(-reserve)
+	if !agentDeadline.After(time.Now()) {
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		return canceled, func() {}
+	}
+	return context.WithDeadline(ctx, agentDeadline)
+}
+
+func (e *Executor) bindRepositoryReviewModelProfile(
+	ctx context.Context,
+	with map[string]any,
+) (map[string]any, error) {
+	resolver, ok := e.Agents.(RepositoryReviewProfileResolver)
+	if !ok || resolver == nil {
+		profile := nativeMapValue(with["profile"])
+		if strings.TrimSpace(fmt.Sprint(profile["schema"])) == "repository-bug-finder-v1" {
+			return nil, errors.New("repository bug finder requires a model-profile-aware agent runtime")
+		}
+		return with, nil
+	}
+	profile := cloneMap(nativeMapValue(with["profile"]))
+	if profile == nil {
+		profile = make(map[string]any)
+	}
+	requested := repositoryReviewModelNames(profile["models"])
+	profile["models"] = append([]string(nil), requested...)
+	agentID := strings.TrimSpace(stringFromMap(with, "agent"))
+	if agentID == "" {
+		agentID = "main"
+	}
+	resolved, err := resolver.ResolveRepositoryReviewProfile(ctx, agentID, requested)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repository review model profile: %w", err)
+	}
+	if strings.TrimSpace(resolved.Revision) == "" ||
+		len(resolved.ReviewerModels) == 0 && !resolved.IncludeDefaultReviewer ||
+		resolved.MaxContentBytes < 1 {
+		return nil, errors.New("resolve repository review model profile: empty result")
+	}
+	bound := cloneMap(with)
+	profile["model_graph_revision"] = resolved.Revision
+	profile["effective_models"] = append([]string(nil), resolved.ReviewerModels...)
+	profile["include_default_reviewer"] = resolved.IncludeDefaultReviewer
+	requestedMaxContent := int(nativeInt64Any(profile, "max_content_bytes"))
+	if requestedMaxContent <= 0 || requestedMaxContent > resolved.MaxContentBytes {
+		requestedMaxContent = resolved.MaxContentBytes
+	}
+	profile["max_content_bytes"] = requestedMaxContent
+	bound["profile"] = profile
+	bound["resolved_reviewer_models"] = append([]string(nil), resolved.ReviewerModels...)
+	bound["include_default_reviewer"] = resolved.IncludeDefaultReviewer
+	bound["resolved_max_content_bytes"] = requestedMaxContent
+	return bound, nil
+}
+
+func repositoryReviewModelNames(raw any) []string {
+	values := make([]string, 0, 8)
+	switch typed := raw.(type) {
+	case string:
+		values = strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';'
+		})
+	case []string:
+		values = append(values, typed...)
+	case []any:
+		for _, value := range typed {
+			values = append(values, strings.TrimSpace(fmt.Sprint(value)))
+		}
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, min(8, len(values)))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) == 8 {
+			break
+		}
+	}
+	return out
 }
 
 func agentToolsMode(with map[string]any) string {

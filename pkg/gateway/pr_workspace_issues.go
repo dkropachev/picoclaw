@@ -120,8 +120,11 @@ func issueURLBelongsToRepository(raw, origin, repository string) bool {
 		return false
 	}
 	prefix := strings.TrimSuffix(provider.Path, "/") + "/" + repository + "/issues/"
-	number, ok := strings.CutPrefix(issue.Path, prefix)
-	if !ok || number == "" || strings.Contains(number, "/") {
+	if len(issue.Path) <= len(prefix) || !strings.EqualFold(issue.Path[:len(prefix)], prefix) {
+		return false
+	}
+	number := issue.Path[len(prefix):]
+	if number == "" || strings.Contains(number, "/") {
 		return false
 	}
 	for _, character := range number {

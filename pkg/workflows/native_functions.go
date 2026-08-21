@@ -2,9 +2,11 @@ package workflows
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -16,10 +18,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
 )
 
 const (
@@ -28,6 +32,10 @@ const (
 	maxNativeGitDiffFiles              = 4096
 	maxNativeGitDiffFileBytes          = 128 << 10
 	maxNativeGitDiffAggregateBytes     = 512 << 10
+	maxNativeGitInventoryBytes         = 64 << 20
+	maxNativeGitInventoryFiles         = 100_000
+	maxNativeGitContentFileBytes       = 512 << 10
+	maxNativeGitContentAggregateBytes  = 64 << 20
 	maxNativeGitRemoteBytes            = 2048
 	maxNativeGitErrorOutputBytes       = 64 << 10
 	nativeGitDiffContextLines          = 80
@@ -36,12 +44,34 @@ const (
 
 var safeStorageSegmentPattern = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+type nativeFrozenGitScopeEntry struct {
+	runID       string
+	workflowRef string
+	scope       any
+	bytes       int
+	expiresAt   time.Time
+}
+
+var nativeFrozenGitScopes = struct {
+	sync.Mutex
+	entries map[string]nativeFrozenGitScopeEntry
+	bytes   int
+}{entries: make(map[string]nativeFrozenGitScopeEntry)}
+
+const (
+	maxNativeFrozenGitScopes      = 8
+	maxNativeFrozenGitScopeBytes  = 72 << 20
+	maxNativeFrozenGitGlobalBytes = 288 << 20
+	nativeFrozenGitScopeTTL       = 30 * time.Minute
+)
+
 var nativeFunctionNames = map[string]struct{}{
 	"workflow.state":    {},
 	"workflow.artifact": {},
 	"git.inventory":     {},
 	"git.diff":          {},
 	"git.filter":        {},
+	"review.repository": {},
 }
 
 // NativeFunctionNames returns a sorted copy of the workflow functions
@@ -63,25 +93,43 @@ func IsNativeFunction(name string) bool {
 }
 
 var nativeCodeExtensions = map[string]struct{}{
-	".c":     {},
-	".cc":    {},
-	".cpp":   {},
-	".cs":    {},
-	".go":    {},
-	".h":     {},
-	".hpp":   {},
-	".java":  {},
-	".js":    {},
-	".jsx":   {},
-	".kt":    {},
-	".mjs":   {},
-	".py":    {},
-	".rb":    {},
-	".rs":    {},
-	".sh":    {},
-	".swift": {},
-	".ts":    {},
-	".tsx":   {},
+	".c":       {},
+	".cc":      {},
+	".cpp":     {},
+	".cs":      {},
+	".dart":    {},
+	".ex":      {},
+	".exs":     {},
+	".erl":     {},
+	".fs":      {},
+	".go":      {},
+	".graphql": {},
+	".gql":     {},
+	".h":       {},
+	".hs":      {},
+	".hpp":     {},
+	".java":    {},
+	".js":      {},
+	".jsx":     {},
+	".kt":      {},
+	".lua":     {},
+	".mjs":     {},
+	".php":     {},
+	".pl":      {},
+	".proto":   {},
+	".py":      {},
+	".rb":      {},
+	".rs":      {},
+	".scala":   {},
+	".sh":      {},
+	".sql":     {},
+	".svelte":  {},
+	".swift":   {},
+	".tf":      {},
+	".ts":      {},
+	".tsx":     {},
+	".vue":     {},
+	".zig":     {},
 }
 
 var nativeConfigExtensions = map[string]struct{}{
@@ -91,17 +139,27 @@ var nativeConfigExtensions = map[string]struct{}{
 	".yml":  {},
 }
 
+var nativeBinaryExtensions = map[string]struct{}{
+	".7z": {}, ".a": {}, ".avi": {}, ".bin": {}, ".bmp": {}, ".class": {},
+	".dll": {}, ".dylib": {}, ".eot": {}, ".exe": {}, ".gif": {}, ".gz": {},
+	".ico": {}, ".jar": {}, ".jpeg": {}, ".jpg": {}, ".mov": {}, ".mp3": {},
+	".mp4": {}, ".o": {}, ".otf": {}, ".pdf": {}, ".png": {}, ".so": {},
+	".tar": {}, ".ttf": {}, ".wav": {}, ".webm": {}, ".webp": {}, ".woff": {},
+	".woff2": {}, ".zip": {},
+}
+
 var nativeTestMarkers = []string{"test", "tests", "spec", "__tests__", "__mocks__"}
 
 var nativeExcludePatterns = []string{
-	".git/*",
-	"node_modules/*",
-	"vendor/*",
-	"dist/*",
-	"build/*",
-	"target/*",
-	"coverage/*",
+	"**/.git/**",
+	"**/node_modules/**",
+	"**/vendor/**",
+	"**/dist/**",
+	"**/build/**",
+	"**/target/**",
+	"**/coverage/**",
 	"*.lock",
+	"go.sum",
 	"package-lock.json",
 	"pnpm-lock.yaml",
 	"yarn.lock",
@@ -121,11 +179,12 @@ type nativeGitFile struct {
 }
 
 type nativeGitWorkspaceRef struct {
-	ID        string
-	RepoID    string
-	RemoteURL string
-	Ref       string
-	Path      string
+	ID          string
+	RepoID      string
+	RemoteURL   string
+	UpstreamURL string
+	Ref         string
+	Path        string
 }
 
 // RunNativeFunction executes PicoClaw built-ins available to workflow
@@ -156,9 +215,1005 @@ func RunNativeFunction(
 	case "git.filter":
 		out, err := nativeGitFilter(ctx, args, exec)
 		return out, true, err
+	case "review.repository":
+		out, err := nativeRepositoryReview(ctx, args, exec)
+		return out, true, err
 	default:
 		return nil, true, fmt.Errorf("unsupported native function %q", name)
 	}
+}
+
+func nativeRepositoryReview(
+	ctx context.Context,
+	args map[string]any,
+	exec ExecutionContext,
+) (map[string]any, error) {
+	action := strings.ToLower(strings.TrimSpace(nativeString(args, "action")))
+	store := repoaudit.NewStore(nativeWorkspace(exec))
+	switch action {
+	case "plan":
+		files, err := nativeRepositoryReviewFiles(args["files"])
+		if err != nil {
+			return nil, fmt.Errorf("review repository files: %w", err)
+		}
+		commit, err := nativeBindRepositoryReviewInventory(ctx, args, exec, files)
+		if err != nil {
+			return nil, err
+		}
+		profileHash, err := nativeStableHash(firstNonNil(args["profile"], "repository-bug-finder-v1"))
+		if err != nil {
+			return nil, err
+		}
+		repository, err := nativeRepositoryReviewIdentity(ctx, args, exec)
+		if err != nil {
+			return nil, err
+		}
+		maximumPending := int(nativeInt64Any(args, "max_files", "maxFiles"))
+		if maximumPending <= 0 || maximumPending > 128 {
+			maximumPending = 24
+		}
+		reviewerCount := len(nativeStringSlice(args["resolved_reviewer_models"]))
+		if nativeBoolAny(args, "include_default_reviewer") {
+			reviewerCount++
+		}
+		if reviewerCount < 1 {
+			reviewerCount = 1
+		}
+		maximumPending = nativeRepositoryReviewPendingLimit(maximumPending, reviewerCount)
+		plan, err := store.PlanWithProfileLimitAuthoritative(
+			ctx,
+			repository,
+			commit,
+			nativeStringAny(args, "inventory_hash", "inventoryHash"),
+			"sha256:"+profileHash,
+			files,
+			nativeBoolAny(args, "force"),
+			maximumPending,
+			nativeBoolAny(args, "authoritative"),
+		)
+		if err != nil {
+			return nil, err
+		}
+		output, err := nativeRepositoryReviewPlanOutput(
+			plan, args["files"], nativeBoolAny(args, "compact_output", "compactOutput"),
+		)
+		if err != nil {
+			return nil, err
+		}
+		_, workspace, err := nativeResolveGitWorkspace(exec, args)
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range output["pendingFiles"].([]map[string]any) {
+			if nativeMapValue(file["source"]) != nil {
+				continue
+			}
+			source, sourceErr := nativeGitFileSource(workspace, nativeAnyString(file["path"]))
+			if sourceErr != nil {
+				return nil, sourceErr
+			}
+			file["source"] = source
+		}
+		output["reviewerModels"] = firstNonNil(args["resolved_reviewer_models"], args["reviewer_models"])
+		output["includeDefaultReviewer"] = nativeBoolAny(args, "include_default_reviewer")
+		output["maxContentBytes"] = int(nativeInt64Any(args, "resolved_max_content_bytes"))
+		output["maxFiles"] = maximumPending
+		return output, nil
+	case "freeze":
+		scope, err := hydrateImmutableGitScope(ctx, args["files"], args, exec)
+		if err != nil {
+			return nil, err
+		}
+		groupContentBytes := int(nativeInt64Any(args, "max_content_bytes", "maxContentBytes"))
+		reviewableScope, unsupportedFiles, unavailableCount, err := nativeReviewableFrozenGitScope(
+			scope, groupContentBytes,
+		)
+		if err != nil {
+			return nil, err
+		}
+		token, err := storeNativeFrozenGitScope(exec, reviewableScope)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"token":            token,
+			"files":            nativeFrozenGitScopeReferences(reviewableScope),
+			"reviewableCount":  len(reviewableScope),
+			"unsupportedFiles": unsupportedFiles,
+			"unavailableCount": unavailableCount,
+		}, nil
+	case "record":
+		plan, err := nativeRepositoryReviewPlan(args["plan"])
+		if err != nil {
+			return nil, err
+		}
+		observations, completedFiles, err := nativeRepositoryReviewObservations(args, plan)
+		if err != nil {
+			return nil, err
+		}
+		unsupportedFiles := nativeRepositoryReviewUnsupportedFiles(args["managed_children"])
+		unsupportedFiles = mergeNativeRepositoryUnsupportedFiles(
+			unsupportedFiles,
+			nativeRepositoryReviewUnsupportedScopeFiles(args["unsupported_files"]),
+		)
+		result, err := store.Record(ctx, repoaudit.RecordRequest{
+			Plan:             plan,
+			RunID:            strings.TrimSpace(firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID)),
+			Observations:     observations,
+			CompletedFiles:   completedFiles,
+			UnsupportedFiles: unsupportedFiles,
+			ExcludedFiles:    int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+		})
+		if err != nil {
+			return nil, err
+		}
+		run, err := nativeJSONMap(result.Run)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"run":                run,
+			"acceptedFindingIds": append([]string(nil), result.AcceptedFindingIDs...),
+			"stateVersion":       result.State.Version,
+		}, nil
+	case "result":
+		plan, err := nativeRepositoryReviewPlan(args["plan"])
+		if err != nil {
+			return nil, err
+		}
+		recorded := nativeMapValue(args["recorded"])
+		run := nativeMapValue(recorded["run"])
+		findingIDs := recorded["acceptedFindingIds"]
+		summary := strings.TrimSpace(nativeAnyString(nativeMapValue(args["review"])["summary"]))
+		if run == nil {
+			if len(plan.PendingFiles)+len(plan.DeferredFiles) == 0 && plan.Authoritative {
+				if _, finalizeErr := store.FinalizeNoopPlan(
+					plan, int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+				); finalizeErr != nil &&
+					!errors.Is(finalizeErr, repoaudit.ErrConflict) {
+					return nil, finalizeErr
+				}
+			}
+			run = map[string]any{
+				"reviewed_files": 0, "unreviewed_files": 0,
+				"unsupported_files": len(plan.UnsupportedFiles),
+				"remaining_files":   len(plan.PendingFiles) + len(plan.DeferredFiles),
+				"skipped_files":     len(plan.UnchangedFiles),
+				"excluded_files":    int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+			}
+			findingIDs = []string{}
+		}
+		if summary == "" {
+			if len(plan.PendingFiles)+len(plan.DeferredFiles) == 0 {
+				summary = "No changed reviewable files required model review."
+			} else {
+				summary = "Repository review batch completed."
+			}
+		}
+		return map[string]any{"summary": summary, "findingIds": findingIDs, "run": run}, nil
+	default:
+		return nil, fmt.Errorf("unsupported review.repository action %q", action)
+	}
+}
+
+func nativeRepositoryReviewPendingLimit(requested, reviewerCount int) int {
+	requested = min(128, max(1, requested))
+	reviewerCount = max(1, reviewerCount)
+	return min(requested, max(1, 3*32/(4*reviewerCount)))
+}
+
+func storeNativeFrozenGitScope(exec ExecutionContext, scope any) (string, error) {
+	if strings.TrimSpace(exec.RunID) == "" || strings.TrimSpace(exec.WorkflowRef) == "" {
+		return "", errors.New("frozen Git scope requires a workflow run identity")
+	}
+	scopeBytes, err := nativeFrozenGitScopeMemoryBytes(scope)
+	if err != nil {
+		return "", err
+	}
+	if scopeBytes > maxNativeFrozenGitScopeBytes {
+		return "", errors.New("frozen Git scope exceeds its size limit")
+	}
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(random)
+	now := time.Now().UTC()
+	nativeFrozenGitScopes.Lock()
+	defer nativeFrozenGitScopes.Unlock()
+	for key, entry := range nativeFrozenGitScopes.entries {
+		if !now.Before(entry.expiresAt) {
+			delete(nativeFrozenGitScopes.entries, key)
+			nativeFrozenGitScopes.bytes -= entry.bytes
+		}
+	}
+	if len(nativeFrozenGitScopes.entries) >= maxNativeFrozenGitScopes ||
+		nativeFrozenGitScopes.bytes > maxNativeFrozenGitGlobalBytes-scopeBytes {
+		return "", errors.New("frozen Git scope cache is at capacity")
+	}
+	nativeFrozenGitScopes.entries[token] = nativeFrozenGitScopeEntry{
+		runID: exec.RunID, workflowRef: exec.WorkflowRef, scope: scope,
+		bytes: scopeBytes, expiresAt: now.Add(nativeFrozenGitScopeTTL),
+	}
+	nativeFrozenGitScopes.bytes += scopeBytes
+	if exec.workspaceCleanup != nil {
+		exec.workspaceCleanup.trackFrozen(token)
+	}
+	return token, nil
+}
+
+func nativeFrozenGitScopeMemoryBytes(scope any) (int, error) {
+	items, wrapper, err := nativeScopeItems(scope)
+	if err != nil {
+		return 0, err
+	}
+	estimated := 2
+	if wrapper != nil {
+		metadata := cloneMap(wrapper)
+		delete(metadata, "items")
+		encoded, marshalErr := json.Marshal(metadata)
+		if marshalErr != nil {
+			return 0, marshalErr
+		}
+		estimated += len(encoded)
+	}
+	for _, item := range items {
+		mapped, ok := item.(map[string]any)
+		if !ok {
+			return 0, errors.New("frozen Git scope item must be an object")
+		}
+		metadata := cloneMap(mapped)
+		content, _ := metadata["content"].(string)
+		delete(metadata, "content")
+		encoded, marshalErr := json.Marshal(metadata)
+		if marshalErr != nil {
+			return 0, marshalErr
+		}
+		estimated += len(encoded) + len(content)
+		if estimated > maxNativeFrozenGitScopeBytes {
+			return estimated, nil
+		}
+	}
+	return estimated, nil
+}
+
+func consumeNativeFrozenGitScope(exec ExecutionContext, token string) (any, error) {
+	token = strings.TrimSpace(token)
+	if len(token) != 64 {
+		return nil, errors.New("frozen Git scope token is invalid")
+	}
+	nativeFrozenGitScopes.Lock()
+	defer nativeFrozenGitScopes.Unlock()
+	entry, ok := nativeFrozenGitScopes.entries[token]
+	if !ok || entry.runID != exec.RunID || entry.workflowRef != exec.WorkflowRef ||
+		!time.Now().UTC().Before(entry.expiresAt) {
+		return nil, errors.New("frozen Git scope is unavailable")
+	}
+	delete(nativeFrozenGitScopes.entries, token)
+	nativeFrozenGitScopes.bytes -= entry.bytes
+	return entry.scope, nil
+}
+
+func discardNativeFrozenGitScope(token string) {
+	nativeFrozenGitScopes.Lock()
+	defer nativeFrozenGitScopes.Unlock()
+	if entry, ok := nativeFrozenGitScopes.entries[token]; ok {
+		delete(nativeFrozenGitScopes.entries, token)
+		nativeFrozenGitScopes.bytes -= entry.bytes
+	}
+}
+
+func nativeFrozenGitScopeReferences(scope any) []map[string]any {
+	items, _, err := nativeScopeItems(scope)
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref := make(map[string]any)
+		for _, key := range []string{
+			"path", "fileHash", "sizeBytes", "category", "mode", "selected",
+			"contentComplete", "contentUnavailable",
+		} {
+			if value, exists := item[key]; exists {
+				ref[key] = value
+			}
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
+func nativeReviewableFrozenGitScope(
+	scope any,
+	maximumGroupBytes int,
+) ([]map[string]any, []map[string]any, int, error) {
+	items, _, err := nativeScopeItems(scope)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	reviewable := make([]map[string]any, 0, len(items))
+	unsupported := make([]map[string]any, 0)
+	unavailable := 0
+	for index, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return nil, nil, 0, fmt.Errorf("frozen Git scope item %d must be an object", index)
+		}
+		if complete, _ := item["contentComplete"].(bool); complete {
+			reviewable = append(reviewable, item)
+			continue
+		}
+		unavailable++
+		reason := strings.TrimSpace(nativeAnyString(item["contentUnavailable"]))
+		if reason == "binary" || reason == "file_too_large" {
+			unsupported = append(unsupported, nativeFrozenGitScopeReferences([]map[string]any{item})[0])
+		}
+	}
+	return nativeGroupFrozenReviewScope(reviewable, 3, maximumGroupBytes), unsupported, unavailable, nil
+}
+
+func nativeGroupFrozenReviewScope(
+	files []map[string]any,
+	maximumGroupSize int,
+	maximumGroupBytes int,
+) []map[string]any {
+	if maximumGroupSize < 2 || len(files) < 2 {
+		return files
+	}
+	remaining := append([]map[string]any(nil), files...)
+	sort.Slice(remaining, func(i, j int) bool {
+		return nativeAnyString(remaining[i]["path"]) < nativeAnyString(remaining[j]["path"])
+	})
+	out := make([]map[string]any, 0, len(files))
+	groupNumber := 0
+	for len(remaining) > 0 {
+		groupNumber++
+		seed := remaining[0]
+		remaining = remaining[1:]
+		group := []map[string]any{seed}
+		groupBytes := int(nativeInt64Any(seed, "contentPromptBytes", "contentBytes", "sizeBytes", "size_bytes"))
+		for len(group) < maximumGroupSize && len(remaining) > 0 {
+			bestIndex, bestScore := -1, -1
+			for index, candidate := range remaining {
+				candidateBytes := int(
+					nativeInt64Any(candidate, "contentPromptBytes", "contentBytes", "sizeBytes", "size_bytes"),
+				)
+				if maximumGroupBytes > 0 && groupBytes+candidateBytes > maximumGroupBytes {
+					continue
+				}
+				score := 0
+				for _, member := range group {
+					score += nativeReviewRelationshipScore(member, candidate)
+				}
+				if score > bestScore {
+					bestIndex, bestScore = index, score
+				}
+			}
+			if bestIndex < 0 {
+				break
+			}
+			group = append(group, remaining[bestIndex])
+			groupBytes += int(
+				nativeInt64Any(remaining[bestIndex], "contentPromptBytes", "contentBytes", "sizeBytes", "size_bytes"),
+			)
+			remaining = append(remaining[:bestIndex], remaining[bestIndex+1:]...)
+		}
+		groupID := fmt.Sprintf("review-group-%04d", groupNumber)
+		for _, member := range group {
+			member["reviewGroup"] = groupID
+		}
+		out = append(out, group...)
+	}
+	return out
+}
+
+func nativeReviewRelationshipScore(left, right map[string]any) int {
+	leftPath := filepath.ToSlash(strings.TrimSpace(nativeAnyString(left["path"])))
+	rightPath := filepath.ToSlash(strings.TrimSpace(nativeAnyString(right["path"])))
+	score := 0
+	if path.Dir(leftPath) == path.Dir(rightPath) {
+		score += 8
+	}
+	leftStem := strings.TrimSuffix(path.Base(leftPath), path.Ext(leftPath))
+	rightStem := strings.TrimSuffix(path.Base(rightPath), path.Ext(rightPath))
+	if leftStem == rightStem {
+		score += 6
+	}
+	leftContent, _ := left["content"].(string)
+	rightContent, _ := right["content"].(string)
+	if len(rightStem) >= 3 && strings.Contains(strings.ToLower(leftContent), strings.ToLower(rightStem)) {
+		score += 4
+	}
+	if len(leftStem) >= 3 && strings.Contains(strings.ToLower(rightContent), strings.ToLower(leftStem)) {
+		score += 4
+	}
+	return score
+}
+
+func nativeRepositoryReviewUnsupportedFiles(value any) []repoaudit.UnsupportedFile {
+	children, err := nativeOptionalMapSlice(value)
+	if err != nil {
+		return nil
+	}
+	byPath := make(map[string]repoaudit.UnsupportedFile)
+	for _, child := range children {
+		items, itemErr := nativeOptionalMapSlice(child["scope"])
+		if itemErr != nil {
+			continue
+		}
+		for _, item := range items {
+			reason := strings.TrimSpace(nativeAnyString(item["contentUnavailable"]))
+			if reason != "binary" && reason != "file_too_large" {
+				continue
+			}
+			complete, declared := item["contentComplete"].(bool)
+			if reason == "" || declared && complete {
+				continue
+			}
+			files, fileErr := nativeRepositoryReviewFiles([]map[string]any{item})
+			if fileErr != nil || len(files) != 1 {
+				continue
+			}
+			byPath[files[0].Path] = repoaudit.UnsupportedFile{FileRef: files[0], Reason: reason}
+		}
+	}
+	out := make([]repoaudit.UnsupportedFile, 0, len(byPath))
+	for _, unsupported := range byPath {
+		out = append(out, unsupported)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+func nativeRepositoryReviewUnsupportedScopeFiles(value any) []repoaudit.UnsupportedFile {
+	items, err := nativeOptionalMapSlice(value)
+	if err != nil {
+		return nil
+	}
+	out := make([]repoaudit.UnsupportedFile, 0, len(items))
+	for _, item := range items {
+		reason := strings.TrimSpace(nativeAnyString(item["contentUnavailable"]))
+		if reason != "binary" && reason != "file_too_large" {
+			continue
+		}
+		files, fileErr := nativeRepositoryReviewFiles([]map[string]any{item})
+		if fileErr == nil && len(files) == 1 {
+			out = append(out, repoaudit.UnsupportedFile{FileRef: files[0], Reason: reason})
+		}
+	}
+	return out
+}
+
+func mergeNativeRepositoryUnsupportedFiles(groups ...[]repoaudit.UnsupportedFile) []repoaudit.UnsupportedFile {
+	byPath := make(map[string]repoaudit.UnsupportedFile)
+	for _, group := range groups {
+		for _, file := range group {
+			byPath[file.Path] = file
+		}
+	}
+	out := make([]repoaudit.UnsupportedFile, 0, len(byPath))
+	for _, file := range byPath {
+		out = append(out, file)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+func nativeBindRepositoryReviewInventory(
+	ctx context.Context,
+	args map[string]any,
+	exec ExecutionContext,
+	files []repoaudit.FileRef,
+) (string, error) {
+	repo, _, err := nativeResolveGitWorkspace(exec, args)
+	if err != nil {
+		return "", err
+	}
+	commit, err := nativeResolveCommit(ctx, repo, nativeStringAny(args, "commit", "commit_sha", "commitSha"))
+	if err != nil {
+		return "", err
+	}
+	inventory, err := nativeCollectInventory(ctx, repo, commit)
+	if err != nil {
+		return "", err
+	}
+	inventoryHash, err := nativeStableHash(inventory)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(nativeStringAny(args, "inventory_hash", "inventoryHash")) != inventoryHash {
+		return "", errors.New("repository review inventory hash does not match the exact commit")
+	}
+	trusted := make(map[string]nativeGitFile, len(inventory))
+	for _, file := range inventory {
+		trusted[file.Path] = file
+	}
+	for _, file := range files {
+		entry, ok := trusted[file.Path]
+		if !ok || entry.BlobHash != file.BlobSHA || entry.SizeBytes != file.SizeBytes ||
+			file.Mode != "" && entry.Mode != file.Mode {
+			return "", fmt.Errorf("repository review file %q does not match the exact commit", file.Path)
+		}
+	}
+	return commit, nil
+}
+
+func nativeRepositoryReviewIdentity(
+	ctx context.Context,
+	args map[string]any,
+	exec ExecutionContext,
+) (string, error) {
+	repo, workspace, err := nativeResolveGitWorkspace(exec, args)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository review workspace: %w", err)
+	}
+	remote := ""
+	if output, remoteErr := nativeGit(ctx, repo, "remote", "get-url", "origin"); remoteErr == nil {
+		remote = strings.TrimSpace(output)
+	}
+	if workspace.UpstreamURL != "" && filepath.IsAbs(workspace.RemoteURL) {
+		preservedUpstream, preservedErr := nativeGit(ctx, repo, "remote", "get-url", "picoclaw-upstream")
+		remotePath, remoteErr := filepath.Abs(remote)
+		sourcePath, sourceErr := filepath.Abs(workspace.RemoteURL)
+		if preservedErr == nil && strings.TrimSpace(preservedUpstream) == workspace.UpstreamURL &&
+			remoteErr == nil && sourceErr == nil && filepath.Clean(remotePath) == filepath.Clean(sourcePath) {
+			remote = workspace.UpstreamURL
+		}
+	}
+	derived := nativeGitHubRepositoryIdentity(remote)
+	explicit := strings.TrimSpace(nativeString(args, "repository"))
+	if explicit == "auto" {
+		explicit = ""
+	}
+	if derived != "" {
+		if explicit != "" && explicit != derived {
+			return "", fmt.Errorf(
+				"repository review identity %q does not match acquired GitHub repository %q",
+				explicit,
+				derived,
+			)
+		}
+		return derived, nil
+	}
+	sourceIdentity := nativeRepositorySourceIdentity(remote, repo)
+	if explicit != "" && explicit != sourceIdentity {
+		return "", errors.New("a publishable repository identity requires a matching acquired GitHub origin")
+	}
+	return sourceIdentity, nil
+}
+
+func nativeRepositorySourceIdentity(remote, fallbackRepo string) string {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return fallbackRepo
+	}
+	if strings.Contains(remote, "@") && strings.Contains(remote, ":") &&
+		!strings.Contains(remote, "://") {
+		identity, pathValue, ok := strings.Cut(remote, ":")
+		_, host, hasUser := strings.Cut(identity, "@")
+		if ok && hasUser && host != "" && pathValue != "" {
+			return "ssh://" + strings.ToLower(host) + "/" + strings.TrimPrefix(pathValue, "/")
+		}
+	}
+	if parsed, err := url.Parse(remote); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		parsed.Host = strings.ToLower(parsed.Host)
+		parsed.User = nil
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+	localRemote := remote
+	if !filepath.IsAbs(localRemote) {
+		localRemote = filepath.Join(fallbackRepo, localRemote)
+	}
+	if absolute, err := filepath.Abs(localRemote); err == nil {
+		if evaluated, evalErr := filepath.EvalSymlinks(absolute); evalErr == nil {
+			return evaluated
+		}
+		return filepath.Clean(absolute)
+	}
+	return fallbackRepo
+}
+
+func nativeGitHubRepositoryIdentity(remote string) string {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return ""
+	}
+	var repositoryPath string
+	switch {
+	case strings.Contains(remote, "@") && strings.Contains(remote, ":") && !strings.Contains(remote, "://"):
+		identity, pathValue, ok := strings.Cut(remote, ":")
+		_, host, hasUser := strings.Cut(identity, "@")
+		if !ok || !hasUser || !strings.EqualFold(host, "github.com") {
+			return ""
+		}
+		repositoryPath = pathValue
+	default:
+		parsed, err := url.Parse(remote)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") ||
+			parsed.RawQuery != "" || parsed.Fragment != "" ||
+			(parsed.Scheme != "https" && parsed.Scheme != "ssh" && parsed.Scheme != "git") {
+			return ""
+		}
+		repositoryPath = strings.TrimPrefix(parsed.Path, "/")
+	}
+	repositoryPath = strings.TrimSuffix(repositoryPath, ".git")
+	owner, repository, ok := strings.Cut(repositoryPath, "/")
+	if !ok || owner == "" || repository == "" || strings.Contains(repository, "/") ||
+		!nativeValidGitHubName(owner, false) || !nativeValidGitHubName(repository, true) {
+		return ""
+	}
+	return strings.ToLower(owner + "/" + repository)
+}
+
+func nativeValidGitHubName(value string, repository bool) bool {
+	if len(value) > 100 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' ||
+			repository && (character == '_' || character == '.') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func nativeRepositoryReviewFiles(value any) ([]repoaudit.FileRef, error) {
+	items, err := nativeMapSlice(value)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]repoaudit.FileRef, 0, len(items))
+	for index, item := range items {
+		pathValue := strings.TrimSpace(nativeAnyString(item["path"]))
+		hash := strings.TrimSpace(nativeAnyString(item["fileHash"]))
+		if hash == "" {
+			hash = strings.TrimSpace(nativeAnyString(item["blob_sha"]))
+		}
+		size := nativeInt64Any(item, "sizeBytes", "size_bytes")
+		if pathValue == "" || hash == "" || size < 0 {
+			return nil, fmt.Errorf("item %d is not an exact Git file reference", index)
+		}
+		files = append(files, repoaudit.FileRef{
+			Path: pathValue, BlobSHA: hash, SizeBytes: size,
+			Category: strings.TrimSpace(nativeAnyString(item["category"])),
+			Mode:     strings.TrimSpace(nativeAnyString(item["mode"])),
+		})
+	}
+	return files, nil
+}
+
+func nativeRepositoryReviewPlan(value any) (repoaudit.Plan, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return repoaudit.Plan{}, err
+	}
+	var plan repoaudit.Plan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return repoaudit.Plan{}, err
+	}
+	return plan, nil
+}
+
+func nativeRepositoryReviewPlanOutput(
+	plan repoaudit.Plan,
+	originalValue any,
+	compact bool,
+) (map[string]any, error) {
+	value, err := nativeJSONMap(plan)
+	if err != nil {
+		return nil, err
+	}
+	originals, err := nativeMapSlice(originalValue)
+	if err != nil {
+		return nil, err
+	}
+	pending := nativeRepositoryReviewBoundFileMaps(plan.PendingFiles, originals)
+	output := map[string]any{
+		"plan":               value,
+		"planId":             plan.ID,
+		"pendingFiles":       pending,
+		"pendingCount":       len(plan.PendingFiles),
+		"deferredCount":      len(plan.DeferredFiles),
+		"unsupportedCount":   len(plan.UnsupportedFiles),
+		"unchangedCount":     len(plan.UnchangedFiles),
+		"stateVersion":       plan.StateVersion,
+		"previouslyReviewed": plan.PreviouslyReviewed,
+	}
+	if !compact {
+		output["deferredFiles"] = nativeRepositoryReviewBoundFileMaps(plan.DeferredFiles, originals)
+		output["unsupportedFiles"] = plan.UnsupportedFiles
+		output["unchangedFiles"] = nativeRepositoryReviewBoundFileMaps(plan.UnchangedFiles, originals)
+	}
+	return output, nil
+}
+
+func nativeRepositoryReviewBoundFileMaps(
+	files []repoaudit.FileRef,
+	originals []map[string]any,
+) []map[string]any {
+	byPath := make(map[string]map[string]any, len(originals))
+	for _, original := range originals {
+		byPath[strings.TrimSpace(nativeAnyString(original["path"]))] = original
+	}
+	out := make([]map[string]any, 0, len(files))
+	for _, file := range files {
+		if original := byPath[file.Path]; original != nil {
+			bound := cloneMap(original)
+			bound["path"] = file.Path
+			bound["fileHash"] = file.BlobSHA
+			bound["sizeBytes"] = file.SizeBytes
+			out = append(out, bound)
+			continue
+		}
+		out = append(out, nativeRepositoryReviewFileMaps([]repoaudit.FileRef{file})[0])
+	}
+	return out
+}
+
+func nativeRepositoryReviewFileMaps(files []repoaudit.FileRef) []map[string]any {
+	out := make([]map[string]any, 0, len(files))
+	for _, file := range files {
+		out = append(out, map[string]any{
+			"path": file.Path, "fileHash": file.BlobSHA, "sizeBytes": file.SizeBytes,
+			"category": file.Category, "mode": file.Mode,
+		})
+	}
+	return out
+}
+
+func nativeRepositoryReviewObservations(
+	args map[string]any,
+	plan repoaudit.Plan,
+) ([]repoaudit.Observation, []repoaudit.FileRef, error) {
+	children, err := nativeOptionalMapSlice(args["managed_children"])
+	if err != nil {
+		return nil, nil, fmt.Errorf("managed children: %w", err)
+	}
+	_, boundedReviewDeclared := args["reviewable_count"]
+	if len(children) == 0 && boundedReviewDeclared {
+		return nil, []repoaudit.FileRef{}, nil
+	}
+	observations := make([]repoaudit.Observation, 0, len(children))
+	totalCoverage := make(map[string]int)
+	successfulCoverage := make(map[string]int)
+	fileRefs := make(map[string]repoaudit.FileRef)
+	for index, child := range children {
+		scopeFiles, scopeErr := nativeRepositoryReviewFiles(child["scope"])
+		if scopeErr != nil {
+			return nil, nil, fmt.Errorf("managed child %d scope: %w", index, scopeErr)
+		}
+		required, declared := child["required"].(bool)
+		if !declared {
+			required = true
+		}
+		for _, file := range scopeFiles {
+			if required {
+				totalCoverage[file.Path]++
+			}
+			fileRefs[file.Path] = file
+		}
+		structured := nativeMapValue(child["structured"])
+		valid, _ := child["valid"].(bool)
+		_, runFailed := child["run_error"]
+		if structured == nil || !valid || runFailed {
+			continue
+		}
+		completeFiles := nativeRepositoryReviewCompletedScopePaths(child["scope"])
+		reviewedPaths, reviewErr := nativeRepositoryReviewAcknowledgedPaths(
+			structured, scopeFiles, completeFiles,
+		)
+		if reviewErr != nil {
+			continue
+		}
+		for _, file := range scopeFiles {
+			if required && reviewedPaths[file.Path] {
+				successfulCoverage[file.Path]++
+			}
+		}
+		modelMeta := nativeMapValue(child["model"])
+		model := strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
+		if model == "" {
+			model = strings.TrimSpace(nativeAnyString(modelMeta["default"]))
+		}
+		observation, parseErr := nativeRepositoryReviewObservation(
+			structured,
+			child["scope"],
+			model,
+			strings.TrimSpace(nativeAnyString(child["label"])),
+			strings.TrimSpace(nativeAnyString(child["text"])),
+		)
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("managed child %d: %w", index, parseErr)
+		}
+		observations = append(observations, observation)
+	}
+	if len(children) > 0 {
+		completed := make([]repoaudit.FileRef, 0, len(fileRefs))
+		for path, total := range totalCoverage {
+			if total > 0 && successfulCoverage[path] == total {
+				completed = append(completed, fileRefs[path])
+			}
+		}
+		sort.Slice(completed, func(i, j int) bool { return completed[i].Path < completed[j].Path })
+		return observations, completed, nil
+	}
+	structured := nativeMapValue(args["review"])
+	if structured == nil {
+		return nil, nil, errors.New("review.repository record requires structured review evidence")
+	}
+	model := strings.TrimSpace(nativeString(args, "model"))
+	if model == "" {
+		model = "default"
+	}
+	scopeValue := firstNonNil(args["scope"], nativeRepositoryReviewFileMaps(plan.PendingFiles))
+	scopeFiles, err := nativeRepositoryReviewFiles(scopeValue)
+	if err != nil {
+		return nil, nil, err
+	}
+	reviewedPaths, err := nativeRepositoryReviewAcknowledgedPaths(
+		structured, scopeFiles, nativeRepositoryReviewCompletedScopePaths(scopeValue),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	observation, err := nativeRepositoryReviewObservation(
+		structured,
+		scopeValue,
+		model,
+		"single review",
+		strings.TrimSpace(nativeString(args, "text")),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	completed := make([]repoaudit.FileRef, 0, len(scopeFiles))
+	for _, file := range scopeFiles {
+		if reviewedPaths[file.Path] {
+			completed = append(completed, file)
+		}
+	}
+	return []repoaudit.Observation{observation}, completed, nil
+}
+
+func nativeRepositoryReviewAcknowledgedPaths(
+	structured map[string]any,
+	scopeFiles []repoaudit.FileRef,
+	completeFiles map[string]bool,
+) (map[string]bool, error) {
+	if _, declared := structured["reviewedFiles"]; !declared {
+		return nil, errors.New("reviewedFiles is required")
+	}
+	allowed := make(map[string]bool, len(scopeFiles))
+	for _, file := range scopeFiles {
+		allowed[file.Path] = completeFiles[file.Path]
+	}
+	acknowledged := make(map[string]bool, len(scopeFiles))
+	for _, raw := range nativeStringSlice(structured["reviewedFiles"]) {
+		pathValue := strings.TrimSpace(filepath.ToSlash(raw))
+		if !allowed[pathValue] {
+			return nil, fmt.Errorf("path %q is not readable assigned evidence", pathValue)
+		}
+		if acknowledged[pathValue] {
+			return nil, fmt.Errorf("path %q is duplicated", pathValue)
+		}
+		acknowledged[pathValue] = true
+	}
+	return acknowledged, nil
+}
+
+func nativeRepositoryReviewCompletedScopePaths(value any) map[string]bool {
+	items, err := nativeMapSlice(value)
+	if err != nil {
+		return nil
+	}
+	completed := make(map[string]bool, len(items))
+	for _, item := range items {
+		pathValue := strings.TrimSpace(nativeAnyString(item["path"]))
+		value, declared := item["contentComplete"].(bool)
+		completed[pathValue] = !declared || value
+	}
+	return completed
+}
+
+func nativeRepositoryReviewObservation(
+	structured map[string]any,
+	scopeValue any,
+	model string,
+	reviewer string,
+	raw string,
+) (repoaudit.Observation, error) {
+	scope, err := nativeRepositoryReviewFiles(scopeValue)
+	if err != nil {
+		return repoaudit.Observation{}, fmt.Errorf("scope: %w", err)
+	}
+	findingsRaw, err := nativeOptionalMapSlice(structured["findings"])
+	if err != nil {
+		return repoaudit.Observation{}, fmt.Errorf("findings: %w", err)
+	}
+	findings := make([]repoaudit.FindingCandidate, 0, len(findingsRaw))
+	completedPaths := nativeRepositoryReviewCompletedScopePaths(scopeValue)
+	reviewedPaths := nativeStringSet(nativeStringSlice(structured["reviewedFiles"]))
+	_, reviewedFilesDeclared := structured["reviewedFiles"]
+	for index, rawFinding := range findingsRaw {
+		data, marshalErr := json.Marshal(rawFinding)
+		if marshalErr != nil {
+			return repoaudit.Observation{}, marshalErr
+		}
+		var finding repoaudit.FindingCandidate
+		if unmarshalErr := json.Unmarshal(data, &finding); unmarshalErr != nil {
+			return repoaudit.Observation{}, fmt.Errorf("finding %d: %w", index, unmarshalErr)
+		}
+		findingPath := strings.TrimSpace(filepath.ToSlash(finding.File))
+		if !completedPaths[findingPath] || reviewedFilesDeclared && !reviewedPaths[findingPath] {
+			continue
+		}
+		findings = append(findings, finding)
+	}
+	digest := sha256.Sum256([]byte(raw))
+	return repoaudit.Observation{
+		Model: model, Reviewer: reviewer, ScopeFiles: scope, Findings: findings,
+		Summary:   strings.TrimSpace(nativeAnyString(structured["summary"])),
+		RawDigest: "sha256:" + hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+func nativeOptionalMapSlice(value any) ([]map[string]any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	return nativeMapSlice(value)
+}
+
+func nativeJSONMap(value any) (map[string]any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func nativeInt64Any(values map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		switch value := values[key].(type) {
+		case int:
+			return int64(value)
+		case int64:
+			return value
+		case float64:
+			return int64(value)
+		case json.Number:
+			parsed, _ := value.Int64()
+			return parsed
+		case string:
+			parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			return parsed
+		}
+	}
+	return 0
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func nativeWorkflowState(ctx context.Context, args map[string]any, exec ExecutionContext) (map[string]any, error) {
@@ -294,20 +1349,32 @@ func nativeGitInventory(ctx context.Context, args map[string]any, exec Execution
 			excluded++
 		}
 	}
-	return map[string]any{
+	output := map[string]any{
 		"workingDirectory": repo,
 		"workspace":        workspace.Map(),
 		"commit":           commit,
 		"target":           target,
 		"inventoryHash":    inventoryHash,
-		"files":            files,
-		"selectedFiles":    selected,
 		"counts": map[string]any{
 			"totalFiles":         len(files),
 			"totalSelectedFiles": len(selected),
 			"filesExcluded":      excluded,
 		},
-	}, nil
+	}
+	if nativeBoolAny(args, "compact") {
+		compactSelected := make([]map[string]any, 0, len(selected))
+		for _, file := range selected {
+			ref := cloneMap(file)
+			delete(ref, "source")
+			delete(ref, "selected")
+			compactSelected = append(compactSelected, ref)
+		}
+		output["selectedFiles"] = compactSelected
+	} else {
+		output["files"] = files
+		output["selectedFiles"] = selected
+	}
+	return output, nil
 }
 
 type nativeGitDiffEntry struct {
@@ -890,11 +1957,12 @@ func nativeGitWorkspaceRefFromMap(value map[string]any) nativeGitWorkspaceRef {
 		return nativeGitWorkspaceRef{}
 	}
 	return nativeGitWorkspaceRef{
-		ID:        strings.TrimSpace(nativeAnyString(value["id"])),
-		RepoID:    strings.TrimSpace(nativeAnyString(value["repo_id"])),
-		RemoteURL: strings.TrimSpace(nativeAnyString(value["remote_url"])),
-		Ref:       strings.TrimSpace(nativeAnyString(value["ref"])),
-		Path:      strings.TrimSpace(nativeAnyString(value["path"])),
+		ID:          strings.TrimSpace(nativeAnyString(value["id"])),
+		RepoID:      strings.TrimSpace(nativeAnyString(value["repo_id"])),
+		RemoteURL:   strings.TrimSpace(nativeAnyString(value["remote_url"])),
+		UpstreamURL: strings.TrimSpace(nativeAnyString(value["upstream_url"])),
+		Ref:         strings.TrimSpace(nativeAnyString(value["ref"])),
+		Path:        strings.TrimSpace(nativeAnyString(value["path"])),
 	}
 }
 
@@ -908,6 +1976,9 @@ func (w nativeGitWorkspaceRef) Map() map[string]any {
 	}
 	if strings.TrimSpace(w.RemoteURL) != "" {
 		out["remote_url"] = strings.TrimSpace(w.RemoteURL)
+	}
+	if strings.TrimSpace(w.UpstreamURL) != "" {
+		out["upstream_url"] = strings.TrimSpace(w.UpstreamURL)
 	}
 	if strings.TrimSpace(w.Ref) != "" {
 		out["ref"] = strings.TrimSpace(w.Ref)
@@ -1042,12 +2113,20 @@ func nativeResolveCommit(ctx context.Context, repo, commit string) (string, erro
 }
 
 func nativeCollectInventory(ctx context.Context, repo, commit string) ([]nativeGitFile, error) {
-	output, err := nativeGit(ctx, repo, "ls-tree", "-r", "-l", "--full-tree", commit)
+	output, exceeded, err := nativeGitBoundedOutput(
+		ctx,
+		repo,
+		maxNativeGitInventoryBytes,
+		"ls-tree", "-r", "-l", "-z", "--full-tree", commit,
+	)
 	if err != nil {
 		return nil, err
 	}
+	if exceeded {
+		return nil, fmt.Errorf("git inventory exceeds %d bytes", maxNativeGitInventoryBytes)
+	}
 	inventory := make([]nativeGitFile, 0)
-	for _, line := range strings.Split(output, "\n") {
+	for _, line := range strings.Split(output, "\x00") {
 		if strings.TrimSpace(line) == "" || !strings.Contains(line, "\t") {
 			continue
 		}
@@ -1073,6 +2152,9 @@ func nativeCollectInventory(ctx context.Context, repo, commit string) ([]nativeG
 			BlobHash:  parts[2],
 			SizeBytes: size,
 		})
+		if len(inventory) > maxNativeGitInventoryFiles {
+			return nil, fmt.Errorf("git inventory exceeds %d files", maxNativeGitInventoryFiles)
+		}
 	}
 	sort.Slice(inventory, func(i, j int) bool {
 		return inventory[i].Path < inventory[j].Path
@@ -1189,6 +2271,23 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 	if err != nil {
 		return nil, fmt.Errorf("files: %w", err)
 	}
+	for _, file := range files {
+		if _, pathErr := nativeCleanRepoFilePath(nativeAnyString(file["path"])); pathErr != nil {
+			return nil, pathErr
+		}
+	}
+	commit, err := nativeResolveCommit(ctx, repo, nativeString(args, "commit"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve inventory commit: %w", err)
+	}
+	trustedInventory, err := nativeCollectInventory(ctx, repo, commit)
+	if err != nil {
+		return nil, fmt.Errorf("load trusted inventory: %w", err)
+	}
+	trustedFiles := make(map[string]nativeGitFile, len(trustedInventory))
+	for _, file := range trustedInventory {
+		trustedFiles[file.Path] = file
+	}
 	filter := nativeMapValue(args["filter"])
 	includeGlobs := nativeStringSliceAny(
 		filter,
@@ -1227,6 +2326,13 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 		}
 		filePath = cleanPath
 		file["path"] = filePath
+		trusted, ok := trustedFiles[filePath]
+		if !ok || strings.TrimSpace(nativeAnyString(file["fileHash"])) != trusted.BlobHash ||
+			nativeInt64Any(file, "sizeBytes", "size_bytes") != trusted.SizeBytes {
+			return nil, fmt.Errorf("file %q does not match immutable inventory commit %s", filePath, commit)
+		}
+		file["fileHash"] = trusted.BlobHash
+		file["sizeBytes"] = trusted.SizeBytes
 		baseSelected := nativeTargetSelects(target, category)
 		matchesInclude := len(includeGlobs) == 0 && len(selectedPaths) == 0
 		if !matchesInclude {
@@ -1249,7 +2355,7 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 	return map[string]any{
 		"workingDirectory": repo,
 		"workspace":        workspace.Map(),
-		"commit":           nativeString(args, "commit"),
+		"commit":           commit,
 		"target":           target,
 		"inventoryHash":    nativeStringAny(args, "inventory_hash", "inventoryHash"),
 		"filter": map[string]any{
@@ -1268,12 +2374,166 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 	}, nil
 }
 
+func hydrateImmutableGitScope(
+	ctx context.Context,
+	scope any,
+	args map[string]any,
+	exec ExecutionContext,
+) (any, error) {
+	items, wrapper, err := nativeScopeItems(scope)
+	if err != nil {
+		return nil, err
+	}
+	perFileLimit := int(nativeInt64Any(args, "max_content_bytes", "maxContentBytes"))
+	if perFileLimit <= 0 || perFileLimit > maxNativeGitContentFileBytes {
+		perFileLimit = maxNativeGitContentFileBytes
+	}
+	aggregateLimit := int(nativeInt64Any(args, "max_total_content_bytes", "maxTotalContentBytes"))
+	if aggregateLimit <= 0 || aggregateLimit > maxNativeGitContentAggregateBytes {
+		aggregateLimit = maxNativeGitContentAggregateBytes
+	}
+	used := 0
+	hydrated := make([]any, 0, len(items))
+	for index, raw := range items {
+		file, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("immutable Git scope item %d must be an object", index)
+		}
+		file = cloneMap(file)
+		delete(file, "content")
+		delete(file, "contentBytes")
+		delete(file, "contentComplete")
+		delete(file, "contentUnavailable")
+		if strings.TrimSpace(nativeAnyString(file["category"])) == "binary" {
+			file["contentComplete"] = false
+			file["contentUnavailable"] = "binary"
+			hydrated = append(hydrated, file)
+			continue
+		}
+		source := nativeMapValue(file["source"])
+		workspacePath := strings.TrimSpace(nativeAnyString(source["workspacePath"]))
+		if workspacePath == "" {
+			return nil, fmt.Errorf("immutable Git scope item %d has no workspace source", index)
+		}
+		repo, resolveErr := nativeResolveRepo(exec, workspacePath)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("immutable Git scope item %d: %w", index, resolveErr)
+		}
+		delete(file, "source")
+		size := nativeInt64Any(file, "sizeBytes", "size_bytes")
+		if size < 0 {
+			return nil, fmt.Errorf("immutable Git scope item %d has invalid size", index)
+		}
+		if size > int64(perFileLimit) {
+			file["contentComplete"] = false
+			file["contentUnavailable"] = "file_too_large"
+			hydrated = append(hydrated, file)
+			continue
+		}
+		if size > int64(aggregateLimit-used) {
+			file["contentComplete"] = false
+			file["contentUnavailable"] = "aggregate_limit"
+			hydrated = append(hydrated, file)
+			continue
+		}
+		hash := strings.TrimSpace(nativeAnyString(file["fileHash"]))
+		if !nativeValidGitObjectID(hash) {
+			return nil, fmt.Errorf("immutable Git scope file %q has invalid blob hash", nativeAnyString(file["path"]))
+		}
+		content, exceeded, err := nativeGitBoundedOutput(ctx, repo, perFileLimit+1, "cat-file", "blob", hash)
+		if err != nil {
+			return nil, fmt.Errorf("read immutable blob for %q: %w", nativeAnyString(file["path"]), err)
+		}
+		if exceeded || int64(len(content)) != size {
+			return nil, fmt.Errorf("immutable blob size mismatch for %q", nativeAnyString(file["path"]))
+		}
+		if !nativeReviewText(content) {
+			file["contentComplete"] = false
+			file["contentUnavailable"] = "binary"
+			hydrated = append(hydrated, file)
+			continue
+		}
+		promptBytes := nativeReviewEncodedContentBytes(content)
+		if promptBytes > perFileLimit {
+			file["contentComplete"] = false
+			file["contentUnavailable"] = "file_too_large"
+			hydrated = append(hydrated, file)
+			continue
+		}
+		file["content"] = content
+		file["contentBytes"] = len(content)
+		file["contentPromptBytes"] = promptBytes
+		file["contentComplete"] = true
+		used += len(content)
+		hydrated = append(hydrated, file)
+	}
+	if wrapper != nil {
+		out := cloneMap(wrapper)
+		out["items"] = hydrated
+		return out, nil
+	}
+	if _, preserveMapSlice := scope.([]map[string]any); preserveMapSlice {
+		out := make([]map[string]any, 0, len(hydrated))
+		for _, item := range hydrated {
+			out = append(out, item.(map[string]any))
+		}
+		return out, nil
+	}
+	return hydrated, nil
+}
+
+func nativeReviewText(content string) bool {
+	if !utf8.ValidString(content) || strings.IndexByte(content, 0) >= 0 {
+		return false
+	}
+	for _, character := range content {
+		if character < 0x20 && character != '\n' && character != '\r' && character != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeReviewEncodedContentBytes(content string) int {
+	encoded, err := json.Marshal(content)
+	if err != nil || len(encoded) < 2 {
+		return len(content)
+	}
+	return len(encoded) - 2
+}
+
+func nativeScopeItems(scope any) ([]any, map[string]any, error) {
+	switch typed := scope.(type) {
+	case []any:
+		return append([]any(nil), typed...), nil, nil
+	case []map[string]any:
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+		return items, nil, nil
+	case map[string]any:
+		items, ok := typed["items"]
+		if !ok {
+			return []any{typed}, nil, nil
+		}
+		slice, _, err := nativeScopeItems(items)
+		return slice, typed, err
+	default:
+		return nil, nil, errors.New("immutable Git scope must be an object or array")
+	}
+}
+
 func nativeCategorizePath(filePath string) string {
 	low := strings.ToLower(filepath.ToSlash(filePath))
 	for _, pattern := range nativeExcludePatterns {
-		if ok, _ := path.Match(pattern, low); ok {
+		if nativeGlobMatches(pattern, low) {
 			return "excluded"
 		}
+	}
+	ext := path.Ext(low)
+	if _, binary := nativeBinaryExtensions[ext]; binary {
+		return "binary"
 	}
 	parts := strings.FieldsFunc(low, func(r rune) bool {
 		return r == '/' || r == '_' || r == '.' || r == '-'
@@ -1284,18 +2544,25 @@ func nativeCategorizePath(filePath string) string {
 				return "tests"
 			}
 		}
-		if strings.Contains(low, marker) {
-			return "tests"
-		}
 	}
-	ext := path.Ext(low)
+	baseWithoutExt := strings.TrimSuffix(path.Base(low), path.Ext(low))
+	if strings.HasSuffix(baseWithoutExt, "_test") || strings.HasSuffix(baseWithoutExt, ".test") ||
+		strings.HasSuffix(baseWithoutExt, "_spec") || strings.HasSuffix(baseWithoutExt, ".spec") {
+		return "tests"
+	}
+	base := path.Base(low)
+	if base == "dockerfile" || strings.HasPrefix(base, "dockerfile.") ||
+		base == "makefile" || base == "rakefile" || base == "gemfile" ||
+		base == "procfile" || base == "justfile" || base == "cmakelists.txt" {
+		return "code"
+	}
 	if _, ok := nativeCodeExtensions[ext]; ok {
 		return "code"
 	}
 	if _, ok := nativeConfigExtensions[ext]; ok && !strings.HasSuffix(low, ".lock") {
 		return "code"
 	}
-	return "excluded"
+	return "other"
 }
 
 func normalizeFileTarget(value string) string {
@@ -1310,7 +2577,7 @@ func normalizeFileTarget(value string) string {
 func nativeTargetSelects(target, category string) bool {
 	switch target {
 	case "all":
-		return category == "code" || category == "tests"
+		return category != "excluded"
 	case "code":
 		return category == "code"
 	case "tests":

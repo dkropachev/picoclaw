@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -95,6 +96,21 @@ func TestValidateAgentStructuredOutputRejectsSchemaMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateAgentStructuredOutputEnforcesMinimumStringLength(t *testing.T) {
+	contract := &AgentOutputContract{Format: "json", Schema: map[string]any{
+		"type": "object", "required": []any{"symbol"},
+		"properties": map[string]any{
+			"symbol": map[string]any{"type": "string", "minLength": 1},
+		},
+	}}
+	if result := ValidateAgentStructuredOutput(`{"symbol":""}`, contract); result.Valid {
+		t.Fatalf("empty required symbol passed minLength: %#v", result)
+	}
+	if result := ValidateAgentStructuredOutput(`{"symbol":"Save"}`, contract); !result.Valid {
+		t.Fatalf("nonempty symbol failed minLength: %#v", result)
+	}
+}
+
 func TestValidateAgentStructuredOutputEnforcesAdditionalProperties(t *testing.T) {
 	contract := &AgentOutputContract{
 		Format: "json",
@@ -132,6 +148,47 @@ func TestValidateAgentStructuredOutputEnforcesAdditionalProperties(t *testing.T)
 	)
 	if result.Valid {
 		t.Fatalf("invalid schema-valued additional property accepted: %#v", result)
+	}
+}
+
+func TestValidateAgentStructuredOutputEnforcesMaximumsAndNumericMinimum(t *testing.T) {
+	contract := &AgentOutputContract{Format: "json", Schema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"label": map[string]any{"type": "string", "maxLength": json.Number("4")},
+			"score": map[string]any{"type": "number", "minimum": 2.5},
+			"items": map[string]any{"type": "array", "maxItems": int64(1)},
+		},
+	}}
+	for _, raw := range []string{
+		`{"label":"longer","score":3,"items":[]}`,
+		`{"label":"ok","score":2,"items":[]}`,
+		`{"label":"ok","score":"three","items":[]}`,
+		`{"label":"ok","score":3,"items":[1,2]}`,
+	} {
+		if result := ValidateAgentStructuredOutput(raw, contract); result.Valid {
+			t.Fatalf("structured output %s unexpectedly passed bounded schema", raw)
+		}
+	}
+	if result := ValidateAgentStructuredOutput(
+		`{"label":"four","score":2.5,"items":[1]}`,
+		contract,
+	); !result.Valid {
+		t.Fatalf("bounded structured output failed: %#v", result)
+	}
+
+	for _, test := range []struct {
+		value any
+		want  int
+	}{
+		{value: 2, want: 2},
+		{value: int64(3), want: 3},
+		{value: float64(4), want: 4},
+		{value: json.Number("5"), want: 5},
+	} {
+		if got := schemaIntegerKeyword(map[string]any{"limit": test.value}, "limit"); got != test.want {
+			t.Fatalf("schema integer %T = %d, want %d", test.value, got, test.want)
+		}
 	}
 }
 

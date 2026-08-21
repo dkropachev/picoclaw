@@ -89,3 +89,13 @@ func TestPRWorkspaceIssuePublisherDistinguishesPreDispatchAndAmbiguousFailures(t
 		})
 	}
 }
+
+func TestIssueURLRepositoryComparisonIsCaseInsensitive(t *testing.T) {
+	if !issueURLBelongsToRepository(
+		"https://github.com/Owner/Repo/issues/12",
+		"https://github.com",
+		"owner/repo",
+	) {
+		t.Fatal("canonical GitHub issue URL casing did not match repository identity")
+	}
+}

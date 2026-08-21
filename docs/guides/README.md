@@ -9,6 +9,8 @@ Task-oriented guides for setup, configuration, and common PicoClaw workflows.
 - [Routing Guide](routing-guide.md): agent dispatch, session overrides, and light-model routing.
 - [Pull Request Workspaces](pull-request-workspaces.md): review, implement,
   validate, gate, and publish one pull request from a shared workspace.
+- [Repository Bug Finder](repository-bug-finder.md): run incremental,
+  multi-model repository review and act on durable findings.
 - [Chat Apps Configuration](chat-apps.md): supported chat platforms and channel-specific setup paths.
 - [Providers & Model Configuration](providers.md): `model_list`, providers, and model routing.
 - [Spawn & Async Tasks](spawn-tasks.md): background work, long-running tasks, and sub-agent orchestration.

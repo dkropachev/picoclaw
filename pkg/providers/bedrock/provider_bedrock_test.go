@@ -386,6 +386,7 @@ func TestParseResponse_StopReasons(t *testing.T) {
 		{types.StopReasonMaxTokens, "length"},
 		{types.StopReasonStopSequence, "stop"},
 		{types.StopReasonContentFiltered, "content_filter"},
+		{types.StopReasonGuardrailIntervened, "guardrail_intervened"},
 	}
 
 	for _, tt := range tests {
@@ -859,6 +860,7 @@ func TestParseStreamResponse_StopReasons(t *testing.T) {
 		{types.StopReasonToolUse, "tool_calls"},
 		{types.StopReasonStopSequence, "stop"},
 		{types.StopReasonContentFiltered, "content_filter"},
+		{types.StopReasonGuardrailIntervened, "guardrail_intervened"},
 	}
 
 	for _, tt := range tests {

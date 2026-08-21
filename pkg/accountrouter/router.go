@@ -220,7 +220,7 @@ func (r *Router) recordFallbackResult(
 		pruneRouterState(rs, now, r.ConfigHash, r.knownAccountNames())
 		attempts := resultAttempts(result)
 		for _, attempt := range attempts {
-			if attempt.Error == nil {
+			if attempt.Error == nil || attempt.Reason == providers.FailoverSafetyFilter {
 				continue
 			}
 			account := selection.CandidateAccounts[attempt.IdentityKey]
@@ -263,7 +263,8 @@ func (r *Router) recordFallbackResult(
 				if account == "" {
 					continue
 				}
-				if failErr := providers.ClassifyError(err, candidate.Provider, candidate.Model); failErr != nil {
+				if failErr := providers.ClassifyError(err, candidate.Provider, candidate.Model); failErr != nil &&
+					failErr.Reason != providers.FailoverSafetyFilter {
 					failureErr := err
 					if private {
 						failureErr = errPrivateProviderRequest

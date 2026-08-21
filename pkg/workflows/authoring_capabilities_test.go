@@ -13,6 +13,7 @@ func TestNativeFunctionNamesReturnsSortedCopy(t *testing.T) {
 		"git.diff",
 		"git.filter",
 		"git.inventory",
+		"review.repository",
 		"workflow.artifact",
 		"workflow.state",
 	}

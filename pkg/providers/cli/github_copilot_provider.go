@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -268,6 +269,14 @@ func (p *GitHubCopilotProvider) Chat(
 	return &LLMResponse{
 		FinishReason: "stop",
 		Content:      content,
+		Usage: githubCopilotUsageInfo(
+			string(fullcontent),
+			content,
+			githubCopilotFloat(resp.Data.InputTokens),
+			githubCopilotFloat(resp.Data.OutputTokens),
+			githubCopilotFloat(resp.Data.CacheReadTokens),
+			0,
+		),
 	}, nil
 }
 
@@ -462,6 +471,14 @@ func (p *GitHubCopilotProvider) chatWithToken(
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+			PromptDetails    struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
 		return nil, fmt.Errorf("decoding GitHub Copilot chat response: %w", err)
@@ -477,7 +494,63 @@ func (p *GitHubCopilotProvider) chatWithToken(
 	if finishReason == "" {
 		finishReason = "stop"
 	}
-	return &LLMResponse{FinishReason: finishReason, Content: content}, nil
+	return &LLMResponse{
+		FinishReason: finishReason,
+		Content:      content,
+		Usage: githubCopilotUsageInfo(
+			string(payload),
+			content,
+			chatResp.Usage.PromptTokens,
+			chatResp.Usage.CompletionTokens,
+			chatResp.Usage.PromptDetails.CachedTokens,
+			chatResp.Usage.TotalTokens,
+		),
+	}, nil
+}
+
+func githubCopilotFloat(value *float64) int {
+	if value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || *value <= 0 {
+		return 0
+	}
+	const maximum = 2_147_483_647
+	if *value >= maximum {
+		return maximum
+	}
+	return int(math.Ceil(*value))
+}
+
+func githubCopilotUsageInfo(
+	prompt string,
+	content string,
+	promptTokens int,
+	completionTokens int,
+	cachedTokens int,
+	totalTokens int,
+) *UsageInfo {
+	if promptTokens <= 0 {
+		promptTokens = githubCopilotEstimatedTokens(prompt)
+	}
+	if completionTokens <= 0 {
+		completionTokens = githubCopilotEstimatedTokens(content)
+	}
+	if cachedTokens < 0 {
+		cachedTokens = 0
+	}
+	cachedTokens = min(cachedTokens, promptTokens)
+	totalTokens = max(totalTokens, promptTokens+completionTokens)
+	return &UsageInfo{
+		PromptTokens: promptTokens, CompletionTokens: completionTokens,
+		TotalTokens: totalTokens, CachedTokens: cachedTokens,
+	}
+}
+
+func githubCopilotEstimatedTokens(value string) int {
+	if value == "" {
+		return 0
+	}
+	// Three UTF-8 bytes per token is deliberately conservative when Copilot's
+	// transport omits usage metadata.
+	return (len([]byte(value)) + 2) / 3
 }
 
 func githubCopilotChatMessages(messages []Message) []map[string]string {

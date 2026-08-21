@@ -66,6 +66,9 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		})
 		return nil, false, nil
 	}
+	if admissionErr := admitWorkflowAgentCall(ts.opts.callAdmission); admissionErr != nil {
+		return nil, true, admissionErr
+	}
 
 	publisher := &streamingChunkPublisher{
 		streamer:  streamer,

@@ -1092,8 +1092,18 @@ func validateDevelopmentLineInventory(state *storeState) error {
 		if repository == nil || repository.RemoteURL != workspace.RemoteURL {
 			return errors.New("git workspace repository owner is invalid")
 		}
+		if workspace.UpstreamURL != "" {
+			normalized, ok := normalizeRemoteRepository(workspace.UpstreamURL)
+			if !ok || normalized != workspace.UpstreamURL || len(workspace.UpstreamURL) > 4096 ||
+				!utf8.ValidString(workspace.UpstreamURL) || containsPinnedControlCharacter(workspace.UpstreamURL) {
+				return errors.New("git workspace upstream identity is invalid")
+			}
+		}
 		hasPinnedSource := workspace.PinnedSourceRef != ""
 		hasPinnedCommit := workspace.PinnedCommit != ""
+		if workspace.FreshSnapshot && (workspace.PreservedBranch != "" || hasPinnedSource) {
+			return errors.New("fresh git workspace snapshot identity is invalid")
+		}
 		if hasPinnedSource != hasPinnedCommit {
 			return errors.New("git workspace has incomplete pinned identity")
 		}

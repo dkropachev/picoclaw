@@ -418,6 +418,8 @@ func parseStreamResponse(
 					finishReason = "stop"
 				case types.StopReasonContentFiltered:
 					finishReason = "content_filter"
+				case types.StopReasonGuardrailIntervened:
+					finishReason = "guardrail_intervened"
 				default:
 					finishReason = "stop"
 				}
@@ -849,6 +851,8 @@ func parseResponse(output *bedrockruntime.ConverseOutput) (*LLMResponse, error) 
 		finishReason = "stop"
 	case types.StopReasonContentFiltered:
 		finishReason = "content_filter"
+	case types.StopReasonGuardrailIntervened:
+		finishReason = "guardrail_intervened"
 	}
 
 	// Build usage info

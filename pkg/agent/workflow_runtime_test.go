@@ -91,6 +91,199 @@ func TestWorkflowPromptCacheKey(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewProfileUsesDefaultFallbackChainAndRelevantDependencies(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.AccountRef = "review-account"
+	cfg.Agents.Defaults.ModelName = "review-primary"
+	cfg.Agents.Defaults.ModelFallbacks = []string{"review-fallback"}
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelAliases = []config.ModelAliasConfig{
+		{Name: "review-primary", Model: "primary-v1"},
+		{Name: "review-fallback", Model: "fallback-v1"},
+		{Name: "unrelated", Model: "unrelated-v1"},
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "review-account", Provider: "openai", Model: "primary-v1",
+		APIBase: "http://example.invalid/v1", APIKeys: config.SimpleSecureStrings("test-key"),
+		Enabled: true,
+	}}
+	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
+	runner := &workflowAgentRunner{loop: loop}
+	profile, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", nil)
+	if err != nil || !profile.IncludeDefaultReviewer ||
+		!reflect.DeepEqual(profile.ReviewerModels, []string{"review-fallback"}) ||
+		profile.Revision == "" || profile.MaxContentBytes < 8<<10 {
+		t.Fatalf("default review profile=%#v err=%v", profile, err)
+	}
+	cfg.ModelAliases[2].Model = "unrelated-v2"
+	unrelated, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", nil)
+	if err != nil || unrelated.Revision != profile.Revision {
+		t.Fatalf("unrelated model changed profile from %q to %q: %v", profile.Revision, unrelated.Revision, err)
+	}
+	cfg.ModelAliases[0].Model = "primary-v2"
+	relevant, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", nil)
+	if err != nil || relevant.Revision == profile.Revision {
+		t.Fatalf("relevant alias did not change profile=%#v err=%v", relevant, err)
+	}
+	exact, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", []string{"review-primary", "review-fallback"},
+	)
+	if err != nil || exact.IncludeDefaultReviewer ||
+		!reflect.DeepEqual(exact.ReviewerModels, []string{"review-primary", "review-fallback"}) {
+		t.Fatalf("explicit review profile=%#v err=%v", exact, err)
+	}
+	cfg.ModelList[0].Provider = "codex-cli"
+	cfg.ModelList[0].Model = "codex-cli/codex"
+	if _, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", []string{"review-primary"},
+	); err == nil || !strings.Contains(err.Error(), "agentic CLI provider") {
+		t.Fatalf("agentic CLI reviewer was not rejected: %v", err)
+	}
+}
+
+func TestRepositoryReviewProfileRejectsUnavailableRuntimeAgentsAndModels(t *testing.T) {
+	var nilRunner *workflowAgentRunner
+	if _, err := nilRunner.ResolveRepositoryReviewProfile(context.Background(), "main", nil); err == nil ||
+		!strings.Contains(err.Error(), "agent loop not configured") {
+		t.Fatalf("nil resolver error = %v", err)
+	}
+	if _, err := (&workflowAgentRunner{loop: &AgentLoop{}}).ResolveRepositoryReviewProfile(
+		context.Background(), "main", nil,
+	); err == nil || !strings.Contains(err.Error(), "registry not configured") {
+		t.Fatalf("missing registry error = %v", err)
+	}
+	missing := &AgentLoop{registry: &AgentRegistry{agents: map[string]*AgentInstance{}}}
+	if _, err := (&workflowAgentRunner{loop: missing}).ResolveRepositoryReviewProfile(
+		context.Background(), "missing", nil,
+	); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing agent error = %v", err)
+	}
+	withoutModels := &AgentLoop{registry: &AgentRegistry{agents: map[string]*AgentInstance{
+		"main": {ID: "main"},
+	}}}
+	if _, err := (&workflowAgentRunner{loop: withoutModels}).ResolveRepositoryReviewProfile(
+		context.Background(), "main", nil,
+	); err == nil || !strings.Contains(err.Error(), "no configured model aliases") {
+		t.Fatalf("missing model aliases error = %v", err)
+	}
+	if _, err := (&workflowAgentRunner{loop: withoutModels}).ResolveRepositoryReviewProfile(
+		context.Background(), "main", []string{"review-a"},
+	); err == nil || !strings.Contains(err.Error(), "config is nil") {
+		t.Fatalf("missing config error = %v", err)
+	}
+	stopped := &AgentLoop{runtimeGateStopped: true}
+	if _, err := (&workflowAgentRunner{loop: stopped}).ResolveRepositoryReviewProfile(
+		context.Background(), "main", nil,
+	); !errors.Is(err, errAgentRuntimeStopped) {
+		t.Fatalf("stopped runtime error = %v", err)
+	}
+}
+
+func TestRepositoryReviewProfileExpandsModelRouterDependenciesAndRejectsUnsafeDefault(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review-leaf", Model: "leaf-v1"}}
+	cfg.ModelRouters = []config.ModelRouterConfig{{
+		Name: "review-router", Enabled: true, Entry: "leaf",
+		Blocks: []config.ModelRouterBlock{{
+			ID: "leaf", Type: config.ModelRouterBlockTypeModel, Model: "review-leaf",
+		}},
+	}}
+	agent := &AgentInstance{
+		ID: "main", Model: "review-router", ContextWindow: 16 << 10, MaxTokens: 4 << 10,
+	}
+	loop := &AgentLoop{cfg: cfg, registry: &AgentRegistry{agents: map[string]*AgentInstance{"main": agent}}}
+	profile, err := (&workflowAgentRunner{loop: loop}).ResolveRepositoryReviewProfile(
+		context.Background(), "main", nil,
+	)
+	if err != nil || !profile.IncludeDefaultReviewer || profile.Revision == "" || profile.MaxContentBytes < 8<<10 {
+		t.Fatalf("model-router review profile = %#v, %v", profile, err)
+	}
+
+	agent.Candidates = []providers.FallbackCandidate{{Provider: "codex-cli", Model: "codex"}}
+	if _, err := (&workflowAgentRunner{loop: loop}).ResolveRepositoryReviewProfile(
+		context.Background(), "main", nil,
+	); err == nil || !strings.Contains(err.Error(), "agentic CLI provider") {
+		t.Fatalf("unsafe default candidate error = %v", err)
+	}
+}
+
+func TestRepositoryReviewModelDependencyAndReviewerNormalization(t *testing.T) {
+	models := []string{"primary"}
+	if got := appendRepositoryReviewModelDependency(models, " "); !reflect.DeepEqual(got, models) {
+		t.Fatalf("blank dependency = %#v", got)
+	}
+	if got := appendRepositoryReviewModelDependency(models, "primary"); len(got) != 1 {
+		t.Fatalf("duplicate dependency = %#v", got)
+	}
+	models = appendRepositoryReviewModelDependency(models, "secondary")
+	if !reflect.DeepEqual(models, []string{"primary", "secondary"}) {
+		t.Fatalf("appended dependencies = %#v", models)
+	}
+	if got := removeRepositoryReviewModelDependency(models, "primary"); !reflect.DeepEqual(got, []string{"secondary"}) {
+		t.Fatalf("removed dependency = %#v", got)
+	}
+	if !repositoryReviewUnsafeProvider("codex-cli") || repositoryReviewUnsafeProvider("openai") {
+		t.Fatal("repository review provider safety classification mismatch")
+	}
+
+	if got := workflowManagedReviewerModels(" a, b; a\n c "); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Fatalf("string reviewers = %#v", got)
+	}
+	if got := workflowManagedReviewerModels([]string{" a ", "", "b"}); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("string-slice reviewers = %#v", got)
+	}
+	values := []any{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	if got := workflowManagedReviewerModels(values); len(got) != 8 || got[7] != "h" {
+		t.Fatalf("bounded reviewers = %#v", got)
+	}
+	if got := workflowManagedReviewerModels(42); len(got) != 0 {
+		t.Fatalf("unsupported reviewers = %#v", got)
+	}
+	options := workflowManagedOptions(map[string]any{
+		"estimatedOutputTokens": 321, "includeDefaultReviewer": false,
+	})
+	if options.estimatedOutputTokens != 321 || options.includeDefaultReviewer {
+		t.Fatalf("managed reviewer options = %#v", options)
+	}
+}
+
+func TestWorkflowAgentRunnerValidatesRepositoryReviewSystemPromptAuthority(t *testing.T) {
+	runner := &workflowAgentRunner{loop: &AgentLoop{
+		registry: &AgentRegistry{agents: map[string]*AgentInstance{}},
+	}}
+	for _, test := range []struct {
+		name string
+		req  workflows.AgentRequest
+		want string
+	}{
+		{name: "invalid review prompt", req: workflows.AgentRequest{ReviewSystemPrompt: " padded "}, want: "system prompt is invalid"},
+		{name: "unbounded suppression", req: workflows.AgentRequest{SuppressDefaultContext: true}, want: "bounded frozen no-tool review"},
+		{name: "prompt without suppression", req: workflows.AgentRequest{ReviewSystemPrompt: "review"}, want: "requires suppressed"},
+		{name: "two prompt authorities", req: workflows.AgentRequest{
+			ReviewSystemPrompt: "review", IsolatedSystemPrompt: "isolated", SuppressDefaultContext: true,
+			EphemeralSession: true, History: "none", Cache: "none", Tools: workflows.AgentToolsNone,
+			Scope: []any{}, ScopeContent: "immutable_git",
+		}, want: "requires suppressed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := runner.RunAgent(context.Background(), test.req)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("RunAgent error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	_, err := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		ReviewSystemPrompt: "review", SuppressDefaultContext: true,
+		EphemeralSession: true, History: "none", Cache: "none", Tools: workflows.AgentToolsNone,
+		Scope: []any{}, ScopeContent: "immutable_git",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no agent available") {
+		t.Fatalf("valid review authority reached error = %v", err)
+	}
+}
+
 func TestWorkflowManagedScopeSplitCombinesStructuredOutputs(t *testing.T) {
 	contract := &workflows.AgentOutputContract{
 		Format:         "json",
@@ -1216,6 +1409,142 @@ func TestWorkflowAgentRunnerReadOnlyRepairReusesFrozenSnapshot(t *testing.T) {
 	}
 	if !workflowMessagesContain(agent.Sessions.GetHistory(canonicalKey), "arrived between decision and repair") {
 		t.Fatal("legitimate append between decision and repair was lost")
+	}
+}
+
+func TestWorkflowAgentUsageIncludesNonManagedStructuredRepair(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"not json", `{"ok":true}`},
+		usages: []providers.UsageInfo{
+			{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, CachedTokens: 3},
+			{PromptTokens: 20, CompletionTokens: 4, TotalTokens: 24, CachedTokens: 5},
+		},
+	}
+	loop, _, _, _ := newWorkflowReadOnlyTestLoop(t, provider) //nolint:dogsled // This test only needs the loop.
+	var (
+		observedMu sync.Mutex
+		observed   []workflows.AgentUsage
+	)
+	request := workflowEphemeralTestRequest("Return valid JSON.")
+	request.Output = &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type":     "object",
+			"required": []any{"ok"},
+			"properties": map[string]any{
+				"ok": map[string]any{"type": "boolean"},
+			},
+		},
+	}
+	request.UsageObserver = func(usage workflows.AgentUsage) error {
+		observedMu.Lock()
+		observed = append(observed, usage)
+		observedMu.Unlock()
+		return nil
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(t.Context(), request)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	usage, ok := outputs["usage"].([]workflows.AgentUsage)
+	if !ok || !reflect.DeepEqual(usage, []workflows.AgentUsage{{
+		Model:            "test-model",
+		PromptTokens:     30,
+		CompletionTokens: 6,
+		TotalTokens:      36,
+		CachedTokens:     8,
+	}}) {
+		t.Fatalf("usage = %#v, want exact initial+repair aggregate", outputs["usage"])
+	}
+	observedMu.Lock()
+	defer observedMu.Unlock()
+	if !reflect.DeepEqual(observed, []workflows.AgentUsage{
+		{Model: "test-model", PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, CachedTokens: 3},
+		{Model: "test-model", PromptTokens: 20, CompletionTokens: 4, TotalTokens: 24, CachedTokens: 5},
+	}) {
+		t.Fatalf("observed usage = %#v, want one event per provider response", observed)
+	}
+}
+
+func TestWorkflowAgentUsageObserverErrorPropagates(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"unused"},
+		usages: []providers.UsageInfo{{
+			PromptTokens: 7, CompletionTokens: 2, TotalTokens: 9,
+		}},
+	}
+	loop, _, _, _ := newWorkflowReadOnlyTestLoop(t, provider) //nolint:dogsled // This test only needs the loop.
+	wantErr := errors.New("shared workflow token budget exhausted")
+	request := workflowEphemeralTestRequest("Observe this request.")
+	request.UsageObserver = func(usage workflows.AgentUsage) error {
+		if usage.Model != "test-model" || usage.TotalTokens != 9 {
+			t.Fatalf("observer usage = %#v", usage)
+		}
+		return wantErr
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(t.Context(), request)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RunAgent() outputs = %#v, error = %v, want observer error", outputs, err)
+	}
+	if !reflect.DeepEqual(outputs["usage"], []workflows.AgentUsage{{
+		Model: "test-model", PromptTokens: 7, CompletionTokens: 2, TotalTokens: 9,
+	}}) {
+		t.Fatalf("observer-error usage = %#v", outputs["usage"])
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want no retry after observer error", len(calls))
+	}
+}
+
+func TestWorkflowManagedCallAdmissionStopsQueuedChildrenWithScopePlaceholders(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{
+		workflowManagedTestFindingsJSON([]string{"a"}),
+		workflowManagedTestFindingsJSON([]string{"b"}),
+	}}
+	loop, _, _, _ := newWorkflowReadOnlyTestLoop(t, provider) //nolint:dogsled // This test only needs the loop.
+	var admissions atomic.Int32
+	request := workflowEphemeralTestRequest("Review bounded items.")
+	request.Output = workflowManagedTestOutputContract()
+	request.Managed = map[string]any{
+		"mode": "auto", "max_items_per_chunk": 1, "max_parallel_children": 1,
+		"continue_on_child_error": true,
+		"calibration":             map[string]any{"enabled": false},
+	}
+	request.Scope = []any{
+		map[string]any{"id": "a", "path": "a.go"},
+		map[string]any{"id": "b", "path": "b.go"},
+	}
+	wantStop := errors.New("review budget stopped admission")
+	request.CallAdmission = func() error {
+		if admissions.Add(1) > 2 {
+			return wantStop
+		}
+		return nil
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(t.Context(), request)
+	if err != nil && !errors.Is(err, wantStop) {
+		t.Fatalf("RunAgent() error = %v, outputs=%#v", err, outputs)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want only first child", len(calls))
+	}
+	children, ok := outputs["managed_children"].([]map[string]any)
+	if !ok || len(children) != 2 {
+		t.Fatalf("managed children = %#v, want two plan-preserving outputs", outputs["managed_children"])
+	}
+	if admitted, _ := children[0]["admitted"].(bool); !admitted {
+		t.Fatalf("first child admitted = %#v", children[0])
+	}
+	if admitted, _ := children[1]["admitted"].(bool); admitted {
+		t.Fatalf("second child admitted = %#v", children[1])
+	}
+	scope, _ := children[1]["scope"].([]any)
+	if len(scope) != 1 || scope[0].(map[string]any)["path"] != "b.go" {
+		t.Fatalf("unadmitted child scope = %#v", scope)
 	}
 }
 
@@ -4515,6 +4844,7 @@ func (p *workflowEphemeralFallbackProvider) Chat(
 type workflowReadOnlyCaptureProvider struct {
 	mu                sync.Mutex
 	responses         []string
+	usages            []providers.UsageInfo
 	errors            []error
 	respond           func(int, []providers.Message) string
 	calls             []workflowReadOnlyProviderCall
@@ -4625,6 +4955,11 @@ func (p *workflowReadOnlyCaptureProvider) Chat(
 	if callIndex < len(p.errors) {
 		responseErr = p.errors[callIndex]
 	}
+	var responseUsage *providers.UsageInfo
+	if callIndex < len(p.usages) {
+		usage := p.usages[callIndex]
+		responseUsage = &usage
+	}
 	respond := p.respond
 	toolCall := p.toolCall
 	started := p.started
@@ -4676,7 +5011,7 @@ func (p *workflowReadOnlyCaptureProvider) Chat(
 	if responseErr != nil {
 		return nil, responseErr
 	}
-	result := &providers.LLMResponse{Content: response}
+	result := &providers.LLMResponse{Content: response, Usage: responseUsage}
 	if toolCall {
 		result.ToolCalls = []providers.ToolCall{{
 			ID:   "forbidden",
@@ -4794,7 +5129,11 @@ func TestWorkflowAgentSourceSessionCapturesRepairTranscriptAndReplaysExactPrompt
 		t.Fatalf("source outputs = %#v", first)
 	}
 	second, secondErr := runner.RunAgent(t.Context(), request)
-	if secondErr != nil || !reflect.DeepEqual(first, second) {
+	firstWithoutUsage := cloneAnyMap(first)
+	secondWithoutUsage := cloneAnyMap(second)
+	delete(firstWithoutUsage, "usage")
+	delete(secondWithoutUsage, "usage")
+	if secondErr != nil || !reflect.DeepEqual(firstWithoutUsage, secondWithoutUsage) {
 		t.Fatalf("source replay = %#v, error = %v", second, secondErr)
 	}
 	if calls := provider.snapshotCalls(); len(calls) != 2 {
@@ -4904,7 +5243,11 @@ func TestWorkflowAgentSourceSessionSerializesConcurrentDuplicateExecution(t *tes
 	if first.err != nil || second.err != nil {
 		t.Fatalf("concurrent errors = (%v, %v)", first.err, second.err)
 	}
-	if !reflect.DeepEqual(first.outputs, second.outputs) {
+	firstWithoutUsage := cloneAnyMap(first.outputs)
+	secondWithoutUsage := cloneAnyMap(second.outputs)
+	delete(firstWithoutUsage, "usage")
+	delete(secondWithoutUsage, "usage")
+	if !reflect.DeepEqual(firstWithoutUsage, secondWithoutUsage) {
 		t.Fatalf("concurrent outputs differ: %#v and %#v", first.outputs, second.outputs)
 	}
 	if calls := provider.snapshotCalls(); len(calls) != 1 {

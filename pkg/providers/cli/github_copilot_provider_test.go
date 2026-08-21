@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +25,37 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestGitHubCopilotUsageNormalizesMissingAndInvalidTransportCounts(t *testing.T) {
+	if githubCopilotFloat(nil) != 0 {
+		t.Fatal("nil Copilot float was not zero")
+	}
+	for _, value := range []float64{math.NaN(), math.Inf(1), -1, 0} {
+		if got := githubCopilotFloat(&value); got != 0 {
+			t.Fatalf("githubCopilotFloat(%v) = %d, want 0", value, got)
+		}
+	}
+	large := float64(2_147_483_648)
+	if got := githubCopilotFloat(&large); got != 2_147_483_647 {
+		t.Fatalf("large Copilot float = %d", got)
+	}
+	fractional := 1.2
+	if got := githubCopilotFloat(&fractional); got != 2 {
+		t.Fatalf("fractional Copilot float = %d", got)
+	}
+
+	usage := githubCopilotUsageInfo("abcdef", "reply", 0, 0, -2, 1)
+	if usage.PromptTokens != 2 || usage.CompletionTokens != 2 || usage.CachedTokens != 0 || usage.TotalTokens != 4 {
+		t.Fatalf("estimated Copilot usage = %#v", usage)
+	}
+	usage = githubCopilotUsageInfo("ignored", "ignored", 4, 3, 8, 10)
+	if usage.CachedTokens != 4 || usage.TotalTokens != 10 {
+		t.Fatalf("bounded Copilot usage = %#v", usage)
+	}
+	if githubCopilotEstimatedTokens("") != 0 || githubCopilotEstimatedTokens("four") != 2 {
+		t.Fatal("Copilot token estimate did not use the conservative UTF-8 byte bound")
+	}
 }
 
 func (f *fakeCopilotClient) Start(context.Context) error {
@@ -58,7 +90,10 @@ func (f *fakeCopilotSession) SendAndWait(
 	f.prompt = opts.Prompt
 	return &copilot.SessionEvent{
 		Data: copilot.Data{
-			Content: copilot.String(f.content),
+			Content:         copilot.String(f.content),
+			InputTokens:     copilot.Float64(12),
+			OutputTokens:    copilot.Float64(3),
+			CacheReadTokens: copilot.Float64(2),
 		},
 	}, nil
 }
@@ -103,6 +138,17 @@ func TestGitHubCopilotLocalProviderUsesExternalCLIURL(t *testing.T) {
 	}
 	if fakeClient.config.OnPermissionRequest == nil {
 		t.Fatal("OnPermissionRequest should be configured")
+	}
+	response, err := provider.Chat(
+		context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "gpt-4.1", nil,
+	)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if response.Usage == nil || response.Usage.PromptTokens != 12 ||
+		response.Usage.CompletionTokens != 3 || response.Usage.TotalTokens != 15 ||
+		response.Usage.CachedTokens != 2 {
+		t.Fatalf("local Copilot usage = %#v", response.Usage)
 	}
 }
 
@@ -182,7 +228,10 @@ func TestGitHubCopilotTokenProviderDisablesAmbientLogin(t *testing.T) {
 			gotChatAuth = r.Header.Get("Authorization")
 			gotIntegrationID = r.Header.Get("Copilot-Integration-Id")
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"copilot response"},"finish_reason":"stop"}]}`)
+			fmt.Fprint(
+				w,
+				`{"choices":[{"message":{"content":"copilot response"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":4}}}`,
+			)
 		default:
 			http.NotFound(w, r)
 		}
@@ -204,6 +253,11 @@ func TestGitHubCopilotTokenProviderDisablesAmbientLogin(t *testing.T) {
 	}
 	if resp.Content != "copilot response" {
 		t.Fatalf("Content = %q, want copilot response", resp.Content)
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokens != 20 ||
+		resp.Usage.CompletionTokens != 5 || resp.Usage.TotalTokens != 25 ||
+		resp.Usage.CachedTokens != 4 {
+		t.Fatalf("token Copilot usage = %#v", resp.Usage)
 	}
 	if gotExchangeAuth != "token gho_test-token" {
 		t.Fatalf("exchange Authorization = %q, want GitHub token auth", gotExchangeAuth)

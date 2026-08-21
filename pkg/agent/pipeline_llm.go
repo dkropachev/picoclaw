@@ -191,6 +191,9 @@ func (p *Pipeline) CallLLM(
 
 	// LLM call closure with fallback support
 	callLLM := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
+		if usageErr := ts.workflowAgentUsageError(); usageErr != nil {
+			return nil, usageErr
+		}
 		providerCtx, providerCancel := context.WithCancel(turnCtx)
 		ts.setProviderCancel(providerCancel)
 		defer func() {
@@ -201,6 +204,7 @@ func (p *Pipeline) CallLLM(
 		al.activeRequestsInc()
 		defer al.activeRequestsDec()
 
+		streamStartedAt := time.Now()
 		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
 			providerCtx,
 			ts,
@@ -208,6 +212,16 @@ func (p *Pipeline) CallLLM(
 			messagesForCall,
 			toolDefsForCall,
 		); handled {
+			if observeErr := ts.observeWorkflowAgentResponse(
+				exec.llmModelName,
+				response,
+				time.Since(streamStartedAt),
+			); observeErr != nil {
+				return response, observeErr
+			}
+			if streamErr == nil {
+				streamErr = providers.ResponseSafetyFilterError(response, "", exec.llmModel)
+			}
 			return response, streamErr
 		}
 
@@ -215,6 +229,12 @@ func (p *Pipeline) CallLLM(
 			ctx context.Context,
 			candidate providers.FallbackCandidate,
 		) (*providers.LLMResponse, error) {
+			if admissionErr := admitWorkflowAgentCall(ts.opts.callAdmission); admissionErr != nil {
+				return nil, admissionErr
+			}
+			if usageErr := ts.workflowAgentUsageError(); usageErr != nil {
+				return nil, usageErr
+			}
 			candidateProvider, err := providerForFallbackCandidate(
 				ts.agent,
 				exec.activeProvider,
@@ -244,6 +264,7 @@ func (p *Pipeline) CallLLM(
 				candidateCfg,
 				baseProviderToolDefs,
 			)
+			startedAt := time.Now()
 			response, err := candidateProvider.Chat(
 				ctx,
 				messagesForCall,
@@ -251,6 +272,20 @@ func (p *Pipeline) CallLLM(
 				candidate.Model,
 				callOpts,
 			)
+			actualModelName := resolvedCandidateModelName(
+				[]providers.FallbackCandidate{candidate},
+				exec.llmModelName,
+			)
+			if observeErr := ts.observeWorkflowAgentResponse(
+				actualModelName,
+				response,
+				time.Since(startedAt),
+			); observeErr != nil {
+				return response, observeErr
+			}
+			if err == nil {
+				err = providers.ResponseSafetyFilterError(response, candidate.Provider, candidate.Model)
+			}
 			if err == nil {
 				exec.visibleToolSurface = candidateSurface
 				exec.providerToolDefs = candidateToolDefs
@@ -279,6 +314,9 @@ func (p *Pipeline) CallLLM(
 					runCandidate,
 				)
 			}
+			if usageErr := ts.workflowAgentUsageError(); usageErr != nil {
+				return nil, usageErr
+			}
 			if fbErr != nil {
 				if exec.accountRouter != nil {
 					exec.accountRouter.RecordFallbackResult(
@@ -303,6 +341,10 @@ func (p *Pipeline) CallLLM(
 			p.applySuccessfulFallbackCandidate(ts, exec, fbResult)
 			return fbResult.Response, nil
 		}
+		if admissionErr := admitWorkflowAgentCall(ts.opts.callAdmission); admissionErr != nil {
+			return nil, admissionErr
+		}
+		startedAt := time.Now()
 		resp, err := exec.activeProvider.Chat(
 			providerCtx,
 			messagesForCall,
@@ -310,6 +352,20 @@ func (p *Pipeline) CallLLM(
 			exec.llmModel,
 			exec.llmOpts,
 		)
+		actualModelName := resolvedCandidateModelName(
+			exec.activeCandidates,
+			exec.llmModelName,
+		)
+		if observeErr := ts.observeWorkflowAgentResponse(
+			actualModelName,
+			resp,
+			time.Since(startedAt),
+		); observeErr != nil {
+			return resp, observeErr
+		}
+		if err == nil {
+			err = providers.ResponseSafetyFilterError(resp, "", exec.llmModel)
+		}
 		if exec.accountRouter != nil {
 			candidate := providers.FallbackCandidate{}
 			if len(exec.activeCandidates) > 0 {
@@ -317,7 +373,7 @@ func (p *Pipeline) CallLLM(
 			}
 			exec.accountRouter.RecordFallbackResult(
 				exec.routerSelection,
-				fallbackResultFromSingleCandidate(candidate, resp),
+				fallbackResultFromSingleCandidate(candidate, resp, err),
 				err,
 			)
 		}
@@ -336,6 +392,9 @@ func (p *Pipeline) CallLLM(
 	}
 	for retry := 0; retry <= maxRetries; retry++ {
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
+		if usageErr := ts.workflowAgentUsageError(); usageErr != nil {
+			return ControlBreak, usageErr
+		}
 		if err == nil {
 			break
 		}
@@ -1308,6 +1367,8 @@ func transientLLMRetryReason(err error) (string, bool) {
 			return "network", true
 		case providers.FailoverRateLimit, providers.FailoverOverloaded:
 			return "rate_limit", true
+		case providers.FailoverSafetyFilter:
+			return "safety_filter", true
 		}
 	}
 

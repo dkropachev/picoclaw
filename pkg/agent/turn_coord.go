@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 func (al *AgentLoop) runTurn(
@@ -335,7 +336,10 @@ func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
 			return turnResult{}, err
 		}
 	}
-	return turnResult{status: TurnEndStatusAborted}, nil
+	return turnResult{
+		usage:  ts.workflowAgentUsageSnapshot(),
+		status: TurnEndStatusAborted,
+	}, nil
 }
 
 func (al *AgentLoop) selectCandidates(
@@ -589,6 +593,10 @@ type sideQuestionExecutionOptions struct {
 	rejectToolCalls        bool
 	requireResponseContent bool
 	privateExecution       bool
+	resultModelName        *string
+	resultUsage            *[]workflows.AgentUsage
+	usageObserver          workflows.AgentUsageObserver
+	callAdmission          workflows.AgentCallAdmission
 }
 
 func (al *AgentLoop) askSideQuestion(
@@ -613,6 +621,12 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 	question string,
 	execution sideQuestionExecutionOptions,
 ) (string, error) {
+	usage := newWorkflowAgentUsageAccumulator(execution.usageObserver)
+	if execution.resultUsage != nil {
+		defer func() {
+			*execution.resultUsage = cloneWorkflowAgentUsage(usage.Snapshot())
+		}()
+	}
 	if agent == nil {
 		return "", fmt.Errorf("askSideQuestion: no agent available for /btw")
 	}
@@ -789,6 +803,12 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		forceModel bool,
 		callMessages []providers.Message,
 	) (*providers.LLMResponse, error) {
+		if admissionErr := admitWorkflowAgentCall(execution.callAdmission); admissionErr != nil {
+			return nil, admissionErr
+		}
+		if usageErr := usage.Err(); usageErr != nil {
+			return nil, usageErr
+		}
 		baseModelName := selectedModelName
 		if forceModel && strings.TrimSpace(model) != "" {
 			baseModelName = model
@@ -821,7 +841,27 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		if execution.contextSnapshot != nil || execution.detachProviderMessages {
 			providerMessages = session.CloneMessages(callMessages)
 		}
-		return provider.Chat(ctx, providerMessages, nil, model, callOpts)
+		startedAt := time.Now()
+		response, callErr := provider.Chat(ctx, providerMessages, nil, model, callOpts)
+		actualModelName := resolvedCandidateModelName(
+			[]providers.FallbackCandidate{candidate},
+			baseModelName,
+		)
+		if observeErr := func() error {
+			observed, ok := workflowAgentUsageFromResponse(actualModelName, response, time.Since(startedAt))
+			if !ok {
+				return nil
+			}
+			return usage.Observe(observed)
+		}(); observeErr != nil {
+			return response, observeErr
+		}
+		if callErr == nil {
+			callErr = providers.ResponseSafetyFilterError(
+				response, candidate.Provider, model,
+			)
+		}
+		return response, callErr
 	}
 
 	turnCtx := newTurnContext(nil, nil, nil)
@@ -907,6 +947,9 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		}
 	}
 	callSideLLM := func(callMessages []providers.Message) (*providers.LLMResponse, error) {
+		if usageErr := usage.Err(); usageErr != nil {
+			return nil, usageErr
+		}
 		if len(activeCandidates) > 1 && al.fallback != nil {
 			fbResult, err := al.fallback.ExecuteCandidate(
 				ctx,
@@ -915,6 +958,9 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 					return callProvider(ctx, candidate, candidate.Model, false, callMessages)
 				},
 			)
+			if usageErr := usage.Err(); usageErr != nil {
+				return nil, usageErr
+			}
 			if err != nil {
 				if activeAccountRouter != nil {
 					result := fallbackResultFromError(err, activeCandidates...)
@@ -933,6 +979,16 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 					activeAccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
 				}
 			}
+			if execution.resultModelName != nil {
+				actual := selectedModelName
+				for _, candidate := range activeCandidates {
+					if candidate.StableKey() == fbResult.IdentityKey {
+						actual = resolvedCandidateModelName([]providers.FallbackCandidate{candidate}, actual)
+						break
+					}
+				}
+				*execution.resultModelName = strings.TrimSpace(actual)
+			}
 			return fbResult.Response, nil
 		}
 
@@ -941,8 +997,16 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 			candidate = activeCandidates[0]
 		}
 		resp, err := callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
+		if usageErr := usage.Err(); usageErr != nil {
+			return resp, usageErr
+		}
+		if err == nil && execution.resultModelName != nil {
+			*execution.resultModelName = resolvedCandidateModelName(
+				[]providers.FallbackCandidate{candidate}, selectedModelName,
+			)
+		}
 		if activeAccountRouter != nil {
-			result := fallbackResultFromSingleCandidate(candidate, resp)
+			result := fallbackResultFromSingleCandidate(candidate, resp, err)
 			if execution.privateExecution {
 				activeAccountRouter.RecordPrivateFallbackResult(routerSelection, result, err)
 			} else {
@@ -958,6 +1022,16 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 	var resp *providers.LLMResponse
 	var err error
 	resp, err = callSideLLM(messages)
+	if usageErr := usage.Err(); usageErr != nil {
+		return "", usageErr
+	}
+	if failErr := providers.ClassifyError(err, "", selectedModelName); err != nil &&
+		failErr != nil && failErr.Reason == providers.FailoverSafetyFilter {
+		resp, err = callSideLLM(messages)
+		if usageErr := usage.Err(); usageErr != nil {
+			return "", usageErr
+		}
+	}
 	if err != nil && hasMediaRefs(messages) && isVisionUnsupportedError(err) {
 		if !execution.privateExecution {
 			al.emitEvent(
@@ -978,6 +1052,9 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		}
 		messagesWithoutMedia := stripMessageMedia(messages)
 		resp, err = callSideLLM(messagesWithoutMedia)
+		if usageErr := usage.Err(); usageErr != nil {
+			return "", usageErr
+		}
 	}
 	if err != nil {
 		return "", err

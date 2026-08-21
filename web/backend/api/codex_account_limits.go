@@ -689,11 +689,11 @@ func githubCopilotUsageEntry(
 	overagePermitted, _ := boolFromMap(quota, "overage_permitted", "overagePermitted")
 	remaining, remainingOK := numberFromMap(quota, "remaining", "remaining_count")
 	if remainingOK && remaining <= 0 && !overagePermitted {
-		entry.Status = "unavailable"
+		entry.Status = "limit_reached"
 	}
 	exhausted, exhaustedOK := boolFromMap(quota, "exhausted", "limit_reached", "is_exhausted")
 	if exhaustedOK && exhausted && !overagePermitted {
-		entry.Status = "unavailable"
+		entry.Status = "limit_reached"
 	}
 	return entry, true
 }
@@ -840,7 +840,7 @@ func boolFromMap(values map[string]any, keys ...string) (bool, bool) {
 func codexEntriesForRateLimit(name string, rateLimit *codexRateLimitDetails) []codexAccountLimitEntry {
 	status := "available"
 	if rateLimit != nil && (rateLimit.LimitReached || !rateLimit.Allowed) {
-		status = "unavailable"
+		status = "limit_reached"
 	}
 	if rateLimit == nil {
 		return []codexAccountLimitEntry{{Name: name, Status: status}}

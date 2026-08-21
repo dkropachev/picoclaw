@@ -79,6 +79,15 @@
       ]
     },
     {
+      "spec": "docs/features/repository-reviews.md",
+      "patterns": [
+        "web/frontend/src/api/repository-reviews*.ts",
+        "web/frontend/src/components/repository-reviews/**",
+        "web/frontend/src/routes/-repository-reviews-route.test.tsx",
+        "web/frontend/src/routes/repository-reviews.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/agent-conversations.md",
       "patterns": [
         "web/frontend/src/api/agents*.ts",

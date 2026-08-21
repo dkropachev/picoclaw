@@ -109,6 +109,27 @@ var (
 		substr("no api key found"),
 	}
 
+	// safetyFilterPatterns intentionally require an explicit provider safety,
+	// security, content-policy, or refusal signal. Generic HTTP 403, "forbidden",
+	// and "access denied" errors remain authentication failures.
+	safetyFilterPatterns = []errorPattern{
+		rxp(`\bsecurity[-_\s]+(?:policy[-_\s]+)?violation\b`),
+		rxp(`\bsafety[-_\s]+(?:policy[-_\s]+)?violation\b`),
+		rxp(`\bcontent[-_\s]+policy[-_\s]+violation\b`),
+		rxp(`\bresponsible[-_\s]*ai[-_\s]*policy[-_\s]*violation\b`),
+		rxp(`\b(?:content|safety)[-_\s]+filter(?:ed|ing)?\b`),
+		rxp(
+			`"(?:code|type|finish_reason|finishreason|block_reason|blockreason)"\s*:\s*"(?:content_filter|safety_filter|security_violation|safety|refusal)"`,
+		),
+		rxp(`"refusal"\s*:`),
+		rxp(`^\s*refusal(?:\s*:|\s*$)`),
+		rxp(`\b(?:api|model|provider|safety|policy|content)[-_\s]+refusal\b`),
+		rxp(`\b(?:model|provider)\b.{0,80}\brefused\b.{0,120}\b(?:request|prompt|response)\b`),
+		rxp(
+			`\b(?:request|prompt|response)\b.{0,120}\b(?:blocked|rejected|refused)\b.{0,120}\b(?:safety|content[-_\s]+policy|security[-_\s]+policy)\b`,
+		),
+	}
+
 	formatPatterns = []errorPattern{
 		substr("string should match pattern"),
 		substr("tool_use.id"),
@@ -157,6 +178,17 @@ func ClassifyError(err error, provider, model string) *FailoverError {
 	if err == context.Canceled {
 		return nil
 	}
+	var existing *FailoverError
+	if errors.As(err, &existing) && existing != nil {
+		classified := *existing
+		if classified.Provider == "" {
+			classified.Provider = provider
+		}
+		if classified.Model == "" {
+			classified.Model = model
+		}
+		return &classified
+	}
 
 	// Context deadline exceeded: treat as timeout, always fallback.
 	if err == context.DeadlineExceeded {
@@ -169,6 +201,27 @@ func ClassifyError(err error, provider, model string) *FailoverError {
 	}
 
 	msg := strings.ToLower(err.Error())
+
+	// Some providers report content-policy decisions using HTTP 400 or 403.
+	// Recognize only explicit safety signals before generic status mapping so a
+	// bounded retry/fallback can recover without turning ordinary authorization
+	// failures into safety-filter retries.
+	if isSafetyFilterMessage(msg) {
+		var status int
+		var httpErr *common.HTTPError
+		if errors.As(err, &httpErr) && httpErr != nil {
+			status = httpErr.StatusCode
+		} else {
+			status = extractHTTPStatus(msg)
+		}
+		return &FailoverError{
+			Reason:   FailoverSafetyFilter,
+			Provider: provider,
+			Model:    model,
+			Status:   status,
+			Wrapped:  err,
+		}
+	}
 
 	// Concrete transport errors should continue the fallback chain even when
 	// providers do not expose a structured HTTP status.
@@ -286,6 +339,9 @@ func classifyByStatus(status int) FailoverReason {
 // classifyByMessage matches error messages against patterns.
 // Priority order matters (from OpenClaw classifyFailoverReason).
 func classifyByMessage(msg string) FailoverReason {
+	if isSafetyFilterMessage(msg) {
+		return FailoverSafetyFilter
+	}
 	if matchesAny(msg, rateLimitPatterns) {
 		return FailoverRateLimit
 	}
@@ -311,6 +367,10 @@ func classifyByMessage(msg string) FailoverReason {
 		return FailoverContextOverflow
 	}
 	return ""
+}
+
+func isSafetyFilterMessage(msg string) bool {
+	return matchesAny(msg, safetyFilterPatterns)
 }
 
 // extractHTTPStatus extracts an HTTP status code from an error message.

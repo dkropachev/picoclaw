@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ThreadsRouteImport } from './routes/threads'
+import { Route as RepositoryReviewsRouteImport } from './routes/repository-reviews'
 import { Route as PullRequestsRouteImport } from './routes/pull-requests'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LogsRouteImport } from './routes/logs'
@@ -46,6 +47,11 @@ import { Route as AccountsAccountRouterIndexRouteImport } from './routes/account
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
   path: '/threads',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RepositoryReviewsRoute = RepositoryReviewsRouteImport.update({
+  id: '/repository-reviews',
+  path: '/repository-reviews',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PullRequestsRoute = PullRequestsRouteImport.update({
@@ -227,6 +233,7 @@ export interface FileRoutesByFullPath {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/pull-requests': typeof PullRequestsRoute
+  '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
@@ -262,6 +269,7 @@ export interface FileRoutesByTo {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/pull-requests': typeof PullRequestsRoute
+  '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
@@ -298,6 +306,7 @@ export interface FileRoutesById {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/pull-requests': typeof PullRequestsRoute
+  '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
@@ -335,6 +344,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/pull-requests'
+    | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
@@ -370,6 +380,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/pull-requests'
+    | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
@@ -405,6 +416,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/pull-requests'
+    | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
@@ -441,6 +453,7 @@ export interface RootRouteChildren {
   LogsRoute: typeof LogsRoute
   ModelsRoute: typeof ModelsRoute
   PullRequestsRoute: typeof PullRequestsRoute
+  RepositoryReviewsRoute: typeof RepositoryReviewsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
   PullRequestsWorkspaceIDRoute: typeof PullRequestsWorkspaceIDRoute
   PullRequestsRepositoryAssignmentsRoute: typeof PullRequestsRepositoryAssignmentsRoute
@@ -455,6 +468,13 @@ declare module '@tanstack/react-router' {
       path: '/threads'
       fullPath: '/threads'
       preLoaderRoute: typeof ThreadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repository-reviews': {
+      id: '/repository-reviews'
+      path: '/repository-reviews'
+      fullPath: '/repository-reviews'
+      preLoaderRoute: typeof RepositoryReviewsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pull-requests': {
@@ -798,6 +818,7 @@ const rootRouteChildren: RootRouteChildren = {
   LogsRoute: LogsRoute,
   ModelsRoute: ModelsRoute,
   PullRequestsRoute: PullRequestsRoute,
+  RepositoryReviewsRoute: RepositoryReviewsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
   PullRequestsWorkspaceIDRoute: PullRequestsWorkspaceIDRoute,
   PullRequestsRepositoryAssignmentsRoute:

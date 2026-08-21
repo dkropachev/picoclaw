@@ -43,6 +43,21 @@ jobs:
 	}
 }
 
+func TestValidateAgentImmutableScopeRequiresSupportedModeAndNoTools(t *testing.T) {
+	invalidMode := validateAgentStepOptions("jobs.review.steps[0].with", "main", map[string]any{
+		"scope_content": "moving_worktree",
+	})
+	if len(invalidMode) != 1 || !strings.Contains(invalidMode[0].Message, "unsupported scope content") {
+		t.Fatalf("invalid scope-content errors = %#v", invalidMode)
+	}
+	toolEnabled := validateAgentStepOptions("jobs.review.steps[0].with", "main", map[string]any{
+		"scope_content": "immutable_git", "tools": "inherit",
+	})
+	if len(toolEnabled) != 1 || !strings.Contains(toolEnabled[0].Message, "requires tools: none") {
+		t.Fatalf("tool-enabled immutable scope errors = %#v", toolEnabled)
+	}
+}
+
 func TestValidateCallerJobUsesReusableWorkflowRef(t *testing.T) {
 	workflow := parseWorkflow(t, `
 name: Daily Brief

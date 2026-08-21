@@ -15,6 +15,65 @@ func TestInstallCodeReviewWorkflowWritesValidLocalDefinition(t *testing.T) {
 	testInstallWorkflowTemplate(t, CodeReviewWorkflowRef, InstallCodeReviewWorkflow)
 }
 
+func TestInstallRepositoryBugFinderWorkflowWritesValidLocalDefinition(t *testing.T) {
+	testInstallWorkflowTemplate(
+		t,
+		RepositoryBugFinderWorkflowRef,
+		InstallRepositoryBugFinderWorkflow,
+	)
+}
+
+func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T) {
+	workflow := parseWorkflow(t, RepositoryBugFinderWorkflowYAML)
+	job := workflow.Jobs["find_bugs"]
+	if len(job.Steps) != 8 {
+		t.Fatalf("steps=%#v, want checkout/inventory/plan/freeze/release/review/record/result", job.Steps)
+	}
+	byID := make(map[string]Step, len(job.Steps))
+	for _, step := range job.Steps {
+		byID[step.ID] = step
+	}
+	plan, review, record := byID["plan"], byID["review"], byID["record"]
+	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" || plan.With["profile"] == nil {
+		t.Fatalf("plan=%#v", plan)
+	}
+	managed, ok := review.With["managed"].(map[string]any)
+	if !ok || managed["reviewer_models"] != "${{ steps.plan.outputs.reviewerModels }}" ||
+		managed["max_tasks_per_chunk"] != 1 || managed["continue_on_child_error"] != true {
+		t.Fatalf("managed ensemble=%#v", review.With["managed"])
+	}
+	if review.With["tools"] != "none" || review.With["scope_content"] != "frozen_git" ||
+		review.With["scope"] != "${{ steps.freeze.outputs.files }}" ||
+		review.With["scope_snapshot"] != "${{ steps.freeze.outputs.token }}" {
+		t.Fatalf("review authority/scope=%#v", review.With)
+	}
+	if record.Uses != "function/review.repository" || record.With["action"] != "record" ||
+		record.With["managed_children"] != "${{ steps.review.outputs.managed_children }}" {
+		t.Fatalf("record=%#v", record)
+	}
+	if result := byID["result"]; result.Uses != "function/review.repository" || result.With["action"] != "result" {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestCodeReviewTemplatePromptMatchesImmutableNoToolScope(t *testing.T) {
+	workflow := parseWorkflow(t, CodeReviewWorkflowYAML)
+	var review Step
+	for _, step := range workflow.Jobs["code_review"].Steps {
+		if step.ID == "review" {
+			review = step
+			break
+		}
+	}
+	prompt := fmt.Sprint(review.With["prompt"])
+	if review.With["tools"] != "none" || review.With["scope_content"] != "frozen_git" ||
+		!strings.Contains(prompt, "contentComplete=true") ||
+		strings.Contains(prompt, "reading its assigned source.path") ||
+		strings.Contains(prompt, "Use tools only") {
+		t.Fatalf("code review prompt/authority mismatch: %#v\n%s", review.With, prompt)
+	}
+}
+
 func TestInstallGitHubIssueTriageWorkflowWritesValidLocalDefinition(t *testing.T) {
 	testInstallWorkflowTemplate(
 		t,
@@ -416,32 +475,21 @@ func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentReq
 	if got := scope[0]["path"]; got != "src/app.go" {
 		r.t.Fatalf("scope[0].path = %#v, want src/app.go", got)
 	}
-	if _, exists := scope[0]["content"]; exists {
-		r.t.Fatalf("scope[0].content unexpectedly embedded: %#v", scope[0]["content"])
+	if content, ok := scope[0]["content"].(string); !ok || !strings.Contains(content, "func Answer") {
+		r.t.Fatalf("scope[0].content = %#v, want exact in-memory app.go content", scope[0]["content"])
 	}
-	source, ok := scope[0]["source"].(map[string]any)
-	if !ok {
-		r.t.Fatalf("scope[0].source = %#v, want workspace file source", scope[0]["source"])
+	if req.Tools != AgentToolsNone || req.ScopeContent != "frozen_git" {
+		r.t.Fatalf("review request tools=%q scope_content=%q", req.Tools, req.ScopeContent)
 	}
-	if source["workspaceId"] != "gw-review" {
-		r.t.Fatalf("scope[0].source.workspaceId = %#v, want gw-review", source["workspaceId"])
-	}
-	if source["filePath"] != "src/app.go" {
-		r.t.Fatalf("scope[0].source.filePath = %#v, want src/app.go", source["filePath"])
-	}
-	sourcePath, ok := source["path"].(string)
-	if !ok || sourcePath != filepath.Join(r.repo, "src", "app.go") {
-		r.t.Fatalf("scope[0].source.path = %#v, want linked app.go path", source["path"])
-	}
-	data, err := os.ReadFile(sourcePath)
-	if err != nil || !strings.Contains(string(data), "func Answer") {
-		r.t.Fatalf("linked source read = %q, %v; want app.go content", string(data), err)
+	if _, leaked := scope[0]["source"]; leaked {
+		r.t.Fatalf("scope[0].source leaked workspace capability: %#v", scope[0]["source"])
 	}
 	if req.Output == nil || !req.Output.Enabled() {
 		r.t.Fatal("agent output contract is not enabled")
 	}
 	structured := map[string]any{
 		"summary":       "No findings in selected files.",
+		"reviewedFiles": []any{"src/app.go"},
 		"findings":      []any{},
 		"tests":         []any{"go test ./..."},
 		"residualRisks": []any{},

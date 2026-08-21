@@ -658,6 +658,7 @@ func main() {
 	)
 	apiHandler.SetServerBindHost(hostInput, hostOverrideActive)
 	apiHandler.RegisterRoutes(mux)
+	apiHandler.StartRepositoryReviewController()
 
 	// Frontend Embedded Assets
 	registerEmbedRoutes(mux)

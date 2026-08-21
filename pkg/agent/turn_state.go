@@ -19,6 +19,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 // =============================================================================
@@ -88,6 +89,7 @@ const (
 type turnResult struct {
 	finalContent string
 	modelName    string
+	usage        []workflows.AgentUsage
 	status       TurnEndStatus
 	followUps    []bus.InboundMessage
 }
@@ -252,6 +254,7 @@ type turnState struct {
 	tokenBudget      *atomic.Int64        // Shared token budget counter
 	lastFinishReason string               // Last LLM finish_reason
 	lastUsage        *providers.UsageInfo // Last LLM usage info
+	usage            *workflowAgentUsageAccumulator
 
 	// Back-reference to the owning AgentLoop (set for SubTurns only, used for hard abort cascade)
 	al *AgentLoop
@@ -334,6 +337,7 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 		media:        append([]string(nil), opts.Dispatch.Media...),
 		phase:        TurnPhaseSetup,
 		startedAt:    time.Now(),
+		usage:        newWorkflowAgentUsageAccumulator(opts.usageObserver),
 	}
 
 	// Bind session store and capture initial history length for rollback logic

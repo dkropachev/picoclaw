@@ -406,6 +406,8 @@ func parseResponseBody(body []byte) (*LLMResponse, error) {
 		finishReason = "stop"
 	case "stop_sequence":
 		finishReason = "stop"
+	case "refusal":
+		finishReason = "refusal"
 	}
 
 	return &LLMResponse{

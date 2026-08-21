@@ -139,6 +139,24 @@ describe("AppSidebar", () => {
     expect(activeItem).toHaveAttribute("data-active", "true")
   })
 
+  it("reveals and marks Repository reviews from its direct route", () => {
+    pathname = "/repository-reviews"
+
+    renderSidebar()
+
+    expect(screen.getByRole("button", { name: "Services" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    )
+    const link = screen.getByRole("link", { name: "Repository reviews" })
+    expect(link).toHaveAttribute("href", "/repository-reviews")
+    expect(link).toBeVisible()
+    expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+      "data-active",
+      "true",
+    )
+  })
+
   it("shows the MCP link when the dedicated MCP route is active", () => {
     pathname = "/agent/mcp"
 

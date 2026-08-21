@@ -118,12 +118,22 @@ func TestNativeGitAndFilterFailuresStayBounded(t *testing.T) {
 
 func TestNativePathClassificationAndGlobMatrix(t *testing.T) {
 	classifications := map[string]string{
-		"vendor/module.go":    "excluded",
-		"pkg/service_test.go": "tests",
-		"pkg/service.go":      "code",
-		"config.yaml":         "code",
-		"go.sum":              "excluded",
-		"README":              "excluded",
+		"vendor/module.go":                       "excluded",
+		"vendor/example.com/lib/module.go":       "excluded",
+		"node_modules/pkg/lib/index.js":          "excluded",
+		"packages/app/node_modules/pkg/index.js": "excluded",
+		"module/vendor/example.com/lib.go":       "excluded",
+		"dist/assets/app.js":                     "excluded",
+		"pkg/service_test.go":                    "tests",
+		"pkg/latest.go":                          "code",
+		"pkg/contest.go":                         "code",
+		"specification/api.go":                   "code",
+		"pkg/service.go":                         "code",
+		"config.yaml":                            "code",
+		"go.sum":                                 "excluded",
+		"README":                                 "other",
+		"requirements.txt":                       "other",
+		"assets/logo.png":                        "binary",
 	}
 	for file, want := range classifications {
 		if got := nativeCategorizePath(file); got != want {
@@ -145,11 +155,57 @@ func TestNativePathClassificationAndGlobMatrix(t *testing.T) {
 			t.Fatalf("nativeGlobMatches(%q, %q) = %t", test.pattern, test.path, got)
 		}
 	}
-	if nativeTargetSelects("code", "tests") || !nativeTargetSelects("all", "tests") {
+	if nativeTargetSelects("code", "tests") || !nativeTargetSelects("all", "tests") ||
+		!nativeTargetSelects("all", "other") || !nativeTargetSelects("all", "binary") ||
+		nativeTargetSelects("all", "excluded") {
 		t.Fatal("target classification mismatch")
 	}
 	if normalizeFileTarget("unknown") != "code" {
 		t.Fatal("unknown target did not fall back to code")
+	}
+}
+
+func TestRepositoryReviewPendingLimitBoundsModelChildWaves(t *testing.T) {
+	if got := nativeRepositoryReviewPendingLimit(128, 8); got != 3 {
+		t.Fatalf("eight-reviewer file limit=%d, want 3", got)
+	}
+	if got := nativeRepositoryReviewPendingLimit(24, 1); got != 24 {
+		t.Fatalf("default file limit=%d, want 24", got)
+	}
+}
+
+func TestNativeGitHubRepositoryIdentityNormalizesSupportedRemotes(t *testing.T) {
+	for _, remote := range []string{
+		"https://github.com/Owner/Repo.git",
+		"git@github.com:Owner/Repo.git",
+		"git@GitHub.com:Owner/Repo.git",
+		"ssh://git@github.com/Owner/Repo.git",
+	} {
+		if got := nativeGitHubRepositoryIdentity(remote); got != "owner/repo" {
+			t.Fatalf("identity(%q)=%q, want owner/repo", remote, got)
+		}
+	}
+	for _, remote := range []string{
+		"https://token@example.com/owner/repo.git",
+		"https://github.com/owner/repo/extra.git",
+		"../local/repo",
+	} {
+		if got := nativeGitHubRepositoryIdentity(remote); got != "" {
+			t.Fatalf("identity(%q)=%q, want unavailable", remote, got)
+		}
+	}
+}
+
+func TestNativeRepositorySourceIdentityStripsCredentialsAndCanonicalizesLocalPath(t *testing.T) {
+	if got := nativeRepositorySourceIdentity(
+		"https://user:secret@gitlab.example/Group/Repo.git?token=secret#fragment",
+		"fallback",
+	); got != "https://gitlab.example/Group/Repo.git" {
+		t.Fatalf("sanitized remote identity=%q", got)
+	}
+	root := t.TempDir()
+	if got := nativeRepositorySourceIdentity(root, "fallback"); got != root {
+		t.Fatalf("local source identity=%q, want %q", got, root)
 	}
 }
 

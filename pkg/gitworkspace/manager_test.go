@@ -109,6 +109,397 @@ func TestManagerAllocatesSeparateWorkspaceWhenRepoLocked(t *testing.T) {
 	}
 }
 
+func TestManagerFreshAcquireObservesAdvancedRemoteInsteadOfReusingCachedHead(t *testing.T) {
+	ctx := context.Background()
+	source := initSourceRepo(t)
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	first, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "main", Fresh: true, SessionKey: "review-run-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, releaseErr := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "review-run-1"}); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(source, "advanced.txt"), []byte("advanced\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if _, gitErr := runGit(ctx, source, "add", "advanced.txt"); gitErr != nil {
+		t.Fatal(gitErr)
+	}
+	if _, gitErr := runGit(ctx, source, "commit", "-m", "advance remote"); gitErr != nil {
+		t.Fatal(gitErr)
+	}
+	want := testGitCommit(t, source, "HEAD")
+	second, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "main", Fresh: true, SessionKey: "review-run-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, statsErr := manager.Stats(ctx)
+	if first.ID != second.ID || testGitCommit(t, second.Path, "HEAD") != want ||
+		statsErr != nil || stats.WorkspaceCount != 1 {
+		t.Fatalf("fresh workspaces first=%#v second=%#v want HEAD=%s", first, second, want)
+	}
+}
+
+func TestManagerFreshAcquireSkipsExternallyDirtiedUnlockedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	source := initSourceRepo(t)
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	first, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "main", Fresh: true, SessionKey: "fresh-dirty-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, releaseErr := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "fresh-dirty-1"}); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	dirtyPath := filepath.Join(first.Path, "external-edit.txt")
+	if writeErr := os.WriteFile(dirtyPath, []byte("preserve me\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	second, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "main", Fresh: true, SessionKey: "fresh-dirty-2",
+	})
+	if err != nil || second.ID == first.ID {
+		t.Fatalf("fresh acquire after external edit first=%#v second=%#v err=%v", first, second, err)
+	}
+	if content, err := os.ReadFile(dirtyPath); err != nil || string(content) != "preserve me\n" {
+		t.Fatalf("external edit content=%q err=%v", content, err)
+	}
+}
+
+func TestManagerFreshAcquireDoesNotFallBackToDeletedCachedBranch(t *testing.T) {
+	ctx := context.Background()
+	source := initSourceRepo(t)
+	if _, err := runGit(ctx, source, "branch", "review-topic"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	if _, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "review-topic", Fresh: true, SessionKey: "deleted-ref-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "deleted-ref-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(ctx, source, "branch", "-D", "review-topic"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "review-topic", Fresh: true, SessionKey: "deleted-ref-2",
+	}); err == nil || !strings.Contains(err.Error(), "ref is unavailable") {
+		t.Fatalf("deleted branch reused cached ref: %v", err)
+	}
+}
+
+func TestManagerPreservesNetworkOriginIdentityForLocalSourceCheckout(t *testing.T) {
+	source := initSourceRepo(t)
+	if _, err := runGit(
+		context.Background(),
+		source,
+		"remote",
+		"add",
+		"origin",
+		"git@github.com:Owner/Repo.git",
+	); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	workspace, err := manager.Acquire(context.Background(), AcquireRequest{
+		Repository: source, Fresh: true, SessionKey: "local-upstream-review",
+	})
+	if err != nil || workspace.UpstreamURL != "git@github.com:Owner/Repo.git" {
+		t.Fatalf("local-source workspace=%#v err=%v", workspace, err)
+	}
+}
+
+func TestManagerRejectsDifferentRefForSameSessionReservation(t *testing.T) {
+	ctx := context.Background()
+	source := initSourceRepo(t)
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	if _, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "HEAD", SessionKey: "workflow-run:one",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: source, Ref: "main", SessionKey: "workflow-run:one",
+	}); err == nil || !strings.Contains(err.Error(), "different ref") {
+		t.Fatalf("different-ref reacquire error=%v", err)
+	}
+}
+
+func TestManagerRejectsOptionLikeGenericRef(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	if _, err := manager.Acquire(context.Background(), AcquireRequest{
+		Repository: initSourceRepo(t), Ref: "--detach", SessionKey: "unsafe-ref",
+	}); err == nil || !strings.Contains(err.Error(), "ref is invalid") {
+		t.Fatalf("option-like ref error=%v", err)
+	}
+}
+
+func TestManagerRejectsCredentialedRepositoryURL(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	if _, err := manager.Acquire(context.Background(), AcquireRequest{
+		Repository: "https://x-access-token:secret@github.com/owner/repo.git",
+		SessionKey: "credentialed-url",
+	}); err == nil || !strings.Contains(err.Error(), "credentials outside the URL") {
+		t.Fatalf("credentialed URL error=%v", err)
+	}
+}
+
+func TestValidateDevelopmentLineInventoryRejectsUnsafeFreshSnapshotIdentity(t *testing.T) {
+	remote := filepath.Clean(t.TempDir())
+	repositoryID := repoID(remote)
+	valid := func() *storeState {
+		return &storeState{
+			Repositories: map[string]*RepositoryRecord{
+				repositoryID: {ID: repositoryID, RemoteURL: remote},
+			},
+			Workspaces: map[string]*WorkspaceRecord{
+				"fresh": {ID: "fresh", RepoID: repositoryID, RemoteURL: remote, FreshSnapshot: true},
+			},
+			DevelopmentLines: make(map[string]*developmentLineRecord),
+		}
+	}
+	state := valid()
+	state.Workspaces["fresh"].UpstreamURL = "https://token@github.com/owner/repo.git"
+	if err := validateDevelopmentLineInventory(
+		state,
+	); err == nil ||
+		!strings.Contains(err.Error(), "upstream identity") {
+		t.Fatalf("unsafe upstream error = %v", err)
+	}
+	state = valid()
+	state.Workspaces["fresh"].PreservedBranch = "preserved/branch"
+	if err := validateDevelopmentLineInventory(
+		state,
+	); err == nil ||
+		!strings.Contains(err.Error(), "fresh git workspace snapshot") {
+		t.Fatalf("fresh/preserved identity error = %v", err)
+	}
+}
+
+func TestFindFreshReusableWorkspaceSkipsUnsafeCachedSnapshots(t *testing.T) {
+	repositoryID := "repo"
+	locked := &LockInfo{SessionKey: "active"}
+	droppedAt := time.Now()
+	state := &storeState{Workspaces: map[string]*WorkspaceRecord{
+		"ordinary":  {ID: "ordinary", RepoID: repositoryID},
+		"locked":    {ID: "locked", RepoID: repositoryID, FreshSnapshot: true, LockedBy: locked},
+		"dropped":   {ID: "dropped", RepoID: repositoryID, FreshSnapshot: true, DroppedAt: &droppedAt},
+		"preserved": {ID: "preserved", RepoID: repositoryID, FreshSnapshot: true, PreservedBranch: "saved"},
+		"private":   {ID: "private", RepoID: repositoryID, FreshSnapshot: true, PinnedSourceRef: "main"},
+		"usable":    {ID: "usable", RepoID: repositoryID, FreshSnapshot: true},
+	}}
+	if got := (&Manager{}).findFreshReusableWorkspaceLocked(state, repositoryID); got == nil || got.ID != "usable" {
+		t.Fatalf("fresh reusable workspace = %#v, want usable", got)
+	}
+	state.Workspaces["usable"].LockedBy = locked
+	if got := (&Manager{}).findFreshReusableWorkspaceLocked(state, repositoryID); got != nil {
+		t.Fatalf("unsafe fresh cache was selected: %#v", got)
+	}
+}
+
+func TestRecloneFreshWorkspaceRejectsUnsafeAndChangedOrigins(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	repository := &RepositoryRecord{ID: "repo"}
+	state := &storeState{Workspaces: make(map[string]*WorkspaceRecord)}
+	if err := manager.recloneFreshWorkspaceLocked(
+		ctx, state, &WorkspaceRecord{}, repository, "remote", "main", now,
+	); err == nil || !strings.Contains(err.Error(), "reuse is not safe") {
+		t.Fatalf("unsafe fresh reuse error = %v", err)
+	}
+
+	newWorkspace := func(t *testing.T) (string, *WorkspaceRecord, string) {
+		t.Helper()
+		source := initSourceRepo(t)
+		clone := filepath.Join(t.TempDir(), "clone")
+		if _, err := runGit(ctx, "", "clone", "--", source, clone); err != nil {
+			t.Fatal(err)
+		}
+		return source, &WorkspaceRecord{
+			ID:            "fresh",
+			RepoID:        "repo",
+			RemoteURL:     source,
+			Path:          clone,
+			FreshSnapshot: true,
+		}, clone
+	}
+
+	t.Run("missing origin", func(t *testing.T) {
+		source, workspace, clone := newWorkspace(t)
+		if _, err := runGit(ctx, clone, "remote", "remove", "origin"); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.recloneFreshWorkspaceLocked(
+			ctx,
+			state,
+			workspace,
+			repository,
+			source,
+			"main",
+			now,
+		); err == nil {
+			t.Fatal("fresh workspace without origin was reused")
+		}
+	})
+
+	t.Run("multiple origins", func(t *testing.T) {
+		source, workspace, clone := newWorkspace(t)
+		if _, err := runGit(ctx, clone, "remote", "set-url", "--add", "origin", source+"-other"); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.recloneFreshWorkspaceLocked(
+			ctx,
+			state,
+			workspace,
+			repository,
+			source,
+			"main",
+			now,
+		); err == nil ||
+			!strings.Contains(err.Error(), "origin is invalid") {
+			t.Fatalf("multiple-origin error = %v", err)
+		}
+	})
+
+	t.Run("changed origin", func(t *testing.T) {
+		source, workspace, clone := newWorkspace(t)
+		other := initSourceRepo(t)
+		if _, err := runGit(ctx, clone, "remote", "set-url", "origin", other); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.recloneFreshWorkspaceLocked(
+			ctx,
+			state,
+			workspace,
+			repository,
+			source,
+			"main",
+			now,
+		); err == nil ||
+			!strings.Contains(err.Error(), "origin changed") {
+			t.Fatalf("changed-origin error = %v", err)
+		}
+	})
+
+	t.Run("unavailable remote", func(t *testing.T) {
+		source, workspace, _ := newWorkspace(t)
+		if err := os.RemoveAll(source); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.recloneFreshWorkspaceLocked(
+			ctx,
+			state,
+			workspace,
+			repository,
+			source,
+			"main",
+			now,
+		); err == nil {
+			t.Fatal("unavailable fresh remote was reused")
+		}
+	})
+}
+
+func TestConfigureFreshWorkspaceUpstreamAddsUpdatesAndRemovesRemote(t *testing.T) {
+	ctx := context.Background()
+	source := initSourceRepo(t)
+	clone := filepath.Join(t.TempDir(), "clone")
+	if _, err := runGit(ctx, "", "clone", "--", source, clone); err != nil {
+		t.Fatal(err)
+	}
+	first := "git@github.com:owner/one.git"
+	second := "git@github.com:owner/two.git"
+	if err := configureFreshWorkspaceUpstream(ctx, clone, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := configureFreshWorkspaceUpstream(ctx, clone, second); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := runGit(ctx, clone, "remote", "get-url", "picoclaw-upstream"); err != nil ||
+		strings.TrimSpace(got) != second {
+		t.Fatalf("updated upstream = %q, %v", got, err)
+	}
+	if err := configureFreshWorkspaceUpstream(ctx, clone, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(ctx, clone, "remote", "get-url", "picoclaw-upstream"); err == nil {
+		t.Fatal("empty upstream did not remove preserved remote")
+	}
+}
+
+func TestLocalRepositoryRemoteOriginRequiresOneSafeNetworkOrigin(t *testing.T) {
+	ctx := context.Background()
+	if got := localRepositoryRemoteOrigin(ctx, "relative/repo"); got != "" {
+		t.Fatalf("relative repository origin = %q", got)
+	}
+	repo := initSourceRepo(t)
+	if got := localRepositoryRemoteOrigin(ctx, repo); got != "" {
+		t.Fatalf("repository without origin = %q", got)
+	}
+	if _, err := runGit(ctx, repo, "remote", "add", "origin", "http://Example.com/Owner/Repo.git"); err != nil {
+		t.Fatal(err)
+	}
+	if got := localRepositoryRemoteOrigin(ctx, repo); got != "http://example.com/Owner/Repo.git" {
+		t.Fatalf("safe network origin = %q", got)
+	}
+	if _, err := runGit(
+		ctx,
+		repo,
+		"remote",
+		"set-url",
+		"--add",
+		"origin",
+		"https://github.com/other/repo.git",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := localRepositoryRemoteOrigin(ctx, repo); got != "" {
+		t.Fatalf("multiple network origins = %q", got)
+	}
+	if _, err := runGit(
+		ctx,
+		repo,
+		"remote",
+		"set-url",
+		"--delete",
+		"origin",
+		"https://github.com/other/repo.git",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(
+		ctx,
+		repo,
+		"remote",
+		"set-url",
+		"origin",
+		"https://token@github.com/owner/repo.git",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := localRepositoryRemoteOrigin(ctx, repo); got != "" {
+		t.Fatalf("credentialed network origin = %q", got)
+	}
+}
+
 func TestManagerAcquirePinnedChecksOutExactDetachedCommit(t *testing.T) {
 	ctx := context.Background()
 	source := initSourceRepo(t)
@@ -1266,10 +1657,10 @@ func TestManagerPreservationBranchesAreCreateOnlyAtSameTimestamp(t *testing.T) {
 	}
 }
 
-func TestManagerAcquireCanonicalizesHTTPSGitHubRemoteToSSH(t *testing.T) {
+func TestManagerAcquirePreservesSafeHTTPSGitHubTransport(t *testing.T) {
 	ctx := context.Background()
 	source := initSourceRepo(t)
-	canonical := "git@github.com:scylladb/alternator-client-java.git"
+	canonical := "https://github.com/scylladb/alternator-client-java.git"
 	configPath := filepath.Join(t.TempDir(), "gitconfig")
 	sourceURL := "file://" + filepath.ToSlash(source)
 	if _, err := runGit(
@@ -1288,7 +1679,7 @@ func TestManagerAcquireCanonicalizesHTTPSGitHubRemoteToSSH(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	manager := newTestManager(t, &now)
 	acquired, err := manager.Acquire(ctx, AcquireRequest{
-		Repository: "https://github.com/scylladb/alternator-client-java.git",
+		Repository: canonical,
 		SessionKey: "s1",
 	})
 	if err != nil {
@@ -1306,7 +1697,7 @@ func TestManagerAcquireCanonicalizesHTTPSGitHubRemoteToSSH(t *testing.T) {
 		SessionKey: "s2",
 	})
 	if err != nil {
-		t.Fatalf("reacquire with SSH remote error = %v", err)
+		t.Fatalf("reacquire with HTTPS remote error = %v", err)
 	}
 	if reacquired.ID != acquired.ID {
 		t.Fatalf("reacquired workspace ID = %q, want %q", reacquired.ID, acquired.ID)
@@ -1326,24 +1717,25 @@ func TestManagerAcquireCanonicalizesHTTPSGitHubRemoteToSSH(t *testing.T) {
 
 func TestNormalizeRepositoryPrefersSSHRemoteWhenSafe(t *testing.T) {
 	tests := []struct {
-		name string
-		repo string
-		want string
+		name    string
+		repo    string
+		want    string
+		wantErr bool
 	}{
 		{
 			name: "github https",
 			repo: "https://github.com/scylladb/alternator-client-java.git",
-			want: "git@github.com:scylladb/alternator-client-java.git",
+			want: "https://github.com/scylladb/alternator-client-java.git",
 		},
 		{
 			name: "github https without suffix",
 			repo: "https://github.com/scylladb/alternator-client-java",
-			want: "git@github.com:scylladb/alternator-client-java.git",
+			want: "https://github.com/scylladb/alternator-client-java.git",
 		},
 		{
 			name: "github git protocol",
 			repo: "git://github.com/scylladb/alternator-client-java.git",
-			want: "git@github.com:scylladb/alternator-client-java.git",
+			want: "git://github.com/scylladb/alternator-client-java.git",
 		},
 		{
 			name: "github ssh url",
@@ -1363,28 +1755,34 @@ func TestNormalizeRepositoryPrefersSSHRemoteWhenSafe(t *testing.T) {
 		{
 			name: "gitlab nested group",
 			repo: "https://gitlab.com/group/subgroup/repo.git",
-			want: "git@gitlab.com:group/subgroup/repo.git",
+			want: "https://gitlab.com/group/subgroup/repo.git",
 		},
 		{
-			name: "web page path remains original",
-			repo: "https://github.com/scylladb/alternator-client-java/tree/main",
-			want: "https://github.com/scylladb/alternator-client-java/tree/main",
+			name:    "web page path remains original",
+			repo:    "https://github.com/scylladb/alternator-client-java/tree/main",
+			wantErr: true,
 		},
 		{
-			name: "credentials remain original",
-			repo: "https://token@github.com/scylladb/alternator-client-java.git",
-			want: "https://token@github.com/scylladb/alternator-client-java.git",
+			name:    "credentials are rejected",
+			repo:    "https://token@github.com/scylladb/alternator-client-java.git",
+			wantErr: true,
 		},
 		{
-			name: "custom port remains original",
-			repo: "https://github.com:8443/scylladb/alternator-client-java.git",
-			want: "https://github.com:8443/scylladb/alternator-client-java.git",
+			name:    "custom port remains original",
+			repo:    "https://github.com:8443/scylladb/alternator-client-java.git",
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := normalizeRepository(tt.repo)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("normalizeRepository() = %q, want error", got)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("normalizeRepository() error = %v", err)
 			}

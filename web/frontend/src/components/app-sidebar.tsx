@@ -1,6 +1,7 @@
 import { IconChevronRight } from "@tabler/icons-react"
 import {
   IconBellRinging,
+  IconBug,
   IconChevronsDown,
   IconChevronsUp,
   IconDatabase,
@@ -123,6 +124,13 @@ const pullRequestsLifecycleSettingsNavItem: NavItem = {
   search: { tab: "nudging" },
 }
 
+const repositoryReviewsNavItem: NavItem = {
+  title: "Repository reviews",
+  url: "/repository-reviews",
+  icon: IconBug,
+  translateTitle: false,
+}
+
 const configNavItem: NavItem = {
   title: "navigation.config",
   url: "/config",
@@ -162,9 +170,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     currentPath.startsWith("/pull-requests/")
       ? currentPath
       : null
+  const repositoryReviewsDestination =
+    currentPath === "/repository-reviews" ? currentPath : null
+  const servicesDestination =
+    pullRequestDestination ?? repositoryReviewsDestination
   const [servicesOpen, setServicesOpen] = useAutoRevealCollapsible(
-    pullRequestDestination,
-    currentPath.startsWith("/agent/") || pullRequestDestination != null,
+    servicesDestination,
+    currentPath.startsWith("/agent/") || servicesDestination != null,
   )
   const [pullRequestsOpen, setPullRequestsOpen] = useAutoRevealCollapsible(
     pullRequestDestination,
@@ -472,6 +484,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>
+                  {renderNavItem(repositoryReviewsNavItem)}
                   {renderNavItem(eventsNavItem)}
                   {renderNavItem(logsNavItem)}
                 </SidebarMenu>

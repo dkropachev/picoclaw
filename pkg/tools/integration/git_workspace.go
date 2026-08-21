@@ -51,6 +51,10 @@ func (t *GitWorkspaceTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Optional branch, tag, or commit to check out when a new workspace is cloned.",
 			},
+			"fresh": map[string]any{
+				"type":        "boolean",
+				"description": "Clone a fresh checkout instead of reusing an unlocked cached workspace. Use for immutable review snapshots that must observe the current requested ref.",
+			},
 			"workspace_id": map[string]any{
 				"type":        "string",
 				"description": "Workspace ID for status, clean_ignored, or drop.",
@@ -70,9 +74,11 @@ func (t *GitWorkspaceTool) Execute(ctx context.Context, args map[string]any) *To
 	case "acquire":
 		repository, _ := args["repository"].(string)
 		ref, _ := args["ref"].(string)
+		fresh, _ := args["fresh"].(bool)
 		info, err := t.manager.Acquire(ctx, gitworkspace.AcquireRequest{
 			Repository: repository,
 			Ref:        ref,
+			Fresh:      fresh,
 			SessionKey: ToolSessionKey(ctx),
 			AgentID:    ToolAgentID(ctx),
 		})

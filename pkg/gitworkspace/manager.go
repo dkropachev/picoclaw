@@ -37,6 +37,8 @@ var errLegacyPinnedWorkspaceMigration = errors.New(
 	"git workspace inventory requires version-1 cleanup before upgrade",
 )
 
+var errFreshWorkspaceDirty = errors.New("fresh git workspace is not clean")
+
 type Options struct {
 	RootDir             string
 	MaxTotalSizeBytes   int64
@@ -63,6 +65,7 @@ type Manager struct {
 type AcquireRequest struct {
 	Repository string
 	Ref        string
+	Fresh      bool
 	SessionKey string
 	AgentID    string
 }
@@ -109,6 +112,8 @@ type WorkspaceRecord struct {
 	ID                                string     `json:"id"`
 	RepoID                            string     `json:"repo_id"`
 	RemoteURL                         string     `json:"remote_url"`
+	UpstreamURL                       string     `json:"upstream_url,omitempty"`
+	FreshSnapshot                     bool       `json:"fresh_snapshot,omitempty"`
 	Ref                               string     `json:"ref,omitempty"`
 	PinnedSourceRef                   string     `json:"pinned_source_ref,omitempty"`
 	PinnedCommit                      string     `json:"pinned_commit,omitempty"`
@@ -152,6 +157,7 @@ type WorkspaceInfo struct {
 	ID              string     `json:"id"`
 	RepoID          string     `json:"repo_id"`
 	RemoteURL       string     `json:"remote_url"`
+	UpstreamURL     string     `json:"upstream_url,omitempty"`
 	Ref             string     `json:"ref,omitempty"`
 	Path            string     `json:"path"`
 	CurrentBranch   string     `json:"current_branch,omitempty"`
@@ -354,6 +360,10 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) (WorkspaceInf
 	if err != nil {
 		return WorkspaceInfo{}, err
 	}
+	ref, err := normalizeGenericAcquireRef(ctx, req.Ref)
+	if err != nil {
+		return WorkspaceInfo{}, err
+	}
 	sessionKey := strings.TrimSpace(req.SessionKey)
 	if sessionKey == "" {
 		return WorkspaceInfo{}, errors.New("session key is required to lock a git workspace")
@@ -392,6 +402,11 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) (WorkspaceInf
 				"pinned git workspace reservation requires AcquirePinned",
 			)
 		}
+		if ws.Ref != ref {
+			return WorkspaceInfo{}, errors.New(
+				"session already holds a git workspace for a different ref; release it before acquiring another ref",
+			)
+		}
 		ws.LockedBy.HeartbeatAt = now
 		ws.UpdatedAt = now
 		m.addHistoryLocked(st, now, "heartbeat", repoID, ws.ID, sessionKey, req.AgentID, "")
@@ -401,12 +416,31 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) (WorkspaceInf
 		return m.workspaceInfo(ctx, ws)
 	}
 
-	ws := m.findReusableWorkspaceLocked(st, repoID, strings.TrimSpace(req.Ref))
+	var ws *WorkspaceRecord
+	if req.Fresh {
+		ws = m.findFreshReusableWorkspaceLocked(st, repoID)
+		if ws != nil {
+			if recloneErr := m.recloneFreshWorkspaceLocked(
+				ctx, st, ws, repoRec, repo, ref, now,
+			); recloneErr != nil {
+				if !errors.Is(recloneErr, errFreshWorkspaceDirty) {
+					return WorkspaceInfo{}, recloneErr
+				}
+				ws.FreshSnapshot = false
+				ws = nil
+			}
+		}
+	} else {
+		ws = m.findReusableWorkspaceLocked(st, repoID, ref)
+	}
 	if ws == nil {
-		ws, err = m.createWorkspaceLocked(ctx, st, repoRec, repo, strings.TrimSpace(req.Ref), now)
+		ws, err = m.createWorkspaceLocked(ctx, st, repoRec, repo, ref, now)
 		if err != nil {
 			return WorkspaceInfo{}, err
 		}
+	}
+	if req.Fresh {
+		ws.FreshSnapshot = true
 	}
 
 	ws.LockedBy = &LockInfo{
@@ -719,6 +753,7 @@ func (m *Manager) releaseReservations(
 		}
 		if changed {
 			ws.PreservedBranch = branch
+			ws.FreshSnapshot = false
 		}
 		ws.LockedBy = nil
 		ws.LastWorkAt = now
@@ -1207,13 +1242,108 @@ func (m *Manager) findReusableWorkspaceLocked(st *storeState, repoID, ref string
 		if ws == nil || ws.RepoID != repoID || ws.DroppedAt != nil || ws.LockedBy != nil {
 			continue
 		}
-		if controllerPrivateWorkspace(ws) {
+		if controllerPrivateWorkspace(ws) || ws.FreshSnapshot {
 			continue
 		}
 		if ref == "" || ws.Ref == "" || ws.Ref == ref {
 			return ws
 		}
 	}
+	return nil
+}
+
+func (m *Manager) findFreshReusableWorkspaceLocked(st *storeState, repoID string) *WorkspaceRecord {
+	for _, ws := range sortedWorkspaceRecords(st.Workspaces) {
+		if ws == nil || ws.RepoID != repoID || ws.DroppedAt != nil || ws.LockedBy != nil ||
+			controllerPrivateWorkspace(ws) || !ws.FreshSnapshot || ws.PreservedBranch != "" {
+			continue
+		}
+		return ws
+	}
+	return nil
+}
+
+func (m *Manager) recloneFreshWorkspaceLocked(
+	ctx context.Context,
+	st *storeState,
+	workspace *WorkspaceRecord,
+	repository *RepositoryRecord,
+	remoteURL, ref string,
+	now time.Time,
+) error {
+	if workspace == nil || repository == nil || workspace.LockedBy != nil ||
+		workspace.PreservedBranch != "" || !workspace.FreshSnapshot || controllerPrivateWorkspace(workspace) {
+		return errors.New("fresh git workspace reuse is not safe")
+	}
+	status, err := runGit(ctx, workspace.Path, "status", "--porcelain=v1", "--untracked-files=normal")
+	if err != nil || strings.TrimSpace(status) != "" {
+		return errFreshWorkspaceDirty
+	}
+	origins, err := runGit(ctx, workspace.Path, "remote", "get-url", "--all", "origin")
+	if err != nil {
+		return err
+	}
+	originValues := strings.Fields(strings.TrimSpace(origins))
+	if len(originValues) != 1 {
+		return errors.New("fresh git workspace origin is invalid")
+	}
+	normalizedOrigin, err := normalizeRepository(originValues[0])
+	if err != nil || normalizedOrigin != remoteURL {
+		return errors.New("fresh git workspace origin changed")
+	}
+	hooksPath, err := os.MkdirTemp(m.rootDir, ".fresh-hooks-")
+	if err != nil {
+		return fmt.Errorf("create fresh git workspace hooks directory: %w", err)
+	}
+	defer os.RemoveAll(hooksPath)
+	if _, err := runGit(
+		ctx, workspace.Path, "-c", "core.hooksPath="+hooksPath,
+		"fetch", "--prune", "--prune-tags", "--force", "--tags", "origin",
+	); err != nil {
+		return err
+	}
+	if _, err := runGit(ctx, workspace.Path, "remote", "set-head", "origin", "--auto"); err != nil {
+		return fmt.Errorf("refresh fresh git workspace default branch: %w", err)
+	}
+	candidates := []string{ref}
+	switch {
+	case ref == "" || ref == "HEAD":
+		candidates = []string{"refs/remotes/origin/HEAD"}
+	case strings.HasPrefix(ref, "refs/heads/"):
+		candidates = []string{"refs/remotes/origin/" + strings.TrimPrefix(ref, "refs/heads/")}
+	case !validPinnedCommit(strings.ToLower(ref)) && !strings.HasPrefix(ref, "refs/tags/"):
+		candidates = []string{"refs/remotes/origin/" + ref, "refs/tags/" + ref}
+	}
+	commit := ""
+	for _, candidate := range candidates {
+		resolved, resolveErr := runGit(
+			ctx, workspace.Path, "rev-parse", "--verify", "--end-of-options", candidate+"^{commit}",
+		)
+		if resolveErr == nil && validPinnedCommit(strings.TrimSpace(resolved)) {
+			commit = strings.TrimSpace(resolved)
+			break
+		}
+	}
+	if commit == "" {
+		return errors.New("requested fresh git workspace ref is unavailable")
+	}
+	if _, err := runGit(
+		ctx, workspace.Path, "-c", "core.hooksPath="+hooksPath,
+		"checkout", "--detach", "--force", commit,
+	); err != nil {
+		return err
+	}
+	workspace.Ref = ref
+	workspace.RemoteURL = remoteURL
+	workspace.UpstreamURL = localRepositoryRemoteOrigin(ctx, remoteURL)
+	if err := configureFreshWorkspaceUpstream(ctx, workspace.Path, workspace.UpstreamURL); err != nil {
+		return err
+	}
+	workspace.UpdatedAt = now
+	workspace.PreservedBranch = ""
+	workspace.DroppedAt = nil
+	repository.LastSeenAt = now
+	m.addHistoryLocked(st, now, "recloned", repository.ID, workspace.ID, "", "", workspace.Path)
 	return nil
 }
 
@@ -2256,6 +2386,24 @@ func validPinnedCommit(commit string) bool {
 	return true
 }
 
+func normalizeGenericAcquireRef(ctx context.Context, raw string) (string, error) {
+	ref := strings.TrimSpace(raw)
+	if ref == "" {
+		return "", nil
+	}
+	if ref != raw || len(ref) > 4096 || !utf8.ValidString(ref) ||
+		strings.HasPrefix(ref, "-") || strings.ContainsAny(ref, "\x00\r\n\t") {
+		return "", errors.New("git workspace ref is invalid")
+	}
+	if ref == "HEAD" || validPinnedCommit(strings.ToLower(ref)) {
+		return ref, nil
+	}
+	if _, err := runGit(ctx, "", "check-ref-format", "--branch", ref); err != nil {
+		return "", errors.New("git workspace ref is invalid")
+	}
+	return ref, nil
+}
+
 func controllerPrivateWorkspace(workspace *WorkspaceRecord) bool {
 	return workspace != nil && (workspace.DevelopmentLineID != "" ||
 		workspace.PinnedSourceRef != "" || workspace.PinnedCommit != "")
@@ -2294,19 +2442,38 @@ func (m *Manager) createWorkspaceLocked(
 			return nil, err
 		}
 	}
+	upstreamURL := localRepositoryRemoteOrigin(ctx, remoteURL)
+	if err := configureFreshWorkspaceUpstream(ctx, path, upstreamURL); err != nil {
+		_ = os.RemoveAll(path)
+		return nil, err
+	}
 	ws := &WorkspaceRecord{
-		ID:        id,
-		RepoID:    repo.ID,
-		RemoteURL: remoteURL,
-		Ref:       ref,
-		Path:      path,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          id,
+		RepoID:      repo.ID,
+		RemoteURL:   remoteURL,
+		UpstreamURL: upstreamURL,
+		Ref:         ref,
+		Path:        path,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	st.Workspaces[id] = ws
 	repo.WorkspaceIDs = appendUnique(repo.WorkspaceIDs, id)
 	m.addHistoryLocked(st, now, "cloned", repo.ID, id, "", "", path)
 	return ws, nil
+}
+
+func configureFreshWorkspaceUpstream(ctx context.Context, workspacePath, upstreamURL string) error {
+	if upstreamURL == "" {
+		_, _ = runGit(ctx, workspacePath, "remote", "remove", "picoclaw-upstream")
+		return nil
+	}
+	if _, err := runGit(ctx, workspacePath, "remote", "get-url", "picoclaw-upstream"); err == nil {
+		_, err = runGit(ctx, workspacePath, "remote", "set-url", "picoclaw-upstream", upstreamURL)
+		return err
+	}
+	_, err := runGit(ctx, workspacePath, "remote", "add", "picoclaw-upstream", upstreamURL)
+	return err
 }
 
 func (m *Manager) dropWorkspaceLocked(
@@ -2717,6 +2884,7 @@ func (m *Manager) workspaceInfo(ctx context.Context, ws *WorkspaceRecord) (Works
 		ID:              ws.ID,
 		RepoID:          ws.RepoID,
 		RemoteURL:       ws.RemoteURL,
+		UpstreamURL:     ws.UpstreamURL,
 		Ref:             ws.Ref,
 		Path:            ws.Path,
 		PreservedBranch: ws.PreservedBranch,
@@ -3053,12 +3221,30 @@ func normalizeRepository(repo string) (string, error) {
 		return normalized, nil
 	}
 	if strings.Contains(repo, "://") || isSCPStyleRemote(repo) {
-		return repo, nil
+		return "", errors.New("repository remote URL is invalid; configure credentials outside the URL")
 	}
 	if abs, err := filepath.Abs(repo); err == nil {
 		return filepath.Clean(abs), nil
 	}
 	return repo, nil
+}
+
+func localRepositoryRemoteOrigin(ctx context.Context, repository string) string {
+	if !filepath.IsAbs(repository) {
+		return ""
+	}
+	output, err := runGit(ctx, repository, "remote", "get-url", "--all", "origin")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Fields(strings.TrimSpace(output))
+	if len(lines) != 1 {
+		return ""
+	}
+	if normalized, ok := normalizeRemoteRepository(lines[0]); ok {
+		return normalized
+	}
+	return ""
 }
 
 func normalizeRemoteRepository(repo string) (string, bool) {
@@ -3111,7 +3297,7 @@ func normalizeURLRemote(repoURL *url.URL) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		return formatSCPRemote("git", host, remotePath), true
+		return scheme + "://" + strings.ToLower(host) + "/" + remotePath, true
 	case "https":
 		if repoURL.User != nil || (port != "" && port != "443") {
 			return "", false
@@ -3120,7 +3306,7 @@ func normalizeURLRemote(repoURL *url.URL) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		return formatSCPRemote("git", host, remotePath), true
+		return scheme + "://" + strings.ToLower(host) + "/" + remotePath, true
 	case "git":
 		if repoURL.User != nil || port != "" {
 			return "", false
@@ -3129,7 +3315,7 @@ func normalizeURLRemote(repoURL *url.URL) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		return formatSCPRemote("git", host, remotePath), true
+		return scheme + "://" + strings.ToLower(host) + "/" + remotePath, true
 	case "ssh":
 		if port != "" && port != "22" {
 			return "", false

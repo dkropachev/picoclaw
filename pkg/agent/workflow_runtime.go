@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
@@ -117,48 +118,54 @@ type workflowToolRunner struct {
 
 func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequest) (map[string]any, error) {
 	if r == nil || r.registry == nil {
-		return nil, fmt.Errorf("tool registry not configured")
+		return nil, errors.Join(workflows.ErrToolCallNotDispatched, errors.New("tool registry not configured"))
 	}
 	registry := r.registry
 	if r.loop != nil && r.dynamic {
 		leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(workflows.ErrToolCallNotDispatched, err)
 		}
 		defer releaseRuntime()
 		ctx = leaseCtx
 		currentRegistry := r.loop.GetRegistry()
 		if currentRegistry == nil {
-			return nil, fmt.Errorf("agent registry not configured")
+			return nil, errors.Join(workflows.ErrToolCallNotDispatched, errors.New("agent registry not configured"))
 		}
 		currentAgent, ok := currentRegistry.GetAgent(r.agentID)
 		if !ok || currentAgent == nil || currentAgent.Tools == nil {
-			return nil, fmt.Errorf("agent %q not found for workflow tool step", r.agentID)
+			return nil, errors.Join(
+				workflows.ErrToolCallNotDispatched,
+				fmt.Errorf("agent %q not found for workflow tool step", r.agentID),
+			)
 		}
 		registry = currentAgent.Tools
 	}
 	if req.MCP {
 		registeredTool, ok := registry.Get(req.Name)
 		if !ok {
-			return nil, fmt.Errorf(
+			return nil, errors.Join(workflows.ErrToolCallNotDispatched, fmt.Errorf(
 				"MCP tool %q/%q is not available",
 				req.MCPServer,
 				req.MCPTool,
-			)
+			))
 		}
 		if !workflowMCPToolMatches(registeredTool, req.MCPServer, req.MCPTool) {
-			return nil, fmt.Errorf(
+			return nil, errors.Join(workflows.ErrToolCallNotDispatched, fmt.Errorf(
 				"MCP tool %q/%q does not match the registered wrapper for %q",
 				req.MCPServer,
 				req.MCPTool,
 				req.Name,
-			)
+			))
 		}
 	}
 	args := cloneAnyMap(req.Args)
 	delivery := req.Delivery
 	if strings.EqualFold(req.Name, tools.WorkflowToolName) {
-		return nil, fmt.Errorf("workflow steps cannot call the workflow tool recursively")
+		return nil, errors.Join(
+			workflows.ErrToolCallNotDispatched,
+			errors.New("workflow steps cannot call the workflow tool recursively"),
+		)
 	}
 	if strings.EqualFold(req.Name, "message") && delivery.ReplyToMessageID != "" {
 		if _, exists := args["reply_to_message_id"]; !exists {
@@ -260,12 +267,227 @@ type workflowAgentRunner struct {
 	newEphemeralSessionKey func() string
 }
 
-var _ workflows.ReadOnlySessionCapturer = (*workflowAgentRunner)(nil)
+var (
+	_ workflows.ReadOnlySessionCapturer         = (*workflowAgentRunner)(nil)
+	_ workflows.RepositoryReviewProfileResolver = (*workflowAgentRunner)(nil)
+)
+
+func (r *workflowAgentRunner) ResolveRepositoryReviewProfile(
+	ctx context.Context,
+	agentID string,
+	requestedReviewerModels []string,
+) (workflows.RepositoryReviewModelProfile, error) {
+	if r == nil || r.loop == nil {
+		return workflows.RepositoryReviewModelProfile{}, errors.New("agent loop not configured")
+	}
+	leaseCtx, releaseRuntime, leaseErr := r.loop.acquireRuntimeUse(ctx)
+	if leaseErr != nil {
+		return workflows.RepositoryReviewModelProfile{}, leaseErr
+	}
+	defer releaseRuntime()
+	if contextErr := leaseCtx.Err(); contextErr != nil {
+		return workflows.RepositoryReviewModelProfile{}, contextErr
+	}
+	registry := r.loop.GetRegistry()
+	if registry == nil {
+		return workflows.RepositoryReviewModelProfile{}, errors.New("agent registry not configured")
+	}
+	agentID = strings.TrimSpace(agentID)
+	agent, ok := registry.GetAgent(agentID)
+	if !ok || agent == nil {
+		return workflows.RepositoryReviewModelProfile{}, fmt.Errorf("workflow agent %q not found", agentID)
+	}
+	requested := workflowManagedReviewerModels(requestedReviewerModels)
+	includeDefaultReviewer := len(requested) == 0
+	effectiveModels := requested
+	reviewerModels := requested
+	if includeDefaultReviewer {
+		effectiveModels = workflowManagedReviewerModels(append([]string{agent.Model}, agent.Fallbacks...))
+		if len(effectiveModels) > 1 {
+			reviewerModels = append([]string(nil), effectiveModels[1:]...)
+		}
+	}
+	if len(effectiveModels) == 0 {
+		return workflows.RepositoryReviewModelProfile{}, errors.New("repository review has no configured model aliases")
+	}
+	cfg := r.loop.GetConfig()
+	var modelRouterConfig any
+	if includeDefaultReviewer && cfg != nil {
+		for index := range cfg.ModelRouters {
+			router := &cfg.ModelRouters[index]
+			if !router.Enabled || strings.TrimSpace(router.Name) != strings.TrimSpace(agent.Model) {
+				continue
+			}
+			modelRouterConfig = router
+			effectiveModels = removeRepositoryReviewModelDependency(effectiveModels, agent.Model)
+			for _, block := range router.Blocks {
+				if strings.TrimSpace(block.Type) == config.ModelRouterBlockTypeModel {
+					effectiveModels = appendRepositoryReviewModelDependency(effectiveModels, block.Model)
+				}
+			}
+			break
+		}
+		if agent.Router != nil {
+			effectiveModels = appendRepositoryReviewModelDependency(effectiveModels, agent.Router.LightModel())
+		}
+	}
+	for _, model := range effectiveModels {
+		if validationErr := validateModelAliasReferences(cfg, model, []string{}); validationErr != nil {
+			return workflows.RepositoryReviewModelProfile{}, fmt.Errorf("reviewer model %q: %w", model, validationErr)
+		}
+	}
+	if includeDefaultReviewer {
+		for _, candidate := range append(
+			append([]providers.FallbackCandidate(nil), agent.Candidates...),
+			agent.LightCandidates...,
+		) {
+			if repositoryReviewUnsafeProvider(candidate.Provider) {
+				return workflows.RepositoryReviewModelProfile{}, fmt.Errorf(
+					"repository review model %q uses agentic CLI provider %q",
+					resolvedCandidateModelName([]providers.FallbackCandidate{candidate}, candidate.Model),
+					candidate.Provider,
+				)
+			}
+		}
+	}
+	accountRefs := map[string]struct{}{strings.TrimSpace(agent.AccountRef): {}}
+	var accountRouter any
+	if router := lookupAccountRouterConfig(cfg, agent.AccountRef); router != nil {
+		accountRouter = router
+		for _, accountRef := range accountRouterAccountNames(router) {
+			accountRefs[accountRef] = struct{}{}
+		}
+	}
+	modelConfigs := make([]map[string]any, 0)
+	if cfg != nil {
+		for _, modelCfg := range cfg.ModelList {
+			if modelCfg == nil {
+				continue
+			}
+			if _, selected := accountRefs[strings.TrimSpace(modelCfg.ModelName)]; !selected {
+				continue
+			}
+			modelConfigs = append(modelConfigs, map[string]any{
+				"model_name": modelCfg.ModelName, "provider": modelCfg.Provider,
+				"model": modelCfg.Model, "api_base": modelCfg.APIBase,
+				"fallbacks": append([]string(nil), modelCfg.Fallbacks...),
+				"router":    modelCfg.Router, "model_router": modelCfg.ModelRouter,
+				"auth_method": modelCfg.AuthMethod, "credential_id": modelCfg.CredentialID,
+				"connect_mode": modelCfg.ConnectMode, "max_tokens_field": modelCfg.MaxTokensField,
+				"thinking_level": modelCfg.ThinkingLevel, "reasoning_effort": modelCfg.ReasoningEffort,
+				"tool_schema_transform": modelCfg.ToolSchemaTransform,
+				"streaming":             modelCfg.Streaming, "extra_body": modelCfg.ExtraBody,
+				"enabled": modelCfg.Enabled, "api_key_count": len(modelCfg.APIKeys),
+			})
+		}
+	}
+	aliasBindings := make([]map[string]any, 0, len(effectiveModels))
+	for _, model := range effectiveModels {
+		bindings := make(map[string]string, len(accountRefs))
+		for accountRef := range accountRefs {
+			if accountRef == "" || cfg == nil {
+				continue
+			}
+			resolved, resolveErr := cfg.ResolveModelAlias(model, accountRef)
+			if resolveErr != nil {
+				bindings[accountRef] = "error:" + resolveErr.Error()
+			} else {
+				bindings[accountRef] = resolved
+				modelConfig, configErr := concreteAccountModelConfig(
+					cfg, accountRef, model, agent.Workspace,
+				)
+				if configErr == nil {
+					providerName, _ := providers.ExtractProtocol(modelConfig)
+					if repositoryReviewUnsafeProvider(providerName) {
+						return workflows.RepositoryReviewModelProfile{}, fmt.Errorf(
+							"repository review model %q uses agentic CLI provider %q",
+							model, providerName,
+						)
+					}
+				}
+			}
+		}
+		aliasBindings = append(aliasBindings, map[string]any{
+			"alias": model, "account_bindings": bindings,
+		})
+	}
+	payload := map[string]any{
+		"version": 1, "agent_id": agent.ID, "account_ref": agent.AccountRef,
+		"agent_model": agent.Model, "agent_fallbacks": append([]string(nil), agent.Fallbacks...),
+		"effective_models": effectiveModels, "include_default_reviewer": includeDefaultReviewer,
+		"max_tokens": agent.MaxTokens, "context_window": agent.ContextWindow,
+		"temperature": agent.Temperature, "thinking_level": agent.ThinkingLevel,
+		"model_configs": modelConfigs, "alias_bindings": aliasBindings,
+		"account_router": accountRouter, "model_router": modelRouterConfig,
+		"runtime_candidates": agent.Candidates, "light_candidates": agent.LightCandidates,
+	}
+	if includeDefaultReviewer && cfg != nil {
+		payload["routing"] = cfg.Agents.Defaults.Routing
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return workflows.RepositoryReviewModelProfile{}, err
+	}
+	digest := sha256.Sum256(encoded)
+	inputTokens := agent.ContextWindow - agent.MaxTokens
+	if inputTokens <= 0 {
+		inputTokens = 8192
+	}
+	// Reserve fixed task/schema headroom, then convert the remaining token
+	// budget to a conservative three UTF-8 source bytes per token. Freeze uses
+	// this as both the per-file and related-group aggregate ceiling.
+	sourceTokens := max(2048, inputTokens-4096)
+	maxContentBytes := min(512<<10, max(8<<10, sourceTokens*3))
+	return workflows.RepositoryReviewModelProfile{
+		Revision:               fmt.Sprintf("sha256:%x", digest[:]),
+		ReviewerModels:         append([]string(nil), reviewerModels...),
+		IncludeDefaultReviewer: includeDefaultReviewer,
+		MaxContentBytes:        maxContentBytes,
+	}, nil
+}
+
+func repositoryReviewUnsafeProvider(provider string) bool {
+	switch providers.NormalizeProvider(provider) {
+	case "codex-cli", "claude-cli":
+		return true
+	default:
+		return false
+	}
+}
+
+func appendRepositoryReviewModelDependency(models []string, model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return models
+	}
+	for _, existing := range models {
+		if existing == model {
+			return models
+		}
+	}
+	return append(models, model)
+}
+
+func removeRepositoryReviewModelDependency(models []string, model string) []string {
+	model = strings.TrimSpace(model)
+	out := models[:0]
+	for _, existing := range models {
+		if existing != model {
+			out = append(out, existing)
+		}
+	}
+	return out
+}
 
 type workflowAgentRunOptions struct {
 	ModelName       string
+	ModelFallbacks  []string
 	ReasoningEffort string
 	NoTools         bool
+	ActualModelName *string
+	ActualUsage     *[]workflows.AgentUsage
+	UsageObserver   workflows.AgentUsageObserver
+	CallAdmission   workflows.AgentCallAdmission
 }
 
 const maxWorkflowIsolatedSystemPromptBytes = 64 << 10
@@ -389,10 +611,24 @@ func (r *workflowAgentRunner) CaptureReadOnlySession(
 	}, nil
 }
 
-func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentRequest) (map[string]any, error) {
+func (r *workflowAgentRunner) RunAgent(
+	ctx context.Context,
+	req workflows.AgentRequest,
+) (outputs map[string]any, runErr error) {
 	if r == nil || r.loop == nil {
 		return nil, fmt.Errorf("agent loop not configured")
 	}
+	requestUsage := newWorkflowAgentUsageAccumulator(req.UsageObserver)
+	req.UsageObserver = requestUsage.Observe
+	defer func() {
+		usage := requestUsage.Snapshot()
+		if outputs == nil && len(usage) > 0 {
+			outputs = make(map[string]any, 1)
+		}
+		if outputs != nil {
+			outputs["usage"] = usage
+		}
+	}()
 	leaseCtx, releaseRuntime, acquireErr := r.loop.acquireRuntimeUse(ctx)
 	if acquireErr != nil {
 		return nil, acquireErr
@@ -412,6 +648,27 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		strings.ContainsRune(isolatedSystemPrompt, '\x00') ||
 		len(isolatedSystemPrompt) > maxWorkflowIsolatedSystemPromptBytes {
 		return nil, fmt.Errorf("isolated workflow system prompt is invalid")
+	}
+	reviewSystemPrompt := strings.TrimSpace(req.ReviewSystemPrompt)
+	if reviewSystemPrompt != req.ReviewSystemPrompt || !utf8.ValidString(reviewSystemPrompt) ||
+		strings.ContainsRune(reviewSystemPrompt, '\x00') ||
+		len(reviewSystemPrompt) > maxWorkflowIsolatedSystemPromptBytes {
+		return nil, fmt.Errorf("repository review system prompt is invalid")
+	}
+	if req.SuppressDefaultContext && (!ephemeralDecision || privateDecision ||
+		strings.TrimSpace(req.Tools) != workflows.AgentToolsNone || historyModeInput != "none" ||
+		strings.TrimSpace(req.Cache) != "none" || req.Scope == nil ||
+		(strings.TrimSpace(req.ScopeContent) != "frozen_git" &&
+			strings.TrimSpace(req.ScopeContent) != "immutable_git")) {
+		return nil, fmt.Errorf("suppressed workflow context requires bounded frozen no-tool review")
+	}
+	if (req.SuppressDefaultContext) != (reviewSystemPrompt != "") ||
+		reviewSystemPrompt != "" && isolatedSystemPrompt != "" {
+		return nil, fmt.Errorf("repository review system prompt requires suppressed workflow context")
+	}
+	systemPromptOverride := isolatedSystemPrompt
+	if reviewSystemPrompt != "" {
+		systemPromptOverride = reviewSystemPrompt
 	}
 	if privateDecision {
 		if historyModeInput != "read_only" {
@@ -589,6 +846,14 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		inbound = &value
 	}
 	runOnce := func(runMessage string, noHistoryOverride bool, runOptions workflowAgentRunOptions) (string, error) {
+		usageObserver := runOptions.UsageObserver
+		if usageObserver == nil {
+			usageObserver = req.UsageObserver
+		}
+		callAdmission := runOptions.CallAdmission
+		if callAdmission == nil {
+			callAdmission = req.CallAdmission
+		}
 		if ephemeralDecision {
 			return r.loop.askSideQuestionWithOptions(
 				ctx,
@@ -599,12 +864,13 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 						UserMessage: runMessage,
 					},
 					ModelNameOverride:       strings.TrimSpace(runOptions.ModelName),
+					ModelFallbacksOverride:  cloneOptionalModelFallbacks(runOptions.ModelFallbacks),
 					ReasoningEffortOverride: strings.TrimSpace(runOptions.ReasoningEffort),
 					NoHistory:               true,
 					DisableTools:            true,
 					DisablePromptCache:      true,
-					SystemPromptOverride:    isolatedSystemPrompt,
-					SuppressDefaultContext:  isolatedSystemPrompt != "",
+					SystemPromptOverride:    systemPromptOverride,
+					SuppressDefaultContext:  systemPromptOverride != "",
 				},
 				runMessage,
 				sideQuestionExecutionOptions{
@@ -614,6 +880,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					skipHooks:              true,
 					rejectToolCalls:        true,
 					privateExecution:       privateExecution,
+					resultModelName:        runOptions.ActualModelName,
+					resultUsage:            runOptions.ActualUsage,
+					usageObserver:          usageObserver,
+					callAdmission:          callAdmission,
 				},
 			)
 		}
@@ -634,6 +904,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					},
 					PromptCacheKey:          promptCacheKey,
 					ModelNameOverride:       strings.TrimSpace(runOptions.ModelName),
+					ModelFallbacksOverride:  cloneOptionalModelFallbacks(runOptions.ModelFallbacks),
 					ReasoningEffortOverride: strings.TrimSpace(runOptions.ReasoningEffort),
 					DisableTools:            true,
 					DisablePromptCache:      disablePromptCache,
@@ -651,6 +922,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					skipHooks:          true,
 					rejectToolCalls:    true,
 					privateExecution:   privateExecution,
+					resultModelName:    runOptions.ActualModelName,
+					resultUsage:        runOptions.ActualUsage,
+					usageObserver:      usageObserver,
+					callAdmission:      callAdmission,
 				},
 			)
 		}
@@ -664,6 +939,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			DefaultResponse:         defaultResponse,
 			PromptCacheKey:          promptCacheKey,
 			ModelNameOverride:       strings.TrimSpace(runOptions.ModelName),
+			ModelFallbacksOverride:  cloneOptionalModelFallbacks(runOptions.ModelFallbacks),
 			ReasoningEffortOverride: strings.TrimSpace(runOptions.ReasoningEffort),
 			EnableSummary:           !noHistoryOverride && !noHistory && historyMode != "read_only",
 			SendResponse:            false,
@@ -672,6 +948,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			NoHistory:               noHistory || noHistoryOverride,
 			DisableTools:            workflowAgentToolsDisabled(req.Tools) || runOptions.NoTools,
 			DisablePromptCache:      disablePromptCache,
+			resultModelName:         runOptions.ActualModelName,
+			resultUsage:             runOptions.ActualUsage,
+			usageObserver:           usageObserver,
+			callAdmission:           callAdmission,
 		})
 	}
 	publicSessionKey := sessionKey
@@ -706,7 +986,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				managedErr,
 			)
 		}
-		outputs, managedErr := r.runManagedSplit(
+		splitOutputs, managedErr := r.runManagedSplit(
 			managedReq,
 			agent,
 			agentID,
@@ -717,19 +997,21 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			strategy,
 			runOnce,
 		)
-		if readOnlySnapshot != nil && outputs != nil {
-			outputs["history_revision"] = historyRevision
+		if readOnlySnapshot != nil && splitOutputs != nil {
+			splitOutputs["history_revision"] = historyRevision
 		}
-		if privateDecision && outputs != nil {
-			outputs["session_mode"] = workflows.AgentSessionPrivate
+		if privateDecision && splitOutputs != nil {
+			splitOutputs["session_mode"] = workflows.AgentSessionPrivate
 		}
-		if ephemeralDecision && outputs != nil {
-			outputs["session_mode"] = workflows.AgentSessionEphemeral
+		if ephemeralDecision && splitOutputs != nil {
+			splitOutputs["session_mode"] = workflows.AgentSessionEphemeral
 		}
-		return outputs, managedErr
+		return splitOutputs, managedErr
 	}
 	requestedRunOptions := workflowAgentRunOptions{
-		NoTools: workflowAgentToolsDisabled(req.Tools),
+		NoTools:       workflowAgentToolsDisabled(req.Tools),
+		UsageObserver: req.UsageObserver,
+		CallAdmission: req.CallAdmission,
 	}
 	var (
 		response         string
@@ -757,7 +1039,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			})
 		}
 	}
-	outputs := workflowAgentBaseOutputs(
+	outputs = workflowAgentBaseOutputs(
 		response,
 		agentID,
 		publicSessionKey,
@@ -791,7 +1073,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				)
 			}
 			repairs++
-			repairMessage := workflowStructuredRepairMessage(response, structured.Error, req.Output)
+			repairMessage := workflowStructuredRepairMessage(message, response, structured.Error, req.Output)
 			if sourceExecution != nil {
 				sourceTranscript = append(sourceTranscript, providers.Message{
 					Role: "user", Content: repairMessage,
@@ -1523,30 +1805,38 @@ func workflowRunStructuredAgentWithOptions(
 	contract *workflows.AgentOutputContract,
 	runOnce workflowAgentTextRunner,
 	runOptions workflowAgentRunOptions,
-) (string, workflows.StructuredOutputResult, int, error) {
+) (string, workflows.StructuredOutputResult, int, []workflows.AgentUsage, error) {
+	usage := newWorkflowAgentUsageAccumulator(runOptions.UsageObserver)
+	runOptions.UsageObserver = usage.Observe
 	text, err := runOnce(message, true, runOptions)
 	if err != nil {
-		return "", workflows.StructuredOutputResult{Valid: false, Error: err.Error()}, 0, err
+		return "", workflows.StructuredOutputResult{Valid: false, Error: err.Error()}, 0, usage.Snapshot(), err
 	}
 	structured := workflows.ValidateAgentStructuredOutput(text, contract)
 	repairs := 0
 	for !structured.Valid && contract != nil && repairs < contract.RepairAttempts {
 		repairs++
 		repaired, repairErr := runOnce(
-			workflowStructuredRepairMessage(text, structured.Error, contract),
+			workflowStructuredRepairMessage(message, text, structured.Error, contract),
 			true,
 			runOptions,
 		)
 		if repairErr != nil {
-			return text, workflows.StructuredOutputResult{Valid: false, Error: repairErr.Error()}, repairs, repairErr
+			return text, workflows.StructuredOutputResult{
+				Valid: false,
+				Error: repairErr.Error(),
+			}, repairs, usage.Snapshot(), repairErr
 		}
 		text = repaired
 		structured = workflows.ValidateAgentStructuredOutput(text, contract)
 	}
 	if !structured.Valid {
-		return text, structured, repairs, fmt.Errorf("agent structured output invalid: %s", structured.Error)
+		return text, structured, repairs, usage.Snapshot(), fmt.Errorf(
+			"agent structured output invalid: %s",
+			structured.Error,
+		)
 	}
-	return text, structured, repairs, nil
+	return text, structured, repairs, usage.Snapshot(), nil
 }
 
 func workflowAgentBaseOutputs(
@@ -1608,10 +1898,16 @@ func workflowScopeMessage(scope any) string {
 	return "Assigned scope:\n```json\n" + string(data) + "\n```"
 }
 
-func workflowStructuredRepairMessage(previous, validationError string, contract *workflows.AgentOutputContract) string {
+func workflowStructuredRepairMessage(
+	originalContext,
+	previous,
+	validationError string,
+	contract *workflows.AgentOutputContract,
+) string {
 	parts := []string{
 		"Your previous response did not satisfy the required structured output contract.",
 		"Return only corrected JSON. Do not include markdown or prose outside JSON.",
+		"Original task and evidence context (still authoritative):\n" + strings.TrimSpace(originalContext),
 	}
 	if strings.TrimSpace(validationError) != "" {
 		parts = append(parts, "Validation error:\n"+strings.TrimSpace(validationError))
@@ -1694,6 +1990,9 @@ type workflowManagedExecutionOptions struct {
 	modelOptimization              bool
 	effortOptimization             bool
 	modelCandidates                []workflowManagedModelCandidate
+	reviewerModels                 []string
+	includeDefaultReviewer         bool
+	continueOnChildError           bool
 	requestedSplitStrategy         string
 	estimatedOutputTokens          int
 }
@@ -1737,17 +2036,28 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 		options.maxTasksPerChunk = n
 	}
 	if n := intFromAny(values["max_parallel_children"]); n > 0 {
-		options.maxParallelChildren = n
+		options.maxParallelChildren = min(n, workflowManagedMaximumParallelChildren)
 	} else if n := intFromAny(values["maxParallelChildren"]); n > 0 {
-		options.maxParallelChildren = n
+		options.maxParallelChildren = min(n, workflowManagedMaximumParallelChildren)
 	}
 	if enabled, exists := boolMapValue(values, "adaptive_chunking", "adaptiveChunking"); exists {
 		options.adaptiveChunking = enabled
+	}
+	if enabled, exists := boolMapValue(values, "continue_on_child_error", "continueOnChildError"); exists {
+		options.continueOnChildError = enabled
 	}
 	if n := intFromAny(values["estimated_output_tokens"]); n > 0 {
 		options.estimatedOutputTokens = n
 	} else if n := intFromAny(values["estimatedOutputTokens"]); n > 0 {
 		options.estimatedOutputTokens = n
+	}
+	options.reviewerModels = workflowManagedReviewerModels(
+		firstNonNilManagedValue(values["reviewer_models"], values["reviewerModels"], values["models"]),
+	)
+	if enabled, exists := boolMapValue(
+		values, "include_default_reviewer", "includeDefaultReviewer",
+	); exists {
+		options.includeDefaultReviewer = enabled
 	}
 	if calibration, ok := values["calibration"].(map[string]any); ok {
 		if enabled, exists := calibration["enabled"].(bool); exists {
@@ -1820,6 +2130,46 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 		options.requestedSplitStrategy = strings.ToLower(strategy)
 	}
 	return options
+}
+
+func workflowManagedReviewerModels(raw any) []string {
+	values := make([]string, 0)
+	switch typed := raw.(type) {
+	case string:
+		values = strings.FieldsFunc(typed, func(r rune) bool { return r == ',' || r == '\n' || r == ';' })
+	case []string:
+		values = append(values, typed...)
+	case []any:
+		for _, value := range typed {
+			values = append(values, strings.TrimSpace(fmt.Sprint(value)))
+		}
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{})
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) == 8 {
+			break
+		}
+	}
+	return out
+}
+
+func firstNonNilManagedValue(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func boolMapValue(values map[string]any, keys ...string) (bool, bool) {
