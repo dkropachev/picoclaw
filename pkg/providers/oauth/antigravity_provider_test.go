@@ -226,7 +226,7 @@ func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 
 func TestParseSSEResponse_SplitsThoughtAndVisibleContent(t *testing.T) {
 	p := &AntigravityProvider{}
-	body := "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hidden reasoning\",\"thought\":true},{\"text\":\"visible answer\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":17,\"totalTokenCount\":216}}}\n" +
+	body := "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hidden reasoning\",\"thought\":true},{\"text\":\"visible answer\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":17,\"thoughtsTokenCount\":191,\"totalTokenCount\":216}}}\n" +
 		"data: [DONE]\n"
 
 	resp, err := p.parseSSEResponse(body)
@@ -243,8 +243,9 @@ func TestParseSSEResponse_SplitsThoughtAndVisibleContent(t *testing.T) {
 	if resp.FinishReason != "stop" {
 		t.Fatalf("FinishReason = %q, want %q", resp.FinishReason, "stop")
 	}
-	if resp.Usage == nil || resp.Usage.TotalTokens != 216 {
-		t.Fatalf("Usage.TotalTokens = %v, want %d", resp.Usage, 216)
+	if resp.Usage == nil || resp.Usage.TotalTokens != 216 || resp.Usage.CompletionTokens != 208 ||
+		resp.Usage.ReasoningTokens != 191 {
+		t.Fatalf("Usage = %v, want total=216 reasoning=191", resp.Usage)
 	}
 }
 

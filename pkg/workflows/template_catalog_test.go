@@ -63,8 +63,8 @@ func TestBuiltInWorkflowTemplateRegistryIsUniqueAndValid(t *testing.T) {
 			t.Fatalf("template %q validation error = %v", template.name, err)
 		}
 	}
-	if len(names) != 3 {
-		t.Fatalf("built-in template count = %d, want 3", len(names))
+	if len(names) != 6 {
+		t.Fatalf("built-in template count = %d, want 6", len(names))
 	}
 }
 

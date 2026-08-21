@@ -24,6 +24,7 @@ type repositoryReviewAutomationConfigRequest struct {
 	Ref                   string                                          `json:"ref,omitempty"`
 	Target                string                                          `json:"target"`
 	ReviewFocus           string                                          `json:"review_focus"`
+	ScopePolicy           repoaudit.RepositoryReviewScopePolicy           `json:"scope_policy"`
 	ReviewerModels        []string                                        `json:"reviewer_models"`
 	CompareModels         bool                                            `json:"compare_models"`
 	ModelPrices           map[string]repoaudit.RepositoryReviewModelPrice `json:"model_prices,omitempty"`
@@ -189,6 +190,7 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 			applyRepositoryReviewAutomationRequest(candidate, request)
 			if repositoryReviewExecutionConfigurationChanged(previous, *candidate) {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
+				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 				candidate.PauseReason = ""
 				candidate.PauseDetail = ""
 				candidate.RequestedPauseReason = ""
@@ -356,6 +358,7 @@ func repositoryReviewAutomationFromRequest(
 	automation := repoaudit.RepositoryReviewAutomation{
 		Name: request.Name, Repository: request.Repository, Ref: request.Ref,
 		Target: request.Target, ReviewFocus: request.ReviewFocus,
+		ScopePolicy:    request.ScopePolicy,
 		ReviewerModels: request.ReviewerModels, CompareModels: request.CompareModels,
 		ModelPrices: request.ModelPrices, Force: request.Force,
 		MaxFilesPerRun: request.MaxFilesPerRun, MaxContentBytes: request.MaxContentBytes,
@@ -384,6 +387,7 @@ func applyRepositoryReviewAutomationRequest(
 	automation.Ref = request.Ref
 	automation.Target = request.Target
 	automation.ReviewFocus = request.ReviewFocus
+	automation.ScopePolicy = request.ScopePolicy
 	automation.ReviewerModels = append([]string(nil), request.ReviewerModels...)
 	automation.CompareModels = request.CompareModels
 	automation.ModelPrices = request.ModelPrices
@@ -403,9 +407,38 @@ func repositoryReviewExecutionConfigurationChanged(
 ) bool {
 	return previous.Repository != next.Repository || previous.Ref != next.Ref ||
 		previous.Target != next.Target || previous.ReviewFocus != next.ReviewFocus ||
+		!repositoryReviewScopePoliciesEqual(previous.ScopePolicy, next.ScopePolicy) ||
 		previous.CompareModels != next.CompareModels || previous.Force != next.Force ||
 		previous.MaxContentBytes != next.MaxContentBytes ||
 		!slicesEqual(previous.ReviewerModels, next.ReviewerModels)
+}
+
+func repositoryReviewScopePoliciesEqual(
+	left, right repoaudit.RepositoryReviewScopePolicy,
+) bool {
+	left, leftErr := repoaudit.NormalizeRepositoryReviewScopePolicy(left)
+	right, rightErr := repoaudit.NormalizeRepositoryReviewScopePolicy(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return slicesEqualRepositoryReviewCodeTypes(left.CodeTypes, right.CodeTypes) &&
+		slicesEqual(left.IncludeFolders, right.IncludeFolders) &&
+		slicesEqual(left.ExcludeFolders, right.ExcludeFolders) &&
+		left.FreeText == right.FreeText
+}
+
+func slicesEqualRepositoryReviewCodeTypes(
+	left, right []repoaudit.RepositoryReviewCodeType,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func slicesEqual(left, right []string) bool {

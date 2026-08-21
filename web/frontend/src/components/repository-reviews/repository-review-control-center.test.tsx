@@ -76,6 +76,12 @@ const automation: RepositoryReviewAutomation = {
   ref: "HEAD",
   target: "all",
   review_focus: "Correctness and security bugs",
+  scope_policy: {
+    code_types: ["hotpath-code", "code"],
+    include_folders: ["cmd", "internal/runtime"],
+    exclude_folders: ["internal/runtime/generated"],
+    free_text: "Prioritize authorization boundaries.",
+  },
   reviewer_models: ["fast-review", "premium-review"],
   compare_models: true,
   force: false,
@@ -124,6 +130,21 @@ const automation: RepositoryReviewAutomation = {
   },
   model_stats: [],
   account_limits: [],
+  scope_plan: {
+    commit_sha: "a".repeat(40),
+    policy_hash: "b".repeat(64),
+    hash: "c".repeat(64),
+    summary: "18 production files selected",
+    rationale: "Matched production code under the requested folders.",
+    warnings: ["Generated files were excluded."],
+    counts: {
+      total_files: 100,
+      code_type_files: 60,
+      include_files: 24,
+      excluded_files: 6,
+      selected_files: 18,
+    },
+  },
   created_at: "2026-08-20T12:00:00Z",
   updated_at: "2026-08-20T12:00:00Z",
 }
@@ -160,6 +181,20 @@ describe("RepositoryReviewControlCenter", () => {
     )
     await user.type(screen.getByLabelText("Profile name"), "Core review")
     await user.type(screen.getByLabelText("Repository"), "owner/repo")
+    expect(screen.getByText("Review scope")).toBeVisible()
+    await user.click(screen.getByRole("checkbox", { name: /Tests/u }))
+    await user.type(
+      screen.getByLabelText("Include folder prefixes"),
+      "cmd{enter}internal/runtime",
+    )
+    await user.type(
+      screen.getByLabelText("Exclude folder prefixes"),
+      "internal/runtime/generated",
+    )
+    await user.type(
+      screen.getByLabelText("Additional scope guidance"),
+      "Prioritize authorization boundaries.",
+    )
     await user.click(screen.getByLabelText(/fast-review/u))
     await user.click(screen.getByLabelText(/Primary account/u))
     await user.type(screen.getByLabelText("Another limit window"), "monthly")
@@ -181,6 +216,12 @@ describe("RepositoryReviewControlCenter", () => {
           repository: "owner/repo",
           ref: "HEAD",
           target: "all",
+          scope_policy: {
+            code_types: ["hotpath-code", "code", "test"],
+            include_folders: ["cmd", "internal/runtime"],
+            exclude_folders: ["internal/runtime/generated"],
+            free_text: "Prioritize authorization boundaries.",
+          },
           reviewer_models: ["fast-review"],
           compare_models: false,
           max_files_per_run: 24,
@@ -209,6 +250,41 @@ describe("RepositoryReviewControlCenter", () => {
         }),
       ),
     )
+  })
+
+  it("requires a code type and safe repository-relative folder prefixes", async () => {
+    const user = userEvent.setup()
+    renderControlCenter()
+
+    await user.click(
+      await screen.findByRole("button", { name: "Configure pre-review" }),
+    )
+    await user.click(
+      screen.getByRole("checkbox", { name: /Hot-path production code/u }),
+    )
+    await user.click(
+      screen.getByRole("checkbox", { name: /^Production code/u }),
+    )
+    expect(screen.getByText("Select at least one code type.")).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: "Save review profile" }),
+    ).toBeDisabled()
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /^Production code/u }),
+    )
+    await user.type(
+      screen.getByLabelText("Include folder prefixes"),
+      "../outside",
+    )
+    expect(
+      screen.getByText(
+        "Include folders must be canonical repository-relative prefixes.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: "Save review profile" }),
+    ).toBeDisabled()
   })
 
   it("does not represent an unknown model price as free", async () => {
@@ -346,9 +422,10 @@ describe("RepositoryReviewControlCenter", () => {
     })
     renderControlCenter()
 
-    await user.click(
-      await screen.findByRole("button", { name: "Start review" }),
-    )
+    expect(await screen.findByText("Scope preflight")).toBeVisible()
+    expect(screen.getByText("18 production files selected")).toBeVisible()
+    expect(screen.getByText("Generated files were excluded.")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Start review" }))
     await waitFor(() =>
       expect(startRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
         expected_version: 3,

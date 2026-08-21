@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -72,6 +74,7 @@ var nativeFunctionNames = map[string]struct{}{
 	"git.diff":          {},
 	"git.filter":        {},
 	"review.repository": {},
+	"evaluation.corpus": {},
 }
 
 // NativeFunctionNames returns a sorted copy of the workflow functions
@@ -218,6 +221,9 @@ func RunNativeFunction(
 	case "review.repository":
 		out, err := nativeRepositoryReview(ctx, args, exec)
 		return out, true, err
+	case "evaluation.corpus":
+		out, err := nativeRepositoryEvaluationCorpus(ctx, args, exec)
+		return out, true, err
 	default:
 		return nil, true, fmt.Errorf("unsupported native function %q", name)
 	}
@@ -315,13 +321,26 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{
+		output := map[string]any{
 			"token":            token,
 			"files":            nativeFrozenGitScopeReferences(reviewableScope),
 			"reviewableCount":  len(reviewableScope),
 			"unsupportedFiles": unsupportedFiles,
 			"unavailableCount": unavailableCount,
-		}, nil
+		}
+		if copies := int(nativeInt64Any(args, "copies")); copies > 1 {
+			if copies != 2 {
+				discardNativeFrozenGitScope(token)
+				return nil, errors.New("frozen Git scope copies must be one or two")
+			}
+			secondary, secondaryErr := storeNativeFrozenGitScope(exec, reviewableScope)
+			if secondaryErr != nil {
+				discardNativeFrozenGitScope(token)
+				return nil, secondaryErr
+			}
+			output["secondaryToken"] = secondary
+		}
+		return output, nil
 	case "record":
 		plan, err := nativeRepositoryReviewPlan(args["plan"])
 		if err != nil {
@@ -432,7 +451,7 @@ func storeNativeFrozenGitScope(exec ExecutionContext, scope any) (string, error)
 		return "", errors.New("frozen Git scope cache is at capacity")
 	}
 	nativeFrozenGitScopes.entries[token] = nativeFrozenGitScopeEntry{
-		runID: exec.RunID, workflowRef: exec.WorkflowRef, scope: scope,
+		runID: exec.RunID, workflowRef: exec.WorkflowRef, scope: cloneJSONValue(scope),
 		bytes: scopeBytes, expiresAt: now.Add(nativeFrozenGitScopeTTL),
 	}
 	nativeFrozenGitScopes.bytes += scopeBytes
@@ -2125,6 +2144,47 @@ func nativeCollectInventory(ctx context.Context, repo, commit string) ([]nativeG
 	if exceeded {
 		return nil, fmt.Errorf("git inventory exceeds %d bytes", maxNativeGitInventoryBytes)
 	}
+	return nativeParseInventory(output)
+}
+
+func nativeCollectInventoryPaths(
+	ctx context.Context,
+	repo string,
+	commit string,
+	paths []string,
+) ([]nativeGitFile, error) {
+	if len(paths) == 0 || len(paths) > 128 {
+		return nil, errors.New("exact Git inventory path batch is invalid")
+	}
+	args := []string{"ls-tree", "-r", "-l", "-z", "--full-tree", commit, "--"}
+	seen := make(map[string]struct{}, len(paths))
+	for _, filePath := range paths {
+		clean, err := nativeCleanRepoFilePath(filePath)
+		if err != nil || clean != filePath {
+			return nil, errors.New("exact Git inventory contains an invalid path")
+		}
+		if _, duplicate := seen[clean]; duplicate {
+			return nil, errors.New("exact Git inventory contains a duplicate path")
+		}
+		seen[clean] = struct{}{}
+		args = append(args, ":(literal)"+clean)
+	}
+	output, exceeded, err := nativeGitBoundedOutput(
+		ctx,
+		repo,
+		min(maxNativeGitInventoryBytes, len(paths)*(4096+256)),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if exceeded {
+		return nil, errors.New("exact Git inventory output exceeds its bound")
+	}
+	return nativeParseInventory(output)
+}
+
+func nativeParseInventory(output string) ([]nativeGitFile, error) {
 	inventory := make([]nativeGitFile, 0)
 	for _, line := range strings.Split(output, "\x00") {
 		if strings.TrimSpace(line) == "" || !strings.Contains(line, "\t") {
@@ -2213,6 +2273,105 @@ func nativeGitBoundedOutput(
 		return "", stdout.exceeded, nativeGitError{err: err, output: output, args: args}
 	}
 	return string(stdout.data), stdout.exceeded, nil
+}
+
+type nativeGitBlobRequest struct {
+	ObjectID     string
+	ExpectedSize int64
+	RetainBytes  int64
+}
+
+// nativeGitBatchReadBlobs reads exact object contents through one long-lived
+// cat-file process. The callback receives at most RetainBytes for each object;
+// the rest is streamed to io.Discard, so both process count and resident memory
+// stay bounded for large repositories.
+func nativeGitBatchReadBlobs(
+	ctx context.Context,
+	repo string,
+	requests []nativeGitBlobRequest,
+	consume func(int, []byte) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	if len(requests) > maxNativeGitInventoryFiles || consume == nil {
+		return errors.New("invalid immutable Git blob batch")
+	}
+	var input strings.Builder
+	input.Grow(len(requests) * 65)
+	for _, request := range requests {
+		if !nativeValidGitObjectID(request.ObjectID) || request.ExpectedSize < 0 ||
+			request.RetainBytes < 0 || request.RetainBytes > request.ExpectedSize ||
+			request.ExpectedSize > maxNativeGitContentFileBytes {
+			return errors.New("invalid immutable Git blob batch request")
+		}
+		input.WriteString(request.ObjectID)
+		input.WriteByte('\n')
+	}
+
+	stderr := nativeBoundedBuffer{limit: maxNativeGitErrorOutputBytes}
+	cmd := osexec.CommandContext(ctx, "git", "cat-file", "--batch")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_PAGER=cat")
+	cmd.Stdin = strings.NewReader(input.String())
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return nativeGitError{
+			err: err, output: strings.TrimSpace(string(stderr.data)), args: []string{"cat-file", "--batch"},
+		}
+	}
+	fail := func(cause error) error {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		if output := strings.TrimSpace(string(stderr.data)); output != "" {
+			return fmt.Errorf("git cat-file --batch: %w: %s", cause, output)
+		}
+		return fmt.Errorf("git cat-file --batch: %w", cause)
+	}
+	reader := bufio.NewReaderSize(stdout, 64<<10)
+	for index, request := range requests {
+		header, headerErr := reader.ReadString('\n')
+		if headerErr != nil {
+			return fail(fmt.Errorf("read immutable Git blob header: %w", headerErr))
+		}
+		fields := strings.Fields(strings.TrimSuffix(header, "\n"))
+		if len(fields) != 3 || !strings.EqualFold(fields[0], request.ObjectID) || fields[1] != "blob" {
+			return fail(fmt.Errorf("immutable Git object %s is missing or not a blob", request.ObjectID))
+		}
+		size, parseErr := strconv.ParseInt(fields[2], 10, 64)
+		if parseErr != nil || size != request.ExpectedSize {
+			return fail(fmt.Errorf("immutable Git blob %s size mismatch with inventory", request.ObjectID))
+		}
+		retained := make([]byte, int(request.RetainBytes))
+		if _, contentErr := io.ReadFull(reader, retained); contentErr != nil {
+			return fail(fmt.Errorf("read immutable Git blob %s: %w", request.ObjectID, contentErr))
+		}
+		if remaining := size - request.RetainBytes; remaining > 0 {
+			if _, drainErr := io.CopyN(io.Discard, reader, remaining); drainErr != nil {
+				return fail(fmt.Errorf("drain immutable Git blob %s: %w", request.ObjectID, drainErr))
+			}
+		}
+		delimiter, delimiterErr := reader.ReadByte()
+		if delimiterErr != nil || delimiter != '\n' {
+			return fail(fmt.Errorf("immutable Git blob %s has an invalid batch delimiter", request.ObjectID))
+		}
+		if consumeErr := consume(index, retained); consumeErr != nil {
+			return fail(consumeErr)
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return nativeGitError{
+			err: err, output: strings.TrimSpace(string(stderr.data)), args: []string{"cat-file", "--batch"},
+		}
+	}
+	return nil
 }
 
 type nativeGitError struct {
@@ -2392,8 +2551,14 @@ func hydrateImmutableGitScope(
 	if aggregateLimit <= 0 || aggregateLimit > maxNativeGitContentAggregateBytes {
 		aggregateLimit = maxNativeGitContentAggregateBytes
 	}
+	type pendingBlob struct {
+		repo  string
+		index int
+		blob  nativeGitBlobRequest
+	}
 	used := 0
 	hydrated := make([]any, 0, len(items))
+	pending := make([]pendingBlob, 0, len(items))
 	for index, raw := range items {
 		file, ok := raw.(map[string]any)
 		if !ok {
@@ -2430,42 +2595,60 @@ func hydrateImmutableGitScope(
 			hydrated = append(hydrated, file)
 			continue
 		}
-		if size > int64(aggregateLimit-used) {
-			file["contentComplete"] = false
-			file["contentUnavailable"] = "aggregate_limit"
-			hydrated = append(hydrated, file)
-			continue
-		}
 		hash := strings.TrimSpace(nativeAnyString(file["fileHash"]))
 		if !nativeValidGitObjectID(hash) {
 			return nil, fmt.Errorf("immutable Git scope file %q has invalid blob hash", nativeAnyString(file["path"]))
 		}
-		content, exceeded, err := nativeGitBoundedOutput(ctx, repo, perFileLimit+1, "cat-file", "blob", hash)
-		if err != nil {
-			return nil, fmt.Errorf("read immutable blob for %q: %w", nativeAnyString(file["path"]), err)
-		}
-		if exceeded || int64(len(content)) != size {
-			return nil, fmt.Errorf("immutable blob size mismatch for %q", nativeAnyString(file["path"]))
-		}
-		if !nativeReviewText(content) {
-			file["contentComplete"] = false
-			file["contentUnavailable"] = "binary"
-			hydrated = append(hydrated, file)
-			continue
-		}
-		promptBytes := nativeReviewEncodedContentBytes(content)
-		if promptBytes > perFileLimit {
-			file["contentComplete"] = false
-			file["contentUnavailable"] = "file_too_large"
-			hydrated = append(hydrated, file)
-			continue
-		}
-		file["content"] = content
-		file["contentBytes"] = len(content)
-		file["contentPromptBytes"] = promptBytes
-		file["contentComplete"] = true
-		used += len(content)
 		hydrated = append(hydrated, file)
+		pending = append(pending, pendingBlob{
+			repo: repo, index: len(hydrated) - 1,
+			blob: nativeGitBlobRequest{ObjectID: hash, ExpectedSize: size, RetainBytes: size},
+		})
+	}
+	for start := 0; start < len(pending); {
+		end := start + 1
+		for end < len(pending) && pending[end].repo == pending[start].repo {
+			end++
+		}
+		requests := make([]nativeGitBlobRequest, end-start)
+		for index := start; index < end; index++ {
+			requests[index-start] = pending[index].blob
+		}
+		if err := nativeGitBatchReadBlobs(
+			ctx,
+			pending[start].repo,
+			requests,
+			func(requestIndex int, content []byte) error {
+				entry := pending[start+requestIndex]
+				file := hydrated[entry.index].(map[string]any)
+				if len(content) > aggregateLimit-used {
+					file["contentComplete"] = false
+					file["contentUnavailable"] = "aggregate_limit"
+					return nil
+				}
+				textContent := string(content)
+				if !nativeReviewText(textContent) {
+					file["contentComplete"] = false
+					file["contentUnavailable"] = "binary"
+					return nil
+				}
+				promptBytes := nativeReviewEncodedContentBytes(textContent)
+				if promptBytes > perFileLimit {
+					file["contentComplete"] = false
+					file["contentUnavailable"] = "file_too_large"
+					return nil
+				}
+				file["content"] = textContent
+				file["contentBytes"] = len(content)
+				file["contentPromptBytes"] = promptBytes
+				file["contentComplete"] = true
+				used += len(content)
+				return nil
+			},
+		); err != nil {
+			return nil, fmt.Errorf("read immutable blob batch: %w", err)
+		}
+		start = end
 	}
 	if wrapper != nil {
 		out := cloneMap(wrapper)

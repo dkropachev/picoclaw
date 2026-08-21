@@ -143,6 +143,8 @@ type RepositoryReviewAutomation struct {
 	Ref                   string                                 `json:"ref,omitempty"`
 	Target                string                                 `json:"target"`
 	ReviewFocus           string                                 `json:"review_focus"`
+	ScopePolicy           RepositoryReviewScopePolicy            `json:"scope_policy"`
+	ScopePlan             RepositoryReviewScopePlan              `json:"scope_plan"`
 	ReviewerModels        []string                               `json:"reviewer_models"`
 	CompareModels         bool                                   `json:"compare_models"`
 	ModelPrices           map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
@@ -546,6 +548,12 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if err := normalizeModelCoverageSketches(automation); err != nil {
 		return err
 	}
+	if err := normalizeRepositoryReviewScopePolicy(&automation.ScopePolicy); err != nil {
+		return err
+	}
+	if err := normalizeRepositoryReviewScopePlan(&automation.ScopePlan); err != nil {
+		return err
+	}
 	if err := normalizeWindowPolicies(&automation.BudgetPolicy); err != nil {
 		return err
 	}
@@ -870,6 +878,16 @@ func normalizeUniqueAutomationStrings(values []string, maximum, maxBytes int, fi
 
 func cloneAutomation(automation RepositoryReviewAutomation) RepositoryReviewAutomation {
 	automation.ReviewerModels = append([]string{}, automation.ReviewerModels...)
+	automation.ScopePolicy.CodeTypes = append(
+		[]RepositoryReviewCodeType{}, automation.ScopePolicy.CodeTypes...,
+	)
+	automation.ScopePolicy.IncludeFolders = append(
+		[]string{}, automation.ScopePolicy.IncludeFolders...,
+	)
+	automation.ScopePolicy.ExcludeFolders = append(
+		[]string{}, automation.ScopePolicy.ExcludeFolders...,
+	)
+	automation.ScopePlan.Warnings = append([]string{}, automation.ScopePlan.Warnings...)
 	automation.RunIDs = append([]string{}, automation.RunIDs...)
 	automation.BudgetPolicy.AccountIDs = append([]string{}, automation.BudgetPolicy.AccountIDs...)
 	automation.BudgetPolicy.MinRemainingPercentByWindow = cloneAutomationFloatMap(

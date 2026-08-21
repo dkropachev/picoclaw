@@ -79,6 +79,101 @@ func TestHydrateImmutableGitScopeRejectsUntrustedBlobMetadata(t *testing.T) {
 	}
 }
 
+func TestFrozenGitScopeCopiesAreIndependentOneShotCapabilities(t *testing.T) {
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "package service\nconst ready = true\n"
+	writeTestFile(t, filepath.Join(repo, "service.go"), content)
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	gitCmd(t, repo, "add", "service.go")
+	gitCmd(t, repo, "commit", "-m", "frozen copies")
+	blob := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD:service.go"))
+	exec := ExecutionContext{
+		WorkspaceDir:     workspace,
+		RunID:            "wr-frozen-copies",
+		WorkflowRef:      RepositoryModelEvaluationBatchWorkflowRef,
+		workspaceCleanup: &workflowWorkspaceCleanup{},
+	}
+	output, err := nativeRepositoryReview(context.Background(), map[string]any{
+		"action": "freeze", "copies": 2, "max_content_bytes": 1024,
+		"files": []map[string]any{{
+			"path": "service.go", "fileHash": blob, "sizeBytes": int64(len(content)),
+			"category": "code", "source": map[string]any{"workspacePath": repo},
+		}},
+	}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary, _ := output["token"].(string)
+	secondary, _ := output["secondaryToken"].(string)
+	if primary == "" || secondary == "" || primary == secondary {
+		t.Fatalf("frozen scope copy tokens = %q, %q", primary, secondary)
+	}
+	primaryScope, consumeErr := consumeNativeFrozenGitScope(exec, primary)
+	if consumeErr != nil {
+		t.Fatal(consumeErr)
+	}
+	primaryFiles := primaryScope.([]map[string]any)
+	primaryFiles[0]["content"] = "mutated by candidate runner"
+	primaryFiles[0]["path"] = "mutated.go"
+	secondaryScope, consumeErr := consumeNativeFrozenGitScope(exec, secondary)
+	if consumeErr != nil {
+		t.Fatal(consumeErr)
+	}
+	secondaryFiles := secondaryScope.([]map[string]any)
+	if len(secondaryFiles) != 1 || secondaryFiles[0]["content"] != content ||
+		secondaryFiles[0]["path"] != "service.go" {
+		t.Fatalf("secondary frozen scope was aliased to candidate mutation: %#v", secondaryScope)
+	}
+	for _, token := range []string{primary, secondary} {
+		if _, reuseErr := consumeNativeFrozenGitScope(exec, token); reuseErr == nil {
+			t.Fatalf("one-shot token %q was reusable", token)
+		}
+	}
+	nativeFrozenGitScopes.Lock()
+	_, primaryRemains := nativeFrozenGitScopes.entries[primary]
+	_, secondaryRemains := nativeFrozenGitScopes.entries[secondary]
+	nativeFrozenGitScopes.Unlock()
+	if primaryRemains || secondaryRemains {
+		t.Fatal("consumed frozen scope capability remained in runtime cache")
+	}
+}
+
+func TestStoredFrozenGitScopeSnapshotsNestedCallerData(t *testing.T) {
+	exec := ExecutionContext{
+		RunID:       "wr-frozen-snapshot",
+		WorkflowRef: RepositoryModelEvaluationBatchWorkflowRef,
+	}
+	scope := []map[string]any{{
+		"path": "service.go",
+		"metadata": map[string]any{
+			"regions": []map[string]any{{"name": "runtime"}},
+		},
+	}}
+	token, err := storeNativeFrozenGitScope(exec, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope[0]["path"] = "mutated.go"
+	regions := scope[0]["metadata"].(map[string]any)["regions"].([]map[string]any)
+	regions[0]["name"] = "mutated"
+
+	stored, err := consumeNativeFrozenGitScope(exec, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := stored.([]map[string]any)
+	storedRegions := files[0]["metadata"].(map[string]any)["regions"].([]map[string]any)
+	if files[0]["path"] != "service.go" || storedRegions[0]["name"] != "runtime" {
+		t.Fatalf("stored frozen scope followed caller mutation: %#v", stored)
+	}
+}
+
 func TestReviewTextBudgetAccountsForPromptEscapingAndControls(t *testing.T) {
 	content := strings.Repeat(`"\\`, 100)
 	if encoded := nativeReviewEncodedContentBytes(content); encoded <= len(content) {

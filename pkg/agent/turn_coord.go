@@ -843,12 +843,8 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		}
 		startedAt := time.Now()
 		response, callErr := provider.Chat(ctx, providerMessages, nil, model, callOpts)
-		actualModelName := resolvedCandidateModelName(
-			[]providers.FallbackCandidate{candidate},
-			baseModelName,
-		)
 		if observeErr := func() error {
-			observed, ok := workflowAgentUsageFromResponse(actualModelName, response, time.Since(startedAt))
+			observed, ok := workflowAgentUsageFromResponse(model, response, time.Since(startedAt))
 			if !ok {
 				return nil
 			}

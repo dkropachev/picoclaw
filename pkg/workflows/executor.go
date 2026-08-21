@@ -49,6 +49,8 @@ type Executor struct {
 	// AgentCallAdmission is checked immediately before provider dispatch with
 	// the exact run/job/step identity.
 	AgentCallAdmission AgentCallAdmissionEventObserver
+	// StepActivityObserver runs immediately before each concrete step target.
+	StepActivityObserver StepActivityObserver
 	// WorkflowSnapshots is an immutable, pre-admitted reusable closure. When
 	// present, the executor uses these exact parsed bytes instead of reloading
 	// definitions after admission.
@@ -1975,7 +1977,15 @@ func (e *Executor) executeStep(
 		stepExec.Error = ErrHumanTaskConflict.Error()
 		return stepExec, ErrHumanTaskConflict
 	}
-	outputs, err := e.runStepTarget(ctx, step, with, stepTargetCtx)
+	var outputs map[string]any
+	if e.StepActivityObserver != nil {
+		err = e.StepActivityObserver(StepActivityEvent{
+			RunID: run.ID, JobID: jobID, StepID: stepID, Uses: uses,
+		})
+	}
+	if err == nil {
+		outputs, err = e.runStepTarget(ctx, step, with, stepTargetCtx)
+	}
 	if err != nil {
 		if step.ContinueOnError {
 			if outputs == nil {
@@ -2299,14 +2309,27 @@ func (e *Executor) runStepTarget(
 		}
 		repositoryReviewProfile := strings.TrimSpace(stringFromMap(with, "review_profile")) ==
 			"repository-bug-finder-v1"
+		repositoryEvaluationProfile := repositoryModelEvaluationAgentStep(
+			execCtx.WorkflowRef,
+			step.ID,
+		)
+		repositoryScopePlanner := strings.TrimSpace(execCtx.WorkflowRef) == RepositoryBugFinderWorkflowRef &&
+			step.ID == "plan_scope"
 		suppressDefaultContext := sessionMode == AgentSessionEphemeral &&
 			agentToolsMode(with) == AgentToolsNone &&
 			(strings.TrimSpace(execCtx.WorkflowRef) == RepositoryBugFinderWorkflowRef &&
 				step.ID == "review" && scopeContent == "frozen_git" ||
-				repositoryReviewProfile && scopeContent == "immutable_git")
+				repositoryReviewProfile && scopeContent == "immutable_git" ||
+				repositoryScopePlanner && scopeContent == "metadata" ||
+				repositoryEvaluationProfile &&
+					(scopeContent == "frozen_git" || scopeContent == "metadata"))
 		reviewSystemPrompt := ""
 		if suppressDefaultContext {
-			reviewSystemPrompt = RepositoryBugFinderSystemPrompt
+			if repositoryEvaluationProfile {
+				reviewSystemPrompt = RepositoryModelEvaluationSystemPrompt
+			} else {
+				reviewSystemPrompt = RepositoryBugFinderSystemPrompt
+			}
 		}
 		agentCtx, cancelAgent := repositoryReviewAgentContext(ctx, suppressDefaultContext)
 		defer cancelAgent()
@@ -2334,6 +2357,7 @@ func (e *Executor) runStepTarget(
 		}
 		outputs, runErr := e.Agents.RunAgent(agentCtx, AgentRequest{
 			AgentID:                agentID,
+			Model:                  stringFromMap(with, "model"),
 			Message:                stringFromMap(with, "message"),
 			Prompt:                 stringFromMap(with, "prompt"),
 			Context:                stringFromMap(with, "context"),
@@ -2719,6 +2743,12 @@ func cloneJSONValue(value any) any {
 		out := make([]any, len(typed))
 		for index, item := range typed {
 			out[index] = cloneJSONValue(item)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(typed))
+		for index, item := range typed {
+			out[index] = cloneMap(item)
 		}
 		return out
 	case []string:

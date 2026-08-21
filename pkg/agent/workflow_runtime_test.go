@@ -5266,6 +5266,34 @@ func workflowEphemeralTestRequest(prompt string) workflows.AgentRequest {
 	}
 }
 
+func TestWorkflowAgentExplicitModelAliasIsValidatedAndReported(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"evaluated"}}
+	loop, _, _, _ := newWorkflowReadOnlyTestLoop(t, provider) //nolint:dogsled // Only the runtime loop is relevant.
+	runner := &workflowAgentRunner{loop: loop}
+	request := workflowEphemeralTestRequest("Evaluate this immutable corpus chunk.")
+	request.Model = "test-model"
+
+	outputs, err := runner.RunAgent(t.Context(), request)
+	if err != nil || outputs["model"] != "test-model" || outputs["text"] != "evaluated" {
+		t.Fatalf("explicit model outputs = %#v, error = %v", outputs, err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(calls))
+	}
+
+	for _, model := range []string{" missing-model ", "missing-model"} {
+		invalid := request
+		invalid.Model = model
+		if _, runErr := runner.RunAgent(t.Context(), invalid); runErr == nil ||
+			!strings.Contains(runErr.Error(), "model alias") {
+			t.Fatalf("RunAgent(model=%q) error = %v", model, runErr)
+		}
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 1 {
+		t.Fatalf("provider calls after invalid aliases = %d, want 1", len(calls))
+	}
+}
+
 func workflowDirectoryFileSnapshot(t *testing.T, directory string) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir(directory)

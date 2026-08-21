@@ -1054,12 +1054,13 @@ func validateAgentStepOptions(path, agentID string, with map[string]any) Validat
 	}
 	scopeContent, scopeContentSet, scopeContentString := agentStringOption(with, "scope_content")
 	if scopeContentSet && (!scopeContentString ||
-		(scopeContent != "immutable_git" && scopeContent != "frozen_git")) {
+		(scopeContent != "immutable_git" && scopeContent != "frozen_git" && scopeContent != "metadata")) {
 		errs = append(errs, ValidationError{Path: path + ".scope_content", Message: "unsupported scope content mode"})
 	}
-	if (scopeContent == "immutable_git" || scopeContent == "frozen_git") && toolsMode != AgentToolsNone {
+	if (scopeContent == "immutable_git" || scopeContent == "frozen_git" || scopeContent == "metadata") &&
+		toolsMode != AgentToolsNone {
 		errs = append(errs, ValidationError{
-			Path: path + ".tools", Message: "immutable Git scope requires tools: none",
+			Path: path + ".tools", Message: "bounded scope content requires tools: none",
 		})
 	}
 	if history == "read_only" && toolsMode != AgentToolsNone {

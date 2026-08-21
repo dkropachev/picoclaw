@@ -1,6 +1,7 @@
 import { IconChevronRight } from "@tabler/icons-react"
 import {
   IconBellRinging,
+  IconBrain,
   IconBug,
   IconChevronsDown,
   IconChevronsUp,
@@ -131,6 +132,13 @@ const repositoryReviewsNavItem: NavItem = {
   translateTitle: false,
 }
 
+const modelEvaluationsNavItem: NavItem = {
+  title: "Model evaluations",
+  url: "/model-evaluations",
+  icon: IconBrain,
+  translateTitle: false,
+}
+
 const configNavItem: NavItem = {
   title: "navigation.config",
   url: "/config",
@@ -172,8 +180,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       : null
   const repositoryReviewsDestination =
     currentPath === "/repository-reviews" ? currentPath : null
+  const modelEvaluationsDestination =
+    currentPath === "/model-evaluations" ? currentPath : null
   const servicesDestination =
-    pullRequestDestination ?? repositoryReviewsDestination
+    pullRequestDestination ??
+    repositoryReviewsDestination ??
+    modelEvaluationsDestination
   const [servicesOpen, setServicesOpen] = useAutoRevealCollapsible(
     servicesDestination,
     currentPath.startsWith("/agent/") || servicesDestination != null,
@@ -485,6 +497,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>
                   {renderNavItem(repositoryReviewsNavItem)}
+                  {renderNavItem(modelEvaluationsNavItem)}
                   {renderNavItem(eventsNavItem)}
                   {renderNavItem(logsNavItem)}
                 </SidebarMenu>

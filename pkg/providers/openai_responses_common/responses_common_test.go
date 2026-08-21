@@ -436,6 +436,9 @@ func TestParseResponseBody_Reasoning(t *testing.T) {
 	if result.ReasoningContent != "Thinking about it..." {
 		t.Errorf("ReasoningContent = %q, want %q", result.ReasoningContent, "Thinking about it...")
 	}
+	if result.Usage == nil || result.Usage.ReasoningTokens != 10 {
+		t.Fatalf("reasoning usage = %#v, want 10 reasoning tokens", result.Usage)
+	}
 }
 
 func TestParseResponseBody_Refusal(t *testing.T) {

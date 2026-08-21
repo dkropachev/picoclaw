@@ -13,6 +13,7 @@ import { Route as ThreadsRouteImport } from './routes/threads'
 import { Route as RepositoryReviewsRouteImport } from './routes/repository-reviews'
 import { Route as PullRequestsRouteImport } from './routes/pull-requests'
 import { Route as ModelsRouteImport } from './routes/models'
+import { Route as ModelEvaluationsRouteImport } from './routes/model-evaluations'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
 import { Route as LauncherLoginRouteImport } from './routes/launcher-login'
@@ -62,6 +63,11 @@ const PullRequestsRoute = PullRequestsRouteImport.update({
 const ModelsRoute = ModelsRouteImport.update({
   id: '/models',
   path: '/models',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelEvaluationsRoute = ModelEvaluationsRouteImport.update({
+  id: '/model-evaluations',
+  path: '/model-evaluations',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LogsRoute = LogsRouteImport.update({
@@ -231,6 +237,7 @@ export interface FileRoutesByFullPath {
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
+  '/model-evaluations': typeof ModelEvaluationsRoute
   '/models': typeof ModelsRoute
   '/pull-requests': typeof PullRequestsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
@@ -267,6 +274,7 @@ export interface FileRoutesByTo {
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
+  '/model-evaluations': typeof ModelEvaluationsRoute
   '/models': typeof ModelsRoute
   '/pull-requests': typeof PullRequestsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
@@ -304,6 +312,7 @@ export interface FileRoutesById {
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
+  '/model-evaluations': typeof ModelEvaluationsRoute
   '/models': typeof ModelsRoute
   '/pull-requests': typeof PullRequestsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
@@ -342,6 +351,7 @@ export interface FileRouteTypes {
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
+    | '/model-evaluations'
     | '/models'
     | '/pull-requests'
     | '/repository-reviews'
@@ -378,6 +388,7 @@ export interface FileRouteTypes {
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
+    | '/model-evaluations'
     | '/models'
     | '/pull-requests'
     | '/repository-reviews'
@@ -414,6 +425,7 @@ export interface FileRouteTypes {
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
+    | '/model-evaluations'
     | '/models'
     | '/pull-requests'
     | '/repository-reviews'
@@ -451,6 +463,7 @@ export interface RootRouteChildren {
   LauncherLoginRoute: typeof LauncherLoginRoute
   LauncherSetupRoute: typeof LauncherSetupRoute
   LogsRoute: typeof LogsRoute
+  ModelEvaluationsRoute: typeof ModelEvaluationsRoute
   ModelsRoute: typeof ModelsRoute
   PullRequestsRoute: typeof PullRequestsRoute
   RepositoryReviewsRoute: typeof RepositoryReviewsRoute
@@ -489,6 +502,13 @@ declare module '@tanstack/react-router' {
       path: '/models'
       fullPath: '/models'
       preLoaderRoute: typeof ModelsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-evaluations': {
+      id: '/model-evaluations'
+      path: '/model-evaluations'
+      fullPath: '/model-evaluations'
+      preLoaderRoute: typeof ModelEvaluationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/logs': {
@@ -816,6 +836,7 @@ const rootRouteChildren: RootRouteChildren = {
   LauncherLoginRoute: LauncherLoginRoute,
   LauncherSetupRoute: LauncherSetupRoute,
   LogsRoute: LogsRoute,
+  ModelEvaluationsRoute: ModelEvaluationsRoute,
   ModelsRoute: ModelsRoute,
   PullRequestsRoute: PullRequestsRoute,
   RepositoryReviewsRoute: RepositoryReviewsRoute,

@@ -12,47 +12,49 @@ import (
 
 // Handler serves HTTP API requests.
 type Handler struct {
-	configPath                   string
-	serverPort                   int
-	serverPublic                 bool
-	serverPublicExplicit         bool
-	serverHostInput              string
-	serverHostExplicit           bool
-	serverCIDRs                  []string
-	serverAllowLocalhostBypass   bool
-	serverTrustedProxyCIDRs      []string
-	debug                        bool
-	oauthMu                      sync.Mutex
-	oauthFlows                   map[string]*oauthFlow
-	oauthState                   map[string]string
-	weixinMu                     sync.Mutex
-	weixinFlows                  map[string]*weixinFlow
-	wecomMu                      sync.Mutex
-	wecomFlows                   map[string]*wecomFlow
-	mcpMu                        sync.Mutex
-	mcpOAuthMu                   sync.Mutex
-	mcpOAuthFlows                map[string]*mcpOAuthFlow
-	mcpOAuthState                map[string]string
-	mcpOAuthLatestByServer       map[string]string
-	configMutationMu             sync.Mutex
-	prLifecycleEffectMu          sync.Mutex
-	prLifecyclePendingCatalog    string
-	prLifecycleAppliedDeferred   string
-	prLifecyclePendingDeferred   string
-	workflowDevelopmentMu        sync.Mutex
-	workflowTriggerReviewOnce    sync.Once
-	workflowTriggerReviewKey     [32]byte
-	workflowTriggerReviewErr     error
-	workflowTriggerReviewNow     func() time.Time
-	workflowTriggerReviewUseMu   sync.Mutex
-	workflowTriggerReviewUsed    map[[32]byte]int64
-	workflowDevelopmentTestDone  func()
-	repositoryReviewControllerMu sync.Mutex
-	repositoryReviewController   *repositoryReviewController
-	sessionReadAfterLookup       func()
-	sessionDeleteAfterLookup     func()
-	saveToolStateConfig          func(string, *config.Config, string) (string, error)
-	saveConfigIfRevision         func(string, *config.Config, string) (string, error)
+	configPath                            string
+	serverPort                            int
+	serverPublic                          bool
+	serverPublicExplicit                  bool
+	serverHostInput                       string
+	serverHostExplicit                    bool
+	serverCIDRs                           []string
+	serverAllowLocalhostBypass            bool
+	serverTrustedProxyCIDRs               []string
+	debug                                 bool
+	oauthMu                               sync.Mutex
+	oauthFlows                            map[string]*oauthFlow
+	oauthState                            map[string]string
+	weixinMu                              sync.Mutex
+	weixinFlows                           map[string]*weixinFlow
+	wecomMu                               sync.Mutex
+	wecomFlows                            map[string]*wecomFlow
+	mcpMu                                 sync.Mutex
+	mcpOAuthMu                            sync.Mutex
+	mcpOAuthFlows                         map[string]*mcpOAuthFlow
+	mcpOAuthState                         map[string]string
+	mcpOAuthLatestByServer                map[string]string
+	configMutationMu                      sync.Mutex
+	prLifecycleEffectMu                   sync.Mutex
+	prLifecyclePendingCatalog             string
+	prLifecycleAppliedDeferred            string
+	prLifecyclePendingDeferred            string
+	workflowDevelopmentMu                 sync.Mutex
+	workflowTriggerReviewOnce             sync.Once
+	workflowTriggerReviewKey              [32]byte
+	workflowTriggerReviewErr              error
+	workflowTriggerReviewNow              func() time.Time
+	workflowTriggerReviewUseMu            sync.Mutex
+	workflowTriggerReviewUsed             map[[32]byte]int64
+	workflowDevelopmentTestDone           func()
+	repositoryReviewControllerMu          sync.Mutex
+	repositoryReviewController            *repositoryReviewController
+	repositoryModelEvaluationControllerMu sync.Mutex
+	repositoryModelEvaluationController   *repositoryModelEvaluationController
+	sessionReadAfterLookup                func()
+	sessionDeleteAfterLookup              func()
+	saveToolStateConfig                   func(string, *config.Config, string) (string, error)
+	saveConfigIfRevision                  func(string, *config.Config, string) (string, error)
 }
 
 // NewHandler creates an instance of the API handler.
@@ -142,6 +144,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerEventRoutes(mux)
 	h.registerPRWorkspaceRoutes(mux)
 	h.registerRepositoryReviewRoutes(mux)
+	h.registerRepositoryModelEvaluationRoutes(mux)
 	h.registerPRLifecycleWorkflowConfigurationRoutes(mux)
 
 	// OS startup / launch-at-login
@@ -165,6 +168,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Shutdown gracefully shuts down the handler, stopping the gateway if it was started by this handler.
 func (h *Handler) Shutdown() {
+	h.stopRepositoryModelEvaluationController()
 	h.stopRepositoryReviewController()
 	h.cancelMCPOAuthFlows()
 	h.StopGateway()

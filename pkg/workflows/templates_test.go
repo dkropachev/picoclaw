@@ -26,14 +26,31 @@ func TestInstallRepositoryBugFinderWorkflowWritesValidLocalDefinition(t *testing
 func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T) {
 	workflow := parseWorkflow(t, RepositoryBugFinderWorkflowYAML)
 	job := workflow.Jobs["find_bugs"]
-	if len(job.Steps) != 8 {
-		t.Fatalf("steps=%#v, want checkout/inventory/plan/freeze/release/review/record/result", job.Steps)
-	}
 	byID := make(map[string]Step, len(job.Steps))
 	for _, step := range job.Steps {
 		byID[step.ID] = step
 	}
 	plan, review, record := byID["plan"], byID["review"], byID["record"]
+	for _, id := range []string{
+		"checkout", "inventory", "scope_catalog", "release_structure", "plan_scope",
+		"scope_checkout", "scope_inventory", "full_scope_catalog", "scope", "scope_files",
+		"plan", "freeze", "release", "review", "record", "result",
+	} {
+		if _, exists := byID[id]; !exists {
+			t.Fatalf("repository bug finder missing %q", id)
+		}
+	}
+	planner := byID["plan_scope"]
+	if planner.With["tools"] != "none" || planner.With["session"] != "ephemeral" ||
+		planner.With["scope_content"] != "metadata" ||
+		planner.With["scope"] != "${{ steps.scope_catalog.outputs.candidates }}" {
+		t.Fatalf("scope planner authority=%#v", planner.With)
+	}
+	scope := byID["scope"]
+	if scope.Uses != "function/evaluation.corpus" || scope.With["action"] != "filter" ||
+		scope.With["hard_scope"] != "${{ inputs.scope_policy }}" {
+		t.Fatalf("scope enforcement=%#v", scope)
+	}
 	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" || plan.With["profile"] == nil {
 		t.Fatalf("plan=%#v", plan)
 	}

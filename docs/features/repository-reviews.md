@@ -61,6 +61,7 @@ an explicit manual fallback and is not proof of posting.
 | `FR-REPOREVIEW-011` | MUST  | Account limit telemetry is normalized into account/window snapshots with remaining percentage and reset time. Policies may select accounts, apply a default minimum and stricter named windows such as daily or weekly, and choose fail-open or fail-closed behavior for unknown telemetry. The backend—not a browser timer—rechecks active and quota-paused automations, safely stops admission when a threshold is crossed, and automatically resumes exactly once when all configured criteria recover. | Daily, weekly, and provider-specific limits must protect unattended reviews and recover after reset even when the dashboard is closed. |
 | `FR-REPOREVIEW-012` | MUST  | The setup UI presents available safe reviewer aliases and known or operator-supplied input/output prices. The runtime retains per-reviewer request/failure counts, actual tokens, estimated USD, compact approximate unique reviewed-file coverage, and finding yield. The comparison table labels approximate coverage, derives cost per finding, and visually identifies the cheapest known successful reviewer without claiming a price when metadata is absent. Agentic CLI providers remain unavailable for immutable repository review. | Users need comparable quality and economics signals to choose a cheaper review model deliberately. |
 | `FR-REPOREVIEW-013` | MUST  | On launcher startup, the durable controller reconciles an automation left running without a local executor, marks the orphaned workflow run canceled, records a `service_restart` pause, and resumes from repository checkpoints only when automatic resume is enabled. Controller shutdown cancels in-process execution and never creates a new batch after its context is closed. | Process restarts must not leave phantom running state, duplicate work, or silently disable unattended recovery. |
+| `FR-REPOREVIEW-014` | MUST  | Each automation persists a bounded scope policy with one or more selectable inventory code types (`hotpath-code`, `code`, `test`, `bench-test`), canonical repository-relative include and exclude folder prefixes, and optional free-text guidance. The default selects normal production code (`hotpath-code` and `code`); exclusions always win. A generated preflight is commit-bound and persists bounded policy/plan hashes, summary, rationale, warnings, and aggregate file counts. Changing execution scope clears any prior commit-bound plan. | Operators must be able to express reproducible review intent before AI planning without allowing unsafe paths, unbounded manifests, stale commit summaries, or an exclusion to be silently re-included. |
 
 ## Data And State Model
 
@@ -72,6 +73,7 @@ an explicit manual fallback and is not proof of posting.
 | Controller lease | `workspace/repository_reviews.controller.lock` | Non-blocking workspace-wide OS lock held for the launcher controller lifetime; never returned by an API. |
 | Guard epoch | `usage`, `estimated_cost_usd`, `budget` | Resume may reset only current guard counters. Restart establishes a new campaign epoch and clears progress/model comparison state while the repository blob ledger still controls unchanged-file reuse. |
 | Model comparison | `model_stats`, `model_coverage_sketches` | Lifetime per-campaign request/failure/usage/cost/latency/finding counts and fixed-size approximate unique coverage. Sketches are persistence-only and are removed from API projections. |
+| Scope policy and preflight | `scope_policy`, `scope_plan` in the automation profile | Commit-independent bounded code-type/folder/free-text intent plus the latest bounded commit SHA, policy hash, plan hash, explanation, warnings, and counts. It does not contain the selected-file manifest. |
 
 ## Surface Ownership
 
@@ -104,16 +106,18 @@ interfaces owned by their existing feature specifications.
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| HTTP | `GET/POST/PATCH/DELETE /api/repository-reviews/automations*` | List/create/update/delete CAS-fenced profiles and invoke start, pause, resume, or restart transitions. Internal sketches and credentials are never projected. | `FR-REPOREVIEW-008`, `FR-REPOREVIEW-009`, `FR-REPOREVIEW-013` |
+| HTTP | `GET/POST/PATCH/DELETE /api/repository-reviews/automations*` | List/create/update/delete CAS-fenced profiles, including bounded scope policy, and invoke start, pause, resume, or restart transitions. Internal sketches and credentials are never projected; bounded scope preflight summaries are returned. | `FR-REPOREVIEW-008`, `FR-REPOREVIEW-009`, `FR-REPOREVIEW-013`, `FR-REPOREVIEW-014` |
 | HTTP | `GET /api/repository-reviews/automation-options` | Return safe configured aliases, conservative selectable-route price metadata, and normalized limit-aware accounts without credential values. | `FR-REPOREVIEW-011`, `FR-REPOREVIEW-012` |
 | HTTP | `GET/PATCH/POST /api/repository-reviews/**` | Page result ledgers and mutate finding status or issue drafts with exact version fences. | `FR-REPOREVIEW-001`–`FR-REPOREVIEW-007` |
 | Gateway HTTP | `/runtime/repository-reviews/<repo>/issue-drafts/<draft>/publish` | Protected, idempotent publication/reconciliation boundary for canonical GitHub identities. | `FR-REPOREVIEW-006` |
-| UI | `/repository-reviews` | Persistent control center above the completed finding/draft ledger; polling is observation only, not automation authority. | `FR-REPOREVIEW-003`–`FR-REPOREVIEW-005`, `FR-REPOREVIEW-008`–`FR-REPOREVIEW-013` |
+| UI | `/repository-reviews` | Persistent control center above the completed finding/draft ledger, including multi-select code types, folder-prefix policy, free-text scope, and the latest bounded preflight explanation; polling is observation only, not automation authority. | `FR-REPOREVIEW-003`–`FR-REPOREVIEW-005`, `FR-REPOREVIEW-008`–`FR-REPOREVIEW-014` |
 
 ## Algorithms And Ordering
 
 1. Create/update normalizes the repository, ref, reviewers, prices, work bounds,
-   and guard policy under the shared review-store lock. CAS mismatch fails
+   scope policy, and guard policy under the shared review-store lock. Code types
+   are canonicalized; folder prefixes must be exact safe repository-relative
+   paths. CAS mismatch fails
    without partial mutation. Execution-affecting changes start a new campaign;
    price-only edits are non-retroactive and do not erase progress.
 2. Start/resume/restart checks the action-specific source state, controller
@@ -168,6 +172,10 @@ interfaces owned by their existing feature specifications.
   symlinked roots/files/locks, oversized ledgers, invalid reviewer aliases,
   unsafe agentic CLI reviewers, invalid prices, and out-of-range work/guard
   values fail before execution.
+- Scope policies reject unknown/duplicate code types, absolute, parent-relative,
+  non-canonical, duplicate, or over-limit folder prefixes, and oversized free
+  text. Include folders narrow category matches and excludes always win. The
+  commit-bound summary is invalidated when repository/ref/target/scope changes.
 - A cost guard requires a positive price for each executable reviewer. Unknown
   price is displayed as unknown, never zero/free.
 - Active token/cost/account guards require one parallel child. The documented
@@ -204,10 +212,12 @@ interfaces owned by their existing feature specifications.
 | `FR-REPOREVIEW-011` | [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/backend/api/codex_account_limits_test.go](../../web/backend/api/codex_account_limits_test.go) |
 | `FR-REPOREVIEW-012` | [pkg/agent/workflow_managed_ensemble_test.go](../../pkg/agent/workflow_managed_ensemble_test.go), [pkg/providers/cli/github_copilot_provider_test.go](../../pkg/providers/cli/github_copilot_provider_test.go), [web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx) |
 | `FR-REPOREVIEW-013` | [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [pkg/repoaudit/control_test.go](../../pkg/repoaudit/control_test.go) |
+| `FR-REPOREVIEW-014` | [pkg/repoaudit/scope_policy_test.go](../../pkg/repoaudit/scope_policy_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/frontend/src/api/repository-reviews.test.ts](../../web/frontend/src/api/repository-reviews.test.ts), [web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx) |
 
 ## Implementation Anchors
 
 - [pkg/repoaudit/control.go](../../pkg/repoaudit/control.go)
+- [pkg/repoaudit/scope_policy.go](../../pkg/repoaudit/scope_policy.go)
 - [pkg/repoaudit/store.go](../../pkg/repoaudit/store.go)
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
 - [pkg/workflows/native_functions.go](../../pkg/workflows/native_functions.go)

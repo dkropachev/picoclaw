@@ -73,7 +73,8 @@ func TestGeminiProvider_ChatSeparatesThoughtAndToolCall(t *testing.T) {
 			"usageMetadata": map[string]any{
 				"promptTokenCount":     2,
 				"candidatesTokenCount": 3,
-				"totalTokenCount":      5,
+				"thoughtsTokenCount":   1,
+				"totalTokenCount":      6,
 			},
 		})
 	}))
@@ -99,8 +100,9 @@ func TestGeminiProvider_ChatSeparatesThoughtAndToolCall(t *testing.T) {
 	if resp.FinishReason != "tool_calls" {
 		t.Fatalf("FinishReason = %q, want %q", resp.FinishReason, "tool_calls")
 	}
-	if resp.Usage == nil || resp.Usage.TotalTokens != 5 {
-		t.Fatalf("Usage = %#v, expected total tokens = 5", resp.Usage)
+	if resp.Usage == nil || resp.Usage.TotalTokens != 6 || resp.Usage.CompletionTokens != 4 ||
+		resp.Usage.ReasoningTokens != 1 {
+		t.Fatalf("Usage = %#v, expected total=6 completion=4 reasoning=1", resp.Usage)
 	}
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("ToolCalls len = %d, want 1", len(resp.ToolCalls))
@@ -179,7 +181,8 @@ func TestGeminiProvider_ChatStreamParsesThoughtTextAndToolCalls(t *testing.T) {
 				"usageMetadata": map[string]any{
 					"promptTokenCount":     1,
 					"candidatesTokenCount": 2,
-					"totalTokenCount":      3,
+					"thoughtsTokenCount":   1,
+					"totalTokenCount":      4,
 				},
 			},
 		}
@@ -226,8 +229,9 @@ func TestGeminiProvider_ChatStreamParsesThoughtTextAndToolCalls(t *testing.T) {
 	if resp.FinishReason != "tool_calls" {
 		t.Fatalf("FinishReason = %q, want %q", resp.FinishReason, "tool_calls")
 	}
-	if resp.Usage == nil || resp.Usage.TotalTokens != 3 {
-		t.Fatalf("Usage = %#v, expected total tokens = 3", resp.Usage)
+	if resp.Usage == nil || resp.Usage.TotalTokens != 4 || resp.Usage.CompletionTokens != 3 ||
+		resp.Usage.ReasoningTokens != 1 {
+		t.Fatalf("Usage = %#v, expected total=4 completion=3 reasoning=1", resp.Usage)
 	}
 	if len(updates) < 2 || updates[len(updates)-1] != "Hello World" {
 		t.Fatalf("stream updates = %#v, expected final accumulated text", updates)

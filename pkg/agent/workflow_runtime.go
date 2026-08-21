@@ -635,6 +635,21 @@ func (r *workflowAgentRunner) RunAgent(
 	}
 	defer releaseRuntime()
 	ctx = leaseCtx
+	requestedModel := strings.TrimSpace(req.Model)
+	if requestedModel != req.Model || !utf8.ValidString(requestedModel) ||
+		strings.ContainsRune(requestedModel, '\x00') || len(requestedModel) > 256 {
+		return nil, fmt.Errorf("workflow agent model alias is invalid")
+	}
+	if requestedModel != "" {
+		validationErr := validateModelAliasReferences(
+			r.loop.GetConfig(),
+			requestedModel,
+			[]string{},
+		)
+		if validationErr != nil {
+			return nil, fmt.Errorf("workflow agent model alias %q: %w", requestedModel, validationErr)
+		}
+	}
 
 	historyModeInput := strings.TrimSpace(req.History)
 	historyMode := strings.ToLower(historyModeInput)
@@ -659,7 +674,8 @@ func (r *workflowAgentRunner) RunAgent(
 		strings.TrimSpace(req.Tools) != workflows.AgentToolsNone || historyModeInput != "none" ||
 		strings.TrimSpace(req.Cache) != "none" || req.Scope == nil ||
 		(strings.TrimSpace(req.ScopeContent) != "frozen_git" &&
-			strings.TrimSpace(req.ScopeContent) != "immutable_git")) {
+			strings.TrimSpace(req.ScopeContent) != "immutable_git" &&
+			strings.TrimSpace(req.ScopeContent) != "metadata")) {
 		return nil, fmt.Errorf("suppressed workflow context requires bounded frozen no-tool review")
 	}
 	if (req.SuppressDefaultContext) != (reviewSystemPrompt != "") ||
@@ -1008,10 +1024,15 @@ func (r *workflowAgentRunner) RunAgent(
 		}
 		return splitOutputs, managedErr
 	}
+	actualModel := ""
 	requestedRunOptions := workflowAgentRunOptions{
 		NoTools:       workflowAgentToolsDisabled(req.Tools),
 		UsageObserver: req.UsageObserver,
 		CallAdmission: req.CallAdmission,
+	}
+	if requestedModel != "" {
+		requestedRunOptions.ModelName = requestedModel
+		requestedRunOptions.ActualModelName = &actualModel
 	}
 	var (
 		response         string
@@ -1049,6 +1070,9 @@ func (r *workflowAgentRunner) RunAgent(
 		publicMessageID,
 		req.Tools,
 	)
+	if actualModel != "" {
+		outputs["model"] = actualModel
+	}
 	if readOnlySnapshot != nil {
 		outputs["history_revision"] = historyRevision
 	}
