@@ -8,6 +8,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,12 @@ type factoryStubProvider struct {
 	tokenSource func() (string, error)
 }
 
+type factoryPlainProvider struct{}
+
+type factoryAPIKeySourceStub struct {
+	apiKeySource func() (string, error)
+}
+
 func (p *factoryStubProvider) SetTokenSource(source func() (string, error)) {
 	p.tokenSource = source
 }
@@ -34,6 +41,20 @@ func (p *factoryStubProvider) Chat(
 	map[string]any,
 ) (*LLMResponse, error) {
 	return &LLMResponse{Content: ""}, nil
+}
+
+func (*factoryPlainProvider) Chat(
+	context.Context,
+	[]Message,
+	[]ToolDefinition,
+	string,
+	map[string]any,
+) (*LLMResponse, error) {
+	return &LLMResponse{}, nil
+}
+
+func (p *factoryAPIKeySourceStub) SetAPIKeySource(source func() (string, error)) {
+	p.apiKeySource = source
 }
 
 func TestExtractProtocol(t *testing.T) {
@@ -952,6 +973,130 @@ func TestCreateProviderFromConfigRejectsMismatchedCredentialProviders(t *testing
 			}
 			if !strings.Contains(err.Error(), "belongs to provider") {
 				t.Fatalf("error = %v, want provider mismatch", err)
+			}
+		})
+	}
+}
+
+func TestCredentialAccessTokenSourceReportsLookupAndMissingCredential(t *testing.T) {
+	wantLookupErr := errors.New("auth store unavailable")
+	if _, err := loadCredentialAccessToken(
+		func(string) (*auth.AuthCredential, error) { return nil, wantLookupErr },
+		"openrouter:work",
+		"openrouter",
+	); err == nil || !strings.Contains(err.Error(), "loading auth credentials") {
+		t.Fatalf("lookup error = %v", err)
+	}
+	if _, err := loadCredentialAccessToken(
+		func(string) (*auth.AuthCredential, error) { return nil, nil },
+		"openrouter:work",
+		"openrouter",
+	); err == nil || !strings.Contains(err.Error(), "no credentials for openrouter:work") {
+		t.Fatalf("missing credential error = %v", err)
+	}
+}
+
+func TestConfigureCredentialAPIKeySourceRejectsInvalidCredentialID(t *testing.T) {
+	stub := &factoryAPIKeySourceStub{}
+	err := configureCredentialAPIKeySource(stub, &config.ModelConfig{
+		AuthMethod:   "token",
+		CredentialID: "bad/name",
+	}, "openrouter")
+	if err == nil || !strings.Contains(err.Error(), "invalid characters") {
+		t.Fatalf("configureCredentialAPIKeySource() error = %v", err)
+	}
+	if stub.apiKeySource != nil {
+		t.Fatal("API key source was installed after credential ID validation failed")
+	}
+}
+
+func TestCreateGitHubCopilotAuthProviderReportsConstructorContracts(t *testing.T) {
+	origGetCredential := getCredential
+	origNewCopilotProvider := newGitHubCopilotProviderWithToken
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+		newGitHubCopilotProviderWithToken = origNewCopilotProvider
+	})
+	getCredential = func(string) (*auth.AuthCredential, error) {
+		return &auth.AuthCredential{
+			AccessToken: "gho_valid-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		}, nil
+	}
+	cfg := &config.ModelConfig{
+		Provider:   "github-copilot",
+		Model:      "gpt-4.1",
+		AuthMethod: "token",
+	}
+
+	wantConstructorErr := errors.New("constructor unavailable")
+	newGitHubCopilotProviderWithToken = func(string, string) (LLMProvider, error) {
+		return nil, wantConstructorErr
+	}
+	if _, err := createGitHubCopilotAuthProvider(cfg, "gpt-4.1"); !errors.Is(err, wantConstructorErr) {
+		t.Fatalf("constructor error = %v, want %v", err, wantConstructorErr)
+	}
+
+	newGitHubCopilotProviderWithToken = func(string, string) (LLMProvider, error) {
+		return &factoryPlainProvider{}, nil
+	}
+	if _, err := createGitHubCopilotAuthProvider(cfg, "gpt-4.1"); err == nil ||
+		!strings.Contains(err.Error(), "does not support credential reload") {
+		t.Fatalf("non-reloadable provider error = %v", err)
+	}
+}
+
+func TestStoredTokenProviderConstructionReportsCredentialFailures(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() { getCredential = origGetCredential })
+
+	tests := []struct {
+		name       string
+		provider   string
+		model      string
+		apiBase    string
+		emptyToken bool
+	}{
+		{name: "azure lookup", provider: "azure", model: "deployment", apiBase: "https://azure.example.com"},
+		{name: "anthropic messages lookup", provider: "anthropic-messages", model: "claude-sonnet-4-6"},
+		{
+			name: "anthropic messages empty token", provider: "anthropic-messages",
+			model: "claude-sonnet-4-6", emptyToken: true,
+		},
+		{name: "alibaba lookup", provider: "alibaba-coding-anthropic", model: "claude-sonnet-4-6"},
+		{
+			name: "alibaba empty token", provider: "alibaba-coding-anthropic",
+			model: "claude-sonnet-4-6", emptyToken: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getCredential = func(string) (*auth.AuthCredential, error) {
+				if tt.emptyToken {
+					return &auth.AuthCredential{
+						AccessToken: "  ",
+						Provider:    tt.provider,
+						AuthMethod:  "token",
+					}, nil
+				}
+				return nil, errors.New("auth store unavailable")
+			}
+			_, _, err := CreateProviderFromConfig(&config.ModelConfig{
+				Provider:     tt.provider,
+				Model:        tt.model,
+				APIBase:      tt.apiBase,
+				AuthMethod:   "token",
+				CredentialID: "work",
+			})
+			if err == nil {
+				t.Fatal("CreateProviderFromConfig() error = nil")
+			}
+			if tt.emptyToken && !strings.Contains(err.Error(), "api_key is required") {
+				t.Fatalf("empty-token error = %v", err)
+			}
+			if !tt.emptyToken && !strings.Contains(err.Error(), "loading auth credentials") {
+				t.Fatalf("lookup error = %v", err)
 			}
 		})
 	}

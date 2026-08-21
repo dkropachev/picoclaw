@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -720,6 +721,129 @@ func TestCredentialAuthInvalidationFencesLatePreRenewalFailure(t *testing.T) {
 		state.Reason != providers.FailoverAuth || state.FailureCount != 1 {
 		t.Fatalf("post-renewal auth failure was not recorded: %#v", state)
 	}
+}
+
+func TestCredentialAuthInvalidationValidatesInputsAndFilesystemState(t *testing.T) {
+	if err := InvalidateCredentialAuthFailure(" ", "openai:work"); err == nil ||
+		!strings.Contains(err.Error(), "state path is required") {
+		t.Fatalf("empty state path error = %v", err)
+	}
+	if err := InvalidateCredentialAuthFailure("unused.json", "openai:bad/name"); err == nil ||
+		!strings.Contains(err.Error(), "normalize credential id") {
+		t.Fatalf("invalid credential error = %v", err)
+	}
+
+	t.Run("missing state is a no-op", func(t *testing.T) {
+		statePath := filepath.Join(t.TempDir(), "missing", "state.json")
+		if err := InvalidateCredentialAuthFailure(statePath, "openai:work"); err != nil {
+			t.Fatalf("InvalidateCredentialAuthFailure() error = %v", err)
+		}
+		if matches, err := filepath.Glob(statePath + ".auth-invalidation.*"); err != nil {
+			t.Fatalf("Glob() error = %v", err)
+		} else if len(matches) != 0 {
+			t.Fatalf("missing state created invalidation files: %v", matches)
+		}
+	})
+
+	t.Run("stat error", func(t *testing.T) {
+		parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(parentFile, []byte("blocked"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		err := InvalidateCredentialAuthFailure(filepath.Join(parentFile, "state.json"), "openai:work")
+		if err == nil || !strings.Contains(err.Error(), "stat account router state") {
+			t.Fatalf("stat error = %v", err)
+		}
+	})
+
+	t.Run("marker write error", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("directory write permissions are Unix-specific")
+		}
+		dir := t.TempDir()
+		statePath := filepath.Join(dir, "state.json")
+		if err := os.WriteFile(statePath, []byte(`{"version":1}`), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatalf("Chmod(read-only) error = %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		err := InvalidateCredentialAuthFailure(statePath, "openai:work")
+		if err == nil || !strings.Contains(err.Error(), "write account router auth invalidation") {
+			t.Fatalf("marker write error = %v", err)
+		}
+	})
+}
+
+func TestCredentialAuthInvalidationMarkerValidationAndSparseState(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	normalizedID := "openai:work"
+	markerPath := credentialAuthInvalidationPath(statePath, normalizedID)
+	if _, err := normalizeCredentialID(" "); err == nil || !strings.Contains(err.Error(), "credential id is required") {
+		t.Fatalf("normalizeCredentialID(empty) error = %v", err)
+	}
+
+	if _, ok := readCredentialAuthInvalidation(statePath, normalizedID); ok {
+		t.Fatal("missing marker was accepted")
+	}
+	for name, data := range map[string]string{
+		"malformed":           "{not-json",
+		"unsupported version": `{"version":2,"credential_id":"openai:work","generation":"next"}`,
+		"missing generation":  `{"version":1,"credential_id":"openai:work"}`,
+		"invalid id":          `{"version":1,"credential_id":"openai:bad/name","generation":"next"}`,
+		"different id":        `{"version":1,"credential_id":"openai:other","generation":"next"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(markerPath, []byte(data), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			if marker, ok := readCredentialAuthInvalidation(statePath, normalizedID); ok {
+				t.Fatalf("invalid marker accepted: %#v", marker)
+			}
+		})
+	}
+
+	valid := `{"version":1,"credential_id":"OPENAI:WORK","generation":"next"}`
+	if err := os.WriteFile(markerPath, []byte(valid), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if marker, ok := readCredentialAuthInvalidation(statePath, normalizedID); !ok ||
+		marker.CredentialID != normalizedID || marker.Generation != "next" {
+		t.Fatalf("valid marker = (%#v, %v)", marker, ok)
+	}
+
+	for _, accountRef := range []string{
+		"account-a",
+		"credential:unsupported:work",
+		"credential:openai:bad/name",
+	} {
+		if credentialID, ok := normalizedCredentialIDForAccount(accountRef); ok {
+			t.Fatalf("normalizedCredentialIDForAccount(%q) = (%q, true)", accountRef, credentialID)
+		}
+	}
+
+	var nilStore *Store
+	nilStore.applyCredentialAuthInvalidations()
+	(&Store{}).applyCredentialAuthInvalidations()
+	(&Store{path: statePath, st: State{Routers: map[string]*RouterState{
+		"nil-router": nil,
+		"sparse": {
+			Accounts: map[string]*AccountState{
+				"nil-account":                 nil,
+				"account-a":                   {},
+				"credential:unsupported:work": {},
+			},
+		},
+	}}}).applyCredentialAuthInvalidations()
+
+	if got := accountAuthInvalidationGeneration(nil, "account"); got != "" {
+		t.Fatalf("generation from nil state = %q", got)
+	}
+	if got := accountAuthInvalidationGeneration(&RouterState{}, "account"); got != "" {
+		t.Fatalf("generation from empty state = %q", got)
+	}
+	resetAccountAuthFailure(nil)
 }
 
 func newTestRouter(t *testing.T, cfg *config.AccountRouterConfig, now time.Time) *Router {

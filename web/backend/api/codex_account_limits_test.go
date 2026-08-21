@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +18,51 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 )
+
+func TestCodexAccountLimitsErrorAndSnapshotBoundaries(t *testing.T) {
+	credential := &auth.AuthCredential{
+		Provider: "openai", AuthMethod: "oauth", AccessToken: "token",
+	}
+	snapshot := *credential
+	if credentialMatchesCodexSnapshot(nil, codexAuthTokens{Credential: &snapshot}) ||
+		credentialMatchesCodexSnapshot(credential, codexAuthTokens{}) ||
+		!credentialMatchesCodexSnapshot(credential, codexAuthTokens{Credential: &snapshot}) {
+		t.Fatal("credential snapshot matching returned the wrong result")
+	}
+	snapshot.AccessToken = "different"
+	if credentialMatchesCodexSnapshot(credential, codexAuthTokens{Credential: &snapshot}) {
+		t.Fatal("changed credential matched stale snapshot")
+	}
+
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{err: &codexUsageError{Code: "token_expired"}, want: "token_expired"},
+		{err: &codexUsageError{Status: http.StatusTeapot}, want: "upstream_status_418"},
+		{err: &codexUsageError{}, want: "unavailable"},
+		{err: context.DeadlineExceeded, want: "timeout"},
+		{err: errors.New("wrapper: context deadline exceeded"), want: "timeout"},
+		{err: errors.New("network reset"), want: "unavailable"},
+	} {
+		if got := codexLimitsErrorCode(test.err); got != test.want {
+			t.Errorf("codexLimitsErrorCode(%v) = %q, want %q", test.err, got, test.want)
+		}
+	}
+	for raw, want := range map[string]string{
+		"":                      "unavailable",
+		"Token-Expired!":        "token_expired",
+		"the token has expired": "token_expired",
+		"Not Authorized":        "not_authorized",
+		"Unauthorized request":  "unauthorized",
+		"Forbidden request":     "forbidden",
+		"Rate Limited":          "rate_limited",
+	} {
+		if got := sanitizeCodexErrorCode(raw); got != want {
+			t.Errorf("sanitizeCodexErrorCode(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
 
 func TestHandleCodexAccountLimitsUsesUsageAPI(t *testing.T) {
 	withPicoclawAuthHome(t)

@@ -27,6 +27,50 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestGitHubCopilotTokenSourceValidatesReloadedCredentials(t *testing.T) {
+	var nilProvider *GitHubCopilotProvider
+	nilProvider.SetTokenSource(func() (string, error) { return "gho_unused", nil })
+
+	provider, err := NewGitHubCopilotProviderWithToken("gho_fixed-token", "gpt-4.1")
+	if err != nil {
+		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v", err)
+	}
+	if token, tokenErr := provider.tokenForRequest(); tokenErr != nil || token != "gho_fixed-token" {
+		t.Fatalf("fixed token = (%q, %v)", token, tokenErr)
+	}
+
+	provider.SetTokenSource(func() (string, error) {
+		return "", errors.New("credential store unavailable")
+	})
+	if _, tokenErr := provider.tokenForRequest(); tokenErr == nil ||
+		!strings.Contains(tokenErr.Error(), "resolving GitHub Copilot token") {
+		t.Fatalf("token source error = %v", tokenErr)
+	}
+	if _, chatErr := provider.chatWithToken(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		"gpt-4.1",
+	); chatErr == nil ||
+		!strings.Contains(chatErr.Error(), "resolving GitHub Copilot token") {
+		t.Fatalf("chat token source error = %v", chatErr)
+	}
+
+	provider.SetTokenSource(func() (string, error) { return " invalid ", nil })
+	if _, tokenErr := provider.tokenForRequest(); tokenErr == nil ||
+		!strings.Contains(tokenErr.Error(), "invalid GitHub Copilot token") {
+		t.Fatalf("invalid reloaded token error = %v", tokenErr)
+	}
+	provider.SetTokenSource(func() (string, error) { return "  ghu_rotated-token  ", nil })
+	if token, tokenErr := provider.tokenForRequest(); tokenErr != nil || token != "ghu_rotated-token" {
+		t.Fatalf("rotated token = (%q, %v)", token, tokenErr)
+	}
+
+	provider.SetTokenSource(nil)
+	if token, tokenErr := provider.tokenForRequest(); tokenErr != nil || token != "gho_fixed-token" {
+		t.Fatalf("reset fixed token = (%q, %v)", token, tokenErr)
+	}
+}
+
 func TestGitHubCopilotUsageNormalizesMissingAndInvalidTransportCounts(t *testing.T) {
 	if githubCopilotFloat(nil) != 0 {
 		t.Fatal("nil Copilot float was not zero")

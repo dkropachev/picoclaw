@@ -88,6 +88,40 @@ func TestProviderAPIKeySourceReloadsForChatAndStream(t *testing.T) {
 	}
 }
 
+func TestProviderAPIKeySourceErrorsForChatAndStreamAndCanReset(t *testing.T) {
+	var nilProvider *Provider
+	nilProvider.SetAPIKeySource(func() (string, error) { return "unused", nil })
+
+	provider := NewProvider("fixed-key", "https://api.example.com", "")
+	provider.SetAPIKeySource(func() (string, error) {
+		return "", fmt.Errorf("credential store unavailable")
+	})
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "resolving API key") {
+		t.Fatalf("Chat() key-source error = %v", err)
+	}
+	if _, err := provider.ChatStreamEvents(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "resolving API key") {
+		t.Fatalf("ChatStreamEvents() key-source error = %v", err)
+	}
+
+	provider.SetAPIKeySource(nil)
+	if got, err := provider.apiKeyForRequest(); err != nil || got != "fixed-key" {
+		t.Fatalf("apiKeyForRequest() = (%q, %v), want fixed-key", got, err)
+	}
+}
+
 func TestProviderChat_UsesMaxCompletionTokensForGLM(t *testing.T) {
 	var requestBody map[string]any
 

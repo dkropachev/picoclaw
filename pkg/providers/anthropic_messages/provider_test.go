@@ -8,6 +8,7 @@ package anthropicmessages
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -433,6 +434,30 @@ func TestProviderAPIKeySourceReloadsPerRequest(t *testing.T) {
 		if got := <-headers; got != wantKey {
 			t.Fatalf("X-API-Key = %q, want %q", got, wantKey)
 		}
+	}
+}
+
+func TestProviderAPIKeySourceErrorsAndCanResetToFixedKey(t *testing.T) {
+	var nilProvider *Provider
+	nilProvider.SetAPIKeySource(func() (string, error) { return "unused", nil })
+
+	provider := NewProvider("fixed-key", "https://api.example.com", "")
+	provider.SetAPIKeySource(func() (string, error) {
+		return "", errors.New("credential store unavailable")
+	})
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"claude-sonnet-4-6",
+		map[string]any{"max_tokens": 128},
+	); err == nil || !strings.Contains(err.Error(), "resolving Anthropic API key") {
+		t.Fatalf("Chat() key-source error = %v", err)
+	}
+
+	provider.SetAPIKeySource(nil)
+	if got, err := provider.apiKeyForRequest(); err != nil || got != "fixed-key" {
+		t.Fatalf("apiKeyForRequest() = (%q, %v), want fixed-key", got, err)
 	}
 }
 

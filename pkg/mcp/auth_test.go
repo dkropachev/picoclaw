@@ -331,6 +331,67 @@ func TestHeaderTransportUsesRenewedStoredCredentialWithoutRebuild(t *testing.T) 
 	}
 }
 
+func TestStoredMCPTokenSourceInitialValidationBoundaries(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Minute)
+	tests := []struct {
+		name       string
+		authType   string
+		credential *picoauth.AuthCredential
+		wantError  string
+	}{
+		{
+			name: "wrong provider", authType: "bearer",
+			credential: &picoauth.AuthCredential{
+				Provider: "openai", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: future,
+			},
+			wantError: "changed provider",
+		},
+		{
+			name: "wrong method", authType: "oauth",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: future,
+			},
+			wantError: "changed auth",
+		},
+		{
+			name: "insecure refresh endpoint", authType: "oauth",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "oauth", AccessToken: "token", ExpiresAt: future,
+				RefreshToken: "refresh", OAuthClientID: "client", OAuthTokenURL: "http://id.example.test/token",
+			},
+			wantError: "insecure OAuth token endpoint",
+		},
+		{
+			name: "expired static oauth", authType: "oauth",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "oauth", AccessToken: "token", ExpiresAt: past,
+			},
+			wantError: "cannot be refreshed",
+		},
+		{
+			name: "expired bearer", authType: "bearer",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: past,
+			},
+			wantError: "replace it in the dashboard",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := storedMCPTokenSourceForCredential("mcp:initial", test.authType, test.credential)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("initial token source error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+	if source, err := storedMCPTokenSourceForCredential("mcp:initial", "bearer", &picoauth.AuthCredential{
+		Provider: "mcp", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: future,
+	}); err != nil || source == nil {
+		t.Fatalf("valid initial token source = %#v, %v", source, err)
+	}
+}
+
 func TestHeaderTransportRejectsInvalidStoredCredentialReplacement(t *testing.T) {
 	tests := []struct {
 		name        string

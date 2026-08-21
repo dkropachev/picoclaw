@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -728,6 +729,71 @@ func TestOAuthProvidersIncludesGitHubCopilotTokenLogin(t *testing.T) {
 		return
 	}
 	t.Fatal("github-copilot provider missing")
+}
+
+func TestOAuthProviderCredentialStatusLifecycle(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name       string
+		credential *auth.AuthCredential
+		wantStatus string
+		wantLogin  bool
+	}{
+		{name: "missing", wantStatus: "not_logged_in"},
+		{
+			name: "connected",
+			credential: &auth.AuthCredential{
+				Provider: "openai", AuthMethod: "oauth", AccessToken: "connected",
+				AccountID: "account", Email: "user@example.test", ProjectID: "project",
+				ExpiresAt: now.Add(time.Hour),
+			},
+			wantStatus: "connected", wantLogin: true,
+		},
+		{
+			name: "needs refresh",
+			credential: &auth.AuthCredential{
+				Provider: "openai", AuthMethod: "oauth", AccessToken: "refresh-soon",
+				ExpiresAt: now.Add(time.Minute),
+			},
+			wantStatus: "needs_refresh", wantLogin: true,
+		},
+		{
+			name: "expired",
+			credential: &auth.AuthCredential{
+				Provider: "openai", AuthMethod: "oauth", AccessToken: "expired",
+				ExpiresAt: now.Add(-time.Minute),
+			},
+			wantStatus: "expired", wantLogin: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := newOAuthProviderCredentialStatus("openai", "openai:work", test.credential)
+			if status.Provider != "openai" || status.CredentialID != "openai:work" ||
+				status.DisplayName == "" || len(status.Methods) == 0 || status.Status != test.wantStatus ||
+				status.LoggedIn != test.wantLogin {
+				t.Fatalf("credential status = %#v", status)
+			}
+			if test.credential != nil {
+				if status.AuthMethod != test.credential.AuthMethod || status.AccountID != test.credential.AccountID ||
+					status.Email != test.credential.Email || status.ProjectID != test.credential.ProjectID {
+					t.Fatalf("credential metadata = %#v", status)
+				}
+				if test.credential.ExpiresAt.IsZero() != (status.ExpiresAt == "") {
+					t.Fatalf("credential expiry = %#v", status)
+				}
+			}
+		})
+	}
+
+	preserved := oauthProviderStatus{DisplayName: "Preserved", Methods: []string{"token"}}
+	preserved.applyCredential("deepseek", "deepseek:work", &auth.AuthCredential{
+		Provider: "deepseek", AuthMethod: "token", AccessToken: "token",
+	})
+	if preserved.DisplayName != "Preserved" || !reflect.DeepEqual(preserved.Methods, []string{"token"}) ||
+		preserved.Status != "connected" || preserved.ExpiresAt != "" {
+		t.Fatalf("prepopulated provider status = %#v", preserved)
+	}
 }
 
 func TestOAuthProvidersIncludesOnlyAccountStoreCapableModelProviders(t *testing.T) {

@@ -80,6 +80,72 @@ func TestGeminiProviderAPIKeySourceReloadsForChatAndStream(t *testing.T) {
 	}
 }
 
+func TestGeminiProviderAPIKeySourceErrorsForChatAndStreamAndCanReset(t *testing.T) {
+	var nilProvider *GeminiProvider
+	nilProvider.SetAPIKeySource(func() (string, error) { return "unused", nil })
+
+	provider := NewGeminiProvider("fixed-key", "https://api.example.com", "", "", 0, nil, nil)
+	provider.SetAPIKeySource(func() (string, error) {
+		return "", fmt.Errorf("credential store unavailable")
+	})
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"gemini-2.5-flash",
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "resolving Gemini API key") {
+		t.Fatalf("Chat() key-source error = %v", err)
+	}
+	if _, err := provider.ChatStreamEvents(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"gemini-2.5-flash",
+		nil,
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "resolving Gemini API key") {
+		t.Fatalf("ChatStreamEvents() key-source error = %v", err)
+	}
+
+	provider.SetAPIKeySource(nil)
+	if got, err := provider.apiKeyForRequest(); err != nil || got != "fixed-key" {
+		t.Fatalf("apiKeyForRequest() = (%q, %v), want fixed-key", got, err)
+	}
+}
+
+func TestHTTPProviderAPIKeySourceHandlesNilAndDelegates(t *testing.T) {
+	var nilProvider *HTTPProvider
+	nilProvider.SetAPIKeySource(func() (string, error) { return "unused", nil })
+	(&HTTPProvider{}).SetAPIKeySource(func() (string, error) { return "unused", nil })
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("Authorization"); got != "Bearer stored-key" {
+			t.Errorf("Authorization = %q, want stored key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	provider := NewHTTPProvider("fixed-key", server.URL, "")
+	provider.SetAPIKeySource(func() (string, error) { return "stored-key", nil })
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+	); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
 func TestGeminiProvider_ChatSeparatesThoughtAndToolCall(t *testing.T) {
 	var capturedBody map[string]any
 

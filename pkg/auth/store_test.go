@@ -761,6 +761,263 @@ func TestPersistCredentialIfCurrentNormalizesAndValidatesProvider(t *testing.T) 
 	}
 }
 
+func TestCredentialRenewalValidationAndNoopBranches(t *testing.T) {
+	if _, err := normalizeCredentialReplacement("openai:work", nil, nil); err == nil {
+		t.Fatal("normalizeCredentialReplacement(nil) error = nil")
+	}
+
+	replacement, err := normalizeCredentialReplacement(
+		"OpenAI:Work",
+		nil,
+		&AuthCredential{AccessToken: "replacement-token"},
+	)
+	if err != nil {
+		t.Fatalf("normalizeCredentialReplacement() error = %v", err)
+	}
+	if replacement.Provider != "openai" {
+		t.Fatalf("replacement provider = %q, want openai", replacement.Provider)
+	}
+
+	store := &AuthStore{Credentials: map[string]*AuthCredential{
+		" OpenAI:Work ": {AccessToken: "stored-token"},
+	}}
+	normalizeStore(store)
+	if got := store.Credentials["openai:work"]; got == nil || got.Provider != "openai" {
+		t.Fatalf("normalized credential = %#v, want inferred openai provider", got)
+	}
+
+	setTestAuthHome(t)
+	if setErr := SetCredential("OpenAI:Work", &AuthCredential{AccessToken: "stored-token"}); setErr != nil {
+		t.Fatalf("SetCredential() error = %v", setErr)
+	}
+	current, err := GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if current == nil || current.Provider != "openai" {
+		t.Fatalf("stored credential = %#v, want inferred openai provider", current)
+	}
+
+	if authoritative, persistErr := PersistCredentialIfCurrent(
+		"openai:work",
+		current,
+		cloneCredential(current),
+	); persistErr != nil {
+		t.Fatalf("PersistCredentialIfCurrent(no-op) error = %v", persistErr)
+	} else if !authCredentialsEqual(authoritative, current) {
+		t.Fatalf("no-op authoritative credential = %#v, want %#v", authoritative, current)
+	}
+}
+
+func TestCredentialRenewalRejectsInvalidInputsAndRefreshFailures(t *testing.T) {
+	setTestAuthHome(t)
+
+	if _, err := PersistCredentialIfCurrent("openai:work", nil, &AuthCredential{}); err == nil {
+		t.Fatal("PersistCredentialIfCurrent(nil source) error = nil")
+	}
+	if _, err := PersistCredentialIfCurrent("openai:work", &AuthCredential{}, nil); err == nil {
+		t.Fatal("PersistCredentialIfCurrent(nil replacement) error = nil")
+	}
+	if _, err := RefreshCredentialDetailed("openai:work", nil, func(*AuthCredential) (*AuthCredential, error) {
+		return nil, nil
+	}); err == nil {
+		t.Fatal("RefreshCredentialDetailed(nil predicate) error = nil")
+	}
+	if _, err := RefreshCredentialDetailed("openai:work", func(*AuthCredential) bool { return true }, nil); err == nil {
+		t.Fatal("RefreshCredentialDetailed(nil callback) error = nil")
+	}
+
+	missing, err := RefreshCredentialDetailed(
+		"openai:missing",
+		func(*AuthCredential) bool {
+			t.Fatal("predicate called for missing credential")
+			return true
+		},
+		func(*AuthCredential) (*AuthCredential, error) {
+			t.Fatal("refresh called for missing credential")
+			return nil, nil
+		},
+	)
+	if err != nil || missing.Credential != nil || missing.Committed {
+		t.Fatalf("missing refresh result = (%#v, %v)", missing, err)
+	}
+
+	credentialID := "openai:work"
+	current := &AuthCredential{
+		AccessToken: "current-token",
+		Provider:    "openai",
+		AuthMethod:  "token",
+	}
+	if setErr := SetCredential(credentialID, current); setErr != nil {
+		t.Fatalf("SetCredential() error = %v", setErr)
+	}
+	notNeeded, err := RefreshCredentialDetailed(
+		credentialID,
+		func(*AuthCredential) bool { return false },
+		func(*AuthCredential) (*AuthCredential, error) {
+			t.Fatal("refresh called when predicate returned false")
+			return nil, nil
+		},
+	)
+	if err != nil || !authCredentialsEqual(notNeeded.Credential, current) || notNeeded.Committed {
+		t.Fatalf("not-needed refresh result = (%#v, %v)", notNeeded, err)
+	}
+
+	wantRefreshErr := fmt.Errorf("provider refresh failed")
+	if _, err := RefreshCredentialDetailed(
+		credentialID,
+		func(*AuthCredential) bool { return true },
+		func(*AuthCredential) (*AuthCredential, error) { return nil, wantRefreshErr },
+	); err == nil || err.Error() != wantRefreshErr.Error() {
+		t.Fatalf("refresh error = %v, want %v", err, wantRefreshErr)
+	}
+	if _, err := RefreshCredentialDetailed(
+		credentialID,
+		func(*AuthCredential) bool { return true },
+		func(*AuthCredential) (*AuthCredential, error) { return nil, nil },
+	); err == nil || !strings.Contains(err.Error(), "returned nil") {
+		t.Fatalf("nil refresh error = %v", err)
+	}
+	if _, err := RefreshCredentialDetailed(
+		credentialID,
+		func(*AuthCredential) bool { return true },
+		func(*AuthCredential) (*AuthCredential, error) {
+			return &AuthCredential{AccessToken: "wrong", Provider: "anthropic"}, nil
+		},
+	); err == nil || !strings.Contains(err.Error(), "belongs to provider") {
+		t.Fatalf("provider mismatch refresh error = %v", err)
+	}
+}
+
+func TestCredentialRenewalPropagatesStoreAndLockFailures(t *testing.T) {
+	t.Run("refresh lock", func(t *testing.T) {
+		blockingPath := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(blockingPath, []byte("blocked"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		t.Setenv(config.EnvHome, blockingPath)
+
+		if _, err := RefreshCredentialDetailed(
+			"openai:work",
+			func(*AuthCredential) bool { return true },
+			func(*AuthCredential) (*AuthCredential, error) { return nil, nil },
+		); err == nil {
+			t.Fatal("RefreshCredentialDetailed() lock error = nil")
+		}
+		if _, _, err := persistCredentialIfCurrentDetailed(
+			"openai:work",
+			&AuthCredential{},
+			&AuthCredential{},
+		); err == nil {
+			t.Fatal("persistCredentialIfCurrentDetailed() lock error = nil")
+		}
+		if _, err := getCredentialAfterWriters("openai:work"); err == nil {
+			t.Fatal("getCredentialAfterWriters() lock error = nil")
+		}
+	})
+
+	t.Run("malformed store", func(t *testing.T) {
+		testRoot := setTestAuthHome(t)
+		home := filepath.Join(testRoot, ".picoclaw")
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("{not-json"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		if _, err := getCredentialAfterWriters("openai:work"); err == nil {
+			t.Fatal("getCredentialAfterWriters() malformed-store error = nil")
+		}
+		if _, err := RefreshCredentialDetailed(
+			"openai:work",
+			func(*AuthCredential) bool { return true },
+			func(*AuthCredential) (*AuthCredential, error) { return nil, nil },
+		); err == nil {
+			t.Fatal("RefreshCredentialDetailed() malformed-store error = nil")
+		}
+		if _, _, err := persistCredentialIfCurrentDetailed(
+			"openai:work",
+			&AuthCredential{},
+			&AuthCredential{},
+		); err == nil {
+			t.Fatal("persistCredentialIfCurrentDetailed() malformed-store error = nil")
+		}
+	})
+}
+
+func TestPersistCredentialIfCurrentPropagatesAtomicWriteFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory write permissions are Unix-specific")
+	}
+	testRoot := setTestAuthHome(t)
+	home := filepath.Join(testRoot, ".picoclaw")
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken: "old-token",
+		Provider:    "openai",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+	source, err := GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if chmodErr := os.Chmod(home, 0o500); chmodErr != nil {
+		t.Fatalf("Chmod(read-only) error = %v", chmodErr)
+	}
+	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+
+	_, err = PersistCredentialIfCurrent(credentialID, source, &AuthCredential{
+		AccessToken: "new-token",
+		Provider:    "openai",
+	})
+	if err == nil {
+		t.Fatal("PersistCredentialIfCurrent() write error = nil")
+	}
+}
+
+func TestUpdateCredentialUsesNamedCanonicalKeyAndInfersProvider(t *testing.T) {
+	setTestAuthHome(t)
+	credentialID := "openai:work"
+	if err := SetCredential(credentialID, &AuthCredential{
+		AccessToken: "old-token",
+		Provider:    "openai",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	updated, err := UpdateCredential(" OpenAI:Work ", func(current *AuthCredential) (*AuthCredential, error) {
+		if current == nil || current.AccessToken != "old-token" {
+			t.Fatalf("update current credential = %#v", current)
+		}
+		return &AuthCredential{
+			AccessToken: "new-token",
+			AuthMethod:  "token",
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("UpdateCredential() error = %v", err)
+	}
+	if updated.Provider != "openai" || updated.AccessToken != "new-token" {
+		t.Fatalf("updated credential = %#v", updated)
+	}
+	stored, err := GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if !authCredentialsEqual(stored, updated) {
+		t.Fatalf("stored credential = %#v, want %#v", stored, updated)
+	}
+
+	noChange, err := UpdateCredential(credentialID, func(current *AuthCredential) (*AuthCredential, error) {
+		return current, nil
+	})
+	if err != nil || !authCredentialsEqual(noChange, updated) {
+		t.Fatalf("no-op UpdateCredential() = (%#v, %v)", noChange, err)
+	}
+}
+
 func TestNormalizeCredentialID(t *testing.T) {
 	tests := []struct {
 		name         string
