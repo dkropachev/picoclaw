@@ -14,6 +14,13 @@ import {
 
 type FlowWatchMode = "" | "status" | "poll"
 
+interface FlowWatchTarget {
+  flowID: string
+  mode: Exclude<FlowWatchMode, "">
+  intervalMs: number
+  actionGeneration: number
+}
+
 interface StartDeviceCodeOptions {
   openImmediately?: boolean
 }
@@ -41,11 +48,10 @@ export function useCredentialsPage() {
   const [activeAction, setActiveAction] = useState("")
   const [activeFlow, setActiveFlow] = useState<OAuthFlowState | null>(null)
   const actionTokenRef = useRef(0)
+  const expectedFlowRef = useRef<FlowWatchTarget | null>(null)
   const providersRequestRef = useRef(0)
 
-  const [watchFlowID, setWatchFlowID] = useState("")
-  const [watchMode, setWatchMode] = useState<FlowWatchMode>("")
-  const [pollIntervalMs, setPollIntervalMs] = useState(2000)
+  const [flowWatch, setFlowWatch] = useState<FlowWatchTarget | null>(null)
 
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false)
   const [logoutConfirmProvider, setLogoutConfirmProvider] = useState<
@@ -55,6 +61,26 @@ export function useCredentialsPage() {
 
   const [deviceSheetOpen, setDeviceSheetOpen] = useState(false)
   const [deviceFlow, setDeviceFlow] = useState<OAuthFlowState | null>(null)
+
+  const bumpActionToken = useCallback(() => {
+    actionTokenRef.current += 1
+    expectedFlowRef.current = null
+    setFlowWatch(null)
+    return actionTokenRef.current
+  }, [])
+
+  const isActionTokenCurrent = useCallback((token: number) => {
+    return actionTokenRef.current === token
+  }, [])
+
+  const watchExpectedFlow = useCallback((target: FlowWatchTarget) => {
+    if (actionTokenRef.current !== target.actionGeneration) {
+      return false
+    }
+    expectedFlowRef.current = target
+    setFlowWatch(target)
+    return true
+  }, [])
 
   const loadProviders = useCallback(async (): Promise<boolean> => {
     const request = ++providersRequestRef.current
@@ -86,21 +112,31 @@ export function useCredentialsPage() {
   }, [loadProviders])
 
   useEffect(() => {
-    if (!watchFlowID || !watchMode) {
+    if (!flowWatch) {
       return
     }
 
     let canceled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    const isExpectedFlow = () => {
+      const expected = expectedFlowRef.current
+      return (
+        !canceled &&
+        actionTokenRef.current === flowWatch.actionGeneration &&
+        expected?.actionGeneration === flowWatch.actionGeneration &&
+        expected.flowID === flowWatch.flowID &&
+        expected.mode === flowWatch.mode
+      )
+    }
 
     const step = async () => {
       try {
         const flow =
-          watchMode === "poll"
-            ? await pollOAuthFlow(watchFlowID)
-            : await getOAuthFlow(watchFlowID)
+          flowWatch.mode === "poll"
+            ? await pollOAuthFlow(flowWatch.flowID)
+            : await getOAuthFlow(flowWatch.flowID)
 
-        if (canceled) {
+        if (!isExpectedFlow() || flow.flow_id !== flowWatch.flowID) {
           return
         }
 
@@ -110,27 +146,41 @@ export function useCredentialsPage() {
         )
 
         if (flow.status === "pending") {
-          timer = setTimeout(step, pollIntervalMs)
+          timer = setTimeout(step, flowWatch.intervalMs)
           return
         }
 
-        if (watchMode === "poll") {
+        expectedFlowRef.current = null
+        setFlowWatch((current) =>
+          current?.actionGeneration === flowWatch.actionGeneration &&
+          current.flowID === flowWatch.flowID
+            ? null
+            : current,
+        )
+
+        if (flowWatch.mode === "poll") {
           setDeviceSheetOpen(false)
         }
 
-        setWatchFlowID("")
-        setWatchMode("")
         setActiveAction("")
         await loadProviders()
+        if (!isActionTokenCurrent(flowWatch.actionGeneration)) {
+          return
+        }
         if (flow.status === "success") {
           setCredentialsRevision((revision) => revision + 1)
         }
       } catch (err) {
-        if (canceled) {
+        if (!isExpectedFlow()) {
           return
         }
-        setWatchFlowID("")
-        setWatchMode("")
+        expectedFlowRef.current = null
+        setFlowWatch((current) =>
+          current?.actionGeneration === flowWatch.actionGeneration &&
+          current.flowID === flowWatch.flowID
+            ? null
+            : current,
+        )
         setActiveAction("")
         setError(
           err instanceof Error
@@ -148,7 +198,7 @@ export function useCredentialsPage() {
         clearTimeout(timer)
       }
     }
-  }, [loadProviders, pollIntervalMs, t, watchFlowID, watchMode])
+  }, [flowWatch, isActionTokenCurrent, loadProviders, t])
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -157,12 +207,16 @@ export function useCredentialsPage() {
       return
     }
 
-    setWatchFlowID(flowID)
-    setWatchMode("status")
-    setPollIntervalMs(700)
+    const actionGeneration = bumpActionToken()
+    watchExpectedFlow({
+      flowID,
+      mode: "status",
+      intervalMs: 700,
+      actionGeneration,
+    })
 
     window.history.replaceState({}, "", window.location.pathname)
-  }, [])
+  }, [bumpActionToken, watchExpectedFlow])
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -173,23 +227,22 @@ export function useCredentialsPage() {
         return
       }
 
-      setWatchFlowID(data.flowId)
-      setWatchMode("status")
-      setPollIntervalMs(700)
+      const expected = expectedFlowRef.current
+      if (
+        !expected ||
+        expected.mode !== "status" ||
+        expected.flowID !== data.flowId ||
+        expected.actionGeneration !== actionTokenRef.current
+      ) {
+        return
+      }
+
+      watchExpectedFlow({ ...expected, intervalMs: 700 })
     }
 
     window.addEventListener("message", onMessage)
     return () => window.removeEventListener("message", onMessage)
-  }, [])
-
-  const bumpActionToken = useCallback(() => {
-    actionTokenRef.current += 1
-    return actionTokenRef.current
-  }, [])
-
-  const isActionTokenCurrent = useCallback((token: number) => {
-    return actionTokenRef.current === token
-  }, [])
+  }, [watchExpectedFlow])
 
   const startBrowserOAuth = useCallback(
     async (
@@ -234,9 +287,12 @@ export function useCredentialsPage() {
           status: "pending",
           expires_at: resp.expires_at,
         })
-        setWatchFlowID(resp.flow_id)
-        setWatchMode("status")
-        setPollIntervalMs(2000)
+        watchExpectedFlow({
+          flowID: resp.flow_id,
+          mode: "status",
+          intervalMs: 2000,
+          actionGeneration: actionToken,
+        })
         return true
       } catch (err) {
         if (!isActionTokenCurrent(actionToken)) {
@@ -253,7 +309,7 @@ export function useCredentialsPage() {
         return false
       }
     },
-    [bumpActionToken, isActionTokenCurrent, t],
+    [bumpActionToken, isActionTokenCurrent, t, watchExpectedFlow],
   )
 
   const startOpenAIDeviceCode = useCallback(
@@ -298,9 +354,12 @@ export function useCredentialsPage() {
         setDeviceFlow(flow)
         setDeviceSheetOpen(true)
         setActiveFlow(flow)
-        setWatchFlowID(resp.flow_id)
-        setWatchMode("poll")
-        setPollIntervalMs(Math.max(1000, (resp.interval ?? 5) * 1000))
+        watchExpectedFlow({
+          flowID: resp.flow_id,
+          mode: "poll",
+          intervalMs: Math.max(1000, (resp.interval ?? 5) * 1000),
+          actionGeneration: actionToken,
+        })
         return true
       } catch (err) {
         if (!isActionTokenCurrent(actionToken)) {
@@ -318,7 +377,7 @@ export function useCredentialsPage() {
         return false
       }
     },
-    [bumpActionToken, isActionTokenCurrent, t],
+    [bumpActionToken, isActionTokenCurrent, t, watchExpectedFlow],
   )
 
   const saveToken = useCallback(
@@ -430,17 +489,9 @@ export function useCredentialsPage() {
         return
       }
 
-      if (activeAction === "openai:device") {
+      if (activeAction === "openai:device" || flowWatch?.mode === "poll") {
         bumpActionToken()
         setActiveAction("")
-      }
-
-      if (watchMode === "poll") {
-        setWatchFlowID("")
-        setWatchMode("")
-        if (activeAction === "openai:device") {
-          setActiveAction("")
-        }
       }
 
       setDeviceFlow(null)
@@ -451,13 +502,11 @@ export function useCredentialsPage() {
         setActiveFlow(null)
       }
     },
-    [activeAction, activeFlow, bumpActionToken, watchMode],
+    [activeAction, activeFlow, bumpActionToken, flowWatch?.mode],
   )
 
   const stopLoading = useCallback(() => {
     bumpActionToken()
-    setWatchFlowID("")
-    setWatchMode("")
     setActiveAction("")
     setDeviceSheetOpen(false)
     setDeviceFlow(null)

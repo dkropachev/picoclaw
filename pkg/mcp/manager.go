@@ -68,7 +68,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if t.tokenSource != nil {
 			token, err := t.tokenSource.Token()
 			if err != nil {
-				return nil, fmt.Errorf("resolve MCP OAuth access token: %w", err)
+				return nil, fmt.Errorf("resolve MCP stored access token: %w", err)
 			}
 			req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 		}
