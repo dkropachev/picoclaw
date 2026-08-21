@@ -250,6 +250,10 @@
       "description": "请打开验证页面并输入下方代码，此页面会自动刷新授权状态。",
       "code": "用户代码",
       "url": "验证地址",
+      "copy": "复制{{label}}",
+      "copied": "已复制{{label}}",
+      "copyFailed": "无法复制{{label}}",
+      "starting": "正在启动设备登录...",
       "polling": "正在轮询登录状态...",
       "open": "打开验证页面"
     }

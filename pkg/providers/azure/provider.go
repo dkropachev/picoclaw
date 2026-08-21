@@ -197,7 +197,7 @@ func (p *Provider) Chat(
 	case p.tokenSource != nil:
 		tok, tokErr := p.tokenSource(ctx)
 		if tokErr != nil {
-			return nil, fmt.Errorf("acquiring azure identity token: %w", tokErr)
+			return nil, fmt.Errorf("acquiring Azure bearer token: %w", tokErr)
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
 	case p.apiKey != "":

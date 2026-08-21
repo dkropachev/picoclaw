@@ -4332,6 +4332,24 @@ test("accounts page lists registered accounts and opens onboarding", async ({
         status: "not_logged_in",
         credentials: [],
       },
+      {
+        provider: "deepseek",
+        credential_id: "deepseek",
+        display_name: "DeepSeek",
+        methods: ["token"],
+        logged_in: false,
+        status: "not_logged_in",
+        credentials: [],
+      },
+      {
+        provider: "gemini",
+        credential_id: "gemini",
+        display_name: "Google Gemini",
+        methods: ["token"],
+        logged_in: false,
+        status: "not_logged_in",
+        credentials: [],
+      },
     ],
     codexAccountLimits: {
       accounts: [
@@ -4473,6 +4491,285 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   await expect(page.getByPlaceholder("work")).toBeVisible()
   await expect(page.getByText("OAuth logins can infer this")).toBeVisible()
   expect(errors).toEqual([])
+})
+
+test("Codex renewal opens device login directly for the exact account", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const credentialID = "openai:expired-work"
+  const flowID = "device-renewal"
+  const userCode = "ABCD-EFGH"
+  const verifyURL = "https://auth.openai.com/device"
+  let releaseDeviceLogin!: () => void
+  const deviceLoginPending = new Promise<void>((resolve) => {
+    releaseDeviceLogin = resolve
+  })
+
+  await gotoMockedRoute(page, "/accounts", {
+    oauthProviders: [
+      {
+        provider: "openai",
+        credential_id: "openai",
+        display_name: "OpenAI",
+        methods: ["browser", "device_code", "token"],
+        logged_in: true,
+        status: "connected",
+        credentials: [
+          {
+            provider: "openai",
+            credential_id: credentialID,
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "expired",
+            auth_method: "oauth",
+            account_id: "acct-expired-work",
+          },
+        ],
+      },
+    ],
+    codexAccountLimits: { accounts: [] },
+  })
+  await page.route("**/api/oauth/login", async (route) => {
+    await deviceLoginPending
+    return json(route, {
+      status: "pending",
+      provider: "openai",
+      credential_id: credentialID,
+      method: "device_code",
+      flow_id: flowID,
+      user_code: userCode,
+      verify_url: verifyURL,
+      interval: 30,
+    })
+  })
+  await page.route(`**/api/oauth/flows/${flowID}/poll`, async (route) => {
+    return json(route, {
+      flow_id: flowID,
+      provider: "openai",
+      credential_id: credentialID,
+      method: "device_code",
+      status: "pending",
+      user_code: userCode,
+      verify_url: verifyURL,
+      interval: 30,
+    })
+  })
+
+  const accountCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "expired-work" }),
+  })
+  await expect(accountCard.getByText("Expired", { exact: true })).toBeVisible()
+  const renew = accountCard.getByRole("button", { name: "Renew login" })
+  await expect(renew).toBeVisible()
+  const firstLoginRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return request.method() === "POST" && url.pathname === "/api/oauth/login"
+  })
+  const firstLoginResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return (
+      response.request().method() === "POST" &&
+      url.pathname === "/api/oauth/login"
+    )
+  })
+  await renew.click()
+
+  expect((await firstLoginRequest).postDataJSON()).toEqual({
+    provider: "openai",
+    credential_id: credentialID,
+    method: "device_code",
+  })
+  await expect(
+    page.getByRole("dialog", { name: "Renew Account Login" }),
+  ).toHaveCount(0)
+
+  const deviceLogin = page.getByRole("dialog", {
+    name: "OpenAI Device Login",
+  })
+  await expect(deviceLogin).toBeVisible()
+  await expect(deviceLogin.getByText("Starting device login...")).toBeVisible()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy User Code" }),
+  ).toBeDisabled()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy Verification URL" }),
+  ).toBeDisabled()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Open Verification Page" }),
+  ).toBeDisabled()
+
+  await deviceLogin.getByRole("button", { name: "Cancel" }).click()
+  await expect(deviceLogin).toBeHidden()
+  releaseDeviceLogin()
+  await firstLoginResponse
+  await page.waitForTimeout(100)
+  await expect(deviceLogin).toBeHidden()
+  await expect(renew).toBeEnabled()
+
+  const loginRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return request.method() === "POST" && url.pathname === "/api/oauth/login"
+  })
+  await renew.click()
+  expect((await loginRequest).postDataJSON()).toEqual({
+    provider: "openai",
+    credential_id: credentialID,
+    method: "device_code",
+  })
+  await expect(deviceLogin).toBeVisible()
+
+  await expect(deviceLogin.getByText(userCode)).toBeVisible()
+  await expect(deviceLogin.getByRole("link", { name: verifyURL })).toBeVisible()
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy User Code" }),
+  ).toContainText("📋")
+  await expect(
+    deviceLogin.getByRole("button", { name: "Copy Verification URL" }),
+  ).toContainText("📋")
+
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  await deviceLogin.getByRole("button", { name: "Cancel" }).click()
+  expect(errors).toEqual([])
+})
+
+test("token account renewal keeps its method and exact identity locked", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const credentialID = "anthropic:expired-work"
+  const replacementToken = "replacement-account-token"
+
+  await gotoMockedRoute(page, "/accounts", {
+    oauthProviders: [
+      {
+        provider: "anthropic",
+        credential_id: "anthropic",
+        display_name: "Anthropic",
+        methods: ["token"],
+        logged_in: true,
+        status: "connected",
+        credentials: [
+          {
+            provider: "anthropic",
+            credential_id: credentialID,
+            display_name: "Anthropic",
+            methods: ["token"],
+            logged_in: true,
+            status: "expired",
+            auth_method: "token",
+          },
+        ],
+      },
+    ],
+    codexAccountLimits: { accounts: [] },
+  })
+
+  const accountCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "expired-work" }),
+  })
+  await accountCard.getByRole("button", { name: "Renew login" }).click()
+
+  const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
+  await expect(renewal).toBeVisible()
+  await expect(renewal.getByLabel("Provider")).toHaveValue("Anthropic")
+  await expect(renewal.getByLabel("Provider")).toHaveJSProperty(
+    "readOnly",
+    true,
+  )
+  await expect(renewal.getByLabel("Login Method")).toHaveValue("Token")
+  await expect(renewal.getByLabel("Login Method")).toHaveJSProperty(
+    "readOnly",
+    true,
+  )
+  await expect(renewal.getByLabel("Credential ID")).toHaveValue(credentialID)
+  await expect(renewal.getByLabel("Credential ID")).toHaveJSProperty(
+    "readOnly",
+    true,
+  )
+  await expect(renewal.getByRole("combobox")).toHaveCount(0)
+  await renewal.getByPlaceholder("Anthropic token").fill(replacementToken)
+
+  const loginRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return request.method() === "POST" && url.pathname === "/api/oauth/login"
+  })
+  const modelsRefresh = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return request.method() === "GET" && url.pathname === "/api/accounts/models"
+  })
+  const limitsRefresh = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return (
+      request.method() === "GET" &&
+      url.pathname === "/api/oauth/codex-account-limits"
+    )
+  })
+  await renewal.getByRole("button", { name: "Save New Token" }).click()
+
+  expect((await loginRequest).postDataJSON()).toEqual({
+    provider: "anthropic",
+    credential_id: credentialID,
+    method: "token",
+    token: replacementToken,
+  })
+  await Promise.all([modelsRefresh, limitsRefresh])
+  await expect(renewal).toBeHidden()
+  expect(errors).toEqual([])
+})
+
+test("a rejected account renewal remains visible in its sheet", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop error smoke coverage")
+  const credentialID = "anthropic:expired-work"
+
+  await gotoMockedRoute(page, "/accounts", {
+    oauthProviders: [
+      {
+        provider: "anthropic",
+        credential_id: "anthropic",
+        display_name: "Anthropic",
+        methods: ["token"],
+        logged_in: true,
+        status: "connected",
+        credentials: [
+          {
+            provider: "anthropic",
+            credential_id: credentialID,
+            display_name: "Anthropic",
+            methods: ["token"],
+            logged_in: true,
+            status: "expired",
+            auth_method: "token",
+          },
+        ],
+      },
+    ],
+    codexAccountLimits: { accounts: [] },
+  })
+  await page.route("**/api/oauth/login", async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: "text/plain",
+      body: "Replacement token was rejected",
+    })
+  })
+
+  const accountCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "expired-work" }),
+  })
+  await accountCard.getByRole("button", { name: "Renew login" }).click()
+  const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
+  await renewal.getByLabel("Token").fill("rejected-token")
+  await renewal.getByRole("button", { name: "Save New Token" }).click()
+
+  await expect(renewal).toBeVisible()
+  await expect(renewal.getByRole("alert")).toHaveText(
+    "Replacement token was rejected",
+  )
 })
 
 test("models page exposes editable model aliases without global runtime selection", async ({

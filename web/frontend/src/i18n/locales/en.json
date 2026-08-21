@@ -286,6 +286,10 @@
       "description": "Open the verification page and enter the code below. This page will refresh automatically.",
       "code": "User Code",
       "url": "Verification URL",
+      "copy": "Copy {{label}}",
+      "copied": "{{label}} copied",
+      "copyFailed": "Could not copy {{label}}",
+      "starting": "Starting device login...",
       "polling": "Polling login status...",
       "open": "Open Verification Page"
     }
@@ -295,7 +299,8 @@
     "defaultName": "Default",
     "actions": {
       "add": "Add Account",
-      "remove": "Remove"
+      "remove": "Remove",
+      "renew": "Renew login"
     },
     "fields": {
       "provider": "Provider",
@@ -323,6 +328,12 @@
       "tokenRequired": "Token is required.",
       "start": "Start Login",
       "save": "Save Account"
+    },
+    "renewal": {
+      "title": "Renew Account Login",
+      "description": "Replace the saved login for this account without changing its identity or routing.",
+      "start": "Start Renewal",
+      "save": "Save New Token"
     }
   },
   "models": {

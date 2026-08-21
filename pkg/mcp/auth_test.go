@@ -251,6 +251,311 @@ func TestHeaderTransportDoesNotForwardManagedHeadersAcrossOrigins(t *testing.T) 
 	}
 }
 
+func TestHeaderTransportUsesRenewedStoredCredentialWithoutRebuild(t *testing.T) {
+	for _, authType := range []string{"bearer", "oauth"} {
+		t.Run(authType, func(t *testing.T) {
+			setMCPAuthTestHome(t)
+
+			received := make(chan string, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received <- r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			credentialID := "mcp:rotate-" + authType
+			if err := picoauth.SetCredential(credentialID, &picoauth.AuthCredential{
+				AccessToken: "initial-" + authType,
+				ExpiresAt:   time.Now().Add(time.Hour),
+				Provider:    "mcp",
+				AuthMethod:  authType,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			headers, source, err := serverHTTPAuth("rotate-"+authType, config.MCPServerConfig{
+				URL:     server.URL,
+				Headers: map[string]string{"Authorization": "Bearer stale-config-token"},
+				Auth: &config.MCPServerAuthConfig{
+					Type:         authType,
+					CredentialID: credentialID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("serverHTTPAuth() error = %v", err)
+			}
+			if source == nil {
+				t.Fatal("serverHTTPAuth() returned no request-time token source")
+			}
+			for key := range headers {
+				if strings.EqualFold(key, "Authorization") {
+					t.Fatalf("serverHTTPAuth() retained pinned Authorization header %q", headers[key])
+				}
+			}
+
+			origin, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: &headerTransport{
+				base:         http.DefaultTransport,
+				headers:      headers,
+				tokenSource:  source,
+				originScheme: origin.Scheme,
+				originHost:   origin.Host,
+			}}
+			request := func() string {
+				t.Helper()
+				response, requestErr := client.Get(server.URL)
+				if requestErr != nil {
+					t.Fatalf("client.Get() error = %v", requestErr)
+				}
+				response.Body.Close()
+				return <-received
+			}
+
+			if got := request(); got != "Bearer initial-"+authType {
+				t.Fatalf("initial Authorization = %q", got)
+			}
+			if err := picoauth.SetCredential(credentialID, &picoauth.AuthCredential{
+				AccessToken: "renewed-" + authType,
+				ExpiresAt:   time.Now().Add(2 * time.Hour),
+				Provider:    "mcp",
+				AuthMethod:  authType,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got := request(); got != "Bearer renewed-"+authType {
+				t.Fatalf("renewed Authorization = %q, want same client to use replacement", got)
+			}
+		})
+	}
+}
+
+func TestStoredMCPTokenSourceInitialValidationBoundaries(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Minute)
+	tests := []struct {
+		name       string
+		authType   string
+		credential *picoauth.AuthCredential
+		wantError  string
+	}{
+		{
+			name: "wrong provider", authType: "bearer",
+			credential: &picoauth.AuthCredential{
+				Provider: "openai", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: future,
+			},
+			wantError: "changed provider",
+		},
+		{
+			name: "wrong method", authType: "oauth",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: future,
+			},
+			wantError: "changed auth",
+		},
+		{
+			name: "insecure refresh endpoint", authType: "oauth",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "oauth", AccessToken: "token", ExpiresAt: future,
+				RefreshToken: "refresh", OAuthClientID: "client", OAuthTokenURL: "http://id.example.test/token",
+			},
+			wantError: "insecure OAuth token endpoint",
+		},
+		{
+			name: "expired static oauth", authType: "oauth",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "oauth", AccessToken: "token", ExpiresAt: past,
+			},
+			wantError: "cannot be refreshed",
+		},
+		{
+			name: "expired bearer", authType: "bearer",
+			credential: &picoauth.AuthCredential{
+				Provider: "mcp", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: past,
+			},
+			wantError: "replace it in the dashboard",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := storedMCPTokenSourceForCredential("mcp:initial", test.authType, test.credential)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("initial token source error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+	if source, err := storedMCPTokenSourceForCredential("mcp:initial", "bearer", &picoauth.AuthCredential{
+		Provider: "mcp", AuthMethod: "bearer", AccessToken: "token", ExpiresAt: future,
+	}); err != nil || source == nil {
+		t.Fatalf("valid initial token source = %#v, %v", source, err)
+	}
+}
+
+func TestHeaderTransportRejectsInvalidStoredCredentialReplacement(t *testing.T) {
+	tests := []struct {
+		name        string
+		authType    string
+		replacement *picoauth.AuthCredential
+		remove      bool
+		wantError   string
+	}{
+		{
+			name:     "bearer provider changed",
+			authType: "bearer",
+			replacement: &picoauth.AuthCredential{
+				AccessToken: "cross-wired",
+				ExpiresAt:   time.Now().Add(time.Hour),
+				Provider:    "openai",
+				AuthMethod:  "bearer",
+			},
+			wantError: "belongs to provider",
+		},
+		{
+			name:     "oauth method changed",
+			authType: "oauth",
+			replacement: &picoauth.AuthCredential{
+				AccessToken: "wrong-method",
+				ExpiresAt:   time.Now().Add(time.Hour),
+				Provider:    "mcp",
+				AuthMethod:  "bearer",
+			},
+			wantError: "uses \"bearer\" auth, want \"oauth\"",
+		},
+		{
+			name:     "oauth method cleared",
+			authType: "oauth",
+			replacement: &picoauth.AuthCredential{
+				AccessToken: "missing-method",
+				ExpiresAt:   time.Now().Add(time.Hour),
+				Provider:    "mcp",
+			},
+			wantError: "uses \"\" auth, want \"oauth\"",
+		},
+		{
+			name:     "bearer expired",
+			authType: "bearer",
+			replacement: &picoauth.AuthCredential{
+				AccessToken: "expired-bearer",
+				ExpiresAt:   time.Now().Add(-time.Minute),
+				Provider:    "mcp",
+				AuthMethod:  "bearer",
+			},
+			wantError: "has expired",
+		},
+		{
+			name:     "non-refreshable oauth expired",
+			authType: "oauth",
+			replacement: &picoauth.AuthCredential{
+				AccessToken: "expired-oauth",
+				ExpiresAt:   time.Now().Add(-time.Minute),
+				Provider:    "mcp",
+				AuthMethod:  "oauth",
+			},
+			wantError: "has expired",
+		},
+		{
+			name:     "access token cleared",
+			authType: "bearer",
+			replacement: &picoauth.AuthCredential{
+				ExpiresAt:  time.Now().Add(time.Hour),
+				Provider:   "mcp",
+				AuthMethod: "bearer",
+			},
+			wantError: "has no access token",
+		},
+		{
+			name:      "credential removed",
+			authType:  "oauth",
+			remove:    true,
+			wantError: "was removed",
+		},
+		{
+			name:     "oauth refresh endpoint became insecure",
+			authType: "oauth",
+			replacement: &picoauth.AuthCredential{
+				AccessToken:   "valid-oauth",
+				RefreshToken:  "refresh-oauth",
+				ExpiresAt:     time.Now().Add(time.Hour),
+				Provider:      "mcp",
+				AuthMethod:    "oauth",
+				OAuthTokenURL: "http://identity.example.test/token",
+				OAuthClientID: "client-id",
+			},
+			wantError: "insecure OAuth token endpoint",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setMCPAuthTestHome(t)
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			credentialID := "mcp:invalid-replacement"
+			if err := picoauth.SetCredential(credentialID, &picoauth.AuthCredential{
+				AccessToken: "initial-valid-token",
+				ExpiresAt:   time.Now().Add(time.Hour),
+				Provider:    "mcp",
+				AuthMethod:  test.authType,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			headers, source, err := serverHTTPAuth("invalid-replacement", config.MCPServerConfig{
+				URL:  server.URL,
+				Auth: &config.MCPServerAuthConfig{Type: test.authType, CredentialID: credentialID},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			origin, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: &headerTransport{
+				base:         http.DefaultTransport,
+				headers:      headers,
+				tokenSource:  source,
+				originScheme: origin.Scheme,
+				originHost:   origin.Host,
+			}}
+
+			response, err := client.Get(server.URL)
+			if err != nil {
+				t.Fatalf("initial request error = %v", err)
+			}
+			response.Body.Close()
+			if requests.Load() != 1 {
+				t.Fatalf("initial request count = %d, want 1", requests.Load())
+			}
+
+			if test.remove {
+				err = picoauth.DeleteCredential(credentialID)
+			} else {
+				err = picoauth.SetCredential(credentialID, test.replacement)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err = client.Get(server.URL)
+			if response != nil {
+				response.Body.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("replacement request error = %v, want %q", err, test.wantError)
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("invalid replacement reached MCP server; request count = %d", requests.Load())
+			}
+		})
+	}
+}
+
 func TestOAuthTokenSourceRefreshesAndPersistsCredential(t *testing.T) {
 	setMCPAuthTestHome(t)
 
@@ -366,6 +671,50 @@ func TestOAuthTokenSourceDoesNotOverwriteReplacementCredential(t *testing.T) {
 	}
 	if persisted == nil || persisted.AccessToken != "new-bearer" || persisted.AuthMethod != "bearer" {
 		t.Fatalf("replacement credential was overwritten: %#v", persisted)
+	}
+}
+
+func TestOAuthTokenSourceRejectsCrossWiredCredentialBeforeRefresh(t *testing.T) {
+	setMCPAuthTestHome(t)
+
+	var refreshRequests atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		refreshRequests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer tokenServer.Close()
+
+	credentialID := "mcp:cross-wired"
+	original := &picoauth.AuthCredential{
+		AccessToken:   "expired-mcp-token",
+		RefreshToken:  "mcp-refresh",
+		ExpiresAt:     time.Now().Add(-time.Minute),
+		Provider:      "mcp",
+		AuthMethod:    "oauth",
+		OAuthTokenURL: tokenServer.URL,
+		OAuthClientID: "mcp-client",
+	}
+	if err := picoauth.SetCredential(credentialID, original); err != nil {
+		t.Fatal(err)
+	}
+	source, err := oauthTokenSourceForCredential(credentialID, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := picoauth.SetCredential(credentialID, &picoauth.AuthCredential{
+		AccessToken: "openai-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := source.Token(); err == nil || !strings.Contains(err.Error(), "changed provider") {
+		t.Fatalf("Token() error = %v, want provider mismatch", err)
+	}
+	if refreshRequests.Load() != 0 {
+		t.Fatalf("refresh requests = %d, want 0", refreshRequests.Load())
 	}
 }
 

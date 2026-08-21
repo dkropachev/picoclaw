@@ -70,6 +70,7 @@ type GitHubCopilotProvider struct {
 	uri         string
 	connectMode string // "stdio" or "grpc"
 	token       string
+	tokenSource func() (string, error)
 	model       string
 
 	client  copilotClient
@@ -115,6 +116,38 @@ func NewGitHubCopilotProviderWithToken(token string, model string) (*GitHubCopil
 		token:       token,
 		model:       model,
 	}, nil
+}
+
+// SetTokenSource configures request-time GitHub token resolution. A nil source
+// restores the fixed token supplied to NewGitHubCopilotProviderWithToken.
+func (p *GitHubCopilotProvider) SetTokenSource(source func() (string, error)) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.tokenSource = source
+	p.mu.Unlock()
+}
+
+func (p *GitHubCopilotProvider) tokenForRequest() (string, error) {
+	p.mu.Lock()
+	source := p.tokenSource
+	fixedToken := p.token
+	p.mu.Unlock()
+
+	token := fixedToken
+	if source != nil {
+		var err error
+		token, err = source()
+		if err != nil {
+			return "", fmt.Errorf("resolving GitHub Copilot token: %w", err)
+		}
+	}
+	token = strings.TrimSpace(token)
+	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
+		return "", fmt.Errorf("invalid GitHub Copilot token: %w", err)
+	}
+	return token, nil
 }
 
 func ListGitHubCopilotModelsWithToken(ctx context.Context, token string) ([]copilot.ModelInfo, error) {
@@ -424,7 +457,11 @@ func (p *GitHubCopilotProvider) chatWithToken(
 	messages []Message,
 	model string,
 ) (*LLMResponse, error) {
-	authInfo, err := resolveGitHubCopilotAPIAuth(ctx, p.token)
+	token, err := p.tokenForRequest()
+	if err != nil {
+		return nil, err
+	}
+	authInfo, err := resolveGitHubCopilotAPIAuth(ctx, token)
 	if err != nil {
 		return nil, err
 	}

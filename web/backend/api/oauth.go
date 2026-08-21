@@ -9,10 +9,13 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
+	picoagent "github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -76,6 +79,7 @@ var (
 	oauthLoadStore                = auth.LoadStore
 	oauthFetchAntigravityProject  = providers.FetchAntigravityProjectID
 	oauthFetchGoogleUserEmailFunc = fetchGoogleUserEmail
+	oauthInvalidateCredentialAuth = accountrouter.InvalidateCredentialAuthFailure
 )
 
 type oauthFlow struct {
@@ -642,7 +646,7 @@ func accountProviderIDs() []string {
 		return options[i].Priority > options[j].Priority
 	})
 	for _, option := range options {
-		if !option.CreateAllowed || option.ID == config.AccountRouterProvider {
+		if !providers.SupportsAccountStoreCredentials(option.ID) || option.ID == config.AccountRouterProvider {
 			continue
 		}
 		normalized, err := normalizeOAuthProvider(option.ID)
@@ -690,7 +694,7 @@ func normalizeOAuthProvider(raw string) (string, error) {
 		return provider, nil
 	default:
 		normalized := providers.NormalizeProvider(provider)
-		if normalized != "" && providers.IsCreatableModelProvider(normalized) {
+		if normalized != "" && providers.SupportsAccountStoreCredentials(normalized) {
 			return normalized, nil
 		}
 		return "", fmt.Errorf("unsupported provider %q", raw)
@@ -915,7 +919,48 @@ func (h *Handler) persistCredentialAndConfig(
 	if err := oauthSetCredential(normalizedCredentialID, &cp); err != nil {
 		return "", fmt.Errorf("saving credential: %w", err)
 	}
+	h.invalidateAccountRouterCredentialAuth(normalizedCredentialID)
 	return normalizedCredentialID, nil
+}
+
+func (h *Handler) invalidateAccountRouterCredentialAuth(credentialID string) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		logger.WarnCF("oauth", "Could not locate account router state after credential persistence", map[string]any{
+			"credential_id": credentialID,
+			"error":         err.Error(),
+		})
+		return
+	}
+
+	workspaces := make(map[string]bool, len(cfg.Agents.List)+1)
+	addWorkspace := func(workspace string) {
+		workspace = strings.TrimSpace(workspace)
+		if workspace != "" {
+			workspaces[filepath.Clean(workspace)] = true
+		}
+	}
+	addWorkspace(cfg.WorkspacePath())
+	for index := range cfg.Agents.List {
+		addWorkspace(picoagent.ResolveAgentWorkspace(
+			&cfg.Agents.List[index],
+			&cfg.Agents.Defaults,
+		))
+	}
+
+	for workspace := range workspaces {
+		statePath := filepath.Join(workspace, "account_router_state.json")
+		if err := oauthInvalidateCredentialAuth(statePath, credentialID); err != nil {
+			// Credential persistence is already durable. Router recovery is a
+			// best-effort follow-up and must not turn a successful renewal into
+			// a misleading login failure.
+			logger.WarnCF("oauth", "Could not invalidate account router authentication health", map[string]any{
+				"credential_id": credentialID,
+				"state_path":    statePath,
+				"error":         err.Error(),
+			})
+		}
+	}
 }
 
 func resolveCredentialIDForAccount(

@@ -1,7 +1,9 @@
 package accountrouter
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -23,6 +26,8 @@ const (
 	stateVersion     = 1
 	sessionStateTTL  = 30 * 24 * time.Hour
 	defaultStatePerm = 0o600
+
+	credentialAuthInvalidationVersion = 1
 )
 
 var errPrivateProviderRequest = errors.New("provider request failed")
@@ -60,6 +65,8 @@ type Selection struct {
 	CandidateAccounts   map[string]string
 	ProviderAccounts    map[string]string
 	BlockAccountChoices map[string]string
+
+	accountAuthInvalidationGenerations map[string]string
 }
 
 type State struct {
@@ -76,19 +83,26 @@ type RouterState struct {
 }
 
 type AccountState struct {
-	State            string                   `json:"state"`
-	Reason           providers.FailoverReason `json:"reason,omitempty"`
-	FailureCount     int                      `json:"failure_count,omitempty"`
-	Requests         int64                    `json:"requests,omitempty"`
-	RateWindowStart  time.Time                `json:"rate_window_start,omitempty"`
-	RateWindowReqs   int64                    `json:"rate_window_reqs,omitempty"`
-	PromptTokens     int64                    `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64                    `json:"completion_tokens,omitempty"`
-	TotalTokens      int64                    `json:"total_tokens,omitempty"`
-	UnavailableUntil time.Time                `json:"unavailable_until,omitempty"`
-	LastFailureAt    time.Time                `json:"last_failure_at,omitempty"`
-	LastSuccessAt    time.Time                `json:"last_success_at,omitempty"`
-	LastError        string                   `json:"last_error,omitempty"`
+	State                      string                   `json:"state"`
+	Reason                     providers.FailoverReason `json:"reason,omitempty"`
+	FailureCount               int                      `json:"failure_count,omitempty"`
+	Requests                   int64                    `json:"requests,omitempty"`
+	RateWindowStart            time.Time                `json:"rate_window_start,omitempty"`
+	RateWindowReqs             int64                    `json:"rate_window_reqs,omitempty"`
+	PromptTokens               int64                    `json:"prompt_tokens,omitempty"`
+	CompletionTokens           int64                    `json:"completion_tokens,omitempty"`
+	TotalTokens                int64                    `json:"total_tokens,omitempty"`
+	UnavailableUntil           time.Time                `json:"unavailable_until,omitempty"`
+	LastFailureAt              time.Time                `json:"last_failure_at,omitempty"`
+	LastSuccessAt              time.Time                `json:"last_success_at,omitempty"`
+	LastError                  string                   `json:"last_error,omitempty"`
+	AuthInvalidationGeneration string                   `json:"auth_invalidation_generation,omitempty"`
+}
+
+type credentialAuthInvalidation struct {
+	Version      int    `json:"version"`
+	CredentialID string `json:"credential_id"`
+	Generation   string `json:"generation"`
 }
 
 type SessionState struct {
@@ -146,17 +160,69 @@ func New(name string, routerConfig *config.AccountRouterConfig, accounts map[str
 	}
 }
 
+// InvalidateCredentialAuthFailure records a durable generation change for one
+// exact auth-store credential. Account-router stores consume the change in
+// their owning process and clear only authentication-failure health for the
+// matching credential account across every router in that state file.
+//
+// The invalidation is kept in a sidecar instead of rewriting the router state
+// directly. The gateway owns and caches that state in memory, so an external
+// rewrite could otherwise be overwritten by its next persistence cycle.
+func InvalidateCredentialAuthFailure(statePath, credentialID string) error {
+	statePath = strings.TrimSpace(statePath)
+	if statePath == "" {
+		return fmt.Errorf("account router state path is required")
+	}
+	normalizedCredentialID, err := normalizeCredentialID(credentialID)
+	if err != nil {
+		return err
+	}
+
+	statePath = filepath.Clean(statePath)
+	if _, statErr := os.Stat(statePath); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			// No persisted router health exists to invalidate. Avoid creating
+			// workspace state as a side effect of onboarding a new credential.
+			return nil
+		}
+		return fmt.Errorf("stat account router state: %w", statErr)
+	}
+
+	generationBytes := make([]byte, 16)
+	if _, randomErr := rand.Read(generationBytes); randomErr != nil {
+		return fmt.Errorf("generate account router auth invalidation: %w", randomErr)
+	}
+	marker := credentialAuthInvalidation{
+		Version:      credentialAuthInvalidationVersion,
+		CredentialID: normalizedCredentialID,
+		Generation:   hex.EncodeToString(generationBytes),
+	}
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode account router auth invalidation: %w", err)
+	}
+	if err := fileutil.WriteFileAtomic(
+		credentialAuthInvalidationPath(statePath, normalizedCredentialID),
+		data,
+		defaultStatePerm,
+	); err != nil {
+		return fmt.Errorf("write account router auth invalidation: %w", err)
+	}
+	return nil
+}
+
 func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 	if r == nil {
 		return Selection{}
 	}
 	selection := Selection{
-		RouterName:          r.Name,
-		SessionKey:          sessionKey,
-		Reason:              reason,
-		CandidateAccounts:   map[string]string{},
-		ProviderAccounts:    map[string]string{},
-		BlockAccountChoices: map[string]string{},
+		RouterName:                         r.Name,
+		SessionKey:                         sessionKey,
+		Reason:                             reason,
+		CandidateAccounts:                  map[string]string{},
+		ProviderAccounts:                   map[string]string{},
+		BlockAccountChoices:                map[string]string{},
+		accountAuthInvalidationGenerations: map[string]string{},
 	}
 	if !r.Config.Enabled {
 		return selection
@@ -177,9 +243,13 @@ func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 			&selection,
 		)
 		selection.Candidates = dedupeCandidates(candidates)
+		invalidationGenerations := selection.accountAuthInvalidationGenerations
 		for _, candidate := range selection.Candidates {
 			if account := selection.CandidateAccounts[candidate.StableKey()]; account != "" {
 				selection.ProviderAccounts[providers.ModelKey(candidate.Provider, candidate.Model)] = account
+				if _, ok := invalidationGenerations[account]; !ok {
+					invalidationGenerations[account] = accountAuthInvalidationGeneration(rs, account)
+				}
 			}
 		}
 		if session != nil {
@@ -234,7 +304,7 @@ func (r *Router) recordFallbackResult(
 			if private {
 				failureErr = errPrivateProviderRequest
 			}
-			markAccountFailure(rs, account, attempt.Reason, failureErr, now)
+			markSelectionAccountFailure(rs, selection, account, attempt.Reason, failureErr, now)
 		}
 		if result != nil && result.Response != nil {
 			account := selection.CandidateAccounts[result.IdentityKey]
@@ -269,7 +339,7 @@ func (r *Router) recordFallbackResult(
 					if private {
 						failureErr = errPrivateProviderRequest
 					}
-					markAccountFailure(rs, account, failErr.Reason, failureErr, now)
+					markSelectionAccountFailure(rs, selection, account, failErr.Reason, failureErr, now)
 				}
 				break
 			}
@@ -616,6 +686,107 @@ func (r *Router) knownAccountNames() map[string]bool {
 	return out
 }
 
+func normalizeCredentialID(credentialID string) (string, error) {
+	credentialID = strings.ToLower(strings.TrimSpace(credentialID))
+	if credentialID == "" {
+		return "", fmt.Errorf("credential id is required")
+	}
+	provider := credentialID
+	if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
+		provider = prefix
+	}
+	normalized, err := auth.NormalizeCredentialID(provider, credentialID)
+	if err != nil {
+		return "", fmt.Errorf("normalize credential id: %w", err)
+	}
+	return normalized, nil
+}
+
+func normalizedCredentialIDForAccount(accountRef string) (string, bool) {
+	credentialID, ok := config.AccountRouterCredentialAccountID(accountRef)
+	if !ok {
+		return "", false
+	}
+	provider, ok := config.AccountRouterCredentialAccountProvider(accountRef)
+	if !ok {
+		return "", false
+	}
+	normalized, err := auth.NormalizeCredentialID(provider, credentialID)
+	if err != nil {
+		return "", false
+	}
+	return normalized, true
+}
+
+func credentialAuthInvalidationPath(statePath, normalizedCredentialID string) string {
+	sum := sha256.Sum256([]byte(normalizedCredentialID))
+	return fmt.Sprintf("%s.auth-invalidation.%x", statePath, sum[:16])
+}
+
+func readCredentialAuthInvalidation(
+	statePath, normalizedCredentialID string,
+) (credentialAuthInvalidation, bool) {
+	data, err := os.ReadFile(
+		credentialAuthInvalidationPath(statePath, normalizedCredentialID),
+	)
+	if err != nil {
+		return credentialAuthInvalidation{}, false
+	}
+	var marker credentialAuthInvalidation
+	if unmarshalErr := json.Unmarshal(data, &marker); unmarshalErr != nil ||
+		marker.Version != credentialAuthInvalidationVersion ||
+		strings.TrimSpace(marker.Generation) == "" {
+		return credentialAuthInvalidation{}, false
+	}
+	markerCredentialID, err := normalizeCredentialID(marker.CredentialID)
+	if err != nil || markerCredentialID != normalizedCredentialID {
+		return credentialAuthInvalidation{}, false
+	}
+	marker.CredentialID = markerCredentialID
+	return marker, true
+}
+
+func (s *Store) applyCredentialAuthInvalidations() {
+	if s == nil || s.path == "" {
+		return
+	}
+	markers := make(map[string]credentialAuthInvalidation)
+	missingMarkers := make(map[string]bool)
+	for _, router := range s.st.Routers {
+		if router == nil {
+			continue
+		}
+		for accountRef, accountState := range router.Accounts {
+			if accountState == nil {
+				continue
+			}
+			credentialID, ok := normalizedCredentialIDForAccount(accountRef)
+			if !ok {
+				continue
+			}
+			marker, found := markers[credentialID]
+			if !found && !missingMarkers[credentialID] {
+				marker, found = readCredentialAuthInvalidation(s.path, credentialID)
+				if found {
+					markers[credentialID] = marker
+				} else {
+					missingMarkers[credentialID] = true
+				}
+			}
+			if !found || accountState.AuthInvalidationGeneration == marker.Generation {
+				continue
+			}
+			if accountState.Reason == providers.FailoverAuth {
+				resetAccountAuthFailure(accountState)
+			}
+			// Advance the fence even when another health reason is active. This
+			// prevents a late result from the pre-renewal credential from
+			// introducing a new authentication failure.
+			accountState.AuthInvalidationGeneration = marker.Generation
+		}
+	}
+}
+
 func getStore(path string) *Store {
 	path = filepath.Clean(path)
 	if value, ok := stores.Load(path); ok {
@@ -662,7 +833,9 @@ func (s *Store) update(fn func(*State)) error {
 	if s.st.Routers == nil {
 		s.st.Routers = map[string]*RouterState{}
 	}
+	s.applyCredentialAuthInvalidations()
 	fn(&s.st)
+	s.applyCredentialAuthInvalidations()
 	data, err := json.MarshalIndent(s.st, "", "  ")
 	if err != nil {
 		return err
@@ -733,6 +906,30 @@ func pruneRouterState(rs *RouterState, now time.Time, configHash string, knownAc
 	}
 }
 
+func accountAuthInvalidationGeneration(rs *RouterState, account string) string {
+	if rs == nil || rs.Accounts == nil || rs.Accounts[account] == nil {
+		return ""
+	}
+	return rs.Accounts[account].AuthInvalidationGeneration
+}
+
+func markSelectionAccountFailure(
+	rs *RouterState,
+	selection Selection,
+	account string,
+	reason providers.FailoverReason,
+	err error,
+	now time.Time,
+) {
+	if reason == providers.FailoverAuth {
+		selectedGeneration, generationTracked := selection.accountAuthInvalidationGenerations[account]
+		if generationTracked && selectedGeneration != accountAuthInvalidationGeneration(rs, account) {
+			return
+		}
+	}
+	markAccountFailure(rs, account, reason, err, now)
+}
+
 func markAccountFailure(rs *RouterState, account string, reason providers.FailoverReason, err error, now time.Time) {
 	if account == "" {
 		return
@@ -750,6 +947,17 @@ func markAccountFailure(rs *RouterState, account string, reason providers.Failov
 	if err != nil {
 		state.LastError = err.Error()
 	}
+}
+
+func resetAccountAuthFailure(state *AccountState) {
+	if state == nil {
+		return
+	}
+	state.State = "operational"
+	state.Reason = ""
+	state.FailureCount = 0
+	state.UnavailableUntil = time.Time{}
+	state.LastError = ""
 }
 
 func markAccountSuccess(rs *RouterState, account string, usage *providers.UsageInfo, now time.Time) {

@@ -1,5 +1,5 @@
 import { IconLoader2, IconPlus } from "@tabler/icons-react"
-import { type FormEvent, useEffect, useMemo, useState } from "react"
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { ModelProviderOption } from "@/api/models"
@@ -26,6 +26,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
+
+import { getAccountRenewalMethod } from "./account-renewal"
 
 const DEFAULT_PROVIDERS: OAuthProviderStatus[] = [
   {
@@ -66,10 +68,12 @@ const ACCOUNT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 
 interface AccountOnboardingSheetProps {
   open: boolean
+  account?: OAuthProviderStatus
   providers: OAuthProviderStatus[]
   providerOptions: ModelProviderOption[]
   registeredAccounts: OAuthProviderStatus[]
   activeAction: string
+  error?: string
   onOpenChange: (open: boolean) => void
   onStartBrowserOAuth: (
     provider: OAuthProvider,
@@ -90,16 +94,21 @@ function actionKey(provider: OAuthProvider, method: OAuthMethod): string {
 
 export function AccountOnboardingSheet({
   open,
+  account,
   providers,
-  providerOptions: backendProviderOptions,
   registeredAccounts,
   activeAction,
+  error,
   onOpenChange,
   onStartBrowserOAuth,
   onStartDeviceCode,
   onSaveToken,
 }: AccountOnboardingSheetProps) {
   const { t } = useTranslation()
+  const renewalMode = account != null
+  const renewalCredentialID = account?.credential_id || account?.provider || ""
+  const initialProvider = account?.provider ?? "openai"
+  const initialMethod = getAccountRenewalMethod(account)
   const providerOptions = useMemo(() => {
     const merged = new Map<string, OAuthProviderStatus>()
     const add = (item: OAuthProviderStatus) => {
@@ -112,40 +121,30 @@ export function AccountOnboardingSheet({
     for (const item of providers.length > 0 ? providers : DEFAULT_PROVIDERS) {
       add(item)
     }
-    for (const option of backendProviderOptions) {
-      if (!option.create_allowed || option.id === "router") {
-        continue
-      }
-      if (merged.has(option.id)) {
-        continue
-      }
-      add({
-        provider: option.id,
-        credential_id: option.id,
-        display_name: option.display_name || option.id,
-        methods: [option.default_auth_method === "oauth" ? "browser" : "token"],
-        logged_in: false,
-        status: "not_logged_in",
-      })
-    }
 
     return [...merged.values()].sort((a, b) =>
       a.display_name.localeCompare(b.display_name),
     )
-  }, [backendProviderOptions, providers])
+  }, [providers])
   const [provider, setProvider] = useState<OAuthProvider>("openai")
   const [method, setMethod] = useState<OAuthMethod>("browser")
   const [accountName, setAccountName] = useState("")
   const [token, setToken] = useState("")
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [submissionPending, setSubmissionPending] = useState(false)
+  const sessionRef = useRef(0)
 
-  const methods = useMemo(
-    () =>
-      providerOptions.find((item) => item.provider === provider)?.methods ?? [],
-    [provider, providerOptions],
-  )
-  const actionBusy = activeAction !== ""
-  const submitting = activeAction === actionKey(provider, method)
+  const methods = useMemo(() => {
+    if (account?.provider === provider) {
+      return account.methods
+    }
+    return (
+      providerOptions.find((item) => item.provider === provider)?.methods ?? []
+    )
+  }, [account, provider, providerOptions])
+  const actionBusy = activeAction !== "" || submissionPending
+  const submitting =
+    submissionPending || activeAction === actionKey(provider, method)
   const trimmedAccountName = accountName.trim()
   const normalizedCredentialID = trimmedAccountName
     ? `${provider}:${trimmedAccountName.toLowerCase()}`
@@ -161,34 +160,40 @@ export function AccountOnboardingSheet({
   }
 
   useEffect(() => {
+    sessionRef.current += 1
     if (!open) {
+      setAccountName("")
+      setToken("")
+      setErrors({})
+      setSubmissionPending(false)
       return
     }
-    setProvider("openai")
-    setMethod("browser")
+    setProvider(initialProvider)
+    setMethod(initialMethod)
     setAccountName("")
     setToken("")
     setErrors({})
-  }, [open])
+    setSubmissionPending(false)
+  }, [initialMethod, initialProvider, open, renewalCredentialID])
 
   useEffect(() => {
     if (methods.length === 0) {
       return
     }
-    if (!methods.includes(method)) {
+    if (!renewalMode && !methods.includes(method)) {
       setMethod(methods[0] as OAuthMethod)
     }
-  }, [method, methods])
+  }, [method, methods, renewalMode])
 
   const validate = () => {
     const nextErrors: Record<string, string> = {}
     const name = accountName.trim()
 
-    if (!name && method === "token") {
+    if (!renewalMode && !name && method === "token") {
       nextErrors.accountName = t("accounts.onboarding.nameRequired")
-    } else if (name && name.toLowerCase() === provider) {
+    } else if (!renewalMode && name && name.toLowerCase() === provider) {
       nextErrors.accountName = t("accounts.onboarding.nameReserved")
-    } else if (name && !ACCOUNT_NAME_RE.test(name)) {
+    } else if (!renewalMode && name && !ACCOUNT_NAME_RE.test(name)) {
       nextErrors.accountName = t("accounts.onboarding.nameInvalid")
     }
 
@@ -206,94 +211,173 @@ export function AccountOnboardingSheet({
       return
     }
 
-    const credentialID = trimmedAccountName || undefined
-    const ok =
-      method === "browser"
-        ? await onStartBrowserOAuth(provider, credentialID)
-        : method === "device_code"
-          ? await onStartDeviceCode(credentialID)
-          : await onSaveToken(provider, token.trim(), credentialID)
+    const session = sessionRef.current
+    const credentialID = renewalMode
+      ? renewalCredentialID
+      : trimmedAccountName || undefined
+    setSubmissionPending(true)
 
-    if (ok) {
+    let ok: boolean
+    try {
+      ok =
+        method === "browser"
+          ? await onStartBrowserOAuth(provider, credentialID)
+          : method === "device_code"
+            ? await onStartDeviceCode(credentialID)
+            : await onSaveToken(provider, token.trim(), credentialID)
+    } finally {
+      if (sessionRef.current === session) {
+        setSubmissionPending(false)
+      }
+    }
+
+    if (ok && sessionRef.current === session) {
+      sessionRef.current += 1
+      setAccountName("")
+      setToken("")
+      setErrors({})
       onOpenChange(false)
     }
   }
 
+  const handleSheetOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && submissionPending) {
+      return
+    }
+    if (!nextOpen) {
+      sessionRef.current += 1
+      setAccountName("")
+      setToken("")
+      setErrors({})
+    }
+    onOpenChange(nextOpen)
+  }
+
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-md">
+    <Sheet open={open} onOpenChange={handleSheetOpenChange}>
+      <SheetContent className="data-[side=right]:!w-full data-[side=right]:sm:!w-[448px] data-[side=right]:sm:!max-w-[448px]">
         <SheetHeader>
-          <SheetTitle>{t("accounts.onboarding.title")}</SheetTitle>
+          <SheetTitle>
+            {renewalMode
+              ? t("accounts.renewal.title")
+              : t("accounts.onboarding.title")}
+          </SheetTitle>
           <SheetDescription>
-            {t("accounts.onboarding.description")}
+            {renewalMode
+              ? t("accounts.renewal.description")
+              : t("accounts.onboarding.description")}
           </SheetDescription>
         </SheetHeader>
 
         <form className="flex min-h-0 flex-1 flex-col" onSubmit={handleSubmit}>
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4">
-            <Field label={t("accounts.fields.provider")} required>
-              <Select
-                value={provider}
-                onValueChange={(value) => {
-                  setProvider(value as OAuthProvider)
-                  setErrors({})
-                }}
+            {error && (
+              <div
+                role="alert"
+                aria-live="polite"
+                className="text-destructive bg-destructive/10 rounded-lg px-3 py-2 text-sm"
               >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {providerOptions.map((item) => (
-                    <SelectItem key={item.provider} value={item.provider}>
-                      {item.display_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                {error}
+              </div>
+            )}
+
+            <Field label={t("accounts.fields.provider")} required>
+              {renewalMode ? (
+                <Input
+                  value={account?.display_name ?? provider}
+                  aria-label={t("accounts.fields.provider")}
+                  readOnly
+                />
+              ) : (
+                <Select
+                  value={provider}
+                  onValueChange={(value) => {
+                    setProvider(value as OAuthProvider)
+                    setErrors({})
+                  }}
+                >
+                  <SelectTrigger
+                    className="w-full"
+                    aria-label={t("accounts.fields.provider")}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providerOptions.map((item) => (
+                      <SelectItem key={item.provider} value={item.provider}>
+                        {item.display_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </Field>
 
             <Field label={t("accounts.fields.method")} required>
-              <Select
-                value={method}
-                onValueChange={(value) => {
-                  setMethod(value as OAuthMethod)
-                  setErrors({})
-                }}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {methods.map((item) => (
-                    <SelectItem key={item} value={item}>
-                      {methodLabel(item as OAuthMethod)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-
-            <Field
-              label={t("accounts.fields.name")}
-              hint={t("accounts.onboarding.nameHint")}
-              error={errors.accountName}
-            >
-              <Input
-                value={accountName}
-                onChange={(event) => {
-                  setAccountName(event.target.value)
-                  if (errors.accountName) {
-                    setErrors((prev) => ({ ...prev, accountName: "" }))
-                  }
-                }}
-                placeholder={t("accounts.onboarding.namePlaceholder")}
-              />
-              {accountAlreadyExists && !errors.accountName && (
-                <p className="text-muted-foreground mt-2 text-xs leading-normal">
-                  {t("accounts.onboarding.nameExists")}
-                </p>
+              {renewalMode ? (
+                <Input
+                  value={methodLabel(method)}
+                  aria-label={t("accounts.fields.method")}
+                  readOnly
+                />
+              ) : (
+                <Select
+                  value={method}
+                  onValueChange={(value) => {
+                    setMethod(value as OAuthMethod)
+                    setErrors({})
+                  }}
+                >
+                  <SelectTrigger
+                    className="w-full"
+                    aria-label={t("accounts.fields.method")}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {methods.map((item) => (
+                      <SelectItem key={item} value={item}>
+                        {methodLabel(item as OAuthMethod)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               )}
             </Field>
+
+            {renewalMode ? (
+              <Field label={t("accounts.fields.credentialID")}>
+                <Input
+                  value={renewalCredentialID}
+                  className="font-mono"
+                  aria-label={t("accounts.fields.credentialID")}
+                  readOnly
+                />
+              </Field>
+            ) : (
+              <Field
+                label={t("accounts.fields.name")}
+                hint={t("accounts.onboarding.nameHint")}
+                error={errors.accountName}
+              >
+                <Input
+                  value={accountName}
+                  aria-label={t("accounts.fields.name")}
+                  onChange={(event) => {
+                    setAccountName(event.target.value)
+                    if (errors.accountName) {
+                      setErrors((prev) => ({ ...prev, accountName: "" }))
+                    }
+                  }}
+                  placeholder={t("accounts.onboarding.namePlaceholder")}
+                />
+                {accountAlreadyExists && !errors.accountName && (
+                  <p className="text-muted-foreground mt-2 text-xs leading-normal">
+                    {t("accounts.onboarding.nameExists")}
+                  </p>
+                )}
+              </Field>
+            )}
 
             {method === "token" && (
               <Field
@@ -303,6 +387,8 @@ export function AccountOnboardingSheet({
               >
                 <KeyInput
                   value={token}
+                  ariaLabel={t("accounts.fields.token")}
+                  ariaRequired
                   onChange={(value) => {
                     setToken(value)
                     if (errors.token) {
@@ -328,9 +414,13 @@ export function AccountOnboardingSheet({
               ) : (
                 <IconPlus className="size-4" />
               )}
-              {method === "token"
-                ? t("accounts.onboarding.save")
-                : t("accounts.onboarding.start")}
+              {renewalMode
+                ? method === "token"
+                  ? t("accounts.renewal.save")
+                  : t("accounts.renewal.start")
+                : method === "token"
+                  ? t("accounts.onboarding.save")
+                  : t("accounts.onboarding.start")}
             </Button>
           </SheetFooter>
         </form>

@@ -98,20 +98,10 @@ func serverHTTPAuth(
 			delete(headers, key)
 		}
 	}
-	if authType == "bearer" {
-		if credential.IsExpired() {
-			return nil, nil, fmt.Errorf(
-				"MCP credential for server %q has expired; replace it in the dashboard",
-				serverName,
-			)
-		}
-		headers["Authorization"] = "Bearer " + credential.AccessToken
-		return headers, nil, nil
-	}
 
-	tokenSource, err := oauthTokenSourceForCredential(credentialID, credential)
+	tokenSource, err := storedMCPTokenSourceForCredential(credentialID, authType, credential)
 	if err != nil {
-		return nil, nil, fmt.Errorf("MCP OAuth credential for server %q: %w", serverName, err)
+		return nil, nil, fmt.Errorf("MCP %s credential for server %q: %w", authType, serverName, err)
 	}
 	return headers, tokenSource, nil
 }
@@ -128,88 +118,128 @@ func oauthTokenSourceForCredential(
 	credentialID string,
 	credential *picoauth.AuthCredential,
 ) (oauth2.TokenSource, error) {
-	token := &oauth2.Token{
+	return storedMCPTokenSourceForCredential(credentialID, "oauth", credential)
+}
+
+func storedMCPTokenSourceForCredential(
+	credentialID string,
+	authType string,
+	credential *picoauth.AuthCredential,
+) (oauth2.TokenSource, error) {
+	if err := validateStoredMCPCredential(credentialID, authType, credential); err != nil {
+		return nil, err
+	}
+	if authType == "oauth" && hasOAuthRefreshMetadata(credential) &&
+		!isHTTPSOrLoopbackHTTP(credential.OAuthTokenURL) {
+		return nil, fmt.Errorf("has an insecure OAuth token endpoint")
+	}
+	if authType == "oauth" && credential.IsExpired() && !hasOAuthRefreshMetadata(credential) {
+		return nil, fmt.Errorf("has expired and cannot be refreshed; log in again")
+	}
+	if authType == "bearer" && credential.IsExpired() {
+		return nil, fmt.Errorf("has expired; replace it in the dashboard")
+	}
+	return &storedMCPTokenSource{credentialID: credentialID, authType: authType}, nil
+}
+
+type storedMCPTokenSource struct {
+	credentialID string
+	authType     string
+}
+
+func (s *storedMCPTokenSource) Token() (*oauth2.Token, error) {
+	if s.authType == "oauth" {
+		return (&persistingOAuthTokenSource{credentialID: s.credentialID}).Token()
+	}
+	credential, err := picoauth.GetCredential(s.credentialID)
+	if err != nil {
+		return nil, fmt.Errorf("load MCP credential %q: %w", s.credentialID, err)
+	}
+	if err := validateStoredMCPCredential(s.credentialID, s.authType, credential); err != nil {
+		return nil, err
+	}
+	if credential.IsExpired() {
+		return nil, fmt.Errorf("MCP %s credential %q has expired", s.authType, s.credentialID)
+	}
+	return oauthTokenFromCredential(credential), nil
+}
+
+func validateStoredMCPCredential(
+	credentialID string,
+	authType string,
+	credential *picoauth.AuthCredential,
+) error {
+	if credential == nil {
+		return fmt.Errorf("MCP credential %q was removed", credentialID)
+	}
+	if credential.Provider != mcpCredentialProvider {
+		return fmt.Errorf(
+			"MCP credential %q changed provider; now belongs to provider %q",
+			credentialID,
+			credential.Provider,
+		)
+	}
+	method := strings.ToLower(strings.TrimSpace(credential.AuthMethod))
+	if method != authType {
+		return fmt.Errorf(
+			"MCP credential %q changed auth; uses %q auth, want %q",
+			credentialID,
+			method,
+			authType,
+		)
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return fmt.Errorf("MCP credential %q has no access token", credentialID)
+	}
+	return nil
+}
+
+func hasOAuthRefreshMetadata(credential *picoauth.AuthCredential) bool {
+	return credential != nil &&
+		strings.TrimSpace(credential.RefreshToken) != "" &&
+		strings.TrimSpace(credential.OAuthTokenURL) != "" &&
+		strings.TrimSpace(credential.OAuthClientID) != ""
+}
+
+func oauthTokenFromCredential(credential *picoauth.AuthCredential) *oauth2.Token {
+	return &oauth2.Token{
 		AccessToken:  credential.AccessToken,
 		RefreshToken: credential.RefreshToken,
 		TokenType:    credential.TokenType,
 		Expiry:       credential.ExpiresAt,
 	}
-	if strings.TrimSpace(credential.RefreshToken) == "" ||
-		strings.TrimSpace(credential.OAuthTokenURL) == "" ||
-		strings.TrimSpace(credential.OAuthClientID) == "" {
-		if credential.IsExpired() {
-			return nil, fmt.Errorf("has expired and cannot be refreshed; log in again")
-		}
-		return &expiringStaticTokenSource{token: token}, nil
-	}
-	if !isHTTPSOrLoopbackHTTP(credential.OAuthTokenURL) {
-		return nil, fmt.Errorf("has an insecure OAuth token endpoint")
-	}
-
-	authStyle := oauth2.AuthStyleAutoDetect
-	switch strings.ToLower(strings.TrimSpace(credential.OAuthAuthStyle)) {
-	case "header":
-		authStyle = oauth2.AuthStyleInHeader
-	case "params":
-		authStyle = oauth2.AuthStyleInParams
-	}
-	return oauth2.ReuseTokenSource(
-		token,
-		&persistingOAuthTokenSource{
-			credentialID: credentialID,
-			authStyle:    authStyle,
-		},
-	), nil
-}
-
-type expiringStaticTokenSource struct {
-	token *oauth2.Token
-}
-
-func (s *expiringStaticTokenSource) Token() (*oauth2.Token, error) {
-	if s.token == nil || !s.token.Valid() {
-		return nil, fmt.Errorf("OAuth access token has expired; log in again")
-	}
-	return s.token, nil
 }
 
 type persistingOAuthTokenSource struct {
 	credentialID string
-	authStyle    oauth2.AuthStyle
 }
 
 func (s *persistingOAuthTokenSource) Token() (*oauth2.Token, error) {
-	var resolved *oauth2.Token
-	_, err := picoauth.UpdateCredential(
+	authoritative, err := picoauth.RefreshCredential(
 		s.credentialID,
-		func(credential *picoauth.AuthCredential) (*picoauth.AuthCredential, error) {
+		func(credential *picoauth.AuthCredential) bool {
 			if credential == nil {
-				return nil, fmt.Errorf("MCP credential %q was removed", s.credentialID)
-			}
-			if method := strings.ToLower(strings.TrimSpace(credential.AuthMethod)); method != "" &&
-				method != "oauth" {
-				return nil, fmt.Errorf("MCP credential %q changed; reconnect the server", s.credentialID)
+				return false
 			}
 			token := &oauth2.Token{
-				AccessToken:  credential.AccessToken,
-				RefreshToken: credential.RefreshToken,
-				TokenType:    credential.TokenType,
-				Expiry:       credential.ExpiresAt,
+				AccessToken: credential.AccessToken,
+				Expiry:      credential.ExpiresAt,
 			}
-			if token.Valid() {
-				resolved = cloneOAuthToken(token)
-				return credential, nil
+			return !token.Valid()
+		},
+		func(credential *picoauth.AuthCredential) (*picoauth.AuthCredential, error) {
+			if err := validateStoredMCPCredential(s.credentialID, "oauth", credential); err != nil {
+				return nil, err
 			}
-			if strings.TrimSpace(credential.RefreshToken) == "" ||
-				strings.TrimSpace(credential.OAuthTokenURL) == "" ||
-				strings.TrimSpace(credential.OAuthClientID) == "" {
+			token := oauthTokenFromCredential(credential)
+			if !hasOAuthRefreshMetadata(credential) {
 				return nil, fmt.Errorf("OAuth access token has expired; log in again")
 			}
 			if !isHTTPSOrLoopbackHTTP(credential.OAuthTokenURL) {
 				return nil, fmt.Errorf("has an insecure OAuth token endpoint")
 			}
 
-			authStyle := s.authStyle
+			authStyle := oauth2.AuthStyleAutoDetect
 			switch strings.ToLower(strings.TrimSpace(credential.OAuthAuthStyle)) {
 			case "header":
 				authStyle = oauth2.AuthStyleInHeader
@@ -244,17 +274,24 @@ func (s *persistingOAuthTokenSource) Token() (*oauth2.Token, error) {
 			if refreshed.RefreshToken != "" {
 				updated.RefreshToken = refreshed.RefreshToken
 			}
-			resolved = cloneOAuthToken(refreshed)
-			if resolved.RefreshToken == "" {
-				resolved.RefreshToken = updated.RefreshToken
-			}
 			return &updated, nil
 		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("refresh MCP OAuth credential: %w", err)
 	}
-	if resolved == nil {
+	if authoritative == nil {
+		return nil, fmt.Errorf("MCP credential %q was removed", s.credentialID)
+	}
+	if err := validateStoredMCPCredential(s.credentialID, "oauth", authoritative); err != nil {
+		return nil, err
+	}
+	if hasOAuthRefreshMetadata(authoritative) &&
+		!isHTTPSOrLoopbackHTTP(authoritative.OAuthTokenURL) {
+		return nil, fmt.Errorf("MCP credential %q has an insecure OAuth token endpoint", s.credentialID)
+	}
+	resolved := oauthTokenFromCredential(authoritative)
+	if !resolved.Valid() {
 		return nil, fmt.Errorf("MCP OAuth credential did not return a token")
 	}
 	return resolved, nil
@@ -412,12 +449,4 @@ func cloneOAuthIPs(values []net.IP) []net.IP {
 		cloned = append(cloned, append(net.IP(nil), value...))
 	}
 	return cloned
-}
-
-func cloneOAuthToken(token *oauth2.Token) *oauth2.Token {
-	if token == nil {
-		return nil
-	}
-	cloned := *token
-	return &cloned
 }

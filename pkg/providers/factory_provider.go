@@ -112,14 +112,25 @@ func createGitHubCopilotAuthProvider(cfg *config.ModelConfig, modelID string) (L
 			credentialID,
 		)
 	}
-	if err := validateCredentialProvider(credentialID, "github-copilot", cred); err != nil {
-		return nil, err
+	if validationErr := validateCredentialProvider(credentialID, "github-copilot", cred); validationErr != nil {
+		return nil, validationErr
 	}
 	token := strings.TrimSpace(cred.AccessToken)
-	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
-		return nil, fmt.Errorf("invalid GitHub Copilot credential %s: %w", credentialID, err)
+	if validationErr := auth.ValidateGitHubCopilotToken(token); validationErr != nil {
+		return nil, fmt.Errorf("invalid GitHub Copilot credential %s: %w", credentialID, validationErr)
 	}
-	return newGitHubCopilotProviderWithToken(token, modelID)
+	provider, err := newGitHubCopilotProviderWithToken(token, modelID)
+	if err != nil {
+		return nil, err
+	}
+	reloadable, ok := provider.(interface {
+		SetTokenSource(tokenSource func() (string, error))
+	})
+	if !ok {
+		return nil, fmt.Errorf("GitHub Copilot token provider does not support credential reload")
+	}
+	reloadable.SetTokenSource(newCredentialAccessTokenSource(credentialID, "github-copilot"))
+	return provider, nil
 }
 
 func credentialIDForModel(cfg *config.ModelConfig, provider string) (string, error) {
@@ -150,6 +161,55 @@ func validateCredentialProvider(
 			expectedProvider,
 		)
 	}
+	return nil
+}
+
+func loadCredentialAccessToken(
+	lookup func(string) (*auth.AuthCredential, error),
+	credentialID string,
+	provider string,
+) (string, error) {
+	cred, err := lookup(credentialID)
+	if err != nil {
+		return "", fmt.Errorf("loading auth credentials: %w", err)
+	}
+	if cred == nil {
+		return "", fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider %s --credential-id %s",
+			credentialID,
+			provider,
+			credentialID,
+		)
+	}
+	if err := validateCredentialProvider(credentialID, provider, cred); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cred.AccessToken), nil
+}
+
+func newCredentialAccessTokenSource(credentialID, provider string) func() (string, error) {
+	lookup := getCredential
+	return func() (string, error) {
+		return loadCredentialAccessToken(lookup, credentialID, provider)
+	}
+}
+
+func configureCredentialAPIKeySource(
+	provider interface {
+		SetAPIKeySource(apiKeySource func() (string, error))
+	},
+	cfg *config.ModelConfig,
+	providerName string,
+) error {
+	if strings.TrimSpace(cfg.APIKey()) != "" ||
+		strings.ToLower(strings.TrimSpace(cfg.AuthMethod)) != "token" {
+		return nil
+	}
+	credentialID, err := credentialIDForModel(cfg, providerName)
+	if err != nil {
+		return err
+	}
+	provider.SetAPIKeySource(newCredentialAccessTokenSource(credentialID, providerName))
 	return nil
 }
 
@@ -242,6 +302,9 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.CustomHeaders,
 		)
 		provider.SetProviderName(protocol)
+		if err := configureCredentialAPIKeySource(provider, cfg, protocol); err != nil {
+			return nil, "", err
+		}
 		return finalizeProviderFromConfig(provider, modelID, cfg)
 	}
 
@@ -293,6 +356,23 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 				cfg.Proxy,
 				userAgent,
 				cfg.RequestTimeout,
+			), modelID, cfg)
+		}
+		if authMethod == "token" {
+			if _, err := apiKeyFromConfigOrCredential(cfg, protocol); err != nil {
+				return nil, "", err
+			}
+			credentialID, err := credentialIDForModel(cfg, protocol)
+			if err != nil {
+				return nil, "", err
+			}
+			tokenSource := newCredentialAccessTokenSource(credentialID, protocol)
+			return finalizeProviderFromConfig(azure.NewProviderWithTokenSource(
+				cfg.APIBase,
+				cfg.Proxy,
+				userAgent,
+				func(context.Context) (string, error) { return tokenSource() },
+				azure.WithRequestTimeout(time.Duration(cfg.RequestTimeout)*time.Second),
 			), modelID, cfg)
 		}
 		provider, err := azure.NewProviderWithIdentityAndTimeout(
@@ -354,7 +434,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		if apiBase == "" {
 			apiBase = getDefaultAPIBase(protocol)
 		}
-		return finalizeProviderFromConfig(NewGeminiProvider(
+		provider := NewGeminiProvider(
 			apiKey,
 			apiBase,
 			cfg.Proxy,
@@ -362,7 +442,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
 			cfg.CustomHeaders,
-		), modelID, cfg)
+		)
+		if err := configureCredentialAPIKeySource(provider, cfg, protocol); err != nil {
+			return nil, "", err
+		}
+		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "minimax":
 		// Minimax requires reasoning_split: true in the request body
@@ -395,6 +479,9 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.CustomHeaders,
 		)
 		provider.SetProviderName(protocol)
+		if err := configureCredentialAPIKeySource(provider, cfg, protocol); err != nil {
+			return nil, "", err
+		}
 		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "anthropic":
@@ -430,15 +517,23 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		if apiBase == "" {
 			apiBase = "https://api.anthropic.com/v1"
 		}
-		if cfg.APIKey() == "" {
+		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
+		if err != nil {
+			return nil, "", err
+		}
+		if apiKey == "" {
 			return nil, "", fmt.Errorf("api_key is required for anthropic-messages protocol (model: %s)", cfg.Model)
 		}
-		return finalizeProviderFromConfig(anthropicmessages.NewProviderWithTimeout(
-			cfg.APIKey(),
+		provider := anthropicmessages.NewProviderWithTimeout(
+			apiKey,
 			apiBase,
 			userAgent,
 			cfg.RequestTimeout,
-		), modelID, cfg)
+		)
+		if err := configureCredentialAPIKeySource(provider, cfg, protocol); err != nil {
+			return nil, "", err
+		}
+		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "alibaba-coding-anthropic":
 		// Alibaba Coding Plan with Anthropic-compatible API
@@ -446,15 +541,23 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		if apiBase == "" {
 			apiBase = getDefaultAPIBase(protocol)
 		}
-		if cfg.APIKey() == "" {
+		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
+		if err != nil {
+			return nil, "", err
+		}
+		if apiKey == "" {
 			return nil, "", fmt.Errorf("api_key is required for %q protocol (model: %s)", protocol, cfg.Model)
 		}
-		return finalizeProviderFromConfig(anthropicmessages.NewProviderWithTimeout(
-			cfg.APIKey(),
+		provider := anthropicmessages.NewProviderWithTimeout(
+			apiKey,
 			apiBase,
 			userAgent,
 			cfg.RequestTimeout,
-		), modelID, cfg)
+		)
+		if err := configureCredentialAPIKeySource(provider, cfg, protocol); err != nil {
+			return nil, "", err
+		}
+		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "antigravity":
 		provider, err := createAntigravityAuthProvider(cfg)
@@ -530,22 +633,7 @@ func apiKeyFromConfigOrCredential(cfg *config.ModelConfig, provider string) (str
 	if err != nil {
 		return "", err
 	}
-	cred, err := getCredential(credentialID)
-	if err != nil {
-		return "", fmt.Errorf("loading auth credentials: %w", err)
-	}
-	if cred == nil {
-		return "", fmt.Errorf(
-			"no credentials for %s. Run: picoclaw auth login --provider %s --credential-id %s",
-			credentialID,
-			provider,
-			credentialID,
-		)
-	}
-	if err := validateCredentialProvider(credentialID, provider, cred); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(cred.AccessToken), nil
+	return loadCredentialAccessToken(getCredential, credentialID, provider)
 }
 
 func isEmptyAPIKeyAllowed(protocol string) bool {

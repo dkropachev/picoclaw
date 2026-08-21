@@ -38,6 +38,90 @@ func TestProviderRejectsMissingModelBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestProviderAPIKeySourceReloadsForChatAndStream(t *testing.T) {
+	headers := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Get("Authorization")
+		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(
+				"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+			))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	apiKey := "stored-key-one"
+	provider := NewProvider("initial-key", server.URL, "")
+	provider.SetAPIKeySource(func() (string, error) { return apiKey, nil })
+
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+	); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got := <-headers; got != "Bearer stored-key-one" {
+		t.Fatalf("Chat Authorization = %q, want first stored key", got)
+	}
+
+	apiKey = "stored-key-two"
+	if _, err := provider.ChatStream(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if got := <-headers; got != "Bearer stored-key-two" {
+		t.Fatalf("ChatStream Authorization = %q, want rotated stored key", got)
+	}
+}
+
+func TestProviderAPIKeySourceErrorsForChatAndStreamAndCanReset(t *testing.T) {
+	var nilProvider *Provider
+	nilProvider.SetAPIKeySource(func() (string, error) { return "unused", nil })
+
+	provider := NewProvider("fixed-key", "https://api.example.com", "")
+	provider.SetAPIKeySource(func() (string, error) {
+		return "", fmt.Errorf("credential store unavailable")
+	})
+	if _, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "resolving API key") {
+		t.Fatalf("Chat() key-source error = %v", err)
+	}
+	if _, err := provider.ChatStreamEvents(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"test-model",
+		nil,
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "resolving API key") {
+		t.Fatalf("ChatStreamEvents() key-source error = %v", err)
+	}
+
+	provider.SetAPIKeySource(nil)
+	if got, err := provider.apiKeyForRequest(); err != nil || got != "fixed-key" {
+		t.Fatalf("apiKeyForRequest() = (%q, %v), want fixed-key", got, err)
+	}
+}
+
 func TestProviderChat_UsesMaxCompletionTokensForGLM(t *testing.T) {
 	var requestBody map[string]any
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -36,6 +37,8 @@ type (
 
 type Provider struct {
 	apiKey         string
+	apiKeySource   func() (string, error)
+	apiKeySourceMu sync.RWMutex
 	apiBase        string
 	providerName   string
 	maxTokensField string // Field name for max tokens (e.g., "max_completion_tokens" for o1/glm models)
@@ -124,6 +127,28 @@ func NewProvider(apiKey, apiBase, proxy string, opts ...Option) *Provider {
 	}
 
 	return p
+}
+
+// SetAPIKeySource configures a function that resolves the API key for each
+// request. A nil source restores the fixed key supplied to NewProvider.
+func (p *Provider) SetAPIKeySource(source func() (string, error)) {
+	if p == nil {
+		return
+	}
+	p.apiKeySourceMu.Lock()
+	p.apiKeySource = source
+	p.apiKeySourceMu.Unlock()
+}
+
+func (p *Provider) apiKeyForRequest() (string, error) {
+	p.apiKeySourceMu.RLock()
+	source := p.apiKeySource
+	fixedKey := p.apiKey
+	p.apiKeySourceMu.RUnlock()
+	if source == nil {
+		return fixedKey, nil
+	}
+	return source()
 }
 
 func NewProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField string) *Provider {
@@ -485,6 +510,10 @@ func (p *Provider) Chat(
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
+	apiKey, err := p.apiKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("resolving API key: %w", err)
+	}
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 
@@ -502,8 +531,8 @@ func (p *Provider) Chat(
 	if p.userAgent != "" {
 		req.Header.Set("User-Agent", p.userAgent)
 	}
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	p.applyCustomHeaders(req)
 
@@ -559,6 +588,10 @@ func (p *Provider) ChatStreamEvents(
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
+	apiKey, err := p.apiKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("resolving API key: %w", err)
+	}
 
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	requestBody["stream"] = true
@@ -578,8 +611,8 @@ func (p *Provider) ChatStreamEvents(
 	if p.userAgent != "" {
 		req.Header.Set("User-Agent", p.userAgent)
 	}
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	p.applyCustomHeaders(req)
 

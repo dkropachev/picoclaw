@@ -1,19 +1,68 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 )
+
+func TestCodexAccountLimitsErrorAndSnapshotBoundaries(t *testing.T) {
+	credential := &auth.AuthCredential{
+		Provider: "openai", AuthMethod: "oauth", AccessToken: "token",
+	}
+	snapshot := *credential
+	if credentialMatchesCodexSnapshot(nil, codexAuthTokens{Credential: &snapshot}) ||
+		credentialMatchesCodexSnapshot(credential, codexAuthTokens{}) ||
+		!credentialMatchesCodexSnapshot(credential, codexAuthTokens{Credential: &snapshot}) {
+		t.Fatal("credential snapshot matching returned the wrong result")
+	}
+	snapshot.AccessToken = "different"
+	if credentialMatchesCodexSnapshot(credential, codexAuthTokens{Credential: &snapshot}) {
+		t.Fatal("changed credential matched stale snapshot")
+	}
+
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{err: &codexUsageError{Code: "token_expired"}, want: "token_expired"},
+		{err: &codexUsageError{Status: http.StatusTeapot}, want: "upstream_status_418"},
+		{err: &codexUsageError{}, want: "unavailable"},
+		{err: context.DeadlineExceeded, want: "timeout"},
+		{err: errors.New("wrapper: context deadline exceeded"), want: "timeout"},
+		{err: errors.New("network reset"), want: "unavailable"},
+	} {
+		if got := codexLimitsErrorCode(test.err); got != test.want {
+			t.Errorf("codexLimitsErrorCode(%v) = %q, want %q", test.err, got, test.want)
+		}
+	}
+	for raw, want := range map[string]string{
+		"":                      "unavailable",
+		"Token-Expired!":        "token_expired",
+		"the token has expired": "token_expired",
+		"Not Authorized":        "not_authorized",
+		"Unauthorized request":  "unauthorized",
+		"Forbidden request":     "forbidden",
+		"Rate Limited":          "rate_limited",
+	} {
+		if got := sanitizeCodexErrorCode(raw); got != want {
+			t.Errorf("sanitizeCodexErrorCode(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
 
 func TestHandleCodexAccountLimitsUsesUsageAPI(t *testing.T) {
 	withPicoclawAuthHome(t)
@@ -347,6 +396,39 @@ func TestGitHubCopilotAccountLimitsInvalidTokenIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestCodexAccountLimitsRejectsCrossWiredCredentialWithoutUpstreamRequest(t *testing.T) {
+	withPicoclawAuthHome(t)
+	if err := auth.SetCredential("openai:cross-wired", &auth.AuthCredential{
+		AccessToken:  "anthropic-token",
+		RefreshToken: "must-not-be-spent",
+		Provider:     "anthropic",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	withCodexAccountLimitsBaseURL(t, server.URL)
+	withCodexTokenURL(t, server.URL+"/oauth/token")
+
+	resp, err := loadCodexAccountLimits(t.Context())
+	if err != nil {
+		t.Fatalf("loadCodexAccountLimits() error = %v", err)
+	}
+	account := findCodexLimitAccount(resp.Accounts, "openai:cross-wired")
+	if account == nil || account.CredentialStatus != "invalid" || account.LimitsStatus != "unavailable" {
+		t.Fatalf("cross-wired account = %#v, want invalid/unavailable", account)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("upstream requests = %d, want 0", requests.Load())
+	}
+}
+
 func TestCodexAccountLimitsRefreshesExpiredToken(t *testing.T) {
 	withPicoclawAuthHome(t)
 	setOpenAIAuthCredential(
@@ -423,6 +505,121 @@ func TestCodexAccountLimitsRefreshesExpiredToken(t *testing.T) {
 	}
 	if resp.Accounts[0].AccountID != "acc-new" {
 		t.Fatalf("account id = %q, want acc-new", resp.Accounts[0].AccountID)
+	}
+	persisted, err := auth.GetCredential("openai")
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if persisted == nil ||
+		persisted.AccessToken != "refreshed-token" ||
+		persisted.RefreshToken != "new-refresh-token" ||
+		persisted.AccountID != "acc-new" ||
+		!persisted.ExpiresAt.After(time.Now().Add(50*time.Minute)) {
+		t.Fatalf("persisted refreshed credential = %#v", persisted)
+	}
+}
+
+func TestCodexAccountLimitsSerializesSharedCredentialRefresh(t *testing.T) {
+	withPicoclawAuthHome(t)
+	credentialID := "openai:work"
+	setOpenAIAuthCredential(t, credentialID, "expired-token", "rotating-token", "acc-old", "")
+	stored, err := auth.GetCredential(credentialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, _ := codexAccountTokensFromCredential(stored)
+
+	var tokenRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/codex/usage":
+			if r.Header.Get("Authorization") == "Bearer expired-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"token_expired"}}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"plan_type": "pro"})
+		case "/oauth/token":
+			tokenRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "fresh-token", "refresh_token": "next-token", "expires_in": 3600,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	withCodexTokenURL(t, server.URL+"/oauth/token")
+
+	results := make([]codexAuthTokens, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for index := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, results[index], errs[index] = fetchCodexAccountUsage(
+				t.Context(), server.URL+"/api/codex/usage", credentialID, tokens, false,
+			)
+		}()
+	}
+	wg.Wait()
+	for index := range results {
+		if errs[index] != nil || results[index].AccessToken != "fresh-token" {
+			t.Fatalf("caller %d = (%#v, %v), want refreshed token", index, results[index], errs[index])
+		}
+	}
+	if got := tokenRequests.Load(); got != 1 {
+		t.Fatalf("token refresh requests = %d, want 1", got)
+	}
+}
+
+func TestCodexAccountLimitsRefreshErrorUsesConcurrentRenewal(t *testing.T) {
+	withPicoclawAuthHome(t)
+	credentialID := "openai:work"
+	setOpenAIAuthCredential(t, credentialID, "expired-token", "old-refresh", "acc-old", "")
+	stored, err := auth.GetCredential(credentialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, _ := codexAccountTokensFromCredential(stored)
+	renewed := &auth.AuthCredential{
+		AccessToken: "renewed-token", Provider: "openai", AuthMethod: "token", AccountID: "acc-new",
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/codex/usage":
+			if r.Header.Get("Authorization") == "Bearer expired-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"code":"token_expired"}}`))
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer renewed-token" {
+				t.Errorf("retry Authorization = %q, want renewed token", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"plan_type": "pro"})
+		case "/oauth/token":
+			if setErr := auth.SetCredential(credentialID, renewed); setErr != nil {
+				t.Errorf("SetCredential(renewed) error = %v", setErr)
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_grant"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	withCodexTokenURL(t, server.URL+"/oauth/token")
+
+	_, resolved, err := fetchCodexAccountUsage(
+		t.Context(), server.URL+"/api/codex/usage", credentialID, tokens, false,
+	)
+	if err != nil {
+		t.Fatalf("fetchCodexAccountUsage() error = %v", err)
+	}
+	if resolved.AccessToken != "renewed-token" || resolved.AccountID != "acc-new" {
+		t.Fatalf("resolved tokens = %#v, want concurrent renewal", resolved)
 	}
 }
 

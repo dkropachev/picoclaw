@@ -27,6 +27,50 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestGitHubCopilotTokenSourceValidatesReloadedCredentials(t *testing.T) {
+	var nilProvider *GitHubCopilotProvider
+	nilProvider.SetTokenSource(func() (string, error) { return "gho_unused", nil })
+
+	provider, err := NewGitHubCopilotProviderWithToken("gho_fixed-token", "gpt-4.1")
+	if err != nil {
+		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v", err)
+	}
+	if token, tokenErr := provider.tokenForRequest(); tokenErr != nil || token != "gho_fixed-token" {
+		t.Fatalf("fixed token = (%q, %v)", token, tokenErr)
+	}
+
+	provider.SetTokenSource(func() (string, error) {
+		return "", errors.New("credential store unavailable")
+	})
+	if _, tokenErr := provider.tokenForRequest(); tokenErr == nil ||
+		!strings.Contains(tokenErr.Error(), "resolving GitHub Copilot token") {
+		t.Fatalf("token source error = %v", tokenErr)
+	}
+	if _, chatErr := provider.chatWithToken(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hello"}},
+		"gpt-4.1",
+	); chatErr == nil ||
+		!strings.Contains(chatErr.Error(), "resolving GitHub Copilot token") {
+		t.Fatalf("chat token source error = %v", chatErr)
+	}
+
+	provider.SetTokenSource(func() (string, error) { return " invalid ", nil })
+	if _, tokenErr := provider.tokenForRequest(); tokenErr == nil ||
+		!strings.Contains(tokenErr.Error(), "invalid GitHub Copilot token") {
+		t.Fatalf("invalid reloaded token error = %v", tokenErr)
+	}
+	provider.SetTokenSource(func() (string, error) { return "  ghu_rotated-token  ", nil })
+	if token, tokenErr := provider.tokenForRequest(); tokenErr != nil || token != "ghu_rotated-token" {
+		t.Fatalf("rotated token = (%q, %v)", token, tokenErr)
+	}
+
+	provider.SetTokenSource(nil)
+	if token, tokenErr := provider.tokenForRequest(); tokenErr != nil || token != "gho_fixed-token" {
+		t.Fatalf("reset fixed token = (%q, %v)", token, tokenErr)
+	}
+}
+
 func TestGitHubCopilotUsageNormalizesMissingAndInvalidTransportCounts(t *testing.T) {
 	if githubCopilotFloat(nil) != 0 {
 		t.Fatal("nil Copilot float was not zero")
@@ -267,6 +311,60 @@ func TestGitHubCopilotTokenProviderDisablesAmbientLogin(t *testing.T) {
 	}
 	if gotIntegrationID != "vscode-chat" {
 		t.Fatalf("Copilot-Integration-Id = %q, want vscode-chat", gotIntegrationID)
+	}
+}
+
+func TestGitHubCopilotTokenProviderReloadsTokenPerRequest(t *testing.T) {
+	origHTTPClient := githubCopilotHTTPClient
+	origTokenEndpoint := githubCopilotTokenEndpoint
+	origAPIBase := githubCopilotAPIBaseEndpoint
+	t.Cleanup(func() {
+		githubCopilotHTTPClient = origHTTPClient
+		githubCopilotTokenEndpoint = origTokenEndpoint
+		githubCopilotAPIBaseEndpoint = origAPIBase
+	})
+
+	exchangeHeaders := make(chan string, 2)
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot_internal/v2/token":
+			exchangeHeaders <- r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"token":"copilot-api-token","endpoints":{"api":%q}}`, srv.URL)
+		case "/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"copilot response"},"finish_reason":"stop"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	githubCopilotHTTPClient = srv.Client()
+	githubCopilotTokenEndpoint = srv.URL + "/copilot_internal/v2/token"
+	githubCopilotAPIBaseEndpoint = srv.URL
+
+	storedToken := "gho_first-token"
+	provider, err := NewGitHubCopilotProviderWithToken("gho_initial-token", "gpt-4.1")
+	if err != nil {
+		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v", err)
+	}
+	provider.SetTokenSource(func() (string, error) { return storedToken, nil })
+
+	for _, wantToken := range []string{"gho_first-token", "ghu_rotated-token"} {
+		storedToken = wantToken
+		if _, err := provider.Chat(
+			t.Context(),
+			[]Message{{Role: "user", Content: "hello"}},
+			nil,
+			"gpt-4.1",
+			nil,
+		); err != nil {
+			t.Fatalf("Chat() error = %v", err)
+		}
+		if got := <-exchangeHeaders; got != "token "+wantToken {
+			t.Fatalf("exchange Authorization = %q, want rotated GitHub token", got)
+		}
 	}
 }
 

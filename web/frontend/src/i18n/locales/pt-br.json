@@ -250,6 +250,10 @@
       "description": "Abra a página de verificação e digite o código abaixo. Esta página será atualizada automaticamente.",
       "code": "Código do Usuário",
       "url": "URL de Verificação",
+      "copy": "Copiar {{label}}",
+      "copied": "{{label}} copiado",
+      "copyFailed": "Não foi possível copiar {{label}}",
+      "starting": "Iniciando login por device...",
       "polling": "Verificando status do login...",
       "open": "Abrir Página de Verificação"
     }

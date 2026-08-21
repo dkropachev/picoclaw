@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -68,15 +69,28 @@ type codexAccountRateLimitResetCredits struct {
 }
 
 type codexAccountUsageFetch struct {
-	index  int
-	tokens codexAuthTokens
+	index        int
+	credentialID string
+	tokens       codexAuthTokens
 }
 
 type codexAuthTokens struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	AccountID    string `json:"account_id"`
-	IDToken      string `json:"id_token"`
+	AccessToken  string               `json:"access_token"`
+	RefreshToken string               `json:"refresh_token"`
+	AccountID    string               `json:"account_id"`
+	IDToken      string               `json:"id_token"`
+	ExpiresAt    time.Time            `json:"-"`
+	Credential   *auth.AuthCredential `json:"-"`
+}
+
+func credentialMatchesCodexSnapshot(
+	credential *auth.AuthCredential,
+	tokens codexAuthTokens,
+) bool {
+	if credential == nil {
+		return false
+	}
+	return tokens.Credential != nil && reflect.DeepEqual(credential, tokens.Credential)
 }
 
 type codexTokenInfo struct {
@@ -204,8 +218,9 @@ func loadCodexAccountLimits(ctx context.Context) (codexAccountLimitsResponse, er
 
 		resp.Accounts = append(resp.Accounts, account)
 		fetches = append(fetches, codexAccountUsageFetch{
-			index:  len(resp.Accounts) - 1,
-			tokens: tokens,
+			index:        len(resp.Accounts) - 1,
+			credentialID: candidate.credentialID,
+			tokens:       tokens,
 		})
 	}
 
@@ -257,7 +272,13 @@ func fetchCodexAccountUsages(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			payload, refreshed, err := fetchCodexAccountUsage(ctx, usageURL, fetch.tokens, false)
+			payload, refreshed, err := fetchCodexAccountUsage(
+				ctx,
+				usageURL,
+				fetch.credentialID,
+				fetch.tokens,
+				false,
+			)
 			mu.Lock()
 			defer mu.Unlock()
 			account := &accounts[fetch.index]
@@ -336,10 +357,17 @@ func codexAccountTokensFromCredential(credential *auth.AuthCredential) (codexAut
 	if credential == nil || strings.TrimSpace(credential.AccessToken) == "" {
 		return codexAuthTokens{}, "invalid"
 	}
+	if credential.Provider != oauthProviderOpenAI ||
+		!isCredentialAuthMethod(credential.AuthMethod) {
+		return codexAuthTokens{}, "invalid"
+	}
+	credentialSnapshot := *credential
 	return codexAuthTokens{
 		AccessToken:  strings.TrimSpace(credential.AccessToken),
 		RefreshToken: strings.TrimSpace(credential.RefreshToken),
 		AccountID:    strings.TrimSpace(credential.AccountID),
+		ExpiresAt:    credential.ExpiresAt,
+		Credential:   &credentialSnapshot,
 	}, "available"
 }
 
@@ -420,6 +448,7 @@ func fetchGitHubCopilotAccountUsage(ctx context.Context, token string) (map[stri
 func fetchCodexAccountUsage(
 	ctx context.Context,
 	usageURL string,
+	credentialID string,
 	tokens codexAuthTokens,
 	fedramp bool,
 ) (codexUsagePayload, codexAuthTokens, error) {
@@ -432,7 +461,7 @@ func fetchCodexAccountUsage(
 		return codexUsagePayload{}, tokens, err
 	}
 
-	refreshed, refreshErr := refreshCodexAccountLimitsToken(ctx, tokens)
+	refreshed, refreshErr := refreshCodexAccountLimitsCredential(ctx, credentialID, tokens)
 	if refreshErr != nil {
 		return codexUsagePayload{}, tokens, &codexUsageError{Status: http.StatusUnauthorized, Code: "token_expired"}
 	}
@@ -441,6 +470,70 @@ func fetchCodexAccountUsage(
 		return codexUsagePayload{}, refreshed, err
 	}
 	return payload, refreshed, nil
+}
+
+func refreshCodexAccountLimitsCredential(
+	ctx context.Context,
+	credentialID string,
+	tokens codexAuthTokens,
+) (codexAuthTokens, error) {
+	var networkResult codexAuthTokens
+	refreshResult, err := auth.RefreshCredentialDetailed(
+		credentialID,
+		func(current *auth.AuthCredential) bool {
+			return credentialMatchesCodexSnapshot(current, tokens) &&
+				strings.TrimSpace(current.RefreshToken) != ""
+		},
+		func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+			if current.Provider != oauthProviderOpenAI ||
+				!isCredentialAuthMethod(current.AuthMethod) {
+				return nil, fmt.Errorf("credential changed to unsupported provider or auth method")
+			}
+			refreshed, refreshErr := refreshCodexAccountLimitsToken(ctx, codexAuthTokens{
+				AccessToken:  current.AccessToken,
+				RefreshToken: current.RefreshToken,
+				AccountID:    current.AccountID,
+			})
+			if refreshErr != nil {
+				return nil, refreshErr
+			}
+			networkResult = refreshed
+			updated := *current
+			updated.AccessToken = refreshed.AccessToken
+			updated.RefreshToken = refreshed.RefreshToken
+			updated.AccountID = refreshed.AccountID
+			updated.ExpiresAt = refreshed.ExpiresAt
+			if info := codexTokenInfoFromIDToken(refreshed.IDToken); info.Email != "" {
+				updated.Email = info.Email
+			}
+			return &updated, nil
+		},
+	)
+	if err != nil {
+		return codexAuthTokens{}, err
+	}
+	authoritative := refreshResult.Credential
+	if authoritative == nil {
+		return codexAuthTokens{}, errors.New("credential removed while refreshing")
+	}
+	if authoritative.Provider != oauthProviderOpenAI ||
+		!isCredentialAuthMethod(authoritative.AuthMethod) {
+		return codexAuthTokens{}, fmt.Errorf(
+			"credential changed to unsupported provider or auth method",
+		)
+	}
+	result := codexAuthTokens{
+		AccessToken:  authoritative.AccessToken,
+		RefreshToken: authoritative.RefreshToken,
+		AccountID:    authoritative.AccountID,
+		ExpiresAt:    authoritative.ExpiresAt,
+	}
+	credentialSnapshot := *authoritative
+	result.Credential = &credentialSnapshot
+	if refreshResult.Committed {
+		result.IDToken = networkResult.IDToken
+	}
+	return result, nil
 }
 
 func doFetchCodexAccountUsage(
@@ -514,6 +607,7 @@ func refreshCodexAccountLimitsToken(ctx context.Context, tokens codexAuthTokens)
 		RefreshToken string `json:"refresh_token"`
 		IDToken      string `json:"id_token"`
 		AccountID    string `json:"account_id"`
+		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&refreshed); err != nil {
 		return codexAuthTokens{}, err
@@ -534,6 +628,10 @@ func refreshCodexAccountLimitsToken(ctx context.Context, tokens codexAuthTokens)
 	} else if info := codexTokenInfoFromIDToken(tokens.IDToken); info.AccountID != "" {
 		tokens.AccountID = info.AccountID
 	}
+	if refreshed.ExpiresIn <= 0 {
+		refreshed.ExpiresIn = 3600
+	}
+	tokens.ExpiresAt = time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
 	return tokens, nil
 }
 

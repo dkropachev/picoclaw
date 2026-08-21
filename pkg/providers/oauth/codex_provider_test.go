@@ -8,11 +8,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	openaiopt "github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
+	"github.com/sipeed/picoclaw/pkg/config"
 	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
 )
 
@@ -904,6 +907,106 @@ func TestCreateCodexTokenSourceConstructors(t *testing.T) {
 	}
 	if CreateCodexTokenSourceForCredential("work") == nil {
 		t.Fatal("CreateCodexTokenSourceForCredential() returned nil")
+	}
+}
+
+func TestCodexTokenSourceKeepsConcurrentRenewal(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+	credentialID := "openai:work"
+	if err := auth.SetCredential(credentialID, &auth.AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		AccountID:    "old-account",
+	}); err != nil {
+		t.Fatalf("SetCredential(expired) error = %v", err)
+	}
+	renewed := &auth.AuthCredential{
+		AccessToken:  "renewed-token",
+		RefreshToken: "new-refresh-token",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+		Provider:     "openai",
+		AuthMethod:   "oauth",
+		AccountID:    "renewed-account",
+	}
+	source := createCodexTokenSourceForCredential(
+		credentialID,
+		codexTokenSourceDependencies{
+			refreshCredential: auth.RefreshCredential,
+			refreshToken: func(
+				credential *auth.AuthCredential,
+				_ auth.OAuthProviderConfig,
+			) (*auth.AuthCredential, error) {
+				if credential.AccessToken != "expired-token" {
+					t.Fatalf("refresh credential = %+v, want expired credential", credential)
+				}
+				if err := auth.SetCredential(credentialID, renewed); err != nil {
+					t.Fatalf("SetCredential(renewed) error = %v", err)
+				}
+				return &auth.AuthCredential{
+					AccessToken:  "stale-refreshed-token",
+					RefreshToken: "old-refresh-token",
+					ExpiresAt:    time.Now().Add(time.Hour),
+					Provider:     "openai",
+					AuthMethod:   "oauth",
+				}, nil
+			},
+		},
+	)
+
+	token, accountID, err := source()
+	if err != nil {
+		t.Fatalf("token source error = %v", err)
+	}
+	if token != "renewed-token" || accountID != "renewed-account" {
+		t.Fatalf("token source = (%q, %q), want concurrent renewal", token, accountID)
+	}
+	stored, err := auth.GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if stored == nil ||
+		stored.AccessToken != "renewed-token" ||
+		stored.RefreshToken != "new-refresh-token" {
+		t.Fatalf("stored credential = %+v, want concurrent renewal", stored)
+	}
+}
+
+func TestCodexTokenSourceRejectsCrossWiredCredentialBeforeRefresh(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+	credentialID := "openai:cross-wired"
+	if err := auth.SetCredential(credentialID, &auth.AuthCredential{
+		AccessToken:  "anthropic-token",
+		RefreshToken: "must-not-be-spent",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "anthropic",
+		AuthMethod:   "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+	refreshCalls := 0
+	source := createCodexTokenSourceForCredential(
+		credentialID,
+		codexTokenSourceDependencies{
+			refreshCredential: auth.RefreshCredential,
+			refreshToken: func(
+				*auth.AuthCredential,
+				auth.OAuthProviderConfig,
+			) (*auth.AuthCredential, error) {
+				refreshCalls++
+				return nil, nil
+			},
+		},
+	)
+
+	_, _, err := source()
+	if err == nil || !strings.Contains(err.Error(), `belongs to provider "anthropic"`) {
+		t.Fatalf("token source error = %v, want provider mismatch", err)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("refresh calls = %d, want 0", refreshCalls)
 	}
 }
 

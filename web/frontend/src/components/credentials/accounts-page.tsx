@@ -6,6 +6,7 @@ import {
   IconKey,
   IconLoader2,
   IconPlus,
+  IconRefresh,
   IconRoute,
   IconSparkles,
   IconStar,
@@ -14,7 +15,7 @@ import {
 } from "@tabler/icons-react"
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router"
 import type { TFunction } from "i18next"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -44,6 +45,7 @@ import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
 import { AccountOnboardingSheet } from "./account-onboarding-sheet"
+import { getAccountRenewalMethod } from "./account-renewal"
 import { CodexAccountLimitSummary } from "./codex-account-limits-panel"
 import { DeviceCodeSheet } from "./device-code-sheet"
 import { LogoutConfirmDialog } from "./logout-confirm-dialog"
@@ -355,6 +357,7 @@ interface AccountCardProps {
   codexLimitsError: string
   codexLimitsApiError: string
   onRefreshCodexLimits: () => void
+  onRenew: (account: OAuthProviderStatus) => void
   onAskLogout: (provider: OAuthProvider, credentialID?: string) => void
 }
 
@@ -366,6 +369,7 @@ function AccountCard({
   codexLimitsError,
   codexLimitsApiError,
   onRefreshCodexLimits,
+  onRenew,
   onAskLogout,
 }: AccountCardProps) {
   const { t } = useTranslation()
@@ -442,8 +446,17 @@ function AccountCard({
           ) : null}
         </div>
 
-        <div className="flex items-center gap-2 sm:shrink-0">
+        <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:justify-end">
           <ProviderStatusLine status={account.status} />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={actionBusy}
+            onClick={() => onRenew(account)}
+          >
+            <IconRefresh className="size-4" />
+            {t("accounts.actions.renew")}
+          </Button>
           <Button
             variant="ghost"
             size="sm"
@@ -687,6 +700,8 @@ function AccountsHomePage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [renewalAccount, setRenewalAccount] =
+    useState<OAuthProviderStatus | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [providerOptions, setProviderOptions] = useState<ModelProviderOption[]>(
     [],
@@ -702,10 +717,13 @@ function AccountsHomePage() {
   const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
     null,
   )
+  const modelsRequestRef = useRef(0)
+  const codexLimitsRequestRef = useRef(0)
   const {
     providers,
     loading,
     error,
+    credentialsRevision,
     activeAction,
     activeFlow,
     flowHint,
@@ -716,6 +734,8 @@ function AccountsHomePage() {
     deviceFlow,
     startBrowserOAuth,
     startOpenAIDeviceCode,
+    stopLoading,
+    clearError,
     saveToken,
     askLogout,
     handleConfirmLogout,
@@ -737,34 +757,52 @@ function AccountsHomePage() {
   )
 
   const fetchModels = useCallback(async () => {
+    const request = ++modelsRequestRef.current
     setModelsLoading(true)
     try {
       const data = await getModels()
+      if (request !== modelsRequestRef.current) {
+        return
+      }
       setModels(data.models)
       setModelsRevision(data.revision)
       setProviderOptions(data.provider_options || [])
       setModelsError("")
     } catch (err) {
+      if (request !== modelsRequestRef.current) {
+        return
+      }
       setModelsError(err instanceof Error ? err.message : t("models.loadError"))
     } finally {
-      setModelsLoading(false)
+      if (request === modelsRequestRef.current) {
+        setModelsLoading(false)
+      }
     }
   }, [t])
 
   const fetchCodexLimits = useCallback(async () => {
+    const request = ++codexLimitsRequestRef.current
     setCodexLimitsLoading(true)
     try {
       const data = await getCodexAccountLimits()
+      if (request !== codexLimitsRequestRef.current) {
+        return
+      }
       setCodexLimits(data)
       setCodexLimitsError("")
     } catch (err) {
+      if (request !== codexLimitsRequestRef.current) {
+        return
+      }
       setCodexLimitsError(
         err instanceof Error
           ? err.message
           : t("credentials.codexLimits.loadFailed"),
       )
     } finally {
-      setCodexLimitsLoading(false)
+      if (request === codexLimitsRequestRef.current) {
+        setCodexLimitsLoading(false)
+      }
     }
   }, [t])
 
@@ -776,6 +814,13 @@ function AccountsHomePage() {
     void fetchCodexLimits()
   }, [fetchCodexLimits])
 
+  useEffect(() => {
+    if (credentialsRevision === 0) {
+      return
+    }
+    void Promise.all([fetchModels(), fetchCodexLimits()])
+  }, [credentialsRevision, fetchCodexLimits, fetchModels])
+
   const routers = models.filter(isAccountRouterModel).sort((a, b) => {
     if (a.is_default && !b.is_default) return -1
     if (!a.is_default && b.is_default) return 1
@@ -786,6 +831,37 @@ function AccountsHomePage() {
 
   const handleAddRouter = () => {
     void navigate({ to: "/accounts/account-router/new" })
+  }
+
+  const handleAddAccount = () => {
+    clearError()
+    setRenewalAccount(null)
+    setOnboardingOpen(true)
+  }
+
+  const handleRenewAccount = (account: OAuthProviderStatus) => {
+    clearError()
+    if (
+      account.provider === "openai" &&
+      getAccountRenewalMethod(account) === "device_code"
+    ) {
+      setRenewalAccount(null)
+      setOnboardingOpen(false)
+      void startOpenAIDeviceCode(getAccountCredentialID(account), {
+        openImmediately: true,
+      })
+      return
+    }
+    setRenewalAccount(account)
+    setOnboardingOpen(true)
+  }
+
+  const handleAccountSheetOpenChange = (open: boolean) => {
+    setOnboardingOpen(open)
+    if (!open) {
+      setRenewalAccount(null)
+      clearError()
+    }
   }
 
   const handleSetDefault = async (model: ModelInfo) => {
@@ -816,7 +892,11 @@ function AccountsHomePage() {
           <IconRoute className="size-4" />
           {t("models.router.button")}
         </Button>
-        <Button size="sm" onClick={() => setOnboardingOpen(true)}>
+        <Button
+          size="sm"
+          disabled={activeAction !== ""}
+          onClick={handleAddAccount}
+        >
           <IconPlus className="size-4" />
           {t("accounts.actions.add")}
         </Button>
@@ -824,15 +904,40 @@ function AccountsHomePage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
         {error && (
-          <div className="text-destructive bg-destructive/10 mt-4 rounded-lg px-4 py-3 text-sm">
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="text-destructive bg-destructive/10 mt-4 rounded-lg px-4 py-3 text-sm"
+          >
             {error}
           </div>
         )}
 
         {activeFlow && (
-          <div className="bg-muted mt-4 rounded-lg border px-4 py-3 text-sm">
-            <p className="font-medium">{t("credentials.flow.current")}</p>
-            <p className="text-muted-foreground mt-1">{flowHint}</p>
+          <div
+            role={
+              activeFlow.status === "error" || activeFlow.status === "expired"
+                ? "alert"
+                : "status"
+            }
+            aria-live={
+              activeFlow.status === "error" || activeFlow.status === "expired"
+                ? "assertive"
+                : "polite"
+            }
+            aria-atomic="true"
+            className="bg-muted mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm"
+          >
+            <div>
+              <p className="font-medium">{t("credentials.flow.current")}</p>
+              <p className="text-muted-foreground mt-1">{flowHint}</p>
+            </div>
+            {activeFlow.method === "browser" &&
+              activeFlow.status === "pending" && (
+                <Button size="sm" variant="outline" onClick={stopLoading}>
+                  {t("credentials.actions.stopLoading")}
+                </Button>
+              )}
           </div>
         )}
 
@@ -854,6 +959,7 @@ function AccountsHomePage() {
                   codexLimitsError={codexLimitsError}
                   codexLimitsApiError={codexLimits?.error ?? ""}
                   onRefreshCodexLimits={() => void fetchCodexLimits()}
+                  onRenew={handleRenewAccount}
                   onAskLogout={askLogout}
                 />
               ))}
@@ -873,7 +979,8 @@ function AccountsHomePage() {
                 <Button
                   size="sm"
                   className="mt-4"
-                  onClick={() => setOnboardingOpen(true)}
+                  disabled={activeAction !== ""}
+                  onClick={handleAddAccount}
                 >
                   <IconPlus className="size-4" />
                   {t("accounts.actions.add")}
@@ -964,11 +1071,13 @@ function AccountsHomePage() {
 
       <AccountOnboardingSheet
         open={onboardingOpen}
+        account={renewalAccount ?? undefined}
         providers={providers}
         providerOptions={providerOptions}
         registeredAccounts={registeredAccounts}
         activeAction={activeAction}
-        onOpenChange={setOnboardingOpen}
+        error={error}
+        onOpenChange={handleAccountSheetOpenChange}
         onStartBrowserOAuth={startBrowserOAuth}
         onStartDeviceCode={startOpenAIDeviceCode}
         onSaveToken={saveToken}

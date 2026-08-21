@@ -1896,7 +1896,10 @@ var listGitHubCopilotModelsWithToken = cliprovider.ListGitHubCopilotModelsWithTo
 
 var (
 	fetchAntigravityModels       = providers.FetchAntigravityModelsContext
+	resolveAntigravityProject    = providers.FetchAntigravityProjectID
 	refreshAntigravityCredential = auth.RefreshAccessToken
+	refreshOpenAICodexCredential = auth.RefreshAccessToken
+	refreshModelCredential       = auth.RefreshCredential
 )
 
 func isCredentialAuthMethod(authMethod string) bool {
@@ -1934,9 +1937,41 @@ func fetchAntigravityCredentialModels(
 		)
 	}
 	if credential.NeedsRefresh() && strings.TrimSpace(credential.RefreshToken) != "" {
-		refreshed, refreshErr := refreshAntigravityCredential(
-			credential,
-			auth.GoogleAntigravityOAuthConfig(),
+		var refreshErr error
+		credential, refreshErr = refreshModelCredential(
+			credentialID,
+			func(current *auth.AuthCredential) bool {
+				return current != nil &&
+					current.NeedsRefresh() &&
+					strings.TrimSpace(current.RefreshToken) != ""
+			},
+			func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+				if !credentialProviderMatches(current, "antigravity") {
+					return nil, fmt.Errorf(
+						"credential belongs to provider %q, not antigravity",
+						current.Provider,
+					)
+				}
+				refreshed, credentialRefreshErr := refreshAntigravityCredential(
+					current,
+					auth.GoogleAntigravityOAuthConfig(),
+				)
+				if credentialRefreshErr != nil {
+					return nil, credentialRefreshErr
+				}
+				if refreshed == nil {
+					return nil, fmt.Errorf("no credential returned")
+				}
+				refreshed.Email = current.Email
+				refreshed.ProjectID = ""
+				if !credentialProviderMatches(refreshed, "antigravity") {
+					return nil, fmt.Errorf(
+						"refreshed credential belongs to provider %q, not antigravity",
+						refreshed.Provider,
+					)
+				}
+				return refreshed, nil
+			},
 		)
 		if refreshErr != nil {
 			return nil, false, fmt.Errorf(
@@ -1945,37 +1980,68 @@ func fetchAntigravityCredentialModels(
 				refreshErr,
 			)
 		}
-		if refreshed == nil {
+		if credential == nil {
 			return nil, false, fmt.Errorf(
-				"refreshing Antigravity credential %s: no credential returned",
+				"Antigravity credential %s was removed while refreshing",
 				credentialID,
 			)
 		}
-		refreshed.Email = credential.Email
-		if refreshed.ProjectID == "" {
-			refreshed.ProjectID = credential.ProjectID
-		}
-		if !credentialProviderMatches(refreshed, "antigravity") {
+		if !credentialProviderMatches(credential, "antigravity") {
 			return nil, false, fmt.Errorf(
-				"refreshed credential %s belongs to provider %q, not antigravity",
+				"credential %s belongs to provider %q, not antigravity",
 				credentialID,
-				refreshed.Provider,
+				credential.Provider,
 			)
 		}
-		if setErr := oauthSetCredential(credentialID, refreshed); setErr != nil {
-			return nil, false, fmt.Errorf(
-				"saving refreshed Antigravity credential %s: %w",
-				credentialID,
-				setErr,
-			)
-		}
-		credential = refreshed
 	}
 	if credential.IsExpired() {
 		return nil, false, fmt.Errorf(
 			"Antigravity credential %s is expired",
 			credentialID,
 		)
+	}
+	for attempts := 0; strings.TrimSpace(credential.ProjectID) == "" && attempts < 2; attempts++ {
+		credential, err = refreshModelCredential(
+			credentialID,
+			func(current *auth.AuthCredential) bool {
+				return current != nil && strings.TrimSpace(current.ProjectID) == ""
+			},
+			func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+				if !credentialProviderMatches(current, "antigravity") {
+					return nil, fmt.Errorf(
+						"credential belongs to provider %q, not antigravity",
+						current.Provider,
+					)
+				}
+				projectID, projectErr := resolveAntigravityProject(current.AccessToken)
+				if projectErr != nil {
+					return nil, projectErr
+				}
+				updated := *current
+				updated.ProjectID = projectID
+				return &updated, nil
+			},
+		)
+		if err != nil {
+			return nil, false, fmt.Errorf(
+				"resolving Antigravity project for credential %s: %w",
+				credentialID,
+				err,
+			)
+		}
+		if credential == nil {
+			return nil, false, fmt.Errorf(
+				"Antigravity credential %s was removed while resolving project",
+				credentialID,
+			)
+		}
+		if !credentialProviderMatches(credential, "antigravity") {
+			return nil, false, fmt.Errorf(
+				"credential %s belongs to provider %q, not antigravity",
+				credentialID,
+				credential.Provider,
+			)
+		}
 	}
 	accessToken := strings.TrimSpace(credential.AccessToken)
 	if accessToken == "" {
@@ -2135,17 +2201,53 @@ func resolveOpenAICodexCredential(credentialID string) (*auth.AuthCredential, er
 		)
 	}
 	if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {
-		refreshed, err := auth.RefreshAccessToken(cred, auth.OpenAIOAuthConfig())
+		cred, err = refreshModelCredential(
+			normalizedCredentialID,
+			func(current *auth.AuthCredential) bool {
+				return current != nil &&
+					current.AuthMethod == "oauth" &&
+					current.NeedsRefresh() &&
+					current.RefreshToken != ""
+			},
+			func(current *auth.AuthCredential) (*auth.AuthCredential, error) {
+				if !credentialProviderMatches(current, "openai") {
+					return nil, fmt.Errorf(
+						"credential belongs to provider %q, not openai",
+						current.Provider,
+					)
+				}
+				refreshed, refreshErr := refreshOpenAICodexCredential(
+					current,
+					auth.OpenAIOAuthConfig(),
+				)
+				if refreshErr != nil {
+					return nil, refreshErr
+				}
+				if refreshed == nil {
+					return nil, fmt.Errorf("no credential returned")
+				}
+				if refreshed.AccountID == "" {
+					refreshed.AccountID = current.AccountID
+				}
+				return refreshed, nil
+			},
+		)
 		if err != nil {
 			return nil, fmt.Errorf("refreshing token: %w", err)
 		}
-		if refreshed.AccountID == "" {
-			refreshed.AccountID = cred.AccountID
+		if cred == nil {
+			return nil, fmt.Errorf(
+				"credential %s was removed while refreshing",
+				normalizedCredentialID,
+			)
 		}
-		if err := auth.SetCredential(normalizedCredentialID, refreshed); err != nil {
-			return nil, fmt.Errorf("saving refreshed token: %w", err)
+		if !credentialProviderMatches(cred, "openai") {
+			return nil, fmt.Errorf(
+				"credential %s belongs to provider %q, not openai",
+				normalizedCredentialID,
+				cred.Provider,
+			)
 		}
-		cred = refreshed
 	}
 	if strings.TrimSpace(cred.AccessToken) == "" {
 		return nil, fmt.Errorf(
