@@ -115,6 +115,63 @@ func (r *fakeAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[str
 	return map[string]any{"text": req.Message}, nil
 }
 
+func TestAgentStepForwardsExplicitModelAlias(t *testing.T) {
+	agents := &fakeAgentRunner{}
+	executor := &Executor{Agents: agents}
+	_, err := executor.runStepTarget(
+		t.Context(),
+		Step{Uses: "agent/main"},
+		map[string]any{
+			"model":   "candidate-a",
+			"message": "evaluate",
+		},
+		ExecutionContext{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 1 || agents.requests[0].Model != "candidate-a" {
+		t.Fatalf("agent requests = %#v", agents.requests)
+	}
+}
+
+func TestExecutorStepActivityObserverRunsAtActualDispatchBoundary(t *testing.T) {
+	workflow := parseWorkflow(t, `name: Step activity
+on:
+  workflow_dispatch:
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: inspect
+        uses: tool/inspect
+`)
+	tools := &fakeToolRunner{}
+	var observed []StepActivityEvent
+	executor := &Executor{
+		WorkspaceDir: t.TempDir(),
+		Tools:        tools,
+		StepActivityObserver: func(event StepActivityEvent) error {
+			if len(tools.requests) != 0 {
+				t.Fatal("step activity was reported after the target dispatched")
+			}
+			observed = append(observed, event)
+			return nil
+		},
+	}
+	result, err := executor.Run(t.Context(), RunRequest{
+		RunID: "wr-step-activity", Workflow: workflow, WorkflowRef: "workflows/step-activity.yml",
+	})
+	if err != nil || result.Status != RunStatusSucceeded {
+		t.Fatalf("step activity run = %#v, %v", result, err)
+	}
+	if len(observed) != 1 || observed[0].RunID != "wr-step-activity" ||
+		observed[0].JobID != "main" || observed[0].StepID != "inspect" ||
+		observed[0].Uses != "tool/inspect" || len(tools.requests) != 1 {
+		t.Fatalf("step activity = %#v, tool requests = %#v", observed, tools.requests)
+	}
+}
+
 func TestWorkflowWorkspaceCleanupTracksFrozenScopesAndJoinsReleaseErrors(t *testing.T) {
 	if cleanup := (*workflowWorkspaceCleanup)(nil); cleanup.releaseAll() != nil {
 		t.Fatal("nil workspace cleanup returned an error")

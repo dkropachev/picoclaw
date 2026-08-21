@@ -251,6 +251,37 @@ export interface RepositoryReviewAutomationProgress {
   findings: number
 }
 
+export type RepositoryReviewCodeType =
+  | "hotpath-code"
+  | "code"
+  | "test"
+  | "bench-test"
+
+export interface RepositoryReviewScopePolicy {
+  code_types: RepositoryReviewCodeType[]
+  include_folders: string[]
+  exclude_folders: string[]
+  free_text: string
+}
+
+export interface RepositoryReviewScopePlanCounts {
+  total_files: number
+  code_type_files: number
+  include_files: number
+  excluded_files: number
+  selected_files: number
+}
+
+export interface RepositoryReviewScopePlan {
+  commit_sha: string
+  policy_hash: string
+  hash: string
+  summary: string
+  rationale?: string
+  warnings: string[]
+  counts: RepositoryReviewScopePlanCounts
+}
+
 export interface RepositoryReviewModelStats extends RepositoryReviewTokenUsage {
   model: string
   estimated_cost_usd: number
@@ -272,6 +303,7 @@ export interface RepositoryReviewAutomationConfig {
   ref: string
   target: string
   review_focus: string
+  scope_policy: RepositoryReviewScopePolicy
   reviewer_models: string[]
   compare_models: boolean
   force: boolean
@@ -297,6 +329,7 @@ export interface RepositoryReviewAutomation extends RepositoryReviewAutomationCo
   progress: RepositoryReviewAutomationProgress
   model_stats: RepositoryReviewModelStats[]
   account_limits: RepositoryReviewAccountSnapshot[]
+  scope_plan?: RepositoryReviewScopePlan
   next_check_at?: string
   started_at?: string
   completed_at?: string
@@ -643,6 +676,15 @@ function normalizeAutomation(
     ref: automation.ref ?? "HEAD",
     target: automation.target ?? "all",
     review_focus: automation.review_focus ?? "",
+    scope_policy: {
+      code_types:
+        automation.scope_policy?.code_types?.length > 0
+          ? automation.scope_policy.code_types
+          : ["hotpath-code", "code"],
+      include_folders: automation.scope_policy?.include_folders ?? [],
+      exclude_folders: automation.scope_policy?.exclude_folders ?? [],
+      free_text: automation.scope_policy?.free_text ?? "",
+    },
     reviewer_models: automation.reviewer_models ?? [],
     compare_models: automation.compare_models ?? false,
     force: automation.force ?? false,
@@ -677,6 +719,19 @@ function normalizeAutomation(
     },
     model_stats: normalizeModelStats(automation.model_stats),
     account_limits: normalizeAccountSnapshots(automation.account_limits),
+    scope_plan: automation.scope_plan
+      ? {
+          ...automation.scope_plan,
+          warnings: automation.scope_plan.warnings ?? [],
+          counts: {
+            total_files: automation.scope_plan.counts?.total_files ?? 0,
+            code_type_files: automation.scope_plan.counts?.code_type_files ?? 0,
+            include_files: automation.scope_plan.counts?.include_files ?? 0,
+            excluded_files: automation.scope_plan.counts?.excluded_files ?? 0,
+            selected_files: automation.scope_plan.counts?.selected_files ?? 0,
+          },
+        }
+      : undefined,
     next_check_at: normalizeOptionalTimestamp(automation.next_check_at),
     started_at: normalizeOptionalTimestamp(automation.started_at),
     completed_at: normalizeOptionalTimestamp(automation.completed_at),

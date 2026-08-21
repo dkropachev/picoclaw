@@ -16,6 +16,7 @@ import { type FormEvent, useState } from "react"
 import {
   type RepositoryReviewAutomation,
   type RepositoryReviewAutomationConfig,
+  type RepositoryReviewCodeType,
   type RepositoryReviewModelStats,
   type ReviewAccountLimitEntry,
   type ReviewAccountOption,
@@ -67,6 +68,32 @@ const automationKey = ["repository-review-automations"] as const
 const automationOptionsKey = ["repository-review-automation-options"] as const
 const runningPollMilliseconds = 2_000
 const pausedPollMilliseconds = 15_000
+const scopeCodeTypeOptions: Array<{
+  value: RepositoryReviewCodeType
+  label: string
+  description: string
+}> = [
+  {
+    value: "hotpath-code",
+    label: "Hot-path production code",
+    description: "Runtime entry points and high-impact execution paths.",
+  },
+  {
+    value: "code",
+    label: "Production code",
+    description: "Normal application and library implementation files.",
+  },
+  {
+    value: "test",
+    label: "Tests",
+    description: "Test suites and their supporting code.",
+  },
+  {
+    value: "bench-test",
+    label: "Benchmarks",
+    description: "Benchmark and performance-test files.",
+  },
+]
 
 type FormState = Omit<RepositoryReviewAutomationConfig, "model_prices"> & {
   model_prices: Record<
@@ -87,6 +114,12 @@ const emptyForm: FormState = {
   ref: "HEAD",
   target: "all",
   review_focus: "Find correctness, security, and reliability bugs.",
+  scope_policy: {
+    code_types: ["hotpath-code", "code"],
+    include_folders: [],
+    exclude_folders: [],
+    free_text: "",
+  },
   reviewer_models: [],
   compare_models: false,
   force: false,
@@ -503,6 +536,7 @@ function AutomationForm({
     event.preventDefault()
     onSubmit()
   }
+  const scopeError = repositoryReviewScopeError(value)
 
   return (
     <form className="space-y-6" onSubmit={submit}>
@@ -548,6 +582,109 @@ function AutomationForm({
             onChange={(event) => set("review_focus", event.target.value)}
           />
         </div>
+      </fieldset>
+
+      <fieldset className="space-y-4 rounded-lg border p-4">
+        <legend className="px-1 font-medium">Review scope</legend>
+        <p className="text-muted-foreground text-xs">
+          Choose one or more inventory code types. Folder prefixes are exact,
+          repository-relative paths; exclusions always win over category and
+          inclusion matches.
+        </p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {scopeCodeTypeOptions.map((option) => (
+            <div
+              key={option.value}
+              className="flex items-start gap-2 rounded-md border p-3"
+            >
+              <input
+                id={`scope-code-type-${option.value}`}
+                aria-label={option.label}
+                type="checkbox"
+                className="mt-1"
+                checked={value.scope_policy.code_types.includes(option.value)}
+                onChange={(event) => {
+                  const codeTypes = event.target.checked
+                    ? [...value.scope_policy.code_types, option.value]
+                    : value.scope_policy.code_types.filter(
+                        (codeType) => codeType !== option.value,
+                      )
+                  set("scope_policy", {
+                    ...value.scope_policy,
+                    code_types: codeTypes,
+                  })
+                }}
+              />
+              <span>
+                <span className="block font-medium">{option.label}</span>
+                <span className="text-muted-foreground block text-xs">
+                  {option.description}
+                </span>
+              </span>
+            </div>
+          ))}
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="scope-include-folders">
+              Include folder prefixes
+            </Label>
+            <Textarea
+              id="scope-include-folders"
+              value={value.scope_policy.include_folders.join("\n")}
+              placeholder={"cmd\ninternal/runtime"}
+              onChange={(event) =>
+                set("scope_policy", {
+                  ...value.scope_policy,
+                  include_folders: event.target.value.split(/\r?\n/u),
+                })
+              }
+            />
+            <p className="text-muted-foreground text-xs">
+              One canonical repository-relative folder per line. Empty means
+              every folder for the selected code types.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="scope-exclude-folders">
+              Exclude folder prefixes
+            </Label>
+            <Textarea
+              id="scope-exclude-folders"
+              value={value.scope_policy.exclude_folders.join("\n")}
+              placeholder={"vendor\ninternal/generated"}
+              onChange={(event) =>
+                set("scope_policy", {
+                  ...value.scope_policy,
+                  exclude_folders: event.target.value.split(/\r?\n/u),
+                })
+              }
+            />
+            <p className="text-muted-foreground text-xs">
+              Excluded prefixes win even when the same path is included above.
+            </p>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="scope-free-text">Additional scope guidance</Label>
+          <Textarea
+            id="scope-free-text"
+            maxLength={16_384}
+            value={value.scope_policy.free_text}
+            placeholder="Prioritize request authorization and recovery paths."
+            onChange={(event) =>
+              set("scope_policy", {
+                ...value.scope_policy,
+                free_text: event.target.value,
+              })
+            }
+          />
+        </div>
+        {scopeError && (
+          <p role="alert" className="text-destructive text-xs">
+            {scopeError}
+          </p>
+        )}
       </fieldset>
 
       <fieldset className="space-y-3 rounded-lg border p-4">
@@ -1061,6 +1198,7 @@ function AutomationForm({
             busy ||
             value.reviewer_models.length === 0 ||
             unavailableSelectedModel ||
+            Boolean(scopeError) ||
             !value.name.trim() ||
             !value.repository.trim()
           }
@@ -1163,6 +1301,30 @@ function AutomationCard({
           <SmallMetric label="Findings" value={automation.progress.findings} />
         </div>
 
+        {automation.scope_plan?.summary && (
+          <div className="border-border bg-muted/30 rounded-lg border p-3 text-sm">
+            <p className="font-medium">Scope preflight</p>
+            <p className="mt-1">{automation.scope_plan.summary}</p>
+            <p className="text-muted-foreground mt-1 text-xs">
+              Commit {automation.scope_plan.commit_sha} · selected{" "}
+              {automation.scope_plan.counts.selected_files} of{" "}
+              {automation.scope_plan.counts.total_files} files
+            </p>
+            {automation.scope_plan.rationale && (
+              <p className="text-muted-foreground mt-2 text-xs">
+                {automation.scope_plan.rationale}
+              </p>
+            )}
+            {automation.scope_plan.warnings.length > 0 && (
+              <ul className="text-warning-foreground mt-2 list-disc space-y-1 pl-4 text-xs">
+                {automation.scope_plan.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         <div className="space-y-3">
           <BudgetBar
             label="Tokens"
@@ -1205,6 +1367,7 @@ function AutomationCard({
         <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs">
           <span>{automation.progress.remaining_files} files remaining</span>
           <span>{automation.progress.unsupported_files} unsupported</span>
+          <span>{automation.scope_policy.code_types.join(", ")}</span>
           <span>{automation.reviewer_models.join(", ")}</span>
           {automation.active_run_id && (
             <a
@@ -1798,6 +1961,16 @@ function formPayload(value: FormState): RepositoryReviewAutomationConfig {
     ref: value.ref.trim(),
     target: value.target.trim(),
     review_focus: value.review_focus.trim(),
+    scope_policy: {
+      code_types: [...value.scope_policy.code_types],
+      include_folders: normalizeScopeFolderPrefixes(
+        value.scope_policy.include_folders,
+      ),
+      exclude_folders: normalizeScopeFolderPrefixes(
+        value.scope_policy.exclude_folders,
+      ),
+      free_text: value.scope_policy.free_text.trim(),
+    },
     compare_models: value.reviewer_models.length > 1,
     max_parallel_children: budgetGuarded ? 1 : value.max_parallel_children,
     budget: {
@@ -1883,6 +2056,12 @@ function automationForm(automation: RepositoryReviewAutomation): FormState {
   return {
     ...automation,
     reviewer_models: [...automation.reviewer_models],
+    scope_policy: {
+      ...automation.scope_policy,
+      code_types: [...automation.scope_policy.code_types],
+      include_folders: [...automation.scope_policy.include_folders],
+      exclude_folders: [...automation.scope_policy.exclude_folders],
+    },
     model_prices: Object.fromEntries(
       Object.entries(automation.model_prices).map(([model, price]) => [
         model,
@@ -1909,6 +2088,12 @@ function copyForm(form: FormState): FormState {
   return {
     ...form,
     reviewer_models: [...form.reviewer_models],
+    scope_policy: {
+      ...form.scope_policy,
+      code_types: [...form.scope_policy.code_types],
+      include_folders: [...form.scope_policy.include_folders],
+      exclude_folders: [...form.scope_policy.exclude_folders],
+    },
     model_prices: { ...form.model_prices },
     budget: {
       ...form.budget,
@@ -1918,6 +2103,48 @@ function copyForm(form: FormState): FormState {
       },
     },
   }
+}
+
+function repositoryReviewScopeError(value: FormState): string {
+  if (value.scope_policy.code_types.length === 0) {
+    return "Select at least one code type."
+  }
+  for (const [label, prefixes] of [
+    ["include", value.scope_policy.include_folders],
+    ["exclude", value.scope_policy.exclude_folders],
+  ] as const) {
+    const normalized = normalizeScopeFolderPrefixes(prefixes)
+    if (normalized.length > 64) {
+      return `Use at most 64 ${label} folder prefixes.`
+    }
+    if (normalized.some((prefix) => !validScopeFolderPrefix(prefix))) {
+      return `${label === "include" ? "Include" : "Exclude"} folders must be canonical repository-relative prefixes.`
+    }
+    if (new Set(normalized).size !== normalized.length) {
+      return `${label === "include" ? "Include" : "Exclude"} folder prefixes must be unique.`
+    }
+  }
+  return ""
+}
+
+function normalizeScopeFolderPrefixes(prefixes: string[]): string[] {
+  return prefixes.map((prefix) => prefix.trim()).filter(Boolean)
+}
+
+function validScopeFolderPrefix(prefix: string): boolean {
+  if (
+    prefix.length === 0 ||
+    prefix.length > 1_024 ||
+    prefix.startsWith("/") ||
+    prefix.endsWith("/") ||
+    prefix.includes("\\") ||
+    prefix.includes("\0")
+  ) {
+    return false
+  }
+  return prefix
+    .split("/")
+    .every((segment) => segment !== "" && segment !== "." && segment !== "..")
 }
 
 function updateCachedAutomation(

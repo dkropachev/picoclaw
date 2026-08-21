@@ -146,6 +146,7 @@ type AgentUsage struct {
 	CompletionTokens int    `json:"completion_tokens"`
 	TotalTokens      int    `json:"total_tokens"`
 	CachedTokens     int    `json:"cached_tokens"`
+	ReasoningTokens  int    `json:"reasoning_tokens,omitempty"`
 	LatencyMillis    int64  `json:"latency_millis,omitempty"`
 }
 
@@ -167,6 +168,19 @@ type AgentUsageEvent struct {
 
 // AgentUsageEventObserver observes provider usage with workflow identity.
 type AgentUsageEventObserver func(AgentUsageEvent) error
+
+// StepActivityEvent identifies a workflow step at the boundary immediately
+// before its tool, native function, or agent work begins.
+type StepActivityEvent struct {
+	RunID  string `json:"run_id"`
+	JobID  string `json:"job_id"`
+	StepID string `json:"step_id"`
+	Uses   string `json:"uses"`
+}
+
+// StepActivityObserver projects real workflow activity to an owning control
+// plane. Returning an error prevents the step from starting.
+type StepActivityObserver func(StepActivityEvent) error
 
 type AgentCallAdmissionEvent struct {
 	RunID  string `json:"run_id"`
@@ -210,7 +224,11 @@ type AgentSourceCapture struct {
 }
 
 type AgentRequest struct {
-	AgentID          string
+	AgentID string
+	// Model optionally selects one configured model alias for this isolated
+	// workflow call. It does not accept provider credentials or concrete account
+	// overrides; normal alias/account resolution remains authoritative.
+	Model            string
 	Message          string
 	Prompt           string
 	Context          string

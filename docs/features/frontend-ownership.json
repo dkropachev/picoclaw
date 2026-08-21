@@ -88,6 +88,15 @@
       ]
     },
     {
+      "spec": "docs/features/repository-model-evaluations.md",
+      "patterns": [
+        "web/frontend/src/api/model-evaluations*.ts",
+        "web/frontend/src/components/model-evaluations/**",
+        "web/frontend/src/routes/-model-evaluations-route.test.tsx",
+        "web/frontend/src/routes/model-evaluations.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/agent-conversations.md",
       "patterns": [
         "web/frontend/src/api/agents*.ts",

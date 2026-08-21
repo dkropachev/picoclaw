@@ -43,11 +43,11 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		},
 	}
 	first, err := executor.Run(context.Background(), request)
-	if err != nil || first.Status != RunStatusSucceeded {
-		t.Fatalf("first run status=%q err=%v", first.Status, err)
+	if err != nil || first == nil || first.Status != RunStatusSucceeded {
+		t.Fatalf("first run=%#v err=%v", first, err)
 	}
-	if agentRunner.calls != 1 {
-		t.Fatalf("first agent calls=%d, want 1 visible managed request", agentRunner.calls)
+	if agentRunner.calls != 2 {
+		t.Fatalf("first agent calls=%d, want scope planner plus visible managed review", agentRunner.calls)
 	}
 	state, found, err := repoaudit.NewStore(workspace).Get(repo)
 	if err != nil || !found || len(state.Files) != 1 || len(state.Findings) != 1 {
@@ -63,8 +63,8 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 	if err != nil || second.Status != RunStatusSucceeded {
 		t.Fatalf("second run status=%q err=%v", second.Status, err)
 	}
-	if agentRunner.calls != 1 {
-		t.Fatalf("unchanged second run called agent; calls=%d", agentRunner.calls)
+	if agentRunner.calls != 3 {
+		t.Fatalf("unchanged second run calls=%d, want one additional scope preflight", agentRunner.calls)
 	}
 	if second.Outputs["summary"] != "No changed reviewable files required model review." ||
 		second.Outputs["remainingFiles"] != 0 {
@@ -74,8 +74,10 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 	if err != nil || len(after.Runs) != 1 || len(after.Findings) != 1 {
 		t.Fatalf("unchanged second run mutated review ledger: %#v err=%v", after, err)
 	}
-	if len(toolRunner.sessions) != 4 || toolRunner.sessions[0] != toolRunner.sessions[1] ||
-		toolRunner.sessions[2] != toolRunner.sessions[3] || toolRunner.sessions[0] == toolRunner.sessions[2] ||
+	if len(toolRunner.sessions) != 8 || toolRunner.sessions[0] != toolRunner.sessions[1] ||
+		toolRunner.sessions[0] != toolRunner.sessions[2] || toolRunner.sessions[0] != toolRunner.sessions[3] ||
+		toolRunner.sessions[4] != toolRunner.sessions[5] || toolRunner.sessions[4] != toolRunner.sessions[6] ||
+		toolRunner.sessions[4] != toolRunner.sessions[7] || toolRunner.sessions[0] == toolRunner.sessions[4] ||
 		!strings.HasPrefix(toolRunner.sessions[0], "workflow-run:") {
 		t.Fatalf("run-scoped git workspace sessions=%#v", toolRunner.sessions)
 	}
@@ -131,6 +133,20 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 	request AgentRequest,
 ) (map[string]any, error) {
 	runner.calls++
+	if request.ScopeContent == "metadata" {
+		if request.Tools != AgentToolsNone || request.Session != "" ||
+			!request.EphemeralSession || !request.SuppressDefaultContext ||
+			request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt {
+			runner.t.Fatalf("scope planner authority=%#v", request)
+		}
+		structured := map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"hotpathCandidateIds": []any{}, "candidateIds": []any{},
+			"rationale": "Keep the complete hard scope.",
+			"warnings":  []any{},
+		}
+		return map[string]any{"text": `{}`, "structured": structured}, nil
+	}
 	if request.Tools != AgentToolsNone || request.ScopeContent != "frozen_git" ||
 		request.Session != "" || !request.EphemeralSession || !request.SuppressDefaultContext ||
 		request.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt {

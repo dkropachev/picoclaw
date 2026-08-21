@@ -55,6 +55,7 @@ func (a *workflowAgentUsageAccumulator) Observe(usage workflows.AgentUsage) erro
 	aggregate.CompletionTokens += usage.CompletionTokens
 	aggregate.TotalTokens += usage.TotalTokens
 	aggregate.CachedTokens += usage.CachedTokens
+	aggregate.ReasoningTokens += usage.ReasoningTokens
 	aggregate.LatencyMillis += usage.LatencyMillis
 	a.usage[key] = aggregate
 	if a.observer != nil {
@@ -111,6 +112,7 @@ func workflowAgentUsageFromResponse(
 		usage.CompletionTokens = response.Usage.CompletionTokens
 		usage.TotalTokens = response.Usage.TotalTokens
 		usage.CachedTokens = response.Usage.CachedTokens
+		usage.ReasoningTokens = response.Usage.ReasoningTokens
 	}
 	return usage, true
 }

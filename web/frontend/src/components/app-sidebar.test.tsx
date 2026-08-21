@@ -157,6 +157,23 @@ describe("AppSidebar", () => {
     )
   })
 
+  it("reveals and marks Model evaluations from its direct route", () => {
+    pathname = "/model-evaluations"
+
+    renderSidebar()
+
+    expect(screen.getByRole("button", { name: "Services" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    )
+    const link = screen.getByRole("link", { name: "Model evaluations" })
+    expect(link).toHaveAttribute("href", "/model-evaluations")
+    expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+      "data-active",
+      "true",
+    )
+  })
+
   it("shows the MCP link when the dedicated MCP route is active", () => {
     pathname = "/agent/mcp"
 

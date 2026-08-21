@@ -52,6 +52,12 @@ func TestWorkflowAgentUsageNilSafetyAndAdmissionErrors(t *testing.T) {
 	if !ok || usage.Model != "model" || usage.LatencyMillis != 0 {
 		t.Fatalf("metadata-only response usage = (%#v, %t)", usage, ok)
 	}
+	usage, ok = workflowAgentUsageFromResponse("concrete", &providers.LLMResponse{
+		Usage: &providers.UsageInfo{CompletionTokens: 10, ReasoningTokens: 7},
+	}, time.Second)
+	if !ok || usage.Model != "concrete" || usage.CompletionTokens != 10 || usage.ReasoningTokens != 7 {
+		t.Fatalf("reasoning response usage = (%#v, %t)", usage, ok)
+	}
 	if cloned := cloneWorkflowAgentUsage(nil); cloned == nil || len(cloned) != 0 {
 		t.Fatalf("nil usage clone = %#v", cloned)
 	}

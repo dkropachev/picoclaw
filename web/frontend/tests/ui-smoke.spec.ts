@@ -22,6 +22,7 @@ const smokeRoutes = [
   "/event-sources",
   "/pull-requests",
   "/repository-reviews",
+  "/model-evaluations",
   "/logs",
   "/agent/agents",
   "/agent/git-workspaces",
@@ -1252,6 +1253,12 @@ interface MockLauncherApiOptions {
   fetchModelEmptyCredentials?: string[]
   fetchModelFailures?: Record<string, string>
   modelResponse?: unknown
+  modelEvaluationRequests?: Array<{
+    method: string
+    path: string
+    body: Record<string, unknown> | null
+  }>
+  statefulModelEvaluations?: boolean
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
   statefulAgents?: boolean
@@ -1313,6 +1320,62 @@ async function mockLauncherApis(
   let currentAgentRevision = 1
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
+  let currentModelEvaluation: Record<string, unknown> | null = null
+
+  const modelEvaluationFromBody = (
+    body: Record<string, unknown>,
+    previous?: Record<string, unknown> | null,
+  ): Record<string, unknown> => ({
+    schema_version: 1,
+    id: previous?.id ?? `rme_${"1".repeat(32)}`,
+    version: (previous?.version as number | undefined) ?? 1,
+    status: previous?.status ?? "draft",
+    repository: body.repository ?? previous?.repository ?? "owner/repo",
+    ref: body.ref ?? previous?.ref ?? "main",
+    candidate_models: body.candidate_models ??
+      previous?.candidate_models ?? ["code", "fast"],
+    selector_model_alias:
+      body.selector_model_alias ?? previous?.selector_model_alias ?? "review",
+    judge_model_alias:
+      body.judge_model_alias ?? previous?.judge_model_alias ?? "review",
+    focus: body.focus ??
+      previous?.focus ?? {
+        code_types: ["hotpath-code", "code", "test", "bench-test"],
+        include_folders: [],
+        exclude_folders: [],
+        free_text: "",
+      },
+    default_files_per_language:
+      body.default_files_per_language ??
+      previous?.default_files_per_language ??
+      20,
+    files_per_language:
+      body.files_per_language ?? previous?.files_per_language ?? {},
+    progress: previous?.progress ?? {
+      stage: "idle",
+      languages: {},
+      total_files: 0,
+      selected_files: 0,
+      completed_files: 0,
+      total_tasks: 0,
+      completed_tasks: 0,
+      percent: 0,
+    },
+    usage: previous?.usage ?? {
+      requests: 0,
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_tokens: 0,
+      duration_millis: 0,
+    },
+    model_stats: previous?.model_stats ?? {},
+    comparisons: previous?.comparisons ?? [],
+    warnings: previous?.warnings ?? [],
+    run_ids: previous?.run_ids ?? [],
+    created_at: previous?.created_at ?? "2026-08-21T12:00:00Z",
+    updated_at: "2026-08-21T12:01:00Z",
+  })
   let currentAgents: AgentInfo[] = [
     {
       id: "main",
@@ -1595,6 +1658,164 @@ async function mockLauncherApis(
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+
+      if (
+        options.statefulModelEvaluations &&
+        path.startsWith("/api/model-evaluations")
+      ) {
+        const body = request.postData()
+          ? (request.postDataJSON() as Record<string, unknown>)
+          : null
+        if (method !== "GET") {
+          options.modelEvaluationRequests?.push({ method, path, body })
+        }
+        if (method === "GET" && path === "/api/model-evaluations/options") {
+          return json(route, {
+            models: [
+              {
+                alias: "code",
+                resolved_model: "gpt-code",
+                provider: "openai",
+                available: true,
+              },
+              {
+                alias: "fast",
+                resolved_model: "gpt-fast",
+                provider: "openai",
+                available: true,
+              },
+              {
+                alias: "review",
+                resolved_model: "gpt-review",
+                provider: "openai",
+                available: true,
+              },
+            ],
+            repositories: [],
+            code_types: ["hotpath-code", "code", "test", "bench-test"],
+            default_files_per_language: 20,
+            max_files_per_language: 20,
+            max_candidate_models: 8,
+          })
+        }
+        if (method === "GET" && path === "/api/model-evaluations") {
+          return json(route, {
+            evaluations: currentModelEvaluation
+              ? [structuredClone(currentModelEvaluation)]
+              : [],
+          })
+        }
+        if (method === "POST" && path === "/api/model-evaluations") {
+          currentModelEvaluation = modelEvaluationFromBody(body ?? {})
+          return json(
+            route,
+            { evaluation: structuredClone(currentModelEvaluation) },
+            201,
+          )
+        }
+        const corpusMatch = path.match(
+          /^\/api\/model-evaluations\/([^/]+)\/corpus$/,
+        )
+        if (method === "GET" && corpusMatch) {
+          return json(route, {
+            commit_sha: "a".repeat(40),
+            inventory_hash: "sha256:inventory",
+            language_counts: { go: 2 },
+            files: [],
+            offset: 0,
+            total: 2,
+          })
+        }
+        const actionMatch = path.match(
+          /^\/api\/model-evaluations\/([^/]+)\/(preflight|start|cancel|resume|restart)$/,
+        )
+        if (method === "POST" && actionMatch && currentModelEvaluation) {
+          const action = actionMatch[2]
+          const version = Number(currentModelEvaluation.version) + 1
+          if (action === "preflight") {
+            currentModelEvaluation = {
+              ...currentModelEvaluation,
+              version,
+              status: "ready",
+              progress: {
+                stage: "ready",
+                languages: {
+                  go: {
+                    available_files: 4,
+                    selected_files: 2,
+                    completed_files: 0,
+                    selected_bytes: 12_000,
+                    regions: ["pkg", "cmd"],
+                    limited: false,
+                  },
+                },
+                total_files: 4,
+                selected_files: 2,
+                completed_files: 0,
+                total_tasks: 4,
+                completed_tasks: 0,
+                message: "Corpus ready.",
+                percent: 20,
+              },
+              run_ids: ["wr_selector"],
+            }
+          } else if (action === "start") {
+            currentModelEvaluation = {
+              ...currentModelEvaluation,
+              version,
+              status: "running",
+              progress: {
+                ...(currentModelEvaluation.progress as Record<string, unknown>),
+                stage: "candidate_execution",
+                message: "Running candidate models.",
+                current_model: "code",
+                current_path: "pkg/service.go",
+                percent: 40,
+              },
+            }
+          } else if (action === "cancel") {
+            currentModelEvaluation = {
+              ...currentModelEvaluation,
+              version,
+              status: "canceled",
+              progress: {
+                ...(currentModelEvaluation.progress as Record<string, unknown>),
+                stage: "canceled",
+                message: "Canceled.",
+              },
+            }
+          }
+          return json(
+            route,
+            { evaluation: structuredClone(currentModelEvaluation) },
+            202,
+          )
+        }
+        const detailMatch = path.match(/^\/api\/model-evaluations\/([^/]+)$/)
+        if (detailMatch && currentModelEvaluation) {
+          if (method === "GET") {
+            return json(route, {
+              evaluation: structuredClone(currentModelEvaluation),
+            })
+          }
+          if (method === "PATCH") {
+            currentModelEvaluation = modelEvaluationFromBody(
+              body ?? {},
+              currentModelEvaluation,
+            )
+            currentModelEvaluation.version =
+              Number(currentModelEvaluation.version) + 1
+            return json(route, {
+              evaluation: structuredClone(currentModelEvaluation),
+            })
+          }
+          if (method === "DELETE") {
+            currentModelEvaluation = null
+            return json(route, undefined, 204)
+          }
+        }
+        return json(route, { code: "not_found", message: "not found" }, 404)
+      }
 
       const capabilitiesMatch = path.match(
         /^\/api\/agents\/([^/]+)\/capabilities$/,
@@ -2662,6 +2883,17 @@ async function mockLauncherApis(
           return json(route, { automations: [] })
         case "/api/repository-reviews/automation-options":
           return json(route, { models: [], accounts: [] })
+        case "/api/model-evaluations":
+          return json(route, { evaluations: [] })
+        case "/api/model-evaluations/options":
+          return json(route, {
+            models: [],
+            repositories: [],
+            code_types: ["hotpath-code", "code", "test", "bench-test"],
+            default_files_per_language: 20,
+            max_files_per_language: 20,
+            max_candidate_models: 8,
+          })
         case `/api/pr-workspaces/${prWorkspaceID}`:
           return json(route, prWorkspaceAggregate)
         case "/api/pr-lifecycle/workflow-configurations":
@@ -3185,6 +3417,71 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("model evaluations create, preflight, start, and cancel a bounded corpus", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["modelEvaluationRequests"]
+  > = []
+  await gotoMockedRoute(page, "/model-evaluations", {
+    statefulModelEvaluations: true,
+    modelEvaluationRequests: requests,
+  })
+  const workspace = page.getByRole("region", {
+    name: "Model evaluation workspace",
+  })
+
+  await workspace.getByLabel("Repository", { exact: true }).fill("owner/repo")
+  await workspace
+    .getByRole("checkbox", { name: "Select candidate model code" })
+    .check()
+  await workspace
+    .getByRole("checkbox", { name: "Select candidate model fast" })
+    .check()
+  await workspace.getByLabel("File selector model").selectOption("review")
+  await workspace.getByLabel("Judge and analyzer model").selectOption("review")
+  await workspace.getByLabel("Include folders").fill("pkg\ncmd")
+  await workspace.getByRole("button", { name: "Create evaluation" }).click()
+
+  await expect(
+    workspace.getByRole("button", { name: "Analyze repository" }),
+  ).toBeEnabled()
+  await workspace.getByRole("button", { name: "Analyze repository" }).click()
+  await expect(workspace.getByText("Corpus by language")).toBeVisible()
+  await expect(workspace.getByText("Corpus preview")).toBeVisible()
+  await expect(workspace.getByText(/Commit a{40}/)).toBeVisible()
+  await workspace.getByRole("button", { name: "Start evaluation" }).click()
+
+  await expect(
+    workspace.getByRole("progressbar", { name: "Evaluation progress" }),
+  ).toHaveAttribute("aria-valuenow", "40")
+  await expect(
+    workspace.getByText("Model code · File pkg/service.go"),
+  ).toBeVisible()
+  await workspace.getByRole("button", { name: "Cancel" }).click()
+  await expect(workspace.getByText("Canceled.")).toBeVisible()
+  await expect(workspace.getByRole("button", { name: "Resume" })).toBeVisible()
+
+  expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
+    "POST /api/model-evaluations",
+    `POST /api/model-evaluations/rme_${"1".repeat(32)}/preflight`,
+    `POST /api/model-evaluations/rme_${"1".repeat(32)}/start`,
+    `POST /api/model-evaluations/rme_${"1".repeat(32)}/cancel`,
+  ])
+  expect(requests[0]?.body).toMatchObject({
+    repository: "owner/repo",
+    candidate_models: ["code", "fast"],
+    selector_model_alias: "review",
+    judge_model_alias: "review",
+    focus: { include_folders: ["pkg", "cmd"] },
+    default_files_per_language: 20,
+  })
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
 
 test("Workflow configurations use canonical pages, tabs, and modal URLs", async ({
   page,

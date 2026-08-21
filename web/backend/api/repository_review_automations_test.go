@@ -28,6 +28,12 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		"/api/repository-reviews/automations", map[string]any{
 			"name": "Core pre-review", "repository": "https://github.com/acme/core.git",
 			"ref": "main", "target": "all", "review_focus": "Find release blockers.",
+			"scope_policy": map[string]any{
+				"code_types":      []string{"test", "code", "hotpath-code"},
+				"include_folders": []string{"services/api", "cmd"},
+				"exclude_folders": []string{"services/api/generated"},
+				"free_text":       "Prioritize authorization boundaries.",
+			},
 			"reviewer_models": []string{"cheap", "quality"}, "compare_models": true,
 			"auto_continue": true, "max_files_per_run": 4, "max_content_bytes": 65536,
 			"max_parallel_children": 1, "estimated_output_tokens": 900,
@@ -53,7 +59,10 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 	}
 	if created.Automation.ID == "" || created.Automation.Status != repoaudit.RepositoryReviewAutomationIdle ||
 		!created.Automation.AutoContinue || created.Automation.MaxParallelChildren != 1 ||
-		created.Automation.BudgetPolicy.MinRemainingPercentByWindow["weekly"] != 25 {
+		created.Automation.BudgetPolicy.MinRemainingPercentByWindow["weekly"] != 25 ||
+		len(created.Automation.ScopePolicy.CodeTypes) != 3 ||
+		created.Automation.ScopePolicy.CodeTypes[0] != repoaudit.RepositoryReviewCodeTypeHotpathCode ||
+		created.Automation.ScopePolicy.FreeText != "Prioritize authorization boundaries." {
 		t.Fatalf("created automation=%#v", created.Automation)
 	}
 	statePath := filepath.Join(workspace, "repository_reviews", "automation_"+created.Automation.ID+".json")
@@ -141,6 +150,95 @@ func TestRepositoryReviewAutomationRoutesRejectInvalidStateTransitionsAndBodies(
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("body %q status=%d response=%s", body, recorder.Code, recorder.Body.String())
 		}
+	}
+	invalidScope := automationConfigBody(testRepositoryReviewAutomation())
+	invalidScope["scope_policy"] = map[string]any{
+		"code_types": []string{"code"}, "include_folders": []string{"../outside"},
+	}
+	response = repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/automations", invalidScope,
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe scope status=%d body=%s", response.Code, response.Body.String())
+	}
+	forgedPlan := automationConfigBody(testRepositoryReviewAutomation())
+	forgedPlan["scope_plan"] = map[string]any{"summary": "client supplied"}
+	response = repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/automations", forgedPlan,
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("client scope plan status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRepositoryReviewAutomationScopeChangeClearsCommitPlan(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation, err = store.UpdateAutomation(
+		t.Context(), automation.ID, automation.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{
+				CommitSHA: strings.Repeat("a", 40), PolicyHash: strings.Repeat("b", 64),
+				Hash: strings.Repeat("c", 64), Summary: "production files selected",
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalentBody := automationConfigBody(automation)
+	equivalentBody["scope_policy"] = map[string]any{
+		"code_types":      []string{" CODE ", "hotpath-code"},
+		"include_folders": []string{}, "exclude_folders": []string{},
+	}
+	equivalentBody["expected_version"] = automation.Version
+	equivalentResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPatch, "/api/repository-reviews/automations/"+automation.ID,
+		equivalentBody,
+	)
+	if equivalentResponse.Code != http.StatusOK {
+		t.Fatalf("equivalent scope update status=%d body=%s", equivalentResponse.Code, equivalentResponse.Body.String())
+	}
+	var equivalent struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(equivalentResponse.Body.Bytes(), &equivalent); err != nil {
+		t.Fatal(err)
+	}
+	if equivalent.Automation.ScopePlan.Hash == "" {
+		t.Fatalf("equivalent normalized scope cleared plan: %#v", equivalent.Automation.ScopePlan)
+	}
+	automation = equivalent.Automation
+	body := automationConfigBody(automation)
+	policy := automation.ScopePolicy
+	policy.FreeText = "Focus on storage boundaries."
+	body["scope_policy"] = policy
+	body["expected_version"] = automation.Version
+	response := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPatch, "/api/repository-reviews/automations/"+automation.ID, body,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("scope update status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Automation.ScopePolicy.FreeText != "Focus on storage boundaries." ||
+		result.Automation.ScopePlan.CommitSHA != "" || result.Automation.ScopePlan.Hash != "" ||
+		len(result.Automation.ScopePlan.Warnings) != 0 {
+		t.Fatalf("scope update = %#v", result.Automation)
 	}
 }
 
@@ -1008,6 +1106,7 @@ func automationConfigBody(automation repoaudit.RepositoryReviewAutomation) map[s
 	return map[string]any{
 		"name": automation.Name, "repository": automation.Repository, "ref": automation.Ref,
 		"target": automation.Target, "review_focus": automation.ReviewFocus,
+		"scope_policy":    automation.ScopePolicy,
 		"reviewer_models": automation.ReviewerModels, "compare_models": automation.CompareModels,
 		"model_prices": automation.ModelPrices, "force": automation.Force,
 		"auto_continue": autoContinue, "max_files_per_run": automation.MaxFilesPerRun,

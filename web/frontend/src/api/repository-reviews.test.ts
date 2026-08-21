@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { launcherFetch } from "@/api/http"
 import {
+  type RepositoryReviewAutomationConfig,
   createRepositoryReviewAutomation,
   createRepositoryReviewIssueDraft,
   deleteRepositoryReviewAutomation,
@@ -274,6 +275,14 @@ describe("repository review API", () => {
                   checked_at: "2026-08-20T12:00:00Z",
                 },
               ],
+              scope_plan: {
+                commit_sha: "a".repeat(40),
+                policy_hash: "b".repeat(64),
+                hash: "c".repeat(64),
+                summary: "Production files selected",
+                counts: null,
+                warnings: null,
+              },
               next_check_at: "0001-01-01T00:00:00Z",
             },
           ],
@@ -309,6 +318,23 @@ describe("repository review API", () => {
         {
           id: "auto_1",
           reviewer_models: [],
+          scope_policy: {
+            code_types: ["hotpath-code", "code"],
+            include_folders: [],
+            exclude_folders: [],
+            free_text: "",
+          },
+          scope_plan: {
+            summary: "Production files selected",
+            warnings: [],
+            counts: {
+              total_files: 0,
+              code_type_files: 0,
+              include_files: 0,
+              excluded_files: 0,
+              selected_files: 0,
+            },
+          },
           usage: { total_tokens: 0 },
           progress: { stage: "waiting" },
           model_stats: [{ model: "fast", total_tokens: 100, latency_ms: 250 }],
@@ -362,12 +388,18 @@ describe("repository review API", () => {
           : jsonResponse({ automation }),
       )
     }
-    const config = {
+    const config: RepositoryReviewAutomationConfig = {
       name: "Core review",
       repository: "owner/repo",
       ref: "HEAD",
       target: "all",
       review_focus: "bugs",
+      scope_policy: {
+        code_types: ["hotpath-code", "code", "test"],
+        include_folders: ["cmd", "internal"],
+        exclude_folders: ["internal/generated"],
+        free_text: "Prioritize request boundaries.",
+      },
       reviewer_models: ["fast"],
       compare_models: false,
       force: false,

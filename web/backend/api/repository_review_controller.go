@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -521,6 +522,11 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		defer close(monitorDone)
 		c.monitorWorkflowProgress(runCtx, store, workflowStore, id, runID)
 	}()
+	scopePolicyJSON, err := json.Marshal(automation.ScopePolicy)
+	if err != nil {
+		c.finishAutomationRun(id, runID, nil, err, false)
+		return
+	}
 	result, runErr := executor.Run(runCtx, workflows.RunRequest{
 		RunID:       runID,
 		Workflow:    workflow,
@@ -531,6 +537,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 			"target":                  automation.Target,
 			"review_focus":            automation.ReviewFocus,
 			"review_models":           strings.Join(repositoryReviewExecutionModels(automation), ","),
+			"scope_policy":            string(scopePolicyJSON),
 			"force":                   automation.Force,
 			"max_content_bytes":       automation.MaxContentBytes,
 			"max_files_per_run":       automation.MaxFilesPerRun,
@@ -968,16 +975,28 @@ func repositoryReviewWorkflowStage(run *workflows.Run) string {
 		return ""
 	}
 	labels := map[string]string{
-		"checkout":  "Acquiring repository snapshot",
-		"inventory": "Inventorying tracked files",
-		"plan":      "Planning changed files",
-		"freeze":    "Freezing immutable evidence",
-		"release":   "Releasing checkout",
-		"review":    "Reviewing bounded file batch",
-		"record":    "Checkpointing findings",
-		"result":    "Finalizing batch",
+		"checkout":           "Acquiring repository snapshot",
+		"inventory":          "Inventorying tracked files",
+		"scope_catalog":      "Classifying target code",
+		"release_structure":  "Releasing checkout before scope planning",
+		"plan_scope":         "AI planning target scope",
+		"scope_checkout":     "Reacquiring the exact commit",
+		"scope_inventory":    "Validating target inventory",
+		"full_scope_catalog": "Rebuilding complete target scope",
+		"scope":              "Validating AI target scope",
+		"scope_files":        "Binding exact target files",
+		"plan":               "Planning changed files",
+		"freeze":             "Freezing immutable evidence",
+		"release":            "Releasing checkout",
+		"review":             "Reviewing bounded file batch",
+		"record":             "Checkpointing findings",
+		"result":             "Finalizing batch",
 	}
-	order := []string{"checkout", "inventory", "plan", "freeze", "release", "review", "record", "result"}
+	order := []string{
+		"checkout", "inventory", "scope_catalog", "release_structure", "plan_scope",
+		"scope_checkout", "scope_inventory", "full_scope_catalog", "scope", "scope_files",
+		"plan", "freeze", "release", "review", "record", "result",
+	}
 	for index := len(order) - 1; index >= 0; index-- {
 		step := repositoryReviewRunStep(run, order[index])
 		if step.Status == workflows.RunStatusRunning {
@@ -1204,6 +1223,14 @@ func applyRepositoryReviewRunProgress(
 ) {
 	if automation == nil || result == nil {
 		return
+	}
+	if rawPlan, exists := result.Outputs["scopePlan"]; exists && rawPlan != nil {
+		if encoded, err := json.Marshal(rawPlan); err == nil {
+			var scopePlan repoaudit.RepositoryReviewScopePlan
+			if json.Unmarshal(encoded, &scopePlan) == nil {
+				automation.ScopePlan = scopePlan
+			}
+		}
 	}
 	remaining := repositoryReviewInt(result.Outputs["remainingFiles"])
 	if remaining == 0 {

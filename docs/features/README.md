@@ -40,6 +40,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
 | Agent execution optimization           | [agent-execution-optimization.md](agent-execution-optimization.md) |
 | Repository pre-review and findings     | [repository-reviews.md](repository-reviews.md)                     |
+| Repository model evaluations           | [repository-model-evaluations.md](repository-model-evaluations.md) |
 
 ## Workflow
 

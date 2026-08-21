@@ -9,6 +9,10 @@ Open **Repository reviews** and choose **New pre-review**. Save a reusable
 profile with:
 
 - the repository URL or local checkout, ref, target, and review focus;
+- one or more target code types: hot-path production code, normal production
+  code, tests, and benchmark/performance tests;
+- optional exact include-folder and exclude-folder prefixes (excludes win), plus
+  free-text guidance that AI may use only to narrow that structured boundary;
 - one reviewer alias, or several aliases in comparison mode;
 - the bounded files per batch and parallel child count;
 - optional input/output prices for aliases whose account configuration has no
@@ -39,6 +43,14 @@ Quota monitoring and automatic resume run in the launcher backend, so the
 dashboard does not have to remain open. After a launcher restart, an interrupted
 profile is shown with the `service_restart` reason and resumes automatically
 only when that profile opted in.
+
+Before the first reviewer call in every batch, PicoClaw inventories the exact
+commit and classifies the structured scope. It releases the checkout, asks AI
+to plan a metadata-only target filter, reacquires only the pinned commit, and
+validates the plan natively against opaque candidate IDs and folder/type
+boundaries. The scope preflight summary records its commit, selection counts,
+rationale, and warnings. AI cannot invent a path, re-include an ignored folder,
+or select an unchosen code type.
 
 ## Install And Run From The CLI
 

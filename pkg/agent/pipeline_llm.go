@@ -213,7 +213,7 @@ func (p *Pipeline) CallLLM(
 			toolDefsForCall,
 		); handled {
 			if observeErr := ts.observeWorkflowAgentResponse(
-				exec.llmModelName,
+				exec.llmModel,
 				response,
 				time.Since(streamStartedAt),
 			); observeErr != nil {
@@ -272,12 +272,8 @@ func (p *Pipeline) CallLLM(
 				candidate.Model,
 				callOpts,
 			)
-			actualModelName := resolvedCandidateModelName(
-				[]providers.FallbackCandidate{candidate},
-				exec.llmModelName,
-			)
 			if observeErr := ts.observeWorkflowAgentResponse(
-				actualModelName,
+				candidate.Model,
 				response,
 				time.Since(startedAt),
 			); observeErr != nil {
@@ -352,12 +348,8 @@ func (p *Pipeline) CallLLM(
 			exec.llmModel,
 			exec.llmOpts,
 		)
-		actualModelName := resolvedCandidateModelName(
-			exec.activeCandidates,
-			exec.llmModelName,
-		)
 		if observeErr := ts.observeWorkflowAgentResponse(
-			actualModelName,
+			exec.llmModel,
 			resp,
 			time.Since(startedAt),
 		); observeErr != nil {

@@ -10,6 +10,7 @@ import (
 func TestNativeFunctionNamesReturnsSortedCopy(t *testing.T) {
 	first := NativeFunctionNames()
 	want := []string{
+		"evaluation.corpus",
 		"git.diff",
 		"git.filter",
 		"git.inventory",

@@ -56,6 +56,13 @@ func TestValidateAgentImmutableScopeRequiresSupportedModeAndNoTools(t *testing.T
 	if len(toolEnabled) != 1 || !strings.Contains(toolEnabled[0].Message, "requires tools: none") {
 		t.Fatalf("tool-enabled immutable scope errors = %#v", toolEnabled)
 	}
+	metadata := validateAgentStepOptions("jobs.review.steps[0].with", "main", map[string]any{
+		"scope_content": "metadata", "tools": "none", "session": "ephemeral",
+		"history": "none", "cache": "none",
+	})
+	if len(metadata) != 0 {
+		t.Fatalf("bounded metadata scope errors = %#v", metadata)
+	}
 }
 
 func TestValidateCallerJobUsesReusableWorkflowRef(t *testing.T) {
