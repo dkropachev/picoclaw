@@ -575,19 +575,14 @@ export function ModelAliasDialog({
                   const selectedValue = override.disabled
                     ? DISABLED_MODEL_VALUE
                     : override.model
-                  const accountAvailability = availability.filter((item) =>
-                    item.accountRefs.includes(override.accountRef),
-                  )
                   const rowOptions =
                     override.model &&
-                    !accountAvailability.some(
-                      (item) => item.id === override.model,
-                    )
+                    !availability.some((item) => item.id === override.model)
                       ? [
-                          ...accountAvailability,
+                          ...availability,
                           { id: override.model, accountRefs: [] },
                         ].sort((a, b) => a.id.localeCompare(b.id))
-                      : accountAvailability
+                      : availability
                   return (
                     <div
                       key={`${override.accountRef}-${index}`}

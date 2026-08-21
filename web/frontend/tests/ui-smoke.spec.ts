@@ -1883,14 +1883,14 @@ async function mockLauncherApis(
               body.account_ref === "gpt-4o-mini"
                 ? ["gpt-4o-mini", "gpt-5.4"]
                 : body.account_ref === "gpt-4o"
-                  ? ["gpt-4o", "gpt-5.4"]
+                  ? ["gpt-4o", "gpt-5.4", "gpt-5.5-sol"]
                   : ["gpt-4o", "gpt-5.4"]
             return json(route, {
               models: accountModels.map((id) => ({
                 id,
                 owned_by: "openai",
               })),
-              total: 2,
+              total: accountModels.length,
             })
           }
           case "/api/workflows/development/start": {
@@ -4226,11 +4226,14 @@ test("models page exposes editable model aliases without global runtime selectio
     name: /^gpt-4o-mini/,
   })
   await expect(accountSpecificModel.getByText(/Missing: gpt-4o/)).toBeVisible()
+  const solModel = page.getByRole("option", { name: /^gpt-5\.5-sol/ })
+  await expect(solModel.getByText(/Missing: gpt-4o-mini/)).toBeVisible()
   const defaultModelSearch = page.getByPlaceholder("Search models...")
   await expect(defaultModelSearch).toBeFocused()
-  await page.keyboard.type("gpt-5.4")
-  await expect(defaultModelSearch).toHaveValue("gpt-5.4")
-  await expect(sharedModel).toBeVisible()
+  await page.keyboard.type("gpt-5.5-sol")
+  await expect(defaultModelSearch).toHaveValue("gpt-5.5-sol")
+  await expect(solModel).toBeVisible()
+  await expect(sharedModel).toHaveCount(0)
   await expect(accountSpecificModel).toHaveCount(0)
   await defaultModelSearch.fill("")
   await page.keyboard.press("Escape")
@@ -4248,19 +4251,29 @@ test("models page exposes editable model aliases without global runtime selectio
   await expect(
     page.getByRole("option", { name: "gpt-5.4 All accounts (1)" }),
   ).toBeVisible()
+  const crossAccountModel = page
+    .getByRole("option", { name: /^gpt-4o / })
+    .last()
   await expect(
-    page.getByRole("option", { name: /^gpt-4o All accounts/ }),
-  ).toHaveCount(0)
+    crossAccountModel.getByText("Missing: gpt-4o-mini", { exact: false }),
+  ).toBeVisible()
+  const overrideSolModel = page
+    .getByRole("option", {
+      name: /^gpt-5\.5-sol/,
+    })
+    .last()
+  await expect(
+    overrideSolModel.getByText("Missing: gpt-4o-mini", { exact: false }),
+  ).toBeVisible()
   const overrideModelSearch = page.getByPlaceholder("Search models...").last()
   await expect(overrideModelSearch).toBeFocused()
-  await page.keyboard.type("gpt-5.4")
-  await expect(overrideModelSearch).toHaveValue("gpt-5.4")
-  await expect(
-    page.getByRole("option", { name: "gpt-5.4 All accounts (1)" }),
-  ).toBeVisible()
+  await page.keyboard.type("gpt-5.5-sol")
+  await expect(overrideModelSearch).toHaveValue("gpt-5.5-sol")
+  await expect(overrideSolModel).toBeVisible()
   await expect(
     page.getByRole("option", { name: /^gpt-4o-mini All accounts/ }),
   ).toHaveCount(0)
+  await expect(crossAccountModel).toHaveCount(0)
   await page.keyboard.press("Escape")
   expect(errors).toEqual([])
 })
