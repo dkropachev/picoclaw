@@ -152,6 +152,86 @@ func TestFallback_NonRetriableError(t *testing.T) {
 	}
 }
 
+func TestFallback_SafetyFilterTriesNextCandidate(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "primary"),
+		makeCandidate("anthropic", "fallback"),
+	}
+
+	attempt := 0
+	result, err := fc.Execute(
+		context.Background(),
+		candidates,
+		func(_ context.Context, _, _ string) (*LLMResponse, error) {
+			attempt++
+			if attempt == 1 {
+				return nil, errors.New(`API error status: 400 {"code":"security_violation"}`)
+			}
+			return &LLMResponse{Content: "recovered", FinishReason: "stop"}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if attempt != 2 || result == nil || result.Provider != "anthropic" || result.Model != "fallback" {
+		t.Fatalf("attempts = %d, result = %#v", attempt, result)
+	}
+	if len(result.Attempts) != 1 || result.Attempts[0].Reason != FailoverSafetyFilter {
+		t.Fatalf("fallback attempts = %#v, want safety-filter failure", result.Attempts)
+	}
+	if !ct.IsAvailable(candidates[0].StableKey()) {
+		t.Fatal("prompt-local safety filter put the primary candidate in global cooldown")
+	}
+}
+
+func TestFallback_ResponseSafetyFinishReasonTriesNextCandidateWithoutCooldown(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+	candidates := []FallbackCandidate{
+		makeCandidate("bedrock", "primary"),
+		makeCandidate("anthropic", "fallback"),
+	}
+	attempt := 0
+	result, err := fc.ExecuteCandidate(
+		context.Background(), candidates,
+		func(_ context.Context, _ FallbackCandidate) (*LLMResponse, error) {
+			attempt++
+			if attempt == 1 {
+				return &LLMResponse{FinishReason: "content_filter"}, nil
+			}
+			return &LLMResponse{Content: "recovered", FinishReason: "stop"}, nil
+		},
+	)
+	if err != nil || result == nil || result.Model != "fallback" || attempt != 2 ||
+		len(result.Attempts) != 1 || result.Attempts[0].Reason != FailoverSafetyFilter {
+		t.Fatalf("response safety fallback result=%#v attempts=%d err=%v", result, attempt, err)
+	}
+	if !ct.IsAvailable(candidates[0].StableKey()) {
+		t.Fatal("response safety filter put the primary candidate in cooldown")
+	}
+}
+
+func TestResponseSafetyFilterErrorRecognizesExplicitFinishReasons(t *testing.T) {
+	if err := ResponseSafetyFilterError(nil, "provider", "model"); err != nil {
+		t.Fatalf("nil response safety error = %v", err)
+	}
+	for _, reason := range []string{
+		"content_filter", "guardrail_intervened", "refusal", "safety",
+		"blocklist", "spii", "recitation", "image_safety", "prohibited_content",
+	} {
+		err := ResponseSafetyFilterError(&LLMResponse{FinishReason: reason}, "provider", "model")
+		classified := ClassifyError(err, "provider", "model")
+		if classified == nil || classified.Reason != FailoverSafetyFilter {
+			t.Fatalf("finish reason %q classified as %#v", reason, classified)
+		}
+	}
+	if err := ResponseSafetyFilterError(&LLMResponse{FinishReason: "stop"}, "provider", "model"); err != nil {
+		t.Fatalf("ordinary stop became safety error: %v", err)
+	}
+}
+
 func TestFallback_NonRetriableErrorKeepsTerminalCandidateIdentity(t *testing.T) {
 	ct := NewCooldownTracker()
 	fc := NewFallbackChain(ct, nil)

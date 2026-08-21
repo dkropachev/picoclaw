@@ -1303,6 +1303,57 @@ func TestHandleListModels_ReturnsStreamingConfig(t *testing.T) {
 	}
 }
 
+func TestHandleListModels_ReturnsSafePricingMetadata(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName:                   "priced-reviewer",
+		Provider:                    "openai",
+		Model:                       "gpt-review",
+		APIKeys:                     config.SimpleSecureStrings("sk-existing"),
+		InputPricePerMTok:           0.25,
+		OutputPricePerMTok:          1.75,
+		Subscription:                true,
+		SubscriptionEquivalentModel: "review-api",
+	}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "review-api",
+		Model: "gpt-review-api",
+	}}
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []modelResponse `json:"models"`
+	}
+	if err = json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(resp.Models) != 1 {
+		t.Fatalf("len(models) = %d, want 1", len(resp.Models))
+	}
+	model := resp.Models[0]
+	if model.InputPricePerMTok != 0.25 || model.OutputPricePerMTok != 1.75 ||
+		!model.Subscription || model.SubscriptionEquivalentModel != "review-api" {
+		t.Fatalf("pricing metadata = %#v", model)
+	}
+}
+
 func TestHandleAddModel_RejectsUnsupportedProvider(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

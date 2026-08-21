@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
@@ -37,6 +38,32 @@ type LLMProvider interface {
 type StatefulProvider interface {
 	LLMProvider
 	Close()
+}
+
+// ResponseSafetyFilterError converts explicit provider refusal finish reasons
+// into the same request-local failover category used for returned errors.
+func ResponseSafetyFilterError(response *LLMResponse, provider, model string) error {
+	if response == nil {
+		return nil
+	}
+	reason := strings.ToLower(strings.TrimSpace(response.FinishReason))
+	reason = strings.NewReplacer("-", "_", " ", "_").Replace(reason)
+	switch reason {
+	case "content_filter", "content_filtered", "safety_filter", "safety",
+		"refusal", "refused", "blocked", "guardrail", "guardrail_intervened",
+		"prohibited_content", "blocklist", "spii", "recitation", "image_safety":
+		return &FailoverError{
+			Reason:   FailoverSafetyFilter,
+			Provider: provider,
+			Model:    model,
+			Wrapped: fmt.Errorf(
+				"provider response finish_reason %q indicates an explicit safety filter",
+				response.FinishReason,
+			),
+		}
+	default:
+		return nil
+	}
 }
 
 // StreamingProvider is an optional interface for providers that support token streaming.
@@ -90,6 +117,7 @@ const (
 	FailoverNetwork         FailoverReason = "network"
 	FailoverTimeout         FailoverReason = "timeout"
 	FailoverFormat          FailoverReason = "format"
+	FailoverSafetyFilter    FailoverReason = "safety_filter"
 	FailoverContextOverflow FailoverReason = "context_overflow"
 	FailoverOverloaded      FailoverReason = "overloaded"
 	FailoverUnknown         FailoverReason = "unknown"
@@ -115,7 +143,9 @@ func (e *FailoverError) Unwrap() error {
 }
 
 // IsRetriable returns true if this error should trigger fallback to next candidate.
-// Non-retriable: Format errors (bad request structure, image dimension/size).
+// Non-retriable: Format errors (bad request structure, image dimension/size)
+// and context overflow. Explicit provider safety-filter failures remain
+// retriable so a bounded caller can try another configured model/provider.
 func (e *FailoverError) IsRetriable() bool {
 	return e.Reason != FailoverFormat && e.Reason != FailoverContextOverflow
 }

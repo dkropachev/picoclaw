@@ -38,6 +38,14 @@ func TestInstallWorkflowCommandInstallsGitHubIssueTriageWorkflow(t *testing.T) {
 	)
 }
 
+func TestInstallWorkflowCommandInstallsRepositoryBugFinderWorkflow(t *testing.T) {
+	testInstallWorkflowCommand(
+		t,
+		"repository-bug-finder",
+		"workflows/repository-bug-finder.yml",
+	)
+}
+
 func testInstallWorkflowCommand(t *testing.T, template string, ref string) {
 	t.Helper()
 	workspace := t.TempDir()
@@ -85,6 +93,7 @@ func TestInstallWorkflowCommandHelpListsAvailableTemplates(t *testing.T) {
 	}
 	for _, template := range []string{
 		"code-review",
+		"repository-bug-finder",
 		"github-issue-triage",
 	} {
 		if !strings.Contains(out.String(), template) {
@@ -137,5 +146,22 @@ jobs:
 	}
 	if !strings.Contains(out.String(), `"status": "succeeded"`) {
 		t.Fatalf("workflow run output = %s, want succeeded", out.String())
+	}
+}
+
+func TestCLIWorkflowRepositoryReviewProfileResolverRequiresConfiguredRuntime(t *testing.T) {
+	var nilRunner *cliWorkflowRuntimeRunner
+	if _, err := nilRunner.ResolveRepositoryReviewProfile(context.Background(), "main", nil); err == nil ||
+		!strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("nil profile resolver error = %v", err)
+	}
+	runner := &cliWorkflowRuntimeRunner{}
+	if _, err := runner.ResolveRepositoryReviewProfile(
+		context.Background(),
+		"main",
+		[]string{"review-a"},
+	); err == nil ||
+		!strings.Contains(err.Error(), "config not loaded") {
+		t.Fatalf("unconfigured profile resolver error = %v", err)
 	}
 }

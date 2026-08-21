@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,57 @@ type fakeAgentRunner struct {
 	err      error
 }
 
+type repositoryProfileAgentStub struct {
+	profile    RepositoryReviewModelProfile
+	profileErr error
+	request    AgentRequest
+}
+
+func (r *repositoryProfileAgentStub) ResolveRepositoryReviewProfile(
+	_ context.Context,
+	_ string,
+	_ []string,
+) (RepositoryReviewModelProfile, error) {
+	return r.profile, r.profileErr
+}
+
+func (r *repositoryProfileAgentStub) RunAgent(
+	_ context.Context,
+	req AgentRequest,
+) (map[string]any, error) {
+	r.request = req
+	if req.CallAdmission != nil {
+		if err := req.CallAdmission(); err != nil {
+			return nil, err
+		}
+	}
+	if req.UsageObserver != nil {
+		if err := req.UsageObserver(AgentUsage{Model: "review-a", TotalTokens: 3}); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"text": "ok"}, nil
+}
+
+type usageReportingAgentRunner struct {
+	usage []AgentUsage
+}
+
+func (r *usageReportingAgentRunner) RunAgent(
+	_ context.Context,
+	req AgentRequest,
+) (map[string]any, error) {
+	for _, usage := range r.usage {
+		if req.UsageObserver == nil {
+			return nil, errors.New("usage observer is nil")
+		}
+		if err := req.UsageObserver(usage); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"text": "ok", "usage": append([]AgentUsage(nil), r.usage...)}, nil
+}
+
 type retrySourceTrackingStore struct {
 	RunStore
 	sourceID    string
@@ -61,6 +113,218 @@ func (r *fakeAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[str
 		return cloneMap(r.outputs), nil
 	}
 	return map[string]any{"text": req.Message}, nil
+}
+
+func TestWorkflowWorkspaceCleanupTracksFrozenScopesAndJoinsReleaseErrors(t *testing.T) {
+	if cleanup := (*workflowWorkspaceCleanup)(nil); cleanup.releaseAll() != nil {
+		t.Fatal("nil workspace cleanup returned an error")
+	}
+	var nilCleanup *workflowWorkspaceCleanup
+	nilCleanup.track("")
+	nilCleanup.trackFrozen("")
+
+	runner := &fakeToolRunner{err: errors.New("release failed")}
+	cleanup := &workflowWorkspaceCleanup{runner: runner}
+	cleanup.track("session-a")
+	cleanup.track("session-b")
+	cleanup.released("session-b")
+	token, err := storeNativeFrozenGitScope(
+		ExecutionContext{RunID: "cleanup-run", WorkflowRef: "workflows/cleanup.yml"},
+		[]map[string]any{{"path": "service.go"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup.trackFrozen(token)
+	if err := cleanup.releaseAll(); err == nil || !strings.Contains(err.Error(), "release failed") {
+		t.Fatalf("releaseAll error = %v", err)
+	}
+	if len(runner.requests) != 1 || runner.requests[0].Session != "session-a" ||
+		runner.requests[0].Args["action"] != "release" {
+		t.Fatalf("release requests = %#v", runner.requests)
+	}
+	if _, err := consumeNativeFrozenGitScope(
+		ExecutionContext{RunID: "cleanup-run", WorkflowRef: "workflows/cleanup.yml"}, token,
+	); err == nil {
+		t.Fatal("releaseAll left a frozen scope available")
+	}
+}
+
+func TestRepositoryBugFinderRepositoryInputRejectsSecretsAndMissingValues(t *testing.T) {
+	for _, value := range []any{nil, "", "   "} {
+		if err := validateRepositoryBugFinderRepositoryInput(value); err == nil ||
+			!strings.Contains(err.Error(), "required") {
+			t.Fatalf("missing repository %#v error = %v", value, err)
+		}
+	}
+	for _, value := range []any{"owner/repo", "https://github.com/owner/repo.git"} {
+		if err := validateRepositoryBugFinderRepositoryInput(value); err != nil {
+			t.Fatalf("safe repository %#v error = %v", value, err)
+		}
+	}
+	for _, value := range []any{
+		"https://token@github.com/owner/repo.git",
+		"https://github.com/owner/repo.git?token=secret",
+		"https://github.com/owner/repo.git#fragment",
+	} {
+		if err := validateRepositoryBugFinderRepositoryInput(value); err == nil ||
+			!strings.Contains(err.Error(), "credentialed or parameterized") {
+			t.Fatalf("unsafe repository %#v error = %v", value, err)
+		}
+	}
+}
+
+func TestRepositoryReviewAgentContextReservesControllerDeadline(t *testing.T) {
+	background, cancel := repositoryReviewAgentContext(context.Background(), false)
+	cancel()
+	if background != context.Background() {
+		t.Fatal("ordinary agent context was replaced")
+	}
+	unbounded, cancel := repositoryReviewAgentContext(context.Background(), true)
+	cancel()
+	if _, bounded := unbounded.Deadline(); bounded {
+		t.Fatal("unbounded repository review gained a deadline")
+	}
+
+	parent, parentCancel := context.WithDeadline(context.Background(), time.Now().Add(80*time.Millisecond))
+	defer parentCancel()
+	child, cancel := repositoryReviewAgentContext(parent, true)
+	defer cancel()
+	parentDeadline, _ := parent.Deadline()
+	childDeadline, bounded := child.Deadline()
+	if !bounded || !childDeadline.Before(parentDeadline) {
+		t.Fatalf("child deadline=%v parent=%v bounded=%t", childDeadline, parentDeadline, bounded)
+	}
+
+	expired, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expiredCancel()
+	canceled, cancel := repositoryReviewAgentContext(expired, true)
+	defer cancel()
+	if canceled.Err() == nil {
+		t.Fatal("expired repository review context was not canceled")
+	}
+}
+
+func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testing.T) {
+	base := map[string]any{"agent": "", "profile": map[string]any{
+		"schema": "repository-bug-finder-v1", "models": " review-a, review-a; review-b ",
+		"max_content_bytes": 128 << 10,
+	}}
+	if _, err := (&Executor{Agents: &fakeAgentRunner{}}).bindRepositoryReviewModelProfile(
+		context.Background(), base,
+	); err == nil || !strings.Contains(err.Error(), "model-profile-aware") {
+		t.Fatalf("profile-unaware runtime error = %v", err)
+	}
+	plain := map[string]any{"profile": map[string]any{"schema": "custom"}}
+	if got, err := (&Executor{Agents: &fakeAgentRunner{}}).bindRepositoryReviewModelProfile(
+		context.Background(), plain,
+	); err != nil || !reflect.DeepEqual(got, plain) {
+		t.Fatalf("custom profile binding = (%#v, %v)", got, err)
+	}
+
+	stub := &repositoryProfileAgentStub{profile: RepositoryReviewModelProfile{
+		Revision: "sha256:models", ReviewerModels: []string{"review-a", "review-b"}, MaxContentBytes: 64 << 10,
+	}}
+	bound, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := bound["profile"].(map[string]any)
+	if profile["model_graph_revision"] != "sha256:models" || profile["max_content_bytes"] != 64<<10 ||
+		bound["resolved_max_content_bytes"] != 64<<10 ||
+		!reflect.DeepEqual(profile["models"], []string{"review-a", "review-b"}) {
+		t.Fatalf("bound repository review profile = %#v", bound)
+	}
+	if base["resolved_max_content_bytes"] != nil {
+		t.Fatalf("profile binding mutated input = %#v", base)
+	}
+
+	stub.profileErr = errors.New("resolver unavailable")
+	if _, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(context.Background(), base); err == nil ||
+		!strings.Contains(err.Error(), "resolver unavailable") {
+		t.Fatalf("resolver error = %v", err)
+	}
+	for _, empty := range []RepositoryReviewModelProfile{
+		{},
+		{Revision: "revision", MaxContentBytes: 1},
+		{Revision: "revision", ReviewerModels: []string{"review-a"}},
+	} {
+		stub.profileErr = nil
+		stub.profile = empty
+		if _, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(
+			context.Background(),
+			base,
+		); err == nil ||
+			!strings.Contains(err.Error(), "empty result") {
+			t.Fatalf("empty profile %#v error = %v", empty, err)
+		}
+	}
+}
+
+func TestRepositoryReviewModelNamesNormalizesBoundsAndSupportedInputs(t *testing.T) {
+	if got := repositoryReviewModelNames(" a, b; a\n c "); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Fatalf("string model names = %#v", got)
+	}
+	if got := repositoryReviewModelNames([]string{" a ", "", "b"}); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("string-slice model names = %#v", got)
+	}
+	values := []any{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	if got := repositoryReviewModelNames(values); len(got) != 8 || got[7] != "h" {
+		t.Fatalf("bounded model names = %#v", got)
+	}
+	if got := repositoryReviewModelNames(42); len(got) != 0 {
+		t.Fatalf("unsupported model-name input = %#v", got)
+	}
+}
+
+func TestRunStepTargetRejectsUnboundReviewScopeAndReportsAdmissionUsage(t *testing.T) {
+	stub := &repositoryProfileAgentStub{}
+	executor := &Executor{Agents: stub}
+	execCtx := ExecutionContext{RunID: "step-run", WorkflowRef: "workflows/review.yml", StepID: "review"}
+	if _, err := executor.runStepTarget(context.Background(), Step{Uses: "agent/main"}, map[string]any{
+		"scope_content": "immutable_git", "scope": "not-a-scope",
+	}, execCtx); err == nil || !strings.Contains(err.Error(), "immutable Git scope") {
+		t.Fatalf("invalid immutable scope error = %v", err)
+	}
+	if _, err := executor.runStepTarget(context.Background(), Step{Uses: "agent/main"}, map[string]any{
+		"scope_content": "frozen_git", "scope_snapshot": "short",
+	}, execCtx); err == nil || !strings.Contains(err.Error(), "token is invalid") {
+		t.Fatalf("invalid frozen scope error = %v", err)
+	}
+
+	var admitted, observed int
+	executor.AgentCallAdmission = func(event AgentCallAdmissionEvent) error {
+		admitted++
+		if event.RunID != "step-run" || event.StepID != "review" {
+			t.Fatalf("admission event = %#v", event)
+		}
+		return nil
+	}
+	executor.AgentUsageObserver = func(event AgentUsageEvent) error {
+		observed++
+		if event.Usage.Model != "review-a" || event.Usage.TotalTokens != 3 {
+			t.Fatalf("usage event = %#v", event)
+		}
+		return nil
+	}
+	if _, err := executor.runStepTarget(
+		context.Background(),
+		Step{Uses: "agent/main"},
+		map[string]any{},
+		execCtx,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if admitted != 1 || observed != 1 {
+		t.Fatalf("admitted=%d observed=%d", admitted, observed)
+	}
+
+	stub.profileErr = errors.New("profile blocked")
+	if _, err := executor.runStepTarget(context.Background(), Step{Uses: "function/review.repository"}, map[string]any{
+		"action": "plan", "profile": map[string]any{"schema": "repository-bug-finder-v1"},
+	}, execCtx); err == nil || !strings.Contains(err.Error(), "profile blocked") {
+		t.Fatalf("unbound plan error = %v", err)
+	}
 }
 
 type fakeRuntimeEventPublisher struct {
@@ -439,6 +703,52 @@ jobs:
 	scope, ok := req.Scope.([]any)
 	if !ok || len(scope) != 1 {
 		t.Fatalf("scope = %#v, want one scope item", req.Scope)
+	}
+}
+
+func TestExecutorWrapsAgentUsageWithRunJobStepIdentity(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Agent Usage Identity
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: review
+        uses: agent/reviewer
+        with:
+          prompt: Review this.
+`)
+	reported := []AgentUsage{
+		{Model: "cheap", PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, CachedTokens: 1},
+		{Model: "cheap", PromptTokens: 20, CompletionTokens: 3, TotalTokens: 23, CachedTokens: 4},
+	}
+	var events []AgentUsageEvent
+	executor := &Executor{
+		WorkspaceDir: t.TempDir(),
+		Agents:       &usageReportingAgentRunner{usage: reported},
+		AgentUsageObserver: func(event AgentUsageEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	}
+	result, err := executor.Run(t.Context(), RunRequest{
+		RunID:       "wr_usage_identity",
+		Workflow:    workflow,
+		WorkflowRef: "inline",
+	})
+	if err != nil || result.Status != RunStatusSucceeded {
+		t.Fatalf("Run() result = %#v, error = %v", result, err)
+	}
+	if len(events) != len(reported) {
+		t.Fatalf("usage events = %#v, want %d", events, len(reported))
+	}
+	for index, event := range events {
+		if event.RunID != "wr_usage_identity" || event.JobID != "main" ||
+			event.StepID != "review" || event.Usage != reported[index] {
+			t.Fatalf("usage event %d = %#v", index, event)
+		}
 	}
 }
 

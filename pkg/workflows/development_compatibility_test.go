@@ -90,8 +90,8 @@ func TestGenerateWorkflowDraftYAMLRecognizesWholeRepoReview(t *testing.T) {
 	if !ok {
 		t.Fatalf("jobs = %#v, want review job", workflow.Jobs)
 	}
-	if len(job.Steps) != 2 {
-		t.Fatalf("steps = %#v, want inventory and review steps", job.Steps)
+	if len(job.Steps) != 5 {
+		t.Fatalf("steps = %#v, want inventory, plan, review, record, and result steps", job.Steps)
 	}
 	inventory := job.Steps[0]
 	if inventory.Uses != "function/git.inventory" {
@@ -106,11 +106,15 @@ func TestGenerateWorkflowDraftYAMLRecognizesWholeRepoReview(t *testing.T) {
 	if got := inventory.With["target"]; got != "all" {
 		t.Fatalf("target = %#v, want all", got)
 	}
-	if got := inventory.With["include_content"]; got != true {
-		t.Fatalf("include_content = %#v, want true", got)
+	if _, exists := inventory.With["include_content"]; exists {
+		t.Fatalf("inventory embeds repository content in durable outputs: %#v", inventory.With)
 	}
 
-	review := job.Steps[1]
+	plan := job.Steps[1]
+	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" {
+		t.Fatalf("plan = %#v, want incremental repository review plan", plan)
+	}
+	review := job.Steps[2]
 	if review.Uses != "agent/main" {
 		t.Fatalf("review uses = %q, want agent/main", review.Uses)
 	}
@@ -118,14 +122,25 @@ func TestGenerateWorkflowDraftYAMLRecognizesWholeRepoReview(t *testing.T) {
 	if !ok {
 		t.Fatalf("managed = %#v, want map", review.With["managed"])
 	}
-	if managed["strategy"] != "scope_split" {
-		t.Fatalf("managed.strategy = %#v, want scope_split", managed["strategy"])
+	if managed["strategy"] != "auto" {
+		t.Fatalf("managed.strategy = %#v, want auto", managed["strategy"])
 	}
-	if got := review.With["scope"]; got != "${{ steps.inventory.outputs.selectedFiles }}" {
-		t.Fatalf("scope = %#v, want selectedFiles expression", got)
+	if got := review.With["scope"]; got != "${{ steps.plan.outputs.pendingFiles }}" {
+		t.Fatalf("scope = %#v, want incremental pendingFiles expression", got)
+	}
+	if review.With["tools"] != "none" || review.With["scope_content"] != "immutable_git" ||
+		review.With["review_profile"] != "repository-bug-finder-v1" ||
+		review.With["max_content_bytes"] != "${{ steps.plan.outputs.maxContentBytes }}" {
+		t.Fatalf("review authority/content = %#v, want tool-free immutable Git scope", review.With)
 	}
 	if _, ok := review.With["output"].(map[string]any); !ok {
 		t.Fatalf("output = %#v, want structured output contract", review.With["output"])
+	}
+	if record := job.Steps[3]; record.Uses != "function/review.repository" || record.With["action"] != "record" {
+		t.Fatalf("record = %#v, want durable repository findings record", record)
+	}
+	if result := job.Steps[4]; result.Uses != "function/review.repository" || result.With["action"] != "result" {
+		t.Fatalf("result = %#v, want explicit no-op/batch projection", result)
 	}
 }
 

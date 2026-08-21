@@ -192,6 +192,11 @@ produce outbound responses. Security rules control dashboard and channel
 credentials. Runtime events expose delivery status. Thread card payloads can
 render inside chat messages and route users into thread search or open-thread
 views without changing the channel delivery contract.
+The gateway service transaction also installs, releases, and reinstalls the
+repository-review issue-publication handler against the same retained
+AgentLoop generation. Repository Reviews owns that protected runtime route and
+its durable effects; it adds no channel adapter, inbound message, typing state,
+or outbound chat delivery behavior.
 
 ## Failure And Edge Cases
 

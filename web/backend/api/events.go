@@ -622,7 +622,9 @@ func (h *Handler) eventGatewayURL(
 	upstreamPath string,
 	rawQuery string,
 ) (*url.URL, error) {
-	if pidData == nil || !strings.HasPrefix(upstreamPath, "/runtime/eventing/") {
+	if pidData == nil ||
+		(!strings.HasPrefix(upstreamPath, "/runtime/eventing/") &&
+			!strings.HasPrefix(upstreamPath, "/runtime/repository-reviews/")) {
 		return nil, errors.New("invalid event gateway target")
 	}
 	port := pidData.Port

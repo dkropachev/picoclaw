@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 type AgentOutputContract struct {
@@ -394,6 +395,23 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 			return fmt.Errorf("%s must be one of %v", path, enumValues)
 		}
 	}
+	if schemaType(schema) == "string" {
+		if minimum := schemaMinimumLength(schema); minimum > 0 {
+			if text, ok := value.(string); !ok || utf8.RuneCountInString(text) < minimum {
+				return fmt.Errorf("%s must contain at least %d characters", path, minimum)
+			}
+		}
+		if maximum := schemaIntegerKeyword(schema, "maxLength"); maximum > 0 {
+			if text, ok := value.(string); !ok || len(text) > maximum {
+				return fmt.Errorf("%s must contain at most %d bytes", path, maximum)
+			}
+		}
+	}
+	if minimum, configured := schemaNumericKeyword(schema, "minimum"); configured {
+		if number, ok := asFloat(value); !ok || number < minimum {
+			return fmt.Errorf("%s must be at least %v", path, minimum)
+		}
+	}
 	switch schemaType(schema) {
 	case "object":
 		obj, ok := value.(map[string]any)
@@ -421,6 +439,9 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 		if !ok {
 			return fmt.Errorf("%s must be array", path)
 		}
+		if maximum := schemaIntegerKeyword(schema, "maxItems"); maximum > 0 && len(arr) > maximum {
+			return fmt.Errorf("%s must contain at most %d items", path, maximum)
+		}
 		if itemSchema := schemaItems(schema); len(itemSchema) > 0 {
 			for i, item := range arr {
 				if err := validateJSONSchemaValue(item, itemSchema, fmt.Sprintf("%s[%d]", path, i)); err != nil {
@@ -430,6 +451,34 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 		}
 	}
 	return nil
+}
+
+func schemaMinimumLength(schema map[string]any) int {
+	return schemaIntegerKeyword(schema, "minLength")
+}
+
+func schemaIntegerKeyword(schema map[string]any, keyword string) int {
+	switch value := schema[keyword].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return int(parsed)
+	}
+	return 0
+}
+
+func schemaNumericKeyword(schema map[string]any, keyword string) (float64, bool) {
+	value, exists := schema[keyword]
+	if !exists {
+		return 0, false
+	}
+	number, ok := asFloat(value)
+	return number, ok
 }
 
 func validateJSONSchemaAdditionalProperties(

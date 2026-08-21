@@ -1,0 +1,119 @@
+import type {
+  RepositoryReviewFinding,
+  RepositoryReviewIssueDraft,
+  RepositoryReviewState,
+} from "@/api/repository-reviews"
+
+const discussionTextFieldBytes = 8 << 10
+const discussionChecks = 32
+const discussionCheckBytes = 512
+const discussionObservationVariants = 4
+
+function boundedDiscussionText(value: string | undefined): string {
+  if (!value) return "none"
+  const encoded = new TextEncoder().encode(value)
+  if (encoded.byteLength <= discussionTextFieldBytes) return value
+  return `${new TextDecoder().decode(encoded.slice(0, discussionTextFieldBytes))}\n[truncated for discussion]`
+}
+
+function boundedDiscussionCheck(value: string): string {
+  const encoded = new TextEncoder().encode(value)
+  return encoded.byteLength <= discussionCheckBytes
+    ? value
+    : `${new TextDecoder().decode(encoded.slice(0, discussionCheckBytes))}…`
+}
+
+export function discussionPrompt(
+  repository: RepositoryReviewState,
+  findings: RepositoryReviewFinding[],
+): string {
+  const contextByID = new Map(
+    repository.contexts.map((context) => [context.id, context]),
+  )
+  const selectedContextIDs = [
+    ...new Set(findings.flatMap((finding) => finding.context_ids)),
+  ]
+  const lines = [
+    "Discuss these validated repository-review findings with me.",
+    `Repository: ${repository.repository}`,
+    `Repository review ID: ${repository.id}`,
+    `Latest reviewed commit SHA: ${repository.last_commit_sha || "unknown"}`,
+    "The context IDs below are opaque durable references. Use them as provenance identifiers; do not invent replacement context.",
+    "",
+  ]
+  for (const finding of findings) {
+    lines.push(
+      `- Finding ${finding.id}: ${boundedDiscussionText(finding.title)}`,
+      `  File: ${finding.file.path}${finding.line == null ? "" : `:${finding.line}`}`,
+      `  Symbol: ${boundedDiscussionText(finding.symbol || "unknown")}`,
+      `  Finding commit SHA: ${finding.commit_sha}`,
+      `  Blob SHA: ${finding.file.blob_sha}`,
+      `  Models: ${finding.models.join(", ")}`,
+      `  Context IDs: ${finding.context_ids.join(", ")}`,
+      `  Message: ${boundedDiscussionText(finding.message)}`,
+      `  Evidence: ${boundedDiscussionText(finding.evidence)}`,
+      `  Impact: ${boundedDiscussionText(finding.impact)}`,
+      `  Recommendation: ${boundedDiscussionText(finding.recommendation)}`,
+      `  Validation: ${finding.validation.status} — ${boundedDiscussionText(finding.validation.summary)}`,
+      `  Validation checks: ${(finding.validation.checks ?? []).slice(0, discussionChecks).map(boundedDiscussionCheck).join("; ") || "none"}`,
+    )
+    for (const observation of (finding.observations ?? []).slice(
+      -discussionObservationVariants,
+    )) {
+      lines.push(
+        `  Observation from ${observation.model} (${observation.context_id}):`,
+        `    Severity: ${observation.severity}`,
+        `    Evidence: ${boundedDiscussionText(observation.evidence)}`,
+        `    Impact: ${boundedDiscussionText(observation.impact)}`,
+        `    Recommendation: ${boundedDiscussionText(observation.recommendation)}`,
+        `    Validation: ${boundedDiscussionText(observation.validation.summary)}`,
+      )
+    }
+  }
+  lines.push("", "Selected context manifests:")
+  for (const contextID of selectedContextIDs) {
+    const context = contextByID.get(contextID)
+    if (!context) {
+      lines.push(
+        `- Context ${contextID}: metadata unavailable in this snapshot`,
+      )
+      continue
+    }
+    lines.push(
+      `- Context ${context.id}`,
+      `  Commit SHA: ${context.commit_sha}`,
+      `  Model: ${context.model}`,
+      `  Profile hash: ${context.profile_hash || "unknown"}`,
+      `  Files (${context.files.length}):`,
+    )
+    for (const file of context.files) {
+      lines.push(
+        `    - ${file.path} | blob ${file.blob_sha} | ${file.size_bytes} bytes`,
+      )
+    }
+  }
+  return lines.join("\n")
+}
+
+export function githubNewIssueURL(
+  repository: string,
+  draft: Pick<RepositoryReviewIssueDraft, "title" | "body" | "labels">,
+): string | undefined {
+  const path = githubRepositoryPath(repository)
+  if (!path) return undefined
+  const url = new URL(`https://github.com/${path}/issues/new`)
+  url.searchParams.set("title", draft.title)
+  url.searchParams.set("body", draft.body)
+  if (draft.labels && draft.labels.length > 0) {
+    url.searchParams.set("labels", draft.labels.join(","))
+  }
+  return url.toString()
+}
+
+export function githubRepositoryPath(repository: string): string | undefined {
+  const normalized = repository.trim()
+  const match =
+    /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9_.-]+)$/u.exec(normalized)
+  if (!match || match[2] === "." || match[2] === "..") return undefined
+  return `${match[1]}/${match[2]}`
+}

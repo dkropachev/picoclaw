@@ -2387,6 +2387,7 @@ const workflowNativeFunctionNames = new Set([
   "git.diff",
   "git.filter",
   "git.inventory",
+  "review.repository",
   "workflow.artifact",
   "workflow.state",
 ])
@@ -2395,7 +2396,7 @@ const workflowCapabilityBounds = {
   agents: 128,
   tools: 256,
   mcpTools: 256,
-  functions: 5,
+  functions: 6,
   identityBytes: 256,
   targetBytes: 1024,
   schemaDepth: 6,

@@ -203,6 +203,9 @@ func (fc *FallbackChain) ExecuteCandidate(
 		start := time.Now()
 		resp, err := run(ctx, candidate)
 		elapsed := time.Since(start)
+		if err == nil {
+			err = ResponseSafetyFilterError(resp, candidate.Provider, candidate.Model)
+		}
 
 		if err == nil {
 			// Success.
@@ -256,8 +259,12 @@ func (fc *FallbackChain) ExecuteCandidate(
 			return nil, failErr
 		}
 
-		// Retriable error: mark failure and continue to next candidate.
-		fc.cooldown.MarkFailure(cooldownKey, failErr.Reason)
+		// Provider safety filters are prompt/request-local decisions, not provider
+		// health. Continue through this request's fallback candidates without
+		// poisoning the candidate for unrelated work or the bounded outer retry.
+		if failErr.Reason != FailoverSafetyFilter {
+			fc.cooldown.MarkFailure(cooldownKey, failErr.Reason)
+		}
 		result.Attempts = append(result.Attempts, FallbackAttempt{
 			Provider:    candidate.Provider,
 			Model:       candidate.Model,
@@ -331,6 +338,9 @@ func (fc *FallbackChain) ExecuteImage(
 		start := time.Now()
 		resp, err := run(ctx, candidate)
 		elapsed := time.Since(start)
+		if err == nil {
+			err = ResponseSafetyFilterError(resp, candidate.Provider, candidate.Model)
+		}
 
 		if err == nil {
 			result.Response = resp

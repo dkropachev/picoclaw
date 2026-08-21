@@ -381,6 +381,15 @@ protection, network confinement, and private evidence projection. Launcher
 Management owns authenticated browser composition. Event Automation owns the PR
 aggregate and transition policy; no neighboring feature may advance it directly.
 
+Repository Reviews owns its separate ledger, controller, and publication
+semantics. It composes only the gateway's generation-bound GitHub issue
+capability and the launcher's already authenticated bounded proxy. Gateway
+admission/reload releases that publication route with the old generation, and
+the shared issue-URL validator accepts repository-path case differences while
+still requiring the exact provider host/scheme, repository path, and positive
+numeric issue tail; none of this admits a repository review as an event or PR
+aggregate.
+
 The `reviews` package is only a narrow GitHub provider/submission adapter and
 `prworkspace/localci` is only a reusable local validation engine. Neither is
 a separate product, route, store, identity, worker, or UI.

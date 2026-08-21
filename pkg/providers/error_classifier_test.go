@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"syscall"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/providers/common"
 )
 
 type stubNetError struct {
@@ -24,6 +26,21 @@ func TestClassifyError_Nil(t *testing.T) {
 	result := ClassifyError(nil, "openai", "gpt-4")
 	if result != nil {
 		t.Errorf("expected nil for nil error, got %+v", result)
+	}
+}
+
+func TestClassifyErrorPreservesExistingReasonAndFillsMissingIdentity(t *testing.T) {
+	original := &FailoverError{Reason: FailoverTimeout, Wrapped: context.DeadlineExceeded}
+	classified := ClassifyError(fmt.Errorf("wrapped: %w", original), "provider-a", "model-a")
+	if classified == nil || classified == original || classified.Reason != FailoverTimeout ||
+		classified.Provider != "provider-a" || classified.Model != "model-a" {
+		t.Fatalf("classified existing failover = %#v", classified)
+	}
+	if original.Provider != "" || original.Model != "" {
+		t.Fatalf("classification mutated original failover = %#v", original)
+	}
+	if got := classifyByMessage("request was rejected by the content safety filter"); got != FailoverSafetyFilter {
+		t.Fatalf("safety message classification = %q", got)
 	}
 }
 
@@ -321,6 +338,99 @@ func TestClassifyError_AuthPatterns(t *testing.T) {
 	}
 }
 
+func TestClassifyError_SafetyFilterPatternsPrecedeHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{
+			name: "content policy HTTP 400",
+			err: &common.HTTPError{
+				StatusCode:  400,
+				BodyPreview: `{"error":{"code":"content_policy_violation"}}`,
+			},
+			wantStatus: 400,
+		},
+		{
+			name: "security violation HTTP 403",
+			err: &common.HTTPError{
+				StatusCode:  403,
+				BodyPreview: `{"error":{"message":"Security policy violation"}}`,
+			},
+			wantStatus: 403,
+		},
+		{
+			name:       "structured refusal",
+			err:        errors.New(`API error status: 400 {"type":"refusal","refusal":"blocked"}`),
+			wantStatus: 400,
+		},
+		{
+			name: "explicit refusal error",
+			err:  errors.New("refusal: provider declined the response"),
+		},
+		{
+			name: "Gemini safety finish reason",
+			err:  errors.New(`provider response failed: {"finishReason":"SAFETY"}`),
+		},
+		{
+			name: "Azure responsible AI code",
+			err:  errors.New("ResponsibleAIPolicyViolation"),
+		},
+		{
+			name: "explicit blocked prompt",
+			err:  errors.New("prompt was blocked by the safety policy"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ClassifyError(tt.err, "provider", "model")
+			if result == nil {
+				t.Fatal("expected classified safety-filter error")
+			}
+			if result.Reason != FailoverSafetyFilter {
+				t.Fatalf("reason = %q, want %q", result.Reason, FailoverSafetyFilter)
+			}
+			if result.Status != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", result.Status, tt.wantStatus)
+			}
+			if !result.IsRetriable() {
+				t.Fatal("safety-filter error must permit bounded fallback")
+			}
+		})
+	}
+}
+
+func TestClassifyError_GenericAuthorizationIsNotSafetyFilter(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want FailoverReason
+	}{
+		{
+			name: "generic forbidden",
+			err:  &common.HTTPError{StatusCode: 403, BodyPreview: `{"error":"forbidden"}`},
+			want: FailoverAuth,
+		},
+		{name: "access denied", err: errors.New("access denied by organization policy"), want: FailoverAuth},
+		{name: "expired security token", err: errors.New("the security token has expired"), want: FailoverAuth},
+		{name: "connection refused", err: errors.New("connection refused"), want: FailoverNetwork},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ClassifyError(tt.err, "provider", "model")
+			if result == nil || result.Reason != tt.want {
+				t.Fatalf("result = %#v, want reason %q", result, tt.want)
+			}
+			if result.Reason == FailoverSafetyFilter {
+				t.Fatal("generic authorization/transport error became a safety filter")
+			}
+		})
+	}
+}
+
 func TestClassifyError_FormatPatterns(t *testing.T) {
 	patterns := []string{
 		"string should match pattern",
@@ -424,6 +534,7 @@ func TestFailoverError_IsRetriable(t *testing.T) {
 		{FailoverBilling, true},
 		{FailoverNetwork, true},
 		{FailoverTimeout, true},
+		{FailoverSafetyFilter, true},
 		{FailoverOverloaded, true},
 		{FailoverFormat, false},
 		{FailoverContextOverflow, false},

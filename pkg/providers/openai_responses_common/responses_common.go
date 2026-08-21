@@ -300,6 +300,7 @@ func parseResponse(apiResp *responses.Response) *protocoltypes.LLMResponse {
 	var content strings.Builder
 	var reasoningContent strings.Builder
 	var toolCalls []protocoltypes.ToolCall
+	refused := false
 
 	for _, item := range apiResp.Output {
 		switch item.Type {
@@ -309,6 +310,7 @@ func parseResponse(apiResp *responses.Response) *protocoltypes.LLMResponse {
 				case "output_text":
 					content.WriteString(c.Text)
 				case "refusal":
+					refused = true
 					content.WriteString(c.Refusal)
 				}
 			}
@@ -340,6 +342,9 @@ func parseResponse(apiResp *responses.Response) *protocoltypes.LLMResponse {
 		finishReason = "error"
 	case responses.ResponseStatusCancelled:
 		finishReason = "canceled"
+	}
+	if refused {
+		finishReason = "refusal"
 	}
 
 	var usage *protocoltypes.UsageInfo

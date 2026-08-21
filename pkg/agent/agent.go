@@ -29,6 +29,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/utils"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 type AgentLoop struct {
@@ -129,28 +130,32 @@ type processOptions struct {
 	UserMessage             string          // User message content (may include prefix)
 	ForcedSkills            []string        // Skills explicitly requested for this message
 	TurnProfile             config.EffectiveTurnProfile
-	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
-	SuppressDefaultContext  bool                   // Keep only explicit system overlays for isolated turns
-	Media                   []string               // media:// refs from inbound message
-	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
-	DefaultResponse         string                 // Response when LLM returns empty
-	PromptCacheKey          string                 // Optional provider prompt cache key override
-	ModelNameOverride       string                 // Optional exact model alias override for this isolated turn
-	ModelFallbacksOverride  []string               // Optional exact fallback aliases; non-nil replaces inherited fallbacks
-	AccountRefOverride      string                 // Optional concrete account or account-router override for this isolated turn
-	ReasoningEffortOverride string                 // Optional reasoning_effort override for this isolated turn
-	EnableSummary           bool                   // Whether to trigger summarization
-	SendResponse            bool                   // Whether to send response via bus
-	AllowInterimPicoPublish bool                   // Whether pico tool-call interim text can be published when SendResponse is false
-	SuppressToolFeedback    bool                   // Whether to suppress inline tool feedback messages
-	NoHistory               bool                   // If true, don't load session history (for heartbeat)
-	DisableTools            bool                   // If true, no provider or runtime tools are callable this turn
-	DisablePromptCache      bool                   // If true, omit provider prompt cache key
-	SkipInitialSteeringPoll bool                   // If true, skip the steering poll at loop start (used by Continue)
-	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
-	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
-	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
-	turnReservation         *turnState             // exact root/continuation placeholder, process-local only
+	SystemPromptOverride    string                  // Override the default system prompt (Used by SubTurns)
+	SuppressDefaultContext  bool                    // Keep only explicit system overlays for isolated turns
+	Media                   []string                // media:// refs from inbound message
+	InitialSteeringMessages []providers.Message     // Steering messages from refactor/agent
+	DefaultResponse         string                  // Response when LLM returns empty
+	PromptCacheKey          string                  // Optional provider prompt cache key override
+	ModelNameOverride       string                  // Optional exact model alias override for this isolated turn
+	ModelFallbacksOverride  []string                // Optional exact fallback aliases; non-nil replaces inherited fallbacks
+	AccountRefOverride      string                  // Optional concrete account or account-router override for this isolated turn
+	ReasoningEffortOverride string                  // Optional reasoning_effort override for this isolated turn
+	EnableSummary           bool                    // Whether to trigger summarization
+	SendResponse            bool                    // Whether to send response via bus
+	AllowInterimPicoPublish bool                    // Whether pico tool-call interim text can be published when SendResponse is false
+	SuppressToolFeedback    bool                    // Whether to suppress inline tool feedback messages
+	NoHistory               bool                    // If true, don't load session history (for heartbeat)
+	DisableTools            bool                    // If true, no provider or runtime tools are callable this turn
+	DisablePromptCache      bool                    // If true, omit provider prompt cache key
+	SkipInitialSteeringPoll bool                    // If true, skip the steering poll at loop start (used by Continue)
+	InboundContext          *bus.InboundContext     // Normalized inbound facts for events/hooks
+	RouteResult             *routing.ResolvedRoute  // Route decision snapshot for events/hooks
+	SessionScope            *session.SessionScope   // Session scope snapshot for events/hooks
+	turnReservation         *turnState              // exact root/continuation placeholder, process-local only
+	resultModelName         *string                 // private caller-owned successful model provenance
+	resultUsage             *[]workflows.AgentUsage // private caller-owned detached per-model usage
+	usageObserver           workflows.AgentUsageObserver
+	callAdmission           workflows.AgentCallAdmission
 }
 
 type continuationTarget struct {
@@ -1028,6 +1033,11 @@ func (al *AgentLoop) runAgentLoop(
 		newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope),
 	)
 	ts := newTurnState(agent, opts, turnScope)
+	if opts.resultUsage != nil {
+		defer func() {
+			*opts.resultUsage = cloneWorkflowAgentUsage(ts.workflowAgentUsageSnapshot())
+		}()
+	}
 	pipeline := NewPipeline(al)
 	result, err := al.runTurn(ctx, ts, pipeline)
 	if err != nil {
@@ -1085,6 +1095,12 @@ func (al *AgentLoop) runAgentLoop(
 				"iterations":   ts.currentIteration(),
 				"final_length": len(result.finalContent),
 			})
+	}
+	if opts.resultModelName != nil {
+		*opts.resultModelName = strings.TrimSpace(result.modelName)
+	}
+	if opts.resultUsage != nil {
+		*opts.resultUsage = cloneWorkflowAgentUsage(result.usage)
 	}
 
 	return result.finalContent, nil

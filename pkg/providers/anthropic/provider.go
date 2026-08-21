@@ -421,6 +421,8 @@ func parseResponse(resp *anthropic.Message) *LLMResponse {
 		finishReason = "length"
 	case anthropic.StopReasonEndTurn:
 		finishReason = "stop"
+	case anthropic.StopReasonRefusal:
+		finishReason = "refusal"
 	}
 
 	return &LLMResponse{

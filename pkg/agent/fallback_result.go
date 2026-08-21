@@ -49,7 +49,11 @@ func fallbackResultFromError(
 func fallbackResultFromSingleCandidate(
 	candidate providers.FallbackCandidate,
 	resp *providers.LLMResponse,
+	err error,
 ) *providers.FallbackResult {
+	if err != nil {
+		return fallbackResultFromError(err, candidate)
+	}
 	if resp == nil {
 		return nil
 	}

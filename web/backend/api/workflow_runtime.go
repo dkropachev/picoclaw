@@ -67,7 +67,10 @@ type webWorkflowRuntimeRunner struct {
 	initializeMCP func(context.Context, *agentloop.AgentLoop) error
 }
 
-var _ workflows.ReadOnlySessionCapturer = (*webWorkflowRuntimeRunner)(nil)
+var (
+	_ workflows.ReadOnlySessionCapturer         = (*webWorkflowRuntimeRunner)(nil)
+	_ workflows.RepositoryReviewProfileResolver = (*webWorkflowRuntimeRunner)(nil)
+)
 
 func (r *webWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.AgentRequest) (map[string]any, error) {
 	if r == nil {
@@ -79,6 +82,28 @@ func (r *webWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.A
 		return nil, err
 	}
 	return agentloop.NewWorkflowAgentRunner(r.loop).RunAgent(ctx, req)
+}
+
+func (r *webWorkflowRuntimeRunner) ResolveRepositoryReviewProfile(
+	ctx context.Context,
+	agentID string,
+	requestedReviewerModels []string,
+) (workflows.RepositoryReviewModelProfile, error) {
+	if r == nil {
+		return workflows.RepositoryReviewModelProfile{}, fmt.Errorf("agent runner not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensureLoopLocked(); err != nil {
+		return workflows.RepositoryReviewModelProfile{}, err
+	}
+	resolver, ok := agentloop.NewWorkflowAgentRunner(r.loop).(workflows.RepositoryReviewProfileResolver)
+	if !ok {
+		return workflows.RepositoryReviewModelProfile{}, fmt.Errorf(
+			"agent runner does not support repository review profiles",
+		)
+	}
+	return resolver.ResolveRepositoryReviewProfile(ctx, agentID, requestedReviewerModels)
 }
 
 func (r *webWorkflowRuntimeRunner) CaptureReadOnlySession(

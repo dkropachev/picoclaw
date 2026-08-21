@@ -34,6 +34,7 @@ func (p *Pipeline) Finalize(
 		return turnResult{
 			finalContent: finalContent,
 			modelName:    exec.llmModelName,
+			usage:        ts.workflowAgentUsageSnapshot(),
 			status:       turnStatus,
 			followUps:    append([]bus.InboundMessage(nil), ts.followUps...),
 		}, nil
@@ -93,6 +94,7 @@ func (p *Pipeline) Finalize(
 		ts.setPhase(TurnPhaseCompleted)
 		return turnResult{
 			finalContent: finalContent,
+			usage:        ts.workflowAgentUsageSnapshot(),
 			status:       TurnEndStatusError,
 			followUps:    append([]bus.InboundMessage(nil), ts.followUps...),
 		}, streamErr
@@ -101,6 +103,7 @@ func (p *Pipeline) Finalize(
 	return turnResult{
 		finalContent: finalContent,
 		modelName:    exec.llmModelName,
+		usage:        ts.workflowAgentUsageSnapshot(),
 		status:       turnStatus,
 		followUps:    append([]bus.InboundMessage(nil), ts.followUps...),
 	}, nil

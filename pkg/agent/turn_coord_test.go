@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 // =============================================================================
@@ -20,6 +22,51 @@ import (
 
 // simpleConvProvider returns a simple text response without tools
 type simpleConvProvider struct{}
+
+func TestWorkflowAgentUsageNilSafetyAndAdmissionErrors(t *testing.T) {
+	if err := admitWorkflowAgentCall(nil); err != nil {
+		t.Fatalf("nil admission error = %v", err)
+	}
+	blocked := errors.New("quota exhausted")
+	if err := admitWorkflowAgentCall(
+		func() error { return blocked },
+	); !errors.Is(err, workflows.ErrAgentCallNotAdmitted) ||
+		!errors.Is(err, blocked) {
+		t.Fatalf("blocked admission error = %v", err)
+	}
+
+	var accumulator *workflowAgentUsageAccumulator
+	if err := accumulator.Observe(workflows.AgentUsage{}); err != nil {
+		t.Fatalf("nil accumulator observe error = %v", err)
+	}
+	if snapshot := accumulator.Snapshot(); snapshot == nil || len(snapshot) != 0 {
+		t.Fatalf("nil accumulator snapshot = %#v", snapshot)
+	}
+	if err := accumulator.Err(); err != nil {
+		t.Fatalf("nil accumulator error = %v", err)
+	}
+	if usage, ok := workflowAgentUsageFromResponse("model", nil, time.Second); ok || usage.Model != "" {
+		t.Fatalf("nil response usage = (%#v, %t)", usage, ok)
+	}
+	usage, ok := workflowAgentUsageFromResponse(" model ", &providers.LLMResponse{}, -time.Second)
+	if !ok || usage.Model != "model" || usage.LatencyMillis != 0 {
+		t.Fatalf("metadata-only response usage = (%#v, %t)", usage, ok)
+	}
+	if cloned := cloneWorkflowAgentUsage(nil); cloned == nil || len(cloned) != 0 {
+		t.Fatalf("nil usage clone = %#v", cloned)
+	}
+
+	var state *turnState
+	if err := state.observeWorkflowAgentResponse("model", &providers.LLMResponse{}, time.Second); err != nil {
+		t.Fatalf("nil turn usage observe error = %v", err)
+	}
+	if snapshot := state.workflowAgentUsageSnapshot(); snapshot == nil || len(snapshot) != 0 {
+		t.Fatalf("nil turn usage snapshot = %#v", snapshot)
+	}
+	if err := state.workflowAgentUsageError(); err != nil {
+		t.Fatalf("nil turn usage error = %v", err)
+	}
+}
 
 func (p *simpleConvProvider) Chat(
 	ctx context.Context,
@@ -97,6 +144,7 @@ type toolCallRespProvider struct {
 	toolName  string
 	toolArgs  map[string]any
 	response  string
+	usages    []providers.UsageInfo
 	callCount int
 	mu        sync.Mutex
 }
@@ -112,6 +160,11 @@ func (p *toolCallRespProvider) Chat(
 	p.callCount++
 	count := p.callCount
 	p.mu.Unlock()
+	var usage *providers.UsageInfo
+	if count <= len(p.usages) {
+		usageValue := p.usages[count-1]
+		usage = &usageValue
+	}
 
 	// First call returns a tool call, subsequent calls return final response
 	if count == 1 {
@@ -125,12 +178,58 @@ func (p *toolCallRespProvider) Chat(
 				},
 			},
 			FinishReason: "tool_calls",
+			Usage:        usage,
 		}, nil
 	}
 	return &providers.LLMResponse{
 		Content:      p.response,
 		FinishReason: "stop",
+		Usage:        usage,
 	}, nil
+}
+
+func TestRunAgentLoopAccumulatesEveryProviderResponseUsage(t *testing.T) {
+	provider := &toolCallRespProvider{
+		toolName: "mock_custom",
+		toolArgs: map[string]any{},
+		response: "finished",
+		usages: []providers.UsageInfo{
+			{PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10, CachedTokens: 1},
+			{PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15, CachedTokens: 2},
+		},
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+	al.RegisterTool(&mockCustomTool{})
+	var resultUsage []workflows.AgentUsage
+	var observed []workflows.AgentUsage
+	opts := makeTestProcessOpts("usage-multi-response")
+	opts.resultUsage = &resultUsage
+	opts.usageObserver = func(usage workflows.AgentUsage) error {
+		observed = append(observed, usage)
+		return nil
+	}
+
+	response, err := al.runAgentLoop(t.Context(), agent, opts)
+	if err != nil || response != "finished" {
+		t.Fatalf("runAgentLoop() response = %q, error = %v", response, err)
+	}
+	wantResult := []workflows.AgentUsage{{
+		Model:            "test-model",
+		PromptTokens:     20,
+		CompletionTokens: 5,
+		TotalTokens:      25,
+		CachedTokens:     3,
+	}}
+	if !reflect.DeepEqual(resultUsage, wantResult) {
+		t.Fatalf("result usage = %#v, want %#v", resultUsage, wantResult)
+	}
+	if !reflect.DeepEqual(observed, []workflows.AgentUsage{
+		{Model: "test-model", PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10, CachedTokens: 1},
+		{Model: "test-model", PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15, CachedTokens: 2},
+	}) {
+		t.Fatalf("observed usage = %#v, want every provider response", observed)
+	}
 }
 
 // errorProvider simulates various error conditions
@@ -174,10 +273,11 @@ func (p *errorProvider) Chat(
 }
 
 type failOnceLLMProvider struct {
-	err       error
-	response  string
-	callCount int
-	mu        sync.Mutex
+	err           error
+	firstResponse *providers.LLMResponse
+	response      string
+	callCount     int
+	mu            sync.Mutex
 }
 
 func (p *failOnceLLMProvider) Chat(
@@ -193,7 +293,7 @@ func (p *failOnceLLMProvider) Chat(
 	p.mu.Unlock()
 
 	if callCount == 1 {
-		return nil, p.err
+		return p.firstResponse, p.err
 	}
 	return &providers.LLMResponse{
 		Content:      p.response,
@@ -262,7 +362,6 @@ func TestPipeline_SetupTurn_BasicInitialization(t *testing.T) {
 	provider := &simpleConvProvider{}
 	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
-
 	pipeline := NewPipeline(al)
 	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
 		turnID:  "turn-1",
@@ -652,6 +751,109 @@ func TestPipeline_CallLLM_HTTP5xxRetry(t *testing.T) {
 	}
 	if provider.callCount != 2 {
 		t.Fatalf("callCount = %d, want 2", provider.callCount)
+	}
+}
+
+func TestPipeline_CallLLM_SafetyFilterRetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	provider := &failOnceLLMProvider{
+		err:      errors.New(`API request failed: Status: 400 Body: {"code":"security_violation"}`),
+		response: "Recovered with the bounded retry",
+	}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:           tmpDir,
+				ModelName:           "test-model",
+				MaxTokens:           4096,
+				MaxToolIterations:   10,
+				MaxLLMRetries:       1,
+				LLMRetryBackoffSecs: 1,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+
+	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if err != nil {
+		t.Fatalf("expected safety-filter retry to recover, got error: %v", err)
+	}
+	if ctrl != ControlBreak || exec.finalContent != "Recovered with the bounded retry" {
+		t.Fatalf("control = %v, finalContent = %q", ctrl, exec.finalContent)
+	}
+	if provider.callCount != 2 {
+		t.Fatalf("callCount = %d, want 2", provider.callCount)
+	}
+}
+
+func TestPipeline_CallLLM_ResponseSafetyFinishReasonRetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	provider := &failOnceLLMProvider{
+		firstResponse: &providers.LLMResponse{FinishReason: "content_filter"},
+		response:      "Recovered after response-level safety filter",
+	}
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: tmpDir, ModelName: "test-model", MaxTokens: 4096,
+		MaxToolIterations: 10, MaxLLMRetries: 1, LLMRetryBackoffSecs: 1,
+	}}}
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("response-safety"), turnEventScope{
+		turnID: "turn-response-safety", context: newTurnContext(nil, nil, nil),
+	})
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if err != nil || ctrl != ControlBreak ||
+		exec.finalContent != "Recovered after response-level safety filter" || provider.callCount != 2 {
+		t.Fatalf(
+			"response safety retry control=%v content=%q calls=%d err=%v",
+			ctrl,
+			exec.finalContent,
+			provider.callCount,
+			err,
+		)
+	}
+}
+
+func TestSideQuestion_ResponseSafetyFinishReasonRetriesOnce(t *testing.T) {
+	provider := &failOnceLLMProvider{
+		firstResponse: &providers.LLMResponse{FinishReason: "content_filter"},
+		response:      "side question recovered",
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+	al.providerFactory = func(*config.ModelConfig) (providers.LLMProvider, string, error) {
+		return provider, "test-model", nil
+	}
+	response, err := al.askSideQuestionWithOptions(
+		context.Background(), agent,
+		&processOptions{Dispatch: DispatchRequest{SessionKey: "side-response-safety"}, NoHistory: true},
+		"Review this evidence",
+		sideQuestionExecutionOptions{disablePromptCache: true, skipHooks: true},
+	)
+	if err != nil || response != "side question recovered" || provider.callCount != 2 {
+		t.Fatalf("side response safety response=%q calls=%d err=%v", response, provider.callCount, err)
 	}
 }
 

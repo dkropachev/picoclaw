@@ -840,7 +840,7 @@ func TestWorkflowStructuredAgentReportsInitialRepairAndValidationFailures(t *tes
 		},
 	}
 	initialErr := errors.New("initial failed")
-	if _, result, repairs, err := workflowRunStructuredAgentWithOptions(
+	if _, result, repairs, _, err := workflowRunStructuredAgentWithOptions(
 		"message",
 		contract,
 		func(string, bool, workflowAgentRunOptions) (string, error) { return "", initialErr },
@@ -851,7 +851,7 @@ func TestWorkflowStructuredAgentReportsInitialRepairAndValidationFailures(t *tes
 
 	repairErr := errors.New("repair failed")
 	calls := 0
-	if _, result, repairs, err := workflowRunStructuredAgentWithOptions(
+	if _, result, repairs, _, err := workflowRunStructuredAgentWithOptions(
 		"message",
 		contract,
 		func(string, bool, workflowAgentRunOptions) (string, error) {
@@ -867,7 +867,7 @@ func TestWorkflowStructuredAgentReportsInitialRepairAndValidationFailures(t *tes
 	}
 
 	contract.RepairAttempts = 0
-	if _, result, repairs, err := workflowRunStructuredAgentWithOptions(
+	if _, result, repairs, _, err := workflowRunStructuredAgentWithOptions(
 		"message",
 		contract,
 		func(string, bool, workflowAgentRunOptions) (string, error) { return `{}`, nil },

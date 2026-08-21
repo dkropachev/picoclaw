@@ -235,6 +235,21 @@ func TestParseResponseBody(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "explicit refusal response",
+			body: []byte(`{
+				"id":"msg-refusal","type":"message","role":"assistant",
+				"content":[{"type":"text","text":"I cannot comply."}],
+				"stop_reason":"refusal","model":"test-model",
+				"usage":{"input_tokens":4,"output_tokens":4}
+			}`),
+			want: &LLMResponse{
+				Content: "I cannot comply.", ToolCalls: []ToolCall{}, FinishReason: "refusal",
+				Usage:     &UsageInfo{PromptTokens: 4, CompletionTokens: 4, TotalTokens: 8},
+				Reasoning: "", ReasoningDetails: nil,
+			},
+			wantErr: false,
+		},
+		{
 			name: "response with tool use",
 			body: []byte(`{
 				"id": "msg-456",

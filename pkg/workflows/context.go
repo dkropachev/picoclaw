@@ -2,12 +2,15 @@ package workflows
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
+
+var ErrAgentCallNotAdmitted = errors.New("workflow agent provider call was not admitted")
 
 type Delivery struct {
 	Channel          string            `json:"channel,omitempty"`
@@ -49,6 +52,7 @@ type ExecutionContext struct {
 	// the separately frozen session snapshot.
 	privateValues         map[string]any
 	frozenReadOnlySession *FrozenReadOnlySession
+	workspaceCleanup      *workflowWorkspaceCleanup
 }
 
 // PrivateRootRequest is internal invocation context for a trusted,
@@ -133,6 +137,62 @@ type AgentRunner interface {
 	RunAgent(ctx context.Context, req AgentRequest) (map[string]any, error)
 }
 
+// AgentUsage is the provider-reported token usage for one concrete model.
+// It deliberately contains no request, response, account, or credential data.
+type AgentUsage struct {
+	Model            string `json:"model"`
+	Reviewer         string `json:"reviewer,omitempty"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	CachedTokens     int    `json:"cached_tokens"`
+	LatencyMillis    int64  `json:"latency_millis,omitempty"`
+}
+
+// AgentUsageObserver is called once for each completed provider response.
+// Returning an error aborts the workflow agent execution.
+type AgentUsageObserver func(AgentUsage) error
+
+// AgentCallAdmission is checked immediately before each provider request.
+// Returning an error prevents that request from being dispatched.
+type AgentCallAdmission func() error
+
+// AgentUsageEvent adds durable workflow identity to one provider usage event.
+type AgentUsageEvent struct {
+	RunID  string     `json:"run_id"`
+	JobID  string     `json:"job_id"`
+	StepID string     `json:"step_id"`
+	Usage  AgentUsage `json:"usage"`
+}
+
+// AgentUsageEventObserver observes provider usage with workflow identity.
+type AgentUsageEventObserver func(AgentUsageEvent) error
+
+type AgentCallAdmissionEvent struct {
+	RunID  string `json:"run_id"`
+	JobID  string `json:"job_id"`
+	StepID string `json:"step_id"`
+}
+
+type AgentCallAdmissionEventObserver func(AgentCallAdmissionEvent) error
+
+type RepositoryReviewModelProfile struct {
+	Revision               string
+	ReviewerModels         []string
+	IncludeDefaultReviewer bool
+	MaxContentBytes        int
+}
+
+// RepositoryReviewProfileResolver binds incremental review checkpoints to the
+// effective configured model graph without exposing provider credentials.
+type RepositoryReviewProfileResolver interface {
+	ResolveRepositoryReviewProfile(
+		ctx context.Context,
+		agentID string,
+		requestedReviewerModels []string,
+	) (RepositoryReviewModelProfile, error)
+}
+
 const (
 	AgentToolsInherit     = "inherit"
 	AgentToolsNone        = "none"
@@ -165,6 +225,14 @@ type AgentRequest struct {
 	Output           *AgentOutputContract
 	Managed          any
 	Scope            any
+	ScopeContent     string
+	// SuppressDefaultContext is a reduction-only trusted workflow profile for
+	// evidence-bound no-tool reviews. It omits mutable bootstrap, memory, skill,
+	// contributor, and dynamic prompt context while retaining the supplied task.
+	SuppressDefaultContext bool
+	// ReviewSystemPrompt is the fixed trusted policy paired with the suppressed
+	// built-in repository-review profile. Repository bytes remain only in Scope.
+	ReviewSystemPrompt string
 	// PrivateContext marks an agent step whose inputs belong to a private
 	// workflow root. Runners must keep provider diagnostics out of ordinary
 	// runtime events and shared health-state error fields for this request.
@@ -179,6 +247,12 @@ type AgentRequest struct {
 	// read-only decision. Session remains empty so its local capability key
 	// cannot enter ordinary workflow output or routing context.
 	FrozenReadOnlySession *FrozenReadOnlySession
+	// UsageObserver receives provider-reported token counts and model provenance
+	// only. It must not be used to expose prompts, responses, or account data.
+	UsageObserver AgentUsageObserver
+	// CallAdmission is checked before every provider request, including queued
+	// managed children, fallbacks, retries, and structured-output repairs.
+	CallAdmission AgentCallAdmission
 }
 
 type FunctionRunner interface {

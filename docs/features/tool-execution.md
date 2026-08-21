@@ -232,8 +232,10 @@ filtering, response-handled media delivery, and channel delivery tools. Its
 agent-callable publish action additionally reuses the production dependency
 gate and fenced workflow transaction instead of trusting model-visible state.
 Git workspaces contribute a built-in agent tool registered through this generic
-registry, while acquire, release, cleanup, drop, and inventory semantics are
-owned by the git workspaces feature.
+registry, while acquire, release, cleanup, drop, inventory, and the optional
+fresh-checkout semantics are owned by the git workspaces feature. The generic
+registry only carries the `fresh` boolean from the validated tool call to that
+feature; it does not refresh or select a Git ref itself.
 Channel delivery owns typing, reaction, placeholder, and stream-marker storage;
 tool execution supplies only the opaque turn identity needed for exact
 same-chat consumption.

@@ -11,7 +11,7 @@ import (
 func newInstallCommand() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "install [code-review|github-issue-triage]",
+		Use:   "install [code-review|repository-bug-finder|github-issue-triage]",
 		Short: "Install a local workflow template",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

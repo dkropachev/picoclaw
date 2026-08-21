@@ -86,6 +86,62 @@ func TestAccountFallbackWhenSelectedAccountUnavailable(t *testing.T) {
 	}
 }
 
+func TestSafetyFilterDoesNotMarkAccountUnavailable(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	router := newTestRouter(t, &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "entry",
+		Blocks: []config.AccountRouterBlock{{
+			ID: "entry", Type: config.AccountRouterBlockTypeAccount, Account: "account-a",
+		}},
+	}, now)
+	selection := router.Select("", SelectReasonInitial)
+	candidate := selection.Candidates[0]
+	router.RecordFallbackResult(selection, &providers.FallbackResult{
+		Attempts: []providers.FallbackAttempt{{
+			Provider: candidate.Provider, Model: candidate.Model,
+			IdentityKey: candidate.StableKey(), Reason: providers.FailoverSafetyFilter,
+			Error: errors.New("security violation"),
+		}},
+	}, errors.New("security violation"))
+	state := router.store.st.Routers["router-main"].Accounts["account-a"]
+	if state != nil && (state.FailureCount != 0 || state.State == "unavailable") {
+		t.Fatalf("safety filter poisoned account health: %#v", state)
+	}
+}
+
+func TestUnattemptedFallbackErrorUsesSelectedCandidateWithoutLeakingPrivateDetails(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	newRouter := func(t *testing.T) *Router {
+		t.Helper()
+		return newTestRouter(t, &config.AccountRouterConfig{
+			Enabled: true,
+			Entry:   "entry",
+			Blocks: []config.AccountRouterBlock{{
+				ID: "entry", Type: config.AccountRouterBlockTypeAccount, Account: "account-a",
+			}},
+		}, now)
+	}
+
+	safetyRouter := newRouter(t)
+	safetyRouter.RecordFallbackResult(
+		safetyRouter.Select("", SelectReasonInitial), nil, errors.New("content safety filter blocked the request"),
+	)
+	if state := safetyRouter.store.st.Routers["router-main"].Accounts["account-a"]; state != nil &&
+		state.FailureCount != 0 {
+		t.Fatalf("unattempted safety filter poisoned health: %#v", state)
+	}
+
+	privateRouter := newRouter(t)
+	privateRouter.RecordPrivateFallbackResult(
+		privateRouter.Select("", SelectReasonInitial), nil, errors.New("secret upstream timeout detail"),
+	)
+	state := privateRouter.store.st.Routers["router-main"].Accounts["account-a"]
+	if state == nil || state.FailureCount != 1 || state.LastError != errPrivateProviderRequest.Error() {
+		t.Fatalf("private unattempted failure state = %#v", state)
+	}
+}
+
 func TestRecordFallbackResultDoesNotDoubleCountRecordedAttempt(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	router := newTestRouter(t, &config.AccountRouterConfig{

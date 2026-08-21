@@ -465,6 +465,9 @@ func TestParseResponseBody_Refusal(t *testing.T) {
 	if result.Content != "I cannot help with that." {
 		t.Errorf("Content = %q, want %q", result.Content, "I cannot help with that.")
 	}
+	if result.FinishReason != "refusal" {
+		t.Errorf("FinishReason = %q, want refusal", result.FinishReason)
+	}
 }
 
 func TestParseResponseBody_IncompleteStatus(t *testing.T) {

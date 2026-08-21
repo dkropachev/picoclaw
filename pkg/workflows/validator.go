@@ -1052,6 +1052,16 @@ func validateAgentStepOptions(path, agentID string, with map[string]any) Validat
 			errs = append(errs, ValidationError{Path: path + ".tools", Message: "unsupported tools mode"})
 		}
 	}
+	scopeContent, scopeContentSet, scopeContentString := agentStringOption(with, "scope_content")
+	if scopeContentSet && (!scopeContentString ||
+		(scopeContent != "immutable_git" && scopeContent != "frozen_git")) {
+		errs = append(errs, ValidationError{Path: path + ".scope_content", Message: "unsupported scope content mode"})
+	}
+	if (scopeContent == "immutable_git" || scopeContent == "frozen_git") && toolsMode != AgentToolsNone {
+		errs = append(errs, ValidationError{
+			Path: path + ".tools", Message: "immutable Git scope requires tools: none",
+		})
+	}
 	if history == "read_only" && toolsMode != AgentToolsNone {
 		errs = append(errs, ValidationError{
 			Path:    path + ".tools",

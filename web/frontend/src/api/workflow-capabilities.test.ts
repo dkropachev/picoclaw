@@ -334,6 +334,11 @@ function capabilities(): WorkflowAuthoringCapabilities {
         readiness: "ready" as const,
       },
       {
+        name: "review.repository",
+        target: "function/review.repository",
+        readiness: "ready" as const,
+      },
+      {
         name: "workflow.artifact",
         target: "function/workflow.artifact",
         readiness: "ready" as const,

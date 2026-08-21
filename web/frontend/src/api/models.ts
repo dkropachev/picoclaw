@@ -23,6 +23,10 @@ export interface ModelInfo {
   request_timeout?: number
   thinking_level?: string
   reasoning_effort?: string
+  input_price_per_1m?: number
+  output_price_per_1m?: number
+  subscription?: boolean
+  subscription_equivalent_model?: string
   tool_schema_transform?: string
   streaming?: {
     enabled?: boolean
