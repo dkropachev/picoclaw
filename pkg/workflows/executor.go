@@ -51,6 +51,9 @@ type Executor struct {
 	AgentCallAdmission AgentCallAdmissionEventObserver
 	// StepActivityObserver runs immediately before each concrete step target.
 	StepActivityObserver StepActivityObserver
+	// ManagedChildActivityObserver receives managed child lifecycle events with
+	// exact workflow identity.
+	ManagedChildActivityObserver ManagedChildActivityEventObserver
 	// WorkflowSnapshots is an immutable, pre-admitted reusable closure. When
 	// present, the executor uses these exact parsed bytes instead of reloading
 	// definitions after admission.
@@ -2355,6 +2358,18 @@ func (e *Executor) runStepTarget(
 				})
 			}
 		}
+		var managedChildObserver ManagedChildActivityObserver
+		if e.ManagedChildActivityObserver != nil {
+			var managedChildObserverMu sync.Mutex
+			managedChildObserver = func(activity ManagedChildActivity) error {
+				managedChildObserverMu.Lock()
+				defer managedChildObserverMu.Unlock()
+				return e.ManagedChildActivityObserver(ManagedChildActivityEvent{
+					RunID: execCtx.RunID, JobID: execCtx.JobID, StepID: execCtx.StepID,
+					ManagedChildActivity: activity,
+				})
+			}
+		}
 		outputs, runErr := e.Agents.RunAgent(agentCtx, AgentRequest{
 			AgentID:                agentID,
 			Model:                  stringFromMap(with, "model"),
@@ -2377,6 +2392,7 @@ func (e *Executor) runStepTarget(
 			PrivateContext:         execCtx.privateValues != nil || frozenSession != nil,
 			FrozenReadOnlySession:  frozenSession,
 			UsageObserver:          usageObserver,
+			ManagedChildObserver:   managedChildObserver,
 			CallAdmission:          callAdmission,
 		})
 		if frozenSession != nil && outputs != nil {

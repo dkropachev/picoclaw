@@ -73,6 +73,26 @@ function formatDuration(value: number): string {
   return `${(value / 1000).toFixed(1)} s`
 }
 
+function formatProgressTime(value?: string): string {
+  if (!value) return "not reported"
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) return "not reported"
+  return timestamp.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+}
+
+function formatProgressElapsed(value?: string): string {
+  if (!value) return "unknown"
+  const started = new Date(value).getTime()
+  if (!Number.isFinite(started)) return "unknown"
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - started) / 1000))
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s`
+  return `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s`
+}
+
 function statusTone(status: string): string {
   if (status === "completed") return "text-emerald-700 dark:text-emerald-400"
   if (status === "failed" || status === "canceled") return "text-destructive"
@@ -953,12 +973,12 @@ export function ModelEvaluationsPage() {
             </section>
 
             {selected && (
-              <section
-                className="border-border bg-card rounded-xl border p-4 sm:p-5"
-                aria-live="polite"
-                aria-atomic="false"
-              >
-                <div className="flex items-center justify-between gap-3">
+              <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
+                <div
+                  className="flex items-center justify-between gap-3"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
                   <div>
                     <h2 className="font-semibold">Progress</h2>
                     <p className="text-muted-foreground text-xs">
@@ -1002,6 +1022,55 @@ export function ModelEvaluationsPage() {
                     tokens
                   </span>
                 </div>
+                {(selected.progress.total_calls ?? 0) > 0 && (
+                  <div
+                    role="region"
+                    aria-label="Candidate call progress"
+                    className="border-border bg-muted/40 mt-4 rounded-lg border p-3"
+                  >
+                    <div className="grid gap-2 text-xs sm:grid-cols-4">
+                      <span>
+                        Batch {selected.progress.current_batch ?? 0}/
+                        {selected.progress.total_batches ?? 0}
+                      </span>
+                      <span>
+                        {selected.progress.completed_calls ?? 0}/
+                        {selected.progress.total_calls ?? 0} candidate calls
+                      </span>
+                      <span>
+                        {selected.progress.active_children?.length ?? 0} active
+                      </span>
+                      <span>{selected.progress.failed_calls ?? 0} failed</span>
+                    </div>
+                    {(selected.progress.active_children?.length ?? 0) > 0 && (
+                      <ul className="mt-3 space-y-2 text-xs">
+                        {selected.progress.active_children?.map((child) => (
+                          <li
+                            key={child.index}
+                            className="border-border flex flex-wrap justify-between gap-2 border-t pt-2 first:border-0 first:pt-0"
+                          >
+                            <span className="font-medium">
+                              {child.label ||
+                                `Candidate call ${child.index} of ${selected.progress.total_calls ?? 0}`}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {child.model_alias || "resolved model"} ·{" "}
+                              {child.scope_count} file
+                              {child.scope_count === 1 ? "" : "s"} · started{" "}
+                              {formatProgressTime(child.started_at)} · running{" "}
+                              {formatProgressElapsed(child.started_at)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="text-muted-foreground mt-3 text-xs">
+                      Candidate calls update live. Analyzed files and durable
+                      task counts advance after the batch is judged and
+                      checkpointed.
+                    </p>
+                  </div>
+                )}
                 {(selected.progress.current_model ||
                   selected.progress.current_path) && (
                   <p className="text-muted-foreground mt-3 text-xs">
@@ -1017,6 +1086,12 @@ export function ModelEvaluationsPage() {
                       : ""}
                   </p>
                 )}
+                <p className="text-muted-foreground mt-3 text-xs">
+                  Last progress update{" "}
+                  <time dateTime={selected.progress.updated_at}>
+                    {formatProgressTime(selected.progress.updated_at)}
+                  </time>
+                </p>
                 {selected.failure && (
                   <p className="text-destructive mt-3 text-sm">
                     {selected.failure}

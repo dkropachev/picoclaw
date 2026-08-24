@@ -86,7 +86,8 @@ func TestRepositoryModelEvaluationWorkflowContracts(t *testing.T) {
 	candidates := batchSteps["candidates"]
 	managed, ok := candidates.With["managed"].(map[string]any)
 	if !ok || managed["reviewer_models"] != "${{ inputs.candidate_models }}" ||
-		managed["include_default_reviewer"] != false || managed["max_parallel_children"] != 1 {
+		managed["include_default_reviewer"] != false || managed["max_parallel_children"] != 3 ||
+		managed["max_parallel_per_reviewer"] != 1 {
 		t.Fatalf("candidate fairness controls = %#v", candidates.With["managed"])
 	}
 	if candidates.With["scope_snapshot"] != "${{ steps.freeze.outputs.token }}" ||

@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/repoeval"
@@ -178,6 +180,13 @@ func TestRepositoryModelEvaluationBatchInputUsesExactPersistedCandidates(t *test
 			t.Fatalf("persisted candidate %d = %#v, file = %#v", index, candidate, file)
 		}
 	}
+	invalid := repoeval.Clone(ready)
+	invalid.Repository = filepath.Join(t.TempDir(), "missing-repository")
+	if _, err := controller.runEvaluationBatch(
+		t.Context(), invalid, batch, "wr-invalid-batch-input", "inactive-token",
+	); !errors.Is(err, repoeval.ErrInvalidEvaluation) {
+		t.Fatalf("invalid batch repository error=%v", err)
+	}
 }
 
 func assertRepositoryModelEvaluationProgress(
@@ -217,6 +226,164 @@ func TestRepositoryModelEvaluationRuntimeStepObserverFiltersRunIdentity(t *testi
 	}
 }
 
+func TestRepositoryModelEvaluationManagedChildrenPersistLiveBatchProgress(t *testing.T) {
+	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+	store, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newRepositoryModelEvaluationController(handler)
+	controller.store = store
+	ready := seedReadyRepositoryModelEvaluation(t, controller, store, "owner/live-progress")
+	running, err := store.Update(t.Context(), ready.ID, ready.Version, func(value *repoeval.Evaluation) error {
+		value.Status = repoeval.StatusRunning
+		value.Progress.Stage = repoeval.ProgressCandidateExecution
+		value.Progress.Percent = 0
+		value.Progress.TotalTasks = 20
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, cancel, err := controller.reserveActive(running.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	defer controller.releaseActive(running.ID, token)
+	batch := repositoryModelEvaluationBatches(running)[0]
+	observer := controller.batchManagedChildObserver(running.ID, token, batch, 2)
+	start := workflows.ManagedChildActivityEvent{
+		StepID: "candidates",
+		ManagedChildActivity: workflows.ManagedChildActivity{
+			Phase: workflows.ManagedChildStarted, Index: 1, Total: 4,
+			Label: "scope chunk 1 of 2", ModelAlias: "model-a", ScopeCount: 3,
+		},
+	}
+	if observerErr := observer(start); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	current, found, err := store.Get(t.Context(), running.ID)
+	if err != nil || !found || current.Progress.CurrentBatch != batch.index+1 ||
+		current.Progress.TotalBatches != 2 || current.Progress.TotalCalls != 4 ||
+		len(current.Progress.ActiveChildren) != 1 || current.Progress.CurrentModel != "model-a" ||
+		current.Progress.ActiveChildren[0].ScopeCount != 3 || current.Progress.UpdatedAt.IsZero() {
+		t.Fatalf("started managed child progress = %#v, found=%v err=%v", current.Progress, found, err)
+	}
+	if observerErr := observer(start); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	second := start
+	second.Index = 2
+	second.ModelAlias = "model-b"
+	second.Label = "scope chunk 1 of 2, reviewer 2 of 2"
+	if observerErr := observer(second); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	current, _, err = store.Get(t.Context(), running.ID)
+	if err != nil || len(current.Progress.ActiveChildren) != 2 ||
+		current.Progress.ActiveChildren[0].Index != 1 || current.Progress.ActiveChildren[1].Index != 2 {
+		t.Fatalf("parallel managed child progress = %#v, err=%v", current.Progress, err)
+	}
+	completed := start
+	completed.Phase = workflows.ManagedChildCompleted
+	completed.Success = true
+	if observerErr := observer(completed); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	current, _, err = store.Get(t.Context(), running.ID)
+	if err != nil || current.Progress.CompletedCalls != 1 || current.Progress.FailedCalls != 0 ||
+		len(current.Progress.ActiveChildren) != 1 || current.Progress.CurrentModel != "model-b" ||
+		current.Progress.Percent <= 0 {
+		t.Fatalf("completed managed child progress = %#v, err=%v", current.Progress, err)
+	}
+	completed = second
+	completed.Phase = workflows.ManagedChildCompleted
+	if observerErr := observer(completed); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	current, _, err = store.Get(t.Context(), running.ID)
+	if err != nil || current.Progress.CompletedCalls != 2 || current.Progress.FailedCalls != 1 {
+		t.Fatalf("failed managed child progress = %#v, err=%v", current.Progress, err)
+	}
+	if observerErr := observer(workflows.ManagedChildActivityEvent{
+		StepID: "candidates",
+		ManagedChildActivity: workflows.ManagedChildActivity{
+			Phase: "unknown", Index: 3, Total: 4,
+		},
+	}); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	if observerErr := observer(workflows.ManagedChildActivityEvent{StepID: "other"}); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	start.Index = 3
+	if observerErr := observer(start); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	if observerErr := controller.batchStepObserver(running.ID, token, batch, running.JudgeModelAlias)(
+		workflows.StepActivityEvent{StepID: "judge"},
+	); observerErr != nil {
+		t.Fatal(observerErr)
+	}
+	current, _, err = store.Get(t.Context(), running.ID)
+	if err != nil || len(current.Progress.ActiveChildren) != 0 ||
+		current.Progress.CurrentModel != running.JudgeModelAlias {
+		t.Fatalf("judge progress retained active children = %#v, err=%v", current.Progress, err)
+	}
+	repositoryModelEvaluationClearActiveChildren(nil)
+	cancel()
+	controller.releaseActive(running.ID, token)
+	if observerErr := observer(start); !errors.Is(observerErr, context.Canceled) {
+		t.Fatalf("fenced managed child observer error=%v", observerErr)
+	}
+}
+
+func TestRepositoryModelEvaluationCandidatePercentUsesDurableAliasFilePairs(t *testing.T) {
+	evaluation := repositoryModelEvaluationMetricsFixture()
+	evaluation.CandidateModels = []string{"model-a", "model-b"}
+	evaluation.ModelStats = map[string]repoeval.ModelStats{
+		"model-a": {FilesCompleted: 2},
+		"model-b": {FilesCompleted: 1},
+	}
+	if percent := repositoryModelEvaluationDurableCandidatePercent(evaluation); percent != 72.5 {
+		t.Fatalf("durable candidate percent=%v want=72.5", percent)
+	}
+	batch := repositoryModelEvaluationBatch{
+		files:  evaluation.Corpus.Files[:1],
+		models: []string{"model-b"},
+	}
+	if share := repositoryModelEvaluationBatchPercentShare(evaluation, batch); share != 17.5 {
+		t.Fatalf("candidate batch share=%v want=17.5", share)
+	}
+	if percent := repositoryModelEvaluationDurableCandidatePercent(repoeval.Evaluation{}); percent != 20 {
+		t.Fatalf("empty candidate percent=%v want=20", percent)
+	}
+	if share := repositoryModelEvaluationBatchPercentShare(repoeval.Evaluation{}, batch); share != 0 {
+		t.Fatalf("empty candidate share=%v want=0", share)
+	}
+}
+
+func TestRepositoryModelEvaluationRuntimeManagedChildObserverFiltersRunIdentity(t *testing.T) {
+	var observed []workflows.ManagedChildActivityEvent
+	observer := repositoryModelEvaluationRuntimeManagedChildObserver(
+		"wr-target",
+		func(event workflows.ManagedChildActivityEvent) error {
+			observed = append(observed, event)
+			return nil
+		},
+	)
+	if err := observer(workflows.ManagedChildActivityEvent{RunID: "wr-other"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := observer(workflows.ManagedChildActivityEvent{RunID: "wr-target", StepID: "candidates"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(observed) != 1 || observed[0].StepID != "candidates" {
+		t.Fatalf("filtered managed child activity = %#v", observed)
+	}
+}
+
 func TestRepositoryModelEvaluationProgressObserverBoundaries(t *testing.T) {
 	ctx := context.Background()
 	if repositoryModelEvaluationWithStepObserver(ctx, nil) != ctx {
@@ -224,6 +391,12 @@ func TestRepositoryModelEvaluationProgressObserverBoundaries(t *testing.T) {
 	}
 	if repositoryModelEvaluationStepObserver(ctx) != nil {
 		t.Fatal("empty context exposed a step observer")
+	}
+	if repositoryModelEvaluationWithManagedChildObserver(ctx, nil) != ctx {
+		t.Fatal("nil managed child observer changed context")
+	}
+	if repositoryModelEvaluationManagedChildObserver(ctx) != nil {
+		t.Fatal("empty context exposed a managed child observer")
 	}
 
 	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
@@ -299,4 +472,24 @@ func TestRepositoryModelEvaluationProgressObserverBoundaries(t *testing.T) {
 		repoeval.ProgressAnalyzing,
 		analyzing.JudgeModelAlias,
 	)
+}
+
+func TestRepositoryModelEvaluationRecoveryReleasesMissingState(t *testing.T) {
+	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+	store, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newRepositoryModelEvaluationController(handler)
+	controller.store = store
+
+	controller.recoverEvaluation("missing-running-evaluation")
+	controller.recoverReadyEvaluation("missing-ready-evaluation")
+
+	controller.mu.Lock()
+	active := len(controller.active)
+	controller.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("missing recovery leaked %d active reservations", active)
+	}
 }

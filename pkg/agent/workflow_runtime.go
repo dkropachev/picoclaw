@@ -2000,6 +2000,7 @@ type workflowManagedExecutionOptions struct {
 	maxItemsPerChunk               int
 	maxTasksPerChunk               int
 	maxParallelChildren            int
+	maxParallelPerReviewer         int
 	adaptiveChunking               bool
 	targetChildPromptTokens        int
 	targetChildPromptSource        string
@@ -2063,6 +2064,11 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 		options.maxParallelChildren = min(n, workflowManagedMaximumParallelChildren)
 	} else if n := intFromAny(values["maxParallelChildren"]); n > 0 {
 		options.maxParallelChildren = min(n, workflowManagedMaximumParallelChildren)
+	}
+	if n := intFromAny(values["max_parallel_per_reviewer"]); n > 0 {
+		options.maxParallelPerReviewer = min(n, workflowManagedMaximumParallelChildren)
+	} else if n := intFromAny(values["maxParallelPerReviewer"]); n > 0 {
+		options.maxParallelPerReviewer = min(n, workflowManagedMaximumParallelChildren)
 	}
 	if enabled, exists := boolMapValue(values, "adaptive_chunking", "adaptiveChunking"); exists {
 		options.adaptiveChunking = enabled

@@ -172,6 +172,57 @@ jobs:
 	}
 }
 
+type managedActivityAgentRunner struct{}
+
+func (managedActivityAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[string]any, error) {
+	if req.ManagedChildObserver == nil {
+		return nil, errors.New("managed child observer is nil")
+	}
+	for _, activity := range []ManagedChildActivity{
+		{Phase: ManagedChildStarted, Index: 1, Total: 1, Label: "child", ModelAlias: "model-a", ScopeCount: 2},
+		{Phase: ManagedChildCompleted, Index: 1, Total: 1, Label: "child", ModelAlias: "model-a", ScopeCount: 2, Success: true},
+	} {
+		if err := req.ManagedChildObserver(activity); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"text": "done"}, nil
+}
+
+func TestExecutorManagedChildActivityAddsWorkflowIdentity(t *testing.T) {
+	workflow := parseWorkflow(t, `name: Managed activity
+on:
+  workflow_dispatch:
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: candidates
+        uses: agent/main
+`)
+	var events []ManagedChildActivityEvent
+	executor := &Executor{
+		WorkspaceDir: t.TempDir(),
+		Agents:       managedActivityAgentRunner{},
+		ManagedChildActivityObserver: func(event ManagedChildActivityEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	}
+	result, err := executor.Run(t.Context(), RunRequest{
+		RunID: "wr-managed-activity", Workflow: workflow, WorkflowRef: "inline",
+	})
+	if err != nil || result.Status != RunStatusSucceeded || len(events) != 2 {
+		t.Fatalf("managed activity run = %#v, events = %#v, err = %v", result, events, err)
+	}
+	for _, event := range events {
+		if event.RunID != "wr-managed-activity" || event.JobID != "main" ||
+			event.StepID != "candidates" || event.Index != 1 || event.Total != 1 {
+			t.Fatalf("managed activity identity = %#v", event)
+		}
+	}
+}
+
 func TestWorkflowWorkspaceCleanupTracksFrozenScopesAndJoinsReleaseErrors(t *testing.T) {
 	if cleanup := (*workflowWorkspaceCleanup)(nil); cleanup.releaseAll() != nil {
 		t.Fatal("nil workspace cleanup returned an error")

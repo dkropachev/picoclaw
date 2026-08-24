@@ -32,6 +32,14 @@ export interface EvaluationLanguageProgress {
   limited: boolean
 }
 
+export interface EvaluationActiveChildProgress {
+  index: number
+  label?: string
+  model_alias?: string
+  scope_count: number
+  started_at: string
+}
+
 export interface EvaluationProgress {
   stage: string
   languages: Record<string, EvaluationLanguageProgress>
@@ -40,6 +48,12 @@ export interface EvaluationProgress {
   completed_files: number
   total_tasks: number
   completed_tasks: number
+  current_batch?: number
+  total_batches?: number
+  completed_calls?: number
+  total_calls?: number
+  failed_calls?: number
+  active_children?: EvaluationActiveChildProgress[]
   current_model?: string
   current_path?: string
   message?: string
@@ -405,6 +419,12 @@ function normalizeProgress(
     completed_files: value?.completed_files ?? 0,
     total_tasks: value?.total_tasks ?? 0,
     completed_tasks: value?.completed_tasks ?? 0,
+    current_batch: value?.current_batch ?? 0,
+    total_batches: value?.total_batches ?? 0,
+    completed_calls: value?.completed_calls ?? 0,
+    total_calls: value?.total_calls ?? 0,
+    failed_calls: value?.failed_calls ?? 0,
+    active_children: value?.active_children ?? [],
     percent: Math.min(100, Math.max(0, value?.percent ?? 0)),
     ...(value?.current_model ? { current_model: value.current_model } : {}),
     ...(value?.current_path ? { current_path: value.current_path } : {}),

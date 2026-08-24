@@ -1731,6 +1731,27 @@ async function mockLauncherApis(
               completed_files: 1,
               total_tasks: 4,
               completed_tasks: 2,
+              current_batch: 1,
+              total_batches: 2,
+              completed_calls: 1,
+              total_calls: 4,
+              failed_calls: 0,
+              active_children: [
+                {
+                  index: 2,
+                  label: "scope chunk 1 of 2, reviewer 2 of 2 (code)",
+                  model_alias: "code",
+                  scope_count: 2,
+                  started_at: "2026-08-24T09:45:14Z",
+                },
+                {
+                  index: 3,
+                  label: "scope chunk 2 of 2, reviewer 1 of 2 (fast)",
+                  model_alias: "fast",
+                  scope_count: 2,
+                  started_at: "2026-08-24T09:45:15Z",
+                },
+              ],
               message: "Running candidate models.",
               current_model: "code",
               current_path: "pkg/service.go",
@@ -1826,6 +1847,7 @@ async function mockLauncherApis(
                 ...(currentModelEvaluation.progress as Record<string, unknown>),
                 stage: "canceled",
                 message: "Canceled.",
+                active_children: [],
               },
             }
           }
@@ -1856,6 +1878,8 @@ async function mockLauncherApis(
                   message: "Repository model evaluation completed.",
                   completed_files: 2,
                   completed_tasks: 4,
+                  completed_calls: 4,
+                  active_children: [],
                   current_model: "",
                   current_path: "",
                   percent: 100,
@@ -3527,6 +3551,12 @@ test("model review probes compare models without producing findings", async ({
   await expect(
     workspace.getByText("Model code · File pkg/service.go"),
   ).toBeVisible()
+  const candidateCalls = workspace.getByRole("region", {
+    name: "Candidate call progress",
+  })
+  await expect(candidateCalls.getByText("Batch 1/2")).toBeVisible()
+  await expect(candidateCalls.getByText("1/4 candidate calls")).toBeVisible()
+  await expect(candidateCalls.getByText("2 active")).toBeVisible()
   await expect(
     workspace.getByText("Repository model evaluation completed."),
   ).toBeVisible({ timeout: 5_000 })

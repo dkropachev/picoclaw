@@ -59,6 +59,7 @@ func Clone(evaluation Evaluation) Evaluation {
 	clone.FilesPerLanguage = cloneIntMap(evaluation.FilesPerLanguage)
 	clone.Corpus = cloneCorpus(evaluation.Corpus)
 	clone.Progress.Languages = cloneLanguageProgressMap(evaluation.Progress.Languages)
+	clone.Progress.ActiveChildren = append([]ActiveChildProgress(nil), evaluation.Progress.ActiveChildren...)
 	clone.Usage.EstimatedCostUSD = cloneFloat(evaluation.Usage.EstimatedCostUSD)
 	clone.ModelStats = make(map[string]ModelStats, len(evaluation.ModelStats))
 	for model, stats := range evaluation.ModelStats {
@@ -228,6 +229,12 @@ func normalizeEvaluation(evaluation Evaluation) (Evaluation, error) {
 		return Evaluation{}, err
 	}
 	evaluation.Progress.CurrentModel = strings.TrimSpace(evaluation.Progress.CurrentModel)
+	for index := range evaluation.Progress.ActiveChildren {
+		child := &evaluation.Progress.ActiveChildren[index]
+		child.Label = strings.TrimSpace(child.Label)
+		child.ModelAlias = strings.TrimSpace(child.ModelAlias)
+		child.StartedAt = child.StartedAt.UTC()
+	}
 	evaluation.Progress.CurrentPath, err = normalizeOptionalPath(evaluation.Progress.CurrentPath, false)
 	if err != nil {
 		return Evaluation{}, err
@@ -769,6 +776,11 @@ func validateProgress(progress Progress) error {
 		progress.CompletedFiles,
 		progress.TotalTasks,
 		progress.CompletedTasks,
+		progress.CurrentBatch,
+		progress.TotalBatches,
+		progress.CompletedCalls,
+		progress.TotalCalls,
+		progress.FailedCalls,
 	}
 	for _, count := range counts {
 		if count < 0 || count > maxProgressCount {
@@ -778,6 +790,9 @@ func validateProgress(progress Progress) error {
 	if !progress.Stage.Valid() || len(progress.Languages) > maxLanguages ||
 		progress.SelectedFiles > progress.TotalFiles || progress.CompletedFiles > progress.SelectedFiles ||
 		progress.CompletedTasks > progress.TotalTasks || !finiteBetween(progress.Percent, 0, 100) ||
+		progress.CurrentBatch > progress.TotalBatches || progress.CompletedCalls > progress.TotalCalls ||
+		progress.FailedCalls > progress.CompletedCalls || len(progress.ActiveChildren) > MaxProgressActiveChildren ||
+		progress.CompletedCalls+len(progress.ActiveChildren) > progress.TotalCalls ||
 		!validText(progress.CurrentModel, maxAliasBytes, true) ||
 		!validText(progress.Message, maxSummaryBytes, true) {
 		return ErrInvalidEvaluation
@@ -790,6 +805,22 @@ func validateProgress(progress Progress) error {
 	}
 	if !progress.UpdatedAt.IsZero() && progress.UpdatedAt.Location() != time.UTC {
 		return ErrInvalidEvaluation
+	}
+	seenActive := make(map[int]struct{}, len(progress.ActiveChildren))
+	for _, child := range progress.ActiveChildren {
+		if child.Index < 1 || child.Index > maxProgressCount || child.ScopeCount < 0 ||
+			child.ScopeCount > maxProgressCount || !validText(child.Label, maxSummaryBytes, true) ||
+			!validText(child.ModelAlias, maxAliasBytes, true) || child.StartedAt.IsZero() ||
+			child.StartedAt.Location() != time.UTC {
+			return ErrInvalidEvaluation
+		}
+		if progress.TotalCalls == 0 || child.Index > progress.TotalCalls {
+			return ErrInvalidEvaluation
+		}
+		if _, duplicate := seenActive[child.Index]; duplicate {
+			return ErrInvalidEvaluation
+		}
+		seenActive[child.Index] = struct{}{}
 	}
 	for language, languageProgress := range progress.Languages {
 		if !validText(language, maxLanguageBytes, false) || languageProgress.AvailableFiles < 0 ||

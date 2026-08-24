@@ -10,7 +10,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 )
 
-var ErrAgentCallNotAdmitted = errors.New("workflow agent provider call was not admitted")
+var (
+	ErrAgentCallNotAdmitted            = errors.New("workflow agent provider call was not admitted")
+	ErrManagedChildActivityNotRecorded = errors.New("workflow managed child activity was not recorded")
+)
 
 type Delivery struct {
 	Channel          string            `json:"channel,omitempty"`
@@ -182,6 +185,41 @@ type StepActivityEvent struct {
 // plane. Returning an error prevents the step from starting.
 type StepActivityObserver func(StepActivityEvent) error
 
+// ManagedChildActivityPhase identifies a managed child's lifecycle boundary.
+type ManagedChildActivityPhase string
+
+const (
+	ManagedChildStarted   ManagedChildActivityPhase = "started"
+	ManagedChildCompleted ManagedChildActivityPhase = "completed"
+)
+
+// ManagedChildActivity identifies one concrete managed child without exposing
+// its prompt, response, or repository content.
+type ManagedChildActivity struct {
+	Phase      ManagedChildActivityPhase `json:"phase"`
+	Index      int                       `json:"index"`
+	Total      int                       `json:"total"`
+	Label      string                    `json:"label,omitempty"`
+	ModelAlias string                    `json:"model_alias,omitempty"`
+	ScopeCount int                       `json:"scope_count"`
+	Success    bool                      `json:"success"`
+}
+
+// ManagedChildActivityObserver receives bounded managed child lifecycle data.
+type ManagedChildActivityObserver func(ManagedChildActivity) error
+
+// ManagedChildActivityEvent adds durable workflow identity to one managed
+// child lifecycle event.
+type ManagedChildActivityEvent struct {
+	RunID  string `json:"run_id"`
+	JobID  string `json:"job_id"`
+	StepID string `json:"step_id"`
+	ManagedChildActivity
+}
+
+// ManagedChildActivityEventObserver receives managed child data with workflow identity.
+type ManagedChildActivityEventObserver func(ManagedChildActivityEvent) error
+
 type AgentCallAdmissionEvent struct {
 	RunID  string `json:"run_id"`
 	JobID  string `json:"job_id"`
@@ -268,6 +306,9 @@ type AgentRequest struct {
 	// UsageObserver receives provider-reported token counts and model provenance
 	// only. It must not be used to expose prompts, responses, or account data.
 	UsageObserver AgentUsageObserver
+	// ManagedChildObserver receives bounded start/completion metadata for each
+	// managed child. It never receives prompts, responses, or scope content.
+	ManagedChildObserver ManagedChildActivityObserver
 	// CallAdmission is checked before every provider request, including queued
 	// managed children, fallbacks, retries, and structured-output repairs.
 	CallAdmission AgentCallAdmission

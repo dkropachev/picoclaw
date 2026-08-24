@@ -188,6 +188,18 @@ type LanguageProgress struct {
 	Limited        bool     `json:"limited"`
 }
 
+// MaxProgressActiveChildren bounds live, non-content managed child metadata.
+const MaxProgressActiveChildren = 64
+
+// ActiveChildProgress describes one in-flight candidate model call.
+type ActiveChildProgress struct {
+	Index      int       `json:"index"`
+	Label      string    `json:"label,omitempty"`
+	ModelAlias string    `json:"model_alias,omitempty"`
+	ScopeCount int       `json:"scope_count"`
+	StartedAt  time.Time `json:"started_at"`
+}
+
 type Progress struct {
 	Stage          ProgressStage               `json:"stage"`
 	Languages      map[string]LanguageProgress `json:"languages"`
@@ -196,6 +208,12 @@ type Progress struct {
 	CompletedFiles int                         `json:"completed_files"`
 	TotalTasks     int                         `json:"total_tasks"`
 	CompletedTasks int                         `json:"completed_tasks"`
+	CurrentBatch   int                         `json:"current_batch,omitempty"`
+	TotalBatches   int                         `json:"total_batches,omitempty"`
+	CompletedCalls int                         `json:"completed_calls,omitempty"`
+	TotalCalls     int                         `json:"total_calls,omitempty"`
+	FailedCalls    int                         `json:"failed_calls,omitempty"`
+	ActiveChildren []ActiveChildProgress       `json:"active_children,omitempty"`
 	CurrentModel   string                      `json:"current_model,omitempty"`
 	CurrentPath    string                      `json:"current_path,omitempty"`
 	Message        string                      `json:"message,omitempty"`

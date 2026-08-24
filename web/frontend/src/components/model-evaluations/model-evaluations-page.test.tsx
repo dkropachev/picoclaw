@@ -432,6 +432,28 @@ describe("ModelEvaluationsPage", () => {
         current_model: "code",
         current_path: "pkg/service.go",
         completed_tasks: 2,
+        current_batch: 2,
+        total_batches: 7,
+        completed_calls: 4,
+        total_calls: 12,
+        failed_calls: 1,
+        active_children: [
+          {
+            index: 5,
+            label: "scope chunk 2 of 4, reviewer 2 of 3 (code)",
+            model_alias: "code",
+            scope_count: 3,
+            started_at: "2026-08-24T09:45:14Z",
+          },
+          {
+            index: 6,
+            label: "scope chunk 2 of 4, reviewer 3 of 3 (fast)",
+            model_alias: "fast",
+            scope_count: 3,
+            started_at: "2026-08-24T09:45:15Z",
+          },
+        ],
+        updated_at: "2026-08-24T09:45:15Z",
         percent: 40,
       },
     }
@@ -444,6 +466,7 @@ describe("ModelEvaluationsPage", () => {
         stage: "completed",
         message: "Evaluation complete.",
         completed_tasks: running.progress.total_tasks,
+        active_children: [],
         percent: 100,
       },
     }
@@ -457,6 +480,16 @@ describe("ModelEvaluationsPage", () => {
       await screen.findByRole("progressbar", { name: "Model probe progress" }),
     ).toHaveAttribute("aria-valuenow", "40")
     expect(screen.getByText(/Model code · File pkg\/service.go/)).toBeVisible()
+    const calls = screen.getByRole("region", {
+      name: "Candidate call progress",
+    })
+    expect(within(calls).getByText("Batch 2/7")).toBeVisible()
+    expect(within(calls).getByText("4/12 candidate calls")).toBeVisible()
+    expect(within(calls).getByText("2 active")).toBeVisible()
+    expect(within(calls).getByText("1 failed")).toBeVisible()
+    expect(within(calls).getAllByText(/scope chunk 2 of 4/)).toHaveLength(2)
+    expect(within(calls).getAllByText(/3 files · started/)).toHaveLength(2)
+    expect(screen.getByText(/Last progress update/)).toBeVisible()
     expect(
       await screen.findByText("Evaluation complete.", {}, { timeout: 3_000 }),
     ).toBeVisible()

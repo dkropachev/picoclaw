@@ -238,7 +238,8 @@ jobs:
             strategy: scope
             max_items_per_chunk: 3
             max_tasks_per_chunk: 1
-            max_parallel_children: 1
+            max_parallel_children: 3
+            max_parallel_per_reviewer: 1
             adaptive_chunking: false
             continue_on_child_error: true
             reviewer_models: ${{ inputs.candidate_models }}
