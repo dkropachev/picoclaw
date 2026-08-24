@@ -2,6 +2,7 @@ package repoaudit
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -320,6 +321,213 @@ func TestRepositoryReviewGuardExpressionRejectsInvalidEnvironment(t *testing.T) 
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid remaining percentage") {
 		t.Fatalf("invalid account-limit environment error = %v", err)
+	}
+}
+
+func TestRepositoryReviewGuardExpressionScannerAndParserBoundaries(t *testing.T) {
+	t.Parallel()
+
+	invalid := []struct {
+		expression string
+		contains   string
+	}{
+		{expression: "! true", contains: "expected '=' after '!'"},
+		{expression: "@", contains: "unexpected character"},
+		{expression: "'line\nbreak' = 'x'", contains: "unescaped newline"},
+		{expression: `'trailing\`, contains: "unterminated escape"},
+		{expression: `'bad\x'`, contains: "unsupported escape"},
+		{expression: ". = 0", contains: "invalid number"},
+		{expression: "1e = 1", contains: "invalid exponent"},
+		{expression: "1e+ = 1", contains: "invalid exponent"},
+		{expression: "1e9999 = 1", contains: "invalid finite number"},
+		{expression: "spent..tokens = 1", contains: "dotted identifiers"},
+		{expression: "spent.tokens. = 1", contains: "dotted identifiers"},
+		{expression: "true false", contains: "unexpected token"},
+		{expression: "true OR", contains: "expected an identifier or literal"},
+		{
+			expression: strings.Repeat("NOT ", maxRepositoryReviewGuardExpressionDepth+1) + "true",
+			contains:   "nesting exceeds",
+		},
+	}
+	for _, test := range invalid {
+		err := ValidateRepositoryReviewGuardExpression(test.expression)
+		if err == nil || !strings.Contains(err.Error(), test.contains) {
+			t.Errorf(
+				"ValidateRepositoryReviewGuardExpression(%q) error = %v, want %q",
+				test.expression,
+				err,
+				test.contains,
+			)
+		}
+	}
+	if _, err := repositoryReviewGuardIdentifierKind("account.limits.Weekly.known"); err == nil ||
+		!strings.Contains(err.Error(), "is not normalized") {
+		t.Fatalf("non-normalized internal identifier error = %v", err)
+	}
+
+	allowed, err := EvaluateRepositoryReviewGuardExpression(
+		`"escaped\\quote\"apostrophe\'newline\nreturn\rtab\tback\bform\f" != '' AND +.5e+2 = 50 AND -.5E-2 < 0`,
+		RepositoryReviewGuardEnvironment{},
+	)
+	if err != nil || !allowed {
+		t.Fatalf("escaped strings and signed exponents = %t, %v", allowed, err)
+	}
+
+	// Every punctuation token has its own bounded append path. Fill the token
+	// budget first, then assert that the next token is rejected consistently.
+	for _, suffix := range []string{"(", ")", "=", "!=", "<", ">", `'x'`, "1"} {
+		expression := strings.Repeat("true AND ", maxRepositoryReviewGuardExpressionTokens/2) + suffix
+		err := ValidateRepositoryReviewGuardExpression(expression)
+		if err == nil || !strings.Contains(err.Error(), "exceeds 256 tokens") {
+			t.Errorf("token overflow suffix %q error = %v", suffix, err)
+		}
+	}
+}
+
+func TestRepositoryReviewGuardExpressionNodeContractAndEnvironmentBoundaries(t *testing.T) {
+	t.Parallel()
+
+	node, err := parseRepositoryReviewGuardExpression(
+		"NOT (account.limits.known AND spent.tokens.total < 10)",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.valueKind() != guardValueBoolean {
+		t.Fatalf("logical node kind = %v", node.valueKind())
+	}
+	identifiers := make(map[string]struct{})
+	node.collectIdentifiers(identifiers)
+	for _, expected := range []string{"account.limits.known", "spent.tokens.total"} {
+		if _, found := identifiers[expected]; !found {
+			t.Fatalf("identifiers = %#v, missing %q", identifiers, expected)
+		}
+	}
+
+	comparison, err := parseRepositoryReviewGuardExpression("false != true")
+	if err != nil || comparison.valueKind() != guardValueBoolean {
+		t.Fatalf("comparison contract kind=%v err=%v", comparison.valueKind(), err)
+	}
+	comparisonResult := comparison.evaluate(&repositoryReviewGuardResolver{})
+	if !comparisonResult.known || !comparisonResult.boolean {
+		t.Fatalf("false-first boolean comparison = %#v", comparisonResult)
+	}
+	if got := (&RepositoryReviewGuardUnknownError{}).Error(); got != ErrRepositoryReviewGuardUnknown.Error() {
+		t.Fatalf("empty unknown error = %q", got)
+	}
+	var nilUnknown *RepositoryReviewGuardUnknownError
+	if got := nilUnknown.Error(); got != ErrRepositoryReviewGuardUnknown.Error() {
+		t.Fatalf("nil unknown error = %q", got)
+	}
+	trueFirst, err := parseRepositoryReviewGuardExpression("true != false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := newRepositoryReviewGuardResolver(RepositoryReviewGuardEnvironment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := trueFirst.evaluate(resolver); !result.known || !result.boolean {
+		t.Fatalf("true-first boolean comparison = %#v", result)
+	}
+	logical := &repositoryReviewGuardLogicalNode{
+		operator: guardTokenAnd,
+		left:     &repositoryReviewGuardLiteralNode{value: knownGuardBoolean(true), text: "true"},
+		right:    &repositoryReviewGuardLiteralNode{value: knownGuardBoolean(true), text: "true"},
+	}
+	if logical.valueKind() != guardValueBoolean {
+		t.Fatalf("logical value kind = %v", logical.valueKind())
+	}
+	if got := operatorText(
+		&repositoryReviewGuardIdentifierNode{identifier: "spent.tokens.total"},
+	); got != "spent.tokens.total" {
+		t.Fatalf("identifier operator text = %q", got)
+	}
+	if got := operatorText(logical); got != "value" {
+		t.Fatalf("composite operator text = %q", got)
+	}
+	if value := resolver.resolve("unsupported", guardValueNumber); value.known || value.kind != guardValueNumber {
+		t.Fatalf("unsupported resolver value = %#v", value)
+	}
+	malformedNumberParser := &repositoryReviewGuardParser{tokens: []repositoryReviewGuardToken{
+		{kind: guardTokenNumber, text: "not-a-number"}, {kind: guardTokenEOF},
+	}}
+	if _, operandErr := malformedNumberParser.parseOperand(); operandErr == nil ||
+		!strings.Contains(operandErr.Error(), "invalid number") {
+		t.Fatalf("malformed internal number error = %v", operandErr)
+	}
+	if wildcardErr := ValidateRepositoryReviewGuardExpression("*"); wildcardErr == nil ||
+		!strings.Contains(wildcardErr.Error(), "wildcards are not supported") {
+		t.Fatalf("bare wildcard error = %v", wildcardErr)
+	}
+
+	boundaryEnvironments := []struct {
+		name        string
+		environment RepositoryReviewGuardEnvironment
+		contains    string
+	}{
+		{
+			name: "token overflow",
+			environment: RepositoryReviewGuardEnvironment{SpentTokens: RepositoryReviewTokenUsage{
+				PromptTokens: math.MaxInt64, CompletionTokens: 1, TotalTokens: math.MaxInt64,
+			}},
+			contains: "overflow",
+		},
+		{
+			name: "inconsistent total",
+			environment: RepositoryReviewGuardEnvironment{SpentTokens: RepositoryReviewTokenUsage{
+				PromptTokens: 2, CompletionTokens: 2, TotalTokens: 3,
+			}},
+			contains: "inconsistent",
+		},
+		{
+			name: "cached exceeds prompt",
+			environment: RepositoryReviewGuardEnvironment{SpentTokens: RepositoryReviewTokenUsage{
+				PromptTokens: 1, CachedTokens: 2, TotalTokens: 1,
+			}},
+			contains: "inconsistent",
+		},
+		{
+			name:        "negative cost",
+			environment: RepositoryReviewGuardEnvironment{CostKnown: true, SpendTotalUSD: -1},
+			contains:    "finite and non-negative",
+		},
+		{
+			name:        "infinite cost",
+			environment: RepositoryReviewGuardEnvironment{CostKnown: true, SpendTotalUSD: math.Inf(1)},
+			contains:    "finite and non-negative",
+		},
+		{
+			name: "empty limit window",
+			environment: RepositoryReviewGuardEnvironment{AccountLimitSnapshots: []RepositoryReviewAccountLimitSnapshot{
+				{Window: "  "},
+			}},
+			contains: "empty window",
+		},
+	}
+	for _, test := range boundaryEnvironments {
+		_, evaluationErr := EvaluateRepositoryReviewGuardExpression("true", test.environment)
+		if evaluationErr == nil || !strings.Contains(evaluationErr.Error(), test.contains) {
+			t.Errorf("%s error = %v, want %q", test.name, evaluationErr, test.contains)
+		}
+	}
+	allowed, err := EvaluateRepositoryReviewGuardExpression(
+		"spent.tokens.total = 3",
+		RepositoryReviewGuardEnvironment{SpentTokens: RepositoryReviewTokenUsage{
+			PromptTokens: 2, CompletionTokens: 1,
+		}},
+	)
+	if err != nil || !allowed {
+		t.Fatalf("derived total token count = %t, %v", allowed, err)
+	}
+
+	// An absent but successfully enumerated limit set is known to be empty.
+	allowed, err = EvaluateRepositoryReviewGuardExpression(
+		"account.limits.known AND account.limits.exhausted_known AND NOT account.limits.any",
+		RepositoryReviewGuardEnvironment{AccountLimitsKnown: true},
+	)
+	if err != nil || !allowed {
+		t.Fatalf("known empty limit set = %t, %v", allowed, err)
 	}
 }
 

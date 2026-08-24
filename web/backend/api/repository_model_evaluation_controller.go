@@ -2192,7 +2192,7 @@ func repositoryModelEvaluationUsagePrice(
 				}
 				if price.inputPerMillion <= 0 && price.outputPerMillion <= 0 &&
 					resolved.Subscription && strings.TrimSpace(resolved.SubscriptionEquivalentModel) != "" {
-					if inherited, ok := repositoryReviewAliasPrice(
+					if inherited, ok := repositoryReviewEquivalentAliasPrice(
 						cfg,
 						resolved.SubscriptionEquivalentModel,
 						make(map[string]bool),

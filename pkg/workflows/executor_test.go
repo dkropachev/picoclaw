@@ -138,6 +138,43 @@ func TestAgentStepForwardsExplicitModelAlias(t *testing.T) {
 	}
 }
 
+func TestRunStepTargetFailsClosedWhenDispatchCapabilityIsUnavailable(t *testing.T) {
+	executor := &Executor{}
+	for _, test := range []struct {
+		name string
+		step Step
+		with map[string]any
+		want string
+	}{
+		{name: "tool runner", step: Step{Uses: "tool/read"}, want: "tool runner not configured"},
+		{name: "mcp runner", step: Step{Uses: "mcp/github/get"}, want: "tool runner not configured"},
+		{name: "agent runner", step: Step{Uses: "agent/main"}, want: "agent runner not configured"},
+		{
+			name: "invalid agent output", step: Step{Uses: "agent/main"},
+			with: map[string]any{"output": map[string]any{"format": "unsupported"}},
+			want: "output format",
+		},
+		{
+			name: "function runner", step: Step{Uses: "function/not-native"},
+			want: "function runner not configured",
+		},
+		{name: "unknown target", step: Step{Uses: "custom/target"}, want: "unsupported uses target"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := executor
+			if test.name == "invalid agent output" {
+				candidate = &Executor{Agents: &fakeAgentRunner{}}
+			}
+			_, err := candidate.runStepTarget(
+				t.Context(), test.step, test.with, ExecutionContext{},
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runStepTarget() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestExecutorStepActivityObserverRunsAtActualDispatchBoundary(t *testing.T) {
 	workflow := parseWorkflow(t, `name: Step activity
 on:

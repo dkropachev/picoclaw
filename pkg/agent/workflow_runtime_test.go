@@ -241,6 +241,55 @@ func TestRepositoryReviewProfileRejectsUnavailableRuntimeAgentsAndModels(t *test
 	}
 }
 
+func TestWorkflowAgentAccountReferenceValidationCoversEveryRuntimeAccountKind(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name: "review-pool", Enabled: true, Entry: "primary",
+		Blocks: []config.AccountRouterBlock{{
+			ID: "primary", Type: config.AccountRouterBlockTypeAccount, Account: "direct",
+		}},
+	}}
+	cfg.ModelList = []*config.ModelConfig{
+		{ModelName: "direct", Provider: "openai", Enabled: true},
+		{
+			ModelName: "dynamic-model-router", Provider: config.ModelRouterProvider,
+			ModelRouter: &config.ModelRouterConfig{Name: "dynamic-model-router"}, Enabled: true,
+		},
+	}
+
+	for _, accountRef := range []string{
+		"", "review-pool", "direct", "credential:openai:work",
+	} {
+		if err := validateWorkflowAgentAccountRef(cfg, accountRef); err != nil {
+			t.Fatalf("valid account reference %q: %v", accountRef, err)
+		}
+	}
+
+	invalidUTF8 := string([]byte{0xff})
+	for _, test := range []struct {
+		name       string
+		cfg        *config.Config
+		accountRef string
+		contains   string
+	}{
+		{name: "missing config", accountRef: "direct", contains: "not configured"},
+		{name: "surrounding whitespace", cfg: cfg, accountRef: " direct ", contains: "reference is invalid"},
+		{name: "nul", cfg: cfg, accountRef: "direct\x00other", contains: "reference is invalid"},
+		{name: "invalid utf8", cfg: cfg, accountRef: invalidUTF8, contains: "reference is invalid"},
+		{name: "too long", cfg: cfg, accountRef: strings.Repeat("a", 257), contains: "reference is invalid"},
+		{name: "model router", cfg: cfg, accountRef: "dynamic-model-router", contains: "references a model router"},
+		{name: "unsupported credential provider", cfg: cfg, accountRef: "credential:custom:work", contains: "unsupported credential account"},
+		{name: "unknown", cfg: cfg, accountRef: "missing", contains: "not configured"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateWorkflowAgentAccountRef(test.cfg, test.accountRef)
+			if err == nil || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("validateWorkflowAgentAccountRef(%q) = %v, want %q", test.accountRef, err, test.contains)
+			}
+		})
+	}
+}
+
 func TestRepositoryReviewProfileExpandsModelRouterDependenciesAndRejectsUnsafeDefault(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review-leaf", Model: "leaf-v1"}}

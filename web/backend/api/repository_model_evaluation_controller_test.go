@@ -196,6 +196,50 @@ func TestRepositoryModelEvaluationUsagePricesConcreteModelsAndSeparatesJudge(t *
 		subscriptionPrice.outputPerMillion != 5 {
 		t.Fatalf("subscription-equivalent price=%#v known=%v", subscriptionPrice, subscriptionKnown)
 	}
+	overrideSubscriptionConfig := config.DefaultConfig()
+	overrideSubscriptionConfig.Agents.Defaults.AccountRef = "subscription"
+	overrideSubscriptionConfig.ModelAliases = []config.ModelAliasConfig{
+		{
+			Name: "subscription-alias", Model: "openai/default-subscription",
+			AccountOverrides: map[string]string{"subscription": "openai/override-subscription"},
+		},
+		{
+			Name: "metered-alias", Model: "openai/default-metered",
+			AccountOverrides: map[string]string{"pricing": "openai/priced-metered"},
+		},
+	}
+	overrideSubscriptionConfig.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "subscription", Provider: "openai", Model: "openai/override-subscription", Enabled: true,
+			Subscription: true, SubscriptionEquivalentModel: "metered-alias",
+		},
+		{
+			ModelName: "pricing", Provider: "openai", Model: "openai/priced-metered", Enabled: true,
+			InputPricePerMTok: 7, OutputPricePerMTok: 9,
+		},
+	}
+	overridePrice, overrideKnown := repositoryModelEvaluationUsagePrice(
+		overrideSubscriptionConfig,
+		workflows.AgentUsage{Model: "openai/override-subscription"},
+	)
+	if !overrideKnown || overridePrice.inputPerMillion != 7 || overridePrice.outputPerMillion != 9 {
+		t.Fatalf("account-override equivalent price=%#v known=%v", overridePrice, overrideKnown)
+	}
+	unavailableConfig := config.DefaultConfig()
+	unavailableConfig.Agents.Defaults.AccountRef = "api"
+	unavailableConfig.ModelAliases = []config.ModelAliasConfig{{
+		Name: "disabled-alias", Model: "openai/disabled", DisabledAccounts: []string{"api"},
+	}}
+	unavailableConfig.ModelList = []*config.ModelConfig{{
+		ModelName: "api", Provider: "openai", Model: "openai/default", Enabled: true,
+		InputPricePerMTok: 3, OutputPricePerMTok: 6,
+	}}
+	if _, known := repositoryModelEvaluationUsagePrice(
+		unavailableConfig,
+		workflows.AgentUsage{Model: "unavailable-concrete"},
+	); known {
+		t.Fatal("disabled alias produced a model evaluation price")
+	}
 	repositoryModelEvaluationAddUsage(nil, workflows.AgentUsage{}, repositoryModelEvaluationPrice{}, false)
 	unknownThenKnown := repoeval.Usage{}
 	repositoryModelEvaluationAddUsage(
@@ -349,6 +393,14 @@ func TestRepositoryModelEvaluationClaimLedgerRequiresExactDiagnosisAssessments(t
 		claims["model-a"][1].Disposition != repoeval.ClaimDispositionUnsupported {
 		t.Fatalf("validated claim ledger = %#v", claims)
 	}
+	if validationErr := repositoryModelEvaluationValidateJudgeEvidence(
+		judge,
+		mapping,
+		[]string{"model-a"},
+		ledger,
+	); validationErr != nil {
+		t.Fatalf("validate judge evidence with claim ledger: %v", validationErr)
+	}
 	aggregate, err := repositoryModelEvaluationAggregateJudgeJSON(judge)
 	if err != nil || strings.Contains(aggregate, "claimAssessments") ||
 		!strings.Contains(aggregate, `"confirmedClaims":1`) {
@@ -395,6 +447,27 @@ func TestRepositoryModelEvaluationClaimLedgerRequiresExactDiagnosisAssessments(t
 			judge:  judge,
 			ledger: strings.Replace(ledger, `"path":"pkg/core.go"`, `"path":"/tmp/core.go"`, 1),
 		},
+		{
+			name:   "duplicate ledger claim ID",
+			judge:  judge,
+			ledger: ledger[:len(ledger)-1] + `,` + ledger[1:],
+		},
+		{
+			name:   "assessment references absent claim",
+			judge:  strings.Replace(judge, "claim-001-0001", "claim-001-9999", 1),
+			ledger: ledger,
+		},
+		{
+			name: "duplicate claim assessment",
+			judge: strings.Replace(
+				judge,
+				`]}]}`,
+				`,{"claimId":"claim-001-0001","disposition":"supported",`+
+					`"rationale":"The predicate is present."}]}]}`,
+				1,
+			),
+			ledger: ledger,
+		},
 	}
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
@@ -408,6 +481,26 @@ func TestRepositoryModelEvaluationClaimLedgerRequiresExactDiagnosisAssessments(t
 				t.Fatal("invalid claim evidence was accepted")
 			}
 		})
+	}
+}
+
+func TestRepositoryModelEvaluationClaimEvidenceRejectsMalformedIDsAndAggregateShapes(t *testing.T) {
+	if !repositoryModelEvaluationValidClaimID("claim-001-0001") {
+		t.Fatal("valid claim ID was rejected")
+	}
+	for _, value := range []string{"claim-01-0001", "claim-001-abcd"} {
+		if repositoryModelEvaluationValidClaimID(value) {
+			t.Fatalf("invalid claim ID %q was accepted", value)
+		}
+	}
+	for _, value := range []string{
+		`{`,
+		`{}`,
+		`{"evaluations":[1]}`,
+	} {
+		if _, err := repositoryModelEvaluationAggregateJudgeJSON(value); err == nil {
+			t.Fatalf("invalid aggregate judge value %q was accepted", value)
+		}
 	}
 }
 
@@ -747,6 +840,53 @@ func TestRepositoryModelEvaluationInvalidJudgeEvidenceFailsBeforeCheckpoint(t *t
 	failed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusFailed)
 	if !strings.Contains(failed.Failure, "judge omitted") || len(failed.Checkpoint.Batches) != 0 {
 		t.Fatalf("invalid judge evidence persisted=%#v", failed)
+	}
+}
+
+func TestRepositoryModelEvaluationUnencodableClaimLedgerFailsBeforeCheckpoint(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	controller.runWorkflow = func(
+		_ context.Context,
+		_ string,
+		ref string,
+		_ string,
+		_ map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		switch ref {
+		case workflows.RepositoryModelEvaluationPreflightWorkflowRef:
+			return repositoryModelEvaluationPreflightResult(), nil
+		case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+			result := repositoryModelEvaluationBatchResult()
+			result.Outputs["ledger"] = make(chan int)
+			return result, nil
+		default:
+			return nil, errors.New("analysis must not run after an invalid claim ledger")
+		}
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	created := createRepositoryModelEvaluation(t, mux, "owner/invalid-claim-ledger")
+	repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+created.ID+"/preflight",
+		map[string]any{"expected_version": created.Version},
+	)
+	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
+	repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+created.ID+"/start",
+		map[string]any{"expected_version": ready.Version},
+	)
+	failed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusFailed)
+	if !strings.Contains(failed.Failure, "invalid bounded candidate claim ledger") ||
+		len(failed.Checkpoint.Batches) != 0 {
+		t.Fatalf("invalid claim ledger persisted=%#v", failed)
 	}
 }
 

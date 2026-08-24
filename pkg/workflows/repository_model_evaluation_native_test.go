@@ -1386,6 +1386,110 @@ func TestNativeRepositoryEvaluationBlindBuildsDiagnosisOnlyClaimLedger(t *testin
 	}
 }
 
+func TestNativeRepositoryEvaluationBlindRejectsMalformedAndUnboundedClaimLedgers(t *testing.T) {
+	t.Run("missing structured diagnosis", func(t *testing.T) {
+		child := nativeRepositoryEvaluationClaimChild("model-a", 0)
+		delete(child, "structured")
+		if _, err := nativeRepositoryEvaluationBlindClaims(
+			child,
+			"candidate-001",
+			map[string]int{},
+		); err == nil || !strings.Contains(err.Error(), "no structured diagnosis") {
+			t.Fatalf("missing diagnosis error = %v", err)
+		}
+	})
+
+	t.Run("prohibited structured field", func(t *testing.T) {
+		child := nativeRepositoryEvaluationClaimChild("model-a", 0)
+		nativeMapValue(child["structured"])["recommendation"] = "change it"
+		if _, err := nativeRepositoryEvaluationBlindClaims(
+			child,
+			"candidate-001",
+			map[string]int{},
+		); err == nil || !strings.Contains(err.Error(), "prohibited diagnosis field") {
+			t.Fatalf("prohibited diagnosis error = %v", err)
+		}
+	})
+
+	t.Run("malformed claims", func(t *testing.T) {
+		child := nativeRepositoryEvaluationClaimChild("model-a", 0)
+		nativeMapValue(child["structured"])["claims"] = "not a claim list"
+		if _, err := nativeRepositoryEvaluationBlindClaims(
+			child,
+			"candidate-001",
+			map[string]int{},
+		); err == nil || !strings.Contains(err.Error(), "candidate claims") {
+			t.Fatalf("malformed claims error = %v", err)
+		}
+	})
+
+	t.Run("per child limit", func(t *testing.T) {
+		child := nativeRepositoryEvaluationClaimChild(
+			"model-a",
+			repositoryEvaluationMaxClaimsPerChild+1,
+		)
+		if _, err := nativeRepositoryEvaluationBlindClaims(
+			child,
+			"candidate-001",
+			map[string]int{},
+		); err == nil || !strings.Contains(err.Error(), "claim limit") {
+			t.Fatalf("per-child claim limit error = %v", err)
+		}
+	})
+
+	t.Run("aggregate candidate limit", func(t *testing.T) {
+		child := nativeRepositoryEvaluationClaimChild("model-a", 1)
+		if _, err := nativeRepositoryEvaluationBlindClaims(
+			child,
+			"candidate-001",
+			map[string]int{"candidate-001": repositoryEvaluationMaxClaimsPerCandidate},
+		); err == nil || !strings.Contains(err.Error(), "aggregate claim limit") {
+			t.Fatalf("aggregate candidate claim limit error = %v", err)
+		}
+	})
+
+	t.Run("batch limit", func(t *testing.T) {
+		childCount := repositoryEvaluationMaxClaimsPerBatch/repositoryEvaluationMaxClaimsPerChild + 1
+		children := make([]map[string]any, childCount)
+		aliases := make([]string, childCount)
+		for index := range children {
+			aliases[index] = fmt.Sprintf("model-%02d", index)
+			children[index] = nativeRepositoryEvaluationClaimChild(
+				aliases[index],
+				repositoryEvaluationMaxClaimsPerChild,
+			)
+		}
+		if _, err := nativeRepositoryEvaluationBlind(
+			children,
+			aliases,
+		); err == nil || !strings.Contains(err.Error(), "batch limit") {
+			t.Fatalf("batch claim limit error = %v", err)
+		}
+	})
+}
+
+func nativeRepositoryEvaluationClaimChild(alias string, claimCount int) map[string]any {
+	claims := make([]map[string]any, claimCount)
+	for index := range claims {
+		claims[index] = map[string]any{
+			"path":     "pkg/core.go",
+			"title":    "Boundary state is accepted",
+			"evidence": "The exact predicate accepts the boundary value.",
+			"impact":   "The operation enters an invalid state.",
+		}
+	}
+	return map[string]any{
+		"model": map[string]any{"requested": alias, "selected": "provider/" + alias},
+		"valid": true,
+		"scope": []map[string]any{{"path": "pkg/core.go"}},
+		"structured": map[string]any{
+			"summary":       "Bounded diagnosis.",
+			"claims":        claims,
+			"residualRisks": []string{},
+		},
+	}
+}
+
 func TestNativeRepositoryEvaluationAICandidatePoolIsBoundedDiverseAndStable(t *testing.T) {
 	candidate := func(
 		language reposcope.Language,

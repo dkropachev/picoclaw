@@ -247,6 +247,47 @@ func TestRepositoryReviewPublicationHandlerRejectsMissingToolRuntime(t *testing.
 	}
 }
 
+func TestRepositoryReviewPublicationHandlerReportsClaimPersistenceFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can bypass directory permission checks")
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.MCP.Enabled = false
+	messageBus := bus.NewMessageBus()
+	loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "not used"})
+	t.Cleanup(func() {
+		loop.Stop()
+		messageBus.Close()
+		loop.Close()
+	})
+	store, state, draft := repositoryReviewPublicationTestDraft(t, cfg.WorkspacePath(), "owner/repo")
+	root := filepath.Join(cfg.WorkspacePath(), "repository_reviews")
+	if err := os.Chmod(root, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() { _ = os.Chmod(root, 0o700) }
+	t.Cleanup(restore)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+state.ID+"/issue-drafts/"+draft.ID+"/publish",
+		strings.NewReader(`{"expected_version":`+strconv.FormatInt(draft.Version, 10)+`}`),
+	)
+	response := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), `"code":"publication_unavailable"`) {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	restore()
+	current, found, err := store.GetByID(state.ID)
+	if err != nil || !found || len(current.IssueDrafts) != 1 ||
+		current.IssueDrafts[0].State != repoaudit.IssueDraftEditing {
+		t.Fatalf("claim failure state=%#v found=%v err=%v", current.IssueDrafts, found, err)
+	}
+}
+
 func TestRepositoryReviewPublicationHandlerCoversDurableDraftStates(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -149,3 +149,75 @@ func TestLegacyWildcardWindowMigratesToAnyLimit(t *testing.T) {
 		t.Fatalf("wildcard expression=%q", decoded.Budget.GuardExpression)
 	}
 }
+
+func TestRepositoryReviewGuardMigrationReadBoundaries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		data      string
+		wantErr   bool
+		wantMoved bool
+		wantGuard string
+	}{
+		{name: "invalid root", data: `{`, wantErr: true},
+		{name: "absent budget", data: `{"name":"profile"}`},
+		{name: "null budget", data: `{"budget":null}`},
+		{name: "invalid budget", data: `{"budget":[]}`, wantErr: true},
+		{
+			name:      "current guard",
+			data:      `{"budget":{"guard_expression":"spent.tokens.total < 10"}}`,
+			wantGuard: "spent.tokens.total < 10",
+		},
+		{
+			name:      "retired field keeps explicit guard",
+			data:      `{"budget":{"guard_expression":"spent.tokens.total < 20","check_interval_seconds":30}}`,
+			wantMoved: true, wantGuard: "spent.tokens.total < 20",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var decoded struct {
+				Budget RepositoryReviewBudgetPolicy `json:"budget"`
+			}
+			migrated, err := unmarshalRepositoryReviewGuardState([]byte(test.data), &decoded)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("migrated=%v error=%v", migrated, err)
+			}
+			if err == nil && (migrated != test.wantMoved || decoded.Budget.GuardExpression != test.wantGuard) {
+				t.Fatalf("migrated=%v guard=%q", migrated, decoded.Budget.GuardExpression)
+			}
+		})
+	}
+}
+
+func TestLegacyGuardMigrationHandlesGlobalAndUnusableWindows(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"budget":{
+		"min_remaining_percent":15,
+		"min_remaining_percent_by_window":{"  ":20,"monthly":0},
+		"pause_on_unknown":false
+	}}`)
+	var decoded struct {
+		Budget RepositoryReviewBudgetPolicy `json:"budget"`
+	}
+	if migrated, err := unmarshalRepositoryReviewGuardState(data, &decoded); err != nil || !migrated {
+		t.Fatalf("migrated=%v error=%v", migrated, err)
+	}
+	if !strings.Contains(decoded.Budget.GuardExpression, "account.limits.any.observed") ||
+		strings.Contains(decoded.Budget.GuardExpression, "monthly") {
+		t.Fatalf("global fail-open guard = %q", decoded.Budget.GuardExpression)
+	}
+
+	// The legacy toggle by itself requested fail-closed quota discovery.
+	data = []byte(`{"budget":{"pause_on_unknown":true}}`)
+	if migrated, err := unmarshalRepositoryReviewGuardState(data, &decoded); err != nil || !migrated {
+		t.Fatalf("toggle migration=%v error=%v", migrated, err)
+	}
+	if decoded.Budget.GuardExpression != "account.limits.known and not account.limits.exhausted" {
+		t.Fatalf("toggle-only guard = %q", decoded.Budget.GuardExpression)
+	}
+}
