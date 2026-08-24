@@ -11,6 +11,7 @@
   "hardcodedColors": {
     "allowedFiles": {
       "src/components/chat/message-code-block.tsx": "Code block theme colors mirror rendered code content.",
+      "src/components/model-evaluations/model-evaluation-report-page.tsx": "The report needs eight stable, distinguishable chart series because one probe may compare eight models; every series also has direct labels and exact text.",
       "src/lib/ansi-log.ts": "ANSI terminal color palette maps protocol color indexes."
     }
   }

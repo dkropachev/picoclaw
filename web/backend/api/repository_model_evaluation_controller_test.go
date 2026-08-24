@@ -494,7 +494,9 @@ func TestRepositoryModelEvaluationComparisonsUseCheckpointCoverageAndFailures(t 
 			},
 			"model-c": {Attempts: 2, Failures: 2},
 		},
-		JudgeJSON: `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+		JudgeJSON:   `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":3,"unsupportedClaims":5}]}`,
+		MappingJSON: `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`,
+		CompletedAt: time.Now().UTC(),
 	}}
 	score := 70.0
 	rows, _, err := repositoryModelEvaluationComparisons(evaluation, map[string]any{
@@ -520,7 +522,8 @@ func TestRepositoryModelEvaluationComparisonsUseCheckpointCoverageAndFailures(t 
 		rows[0].OverallScore != nil || rows[0].Rank != 0 || len(rows[0].Scores) != 0 ||
 		rows[0].FilesAnalyzed != 1 || rows[0].BytesAnalyzed != 120 ||
 		!slices.Equal(rows[0].Languages, []string{"go"}) || !slices.Equal(rows[0].Regions, []string{"pkg"}) ||
-		rows[0].Failures != 1 || rows[1].Completion != repoeval.ModelCompletionCompleted ||
+		rows[0].Failures != 1 || rows[0].UnsupportedClaims == nil || *rows[0].UnsupportedClaims != 5 ||
+		rows[0].UnsupportedFiles != 1 || rows[1].Completion != repoeval.ModelCompletionCompleted ||
 		rows[1].FilesAnalyzed != 2 || rows[1].BytesAnalyzed != 210 || rows[1].OverallScore == nil ||
 		rows[2].Completion != repoeval.ModelCompletionFailed || rows[2].FilesAnalyzed != 0 ||
 		rows[2].BytesAnalyzed != 0 || len(rows[2].Languages) != 0 || len(rows[2].Regions) != 0 ||

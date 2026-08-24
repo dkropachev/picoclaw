@@ -300,6 +300,18 @@ func TestStoreAllowsOnlyGuardedCanceledAndFailedResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, invalidResumeErr := store.Update(
+		t.Context(),
+		failed.ID,
+		failed.Version,
+		func(candidate *Evaluation) error {
+			candidate.Status = StatusRunning
+			candidate.Progress.Stage = ProgressCandidateExecution
+			return nil
+		},
+	); !errors.Is(invalidResumeErr, ErrInvalidEvaluation) {
+		t.Fatalf("failed state resumed without clearing failure: %v", invalidResumeErr)
+	}
 	resumed, err := store.Update(t.Context(), failed.ID, failed.Version, func(candidate *Evaluation) error {
 		candidate.Status = StatusRunning
 		candidate.Failure = ""

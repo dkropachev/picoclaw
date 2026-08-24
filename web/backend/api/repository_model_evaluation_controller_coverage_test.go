@@ -799,6 +799,52 @@ func TestRepositoryModelEvaluationPreflightExecutionEdgeCoverage(t *testing.T) {
 	}
 }
 
+func TestRepositoryModelEvaluationPreflightPersistenceFailureCoverage(t *testing.T) {
+	for _, failureCall := range []int{1, 2} {
+		t.Run(fmt.Sprintf("update-%d", failureCall), func(t *testing.T) {
+			handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+			controller := newRepositoryModelEvaluationController(handler)
+			base, _, err := handler.repositoryModelEvaluationStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := repositoryModelEvaluationCreateRequest(
+				fmt.Sprintf("owner/preflight-update-%d", failureCall),
+			)
+			request.OneShot = true
+			request.InitialRunID = workflows.NewRunID()
+			preflighting, err := base.Create(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.store = &repositoryModelEvaluationFaultStore{
+				base:   base,
+				failAt: map[int]error{failureCall: errors.New("injected preflight persistence failure")},
+			}
+			controller.runWorkflow = func(
+				context.Context,
+				string,
+				string,
+				string,
+				map[string]any,
+				workflows.AgentUsageEventObserver,
+			) (*workflows.RunResult, error) {
+				return repositoryModelEvaluationPreflightResult(), nil
+			}
+			token, runCtx, _, reserveErr := controller.reserveActive(preflighting.ID)
+			if reserveErr != nil {
+				t.Fatal(reserveErr)
+			}
+			controller.wg.Add(1)
+			controller.executePreflight(runCtx, preflighting.ID, token, workflows.NewRunID())
+			failed, found, getErr := base.Get(t.Context(), preflighting.ID)
+			if getErr != nil || !found || failed.Status != repoeval.StatusFailed {
+				t.Fatalf("failed preflight=%#v found=%v err=%v", failed, found, getErr)
+			}
+		})
+	}
+}
+
 func TestRepositoryModelEvaluationExecutionStructuredFailureCoverage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1217,7 +1263,7 @@ func TestRepositoryModelEvaluationExecutionControlFlowCoverage(t *testing.T) {
 		controller := newRepositoryModelEvaluationController(handler)
 		base, _, _ := handler.repositoryModelEvaluationStore()
 		running := seedRunningRepositoryModelEvaluation(t, controller, base, "owner/duplicate-checkpoint")
-		batch := repositoryModelEvaluationBatches(running)[0]
+		batch := repositoryModelEvaluationPendingBatches(running)[0]
 		fault := &repositoryModelEvaluationFaultStore{base: base}
 		fault.beforeUpdate = func(call int) {
 			if call != 2 {

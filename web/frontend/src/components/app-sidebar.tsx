@@ -210,7 +210,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       ? currentPath
       : null
   const modelEvaluationsDestination =
-    currentPath === "/model-evaluations" ? currentPath : null
+    currentPath === "/model-evaluations" ||
+    currentPath.startsWith("/model-evaluations/")
+      ? currentPath
+      : null
   const servicesDestination =
     pullRequestDestination ??
     repositoryReviewsDestination ??

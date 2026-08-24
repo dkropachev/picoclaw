@@ -245,6 +245,26 @@ func TestRepositoryModelEvaluationRoutesRejectUnsafeRequestsModelsAndPages(t *te
 		projected.RunIDs[0] != "wr_5" {
 		t.Fatalf("projected run IDs=%v", projected.RunIDs)
 	}
+	exactUnsupported := 2
+	legacyComparison := repoeval.Evaluation{
+		Comparisons: []repoeval.ModelComparison{
+			{ModelAlias: "model-a", UnsupportedFiles: 1},
+			{ModelAlias: "model-b", UnsupportedClaims: &exactUnsupported},
+			{ModelAlias: "model-missing"},
+		},
+		Checkpoint: repoeval.Checkpoint{Batches: []repoeval.BatchCheckpoint{{
+			MappingJSON: `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`,
+			JudgeJSON:   `{"evaluations":[{"candidateId":"candidate-001","unsupportedClaims":5}]}`,
+		}}},
+	}
+	projected := projectRepositoryModelEvaluation(legacyComparison)
+	if len(projected.Checkpoint.Batches) != 0 || projected.Comparisons[0].UnsupportedClaims == nil ||
+		*projected.Comparisons[0].UnsupportedClaims != 5 ||
+		projected.Comparisons[1].UnsupportedClaims == nil ||
+		*projected.Comparisons[1].UnsupportedClaims != exactUnsupported ||
+		projected.Comparisons[2].UnsupportedClaims != nil {
+		t.Fatalf("legacy claim projection=%#v", projected)
+	}
 }
 
 func TestRepositoryModelEvaluationOptionsExposeOnlySafeModelsAndRepositories(t *testing.T) {
@@ -373,6 +393,16 @@ func TestRepositoryModelEvaluationRoutesFullPatchResumeAndBusyDelete(t *testing.
 	}
 	<-entered
 	active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
+	busyPatch := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/model-evaluations/"+created.ID,
+		map[string]any{"expected_version": active.Version, "ref": "other"},
+	)
+	if busyPatch.Code != http.StatusConflict {
+		t.Fatalf("busy patch status=%d body=%s", busyPatch.Code, busyPatch.Body.String())
+	}
 	busyResume := repositoryModelEvaluationMutation(
 		t,
 		mux,
@@ -1230,7 +1260,9 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 	remotes := []string{
 		"https://github.com/zeta/repo-z.git",
 		"https://github.com/acme/repo-a.git",
+		"https://github.com/acme/repo-a",
 		"alice@git.example:group/incompatible.git",
+		"file:///private/repository.git",
 		filepath.Join(t.TempDir(), "local-secret.git"),
 	}
 	repositories := make(map[string]any, len(remotes))

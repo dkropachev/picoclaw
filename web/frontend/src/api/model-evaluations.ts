@@ -126,6 +126,7 @@ export interface EvaluationComparison {
   files_analyzed: number
   bytes_analyzed: number
   confirmed_findings: number
+  unsupported_claims?: number
   unsupported_files: number
   usage: EvaluationUsage
   verdict?: string

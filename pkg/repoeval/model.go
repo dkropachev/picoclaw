@@ -310,6 +310,7 @@ type ModelComparison struct {
 	FilesAnalyzed     int                `json:"files_analyzed"`
 	BytesAnalyzed     int64              `json:"bytes_analyzed"`
 	ConfirmedFindings int                `json:"confirmed_findings"`
+	UnsupportedClaims *int               `json:"unsupported_claims,omitempty"`
 	UnsupportedFiles  int                `json:"unsupported_files"`
 	Usage             Usage              `json:"usage"`
 	Verdict           string             `json:"verdict,omitempty"`

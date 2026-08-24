@@ -96,6 +96,7 @@ func Clone(evaluation Evaluation) Evaluation {
 		clone.Comparisons[index] = comparison
 		clone.Comparisons[index].ConcreteModels = cloneIntMap(comparison.ConcreteModels)
 		clone.Comparisons[index].OverallScore = cloneFloat(comparison.OverallScore)
+		clone.Comparisons[index].UnsupportedClaims = cloneInt(comparison.UnsupportedClaims)
 		clone.Comparisons[index].Scores = cloneFloatMap(comparison.Scores)
 		clone.Comparisons[index].Usage.EstimatedCostUSD = cloneFloat(comparison.Usage.EstimatedCostUSD)
 		clone.Comparisons[index].Languages = append([]string(nil), comparison.Languages...)
@@ -138,6 +139,14 @@ func cloneFloat(value *float64) *float64 {
 	}
 	copyValue := *value
 	return &copyValue
+}
+
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 func cloneIntMap(values map[string]int) map[string]int {
@@ -898,7 +907,9 @@ func validateComparisons(comparisons []ModelComparison, candidates []string, sta
 			len(comparison.Languages) > maxLanguages || len(comparison.Regions) > 256 ||
 			comparison.FilesAnalyzed < 0 || comparison.FilesAnalyzed > maxCorpusFiles ||
 			comparison.BytesAnalyzed < 0 || comparison.ConfirmedFindings < 0 ||
-			comparison.ConfirmedFindings > maxProgressCount || comparison.UnsupportedFiles < 0 ||
+			comparison.ConfirmedFindings > maxProgressCount ||
+			comparison.UnsupportedClaims != nil && (*comparison.UnsupportedClaims < 0 ||
+				*comparison.UnsupportedClaims > maxProgressCount) || comparison.UnsupportedFiles < 0 ||
 			comparison.UnsupportedFiles > maxCorpusFiles {
 			return ErrInvalidEvaluation
 		}

@@ -192,6 +192,25 @@ describe("AppSidebar", () => {
     )
   })
 
+  it("keeps Model review probes active on a dedicated report route", () => {
+    pathname = "/model-evaluations/rme_012d820e0d5cf890740e990be0bc3651/report"
+
+    renderSidebar()
+
+    expect(screen.getByRole("button", { name: "Services" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    )
+    expect(
+      screen.getByRole("button", { name: "Repository reviews" }),
+    ).toHaveAttribute("aria-expanded", "true")
+    expect(
+      screen
+        .getByRole("link", { name: "Model review probes" })
+        .closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "true")
+  })
+
   it("shows the MCP link when the dedicated MCP route is active", () => {
     pathname = "/agent/mcp"
 

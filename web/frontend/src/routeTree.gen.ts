@@ -45,6 +45,7 @@ import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-works
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
 import { Route as PullRequestsWorkflowConfigurationsConfigurationIDRouteImport } from './routes/pull-requests_.workflow-configurations.$configurationID'
+import { Route as ModelEvaluationsEvaluationIDReportRouteImport } from './routes/model-evaluations_.$evaluationID.report'
 import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
 import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
 
@@ -234,6 +235,12 @@ const PullRequestsWorkflowConfigurationsConfigurationIDRoute =
     path: '/$configurationID',
     getParentRoute: () => PullRequestsWorkflowConfigurationsRoute,
   } as any)
+const ModelEvaluationsEvaluationIDReportRoute =
+  ModelEvaluationsEvaluationIDReportRouteImport.update({
+    id: '/model-evaluations_/$evaluationID/report',
+    path: '/model-evaluations/$evaluationID/report',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const AccountsAccountRouterNewRoute =
   AccountsAccountRouterNewRouteImport.update({
     id: '/account-router/new',
@@ -284,6 +291,7 @@ export interface FileRoutesByFullPath {
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/pull-requests/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
@@ -324,6 +332,7 @@ export interface FileRoutesByTo {
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/pull-requests/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
@@ -365,6 +374,7 @@ export interface FileRoutesById {
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/model-evaluations_/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/pull-requests_/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
@@ -407,6 +417,7 @@ export interface FileRouteTypes {
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/model-evaluations/$evaluationID/report'
     | '/pull-requests/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
@@ -447,6 +458,7 @@ export interface FileRouteTypes {
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/model-evaluations/$evaluationID/report'
     | '/pull-requests/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   id:
@@ -487,6 +499,7 @@ export interface FileRouteTypes {
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/model-evaluations_/$evaluationID/report'
     | '/pull-requests_/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
@@ -514,6 +527,7 @@ export interface RootRouteChildren {
   RepositoryReviewsProfilesRoute: typeof RepositoryReviewsProfilesRoute
   RepositoryReviewsRepositoriesRoute: typeof RepositoryReviewsRepositoriesRoute
   RepositoryReviewsResultsRoute: typeof RepositoryReviewsResultsRoute
+  ModelEvaluationsEvaluationIDReportRoute: typeof ModelEvaluationsEvaluationIDReportRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -770,6 +784,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PullRequestsWorkflowConfigurationsConfigurationIDRouteImport
       parentRoute: typeof PullRequestsWorkflowConfigurationsRoute
     }
+    '/model-evaluations_/$evaluationID/report': {
+      id: '/model-evaluations_/$evaluationID/report'
+      path: '/model-evaluations/$evaluationID/report'
+      fullPath: '/model-evaluations/$evaluationID/report'
+      preLoaderRoute: typeof ModelEvaluationsEvaluationIDReportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/accounts/account-router/new': {
       id: '/accounts/account-router/new'
       path: '/account-router/new'
@@ -913,6 +934,8 @@ const rootRouteChildren: RootRouteChildren = {
   RepositoryReviewsProfilesRoute: RepositoryReviewsProfilesRoute,
   RepositoryReviewsRepositoriesRoute: RepositoryReviewsRepositoriesRoute,
   RepositoryReviewsResultsRoute: RepositoryReviewsResultsRoute,
+  ModelEvaluationsEvaluationIDReportRoute:
+    ModelEvaluationsEvaluationIDReportRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

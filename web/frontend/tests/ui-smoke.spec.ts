@@ -1884,6 +1884,85 @@ async function mockLauncherApis(
                   current_path: "",
                   percent: 100,
                 },
+                usage: {
+                  requests: 12,
+                  input_tokens: 120_000,
+                  cached_input_tokens: 10_000,
+                  output_tokens: 24_000,
+                  reasoning_tokens: 8_000,
+                  duration_millis: 180_000,
+                },
+                comparisons: [
+                  {
+                    model_alias: "code",
+                    concrete_models: { "gpt-code": 2 },
+                    completion: "completed",
+                    failures: 0,
+                    rank: 1,
+                    overall_score: 92.5,
+                    scores: {
+                      correctness: 95,
+                      evidence: 93,
+                      coverage: 88,
+                      actionability: 94,
+                    },
+                    languages: ["go"],
+                    regions: ["pkg", "cmd"],
+                    files_analyzed: 2,
+                    bytes_analyzed: 12_000,
+                    confirmed_findings: 8,
+                    unsupported_claims: 1,
+                    unsupported_files: 1,
+                    usage: {
+                      requests: 4,
+                      input_tokens: 40_000,
+                      cached_input_tokens: 0,
+                      output_tokens: 10_000,
+                      reasoning_tokens: 4_000,
+                      duration_millis: 120_000,
+                    },
+                    verdict: "Best evidence-grounded analysis.",
+                    strengths: ["Precise source evidence"],
+                    limitations: ["Higher cumulative model time"],
+                  },
+                  {
+                    model_alias: "fast",
+                    concrete_models: { "gpt-fast": 2 },
+                    completion: "completed",
+                    failures: 0,
+                    rank: 2,
+                    overall_score: 84,
+                    scores: {
+                      correctness: 86,
+                      evidence: 85,
+                      coverage: 76,
+                      actionability: 82,
+                    },
+                    languages: ["go"],
+                    regions: ["pkg", "cmd"],
+                    files_analyzed: 2,
+                    bytes_analyzed: 12_000,
+                    confirmed_findings: 5,
+                    unsupported_claims: 2,
+                    unsupported_files: 2,
+                    usage: {
+                      requests: 4,
+                      input_tokens: 40_000,
+                      cached_input_tokens: 0,
+                      output_tokens: 6_000,
+                      reasoning_tokens: 2_000,
+                      duration_millis: 60_000,
+                    },
+                    verdict: "Fast, but materially narrower.",
+                    strengths: ["Lower cumulative model time"],
+                    limitations: ["Missed important findings"],
+                  },
+                ],
+                warnings: [
+                  "Quality scores are comparative AI judgments, not ground truth.",
+                ],
+                finished_at: "2026-08-21T12:03:00Z",
+                updated_at: "2026-08-21T12:03:00Z",
               }
             }
             return json(route, {
@@ -3560,6 +3639,7 @@ test("model review probes compare models without producing findings", async ({
   await expect(
     workspace.getByText("Repository model evaluation completed."),
   ).toBeVisible({ timeout: 5_000 })
+  await expect(workspace.getByText("Visual report ready")).toBeVisible()
   await expect(
     workspace.getByLabel("Repository", { exact: true }),
   ).toBeDisabled()
@@ -3573,6 +3653,39 @@ test("model review probes compare models without producing findings", async ({
     workspace.getByRole("button", { name: "Start over" }),
   ).toHaveCount(0)
   await expect(workspace.getByRole("button", { name: "Delete" })).toHaveCount(0)
+
+  await workspace.getByRole("button", { name: "View full report" }).click()
+  await expect(page).toHaveURL(/\/model-evaluations\/rme_[0-9a-f]{32}\/report$/)
+  const report = page.getByRole("region", { name: "Model probe report" })
+  await expect(
+    report.getByRole("heading", {
+      name: "Use code when review quality matters.",
+    }),
+  ).toBeVisible()
+  await expect(
+    report.getByRole("heading", { name: "Quality score comparison" }),
+  ).toBeVisible()
+  if ((page.viewportSize()?.width ?? 0) < 640) {
+    await expect(
+      report.getByText("Quality", { exact: true }).first(),
+    ).toBeVisible()
+    await expect(
+      report.getByText("Time", { exact: true }).first(),
+    ).toBeVisible()
+  } else {
+    await expect(
+      report.getByRole("img", { name: /Efficiency graph/i }),
+    ).toBeVisible()
+  }
+  await expect(
+    report.getByRole("img", { name: /code: AI-judge supported claims 8/i }),
+  ).toBeVisible()
+  await expect(
+    report.getByText("Best evidence-grounded analysis."),
+  ).toBeVisible()
+  await expect(report.getByText("Precise source evidence")).toBeVisible()
+  await report.getByRole("button", { name: "View analysis" }).click()
+  await expect(report.getByText("Missed important findings")).toBeVisible()
 
   expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
     "POST /api/model-evaluations/run",

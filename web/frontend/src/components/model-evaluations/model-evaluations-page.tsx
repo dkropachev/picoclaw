@@ -1,9 +1,11 @@
 import {
   IconAlertTriangle,
-  IconBrain,
+  IconArrowRight,
   IconLoader2,
   IconPlayerPlay,
   IconRefresh,
+  IconReportAnalytics,
+  IconTrophy,
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 
@@ -31,6 +33,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+
+import { buildModelEvaluationReportAnalysis } from "./model-evaluation-report-analysis"
 
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Horizontally scrollable data regions must be keyboard-focusable. */
 
@@ -66,11 +70,6 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`
-}
-
-function formatDuration(value: number): string {
-  if (value < 1000) return `${value} ms`
-  return `${(value / 1000).toFixed(1)} s`
 }
 
 function formatProgressTime(value?: string): string {
@@ -276,11 +275,17 @@ function ModelChecks({
   )
 }
 
-export function ModelEvaluationsPage() {
+export function ModelEvaluationsPage({
+  onOpenReport,
+  initialEvaluationID = "",
+}: {
+  onOpenReport?: (evaluationID: string) => void
+  initialEvaluationID?: string
+} = {}) {
   const [evaluations, setEvaluations] = useState<
     RepositoryModelEvaluationSummary[]
   >([])
-  const [selectedID, setSelectedID] = useState("")
+  const [selectedID, setSelectedID] = useState(initialEvaluationID)
   const [creatingNew, setCreatingNew] = useState(false)
   const [selected, setSelected] = useState<RepositoryModelEvaluation | null>(
     null,
@@ -540,6 +545,11 @@ export function ModelEvaluationsPage() {
       Object.entries(selected?.progress.languages ?? {}).sort(([a], [b]) =>
         a.localeCompare(b),
       ),
+    [selected],
+  )
+  const reportWinner = useMemo(
+    () =>
+      buildModelEvaluationReportAnalysis(selected?.comparisons ?? []).winner,
     [selected],
   )
 
@@ -1334,125 +1344,57 @@ export function ModelEvaluationsPage() {
 
             {selected && selected.comparisons.length > 0 && (
               <section
-                aria-label="AI-judged comparison"
-                tabIndex={0}
-                className="border-border bg-card overflow-x-auto rounded-xl border p-4 sm:p-5"
+                aria-label="Probe report ready"
+                className="via-card overflow-hidden rounded-xl border border-sky-200 bg-gradient-to-br from-sky-50 to-violet-50 p-4 sm:p-5 dark:border-sky-900 dark:from-sky-950/30 dark:to-violet-950/20"
               >
-                <div className="flex items-center gap-2">
-                  <IconBrain className="size-5" />
-                  <h2 className="font-semibold">AI-judged comparison</h2>
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="max-w-2xl">
+                    <div className="flex items-center gap-2 text-sky-700 dark:text-sky-300">
+                      <IconReportAnalytics
+                        className="size-5"
+                        aria-hidden="true"
+                      />
+                      <h2 className="font-semibold">Visual report ready</h2>
+                    </div>
+                    <p className="text-muted-foreground mt-2 text-sm leading-6">
+                      The full report turns this comparison into score graphs,
+                      efficiency tradeoffs, claim assessment, and readable
+                      strengths and limitations.
+                    </p>
+                    <p className="mt-3 flex items-center gap-2 text-sm">
+                      <IconTrophy
+                        className="size-4 text-amber-500"
+                        aria-hidden="true"
+                      />
+                      <strong>
+                        {reportWinner?.model_alias ?? "Results need attention"}
+                      </strong>
+                      {reportWinner?.overall_score == null
+                        ? " · no fully completed scored model"
+                        : ` leads at ${reportWinner.overall_score.toFixed(1)} overall`}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-start gap-2 lg:items-end">
+                    <div className="text-muted-foreground text-xs">
+                      {selected.comparisons.length} models ·{" "}
+                      {selected.progress.completed_files}/
+                      {selected.progress.selected_files} files
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() =>
+                        onOpenReport
+                          ? onOpenReport(selected.id)
+                          : window.location.assign(
+                              `/model-evaluations/${selected.id}/report`,
+                            )
+                      }
+                    >
+                      View full report
+                      <IconArrowRight aria-hidden="true" />
+                    </Button>
+                  </div>
                 </div>
-                <p className="text-muted-foreground mt-1 text-xs">
-                  Quality scores are comparative AI judgments, not ground-truth
-                  benchmark measurements.
-                </p>
-                <table className="mt-4 w-full min-w-[70rem] text-left text-sm">
-                  <caption className="sr-only">
-                    AI-judged model quality, coverage, reliability, usage, and
-                    cost comparison
-                  </caption>
-                  <thead>
-                    <tr className="border-border border-b">
-                      <th scope="col" className="py-2">
-                        Rank
-                      </th>
-                      <th scope="col">Model alias</th>
-                      <th scope="col">Concrete models</th>
-                      <th scope="col">Completion</th>
-                      <th scope="col">Overall</th>
-                      <th scope="col">Correctness</th>
-                      <th scope="col">Evidence</th>
-                      <th scope="col">Coverage</th>
-                      <th scope="col">Actionability</th>
-                      <th scope="col">Files / bytes / regions / languages</th>
-                      <th scope="col">Findings / unsupported</th>
-                      <th scope="col">Requests / latency</th>
-                      <th scope="col">Tokens / cost</th>
-                      <th scope="col">AI-judged verdict</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...selected.comparisons]
-                      .sort((a, b) => (a.rank || 99) - (b.rank || 99))
-                      .map((row) => (
-                        <tr
-                          key={row.model_alias}
-                          className="border-border border-b align-top last:border-0"
-                        >
-                          <td className="py-3">{row.rank || "—"}</td>
-                          <th
-                            scope="row"
-                            className="text-left font-mono font-normal"
-                          >
-                            {row.model_alias}
-                          </th>
-                          <td>
-                            {Object.entries(row.concrete_models)
-                              .map(([model, count]) => `${model} (${count})`)
-                              .join(", ") || "unknown"}
-                          </td>
-                          <td>
-                            <Badge
-                              variant={
-                                row.completion === "failed"
-                                  ? "destructive"
-                                  : "outline"
-                              }
-                            >
-                              {row.completion}
-                            </Badge>
-                            {row.failures > 0 && (
-                              <span className="text-destructive mt-1 block text-xs">
-                                {row.failures} failed task
-                                {row.failures === 1 ? "" : "s"}
-                              </span>
-                            )}
-                          </td>
-                          <td>{row.overall_score?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.correctness?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.evidence?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.coverage?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.actionability?.toFixed(1) ?? "—"}</td>
-                          <td>
-                            {row.files_analyzed} /{" "}
-                            {formatBytes(row.bytes_analyzed)} /{" "}
-                            {row.regions.length} / {row.languages.length}
-                          </td>
-                          <td>
-                            {row.confirmed_findings} / {row.unsupported_files}
-                          </td>
-                          <td>
-                            {row.usage.requests} /{" "}
-                            {formatDuration(row.usage.duration_millis)}
-                          </td>
-                          <td>
-                            {row.usage.input_tokens + row.usage.output_tokens} /{" "}
-                            {row.usage.estimated_cost_usd == null
-                              ? "unknown"
-                              : `$${row.usage.estimated_cost_usd.toFixed(4)}`}
-                          </td>
-                          <td className="max-w-md">
-                            <p>{row.verdict || row.summary || "No verdict."}</p>
-                            {row.failure && (
-                              <p className="text-destructive mt-1 text-xs">
-                                Failure: {row.failure}
-                              </p>
-                            )}
-                            {(row.strengths ?? []).length > 0 && (
-                              <p className="mt-1 text-xs text-emerald-600">
-                                Strengths: {row.strengths?.join("; ")}
-                              </p>
-                            )}
-                            {(row.limitations ?? []).length > 0 && (
-                              <p className="mt-1 text-xs text-amber-600">
-                                Limitations: {row.limitations?.join("; ")}
-                              </p>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
               </section>
             )}
           </div>

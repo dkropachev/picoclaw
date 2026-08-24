@@ -696,6 +696,19 @@ func projectRepositoryModelEvaluationSummary(evaluation repoeval.Evaluation) rep
 
 func projectRepositoryModelEvaluation(evaluation repoeval.Evaluation) repoeval.Evaluation {
 	projected := repoeval.Clone(evaluation)
+	if len(projected.Checkpoint.Batches) > 0 {
+		_, unsupported := repositoryModelEvaluationJudgedClaimCounts(projected.Checkpoint.Batches)
+		for index := range projected.Comparisons {
+			if projected.Comparisons[index].UnsupportedClaims != nil {
+				continue
+			}
+			count, found := unsupported[projected.Comparisons[index].ModelAlias]
+			if !found {
+				continue
+			}
+			projected.Comparisons[index].UnsupportedClaims = &count
+		}
+	}
 	projected.Failure = sanitizeRepositoryModelEvaluationRuntimeText(projected.Failure, evaluation.Repository)
 	projected.Progress.Message = sanitizeRepositoryModelEvaluationRuntimeText(
 		projected.Progress.Message,

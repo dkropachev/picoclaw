@@ -121,8 +121,8 @@ const evaluation: RepositoryModelEvaluation = {
   updated_at: "2026-08-21T12:01:00Z",
 }
 
-function renderPage() {
-  return render(<ModelEvaluationsPage />)
+function renderPage(onOpenReport?: (evaluationID: string) => void) {
+  return render(<ModelEvaluationsPage onOpenReport={onOpenReport} />)
 }
 
 describe("ModelEvaluationsPage", () => {
@@ -755,6 +755,8 @@ describe("ModelEvaluationsPage", () => {
   })
 
   it("renders completed results as immutable terminal work", async () => {
+    const user = userEvent.setup()
+    const onOpenReport = vi.fn()
     const completed: RepositoryModelEvaluation = {
       ...evaluation,
       status: "completed",
@@ -788,12 +790,17 @@ describe("ModelEvaluationsPage", () => {
     }
     vi.mocked(listModelEvaluations).mockResolvedValue([completed])
     vi.mocked(getModelEvaluation).mockResolvedValue(completed)
-    renderPage()
+    renderPage(onOpenReport)
 
-    expect(await screen.findByText("AI-judged comparison")).toBeVisible()
-    expect(screen.getByText("92.5")).toBeVisible()
-    expect(screen.getByText("Best evidence-grounded analysis.")).toBeVisible()
-    expect(screen.getByText(/Strengths: Strong evidence/)).toBeVisible()
+    expect(await screen.findByText("Visual report ready")).toBeVisible()
+    expect(screen.getByLabelText("Probe report ready")).toHaveTextContent(
+      "code leads at 92.5 overall",
+    )
+    expect(
+      screen.queryByText("Best evidence-grounded analysis."),
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "View full report" }))
+    expect(onOpenReport).toHaveBeenCalledWith(completed.id)
     expect(screen.getByLabelText("Repository")).toBeDisabled()
     expect(
       screen.queryByRole("button", { name: "Run probe" }),
@@ -813,6 +820,8 @@ describe("ModelEvaluationsPage", () => {
   })
 
   it("keeps partial and failed comparison evidence honest with unknown cost", async () => {
+    const user = userEvent.setup()
+    const onOpenReport = vi.fn()
     const completed: RepositoryModelEvaluation = {
       ...evaluation,
       status: "completed",
@@ -860,24 +869,17 @@ describe("ModelEvaluationsPage", () => {
     }
     vi.mocked(listModelEvaluations).mockResolvedValue([completed])
     vi.mocked(getModelEvaluation).mockResolvedValue(completed)
-    renderPage()
+    renderPage(onOpenReport)
 
-    expect(await screen.findByText("AI-judged comparison")).toBeVisible()
-    expect(screen.getByText("partial")).toBeVisible()
-    expect(screen.getByText("1 failed task")).toBeVisible()
+    expect(await screen.findByText("Visual report ready")).toBeVisible()
+    expect(screen.getByLabelText("Probe report ready")).toHaveTextContent(
+      "Results need attention · no fully completed scored model",
+    )
     expect(
-      screen.getByText("Failure: One corpus task timed out."),
-    ).toBeVisible()
-    expect(
-      screen.getByText("Failure: No valid candidate output."),
-    ).toBeVisible()
-    const partialRow = screen.getByRole("row", { name: /code gpt-code/i })
-    expect(within(partialRow).getByText(/unknown/)).toBeVisible()
-    const failedRow = screen.getByRole("row", { name: /fast unknown failed/i })
-    expect(within(failedRow).getByText(/\$0\.0000/)).toBeVisible()
-    expect(
-      screen.getByText(/comparative AI judgments, not ground-truth/i),
-    ).toBeVisible()
+      screen.queryByText("One corpus task timed out."),
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "View full report" }))
+    expect(onOpenReport).toHaveBeenCalledWith(completed.id)
   })
 
   it("restarts failed evaluations from checkpoints with the exact version", async () => {

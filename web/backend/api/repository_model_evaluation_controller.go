@@ -2646,6 +2646,7 @@ func repositoryModelEvaluationComparisons(
 			alias,
 		)
 		completion := repositoryModelEvaluationObjectiveCompletion(filesAnalyzed, len(evaluation.Corpus.Files))
+		unsupportedClaims := unsupported[alias]
 		comparison := repoeval.ModelComparison{
 			ModelAlias:        alias,
 			ConcreteModels:    cloneNestedConcrete(evaluation.Checkpoint.ConcreteModels[alias]),
@@ -2659,6 +2660,7 @@ func repositoryModelEvaluationComparisons(
 			BytesAnalyzed:     bytesAnalyzed,
 			Failures:          metrics.ModelStats[alias].Failures,
 			ConfirmedFindings: confirmed[alias],
+			UnsupportedClaims: &unsupportedClaims,
 			UnsupportedFiles:  min(filesAnalyzed, unsupported[alias]),
 			Usage:             evaluation.ModelStats[alias].Usage,
 			Verdict:           row.Verdict,

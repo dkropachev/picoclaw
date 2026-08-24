@@ -801,9 +801,12 @@ func TestManifestAndComparisonValidation(t *testing.T) {
 		"language": func(value *Evaluation) {
 			value.Comparisons[0].Languages = []string{strings.Repeat("l", maxLanguageBytes+1)}
 		},
-		"files":       func(value *Evaluation) { value.Comparisons[0].FilesAnalyzed = -1 },
-		"bytes":       func(value *Evaluation) { value.Comparisons[0].BytesAnalyzed = -1 },
-		"confirmed":   func(value *Evaluation) { value.Comparisons[0].ConfirmedFindings = -1 },
+		"files":     func(value *Evaluation) { value.Comparisons[0].FilesAnalyzed = -1 },
+		"bytes":     func(value *Evaluation) { value.Comparisons[0].BytesAnalyzed = -1 },
+		"confirmed": func(value *Evaluation) { value.Comparisons[0].ConfirmedFindings = -1 },
+		"unsupported claims": func(value *Evaluation) {
+			value.Comparisons[0].UnsupportedClaims = intPointer(-1)
+		},
 		"unsupported": func(value *Evaluation) { value.Comparisons[0].UnsupportedFiles = -1 },
 		"strength": func(value *Evaluation) {
 			value.Comparisons[0].Strengths = []string{strings.Repeat("s", maxWarningBytes+1)}
@@ -986,6 +989,7 @@ func testEvaluationID(value int) string {
 }
 
 func floatPointer(value float64) *float64 { return &value }
+func intPointer(value int) *int           { return &value }
 
 func testCandidateID(marker string) string { return "cand_" + strings.Repeat(marker, 64) }
 
