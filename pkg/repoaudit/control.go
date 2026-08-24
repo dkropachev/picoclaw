@@ -855,10 +855,6 @@ func canonicalAutomationRepository(repository string) string {
 	return strings.ToLower(repository)
 }
 
-func repositoryReviewBudgetGuardsActive(policy RepositoryReviewBudgetPolicy) bool {
-	return strings.TrimSpace(policy.GuardExpression) != ""
-}
-
 func validateBudgetPolicy(policy RepositoryReviewBudgetPolicy) error {
 	if err := ValidateRepositoryReviewGuardExpression(policy.GuardExpression); err != nil {
 		return fmt.Errorf("%w: invalid task admission guard: %v", ErrInvalidAutomation, err)

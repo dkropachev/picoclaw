@@ -38,8 +38,8 @@ func TestLegacyRepositoryReviewBudgetMigratesToGuardExpression(t *testing.T) {
 			t.Fatalf("migrated expression %q missing %q", decoded.Budget.GuardExpression, expected)
 		}
 	}
-	if err := ValidateRepositoryReviewGuardExpression(decoded.Budget.GuardExpression); err != nil {
-		t.Fatalf("migrated expression is invalid: %v", err)
+	if validationErr := ValidateRepositoryReviewGuardExpression(decoded.Budget.GuardExpression); validationErr != nil {
+		t.Fatalf("migrated expression is invalid: %v", validationErr)
 	}
 	encoded, err := json.Marshal(decoded)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestLegacyLargeWindowPolicyMigratesToValidFailClosedExpression(t *testing.T
 	}
 	budget, err := json.Marshal(map[string]any{
 		"min_remaining_percent_by_window": windows,
-		"pause_on_unknown":                 false,
+		"pause_on_unknown":                false,
 	})
 	if err != nil {
 		t.Fatal(err)

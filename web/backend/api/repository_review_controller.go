@@ -1984,7 +1984,7 @@ func (c *repositoryReviewController) reconcile() {
 				requestedReason = repoaudit.RepositoryReviewPauseServiceRestart
 				requestedDetail = "The launcher restarted. Resume continues from durable review checkpoints."
 			}
-			updated, updateErr := store.UpdateAutomation(
+			_, _ = store.UpdateAutomation(
 				context.Background(),
 				automation.ID,
 				automation.Version,
@@ -1999,9 +1999,6 @@ func (c *repositoryReviewController) reconcile() {
 					return nil
 				},
 			)
-			if updateErr == nil {
-				automation = updated
-			}
 		}
 	}
 }

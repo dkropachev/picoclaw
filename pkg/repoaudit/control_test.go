@@ -296,8 +296,10 @@ func TestAutomationStorePersistsRuntimeProgressBudgetsAndModelComparison(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paused.Status != RepositoryReviewAutomationPaused || paused.PauseReason != RepositoryReviewPauseGuardExpression ||
-		paused.PauseDetail != "task admission guard is false" || paused.ActiveRunID != "" {
+	if paused.Status != RepositoryReviewAutomationPaused ||
+		paused.PauseReason != RepositoryReviewPauseGuardExpression ||
+		paused.PauseDetail != "task admission guard is false" ||
+		paused.ActiveRunID != "" {
 		t.Fatalf("paused automation = %#v", paused)
 	}
 }

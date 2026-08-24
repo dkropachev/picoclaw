@@ -306,8 +306,8 @@ func TestStoreDropsLegacyFindingRecommendationsFromStateAndIssueDrafts(t *testin
 		t.Fatal(err)
 	}
 	var legacy map[string]any
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(data, &legacy); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	findings := legacy["findings"].([]any)
 	legacyFinding := findings[0].(map[string]any)
@@ -318,8 +318,8 @@ func TestStoreDropsLegacyFindingRecommendationsFromStateAndIssueDrafts(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(store.path(plan.Repository), data, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(store.path(plan.Repository), data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	loaded, found, err := store.Get(plan.Repository)

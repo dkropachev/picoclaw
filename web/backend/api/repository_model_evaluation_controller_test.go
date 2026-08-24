@@ -360,11 +360,41 @@ func TestRepositoryModelEvaluationClaimLedgerRequiresExactDiagnosisAssessments(t
 		judge  string
 		ledger string
 	}{
-		{name: "missing assessments", judge: `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":1,"unsupportedClaims":1}]}`, ledger: ledger},
-		{name: "wrong counts", judge: strings.Replace(judge, `"confirmedClaims":1`, `"confirmedClaims":2`, 1), ledger: ledger},
-		{name: "missing claim", judge: strings.Replace(judge, `,{"claimId":"claim-001-0002","disposition":"unsupported","rationale":"The cited source contains no deadline operation."}`, "", 1), ledger: ledger},
-		{name: "prohibited fix field", judge: judge, ledger: strings.Replace(ledger, `"impact":"The operation enters an invalid state."`, `"impact":"The operation enters an invalid state.","recommendation":"change it"`, 1)},
-		{name: "unsafe path", judge: judge, ledger: strings.Replace(ledger, `"path":"pkg/core.go"`, `"path":"/tmp/core.go"`, 1)},
+		{
+			name:   "missing assessments",
+			judge:  `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":1,"unsupportedClaims":1}]}`,
+			ledger: ledger,
+		},
+		{
+			name:   "wrong counts",
+			judge:  strings.Replace(judge, `"confirmedClaims":1`, `"confirmedClaims":2`, 1),
+			ledger: ledger,
+		},
+		{
+			name: "missing claim",
+			judge: strings.Replace(
+				judge,
+				`,{"claimId":"claim-001-0002","disposition":"unsupported","rationale":"The cited source contains no deadline operation."}`,
+				"",
+				1,
+			),
+			ledger: ledger,
+		},
+		{
+			name:  "prohibited fix field",
+			judge: judge,
+			ledger: strings.Replace(
+				ledger,
+				`"impact":"The operation enters an invalid state."`,
+				`"impact":"The operation enters an invalid state.","recommendation":"change it"`,
+				1,
+			),
+		},
+		{
+			name:   "unsafe path",
+			judge:  judge,
+			ledger: strings.Replace(ledger, `"path":"pkg/core.go"`, `"path":"/tmp/core.go"`, 1),
+		},
 	}
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {

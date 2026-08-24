@@ -243,7 +243,8 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 				if !previous.StartedAt.IsZero() {
 					candidate.ModelPrices = maps.Clone(previous.ModelPrices)
 				}
-				if !reflect.DeepEqual(previous.BudgetPolicy, candidate.BudgetPolicy) || previous.AccountRef != candidate.AccountRef {
+				if !reflect.DeepEqual(previous.BudgetPolicy, candidate.BudgetPolicy) ||
+					previous.AccountRef != candidate.AccountRef {
 					candidate.AccountLimitSnapshots = nil
 				}
 			}
@@ -900,7 +901,10 @@ func repositoryReviewAccountRefsForSelection(cfg *config.Config, accountRef stri
 			return repositoryReviewReachableAccountRouterRefs(router)
 		}
 	}
-	if account, err := cfg.GetEnabledModelConfig(accountRef); err == nil && account != nil && account.IsAccountRouter() {
+	if account, err := cfg.GetEnabledModelConfig(
+		accountRef,
+	); err == nil && account != nil &&
+		account.IsAccountRouter() {
 		return repositoryReviewReachableAccountRouterRefs(account.Router)
 	}
 	return []string{accountRef}

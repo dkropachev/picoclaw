@@ -715,8 +715,8 @@ func TestRepositoryReviewGuardPauseRequiresExplicitResume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(); err != nil {
-		t.Fatal(err)
+	if startErr := controller.Start(); startErr != nil {
+		t.Fatal(startErr)
 	}
 	controller.reconcile()
 	time.Sleep(30 * time.Millisecond)

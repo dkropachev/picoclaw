@@ -1958,7 +1958,6 @@ func TestRepositoryReviewCoverageControllerTransitionEdges(t *testing.T) {
 	) {
 		t.Fatalf("canceled pause error=%v", pauseErr)
 	}
-
 }
 
 func TestRepositoryReviewCoverageConfigurationAndStoreErrors(t *testing.T) {

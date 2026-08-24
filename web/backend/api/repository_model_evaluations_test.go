@@ -1616,24 +1616,100 @@ func repositoryModelEvaluationBatchResult() *workflows.RunResult {
 			{"candidateId": "candidate-002", "modelAlias": "model-b"},
 		},
 		"ledger": []map[string]any{
-			{"candidateId": "candidate-001", "claimId": "claim-001-0001", "path": "pkg/core.go", "title": "First boundary failure", "evidence": "The exact branch accepts the invalid boundary.", "impact": "The request reaches an invalid state."},
-			{"candidateId": "candidate-001", "claimId": "claim-001-0002", "path": "pkg/core.go", "title": "Second boundary failure", "evidence": "The error path returns success.", "impact": "Callers observe a false success."},
-			{"candidateId": "candidate-001", "claimId": "claim-001-0003", "path": "web/app.ts", "title": "Stale state is retained", "evidence": "The failure branch leaves the prior value in state.", "impact": "The next request reads stale data."},
-			{"candidateId": "candidate-002", "claimId": "claim-002-0001", "path": "pkg/core.go", "title": "Unchecked empty value", "evidence": "The value is dereferenced before the empty check.", "impact": "Empty input terminates the operation."},
-			{"candidateId": "candidate-002", "claimId": "claim-002-0002", "path": "web/app.ts", "title": "Lost failure state", "evidence": "The catch branch overwrites the failure marker.", "impact": "The UI reports completion after failure."},
-			{"candidateId": "candidate-002", "claimId": "claim-002-0003", "path": "web/app.ts", "title": "Unsupported timing claim", "evidence": "The cited branch does not contain a timing operation.", "impact": "The claimed delay is not established by this source."},
+			{
+				"candidateId": "candidate-001",
+				"claimId":     "claim-001-0001",
+				"path":        "pkg/core.go",
+				"title":       "First boundary failure",
+				"evidence":    "The exact branch accepts the invalid boundary.",
+				"impact":      "The request reaches an invalid state.",
+			},
+			{
+				"candidateId": "candidate-001",
+				"claimId":     "claim-001-0002",
+				"path":        "pkg/core.go",
+				"title":       "Second boundary failure",
+				"evidence":    "The error path returns success.",
+				"impact":      "Callers observe a false success.",
+			},
+			{
+				"candidateId": "candidate-001",
+				"claimId":     "claim-001-0003",
+				"path":        "web/app.ts",
+				"title":       "Stale state is retained",
+				"evidence":    "The failure branch leaves the prior value in state.",
+				"impact":      "The next request reads stale data.",
+			},
+			{
+				"candidateId": "candidate-002",
+				"claimId":     "claim-002-0001",
+				"path":        "pkg/core.go",
+				"title":       "Unchecked empty value",
+				"evidence":    "The value is dereferenced before the empty check.",
+				"impact":      "Empty input terminates the operation.",
+			},
+			{
+				"candidateId": "candidate-002",
+				"claimId":     "claim-002-0002",
+				"path":        "web/app.ts",
+				"title":       "Lost failure state",
+				"evidence":    "The catch branch overwrites the failure marker.",
+				"impact":      "The UI reports completion after failure.",
+			},
+			{
+				"candidateId": "candidate-002",
+				"claimId":     "claim-002-0003",
+				"path":        "web/app.ts",
+				"title":       "Unsupported timing claim",
+				"evidence":    "The cited branch does not contain a timing operation.",
+				"impact":      "The claimed delay is not established by this source.",
+			},
 		},
 		"judge": map[string]any{"evaluations": []map[string]any{
-			{"candidateId": "candidate-001", "confirmedClaims": 3, "unsupportedClaims": 0, "claimAssessments": []map[string]any{
-				{"claimId": "claim-001-0001", "disposition": "supported", "rationale": "The cited branch and consequence are present in the assigned source."},
-				{"claimId": "claim-001-0002", "disposition": "supported", "rationale": "The return path establishes the stated false-success behavior."},
-				{"claimId": "claim-001-0003", "disposition": "supported", "rationale": "The state transition leaves the prior value observable."},
-			}},
-			{"candidateId": "candidate-002", "confirmedClaims": 2, "unsupportedClaims": 1, "claimAssessments": []map[string]any{
-				{"claimId": "claim-002-0001", "disposition": "supported", "rationale": "The dereference precedes the guard in the supplied source."},
-				{"claimId": "claim-002-0002", "disposition": "supported", "rationale": "The catch branch clears the only failure marker."},
-				{"claimId": "claim-002-0003", "disposition": "unsupported", "rationale": "The cited source contains no operation that establishes the claimed delay."},
-			}},
+			{
+				"candidateId":       "candidate-001",
+				"confirmedClaims":   3,
+				"unsupportedClaims": 0,
+				"claimAssessments": []map[string]any{
+					{
+						"claimId":     "claim-001-0001",
+						"disposition": "supported",
+						"rationale":   "The cited branch and consequence are present in the assigned source.",
+					},
+					{
+						"claimId":     "claim-001-0002",
+						"disposition": "supported",
+						"rationale":   "The return path establishes the stated false-success behavior.",
+					},
+					{
+						"claimId":     "claim-001-0003",
+						"disposition": "supported",
+						"rationale":   "The state transition leaves the prior value observable.",
+					},
+				},
+			},
+			{
+				"candidateId":       "candidate-002",
+				"confirmedClaims":   2,
+				"unsupportedClaims": 1,
+				"claimAssessments": []map[string]any{
+					{
+						"claimId":     "claim-002-0001",
+						"disposition": "supported",
+						"rationale":   "The dereference precedes the guard in the supplied source.",
+					},
+					{
+						"claimId":     "claim-002-0002",
+						"disposition": "supported",
+						"rationale":   "The catch branch clears the only failure marker.",
+					},
+					{
+						"claimId":     "claim-002-0003",
+						"disposition": "unsupported",
+						"rationale":   "The cited source contains no operation that establishes the claimed delay.",
+					},
+				},
+			},
 		}},
 	}}
 }

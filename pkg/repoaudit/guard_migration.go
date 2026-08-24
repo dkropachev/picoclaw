@@ -71,7 +71,12 @@ func legacyRepositoryReviewGuardExpression(budget map[string]json.RawMessage) st
 	if json.Unmarshal(budget["min_remaining_percent"], &minimum) == nil && minimum > 0 {
 		term := fmt.Sprintf("account.limits.any.remaining_percent >= %s", strconv.FormatFloat(minimum, 'g', -1, 64))
 		if !pauseOnUnknown {
-			term = "((not account.limits.exhausted_known or not account.limits.exhausted) and (not account.limits.any.observed or account.limits.any.minimum_remaining_percent >= " + strconv.FormatFloat(minimum, 'g', -1, 64) + "))"
+			term = "((not account.limits.exhausted_known or not account.limits.exhausted) and (not account.limits.any.observed or account.limits.any.minimum_remaining_percent >= " + strconv.FormatFloat(
+				minimum,
+				'g',
+				-1,
+				64,
+			) + "))"
 		}
 		terms = append(terms, term)
 	}
@@ -97,7 +102,12 @@ func legacyRepositoryReviewGuardExpression(budget map[string]json.RawMessage) st
 				strconv.FormatFloat(windows[window], 'g', -1, 64),
 			)
 			if !pauseOnUnknown {
-				term = "((not account.limits.exhausted_known or not account.limits.exhausted) and (not account.limits." + normalized + ".observed or account.limits." + normalized + ".minimum_remaining_percent >= " + strconv.FormatFloat(windows[window], 'g', -1, 64) + "))"
+				term = "((not account.limits.exhausted_known or not account.limits.exhausted) and (not account.limits." + normalized + ".observed or account.limits." + normalized + ".minimum_remaining_percent >= " + strconv.FormatFloat(
+					windows[window],
+					'g',
+					-1,
+					64,
+				) + "))"
 			}
 			terms = append(terms, term)
 		}

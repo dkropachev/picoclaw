@@ -153,12 +153,23 @@ func exactScopeAuditFixture() map[string]any {
 
 func completionFindingJSON(presence, distance, size string, compatible bool) map[string]any {
 	value := map[string]any{
-		"severity": "high", "title": "retry bug", "file": "pkg/retry.go", "message": "The retry path remains incomplete.",
-		"evidence": "retry remains incomplete", "impact": "requests fail",
-		"validation": "Traced the incomplete retry path.", "scope_distance": distance, "change_size": size,
-		"type_compatible": compatible, "scope_confidence": 1.0,
-		"scope_explanation": "graded against retry charter", "charter_clauses": []any{"fix retry"},
-		"presence": presence, "hunk": "", "module": "", "semantic_lines": 0,
+		"severity":          "high",
+		"title":             "retry bug",
+		"file":              "pkg/retry.go",
+		"message":           "The retry path remains incomplete.",
+		"evidence":          "retry remains incomplete",
+		"impact":            "requests fail",
+		"validation":        "Traced the incomplete retry path.",
+		"scope_distance":    distance,
+		"change_size":       size,
+		"type_compatible":   compatible,
+		"scope_confidence":  1.0,
+		"scope_explanation": "graded against retry charter",
+		"charter_clauses":   []any{"fix retry"},
+		"presence":          presence,
+		"hunk":              "",
+		"module":            "",
+		"semantic_lines":    0,
 	}
 	if presence == "candidate_present" {
 		value["hunk"], value["module"], value["semantic_lines"] = testCandidateHunk, "pkg", 10

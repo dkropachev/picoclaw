@@ -127,7 +127,11 @@ func TestRepositoryReviewGuardExpressionBoundsAndInvalidSyntax(t *testing.T) {
 		{name: "unterminated string", expression: `"hello`, contains: "unterminated string"},
 		{name: "missing right parenthesis", expression: "(true OR false", contains: "expected ')'"},
 		{name: "trailing operator", expression: "true AND", contains: "expected an identifier or literal"},
-		{name: "too many bytes", expression: strings.Repeat(" ", maxRepositoryReviewGuardExpressionBytes+1), contains: "exceeds 4096 bytes"},
+		{
+			name:       "too many bytes",
+			expression: strings.Repeat(" ", maxRepositoryReviewGuardExpressionBytes+1),
+			contains:   "exceeds 4096 bytes",
+		},
 		{
 			name: "too many tokens", expression: strings.Repeat("true AND ", 128) + "true",
 			contains: "exceeds 256 tokens",
@@ -262,7 +266,11 @@ func TestRepositoryReviewGuardExpressionAggregatesLimitsConservatively(t *testin
 	unknown.AccountLimitSnapshots = append(unknown.AccountLimitSnapshots,
 		RepositoryReviewAccountLimitSnapshot{AccountID: "account-d", Window: "daily", RemainingPercent: &exhausted},
 	)
-	if allowed, err = EvaluateRepositoryReviewGuardExpression("account.limits.exhausted", unknown); err != nil || !allowed {
+	if allowed, err = EvaluateRepositoryReviewGuardExpression(
+		"account.limits.exhausted",
+		unknown,
+	); err != nil ||
+		!allowed {
 		t.Fatalf("decisively exhausted aggregate = %t, %v", allowed, err)
 	}
 

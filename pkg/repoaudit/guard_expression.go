@@ -611,7 +611,10 @@ func repositoryReviewGuardIdentifierKind(identifier string) (repositoryReviewGua
 
 	parts := strings.Split(identifier, ".")
 	if len(parts) == 4 && parts[0] == "account" && parts[1] == "limits" && parts[2] != "" {
-		if normalized := normalizeRepositoryReviewGuardLimitWindow(parts[2]); normalized == "" || normalized != parts[2] {
+		if normalized := normalizeRepositoryReviewGuardLimitWindow(
+			parts[2],
+		); normalized == "" ||
+			normalized != parts[2] {
 			return guardValueInvalid, fmt.Errorf("account-limit window %q is not normalized", parts[2])
 		}
 		switch parts[3] {
@@ -662,8 +665,8 @@ func unknownGuardValue(kind repositoryReviewGuardValueKind, field string) reposi
 
 type repositoryReviewGuardNode interface {
 	valueKind() repositoryReviewGuardValueKind
-	evaluate(*repositoryReviewGuardResolver) repositoryReviewGuardValue
-	collectIdentifiers(map[string]struct{})
+	evaluate(resolver *repositoryReviewGuardResolver) repositoryReviewGuardValue
+	collectIdentifiers(identifiers map[string]struct{})
 }
 
 type repositoryReviewGuardLiteralNode struct {
@@ -1059,7 +1062,8 @@ func normalizeRepositoryReviewGuardLimitWindow(window string) string {
 	separator := false
 	for index := 0; index < len(window); index++ {
 		character := window[index]
-		if isRepositoryReviewGuardIdentifierStart(character) || isRepositoryReviewGuardDigit(character) || character == '-' {
+		if isRepositoryReviewGuardIdentifierStart(character) || isRepositoryReviewGuardDigit(character) ||
+			character == '-' {
 			if separator && normalized.Len() > 0 {
 				normalized.WriteByte('_')
 			}
