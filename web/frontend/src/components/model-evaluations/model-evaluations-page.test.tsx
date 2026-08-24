@@ -809,8 +809,8 @@ describe("ModelEvaluationsPage", () => {
 
     expect(await screen.findByRole("button", { name: "Resume" })).toBeVisible()
     expect(
-      screen.queryByRole("button", { name: "Run again" }),
-    ).not.toBeInTheDocument()
+      screen.getByRole("button", { name: "Restart from scratch" }),
+    ).toBeVisible()
     expect(
       screen.queryByRole("button", { name: "Save configuration" }),
     ).not.toBeInTheDocument()
@@ -822,5 +822,43 @@ describe("ModelEvaluationsPage", () => {
         failed.version,
       ),
     )
+  })
+
+  it("restarts failed evaluations as a fresh probe with the exact version", async () => {
+    const user = userEvent.setup()
+    const failed: RepositoryModelEvaluation = {
+      ...evaluation,
+      status: "failed",
+      failure: "Candidate execution failed.",
+    }
+    const restarted: RepositoryModelEvaluation = {
+      ...evaluation,
+      id: "rme_22222222222222222222222222222222",
+      version: 2,
+      status: "preflighting",
+      run_ids: ["wr_restart"],
+    }
+    vi.mocked(listModelEvaluations)
+      .mockResolvedValueOnce([failed])
+      .mockResolvedValue([restarted])
+    vi.mocked(getModelEvaluation).mockImplementation(async (id) =>
+      id === restarted.id ? restarted : failed,
+    )
+    vi.mocked(runModelEvaluationAction).mockResolvedValue(restarted)
+    renderPage()
+
+    await user.click(
+      await screen.findByRole("button", { name: "Restart from scratch" }),
+    )
+    await waitFor(() =>
+      expect(runModelEvaluationAction).toHaveBeenCalledWith(
+        failed.id,
+        "restart",
+        failed.version,
+      ),
+    )
+    expect(
+      await screen.findByRole("button", { name: /owner\/repo.*preflighting/i }),
+    ).toHaveAttribute("aria-pressed", "true")
   })
 })

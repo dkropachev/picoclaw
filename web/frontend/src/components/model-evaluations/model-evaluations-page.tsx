@@ -990,16 +990,21 @@ export function ModelEvaluationsPage() {
                     <IconRefresh className="size-4" /> Resume
                   </Button>
                 )}
-                {selected?.status === "completed" && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => void action("restart")}
-                  >
-                    <IconRefresh className="size-4" /> Run again
-                  </Button>
-                )}
+                {selected &&
+                  (selected.status === "completed" ||
+                    selected.status === "failed") && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void action("restart")}
+                    >
+                      <IconRefresh className="size-4" />
+                      {selected.status === "failed"
+                        ? "Restart from scratch"
+                        : "Run again"}
+                    </Button>
+                  )}
                 {selected && !activeStatuses.has(selected.status) && (
                   <Button
                     type="button"

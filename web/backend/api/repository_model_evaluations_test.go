@@ -631,6 +631,91 @@ func TestRepositoryModelEvaluationControllerCancellationAndRestart(t *testing.T)
 	}
 }
 
+func TestRepositoryModelEvaluationFailedRestartCreatesFreshProbe(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	entered := make(chan struct{})
+	controller.runWorkflow = func(
+		ctx context.Context,
+		_ string,
+		ref string,
+		_ string,
+		_ map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
+			return nil, errors.New("unexpected restart workflow")
+		}
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	store, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/failed-restart"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflighting, err := store.Update(
+		t.Context(),
+		draft.ID,
+		draft.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusPreflighting
+			candidate.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.Update(
+		t.Context(),
+		preflighting.ID,
+		preflighting.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusFailed
+			candidate.Progress.Stage = repoeval.ProgressFailed
+			candidate.Failure = "repository clone failed"
+			return nil
+		},
+	)
+	if err != nil || failed.Corpus != nil {
+		t.Fatalf("failed preflight=%#v err=%v", failed, err)
+	}
+
+	restart := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+failed.ID+"/restart",
+		map[string]any{"expected_version": failed.Version},
+	)
+	if restart.Code != http.StatusAccepted {
+		t.Fatalf("failed restart status=%d body=%s", restart.Code, restart.Body.String())
+	}
+	var detail repositoryModelEvaluationDetail
+	if decodeErr := json.Unmarshal(restart.Body.Bytes(), &detail); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if detail.Evaluation.ID == failed.ID || detail.Evaluation.Status != repoeval.StatusPreflighting ||
+		detail.Evaluation.Repository != "https://github.com/owner/failed-restart.git" {
+		t.Fatalf("failed restart evaluation=%#v", detail.Evaluation)
+	}
+	<-entered
+	original, found, err := store.Get(t.Context(), failed.ID)
+	if err != nil || !found || original.Status != repoeval.StatusFailed {
+		t.Fatalf("original failed probe=%#v found=%v err=%v", original, found, err)
+	}
+}
+
 func TestRepositoryModelEvaluationAPIRejectsStrictRequestBoundaries(t *testing.T) {
 	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
