@@ -19,6 +19,7 @@ import {
   updateRepositoryReviewProfile,
 } from "@/api/repository-reviews"
 import { PageHeader } from "@/components/page-header"
+import { RepositoryReviewGuardExpressionEditor } from "@/components/repository-reviews/repository-review-guard-expression-editor"
 import { ReviewAdvancedSection } from "@/components/repository-reviews/review-advanced-section"
 import {
   AlertDialog,
@@ -671,50 +672,13 @@ function ProfileForm({
 
         <section className="space-y-3 border-t pt-4">
           <h3 className="text-sm font-semibold">Task admission guard</h3>
-          <Field
-            label="Guard expression"
-            hint="Blank allows all tasks. Otherwise this JQL-like expression runs before each worker task and must be true; false, unknown, or errors pause admission. Supported fields: account.limits.*, spent.tokens.*, and spend.total.*."
-            hintId="review-task-guard-help"
-            controlId="review-guard-expression"
-          >
-            <Textarea
-              id="review-guard-expression"
-              aria-label="Guard expression"
-              aria-describedby="review-task-guard-help"
-              className="min-h-28 font-mono text-xs"
-              spellCheck={false}
-              value={value.budget.guard_expression}
-              onChange={(event) => setGuardExpression(event.target.value)}
-              placeholder={
-                "account.limits.weekly.known and account.limits.weekly.remaining_percent >= 10 and\nspent.tokens.total < 500000 and spend.total.usd < 25"
-              }
-            />
-          </Field>
-          <details className="rounded-lg border p-3 text-xs">
-            <summary className="cursor-pointer font-medium">
-              Expression reference
-            </summary>
-            <div className="text-muted-foreground mt-2 space-y-2">
-              <p>
-                Operators: AND, OR, NOT, parentheses, =, ==, !=, &lt;, &lt;=,
-                &gt;, &gt;=. Literals may be numbers, true/false, or quoted
-                text.
-              </p>
-              <p>
-                Token fields: spent.tokens.prompt, completion, cached, total;
-                cost: spend.total.usd.
-              </p>
-              <p>
-                Limits: account.limits.known, exhausted_known, exhausted, any,
-                and account.limits.&lt;window&gt;.known, observed,
-                remaining_percent, or used_percent. For partial telemetry,
-                observed plus minimum_remaining_percent or maximum_used_percent
-                exposes the conservative known subset. Common windows include
-                daily and weekly. The * in field-family names is documentation,
-                not wildcard syntax.
-              </p>
-            </div>
-          </details>
+          <RepositoryReviewGuardExpressionEditor
+            value={value.budget.guard_expression}
+            limitWindows={(selectedAccount?.entries ?? []).flatMap((entry) =>
+              entry.window ? [entry.window] : [],
+            )}
+            onChange={setGuardExpression}
+          />
         </section>
       </ReviewAdvancedSection>
 
