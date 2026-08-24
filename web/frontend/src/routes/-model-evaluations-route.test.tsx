@@ -20,12 +20,12 @@ vi.mock("@/components/app-layout", () => ({
 }))
 vi.mock("@/components/model-evaluations/model-evaluations-page", () => ({
   ModelEvaluationsPage: () => (
-    <output>Separate model evaluation workspace</output>
+    <output>Separate model review probe workspace</output>
   ),
 }))
 vi.mock("@/features/chat/controller", () => ({ initializeChatStore: vi.fn() }))
 
-describe("model evaluations route", () => {
+describe("model review probes route", () => {
   it("renders the dedicated route", async () => {
     const router = createRouter({
       routeTree,
@@ -38,7 +38,7 @@ describe("model evaluations route", () => {
     })
     render(<RouterProvider router={router} />)
     expect(
-      await screen.findByText("Separate model evaluation workspace"),
+      await screen.findByText("Separate model review probe workspace"),
     ).toBeVisible()
   })
 })

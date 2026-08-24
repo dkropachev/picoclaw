@@ -22,6 +22,9 @@ const smokeRoutes = [
   "/event-sources",
   "/pull-requests",
   "/repository-reviews",
+  "/repository-reviews/repositories",
+  "/repository-reviews/profiles",
+  "/repository-reviews/results",
   "/model-evaluations",
   "/logs",
   "/agent/agents",
@@ -2881,6 +2884,8 @@ async function mockLauncherApis(
           return json(route, { repositories: [] })
         case "/api/repository-reviews/automations":
           return json(route, { automations: [] })
+        case "/api/repository-reviews/profiles":
+          return json(route, { profiles: [] })
         case "/api/repository-reviews/automation-options":
           return json(route, { models: [], accounts: [] })
         case "/api/model-evaluations":
@@ -3418,7 +3423,7 @@ for (const routePath of smokeRoutes) {
   })
 }
 
-test("model evaluations create, preflight, start, and cancel a bounded corpus", async ({
+test("model review probes compare models without producing findings", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -3430,8 +3435,13 @@ test("model evaluations create, preflight, start, and cancel a bounded corpus", 
     modelEvaluationRequests: requests,
   })
   const workspace = page.getByRole("region", {
-    name: "Model evaluation workspace",
+    name: "Model probe workspace",
   })
+
+  await expect(workspace.getByText(/Comparison-only flow/)).toBeVisible()
+  await expect(
+    workspace.getByText(/do not create repository findings/),
+  ).toBeVisible()
 
   await workspace.getByLabel("Repository", { exact: true }).fill("owner/repo")
   await workspace
@@ -3440,10 +3450,11 @@ test("model evaluations create, preflight, start, and cancel a bounded corpus", 
   await workspace
     .getByRole("checkbox", { name: "Select candidate model fast" })
     .check()
+  await workspace.getByRole("button", { name: /^Advanced/ }).click()
   await workspace.getByLabel("File selector model").selectOption("review")
   await workspace.getByLabel("Judge and analyzer model").selectOption("review")
   await workspace.getByLabel("Include folders").fill("pkg\ncmd")
-  await workspace.getByRole("button", { name: "Create evaluation" }).click()
+  await workspace.getByRole("button", { name: "Create probe" }).click()
 
   await expect(
     workspace.getByRole("button", { name: "Analyze repository" }),
@@ -3452,10 +3463,10 @@ test("model evaluations create, preflight, start, and cancel a bounded corpus", 
   await expect(workspace.getByText("Corpus by language")).toBeVisible()
   await expect(workspace.getByText("Corpus preview")).toBeVisible()
   await expect(workspace.getByText(/Commit a{40}/)).toBeVisible()
-  await workspace.getByRole("button", { name: "Start evaluation" }).click()
+  await workspace.getByRole("button", { name: "Start probe" }).click()
 
   await expect(
-    workspace.getByRole("progressbar", { name: "Evaluation progress" }),
+    workspace.getByRole("progressbar", { name: "Model probe progress" }),
   ).toHaveAttribute("aria-valuenow", "40")
   await expect(
     workspace.getByText("Model code · File pkg/service.go"),

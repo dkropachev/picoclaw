@@ -31,7 +31,6 @@ import {
   githubNewIssueURL,
   githubRepositoryPath,
 } from "@/components/repository-reviews/repository-review-actions"
-import { RepositoryReviewControlCenter } from "@/components/repository-reviews/repository-review-control-center"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -394,13 +393,13 @@ export function RepositoryReviewsPage({
 
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
-      <PageHeader title="Repository reviews">
+      <PageHeader title="Review results">
         <Button
           type="button"
           size="icon"
           variant="outline"
-          aria-label="Refresh repository reviews"
-          title="Refresh repository reviews"
+          aria-label="Refresh review results"
+          title="Refresh review results"
           disabled={repositoriesQuery.isFetching || repositoryQuery.isFetching}
           onClick={refresh}
         >
@@ -409,12 +408,11 @@ export function RepositoryReviewsPage({
       </PageHeader>
 
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-8 md:px-6">
-        <RepositoryReviewControlCenter />
         {repositoriesQuery.isPending ? (
-          <CenteredMessage text="Loading repository reviews…" />
+          <CenteredMessage text="Loading review results…" />
         ) : repositoriesQuery.isError ? (
           <CenteredMessage
-            text="Repository reviews could not be loaded."
+            text="Review results could not be loaded."
             action={
               <Button variant="outline" onClick={refresh}>
                 Retry
@@ -422,7 +420,7 @@ export function RepositoryReviewsPage({
             }
           />
         ) : repositories.length === 0 ? (
-          <CenteredMessage text="No repository review has completed yet." />
+          <CenteredMessage text="No repository review results yet." />
         ) : (
           <div className="mx-auto grid w-full max-w-[96rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]">
             <RepositoryList

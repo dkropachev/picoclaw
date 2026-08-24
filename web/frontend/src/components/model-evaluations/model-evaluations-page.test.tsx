@@ -176,6 +176,9 @@ describe("ModelEvaluationsPage", () => {
     await user.click(
       screen.getByRole("checkbox", { name: "Select candidate model fast" }),
     )
+    const advanced = screen.getAllByRole("button", { name: /^Advanced/ })
+    expect(advanced).toHaveLength(1)
+    await user.click(advanced[0])
     await user.selectOptions(
       screen.getByLabelText("File selector model"),
       "review",
@@ -186,7 +189,7 @@ describe("ModelEvaluationsPage", () => {
     )
     await user.type(screen.getByLabelText("Include folders"), "pkg\nweb")
     await user.type(screen.getByLabelText("Ignore folders"), "web/fixtures")
-    await user.click(screen.getByRole("button", { name: "Create evaluation" }))
+    await user.click(screen.getByRole("button", { name: "Create probe" }))
 
     await waitFor(() => expect(createModelEvaluation).toHaveBeenCalled())
     expect(vi.mocked(createModelEvaluation).mock.calls[0]?.[0]).toMatchObject({
@@ -198,6 +201,37 @@ describe("ModelEvaluationsPage", () => {
         include_folders: ["pkg", "web"],
         exclude_folders: ["web/fixtures"],
       },
+    })
+  })
+
+  it("creates a basic comparison probe while advanced options stay closed", async () => {
+    const user = userEvent.setup()
+    vi.mocked(createModelEvaluation).mockResolvedValue(evaluation)
+    renderPage()
+
+    await user.type(await screen.findByLabelText("Repository"), "owner/repo")
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select candidate model code" }),
+    )
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
+    )
+    const advanced = screen.getAllByRole("button", { name: /^Advanced/ })
+    expect(advanced).toHaveLength(1)
+    expect(advanced[0]).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByLabelText("Revision")).not.toBeInTheDocument()
+    expect(
+      screen.queryByLabelText("File selector model"),
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Create probe" }))
+
+    await waitFor(() => expect(createModelEvaluation).toHaveBeenCalled())
+    expect(vi.mocked(createModelEvaluation).mock.calls[0]?.[0]).toMatchObject({
+      repository: "owner/repo",
+      candidate_models: ["code", "fast"],
+      selector_model_alias: "code",
+      judge_model_alias: "review",
     })
   })
 
@@ -227,7 +261,7 @@ describe("ModelEvaluationsPage", () => {
     renderPage()
 
     expect(await screen.findByDisplayValue("owner/repo")).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "New evaluation" }))
+    await user.click(screen.getByRole("button", { name: "New probe" }))
     await user.type(screen.getByLabelText("Repository"), "other/repo")
     await user.click(
       screen.getByRole("checkbox", { name: "Select candidate model code" }),
@@ -235,15 +269,7 @@ describe("ModelEvaluationsPage", () => {
     await user.click(
       screen.getByRole("checkbox", { name: "Select candidate model fast" }),
     )
-    await user.selectOptions(
-      screen.getByLabelText("File selector model"),
-      "review",
-    )
-    await user.selectOptions(
-      screen.getByLabelText("Judge and analyzer model"),
-      "review",
-    )
-    await user.click(screen.getByRole("button", { name: "Create evaluation" }))
+    await user.click(screen.getByRole("button", { name: "Create probe" }))
     await waitFor(() =>
       expect(screen.getByLabelText("Repository")).toHaveValue("other/repo"),
     )
@@ -279,7 +305,7 @@ describe("ModelEvaluationsPage", () => {
     const typescriptRow = screen.getByText("typescript").closest("tr")
     expect(typescriptRow).not.toBeNull()
     expect(within(typescriptRow!).getByText("limited")).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "Start evaluation" }))
+    await user.click(screen.getByRole("button", { name: "Start probe" }))
     await waitFor(() =>
       expect(runModelEvaluationAction).toHaveBeenCalledWith(
         evaluation.id,
@@ -325,18 +351,17 @@ describe("ModelEvaluationsPage", () => {
     renderPage()
 
     await screen.findByDisplayValue("owner/repo")
-    const ref = await screen.findByLabelText("Ref")
+    await user.click(screen.getAllByRole("button", { name: /^Advanced/ })[0])
+    const ref = await screen.findByLabelText("Revision")
     fireEvent.change(ref, { target: { value: "release" } })
     expect(
       screen.getByText(/Save configuration changes to clear the stale corpus/i),
     ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "Start evaluation" }),
-    ).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Start probe" })).toBeDisabled()
     await user.click(screen.getByRole("button", { name: "Save configuration" }))
     expect(await screen.findByText(/stale corpus was cleared/i)).toBeVisible()
     expect(
-      screen.queryByRole("button", { name: "Start evaluation" }),
+      screen.queryByRole("button", { name: "Start probe" }),
     ).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Analyze repository" }))
     await waitFor(() =>
@@ -382,7 +407,7 @@ describe("ModelEvaluationsPage", () => {
     renderPage()
 
     expect(
-      await screen.findByRole("progressbar", { name: "Evaluation progress" }),
+      await screen.findByRole("progressbar", { name: "Model probe progress" }),
     ).toHaveAttribute("aria-valuenow", "40")
     expect(screen.getByText(/Model code · File pkg\/service.go/)).toBeVisible()
     expect(
@@ -451,11 +476,12 @@ describe("ModelEvaluationsPage", () => {
     renderPage()
 
     await user.click(
+      (await screen.findAllByRole("button", { name: /^Advanced/ }))[0],
+    )
+    await user.click(
       await screen.findByRole("button", { name: "Analyze repository" }),
     )
-    expect(
-      screen.getByRole("button", { name: "New evaluation" }),
-    ).toBeDisabled()
+    expect(screen.getByRole("button", { name: "New probe" })).toBeDisabled()
     expect(screen.getByRole("button", { name: /owner\/repo/i })).toBeDisabled()
     expect(screen.getByLabelText("Repository")).toBeDisabled()
     expect(screen.getByLabelText("Production code")).toBeDisabled()
@@ -466,7 +492,7 @@ describe("ModelEvaluationsPage", () => {
         version: 4,
       }),
     )
-    expect(screen.getByRole("button", { name: "New evaluation" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "New probe" })).toBeEnabled()
   })
 
   it("offers explicit reload after a stale version conflict", async () => {
@@ -486,7 +512,8 @@ describe("ModelEvaluationsPage", () => {
     renderPage()
 
     await screen.findByDisplayValue("owner/repo")
-    const ref = await screen.findByLabelText("Ref")
+    await user.click(screen.getAllByRole("button", { name: /^Advanced/ })[0])
+    const ref = await screen.findByLabelText("Revision")
     fireEvent.change(ref, { target: { value: "release" } })
     await user.click(screen.getByRole("button", { name: "Save configuration" }))
     expect(
@@ -597,9 +624,7 @@ describe("ModelEvaluationsPage", () => {
     expect(
       await screen.findByText(/Replace unavailable selector\/judge models/i),
     ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "Start evaluation" }),
-    ).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Start probe" })).toBeDisabled()
     await user.click(
       screen.getByRole("checkbox", {
         name: "Select candidate model retired",
@@ -608,6 +633,7 @@ describe("ModelEvaluationsPage", () => {
     await user.click(
       screen.getByRole("checkbox", { name: "Select candidate model code" }),
     )
+    await user.click(screen.getAllByRole("button", { name: /^Advanced/ })[0])
     await user.selectOptions(
       screen.getByLabelText("File selector model"),
       "review",

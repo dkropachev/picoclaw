@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -40,8 +41,10 @@ const (
 )
 
 var (
-	ErrInvalidAutomation          = errors.New("invalid repository review automation")
-	ErrAutomationControllerLocked = errors.New("repository review automation controller is already active")
+	ErrInvalidAutomation                  = errors.New("invalid repository review automation")
+	ErrAutomationControllerLocked         = errors.New("repository review automation controller is already active")
+	ErrAutomationActive                   = errors.New("repository review automation is active")
+	ErrRepositoryReviewRepositoryConflict = errors.New("repository already has a review configuration")
 )
 
 // RepositoryReviewAutomationStatus describes the durable controller state.
@@ -138,6 +141,8 @@ type RepositoryReviewAutomation struct {
 	SchemaVersion         int                                    `json:"schema_version"`
 	ID                    string                                 `json:"id"`
 	Version               int64                                  `json:"version"`
+	ProfileID             string                                 `json:"profile_id,omitempty"`
+	ProfileVersion        int64                                  `json:"profile_version,omitempty"`
 	Name                  string                                 `json:"name"`
 	Repository            string                                 `json:"repository"`
 	Ref                   string                                 `json:"ref,omitempty"`
@@ -199,6 +204,17 @@ func (s Store) listAutomationsWithLoader(
 	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, contextErr
 	}
+	return s.listAutomationsUnlockedWithLoader(maximum, load)
+}
+
+func (s Store) listAutomationsUnlocked(maximum int) ([]RepositoryReviewAutomation, error) {
+	return s.listAutomationsUnlockedWithLoader(maximum, s.loadAutomation)
+}
+
+func (s Store) listAutomationsUnlockedWithLoader(
+	maximum int,
+	load func(string) (RepositoryReviewAutomation, bool, error),
+) ([]RepositoryReviewAutomation, error) {
 	if rootErr := s.requireSafeRoot(true); rootErr != nil {
 		return nil, rootErr
 	}
@@ -300,6 +316,14 @@ func (s Store) CreateAutomation(
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
+	if automation.ProfileID != "" {
+		if err := s.validateAutomationProfileSnapshotUnlocked(automation); err != nil {
+			return RepositoryReviewAutomation{}, err
+		}
+		if err := s.ensureRepositoryAutomationUniqueUnlocked(automation.ID, automation.Repository); err != nil {
+			return RepositoryReviewAutomation{}, err
+		}
+	}
 	if err := s.saveAutomation(automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -353,6 +377,24 @@ func (s Store) UpdateAutomation(
 	if err := normalizeAutomation(&candidate); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
+	if candidate.ProfileID != "" {
+		if current.ProfileID != candidate.ProfileID ||
+			current.ProfileVersion != candidate.ProfileVersion ||
+			!repositoryReviewAutomationProfilePolicyEqual(current, candidate) ||
+			repositoryReviewAutomationAdmissionTransition(current, candidate) {
+			if err := s.validateAutomationProfileSnapshotUnlocked(candidate); err != nil {
+				return RepositoryReviewAutomation{}, err
+			}
+		}
+	}
+	if canonicalAutomationRepository(current.Repository) !=
+		canonicalAutomationRepository(candidate.Repository) ||
+		candidate.ProfileID != "" &&
+			repositoryReviewAutomationAdmissionTransition(current, candidate) {
+		if err := s.ensureRepositoryAutomationUniqueUnlocked(candidate.ID, candidate.Repository); err != nil {
+			return RepositoryReviewAutomation{}, err
+		}
+	}
 	if err := s.saveAutomation(candidate); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -385,6 +427,10 @@ func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion 
 	if expectedVersion < 1 || automation.Version != expectedVersion {
 		return ErrConflict
 	}
+	if automation.Status == RepositoryReviewAutomationRunning ||
+		automation.Status == RepositoryReviewAutomationStopping {
+		return ErrAutomationActive
+	}
 	return fileutil.RemoveDurable(s.automationPath(id))
 }
 
@@ -392,26 +438,17 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if !validAutomationID(id) {
 		return RepositoryReviewAutomation{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidAutomation)
 	}
-	if err := s.requireSafeRoot(true); err != nil {
-		return RepositoryReviewAutomation{}, false, err
-	}
 	statePath := s.automationPath(id)
-	info, err := os.Lstat(statePath)
-	if os.IsNotExist(err) {
+	data, found, err := s.readStateFile(
+		statePath,
+		maxAutomationFileBytes,
+		"repository review automation",
+	)
+	if err != nil {
+		return RepositoryReviewAutomation{}, false, err
+	}
+	if !found {
 		return RepositoryReviewAutomation{}, false, nil
-	}
-	if err != nil {
-		return RepositoryReviewAutomation{}, false, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return RepositoryReviewAutomation{}, false, errors.New("repository review automation must be a regular file")
-	}
-	if info.Size() > maxAutomationFileBytes {
-		return RepositoryReviewAutomation{}, false, errors.New("repository review automation exceeds its size limit")
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return RepositoryReviewAutomation{}, false, err
 	}
 	var automation RepositoryReviewAutomation
 	if err := json.Unmarshal(data, &automation); err != nil {
@@ -424,6 +461,34 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 		return RepositoryReviewAutomation{}, false, err
 	}
 	return automation, true, nil
+}
+
+func (s Store) readStateFile(
+	statePath string,
+	maximumBytes int64,
+	kind string,
+) ([]byte, bool, error) {
+	if err := s.requireSafeRoot(true); err != nil {
+		return nil, false, err
+	}
+	info, err := os.Lstat(statePath)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s must be a regular file", kind)
+	}
+	if info.Size() > maximumBytes {
+		return nil, false, fmt.Errorf("%s exceeds its size limit", kind)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 func (s Store) saveAutomation(automation RepositoryReviewAutomation) error {
@@ -481,7 +546,9 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if automation == nil {
 		return fmt.Errorf("%w: state is required", ErrInvalidAutomation)
 	}
+	rawRef := automation.Ref
 	automation.ID = strings.TrimSpace(automation.ID)
+	automation.ProfileID = strings.TrimSpace(automation.ProfileID)
 	automation.Name = strings.TrimSpace(automation.Name)
 	automation.Repository = strings.TrimSpace(automation.Repository)
 	automation.Ref = strings.TrimSpace(automation.Ref)
@@ -495,6 +562,14 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.PauseReason = RepositoryReviewPauseReason(
 		strings.ToLower(strings.TrimSpace(string(automation.PauseReason))),
 	)
+	if automation.ProfileID != "" {
+		branch, err := NormalizeRepositoryReviewBranch(rawRef)
+		if err != nil {
+			return err
+		}
+		automation.Ref = branch
+		automation.Target = "all"
+	}
 	if automation.Target == "" {
 		automation.Target = "all"
 	}
@@ -592,6 +667,14 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		automation.UpdatedAt.Before(automation.CreatedAt) {
 		return ErrInvalidAutomation
 	}
+	if automation.ProfileID == "" {
+		if automation.ProfileVersion != 0 {
+			return fmt.Errorf("%w: profile version requires a profile", ErrInvalidAutomation)
+		}
+	} else if !validProfileID(automation.ProfileID) || automation.ProfileVersion < 1 ||
+		automation.Target != "all" || len(automation.ReviewerModels) != 1 || automation.CompareModels {
+		return fmt.Errorf("%w: invalid profile assignment", ErrInvalidAutomation)
+	}
 	if err := validateBudgetPolicy(automation.BudgetPolicy); err != nil {
 		return err
 	}
@@ -673,6 +756,124 @@ func validAutomationRepository(repository string) bool {
 	}
 	parsed, err := url.Parse(repository)
 	return err == nil && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+func (s Store) ensureRepositoryAutomationUniqueUnlocked(id, repository string) error {
+	canonical := canonicalAutomationRepository(repository)
+	if canonical == "" {
+		return ErrInvalidAutomation
+	}
+	automations, err := s.listAutomationsUnlocked(maxAutomationCount)
+	if err != nil {
+		return err
+	}
+	for _, existing := range automations {
+		if existing.ID != id && canonicalAutomationRepository(existing.Repository) == canonical {
+			return ErrRepositoryReviewRepositoryConflict
+		}
+	}
+	return nil
+}
+
+func (s Store) validateAutomationProfileSnapshotUnlocked(
+	automation RepositoryReviewAutomation,
+) error {
+	profile, found, err := s.loadProfile(automation.ProfileID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	if profile.Version != automation.ProfileVersion {
+		return ErrConflict
+	}
+	materialized, err := MaterializeRepositoryReviewAutomation(profile, automation)
+	if err != nil {
+		return err
+	}
+	if automation.ReviewFocus != materialized.ReviewFocus ||
+		!reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) ||
+		!reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) ||
+		automation.CompareModels != materialized.CompareModels ||
+		!reflect.DeepEqual(automation.ModelPrices, materialized.ModelPrices) ||
+		automation.Force != materialized.Force ||
+		automation.AutoContinue != materialized.AutoContinue ||
+		automation.MaxFilesPerRun != materialized.MaxFilesPerRun ||
+		automation.MaxContentBytes != materialized.MaxContentBytes ||
+		automation.MaxParallelChildren != materialized.MaxParallelChildren ||
+		automation.EstimatedOutputTokens != materialized.EstimatedOutputTokens ||
+		!reflect.DeepEqual(automation.BudgetPolicy, materialized.BudgetPolicy) ||
+		automation.Target != materialized.Target {
+		return fmt.Errorf(
+			"%w: repository review profile snapshot does not match its assigned profile",
+			ErrInvalidAutomation,
+		)
+	}
+	return nil
+}
+
+func repositoryReviewAutomationProfilePolicyEqual(
+	left, right RepositoryReviewAutomation,
+) bool {
+	return left.ReviewFocus == right.ReviewFocus &&
+		reflect.DeepEqual(left.ScopePolicy, right.ScopePolicy) &&
+		reflect.DeepEqual(left.ReviewerModels, right.ReviewerModels) &&
+		left.CompareModels == right.CompareModels &&
+		reflect.DeepEqual(left.ModelPrices, right.ModelPrices) &&
+		left.Force == right.Force && left.AutoContinue == right.AutoContinue &&
+		left.MaxFilesPerRun == right.MaxFilesPerRun &&
+		left.MaxContentBytes == right.MaxContentBytes &&
+		left.MaxParallelChildren == right.MaxParallelChildren &&
+		left.EstimatedOutputTokens == right.EstimatedOutputTokens &&
+		reflect.DeepEqual(left.BudgetPolicy, right.BudgetPolicy) &&
+		left.Target == right.Target
+}
+
+func repositoryReviewAutomationAdmissionTransition(
+	current, candidate RepositoryReviewAutomation,
+) bool {
+	currentActive := current.Status == RepositoryReviewAutomationRunning ||
+		current.Status == RepositoryReviewAutomationStopping
+	candidateActive := candidate.Status == RepositoryReviewAutomationRunning ||
+		candidate.Status == RepositoryReviewAutomationStopping
+	return !currentActive && candidateActive
+}
+
+func canonicalAutomationRepository(repository string) string {
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return ""
+	}
+	if filepath.IsAbs(repository) {
+		return filepath.Clean(repository)
+	}
+	if parsed, err := url.Parse(repository); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		path := strings.Trim(parsed.Path, "/")
+		if strings.HasSuffix(strings.ToLower(path), ".git") {
+			path = path[:len(path)-len(".git")]
+		}
+		if strings.EqualFold(parsed.Hostname(), "github.com") && path != "" {
+			return strings.ToLower(path)
+		}
+		return strings.ToLower(parsed.Hostname() + "/" + path)
+	}
+	lower := strings.ToLower(repository)
+	if colon := strings.Index(repository, ":"); colon > 0 &&
+		strings.Contains(repository[:colon], "@") {
+		identity, remotePath := repository[:colon], repository[colon+1:]
+		_, host, found := strings.Cut(identity, "@")
+		if found && strings.TrimSpace(host) != "" {
+			repository = strings.TrimSpace(host) + "/" + remotePath
+		}
+	} else if separator := strings.Index(lower, "github.com:"); separator >= 0 {
+		repository = repository[separator+len("github.com:"):]
+	}
+	repository = strings.Trim(repository, "/")
+	if strings.HasSuffix(strings.ToLower(repository), ".git") {
+		repository = repository[:len(repository)-len(".git")]
+	}
+	return strings.ToLower(repository)
 }
 
 func validateBudgetPolicy(policy RepositoryReviewBudgetPolicy) error {

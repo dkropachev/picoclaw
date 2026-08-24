@@ -23,30 +23,13 @@ import (
 func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
+	profile := createRepositoryReviewProfileForTest(t, mux, "Core pre-review", "cheap")
 
 	create := repositoryReviewAutomationMutation(t, mux, http.MethodPost,
 		"/api/repository-reviews/automations", map[string]any{
-			"name": "Core pre-review", "repository": "https://github.com/acme/core.git",
-			"ref": "main", "target": "all", "review_focus": "Find release blockers.",
-			"scope_policy": map[string]any{
-				"code_types":      []string{"test", "code", "hotpath-code"},
-				"include_folders": []string{"services/api", "cmd"},
-				"exclude_folders": []string{"services/api/generated"},
-				"free_text":       "Prioritize authorization boundaries.",
-			},
-			"reviewer_models": []string{"cheap", "quality"}, "compare_models": true,
-			"auto_continue": true, "max_files_per_run": 4, "max_content_bytes": 65536,
-			"max_parallel_children": 1, "estimated_output_tokens": 900,
-			"model_prices": map[string]any{
-				"cheap":   map[string]any{"input_price_per_1m": 0.2, "output_price_per_1m": 0.8},
-				"quality": map[string]any{"input_price_per_1m": 2.0, "output_price_per_1m": 8.0},
-			},
-			"budget": map[string]any{
-				"max_total_tokens": 20000, "max_estimated_cost_usd": 2.5,
-				"account_ids": []string{"openai:work"}, "min_remaining_percent": 10,
-				"min_remaining_percent_by_window": map[string]any{"weekly": 25},
-				"auto_resume":                     true, "pause_on_unknown": false, "check_interval_seconds": 30,
-			},
+			"repository": "https://github.com/acme/core.git",
+			"branch":     "main",
+			"profile_id": profile.ID,
 		})
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
@@ -58,11 +41,12 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		t.Fatal(err)
 	}
 	if created.Automation.ID == "" || created.Automation.Status != repoaudit.RepositoryReviewAutomationIdle ||
-		!created.Automation.AutoContinue || created.Automation.MaxParallelChildren != 1 ||
-		created.Automation.BudgetPolicy.MinRemainingPercentByWindow["weekly"] != 25 ||
-		len(created.Automation.ScopePolicy.CodeTypes) != 3 ||
-		created.Automation.ScopePolicy.CodeTypes[0] != repoaudit.RepositoryReviewCodeTypeHotpathCode ||
-		created.Automation.ScopePolicy.FreeText != "Prioritize authorization boundaries." {
+		created.Automation.ProfileID != profile.ID ||
+		created.Automation.ProfileVersion != profile.Version ||
+		created.Automation.Ref != "main" || created.Automation.Target != "all" ||
+		len(created.Automation.ReviewerModels) != 1 ||
+		created.Automation.ReviewerModels[0] != profile.ReviewerModel ||
+		created.Automation.CompareModels {
 		t.Fatalf("created automation=%#v", created.Automation)
 	}
 	statePath := filepath.Join(workspace, "repository_reviews", "automation_"+created.Automation.ID+".json")
@@ -76,12 +60,15 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
 	}
 
-	updateBody := automationConfigBody(created.Automation)
-	updateBody["name"] = "Core release pre-review"
-	updateBody["expected_version"] = created.Automation.Version
+	updateBody := map[string]any{
+		"repository":       created.Automation.Repository,
+		"branch":           "release/v2",
+		"profile_id":       profile.ID,
+		"expected_version": created.Automation.Version,
+	}
 	update := repositoryReviewAutomationMutation(t, mux, http.MethodPatch,
 		"/api/repository-reviews/automations/"+created.Automation.ID, updateBody)
-	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), "Core release pre-review") {
+	if update.Code != http.StatusOK || !strings.Contains(update.Body.String(), "release/v2") {
 		t.Fatalf("update status=%d body=%s", update.Code, update.Body.String())
 	}
 	var changed struct {
@@ -1057,6 +1044,10 @@ func newRepositoryReviewAutomationTestHandler(t *testing.T) (*Handler, *http.Ser
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = workspace
 	cfg.Agents.Defaults.ModelName = "cheap"
+	cfg.Agents.Defaults.AccountRef = "api"
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "api", Provider: "openai", Model: "openai/test", Enabled: true,
+	}}
 	cfg.ModelAliases = []config.ModelAliasConfig{
 		{Name: "cheap", Model: "gpt-cheap"},
 		{Name: "quality", Model: "gpt-quality"},

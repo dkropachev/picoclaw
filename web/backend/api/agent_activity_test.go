@@ -22,6 +22,53 @@ const (
 	validAgentActivityCursorSequenceTwo = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC"
 )
 
+type agentActivityStringAddress string
+
+func (address agentActivityStringAddress) Network() string { return "test" }
+func (address agentActivityStringAddress) String() string  { return string(address) }
+
+func TestAgentActivityHelperCoverageMargin(t *testing.T) {
+	if _, ok := launcherAgentActivityID(nil); ok {
+		t.Fatal("nil request produced an agent identity")
+	}
+	requests := []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/agents/main/activity", nil),
+		httptest.NewRequest(http.MethodGet, "/wrong/main/activity", nil),
+		httptest.NewRequest(http.MethodGet, "/api/agents/main/other", nil),
+		httptest.NewRequest(http.MethodGet, "/api/agents/NotValid/activity", nil),
+	}
+	requests[0].URL.RawPath = "/api/agents/main%2Factivity"
+	for index, request := range requests {
+		if id, ok := launcherAgentActivityID(request); ok {
+			t.Errorf("invalid request %d produced agent %q", index, id)
+		}
+	}
+
+	original := agentActivityInterfaceAddrs
+	defer func() { agentActivityInterfaceAddrs = original }()
+	agentActivityInterfaceAddrs = func() ([]net.Addr, error) {
+		return nil, errors.New("injected interface failure")
+	}
+	if localAgentActivityHost("192.0.2.44") {
+		t.Fatal("interface failure accepted a non-loopback host")
+	}
+	agentActivityInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			agentActivityStringAddress("192.0.2.44/24"),
+			&net.IPAddr{IP: net.ParseIP("2001:db8::44")},
+			agentActivityStringAddress("not-a-cidr"),
+		}, nil
+	}
+	for _, host := range []string{"192.0.2.44", "2001:db8::44"} {
+		if !localAgentActivityHost(host) {
+			t.Errorf("assigned host %q was rejected", host)
+		}
+	}
+	if localAgentActivityHost("192.0.2.45") {
+		t.Fatal("unassigned host was accepted")
+	}
+}
+
 func TestAgentActivityProxyUsesIsolatedTransportAndCanonicalResponse(t *testing.T) {
 	originalPID := agentActivityGatewayPIDData
 	originalDo := agentActivityGatewayDo

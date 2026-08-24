@@ -7,36 +7,38 @@
 ## Behavior Summary
 
 Repository reviews provide a durable pre-review control plane and retain
-validated bug findings independently from pull-request workspaces. Before any
-finding exists, the launcher dashboard can save a repository/ref profile,
-review focus, model comparison set, bounded batch shape, token/cost budgets,
-and account-window quota thresholds. It can start the review, show its live
-stage and cumulative consumption, pause safely after the current checkpoint,
-resume or restart it, and automatically continue or resume when configured
-quota criteria recover. Each finding is bound to an exact repository commit,
-primary file blob and size, one or more opaque AI context snapshots, and its
-contributing models. The dashboard lets a user inspect that provenance, select
-one or many findings, discuss the selected set in a durable reviewing thread,
-change finding status, and prepare an editable issue draft. For canonical
-`owner/repo` identities, the dashboard can publish the exact prepared draft
-through the protected gateway GitHub provider, recover an ambiguous response by
-its stable marker, and link the posted issue. Opening the GitHub composer remains
-an explicit manual fallback and is not proof of posting.
+validated bug findings independently from pull-request workspaces. Reusable
+named review profiles own review behavior, one execution model, scope, work
+bounds, and guardrails. A separate repository configuration assigns exactly one
+profile to one normalized repository and may select only an optional branch;
+blank follows the repository's advertised default branch. Configuration,
+actual review runs, and completed results have separate launcher flows. Model
+comparison is a separate repository model probe and never writes the review
+campaign or finding ledger. An actual review exposes live stage and cumulative
+consumption, pauses safely after the current checkpoint, resumes or restarts,
+and automatically continues or resumes when configured quota criteria recover.
+Each finding is bound to an exact repository commit, primary file blob and size,
+one or more opaque AI context snapshots, and its contributing model. The result
+flow lets a user inspect provenance, discuss findings in a durable reviewing
+thread, change status, prepare an editable issue draft, and safely publish a
+canonical GitHub issue through the protected provider.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate a launcher-owned repository pre-review control
   plane backed by bounded workflow batches and an independent immutable finding
   ledger, not a browser-only wrapper around the generic workflow form.
-- Core types/functions: `repoaudit.Store`, `RepositoryReviewAutomation`, the
-  repository review controller and API handlers, workflow `review.repository`
-  native functions, the built-in repository-bug-finder template, and the
-  `/repository-reviews` control center/result ledger.
-- Runtime ordering: validate and persist a profile; evaluate token, cost, and
-  account-window guards; reserve one durable workflow run; execute and account
-  provider calls; verify the record/no-op checkpoint; then complete, pause, or
-  admit the next batch. Recovery first reconciles orphaned durable state before
-  it considers automatic resume.
+- Core types/functions: `repoaudit.Store`, `RepositoryReviewProfile`,
+  `RepositoryReviewAutomation`, the repository review controller and API
+  handlers, workflow `review.repository` native functions, the built-in
+  repository-bug-finder template, and the separate profile, repository, run,
+  and result launcher routes.
+- Runtime ordering: validate and persist a reusable profile; atomically assign
+  it to one branch-bound repository configuration; materialize the current
+  profile version at admission; evaluate token, cost, and account-window guards;
+  reserve one durable workflow run; execute and account provider calls; verify
+  the record/no-op checkpoint; then complete, pause, or admit the next batch.
+  Recovery first reconciles orphaned durable state before automatic resume.
 - Non-obvious constraints: repository bytes remain immutable no-tool evidence;
   one workspace-wide controller lease prevents competing launchers; active
   guardrails force one provider request at a time; actual response usage may
@@ -55,25 +57,27 @@ an explicit manual fallback and is not proof of posting.
 | `FR-REPOREVIEW-005` | MUST  | Prepare issue creates a durable draft from the exact selection; editing title, body, or labels uses the draft version.                                                                                                                                                                                                                    | Users must be able to refine a proposed issue without losing its finding membership.                                   |
 | `FR-REPOREVIEW-006` | MUST  | For a repository value derived from the acquired checkout's exact GitHub origin as a normalized safe `owner/repo` identity, Post now first persists the draft and then publishes it through the protected gateway's exact GitHub issue-create capability. Publication durably changes the draft from `editing` to `publishing` before any external call, freezing the exact title/body/labels against concurrent edits. A stable draft marker is searched before every create; a recovered marker completes publication, while absent results for `publishing`/`unknown` never cause another create. Ambiguous outcomes become `unknown`. Success stores the provider issue ID/URL and marks the selected findings posted. An editable saved draft exposes the same publish action after discussion; the prefilled GitHub composer remains a manual alternative. Local/non-GitHub identities expose no publish action. | External publication must use a reviewable durable payload, a verified bounded destination, and idempotent recovery rather than treating a browser handoff, stale draft, concurrent request, or transport timeout as success. |
 | `FR-REPOREVIEW-007` | MUST  | Review checkpoint CAS uses a dedicated `review_version`, while finding status, issue drafting, and publication use the aggregate/draft versions. UI mutations during a long AI run therefore merge with its later findings; only a newer review checkpoint invalidates an older review plan. Repository writes use OS locks on Unix and Windows. | A user discussing or drafting an issue must not make completed AI work fail, and launcher/gateway processes must not overwrite one another. |
-| `FR-REPOREVIEW-008` | MUST  | A versioned repository-review automation can be created before the first ledger or finding. It stores repository/ref/target/focus, one or more reviewer aliases, comparison mode, optional per-model price metadata, force mode, bounded file/content/parallel/output settings, automatic batch continuation, token/USD budgets, selected account IDs, default and per-window minimum remaining percentages, unknown-limit policy, automatic resume, and a bounded recheck interval. Create/update/delete use cross-process locking, atomic `0600` files, validation, and version CAS. | Pre-review setup must be a reusable repository policy rather than a transient raw workflow form. |
-| `FR-REPOREVIEW-009` | MUST  | The authenticated automation API and `/repository-reviews` UI expose Start, safe Pause, Resume, Restart, and Delete. Starting assigns a durable workflow run ID before work begins. Active state exposes running/stopping/paused/completed/failed status, current workflow stage, bounded-batch progress, run history, timestamps, and a structured pause reason/detail. Automatic continuation launches the next bounded batch until no files remain. Safe pause stops admission after the current batch records its durable checkpoint. | Operators need one place to launch, observe, stop, and continue repository work without discarding a completed model batch. |
-| `FR-REPOREVIEW-010` | MUST  | Every non-nil provider response in workflow agent execution reports actual model-attributed prompt, completion, cached, and total token usage, including fallbacks, structured repairs, and concurrent managed children. The controller durably aggregates that usage and configured-price cost per automation and reviewer. Reaching a token or cost ceiling changes the active review to stopping and prevents another batch after the current bounded checkpoint; the UI states this bounded overshoot explicitly. Manual Resume may reset the budget counters, while Restart resets campaign progress/statistics. | A budget guard based only on prompt estimates or process logs cannot protect accounts or explain actual spend. |
+| `FR-REPOREVIEW-008` | MUST  | A reusable versioned review profile can be created before any repository assignment, ledger, or finding. It stores a name, focus, exactly one safe reviewer alias, optional price metadata, force mode, bounded file/content/parallel/output settings, automatic batch continuation, token/USD budgets, selected account IDs, default and per-window minimum remaining percentages, unknown-limit policy, automatic resume, and a bounded recheck interval. Profile create/update/delete uses cross-process locking, atomic `0600` files, validation, and version CAS; deletion is rejected while assigned and mutation is rejected while an assigned review is running or stopping. | Review behavior should be reusable across repositories without coupling lifecycle state or mutable repository identity to the profile. |
+| `FR-REPOREVIEW-009` | MUST  | A separate versioned repository configuration assigns one profile to one normalized repository and an optional branch. A repository has at most one configuration; one profile may serve many repositories. The authenticated run API and `/repository-reviews` run flow expose Start, safe Pause, Resume, Restart, and Delete. Starting snapshots the latest assigned profile version and assigns a durable workflow run ID before work begins. Active state exposes running/stopping/paused/completed/failed status, current workflow stage, bounded-batch progress, run history, timestamps, and a structured pause reason/detail. Automatic continuation launches the next bounded batch until no files remain. Safe pause stops admission after the current batch records its durable checkpoint. | Repository assignment, profile policy, and execution lifecycle require distinct authority and concurrency fences. |
+| `FR-REPOREVIEW-010` | MUST  | Every non-nil provider response in workflow agent execution reports actual model-attributed prompt, completion, cached, and total token usage, including fallbacks and structured repairs. The controller durably aggregates that usage and configured-price cost per repository review run. Reaching a token or cost ceiling changes the active review to stopping and prevents another batch after the current bounded checkpoint; the UI states this bounded overshoot explicitly. Manual Resume may reset the budget counters, while Restart resets campaign progress/statistics. | A budget guard based only on prompt estimates or process logs cannot protect accounts or explain actual spend. |
 | `FR-REPOREVIEW-011` | MUST  | Account limit telemetry is normalized into account/window snapshots with remaining percentage and reset time. Policies may select accounts, apply a default minimum and stricter named windows such as daily or weekly, and choose fail-open or fail-closed behavior for unknown telemetry. The backend—not a browser timer—rechecks active and quota-paused automations, safely stops admission when a threshold is crossed, and automatically resumes exactly once when all configured criteria recover. | Daily, weekly, and provider-specific limits must protect unattended reviews and recover after reset even when the dashboard is closed. |
-| `FR-REPOREVIEW-012` | MUST  | The setup UI presents available safe reviewer aliases and known or operator-supplied input/output prices. The runtime retains per-reviewer request/failure counts, actual tokens, estimated USD, compact approximate unique reviewed-file coverage, and finding yield. The comparison table labels approximate coverage, derives cost per finding, and visually identifies the cheapest known successful reviewer without claiming a price when metadata is absent. Agentic CLI providers remain unavailable for immutable repository review. | Users need comparable quality and economics signals to choose a cheaper review model deliberately. |
+| `FR-REPOREVIEW-012` | MUST  | The profile UI presents available safe reviewer aliases and known or operator-supplied input/output prices for the one actual-review model. Runtime retains request/failure counts, actual tokens, estimated USD, compact approximate reviewed-file coverage, and finding yield without claiming unknown price as zero. Comparative model testing, scoring, and efficiency ranking remain exclusively in the separate model-review probe domain and never start or mutate an actual review. Agentic CLI providers remain unavailable for immutable repository review. | Operators need honest actual-run economics without conflating exploratory model comparison with production findings. |
 | `FR-REPOREVIEW-013` | MUST  | On launcher startup, the durable controller reconciles an automation left running without a local executor, marks the orphaned workflow run canceled, records a `service_restart` pause, and resumes from repository checkpoints only when automatic resume is enabled. Controller shutdown cancels in-process execution and never creates a new batch after its context is closed. | Process restarts must not leave phantom running state, duplicate work, or silently disable unattended recovery. |
-| `FR-REPOREVIEW-014` | MUST  | Each automation persists a bounded scope policy with one or more selectable inventory code types (`hotpath-code`, `code`, `test`, `bench-test`), canonical repository-relative include and exclude folder prefixes, and optional free-text guidance. The default selects normal production code (`hotpath-code` and `code`); exclusions always win. A generated preflight is commit-bound and persists bounded policy/plan hashes, summary, rationale, warnings, and aggregate file counts. Changing execution scope clears any prior commit-bound plan. | Operators must be able to express reproducible review intent before AI planning without allowing unsafe paths, unbounded manifests, stale commit summaries, or an exclusion to be silently re-included. |
+| `FR-REPOREVIEW-014` | MUST  | Each review profile persists a bounded scope policy with one or more selectable inventory code types (`hotpath-code`, `code`, `test`, `bench-test`), canonical repository-relative include and exclude folder prefixes, and optional free-text guidance. The default selects normal production code (`hotpath-code` and `code`); exclusions always win. A generated repository preflight is commit-bound and persists bounded policy/plan hashes, summary, rationale, warnings, and aggregate file counts. Changing the assigned profile or its execution scope clears any prior commit-bound plan. | Operators must be able to express reusable, reproducible review intent without allowing unsafe paths, unbounded manifests, stale commit summaries, or an exclusion to be silently re-included. |
+| `FR-REPOREVIEW-015` | MUST  | Repository configuration accepts only an optional branch name. Blank resolves through the acquired repository's advertised default branch; `HEAD`, commit hashes, tags, full refs, revision expressions, URLs, query/fragment forms, and invalid Git branch names are rejected before admission. The launcher exposes separate Review runs, Repositories, Profiles, and Results destinations. Basic fields are immediately visible; Scope, execution sizing, price overrides, and detailed spending/account policies remain in an Advanced section that is collapsed by default and preserves its draft while closed. | Repository review should follow a predictable branch, never masquerade an immutable commit/tag as mutable configuration, and avoid one overloaded control surface. |
 
 ## Data And State Model
 
 | State | Shape And Location | Contract |
 | --- | --- | --- |
-| Automation profile | `workspace/repository_reviews/automation_rra_*.json` | Versioned `0600` configuration plus lifecycle, guard-epoch usage/cost, bounded run history, quota snapshots, lifetime model statistics, and internal approximate coverage sketches. |
+| Review profile | `workspace/repository_reviews/profile_rrpf_*.json` | Reusable versioned `0600` behavior, one reviewer alias, scope, sizing, price, and guard policy without repository or lifecycle state. |
+| Repository configuration/run | `workspace/repository_reviews/automation_rra_*.json` | Unique normalized repository/profile assignment, optional branch, materialized profile version, lifecycle, guard-epoch usage/cost, bounded run history, quota snapshots, and internal approximate coverage sketch. |
 | Repository ledger | `workspace/repository_reviews/repo_*.json` plus summary sidecar | Exact commit/blob checkpoints, attempts, unsupported files, findings, observations, contexts, completed review runs, and issue drafts. |
 | Workflow run | `workspace/workflow_runs/<run-id>/` | Generic durable job/step state and events; automation stores only bounded identities/progress and requires a verified `record` output or authoritative no-op checkpoint. |
 | Controller lease | `workspace/repository_reviews.controller.lock` | Non-blocking workspace-wide OS lock held for the launcher controller lifetime; never returned by an API. |
 | Guard epoch | `usage`, `estimated_cost_usd`, `budget` | Resume may reset only current guard counters. Restart establishes a new campaign epoch and clears progress/model comparison state while the repository blob ledger still controls unchanged-file reuse. |
-| Model comparison | `model_stats`, `model_coverage_sketches` | Lifetime per-campaign request/failure/usage/cost/latency/finding counts and fixed-size approximate unique coverage. Sketches are persistence-only and are removed from API projections. |
-| Scope policy and preflight | `scope_policy`, `scope_plan` in the automation profile | Commit-independent bounded code-type/folder/free-text intent plus the latest bounded commit SHA, policy hash, plan hash, explanation, warnings, and counts. It does not contain the selected-file manifest. |
+| Actual-model statistics | `model_stats`, `model_coverage_sketches` | Per-campaign request/failure/usage/cost/latency/finding counts and fixed-size approximate unique coverage for the assigned profile model. Sketches are persistence-only and removed from API projections. |
+| Scope policy and preflight | `scope_policy` in the review profile and `scope_plan` in the repository run | Reusable code-type/folder/free-text intent plus the latest bounded commit SHA, policy hash, plan hash, explanation, warnings, and counts. It does not contain the selected-file manifest. |
 
 ## Surface Ownership
 
@@ -88,16 +92,22 @@ Owns: CODE web/frontend/src/api/repository-reviews.ts
 Owns: TEST web/frontend/src/api/repository-reviews.test.ts
 Owns: CODE web/frontend/src/components/repository-reviews/**
 Owns: TEST web/frontend/src/components/repository-reviews/**
-Owns: CODE web/frontend/src/routes/repository-reviews.tsx
-Owns: TEST web/frontend/src/routes/-repository-reviews-route.test.tsx
+Owns: CODE web/frontend/src/routes/repository-reviews*.tsx
+Owns: TEST web/frontend/src/routes/-repository-reviews*.test.tsx
 Owns: HTTP * /api/repository-reviews*
-Owns: UI /repository-reviews
+Owns: UI /repository-reviews*
 
-Automation state is stored in
-`workspace/repository_reviews/automation_rra_*.json`. The authenticated control
-surface is `GET/POST/PATCH/DELETE /api/repository-reviews/automations*`, with
-`start`, `pause`, `resume`, and `restart` action subresources plus
+Profile state is stored in `workspace/repository_reviews/profile_rrpf_*.json`;
+repository configuration and runtime state remains in
+`workspace/repository_reviews/automation_rra_*.json`. Authenticated profile CRUD
+uses `/api/repository-reviews/profiles*`. Repository configuration and run
+lifecycle use `/api/repository-reviews/automations*`, with `start`, `pause`,
+`resume`, and `restart` action subresources plus
 `GET /api/repository-reviews/automation-options` for safe model/account choices.
+Profileless automation files written by older versions remain readable for
+recovery and have legacy `HEAD`/target values sanitized at admission. New HTTP
+creation always requires `profile_id`; the split UI does not expose legacy
+profileless editing or multi-model actual-review configuration.
 
 The shared application sidebar and thread/chat controller remain auxiliary
 interfaces owned by their existing feature specifications.
@@ -106,44 +116,48 @@ interfaces owned by their existing feature specifications.
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| HTTP | `GET/POST/PATCH/DELETE /api/repository-reviews/automations*` | List/create/update/delete CAS-fenced profiles, including bounded scope policy, and invoke start, pause, resume, or restart transitions. Internal sketches and credentials are never projected; bounded scope preflight summaries are returned. | `FR-REPOREVIEW-008`, `FR-REPOREVIEW-009`, `FR-REPOREVIEW-013`, `FR-REPOREVIEW-014` |
+| HTTP | `GET/POST/PATCH/DELETE /api/repository-reviews/profiles*` | List/create/update/delete reusable CAS-fenced single-model profiles, including bounded scope, sizing, price, and guard policy. Assigned deletion and active-assignment mutation fail closed. | `FR-REPOREVIEW-008`, `FR-REPOREVIEW-012`, `FR-REPOREVIEW-014` |
+| HTTP | `GET/POST/PATCH/DELETE /api/repository-reviews/automations*` | List/create/update/delete unique repository/profile assignments and invoke start, pause, resume, or restart transitions. Internal sketches and credentials are never projected; bounded scope preflight summaries are returned. | `FR-REPOREVIEW-009`, `FR-REPOREVIEW-013`, `FR-REPOREVIEW-015` |
 | HTTP | `GET /api/repository-reviews/automation-options` | Return safe configured aliases, conservative selectable-route price metadata, and normalized limit-aware accounts without credential values. | `FR-REPOREVIEW-011`, `FR-REPOREVIEW-012` |
 | HTTP | `GET/PATCH/POST /api/repository-reviews/**` | Page result ledgers and mutate finding status or issue drafts with exact version fences. | `FR-REPOREVIEW-001`–`FR-REPOREVIEW-007` |
 | Gateway HTTP | `/runtime/repository-reviews/<repo>/issue-drafts/<draft>/publish` | Protected, idempotent publication/reconciliation boundary for canonical GitHub identities. | `FR-REPOREVIEW-006` |
-| UI | `/repository-reviews` | Persistent control center above the completed finding/draft ledger, including multi-select code types, folder-prefix policy, free-text scope, and the latest bounded preflight explanation; polling is observation only, not automation authority. | `FR-REPOREVIEW-003`–`FR-REPOREVIEW-005`, `FR-REPOREVIEW-008`–`FR-REPOREVIEW-014` |
+| UI | `/repository-reviews`, `/repository-reviews/repositories`, `/repository-reviews/profiles`, `/repository-reviews/results` | Separate actual-run, one-profile-per-repository assignment, reusable profile, and completed finding/draft flows. Advanced profile controls are hidden by default; polling is observation only, not execution authority. | `FR-REPOREVIEW-003`–`FR-REPOREVIEW-005`, `FR-REPOREVIEW-008`–`FR-REPOREVIEW-015` |
 
 ## Algorithms And Ordering
 
-1. Create/update normalizes the repository, ref, reviewers, prices, work bounds,
-   scope policy, and guard policy under the shared review-store lock. Code types
-   are canonicalized; folder prefixes must be exact safe repository-relative
-   paths. CAS mismatch fails
-   without partial mutation. Execution-affecting changes start a new campaign;
-   price-only edits are non-retroactive and do not erase progress.
-2. Start/resume/restart checks the action-specific source state, controller
-   lifecycle, workspace lease, current automation version, token/cost threshold,
-   and selected account windows. A failed guard persists a structured pause;
-   admission never allocates a workflow run.
-3. Admission creates a run ID and persists `running` plus run history before a
+1. Profile create/update normalizes one reviewer, prices, work bounds, scope,
+   and guard policy under the shared review-store lock. Code types are
+   canonicalized; folder prefixes must be exact safe repository-relative paths.
+   CAS mismatch fails without partial mutation.
+2. Repository configuration create/update normalizes repository identity and an
+   optional branch under the catalog lock, atomically rejects a second
+   configuration for the same repository, and binds one existing profile.
+3. Start/resume/restart checks the action-specific source state, controller
+   lifecycle, workspace lease, current configuration and assigned profile
+   versions, token/cost threshold, and selected account windows. A changed
+   profile is materialized and starts a new campaign before admission. A failed
+   guard persists a structured pause; admission never allocates a workflow run.
+4. Admission creates a run ID and persists `running` plus run history before a
    goroutine executes the built-in repository-bug-finder workflow with the exact
-   captured profile and workspace configuration.
-4. The workflow acquires a fresh checkout, inventories exact Git blobs, plans
+   captured profile and repository branch. A named branch is passed as
+   `refs/heads/<branch>`; blank uses the repository's remote default.
+5. The workflow acquires a fresh checkout, inventories exact Git blobs, plans
    only changed/profile-invalidated work, freezes bounded source evidence, and
    releases the checkout before model calls. Managed review takes the Cartesian
-   product of bounded scope and reviewer aliases.
-5. Every provider response records requested reviewer, actual model, actual or
+   one bounded scope with the assigned profile model.
+6. Every provider response records requested reviewer, actual model, actual or
    conservative token usage, and latency. A persistence failure fails closed.
    When any guard is active, call admission is serialized; a threshold-crossing
    response is still validated, but subsequent provider calls are rejected.
-6. A completed batch counts only after the qualified record step persisted a
+7. A completed batch counts only after the qualified record step persisted a
    run or the authoritative no-op result was verified. The controller then
    merges campaign-scoped ledger outcomes and either completes, safely pauses,
    or atomically admits the next bounded batch.
-7. The monitor periodically refreshes active and account-paused profiles.
+8. The monitor periodically refreshes active and account-paused runs.
    Known exhausted limits always block; unknown telemetry follows
    `pause_on_unknown`. Only account-limit/service-restart pauses with
    `auto_resume` are eligible for unattended restart.
-8. Issue publication first freezes a durable draft in `publishing`, searches
+9. Issue publication first freezes a durable draft in `publishing`, searches
    its stable marker, creates only when safe, and stores `posted` or `unknown`
    before returning.
 
@@ -159,6 +173,9 @@ interfaces owned by their existing feature specifications.
 - Git workspaces owns fresh lease acquisition, immutable Git-object reads, and
   checkout release. Repository review never retains mutable workspace access in
   a model call.
+- Repository model evaluations owns the separate model-review probe lifecycle,
+  frozen comparison corpus, blinded judging, and quality/efficiency ranking. A
+  probe never changes a review profile, repository run, or finding ledger.
 - Launcher authentication and same-origin mutation guards protect every control
   and result mutation. Runtime events/workflow pages remain optional detailed
   observation surfaces.
@@ -168,15 +185,19 @@ interfaces owned by their existing feature specifications.
 
 ## Failure And Edge Cases
 
-- Credentialed or query/fragment-bearing repository URLs, unsafe paths,
+- Duplicate normalized repository assignments, missing or assigned profiles,
+  credentialed or query/fragment-bearing repository URLs, unsafe paths,
   symlinked roots/files/locks, oversized ledgers, invalid reviewer aliases,
   unsafe agentic CLI reviewers, invalid prices, and out-of-range work/guard
   values fail before execution.
 - Scope policies reject unknown/duplicate code types, absolute, parent-relative,
   non-canonical, duplicate, or over-limit folder prefixes, and oversized free
   text. Include folders narrow category matches and excludes always win. The
-  commit-bound summary is invalidated when repository/ref/target/scope changes.
-- A cost guard requires a positive price for each executable reviewer. Unknown
+  commit-bound summary is invalidated when repository/branch/profile/scope changes.
+- Branch configuration rejects detached commit or tag targets and every unsafe
+  or ambiguous ref form. Internal workflow checkpoints may still reacquire the
+  exact commit resolved from the admitted branch.
+- A cost guard requires a positive price for the executable reviewer. Unknown
   price is displayed as unknown, never zero/free.
 - Active token/cost/account guards require one parallel child. The documented
   overshoot bound is one completed provider response, including Copilot
@@ -206,17 +227,19 @@ interfaces owned by their existing feature specifications.
 | `FR-REPOREVIEW-005` | [pkg/repoaudit/ensemble_test.go](../../pkg/repoaudit/ensemble_test.go), [web/backend/api/repository_reviews_test.go](../../web/backend/api/repository_reviews_test.go) |
 | `FR-REPOREVIEW-006` | [pkg/gateway/repository_review_publication_test.go](../../pkg/gateway/repository_review_publication_test.go), [web/frontend/src/components/repository-reviews/repository-reviews-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-reviews-page.test.tsx) |
 | `FR-REPOREVIEW-007` | [pkg/repoaudit/store_test.go](../../pkg/repoaudit/store_test.go), [pkg/repoaudit/ensemble_test.go](../../pkg/repoaudit/ensemble_test.go) |
-| `FR-REPOREVIEW-008` | [pkg/repoaudit/control_test.go](../../pkg/repoaudit/control_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go) |
-| `FR-REPOREVIEW-009` | [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx) |
+| `FR-REPOREVIEW-008` | [pkg/repoaudit/profile_test.go](../../pkg/repoaudit/profile_test.go), [web/backend/api/repository_review_profiles_test.go](../../web/backend/api/repository_review_profiles_test.go), [web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx) |
+| `FR-REPOREVIEW-009` | [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/frontend/src/components/repository-reviews/repository-review-runs-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-runs-page.test.tsx), [web/frontend/src/components/repository-reviews/repository-review-repositories-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-repositories-page.test.tsx) |
 | `FR-REPOREVIEW-010` | [pkg/agent/workflow_managed_ensemble_test.go](../../pkg/agent/workflow_managed_ensemble_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go) |
 | `FR-REPOREVIEW-011` | [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/backend/api/codex_account_limits_test.go](../../web/backend/api/codex_account_limits_test.go) |
-| `FR-REPOREVIEW-012` | [pkg/agent/workflow_managed_ensemble_test.go](../../pkg/agent/workflow_managed_ensemble_test.go), [pkg/providers/cli/github_copilot_provider_test.go](../../pkg/providers/cli/github_copilot_provider_test.go), [web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx) |
+| `FR-REPOREVIEW-012` | [pkg/providers/cli/github_copilot_provider_test.go](../../pkg/providers/cli/github_copilot_provider_test.go), [web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx), [web/frontend/src/components/model-evaluations/model-evaluations-page.test.tsx](../../web/frontend/src/components/model-evaluations/model-evaluations-page.test.tsx) |
 | `FR-REPOREVIEW-013` | [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [pkg/repoaudit/control_test.go](../../pkg/repoaudit/control_test.go) |
-| `FR-REPOREVIEW-014` | [pkg/repoaudit/scope_policy_test.go](../../pkg/repoaudit/scope_policy_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/frontend/src/api/repository-reviews.test.ts](../../web/frontend/src/api/repository-reviews.test.ts), [web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-control-center.test.tsx) |
+| `FR-REPOREVIEW-014` | [pkg/repoaudit/scope_policy_test.go](../../pkg/repoaudit/scope_policy_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/frontend/src/api/repository-reviews.test.ts](../../web/frontend/src/api/repository-reviews.test.ts), [web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx) |
+| `FR-REPOREVIEW-015` | [pkg/repoaudit/profile_test.go](../../pkg/repoaudit/profile_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-profiles-page.test.tsx), [web/frontend/src/components/repository-reviews/repository-review-repositories-page.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-repositories-page.test.tsx), [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx) |
 
 ## Implementation Anchors
 
 - [pkg/repoaudit/control.go](../../pkg/repoaudit/control.go)
+- [pkg/repoaudit/profile.go](../../pkg/repoaudit/profile.go)
 - [pkg/repoaudit/scope_policy.go](../../pkg/repoaudit/scope_policy.go)
 - [pkg/repoaudit/store.go](../../pkg/repoaudit/store.go)
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
@@ -226,5 +249,6 @@ interfaces owned by their existing feature specifications.
 - [web/backend/api/repository_review_automations.go](../../web/backend/api/repository_review_automations.go)
 - [web/backend/api/repository_reviews.go](../../web/backend/api/repository_reviews.go)
 - [pkg/gateway/repository_review_publication.go](../../pkg/gateway/repository_review_publication.go)
-- [web/frontend/src/components/repository-reviews/repository-review-control-center.tsx](../../web/frontend/src/components/repository-reviews/repository-review-control-center.tsx)
+- [web/frontend/src/components/repository-reviews/repository-review-profiles-page.tsx](../../web/frontend/src/components/repository-reviews/repository-review-profiles-page.tsx)
+- [web/frontend/src/components/repository-reviews/repository-review-repositories-page.tsx](../../web/frontend/src/components/repository-reviews/repository-review-repositories-page.tsx)
 - [web/frontend/src/components/repository-reviews/repository-reviews-page.tsx](../../web/frontend/src/components/repository-reviews/repository-reviews-page.tsx)

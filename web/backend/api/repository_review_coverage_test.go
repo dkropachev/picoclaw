@@ -195,14 +195,13 @@ func TestRepositoryReviewCoverageAutomationMutationBranches(t *testing.T) {
 	if storeErr != nil {
 		t.Fatal(storeErr)
 	}
+	profile := createRepositoryReviewProfileForTest(t, mux, "Coverage", "cheap")
 
 	createdResponse := repositoryReviewAutomationMutation(t, mux, http.MethodPost,
 		"/api/repository-reviews/automations", map[string]any{
-			"name": "", "repository": "owner/coverage", "ref": "main", "target": "all",
-			"review_focus": "Find coverage gaps.", "reviewer_models": []string{},
-			"compare_models": false, "force": false, "max_files_per_run": 2,
-			"max_content_bytes": 4096, "max_parallel_children": 1, "estimated_output_tokens": 256,
-			"budget": map[string]any{"check_interval_seconds": 30},
+			"repository": "owner/coverage",
+			"branch":     "main",
+			"profile_id": profile.ID,
 		})
 	if createdResponse.Code != http.StatusCreated {
 		t.Fatalf("create default status=%d body=%s", createdResponse.Code, createdResponse.Body.String())
@@ -213,8 +212,9 @@ func TestRepositoryReviewCoverageAutomationMutationBranches(t *testing.T) {
 	if err := json.Unmarshal(createdResponse.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Automation.Name != "owner/coverage" ||
-		len(created.Automation.ReviewerModels) != 1 || created.Automation.ReviewerModels[0] != "cheap" ||
+	if created.Automation.ProfileID != profile.ID ||
+		len(created.Automation.ReviewerModels) != 1 ||
+		created.Automation.ReviewerModels[0] != "cheap" ||
 		!created.Automation.AutoContinue {
 		t.Fatalf("defaulted automation=%#v", created.Automation)
 	}
@@ -237,9 +237,12 @@ func TestRepositoryReviewCoverageAutomationMutationBranches(t *testing.T) {
 	if updateErr != nil {
 		t.Fatal(updateErr)
 	}
-	updateBody := automationConfigBody(paused)
-	updateBody["review_focus"] = "Find correctness and security gaps."
-	updateBody["expected_version"] = paused.Version
+	updateBody := map[string]any{
+		"repository":       paused.Repository,
+		"branch":           "release/v2",
+		"profile_id":       profile.ID,
+		"expected_version": paused.Version,
+	}
 	updatedResponse := repositoryReviewAutomationMutation(t, mux, http.MethodPatch,
 		"/api/repository-reviews/automations/"+paused.ID, updateBody)
 	if updatedResponse.Code != http.StatusOK {
@@ -310,6 +313,62 @@ func TestRepositoryReviewCoverageAutomationMutationBranches(t *testing.T) {
 	badMux.ServeHTTP(badList, httptest.NewRequest(http.MethodGet, "/api/repository-reviews/automations", nil))
 	if badList.Code != http.StatusInternalServerError {
 		t.Fatalf("bad list status=%d body=%s", badList.Code, badList.Body.String())
+	}
+}
+
+func TestRepositoryReviewSplitCoverageOffsets(t *testing.T) {
+	for _, repository := range []string{
+		"http://example.com:81/owner/repository",
+		"git://example.com:9418/owner/repository",
+	} {
+		if normalized, err := normalizeRepositoryReviewAutomationRepository(repository); err == nil {
+			t.Fatalf("unsafe repository %q normalized to %q", repository, normalized)
+		}
+	}
+	if normalized, err := normalizeRepositoryReviewAutomationRepository(
+		"https://[2001:db8::1]/owner/repository",
+	); err != nil || normalized != "https://[2001:db8::1]/owner/repository.git" {
+		t.Fatalf("IPv6 repository normalization = (%q, %v)", normalized, err)
+	}
+
+	validScope := repoaudit.RepositoryReviewScopePolicy{
+		CodeTypes:      []repoaudit.RepositoryReviewCodeType{repoaudit.RepositoryReviewCodeTypeCode},
+		IncludeFolders: []string{"pkg"},
+		ExcludeFolders: []string{"pkg/generated"},
+	}
+	invalidScope := validScope
+	invalidScope.CodeTypes = []repoaudit.RepositoryReviewCodeType{"invalid"}
+	if repositoryReviewScopePoliciesEqual(invalidScope, validScope) {
+		t.Fatal("invalid scope policies compared equal")
+	}
+	if slicesEqualRepositoryReviewCodeTypes(
+		validScope.CodeTypes,
+		append(validScope.CodeTypes, repoaudit.RepositoryReviewCodeTypeTest),
+	) {
+		t.Fatal("different-length code type slices compared equal")
+	}
+	if slicesEqualRepositoryReviewCodeTypes(
+		validScope.CodeTypes,
+		[]repoaudit.RepositoryReviewCodeType{repoaudit.RepositoryReviewCodeTypeTest},
+	) {
+		t.Fatal("different code type slices compared equal")
+	}
+
+	controller := &repositoryReviewController{}
+	if _, err := controller.normalizeRepositoryReviewAutomationAdmission(
+		t.Context(),
+		repoaudit.Store{},
+		repoaudit.RepositoryReviewAutomation{Repository: "relative/path/extra"},
+	); err == nil {
+		t.Fatal("admission accepted an invalid repository")
+	}
+
+	automation := repoaudit.RepositoryReviewAutomation{}
+	applyRepositoryReviewRunProgress(&automation, &workflows.RunResult{Outputs: map[string]any{
+		"scopePlan": map[string]any{"commit_sha": strings.Repeat("a", 40)},
+	}})
+	if automation.ScopePlan.CommitSHA != strings.Repeat("a", 40) {
+		t.Fatalf("scope plan was not projected: %#v", automation.ScopePlan)
 	}
 }
 
@@ -747,6 +806,7 @@ func TestRepositoryReviewCoverageMissingConfigurationHandlers(t *testing.T) {
 	handler.RegisterRoutes(mux)
 	automation := testRepositoryReviewAutomation()
 	configBody := automationConfigBody(automation)
+	configBody["profile_id"] = "rrpf_missing"
 	configBody["expected_version"] = 1
 
 	requests := []struct {

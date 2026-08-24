@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -25,6 +26,9 @@ var (
 	errRepositoryReviewGuardBlocked      = errors.New("repository review guard is not satisfied")
 	errRepositoryReviewSafeStop          = errors.New("repository review stopped at a safe checkpoint")
 	errRepositoryReviewInvalidTransition = errors.New("repository review action is not valid for the current status")
+	errRepositoryReviewProfileActive     = errors.New(
+		"repository review profile is assigned to an active repository review",
+	)
 )
 
 const (
@@ -272,6 +276,15 @@ func (c *repositoryReviewController) startAutomation(
 		automation.Status == repoaudit.RepositoryReviewAutomationStopping {
 		return repoaudit.RepositoryReviewAutomation{}, errRepositoryReviewAutomationBusy
 	}
+	automation, err = c.normalizeRepositoryReviewAutomationAdmission(ctx, store, automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	automation, err = c.materializeLatestRepositoryReviewProfile(ctx, store, automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	expectedVersion = automation.Version
 
 	if resetBudget || restart {
 		automation, err = c.update(
@@ -362,6 +375,138 @@ func (c *repositoryReviewController) startAutomation(
 	go c.executeAutomation(id, runID)
 	c.lifecycleMu.Unlock()
 	return updated, nil
+}
+
+func (c *repositoryReviewController) normalizeRepositoryReviewAutomationAdmission(
+	ctx context.Context,
+	store repoaudit.Store,
+	automation repoaudit.RepositoryReviewAutomation,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	repository, err := normalizeRepositoryReviewAutomationRepository(automation.Repository)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	branch := automation.Ref
+	if automation.ProfileID == "" && strings.EqualFold(branch, "HEAD") {
+		branch = ""
+	} else {
+		branch, err = repoaudit.NormalizeRepositoryReviewBranch(branch)
+		if err != nil {
+			return repoaudit.RepositoryReviewAutomation{}, err
+		}
+	}
+	if automation.Repository == repository && automation.Ref == branch && automation.Target == "all" {
+		return automation, nil
+	}
+	updated, err := c.update(
+		ctx,
+		store,
+		automation.ID,
+		automation.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.Repository = repository
+			candidate.Ref = branch
+			candidate.Target = "all"
+			resetRepositoryReviewExecutionCampaign(candidate)
+			return nil
+		},
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	return updated, nil
+}
+
+func (c *repositoryReviewController) materializeLatestRepositoryReviewProfile(
+	ctx context.Context,
+	store repoaudit.Store,
+	automation repoaudit.RepositoryReviewAutomation,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	if strings.TrimSpace(automation.ProfileID) == "" {
+		return automation, nil
+	}
+	profile, found, err := store.GetProfile(ctx, automation.ProfileID)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if !found {
+		return repoaudit.RepositoryReviewAutomation{}, fmt.Errorf(
+			"repository review profile %q not found", automation.ProfileID,
+		)
+	}
+	materialized, err := repoaudit.MaterializeRepositoryReviewAutomation(profile, automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	materialized.Name = repositoryReviewAssignedAutomationName(materialized.Repository, profile.Name)
+	if repositoryReviewProfileSnapshotMatches(automation, materialized) {
+		return automation, nil
+	}
+	updated, err := c.update(
+		ctx,
+		store,
+		automation.ID,
+		automation.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			materialized, materializeErr := repoaudit.MaterializeRepositoryReviewAutomation(
+				profile, *candidate,
+			)
+			if materializeErr != nil {
+				return materializeErr
+			}
+			materialized.Name = repositoryReviewAssignedAutomationName(
+				materialized.Repository, profile.Name,
+			)
+			resetRepositoryReviewExecutionCampaign(&materialized)
+			*candidate = materialized
+			return nil
+		},
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	return updated, nil
+}
+
+func repositoryReviewProfileSnapshotMatches(
+	automation repoaudit.RepositoryReviewAutomation,
+	materialized repoaudit.RepositoryReviewAutomation,
+) bool {
+	return automation.ProfileID == materialized.ProfileID &&
+		automation.ProfileVersion == materialized.ProfileVersion &&
+		automation.Name == materialized.Name &&
+		automation.Target == "all" &&
+		automation.ReviewFocus == materialized.ReviewFocus &&
+		reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) &&
+		reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) &&
+		!automation.CompareModels &&
+		reflect.DeepEqual(automation.ModelPrices, materialized.ModelPrices) &&
+		automation.Force == materialized.Force &&
+		automation.AutoContinue == materialized.AutoContinue &&
+		automation.MaxFilesPerRun == materialized.MaxFilesPerRun &&
+		automation.MaxContentBytes == materialized.MaxContentBytes &&
+		automation.MaxParallelChildren == materialized.MaxParallelChildren &&
+		automation.EstimatedOutputTokens == materialized.EstimatedOutputTokens &&
+		reflect.DeepEqual(automation.BudgetPolicy, materialized.BudgetPolicy)
+}
+
+func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryReviewAutomation) {
+	if automation == nil {
+		return
+	}
+	automation.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+	automation.RequestedPauseReason = ""
+	automation.RequestedPauseDetail = ""
+	automation.ActiveRunID = ""
+	automation.Usage = repoaudit.RepositoryReviewTokenUsage{}
+	automation.EstimatedCostUSD = 0
+	automation.Progress = repoaudit.RepositoryReviewProgress{}
+	automation.ModelStats = make(map[string]repoaudit.RepositoryReviewModelStats)
+	automation.ModelCoverageSketches = make(map[string]string)
+	automation.AccountLimitSnapshots = nil
+	automation.NextCheckAt = time.Time{}
+	automation.StartedAt = time.Time{}
+	automation.CompletedAt = time.Time{}
 }
 
 func (c *repositoryReviewController) currentLeasedConfiguration() (*config.Config, error) {
@@ -533,7 +678,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
 			"repository":              automation.Repository,
-			"ref":                     automation.Ref,
+			"ref":                     repositoryReviewWorkflowRef(automation.Ref),
 			"target":                  automation.Target,
 			"review_focus":            automation.ReviewFocus,
 			"review_models":           strings.Join(repositoryReviewExecutionModels(automation), ","),
@@ -553,6 +698,14 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	cancel()
 	<-monitorDone
 	c.finishAutomationRun(id, runID, result, runErr, checkpointed)
+}
+
+func repositoryReviewWorkflowRef(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	return "refs/heads/" + branch
 }
 
 func repositoryReviewAgentUsageObserver(

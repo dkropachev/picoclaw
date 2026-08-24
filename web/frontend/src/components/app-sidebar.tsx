@@ -3,6 +3,7 @@ import {
   IconBellRinging,
   IconBrain,
   IconBug,
+  IconChecks,
   IconChevronsDown,
   IconChevronsUp,
   IconDatabase,
@@ -56,12 +57,15 @@ interface NavItem {
     | "repository-assignments"
     | "settings"
   search?: Record<string, string>
+  exact?: boolean
 }
 
 interface NavSection {
   label: string
   items: NavItem[]
   isChannelsSection?: boolean
+  translateLabel?: boolean
+  controlled?: "pull-requests" | "repository-reviews"
 }
 
 const chatNavItem: NavItem = {
@@ -126,14 +130,36 @@ const pullRequestsLifecycleSettingsNavItem: NavItem = {
 }
 
 const repositoryReviewsNavItem: NavItem = {
-  title: "Repository reviews",
+  title: "Review runs",
   url: "/repository-reviews",
   icon: IconBug,
+  translateTitle: false,
+  exact: true,
+}
+
+const repositoryReviewRepositoriesNavItem: NavItem = {
+  title: "Repositories",
+  url: "/repository-reviews/repositories",
+  icon: IconGitBranch,
+  translateTitle: false,
+}
+
+const repositoryReviewProfilesNavItem: NavItem = {
+  title: "Profiles",
+  url: "/repository-reviews/profiles",
+  icon: IconSettings,
+  translateTitle: false,
+}
+
+const repositoryReviewResultsNavItem: NavItem = {
+  title: "Results",
+  url: "/repository-reviews/results",
+  icon: IconChecks,
   translateTitle: false,
 }
 
 const modelEvaluationsNavItem: NavItem = {
-  title: "Model evaluations",
+  title: "Model review probes",
   url: "/model-evaluations",
   icon: IconBrain,
   translateTitle: false,
@@ -179,7 +205,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       ? currentPath
       : null
   const repositoryReviewsDestination =
-    currentPath === "/repository-reviews" ? currentPath : null
+    currentPath === "/repository-reviews" ||
+    currentPath.startsWith("/repository-reviews/")
+      ? currentPath
+      : null
   const modelEvaluationsDestination =
     currentPath === "/model-evaluations" ? currentPath : null
   const servicesDestination =
@@ -194,6 +223,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     pullRequestDestination,
     pullRequestDestination != null,
   )
+  const [repositoryReviewsOpen, setRepositoryReviewsOpen] =
+    useAutoRevealCollapsible(
+      repositoryReviewsDestination ?? modelEvaluationsDestination,
+      repositoryReviewsDestination != null ||
+        modelEvaluationsDestination != null,
+    )
   const {
     channelItems,
     hasMoreChannels,
@@ -271,11 +306,24 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       },
       {
         label: "navigation.pull_requests",
+        controlled: "pull-requests",
         items: [
           pullRequestsWorkNavItem,
           pullRequestsWorkflowConfigurationsNavItem,
           pullRequestsRepositoryAssignmentsNavItem,
           pullRequestsLifecycleSettingsNavItem,
+        ],
+      },
+      {
+        label: "Repository reviews",
+        translateLabel: false,
+        controlled: "repository-reviews",
+        items: [
+          repositoryReviewsNavItem,
+          repositoryReviewRepositoriesNavItem,
+          repositoryReviewProfilesNavItem,
+          repositoryReviewResultsNavItem,
+          modelEvaluationsNavItem,
         ],
       },
     ]
@@ -305,7 +353,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     }
     const pathActive =
       currentPath === item.url ||
-      (item.url !== "/" && currentPath.startsWith(`${item.url}/`))
+      (!item.exact &&
+        item.url !== "/" &&
+        currentPath.startsWith(`${item.url}/`))
     return pathActive
   }
 
@@ -403,24 +453,28 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     <Collapsible
       key={section.label}
       defaultOpen={
-        section.label === "navigation.pull_requests"
-          ? undefined
-          : section.items.some(isNavItemActive)
+        section.controlled ? undefined : section.items.some(isNavItemActive)
       }
       open={
-        section.label === "navigation.pull_requests"
+        section.controlled === "pull-requests"
           ? pullRequestsOpen
-          : undefined
+          : section.controlled === "repository-reviews"
+            ? repositoryReviewsOpen
+            : undefined
       }
       onOpenChange={
-        section.label === "navigation.pull_requests"
+        section.controlled === "pull-requests"
           ? setPullRequestsOpen
-          : undefined
+          : section.controlled === "repository-reviews"
+            ? setRepositoryReviewsOpen
+            : undefined
       }
       className="group/service-section mb-1 last:mb-0"
     >
       <CollapsibleTrigger className="text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
-        <span>{t(section.label)}</span>
+        <span>
+          {section.translateLabel === false ? section.label : t(section.label)}
+        </span>
         <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/service-section:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent>
@@ -496,8 +550,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>
-                  {renderNavItem(repositoryReviewsNavItem)}
-                  {renderNavItem(modelEvaluationsNavItem)}
                   {renderNavItem(eventsNavItem)}
                   {renderNavItem(logsNavItem)}
                 </SidebarMenu>

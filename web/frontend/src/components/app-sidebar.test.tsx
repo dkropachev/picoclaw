@@ -139,7 +139,7 @@ describe("AppSidebar", () => {
     expect(activeItem).toHaveAttribute("data-active", "true")
   })
 
-  it("reveals and marks Repository reviews from its direct route", () => {
+  it("reveals repository review navigation and marks Review runs", () => {
     pathname = "/repository-reviews"
 
     renderSidebar()
@@ -148,16 +148,31 @@ describe("AppSidebar", () => {
       "aria-expanded",
       "true",
     )
-    const link = screen.getByRole("link", { name: "Repository reviews" })
+    expect(
+      screen.getByRole("button", { name: "Repository reviews" }),
+    ).toHaveAttribute("aria-expanded", "true")
+    const link = screen.getByRole("link", { name: "Review runs" })
     expect(link).toHaveAttribute("href", "/repository-reviews")
     expect(link).toBeVisible()
     expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",
       "true",
     )
+    expect(screen.getByRole("link", { name: "Repositories" })).toHaveAttribute(
+      "href",
+      "/repository-reviews/repositories",
+    )
+    expect(screen.getByRole("link", { name: "Profiles" })).toHaveAttribute(
+      "href",
+      "/repository-reviews/profiles",
+    )
+    expect(screen.getByRole("link", { name: "Results" })).toHaveAttribute(
+      "href",
+      "/repository-reviews/results",
+    )
   })
 
-  it("reveals and marks Model evaluations from its direct route", () => {
+  it("reveals and marks Model review probes from its direct route", () => {
     pathname = "/model-evaluations"
 
     renderSidebar()
@@ -166,7 +181,10 @@ describe("AppSidebar", () => {
       "aria-expanded",
       "true",
     )
-    const link = screen.getByRole("link", { name: "Model evaluations" })
+    expect(
+      screen.getByRole("button", { name: "Repository reviews" }),
+    ).toHaveAttribute("aria-expanded", "true")
+    const link = screen.getByRole("link", { name: "Model review probes" })
     expect(link).toHaveAttribute("href", "/model-evaluations")
     expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
       "data-active",

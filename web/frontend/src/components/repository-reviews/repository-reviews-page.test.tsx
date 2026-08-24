@@ -40,15 +40,6 @@ vi.mock("@/features/chat/controller", () => ({
   switchChatSessionAndSend: vi.fn(),
 }))
 
-vi.mock(
-  "@/components/repository-reviews/repository-review-control-center",
-  () => ({
-    RepositoryReviewControlCenter: () => (
-      <div data-testid="repository-review-control-center" />
-    ),
-  }),
-)
-
 const contextID = "rctx_context_1"
 const state: RepositoryReviewState = {
   schema_version: 1,
@@ -275,14 +266,14 @@ describe("RepositoryReviewsPage", () => {
     vi.stubGlobal("open", vi.fn())
   })
 
-  it("keeps review setup visible before the first ledger completes", async () => {
+  it("shows an empty result ledger before the first review completes", async () => {
     vi.mocked(listRepositoryReviews).mockResolvedValue({ repositories: [] })
     renderPage(vi.fn())
 
     expect(
-      await screen.findByText("No repository review has completed yet."),
+      await screen.findByText("No repository review results yet."),
     ).toBeVisible()
-    expect(screen.getByTestId("repository-review-control-center")).toBeVisible()
+    expect(screen.getByText("Review results")).toBeVisible()
     expect(getRepositoryReview).not.toHaveBeenCalled()
   })
 

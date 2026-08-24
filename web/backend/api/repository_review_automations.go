@@ -4,14 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	pathpkg "path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
@@ -21,6 +27,8 @@ import (
 type repositoryReviewAutomationConfigRequest struct {
 	Name                  string                                          `json:"name"`
 	Repository            string                                          `json:"repository"`
+	ProfileID             string                                          `json:"profile_id,omitempty"`
+	Branch                string                                          `json:"branch,omitempty"`
 	Ref                   string                                          `json:"ref,omitempty"`
 	Target                string                                          `json:"target"`
 	ReviewFocus           string                                          `json:"review_focus"`
@@ -75,6 +83,7 @@ type repositoryReviewAccountLimitOption struct {
 }
 
 func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
+	h.registerRepositoryReviewProfileRoutes(mux)
 	mux.HandleFunc("GET /api/repository-reviews/automations", h.handleListRepositoryReviewAutomations)
 	mux.HandleFunc("POST /api/repository-reviews/automations", h.handleCreateRepositoryReviewAutomation)
 	mux.HandleFunc(
@@ -132,21 +141,24 @@ func (h *Handler) handleCreateRepositoryReviewAutomation(w http.ResponseWriter, 
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	if strings.TrimSpace(request.ProfileID) == "" {
+		writeRepositoryReviewAutomationError(
+			w,
+			fmt.Errorf("%w: profile_id is required", repoaudit.ErrInvalidAutomation),
+		)
+		return
+	}
 	store, err := h.repositoryReviewStore()
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	automation := repositoryReviewAutomationFromRequest(request)
-	if automation.Name == "" {
-		automation.Name = automation.Repository
-	}
-	if len(automation.ReviewerModels) == 0 {
-		if cfg, cfgErr := config.LoadConfig(h.configPath); cfgErr == nil {
-			if model := strings.TrimSpace(cfg.Agents.Defaults.GetModelName()); model != "" {
-				automation.ReviewerModels = []string{model}
-			}
-		}
+	automation, err := materializeRepositoryReviewAutomationRequest(
+		r.Context(), store, repositoryReviewAutomationFromRequest(request), request,
+	)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
 	}
 	created, err := store.CreateAutomation(r.Context(), automation)
 	if err != nil {
@@ -175,6 +187,12 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	prepared := repositoryReviewAutomationFromRequest(request)
+	prepared, err = materializeRepositoryReviewAutomationRequest(r.Context(), store, prepared, request)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
 	updated, err := store.UpdateAutomation(
 		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
@@ -187,7 +205,18 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 			previous.BudgetPolicy.MinRemainingPercentByWindow = maps.Clone(
 				candidate.BudgetPolicy.MinRemainingPercentByWindow,
 			)
-			applyRepositoryReviewAutomationRequest(candidate, request)
+			if prepared.ProfileID != "" {
+				applyRepositoryReviewMaterializedPolicy(candidate, prepared)
+			} else {
+				if candidate.ProfileID != "" {
+					return fmt.Errorf(
+						"%w: profile_id is required when updating an assigned repository",
+						repoaudit.ErrInvalidAutomation,
+					)
+				}
+				applyRepositoryReviewAutomationRequest(candidate, request)
+				candidate.Ref = prepared.Ref
+			}
 			if repositoryReviewExecutionConfigurationChanged(previous, *candidate) {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
@@ -375,6 +404,256 @@ func repositoryReviewAutomationFromRequest(
 	return automation
 }
 
+func materializeRepositoryReviewAutomationRequest(
+	ctx context.Context,
+	store repoaudit.Store,
+	automation repoaudit.RepositoryReviewAutomation,
+	request repositoryReviewAutomationConfigRequest,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	repository, err := normalizeRepositoryReviewAutomationRepository(automation.Repository)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	automation.Repository = repository
+	branch, err := repositoryReviewBranchFromRequest(request)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	automation.Ref = branch
+	profileID := strings.TrimSpace(request.ProfileID)
+	if profileID == "" {
+		return automation, nil
+	}
+	profile, found, err := store.GetProfile(ctx, profileID)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if !found {
+		return repoaudit.RepositoryReviewAutomation{}, fmt.Errorf("repository review profile %q not found", profileID)
+	}
+	automation.ProfileID = profile.ID
+	automation.ProfileVersion = profile.Version
+	automation.Name = repositoryReviewAssignedAutomationName(automation.Repository, profile.Name)
+	return repoaudit.MaterializeRepositoryReviewAutomation(profile, automation)
+}
+
+func normalizeRepositoryReviewAutomationRepository(repository string) (string, error) {
+	if repository == "" || repository != strings.TrimSpace(repository) {
+		return "", fmt.Errorf("%w: invalid repository", repoaudit.ErrInvalidAutomation)
+	}
+	if filepath.IsAbs(repository) {
+		return filepath.Clean(repository), nil
+	}
+	if !strings.Contains(repository, "://") {
+		if strings.Contains(repository, "@") && strings.Contains(repository, ":") {
+			return normalizeRepositoryReviewSCPRepository(repository)
+		}
+		owner, name, ok := strings.Cut(repository, "/")
+		if !ok || strings.Contains(name, "/") ||
+			!validRepositoryReviewGitHubSegment(owner) || !validRepositoryReviewGitHubSegment(name) {
+			return "", fmt.Errorf(
+				"%w: repository must be an owner/repository shorthand, safe URL, or absolute local path",
+				repoaudit.ErrInvalidAutomation,
+			)
+		}
+		if strings.HasSuffix(strings.ToLower(name), ".git") {
+			name = name[:len(name)-len(".git")]
+		}
+		if !validRepositoryReviewGitHubSegment(name) {
+			return "", fmt.Errorf("%w: invalid GitHub repository shorthand", repoaudit.ErrInvalidAutomation)
+		}
+		return "https://github.com/" + owner + "/" + name + ".git", nil
+	}
+	parsed, err := url.Parse(repository)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid repository URL", repoaudit.ErrInvalidAutomation)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if parsed.Host == "" ||
+		(scheme != "https" && scheme != "http" && scheme != "ssh" && scheme != "git") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%w: invalid repository URL", repoaudit.ErrInvalidAutomation)
+	}
+	if host := parsed.Hostname(); net.ParseIP(host) == nil && !validRepositoryReviewRemoteHost(host) {
+		return "", fmt.Errorf("%w: invalid repository URL host", repoaudit.ErrInvalidAutomation)
+	}
+	port := parsed.Port()
+	switch scheme {
+	case "http":
+		if port != "" && port != "80" {
+			return "", fmt.Errorf("%w: invalid repository URL port", repoaudit.ErrInvalidAutomation)
+		}
+	case "https":
+		if port != "" && port != "443" {
+			return "", fmt.Errorf("%w: invalid repository URL port", repoaudit.ErrInvalidAutomation)
+		}
+	case "ssh":
+		if port != "" && port != "22" {
+			return "", fmt.Errorf("%w: invalid repository URL port", repoaudit.ErrInvalidAutomation)
+		}
+	case "git":
+		if port != "" {
+			return "", fmt.Errorf("%w: invalid repository URL port", repoaudit.ErrInvalidAutomation)
+		}
+	}
+	if parsed.User != nil {
+		_, hasPassword := parsed.User.Password()
+		if scheme != "ssh" || parsed.User.Username() == "" || hasPassword {
+			return "", fmt.Errorf("%w: repository URL credentials are not allowed", repoaudit.ErrInvalidAutomation)
+		}
+	}
+	parsed.Scheme = scheme
+	normalizedHost := strings.ToLower(parsed.Hostname())
+	if strings.Contains(normalizedHost, ":") {
+		parsed.Host = "[" + normalizedHost + "]"
+	} else {
+		parsed.Host = normalizedHost
+	}
+	normalizedPath, err := normalizeRepositoryReviewRemotePath(parsed.Hostname(), parsed.Path)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + normalizedPath
+	parsed.RawPath = ""
+	return parsed.String(), nil
+}
+
+func normalizeRepositoryReviewSCPRepository(repository string) (string, error) {
+	identity, repositoryPath, hasPath := strings.Cut(repository, ":")
+	user, host, hasHost := strings.Cut(identity, "@")
+	if !hasPath || !hasHost || user != "git" || !validRepositoryReviewRemoteHost(host) {
+		return "", fmt.Errorf("%w: invalid SCP repository", repoaudit.ErrInvalidAutomation)
+	}
+	normalizedPath, err := normalizeRepositoryReviewRemotePath(host, repositoryPath)
+	if err != nil {
+		return "", err
+	}
+	return "git@" + strings.ToLower(host) + ":" + normalizedPath, nil
+}
+
+func normalizeRepositoryReviewRemotePath(host, repositoryPath string) (string, error) {
+	if repositoryPath == "" || strings.HasPrefix(repositoryPath, "~") ||
+		strings.ContainsAny(repositoryPath, "\\?#") {
+		return "", fmt.Errorf("%w: invalid repository remote path", repoaudit.ErrInvalidAutomation)
+	}
+	components := strings.Split(strings.Trim(repositoryPath, "/"), "/")
+	if len(components) < 2 {
+		return "", fmt.Errorf(
+			"%w: repository remote path requires an owner and repository",
+			repoaudit.ErrInvalidAutomation,
+		)
+	}
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." ||
+			strings.IndexFunc(component, func(character rune) bool {
+				return unicode.IsSpace(character) || unicode.IsControl(character)
+			}) >= 0 {
+			return "", fmt.Errorf("%w: invalid repository remote path", repoaudit.ErrInvalidAutomation)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(host), "github.com") && len(components) != 2 {
+		return "", fmt.Errorf("%w: GitHub repositories require owner/repository", repoaudit.ErrInvalidAutomation)
+	}
+	normalized := pathpkg.Join(components...)
+	if strings.HasSuffix(strings.ToLower(normalized), ".git") {
+		return normalized[:len(normalized)-len(".git")] + ".git", nil
+	}
+	return normalized + ".git", nil
+}
+
+func validRepositoryReviewRemoteHost(host string) bool {
+	if host == "" || host != strings.TrimSpace(host) || strings.HasPrefix(host, ".") ||
+		strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, character := range host {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validRepositoryReviewGitHubSegment(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func repositoryReviewBranchFromRequest(
+	request repositoryReviewAutomationConfigRequest,
+) (string, error) {
+	branch := request.Branch
+	legacy := request.Ref
+	if branch != "" && legacy != "" {
+		normalizedBranch, err := repoaudit.NormalizeRepositoryReviewBranch(branch)
+		if err != nil {
+			return "", err
+		}
+		normalizedLegacy, err := repoaudit.NormalizeRepositoryReviewBranch(legacy)
+		if err != nil {
+			return "", err
+		}
+		if normalizedBranch != normalizedLegacy {
+			return "", fmt.Errorf("invalid repository review branch: branch and legacy ref disagree")
+		}
+		return normalizedBranch, nil
+	}
+	if branch == "" {
+		branch = legacy
+	}
+	return repoaudit.NormalizeRepositoryReviewBranch(branch)
+}
+
+func repositoryReviewAssignedAutomationName(repository, profileName string) string {
+	repository = strings.TrimSpace(repository)
+	profileName = strings.TrimSpace(profileName)
+	if repository == "" {
+		return profileName
+	}
+	if profileName == "" {
+		return repository
+	}
+	return repository + " · " + profileName
+}
+
+func applyRepositoryReviewMaterializedPolicy(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	materialized repoaudit.RepositoryReviewAutomation,
+) {
+	if candidate == nil {
+		return
+	}
+	candidate.ProfileID = materialized.ProfileID
+	candidate.ProfileVersion = materialized.ProfileVersion
+	candidate.Name = materialized.Name
+	candidate.Repository = materialized.Repository
+	candidate.Ref = materialized.Ref
+	candidate.Target = "all"
+	candidate.ReviewFocus = materialized.ReviewFocus
+	candidate.ScopePolicy = materialized.ScopePolicy
+	candidate.ReviewerModels = append([]string(nil), materialized.ReviewerModels...)
+	candidate.CompareModels = false
+	candidate.ModelPrices = maps.Clone(materialized.ModelPrices)
+	candidate.Force = materialized.Force
+	candidate.AutoContinue = materialized.AutoContinue
+	candidate.MaxFilesPerRun = materialized.MaxFilesPerRun
+	candidate.MaxContentBytes = materialized.MaxContentBytes
+	candidate.MaxParallelChildren = materialized.MaxParallelChildren
+	candidate.EstimatedOutputTokens = materialized.EstimatedOutputTokens
+	candidate.BudgetPolicy = materialized.BudgetPolicy
+}
+
 func applyRepositoryReviewAutomationRequest(
 	automation *repoaudit.RepositoryReviewAutomation,
 	request repositoryReviewAutomationConfigRequest,
@@ -405,7 +684,8 @@ func applyRepositoryReviewAutomationRequest(
 func repositoryReviewExecutionConfigurationChanged(
 	previous, next repoaudit.RepositoryReviewAutomation,
 ) bool {
-	return previous.Repository != next.Repository || previous.Ref != next.Ref ||
+	return previous.ProfileID != next.ProfileID || previous.ProfileVersion != next.ProfileVersion ||
+		previous.Repository != next.Repository || previous.Ref != next.Ref ||
 		previous.Target != next.Target || previous.ReviewFocus != next.ReviewFocus ||
 		!repositoryReviewScopePoliciesEqual(previous.ScopePolicy, next.ScopePolicy) ||
 		previous.CompareModels != next.CompareModels || previous.Force != next.Force ||
@@ -729,10 +1009,13 @@ func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "not found"):
 		status, code = http.StatusNotFound, "not_found"
-	case errors.Is(err, repoaudit.ErrConflict), errors.Is(err, errRepositoryReviewAutomationBusy),
+	case errors.Is(err, repoaudit.ErrConflict), errors.Is(err, repoaudit.ErrAutomationActive),
+		errors.Is(err, errRepositoryReviewAutomationBusy),
 		errors.Is(err, errRepositoryReviewInvalidTransition),
 		errors.Is(err, repoaudit.ErrAutomationControllerLocked):
 		status, code = http.StatusConflict, "stale_repository_review_automation"
+	case errors.Is(err, repoaudit.ErrRepositoryReviewRepositoryConflict):
+		status, code = http.StatusConflict, "repository_review_repository_assigned"
 	case errors.Is(err, repoaudit.ErrInvalidAutomation),
 		errors.Is(err, io.EOF),
 		errors.Is(err, io.ErrUnexpectedEOF),
