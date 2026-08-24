@@ -33,6 +33,7 @@ type ReviewWorkflowContext struct {
 	PriorEvidence     []StageEvidence        `json:"prior-evidence,omitempty"`
 	Deferred          []DeferredGroup        `json:"deferred,omitempty"`
 	CandidateDiff     string                 `json:"candidate-diff,omitempty"`
+	ScopePolicyPrompt string                 `json:"scope-policy-prompt,omitempty"`
 }
 
 // ReviewProviderContext contains only immutable pull-request evidence needed
@@ -210,7 +211,8 @@ func reviewWorkflowContext(bundle PRContextBundle) ReviewWorkflowContext {
 		Corrections:       filterCorrectionsFor(bundle.Corrections, CorrectionReviewOnly),
 		RepositoryLessons: filterLessonsFor(bundle.RepositoryLessons, CorrectionReviewOnly),
 		NudgeLearning:     nudgeLearning, PriorEvidence: priorEvidence, Deferred: bundle.Deferred,
-		CandidateDiff: bundle.CandidateDiff,
+		CandidateDiff:     bundle.CandidateDiff,
+		ScopePolicyPrompt: bundle.ScopePolicyPrompt,
 	}
 }
 
@@ -239,7 +241,7 @@ func (review ReviewWorkflowContext) promptBundle() PRContextBundle {
 		Messages: review.Messages, Findings: review.Findings, Corrections: review.Corrections,
 		RepositoryLessons: review.RepositoryLessons, NudgeLearning: review.NudgeLearning,
 		PriorEvidence: review.PriorEvidence, Deferred: review.Deferred,
-		CandidateDiff: review.CandidateDiff,
+		CandidateDiff: review.CandidateDiff, ScopePolicyPrompt: review.ScopePolicyPrompt,
 	}
 }
 

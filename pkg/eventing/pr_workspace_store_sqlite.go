@@ -34,7 +34,8 @@ var (
 )
 
 const prWorkspaceColumns = `
-	id, provider, provider_origin, repository_id, repository,
+	id, intent, source_kind, source_id, source_number,
+	provider, provider_origin, repository_id, repository,
 	pull_request_id, pull_number, provider_head_sha, owned, head_writable, phase,
 	execution_state, current_provider_ordinal, active_charter_id, version,
 	created_at, updated_at`
@@ -323,12 +324,17 @@ func (s *Store) CreatePRWorkspace(
 	if err := validatePRProviderSnapshot(input.Provider); err != nil {
 		return PRWorkspaceAggregate{}, false, err
 	}
+	fingerprintProvider := input.Provider
+	// Observation time is adapter-local freshness metadata, not request
+	// identity. Provider revision and all frozen authority fields remain bound,
+	// so a changed source still conflicts while a transport retry replays.
+	fingerprintProvider.ObservedAt = time.Time{}
 	canonical, marshalErr := json.Marshal(struct {
 		WorkspaceID    string             `json:"workspace_id,omitempty"`
 		Provider       PRProviderSnapshot `json:"provider"`
 		Phase          PRWorkspacePhase   `json:"phase"`
 		ExecutionState PRExecutionState   `json:"execution_state"`
-	}{input.WorkspaceID, input.Provider, input.Phase, input.ExecutionState})
+	}{input.WorkspaceID, fingerprintProvider, input.Phase, input.ExecutionState})
 	if marshalErr != nil {
 		return PRWorkspaceAggregate{}, false, fmt.Errorf(
 			"%w: encode create request: %v",
@@ -422,12 +428,15 @@ func (s *Store) CreatePRWorkspace(
 		}
 		if _, execErr := conn.ExecContext(ctx, `
 			INSERT INTO pr_workspaces (
-				id, provider, provider_origin, repository_id, repository,
+				id, intent, source_kind, source_id, source_number,
+				provider, provider_origin, repository_id, repository,
 				pull_request_id, pull_number, provider_head_sha, owned,
 				head_writable, phase, execution_state, current_provider_ordinal, active_charter_id,
 				version, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', 1, ?, ?)`,
-			workspaceID, input.Provider.Provider, input.Provider.ProviderOrigin,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', 1, ?, ?)`,
+			workspaceID, input.Provider.Intent, input.Provider.SourceKind,
+			input.Provider.SourceID, input.Provider.SourceNumber,
+			input.Provider.Provider, input.Provider.ProviderOrigin,
 			input.Provider.RepositoryID, input.Provider.Repository,
 			input.Provider.PullRequestID, input.Provider.PullNumber, input.Provider.HeadSHA,
 			input.Provider.Owned,
@@ -891,6 +900,13 @@ func (s *Store) ApplyPRWorkspacePatch(
 		if err != nil {
 			return err
 		}
+		// Attention state is part of the same durable domain transition. A
+		// workspace version must never become visible without the notifications
+		// implied by that exact aggregate (or with notifications from an older
+		// aggregate still left open).
+		if err := reconcileDevelopmentNotificationsTx(ctx, conn, aggregate, now); err != nil {
+			return err
+		}
 		result = PRWorkspacePatchResult{Aggregate: aggregate}
 		receipt := prWorkspacePatchReceipt{WorkspaceID: workspace.ID, WorkspaceVersion: newVersion}
 		return insertPRWorkspaceRequest(ctx, conn, input.RequestID, workspace.ID, "patch", requestHash, receipt, now)
@@ -1308,15 +1324,21 @@ func applyPRWorkspaceRecord(
 	switch value := record.value.(type) {
 	case *PRProviderSnapshot:
 		if value.Provider != workspace.Provider || value.ProviderOrigin != workspace.ProviderOrigin ||
-			value.RepositoryID != workspace.RepositoryID || value.PullRequestID != workspace.PullRequestID {
-			return "", false, fmt.Errorf("%w: provider snapshot changes immutable PR identity", ErrPRWorkspaceConflict)
+			value.RepositoryID != workspace.RepositoryID || value.Intent != workspace.Intent ||
+			value.SourceKind != workspace.SourceKind || value.SourceID != workspace.SourceID ||
+			(workspace.PullRequestID != "" && value.PullRequestID != workspace.PullRequestID) ||
+			(workspace.Intent == DevelopmentPickupPR && value.PullRequestID != workspace.PullRequestID) {
+			return "", false, fmt.Errorf(
+				"%w: provider snapshot changes immutable development identity",
+				ErrPRWorkspaceConflict,
+			)
 		}
 		if _, err := conn.ExecContext(ctx, `
 			UPDATE pr_workspaces SET
-				repository = ?, pull_number = ?, provider_head_sha = ?, owned = ?,
+				repository = ?, pull_request_id = ?, pull_number = ?, provider_head_sha = ?, owned = ?,
 				head_writable = ?, current_provider_ordinal = ?
 			WHERE id = ?`,
-			value.Repository, value.PullNumber, value.HeadSHA, value.Owned,
+			value.Repository, value.PullRequestID, value.PullNumber, value.HeadSHA, value.Owned,
 			value.HeadWritable, value.Ordinal, workspace.ID,
 		); err != nil {
 			return "", false, err
@@ -1326,9 +1348,13 @@ func applyPRWorkspaceRecord(
 			if err := supersedeConfirmedPRCharters(ctx, conn, workspace.ID, value.ID, now); err != nil {
 				return "", false, err
 			}
+			nextPhase := PRWorkspaceReview
+			if workspace.Intent == DevelopmentImplementFeature {
+				nextPhase = PRWorkspacePlanning
+			}
 			if _, err := conn.ExecContext(ctx, `UPDATE pr_workspaces
-				SET active_charter_id = ?, phase = 'review', execution_state = 'queued'
-				WHERE id = ?`, value.ID, workspace.ID); err != nil {
+				SET active_charter_id = ?, phase = ?, execution_state = 'queued'
+				WHERE id = ?`, value.ID, nextPhase, workspace.ID); err != nil {
 				return "", false, err
 			}
 		}
@@ -2443,6 +2469,14 @@ func validatePRWorkspaceRecord(value any) error {
 				return err
 			}
 		}
+		if record.ClarificationNeeded != (strings.TrimSpace(record.ClarificationQuestion) != "") {
+			return fmt.Errorf("%w: charter clarification is inconsistent", ErrInvalidPRWorkspace)
+		}
+		if err := validatePRWorkspaceString(
+			"charter clarification", record.ClarificationQuestion, 8<<10, record.ClarificationNeeded,
+		); err != nil {
+			return err
+		}
 		for field, item := range map[string]string{"base SHA": record.BaseSHA, "head SHA": record.HeadSHA, "created by": record.CreatedBy} {
 			if err := validatePRWorkspaceString(field, item, maxPRWorkspaceIdentityBytes, true); err != nil {
 				return err
@@ -2495,6 +2529,17 @@ func validatePRWorkspaceRecord(value any) error {
 		}
 		if record.Version <= 0 {
 			return fmt.Errorf("%w: finding version must be positive", ErrInvalidPRWorkspace)
+		}
+		if record.ScopePolicyMode != "" && record.ScopePolicyMode != "strict" && record.ScopePolicyMode != "relaxed" {
+			return fmt.Errorf("%w: finding scope policy mode is invalid", ErrInvalidPRWorkspace)
+		}
+		for field, value := range map[string]string{
+			"scope policy revision":      record.ScopePolicyRevision,
+			"scope policy prompt digest": record.ScopePolicyPromptDigest,
+		} {
+			if err := validatePRWorkspaceString(field, value, 128, false); err != nil {
+				return err
+			}
 		}
 		if record.NudgeReward != nil && (*record.NudgeReward < 0 || *record.NudgeReward > 1) {
 			return fmt.Errorf("%w: finding nudge reward must be between 0 and 1", ErrInvalidPRWorkspace)
@@ -2990,6 +3035,14 @@ func normalizePRProviderSnapshot(value *PRProviderSnapshot) {
 		return
 	}
 	value.Provider = strings.ToLower(strings.TrimSpace(value.Provider))
+	if value.Intent == "" && value.PullRequestID != "" {
+		value.Intent = DevelopmentPickupPR
+		value.SourceKind = DevelopmentSourcePullRequest
+		value.SourceID = value.PullRequestID
+		value.SourceNumber = value.PullNumber
+	}
+	value.SourceID = strings.TrimSpace(value.SourceID)
+	value.SourceURL = strings.TrimSpace(value.SourceURL)
 	value.ProviderOrigin = strings.TrimSpace(value.ProviderOrigin)
 	value.RepositoryID = strings.TrimSpace(value.RepositoryID)
 	value.Repository = strings.TrimSpace(value.Repository)
@@ -3034,9 +3087,20 @@ func validatePRProviderSnapshot(value PRProviderSnapshot) error {
 	if value.Provider != "github" {
 		return fmt.Errorf("%w: provider must be github", ErrInvalidPRWorkspace)
 	}
+	if value.Intent != DevelopmentImplementFeature && value.Intent != DevelopmentPickupPR {
+		return fmt.Errorf("%w: invalid development intent", ErrInvalidPRWorkspace)
+	}
+	if value.SourceKind != DevelopmentSourceIssue && value.SourceKind != DevelopmentSourceBrief &&
+		value.SourceKind != DevelopmentSourcePullRequest {
+		return fmt.Errorf("%w: invalid development source", ErrInvalidPRWorkspace)
+	}
+	if value.Intent == DevelopmentPickupPR && value.SourceKind != DevelopmentSourcePullRequest ||
+		value.Intent == DevelopmentImplementFeature && value.SourceKind == DevelopmentSourcePullRequest {
+		return fmt.Errorf("%w: intent and source are incompatible", ErrInvalidPRWorkspace)
+	}
 	for field, item := range map[string]string{
 		"provider origin": value.ProviderOrigin, "repository ID": value.RepositoryID,
-		"repository": value.Repository, "pull request ID": value.PullRequestID,
+		"repository": value.Repository, "source ID": value.SourceID,
 		"base SHA": value.BaseSHA, "head SHA": value.HeadSHA,
 		"head repository ID": value.HeadRepositoryID,
 		"head repository":    value.HeadRepository,
@@ -3050,7 +3114,8 @@ func validatePRProviderSnapshot(value PRProviderSnapshot) error {
 		"author login": value.AuthorLogin, "authenticated user ID": value.AuthenticatedUserID,
 		"base ref": value.BaseRef,
 		"head ref": value.HeadRef, "state": value.State,
-		"provider revision": value.ProviderRevision,
+		"provider revision": value.ProviderRevision, "source URL": value.SourceURL,
+		"pull request ID": value.PullRequestID,
 	} {
 		maximum := maxPRWorkspaceBodyBytes
 		if field != "body" && field != "title" {
@@ -3060,8 +3125,16 @@ func validatePRProviderSnapshot(value PRProviderSnapshot) error {
 			return err
 		}
 	}
-	if value.PullNumber <= 0 || value.PullNumber > 1<<31-1 {
+	if value.SourceKind == DevelopmentSourcePullRequest &&
+		(value.PullRequestID == "" || value.PullNumber <= 0 || value.PullNumber > 1<<31-1) {
 		return fmt.Errorf("%w: pull number is outside supported range", ErrInvalidPRWorkspace)
+	}
+	if value.SourceKind != DevelopmentSourcePullRequest &&
+		((value.PullRequestID == "") != (value.PullNumber == 0) || value.PullNumber < 0) {
+		return fmt.Errorf("%w: created pull request identity is incomplete", ErrInvalidPRWorkspace)
+	}
+	if value.SourceKind == DevelopmentSourceIssue && value.SourceNumber <= 0 {
+		return fmt.Errorf("%w: issue source requires a positive number", ErrInvalidPRWorkspace)
 	}
 	if !value.ObservedAt.IsZero() {
 		if err := validateDBTimestamp("provider observed_at", value.ObservedAt); err != nil {
@@ -3138,7 +3211,7 @@ func validatePRChangeMetrics(value PRChangeMetrics) error {
 
 func validatePRWorkspacePhase(value PRWorkspacePhase) error {
 	switch value {
-	case PRWorkspaceIntake, PRWorkspaceCharter, PRWorkspaceReview, PRWorkspaceTriage,
+	case PRWorkspaceIntake, PRWorkspaceCharter, PRWorkspacePlanning, PRWorkspaceReview, PRWorkspaceTriage,
 		PRWorkspaceImplementation, PRWorkspaceValidation, PRWorkspaceCompletionAudit,
 		PRWorkspacePublication, PRWorkspaceComplete:
 		return nil
@@ -3401,8 +3474,9 @@ func findPRWorkspaceByIdentity(
 ) (PRWorkspace, error) {
 	return scanPRWorkspace(queryer.QueryRowContext(ctx, `SELECT `+prWorkspaceColumns+`
 		FROM pr_workspaces WHERE provider = ? AND provider_origin = ?
-		AND repository_id = ? AND pull_request_id = ?`,
-		provider.Provider, provider.ProviderOrigin, provider.RepositoryID, provider.PullRequestID))
+		AND repository_id = ? AND source_kind = ? AND source_id = ?`,
+		provider.Provider, provider.ProviderOrigin, provider.RepositoryID,
+		provider.SourceKind, provider.SourceID))
 }
 
 func getPRWorkspaceRecord(ctx context.Context, queryer rowQueryer, workspaceID string) (PRWorkspace, error) {
@@ -3419,7 +3493,8 @@ func scanPRWorkspace(scanner rowScanner) (PRWorkspace, error) {
 	var owned, writable int
 	var createdAt, updatedAt int64
 	if err := scanner.Scan(
-		&value.ID, &value.Provider, &value.ProviderOrigin, &value.RepositoryID,
+		&value.ID, &value.Intent, &value.SourceKind, &value.SourceID,
+		&value.SourceNumber, &value.Provider, &value.ProviderOrigin, &value.RepositoryID,
 		&value.Repository, &value.PullRequestID, &value.PullNumber,
 		&value.ProviderHeadSHA, &owned, &writable, &value.Phase,
 		&value.ExecutionState, &value.CurrentProviderOrdinal,

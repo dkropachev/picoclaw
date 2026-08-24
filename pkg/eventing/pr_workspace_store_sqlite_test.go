@@ -46,7 +46,7 @@ func createPRWorkspaceForTest(t *testing.T, store *Store, now time.Time) PRWorks
 	t.Helper()
 	aggregate, created, err := store.CreatePRWorkspace(context.Background(), PRWorkspaceCreate{
 		RequestID:   "req_create_workspace_1",
-		WorkspaceID: "prw_00000000000000000000000000000001",
+		WorkspaceID: "devw_00000000000000000000000000000001",
 		Provider:    testPRProviderSnapshot(now), Phase: PRWorkspaceCharter,
 		ExecutionState: PRExecutionWaitingUser,
 	})
@@ -68,10 +68,12 @@ func TestPRWorkspaceCreateGetListAndRequestReplay(t *testing.T) {
 	assert.Equal(t, int64(1), first.ProviderSnapshots[0].Ordinal)
 	assert.Equal(t, first.Workspace.ID, first.ProviderSnapshots[0].WorkspaceID)
 
+	retryProvider := testPRProviderSnapshot(now)
+	retryProvider.ObservedAt = retryProvider.ObservedAt.Add(time.Minute)
 	replay, created, err := store.CreatePRWorkspace(context.Background(), PRWorkspaceCreate{
 		RequestID:   "req_create_workspace_1",
 		WorkspaceID: first.Workspace.ID,
-		Provider:    testPRProviderSnapshot(now), Phase: PRWorkspaceCharter,
+		Provider:    retryProvider, Phase: PRWorkspaceCharter,
 		ExecutionState: PRExecutionWaitingUser,
 	})
 	require.NoError(t, err)
@@ -625,7 +627,7 @@ func TestPRWorkspaceMutationRejectsUnknownFields(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, ErrInvalidPRWorkspace)
 
-	_, err = store.GetPRWorkspace(context.Background(), "prw_bad")
+	_, err = store.GetPRWorkspace(context.Background(), "devw_bad")
 	assert.True(t, errors.Is(err, ErrInvalidPRWorkspace))
 }
 

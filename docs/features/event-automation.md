@@ -13,54 +13,55 @@ workflow event filters, persists one deterministic dispatch per
 event/workflow/revision, and reconciles interrupted runs without repeating a
 known durable execution.
 
-The same eventing database now stores one unified pull-request workspace model.
-A `prw_` aggregate combines verified provider identity, an explicit PR charter,
-review findings, implementation attempts, corrections, adaptive nudge history,
-scope/type decisions, validation, gates, deferred work, publications, and
-activity. Review and implementation consume the same charter and correction
-context rather than separate case stores or prompt-owned memories. One canonical
-facts bundle is projected by audience into review or implementation, with
-current findings, corrections, advisory messages, repository lessons, deferred
-work, prior evidence, and nudge learning fenced to the active charter and exact
-provider head before any model call.
+The same eventing database stores durable development workspaces. A `devw_`
+aggregate has exactly one intent and source: `implement_feature` starts from one
+GitHub issue or one configured-repository brief and creates a new draft pull
+request, while `pickup_pr` starts from one existing pull request and continues
+its review, repair, validation, and branch publication. Mixed issue, brief, and
+pull-request inputs are invalid at both UI and API boundaries.
 
-The authenticated launcher exposes the aggregate only at `/pull-requests`
-through `/api/pr-workspaces`; the gateway owns the matching protected
-`/runtime/eventing/pr-workspaces` tree. GitHub review submission, implementation
-branch push, and deferred-issue creation are distinct gated publications with
-independent capabilities and ambiguous-outcome reconciliation. None grants
-merge authority.
+Each workspace combines verified provider identity, charter, planning/review
+findings, scope dispositions, implementation attempts, conversation steering,
+validation, gates, deferred work, publications, and activity. The authenticated
+launcher exposes `/development` through `/api/development-workspaces`; the
+gateway owns `/runtime/eventing/development-workspaces`. Read-only candidate
+files and diffs use revision-fenced code APIs and a lazy Monaco viewer.
 
-Schema v19 is a deliberate breaking cutover. It validates a v18 database,
-retains generic event and workflow data, destroys every legacy
-`pr_review_*` and `pr_development_*` table, and creates the unified PR schema.
-Versions v1 through v17 are rejected rather than translated into workspaces.
+Actionable lifecycle waits accumulate as durable notifications. `/notifications`
+provides mobile and desktop list/detail navigation, bulk state changes, simple
+filters, bounded JQL-like queries, sorting, saved views, and workspace deep
+links. The installable PWA may send privacy-minimal Web Push only for newly open
+critical/high items after explicit per-device opt-in. It remains fully usable as
+an in-app inbox where push is unsupported.
+
+Schema v20 is a deliberate breaking cutover. It preserves generic event and
+workflow rows while destructively replacing v19 pull-request workspaces with
+development workspaces and notification state. Old workspace rows, `prw_` IDs,
+routes, APIs, and request shapes have no translation, redirect, or dual-read
+adapter.
 
 ## Reconstruction Notes
 
 - Similarity target: one durable event/workflow inbox plus one event-sourced,
-  version-fenced PR aggregate shared by review and implementation.
+  version-fenced development aggregate and one derived notification inbox.
 - Core types/functions: `eventing.Store`, operator backend, `prworkspace.Service`,
-  strict aggregate store, isolated AI and workflow-gate adapters, protected HTTP
-  handler, gateway provider/evidence/implementation/publication adapters, and
-  the launcher proxy/UI.
+  `developmentnotifications`, strict aggregate store, isolated AI and
+  workflow-gate adapters, protected HTTP handler, gateway
+  provider/evidence/implementation/publication adapters, Web Push delivery, and
+  the launcher PWA/UI.
 - Runtime ordering: validate configuration and schema; resolve exact provider
-  identity; mutate one aggregate by expected version and idempotency key; freeze
-  charter, head, prompt, diff, gate, complete publication payload, and provider
-  fence before effects; reconcile ambiguous effects by marker or exact remote
-  head only after a distinct reconciliation gate.
-- Non-obvious constraints: PR type and semantic scope are independent policy
-  dimensions; scope distance and change size are separately graded; completed
-  gate actions resume without replay; candidate-present scope drift cannot be
-  made safe by choosing an ordinary approval-like option or by leaving code in
-  place while recording a follow-up; hard drift stops before
-  validation/finalization at a dedicated static Human resolution gate; scope
-  evidence maps one-to-one to exact candidate diff hunks;
-  manual nudges challenge persisted coverage instead of replaying the first
-  prompt; edit and scope-audit prompt digests are independent; deferred-issue
-  policy is exactly `off`, `ask`, or `automatic`, and automatic-policy failures
-  surface the retained aggregate for an idempotent `automatic-sync` retry; legacy PR identities,
-  routes, configuration, and data have no compatibility adapter.
+  source identity; create one `devw_` aggregate; freeze charter, base/head,
+  prompts, candidate, gates, validation, and publication payloads before effects;
+  derive/resolve attention notifications after aggregate mutations; reconcile
+  ambiguous effects by exact remote tip or marker before retry.
+- Non-obvious constraints: intake intents are mutually exclusive; feature work
+  always targets a new draft PR and pickup work never accepts an issue; PR type,
+  semantic scope, and size are independent policy dimensions; relaxed scope is
+  bounded by relevance, confidence, size, and infrastructure exclusions;
+  steering that changes scope waits for clarification; Monaco is read-only;
+  notification queries compile from a closed typed grammar; Web Push never
+  replaces the durable inbox; legacy workspace identities, routes, data, and
+  wire shapes have no compatibility adapter.
 
 ## Requirements
 
@@ -70,12 +71,12 @@ Versions v1 through v17 are rejected rather than translated into workspaces.
 | `FR-EVENT-AUTOMATION-002` | MUST | A caller submits an external envelope with source, connector, deduplication key, event type, and JSON-object payload, optionally including actor, subject, occurrence time, attributes, and receipt time. | Normalization returns an immutable deep copy, assigns a stable opaque `ev_` ID and missing receipt time, and canonicalizes timestamps to UTC. | A successful store insert commits the normalized inbox data and pending routing state together. | Missing/oversized/non-UTF-8 identity, entity, attribute, or payload data, excessive/invalid attributes, non-object/trailing/invalid JSON, out-of-range timestamps, invalid caller-supplied event/replay IDs, or self-referential replay lineage fail before mutation; caller-owned payloads, maps, pointers, actors, and subjects cannot mutate stored or returned state. | All connectors need one safe, bounded, source-neutral contract. |
 | `FR-EVENT-AUTOMATION-003` | MUST | An envelope is prepared for persistence with a payload byte limit, configured sensitive field names, and optional exact secret values. | Sensitive values and embedded secret strings are recursively replaced with `[REDACTED]` while unrelated JSON types and structure are preserved; actor, subject, and envelope attribute strings receive the same protection, and repeated redaction is idempotent. | Only the redacted deep copy is eligible for durable insertion. | Oversized or invalid JSON is rejected; key matching ignores case and punctuation/underscore/camel-case differences, recognizes sensitive suffixes and explicitly configured punctuation-only keys, and descends through nested objects/arrays. An exact configured secret in a JSON or attribute-map key fails closed rather than leaking or causing a redacted-key collision. The caller's input is never rewritten. | Durable automation must not turn provider secrets or credentials into an unbounded local archive. |
 | `FR-EVENT-AUTOMATION-004` | MUST | One or more workers concurrently ingest deliveries with the same non-empty `(source, connector, dedupe_key)`. | Every caller receives the same original event and an observable duplicate indication after exactly one insert. | The first envelope remains authoritative; later duplicates add no inbox/routing state and never overwrite its payload or metadata. | Database contention may wait within the configured SQLite busy timeout, but must not surface as two durable events. | Provider retries and concurrent receivers must be safe. |
-| `FR-EVENT-AUTOMATION-005` | MUST | A supported build opens an enabled eventing database for the first time, reopens v19, opens a valid v18 database, or is given another version. | A new/current database exposes the validated generic event/workflow schema and unified PR-workspace schema with WAL, foreign keys, busy handling, and owner-only storage. A valid v18 database performs the documented destructive PR cutover transaction. | The v18 transaction drops every legacy PR review/development table, creates all v19 unified PR tables/indexes, and records version 19 while retaining generic event and workflow rows. | A corrupt v18 schema, v1-v17 database, unknown newer version, or malformed v19 schema fails closed. Migration failure rolls back version and objects. Unsupported targets create no database. | A breaking replacement must be explicit, atomic, and unable to bless corrupt or partially migrated PR state. |
+| `FR-EVENT-AUTOMATION-005` | MUST | A supported build opens a new eventing database, reopens v20, or opens a v18/v19 database at the destructive development-workspace boundary. | A new/current database exposes the validated generic event/workflow core, v20 development aggregate, notification/view/push state, WAL, foreign keys, busy handling, and owner-only storage. | The transaction retains generic event/workflow rows; a valid v18 database first validates and removes legacy review/development tables, while v19 drops all prior `pr_*` workspace tables; both install v20 objects and record version 20 without translating workspace rows. | Corrupt retained event tables, corrupt v18, versions 1-17, unknown newer versions, or malformed v20 fail closed. Migration failure rolls back version and objects. | Breaking replacement must be atomic and must not masquerade old PR state as a compatible development workspace. |
 | `FR-EVENT-AUTOMATION-006` | MUST | A worker claims routable events with a non-empty worker label, bounded limit, and positive lease duration. | It receives only available pending or expired-lease events, each with a store-generated fresh opaque lease token and deadline. | Claims transition routing state atomically to `claimed`, store the generated token, and increment the attempt count once. | Concurrent claimers cannot own the same live lease; future `available_at` work is skipped; an empty label or invalid claim request mutates nothing. | At-least-once routing needs bounded, restart-recoverable, independently fenced work ownership. |
 | `FR-EVENT-AUTOMATION-007` | MUST | A worker transitions routing using the event ID and fresh lease token returned by its claim. | A current token can acknowledge success, nack to pending at an explicit retry time with redacted/bounded error detail, or mark the event dead; stale or foreign tokens receive a typed conflict. | Routing status, availability, cleared lease, sanitized error detail, and update timestamp change atomically without changing the envelope. | A zero/past nack time retries immediately; transition after lease replacement/expiry and duplicate terminal completion cannot clobber newer state. | Per-claim lease fencing prevents slow workers from corrupting recovered work. |
 | `FR-EVENT-AUTOMATION-008` | MUST | Routing selects an exact validated workflow byte snapshot and revision for a durable event and calls revision-bound dispatch creation through its current claim. | The store derives stable `dsp_` and `wr_` IDs from the event/workflow pair and returns exactly one pending dispatch, including its first non-empty opaque workflow revision, before execution. | The dispatch and its immutable first workflow-revision binding are committed atomically and remain independent of event routing state. | Repeating the same pair returns the existing dispatch and cannot replace its revision; selecting different workflows creates distinct dispatches; a blank/oversized revision, missing event, or stale routing claim fails; no workflow code is invoked. Legacy unbound dispatches remain readable for fail-closed recovery. | Retries must not create duplicate workflow runs, silently retarget durable intent to edited YAML, or couple routing completion to execution. |
 | `FR-EVENT-AUTOMATION-009` | MUST | A worker claims available workflow dispatches, links the expected run ID, and finishes or nacks using the returned dispatch lease token. | Live work is exclusively claimed, expired claimed/running work becomes claimable after restart, a nack schedules pending retry, and the current token can persist `succeeded`, `failed`, or `dead` with redacted/bounded detail. | Dispatch attempts, availability, token/lease fields, `claimed`/`running`/pending/terminal status, sanitized error, link time, and finish time advance atomically. | Future-availability work is skipped; a mismatched run ID, stale token, expired lease, or non-terminal finish status is rejected without mutating newer state. | Workflow delivery needs scheduled recovery, deterministic run linkage, and per-claim fencing guarantees. |
-| `FR-EVENT-AUTOMATION-012` | MUST | Event ingress or PR-workspace automation is disabled or cannot be fully composed for the active runtime generation. | Disabled capabilities remain inert; enabled independent capabilities continue without silently substituting volatile storage, ambient provider authority, a different model generation, or a weaker gate. | No listener, worker, model run, checkout, provider write, or publication is created by an incomplete capability graph. | A later complete generation may claim durable queued work using its own frozen dependencies. | Optional automation must fail closed without disturbing unrelated runtime services. |
+| `FR-EVENT-AUTOMATION-012` | MUST | Event ingress or development-workspace automation is disabled or cannot be fully composed for the active runtime generation. | Disabled capabilities remain inert; enabled independent capabilities continue without silently substituting volatile storage, ambient provider authority, a different model generation, or a weaker gate. | No listener, worker, model run, checkout, provider write, notification push, or publication is created by an incomplete capability graph. | A later complete generation may claim durable queued work using its own frozen dependencies. | Optional automation must fail closed without disturbing unrelated runtime services. |
 | `FR-EVENT-AUTOMATION-013` | MUST | A validated workflow declares `on.event` with one or more source, connector, type, actor, subject, or attribute filters. | Scalar or list values parse into typed filters; alternatives within one list use OR, populated fields use AND, and anchored `*`/`?` globs select a workflow deterministically. | Parsing and matching do not mutate the workflow or envelope. | An absent trigger, unknown/typoed field (including one inherited through YAML merge), empty trigger, empty list/map, blank pattern, empty entity filter, or missing required entity/attribute does not match and fails parsing/validation where applicable. Source, connector, event type, and entity type compare case-insensitively; IDs and attribute values remain case-sensitive. | Operators need explicit reviewable routing policy before AI or side-effecting steps run. |
 | `FR-EVENT-AUTOMATION-014` | MUST | The router claims one durable event while both ingress and workflows are enabled. | It renews the routing lease, loads each current local definition once as an exact parsed, validated, compatibility-approved byte snapshot, evaluates that snapshot's deterministic trigger, and creates every matching dispatch with its opaque content revision through the current live routing token. It skips malformed, invalid, or compatibility-blocked workflows consistently with existing automatic triggers and acknowledges only after all selected rows and revisions are durable; zero matches is successful routing. | Each new `(event_id, workflow_ref)` atomically creates one deterministic revision-bound dispatch while the authorizing claim remains live; routing then becomes `succeeded`. | A stale/expired/replaced claim cannot insert even when another worker has already completed routing. Fan-out or lease-renewal failure uses bounded exponential retry, safe duplicate encounter, and `dead` attempt exhaustion. | A crash, slow catalog scan, or definition edit between matching and insertion must neither lose or retarget selected work, duplicate a dispatch, nor let a stale routing claim authorize work. |
 | `FR-EVENT-AUTOMATION-015` | MUST | The dispatcher claims a durable event/workflow dispatch with its deterministic run ID. | Before execution it loads the redacted persisted envelope and one exact current runnable workflow snapshot, rejects a non-empty stored revision that differs from that snapshot, re-evaluates the persisted event against that same snapshot, renews its claim, and passes that exact workflow object plus the dispatch run ID and a trusted payload-free production origin to the shared executor. A legacy unbound dispatch may proceed only after the current snapshot still matches. The executor exclusively creates the durable run and calls `OnRunPersisted`; that callback links the dispatch and renews again before any workflow side effect. | The dispatch moves through claimed/running to succeeded, failed, pending retry, or dead while the normal file run store records the workflow run and its event/dispatch/root-run origin. | Revision drift, a removed/nonmatching trigger, an invalid internal origin, and other pre-run failures retry with bounded exponential backoff and become dead after the configured attempt limit without executing changed intent. A link/callback or ordinary workflow failure leaves a terminal durable run and becomes dispatch `failed` rather than being executed again. | Durable intent must execute the bytes and trigger decision it selected, remain linked to the same auditable workflow run before effects, and fail closed when old bytes are no longer available. |
@@ -97,18 +98,24 @@ Versions v1 through v17 are rejected rather than translated into workspaces.
 | `FR-EVENT-AUTOMATION-031` | MUST | An operator explicitly installs `github-issue-triage` while native GitHub ingress, workflows, and a non-deferred GitHub MCP server are configured. | The installed workflow deterministically matches source `github`, type `issues.opened`, and `body_authenticated=true`; a no-tool classifier receives a narrow repository/issue projection from the signed body and returns only enum category/priority plus a boolean comment decision. A separate conditional `mcp/github/add_issue_comment` step uses signed-body owner/repository/issue identity and posts fixed bounded text containing the enums and event marker. | Installation writes one local workflow definition and revalidates the local catalog without changing gateway, ingress, model, MCP, or credential configuration. A matched run uses the existing durable dispatch/run state and records classifier/action steps normally. | GitHub's event header remains transport-authenticated only by trusted TLS. Issue text remains untrusted despite the body signature. Invalid model output, disabled/no-tool policy failure, absent MCP capability, or GitHub action failure produces no hidden fallback action. Explicit workflow retry, event replay, or provider redelivery after retention pruning can duplicate the comment because the marker is not a provider idempotency key. | AI classification becomes useful without model-held action authority, a new GitHub client, or changes to existing installations. |
 | `FR-EVENT-AUTOMATION-032` | MUST | An authenticated launcher user requests the live event list, one event, its payload, the dispatch list, or one exact dispatch while ingress is enabled; a local CLI operator requests the existing list/event/payload/dispatch-list subset. | The launcher proxies through the gateway's PID bearer credential and the CLI calls that protected runtime endpoint directly. Lists support exact source/connector/type/status filters and filter-bound, versioned newest-first keyset cursors with a default of 50 and maximum of 100. Dedicated event and dispatch projections and their metadata store queries omit every owner/lease token; exact dispatch lookup through the runtime and launcher APIs selects the same token-free metadata by strict opaque ID without materializing a lease credential, while the CLI `dispatches` command remains list-only. Event metadata additionally omits deduplication and payload blobs and derives only `length(payload_json)`. Ordinary event responses omit payload, while the explicit payload endpoint returns the already-redacted JSON bytes exactly and all responses prohibit caching. | Read operations mutate no event, routing, dispatch, or workflow state and remain admitted to one live operator-controller generation until the store call and response projection complete. | Missing/invalid filters, IDs, cursors, or limits fail with `400`; missing events or dispatches return `404`; absent, starting, reloading, stale, or stopped gateway state returns retryable `503`. Disabled ingress registers no operator route and opens no store. Reload rejects new operations and drains admitted calls before closing the old store; delayed cleanup cannot deactivate a replacement. | Operators need inspectable durable state without opening SQLite beside a reloading gateway, materializing a page of payload blobs, exposing worker fencing credentials, or losing exact JSON numbers in browser parsing. |
 | `FR-EVENT-AUTOMATION-033` | MUST | An authenticated operator explicitly requests replay of one existing event through the live gateway, and CLI callers additionally pass `--yes`. | Exactly one accepted `POST` with an empty JSON object creates a fresh pending event linked by `replay_of`, returns `201` and its new location, and leaves the source and prior dispatches unchanged. The launcher enforces same-origin browser metadata before proxying; neither client automatically retries a replay. | Replay uses the active generation's ordinary redacting store insertion and therefore creates new routing state that current deterministic workflow definitions process normally. | Missing events return `404`; malformed media type/body/query/ID or cross-site launcher requests fail without mutation. After replay dispatch, storage, cancellation, timeout, or transport failure reports a fixed unknown outcome without `Retry-After`; the operator must inspect replay lineage before deciding whether to issue another explicit request. Every replay can repeat workflows and external effects. | Replay must be deliberate, auditable, and additive rather than a hidden dispatch reset or an unsafe retry abstraction. |
-| `FR-EVENT-AUTOMATION-034` | MUST | An authenticated dashboard user opens the Events route, changes exact event filters, selects an event, requests more results, explicitly reveals its payload, or opens replay confirmation. | The responsive master/detail surface keeps normalized filters and selection in the URL, keeps opaque cursors only in filter-bound query state, lists newest events, shows token-free event and dispatch projections, and loads exact payload text only after an explicit action. Replay presents an unmistakable duplicate-effects warning and sends one non-retried empty-object request only after confirmation. | Inspection and filter/selection changes mutate no durable state. Payload text is discarded when selection changes. A successful replay creates the additive event defined by `FR-EVENT-AUTOMATION-033`, invalidates affected reads, and selects the returned event. | Loading, empty, unavailable, malformed-response, not-found, and replay-failure states remain operable on desktop and narrow mobile widths. Payload never enters route state, browser persistence, logs, toast text, clipboard state, or HTML interpretation; cancel sends no request, failure keeps confirmation available, and ambiguous replay failure is never retried automatically. | Operators need a safe, accessible control plane that preserves the API's least-exposure and replay boundaries instead of turning inspection into hidden data retention or side effects. |
+| `FR-EVENT-AUTOMATION-034` | MUST | An authenticated dashboard user opens the Events route, changes exact event filters, selects an event, requests more results, explicitly reveals its payload, opens replay confirmation, or chooses **Implement feature** on a projected GitHub issue. | The responsive master/detail surface keeps normalized filters and selection in the URL, keeps opaque cursors only in filter-bound query state, lists newest events, shows token-free event and dispatch projections, and loads exact payload text only after an explicit action. A GitHub issue with one validated HTTPS `issue_url` exposes an **Implement feature** link to `/development/new?issue=...`; that intake mounts only the prefilled issue feature form. Replay presents an unmistakable duplicate-effects warning and sends one non-retried empty-object request only after confirmation. | Inspection, feature-link navigation, and filter/selection changes mutate no durable state. Payload text is discarded when selection changes. Development state begins only after the operator submits intake. A successful replay creates the additive event defined by `FR-EVENT-AUTOMATION-033`, invalidates affected reads, and selects the returned event. | Loading, empty, unavailable, malformed-response, not-found, and replay-failure states remain operable on desktop and narrow mobile widths. Non-issue events and unsafe, credential-bearing, non-HTTPS, oversized, or malformed issue URLs expose no feature link. Payload never enters route state, browser persistence, logs, toast text, clipboard state, or HTML interpretation; cancel sends no request, failure keeps confirmation available, and ambiguous replay failure is never retried automatically. | Operators need a safe path from an authenticated issue notification into implementation without revealing the raw payload, mixing issue and PR input, or turning inspection into a side effect. |
 | `FR-EVENT-AUTOMATION-035` | MUST | An authenticated dashboard user opens `/event-sources`, edits the ingress master switch or storage/redaction policy, adds, edits, disables, or removes a Standard Webhooks/GitHub connector, chooses a connector secret action, configures a GitHub target login or watched repositories, imports a local newline-delimited owner/repo file, or opts an available Delta Chat instance into `mirror` or `event_only` email admission. | The responsive accessible editor loads only the safe configuration projection, shows existing webhook credentials as presence metadata, derives each token-free `/webhooks/events/{connector}` endpoint, warns that public GitHub delivery requires HTTPS, and presents available Delta Chat instances plus retained missing/disabled adapter references with explicit dependency state. For GitHub it explains empty-scope accept-all behavior, accepts one target login and one owner/repo per line, and can replace only the repository draft from a locally read text file. Management reads remain available to repair unresolved active webhook references and unavailable adapter dependencies, but validate every serialized webhook name, format, repository, target user, and channel map key against all configured sensitive values and fail opaquely rather than project a credential-bearing public identity. Optional retention and payload limits accept blank defaults or positive safe integers; connector names match `^[A-Za-z][A-Za-z0-9_-]{0,63}$` and are locale-independently case-insensitively unique; persisted connector names remain stable so their credential identity cannot move implicitly; enabled connectors use a format-valid configured, entered, or cryptographically generated secret; changing a persisted connector format requires a compatible replacement for any configured secret; and, while master ingress is active, an enabled adapter must reference an existing enabled Delta Chat channel. After save, the page reloads the safe projection, refreshes gateway state, and surfaces the shared restart-required notice when the effective active event-ingress runtime signature changed. | No draft or imported file mutates configuration before explicit save. The editor sends one scoped RFC 7396 `PATCH /api/config`: null policy values restore effective defaults, omitted or preserve-mode secret fields retain the secure value, a concrete secret rotates it, an explicit empty secret clears only a disabled connector, GitHub repository/target fields carry their normalized values, switching away from GitHub clears those fields, and null map tombstones remove deleted webhook/adapter entries without replacing unrelated configuration. Erasing a replacement field reverts to preservation; renaming is an explicit add-new/remove-old operation. A generated or entered secret remains input-only until save. With master ingress disabled, source edits remain runtime-inert. While it is active, the restart signature covers effective policy, enabled webhooks/adapters including canonical case- and order-insensitive GitHub repository scope and target login, workflow-dispatch executor settings, and digests of the complete exact-secret redactor input; inactive non-secret routing metadata and semantically equivalent repository reordering or case changes do not create a false restart requirement, but rotating any configured credential may require restart so the running store learns the new redaction value. | Invalid policy, duplicate/invalid names, invalid GitHub repository or target-user scope, a public identity containing any configured sensitive value, invalid Standard `whsec_` canonical-base64 material, invalid GitHub UTF-8/trim/32–256-byte material, a preserved configured secret after format change, an enabled connector without a secret while master ingress is active, or an unavailable/disabled Delta Chat dependency while master ingress is active blocks save with field-level or opaque boundary guidance as appropriate. Load, validation, and save failures remain actionable without losing an unsaved draft; background gateway polling continues to retry a temporarily unavailable status read. A clear action requires the connector to be disabled. Existing, generated, and replacement secret bytes never enter route state, endpoint text, browser persistence, logs, toast text, restart signatures, or read responses; the disabled default remains inert and no new listener is created. | Event ingestion must be configurable without raw JSON editing while preserving secure-string, opt-in, validation, and existing shared-listener/restart boundaries. |
 | `FR-EVENT-AUTOMATION-036` | MUST | An authenticated dashboard user edits a workflow draft's external-event filters, selects a recent durable event, asks whether it matches, or launches an event-parity draft test. | The workflow UI projects `on.event` through the server parser into source, connector, type, actor, subject, and attribute controls while retaining raw YAML; explains OR-within/AND-across, anchored `*`/`?`, and case rules; and revision-fences a YAML-node replacement that preserves unrelated triggers, jobs, and comments. Alias/merge shapes and projected patterns or attribute names containing line breaks stay raw-only so the builder cannot flatten or split them. The match preview sends only draft YAML and event ID, loads payload-free metadata from the protected live gateway, and returns deterministic field checks from the exact runtime evaluator. Event-parity testing sends only the event ID, server-loads the complete already-redacted envelope through one admitted live-generation operation, requires the draft match, and constructs the same event snapshot, fixed inputs, target-ref event session, and empty delivery as automatic dispatch plus a trusted event/root-only draft-test origin before creating an ordinary `draft:<target>` run. The authoring agent has no tools or history, learns that AI is a post-match workflow step, and repair context contains structural event metadata rather than payload values. | Inspect, render, and preview are stateless and create no event, replay, dispatch, routing transition, compatibility stamp, or workflow run. A draft test records its selected event ID in the singleton test snapshot and its normal run record contains a trusted `external_event_draft_test` origin but creates no dispatch; automatic production dispatch behavior remains unchanged. Browser event selection uses metadata only, and exact payload remains behind the explicit ephemeral event inspector. | Malformed or oversized requests, stale revisions, invalid triggers, unsupported alias/merge or multiline-scalar edits, missing/unavailable events, a non-match, or any event-mode manual input, secret, session, delivery, or origin override fails before run creation. Delayed inspect/render responses cannot overwrite newer YAML. Captured payload bytes or values never enter routes, query keys, storage, toast/error text, match responses, origin, or AI author/repair prompts; switching selection purges an explicitly revealed payload. | Deterministic and AI-driven automation should be buildable and production-faithfully testable from the dashboard without a second matcher, browser payload copying, hidden routing side effects, or model-held action authority. |
 | `FR-EVENT-AUTOMATION-037` | MUST | An authenticated dashboard user switches `/events` to the global dispatch view, changes exact event/workflow/status filters, pages results, selects one dispatch, or follows an event/dispatch/workflow/run relationship. | The responsive master/detail surface normalizes `view`, `dispatch_event`, `workflow`, `dispatch_status`, and exact `dispatch` selection in route search state while keeping opaque cursors only inside matching query state. It lists token-free dispatch projections across all events, loads selected metadata through the exact dispatch endpoint, shows its immutable workflow revision and independent created/available/lease/link/finish lifecycle fields, and constructs ID/ref-only links to the selected event and the workflow console's exact workflow/run state. Event detail links back to the exact dispatch view. | Filters, selection, pagination, and navigation mutate no event, dispatch, routing, or workflow state. Switching between event and dispatch views preserves the inactive view's normalized search state; browser back, forward, and refresh reconstruct the visible selection without persisting a cursor. | Invalid route values normalize away; malformed, unavailable, empty, and not-found responses remain operable on desktop and narrow widths. Payloads, delivery data, errors, cursors, deduplication identities, and owner/lease tokens never enter URLs or relationship labels. A pruned related record is an ordinary not-found state rather than evidence that another lifecycle stage completed. | Operators need one durable, shareable path through event, dispatch, workflow, and run state without copying opaque IDs, leaking protected fields, or losing context on refresh. |
 | `FR-EVENT-AUTOMATION-038` | MUST | A production external-event dispatch or event-parity draft test creates a root workflow run, either run creates reusable children, a production run is retried, or an authenticated operator inspects any member of the run family. | The trusted internal `RunOrigin` is payload-free and contains only `kind`, exact event ID, optional exact dispatch ID, and exact family-root run ID. Production dispatch constructs `external_event` with `ev_` plus 32 lowercase hexadecimal characters, `dsp_` plus 32 lowercase hexadecimal characters, and the deterministic initial `wr_` run as root. Event-parity draft testing constructs `external_event_draft_test` with the exact event and initial root but forbids a dispatch. Root IDs are at most 1,024 bytes and match `wr_[A-Za-z0-9_-]+`. Reusable children and supported retries retain the complete unchanged origin. Run projection and Retry validate the selected record's intrinsic kind/IDs/context plus every ancestor still available through parent and retry links. A not-found pruned ancestor is an independent-retention boundary; any available ancestor with mismatched origin/context, an invalid link, a read failure, or a cycle makes provenance untrusted. Retry preserves origin across legitimate pruning and drops it only when this validation rejects the captured source. Workflow run detail renders ID/ref-only links to the event, production dispatch, and family root beside independent run cancellation/completion fields. | The origin is constructed only after trusted server-side event/dispatch resolution, persists in the ordinary file run record, and changes no envelope, routing, dispatch, or replay state. Retrying a production event run uses one captured authoritative source, creates no dispatch, and does not alter the original dispatch; retry lineage remains separate from the unchanged origin root. A missing ancestor neither repairs nor invalidates the retained record, while any conflicting retained lineage suppresses the projection and retry propagation. Event-backed draft runs remain retryable only by launching a new current draft test against an explicitly selected event. Legacy runs without origin remain readable and display no external relationship. | Browser/manual Run, Retry, and draft-test inputs cannot set origin. Invalid internal kind/ID combinations or context mismatches fail before run creation. Intrinsically malformed persisted origin, retained ancestor mismatch, invalid ancestry, lineage read failure, or cycle is omitted from browser projection and not copied by Retry. Event/input maps, payload, session, delivery, errors, route state, or coincidentally shaped manual values are never provenance authority. Event, dispatch, ancestor-run, and current-run retention are independent: a pruned relationship is ordinary not found and does not imply success, failure, cancellation, dispatch completion, replay, or provenance forgery. Payloads, delivery data, cancel reasons, errors, deduplication data, cursors, and lease tokens never enter relationship URLs or labels. | Typed provenance closes the navigation loop without granting payload-bearing workflow data authority, conflating production dispatch with a draft test, treating retention as tampering, or accepting conflicting retained lineage. |
 | `FR-EVENT-AUTOMATION-039` | MUST | An enabled GitHub webhook connector declares optional `repositories` and `target_user`, an authenticated operator edits or imports a newline-delimited owner/repo list, or an authenticated GitHub delivery reaches that connector. | The editor round-trips the scope without exposing credentials, replaces its repository draft from a local text file, and on explicit save removes blank lines, trims entries, and retains the first of case-insensitive duplicates. After exact-body HMAC verification, JSON-object decoding, and secret-bearing delivery/event identity rejection, an empty repository list admits every repository; a non-empty list compares the body-authenticated `repository.full_name` case-insensitively. Admitted deliveries promote bounded pull-request number/URL/author/head/base/draft, issue number/URL/author, comment URL/author, review URL/author/state, requested reviewer/team, and assignee metadata. When configured, `target_user`, `targets_user`, and an optional deduplicated comma-separated `target_reason` identify an active matching requested reviewer, assignee, or case-insensitive `@mention`; review-request removal and unassignment actions do not produce the corresponding active target reason. A scope miss returns `202` with `ignored: true` and `inserted: false` while omitting `event_id`. | An explicit save writes only connector configuration. An admitted delivery follows the ordinary redacted inbox insertion, routing, and dispatch lifecycle. An ignored delivery creates no inbox, routing, dispatch, replay, or deduplication record. Changing an enabled connector's effective repository scope or target user changes the launcher event-runtime signature and therefore surfaces restart-required feedback; disabled connector metadata remains runtime-inert. | For an enabled connector, repository and target-user scope is valid only with GitHub format; other disabled connector bodies remain inert except for public-identity secret checks. An enabled configuration accepts at most 4,096 repositories; every entry is a trimmed UTF-8 `owner/repo` value matching `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`, is at most 256 bytes, and is unique ignoring case. A target login is at most 128 bytes and contains only letters, digits, and internal hyphens. A missing repository projection under a non-empty allowlist is ignored. Invalid authentication, malformed bodies/actions, and secret-bearing public or delivery/event identities remain errors before the scope decision. Target metadata is a deterministic routing hint, not authentication or GitHub action authority. A repeated scoped-out provider delivery is authenticated and ignored again because the first miss created no durable deduplication state. | Operators need to suppress irrelevant organization traffic and route review requests, assignments, and mentions without storing every delivery or asking workflow models to rediscover targeting facts from raw payloads. |
 | `FR-EVENT-AUTOMATION-040` | MUST | An enabled GitHub connector uses `format: github` and opts into `poll_notifications`, with the exact non-deferred `github/list_notifications` and `github/pull_request_read` MCP tools available. | The gateway performs one bounded read-only provider scan at startup and waits 60 seconds after each completed scan before the next, requesting at most five provider-maximum 50-item pages including already-read notifications without marking, dismissing, or acknowledging them. A slow scan cannot accumulate timer ticks into immediate catch-up scans. It applies the connector's case-insensitive repository allowlist, maps review requests, mentions, assignments, issues, pull requests, and other notification reasons to stable event types, and enriches pull-request notifications with trusted number, URL, author, base/head revision, and clone metadata. Provider-derived envelopes carry `provider_authenticated` and `source_authenticated`, connector target metadata, and a deduplication key over notification ID plus provider update time. Exact JSON returned through the MCP wrapper may be inline or in one confined, bounded text artifact; the poller consumes and removes a valid artifact rather than parsing its model-facing notice. | Each admitted projection enters the ordinary redacted inbox once per connector/update. Re-polling unchanged provider state adds no event; an updated notification may add a new event. Poll-only connectors require no webhook secret and own no public webhook endpoint, while a connector with a signing secret may use polling and authenticated webhooks together. | Missing exact MCP tools leave polling unavailable rather than substituting an untrusted tool. Malformed, oversized, trailing, or incomplete MCP output; missing, multiple, malformed, non-regular, symlinked, out-of-root, invalid, or oversized exact-text artifacts; invalid repository/resource identity; or incomplete pull-request enrichment fails that scan before inserting the affected event. Empty allowlists intentionally accept every notification visible to the authenticated GitHub identity. Restart signatures include effective enabled polling state. | Private development machines need useful GitHub targeting events without requiring a publicly reachable webhook, while provider reads must never mutate the notification inbox or weaken durable event authentication. |
-| `FR-EVENT-AUTOMATION-080` | MUST | The former review/development pages and Gate V2 routes are removed without compatibility aliases. An authenticated operator uses `/pull-requests`, `/pull-requests/prw_...`, `/pull-requests/workflow-configurations`, `/pull-requests/workflow-configurations/:configurationID`, `/pull-requests/repository-assignments`, and `/pull-requests/settings`. | Portfolio, workspace, named workflow-configuration editor, repository-assignment editor, Review/Implementation flow, gate modal, and settings state use distinct canonical URLs. Review and implementation remain phases of one aggregate. | Reads and navigation create no model/workflow run, checkout, provider effect, acknowledgement, or merge. | Invalid, repeated, private, or retired route state is rejected or canonicalized away; dense and narrow layouts remain operable. | One PR identity and one canonical route family must replace obsolete split frontends. |
-| `FR-EVENT-AUTOMATION-081` | MUST | A trusted PR aggregate and Gate V3 configuration API are available to an authenticated operator. | The workspace projects safe lifecycle evidence plus generic Gate forms. A waiting Human gate renders its static `short-text`, `long-text`, `boolean`, and `select` fields and submits only `field-values`; automatic actions expose status without fake Human controls. Workflow configuration has a separate list/editor UI that shows the Review and Implementation action flows and a compact gate-action editor: the action selector names the workflow default, the answer preview shows only the human-facing prompt, labels, requirements, choices, and selection cardinality, and internal workflow/gate/revision IDs plus redundant default/override/effective summaries remain hidden. Deterministic overrides expose workflow field and option IDs only in an on-demand JSON reference because those IDs are required to author deterministic values. Repository assignment has its own UI and safe API projection containing only names, deferred policies, default selection, and assignments—never bindings, actions, prompts, or the Gate catalog. Both scoped writes share one full-config revision fence and preserve fields owned by the other surface. The AI editor distinguishes ephemeral, private-snapshot, and originating-snapshot profiles, renders enforced history/cache/agent/tool properties as one concise read-only execution summary, renders only properties editable for the selected profile as controls, projects inherited AI defaults read-only, and offers source mode only where the Gate catalog declares one source-bearing finding. | Reads are inert; version/head/request fences protect mutations, and private subjects, workflow/task IDs, prompts beyond the deliberate form, provider authority, source-session capabilities, and publication payloads remain hidden. | Malformed forms or values, unsafe URLs, unavailable or ambiguous source provenance, stale revisions, assigned-configuration deletion, and retired V2 configuration and result fields fail closed. | Operators need one generic gate interaction and separate execution-policy and repository-routing surfaces without workflow-engine semantics leaking into product choices. |
-| `FR-EVENT-AUTOMATION-082` | MUST | A workspace operation reaches an application gate. | The service resolves the repository Workflow configuration, loads the static published gate by exact `(workflow-ref, gate-ref)`, and invokes `gate/exec` with frozen evidence. An exact configured action replaces the complete `default-action`; absent override inherits the default; absence of both fails closed. Human, AI, deterministic, and workflow actions return validated `field-values` with immutable actor/execution/action/input metadata. PR application logic branches on the specific returned field and option IDs. The hard candidate-scope variant is a separate static form offering only `defer-follow-up`, `revise-charter`, or `stop`; it cannot be weakened by the ordinary scope gate. | Gate, evidence, workflow/config revisions, action metadata, and field values are persisted with the aggregate; no separate gate-decision/outcome record exists. | Stale evidence/config/task fences, unknown fields/options, invalid cardinality, unsafe action workflows, or an unrecognized application action stop before lifecycle advancement. V2 configuration and result data is not migrated. | Generic execution must remain independent from application-specific lifecycle branching while preserving strict PR type, scope, and head authority. |
-| `FR-EVENT-AUTOMATION-083` | MUST | Review or completion reports findings or no findings while adaptive policy permits another round, or the user requests one bounded search. | The service selects and records a bounded nudge variant, challenges persisted coverage and prior results, and tracks novel/duplicate findings and later validated reward independently for review and completion. Every review-search, review-nudge, local-review, completion-audit, and completion-nudge request appends a fixed system policy that treats candidate content, review history, charter text, and caller context as untrusted and permits diagnosis only: exact defect or missing requirement, location, trigger, evidence, impact, scope, and completed validation. The strict finding contract contains no recommendation field and forbids fixes, remediation, mitigation, workarounds, patches, replacement code, refactors, design/configuration/test changes, or next-step advice in every field. | Nudge rounds, rewards, diagnosis-only findings, evidence, coverage, and activity append to the same aggregate; legacy recommendation data is not copied into newly materialized findings. | A successful or zero-finding first answer does not skip configured minimum rounds; invalid or policy-violating output, cancellation, policy maximum, or disablement terminates the loop. User-controlled context cannot weaken the fixed diagnosis-only policy. | The system should search past premature completion and learn which wording finds validated defects without turning review output into implementation advice. |
-| `FR-EVENT-AUTOMATION-084` | MUST | A review, implementation, deferred group, or ambiguous prior provider effect is ready for publication handling. | Each effect freezes its own payload and reaches its own static gate. Application-specific values such as `publish`, `revise`, `wait`, `stop`, `recheck-provider`, and `assume-failed` determine the next PR action; the generic gate runtime assigns none of those meanings. The repository's selected Workflow configuration owns deferred mode `off`, `ask`, or `automatic`, with automatic mode using the workflow deterministic default. | Frozen intents, fences, claims, results, suppression, reconciliation evidence, gates, and activity are durable and independently idempotent. | Missing authority, drift, invalid field values, stale gates, or ambiguous remote results fail closed; unknown effects are reconciled rather than blindly retried. | External effects require independent least-authority gates and crash-safe ambiguity handling. |
+| `FR-EVENT-AUTOMATION-080` | MUST | An authenticated operator starts work at `/development/new`. | The UI first offers exactly `Implement feature` or `Pick up PR`. Implement feature then mounts exactly one issue-URL or configured-repository brief form; pickup mounts exactly one pull-request URL form. `POST /api/development-workspaces` strictly accepts the matching discriminated body and returns one `devw_` aggregate. | Intake persists one verified source/repository snapshot and deterministic workspace identity. Feature work enters charter/planning; pickup work enters the existing-PR charter/review lifecycle. | Unknown fields and mixed issue/brief/PR inputs fail before creation. Issue feature work requires an open issue in a writable repository; brief mode lists only configured implementable repositories. Pickup resolves one exact PR, while later implementation still requires its open/writable authority. | Product intent must be selected once, without asking users to combine an issue and PR. |
+| `FR-EVENT-AUTOMATION-081` | MUST | An authenticated operator opens `/development`, `/development/devw_...`, `/development/repositories`, `/development/workflow-configurations`, or `/development/settings`. | Portfolio, intake, repository routing, policy editing, and workspace views use canonical development URLs. A workspace exposes `Overview`, `Changes`, `Files`, and `Activity`, responsive chat, lifecycle state, exact gate forms, validation evidence, and publications. | Reads and navigation create no model run, checkout, provider write, acknowledgement, or merge; gate responses alone submit validated `field-values` under version/request fences. | Invalid workspace IDs, route search, stale versions, malformed forms, or unavailable evidence fail closed and remain operable at narrow widths. `/pull-requests` has no redirect or alias. | One development surface must expose progress without demanding attention when no action is pending. |
+| `FR-EVENT-AUTOMATION-082` | MUST | A workspace operation reaches an application gate. | The service resolves the repository Workflow configuration, loads the static published gate by exact `(workflow-ref, gate-ref)`, and invokes `gate/exec` with frozen evidence. An exact configured action replaces the complete `default-action`; absence inherits the default; absence of both fails closed. Human, AI, deterministic, and workflow actions return validated `field-values` with immutable actor/execution/action/input metadata; application code alone interprets their field and option IDs. The hard candidate-scope variant is a separate static form offering only `defer-follow-up`, `revise-charter`, or `stop`; it cannot be weakened by the ordinary scope gate. | Gate, evidence, workflow/config revisions, action metadata, and field values persist with the aggregate; no separate gate-decision/outcome record exists. | Stale evidence/config/task fences, unknown fields/options, invalid cardinality, unsafe action workflows, or unrecognized application values stop advancement. Old Gate result shapes are not migrated. | Generic gate execution must remain separate from development lifecycle meaning while preserving strict development type, scope, and head authority. |
+| `FR-EVENT-AUTOMATION-083` | MUST | Planning, review, or completion reports findings or no findings while adaptive policy permits another round, or the user requests one bounded search. | The service records a bounded nudge variant, challenges persisted coverage and prior results, and tracks novel/duplicate findings and validated reward independently for review and completion. Every review-search, review-nudge, local-review, completion-audit, and completion-nudge request appends a fixed system policy that treats candidate content, review history, charter text, and caller context as untrusted and permits diagnosis only: exact defect or missing requirement, location, trigger, evidence, impact, scope, and completed validation. The strict finding contract contains no recommendation field and forbids fixes, remediation, mitigation, workarounds, patches, replacement code, refactors, design/configuration/test changes, or next-step advice in every field. | Nudge rounds, rewards, diagnosis-only findings, evidence, coverage, and activity append to the same aggregate; legacy recommendation data is not copied into newly materialized findings. | A successful or zero-finding first answer does not skip configured minimum rounds; invalid or policy-violating output, cancellation, policy maximum, or disablement terminates the loop. User-controlled context cannot weaken the fixed diagnosis-only policy. | Development should search past premature completion without unbounded model cost or turning review output into implementation advice. |
+| `FR-EVENT-AUTOMATION-084` | MUST | A validated implementation is ready for publication, deferred work is ready for issue handling, or a prior provider effect is ambiguous. | Pickup freezes and pushes the exact existing PR branch. Feature implementation create-only pushes deterministic `picoclaw/issue-<number>-<suffix>` or `picoclaw/feature-<suffix>`, then creates a draft PR against the frozen base with a bounded source summary, change summary, changed-file list, and validation evidence; issue PRs include `Closes #<number>` and every created PR carries a recovery marker. Each effect uses its own gate and reconciliation path. | Frozen requests, candidate/base/head fences, claims, results, suppression, reconciliation evidence, gates, and activity are durable and independently idempotent. | Missing authority, remote drift, destination collision, stale validation, invalid gate values, an invalid created-PR repository/open/draft/head/base/marker response, or ambiguous remote results fail closed. Unknown pushes reconcile the exact remote tip; unknown PR/issue effects reconcile exact markers and are never blindly retried. No flow merges or marks ready-for-review. | Existing-PR continuation and new draft-PR creation require distinct least-authority effects. |
+| `FR-EVENT-AUTOMATION-085` | MUST | Feature planning or later audit classifies one finding under a repository-selected scope policy. | The selected Workflow configuration supplies a strict default plus optional `fix`, `feature`, `refactor`, `documentation`, or `test` override and bounded custom prompt. Strict admits exact compatible small work, gates exact larger work, and defers adjacent/follow-up work; relaxed may include relevant `S1`/`S2` `XS`/`S` work only at confidence at least `0.80`. | The finding retains scope distance, independent size, type compatibility, confidence, evidence, and disposition; prompt influence is captured in stage evidence. | `S3`, type-incompatible, medium/large related work, and CI/CD, release, deployment, dependency, migration, generated-code, or broad-cleanup work remain deferred unless explicitly chartered. Custom text may tighten or clarify relevance but cannot bypass hard limits. | Relaxed policy should absorb genuinely small relevant work without turning one PR into an unrelated cleanup vehicle. |
+| `FR-EVENT-AUTOMATION-086` | MUST | A user sends an `ask` or `steer` message in a workspace chat. | `ask` returns a read-only answer from the exact charter/findings and optional candidate revision. `steer` is classified against the charter; in-scope steering queues for the next implementation boundary, while scope-changing steering becomes `needs_clarification` and a notification. | Messages append under a conversation revision fence and are serialized against side-effecting implementation so chat cannot invalidate a CAS after code has changed. Steering after validation returns the workspace to implementation and stales queued publication evidence before further work. Applied steering receives a durable marker and is not replayed on later attempts. | Stale conversation/candidate revisions, unavailable AI, publication already running/succeeded/unknown, an implementation currently changing code, or unsupported lifecycle phases reject the message without silently editing or expanding scope. | Users need to direct AI development without racing code operations or granting chat publication authority. |
+| `FR-EVENT-AUTOMATION-087` | MUST | A workspace has a parked candidate and the user opens `Changes` or `Files`. | Revision-fenced tree, UTF-8 blob, and diff endpoints expose only the exact base/candidate; the UI lazy-loads Monaco 0.56.0 read-only diff/editor, uses side-by-side desktop and inline mobile presentation, follows theme, disposes models, and offers a plain read-only text fallback. | Browsing and editor navigation mutate no repository, candidate, aggregate, or publication state. | Stale fences, traversal/noncanonical paths, symlink or submodule entries, binary/oversized blobs, changed parked-line state, or unavailable revisions return no content. Directory results cap at 500 entries and blobs at 1 MiB. | Users need exact code inspection without bypassing the audited AI edit path. |
+| `FR-EVENT-AUTOMATION-088` | MUST | Charter ambiguity, scope exception, scope-changing steering, implementation failure/block, unknown provider outcome, or publication approval requires user action. | The lifecycle upserts one durable notification with workspace/repository/source, reason, priority, phase, safe target, read state, snooze, and status. Stable source keys deduplicate retries; resolving the underlying condition resolves its open notification. | Notifications accumulate independently of page visits. Users may mark read/unread, snooze/clear snooze, and archive only resolved items through per-item version-fenced bulk mutations. | Same-generation retries preserve user state; a higher generation may reopen with changed evidence. Open items are not discarded merely because they are old. | Attention must be durable, sortable work rather than transient modals or polling noise. |
+| `FR-EVENT-AUTOMATION-089` | MUST | A user filters, sorts, saves, or navigates the notification backlog. | `/notifications` provides responsive list/detail and previous/next navigation inside the current result set, workspace deep links, built-in/simple filters, and advanced JQL-like queries over `status`, `read`, `snoozed`, `priority`, `reason`, `repository`, `workspace`, `intent`, `source`, `phase`, `created`, `updated`, and `text`. It supports typed comparisons, `IN`/`NOT IN`, case-insensitive contains, `AND`/`OR`/`NOT`, parentheses, ISO/relative time, and up to three `ORDER BY` fields. Saved views support name, pin, default, position, and revision-fenced replacement. | Query text remains in URL; cursors bind normalized query/sort semantics; list selection and scroll position survive detail navigation in the running client. | Parser bounds input to 4 KiB, 16 negations, 50 predicates, 100 `IN` values, and three unique sort fields. Invalid syntax returns a safe byte position; raw text is never SQL. | A growing attention queue needs reproducible views and Jira-like precision without exposing a query-injection surface. |
+| `FR-EVENT-AUTOMATION-090` | MUST | A user explicitly enables mobile notifications from an HTTPS/Web-Push-capable installed launcher. | The PWA registers its service worker, requests permission only after that action, creates/renames/disables/revokes per-device subscriptions, refreshes the app badge, and deep-links notification clicks to `/notifications/<id>`. New open critical/high items send a privacy-minimal title and reason; repository is included only by opt-in. | Owner-only, mode-0600 v20 push state stores generated VAPID keys, sensitive subscription material, per-device revision, enablement, last delivery, and bounded per-notification generation suppression; public projections omit endpoints and keys. | Unsupported or insecure browsers retain the full in-app inbox. Disabled devices and already-delivered generations receive no push; expired provider subscriptions are disabled after terminal delivery responses. Push failure never resolves or removes inbox work. | Mobile attention must be selective and recoverable, not the sole record of required action. |
 
 ## Data And State Model
 
@@ -119,23 +126,28 @@ workflow dispatches, immutable workflow revisions, replay lineage, and
 maintenance metadata. IDs are opaque and source-neutral. Payloads are bounded
 JSON objects stored only after recursive sensitive-value redaction.
 
-### Unified PR aggregate
+### Development aggregate
 
-A workspace is identified by `prw_` plus the verified provider origin,
-provider repository ID, and provider pull-request ID. Mutable repository names,
-pull number, author login, refs, state, capabilities, and SHAs are snapshots,
-not identity or authority.
+A workspace is identified by `devw_` plus verified provider origin, repository
+ID, source kind, and source ID. `pickup_pr` binds the source ID to one provider
+pull request. `implement_feature` binds it to one provider issue or a digest of
+one immutable brief and configured repository. Mutable repository names,
+numbers, author login, refs, state, capabilities, and SHAs are snapshots, not
+identity or authority. A created draft PR updates the feature workspace's
+provider snapshot without changing its `devw_` identity.
 
 The aggregate stores:
 
-- provider snapshots and ingress/cutover watermarks;
+- immutable intent/source and provider snapshots plus ingress/cutover
+  watermarks;
 - immutable charter revisions with one primary type: `fix`, `refactor`,
   `feature`, `documentation`, or `test`;
-- lifecycle stage evidence for intake, charter, review, triage, implementation,
-  validation, completion audit, publication, and completion;
+- lifecycle stage evidence for intake, charter, feature planning or PR review,
+  triage, implementation, validation, completion audit, publication, and
+  completion;
 - findings and disposition events, exact charter/head-fenced corrections,
-  active repository/type/audience-applicable lessons, and bounded advisory
-  conversation messages;
+  active repository/type/audience-applicable lessons, and bounded revisioned
+  `ask`/`steer` conversation messages;
 - adaptive review/completion nudge rounds, chosen variants, prompt digests,
   rewards, and coverage;
 - scope assessments with `S0_exact`, `S1_necessary_adjacent`,
@@ -153,30 +165,37 @@ Every mutation carries an expected aggregate version and random request ID.
 Head-sensitive operations additionally bind the exact provider revision or
 verified head SHA. Request IDs replay only their original mutation/result.
 
-### Schema v19 boundary
+### Development notifications
 
-The v19 schema retains the generic v1/v2 event/workflow core. It creates unified
-tables under `pr_*` and requires that no table matching `pr_review_*` or
-`pr_development_*` remains. A v18 cutover validates the entire old schema
-before dropping it. Every open enforces the absence rule, including databases
-that already declare `user_version=19`; a contaminated current database fails
-closed and is never repaired in place. There is no row translation, route
-alias, ID adapter, or configuration migration for legacy PR state.
+One notification row owns a stable source key, generation, workspace link,
+reason, priority, lifecycle status, user read/snooze state, safe workspace
+target, and timestamps. A singleton document stores revisioned saved views.
+Another owner-only singleton stores VAPID identity, private subscription
+material, device metadata, and delivered generations; browser responses project
+only the public VAPID key and safe device fields.
+
+### Schema v20 boundary
+
+The v20 schema retains the generic v1/v2 event/workflow core. Fresh databases
+create development aggregate, notification, saved-view, and push-state tables.
+A v19 cutover drops all prior `pr_*` tables and installs the new schema without
+row translation. A v18 cutover validates the whole legacy schema before
+dropping its PR tables. Versions 1-17 are rejected. Every v20 open validates the
+complete current schema and never repairs malformed current objects in place.
+There is no old workspace row translation, route alias, ID adapter, dual read,
+or legacy request fallback.
 
 ## Surface Ownership
 
 Owns: CODE pkg/eventing/**
 Owns: CODE pkg/eventing/webhook/**
 Owns: CODE pkg/eventing/channelmessage/**
+Owns: CODE pkg/developmentnotifications/**
 Owns: CODE pkg/prlifecycle/**
 Owns: CODE pkg/prworkspace/**
 Owns: CODE pkg/reviews/provider.go
 Owns: CODE pkg/reviews/submitter.go
 Owns: CODE pkg/prworkspace/localci/**
-<!-- Retired v19 paths remain owned here so their destructive cutover is governed. -->
-Owns: CODE pkg/attention/**
-Owns: CODE pkg/reviews/**
-Owns: CODE pkg/prdevelopment/**
 Owns: CODE pkg/config/config.go
 Owns: CODE pkg/config/events.go
 Owns: CODE pkg/config/pr_lifecycle.go
@@ -186,9 +205,7 @@ Owns: CODE pkg/workflows/event_dispatcher.go
 Owns: CODE pkg/agent/workflow_eventing.go
 Owns: CODE pkg/gateway/event_automation.go
 Owns: CODE pkg/gateway/pr_workspace_*.go
-Owns: CODE pkg/gateway/pr_development_*.go
-Owns: CODE pkg/gateway/review_attention_policy.go
-Owns: CODE pkg/gateway/review_working_context.go
+Owns: CODE pkg/gateway/development_*.go
 Owns: CODE pkg/gateway/event_webhook*
 Owns: CODE pkg/gateway/event_channel*
 Owns: CODE pkg/gateway/event_operator*
@@ -197,48 +214,56 @@ Owns: CODE web/backend/api/events.go
 Owns: CODE web/backend/api/pr_workspaces.go
 Owns: CODE web/backend/api/pr_workspace_proxy.go
 Owns: CODE web/backend/api/pr_lifecycle_workflow_configurations.go
+Owns: CODE web/frontend/public/service-worker.js
+Owns: CODE web/frontend/public/site.webmanifest
 Owns: CODE web/frontend/src/api/event-sources.ts
 Owns: CODE web/frontend/src/api/events.ts
-Owns: CODE web/frontend/src/api/pr-workspaces.ts
+Owns: CODE web/frontend/src/api/development-workspaces.ts
+Owns: CODE web/frontend/src/api/notifications.ts
 Owns: CODE web/frontend/src/api/pr-workspace-gates.ts
+Owns: CODE web/frontend/src/api/pr-workspaces.ts
 Owns: CODE web/frontend/src/api/pr-lifecycle-flow.ts
 Owns: CODE web/frontend/src/api/pr-lifecycle-workflow-configurations.ts
 Owns: CODE web/frontend/src/api/pr-lifecycle-repository-assignments.ts
-Owns: CODE web/frontend/src/api/review-provider.ts
-Owns: CODE web/frontend/src/api/reviews.ts
-Owns: CODE web/frontend/src/api/pr-development.ts
-Owns: CODE web/frontend/src/api/pr-development-attention.ts
-Owns: CODE web/frontend/src/api/review-attention.ts
-Owns: CODE web/frontend/src/api/review-attention-*.ts
+Owns: CODE web/frontend/src/app-providers.tsx
+Owns: CODE web/frontend/src/components/app-sidebar.tsx
+Owns: CODE web/frontend/src/components/development-workspaces/**
 Owns: CODE web/frontend/src/components/events/**
+Owns: CODE web/frontend/src/components/notifications/**
 Owns: CODE web/frontend/src/components/pr-workspaces/**
-Owns: CODE web/frontend/src/components/reviews/**
-Owns: CODE web/frontend/src/routes/-pr-navigation.ts
+Owns: CODE web/frontend/src/lib/pwa-notifications.ts
 Owns: CODE web/frontend/src/routes/event-sources.tsx
 Owns: CODE web/frontend/src/routes/events.tsx
-Owns: CODE web/frontend/src/routes/pull-requests.tsx
-Owns: CODE web/frontend/src/routes/pull-requests_*.tsx
-Owns: CODE web/frontend/src/routes/reviews.tsx
+Owns: CODE web/frontend/src/routes/development.tsx
+Owns: CODE web/frontend/src/routes/development_*.tsx
+Owns: CODE web/frontend/src/routes/notifications.tsx
+Owns: CODE web/frontend/src/routes/notifications_*.tsx
+Owns: CODE web/frontend/src/routes/pull-requests*.tsx
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
 Owns: CONFIG.events.ingress.webhooks*
 Owns: CONFIG.events.ingress.channels*
-Owns: CONFIG.pr_lifecycle
-Owns: CONFIG.pr_lifecycle*
+Owns: CONFIG.development
+Owns: CONFIG.development*
 Owns: HTTP POST /webhooks/events/*
 Owns: HTTP GET /runtime/eventing/*
 Owns: HTTP POST /runtime/eventing/events/*/replay
-Owns: HTTP * /runtime/eventing/pr-workspaces*
+Owns: HTTP * /runtime/eventing/development-workspaces*
 Owns: HTTP /api/events*
-Owns: HTTP * /api/pr-workspaces*
-Owns: HTTP GET /api/pr-lifecycle/workflow-configurations
-Owns: HTTP PUT /api/pr-lifecycle/workflow-configurations
-Owns: HTTP GET /api/pr-lifecycle/repository-assignments
-Owns: HTTP PUT /api/pr-lifecycle/repository-assignments
+Owns: HTTP * /api/development-workspaces*
+Owns: HTTP * /api/notifications*
+Owns: HTTP * /api/notification-views*
+Owns: HTTP * /api/notification-settings*
+Owns: HTTP * /api/push-subscriptions*
+Owns: HTTP GET /api/development/workflow-configurations
+Owns: HTTP PUT /api/development/workflow-configurations
+Owns: HTTP GET /api/development/repositories
+Owns: HTTP PUT /api/development/repositories
 Owns: CLI cmd/picoclaw/internal/events/*
 Owns: TEST pkg/eventing/*
 Owns: TEST pkg/eventing/webhook/*
 Owns: TEST pkg/eventing/channelmessage/*
+Owns: TEST pkg/developmentnotifications/*
 Owns: TEST pkg/prlifecycle/*
 Owns: TEST pkg/prworkspace/*
 Owns: TEST pkg/reviews/*
@@ -248,18 +273,23 @@ Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_*
 Owns: TEST pkg/gateway/pr_workspace_*
+Owns: TEST pkg/gateway/development_*
 Owns: TEST cmd/picoclaw/internal/events/*
 Owns: TEST web/backend/api/events_test.go
 Owns: TEST web/backend/api/pr_workspaces_test.go
 Owns: TEST web/backend/api/pr_lifecycle_workflow_configurations_test.go
 Owns: TEST web/frontend/src/api/event-sources.test.ts
 Owns: TEST web/frontend/src/api/events.test.ts
-Owns: TEST web/frontend/src/api/pr-workspaces.test.ts
+Owns: TEST web/frontend/src/api/development-workspaces.test.ts
+Owns: TEST web/frontend/src/api/notifications.test.ts
 Owns: TEST web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts
 Owns: TEST web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts
 Owns: TEST web/frontend/src/components/events/*
+Owns: TEST web/frontend/src/components/development-workspaces/*
+Owns: TEST web/frontend/src/components/notifications/*
 Owns: TEST web/frontend/src/components/pr-workspaces/*
-Owns: TEST web/frontend/src/routes/-pull-requests*
+Owns: TEST web/frontend/src/lib/pwa-notifications.test.ts
+Owns: TEST web/frontend/src/routes/-development.test.ts
 Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 
 ## Auxiliary Interfaces
@@ -267,14 +297,17 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `events.*` | Opt-in ingress, storage, redaction, connector, scope, and polling policy. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-022` through `FR-EVENT-AUTOMATION-040` |
-| Config | `pr_lifecycle.*` | Named Workflow configurations, one default, exact repository assignments and atomic `(workflow-ref, gate-ref)` action overrides, plus independent adaptive nudge bounds, monotonic scope-size thresholds, and deferred-issue mode `off`, `ask`, or `automatic`. | `FR-EVENT-AUTOMATION-082` through `FR-EVENT-AUTOMATION-084` |
-| Storage | eventing SQLite schema v19 | Generic event/workflow durability plus the unified PR aggregate and destructive v18 PR cutover. | `FR-EVENT-AUTOMATION-002` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-082` through `FR-EVENT-AUTOMATION-084` |
-| HTTP | `/runtime/eventing/pr-workspaces*` | PID-bearer-protected canonical aggregate reads and version/request/head-fenced mutations. | `FR-EVENT-AUTOMATION-082` through `FR-EVENT-AUTOMATION-084` |
-| HTTP | `/api/pr-workspaces*` | Authenticated launcher proxy of the protected workspace tree. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-084` |
-| HTTP | `GET/PUT /api/pr-lifecycle/workflow-configurations` | Strict kebab-case workflow catalog/settings projection and revision-fenced replacement that preserves repository assignments. | `FR-EVENT-AUTOMATION-081`, `FR-EVENT-AUTOMATION-082` |
-| HTTP | `GET/PUT /api/pr-lifecycle/repository-assignments` | Safe name/deferred-policy summaries plus revision-fenced assignment replacement that preserves workflow configuration. | `FR-EVENT-AUTOMATION-081`, `FR-EVENT-AUTOMATION-082` |
-| UI | `/pull-requests` | Unified portfolio, workspace lifecycle, deferred work, publications, workflow-configuration editor, and separate repository-assignment editor. | `FR-EVENT-AUTOMATION-080`, `FR-EVENT-AUTOMATION-081` |
-| Go API | `prworkspace.Service`, `Store`, `IsolatedAI`, evidence, gate, repair, validation, and publisher interfaces | One strict aggregate service; model, workflow, Git, CI, and provider effects enter only through narrow injected capabilities. | `FR-EVENT-AUTOMATION-082` through `FR-EVENT-AUTOMATION-084` |
+| Config | `development.*` | Configured repository descriptors; named Workflow configurations; exact repository assignments and Gate overrides; strict/relaxed scope-disposition default plus per-type prompt; adaptive nudge bounds; size thresholds; and independent follow-up issue mode `off`, `ask`, or `automatic`. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-085` |
+| Storage | eventing SQLite schema v20 | Generic event/workflow durability plus development aggregates, notifications, saved views, owner-only push state, and destructive v18/v19 PR-state cutover. | `FR-EVENT-AUTOMATION-002` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-090` |
+| HTTP | `/runtime/eventing/development-workspaces*` | PID-bearer-protected canonical aggregate, conversation, code, repository, notification, view, setting, and subscription contracts. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-090` |
+| HTTP | `/api/development-workspaces*` | Authenticated launcher proxy for strict intake, aggregate reads/mutations, conversation, and revision-fenced code browsing. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-087` |
+| HTTP | `/api/notifications*`, `/api/notification-views*`, `/api/notification-settings*`, `/api/push-subscriptions*` | Authenticated notification query/detail/neighbors/bulk/stream, revisioned saved-view/settings, and per-device Web Push management. | `FR-EVENT-AUTOMATION-088` through `FR-EVENT-AUTOMATION-090` |
+| HTTP | `GET/PUT /api/development/workflow-configurations` | Strict kebab-case workflow catalog/settings projection and revision-fenced replacement that preserves repository assignments. | `FR-EVENT-AUTOMATION-081`, `FR-EVENT-AUTOMATION-082` |
+| HTTP | `GET/PUT /api/development/repositories` | Safe verified repository descriptors, policy summaries, default selection, and revision-fenced assignment replacement that preserves Workflow configuration. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-082` |
+| UI | `/development*` | Portfolio, mutually exclusive intake, workspace tabs/chat/code inspection, policy editor, and repository routing. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-087` |
+| UI | `/notifications*` | Responsive notification inbox/detail, query/sort/filter, saved views, bulk actions, workspace navigation, and mobile push settings. | `FR-EVENT-AUTOMATION-088` through `FR-EVENT-AUTOMATION-090` |
+| File | `site.webmanifest`, `service-worker.js` | Installable launcher metadata, confined static caching, Web Push display/click handling, and badge refresh. | `FR-EVENT-AUTOMATION-090` |
+| Go API | `prworkspace.Service`, `developmentnotifications`, `Store`, `IsolatedAI`, evidence, gate, repair, validation, browser, notification, and publisher interfaces | One strict aggregate service; model, workflow, Git, CI, provider, notification, and push effects enter only through narrow injected capabilities. | `FR-EVENT-AUTOMATION-080` through `FR-EVENT-AUTOMATION-090` |
 
 ## Algorithms And Ordering
 
@@ -288,12 +321,22 @@ starting an unknown prior execution.
 
 ### Workspace intake and charter
 
-Resolve a pull request through one provider adapter, cross-bind numeric identity,
-origin, repository, pull URL/number, author, base/head, ownership, writability,
-and narrow capabilities, then observe again around exact diff acquisition.
-Create or refresh through workspace version/request fences. Drafting a charter
-may use isolated structured AI, but only an explicitly confirmed charter
-revision supplies lifecycle authority.
+Strictly decode one intake variant before provider work. Issue intake binds an
+open provider issue to its writable repository and current default-branch tip.
+Brief intake binds immutable text to one configured repository identity and its
+default-branch tip. Pull-request intake cross-binds provider/repository/PR IDs,
+URL/number, author, base/head, state, ownership, writability, and narrow
+capabilities. Persist a deterministic `devw_` identity from provider origin,
+repository, source kind, and source ID. Drafting a charter may use isolated
+structured AI, but only a confirmed charter revision supplies lifecycle
+authority.
+
+Confirmed issue/brief work enters feature planning. Build a bounded structured
+plan from the untrusted source, charter, repository/base metadata, and effective
+scope prompt; persist work items as findings and apply scope dispositions before
+implementation. Confirmed pickup work enters the exact provider-diff review
+flow. The two paths join at triage/implementation and never switch source or
+intent.
 
 ### Review, triage, and correction
 
@@ -329,22 +372,25 @@ nested-wait implementation.
 
 ### Implementation and completion
 
-Require ownership, writable exact head, confirmed charter, and eligible in-scope
-findings. Project the same canonical facts bundle for implementation, acquire a
-pinned workspace, adopt a deterministic private line, run the edit-only repair
-agent, and snapshot the exact candidate. Run the isolated scope audit before
+Require writable exact source/base authority, confirmed charter, and eligible
+in-scope findings. Resolve the repository's strict/relaxed rule by primary work
+type. Strict admits exact compatible small work, gates exact larger work, and
+defers adjacent/follow-up work. Relaxed may admit relevant `S1`/`S2` `XS`/`S` findings only at
+confidence `>= 0.80`; infrastructure/release/dependency/migration/generated or
+broad-cleanup findings default deferred unless the charter names that domain.
+The optional custom prompt only tightens or clarifies that classifier.
+
+Project the canonical facts bundle, acquire a pinned workspace, adopt a
+deterministic private line, apply queued in-scope steering, run the edit-only
+repair agent, and snapshot the exact candidate. Run isolated scope audit before
 local validation. Hard S2/S3 or type-incompatible candidate code stops there;
-only an eligible candidate validates, receives a completion audit, and can be
-finalized. Persist separate digests for the full edit prompt and scope audit.
-Policy-selected S0/S1 cases use configured gates. Candidate-present completion
-findings must cite a path, module, full `@@` header, and semantic-line count that
-matches the persisted exact scope audit; follow-up work has no candidate hunk.
-A candidate-present change must be removed, repaired, or covered by a
-reconfirmed charter; marking it deferred does not satisfy the audit. Commit and
-park only verified evidence. The completion audit checks every acceptance
-criterion and in-scope finding, then challenges its persisted coverage in
-adaptive “anything else” rounds before all applicable completion/scope gates
-may finalize it.
+only an eligible candidate validates, receives completion audit, and can be
+finalized. Persist separate digests for edit and scope-audit prompts.
+Candidate-present completion findings must cite exact path/module/hunk evidence.
+They must be removed, repaired, or covered by a reconfirmed charter; a deferred
+label does not make present code safe. Commit and park only verified evidence.
+Completion checks every criterion/finding, then challenges coverage in bounded
+additional rounds before completion/scope gates may finalize it.
 
 ### Gates and publications
 
@@ -358,18 +404,61 @@ not assign lifecycle meaning; PR application logic branches on the returned
 field IDs and option IDs. A Human or composed workflow wait resumes the same
 private run without repeating completed work.
 
-Freeze and digest the complete review, branch, or issue request, then queue each
-publication independently after its own gate. Dispatch only the frozen payload
-and private marker or pinned-line fence. Deferred issue mode `off` refuses and
-cancels queued issue work, `ask` uses the configured publication gate, and
-`automatic` uses the workflow's deterministic default action. A publication
-gate action that keeps work local suppresses its deferred group until explicit
-retry. Mark uncertain remote outcomes unknown. Reconcile only after its
-distinct gate: the application-specific `recheck-provider` value permits an
-exact review/issue-marker or remote-head observation, while `assume-failed`
-records the explicit assumption and unlocks a new deliberate request. Never
-infer issue absence from an inconclusive marker
-search, and never blindly retry an unknown effect.
+Freeze and digest the complete review, branch, PR-create, or issue request, then
+queue each publication independently after its gate. Pickup dispatches only the
+frozen pinned-line push to the existing PR branch. Feature publication
+create-only pushes a deterministic new branch, lists exact head/base PRs for the
+private marker, and creates a draft PR only when reconciliation proves none
+exists. Issue-sourced bodies add `Closes #<number>`. A successful created-PR
+snapshot remains attached to the same `devw_` aggregate.
+
+Deferred issue mode `off` refuses queued issue work, `ask` uses the configured
+publication gate, and `automatic` uses the workflow's deterministic default. A
+gate action that keeps work local suppresses its group until explicit retry.
+Mark uncertain remote outcomes unknown. Reconcile only after its distinct gate:
+`recheck-provider` permits exact marker/remote-tip observation, while
+`assume-failed` records the explicit assumption and unlocks a new deliberate
+request. Never infer absence from an inconclusive scan or blindly retry an
+unknown effect.
+
+### Conversation and code inspection
+
+Append conversation messages against exact conversation length. `ask` freezes
+charter, findings, provider, and optional candidate evidence for a no-action AI
+answer. `steer` first classifies scope. Out-of-charter steering persists
+`needs_clarification`; in-scope steering waits until the next implementation
+admission. Steering received after validation moves the aggregate back to
+implementation and stales queued branch publication, but cannot interrupt an
+already running or uncertain provider effect.
+
+Serve code only from a latest parked repair fence. Validate the exact line
+version/base/tip/tree before and after Git plumbing. Tree and blob reads accept
+only canonical repository paths and exact base/candidate revisions; reject
+symlink, submodule, binary, oversized, stale, or changed evidence. Diff reads
+filter the frozen unified diff by path and optionally attach safe base/candidate
+text. Monaco consumes these read-only projections and plain text remains the
+fallback.
+
+### Notification projection and mobile delivery
+
+After aggregate mutations, derive active notification drafts from waiting
+gates, unknown publications, failed/blocked execution, and steering
+clarification. Upsert by stable source key, preserve read/snooze state on
+same-generation retries, and resolve prior open rows whose conditions vanished.
+Inbox mutations compare each notification version. Parse advanced queries into
+a bounded typed AST, evaluate relative time against the page cursor's frozen
+instant, sort with deterministic ID tie-break, and bind cursors to query
+fingerprint.
+
+Generate VAPID identity when authenticated mobile-notification settings are
+first loaded; browser permission still waits for explicit device enablement.
+Persist private keys and subscription endpoints only in owner-only eventing
+storage. For a newly created/reopened critical or high item, attempt Web Push to
+each enabled device that lacks that generation, record successful delivery, and
+disable subscriptions after terminal `404`/`410` responses. Payload contains
+notification ID, reason, source key, and generation; repository appears only
+when enabled. Service-worker clicks open the exact authenticated detail route;
+the browser then fetches protected content.
 
 ## Cross-Feature Behavior
 
@@ -377,9 +466,11 @@ Workflows owns gate compilation, private frozen context, and human-task
 continuation. Git Workspaces owns pinned checkout, candidate, validation-root,
 commit, park, and push fences. Agent Conversations owns isolated no-tool review
 and edit-only local agents. Security owns credential separation, runtime bearer
-protection, network confinement, and private evidence projection. Launcher
-Management owns authenticated browser composition. Event Automation owns the PR
-aggregate and transition policy; no neighboring feature may advance it directly.
+protection, network confinement, private evidence projection, and owner-only
+push secrets. Launcher Management owns authenticated browser composition and
+shared PWA shell. Event Automation owns development aggregate transitions,
+notification/JQL semantics, workspace chat, and read-only Monaco integration;
+no neighboring feature may advance workspace state directly.
 
 Repository Reviews owns its separate ledger, controller, and publication
 semantics. It composes only the gateway's generation-bound GitHub issue
@@ -387,8 +478,8 @@ capability and the launcher's already authenticated bounded proxy. Gateway
 admission/reload releases that publication route with the old generation, and
 the shared issue-URL validator accepts repository-path case differences while
 still requiring the exact provider host/scheme, repository path, and positive
-numeric issue tail; none of this admits a repository review as an event or PR
-aggregate.
+numeric issue tail; none of this admits a repository review as an event or
+development aggregate.
 
 The `reviews` package is only a narrow GitHub provider/submission adapter and
 `prworkspace/localci` is only a reusable local validation engine. Neither is
@@ -396,21 +487,30 @@ a separate product, route, store, identity, worker, or UI.
 
 ## Failure And Edge Cases
 
-Malformed provider identities, stale aggregate or head revisions, mutable diff
-evidence, unconfirmed/revised charters, invalid PR types, malformed scope grades,
-type-incompatible work, invalid or unhandled Gate field values, failed
-validation, incomplete completion
-audits, missing narrow capabilities, unsafe publication URLs, and provider/Git
-drift fail before advancement.
+Mixed intake variants, malformed provider identities, stale aggregate,
+conversation, candidate, or head revisions, mutable diff evidence,
+unconfirmed/revised charters, invalid PR types, malformed scope grades,
+type-incompatible work, invalid Gate values, failed validation, incomplete
+completion audits, missing narrow capabilities, unsafe publication URLs, and
+provider/Git drift fail before advancement.
 
 A model returning no issues still receives the configured minimum review or
 completion nudges. A manual nudge challenges prior coverage rather than
 replaying the initial prompt. Duplicate fingerprints do not multiply findings.
 Nudge maximums bound cost. A correction never silently changes the charter, and
-an advisory message is never authority. Deferred follow-up work is never fixed
-opportunistically; candidate-present drift is never cured by a deferred label.
-S2/S3 work cannot be authorized by size alone. A branch push is not a merge; a
-review publication is not a branch push; an issue publication grants neither.
+an advisory or `ask` message is never authority. Strict mode defers related
+follow-up work; relaxed mode may include only small relevant high-confidence
+S1/S2 work inside hard type/infrastructure rules. Candidate-present drift is
+never cured by a deferred label, and S3 work cannot be authorized by size. A
+branch push is not a merge; draft-PR creation is not ready-for-review; an issue
+or review publication grants neither.
+
+Notification query syntax, values, sort fields, cursors, saved views, bulk
+versions, snooze deadlines, subscription endpoints/keys, and workspace targets
+are bounded and validated. Query text never becomes SQL. Code browsing rejects
+noncanonical paths and unsafe Git entry modes. Push permission denial, missing
+HTTPS, service-worker/Monaco load failure, or unsupported browser APIs retain
+the ordinary inbox and accessible text viewer.
 
 Unknown provider outcomes retain their exact marker/head fence and expose only
 gated reconciliation. An inconclusive provider scan remains unknown; a user may
@@ -418,8 +518,9 @@ explicitly assume failure through the gate before issuing a new request.
 Rejected deferred publication remains durably suppressed until explicit retry.
 Canceled or crashed operations resume from persisted aggregate, gate, request,
 operation-intent, frozen publication payload, and publication evidence without
-replaying a known completed gate or provider effect. Corrupt v18/v19 storage and
-pre-v18 versions fail closed.
+replaying a known completed gate or provider effect. Corrupt v18 retained state,
+corrupt v20 state, pre-v18 versions, and newer unknown versions fail closed;
+v19 workspace state is deliberately discarded during cutover.
 
 ## Acceptance Evidence
 
@@ -428,7 +529,7 @@ pre-v18 versions fail closed.
 | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004` | [pkg/eventing/envelope_test.go](../../pkg/eventing/envelope_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-003` | [pkg/eventing/redaction_test.go](../../pkg/eventing/redaction_test.go), [pkg/eventing/store_replay_redaction_test.go](../../pkg/eventing/store_replay_redaction_test.go) |
-| `FR-EVENT-AUTOMATION-005` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go) |
+| `FR-EVENT-AUTOMATION-005` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/schema_v19_cutover_sqlite_test.go](../../pkg/eventing/schema_v19_cutover_sqlite_test.go), [pkg/eventing/pr_workspace_store_sqlite_test.go](../../pkg/eventing/pr_workspace_store_sqlite_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go) |
 | `FR-EVENT-AUTOMATION-006`, `FR-EVENT-AUTOMATION-007` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-008`, `FR-EVENT-AUTOMATION-009` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go) |
 | `FR-EVENT-AUTOMATION-010`, `FR-EVENT-AUTOMATION-011` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
@@ -452,11 +553,17 @@ pre-v18 versions fail closed.
 | `FR-EVENT-AUTOMATION-038` | [pkg/workflows/origin.go](../../pkg/workflows/origin.go), [pkg/workflows/origin_test.go](../../pkg/workflows/origin_test.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_cancel_test.go](../../web/backend/api/workflow_cancel_test.go), [web/backend/api/workflow_event_context_test.go](../../web/backend/api/workflow_event_context_test.go), [web/frontend/src/api/events.ts](../../web/frontend/src/api/events.ts), [web/frontend/src/api/events.test.ts](../../web/frontend/src/api/events.test.ts), [web/frontend/src/api/workflows.ts](../../web/frontend/src/api/workflows.ts), [web/frontend/src/api/workflows.test.ts](../../web/frontend/src/api/workflows.test.ts), [web/frontend/src/components/workflows/workflow-run-origin.test.ts](../../web/frontend/src/components/workflows/workflow-run-origin.test.ts), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-EVENT-AUTOMATION-039` | [pkg/config/events_github_scope_test.go](../../pkg/config/events_github_scope_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/frontend/src/api/event-sources.test.ts](../../web/frontend/src/api/event-sources.test.ts), [web/frontend/src/components/events/event-sources-page.test.tsx](../../web/frontend/src/components/events/event-sources-page.test.tsx) |
 | `FR-EVENT-AUTOMATION-040` | [pkg/config/events_github_scope_test.go](../../pkg/config/events_github_scope_test.go), [pkg/eventing/githubpoll](../../pkg/eventing/githubpoll), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/frontend/src/api/event-sources.test.ts](../../web/frontend/src/api/event-sources.test.ts), [web/frontend/src/components/events/event-sources-page.test.tsx](../../web/frontend/src/components/events/event-sources-page.test.tsx) |
-| `FR-EVENT-AUTOMATION-080` | [web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/src/routes/-pull-requests.test.ts](../../web/frontend/src/routes/-pull-requests.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-EVENT-AUTOMATION-081` | [web/frontend/src/api/pr-workspaces.test.ts](../../web/frontend/src/api/pr-workspaces.test.ts), [web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts), [web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts](../../web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts), [web/frontend/src/components/pr-workspaces/pr-lifecycle-repository-assignments-page.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-lifecycle-repository-assignments-page.test.tsx), [web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-workspace-pages.test.tsx), [web/frontend/src/routes/-pull-requests-route.test.tsx](../../web/frontend/src/routes/-pull-requests-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-EVENT-AUTOMATION-080` | [pkg/prworkspace/service_test.go](../../pkg/prworkspace/service_test.go), [web/backend/api/pr_workspaces_test.go](../../web/backend/api/pr_workspaces_test.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-intake-page.test.tsx](../../web/frontend/src/components/development-workspaces/development-intake-page.test.tsx), [web/frontend/src/routes/-development.test.ts](../../web/frontend/src/routes/-development.test.ts) |
+| `FR-EVENT-AUTOMATION-081` | [web/frontend/src/components/development-workspaces/development-pages.test.tsx](../../web/frontend/src/components/development-workspaces/development-pages.test.tsx), [web/frontend/src/components/development-workspaces/development-action-panel.test.tsx](../../web/frontend/src/components/development-workspaces/development-action-panel.test.tsx), [web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts), [web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts](../../web/frontend/src/api/pr-lifecycle-repository-assignments.test.ts), [web/frontend/src/components/pr-workspaces/pr-lifecycle-repository-assignments-page.test.tsx](../../web/frontend/src/components/pr-workspaces/pr-lifecycle-repository-assignments-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-EVENT-AUTOMATION-082` | [pkg/prworkspace/service_test.go](../../pkg/prworkspace/service_test.go), [pkg/prworkspace/context_test.go](../../pkg/prworkspace/context_test.go), [pkg/prworkspace/implementation_test.go](../../pkg/prworkspace/implementation_test.go), [pkg/prworkspace/operations_candidate_test.go](../../pkg/prworkspace/operations_candidate_test.go), [pkg/prworkspace/lifecycle_resume_publication_test.go](../../pkg/prworkspace/lifecycle_resume_publication_test.go), [pkg/prworkspace/scope_test.go](../../pkg/prworkspace/scope_test.go), [pkg/prworkspace/decisions_test.go](../../pkg/prworkspace/decisions_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
 | `FR-EVENT-AUTOMATION-083` | [pkg/prworkspace/nudge_test.go](../../pkg/prworkspace/nudge_test.go), [pkg/prworkspace/nudge_learning_test.go](../../pkg/prworkspace/nudge_learning_test.go), [pkg/prworkspace/prompts_test.go](../../pkg/prworkspace/prompts_test.go), [pkg/prworkspace/context_test.go](../../pkg/prworkspace/context_test.go), [pkg/prworkspace/deferred_test.go](../../pkg/prworkspace/deferred_test.go), [pkg/prworkspace/eventing_store_sqlite_test.go](../../pkg/prworkspace/eventing_store_sqlite_test.go) |
-| `FR-EVENT-AUTOMATION-084` | [pkg/prworkspace/lifecycle_resume_publication_test.go](../../pkg/prworkspace/lifecycle_resume_publication_test.go), [pkg/prworkspace/publication_recovery_test.go](../../pkg/prworkspace/publication_recovery_test.go), [pkg/prworkspace/eventing_store_sqlite_test.go](../../pkg/prworkspace/eventing_store_sqlite_test.go), [pkg/eventing/schema_v19_cutover_sqlite_test.go](../../pkg/eventing/schema_v19_cutover_sqlite_test.go), [pkg/eventing/pr_workspace_store_sqlite_test.go](../../pkg/eventing/pr_workspace_store_sqlite_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/gateway/event_review_readiness_test.go](../../pkg/gateway/event_review_readiness_test.go) |
+| `FR-EVENT-AUTOMATION-084` | [pkg/prworkspace/lifecycle_resume_publication_test.go](../../pkg/prworkspace/lifecycle_resume_publication_test.go), [pkg/prworkspace/publication_recovery_test.go](../../pkg/prworkspace/publication_recovery_test.go), [pkg/prworkspace/implementation_authorization_test.go](../../pkg/prworkspace/implementation_authorization_test.go), [pkg/gitworkspace/development_line_push_test.go](../../pkg/gitworkspace/development_line_push_test.go), [pkg/gateway/pr_workspace_implementation_test.go](../../pkg/gateway/pr_workspace_implementation_test.go), [pkg/gateway/pr_workspace_publication_restart_integration_test.go](../../pkg/gateway/pr_workspace_publication_restart_integration_test.go) |
+| `FR-EVENT-AUTOMATION-085` | [pkg/config/pr_lifecycle_test.go](../../pkg/config/pr_lifecycle_test.go), [pkg/prworkspace/implementation_test.go](../../pkg/prworkspace/implementation_test.go), [pkg/prworkspace/scope_test.go](../../pkg/prworkspace/scope_test.go), [web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts](../../web/frontend/src/api/pr-lifecycle-workflow-configurations.test.ts) |
+| `FR-EVENT-AUTOMATION-086` | [pkg/prworkspace/implementation_authorization_test.go](../../pkg/prworkspace/implementation_authorization_test.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-chat.test.tsx](../../web/frontend/src/components/development-workspaces/development-chat.test.tsx) |
+| `FR-EVENT-AUTOMATION-087` | [pkg/gateway/pr_workspace_candidate_checkpoint_test.go](../../pkg/gateway/pr_workspace_candidate_checkpoint_test.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-code-browser.test.tsx](../../web/frontend/src/components/development-workspaces/development-code-browser.test.tsx) |
+| `FR-EVENT-AUTOMATION-088` | [pkg/developmentnotifications/model_test.go](../../pkg/developmentnotifications/model_test.go), [pkg/eventing/pr_workspace_store_sqlite_test.go](../../pkg/eventing/pr_workspace_store_sqlite_test.go), [web/frontend/src/api/notifications.test.ts](../../web/frontend/src/api/notifications.test.ts), [web/frontend/src/components/notifications/notification-inbox-page.test.tsx](../../web/frontend/src/components/notifications/notification-inbox-page.test.tsx) |
+| `FR-EVENT-AUTOMATION-089` | [pkg/developmentnotifications/query_test.go](../../pkg/developmentnotifications/query_test.go), [pkg/developmentnotifications/pagination_test.go](../../pkg/developmentnotifications/pagination_test.go), [pkg/developmentnotifications/saved_view_test.go](../../pkg/developmentnotifications/saved_view_test.go), [web/frontend/src/components/notifications/notification-query.test.ts](../../web/frontend/src/components/notifications/notification-query.test.ts), [web/frontend/src/components/notifications/notification-inbox-page.test.tsx](../../web/frontend/src/components/notifications/notification-inbox-page.test.tsx) |
+| `FR-EVENT-AUTOMATION-090` | [web/frontend/src/lib/pwa-notifications.test.ts](../../web/frontend/src/lib/pwa-notifications.test.ts), [web/frontend/src/components/notifications/push-notification-settings.test.tsx](../../web/frontend/src/components/notifications/push-notification-settings.test.tsx), [web/frontend/src/components/notifications/notification-inbox-page.test.tsx](../../web/frontend/src/components/notifications/notification-inbox-page.test.tsx) |
 
 ## Implementation Anchors
 
@@ -465,8 +572,10 @@ pre-v18 versions fail closed.
 - [pkg/eventing/pr_workspace_schema_sqlite.go](../../pkg/eventing/pr_workspace_schema_sqlite.go)
 - [pkg/eventing/pr_workspace_store_sqlite.go](../../pkg/eventing/pr_workspace_store_sqlite.go)
 - [pkg/eventing/pr_workspace_workers_sqlite.go](../../pkg/eventing/pr_workspace_workers_sqlite.go)
+- [pkg/eventing/development_notifications_sqlite.go](../../pkg/eventing/development_notifications_sqlite.go)
 - [pkg/eventing/operator](../../pkg/eventing/operator)
 - [pkg/eventing/webhook](../../pkg/eventing/webhook)
+- [pkg/developmentnotifications](../../pkg/developmentnotifications)
 - [pkg/prworkspace](../../pkg/prworkspace)
 - [pkg/reviews/provider.go](../../pkg/reviews/provider.go)
 - [pkg/reviews/submitter.go](../../pkg/reviews/submitter.go)
@@ -481,7 +590,9 @@ pre-v18 versions fail closed.
 - [pkg/gateway/pr_workspace_issues.go](../../pkg/gateway/pr_workspace_issues.go)
 - [web/backend/api/pr_workspaces.go](../../web/backend/api/pr_workspaces.go)
 - [web/backend/api/pr_lifecycle_workflow_configurations.go](../../web/backend/api/pr_lifecycle_workflow_configurations.go)
-- [web/frontend/src/routes/pull-requests.tsx](../../web/frontend/src/routes/pull-requests.tsx)
+- [web/frontend/src/routes/development.tsx](../../web/frontend/src/routes/development.tsx)
+- [web/frontend/src/routes/notifications.tsx](../../web/frontend/src/routes/notifications.tsx)
+- [web/frontend/src/components/development-workspaces](../../web/frontend/src/components/development-workspaces)
+- [web/frontend/src/components/notifications](../../web/frontend/src/components/notifications)
 - [web/frontend/src/components/pr-workspaces](../../web/frontend/src/components/pr-workspaces)
-- [Pull Request Workspaces](../guides/pull-request-workspaces.md)
-- [PR Workspace V19 Cutover](../migration/pr-workspace-v19-cutover.md)
+- [Development Workspaces](../guides/development-workspaces.md)

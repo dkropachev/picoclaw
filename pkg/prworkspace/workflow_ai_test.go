@@ -44,7 +44,7 @@ func TestWorkflowAIRunnerCapturesPrivateSourceProvenance(t *testing.T) {
 		Operation: "review.initial", SystemPrompt: "Review privately.",
 		UserPrompt: "Review this diff.", Schema: map[string]any{"type": "object"},
 		SourceExecutionID: "aix_11111111111111111111111111111111",
-		SourceWorkspaceID: "prw_11111111111111111111111111111111",
+		SourceWorkspaceID: "devw_11111111111111111111111111111111",
 		SourceBinding:     "sha256:source-binding",
 	})
 	if err != nil {

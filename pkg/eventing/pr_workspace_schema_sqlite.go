@@ -10,23 +10,31 @@ import (
 const (
 	schemaV19PRWorkspacesTable = `CREATE TABLE IF NOT EXISTS pr_workspaces (
 	id TEXT PRIMARY KEY,
+	intent TEXT NOT NULL CHECK (intent IN ('implement_feature', 'pickup_pr')),
+	source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'brief', 'pull_request')),
+	source_id TEXT NOT NULL CHECK (source_id <> ''),
+	source_number INTEGER NOT NULL DEFAULT 0 CHECK (source_number >= 0 AND source_number <= 2147483647),
 	provider TEXT NOT NULL CHECK (provider <> ''),
 	provider_origin TEXT NOT NULL CHECK (provider_origin <> ''),
 	repository_id TEXT NOT NULL CHECK (repository_id <> ''),
 	repository TEXT NOT NULL COLLATE NOCASE CHECK (repository <> ''),
-	pull_request_id TEXT NOT NULL CHECK (pull_request_id <> ''),
-	pull_number INTEGER NOT NULL CHECK (pull_number > 0 AND pull_number <= 2147483647),
+	pull_request_id TEXT NOT NULL,
+	pull_number INTEGER NOT NULL CHECK (pull_number >= 0 AND pull_number <= 2147483647),
 	provider_head_sha TEXT NOT NULL CHECK (provider_head_sha <> ''),
 	owned INTEGER NOT NULL CHECK (owned IN (0, 1)),
 	head_writable INTEGER NOT NULL CHECK (head_writable IN (0, 1)),
-	phase TEXT NOT NULL CHECK (phase IN ('intake', 'charter', 'review', 'triage', 'implementation', 'validation', 'completion_audit', 'publication', 'complete')),
+	phase TEXT NOT NULL CHECK (phase IN ('intake', 'charter', 'planning', 'review', 'triage', 'implementation', 'validation', 'completion_audit', 'publication', 'complete')),
 	execution_state TEXT NOT NULL CHECK (execution_state IN ('queued', 'running', 'waiting_gate', 'waiting_user', 'succeeded', 'failed', 'blocked', 'canceled', 'stale', 'unknown')),
 	current_provider_ordinal INTEGER NOT NULL CHECK (current_provider_ordinal > 0),
 	active_charter_id TEXT NOT NULL DEFAULT '',
 	version INTEGER NOT NULL CHECK (version > 0),
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
-	UNIQUE (provider, provider_origin, repository_id, pull_request_id),
+	UNIQUE (provider, provider_origin, repository_id, source_kind, source_id),
+	CHECK (
+		(intent = 'pickup_pr' AND source_kind = 'pull_request' AND pull_request_id <> '' AND pull_number > 0) OR
+		(intent = 'implement_feature' AND source_kind IN ('issue', 'brief'))
+	),
 	CHECK (updated_at >= created_at)
 );`
 	schemaV19PRWorkspacesListIndex = `CREATE INDEX IF NOT EXISTS pr_workspaces_list
@@ -35,6 +43,9 @@ const (
 	ON pr_workspaces(provider_origin, repository_id, updated_at DESC, id DESC);`
 	schemaV19PRWorkspacesStateIndex = `CREATE INDEX IF NOT EXISTS pr_workspaces_state
 	ON pr_workspaces(phase, execution_state, updated_at DESC, id DESC);`
+	schemaV20PRWorkspacesPullIndex = `CREATE UNIQUE INDEX IF NOT EXISTS pr_workspaces_pull
+	ON pr_workspaces(provider, provider_origin, repository_id, pull_request_id)
+	WHERE pull_request_id <> '';`
 
 	schemaV19PRProviderSnapshotsTable = `CREATE TABLE IF NOT EXISTS pr_provider_snapshots (
 	id TEXT PRIMARY KEY,
@@ -376,10 +387,49 @@ const (
 	schemaV19PRWorkspaceHistoryReplayIndex = `CREATE INDEX IF NOT EXISTS pr_workspace_history_replay
 	ON pr_workspace_history(workspace_id, version ASC, sequence ASC);`
 
+	schemaV20DevelopmentNotificationsTable = `CREATE TABLE IF NOT EXISTS development_notifications (
+	id TEXT PRIMARY KEY,
+	source_key TEXT NOT NULL UNIQUE,
+	workspace_id TEXT NOT NULL REFERENCES pr_workspaces(id) ON DELETE CASCADE,
+	generation INTEGER NOT NULL CHECK (generation > 0),
+	status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'archived')),
+	priority TEXT NOT NULL CHECK (priority IN ('critical', 'high', 'medium', 'low')),
+	version INTEGER NOT NULL CHECK (version > 0),
+	payload_json BLOB NOT NULL CHECK (length(payload_json) >= 2 AND length(payload_json) <= 1048576),
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	CHECK (updated_at >= created_at)
+);`
+	schemaV20DevelopmentNotificationsListIndex = `CREATE INDEX IF NOT EXISTS development_notifications_list
+	ON development_notifications(updated_at DESC, id DESC);`
+	schemaV20DevelopmentNotificationsWorkspaceIndex = `CREATE INDEX IF NOT EXISTS development_notifications_workspace
+	ON development_notifications(workspace_id, status, updated_at DESC, id DESC);`
+	schemaV20DevelopmentNotificationsPushIndex = `CREATE INDEX IF NOT EXISTS development_notifications_push
+	ON development_notifications(updated_at DESC, id DESC)
+	WHERE status = 'open' AND priority IN ('critical','high');`
+	schemaV20DevelopmentNotificationViewsTable = `CREATE TABLE IF NOT EXISTS development_notification_views (
+	id TEXT PRIMARY KEY CHECK (id = 'singleton'),
+	version INTEGER NOT NULL CHECK (version > 0),
+	payload_json BLOB NOT NULL CHECK (length(payload_json) >= 2 AND length(payload_json) <= 1048576),
+	updated_at INTEGER NOT NULL
+);`
+	schemaV20DevelopmentNotificationRequestsTable = `CREATE TABLE IF NOT EXISTS development_notification_requests (
+	request_id TEXT PRIMARY KEY,
+	request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+	result_json BLOB NOT NULL CHECK (length(result_json) >= 2 AND length(result_json) <= 1048576),
+	created_at INTEGER NOT NULL
+);`
+	schemaV20DevelopmentPushStateTable = `CREATE TABLE IF NOT EXISTS development_push_state (
+	id TEXT PRIMARY KEY CHECK (id = 'singleton'),
+	version INTEGER NOT NULL CHECK (version > 0),
+	payload_json BLOB NOT NULL CHECK (length(payload_json) >= 2 AND length(payload_json) <= 1048576),
+	updated_at INTEGER NOT NULL
+);`
+
 	schemaV19PRWorkspace = schemaV19PRWorkspacesTable + "\n" +
 		schemaV19PRWorkspacesListIndex + "\n" +
 		schemaV19PRWorkspacesRepositoryIndex + "\n" +
-		schemaV19PRWorkspacesStateIndex + "\n" +
+		schemaV19PRWorkspacesStateIndex + "\n" + schemaV20PRWorkspacesPullIndex + "\n" +
 		schemaV19PRProviderSnapshotsTable + "\n" + schemaV19PRProviderSnapshotsListIndex + "\n" +
 		schemaV19PRCharterRevisionsTable + "\n" + schemaV19PRCharterRevisionsListIndex + "\n" +
 		schemaV19PRStageRunsTable + "\n" + schemaV19PRStageRunsListIndex + "\n" +
@@ -402,7 +452,11 @@ const (
 		schemaV19PRActivityTable + "\n" + schemaV19PRActivityListIndex + "\n" +
 		schemaV19PRIngressCutoverWatermarksTable + "\n" + schemaV19PRIngressCutoverWatermarksPositionIndex + "\n" +
 		schemaV19PRWorkspaceRequestsTable + "\n" + schemaV19PRWorkspaceRequestsWorkspaceIndex + "\n" +
-		schemaV19PRWorkspaceHistoryTable + "\n" + schemaV19PRWorkspaceHistoryReplayIndex
+		schemaV19PRWorkspaceHistoryTable + "\n" + schemaV19PRWorkspaceHistoryReplayIndex + "\n" +
+		schemaV20DevelopmentNotificationsTable + "\n" + schemaV20DevelopmentNotificationsListIndex + "\n" +
+		schemaV20DevelopmentNotificationsWorkspaceIndex + "\n" + schemaV20DevelopmentNotificationsPushIndex + "\n" +
+		schemaV20DevelopmentNotificationViewsTable + "\n" +
+		schemaV20DevelopmentNotificationRequestsTable + "\n" + schemaV20DevelopmentPushStateTable
 )
 
 type prWorkspaceSchemaEntry struct {
@@ -527,7 +581,15 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 					binary("provider"),
 					binary("provider_origin"),
 					binary("repository_id"),
-					binary("pull_request_id"),
+					binary("source_kind"),
+					binary("source_id"),
+				},
+			},
+			{
+				name: "pr_workspaces_pull", origin: "c", partial: true,
+				columns: []schemaIndexColumn{
+					binary("provider"), binary("provider_origin"),
+					binary("repository_id"), binary("pull_request_id"),
 				},
 			},
 		},
@@ -538,6 +600,7 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 		{name: "pr_workspaces_list", createSQL: schemaV19PRWorkspacesListIndex},
 		{name: "pr_workspaces_repository", createSQL: schemaV19PRWorkspacesRepositoryIndex},
 		{name: "pr_workspaces_state", createSQL: schemaV19PRWorkspacesStateIndex},
+		{name: "pr_workspaces_pull", createSQL: schemaV20PRWorkspacesPullIndex},
 	} {
 		if err := validateSchemaIndex(ctx, conn, index); err != nil {
 			return err
@@ -637,9 +700,45 @@ func validateSchemaV19PRWorkspace(ctx context.Context, conn *sql.Conn) error {
 	}); err != nil {
 		return err
 	}
-	return validateSchemaIndex(
+	if err := validateSchemaIndex(
 		ctx,
 		conn,
 		schemaIndexSpec{name: "pr_workspace_history_replay", createSQL: schemaV19PRWorkspaceHistoryReplayIndex},
-	)
+	); err != nil {
+		return err
+	}
+	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
+		name: "development_notifications", createSQL: schemaV20DevelopmentNotificationsTable,
+		uniqueIndexes: []schemaUniqueIndexSpec{
+			{origin: "pk", columns: []schemaIndexColumn{binary("id")}},
+			{origin: "u", columns: []schemaIndexColumn{binary("source_key")}},
+		},
+	}); err != nil {
+		return err
+	}
+	for _, index := range []schemaIndexSpec{
+		{name: "development_notifications_list", createSQL: schemaV20DevelopmentNotificationsListIndex},
+		{name: "development_notifications_workspace", createSQL: schemaV20DevelopmentNotificationsWorkspaceIndex},
+		{name: "development_notifications_push", createSQL: schemaV20DevelopmentNotificationsPushIndex},
+	} {
+		if err := validateSchemaIndex(ctx, conn, index); err != nil {
+			return err
+		}
+	}
+	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
+		name: "development_notification_views", createSQL: schemaV20DevelopmentNotificationViewsTable,
+		uniqueIndexes: []schemaUniqueIndexSpec{{origin: "pk", columns: []schemaIndexColumn{binary("id")}}},
+	}); err != nil {
+		return err
+	}
+	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
+		name: "development_notification_requests", createSQL: schemaV20DevelopmentNotificationRequestsTable,
+		uniqueIndexes: []schemaUniqueIndexSpec{{origin: "pk", columns: []schemaIndexColumn{binary("request_id")}}},
+	}); err != nil {
+		return err
+	}
+	return validateSchemaTable(ctx, conn, schemaTableSpec{
+		name: "development_push_state", createSQL: schemaV20DevelopmentPushStateTable,
+		uniqueIndexes: []schemaUniqueIndexSpec{{origin: "pk", columns: []schemaIndexColumn{binary("id")}}},
+	})
 }

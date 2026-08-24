@@ -1,7 +1,7 @@
 import {
-  PRWorkspaceAPIError,
-  requestPRWorkspaceJSON,
-} from "@/api/pr-workspaces"
+  DevelopmentWorkspaceAPIError as PRWorkspaceAPIError,
+  requestDevelopmentJSON as requestPRWorkspaceJSON,
+} from "@/api/development-workspaces"
 
 export interface PRLifecycleWorkflowConfigurationSummary {
   name: string
@@ -9,6 +9,7 @@ export interface PRLifecycleWorkflowConfigurationSummary {
 }
 
 export interface PRLifecycleRepositoryAssignmentSnapshot {
+  repositories: Record<string, { name: string; defaultBranch: string }>
   workflowConfigurations: Record<
     string,
     PRLifecycleWorkflowConfigurationSummary
@@ -26,6 +27,7 @@ export interface PutPRLifecycleRepositoryAssignmentsInput {
   expectedConfigRevision: string
   requestID: string
   repositoryAssignments: Record<string, string>
+  repositories?: Record<string, { name: string; defaultBranch: string }>
 }
 
 export interface PRLifecycleRepositoryAssignmentIssue {
@@ -112,7 +114,7 @@ export async function getPRLifecycleRepositoryAssignments(
 ): Promise<PRLifecycleRepositoryAssignmentSnapshot> {
   return projectSnapshot(
     await requestPRWorkspaceJSON<unknown>(
-      "/api/pr-lifecycle/repository-assignments",
+      "/api/development/repositories",
       undefined,
       signal,
     ),
@@ -125,7 +127,7 @@ export async function putPRLifecycleRepositoryAssignments(
 ): Promise<PRLifecycleRepositoryAssignmentSnapshot> {
   return projectSnapshot(
     await requestPRWorkspaceJSON<unknown>(
-      "/api/pr-lifecycle/repository-assignments",
+      "/api/development/repositories",
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -133,6 +135,17 @@ export async function putPRLifecycleRepositoryAssignments(
           "expected-config-revision": input.expectedConfigRevision,
           "request-id": input.requestID,
           "repository-assignments": input.repositoryAssignments,
+          repositories: Object.fromEntries(
+            Object.entries(input.repositories ?? {}).map(
+              ([identity, repository]) => [
+                identity,
+                {
+                  name: repository.name,
+                  "default-branch": repository.defaultBranch,
+                },
+              ],
+            ),
+          ),
         }),
       },
       signal,
@@ -148,10 +161,19 @@ function projectSnapshot(
     "workflow-configurations",
     "default-workflow-configuration",
     "repository-assignments",
+    "repositories",
     "config-revision",
     "effects",
   ])
   const snapshot: PRLifecycleRepositoryAssignmentSnapshot = {
+    repositories: projectMap(root.repositories ?? {}, (value) => {
+      const source = asRecord(value)
+      onlyKeys(source, ["name", "default-branch"])
+      return {
+        name: stringValue(source.name),
+        defaultBranch: stringValue(source["default-branch"]),
+      }
+    }),
     workflowConfigurations: projectMap(
       root["workflow-configurations"],
       projectConfigurationSummary,
@@ -173,6 +195,35 @@ function projectSnapshot(
     malformed()
   }
   return snapshot
+}
+
+export async function resolveDevelopmentRepository(
+  repositoryURL: string,
+  signal?: AbortSignal,
+): Promise<{
+  identity: string
+  name: string
+  default_branch: string
+  can_implement: boolean
+}> {
+  const value = asRecord(
+    await requestPRWorkspaceJSON<unknown>(
+      "/api/development-workspaces/repositories/resolve",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repository_url: repositoryURL }),
+      },
+      signal,
+    ),
+  )
+  onlyKeys(value, ["identity", "name", "default_branch", "can_implement"])
+  return {
+    identity: stringValue(value.identity),
+    name: stringValue(value.name),
+    default_branch: stringValue(value.default_branch),
+    can_implement: value.can_implement === true,
+  }
 }
 
 function projectConfigurationSummary(

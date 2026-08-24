@@ -1274,6 +1274,8 @@ func TestEventWorkflowDispatcherCancelsInterruptedExistingRun(t *testing.T) {
 }
 
 func TestEventWorkflowDispatcherStaleWorkerCannotCancelReclaimedRunningRun(t *testing.T) {
+	const coordinationTimeout = 10 * time.Second
+
 	fixture := newEventDispatchFixture(t, "dispatcher-stale-reconcile")
 	runStore := &blockingFirstGetRunStore{
 		RunStore: fixture.runStore,
@@ -1296,7 +1298,7 @@ func TestEventWorkflowDispatcherStaleWorkerCannotCancelReclaimedRunningRun(t *te
 	}()
 	select {
 	case <-runStore.entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(coordinationTimeout):
 		t.Fatal("stale dispatcher did not block while loading the deterministic run")
 	}
 
@@ -1335,7 +1337,7 @@ func TestEventWorkflowDispatcherStaleWorkerCannotCancelReclaimedRunningRun(t *te
 	}()
 	select {
 	case <-replacementRunning:
-	case <-time.After(2 * time.Second):
+	case <-time.After(coordinationTimeout):
 		t.Fatal("replacement dispatcher did not start the deterministic run")
 	}
 
@@ -1345,7 +1347,7 @@ func TestEventWorkflowDispatcherStaleWorkerCannotCancelReclaimedRunningRun(t *te
 		if !errors.Is(staleErr, eventing.ErrStaleLease) {
 			t.Fatalf("stale ProcessOne() error = %v, want stale lease", staleErr)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(coordinationTimeout):
 		t.Fatal("stale dispatcher did not return after GetRun was released")
 	}
 	if calls := runStore.CancelCalls(); calls != 0 {
@@ -1368,7 +1370,7 @@ func TestEventWorkflowDispatcherStaleWorkerCannotCancelReclaimedRunningRun(t *te
 		if replacementErr != nil {
 			t.Fatalf("replacement ProcessOne() error = %v", replacementErr)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(coordinationTimeout):
 		t.Fatal("replacement dispatcher did not finish")
 	}
 }

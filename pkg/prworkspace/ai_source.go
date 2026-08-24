@@ -17,7 +17,7 @@ func validAIExecutionSource(source *AIExecutionSource) bool {
 	if source == nil ||
 		!validOpaqueID(source.ExecutionID, "aix_") ||
 		source.ExecutionID != strings.ToLower(source.ExecutionID) ||
-		!validOpaqueID(source.WorkspaceID, "prw_") ||
+		!validOpaqueID(source.WorkspaceID, "devw_") ||
 		source.WorkspaceID != strings.ToLower(source.WorkspaceID) ||
 		source.AgentID != strings.TrimSpace(source.AgentID) ||
 		!routing.IsCanonicalAgentID(source.AgentID) ||

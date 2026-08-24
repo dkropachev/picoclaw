@@ -106,7 +106,7 @@ func TestPRWorkspaceCandidateCheckpointRestoresExactCandidateAfterManagerRestart
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceID := "prw_22222222222222222222222222222222"
+	workspaceID := "devw_22222222222222222222222222222222"
 	pin := gitworkspace.PinnedAcquireRequest{
 		Repository: source, SourceRef: "main", ExpectedCommit: head,
 		ReservationKey: "pr-workspace:" + workspaceID, AgentID: "repair-test",
@@ -225,7 +225,7 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceID := "prw_44444444444444444444444444444444"
+	workspaceID := "devw_44444444444444444444444444444444"
 	pin := gitworkspace.PinnedAcquireRequest{
 		Repository: source, SourceRef: "main", ExpectedCommit: head,
 		ReservationKey: "pr-workspace:" + workspaceID, AgentID: "repair-test",
@@ -284,7 +284,7 @@ func TestPRWorkspaceFinalizationRetainsCheckpointUntilAggregateAcknowledgement(t
 	repair := prworkspace.RepairResult{
 		WorkspaceID: workspace.ID, CandidateSHA: candidate.Tree, Summary: "finalized",
 	}
-	if _, err = runtime.FinalizeRepair(ctx, "prw_55555555555555555555555555555555", repair); err == nil {
+	if _, err = runtime.FinalizeRepair(ctx, "devw_55555555555555555555555555555555", repair); err == nil {
 		t.Fatal("FinalizeRepair() accepted another PR workspace identity")
 	}
 	finalized, err := runtime.FinalizeRepair(ctx, workspaceID, repair)
@@ -326,7 +326,7 @@ func prWorkspaceCandidateCheckpointFixture() prWorkspaceCandidateCheckpoint {
 	return prWorkspaceCandidateCheckpoint{
 		Version:        prWorkspaceCandidateCheckpointVersion,
 		State:          prWorkspaceCandidateCheckpointActive,
-		WorkspaceID:    "prw_11111111111111111111111111111111",
+		WorkspaceID:    "devw_11111111111111111111111111111111",
 		Repository:     "git@example.invalid:owner/repository.git",
 		SourceRef:      "feature/checkpoint",
 		HeadSHA:        "1111111111111111111111111111111111111111",

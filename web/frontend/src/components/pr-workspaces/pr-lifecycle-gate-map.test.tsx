@@ -750,7 +750,7 @@ describe("PR lifecycle gate map", () => {
     })
     expect(implementationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests/workflow-configurations/strict%20profile?flow=implementation&gate=pr.implementation.complete",
+      "/development/workflow-configurations?config=strict%20profile&flow=implementation&gate=pr.implementation.complete",
     )
 
     onFlowChange.mockClear()
@@ -859,7 +859,7 @@ describe("PR lifecycle gate map", () => {
     expect(container.querySelectorAll("[data-gate-number]")).toHaveLength(0)
     expect(notificationGate).toHaveAttribute(
       "data-edit-href",
-      "/pull-requests/workflow-configurations/strict%20profile?flow=review&gate=pr.review.publish",
+      "/development/workflow-configurations?config=strict%20profile&flow=review&gate=pr.review.publish",
     )
     const locked = screen.getByRole("group", { name: "Protect audit archive" })
     expect(locked).toHaveAttribute("data-flow-element", "locked-safeguard")

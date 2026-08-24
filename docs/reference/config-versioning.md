@@ -81,28 +81,31 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
   version-only transformation. Any already-present policy maps, including
   explicit empty decision or repository policies, are preserved semantically.
 
-> This section describes the historical v6 schema. The current breaking PR
-> workspace cutover removes `reviews` rather than preserving or translating it.
+> This section describes the historical v6 schema. The current breaking
+> development-workspace cutover removes `reviews` rather than preserving or
+> translating it.
 
-### Current PR lifecycle configuration
+### Current development lifecycle configuration
 
-The current schema uses top-level `pr_lifecycle` for unified pull-request
+The current config schema uses top-level `development` for `devw_` development
 workspaces. It contains:
 
 - named `workflow-configurations`, one `default-workflow-configuration`, exact
   `repository-assignments`, and atomic action overrides bound by the exact pair
   `workflow-ref` plus full `gate-ref: gates.<id>`;
 - independent review and completion adaptive-nudge minimum/maximum bounds;
+- strict/relaxed `scope-disposition` defaults plus optional work-type overrides
+  and bounded custom relevance prompts;
 - monotonic `XS`, `S`, and `M` file, semantic-line, and module thresholds used
   to derive the `XS` through `L` implementation size grade.
 
 The authenticated scoped APIs are split by ownership:
 
-- `GET`/`PUT /api/pr-lifecycle/workflow-configurations` owns the named
+- `GET`/`PUT /api/development/workflow-configurations` owns the named
   configurations, default selection, nudge bounds, and scope thresholds;
-- `GET`/`PUT /api/pr-lifecycle/repository-assignments` owns only exact
-  repository assignments and projects name/deferred-policy summaries for the
-  selectable configurations.
+- `GET`/`PUT /api/development/repositories` owns verified repository
+  descriptors and exact assignments, and projects name/deferred-policy
+  summaries for selectable configurations.
 
 Both writes use the same exact full-config revision compare-and-swap fence,
 preserve the other endpoint's fields server-side, and report whether a gateway
@@ -112,11 +115,11 @@ complete workflow `default-action`; without a binding the default is used; if
 neither exists, execution fails closed. Partial action merging is unsupported.
 
 `reviews` is no longer a supported top-level field or an empty compatibility
-placeholder. It is not auto-migrated to `pr_lifecycle`; recreate desired
+placeholder. It is not auto-migrated to `development`; recreate desired
 workflow configurations explicitly. Gate V2 serialized fields are unknown to the current
 schema and are rejected rather than migrated.
-See [Pull Request Workspaces](../guides/pull-request-workspaces.md)
-and [PR Workspace V19 Cutover](../migration/pr-workspace-v19-cutover.md).
+See [Development Workspaces](../guides/development-workspaces.md) and
+[Development Workspace V20 Cutover](../migration/development-workspace-v20-cutover.md).
 
 ## How It Works
 

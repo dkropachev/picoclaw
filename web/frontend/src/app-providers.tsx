@@ -1,6 +1,7 @@
-import type { ReactNode } from "react"
+import { type ReactNode, useEffect } from "react"
 
 import { useHighlightTheme } from "./hooks/use-highlight-theme"
+import { registerPicoClawServiceWorker } from "./lib/pwa-notifications"
 
 interface AppProvidersProps {
   children: ReactNode
@@ -8,6 +9,11 @@ interface AppProvidersProps {
 
 export function AppProviders({ children }: AppProvidersProps) {
   useHighlightTheme()
+
+  useEffect(() => {
+    if (!import.meta.env.PROD) return
+    void registerPicoClawServiceWorker()
+  }, [])
 
   return <>{children}</>
 }

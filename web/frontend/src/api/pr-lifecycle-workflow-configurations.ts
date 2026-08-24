@@ -1,11 +1,11 @@
 import {
+  DevelopmentWorkspaceAPIError as PRWorkspaceAPIError,
+  requestDevelopmentJSON as requestPRWorkspaceJSON,
+} from "@/api/development-workspaces"
+import {
   type PRLifecycleFlowCatalog,
   projectPRLifecycleFlowCatalog,
 } from "@/api/pr-lifecycle-flow"
-import {
-  PRWorkspaceAPIError,
-  requestPRWorkspaceJSON,
-} from "@/api/pr-workspaces"
 
 export type PRLifecycleGateActionType =
   | "human"
@@ -35,6 +35,24 @@ export interface PRLifecycleWorkflowConfiguration {
   name: string
   bindings: PRLifecycleGateBinding[]
   deferredIssues: { mode: PRLifecycleDeferredIssueModeV3 }
+  scopeDisposition?: PRLifecycleScopeDispositionConfig
+}
+
+export type PRLifecycleScopeDispositionMode = "strict" | "relaxed"
+
+export interface PRLifecycleScopeDispositionRule {
+  mode: PRLifecycleScopeDispositionMode
+  prompt: string
+}
+
+export interface PRLifecycleScopeDispositionConfig {
+  default: PRLifecycleScopeDispositionRule
+  byType: Partial<
+    Record<
+      "fix" | "feature" | "refactor" | "documentation" | "test",
+      PRLifecycleScopeDispositionRule
+    >
+  >
 }
 
 export type PRLifecycleGateCatalogField =
@@ -168,6 +186,11 @@ export function validatePRLifecycleWorkflowConfigurations(
           "Workflow configuration name must be trimmed, non-empty, and at most 128 bytes.",
       })
     }
+    validateScopeDisposition(
+      config.scopeDisposition,
+      `${path}.scope-disposition`,
+      issues,
+    )
     const foldedName = config.name.toLowerCase()
     const previousNameOwner = names.get(foldedName)
     if (previousNameOwner !== undefined) {
@@ -402,7 +425,7 @@ export async function getPRLifecycleWorkflowConfigurations(
 ): Promise<PRLifecycleWorkflowConfigurationSnapshot> {
   return projectSnapshot(
     await requestPRWorkspaceJSON<unknown>(
-      "/api/pr-lifecycle/workflow-configurations",
+      "/api/development/workflow-configurations",
       undefined,
       signal,
     ),
@@ -415,7 +438,7 @@ export async function putPRLifecycleWorkflowConfigurations(
 ): Promise<PRLifecycleWorkflowConfigurationSnapshot> {
   return projectSnapshot(
     await requestPRWorkspaceJSON<unknown>(
-      "/api/pr-lifecycle/workflow-configurations",
+      "/api/development/workflow-configurations",
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -460,6 +483,10 @@ function serializeConfig(config: PRLifecycleWorkflowConfiguration) {
   return {
     name: config.name,
     "deferred-issues": config.deferredIssues,
+    "scope-disposition": {
+      default: (config.scopeDisposition ?? defaultScopeDisposition()).default,
+      "by-type": (config.scopeDisposition ?? defaultScopeDisposition()).byType,
+    },
     bindings: config.bindings.map((binding) => ({
       "workflow-ref": binding.workflowRef,
       "gate-ref": binding.gateRef,
@@ -531,13 +558,82 @@ function projectSnapshot(
 
 function projectConfig(value: unknown): PRLifecycleWorkflowConfiguration {
   const source = asRecord(value)
-  onlyKeys(source, ["name", "bindings", "deferred-issues"])
+  onlyKeys(source, ["name", "bindings", "deferred-issues", "scope-disposition"])
   if (!Array.isArray(source.bindings)) malformed()
   return {
     name: stringValue(source.name),
     bindings: source.bindings.map(projectBinding),
     deferredIssues: projectDeferredIssues(source["deferred-issues"]),
+    scopeDisposition: projectScopeDisposition(source["scope-disposition"]),
   }
+}
+
+function projectScopeDisposition(
+  value: unknown,
+): PRLifecycleScopeDispositionConfig {
+  if (value === undefined) {
+    return { default: { mode: "strict", prompt: "" }, byType: {} }
+  }
+  const source = asRecord(value)
+  onlyKeys(source, ["default", "by-type"])
+  const projectRule = (raw: unknown): PRLifecycleScopeDispositionRule => {
+    const rule = asRecord(raw)
+    onlyKeys(rule, ["mode", "prompt"])
+    const mode = stringValue(rule.mode)
+    if (mode !== "strict" && mode !== "relaxed") malformed()
+    if (typeof rule.prompt !== "string") malformed()
+    return { mode, prompt: rule.prompt }
+  }
+  const byTypeSource = asRecord(source["by-type"])
+  onlyKeys(byTypeSource, [
+    "fix",
+    "feature",
+    "refactor",
+    "documentation",
+    "test",
+  ])
+  return {
+    default: projectRule(source.default),
+    byType: Object.fromEntries(
+      Object.entries(byTypeSource).map(([key, rule]) => [
+        key,
+        projectRule(rule),
+      ]),
+    ) as PRLifecycleScopeDispositionConfig["byType"],
+  }
+}
+
+function validateScopeDisposition(
+  value: PRLifecycleScopeDispositionConfig | undefined,
+  path: string,
+  issues: PRLifecycleWorkflowConfigurationIssue[],
+) {
+  value ??= defaultScopeDisposition()
+  const rules = [
+    ["default", value.default],
+    ...Object.entries(value.byType),
+  ] as Array<[string, PRLifecycleScopeDispositionRule]>
+  for (const [kind, rule] of rules) {
+    if (rule.mode !== "strict" && rule.mode !== "relaxed") {
+      issues.push({
+        path: `${path}.${kind}.mode`,
+        message: "Mode must be strict or relaxed.",
+      })
+    }
+    if (
+      rule.prompt !== rule.prompt.trim() ||
+      new TextEncoder().encode(rule.prompt).length > 8192
+    ) {
+      issues.push({
+        path: `${path}.${kind}.prompt`,
+        message: "Prompt must be trimmed and at most 8192 bytes.",
+      })
+    }
+  }
+}
+
+export function defaultScopeDisposition(): PRLifecycleScopeDispositionConfig {
+  return { default: { mode: "strict", prompt: "" }, byType: {} }
 }
 
 function projectBinding(value: unknown): PRLifecycleGateBinding {

@@ -22,6 +22,10 @@ const (
 	DefaultGitHubMCPServer = "github"
 
 	GitHubPullRequestReadTool        = "pull_request_read"
+	GitHubIssueReadTool              = "issue_read"
+	GitHubCreatePullRequestTool      = "create_pull_request"
+	GitHubListPullRequestsTool       = "list_pull_requests"
+	GitHubListCommitsTool            = "list_commits"
 	GitHubGetMeTool                  = "get_me"
 	GitHubSearchRepositoriesTool     = "search_repositories"
 	GitHubIssueWriteTool             = "issue_write"

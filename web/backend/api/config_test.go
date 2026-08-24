@@ -84,6 +84,64 @@ func TestMergeMapDeletesNullValues(t *testing.T) {
 	}
 }
 
+func TestBroadConfigWritesRejectDevelopmentScopedField(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			response := performConfigAPIRequest(
+				t, configPath, method, []byte(`{"development":{}}`),
+			)
+			if response.Code != http.StatusBadRequest ||
+				!strings.Contains(response.Body.String(), "dedicated scoped API") {
+				t.Fatalf("%s status=%d body=%s", method, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestBroadConfigPutAcceptsUnchangedDevelopmentScopedField(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	existing, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate() error = %v", err)
+	}
+	existing.PRLifecycle.Nudge.ReviewMinimumAdditional = 3
+	if err = config.SaveConfig(configPath, existing); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	requestConfig, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate(request) error = %v", err)
+	}
+	requestConfig.Gateway.LogLevel = "debug"
+	body, err := json.Marshal(requestConfig)
+	if err != nil {
+		t.Fatalf("Marshal(request config) error = %v", err)
+	}
+
+	response := performConfigAPIRequest(t, configPath, http.MethodPut, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d body=%s", response.Code, response.Body.String())
+	}
+	updated, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate(updated) error = %v", err)
+	}
+	if updated.PRLifecycle.Nudge.ReviewMinimumAdditional != 3 {
+		t.Fatalf(
+			"development nudge minimum = %d, want preserved value 3",
+			updated.PRLifecycle.Nudge.ReviewMinimumAdditional,
+		)
+	}
+	if updated.Gateway.LogLevel != "debug" {
+		t.Fatalf("gateway log level = %q, want debug", updated.Gateway.LogLevel)
+	}
+}
+
 func TestNormalizeChannelArrayFieldsIgnoresNonApplicableEntries(t *testing.T) {
 	channels := map[string]any{
 		"scalar": "leave-me-alone",

@@ -1,21 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+import { requestDevelopmentJSON } from "@/api/development-workspaces"
 import {
   canonicalPRLifecycleRepositoryIdentity,
   getPRLifecycleRepositoryAssignments,
   putPRLifecycleRepositoryAssignments,
   validatePRLifecycleRepositoryAssignments,
 } from "@/api/pr-lifecycle-repository-assignments"
-import { requestPRWorkspaceJSON } from "@/api/pr-workspaces"
 
-vi.mock("@/api/pr-workspaces", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/api/pr-workspaces")>()
-  return { ...original, requestPRWorkspaceJSON: vi.fn() }
+vi.mock("@/api/development-workspaces", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/api/development-workspaces")>()
+  return { ...original, requestDevelopmentJSON: vi.fn() }
 })
 
-const mockedRequest = vi.mocked(requestPRWorkspaceJSON)
+const mockedRequest = vi.mocked(requestDevelopmentJSON)
 
 const wireSnapshot = {
+  repositories: {
+    "https://github.com|100": {
+      name: "owner/existing",
+      "default-branch": "main",
+    },
+  },
   "workflow-configurations": {
     default: {
       name: "Default",
@@ -46,13 +53,19 @@ describe("PR lifecycle repository assignments", () => {
     const snapshot = await getPRLifecycleRepositoryAssignments()
 
     expect(mockedRequest).toHaveBeenCalledWith(
-      "/api/pr-lifecycle/repository-assignments",
+      "/api/development/repositories",
       undefined,
       undefined,
     )
     expect(snapshot.defaultWorkflowConfiguration).toBe("default")
     expect(snapshot.repositoryAssignments).toEqual({
       "https://github.com|100": "strict",
+    })
+    expect(snapshot.repositories).toEqual({
+      "https://github.com|100": {
+        name: "owner/existing",
+        defaultBranch: "main",
+      },
     })
     expect(snapshot.workflowConfigurations.strict).toEqual({
       name: "Strict",
@@ -69,6 +82,7 @@ describe("PR lifecycle repository assignments", () => {
       expectedConfigRevision: snapshot.configRevision,
       requestID: "request-1",
       repositoryAssignments: snapshot.repositoryAssignments,
+      repositories: snapshot.repositories,
     })
 
     const request = mockedRequest.mock.calls.at(-1)?.[1]
@@ -76,6 +90,12 @@ describe("PR lifecycle repository assignments", () => {
     expect(body).toEqual({
       "expected-config-revision": "config-1",
       "request-id": "request-1",
+      repositories: {
+        "https://github.com|100": {
+          name: "owner/existing",
+          "default-branch": "main",
+        },
+      },
       "repository-assignments": {
         "https://github.com|100": "strict",
       },

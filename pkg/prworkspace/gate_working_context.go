@@ -57,7 +57,7 @@ func (binder *SessionGateWorkingContextBinder) Bind(
 	request GateWorkingContextRequest,
 ) (workflows.ReadOnlySessionRef, error) {
 	if binder == nil || binder.Acquire == nil ||
-		!validOpaqueID(request.WorkspaceID, "prw_") || request.WorkspaceVersion <= 0 ||
+		!validOpaqueID(request.WorkspaceID, "devw_") || request.WorkspaceVersion <= 0 ||
 		request.Context.WorkspaceID != request.WorkspaceID ||
 		request.AgentID != routing.NormalizeAgentID(request.AgentID) ||
 		!routing.IsCanonicalAgentID(request.AgentID) {

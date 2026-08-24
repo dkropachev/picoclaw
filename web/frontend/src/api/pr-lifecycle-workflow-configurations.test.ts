@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+import { requestDevelopmentJSON } from "@/api/development-workspaces"
 import {
   getPRLifecycleWorkflowConfigurations,
   putPRLifecycleWorkflowConfigurations,
   validatePRLifecycleWorkflowConfigurations,
 } from "@/api/pr-lifecycle-workflow-configurations"
-import { requestPRWorkspaceJSON } from "@/api/pr-workspaces"
 
 vi.mock("@/api/pr-lifecycle-flow", () => ({
   projectPRLifecycleFlowCatalog: vi.fn(() => ({
@@ -14,12 +14,13 @@ vi.mock("@/api/pr-lifecycle-flow", () => ({
   })),
 }))
 
-vi.mock("@/api/pr-workspaces", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/api/pr-workspaces")>()
-  return { ...original, requestPRWorkspaceJSON: vi.fn() }
+vi.mock("@/api/development-workspaces", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/api/development-workspaces")>()
+  return { ...original, requestDevelopmentJSON: vi.fn() }
 })
 
-const mockedRequest = vi.mocked(requestPRWorkspaceJSON)
+const mockedRequest = vi.mocked(requestDevelopmentJSON)
 
 const wireSnapshot = {
   "workflow-configurations": {
@@ -112,7 +113,7 @@ describe("PR lifecycle Workflow configurations", () => {
     const snapshot = await getPRLifecycleWorkflowConfigurations()
 
     expect(mockedRequest).toHaveBeenCalledWith(
-      "/api/pr-lifecycle/workflow-configurations",
+      "/api/development/workflow-configurations",
       undefined,
       undefined,
     )

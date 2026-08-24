@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
 	"github.com/sipeed/picoclaw/pkg/prworkspace/localci"
+	"github.com/sipeed/picoclaw/pkg/reviews"
 )
 
 type prWorkspaceCandidate struct {
@@ -45,6 +47,7 @@ type prWorkspaceImplementationRuntime struct {
 	agentID        string
 	acquireRuntime eventAutomationRuntimeAcquire
 	checkpoints    *prWorkspaceCandidateCheckpointStore
+	provider       *reviews.GitHubProvider
 
 	mu         sync.Mutex
 	candidates map[prWorkspaceCandidateKey]prWorkspaceCandidate
@@ -252,6 +255,45 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(
 		CandidateDiff: review.UnifiedDiff,
 		PromptDigest:  result.PromptDigest,
 	}, nil
+}
+
+func (runtime *prWorkspaceImplementationRuntime) LoadPlanningEvidence(
+	ctx context.Context,
+	workspaceID string,
+	provider prworkspace.ProviderSnapshot,
+) (json.RawMessage, error) {
+	if runtime == nil || runtime.manager == nil || workspaceID == "" ||
+		provider.HeadRepository == "" || provider.HeadRef == "" || provider.HeadSHA == "" {
+		return nil, errors.New("repository planning evidence is unavailable")
+	}
+	leaseCtx, releaseRuntime, err := runtime.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRuntime()
+	pin := gitworkspace.PinnedAcquireRequest{
+		Repository: strings.TrimSuffix(provider.ProviderOrigin, "/") + "/" + provider.HeadRepository + ".git",
+		SourceRef:  provider.HeadRef, ExpectedCommit: provider.HeadSHA,
+		ReservationKey: "pr-workspace:" + workspaceID, AgentID: runtime.agentID,
+	}
+	workspace, err := runtime.manager.AcquirePinned(leaseCtx, pin)
+	if err != nil {
+		return nil, err
+	}
+	evidence, snapshotErr := runtime.manager.SnapshotPinnedPlanningEvidence(
+		leaseCtx, gitworkspace.PinnedCandidateRequest{Pin: pin, WorkspaceID: workspace.ID},
+	)
+	_, releaseErr := runtime.manager.ReleasePinned(leaseCtx, gitworkspace.PinnedReleaseRequest{
+		ReservationKey: pin.ReservationKey, AgentID: pin.AgentID,
+	})
+	if snapshotErr != nil || releaseErr != nil {
+		return nil, errors.Join(snapshotErr, releaseErr)
+	}
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
 }
 
 func (runtime *prWorkspaceImplementationRuntime) capturePartialRepairCandidate(
@@ -697,6 +739,56 @@ func (runtime *prWorkspaceImplementationRuntime) LoadCandidateEvidence(
 	}, nil
 }
 
+func (runtime *prWorkspaceImplementationRuntime) ListCodeTree(
+	ctx context.Context,
+	repair prworkspace.RepairAttempt,
+	revision, path, after string,
+) (prworkspace.CodeTreePage, error) {
+	if runtime == nil || runtime.manager == nil || repair.PublicationFence == nil {
+		return prworkspace.CodeTreePage{}, errors.New("candidate code browser is unavailable")
+	}
+	fence := repair.PublicationFence
+	page, err := runtime.manager.ListPinnedLineTree(ctx, gitworkspace.PinnedLineTreeRequest{
+		PinnedLineBrowseFence: gitworkspace.PinnedLineBrowseFence{
+			LineID: fence.LineID, ExpectedVersion: fence.LineVersion,
+			ExpectedBase: fence.BaseCommit, ExpectedTip: fence.Tip, ExpectedTree: fence.Tree,
+		},
+		Revision: revision, Path: path, After: after,
+	})
+	if err != nil {
+		return prworkspace.CodeTreePage{}, err
+	}
+	result := prworkspace.CodeTreePage{Revision: repair.CandidateSHA, Path: path, Next: page.Next}
+	for _, entry := range page.Entries {
+		result.Entries = append(result.Entries, prworkspace.CodeTreeEntry{
+			Name: filepath.Base(entry.Path), Path: entry.Path, Type: entry.Type,
+		})
+	}
+	return result, nil
+}
+
+func (runtime *prWorkspaceImplementationRuntime) ReadCodeBlob(
+	ctx context.Context,
+	repair prworkspace.RepairAttempt,
+	revision, path string,
+) (prworkspace.CodeBlob, error) {
+	if runtime == nil || runtime.manager == nil || repair.PublicationFence == nil {
+		return prworkspace.CodeBlob{}, errors.New("candidate code browser is unavailable")
+	}
+	fence := repair.PublicationFence
+	blob, err := runtime.manager.ReadPinnedLineBlob(ctx, gitworkspace.PinnedLineBlobRequest{
+		PinnedLineBrowseFence: gitworkspace.PinnedLineBrowseFence{
+			LineID: fence.LineID, ExpectedVersion: fence.LineVersion,
+			ExpectedBase: fence.BaseCommit, ExpectedTip: fence.Tip, ExpectedTree: fence.Tree,
+		},
+		Revision: revision, Path: path,
+	})
+	if err != nil {
+		return prworkspace.CodeBlob{}, err
+	}
+	return prworkspace.CodeBlob{Revision: repair.CandidateSHA, Path: blob.Path, Content: blob.Content}, nil
+}
+
 func (runtime *prWorkspaceImplementationRuntime) acquire(ctx context.Context) (context.Context, func(), error) {
 	if runtime.acquireRuntime == nil {
 		return ctx, func() {}, nil
@@ -735,7 +827,7 @@ func changedPathModules(paths []string) int {
 }
 
 func stablePRWorkspaceLineID(workspaceID string) string {
-	value := strings.TrimPrefix(workspaceID, "prw_")
+	value := strings.TrimPrefix(workspaceID, "devw_")
 	if len(value) != 32 {
 		return "pdln_00000000000000000000000000000000"
 	}
@@ -751,30 +843,35 @@ func (runtime *prWorkspaceImplementationRuntime) PublishBranch(
 	ctx context.Context,
 	request prworkspace.BranchPublicationRequest,
 ) (prworkspace.BranchPublicationResult, error) {
-	return runtime.publishOrReconcileBranch(ctx, request)
+	return runtime.publishOrReconcileBranch(ctx, request, true)
 }
 
 func (runtime *prWorkspaceImplementationRuntime) ReconcileBranch(
 	ctx context.Context,
 	request prworkspace.BranchPublicationRequest,
 ) (prworkspace.BranchPublicationResult, bool, error) {
-	result, err := runtime.publishOrReconcileBranch(ctx, request)
+	result, err := runtime.publishOrReconcileBranch(ctx, request, false)
 	if err != nil {
 		return result, false, err
 	}
-	return result, result.ExternalID == request.Repair.CandidateSHA, nil
+	found := result.ExternalID == request.Repair.CandidateSHA
+	if request.Provider.Intent == prworkspace.IntentImplementFeature {
+		found = result.ExternalID != "" && result.ExternalURL != ""
+	}
+	return result, found, nil
 }
 
 func (runtime *prWorkspaceImplementationRuntime) publishOrReconcileBranch(
 	ctx context.Context,
 	request prworkspace.BranchPublicationRequest,
+	allowPRCreate bool,
 ) (prworkspace.BranchPublicationResult, error) {
 	if runtime == nil || runtime.manager == nil || request.Repair.PublicationFence == nil ||
 		request.Provider.HeadSHA == "" || request.Repair.CandidateSHA == "" {
 		return prworkspace.BranchPublicationResult{}, errors.New("PR branch publisher is unavailable")
 	}
 	fence := request.Repair.PublicationFence
-	result, err := runtime.manager.PushPinnedLine(ctx, gitworkspace.PinnedLinePushRequest{
+	pushRequest := gitworkspace.PinnedLinePushRequest{
 		Repository: strings.TrimSuffix(
 			request.Provider.ProviderOrigin,
 			"/",
@@ -790,9 +887,35 @@ func (runtime *prWorkspaceImplementationRuntime) publishOrReconcileBranch(
 		ExpectedTip:           fence.Tip,
 		ExpectedTree:          fence.Tree,
 		ExpectedRemoteTip:     request.Provider.HeadSHA,
-	})
+	}
+	if request.Provider.Intent == prworkspace.IntentImplementFeature {
+		pushRequest.DestinationRef = developmentFeatureBranch(request.Provider)
+		pushRequest.CreateDestination = true
+	}
+	result, err := runtime.manager.PushPinnedLine(ctx, pushRequest)
 	publication := prworkspace.BranchPublicationResult{
 		ExternalID: result.RemoteTip, ExternalURL: prWorkspacePullURL(request.Provider),
+	}
+	if request.Provider.Intent == prworkspace.IntentImplementFeature {
+		publication.ExternalURL = ""
+	}
+	if result.RemoteTip == fence.Tip && request.Provider.Intent == prworkspace.IntentImplementFeature {
+		if runtime.provider == nil || !request.Provider.CanCreatePullRequest {
+			return prworkspace.BranchPublicationResult{}, errors.New("draft pull request publisher is unavailable")
+		}
+		pull, found, pullErr := runtime.findOrCreateDevelopmentPullRequest(
+			ctx, request, pushRequest.DestinationRef, fence.Tip, allowPRCreate,
+		)
+		if pullErr != nil {
+			if !errors.Is(pullErr, reviews.ErrWorkspaceProviderCallNotDispatched) {
+				publication.Ambiguous = true
+			}
+			return publication, pullErr
+		}
+		if !found {
+			return prworkspace.BranchPublicationResult{}, nil
+		}
+		return pull, nil
 	}
 	if result.RemoteTip == fence.Tip {
 		return publication, nil
@@ -803,10 +926,226 @@ func (runtime *prWorkspaceImplementationRuntime) publishOrReconcileBranch(
 	return publication, err
 }
 
+func developmentFeatureBranch(provider prworkspace.ProviderSnapshot) string {
+	digest := sha256.Sum256(
+		[]byte(provider.ProviderOrigin + "\x00" + provider.RepositoryID + "\x00" + provider.SourceID),
+	)
+	suffix := hex.EncodeToString(digest[:6])
+	if provider.SourceKind == prworkspace.SourceIssue && provider.SourceNumber > 0 {
+		return fmt.Sprintf("picoclaw/issue-%d-%s", provider.SourceNumber, suffix)
+	}
+	return "picoclaw/feature-" + suffix
+}
+
+func (runtime *prWorkspaceImplementationRuntime) findOrCreateDevelopmentPullRequest(
+	ctx context.Context,
+	request prworkspace.BranchPublicationRequest,
+	branch, candidateSHA string,
+	allowCreate bool,
+) (prworkspace.BranchPublicationResult, bool, error) {
+	provider := request.Provider
+	marker := "<!-- picoclaw-development:" + provider.SourceID + ":" + candidateSHA + " -->"
+	raw, err := runtime.provider.ListWorkspacePullRequestsJSON(ctx, provider.Repository, branch, provider.BaseRef)
+	if err != nil {
+		return prworkspace.BranchPublicationResult{}, false, err
+	}
+	pulls, err := decodeDevelopmentPullList(raw)
+	if err != nil {
+		return prworkspace.BranchPublicationResult{}, false, err
+	}
+	var matched []prWorkspaceGitHubPull
+	for _, pull := range pulls {
+		if strings.Contains(pull.Body, marker) && pull.Head != nil && pull.Base != nil &&
+			pull.Head.Ref == branch && pull.Base.Ref == provider.BaseRef {
+			if validationErr := validateDevelopmentPull(
+				pull, provider, branch, candidateSHA, marker, developmentPullTitle(provider),
+			); validationErr != nil {
+				return prworkspace.BranchPublicationResult{}, false, validationErr
+			}
+			matched = append(matched, pull)
+		}
+	}
+	if len(matched) > 1 {
+		return prworkspace.BranchPublicationResult{}, false, errors.New(
+			"multiple draft pull requests match development marker",
+		)
+	}
+	if len(matched) == 1 {
+		return developmentPullResult(matched[0], branch, candidateSHA), true, nil
+	}
+	if !allowCreate {
+		return prworkspace.BranchPublicationResult{}, false, nil
+	}
+	owner, repo, ok := strings.Cut(provider.Repository, "/")
+	if !ok {
+		return prworkspace.BranchPublicationResult{}, false, errors.New("development repository is invalid")
+	}
+	title := developmentPullTitle(provider)
+	body := developmentPullBody(provider, request.Repair, request.Validation, marker)
+	raw, err = runtime.provider.CreateWorkspacePullRequestJSON(ctx, map[string]any{
+		"owner": owner, "repo": repo, "title": title, "body": body,
+		"head": branch, "base": provider.BaseRef, "draft": true, "maintainer_can_modify": true,
+	})
+	if err != nil {
+		return prworkspace.BranchPublicationResult{}, false, err
+	}
+	var pull prWorkspaceGitHubPull
+	if err := json.Unmarshal(raw, &pull); err != nil {
+		return prworkspace.BranchPublicationResult{}, false, errors.New("created pull request response is invalid")
+	}
+	if err := validateDevelopmentPull(pull, provider, branch, candidateSHA, marker, title); err != nil {
+		return prworkspace.BranchPublicationResult{}, false, err
+	}
+	return developmentPullResult(pull, branch, candidateSHA), true, nil
+}
+
+func validateDevelopmentPull(
+	pull prWorkspaceGitHubPull,
+	provider prworkspace.ProviderSnapshot,
+	branch, candidateSHA, marker, expectedTitle string,
+) error {
+	if pull.Number < 1 || githubPositiveNumericID(pull.ID) == "" ||
+		!samePRWorkspacePullURL(
+			pull.HTMLURL, provider.ProviderOrigin, provider.Repository, pull.Number,
+		) || !strings.EqualFold(strings.TrimSpace(pull.State), "open") || pull.Merged || !pull.Draft ||
+		pull.Head == nil || pull.Base == nil || pull.Head.Repo == nil || pull.Base.Repo == nil ||
+		pull.Head.Ref != branch || pull.Head.SHA != candidateSHA || pull.Base.Ref != provider.BaseRef ||
+		pull.Base.SHA != provider.BaseSHA ||
+		!strings.EqualFold(pull.Head.Repo.FullName, provider.Repository) ||
+		!strings.EqualFold(pull.Base.Repo.FullName, provider.Repository) ||
+		githubPositiveNumericID(pull.Head.Repo.ID) != provider.RepositoryID ||
+		githubPositiveNumericID(pull.Base.Repo.ID) != provider.RepositoryID ||
+		!samePRWorkspaceRepositoryURL(pull.Head.Repo.HTMLURL, provider.ProviderOrigin, provider.Repository) ||
+		!samePRWorkspaceRepositoryURL(pull.Base.Repo.HTMLURL, provider.ProviderOrigin, provider.Repository) ||
+		strings.TrimSpace(pull.Title) != expectedTitle || !strings.Contains(pull.Body, marker) {
+		return errors.New("development pull request authority is invalid")
+	}
+	return nil
+}
+
+func developmentPullTitle(provider prworkspace.ProviderSnapshot) string {
+	value := strings.TrimSpace(provider.Title)
+	if provider.SourceKind == prworkspace.SourceBrief || value == "" ||
+		strings.EqualFold(value, "feature brief") {
+		value = strings.TrimSpace(provider.Body)
+		if line, _, ok := strings.Cut(value, "\n"); ok {
+			value = strings.TrimSpace(line)
+		}
+	}
+	value = boundedDevelopmentMarkdown(value, 120)
+	if value == "" {
+		return "Implement requested feature"
+	}
+	return value
+}
+
+func developmentPullBody(
+	provider prworkspace.ProviderSnapshot,
+	repair prworkspace.RepairAttempt,
+	validation prworkspace.ValidationRun,
+	marker string,
+) string {
+	source := strings.TrimSpace(provider.Body)
+	if before, _, ok := strings.Cut(source, "\n\nProvider issue comments (untrusted evidence):"); ok {
+		source = strings.TrimSpace(before)
+	}
+	source = boundedDevelopmentMarkdown(source, 4<<10)
+	if source == "" {
+		source = "No additional source description was provided."
+	}
+	var builder strings.Builder
+	builder.WriteString("## Source\n\n")
+	builder.WriteString(source)
+	if provider.SourceKind == prworkspace.SourceIssue && provider.SourceNumber > 0 {
+		fmt.Fprintf(&builder, "\n\nCloses #%d", provider.SourceNumber)
+	}
+	builder.WriteString("\n\n## Changes\n\n")
+	if summary := boundedDevelopmentMarkdown(repair.ResultSummary, 2<<10); summary != "" {
+		builder.WriteString(summary)
+	} else {
+		builder.WriteString("Implemented the confirmed development charter.")
+	}
+	if len(repair.ChangedFiles) > 0 {
+		builder.WriteString("\n\nChanged files:\n")
+		for index, path := range repair.ChangedFiles {
+			if index == 50 {
+				builder.WriteString("- … additional files omitted\n")
+				break
+			}
+			fmt.Fprintf(&builder, "- `%s`\n", strings.ReplaceAll(path, "`", ""))
+		}
+	}
+	builder.WriteString("\n## Validation\n\n")
+	if len(validation.Checks) == 0 {
+		builder.WriteString("- Validation completed successfully.\n")
+	} else {
+		for index, check := range validation.Checks {
+			if index == 50 {
+				builder.WriteString("- … additional checks omitted\n")
+				break
+			}
+			fmt.Fprintf(&builder, "- `%s`: %s", strings.ReplaceAll(check.Name, "`", ""), check.Status)
+			if summary := boundedDevelopmentMarkdown(check.Summary, 512); summary != "" {
+				fmt.Fprintf(&builder, " — %s", summary)
+			}
+			builder.WriteByte('\n')
+		}
+	}
+	return boundedDevelopmentMarkdown(builder.String(), 22<<10) + "\n\n" + marker
+}
+
+func boundedDevelopmentMarkdown(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit < 1 || len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return strings.TrimSpace(value) + "…"
+}
+
+func decodeDevelopmentPullList(raw []byte) ([]prWorkspaceGitHubPull, error) {
+	var pulls []prWorkspaceGitHubPull
+	if err := json.Unmarshal(raw, &pulls); err == nil {
+		if len(pulls) > 100 {
+			return nil, errors.New("pull request list response exceeds bound")
+		}
+		return pulls, nil
+	}
+	var envelope struct {
+		Items []prWorkspaceGitHubPull `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, errors.New("pull request list response is invalid")
+	}
+	if len(envelope.Items) > 100 {
+		return nil, errors.New("pull request list response exceeds bound")
+	}
+	return envelope.Items, nil
+}
+
+func developmentPullResult(
+	pull prWorkspaceGitHubPull,
+	branch, candidateSHA string,
+) prworkspace.BranchPublicationResult {
+	id := githubScalarID(pull.ID)
+	if id == "" {
+		id = strconv.FormatInt(pull.Number, 10)
+	}
+	return prworkspace.BranchPublicationResult{
+		ExternalID: id, ExternalURL: pull.HTMLURL, PullRequestID: id,
+		PullNumber: pull.Number, HeadRef: branch, HeadSHA: candidateSHA,
+	}
+}
+
 var (
 	_ prworkspace.RepairExecutor          = (*prWorkspaceImplementationRuntime)(nil)
 	_ prworkspace.RepairFinalizer         = (*prWorkspaceImplementationRuntime)(nil)
 	_ prworkspace.ValidationExecutor      = (*prWorkspaceImplementationRuntime)(nil)
 	_ prworkspace.BranchPublisher         = (*prWorkspaceImplementationRuntime)(nil)
 	_ prworkspace.CandidateEvidenceLoader = (*prWorkspaceImplementationRuntime)(nil)
+	_ prworkspace.CandidateCodeBrowser    = (*prWorkspaceImplementationRuntime)(nil)
+	_ prworkspace.PlanningEvidenceLoader  = (*prWorkspaceImplementationRuntime)(nil)
 )

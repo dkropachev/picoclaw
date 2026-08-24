@@ -20,20 +20,22 @@ import {
   useState,
 } from "react"
 
+import { createDevelopmentRequestID } from "@/api/development-workspaces"
 import { type PRLifecycleDecisionPoint } from "@/api/pr-lifecycle-flow"
 import {
   type PRLifecycleGateAction,
   type PRLifecycleGateActionType,
   type PRLifecycleGateCatalogField,
+  type PRLifecycleScopeDispositionMode,
   type PRLifecycleWorkflowConfiguration,
   type PRLifecycleWorkflowConfigurationIssue,
   type PRLifecycleWorkflowConfigurationSnapshot,
+  defaultScopeDisposition,
   getPRLifecycleWorkflowConfigurations,
   isPRLifecycleWorkflowConfigurationID,
   putPRLifecycleWorkflowConfigurations,
   validatePRLifecycleWorkflowConfigurations,
 } from "@/api/pr-lifecycle-workflow-configurations"
-import { createPRWorkspaceRequestID } from "@/api/pr-workspaces"
 import { PageHeader } from "@/components/page-header"
 import { PRLifecycleGateMap } from "@/components/pr-workspaces/pr-lifecycle-gate-map"
 import {
@@ -212,9 +214,8 @@ export function PRLifecycleWorkflowConfigurationsPage({
       next: { pathname: string }
     }) => {
       const isConfigurationPath = (pathname: string) =>
-        pathname === "/pull-requests/workflow-configurations" ||
-        pathname.startsWith("/pull-requests/workflow-configurations/") ||
-        pathname === "/pull-requests/settings"
+        pathname === "/development/workflow-configurations" ||
+        pathname === "/development/settings"
       return (
         dirty &&
         isConfigurationPath(current.pathname) &&
@@ -244,7 +245,7 @@ export function PRLifecycleWorkflowConfigurationsPage({
     mutationFn: (value: PRLifecycleWorkflowConfigurationSnapshot) =>
       putPRLifecycleWorkflowConfigurations({
         expectedConfigRevision: value.configRevision,
-        requestID: createPRWorkspaceRequestID(),
+        requestID: createDevelopmentRequestID(),
         workflowConfigurations: value.workflowConfigurations,
         defaultWorkflowConfiguration: value.defaultWorkflowConfiguration,
         nudge: value.nudge,
@@ -369,6 +370,7 @@ export function PRLifecycleWorkflowConfigurationsPage({
         name,
         bindings: [],
         deferredIssues: { mode: "ask" },
+        scopeDisposition: defaultScopeDisposition(),
       }
     })
     setNewConfigID("")
@@ -426,7 +428,7 @@ export function PRLifecycleWorkflowConfigurationsPage({
           selectedConfig
             ? `Edit ${selectedConfig.name} Workflow configuration`
             : resolvedPage === "settings"
-              ? "PR lifecycle settings"
+              ? "Development settings"
               : "Workflow configurations"
         }
         titleExtra={<Badge variant="outline">v3</Badge>}
@@ -542,7 +544,10 @@ export function PRLifecycleWorkflowConfigurationsPage({
         nodeTitle={selectedGateNode?.title ?? selectedDecisionPoint ?? "Gate"}
         nodeDescription={selectedGateNode?.description}
         catalogEntry={selectedCatalogEntry}
-        readOnly={selectedConfigID === "default"}
+        readOnly={
+          selectedConfigID === "default" ||
+          selectedDecisionPoint === "pr.implementation.publish"
+        }
         binding={
           selectedCatalogEntry
             ? selectedConfig?.bindings.find(
@@ -556,7 +561,12 @@ export function PRLifecycleWorkflowConfigurationsPage({
           if (!open) closeDecisionPoint()
         }}
         onActionChange={(action) => {
-          if (!selectedCatalogEntry || selectedConfigID === "default") return
+          if (
+            !selectedCatalogEntry ||
+            selectedConfigID === "default" ||
+            selectedDecisionPoint === "pr.implementation.publish"
+          )
+            return
           updateSelectedConfig((config) => {
             const index = config.bindings.findIndex(
               (binding) =>
@@ -737,6 +747,9 @@ function ConfigSettings({
   ) => void
   onMakeDefault: () => void
 }) {
+  const scopeDisposition = config.scopeDisposition ?? defaultScopeDisposition()
+  const ensureScopeDisposition = (current: PRLifecycleWorkflowConfiguration) =>
+    (current.scopeDisposition ??= defaultScopeDisposition())
   return (
     <Card size="sm">
       <CardHeader>
@@ -791,6 +804,93 @@ function ConfigSettings({
             configuration can become GitHub issues.
           </p>
         </GateField>
+        <GateField label="Default scope policy">
+          <Select
+            value={scopeDisposition.default.mode}
+            onValueChange={(value) =>
+              onChange((current) => {
+                ensureScopeDisposition(current).default.mode =
+                  value as PRLifecycleScopeDispositionMode
+              })
+            }
+          >
+            <SelectTrigger aria-label="Default scope policy">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="strict">Strict</SelectItem>
+              <SelectItem value="relaxed">Relaxed</SelectItem>
+            </SelectContent>
+          </Select>
+          <Textarea
+            className="mt-2 min-h-20"
+            aria-label="Default scope policy prompt"
+            placeholder="Optional repository relevance guidance"
+            value={scopeDisposition.default.prompt}
+            onChange={(event) =>
+              onChange((current) => {
+                ensureScopeDisposition(current).default.prompt =
+                  event.target.value
+              })
+            }
+          />
+          <p className="text-muted-foreground mt-1.5 text-xs">
+            Relaxed mode may include relevant, confident XS/S adjacent work.
+            Hard scope and type limits remain fixed.
+          </p>
+        </GateField>
+        <div className="space-y-2">
+          <strong className="text-sm">Per-type overrides</strong>
+          {(
+            ["fix", "feature", "refactor", "documentation", "test"] as const
+          ).map((kind) => {
+            const rule = scopeDisposition.byType[kind]
+            return (
+              <div
+                key={kind}
+                className="border-border grid gap-2 rounded-md border p-2 sm:grid-cols-[9rem_minmax(0,1fr)]"
+              >
+                <Select
+                  value={rule?.mode ?? "inherit"}
+                  onValueChange={(value) =>
+                    onChange((current) => {
+                      const policy = ensureScopeDisposition(current)
+                      if (value === "inherit") delete policy.byType[kind]
+                      else
+                        policy.byType[kind] = {
+                          mode: value as PRLifecycleScopeDispositionMode,
+                          prompt: policy.byType[kind]?.prompt ?? "",
+                        }
+                    })
+                  }
+                >
+                  <SelectTrigger aria-label={`${kind} scope policy`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">Inherit</SelectItem>
+                    <SelectItem value="strict">Strict</SelectItem>
+                    <SelectItem value="relaxed">Relaxed</SelectItem>
+                  </SelectContent>
+                </Select>
+                {rule && (
+                  <Input
+                    aria-label={`${kind} scope prompt`}
+                    placeholder="Optional type-specific relevance guidance"
+                    value={rule.prompt}
+                    onChange={(event) =>
+                      onChange((current) => {
+                        const selected =
+                          ensureScopeDisposition(current).byType[kind]
+                        if (selected) selected.prompt = event.target.value
+                      })
+                    }
+                  />
+                )}
+              </div>
+            )
+          })}
+        </div>
       </CardContent>
     </Card>
   )
@@ -1417,7 +1517,7 @@ function SettingsTabs({
   }
   return (
     <div
-      aria-label="PR lifecycle settings"
+      aria-label="Development settings"
       className="bg-muted/40 grid gap-1 rounded-lg border p-1 sm:grid-cols-2"
       role="tablist"
     >

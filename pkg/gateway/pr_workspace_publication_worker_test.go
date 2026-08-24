@@ -163,8 +163,8 @@ func (publicationWorkerBranchPublisher) ReconcileBranch(
 
 func TestPRWorkspacePublicationWorkerPagesAndPrioritizesInterruptedWork(t *testing.T) {
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	queuedWorkspace := "prw_11111111111111111111111111111111"
-	runningWorkspace := "prw_22222222222222222222222222222222"
+	queuedWorkspace := "devw_11111111111111111111111111111111"
+	runningWorkspace := "devw_22222222222222222222222222222222"
 	queued := publicationWorkerPublication(
 		"ppb_11111111111111111111111111111111",
 		prworkspace.PublicationGitHubIssue,
@@ -233,7 +233,7 @@ func TestPRWorkspacePublicationWorkerPagesAndPrioritizesInterruptedWork(t *testi
 
 func TestPRWorkspacePublicationWorkerSkipsUnknownAndRecentRunning(t *testing.T) {
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	workspaceID := "prw_33333333333333333333333333333333"
+	workspaceID := "devw_33333333333333333333333333333333"
 	unknown := publicationWorkerPublication(
 		"ppb_33333333333333333333333333333333",
 		prworkspace.PublicationGitHubIssue,
@@ -320,7 +320,7 @@ func TestPRWorkspacePublicationWorkerDispatchesEachSupportedKind(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			workspaceID := "prw_55555555555555555555555555555555"
+			workspaceID := "devw_55555555555555555555555555555555"
 			publication := publicationWorkerPublication(
 				"ppb_55555555555555555555555555555555",
 				test.kind,
@@ -356,7 +356,7 @@ func TestPRWorkspacePublicationWorkerDispatchesEachSupportedKind(t *testing.T) {
 
 func TestPRWorkspacePublicationWorkerIgnoresUnsupportedKindAndAbsorbsCASRace(t *testing.T) {
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	workspaceID := "prw_66666666666666666666666666666666"
+	workspaceID := "devw_66666666666666666666666666666666"
 	unsupported := publicationWorkerPublication(
 		"ppb_66666666666666666666666666666666",
 		prworkspace.PublicationGitHubIssue,
@@ -392,7 +392,7 @@ func TestPRWorkspacePublicationWorkerIgnoresUnsupportedKindAndAbsorbsCASRace(t *
 
 func TestPRWorkspacePublicationWorkerRejectsRepeatedCursor(t *testing.T) {
 	now := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	cursor := &prworkspace.WorkspaceCursor{UpdatedAt: now, ID: "prw_88888888888888888888888888888888"}
+	cursor := &prworkspace.WorkspaceCursor{UpdatedAt: now, ID: "devw_88888888888888888888888888888888"}
 	service := &fakePRWorkspacePublicationService{
 		pages: []prworkspace.Page{
 			{Next: cursor},

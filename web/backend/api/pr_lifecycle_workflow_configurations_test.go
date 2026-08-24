@@ -827,6 +827,7 @@ func putPRLifecycleRepositoryAssignmentsForTest(
 		ExpectedConfigRevision: revision,
 		RequestID:              "request-save-repository-assignments",
 		RepositoryAssignments:  assignments,
+		Repositories:           map[string]config.PRLifecycleRepositoryDescriptor{},
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {

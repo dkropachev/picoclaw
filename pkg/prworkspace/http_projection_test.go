@@ -9,7 +9,7 @@ import (
 
 func TestWriteHTTPResultProjectsEmptyAggregateCollectionsAsArrays(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writeHTTPResult(recorder, Aggregate{Workspace: Workspace{ID: "prw_projection"}}, nil)
+	writeHTTPResult(recorder, Aggregate{Workspace: Workspace{ID: "devw_projection"}}, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
 	}
@@ -30,7 +30,7 @@ func TestWriteHTTPResultProjectsEmptyAggregateCollectionsAsArrays(t *testing.T) 
 
 func TestWriteHTTPErrorProjectsCurrentAggregateCollectionsAsArrays(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writeHTTPResult(recorder, Aggregate{Workspace: Workspace{ID: "prw_projection"}}, ErrConflict)
+	writeHTTPResult(recorder, Aggregate{Workspace: Workspace{ID: "devw_projection"}}, ErrConflict)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
 	}

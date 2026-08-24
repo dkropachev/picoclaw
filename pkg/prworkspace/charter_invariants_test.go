@@ -246,6 +246,56 @@ func TestRevisedCharterUsesReconfirmationAndInvalidatesEvidence(t *testing.T) {
 	}
 }
 
+func TestHumanGateApprovalRoutesFeatureCharterToPlanning(t *testing.T) {
+	service, err := NewService(ServiceConfig{
+		Store: NewMemoryStore(), Provider: developmentIntakeResolver{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := service.Create(t.Context(), CreateWorkspaceRequest{
+		RequestID: "request-feature-gate-create", Intent: IntentImplementFeature,
+		SourceKind: SourceIssue, IssueURL: "https://github.com/octo/repo/issues/7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = service.SaveCharter(t.Context(), SaveCharterRequest{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: "request-feature-gate-charter",
+		Draft: CharterDraftOutput{
+			Type: PRTypeFeature, Goal: "Implement the requested feature",
+			AcceptanceCriteria: []string{"The feature is available"},
+			IncludedAreas:      []string{"pkg/feature"}, ExcludedAreas: []string{"unrelated"},
+			NonGoals: []string{"deployment"},
+		},
+	})
+	if err != nil || len(aggregate.Charters) != 1 {
+		t.Fatalf("SaveCharter() = %#v, %v", aggregate, err)
+	}
+	waiting, err := service.ConfirmCharter(t.Context(), ConfirmCharterRequest{
+		WorkspaceID: aggregate.Workspace.ID, CharterID: aggregate.Charters[0].ID,
+		ExpectedVersion: aggregate.Workspace.Version, RequestID: "request-feature-gate-start",
+	})
+	if err != nil || len(waiting.Gates) != 1 || waiting.Gates[0].State != ExecutionWaitingUser {
+		t.Fatalf("ConfirmCharter() = %#v, %v", waiting, err)
+	}
+	confirmed, err := service.RespondGate(t.Context(), RespondGateRequest{
+		WorkspaceID: waiting.Workspace.ID, GateRunID: waiting.Gates[0].ID,
+		ExpectedVersion: waiting.Workspace.Version, RequestID: "request-feature-gate-approve",
+		FieldValues: map[string]any{"action": "approve"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Workspace.Phase != PhasePlanning ||
+		confirmed.Workspace.ExecutionState != ExecutionQueued ||
+		confirmed.Workspace.ActiveCharterID != aggregate.Charters[0].ID ||
+		!confirmed.Charters[0].Confirmed {
+		t.Fatalf("confirmed feature workspace = %#v", confirmed)
+	}
+}
+
 func charterInvariantDraft(goal string) CharterDraftOutput {
 	return CharterDraftOutput{
 		Type: PRTypeFix, Goal: goal, AcceptanceCriteria: []string{"fix the defect"},

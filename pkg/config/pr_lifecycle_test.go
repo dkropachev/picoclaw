@@ -158,6 +158,17 @@ func TestPRLifecycleConfigRejectsInvalidWorkflowConfigurations(t *testing.T) {
 			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionAI, AgentID: "main"}
 			c.WorkflowConfigurations["automated"] = v
 		}, want: "requires prompt"},
+		{name: "automatic implementation publication", mutate: func(c *PRLifecycleConfig) {
+			v := c.WorkflowConfigurations["automated"]
+			v.Bindings = append(v.Bindings, PRLifecycleGateBinding{
+				WorkflowRef: PRLifecycleWorkflowRef,
+				GateRef:     "gates.implementation-publish",
+				Action: &gatetypes.GateAction{
+					Type: gatetypes.GateActionDeterministic, Fields: map[string]any{"action": "publish"},
+				},
+			})
+			c.WorkflowConfigurations["automated"] = v
+		}, want: "must remain human"},
 		{name: "partial workflow action", mutate: func(c *PRLifecycleConfig) {
 			v := c.WorkflowConfigurations["automated"]
 			v.Bindings[0].Action = &gatetypes.GateAction{Type: gatetypes.GateActionWorkflow}
@@ -401,5 +412,144 @@ func TestPRLifecycleConfigAcceptsOnlyMinimalSourceAIAction(t *testing.T) {
 	unsupported.DefaultWorkflowConfigurationID = "source"
 	if err := unsupported.Validate(); err == nil || !strings.Contains(err.Error(), "single-finding classification") {
 		t.Fatalf("unsupported source gate error = %v", err)
+	}
+}
+
+func TestPRLifecycleEffectiveDefaultsAndScopeDispositionValidation(t *testing.T) {
+	var empty PRLifecycleConfig
+	effective := empty.Effective()
+	wantDefault := DefaultPRLifecycleConfig()
+	if !reflect.DeepEqual(effective, wantDefault) {
+		t.Fatalf("zero Effective() = %#v, want default %#v", effective, wantDefault)
+	}
+
+	configured := DefaultPRLifecycleConfig()
+	configured.Nudge.ReviewMinimumAdditional = 3
+	if got := configured.Effective(); !reflect.DeepEqual(got, configured) {
+		t.Fatalf("configured Effective() = %#v, want original %#v", got, configured)
+	}
+
+	if err := (PRLifecycleScopeDispositionConfig{}).Validate(); err != nil {
+		t.Fatalf("zero scope disposition error = %v", err)
+	}
+	valid := PRLifecycleScopeDispositionConfig{
+		Default: PRLifecycleScopeDispositionRule{Mode: PRLifecycleScopeStrict},
+		ByType: map[string]PRLifecycleScopeDispositionRule{
+			"feature": {Mode: PRLifecycleScopeRelaxed, Prompt: "Prefer exact charter work."},
+			"test":    {Mode: PRLifecycleScopeStrict},
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid scope disposition error = %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		candidate PRLifecycleScopeDispositionConfig
+		want      string
+	}{
+		{
+			name: "invalid default mode",
+			candidate: PRLifecycleScopeDispositionConfig{
+				Default: PRLifecycleScopeDispositionRule{Mode: "automatic"},
+				ByType:  map[string]PRLifecycleScopeDispositionRule{},
+			},
+			want: "default",
+		},
+		{
+			name: "missing by type",
+			candidate: PRLifecycleScopeDispositionConfig{
+				Default: PRLifecycleScopeDispositionRule{Mode: PRLifecycleScopeStrict},
+			},
+			want: "by-type is required",
+		},
+		{
+			name: "unknown change type",
+			candidate: PRLifecycleScopeDispositionConfig{
+				Default: PRLifecycleScopeDispositionRule{Mode: PRLifecycleScopeStrict},
+				ByType: map[string]PRLifecycleScopeDispositionRule{
+					"deployment": {Mode: PRLifecycleScopeStrict},
+				},
+			},
+			want: "type \"deployment\" is invalid",
+		},
+		{
+			name: "untrimmed type prompt",
+			candidate: PRLifecycleScopeDispositionConfig{
+				Default: PRLifecycleScopeDispositionRule{Mode: PRLifecycleScopeStrict},
+				ByType: map[string]PRLifecycleScopeDispositionRule{
+					"fix": {Mode: PRLifecycleScopeRelaxed, Prompt: " trailing "},
+				},
+			},
+			want: "prompt must be trimmed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.candidate.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPRLifecycleRepositoryCatalogAndDefaultSelectionValidation(t *testing.T) {
+	candidate := lifecycleConfigWithOverrides()
+	candidate.Repositories["https://github.com|repo-42"] = PRLifecycleRepositoryDescriptor{
+		Name: "octo/repo", DefaultBranch: "main",
+	}
+	if err := candidate.Validate(); err != nil {
+		t.Fatalf("valid repository catalog error = %v", err)
+	}
+
+	unassigned := DefaultPRLifecycleConfig()
+	id, selected, revision, err := unassigned.WorkflowConfigurationForRepository(
+		"https://github.com", "unassigned-repository",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != DefaultPRLifecycleWorkflowConfigurationID ||
+		!reflect.DeepEqual(selected, unassigned.WorkflowConfigurations[id]) || revision == "" {
+		t.Fatalf("default selection = %q %#v %q", id, selected, revision)
+	}
+
+	for name, mutate := range map[string]func(*PRLifecycleConfig){
+		"malformed identity": func(config *PRLifecycleConfig) {
+			config.Repositories["missing-separator"] = PRLifecycleRepositoryDescriptor{
+				Name: "octo/repo", DefaultBranch: "main",
+			}
+		},
+		"unsafe origin": func(config *PRLifecycleConfig) {
+			config.Repositories["http://github.com|repo-42"] = PRLifecycleRepositoryDescriptor{
+				Name: "octo/repo", DefaultBranch: "main",
+			}
+		},
+		"noncanonical name": func(config *PRLifecycleConfig) {
+			config.Repositories["https://github.com|repo-42"] = PRLifecycleRepositoryDescriptor{
+				Name: "octo/repo/extra", DefaultBranch: "main",
+			}
+		},
+		"unsafe default branch": func(config *PRLifecycleConfig) {
+			config.Repositories["https://github.com|repo-42"] = PRLifecycleRepositoryDescriptor{
+				Name: "octo/repo", DefaultBranch: "main\nnext",
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := DefaultPRLifecycleConfig()
+			mutate(&invalid)
+			err := invalid.Validate()
+			if err == nil || !strings.Contains(err.Error(), "repository") {
+				t.Fatalf("Validate() error = %v, want repository validation failure", err)
+			}
+		})
+	}
+
+	if _, _, _, err := unassigned.WorkflowConfigurationForRepository(
+		"http://github.com", "repo-42",
+	); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("unsafe repository selection error = %v", err)
 	}
 }

@@ -33,7 +33,10 @@ func (store *EventingStore) Create(ctx context.Context, input CreateInput) (Muta
 		input.Workspace.Version != 1 || input.Workspace.ID == "" ||
 		input.Workspace.ProviderOrigin != input.Provider.ProviderOrigin ||
 		input.Workspace.RepositoryID != input.Provider.RepositoryID ||
-		input.Workspace.PullRequestID != input.Provider.PullRequestID {
+		input.Workspace.PullRequestID != input.Provider.PullRequestID ||
+		input.Workspace.Intent != input.Provider.Intent ||
+		input.Workspace.SourceKind != input.Provider.SourceKind ||
+		input.Workspace.SourceID != input.Provider.SourceID {
 		return MutationResult{}, ErrInvalid
 	}
 	_, beforeErr := store.store.GetPRWorkspace(ctx, input.Workspace.ID)
@@ -54,6 +57,7 @@ func (store *EventingStore) Create(ctx context.Context, input CreateInput) (Muta
 	if convertErr != nil {
 		return MutationResult{}, convertErr
 	}
+	syncDevelopmentNotifications(ctx, store, converted)
 	return MutationResult{Aggregate: converted, Replayed: existed || !created}, nil
 }
 
@@ -129,6 +133,7 @@ func (store *EventingStore) Mutate(ctx context.Context, mutation Mutation) (Muta
 	if convertErr != nil {
 		return MutationResult{}, convertErr
 	}
+	syncDevelopmentNotifications(ctx, store, converted)
 	return MutationResult{Aggregate: converted, Replayed: result.Replayed}, nil
 }
 
@@ -270,6 +275,9 @@ func toEventingPatch(
 
 func toEventingProvider(value ProviderSnapshot) eventing.PRProviderSnapshot {
 	return eventing.PRProviderSnapshot{
+		Intent:     eventing.DevelopmentIntent(value.Intent),
+		SourceKind: eventing.DevelopmentSourceKind(value.SourceKind),
+		SourceID:   value.SourceID, SourceNumber: value.SourceNumber, SourceURL: value.SourceURL,
 		Provider: value.Provider, ProviderOrigin: value.ProviderOrigin,
 		RepositoryID: value.RepositoryID, Repository: value.Repository,
 		PullRequestID: value.PullRequestID, PullNumber: value.PullNumber,
@@ -280,7 +288,8 @@ func toEventingProvider(value ProviderSnapshot) eventing.PRProviderSnapshot {
 		HeadRef: value.HeadRef, HeadSHA: value.HeadSHA, State: value.State,
 		Owned: value.Owned, HeadWritable: value.HeadWritable,
 		CanReview: value.CanReview, CanCreateIssue: value.CanCreateIssue,
-		ProviderRevision: value.ProviderRevision, ObservedAt: value.ObservedAt,
+		CanCreatePullRequest: value.CanCreatePullRequest,
+		ProviderRevision:     value.ProviderRevision, ObservedAt: value.ObservedAt,
 	}
 }
 
@@ -300,11 +309,13 @@ func toEventingCharter(value Charter) eventing.PRCharterRevision {
 		Exclusions: append(
 			[]string(nil),
 			value.ExcludedAreas...),
-		NonGoals:    append([]string(nil), value.NonGoals...),
-		BaseSHA:     value.BaseSHA,
-		HeadSHA:     value.HeadSHA,
-		CreatedBy:   "prworkspace",
-		ConfirmedAt: cloneTimePointer(value.ConfirmedAt),
+		NonGoals:              append([]string(nil), value.NonGoals...),
+		ClarificationNeeded:   value.ClarificationNeeded,
+		ClarificationQuestion: value.ClarificationQuestion,
+		BaseSHA:               value.BaseSHA,
+		HeadSHA:               value.HeadSHA,
+		CreatedBy:             "prworkspace",
+		ConfirmedAt:           cloneTimePointer(value.ConfirmedAt),
 	}
 }
 
@@ -372,10 +383,13 @@ func toEventingFinding(value Finding) (eventing.PRFinding, error) {
 			SemanticLines: value.Scope.SemanticLines,
 			Modules:       value.Scope.Modules,
 		},
-		MetricsEstimated:    value.Scope.Estimated,
-		ScopeExplanation:    value.Scope.Explanation,
-		ScopePresence:       eventing.PRWorkPresence(value.Scope.Presence),
-		ScopeChangeEvidence: toEventingScopeChanges(value.Scope.ChangeEvidence),
+		MetricsEstimated:        value.Scope.Estimated,
+		ScopeExplanation:        value.Scope.Explanation,
+		ScopePolicyMode:         string(value.ScopePolicyMode),
+		ScopePolicyRevision:     value.ScopePolicyRevision,
+		ScopePolicyPromptDigest: value.ScopePolicyPromptDigest,
+		ScopePresence:           eventing.PRWorkPresence(value.Scope.Presence),
+		ScopeChangeEvidence:     toEventingScopeChanges(value.Scope.ChangeEvidence),
 		NudgeReward: cloneFloatPointer(
 			value.NudgeReward,
 		),
@@ -398,7 +412,9 @@ func toEventingFinding(value Finding) (eventing.PRFinding, error) {
 
 func toEventingMessage(value Message) eventing.PRMessage {
 	kind := "workspace_message"
-	if value.Stage != "" {
+	if value.Mode != "" {
+		kind = "development_chat:" + value.Mode + ":" + value.Status
+	} else if value.Stage != "" {
 		kind += ":" + value.Stage
 	}
 	return eventing.PRMessage{
@@ -805,7 +821,9 @@ func fromEventingAggregate(value eventing.PRWorkspaceAggregate) (Aggregate, erro
 
 func fromEventingWorkspace(value eventing.PRWorkspace) Workspace {
 	return Workspace{
-		ID: value.ID, Provider: value.Provider, ProviderOrigin: value.ProviderOrigin,
+		ID: value.ID, Intent: DevelopmentIntent(value.Intent), SourceKind: SourceKind(value.SourceKind),
+		SourceID: value.SourceID, SourceNumber: value.SourceNumber,
+		Provider: value.Provider, ProviderOrigin: value.ProviderOrigin,
 		RepositoryID: value.RepositoryID, PullRequestID: value.PullRequestID,
 		Repository: value.Repository, PullNumber: value.PullNumber,
 		Phase: Phase(value.Phase), ExecutionState: ExecutionState(value.ExecutionState),
@@ -816,6 +834,8 @@ func fromEventingWorkspace(value eventing.PRWorkspace) Workspace {
 
 func fromEventingProvider(value eventing.PRProviderSnapshot) ProviderSnapshot {
 	return ProviderSnapshot{
+		Intent: DevelopmentIntent(value.Intent), SourceKind: SourceKind(value.SourceKind),
+		SourceID: value.SourceID, SourceNumber: value.SourceNumber, SourceURL: value.SourceURL,
 		Provider: value.Provider, ProviderOrigin: value.ProviderOrigin,
 		RepositoryID: value.RepositoryID, Repository: value.Repository,
 		PullRequestID: value.PullRequestID, PullNumber: value.PullNumber,
@@ -826,7 +846,8 @@ func fromEventingProvider(value eventing.PRProviderSnapshot) ProviderSnapshot {
 		HeadRef: value.HeadRef, HeadSHA: value.HeadSHA, State: value.State,
 		Owned: value.Owned, HeadWritable: value.HeadWritable,
 		CanReview: value.CanReview, CanCreateIssue: value.CanCreateIssue,
-		ProviderRevision: value.ProviderRevision, ObservedAt: value.ObservedAt,
+		CanCreatePullRequest: value.CanCreatePullRequest,
+		ProviderRevision:     value.ProviderRevision, ObservedAt: value.ObservedAt,
 	}
 }
 
@@ -841,12 +862,14 @@ func fromEventingCharter(value eventing.PRCharterRevision) Charter {
 		ExcludedAreas: append(
 			[]string(nil),
 			value.Exclusions...),
-		NonGoals:    append([]string(nil), value.NonGoals...),
-		BaseSHA:     value.BaseSHA,
-		HeadSHA:     value.HeadSHA,
-		Confirmed:   value.Status == eventing.PRRecordConfirmed,
-		CreatedAt:   value.CreatedAt,
-		ConfirmedAt: cloneTimePointer(value.ConfirmedAt),
+		NonGoals:              append([]string(nil), value.NonGoals...),
+		ClarificationNeeded:   value.ClarificationNeeded,
+		ClarificationQuestion: value.ClarificationQuestion,
+		BaseSHA:               value.BaseSHA,
+		HeadSHA:               value.HeadSHA,
+		Confirmed:             value.Status == eventing.PRRecordConfirmed,
+		CreatedAt:             value.CreatedAt,
+		ConfirmedAt:           cloneTimePointer(value.ConfirmedAt),
 	}
 }
 
@@ -884,7 +907,10 @@ func fromEventingFinding(value eventing.PRFinding) (Finding, error) {
 			ChangeEvidence: fromEventingScopeChanges(value.ScopeChangeEvidence),
 		},
 		Disposition: FindingDisposition(value.Disposition), NudgeReward: cloneFloatPointer(value.NudgeReward),
-		RewardSource: value.RewardSource, Version: value.Version,
+		ScopePolicyMode:         ScopeDispositionMode(value.ScopePolicyMode),
+		ScopePolicyRevision:     value.ScopePolicyRevision,
+		ScopePolicyPromptDigest: value.ScopePolicyPromptDigest,
+		RewardSource:            value.RewardSource, Version: value.Version,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 	if persisted, ok := value.ProtectedSourceExecution(); ok {
@@ -905,11 +931,17 @@ func fromEventingFinding(value eventing.PRFinding) (Finding, error) {
 
 func fromEventingMessage(value eventing.PRMessage) Message {
 	stage := ""
+	mode, status := "", ""
 	if strings.HasPrefix(value.Kind, "workspace_message:") {
 		stage = strings.TrimPrefix(value.Kind, "workspace_message:")
+	} else if strings.HasPrefix(value.Kind, "development_chat:") {
+		parts := strings.Split(value.Kind, ":")
+		if len(parts) == 3 {
+			mode, status, stage = parts[1], parts[2], "implementation"
+		}
 	}
 	return Message{
-		ID: value.ID, Role: value.Role, Stage: stage, Content: value.Content,
+		ID: value.ID, Role: value.Role, Stage: stage, Mode: mode, Status: status, Content: value.Content,
 		CharterID: value.CharterID, HeadSHA: value.HeadSHA, CreatedAt: value.CreatedAt,
 	}
 }

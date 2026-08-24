@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	prWorkspaceIDPrefix         = "prw_"
+	prWorkspaceIDPrefix         = "devw_"
 	prProviderSnapshotIDPrefix  = "pps_"
 	prCharterRevisionIDPrefix   = "pcr_"
 	prStageRunIDPrefix          = "psr_"
@@ -66,6 +66,7 @@ type PRWorkspacePhase string
 const (
 	PRWorkspaceIntake          PRWorkspacePhase = "intake"
 	PRWorkspaceCharter         PRWorkspacePhase = "charter"
+	PRWorkspacePlanning        PRWorkspacePhase = "planning"
 	PRWorkspaceReview          PRWorkspacePhase = "review"
 	PRWorkspaceTriage          PRWorkspacePhase = "triage"
 	PRWorkspaceImplementation  PRWorkspacePhase = "implementation"
@@ -73,6 +74,21 @@ const (
 	PRWorkspaceCompletionAudit PRWorkspacePhase = "completion_audit"
 	PRWorkspacePublication     PRWorkspacePhase = "publication"
 	PRWorkspaceComplete        PRWorkspacePhase = "complete"
+)
+
+type DevelopmentIntent string
+
+const (
+	DevelopmentImplementFeature DevelopmentIntent = "implement_feature"
+	DevelopmentPickupPR         DevelopmentIntent = "pickup_pr"
+)
+
+type DevelopmentSourceKind string
+
+const (
+	DevelopmentSourceIssue       DevelopmentSourceKind = "issue"
+	DevelopmentSourceBrief       DevelopmentSourceKind = "brief"
+	DevelopmentSourcePullRequest DevelopmentSourceKind = "pull_request"
 )
 
 // PRExecutionState is shared by workspace and durable stage operations.
@@ -192,67 +208,79 @@ type PRWorkspaceRecord struct {
 // PRProviderSnapshot is a provider-verified, immutable-in-history observation.
 type PRProviderSnapshot struct {
 	PRWorkspaceRecord
-	Provider            string    `json:"provider"`
-	ProviderOrigin      string    `json:"provider_origin"`
-	RepositoryID        string    `json:"repository_id"`
-	Repository          string    `json:"repository"`
-	PullRequestID       string    `json:"pull_request_id"`
-	PullNumber          int64     `json:"pull_number"`
-	Title               string    `json:"title"`
-	Body                string    `json:"body,omitempty"`
-	AuthorID            string    `json:"author_id"`
-	AuthorLogin         string    `json:"author_login"`
-	AuthenticatedUserID string    `json:"authenticated_user_id"`
-	BaseRef             string    `json:"base_ref"`
-	BaseSHA             string    `json:"base_sha"`
-	HeadRepositoryID    string    `json:"head_repository_id"`
-	HeadRepository      string    `json:"head_repository"`
-	HeadRef             string    `json:"head_ref"`
-	HeadSHA             string    `json:"head_sha"`
-	State               string    `json:"state"`
-	Owned               bool      `json:"owned"`
-	HeadWritable        bool      `json:"head_writable"`
-	CanReview           bool      `json:"can_review"`
-	CanCreateIssue      bool      `json:"can_create_issue"`
-	ProviderRevision    string    `json:"provider_revision,omitempty"`
-	ObservedAt          time.Time `json:"observed_at"`
+	Intent               DevelopmentIntent     `json:"intent"`
+	SourceKind           DevelopmentSourceKind `json:"source_kind"`
+	SourceID             string                `json:"source_id"`
+	SourceNumber         int64                 `json:"source_number,omitempty"`
+	SourceURL            string                `json:"source_url,omitempty"`
+	Provider             string                `json:"provider"`
+	ProviderOrigin       string                `json:"provider_origin"`
+	RepositoryID         string                `json:"repository_id"`
+	Repository           string                `json:"repository"`
+	PullRequestID        string                `json:"pull_request_id"`
+	PullNumber           int64                 `json:"pull_number"`
+	Title                string                `json:"title"`
+	Body                 string                `json:"body,omitempty"`
+	AuthorID             string                `json:"author_id"`
+	AuthorLogin          string                `json:"author_login"`
+	AuthenticatedUserID  string                `json:"authenticated_user_id"`
+	BaseRef              string                `json:"base_ref"`
+	BaseSHA              string                `json:"base_sha"`
+	HeadRepositoryID     string                `json:"head_repository_id"`
+	HeadRepository       string                `json:"head_repository"`
+	HeadRef              string                `json:"head_ref"`
+	HeadSHA              string                `json:"head_sha"`
+	State                string                `json:"state"`
+	Owned                bool                  `json:"owned"`
+	HeadWritable         bool                  `json:"head_writable"`
+	CanReview            bool                  `json:"can_review"`
+	CanCreateIssue       bool                  `json:"can_create_issue"`
+	CanCreatePullRequest bool                  `json:"can_create_pull_request"`
+	ProviderRevision     string                `json:"provider_revision,omitempty"`
+	ObservedAt           time.Time             `json:"observed_at"`
 }
 
 // PRWorkspace is the current provider/lifecycle projection.
 type PRWorkspace struct {
-	ID                     string           `json:"id"`
-	Provider               string           `json:"provider"`
-	ProviderOrigin         string           `json:"provider_origin"`
-	RepositoryID           string           `json:"repository_id"`
-	PullRequestID          string           `json:"pull_request_id"`
-	Repository             string           `json:"repository"`
-	PullNumber             int64            `json:"pull_number"`
-	Phase                  PRWorkspacePhase `json:"phase"`
-	ExecutionState         PRExecutionState `json:"execution_state"`
-	ActiveCharterID        string           `json:"active_charter_id,omitempty"`
-	ProviderHeadSHA        string           `json:"provider_head_sha"`
-	CurrentProviderOrdinal int64            `json:"current_provider_ordinal"`
-	Version                int64            `json:"version"`
-	CreatedAt              time.Time        `json:"created_at"`
-	UpdatedAt              time.Time        `json:"updated_at"`
+	ID                     string                `json:"id"`
+	Intent                 DevelopmentIntent     `json:"intent"`
+	SourceKind             DevelopmentSourceKind `json:"source_kind"`
+	SourceID               string                `json:"source_id"`
+	SourceNumber           int64                 `json:"source_number,omitempty"`
+	Provider               string                `json:"provider"`
+	ProviderOrigin         string                `json:"provider_origin"`
+	RepositoryID           string                `json:"repository_id"`
+	PullRequestID          string                `json:"pull_request_id"`
+	Repository             string                `json:"repository"`
+	PullNumber             int64                 `json:"pull_number"`
+	Phase                  PRWorkspacePhase      `json:"phase"`
+	ExecutionState         PRExecutionState      `json:"execution_state"`
+	ActiveCharterID        string                `json:"active_charter_id,omitempty"`
+	ProviderHeadSHA        string                `json:"provider_head_sha"`
+	CurrentProviderOrdinal int64                 `json:"current_provider_ordinal"`
+	Version                int64                 `json:"version"`
+	CreatedAt              time.Time             `json:"created_at"`
+	UpdatedAt              time.Time             `json:"updated_at"`
 }
 
 type PRCharterRevision struct {
 	PRWorkspaceRecord
-	Status             PRRecordStatus `json:"status"`
-	Revision           int64          `json:"revision"`
-	Type               PRType         `json:"type"`
-	Goal               string         `json:"goal"`
-	AcceptanceCriteria []string       `json:"acceptance_criteria"`
-	IncludedAreas      []string       `json:"included_areas,omitempty"`
-	Exclusions         []string       `json:"exclusions,omitempty"`
-	NonGoals           []string       `json:"non_goals,omitempty"`
-	BaseSHA            string         `json:"base_sha"`
-	HeadSHA            string         `json:"head_sha"`
-	CreatedBy          string         `json:"created_by"`
-	ContentDigest      string         `json:"content_digest,omitempty"`
-	SupersedesID       string         `json:"supersedes_id,omitempty"`
-	ConfirmedAt        *time.Time     `json:"confirmed_at,omitempty"`
+	Status                PRRecordStatus `json:"status"`
+	Revision              int64          `json:"revision"`
+	Type                  PRType         `json:"type"`
+	Goal                  string         `json:"goal"`
+	AcceptanceCriteria    []string       `json:"acceptance_criteria"`
+	IncludedAreas         []string       `json:"included_areas,omitempty"`
+	Exclusions            []string       `json:"exclusions,omitempty"`
+	NonGoals              []string       `json:"non_goals,omitempty"`
+	ClarificationNeeded   bool           `json:"clarification_needed,omitempty"`
+	ClarificationQuestion string         `json:"clarification_question,omitempty"`
+	BaseSHA               string         `json:"base_sha"`
+	HeadSHA               string         `json:"head_sha"`
+	CreatedBy             string         `json:"created_by"`
+	ContentDigest         string         `json:"content_digest,omitempty"`
+	SupersedesID          string         `json:"supersedes_id,omitempty"`
+	ConfirmedAt           *time.Time     `json:"confirmed_at,omitempty"`
 }
 
 type PRStageRun struct {
@@ -284,37 +312,40 @@ type PRChangeMetrics struct {
 
 type PRFinding struct {
 	PRWorkspaceRecord
-	Origin              string               `json:"origin"`
-	StageRunID          string               `json:"stage_run_id,omitempty"`
-	NudgeRoundID        string               `json:"nudge_round_id,omitempty"`
-	ExternalID          string               `json:"external_id,omitempty"`
-	Fingerprint         string               `json:"fingerprint"`
-	Severity            string               `json:"severity"`
-	Title               string               `json:"title"`
-	Message             string               `json:"message"`
-	File                string               `json:"file,omitempty"`
-	Line                *int                 `json:"line,omitempty"`
-	Evidence            string               `json:"evidence,omitempty"`
-	Impact              string               `json:"impact,omitempty"`
-	Recommendation      string               `json:"recommendation,omitempty"`
-	Validation          string               `json:"validation,omitempty"`
-	Disposition         PRFindingDisposition `json:"disposition"`
-	ScopeDistance       PRScopeDistance      `json:"scope_distance"`
-	ChangeSize          PRChangeSize         `json:"change_size"`
-	TypeCompatible      bool                 `json:"type_compatible"`
-	ClassificationConf  float64              `json:"classification_confidence"`
-	CharterClauses      []string             `json:"charter_clauses,omitempty"`
-	EstimatedMetrics    PRChangeMetrics      `json:"estimated_metrics"`
-	MetricsEstimated    bool                 `json:"metrics_estimated"`
-	ScopeExplanation    string               `json:"scope_explanation,omitempty"`
-	ScopePresence       PRWorkPresence       `json:"scope_presence,omitempty"`
-	ScopeChangeEvidence []PRScopeChange      `json:"scope_change_evidence,omitempty"`
-	ActualMetrics       *PRChangeMetrics     `json:"actual_metrics,omitempty"`
-	DeferredGroupID     string               `json:"deferred_group_id,omitempty"`
-	NudgeReward         *float64             `json:"nudge_reward,omitempty"`
-	RewardSource        string               `json:"reward_source,omitempty"`
-	protectedSource     *PRFindingSourceExecution
-	Version             int64 `json:"version"`
+	Origin                  string               `json:"origin"`
+	StageRunID              string               `json:"stage_run_id,omitempty"`
+	NudgeRoundID            string               `json:"nudge_round_id,omitempty"`
+	ExternalID              string               `json:"external_id,omitempty"`
+	Fingerprint             string               `json:"fingerprint"`
+	Severity                string               `json:"severity"`
+	Title                   string               `json:"title"`
+	Message                 string               `json:"message"`
+	File                    string               `json:"file,omitempty"`
+	Line                    *int                 `json:"line,omitempty"`
+	Evidence                string               `json:"evidence,omitempty"`
+	Impact                  string               `json:"impact,omitempty"`
+	Recommendation          string               `json:"recommendation,omitempty"`
+	Validation              string               `json:"validation,omitempty"`
+	Disposition             PRFindingDisposition `json:"disposition"`
+	ScopeDistance           PRScopeDistance      `json:"scope_distance"`
+	ChangeSize              PRChangeSize         `json:"change_size"`
+	TypeCompatible          bool                 `json:"type_compatible"`
+	ClassificationConf      float64              `json:"classification_confidence"`
+	CharterClauses          []string             `json:"charter_clauses,omitempty"`
+	EstimatedMetrics        PRChangeMetrics      `json:"estimated_metrics"`
+	MetricsEstimated        bool                 `json:"metrics_estimated"`
+	ScopeExplanation        string               `json:"scope_explanation,omitempty"`
+	ScopePolicyMode         string               `json:"scope_policy_mode,omitempty"`
+	ScopePolicyRevision     string               `json:"scope_policy_revision,omitempty"`
+	ScopePolicyPromptDigest string               `json:"scope_policy_prompt_digest,omitempty"`
+	ScopePresence           PRWorkPresence       `json:"scope_presence,omitempty"`
+	ScopeChangeEvidence     []PRScopeChange      `json:"scope_change_evidence,omitempty"`
+	ActualMetrics           *PRChangeMetrics     `json:"actual_metrics,omitempty"`
+	DeferredGroupID         string               `json:"deferred_group_id,omitempty"`
+	NudgeReward             *float64             `json:"nudge_reward,omitempty"`
+	RewardSource            string               `json:"reward_source,omitempty"`
+	protectedSource         *PRFindingSourceExecution
+	Version                 int64 `json:"version"`
 }
 
 type PRFindingEvent struct {

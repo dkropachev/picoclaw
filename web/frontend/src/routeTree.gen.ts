@@ -11,7 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ThreadsRouteImport } from './routes/threads'
 import { Route as RepositoryReviewsRouteImport } from './routes/repository-reviews'
-import { Route as PullRequestsRouteImport } from './routes/pull-requests'
+import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as ModelEvaluationsRouteImport } from './routes/model-evaluations'
 import { Route as LogsRouteImport } from './routes/logs'
@@ -19,6 +19,7 @@ import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
 import { Route as LauncherLoginRouteImport } from './routes/launcher-login'
 import { Route as EventsRouteImport } from './routes/events'
 import { Route as EventSourcesRouteImport } from './routes/event-sources'
+import { Route as DevelopmentRouteImport } from './routes/development'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as AgentRouteImport } from './routes/agent'
 import { Route as AccountsRouteImport } from './routes/accounts'
@@ -30,10 +31,12 @@ import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
 import { Route as RepositoryReviewsResultsRouteImport } from './routes/repository-reviews_.results'
 import { Route as RepositoryReviewsRepositoriesRouteImport } from './routes/repository-reviews_.repositories'
 import { Route as RepositoryReviewsProfilesRouteImport } from './routes/repository-reviews_.profiles'
-import { Route as PullRequestsWorkflowConfigurationsRouteImport } from './routes/pull-requests_.workflow-configurations'
-import { Route as PullRequestsSettingsRouteImport } from './routes/pull-requests_.settings'
-import { Route as PullRequestsRepositoryAssignmentsRouteImport } from './routes/pull-requests_.repository-assignments'
-import { Route as PullRequestsWorkspaceIDRouteImport } from './routes/pull-requests_.$workspaceID'
+import { Route as NotificationsNotificationIDRouteImport } from './routes/notifications_.$notificationID'
+import { Route as DevelopmentWorkflowConfigurationsRouteImport } from './routes/development_.workflow-configurations'
+import { Route as DevelopmentSettingsRouteImport } from './routes/development_.settings'
+import { Route as DevelopmentRepositoriesRouteImport } from './routes/development_.repositories'
+import { Route as DevelopmentNewRouteImport } from './routes/development_.new'
+import { Route as DevelopmentWorkspaceIDRouteImport } from './routes/development_.$workspaceID'
 import { Route as ConfigRawRouteImport } from './routes/config.raw'
 import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
 import { Route as AgentWorkflowsRouteImport } from './routes/agent/workflows'
@@ -44,7 +47,6 @@ import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
-import { Route as PullRequestsWorkflowConfigurationsConfigurationIDRouteImport } from './routes/pull-requests_.workflow-configurations.$configurationID'
 import { Route as ModelEvaluationsEvaluationIDReportRouteImport } from './routes/model-evaluations_.$evaluationID.report'
 import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
 import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
@@ -59,9 +61,9 @@ const RepositoryReviewsRoute = RepositoryReviewsRouteImport.update({
   path: '/repository-reviews',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PullRequestsRoute = PullRequestsRouteImport.update({
-  id: '/pull-requests',
-  path: '/pull-requests',
+const NotificationsRoute = NotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ModelsRoute = ModelsRouteImport.update({
@@ -97,6 +99,11 @@ const EventsRoute = EventsRouteImport.update({
 const EventSourcesRoute = EventSourcesRouteImport.update({
   id: '/event-sources',
   path: '/event-sources',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DevelopmentRoute = DevelopmentRouteImport.update({
+  id: '/development',
+  path: '/development',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ConfigRoute = ConfigRouteImport.update({
@@ -157,26 +164,36 @@ const RepositoryReviewsProfilesRoute =
     path: '/repository-reviews/profiles',
     getParentRoute: () => rootRouteImport,
   } as any)
-const PullRequestsWorkflowConfigurationsRoute =
-  PullRequestsWorkflowConfigurationsRouteImport.update({
-    id: '/pull-requests_/workflow-configurations',
-    path: '/pull-requests/workflow-configurations',
+const NotificationsNotificationIDRoute =
+  NotificationsNotificationIDRouteImport.update({
+    id: '/notifications_/$notificationID',
+    path: '/notifications/$notificationID',
     getParentRoute: () => rootRouteImport,
   } as any)
-const PullRequestsSettingsRoute = PullRequestsSettingsRouteImport.update({
-  id: '/pull-requests_/settings',
-  path: '/pull-requests/settings',
+const DevelopmentWorkflowConfigurationsRoute =
+  DevelopmentWorkflowConfigurationsRouteImport.update({
+    id: '/development_/workflow-configurations',
+    path: '/development/workflow-configurations',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const DevelopmentSettingsRoute = DevelopmentSettingsRouteImport.update({
+  id: '/development_/settings',
+  path: '/development/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PullRequestsRepositoryAssignmentsRoute =
-  PullRequestsRepositoryAssignmentsRouteImport.update({
-    id: '/pull-requests_/repository-assignments',
-    path: '/pull-requests/repository-assignments',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const PullRequestsWorkspaceIDRoute = PullRequestsWorkspaceIDRouteImport.update({
-  id: '/pull-requests_/$workspaceID',
-  path: '/pull-requests/$workspaceID',
+const DevelopmentRepositoriesRoute = DevelopmentRepositoriesRouteImport.update({
+  id: '/development_/repositories',
+  path: '/development/repositories',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DevelopmentNewRoute = DevelopmentNewRouteImport.update({
+  id: '/development_/new',
+  path: '/development/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DevelopmentWorkspaceIDRoute = DevelopmentWorkspaceIDRouteImport.update({
+  id: '/development_/$workspaceID',
+  path: '/development/$workspaceID',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ConfigRawRoute = ConfigRawRouteImport.update({
@@ -229,12 +246,6 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
-const PullRequestsWorkflowConfigurationsConfigurationIDRoute =
-  PullRequestsWorkflowConfigurationsConfigurationIDRouteImport.update({
-    id: '/$configurationID',
-    path: '/$configurationID',
-    getParentRoute: () => PullRequestsWorkflowConfigurationsRoute,
-  } as any)
 const ModelEvaluationsEvaluationIDReportRoute =
   ModelEvaluationsEvaluationIDReportRouteImport.update({
     id: '/model-evaluations_/$evaluationID/report',
@@ -260,6 +271,7 @@ export interface FileRoutesByFullPath {
   '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
+  '/development': typeof DevelopmentRoute
   '/event-sources': typeof EventSourcesRoute
   '/events': typeof EventsRoute
   '/launcher-login': typeof LauncherLoginRoute
@@ -267,7 +279,7 @@ export interface FileRoutesByFullPath {
   '/logs': typeof LogsRoute
   '/model-evaluations': typeof ModelEvaluationsRoute
   '/models': typeof ModelsRoute
-  '/pull-requests': typeof PullRequestsRoute
+  '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
@@ -279,10 +291,12 @@ export interface FileRoutesByFullPath {
   '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
-  '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests/repository-assignments': typeof PullRequestsRepositoryAssignmentsRoute
-  '/pull-requests/settings': typeof PullRequestsSettingsRoute
-  '/pull-requests/workflow-configurations': typeof PullRequestsWorkflowConfigurationsRouteWithChildren
+  '/development/$workspaceID': typeof DevelopmentWorkspaceIDRoute
+  '/development/new': typeof DevelopmentNewRoute
+  '/development/repositories': typeof DevelopmentRepositoriesRoute
+  '/development/settings': typeof DevelopmentSettingsRoute
+  '/development/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/notifications/$notificationID': typeof NotificationsNotificationIDRoute
   '/repository-reviews/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews/repositories': typeof RepositoryReviewsRepositoriesRoute
   '/repository-reviews/results': typeof RepositoryReviewsResultsRoute
@@ -292,7 +306,6 @@ export interface FileRoutesByFullPath {
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
-  '/pull-requests/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesByTo {
@@ -301,6 +314,7 @@ export interface FileRoutesByTo {
   '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
+  '/development': typeof DevelopmentRoute
   '/event-sources': typeof EventSourcesRoute
   '/events': typeof EventsRoute
   '/launcher-login': typeof LauncherLoginRoute
@@ -308,7 +322,7 @@ export interface FileRoutesByTo {
   '/logs': typeof LogsRoute
   '/model-evaluations': typeof ModelEvaluationsRoute
   '/models': typeof ModelsRoute
-  '/pull-requests': typeof PullRequestsRoute
+  '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
@@ -320,10 +334,12 @@ export interface FileRoutesByTo {
   '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
-  '/pull-requests/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests/repository-assignments': typeof PullRequestsRepositoryAssignmentsRoute
-  '/pull-requests/settings': typeof PullRequestsSettingsRoute
-  '/pull-requests/workflow-configurations': typeof PullRequestsWorkflowConfigurationsRouteWithChildren
+  '/development/$workspaceID': typeof DevelopmentWorkspaceIDRoute
+  '/development/new': typeof DevelopmentNewRoute
+  '/development/repositories': typeof DevelopmentRepositoriesRoute
+  '/development/settings': typeof DevelopmentSettingsRoute
+  '/development/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/notifications/$notificationID': typeof NotificationsNotificationIDRoute
   '/repository-reviews/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews/repositories': typeof RepositoryReviewsRepositoriesRoute
   '/repository-reviews/results': typeof RepositoryReviewsResultsRoute
@@ -333,7 +349,6 @@ export interface FileRoutesByTo {
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
-  '/pull-requests/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesById {
@@ -343,6 +358,7 @@ export interface FileRoutesById {
   '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
+  '/development': typeof DevelopmentRoute
   '/event-sources': typeof EventSourcesRoute
   '/events': typeof EventsRoute
   '/launcher-login': typeof LauncherLoginRoute
@@ -350,7 +366,7 @@ export interface FileRoutesById {
   '/logs': typeof LogsRoute
   '/model-evaluations': typeof ModelEvaluationsRoute
   '/models': typeof ModelsRoute
-  '/pull-requests': typeof PullRequestsRoute
+  '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
@@ -362,10 +378,12 @@ export interface FileRoutesById {
   '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
-  '/pull-requests_/$workspaceID': typeof PullRequestsWorkspaceIDRoute
-  '/pull-requests_/repository-assignments': typeof PullRequestsRepositoryAssignmentsRoute
-  '/pull-requests_/settings': typeof PullRequestsSettingsRoute
-  '/pull-requests_/workflow-configurations': typeof PullRequestsWorkflowConfigurationsRouteWithChildren
+  '/development_/$workspaceID': typeof DevelopmentWorkspaceIDRoute
+  '/development_/new': typeof DevelopmentNewRoute
+  '/development_/repositories': typeof DevelopmentRepositoriesRoute
+  '/development_/settings': typeof DevelopmentSettingsRoute
+  '/development_/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/notifications_/$notificationID': typeof NotificationsNotificationIDRoute
   '/repository-reviews_/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews_/repositories': typeof RepositoryReviewsRepositoriesRoute
   '/repository-reviews_/results': typeof RepositoryReviewsResultsRoute
@@ -375,7 +393,6 @@ export interface FileRoutesById {
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
   '/model-evaluations_/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
-  '/pull-requests_/workflow-configurations/$configurationID': typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRouteTypes {
@@ -386,6 +403,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/agent'
     | '/config'
+    | '/development'
     | '/event-sources'
     | '/events'
     | '/launcher-login'
@@ -393,7 +411,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/model-evaluations'
     | '/models'
-    | '/pull-requests'
+    | '/notifications'
     | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
@@ -405,10 +423,12 @@ export interface FileRouteTypes {
     | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
-    | '/pull-requests/$workspaceID'
-    | '/pull-requests/repository-assignments'
-    | '/pull-requests/settings'
-    | '/pull-requests/workflow-configurations'
+    | '/development/$workspaceID'
+    | '/development/new'
+    | '/development/repositories'
+    | '/development/settings'
+    | '/development/workflow-configurations'
+    | '/notifications/$notificationID'
     | '/repository-reviews/profiles'
     | '/repository-reviews/repositories'
     | '/repository-reviews/results'
@@ -418,7 +438,6 @@ export interface FileRouteTypes {
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
     | '/model-evaluations/$evaluationID/report'
-    | '/pull-requests/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -427,6 +446,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/agent'
     | '/config'
+    | '/development'
     | '/event-sources'
     | '/events'
     | '/launcher-login'
@@ -434,7 +454,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/model-evaluations'
     | '/models'
-    | '/pull-requests'
+    | '/notifications'
     | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
@@ -446,10 +466,12 @@ export interface FileRouteTypes {
     | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
-    | '/pull-requests/$workspaceID'
-    | '/pull-requests/repository-assignments'
-    | '/pull-requests/settings'
-    | '/pull-requests/workflow-configurations'
+    | '/development/$workspaceID'
+    | '/development/new'
+    | '/development/repositories'
+    | '/development/settings'
+    | '/development/workflow-configurations'
+    | '/notifications/$notificationID'
     | '/repository-reviews/profiles'
     | '/repository-reviews/repositories'
     | '/repository-reviews/results'
@@ -459,7 +481,6 @@ export interface FileRouteTypes {
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
     | '/model-evaluations/$evaluationID/report'
-    | '/pull-requests/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   id:
     | '__root__'
@@ -468,6 +489,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/agent'
     | '/config'
+    | '/development'
     | '/event-sources'
     | '/events'
     | '/launcher-login'
@@ -475,7 +497,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/model-evaluations'
     | '/models'
-    | '/pull-requests'
+    | '/notifications'
     | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
@@ -487,10 +509,12 @@ export interface FileRouteTypes {
     | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
-    | '/pull-requests_/$workspaceID'
-    | '/pull-requests_/repository-assignments'
-    | '/pull-requests_/settings'
-    | '/pull-requests_/workflow-configurations'
+    | '/development_/$workspaceID'
+    | '/development_/new'
+    | '/development_/repositories'
+    | '/development_/settings'
+    | '/development_/workflow-configurations'
+    | '/notifications_/$notificationID'
     | '/repository-reviews_/profiles'
     | '/repository-reviews_/repositories'
     | '/repository-reviews_/results'
@@ -500,7 +524,6 @@ export interface FileRouteTypes {
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
     | '/model-evaluations_/$evaluationID/report'
-    | '/pull-requests_/workflow-configurations/$configurationID'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
 }
@@ -510,6 +533,7 @@ export interface RootRouteChildren {
   AccountsRoute: typeof AccountsRouteWithChildren
   AgentRoute: typeof AgentRouteWithChildren
   ConfigRoute: typeof ConfigRouteWithChildren
+  DevelopmentRoute: typeof DevelopmentRoute
   EventSourcesRoute: typeof EventSourcesRoute
   EventsRoute: typeof EventsRoute
   LauncherLoginRoute: typeof LauncherLoginRoute
@@ -517,13 +541,15 @@ export interface RootRouteChildren {
   LogsRoute: typeof LogsRoute
   ModelEvaluationsRoute: typeof ModelEvaluationsRoute
   ModelsRoute: typeof ModelsRoute
-  PullRequestsRoute: typeof PullRequestsRoute
+  NotificationsRoute: typeof NotificationsRoute
   RepositoryReviewsRoute: typeof RepositoryReviewsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
-  PullRequestsWorkspaceIDRoute: typeof PullRequestsWorkspaceIDRoute
-  PullRequestsRepositoryAssignmentsRoute: typeof PullRequestsRepositoryAssignmentsRoute
-  PullRequestsSettingsRoute: typeof PullRequestsSettingsRoute
-  PullRequestsWorkflowConfigurationsRoute: typeof PullRequestsWorkflowConfigurationsRouteWithChildren
+  DevelopmentWorkspaceIDRoute: typeof DevelopmentWorkspaceIDRoute
+  DevelopmentNewRoute: typeof DevelopmentNewRoute
+  DevelopmentRepositoriesRoute: typeof DevelopmentRepositoriesRoute
+  DevelopmentSettingsRoute: typeof DevelopmentSettingsRoute
+  DevelopmentWorkflowConfigurationsRoute: typeof DevelopmentWorkflowConfigurationsRoute
+  NotificationsNotificationIDRoute: typeof NotificationsNotificationIDRoute
   RepositoryReviewsProfilesRoute: typeof RepositoryReviewsProfilesRoute
   RepositoryReviewsRepositoriesRoute: typeof RepositoryReviewsRepositoriesRoute
   RepositoryReviewsResultsRoute: typeof RepositoryReviewsResultsRoute
@@ -546,11 +572,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepositoryReviewsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests': {
-      id: '/pull-requests'
-      path: '/pull-requests'
-      fullPath: '/pull-requests'
-      preLoaderRoute: typeof PullRequestsRouteImport
+    '/notifications': {
+      id: '/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof NotificationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/models': {
@@ -600,6 +626,13 @@ declare module '@tanstack/react-router' {
       path: '/event-sources'
       fullPath: '/event-sources'
       preLoaderRoute: typeof EventSourcesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development': {
+      id: '/development'
+      path: '/development'
+      fullPath: '/development'
+      preLoaderRoute: typeof DevelopmentRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/config': {
@@ -679,32 +712,46 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RepositoryReviewsProfilesRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests_/workflow-configurations': {
-      id: '/pull-requests_/workflow-configurations'
-      path: '/pull-requests/workflow-configurations'
-      fullPath: '/pull-requests/workflow-configurations'
-      preLoaderRoute: typeof PullRequestsWorkflowConfigurationsRouteImport
+    '/notifications_/$notificationID': {
+      id: '/notifications_/$notificationID'
+      path: '/notifications/$notificationID'
+      fullPath: '/notifications/$notificationID'
+      preLoaderRoute: typeof NotificationsNotificationIDRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests_/settings': {
-      id: '/pull-requests_/settings'
-      path: '/pull-requests/settings'
-      fullPath: '/pull-requests/settings'
-      preLoaderRoute: typeof PullRequestsSettingsRouteImport
+    '/development_/workflow-configurations': {
+      id: '/development_/workflow-configurations'
+      path: '/development/workflow-configurations'
+      fullPath: '/development/workflow-configurations'
+      preLoaderRoute: typeof DevelopmentWorkflowConfigurationsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests_/repository-assignments': {
-      id: '/pull-requests_/repository-assignments'
-      path: '/pull-requests/repository-assignments'
-      fullPath: '/pull-requests/repository-assignments'
-      preLoaderRoute: typeof PullRequestsRepositoryAssignmentsRouteImport
+    '/development_/settings': {
+      id: '/development_/settings'
+      path: '/development/settings'
+      fullPath: '/development/settings'
+      preLoaderRoute: typeof DevelopmentSettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/pull-requests_/$workspaceID': {
-      id: '/pull-requests_/$workspaceID'
-      path: '/pull-requests/$workspaceID'
-      fullPath: '/pull-requests/$workspaceID'
-      preLoaderRoute: typeof PullRequestsWorkspaceIDRouteImport
+    '/development_/repositories': {
+      id: '/development_/repositories'
+      path: '/development/repositories'
+      fullPath: '/development/repositories'
+      preLoaderRoute: typeof DevelopmentRepositoriesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/new': {
+      id: '/development_/new'
+      path: '/development/new'
+      fullPath: '/development/new'
+      preLoaderRoute: typeof DevelopmentNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/development_/$workspaceID': {
+      id: '/development_/$workspaceID'
+      path: '/development/$workspaceID'
+      fullPath: '/development/$workspaceID'
+      preLoaderRoute: typeof DevelopmentWorkspaceIDRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/config/raw': {
@@ -776,13 +823,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/threads/open/$threadId'
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
-    }
-    '/pull-requests_/workflow-configurations/$configurationID': {
-      id: '/pull-requests_/workflow-configurations/$configurationID'
-      path: '/$configurationID'
-      fullPath: '/pull-requests/workflow-configurations/$configurationID'
-      preLoaderRoute: typeof PullRequestsWorkflowConfigurationsConfigurationIDRouteImport
-      parentRoute: typeof PullRequestsWorkflowConfigurationsRoute
     }
     '/model-evaluations_/$evaluationID/report': {
       id: '/model-evaluations_/$evaluationID/report'
@@ -894,27 +934,13 @@ const ThreadsRouteChildren: ThreadsRouteChildren = {
 const ThreadsRouteWithChildren =
   ThreadsRoute._addFileChildren(ThreadsRouteChildren)
 
-interface PullRequestsWorkflowConfigurationsRouteChildren {
-  PullRequestsWorkflowConfigurationsConfigurationIDRoute: typeof PullRequestsWorkflowConfigurationsConfigurationIDRoute
-}
-
-const PullRequestsWorkflowConfigurationsRouteChildren: PullRequestsWorkflowConfigurationsRouteChildren =
-  {
-    PullRequestsWorkflowConfigurationsConfigurationIDRoute:
-      PullRequestsWorkflowConfigurationsConfigurationIDRoute,
-  }
-
-const PullRequestsWorkflowConfigurationsRouteWithChildren =
-  PullRequestsWorkflowConfigurationsRoute._addFileChildren(
-    PullRequestsWorkflowConfigurationsRouteChildren,
-  )
-
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChannelsRouteRoute: ChannelsRouteRouteWithChildren,
   AccountsRoute: AccountsRouteWithChildren,
   AgentRoute: AgentRouteWithChildren,
   ConfigRoute: ConfigRouteWithChildren,
+  DevelopmentRoute: DevelopmentRoute,
   EventSourcesRoute: EventSourcesRoute,
   EventsRoute: EventsRoute,
   LauncherLoginRoute: LauncherLoginRoute,
@@ -922,15 +948,16 @@ const rootRouteChildren: RootRouteChildren = {
   LogsRoute: LogsRoute,
   ModelEvaluationsRoute: ModelEvaluationsRoute,
   ModelsRoute: ModelsRoute,
-  PullRequestsRoute: PullRequestsRoute,
+  NotificationsRoute: NotificationsRoute,
   RepositoryReviewsRoute: RepositoryReviewsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
-  PullRequestsWorkspaceIDRoute: PullRequestsWorkspaceIDRoute,
-  PullRequestsRepositoryAssignmentsRoute:
-    PullRequestsRepositoryAssignmentsRoute,
-  PullRequestsSettingsRoute: PullRequestsSettingsRoute,
-  PullRequestsWorkflowConfigurationsRoute:
-    PullRequestsWorkflowConfigurationsRouteWithChildren,
+  DevelopmentWorkspaceIDRoute: DevelopmentWorkspaceIDRoute,
+  DevelopmentNewRoute: DevelopmentNewRoute,
+  DevelopmentRepositoriesRoute: DevelopmentRepositoriesRoute,
+  DevelopmentSettingsRoute: DevelopmentSettingsRoute,
+  DevelopmentWorkflowConfigurationsRoute:
+    DevelopmentWorkflowConfigurationsRoute,
+  NotificationsNotificationIDRoute: NotificationsNotificationIDRoute,
   RepositoryReviewsProfilesRoute: RepositoryReviewsProfilesRoute,
   RepositoryReviewsRepositoriesRoute: RepositoryReviewsRepositoriesRoute,
   RepositoryReviewsResultsRoute: RepositoryReviewsResultsRoute,

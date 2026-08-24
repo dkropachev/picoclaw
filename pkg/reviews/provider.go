@@ -72,6 +72,100 @@ func (provider *GitHubProvider) ReadWorkspacePullJSON(
 	}, providerMaximumResultBytes)
 }
 
+// ReadWorkspaceIssueJSON returns one bounded exact issue record for
+// development-workspace intake.
+func (provider *GitHubProvider) ReadWorkspaceIssueJSON(
+	ctx context.Context,
+	repository string,
+	issueNumber int64,
+) ([]byte, error) {
+	owner, repo, ok := workspaceRepository(repository)
+	if !ok || issueNumber < 1 {
+		return nil, ErrInvalidWorkspaceProviderRequest
+	}
+	outputs, err := provider.run(ctx, GitHubIssueReadTool, map[string]any{
+		"method": "get", "owner": owner, "repo": repo, "issue_number": issueNumber,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return provider.exactJSON(outputs, providerMaximumResultBytes)
+}
+
+func (provider *GitHubProvider) ReadWorkspaceIssueCommentsJSON(
+	ctx context.Context,
+	repository string,
+	issueNumber int64,
+) ([]byte, error) {
+	owner, repo, ok := workspaceRepository(repository)
+	if !ok || issueNumber < 1 {
+		return nil, ErrInvalidWorkspaceProviderRequest
+	}
+	outputs, err := provider.run(ctx, GitHubIssueReadTool, map[string]any{
+		"method": "get_comments", "owner": owner, "repo": repo,
+		"issue_number": issueNumber, "page": 1, "perPage": 100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return provider.exactJSON(outputs, 256<<10)
+}
+
+// CreateWorkspacePullRequestJSON invokes only the draft-PR creation
+// capability with a closed argument set.
+func (provider *GitHubProvider) CreateWorkspacePullRequestJSON(
+	ctx context.Context,
+	args map[string]any,
+) ([]byte, error) {
+	allowed := map[string]bool{
+		"owner": true, "repo": true, "title": true, "body": true,
+		"head": true, "base": true, "draft": true, "maintainer_can_modify": true,
+	}
+	if len(args) == 0 {
+		return nil, ErrInvalidWorkspaceProviderRequest
+	}
+	clean := make(map[string]any, len(args))
+	for key, value := range args {
+		if !allowed[key] {
+			return nil, ErrInvalidWorkspaceProviderRequest
+		}
+		clean[key] = value
+	}
+	for _, key := range []string{"owner", "repo", "title", "head", "base"} {
+		value, ok := clean[key].(string)
+		if !ok || strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\x00\r\n") {
+			return nil, ErrInvalidWorkspaceProviderRequest
+		}
+	}
+	if draft, ok := clean["draft"].(bool); !ok || !draft {
+		return nil, ErrInvalidWorkspaceProviderRequest
+	}
+	outputs, err := provider.run(ctx, GitHubCreatePullRequestTool, clean)
+	if err != nil {
+		return nil, err
+	}
+	return provider.exactJSON(outputs, providerMaximumResultBytes)
+}
+
+func (provider *GitHubProvider) ListWorkspacePullRequestsJSON(
+	ctx context.Context,
+	repository, head, base string,
+) ([]byte, error) {
+	owner, repo, ok := workspaceRepository(repository)
+	if !ok || strings.TrimSpace(head) == "" || strings.TrimSpace(base) == "" ||
+		strings.ContainsAny(head+base, "\x00\r\n") {
+		return nil, ErrInvalidWorkspaceProviderRequest
+	}
+	outputs, err := provider.run(ctx, GitHubListPullRequestsTool, map[string]any{
+		"owner": owner, "repo": repo, "head": owner + ":" + head, "base": base,
+		"state": "open", "page": 1, "perPage": 100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return provider.exactJSON(outputs, providerMaximumResultBytes)
+}
+
 // ReadWorkspaceDiff returns the provider's exact bounded unified diff.
 func (provider *GitHubProvider) ReadWorkspaceDiff(
 	ctx context.Context,
@@ -141,6 +235,24 @@ func (provider *GitHubProvider) SearchWorkspaceRepositoriesJSON(
 		"minimal_output": false,
 		"page":           1,
 		"perPage":        workspaceRepositoriesPerPage,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return provider.exactJSON(outputs, providerMaximumResultBytes)
+}
+
+func (provider *GitHubProvider) ListWorkspaceCommitsJSON(
+	ctx context.Context,
+	repository string,
+	ref string,
+) ([]byte, error) {
+	owner, repo, ok := workspaceRepository(repository)
+	if !ok || strings.TrimSpace(ref) == "" || strings.ContainsAny(ref, "\x00\r\n") {
+		return nil, ErrInvalidWorkspaceProviderRequest
+	}
+	outputs, err := provider.run(ctx, GitHubListCommitsTool, map[string]any{
+		"owner": owner, "repo": repo, "sha": ref, "page": 1, "perPage": 1,
 	})
 	if err != nil {
 		return nil, err

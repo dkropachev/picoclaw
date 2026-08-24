@@ -87,11 +87,13 @@ func TestPRWorkspacePublicationWorkerDispatchesFrozenReviewAfterSQLiteRestart(t 
 	require.NoError(t, err)
 	durableStore := prworkspace.NewEventingStore(raw)
 
-	workspaceID := "prw_11111111111111111111111111111111"
+	workspaceID := "devw_11111111111111111111111111111111"
 	charterID := "pcr_11111111111111111111111111111111"
 	stageID := "psr_11111111111111111111111111111111"
 	findingID := "pfn_11111111111111111111111111111111"
 	frozenProvider := prworkspace.ProviderSnapshot{
+		Intent: prworkspace.IntentPickupPR, SourceKind: prworkspace.SourcePullRequest,
+		SourceID: "pull-request-19", SourceNumber: 19,
 		Provider: "github", ProviderOrigin: "https://github.example.test",
 		RepositoryID: "repository-17", Repository: "octo/frozen-project",
 		PullRequestID: "pull-request-19", PullNumber: 19,
@@ -106,7 +108,9 @@ func TestPRWorkspacePublicationWorkerDispatchesFrozenReviewAfterSQLiteRestart(t 
 	created, err := durableStore.Create(ctx, prworkspace.CreateInput{
 		RequestID: "restart-create-request-0001",
 		Workspace: prworkspace.Workspace{
-			ID: workspaceID, Provider: frozenProvider.Provider,
+			ID: workspaceID, Intent: frozenProvider.Intent, SourceKind: frozenProvider.SourceKind,
+			SourceID: frozenProvider.SourceID, SourceNumber: frozenProvider.SourceNumber,
+			Provider:       frozenProvider.Provider,
 			ProviderOrigin: frozenProvider.ProviderOrigin,
 			RepositoryID:   frozenProvider.RepositoryID, PullRequestID: frozenProvider.PullRequestID,
 			Repository: frozenProvider.Repository, PullNumber: frozenProvider.PullNumber,

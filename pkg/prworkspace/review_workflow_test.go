@@ -31,7 +31,7 @@ func TestImplementationReentryConsumesTypedReviewWorkflowHandoff(t *testing.T) {
 		Provider: "github", ProviderOrigin: "https://github.com", RepositoryID: "1",
 		Repository: "octo/repo", PullRequestID: "2", PullNumber: 3,
 		HeadRepositoryID: "1", HeadRepository: "octo/repo",
-		BaseSHA: "base", HeadSHA: "head", ObservedAt: now, Owned: true, HeadWritable: true,
+		BaseSHA: "base", HeadSHA: "head", State: "open", ObservedAt: now, Owned: true, HeadWritable: true,
 	}
 	store := NewMemoryStore()
 	reviewWorkflow := &recordingReviewWorkflow{}
@@ -44,8 +44,8 @@ func TestImplementationReentryConsumesTypedReviewWorkflowHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	aggregate, err := service.Create(context.Background(), CreateWorkspaceRequest{
-		RequestID: "request-review-handoff-01",
-		Resolve:   ResolveRequest{PullRequestURL: "https://github.com/octo/repo/pull/3"},
+		RequestID: "request-review-handoff-01", Intent: IntentPickupPR, SourceKind: SourcePullRequest,
+		PullRequestURL: "https://github.com/octo/repo/pull/3",
 	})
 	if err != nil {
 		t.Fatal(err)

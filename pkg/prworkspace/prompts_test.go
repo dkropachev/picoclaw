@@ -7,7 +7,7 @@ import (
 
 func TestCompilePromptSeparatesStageAuthorityAndSharedFacts(t *testing.T) {
 	bundle := PRContextBundle{
-		WorkspaceID: "prw_11111111111111111111111111111111",
+		WorkspaceID: "devw_11111111111111111111111111111111",
 		Charter:     Charter{ID: "pcr_11111111111111111111111111111111", Confirmed: true, Type: PRTypeFix},
 	}
 	review, err := CompilePrompt(PromptReviewSearch, bundle, "")
@@ -38,7 +38,7 @@ func TestCompilePromptSeparatesStageAuthorityAndSharedFacts(t *testing.T) {
 
 func TestCompilePromptRejectsUnconfirmedCharterOutsideDraft(t *testing.T) {
 	bundle := PRContextBundle{
-		WorkspaceID: "prw_11111111111111111111111111111111",
+		WorkspaceID: "devw_11111111111111111111111111111111",
 		Charter:     Charter{ID: "pcr_11111111111111111111111111111111", Type: PRTypeFix},
 	}
 	for _, stage := range []PromptStage{

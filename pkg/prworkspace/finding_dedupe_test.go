@@ -192,9 +192,10 @@ func TestMaterializeReviewRoundsUsesSemanticDuplicateIdentity(t *testing.T) {
 		{Round: 2, Result: ReviewPass{Findings: liveSecondNudgeFindings()}, NovelFindings: 0, DuplicateCount: 3},
 	}
 	findings, nudges := materializeReviewRounds(
-		Aggregate{Workspace: Workspace{ID: "prw_semantic_dedupe"}},
+		Aggregate{Workspace: Workspace{ID: "devw_semantic_dedupe"}},
 		"psr_semantic_dedupe", rounds,
-		NudgePolicy{MinimumAdditionalRounds: 2, MaximumAdditionalRounds: 2}, now,
+		NudgePolicy{MinimumAdditionalRounds: 2, MaximumAdditionalRounds: 2},
+		DefaultScopeDispositionPolicy(), now,
 	)
 	if len(findings) != 4 {
 		t.Fatalf("materialized findings=%d, want four unique defects: %#v", len(findings), findings)

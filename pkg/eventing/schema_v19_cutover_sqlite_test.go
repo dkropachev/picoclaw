@@ -30,7 +30,7 @@ func TestSchemaV19FreshInstallRetainsOnlyGenericAndWorkspaceSchemas(t *testing.T
 	assert.Empty(t, legacy)
 	var version int
 	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, 19, version)
+	assert.Equal(t, schemaVersion, version)
 	require.NoError(t, store.Close())
 
 	reopened, err := Open(context.Background(), path)
@@ -67,7 +67,7 @@ func TestSchemaV19DestructivelyCutsOverValidV18(t *testing.T) {
 	assert.True(t, schemaObjectExists(t, store.db, "table", "pr_workspaces"))
 	var version int
 	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, 19, version)
+	assert.Equal(t, schemaVersion, version)
 }
 
 func TestSchemaV19RejectsCorruptV18BeforeDestructiveCutover(t *testing.T) {
@@ -130,7 +130,7 @@ func TestSchemaV19RejectsLegacyPRTablesInAlreadyCurrentDatabase(t *testing.T) {
 				"current-schema validation must reject contamination without repairing it")
 			var version int
 			require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
-			assert.Equal(t, 19, version)
+			assert.Equal(t, schemaVersion, version)
 		})
 	}
 }

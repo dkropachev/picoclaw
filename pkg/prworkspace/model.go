@@ -18,12 +18,32 @@ const (
 	PRTypeTest          PRType = "test"
 )
 
-// Phase is the current durable lifecycle phase of one pull request.
+// DevelopmentIntent identifies the mutually exclusive job selected at intake.
+// Implement-feature work starts from an issue or brief and creates a new draft
+// pull request. Pickup work starts from one existing pull request.
+type DevelopmentIntent string
+
+const (
+	IntentImplementFeature DevelopmentIntent = "implement_feature"
+	IntentPickupPR         DevelopmentIntent = "pickup_pr"
+)
+
+// SourceKind identifies the single source accepted by a development workspace.
+type SourceKind string
+
+const (
+	SourceIssue       SourceKind = "issue"
+	SourceBrief       SourceKind = "brief"
+	SourcePullRequest SourceKind = "pull_request"
+)
+
+// Phase is the current durable lifecycle phase of one development workspace.
 type Phase string
 
 const (
 	PhaseIntake          Phase = "intake"
 	PhaseCharter         Phase = "charter"
+	PhasePlanning        Phase = "planning"
 	PhaseReview          Phase = "review"
 	PhaseTriage          Phase = "triage"
 	PhaseImplementation  Phase = "implementation"
@@ -123,47 +143,55 @@ const (
 // ProviderSnapshot contains verified provider authority. Mutable names are
 // display fields; numeric provider IDs are the workspace identity.
 type ProviderSnapshot struct {
-	Provider            string    `json:"provider"`
-	ProviderOrigin      string    `json:"provider_origin"`
-	RepositoryID        string    `json:"repository_id"`
-	Repository          string    `json:"repository"`
-	PullRequestID       string    `json:"pull_request_id"`
-	PullNumber          int64     `json:"pull_number"`
-	Title               string    `json:"title"`
-	Body                string    `json:"body,omitempty"`
-	AuthorID            string    `json:"author_id"`
-	AuthorLogin         string    `json:"author_login"`
-	AuthenticatedUserID string    `json:"authenticated_user_id"`
-	BaseRef             string    `json:"base_ref"`
-	BaseSHA             string    `json:"base_sha"`
-	HeadRepositoryID    string    `json:"head_repository_id"`
-	HeadRepository      string    `json:"head_repository"`
-	HeadRef             string    `json:"head_ref"`
-	HeadSHA             string    `json:"head_sha"`
-	State               string    `json:"state"`
-	Owned               bool      `json:"owned"`
-	HeadWritable        bool      `json:"head_writable"`
-	CanReview           bool      `json:"can_review"`
-	CanCreateIssue      bool      `json:"can_create_issue"`
-	ProviderRevision    string    `json:"provider_revision,omitempty"`
-	ObservedAt          time.Time `json:"observed_at"`
+	Intent               DevelopmentIntent `json:"intent"`
+	SourceKind           SourceKind        `json:"source_kind"`
+	SourceID             string            `json:"source_id"`
+	SourceNumber         int64             `json:"source_number,omitempty"`
+	SourceURL            string            `json:"source_url,omitempty"`
+	Provider             string            `json:"provider"`
+	ProviderOrigin       string            `json:"provider_origin"`
+	RepositoryID         string            `json:"repository_id"`
+	Repository           string            `json:"repository"`
+	PullRequestID        string            `json:"pull_request_id"`
+	PullNumber           int64             `json:"pull_number"`
+	Title                string            `json:"title"`
+	Body                 string            `json:"body,omitempty"`
+	AuthorID             string            `json:"author_id"`
+	AuthorLogin          string            `json:"author_login"`
+	AuthenticatedUserID  string            `json:"authenticated_user_id"`
+	BaseRef              string            `json:"base_ref"`
+	BaseSHA              string            `json:"base_sha"`
+	HeadRepositoryID     string            `json:"head_repository_id"`
+	HeadRepository       string            `json:"head_repository"`
+	HeadRef              string            `json:"head_ref"`
+	HeadSHA              string            `json:"head_sha"`
+	State                string            `json:"state"`
+	Owned                bool              `json:"owned"`
+	HeadWritable         bool              `json:"head_writable"`
+	CanReview            bool              `json:"can_review"`
+	CanCreateIssue       bool              `json:"can_create_issue"`
+	CanCreatePullRequest bool              `json:"can_create_pull_request"`
+	ProviderRevision     string            `json:"provider_revision,omitempty"`
+	ObservedAt           time.Time         `json:"observed_at"`
 }
 
 // Charter is one immutable confirmed or editable draft revision.
 type Charter struct {
-	ID                 string     `json:"id"`
-	Revision           int64      `json:"revision"`
-	Type               PRType     `json:"type"`
-	Goal               string     `json:"goal"`
-	AcceptanceCriteria []string   `json:"acceptance_criteria"`
-	IncludedAreas      []string   `json:"included_areas"`
-	ExcludedAreas      []string   `json:"excluded_areas"`
-	NonGoals           []string   `json:"non_goals"`
-	BaseSHA            string     `json:"base_sha"`
-	HeadSHA            string     `json:"head_sha"`
-	Confirmed          bool       `json:"confirmed"`
-	CreatedAt          time.Time  `json:"created_at"`
-	ConfirmedAt        *time.Time `json:"confirmed_at,omitempty"`
+	ID                    string     `json:"id"`
+	Revision              int64      `json:"revision"`
+	Type                  PRType     `json:"type"`
+	Goal                  string     `json:"goal"`
+	AcceptanceCriteria    []string   `json:"acceptance_criteria"`
+	IncludedAreas         []string   `json:"included_areas"`
+	ExcludedAreas         []string   `json:"excluded_areas"`
+	NonGoals              []string   `json:"non_goals"`
+	ClarificationNeeded   bool       `json:"clarification_needed,omitempty"`
+	ClarificationQuestion string     `json:"clarification_question,omitempty"`
+	BaseSHA               string     `json:"base_sha"`
+	HeadSHA               string     `json:"head_sha"`
+	Confirmed             bool       `json:"confirmed"`
+	CreatedAt             time.Time  `json:"created_at"`
+	ConfirmedAt           *time.Time `json:"confirmed_at,omitempty"`
 }
 
 // ScopeAssessment preserves both the AI classification and raw measurements.
@@ -200,29 +228,32 @@ type ScopeChange struct {
 }
 
 type Finding struct {
-	ID              string             `json:"id"`
-	Fingerprint     string             `json:"fingerprint"`
-	Origin          FindingOrigin      `json:"origin"`
-	OriginRunID     string             `json:"origin_run_id,omitempty"`
-	NudgeRoundID    string             `json:"nudge_round_id,omitempty"`
-	Severity        string             `json:"severity"`
-	Title           string             `json:"title"`
-	File            string             `json:"file,omitempty"`
-	Line            *int               `json:"line,omitempty"`
-	Message         string             `json:"message"`
-	Evidence        string             `json:"evidence,omitempty"`
-	Impact          string             `json:"impact,omitempty"`
-	Recommendation  string             `json:"recommendation,omitempty"`
-	Validation      string             `json:"validation,omitempty"`
-	Scope           ScopeAssessment    `json:"scope"`
-	Disposition     FindingDisposition `json:"disposition"`
-	NudgeReward     *float64           `json:"nudge_reward,omitempty"`
-	RewardSource    string             `json:"reward_source,omitempty"`
-	SourceAvailable bool               `json:"source_available,omitempty"`
-	Version         int64              `json:"version"`
-	CreatedAt       time.Time          `json:"created_at"`
-	UpdatedAt       time.Time          `json:"updated_at"`
-	source          *AIExecutionSource
+	ID                      string               `json:"id"`
+	Fingerprint             string               `json:"fingerprint"`
+	Origin                  FindingOrigin        `json:"origin"`
+	OriginRunID             string               `json:"origin_run_id,omitempty"`
+	NudgeRoundID            string               `json:"nudge_round_id,omitempty"`
+	Severity                string               `json:"severity"`
+	Title                   string               `json:"title"`
+	File                    string               `json:"file,omitempty"`
+	Line                    *int                 `json:"line,omitempty"`
+	Message                 string               `json:"message"`
+	Evidence                string               `json:"evidence,omitempty"`
+	Impact                  string               `json:"impact,omitempty"`
+	Recommendation          string               `json:"recommendation,omitempty"`
+	Validation              string               `json:"validation,omitempty"`
+	Scope                   ScopeAssessment      `json:"scope"`
+	ScopePolicyMode         ScopeDispositionMode `json:"scope_policy_mode,omitempty"`
+	ScopePolicyRevision     string               `json:"scope_policy_revision,omitempty"`
+	ScopePolicyPromptDigest string               `json:"scope_policy_prompt_digest,omitempty"`
+	Disposition             FindingDisposition   `json:"disposition"`
+	NudgeReward             *float64             `json:"nudge_reward,omitempty"`
+	RewardSource            string               `json:"reward_source,omitempty"`
+	SourceAvailable         bool                 `json:"source_available,omitempty"`
+	Version                 int64                `json:"version"`
+	CreatedAt               time.Time            `json:"created_at"`
+	UpdatedAt               time.Time            `json:"updated_at"`
+	source                  *AIExecutionSource
 }
 
 // AIExecutionSource is private durable provenance for one finding-producing
@@ -303,20 +334,24 @@ type DeferredGroup struct {
 }
 
 type Workspace struct {
-	ID              string         `json:"id"`
-	Provider        string         `json:"provider"`
-	ProviderOrigin  string         `json:"provider_origin"`
-	RepositoryID    string         `json:"repository_id"`
-	PullRequestID   string         `json:"pull_request_id"`
-	Repository      string         `json:"repository"`
-	PullNumber      int64          `json:"pull_number"`
-	Phase           Phase          `json:"phase"`
-	ExecutionState  ExecutionState `json:"execution_state"`
-	ActiveCharterID string         `json:"active_charter_id,omitempty"`
-	ProviderHeadSHA string         `json:"provider_head_sha"`
-	Version         int64          `json:"version"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	ID              string            `json:"id"`
+	Intent          DevelopmentIntent `json:"intent"`
+	SourceKind      SourceKind        `json:"source_kind"`
+	SourceID        string            `json:"source_id"`
+	SourceNumber    int64             `json:"source_number,omitempty"`
+	Provider        string            `json:"provider"`
+	ProviderOrigin  string            `json:"provider_origin"`
+	RepositoryID    string            `json:"repository_id"`
+	PullRequestID   string            `json:"pull_request_id"`
+	Repository      string            `json:"repository"`
+	PullNumber      int64             `json:"pull_number"`
+	Phase           Phase             `json:"phase"`
+	ExecutionState  ExecutionState    `json:"execution_state"`
+	ActiveCharterID string            `json:"active_charter_id,omitempty"`
+	ProviderHeadSHA string            `json:"provider_head_sha"`
+	Version         int64             `json:"version"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
 type StageRun struct {
@@ -341,6 +376,8 @@ type Message struct {
 	ID        string    `json:"id"`
 	Role      string    `json:"role"`
 	Stage     string    `json:"stage,omitempty"`
+	Mode      string    `json:"mode,omitempty"`
+	Status    string    `json:"status,omitempty"`
 	Content   string    `json:"content"`
 	CharterID string    `json:"charter_id,omitempty"`
 	HeadSHA   string    `json:"head_sha,omitempty"`

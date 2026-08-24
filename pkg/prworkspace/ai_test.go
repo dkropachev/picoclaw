@@ -49,7 +49,7 @@ func (runner *scriptedIsolatedAI) RunIsolated(_ context.Context, request Isolate
 
 func testPromptBundle() PRContextBundle {
 	return PRContextBundle{
-		WorkspaceID: "prw_11111111111111111111111111111111",
+		WorkspaceID: "devw_11111111111111111111111111111111",
 		Charter:     Charter{ID: "pcr_11111111111111111111111111111111", Type: PRTypeFix, Confirmed: true},
 	}
 }

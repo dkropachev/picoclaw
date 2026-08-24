@@ -104,6 +104,10 @@ func (service *Service) RunImplementation(
 	if request.SizePolicy == (SizePolicy{}) {
 		request.SizePolicy = DefaultSizePolicy()
 	}
+	if !service.claimImplementation(request.WorkspaceID) {
+		return Aggregate{}, ErrConflict
+	}
+	defer service.releaseImplementation(request.WorkspaceID)
 	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
 	if err != nil {
 		return Aggregate{}, err
@@ -121,10 +125,6 @@ func (service *Service) RunImplementation(
 	if !aggregate.ProviderSnapshot.HeadWritable {
 		return aggregate, errors.New("PR head is not writable")
 	}
-	if !service.claimImplementation(request.WorkspaceID) {
-		return aggregate, ErrConflict
-	}
-	defer service.releaseImplementation(request.WorkspaceID)
 	var authorizationGates []GateRun
 	if !aggregate.ProviderSnapshot.Owned {
 		eligibility, eligibilityNew, gateErr := service.ensureGate(
@@ -196,7 +196,7 @@ func (service *Service) RunImplementation(
 		for _, finding := range workingFindings {
 			addressedFindings[finding.ID] = finding
 		}
-		instruction := implementationInstruction(charter, workingFindings, cycle)
+		instruction := implementationInstruction(charter, workingFindings, aggregate.Messages, cycle)
 		repairContext := implementationContextBundle(aggregate)
 		repairContext.Findings = upsertByID(
 			repairContext.Findings,
@@ -544,6 +544,23 @@ func (service *Service) RunImplementation(
 		Kind: "implementation.finished", Actor: "ai", EntityID: runID,
 		Summary: activitySummary, CreatedAt: service.now().UTC(),
 	})
+	if len(patch.AppendRepairs) > 0 {
+		applied := appliedSteeringMessageIDs(aggregate.Messages)
+		for _, message := range aggregate.Messages {
+			if message.Mode != "steer" || message.Status != "queued" {
+				continue
+			}
+			if _, alreadyApplied := applied[message.ID]; alreadyApplied {
+				continue
+			}
+			patch.AppendMessages = append(patch.AppendMessages, Message{
+				ID:   stableID("pms_", aggregate.Workspace.ID, request.RequestID, "steer-applied", message.ID),
+				Role: "system", Stage: "implementation", Mode: "steer", Status: "applied",
+				Content: "applied:" + message.ID, CharterID: charter.ID,
+				HeadSHA: aggregate.ProviderSnapshot.HeadSHA, CreatedAt: service.now().UTC(),
+			})
+		}
+	}
 	refreshNudgeRewardsForPatch(aggregate, &patch)
 	result, err := service.store.Mutate(ctx, Mutation{
 		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
@@ -575,7 +592,11 @@ func implementationStartReady(aggregate Aggregate, charter Charter) bool {
 	if aggregate.Workspace.Phase != PhaseTriage && aggregate.Workspace.Phase != PhaseImplementation {
 		return false
 	}
-	if !hasSuccessfulStageAtHead(aggregate.StageRuns, "review", charter.ID, charter.HeadSHA) {
+	requiredStage := "review"
+	if aggregate.Workspace.Intent == IntentImplementFeature {
+		requiredStage = "planning"
+	}
+	if !hasSuccessfulStageAtHead(aggregate.StageRuns, requiredStage, charter.ID, charter.HeadSHA) {
 		return false
 	}
 	for _, finding := range currentContextFindings(aggregate, charter, true) {
@@ -589,7 +610,7 @@ func implementationStartReady(aggregate Aggregate, charter Charter) bool {
 		return true
 	}
 	switch aggregate.Workspace.ExecutionState {
-	case ExecutionFailed, ExecutionBlocked, ExecutionQueued:
+	case ExecutionFailed, ExecutionBlocked, ExecutionQueued, ExecutionRunning:
 	default:
 		return false
 	}
@@ -721,7 +742,7 @@ func findingRemovalAuthorized(gates []GateRun, finding Finding) bool {
 	return false
 }
 
-func implementationInstruction(charter Charter, findings []Finding, attempt int) string {
+func implementationInstruction(charter Charter, findings []Finding, messages []Message, attempt int) string {
 	sort.Slice(findings, func(i, j int) bool { return findings[i].ID < findings[j].ID })
 	var builder strings.Builder
 	fmt.Fprintf(
@@ -750,8 +771,41 @@ func implementationInstruction(charter Charter, findings []Finding, attempt int)
 		}
 		fmt.Fprintf(&builder, "- %s: %s — %s\n", finding.ID, finding.Title, finding.Message)
 	}
+	queued := make([]Message, 0)
+	applied := appliedSteeringMessageIDs(messages)
+	for _, message := range messages {
+		if message.Mode == "steer" && message.Status == "queued" {
+			if _, alreadyApplied := applied[message.ID]; alreadyApplied {
+				continue
+			}
+			queued = append(queued, message)
+		}
+	}
+	sort.Slice(queued, func(i, j int) bool { return queued[i].CreatedAt.Before(queued[j].CreatedAt) })
+	if len(queued) > 0 {
+		builder.WriteString(
+			"Apply these queued user steering instructions only within the confirmed charter; report any requested scope expansion instead of implementing it:\n",
+		)
+		for _, message := range queued {
+			fmt.Fprintf(&builder, "- [%s] %s\n", message.ID, message.Content)
+		}
+	}
 	builder.WriteString("Do not add adjacent cleanup. Report blockers instead.")
 	return builder.String()
+}
+
+func appliedSteeringMessageIDs(messages []Message) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, message := range messages {
+		if message.Mode != "steer" || message.Status != "applied" {
+			continue
+		}
+		id := strings.TrimSpace(strings.TrimPrefix(message.Content, "applied:"))
+		if id != "" && id != message.Content {
+			result[id] = struct{}{}
+		}
+	}
+	return result
 }
 
 func findingIDs(findings []Finding) []string {

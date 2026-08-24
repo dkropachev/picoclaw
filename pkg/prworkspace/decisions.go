@@ -487,7 +487,12 @@ func (service *Service) gateActionPatch(aggregate Aggregate, gate GateRun) (Aggr
 		now := service.now().UTC()
 		charter.Confirmed, charter.ConfirmedAt = true, &now
 		patch.ReplaceCharters = []Charter{charter}
-		queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
+		if aggregate.Workspace.Intent == IntentImplementFeature {
+			phase, state, activeID := PhasePlanning, ExecutionQueued, charter.ID
+			patch.Phase, patch.ExecutionState, patch.ActiveCharterID = &phase, &state, &activeID
+		} else {
+			queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
+		}
 	case "pr.correction.promote":
 		correction, ok := findCorrection(aggregate.Corrections, gate.TargetID)
 		if !ok {
@@ -825,6 +830,9 @@ func (service *Service) RefreshProvider(ctx context.Context, request RefreshProv
 	if getErr != nil {
 		return Aggregate{}, getErr
 	}
+	if aggregate.Workspace.PullNumber < 1 || aggregate.Workspace.PullRequestID == "" {
+		return aggregate, ErrConflict
+	}
 	provider, resolveErr := service.provider.ResolvePullRequest(ctx, ResolveRequest{
 		ProviderOrigin: aggregate.Workspace.ProviderOrigin,
 		Repository:     aggregate.Workspace.Repository, PullNumber: aggregate.Workspace.PullNumber,
@@ -832,6 +840,11 @@ func (service *Service) RefreshProvider(ctx context.Context, request RefreshProv
 	if resolveErr != nil {
 		return Aggregate{}, resolveErr
 	}
+	provider.Intent = aggregate.ProviderSnapshot.Intent
+	provider.SourceKind = aggregate.ProviderSnapshot.SourceKind
+	provider.SourceID = aggregate.ProviderSnapshot.SourceID
+	provider.SourceNumber = aggregate.ProviderSnapshot.SourceNumber
+	provider.SourceURL = aggregate.ProviderSnapshot.SourceURL
 	if err := validateProviderSnapshot(
 		provider,
 	); err != nil || provider.RepositoryID != aggregate.Workspace.RepositoryID ||
