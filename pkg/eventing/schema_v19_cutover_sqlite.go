@@ -98,6 +98,71 @@ func dropLegacyPRSchemaV19(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
+// dropAllPRWorkspaceSchemaV20 performs the explicitly destructive development
+// workspace cutover. Generic event and workflow tables are deliberately outside
+// the pr_* namespace and remain intact.
+func dropAllPRWorkspaceSchemaV20(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `SELECT name FROM sqlite_master
+		WHERE type = 'table' AND lower(name) GLOB 'pr_*' ORDER BY name`)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	var tables []string
+	for rows.Next() {
+		var table string
+		if scanErr := rows.Scan(&table); scanErr != nil {
+			return scanErr
+		}
+		tables = append(tables, table)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return rowsErr
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return closeErr
+	}
+	remaining := make(map[string]struct{}, len(tables))
+	for _, table := range tables {
+		remaining[table] = struct{}{}
+	}
+	for len(remaining) > 0 {
+		var droppable []string
+		for candidate := range remaining {
+			referenced := false
+			for child := range remaining {
+				if child == candidate {
+					continue
+				}
+				parents, parentErr := foreignKeyParentsV19(ctx, conn, child)
+				if parentErr != nil {
+					return parentErr
+				}
+				if _, ok := parents[candidate]; ok {
+					referenced = true
+					break
+				}
+			}
+			if !referenced {
+				droppable = append(droppable, candidate)
+			}
+		}
+		if len(droppable) == 0 {
+			return fmt.Errorf("%w: development tables contain a foreign-key cycle", ErrSchemaInvalid)
+		}
+		sort.Strings(droppable)
+		for _, table := range droppable {
+			if _, dropErr := conn.ExecContext(ctx, "DROP TABLE "+quoteSQLiteIdentifierV19(table)); dropErr != nil {
+				return fmt.Errorf("drop %s: %w", table, dropErr)
+			}
+			delete(remaining, table)
+		}
+	}
+	return nil
+}
+
 func validateLegacyPRSchemaAbsentV19(ctx context.Context, conn *sql.Conn) error {
 	tables, err := legacyPRTablesV19(ctx, conn)
 	if err != nil {

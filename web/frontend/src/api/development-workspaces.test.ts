@@ -1,0 +1,515 @@
+import { beforeEach, describe, expect, it, vi } from "vitest"
+
+import {
+  type CreateDevelopmentWorkspaceRequest,
+  confirmDevelopmentCharter,
+  createDevelopmentWorkspace,
+  getDevelopmentCodeDiff,
+  getDevelopmentConversation,
+  listDevelopmentRepositories,
+  listDevelopmentWorkspaces,
+  reconcileDevelopmentPublication,
+  respondDevelopmentGate,
+  saveDevelopmentCharter,
+  sendDevelopmentMessage,
+} from "@/api/development-workspaces"
+import { launcherFetch } from "@/api/http"
+
+vi.mock("@/api/http", () => ({ launcherFetch: vi.fn() }))
+
+const mockedLauncherFetch = vi.mocked(launcherFetch)
+const workspaceID = `devw_${"1".repeat(32)}`
+const summary = {
+  id: workspaceID,
+  intent: "implement_feature",
+  source_kind: "issue",
+  repository: "octo/repo",
+  title: "Improve retry feedback",
+  phase: "implementation",
+  execution_state: "running",
+  version: 3,
+  created_at: "2026-08-24T10:00:00Z",
+  updated_at: "2026-08-24T10:05:00Z",
+} as const
+
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  })
+}
+
+describe("development workspace API", () => {
+  beforeEach(() => mockedLauncherFetch.mockReset())
+
+  it("lists workspaces and configured implementation repositories", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ workspaces: [summary], next_cursor: "next+/=" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          repositories: [
+            {
+              identity: "https://github.com|100",
+              name: "octo/repo",
+              default_branch: "main",
+              can_implement: true,
+            },
+          ],
+        }),
+      )
+
+    await expect(
+      listDevelopmentWorkspaces({ limit: 50, cursor: "cursor+/=" }),
+    ).resolves.toEqual({ workspaces: [summary], next_cursor: "next+/=" })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/development-workspaces?limit=50&cursor=cursor%2B%2F%3D",
+      { signal: undefined },
+    )
+    await expect(listDevelopmentRepositories()).resolves.toEqual({
+      repositories: [
+        {
+          identity: "https://github.com|100",
+          name: "octo/repo",
+          default_branch: "main",
+          can_implement: true,
+        },
+      ],
+    })
+  })
+
+  it("derives display data and candidate evidence from the backend aggregate", async () => {
+    mockedLauncherFetch.mockResolvedValue(
+      jsonResponse({
+        workspace: {
+          id: workspaceID,
+          intent: "implement_feature",
+          source_kind: "issue",
+          source_number: 7,
+          repository: "octo/repo",
+          phase: "validation",
+          execution_state: "waiting_gate",
+          version: 4,
+          created_at: "2026-08-24T10:00:00Z",
+          updated_at: "2026-08-24T10:06:00Z",
+        },
+        provider_snapshot: {
+          intent: "implement_feature",
+          source_kind: "issue",
+          source_url: "https://github.com/octo/repo/issues/7",
+          source_number: 7,
+          title: "Improve retry feedback",
+          body: "Show the user when another attempt is running.",
+          base_sha: "base:1",
+          head_sha: "head:1",
+          provider_revision: "provider:4",
+        },
+        repair_attempts: [
+          {
+            candidate_sha: "candidate:2",
+            changed_files: ["src/retry.ts"],
+          },
+        ],
+        charters: [
+          {
+            id: `pcr_${"7".repeat(32)}`,
+            revision: 1,
+            type: "feature",
+            goal: "Improve retry feedback",
+            acceptance_criteria: ["Show retry state"],
+            included_areas: ["web"],
+            excluded_areas: [],
+            non_goals: [],
+            clarification_needed: true,
+            clarification_question: "Which retry states?",
+            confirmed: false,
+          },
+        ],
+        validation_runs: [
+          {
+            candidate_sha: "candidate:2",
+            checks: [{ id: "test", name: "Tests", status: "passed" }],
+          },
+        ],
+        stage_runs: [{ summary: "Candidate ready for validation." }],
+        gates: [
+          {
+            id: `pgr_${"8".repeat(32)}`,
+            decision_point: "development.scope",
+            state: "waiting_user",
+            turns: [
+              {
+                stage_id: "stage-1",
+                kind: "human",
+                title: "Choose scope",
+                status: "waiting_user",
+                "gate-form": {
+                  "gate-ref": "scope",
+                  prompt: "Choose what belongs in this PR.",
+                  fields: [
+                    {
+                      id: "decision",
+                      type: "select",
+                      label: "Decision",
+                      required: true,
+                      "min-selections": 1,
+                      "max-selections": 1,
+                      options: [{ id: "include", label: "Include" }],
+                    },
+                  ],
+                },
+              },
+            ],
+            created_at: "2026-08-24T10:05:00Z",
+          },
+        ],
+        publications: [
+          {
+            id: `ppu_${"9".repeat(32)}`,
+            kind: "branch_push",
+            state: "unknown",
+            updated_at: "2026-08-24T10:06:00Z",
+          },
+        ],
+        activity: [],
+      }),
+    )
+
+    const { getDevelopmentWorkspace } =
+      await import("@/api/development-workspaces")
+    await expect(getDevelopmentWorkspace(workspaceID)).resolves.toMatchObject({
+      title: "Improve retry feedback",
+      execution_state: "waiting_gate",
+      source: {
+        kind: "issue",
+        url: "https://github.com/octo/repo/issues/7",
+        number: 7,
+      },
+      charter: {
+        goal: "Improve retry feedback",
+        clarification_needed: true,
+        clarification_question: "Which retry states?",
+      },
+      base_revision: "base:1",
+      candidate_revision: "candidate:2",
+      head_revision: "provider:4",
+      changed_files: ["src/retry.ts"],
+      validation_checks: [{ name: "Tests", status: "passed" }],
+      summary: "Candidate ready for validation.",
+      gates: [
+        {
+          decision_point: "development.scope",
+          turns: [
+            {
+              gate_form: {
+                gate_ref: "scope",
+                fields: [
+                  {
+                    id: "decision",
+                    min_selections: 1,
+                    max_selections: 1,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      publications: [{ kind: "branch_push", state: "unknown" }],
+    })
+  })
+
+  it("sends each mutually exclusive intake variant without leaked fields", async () => {
+    mockedLauncherFetch.mockResolvedValue(
+      jsonResponse({
+        ...summary,
+        source: {
+          kind: "issue",
+          url: "https://github.com/octo/repo/issues/7",
+        },
+      }),
+    )
+    await createDevelopmentWorkspace({
+      intent: "implement_feature",
+      source: {
+        kind: "issue",
+        issue_url: "https://github.com/octo/repo/issues/7",
+      },
+      request_id: `devq_${"2".repeat(32)}`,
+    })
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      "/api/development-workspaces",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          intent: "implement_feature",
+          source: {
+            kind: "issue",
+            issue_url: "https://github.com/octo/repo/issues/7",
+          },
+          request_id: `devq_${"2".repeat(32)}`,
+        }),
+      }),
+    )
+
+    mockedLauncherFetch.mockResolvedValue(
+      jsonResponse({
+        ...summary,
+        source_kind: "brief",
+        source: { kind: "brief", content: "Add retry feedback." },
+      }),
+    )
+    await createDevelopmentWorkspace({
+      intent: "implement_feature",
+      source: {
+        kind: "brief",
+        repository_identity: "https://github.com|100",
+        content: "Add retry feedback.",
+      },
+      request_id: `devq_${"3".repeat(32)}`,
+    })
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      "/api/development-workspaces",
+      expect.objectContaining({
+        body: JSON.stringify({
+          intent: "implement_feature",
+          source: {
+            kind: "brief",
+            repository_identity: "https://github.com|100",
+            content: "Add retry feedback.",
+          },
+          request_id: `devq_${"3".repeat(32)}`,
+        }),
+      }),
+    )
+
+    mockedLauncherFetch.mockResolvedValue(
+      jsonResponse({
+        ...summary,
+        intent: "pickup_pr",
+        source_kind: "pull_request",
+        source: {
+          kind: "pull_request",
+          url: "https://github.com/octo/repo/pull/9",
+        },
+      }),
+    )
+    const unsafeMixed = {
+      intent: "pickup_pr",
+      pull_request_url: "https://github.com/octo/repo/pull/9",
+      source: {
+        kind: "issue",
+        issue_url: "https://github.com/octo/repo/issues/7",
+      },
+      request_id: `devq_${"4".repeat(32)}`,
+    } as unknown as CreateDevelopmentWorkspaceRequest
+    await createDevelopmentWorkspace(unsafeMixed)
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      "/api/development-workspaces",
+      expect.objectContaining({
+        body: JSON.stringify({
+          intent: "pickup_pr",
+          pull_request_url: "https://github.com/octo/repo/pull/9",
+          request_id: `devq_${"4".repeat(32)}`,
+        }),
+      }),
+    )
+  })
+
+  it("revision-fences chat steering and exact code reads", async () => {
+    const conversation = {
+      revision: 4,
+      messages: [
+        {
+          id: "msg_1",
+          role: "user",
+          mode: "steer",
+          status: "queued",
+          content: "Keep the error copy concise.",
+          created_at: "2026-08-24T10:06:00Z",
+        },
+      ],
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse(conversation))
+      .mockResolvedValueOnce(jsonResponse(conversation))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          base_revision: "base:1",
+          candidate_revision: "candidate:2",
+          path: "src/retry.ts",
+          base_content: "old\n",
+          candidate_content: "new\n",
+          diff: "@@ -1 +1 @@\n-old\n+new",
+        }),
+      )
+
+    await getDevelopmentConversation(workspaceID)
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      `/api/development-workspaces/${workspaceID}/conversation/messages`,
+      { signal: undefined },
+    )
+    await sendDevelopmentMessage(workspaceID, {
+      mode: "steer",
+      content: "Keep the error copy concise.",
+      expected_revision: 3,
+      request_id: `devq_${"5".repeat(32)}`,
+      candidate_revision: "candidate:2",
+    })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      `/api/development-workspaces/${workspaceID}/conversation/messages`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          mode: "steer",
+          content: "Keep the error copy concise.",
+          expected_revision: 3,
+          request_id: `devq_${"5".repeat(32)}`,
+          candidate_revision: "candidate:2",
+        }),
+      }),
+    )
+    await expect(
+      getDevelopmentCodeDiff(workspaceID, {
+        revision: "candidate:2",
+        path: "src/retry copy.ts",
+      }),
+    ).resolves.toMatchObject({ original: "old\n", modified: "new\n" })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      `/api/development-workspaces/${workspaceID}/code/diff?revision=candidate%3A2&path=src%2Fretry+copy.ts`,
+      { signal: undefined },
+    )
+  })
+
+  it("accepts bounded tree and unified-diff projections from the runtime", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          revision: "candidate:2",
+          entries: [{ path: "src/retry.ts", type: "file" }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          revision: "evidence:3",
+          path: "src/retry.ts",
+          diff: "@@ -1 +1 @@\n-old\n+new",
+        }),
+      )
+    const { getDevelopmentCodeTree } =
+      await import("@/api/development-workspaces")
+    await expect(
+      getDevelopmentCodeTree(workspaceID, { revision: "candidate:2" }),
+    ).resolves.toMatchObject({
+      entries: [{ name: "src/retry.ts", path: "src/retry.ts", type: "file" }],
+    })
+    await expect(
+      getDevelopmentCodeDiff(workspaceID, {
+        revision: "candidate:2",
+        path: "src/retry.ts",
+      }),
+    ).resolves.toEqual({
+      base_revision: "evidence:3",
+      candidate_revision: "evidence:3",
+      path: "src/retry.ts",
+      unified_diff: "@@ -1 +1 @@\n-old\n+new",
+    })
+  })
+
+  it("responds to gates and reconciles publication through fenced mutations", async () => {
+    const aggregate = {
+      ...summary,
+      source: {
+        kind: "issue",
+        url: "https://github.com/octo/repo/issues/7",
+      },
+      gates: [],
+      publications: [],
+    }
+    mockedLauncherFetch.mockImplementation(async () => jsonResponse(aggregate))
+    await saveDevelopmentCharter(workspaceID, {
+      expected_version: 3,
+      expected_head_revision: "provider:3",
+      request_id: `devq_${"5".repeat(32)}`,
+      charter: {
+        type: "feature",
+        goal: "Clarified goal",
+        acceptance_criteria: ["One criterion"],
+        included_areas: [],
+        excluded_areas: [],
+        non_goals: [],
+      },
+    })
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      `/api/development-workspaces/${workspaceID}/charter`,
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          expected_version: 3,
+          expected_head_revision: "provider:3",
+          request_id: `devq_${"5".repeat(32)}`,
+          pr_type: "feature",
+          goal: "Clarified goal",
+          acceptance_criteria: ["One criterion"],
+          included_areas: [],
+          exclusions: [],
+          non_goals: [],
+        }),
+      }),
+    )
+    await confirmDevelopmentCharter(workspaceID, {
+      expected_version: 3,
+      expected_charter_revision: 1,
+      request_id: `devq_${"5".repeat(32)}`,
+    })
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      `/api/development-workspaces/${workspaceID}/charter/confirm`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: 3,
+          expected_charter_revision: 1,
+          request_id: `devq_${"5".repeat(32)}`,
+        }),
+      }),
+    )
+    await respondDevelopmentGate(workspaceID, "pgr/unsafe", {
+      expected_version: 3,
+      request_id: `devq_${"6".repeat(32)}`,
+      field_values: { decision: "approve" },
+    })
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      `/api/development-workspaces/${workspaceID}/gates/pgr%2Funsafe/respond`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: 3,
+          request_id: `devq_${"6".repeat(32)}`,
+          "field-values": { decision: "approve" },
+        }),
+      }),
+    )
+
+    await reconcileDevelopmentPublication(workspaceID, "ppu/unsafe", {
+      expected_version: 3,
+      expected_head_revision: "provider:3",
+      request_id: `devq_${"7".repeat(32)}`,
+    })
+    expect(mockedLauncherFetch).toHaveBeenLastCalledWith(
+      `/api/development-workspaces/${workspaceID}/publications/ppu%2Funsafe/reconcile`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: 3,
+          expected_head_revision: "provider:3",
+          request_id: `devq_${"7".repeat(32)}`,
+        }),
+      }),
+    )
+  })
+})

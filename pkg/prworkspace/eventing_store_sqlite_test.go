@@ -107,8 +107,9 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	require.NoError(t, err)
 	store := NewEventingStore(raw)
 
-	workspaceID := stableID("prw_", "https://github.example.test", "repo-1", "pull-7")
+	workspaceID := stableID("devw_", "https://github.example.test", "repo-1", "pull-7")
 	provider := ProviderSnapshot{
+		Intent: IntentPickupPR, SourceKind: SourcePullRequest, SourceID: "pull-7", SourceNumber: 7,
 		Provider: "github", ProviderOrigin: "https://github.example.test",
 		RepositoryID: "repo-1", Repository: "octo/project", PullRequestID: "pull-7", PullNumber: 7,
 		Title: "Fix the race", AuthorID: "user-1", AuthorLogin: "octo", AuthenticatedUserID: "user-1",
@@ -119,7 +120,9 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 	created, err := store.Create(ctx, CreateInput{
 		RequestID: "request-create-0001",
 		Workspace: Workspace{
-			ID: workspaceID, Provider: "github", ProviderOrigin: provider.ProviderOrigin,
+			ID: workspaceID, Intent: provider.Intent, SourceKind: provider.SourceKind,
+			SourceID: provider.SourceID, SourceNumber: provider.SourceNumber,
+			Provider: "github", ProviderOrigin: provider.ProviderOrigin,
 			RepositoryID: provider.RepositoryID, PullRequestID: provider.PullRequestID,
 			Repository: provider.Repository, PullNumber: provider.PullNumber,
 			Phase: PhaseCharter, ExecutionState: ExecutionWaitingUser,
@@ -425,15 +428,19 @@ func TestEventingStoreRoundTripsUnifiedAggregatePrivateStateAndReplay(t *testing
 		relatedProvider.Repository = repository
 		relatedProvider.PullRequestID = pullRequestID
 		relatedProvider.PullNumber = pullNumber
+		relatedProvider.SourceID = pullRequestID
+		relatedProvider.SourceNumber = pullNumber
 		relatedProvider.HeadRepositoryID = repositoryID
 		relatedProvider.HeadRepository = repository
 		relatedProvider.HeadRef = "lesson-consumer"
 		relatedProvider.HeadSHA = stableID("head_", providerOrigin, repositoryID, pullRequestID)
-		relatedID := stableID("prw_", providerOrigin, repositoryID, pullRequestID)
+		relatedID := stableID("devw_", providerOrigin, repositoryID, pullRequestID)
 		createdRelated, createErr := store.Create(ctx, CreateInput{
 			RequestID: "request-create-" + pullRequestID,
 			Workspace: Workspace{
-				ID: relatedID, Provider: relatedProvider.Provider, ProviderOrigin: providerOrigin,
+				ID: relatedID, Intent: relatedProvider.Intent, SourceKind: relatedProvider.SourceKind,
+				SourceID: pullRequestID, SourceNumber: pullNumber,
+				Provider: relatedProvider.Provider, ProviderOrigin: providerOrigin,
 				RepositoryID: repositoryID, PullRequestID: pullRequestID, Repository: repository,
 				PullNumber: pullNumber, Phase: PhaseCharter, ExecutionState: ExecutionWaitingUser,
 				ProviderHeadSHA: relatedProvider.HeadSHA, Version: 1, CreatedAt: now, UpdatedAt: now,

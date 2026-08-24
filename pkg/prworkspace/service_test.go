@@ -110,7 +110,7 @@ func TestServiceIntakeCharterConfirmAndZeroFindingNudges(t *testing.T) {
 		Provider: "github", ProviderOrigin: "https://github.com", RepositoryID: "1",
 		Repository: "octo/repo", PullRequestID: "2", PullNumber: 3,
 		HeadRepositoryID: "1", HeadRepository: "octo/repo",
-		BaseSHA: "base", HeadSHA: "head", ObservedAt: now, Owned: true, HeadWritable: true,
+		BaseSHA: "base", HeadSHA: "head", State: "open", ObservedAt: now, Owned: true, HeadWritable: true,
 	}
 	service, err := NewService(ServiceConfig{
 		Store: NewMemoryStore(), Provider: serviceProvider{snapshot: provider}, AI: serviceAI{},
@@ -120,7 +120,8 @@ func TestServiceIntakeCharterConfirmAndZeroFindingNudges(t *testing.T) {
 		t.Fatal(err)
 	}
 	aggregate, err := service.Create(context.Background(), CreateWorkspaceRequest{
-		RequestID: "request-00000001", Resolve: ResolveRequest{PullRequestURL: "https://github.com/octo/repo/pull/3"},
+		RequestID: "request-00000001", Intent: IntentPickupPR, SourceKind: SourcePullRequest,
+		PullRequestURL: "https://github.com/octo/repo/pull/3",
 	})
 	if err != nil || aggregate.Workspace.Phase != PhaseCharter {
 		t.Fatalf("create = %#v, %v", aggregate, err)
@@ -234,7 +235,7 @@ func TestServiceDeferredModeInvalidRepositoryResolutionFailsClosed(t *testing.T)
 func TestMissingAuthorizationConfigCreatesHumanGate(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	service, _ := NewService(ServiceConfig{Store: NewMemoryStore(), Now: func() time.Time { return now }})
-	aggregate := Aggregate{Workspace: Workspace{ID: "prw_11111111111111111111111111111111"}}
+	aggregate := Aggregate{Workspace: Workspace{ID: "devw_11111111111111111111111111111111"}}
 	gate, err := service.startGate(context.Background(), aggregate, "pr.charter.confirm", map[string]any{"x": "y"})
 	if err != nil {
 		t.Fatal(err)

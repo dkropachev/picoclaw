@@ -159,11 +159,11 @@ func externalPRWorkspaceLocation(raw string) (string, bool) {
 		return "", false
 	}
 	id := strings.TrimPrefix(raw, prWorkspaceRuntimePath+"/")
-	if len(id) != len("prw_")+32 || !strings.HasPrefix(id, "prw_") ||
+	if len(id) != len("devw_")+32 || !strings.HasPrefix(id, "devw_") ||
 		strings.Contains(id, "/") {
 		return "", false
 	}
-	for _, character := range strings.TrimPrefix(id, "prw_") {
+	for _, character := range strings.TrimPrefix(id, "devw_") {
 		if character < '0' || character > '9' && character < 'a' || character > 'f' {
 			return "", false
 		}

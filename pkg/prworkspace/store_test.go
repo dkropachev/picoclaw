@@ -14,7 +14,10 @@ func TestMemoryStoreCASIdempotencyAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err := store.Create(context.Background(), created)
+	retry := created
+	retry.Workspace.CreatedAt = retry.Workspace.CreatedAt.Add(time.Minute)
+	retry.Provider.ObservedAt = retry.Provider.ObservedAt.Add(time.Minute)
+	replay, err := store.Create(context.Background(), retry)
 	if err != nil || !replay.Replayed {
 		t.Fatalf("create replay = %#v, %v", replay, err)
 	}
@@ -107,6 +110,7 @@ func TestMemoryStoreBindsAndFreezesFindingSourceProvenance(t *testing.T) {
 func testCreateInput() CreateInput {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	provider := ProviderSnapshot{
+		Intent: IntentPickupPR, SourceKind: SourcePullRequest, SourceID: "2", SourceNumber: 3,
 		Provider: "github", ProviderOrigin: "https://github.com", RepositoryID: "1",
 		Repository: "octo/repo", PullRequestID: "2", PullNumber: 3, HeadSHA: "abcdef",
 		ObservedAt: now,
@@ -114,7 +118,9 @@ func testCreateInput() CreateInput {
 	return CreateInput{
 		RequestID: "request-00000001",
 		Workspace: Workspace{
-			ID: "prw_11111111111111111111111111111111", Provider: "github",
+			ID: "devw_11111111111111111111111111111111", Intent: provider.Intent,
+			SourceKind: provider.SourceKind, SourceID: provider.SourceID, SourceNumber: provider.SourceNumber,
+			Provider:       "github",
 			ProviderOrigin: provider.ProviderOrigin, RepositoryID: provider.RepositoryID,
 			PullRequestID: provider.PullRequestID, Repository: provider.Repository,
 			PullNumber: provider.PullNumber, ProviderHeadSHA: provider.HeadSHA,

@@ -216,7 +216,9 @@ gates:
         type: long-text
         label: Explanation
     default-action:
-      type: human
+      type: deterministic
+      fields:
+        action: accept
 
   review-publish:
     prompt: Decide whether to publish the review and findings.

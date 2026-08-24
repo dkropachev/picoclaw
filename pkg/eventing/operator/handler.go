@@ -164,8 +164,8 @@ func routeFromRequest(request *http.Request) operatorRoute {
 	case RoutePrefix + "dispatches":
 		return operatorRoute{kind: routeDispatches, method: http.MethodGet}
 	}
-	if path == RoutePrefix+"pr-workspaces" ||
-		strings.HasPrefix(path, RoutePrefix+"pr-workspaces/") {
+	if path == RoutePrefix+"development-workspaces" ||
+		strings.HasPrefix(path, RoutePrefix+"development-workspaces/") {
 		return operatorRoute{kind: routePRWorkspaces}
 	}
 	if strings.HasPrefix(path, RoutePrefix+"dispatches/") {

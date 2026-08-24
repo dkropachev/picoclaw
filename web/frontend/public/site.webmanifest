@@ -1,21 +1,53 @@
 {
-  "name": "MyWebSite",
-  "short_name": "MySite",
+  "id": "/",
+  "name": "PicoClaw",
+  "short_name": "PicoClaw",
+  "description": "PicoClaw development workspace and attention inbox",
+  "start_url": "/notifications",
+  "scope": "/",
   "icons": [
     {
       "src": "/web-app-manifest-192x192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "maskable"
+      "purpose": "any maskable"
     },
     {
       "src": "/web-app-manifest-512x512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "maskable"
+      "purpose": "any maskable"
     }
   ],
-  "theme_color": "#ffffff",
+  "theme_color": "#171717",
   "background_color": "#ffffff",
-  "display": "standalone"
+  "display": "standalone",
+  "orientation": "any",
+  "categories": ["developer", "productivity"],
+  "shortcuts": [
+    {
+      "name": "Notifications",
+      "short_name": "Inbox",
+      "url": "/notifications",
+      "icons": [
+        {
+          "src": "/web-app-manifest-192x192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Development",
+      "short_name": "Development",
+      "url": "/development",
+      "icons": [
+        {
+          "src": "/web-app-manifest-192x192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
 }

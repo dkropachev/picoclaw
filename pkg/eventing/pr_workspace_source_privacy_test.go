@@ -58,7 +58,7 @@ func requireNoProtectedFindingSourceJSON(t *testing.T, value any, source PRFindi
 }
 
 func TestPRFindingProtectedSourceIsAbsentFromEveryPublicJSONProjection(t *testing.T) {
-	finding, source := testProtectedFinding(t, "prw_00000000000000000000000000000001")
+	finding, source := testProtectedFinding(t, "devw_00000000000000000000000000000001")
 	patch := PRWorkspacePatch{UpsertFindings: []PRFinding{finding}}
 
 	requireNoProtectedFindingSourceJSON(t, finding, source)
@@ -170,7 +170,7 @@ func TestPRFindingProtectedSourceIsImmutable(t *testing.T) {
 }
 
 func TestPRFindingProtectedPersistenceSchemaIsStrictAndBounded(t *testing.T) {
-	finding, source := testProtectedFinding(t, "prw_00000000000000000000000000000001")
+	finding, source := testProtectedFinding(t, "devw_00000000000000000000000000000001")
 	valid, err := marshalPRFindingPersistence(finding)
 	require.NoError(t, err)
 	restored, err := decodePRFindingPersistence(valid)

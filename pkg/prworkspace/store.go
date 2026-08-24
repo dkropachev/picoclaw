@@ -174,7 +174,7 @@ func claimedBranchPublication(patch AggregatePatch) (string, bool) {
 }
 
 func branchPublicationLeaseTransition(patch AggregatePatch, publicationID string) bool {
-	if patch.ActiveCharterID != nil || patch.Provider != nil ||
+	if patch.ActiveCharterID != nil ||
 		len(patch.AppendCharters) != 0 || len(patch.ReplaceCharters) != 0 ||
 		len(patch.AppendStageRuns) != 0 || len(patch.ReplaceStageRuns) != 0 ||
 		len(patch.UpsertFindings) != 0 || len(patch.AppendMessages) != 0 ||
@@ -196,6 +196,10 @@ func branchPublicationLeaseTransition(patch AggregatePatch, publicationID string
 	case ExecutionRunning:
 		return patch.Phase == nil && patch.ExecutionState == nil
 	case ExecutionSucceeded:
+		if patch.Provider != nil && (patch.Provider.Intent != IntentImplementFeature ||
+			patch.Provider.PullRequestID == "" || patch.Provider.PullNumber < 1) {
+			return false
+		}
 		if patch.Phase == nil && patch.ExecutionState == nil {
 			return true
 		}
@@ -235,17 +239,27 @@ func (store *MemoryStore) Create(ctx context.Context, input CreateInput) (Mutati
 	}
 	if store == nil || !validRequestID(input.RequestID) || input.Workspace.ID == "" ||
 		input.Workspace.Version != 1 || input.Workspace.RepositoryID == "" ||
-		input.Workspace.PullRequestID == "" {
+		input.Workspace.SourceID == "" || input.Workspace.Intent != input.Provider.Intent ||
+		input.Workspace.SourceKind != input.Provider.SourceKind ||
+		input.Workspace.SourceID != input.Provider.SourceID ||
+		input.Workspace.ProviderOrigin != input.Provider.ProviderOrigin ||
+		input.Workspace.RepositoryID != input.Provider.RepositoryID ||
+		input.Workspace.PullRequestID != input.Provider.PullRequestID {
 		return MutationResult{}, ErrInvalid
 	}
-	fingerprint, err := fingerprintValue(input)
+	fingerprintInput := input
+	fingerprintInput.Workspace.CreatedAt = time.Time{}
+	fingerprintInput.Workspace.UpdatedAt = time.Time{}
+	fingerprintInput.Provider.ObservedAt = time.Time{}
+	fingerprint, err := fingerprintValue(fingerprintInput)
 	if err != nil {
 		return MutationResult{}, ErrInvalid
 	}
 	identity := workspaceIdentity(
 		input.Workspace.ProviderOrigin,
 		input.Workspace.RepositoryID,
-		input.Workspace.PullRequestID,
+		input.Workspace.SourceKind,
+		input.Workspace.SourceID,
 	)
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -614,8 +628,8 @@ func fingerprintValue(value any) (string, error) {
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-func workspaceIdentity(origin, repositoryID, pullRequestID string) string {
-	return strings.ToLower(origin) + "\x00" + repositoryID + "\x00" + pullRequestID
+func workspaceIdentity(origin, repositoryID string, sourceKind SourceKind, sourceID string) string {
+	return strings.ToLower(origin) + "\x00" + repositoryID + "\x00" + string(sourceKind) + "\x00" + sourceID
 }
 
 func validRequestID(value string) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -33,6 +34,38 @@ type ProviderResolver interface {
 	ResolvePullRequest(ctx context.Context, request ResolveRequest) (ProviderSnapshot, error)
 }
 
+type IssueResolveRequest struct {
+	IssueURL string
+}
+
+type IssueProviderResolver interface {
+	ResolveIssue(ctx context.Context, request IssueResolveRequest) (ProviderSnapshot, error)
+}
+
+type RepositoryResolveRequest struct {
+	RepositoryIdentity string
+	Brief              string
+}
+
+type RepositoryProviderResolver interface {
+	ResolveRepository(ctx context.Context, request RepositoryResolveRequest) (ProviderSnapshot, error)
+}
+
+type ConfiguredRepository struct {
+	Identity      string `json:"identity"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	CanImplement  bool   `json:"can_implement"`
+}
+
+type ConfiguredRepositoryLister interface {
+	ListConfiguredRepositories(ctx context.Context) ([]ConfiguredRepository, error)
+}
+
+type ConfiguredRepositoryVerifier interface {
+	VerifyRepository(ctx context.Context, identity string) (ConfiguredRepository, error)
+}
+
 type GateRequest struct {
 	WorkspaceID      string
 	WorkspaceVersion int64
@@ -56,11 +89,19 @@ type CandidateEvidenceLoader interface {
 	LoadCandidateEvidence(ctx context.Context, repair RepairAttempt) (CandidateEvidence, error)
 }
 
+type PlanningEvidenceLoader interface {
+	LoadPlanningEvidence(
+		ctx context.Context,
+		workspaceID string,
+		provider ProviderSnapshot,
+	) (json.RawMessage, error)
+}
+
 type CandidateEvidence struct {
-	CandidateSHA   string
-	CandidateDiff  string
-	Metrics        CandidateMetrics
-	EvidenceDigest string
+	CandidateSHA   string           `json:"candidate_sha"`
+	CandidateDiff  string           `json:"candidate_diff"`
+	Metrics        CandidateMetrics `json:"metrics"`
+	EvidenceDigest string           `json:"evidence_digest"`
 }
 
 type ServiceConfig struct {
@@ -68,11 +109,13 @@ type ServiceConfig struct {
 	Provider                       ProviderResolver
 	ReviewEvidence                 ReviewEvidenceLoader
 	CandidateEvidence              CandidateEvidenceLoader
+	PlanningEvidence               PlanningEvidenceLoader
 	AI                             IsolatedAIRunner
 	ReviewWorkflow                 ReviewWorkflowExecutor
 	Gates                          GateEvaluator
 	DeferredIssueMode              DeferredIssueMode
 	DeferredIssueModeForRepository func(providerOrigin, repositoryID string) DeferredIssueMode
+	ScopeDispositionForRepository  func(providerOrigin, repositoryID string) ScopeDispositionPolicy
 	Now                            func() time.Time
 }
 
@@ -81,11 +124,13 @@ type Service struct {
 	provider                       ProviderResolver
 	reviewEvidence                 ReviewEvidenceLoader
 	candidateEvidence              CandidateEvidenceLoader
+	planningEvidence               PlanningEvidenceLoader
 	ai                             AIController
 	reviewWorkflow                 ReviewWorkflowExecutor
 	gates                          GateEvaluator
 	deferredIssueMode              DeferredIssueMode
 	deferredIssueModeForRepository func(providerOrigin, repositoryID string) DeferredIssueMode
+	scopeDispositionForRepository  func(providerOrigin, repositoryID string) ScopeDispositionPolicy
 	now                            func() time.Time
 }
 
@@ -119,13 +164,24 @@ func NewService(config ServiceConfig) (*Service, error) {
 		provider:                       config.Provider,
 		reviewEvidence:                 config.ReviewEvidence,
 		candidateEvidence:              config.CandidateEvidence,
+		planningEvidence:               config.PlanningEvidence,
 		ai:                             AIController{Runner: config.AI},
 		reviewWorkflow:                 reviewWorkflow,
 		gates:                          config.Gates,
 		deferredIssueMode:              config.DeferredIssueMode,
 		deferredIssueModeForRepository: config.DeferredIssueModeForRepository,
+		scopeDispositionForRepository:  config.ScopeDispositionForRepository,
 		now:                            now,
 	}, nil
+}
+
+func (service *Service) scopeDisposition(aggregate Aggregate) ScopeDispositionPolicy {
+	if service != nil && service.scopeDispositionForRepository != nil {
+		return service.scopeDispositionForRepository(
+			aggregate.ProviderSnapshot.ProviderOrigin, aggregate.ProviderSnapshot.RepositoryID,
+		)
+	}
+	return DefaultScopeDispositionPolicy()
 }
 
 func (service *Service) deferredMode(aggregate Aggregate) DeferredIssueMode {
@@ -166,30 +222,83 @@ func (service *Service) releaseImplementation(workspaceID string) {
 }
 
 type CreateWorkspaceRequest struct {
-	RequestID string
-	Resolve   ResolveRequest
+	RequestID          string
+	Intent             DevelopmentIntent
+	SourceKind         SourceKind
+	PullRequestURL     string
+	IssueURL           string
+	RepositoryIdentity string
+	Brief              string
 }
 
 func (service *Service) Create(ctx context.Context, request CreateWorkspaceRequest) (Aggregate, error) {
 	if service == nil || service.store == nil || service.provider == nil {
 		return Aggregate{}, errors.New("PR workspace intake is unavailable")
 	}
-	if !validRequestID(request.RequestID) || validateResolveRequest(request.Resolve) != nil {
+	if !validRequestID(request.RequestID) || !validCreateWorkspaceRequest(request) {
 		return Aggregate{}, ErrInvalid
 	}
-	provider, resolveErr := service.provider.ResolvePullRequest(ctx, request.Resolve)
+	var provider ProviderSnapshot
+	var resolveErr error
+	switch request.SourceKind {
+	case SourcePullRequest:
+		provider, resolveErr = service.provider.ResolvePullRequest(ctx, ResolveRequest{
+			PullRequestURL: request.PullRequestURL,
+		})
+	case SourceIssue:
+		resolver, ok := service.provider.(IssueProviderResolver)
+		if !ok {
+			return Aggregate{}, errors.New("GitHub issue intake is unavailable")
+		}
+		provider, resolveErr = resolver.ResolveIssue(ctx, IssueResolveRequest{IssueURL: request.IssueURL})
+	case SourceBrief:
+		resolver, ok := service.provider.(RepositoryProviderResolver)
+		if !ok {
+			return Aggregate{}, errors.New("configured repository intake is unavailable")
+		}
+		provider, resolveErr = resolver.ResolveRepository(ctx, RepositoryResolveRequest{
+			RepositoryIdentity: request.RepositoryIdentity,
+			Brief:              request.Brief,
+		})
+	}
 	if resolveErr != nil {
 		return Aggregate{}, resolveErr
+	}
+	provider.Intent = request.Intent
+	provider.SourceKind = request.SourceKind
+	if request.SourceKind == SourcePullRequest {
+		provider.SourceID = provider.PullRequestID
+		provider.SourceNumber = provider.PullNumber
+		provider.SourceURL = request.PullRequestURL
+		if provider.State != "open" || !provider.HeadWritable {
+			return Aggregate{}, errors.New("pull request must be open and writable")
+		}
+	}
+	if request.SourceKind == SourceBrief {
+		// A brief is a request to start new work, not a reusable provider entity.
+		// Include the idempotency key so retries replay while two identical briefs
+		// intentionally create independent development workspaces.
+		digest := sha256.Sum256([]byte(strings.Join([]string{
+			"development-brief-request-v1", provider.ProviderOrigin,
+			provider.RepositoryID, request.RequestID,
+		}, "\x00")))
+		provider.SourceID = "sha256:" + hex.EncodeToString(digest[:])
+	}
+	if request.Intent == IntentImplementFeature && !provider.CanCreatePullRequest {
+		return Aggregate{}, errors.New("draft pull request creation is unavailable")
 	}
 	if err := validateProviderSnapshot(provider); err != nil {
 		return Aggregate{}, fmt.Errorf("%w: provider snapshot: %v", ErrInvalid, err)
 	}
 	now := service.now().UTC()
-	workspaceID := stableID("prw_", provider.ProviderOrigin, provider.RepositoryID, provider.PullRequestID)
+	workspaceID := stableID("devw_", provider.ProviderOrigin, provider.RepositoryID,
+		string(provider.SourceKind), provider.SourceID)
 	result, createErr := service.store.Create(ctx, CreateInput{
 		RequestID: request.RequestID,
 		Workspace: Workspace{
-			ID: workspaceID, Provider: provider.Provider, ProviderOrigin: provider.ProviderOrigin,
+			ID: workspaceID, Intent: provider.Intent, SourceKind: provider.SourceKind,
+			SourceID: provider.SourceID, SourceNumber: provider.SourceNumber,
+			Provider: provider.Provider, ProviderOrigin: provider.ProviderOrigin,
 			RepositoryID: provider.RepositoryID, PullRequestID: provider.PullRequestID,
 			Repository: provider.Repository, PullNumber: provider.PullNumber,
 			Phase: PhaseCharter, ExecutionState: ExecutionWaitingUser,
@@ -204,10 +313,32 @@ func (service *Service) Create(ctx context.Context, request CreateWorkspaceReque
 }
 
 func (service *Service) Get(ctx context.Context, workspaceID string) (Aggregate, error) {
-	if service == nil || service.store == nil || !validOpaqueID(workspaceID, "prw_") {
+	if service == nil || service.store == nil || !validOpaqueID(workspaceID, "devw_") {
 		return Aggregate{}, ErrInvalid
 	}
 	return service.store.Get(ctx, workspaceID)
+}
+
+func validCreateWorkspaceRequest(request CreateWorkspaceRequest) bool {
+	switch request.Intent {
+	case IntentPickupPR:
+		validPull := request.PullRequestURL != "" &&
+			validateResolveRequest(ResolveRequest{PullRequestURL: request.PullRequestURL}) == nil
+		return request.SourceKind == SourcePullRequest && validPull &&
+			request.IssueURL == "" && request.RepositoryIdentity == "" && request.Brief == ""
+	case IntentImplementFeature:
+		switch request.SourceKind {
+		case SourceIssue:
+			parsed, err := url.ParseRequestURI(request.IssueURL)
+			return err == nil && parsed.Scheme == "https" && parsed.Host != "" &&
+				request.PullRequestURL == "" && request.RepositoryIdentity == "" && request.Brief == ""
+		case SourceBrief:
+			return request.PullRequestURL == "" && request.IssueURL == "" &&
+				validBoundedText(request.RepositoryIdentity, 1024, false) &&
+				validBoundedText(request.Brief, maxCharterTextBytes, false)
+		}
+	}
+	return false
 }
 
 func (service *Service) List(ctx context.Context, filter ListFilter) (Page, error) {
@@ -220,6 +351,30 @@ func (service *Service) List(ctx context.Context, filter ListFilter) (Page, erro
 	return service.store.List(ctx, filter)
 }
 
+func (service *Service) ListConfiguredRepositories(ctx context.Context) ([]ConfiguredRepository, error) {
+	if service == nil || service.provider == nil {
+		return nil, errors.New("configured repositories are unavailable")
+	}
+	lister, ok := service.provider.(ConfiguredRepositoryLister)
+	if !ok {
+		return nil, errors.New("configured repositories are unavailable")
+	}
+	return lister.ListConfiguredRepositories(ctx)
+}
+
+func (service *Service) VerifyConfiguredRepository(
+	ctx context.Context, repositoryURL string,
+) (ConfiguredRepository, error) {
+	if service == nil || service.provider == nil {
+		return ConfiguredRepository{}, errors.New("repository verification is unavailable")
+	}
+	verifier, ok := service.provider.(ConfiguredRepositoryVerifier)
+	if !ok {
+		return ConfiguredRepository{}, errors.New("repository verification is unavailable")
+	}
+	return verifier.VerifyRepository(ctx, repositoryURL)
+}
+
 type DraftCharterRequest struct {
 	WorkspaceID     string
 	ExpectedVersion int64
@@ -227,12 +382,14 @@ type DraftCharterRequest struct {
 }
 
 type CharterDraftOutput struct {
-	Type               PRType   `json:"type"`
-	Goal               string   `json:"goal"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	IncludedAreas      []string `json:"included_areas"`
-	ExcludedAreas      []string `json:"excluded_areas"`
-	NonGoals           []string `json:"non_goals"`
+	Type                  PRType   `json:"type"`
+	Goal                  string   `json:"goal"`
+	AcceptanceCriteria    []string `json:"acceptance_criteria"`
+	IncludedAreas         []string `json:"included_areas"`
+	ExcludedAreas         []string `json:"excluded_areas"`
+	NonGoals              []string `json:"non_goals"`
+	ClarificationNeeded   bool     `json:"clarification_needed"`
+	ClarificationQuestion string   `json:"clarification_question"`
 }
 
 func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRequest) (Aggregate, error) {
@@ -271,7 +428,9 @@ func (service *Service) DraftCharter(ctx context.Context, request DraftCharterRe
 		Revision: int64(len(aggregate.Charters) + 1), Type: draft.Type, Goal: draft.Goal,
 		AcceptanceCriteria: draft.AcceptanceCriteria, IncludedAreas: draft.IncludedAreas,
 		ExcludedAreas: draft.ExcludedAreas, NonGoals: draft.NonGoals,
-		BaseSHA: aggregate.ProviderSnapshot.BaseSHA, HeadSHA: aggregate.ProviderSnapshot.HeadSHA,
+		ClarificationNeeded:   draft.ClarificationNeeded,
+		ClarificationQuestion: strings.TrimSpace(draft.ClarificationQuestion),
+		BaseSHA:               aggregate.ProviderSnapshot.BaseSHA, HeadSHA: aggregate.ProviderSnapshot.HeadSHA,
 		CreatedAt: now,
 	}
 	phase, state := PhaseCharter, ExecutionWaitingUser
@@ -439,6 +598,47 @@ type ConfirmCharterRequest struct {
 	RequestID       string
 }
 
+func (service *Service) ConfirmCharterAutomatically(
+	ctx context.Context,
+	request ConfirmCharterRequest,
+) (Aggregate, error) {
+	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
+		!validOpaqueID(request.CharterID, "pcr_") {
+		return Aggregate{}, ErrInvalid
+	}
+	aggregate, err := service.store.Get(ctx, request.WorkspaceID)
+	if err != nil {
+		return Aggregate{}, err
+	}
+	charter, _, ready := charterConfirmationReady(aggregate, request.CharterID)
+	if !ready || aggregate.Workspace.Version != request.ExpectedVersion {
+		return aggregate, ErrConflict
+	}
+	if charter.ClarificationNeeded {
+		return aggregate, ErrConflict
+	}
+	now := service.now().UTC()
+	charter.Confirmed, charter.ConfirmedAt = true, &now
+	activeID := charter.ID
+	phase, state := PhaseReview, ExecutionQueued
+	if aggregate.Workspace.Intent == IntentImplementFeature {
+		phase = PhasePlanning
+	}
+	result, err := service.store.Mutate(ctx, Mutation{
+		WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion,
+		RequestID: request.RequestID,
+		Patch: AggregatePatch{
+			Phase: &phase, ExecutionState: &state, ActiveCharterID: &activeID,
+			ReplaceCharters: []Charter{charter},
+			Activity: []Activity{{
+				Kind: "charter.confirmed", Actor: "system", EntityID: charter.ID,
+				Summary: "AI-drafted charter confirmed for autonomous development", CreatedAt: now,
+			}},
+		},
+	})
+	return result.Aggregate, err
+}
+
 func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmCharterRequest) (Aggregate, error) {
 	if !validMutationEnvelope(request.WorkspaceID, request.ExpectedVersion, request.RequestID) ||
 		!validOpaqueID(request.CharterID, "pcr_") {
@@ -470,11 +670,25 @@ func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmChart
 			},
 		},
 	}
+	if charter.ClarificationNeeded {
+		charter.ClarificationNeeded = false
+		charter.ClarificationQuestion = ""
+		patch.ReplaceCharters = []Charter{charter}
+		patch.Activity = append(patch.Activity, Activity{
+			Kind: "charter.clarification_acknowledged", Actor: "user", EntityID: charter.ID,
+			Summary: "User accepted the drafted charter for confirmation", CreatedAt: now,
+		})
+	}
 	if gateCompletedWith(gate, "approve") {
 		charter.Confirmed = true
 		charter.ConfirmedAt = &now
 		patch.ReplaceCharters = []Charter{charter}
-		queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
+		if aggregate.Workspace.Intent == IntentImplementFeature {
+			phase, state, activeID := PhasePlanning, ExecutionQueued, charter.ID
+			patch.Phase, patch.ExecutionState, patch.ActiveCharterID = &phase, &state, &activeID
+		} else {
+			queueReviewWorkflow(&patch, newReviewWorkflowHandoff(aggregate.Workspace, charter))
+		}
 		patch.Activity = append(
 			patch.Activity,
 			Activity{
@@ -487,6 +701,9 @@ func (service *Service) ConfirmCharter(ctx context.Context, request ConfirmChart
 		)
 	} else {
 		state := ExecutionWaitingGate
+		if gate.State == ExecutionWaitingUser {
+			state = ExecutionWaitingUser
+		}
 		patch.ExecutionState = &state
 	}
 	result, err := service.store.Mutate(ctx, Mutation{
@@ -626,6 +843,7 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 	}
 	bundle := reviewContextBundle(aggregate)
 	bundle.CandidateDiff = evidence.UnifiedDiff
+	bundle.ScopePolicyPrompt = service.scopeDisposition(aggregate).Rule(charter.Type).Prompt
 	mode := ReviewWorkflowFull
 	if manualNudge {
 		mode = ReviewWorkflowAdditional
@@ -645,7 +863,7 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 	now := service.now().UTC()
 	runID := stableID("psr_", aggregate.Workspace.ID, request.RequestID)
 	stageState := ExecutionSucceeded
-	phase, state := PhaseTriage, ExecutionWaitingUser
+	phase, state := PhaseTriage, ExecutionQueued
 	publicError := ""
 	if runErr != nil {
 		stageState, phase, state, publicError = ExecutionFailed, PhaseReview, ExecutionFailed, "review_nudge_failed"
@@ -656,7 +874,9 @@ func (service *Service) runReview(ctx context.Context, request RunReviewRequest,
 		Summary: rounds[len(rounds)-1].Result.Summary, PromptDigest: rounds[0].PromptDigest,
 		PublicError: publicError, StartedAt: now, FinishedAt: &now,
 	}
-	findings, nudges := materializeReviewRounds(aggregate, runID, rounds, request.NudgePolicy, now)
+	findings, nudges := materializeReviewRounds(
+		aggregate, runID, rounds, request.NudgePolicy, service.scopeDisposition(aggregate), now,
+	)
 	stage.Evidence = reviewStageEvidence(runID, stage.Summary, stage.PromptDigest, rounds, findings, now)
 	classificationGates, classificationWaiting, needsCharterRevision, classifyErr := service.classifyReviewFindings(
 		ctx,
@@ -1127,9 +1347,12 @@ func materializeReviewRounds(
 	runID string,
 	rounds []ReviewRound,
 	policy NudgePolicy,
+	scopePolicy ScopeDispositionPolicy,
 	now time.Time,
 ) ([]Finding, []NudgeRoundRecord) {
 	charter, hasCharter := aggregate.ActiveCharter()
+	scopeRule := scopePolicy.Rule(charter.Type)
+	scopePolicyRevision, scopePromptDigest := scopeDispositionEvidence(scopeRule, charter.Type)
 	current := currentContextFindings(aggregate, charter, hasCharter)
 	known := newSemanticFindingSet()
 	for _, finding := range current {
@@ -1178,12 +1401,16 @@ func materializeReviewRounds(
 				Scope: agentFindingScope(
 					candidate,
 				),
-				Disposition:     reviewFindingDisposition(agentFindingScope(candidate)),
-				SourceAvailable: round.Source != nil,
-				source:          cloneAIExecutionSource(round.Source),
-				Version:         1,
-				CreatedAt:       now,
-				UpdatedAt:       now,
+				Disposition: decideFindingDisposition(
+					agentFindingScope(candidate), candidate, charter, scopePolicy,
+				),
+				ScopePolicyMode: scopeRule.Mode, ScopePolicyRevision: scopePolicyRevision,
+				ScopePolicyPromptDigest: scopePromptDigest,
+				SourceAvailable:         round.Source != nil,
+				source:                  cloneAIExecutionSource(round.Source),
+				Version:                 1,
+				CreatedAt:               now,
+				UpdatedAt:               now,
 			})
 		}
 		if round.Initial {
@@ -1279,16 +1506,31 @@ func validateResolveRequest(request ResolveRequest) error {
 
 func validateProviderSnapshot(snapshot ProviderSnapshot) error {
 	if snapshot.Provider != "github" || snapshot.ProviderOrigin == "" || snapshot.RepositoryID == "" ||
-		snapshot.Repository == "" || snapshot.PullRequestID == "" || snapshot.PullNumber < 1 ||
+		snapshot.Repository == "" || snapshot.SourceID == "" ||
 		snapshot.HeadRepositoryID == "" || snapshot.HeadRepository == "" ||
 		snapshot.HeadSHA == "" || snapshot.BaseSHA == "" || snapshot.ObservedAt.IsZero() {
 		return errors.New("required provider identity is missing")
+	}
+	if snapshot.Intent == IntentPickupPR {
+		if snapshot.SourceKind != SourcePullRequest || snapshot.PullRequestID == "" || snapshot.PullNumber < 1 {
+			return errors.New("pickup source must be one pull request")
+		}
+		return nil
+	}
+	if snapshot.Intent != IntentImplementFeature ||
+		(snapshot.SourceKind != SourceIssue && snapshot.SourceKind != SourceBrief) {
+		return errors.New("feature source must be one issue or brief")
 	}
 	return nil
 }
 
 func validateCharterDraft(draft CharterDraftOutput) error {
-	if !validPRType(draft.Type) || !validBoundedText(draft.Goal, maxCharterTextBytes, false) {
+	if !validPRType(draft.Type) || !validBoundedText(draft.Goal, maxCharterTextBytes, false) ||
+		len(draft.AcceptanceCriteria) == 0 {
+		return ErrInvalid
+	}
+	if draft.ClarificationNeeded != (strings.TrimSpace(draft.ClarificationQuestion) != "") ||
+		!validBoundedText(draft.ClarificationQuestion, 8<<10, !draft.ClarificationNeeded) {
 		return ErrInvalid
 	}
 	for _, values := range [][]string{draft.AcceptanceCriteria, draft.IncludedAreas, draft.ExcludedAreas, draft.NonGoals} {
@@ -1314,7 +1556,7 @@ func validPRType(value PRType) bool {
 }
 
 func validMutationEnvelope(workspaceID string, version int64, requestID string) bool {
-	return validOpaqueID(workspaceID, "prw_") && version > 0 && validRequestID(requestID)
+	return validOpaqueID(workspaceID, "devw_") && version > 0 && validRequestID(requestID)
 }
 
 func validOpaqueID(value, prefix string) bool {
@@ -1388,9 +1630,23 @@ func charterDraftSchema() map[string]any {
 		"maxItems": maxCharterItems,
 		"items":    map[string]any{"type": "string"},
 	}
+	requiredStringsArray := map[string]any{
+		"type": "array", "minItems": 1, "maxItems": maxCharterItems,
+		"items": map[string]any{"type": "string"},
+	}
 	return map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []any{"type", "goal", "acceptance_criteria", "included_areas", "excluded_areas", "non_goals"},
+		"type":                 "object",
+		"additionalProperties": false,
+		"required": []any{
+			"type",
+			"goal",
+			"acceptance_criteria",
+			"included_areas",
+			"excluded_areas",
+			"non_goals",
+			"clarification_needed",
+			"clarification_question",
+		},
 		"properties": map[string]any{
 			"type": map[string]any{
 				"type": "string",
@@ -1402,11 +1658,13 @@ func charterDraftSchema() map[string]any {
 					string(PRTypeTest),
 				},
 			},
-			"goal":                map[string]any{"type": "string"},
-			"acceptance_criteria": stringsArray,
-			"included_areas":      stringsArray,
-			"excluded_areas":      stringsArray,
-			"non_goals":           stringsArray,
+			"goal":                   map[string]any{"type": "string"},
+			"acceptance_criteria":    requiredStringsArray,
+			"included_areas":         stringsArray,
+			"excluded_areas":         stringsArray,
+			"non_goals":              stringsArray,
+			"clarification_needed":   map[string]any{"type": "boolean"},
+			"clarification_question": map[string]any{"type": "string"},
 		},
 	}
 }

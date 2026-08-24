@@ -45,6 +45,8 @@ var (
 type PinnedLinePushRequest struct {
 	Repository            string `json:"-"`
 	SourceRef             string `json:"-"`
+	DestinationRef        string `json:"-"`
+	CreateDestination     bool   `json:"-"`
 	ExpectedSourceCommit  string `json:"-"`
 	WorkspaceID           string `json:"-"`
 	LineID                string `json:"-"`
@@ -173,7 +175,11 @@ func (m *Manager) PushPinnedLine(
 		return PinnedLinePushResult{}, ancestryErr
 	}
 
-	remoteRef := "refs/heads/" + line.SourceRef
+	destinationRef := line.SourceRef
+	if request.DestinationRef != "" {
+		destinationRef = request.DestinationRef
+	}
+	remoteRef := "refs/heads/" + destinationRef
 	observed, found, observeErr := observePinnedLineRemote(
 		operationCtx,
 		workspace.Path,
@@ -188,10 +194,19 @@ func (m *Manager) PushPinnedLine(
 		}
 		return PinnedLinePushResult{}, ErrPinnedLinePushRemoteUnavailable
 	}
-	if !found {
+	if !found && !request.CreateDestination {
 		return PinnedLinePushResult{}, fmt.Errorf(
 			"%w: source branch is missing from its remote",
 			ErrPinnedLineConflict,
+		)
+	}
+	if request.CreateDestination && found {
+		if observed == request.ExpectedTip {
+			result := pinnedLinePushResult(line, request, remoteRef, PinnedLinePushAlreadyCurrent)
+			return m.finishPinnedLinePushLocalPostflight(ctx, workspace, line, repository, environment, result)
+		}
+		return PinnedLinePushResult{}, fmt.Errorf(
+			"%w: destination branch already exists", ErrPinnedLineConflict,
 		)
 	}
 	if observed == request.ExpectedTip {
@@ -210,7 +225,7 @@ func (m *Manager) PushPinnedLine(
 			result,
 		)
 	}
-	if observed != request.ExpectedRemoteTip {
+	if !request.CreateDestination && observed != request.ExpectedRemoteTip {
 		return PinnedLinePushResult{}, fmt.Errorf(
 			"%w: source branch changed before push",
 			ErrPinnedLineConflict,
@@ -220,6 +235,10 @@ func (m *Manager) PushPinnedLine(
 		return PinnedLinePushResult{}, operationErr
 	}
 
+	lease := "--force-with-lease=" + remoteRef + ":" + request.ExpectedRemoteTip
+	if request.CreateDestination {
+		lease = "--force-with-lease=" + remoteRef + ":"
+	}
 	_, pushErr := runPinnedGitPlumbing(
 		operationCtx,
 		workspace.Path,
@@ -243,7 +262,7 @@ func (m *Manager) PushPinnedLine(
 		"--recurse-submodules=no",
 		"--no-force-if-includes",
 		"--no-thin",
-		"--force-with-lease="+remoteRef+":"+request.ExpectedRemoteTip,
+		lease,
 		"--",
 		transportRepository,
 		request.ExpectedTip+":"+remoteRef,
@@ -366,6 +385,14 @@ func validatePinnedLinePushRequest(
 			"%w: push source or parked fence is invalid",
 			ErrPinnedLineInvalid,
 		)
+	}
+	if request.DestinationRef != "" &&
+		(len(request.DestinationRef) > 240 || request.DestinationRef != strings.TrimSpace(request.DestinationRef) ||
+			!validPinnedSourceRef(ctx, request.DestinationRef)) {
+		return "", fmt.Errorf("%w: push destination is invalid", ErrPinnedLineInvalid)
+	}
+	if request.CreateDestination && (request.DestinationRef == "" || request.DestinationRef == request.SourceRef) {
+		return "", fmt.Errorf("%w: create-only destination must be a new branch", ErrPinnedLineInvalid)
 	}
 	return repository, nil
 }

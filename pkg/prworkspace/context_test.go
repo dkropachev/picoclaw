@@ -32,7 +32,7 @@ func TestSharedContextIsCurrentFencedAndAudienceProjected(t *testing.T) {
 
 	aggregate := Aggregate{
 		Workspace: Workspace{
-			ID: "prw_11111111111111111111111111111111", RepositoryID: "repo-1",
+			ID: "devw_11111111111111111111111111111111", RepositoryID: "repo-1",
 			ActiveCharterID: charter.ID,
 		},
 		ProviderSnapshot: ProviderSnapshot{RepositoryID: "repo-1", HeadSHA: charter.HeadSHA},

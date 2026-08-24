@@ -9,7 +9,7 @@ import (
 func testAIExecutionSource(execution string) *AIExecutionSource {
 	source := &AIExecutionSource{
 		ExecutionID: execution,
-		WorkspaceID: "prw_11111111111111111111111111111111",
+		WorkspaceID: "devw_11111111111111111111111111111111",
 		Binding:     "sha256:binding", AgentID: "main",
 		SessionRevision: "sha256:revision", Tools: "none",
 	}
@@ -59,7 +59,7 @@ func TestAIExecutionSourceBindsExactProtectedSessionIdentity(t *testing.T) {
 		{
 			name: "workspace changed without rebinding",
 			mutate: func(source *AIExecutionSource) {
-				source.WorkspaceID = "prw_22222222222222222222222222222222"
+				source.WorkspaceID = "devw_22222222222222222222222222222222"
 			},
 		},
 		{
@@ -86,7 +86,7 @@ func TestAIExecutionSourceBindsExactProtectedSessionIdentity(t *testing.T) {
 
 	if _, err := sourceForGateSubject(
 		map[string]any{"finding": Finding{source: valid}},
-		"prw_22222222222222222222222222222222",
+		"devw_22222222222222222222222222222222",
 	); err == nil {
 		t.Fatal("source from another workspace was accepted")
 	}
@@ -151,7 +151,8 @@ func TestReviewRoundAndMaterializedFindingRetainSourceProvenance(t *testing.T) {
 	aggregate := Aggregate{Workspace: Workspace{ID: bundle.WorkspaceID}}
 	findings, _ := materializeReviewRounds(
 		aggregate, "psr_11111111111111111111111111111111", rounds,
-		ConfiguredNudgePolicy(0, 0), time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
+		ConfiguredNudgePolicy(0, 0), DefaultScopeDispositionPolicy(),
+		time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
 	)
 	if len(findings) != 1 || !findings[0].SourceAvailable || findings[0].source == nil ||
 		findings[0].source.Session != aiExecutionSourceSessionKey(findings[0].source) {

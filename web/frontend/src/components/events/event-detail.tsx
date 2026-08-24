@@ -3,6 +3,7 @@ import {
   IconExternalLink,
   IconRotateClockwise,
   IconRoute,
+  IconSparkles,
   IconUser,
 } from "@tabler/icons-react"
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
@@ -95,18 +96,43 @@ export function EventDetail({
           </p>
         </div>
         {detail ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="min-w-0 shrink-0"
-            onClick={() => onReplay(detail)}
-          >
-            <IconRotateClockwise className="size-4" />
-            <span className="truncate">
-              {t("pages.events.replay.action", "Replay")}
-            </span>
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            {githubIssueURL(detail) ? (
+              <Button asChild size="sm">
+                <a
+                  href={developmentIssueHref(githubIssueURL(detail)!)}
+                  aria-label={t(
+                    "pages.events.detail.implement_feature",
+                    "Implement feature",
+                  )}
+                  title={t(
+                    "pages.events.detail.implement_feature",
+                    "Implement feature",
+                  )}
+                >
+                  <IconSparkles className="size-4" />
+                  <span className="hidden truncate sm:inline">
+                    {t(
+                      "pages.events.detail.implement_feature",
+                      "Implement feature",
+                    )}
+                  </span>
+                </a>
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="min-w-0 shrink-0"
+              onClick={() => onReplay(detail)}
+            >
+              <IconRotateClockwise className="size-4" />
+              <span className="truncate">
+                {t("pages.events.replay.action", "Replay")}
+              </span>
+            </Button>
+          </div>
         ) : null}
       </div>
 
@@ -167,6 +193,35 @@ export function EventDetail({
       </EventScrollRegion>
     </section>
   )
+}
+
+function githubIssueURL(event: EventView): string | undefined {
+  if (
+    event.source.toLowerCase() !== "github" ||
+    event.subject?.type?.toLowerCase() !== "issue"
+  ) {
+    return undefined
+  }
+  const value = event.attributes?.issue_url?.trim()
+  if (!value || value.length > 4096) return undefined
+  try {
+    const parsed = new URL(value)
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      !/\/issues\/[1-9][0-9]*\/?$/.test(parsed.pathname)
+    ) {
+      return undefined
+    }
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+function developmentIssueHref(issueURL: string): string {
+  return `/development/new?${new URLSearchParams({ issue: issueURL }).toString()}`
 }
 
 function EventSummary({ event }: { event: EventView }) {

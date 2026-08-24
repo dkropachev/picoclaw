@@ -16,15 +16,15 @@ import {
   useState,
 } from "react"
 
+import { createDevelopmentRequestID } from "@/api/development-workspaces"
 import {
   type PRLifecycleRepositoryAssignmentIssue,
   type PRLifecycleRepositoryAssignmentSnapshot,
-  canonicalPRLifecycleRepositoryIdentity,
   getPRLifecycleRepositoryAssignments,
   putPRLifecycleRepositoryAssignments,
+  resolveDevelopmentRepository,
   validatePRLifecycleRepositoryAssignments,
 } from "@/api/pr-lifecycle-repository-assignments"
-import { createPRWorkspaceRequestID } from "@/api/pr-workspaces"
 import { PageHeader } from "@/components/page-header"
 import {
   AlertDialog,
@@ -66,6 +66,15 @@ interface CachedRepositoryAssignmentDraft {
   draft: PRLifecycleRepositoryAssignmentSnapshot
 }
 
+function repositoryDraftFingerprint(
+  value: PRLifecycleRepositoryAssignmentSnapshot,
+) {
+  return JSON.stringify({
+    assignments: value.repositoryAssignments,
+    repositories: value.repositories,
+  })
+}
+
 interface PRLifecycleRepositoryAssignmentsPageProps {
   onBack: () => void
   discardOpen?: boolean
@@ -83,8 +92,7 @@ export function PRLifecycleRepositoryAssignmentsPage({
   )
   const cachedDirty =
     cachedDraft != null &&
-    JSON.stringify(cachedDraft.draft.repositoryAssignments) !==
-      cachedDraft.baseline
+    repositoryDraftFingerprint(cachedDraft.draft) !== cachedDraft.baseline
   const [draft, setDraft] =
     useState<PRLifecycleRepositoryAssignmentSnapshot | null>(() =>
       cachedDirty ? structuredClone(cachedDraft.draft) : null,
@@ -96,8 +104,7 @@ export function PRLifecycleRepositoryAssignmentsPage({
   const [newConfigurationID, setNewConfigurationID] = useState("")
   const [localDiscardOpen, setLocalDiscardOpen] = useState(false)
   const [error, setError] = useState("")
-  const dirty =
-    draft != null && JSON.stringify(draft.repositoryAssignments) !== baseline
+  const dirty = draft != null && repositoryDraftFingerprint(draft) !== baseline
   const resolvedDiscardOpen = Boolean(discardOpen || localDiscardOpen)
 
   const query = useQuery({
@@ -110,7 +117,7 @@ export function PRLifecycleRepositoryAssignmentsPage({
     if (!query.data || dirty) return
     const next = structuredClone(query.data)
     setDraft(next)
-    setBaseline(JSON.stringify(next.repositoryAssignments))
+    setBaseline(repositoryDraftFingerprint(next))
     setNewConfigurationID((current) =>
       next.workflowConfigurations[current]
         ? current
@@ -132,36 +139,36 @@ export function PRLifecycleRepositoryAssignmentsPage({
   )
   const newRepositoryIssue = useMemo(() => {
     if (!newRepository) return ""
-    const canonical = canonicalPRLifecycleRepositoryIdentity(newRepository)
-    if (!canonical) {
-      return "Use an exact https:// origin and repository ID separated by one |, without surrounding whitespace (maximum 1024 bytes)."
+    try {
+      const parsed = new URL(newRepository)
+      if (
+        parsed.protocol !== "https:" ||
+        parsed.search ||
+        parsed.hash ||
+        parsed.pathname.split("/").filter(Boolean).length !== 2
+      )
+        return "Use an exact HTTPS GitHub repository URL such as https://github.com/owner/repository."
+      return ""
+    } catch {
+      return "Use an exact HTTPS GitHub repository URL such as https://github.com/owner/repository."
     }
-    const collision = Object.keys(draft?.repositoryAssignments ?? {}).find(
-      (repository) =>
-        repository !== newRepository &&
-        canonicalPRLifecycleRepositoryIdentity(repository) === canonical,
-    )
-    return collision
-      ? `This identity collides with ${collision} after case and trailing-origin-slash normalization.`
-      : ""
-  }, [draft?.repositoryAssignments, newRepository])
+  }, [newRepository])
   const saveMutation = useMutation({
     mutationFn: (value: PRLifecycleRepositoryAssignmentSnapshot) =>
       putPRLifecycleRepositoryAssignments({
         expectedConfigRevision: value.configRevision,
-        requestID: createPRWorkspaceRequestID(),
+        requestID: createDevelopmentRequestID(),
         repositoryAssignments: value.repositoryAssignments,
+        repositories: value.repositories,
       }),
     onSuccess: (next, submitted) => {
       const saved = structuredClone(next)
-      const nextBaseline = JSON.stringify(saved.repositoryAssignments)
-      const submittedAssignments = JSON.stringify(
-        submitted.repositoryAssignments,
-      )
+      const nextBaseline = repositoryDraftFingerprint(saved)
+      const submittedAssignments = repositoryDraftFingerprint(submitted)
       setDraft((current) => {
         if (
           !current ||
-          JSON.stringify(current.repositoryAssignments) === submittedAssignments
+          repositoryDraftFingerprint(current) === submittedAssignments
         ) {
           return saved
         }
@@ -191,6 +198,16 @@ export function PRLifecycleRepositoryAssignmentsPage({
           : "Repository assignments could not be saved.",
       ),
   })
+  const resolveRepositoryMutation = useMutation({
+    mutationFn: (repositoryURL: string) =>
+      resolveDevelopmentRepository(repositoryURL),
+    onError: (failure) =>
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "Repository could not be verified.",
+      ),
+  })
 
   const shouldBlockNavigation = useCallback(
     ({
@@ -201,8 +218,8 @@ export function PRLifecycleRepositoryAssignmentsPage({
       next: { pathname: string }
     }) =>
       dirty &&
-      current.pathname === "/pull-requests/repository-assignments" &&
-      next.pathname !== "/pull-requests/repository-assignments",
+      current.pathname === "/development/repositories" &&
+      next.pathname !== "/development/repositories",
     [dirty],
   )
   const blocker = useBlocker({
@@ -226,19 +243,30 @@ export function PRLifecycleRepositoryAssignmentsPage({
       return next
     })
 
-  const addAssignment = (event: FormEvent) => {
+  const addAssignment = async (event: FormEvent) => {
     event.preventDefault()
-    const repository = newRepository
     if (
-      !repository ||
+      !newRepository ||
       newRepositoryIssue ||
       !draft?.workflowConfigurations[newConfigurationID]
     ) {
       return
     }
-    updateAssignments(
-      (assignments) => void (assignments[repository] = newConfigurationID),
-    )
+    const verified = await resolveRepositoryMutation.mutateAsync(newRepository)
+    if (draft.repositories[verified.identity]) {
+      setError(`Repository is already configured as ${verified.name}.`)
+      return
+    }
+    setDraft((current) => {
+      if (!current) return current
+      const next = structuredClone(current)
+      next.repositories[verified.identity] = {
+        name: verified.name,
+        defaultBranch: verified.default_branch,
+      }
+      next.repositoryAssignments[verified.identity] = newConfigurationID
+      return next
+    })
     setNewRepository("")
   }
 
@@ -258,7 +286,7 @@ export function PRLifecycleRepositoryAssignmentsPage({
   const discardChanges = async () => {
     const saved = query.data ? structuredClone(query.data) : null
     if (saved) {
-      const nextBaseline = JSON.stringify(saved.repositoryAssignments)
+      const nextBaseline = repositoryDraftFingerprint(saved)
       setDraft(saved)
       setBaseline(nextBaseline)
       queryClient.setQueryData<CachedRepositoryAssignmentDraft>(
@@ -296,7 +324,7 @@ export function PRLifecycleRepositoryAssignmentsPage({
         title="Repository assignments"
         titleExtra={
           <Badge className="hidden sm:inline-flex" variant="outline">
-            PR lifecycle
+            Development
           </Badge>
         }
       >
@@ -364,8 +392,8 @@ export function PRLifecycleRepositoryAssignmentsPage({
                 onSubmit={addAssignment}
               >
                 <Input
-                  aria-label="Repository identity"
-                  placeholder="https://github.com|repository-id"
+                  aria-label="Repository URL"
+                  placeholder="https://github.com/owner/repository"
                   value={newRepository}
                   onChange={(event) => setNewRepository(event.target.value)}
                 />
@@ -390,7 +418,8 @@ export function PRLifecycleRepositoryAssignmentsPage({
                   disabled={
                     !newRepository ||
                     Boolean(newRepositoryIssue) ||
-                    !draft.workflowConfigurations[newConfigurationID]
+                    !draft.workflowConfigurations[newConfigurationID] ||
+                    resolveRepositoryMutation.isPending
                   }
                 >
                   <IconPlus /> Add assignment
@@ -419,8 +448,13 @@ export function PRLifecycleRepositoryAssignmentsPage({
                         className="grid min-w-0 gap-2 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,18rem)_auto] sm:items-center"
                         key={repository}
                       >
-                        <span className="min-w-0 font-mono text-xs break-all">
-                          {repository}
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-medium">
+                            {draft.repositories[repository]?.name ?? repository}
+                          </span>
+                          <span className="text-muted-foreground block font-mono text-xs break-all">
+                            {repository}
+                          </span>
                         </span>
                         <Select
                           value={configurationID}

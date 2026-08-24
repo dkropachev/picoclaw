@@ -20,7 +20,9 @@ const smokeRoutes = [
   "/accounts",
   "/events",
   "/event-sources",
-  "/pull-requests",
+  "/development",
+  "/development/new",
+  "/notifications",
   "/repository-reviews",
   "/repository-reviews/repositories",
   "/repository-reviews/profiles",
@@ -306,6 +308,9 @@ const eventResponse = {
   attributes: {
     body_authenticated: "true",
     signature_algorithm: "hmac-sha256",
+    repository_full_name: "octo/repo",
+    issue_number: "42",
+    issue_url: "https://github.com/octo/repo/issues/42",
   },
   payload_bytes: 84,
   routing: {
@@ -985,11 +990,15 @@ const channelCatalogResponse = {
   ],
 }
 
-const prWorkspaceID = `prw_${"1".repeat(32)}`
-const prWorkspaceCharterID = `pcr_${"2".repeat(32)}`
-const prWorkspaceAggregate = {
+const developmentWorkspaceID = `devw_${"1".repeat(32)}`
+const developmentWorkspaceCharterID = `pcr_${"2".repeat(32)}`
+const developmentWorkspaceAggregate = {
   workspace: {
-    id: prWorkspaceID,
+    id: developmentWorkspaceID,
+    intent: "pickup_pr",
+    source_kind: "pull_request",
+    source_id: "200",
+    source_number: 42,
     provider: "github",
     provider_origin: "https://github.com",
     repository_id: "100",
@@ -998,13 +1007,18 @@ const prWorkspaceAggregate = {
     pull_number: 42,
     phase: "completion_audit",
     execution_state: "waiting_user",
-    active_charter_id: prWorkspaceCharterID,
+    active_charter_id: developmentWorkspaceCharterID,
     provider_head_sha: "b".repeat(40),
     version: 4,
     created_at: "2026-08-13T10:00:00Z",
     updated_at: "2026-08-13T10:05:00Z",
   },
   provider_snapshot: {
+    intent: "pickup_pr",
+    source_kind: "pull_request",
+    source_id: "200",
+    source_number: 42,
+    source_url: "https://github.com/octo/repo/pull/42",
     provider: "github",
     provider_origin: "https://github.com",
     repository_id: "100",
@@ -1031,7 +1045,7 @@ const prWorkspaceAggregate = {
   },
   charters: [
     {
-      id: prWorkspaceCharterID,
+      id: developmentWorkspaceCharterID,
       revision: 1,
       type: "fix",
       goal: "Prevent lost updates.",
@@ -1051,7 +1065,7 @@ const prWorkspaceAggregate = {
       id: `psr_${"3".repeat(32)}`,
       stage: "review",
       state: "succeeded",
-      charter_id: prWorkspaceCharterID,
+      charter_id: developmentWorkspaceCharterID,
       head_sha: "b".repeat(40),
       attempt: 1,
       summary: "Review completed after distinct coverage challenges.",
@@ -1062,7 +1076,7 @@ const prWorkspaceAggregate = {
       id: `psr_${"6".repeat(32)}`,
       stage: "implementation",
       state: "succeeded",
-      charter_id: prWorkspaceCharterID,
+      charter_id: developmentWorkspaceCharterID,
       head_sha: "b".repeat(40),
       attempt: 1,
       summary: "Implemented the confirmed charter.",
@@ -1073,7 +1087,7 @@ const prWorkspaceAggregate = {
       id: `psr_${"4".repeat(32)}`,
       stage: "completion_audit",
       state: "succeeded",
-      charter_id: prWorkspaceCharterID,
+      charter_id: developmentWorkspaceCharterID,
       head_sha: "b".repeat(40),
       attempt: 1,
       summary: "Implementation is complete within the charter.",
@@ -1147,17 +1161,52 @@ const prWorkspaceAggregate = {
   activity: [],
 }
 
+const developmentNotificationID = `dnt_${"7".repeat(32)}`
+const developmentNotification = {
+  id: developmentNotificationID,
+  source_key: `${developmentWorkspaceID}:publication_approval:gate-1`,
+  generation: 1,
+  workspace_id: developmentWorkspaceID,
+  repository: "octo/repo",
+  intent: "pickup_pr",
+  source_kind: "pull_request",
+  phase: "publication",
+  reason: "publication_approval",
+  priority: "high",
+  status: "open",
+  read: false,
+  title: "Publication approval needed",
+  summary: "Review the exact branch publication before it is pushed.",
+  target: { panel: "publication", entity_id: "gate-1" },
+  version: 1,
+  created_at: "2026-08-24T10:00:00Z",
+  updated_at: "2026-08-24T10:05:00Z",
+}
+
+const notificationViews = {
+  version: 1,
+  views: [],
+}
+
 const prLifecycleWorkflowConfigurations = {
   "workflow-configurations": {
     default: {
       name: "Default",
       bindings: [],
       "deferred-issues": { mode: "ask" },
+      "scope-disposition": {
+        default: { mode: "strict", prompt: "" },
+        "by-type": {},
+      },
     },
     editable: {
       name: "Editable",
       bindings: [],
       "deferred-issues": { mode: "ask" },
+      "scope-disposition": {
+        default: { mode: "relaxed", prompt: "Keep changes relevant." },
+        "by-type": {},
+      },
     },
   },
   "default-workflow-configuration": "default",
@@ -1220,6 +1269,12 @@ const prLifecycleWorkflowConfigurations = {
 }
 
 const prLifecycleRepositoryAssignments = {
+  repositories: {
+    "https://github.com|100": {
+      name: "octo/repo",
+      "default-branch": "main",
+    },
+  },
   "workflow-configurations": {
     default: {
       name: "Default",
@@ -2916,6 +2971,13 @@ async function mockLauncherApis(
               },
               201,
             )
+          case "/api/development-workspaces/repositories/resolve":
+            return json(route, {
+              identity: "https://github.com|200",
+              name: "other/repo",
+              default_branch: "main",
+              can_implement: true,
+            })
           default:
             return json(route, { status: "ok" })
         }
@@ -3044,9 +3106,27 @@ async function mockLauncherApis(
           return json(route, gitWorkspaceResponse)
         case "/api/agents":
           return json(route, currentAgentsResponse())
-        case "/api/pr-workspaces":
+        case "/api/development-workspaces":
           return json(route, {
-            workspaces: [prWorkspaceAggregate.workspace],
+            workspaces: [developmentWorkspaceAggregate.workspace],
+          })
+        case "/api/development-workspaces/repositories":
+          return json(route, {
+            repositories: [
+              {
+                identity: "https://github.com|100",
+                name: "octo/repo",
+                default_branch: "main",
+                can_implement: true,
+              },
+            ],
+          })
+        case "/api/development-workspaces/repositories/resolve":
+          return json(route, {
+            identity: "https://github.com|200",
+            name: "other/repo",
+            default_branch: "main",
+            can_implement: true,
           })
         case "/api/repository-reviews":
           return json(route, { repositories: [] })
@@ -3067,12 +3147,39 @@ async function mockLauncherApis(
             max_files_per_language: 20,
             max_candidate_models: 8,
           })
-        case `/api/pr-workspaces/${prWorkspaceID}`:
-          return json(route, prWorkspaceAggregate)
-        case "/api/pr-lifecycle/workflow-configurations":
+        case `/api/development-workspaces/${developmentWorkspaceID}`:
+          return json(route, developmentWorkspaceAggregate)
+        case `/api/development-workspaces/${developmentWorkspaceID}/conversation/messages`:
+          return json(route, { revision: 0, messages: [] })
+        case "/api/development/workflow-configurations":
           return json(route, prLifecycleWorkflowConfigurations)
-        case "/api/pr-lifecycle/repository-assignments":
+        case "/api/development/repositories":
           return json(route, prLifecycleRepositoryAssignments)
+        case "/api/notifications":
+          return json(route, {
+            notifications: [developmentNotification],
+            counts: { open: 1, unread: 1, snoozed: 0 },
+          })
+        case `/api/notifications/${developmentNotificationID}`:
+          return json(route, developmentNotification)
+        case `/api/notifications/${developmentNotificationID}/neighbors`:
+          return json(route, {})
+        case "/api/notification-views":
+          return json(route, notificationViews)
+        case "/api/notification-settings":
+          return json(route, {
+            include_repository_in_push: false,
+            vapid_public_key: "test-public-key",
+            version: 1,
+          })
+        case "/api/push-subscriptions":
+          return json(route, { devices: [] })
+        case "/api/notifications/events/stream":
+          return route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body: "",
+          })
         case "/api/events":
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
@@ -3572,7 +3679,7 @@ async function gotoMockedRoute(
   await mockLauncherApis(page, options)
   await page.goto(routePath)
   await expect(page.getByRole("banner")).toBeVisible()
-  await expect(page.locator("main")).toBeVisible()
+  await expect(page.locator("#main-content")).toBeVisible()
 }
 
 for (const routePath of smokeRoutes) {
@@ -3590,6 +3697,82 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("development intake stays exclusive and preserves an issue event prefill", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const issueURL = "https://github.com/octo/repo/issues/42"
+  await gotoMockedRoute(
+    page,
+    `/development/new?${new URLSearchParams({ issue: issueURL }).toString()}`,
+  )
+
+  await expect(
+    page.getByRole("button", { name: /^Implement feature/ }),
+  ).toHaveAttribute("aria-pressed", "true")
+  await expect(page.getByLabel("GitHub issue URL")).toHaveValue(issueURL)
+  await expect(page.getByLabel("GitHub pull request URL")).toHaveCount(0)
+  await expect(page.getByLabel("Feature brief")).toHaveCount(0)
+
+  await page.getByRole("button", { name: /^Pick up PR/ }).click()
+  await expect(page.getByLabel("GitHub pull request URL")).toBeVisible()
+  await expect(page.getByLabel("GitHub issue URL")).toHaveCount(0)
+  await expect(page.getByLabel("Feature brief")).toHaveCount(0)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("development portfolio opens a durable workspace with inspection tabs", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/development")
+
+  await page
+    .getByRole("button", { name: /Pull request #42.*octo\/repo/ })
+    .click()
+  await expect(page).toHaveURL(
+    new RegExp(`/development/${developmentWorkspaceID}\\?tab=overview$`),
+  )
+  await expect(page.getByRole("button", { name: "Overview" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  )
+  await expect(page.getByRole("button", { name: "Changes" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Files" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Activity" })).toBeVisible()
+  await expect(page.getByText("Tests", { exact: true })).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("notification inbox opens the exact development action target", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/notifications")
+
+  const item = page.getByRole("button", {
+    name: "Open Publication approval needed",
+  })
+  await expect(item).toBeVisible()
+  await item.click()
+  await expect(
+    page.getByRole("button", { name: "Open required action" }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Open required action" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/development/${developmentWorkspaceID}\\?tab=overview&panel=publication&entity=gate-1$`,
+    ),
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
 
 test("model review probes compare models without producing findings", async ({
   page,
@@ -3707,9 +3890,11 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   page,
 }) => {
   test.setTimeout(60_000)
-  await gotoMockedRoute(page, "/pull-requests/workflow-configurations")
+  await gotoMockedRoute(page, "/development/workflow-configurations")
 
-  await expect(page).toHaveURL(/\/pull-requests\/workflow-configurations$/)
+  await expect(page).toHaveURL(
+    /\/development\/workflow-configurations\?flow=review$/,
+  )
   await expect(
     page.getByRole("heading", { name: "Workflow configurations" }),
   ).toBeVisible()
@@ -3717,7 +3902,7 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
     .getByRole("button", { name: "Edit Default Workflow configuration" })
     .click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/default\?flow=review$/,
+    /\/development\/workflow-configurations\?config=default&flow=review$/,
   )
   await expect(
     page.getByRole("textbox", { name: "Configuration name" }),
@@ -3737,7 +3922,7 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
 
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/default\?flow=review&gate=pr\.charter\.confirm$/,
+    /\/development\/workflow-configurations\?config=default&flow=review&gate=pr\.charter\.confirm$/,
   )
   const lockedDialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
@@ -3752,17 +3937,19 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   await page
     .getByRole("button", { name: "Back to Workflow configurations" })
     .click()
-  await expect(page).toHaveURL(/\/pull-requests\/workflow-configurations$/)
+  await expect(page).toHaveURL(
+    /\/development\/workflow-configurations\?flow=review$/,
+  )
 
   await page
     .getByRole("button", { name: "Edit Editable Workflow configuration" })
     .click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
+    /\/development\/workflow-configurations\?config=editable&flow=review$/,
   )
   await page.getByRole("button", { name: "Approve purpose and scope" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/editable\?flow=review&gate=pr\.charter\.confirm$/,
+    /\/development\/workflow-configurations\?config=editable&flow=review&gate=pr\.charter\.confirm$/,
   )
   const dialog = page.getByRole("dialog", {
     name: "Approve purpose and scope",
@@ -3789,14 +3976,14 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   await page.keyboard.press("Escape")
   await dialog.getByRole("button", { name: "Done editing" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
+    /\/development\/workflow-configurations\?config=editable&flow=review$/,
   )
 
   await page
     .getByRole("button", { name: "Decide ambiguous finding scope" })
     .click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/editable\?flow=review&gate=pr\.finding\.classify$/,
+    /\/development\/workflow-configurations\?config=editable&flow=review&gate=pr\.finding\.classify$/,
   )
   const sourceDialog = page.getByRole("dialog", {
     name: "Decide ambiguous finding scope",
@@ -3854,7 +4041,7 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   await expect(sourceDialog.getByText("approve", { exact: true })).toBeVisible()
   await sourceDialog.getByRole("button", { name: "Done editing" }).click()
   await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/editable\?flow=review$/,
+    /\/development\/workflow-configurations\?config=editable&flow=review$/,
   )
   await expectNoSeriousA11yViolations(page)
   await expect(
@@ -3864,45 +4051,22 @@ test("Workflow configurations use canonical pages, tabs, and modal URLs", async 
   if ((page.viewportSize()?.width ?? 1280) < 640) {
     await page.getByRole("button", { name: "Toggle Sidebar" }).click()
   }
-  await page.getByRole("link", { name: "Lifecycle settings" }).click()
-  await expect(page).toHaveURL(/\/pull-requests\/settings\?tab=nudging$/)
+  await page.getByRole("link", { name: "Settings" }).click()
+  await expect(page).toHaveURL(/\/development\/settings\?tab=nudging$/)
   await page.getByRole("tab", { name: "Scope grades" }).click()
-  await expect(page).toHaveURL(/\/pull-requests\/settings\?tab=scope$/)
+  await expect(page).toHaveURL(/\/development\/settings\?tab=scope$/)
   await expect(page.getByRole("tab", { name: "Deferred issues" })).toHaveCount(
     0,
   )
   await expectNoSeriousA11yViolations(page)
 })
 
-test("Workflow configuration discard owns the modal focus trap", async ({
-  page,
-}) => {
-  await gotoMockedRoute(
-    page,
-    "/pull-requests/workflow-configurations/editable?flow=review&gate=pr.finding.classify&dialog=discard",
-  )
-
-  const discard = page.getByRole("alertdialog", {
-    name: "Discard Workflow configuration changes?",
-  })
-  await expect(discard).toBeVisible()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
-
-  await discard.getByRole("button", { name: "Keep editing" }).click()
-  await expect(page).toHaveURL(
-    /\/pull-requests\/workflow-configurations\/editable\?flow=review&gate=pr\.finding\.classify$/,
-  )
-  await expect(
-    page.getByRole("dialog", { name: "Decide ambiguous finding scope" }),
-  ).toBeVisible()
-})
-
 test("Repository assignments have a separate canonical UI and URL", async ({
   page,
 }) => {
-  await gotoMockedRoute(page, "/pull-requests/repository-assignments")
+  await gotoMockedRoute(page, "/development/repositories")
 
-  await expect(page).toHaveURL(/\/pull-requests\/repository-assignments$/)
+  await expect(page).toHaveURL(/\/development\/repositories$/)
   await expect(
     page.getByRole("heading", { name: "Repository assignments" }),
   ).toBeVisible()
@@ -3920,15 +4084,15 @@ test("Repository assignments have a separate canonical UI and URL", async ({
   ).toHaveCount(0)
 
   await page
-    .getByRole("textbox", { name: "Repository identity" })
-    .fill("https://github.com|100")
+    .getByRole("textbox", { name: "Repository URL" })
+    .fill("https://github.com/other/repo")
   await page.getByRole("combobox", { name: "Workflow configuration" }).click()
   await page.getByRole("option", { name: "Editable" }).click()
   await page.getByRole("button", { name: "Add assignment" }).click()
-  await expect(page.getByText("https://github.com|100")).toBeVisible()
+  await expect(page.getByText("other/repo")).toBeVisible()
   await expect(
     page.getByRole("combobox", {
-      name: "Workflow configuration for https://github.com|100",
+      name: "Workflow configuration for https://github.com|200",
     }),
   ).toHaveText("Editable")
   await expect(
@@ -4177,6 +4341,12 @@ test("events payload stays opt-in and replay remains deliberate", async ({
   await expect(
     page.getByRole("button", { name: /issues\.opened.*github\/triage/ }),
   ).toBeVisible()
+  await expect(
+    page.getByRole("link", { name: "Implement feature" }),
+  ).toHaveAttribute(
+    "href",
+    "/development/new?issue=https%3A%2F%2Fgithub.com%2Focto%2Frepo%2Fissues%2F42",
+  )
   await expect(page.getByRole("button", { name: "Show payload" })).toBeVisible()
   expect(payloadRequests).toBe(0)
 
@@ -5738,7 +5908,7 @@ test("workflow capability catalog is lazy, searchable, and available across work
 
   await page.getByRole("button", { name: "Operate" }).click()
   await expect(capabilitiesButton).toBeVisible()
-  await page.getByRole("button", { name: "Develop" }).click()
+  await page.getByRole("button", { name: "Develop", exact: true }).click()
   await page
     .getByPlaceholder("Describe the workflow outcome")
     .fill("Triage support tickets")
@@ -6204,7 +6374,7 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await expect(page.getByText("retry summary").first()).toBeVisible()
   await expect(page.getByText('"result": "retry event"')).toBeVisible()
   await expect(page.getByText('"streamed": "retry stream"')).toBeVisible()
-  await page.getByRole("button", { name: "Develop" }).click()
+  await page.getByRole("button", { name: "Develop", exact: true }).click()
 
   await expect(
     page.getByText("Describe the workflow outcome before starting."),
@@ -6307,7 +6477,7 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     page.getByText('"streamed": "draft stream"').first(),
   ).toBeVisible()
 
-  await page.getByRole("button", { name: "Develop" }).click()
+  await page.getByRole("button", { name: "Develop", exact: true }).click()
   await page.getByRole("button", { name: "Publish" }).click()
 
   await expect(page.getByText("Run workflow").first()).toBeVisible()

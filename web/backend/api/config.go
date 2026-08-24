@@ -81,7 +81,7 @@ func publicConfigProjection(cfg *config.Config) (map[string]json.RawMessage, err
 		return nil, err
 	}
 	// PR lifecycle policy has its own strict, revision-fenced API.
-	delete(projection, "pr_lifecycle")
+	delete(projection, "development")
 	return projection, nil
 }
 
@@ -106,7 +106,7 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, removed := raw["reviews"]; removed {
-		http.Error(w, "reviews config was removed; use pr_lifecycle", http.StatusBadRequest)
+		http.Error(w, "reviews config was removed; use development", http.StatusBadRequest)
 		return
 	}
 	if err = normalizeChannelArrayFields(raw); err != nil {
@@ -136,6 +136,10 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load existing config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if _, scoped := raw["development"]; scoped && !reflect.DeepEqual(cfg.PRLifecycle, existingCfg.PRLifecycle) {
+		http.Error(w, "development config uses its dedicated scoped API", http.StatusBadRequest)
 		return
 	}
 	cfg.PRLifecycle = existingCfg.PRLifecycle
@@ -216,7 +220,11 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, removed := patch["reviews"]; removed {
-		http.Error(w, "reviews config was removed; use pr_lifecycle", http.StatusBadRequest)
+		http.Error(w, "reviews config was removed; use development", http.StatusBadRequest)
+		return
+	}
+	if _, scoped := patch["development"]; scoped {
+		http.Error(w, "development config uses its dedicated scoped API", http.StatusBadRequest)
 		return
 	}
 	// Load existing config and marshal to a map for merging
@@ -436,7 +444,7 @@ func validateConfig(cfg *config.Config) []string {
 		errs = append(errs, fmt.Sprintf("events.ingress.channels: %v", err))
 	}
 	if err := cfg.PRLifecycle.Validate(); err != nil {
-		errs = append(errs, fmt.Sprintf("pr_lifecycle: %v", err))
+		errs = append(errs, fmt.Sprintf("development: %v", err))
 	}
 
 	// Gateway port range

@@ -330,7 +330,7 @@ func renderSVGNode(output *bytes.Buffer, flowID string, node Node, point svgPoin
 	}
 
 	if node.Kind == NodeGate && node.Editable {
-		href := "/pull-requests/workflow-configurations/default?flow=" + url.QueryEscape(
+		href := "/development/workflow-configurations?config=default&flow=" + url.QueryEscape(
 			flowID,
 		) + "&gate=" + url.QueryEscape(
 			node.DecisionPoint,

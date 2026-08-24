@@ -7,18 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
 	"github.com/sipeed/picoclaw/pkg/reviews"
 )
 
 type prWorkspaceGitHubResolver struct {
-	provider       *reviews.GitHubProvider
-	canReview      bool
-	canCreateIssue bool
+	provider             *reviews.GitHubProvider
+	canReview            bool
+	canCreateIssue       bool
+	canCreatePullRequest bool
+	repositories         map[string]config.PRLifecycleRepositoryDescriptor
 }
 
 type prWorkspaceGitHubUser struct {
@@ -35,13 +40,29 @@ type prWorkspaceGitHubPermissions struct {
 }
 
 type prWorkspaceGitHubRepo struct {
-	ID          json.RawMessage               `json:"id"`
-	Name        string                        `json:"name"`
-	FullName    string                        `json:"full_name"`
-	HTMLURL     string                        `json:"html_url"`
-	HasIssues   *bool                         `json:"has_issues"`
-	Owner       *prWorkspaceGitHubUser        `json:"owner"`
-	Permissions *prWorkspaceGitHubPermissions `json:"permissions"`
+	ID            json.RawMessage               `json:"id"`
+	Name          string                        `json:"name"`
+	FullName      string                        `json:"full_name"`
+	HTMLURL       string                        `json:"html_url"`
+	HasIssues     *bool                         `json:"has_issues"`
+	Owner         *prWorkspaceGitHubUser        `json:"owner"`
+	Permissions   *prWorkspaceGitHubPermissions `json:"permissions"`
+	DefaultBranch string                        `json:"default_branch"`
+}
+
+type prWorkspaceGitHubIssue struct {
+	ID        json.RawMessage        `json:"id"`
+	Number    int64                  `json:"number"`
+	Title     string                 `json:"title"`
+	Body      string                 `json:"body"`
+	State     string                 `json:"state"`
+	HTMLURL   string                 `json:"html_url"`
+	UpdatedAt string                 `json:"updated_at"`
+	User      *prWorkspaceGitHubUser `json:"user"`
+}
+
+type prWorkspaceGitHubCommit struct {
+	SHA string `json:"sha"`
 }
 
 type prWorkspaceGitHubBranch struct {
@@ -51,6 +72,209 @@ type prWorkspaceGitHubBranch struct {
 	User *prWorkspaceGitHubUser `json:"user"`
 }
 
+func (resolver *prWorkspaceGitHubResolver) ResolveIssue(
+	ctx context.Context,
+	request prworkspace.IssueResolveRequest,
+) (prworkspace.ProviderSnapshot, error) {
+	if resolver == nil || resolver.provider == nil {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub issue provider is unavailable")
+	}
+	origin, repository, issueNumber, err := normalizeGitHubIssueURL(request.IssueURL)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	raw, err := resolver.provider.ReadWorkspaceIssueJSON(ctx, repository, issueNumber)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	var issue prWorkspaceGitHubIssue
+	if err = json.Unmarshal(raw, &issue); err != nil || issue.User == nil ||
+		issue.Number != issueNumber || !sameGitHubIssueURL(issue.HTMLURL, origin, repository, issueNumber) ||
+		!strings.EqualFold(strings.TrimSpace(issue.State), "open") {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub issue identity is invalid")
+	}
+	issueID := githubPositiveNumericID(issue.ID)
+	authorID := githubPositiveNumericID(issue.User.ID)
+	if issueID == "" || authorID == "" || strings.TrimSpace(issue.User.Login) == "" {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub issue authority is incomplete")
+	}
+	comments, err := resolver.provider.ReadWorkspaceIssueCommentsJSON(ctx, repository, issueNumber)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	body := issue.Body
+	if len(comments) > 0 && string(comments) != "[]" {
+		body = strings.TrimSpace(body) + "\n\nProvider issue comments (untrusted evidence):\n" + string(comments)
+	}
+	body = boundedGitHubIssueEvidence(body)
+	return resolver.resolveFeatureRepository(ctx, origin, repository, issueID, issueNumber,
+		request.IssueURL, issue.Title, body, authorID, issue.User.Login, issue.UpdatedAt)
+}
+
+func boundedGitHubIssueEvidence(value string) string {
+	const limit = 480 << 10
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return strings.TrimSpace(value) + "\n[truncated]"
+}
+
+func (resolver *prWorkspaceGitHubResolver) ResolveRepository(
+	ctx context.Context,
+	request prworkspace.RepositoryResolveRequest,
+) (prworkspace.ProviderSnapshot, error) {
+	if resolver == nil || resolver.provider == nil || resolver.repositories == nil {
+		return prworkspace.ProviderSnapshot{}, errors.New("configured repository provider is unavailable")
+	}
+	identity := strings.TrimSpace(request.RepositoryIdentity)
+	descriptor, ok := resolver.repositories[identity]
+	repository := descriptor.Name
+	if !ok || repository == "" {
+		return prworkspace.ProviderSnapshot{}, prworkspace.ErrInvalid
+	}
+	origin, repositoryID, ok := strings.Cut(identity, "|")
+	if !ok || origin == "" || repositoryID == "" {
+		return prworkspace.ProviderSnapshot{}, prworkspace.ErrInvalid
+	}
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"development-brief", origin, repositoryID, request.Brief,
+	}, "\x00")))
+	sourceID := "sha256:" + hex.EncodeToString(digest[:])
+	snapshot, err := resolver.resolveFeatureRepository(ctx, origin, repository, sourceID, 0, "",
+		"Feature brief", request.Brief, "", "", sourceID)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	if snapshot.ProviderOrigin != origin || snapshot.RepositoryID != repositoryID {
+		return prworkspace.ProviderSnapshot{}, errors.New("configured repository identity changed")
+	}
+	return snapshot, nil
+}
+
+func (resolver *prWorkspaceGitHubResolver) ListConfiguredRepositories(
+	_ context.Context,
+) ([]prworkspace.ConfiguredRepository, error) {
+	if resolver == nil || resolver.repositories == nil {
+		return nil, errors.New("configured repositories are unavailable")
+	}
+	identities := make([]string, 0, len(resolver.repositories))
+	for identity := range resolver.repositories {
+		identities = append(identities, identity)
+	}
+	sort.Strings(identities)
+	result := make([]prworkspace.ConfiguredRepository, 0, len(identities))
+	for _, identity := range identities {
+		descriptor := resolver.repositories[identity]
+		result = append(result, prworkspace.ConfiguredRepository{
+			Identity: identity, Name: descriptor.Name, DefaultBranch: descriptor.DefaultBranch,
+			CanImplement: resolver.canCreatePullRequest,
+		})
+	}
+	return result, nil
+}
+
+func (resolver *prWorkspaceGitHubResolver) VerifyRepository(
+	ctx context.Context, raw string,
+) (prworkspace.ConfiguredRepository, error) {
+	parsed, err := url.ParseRequestURI(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return prworkspace.ConfiguredRepository{}, prworkspace.ErrInvalid
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return prworkspace.ConfiguredRepository{}, prworkspace.ErrInvalid
+	}
+	repository := parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
+	origin := parsed.Scheme + "://" + strings.ToLower(parsed.Host)
+	resolved, err := resolver.resolveRepository(ctx, origin, repository)
+	if err != nil || !githubRepositoryCanPush(resolved) || strings.TrimSpace(resolved.DefaultBranch) == "" {
+		return prworkspace.ConfiguredRepository{}, errors.New("GitHub repository is not writable")
+	}
+	id := githubPositiveNumericID(resolved.ID)
+	if id == "" {
+		return prworkspace.ConfiguredRepository{}, errors.New("GitHub repository identity is invalid")
+	}
+	return prworkspace.ConfiguredRepository{
+		Identity: origin + "|" + id, Name: resolved.FullName,
+		DefaultBranch: resolved.DefaultBranch, CanImplement: resolver.canCreatePullRequest,
+	}, nil
+}
+
+func (resolver *prWorkspaceGitHubResolver) resolveFeatureRepository(
+	ctx context.Context,
+	origin, repository, sourceID string,
+	sourceNumber int64,
+	sourceURL, title, body, authorID, authorLogin, sourceRevision string,
+) (prworkspace.ProviderSnapshot, error) {
+	repo, err := resolver.resolveRepository(ctx, origin, repository)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	repositoryID := githubPositiveNumericID(repo.ID)
+	defaultBranch := strings.TrimSpace(repo.DefaultBranch)
+	if repositoryID == "" || defaultBranch == "" || !githubRepositoryCanPush(repo) {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub repository is not writable")
+	}
+	commitRaw, err := resolver.provider.ListWorkspaceCommitsJSON(ctx, repository, defaultBranch)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	commitSHA, err := decodeSingleGitHubCommitSHA(commitRaw)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	viewerRaw, err := resolver.provider.ReadWorkspaceViewerJSON(ctx)
+	if err != nil {
+		return prworkspace.ProviderSnapshot{}, err
+	}
+	var viewer prWorkspaceGitHubUser
+	if err = json.Unmarshal(viewerRaw, &viewer); err != nil {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub viewer response is invalid")
+	}
+	viewerID := githubPositiveNumericID(viewer.ID)
+	if viewerID == "" || strings.TrimSpace(viewer.Login) == "" {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub viewer authority is incomplete")
+	}
+	if authorID == "" {
+		authorID, authorLogin = viewerID, viewer.Login
+	}
+	revision := sha256.Sum256([]byte(strings.Join([]string{
+		origin, repositoryID, sourceID, sourceRevision, defaultBranch, commitSHA,
+	}, "\x00")))
+	return prworkspace.ProviderSnapshot{
+		SourceID: sourceID, SourceNumber: sourceNumber, SourceURL: sourceURL,
+		Provider: "github", ProviderOrigin: origin, RepositoryID: repositoryID,
+		Repository: repository, Title: strings.TrimSpace(title), Body: body,
+		AuthorID: authorID, AuthorLogin: authorLogin, AuthenticatedUserID: viewerID,
+		BaseRef: defaultBranch, BaseSHA: commitSHA,
+		HeadRepositoryID: repositoryID, HeadRepository: repository,
+		HeadRef: defaultBranch, HeadSHA: commitSHA, State: "open", Owned: true,
+		HeadWritable: true, CanCreateIssue: resolver.canCreateIssue,
+		CanCreatePullRequest: resolver.canCreatePullRequest,
+		ProviderRevision:     "sha256:" + hex.EncodeToString(revision[:]), ObservedAt: time.Now().UTC(),
+	}, nil
+}
+
+func decodeSingleGitHubCommitSHA(raw []byte) (string, error) {
+	var commits []prWorkspaceGitHubCommit
+	if err := json.Unmarshal(raw, &commits); err != nil || len(commits) != 1 {
+		return "", errors.New("GitHub commit response is invalid")
+	}
+	sha := strings.ToLower(strings.TrimSpace(commits[0].SHA))
+	if len(sha) != 40 && len(sha) != 64 {
+		return "", errors.New("GitHub commit identity is invalid")
+	}
+	if _, err := hex.DecodeString(sha); err != nil {
+		return "", errors.New("GitHub commit identity is invalid")
+	}
+	return sha, nil
+}
+
 type prWorkspaceGitHubPull struct {
 	ID                  json.RawMessage          `json:"id"`
 	Number              int64                    `json:"number"`
@@ -58,6 +282,7 @@ type prWorkspaceGitHubPull struct {
 	Body                string                   `json:"body"`
 	State               string                   `json:"state"`
 	Merged              bool                     `json:"merged"`
+	Draft               bool                     `json:"draft"`
 	HTMLURL             string                   `json:"html_url"`
 	User                *prWorkspaceGitHubUser   `json:"user"`
 	Base                *prWorkspaceGitHubBranch `json:"base"`
@@ -143,6 +368,9 @@ func (resolver *prWorkspaceGitHubResolver) ResolvePullRequest(
 	}
 	if state != "open" && state != "closed" && state != "merged" {
 		return prworkspace.ProviderSnapshot{}, errors.New("GitHub pull state is invalid")
+	}
+	if state != "open" || !headWritable {
+		return prworkspace.ProviderSnapshot{}, errors.New("GitHub pull request must be open and writable")
 	}
 	observed := time.Now().UTC()
 	revisionDigest := sha256.Sum256([]byte(strings.Join([]string{
@@ -304,6 +532,36 @@ func normalizePRWorkspaceResolveRequest(request prworkspace.ResolveRequest) (str
 	return parsed.Scheme + "://" + strings.ToLower(parsed.Host), request.Repository, request.PullNumber, nil
 }
 
+func normalizeGitHubIssueURL(raw string) (string, string, int64, error) {
+	parsed, err := url.ParseRequestURI(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", 0, prworkspace.ErrInvalid
+	}
+	segments := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(segments) != 4 || segments[0] == "" || segments[1] == "" || segments[2] != "issues" {
+		return "", "", 0, prworkspace.ErrInvalid
+	}
+	owner, ownerErr := url.PathUnescape(segments[0])
+	repo, repoErr := url.PathUnescape(segments[1])
+	number, numberErr := strconv.ParseInt(segments[3], 10, 64)
+	if ownerErr != nil || repoErr != nil || numberErr != nil || number < 1 ||
+		owner == "" || repo == "" || strings.ContainsAny(owner+repo, "/\\") {
+		return "", "", 0, prworkspace.ErrInvalid
+	}
+	return parsed.Scheme + "://" + strings.ToLower(parsed.Host), owner + "/" + repo, number, nil
+}
+
+func sameGitHubIssueURL(raw, origin, repository string, number int64) bool {
+	parsed, err := url.ParseRequestURI(raw)
+	if err != nil || parsed.Scheme+"://"+strings.ToLower(parsed.Host) != origin {
+		return false
+	}
+	want := "/" + repository + "/issues/" + strconv.FormatInt(number, 10)
+	return strings.EqualFold(strings.TrimSuffix(parsed.Path, "/"), want) &&
+		parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
 func samePRWorkspacePullURL(raw, origin, repository string, number int64) bool {
 	parsed, err := url.ParseRequestURI(raw)
 	if err != nil || parsed.Scheme+"://"+strings.ToLower(parsed.Host) != origin {
@@ -357,6 +615,10 @@ func githubScalarID(raw json.RawMessage) string {
 }
 
 var (
-	_ prworkspace.ProviderResolver     = (*prWorkspaceGitHubResolver)(nil)
-	_ prworkspace.ReviewEvidenceLoader = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.ProviderResolver             = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.IssueProviderResolver        = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.RepositoryProviderResolver   = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.ConfiguredRepositoryLister   = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.ConfiguredRepositoryVerifier = (*prWorkspaceGitHubResolver)(nil)
+	_ prworkspace.ReviewEvidenceLoader         = (*prWorkspaceGitHubResolver)(nil)
 )

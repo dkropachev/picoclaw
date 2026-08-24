@@ -7,8 +7,9 @@ Task-oriented guides for setup, configuration, and common PicoClaw workflows.
 - [Configuration Guide](configuration.md): environment variables, workspace layout, routing, and sandbox settings.
 - [Session Guide](session-guide.md): how session scope affects memory sharing, summaries, and isolation.
 - [Routing Guide](routing-guide.md): agent dispatch, session overrides, and light-model routing.
-- [Pull Request Workspaces](pull-request-workspaces.md): review, implement,
-  validate, gate, and publish one pull request from a shared workspace.
+- [Development Workspaces](development-workspaces.md): implement an issue or
+  brief into a draft PR, pick up an existing PR, inspect code, steer AI, and
+  handle mobile attention notifications.
 - [Repository Bug Finder](repository-bug-finder.md): run incremental,
   multi-model repository review and act on durable findings.
 - [Repository Model Evaluations](repository-model-evaluations.md): build a

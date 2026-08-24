@@ -135,6 +135,7 @@ func setupEventAutomationService(
 		pollNotifications := githubNotificationPollingEnabled(cfg)
 		reviewSubmission := githubReviewSubmissionReady(ctx, agentLoop)
 		reviewProviderRead := githubReviewProviderReadReady(ctx, agentLoop)
+		developmentProviderRead := githubDevelopmentProviderReadReady(ctx, agentLoop)
 		if pollNotifications {
 			if err := validateGitHubNotificationPollingRuntime(
 				ctx,
@@ -144,7 +145,7 @@ func setupEventAutomationService(
 				return nil, err
 			}
 		}
-		if pollNotifications || reviewSubmission || reviewProviderRead {
+		if pollNotifications || reviewSubmission || reviewProviderRead || developmentProviderRead {
 			toolRunner, err := agent.NewWorkflowToolRunner(agentLoop, "")
 			if err != nil {
 				return nil, fmt.Errorf("initialize GitHub event MCP tools: %w", err)
@@ -156,7 +157,7 @@ func setupEventAutomationService(
 				pollNotifications,
 				reviewSubmission,
 			)
-			if reviewProviderRead {
+			if reviewProviderRead || developmentProviderRead {
 				reviewRuntime.provider, err = reviews.NewGitHubProvider(
 					toolRunner,
 					githubMCPArtifactRoot(cfg, agentLoop),
@@ -278,11 +279,13 @@ func newEventAutomationServiceWithRuntime(
 	var reviewEvidence prworkspace.ReviewEvidenceLoader
 	var issuePublisher prworkspace.IssuePublisher
 	issuePublicationReady := githubPRWorkspaceIssuePublicationReady(ctx, reviewRuntime.agentLoop)
+	pullCreationReady := githubDevelopmentPullCreationReady(ctx, reviewRuntime.agentLoop)
 	if reviewRuntime.provider != nil {
 		resolver = &prWorkspaceGitHubResolver{
-			provider:       reviewRuntime.provider,
-			canReview:      reviewRuntime.submitter != nil,
-			canCreateIssue: issuePublicationReady,
+			provider:             reviewRuntime.provider,
+			canReview:            reviewRuntime.submitter != nil,
+			canCreateIssue:       issuePublicationReady,
+			canCreatePullRequest: pullCreationReady,
 		}
 		provider = resolver
 		reviewEvidence = resolver
@@ -297,6 +300,12 @@ func newEventAutomationServiceWithRuntime(
 		}
 	}
 	lifecycle := cfg.PRLifecycle.Effective()
+	if resolver != nil {
+		resolver.repositories = make(map[string]config.PRLifecycleRepositoryDescriptor, len(lifecycle.Repositories))
+		for identity, descriptor := range lifecycle.Repositories {
+			resolver.repositories[identity] = descriptor
+		}
+	}
 	deferredModeForRepository := func(providerOrigin, repositoryID string) prworkspace.DeferredIssueMode {
 		_, workflowConfiguration, _, resolveErr := lifecycle.WorkflowConfigurationForRepository(
 			providerOrigin,
@@ -306,6 +315,25 @@ func newEventAutomationServiceWithRuntime(
 			return prworkspace.DeferredIssuesOff
 		}
 		return prworkspace.DeferredIssueMode(workflowConfiguration.DeferredIssues.Mode)
+	}
+	scopeDispositionForRepository := func(providerOrigin, repositoryID string) prworkspace.ScopeDispositionPolicy {
+		_, configuration, _, resolveErr := lifecycle.WorkflowConfigurationForRepository(providerOrigin, repositoryID)
+		if resolveErr != nil {
+			return prworkspace.DefaultScopeDispositionPolicy()
+		}
+		policy := prworkspace.ScopeDispositionPolicy{
+			Default: prworkspace.ScopeDispositionRule{
+				Mode:   prworkspace.ScopeDispositionMode(configuration.ScopeDisposition.Default.Mode),
+				Prompt: configuration.ScopeDisposition.Default.Prompt,
+			},
+			ByType: make(map[prworkspace.PRType]prworkspace.ScopeDispositionRule),
+		}
+		for kind, rule := range configuration.ScopeDisposition.ByType {
+			policy.ByType[prworkspace.PRType(kind)] = prworkspace.ScopeDispositionRule{
+				Mode: prworkspace.ScopeDispositionMode(rule.Mode), Prompt: rule.Prompt,
+			}
+		}
+		return policy
 	}
 	defaultDeferredMode := prworkspace.DeferredIssueMode(
 		lifecycle.WorkflowConfigurations[lifecycle.DefaultWorkflowConfigurationID].DeferredIssues.Mode,
@@ -339,10 +367,12 @@ func newEventAutomationServiceWithRuntime(
 		Provider:                       provider,
 		ReviewEvidence:                 reviewEvidence,
 		CandidateEvidence:              implementationRuntime,
+		PlanningEvidence:               implementationRuntime,
 		AI:                             isolatedAI,
 		Gates:                          gateEvaluator,
 		DeferredIssueMode:              defaultDeferredMode,
 		DeferredIssueModeForRepository: deferredModeForRepository,
+		ScopeDispositionForRepository:  scopeDispositionForRepository,
 	})
 	if err != nil {
 		return nil, closeSetup(err)
@@ -350,6 +380,7 @@ func newEventAutomationServiceWithRuntime(
 	implementation := prworkspace.ImplementationConfig{MaxCycles: 3}
 	var branchPublisher prworkspace.BranchPublisher
 	if implementationRuntime != nil {
+		implementationRuntime.provider = reviewRuntime.provider
 		implementation.Repair = implementationRuntime
 		implementation.Validation = implementationRuntime
 		branchPublisher = implementationRuntime
@@ -393,6 +424,10 @@ func newEventAutomationServiceWithRuntime(
 		reviewPublisher,
 		branchPublisher,
 	)
+	developmentWorker := &developmentWorkspaceWorker{
+		service: prWorkspaceService, handler: prWorkspaceHandler,
+	}
+	notificationPushWorker := &developmentNotificationPushWorker{service: prWorkspaceService}
 	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
 		Store: store, PRWorkspaces: prWorkspaceHandler,
 	})
@@ -482,6 +517,19 @@ func newEventAutomationServiceWithRuntime(
 			withEventAutomationRuntime(acquireRuntime, publicationWorker.ProcessOne),
 		)
 	}
+	workers.Add(2)
+	go runEventAutomationWorker(
+		workerCtx,
+		&workers,
+		"development-workspaces",
+		withEventAutomationRuntime(acquireRuntime, developmentWorker.ProcessOne),
+	)
+	go runEventAutomationWorker(
+		workerCtx,
+		&workers,
+		"development-notification-push",
+		notificationPushWorker.ProcessOne,
+	)
 	if githubPoller != nil {
 		workers.Add(1)
 		go runGitHubNotificationPollWorker(
@@ -544,6 +592,43 @@ func githubPRWorkspaceIssuePublicationReady(
 	) workflows.WorkflowDependencyReadinessCode {
 		return agentLoop.ResolveWorkflowDependency(ctx, occurrence)
 	})
+}
+
+func githubDevelopmentPullCreationReady(ctx context.Context, agentLoop *agent.AgentLoop) bool {
+	if agentLoop == nil {
+		return false
+	}
+	for _, tool := range []string{
+		reviews.GitHubCreatePullRequestTool,
+		reviews.GitHubListPullRequestsTool,
+	} {
+		if agentLoop.ResolveWorkflowDependency(ctx, workflows.WorkflowDependencyOccurrence{
+			Kind: workflows.WorkflowDependencyKindMCP,
+			Name: reviews.DefaultGitHubMCPServer + "/" + tool,
+		}) != workflows.WorkflowDependencyReadinessReady {
+			return false
+		}
+	}
+	return true
+}
+
+func githubDevelopmentProviderReadReady(ctx context.Context, agentLoop *agent.AgentLoop) bool {
+	if agentLoop == nil {
+		return false
+	}
+	for _, tool := range []string{
+		reviews.GitHubGetMeTool,
+		reviews.GitHubSearchRepositoriesTool,
+		reviews.GitHubListCommitsTool,
+	} {
+		if agentLoop.ResolveWorkflowDependency(ctx, workflows.WorkflowDependencyOccurrence{
+			Kind: workflows.WorkflowDependencyKindMCP,
+			Name: reviews.DefaultGitHubMCPServer + "/" + tool,
+		}) != workflows.WorkflowDependencyReadinessReady {
+			return false
+		}
+	}
+	return true
 }
 
 func githubPRWorkspaceIssuePublicationToolsReady(
@@ -1087,7 +1172,25 @@ func pruneExpiredEvents(
 			return total, err
 		}
 		if count < eventRetentionPruneBatchSize {
-			return total, nil
+			break
+		}
+	}
+	if notificationPruner, ok := pruner.(interface {
+		PruneDevelopmentNotifications(ctx context.Context, cutoff time.Time, limit int) (int64, error)
+	}); ok {
+		cutoff := now().UTC().Add(-90 * 24 * time.Hour)
+		for range eventRetentionMaxBatchesPerCycle {
+			count, pruneErr := notificationPruner.PruneDevelopmentNotifications(
+				ctx,
+				cutoff,
+				eventRetentionPruneBatchSize,
+			)
+			if pruneErr != nil {
+				return total, pruneErr
+			}
+			if count < eventRetentionPruneBatchSize {
+				break
+			}
 		}
 	}
 	return total, nil

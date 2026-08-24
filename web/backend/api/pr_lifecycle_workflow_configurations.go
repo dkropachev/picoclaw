@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	prLifecycleWorkflowConfigurationsPath = "/api/pr-lifecycle/workflow-configurations"
-	prLifecycleRepositoryAssignmentsPath  = "/api/pr-lifecycle/repository-assignments"
+	prLifecycleWorkflowConfigurationsPath = "/api/development/workflow-configurations"
+	prLifecycleRepositoryAssignmentsPath  = "/api/development/repositories"
 	prLifecycleRequestMaxBytes            = config.MaxPRLifecycleConfigBytes + (64 << 10)
 )
 
@@ -70,6 +70,7 @@ type prLifecycleWorkflowConfigurationSummary struct {
 }
 
 type prLifecycleRepositoryAssignmentsResponse struct {
+	Repositories                   map[string]config.PRLifecycleRepositoryDescriptor  `json:"repositories"`
 	RepositoryAssignments          map[string]string                                  `json:"repository-assignments"`
 	WorkflowConfigurations         map[string]prLifecycleWorkflowConfigurationSummary `json:"workflow-configurations"`
 	DefaultWorkflowConfigurationID string                                             `json:"default-workflow-configuration"`
@@ -78,20 +79,21 @@ type prLifecycleRepositoryAssignmentsResponse struct {
 }
 
 type prLifecycleRepositoryAssignmentsPutRequest struct {
-	ExpectedConfigRevision string            `json:"expected-config-revision"`
-	RequestID              string            `json:"request-id"`
-	RepositoryAssignments  map[string]string `json:"repository-assignments"`
+	ExpectedConfigRevision string                                            `json:"expected-config-revision"`
+	RequestID              string                                            `json:"request-id"`
+	RepositoryAssignments  map[string]string                                 `json:"repository-assignments"`
+	Repositories           map[string]config.PRLifecycleRepositoryDescriptor `json:"repositories"`
 }
 
 func (h *Handler) registerPRLifecycleWorkflowConfigurationRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/pr-lifecycle/workflow-configurations", h.handleGetPRLifecycleWorkflowConfigurations)
-	mux.HandleFunc("PUT /api/pr-lifecycle/workflow-configurations", h.handlePutPRLifecycleWorkflowConfigurations)
+	mux.HandleFunc("GET /api/development/workflow-configurations", h.handleGetPRLifecycleWorkflowConfigurations)
+	mux.HandleFunc("PUT /api/development/workflow-configurations", h.handlePutPRLifecycleWorkflowConfigurations)
 	mux.HandleFunc(prLifecycleWorkflowConfigurationsPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Allow", "GET, PUT")
 		writePRWorkspaceAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 	})
-	mux.HandleFunc("GET /api/pr-lifecycle/repository-assignments", h.handleGetPRLifecycleRepositoryAssignments)
-	mux.HandleFunc("PUT /api/pr-lifecycle/repository-assignments", h.handlePutPRLifecycleRepositoryAssignments)
+	mux.HandleFunc("GET /api/development/repositories", h.handleGetPRLifecycleRepositoryAssignments)
+	mux.HandleFunc("PUT /api/development/repositories", h.handlePutPRLifecycleRepositoryAssignments)
 	mux.HandleFunc(prLifecycleRepositoryAssignmentsPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Allow", "GET, PUT")
 		writePRWorkspaceAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -156,6 +158,7 @@ func (h *Handler) handlePutPRLifecycleWorkflowConfigurations(w http.ResponseWrit
 	}
 	current := cfg.PRLifecycle.Effective()
 	candidate := config.PRLifecycleConfig{
+		Repositories:                   current.Repositories,
 		WorkflowConfigurations:         request.WorkflowConfigurations,
 		DefaultWorkflowConfigurationID: request.DefaultWorkflowConfigurationID,
 		RepositoryAssignments:          current.RepositoryAssignments,
@@ -237,6 +240,7 @@ func (h *Handler) handlePutPRLifecycleRepositoryAssignments(w http.ResponseWrite
 	candidate := cfg.PRLifecycle.Effective()
 	current := candidate
 	candidate.RepositoryAssignments = request.RepositoryAssignments
+	candidate.Repositories = request.Repositories
 	if err := validatePRLifecycleWorkflowConfigurations(r.Context(), candidate, cfg); err != nil {
 		writePRWorkspaceAPIError(w, http.StatusUnprocessableEntity, "invalid_repository_assignments")
 		return
@@ -456,6 +460,7 @@ func writePRLifecycleRepositoryAssignments(
 		}
 	}
 	response := prLifecycleRepositoryAssignmentsResponse{
+		Repositories:                   lifecycle.Repositories,
 		RepositoryAssignments:          lifecycle.RepositoryAssignments,
 		WorkflowConfigurations:         summaries,
 		DefaultWorkflowConfigurationID: lifecycle.DefaultWorkflowConfigurationID,

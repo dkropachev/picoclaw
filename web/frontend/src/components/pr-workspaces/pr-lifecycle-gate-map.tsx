@@ -206,7 +206,7 @@ export function PRLifecycleGateMap({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 id={titleID} className="text-sm font-semibold">
-              PR lifecycle gate flow
+              Development gate flow
             </h2>
             {configName ? (
               <span className="bg-muted/50 text-muted-foreground min-w-0 rounded-md border px-2 py-0.5 text-xs [overflow-wrap:anywhere]">
@@ -1879,7 +1879,7 @@ function gateEditorHref(
   decisionPoint: PRLifecycleDecisionPoint,
 ): string | undefined {
   if (!configID) return undefined
-  return `/pull-requests/workflow-configurations/${encodeURIComponent(configID)}?flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
+  return `/development/workflow-configurations?config=${encodeURIComponent(configID)}&flow=${encodeURIComponent(flowID)}&gate=${encodeURIComponent(decisionPoint)}`
 }
 
 function isPRLifecycleFlowID(flowID: string): flowID is PRLifecycleFlowID {

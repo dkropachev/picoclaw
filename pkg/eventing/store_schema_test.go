@@ -5,6 +5,7 @@ package eventing
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -217,7 +218,7 @@ func installCurrentSchemaForTest(t *testing.T, db *sql.DB) {
 
 func setCurrentSchemaVersionForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec(`PRAGMA user_version = 19`)
+	_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 	require.NoError(t, err)
 }
 

@@ -40,7 +40,7 @@ type legacyDiagnosticConfig struct {
 	ModelRouters   ModelRouterList        `json:"model_routers,omitempty"`
 	Gateway        GatewayConfig          `json:"gateway,omitempty"`
 	Events         EventsConfig           `json:"events,omitempty"`
-	PRLifecycle    PRLifecycleConfig      `json:"pr_lifecycle,omitempty"`
+	PRLifecycle    PRLifecycleConfig      `json:"development,omitempty"`
 	Workflows      WorkflowsConfig        `json:"workflows,omitempty"`
 	GitWorkspaces  GitWorkspacesConfig    `json:"git_workspaces,omitempty"`
 	Hooks          HooksConfig            `json:"hooks,omitempty"`

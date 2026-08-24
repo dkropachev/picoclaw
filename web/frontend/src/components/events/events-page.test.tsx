@@ -69,6 +69,8 @@ const eventA: EventView = {
   attributes: {
     repository: "octo/repo",
     repository_full_name: "octo/repo",
+    issue_number: "42",
+    issue_url: "https://github.com/octo/repo/issues/42",
     pull_request_number: "42",
     pull_request_url: "https://github.com/octo/repo/pull/42",
     pull_request_head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -809,6 +811,33 @@ describe("EventsPage", () => {
       "href",
       `/events?view=dispatches&dispatch=${dispatchA.id}`,
     )
+  })
+
+  it("opens GitHub issue events in prefilled feature implementation", async () => {
+    renderEventsPage({ event: eventA.id })
+
+    expect(
+      await screen.findByRole("link", { name: "Implement feature" }),
+    ).toHaveAttribute(
+      "href",
+      "/development/new?issue=https%3A%2F%2Fgithub.com%2Focto%2Frepo%2Fissues%2F42",
+    )
+  })
+
+  it("does not offer implementation for non-issue or unsafe event metadata", async () => {
+    vi.mocked(getEvent).mockResolvedValueOnce({
+      ...eventB,
+      attributes: {
+        ...eventB.attributes,
+        issue_url: "javascript:alert(1)",
+      },
+    })
+    renderEventsPage({ event: eventB.id })
+
+    expect((await screen.findAllByText(eventB.type)).length).toBeGreaterThan(0)
+    expect(
+      screen.queryByRole("link", { name: "Implement feature" }),
+    ).not.toBeInTheDocument()
   })
 })
 

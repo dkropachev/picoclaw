@@ -29,7 +29,7 @@ func TestControllerDelegatesProtectedPRWorkspaceSubtreeToActiveGeneration(t *tes
 
 	request := httptest.NewRequest(
 		http.MethodPost,
-		RoutePrefix+"pr-workspaces/prw_11111111111111111111111111111111/review?trace=kept",
+		RoutePrefix+"development-workspaces/devw_11111111111111111111111111111111/review?trace=kept",
 		strings.NewReader(`{"expected_version":7}`),
 	)
 	request.Header.Set("X-Delegation-Test", "preserved")
@@ -43,7 +43,7 @@ func TestControllerDelegatesProtectedPRWorkspaceSubtreeToActiveGeneration(t *tes
 		t.Fatalf("generation header = %q", got)
 	}
 	if handler.calls != 1 || handler.method != http.MethodPost ||
-		handler.path != RoutePrefix+"pr-workspaces/prw_11111111111111111111111111111111/review" ||
+		handler.path != RoutePrefix+"development-workspaces/devw_11111111111111111111111111111111/review" ||
 		handler.rawQuery != "trace=kept" ||
 		handler.body != `{"expected_version":7}` ||
 		handler.requestHeader != "preserved" {
@@ -69,7 +69,11 @@ func TestControllerRejectsInvalidOrUnconfiguredPRWorkspaceRoutes(t *testing.T) {
 	response := httptest.NewRecorder()
 	controller.ServeHTTP(
 		response,
-		httptest.NewRequest(http.MethodGet, RoutePrefix+"pr-workspaces%2fprw_11111111111111111111111111111111", nil),
+		httptest.NewRequest(
+			http.MethodGet,
+			RoutePrefix+"development-workspaces%2fdevw_11111111111111111111111111111111",
+			nil,
+		),
 	)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("encoded path status = %d", response.Code)
@@ -95,7 +99,7 @@ func TestControllerRejectsInvalidOrUnconfiguredPRWorkspaceRoutes(t *testing.T) {
 	response = httptest.NewRecorder()
 	controller.ServeHTTP(
 		response,
-		httptest.NewRequest(http.MethodGet, RoutePrefix+"pr-workspaces", nil),
+		httptest.NewRequest(http.MethodGet, RoutePrefix+"development-workspaces", nil),
 	)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unconfigured PR workspaces status = %d, body=%s", response.Code, response.Body.String())

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Provider } from "jotai"
 import type { AnchorHTMLAttributes, ReactNode } from "react"
@@ -7,8 +7,14 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { AppSidebar } from "@/components/app-sidebar"
 import { SidebarProvider } from "@/components/ui/sidebar"
 
-let pathname = "/threads/search"
-let routeSearch: Record<string, unknown> = {}
+let pathname = "/development"
+
+vi.mock("@/api/notifications", () => ({
+  listDevelopmentNotifications: vi.fn(async () => ({
+    notifications: [],
+    counts: { open: 3, unread: 2, snoozed: 0 },
+  })),
+}))
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -16,43 +22,27 @@ vi.mock("@tanstack/react-router", () => ({
     to,
     activeOptions,
     search,
-    state: _state,
     ...props
   }: {
     children: ReactNode
     to: string
-    activeOptions?: { exact?: boolean; includeSearch?: boolean }
+    activeOptions?: { exact?: boolean }
     search?: Record<string, string>
-    state?: unknown
-  } & AnchorHTMLAttributes<HTMLAnchorElement>) =>
-    (() => {
-      void _state
-      const pathActive = activeOptions?.exact
-        ? pathname === to
-        : pathname === to || (to !== "/" && pathname.startsWith(`${to}/`))
-
-      return (
-        <a
-          {...props}
-          href={
-            search && Object.keys(search).length > 0
-              ? `${to}?${new URLSearchParams(search).toString()}`
-              : to
-          }
-          {...(pathActive
-            ? { "aria-current": "page", "data-status": "active" }
-            : {})}
-        >
-          {children}
-        </a>
-      )
-    })(),
-  useRouterState: () => ({
-    location: {
-      pathname,
-      search: routeSearch,
-    },
-  }),
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) => {
+    const active = activeOptions?.exact
+      ? pathname === to
+      : pathname === to || (to !== "/" && pathname.startsWith(`${to}/`))
+    return (
+      <a
+        {...props}
+        href={search ? `${to}?${new URLSearchParams(search).toString()}` : to}
+        {...(active ? { "aria-current": "page", "data-status": "active" } : {})}
+      >
+        {children}
+      </a>
+    )
+  },
+  useRouterState: () => ({ location: { pathname, search: {} } }),
 }))
 
 vi.mock("@/hooks/use-sidebar-channels", () => ({
@@ -78,57 +68,71 @@ describe("AppSidebar", () => {
   beforeAll(() => {
     Object.defineProperty(window, "matchMedia", {
       writable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
+      value: vi.fn().mockImplementation(() => ({
         matches: false,
-        media: query,
-        onchange: null,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        dispatchEvent: vi.fn(),
       })),
     })
   })
 
   beforeEach(() => {
-    pathname = "/threads/search"
-    routeSearch = {}
+    pathname = "/development"
   })
 
-  it("links Threads navigation directly to the thread search workspace", () => {
+  it("exposes canonical development destinations without pull-request aliases", () => {
     renderSidebar()
-
-    expect(screen.getByRole("link", { name: "Threads" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Development" })).toHaveAttribute(
       "href",
-      "/threads/search",
+      "/development",
     )
-    expect(
-      screen.queryByRole("link", { name: "Search" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("link", { name: "Thread" }),
-    ).not.toBeInTheDocument()
+    expect(screen.getByRole("link", { name: /Notifications/ })).toHaveAttribute(
+      "href",
+      "/notifications",
+    )
+    expect(screen.getByRole("link", { name: "Repositories" })).toHaveAttribute(
+      "href",
+      "/development/repositories",
+    )
+    expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute(
+      "href",
+      "/development/workflow-configurations",
+    )
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute(
+      "href",
+      "/development/settings",
+    )
+    expect(screen.queryByRole("link", { name: "Work" })).not.toBeInTheDocument()
   })
 
-  it("keeps Threads navigation on search when viewing a concrete thread", () => {
-    pathname = "/threads/open/session-thread"
-
+  it("marks nested development workspaces through the Development link", () => {
+    pathname = "/development/devw_11111111111111111111111111111111"
     renderSidebar()
-
-    expect(screen.getByRole("link", { name: "Threads" })).toHaveAttribute(
-      "href",
-      "/threads/search",
+    expect(screen.getByRole("link", { name: "Development" })).toHaveAttribute(
+      "data-status",
+      "active",
     )
   })
 
-  it("links Events from Services and marks the route active", async () => {
-    pathname = "/events"
+  it("marks notification detail navigation and renders open count", async () => {
+    pathname = "/notifications/dnt_11111111111111111111111111111111"
+    renderSidebar()
+    expect(screen.getByRole("link", { name: /Notifications/ })).toHaveAttribute(
+      "data-status",
+      "active",
+    )
+    expect(await screen.findByText("3")).toBeInTheDocument()
+  })
+
+  it("retains Threads and Events navigation", async () => {
     const user = userEvent.setup()
-
+    pathname = "/events"
     renderSidebar()
+    expect(screen.getByRole("link", { name: "Threads" })).toHaveAttribute(
+      "href",
+      "/threads/search",
+    )
     await user.click(screen.getByRole("button", { name: "Services" }))
-
     expect(screen.getByRole("link", { name: "Events" })).toHaveAttribute(
       "href",
       "/events",
@@ -239,202 +243,5 @@ describe("AppSidebar", () => {
       "data-active",
       "true",
     )
-  })
-
-  it("links each Pull requests destination to a first-class URL", async () => {
-    pathname = "/pull-requests"
-    const user = userEvent.setup()
-
-    renderSidebar()
-
-    const trigger = screen.getByRole("button", { name: "Pull requests" })
-    expect(trigger).toHaveAttribute("aria-expanded", "true")
-    const work = screen.getByRole("link", { name: "Work" })
-    const gateProfiles = screen.getByRole("link", {
-      name: "Workflow configurations",
-    })
-    const repositoryAssignments = screen.getByRole("link", {
-      name: "Repository assignments",
-    })
-    const lifecycleSettings = screen.getByRole("link", {
-      name: "Lifecycle settings",
-    })
-    expect(work).toHaveAttribute("href", "/pull-requests")
-    expect(gateProfiles).toHaveAttribute(
-      "href",
-      "/pull-requests/workflow-configurations",
-    )
-    expect(repositoryAssignments).toHaveAttribute(
-      "href",
-      "/pull-requests/repository-assignments",
-    )
-    expect(lifecycleSettings).toHaveAttribute(
-      "href",
-      "/pull-requests/settings?tab=nudging",
-    )
-    expect(work.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
-      "data-active",
-      "true",
-    )
-    expect(work).toHaveAttribute("aria-current", "page")
-    expect(work).toHaveAttribute("data-status", "active")
-    expect(gateProfiles).not.toHaveAttribute("aria-current")
-    expect(gateProfiles).not.toHaveAttribute("data-status")
-    expect(lifecycleSettings).not.toHaveAttribute("aria-current")
-    expect(repositoryAssignments).not.toHaveAttribute("aria-current")
-    expect(
-      gateProfiles.closest('[data-sidebar="menu-button"]'),
-    ).toHaveAttribute("data-active", "false")
-
-    await user.click(trigger)
-    expect(trigger).toHaveAttribute("aria-expanded", "false")
-    expect(work).not.toBeVisible()
-    expect(gateProfiles).not.toBeVisible()
-    expect(repositoryAssignments).not.toBeVisible()
-    expect(lifecycleSettings).not.toBeVisible()
-  })
-
-  it.each([
-    ["/pull-requests", "Work"],
-    ["/pull-requests/prw_example", "Work"],
-    ["/pull-requests/workflow-configurations", "Workflow configurations"],
-    [
-      "/pull-requests/workflow-configurations/default/edit",
-      "Workflow configurations",
-    ],
-    ["/pull-requests/repository-assignments", "Repository assignments"],
-    ["/pull-requests/settings", "Lifecycle settings"],
-    ["/pull-requests/settings/review", "Lifecycle settings"],
-  ])("marks only %s navigation active", (route, activeName) => {
-    pathname = route
-
-    renderSidebar()
-
-    for (const name of [
-      "Work",
-      "Workflow configurations",
-      "Repository assignments",
-      "Lifecycle settings",
-    ]) {
-      const link = screen.getByRole("link", { name })
-      const active = name === activeName
-      expect(link.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
-        "data-active",
-        String(active),
-      )
-      if (active) {
-        expect(link).toHaveAttribute("aria-current", "page")
-        expect(link).toHaveAttribute("data-status", "active")
-      } else {
-        expect(link).not.toHaveAttribute("aria-current")
-        expect(link).not.toHaveAttribute("data-status")
-      }
-    }
-  })
-
-  it("preserves the originating workspace across configuration links", () => {
-    const workspaceID = `prw_${"a".repeat(32)}`
-    pathname = "/pull-requests/workflow-configurations/default"
-    routeSearch = { flow: "review", from: workspaceID }
-
-    renderSidebar()
-
-    expect(screen.getByRole("link", { name: "Work" })).toHaveAttribute(
-      "href",
-      `/pull-requests/${workspaceID}`,
-    )
-    expect(
-      screen.getByRole("link", { name: "Workflow configurations" }),
-    ).toHaveAttribute(
-      "href",
-      `/pull-requests/workflow-configurations?from=${workspaceID}`,
-    )
-    expect(
-      screen.getByRole("link", { name: "Repository assignments" }),
-    ).toHaveAttribute(
-      "href",
-      `/pull-requests/repository-assignments?from=${workspaceID}`,
-    )
-    expect(
-      screen.getByRole("link", { name: "Lifecycle settings" }),
-    ).toHaveAttribute(
-      "href",
-      `/pull-requests/settings?tab=nudging&from=${workspaceID}`,
-    )
-  })
-
-  it("reveals a PR destination after navigation while preserving manual collapse", async () => {
-    const user = userEvent.setup()
-    const view = renderSidebar()
-    const services = screen.getByRole("button", { name: "Services" })
-
-    expect(services).toHaveAttribute("aria-expanded", "false")
-
-    pathname = "/pull-requests/workflow-configurations/default"
-    view.rerender(
-      <Provider>
-        <SidebarProvider>
-          <AppSidebar collapsible="none" />
-        </SidebarProvider>
-      </Provider>,
-    )
-
-    await waitFor(() =>
-      expect(services).toHaveAttribute("aria-expanded", "true"),
-    )
-    const pullRequests = screen.getByRole("button", {
-      name: "Pull requests",
-    })
-    expect(pullRequests).toHaveAttribute("aria-expanded", "true")
-    expect(
-      screen.getByRole("link", { name: "Workflow configurations" }),
-    ).toBeVisible()
-
-    await user.click(pullRequests)
-    expect(pullRequests).toHaveAttribute("aria-expanded", "false")
-    view.rerender(
-      <Provider>
-        <SidebarProvider>
-          <AppSidebar collapsible="none" />
-        </SidebarProvider>
-      </Provider>,
-    )
-    expect(pullRequests).toHaveAttribute("aria-expanded", "false")
-
-    pathname = "/pull-requests/settings"
-    view.rerender(
-      <Provider>
-        <SidebarProvider>
-          <AppSidebar collapsible="none" />
-        </SidebarProvider>
-      </Provider>,
-    )
-    await waitFor(() =>
-      expect(pullRequests).toHaveAttribute("aria-expanded", "true"),
-    )
-
-    await user.click(services)
-    expect(services).toHaveAttribute("aria-expanded", "false")
-    view.rerender(
-      <Provider>
-        <SidebarProvider>
-          <AppSidebar collapsible="none" />
-        </SidebarProvider>
-      </Provider>,
-    )
-    expect(services).toHaveAttribute("aria-expanded", "false")
-
-    pathname = "/pull-requests/prw_example"
-    view.rerender(
-      <Provider>
-        <SidebarProvider>
-          <AppSidebar collapsible="none" />
-        </SidebarProvider>
-      </Provider>,
-    )
-    await waitFor(() =>
-      expect(services).toHaveAttribute("aria-expanded", "true"),
-    )
-    expect(screen.getByRole("link", { name: "Work" })).toBeVisible()
   })
 })

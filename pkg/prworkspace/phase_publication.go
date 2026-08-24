@@ -35,14 +35,19 @@ type reviewPublicationPayload struct {
 }
 
 type BranchPublicationRequest struct {
-	Provider ProviderSnapshot
-	Repair   RepairAttempt
+	Provider   ProviderSnapshot
+	Repair     RepairAttempt
+	Validation ValidationRun
 }
 
 type BranchPublicationResult struct {
-	ExternalID  string
-	ExternalURL string
-	Ambiguous   bool
+	ExternalID    string
+	ExternalURL   string
+	Ambiguous     bool
+	PullRequestID string
+	PullNumber    int64
+	HeadRef       string
+	HeadSHA       string
 }
 
 type BranchPublisher interface {
@@ -51,9 +56,10 @@ type BranchPublisher interface {
 }
 
 type branchPublicationPayload struct {
-	Provider ProviderSnapshot                `json:"provider"`
-	Repair   RepairAttempt                   `json:"repair"`
-	Fence    *ImplementationPublicationFence `json:"publication_fence"`
+	Provider   ProviderSnapshot                `json:"provider"`
+	Repair     RepairAttempt                   `json:"repair"`
+	Validation ValidationRun                   `json:"validation"`
+	Fence      *ImplementationPublicationFence `json:"publication_fence"`
 }
 
 type QueueReviewPublicationRequest struct {
@@ -198,10 +204,15 @@ func (service *Service) QueueBranchPublication(
 			WorkspaceID: request.WorkspaceID, ExpectedVersion: request.ExpectedVersion, RequestID: request.RequestID,
 		}, aggregate, completionGate)
 	}
+	validation, ok := latestValidationForRepair(aggregate.ValidationRuns, repair)
+	if !ok || validation.State != ExecutionSucceeded {
+		return aggregate, ErrConflict
+	}
 	authorizationRequest := branchPublicationPayload{
-		Provider: aggregate.ProviderSnapshot,
-		Repair:   repair,
-		Fence:    repair.PublicationFence,
+		Provider:   aggregate.ProviderSnapshot,
+		Repair:     repair,
+		Validation: validation,
+		Fence:      repair.PublicationFence,
 	}
 	pinnedPayload, payload, err := encodePublicationPayload(authorizationRequest)
 	if err != nil {
@@ -221,9 +232,7 @@ func (service *Service) QueueBranchPublication(
 		"publication": publication, "request": authorizationRequest,
 		"provider_revision": aggregate.ProviderSnapshot.ProviderRevision,
 	}
-	if validation, ok := latestValidationForRepair(aggregate.ValidationRuns, repair); ok {
-		gateSubject["validation"] = validation
-	}
+	gateSubject["validation"] = validation
 	gate, gateNew, err := service.ensureGate(ctx, aggregate, "pr.implementation.publish", gateSubject)
 	if err != nil {
 		return aggregate, err
@@ -285,7 +294,11 @@ func (service *Service) DispatchReviewPublication(
 				Provider: payload.Provider, Summary: payload.Summary,
 				Findings: payload.Findings, Marker: phasePublicationMarker(publication),
 			})
-			return phasePublicationResult{result.ExternalID, result.ExternalURL, result.Ambiguous}, err
+			return phasePublicationResult{
+				externalID:  result.ExternalID,
+				externalURL: result.ExternalURL,
+				ambiguous:   result.Ambiguous,
+			}, err
 		},
 	)
 }
@@ -310,9 +323,25 @@ func (service *Service) DispatchBranchPublication(
 			payload.Repair.PublicationFence = payload.Fence
 			result, err := publisher.PublishBranch(
 				ctx,
-				BranchPublicationRequest{Provider: payload.Provider, Repair: payload.Repair},
+				BranchPublicationRequest{
+					Provider: payload.Provider, Repair: payload.Repair, Validation: payload.Validation,
+				},
 			)
-			return phasePublicationResult{result.ExternalID, result.ExternalURL, result.Ambiguous}, err
+			phaseResult := phasePublicationResult{
+				externalID:  result.ExternalID,
+				externalURL: result.ExternalURL,
+				ambiguous:   result.Ambiguous,
+			}
+			if err == nil && payload.Provider.Intent == IntentImplementFeature && result.PullNumber > 0 &&
+				result.PullRequestID != "" && result.HeadRef != "" && result.HeadSHA != "" {
+				updated := payload.Provider
+				updated.PullRequestID, updated.PullNumber = result.PullRequestID, result.PullNumber
+				updated.HeadRef, updated.HeadSHA = result.HeadRef, result.HeadSHA
+				updated.ProviderRevision = "published:" + result.ExternalID
+				updated.ObservedAt = service.now().UTC()
+				phaseResult.provider = &updated
+			}
+			return phaseResult, err
 		},
 	)
 }
@@ -321,6 +350,7 @@ type phasePublicationResult struct {
 	externalID  string
 	externalURL string
 	ambiguous   bool
+	provider    *ProviderSnapshot
 }
 
 func (service *Service) dispatchPhasePublication(
@@ -418,6 +448,9 @@ func (service *Service) dispatchPhasePublication(
 			},
 		},
 	}
+	if success && result.provider != nil {
+		patch.Provider = result.provider
+	}
 	if success && publication.Kind == PublicationBranchPush {
 		phase, state := PhaseComplete, ExecutionSucceeded
 		patch.Phase, patch.ExecutionState = &phase, &state
@@ -496,7 +529,11 @@ func (service *Service) ReconcilePhasePublication(
 		if observeErr != nil {
 			return service.recordUnknownPhasePublication(ctx, aggregate, publication, request, observeErr)
 		}
-		result, exists = phasePublicationResult{observed.ExternalID, observed.ExternalURL, observed.Ambiguous}, found
+		result, exists = phasePublicationResult{
+			externalID:  observed.ExternalID,
+			externalURL: observed.ExternalURL,
+			ambiguous:   observed.Ambiguous,
+		}, found
 	case PublicationBranchPush:
 		if branch == nil {
 			return aggregate, errors.New("branch reconciler is unavailable")
@@ -509,12 +546,27 @@ func (service *Service) ReconcilePhasePublication(
 		payload.Repair.PublicationFence = payload.Fence
 		observed, found, observeErr := branch.ReconcileBranch(
 			ctx,
-			BranchPublicationRequest{Provider: payload.Provider, Repair: payload.Repair},
+			BranchPublicationRequest{
+				Provider: payload.Provider, Repair: payload.Repair, Validation: payload.Validation,
+			},
 		)
 		if observeErr != nil {
 			return service.recordUnknownPhasePublication(ctx, aggregate, publication, request, observeErr)
 		}
-		result, exists = phasePublicationResult{observed.ExternalID, observed.ExternalURL, observed.Ambiguous}, found
+		result, exists = phasePublicationResult{
+			externalID:  observed.ExternalID,
+			externalURL: observed.ExternalURL,
+			ambiguous:   observed.Ambiguous,
+		}, found
+		if found && payload.Provider.Intent == IntentImplementFeature && observed.PullNumber > 0 &&
+			observed.PullRequestID != "" && observed.HeadRef != "" && observed.HeadSHA != "" {
+			updated := payload.Provider
+			updated.PullRequestID, updated.PullNumber = observed.PullRequestID, observed.PullNumber
+			updated.HeadRef, updated.HeadSHA = observed.HeadRef, observed.HeadSHA
+			updated.ProviderRevision = "published:" + observed.ExternalID
+			updated.ObservedAt = service.now().UTC()
+			result.provider = &updated
+		}
 	default:
 		return aggregate, ErrInvalid
 	}
@@ -552,6 +604,9 @@ func (service *Service) ReconcilePhasePublication(
 	publication.State, publication.ExternalID, publication.ExternalURL = ExecutionSucceeded, result.externalID, result.externalURL
 	publication.PublicErrorCode, publication.UpdatedAt, publication.PublishedAt = "", now, &now
 	patch := AggregatePatch{ReplacePublications: []Publication{publication}}
+	if result.provider != nil {
+		patch.Provider = result.provider
+	}
 	if publication.Kind == PublicationBranchPush {
 		phase, state := PhaseComplete, ExecutionSucceeded
 		patch.Phase, patch.ExecutionState = &phase, &state
@@ -657,7 +712,15 @@ func validPhasePublicationURL(publication Publication, raw string) bool {
 	wantedPath := strings.TrimSuffix(
 		origin.Path,
 		"/",
-	) + "/" + provider.Repository + "/pull/" + strconv.FormatInt(
+	) + "/" + provider.Repository + "/pull/"
+	if provider.Intent == IntentImplementFeature && provider.PullNumber == 0 {
+		if !strings.HasPrefix(external.Path, wantedPath) {
+			return false
+		}
+		number, parseErr := strconv.ParseInt(strings.TrimPrefix(external.Path, wantedPath), 10, 64)
+		return parseErr == nil && number > 0
+	}
+	wantedPath += strconv.FormatInt(
 		provider.PullNumber,
 		10,
 	)

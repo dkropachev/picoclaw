@@ -397,7 +397,7 @@ func TestWorkflowGateEvaluatorRejectsInvalidIdentityAndFieldValues(t *testing.T)
 func testPRLifecycleGateRequest(decisionPoint string, subject map[string]any) GateRequest {
 	digest, _ := fingerprintValue(subject)
 	return GateRequest{
-		WorkspaceID: "prw_11111111111111111111111111111111", WorkspaceVersion: 7,
+		WorkspaceID: "devw_11111111111111111111111111111111", WorkspaceVersion: 7,
 		ProviderOrigin: "https://github.com", RepositoryID: "repo-v3",
 		DecisionPoint: decisionPoint, Subject: subject, SubjectDigest: digest,
 	}

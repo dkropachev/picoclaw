@@ -48,6 +48,7 @@ var (
 // referenced workflow gate. Missing bindings deliberately inherit that
 // workflow default; no field-by-field merge exists.
 type PRLifecycleConfig struct {
+	Repositories                   map[string]PRLifecycleRepositoryDescriptor  `json:"repositories"`
 	WorkflowConfigurations         map[string]PRLifecycleWorkflowConfiguration `json:"workflow-configurations"`
 	DefaultWorkflowConfigurationID string                                      `json:"default-workflow-configuration"`
 	RepositoryAssignments          map[string]string                           `json:"repository-assignments"`
@@ -88,9 +89,32 @@ type PRLifecycleDeferredIssueConfig struct {
 // PRLifecycleWorkflowConfiguration is a named, assignable collection of workflow gate
 // overrides. Bindings are matched by the exact pair (workflow-ref, gate-ref).
 type PRLifecycleWorkflowConfiguration struct {
-	Name           string                         `json:"name"`
-	Bindings       []PRLifecycleGateBinding       `json:"bindings"`
-	DeferredIssues PRLifecycleDeferredIssueConfig `json:"deferred-issues"`
+	Name             string                            `json:"name"`
+	Bindings         []PRLifecycleGateBinding          `json:"bindings"`
+	DeferredIssues   PRLifecycleDeferredIssueConfig    `json:"deferred-issues"`
+	ScopeDisposition PRLifecycleScopeDispositionConfig `json:"scope-disposition"`
+}
+
+type PRLifecycleRepositoryDescriptor struct {
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default-branch"`
+}
+
+type PRLifecycleScopeDispositionMode string
+
+const (
+	PRLifecycleScopeStrict  PRLifecycleScopeDispositionMode = "strict"
+	PRLifecycleScopeRelaxed PRLifecycleScopeDispositionMode = "relaxed"
+)
+
+type PRLifecycleScopeDispositionRule struct {
+	Mode   PRLifecycleScopeDispositionMode `json:"mode"`
+	Prompt string                          `json:"prompt"`
+}
+
+type PRLifecycleScopeDispositionConfig struct {
+	Default PRLifecycleScopeDispositionRule            `json:"default"`
+	ByType  map[string]PRLifecycleScopeDispositionRule `json:"by-type"`
 }
 
 type PRLifecycleGateBinding struct {
@@ -119,9 +143,44 @@ type PRLifecycleSizeThreshold struct {
 }
 
 func (config *PRLifecycleConfig) IsZero() bool {
-	return config.WorkflowConfigurations == nil && config.DefaultWorkflowConfigurationID == "" &&
-		config.RepositoryAssignments == nil && config.Nudge == (PRLifecycleNudgeConfig{}) &&
+	return config.Repositories == nil && config.WorkflowConfigurations == nil &&
+		config.DefaultWorkflowConfigurationID == "" &&
+		config.RepositoryAssignments == nil &&
+		config.Nudge == (PRLifecycleNudgeConfig{}) &&
 		config.Scope == (PRLifecycleScopeConfig{})
+}
+
+func (config PRLifecycleScopeDispositionConfig) Validate() error {
+	if config.Default == (PRLifecycleScopeDispositionRule{}) && config.ByType == nil {
+		return nil
+	}
+	if err := config.Default.Validate(); err != nil {
+		return fmt.Errorf("scope-disposition default: %w", err)
+	}
+	if config.ByType == nil {
+		return errors.New("scope-disposition by-type is required")
+	}
+	for kind, rule := range config.ByType {
+		switch kind {
+		case "fix", "feature", "refactor", "documentation", "test":
+		default:
+			return fmt.Errorf("scope-disposition type %q is invalid", kind)
+		}
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("scope-disposition type %q: %w", kind, err)
+		}
+	}
+	return nil
+}
+
+func (rule PRLifecycleScopeDispositionRule) Validate() error {
+	if rule.Mode != PRLifecycleScopeStrict && rule.Mode != PRLifecycleScopeRelaxed {
+		return errors.New("mode must be strict or relaxed")
+	}
+	if rule.Prompt != strings.TrimSpace(rule.Prompt) || len(rule.Prompt) > 8<<10 {
+		return errors.New("prompt must be trimmed and at most 8192 bytes")
+	}
+	return nil
 }
 
 func (config *PRLifecycleConfig) Effective() PRLifecycleConfig {
@@ -133,11 +192,16 @@ func (config *PRLifecycleConfig) Effective() PRLifecycleConfig {
 
 func DefaultPRLifecycleConfig() PRLifecycleConfig {
 	return PRLifecycleConfig{
+		Repositories: make(map[string]PRLifecycleRepositoryDescriptor),
 		WorkflowConfigurations: map[string]PRLifecycleWorkflowConfiguration{
 			DefaultPRLifecycleWorkflowConfigurationID: {
 				Name:           DefaultPRLifecycleWorkflowConfigurationName,
 				Bindings:       []PRLifecycleGateBinding{},
 				DeferredIssues: PRLifecycleDeferredIssueConfig{Mode: PRLifecycleDeferredIssuesAsk},
+				ScopeDisposition: PRLifecycleScopeDispositionConfig{
+					Default: PRLifecycleScopeDispositionRule{Mode: PRLifecycleScopeStrict},
+					ByType:  make(map[string]PRLifecycleScopeDispositionRule),
+				},
 			},
 		},
 		DefaultWorkflowConfigurationID: DefaultPRLifecycleWorkflowConfigurationID,
@@ -192,6 +256,9 @@ func (config *PRLifecycleConfig) Validate() error {
 		if err := workflowConfiguration.DeferredIssues.Validate(); err != nil {
 			return fmt.Errorf("PR lifecycle workflow configuration %q: %w", id, err)
 		}
+		if err := workflowConfiguration.ScopeDisposition.Validate(); err != nil {
+			return fmt.Errorf("PR lifecycle workflow configuration %q: %w", id, err)
+		}
 		if workflowConfiguration.Bindings == nil {
 			return fmt.Errorf("PR lifecycle workflow configuration %q bindings are required", id)
 		}
@@ -217,6 +284,19 @@ func (config *PRLifecycleConfig) Validate() error {
 
 	if config.RepositoryAssignments == nil {
 		return errors.New("PR lifecycle repository assignments are required")
+	}
+	for identity, descriptor := range config.Repositories {
+		parts := strings.Split(identity, "|")
+		if len(parts) != 2 {
+			return fmt.Errorf("development repository identity %q is invalid", identity)
+		}
+		if _, err := CanonicalPRLifecycleRepositoryIdentity(parts[0], parts[1]); err != nil ||
+			descriptor.Name == "" || descriptor.Name != strings.TrimSpace(descriptor.Name) ||
+			len(descriptor.Name) > 256 || strings.Count(descriptor.Name, "/") != 1 ||
+			descriptor.DefaultBranch == "" || descriptor.DefaultBranch != strings.TrimSpace(descriptor.DefaultBranch) ||
+			len(descriptor.DefaultBranch) > 256 || strings.ContainsAny(descriptor.DefaultBranch, "\x00\r\n") {
+			return fmt.Errorf("development repository descriptor %q is invalid", identity)
+		}
 	}
 	if len(config.RepositoryAssignments) > MaxPRLifecycleAssignments {
 		return fmt.Errorf("PR lifecycle repository assignments exceed %d", MaxPRLifecycleAssignments)
@@ -272,6 +352,10 @@ func validatePRLifecycleGateBinding(binding PRLifecycleGateBinding) error {
 		// An explicit binding without an action means "use workflow default".
 		// When Action is present it is validated as one complete atomic override.
 		return nil
+	}
+	if binding.WorkflowRef == PRLifecycleWorkflowRef && binding.GateRef == "gates.implementation-publish" &&
+		binding.Action.Type != gatetypes.GateActionHuman {
+		return errors.New("implementation publication gate must remain human")
 	}
 	if err := validatePRLifecycleGateAction(*binding.Action); err != nil {
 		return err

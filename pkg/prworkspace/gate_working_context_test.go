@@ -42,7 +42,7 @@ func TestSessionGateWorkingContextBinderSeparatesAgentOwnership(t *testing.T) {
 	}
 
 	invalid := testGateWorkingContextRequest("main")
-	invalid.Context.WorkspaceID = "prw_22222222222222222222222222222222"
+	invalid.Context.WorkspaceID = "devw_22222222222222222222222222222222"
 	if _, err := binder.Bind(t.Context(), invalid); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("cross-workspace context error = %v, want invalid", err)
 	}

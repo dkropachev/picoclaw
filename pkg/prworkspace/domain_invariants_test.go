@@ -50,7 +50,7 @@ func TestCompletionMissingReopensMatchingUnresolvedFindingInsteadOfDroppingDupli
 	}
 	aggregate := Aggregate{
 		Workspace: Workspace{
-			ID:              "prw_11111111111111111111111111111111",
+			ID:              "devw_11111111111111111111111111111111",
 			ActiveCharterID: "pcr_11111111111111111111111111111111",
 		},
 		ProviderSnapshot: ProviderSnapshot{HeadSHA: "head"},
@@ -736,7 +736,7 @@ func (ambiguousReviewAI) RunIsolated(_ context.Context, request IsolatedAIReques
 	}, nil
 }
 
-func TestAmbiguousReviewFindingStartsClassificationGate(t *testing.T) {
+func TestStrictPolicyDefersAdjacentReviewFindingWithoutAttentionGate(t *testing.T) {
 	store := NewMemoryStore()
 	created, err := store.Create(context.Background(), testCreateInput())
 	if err != nil {
@@ -779,17 +779,15 @@ func TestAmbiguousReviewFindingStartsClassificationGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Workspace.Phase != PhaseTriage || result.Workspace.ExecutionState != ExecutionWaitingGate ||
-		len(result.Findings) != 1 || result.Findings[0].Disposition != FindingOpen {
-		t.Fatalf("ambiguous finding bypassed triage: workspace=%#v findings=%#v", result.Workspace, result.Findings)
+	if result.Workspace.Phase != PhaseTriage || result.Workspace.ExecutionState != ExecutionQueued ||
+		len(result.Findings) != 1 || result.Findings[0].Disposition != FindingDeferred {
+		t.Fatalf("strict finding disposition: workspace=%#v findings=%#v", result.Workspace, result.Findings)
 	}
 	for _, gate := range result.Gates {
-		if gate.DecisionPoint == "pr.finding.classify" && gate.TargetID == result.Findings[0].ID &&
-			gate.State == ExecutionWaitingUser {
-			return
+		if gate.DecisionPoint == "pr.finding.classify" && gate.TargetID == result.Findings[0].ID {
+			t.Fatalf("strict adjacent work requested user attention: %#v", gate)
 		}
 	}
-	t.Fatalf("classification gate missing: %#v", result.Gates)
 }
 
 func TestExactLargeFindingBecomesSelectableOnlyAfterClassificationApproval(t *testing.T) {

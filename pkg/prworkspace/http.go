@@ -1,10 +1,12 @@
 package prworkspace
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,8 +19,8 @@ import (
 const (
 	// RuntimeRoutePrefix is the sole protected runtime subtree for both PR
 	// review and implementation. The launcher exposes the same contract under
-	// /api/pr-workspaces.
-	RuntimeRoutePrefix = "/runtime/eventing/pr-workspaces"
+	// /api/development-workspaces.
+	RuntimeRoutePrefix = "/runtime/eventing/development-workspaces"
 	maxHTTPBodyBytes   = 1 << 20
 )
 
@@ -107,7 +109,40 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 		return
 	}
 	workspaceID := segments[0]
-	if !validOpaqueID(workspaceID, "prw_") {
+	switch workspaceID {
+	case "notifications", "notification-views", "notification-settings", "push-subscriptions":
+		handler.serveNotificationAPI(response, request, workspaceID, segments[1:])
+		return
+	}
+	if workspaceID == "repositories" {
+		if len(segments) == 1 && request.Method == http.MethodGet && request.URL.RawQuery == "" {
+			repositories, err := handler.service.ListConfiguredRepositories(request.Context())
+			if err != nil {
+				writeHTTPError(response, http.StatusServiceUnavailable, "repositories_unavailable", nil)
+				return
+			}
+			writeHTTPJSON(response, http.StatusOK, map[string]any{"repositories": repositories})
+			return
+		}
+		if len(segments) == 2 && segments[1] == "resolve" && request.Method == http.MethodPost {
+			var body struct {
+				RepositoryURL string `json:"repository_url"`
+			}
+			if !decodeHTTPBody(response, request, &body) {
+				return
+			}
+			repository, err := handler.service.VerifyConfiguredRepository(request.Context(), body.RepositoryURL)
+			if err != nil {
+				writeHTTPError(response, http.StatusBadRequest, "repository_unavailable", nil)
+				return
+			}
+			writeHTTPJSON(response, http.StatusOK, repository)
+			return
+		}
+		writeHTTPMethod(response, http.MethodGet, http.MethodPost)
+		return
+	}
+	if !validOpaqueID(workspaceID, "devw_") {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_workspace_id", nil)
 		return
 	}
@@ -137,26 +172,156 @@ func (handler *HTTPHandler) serveRoot(response http.ResponseWriter, request *htt
 		writeHTTPJSON(response, http.StatusOK, result)
 	case http.MethodPost:
 		var body struct {
-			RequestID      string `json:"request_id"`
+			Intent DevelopmentIntent `json:"intent"`
+			Source *struct {
+				Kind               SourceKind `json:"kind"`
+				IssueURL           string     `json:"issue_url"`
+				RepositoryIdentity string     `json:"repository_identity"`
+				Content            string     `json:"content"`
+			} `json:"source"`
 			PullRequestURL string `json:"pull_request_url"`
-			ProviderOrigin string `json:"provider_origin"`
-			Repository     string `json:"repository"`
-			PullNumber     int64  `json:"pull_number"`
+			RequestID      string `json:"request_id"`
 		}
 		if !decodeHTTPBody(response, request, &body) {
 			return
 		}
-		aggregate, err := handler.service.Create(request.Context(), CreateWorkspaceRequest{
-			RequestID: body.RequestID,
-			Resolve: ResolveRequest{
-				PullRequestURL: body.PullRequestURL, ProviderOrigin: body.ProviderOrigin,
-				Repository: body.Repository, PullNumber: body.PullNumber,
-			},
-		})
+		create := CreateWorkspaceRequest{
+			RequestID: body.RequestID, Intent: body.Intent, PullRequestURL: body.PullRequestURL,
+		}
+		if body.Source != nil {
+			create.SourceKind = body.Source.Kind
+			create.IssueURL = body.Source.IssueURL
+			create.RepositoryIdentity = body.Source.RepositoryIdentity
+			create.Brief = body.Source.Content
+		} else if body.Intent == IntentPickupPR {
+			create.SourceKind = SourcePullRequest
+		}
+		aggregate, err := handler.service.Create(request.Context(), create)
 		writeHTTPResultStatus(response, aggregate, err, http.StatusCreated)
 	default:
 		writeHTTPMethod(response, http.MethodGet, http.MethodPost)
 	}
+}
+
+func (handler *HTTPHandler) advanceDevelopmentWorkspace(
+	ctx context.Context, aggregate Aggregate, requestID string,
+) (Aggregate, error) {
+	if aggregate.Workspace.Phase == PhaseCharter && len(aggregate.Charters) == 0 {
+		var err error
+		aggregate, err = handler.service.DraftCharter(ctx, DraftCharterRequest{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID: requestID + ":charter",
+		})
+		if err != nil {
+			return aggregate, err
+		}
+	}
+	if aggregate.Workspace.Phase == PhaseCharter && aggregate.Workspace.ActiveCharterID == "" &&
+		len(aggregate.Charters) > 0 {
+		charter := aggregate.Charters[len(aggregate.Charters)-1]
+		var err error
+		aggregate, err = handler.service.ConfirmCharterAutomatically(ctx, ConfirmCharterRequest{
+			WorkspaceID: aggregate.Workspace.ID, CharterID: charter.ID,
+			ExpectedVersion: aggregate.Workspace.Version, RequestID: requestID + ":confirm",
+		})
+		if err != nil {
+			return aggregate, err
+		}
+	}
+	if aggregate.Workspace.Phase == PhasePlanning {
+		var err error
+		aggregate, err = handler.service.RunFeaturePlanning(ctx, RunFeaturePlanningRequest{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID: requestID + ":planning",
+		})
+		if err != nil {
+			return aggregate, err
+		}
+	} else if aggregate.Workspace.Phase == PhaseReview {
+		var err error
+		aggregate, err = handler.service.RunReview(ctx, RunReviewRequest{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID: requestID + ":review", NudgePolicy: handler.reviewNudgePolicy,
+		})
+		if err != nil {
+			return aggregate, err
+		}
+	}
+	if (aggregate.Workspace.Phase == PhaseTriage || aggregate.Workspace.Phase == PhaseImplementation) &&
+		!aggregateHasOpenFindings(aggregate) && handler.implementation.Repair != nil &&
+		handler.implementation.Validation != nil {
+		implemented, err := handler.service.RunImplementation(ctx, handler.implementation, RunImplementationRequest{
+			WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+			RequestID:   requestID + ":implementation",
+			NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
+		})
+		if err != nil {
+			return implemented, err
+		}
+		return handler.maybeQueueBranchPublication(ctx, implemented, requestID+":publication")
+	}
+	return handler.maybeQueueBranchPublication(ctx, aggregate, requestID+":publication")
+}
+
+// AdvanceDevelopmentWorkspace resumes one durable autonomous workspace from
+// its persisted phase. Gateway workers call it under an exact runtime lease;
+// browser requests never need to remain connected while AI or Git work runs.
+func (handler *HTTPHandler) AdvanceDevelopmentWorkspace(
+	ctx context.Context, aggregate Aggregate, requestID string,
+) (Aggregate, error) {
+	return handler.advanceDevelopmentWorkspace(ctx, aggregate, requestID)
+}
+
+// AutonomousDevelopmentWorkspaceReady prevents the durable worker from
+// repeatedly selecting lifecycle phases whose configured runtime cannot make
+// progress. It intentionally says nothing about user-triggered operations.
+func (handler *HTTPHandler) AutonomousDevelopmentWorkspaceReady(aggregate Aggregate) bool {
+	if handler == nil {
+		return false
+	}
+	switch aggregate.Workspace.Phase {
+	case PhaseCharter:
+		return len(aggregate.Charters) > 0 ||
+			(handler.service != nil && handler.service.ai.Runner != nil)
+	case PhasePlanning:
+		return handler.service != nil && handler.service.ai.Runner != nil &&
+			handler.service.planningEvidence != nil
+	case PhaseReview:
+		return handler.service != nil && handler.service.ai.Runner != nil &&
+			handler.service.reviewEvidence != nil && handler.service.reviewWorkflow != nil
+	case PhaseTriage, PhaseImplementation:
+		return handler.implementation.Repair != nil && handler.implementation.Validation != nil
+	case PhasePublication:
+		return handler.branchPublisher != nil
+	default:
+		return true
+	}
+}
+
+// AutonomousDevelopmentWorkspaceClaimRequired identifies operations that may
+// invoke AI or edit a candidate. The worker durably claims these before the
+// runtime call; pure lifecycle transitions remain single-CAS mutations.
+func (handler *HTTPHandler) AutonomousDevelopmentWorkspaceClaimRequired(aggregate Aggregate) bool {
+	if !handler.AutonomousDevelopmentWorkspaceReady(aggregate) {
+		return false
+	}
+	switch aggregate.Workspace.Phase {
+	case PhaseCharter:
+		return len(aggregate.Charters) == 0
+	case PhasePlanning, PhaseReview, PhaseTriage, PhaseImplementation:
+		return true
+	default:
+		return false
+	}
+}
+
+func aggregateHasOpenFindings(aggregate Aggregate) bool {
+	for _, finding := range aggregate.Findings {
+		if finding.Disposition == FindingOpen {
+			return true
+		}
+	}
+	return false
 }
 
 func (handler *HTTPHandler) serveWorkspace(
@@ -174,7 +339,7 @@ func (handler *HTTPHandler) serveWorkspace(
 		writeHTTPResult(response, aggregate, err)
 		return
 	}
-	if request.URL.RawQuery != "" {
+	if request.URL.RawQuery != "" && tail[0] != "code" {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_query", nil)
 		return
 	}
@@ -183,7 +348,7 @@ func (handler *HTTPHandler) serveWorkspace(
 		handler.serveRefresh(response, request, workspaceID, tail)
 	case "charter":
 		handler.serveCharter(response, request, workspaceID, tail[1:])
-	case "review-runs", "implementation-runs", "completion-audits", "nudge-runs":
+	case "planning-runs", "review-runs", "implementation-runs", "completion-audits", "nudge-runs":
 		handler.serveRun(response, request, workspaceID, tail)
 	case "stage-runs":
 		handler.serveStageRun(response, request, workspaceID, tail)
@@ -193,6 +358,10 @@ func (handler *HTTPHandler) serveWorkspace(
 		handler.serveCorrection(response, request, workspaceID, tail)
 	case "messages":
 		handler.serveMessage(response, request, workspaceID, tail)
+	case "conversation":
+		handler.serveConversation(response, request, workspaceID, tail)
+	case "code":
+		handler.serveCode(response, request, workspaceID, tail)
 	case "deferred-groups":
 		handler.serveDeferred(response, request, workspaceID, tail)
 	case "gates":
@@ -201,6 +370,101 @@ func (handler *HTTPHandler) serveWorkspace(
 		handler.servePublication(response, request, workspaceID, tail)
 	default:
 		writeHTTPError(response, http.StatusNotFound, "not_found", nil)
+	}
+}
+
+func (handler *HTTPHandler) serveCode(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
+	if request.Method != http.MethodGet || len(tail) != 2 {
+		writeHTTPMethod(response, http.MethodGet)
+		return
+	}
+	query := request.URL.Query()
+	for key := range query {
+		if key != "revision" && key != "candidate_revision" && key != "path" && key != "cursor" {
+			writeHTTPError(response, http.StatusBadRequest, "invalid_query", nil)
+			return
+		}
+	}
+	var value any
+	var err error
+	switch tail[1] {
+	case "tree":
+		value, err = handler.service.ListCodeTree(
+			request.Context(), workspaceID, query.Get("revision"), query.Get("path"), query.Get("cursor"),
+		)
+	case "blob":
+		value, err = handler.service.ReadCodeBlob(
+			request.Context(), workspaceID, query.Get("revision"), query.Get("candidate_revision"), query.Get("path"),
+		)
+	case "diff":
+		value, err = handler.service.ReadCodeDiff(
+			request.Context(),
+			workspaceID,
+			query.Get("revision"),
+			query.Get("path"),
+		)
+	default:
+		writeHTTPError(response, http.StatusNotFound, "not_found", nil)
+		return
+	}
+	if err != nil {
+		writeHTTPError(response, http.StatusConflict, "code_unavailable", nil)
+		return
+	}
+	writeHTTPJSON(response, http.StatusOK, value)
+}
+
+func (handler *HTTPHandler) serveConversation(
+	response http.ResponseWriter,
+	request *http.Request,
+	workspaceID string,
+	tail []string,
+) {
+	if len(tail) != 2 || tail[1] != "messages" {
+		writeHTTPError(response, http.StatusNotFound, "not_found", nil)
+		return
+	}
+	switch request.Method {
+	case http.MethodGet:
+		page, err := handler.service.Conversation(request.Context(), workspaceID)
+		if err != nil {
+			writeHTTPResult(response, Aggregate{}, err)
+			return
+		}
+		writeHTTPJSON(response, http.StatusOK, page)
+	case http.MethodPost:
+		var body struct {
+			Mode              string `json:"mode"`
+			Content           string `json:"content"`
+			ExpectedRevision  int64  `json:"expected_revision"`
+			RequestID         string `json:"request_id"`
+			CandidateRevision string `json:"candidate_revision"`
+		}
+		if !decodeHTTPBody(response, request, &body) {
+			return
+		}
+		page, err := handler.service.SendConversationMessage(request.Context(), ConversationMessageRequest{
+			WorkspaceID: workspaceID, ExpectedRevision: body.ExpectedRevision,
+			RequestID: body.RequestID, Mode: body.Mode, Content: body.Content,
+			CandidateRevision: body.CandidateRevision,
+		})
+		if err != nil {
+			writeHTTPResult(response, Aggregate{}, err)
+			return
+		}
+		if body.Mode == "steer" {
+			if aggregate, getErr := handler.service.Get(request.Context(), workspaceID); getErr == nil {
+				_, _ = handler.maybeRunImplementation(request.Context(), aggregate, body.RequestID+":implementation")
+			}
+		}
+		writeHTTPJSON(response, http.StatusCreated, page)
+	default:
+		writeHTTPMethod(response, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -342,6 +606,10 @@ func (handler *HTTPHandler) serveRun(
 	var aggregate Aggregate
 	var err error
 	switch tail[0] {
+	case "planning-runs":
+		aggregate, err = handler.service.RunFeaturePlanning(request.Context(), RunFeaturePlanningRequest{
+			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion, RequestID: body.RequestID,
+		})
 	case "review-runs":
 		aggregate, err = handler.service.RunReview(request.Context(), RunReviewRequest{
 			WorkspaceID: workspaceID, ExpectedVersion: body.ExpectedVersion,
@@ -732,7 +1000,60 @@ func (handler *HTTPHandler) serveGate(
 			aggregate = automatic
 		}
 	}
+	if err == nil {
+		aggregate, err = handler.maybeRunImplementation(
+			request.Context(), aggregate, body.RequestID+":implementation",
+		)
+	}
+	if err == nil {
+		aggregate, err = handler.maybeQueueBranchPublication(
+			request.Context(), aggregate, body.RequestID+":publication",
+		)
+	}
 	writeHTTPResult(response, aggregate, err)
+}
+
+func (handler *HTTPHandler) maybeRunImplementation(
+	ctx context.Context, aggregate Aggregate, requestID string,
+) (Aggregate, error) {
+	if handler.implementation.Repair == nil || handler.implementation.Validation == nil ||
+		aggregateHasOpenFindings(aggregate) {
+		return aggregate, nil
+	}
+	if aggregate.Workspace.Phase != PhaseTriage &&
+		!(aggregate.Workspace.Phase == PhaseImplementation &&
+			aggregate.Workspace.ExecutionState == ExecutionQueued) {
+		return aggregate, nil
+	}
+	implemented, err := handler.service.RunImplementation(ctx, handler.implementation, RunImplementationRequest{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: requestID, NudgePolicy: handler.completionNudgePolicy, SizePolicy: handler.sizePolicy,
+	})
+	if err != nil {
+		return implemented, err
+	}
+	return handler.maybeQueueBranchPublication(ctx, implemented, requestID+":publication")
+}
+
+func (handler *HTTPHandler) maybeQueueBranchPublication(
+	ctx context.Context, aggregate Aggregate, requestID string,
+) (Aggregate, error) {
+	if handler.branchPublisher == nil || aggregate.Workspace.Phase != PhasePublication {
+		return aggregate, nil
+	}
+	for _, publication := range aggregate.Publications {
+		if publication.Kind == PublicationBranchPush && publication.State != ExecutionStale &&
+			publication.State != ExecutionFailed && publication.State != ExecutionCanceled {
+			return aggregate, nil
+		}
+	}
+	if _, found := latestPublishableRepair(aggregate, aggregate.ProviderSnapshot.HeadSHA); !found {
+		return aggregate, nil
+	}
+	return handler.service.QueueBranchPublication(ctx, QueueBranchPublicationRequest{
+		WorkspaceID: aggregate.Workspace.ID, ExpectedVersion: aggregate.Workspace.Version,
+		RequestID: requestID, ExpectedHeadSHA: aggregate.ProviderSnapshot.HeadSHA,
+	})
 }
 
 type publicationHTTPBody struct {
@@ -923,6 +1244,7 @@ func charterAtRevision(values []Charter, revision int64) (Charter, bool) {
 
 func canonicalHTTPRequest(request *http.Request) bool {
 	return request != nil && request.URL != nil && request.URL.Fragment == "" &&
+		!request.URL.ForceQuery &&
 		request.URL.EscapedPath() == request.URL.Path &&
 		!strings.Contains(request.URL.Path, "//") &&
 		!strings.Contains(request.URL.Path, "/./") &&
@@ -1027,15 +1349,16 @@ func decodeWorkspaceCursor(value string) (WorkspaceCursor, error) {
 		raw,
 		&decoded,
 	); err != nil || decoded.UpdatedAt.IsZero() ||
-		!validOpaqueID(decoded.ID, "prw_") {
+		!validOpaqueID(decoded.ID, "devw_") {
 		return WorkspaceCursor{}, ErrInvalid
 	}
 	return WorkspaceCursor{UpdatedAt: decoded.UpdatedAt, ID: decoded.ID}, nil
 }
 
 func decodeHTTPBody(response http.ResponseWriter, request *http.Request, target any) bool {
-	if request.Body == nil || request.URL.RawQuery != "" ||
-		!strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json") {
+	mediaType, _, mediaErr := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if request.Body == nil || request.URL.RawQuery != "" || mediaErr != nil ||
+		!strings.EqualFold(mediaType, "application/json") {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request", nil)
 		return false
 	}
@@ -1161,7 +1484,7 @@ func writeHTTPJSON(response http.ResponseWriter, status int, value any) {
 
 func validPhase(value Phase) bool {
 	switch value {
-	case PhaseIntake, PhaseCharter, PhaseReview, PhaseTriage, PhaseImplementation,
+	case PhaseIntake, PhaseCharter, PhasePlanning, PhaseReview, PhaseTriage, PhaseImplementation,
 		PhaseValidation, PhaseCompletionAudit, PhasePublication, PhaseComplete:
 		return true
 	default:

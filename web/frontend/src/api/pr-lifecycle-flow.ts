@@ -1,4 +1,4 @@
-import { PRWorkspaceAPIError } from "@/api/pr-workspaces"
+import { DevelopmentWorkspaceAPIError as PRWorkspaceAPIError } from "@/api/development-workspaces"
 
 export type PRLifecycleDecisionPoint = string
 

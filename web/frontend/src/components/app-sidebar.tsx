@@ -21,10 +21,11 @@ import {
   IconSparkles,
   IconTools,
 } from "@tabler/icons-react"
-import { type HistoryState, Link, useRouterState } from "@tanstack/react-router"
+import { Link, useRouterState } from "@tanstack/react-router"
 import * as React from "react"
 import { useTranslation } from "react-i18next"
 
+import { listDevelopmentNotifications } from "@/api/notifications"
 import {
   Collapsible,
   CollapsibleContent,
@@ -43,7 +44,6 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { useSidebarChannels } from "@/hooks/use-sidebar-channels"
-import { asPRNavigationState } from "@/routes/-pr-navigation"
 
 interface NavItem {
   title: string
@@ -51,11 +51,6 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
   tourId?: string
-  pullRequestView?:
-    | "work"
-    | "workflow-configurations"
-    | "repository-assignments"
-    | "settings"
   search?: Record<string, string>
   exact?: boolean
 }
@@ -65,7 +60,7 @@ interface NavSection {
   items: NavItem[]
   isChannelsSection?: boolean
   translateLabel?: boolean
-  controlled?: "pull-requests" | "repository-reviews"
+  controlled?: "development" | "repository-reviews"
 }
 
 const chatNavItem: NavItem = {
@@ -96,37 +91,39 @@ const eventsNavItem: NavItem = {
   translateTitle: true,
 }
 
-const pullRequestsWorkNavItem: NavItem = {
-  title: "navigation.pull_requests_work",
-  url: "/pull-requests",
+const developmentNavItem: NavItem = {
+  title: "Development",
+  url: "/development",
   icon: IconGitPullRequest,
-  translateTitle: true,
-  pullRequestView: "work",
+  translateTitle: false,
 }
 
-const pullRequestsWorkflowConfigurationsNavItem: NavItem = {
-  title: "navigation.pull_requests_workflow_configurations",
-  url: "/pull-requests/workflow-configurations",
-  icon: IconSettings,
-  translateTitle: true,
-  pullRequestView: "workflow-configurations",
+const notificationsNavItem: NavItem = {
+  title: "Notifications",
+  url: "/notifications",
+  icon: IconBellRinging,
+  translateTitle: false,
 }
 
-const pullRequestsRepositoryAssignmentsNavItem: NavItem = {
-  title: "navigation.pull_requests_repository_assignments",
-  url: "/pull-requests/repository-assignments",
+const developmentRepositoriesNavItem: NavItem = {
+  title: "Repositories",
+  url: "/development/repositories",
   icon: IconGitBranch,
-  translateTitle: true,
-  pullRequestView: "repository-assignments",
+  translateTitle: false,
 }
 
-const pullRequestsLifecycleSettingsNavItem: NavItem = {
-  title: "navigation.pull_requests_lifecycle_settings",
-  url: "/pull-requests/settings",
-  icon: IconRoute,
-  translateTitle: true,
-  pullRequestView: "settings",
-  search: { tab: "nudging" },
+const developmentPoliciesNavItem: NavItem = {
+  title: "Policies",
+  url: "/development/workflow-configurations",
+  icon: IconSettings,
+  translateTitle: false,
+}
+
+const developmentSettingsNavItem: NavItem = {
+  title: "Settings",
+  url: "/development/settings",
+  icon: IconSettings,
+  translateTitle: false,
 }
 
 const repositoryReviewsNavItem: NavItem = {
@@ -190,18 +187,29 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const routerState = useRouterState()
   const { i18n, t } = useTranslation()
   const { isMobile, setOpenMobile } = useSidebar()
+  const [notificationCount, setNotificationCount] = React.useState(0)
+  React.useEffect(() => {
+    const controller = new AbortController()
+    const refresh = () =>
+      void listDevelopmentNotifications(
+        { query: "status = open", limit: 1 },
+        controller.signal,
+      )
+        .then((page) => setNotificationCount(page.counts?.open ?? 0))
+        .catch(() => undefined)
+    refresh()
+    const interval = window.setInterval(refresh, 30_000)
+    return () => {
+      controller.abort()
+      window.clearInterval(interval)
+    }
+  }, [])
   const currentPath = routerState.location.pathname
-  const currentSearch = routerState.location.search as
-    | Record<string, unknown>
-    | undefined
-  const originWorkspace =
-    typeof currentSearch?.from === "string" &&
-    /^prw_[0-9a-f]{32}$/.test(currentSearch.from)
-      ? currentSearch.from
-      : undefined
-  const pullRequestDestination =
-    currentPath === "/pull-requests" ||
-    currentPath.startsWith("/pull-requests/")
+  const developmentDestination =
+    currentPath === "/development" ||
+    currentPath.startsWith("/development/") ||
+    currentPath === "/notifications" ||
+    currentPath.startsWith("/notifications/")
       ? currentPath
       : null
   const repositoryReviewsDestination =
@@ -215,16 +223,16 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       ? currentPath
       : null
   const servicesDestination =
-    pullRequestDestination ??
+    developmentDestination ??
     repositoryReviewsDestination ??
     modelEvaluationsDestination
   const [servicesOpen, setServicesOpen] = useAutoRevealCollapsible(
     servicesDestination,
     currentPath.startsWith("/agent/") || servicesDestination != null,
   )
-  const [pullRequestsOpen, setPullRequestsOpen] = useAutoRevealCollapsible(
-    pullRequestDestination,
-    pullRequestDestination != null,
+  const [developmentOpen, setDevelopmentOpen] = useAutoRevealCollapsible(
+    developmentDestination,
+    developmentDestination != null,
   )
   const [repositoryReviewsOpen, setRepositoryReviewsOpen] =
     useAutoRevealCollapsible(
@@ -308,13 +316,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ],
       },
       {
-        label: "navigation.pull_requests",
-        controlled: "pull-requests",
+        label: "Development",
+        controlled: "development",
         items: [
-          pullRequestsWorkNavItem,
-          pullRequestsWorkflowConfigurationsNavItem,
-          pullRequestsRepositoryAssignmentsNavItem,
-          pullRequestsLifecycleSettingsNavItem,
+          developmentNavItem,
+          notificationsNavItem,
+          developmentRepositoriesNavItem,
+          developmentPoliciesNavItem,
+          developmentSettingsNavItem,
         ],
       },
       {
@@ -333,27 +342,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   }, [channelItems])
 
   const isNavItemActive = (item: NavItem) => {
-    if (item.pullRequestView === "work") {
-      return (
-        currentPath === "/pull-requests" ||
-        currentPath.startsWith("/pull-requests/prw_")
-      )
-    }
-    if (item.pullRequestView === "workflow-configurations") {
-      return (
-        currentPath === "/pull-requests/workflow-configurations" ||
-        currentPath.startsWith("/pull-requests/workflow-configurations/")
-      )
-    }
-    if (item.pullRequestView === "repository-assignments") {
-      return currentPath === "/pull-requests/repository-assignments"
-    }
-    if (item.pullRequestView === "settings") {
-      return (
-        currentPath === "/pull-requests/settings" ||
-        currentPath.startsWith("/pull-requests/settings/")
-      )
-    }
     const pathActive =
       currentPath === item.url ||
       (!item.exact &&
@@ -364,38 +352,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
   const renderNavItem = (item: NavItem) => {
     const isActive = isNavItemActive(item)
-    const linkTo =
-      item.pullRequestView === "work" && originWorkspace
-        ? `/pull-requests/${originWorkspace}`
-        : item.url
-    const linkSearch =
-      item.pullRequestView === "workflow-configurations"
-        ? originWorkspace
-          ? { from: originWorkspace }
-          : undefined
-        : item.pullRequestView === "repository-assignments"
-          ? originWorkspace
-            ? { from: originWorkspace }
-            : undefined
-          : item.pullRequestView === "settings"
-            ? {
-                tab: "nudging",
-                ...(originWorkspace ? { from: originWorkspace } : {}),
-              }
-            : item.search
-    const prParent = currentPath.startsWith(
-      "/pull-requests/workflow-configurations",
-    )
-      ? "workflow-configurations"
-      : currentPath === "/pull-requests/repository-assignments"
-        ? "repository-assignments"
-        : currentPath === "/pull-requests/settings"
-          ? "settings"
-          : currentPath.startsWith("/pull-requests/prw_")
-            ? "workspace"
-            : currentPath === "/pull-requests"
-              ? "portfolio"
-              : undefined
+    const linkTo = item.url
+    const linkSearch = item.search
 
     const content = (
       <>
@@ -405,6 +363,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <span className={isActive ? "opacity-100" : "opacity-80"}>
           {item.translateTitle === false ? item.title : t(item.title)}
         </span>
+        {item.url === "/notifications" && notificationCount > 0 && (
+          <span className="bg-primary text-primary-foreground ml-auto rounded-full px-1.5 text-[10px] font-medium">
+            {notificationCount}
+          </span>
+        )}
       </>
     )
 
@@ -420,30 +383,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <Link
             to={linkTo}
             activeOptions={
-              item.pullRequestView === "work" ? { exact: true } : undefined
+              item.url === "/development" ? { exact: true } : undefined
             }
             aria-current={isActive ? "page" : undefined}
             data-status={isActive ? "active" : undefined}
             search={linkSearch}
-            state={
-              item.pullRequestView && prParent
-                ? (previous: HistoryState) => {
-                    const current = asPRNavigationState(previous)
-                    return {
-                      ...previous,
-                      prParent,
-                      prParentIndex: current.__TSR_index,
-                      prParentKey: current.__TSR_key,
-                      ...(prParent === "workspace" || prParent === "portfolio"
-                        ? {
-                            prWorkIndex: current.__TSR_index,
-                            prWorkKey: current.__TSR_key,
-                          }
-                        : {}),
-                    }
-                  }
-                : undefined
-            }
           >
             {content}
           </Link>
@@ -459,15 +403,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         section.controlled ? undefined : section.items.some(isNavItemActive)
       }
       open={
-        section.controlled === "pull-requests"
-          ? pullRequestsOpen
+        section.controlled === "development"
+          ? developmentOpen
           : section.controlled === "repository-reviews"
             ? repositoryReviewsOpen
             : undefined
       }
       onOpenChange={
-        section.controlled === "pull-requests"
-          ? setPullRequestsOpen
+        section.controlled === "development"
+          ? setDevelopmentOpen
           : section.controlled === "repository-reviews"
             ? setRepositoryReviewsOpen
             : undefined

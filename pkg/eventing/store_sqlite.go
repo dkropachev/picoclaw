@@ -270,9 +270,16 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 			return fmt.Errorf("drop legacy pull request schema: %w", err)
 		}
 		if _, err = conn.ExecContext(ctx, schemaV19PRWorkspace); err != nil {
-			return fmt.Errorf("create pull request workspace schema v19: %w", err)
+			return fmt.Errorf("create development workspace schema v20: %w", err)
 		}
 	case 19:
+		if err = dropAllPRWorkspaceSchemaV20(ctx, conn); err != nil {
+			return fmt.Errorf("drop v19 pull request workspaces: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, schemaV19PRWorkspace); err != nil {
+			return fmt.Errorf("create development workspace schema v20: %w", err)
+		}
+	case 20:
 		// Already current; validation below is intentionally non-repairing.
 	default:
 		return fmt.Errorf("%w: schema versions 1 through 17 are not supported; database=%d", ErrSchemaInvalid, version)
@@ -286,8 +293,8 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if err = validateSchemaV19PRWorkspace(ctx, conn); err != nil {
 		return fmt.Errorf("validate pull request workspace schema v19: %w", err)
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 19"); err != nil {
-		return fmt.Errorf("record eventing schema v19: %w", err)
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 20"); err != nil {
+		return fmt.Errorf("record eventing schema v20: %w", err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
