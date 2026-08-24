@@ -1495,6 +1495,130 @@ func TestRepositoryModelEvaluationOneShotReadyRecoveryAndTimeoutBudget(t *testin
 	})
 }
 
+func TestRepositoryModelEvaluationResidualOneShotBranches(t *testing.T) {
+	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	if err := controller.Start(); err != nil {
+		t.Fatal(err)
+	}
+	store := controller.store.(repoeval.Store)
+	failedPreflight := func(repository string) repoeval.Evaluation {
+		draft, err := store.Create(t.Context(), repositoryModelEvaluationCreateRequest(repository))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preflighting, err := store.Update(
+			t.Context(),
+			draft.ID,
+			draft.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusPreflighting
+				value.Progress.Stage = repoeval.ProgressResolving
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed, err := store.Update(
+			t.Context(),
+			preflighting.ID,
+			preflighting.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusFailed
+				value.Progress.Stage = repoeval.ProgressFailed
+				value.Failure = "preflight failed"
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return failed
+	}
+
+	busyFailed := failedPreflight("owner/busy-failed")
+	busyToken, _, busyCancel, err := controller.reserveActive(busyFailed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, restartErr := controller.Resume(
+		t.Context(),
+		busyFailed.ID,
+		busyFailed.Version,
+	); !errors.Is(restartErr, errRepositoryModelEvaluationBusy) {
+		t.Fatalf("busy failed restart error=%v", restartErr)
+	}
+	busyCancel()
+	controller.releaseActive(busyFailed.ID, busyToken)
+
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	missingFailed := failedPreflight(missingPath)
+	if _, restartErr := controller.Restart(
+		t.Context(),
+		missingFailed.ID,
+		missingFailed.Version,
+	); !errors.Is(restartErr, repoeval.ErrInvalidEvaluation) {
+		t.Fatalf("missing repository start-over error=%v", restartErr)
+	}
+
+	invalidDraft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest(missingPath),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidPreflight, err := store.Update(
+		t.Context(),
+		invalidDraft.ID,
+		invalidDraft.Version,
+		func(value *repoeval.Evaluation) error {
+			value.OneShot = true
+			value.Status = repoeval.StatusPreflighting
+			value.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidToken, invalidCtx, _, err := controller.reserveActive(invalidPreflight.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.wg.Add(1)
+	controller.executePreflight(invalidCtx, invalidPreflight.ID, invalidToken, "wr_invalid_repository")
+	invalidFailed, found, err := store.Get(t.Context(), invalidPreflight.ID)
+	if err != nil || !found || invalidFailed.Status != repoeval.StatusFailed {
+		t.Fatalf("invalid repository preflight=%#v found=%v err=%v", invalidFailed, found, err)
+	}
+
+	usageDraft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/fenced-usage"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageToken, _, usageCancel, err := controller.reserveActive(usageDraft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usageErr := controller.recordUsage(
+		usageDraft.ID,
+		usageToken,
+		workflows.AgentUsage{},
+		false,
+	); !errors.Is(usageErr, context.Canceled) {
+		t.Fatalf("fenced usage error=%v", usageErr)
+	}
+	usageCancel()
+	controller.releaseActive(usageDraft.ID, usageToken)
+}
+
 func repositoryModelEvaluationCreateRequest(repository string) repoeval.CreateRequest {
 	return repoeval.CreateRequest{
 		Repository:         repository,
