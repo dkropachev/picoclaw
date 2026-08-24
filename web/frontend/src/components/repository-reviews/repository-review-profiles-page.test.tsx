@@ -90,14 +90,13 @@ describe("RepositoryReviewProfilesPage", () => {
       name: "Core bugs",
       reviewer_model: "review-model",
       max_files_per_run: 12,
-      model_price: { input_price_per_1m: 1, output_price_per_1m: 4 },
     })
     expect(
       vi.mocked(createRepositoryReviewProfile).mock.calls[0]?.[0],
     ).not.toHaveProperty("reviewer_models")
   })
 
-  it("resets unknown prices and serializes guarded work", async () => {
+  it("requires central pricing and serializes guarded work", async () => {
     const user = userEvent.setup()
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [
@@ -126,9 +125,26 @@ describe("RepositoryReviewProfilesPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "New profile" }))
     await user.type(screen.getByLabelText("Profile name"), "Unknown price")
-    expect(screen.getByLabelText("Maximum estimated cost ($)")).toBeDisabled()
-    expect(screen.getByLabelText("Maximum estimated cost ($)")).toHaveValue(0)
+    expect(
+      screen.queryByLabelText("Maximum estimated cost ($)"),
+    ).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: /^Advanced/ }))
+    expect(screen.getByLabelText("Maximum estimated cost ($)")).toHaveAttribute(
+      "readonly",
+    )
+    expect(screen.getByLabelText("Maximum estimated cost ($)")).toHaveValue(0)
+    expect(screen.getByLabelText("Maximum estimated cost ($)")).toHaveAttribute(
+      "aria-describedby",
+      "review-cost-pricing-help",
+    )
+    expect(
+      screen.getByText(
+        /requires pricing in the selected model's central configuration/i,
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("link", { name: /Configure pricing/i }),
+    ).toHaveAttribute("href", "/models")
     expect(screen.getByLabelText("Parallel review workers")).toBeDisabled()
     expect(screen.getByLabelText("Parallel review workers")).toHaveValue(1)
     await user.click(screen.getByRole("button", { name: "Save profile" }))
@@ -140,7 +156,6 @@ describe("RepositoryReviewProfilesPage", () => {
       vi.mocked(createRepositoryReviewProfile).mock.calls[0]?.[0],
     ).toMatchObject({
       reviewer_model: "new-model",
-      model_price: { input_price_per_1m: 0, output_price_per_1m: 0 },
       max_parallel_children: 1,
       budget: { max_estimated_cost_usd: 0 },
     })

@@ -13,8 +13,6 @@ import {
   type RepositoryReviewCodeType,
   type RepositoryReviewProfile,
   type RepositoryReviewProfileConfig,
-  type ReviewModelOption,
-  type ReviewModelPrice,
   createRepositoryReviewProfile,
   deleteRepositoryReviewProfile,
   getRepositoryReviewAutomationOptions,
@@ -78,7 +76,6 @@ const emptyProfile: RepositoryReviewProfileConfig = {
   name: "",
   reviewer_model: "",
   review_focus: "Find correctness, security, and reliability bugs.",
-  model_price: { input_price_per_1m: 0, output_price_per_1m: 0 },
   force: false,
   auto_continue: true,
   max_files_per_run: 24,
@@ -197,7 +194,6 @@ export function RepositoryReviewProfilesPage() {
     const value = copyProfile(emptyProfile)
     if (model) {
       value.reviewer_model = model.alias
-      value.model_price = modelPrice(model)
       if (!model.price_known) value.budget.max_estimated_cost_usd = 0
     }
     setEditor({
@@ -210,7 +206,10 @@ export function RepositoryReviewProfilesPage() {
   }
   const openEdit = (profile: RepositoryReviewProfile) => {
     const value = copyProfile(profile)
-    if (!modelPriceBillable(value.model_price)) {
+    const model = options.models.find(
+      (candidate) => candidate.alias === value.reviewer_model,
+    )
+    if (!model?.price_known) {
       value.budget.max_estimated_cost_usd = 0
     }
     if (profileGuardrailsActive(value.budget)) {
@@ -362,8 +361,8 @@ export function RepositoryReviewProfilesPage() {
               {editor?.profile ? "Edit profile" : "New review profile"}
             </DialogTitle>
             <DialogDescription>
-              Basic limits stay visible. Scope, sizing, pricing, and account
-              guardrails remain under Advanced until needed.
+              Name, model, and review focus stay concise. Scope, sizing, and
+              budget or account guardrails remain under Advanced until needed.
             </DialogDescription>
           </DialogHeader>
           {editor && (
@@ -440,7 +439,10 @@ function ProfileForm({
     value.max_parallel_children >= 1 &&
     value.estimated_output_tokens >= 1 &&
     value.budget.check_interval_seconds >= 15
-  const costBudgetAvailable = modelPriceBillable(value.model_price)
+  const selectedModel = models.find(
+    (model) => model.alias === value.reviewer_model,
+  )
+  const costBudgetAvailable = selectedModel?.price_known === true
   const guardrailsActive = profileGuardrailsActive({
     ...value.budget,
     min_remaining_percent_by_window: parseWindowLimits(editor.windowLimits),
@@ -470,7 +472,6 @@ function ProfileForm({
                 value: {
                   ...value,
                   reviewer_model: event.target.value,
-                  model_price: modelPrice(model),
                   budget: {
                     ...value.budget,
                     ...(model?.price_known
@@ -502,24 +503,7 @@ function ProfileForm({
           onChange={(event) => setValue("review_focus", event.target.value)}
         />
       </Field>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <NumberField
-          label="Maximum total tokens"
-          max={1_000_000_000_000}
-          value={value.budget.max_total_tokens}
-          onChange={(next) => setBudget("max_total_tokens", next)}
-        />
-        <NumberField
-          label="Maximum estimated cost ($)"
-          value={value.budget.max_estimated_cost_usd}
-          step="0.01"
-          max={1_000_000_000}
-          disabled={!costBudgetAvailable}
-          onChange={(next) => setBudget("max_estimated_cost_usd", next)}
-        />
-      </div>
-
-      <ReviewAdvancedSection description="scope, sizing, pricing, and quotas">
+      <ReviewAdvancedSection description="scope, sizing, budgets, and quotas">
         <section className="space-y-3">
           <h3 className="text-sm font-semibold">Scope</h3>
           <div className="flex flex-wrap gap-2">
@@ -628,65 +612,41 @@ function ProfileForm({
         </section>
 
         <section className="space-y-3 border-t pt-4">
-          <h3 className="text-sm font-semibold">Model price metadata</h3>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <NumberField
-              label="Input price / 1M ($)"
-              max={1_000_000}
-              value={value.model_price.input_price_per_1m}
-              step="0.0001"
-              onChange={(next) =>
-                setModelPrice(
-                  editor,
-                  { ...value.model_price, input_price_per_1m: next },
-                  onChange,
-                )
-              }
-            />
-            <NumberField
-              label="Output price / 1M ($)"
-              max={1_000_000}
-              value={value.model_price.output_price_per_1m}
-              step="0.0001"
-              onChange={(next) =>
-                setModelPrice(
-                  editor,
-                  { ...value.model_price, output_price_per_1m: next },
-                  onChange,
-                )
-              }
-            />
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Check
-              label="Subscription-backed model"
-              checked={value.model_price.subscription ?? false}
-              onChange={(next) =>
-                setValue("model_price", {
-                  ...value.model_price,
-                  subscription: next,
-                })
-              }
-            />
-            <Field label="Equivalent model">
-              <Input
-                aria-label="Equivalent model"
-                value={value.model_price.equivalent_model ?? ""}
-                onChange={(event) =>
-                  setValue("model_price", {
-                    ...value.model_price,
-                    equivalent_model: event.target.value,
-                  })
-                }
-              />
-            </Field>
-          </div>
-        </section>
-
-        <section className="space-y-3 border-t pt-4">
           <h3 className="text-sm font-semibold">
-            Accounts and quota guardrails
+            Budgets and account guardrails
           </h3>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <NumberField
+              label="Maximum total tokens"
+              max={1_000_000_000_000}
+              value={value.budget.max_total_tokens}
+              onChange={(next) => setBudget("max_total_tokens", next)}
+            />
+            <NumberField
+              label="Maximum estimated cost ($)"
+              value={value.budget.max_estimated_cost_usd}
+              step="0.01"
+              max={1_000_000_000}
+              readOnly={!costBudgetAvailable}
+              describedBy="review-cost-pricing-help"
+              onChange={(next) => setBudget("max_estimated_cost_usd", next)}
+            />
+          </div>
+          <p
+            id="review-cost-pricing-help"
+            className="text-muted-foreground text-xs"
+          >
+            {costBudgetAvailable && selectedModel
+              ? selectedModel.subscription && selectedModel.equivalent_model
+                ? `Subscription-backed model; budget estimates use ${selectedModel.equivalent_model} rates from central configuration: $${selectedModel.input_price_per_1m.toFixed(4)} input / $${selectedModel.output_price_per_1m.toFixed(4)} output per 1M tokens.`
+                : `Read-only pricing from model configuration: $${selectedModel.input_price_per_1m.toFixed(4)} input / $${selectedModel.output_price_per_1m.toFixed(4)} output per 1M tokens.`
+              : "Estimated-cost budgeting requires pricing in the selected model's central configuration. "}
+            {!costBudgetAvailable && (
+              <a className="underline underline-offset-2" href="/models">
+                Configure pricing in Models.
+              </a>
+            )}
+          </p>
           {accounts.length === 0 ? (
             <p className="text-muted-foreground text-xs">
               No account telemetry available.
@@ -807,6 +767,8 @@ function NumberField({
   min = 0,
   max,
   disabled,
+  readOnly,
+  describedBy,
   onChange,
 }: {
   label: string
@@ -815,6 +777,8 @@ function NumberField({
   min?: number
   max?: number
   disabled?: boolean
+  readOnly?: boolean
+  describedBy?: string
   onChange: (value: number) => void
 }) {
   return (
@@ -827,6 +791,9 @@ function NumberField({
         step={step}
         value={value}
         disabled={disabled}
+        readOnly={readOnly}
+        aria-disabled={readOnly || undefined}
+        aria-describedby={describedBy}
         onChange={(event) => {
           const parsed = Number(event.target.value)
           if (!event.target.value || !Number.isFinite(parsed)) {
@@ -866,7 +833,6 @@ function copyProfile(
 ): RepositoryReviewProfileConfig {
   return {
     ...value,
-    model_price: { ...value.model_price },
     scope_policy: {
       ...value.scope_policy,
       code_types: [...value.scope_policy.code_types],
@@ -881,44 +847,6 @@ function copyProfile(
       },
     },
   }
-}
-
-function modelPrice(model?: ReviewModelOption): ReviewModelPrice {
-  if (!model?.price_known) {
-    return { input_price_per_1m: 0, output_price_per_1m: 0 }
-  }
-  return {
-    input_price_per_1m: model.input_price_per_1m,
-    output_price_per_1m: model.output_price_per_1m,
-    ...(model.subscription == null ? {} : { subscription: model.subscription }),
-    ...(model.equivalent_model
-      ? { equivalent_model: model.equivalent_model }
-      : {}),
-  }
-}
-
-function modelPriceBillable(price: ReviewModelPrice): boolean {
-  return price.input_price_per_1m > 0 || price.output_price_per_1m > 0
-}
-
-function setModelPrice(
-  editor: ProfileEditor,
-  model_price: ReviewModelPrice,
-  onChange: (editor: ProfileEditor) => void,
-) {
-  onChange({
-    ...editor,
-    value: {
-      ...editor.value,
-      model_price,
-      budget: {
-        ...editor.value.budget,
-        ...(modelPriceBillable(model_price)
-          ? {}
-          : { max_estimated_cost_usd: 0 }),
-      },
-    },
-  })
 }
 
 function profileGuardrailsActive(

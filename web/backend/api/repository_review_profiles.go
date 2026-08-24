@@ -19,7 +19,6 @@ type repositoryReviewProfileConfigRequest struct {
 	ReviewFocus           string                                 `json:"review_focus"`
 	ScopePolicy           repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel         string                                 `json:"reviewer_model"`
-	ModelPrice            repoaudit.RepositoryReviewModelPrice   `json:"model_price"`
 	Force                 bool                                   `json:"force"`
 	AutoContinue          *bool                                  `json:"auto_continue,omitempty"`
 	MaxFilesPerRun        int                                    `json:"max_files_per_run"`
@@ -98,6 +97,13 @@ func (h *Handler) handleCreateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
 	}
+	if validationErr := h.validateRepositoryReviewProfilePricing(
+		request.ReviewerModel,
+		request.Budget,
+	); validationErr != nil {
+		writeRepositoryReviewProfileError(w, validationErr)
+		return
+	}
 	created, err := store.CreateProfile(r.Context(), repositoryReviewProfileFromRequest(request))
 	if err != nil {
 		writeRepositoryReviewProfileError(w, err)
@@ -122,6 +128,13 @@ func (h *Handler) handleUpdateRepositoryReviewProfile(w http.ResponseWriter, r *
 		return
 	}
 	if validationErr := h.validateRepositoryReviewProfileModel(request.ReviewerModel); validationErr != nil {
+		writeRepositoryReviewProfileError(w, validationErr)
+		return
+	}
+	if validationErr := h.validateRepositoryReviewProfilePricing(
+		request.ReviewerModel,
+		request.Budget,
+	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
 	}
@@ -171,6 +184,30 @@ func (h *Handler) validateRepositoryReviewProfileModel(reviewerModel string) err
 	return fmt.Errorf("%w: reviewer_model %q is not a configured alias", repoaudit.ErrInvalidProfile, reviewerModel)
 }
 
+func (h *Handler) validateRepositoryReviewProfilePricing(
+	reviewerModel string,
+	budget repoaudit.RepositoryReviewBudgetPolicy,
+) error {
+	if budget.MaxEstimatedCostUSD <= 0 {
+		return nil
+	}
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		return err
+	}
+	reviewerModel = strings.TrimSpace(reviewerModel)
+	for _, option := range repositoryReviewModelOptions(cfg) {
+		if option.Alias == reviewerModel && option.PriceKnown {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%w: cost budget requires centrally configured pricing for reviewer_model %q",
+		repoaudit.ErrInvalidProfile,
+		reviewerModel,
+	)
+}
+
 func (h *Handler) handleDeleteRepositoryReviewProfile(w http.ResponseWriter, r *http.Request) {
 	if err := validateRepositoryReviewMutation(r); err != nil {
 		writeRepositoryReviewProfileError(w, err)
@@ -215,7 +252,6 @@ func applyRepositoryReviewProfileRequest(
 	profile.ReviewFocus = request.ReviewFocus
 	profile.ScopePolicy = request.ScopePolicy
 	profile.ReviewerModel = request.ReviewerModel
-	profile.ModelPrice = request.ModelPrice
 	profile.Force = request.Force
 	if request.AutoContinue != nil {
 		profile.AutoContinue = *request.AutoContinue

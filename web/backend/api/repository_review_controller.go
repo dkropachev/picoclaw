@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -280,11 +281,35 @@ func (c *repositoryReviewController) startAutomation(
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
+	profileVersionBeforeMaterialization := automation.ProfileVersion
 	automation, err = c.materializeLatestRepositoryReviewProfile(ctx, store, automation)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
 	expectedVersion = automation.Version
+	refreshPriceSnapshot := (action == "start" && automation.StartedAt.IsZero()) ||
+		action == "restart" || resetBudget ||
+		automation.ProfileVersion != profileVersionBeforeMaterialization
+	if refreshPriceSnapshot {
+		priced := automation
+		if pricingErr := repositoryReviewRefreshAccountingSnapshot(cfg, &priced); pricingErr != nil {
+			return repoaudit.RepositoryReviewAutomation{}, pricingErr
+		}
+		automation, err = c.update(
+			ctx,
+			store,
+			id,
+			expectedVersion,
+			func(candidate *repoaudit.RepositoryReviewAutomation) error {
+				candidate.ModelPrices = maps.Clone(priced.ModelPrices)
+				return nil
+			},
+		)
+		if err != nil {
+			return repoaudit.RepositoryReviewAutomation{}, err
+		}
+		expectedVersion = automation.Version
+	}
 
 	if resetBudget || restart {
 		automation, err = c.update(
@@ -442,6 +467,14 @@ func (c *repositoryReviewController) materializeLatestRepositoryReviewProfile(
 	if repositoryReviewProfileSnapshotMatches(automation, materialized) {
 		return automation, nil
 	}
+	cfg, err := config.LoadConfig(c.handler.configPath)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if pricingErr := repositoryReviewRefreshAccountingSnapshot(cfg, &materialized); pricingErr != nil {
+		return repoaudit.RepositoryReviewAutomation{}, pricingErr
+	}
+	materializedPrices := maps.Clone(materialized.ModelPrices)
 	updated, err := c.update(
 		ctx,
 		store,
@@ -457,6 +490,7 @@ func (c *repositoryReviewController) materializeLatestRepositoryReviewProfile(
 			materialized.Name = repositoryReviewAssignedAutomationName(
 				materialized.Repository, profile.Name,
 			)
+			materialized.ModelPrices = maps.Clone(materializedPrices)
 			resetRepositoryReviewExecutionCampaign(&materialized)
 			*candidate = materialized
 			return nil
@@ -480,7 +514,6 @@ func repositoryReviewProfileSnapshotMatches(
 		reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) &&
 		reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) &&
 		!automation.CompareModels &&
-		reflect.DeepEqual(automation.ModelPrices, materialized.ModelPrices) &&
 		automation.Force == materialized.Force &&
 		automation.AutoContinue == materialized.AutoContinue &&
 		automation.MaxFilesPerRun == materialized.MaxFilesPerRun &&

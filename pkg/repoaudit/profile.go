@@ -37,7 +37,6 @@ type RepositoryReviewProfile struct {
 	ReviewFocus           string                       `json:"review_focus"`
 	ScopePolicy           RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel         string                       `json:"reviewer_model"`
-	ModelPrice            RepositoryReviewModelPrice   `json:"model_price"`
 	Force                 bool                         `json:"force"`
 	AutoContinue          bool                         `json:"auto_continue"`
 	MaxFilesPerRun        int                          `json:"max_files_per_run"`
@@ -258,7 +257,11 @@ func MaterializeRepositoryReviewAutomation(
 	automation.ScopePolicy = profile.ScopePolicy
 	automation.ReviewerModels = []string{profile.ReviewerModel}
 	automation.CompareModels = false
-	automation.ModelPrices = map[string]RepositoryReviewModelPrice{profile.ReviewerModel: profile.ModelPrice}
+	price, hasPrice := automation.ModelPrices[profile.ReviewerModel]
+	automation.ModelPrices = make(map[string]RepositoryReviewModelPrice)
+	if hasPrice {
+		automation.ModelPrices[profile.ReviewerModel] = price
+	}
 	automation.Force = profile.Force
 	automation.AutoContinue = profile.AutoContinue
 	automation.MaxFilesPerRun = profile.MaxFilesPerRun
@@ -339,11 +342,20 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 	if err := json.Unmarshal(data, &profile); err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return RepositoryReviewProfile{}, false, err
+	}
 	if profile.ID != id {
 		return RepositoryReviewProfile{}, false, errors.New("repository review profile identity mismatch")
 	}
 	if err := normalizeProfile(&profile); err != nil {
 		return RepositoryReviewProfile{}, false, err
+	}
+	if _, hadLegacyPrice := legacy["model_price"]; hadLegacyPrice {
+		if err := s.saveProfile(profile); err != nil {
+			return RepositoryReviewProfile{}, false, err
+		}
 	}
 	return profile, true, nil
 }
@@ -381,7 +393,6 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.ReviewFocus = strings.TrimSpace(profile.ReviewFocus)
 	profile.ReviewerModel = strings.TrimSpace(profile.ReviewerModel)
-	profile.ModelPrice.EquivalentModel = strings.TrimSpace(profile.ModelPrice.EquivalentModel)
 	if profile.MaxFilesPerRun == 0 {
 		profile.MaxFilesPerRun = defaultAutomationMaxFilesPerRun
 	}
@@ -416,9 +427,6 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		profile.Version < 1 || !validBoundedText(profile.Name, 256) ||
 		!validBoundedText(profile.ReviewFocus, maxFindingTextBytes) ||
 		!validBoundedText(profile.ReviewerModel, 256) ||
-		!finiteNonnegative(profile.ModelPrice.InputPricePer1M, maxAutomationModelPrice) ||
-		!finiteNonnegative(profile.ModelPrice.OutputPricePer1M, maxAutomationModelPrice) ||
-		!validOptionalAutomationText(profile.ModelPrice.EquivalentModel, 256) ||
 		profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > maxReviewFiles ||
 		profile.MaxContentBytes < 1 || profile.MaxContentBytes > defaultAutomationMaxContentBytes ||
 		profile.MaxParallelChildren < 1 || profile.MaxParallelChildren > 64 ||
@@ -434,10 +442,6 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		len(profile.BudgetPolicy.MinRemainingPercentByWindow) > 0 || profile.BudgetPolicy.PauseOnUnknown) &&
 		profile.MaxParallelChildren != 1 {
 		return fmt.Errorf("%w: guarded budgets require max_parallel_children=1", ErrInvalidProfile)
-	}
-	if profile.BudgetPolicy.MaxEstimatedCostUSD > 0 &&
-		profile.ModelPrice.InputPricePer1M <= 0 && profile.ModelPrice.OutputPricePer1M <= 0 {
-		return fmt.Errorf("%w: cost budget requires positive model pricing", ErrInvalidProfile)
 	}
 	return nil
 }

@@ -605,14 +605,6 @@ func TestNormalizeRepositoryReviewProfileBoundaries(t *testing.T) {
 				profile.MaxParallelChildren = 2
 			},
 		},
-		{
-			name: "cost budget without prices",
-			mutate: func(profile *RepositoryReviewProfile) {
-				profile.BudgetPolicy.MaxEstimatedCostUSD = 1
-				profile.ModelPrice.InputPricePer1M = 0
-				profile.ModelPrice.OutputPricePer1M = 0
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

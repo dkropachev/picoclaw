@@ -1,13 +1,59 @@
 package repoaudit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
+	store := NewStore(t.TempDir())
+	store.now = func() time.Time { return automationTestNow }
+	created, err := store.CreateProfile(
+		context.Background(),
+		validProfileForTest("rrpf_legacy_price", "Legacy price"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.profilePath(created.ID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if unmarshalErr := json.Unmarshal(data, &raw); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	raw["model_price"] = map[string]any{
+		"input_price_per_1m":  1,
+		"output_price_per_1m": 4,
+		"subscription":        true,
+		"equivalent_model":    "metered-review",
+	}
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if _, found, getErr := store.GetProfile(context.Background(), created.ID); getErr != nil || !found {
+		t.Fatalf("GetProfile() found=%v error=%v", found, getErr)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rewritten, []byte(`"model_price"`)) {
+		t.Fatalf("legacy model_price was not removed: %s", rewritten)
+	}
+}
 
 func TestRepositoryReviewProfileCRUDCASAndPrivateFile(t *testing.T) {
 	workspace := t.TempDir()
@@ -525,10 +571,7 @@ func validProfileForTest(id, name string) RepositoryReviewProfile {
 			CodeTypes: []RepositoryReviewCodeType{RepositoryReviewCodeTypeCode},
 		},
 		ReviewerModel: "review-a",
-		ModelPrice: RepositoryReviewModelPrice{
-			InputPricePer1M: 1, OutputPricePer1M: 2, EquivalentModel: "review-a-2026",
-		},
-		AutoContinue: true, MaxFilesPerRun: 12, MaxContentBytes: 64 << 10,
+		AutoContinue:  true, MaxFilesPerRun: 12, MaxContentBytes: 64 << 10,
 		MaxParallelChildren: 1, EstimatedOutputTokens: 1_500,
 		BudgetPolicy: RepositoryReviewBudgetPolicy{CheckIntervalSeconds: 60},
 	}

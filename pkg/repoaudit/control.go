@@ -84,13 +84,12 @@ type RepositoryReviewBudgetPolicy struct {
 	CheckIntervalSeconds        int                `json:"check_interval_seconds"`
 }
 
-// RepositoryReviewModelPrice is caller-supplied comparison metadata keyed by
-// the reviewer alias selected in ReviewerModels.
+// RepositoryReviewModelPrice is a server-resolved accounting snapshot keyed by
+// the reviewer alias selected in ReviewerModels. Subscription inheritance is
+// resolved from central model configuration before this snapshot is stored.
 type RepositoryReviewModelPrice struct {
 	InputPricePer1M  float64 `json:"input_price_per_1m"`
 	OutputPricePer1M float64 `json:"output_price_per_1m"`
-	Subscription     bool    `json:"subscription,omitempty"`
-	EquivalentModel  string  `json:"equivalent_model,omitempty"`
 }
 
 // RepositoryReviewTokenUsage is the cumulative token accounting accepted by
@@ -454,11 +453,31 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if err := json.Unmarshal(data, &automation); err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
+	var legacy struct {
+		ModelPrices map[string]map[string]json.RawMessage `json:"model_prices"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return RepositoryReviewAutomation{}, false, err
+	}
+	hasLegacyPriceMetadata := false
+	for _, price := range legacy.ModelPrices {
+		if _, exists := price["subscription"]; exists {
+			hasLegacyPriceMetadata = true
+		}
+		if _, exists := price["equivalent_model"]; exists {
+			hasLegacyPriceMetadata = true
+		}
+	}
 	if automation.ID != id {
 		return RepositoryReviewAutomation{}, false, errors.New("repository review automation identity mismatch")
 	}
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, false, err
+	}
+	if hasLegacyPriceMetadata {
+		if err := s.saveAutomation(automation); err != nil {
+			return RepositoryReviewAutomation{}, false, err
+		}
 	}
 	return automation, true, nil
 }
@@ -918,14 +937,12 @@ func normalizeModelPrices(automation *RepositoryReviewAutomation) error {
 	normalized := make(map[string]RepositoryReviewModelPrice, len(automation.ModelPrices))
 	for rawAlias, price := range automation.ModelPrices {
 		alias := strings.TrimSpace(rawAlias)
-		price.EquivalentModel = strings.TrimSpace(price.EquivalentModel)
 		if alias == "" || alias != rawAlias && containsAutomationMapKey(normalized, alias) {
 			return fmt.Errorf("%w: duplicate model price alias", ErrInvalidAutomation)
 		}
 		if _, exists := selected[alias]; !exists || !validBoundedText(alias, 256) ||
 			!finiteNonnegative(price.InputPricePer1M, maxAutomationModelPrice) ||
-			!finiteNonnegative(price.OutputPricePer1M, maxAutomationModelPrice) ||
-			!validOptionalAutomationText(price.EquivalentModel, 256) {
+			!finiteNonnegative(price.OutputPricePer1M, maxAutomationModelPrice) {
 			return fmt.Errorf("%w: invalid model price", ErrInvalidAutomation)
 		}
 		if _, duplicate := normalized[alias]; duplicate {

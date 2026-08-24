@@ -16,6 +16,53 @@ import (
 
 var automationTestNow = time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
 
+func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
+	store := NewStore(t.TempDir())
+	store.now = func() time.Time { return automationTestNow }
+	automation := createAutomationForTest(
+		t,
+		store,
+		"rra_11111111111111111111111111111111",
+		"Legacy price metadata",
+	)
+	path := store.automationPath(automation.ID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if unmarshalErr := json.Unmarshal(data, &raw); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	prices := raw["model_prices"].(map[string]any)
+	price := prices["review-a"].(map[string]any)
+	price["subscription"] = true
+	price["equivalent_model"] = "metered-review"
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	loaded, found, err := store.GetAutomation(context.Background(), automation.ID)
+	if err != nil || !found {
+		t.Fatalf("GetAutomation() found=%v error=%v", found, err)
+	}
+	if loaded.ModelPrices["review-a"].InputPricePer1M != 1 {
+		t.Fatalf("numeric price snapshot changed: %#v", loaded.ModelPrices)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rewritten), `"subscription"`) ||
+		strings.Contains(string(rewritten), `"equivalent_model"`) {
+		t.Fatalf("legacy price metadata was not removed: %s", rewritten)
+	}
+}
+
 func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewStore(workspace)
@@ -32,7 +79,6 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 			" review-expensive ": {InputPricePer1M: 5, OutputPricePer1M: 15},
 			"review-cheap": {
 				InputPricePer1M: 0.1, OutputPricePer1M: 0.4,
-				Subscription: true, EquivalentModel: " metered-cheap ",
 			},
 		},
 		AutoContinue: true,
@@ -66,7 +112,7 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 		t.Fatalf("new automation defaults = %#v", automation)
 	}
 	if _, ok := automation.BudgetPolicy.MinRemainingPercentByWindow["weekly"]; !ok ||
-		automation.ModelPrices["review-cheap"].EquivalentModel != "metered-cheap" {
+		automation.ModelPrices["review-cheap"].InputPricePer1M != 0.1 {
 		t.Fatalf("normalized budget/prices = %#v %#v", automation.BudgetPolicy, automation.ModelPrices)
 	}
 	if !automation.AutoContinue || !automation.BudgetPolicy.AutoResume {

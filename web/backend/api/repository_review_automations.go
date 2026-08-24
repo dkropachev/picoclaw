@@ -25,25 +25,24 @@ import (
 )
 
 type repositoryReviewAutomationConfigRequest struct {
-	Name                  string                                          `json:"name"`
-	Repository            string                                          `json:"repository"`
-	ProfileID             string                                          `json:"profile_id,omitempty"`
-	Branch                string                                          `json:"branch,omitempty"`
-	Ref                   string                                          `json:"ref,omitempty"`
-	Target                string                                          `json:"target"`
-	ReviewFocus           string                                          `json:"review_focus"`
-	ScopePolicy           repoaudit.RepositoryReviewScopePolicy           `json:"scope_policy"`
-	ReviewerModels        []string                                        `json:"reviewer_models"`
-	CompareModels         bool                                            `json:"compare_models"`
-	ModelPrices           map[string]repoaudit.RepositoryReviewModelPrice `json:"model_prices,omitempty"`
-	Force                 bool                                            `json:"force"`
-	AutoContinue          *bool                                           `json:"auto_continue,omitempty"`
-	MaxFilesPerRun        int                                             `json:"max_files_per_run"`
-	MaxContentBytes       int64                                           `json:"max_content_bytes"`
-	MaxParallelChildren   int                                             `json:"max_parallel_children"`
-	EstimatedOutputTokens int                                             `json:"estimated_output_tokens"`
-	Budget                repoaudit.RepositoryReviewBudgetPolicy          `json:"budget"`
-	ExpectedVersion       int64                                           `json:"expected_version,omitempty"`
+	Name                  string                                 `json:"name"`
+	Repository            string                                 `json:"repository"`
+	ProfileID             string                                 `json:"profile_id,omitempty"`
+	Branch                string                                 `json:"branch,omitempty"`
+	Ref                   string                                 `json:"ref,omitempty"`
+	Target                string                                 `json:"target"`
+	ReviewFocus           string                                 `json:"review_focus"`
+	ScopePolicy           repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModels        []string                               `json:"reviewer_models"`
+	CompareModels         bool                                   `json:"compare_models"`
+	Force                 bool                                   `json:"force"`
+	AutoContinue          *bool                                  `json:"auto_continue,omitempty"`
+	MaxFilesPerRun        int                                    `json:"max_files_per_run"`
+	MaxContentBytes       int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren   int                                    `json:"max_parallel_children"`
+	EstimatedOutputTokens int                                    `json:"estimated_output_tokens"`
+	Budget                repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
+	ExpectedVersion       int64                                  `json:"expected_version,omitempty"`
 }
 
 type repositoryReviewAutomationActionRequest struct {
@@ -160,6 +159,10 @@ func (h *Handler) handleCreateRepositoryReviewAutomation(w http.ResponseWriter, 
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	if pricingErr := h.refreshRepositoryReviewAccountingSnapshot(&automation); pricingErr != nil {
+		writeRepositoryReviewAutomationError(w, pricingErr)
+		return
+	}
 	created, err := store.CreateAutomation(r.Context(), automation)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
@@ -193,6 +196,10 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
+	if pricingErr := h.refreshRepositoryReviewAccountingSnapshot(&prepared); pricingErr != nil {
+		writeRepositoryReviewAutomationError(w, pricingErr)
+		return
+	}
 	updated, err := store.UpdateAutomation(
 		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
@@ -217,7 +224,8 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 				applyRepositoryReviewAutomationRequest(candidate, request)
 				candidate.Ref = prepared.Ref
 			}
-			if repositoryReviewExecutionConfigurationChanged(previous, *candidate) {
+			executionChanged := repositoryReviewExecutionConfigurationChanged(previous, *candidate)
+			if executionChanged {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 				candidate.PauseReason = ""
@@ -234,6 +242,9 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 				candidate.NextCheckAt = time.Time{}
 				candidate.AccountLimitSnapshots = nil
 			} else {
+				if !previous.StartedAt.IsZero() {
+					candidate.ModelPrices = maps.Clone(previous.ModelPrices)
+				}
 				if repositoryReviewQuotaConfigurationChanged(previous.BudgetPolicy, candidate.BudgetPolicy) {
 					candidate.AccountLimitSnapshots = nil
 					candidate.NextCheckAt = time.Time{}
@@ -389,7 +400,7 @@ func repositoryReviewAutomationFromRequest(
 		Target: request.Target, ReviewFocus: request.ReviewFocus,
 		ScopePolicy:    request.ScopePolicy,
 		ReviewerModels: request.ReviewerModels, CompareModels: request.CompareModels,
-		ModelPrices: request.ModelPrices, Force: request.Force,
+		Force:          request.Force,
 		MaxFilesPerRun: request.MaxFilesPerRun, MaxContentBytes: request.MaxContentBytes,
 		MaxParallelChildren:   request.MaxParallelChildren,
 		EstimatedOutputTokens: request.EstimatedOutputTokens,
@@ -669,7 +680,6 @@ func applyRepositoryReviewAutomationRequest(
 	automation.ScopePolicy = request.ScopePolicy
 	automation.ReviewerModels = append([]string(nil), request.ReviewerModels...)
 	automation.CompareModels = request.CompareModels
-	automation.ModelPrices = request.ModelPrices
 	automation.Force = request.Force
 	if request.AutoContinue != nil {
 		automation.AutoContinue = *request.AutoContinue
@@ -812,6 +822,62 @@ func repositoryReviewModelOptions(cfg *config.Config) []repositoryReviewModelOpt
 	return options
 }
 
+func (h *Handler) refreshRepositoryReviewAccountingSnapshot(
+	automation *repoaudit.RepositoryReviewAutomation,
+) error {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		return err
+	}
+	return repositoryReviewRefreshAccountingSnapshot(cfg, automation)
+}
+
+func repositoryReviewRefreshAccountingSnapshot(
+	cfg *config.Config,
+	automation *repoaudit.RepositoryReviewAutomation,
+) error {
+	if automation == nil {
+		return fmt.Errorf("%w: repository review automation is required", repoaudit.ErrInvalidAutomation)
+	}
+	aliases := make(map[string]config.ModelAliasConfig)
+	if cfg != nil {
+		aliases = make(map[string]config.ModelAliasConfig, len(cfg.ModelAliases))
+		for _, alias := range cfg.ModelAliases {
+			aliases[strings.TrimSpace(alias.Name)] = alias
+		}
+	}
+	snapshot := make(map[string]repoaudit.RepositoryReviewModelPrice)
+	for _, aliasName := range repositoryReviewExecutionModels(*automation) {
+		alias, found := aliases[strings.TrimSpace(aliasName)]
+		if !found {
+			continue
+		}
+		resolved, known := repositoryReviewConservativePricedAccount(cfg, alias)
+		if !known || resolved.InputPricePerMTok <= 0 && resolved.OutputPricePerMTok <= 0 {
+			continue
+		}
+		snapshot[aliasName] = repoaudit.RepositoryReviewModelPrice{
+			InputPricePer1M:  resolved.InputPricePerMTok,
+			OutputPricePer1M: resolved.OutputPricePerMTok,
+		}
+	}
+	automation.ModelPrices = snapshot
+	if automation.BudgetPolicy.MaxEstimatedCostUSD <= 0 {
+		return nil
+	}
+	for _, aliasName := range repositoryReviewExecutionModels(*automation) {
+		price, known := snapshot[aliasName]
+		if !known || price.InputPricePer1M <= 0 && price.OutputPricePer1M <= 0 {
+			return fmt.Errorf(
+				"%w: cost budget requires centrally configured pricing for reviewer %q",
+				repoaudit.ErrInvalidAutomation,
+				aliasName,
+			)
+		}
+	}
+	return nil
+}
+
 func repositoryReviewAliasAvailableForRuntime(
 	cfg *config.Config,
 	alias config.ModelAliasConfig,
@@ -884,17 +950,7 @@ func repositoryReviewRuntimeAccountRefs(cfg *config.Config) []string {
 		}
 	}
 	if router != nil {
-		refs = refs[:0]
-		for _, block := range router.Blocks {
-			switch strings.TrimSpace(block.Type) {
-			case config.AccountRouterBlockTypeAccount:
-				refs = append(refs, strings.TrimSpace(block.Account))
-			case config.AccountRouterBlockTypeLoadBalance:
-				for _, accountRef := range block.Accounts {
-					refs = append(refs, strings.TrimSpace(accountRef))
-				}
-			}
-		}
+		refs = repositoryReviewReachableAccountRouterRefs(router)
 	}
 	seen := make(map[string]struct{}, len(refs))
 	out := make([]string, 0, len(refs))
@@ -909,6 +965,63 @@ func repositoryReviewRuntimeAccountRefs(cfg *config.Config) []string {
 		out = append(out, ref)
 	}
 	return out
+}
+
+func repositoryReviewReachableAccountRouterRefs(
+	router *config.AccountRouterConfig,
+) []string {
+	if router == nil {
+		return nil
+	}
+	blocks := make(map[string]config.AccountRouterBlock, len(router.Blocks))
+	for _, block := range router.Blocks {
+		if id := strings.TrimSpace(block.ID); id != "" {
+			blocks[id] = block
+		}
+	}
+	seenBlocks := make(map[string]struct{}, len(blocks))
+	seenAccounts := make(map[string]struct{})
+	refs := make([]string, 0)
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return
+		}
+		if _, exists := seenAccounts[ref]; exists {
+			return
+		}
+		seenAccounts[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	var walk func(string)
+	walk = func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, visited := seenBlocks[id]; visited {
+			return
+		}
+		block, exists := blocks[id]
+		if !exists {
+			return
+		}
+		seenBlocks[id] = struct{}{}
+		switch strings.TrimSpace(block.Type) {
+		case config.AccountRouterBlockTypeAccount:
+			add(block.Account)
+		case config.AccountRouterBlockTypeLoadBalance:
+			for _, account := range block.Accounts {
+				add(account)
+			}
+		case config.AccountRouterBlockTypeBranch:
+			walk(block.Then)
+			walk(block.Else)
+		}
+		walk(block.Fallback)
+	}
+	walk(router.Entry)
+	return refs
 }
 
 func repositoryReviewConservativePricedAccount(
@@ -933,7 +1046,7 @@ func repositoryReviewAliasPrice(
 	visiting[aliasName] = true
 	defer delete(visiting, aliasName)
 	aggregate := &config.ModelConfig{}
-	found := false
+	reachable := false
 	for _, accountRef := range repositoryReviewRuntimeAccountRefs(cfg) {
 		account, err := cfg.GetEnabledModelConfig(accountRef)
 		if err != nil || account == nil || account.IsAccountRouter() || account.IsModelRouter() {
@@ -943,11 +1056,64 @@ func repositoryReviewAliasPrice(
 		if err != nil {
 			continue
 		}
+		reachable = true
 		inputPrice := resolved.InputPricePerMTok
 		outputPrice := resolved.OutputPricePerMTok
 		equivalent := strings.TrimSpace(resolved.SubscriptionEquivalentModel)
 		if inputPrice <= 0 && outputPrice <= 0 && resolved.Subscription && equivalent != "" {
-			if inherited, ok := repositoryReviewAliasPrice(cfg, equivalent, visiting); ok {
+			if inherited, ok := repositoryReviewEquivalentAliasPrice(cfg, equivalent, visiting); ok {
+				inputPrice = inherited.InputPricePerMTok
+				outputPrice = inherited.OutputPricePerMTok
+			}
+		}
+		if inputPrice <= 0 && outputPrice <= 0 {
+			return nil, false
+		}
+		aggregate.InputPricePerMTok = max(aggregate.InputPricePerMTok, inputPrice)
+		aggregate.OutputPricePerMTok = max(aggregate.OutputPricePerMTok, outputPrice)
+		aggregate.Subscription = aggregate.Subscription || resolved.Subscription
+		if aggregate.SubscriptionEquivalentModel == "" && equivalent != "" {
+			aggregate.SubscriptionEquivalentModel = equivalent
+		}
+		if aggregate.Provider == "" {
+			aggregate.Provider = resolved.Provider
+		}
+	}
+	return aggregate, reachable
+}
+
+// repositoryReviewEquivalentAliasPrice resolves comparison-only rates from any
+// centrally configured direct account. These accounts are pricing authorities,
+// not execution routes for the original subscription-backed alias.
+func repositoryReviewEquivalentAliasPrice(
+	cfg *config.Config,
+	aliasName string,
+	visiting map[string]bool,
+) (*config.ModelConfig, bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	aliasName = strings.TrimSpace(aliasName)
+	if aliasName == "" || visiting[aliasName] {
+		return nil, false
+	}
+	visiting[aliasName] = true
+	defer delete(visiting, aliasName)
+	aggregate := &config.ModelConfig{}
+	found := false
+	for _, account := range cfg.ModelList {
+		if account == nil || !account.Enabled || account.IsAccountRouter() || account.IsModelRouter() {
+			continue
+		}
+		resolved, err := cfg.ResolveModelAliasConfig(aliasName, account.ModelName)
+		if err != nil {
+			continue
+		}
+		inputPrice := resolved.InputPricePerMTok
+		outputPrice := resolved.OutputPricePerMTok
+		equivalent := strings.TrimSpace(resolved.SubscriptionEquivalentModel)
+		if inputPrice <= 0 && outputPrice <= 0 && resolved.Subscription && equivalent != "" {
+			if inherited, ok := repositoryReviewEquivalentAliasPrice(cfg, equivalent, visiting); ok {
 				inputPrice = inherited.InputPricePerMTok
 				outputPrice = inherited.OutputPricePerMTok
 			}
@@ -958,13 +1124,6 @@ func repositoryReviewAliasPrice(
 		found = true
 		aggregate.InputPricePerMTok = max(aggregate.InputPricePerMTok, inputPrice)
 		aggregate.OutputPricePerMTok = max(aggregate.OutputPricePerMTok, outputPrice)
-		aggregate.Subscription = aggregate.Subscription || resolved.Subscription
-		if aggregate.SubscriptionEquivalentModel == "" && equivalent != "" {
-			aggregate.SubscriptionEquivalentModel = equivalent
-		}
-		if aggregate.Provider == "" {
-			aggregate.Provider = resolved.Provider
-		}
 	}
 	return aggregate, found
 }

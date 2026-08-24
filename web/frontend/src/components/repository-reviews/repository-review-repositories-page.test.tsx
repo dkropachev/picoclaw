@@ -47,7 +47,6 @@ const profile = {
     exclude_folders: [],
     free_text: "",
   },
-  model_price: { input_price_per_1m: 1, output_price_per_1m: 4 },
   force: false,
   auto_continue: true,
   max_files_per_run: 24,
@@ -103,7 +102,12 @@ describe("RepositoryReviewRepositoriesPage", () => {
       max_parallel_children: 1,
       estimated_output_tokens: 4096,
       auto_continue: true,
-      model_prices: { [profile.reviewer_model]: profile.model_price },
+      model_prices: {
+        [profile.reviewer_model]: {
+          input_price_per_1m: 1,
+          output_price_per_1m: 4,
+        },
+      },
       budget: profile.budget,
       status: "idle",
       run_ids: [],

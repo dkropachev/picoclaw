@@ -26,6 +26,17 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 		!created.AutoContinue {
 		t.Fatalf("created profile=%#v", created)
 	}
+	legacyPriceBody := repositoryReviewProfileCreateBody("Legacy price", "cheap")
+	legacyPriceBody["model_price"] = map[string]any{
+		"input_price_per_1m":  1.0,
+		"output_price_per_1m": 4.0,
+	}
+	legacyPrice := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", legacyPriceBody,
+	)
+	if legacyPrice.Code != http.StatusBadRequest {
+		t.Fatalf("legacy model_price status=%d body=%s", legacyPrice.Code, legacyPrice.Body.String())
+	}
 
 	list := httptest.NewRecorder()
 	mux.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/repository-reviews/profiles", nil))
@@ -200,6 +211,162 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("unassigned delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+}
+
+func TestRepositoryReviewCostBudgetRequiresCentralPricingAtMutationAndAdmission(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+
+	pricedBody := repositoryReviewProfileCreateBody("Priced review", "cheap")
+	pricedBody["budget"] = map[string]any{
+		"max_estimated_cost_usd": 10,
+		"check_interval_seconds": 30,
+	}
+	createdResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", pricedBody,
+	)
+	if createdResponse.Code != http.StatusCreated {
+		t.Fatalf("priced profile create status=%d body=%s", createdResponse.Code, createdResponse.Body.String())
+	}
+	var created struct {
+		Profile repoaudit.RepositoryReviewProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(createdResponse.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	automationResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/automations", map[string]any{
+			"repository": "https://github.com/acme/priced.git",
+			"profile_id": created.Profile.ID,
+		},
+	)
+	if automationResponse.Code != http.StatusCreated {
+		t.Fatalf(
+			"priced automation create status=%d body=%s",
+			automationResponse.Code,
+			automationResponse.Body.String(),
+		)
+	}
+	var assigned struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(automationResponse.Body.Bytes(), &assigned); err != nil {
+		t.Fatal(err)
+	}
+	price := assigned.Automation.ModelPrices["cheap"]
+	if price.InputPricePer1M != 1 || price.OutputPricePer1M != 2 {
+		t.Fatalf("server accounting snapshot=%#v", assigned.Automation.ModelPrices)
+	}
+
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ModelList[0].InputPricePerMTok = 0
+	cfg.ModelList[0].OutputPricePerMTok = 0
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+
+	unknownCreate := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles",
+		func() map[string]any {
+			body := repositoryReviewProfileCreateBody("Unknown price", "cheap")
+			body["budget"] = map[string]any{
+				"max_estimated_cost_usd": 1,
+				"check_interval_seconds": 30,
+			}
+			return body
+		}(),
+	)
+	if unknownCreate.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-price create status=%d body=%s", unknownCreate.Code, unknownCreate.Body.String())
+	}
+	updateBody := repositoryReviewProfileBody(created.Profile)
+	updateBody["expected_version"] = created.Profile.Version
+	updateBody["name"] = "Still centrally priced"
+	unknownUpdate := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPatch,
+		"/api/repository-reviews/profiles/"+created.Profile.ID,
+		updateBody,
+	)
+	if unknownUpdate.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-price update status=%d body=%s", unknownUpdate.Code, unknownUpdate.Body.String())
+	}
+	unknownAssignment := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/automations", map[string]any{
+			"repository": "https://github.com/acme/unpriced.git",
+			"profile_id": created.Profile.ID,
+		},
+	)
+	if unknownAssignment.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"unknown-price assignment status=%d body=%s",
+			unknownAssignment.Code,
+			unknownAssignment.Body.String(),
+		)
+	}
+	unknownAssignmentUpdate := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPatch,
+		"/api/repository-reviews/automations/"+assigned.Automation.ID,
+		map[string]any{
+			"repository":       assigned.Automation.Repository,
+			"profile_id":       created.Profile.ID,
+			"expected_version": assigned.Automation.Version,
+		},
+	)
+	if unknownAssignmentUpdate.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"unknown-price assignment update status=%d body=%s",
+			unknownAssignmentUpdate.Code,
+			unknownAssignmentUpdate.Body.String(),
+		)
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestProfile, err := store.UpdateProfile(
+		t.Context(),
+		created.Profile.ID,
+		created.Profile.Version,
+		func(candidate *repoaudit.RepositoryReviewProfile) error {
+			candidate.Name = "Latest centrally governed profile"
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, refreshErr := newRepositoryReviewController(handler).materializeLatestRepositoryReviewProfile(
+		t.Context(),
+		store,
+		assigned.Automation,
+	); refreshErr == nil {
+		t.Fatal("stale profile snapshot accepted unknown central pricing")
+	}
+	brokenConfigPath := filepath.Join(t.TempDir(), "broken-config.json")
+	if err := os.WriteFile(brokenConfigPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brokenHandler := NewHandler(brokenConfigPath)
+	stale := assigned.Automation
+	stale.ProfileVersion = latestProfile.Version - 1
+	if _, refreshErr := newRepositoryReviewController(brokenHandler).materializeLatestRepositoryReviewProfile(
+		t.Context(),
+		store,
+		stale,
+	); refreshErr == nil {
+		t.Fatal("profile materialization accepted an unreadable central configuration")
+	}
+	unknownAdmission := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+assigned.Automation.ID+"/start",
+		map[string]any{"expected_version": assigned.Automation.Version},
+	)
+	if unknownAdmission.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-price admission status=%d body=%s", unknownAdmission.Code, unknownAdmission.Body.String())
 	}
 }
 
@@ -969,10 +1136,7 @@ func repositoryReviewProfileCreateBody(name, model string) map[string]any {
 		"name": name, "review_focus": "Find correctness and security defects.",
 		"scope_policy":   map[string]any{"code_types": []string{"code"}},
 		"reviewer_model": model,
-		"model_price": map[string]any{
-			"input_price_per_1m": 1.0, "output_price_per_1m": 4.0,
-		},
-		"force": false, "auto_continue": true,
+		"force":          false, "auto_continue": true,
 		"max_files_per_run": 4, "max_content_bytes": 65536,
 		"max_parallel_children": 1, "estimated_output_tokens": 900,
 		"budget": map[string]any{"check_interval_seconds": 30},
@@ -983,7 +1147,7 @@ func repositoryReviewProfileBody(profile repoaudit.RepositoryReviewProfile) map[
 	return map[string]any{
 		"name": profile.Name, "review_focus": profile.ReviewFocus,
 		"scope_policy": profile.ScopePolicy, "reviewer_model": profile.ReviewerModel,
-		"model_price": profile.ModelPrice, "force": profile.Force,
+		"force":         profile.Force,
 		"auto_continue": profile.AutoContinue, "max_files_per_run": profile.MaxFilesPerRun,
 		"max_content_bytes":       profile.MaxContentBytes,
 		"max_parallel_children":   profile.MaxParallelChildren,

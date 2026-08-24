@@ -384,7 +384,6 @@ describe("repository review API", () => {
         free_text: "Prioritize state transitions.",
       },
       reviewer_model: "review-model",
-      model_price: { input_price_per_1m: 1, output_price_per_1m: 4 },
       force: false,
       auto_continue: true,
       max_files_per_run: 24,

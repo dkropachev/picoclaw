@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -436,6 +437,17 @@ func TestRepositoryReviewAutomationStartAutoContinuesBoundedBatches(t *testing.T
 		}
 		remaining := 2
 		reviewed := 1
+		if call == 1 {
+			cfg, err := config.LoadConfig(handler.configPath)
+			if err != nil {
+				return nil, err
+			}
+			cfg.ModelList[0].InputPricePerMTok = 9
+			cfg.ModelList[0].OutputPricePerMTok = 13
+			if err := config.SaveConfig(handler.configPath, cfg); err != nil {
+				return nil, err
+			}
+		}
 		if call == 2 {
 			remaining = 0
 			reviewed = 2
@@ -452,7 +464,7 @@ func TestRepositoryReviewAutomationStartAutoContinuesBoundedBatches(t *testing.T
 	}
 	automation := testRepositoryReviewAutomation()
 	automation.ModelPrices = map[string]repoaudit.RepositoryReviewModelPrice{
-		"cheap": {InputPricePer1M: 1, OutputPricePer1M: 2},
+		"cheap": {InputPricePer1M: 7, OutputPricePer1M: 11},
 	}
 	automation, err = store.CreateAutomation(t.Context(), automation)
 	if err != nil {
@@ -482,11 +494,75 @@ func TestRepositoryReviewAutomationStartAutoContinuesBoundedBatches(t *testing.T
 		t.Fatalf("automation did not complete; batches=%d", calls.Load())
 	}
 	stats := completed.ModelStats["cheap"]
+	price := completed.ModelPrices["cheap"]
 	if calls.Load() != 2 || len(completed.RunIDs) != 2 ||
 		completed.Progress.CompletedBatches != 2 || completed.Progress.RemainingFiles != 0 ||
 		completed.Usage.TotalTokens != 100 || stats.Requests != 2 ||
-		math.Abs(completed.EstimatedCostUSD-0.00012) > 0.0000001 {
+		math.Abs(completed.EstimatedCostUSD-0.00012) > 0.0000001 ||
+		price.InputPricePer1M != 1 || price.OutputPricePer1M != 2 {
 		t.Fatalf("completed=%#v stats=%#v calls=%d", completed, stats, calls.Load())
+	}
+}
+
+func TestRepositoryReviewOrdinaryResumeRetainsLegacyAccountingSnapshot(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	seenPrice := make(chan repoaudit.RepositoryReviewModelPrice, 1)
+	controller.runBatch = func(
+		_ context.Context,
+		automation repoaudit.RepositoryReviewAutomation,
+		runID string,
+		observe workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		seenPrice <- automation.ModelPrices["cheap"]
+		if err := observe(workflows.AgentUsage{
+			Model: "cheap", Reviewer: "cheap",
+			PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
+		}); err != nil {
+			return nil, err
+		}
+		return &workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"remainingFiles": 0},
+		}, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation := testRepositoryReviewAutomation()
+	automation.Status = repoaudit.RepositoryReviewAutomationPaused
+	automation.PauseReason = repoaudit.RepositoryReviewPauseManual
+	automation.PauseDetail = "legacy campaign paused"
+	automation.ModelPrices = map[string]repoaudit.RepositoryReviewModelPrice{
+		"cheap": {InputPricePer1M: 7, OutputPricePer1M: 11},
+	}
+	automation, err = store.CreateAutomation(t.Context(), automation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/resume",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if resumed.Code != http.StatusAccepted {
+		t.Fatalf("resume status=%d body=%s", resumed.Code, resumed.Body.String())
+	}
+	select {
+	case price := <-seenPrice:
+		if price.InputPricePer1M != 7 || price.OutputPricePer1M != 11 {
+			t.Fatalf("ordinary resume replaced legacy snapshot: %#v", price)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resumed batch did not start")
+	}
+	completed := waitForRepositoryReviewAutomationStatus(
+		t, store, automation.ID, repoaudit.RepositoryReviewAutomationCompleted,
+	)
+	if math.Abs(completed.EstimatedCostUSD-0.000092) > 0.0000001 {
+		t.Fatalf("legacy snapshot cost=%v", completed.EstimatedCostUSD)
 	}
 }
 
@@ -664,9 +740,9 @@ func TestRepositoryReviewBudgetResetKeepsLifetimeComparisonWithoutResurrectingGu
 		t, store, automation.ID, repoaudit.RepositoryReviewAutomationCompleted,
 	)
 	stats := completed.ModelStats["cheap"]
-	if completed.Usage.TotalTokens != 10 || math.Abs(completed.EstimatedCostUSD-0.00001) > 0.0000001 ||
+	if completed.Usage.TotalTokens != 10 || math.Abs(completed.EstimatedCostUSD-0.000012) > 0.0000001 ||
 		stats.Tokens.TotalTokens != 110 || stats.Requests != 3 || stats.Findings != 1 ||
-		stats.ReviewedFiles != 1 || math.Abs(stats.EstimatedCostUSD-0.00011) > 0.0000001 {
+		stats.ReviewedFiles != 1 || math.Abs(stats.EstimatedCostUSD-0.000112) > 0.0000001 {
 		t.Fatalf("reset completion=%#v stats=%#v", completed, stats)
 	}
 	updateBody := automationConfigBody(completed)
@@ -679,7 +755,7 @@ func TestRepositoryReviewBudgetResetKeepsLifetimeComparisonWithoutResurrectingGu
 	}
 	latest, _, err := store.GetAutomation(t.Context(), automation.ID)
 	if err != nil || latest.Usage.TotalTokens != 10 ||
-		math.Abs(latest.EstimatedCostUSD-0.00001) > 0.0000001 {
+		math.Abs(latest.EstimatedCostUSD-0.000012) > 0.0000001 {
 		t.Fatalf("post-update guard epoch=%#v err=%v", latest, err)
 	}
 }
@@ -889,6 +965,191 @@ func TestRepositoryReviewModelOptionsExposePriceAndBlockAgenticCLI(t *testing.T)
 	}
 }
 
+func TestRepositoryReviewModelOptionsRejectPartiallyPricedAccountRoute(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.AccountRef = "review-router"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name: "review", Model: "openai/review",
+	}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "priced", Provider: "openai", Model: "openai/review", Enabled: true,
+			InputPricePerMTok: 1, OutputPricePerMTok: 4,
+		},
+		{ModelName: "unpriced", Provider: "openai", Model: "openai/review", Enabled: true},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name: "review-router", Enabled: true, Entry: "accounts",
+		Blocks: []config.AccountRouterBlock{{
+			ID: "accounts", Type: config.AccountRouterBlockTypeLoadBalance,
+			Accounts: []string{"priced", "unpriced"},
+		}},
+	}}
+
+	options := repositoryReviewModelOptions(cfg)
+	if len(options) != 1 || !options[0].Available || options[0].PriceKnown {
+		t.Fatalf("partially priced option=%#v", options)
+	}
+	automation := testRepositoryReviewAutomation()
+	automation.ReviewerModels = []string{"review"}
+	automation.BudgetPolicy.MaxEstimatedCostUSD = 10
+	if err := repositoryReviewRefreshAccountingSnapshot(cfg, &automation); err == nil {
+		t.Fatal("partially priced route admitted a USD budget")
+	}
+}
+
+func TestRepositoryReviewPricingIgnoresUnreachableAccountRouterBlocks(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.AccountRef = "review-router"
+	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "review", Model: "openai/review"}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "priced", Provider: "openai", Model: "openai/review", Enabled: true,
+			InputPricePerMTok: 1, OutputPricePerMTok: 4,
+		},
+		{ModelName: "orphan-unpriced", Provider: "openai", Model: "openai/review", Enabled: true},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name: "review-router", Enabled: true, Entry: "entry",
+		Blocks: []config.AccountRouterBlock{
+			{ID: "entry", Type: config.AccountRouterBlockTypeAccount, Account: "priced"},
+			{ID: "orphan", Type: config.AccountRouterBlockTypeAccount, Account: "orphan-unpriced"},
+		},
+	}}
+
+	if refs := repositoryReviewRuntimeAccountRefs(cfg); !reflect.DeepEqual(refs, []string{"priced"}) {
+		t.Fatalf("reachable account refs=%#v", refs)
+	}
+	options := repositoryReviewModelOptions(cfg)
+	if len(options) != 1 || !options[0].PriceKnown || options[0].InputPricePer1M != 1 {
+		t.Fatalf("orphan block affected pricing=%#v", options)
+	}
+}
+
+func TestRepositoryReviewCentralPricingHelperBoundaries(t *testing.T) {
+	t.Run("configuration and snapshot errors", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "invalid.json")
+		if err := os.WriteFile(configPath, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		handler := &Handler{configPath: configPath}
+		automation := testRepositoryReviewAutomation()
+		if err := handler.refreshRepositoryReviewAccountingSnapshot(&automation); err == nil {
+			t.Fatal("invalid central configuration produced an accounting snapshot")
+		}
+		if err := handler.validateRepositoryReviewProfilePricing(
+			"cheap",
+			repoaudit.RepositoryReviewBudgetPolicy{MaxEstimatedCostUSD: 1},
+		); err == nil {
+			t.Fatal("invalid central configuration admitted a profile cost budget")
+		}
+		if err := repositoryReviewRefreshAccountingSnapshot(nil, nil); !errors.Is(
+			err,
+			repoaudit.ErrInvalidAutomation,
+		) {
+			t.Fatalf("nil automation pricing error=%v", err)
+		}
+		unknown := testRepositoryReviewAutomation()
+		unknown.ReviewerModels = []string{"missing"}
+		unknown.ModelPrices = map[string]repoaudit.RepositoryReviewModelPrice{
+			"missing": {InputPricePer1M: 99, OutputPricePer1M: 99},
+		}
+		if err := repositoryReviewRefreshAccountingSnapshot(nil, &unknown); err != nil ||
+			len(unknown.ModelPrices) != 0 {
+			t.Fatalf("unknown central pricing snapshot=%#v error=%v", unknown.ModelPrices, err)
+		}
+	})
+
+	t.Run("reachable router graph", func(t *testing.T) {
+		if refs := repositoryReviewReachableAccountRouterRefs(nil); refs != nil {
+			t.Fatalf("nil router refs=%#v", refs)
+		}
+		router := &config.AccountRouterConfig{
+			Entry: " branch ",
+			Blocks: []config.AccountRouterBlock{
+				{ID: "", Type: config.AccountRouterBlockTypeAccount, Account: "ignored"},
+				{
+					ID: "branch", Type: config.AccountRouterBlockTypeBranch,
+					Then: "direct", Else: "missing", Fallback: "branch",
+				},
+				{
+					ID: "direct", Type: config.AccountRouterBlockTypeAccount,
+					Account: " account-a ", Fallback: "pool",
+				},
+				{
+					ID: "pool", Type: config.AccountRouterBlockTypeLoadBalance,
+					Accounts: []string{"", "account-a", "account-b"},
+				},
+			},
+		}
+		if refs := repositoryReviewReachableAccountRouterRefs(router); !reflect.DeepEqual(
+			refs,
+			[]string{"account-a", "account-b"},
+		) {
+			t.Fatalf("reachable router refs=%#v", refs)
+		}
+	})
+
+	t.Run("equivalent alias recursion", func(t *testing.T) {
+		if price, found := repositoryReviewEquivalentAliasPrice(nil, "root", nil); price != nil || found {
+			t.Fatalf("nil equivalent pricing=(%#v,%v)", price, found)
+		}
+		cfg := config.DefaultConfig()
+		cfg.ModelAliases = []config.ModelAliasConfig{
+			{Name: "root", Model: "openai/root"},
+			{Name: "middle", Model: "openai/middle"},
+			{Name: "leaf", Model: "openai/leaf"},
+		}
+		cfg.ModelList = []*config.ModelConfig{
+			nil,
+			{ModelName: "disabled", Provider: "openai", Model: "openai/disabled"},
+			{
+				ModelName: "account-router", Enabled: true,
+				Router: &config.AccountRouterConfig{Name: "account-router"},
+			},
+			{
+				ModelName: "model-router", Enabled: true,
+				ModelRouter: &config.ModelRouterConfig{Name: "model-router"},
+			},
+			{
+				ModelName: "subscription-middle", Provider: "openai", Model: "openai/root",
+				Enabled: true, Subscription: true, SubscriptionEquivalentModel: "middle",
+			},
+			{
+				ModelName: "subscription-leaf", Provider: "openai", Model: "openai/middle",
+				Enabled: true, Subscription: true, SubscriptionEquivalentModel: "leaf",
+			},
+			{
+				ModelName: "priced", Provider: "openai", Model: "openai/leaf", Enabled: true,
+				InputPricePerMTok: 1.5, OutputPricePerMTok: 6,
+			},
+		}
+		price, found := repositoryReviewEquivalentAliasPrice(
+			cfg,
+			"root",
+			make(map[string]bool),
+		)
+		if !found || price.InputPricePerMTok != 1.5 || price.OutputPricePerMTok != 6 {
+			t.Fatalf("recursive equivalent pricing=(%#v,%v)", price, found)
+		}
+		missingPrice, missingFound := repositoryReviewEquivalentAliasPrice(
+			cfg,
+			"missing",
+			make(map[string]bool),
+		)
+		if missingPrice == nil || missingFound {
+			t.Fatalf("missing equivalent alias pricing=(%#v,%v)", missingPrice, missingFound)
+		}
+		if price, found := repositoryReviewEquivalentAliasPrice(
+			cfg,
+			"root",
+			map[string]bool{"root": true},
+		); price != nil || found {
+			t.Fatalf("recursive guard pricing=(%#v,%v)", price, found)
+		}
+	})
+}
+
 func TestRepositoryReviewModelOptionsInheritSubscriptionPriceAndRejectUnsafeOverride(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.AccountRef = "review-router"
@@ -922,10 +1183,21 @@ func TestRepositoryReviewModelOptionsInheritSubscriptionPriceAndRejectUnsafeOver
 		byAlias[option.Alias] = option
 	}
 	subscription := byAlias["subscription-review"]
-	if subscription.Available || subscription.BlockedReason == "" || !subscription.PriceKnown ||
+	if subscription.Available || subscription.BlockedReason == "" || subscription.PriceKnown {
+		t.Fatalf("subscription option=%#v", subscription)
+	}
+	cfg.ModelAliases[0].AccountOverrides = nil
+	cfg.AccountRouters[0].Blocks[0].Accounts = []string{"subscription", "metered"}
+	options = repositoryReviewModelOptions(cfg)
+	byAlias = make(map[string]repositoryReviewModelOption, len(options))
+	for _, option := range options {
+		byAlias[option.Alias] = option
+	}
+	subscription = byAlias["subscription-review"]
+	if !subscription.Available || !subscription.PriceKnown ||
 		subscription.InputPricePer1M != 1.25 || subscription.OutputPricePer1M != 5 ||
 		!subscription.Subscription || subscription.EquivalentModel != "metered-review" {
-		t.Fatalf("subscription option=%#v", subscription)
+		t.Fatalf("safe subscription option=%#v", subscription)
 	}
 }
 
@@ -1047,6 +1319,7 @@ func newRepositoryReviewAutomationTestHandler(t *testing.T) (*Handler, *http.Ser
 	cfg.Agents.Defaults.AccountRef = "api"
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "api", Provider: "openai", Model: "openai/test", Enabled: true,
+		InputPricePerMTok: 1, OutputPricePerMTok: 2,
 	}}
 	cfg.ModelAliases = []config.ModelAliasConfig{
 		{Name: "cheap", Model: "gpt-cheap"},
@@ -1099,7 +1372,7 @@ func automationConfigBody(automation repoaudit.RepositoryReviewAutomation) map[s
 		"target": automation.Target, "review_focus": automation.ReviewFocus,
 		"scope_policy":    automation.ScopePolicy,
 		"reviewer_models": automation.ReviewerModels, "compare_models": automation.CompareModels,
-		"model_prices": automation.ModelPrices, "force": automation.Force,
+		"force":         automation.Force,
 		"auto_continue": autoContinue, "max_files_per_run": automation.MaxFilesPerRun,
 		"max_content_bytes":       automation.MaxContentBytes,
 		"max_parallel_children":   automation.MaxParallelChildren,

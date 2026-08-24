@@ -1086,10 +1086,16 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 	routerConfig := config.DefaultConfig()
 	routerConfig.Agents.Defaults.AccountRef = "review-router"
 	routerConfig.AccountRouters = []config.AccountRouterConfig{{
-		Name: "review-router", Enabled: true,
+		Name: "review-router", Enabled: true, Entry: "entry",
 		Blocks: []config.AccountRouterBlock{
-			{Type: config.AccountRouterBlockTypeAccount, Account: " account-a "},
-			{Type: config.AccountRouterBlockTypeLoadBalance, Accounts: []string{"account-b", "account-a", ""}},
+			{
+				ID: "entry", Type: config.AccountRouterBlockTypeAccount,
+				Account: " account-a ", Fallback: "pool",
+			},
+			{
+				ID: "pool", Type: config.AccountRouterBlockTypeLoadBalance,
+				Accounts: []string{"account-b", "account-a", ""},
+			},
 		},
 	}}
 	if refs := repositoryReviewRuntimeAccountRefs(
@@ -1775,8 +1781,9 @@ func TestRepositoryReviewCoverageModelOptionEdgeBranches(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.AccountRef = "review-router"
 	cfg.AccountRouters = []config.AccountRouterConfig{{
-		Name: "review-router", Enabled: true,
+		Name: "review-router", Enabled: true, Entry: "pool",
 		Blocks: []config.AccountRouterBlock{{
+			ID:       "pool",
 			Type:     config.AccountRouterBlockTypeLoadBalance,
 			Accounts: []string{"api", "missing", "dynamic"},
 		}},
@@ -1808,8 +1815,8 @@ func TestRepositoryReviewCoverageModelOptionEdgeBranches(t *testing.T) {
 	embedded.Agents.Defaults.AccountRef = "embedded-router"
 	embedded.ModelList = []*config.ModelConfig{{
 		ModelName: "embedded-router", Enabled: true,
-		Router: &config.AccountRouterConfig{Blocks: []config.AccountRouterBlock{{
-			Type: config.AccountRouterBlockTypeAccount, Account: "direct",
+		Router: &config.AccountRouterConfig{Entry: "entry", Blocks: []config.AccountRouterBlock{{
+			ID: "entry", Type: config.AccountRouterBlockTypeAccount, Account: "direct",
 		}}},
 	}}
 	if refs := repositoryReviewRuntimeAccountRefs(embedded); !reflect.DeepEqual(refs, []string{"direct"}) {

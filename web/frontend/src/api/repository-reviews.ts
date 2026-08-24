@@ -188,8 +188,6 @@ export type RepositoryReviewPauseReason =
 export interface ReviewModelPrice {
   input_price_per_1m: number
   output_price_per_1m: number
-  subscription?: boolean
-  equivalent_model?: string
 }
 
 export interface ReviewModelOption extends ReviewModelPrice {
@@ -321,7 +319,6 @@ export interface RepositoryReviewProfileConfig {
   review_focus: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_model: string
-  model_price: ReviewModelPrice
   force: boolean
   auto_continue: boolean
   max_files_per_run: number
@@ -778,16 +775,6 @@ function normalizeProfile(
     name: profile.name ?? "Review profile",
     review_focus: profile.review_focus ?? "",
     reviewer_model: profile.reviewer_model ?? "",
-    model_price: {
-      input_price_per_1m: profile.model_price?.input_price_per_1m ?? 0,
-      output_price_per_1m: profile.model_price?.output_price_per_1m ?? 0,
-      ...(profile.model_price?.subscription == null
-        ? {}
-        : { subscription: profile.model_price.subscription }),
-      ...(profile.model_price?.equivalent_model
-        ? { equivalent_model: profile.model_price.equivalent_model }
-        : {}),
-    },
     force: profile.force ?? false,
     auto_continue: profile.auto_continue ?? true,
     max_files_per_run: profile.max_files_per_run ?? 24,
