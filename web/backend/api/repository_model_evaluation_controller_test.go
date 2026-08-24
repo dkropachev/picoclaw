@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -728,22 +729,29 @@ func TestRepositoryModelEvaluationControllerRecoversPreflight(t *testing.T) {
 	}
 	controller := newRepositoryModelEvaluationController(handler)
 	controller.runWorkflow = func(_ context.Context, _ string, ref string, _ string, inputs map[string]any, _ workflows.AgentUsageEventObserver) (*workflows.RunResult, error) {
-		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
-			t.Fatalf("recovery workflow ref=%q", ref)
+		switch ref {
+		case workflows.RepositoryModelEvaluationPreflightWorkflowRef:
+			if inputs["repository"] != "https://github.com/owner/repo.git" {
+				t.Fatalf("recovery repository=%#v", inputs["repository"])
+			}
+			return repositoryModelEvaluationPreflightResult(), nil
+		case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+			return repositoryModelEvaluationBatchResult(), nil
+		case workflows.RepositoryModelEvaluationAnalysisWorkflowRef:
+			return repositoryModelEvaluationAnalysisResult(), nil
+		default:
+			return nil, fmt.Errorf("unexpected recovery workflow ref=%q", ref)
 		}
-		if inputs["repository"] != "https://github.com/owner/repo.git" {
-			t.Fatalf("recovery repository=%#v", inputs["repository"])
-		}
-		return repositoryModelEvaluationPreflightResult(), nil
 	}
 	handler.repositoryModelEvaluationController = controller
 	t.Cleanup(handler.Shutdown)
 	if err := controller.Start(); err != nil {
 		t.Fatal(err)
 	}
-	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
-	if len(ready.RunIDs) != 2 || ready.RunIDs[0] != "wr_orphaned_preflight" {
-		t.Fatalf("recovered run IDs=%v", ready.RunIDs)
+	completed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCompleted)
+	if !completed.OneShot || len(completed.RunIDs) != 4 ||
+		completed.RunIDs[0] != "wr_orphaned_preflight" {
+		t.Fatalf("recovered evaluation=%#v", completed)
 	}
 }
 
