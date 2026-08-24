@@ -9,6 +9,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import {
   type RepositoryReviewAutomation,
+  type ReviewAccountOption,
+  getRepositoryReviewAutomationOptions,
   listRepositoryReviewAutomations,
   pauseRepositoryReviewAutomation,
   restartRepositoryReviewAutomation,
@@ -39,25 +41,19 @@ export function RepositoryReviewRunsPage() {
         (run) => activeStatuses.has(run.status) || isQueuedHandoff(run),
       )
         ? 2_000
-        : (query.state.data?.automations ?? []).some(
-              (run) =>
-                run.status === "paused" &&
-                run.budget.auto_resume &&
-                (run.pause_reason === "account_limit" ||
-                  run.pause_reason === "service_restart"),
-            )
-          ? 15_000
-          : false,
+        : false,
+  })
+  const optionsQuery = useQuery({
+    queryKey: ["repository-review-automation-options"],
+    queryFn: ({ signal }) => getRepositoryReviewAutomationOptions(signal),
   })
   const mutation = useMutation({
     mutationFn: async ({
       run,
       action,
-      resetBudget,
     }: {
       run: RepositoryReviewAutomation
       action: "start" | "pause" | "resume" | "restart"
-      resetBudget?: boolean
     }) => {
       const input = { expected_version: run.version }
       if (action === "start")
@@ -65,10 +61,7 @@ export function RepositoryReviewRunsPage() {
       if (action === "pause")
         return pauseRepositoryReviewAutomation(run.id, input)
       if (action === "resume")
-        return resumeRepositoryReviewAutomation(run.id, {
-          ...input,
-          ...(resetBudget ? { reset_budget: true } : {}),
-        })
+        return resumeRepositoryReviewAutomation(run.id, input)
       return restartRepositoryReviewAutomation(run.id, input)
     },
     onSuccess: (updated) => {
@@ -125,10 +118,9 @@ export function RepositoryReviewRunsPage() {
                 <RunCard
                   key={run.id}
                   run={run}
+                  accounts={optionsQuery.data?.accounts ?? []}
                   busy={mutation.isPending}
-                  onAction={(action, resetBudget) =>
-                    mutation.mutate({ run, action, resetBudget })
-                  }
+                  onAction={(action) => mutation.mutate({ run, action })}
                 />
               ))}
             </div>
@@ -141,18 +133,26 @@ export function RepositoryReviewRunsPage() {
 
 function RunCard({
   run,
+  accounts,
   busy,
   onAction,
 }: {
   run: RepositoryReviewAutomation
+  accounts: ReviewAccountOption[]
   busy: boolean
-  onAction: (
-    action: "start" | "pause" | "resume" | "restart",
-    resetBudget?: boolean,
-  ) => void
+  onAction: (action: "start" | "pause" | "resume" | "restart") => void
 }) {
   const branch = run.branch || run.ref
   const model = run.reviewer_models[0] || "Profile model unavailable"
+  const effectiveAccountRef = run.effective_account_ref || run.account_ref
+  const account = effectiveAccountRef
+    ? accounts.find((candidate) => candidate.id === effectiveAccountRef)
+    : accounts.find((candidate) => candidate.default)
+  const accountLabel = effectiveAccountRef
+    ? account?.label || effectiveAccountRef
+    : account?.label
+      ? `Default (${account.label})`
+      : "Default account"
   const priceKnown =
     run.reviewer_models.length > 0 &&
     run.reviewer_models.every((reviewer) => {
@@ -167,8 +167,6 @@ function RunCard({
         (run.progress.completed_batches / run.progress.total_batches) * 100,
       )
     : 0
-  const budgetPaused =
-    run.pause_reason === "token_budget" || run.pause_reason === "cost_budget"
   const handoffQueued = isQueuedHandoff(run)
 
   return (
@@ -207,6 +205,7 @@ function RunCard({
           </span>
           <span>{run.progress.remaining_files} files remaining</span>
           <span>{run.progress.unsupported_files} unsupported files</span>
+          <span>Account: {accountLabel}</span>
         </div>
         {run.scope_plan?.commit_sha && (
           <p className="text-muted-foreground text-xs break-all">
@@ -255,10 +254,9 @@ function RunCard({
             <Button
               size="sm"
               disabled={busy}
-              onClick={() => onAction("resume", budgetPaused)}
+              onClick={() => onAction("resume")}
             >
-              <IconPlayerPlay />
-              {budgetPaused ? "Resume and reset budget" : "Resume"}
+              <IconPlayerPlay /> Resume
             </Button>
           )}
           {(run.status === "completed" || run.status === "failed") && (

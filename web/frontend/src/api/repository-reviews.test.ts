@@ -288,7 +288,6 @@ describe("repository review API", () => {
                 counts: null,
                 warnings: null,
               },
-              next_check_at: "0001-01-01T00:00:00Z",
             },
           ],
         }),
@@ -322,7 +321,9 @@ describe("repository review API", () => {
       automations: [
         {
           id: "auto_1",
+          account_ref: "",
           reviewer_models: [],
+          max_parallel_children: 8,
           scope_policy: {
             code_types: ["hotpath-code", "code"],
             include_folders: [],
@@ -341,6 +342,7 @@ describe("repository review API", () => {
             },
           },
           usage: { total_tokens: 0 },
+          budget: { guard_expression: "" },
           progress: { stage: "waiting" },
           model_stats: [{ model: "fast", total_tokens: 100, latency_ms: 250 }],
           account_limits: [
@@ -356,7 +358,6 @@ describe("repository review API", () => {
               ],
             },
           ],
-          next_check_at: undefined,
         },
       ],
     })
@@ -376,6 +377,7 @@ describe("repository review API", () => {
   it("sends strict profile CRUD envelopes and normalizes wrappers", async () => {
     const config: RepositoryReviewProfileConfig = {
       name: "Core bugs",
+      account_ref: "",
       review_focus: "Find correctness bugs.",
       scope_policy: {
         code_types: ["hotpath-code", "code"],
@@ -388,17 +390,10 @@ describe("repository review API", () => {
       auto_continue: true,
       max_files_per_run: 24,
       max_content_bytes: 524288,
-      max_parallel_children: 1,
-      estimated_output_tokens: 4096,
+      max_parallel_children: 8,
       budget: {
-        max_total_tokens: 100000,
-        max_estimated_cost_usd: 10,
-        account_ids: [],
-        min_remaining_percent: 0,
-        min_remaining_percent_by_window: {},
-        auto_resume: true,
-        pause_on_unknown: false,
-        check_interval_seconds: 900,
+        guard_expression:
+          "account.limits.weekly.remaining_percent >= 10 and spend.total.usd < 25",
       },
     }
     const profile = {
@@ -409,14 +404,24 @@ describe("repository review API", () => {
       updated_at: "2026-08-23T00:00:00Z",
     }
     mockedLauncherFetch
-      .mockResolvedValueOnce(jsonResponse({ profiles: [profile] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          profiles: [{ ...profile, max_parallel_children: undefined }],
+        }),
+      )
       .mockResolvedValueOnce(jsonResponse({ profile }))
       .mockResolvedValueOnce(jsonResponse({ profile }))
       .mockResolvedValueOnce(jsonResponse({ profile }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
 
     await expect(listRepositoryReviewProfiles()).resolves.toMatchObject({
-      profiles: [{ id: "profile/slash", reviewer_model: "review-model" }],
+      profiles: [
+        {
+          id: "profile/slash",
+          reviewer_model: "review-model",
+          max_parallel_children: 8,
+        },
+      ],
     })
     await expect(
       getRepositoryReviewProfile("profile/slash"),
@@ -561,7 +566,6 @@ describe("repository review API", () => {
     })
     await resumeRepositoryReviewAutomation("auto/slash", {
       expected_version: 8,
-      reset_budget: true,
     })
     await restartRepositoryReviewAutomation("auto/slash", {
       expected_version: 9,
@@ -606,7 +610,7 @@ describe("repository review API", () => {
       6,
       "/api/repository-reviews/automations/auto%2Fslash/resume",
       expect.objectContaining({
-        body: JSON.stringify({ expected_version: 8, reset_budget: true }),
+        body: JSON.stringify({ expected_version: 8 }),
       }),
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(

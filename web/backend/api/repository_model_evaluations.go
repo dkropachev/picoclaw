@@ -698,7 +698,38 @@ func projectRepositoryModelEvaluation(evaluation repoeval.Evaluation) repoeval.E
 	projected := repoeval.Clone(evaluation)
 	if len(projected.Checkpoint.Batches) > 0 {
 		_, unsupported := repositoryModelEvaluationJudgedClaimCounts(projected.Checkpoint.Batches)
+		claims := make(map[string][]repoeval.ModelClaim)
+		omittedClaims := make(map[string]int)
+		availableClaims := make(map[string]bool)
+		for _, checkpoint := range projected.Checkpoint.Batches {
+			for alias, ledger := range checkpoint.ClaimLedger {
+				availableClaims[alias] = true
+				claims[alias] = append(claims[alias], ledger...)
+			}
+			for alias, omitted := range checkpoint.ClaimLedgerOmitted {
+				omittedClaims[alias] += omitted
+			}
+		}
 		for index := range projected.Comparisons {
+			alias := projected.Comparisons[index].ModelAlias
+			if availableClaims[alias] {
+				projected.Comparisons[index].Claims = append(
+					[]repoeval.ModelClaim(nil),
+					claims[alias]...,
+				)
+				projected.Comparisons[index].ClaimsOmitted = omittedClaims[alias]
+				projected.Comparisons[index].ClaimLedgerAvailable = true
+				for claimIndex := range projected.Comparisons[index].Claims {
+					claim := &projected.Comparisons[index].Claims[claimIndex]
+					claim.Title = sanitizeRepositoryModelEvaluationRuntimeText(claim.Title, evaluation.Repository)
+					claim.Evidence = sanitizeRepositoryModelEvaluationRuntimeText(claim.Evidence, evaluation.Repository)
+					claim.Impact = sanitizeRepositoryModelEvaluationRuntimeText(claim.Impact, evaluation.Repository)
+					claim.JudgeRationale = sanitizeRepositoryModelEvaluationRuntimeText(
+						claim.JudgeRationale,
+						evaluation.Repository,
+					)
+				}
+			}
 			if projected.Comparisons[index].UnsupportedClaims != nil {
 				continue
 			}

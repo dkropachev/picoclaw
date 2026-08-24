@@ -357,7 +357,7 @@ func repositoryReviewPublicationTestDraft(
 			Model: "review-a", ScopeFiles: []repoaudit.FileRef{file},
 			Findings: []repoaudit.FindingCandidate{{
 				Severity: "high", Title: "Lost update", File: file.Path,
-				Evidence: "unfenced write", Impact: "data loss", Recommendation: "use CAS",
+				Evidence: "unfenced write", Impact: "data loss",
 				Validation: repoaudit.Validation{Status: "confirmed", Summary: "reproduced"},
 			}},
 		}},

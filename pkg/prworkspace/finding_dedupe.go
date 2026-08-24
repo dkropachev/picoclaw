@@ -84,7 +84,6 @@ func agentFindingFromRecord(finding Finding) AgentFinding {
 		Message:          finding.Message,
 		Evidence:         finding.Evidence,
 		Impact:           finding.Impact,
-		Recommendation:   finding.Recommendation,
 		Validation:       finding.Validation,
 		ScopeDistance:    finding.Scope.Distance,
 		ChangeSize:       finding.Scope.Size,

@@ -254,17 +254,47 @@ type BatchCandidateCheckpoint struct {
 	Failures              int      `json:"failures"`
 }
 
+// ClaimDisposition is the judge's diagnosis-only assessment of one candidate
+// claim. It deliberately does not include a remediation or recommendation
+// state.
+type ClaimDisposition string
+
+const (
+	ClaimDispositionSupported   ClaimDisposition = "supported"
+	ClaimDispositionUnsupported ClaimDisposition = "unsupported"
+)
+
+func (disposition ClaimDisposition) Valid() bool {
+	return disposition == ClaimDispositionSupported || disposition == ClaimDispositionUnsupported
+}
+
+// ModelClaim is the compact, durable, diagnosis-only record shown in an
+// evaluation report. It contains only the candidate's claim and the judge's
+// disposition; prompts, source content, provider payloads, and fix guidance are
+// never retained here.
+type ModelClaim struct {
+	ID             string           `json:"id"`
+	Path           string           `json:"path"`
+	Title          string           `json:"title"`
+	Evidence       string           `json:"evidence"`
+	Impact         string           `json:"impact"`
+	Disposition    ClaimDisposition `json:"disposition"`
+	JudgeRationale string           `json:"judge_rationale"`
+}
+
 // BatchCheckpoint is the compact durable recovery boundary for one fully
-// judged corpus batch. It deliberately retains only bounded structured judge
-// evidence and the blinded alias mapping; candidate source and raw provider
-// payloads never enter the evaluation store.
+// judged corpus batch. It retains bounded diagnosis-only candidate claims,
+// structured judge evidence, and the blinded alias mapping; prompts, raw
+// repository files, and provider payloads never enter the evaluation store.
 type BatchCheckpoint struct {
-	ID           string                              `json:"id"`
-	CandidateIDs []string                            `json:"candidate_ids"`
-	Candidates   map[string]BatchCandidateCheckpoint `json:"candidates,omitempty"`
-	JudgeJSON    string                              `json:"judge_json"`
-	MappingJSON  string                              `json:"mapping_json"`
-	CompletedAt  time.Time                           `json:"completed_at"`
+	ID                 string                              `json:"id"`
+	CandidateIDs       []string                            `json:"candidate_ids"`
+	Candidates         map[string]BatchCandidateCheckpoint `json:"candidates,omitempty"`
+	ClaimLedger        map[string][]ModelClaim             `json:"claim_ledger,omitempty"`
+	ClaimLedgerOmitted map[string]int                      `json:"claim_ledger_omitted,omitempty"`
+	JudgeJSON          string                              `json:"judge_json"`
+	MappingJSON        string                              `json:"mapping_json"`
+	CompletedAt        time.Time                           `json:"completed_at"`
 }
 
 // Checkpoint contains enough compact evidence to skip completed batches after
@@ -297,26 +327,29 @@ func (completion ModelCompletion) Valid() bool {
 // alias, while Usage retains objective cost/performance evidence beside the
 // explicitly AI-judged score dimensions.
 type ModelComparison struct {
-	ModelAlias        string             `json:"model_alias"`
-	ConcreteModels    map[string]int     `json:"concrete_models"`
-	Completion        ModelCompletion    `json:"completion"`
-	Failure           string             `json:"failure,omitempty"`
-	Failures          int                `json:"failures"`
-	Rank              int                `json:"rank"`
-	OverallScore      *float64           `json:"overall_score,omitempty"`
-	Scores            map[string]float64 `json:"scores"`
-	Languages         []string           `json:"languages"`
-	Regions           []string           `json:"regions"`
-	FilesAnalyzed     int                `json:"files_analyzed"`
-	BytesAnalyzed     int64              `json:"bytes_analyzed"`
-	ConfirmedFindings int                `json:"confirmed_findings"`
-	UnsupportedClaims *int               `json:"unsupported_claims,omitempty"`
-	UnsupportedFiles  int                `json:"unsupported_files"`
-	Usage             Usage              `json:"usage"`
-	Verdict           string             `json:"verdict,omitempty"`
-	Summary           string             `json:"summary,omitempty"`
-	Strengths         []string           `json:"strengths,omitempty"`
-	Limitations       []string           `json:"limitations,omitempty"`
+	ModelAlias           string             `json:"model_alias"`
+	ConcreteModels       map[string]int     `json:"concrete_models"`
+	Completion           ModelCompletion    `json:"completion"`
+	Failure              string             `json:"failure,omitempty"`
+	Failures             int                `json:"failures"`
+	Rank                 int                `json:"rank"`
+	OverallScore         *float64           `json:"overall_score,omitempty"`
+	Scores               map[string]float64 `json:"scores"`
+	Languages            []string           `json:"languages"`
+	Regions              []string           `json:"regions"`
+	FilesAnalyzed        int                `json:"files_analyzed"`
+	BytesAnalyzed        int64              `json:"bytes_analyzed"`
+	ConfirmedFindings    int                `json:"confirmed_findings"`
+	UnsupportedClaims    *int               `json:"unsupported_claims,omitempty"`
+	UnsupportedFiles     int                `json:"unsupported_files"`
+	Usage                Usage              `json:"usage"`
+	Verdict              string             `json:"verdict,omitempty"`
+	Summary              string             `json:"summary,omitempty"`
+	Strengths            []string           `json:"strengths,omitempty"`
+	Limitations          []string           `json:"limitations,omitempty"`
+	Claims               []ModelClaim       `json:"claims,omitempty"`
+	ClaimsOmitted        int                `json:"claims_omitted,omitempty"`
+	ClaimLedgerAvailable bool               `json:"claim_ledger_available,omitempty"`
 }
 
 type Evaluation struct {

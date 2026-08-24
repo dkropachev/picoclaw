@@ -552,16 +552,12 @@ func TestNormalizeRepositoryReviewProfileBoundaries(t *testing.T) {
 		profile.MaxFilesPerRun = 0
 		profile.MaxContentBytes = 0
 		profile.MaxParallelChildren = 0
-		profile.EstimatedOutputTokens = 0
-		profile.BudgetPolicy.CheckIntervalSeconds = 0
 		if err := normalizeProfile(&profile); err != nil {
 			t.Fatal(err)
 		}
 		if profile.MaxFilesPerRun != defaultAutomationMaxFilesPerRun ||
 			profile.MaxContentBytes != defaultAutomationMaxContentBytes ||
-			profile.MaxParallelChildren != defaultAutomationMaxParallelChildren ||
-			profile.EstimatedOutputTokens != defaultAutomationEstimatedOutputTokens ||
-			profile.BudgetPolicy.CheckIntervalSeconds != defaultAutomationCheckInterval {
+			profile.MaxParallelChildren != defaultAutomationMaxParallelChildren {
 			t.Fatalf("normalized defaults = %#v", profile)
 		}
 	})
@@ -570,12 +566,9 @@ func TestNormalizeRepositoryReviewProfileBoundaries(t *testing.T) {
 		name   string
 		mutate func(*RepositoryReviewProfile)
 	}{
-		{
-			name: "account IDs",
-			mutate: func(profile *RepositoryReviewProfile) {
-				profile.BudgetPolicy.AccountIDs = []string{"account", " account "}
-			},
-		},
+		{name: "guard expression", mutate: func(profile *RepositoryReviewProfile) {
+			profile.BudgetPolicy.GuardExpression = "account.limits.*"
+		}},
 		{
 			name: "scope policy",
 			mutate: func(profile *RepositoryReviewProfile) {
@@ -583,27 +576,8 @@ func TestNormalizeRepositoryReviewProfileBoundaries(t *testing.T) {
 			},
 		},
 		{
-			name: "window policy",
-			mutate: func(profile *RepositoryReviewProfile) {
-				profile.BudgetPolicy.MinRemainingPercentByWindow = map[string]float64{"": 10}
-			},
-		},
-		{
 			name:   "required fields",
 			mutate: func(profile *RepositoryReviewProfile) { profile.Name = "" },
-		},
-		{
-			name: "budget validation",
-			mutate: func(profile *RepositoryReviewProfile) {
-				profile.BudgetPolicy.CheckIntervalSeconds = 1
-			},
-		},
-		{
-			name: "guarded parallel budget",
-			mutate: func(profile *RepositoryReviewProfile) {
-				profile.BudgetPolicy.MaxTotalTokens = 1
-				profile.MaxParallelChildren = 2
-			},
 		},
 	}
 	for _, test := range tests {

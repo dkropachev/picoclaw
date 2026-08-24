@@ -41,7 +41,15 @@ func TestEvaluationCheckpointPersistsAndClonesWithoutAliasing(t *testing.T) {
 						Attempts:              1, Successes: 1,
 					},
 				},
-				JudgeJSON: `{"evaluations":[]}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+				ClaimLedger: map[string][]ModelClaim{"model-a": {{
+					ID: "batch-claim-001", Path: "pkg/service.go", Title: "Boundary state is accepted",
+					Evidence:       "The exact predicate accepts the invalid boundary.",
+					Impact:         "The operation enters an invalid state.",
+					Disposition:    ClaimDispositionSupported,
+					JudgeRationale: "The predicate and state transition are present in source.",
+				}}},
+				ClaimLedgerOmitted: map[string]int{"model-a": 1},
+				JudgeJSON:          `{"evaluations":[]}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
 			}},
 			ConcreteModels: map[string]map[string]int{"model-a": {"gpt-a": 1}},
 		}
@@ -55,9 +63,13 @@ func TestEvaluationCheckpointPersistsAndClonesWithoutAliasing(t *testing.T) {
 	completed := clone.Checkpoint.Batches[0].Candidates["model-a"]
 	completed.CompletedCandidateIDs[0] = "changed"
 	clone.Checkpoint.Batches[0].Candidates["model-a"] = completed
+	clone.Checkpoint.Batches[0].ClaimLedger["model-a"][0].Title = "changed"
+	clone.Checkpoint.Batches[0].ClaimLedgerOmitted["model-a"] = 9
 	clone.Checkpoint.ConcreteModels["model-a"]["gpt-a"] = 9
 	if running.Checkpoint.Batches[0].CandidateIDs[0] == "changed" ||
 		running.Checkpoint.Batches[0].Candidates["model-a"].CompletedCandidateIDs[0] == "changed" ||
+		running.Checkpoint.Batches[0].ClaimLedger["model-a"][0].Title == "changed" ||
+		running.Checkpoint.Batches[0].ClaimLedgerOmitted["model-a"] != 1 ||
 		running.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 {
 		t.Fatalf("checkpoint clone aliased original: %#v", running.Checkpoint)
 	}
@@ -130,6 +142,19 @@ func TestEvaluationCheckpointRejectsUnknownDuplicateAndUnboundedEvidence(t *test
 			},
 		},
 		{ConcreteModels: map[string]map[string]int{"unknown": {"gpt": 1}}},
+		{Batches: []BatchCheckpoint{{
+			ID: "batch", CandidateIDs: []string{evaluation.Corpus.Files[0].CandidateID},
+			ClaimLedger: map[string][]ModelClaim{"unknown": {{
+				ID: "claim", Path: "pkg/service.go", Title: "title", Evidence: "evidence", Impact: "impact",
+				Disposition: ClaimDispositionSupported, JudgeRationale: "rationale",
+			}}},
+			JudgeJSON: `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+		}}},
+		{Batches: []BatchCheckpoint{{
+			ID: "batch", CandidateIDs: []string{evaluation.Corpus.Files[0].CandidateID},
+			ClaimLedgerOmitted: map[string]int{"model-a": 0},
+			JudgeJSON:          `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+		}}},
 	}
 	for index, checkpoint := range tests {
 		candidate := Clone(evaluation)

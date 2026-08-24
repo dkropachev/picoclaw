@@ -301,6 +301,7 @@ func nativeRepositoryReview(
 			file["source"] = source
 		}
 		output["reviewerModels"] = firstNonNil(args["resolved_reviewer_models"], args["reviewer_models"])
+		output["accountRef"] = nativeStringAny(args, "resolved_account_ref")
 		output["includeDefaultReviewer"] = nativeBoolAny(args, "include_default_reviewer")
 		output["maxContentBytes"] = int(nativeInt64Any(args, "resolved_max_content_bytes"))
 		output["maxFiles"] = maximumPending
@@ -1152,6 +1153,9 @@ func nativeRepositoryReviewObservation(
 	reviewer string,
 	raw string,
 ) (repoaudit.Observation, error) {
+	if err := nativeValidateRepositoryReviewOutputFields(structured); err != nil {
+		return repoaudit.Observation{}, err
+	}
 	scope, err := nativeRepositoryReviewFiles(scopeValue)
 	if err != nil {
 		return repoaudit.Observation{}, fmt.Errorf("scope: %w", err)
@@ -1185,6 +1189,84 @@ func nativeRepositoryReviewObservation(
 		Summary:   strings.TrimSpace(nativeAnyString(structured["summary"])),
 		RawDigest: "sha256:" + hex.EncodeToString(digest[:]),
 	}, nil
+}
+
+func nativeValidateRepositoryReviewOutputFields(structured map[string]any) error {
+	if err := nativeValidateRepositoryReviewObjectFields(
+		structured,
+		map[string]struct{}{
+			"summary": {}, "reviewedFiles": {}, "findings": {}, "residualRisks": {},
+		},
+		"output",
+	); err != nil {
+		return err
+	}
+	findings, err := nativeOptionalMapSlice(structured["findings"])
+	if err != nil {
+		return fmt.Errorf("findings: %w", err)
+	}
+	for index, finding := range findings {
+		location := fmt.Sprintf("finding %d", index)
+		if err := nativeValidateRepositoryReviewObjectFields(
+			finding,
+			map[string]struct{}{
+				"severity": {}, "title": {}, "symbol": {}, "file": {}, "line": {},
+				"message": {}, "evidence": {}, "impact": {}, "validation": {},
+			},
+			location,
+		); err != nil {
+			return err
+		}
+		for _, field := range []string{
+			"severity", "title", "symbol", "file", "message", "evidence", "impact", "validation",
+		} {
+			if _, exists := finding[field]; !exists {
+				return fmt.Errorf("repository review %s is missing required field %q", location, field)
+			}
+		}
+		validation, ok := finding["validation"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("repository review %s validation is invalid", location)
+		}
+		if err := nativeValidateRepositoryReviewObjectFields(
+			validation,
+			map[string]struct{}{"status": {}, "summary": {}, "checks": {}},
+			location+" validation",
+		); err != nil {
+			return err
+		}
+		for _, field := range []string{"status", "summary", "checks"} {
+			if _, exists := validation[field]; !exists {
+				return fmt.Errorf(
+					"repository review %s validation is missing required field %q",
+					location, field,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func nativeValidateRepositoryReviewObjectFields(
+	object map[string]any,
+	allowed map[string]struct{},
+	location string,
+) error {
+	unknown := make([]string, 0)
+	for field := range object {
+		if _, ok := allowed[field]; !ok {
+			unknown = append(unknown, field)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf(
+		"repository review %s contains field %q outside the diagnosis-only contract",
+		location,
+		unknown[0],
+	)
 }
 
 func nativeOptionalMapSlice(value any) ([]map[string]any, error) {

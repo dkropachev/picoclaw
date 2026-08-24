@@ -196,13 +196,17 @@ const (
 // ManagedChildActivity identifies one concrete managed child without exposing
 // its prompt, response, or repository content.
 type ManagedChildActivity struct {
-	Phase      ManagedChildActivityPhase `json:"phase"`
-	Index      int                       `json:"index"`
-	Total      int                       `json:"total"`
-	Label      string                    `json:"label,omitempty"`
-	ModelAlias string                    `json:"model_alias,omitempty"`
-	ScopeCount int                       `json:"scope_count"`
-	Success    bool                      `json:"success"`
+	Phase                 ManagedChildActivityPhase `json:"phase"`
+	Index                 int                       `json:"index"`
+	Total                 int                       `json:"total"`
+	Label                 string                    `json:"label,omitempty"`
+	ModelAlias            string                    `json:"model_alias,omitempty"`
+	ScopeCount            int                       `json:"scope_count"`
+	EstimatedPromptTokens int                       `json:"estimated_prompt_tokens,omitempty"`
+	EstimatedOutputTokens int                       `json:"estimated_output_tokens,omitempty"`
+	EstimatedCostUSD      float64                   `json:"estimated_cost_usd,omitempty"`
+	PriceKnown            bool                      `json:"price_known,omitempty"`
+	Success               bool                      `json:"success"`
 }
 
 // ManagedChildActivityObserver receives bounded managed child lifecycle data.
@@ -230,6 +234,7 @@ type AgentCallAdmissionEventObserver func(AgentCallAdmissionEvent) error
 
 type RepositoryReviewModelProfile struct {
 	Revision               string
+	AccountRef             string
 	ReviewerModels         []string
 	IncludeDefaultReviewer bool
 	MaxContentBytes        int
@@ -241,6 +246,7 @@ type RepositoryReviewProfileResolver interface {
 	ResolveRepositoryReviewProfile(
 		ctx context.Context,
 		agentID string,
+		requestedAccountRef string,
 		requestedReviewerModels []string,
 	) (RepositoryReviewModelProfile, error)
 }
@@ -263,6 +269,9 @@ type AgentSourceCapture struct {
 
 type AgentRequest struct {
 	AgentID string
+	// AccountRef optionally selects one configured account or account router for
+	// this isolated workflow call. Empty inherits the configured agent account.
+	AccountRef string
 	// Model optionally selects one configured model alias for this isolated
 	// workflow call. It does not accept provider credentials or concrete account
 	// overrides; normal alias/account resolution remains authoritative.

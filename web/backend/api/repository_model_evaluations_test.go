@@ -255,11 +255,20 @@ func TestRepositoryModelEvaluationRoutesRejectUnsafeRequestsModelsAndPages(t *te
 		Checkpoint: repoeval.Checkpoint{Batches: []repoeval.BatchCheckpoint{{
 			MappingJSON: `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`,
 			JudgeJSON:   `{"evaluations":[{"candidateId":"candidate-001","unsupportedClaims":5}]}`,
+			ClaimLedger: map[string][]repoeval.ModelClaim{"model-a": {{
+				ID: "batch-claim-001", Path: "pkg/core.go", Title: "Invalid boundary",
+				Evidence: "The failure reads /tmp/private-state.", Impact: "The request fails.",
+				Disposition: repoeval.ClaimDispositionSupported, JudgeRationale: "The branch confirms the failure.",
+			}}},
+			ClaimLedgerOmitted: map[string]int{"model-a": 2},
 		}}},
 	}
 	projected := projectRepositoryModelEvaluation(legacyComparison)
 	if len(projected.Checkpoint.Batches) != 0 || projected.Comparisons[0].UnsupportedClaims == nil ||
 		*projected.Comparisons[0].UnsupportedClaims != 5 ||
+		len(projected.Comparisons[0].Claims) != 1 || !projected.Comparisons[0].ClaimLedgerAvailable ||
+		projected.Comparisons[0].ClaimsOmitted != 2 ||
+		!strings.Contains(projected.Comparisons[0].Claims[0].Evidence, "[filesystem path]") ||
 		projected.Comparisons[1].UnsupportedClaims == nil ||
 		*projected.Comparisons[1].UnsupportedClaims != exactUnsupported ||
 		projected.Comparisons[2].UnsupportedClaims != nil {
@@ -515,8 +524,10 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 		t.Fatalf("accepted preflight=%#v err=%v", accepted, err)
 	}
 	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
+	expectedRubricHash := sha256.Sum256([]byte("repository-model-evaluation-rubric-v2"))
 	if ready.Corpus == nil || len(ready.Corpus.Files) != 2 || ready.Corpus.LanguageCounts["go"] != 1 ||
-		ready.Corpus.LanguageCounts["typescript"] != 1 {
+		ready.Corpus.LanguageCounts["typescript"] != 1 ||
+		ready.Corpus.RubricHash != hex.EncodeToString(expectedRubricHash[:]) {
 		t.Fatalf("ready evaluation=%#v", ready)
 	}
 	detailResponse := httptest.NewRecorder()
@@ -545,8 +556,23 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 		completed.Comparisons[0].Rank != 1 ||
 		completed.Usage.Requests != 3 ||
 		completed.ModelStats["model-a"].FilesCompleted != 2 ||
-		completed.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 {
+		completed.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 ||
+		len(completed.Checkpoint.Batches) != 1 ||
+		len(completed.Checkpoint.Batches[0].ClaimLedger["model-a"]) != 3 {
 		t.Fatalf("completed evaluation=%#v", completed)
+	}
+	completedDetailResponse := httptest.NewRecorder()
+	mux.ServeHTTP(
+		completedDetailResponse,
+		httptest.NewRequest(http.MethodGet, "/api/model-evaluations/"+created.ID, nil),
+	)
+	var completedDetail repositoryModelEvaluationDetail
+	if err := json.Unmarshal(completedDetailResponse.Body.Bytes(), &completedDetail); err != nil ||
+		len(completedDetail.Evaluation.Checkpoint.Batches) != 0 ||
+		!completedDetail.Evaluation.Comparisons[0].ClaimLedgerAvailable ||
+		len(completedDetail.Evaluation.Comparisons[0].Claims) != 3 ||
+		completedDetail.Evaluation.Comparisons[0].Claims[0].Disposition != repoeval.ClaimDispositionSupported {
+		t.Fatalf("projected completed detail=%#v err=%v", completedDetail, err)
 	}
 	if _, err := controller.Resume(t.Context(), completed.ID, completed.Version); !errors.Is(
 		err,
@@ -1589,9 +1615,25 @@ func repositoryModelEvaluationBatchResult() *workflows.RunResult {
 			{"candidateId": "candidate-001", "modelAlias": "model-a"},
 			{"candidateId": "candidate-002", "modelAlias": "model-b"},
 		},
+		"ledger": []map[string]any{
+			{"candidateId": "candidate-001", "claimId": "claim-001-0001", "path": "pkg/core.go", "title": "First boundary failure", "evidence": "The exact branch accepts the invalid boundary.", "impact": "The request reaches an invalid state."},
+			{"candidateId": "candidate-001", "claimId": "claim-001-0002", "path": "pkg/core.go", "title": "Second boundary failure", "evidence": "The error path returns success.", "impact": "Callers observe a false success."},
+			{"candidateId": "candidate-001", "claimId": "claim-001-0003", "path": "web/app.ts", "title": "Stale state is retained", "evidence": "The failure branch leaves the prior value in state.", "impact": "The next request reads stale data."},
+			{"candidateId": "candidate-002", "claimId": "claim-002-0001", "path": "pkg/core.go", "title": "Unchecked empty value", "evidence": "The value is dereferenced before the empty check.", "impact": "Empty input terminates the operation."},
+			{"candidateId": "candidate-002", "claimId": "claim-002-0002", "path": "web/app.ts", "title": "Lost failure state", "evidence": "The catch branch overwrites the failure marker.", "impact": "The UI reports completion after failure."},
+			{"candidateId": "candidate-002", "claimId": "claim-002-0003", "path": "web/app.ts", "title": "Unsupported timing claim", "evidence": "The cited branch does not contain a timing operation.", "impact": "The claimed delay is not established by this source."},
+		},
 		"judge": map[string]any{"evaluations": []map[string]any{
-			{"candidateId": "candidate-001", "confirmedClaims": 3, "unsupportedClaims": 0},
-			{"candidateId": "candidate-002", "confirmedClaims": 2, "unsupportedClaims": 1},
+			{"candidateId": "candidate-001", "confirmedClaims": 3, "unsupportedClaims": 0, "claimAssessments": []map[string]any{
+				{"claimId": "claim-001-0001", "disposition": "supported", "rationale": "The cited branch and consequence are present in the assigned source."},
+				{"claimId": "claim-001-0002", "disposition": "supported", "rationale": "The return path establishes the stated false-success behavior."},
+				{"claimId": "claim-001-0003", "disposition": "supported", "rationale": "The state transition leaves the prior value observable."},
+			}},
+			{"candidateId": "candidate-002", "confirmedClaims": 2, "unsupportedClaims": 1, "claimAssessments": []map[string]any{
+				{"claimId": "claim-002-0001", "disposition": "supported", "rationale": "The dereference precedes the guard in the supplied source."},
+				{"claimId": "claim-002-0002", "disposition": "supported", "rationale": "The catch branch clears the only failure marker."},
+				{"claimId": "claim-002-0003", "disposition": "unsupported", "rationale": "The cited source contains no operation that establishes the claimed delay."},
+			}},
 		}},
 	}}
 }

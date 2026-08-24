@@ -1288,7 +1288,8 @@ func TestNativeRepositoryEvaluationBlindUsesStableConfiguredAliasUniverse(t *tes
 	child := func(alias string) []map[string]any {
 		return []map[string]any{{
 			"model": map[string]any{"requested": alias, "selected": "provider/" + alias},
-			"valid": true,
+			"valid": true, "scope": []map[string]any{},
+			"structured": map[string]any{"claims": []map[string]any{}},
 		}}
 	}
 	first, err := nativeRepositoryEvaluationBlind(child("model-a"), "model-a,model-b")
@@ -1321,6 +1322,67 @@ func TestNativeRepositoryEvaluationBlindUsesStableConfiguredAliasUniverse(t *tes
 		[]string{"model-a", "model-b"},
 	) {
 		t.Fatalf("normalized alias universe = %#v", aliases)
+	}
+}
+
+func TestNativeRepositoryEvaluationBlindBuildsDiagnosisOnlyClaimLedger(t *testing.T) {
+	children := []map[string]any{{
+		"model": map[string]any{"requested": "model-a", "selected": "provider/model-a"},
+		"valid": true,
+		"scope": []map[string]any{{"path": "pkg/core.go"}},
+		"structured": map[string]any{
+			"summary": "One claim.",
+			"claims": []map[string]any{{
+				"path": "pkg/core.go", "title": "Boundary state is accepted",
+				"evidence": "The exact predicate accepts the boundary value.",
+				"impact":   "The operation enters an invalid state.",
+			}},
+			"residualRisks": []string{},
+		},
+	}}
+	output, err := nativeRepositoryEvaluationBlind(children, "model-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := output["ledger"].([]map[string]any)
+	if len(ledger) != 1 || ledger[0]["candidateId"] != "candidate-001" ||
+		ledger[0]["claimId"] != "claim-001-0001" || ledger[0]["path"] != "pkg/core.go" {
+		t.Fatalf("claim ledger = %#v", ledger)
+	}
+	blinded := output["blinded"].([]map[string]any)
+	structured := blinded[0]["structured"].(map[string]any)
+	claims := structured["claims"].([]map[string]any)
+	if claims[0]["claimId"] != "claim-001-0001" {
+		t.Fatalf("blinded claim IDs = %#v", claims)
+	}
+	if _, leaked := ledger[0]["modelAlias"]; leaked {
+		t.Fatalf("blinded ledger leaked model alias: %#v", ledger[0])
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"fix field": func(child map[string]any) {
+			structured := nativeMapValue(child["structured"])
+			claims, _ := nativeMapSlice(structured["claims"])
+			claim := claims[0]
+			claim["recommendation"] = "change the predicate"
+		},
+		"out of scope path": func(child map[string]any) {
+			structured := nativeMapValue(child["structured"])
+			claims, _ := nativeMapSlice(structured["claims"])
+			claim := claims[0]
+			claim["path"] = "other/file.go"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var candidate []map[string]any
+			if err := nativeRepositoryEvaluationDecode(children, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			mutate(candidate[0])
+			if _, err := nativeRepositoryEvaluationBlind(candidate, "model-a"); err == nil {
+				t.Fatal("invalid diagnosis claim was accepted")
+			}
+		})
 	}
 }
 

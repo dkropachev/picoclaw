@@ -87,6 +87,7 @@ func (r *webWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.A
 func (r *webWorkflowRuntimeRunner) ResolveRepositoryReviewProfile(
 	ctx context.Context,
 	agentID string,
+	requestedAccountRef string,
 	requestedReviewerModels []string,
 ) (workflows.RepositoryReviewModelProfile, error) {
 	if r == nil {
@@ -103,7 +104,12 @@ func (r *webWorkflowRuntimeRunner) ResolveRepositoryReviewProfile(
 			"agent runner does not support repository review profiles",
 		)
 	}
-	return resolver.ResolveRepositoryReviewProfile(ctx, agentID, requestedReviewerModels)
+	return resolver.ResolveRepositoryReviewProfile(
+		ctx,
+		agentID,
+		requestedAccountRef,
+		requestedReviewerModels,
+	)
 }
 
 func (r *webWorkflowRuntimeRunner) CaptureReadOnlySession(

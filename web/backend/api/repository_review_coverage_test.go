@@ -144,12 +144,13 @@ func TestRepositoryReviewCoverageAutomationOptionsAndAccountProjection(t *testin
 	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if len(options.Models) != 2 || len(options.Accounts) != 0 {
+	if len(options.Models) != 2 || len(options.Accounts) != 1 ||
+		options.Accounts[0].ID != "api" || !options.Accounts[0].Default {
 		t.Fatalf("options=%#v", options)
 	}
 
 	used := 25
-	accounts := repositoryReviewAccountOptions(codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
+	accounts := repositoryReviewAccountOptions(nil, codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
 		{
 			ID: "openai:work", Provider: "openai", Email: "work@example.test",
 			LimitsStatus: "available", Entries: []codexAccountLimitEntry{{
@@ -159,9 +160,15 @@ func TestRepositoryReviewCoverageAutomationOptionsAndAccountProjection(t *testin
 		},
 		{ID: "github:backup", Provider: "github-copilot", AccountID: "backup-id", CredentialStatus: "missing"},
 	}})
-	if len(accounts) != 2 || accounts[0].Label != "work@example.test" || len(accounts[0].Entries) != 1 ||
-		accounts[0].Entries[0].RemainingPercent == nil || *accounts[0].Entries[0].RemainingPercent != 75 ||
-		accounts[1].Label != "backup-id" || accounts[1].Status != "missing" {
+	accountByID := make(map[string]repositoryReviewAccountOption, len(accounts))
+	for _, account := range accounts {
+		accountByID[account.ID] = account
+	}
+	work := accountByID["credential:openai:work"]
+	backup := accountByID["credential:github:backup"]
+	if len(accounts) != 2 || !strings.Contains(work.Label, "work@example.test") || len(work.Entries) != 1 ||
+		work.Entries[0].RemainingPercent == nil || *work.Entries[0].RemainingPercent != 75 ||
+		!strings.Contains(backup.Label, "backup-id") || backup.Status != "missing" {
 		t.Fatalf("account options=%#v", accounts)
 	}
 
@@ -479,11 +486,11 @@ func TestRepositoryReviewCoverageControllerHelpersAndOutcome(t *testing.T) {
 		t.Fatalf("nil admission error=%v", err)
 	}
 
-	costGuard := repoaudit.RepositoryReviewAutomation{
-		EstimatedCostUSD: 2, BudgetPolicy: repoaudit.RepositoryReviewBudgetPolicy{MaxEstimatedCostUSD: 1},
-	}
-	if reason, _ := repositoryReviewBudgetGuard(costGuard); reason != repoaudit.RepositoryReviewPauseCostBudget {
-		t.Fatalf("cost guard reason=%q", reason)
+	if allowed, guardErr := repoaudit.EvaluateRepositoryReviewGuardExpression(
+		"spend.total.usd < 1",
+		repoaudit.RepositoryReviewGuardEnvironment{SpendTotalUSD: 2, CostKnown: true},
+	); guardErr != nil || allowed {
+		t.Fatalf("cost guard allowed=%v err=%v", allowed, guardErr)
 	}
 	if got := repositoryReviewAnySlice([]map[string]any{{"id": 1}}); len(got) != 1 {
 		t.Fatalf("map slice=%#v", got)
@@ -995,7 +1002,6 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 	idleInput.AccountLimitSnapshots = []repoaudit.RepositoryReviewAccountLimitSnapshot{{
 		AccountID: "account-a", Window: "weekly", CheckedAt: time.Now().UTC(),
 	}}
-	idleInput.NextCheckAt = time.Now().UTC().Add(time.Minute)
 	idle, createErr := store.CreateAutomation(t.Context(), idleInput)
 	if createErr != nil {
 		t.Fatal(createErr)
@@ -1003,7 +1009,7 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 	quotaBody := automationConfigBody(idle)
 	quotaBody["expected_version"] = idle.Version
 	budget := quotaBody["budget"].(repoaudit.RepositoryReviewBudgetPolicy)
-	budget.MinRemainingPercent = budget.MinRemainingPercent + 1
+	budget.GuardExpression = "account.limits.weekly.known"
 	quotaBody["budget"] = budget
 	quotaUpdate := repositoryReviewCoverageMutation(
 		t, mux, http.MethodPatch, "/api/repository-reviews/automations/"+idle.ID, quotaBody,
@@ -1017,7 +1023,7 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 	if decodeErr := json.Unmarshal(quotaUpdate.Body.Bytes(), &quotaResult); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if len(quotaResult.Automation.AccountLimitSnapshots) != 0 || !quotaResult.Automation.NextCheckAt.IsZero() {
+	if len(quotaResult.Automation.AccountLimitSnapshots) != 0 {
 		t.Fatalf("quota-only automation=%#v", quotaResult.Automation)
 	}
 
@@ -1109,12 +1115,18 @@ func TestRepositoryReviewCoverageAutomationTransitionsAndUtilities(t *testing.T)
 
 	usedAbove := 125
 	usedBelow := -10
-	accounts := repositoryReviewAccountOptions(codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
+	accounts := repositoryReviewAccountOptions(nil, codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
 		{ID: "fallback-id", Entries: []codexAccountLimitEntry{{UsedPercent: &usedAbove}}},
 		{ID: "account-id", AccountID: "account-label", Entries: []codexAccountLimitEntry{{UsedPercent: &usedBelow}}},
 	}})
-	if accounts[0].Label != "fallback-id" || *accounts[0].Entries[0].RemainingPercent != 0 ||
-		accounts[1].Label != "account-label" || *accounts[1].Entries[0].RemainingPercent != 100 {
+	accountMap := make(map[string]repositoryReviewAccountOption, len(accounts))
+	for _, account := range accounts {
+		accountMap[account.ID] = account
+	}
+	fallback := accountMap["credential:fallback-id"]
+	labeled := accountMap["credential:account-id"]
+	if !strings.Contains(fallback.Label, "fallback-id") || *fallback.Entries[0].RemainingPercent != 0 ||
+		!strings.Contains(labeled.Label, "account-label") || *labeled.Entries[0].RemainingPercent != 100 {
 		t.Fatalf("fallback accounts=%#v", accounts)
 	}
 
@@ -1466,75 +1478,15 @@ func TestRepositoryReviewCoverageRunAndProgressHelpers(t *testing.T) {
 }
 
 func TestRepositoryReviewCoverageQuotaRemainingBranches(t *testing.T) {
-	now := time.Now().UTC()
-	base := testRepositoryReviewAutomation()
-	base.BudgetPolicy.AccountIDs = []string{"work"}
-	base.BudgetPolicy.PauseOnUnknown = true
-	base.BudgetPolicy.CheckIntervalSeconds = 30
-
-	tests := []struct {
-		name       string
-		automation repoaudit.RepositoryReviewAutomation
-		response   codexAccountLimitsResponse
-		wantPause  bool
-	}{
-		{
-			name: "unselected account", automation: base,
-			response:  codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{ID: "backup"}}},
-			wantPause: true,
-		},
-		{
-			name: "unknown status", automation: base,
-			response: codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{
-				ID: "work", Entries: []codexAccountLimitEntry{{Status: "mystery", Window: "weekly"}},
-			}}},
-			wantPause: true,
-		},
-		{
-			name: "nil remaining", automation: base,
-			response: codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{
-				ID: "work", Entries: []codexAccountLimitEntry{{Status: "available", Window: "weekly"}},
-			}}},
-			wantPause: true,
-		},
-		{
-			name: "valid reset and required window",
-			automation: func() repoaudit.RepositoryReviewAutomation {
-				value := base
-				value.BudgetPolicy.MinRemainingPercentByWindow = map[string]float64{"weekly": 10}
-				return value
-			}(),
-			response: codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{
-				ID: "work", Entries: []codexAccountLimitEntry{{
-					Status: "available", Window: "weekly", UsedPercent: ptrInt(0),
-					RefreshesAt: now.Add(time.Hour).Format(time.RFC3339),
-				}},
-			}}},
-		},
-		{
-			name: "response error after valid account", automation: base,
-			response: codexAccountLimitsResponse{
-				Error: "partial telemetry",
-				Accounts: []codexAccountLimitAccount{
-					{
-						ID: "work",
-						Entries: []codexAccountLimitEntry{
-							{Status: "available", Window: "weekly", UsedPercent: ptrInt(0)},
-						},
-					},
-				},
-			},
-			wantPause: true,
-		},
+	if got := normalizeRepositoryReviewWindow("7d"); got != "weekly" {
+		t.Fatalf("7d window=%q", got)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			snapshots, _, reason, _, quotaErr := evaluateRepositoryReviewQuota(test.automation, test.response, now)
-			if quotaErr != nil || (reason != "") != test.wantPause ||
-				len(snapshots) == 0 && len(test.response.Accounts) > 0 {
-				t.Fatalf("snapshots=%#v reason=%q err=%v", snapshots, reason, quotaErr)
-			}
-		})
+	if got := normalizeRepositoryReviewWindow("24h"); got != "daily" {
+		t.Fatalf("24h window=%q", got)
+	}
+	reset := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	if parsed, ok := parseRepositoryReviewReset(reset.Format(time.RFC3339)); !ok || !parsed.Equal(reset) {
+		t.Fatalf("reset parsed=%s ok=%v", parsed, ok)
 	}
 }
 
@@ -1646,13 +1598,15 @@ func TestRepositoryReviewCoverageReconcileBranches(t *testing.T) {
 	quotaInput.Status = repoaudit.RepositoryReviewAutomationRunning
 	quotaInput.ActiveRunID = "run-quota-reconcile"
 	quotaInput.RunIDs = []string{quotaInput.ActiveRunID}
-	quotaInput.BudgetPolicy.AccountIDs = []string{"work"}
-	quotaInput.BudgetPolicy.MinRemainingPercent = 10
+	quotaInput.BudgetPolicy.GuardExpression = "account.limits.weekly.remaining_percent > 10"
 	quota, createErr := store.CreateAutomation(t.Context(), quotaInput)
 	if createErr != nil {
 		t.Fatal(createErr)
 	}
-	controller.active[quota.ID] = &repositoryReviewActiveRun{runID: quota.ActiveRunID, store: store}
+	controller.active[quota.ID] = &repositoryReviewActiveRun{
+		runID: quota.ActiveRunID, store: store, config: cfg,
+		reservations: make(map[int]repositoryReviewTaskReservation),
+	}
 	controller.probe = func(context.Context) (codexAccountLimitsResponse, error) {
 		return codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{
 			ID: "work", Entries: []codexAccountLimitEntry{{
@@ -1660,10 +1614,13 @@ func TestRepositoryReviewCoverageReconcileBranches(t *testing.T) {
 			}},
 		}}}, nil
 	}
-	controller.reconcile()
+	_ = controller.observeRepositoryReviewTask(
+		quota.ID, quota.ActiveRunID,
+		workflows.ManagedChildActivity{Phase: workflows.ManagedChildStarted, Index: 1},
+	)
 	quota, found, getErr = store.GetAutomation(t.Context(), quota.ID)
 	if getErr != nil || !found || quota.Status != repoaudit.RepositoryReviewAutomationStopping ||
-		quota.RequestedPauseReason != repoaudit.RepositoryReviewPauseAccountLimit {
+		quota.RequestedPauseReason != repoaudit.RepositoryReviewPauseGuardExpression {
 		t.Fatalf("quota reconcile=%#v found=%v err=%v", quota, found, getErr)
 	}
 
@@ -1948,24 +1905,8 @@ func TestRepositoryReviewCoverageControllerTransitionEdges(t *testing.T) {
 	}
 
 	canceled := createIdle(t)
-	canceled.BudgetPolicy.AccountIDs = []string{"work"}
-	canceled, err = store.UpdateAutomation(
-		t.Context(),
-		canceled.ID,
-		canceled.Version,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			candidate.BudgetPolicy.AccountIDs = []string{"work"}
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	cancelController := repositoryReviewCoverageLeasedController(t, handler, store)
-	cancelController.probe = func(context.Context) (codexAccountLimitsResponse, error) {
-		cancelController.cancel()
-		return codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{ID: "work"}}}, nil
-	}
+	cancelController.cancel()
 	if _, startErr := cancelController.startAutomation(
 		t.Context(), canceled.ID, canceled.Version, false, "start",
 	); !errors.Is(startErr, context.Canceled) {
@@ -1973,25 +1914,10 @@ func TestRepositoryReviewCoverageControllerTransitionEdges(t *testing.T) {
 	}
 
 	raced := createIdle(t)
-	raced, err = store.UpdateAutomation(
-		t.Context(),
-		raced.ID,
-		raced.Version,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			candidate.BudgetPolicy.AccountIDs = []string{"work"}
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	raceController := repositoryReviewCoverageLeasedController(t, handler, store)
-	raceController.probe = func(context.Context) (codexAccountLimitsResponse, error) {
-		raceController.mu.Lock()
-		raceController.active[raced.ID] = &repositoryReviewActiveRun{runID: "won-race", store: store}
-		raceController.mu.Unlock()
-		return codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{ID: "work"}}}, nil
-	}
+	raceController.mu.Lock()
+	raceController.active[raced.ID] = &repositoryReviewActiveRun{runID: "won-race", store: store}
+	raceController.mu.Unlock()
 	if _, startErr := raceController.startAutomation(
 		t.Context(),
 		raced.ID,
@@ -2033,14 +1959,6 @@ func TestRepositoryReviewCoverageControllerTransitionEdges(t *testing.T) {
 		t.Fatalf("canceled pause error=%v", pauseErr)
 	}
 
-	staleGuard := idle
-	staleGuard.Version++
-	if _, guardErr := controller.pauseAtGuard(
-		t.Context(), store, staleGuard, repoaudit.RepositoryReviewPauseTokenBudget,
-		"stale guard", nil, time.Time{},
-	); !errors.Is(guardErr, repoaudit.ErrConflict) {
-		t.Fatalf("stale guard error=%v", guardErr)
-	}
 }
 
 func TestRepositoryReviewCoverageConfigurationAndStoreErrors(t *testing.T) {
@@ -2214,7 +2132,7 @@ func TestRepositoryReviewCoverageOutcomeSelectionEdges(t *testing.T) {
 			Model: "edge-model", Reviewer: "edge-reviewer", ScopeFiles: []repoaudit.FileRef{code},
 			Findings: []repoaudit.FindingCandidate{{
 				Severity: "medium", Title: "Edge finding", File: code.Path, Line: &line,
-				Evidence: "edge evidence", Impact: "edge impact", Recommendation: "edge recommendation",
+				Evidence: "edge evidence", Impact: "edge impact",
 				Validation: repoaudit.Validation{Status: "confirmed", Summary: "confirmed"},
 			}},
 		}},
@@ -2251,12 +2169,9 @@ func TestRepositoryReviewCoverageQuotaProbeAndReconcileErrors(t *testing.T) {
 	controller := repositoryReviewCoverageLeasedController(t, handler, store)
 	controller.probe = nil
 	quotaInput := testRepositoryReviewAutomation()
-	quotaInput.BudgetPolicy.AccountIDs = []string{"work"}
-	if snapshots, _, _, _, quotaErr := controller.checkQuota(
-		t.Context(),
-		quotaInput,
-	); quotaErr != nil ||
-		len(snapshots) != 0 {
+	if snapshots, _, quotaErr := controller.repositoryReviewGuardAccountLimits(
+		t.Context(), controller.leasedConfig, quotaInput,
+	); quotaErr == nil && len(snapshots) == 0 {
 		t.Fatalf("default empty quota snapshots=%#v err=%v", snapshots, quotaErr)
 	}
 
@@ -2264,55 +2179,26 @@ func TestRepositoryReviewCoverageQuotaProbeAndReconcileErrors(t *testing.T) {
 	runningInput.Status = repoaudit.RepositoryReviewAutomationRunning
 	runningInput.ActiveRunID = "run-probe-error"
 	runningInput.RunIDs = []string{runningInput.ActiveRunID}
-	runningInput.BudgetPolicy.AccountIDs = []string{"work"}
-	runningInput.BudgetPolicy.PauseOnUnknown = true
+	runningInput.BudgetPolicy.GuardExpression = "account.limits.weekly.remaining_percent > 10"
 	running, createErr := store.CreateAutomation(t.Context(), runningInput)
 	if createErr != nil {
 		t.Fatal(createErr)
 	}
-	controller.active[running.ID] = &repositoryReviewActiveRun{runID: running.ActiveRunID, store: store}
+	controller.active[running.ID] = &repositoryReviewActiveRun{
+		runID: running.ActiveRunID, store: store, config: controller.leasedConfig,
+		reservations: make(map[int]repositoryReviewTaskReservation),
+	}
 	controller.probe = func(context.Context) (codexAccountLimitsResponse, error) {
 		return codexAccountLimitsResponse{}, errors.New("telemetry offline")
 	}
-	controller.reconcile()
+	_ = controller.observeRepositoryReviewTask(
+		running.ID, running.ActiveRunID,
+		workflows.ManagedChildActivity{Phase: workflows.ManagedChildStarted, Index: 1},
+	)
 	updated, found, getErr := store.GetAutomation(t.Context(), running.ID)
 	if getErr != nil || !found || updated.Status != repoaudit.RepositoryReviewAutomationStopping ||
-		updated.RequestedPauseReason != repoaudit.RepositoryReviewPauseAccountLimit {
+		updated.RequestedPauseReason != repoaudit.RepositoryReviewPauseGuardExpression {
 		t.Fatalf("probe-error reconcile=%#v found=%v err=%v", updated, found, getErr)
-	}
-
-	racedInput := testRepositoryReviewAutomation()
-	racedInput.Status = repoaudit.RepositoryReviewAutomationRunning
-	racedInput.ActiveRunID = "run-quota-original"
-	racedInput.RunIDs = []string{racedInput.ActiveRunID}
-	racedInput.BudgetPolicy.AccountIDs = []string{"work"}
-	raced, createErr := store.CreateAutomation(t.Context(), racedInput)
-	if createErr != nil {
-		t.Fatal(createErr)
-	}
-	raceController := repositoryReviewCoverageLeasedController(t, handler, store)
-	raceController.active[raced.ID] = &repositoryReviewActiveRun{runID: raced.ActiveRunID, store: store}
-	raceController.probe = func(ctx context.Context) (codexAccountLimitsResponse, error) {
-		var updateErr error
-		raced, updateErr = store.UpdateAutomation(
-			ctx,
-			raced.ID,
-			raced.Version,
-			func(candidate *repoaudit.RepositoryReviewAutomation) error {
-				candidate.ActiveRunID = "run-quota-replaced"
-				candidate.RunIDs = append(candidate.RunIDs, candidate.ActiveRunID)
-				return nil
-			},
-		)
-		if updateErr != nil {
-			return codexAccountLimitsResponse{}, updateErr
-		}
-		return codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{{ID: "work"}}}, nil
-	}
-	raceController.reconcile()
-	raced, found, getErr = store.GetAutomation(t.Context(), raced.ID)
-	if getErr != nil || !found || raced.ActiveRunID != "run-quota-replaced" || len(raced.AccountLimitSnapshots) != 0 {
-		t.Fatalf("raced quota reconcile=%#v found=%v err=%v", raced, found, getErr)
 	}
 
 	canceledInput, createErr := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())

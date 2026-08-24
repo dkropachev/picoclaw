@@ -158,8 +158,35 @@ const completed: RepositoryModelEvaluation = {
       },
       confirmed_findings: 150,
       unsupported_files: 1,
-      strengths: ["Broad source-grounded review", "Practical remediation"],
+      strengths: [
+        "Broad source-grounded review",
+        "Precise control-flow evidence",
+      ],
       limitations: ["Some impacts need runtime validation"],
+      claim_ledger_available: true,
+      claims_omitted: 4,
+      claims: [
+        {
+          id: "batch-a-claim-001-0001",
+          path: "src/core.cc",
+          title: "Failure state is overwritten",
+          evidence: "The catch branch assigns the completed state.",
+          impact: "Callers observe completion after the operation failed.",
+          disposition: "supported",
+          judge_rationale:
+            "The cited assignment and observable state are present in source.",
+        },
+        {
+          id: "batch-a-claim-001-0002",
+          path: "src/timer.cc",
+          title: "Claimed timeout is not established",
+          evidence: "The cited function does not read or compare a deadline.",
+          impact: "The claimed timeout cannot be derived from this path.",
+          disposition: "unsupported",
+          judge_rationale:
+            "The supplied source contains no deadline operation on this path.",
+        },
+      ],
     }),
     comparison({
       model_alias: "review-cheap-2",
@@ -255,6 +282,7 @@ describe("ModelEvaluationReportPage", () => {
   })
 
   it("renders a concise visual report with recommendation, graphs, pies, and narrative analysis", async () => {
+    const user = userEvent.setup()
     vi.mocked(getModelEvaluation).mockResolvedValue(completed)
     render(
       <ModelEvaluationReportPage
@@ -294,6 +322,25 @@ describe("ModelEvaluationReportPage", () => {
     expect(
       within(winnerCard as HTMLElement).getByText(
         "Some impacts need runtime validation",
+      ),
+    ).toBeVisible()
+    const findingsSummary = within(winnerCard as HTMLElement).getByText(
+      /2 shown · 1 supported · 1 unsupported/i,
+    )
+    await user.click(findingsSummary)
+    const supportedFinding = within(winnerCard as HTMLElement).getByText(
+      "Failure state is overwritten",
+    )
+    expect(supportedFinding).toBeVisible()
+    await user.click(supportedFinding)
+    expect(
+      within(winnerCard as HTMLElement).getByText(
+        "The catch branch assigns the completed state.",
+      ),
+    ).toBeVisible()
+    expect(
+      within(winnerCard as HTMLElement).getByText(
+        /4 additional assessed claims were omitted/i,
       ),
     ).toBeVisible()
     expect(screen.getByText("Lower overall and slower")).toBeVisible()

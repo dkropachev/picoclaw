@@ -320,6 +320,84 @@ func TestRepositoryModelEvaluationJudgeEvidenceRejectsAbsentDuplicateOrOmittedID
 	}
 }
 
+func TestRepositoryModelEvaluationClaimLedgerRequiresExactDiagnosisAssessments(t *testing.T) {
+	mapping := `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`
+	ledger := `[` +
+		`{"candidateId":"candidate-001","claimId":"claim-001-0001","path":"pkg/core.go",` +
+		`"title":"Boundary state is accepted","evidence":"The exact predicate accepts zero.",` +
+		`"impact":"The operation enters an invalid state."},` +
+		`{"candidateId":"candidate-001","claimId":"claim-001-0002","path":"pkg/core.go",` +
+		`"title":"Claimed timeout is absent","evidence":"No deadline is read on this path.",` +
+		`"impact":"The stated timeout is not established."}]`
+	judge := `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":1,"unsupportedClaims":1,` +
+		`"claimAssessments":[` +
+		`{"claimId":"claim-001-0001","disposition":"supported","rationale":"The predicate and state transition are present."},` +
+		`{"claimId":"claim-001-0002","disposition":"unsupported","rationale":"The cited source contains no deadline operation."}]}]}`
+	claims, err := repositoryModelEvaluationValidatedClaimLedger(
+		judge,
+		mapping,
+		ledger,
+		[]string{"model-a"},
+		"0123456789abcdef-extra",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims["model-a"]) != 2 ||
+		claims["model-a"][0].ID != "0123456789abcdef-claim-001-0001" ||
+		claims["model-a"][0].Disposition != repoeval.ClaimDispositionSupported ||
+		claims["model-a"][1].Disposition != repoeval.ClaimDispositionUnsupported {
+		t.Fatalf("validated claim ledger = %#v", claims)
+	}
+	aggregate, err := repositoryModelEvaluationAggregateJudgeJSON(judge)
+	if err != nil || strings.Contains(aggregate, "claimAssessments") ||
+		!strings.Contains(aggregate, `"confirmedClaims":1`) {
+		t.Fatalf("aggregate judge evidence=%q err=%v", aggregate, err)
+	}
+
+	invalid := []struct {
+		name   string
+		judge  string
+		ledger string
+	}{
+		{name: "missing assessments", judge: `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":1,"unsupportedClaims":1}]}`, ledger: ledger},
+		{name: "wrong counts", judge: strings.Replace(judge, `"confirmedClaims":1`, `"confirmedClaims":2`, 1), ledger: ledger},
+		{name: "missing claim", judge: strings.Replace(judge, `,{"claimId":"claim-001-0002","disposition":"unsupported","rationale":"The cited source contains no deadline operation."}`, "", 1), ledger: ledger},
+		{name: "prohibited fix field", judge: judge, ledger: strings.Replace(ledger, `"impact":"The operation enters an invalid state."`, `"impact":"The operation enters an invalid state.","recommendation":"change it"`, 1)},
+		{name: "unsafe path", judge: judge, ledger: strings.Replace(ledger, `"path":"pkg/core.go"`, `"path":"/tmp/core.go"`, 1)},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := repositoryModelEvaluationValidatedClaimLedger(
+				test.judge,
+				mapping,
+				test.ledger,
+				[]string{"model-a"},
+				"batch",
+			); err == nil {
+				t.Fatal("invalid claim evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestRepositoryModelEvaluationClaimLedgerCapIsPerModelAndExplicit(t *testing.T) {
+	evaluation := repoeval.Evaluation{CandidateModels: []string{"model-a", "model-b"}}
+	existing := make([]repoeval.ModelClaim, repositoryModelEvaluationMaxClaimsPerModel-1)
+	evaluation.Checkpoint.Batches = []repoeval.BatchCheckpoint{{
+		ClaimLedger: map[string][]repoeval.ModelClaim{"model-a": existing},
+	}}
+	incoming := map[string][]repoeval.ModelClaim{
+		"model-a": {{ID: "a"}, {ID: "b"}},
+		"model-b": {{ID: "c"}, {ID: "d"}},
+	}
+	bounded, omitted := repositoryModelEvaluationCapClaimLedger(evaluation, incoming)
+	if len(bounded["model-a"]) != 1 || omitted["model-a"] != 1 ||
+		len(bounded["model-b"]) != 2 || omitted["model-b"] != 0 {
+		t.Fatalf("bounded=%#v omitted=%#v", bounded, omitted)
+	}
+}
+
 func TestRepositoryModelEvaluationAnalysisReceivesPerAliasFileWeights(t *testing.T) {
 	evaluation := repositoryModelEvaluationMetricsFixture()
 	evaluation.Checkpoint.Batches = []repoeval.BatchCheckpoint{{

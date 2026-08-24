@@ -122,7 +122,7 @@ func TestWorkflowManagedExplicitScopeGroupsAndTaskContextStayBounded(t *testing.
 
 func TestEnsureWorkflowManagedProvidersDeduplicatesUnavailableReviewers(t *testing.T) {
 	runner := &workflowAgentRunner{loop: &AgentLoop{cfg: config.DefaultConfig()}}
-	err := runner.ensureWorkflowManagedProviders(&AgentInstance{Model: "default"}, map[string]any{
+	err := runner.ensureWorkflowManagedProviders(&AgentInstance{Model: "default"}, "", map[string]any{
 		"reviewer_models": []any{"same"},
 		"optimization": map[string]any{"model": map[string]any{
 			"enabled": true, "candidates": []any{"same"},

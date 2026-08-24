@@ -261,14 +261,13 @@ func seedRepositoryReviewAPIState(t *testing.T, workspace string) repoaudit.Repo
 			Model: "review-model", ScopeFiles: []repoaudit.FileRef{file},
 			Findings: []repoaudit.FindingCandidate{
 				{
-					Severity:       "high",
-					Title:          "Lost update",
-					File:           file.Path,
-					Line:           &line,
-					Message:        "The update is not fenced.",
-					Evidence:       "Two writers overwrite each other.",
-					Impact:         "Data is lost.",
-					Recommendation: "Use compare-and-swap.",
+					Severity: "high",
+					Title:    "Lost update",
+					File:     file.Path,
+					Line:     &line,
+					Message:  "The update is not fenced.",
+					Evidence: "Two writers overwrite each other.",
+					Impact:   "Data is lost.",
 					Validation: repoaudit.Validation{
 						Status:  "confirmed",
 						Summary: "Reproduced",

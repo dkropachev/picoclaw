@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,10 @@ func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
 		"subscription":        true,
 		"equivalent_model":    "metered-review",
 	}
+	raw["budget"] = map[string]any{
+		"max_total_tokens": 1000, "account_ids": []string{"openai:work"},
+		"pause_on_unknown": true, "check_interval_seconds": 30,
+	}
 	data, err = json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +48,14 @@ func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
 	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	if _, found, getErr := store.GetProfile(context.Background(), created.ID); getErr != nil || !found {
+	loaded, found, getErr := store.GetProfile(context.Background(), created.ID)
+	if getErr != nil || !found {
 		t.Fatalf("GetProfile() found=%v error=%v", found, getErr)
+	}
+	if loaded.AccountRef != "" ||
+		!strings.Contains(loaded.BudgetPolicy.GuardExpression, "spent.tokens.total < 1000") ||
+		!strings.Contains(loaded.BudgetPolicy.GuardExpression, "false") {
+		t.Fatalf("legacy guard migration=%#v", loaded)
 	}
 	rewritten, err := os.ReadFile(path)
 	if err != nil {
@@ -52,6 +63,11 @@ func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
 	}
 	if bytes.Contains(rewritten, []byte(`"model_price"`)) {
 		t.Fatalf("legacy model_price was not removed: %s", rewritten)
+	}
+	for _, retired := range [][]byte{[]byte(`"max_total_tokens"`), []byte(`"account_ids"`), []byte(`"check_interval_seconds"`)} {
+		if bytes.Contains(rewritten, retired) {
+			t.Fatalf("legacy guard field %s was not removed: %s", retired, rewritten)
+		}
 	}
 }
 
@@ -572,7 +588,7 @@ func validProfileForTest(id, name string) RepositoryReviewProfile {
 		},
 		ReviewerModel: "review-a",
 		AutoContinue:  true, MaxFilesPerRun: 12, MaxContentBytes: 64 << 10,
-		MaxParallelChildren: 1, EstimatedOutputTokens: 1_500,
-		BudgetPolicy: RepositoryReviewBudgetPolicy{CheckIntervalSeconds: 60},
+		MaxParallelChildren: 1,
+		BudgetPolicy:        RepositoryReviewBudgetPolicy{},
 	}
 }

@@ -111,24 +111,24 @@ func TestRepositoryReviewProfileUsesDefaultFallbackChainAndRelevantDependencies(
 	}}
 	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 	runner := &workflowAgentRunner{loop: loop}
-	profile, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", nil)
+	profile, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
 	if err != nil || !profile.IncludeDefaultReviewer ||
 		!reflect.DeepEqual(profile.ReviewerModels, []string{"review-fallback"}) ||
 		profile.Revision == "" || profile.MaxContentBytes < 8<<10 {
 		t.Fatalf("default review profile=%#v err=%v", profile, err)
 	}
 	cfg.ModelAliases[2].Model = "unrelated-v2"
-	unrelated, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", nil)
+	unrelated, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
 	if err != nil || unrelated.Revision != profile.Revision {
 		t.Fatalf("unrelated model changed profile from %q to %q: %v", profile.Revision, unrelated.Revision, err)
 	}
 	cfg.ModelAliases[0].Model = "primary-v2"
-	relevant, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", nil)
+	relevant, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
 	if err != nil || relevant.Revision == profile.Revision {
 		t.Fatalf("relevant alias did not change profile=%#v err=%v", relevant, err)
 	}
 	exact, err := runner.ResolveRepositoryReviewProfile(
-		t.Context(), "main", []string{"review-primary", "review-fallback"},
+		t.Context(), "main", "", []string{"review-primary", "review-fallback"},
 	)
 	if err != nil || exact.IncludeDefaultReviewer ||
 		!reflect.DeepEqual(exact.ReviewerModels, []string{"review-primary", "review-fallback"}) {
@@ -137,26 +137,86 @@ func TestRepositoryReviewProfileUsesDefaultFallbackChainAndRelevantDependencies(
 	cfg.ModelList[0].Provider = "codex-cli"
 	cfg.ModelList[0].Model = "codex-cli/codex"
 	if _, err := runner.ResolveRepositoryReviewProfile(
-		t.Context(), "main", []string{"review-primary"},
+		t.Context(), "main", "", []string{"review-primary"},
 	); err == nil || !strings.Contains(err.Error(), "agentic CLI provider") {
 		t.Fatalf("agentic CLI reviewer was not rejected: %v", err)
 	}
 }
 
+func TestRepositoryReviewProfileFreezesExplicitAccountAndItsAliasGraph(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.AccountRef = "review-default"
+	cfg.Agents.Defaults.ModelName = "review-model"
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name: "review-model", Model: "gpt-default",
+		AccountOverrides: map[string]string{"review-alt": "gpt-alt"},
+	}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "review-default", Provider: "openai", Model: "gpt-default",
+			APIBase: "http://example.invalid/v1", APIKeys: config.SimpleSecureStrings("default-key"),
+			Enabled: true,
+		},
+		{
+			ModelName: "review-alt", Provider: "openai", Model: "gpt-alt",
+			APIBase: "http://example.invalid/v1", APIKeys: config.SimpleSecureStrings("alt-key"),
+			Enabled: true,
+		},
+	}
+	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
+	t.Cleanup(loop.Close)
+	runner := &workflowAgentRunner{loop: loop}
+
+	inherited, err := runner.ResolveRepositoryReviewProfile(t.Context(), "main", "", nil)
+	if err != nil || inherited.AccountRef != "review-default" {
+		t.Fatalf("inherited profile=%#v err=%v", inherited, err)
+	}
+	explicit, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", "review-alt", nil,
+	)
+	if err != nil || explicit.AccountRef != "review-alt" || explicit.Revision == inherited.Revision {
+		t.Fatalf("explicit profile=%#v inherited=%#v err=%v", explicit, inherited, err)
+	}
+	cfg.ModelList[0].APIBase = "http://changed-default.invalid/v1"
+	unchangedExplicit, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", "review-alt", nil,
+	)
+	if err != nil || unchangedExplicit.Revision != explicit.Revision {
+		t.Fatalf(
+			"unselected account changed explicit profile from %q to %q: %v",
+			explicit.Revision,
+			unchangedExplicit.Revision,
+			err,
+		)
+	}
+	if _, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", "missing-account", nil,
+	); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("missing explicit account error=%v", err)
+	}
+	if _, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", " review-alt ", nil,
+	); err == nil || !strings.Contains(err.Error(), "reference is invalid") {
+		t.Fatalf("non-exact explicit account error=%v", err)
+	}
+}
+
 func TestRepositoryReviewProfileRejectsUnavailableRuntimeAgentsAndModels(t *testing.T) {
 	var nilRunner *workflowAgentRunner
-	if _, err := nilRunner.ResolveRepositoryReviewProfile(context.Background(), "main", nil); err == nil ||
+	if _, err := nilRunner.ResolveRepositoryReviewProfile(context.Background(), "main", "", nil); err == nil ||
 		!strings.Contains(err.Error(), "agent loop not configured") {
 		t.Fatalf("nil resolver error = %v", err)
 	}
 	if _, err := (&workflowAgentRunner{loop: &AgentLoop{}}).ResolveRepositoryReviewProfile(
-		context.Background(), "main", nil,
+		context.Background(), "main", "", nil,
 	); err == nil || !strings.Contains(err.Error(), "registry not configured") {
 		t.Fatalf("missing registry error = %v", err)
 	}
 	missing := &AgentLoop{registry: &AgentRegistry{agents: map[string]*AgentInstance{}}}
 	if _, err := (&workflowAgentRunner{loop: missing}).ResolveRepositoryReviewProfile(
-		context.Background(), "missing", nil,
+		context.Background(), "missing", "", nil,
 	); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing agent error = %v", err)
 	}
@@ -164,18 +224,18 @@ func TestRepositoryReviewProfileRejectsUnavailableRuntimeAgentsAndModels(t *test
 		"main": {ID: "main"},
 	}}}
 	if _, err := (&workflowAgentRunner{loop: withoutModels}).ResolveRepositoryReviewProfile(
-		context.Background(), "main", nil,
+		context.Background(), "main", "", nil,
 	); err == nil || !strings.Contains(err.Error(), "no configured model aliases") {
 		t.Fatalf("missing model aliases error = %v", err)
 	}
 	if _, err := (&workflowAgentRunner{loop: withoutModels}).ResolveRepositoryReviewProfile(
-		context.Background(), "main", []string{"review-a"},
+		context.Background(), "main", "", []string{"review-a"},
 	); err == nil || !strings.Contains(err.Error(), "config is nil") {
 		t.Fatalf("missing config error = %v", err)
 	}
 	stopped := &AgentLoop{runtimeGateStopped: true}
 	if _, err := (&workflowAgentRunner{loop: stopped}).ResolveRepositoryReviewProfile(
-		context.Background(), "main", nil,
+		context.Background(), "main", "", nil,
 	); !errors.Is(err, errAgentRuntimeStopped) {
 		t.Fatalf("stopped runtime error = %v", err)
 	}
@@ -195,7 +255,7 @@ func TestRepositoryReviewProfileExpandsModelRouterDependenciesAndRejectsUnsafeDe
 	}
 	loop := &AgentLoop{cfg: cfg, registry: &AgentRegistry{agents: map[string]*AgentInstance{"main": agent}}}
 	profile, err := (&workflowAgentRunner{loop: loop}).ResolveRepositoryReviewProfile(
-		context.Background(), "main", nil,
+		context.Background(), "main", "", nil,
 	)
 	if err != nil || !profile.IncludeDefaultReviewer || profile.Revision == "" || profile.MaxContentBytes < 8<<10 {
 		t.Fatalf("model-router review profile = %#v, %v", profile, err)
@@ -203,7 +263,7 @@ func TestRepositoryReviewProfileExpandsModelRouterDependenciesAndRejectsUnsafeDe
 
 	agent.Candidates = []providers.FallbackCandidate{{Provider: "codex-cli", Model: "codex"}}
 	if _, err := (&workflowAgentRunner{loop: loop}).ResolveRepositoryReviewProfile(
-		context.Background(), "main", nil,
+		context.Background(), "main", "", nil,
 	); err == nil || !strings.Contains(err.Error(), "agentic CLI provider") {
 		t.Fatalf("unsafe default candidate error = %v", err)
 	}
@@ -387,6 +447,106 @@ func TestWorkflowAgentRunnerRejectsUnknownExplicitAgent(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), `workflow agent "reviewer" not found`) {
 		t.Fatalf("RunAgent() error = %v, want unknown agent error", err)
+	}
+}
+
+func TestWorkflowAgentRunnerUsesExplicitAccountForEphemeralRun(t *testing.T) {
+	defaultCalls, altCalls := 0, 0
+	defaultModel, altModel := "", ""
+	defaultServer := newChatCompletionTestServer(
+		t, "workflow default account", "default answer", &defaultCalls, &defaultModel,
+	)
+	t.Cleanup(defaultServer.Close)
+	altServer := newChatCompletionTestServer(
+		t, "workflow alternate account", "alternate answer", &altCalls, &altModel,
+	)
+	t.Cleanup(altServer.Close)
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.AccountRef = "review-default"
+	cfg.Agents.Defaults.ModelName = "review-model"
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name: "review-model", Model: "gpt-default",
+		AccountOverrides: map[string]string{"review-alt": "gpt-alt"},
+	}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "review-default", Provider: "openai", Model: "gpt-default",
+			APIBase: defaultServer.URL, APIKeys: config.SimpleSecureStrings("default-key"),
+			Enabled: true,
+		},
+		{
+			ModelName: "review-alt", Provider: "openai", Model: "gpt-alt",
+			APIBase: altServer.URL, APIKeys: config.SimpleSecureStrings("alt-key"),
+			Enabled: true,
+		},
+	}
+	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
+	t.Cleanup(loop.Close)
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		t.Context(),
+		workflows.AgentRequest{
+			AgentID: "main", AccountRef: "review-alt", Prompt: "Review this.",
+			EphemeralSession: true, History: "none", Cache: "none", Tools: workflows.AgentToolsNone,
+		},
+	)
+	if err != nil || outputs["text"] != "alternate answer" {
+		t.Fatalf("explicit account run outputs=%#v err=%v", outputs, err)
+	}
+	if altCalls != 1 || altModel != "gpt-alt" || defaultCalls != 0 {
+		t.Fatalf(
+			"explicit account providers alt=%d/%q default=%d/%q",
+			altCalls,
+			altModel,
+			defaultCalls,
+			defaultModel,
+		)
+	}
+	if _, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		t.Context(),
+		workflows.AgentRequest{AgentID: "main", AccountRef: "missing", Prompt: "Review this."},
+	); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("missing workflow account error=%v", err)
+	}
+}
+
+func TestWorkflowManagedChildrenAndRepairsKeepExplicitAccount(t *testing.T) {
+	contract := &workflows.AgentOutputContract{
+		Format: "json", RepairAttempts: 1,
+		Schema: map[string]any{
+			"type": "object", "required": []any{"answer"},
+			"properties": map[string]any{"answer": map[string]any{"type": "string"}},
+		},
+	}
+	req := workflows.AgentRequest{
+		AccountRef: "review-alt", Prompt: "Review this.", Scope: []any{map[string]any{"id": "one"}},
+		Output: contract,
+		Managed: map[string]any{
+			"mode": "auto", "max_items_per_chunk": 1,
+			"calibration": map[string]any{"enabled": false},
+		},
+		ManagedChildObserver: func(workflows.ManagedChildActivity) error { return nil },
+	}
+	var seenAccounts []string
+	runOnce := func(_ string, _ bool, options workflowAgentRunOptions) (string, error) {
+		seenAccounts = append(seenAccounts, options.AccountRef)
+		if len(seenAccounts) == 1 {
+			return `{}`, nil
+		}
+		return `{"answer":"ok"}`, nil
+	}
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		req,
+		&AgentInstance{ID: "main", Model: "review-model", AccountRef: "review-default"},
+		"main", workflows.AgentSessionEphemeral, "none", "none", "", "scope_split", runOnce,
+	)
+	if err != nil || outputs["structured_repairs"] != 1 {
+		t.Fatalf("managed account repair outputs=%#v err=%v", outputs, err)
+	}
+	if !reflect.DeepEqual(seenAccounts, []string{"review-alt", "review-alt"}) {
+		t.Fatalf("managed account refs=%#v", seenAccounts)
 	}
 }
 
@@ -4415,21 +4575,21 @@ func TestWorkflowManagedProviderInitializationRegistersCandidate(t *testing.T) {
 		},
 	}
 
-	if err := runner.ensureWorkflowManagedProviders(agent, raw); err != nil {
+	if err := runner.ensureWorkflowManagedProviders(agent, "", raw); err != nil {
 		t.Fatalf("ensureWorkflowManagedProviders() error = %v", err)
 	}
 	protocol, modelID := "openai", "cheap-model"
 	if agent.CandidateProviders[providers.ModelKey(protocol, modelID)] == nil {
 		t.Fatalf("candidate provider for %s/%s not registered: %#v", protocol, modelID, agent.CandidateProviders)
 	}
-	if err := runner.ensureWorkflowManagedProviders(agent, raw); err != nil {
+	if err := runner.ensureWorkflowManagedProviders(agent, "", raw); err != nil {
 		t.Fatalf("second ensureWorkflowManagedProviders() error = %v", err)
 	}
 }
 
 func TestWorkflowManagedProviderInitializationReportsCandidateFailures(t *testing.T) {
 	runner := &workflowAgentRunner{loop: &AgentLoop{cfg: &config.Config{}}}
-	err := runner.ensureWorkflowManagedProviders(&AgentInstance{Model: "default-model"}, map[string]any{
+	err := runner.ensureWorkflowManagedProviders(&AgentInstance{Model: "default-model"}, "", map[string]any{
 		"optimization": map[string]any{
 			"model": map[string]any{
 				"enabled":    true,

@@ -38,16 +38,19 @@ type fakeAgentRunner struct {
 }
 
 type repositoryProfileAgentStub struct {
-	profile    RepositoryReviewModelProfile
-	profileErr error
-	request    AgentRequest
+	profile             RepositoryReviewModelProfile
+	profileErr          error
+	requestedAccountRef string
+	request             AgentRequest
 }
 
 func (r *repositoryProfileAgentStub) ResolveRepositoryReviewProfile(
 	_ context.Context,
 	_ string,
+	requestedAccountRef string,
 	_ []string,
 ) (RepositoryReviewModelProfile, error) {
+	r.requestedAccountRef = requestedAccountRef
 	return r.profile, r.profileErr
 }
 
@@ -316,7 +319,7 @@ func TestRepositoryReviewAgentContextReservesControllerDeadline(t *testing.T) {
 func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testing.T) {
 	base := map[string]any{"agent": "", "profile": map[string]any{
 		"schema": "repository-bug-finder-v1", "models": " review-a, review-a; review-b ",
-		"max_content_bytes": 128 << 10,
+		"account_ref": "review-account", "max_content_bytes": 128 << 10,
 	}}
 	if _, err := (&Executor{Agents: &fakeAgentRunner{}}).bindRepositoryReviewModelProfile(
 		context.Background(), base,
@@ -331,7 +334,8 @@ func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testin
 	}
 
 	stub := &repositoryProfileAgentStub{profile: RepositoryReviewModelProfile{
-		Revision: "sha256:models", ReviewerModels: []string{"review-a", "review-b"}, MaxContentBytes: 64 << 10,
+		Revision: "sha256:models", AccountRef: "review-account",
+		ReviewerModels: []string{"review-a", "review-b"}, MaxContentBytes: 64 << 10,
 	}}
 	bound, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(context.Background(), base)
 	if err != nil {
@@ -339,9 +343,13 @@ func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testin
 	}
 	profile := bound["profile"].(map[string]any)
 	if profile["model_graph_revision"] != "sha256:models" || profile["max_content_bytes"] != 64<<10 ||
+		profile["account_ref"] != "review-account" || bound["resolved_account_ref"] != "review-account" ||
 		bound["resolved_max_content_bytes"] != 64<<10 ||
 		!reflect.DeepEqual(profile["models"], []string{"review-a", "review-b"}) {
 		t.Fatalf("bound repository review profile = %#v", bound)
+	}
+	if stub.requestedAccountRef != "review-account" {
+		t.Fatalf("requested account ref = %q", stub.requestedAccountRef)
 	}
 	if base["resolved_max_content_bytes"] != nil {
 		t.Fatalf("profile binding mutated input = %#v", base)
@@ -773,6 +781,7 @@ jobs:
       - id: review
         uses: agent/reviewer
         with:
+          account: review-account
           managed: auto
           prompt: Review the scope.
           scope:
@@ -807,6 +816,9 @@ jobs:
 	}
 	if req.Managed != "auto" {
 		t.Fatalf("managed = %#v, want auto", req.Managed)
+	}
+	if req.AccountRef != "review-account" {
+		t.Fatalf("account ref = %q, want review-account", req.AccountRef)
 	}
 	scope, ok := req.Scope.([]any)
 	if !ok || len(scope) != 1 {

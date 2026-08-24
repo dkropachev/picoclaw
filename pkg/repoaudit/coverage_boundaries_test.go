@@ -396,7 +396,7 @@ func TestRepositoryReviewCandidateAndSimilarityBoundaries(t *testing.T) {
 	line := 2
 	valid := FindingCandidate{
 		Severity: "high", Title: "title", File: "service.go", Message: "message",
-		Symbol: "Save", Evidence: "evidence", Impact: "impact", Recommendation: "recommendation",
+		Symbol: "Save", Evidence: "evidence", Impact: "impact",
 		Validation: Validation{Status: "confirmed", Summary: "summary", Checks: []string{"check"}},
 		Line:       &line,
 	}
@@ -457,14 +457,6 @@ func TestRepositoryReviewAutomationNormalizationBoundaries(t *testing.T) {
 	tests := []func(*RepositoryReviewAutomation){
 		func(value *RepositoryReviewAutomation) { value.Repository = "https://user@example.com/repo" },
 		func(value *RepositoryReviewAutomation) { value.Repository = "https://example.com/repo?q=1" },
-		func(value *RepositoryReviewAutomation) {
-			value.MaxParallelChildren = 2
-			value.BudgetPolicy.MaxTotalTokens = 1
-		},
-		func(value *RepositoryReviewAutomation) {
-			value.BudgetPolicy.MaxEstimatedCostUSD = 1
-			value.ModelPrices = nil
-		},
 		func(value *RepositoryReviewAutomation) {
 			value.Status = RepositoryReviewAutomationStopping
 			value.ActiveRunID = "run"
@@ -559,20 +551,8 @@ func TestRepositoryReviewAutomationNormalizationBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	windowPolicy := RepositoryReviewBudgetPolicy{
-		MinRemainingPercentByWindow: map[string]float64{" Daily ": 10, "daily": 20},
-	}
-	if err := normalizeWindowPolicies(&windowPolicy); err == nil {
-		t.Fatal("duplicate normalized window was accepted")
-	}
-	windowPolicy.MinRemainingPercentByWindow = map[string]float64{"": 10}
-	if err := normalizeWindowPolicies(&windowPolicy); err == nil {
-		t.Fatal("empty window was accepted")
-	}
-
 	remaining := 10.0
 	for _, snapshots := range [][]RepositoryReviewAccountLimitSnapshot{
-		{{AccountID: "unknown", Window: "daily", CheckedAt: automationTestNow}},
 		{{AccountID: "account-a", Window: "daily"}},
 		{{AccountID: "account-a", Window: "daily", RemainingPercent: func() *float64 { value := 101.0; return &value }(), CheckedAt: automationTestNow}},
 		{{AccountID: "account-a", Window: "daily", RemainingPercent: &remaining, CheckedAt: automationTestNow}, {AccountID: "account-a", Window: "daily", CheckedAt: automationTestNow}},
@@ -803,7 +783,7 @@ func TestRepositoryReviewStorePlanningAndRecordValidationBoundaries(t *testing.T
 			name: "finding outside scope",
 			request: RecordRequest{Plan: plan, RunID: "finding", Observations: []Observation{{
 				Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
-					Severity: "high", Title: "bug", File: "other.go", Evidence: "e", Impact: "i", Recommendation: "r",
+					Severity: "high", Title: "bug", File: "other.go", Evidence: "e", Impact: "i",
 					Validation: Validation{Status: "confirmed", Summary: "v"},
 				}},
 			}}},
@@ -908,7 +888,7 @@ func TestRepositoryReviewFinalizeAndHelperBoundaries(t *testing.T) {
 	line := 12
 	body := defaultIssueBody(RepositoryState{Repository: "owner/repo"}, []Finding{{
 		ID: "finding", Severity: "high", Title: "bug", File: trusted, Line: &line,
-		Evidence: "e", Impact: "i", Recommendation: "r", Validation: Validation{Summary: "v"},
+		Evidence: "e", Impact: "i", Validation: Validation{Summary: "v"},
 	}})
 	if !strings.Contains(body, ":12") {
 		t.Fatalf("issue body = %q", body)
@@ -1773,7 +1753,7 @@ func TestRepositoryReviewAutomationAdditionalNormalizationBranches(t *testing.T)
 	base.UpdatedAt = automationTestNow
 
 	for _, mutate := range []func(*RepositoryReviewAutomation){
-		func(value *RepositoryReviewAutomation) { value.BudgetPolicy.AccountIDs = []string{""} },
+		func(value *RepositoryReviewAutomation) { value.BudgetPolicy.GuardExpression = "spent.tokens.* > 0" },
 		func(value *RepositoryReviewAutomation) { value.RunIDs = []string{"run", " run "} },
 		func(value *RepositoryReviewAutomation) {
 			value.ModelStats = map[string]RepositoryReviewModelStats{"review-a": {Requests: -1}}
@@ -1791,21 +1771,12 @@ func TestRepositoryReviewAutomationAdditionalNormalizationBranches(t *testing.T)
 
 	cost := cloneAutomation(base)
 	cost.CompareModels = false
-	cost.BudgetPolicy.MaxEstimatedCostUSD = 1
+	cost.BudgetPolicy.GuardExpression = "spend.total.usd < 1"
 	cost.ModelPrices = map[string]RepositoryReviewModelPrice{"review-a": {InputPricePer1M: 1}}
 	if err := normalizeAutomation(&cost); err != nil {
 		t.Fatalf("single-model cost automation: %v", err)
 	}
 
-	tooManyWindows := RepositoryReviewBudgetPolicy{
-		MinRemainingPercentByWindow: make(map[string]float64, maxAutomationWindowPolicies+1),
-	}
-	for index := 0; index <= maxAutomationWindowPolicies; index++ {
-		tooManyWindows.MinRemainingPercentByWindow["window-"+automationTestIndex(index)] = 1
-	}
-	if err := normalizeWindowPolicies(&tooManyWindows); err == nil {
-		t.Fatal("too many windows were accepted")
-	}
 	tooManySnapshots := cloneAutomation(base)
 	tooManySnapshots.AccountLimitSnapshots = make(
 		[]RepositoryReviewAccountLimitSnapshot,
@@ -1816,7 +1787,6 @@ func TestRepositoryReviewAutomationAdditionalNormalizationBranches(t *testing.T)
 	}
 
 	sorted := cloneAutomation(base)
-	sorted.BudgetPolicy.AccountIDs = nil
 	sorted.AccountLimitSnapshots = []RepositoryReviewAccountLimitSnapshot{
 		{AccountID: "b", Name: "a", Window: "weekly", CheckedAt: automationTestNow},
 		{AccountID: "a", Name: "b", Window: "weekly", CheckedAt: automationTestNow},
@@ -2003,7 +1973,7 @@ func TestRepositoryReviewRecordCoversDuplicateContextsAndCompletion(t *testing.T
 		t.Fatal(err)
 	}
 	invalid := FindingCandidate{
-		Severity: "high", Title: "", File: file.Path, Evidence: "e", Impact: "i", Recommendation: "r",
+		Severity: "high", Title: "", File: file.Path, Evidence: "e", Impact: "i",
 		Validation: Validation{Status: "confirmed", Summary: "v"},
 	}
 	result, err := store.Record(context.Background(), RecordRequest{
@@ -2023,7 +1993,7 @@ func TestRepositoryReviewRecordCoversDuplicateContextsAndCompletion(t *testing.T
 	}
 	candidate := FindingCandidate{
 		Severity: "high", Title: "bug", File: file.Path, Symbol: "Save",
-		Evidence: "unfenced write", Impact: "loss", Recommendation: "use CAS",
+		Evidence: "unfenced write", Impact: "loss",
 		Validation: Validation{Status: "confirmed", Summary: "reproduced"},
 	}
 	observation := Observation{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{candidate}}
@@ -2168,7 +2138,7 @@ func TestRepositoryReviewRecordUpdatesExistingContext(t *testing.T) {
 	}
 	candidate := FindingCandidate{
 		Severity: "high", Title: "bug", File: file.Path, Symbol: "Save",
-		Evidence: "unfenced", Impact: "loss", Recommendation: "CAS",
+		Evidence: "unfenced", Impact: "loss",
 		Validation: Validation{Status: "confirmed", Summary: "reproduced"},
 	}
 	contextRecord := FindingContext{

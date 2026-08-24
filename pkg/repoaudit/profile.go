@@ -30,22 +30,22 @@ var (
 // RepositoryReviewProfile is reusable review policy. Repository identity,
 // branch selection, and controller runtime state remain on the automation.
 type RepositoryReviewProfile struct {
-	SchemaVersion         int                          `json:"schema_version"`
-	ID                    string                       `json:"id"`
-	Version               int64                        `json:"version"`
-	Name                  string                       `json:"name"`
-	ReviewFocus           string                       `json:"review_focus"`
-	ScopePolicy           RepositoryReviewScopePolicy  `json:"scope_policy"`
-	ReviewerModel         string                       `json:"reviewer_model"`
-	Force                 bool                         `json:"force"`
-	AutoContinue          bool                         `json:"auto_continue"`
-	MaxFilesPerRun        int                          `json:"max_files_per_run"`
-	MaxContentBytes       int64                        `json:"max_content_bytes"`
-	MaxParallelChildren   int                          `json:"max_parallel_children"`
-	EstimatedOutputTokens int                          `json:"estimated_output_tokens"`
-	BudgetPolicy          RepositoryReviewBudgetPolicy `json:"budget"`
-	CreatedAt             time.Time                    `json:"created_at"`
-	UpdatedAt             time.Time                    `json:"updated_at"`
+	SchemaVersion       int                          `json:"schema_version"`
+	ID                  string                       `json:"id"`
+	Version             int64                        `json:"version"`
+	Name                string                       `json:"name"`
+	ReviewFocus         string                       `json:"review_focus"`
+	ScopePolicy         RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModel       string                       `json:"reviewer_model"`
+	AccountRef          string                       `json:"account_ref,omitempty"`
+	Force               bool                         `json:"force"`
+	AutoContinue        bool                         `json:"auto_continue"`
+	MaxFilesPerRun      int                          `json:"max_files_per_run"`
+	MaxContentBytes     int64                        `json:"max_content_bytes"`
+	MaxParallelChildren int                          `json:"max_parallel_children"`
+	BudgetPolicy        RepositoryReviewBudgetPolicy `json:"budget"`
+	CreatedAt           time.Time                    `json:"created_at"`
+	UpdatedAt           time.Time                    `json:"updated_at"`
 }
 
 func (s Store) ListProfiles(ctx context.Context) ([]RepositoryReviewProfile, error) {
@@ -253,6 +253,7 @@ func MaterializeRepositoryReviewAutomation(
 	automation = cloneAutomation(automation)
 	automation.ProfileID = profile.ID
 	automation.ProfileVersion = profile.Version
+	automation.AccountRef = profile.AccountRef
 	automation.ReviewFocus = profile.ReviewFocus
 	automation.ScopePolicy = profile.ScopePolicy
 	automation.ReviewerModels = []string{profile.ReviewerModel}
@@ -267,7 +268,7 @@ func MaterializeRepositoryReviewAutomation(
 	automation.MaxFilesPerRun = profile.MaxFilesPerRun
 	automation.MaxContentBytes = profile.MaxContentBytes
 	automation.MaxParallelChildren = profile.MaxParallelChildren
-	automation.EstimatedOutputTokens = profile.EstimatedOutputTokens
+	automation.EstimatedOutputTokens = defaultAutomationEstimatedOutputTokens
 	automation.BudgetPolicy = profile.BudgetPolicy
 	automation.Target = "all"
 	branch, err := NormalizeRepositoryReviewBranch(automation.Ref)
@@ -339,7 +340,8 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 		return RepositoryReviewProfile{}, false, nil
 	}
 	var profile RepositoryReviewProfile
-	if err := json.Unmarshal(data, &profile); err != nil {
+	hadLegacyGuard, err := unmarshalRepositoryReviewGuardState(data, &profile)
+	if err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
 	var legacy map[string]json.RawMessage
@@ -352,7 +354,8 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 	if err := normalizeProfile(&profile); err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
-	if _, hadLegacyPrice := legacy["model_price"]; hadLegacyPrice {
+	_, hadLegacyPrice := legacy["model_price"]
+	if hadLegacyPrice || hadLegacyGuard {
 		if err := s.saveProfile(profile); err != nil {
 			return RepositoryReviewProfile{}, false, err
 		}
@@ -393,6 +396,8 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.ReviewFocus = strings.TrimSpace(profile.ReviewFocus)
 	profile.ReviewerModel = strings.TrimSpace(profile.ReviewerModel)
+	profile.AccountRef = strings.TrimSpace(profile.AccountRef)
+	profile.BudgetPolicy.GuardExpression = strings.TrimSpace(profile.BudgetPolicy.GuardExpression)
 	if profile.MaxFilesPerRun == 0 {
 		profile.MaxFilesPerRun = defaultAutomationMaxFilesPerRun
 	}
@@ -402,23 +407,7 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	if profile.MaxParallelChildren == 0 {
 		profile.MaxParallelChildren = defaultAutomationMaxParallelChildren
 	}
-	if profile.EstimatedOutputTokens == 0 {
-		profile.EstimatedOutputTokens = defaultAutomationEstimatedOutputTokens
-	}
-	if profile.BudgetPolicy.CheckIntervalSeconds == 0 {
-		profile.BudgetPolicy.CheckIntervalSeconds = defaultAutomationCheckInterval
-	}
-	var err error
-	profile.BudgetPolicy.AccountIDs, err = normalizeUniqueAutomationStrings(
-		profile.BudgetPolicy.AccountIDs, maxAutomationAccounts, 1024, "account ID",
-	)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidProfile, err)
-	}
 	if err := normalizeRepositoryReviewScopePolicy(&profile.ScopePolicy); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidProfile, err)
-	}
-	if err := normalizeWindowPolicies(&profile.BudgetPolicy); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidProfile, err)
 	}
 	profile.CreatedAt = profile.CreatedAt.UTC()
@@ -427,21 +416,15 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		profile.Version < 1 || !validBoundedText(profile.Name, 256) ||
 		!validBoundedText(profile.ReviewFocus, maxFindingTextBytes) ||
 		!validBoundedText(profile.ReviewerModel, 256) ||
+		!validOptionalAutomationText(profile.AccountRef, 256) ||
 		profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > maxReviewFiles ||
 		profile.MaxContentBytes < 1 || profile.MaxContentBytes > defaultAutomationMaxContentBytes ||
 		profile.MaxParallelChildren < 1 || profile.MaxParallelChildren > 64 ||
-		profile.EstimatedOutputTokens < 1 || profile.EstimatedOutputTokens > 65_536 ||
 		profile.CreatedAt.IsZero() || profile.UpdatedAt.IsZero() || profile.UpdatedAt.Before(profile.CreatedAt) {
 		return ErrInvalidProfile
 	}
 	if err := validateBudgetPolicy(profile.BudgetPolicy); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidProfile, err)
-	}
-	if (profile.BudgetPolicy.MaxTotalTokens > 0 || profile.BudgetPolicy.MaxEstimatedCostUSD > 0 ||
-		len(profile.BudgetPolicy.AccountIDs) > 0 || profile.BudgetPolicy.MinRemainingPercent > 0 ||
-		len(profile.BudgetPolicy.MinRemainingPercentByWindow) > 0 || profile.BudgetPolicy.PauseOnUnknown) &&
-		profile.MaxParallelChildren != 1 {
-		return fmt.Errorf("%w: guarded budgets require max_parallel_children=1", ErrInvalidProfile)
 	}
 	return nil
 }
@@ -450,10 +433,6 @@ func cloneProfile(profile RepositoryReviewProfile) RepositoryReviewProfile {
 	profile.ScopePolicy.CodeTypes = append([]RepositoryReviewCodeType(nil), profile.ScopePolicy.CodeTypes...)
 	profile.ScopePolicy.IncludeFolders = append([]string(nil), profile.ScopePolicy.IncludeFolders...)
 	profile.ScopePolicy.ExcludeFolders = append([]string(nil), profile.ScopePolicy.ExcludeFolders...)
-	profile.BudgetPolicy.AccountIDs = append([]string(nil), profile.BudgetPolicy.AccountIDs...)
-	profile.BudgetPolicy.MinRemainingPercentByWindow = cloneAutomationFloatMap(
-		profile.BudgetPolicy.MinRemainingPercentByWindow,
-	)
 	return profile
 }
 

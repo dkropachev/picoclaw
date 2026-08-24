@@ -24,7 +24,6 @@ import (
 
 var (
 	errRepositoryReviewAutomationBusy    = errors.New("repository review automation is already active")
-	errRepositoryReviewGuardBlocked      = errors.New("repository review guard is not satisfied")
 	errRepositoryReviewSafeStop          = errors.New("repository review stopped at a safe checkpoint")
 	errRepositoryReviewInvalidTransition = errors.New("repository review action is not valid for the current status")
 	errRepositoryReviewProfileActive     = errors.New(
@@ -38,11 +37,21 @@ const (
 )
 
 type repositoryReviewActiveRun struct {
-	runID       string
-	pauseReason repoaudit.RepositoryReviewPauseReason
-	pauseDetail string
-	store       repoaudit.Store
-	config      *config.Config
+	runID        string
+	pauseReason  repoaudit.RepositoryReviewPauseReason
+	pauseDetail  string
+	store        repoaudit.Store
+	config       *config.Config
+	reservations map[int]repositoryReviewTaskReservation
+	guardMu      *sync.Mutex
+}
+
+type repositoryReviewTaskReservation struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	CostUSD          float64
+	CostKnown        bool
 }
 
 type repositoryReviewAutomationUpdater func(
@@ -281,35 +290,44 @@ func (c *repositoryReviewController) startAutomation(
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
-	profileVersionBeforeMaterialization := automation.ProfileVersion
 	automation, err = c.materializeLatestRepositoryReviewProfile(ctx, store, automation)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
-	expectedVersion = automation.Version
-	refreshPriceSnapshot := (action == "start" && automation.StartedAt.IsZero()) ||
-		action == "restart" || resetBudget ||
-		automation.ProfileVersion != profileVersionBeforeMaterialization
-	if refreshPriceSnapshot {
-		priced := automation
-		if pricingErr := repositoryReviewRefreshAccountingSnapshot(cfg, &priced); pricingErr != nil {
-			return repoaudit.RepositoryReviewAutomation{}, pricingErr
-		}
-		automation, err = c.update(
-			ctx,
-			store,
-			id,
-			expectedVersion,
-			func(candidate *repoaudit.RepositoryReviewAutomation) error {
-				candidate.ModelPrices = maps.Clone(priced.ModelPrices)
-				return nil
-			},
+	effectiveAccount := repositoryReviewEffectiveAccountRef(cfg, automation.AccountRef)
+	if validationErr := validateSelectableAccountRef(cfg, effectiveAccount); validationErr != nil {
+		return repoaudit.RepositoryReviewAutomation{}, fmt.Errorf(
+			"%w: account_ref: %v", repoaudit.ErrInvalidAutomation, validationErr,
 		)
-		if err != nil {
-			return repoaudit.RepositoryReviewAutomation{}, err
-		}
-		expectedVersion = automation.Version
 	}
+	for _, model := range repositoryReviewExecutionModels(automation) {
+		if !repositoryReviewAliasAvailableForAccount(cfg, model, effectiveAccount) {
+			return repoaudit.RepositoryReviewAutomation{}, fmt.Errorf(
+				"%w: reviewer model %q is unavailable on account %q",
+				repoaudit.ErrInvalidAutomation, model, effectiveAccount,
+			)
+		}
+	}
+	expectedVersion = automation.Version
+	priced := automation
+	if pricingErr := repositoryReviewRefreshAccountingSnapshot(cfg, &priced); pricingErr != nil {
+		return repoaudit.RepositoryReviewAutomation{}, pricingErr
+	}
+	automation, err = c.update(
+		ctx,
+		store,
+		id,
+		expectedVersion,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.ModelPrices = maps.Clone(priced.ModelPrices)
+			candidate.EffectiveAccountRef = effectiveAccount
+			return nil
+		},
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	expectedVersion = automation.Version
 
 	if resetBudget || restart {
 		automation, err = c.update(
@@ -335,19 +353,6 @@ func (c *repositoryReviewController) startAutomation(
 		}
 		expectedVersion = automation.Version
 	}
-	if reason, detail := repositoryReviewBudgetGuard(automation); reason != "" {
-		return c.pauseAtGuard(ctx, store, automation, reason, detail, nil, time.Time{})
-	}
-
-	snapshots, nextCheck, reason, detail, quotaErr := c.checkQuota(ctx, automation)
-	if quotaErr != nil && automation.BudgetPolicy.PauseOnUnknown {
-		reason = repoaudit.RepositoryReviewPauseAccountLimit
-		detail = repositoryReviewBoundedDetail("Account limit telemetry is unavailable: " + quotaErr.Error())
-	}
-	if reason != "" {
-		return c.pauseAtGuard(ctx, store, automation, reason, detail, snapshots, nextCheck)
-	}
-
 	runID := workflows.NewRunID()
 	now := c.clock()
 	c.lifecycleMu.Lock()
@@ -361,7 +366,11 @@ func (c *repositoryReviewController) startAutomation(
 		c.lifecycleMu.Unlock()
 		return repoaudit.RepositoryReviewAutomation{}, errRepositoryReviewAutomationBusy
 	}
-	c.active[id] = &repositoryReviewActiveRun{runID: runID, store: store, config: cfg}
+	c.active[id] = &repositoryReviewActiveRun{
+		runID: runID, store: store, config: cfg,
+		reservations: make(map[int]repositoryReviewTaskReservation),
+		guardMu:      &sync.Mutex{},
+	}
 	c.mu.Unlock()
 	updated, err := c.update(
 		ctx,
@@ -376,8 +385,7 @@ func (c *repositoryReviewController) startAutomation(
 			candidate.RequestedPauseDetail = ""
 			candidate.ActiveRunID = runID
 			candidate.RunIDs = append(candidate.RunIDs, runID)
-			candidate.AccountLimitSnapshots = snapshots
-			candidate.NextCheckAt = nextCheck
+			candidate.AccountLimitSnapshots = nil
 			candidate.CompletedAt = time.Time{}
 			if candidate.StartedAt.IsZero() {
 				candidate.StartedAt = now
@@ -508,6 +516,7 @@ func repositoryReviewProfileSnapshotMatches(
 ) bool {
 	return automation.ProfileID == materialized.ProfileID &&
 		automation.ProfileVersion == materialized.ProfileVersion &&
+		automation.AccountRef == materialized.AccountRef &&
 		automation.Name == materialized.Name &&
 		automation.Target == "all" &&
 		automation.ReviewFocus == materialized.ReviewFocus &&
@@ -531,13 +540,13 @@ func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryRevi
 	automation.RequestedPauseReason = ""
 	automation.RequestedPauseDetail = ""
 	automation.ActiveRunID = ""
+	automation.EffectiveAccountRef = ""
 	automation.Usage = repoaudit.RepositoryReviewTokenUsage{}
 	automation.EstimatedCostUSD = 0
 	automation.Progress = repoaudit.RepositoryReviewProgress{}
 	automation.ModelStats = make(map[string]repoaudit.RepositoryReviewModelStats)
 	automation.ModelCoverageSketches = make(map[string]string)
 	automation.AccountLimitSnapshots = nil
-	automation.NextCheckAt = time.Time{}
 	automation.StartedAt = time.Time{}
 	automation.CompletedAt = time.Time{}
 }
@@ -554,38 +563,6 @@ func (c *repositoryReviewController) currentLeasedConfiguration() (*config.Confi
 		return nil, errors.New("repository review workspace changed; restart the launcher before controlling reviews")
 	}
 	return cfg, nil
-}
-
-func (c *repositoryReviewController) pauseAtGuard(
-	ctx context.Context,
-	store repoaudit.Store,
-	automation repoaudit.RepositoryReviewAutomation,
-	reason repoaudit.RepositoryReviewPauseReason,
-	detail string,
-	snapshots []repoaudit.RepositoryReviewAccountLimitSnapshot,
-	nextCheck time.Time,
-) (repoaudit.RepositoryReviewAutomation, error) {
-	paused, err := store.UpdateAutomation(
-		ctx,
-		automation.ID,
-		automation.Version,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			candidate.Status = repoaudit.RepositoryReviewAutomationPaused
-			candidate.ActiveRunID = ""
-			candidate.PauseReason = reason
-			candidate.PauseDetail = repositoryReviewBoundedDetail(detail)
-			candidate.RequestedPauseReason = ""
-			candidate.RequestedPauseDetail = ""
-			candidate.Progress.Stage = "paused"
-			candidate.AccountLimitSnapshots = snapshots
-			candidate.NextCheckAt = nextCheck
-			return nil
-		},
-	)
-	if err != nil {
-		return repoaudit.RepositoryReviewAutomation{}, err
-	}
-	return paused, fmt.Errorf("%w: %s", errRepositoryReviewGuardBlocked, detail)
 }
 
 func (c *repositoryReviewController) pauseAutomation(
@@ -694,6 +671,12 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		runID,
 		func() error { return c.admitProviderCall(id, runID) },
 	)
+	executor.ManagedChildActivityObserver = func(event workflows.ManagedChildActivityEvent) error {
+		if event.RunID != runID || event.StepID != "review" {
+			return nil
+		}
+		return c.observeRepositoryReviewTask(id, runID, event.ManagedChildActivity)
+	}
 
 	monitorDone := make(chan struct{})
 	go func() {
@@ -711,10 +694,12 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
 			"repository":              automation.Repository,
+			"account_ref":             repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
 			"ref":                     repositoryReviewWorkflowRef(automation.Ref),
 			"target":                  automation.Target,
 			"review_focus":            automation.ReviewFocus,
 			"review_models":           strings.Join(repositoryReviewExecutionModels(automation), ","),
+			"planner_model":           repositoryReviewPlannerModel(automation),
 			"scope_policy":            string(scopePolicyJSON),
 			"force":                   automation.Force,
 			"max_content_bytes":       automation.MaxContentBytes,
@@ -770,6 +755,14 @@ func repositoryReviewExecutionModels(automation repoaudit.RepositoryReviewAutoma
 		return append([]string(nil), automation.ReviewerModels...)
 	}
 	return append([]string(nil), automation.ReviewerModels[0])
+}
+
+func repositoryReviewPlannerModel(automation repoaudit.RepositoryReviewAutomation) string {
+	models := repositoryReviewExecutionModels(automation)
+	if len(models) == 0 {
+		return ""
+	}
+	return models[0]
 }
 
 type repositoryReviewAccountingModel struct {
@@ -903,10 +896,7 @@ func (c *repositoryReviewController) recordUsage(
 		})
 		return c.latchAccountingFailure(id, runID, updateErr)
 	}
-	if reason, detail := repositoryReviewBudgetGuard(updated); reason != "" {
-		c.requestSafeStop(id, runID, reason, detail)
-		return nil
-	}
+	_ = updated
 	return nil
 }
 
@@ -1048,10 +1038,182 @@ func (c *repositoryReviewController) admitProviderCall(id, runID string) error {
 	}
 	reason, detail := active.pauseReason, active.pauseDetail
 	c.mu.Unlock()
-	if reason != "" {
+	if reason != "" && reason != repoaudit.RepositoryReviewPauseGuardExpression {
 		return fmt.Errorf("%w: %s", errRepositoryReviewSafeStop, detail)
 	}
 	return nil
+}
+
+func (c *repositoryReviewController) observeRepositoryReviewTask(
+	id string,
+	runID string,
+	activity workflows.ManagedChildActivity,
+) error {
+	if activity.Phase == workflows.ManagedChildCompleted {
+		c.mu.Lock()
+		if active := c.active[id]; active != nil && active.runID == runID {
+			delete(active.reservations, activity.Index)
+		}
+		c.mu.Unlock()
+		return nil
+	}
+	if activity.Phase != workflows.ManagedChildStarted {
+		return nil
+	}
+	activeSnapshot, ok := c.activeRunSnapshot(id, runID)
+	if !ok {
+		return fmt.Errorf("%w: repository review is no longer active", errRepositoryReviewSafeStop)
+	}
+	if activeSnapshot.pauseReason != "" {
+		return fmt.Errorf("%w: %s", errRepositoryReviewSafeStop, activeSnapshot.pauseDetail)
+	}
+	guardMu := activeSnapshot.guardMu
+	if guardMu == nil {
+		c.mu.Lock()
+		if active := c.active[id]; active != nil && active.runID == runID {
+			if active.guardMu == nil {
+				active.guardMu = &sync.Mutex{}
+			}
+			guardMu = active.guardMu
+		}
+		c.mu.Unlock()
+	}
+	if guardMu == nil {
+		return fmt.Errorf("%w: task admission guard is unavailable", errRepositoryReviewSafeStop)
+	}
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	activeSnapshot, ok = c.activeRunSnapshot(id, runID)
+	if !ok || activeSnapshot.pauseReason != "" {
+		detail := "repository review stopped before task admission"
+		if ok && activeSnapshot.pauseDetail != "" {
+			detail = activeSnapshot.pauseDetail
+		}
+		return fmt.Errorf("%w: %s", errRepositoryReviewSafeStop, detail)
+	}
+	automation, found, err := activeSnapshot.store.GetAutomation(c.ctx, id)
+	if err != nil || !found || automation.ActiveRunID != runID {
+		if err == nil {
+			err = errors.New("repository review automation is unavailable at task admission")
+		}
+		return errors.Join(errRepositoryReviewSafeStop, err)
+	}
+	expression := strings.TrimSpace(automation.BudgetPolicy.GuardExpression)
+	if expression == "" {
+		return nil
+	}
+
+	reservation := repositoryReviewGuardReservation(automation, activity)
+
+	environment := repoaudit.RepositoryReviewGuardEnvironment{
+		SpentTokens:   automation.Usage,
+		SpendTotalUSD: automation.EstimatedCostUSD,
+		CostKnown:     repositoryReviewAutomationPriceKnown(automation),
+	}
+	c.mu.Lock()
+	if active := c.active[id]; active != nil && active.runID == runID {
+		for _, pending := range active.reservations {
+			addRepositoryReviewGuardReservation(&environment, pending)
+		}
+	}
+	c.mu.Unlock()
+	addRepositoryReviewGuardReservation(&environment, reservation)
+
+	if repoaudit.RepositoryReviewGuardUsesAccountLimits(expression) {
+		snapshots, known, probeErr := c.repositoryReviewGuardAccountLimits(
+			c.ctx, activeSnapshot.config, automation,
+		)
+		environment.AccountLimitSnapshots = snapshots
+		environment.AccountLimitsKnown = known && probeErr == nil
+		if len(snapshots) > 0 {
+			_, _ = c.updateLatest(
+				context.Background(), activeSnapshot.store, id,
+				func(candidate *repoaudit.RepositoryReviewAutomation) error {
+					if candidate.ActiveRunID == runID {
+						candidate.AccountLimitSnapshots = snapshots
+					}
+					return nil
+				},
+			)
+		}
+	}
+
+	allowed, evaluateErr := repoaudit.EvaluateRepositoryReviewGuardExpression(expression, environment)
+	if evaluateErr != nil || !allowed {
+		detail := "Task admission guard evaluated to false."
+		if evaluateErr != nil {
+			detail = "Task admission guard could not produce true: " + evaluateErr.Error()
+		}
+		detail = repositoryReviewBoundedDetail(detail)
+		c.requestSafeStop(id, runID, repoaudit.RepositoryReviewPauseGuardExpression, detail)
+		return fmt.Errorf("%w: %s", errRepositoryReviewSafeStop, detail)
+	}
+
+	c.mu.Lock()
+	active := c.active[id]
+	if active == nil || active.runID != runID || active.pauseReason != "" {
+		detail := "repository review stopped before task dispatch"
+		if active != nil && active.pauseDetail != "" {
+			detail = active.pauseDetail
+		}
+		c.mu.Unlock()
+		return fmt.Errorf("%w: %s", errRepositoryReviewSafeStop, detail)
+	}
+	active.reservations[activity.Index] = reservation
+	c.mu.Unlock()
+	return nil
+}
+
+func repositoryReviewGuardReservation(
+	automation repoaudit.RepositoryReviewAutomation,
+	activity workflows.ManagedChildActivity,
+) repositoryReviewTaskReservation {
+	reservation := repositoryReviewTaskReservation{
+		PromptTokens:     int64(max(0, activity.EstimatedPromptTokens)),
+		CompletionTokens: int64(max(0, activity.EstimatedOutputTokens)),
+	}
+	reservation.TotalTokens = reservation.PromptTokens + reservation.CompletionTokens
+	alias := strings.TrimSpace(activity.ModelAlias)
+	price, found := automation.ModelPrices[alias]
+	if !found {
+		if models := repositoryReviewExecutionModels(automation); len(models) == 1 {
+			price, found = automation.ModelPrices[models[0]]
+		}
+	}
+	reservation.CostKnown = found && (price.InputPricePer1M > 0 || price.OutputPricePer1M > 0)
+	if reservation.CostKnown {
+		reservation.CostUSD = (float64(reservation.PromptTokens)*price.InputPricePer1M +
+			float64(reservation.CompletionTokens)*price.OutputPricePer1M) / 1_000_000
+	}
+	return reservation
+}
+
+func addRepositoryReviewGuardReservation(
+	environment *repoaudit.RepositoryReviewGuardEnvironment,
+	reservation repositoryReviewTaskReservation,
+) {
+	if environment == nil {
+		return
+	}
+	environment.SpentTokens.PromptTokens += reservation.PromptTokens
+	environment.SpentTokens.CompletionTokens += reservation.CompletionTokens
+	environment.SpentTokens.TotalTokens += reservation.TotalTokens
+	environment.SpendTotalUSD += reservation.CostUSD
+	environment.CostKnown = environment.CostKnown && reservation.CostKnown
+}
+
+func repositoryReviewAutomationPriceKnown(automation repoaudit.RepositoryReviewAutomation) bool {
+	models := repositoryReviewExecutionModels(automation)
+	if len(models) == 0 {
+		return false
+	}
+	for _, model := range models {
+		price, ok := automation.ModelPrices[model]
+		if !ok || price.InputPricePer1M <= 0 && price.OutputPricePer1M <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func repositoryReviewAnySlice(value any) []any {
@@ -1067,25 +1229,6 @@ func repositoryReviewAnySlice(value any) []any {
 	default:
 		return nil
 	}
-}
-
-func repositoryReviewBudgetGuard(
-	automation repoaudit.RepositoryReviewAutomation,
-) (repoaudit.RepositoryReviewPauseReason, string) {
-	if limit := automation.BudgetPolicy.MaxTotalTokens; limit > 0 && automation.Usage.TotalTokens >= limit {
-		return repoaudit.RepositoryReviewPauseTokenBudget, fmt.Sprintf(
-			"Token budget reached: %d of %d tokens. The current bounded batch will checkpoint before pausing.",
-			automation.Usage.TotalTokens, limit,
-		)
-	}
-	if limit := automation.BudgetPolicy.MaxEstimatedCostUSD; limit > 0 &&
-		automation.EstimatedCostUSD >= limit {
-		return repoaudit.RepositoryReviewPauseCostBudget, fmt.Sprintf(
-			"Estimated cost budget reached: $%.4f of $%.4f. The current bounded batch will checkpoint before pausing.",
-			automation.EstimatedCostUSD, limit,
-		)
-	}
-	return "", ""
 }
 
 func (c *repositoryReviewController) requestSafeStop(
@@ -1297,8 +1440,6 @@ func (c *repositoryReviewController) finishAutomationRun(
 				candidate.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
 				candidate.PauseDetail = "The workflow ended without a verified durable repository review checkpoint."
 				candidate.Progress.Stage = "failed"
-				candidate.NextCheckAt = c.clock().
-					Add(time.Duration(candidate.BudgetPolicy.CheckIntervalSeconds) * time.Second)
 				return nil
 			}
 			if pauseReason == repoaudit.RepositoryReviewPauseRunFailed {
@@ -1324,8 +1465,6 @@ func (c *repositoryReviewController) finishAutomationRun(
 				candidate.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
 				candidate.PauseDetail = repositoryReviewRunError(runErr, result)
 				candidate.Progress.Stage = "failed"
-				candidate.NextCheckAt = c.clock().
-					Add(time.Duration(candidate.BudgetPolicy.CheckIntervalSeconds) * time.Second)
 				return nil //nolint:nilerr // Persist the run failure as durable automation state.
 			}
 			if candidate.Progress.RemainingFiles <= 0 {
@@ -1334,7 +1473,6 @@ func (c *repositoryReviewController) finishAutomationRun(
 				candidate.PauseDetail = ""
 				candidate.Progress.Stage = "complete"
 				candidate.CompletedAt = c.clock()
-				candidate.NextCheckAt = time.Time{}
 				return nil
 			}
 			if candidate.AutoContinue {
@@ -1360,7 +1498,7 @@ func (c *repositoryReviewController) finishAutomationRun(
 	}
 	if updated.Status == repoaudit.RepositoryReviewAutomationIdle && updated.AutoContinue {
 		_, startErr := c.startAutomation(context.Background(), id, updated.Version, false, "start")
-		if startErr != nil && !errors.Is(startErr, errRepositoryReviewGuardBlocked) {
+		if startErr != nil {
 			logger.WarnCF("repository-review", "Failed to start next repository review batch", map[string]any{
 				"automation_id": id, "error": startErr.Error(),
 			})
@@ -1666,177 +1804,106 @@ func (c *repositoryReviewController) clock() time.Time {
 	return c.now().UTC()
 }
 
-func (c *repositoryReviewController) checkQuota(
+func (c *repositoryReviewController) repositoryReviewGuardAccountLimits(
 	ctx context.Context,
+	cfg *config.Config,
 	automation repoaudit.RepositoryReviewAutomation,
-) ([]repoaudit.RepositoryReviewAccountLimitSnapshot, time.Time, repoaudit.RepositoryReviewPauseReason, string, error) {
-	if !repositoryReviewQuotaGuardEnabled(automation.BudgetPolicy) {
-		return nil, time.Time{}, "", "", nil
-	}
+) ([]repoaudit.RepositoryReviewAccountLimitSnapshot, bool, error) {
 	probe := c.probe
 	if probe == nil {
 		probe = loadCodexAccountLimits
 	}
-	probeCtx, cancelProbe := context.WithTimeout(c.ctx, repositoryReviewQuotaProbeTimeout)
-	stopCallerCancellation := context.AfterFunc(ctx, cancelProbe)
-	defer func() {
-		stopCallerCancellation()
-		cancelProbe()
-	}()
-	response, err := probe(probeCtx)
-	if err != nil {
-		return nil, c.clock().
-				Add(time.Duration(automation.BudgetPolicy.CheckIntervalSeconds) * time.Second),
-			"", "", err
+	probeCtx, cancel := context.WithTimeout(ctx, repositoryReviewQuotaProbeTimeout)
+	defer cancel()
+	response, probeErr := probe(probeCtx)
+	now := c.clock()
+	refs := repositoryReviewAccountRefsForSelection(cfg, automation.AccountRef)
+	if len(refs) == 0 {
+		return nil, false, errors.New("selected review account is unavailable")
 	}
-	return evaluateRepositoryReviewQuota(automation, response, c.clock())
-}
-
-func repositoryReviewQuotaGuardEnabled(policy repoaudit.RepositoryReviewBudgetPolicy) bool {
-	if len(policy.AccountIDs) > 0 || policy.MinRemainingPercent > 0 ||
-		len(policy.MinRemainingPercentByWindow) > 0 || policy.PauseOnUnknown {
-		return true
-	}
-	return false
-}
-
-func evaluateRepositoryReviewQuota(
-	automation repoaudit.RepositoryReviewAutomation,
-	response codexAccountLimitsResponse,
-	now time.Time,
-) ([]repoaudit.RepositoryReviewAccountLimitSnapshot, time.Time, repoaudit.RepositoryReviewPauseReason, string, error) {
-	policy := automation.BudgetPolicy
-	selected := make(map[string]struct{}, len(policy.AccountIDs))
-	for _, id := range policy.AccountIDs {
-		selected[id] = struct{}{}
+	byID := make(map[string]codexAccountLimitAccount, len(response.Accounts))
+	for _, account := range response.Accounts {
+		byID[strings.ToLower(strings.TrimSpace(account.ID))] = account
 	}
 	snapshots := make([]repoaudit.RepositoryReviewAccountLimitSnapshot, 0)
-	blocked := ""
-	matchedAccounts := 0
-	seenAccounts := make(map[string]struct{})
-	seenWindows := make(map[string]map[string]struct{})
-	for _, account := range response.Accounts {
-		if len(selected) > 0 {
-			if _, ok := selected[account.ID]; !ok {
-				continue
+	complete := probeErr == nil && strings.TrimSpace(response.Error) == ""
+	for _, ref := range refs {
+		telemetryIDs := repositoryReviewTelemetryIDsForAccountRef(cfg, ref)
+		var telemetry codexAccountLimitAccount
+		matched := false
+		for _, telemetryID := range telemetryIDs {
+			if candidate, exists := byID[strings.ToLower(strings.TrimSpace(telemetryID))]; exists {
+				telemetry, matched = candidate, true
+				break
 			}
 		}
-		matchedAccounts++
-		seenAccounts[account.ID] = struct{}{}
-		if seenWindows[account.ID] == nil {
-			seenWindows[account.ID] = make(map[string]struct{})
-		}
-		if len(account.Entries) == 0 {
+		if !matched || len(telemetry.Entries) == 0 {
+			complete = false
+			detail := "account limit telemetry is unavailable"
+			if matched {
+				detail = firstRepositoryReviewLimitDetail(
+					telemetry.LimitsError, telemetry.LimitsStatus, telemetry.CredentialStatus,
+				)
+			}
 			snapshots = append(snapshots, repoaudit.RepositoryReviewAccountLimitSnapshot{
-				AccountID: account.ID,
-				Window:    "unknown",
-				CheckedAt: now,
-				Detail: firstRepositoryReviewLimitDetail(
-					account.LimitsError,
-					account.LimitsStatus,
-					account.CredentialStatus,
-				),
+				AccountID: ref, Window: "unknown", CheckedAt: now, Detail: detail,
 			})
-			if policy.PauseOnUnknown && blocked == "" {
-				blocked = fmt.Sprintf("Account %s has no usable limit telemetry.", account.ID)
-			}
 			continue
 		}
-		for _, entry := range account.Entries {
+		for _, entry := range telemetry.Entries {
 			window := normalizeRepositoryReviewWindow(entry.Window)
-			seenWindows[account.ID][window] = struct{}{}
 			snapshot := repoaudit.RepositoryReviewAccountLimitSnapshot{
-				AccountID: account.ID, Name: entry.Name, Window: window, CheckedAt: now,
-				Detail: strings.TrimSpace(entry.Status),
+				AccountID: ref, Name: strings.TrimSpace(entry.Name), Window: window,
+				CheckedAt: now, Detail: strings.TrimSpace(entry.Status),
 			}
-			if entry.UsedPercent != nil {
-				remaining := math.Max(0, math.Min(100, 100-float64(*entry.UsedPercent)))
-				snapshot.RemainingPercent = &remaining
-			}
-			entryStatus := strings.ToLower(strings.TrimSpace(entry.Status))
-			knownExhausted := entryStatus == "limit_reached" || entryStatus == "exhausted" ||
-				entryStatus == "blocked" || entryStatus == "quota_exhausted"
-			unknownStatus := entryStatus != "" && entryStatus != "available" && !knownExhausted
-			if knownExhausted {
+			status := strings.ToLower(strings.TrimSpace(entry.Status))
+			exhausted := status == "limit_reached" || status == "exhausted" ||
+				status == "blocked" || status == "quota_exhausted"
+			if exhausted {
 				remaining := 0.0
 				snapshot.RemainingPercent = &remaining
+			} else if entry.UsedPercent != nil {
+				remaining := math.Max(0, math.Min(100, 100-float64(*entry.UsedPercent)))
+				snapshot.RemainingPercent = &remaining
+			} else {
+				complete = false
 			}
 			if reset, ok := parseRepositoryReviewReset(entry.RefreshesAt); ok {
 				snapshot.ResetsAt = reset
 			}
 			snapshots = append(snapshots, snapshot)
-			minimum := repositoryReviewMinimumRemaining(policy, window)
-			switch {
-			case knownExhausted && blocked == "":
-				blocked = fmt.Sprintf(
-					"Account %s %s limit %s is unavailable.",
-					account.ID, window, strings.TrimSpace(entry.Name),
-				)
-			case unknownStatus && policy.PauseOnUnknown && blocked == "":
-				blocked = fmt.Sprintf(
-					"Account %s %s limit %s telemetry is unavailable.",
-					account.ID, window, strings.TrimSpace(entry.Name),
-				)
-			case snapshot.RemainingPercent == nil && policy.PauseOnUnknown && blocked == "":
-				blocked = fmt.Sprintf("Account %s %s remaining quota is unknown.", account.ID, window)
-			case snapshot.RemainingPercent != nil && minimum > 0 && *snapshot.RemainingPercent < minimum && blocked == "":
-				blocked = fmt.Sprintf(
-					"Account %s %s quota has %.0f%% remaining; this review requires at least %.0f%%.",
-					account.ID, window, *snapshot.RemainingPercent, minimum,
-				)
-			}
 		}
 	}
-	if policy.PauseOnUnknown {
-		for accountID := range selected {
-			if _, found := seenAccounts[accountID]; found {
-				continue
-			}
-			snapshots = append(snapshots, repoaudit.RepositoryReviewAccountLimitSnapshot{
-				AccountID: accountID, Name: "required", Window: "unknown",
-				CheckedAt: now, Detail: "missing account telemetry",
-			})
-			if blocked == "" {
-				blocked = fmt.Sprintf("Account %s has no limit telemetry.", accountID)
-			}
+	if probeErr != nil {
+		return snapshots, false, probeErr
+	}
+	if detail := strings.TrimSpace(response.Error); detail != "" {
+		return snapshots, false, errors.New(detail)
+	}
+	return snapshots, complete, nil
+}
+
+func repositoryReviewTelemetryIDsForAccountRef(cfg *config.Config, accountRef string) []string {
+	accountRef = strings.TrimSpace(accountRef)
+	ids := make([]string, 0, 2)
+	add := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || slices.Contains(ids, value) {
+			return
 		}
-		requiredWindows := make([]string, 0, len(policy.MinRemainingPercentByWindow))
-		for rawWindow, minimum := range policy.MinRemainingPercentByWindow {
-			window := normalizeRepositoryReviewWindow(rawWindow)
-			if minimum > 0 && window != "any" && window != "*" && window != "unknown" {
-				requiredWindows = append(requiredWindows, window)
-			}
-		}
-		slices.Sort(requiredWindows)
-		requiredWindows = slices.Compact(requiredWindows)
-		for accountID := range seenAccounts {
-			for _, window := range requiredWindows {
-				if _, found := seenWindows[accountID][window]; found {
-					continue
-				}
-				snapshots = append(snapshots, repoaudit.RepositoryReviewAccountLimitSnapshot{
-					AccountID: accountID, Name: "required", Window: window,
-					CheckedAt: now, Detail: "missing window telemetry",
-				})
-				if blocked == "" {
-					blocked = fmt.Sprintf(
-						"Account %s has no %s limit telemetry.", accountID, window,
-					)
-				}
-			}
+		ids = append(ids, value)
+	}
+	if credentialID, ok := config.AccountRouterCredentialAccountID(accountRef); ok {
+		add(credentialID)
+		return ids
+	}
+	if cfg != nil {
+		if account, err := cfg.GetEnabledModelConfig(accountRef); err == nil && account != nil {
+			add(account.CredentialID)
 		}
 	}
-	if matchedAccounts == 0 && policy.PauseOnUnknown {
-		blocked = "No configured account limit telemetry is available."
-	}
-	if strings.TrimSpace(response.Error) != "" && policy.PauseOnUnknown && blocked == "" {
-		blocked = "Account limit telemetry is unavailable: " + response.Error
-	}
-	next := now.Add(time.Duration(policy.CheckIntervalSeconds) * time.Second)
-	if blocked != "" {
-		return snapshots, next, repoaudit.RepositoryReviewPauseAccountLimit, blocked, nil
-	}
-	return snapshots, next, "", "", nil
+	add(accountRef)
+	return ids
 }
 
 func firstRepositoryReviewLimitDetail(values ...string) string {
@@ -1860,16 +1927,6 @@ func normalizeRepositoryReviewWindow(window string) string {
 	default:
 		return window
 	}
-}
-
-func repositoryReviewMinimumRemaining(policy repoaudit.RepositoryReviewBudgetPolicy, window string) float64 {
-	minimum := policy.MinRemainingPercent
-	for _, key := range []string{strings.ToLower(strings.TrimSpace(window)), "any", "*"} {
-		if value, exists := policy.MinRemainingPercentByWindow[key]; exists && value > minimum {
-			minimum = value
-		}
-	}
-	return minimum
 }
 
 func parseRepositoryReviewReset(value string) (time.Time, bool) {
@@ -1908,7 +1965,6 @@ func (c *repositoryReviewController) reconcile() {
 	if err != nil {
 		return
 	}
-	now := c.clock()
 	for _, automation := range automations {
 		if c.ctx.Err() != nil {
 			return
@@ -1940,51 +1996,12 @@ func (c *repositoryReviewController) reconcile() {
 					candidate.RequestedPauseReason = ""
 					candidate.RequestedPauseDetail = ""
 					candidate.Progress.Stage = "paused"
-					candidate.NextCheckAt = now
 					return nil
 				},
 			)
 			if updateErr == nil {
 				automation = updated
 			}
-		}
-		if automation.Status != repoaudit.RepositoryReviewAutomationPaused ||
-			!automation.BudgetPolicy.AutoResume ||
-			(automation.PauseReason != repoaudit.RepositoryReviewPauseAccountLimit &&
-				automation.PauseReason != repoaudit.RepositoryReviewPauseServiceRestart) ||
-			(!automation.NextCheckAt.IsZero() && now.Before(automation.NextCheckAt)) {
-			continue
-		}
-		_, _ = c.startAutomation(context.Background(), automation.ID, automation.Version, false, "resume")
-	}
-
-	// Active runs recheck account windows independently of browser polling.
-	for _, automation := range automations {
-		if automation.Status != repoaudit.RepositoryReviewAutomationRunning ||
-			!repositoryReviewQuotaGuardEnabled(automation.BudgetPolicy) ||
-			(!automation.NextCheckAt.IsZero() && now.Before(automation.NextCheckAt)) {
-			continue
-		}
-		snapshots, next, reason, detail, probeErr := c.checkQuota(c.ctx, automation)
-		if probeErr != nil && automation.BudgetPolicy.PauseOnUnknown {
-			reason = repoaudit.RepositoryReviewPauseAccountLimit
-			detail = repositoryReviewBoundedDetail("Account limit telemetry is unavailable: " + probeErr.Error())
-		}
-		_, _ = c.updateLatest(
-			context.Background(),
-			store,
-			automation.ID,
-			func(candidate *repoaudit.RepositoryReviewAutomation) error {
-				if candidate.ActiveRunID != automation.ActiveRunID {
-					return nil
-				}
-				candidate.AccountLimitSnapshots = snapshots
-				candidate.NextCheckAt = next
-				return nil
-			},
-		)
-		if reason != "" {
-			c.requestSafeStop(automation.ID, automation.ActiveRunID, reason, detail)
 		}
 	}
 }

@@ -39,6 +39,7 @@ const profile = {
   id: "profile_1",
   version: 2,
   name: "Core bugs",
+  account_ref: "",
   reviewer_model: "review-model",
   review_focus: "Correctness bugs",
   scope_policy: {
@@ -51,17 +52,9 @@ const profile = {
   auto_continue: true,
   max_files_per_run: 24,
   max_content_bytes: 524288,
-  max_parallel_children: 1,
-  estimated_output_tokens: 4096,
+  max_parallel_children: 8,
   budget: {
-    max_total_tokens: 100000,
-    max_estimated_cost_usd: 10,
-    account_ids: [],
-    min_remaining_percent: 0,
-    min_remaining_percent_by_window: {},
-    auto_resume: true,
-    pause_on_unknown: false,
-    check_interval_seconds: 900,
+    guard_expression: "spend.total.usd < 25",
   },
   created_at: "2026-08-23T00:00:00Z",
   updated_at: "2026-08-23T00:00:00Z",
@@ -92,6 +85,7 @@ describe("RepositoryReviewRepositoriesPage", () => {
       repository: "owner/repo",
       ref: "",
       target: "all",
+      account_ref: profile.account_ref,
       review_focus: profile.review_focus,
       scope_policy: profile.scope_policy,
       reviewer_models: [profile.reviewer_model],
@@ -99,8 +93,7 @@ describe("RepositoryReviewRepositoriesPage", () => {
       force: false,
       max_files_per_run: 24,
       max_content_bytes: 524288,
-      max_parallel_children: 1,
-      estimated_output_tokens: 4096,
+      max_parallel_children: 8,
       auto_continue: true,
       model_prices: {
         [profile.reviewer_model]: {
@@ -204,6 +197,23 @@ describe("RepositoryReviewRepositoriesPage", () => {
     expect(
       screen.getByRole("button", { name: "Save repository" }),
     ).toBeEnabled()
+  })
+
+  it("shows save errors inside the open repository dialog", async () => {
+    const user = userEvent.setup()
+    vi.mocked(createRepositoryReviewAutomation).mockRejectedValue(
+      new Error("Repository is already assigned."),
+    )
+    renderPage()
+    await user.click(
+      await screen.findByRole("button", { name: "Add repository" }),
+    )
+    await user.type(screen.getByLabelText("Repository"), "owner/new-repo")
+    await user.click(screen.getByRole("button", { name: "Save repository" }))
+
+    const alert = await screen.findByRole("alert")
+    expect(alert).toHaveTextContent("already assigned")
+    expect(screen.getByRole("dialog")).toContainElement(alert)
   })
 })
 

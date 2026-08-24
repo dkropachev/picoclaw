@@ -173,6 +173,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 			runOnce,
 			workflowAgentRunOptions{
 				NoTools:       workflowAgentToolsDisabled(req.Tools),
+				AccountRef:    req.AccountRef,
 				UsageObserver: req.UsageObserver,
 			},
 		)
@@ -220,6 +221,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 					runOnce,
 					workflowAgentRunOptions{
 						NoTools:       workflowAgentToolsDisabled(req.Tools),
+						AccountRef:    req.AccountRef,
 						UsageObserver: req.UsageObserver,
 					},
 				)
@@ -391,7 +393,9 @@ func (r *workflowAgentRunner) runManagedSplitCalibration(
 			baselineMessage,
 			req.Output,
 			runOnce,
-			workflowAgentRunOptions{NoTools: true, UsageObserver: req.UsageObserver},
+			workflowAgentRunOptions{
+				NoTools: true, AccountRef: req.AccountRef, UsageObserver: req.UsageObserver,
+			},
 		)
 		repairs += baselineRepairs
 		if baselineErr != nil {
@@ -1503,6 +1507,10 @@ func workflowRunManagedChildren(
 				activity := workflows.ManagedChildActivity{
 					Index: plan.index, Total: len(plans), Label: plan.label,
 					ModelAlias: modelAlias, ScopeCount: len(plan.scope),
+					EstimatedPromptTokens: intFromAny(choice.costMeta["input_tokens"]),
+					EstimatedOutputTokens: intFromAny(choice.costMeta["estimated_output_tokens"]),
+					EstimatedCostUSD:      floatFromAny(choice.costMeta["selected_usd"]),
+					PriceKnown:            boolFromAny(choice.costMeta["selected_price_known"]),
 				}
 				if req.ManagedChildObserver != nil {
 					activity.Phase = workflows.ManagedChildStarted
@@ -1577,6 +1585,7 @@ func workflowRunManagedChildren(
 					workflowAgentRunOptions{
 						ModelName:       modelOverride,
 						ModelFallbacks:  modelFallbacks,
+						AccountRef:      req.AccountRef,
 						ReasoningEffort: choice.reasoningEffort,
 						NoTools:         true,
 						ActualModelName: &actualModelName,
@@ -2319,9 +2328,9 @@ func workflowManagedRunChoice(
 	if agent != nil {
 		modelName = strings.TrimSpace(agent.Model)
 	}
-	accountRef := ""
-	if agent != nil {
-		accountRef = agent.AccountRef
+	accountRef := strings.TrimSpace(req.AccountRef)
+	if accountRef == "" && agent != nil {
+		accountRef = strings.TrimSpace(agent.AccountRef)
 	}
 	current := workflowModelCandidateProfile(cfg, accountRef, modelName)
 	candidateProfiles := workflowManagedCandidateProfiles(
@@ -2353,7 +2362,9 @@ func workflowManagedRunChoice(
 			if candidate.name == "" || !candidate.priceKnown {
 				continue
 			}
-			if !workflowManagedModelCandidateAvailable(cfg, agent, modelName, candidate.name) {
+			if !workflowManagedModelCandidateAvailable(
+				cfg, agent, accountRef, modelName, candidate.name,
+			) {
 				availabilityLimited = true
 				continue
 			}
@@ -2416,6 +2427,7 @@ func workflowManagedRunChoice(
 func workflowManagedModelCandidateAvailable(
 	cfg *config.Config,
 	agent *AgentInstance,
+	accountRef string,
 	defaultModelName string,
 	candidateName string,
 ) bool {
@@ -2423,18 +2435,23 @@ func workflowManagedModelCandidateAvailable(
 	if candidateName == "" {
 		return false
 	}
-	if candidateName == strings.TrimSpace(defaultModelName) {
-		return true
-	}
 	if cfg == nil || agent == nil {
 		return false
+	}
+	accountRef = strings.TrimSpace(accountRef)
+	if accountRef == "" {
+		accountRef = strings.TrimSpace(agent.AccountRef)
+	}
+	if candidateName == strings.TrimSpace(defaultModelName) &&
+		accountRef == strings.TrimSpace(agent.AccountRef) {
+		return true
 	}
 	if err := validateModelAliasReferences(cfg, candidateName, nil); err != nil {
 		return false
 	}
 	router := buildAccountRouterWithAliases(
 		cfg,
-		agent.AccountRef,
+		accountRef,
 		candidateName,
 		nil,
 		agent.Workspace,
@@ -2448,7 +2465,7 @@ func workflowManagedModelCandidateAvailable(
 	}
 	candidates, err := candidatesForAccountAliases(
 		cfg,
-		agent.AccountRef,
+		accountRef,
 		candidateName,
 		nil,
 		agent.Workspace,
@@ -2653,9 +2670,9 @@ func workflowManagedOptimizationSummary(
 	if options.effortOptimization {
 		effortReason = "per-child effort selected from estimated child complexity"
 	}
-	accountRef := ""
-	if agent != nil {
-		accountRef = agent.AccountRef
+	accountRef := strings.TrimSpace(req.AccountRef)
+	if accountRef == "" && agent != nil {
+		accountRef = strings.TrimSpace(agent.AccountRef)
 	}
 	return map[string]any{
 		"model": map[string]any{
@@ -2752,7 +2769,11 @@ func boolFromAny(value any) bool {
 	return false
 }
 
-func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstance, raw any) error {
+func (r *workflowAgentRunner) ensureWorkflowManagedProviders(
+	agent *AgentInstance,
+	accountRef string,
+	raw any,
+) error {
 	if r == nil || r.loop == nil || r.loop.cfg == nil || agent == nil {
 		return nil
 	}
@@ -2766,9 +2787,14 @@ func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstanc
 	}
 	var failures []string
 	seen := make(map[string]struct{})
+	effectiveAccountRef := strings.TrimSpace(accountRef)
+	if effectiveAccountRef == "" {
+		effectiveAccountRef = strings.TrimSpace(agent.AccountRef)
+	}
 	for _, candidate := range candidates {
 		name := strings.TrimSpace(candidate.name)
-		if name == "" || name == strings.TrimSpace(agent.Model) {
+		if name == "" || name == strings.TrimSpace(agent.Model) &&
+			effectiveAccountRef == strings.TrimSpace(agent.AccountRef) {
 			continue
 		}
 		if _, duplicate := seen[name]; duplicate {
@@ -2778,6 +2804,7 @@ func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstanc
 		if !workflowManagedModelCandidateAvailable(
 			r.loop.cfg,
 			agent,
+			accountRef,
 			agent.Model,
 			name,
 		) {

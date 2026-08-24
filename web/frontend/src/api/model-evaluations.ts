@@ -112,6 +112,16 @@ export interface EvaluationCorpusPage {
   language_counts: Record<string, number>
 }
 
+export interface EvaluationModelClaim {
+  id: string
+  path: string
+  title: string
+  evidence: string
+  impact: string
+  disposition: "supported" | "unsupported"
+  judge_rationale: string
+}
+
 export interface EvaluationComparison {
   model_alias: string
   concrete_models: Record<string, number>
@@ -133,6 +143,9 @@ export interface EvaluationComparison {
   summary?: string
   strengths?: string[]
   limitations?: string[]
+  claims?: EvaluationModelClaim[]
+  claims_omitted?: number
+  claim_ledger_available?: boolean
 }
 
 export interface RepositoryModelEvaluation {
@@ -473,6 +486,9 @@ function normalizeEvaluation(
       usage: normalizeUsage(comparison.usage),
       strengths: comparison.strengths ?? [],
       limitations: comparison.limitations ?? [],
+      claims: comparison.claims ?? [],
+      claims_omitted: comparison.claims_omitted ?? 0,
+      claim_ledger_available: comparison.claim_ledger_available ?? false,
     })),
     warnings: value.warnings ?? [],
     run_ids: value.run_ids ?? [],

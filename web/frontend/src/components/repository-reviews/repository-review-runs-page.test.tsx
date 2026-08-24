@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { RepositoryReviewAutomation } from "@/api/repository-reviews"
 import {
+  getRepositoryReviewAutomationOptions,
   listRepositoryReviewAutomations,
   pauseRepositoryReviewAutomation,
   restartRepositoryReviewAutomation,
@@ -29,6 +30,7 @@ vi.mock("@/components/page-header", () => ({
 }))
 
 vi.mock("@/api/repository-reviews", () => ({
+  getRepositoryReviewAutomationOptions: vi.fn(),
   listRepositoryReviewAutomations: vi.fn(),
   pauseRepositoryReviewAutomation: vi.fn(),
   restartRepositoryReviewAutomation: vi.fn(),
@@ -46,6 +48,7 @@ const run: RepositoryReviewAutomation = {
   repository: "owner/repo",
   ref: "",
   target: "all",
+  account_ref: "",
   review_focus: "Correctness bugs",
   scope_policy: {
     code_types: ["code"],
@@ -58,19 +61,11 @@ const run: RepositoryReviewAutomation = {
   force: false,
   max_files_per_run: 24,
   max_content_bytes: 524288,
-  max_parallel_children: 1,
-  estimated_output_tokens: 4096,
+  max_parallel_children: 8,
   auto_continue: true,
   model_prices: {},
   budget: {
-    max_total_tokens: 100000,
-    max_estimated_cost_usd: 10,
-    account_ids: [],
-    min_remaining_percent: 0,
-    min_remaining_percent_by_window: {},
-    auto_resume: true,
-    pause_on_unknown: false,
-    check_interval_seconds: 900,
+    guard_expression: "spend.total.usd < 25",
   },
   status: "idle",
   run_ids: ["workflow_run_1"],
@@ -112,6 +107,18 @@ const run: RepositoryReviewAutomation = {
 
 describe("RepositoryReviewRunsPage", () => {
   beforeEach(() => {
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [],
+      accounts: [
+        {
+          id: "api",
+          label: "Primary API",
+          status: "available",
+          default: true,
+          entries: [],
+        },
+      ],
+    })
     vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
       automations: [run],
     })
@@ -136,6 +143,7 @@ describe("RepositoryReviewRunsPage", () => {
     expect(screen.getByText("25%")).toBeVisible()
     expect(screen.getByText("1,000 tokens used")).toBeVisible()
     expect(screen.getByText("Estimated cost unknown")).toBeVisible()
+    expect(screen.getByText("Account: Default (Primary API)")).toBeVisible()
     expect(screen.getByText(`Resolved commit ${"a".repeat(40)}`)).toBeVisible()
     expect(screen.queryByLabelText("Repository")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Reviewer model")).not.toBeInTheDocument()
@@ -146,6 +154,39 @@ describe("RepositoryReviewRunsPage", () => {
     await user.click(screen.getByRole("button", { name: "Start review" }))
     await waitFor(() =>
       expect(startRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
+        expected_version: 3,
+      }),
+    )
+  })
+
+  it("resumes a guard-paused run without hidden budget-reset semantics", async () => {
+    const user = userEvent.setup()
+    const paused = {
+      ...run,
+      status: "paused" as const,
+      pause_reason: "token_budget" as const,
+      pause_detail: "Task admission guard evaluated to false.",
+    }
+    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+      automations: [paused],
+    })
+    vi.mocked(resumeRepositoryReviewAutomation).mockResolvedValue({
+      ...paused,
+      version: 4,
+      status: "running",
+    })
+    renderPage()
+
+    expect(
+      await screen.findByText(/Task admission guard evaluated/),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("button", { name: /reset budget/i }),
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Resume" }))
+
+    await waitFor(() =>
+      expect(resumeRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
         expected_version: 3,
       }),
     )

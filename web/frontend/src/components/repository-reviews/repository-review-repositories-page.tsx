@@ -143,13 +143,15 @@ export function RepositoryReviewRepositoriesPage() {
       void repositoriesQuery.refetch()
     },
   })
-  const openNew = () =>
+  const openNew = () => {
+    setActionError("")
     setEditor({
       automation: null,
       repository: "",
       profileID: profiles[0]?.id ?? "",
       branch: "",
     })
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -181,7 +183,7 @@ export function RepositoryReviewRepositoriesPage() {
             One configuration per repository. Assign exactly one review profile;
             leave branch blank to use the repository&apos;s default branch.
           </p>
-          {actionError && (
+          {actionError && !editor && (
             <div
               role="alert"
               className="text-destructive flex items-center gap-2 text-sm"
@@ -244,14 +246,15 @@ export function RepositoryReviewRepositoriesPage() {
                           size="sm"
                           variant="outline"
                           disabled={busy}
-                          onClick={() =>
+                          onClick={() => {
+                            setActionError("")
                             setEditor({
                               automation: item,
                               repository: item.repository,
                               profileID: item.profile_id,
                               branch: item.branch || item.ref || "",
                             })
-                          }
+                          }}
                         >
                           <IconEdit /> Edit
                         </Button>
@@ -299,7 +302,12 @@ export function RepositoryReviewRepositoriesPage() {
 
       <Dialog
         open={editor !== null}
-        onOpenChange={(open) => !open && setEditor(null)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditor(null)
+            setActionError("")
+          }
+        }}
       >
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
@@ -311,6 +319,14 @@ export function RepositoryReviewRepositoriesPage() {
               assigned profile.
             </DialogDescription>
           </DialogHeader>
+          {actionError && (
+            <div
+              role="alert"
+              className="text-destructive flex items-center gap-2 text-sm"
+            >
+              <IconAlertTriangle className="size-4" /> {actionError}
+            </div>
+          )}
           {editor && (
             <div className="space-y-4">
               <div className="space-y-2">
@@ -319,9 +335,10 @@ export function RepositoryReviewRepositoriesPage() {
                   id="review-repository"
                   value={editor.repository}
                   placeholder="owner/repository or safe Git URL"
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    setActionError("")
                     setEditor({ ...editor, repository: event.target.value })
-                  }
+                  }}
                 />
                 {duplicate && (
                   <p role="alert" className="text-destructive text-xs">
@@ -335,9 +352,10 @@ export function RepositoryReviewRepositoriesPage() {
                   id="review-profile"
                   className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
                   value={editor.profileID}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    setActionError("")
                     setEditor({ ...editor, profileID: event.target.value })
-                  }
+                  }}
                 >
                   <option value="">Select profile</option>
                   {profiles.map((profile) => (
@@ -354,9 +372,10 @@ export function RepositoryReviewRepositoriesPage() {
                     id="review-branch"
                     value={editor.branch}
                     placeholder="Blank uses the repository default branch"
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      setActionError("")
                       setEditor({ ...editor, branch: event.target.value })
-                    }
+                    }}
                   />
                   <p className="text-muted-foreground text-xs">
                     Branch names only. Repository reviews do not accept

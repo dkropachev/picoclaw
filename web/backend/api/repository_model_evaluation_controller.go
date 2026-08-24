@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	repositoryModelEvaluationBatchSize        = 12
-	repositoryModelEvaluationPhaseMinTimeout  = 15 * time.Minute
-	repositoryModelEvaluationBatchSetupBudget = 5 * time.Minute
-	repositoryModelEvaluationTaskBudget       = 2 * time.Minute
-	repositoryModelEvaluationMaxTimeout       = 4 * time.Hour
+	repositoryModelEvaluationBatchSize         = 12
+	repositoryModelEvaluationPhaseMinTimeout   = 15 * time.Minute
+	repositoryModelEvaluationBatchSetupBudget  = 5 * time.Minute
+	repositoryModelEvaluationTaskBudget        = 2 * time.Minute
+	repositoryModelEvaluationMaxTimeout        = 4 * time.Hour
+	repositoryModelEvaluationMaxClaimsPerModel = 256
 )
 
 var errRepositoryModelEvaluationRunFenced = errors.New("repository model evaluation run is fenced")
@@ -1017,7 +1018,7 @@ func (c *repositoryModelEvaluationController) preflightManifest(
 	selector := anyMap(outputs["selector"])
 	rationale := strings.TrimSpace(anyString(selector["rationale"]))
 	policyHash, _ := stableJSONHash(repositoryModelEvaluationPolicyInput(evaluation))
-	rubricHash := sha256.Sum256([]byte("repository-model-evaluation-rubric-v1"))
+	rubricHash := sha256.Sum256([]byte("repository-model-evaluation-rubric-v2"))
 	manifest := &repoeval.CorpusManifest{
 		CommitSHA: commit, InventoryHash: inventoryHash, PolicyHash: policyHash,
 		RubricHash: hex.EncodeToString(rubricHash[:]), SelectorRunID: runID,
@@ -1139,21 +1140,37 @@ func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context
 			c.fail(id, token, "invalid bounded candidate mapping: "+mappingErr.Error())
 			return
 		}
-		if evidenceErr := repositoryModelEvaluationValidateJudgeEvidence(
+		ledgerJSON, ledgerErr := compactJSON(result.Outputs["ledger"])
+		if ledgerErr != nil {
+			c.fail(id, token, "invalid bounded candidate claim ledger: "+ledgerErr.Error())
+			return
+		}
+		claims, evidenceErr := repositoryModelEvaluationValidatedClaimLedger(
 			judgeJSON,
 			mappingJSON,
+			ledgerJSON,
 			batch.models,
-		); evidenceErr != nil {
+			batch.id,
+		)
+		if evidenceErr != nil {
 			c.fail(id, token, evidenceErr.Error())
 			return
 		}
+		judgeJSON, evidenceErr = repositoryModelEvaluationAggregateJudgeJSON(judgeJSON)
+		if evidenceErr != nil {
+			c.fail(id, token, evidenceErr.Error())
+			return
+		}
+		claims, omitted := repositoryModelEvaluationCapClaimLedger(evaluation, claims)
 		checkpoint := repoeval.BatchCheckpoint{
-			ID:           batch.id,
-			CandidateIDs: batch.ids,
-			Candidates:   repositoryModelEvaluationBatchOutcomes(batch, result.Outputs["candidates"]),
-			JudgeJSON:    judgeJSON,
-			MappingJSON:  mappingJSON,
-			CompletedAt:  c.clock(),
+			ID:                 batch.id,
+			CandidateIDs:       batch.ids,
+			Candidates:         repositoryModelEvaluationBatchOutcomes(batch, result.Outputs["candidates"]),
+			ClaimLedger:        claims,
+			ClaimLedgerOmitted: omitted,
+			JudgeJSON:          judgeJSON,
+			MappingJSON:        mappingJSON,
+			CompletedAt:        c.clock(),
 		}
 		evaluation, err = c.updateActiveLatest(
 			context.Background(),
@@ -2795,6 +2812,161 @@ func repositoryModelEvaluationValidateJudgeEvidence(
 	judgeJSON string,
 	mappingJSON string,
 	expectedAliases []string,
+	ledgerJSON ...string,
+) error {
+	if len(ledgerJSON) > 0 {
+		_, err := repositoryModelEvaluationValidatedClaimLedger(
+			judgeJSON,
+			mappingJSON,
+			ledgerJSON[0],
+			expectedAliases,
+			"validation",
+		)
+		return err
+	}
+	return repositoryModelEvaluationValidateJudgeIdentities(judgeJSON, mappingJSON, expectedAliases)
+}
+
+type repositoryModelEvaluationClaimLedgerItem struct {
+	CandidateID string `json:"candidateId"`
+	ClaimID     string `json:"claimId"`
+	Path        string `json:"path"`
+	Title       string `json:"title"`
+	Evidence    string `json:"evidence"`
+	Impact      string `json:"impact"`
+}
+
+type repositoryModelEvaluationJudgeClaimAssessment struct {
+	ClaimID     string                    `json:"claimId"`
+	Disposition repoeval.ClaimDisposition `json:"disposition"`
+	Rationale   string                    `json:"rationale"`
+}
+
+type repositoryModelEvaluationJudgeEvidence struct {
+	Evaluations []struct {
+		CandidateID       string                                           `json:"candidateId"`
+		ConfirmedClaims   int                                              `json:"confirmedClaims"`
+		UnsupportedClaims int                                              `json:"unsupportedClaims"`
+		ClaimAssessments  *[]repositoryModelEvaluationJudgeClaimAssessment `json:"claimAssessments"`
+	} `json:"evaluations"`
+}
+
+func repositoryModelEvaluationValidatedClaimLedger(
+	judgeJSON string,
+	mappingJSON string,
+	ledgerJSON string,
+	expectedAliases []string,
+	batchID string,
+) (map[string][]repoeval.ModelClaim, error) {
+	if err := repositoryModelEvaluationValidateJudgeIdentities(
+		judgeJSON,
+		mappingJSON,
+		expectedAliases,
+	); err != nil {
+		return nil, err
+	}
+	var mapping []struct {
+		CandidateID string `json:"candidateId"`
+		ModelAlias  string `json:"modelAlias"`
+	}
+	var judge repositoryModelEvaluationJudgeEvidence
+	var ledger []repositoryModelEvaluationClaimLedgerItem
+	ledgerDecoder := json.NewDecoder(strings.NewReader(ledgerJSON))
+	ledgerDecoder.DisallowUnknownFields()
+	if json.Unmarshal([]byte(mappingJSON), &mapping) != nil ||
+		json.Unmarshal([]byte(judgeJSON), &judge) != nil ||
+		ledgerDecoder.Decode(&ledger) != nil || len(mapping) == 0 ||
+		len(ledger) > 1024 {
+		return nil, errors.New("invalid bounded candidate claim evidence")
+	}
+	aliasByCandidate := make(map[string]string, len(mapping))
+	for _, item := range mapping {
+		aliasByCandidate[strings.TrimSpace(item.CandidateID)] = strings.TrimSpace(item.ModelAlias)
+	}
+	claimsByID := make(map[string]repositoryModelEvaluationClaimLedgerItem, len(ledger))
+	claimIDsByCandidate := make(map[string]map[string]struct{}, len(mapping))
+	for _, item := range ledger {
+		item.CandidateID = strings.TrimSpace(item.CandidateID)
+		item.ClaimID = strings.TrimSpace(item.ClaimID)
+		item.Path = strings.TrimSpace(item.Path)
+		item.Title = strings.TrimSpace(item.Title)
+		item.Evidence = strings.TrimSpace(item.Evidence)
+		item.Impact = strings.TrimSpace(item.Impact)
+		if aliasByCandidate[item.CandidateID] == "" || !repositoryModelEvaluationValidClaimID(item.ClaimID) ||
+			!strings.HasPrefix(item.ClaimID, "claim-"+strings.TrimPrefix(item.CandidateID, "candidate-")+"-") ||
+			!repositoryModelEvaluationValidClaimPath(item.Path) ||
+			!repositoryModelEvaluationBoundedClaimText(item.Title, 512) ||
+			!repositoryModelEvaluationBoundedClaimText(item.Evidence, 2048) ||
+			!repositoryModelEvaluationBoundedClaimText(item.Impact, 2048) {
+			return nil, errors.New("candidate claim ledger contains invalid diagnosis evidence")
+		}
+		if _, duplicate := claimsByID[item.ClaimID]; duplicate {
+			return nil, errors.New("candidate claim ledger contains a duplicate claim ID")
+		}
+		claimsByID[item.ClaimID] = item
+		if claimIDsByCandidate[item.CandidateID] == nil {
+			claimIDsByCandidate[item.CandidateID] = make(map[string]struct{})
+		}
+		claimIDsByCandidate[item.CandidateID][item.ClaimID] = struct{}{}
+	}
+	result := make(map[string][]repoeval.ModelClaim, len(mapping))
+	for _, alias := range aliasByCandidate {
+		result[alias] = []repoeval.ModelClaim{}
+	}
+	assessed := make(map[string]struct{}, len(ledger))
+	prefix := strings.TrimSpace(batchID)
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	for _, evaluation := range judge.Evaluations {
+		candidateID := strings.TrimSpace(evaluation.CandidateID)
+		expectedClaims := claimIDsByCandidate[candidateID]
+		if evaluation.ClaimAssessments == nil {
+			return nil, errors.New("judge omitted the bounded claim assessments")
+		}
+		assessments := *evaluation.ClaimAssessments
+		supported, unsupported := 0, 0
+		seen := make(map[string]struct{}, len(assessments))
+		for _, assessment := range assessments {
+			assessment.ClaimID = strings.TrimSpace(assessment.ClaimID)
+			assessment.Rationale = strings.TrimSpace(assessment.Rationale)
+			claim, exists := claimsByID[assessment.ClaimID]
+			if !exists || claim.CandidateID != candidateID || !assessment.Disposition.Valid() ||
+				!repositoryModelEvaluationBoundedClaimText(assessment.Rationale, 2048) {
+				return nil, errors.New("judge claim assessment is outside the bounded diagnosis contract")
+			}
+			if _, duplicate := seen[assessment.ClaimID]; duplicate {
+				return nil, errors.New("judge assessed a claim more than once")
+			}
+			seen[assessment.ClaimID] = struct{}{}
+			assessed[assessment.ClaimID] = struct{}{}
+			if assessment.Disposition == repoeval.ClaimDispositionSupported {
+				supported++
+			} else {
+				unsupported++
+			}
+			alias := aliasByCandidate[candidateID]
+			result[alias] = append(result[alias], repoeval.ModelClaim{
+				ID: prefix + "-" + assessment.ClaimID, Path: claim.Path, Title: claim.Title,
+				Evidence: claim.Evidence, Impact: claim.Impact, Disposition: assessment.Disposition,
+				JudgeRationale: assessment.Rationale,
+			})
+		}
+		if len(seen) != len(expectedClaims) || supported != evaluation.ConfirmedClaims ||
+			unsupported != evaluation.UnsupportedClaims {
+			return nil, errors.New("judge claim assessments do not match the candidate claims")
+		}
+	}
+	if len(assessed) != len(claimsByID) {
+		return nil, errors.New("judge omitted a candidate claim")
+	}
+	return result, nil
+}
+
+func repositoryModelEvaluationValidateJudgeIdentities(
+	judgeJSON string,
+	mappingJSON string,
+	expectedAliases []string,
 ) error {
 	var mapping []struct {
 		CandidateID string `json:"candidateId"`
@@ -2846,6 +3018,80 @@ func repositoryModelEvaluationValidateJudgeEvidence(
 		return errors.New("judge omitted a present candidate")
 	}
 	return nil
+}
+
+func repositoryModelEvaluationValidClaimID(value string) bool {
+	parts := strings.Split(value, "-")
+	if len(parts) != 3 || parts[0] != "claim" || len(parts[1]) != 3 || len(parts[2]) != 4 {
+		return false
+	}
+	for _, part := range parts[1:] {
+		for _, character := range part {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func repositoryModelEvaluationValidClaimPath(value string) bool {
+	if !repositoryModelEvaluationBoundedClaimText(value, 4096) || filepath.IsAbs(value) ||
+		strings.Contains(value, "\\") || value == "." {
+		return false
+	}
+	cleaned := filepath.Clean(value)
+	return cleaned == value && cleaned != ".." && !strings.HasPrefix(cleaned, "../")
+}
+
+func repositoryModelEvaluationBoundedClaimText(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum && utf8.ValidString(value)
+}
+
+func repositoryModelEvaluationAggregateJudgeJSON(value string) (string, error) {
+	var output map[string]any
+	if json.Unmarshal([]byte(value), &output) != nil {
+		return "", errors.New("invalid bounded judge output")
+	}
+	evaluations, ok := output["evaluations"].([]any)
+	if !ok {
+		return "", errors.New("invalid bounded judge output")
+	}
+	for _, value := range evaluations {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return "", errors.New("invalid bounded judge output")
+		}
+		delete(item, "claimAssessments")
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		return "", errors.New("invalid bounded judge output")
+	}
+	return string(encoded), nil
+}
+
+func repositoryModelEvaluationCapClaimLedger(
+	evaluation repoeval.Evaluation,
+	claims map[string][]repoeval.ModelClaim,
+) (map[string][]repoeval.ModelClaim, map[string]int) {
+	used := make(map[string]int, len(evaluation.CandidateModels))
+	for _, batch := range evaluation.Checkpoint.Batches {
+		for alias, values := range batch.ClaimLedger {
+			used[alias] += len(values)
+		}
+	}
+	bounded := make(map[string][]repoeval.ModelClaim)
+	omitted := make(map[string]int)
+	for alias, values := range claims {
+		remaining := max(0, repositoryModelEvaluationMaxClaimsPerModel-used[alias])
+		retained := min(remaining, len(values))
+		bounded[alias] = append([]repoeval.ModelClaim(nil), values[:retained]...)
+		if retained < len(values) {
+			omitted[alias] = len(values) - retained
+		}
+	}
+	return bounded, omitted
 }
 
 func cloneNestedConcrete(values map[string]int) map[string]int {

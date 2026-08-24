@@ -9,7 +9,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
 
 import {
-  type RepositoryReviewAutomationBudget,
   type RepositoryReviewCodeType,
   type RepositoryReviewProfile,
   type RepositoryReviewProfileConfig,
@@ -69,19 +68,18 @@ interface ProfileEditor {
   value: RepositoryReviewProfileConfig
   includeFolders: string
   excludeFolders: string
-  windowLimits: string
 }
 
 const emptyProfile: RepositoryReviewProfileConfig = {
   name: "",
+  account_ref: "",
   reviewer_model: "",
   review_focus: "Find correctness, security, and reliability bugs.",
   force: false,
   auto_continue: true,
   max_files_per_run: 24,
   max_content_bytes: 524_288,
-  max_parallel_children: 1,
-  estimated_output_tokens: 4_096,
+  max_parallel_children: 8,
   scope_policy: {
     code_types: ["hotpath-code", "code"],
     include_folders: [],
@@ -89,14 +87,7 @@ const emptyProfile: RepositoryReviewProfileConfig = {
     free_text: "",
   },
   budget: {
-    max_total_tokens: 250_000,
-    max_estimated_cost_usd: 25,
-    account_ids: [],
-    min_remaining_percent: 0,
-    min_remaining_percent_by_window: {},
-    auto_resume: true,
-    pause_on_unknown: false,
-    check_interval_seconds: 900,
+    guard_expression: "",
   },
 }
 
@@ -121,7 +112,6 @@ export function RepositoryReviewProfilesPage() {
       value,
       includeFolders,
       excludeFolders,
-      windowLimits,
     }: ProfileEditor) => {
       const config: RepositoryReviewProfileConfig = {
         ...value,
@@ -134,12 +124,8 @@ export function RepositoryReviewProfilesPage() {
           free_text: value.scope_policy.free_text.trim(),
         },
         budget: {
-          ...value.budget,
-          min_remaining_percent_by_window: parseWindowLimits(windowLimits),
+          guard_expression: value.budget.guard_expression.trim(),
         },
-      }
-      if (profileGuardrailsActive(config.budget)) {
-        config.max_parallel_children = 1
       }
       return profile
         ? updateRepositoryReviewProfile(profile.id, {
@@ -190,39 +176,33 @@ export function RepositoryReviewProfilesPage() {
   })
 
   const openNew = () => {
-    const model = options.models.find((item) => item.available)
+    setActionError("")
+    const defaultAccount = options.accounts.find((account) => account.default)
+    const model = options.models.find(
+      (item) =>
+        item.available &&
+        (defaultAccount?.models === undefined ||
+          defaultAccount.models.includes(item.alias)),
+    )
     const value = copyProfile(emptyProfile)
     if (model) {
       value.reviewer_model = model.alias
-      if (!model.price_known) value.budget.max_estimated_cost_usd = 0
     }
     setEditor({
       profile: null,
       value,
       includeFolders: "",
       excludeFolders: "",
-      windowLimits: "",
     })
   }
   const openEdit = (profile: RepositoryReviewProfile) => {
+    setActionError("")
     const value = copyProfile(profile)
-    const model = options.models.find(
-      (candidate) => candidate.alias === value.reviewer_model,
-    )
-    if (!model?.price_known) {
-      value.budget.max_estimated_cost_usd = 0
-    }
-    if (profileGuardrailsActive(value.budget)) {
-      value.max_parallel_children = 1
-    }
     setEditor({
       profile,
       value,
       includeFolders: profile.scope_policy.include_folders.join("\n"),
       excludeFolders: profile.scope_policy.exclude_folders.join("\n"),
-      windowLimits: formatWindowLimits(
-        profile.budget.min_remaining_percent_by_window,
-      ),
     })
   }
 
@@ -251,7 +231,7 @@ export function RepositoryReviewProfilesPage() {
             Reusable review behavior. Every profile selects one reviewer model;
             repository assignment happens separately.
           </p>
-          {actionError && (
+          {actionError && !editor && (
             <div
               role="alert"
               className="text-destructive flex items-center gap-2 text-sm"
@@ -288,14 +268,21 @@ export function RepositoryReviewProfilesPage() {
                     </p>
                     <div className="text-muted-foreground grid gap-1 text-xs sm:grid-cols-2">
                       <span>
-                        {formatLimit(profile.budget.max_total_tokens)} token cap
+                        Account:{" "}
+                        {profileAccountLabel(
+                          profile.account_ref,
+                          options.accounts,
+                        )}
                       </span>
                       <span>
-                        {formatMoney(profile.budget.max_estimated_cost_usd)}{" "}
-                        cost cap
+                        {profile.budget.guard_expression.trim()
+                          ? "Task guard configured"
+                          : "No task guard"}
                       </span>
                       <span>{profile.max_files_per_run} files per batch</span>
-                      <span>{profile.scope_policy.code_types.join(", ")}</span>
+                      <span>
+                        {profile.max_parallel_children} parallel workers
+                      </span>
                     </div>
                     <div className="flex gap-2 border-t pt-3">
                       <Button
@@ -353,7 +340,12 @@ export function RepositoryReviewProfilesPage() {
 
       <Dialog
         open={editor !== null}
-        onOpenChange={(open) => !open && setEditor(null)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditor(null)
+            setActionError("")
+          }
+        }}
       >
         <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
@@ -361,17 +353,28 @@ export function RepositoryReviewProfilesPage() {
               {editor?.profile ? "Edit profile" : "New review profile"}
             </DialogTitle>
             <DialogDescription>
-              Name, model, and review focus stay concise. Scope, sizing, and
-              budget or account guardrails remain under Advanced until needed.
+              Name, model, review focus, and scope stay visible. Execution
+              sizing and guardrails remain under Advanced until needed.
             </DialogDescription>
           </DialogHeader>
+          {actionError && (
+            <div
+              role="alert"
+              className="text-destructive flex items-center gap-2 text-sm"
+            >
+              <IconAlertTriangle className="size-4" /> {actionError}
+            </div>
+          )}
           {editor && (
             <ProfileForm
               editor={editor}
               models={options.models}
               accounts={options.accounts}
               busy={saveMutation.isPending}
-              onChange={setEditor}
+              onChange={(next) => {
+                setActionError("")
+                setEditor(next)
+              }}
               onCancel={() => setEditor(null)}
               onSave={() => saveMutation.mutate(editor)}
             />
@@ -408,78 +411,51 @@ function ProfileForm({
     key: K,
     next: RepositoryReviewProfileConfig[K],
   ) => onChange({ ...editor, value: { ...value, [key]: next } })
-  const setBudget = <K extends keyof RepositoryReviewProfileConfig["budget"]>(
-    key: K,
-    next: RepositoryReviewProfileConfig["budget"][K],
-  ) => {
-    const budget = { ...value.budget, [key]: next }
-    onChange({
-      ...editor,
-      value: {
-        ...value,
-        budget,
-        ...(profileGuardrailsActive(budget)
-          ? { max_parallel_children: 1 }
-          : {}),
-      },
+  const setGuardExpression = (guardExpression: string) =>
+    setValue("budget", {
+      ...value.budget,
+      guard_expression: guardExpression,
     })
-  }
   const setScope = <
     K extends keyof RepositoryReviewProfileConfig["scope_policy"],
   >(
     key: K,
     next: RepositoryReviewProfileConfig["scope_policy"][K],
   ) => setValue("scope_policy", { ...value.scope_policy, [key]: next })
+  const selectedAccount = value.account_ref
+    ? accounts.find((account) => account.id === value.account_ref)
+    : accounts.find((account) => account.default)
+  const modelAvailableOnSelectedAccount = (alias: string) =>
+    selectedAccount?.models === undefined ||
+    selectedAccount.models.includes(alias)
   const valid =
     value.name.trim() !== "" &&
     value.reviewer_model !== "" &&
+    modelAvailableOnSelectedAccount(value.reviewer_model) &&
     value.scope_policy.code_types.length > 0 &&
     value.max_files_per_run >= 1 &&
     value.max_content_bytes >= 1 &&
-    value.max_parallel_children >= 1 &&
-    value.estimated_output_tokens >= 1 &&
-    value.budget.check_interval_seconds >= 15
-  const selectedModel = models.find(
-    (model) => model.alias === value.reviewer_model,
-  )
-  const costBudgetAvailable = selectedModel?.price_known === true
-  const guardrailsActive = profileGuardrailsActive({
-    ...value.budget,
-    min_remaining_percent_by_window: parseWindowLimits(editor.windowLimits),
-  })
+    value.max_parallel_children >= 1
 
   return (
     <div className="space-y-5">
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Profile name">
+        <Field label="Profile name" controlId="review-profile-name">
           <Input
+            id="review-profile-name"
             aria-label="Profile name"
             value={value.name}
             onChange={(event) => setValue("name", event.target.value)}
           />
         </Field>
-        <Field label="Reviewer model">
+        <Field label="Reviewer model" controlId="review-profile-model">
           <select
+            id="review-profile-model"
             aria-label="Reviewer model"
             className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
             value={value.reviewer_model}
             onChange={(event) => {
-              const model = models.find(
-                (item) => item.alias === event.target.value,
-              )
-              onChange({
-                ...editor,
-                value: {
-                  ...value,
-                  reviewer_model: event.target.value,
-                  budget: {
-                    ...value.budget,
-                    ...(model?.price_known
-                      ? {}
-                      : { max_estimated_cost_usd: 0 }),
-                  },
-                },
-              })
+              setValue("reviewer_model", event.target.value)
             }}
           >
             <option value="">Select model</option>
@@ -487,80 +463,168 @@ function ProfileForm({
               <option
                 key={model.alias}
                 value={model.alias}
-                disabled={!model.available}
+                disabled={
+                  !model.available ||
+                  !modelAvailableOnSelectedAccount(model.alias)
+                }
               >
                 {model.alias}
-                {model.available ? "" : " (unavailable)"}
+                {!model.available
+                  ? " (unavailable)"
+                  : modelAvailableOnSelectedAccount(model.alias)
+                    ? ""
+                    : " (unavailable on account)"}
               </option>
             ))}
           </select>
         </Field>
       </div>
-      <Field label="Review focus">
+      <Field
+        label="Review focus"
+        hint="Narrows defect classes only. Findings diagnose validated defects and never include fixes or remediation."
+        hintId="review-focus-help"
+        controlId="review-profile-focus"
+      >
         <Textarea
+          id="review-profile-focus"
           aria-label="Review focus"
+          aria-describedby="review-focus-help"
           value={value.review_focus}
           onChange={(event) => setValue("review_focus", event.target.value)}
         />
       </Field>
-      <ReviewAdvancedSection description="scope, sizing, budgets, and quotas">
-        <section className="space-y-3">
-          <h3 className="text-sm font-semibold">Scope</h3>
-          <div className="flex flex-wrap gap-2">
-            {codeTypeOptions.map((item) => {
-              const checked = value.scope_policy.code_types.includes(item.value)
-              return (
-                <label
-                  key={item.value}
-                  className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() =>
-                      setScope(
-                        "code_types",
-                        checked
-                          ? value.scope_policy.code_types.filter(
-                              (candidate) => candidate !== item.value,
-                            )
-                          : [...value.scope_policy.code_types, item.value],
-                      )
-                    }
-                  />
-                  {item.label}
-                </label>
-              )
-            })}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Include folders">
-              <Textarea
-                aria-label="Include folders"
-                value={editor.includeFolders}
-                onChange={(event) =>
-                  onChange({ ...editor, includeFolders: event.target.value })
-                }
-                placeholder="cmd\ninternal/review"
-              />
-            </Field>
-            <Field label="Exclude folders">
-              <Textarea
-                aria-label="Exclude folders"
-                value={editor.excludeFolders}
-                onChange={(event) =>
-                  onChange({ ...editor, excludeFolders: event.target.value })
-                }
-                placeholder="generated\ntestdata"
-              />
-            </Field>
-          </div>
-          <Field label="Additional scope guidance">
+      <section className="space-y-3 rounded-lg border p-4">
+        <h3 className="text-sm font-semibold">Scope</h3>
+        <div className="flex flex-wrap gap-2">
+          {codeTypeOptions.map((item) => {
+            const checked = value.scope_policy.code_types.includes(item.value)
+            return (
+              <label
+                key={item.value}
+                className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm"
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() =>
+                    setScope(
+                      "code_types",
+                      checked
+                        ? value.scope_policy.code_types.filter(
+                            (candidate) => candidate !== item.value,
+                          )
+                        : [...value.scope_policy.code_types, item.value],
+                    )
+                  }
+                />
+                {item.label}
+              </label>
+            )
+          })}
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Include folders" controlId="review-include-folders">
             <Textarea
-              aria-label="Additional scope guidance"
-              value={value.scope_policy.free_text}
-              onChange={(event) => setScope("free_text", event.target.value)}
+              id="review-include-folders"
+              aria-label="Include folders"
+              value={editor.includeFolders}
+              onChange={(event) =>
+                onChange({ ...editor, includeFolders: event.target.value })
+              }
+              placeholder={"cmd\ninternal/review"}
             />
+          </Field>
+          <Field label="Exclude folders" controlId="review-exclude-folders">
+            <Textarea
+              id="review-exclude-folders"
+              aria-label="Exclude folders"
+              value={editor.excludeFolders}
+              onChange={(event) =>
+                onChange({ ...editor, excludeFolders: event.target.value })
+              }
+              placeholder={"generated\ntestdata"}
+            />
+          </Field>
+        </div>
+        <Field
+          label="Additional scope guidance"
+          controlId="review-scope-guidance"
+        >
+          <Textarea
+            id="review-scope-guidance"
+            aria-label="Additional scope guidance"
+            value={value.scope_policy.free_text}
+            onChange={(event) => setScope("free_text", event.target.value)}
+          />
+        </Field>
+      </section>
+
+      <ReviewAdvancedSection description="execution, sizing, and task admission">
+        <section className="space-y-3">
+          <h3 className="text-sm font-semibold">Execution</h3>
+          <Field
+            label="Execution account"
+            hint="Default account follows the runtime's configured default account."
+            hintId="review-account-help"
+            controlId="review-execution-account"
+          >
+            <select
+              id="review-execution-account"
+              aria-label="Execution account"
+              aria-describedby="review-account-help"
+              className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+              value={value.account_ref}
+              onChange={(event) => {
+                const accountRef = event.target.value
+                const account = accountRef
+                  ? accounts.find((candidate) => candidate.id === accountRef)
+                  : accounts.find((candidate) => candidate.default)
+                const reviewerModel =
+                  account?.models === undefined ||
+                  account.models.includes(value.reviewer_model)
+                    ? value.reviewer_model
+                    : (models.find(
+                        (model) =>
+                          model.available &&
+                          account.models?.includes(model.alias),
+                      )?.alias ?? "")
+                onChange({
+                  ...editor,
+                  value: {
+                    ...value,
+                    account_ref: accountRef,
+                    reviewer_model: reviewerModel,
+                  },
+                })
+              }}
+            >
+              <option value="">
+                {accounts.find((account) => account.default)?.label
+                  ? `Default account (currently ${accounts.find((account) => account.default)?.label})`
+                  : "Default account"}
+              </option>
+              {value.account_ref &&
+                !accounts.some(
+                  (account) => account.id === value.account_ref,
+                ) && (
+                  <option value={value.account_ref}>
+                    {value.account_ref} (unavailable)
+                  </option>
+                )}
+              {accounts.map((account) => (
+                <option
+                  key={account.id}
+                  value={account.id}
+                  disabled={account.models?.length === 0}
+                >
+                  {account.label || account.id}
+                  {account.provider ? ` · ${account.provider}` : ""}
+                  {account.models?.length === 0
+                    ? " (no compatible review models)"
+                    : ""}
+                </option>
+              ))}
+            </select>
           </Field>
         </section>
 
@@ -583,18 +647,12 @@ function ProfileForm({
             />
             <NumberField
               label="Parallel review workers"
+              hint="Runs independent review tasks concurrently. The task guard is checked separately before each worker takes another task."
+              describedBy="parallel-workers-help"
               min={1}
               max={64}
-              disabled={guardrailsActive}
-              value={guardrailsActive ? 1 : value.max_parallel_children}
+              value={value.max_parallel_children}
               onChange={(next) => setValue("max_parallel_children", next)}
-            />
-            <NumberField
-              label="Estimated output tokens"
-              min={1}
-              max={65_536}
-              value={value.estimated_output_tokens}
-              onChange={(next) => setValue("estimated_output_tokens", next)}
             />
           </div>
           <div className="flex flex-wrap gap-5 text-sm">
@@ -612,116 +670,51 @@ function ProfileForm({
         </section>
 
         <section className="space-y-3 border-t pt-4">
-          <h3 className="text-sm font-semibold">
-            Budgets and account guardrails
-          </h3>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <NumberField
-              label="Maximum total tokens"
-              max={1_000_000_000_000}
-              value={value.budget.max_total_tokens}
-              onChange={(next) => setBudget("max_total_tokens", next)}
-            />
-            <NumberField
-              label="Maximum estimated cost ($)"
-              value={value.budget.max_estimated_cost_usd}
-              step="0.01"
-              max={1_000_000_000}
-              readOnly={!costBudgetAvailable}
-              describedBy="review-cost-pricing-help"
-              onChange={(next) => setBudget("max_estimated_cost_usd", next)}
-            />
-          </div>
-          <p
-            id="review-cost-pricing-help"
-            className="text-muted-foreground text-xs"
-          >
-            {costBudgetAvailable && selectedModel
-              ? selectedModel.subscription && selectedModel.equivalent_model
-                ? `Subscription-backed model; budget estimates use ${selectedModel.equivalent_model} rates from central configuration: $${selectedModel.input_price_per_1m.toFixed(4)} input / $${selectedModel.output_price_per_1m.toFixed(4)} output per 1M tokens.`
-                : `Read-only pricing from model configuration: $${selectedModel.input_price_per_1m.toFixed(4)} input / $${selectedModel.output_price_per_1m.toFixed(4)} output per 1M tokens.`
-              : "Estimated-cost budgeting requires pricing in the selected model's central configuration. "}
-            {!costBudgetAvailable && (
-              <a className="underline underline-offset-2" href="/models">
-                Configure pricing in Models.
-              </a>
-            )}
-          </p>
-          {accounts.length === 0 ? (
-            <p className="text-muted-foreground text-xs">
-              No account telemetry available.
-            </p>
-          ) : (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {accounts.map((account) => (
-                <Check
-                  key={account.id}
-                  label={`${account.label || account.id} · ${account.status}`}
-                  checked={value.budget.account_ids.includes(account.id)}
-                  onChange={(checked) =>
-                    setBudget(
-                      "account_ids",
-                      checked
-                        ? [...value.budget.account_ids, account.id]
-                        : value.budget.account_ids.filter(
-                            (id) => id !== account.id,
-                          ),
-                    )
-                  }
-                />
-              ))}
-            </div>
-          )}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <NumberField
-              label="Minimum remaining (%)"
-              max={100}
-              value={value.budget.min_remaining_percent}
-              onChange={(next) => setBudget("min_remaining_percent", next)}
-            />
-            <NumberField
-              label="Account check interval (seconds)"
-              min={15}
-              max={3_600}
-              value={value.budget.check_interval_seconds}
-              onChange={(next) => setBudget("check_interval_seconds", next)}
-            />
-          </div>
+          <h3 className="text-sm font-semibold">Task admission guard</h3>
           <Field
-            label="Window limits"
-            hint="One window=remaining-percent entry per line."
+            label="Guard expression"
+            hint="Blank allows all tasks. Otherwise this JQL-like expression runs before each worker task and must be true; false, unknown, or errors pause admission. Supported fields: account.limits.*, spent.tokens.*, and spend.total.*."
+            hintId="review-task-guard-help"
+            controlId="review-guard-expression"
           >
             <Textarea
-              aria-label="Window limits"
-              value={editor.windowLimits}
-              onChange={(event) => {
-                const windowLimits = event.target.value
-                const hasWindowGuardrail = Object.values(
-                  parseWindowLimits(windowLimits),
-                ).some((remaining) => remaining > 0)
-                onChange({
-                  ...editor,
-                  windowLimits,
-                  value: hasWindowGuardrail
-                    ? { ...value, max_parallel_children: 1 }
-                    : value,
-                })
-              }}
-              placeholder="daily=15\nweekly=10"
+              id="review-guard-expression"
+              aria-label="Guard expression"
+              aria-describedby="review-task-guard-help"
+              className="min-h-28 font-mono text-xs"
+              spellCheck={false}
+              value={value.budget.guard_expression}
+              onChange={(event) => setGuardExpression(event.target.value)}
+              placeholder={
+                "account.limits.weekly.known and account.limits.weekly.remaining_percent >= 10 and\nspent.tokens.total < 500000 and spend.total.usd < 25"
+              }
             />
           </Field>
-          <div className="flex flex-wrap gap-5 text-sm">
-            <Check
-              label="Auto-resume after limits recover"
-              checked={value.budget.auto_resume}
-              onChange={(next) => setBudget("auto_resume", next)}
-            />
-            <Check
-              label="Pause when quota is unknown"
-              checked={value.budget.pause_on_unknown}
-              onChange={(next) => setBudget("pause_on_unknown", next)}
-            />
-          </div>
+          <details className="rounded-lg border p-3 text-xs">
+            <summary className="cursor-pointer font-medium">
+              Expression reference
+            </summary>
+            <div className="text-muted-foreground mt-2 space-y-2">
+              <p>
+                Operators: AND, OR, NOT, parentheses, =, ==, !=, &lt;, &lt;=,
+                &gt;, &gt;=. Literals may be numbers, true/false, or quoted
+                text.
+              </p>
+              <p>
+                Token fields: spent.tokens.prompt, completion, cached, total;
+                cost: spend.total.usd.
+              </p>
+              <p>
+                Limits: account.limits.known, exhausted_known, exhausted, any,
+                and account.limits.&lt;window&gt;.known, observed,
+                remaining_percent, or used_percent. For partial telemetry,
+                observed plus minimum_remaining_percent or maximum_used_percent
+                exposes the conservative known subset. Common windows include
+                daily and weekly. The * in field-family names is documentation,
+                not wildcard syntax.
+              </p>
+            </div>
+          </details>
         </section>
       </ReviewAdvancedSection>
 
@@ -745,16 +738,24 @@ function ProfileForm({
 function Field({
   label,
   hint,
+  hintId,
+  controlId,
   children,
 }: {
   label: string
   hint?: string
+  hintId?: string
+  controlId?: string
   children: React.ReactNode
 }) {
   return (
     <div className="space-y-2">
-      <Label>{label}</Label>
-      {hint && <p className="text-muted-foreground text-xs">{hint}</p>}
+      <Label htmlFor={controlId}>{label}</Label>
+      {hint && (
+        <p id={hintId} className="text-muted-foreground text-xs">
+          {hint}
+        </p>
+      )}
       {children}
     </div>
   )
@@ -762,37 +763,37 @@ function Field({
 
 function NumberField({
   label,
+  hint,
   value,
-  step = "1",
   min = 0,
   max,
-  disabled,
-  readOnly,
   describedBy,
   onChange,
 }: {
   label: string
+  hint?: string
   value: number
-  step?: string
   min?: number
   max?: number
-  disabled?: boolean
-  readOnly?: boolean
   describedBy?: string
   onChange: (value: number) => void
 }) {
+  const controlId = `review-profile-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
   return (
-    <Field label={label}>
+    <Field
+      label={label}
+      hint={hint}
+      hintId={hint ? describedBy : undefined}
+      controlId={controlId}
+    >
       <Input
+        id={controlId}
         aria-label={label}
         type="number"
         min={min}
         max={max}
-        step={step}
+        step="1"
         value={value}
-        disabled={disabled}
-        readOnly={readOnly}
-        aria-disabled={readOnly || undefined}
         aria-describedby={describedBy}
         onChange={(event) => {
           const parsed = Number(event.target.value)
@@ -841,27 +842,8 @@ function copyProfile(
     },
     budget: {
       ...value.budget,
-      account_ids: [...value.budget.account_ids],
-      min_remaining_percent_by_window: {
-        ...value.budget.min_remaining_percent_by_window,
-      },
     },
   }
-}
-
-function profileGuardrailsActive(
-  budget: RepositoryReviewAutomationBudget,
-): boolean {
-  return (
-    budget.max_total_tokens > 0 ||
-    budget.max_estimated_cost_usd > 0 ||
-    budget.account_ids.length > 0 ||
-    budget.min_remaining_percent > 0 ||
-    budget.pause_on_unknown ||
-    Object.values(budget.min_remaining_percent_by_window).some(
-      (remaining) => remaining > 0,
-    )
-  )
 }
 
 function lines(value: string): string[] {
@@ -875,30 +857,15 @@ function lines(value: string): string[] {
   ]
 }
 
-function parseWindowLimits(value: string): Record<string, number> {
-  return Object.fromEntries(
-    lines(value).flatMap((line) => {
-      const [name, raw] = line.split("=", 2).map((item) => item.trim())
-      const percent = Number(raw)
-      return name && Number.isFinite(percent)
-        ? [[name, Math.min(100, Math.max(0, percent))]]
-        : []
-    }),
-  )
-}
-
-function formatWindowLimits(value: Record<string, number>): string {
-  return Object.entries(value)
-    .map(([name, percent]) => `${name}=${percent}`)
-    .join("\n")
-}
-
-function formatLimit(value: number): string {
-  return value > 0 ? new Intl.NumberFormat().format(value) : "No"
-}
-
-function formatMoney(value: number): string {
-  return value > 0 ? `$${value.toFixed(2)}` : "No"
+function profileAccountLabel(
+  accountRef: string,
+  accounts: Awaited<
+    ReturnType<typeof getRepositoryReviewAutomationOptions>
+  >["accounts"],
+): string {
+  if (!accountRef) return "Default account"
+  const account = accounts.find((candidate) => candidate.id === accountRef)
+  return account?.label || accountRef
 }
 
 function Empty({ text }: { text: string }) {

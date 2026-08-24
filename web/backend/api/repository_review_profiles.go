@@ -15,18 +15,18 @@ import (
 )
 
 type repositoryReviewProfileConfigRequest struct {
-	Name                  string                                 `json:"name"`
-	ReviewFocus           string                                 `json:"review_focus"`
-	ScopePolicy           repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
-	ReviewerModel         string                                 `json:"reviewer_model"`
-	Force                 bool                                   `json:"force"`
-	AutoContinue          *bool                                  `json:"auto_continue,omitempty"`
-	MaxFilesPerRun        int                                    `json:"max_files_per_run"`
-	MaxContentBytes       int64                                  `json:"max_content_bytes"`
-	MaxParallelChildren   int                                    `json:"max_parallel_children"`
-	EstimatedOutputTokens int                                    `json:"estimated_output_tokens"`
-	Budget                repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
-	ExpectedVersion       int64                                  `json:"expected_version,omitempty"`
+	Name                string                                 `json:"name"`
+	ReviewFocus         string                                 `json:"review_focus"`
+	ScopePolicy         repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
+	ReviewerModel       string                                 `json:"reviewer_model"`
+	AccountRef          string                                 `json:"account_ref,omitempty"`
+	Force               bool                                   `json:"force"`
+	AutoContinue        *bool                                  `json:"auto_continue,omitempty"`
+	MaxFilesPerRun      int                                    `json:"max_files_per_run"`
+	MaxContentBytes     int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren int                                    `json:"max_parallel_children"`
+	Budget              repoaudit.RepositoryReviewBudgetPolicy `json:"budget"`
+	ExpectedVersion     int64                                  `json:"expected_version,omitempty"`
 }
 
 func (h *Handler) registerRepositoryReviewProfileRoutes(mux *http.ServeMux) {
@@ -93,13 +93,8 @@ func (h *Handler) handleCreateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	if validationErr := h.validateRepositoryReviewProfileModel(request.ReviewerModel); validationErr != nil {
-		writeRepositoryReviewProfileError(w, validationErr)
-		return
-	}
-	if validationErr := h.validateRepositoryReviewProfilePricing(
-		request.ReviewerModel,
-		request.Budget,
+	if validationErr := h.validateRepositoryReviewProfileSelection(
+		request.AccountRef, request.ReviewerModel, request.Budget,
 	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
@@ -127,13 +122,8 @@ func (h *Handler) handleUpdateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	if validationErr := h.validateRepositoryReviewProfileModel(request.ReviewerModel); validationErr != nil {
-		writeRepositoryReviewProfileError(w, validationErr)
-		return
-	}
-	if validationErr := h.validateRepositoryReviewProfilePricing(
-		request.ReviewerModel,
-		request.Budget,
+	if validationErr := h.validateRepositoryReviewProfileSelection(
+		request.AccountRef, request.ReviewerModel, request.Budget,
 	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
@@ -160,52 +150,48 @@ func (h *Handler) handleUpdateRepositoryReviewProfile(w http.ResponseWriter, r *
 	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{"profile": updated})
 }
 
-func (h *Handler) validateRepositoryReviewProfileModel(reviewerModel string) error {
-	cfg, err := config.LoadConfig(h.configPath)
-	if err != nil {
-		return err
-	}
-	reviewerModel = strings.TrimSpace(reviewerModel)
-	for _, option := range repositoryReviewModelOptions(cfg) {
-		if option.Alias != reviewerModel {
-			continue
-		}
-		if !option.Available {
-			detail := strings.TrimSpace(option.BlockedReason)
-			return fmt.Errorf(
-				"%w: reviewer_model %q is unavailable: %s",
-				repoaudit.ErrInvalidProfile,
-				reviewerModel,
-				detail,
-			)
-		}
-		return nil
-	}
-	return fmt.Errorf("%w: reviewer_model %q is not a configured alias", repoaudit.ErrInvalidProfile, reviewerModel)
-}
-
-func (h *Handler) validateRepositoryReviewProfilePricing(
+func (h *Handler) validateRepositoryReviewProfileSelection(
+	accountRef string,
 	reviewerModel string,
 	budget repoaudit.RepositoryReviewBudgetPolicy,
 ) error {
-	if budget.MaxEstimatedCostUSD <= 0 {
-		return nil
-	}
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
 		return err
 	}
+	accountRef = repositoryReviewEffectiveAccountRef(cfg, accountRef)
+	if err := validateSelectableAccountRef(cfg, accountRef); err != nil {
+		return fmt.Errorf("%w: account_ref: %v", repoaudit.ErrInvalidProfile, err)
+	}
 	reviewerModel = strings.TrimSpace(reviewerModel)
-	for _, option := range repositoryReviewModelOptions(cfg) {
-		if option.Alias == reviewerModel && option.PriceKnown {
-			return nil
+	aliasConfig, aliasErr := cfg.GetModelAlias(reviewerModel)
+	if aliasErr != nil {
+		return fmt.Errorf("%w: reviewer_model %q is not configured", repoaudit.ErrInvalidProfile, reviewerModel)
+	}
+	if repositoryReviewAliasUsesAgenticCLI(cfg, *aliasConfig) ||
+		repositoryReviewAliasUsesAgenticCLIOnAccount(cfg, reviewerModel, accountRef) {
+		return fmt.Errorf(
+			"%w: reviewer_model %q uses an agentic CLI provider unavailable to immutable review",
+			repoaudit.ErrInvalidProfile, reviewerModel,
+		)
+	}
+	if !repositoryReviewAliasAvailableForAccount(cfg, reviewerModel, accountRef) {
+		return fmt.Errorf(
+			"%w: reviewer_model %q is unavailable on account %q",
+			repoaudit.ErrInvalidProfile, reviewerModel, accountRef,
+		)
+	}
+	if repoaudit.RepositoryReviewGuardUsesSpend(budget.GuardExpression) {
+		if price, known := repositoryReviewAliasPriceForAccount(
+			cfg, reviewerModel, accountRef, make(map[string]bool),
+		); !known || price.InputPricePerMTok <= 0 && price.OutputPricePerMTok <= 0 {
+			return fmt.Errorf(
+				"%w: spend.total.* requires centrally configured pricing for reviewer_model %q on account %q",
+				repoaudit.ErrInvalidProfile, reviewerModel, accountRef,
+			)
 		}
 	}
-	return fmt.Errorf(
-		"%w: cost budget requires centrally configured pricing for reviewer_model %q",
-		repoaudit.ErrInvalidProfile,
-		reviewerModel,
-	)
+	return nil
 }
 
 func (h *Handler) handleDeleteRepositoryReviewProfile(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +238,7 @@ func applyRepositoryReviewProfileRequest(
 	profile.ReviewFocus = request.ReviewFocus
 	profile.ScopePolicy = request.ScopePolicy
 	profile.ReviewerModel = request.ReviewerModel
+	profile.AccountRef = request.AccountRef
 	profile.Force = request.Force
 	if request.AutoContinue != nil {
 		profile.AutoContinue = *request.AutoContinue
@@ -259,7 +246,6 @@ func applyRepositoryReviewProfileRequest(
 	profile.MaxFilesPerRun = request.MaxFilesPerRun
 	profile.MaxContentBytes = request.MaxContentBytes
 	profile.MaxParallelChildren = request.MaxParallelChildren
-	profile.EstimatedOutputTokens = request.EstimatedOutputTokens
 	profile.BudgetPolicy = request.Budget
 }
 

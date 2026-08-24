@@ -62,7 +62,6 @@ export interface RepositoryReviewFinding {
   message?: string
   evidence: string
   impact: string
-  recommendation: string
   validation: RepositoryReviewValidation
   context_ids: string[]
   models: string[]
@@ -85,7 +84,6 @@ export interface RepositoryReviewFindingObservation {
   message?: string
   evidence: string
   impact: string
-  recommendation: string
   validation: RepositoryReviewValidation
 }
 
@@ -182,6 +180,7 @@ export type RepositoryReviewPauseReason =
   | "token_budget"
   | "cost_budget"
   | "account_limit"
+  | "guard_expression"
   | "run_failed"
   | "service_restart"
 
@@ -215,21 +214,16 @@ export interface ReviewAccountLimitEntry {
 
 export interface ReviewAccountOption {
   id: string
-  provider: string
+  provider?: string
   label: string
   status: string
+  default?: boolean
+  models?: string[]
   entries: ReviewAccountLimitEntry[]
 }
 
 export interface RepositoryReviewAutomationBudget {
-  max_total_tokens: number
-  max_estimated_cost_usd: number
-  account_ids: string[]
-  min_remaining_percent: number
-  min_remaining_percent_by_window: Record<string, number>
-  auto_resume: boolean
-  pause_on_unknown: boolean
-  check_interval_seconds: number
+  guard_expression: string
 }
 
 export interface RepositoryReviewTokenUsage {
@@ -300,6 +294,8 @@ export interface RepositoryReviewAutomationConfig {
   repository: string
   ref: string
   target: string
+  account_ref: string
+  effective_account_ref?: string
   review_focus: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_models: string[]
@@ -308,7 +304,6 @@ export interface RepositoryReviewAutomationConfig {
   max_files_per_run: number
   max_content_bytes: number
   max_parallel_children: number
-  estimated_output_tokens: number
   auto_continue: boolean
   model_prices: Record<string, ReviewModelPrice>
   budget: RepositoryReviewAutomationBudget
@@ -316,6 +311,7 @@ export interface RepositoryReviewAutomationConfig {
 
 export interface RepositoryReviewProfileConfig {
   name: string
+  account_ref: string
   review_focus: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_model: string
@@ -324,7 +320,6 @@ export interface RepositoryReviewProfileConfig {
   max_files_per_run: number
   max_content_bytes: number
   max_parallel_children: number
-  estimated_output_tokens: number
   budget: RepositoryReviewAutomationBudget
 }
 
@@ -358,7 +353,6 @@ export interface RepositoryReviewAutomation extends RepositoryReviewAutomationCo
   model_stats: RepositoryReviewModelStats[]
   account_limits: RepositoryReviewAccountSnapshot[]
   scope_plan?: RepositoryReviewScopePlan
-  next_check_at?: string
   started_at?: string
   completed_at?: string
   created_at: string
@@ -552,7 +546,7 @@ export async function pauseRepositoryReviewAutomation(
 
 export async function resumeRepositoryReviewAutomation(
   automationID: string,
-  input: { expected_version: number; reset_budget?: boolean },
+  input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return mutateAutomationAction(automationID, "resume", input, signal)
@@ -560,7 +554,7 @@ export async function resumeRepositoryReviewAutomation(
 
 export async function restartRepositoryReviewAutomation(
   automationID: string,
-  input: { expected_version: number; reset_budget?: boolean },
+  input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return mutateAutomationAction(automationID, "restart", input, signal)
@@ -743,7 +737,7 @@ interface ProfileMutationResult {
 async function mutateAutomationAction(
   automationID: string,
   action: "start" | "pause" | "resume" | "restart",
-  input: { expected_version: number; reset_budget?: boolean },
+  input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return automationFromMutation(
@@ -773,14 +767,14 @@ function normalizeProfile(
   return {
     ...profile,
     name: profile.name ?? "Review profile",
+    account_ref: profile.account_ref ?? "",
     review_focus: profile.review_focus ?? "",
     reviewer_model: profile.reviewer_model ?? "",
     force: profile.force ?? false,
     auto_continue: profile.auto_continue ?? true,
     max_files_per_run: profile.max_files_per_run ?? 24,
     max_content_bytes: profile.max_content_bytes ?? 524_288,
-    max_parallel_children: profile.max_parallel_children ?? 1,
-    estimated_output_tokens: profile.estimated_output_tokens ?? 4_096,
+    max_parallel_children: profile.max_parallel_children ?? 8,
     scope_policy: {
       code_types:
         profile.scope_policy?.code_types?.length > 0
@@ -806,6 +800,8 @@ function normalizeAutomation(
     branch: automation.branch ?? automation.ref ?? "",
     ref: automation.branch ?? automation.ref ?? "",
     target: automation.target ?? "all",
+    account_ref: automation.account_ref ?? "",
+    effective_account_ref: automation.effective_account_ref ?? "",
     review_focus: automation.review_focus ?? "",
     scope_policy: {
       code_types:
@@ -821,8 +817,7 @@ function normalizeAutomation(
     force: automation.force ?? false,
     max_files_per_run: automation.max_files_per_run ?? 24,
     max_content_bytes: automation.max_content_bytes ?? 524_288,
-    max_parallel_children: automation.max_parallel_children ?? 2,
-    estimated_output_tokens: automation.estimated_output_tokens ?? 4_096,
+    max_parallel_children: automation.max_parallel_children ?? 8,
     auto_continue: automation.auto_continue ?? true,
     run_ids: automation.run_ids ?? [],
     model_prices: automation.model_prices ?? {},
@@ -853,7 +848,6 @@ function normalizeAutomation(
           },
         }
       : undefined,
-    next_check_at: normalizeOptionalTimestamp(automation.next_check_at),
     started_at: normalizeOptionalTimestamp(automation.started_at),
     completed_at: normalizeOptionalTimestamp(automation.completed_at),
   }
@@ -863,15 +857,7 @@ function normalizeBudget(
   budget?: Partial<RepositoryReviewAutomationBudget>,
 ): RepositoryReviewAutomationBudget {
   return {
-    max_total_tokens: budget?.max_total_tokens ?? 0,
-    max_estimated_cost_usd: budget?.max_estimated_cost_usd ?? 0,
-    account_ids: budget?.account_ids ?? [],
-    min_remaining_percent: budget?.min_remaining_percent ?? 0,
-    min_remaining_percent_by_window:
-      budget?.min_remaining_percent_by_window ?? {},
-    auto_resume: budget?.auto_resume ?? false,
-    pause_on_unknown: budget?.pause_on_unknown ?? true,
-    check_interval_seconds: budget?.check_interval_seconds ?? 900,
+    guard_expression: budget?.guard_expression ?? "",
   }
 }
 

@@ -67,6 +67,11 @@ func CompilePrompt(stage PromptStage, bundle PRContextBundle, challenge string) 
 	if !ok {
 		return CompiledPrompt{}, errors.New("unsupported PR workspace prompt stage")
 	}
+	if stage == PromptReviewSearch || stage == PromptReviewNudge ||
+		stage == PromptLocalReview || stage == PromptCompletionAudit ||
+		stage == PromptCompletionNudge {
+		system += diagnosisOnlyFindingPolicy
+	}
 	if err := validatePromptBundle(stage, bundle); err != nil {
 		return CompiledPrompt{}, err
 	}

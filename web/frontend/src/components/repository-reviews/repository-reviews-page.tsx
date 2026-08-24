@@ -955,7 +955,6 @@ function FindingCard({
         <dl className="grid gap-2 text-sm sm:grid-cols-2">
           <FindingText label="Evidence" value={finding.evidence} />
           <FindingText label="Impact" value={finding.impact} />
-          <FindingText label="Recommendation" value={finding.recommendation} />
           <FindingText label="Validation" value={finding.validation.summary} />
         </dl>
         {finding.validation.checks && finding.validation.checks.length > 0 && (

@@ -50,7 +50,7 @@ const scoreDimensions = [
   { key: "correctness", label: "Correctness" },
   { key: "evidence", label: "Evidence" },
   { key: "coverage", label: "Coverage" },
-  { key: "actionability", label: "Actionability" },
+  { key: "actionability", label: "Diagnostic utility" },
 ] as const
 
 function formatNumber(value: number): string {
@@ -285,6 +285,14 @@ function EfficiencyScatterPlot({
         role="img"
         aria-label="Efficiency graph: cumulative model time in minutes on the horizontal axis and AI-judged overall score on the vertical axis"
       >
+        <desc>
+          {points
+            .map(
+              ({ comparison }) =>
+                `${comparison.model_alias}: ${comparison.overall_score?.toFixed(1) ?? "unscored"} overall, ${formatDuration(comparison.usage.duration_millis)} cumulative model time`,
+            )
+            .join("; ")}
+        </desc>
         {[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
           const score = yMinimum + (yMaximum - yMinimum) * fraction
           const lineY = y(score)
@@ -611,7 +619,7 @@ function Recommendation({
             {runnerUp && analysis.qualityGap != null
               ? `, ${analysis.qualityGap.toFixed(1)} points ahead of ${runnerUp.model_alias}`
               : ""}
-            . Its AI-judged actionability score is{" "}
+            . Its AI-judged diagnostic utility score is{" "}
             {modelEvaluationComparisonScore(winner, "actionability")?.toFixed(
               1,
             ) ?? "not reported"}
@@ -705,6 +713,114 @@ function DecisionChip({
       <p className="mt-1 truncate font-medium">{value}</p>
       <p className="text-muted-foreground text-xs">{detail}</p>
     </div>
+  )
+}
+
+function ModelClaimLedger({
+  comparison,
+}: {
+  comparison: EvaluationComparison
+}) {
+  if (!comparison.claim_ledger_available) {
+    return (
+      <div className="border-border bg-muted/30 rounded-xl border p-4">
+        <h4 className="text-sm font-semibold">Candidate findings</h4>
+        <p className="text-muted-foreground mt-1 text-sm">
+          Finding-level evidence was not retained for this legacy probe.
+        </p>
+      </div>
+    )
+  }
+  const claims = comparison.claims ?? []
+  const omitted = comparison.claims_omitted ?? 0
+  if (claims.length === 0 && omitted === 0) {
+    return (
+      <div className="border-border bg-muted/30 rounded-xl border p-4">
+        <h4 className="text-sm font-semibold">Candidate findings</h4>
+        <p className="text-muted-foreground mt-1 text-sm">
+          This model returned no candidate findings for the evaluated corpus.
+        </p>
+      </div>
+    )
+  }
+  const supported = claims.filter(
+    (claim) => claim.disposition === "supported",
+  ).length
+  const unsupported = claims.length - supported
+  return (
+    <details className="border-border rounded-xl border">
+      <summary className="hover:bg-muted/50 flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3 transition-colors [&::-webkit-details-marker]:hidden">
+        <span>
+          <span className="text-sm font-semibold">Candidate findings</span>
+          <span className="text-muted-foreground ml-2 text-xs">
+            {claims.length} shown · {supported} supported · {unsupported}{" "}
+            unsupported
+          </span>
+        </span>
+        <span className="text-muted-foreground flex items-center gap-1 text-xs">
+          View evidence
+          <IconChevronDown className="size-4" aria-hidden="true" />
+        </span>
+      </summary>
+      <div className="border-border space-y-3 border-t p-4">
+        {omitted > 0 && (
+          <p className="border-border bg-muted/40 rounded-lg border p-3 text-xs">
+            {omitted} additional assessed{" "}
+            {omitted === 1 ? "claim was" : "claims were"} omitted from this
+            bounded drill-down. Aggregate counts above include them.
+          </p>
+        )}
+        {claims.map((claim) => (
+          <details
+            key={claim.id}
+            className="border-border bg-background rounded-lg border"
+          >
+            <summary className="hover:bg-muted/40 flex cursor-pointer list-none items-start gap-3 rounded-lg p-3 transition-colors [&::-webkit-details-marker]:hidden">
+              <Badge
+                className="mt-0.5 shrink-0"
+                variant={
+                  claim.disposition === "supported" ? "outline" : "destructive"
+                }
+              >
+                {claim.disposition}
+              </Badge>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium">{claim.title}</span>
+                <span className="text-muted-foreground mt-0.5 block truncate font-mono text-xs">
+                  {claim.path}
+                </span>
+              </span>
+            </summary>
+            <dl className="border-border grid gap-4 border-t p-4 text-sm lg:grid-cols-3">
+              <div>
+                <dt className="text-muted-foreground text-xs font-medium uppercase">
+                  Evidence
+                </dt>
+                <dd className="mt-1 leading-6 whitespace-pre-wrap">
+                  {claim.evidence}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground text-xs font-medium uppercase">
+                  Impact
+                </dt>
+                <dd className="mt-1 leading-6 whitespace-pre-wrap">
+                  {claim.impact}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground text-xs font-medium uppercase">
+                  Judge assessment
+                </dt>
+                <dd className="mt-1 leading-6 whitespace-pre-wrap">
+                  {claim.judge_rationale}
+                </dd>
+              </div>
+            </dl>
+          </details>
+        ))}
+      </div>
+    </details>
   )
 }
 
@@ -823,6 +939,7 @@ function ModelAnalysisCard({
               )}
             </div>
           </div>
+          <ModelClaimLedger comparison={comparison} />
           <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
             <Definition
               label="Scope"
@@ -954,6 +1071,11 @@ function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
         <p>
           <strong>Timing:</strong> per-model duration is cumulative provider
           time; calls ran in parallel.
+        </p>
+        <p>
+          <strong>Diagnostic utility:</strong> measures whether a defect can be
+          located, reproduced, verified, and prioritized. Fix guidance is not
+          scored.
         </p>
         <p>
           <strong>Cost:</strong>{" "}

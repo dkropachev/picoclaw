@@ -18,29 +18,35 @@ const (
 	DefaultFilesPerLanguage = 20
 	MaxFilesPerLanguage     = 20
 
-	maxEvaluations        = 10_000
-	maxRepositoryBytes    = 4096
-	maxRefBytes           = 4096
-	maxAliasBytes         = 256
-	maxPathBytes          = 4096
-	maxLanguageBytes      = 128
-	maxHashBytes          = 256
-	maxRunIDBytes         = 1024
-	maxFreeTextBytes      = 32 << 10
-	maxSummaryBytes       = 64 << 10
-	maxWarningBytes       = 16 << 10
-	maxLanguages          = 128
-	maxCorpusFiles        = maxLanguages * MaxFilesPerLanguage
-	maxChunksPerFile      = 256
-	maxCorpusChunks       = 65_536
-	maxWarnings           = 256
-	maxRunIDs             = 4096
-	maxScoreMetrics       = 128
-	maxComparisonDetails  = 64
-	maxProgressCount      = 10_000_000
-	maxCounter            = int64(1<<62 - 1)
-	maxBatchCheckpoints   = 1024
-	maxBatchEvidenceBytes = 256 << 10
+	maxEvaluations         = 10_000
+	maxRepositoryBytes     = 4096
+	maxRefBytes            = 4096
+	maxAliasBytes          = 256
+	maxPathBytes           = 4096
+	maxLanguageBytes       = 128
+	maxHashBytes           = 256
+	maxRunIDBytes          = 1024
+	maxFreeTextBytes       = 32 << 10
+	maxSummaryBytes        = 64 << 10
+	maxWarningBytes        = 16 << 10
+	maxLanguages           = 128
+	maxCorpusFiles         = maxLanguages * MaxFilesPerLanguage
+	maxChunksPerFile       = 256
+	maxCorpusChunks        = 65_536
+	maxWarnings            = 256
+	maxRunIDs              = 4096
+	maxScoreMetrics        = 128
+	maxComparisonDetails   = 64
+	maxClaimsPerModel      = 256
+	maxClaimsPerBatch      = 1024
+	maxClaimTitleBytes     = 512
+	maxClaimEvidenceBytes  = 2048
+	maxClaimImpactBytes    = 2048
+	maxClaimRationaleBytes = 2048
+	maxProgressCount       = 10_000_000
+	maxCounter             = int64(1<<62 - 1)
+	maxBatchCheckpoints    = 1024
+	maxBatchEvidenceBytes  = 256 << 10
 )
 
 var (
@@ -83,6 +89,18 @@ func Clone(evaluation Evaluation) Evaluation {
 					clone.Checkpoint.Batches[index].Candidates[alias] = outcome
 				}
 			}
+			if checkpoint.ClaimLedger != nil {
+				clone.Checkpoint.Batches[index].ClaimLedger = make(
+					map[string][]ModelClaim,
+					len(checkpoint.ClaimLedger),
+				)
+				for alias, claims := range checkpoint.ClaimLedger {
+					clone.Checkpoint.Batches[index].ClaimLedger[alias] = append([]ModelClaim(nil), claims...)
+				}
+			}
+			clone.Checkpoint.Batches[index].ClaimLedgerOmitted = cloneIntMap(
+				checkpoint.ClaimLedgerOmitted,
+			)
 		}
 	}
 	if evaluation.Checkpoint.ConcreteModels != nil {
@@ -103,6 +121,7 @@ func Clone(evaluation Evaluation) Evaluation {
 		clone.Comparisons[index].Regions = append([]string(nil), comparison.Regions...)
 		clone.Comparisons[index].Strengths = append([]string(nil), comparison.Strengths...)
 		clone.Comparisons[index].Limitations = append([]string(nil), comparison.Limitations...)
+		clone.Comparisons[index].Claims = append([]ModelClaim(nil), comparison.Claims...)
 	}
 	clone.Warnings = append([]string(nil), evaluation.Warnings...)
 	clone.RunIDs = append([]string(nil), evaluation.RunIDs...)
@@ -279,6 +298,9 @@ func normalizeEvaluation(evaluation Evaluation) (Evaluation, error) {
 		}
 		comparison.Strengths = normalizeUniqueText(comparison.Strengths)
 		comparison.Limitations = normalizeUniqueText(comparison.Limitations)
+		for claimIndex := range comparison.Claims {
+			normalizeModelClaim(&comparison.Claims[claimIndex])
+		}
 		comparison.Scores, err = normalizeFloatMap(comparison.Scores)
 		if err != nil {
 			return Evaluation{}, err
@@ -588,6 +610,14 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 		}
 		if _, duplicate := seenBatches[batch.ID]; duplicate {
 			return ErrInvalidEvaluation
+		}
+		if err := validateClaimLedger(
+			batch.ClaimLedger,
+			batch.ClaimLedgerOmitted,
+			candidateAliases,
+			maxClaimsPerBatch,
+		); err != nil {
+			return err
 		}
 		seenBatches[batch.ID] = struct{}{}
 		batchCandidates := make(map[string]struct{}, len(batch.CandidateIDs))
@@ -913,6 +943,20 @@ func validateComparisons(comparisons []ModelComparison, candidates []string, sta
 			comparison.UnsupportedFiles > maxCorpusFiles {
 			return ErrInvalidEvaluation
 		}
+		if comparison.ClaimsOmitted < 0 || comparison.ClaimsOmitted > maxProgressCount ||
+			len(comparison.Claims) > maxClaimsPerModel {
+			return ErrInvalidEvaluation
+		}
+		seenClaims := make(map[string]struct{}, len(comparison.Claims))
+		for _, claim := range comparison.Claims {
+			if err := validateModelClaim(claim); err != nil {
+				return err
+			}
+			if _, duplicate := seenClaims[claim.ID]; duplicate {
+				return ErrInvalidEvaluation
+			}
+			seenClaims[claim.ID] = struct{}{}
+		}
 		if comparison.OverallScore != nil && !finiteBetween(*comparison.OverallScore, -1_000_000, 1_000_000) ||
 			comparison.Completion == ModelCompletionCompleted && comparison.Failure != "" ||
 			comparison.Completion == ModelCompletionCompleted && comparison.OverallScore == nil ||
@@ -973,6 +1017,72 @@ func validateComparisons(comparisons []ModelComparison, candidates []string, sta
 			if _, ok := ranks[rank]; !ok {
 				return ErrInvalidEvaluation
 			}
+		}
+	}
+	return nil
+}
+
+func normalizeModelClaim(claim *ModelClaim) {
+	if claim == nil {
+		return
+	}
+	claim.ID = strings.TrimSpace(claim.ID)
+	claim.Path = strings.TrimSpace(claim.Path)
+	claim.Title = strings.TrimSpace(claim.Title)
+	claim.Evidence = strings.TrimSpace(claim.Evidence)
+	claim.Impact = strings.TrimSpace(claim.Impact)
+	claim.Disposition = ClaimDisposition(strings.TrimSpace(string(claim.Disposition)))
+	claim.JudgeRationale = strings.TrimSpace(claim.JudgeRationale)
+}
+
+func validateModelClaim(claim ModelClaim) error {
+	if !validText(claim.ID, maxHashBytes, false) ||
+		!validText(claim.Path, maxPathBytes, false) ||
+		!validText(claim.Title, maxClaimTitleBytes, false) ||
+		!validText(claim.Evidence, maxClaimEvidenceBytes, false) ||
+		!validText(claim.Impact, maxClaimImpactBytes, false) ||
+		!claim.Disposition.Valid() ||
+		!validText(claim.JudgeRationale, maxClaimRationaleBytes, false) {
+		return ErrInvalidEvaluation
+	}
+	if normalized, err := normalizeOptionalPath(claim.Path, false); err != nil || normalized != claim.Path {
+		return ErrInvalidEvaluation
+	}
+	return nil
+}
+
+func validateClaimLedger(
+	ledger map[string][]ModelClaim,
+	omitted map[string]int,
+	candidateAliases map[string]struct{},
+	maximum int,
+) error {
+	if len(ledger) > len(candidateAliases) || len(omitted) > len(candidateAliases) {
+		return ErrInvalidEvaluation
+	}
+	count := 0
+	seen := make(map[string]struct{})
+	for alias, claims := range ledger {
+		if _, ok := candidateAliases[alias]; !ok {
+			return ErrInvalidEvaluation
+		}
+		count += len(claims)
+		if count > maximum {
+			return ErrInvalidEvaluation
+		}
+		for _, claim := range claims {
+			if err := validateModelClaim(claim); err != nil {
+				return err
+			}
+			if _, duplicate := seen[claim.ID]; duplicate {
+				return ErrInvalidEvaluation
+			}
+			seen[claim.ID] = struct{}{}
+		}
+	}
+	for alias, value := range omitted {
+		if _, ok := candidateAliases[alias]; !ok || value < 1 || value > maxProgressCount {
+			return ErrInvalidEvaluation
 		}
 	}
 	return nil

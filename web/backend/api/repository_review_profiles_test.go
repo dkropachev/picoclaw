@@ -220,8 +220,7 @@ func TestRepositoryReviewCostBudgetRequiresCentralPricingAtMutationAndAdmission(
 
 	pricedBody := repositoryReviewProfileCreateBody("Priced review", "cheap")
 	pricedBody["budget"] = map[string]any{
-		"max_estimated_cost_usd": 10,
-		"check_interval_seconds": 30,
+		"guard_expression": "spend.total.usd < 10",
 	}
 	createdResponse := repositoryReviewAutomationMutation(
 		t, mux, http.MethodPost, "/api/repository-reviews/profiles", pricedBody,
@@ -274,8 +273,7 @@ func TestRepositoryReviewCostBudgetRequiresCentralPricingAtMutationAndAdmission(
 		func() map[string]any {
 			body := repositoryReviewProfileCreateBody("Unknown price", "cheap")
 			body["budget"] = map[string]any{
-				"max_estimated_cost_usd": 1,
-				"check_interval_seconds": 30,
+				"guard_expression": "spend.total.usd < 1",
 			}
 			return body
 		}(),
@@ -367,6 +365,49 @@ func TestRepositoryReviewCostBudgetRequiresCentralPricingAtMutationAndAdmission(
 	)
 	if unknownAdmission.Code != http.StatusBadRequest {
 		t.Fatalf("unknown-price admission status=%d body=%s", unknownAdmission.Code, unknownAdmission.Body.String())
+	}
+}
+
+func TestRepositoryReviewProfileSelectsOneExecutionAccount(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ModelList = append(cfg.ModelList, &config.ModelConfig{
+		ModelName: "secondary", Provider: "openai", Model: "openai/test",
+		Enabled: true, InputPricePerMTok: 3, OutputPricePerMTok: 5,
+	})
+	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	body := repositoryReviewProfileCreateBody("Secondary account", "cheap")
+	body["account_ref"] = "secondary"
+	body["budget"] = map[string]any{"guard_expression": "spend.total.usd < 5"}
+	response := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", body,
+	)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("profile status=%d body=%s", response.Code, response.Body.String())
+	}
+	var created struct {
+		Profile repoaudit.RepositoryReviewProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Profile.AccountRef != "secondary" ||
+		created.Profile.BudgetPolicy.GuardExpression != "spend.total.usd < 5" {
+		t.Fatalf("profile=%#v", created.Profile)
+	}
+	invalid := repositoryReviewProfileCreateBody("Missing account", "cheap")
+	invalid["account_ref"] = "missing"
+	rejected := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", invalid,
+	)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "account_ref") {
+		t.Fatalf("missing account status=%d body=%s", rejected.Code, rejected.Body.String())
 	}
 }
 
@@ -970,7 +1011,9 @@ func TestRepositoryReviewProfileRejectsUnsafeModelAliases(t *testing.T) {
 		t.Fatalf("unsafe model update status=%d body=%s", update.Code, update.Body.String())
 	}
 	missingConfig := NewHandler(t.TempDir())
-	if err := missingConfig.validateRepositoryReviewProfileModel("cheap"); err == nil {
+	if err := missingConfig.validateRepositoryReviewProfileSelection(
+		"", "cheap", repoaudit.RepositoryReviewBudgetPolicy{},
+	); err == nil {
 		t.Fatal("missing config model validation succeeded")
 	}
 }
@@ -1134,24 +1177,25 @@ func createRepositoryReviewProfileForTest(
 func repositoryReviewProfileCreateBody(name, model string) map[string]any {
 	return map[string]any{
 		"name": name, "review_focus": "Find correctness and security defects.",
+		"account_ref":    "",
 		"scope_policy":   map[string]any{"code_types": []string{"code"}},
 		"reviewer_model": model,
 		"force":          false, "auto_continue": true,
 		"max_files_per_run": 4, "max_content_bytes": 65536,
-		"max_parallel_children": 1, "estimated_output_tokens": 900,
-		"budget": map[string]any{"check_interval_seconds": 30},
+		"max_parallel_children": 8,
+		"budget":                map[string]any{"guard_expression": ""},
 	}
 }
 
 func repositoryReviewProfileBody(profile repoaudit.RepositoryReviewProfile) map[string]any {
 	return map[string]any{
 		"name": profile.Name, "review_focus": profile.ReviewFocus,
+		"account_ref":  profile.AccountRef,
 		"scope_policy": profile.ScopePolicy, "reviewer_model": profile.ReviewerModel,
 		"force":         profile.Force,
 		"auto_continue": profile.AutoContinue, "max_files_per_run": profile.MaxFilesPerRun,
-		"max_content_bytes":       profile.MaxContentBytes,
-		"max_parallel_children":   profile.MaxParallelChildren,
-		"estimated_output_tokens": profile.EstimatedOutputTokens,
-		"budget":                  profile.BudgetPolicy,
+		"max_content_bytes":     profile.MaxContentBytes,
+		"max_parallel_children": profile.MaxParallelChildren,
+		"budget":                profile.BudgetPolicy,
 	}
 }
