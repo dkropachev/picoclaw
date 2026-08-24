@@ -882,7 +882,7 @@ func TestRepositoryModelEvaluationControllerFailureAndShutdownRecoveryBoundary(t
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, resumeErr := controller.Resume(t.Context(), created.ID, created.Version); resumeErr != nil {
+		if _, resumeErr := controller.RunExisting(t.Context(), created.ID, created.Version); resumeErr != nil {
 			t.Fatal(resumeErr)
 		}
 		<-entered
@@ -1003,11 +1003,11 @@ func TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation(t
 			t,
 			mux,
 			http.MethodPost,
-			"/api/model-evaluations/"+created.ID+"/resume",
+			"/api/model-evaluations/"+created.ID+"/start",
 			map[string]any{"expected_version": ready.Version},
 		)
 		if start.Code != http.StatusAccepted {
-			t.Fatalf("resume ready status=%d body=%s", start.Code, start.Body.String())
+			t.Fatalf("start ready status=%d body=%s", start.Code, start.Body.String())
 		}
 		<-batchEntered
 		active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
@@ -1196,13 +1196,13 @@ func TestRepositoryModelEvaluationControllerHelpersAndInvalidTransitions(t *test
 	if err != nil || canceled.Status != repoeval.StatusCanceled {
 		t.Fatalf("cancel=%#v err=%v", canceled, err)
 	}
-	resumed, err := controller.Resume(
+	_, err = controller.Resume(
 		t.Context(),
 		created.ID,
 		canceled.Version,
 	)
-	if err != nil || resumed.Status != repoeval.StatusPreflighting {
-		t.Fatalf("resume canceled=%#v error=%v", resumed, err)
+	if !errors.Is(err, repoeval.ErrInvalidTransition) {
+		t.Fatalf("resume canceled error=%v", err)
 	}
 
 	if got := repositoryModelEvaluationRunError(errors.New("boom"), nil); got != "boom" {
@@ -1399,6 +1399,100 @@ func TestRepositoryModelEvaluationControllerHelpersAndInvalidTransitions(t *test
 		failureTarget.Status != repoeval.StatusFailed || failureTarget.Failure == "" {
 		t.Fatalf("failure target=%#v err=%v", failureTarget, err)
 	}
+}
+
+func TestRepositoryModelEvaluationOneShotReadyRecoveryAndTimeoutBudget(t *testing.T) {
+	t.Run("legacy ready recovery", func(t *testing.T) {
+		handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+		store, _, err := handler.repositoryModelEvaluationStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		seed := newRepositoryModelEvaluationController(handler)
+		ready := seedReadyRepositoryModelEvaluation(t, seed, store, "owner/ready-recovery")
+		controller := newRepositoryModelEvaluationController(handler)
+		controller.runWorkflow = successfulRepositoryModelEvaluationWorkflow
+		handler.repositoryModelEvaluationController = controller
+		t.Cleanup(handler.Shutdown)
+		if err := controller.Start(); err != nil {
+			t.Fatal(err)
+		}
+		completed := waitRepositoryModelEvaluationStatus(t, handler, ready.ID, repoeval.StatusCompleted)
+		if !completed.OneShot || len(completed.Comparisons) != len(completed.CandidateModels) {
+			t.Fatalf("completed recovery=%#v", completed)
+		}
+	})
+
+	t.Run("ready alias disappearance fails durably", func(t *testing.T) {
+		handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+		store, _, err := handler.repositoryModelEvaluationStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := repositoryModelEvaluationCreateRequest("owner/ready-missing-alias")
+		request.CandidateModels = []string{"removed-model", "model-b"}
+		seed := newRepositoryModelEvaluationController(handler)
+		ready := seedReadyRepositoryModelEvaluationFromRequest(t, seed, store, request)
+		controller := newRepositoryModelEvaluationController(handler)
+		controller.runWorkflow = successfulRepositoryModelEvaluationWorkflow
+		handler.repositoryModelEvaluationController = controller
+		t.Cleanup(handler.Shutdown)
+		if err := controller.Start(); err != nil {
+			t.Fatal(err)
+		}
+		failed := waitRepositoryModelEvaluationStatus(t, handler, ready.ID, repoeval.StatusFailed)
+		if !strings.Contains(failed.Failure, "removed-model") {
+			t.Fatalf("ready recovery failure=%#v", failed)
+		}
+	})
+
+	t.Run("incident batch topology", func(t *testing.T) {
+		selected := make([]map[string]any, 12)
+		encoded, err := json.Marshal(selected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		budget := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			5*time.Minute,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			map[string]any{
+				"selected_candidates": string(encoded),
+				"candidate_models":    "model-a,model-b,model-c",
+			},
+		)
+		if budget != 79*time.Minute {
+			t.Fatalf("incident topology timeout=%s want=79m", budget)
+		}
+		if preserved := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			6*time.Hour,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			map[string]any{},
+		); preserved != 6*time.Hour {
+			t.Fatalf("configured timeout=%s", preserved)
+		}
+		if preflight := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			5*time.Minute,
+			workflows.RepositoryModelEvaluationPreflightWorkflowRef,
+			nil,
+		); preflight < 15*time.Minute {
+			t.Fatalf("preflight timeout=%s", preflight)
+		}
+		huge := make([]map[string]any, 256)
+		hugeJSON, err := json.Marshal(huge)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if capped := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			5*time.Minute,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			map[string]any{
+				"selected_candidates": string(hugeJSON),
+				"candidate_models":    strings.Repeat("model,", 32),
+			},
+		); capped != repositoryModelEvaluationMaxTimeout {
+			t.Fatalf("capped timeout=%s", capped)
+		}
+	})
 }
 
 func repositoryModelEvaluationCreateRequest(repository string) repoeval.CreateRequest {

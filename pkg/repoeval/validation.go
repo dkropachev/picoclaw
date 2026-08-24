@@ -182,6 +182,7 @@ func normalizeCreate(request CreateRequest) (CreateRequest, error) {
 	request.CandidateModels = normalizeUniqueText(request.CandidateModels)
 	request.SelectorModelAlias = strings.TrimSpace(request.SelectorModelAlias)
 	request.JudgeModelAlias = strings.TrimSpace(request.JudgeModelAlias)
+	request.InitialRunID = strings.TrimSpace(request.InitialRunID)
 	focus, err := normalizeFocus(request.Focus)
 	if err != nil {
 		return CreateRequest{}, err

@@ -52,6 +52,10 @@ func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, e
 	if err != nil || validateCreate(normalized) != nil {
 		return Evaluation{}, errors.Join(ErrInvalidEvaluation, err)
 	}
+	if normalized.OneShot != (normalized.InitialRunID != "") ||
+		normalized.InitialRunID != "" && !validText(normalized.InitialRunID, maxRunIDBytes, false) {
+		return Evaluation{}, ErrInvalidEvaluation
+	}
 	unlock, err := s.lock()
 	if err != nil {
 		return Evaluation{}, err
@@ -81,9 +85,21 @@ func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, e
 		} else if !os.IsNotExist(statErr) {
 			return Evaluation{}, statErr
 		}
+		status := StatusDraft
+		progress := Progress{Stage: ProgressIdle, Languages: make(map[string]LanguageProgress), UpdatedAt: now}
+		runIDs := []string{}
+		var startedAt *time.Time
+		if normalized.OneShot {
+			status = StatusPreflighting
+			progress.Stage = ProgressResolving
+			progress.Message = "Resolving the exact repository commit."
+			progress.Percent = 1
+			runIDs = []string{normalized.InitialRunID}
+			startedAt = timePointer(now)
+		}
 		evaluation := Evaluation{
 			SchemaVersion: SchemaVersion,
-			ID:            id, Version: 1, Status: StatusDraft,
+			ID:            id, Version: 1, Status: status, OneShot: normalized.OneShot,
 			Repository: normalized.Repository, Ref: normalized.Ref,
 			CandidateModels:         append([]string(nil), normalized.CandidateModels...),
 			SelectorModelAlias:      normalized.SelectorModelAlias,
@@ -92,9 +108,9 @@ func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, e
 			DefaultFilesPerLanguage: normalized.DefaultFilesPerLanguage,
 			FilesPerLanguage:        cloneIntMap(normalized.FilesPerLanguage),
 			ModelStats:              make(map[string]ModelStats),
-			Comparisons:             []ModelComparison{}, Warnings: []string{}, RunIDs: []string{},
-			CreatedAt: now, UpdatedAt: now,
-			Progress: Progress{Stage: ProgressIdle, Languages: make(map[string]LanguageProgress), UpdatedAt: now},
+			Comparisons:             []ModelComparison{}, Warnings: []string{}, RunIDs: runIDs,
+			CreatedAt: now, UpdatedAt: now, StartedAt: startedAt,
+			Progress: progress,
 		}
 		evaluation, err = normalizeEvaluation(evaluation)
 		if err != nil || validateEvaluation(evaluation) != nil {
@@ -219,7 +235,8 @@ func (s Store) Update(
 		return Evaluation{}, ctxErr
 	}
 	if candidate.SchemaVersion != original.SchemaVersion || candidate.ID != original.ID ||
-		candidate.Version != original.Version || !candidate.CreatedAt.Equal(original.CreatedAt) {
+		candidate.Version != original.Version || !candidate.CreatedAt.Equal(original.CreatedAt) ||
+		original.OneShot && !candidate.OneShot {
 		return Evaluation{}, ErrInvalidEvaluation
 	}
 	// Store-owned timestamps are derived from the durable transition. A caller
@@ -239,7 +256,7 @@ func (s Store) Update(
 		return Evaluation{}, ErrInvalidEvaluation
 	}
 	configurationChanged := !sameConfiguration(original, candidate)
-	terminalResume := (original.Status == StatusCanceled || original.Status == StatusFailed) &&
+	terminalResume := original.Status == StatusFailed &&
 		(candidate.Status == StatusPreflighting || candidate.Status == StatusRunning) &&
 		!configurationChanged
 	if original.Status.Terminal() && !terminalResume && !reflect.DeepEqual(candidate, original) {
@@ -248,7 +265,7 @@ func (s Store) Update(
 	resetToDraft := false
 	if configurationChanged {
 		switch original.Status {
-		case StatusDraft, StatusPreflighting, StatusReady:
+		case StatusDraft:
 			resetDerivedState(&candidate)
 			resetToDraft = true
 			progressChanged = true
@@ -313,6 +330,9 @@ func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) err
 	}
 	if expectedVersion < 1 || evaluation.Version != expectedVersion {
 		return ErrConflict
+	}
+	if evaluation.Status != StatusDraft {
+		return ErrInvalidTransition
 	}
 	if err := ctx.Err(); err != nil {
 		return err

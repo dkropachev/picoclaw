@@ -1,11 +1,9 @@
 import {
   IconAlertTriangle,
   IconBrain,
-  IconCheck,
   IconLoader2,
   IconPlayerPlay,
   IconRefresh,
-  IconTrash,
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 
@@ -18,12 +16,11 @@ import {
   ModelEvaluationAPIError,
   type RepositoryModelEvaluation,
   type RepositoryModelEvaluationSummary,
-  createModelEvaluation,
-  deleteModelEvaluation,
   getModelEvaluation,
   getModelEvaluationCorpus,
   getModelEvaluationOptions,
   listModelEvaluations,
+  runModelEvaluation,
   runModelEvaluationAction,
   updateModelEvaluation,
 } from "@/api/model-evaluations"
@@ -46,6 +43,7 @@ const codeTypes: Array<{ value: EvaluationCodeType; label: string }> = [
 
 const activeStatuses = new Set([
   "preflighting",
+  "ready",
   "running",
   "judging",
   "analyzing",
@@ -76,9 +74,9 @@ function formatDuration(value: number): string {
 }
 
 function statusTone(status: string): string {
-  if (status === "completed" || status === "ready") return "text-emerald-600"
+  if (status === "completed") return "text-emerald-700 dark:text-emerald-400"
   if (status === "failed" || status === "canceled") return "text-destructive"
-  if (activeStatuses.has(status)) return "text-sky-600"
+  if (activeStatuses.has(status)) return "text-sky-700 dark:text-sky-400"
   return "text-muted-foreground"
 }
 
@@ -279,7 +277,6 @@ export function ModelEvaluationsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [conflict, setConflict] = useState(false)
-  const [notice, setNotice] = useState("")
   const [corpusPage, setCorpusPage] = useState<EvaluationCorpusPage | null>(
     null,
   )
@@ -480,13 +477,9 @@ export function ModelEvaluationsPage() {
     models.some((model) => model.alias === draft.selector && model.available) &&
     models.some((model) => model.alias === draft.judge && model.available)
 
-  const configurationEditable =
-    selected == null ||
-    selected.status === "draft" ||
-    selected.status === "ready"
-  const configurationControlsDisabled = !configurationEditable || busy
-  const recoverable =
-    selected?.status === "failed" || selected?.status === "canceled"
+  const configurationEditable = selected == null || selected.status === "draft"
+  const configurationControlsDisabled =
+    !configurationEditable || busy || loading
   const draftDirty = selected
     ? !draftsEqual(draft, evaluationDraft(selected))
     : false
@@ -530,29 +523,22 @@ export function ModelEvaluationsPage() {
     [selected],
   )
 
-  const save = async () => {
+  const run = async () => {
     if (!validDraft || !configurationEditable) return
-    const previousHadCorpus = selected?.status === "ready"
-    const result = await mutate(async () => {
-      if (selected) {
-        return updateModelEvaluation(
-          selected.id,
-          draftInput(draft, selected.version),
-        )
-      }
-      return createModelEvaluation(draftInput(draft))
+    await mutate(async () => {
+      if (selected == null) return runModelEvaluation(draftInput(draft))
+      const configured = draftDirty
+        ? await updateModelEvaluation(
+            selected.id,
+            draftInput(draft, selected.version),
+          )
+        : selected
+      return runModelEvaluationAction(configured.id, "run", configured.version)
     })
-    if (previousHadCorpus && result?.status === "draft") {
-      setNotice(
-        "Configuration changed. The stale corpus was cleared; analyze the repository again before starting.",
-      )
-    } else if (result) {
-      setNotice("")
-    }
   }
 
   const action = async (
-    name: "preflight" | "start" | "cancel" | "resume" | "restart",
+    name: "preflight" | "start" | "run" | "cancel" | "resume" | "restart",
   ) => {
     if (!selected) return
     await mutate(() =>
@@ -567,14 +553,13 @@ export function ModelEvaluationsPage() {
           type="button"
           variant="outline"
           size="sm"
-          disabled={busy}
+          disabled={busy || loading}
           onClick={() => {
             setSelectedID("")
             setSelected(null)
             setCreatingNew(true)
             setCorpusOffset(0)
             setDraft(emptyDraft(defaultFilesPerLanguage))
-            setNotice("")
           }}
         >
           New probe
@@ -613,7 +598,6 @@ export function ModelEvaluationsPage() {
                   setCreatingNew(false)
                   setCorpusOffset(0)
                   setSelectedID(evaluation.id)
-                  setNotice("")
                 }}
               >
                 <span className="block truncate text-sm font-medium">
@@ -648,14 +632,6 @@ export function ModelEvaluationsPage() {
                   Reload latest
                 </Button>
               )}
-            </div>
-          )}
-          {notice && (
-            <div
-              role="status"
-              className="border-border bg-muted mb-4 rounded-lg border p-3 text-sm"
-            >
-              {notice}
             </div>
           )}
           <div className="mx-auto max-w-6xl space-y-6">
@@ -923,49 +899,22 @@ export function ModelEvaluationsPage() {
               {unavailableModelSelected && (
                 <p role="alert" className="text-destructive mt-3 text-sm">
                   Replace unavailable selector/judge models and remove any
-                  unavailable candidate models before saving or running.
-                </p>
-              )}
-              {selected?.status === "ready" && draftDirty && (
-                <p role="status" className="mt-3 text-sm text-amber-600">
-                  Save configuration changes to clear the stale corpus before
-                  analyzing again.
+                  unavailable candidate models before running.
                 </p>
               )}
               <div className="mt-5 flex flex-wrap gap-2">
                 {configurationEditable && (
                   <Button
                     type="button"
-                    disabled={
-                      busy || !validDraft || (selected != null && !draftDirty)
-                    }
-                    onClick={() => void save()}
+                    disabled={busy || loading || !validDraft}
+                    onClick={() => void run()}
                   >
                     {busy ? (
                       <IconLoader2 className="size-4 animate-spin" />
                     ) : (
-                      <IconCheck className="size-4" />
+                      <IconPlayerPlay className="size-4" />
                     )}
-                    {selected ? "Save configuration" : "Create probe"}
-                  </Button>
-                )}
-                {selected?.status === "draft" && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy || draftDirty || !validDraft}
-                    onClick={() => void action("preflight")}
-                  >
-                    <IconBrain className="size-4" /> Analyze repository
-                  </Button>
-                )}
-                {selected?.status === "ready" && (
-                  <Button
-                    type="button"
-                    disabled={busy || draftDirty || !validDraft}
-                    onClick={() => void action("start")}
-                  >
-                    <IconPlayerPlay className="size-4" /> Start probe
+                    Run probe
                   </Button>
                 )}
                 {selected &&
@@ -980,49 +929,24 @@ export function ModelEvaluationsPage() {
                       Cancel
                     </Button>
                   )}
-                {selected && recoverable && (
+                {selected?.status === "failed" && (
                   <Button
                     type="button"
                     variant="outline"
                     disabled={busy}
                     onClick={() => void action("resume")}
                   >
-                    <IconRefresh className="size-4" /> Resume
+                    <IconRefresh className="size-4" /> Restart
                   </Button>
                 )}
-                {selected &&
-                  (selected.status === "completed" ||
-                    selected.status === "failed") && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => void action("restart")}
-                    >
-                      <IconRefresh className="size-4" />
-                      {selected.status === "failed"
-                        ? "Restart from scratch"
-                        : "Run again"}
-                    </Button>
-                  )}
-                {selected && !activeStatuses.has(selected.status) && (
+                {selected?.status === "failed" && (
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="outline"
                     disabled={busy}
-                    onClick={() =>
-                      void mutate(async () => {
-                        await deleteModelEvaluation(
-                          selected.id,
-                          selected.version,
-                        )
-                        setSelected(null)
-                        setSelectedID("")
-                        setDraft(emptyDraft(defaultFilesPerLanguage))
-                      })
-                    }
+                    onClick={() => void action("restart")}
                   >
-                    <IconTrash className="size-4" /> Delete
+                    <IconRefresh className="size-4" /> Start over
                   </Button>
                 )}
               </div>

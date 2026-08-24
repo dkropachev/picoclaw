@@ -81,7 +81,7 @@ func (status Status) CanTransitionTo(next Status) bool {
 		return next == StatusCompleted || next == StatusCanceling || next == StatusFailed
 	case StatusCanceling:
 		return next == StatusCanceled
-	case StatusCanceled, StatusFailed:
+	case StatusFailed:
 		return next == StatusPreflighting || next == StatusRunning
 	default:
 		return false
@@ -305,6 +305,7 @@ type Evaluation struct {
 	ID                      string                `json:"id"`
 	Version                 int64                 `json:"version"`
 	Status                  Status                `json:"status"`
+	OneShot                 bool                  `json:"one_shot,omitempty"`
 	Repository              string                `json:"repository"`
 	Ref                     string                `json:"ref"`
 	CandidateModels         []string              `json:"candidate_models"`
@@ -348,4 +349,6 @@ type CreateRequest struct {
 	Focus                   Focus          `json:"focus"`
 	DefaultFilesPerLanguage int            `json:"default_files_per_language,omitempty"`
 	FilesPerLanguage        map[string]int `json:"files_per_language,omitempty"`
+	OneShot                 bool           `json:"-"`
+	InitialRunID            string         `json:"-"`
 }

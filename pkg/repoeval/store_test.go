@@ -113,6 +113,45 @@ func TestStoreLifecyclePersistsPinnedEvaluation(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesOneShotPreflightAtomically(t *testing.T) {
+	store := newEvaluationTestStore(t, 61)
+	request := validCreateRequest()
+	request.OneShot = true
+	request.InitialRunID = "wr_initial_one_shot"
+	created, err := store.Create(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created.OneShot || created.Status != StatusPreflighting ||
+		created.Progress.Stage != ProgressResolving || created.Progress.Percent != 1 ||
+		created.LatestRunID() != request.InitialRunID || created.StartedAt == nil {
+		t.Fatalf("atomic one-shot create=%#v", created)
+	}
+	loaded, found, err := store.Get(t.Context(), created.ID)
+	if err != nil || !found || !reflect.DeepEqual(loaded, created) {
+		t.Fatalf("atomic one-shot persisted=%#v found=%v err=%v", loaded, found, err)
+	}
+
+	for name, alter := range map[string]func(*CreateRequest){
+		"missing run identity":          func(value *CreateRequest) { value.InitialRunID = "" },
+		"run identity without one-shot": func(value *CreateRequest) { value.OneShot = false },
+		"oversized run identity": func(value *CreateRequest) {
+			value.InitialRunID = strings.Repeat("r", maxRunIDBytes+1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := request
+			alter(&invalid)
+			if _, createErr := store.Create(t.Context(), invalid); !errors.Is(
+				createErr,
+				ErrInvalidEvaluation,
+			) {
+				t.Fatalf("invalid one-shot create error=%v", createErr)
+			}
+		})
+	}
+}
+
 func TestStoreCASNoopAndImmutableInputs(t *testing.T) {
 	store := newEvaluationTestStore(t, 2)
 	created, err := store.Create(context.Background(), validCreateRequest())
@@ -159,22 +198,25 @@ func TestStoreCASNoopAndImmutableInputs(t *testing.T) {
 		})
 	}
 	preflight := updateEvaluation(t, store, created, func(value *Evaluation) { value.Status = StatusPreflighting })
-	reset, err := store.Update(context.Background(), preflight.ID, preflight.Version, func(value *Evaluation) error {
+	_, err = store.Update(context.Background(), preflight.ID, preflight.Version, func(value *Evaluation) error {
 		value.CandidateModels[0] = "changed"
 		return nil
 	})
-	if err != nil || reset.Status != StatusDraft || reset.CandidateModels[0] != "changed" ||
-		reset.Corpus != nil || reset.StartedAt != nil || len(reset.RunIDs) != 0 {
-		t.Fatalf("preflight config reset = %#v err=%v", reset, err)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("preflight config edit error = %v", err)
 	}
-	_, err = store.Update(context.Background(), reset.ID, reset.Version, func(value *Evaluation) error {
+	draft, err := store.Create(context.Background(), validCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Update(context.Background(), draft.ID, draft.Version, func(value *Evaluation) error {
 		value.Status = StatusRunning
 		return nil
 	})
 	if !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("skipped transition error = %v", err)
 	}
-	preflight = updateEvaluation(t, store, reset, func(value *Evaluation) { value.Status = StatusPreflighting })
+	preflight = updateEvaluation(t, store, draft, func(value *Evaluation) { value.Status = StatusPreflighting })
 	ready := updateEvaluation(t, store, preflight, func(value *Evaluation) {
 		value.Status = StatusReady
 		value.Corpus = validManifest()
@@ -186,20 +228,14 @@ func TestStoreCASNoopAndImmutableInputs(t *testing.T) {
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("repinned corpus error = %v", err)
 	}
-	reset, err = store.Update(context.Background(), ready.ID, ready.Version, func(value *Evaluation) error {
+	_, err = store.Update(context.Background(), ready.ID, ready.Version, func(value *Evaluation) error {
 		value.Repository = "other/repo"
 		value.Ref = "release"
 		return nil
 	})
-	if err != nil || reset.Status != StatusDraft || reset.Repository != "other/repo" ||
-		reset.Ref != "release" || reset.Corpus != nil || len(reset.Comparisons) != 0 {
-		t.Fatalf("ready config reset = %#v err=%v", reset, err)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("ready config edit error = %v", err)
 	}
-	preflight = updateEvaluation(t, store, reset, func(value *Evaluation) { value.Status = StatusPreflighting })
-	ready = updateEvaluation(t, store, preflight, func(value *Evaluation) {
-		value.Status = StatusReady
-		value.Corpus = validManifest()
-	})
 	running := updateEvaluation(t, store, ready, func(value *Evaluation) { value.Status = StatusRunning })
 	_, err = store.Update(context.Background(), running.ID, running.Version, func(value *Evaluation) error {
 		value.JudgeModelAlias = "other-judge"
@@ -285,20 +321,41 @@ func TestStoreDeleteAndMissingBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Delete(context.Background(), created.ID, created.Version+1); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stale Delete error = %v", err)
+	if deleteErr := store.Delete(
+		context.Background(),
+		created.ID,
+		created.Version+1,
+	); !errors.Is(deleteErr, ErrConflict) {
+		t.Fatalf("stale Delete error = %v", deleteErr)
 	}
-	if err := store.Delete(context.Background(), "invalid", 1); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid Delete error = %v", err)
+	if deleteErr := store.Delete(context.Background(), "invalid", 1); !errors.Is(deleteErr, os.ErrNotExist) {
+		t.Fatalf("invalid Delete error = %v", deleteErr)
 	}
-	if err := store.Delete(context.Background(), created.ID, created.Version); err != nil {
+	started := updateEvaluation(t, store, created, func(value *Evaluation) {
+		value.Status = StatusPreflighting
+	})
+	if deleteErr := store.Delete(context.Background(), started.ID, started.Version); !errors.Is(
+		deleteErr,
+		ErrInvalidTransition,
+	) {
+		t.Fatalf("started Delete error = %v", deleteErr)
+	}
+	deletable, err := store.Create(context.Background(), validCreateRequest())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, found, err := store.Get(context.Background(), created.ID); err != nil || found {
-		t.Fatalf("deleted Get found=%v err=%v", found, err)
+	if deleteErr := store.Delete(context.Background(), deletable.ID, deletable.Version); deleteErr != nil {
+		t.Fatal(deleteErr)
 	}
-	if err := store.Delete(context.Background(), created.ID, created.Version); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("repeated Delete error = %v", err)
+	if _, found, getErr := store.Get(context.Background(), deletable.ID); getErr != nil || found {
+		t.Fatalf("deleted Get found=%v err=%v", found, getErr)
+	}
+	if deleteErr := store.Delete(
+		context.Background(),
+		deletable.ID,
+		deletable.Version,
+	); !errors.Is(deleteErr, os.ErrNotExist) {
+		t.Fatalf("repeated Delete error = %v", deleteErr)
 	}
 }
 

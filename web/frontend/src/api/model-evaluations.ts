@@ -277,6 +277,16 @@ export async function createModelEvaluation(
   return normalizeEvaluation(response.evaluation)
 }
 
+export async function runModelEvaluation(
+  input: EvaluationConfigInput,
+): Promise<RepositoryModelEvaluation> {
+  const response = await request<{ evaluation: RepositoryModelEvaluation }>(
+    `${BASE}/run`,
+    json("POST", input),
+  )
+  return normalizeEvaluation(response.evaluation)
+}
+
 export async function updateModelEvaluation(
   id: string,
   input: EvaluationConfigInput,
@@ -300,7 +310,7 @@ export async function deleteModelEvaluation(
 
 export async function runModelEvaluationAction(
   id: string,
-  action: "preflight" | "start" | "cancel" | "resume" | "restart",
+  action: "preflight" | "start" | "run" | "cancel" | "resume" | "restart",
   expectedVersion: number,
 ): Promise<RepositoryModelEvaluation> {
   const response = await request<{ evaluation: RepositoryModelEvaluation }>(

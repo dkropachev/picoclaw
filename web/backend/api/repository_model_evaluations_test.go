@@ -365,11 +365,11 @@ func TestRepositoryModelEvaluationRoutesFullPatchResumeAndBusyDelete(t *testing.
 		t,
 		mux,
 		http.MethodPost,
-		"/api/model-evaluations/"+created.ID+"/resume",
+		"/api/model-evaluations/"+created.ID+"/run",
 		map[string]any{"expected_version": patchedDetail.Evaluation.Version},
 	)
 	if resumed.Code != http.StatusAccepted {
-		t.Fatalf("resume draft status=%d body=%s", resumed.Code, resumed.Body.String())
+		t.Fatalf("run draft status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
 	<-entered
 	active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
@@ -524,6 +524,26 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 	) {
 		t.Fatalf("completed resume error=%v", err)
 	}
+	if _, err := controller.Restart(t.Context(), completed.ID, completed.Version); !errors.Is(
+		err,
+		repoeval.ErrInvalidTransition,
+	) {
+		t.Fatalf("completed restart error=%v", err)
+	}
+	deleteCompleted := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodDelete,
+		"/api/model-evaluations/"+completed.ID,
+		map[string]any{"expected_version": completed.Version},
+	)
+	if deleteCompleted.Code != http.StatusConflict {
+		t.Fatalf(
+			"completed delete status=%d body=%s",
+			deleteCompleted.Code,
+			deleteCompleted.Body.String(),
+		)
+	}
 	corpus := httptest.NewRecorder()
 	mux.ServeHTTP(
 		corpus,
@@ -538,6 +558,63 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 	if len(refs) != 3 || refs[0] != workflows.RepositoryModelEvaluationPreflightWorkflowRef ||
 		refs[2] != workflows.RepositoryModelEvaluationAnalysisWorkflowRef {
 		t.Fatalf("workflow refs=%v", refs)
+	}
+}
+
+func TestRepositoryModelEvaluationOneShotRunCompletesWithoutReadyAction(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	var mu sync.Mutex
+	var refs []string
+	controller.runWorkflow = func(
+		_ context.Context,
+		_ string,
+		ref string,
+		_ string,
+		_ map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		mu.Lock()
+		refs = append(refs, ref)
+		mu.Unlock()
+		switch ref {
+		case workflows.RepositoryModelEvaluationPreflightWorkflowRef:
+			return repositoryModelEvaluationPreflightResult(), nil
+		case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+			return repositoryModelEvaluationBatchResult(), nil
+		case workflows.RepositoryModelEvaluationAnalysisWorkflowRef:
+			return repositoryModelEvaluationAnalysisResult(), nil
+		default:
+			return nil, errors.New("unexpected workflow")
+		}
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	response := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		repositoryModelEvaluationCreateBody("owner/one-shot"),
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("run status=%d body=%s", response.Code, response.Body.String())
+	}
+	var accepted repositoryModelEvaluationDetail
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil ||
+		!accepted.Evaluation.OneShot || accepted.Evaluation.Status != repoeval.StatusPreflighting {
+		t.Fatalf("accepted=%#v err=%v", accepted.Evaluation, err)
+	}
+	completed := waitRepositoryModelEvaluationStatus(t, handler, accepted.Evaluation.ID, repoeval.StatusCompleted)
+	mu.Lock()
+	defer mu.Unlock()
+	if !completed.OneShot || len(completed.Comparisons) != len(completed.CandidateModels) ||
+		!reflect.DeepEqual(refs, []string{
+			workflows.RepositoryModelEvaluationPreflightWorkflowRef,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			workflows.RepositoryModelEvaluationAnalysisWorkflowRef,
+		}) {
+		t.Fatalf("completed=%#v refs=%v", completed, refs)
 	}
 }
 
@@ -588,19 +665,6 @@ func TestRepositoryModelEvaluationControllerCancellationAndRestart(t *testing.T)
 		t.Fatalf("cancel response=%#v err=%v", canceledDetail, err)
 	}
 	terminal := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCanceled)
-	controller.runWorkflow = func(
-		_ context.Context,
-		_ string,
-		ref string,
-		_ string,
-		_ map[string]any,
-		_ workflows.AgentUsageEventObserver,
-	) (*workflows.RunResult, error) {
-		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
-			return nil, context.Canceled
-		}
-		return repositoryModelEvaluationPreflightResult(), nil
-	}
 	resumed := repositoryModelEvaluationMutation(
 		t,
 		mux,
@@ -608,26 +672,18 @@ func TestRepositoryModelEvaluationControllerCancellationAndRestart(t *testing.T)
 		"/api/model-evaluations/"+created.ID+"/resume",
 		map[string]any{"expected_version": terminal.Version},
 	)
-	if resumed.Code != http.StatusAccepted {
+	if resumed.Code != http.StatusConflict {
 		t.Fatalf("terminal resume status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
-	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
 	restarted := repositoryModelEvaluationMutation(
 		t,
 		mux,
 		http.MethodPost,
 		"/api/model-evaluations/"+created.ID+"/restart",
-		map[string]any{"expected_version": ready.Version},
+		map[string]any{"expected_version": terminal.Version},
 	)
-	if restarted.Code != http.StatusAccepted {
+	if restarted.Code != http.StatusConflict {
 		t.Fatalf("restart status=%d body=%s", restarted.Code, restarted.Body.String())
-	}
-	var restartedDetail repositoryModelEvaluationDetail
-	if err := json.Unmarshal(restarted.Body.Bytes(), &restartedDetail); err != nil {
-		t.Fatal(err)
-	}
-	if restartedDetail.Evaluation.ID == created.ID || restartedDetail.Evaluation.Status != repoeval.StatusPreflighting {
-		t.Fatalf("restarted=%#v", restartedDetail.Evaluation)
 	}
 }
 
@@ -713,6 +769,94 @@ func TestRepositoryModelEvaluationFailedRestartCreatesFreshProbe(t *testing.T) {
 	original, found, err := store.Get(t.Context(), failed.ID)
 	if err != nil || !found || original.Status != repoeval.StatusFailed {
 		t.Fatalf("original failed probe=%#v found=%v err=%v", original, found, err)
+	}
+}
+
+func TestRepositoryModelEvaluationFailedPreflightRestartsSameRunToCompletion(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	controller.runWorkflow = func(
+		ctx context.Context,
+		workflowYAML string,
+		ref string,
+		runID string,
+		inputs map[string]any,
+		observe workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		if ref == workflows.RepositoryModelEvaluationPreflightWorkflowRef {
+			return repositoryModelEvaluationPreflightResult(), nil
+		}
+		return successfulRepositoryModelEvaluationWorkflow(
+			ctx,
+			workflowYAML,
+			ref,
+			runID,
+			inputs,
+			observe,
+		)
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	store, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/failed-retry"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflighting, err := store.Update(
+		t.Context(),
+		draft.ID,
+		draft.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusPreflighting
+			candidate.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.Update(
+		t.Context(),
+		preflighting.ID,
+		preflighting.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusFailed
+			candidate.Progress.Stage = repoeval.ProgressFailed
+			candidate.Failure = "selector deadline exceeded"
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restart := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+failed.ID+"/resume",
+		map[string]any{"expected_version": failed.Version},
+	)
+	if restart.Code != http.StatusAccepted {
+		t.Fatalf("same-run restart status=%d body=%s", restart.Code, restart.Body.String())
+	}
+	var accepted repositoryModelEvaluationDetail
+	if decodeErr := json.Unmarshal(restart.Body.Bytes(), &accepted); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if accepted.Evaluation.ID != failed.ID || !accepted.Evaluation.OneShot ||
+		accepted.Evaluation.Status != repoeval.StatusPreflighting {
+		t.Fatalf("same-run restart=%#v", accepted.Evaluation)
+	}
+	completed := waitRepositoryModelEvaluationStatus(t, handler, failed.ID, repoeval.StatusCompleted)
+	if len(completed.Comparisons) != len(completed.CandidateModels) {
+		t.Fatalf("same-run completed=%#v", completed)
 	}
 }
 

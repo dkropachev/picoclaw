@@ -255,17 +255,23 @@ func TestStoreAllowsOnlyGuardedCanceledAndFailedResume(t *testing.T) {
 			candidate.Status = StatusRunning
 			return nil
 		},
-	); !errors.Is(
-		invalidResumeErr,
-		ErrInvalidEvaluation,
-	) {
+	); !errors.Is(invalidResumeErr, ErrConflict) {
 		t.Fatalf("canceled state resumed without corpus: %v", invalidResumeErr)
 	}
-	preflighting, err := store.Update(t.Context(), canceled.ID, canceled.Version, func(candidate *Evaluation) error {
-		candidate.Status = StatusPreflighting
-		candidate.Progress.Stage = ProgressResolving
-		return nil
-	})
+	failedDraft, err := store.Create(t.Context(), validCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflighting, err := store.Update(
+		t.Context(),
+		failedDraft.ID,
+		failedDraft.Version,
+		func(candidate *Evaluation) error {
+			candidate.Status = StatusPreflighting
+			candidate.Progress.Stage = ProgressResolving
+			return nil
+		},
+	)
 	if err != nil || preflighting.FinishedAt != nil || preflighting.Status != StatusPreflighting {
 		t.Fatalf("preflight resume=%#v err=%v", preflighting, err)
 	}
@@ -303,7 +309,7 @@ func TestStoreAllowsOnlyGuardedCanceledAndFailedResume(t *testing.T) {
 	if err != nil || resumed.FinishedAt != nil || resumed.Failure != "" {
 		t.Fatalf("execution resume=%#v err=%v", resumed, err)
 	}
-	if !StatusCanceled.CanTransitionTo(StatusPreflighting) || !StatusFailed.CanTransitionTo(StatusRunning) ||
+	if StatusCanceled.CanTransitionTo(StatusPreflighting) || !StatusFailed.CanTransitionTo(StatusRunning) ||
 		StatusCompleted.CanTransitionTo(StatusRunning) {
 		t.Fatal("terminal resume transition matrix is wrong")
 	}

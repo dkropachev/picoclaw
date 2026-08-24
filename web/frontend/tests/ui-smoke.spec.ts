@@ -1324,6 +1324,7 @@ async function mockLauncherApis(
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
   let currentModelEvaluation: Record<string, unknown> | null = null
+  let modelEvaluationDetailReads = 0
 
   const modelEvaluationFromBody = (
     body: Record<string, unknown>,
@@ -1708,6 +1709,42 @@ async function mockLauncherApis(
               : [],
           })
         }
+        if (method === "POST" && path === "/api/model-evaluations/run") {
+          const created = modelEvaluationFromBody(body ?? {})
+          currentModelEvaluation = {
+            ...created,
+            status: "running",
+            progress: {
+              stage: "candidate_execution",
+              languages: {
+                go: {
+                  available_files: 4,
+                  selected_files: 2,
+                  completed_files: 1,
+                  selected_bytes: 12_000,
+                  regions: ["pkg", "cmd"],
+                  limited: false,
+                },
+              },
+              total_files: 4,
+              selected_files: 2,
+              completed_files: 1,
+              total_tasks: 4,
+              completed_tasks: 2,
+              message: "Running candidate models.",
+              current_model: "code",
+              current_path: "pkg/service.go",
+              percent: 40,
+            },
+            run_ids: ["wr_selector", "wr_candidate"],
+          }
+          modelEvaluationDetailReads = 0
+          return json(
+            route,
+            { evaluation: structuredClone(currentModelEvaluation) },
+            202,
+          )
+        }
         if (method === "POST" && path === "/api/model-evaluations") {
           currentModelEvaluation = modelEvaluationFromBody(body ?? {})
           return json(
@@ -1730,7 +1767,7 @@ async function mockLauncherApis(
           })
         }
         const actionMatch = path.match(
-          /^\/api\/model-evaluations\/([^/]+)\/(preflight|start|cancel|resume|restart)$/,
+          /^\/api\/model-evaluations\/([^/]+)\/(preflight|start|run|cancel|resume|restart)$/,
         )
         if (method === "POST" && actionMatch && currentModelEvaluation) {
           const action = actionMatch[2]
@@ -1762,7 +1799,11 @@ async function mockLauncherApis(
               },
               run_ids: ["wr_selector"],
             }
-          } else if (action === "start") {
+          } else if (
+            action === "start" ||
+            action === "run" ||
+            action === "resume"
+          ) {
             currentModelEvaluation = {
               ...currentModelEvaluation,
               version,
@@ -1797,6 +1838,30 @@ async function mockLauncherApis(
         const detailMatch = path.match(/^\/api\/model-evaluations\/([^/]+)$/)
         if (detailMatch && currentModelEvaluation) {
           if (method === "GET") {
+            modelEvaluationDetailReads += 1
+            if (
+              currentModelEvaluation.status === "running" &&
+              modelEvaluationDetailReads >= 2
+            ) {
+              currentModelEvaluation = {
+                ...currentModelEvaluation,
+                version: Number(currentModelEvaluation.version) + 1,
+                status: "completed",
+                progress: {
+                  ...(currentModelEvaluation.progress as Record<
+                    string,
+                    unknown
+                  >),
+                  stage: "completed",
+                  message: "Repository model evaluation completed.",
+                  completed_files: 2,
+                  completed_tasks: 4,
+                  current_model: "",
+                  current_path: "",
+                  percent: 100,
+                },
+              }
+            }
             return json(route, {
               evaluation: structuredClone(currentModelEvaluation),
             })
@@ -3454,16 +3519,7 @@ test("model review probes compare models without producing findings", async ({
   await workspace.getByLabel("File selector model").selectOption("review")
   await workspace.getByLabel("Judge and analyzer model").selectOption("review")
   await workspace.getByLabel("Include folders").fill("pkg\ncmd")
-  await workspace.getByRole("button", { name: "Create probe" }).click()
-
-  await expect(
-    workspace.getByRole("button", { name: "Analyze repository" }),
-  ).toBeEnabled()
-  await workspace.getByRole("button", { name: "Analyze repository" }).click()
-  await expect(workspace.getByText("Corpus by language")).toBeVisible()
-  await expect(workspace.getByText("Corpus preview")).toBeVisible()
-  await expect(workspace.getByText(/Commit a{40}/)).toBeVisible()
-  await workspace.getByRole("button", { name: "Start probe" }).click()
+  await workspace.getByRole("button", { name: "Run probe" }).click()
 
   await expect(
     workspace.getByRole("progressbar", { name: "Model probe progress" }),
@@ -3471,15 +3527,25 @@ test("model review probes compare models without producing findings", async ({
   await expect(
     workspace.getByText("Model code · File pkg/service.go"),
   ).toBeVisible()
-  await workspace.getByRole("button", { name: "Cancel" }).click()
-  await expect(workspace.getByText("Canceled.")).toBeVisible()
-  await expect(workspace.getByRole("button", { name: "Resume" })).toBeVisible()
+  await expect(
+    workspace.getByText("Repository model evaluation completed."),
+  ).toBeVisible({ timeout: 5_000 })
+  await expect(
+    workspace.getByLabel("Repository", { exact: true }),
+  ).toBeDisabled()
+  await expect(
+    workspace.getByRole("button", { name: "Run probe" }),
+  ).toHaveCount(0)
+  await expect(workspace.getByRole("button", { name: "Restart" })).toHaveCount(
+    0,
+  )
+  await expect(
+    workspace.getByRole("button", { name: "Start over" }),
+  ).toHaveCount(0)
+  await expect(workspace.getByRole("button", { name: "Delete" })).toHaveCount(0)
 
   expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
-    "POST /api/model-evaluations",
-    `POST /api/model-evaluations/rme_${"1".repeat(32)}/preflight`,
-    `POST /api/model-evaluations/rme_${"1".repeat(32)}/start`,
-    `POST /api/model-evaluations/rme_${"1".repeat(32)}/cancel`,
+    "POST /api/model-evaluations/run",
   ])
   expect(requests[0]?.body).toMatchObject({
     repository: "owner/repo",
