@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -123,6 +124,12 @@ func (h *Handler) handleCreateRepositoryModelEvaluation(w http.ResponseWriter, r
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
+	normalizedRepository, err := normalizeRepositoryModelEvaluationRepository(r.Context(), request.Repository)
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	request.Repository = normalizedRepository
 	store, cfg, err := h.repositoryModelEvaluationStore()
 	if err != nil {
 		writeRepositoryModelEvaluationError(w, err)
@@ -187,6 +194,17 @@ func (h *Handler) handlePatchRepositoryModelEvaluation(w http.ResponseWriter, r 
 	if err := decodeRepositoryModelEvaluationRequest(r, &request); err != nil || request.ExpectedVersion < 1 {
 		writeRepositoryModelEvaluationError(w, errors.Join(repoeval.ErrInvalidEvaluation, err))
 		return
+	}
+	if request.Repository != nil {
+		normalizedRepository, normalizeErr := normalizeRepositoryModelEvaluationRepository(
+			r.Context(),
+			*request.Repository,
+		)
+		if normalizeErr != nil {
+			writeRepositoryModelEvaluationError(w, normalizeErr)
+			return
+		}
+		request.Repository = &normalizedRepository
 	}
 	store, cfg, err := h.repositoryModelEvaluationStore()
 	if err != nil {
@@ -263,6 +281,72 @@ func applyRepositoryModelEvaluationPatch(
 			evaluation.FilesPerLanguage[language] = limit
 		}
 	}
+}
+
+func normalizeRepositoryModelEvaluationRepository(ctx context.Context, repository string) (string, error) {
+	normalized, err := normalizeRepositoryReviewAutomationRepository(repository)
+	if err != nil {
+		return "", errors.Join(repoeval.ErrInvalidEvaluation, err)
+	}
+	if filepath.IsAbs(normalized) {
+		canonical, resolveErr := filepath.EvalSymlinks(normalized)
+		if resolveErr != nil {
+			return "", fmt.Errorf(
+				"%w: local repository path is unavailable",
+				repoeval.ErrInvalidEvaluation,
+			)
+		}
+		info, statErr := os.Stat(canonical)
+		if statErr != nil || !info.IsDir() {
+			return "", fmt.Errorf(
+				"%w: local repository path is unavailable",
+				repoeval.ErrInvalidEvaluation,
+			)
+		}
+		if !repositoryModelEvaluationGitRoot(ctx, canonical) {
+			return "", fmt.Errorf(
+				"%w: local repository path must be the root of a Git repository",
+				repoeval.ErrInvalidEvaluation,
+			)
+		}
+		normalized = filepath.Clean(canonical)
+	}
+	return normalized, nil
+}
+
+func repositoryModelEvaluationGitRoot(ctx context.Context, repository string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	validationCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	run := func(arguments ...string) (string, error) {
+		command := exec.CommandContext(validationCtx, "git", append([]string{"-C", repository}, arguments...)...)
+		environment := make([]string, 0, len(os.Environ())+1)
+		for _, variable := range os.Environ() {
+			if !strings.HasPrefix(variable, "GIT_") {
+				environment = append(environment, variable)
+			}
+		}
+		command.Env = append(environment, "GIT_OPTIONAL_LOCKS=0")
+		output, err := command.Output()
+		return strings.TrimSpace(string(output)), err
+	}
+
+	bare, err := run("rev-parse", "--is-bare-repository")
+	if err != nil || bare != "true" && bare != "false" {
+		return false
+	}
+	rootArgument := "--show-toplevel"
+	if bare == "true" {
+		rootArgument = "--absolute-git-dir"
+	}
+	root, err := run("rev-parse", rootArgument)
+	if err != nil || root == "" {
+		return false
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	return err == nil && filepath.Clean(canonicalRoot) == filepath.Clean(repository)
 }
 
 func (h *Handler) handleDeleteRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -448,11 +532,30 @@ func (h *Handler) handleRepositoryModelEvaluationOptions(w http.ResponseWriter, 
 	repositories := make([]repositoryModelEvaluationRepositoryOption, 0)
 	if manager, managerErr := h.gitWorkspaceManager(); managerErr == nil {
 		if stats, statsErr := manager.Stats(r.Context()); statsErr == nil {
+			upstreamByRepository := make(map[string]string)
+			for _, workspace := range stats.Workspaces {
+				upstream := sanitizeRepositoryModelEvaluationIdentity(workspace.UpstreamURL)
+				if upstream != "" {
+					upstreamByRepository[workspace.RepoID] = upstream
+				}
+			}
+			seen := make(map[string]struct{})
 			for _, repository := range stats.Repositories {
 				identity := sanitizeRepositoryModelEvaluationIdentity(repository.RemoteURL)
 				if identity == "" {
+					identity = upstreamByRepository[repository.ID]
+				}
+				if identity == "" {
 					continue
 				}
+				identity, err = normalizeRepositoryModelEvaluationRepository(r.Context(), identity)
+				if err != nil {
+					continue
+				}
+				if _, duplicate := seen[identity]; duplicate {
+					continue
+				}
+				seen[identity] = struct{}{}
 				label := strings.TrimSuffix(filepath.Base(strings.TrimSuffix(identity, "/")), ".git")
 				repositories = append(
 					repositories,

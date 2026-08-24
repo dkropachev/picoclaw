@@ -172,9 +172,15 @@ export interface EvaluationModelOption {
   default?: boolean
 }
 
+export interface EvaluationRepositoryOption {
+  id: string
+  repository: string
+  label: string
+}
+
 export interface EvaluationOptions {
   models: EvaluationModelOption[]
-  repositories: Array<{ id: string; repository: string; label: string }>
+  repositories: EvaluationRepositoryOption[]
   code_types: EvaluationCodeType[]
   max_files_per_language: number
   default_files_per_language: number

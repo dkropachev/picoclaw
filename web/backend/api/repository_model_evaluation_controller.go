@@ -595,8 +595,12 @@ func (c *repositoryModelEvaluationController) Restart(
 	if evaluation.Status.InFlight() {
 		return repoeval.Evaluation{}, errRepositoryModelEvaluationBusy
 	}
+	repository, err := normalizeRepositoryModelEvaluationRepository(ctx, evaluation.Repository)
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
 	created, err := c.store.Create(ctx, repoeval.CreateRequest{
-		Repository: evaluation.Repository, Ref: evaluation.Ref,
+		Repository: repository, Ref: evaluation.Ref,
 		CandidateModels:    append([]string(nil), evaluation.CandidateModels...),
 		SelectorModelAlias: evaluation.SelectorModelAlias, JudgeModelAlias: evaluation.JudgeModelAlias,
 		Focus: evaluation.Focus, DefaultFilesPerLanguage: evaluation.DefaultFilesPerLanguage,
@@ -706,6 +710,11 @@ func (c *repositoryModelEvaluationController) executePreflight(ctx context.Conte
 	if err != nil || !found {
 		return
 	}
+	repository, normalizeErr := normalizeRepositoryModelEvaluationRepository(ctx, evaluation.Repository)
+	if normalizeErr != nil {
+		c.fail(id, token, boundedRepositoryModelEvaluationDetail(normalizeErr.Error()))
+		return
+	}
 	scopeJSON, _ := json.Marshal(repositoryModelEvaluationScopeInput(evaluation.Focus))
 	policyJSON, _ := json.Marshal(repositoryModelEvaluationPolicyInput(evaluation))
 	ctx = repositoryModelEvaluationWithStepObserver(
@@ -714,7 +723,7 @@ func (c *repositoryModelEvaluationController) executePreflight(ctx context.Conte
 	)
 	result, runErr := c.runWorkflow(ctx, workflows.RepositoryModelEvaluationPreflightWorkflowYAML,
 		workflows.RepositoryModelEvaluationPreflightWorkflowRef, runID, map[string]any{
-			"repository": evaluation.Repository, "ref": evaluation.Ref,
+			"repository": repository, "ref": evaluation.Ref,
 			"scope": string(scopeJSON), "selection_policy": string(policyJSON),
 			"selector_model": evaluation.SelectorModelAlias,
 		}, c.usageObserver(id, token, workflows.RepositoryModelEvaluationPreflightWorkflowRef))
@@ -1396,6 +1405,10 @@ func (c *repositoryModelEvaluationController) runEvaluationBatch(
 	runID string,
 	token string,
 ) (*workflows.RunResult, error) {
+	repository, err := normalizeRepositoryModelEvaluationRepository(ctx, evaluation.Repository)
+	if err != nil {
+		return nil, err
+	}
 	scopeJSON, _ := json.Marshal(repositoryModelEvaluationScopeInput(evaluation.Focus))
 	selected := make([]reposcope.Candidate, 0, len(batch.files))
 	for _, file := range batch.files {
@@ -1417,7 +1430,7 @@ func (c *repositoryModelEvaluationController) runEvaluationBatch(
 	)
 	return c.runWorkflow(ctx, workflows.RepositoryModelEvaluationBatchWorkflowYAML,
 		workflows.RepositoryModelEvaluationBatchWorkflowRef, runID, map[string]any{
-			"repository": evaluation.Repository, "commit": evaluation.Corpus.CommitSHA,
+			"repository": repository, "commit": evaluation.Corpus.CommitSHA,
 			"inventory_hash": evaluation.Corpus.InventoryHash, "scope": string(scopeJSON),
 			"selected_candidates":       string(selectedJSON),
 			"candidate_models":          strings.Join(candidateModels, ","),
@@ -1986,7 +1999,37 @@ func sanitizeRepositoryModelEvaluationRuntimeText(value string, paths ...string)
 		}
 		value = strings.ReplaceAll(value, pathValue, "[repository path]")
 	}
+	value = redactRepositoryModelEvaluationAbsolutePaths(value)
 	return boundedRepositoryModelEvaluationDetail(value)
+}
+
+func redactRepositoryModelEvaluationAbsolutePaths(value string) string {
+	var sanitized strings.Builder
+	for index := 0; index < len(value); {
+		if value[index] != '/' || !repositoryModelEvaluationAbsolutePathBoundary(value, index) {
+			sanitized.WriteByte(value[index])
+			index++
+			continue
+		}
+		end := index + 1
+		for end < len(value) && !strings.ContainsRune(" \t\r\n'\"`()[]{}<>,;", rune(value[end])) {
+			end++
+		}
+		sanitized.WriteString("[filesystem path]")
+		index = end
+	}
+	return sanitized.String()
+}
+
+func repositoryModelEvaluationAbsolutePathBoundary(value string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous := value[index-1]
+	if previous == ':' {
+		return index+1 >= len(value) || value[index+1] != '/'
+	}
+	return strings.ContainsRune(" \t\r\n'\"`()[]{}<>=,;", rune(previous))
 }
 
 func (c *repositoryModelEvaluationController) clock() time.Time {

@@ -666,6 +666,42 @@ func repositoryModelEvaluationMetricsFixture() repoeval.Evaluation {
 	}
 }
 
+func TestRepositoryModelEvaluationBatchUsesCanonicalGitWorkspaceRepository(t *testing.T) {
+	evaluation := repositoryModelEvaluationMetricsFixture()
+	evaluation.Repository = "scylladb/seastar"
+	evaluation.JudgeModelAlias = "judge"
+	evaluation.Corpus.CommitSHA = strings.Repeat("a", 40)
+	var captured map[string]any
+	controller := &repositoryModelEvaluationController{}
+	controller.runWorkflow = func(
+		_ context.Context,
+		_ string,
+		_ string,
+		_ string,
+		inputs map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		captured = inputs
+		return &workflows.RunResult{Status: workflows.RunStatusSucceeded}, nil
+	}
+	batches := repositoryModelEvaluationBatches(evaluation)
+	if len(batches) != 1 {
+		t.Fatalf("batches=%#v", batches)
+	}
+	if _, err := controller.runEvaluationBatch(
+		t.Context(),
+		evaluation,
+		batches[0],
+		"wr_workspace_repository",
+		"token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if captured["repository"] != "https://github.com/scylladb/seastar.git" {
+		t.Fatalf("batch repository=%#v", captured["repository"])
+	}
+}
+
 func TestRepositoryModelEvaluationControllerRecoversPreflight(t *testing.T) {
 	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
 	store, _, err := handler.repositoryModelEvaluationStore()
@@ -691,9 +727,12 @@ func TestRepositoryModelEvaluationControllerRecoversPreflight(t *testing.T) {
 		t.Fatalf("preflight=%#v err=%v", preflighting, err)
 	}
 	controller := newRepositoryModelEvaluationController(handler)
-	controller.runWorkflow = func(_ context.Context, _ string, ref string, _ string, _ map[string]any, _ workflows.AgentUsageEventObserver) (*workflows.RunResult, error) {
+	controller.runWorkflow = func(_ context.Context, _ string, ref string, _ string, inputs map[string]any, _ workflows.AgentUsageEventObserver) (*workflows.RunResult, error) {
 		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
 			t.Fatalf("recovery workflow ref=%q", ref)
+		}
+		if inputs["repository"] != "https://github.com/owner/repo.git" {
+			t.Fatalf("recovery repository=%#v", inputs["repository"])
 		}
 		return repositoryModelEvaluationPreflightResult(), nil
 	}
@@ -1231,6 +1270,26 @@ func TestRepositoryModelEvaluationControllerHelpersAndInvalidTransitions(t *test
 		"/private/repository",
 	); strings.Contains(sanitized, "/private/repository") || sanitizeRepositoryModelEvaluationRuntimeText("", "/tmp") != "" {
 		t.Fatalf("runtime path sanitization=%q", sanitized)
+	}
+	if sanitized := sanitizeRepositoryModelEvaluationRuntimeText(
+		"git clone -- /home/operator/missing/repo /tmp/workspace failed",
+	); strings.Contains(sanitized, "/home/operator") || strings.Contains(sanitized, "/tmp/workspace") {
+		t.Fatalf("inferred runtime path sanitization=%q", sanitized)
+	}
+	for _, input := range []string{
+		"/opt/private failed",
+		"failure [/home/operator/private]",
+		"failure `/tmp/private`",
+		"failure path=/var/lib/private",
+	} {
+		if sanitized := sanitizeRepositoryModelEvaluationRuntimeText(input); strings.Contains(sanitized, "/private") {
+			t.Fatalf("bounded runtime path sanitization=%q", sanitized)
+		}
+	}
+	if sanitized := sanitizeRepositoryModelEvaluationRuntimeText(
+		"fetch https://github.com/owner/repository.git failed",
+	); !strings.Contains(sanitized, "https://github.com/owner/repository.git") {
+		t.Fatalf("remote URL was redacted=%q", sanitized)
 	}
 	clockController := &repositoryModelEvaluationController{}
 	if clockController.clock().IsZero() {

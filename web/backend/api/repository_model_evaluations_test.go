@@ -28,7 +28,7 @@ import (
 func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T) {
 	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
-	created := createRepositoryModelEvaluation(t, mux, "/absolute/checkout/secret")
+	created := createRepositoryModelEvaluation(t, mux, initAPISourceRepo(t))
 	if created.Repository != "" || created.Status != repoeval.StatusDraft {
 		t.Fatalf("created projection = %#v", created)
 	}
@@ -47,7 +47,7 @@ func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T)
 		"/api/model-evaluations/"+created.ID,
 		map[string]any{
 			"expected_version": created.Version,
-			"repository":       "https://github.com/acme/core.git",
+			"repository":       "acme/core",
 			"ref":              "release",
 			"focus": map[string]any{
 				"code_types":      []string{"code", "test"},
@@ -113,6 +113,78 @@ func TestRepositoryModelEvaluationCreateDefaultsBlankRefToHEAD(t *testing.T) {
 	}
 	if detail.Evaluation.Ref != "HEAD" {
 		t.Fatalf("default ref=%q, want HEAD", detail.Evaluation.Ref)
+	}
+	if detail.Evaluation.Repository != "https://github.com/owner/repo.git" {
+		t.Fatalf("normalized repository=%q", detail.Evaluation.Repository)
+	}
+	missingLocal := repositoryModelEvaluationCreateBody(filepath.Join(t.TempDir(), "missing"))
+	missing := repositoryModelEvaluationMutation(t, mux, http.MethodPost, "/api/model-evaluations", missingLocal)
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing local repository status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	nonGitLocal := repositoryModelEvaluationCreateBody(t.TempDir())
+	nonGit := repositoryModelEvaluationMutation(t, mux, http.MethodPost, "/api/model-evaluations", nonGitLocal)
+	if nonGit.Code != http.StatusBadRequest {
+		t.Fatalf("non-Git local repository status=%d body=%s", nonGit.Code, nonGit.Body.String())
+	}
+	nonDirectoryPath := filepath.Join(t.TempDir(), "repository.txt")
+	if err := os.WriteFile(nonDirectoryPath, []byte("not a repository"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nonDirectoryLocal := repositoryModelEvaluationCreateBody(nonDirectoryPath)
+	nonDirectory := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations",
+		nonDirectoryLocal,
+	)
+	if nonDirectory.Code != http.StatusBadRequest {
+		t.Fatalf("non-directory local repository status=%d body=%s", nonDirectory.Code, nonDirectory.Body.String())
+	}
+}
+
+func TestRepositoryModelEvaluationGitRootValidation(t *testing.T) {
+	repository := initAPISourceRepo(t)
+	if !repositoryModelEvaluationGitRoot(nil, repository) {
+		t.Fatal("working tree root was rejected")
+	}
+	nested := filepath.Join(repository, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if repositoryModelEvaluationGitRoot(t.Context(), nested) {
+		t.Fatal("working tree subdirectory was accepted")
+	}
+	bareRepository := t.TempDir()
+	runAPIGit(t, bareRepository, "init", "--bare")
+	if !repositoryModelEvaluationGitRoot(t.Context(), bareRepository) {
+		t.Fatal("bare repository root was rejected")
+	}
+	if repositoryModelEvaluationGitRoot(t.Context(), t.TempDir()) {
+		t.Fatal("non-Git directory was accepted")
+	}
+
+	fakeBin := t.TempDir()
+	fakeGit := filepath.Join(fakeBin, "git")
+	if err := os.WriteFile(fakeGit, []byte(`#!/bin/sh
+case "$PROBE_GIT_MODE:$4" in
+  invalid:--is-bare-repository) echo maybe; exit 0 ;;
+  root-error:--is-bare-repository) echo false; exit 0 ;;
+  root-error:--show-toplevel) exit 1 ;;
+  missing-root:--is-bare-repository) echo false; exit 0 ;;
+  missing-root:--show-toplevel) echo /path/that/does/not/exist; exit 0 ;;
+esac
+exit 1
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	for _, mode := range []string{"invalid", "root-error", "missing-root"} {
+		t.Setenv("PROBE_GIT_MODE", mode)
+		if repositoryModelEvaluationGitRoot(t.Context(), repository) {
+			t.Fatalf("fake Git mode %q was accepted", mode)
+		}
 	}
 }
 
@@ -863,6 +935,7 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 	remotes := []string{
 		"https://github.com/zeta/repo-z.git",
 		"https://github.com/acme/repo-a.git",
+		"alice@git.example:group/incompatible.git",
 		filepath.Join(t.TempDir(), "local-secret.git"),
 	}
 	repositories := make(map[string]any, len(remotes))
@@ -879,10 +952,14 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 			"id": id, "remote_url": remote, "first_seen_at": now, "last_seen_at": now,
 			"workspace_ids": []string{workspaceID},
 		}
-		workspaces[workspaceID] = map[string]any{
+		workspace := map[string]any{
 			"id": workspaceID, "repo_id": id, "remote_url": remote, "path": workspacePath,
 			"created_at": now, "updated_at": now,
 		}
+		if filepath.IsAbs(remote) {
+			workspace["upstream_url"] = "https://github.com/local/upstream.git"
+		}
+		workspaces[workspaceID] = workspace
 	}
 	inventory, err := json.Marshal(map[string]any{
 		"version": "4", "repositories": repositories, "workspaces": workspaces,
@@ -906,8 +983,9 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if len(options.Repositories) != 2 || options.Repositories[0].Label != "repo-a" ||
-		options.Repositories[1].Label != "repo-z" {
+	if len(options.Repositories) != 3 || options.Repositories[0].Label != "repo-a" ||
+		options.Repositories[1].Label != "repo-z" ||
+		options.Repositories[2].Repository != "https://github.com/local/upstream.git" {
 		t.Fatalf("repositories=%#v", options.Repositories)
 	}
 }

@@ -14,6 +14,7 @@ import {
   type EvaluationConfigInput,
   type EvaluationCorpusPage,
   type EvaluationModelOption,
+  type EvaluationRepositoryOption,
   ModelEvaluationAPIError,
   type RepositoryModelEvaluation,
   type RepositoryModelEvaluationSummary,
@@ -267,6 +268,9 @@ export function ModelEvaluationsPage() {
     null,
   )
   const [models, setModels] = useState<EvaluationModelOption[]>([])
+  const [repositories, setRepositories] = useState<
+    EvaluationRepositoryOption[]
+  >([])
   const [defaultFilesPerLanguage, setDefaultFilesPerLanguage] = useState(20)
   const [maxFilesPerLanguage, setMaxFilesPerLanguage] = useState(20)
   const [maxCandidateModels, setMaxCandidateModels] = useState(8)
@@ -290,6 +294,7 @@ export function ModelEvaluationsPage() {
         ])
         setEvaluations(items)
         setModels(options.models)
+        setRepositories(options.repositories)
         setDefaultFilesPerLanguage(options.default_files_per_language)
         setMaxFilesPerLanguage(options.max_files_per_language)
         setMaxCandidateModels(options.max_candidate_models)
@@ -675,6 +680,7 @@ export function ModelEvaluationsPage() {
                 <Field label="Repository" required>
                   <Input
                     aria-label="Repository"
+                    list="model-probe-workspace-repositories"
                     value={draft.repository}
                     onChange={(event) =>
                       setDraft({ ...draft, repository: event.target.value })
@@ -682,6 +688,18 @@ export function ModelEvaluationsPage() {
                     placeholder="owner/repository or safe Git URL"
                     disabled={configurationControlsDisabled}
                   />
+                  <datalist id="model-probe-workspace-repositories">
+                    {repositories.map((repository) => (
+                      <option key={repository.id} value={repository.repository}>
+                        {repository.label}
+                      </option>
+                    ))}
+                  </datalist>
+                  <p className="text-muted-foreground text-xs">
+                    Choose a registered Git Workspace repository or enter
+                    owner/repository. The probe acquires a managed fresh
+                    checkout and releases it before model calls.
+                  </p>
                 </Field>
               </div>
             </section>

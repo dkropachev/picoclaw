@@ -154,7 +154,13 @@ describe("ModelEvaluationsPage", () => {
         { alias: "fast", resolved_model: "gpt-fast", available: true },
         { alias: "review", resolved_model: "gpt-review", available: true },
       ],
-      repositories: [],
+      repositories: [
+        {
+          id: "gw-seastar",
+          repository: "https://github.com/scylladb/seastar.git",
+          label: "seastar",
+        },
+      ],
       code_types: ["hotpath-code", "code", "test", "bench-test"],
       max_files_per_language: 20,
       default_files_per_language: 20,
@@ -169,7 +175,18 @@ describe("ModelEvaluationsPage", () => {
     vi.mocked(createModelEvaluation).mockResolvedValue(evaluation)
     renderPage()
 
-    await user.type(await screen.findByLabelText("Repository"), "owner/repo")
+    const repository = await screen.findByLabelText("Repository")
+    expect(repository).toHaveAttribute(
+      "list",
+      "model-probe-workspace-repositories",
+    )
+    expect(
+      document.querySelector(
+        '#model-probe-workspace-repositories option[value="https://github.com/scylladb/seastar.git"]',
+      ),
+    ).not.toBeNull()
+    expect(screen.getByText(/managed fresh checkout/i)).toBeVisible()
+    await user.type(repository, "owner/repo")
     await user.click(
       screen.getByRole("checkbox", { name: "Select candidate model code" }),
     )
