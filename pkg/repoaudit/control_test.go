@@ -16,6 +16,53 @@ import (
 
 var automationTestNow = time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
 
+func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
+	store := NewStore(t.TempDir())
+	store.now = func() time.Time { return automationTestNow }
+	automation := createAutomationForTest(
+		t,
+		store,
+		"rra_11111111111111111111111111111111",
+		"Legacy price metadata",
+	)
+	path := store.automationPath(automation.ID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if unmarshalErr := json.Unmarshal(data, &raw); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	prices := raw["model_prices"].(map[string]any)
+	price := prices["review-a"].(map[string]any)
+	price["subscription"] = true
+	price["equivalent_model"] = "metered-review"
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	loaded, found, err := store.GetAutomation(context.Background(), automation.ID)
+	if err != nil || !found {
+		t.Fatalf("GetAutomation() found=%v error=%v", found, err)
+	}
+	if loaded.ModelPrices["review-a"].InputPricePer1M != 1 {
+		t.Fatalf("numeric price snapshot changed: %#v", loaded.ModelPrices)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rewritten), `"subscription"`) ||
+		strings.Contains(string(rewritten), `"equivalent_model"`) {
+		t.Fatalf("legacy price metadata was not removed: %s", rewritten)
+	}
+}
+
 func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewStore(workspace)
@@ -32,15 +79,11 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 			" review-expensive ": {InputPricePer1M: 5, OutputPricePer1M: 15},
 			"review-cheap": {
 				InputPricePer1M: 0.1, OutputPricePer1M: 0.4,
-				Subscription: true, EquivalentModel: " metered-cheap ",
 			},
 		},
 		AutoContinue: true,
 		BudgetPolicy: RepositoryReviewBudgetPolicy{
-			MaxTotalTokens: 200_000, MaxEstimatedCostUSD: 8.50,
-			AccountIDs: []string{" account-a ", "account-b"}, MinRemainingPercent: 15,
-			MinRemainingPercentByWindow: map[string]float64{" Weekly ": 25, "daily": 10},
-			AutoResume:                  true, PauseOnUnknown: true,
+			GuardExpression: " spent.tokens.total < 200000 and spend.total.usd < 8.5 ",
 		},
 	})
 	if err != nil {
@@ -61,15 +104,14 @@ func TestAutomationStoreCreatesConfigurationBeforeRepositoryReviewState(t *testi
 		t.Fatalf("new automation runtime = %#v", automation)
 	}
 	if automation.MaxFilesPerRun != 24 || automation.MaxContentBytes != 512<<10 ||
-		automation.MaxParallelChildren != 1 || automation.EstimatedOutputTokens != 1_800 ||
-		automation.BudgetPolicy.CheckIntervalSeconds != 60 {
+		automation.MaxParallelChildren != 8 || automation.EstimatedOutputTokens != 1_800 {
 		t.Fatalf("new automation defaults = %#v", automation)
 	}
-	if _, ok := automation.BudgetPolicy.MinRemainingPercentByWindow["weekly"]; !ok ||
-		automation.ModelPrices["review-cheap"].EquivalentModel != "metered-cheap" {
+	if automation.BudgetPolicy.GuardExpression != "spent.tokens.total < 200000 and spend.total.usd < 8.5" ||
+		automation.ModelPrices["review-cheap"].InputPricePer1M != 0.1 {
 		t.Fatalf("normalized budget/prices = %#v %#v", automation.BudgetPolicy, automation.ModelPrices)
 	}
-	if !automation.AutoContinue || !automation.BudgetPolicy.AutoResume {
+	if !automation.AutoContinue {
 		t.Fatalf("continuation controls were not persisted independently: %#v", automation)
 	}
 	state, found, err := store.Get("owner/repo")
@@ -246,18 +288,18 @@ func TestAutomationStorePersistsRuntimeProgressBudgetsAndModelComparison(t *test
 		func(value *RepositoryReviewAutomation) error {
 			value.Status = RepositoryReviewAutomationPaused
 			value.ActiveRunID = ""
-			value.PauseReason = RepositoryReviewPauseAccountLimit
-			value.PauseDetail = " weekly capacity below threshold "
-			value.NextCheckAt = pausedAt.Add(time.Minute)
+			value.PauseReason = RepositoryReviewPauseGuardExpression
+			value.PauseDetail = " task admission guard is false "
 			return nil
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paused.Status != RepositoryReviewAutomationPaused || paused.PauseReason != RepositoryReviewPauseAccountLimit ||
-		paused.PauseDetail != "weekly capacity below threshold" || paused.ActiveRunID != "" ||
-		!paused.NextCheckAt.Equal(pausedAt.Add(time.Minute)) {
+	if paused.Status != RepositoryReviewAutomationPaused ||
+		paused.PauseReason != RepositoryReviewPauseGuardExpression ||
+		paused.PauseDetail != "task admission guard is false" ||
+		paused.ActiveRunID != "" {
 		t.Fatalf("paused automation = %#v", paused)
 	}
 }
@@ -373,29 +415,15 @@ func TestAutomationStoreRejectsInvalidPolicyRuntimeAndPricing(t *testing.T) {
 			name:   "estimated output",
 			mutate: func(value *RepositoryReviewAutomation) { value.EstimatedOutputTokens = 65_537 },
 		},
-		{
-			name:   "token budget",
-			mutate: func(value *RepositoryReviewAutomation) { value.BudgetPolicy.MaxTotalTokens = -1 },
-		},
-		{
-			name:   "cost budget",
-			mutate: func(value *RepositoryReviewAutomation) { value.BudgetPolicy.MaxEstimatedCostUSD = math.Inf(1) },
-		},
-		{
-			name:   "default percent",
-			mutate: func(value *RepositoryReviewAutomation) { value.BudgetPolicy.MinRemainingPercent = 100.1 },
-		},
-		{name: "window percent", mutate: func(value *RepositoryReviewAutomation) {
-			value.BudgetPolicy.MinRemainingPercentByWindow = map[string]float64{"weekly": -1}
+		{name: "guard unknown field", mutate: func(value *RepositoryReviewAutomation) {
+			value.BudgetPolicy.GuardExpression = "account.secret > 0"
 		}},
-		{
-			name:   "check interval low",
-			mutate: func(value *RepositoryReviewAutomation) { value.BudgetPolicy.CheckIntervalSeconds = 14 },
-		},
-		{
-			name:   "check interval high",
-			mutate: func(value *RepositoryReviewAutomation) { value.BudgetPolicy.CheckIntervalSeconds = 3601 },
-		},
+		{name: "guard wildcard", mutate: func(value *RepositoryReviewAutomation) {
+			value.BudgetPolicy.GuardExpression = "spent.tokens.* > 0"
+		}},
+		{name: "guard malformed", mutate: func(value *RepositoryReviewAutomation) {
+			value.BudgetPolicy.GuardExpression = "spent.tokens.total <"
+		}},
 		{name: "invalid status", mutate: func(value *RepositoryReviewAutomation) { value.Status = "waiting" }},
 		{
 			name:   "paused without reason",
@@ -540,8 +568,7 @@ func validAutomationForTest(id, name string) RepositoryReviewAutomation {
 		CompareModels: true, MaxFilesPerRun: 12, MaxContentBytes: 64 << 10,
 		MaxParallelChildren: 1, EstimatedOutputTokens: 1_500,
 		BudgetPolicy: RepositoryReviewBudgetPolicy{
-			AccountIDs: []string{"account-a"}, MinRemainingPercent: 10,
-			CheckIntervalSeconds: 60,
+			GuardExpression: "account.limits.any.remaining_percent >= 10",
 		},
 		ModelPrices: map[string]RepositoryReviewModelPrice{
 			"review-a": {InputPricePer1M: 1, OutputPricePer1M: 2},

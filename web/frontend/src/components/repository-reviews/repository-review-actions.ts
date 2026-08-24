@@ -53,7 +53,6 @@ export function discussionPrompt(
       `  Message: ${boundedDiscussionText(finding.message)}`,
       `  Evidence: ${boundedDiscussionText(finding.evidence)}`,
       `  Impact: ${boundedDiscussionText(finding.impact)}`,
-      `  Recommendation: ${boundedDiscussionText(finding.recommendation)}`,
       `  Validation: ${finding.validation.status} — ${boundedDiscussionText(finding.validation.summary)}`,
       `  Validation checks: ${(finding.validation.checks ?? []).slice(0, discussionChecks).map(boundedDiscussionCheck).join("; ") || "none"}`,
     )
@@ -65,7 +64,6 @@ export function discussionPrompt(
         `    Severity: ${observation.severity}`,
         `    Evidence: ${boundedDiscussionText(observation.evidence)}`,
         `    Impact: ${boundedDiscussionText(observation.impact)}`,
-        `    Recommendation: ${boundedDiscussionText(observation.recommendation)}`,
         `    Validation: ${boundedDiscussionText(observation.validation.summary)}`,
       )
     }

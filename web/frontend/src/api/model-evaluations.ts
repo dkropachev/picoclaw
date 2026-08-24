@@ -32,6 +32,14 @@ export interface EvaluationLanguageProgress {
   limited: boolean
 }
 
+export interface EvaluationActiveChildProgress {
+  index: number
+  label?: string
+  model_alias?: string
+  scope_count: number
+  started_at: string
+}
+
 export interface EvaluationProgress {
   stage: string
   languages: Record<string, EvaluationLanguageProgress>
@@ -40,6 +48,12 @@ export interface EvaluationProgress {
   completed_files: number
   total_tasks: number
   completed_tasks: number
+  current_batch?: number
+  total_batches?: number
+  completed_calls?: number
+  total_calls?: number
+  failed_calls?: number
+  active_children?: EvaluationActiveChildProgress[]
   current_model?: string
   current_path?: string
   message?: string
@@ -98,6 +112,16 @@ export interface EvaluationCorpusPage {
   language_counts: Record<string, number>
 }
 
+export interface EvaluationModelClaim {
+  id: string
+  path: string
+  title: string
+  evidence: string
+  impact: string
+  disposition: "supported" | "unsupported"
+  judge_rationale: string
+}
+
 export interface EvaluationComparison {
   model_alias: string
   concrete_models: Record<string, number>
@@ -112,12 +136,16 @@ export interface EvaluationComparison {
   files_analyzed: number
   bytes_analyzed: number
   confirmed_findings: number
+  unsupported_claims?: number
   unsupported_files: number
   usage: EvaluationUsage
   verdict?: string
   summary?: string
   strengths?: string[]
   limitations?: string[]
+  claims?: EvaluationModelClaim[]
+  claims_omitted?: number
+  claim_ledger_available?: boolean
 }
 
 export interface RepositoryModelEvaluation {
@@ -172,9 +200,15 @@ export interface EvaluationModelOption {
   default?: boolean
 }
 
+export interface EvaluationRepositoryOption {
+  id: string
+  repository: string
+  label: string
+}
+
 export interface EvaluationOptions {
   models: EvaluationModelOption[]
-  repositories: Array<{ id: string; repository: string; label: string }>
+  repositories: EvaluationRepositoryOption[]
   code_types: EvaluationCodeType[]
   max_files_per_language: number
   default_files_per_language: number
@@ -271,6 +305,16 @@ export async function createModelEvaluation(
   return normalizeEvaluation(response.evaluation)
 }
 
+export async function runModelEvaluation(
+  input: EvaluationConfigInput,
+): Promise<RepositoryModelEvaluation> {
+  const response = await request<{ evaluation: RepositoryModelEvaluation }>(
+    `${BASE}/run`,
+    json("POST", input),
+  )
+  return normalizeEvaluation(response.evaluation)
+}
+
 export async function updateModelEvaluation(
   id: string,
   input: EvaluationConfigInput,
@@ -294,7 +338,7 @@ export async function deleteModelEvaluation(
 
 export async function runModelEvaluationAction(
   id: string,
-  action: "preflight" | "start" | "cancel" | "resume" | "restart",
+  action: "preflight" | "start" | "run" | "cancel" | "resume" | "restart",
   expectedVersion: number,
 ): Promise<RepositoryModelEvaluation> {
   const response = await request<{ evaluation: RepositoryModelEvaluation }>(
@@ -389,6 +433,12 @@ function normalizeProgress(
     completed_files: value?.completed_files ?? 0,
     total_tasks: value?.total_tasks ?? 0,
     completed_tasks: value?.completed_tasks ?? 0,
+    current_batch: value?.current_batch ?? 0,
+    total_batches: value?.total_batches ?? 0,
+    completed_calls: value?.completed_calls ?? 0,
+    total_calls: value?.total_calls ?? 0,
+    failed_calls: value?.failed_calls ?? 0,
+    active_children: value?.active_children ?? [],
     percent: Math.min(100, Math.max(0, value?.percent ?? 0)),
     ...(value?.current_model ? { current_model: value.current_model } : {}),
     ...(value?.current_path ? { current_path: value.current_path } : {}),
@@ -436,6 +486,9 @@ function normalizeEvaluation(
       usage: normalizeUsage(comparison.usage),
       strengths: comparison.strengths ?? [],
       limitations: comparison.limitations ?? [],
+      claims: comparison.claims ?? [],
+      claims_omitted: comparison.claims_omitted ?? 0,
+      claim_ledger_available: comparison.claim_ledger_available ?? false,
     })),
     warnings: value.warnings ?? [],
     run_ids: value.run_ids ?? [],

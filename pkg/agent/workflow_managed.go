@@ -162,7 +162,9 @@ func (r *workflowAgentRunner) runManagedSplit(
 	metadata := workflowManagedMetadata(req, agent)
 	metadata["strategy"] = strategy
 	metadata["split"] = workflowManagedSplitMetadata(req, agent, options, strategy, plans)
-	if len(plans) <= 1 {
+	managedSingle := len(plans) == 1 &&
+		(req.ManagedChildObserver != nil || len(options.reviewerModels) > 0)
+	if len(plans) == 0 || len(plans) == 1 && !managedSingle {
 		fallbackReq := req
 		fallbackReq.Managed = "off"
 		text, structured, repairs, _, err := workflowRunStructuredAgentWithOptions(
@@ -171,6 +173,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 			runOnce,
 			workflowAgentRunOptions{
 				NoTools:       workflowAgentToolsDisabled(req.Tools),
+				AccountRef:    req.AccountRef,
 				UsageObserver: req.UsageObserver,
 			},
 		)
@@ -218,6 +221,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 					runOnce,
 					workflowAgentRunOptions{
 						NoTools:       workflowAgentToolsDisabled(req.Tools),
+						AccountRef:    req.AccountRef,
 						UsageObserver: req.UsageObserver,
 					},
 				)
@@ -261,6 +265,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 	childOutputs := make([]map[string]any, 0, len(results))
 	totalRepairs := 0
 	var firstErr error
+	var activityErr error
 	for _, result := range results {
 		totalRepairs += result.repairs
 		childOutputs = append(childOutputs, workflowManagedChildOutput(result))
@@ -270,9 +275,12 @@ func (r *workflowAgentRunner) runManagedSplit(
 		if result.err != nil && firstErr == nil {
 			firstErr = result.err
 		}
+		if errors.Is(result.err, workflows.ErrManagedChildActivityNotRecorded) && activityErr == nil {
+			activityErr = result.err
+		}
 	}
 	metadata["optimization"] = workflowManagedOptimizationSummary(req, agent, cfg, options, results)
-	if firstErr != nil && (!options.continueOnChildError || len(partials) == 0) {
+	if activityErr != nil || firstErr != nil && (!options.continueOnChildError || len(partials) == 0) {
 		text := ""
 		for _, result := range results {
 			if result.text != "" {
@@ -292,6 +300,9 @@ func (r *workflowAgentRunner) runManagedSplit(
 		)
 		outputs["managed"] = metadata
 		outputs["managed_children"] = childOutputs
+		if activityErr != nil {
+			return outputs, activityErr
+		}
 		return outputs, firstErr
 	}
 	if firstErr != nil {
@@ -382,7 +393,9 @@ func (r *workflowAgentRunner) runManagedSplitCalibration(
 			baselineMessage,
 			req.Output,
 			runOnce,
-			workflowAgentRunOptions{NoTools: true, UsageObserver: req.UsageObserver},
+			workflowAgentRunOptions{
+				NoTools: true, AccountRef: req.AccountRef, UsageObserver: req.UsageObserver,
+			},
 		)
 		repairs += baselineRepairs
 		if baselineErr != nil {
@@ -1451,6 +1464,19 @@ func workflowRunManagedChildren(
 	if maxParallel > len(plans) {
 		maxParallel = len(plans)
 	}
+	var reviewerSlots map[string]chan struct{}
+	if options.maxParallelPerReviewer > 0 {
+		reviewerSlots = make(map[string]chan struct{}, len(plans))
+		for _, plan := range plans {
+			key := strings.TrimSpace(plan.modelName)
+			if key == "" {
+				key = "\x00default-reviewer"
+			}
+			if reviewerSlots[key] == nil {
+				reviewerSlots[key] = make(chan struct{}, options.maxParallelPerReviewer)
+			}
+		}
+	}
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	for worker := 0; worker < maxParallel; worker++ {
@@ -1460,9 +1486,62 @@ func workflowRunManagedChildren(
 			for i := range jobs {
 				plan := plans[i]
 				choice := workflowManagedRunChoice(req, agent, cfg, options, strategy, plan)
+				modelAlias := strings.TrimSpace(plan.modelName)
+				if modelAlias == "" {
+					modelAlias = strings.TrimSpace(choice.modelName)
+				}
+				reviewerKey := strings.TrimSpace(plan.modelName)
+				if reviewerKey == "" {
+					reviewerKey = "\x00default-reviewer"
+				}
+				reviewerSlot := reviewerSlots[reviewerKey]
+				if reviewerSlot != nil {
+					reviewerSlot <- struct{}{}
+				}
+				releaseReviewer := func() {
+					if reviewerSlot != nil {
+						<-reviewerSlot
+						reviewerSlot = nil
+					}
+				}
+				activity := workflows.ManagedChildActivity{
+					Index: plan.index, Total: len(plans), Label: plan.label,
+					ModelAlias: modelAlias, ScopeCount: len(plan.scope),
+					EstimatedPromptTokens: intFromAny(choice.costMeta["input_tokens"]),
+					EstimatedOutputTokens: intFromAny(choice.costMeta["estimated_output_tokens"]),
+					EstimatedCostUSD:      floatFromAny(choice.costMeta["selected_usd"]),
+					PriceKnown:            boolFromAny(choice.costMeta["selected_price_known"]),
+				}
+				if req.ManagedChildObserver != nil {
+					activity.Phase = workflows.ManagedChildStarted
+					if observeErr := req.ManagedChildObserver(activity); observeErr != nil {
+						observeErr = errors.Join(workflows.ErrManagedChildActivityNotRecorded, observeErr)
+						results[i] = workflowManagedChildResult{
+							plan: plan, choice: choice,
+							structured: workflows.StructuredOutputResult{
+								Valid: false, Error: observeErr.Error(),
+							},
+							err: observeErr,
+						}
+						releaseReviewer()
+						continue
+					}
+				}
+				completeActivity := func(success bool) error {
+					if req.ManagedChildObserver == nil {
+						return nil
+					}
+					activity.Phase = workflows.ManagedChildCompleted
+					activity.Success = success
+					if observeErr := req.ManagedChildObserver(activity); observeErr != nil {
+						return errors.Join(workflows.ErrManagedChildActivityNotRecorded, observeErr)
+					}
+					return nil
+				}
 				if req.CallAdmission != nil {
 					if admissionErr := req.CallAdmission(); admissionErr != nil {
 						admissionErr = errors.Join(workflows.ErrAgentCallNotAdmitted, admissionErr)
+						admissionErr = errors.Join(admissionErr, completeActivity(false))
 						results[i] = workflowManagedChildResult{
 							plan: plan, choice: choice,
 							structured: workflows.StructuredOutputResult{
@@ -1470,6 +1549,7 @@ func workflowRunManagedChildren(
 							},
 							err: admissionErr,
 						}
+						releaseReviewer()
 						continue
 					}
 				}
@@ -1505,6 +1585,7 @@ func workflowRunManagedChildren(
 					workflowAgentRunOptions{
 						ModelName:       modelOverride,
 						ModelFallbacks:  modelFallbacks,
+						AccountRef:      req.AccountRef,
 						ReasoningEffort: choice.reasoningEffort,
 						NoTools:         true,
 						ActualModelName: &actualModelName,
@@ -1521,6 +1602,9 @@ func workflowRunManagedChildren(
 					choice.modelMeta["fallback_used"] = true
 					choice.modelName = actualModelName
 				}
+				if observeErr := completeActivity(err == nil && structured.Valid); observeErr != nil {
+					err = errors.Join(err, observeErr)
+				}
 				results[i] = workflowManagedChildResult{
 					plan:       plan,
 					choice:     choice,
@@ -1531,6 +1615,7 @@ func workflowRunManagedChildren(
 					usage:      usage,
 					err:        err,
 				}
+				releaseReviewer()
 			}
 		}()
 	}
@@ -1794,19 +1879,20 @@ func workflowManagedSplitMetadata(
 		)
 	}
 	return map[string]any{
-		"status":                   "split",
-		"strategy":                 strategy,
-		"child_count":              len(plans),
-		"max_items_per_chunk":      options.maxItemsPerChunk,
-		"max_tasks_per_chunk":      options.maxTasksPerChunk,
-		"max_parallel_children":    options.maxParallelChildren,
-		"reviewer_models":          append([]string(nil), options.reviewerModels...),
-		"include_default_reviewer": options.includeDefaultReviewer,
-		"adaptive_chunking":        options.adaptiveChunking,
-		"scope_count":              len(workflowScopeItems(req.Scope)),
-		"task_count":               len(workflowAssignedOrAgentTasks(req, agent)),
-		"child_scope_counts":       scopeCounts,
-		"child_task_counts":        taskCounts,
+		"status":                    "split",
+		"strategy":                  strategy,
+		"child_count":               len(plans),
+		"max_items_per_chunk":       options.maxItemsPerChunk,
+		"max_tasks_per_chunk":       options.maxTasksPerChunk,
+		"max_parallel_children":     options.maxParallelChildren,
+		"max_parallel_per_reviewer": options.maxParallelPerReviewer,
+		"reviewer_models":           append([]string(nil), options.reviewerModels...),
+		"include_default_reviewer":  options.includeDefaultReviewer,
+		"adaptive_chunking":         options.adaptiveChunking,
+		"scope_count":               len(workflowScopeItems(req.Scope)),
+		"task_count":                len(workflowAssignedOrAgentTasks(req, agent)),
+		"child_scope_counts":        scopeCounts,
+		"child_task_counts":         taskCounts,
 		"token_efficiency": workflowManagedTokenEfficiency(
 			workflows.EstimateAgentPayloadTokens(workflowAgentMessage(req)),
 			childPromptTokens,
@@ -2242,9 +2328,9 @@ func workflowManagedRunChoice(
 	if agent != nil {
 		modelName = strings.TrimSpace(agent.Model)
 	}
-	accountRef := ""
-	if agent != nil {
-		accountRef = agent.AccountRef
+	accountRef := strings.TrimSpace(req.AccountRef)
+	if accountRef == "" && agent != nil {
+		accountRef = strings.TrimSpace(agent.AccountRef)
 	}
 	current := workflowModelCandidateProfile(cfg, accountRef, modelName)
 	candidateProfiles := workflowManagedCandidateProfiles(
@@ -2276,7 +2362,9 @@ func workflowManagedRunChoice(
 			if candidate.name == "" || !candidate.priceKnown {
 				continue
 			}
-			if !workflowManagedModelCandidateAvailable(cfg, agent, modelName, candidate.name) {
+			if !workflowManagedModelCandidateAvailable(
+				cfg, agent, accountRef, modelName, candidate.name,
+			) {
 				availabilityLimited = true
 				continue
 			}
@@ -2339,6 +2427,7 @@ func workflowManagedRunChoice(
 func workflowManagedModelCandidateAvailable(
 	cfg *config.Config,
 	agent *AgentInstance,
+	accountRef string,
 	defaultModelName string,
 	candidateName string,
 ) bool {
@@ -2346,18 +2435,23 @@ func workflowManagedModelCandidateAvailable(
 	if candidateName == "" {
 		return false
 	}
-	if candidateName == strings.TrimSpace(defaultModelName) {
-		return true
-	}
 	if cfg == nil || agent == nil {
 		return false
+	}
+	accountRef = strings.TrimSpace(accountRef)
+	if accountRef == "" {
+		accountRef = strings.TrimSpace(agent.AccountRef)
+	}
+	if candidateName == strings.TrimSpace(defaultModelName) &&
+		accountRef == strings.TrimSpace(agent.AccountRef) {
+		return true
 	}
 	if err := validateModelAliasReferences(cfg, candidateName, nil); err != nil {
 		return false
 	}
 	router := buildAccountRouterWithAliases(
 		cfg,
-		agent.AccountRef,
+		accountRef,
 		candidateName,
 		nil,
 		agent.Workspace,
@@ -2371,7 +2465,7 @@ func workflowManagedModelCandidateAvailable(
 	}
 	candidates, err := candidatesForAccountAliases(
 		cfg,
-		agent.AccountRef,
+		accountRef,
 		candidateName,
 		nil,
 		agent.Workspace,
@@ -2576,9 +2670,9 @@ func workflowManagedOptimizationSummary(
 	if options.effortOptimization {
 		effortReason = "per-child effort selected from estimated child complexity"
 	}
-	accountRef := ""
-	if agent != nil {
-		accountRef = agent.AccountRef
+	accountRef := strings.TrimSpace(req.AccountRef)
+	if accountRef == "" && agent != nil {
+		accountRef = strings.TrimSpace(agent.AccountRef)
 	}
 	return map[string]any{
 		"model": map[string]any{
@@ -2675,7 +2769,11 @@ func boolFromAny(value any) bool {
 	return false
 }
 
-func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstance, raw any) error {
+func (r *workflowAgentRunner) ensureWorkflowManagedProviders(
+	agent *AgentInstance,
+	accountRef string,
+	raw any,
+) error {
 	if r == nil || r.loop == nil || r.loop.cfg == nil || agent == nil {
 		return nil
 	}
@@ -2689,9 +2787,14 @@ func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstanc
 	}
 	var failures []string
 	seen := make(map[string]struct{})
+	effectiveAccountRef := strings.TrimSpace(accountRef)
+	if effectiveAccountRef == "" {
+		effectiveAccountRef = strings.TrimSpace(agent.AccountRef)
+	}
 	for _, candidate := range candidates {
 		name := strings.TrimSpace(candidate.name)
-		if name == "" || name == strings.TrimSpace(agent.Model) {
+		if name == "" || name == strings.TrimSpace(agent.Model) &&
+			effectiveAccountRef == strings.TrimSpace(agent.AccountRef) {
 			continue
 		}
 		if _, duplicate := seen[name]; duplicate {
@@ -2701,6 +2804,7 @@ func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstanc
 		if !workflowManagedModelCandidateAvailable(
 			r.loop.cfg,
 			agent,
+			accountRef,
 			agent.Model,
 			name,
 		) {

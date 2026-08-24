@@ -28,7 +28,7 @@ import (
 func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T) {
 	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
-	created := createRepositoryModelEvaluation(t, mux, "/absolute/checkout/secret")
+	created := createRepositoryModelEvaluation(t, mux, initAPISourceRepo(t))
 	if created.Repository != "" || created.Status != repoeval.StatusDraft {
 		t.Fatalf("created projection = %#v", created)
 	}
@@ -47,7 +47,7 @@ func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T)
 		"/api/model-evaluations/"+created.ID,
 		map[string]any{
 			"expected_version": created.Version,
-			"repository":       "https://github.com/acme/core.git",
+			"repository":       "acme/core",
 			"ref":              "release",
 			"focus": map[string]any{
 				"code_types":      []string{"code", "test"},
@@ -114,6 +114,78 @@ func TestRepositoryModelEvaluationCreateDefaultsBlankRefToHEAD(t *testing.T) {
 	if detail.Evaluation.Ref != "HEAD" {
 		t.Fatalf("default ref=%q, want HEAD", detail.Evaluation.Ref)
 	}
+	if detail.Evaluation.Repository != "https://github.com/owner/repo.git" {
+		t.Fatalf("normalized repository=%q", detail.Evaluation.Repository)
+	}
+	missingLocal := repositoryModelEvaluationCreateBody(filepath.Join(t.TempDir(), "missing"))
+	missing := repositoryModelEvaluationMutation(t, mux, http.MethodPost, "/api/model-evaluations", missingLocal)
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing local repository status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	nonGitLocal := repositoryModelEvaluationCreateBody(t.TempDir())
+	nonGit := repositoryModelEvaluationMutation(t, mux, http.MethodPost, "/api/model-evaluations", nonGitLocal)
+	if nonGit.Code != http.StatusBadRequest {
+		t.Fatalf("non-Git local repository status=%d body=%s", nonGit.Code, nonGit.Body.String())
+	}
+	nonDirectoryPath := filepath.Join(t.TempDir(), "repository.txt")
+	if err := os.WriteFile(nonDirectoryPath, []byte("not a repository"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nonDirectoryLocal := repositoryModelEvaluationCreateBody(nonDirectoryPath)
+	nonDirectory := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations",
+		nonDirectoryLocal,
+	)
+	if nonDirectory.Code != http.StatusBadRequest {
+		t.Fatalf("non-directory local repository status=%d body=%s", nonDirectory.Code, nonDirectory.Body.String())
+	}
+}
+
+func TestRepositoryModelEvaluationGitRootValidation(t *testing.T) {
+	repository := initAPISourceRepo(t)
+	if !repositoryModelEvaluationGitRoot(nil, repository) {
+		t.Fatal("working tree root was rejected")
+	}
+	nested := filepath.Join(repository, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if repositoryModelEvaluationGitRoot(t.Context(), nested) {
+		t.Fatal("working tree subdirectory was accepted")
+	}
+	bareRepository := t.TempDir()
+	runAPIGit(t, bareRepository, "init", "--bare")
+	if !repositoryModelEvaluationGitRoot(t.Context(), bareRepository) {
+		t.Fatal("bare repository root was rejected")
+	}
+	if repositoryModelEvaluationGitRoot(t.Context(), t.TempDir()) {
+		t.Fatal("non-Git directory was accepted")
+	}
+
+	fakeBin := t.TempDir()
+	fakeGit := filepath.Join(fakeBin, "git")
+	if err := os.WriteFile(fakeGit, []byte(`#!/bin/sh
+case "$PROBE_GIT_MODE:$4" in
+  invalid:--is-bare-repository) echo maybe; exit 0 ;;
+  root-error:--is-bare-repository) echo false; exit 0 ;;
+  root-error:--show-toplevel) exit 1 ;;
+  missing-root:--is-bare-repository) echo false; exit 0 ;;
+  missing-root:--show-toplevel) echo /path/that/does/not/exist; exit 0 ;;
+esac
+exit 1
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	for _, mode := range []string{"invalid", "root-error", "missing-root"} {
+		t.Setenv("PROBE_GIT_MODE", mode)
+		if repositoryModelEvaluationGitRoot(t.Context(), repository) {
+			t.Fatalf("fake Git mode %q was accepted", mode)
+		}
+	}
 }
 
 func TestRepositoryModelEvaluationRoutesRejectUnsafeRequestsModelsAndPages(t *testing.T) {
@@ -172,6 +244,35 @@ func TestRepositoryModelEvaluationRoutesRejectUnsafeRequestsModelsAndPages(t *te
 	if projected := projectRepositoryModelEvaluation(projectable); len(projected.RunIDs) != 50 ||
 		projected.RunIDs[0] != "wr_5" {
 		t.Fatalf("projected run IDs=%v", projected.RunIDs)
+	}
+	exactUnsupported := 2
+	legacyComparison := repoeval.Evaluation{
+		Comparisons: []repoeval.ModelComparison{
+			{ModelAlias: "model-a", UnsupportedFiles: 1},
+			{ModelAlias: "model-b", UnsupportedClaims: &exactUnsupported},
+			{ModelAlias: "model-missing"},
+		},
+		Checkpoint: repoeval.Checkpoint{Batches: []repoeval.BatchCheckpoint{{
+			MappingJSON: `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`,
+			JudgeJSON:   `{"evaluations":[{"candidateId":"candidate-001","unsupportedClaims":5}]}`,
+			ClaimLedger: map[string][]repoeval.ModelClaim{"model-a": {{
+				ID: "batch-claim-001", Path: "pkg/core.go", Title: "Invalid boundary",
+				Evidence: "The failure reads /tmp/private-state.", Impact: "The request fails.",
+				Disposition: repoeval.ClaimDispositionSupported, JudgeRationale: "The branch confirms the failure.",
+			}}},
+			ClaimLedgerOmitted: map[string]int{"model-a": 2},
+		}}},
+	}
+	projected := projectRepositoryModelEvaluation(legacyComparison)
+	if len(projected.Checkpoint.Batches) != 0 || projected.Comparisons[0].UnsupportedClaims == nil ||
+		*projected.Comparisons[0].UnsupportedClaims != 5 ||
+		len(projected.Comparisons[0].Claims) != 1 || !projected.Comparisons[0].ClaimLedgerAvailable ||
+		projected.Comparisons[0].ClaimsOmitted != 2 ||
+		!strings.Contains(projected.Comparisons[0].Claims[0].Evidence, "[filesystem path]") ||
+		projected.Comparisons[1].UnsupportedClaims == nil ||
+		*projected.Comparisons[1].UnsupportedClaims != exactUnsupported ||
+		projected.Comparisons[2].UnsupportedClaims != nil {
+		t.Fatalf("legacy claim projection=%#v", projected)
 	}
 }
 
@@ -293,14 +394,24 @@ func TestRepositoryModelEvaluationRoutesFullPatchResumeAndBusyDelete(t *testing.
 		t,
 		mux,
 		http.MethodPost,
-		"/api/model-evaluations/"+created.ID+"/resume",
+		"/api/model-evaluations/"+created.ID+"/run",
 		map[string]any{"expected_version": patchedDetail.Evaluation.Version},
 	)
 	if resumed.Code != http.StatusAccepted {
-		t.Fatalf("resume draft status=%d body=%s", resumed.Code, resumed.Body.String())
+		t.Fatalf("run draft status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
 	<-entered
 	active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
+	busyPatch := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/model-evaluations/"+created.ID,
+		map[string]any{"expected_version": active.Version, "ref": "other"},
+	)
+	if busyPatch.Code != http.StatusConflict {
+		t.Fatalf("busy patch status=%d body=%s", busyPatch.Code, busyPatch.Body.String())
+	}
 	busyResume := repositoryModelEvaluationMutation(
 		t,
 		mux,
@@ -413,8 +524,10 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 		t.Fatalf("accepted preflight=%#v err=%v", accepted, err)
 	}
 	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
+	expectedRubricHash := sha256.Sum256([]byte("repository-model-evaluation-rubric-v2"))
 	if ready.Corpus == nil || len(ready.Corpus.Files) != 2 || ready.Corpus.LanguageCounts["go"] != 1 ||
-		ready.Corpus.LanguageCounts["typescript"] != 1 {
+		ready.Corpus.LanguageCounts["typescript"] != 1 ||
+		ready.Corpus.RubricHash != hex.EncodeToString(expectedRubricHash[:]) {
 		t.Fatalf("ready evaluation=%#v", ready)
 	}
 	detailResponse := httptest.NewRecorder()
@@ -443,14 +556,49 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 		completed.Comparisons[0].Rank != 1 ||
 		completed.Usage.Requests != 3 ||
 		completed.ModelStats["model-a"].FilesCompleted != 2 ||
-		completed.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 {
+		completed.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 ||
+		len(completed.Checkpoint.Batches) != 1 ||
+		len(completed.Checkpoint.Batches[0].ClaimLedger["model-a"]) != 3 {
 		t.Fatalf("completed evaluation=%#v", completed)
+	}
+	completedDetailResponse := httptest.NewRecorder()
+	mux.ServeHTTP(
+		completedDetailResponse,
+		httptest.NewRequest(http.MethodGet, "/api/model-evaluations/"+created.ID, nil),
+	)
+	var completedDetail repositoryModelEvaluationDetail
+	if err := json.Unmarshal(completedDetailResponse.Body.Bytes(), &completedDetail); err != nil ||
+		len(completedDetail.Evaluation.Checkpoint.Batches) != 0 ||
+		!completedDetail.Evaluation.Comparisons[0].ClaimLedgerAvailable ||
+		len(completedDetail.Evaluation.Comparisons[0].Claims) != 3 ||
+		completedDetail.Evaluation.Comparisons[0].Claims[0].Disposition != repoeval.ClaimDispositionSupported {
+		t.Fatalf("projected completed detail=%#v err=%v", completedDetail, err)
 	}
 	if _, err := controller.Resume(t.Context(), completed.ID, completed.Version); !errors.Is(
 		err,
 		repoeval.ErrInvalidTransition,
 	) {
 		t.Fatalf("completed resume error=%v", err)
+	}
+	if _, err := controller.Restart(t.Context(), completed.ID, completed.Version); !errors.Is(
+		err,
+		repoeval.ErrInvalidTransition,
+	) {
+		t.Fatalf("completed restart error=%v", err)
+	}
+	deleteCompleted := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodDelete,
+		"/api/model-evaluations/"+completed.ID,
+		map[string]any{"expected_version": completed.Version},
+	)
+	if deleteCompleted.Code != http.StatusConflict {
+		t.Fatalf(
+			"completed delete status=%d body=%s",
+			deleteCompleted.Code,
+			deleteCompleted.Body.String(),
+		)
 	}
 	corpus := httptest.NewRecorder()
 	mux.ServeHTTP(
@@ -466,6 +614,63 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 	if len(refs) != 3 || refs[0] != workflows.RepositoryModelEvaluationPreflightWorkflowRef ||
 		refs[2] != workflows.RepositoryModelEvaluationAnalysisWorkflowRef {
 		t.Fatalf("workflow refs=%v", refs)
+	}
+}
+
+func TestRepositoryModelEvaluationOneShotRunCompletesWithoutReadyAction(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	var mu sync.Mutex
+	var refs []string
+	controller.runWorkflow = func(
+		_ context.Context,
+		_ string,
+		ref string,
+		_ string,
+		_ map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		mu.Lock()
+		refs = append(refs, ref)
+		mu.Unlock()
+		switch ref {
+		case workflows.RepositoryModelEvaluationPreflightWorkflowRef:
+			return repositoryModelEvaluationPreflightResult(), nil
+		case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+			return repositoryModelEvaluationBatchResult(), nil
+		case workflows.RepositoryModelEvaluationAnalysisWorkflowRef:
+			return repositoryModelEvaluationAnalysisResult(), nil
+		default:
+			return nil, errors.New("unexpected workflow")
+		}
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	response := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		repositoryModelEvaluationCreateBody("owner/one-shot"),
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("run status=%d body=%s", response.Code, response.Body.String())
+	}
+	var accepted repositoryModelEvaluationDetail
+	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil ||
+		!accepted.Evaluation.OneShot || accepted.Evaluation.Status != repoeval.StatusPreflighting {
+		t.Fatalf("accepted=%#v err=%v", accepted.Evaluation, err)
+	}
+	completed := waitRepositoryModelEvaluationStatus(t, handler, accepted.Evaluation.ID, repoeval.StatusCompleted)
+	mu.Lock()
+	defer mu.Unlock()
+	if !completed.OneShot || len(completed.Comparisons) != len(completed.CandidateModels) ||
+		!reflect.DeepEqual(refs, []string{
+			workflows.RepositoryModelEvaluationPreflightWorkflowRef,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			workflows.RepositoryModelEvaluationAnalysisWorkflowRef,
+		}) {
+		t.Fatalf("completed=%#v refs=%v", completed, refs)
 	}
 }
 
@@ -516,19 +721,6 @@ func TestRepositoryModelEvaluationControllerCancellationAndRestart(t *testing.T)
 		t.Fatalf("cancel response=%#v err=%v", canceledDetail, err)
 	}
 	terminal := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCanceled)
-	controller.runWorkflow = func(
-		_ context.Context,
-		_ string,
-		ref string,
-		_ string,
-		_ map[string]any,
-		_ workflows.AgentUsageEventObserver,
-	) (*workflows.RunResult, error) {
-		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
-			return nil, context.Canceled
-		}
-		return repositoryModelEvaluationPreflightResult(), nil
-	}
 	resumed := repositoryModelEvaluationMutation(
 		t,
 		mux,
@@ -536,26 +728,191 @@ func TestRepositoryModelEvaluationControllerCancellationAndRestart(t *testing.T)
 		"/api/model-evaluations/"+created.ID+"/resume",
 		map[string]any{"expected_version": terminal.Version},
 	)
-	if resumed.Code != http.StatusAccepted {
+	if resumed.Code != http.StatusConflict {
 		t.Fatalf("terminal resume status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
-	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
 	restarted := repositoryModelEvaluationMutation(
 		t,
 		mux,
 		http.MethodPost,
 		"/api/model-evaluations/"+created.ID+"/restart",
-		map[string]any{"expected_version": ready.Version},
+		map[string]any{"expected_version": terminal.Version},
 	)
-	if restarted.Code != http.StatusAccepted {
+	if restarted.Code != http.StatusConflict {
 		t.Fatalf("restart status=%d body=%s", restarted.Code, restarted.Body.String())
 	}
-	var restartedDetail repositoryModelEvaluationDetail
-	if err := json.Unmarshal(restarted.Body.Bytes(), &restartedDetail); err != nil {
+}
+
+func TestRepositoryModelEvaluationFailedRestartCreatesFreshProbe(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	entered := make(chan struct{})
+	controller.runWorkflow = func(
+		ctx context.Context,
+		_ string,
+		ref string,
+		_ string,
+		_ map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
+			return nil, errors.New("unexpected restart workflow")
+		}
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	store, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if restartedDetail.Evaluation.ID == created.ID || restartedDetail.Evaluation.Status != repoeval.StatusPreflighting {
-		t.Fatalf("restarted=%#v", restartedDetail.Evaluation)
+	draft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/failed-restart"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflighting, err := store.Update(
+		t.Context(),
+		draft.ID,
+		draft.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusPreflighting
+			candidate.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.Update(
+		t.Context(),
+		preflighting.ID,
+		preflighting.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusFailed
+			candidate.Progress.Stage = repoeval.ProgressFailed
+			candidate.Failure = "repository clone failed"
+			return nil
+		},
+	)
+	if err != nil || failed.Corpus != nil {
+		t.Fatalf("failed preflight=%#v err=%v", failed, err)
+	}
+
+	restart := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+failed.ID+"/restart",
+		map[string]any{"expected_version": failed.Version},
+	)
+	if restart.Code != http.StatusAccepted {
+		t.Fatalf("failed restart status=%d body=%s", restart.Code, restart.Body.String())
+	}
+	var detail repositoryModelEvaluationDetail
+	if decodeErr := json.Unmarshal(restart.Body.Bytes(), &detail); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if detail.Evaluation.ID == failed.ID || detail.Evaluation.Status != repoeval.StatusPreflighting ||
+		detail.Evaluation.Repository != "https://github.com/owner/failed-restart.git" {
+		t.Fatalf("failed restart evaluation=%#v", detail.Evaluation)
+	}
+	<-entered
+	original, found, err := store.Get(t.Context(), failed.ID)
+	if err != nil || !found || original.Status != repoeval.StatusFailed {
+		t.Fatalf("original failed probe=%#v found=%v err=%v", original, found, err)
+	}
+}
+
+func TestRepositoryModelEvaluationFailedPreflightRestartsSameRunToCompletion(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	controller.runWorkflow = func(
+		ctx context.Context,
+		workflowYAML string,
+		ref string,
+		runID string,
+		inputs map[string]any,
+		observe workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		if ref == workflows.RepositoryModelEvaluationPreflightWorkflowRef {
+			return repositoryModelEvaluationPreflightResult(), nil
+		}
+		return successfulRepositoryModelEvaluationWorkflow(
+			ctx,
+			workflowYAML,
+			ref,
+			runID,
+			inputs,
+			observe,
+		)
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	store, _, err := handler.repositoryModelEvaluationStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/failed-retry"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflighting, err := store.Update(
+		t.Context(),
+		draft.ID,
+		draft.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusPreflighting
+			candidate.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.Update(
+		t.Context(),
+		preflighting.ID,
+		preflighting.Version,
+		func(candidate *repoeval.Evaluation) error {
+			candidate.Status = repoeval.StatusFailed
+			candidate.Progress.Stage = repoeval.ProgressFailed
+			candidate.Failure = "selector deadline exceeded"
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restart := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+failed.ID+"/resume",
+		map[string]any{"expected_version": failed.Version},
+	)
+	if restart.Code != http.StatusAccepted {
+		t.Fatalf("same-run restart status=%d body=%s", restart.Code, restart.Body.String())
+	}
+	var accepted repositoryModelEvaluationDetail
+	if decodeErr := json.Unmarshal(restart.Body.Bytes(), &accepted); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if accepted.Evaluation.ID != failed.ID || !accepted.Evaluation.OneShot ||
+		accepted.Evaluation.Status != repoeval.StatusPreflighting {
+		t.Fatalf("same-run restart=%#v", accepted.Evaluation)
+	}
+	completed := waitRepositoryModelEvaluationStatus(t, handler, failed.ID, repoeval.StatusCompleted)
+	if len(completed.Comparisons) != len(completed.CandidateModels) {
+		t.Fatalf("same-run completed=%#v", completed)
 	}
 }
 
@@ -570,6 +927,71 @@ func TestRepositoryModelEvaluationAPIRejectsStrictRequestBoundaries(t *testing.T
 	)
 	if badOptionsQuery.Code != http.StatusBadRequest {
 		t.Fatalf("options query status=%d body=%s", badOptionsQuery.Code, badOptionsQuery.Body.String())
+	}
+	badRunQuery := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run?x=1",
+		repositoryModelEvaluationCreateBody("owner/run-query"),
+	)
+	if badRunQuery.Code != http.StatusBadRequest {
+		t.Fatalf("run query status=%d body=%s", badRunQuery.Code, badRunQuery.Body.String())
+	}
+	malformedRun := httptest.NewRequest(
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		strings.NewReader("{"),
+	)
+	malformedRun.Header.Set("Content-Type", "application/json")
+	malformedRun.Header.Set("Sec-Fetch-Site", "same-origin")
+	malformedRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(malformedRunResponse, malformedRun)
+	if malformedRunResponse.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"malformed run status=%d body=%s",
+			malformedRunResponse.Code,
+			malformedRunResponse.Body.String(),
+		)
+	}
+	unavailableRunBody := repositoryModelEvaluationCreateBody("owner/unavailable-run")
+	unavailableRunBody["candidate_models"] = []string{"model-a", "missing-model"}
+	unavailableRun := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		unavailableRunBody,
+	)
+	if unavailableRun.Code != http.StatusBadRequest {
+		t.Fatalf("unavailable run status=%d body=%s", unavailableRun.Code, unavailableRun.Body.String())
+	}
+	invalidPatchRepository := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/model-evaluations/"+created.ID,
+		map[string]any{
+			"expected_version": created.Version,
+			"repository":       filepath.Join(t.TempDir(), "missing"),
+		},
+	)
+	if invalidPatchRepository.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"invalid patch repository status=%d body=%s",
+			invalidPatchRepository.Code,
+			invalidPatchRepository.Body.String(),
+		)
+	}
+	staleDraftDelete := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodDelete,
+		"/api/model-evaluations/"+created.ID,
+		map[string]any{"expected_version": created.Version + 10},
+	)
+	if staleDraftDelete.Code != http.StatusConflict {
+		t.Fatalf("stale draft delete status=%d body=%s", staleDraftDelete.Code, staleDraftDelete.Body.String())
 	}
 
 	for _, test := range []struct {
@@ -679,6 +1101,7 @@ func TestRepositoryModelEvaluationAPIConfigStoreAndMissingFailures(t *testing.T)
 	}{
 		{name: "list config", method: http.MethodGet, path: "/api/model-evaluations"},
 		{name: "create config", method: http.MethodPost, path: "/api/model-evaluations", body: repositoryModelEvaluationCreateBody("owner/repo")},
+		{name: "run config", method: http.MethodPost, path: "/api/model-evaluations/run", body: repositoryModelEvaluationCreateBody("owner/run")},
 		{name: "get config", method: http.MethodGet, path: "/api/model-evaluations/" + repositoryModelEvaluationMissingID()},
 		{name: "patch config", method: http.MethodPatch, path: "/api/model-evaluations/" + repositoryModelEvaluationMissingID(), body: map[string]any{"expected_version": 1}},
 		{name: "delete config", method: http.MethodDelete, path: "/api/model-evaluations/" + repositoryModelEvaluationMissingID(), body: map[string]any{"expected_version": 1}},
@@ -863,6 +1286,9 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 	remotes := []string{
 		"https://github.com/zeta/repo-z.git",
 		"https://github.com/acme/repo-a.git",
+		"https://github.com/acme/repo-a",
+		"alice@git.example:group/incompatible.git",
+		"file:///private/repository.git",
 		filepath.Join(t.TempDir(), "local-secret.git"),
 	}
 	repositories := make(map[string]any, len(remotes))
@@ -879,10 +1305,14 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 			"id": id, "remote_url": remote, "first_seen_at": now, "last_seen_at": now,
 			"workspace_ids": []string{workspaceID},
 		}
-		workspaces[workspaceID] = map[string]any{
+		workspace := map[string]any{
 			"id": workspaceID, "repo_id": id, "remote_url": remote, "path": workspacePath,
 			"created_at": now, "updated_at": now,
 		}
+		if filepath.IsAbs(remote) {
+			workspace["upstream_url"] = "https://github.com/local/upstream.git"
+		}
+		workspaces[workspaceID] = workspace
 	}
 	inventory, err := json.Marshal(map[string]any{
 		"version": "4", "repositories": repositories, "workspaces": workspaces,
@@ -906,8 +1336,9 @@ func TestRepositoryModelEvaluationOptionsProjectSortedSafeRepositories(t *testin
 	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if len(options.Repositories) != 2 || options.Repositories[0].Label != "repo-a" ||
-		options.Repositories[1].Label != "repo-z" {
+	if len(options.Repositories) != 3 || options.Repositories[0].Label != "repo-a" ||
+		options.Repositories[1].Label != "repo-z" ||
+		options.Repositories[2].Repository != "https://github.com/local/upstream.git" {
 		t.Fatalf("repositories=%#v", options.Repositories)
 	}
 }
@@ -1184,9 +1615,101 @@ func repositoryModelEvaluationBatchResult() *workflows.RunResult {
 			{"candidateId": "candidate-001", "modelAlias": "model-a"},
 			{"candidateId": "candidate-002", "modelAlias": "model-b"},
 		},
+		"ledger": []map[string]any{
+			{
+				"candidateId": "candidate-001",
+				"claimId":     "claim-001-0001",
+				"path":        "pkg/core.go",
+				"title":       "First boundary failure",
+				"evidence":    "The exact branch accepts the invalid boundary.",
+				"impact":      "The request reaches an invalid state.",
+			},
+			{
+				"candidateId": "candidate-001",
+				"claimId":     "claim-001-0002",
+				"path":        "pkg/core.go",
+				"title":       "Second boundary failure",
+				"evidence":    "The error path returns success.",
+				"impact":      "Callers observe a false success.",
+			},
+			{
+				"candidateId": "candidate-001",
+				"claimId":     "claim-001-0003",
+				"path":        "web/app.ts",
+				"title":       "Stale state is retained",
+				"evidence":    "The failure branch leaves the prior value in state.",
+				"impact":      "The next request reads stale data.",
+			},
+			{
+				"candidateId": "candidate-002",
+				"claimId":     "claim-002-0001",
+				"path":        "pkg/core.go",
+				"title":       "Unchecked empty value",
+				"evidence":    "The value is dereferenced before the empty check.",
+				"impact":      "Empty input terminates the operation.",
+			},
+			{
+				"candidateId": "candidate-002",
+				"claimId":     "claim-002-0002",
+				"path":        "web/app.ts",
+				"title":       "Lost failure state",
+				"evidence":    "The catch branch overwrites the failure marker.",
+				"impact":      "The UI reports completion after failure.",
+			},
+			{
+				"candidateId": "candidate-002",
+				"claimId":     "claim-002-0003",
+				"path":        "web/app.ts",
+				"title":       "Unsupported timing claim",
+				"evidence":    "The cited branch does not contain a timing operation.",
+				"impact":      "The claimed delay is not established by this source.",
+			},
+		},
 		"judge": map[string]any{"evaluations": []map[string]any{
-			{"candidateId": "candidate-001", "confirmedClaims": 3, "unsupportedClaims": 0},
-			{"candidateId": "candidate-002", "confirmedClaims": 2, "unsupportedClaims": 1},
+			{
+				"candidateId":       "candidate-001",
+				"confirmedClaims":   3,
+				"unsupportedClaims": 0,
+				"claimAssessments": []map[string]any{
+					{
+						"claimId":     "claim-001-0001",
+						"disposition": "supported",
+						"rationale":   "The cited branch and consequence are present in the assigned source.",
+					},
+					{
+						"claimId":     "claim-001-0002",
+						"disposition": "supported",
+						"rationale":   "The return path establishes the stated false-success behavior.",
+					},
+					{
+						"claimId":     "claim-001-0003",
+						"disposition": "supported",
+						"rationale":   "The state transition leaves the prior value observable.",
+					},
+				},
+			},
+			{
+				"candidateId":       "candidate-002",
+				"confirmedClaims":   2,
+				"unsupportedClaims": 1,
+				"claimAssessments": []map[string]any{
+					{
+						"claimId":     "claim-002-0001",
+						"disposition": "supported",
+						"rationale":   "The dereference precedes the guard in the supplied source.",
+					},
+					{
+						"claimId":     "claim-002-0002",
+						"disposition": "supported",
+						"rationale":   "The catch branch clears the only failure marker.",
+					},
+					{
+						"claimId":     "claim-002-0003",
+						"disposition": "unsupported",
+						"rationale":   "The cited source contains no operation that establishes the claimed delay.",
+					},
+				},
+			},
 		}},
 	}}
 }

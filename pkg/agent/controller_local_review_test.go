@@ -30,8 +30,7 @@ const controllerLocalReviewValidResponse = `{
     "message": "The map write is outside the mutex.",
     "evidence": "Update mutates jobs after Unlock.",
     "impact": "Concurrent calls can panic.",
-    "recommendation": "Move the write under the existing lock.",
-    "validation": "Run the targeted race test."
+    "validation": "Traced the concurrent write interleaving."
   }]
 }`
 
@@ -176,15 +175,14 @@ func TestControllerLocalReviewRunnerUsesFreshStrictIsolatedRequest(t *testing.T)
 		Outcome: ControllerLocalReviewChangesRequired,
 		Summary: "One race remains.",
 		Findings: []ControllerLocalReviewFinding{{
-			Severity:       ControllerLocalReviewSeverityHigh,
-			Title:          "Unprotected write",
-			File:           "pkg/queue.go",
-			Line:           &wantLine,
-			Message:        "The map write is outside the mutex.",
-			Evidence:       "Update mutates jobs after Unlock.",
-			Impact:         "Concurrent calls can panic.",
-			Recommendation: "Move the write under the existing lock.",
-			Validation:     "Run the targeted race test.",
+			Severity:   ControllerLocalReviewSeverityHigh,
+			Title:      "Unprotected write",
+			File:       "pkg/queue.go",
+			Line:       &wantLine,
+			Message:    "The map write is outside the mutex.",
+			Evidence:   "Update mutates jobs after Unlock.",
+			Impact:     "Concurrent calls can panic.",
+			Validation: "Traced the concurrent write interleaving.",
 		}},
 	}
 	if !reflect.DeepEqual(result, want) {

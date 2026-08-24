@@ -151,7 +151,7 @@ jobs:
 
 func TestCLIWorkflowRepositoryReviewProfileResolverRequiresConfiguredRuntime(t *testing.T) {
 	var nilRunner *cliWorkflowRuntimeRunner
-	if _, err := nilRunner.ResolveRepositoryReviewProfile(context.Background(), "main", nil); err == nil ||
+	if _, err := nilRunner.ResolveRepositoryReviewProfile(context.Background(), "main", "", nil); err == nil ||
 		!strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("nil profile resolver error = %v", err)
 	}
@@ -159,6 +159,7 @@ func TestCLIWorkflowRepositoryReviewProfileResolverRequiresConfiguredRuntime(t *
 	if _, err := runner.ResolveRepositoryReviewProfile(
 		context.Background(),
 		"main",
+		"",
 		[]string{"review-a"},
 	); err == nil ||
 		!strings.Contains(err.Error(), "config not loaded") {

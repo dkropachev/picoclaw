@@ -1,19 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { RepositoryReviewsPage } from "@/components/repository-reviews/repository-reviews-page"
+import { RepositoryReviewRunsPage } from "@/components/repository-reviews/repository-review-runs-page"
 
 function RepositoryReviewsRoutePage() {
-  const navigate = Route.useNavigate()
-  return (
-    <RepositoryReviewsPage
-      onOpenThread={(threadID) =>
-        void navigate({
-          to: "/threads/open/$threadId",
-          params: { threadId: threadID },
-        })
-      }
-    />
-  )
+  return <RepositoryReviewRunsPage />
 }
 
 export const Route = createFileRoute("/repository-reviews")({

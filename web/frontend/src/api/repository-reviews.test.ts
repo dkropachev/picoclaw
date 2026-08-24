@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { launcherFetch } from "@/api/http"
 import {
-  type RepositoryReviewAutomationConfig,
+  type RepositoryReviewProfileConfig,
   createRepositoryReviewAutomation,
   createRepositoryReviewIssueDraft,
+  createRepositoryReviewProfile,
   deleteRepositoryReviewAutomation,
+  deleteRepositoryReviewProfile,
   getRepositoryReview,
   getRepositoryReviewAutomationOptions,
+  getRepositoryReviewProfile,
   listRepositoryReviewAutomations,
+  listRepositoryReviewProfiles,
   listRepositoryReviews,
   pauseRepositoryReviewAutomation,
   publishRepositoryReviewIssueDraft,
@@ -18,6 +22,7 @@ import {
   updateRepositoryReviewAutomation,
   updateRepositoryReviewFinding,
   updateRepositoryReviewIssueDraft,
+  updateRepositoryReviewProfile,
 } from "@/api/repository-reviews"
 
 vi.mock("@/api/http", () => ({ launcherFetch: vi.fn() }))
@@ -283,7 +288,6 @@ describe("repository review API", () => {
                 counts: null,
                 warnings: null,
               },
-              next_check_at: "0001-01-01T00:00:00Z",
             },
           ],
         }),
@@ -317,7 +321,9 @@ describe("repository review API", () => {
       automations: [
         {
           id: "auto_1",
+          account_ref: "",
           reviewer_models: [],
+          max_parallel_children: 8,
           scope_policy: {
             code_types: ["hotpath-code", "code"],
             include_folders: [],
@@ -336,6 +342,7 @@ describe("repository review API", () => {
             },
           },
           usage: { total_tokens: 0 },
+          budget: { guard_expression: "" },
           progress: { stage: "waiting" },
           model_stats: [{ model: "fast", total_tokens: 100, latency_ms: 250 }],
           account_limits: [
@@ -351,7 +358,6 @@ describe("repository review API", () => {
               ],
             },
           ],
-          next_check_at: undefined,
         },
       ],
     })
@@ -365,6 +371,156 @@ describe("repository review API", () => {
       2,
       "/api/repository-reviews/automations",
       { signal: undefined },
+    )
+  })
+
+  it("sends strict profile CRUD envelopes and normalizes wrappers", async () => {
+    const config: RepositoryReviewProfileConfig = {
+      name: "Core bugs",
+      account_ref: "",
+      review_focus: "Find correctness bugs.",
+      scope_policy: {
+        code_types: ["hotpath-code", "code"],
+        include_folders: ["pkg"],
+        exclude_folders: ["generated"],
+        free_text: "Prioritize state transitions.",
+      },
+      reviewer_model: "review-model",
+      force: false,
+      auto_continue: true,
+      max_files_per_run: 24,
+      max_content_bytes: 524288,
+      max_parallel_children: 8,
+      budget: {
+        guard_expression:
+          "account.limits.weekly.remaining_percent >= 10 and spend.total.usd < 25",
+      },
+    }
+    const profile = {
+      id: "profile/slash",
+      version: 2,
+      ...config,
+      created_at: "2026-08-23T00:00:00Z",
+      updated_at: "2026-08-23T00:00:00Z",
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          profiles: [{ ...profile, max_parallel_children: undefined }],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ profile }))
+      .mockResolvedValueOnce(jsonResponse({ profile }))
+      .mockResolvedValueOnce(jsonResponse({ profile }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    await expect(listRepositoryReviewProfiles()).resolves.toMatchObject({
+      profiles: [
+        {
+          id: "profile/slash",
+          reviewer_model: "review-model",
+          max_parallel_children: 8,
+        },
+      ],
+    })
+    await expect(
+      getRepositoryReviewProfile("profile/slash"),
+    ).resolves.toMatchObject({
+      id: "profile/slash",
+    })
+    await createRepositoryReviewProfile(config)
+    await updateRepositoryReviewProfile("profile/slash", {
+      ...config,
+      expected_version: 2,
+    })
+    await deleteRepositoryReviewProfile("profile/slash", {
+      expected_version: 3,
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/profiles",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/profiles/profile%2Fslash",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/repository-reviews/profiles",
+      expect.objectContaining({ method: "POST", body: JSON.stringify(config) }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/repository-reviews/profiles/profile%2Fslash",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ ...config, expected_version: 2 }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      5,
+      "/api/repository-reviews/profiles/profile%2Fslash",
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({ expected_version: 3 }),
+      }),
+    )
+  })
+
+  it("sends minimal repository assignment payloads and normalizes branch snapshots", async () => {
+    const automation = {
+      id: "auto_1",
+      version: 1,
+      repository: "owner/repo",
+      ref: "release",
+      profile_id: "profile_1",
+      profile_version: 3,
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse({ automation }))
+      .mockResolvedValueOnce(jsonResponse({ automation }))
+
+    await expect(
+      createRepositoryReviewAutomation({
+        repository: "owner/repo",
+        branch: "",
+        profile_id: "profile_1",
+      }),
+    ).resolves.toMatchObject({ branch: "release", reviewer_models: [] })
+    await updateRepositoryReviewAutomation("auto_1", {
+      repository: "owner/repo",
+      branch: "release",
+      profile_id: "profile_1",
+      expected_version: 1,
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          repository: "owner/repo",
+          branch: "",
+          profile_id: "profile_1",
+        }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto_1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          repository: "owner/repo",
+          branch: "release",
+          profile_id: "profile_1",
+          expected_version: 1,
+        }),
+      }),
     )
   })
 
@@ -388,39 +544,10 @@ describe("repository review API", () => {
           : jsonResponse({ automation }),
       )
     }
-    const config: RepositoryReviewAutomationConfig = {
-      name: "Core review",
+    const config = {
       repository: "owner/repo",
-      ref: "HEAD",
-      target: "all",
-      review_focus: "bugs",
-      scope_policy: {
-        code_types: ["hotpath-code", "code", "test"],
-        include_folders: ["cmd", "internal"],
-        exclude_folders: ["internal/generated"],
-        free_text: "Prioritize request boundaries.",
-      },
-      reviewer_models: ["fast"],
-      compare_models: false,
-      force: false,
-      max_files_per_run: 20,
-      max_content_bytes: 524288,
-      max_parallel_children: 2,
-      estimated_output_tokens: 4096,
-      auto_continue: true,
-      model_prices: {
-        fast: { input_price_per_1m: 0.2, output_price_per_1m: 0.8 },
-      },
-      budget: {
-        max_total_tokens: 100000,
-        max_estimated_cost_usd: 10,
-        account_ids: ["acct"],
-        min_remaining_percent: 10,
-        min_remaining_percent_by_window: { daily: 20, weekly: 15 },
-        auto_resume: true,
-        pause_on_unknown: true,
-        check_interval_seconds: 900,
-      },
+      branch: "main",
+      profile_id: "profile_1",
     }
 
     await createRepositoryReviewAutomation(config)
@@ -439,7 +566,6 @@ describe("repository review API", () => {
     })
     await resumeRepositoryReviewAutomation("auto/slash", {
       expected_version: 8,
-      reset_budget: true,
     })
     await restartRepositoryReviewAutomation("auto/slash", {
       expected_version: 9,
@@ -484,7 +610,7 @@ describe("repository review API", () => {
       6,
       "/api/repository-reviews/automations/auto%2Fslash/resume",
       expect.objectContaining({
-        body: JSON.stringify({ expected_version: 8, reset_budget: true }),
+        body: JSON.stringify({ expected_version: 8 }),
       }),
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(

@@ -18,6 +18,15 @@ const repositoryEvaluationCatalogMaxFileBytes = 512 << 10
 
 const repositoryEvaluationAICandidateLimit = 4096
 
+const (
+	repositoryEvaluationMaxClaimsPerChild     = 32
+	repositoryEvaluationMaxClaimsPerBatch     = 1024
+	repositoryEvaluationMaxClaimsPerCandidate = 512
+	repositoryEvaluationClaimPathBytes        = 4096
+	repositoryEvaluationClaimTitleBytes       = 512
+	repositoryEvaluationClaimTextBytes        = 2048
+)
+
 func nativeRepositoryEvaluationCorpus(
 	ctx context.Context,
 	args map[string]any,
@@ -247,6 +256,8 @@ func nativeRepositoryEvaluationBlind(value any, universeValues ...any) (map[stri
 		}
 	}
 	blinded := make([]map[string]any, 0, len(children))
+	ledger := make([]map[string]any, 0)
+	claimCounts := make(map[string]int, len(aliases))
 	for _, child := range children {
 		var clone map[string]any
 		if err := nativeRepositoryEvaluationDecode(child, &clone); err != nil {
@@ -258,6 +269,14 @@ func nativeRepositoryEvaluationBlind(value any, universeValues ...any) (map[stri
 		if concrete != "" {
 			clone["concreteModelDigest"] = nativeRepositoryEvaluationOpaqueDigest(concrete)
 		}
+		claims, claimErr := nativeRepositoryEvaluationBlindClaims(clone, ids[alias], claimCounts)
+		if claimErr != nil {
+			return nil, claimErr
+		}
+		ledger = append(ledger, claims...)
+		if len(ledger) > repositoryEvaluationMaxClaimsPerBatch {
+			return nil, errors.New("repository evaluation candidate claim ledger exceeds its batch limit")
+		}
 		var usage []map[string]any
 		if usageErr := nativeRepositoryEvaluationDecode(clone["usage"], &usage); usageErr == nil {
 			for _, item := range usage {
@@ -268,7 +287,82 @@ func nativeRepositoryEvaluationBlind(value any, universeValues ...any) (map[stri
 		}
 		blinded = append(blinded, clone)
 	}
-	return map[string]any{"blinded": blinded, "mapping": mapping}, nil
+	return map[string]any{"blinded": blinded, "mapping": mapping, "ledger": ledger}, nil
+}
+
+func nativeRepositoryEvaluationBlindClaims(
+	child map[string]any,
+	candidateID string,
+	claimCounts map[string]int,
+) ([]map[string]any, error) {
+	valid, _ := child["valid"].(bool)
+	if !valid {
+		return []map[string]any{}, nil
+	}
+	structured := nativeMapValue(child["structured"])
+	if structured == nil {
+		return nil, errors.New("valid repository evaluation candidate output has no structured diagnosis")
+	}
+	for key := range structured {
+		if key != "summary" && key != "claims" && key != "residualRisks" {
+			return nil, errors.New("repository evaluation candidate output contains a prohibited diagnosis field")
+		}
+	}
+	claims, err := nativeMapSlice(structured["claims"])
+	if err != nil {
+		return nil, fmt.Errorf("repository evaluation candidate claims: %w", err)
+	}
+	if len(claims) > repositoryEvaluationMaxClaimsPerChild {
+		return nil, errors.New("repository evaluation candidate output exceeds its claim limit")
+	}
+	allowedPaths := make(map[string]struct{})
+	if scope, scopeErr := nativeMapSlice(child["scope"]); scopeErr == nil {
+		for _, item := range scope {
+			if pathValue := strings.TrimSpace(nativeAnyString(item["path"])); pathValue != "" {
+				allowedPaths[pathValue] = struct{}{}
+			}
+		}
+	}
+	ledger := make([]map[string]any, 0, len(claims))
+	for _, claim := range claims {
+		for key := range claim {
+			if key != "path" && key != "title" && key != "evidence" && key != "impact" {
+				return nil, errors.New("repository evaluation candidate claim contains a prohibited field")
+			}
+		}
+		pathValue := strings.TrimSpace(nativeAnyString(claim["path"]))
+		title := strings.TrimSpace(nativeAnyString(claim["title"]))
+		evidence := strings.TrimSpace(nativeAnyString(claim["evidence"]))
+		impact := strings.TrimSpace(nativeAnyString(claim["impact"]))
+		if _, ok := allowedPaths[pathValue]; !ok ||
+			!nativeRepositoryEvaluationBoundedText(pathValue, repositoryEvaluationClaimPathBytes) ||
+			!nativeRepositoryEvaluationBoundedText(title, repositoryEvaluationClaimTitleBytes) ||
+			!nativeRepositoryEvaluationBoundedText(evidence, repositoryEvaluationClaimTextBytes) ||
+			!nativeRepositoryEvaluationBoundedText(impact, repositoryEvaluationClaimTextBytes) {
+			return nil, errors.New("repository evaluation candidate claim is outside its exact diagnosis contract")
+		}
+		claimCounts[candidateID]++
+		if claimCounts[candidateID] > repositoryEvaluationMaxClaimsPerCandidate {
+			return nil, errors.New("repository evaluation candidate exceeds its aggregate claim limit")
+		}
+		claimID := fmt.Sprintf("claim-%s-%04d", strings.TrimPrefix(candidateID, "candidate-"), claimCounts[candidateID])
+		claim["claimId"] = claimID
+		ledger = append(ledger, map[string]any{
+			"candidateId": candidateID,
+			"claimId":     claimID,
+			"path":        pathValue,
+			"title":       title,
+			"evidence":    evidence,
+			"impact":      impact,
+		})
+	}
+	structured["claims"] = claims
+	child["structured"] = structured
+	return ledger, nil
+}
+
+func nativeRepositoryEvaluationBoundedText(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum
 }
 
 func nativeRepositoryEvaluationAliasUniverse(value any) []string {

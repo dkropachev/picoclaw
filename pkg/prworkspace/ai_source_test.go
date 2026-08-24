@@ -121,8 +121,8 @@ func (provenanceReviewAI) RunIsolated(_ context.Context, request IsolatedAIReque
 	return map[string]any{
 		"summary": "Found one issue.",
 		"findings": []any{map[string]any{
-			"severity": "high", "title": "Issue", "message": "Fix it",
-			"impact": "Correctness", "recommendation": "Repair", "validation": "Test",
+			"severity": "high", "title": "Issue", "message": "The candidate violates the stated invariant.",
+			"impact": "Correctness", "validation": "Traced the violating path.",
 			"scope_distance": "S0_exact", "change_size": "XS", "type_compatible": true,
 			"scope_confidence": 1.0, "scope_explanation": "Exact", "charter_clauses": []any{"goal"},
 		}},

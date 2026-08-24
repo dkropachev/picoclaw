@@ -41,7 +41,15 @@ func TestEvaluationCheckpointPersistsAndClonesWithoutAliasing(t *testing.T) {
 						Attempts:              1, Successes: 1,
 					},
 				},
-				JudgeJSON: `{"evaluations":[]}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+				ClaimLedger: map[string][]ModelClaim{"model-a": {{
+					ID: "batch-claim-001", Path: "pkg/service.go", Title: "Boundary state is accepted",
+					Evidence:       "The exact predicate accepts the invalid boundary.",
+					Impact:         "The operation enters an invalid state.",
+					Disposition:    ClaimDispositionSupported,
+					JudgeRationale: "The predicate and state transition are present in source.",
+				}}},
+				ClaimLedgerOmitted: map[string]int{"model-a": 1},
+				JudgeJSON:          `{"evaluations":[]}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
 			}},
 			ConcreteModels: map[string]map[string]int{"model-a": {"gpt-a": 1}},
 		}
@@ -55,9 +63,13 @@ func TestEvaluationCheckpointPersistsAndClonesWithoutAliasing(t *testing.T) {
 	completed := clone.Checkpoint.Batches[0].Candidates["model-a"]
 	completed.CompletedCandidateIDs[0] = "changed"
 	clone.Checkpoint.Batches[0].Candidates["model-a"] = completed
+	clone.Checkpoint.Batches[0].ClaimLedger["model-a"][0].Title = "changed"
+	clone.Checkpoint.Batches[0].ClaimLedgerOmitted["model-a"] = 9
 	clone.Checkpoint.ConcreteModels["model-a"]["gpt-a"] = 9
 	if running.Checkpoint.Batches[0].CandidateIDs[0] == "changed" ||
 		running.Checkpoint.Batches[0].Candidates["model-a"].CompletedCandidateIDs[0] == "changed" ||
+		running.Checkpoint.Batches[0].ClaimLedger["model-a"][0].Title == "changed" ||
+		running.Checkpoint.Batches[0].ClaimLedgerOmitted["model-a"] != 1 ||
 		running.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 {
 		t.Fatalf("checkpoint clone aliased original: %#v", running.Checkpoint)
 	}
@@ -130,6 +142,19 @@ func TestEvaluationCheckpointRejectsUnknownDuplicateAndUnboundedEvidence(t *test
 			},
 		},
 		{ConcreteModels: map[string]map[string]int{"unknown": {"gpt": 1}}},
+		{Batches: []BatchCheckpoint{{
+			ID: "batch", CandidateIDs: []string{evaluation.Corpus.Files[0].CandidateID},
+			ClaimLedger: map[string][]ModelClaim{"unknown": {{
+				ID: "claim", Path: "pkg/service.go", Title: "title", Evidence: "evidence", Impact: "impact",
+				Disposition: ClaimDispositionSupported, JudgeRationale: "rationale",
+			}}},
+			JudgeJSON: `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+		}}},
+		{Batches: []BatchCheckpoint{{
+			ID: "batch", CandidateIDs: []string{evaluation.Corpus.Files[0].CandidateID},
+			ClaimLedgerOmitted: map[string]int{"model-a": 0},
+			JudgeJSON:          `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+		}}},
 	}
 	for index, checkpoint := range tests {
 		candidate := Clone(evaluation)
@@ -255,17 +280,23 @@ func TestStoreAllowsOnlyGuardedCanceledAndFailedResume(t *testing.T) {
 			candidate.Status = StatusRunning
 			return nil
 		},
-	); !errors.Is(
-		invalidResumeErr,
-		ErrInvalidEvaluation,
-	) {
+	); !errors.Is(invalidResumeErr, ErrConflict) {
 		t.Fatalf("canceled state resumed without corpus: %v", invalidResumeErr)
 	}
-	preflighting, err := store.Update(t.Context(), canceled.ID, canceled.Version, func(candidate *Evaluation) error {
-		candidate.Status = StatusPreflighting
-		candidate.Progress.Stage = ProgressResolving
-		return nil
-	})
+	failedDraft, err := store.Create(t.Context(), validCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflighting, err := store.Update(
+		t.Context(),
+		failedDraft.ID,
+		failedDraft.Version,
+		func(candidate *Evaluation) error {
+			candidate.Status = StatusPreflighting
+			candidate.Progress.Stage = ProgressResolving
+			return nil
+		},
+	)
 	if err != nil || preflighting.FinishedAt != nil || preflighting.Status != StatusPreflighting {
 		t.Fatalf("preflight resume=%#v err=%v", preflighting, err)
 	}
@@ -294,6 +325,18 @@ func TestStoreAllowsOnlyGuardedCanceledAndFailedResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, invalidResumeErr := store.Update(
+		t.Context(),
+		failed.ID,
+		failed.Version,
+		func(candidate *Evaluation) error {
+			candidate.Status = StatusRunning
+			candidate.Progress.Stage = ProgressCandidateExecution
+			return nil
+		},
+	); !errors.Is(invalidResumeErr, ErrInvalidEvaluation) {
+		t.Fatalf("failed state resumed without clearing failure: %v", invalidResumeErr)
+	}
 	resumed, err := store.Update(t.Context(), failed.ID, failed.Version, func(candidate *Evaluation) error {
 		candidate.Status = StatusRunning
 		candidate.Failure = ""
@@ -303,7 +346,7 @@ func TestStoreAllowsOnlyGuardedCanceledAndFailedResume(t *testing.T) {
 	if err != nil || resumed.FinishedAt != nil || resumed.Failure != "" {
 		t.Fatalf("execution resume=%#v err=%v", resumed, err)
 	}
-	if !StatusCanceled.CanTransitionTo(StatusPreflighting) || !StatusFailed.CanTransitionTo(StatusRunning) ||
+	if StatusCanceled.CanTransitionTo(StatusPreflighting) || !StatusFailed.CanTransitionTo(StatusRunning) ||
 		StatusCompleted.CanTransitionTo(StatusRunning) {
 		t.Fatal("terminal resume transition matrix is wrong")
 	}

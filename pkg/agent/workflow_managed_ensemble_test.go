@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -121,7 +122,7 @@ func TestWorkflowManagedExplicitScopeGroupsAndTaskContextStayBounded(t *testing.
 
 func TestEnsureWorkflowManagedProvidersDeduplicatesUnavailableReviewers(t *testing.T) {
 	runner := &workflowAgentRunner{loop: &AgentLoop{cfg: config.DefaultConfig()}}
-	err := runner.ensureWorkflowManagedProviders(&AgentInstance{Model: "default"}, map[string]any{
+	err := runner.ensureWorkflowManagedProviders(&AgentInstance{Model: "default"}, "", map[string]any{
 		"reviewer_models": []any{"same"},
 		"optimization": map[string]any{"model": map[string]any{
 			"enabled": true, "candidates": []any{"same"},
@@ -241,6 +242,233 @@ func TestWorkflowManagedUsageIsPerChildAndAggregate(t *testing.T) {
 		"review-b": wantAggregate[1],
 	}) {
 		t.Fatalf("per-child usage = %#v", seen)
+	}
+}
+
+func TestWorkflowManagedParallelismKeepsOneCallPerReviewer(t *testing.T) {
+	req := workflows.AgentRequest{
+		Managed: map[string]any{
+			"strategy":                  "scope_split",
+			"max_items_per_chunk":       1,
+			"max_parallel_children":     4,
+			"max_parallel_per_reviewer": 1,
+			"reviewer_models":           "review-a,review-b",
+			"continue_on_child_error":   false,
+			"calibration":               map[string]any{"enabled": false},
+		},
+		Scope: []any{
+			map[string]any{"path": "a.go"},
+			map[string]any{"path": "b.go"},
+		},
+		Output: workflowManagedTestOutputContract(),
+	}
+	started := make(chan struct{}, 4)
+	releaseFirst := make(chan struct{})
+	go func() {
+		<-started
+		<-started
+		close(releaseFirst)
+	}()
+	var mu sync.Mutex
+	current := make(map[string]int)
+	maximum := make(map[string]int)
+	globalCurrent, globalMaximum := 0, 0
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		req,
+		&AgentInstance{Model: "default"},
+		"main",
+		"ephemeral",
+		"none",
+		"none",
+		"",
+		"scope_split",
+		func(_ string, _ bool, options workflowAgentRunOptions) (string, error) {
+			model := options.ModelName
+			mu.Lock()
+			current[model]++
+			maximum[model] = max(maximum[model], current[model])
+			globalCurrent++
+			globalMaximum = max(globalMaximum, globalCurrent)
+			mu.Unlock()
+			started <- struct{}{}
+			<-releaseFirst
+			mu.Lock()
+			current[model]--
+			globalCurrent--
+			mu.Unlock()
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if err != nil || outputs == nil || maximum["review-a"] != 1 || maximum["review-b"] != 1 ||
+		globalMaximum != 2 {
+		t.Fatalf(
+			"reviewer concurrency maximum=%#v global=%d outputs=%#v err=%v",
+			maximum,
+			globalMaximum,
+			outputs,
+			err,
+		)
+	}
+}
+
+func TestWorkflowManagedParallelismAssignsDefaultReviewerSlot(t *testing.T) {
+	plans := []workflowManagedChildPlan{{
+		index: 1,
+		label: "default reviewer",
+		scope: []any{map[string]any{"path": "a.go"}},
+	}}
+	results := workflowRunManagedChildren(
+		workflows.AgentRequest{Output: workflowManagedTestOutputContract()},
+		&AgentInstance{Model: "review-default"},
+		nil,
+		workflowManagedExecutionOptions{
+			maxParallelChildren:    1,
+			maxParallelPerReviewer: 1,
+		},
+		"scope_split",
+		plans,
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if len(results) != 1 || results[0].err != nil ||
+		results[0].choice.modelName != "review-default" {
+		t.Fatalf("default reviewer result = %#v", results)
+	}
+}
+
+func TestWorkflowManagedChildrenEmitExactLifecycle(t *testing.T) {
+	plans := []workflowManagedChildPlan{
+		{
+			index: 1, label: "scope chunk 1 of 2, reviewer 1 of 1 (review-a)",
+			scope: []any{map[string]any{"path": "a.go"}}, modelName: "review-a",
+		},
+		{
+			index: 2, label: "scope chunk 2 of 2, reviewer 1 of 1 (review-a)",
+			scope: []any{map[string]any{"path": "b.go"}}, modelName: "review-a",
+		},
+	}
+	var events []workflows.ManagedChildActivity
+	request := workflows.AgentRequest{
+		Output: workflowManagedTestOutputContract(),
+		ManagedChildObserver: func(event workflows.ManagedChildActivity) error {
+			events = append(events, event)
+			return nil
+		},
+	}
+	var calls int
+	results := workflowRunManagedChildren(
+		request,
+		&AgentInstance{Model: "default"},
+		nil,
+		workflowManagedExecutionOptions{maxParallelChildren: 1},
+		"scope_split",
+		plans,
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			calls++
+			if calls == 2 {
+				return "", errors.New("candidate failed")
+			}
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if len(results) != 2 || len(events) != 4 {
+		t.Fatalf("managed results/events = %d/%#v", len(results), events)
+	}
+	for index, event := range events {
+		wantIndex := index/2 + 1
+		wantPhase := workflows.ManagedChildStarted
+		if index%2 == 1 {
+			wantPhase = workflows.ManagedChildCompleted
+		}
+		if event.Index != wantIndex || event.Total != 2 || event.Phase != wantPhase ||
+			event.ModelAlias != "review-a" || event.ScopeCount != 1 || event.Label != plans[wantIndex-1].label {
+			t.Fatalf("managed lifecycle event %d = %#v", index, event)
+		}
+	}
+	if !events[1].Success || events[3].Success {
+		t.Fatalf("managed completion success = %#v", events)
+	}
+}
+
+func TestWorkflowManagedChildLifecycleObserverErrorsFenceExecution(t *testing.T) {
+	plan := []workflowManagedChildPlan{{index: 1, label: "child", modelName: "review-a"}}
+	startErr := errors.New("start observation failed")
+	var calls int
+	results := workflowRunManagedChildren(
+		workflows.AgentRequest{
+			ManagedChildObserver: func(workflows.ManagedChildActivity) error { return startErr },
+		},
+		&AgentInstance{Model: "default"},
+		nil,
+		workflowManagedExecutionOptions{maxParallelChildren: 1},
+		"scope_split",
+		plan,
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			calls++
+			return "", nil
+		},
+	)
+	if calls != 0 || len(results) != 1 || !errors.Is(results[0].err, startErr) ||
+		!errors.Is(results[0].err, workflows.ErrManagedChildActivityNotRecorded) {
+		t.Fatalf("start observer fence calls=%d results=%#v", calls, results)
+	}
+
+	completeErr := errors.New("completion observation failed")
+	results = workflowRunManagedChildren(
+		workflows.AgentRequest{
+			Output: workflowManagedTestOutputContract(),
+			ManagedChildObserver: func(activity workflows.ManagedChildActivity) error {
+				if activity.Phase == workflows.ManagedChildCompleted {
+					return completeErr
+				}
+				return nil
+			},
+		},
+		&AgentInstance{Model: "default"},
+		nil,
+		workflowManagedExecutionOptions{maxParallelChildren: 1},
+		"scope_split",
+		plan,
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if len(results) != 1 || !errors.Is(results[0].err, completeErr) ||
+		!errors.Is(results[0].err, workflows.ErrManagedChildActivityNotRecorded) {
+		t.Fatalf("completion observer fence results=%#v", results)
+	}
+
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
+		workflows.AgentRequest{
+			Managed: map[string]any{
+				"strategy": "scope_split", "reviewer_models": "review-a",
+				"continue_on_child_error": true,
+				"calibration":             map[string]any{"enabled": false},
+			},
+			Scope:  []any{map[string]any{"path": "single.go"}},
+			Output: workflowManagedTestOutputContract(),
+			ManagedChildObserver: func(activity workflows.ManagedChildActivity) error {
+				if activity.Phase == workflows.ManagedChildCompleted {
+					return completeErr
+				}
+				return nil
+			},
+		},
+		&AgentInstance{Model: "default"},
+		"main",
+		"ephemeral",
+		"none",
+		"none",
+		"",
+		"scope_split",
+		func(_ string, _ bool, _ workflowAgentRunOptions) (string, error) {
+			return `{"summary":"reviewed","findings":[]}`, nil
+		},
+	)
+	if !errors.Is(err, workflows.ErrManagedChildActivityNotRecorded) ||
+		!errors.Is(err, completeErr) || outputs["managed_children"] == nil {
+		t.Fatalf("single-child observer failure outputs=%#v err=%v", outputs, err)
 	}
 }
 

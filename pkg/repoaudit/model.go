@@ -54,16 +54,15 @@ type Validation struct {
 }
 
 type FindingCandidate struct {
-	Severity       string     `json:"severity"`
-	Title          string     `json:"title"`
-	Symbol         string     `json:"symbol,omitempty"`
-	File           string     `json:"file"`
-	Line           *int       `json:"line,omitempty"`
-	Message        string     `json:"message,omitempty"`
-	Evidence       string     `json:"evidence"`
-	Impact         string     `json:"impact"`
-	Recommendation string     `json:"recommendation"`
-	Validation     Validation `json:"validation"`
+	Severity   string     `json:"severity"`
+	Title      string     `json:"title"`
+	Symbol     string     `json:"symbol,omitempty"`
+	File       string     `json:"file"`
+	Line       *int       `json:"line,omitempty"`
+	Message    string     `json:"message,omitempty"`
+	Evidence   string     `json:"evidence"`
+	Impact     string     `json:"impact"`
+	Validation Validation `json:"validation"`
 }
 
 type Observation struct {
@@ -134,7 +133,6 @@ type Finding struct {
 	Message          string               `json:"message,omitempty"`
 	Evidence         string               `json:"evidence"`
 	Impact           string               `json:"impact"`
-	Recommendation   string               `json:"recommendation"`
 	Validation       Validation           `json:"validation"`
 	ContextIDs       []string             `json:"context_ids"`
 	Models           []string             `json:"models"`
@@ -147,18 +145,17 @@ type Finding struct {
 }
 
 type FindingObservation struct {
-	ContextID      string     `json:"context_id"`
-	Model          string     `json:"model"`
-	Reviewer       string     `json:"reviewer,omitempty"`
-	Severity       string     `json:"severity"`
-	Title          string     `json:"title"`
-	Symbol         string     `json:"symbol,omitempty"`
-	Line           *int       `json:"line,omitempty"`
-	Message        string     `json:"message,omitempty"`
-	Evidence       string     `json:"evidence"`
-	Impact         string     `json:"impact"`
-	Recommendation string     `json:"recommendation"`
-	Validation     Validation `json:"validation"`
+	ContextID  string     `json:"context_id"`
+	Model      string     `json:"model"`
+	Reviewer   string     `json:"reviewer,omitempty"`
+	Severity   string     `json:"severity"`
+	Title      string     `json:"title"`
+	Symbol     string     `json:"symbol,omitempty"`
+	Line       *int       `json:"line,omitempty"`
+	Message    string     `json:"message,omitempty"`
+	Evidence   string     `json:"evidence"`
+	Impact     string     `json:"impact"`
+	Validation Validation `json:"validation"`
 }
 
 type ReviewRun struct {

@@ -39,6 +39,26 @@ vi.mock("@/components/repository-reviews/repository-reviews-page", () => ({
   ),
 }))
 
+vi.mock("@/components/repository-reviews/repository-review-runs-page", () => ({
+  RepositoryReviewRunsPage: () => <output>Review runs workspace</output>,
+}))
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-profiles-page",
+  () => ({
+    RepositoryReviewProfilesPage: () => <output>Profiles workspace</output>,
+  }),
+)
+
+vi.mock(
+  "@/components/repository-reviews/repository-review-repositories-page",
+  () => ({
+    RepositoryReviewRepositoriesPage: () => (
+      <output>Repositories workspace</output>
+    ),
+  }),
+)
+
 vi.mock("@/components/threads/thread-open-page", () => ({
   ThreadOpenPage: ({ threadId }: { threadId?: string }) => (
     <output data-testid="opened-thread">{threadId}</output>
@@ -50,10 +70,27 @@ vi.mock("@/features/chat/controller", () => ({
 }))
 
 describe("repository reviews route", () => {
-  it("renders the first-class route and opens a discussion thread", async () => {
+  it("renders the dedicated review runs route", async () => {
     const router = createRouter({
       routeTree,
       history: createMemoryHistory({ initialEntries: ["/repository-reviews"] }),
+      context: {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        }),
+      },
+    })
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByText("Review runs workspace")).toBeVisible()
+  })
+
+  it("keeps finding discussions in the dedicated results route", async () => {
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: ["/repository-reviews/results"],
+      }),
       context: {
         queryClient: new QueryClient({
           defaultOptions: { queries: { retry: false } },
@@ -76,5 +113,25 @@ describe("repository reviews route", () => {
     expect(await screen.findByTestId("opened-thread")).toHaveTextContent(
       "session-review",
     )
+  })
+
+  it.each([
+    ["/repository-reviews/repositories", "Repositories workspace"],
+    ["/repository-reviews/profiles", "Profiles workspace"],
+  ])("renders the flat %s route", async (path, text) => {
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({ initialEntries: [path] }),
+      context: {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        }),
+      },
+    })
+
+    render(<RouterProvider router={router} />)
+
+    expect(await screen.findByText(text)).toBeVisible()
+    expect(router.state.location.pathname).toBe(path)
   })
 })

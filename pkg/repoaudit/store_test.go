@@ -46,7 +46,7 @@ func TestStoreListSummariesDoesNotProjectFindingPayloads(t *testing.T) {
 		Plan: plan, RunID: "summary-run",
 		Observations: []Observation{{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
 			Severity: "high", Title: "Large private evidence", Symbol: "Save", File: file.Path,
-			Evidence: strings.Repeat("private-evidence", 1000), Impact: "loss", Recommendation: "fix",
+			Evidence: strings.Repeat("private-evidence", 1000), Impact: "loss",
 			Validation: Validation{Status: "confirmed", Summary: "confirmed"},
 		}}}},
 	})
@@ -216,14 +216,13 @@ func TestStoreRecordPersistsCommitBlobContextAndModelProvenance(t *testing.T) {
 			RawDigest: "sha256:raw-observation",
 			Findings: []FindingCandidate{
 				{
-					Severity:       "high",
-					Title:          "Lost update",
-					File:           primary.Path,
-					Line:           &line,
-					Message:        "Concurrent writers can overwrite state.",
-					Evidence:       "The write lacks a version fence.",
-					Impact:         "A completed review can disappear.",
-					Recommendation: "Use compare-and-swap.",
+					Severity: "high",
+					Title:    "Lost update",
+					File:     primary.Path,
+					Line:     &line,
+					Message:  "Concurrent writers can overwrite state.",
+					Evidence: "The write lacks a version fence.",
+					Impact:   "A completed review can disappear.",
 					Validation: Validation{
 						Status:  "confirmed",
 						Summary: "Reproduced with two writers",
@@ -274,6 +273,89 @@ func TestStoreRecordPersistsCommitBlobContextAndModelProvenance(t *testing.T) {
 	}
 }
 
+func TestStoreDropsLegacyFindingRecommendationsFromStateAndIssueDrafts(t *testing.T) {
+	store := newRepositoryAuditTestStore(t)
+	file := repositoryAuditTestFile("pkg/service.go", "c", 120)
+	plan, err := store.Plan(
+		context.Background(),
+		"owner/legacy-recommendation",
+		"commit-a",
+		"inventory-a",
+		[]FileRef{file},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.Record(context.Background(), RecordRequest{
+		Plan: plan, RunID: "legacy-recommendation-run", CompletedAt: repositoryAuditTestNow,
+		Observations: []Observation{{
+			Model: "review-model-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
+				Severity: "high", Title: "Lost update", Symbol: "Save", File: file.Path,
+				Evidence: "Two writers save the same version.", Impact: "A completed update disappears.",
+				Validation: Validation{Status: "confirmed", Summary: "Traced both write paths."},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(store.path(plan.Repository))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if decodeErr := json.Unmarshal(data, &legacy); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	findings := legacy["findings"].([]any)
+	legacyFinding := findings[0].(map[string]any)
+	legacyFinding["recommendation"] = "Use compare-and-swap."
+	observations := legacyFinding["observations"].([]any)
+	observations[0].(map[string]any)["recommendation"] = "Fence the write."
+	data, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(store.path(plan.Repository), data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	loaded, found, err := store.Get(plan.Repository)
+	if err != nil || !found || len(loaded.Findings) != 1 {
+		t.Fatalf("legacy state loaded=%#v found=%v err=%v", loaded, found, err)
+	}
+	apiPayload, err := json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(apiPayload), `"recommendation"`) {
+		t.Fatalf("new state/API payload retained legacy recommendation: %s", apiPayload)
+	}
+	candidatePayload, err := json.Marshal(FindingCandidate{
+		Severity: "high", Title: "Lost update", File: file.Path, Evidence: "evidence", Impact: "impact",
+		Validation: Validation{Status: "confirmed", Summary: "confirmed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(candidatePayload), `"recommendation"`) {
+		t.Fatalf("new candidate payload contains recommendation: %s", candidatePayload)
+	}
+
+	_, draft, err := store.PrepareIssue(IssueDraftRequest{
+		Repository: loaded.Repository, FindingIDs: []string{result.State.Findings[0].ID},
+		ExpectedVersion: loaded.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(draft.Body, "Recommendation:") || strings.Contains(draft.Body, "compare-and-swap") {
+		t.Fatalf("issue draft retained a model recommendation: %q", draft.Body)
+	}
+}
+
 func TestStoreRecordRejectsUnconfirmedFindingWithoutMaterializingIt(t *testing.T) {
 	store := newRepositoryAuditTestStore(t)
 	file := repositoryAuditTestFile("pkg/service.go", "1", 120)
@@ -295,7 +377,7 @@ func TestStoreRecordRejectsUnconfirmedFindingWithoutMaterializingIt(t *testing.T
 			Model: "review-model-a", ScopeFiles: []FileRef{file},
 			Findings: []FindingCandidate{{
 				Severity: "high", Title: "Unconfirmed", File: file.Path,
-				Evidence: "possible", Impact: "unknown", Recommendation: "investigate",
+				Evidence: "possible", Impact: "unknown",
 				Validation: Validation{Status: "unconfirmed", Summary: "not reproduced"},
 			}},
 		}},

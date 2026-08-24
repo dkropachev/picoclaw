@@ -40,15 +40,6 @@ vi.mock("@/features/chat/controller", () => ({
   switchChatSessionAndSend: vi.fn(),
 }))
 
-vi.mock(
-  "@/components/repository-reviews/repository-review-control-center",
-  () => ({
-    RepositoryReviewControlCenter: () => (
-      <div data-testid="repository-review-control-center" />
-    ),
-  }),
-)
-
 const contextID = "rctx_context_1"
 const state: RepositoryReviewState = {
   schema_version: 1,
@@ -77,7 +68,6 @@ const state: RepositoryReviewState = {
       message: "Concurrent writers can overwrite review state.",
       evidence: "The write lacks a version fence.",
       impact: "A completed review can disappear.",
-      recommendation: "Use compare-and-swap.",
       validation: {
         status: "confirmed",
         summary: "Reproduced with two writers.",
@@ -106,7 +96,6 @@ const state: RepositoryReviewState = {
       message: "The retry path loses the source snapshot.",
       evidence: "The context ID is not copied.",
       impact: "Validation cannot be recovered.",
-      recommendation: "Retain the opaque context reference.",
       validation: {
         status: "confirmed",
         summary: "Observed after a retry.",
@@ -275,14 +264,14 @@ describe("RepositoryReviewsPage", () => {
     vi.stubGlobal("open", vi.fn())
   })
 
-  it("keeps review setup visible before the first ledger completes", async () => {
+  it("shows an empty result ledger before the first review completes", async () => {
     vi.mocked(listRepositoryReviews).mockResolvedValue({ repositories: [] })
     renderPage(vi.fn())
 
     expect(
-      await screen.findByText("No repository review has completed yet."),
+      await screen.findByText("No repository review results yet."),
     ).toBeVisible()
-    expect(screen.getByTestId("repository-review-control-center")).toBeVisible()
+    expect(screen.getByText("Review results")).toBeVisible()
     expect(getRepositoryReview).not.toHaveBeenCalled()
   })
 
@@ -349,7 +338,7 @@ describe("RepositoryReviewsPage", () => {
       "Finding commit SHA: commit-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     expect(prompt).toContain("Impact: A completed review can disappear.")
-    expect(prompt).toContain("Recommendation: Use compare-and-swap.")
+    expect(prompt).not.toContain("Recommendation:")
     expect(prompt).toContain("Validation checks: race test")
     expect(prompt).toContain(
       "pkg/service.go | blob blob-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb | 1536 bytes",
@@ -581,7 +570,6 @@ describe("discussionPrompt", () => {
       title: "t".repeat(64 << 10),
       evidence: "e".repeat(64 << 10),
       impact: "i".repeat(64 << 10),
-      recommendation: "r".repeat(64 << 10),
       context_ids: contexts.map((context) => context.id),
     }
     const prompt = discussionPrompt(

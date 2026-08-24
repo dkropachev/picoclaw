@@ -148,6 +148,7 @@ func (r *cliWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.A
 func (r *cliWorkflowRuntimeRunner) ResolveRepositoryReviewProfile(
 	ctx context.Context,
 	agentID string,
+	requestedAccountRef string,
 	requestedReviewerModels []string,
 ) (workflows.RepositoryReviewModelProfile, error) {
 	if r == nil {
@@ -164,7 +165,12 @@ func (r *cliWorkflowRuntimeRunner) ResolveRepositoryReviewProfile(
 			"agent runner does not support repository review profiles",
 		)
 	}
-	return resolver.ResolveRepositoryReviewProfile(ctx, agentID, requestedReviewerModels)
+	return resolver.ResolveRepositoryReviewProfile(
+		ctx,
+		agentID,
+		requestedAccountRef,
+		requestedReviewerModels,
+	)
 }
 
 func (r *cliWorkflowRuntimeRunner) RunTool(ctx context.Context, req workflows.ToolRequest) (map[string]any, error) {

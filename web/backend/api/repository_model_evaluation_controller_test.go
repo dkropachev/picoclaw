@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -195,6 +196,50 @@ func TestRepositoryModelEvaluationUsagePricesConcreteModelsAndSeparatesJudge(t *
 		subscriptionPrice.outputPerMillion != 5 {
 		t.Fatalf("subscription-equivalent price=%#v known=%v", subscriptionPrice, subscriptionKnown)
 	}
+	overrideSubscriptionConfig := config.DefaultConfig()
+	overrideSubscriptionConfig.Agents.Defaults.AccountRef = "subscription"
+	overrideSubscriptionConfig.ModelAliases = []config.ModelAliasConfig{
+		{
+			Name: "subscription-alias", Model: "openai/default-subscription",
+			AccountOverrides: map[string]string{"subscription": "openai/override-subscription"},
+		},
+		{
+			Name: "metered-alias", Model: "openai/default-metered",
+			AccountOverrides: map[string]string{"pricing": "openai/priced-metered"},
+		},
+	}
+	overrideSubscriptionConfig.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "subscription", Provider: "openai", Model: "openai/override-subscription", Enabled: true,
+			Subscription: true, SubscriptionEquivalentModel: "metered-alias",
+		},
+		{
+			ModelName: "pricing", Provider: "openai", Model: "openai/priced-metered", Enabled: true,
+			InputPricePerMTok: 7, OutputPricePerMTok: 9,
+		},
+	}
+	overridePrice, overrideKnown := repositoryModelEvaluationUsagePrice(
+		overrideSubscriptionConfig,
+		workflows.AgentUsage{Model: "openai/override-subscription"},
+	)
+	if !overrideKnown || overridePrice.inputPerMillion != 7 || overridePrice.outputPerMillion != 9 {
+		t.Fatalf("account-override equivalent price=%#v known=%v", overridePrice, overrideKnown)
+	}
+	unavailableConfig := config.DefaultConfig()
+	unavailableConfig.Agents.Defaults.AccountRef = "api"
+	unavailableConfig.ModelAliases = []config.ModelAliasConfig{{
+		Name: "disabled-alias", Model: "openai/disabled", DisabledAccounts: []string{"api"},
+	}}
+	unavailableConfig.ModelList = []*config.ModelConfig{{
+		ModelName: "api", Provider: "openai", Model: "openai/default", Enabled: true,
+		InputPricePerMTok: 3, OutputPricePerMTok: 6,
+	}}
+	if _, known := repositoryModelEvaluationUsagePrice(
+		unavailableConfig,
+		workflows.AgentUsage{Model: "unavailable-concrete"},
+	); known {
+		t.Fatal("disabled alias produced a model evaluation price")
+	}
 	repositoryModelEvaluationAddUsage(nil, workflows.AgentUsage{}, repositoryModelEvaluationPrice{}, false)
 	unknownThenKnown := repoeval.Usage{}
 	repositoryModelEvaluationAddUsage(
@@ -316,6 +361,163 @@ func TestRepositoryModelEvaluationJudgeEvidenceRejectsAbsentDuplicateOrOmittedID
 	})
 	if confirmed["model-a"] != 0 || unsupported["model-a"] != 0 || len(confirmed) != 1 || len(unsupported) != 1 {
 		t.Fatalf("bounded judged claim counts=%v/%v", confirmed, unsupported)
+	}
+}
+
+func TestRepositoryModelEvaluationClaimLedgerRequiresExactDiagnosisAssessments(t *testing.T) {
+	mapping := `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`
+	ledger := `[` +
+		`{"candidateId":"candidate-001","claimId":"claim-001-0001","path":"pkg/core.go",` +
+		`"title":"Boundary state is accepted","evidence":"The exact predicate accepts zero.",` +
+		`"impact":"The operation enters an invalid state."},` +
+		`{"candidateId":"candidate-001","claimId":"claim-001-0002","path":"pkg/core.go",` +
+		`"title":"Claimed timeout is absent","evidence":"No deadline is read on this path.",` +
+		`"impact":"The stated timeout is not established."}]`
+	judge := `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":1,"unsupportedClaims":1,` +
+		`"claimAssessments":[` +
+		`{"claimId":"claim-001-0001","disposition":"supported","rationale":"The predicate and state transition are present."},` +
+		`{"claimId":"claim-001-0002","disposition":"unsupported","rationale":"The cited source contains no deadline operation."}]}]}`
+	claims, err := repositoryModelEvaluationValidatedClaimLedger(
+		judge,
+		mapping,
+		ledger,
+		[]string{"model-a"},
+		"0123456789abcdef-extra",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims["model-a"]) != 2 ||
+		claims["model-a"][0].ID != "0123456789abcdef-claim-001-0001" ||
+		claims["model-a"][0].Disposition != repoeval.ClaimDispositionSupported ||
+		claims["model-a"][1].Disposition != repoeval.ClaimDispositionUnsupported {
+		t.Fatalf("validated claim ledger = %#v", claims)
+	}
+	if validationErr := repositoryModelEvaluationValidateJudgeEvidence(
+		judge,
+		mapping,
+		[]string{"model-a"},
+		ledger,
+	); validationErr != nil {
+		t.Fatalf("validate judge evidence with claim ledger: %v", validationErr)
+	}
+	aggregate, err := repositoryModelEvaluationAggregateJudgeJSON(judge)
+	if err != nil || strings.Contains(aggregate, "claimAssessments") ||
+		!strings.Contains(aggregate, `"confirmedClaims":1`) {
+		t.Fatalf("aggregate judge evidence=%q err=%v", aggregate, err)
+	}
+
+	invalid := []struct {
+		name   string
+		judge  string
+		ledger string
+	}{
+		{
+			name:   "missing assessments",
+			judge:  `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":1,"unsupportedClaims":1}]}`,
+			ledger: ledger,
+		},
+		{
+			name:   "wrong counts",
+			judge:  strings.Replace(judge, `"confirmedClaims":1`, `"confirmedClaims":2`, 1),
+			ledger: ledger,
+		},
+		{
+			name: "missing claim",
+			judge: strings.Replace(
+				judge,
+				`,{"claimId":"claim-001-0002","disposition":"unsupported","rationale":"The cited source contains no deadline operation."}`,
+				"",
+				1,
+			),
+			ledger: ledger,
+		},
+		{
+			name:  "prohibited fix field",
+			judge: judge,
+			ledger: strings.Replace(
+				ledger,
+				`"impact":"The operation enters an invalid state."`,
+				`"impact":"The operation enters an invalid state.","recommendation":"change it"`,
+				1,
+			),
+		},
+		{
+			name:   "unsafe path",
+			judge:  judge,
+			ledger: strings.Replace(ledger, `"path":"pkg/core.go"`, `"path":"/tmp/core.go"`, 1),
+		},
+		{
+			name:   "duplicate ledger claim ID",
+			judge:  judge,
+			ledger: ledger[:len(ledger)-1] + `,` + ledger[1:],
+		},
+		{
+			name:   "assessment references absent claim",
+			judge:  strings.Replace(judge, "claim-001-0001", "claim-001-9999", 1),
+			ledger: ledger,
+		},
+		{
+			name: "duplicate claim assessment",
+			judge: strings.Replace(
+				judge,
+				`]}]}`,
+				`,{"claimId":"claim-001-0001","disposition":"supported",`+
+					`"rationale":"The predicate is present."}]}]}`,
+				1,
+			),
+			ledger: ledger,
+		},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := repositoryModelEvaluationValidatedClaimLedger(
+				test.judge,
+				mapping,
+				test.ledger,
+				[]string{"model-a"},
+				"batch",
+			); err == nil {
+				t.Fatal("invalid claim evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestRepositoryModelEvaluationClaimEvidenceRejectsMalformedIDsAndAggregateShapes(t *testing.T) {
+	if !repositoryModelEvaluationValidClaimID("claim-001-0001") {
+		t.Fatal("valid claim ID was rejected")
+	}
+	for _, value := range []string{"claim-01-0001", "claim-001-abcd"} {
+		if repositoryModelEvaluationValidClaimID(value) {
+			t.Fatalf("invalid claim ID %q was accepted", value)
+		}
+	}
+	for _, value := range []string{
+		`{`,
+		`{}`,
+		`{"evaluations":[1]}`,
+	} {
+		if _, err := repositoryModelEvaluationAggregateJudgeJSON(value); err == nil {
+			t.Fatalf("invalid aggregate judge value %q was accepted", value)
+		}
+	}
+}
+
+func TestRepositoryModelEvaluationClaimLedgerCapIsPerModelAndExplicit(t *testing.T) {
+	evaluation := repoeval.Evaluation{CandidateModels: []string{"model-a", "model-b"}}
+	existing := make([]repoeval.ModelClaim, repositoryModelEvaluationMaxClaimsPerModel-1)
+	evaluation.Checkpoint.Batches = []repoeval.BatchCheckpoint{{
+		ClaimLedger: map[string][]repoeval.ModelClaim{"model-a": existing},
+	}}
+	incoming := map[string][]repoeval.ModelClaim{
+		"model-a": {{ID: "a"}, {ID: "b"}},
+		"model-b": {{ID: "c"}, {ID: "d"}},
+	}
+	bounded, omitted := repositoryModelEvaluationCapClaimLedger(evaluation, incoming)
+	if len(bounded["model-a"]) != 1 || omitted["model-a"] != 1 ||
+		len(bounded["model-b"]) != 2 || omitted["model-b"] != 0 {
+		t.Fatalf("bounded=%#v omitted=%#v", bounded, omitted)
 	}
 }
 
@@ -493,7 +695,9 @@ func TestRepositoryModelEvaluationComparisonsUseCheckpointCoverageAndFailures(t 
 			},
 			"model-c": {Attempts: 2, Failures: 2},
 		},
-		JudgeJSON: `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
+		JudgeJSON:   `{"evaluations":[{"candidateId":"candidate-001","confirmedClaims":3,"unsupportedClaims":5}]}`,
+		MappingJSON: `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`,
+		CompletedAt: time.Now().UTC(),
 	}}
 	score := 70.0
 	rows, _, err := repositoryModelEvaluationComparisons(evaluation, map[string]any{
@@ -519,7 +723,8 @@ func TestRepositoryModelEvaluationComparisonsUseCheckpointCoverageAndFailures(t 
 		rows[0].OverallScore != nil || rows[0].Rank != 0 || len(rows[0].Scores) != 0 ||
 		rows[0].FilesAnalyzed != 1 || rows[0].BytesAnalyzed != 120 ||
 		!slices.Equal(rows[0].Languages, []string{"go"}) || !slices.Equal(rows[0].Regions, []string{"pkg"}) ||
-		rows[0].Failures != 1 || rows[1].Completion != repoeval.ModelCompletionCompleted ||
+		rows[0].Failures != 1 || rows[0].UnsupportedClaims == nil || *rows[0].UnsupportedClaims != 5 ||
+		rows[0].UnsupportedFiles != 1 || rows[1].Completion != repoeval.ModelCompletionCompleted ||
 		rows[1].FilesAnalyzed != 2 || rows[1].BytesAnalyzed != 210 || rows[1].OverallScore == nil ||
 		rows[2].Completion != repoeval.ModelCompletionFailed || rows[2].FilesAnalyzed != 0 ||
 		rows[2].BytesAnalyzed != 0 || len(rows[2].Languages) != 0 || len(rows[2].Regions) != 0 ||
@@ -638,6 +843,53 @@ func TestRepositoryModelEvaluationInvalidJudgeEvidenceFailsBeforeCheckpoint(t *t
 	}
 }
 
+func TestRepositoryModelEvaluationUnencodableClaimLedgerFailsBeforeCheckpoint(t *testing.T) {
+	handler, mux, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	controller.runWorkflow = func(
+		_ context.Context,
+		_ string,
+		ref string,
+		_ string,
+		_ map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		switch ref {
+		case workflows.RepositoryModelEvaluationPreflightWorkflowRef:
+			return repositoryModelEvaluationPreflightResult(), nil
+		case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+			result := repositoryModelEvaluationBatchResult()
+			result.Outputs["ledger"] = make(chan int)
+			return result, nil
+		default:
+			return nil, errors.New("analysis must not run after an invalid claim ledger")
+		}
+	}
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	created := createRepositoryModelEvaluation(t, mux, "owner/invalid-claim-ledger")
+	repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+created.ID+"/preflight",
+		map[string]any{"expected_version": created.Version},
+	)
+	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
+	repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/"+created.ID+"/start",
+		map[string]any{"expected_version": ready.Version},
+	)
+	failed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusFailed)
+	if !strings.Contains(failed.Failure, "invalid bounded candidate claim ledger") ||
+		len(failed.Checkpoint.Batches) != 0 {
+		t.Fatalf("invalid claim ledger persisted=%#v", failed)
+	}
+}
+
 func repositoryModelEvaluationMetricsFixture() repoeval.Evaluation {
 	return repoeval.Evaluation{
 		ID: "rme_metrics", CandidateModels: []string{"model-a", "model-b"},
@@ -666,6 +918,42 @@ func repositoryModelEvaluationMetricsFixture() repoeval.Evaluation {
 	}
 }
 
+func TestRepositoryModelEvaluationBatchUsesCanonicalGitWorkspaceRepository(t *testing.T) {
+	evaluation := repositoryModelEvaluationMetricsFixture()
+	evaluation.Repository = "scylladb/seastar"
+	evaluation.JudgeModelAlias = "judge"
+	evaluation.Corpus.CommitSHA = strings.Repeat("a", 40)
+	var captured map[string]any
+	controller := &repositoryModelEvaluationController{}
+	controller.runWorkflow = func(
+		_ context.Context,
+		_ string,
+		_ string,
+		_ string,
+		inputs map[string]any,
+		_ workflows.AgentUsageEventObserver,
+	) (*workflows.RunResult, error) {
+		captured = inputs
+		return &workflows.RunResult{Status: workflows.RunStatusSucceeded}, nil
+	}
+	batches := repositoryModelEvaluationBatches(evaluation)
+	if len(batches) != 1 {
+		t.Fatalf("batches=%#v", batches)
+	}
+	if _, err := controller.runEvaluationBatch(
+		t.Context(),
+		evaluation,
+		batches[0],
+		"wr_workspace_repository",
+		"token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if captured["repository"] != "https://github.com/scylladb/seastar.git" {
+		t.Fatalf("batch repository=%#v", captured["repository"])
+	}
+}
+
 func TestRepositoryModelEvaluationControllerRecoversPreflight(t *testing.T) {
 	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
 	store, _, err := handler.repositoryModelEvaluationStore()
@@ -691,20 +979,30 @@ func TestRepositoryModelEvaluationControllerRecoversPreflight(t *testing.T) {
 		t.Fatalf("preflight=%#v err=%v", preflighting, err)
 	}
 	controller := newRepositoryModelEvaluationController(handler)
-	controller.runWorkflow = func(_ context.Context, _ string, ref string, _ string, _ map[string]any, _ workflows.AgentUsageEventObserver) (*workflows.RunResult, error) {
-		if ref != workflows.RepositoryModelEvaluationPreflightWorkflowRef {
-			t.Fatalf("recovery workflow ref=%q", ref)
+	controller.runWorkflow = func(_ context.Context, _ string, ref string, _ string, inputs map[string]any, _ workflows.AgentUsageEventObserver) (*workflows.RunResult, error) {
+		switch ref {
+		case workflows.RepositoryModelEvaluationPreflightWorkflowRef:
+			if inputs["repository"] != "https://github.com/owner/repo.git" {
+				t.Fatalf("recovery repository=%#v", inputs["repository"])
+			}
+			return repositoryModelEvaluationPreflightResult(), nil
+		case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+			return repositoryModelEvaluationBatchResult(), nil
+		case workflows.RepositoryModelEvaluationAnalysisWorkflowRef:
+			return repositoryModelEvaluationAnalysisResult(), nil
+		default:
+			return nil, fmt.Errorf("unexpected recovery workflow ref=%q", ref)
 		}
-		return repositoryModelEvaluationPreflightResult(), nil
 	}
 	handler.repositoryModelEvaluationController = controller
 	t.Cleanup(handler.Shutdown)
 	if err := controller.Start(); err != nil {
 		t.Fatal(err)
 	}
-	ready := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusReady)
-	if len(ready.RunIDs) != 2 || ready.RunIDs[0] != "wr_orphaned_preflight" {
-		t.Fatalf("recovered run IDs=%v", ready.RunIDs)
+	completed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCompleted)
+	if !completed.OneShot || len(completed.RunIDs) != 4 ||
+		completed.RunIDs[0] != "wr_orphaned_preflight" {
+		t.Fatalf("recovered evaluation=%#v", completed)
 	}
 }
 
@@ -843,7 +1141,7 @@ func TestRepositoryModelEvaluationControllerFailureAndShutdownRecoveryBoundary(t
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, resumeErr := controller.Resume(t.Context(), created.ID, created.Version); resumeErr != nil {
+		if _, resumeErr := controller.RunExisting(t.Context(), created.ID, created.Version); resumeErr != nil {
 			t.Fatal(resumeErr)
 		}
 		<-entered
@@ -964,11 +1262,11 @@ func TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation(t
 			t,
 			mux,
 			http.MethodPost,
-			"/api/model-evaluations/"+created.ID+"/resume",
+			"/api/model-evaluations/"+created.ID+"/start",
 			map[string]any{"expected_version": ready.Version},
 		)
 		if start.Code != http.StatusAccepted {
-			t.Fatalf("resume ready status=%d body=%s", start.Code, start.Body.String())
+			t.Fatalf("start ready status=%d body=%s", start.Code, start.Body.String())
 		}
 		<-batchEntered
 		active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
@@ -1157,13 +1455,13 @@ func TestRepositoryModelEvaluationControllerHelpersAndInvalidTransitions(t *test
 	if err != nil || canceled.Status != repoeval.StatusCanceled {
 		t.Fatalf("cancel=%#v err=%v", canceled, err)
 	}
-	resumed, err := controller.Resume(
+	_, err = controller.Resume(
 		t.Context(),
 		created.ID,
 		canceled.Version,
 	)
-	if err != nil || resumed.Status != repoeval.StatusPreflighting {
-		t.Fatalf("resume canceled=%#v error=%v", resumed, err)
+	if !errors.Is(err, repoeval.ErrInvalidTransition) {
+		t.Fatalf("resume canceled error=%v", err)
 	}
 
 	if got := repositoryModelEvaluationRunError(errors.New("boom"), nil); got != "boom" {
@@ -1231,6 +1529,26 @@ func TestRepositoryModelEvaluationControllerHelpersAndInvalidTransitions(t *test
 		"/private/repository",
 	); strings.Contains(sanitized, "/private/repository") || sanitizeRepositoryModelEvaluationRuntimeText("", "/tmp") != "" {
 		t.Fatalf("runtime path sanitization=%q", sanitized)
+	}
+	if sanitized := sanitizeRepositoryModelEvaluationRuntimeText(
+		"git clone -- /home/operator/missing/repo /tmp/workspace failed",
+	); strings.Contains(sanitized, "/home/operator") || strings.Contains(sanitized, "/tmp/workspace") {
+		t.Fatalf("inferred runtime path sanitization=%q", sanitized)
+	}
+	for _, input := range []string{
+		"/opt/private failed",
+		"failure [/home/operator/private]",
+		"failure `/tmp/private`",
+		"failure path=/var/lib/private",
+	} {
+		if sanitized := sanitizeRepositoryModelEvaluationRuntimeText(input); strings.Contains(sanitized, "/private") {
+			t.Fatalf("bounded runtime path sanitization=%q", sanitized)
+		}
+	}
+	if sanitized := sanitizeRepositoryModelEvaluationRuntimeText(
+		"fetch https://github.com/owner/repository.git failed",
+	); !strings.Contains(sanitized, "https://github.com/owner/repository.git") {
+		t.Fatalf("remote URL was redacted=%q", sanitized)
 	}
 	clockController := &repositoryModelEvaluationController{}
 	if clockController.clock().IsZero() {
@@ -1340,6 +1658,224 @@ func TestRepositoryModelEvaluationControllerHelpersAndInvalidTransitions(t *test
 		failureTarget.Status != repoeval.StatusFailed || failureTarget.Failure == "" {
 		t.Fatalf("failure target=%#v err=%v", failureTarget, err)
 	}
+}
+
+func TestRepositoryModelEvaluationOneShotReadyRecoveryAndTimeoutBudget(t *testing.T) {
+	t.Run("legacy ready recovery", func(t *testing.T) {
+		handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+		store, _, err := handler.repositoryModelEvaluationStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		seed := newRepositoryModelEvaluationController(handler)
+		ready := seedReadyRepositoryModelEvaluation(t, seed, store, "owner/ready-recovery")
+		controller := newRepositoryModelEvaluationController(handler)
+		controller.runWorkflow = successfulRepositoryModelEvaluationWorkflow
+		handler.repositoryModelEvaluationController = controller
+		t.Cleanup(handler.Shutdown)
+		if err := controller.Start(); err != nil {
+			t.Fatal(err)
+		}
+		completed := waitRepositoryModelEvaluationStatus(t, handler, ready.ID, repoeval.StatusCompleted)
+		if !completed.OneShot || len(completed.Comparisons) != len(completed.CandidateModels) {
+			t.Fatalf("completed recovery=%#v", completed)
+		}
+	})
+
+	t.Run("ready alias disappearance fails durably", func(t *testing.T) {
+		handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+		store, _, err := handler.repositoryModelEvaluationStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := repositoryModelEvaluationCreateRequest("owner/ready-missing-alias")
+		request.CandidateModels = []string{"removed-model", "model-b"}
+		seed := newRepositoryModelEvaluationController(handler)
+		ready := seedReadyRepositoryModelEvaluationFromRequest(t, seed, store, request)
+		controller := newRepositoryModelEvaluationController(handler)
+		controller.runWorkflow = successfulRepositoryModelEvaluationWorkflow
+		handler.repositoryModelEvaluationController = controller
+		t.Cleanup(handler.Shutdown)
+		if err := controller.Start(); err != nil {
+			t.Fatal(err)
+		}
+		failed := waitRepositoryModelEvaluationStatus(t, handler, ready.ID, repoeval.StatusFailed)
+		if !strings.Contains(failed.Failure, "removed-model") {
+			t.Fatalf("ready recovery failure=%#v", failed)
+		}
+	})
+
+	t.Run("incident batch topology", func(t *testing.T) {
+		selected := make([]map[string]any, 12)
+		encoded, err := json.Marshal(selected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		budget := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			5*time.Minute,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			map[string]any{
+				"selected_candidates": string(encoded),
+				"candidate_models":    "model-a,model-b,model-c",
+			},
+		)
+		if budget != 79*time.Minute {
+			t.Fatalf("incident topology timeout=%s want=79m", budget)
+		}
+		if preserved := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			6*time.Hour,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			map[string]any{},
+		); preserved != 6*time.Hour {
+			t.Fatalf("configured timeout=%s", preserved)
+		}
+		if preflight := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			5*time.Minute,
+			workflows.RepositoryModelEvaluationPreflightWorkflowRef,
+			nil,
+		); preflight < 15*time.Minute {
+			t.Fatalf("preflight timeout=%s", preflight)
+		}
+		huge := make([]map[string]any, 256)
+		hugeJSON, err := json.Marshal(huge)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if capped := repositoryModelEvaluationEffectiveWorkflowTimeout(
+			5*time.Minute,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			map[string]any{
+				"selected_candidates": string(hugeJSON),
+				"candidate_models":    strings.Repeat("model,", 32),
+			},
+		); capped != repositoryModelEvaluationMaxTimeout {
+			t.Fatalf("capped timeout=%s", capped)
+		}
+	})
+}
+
+func TestRepositoryModelEvaluationResidualOneShotBranches(t *testing.T) {
+	handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+	controller := newRepositoryModelEvaluationController(handler)
+	handler.repositoryModelEvaluationController = controller
+	t.Cleanup(handler.Shutdown)
+	if err := controller.Start(); err != nil {
+		t.Fatal(err)
+	}
+	store := controller.store.(repoeval.Store)
+	failedPreflight := func(repository string) repoeval.Evaluation {
+		draft, err := store.Create(t.Context(), repositoryModelEvaluationCreateRequest(repository))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preflighting, err := store.Update(
+			t.Context(),
+			draft.ID,
+			draft.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusPreflighting
+				value.Progress.Stage = repoeval.ProgressResolving
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed, err := store.Update(
+			t.Context(),
+			preflighting.ID,
+			preflighting.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusFailed
+				value.Progress.Stage = repoeval.ProgressFailed
+				value.Failure = "preflight failed"
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return failed
+	}
+
+	busyFailed := failedPreflight("owner/busy-failed")
+	busyToken, _, busyCancel, err := controller.reserveActive(busyFailed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, restartErr := controller.Resume(
+		t.Context(),
+		busyFailed.ID,
+		busyFailed.Version,
+	); !errors.Is(restartErr, errRepositoryModelEvaluationBusy) {
+		t.Fatalf("busy failed restart error=%v", restartErr)
+	}
+	busyCancel()
+	controller.releaseActive(busyFailed.ID, busyToken)
+
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	missingFailed := failedPreflight(missingPath)
+	if _, restartErr := controller.Restart(
+		t.Context(),
+		missingFailed.ID,
+		missingFailed.Version,
+	); !errors.Is(restartErr, repoeval.ErrInvalidEvaluation) {
+		t.Fatalf("missing repository start-over error=%v", restartErr)
+	}
+
+	invalidDraft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest(missingPath),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidPreflight, err := store.Update(
+		t.Context(),
+		invalidDraft.ID,
+		invalidDraft.Version,
+		func(value *repoeval.Evaluation) error {
+			value.OneShot = true
+			value.Status = repoeval.StatusPreflighting
+			value.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidToken, invalidCtx, _, err := controller.reserveActive(invalidPreflight.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.wg.Add(1)
+	controller.executePreflight(invalidCtx, invalidPreflight.ID, invalidToken, "wr_invalid_repository")
+	invalidFailed, found, err := store.Get(t.Context(), invalidPreflight.ID)
+	if err != nil || !found || invalidFailed.Status != repoeval.StatusFailed {
+		t.Fatalf("invalid repository preflight=%#v found=%v err=%v", invalidFailed, found, err)
+	}
+
+	usageDraft, err := store.Create(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/fenced-usage"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageToken, _, usageCancel, err := controller.reserveActive(usageDraft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usageErr := controller.recordUsage(
+		usageDraft.ID,
+		usageToken,
+		workflows.AgentUsage{},
+		false,
+	); !errors.Is(usageErr, context.Canceled) {
+		t.Fatalf("fenced usage error=%v", usageErr)
+	}
+	usageCancel()
+	controller.releaseActive(usageDraft.ID, usageToken)
 }
 
 func repositoryModelEvaluationCreateRequest(repository string) repoeval.CreateRequest {

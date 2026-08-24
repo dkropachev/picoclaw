@@ -16,9 +16,9 @@ func completionFindingFixture(
 ) CompletionFinding {
 	result := CompletionFinding{
 		AgentFinding: AgentFinding{
-			Severity: "high", Title: "retry bug", File: "pkg/retry.go", Message: "fix retry",
-			Evidence: "retry remains incomplete", Impact: "requests fail", Recommendation: "finish retry",
-			Validation: "run retry tests", ScopeDistance: distance, ChangeSize: size,
+			Severity: "high", Title: "retry bug", File: "pkg/retry.go", Message: "The retry path remains incomplete.",
+			Evidence: "retry remains incomplete", Impact: "requests fail",
+			Validation: "Traced the incomplete retry path.", ScopeDistance: distance, ChangeSize: size,
 			TypeCompatible: compatible, ScopeConfidence: 1, ScopeExplanation: "graded against retry charter",
 			CharterClauses: []string{"fix retry"},
 		},
@@ -153,12 +153,23 @@ func exactScopeAuditFixture() map[string]any {
 
 func completionFindingJSON(presence, distance, size string, compatible bool) map[string]any {
 	value := map[string]any{
-		"severity": "high", "title": "retry bug", "file": "pkg/retry.go", "message": "fix retry",
-		"evidence": "retry remains incomplete", "impact": "requests fail", "recommendation": "finish retry",
-		"validation": "run retry tests", "scope_distance": distance, "change_size": size,
-		"type_compatible": compatible, "scope_confidence": 1.0,
-		"scope_explanation": "graded against retry charter", "charter_clauses": []any{"fix retry"},
-		"presence": presence, "hunk": "", "module": "", "semantic_lines": 0,
+		"severity":          "high",
+		"title":             "retry bug",
+		"file":              "pkg/retry.go",
+		"message":           "The retry path remains incomplete.",
+		"evidence":          "retry remains incomplete",
+		"impact":            "requests fail",
+		"validation":        "Traced the incomplete retry path.",
+		"scope_distance":    distance,
+		"change_size":       size,
+		"type_compatible":   compatible,
+		"scope_confidence":  1.0,
+		"scope_explanation": "graded against retry charter",
+		"charter_clauses":   []any{"fix retry"},
+		"presence":          presence,
+		"hunk":              "",
+		"module":            "",
+		"semantic_lines":    0,
 	}
 	if presence == "candidate_present" {
 		value["hunk"], value["module"], value["semantic_lines"] = testCandidateHunk, "pkg", 10
@@ -712,8 +723,7 @@ func (ambiguousReviewAI) RunIsolated(_ context.Context, request IsolatedAIReques
 				"message":           "cleanup is adjacent",
 				"evidence":          "adjacent path",
 				"impact":            "maintenance",
-				"recommendation":    "triage explicitly",
-				"validation":        "review charter",
+				"validation":        "Compared the path with the confirmed charter.",
 				"scope_distance":    "S1_necessary_adjacent",
 				"change_size":       "XS",
 				"type_compatible":   true,

@@ -44,7 +44,7 @@ func TestNativeRepositoryReviewDoesNotCheckpointFileWithFailedChallenge(t *testi
 		"summary": "found", "reviewedFiles": []any{"pkg/service.go"}, "findings": []any{map[string]any{
 			"severity": "high", "title": "Lost update", "symbol": "Save", "file": "pkg/service.go",
 			"message": "A writer overwrites state.", "evidence": "No version fence.",
-			"impact": "Data is lost.", "recommendation": "Use CAS.",
+			"impact":     "Data is lost.",
 			"validation": map[string]any{"status": "confirmed", "summary": "Reproduced", "checks": []any{"race test"}},
 		}},
 	}
@@ -88,6 +88,31 @@ func TestNativeRepositoryReviewDoesNotCheckpointFileWithFailedChallenge(t *testi
 	)
 	if err != nil || len(next.PendingFiles) != 1 {
 		t.Fatalf("next plan=%#v err=%v, want file retried", next, err)
+	}
+}
+
+func TestNativeRepositoryReviewRejectsFieldsOutsideDiagnosisOnlyContract(t *testing.T) {
+	_, err := nativeRepositoryReviewObservation(
+		map[string]any{
+			"summary": "found", "reviewedFiles": []any{"service.go"},
+			"findings": []any{map[string]any{
+				"severity": "high", "title": "Lost update", "symbol": "Save",
+				"file": "service.go", "message": "Concurrent saves overwrite state.",
+				"evidence": "Both writes use the same version.", "impact": "Data is lost.",
+				"recommendation": "Use compare-and-swap.",
+				"validation": map[string]any{
+					"status": "confirmed", "summary": "Traced two writers", "checks": []any{},
+				},
+			}},
+			"residualRisks": []any{},
+		},
+		nil,
+		"review-a",
+		"challenge",
+		"response",
+	)
+	if err == nil || !strings.Contains(err.Error(), `field "recommendation" outside the diagnosis-only contract`) {
+		t.Fatalf("recommendation contract error=%v", err)
 	}
 }
 

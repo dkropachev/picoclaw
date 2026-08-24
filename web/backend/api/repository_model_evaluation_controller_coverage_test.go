@@ -179,10 +179,18 @@ jobs:
 	stopped.Stop()
 	for name, invoke := range map[string]func() error{
 		"preflight": func() error { _, actionErr := stopped.Preflight(t.Context(), "id", 1); return actionErr },
-		"start":     func() error { _, actionErr := stopped.StartEvaluation(t.Context(), "id", 1); return actionErr },
-		"cancel":    func() error { _, actionErr := stopped.Cancel(t.Context(), "id", 1); return actionErr },
-		"resume":    func() error { _, actionErr := stopped.Resume(t.Context(), "id", 1); return actionErr },
-		"restart":   func() error { _, actionErr := stopped.Restart(t.Context(), "id", 1); return actionErr },
+		"run existing": func() error {
+			_, actionErr := stopped.RunExisting(t.Context(), "id", 1)
+			return actionErr
+		},
+		"run new": func() error {
+			_, actionErr := stopped.Run(t.Context(), repositoryModelEvaluationCreateRequest("owner/stopped"))
+			return actionErr
+		},
+		"start":   func() error { _, actionErr := stopped.StartEvaluation(t.Context(), "id", 1); return actionErr },
+		"cancel":  func() error { _, actionErr := stopped.Cancel(t.Context(), "id", 1); return actionErr },
+		"resume":  func() error { _, actionErr := stopped.Resume(t.Context(), "id", 1); return actionErr },
+		"restart": func() error { _, actionErr := stopped.Restart(t.Context(), "id", 1); return actionErr },
 	} {
 		if branchErr := invoke(); !errors.Is(branchErr, context.Canceled) {
 			t.Fatalf("stopped %s error=%v", name, branchErr)
@@ -204,6 +212,7 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 
 	for name, invoke := range map[string]func() error{
 		"preflight": func() error { _, actionErr := controller.Preflight(t.Context(), missingID, 1); return actionErr },
+		"run":       func() error { _, actionErr := controller.RunExisting(t.Context(), missingID, 1); return actionErr },
 		"start":     func() error { _, actionErr := controller.StartEvaluation(t.Context(), missingID, 1); return actionErr },
 		"cancel":    func() error { _, actionErr := controller.Cancel(t.Context(), missingID, 1); return actionErr },
 		"resume":    func() error { _, actionErr := controller.Resume(t.Context(), missingID, 1); return actionErr },
@@ -221,6 +230,10 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	for name, invoke := range map[string]func() error{
 		"preflight": func() error {
 			_, actionErr := controller.Preflight(t.Context(), draft.ID, draft.Version+1)
+			return actionErr
+		},
+		"run": func() error {
+			_, actionErr := controller.RunExisting(t.Context(), draft.ID, draft.Version+1)
 			return actionErr
 		},
 		"start": func() error {
@@ -260,8 +273,20 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	) {
 		t.Fatalf("busy preflight error=%v", branchErr)
 	}
+	if _, branchErr := controller.launchCreatedPreflight(draft, "wr_busy_launch"); !errors.Is(
+		branchErr,
+		errRepositoryModelEvaluationBusy,
+	) {
+		t.Fatalf("busy atomic launch error=%v", branchErr)
+	}
 	busyCancel()
 	controller.releaseActive(draft.ID, busyToken)
+	if initializeErr := controller.initializeReadyEvaluation(nil); !errors.Is(
+		initializeErr,
+		repoeval.ErrInvalidTransition,
+	) {
+		t.Fatalf("nil ready initialization error=%v", initializeErr)
+	}
 
 	terminal, actionErr := controller.Cancel(t.Context(), draft.ID, draft.Version)
 	if actionErr != nil {
@@ -272,6 +297,12 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 		repoeval.ErrInvalidTransition,
 	) {
 		t.Fatalf("terminal preflight error=%v", branchErr)
+	}
+	if _, branchErr := controller.RunExisting(t.Context(), terminal.ID, terminal.Version); !errors.Is(
+		branchErr,
+		repoeval.ErrInvalidTransition,
+	) {
+		t.Fatalf("terminal run error=%v", branchErr)
 	}
 	if _, branchErr := controller.Cancel(t.Context(), terminal.ID, terminal.Version); !errors.Is(
 		branchErr,
@@ -285,7 +316,7 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	}
 	if _, branchErr := controller.Resume(t.Context(), terminal.ID, terminal.Version); !errors.Is(
 		branchErr,
-		errRepositoryModelEvaluationBusy,
+		repoeval.ErrInvalidTransition,
 	) {
 		t.Fatalf("busy terminal resume error=%v", branchErr)
 	}
@@ -310,7 +341,7 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	}
 	if _, branchErr := controller.Restart(t.Context(), preflighting.ID, preflighting.Version); !errors.Is(
 		branchErr,
-		errRepositoryModelEvaluationBusy,
+		repoeval.ErrInvalidTransition,
 	) {
 		t.Fatalf("in-flight restart error=%v", branchErr)
 	}
@@ -349,6 +380,13 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 
 	getFailure := errors.New("injected get failure")
 	controller.store = &repositoryModelEvaluationFaultStore{base: base, getErr: getFailure}
+	if _, branchErr := controller.startReadyEvaluationActive(
+		t.Context(),
+		draft.ID,
+		"token",
+	); !errors.Is(branchErr, getFailure) {
+		t.Fatalf("ready get failure=%v", branchErr)
+	}
 	for name, invoke := range map[string]func() error{
 		"preflight": func() error {
 			_, invokeErr := controller.Preflight(t.Context(), draft.ID, draft.Version)
@@ -375,6 +413,14 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 			t.Fatalf("%s get failure=%v", name, branchErr)
 		}
 	}
+	controller.store = &repositoryModelEvaluationFaultStore{base: base, getMissing: true}
+	if _, branchErr := controller.startReadyEvaluationActive(
+		t.Context(),
+		ready.ID,
+		"token",
+	); !errors.Is(branchErr, os.ErrNotExist) {
+		t.Fatalf("ready missing error=%v", branchErr)
+	}
 
 	controller.store = base
 	orphanDraft, err := base.Create(t.Context(), repositoryModelEvaluationCreateRequest("owner/orphan-preflight"))
@@ -393,13 +439,12 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed, resumeErr := controller.Resume(
+	if _, resumeErr := controller.Resume(
 		t.Context(),
 		orphanPreflight.ID,
 		orphanPreflight.Version,
-	); resumeErr != nil ||
-		resumed.Status != repoeval.StatusPreflighting {
-		t.Fatalf("orphan preflight resume=%#v err=%v", resumed, resumeErr)
+	); !errors.Is(resumeErr, repoeval.ErrInvalidTransition) {
+		t.Fatalf("orphan preflight resume err=%v", resumeErr)
 	}
 	orphanReady := seedReadyRepositoryModelEvaluation(t, controller, base, "owner/orphan-running")
 	orphanRunning, err := base.Update(
@@ -416,13 +461,12 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed, resumeErr := controller.Resume(
+	if _, resumeErr := controller.Resume(
 		t.Context(),
 		orphanRunning.ID,
 		orphanRunning.Version,
-	); resumeErr != nil ||
-		resumed.Status != repoeval.StatusRunning {
-		t.Fatalf("orphan running resume=%#v err=%v", resumed, resumeErr)
+	); !errors.Is(resumeErr, repoeval.ErrInvalidTransition) {
+		t.Fatalf("orphan running resume err=%v", resumeErr)
 	}
 	failedResume := seedFailedReadyRepositoryModelEvaluation(t, controller, base, "owner/direct-failed-resume")
 	failedToken, _, failedCancel, actionErr := controller.reserveActive(failedResume.ID)
@@ -453,8 +497,15 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	}
 	controller.recoverPreflight("blocked-recovery")
 	controller.recoverEvaluation("blocked-recovery")
+	controller.recoverReadyEvaluation("blocked-recovery")
 	blockedCancel()
 	controller.releaseActive("blocked-recovery", blockedToken)
+	missingToken, missingCtx, _, actionErr := controller.reserveActive(missingID)
+	if actionErr != nil {
+		t.Fatal(actionErr)
+	}
+	controller.wg.Add(1)
+	controller.executePreflight(missingCtx, missingID, missingToken, "wr_missing_preflight")
 }
 
 func TestRepositoryModelEvaluationControllerFaultStoreCoverage(t *testing.T) {
@@ -519,8 +570,22 @@ func TestRepositoryModelEvaluationControllerFaultStoreCoverage(t *testing.T) {
 		canceledDraft.ID,
 		canceledDraft.Version,
 		func(value *repoeval.Evaluation) error {
-			value.Status = repoeval.StatusCanceled
-			value.Progress.Stage = repoeval.ProgressCanceled
+			value.Status = repoeval.StatusPreflighting
+			value.Progress.Stage = repoeval.ProgressResolving
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceledDraft, err = base.Update(
+		t.Context(),
+		canceledDraft.ID,
+		canceledDraft.Version,
+		func(value *repoeval.Evaluation) error {
+			value.Status = repoeval.StatusFailed
+			value.Progress.Stage = repoeval.ProgressFailed
+			value.Failure = "preflight failed"
 			return nil
 		},
 	)
@@ -581,6 +646,12 @@ func TestRepositoryModelEvaluationControllerFaultStoreCoverage(t *testing.T) {
 
 	createFailure := errors.New("injected create failure")
 	controller.store = &repositoryModelEvaluationFaultStore{base: base, createErr: createFailure}
+	if _, branchErr := controller.Run(
+		t.Context(),
+		repositoryModelEvaluationCreateRequest("owner/run-create-fault"),
+	); !errors.Is(branchErr, createFailure) {
+		t.Fatalf("run create error=%v", branchErr)
+	}
 	if _, branchErr := controller.Restart(
 		t.Context(),
 		canceledDraft.ID,
@@ -725,6 +796,52 @@ func TestRepositoryModelEvaluationPreflightExecutionEdgeCoverage(t *testing.T) {
 	}
 	if got := anyMap(map[string]string{"value": "ok"}); got["value"] != "ok" {
 		t.Fatalf("decoded map=%v", got)
+	}
+}
+
+func TestRepositoryModelEvaluationPreflightPersistenceFailureCoverage(t *testing.T) {
+	for _, failureCall := range []int{1, 2} {
+		t.Run(fmt.Sprintf("update-%d", failureCall), func(t *testing.T) {
+			handler, _, _ := newRepositoryModelEvaluationTestHandler(t)
+			controller := newRepositoryModelEvaluationController(handler)
+			base, _, err := handler.repositoryModelEvaluationStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := repositoryModelEvaluationCreateRequest(
+				fmt.Sprintf("owner/preflight-update-%d", failureCall),
+			)
+			request.OneShot = true
+			request.InitialRunID = workflows.NewRunID()
+			preflighting, err := base.Create(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.store = &repositoryModelEvaluationFaultStore{
+				base:   base,
+				failAt: map[int]error{failureCall: errors.New("injected preflight persistence failure")},
+			}
+			controller.runWorkflow = func(
+				context.Context,
+				string,
+				string,
+				string,
+				map[string]any,
+				workflows.AgentUsageEventObserver,
+			) (*workflows.RunResult, error) {
+				return repositoryModelEvaluationPreflightResult(), nil
+			}
+			token, runCtx, _, reserveErr := controller.reserveActive(preflighting.ID)
+			if reserveErr != nil {
+				t.Fatal(reserveErr)
+			}
+			controller.wg.Add(1)
+			controller.executePreflight(runCtx, preflighting.ID, token, workflows.NewRunID())
+			failed, found, getErr := base.Get(t.Context(), preflighting.ID)
+			if getErr != nil || !found || failed.Status != repoeval.StatusFailed {
+				t.Fatalf("failed preflight=%#v found=%v err=%v", failed, found, getErr)
+			}
+		})
 	}
 }
 
@@ -873,17 +990,34 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 			t.Fatal(err)
 		}
 		ready := seedReadyRepositoryModelEvaluation(t, controller, store, "owner/config-ready")
-		canceled, err := store.Create(t.Context(), repositoryModelEvaluationCreateRequest("owner/config-canceled"))
+		failedPreflight, err := store.Create(
+			t.Context(),
+			repositoryModelEvaluationCreateRequest("owner/config-preflight-failed"),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		canceled, err = store.Update(
+		failedPreflight, err = store.Update(
 			t.Context(),
-			canceled.ID,
-			canceled.Version,
+			failedPreflight.ID,
+			failedPreflight.Version,
 			func(value *repoeval.Evaluation) error {
-				value.Status = repoeval.StatusCanceled
-				value.Progress.Stage = repoeval.ProgressCanceled
+				value.Status = repoeval.StatusPreflighting
+				value.Progress.Stage = repoeval.ProgressResolving
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failedPreflight, err = store.Update(
+			t.Context(),
+			failedPreflight.ID,
+			failedPreflight.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusFailed
+				value.Progress.Stage = repoeval.ProgressFailed
+				value.Failure = "preflight failed"
 				return nil
 			},
 		)
@@ -899,16 +1033,31 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 				_, actionErr := controller.Preflight(t.Context(), draft.ID, draft.Version)
 				return actionErr
 			},
+			"run": func() error {
+				_, actionErr := controller.Run(
+					t.Context(),
+					repositoryModelEvaluationCreateRequest("owner/config-run"),
+				)
+				return actionErr
+			},
 			"start": func() error {
 				_, actionErr := controller.StartEvaluation(t.Context(), ready.ID, ready.Version)
 				return actionErr
 			},
 			"resume preflight": func() error {
-				_, actionErr := controller.Resume(t.Context(), canceled.ID, canceled.Version)
+				_, actionErr := controller.Resume(t.Context(), failedPreflight.ID, failedPreflight.Version)
 				return actionErr
 			},
 			"resume execution": func() error {
 				_, actionErr := controller.Resume(t.Context(), failed.ID, failed.Version)
+				return actionErr
+			},
+			"ready recovery": func() error {
+				_, actionErr := controller.startReadyEvaluationActive(t.Context(), ready.ID, "token")
+				return actionErr
+			},
+			"start over": func() error {
+				_, actionErr := controller.Restart(t.Context(), failed.ID, failed.Version)
 				return actionErr
 			},
 		} {
@@ -940,15 +1089,35 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 		) {
 			t.Fatalf("preflight alias error=%v", branchErr)
 		}
-		canceled, err := store.Update(t.Context(), draft.ID, draft.Version, func(value *repoeval.Evaluation) error {
-			value.Status = repoeval.StatusCanceled
-			value.Progress.Stage = repoeval.ProgressCanceled
+		if _, branchErr := controller.Run(t.Context(), request); !errors.Is(
+			branchErr,
+			errRepositoryModelEvaluationUnavailableModel,
+		) {
+			t.Fatalf("run alias error=%v", branchErr)
+		}
+		preflighting, err := store.Update(t.Context(), draft.ID, draft.Version, func(value *repoeval.Evaluation) error {
+			value.Status = repoeval.StatusPreflighting
+			value.Progress.Stage = repoeval.ProgressResolving
 			return nil
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, branchErr := controller.Resume(t.Context(), canceled.ID, canceled.Version); !errors.Is(
+		failed, err := store.Update(
+			t.Context(),
+			preflighting.ID,
+			preflighting.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusFailed
+				value.Progress.Stage = repoeval.ProgressFailed
+				value.Failure = "preflight failed"
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, branchErr := controller.Resume(t.Context(), failed.ID, failed.Version); !errors.Is(
 			branchErr,
 			errRepositoryModelEvaluationUnavailableModel,
 		) {
@@ -968,6 +1137,12 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 			errRepositoryModelEvaluationUnavailableModel,
 		) {
 			t.Fatalf("execution resume alias error=%v", branchErr)
+		}
+		if _, branchErr := controller.Restart(t.Context(), unknownFailed.ID, unknownFailed.Version); !errors.Is(
+			branchErr,
+			errRepositoryModelEvaluationUnavailableModel,
+		) {
+			t.Fatalf("start-over alias error=%v", branchErr)
 		}
 	})
 }
@@ -1088,7 +1263,7 @@ func TestRepositoryModelEvaluationExecutionControlFlowCoverage(t *testing.T) {
 		controller := newRepositoryModelEvaluationController(handler)
 		base, _, _ := handler.repositoryModelEvaluationStore()
 		running := seedRunningRepositoryModelEvaluation(t, controller, base, "owner/duplicate-checkpoint")
-		batch := repositoryModelEvaluationBatches(running)[0]
+		batch := repositoryModelEvaluationPendingBatches(running)[0]
 		fault := &repositoryModelEvaluationFaultStore{base: base}
 		fault.beforeUpdate = func(call int) {
 			if call != 2 {

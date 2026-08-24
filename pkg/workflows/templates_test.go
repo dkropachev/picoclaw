@@ -42,6 +42,8 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	}
 	planner := byID["plan_scope"]
 	if planner.With["tools"] != "none" || planner.With["session"] != "ephemeral" ||
+		planner.With["account"] != "${{ inputs.account_ref }}" ||
+		planner.With["model"] != "${{ inputs.planner_model }}" ||
 		planner.With["scope_content"] != "metadata" ||
 		planner.With["scope"] != "${{ steps.scope_catalog.outputs.candidates }}" {
 		t.Fatalf("scope planner authority=%#v", planner.With)
@@ -54,12 +56,16 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" || plan.With["profile"] == nil {
 		t.Fatalf("plan=%#v", plan)
 	}
+	if profile := nativeMapValue(plan.With["profile"]); profile["account_ref"] != "${{ inputs.account_ref }}" {
+		t.Fatalf("plan profile account=%#v", profile)
+	}
 	managed, ok := review.With["managed"].(map[string]any)
 	if !ok || managed["reviewer_models"] != "${{ steps.plan.outputs.reviewerModels }}" ||
 		managed["max_tasks_per_chunk"] != 1 || managed["continue_on_child_error"] != true {
 		t.Fatalf("managed ensemble=%#v", review.With["managed"])
 	}
 	if review.With["tools"] != "none" || review.With["scope_content"] != "frozen_git" ||
+		review.With["account"] != "${{ steps.plan.outputs.accountRef }}" ||
 		review.With["scope"] != "${{ steps.freeze.outputs.files }}" ||
 		review.With["scope_snapshot"] != "${{ steps.freeze.outputs.token }}" {
 		t.Fatalf("review authority/scope=%#v", review.With)
@@ -432,10 +438,11 @@ type codeReviewTemplateAgentRunner struct {
 }
 
 func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[string]any, error) {
-	if req.AgentID != "main" || req.History != "none" || req.Cache != "session" {
-		r.t.Fatalf("agent request = %#v, want main/history none/cache session", req)
-	}
 	if strings.Contains(req.Prompt, "selecting files for a Codex-style code review") {
+		if req.AgentID != "main" || req.History != "none" || req.Cache != "session" ||
+			req.EphemeralSession || req.SuppressDefaultContext {
+			r.t.Fatalf("filter agent request = %#v", req)
+		}
 		r.filtered = true
 		if !reflect.DeepEqual(r.toolRunner.actions, []string{"acquire", "release"}) {
 			r.t.Fatalf(
@@ -474,6 +481,11 @@ func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentReq
 			"structured_valid": true,
 		}, nil
 	}
+	if req.AgentID != "main" || req.History != "none" || req.Cache != "none" ||
+		!req.EphemeralSession || req.Session != "" || !req.SuppressDefaultContext ||
+		req.ReviewSystemPrompt != RepositoryBugFinderSystemPrompt {
+		r.t.Fatalf("review agent request = %#v", req)
+	}
 
 	r.called = true
 	if !r.filtered {
@@ -504,11 +516,19 @@ func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentReq
 	if req.Output == nil || !req.Output.Enabled() {
 		r.t.Fatal("agent output contract is not enabled")
 	}
+	schema := nativeMapValue(req.Output.Schema)
+	properties := nativeMapValue(schema["properties"])
+	if _, exists := properties["tests"]; exists {
+		r.t.Fatalf("diagnosis-only code review still exposes tests: %#v", properties)
+	}
+	finding := nativeMapValue(nativeMapValue(properties["findings"])["items"])
+	if _, exists := nativeMapValue(finding["properties"])["recommendation"]; exists {
+		r.t.Fatalf("diagnosis-only code review still exposes recommendation: %#v", finding)
+	}
 	structured := map[string]any{
 		"summary":       "No findings in selected files.",
 		"reviewedFiles": []any{"src/app.go"},
 		"findings":      []any{},
-		"tests":         []any{"go test ./..."},
 		"residualRisks": []any{},
 	}
 	raw, err := json.Marshal(structured)

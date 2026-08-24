@@ -38,16 +38,19 @@ type fakeAgentRunner struct {
 }
 
 type repositoryProfileAgentStub struct {
-	profile    RepositoryReviewModelProfile
-	profileErr error
-	request    AgentRequest
+	profile             RepositoryReviewModelProfile
+	profileErr          error
+	requestedAccountRef string
+	request             AgentRequest
 }
 
 func (r *repositoryProfileAgentStub) ResolveRepositoryReviewProfile(
 	_ context.Context,
 	_ string,
+	requestedAccountRef string,
 	_ []string,
 ) (RepositoryReviewModelProfile, error) {
+	r.requestedAccountRef = requestedAccountRef
 	return r.profile, r.profileErr
 }
 
@@ -135,6 +138,43 @@ func TestAgentStepForwardsExplicitModelAlias(t *testing.T) {
 	}
 }
 
+func TestRunStepTargetFailsClosedWhenDispatchCapabilityIsUnavailable(t *testing.T) {
+	executor := &Executor{}
+	for _, test := range []struct {
+		name string
+		step Step
+		with map[string]any
+		want string
+	}{
+		{name: "tool runner", step: Step{Uses: "tool/read"}, want: "tool runner not configured"},
+		{name: "mcp runner", step: Step{Uses: "mcp/github/get"}, want: "tool runner not configured"},
+		{name: "agent runner", step: Step{Uses: "agent/main"}, want: "agent runner not configured"},
+		{
+			name: "invalid agent output", step: Step{Uses: "agent/main"},
+			with: map[string]any{"output": map[string]any{"format": "unsupported"}},
+			want: "output format",
+		},
+		{
+			name: "function runner", step: Step{Uses: "function/not-native"},
+			want: "function runner not configured",
+		},
+		{name: "unknown target", step: Step{Uses: "custom/target"}, want: "unsupported uses target"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := executor
+			if test.name == "invalid agent output" {
+				candidate = &Executor{Agents: &fakeAgentRunner{}}
+			}
+			_, err := candidate.runStepTarget(
+				t.Context(), test.step, test.with, ExecutionContext{},
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runStepTarget() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestExecutorStepActivityObserverRunsAtActualDispatchBoundary(t *testing.T) {
 	workflow := parseWorkflow(t, `name: Step activity
 on:
@@ -169,6 +209,57 @@ jobs:
 		observed[0].JobID != "main" || observed[0].StepID != "inspect" ||
 		observed[0].Uses != "tool/inspect" || len(tools.requests) != 1 {
 		t.Fatalf("step activity = %#v, tool requests = %#v", observed, tools.requests)
+	}
+}
+
+type managedActivityAgentRunner struct{}
+
+func (managedActivityAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[string]any, error) {
+	if req.ManagedChildObserver == nil {
+		return nil, errors.New("managed child observer is nil")
+	}
+	for _, activity := range []ManagedChildActivity{
+		{Phase: ManagedChildStarted, Index: 1, Total: 1, Label: "child", ModelAlias: "model-a", ScopeCount: 2},
+		{Phase: ManagedChildCompleted, Index: 1, Total: 1, Label: "child", ModelAlias: "model-a", ScopeCount: 2, Success: true},
+	} {
+		if err := req.ManagedChildObserver(activity); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"text": "done"}, nil
+}
+
+func TestExecutorManagedChildActivityAddsWorkflowIdentity(t *testing.T) {
+	workflow := parseWorkflow(t, `name: Managed activity
+on:
+  workflow_dispatch:
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: candidates
+        uses: agent/main
+`)
+	var events []ManagedChildActivityEvent
+	executor := &Executor{
+		WorkspaceDir: t.TempDir(),
+		Agents:       managedActivityAgentRunner{},
+		ManagedChildActivityObserver: func(event ManagedChildActivityEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	}
+	result, err := executor.Run(t.Context(), RunRequest{
+		RunID: "wr-managed-activity", Workflow: workflow, WorkflowRef: "inline",
+	})
+	if err != nil || result.Status != RunStatusSucceeded || len(events) != 2 {
+		t.Fatalf("managed activity run = %#v, events = %#v, err = %v", result, events, err)
+	}
+	for _, event := range events {
+		if event.RunID != "wr-managed-activity" || event.JobID != "main" ||
+			event.StepID != "candidates" || event.Index != 1 || event.Total != 1 {
+			t.Fatalf("managed activity identity = %#v", event)
+		}
 	}
 }
 
@@ -265,7 +356,7 @@ func TestRepositoryReviewAgentContextReservesControllerDeadline(t *testing.T) {
 func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testing.T) {
 	base := map[string]any{"agent": "", "profile": map[string]any{
 		"schema": "repository-bug-finder-v1", "models": " review-a, review-a; review-b ",
-		"max_content_bytes": 128 << 10,
+		"account_ref": "review-account", "max_content_bytes": 128 << 10,
 	}}
 	if _, err := (&Executor{Agents: &fakeAgentRunner{}}).bindRepositoryReviewModelProfile(
 		context.Background(), base,
@@ -280,7 +371,8 @@ func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testin
 	}
 
 	stub := &repositoryProfileAgentStub{profile: RepositoryReviewModelProfile{
-		Revision: "sha256:models", ReviewerModels: []string{"review-a", "review-b"}, MaxContentBytes: 64 << 10,
+		Revision: "sha256:models", AccountRef: "review-account",
+		ReviewerModels: []string{"review-a", "review-b"}, MaxContentBytes: 64 << 10,
 	}}
 	bound, err := (&Executor{Agents: stub}).bindRepositoryReviewModelProfile(context.Background(), base)
 	if err != nil {
@@ -288,9 +380,13 @@ func TestBindRepositoryReviewModelProfileValidatesAndFreezesResolution(t *testin
 	}
 	profile := bound["profile"].(map[string]any)
 	if profile["model_graph_revision"] != "sha256:models" || profile["max_content_bytes"] != 64<<10 ||
+		profile["account_ref"] != "review-account" || bound["resolved_account_ref"] != "review-account" ||
 		bound["resolved_max_content_bytes"] != 64<<10 ||
 		!reflect.DeepEqual(profile["models"], []string{"review-a", "review-b"}) {
 		t.Fatalf("bound repository review profile = %#v", bound)
+	}
+	if stub.requestedAccountRef != "review-account" {
+		t.Fatalf("requested account ref = %q", stub.requestedAccountRef)
 	}
 	if base["resolved_max_content_bytes"] != nil {
 		t.Fatalf("profile binding mutated input = %#v", base)
@@ -722,6 +818,7 @@ jobs:
       - id: review
         uses: agent/reviewer
         with:
+          account: review-account
           managed: auto
           prompt: Review the scope.
           scope:
@@ -756,6 +853,9 @@ jobs:
 	}
 	if req.Managed != "auto" {
 		t.Fatalf("managed = %#v, want auto", req.Managed)
+	}
+	if req.AccountRef != "review-account" {
+		t.Fatalf("account ref = %q, want review-account", req.AccountRef)
 	}
 	scope, ok := req.Scope.([]any)
 	if !ok || len(scope) != 1 {

@@ -51,6 +51,9 @@ type Executor struct {
 	AgentCallAdmission AgentCallAdmissionEventObserver
 	// StepActivityObserver runs immediately before each concrete step target.
 	StepActivityObserver StepActivityObserver
+	// ManagedChildActivityObserver receives managed child lifecycle events with
+	// exact workflow identity.
+	ManagedChildActivityObserver ManagedChildActivityEventObserver
 	// WorkflowSnapshots is an immutable, pre-admitted reusable closure. When
 	// present, the executor uses these exact parsed bytes instead of reloading
 	// definitions after admission.
@@ -2315,10 +2318,13 @@ func (e *Executor) runStepTarget(
 		)
 		repositoryScopePlanner := strings.TrimSpace(execCtx.WorkflowRef) == RepositoryBugFinderWorkflowRef &&
 			step.ID == "plan_scope"
+		repositoryCodeReview := strings.TrimSpace(execCtx.WorkflowRef) == CodeReviewWorkflowRef &&
+			step.ID == "review" && scopeContent == "frozen_git"
 		suppressDefaultContext := sessionMode == AgentSessionEphemeral &&
 			agentToolsMode(with) == AgentToolsNone &&
 			(strings.TrimSpace(execCtx.WorkflowRef) == RepositoryBugFinderWorkflowRef &&
 				step.ID == "review" && scopeContent == "frozen_git" ||
+				repositoryCodeReview ||
 				repositoryReviewProfile && scopeContent == "immutable_git" ||
 				repositoryScopePlanner && scopeContent == "metadata" ||
 				repositoryEvaluationProfile &&
@@ -2355,8 +2361,21 @@ func (e *Executor) runStepTarget(
 				})
 			}
 		}
+		var managedChildObserver ManagedChildActivityObserver
+		if e.ManagedChildActivityObserver != nil {
+			var managedChildObserverMu sync.Mutex
+			managedChildObserver = func(activity ManagedChildActivity) error {
+				managedChildObserverMu.Lock()
+				defer managedChildObserverMu.Unlock()
+				return e.ManagedChildActivityObserver(ManagedChildActivityEvent{
+					RunID: execCtx.RunID, JobID: execCtx.JobID, StepID: execCtx.StepID,
+					ManagedChildActivity: activity,
+				})
+			}
+		}
 		outputs, runErr := e.Agents.RunAgent(agentCtx, AgentRequest{
 			AgentID:                agentID,
+			AccountRef:             stringFromMap(with, "account"),
 			Model:                  stringFromMap(with, "model"),
 			Message:                stringFromMap(with, "message"),
 			Prompt:                 stringFromMap(with, "prompt"),
@@ -2377,6 +2396,7 @@ func (e *Executor) runStepTarget(
 			PrivateContext:         execCtx.privateValues != nil || frozenSession != nil,
 			FrozenReadOnlySession:  frozenSession,
 			UsageObserver:          usageObserver,
+			ManagedChildObserver:   managedChildObserver,
 			CallAdmission:          callAdmission,
 		})
 		if frozenSession != nil && outputs != nil {
@@ -2447,11 +2467,18 @@ func (e *Executor) bindRepositoryReviewModelProfile(
 	}
 	requested := repositoryReviewModelNames(profile["models"])
 	profile["models"] = append([]string(nil), requested...)
+	requestedAccountRef := nativeAnyString(profile["account_ref"])
+	profile["account_ref"] = requestedAccountRef
 	agentID := strings.TrimSpace(stringFromMap(with, "agent"))
 	if agentID == "" {
 		agentID = "main"
 	}
-	resolved, err := resolver.ResolveRepositoryReviewProfile(ctx, agentID, requested)
+	resolved, err := resolver.ResolveRepositoryReviewProfile(
+		ctx,
+		agentID,
+		requestedAccountRef,
+		requested,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repository review model profile: %w", err)
 	}
@@ -2462,6 +2489,7 @@ func (e *Executor) bindRepositoryReviewModelProfile(
 	}
 	bound := cloneMap(with)
 	profile["model_graph_revision"] = resolved.Revision
+	profile["account_ref"] = resolved.AccountRef
 	profile["effective_models"] = append([]string(nil), resolved.ReviewerModels...)
 	profile["include_default_reviewer"] = resolved.IncludeDefaultReviewer
 	requestedMaxContent := int(nativeInt64Any(profile, "max_content_bytes"))
@@ -2471,6 +2499,7 @@ func (e *Executor) bindRepositoryReviewModelProfile(
 	profile["max_content_bytes"] = requestedMaxContent
 	bound["profile"] = profile
 	bound["resolved_reviewer_models"] = append([]string(nil), resolved.ReviewerModels...)
+	bound["resolved_account_ref"] = resolved.AccountRef
 	bound["include_default_reviewer"] = resolved.IncludeDefaultReviewer
 	bound["resolved_max_content_bytes"] = requestedMaxContent
 	return bound, nil

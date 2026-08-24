@@ -62,7 +62,6 @@ export interface RepositoryReviewFinding {
   message?: string
   evidence: string
   impact: string
-  recommendation: string
   validation: RepositoryReviewValidation
   context_ids: string[]
   models: string[]
@@ -85,7 +84,6 @@ export interface RepositoryReviewFindingObservation {
   message?: string
   evidence: string
   impact: string
-  recommendation: string
   validation: RepositoryReviewValidation
 }
 
@@ -182,14 +180,13 @@ export type RepositoryReviewPauseReason =
   | "token_budget"
   | "cost_budget"
   | "account_limit"
+  | "guard_expression"
   | "run_failed"
   | "service_restart"
 
 export interface ReviewModelPrice {
   input_price_per_1m: number
   output_price_per_1m: number
-  subscription?: boolean
-  equivalent_model?: string
 }
 
 export interface ReviewModelOption extends ReviewModelPrice {
@@ -217,21 +214,16 @@ export interface ReviewAccountLimitEntry {
 
 export interface ReviewAccountOption {
   id: string
-  provider: string
+  provider?: string
   label: string
   status: string
+  default?: boolean
+  models?: string[]
   entries: ReviewAccountLimitEntry[]
 }
 
 export interface RepositoryReviewAutomationBudget {
-  max_total_tokens: number
-  max_estimated_cost_usd: number
-  account_ids: string[]
-  min_remaining_percent: number
-  min_remaining_percent_by_window: Record<string, number>
-  auto_resume: boolean
-  pause_on_unknown: boolean
-  check_interval_seconds: number
+  guard_expression: string
 }
 
 export interface RepositoryReviewTokenUsage {
@@ -302,6 +294,8 @@ export interface RepositoryReviewAutomationConfig {
   repository: string
   ref: string
   target: string
+  account_ref: string
+  effective_account_ref?: string
   review_focus: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_models: string[]
@@ -310,15 +304,44 @@ export interface RepositoryReviewAutomationConfig {
   max_files_per_run: number
   max_content_bytes: number
   max_parallel_children: number
-  estimated_output_tokens: number
   auto_continue: boolean
   model_prices: Record<string, ReviewModelPrice>
   budget: RepositoryReviewAutomationBudget
 }
 
+export interface RepositoryReviewProfileConfig {
+  name: string
+  account_ref: string
+  review_focus: string
+  scope_policy: RepositoryReviewScopePolicy
+  reviewer_model: string
+  force: boolean
+  auto_continue: boolean
+  max_files_per_run: number
+  max_content_bytes: number
+  max_parallel_children: number
+  budget: RepositoryReviewAutomationBudget
+}
+
+export interface RepositoryReviewProfile extends RepositoryReviewProfileConfig {
+  id: string
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryReviewRepositoryConfigInput {
+  repository: string
+  branch: string
+  profile_id: string
+}
+
 export interface RepositoryReviewAutomation extends RepositoryReviewAutomationConfig {
   id: string
   version: number
+  profile_id: string
+  profile_version: number
+  branch: string
   status: RepositoryReviewAutomationStatus
   pause_reason?: RepositoryReviewPauseReason
   pause_detail?: string
@@ -330,7 +353,6 @@ export interface RepositoryReviewAutomation extends RepositoryReviewAutomationCo
   model_stats: RepositoryReviewModelStats[]
   account_limits: RepositoryReviewAccountSnapshot[]
   scope_plan?: RepositoryReviewScopePlan
-  next_check_at?: string
   started_at?: string
   completed_at?: string
   created_at: string
@@ -383,6 +405,69 @@ export async function listRepositoryReviewAutomations(
   }
 }
 
+export async function listRepositoryReviewProfiles(
+  signal?: AbortSignal,
+): Promise<{ profiles: RepositoryReviewProfile[] }> {
+  const page = await requestJSON<{ profiles?: RepositoryReviewProfile[] }>(
+    `${apiRoot}/profiles`,
+    undefined,
+    signal,
+  )
+  return { profiles: (page.profiles ?? []).map(normalizeProfile) }
+}
+
+export async function getRepositoryReviewProfile(
+  profileID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewProfile> {
+  return profileFromMutation(
+    await requestJSON<RepositoryReviewProfile | ProfileMutationResult>(
+      profilePath(profileID),
+      undefined,
+      signal,
+    ),
+  )
+}
+
+export async function createRepositoryReviewProfile(
+  input: RepositoryReviewProfileConfig,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewProfile> {
+  return profileFromMutation(
+    await requestJSON<RepositoryReviewProfile | ProfileMutationResult>(
+      `${apiRoot}/profiles`,
+      jsonMutation("POST", input),
+      signal,
+    ),
+  )
+}
+
+export async function updateRepositoryReviewProfile(
+  profileID: string,
+  input: RepositoryReviewProfileConfig & { expected_version: number },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewProfile> {
+  return profileFromMutation(
+    await requestJSON<RepositoryReviewProfile | ProfileMutationResult>(
+      profilePath(profileID),
+      jsonMutation("PATCH", input),
+      signal,
+    ),
+  )
+}
+
+export async function deleteRepositoryReviewProfile(
+  profileID: string,
+  input: { expected_version: number },
+  signal?: AbortSignal,
+): Promise<void> {
+  await requestVoid(
+    profilePath(profileID),
+    jsonMutation("DELETE", input),
+    signal,
+  )
+}
+
 export async function getRepositoryReviewAutomationOptions(
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomationOptions> {
@@ -405,7 +490,7 @@ export async function getRepositoryReviewAutomationOptions(
 }
 
 export async function createRepositoryReviewAutomation(
-  input: RepositoryReviewAutomationConfig,
+  input: RepositoryReviewRepositoryConfigInput,
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return automationFromMutation(
@@ -419,7 +504,7 @@ export async function createRepositoryReviewAutomation(
 
 export async function updateRepositoryReviewAutomation(
   automationID: string,
-  input: RepositoryReviewAutomationConfig & { expected_version: number },
+  input: RepositoryReviewRepositoryConfigInput & { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return automationFromMutation(
@@ -461,7 +546,7 @@ export async function pauseRepositoryReviewAutomation(
 
 export async function resumeRepositoryReviewAutomation(
   automationID: string,
-  input: { expected_version: number; reset_budget?: boolean },
+  input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return mutateAutomationAction(automationID, "resume", input, signal)
@@ -469,7 +554,7 @@ export async function resumeRepositoryReviewAutomation(
 
 export async function restartRepositoryReviewAutomation(
   automationID: string,
-  input: { expected_version: number; reset_budget?: boolean },
+  input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return mutateAutomationAction(automationID, "restart", input, signal)
@@ -645,10 +730,14 @@ interface AutomationMutationResult {
   automation: RepositoryReviewAutomation
 }
 
+interface ProfileMutationResult {
+  profile: RepositoryReviewProfile
+}
+
 async function mutateAutomationAction(
   automationID: string,
   action: "start" | "pause" | "resume" | "restart",
-  input: { expected_version: number; reset_budget?: boolean },
+  input: { expected_version: number },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return automationFromMutation(
@@ -666,6 +755,39 @@ function automationFromMutation(
   return normalizeAutomation("automation" in value ? value.automation : value)
 }
 
+function profileFromMutation(
+  value: RepositoryReviewProfile | ProfileMutationResult,
+): RepositoryReviewProfile {
+  return normalizeProfile("profile" in value ? value.profile : value)
+}
+
+function normalizeProfile(
+  profile: RepositoryReviewProfile,
+): RepositoryReviewProfile {
+  return {
+    ...profile,
+    name: profile.name ?? "Review profile",
+    account_ref: profile.account_ref ?? "",
+    review_focus: profile.review_focus ?? "",
+    reviewer_model: profile.reviewer_model ?? "",
+    force: profile.force ?? false,
+    auto_continue: profile.auto_continue ?? true,
+    max_files_per_run: profile.max_files_per_run ?? 24,
+    max_content_bytes: profile.max_content_bytes ?? 524_288,
+    max_parallel_children: profile.max_parallel_children ?? 8,
+    scope_policy: {
+      code_types:
+        profile.scope_policy?.code_types?.length > 0
+          ? profile.scope_policy.code_types
+          : ["hotpath-code", "code"],
+      include_folders: profile.scope_policy?.include_folders ?? [],
+      exclude_folders: profile.scope_policy?.exclude_folders ?? [],
+      free_text: profile.scope_policy?.free_text ?? "",
+    },
+    budget: normalizeBudget(profile.budget),
+  }
+}
+
 function normalizeAutomation(
   automation: RepositoryReviewAutomation,
 ): RepositoryReviewAutomation {
@@ -673,8 +795,13 @@ function normalizeAutomation(
     ...automation,
     name: automation.name ?? automation.repository ?? "Repository review",
     repository: automation.repository ?? "",
-    ref: automation.ref ?? "HEAD",
+    profile_id: automation.profile_id ?? "",
+    profile_version: automation.profile_version ?? 0,
+    branch: automation.branch ?? automation.ref ?? "",
+    ref: automation.branch ?? automation.ref ?? "",
     target: automation.target ?? "all",
+    account_ref: automation.account_ref ?? "",
+    effective_account_ref: automation.effective_account_ref ?? "",
     review_focus: automation.review_focus ?? "",
     scope_policy: {
       code_types:
@@ -690,22 +817,11 @@ function normalizeAutomation(
     force: automation.force ?? false,
     max_files_per_run: automation.max_files_per_run ?? 24,
     max_content_bytes: automation.max_content_bytes ?? 524_288,
-    max_parallel_children: automation.max_parallel_children ?? 2,
-    estimated_output_tokens: automation.estimated_output_tokens ?? 4_096,
+    max_parallel_children: automation.max_parallel_children ?? 8,
     auto_continue: automation.auto_continue ?? true,
     run_ids: automation.run_ids ?? [],
     model_prices: automation.model_prices ?? {},
-    budget: {
-      max_total_tokens: automation.budget?.max_total_tokens ?? 0,
-      max_estimated_cost_usd: automation.budget?.max_estimated_cost_usd ?? 0,
-      account_ids: automation.budget?.account_ids ?? [],
-      min_remaining_percent: automation.budget?.min_remaining_percent ?? 0,
-      min_remaining_percent_by_window:
-        automation.budget?.min_remaining_percent_by_window ?? {},
-      auto_resume: automation.budget?.auto_resume ?? false,
-      pause_on_unknown: automation.budget?.pause_on_unknown ?? true,
-      check_interval_seconds: automation.budget?.check_interval_seconds ?? 900,
-    },
+    budget: normalizeBudget(automation.budget),
     usage: normalizeUsage(automation.usage),
     estimated_cost_usd: automation.estimated_cost_usd ?? 0,
     progress: {
@@ -732,9 +848,16 @@ function normalizeAutomation(
           },
         }
       : undefined,
-    next_check_at: normalizeOptionalTimestamp(automation.next_check_at),
     started_at: normalizeOptionalTimestamp(automation.started_at),
     completed_at: normalizeOptionalTimestamp(automation.completed_at),
+  }
+}
+
+function normalizeBudget(
+  budget?: Partial<RepositoryReviewAutomationBudget>,
+): RepositoryReviewAutomationBudget {
+  return {
+    guard_expression: budget?.guard_expression ?? "",
   }
 }
 
@@ -874,6 +997,10 @@ function repositoryPath(repositoryID: string): string {
 
 function automationPath(automationID: string): string {
   return `${apiRoot}/automations/${encodeURIComponent(automationID)}`
+}
+
+function profilePath(profileID: string): string {
+  return `${apiRoot}/profiles/${encodeURIComponent(profileID)}`
 }
 
 function jsonMutation(

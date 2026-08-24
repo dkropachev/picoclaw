@@ -22,6 +22,9 @@ const smokeRoutes = [
   "/event-sources",
   "/pull-requests",
   "/repository-reviews",
+  "/repository-reviews/repositories",
+  "/repository-reviews/profiles",
+  "/repository-reviews/results",
   "/model-evaluations",
   "/logs",
   "/agent/agents",
@@ -1321,6 +1324,7 @@ async function mockLauncherApis(
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
   let currentModelEvaluation: Record<string, unknown> | null = null
+  let modelEvaluationDetailReads = 0
 
   const modelEvaluationFromBody = (
     body: Record<string, unknown>,
@@ -1705,6 +1709,63 @@ async function mockLauncherApis(
               : [],
           })
         }
+        if (method === "POST" && path === "/api/model-evaluations/run") {
+          const created = modelEvaluationFromBody(body ?? {})
+          currentModelEvaluation = {
+            ...created,
+            status: "running",
+            progress: {
+              stage: "candidate_execution",
+              languages: {
+                go: {
+                  available_files: 4,
+                  selected_files: 2,
+                  completed_files: 1,
+                  selected_bytes: 12_000,
+                  regions: ["pkg", "cmd"],
+                  limited: false,
+                },
+              },
+              total_files: 4,
+              selected_files: 2,
+              completed_files: 1,
+              total_tasks: 4,
+              completed_tasks: 2,
+              current_batch: 1,
+              total_batches: 2,
+              completed_calls: 1,
+              total_calls: 4,
+              failed_calls: 0,
+              active_children: [
+                {
+                  index: 2,
+                  label: "scope chunk 1 of 2, reviewer 2 of 2 (code)",
+                  model_alias: "code",
+                  scope_count: 2,
+                  started_at: "2026-08-24T09:45:14Z",
+                },
+                {
+                  index: 3,
+                  label: "scope chunk 2 of 2, reviewer 1 of 2 (fast)",
+                  model_alias: "fast",
+                  scope_count: 2,
+                  started_at: "2026-08-24T09:45:15Z",
+                },
+              ],
+              message: "Running candidate models.",
+              current_model: "code",
+              current_path: "pkg/service.go",
+              percent: 40,
+            },
+            run_ids: ["wr_selector", "wr_candidate"],
+          }
+          modelEvaluationDetailReads = 0
+          return json(
+            route,
+            { evaluation: structuredClone(currentModelEvaluation) },
+            202,
+          )
+        }
         if (method === "POST" && path === "/api/model-evaluations") {
           currentModelEvaluation = modelEvaluationFromBody(body ?? {})
           return json(
@@ -1727,7 +1788,7 @@ async function mockLauncherApis(
           })
         }
         const actionMatch = path.match(
-          /^\/api\/model-evaluations\/([^/]+)\/(preflight|start|cancel|resume|restart)$/,
+          /^\/api\/model-evaluations\/([^/]+)\/(preflight|start|run|cancel|resume|restart)$/,
         )
         if (method === "POST" && actionMatch && currentModelEvaluation) {
           const action = actionMatch[2]
@@ -1759,7 +1820,11 @@ async function mockLauncherApis(
               },
               run_ids: ["wr_selector"],
             }
-          } else if (action === "start") {
+          } else if (
+            action === "start" ||
+            action === "run" ||
+            action === "resume"
+          ) {
             currentModelEvaluation = {
               ...currentModelEvaluation,
               version,
@@ -1782,6 +1847,7 @@ async function mockLauncherApis(
                 ...(currentModelEvaluation.progress as Record<string, unknown>),
                 stage: "canceled",
                 message: "Canceled.",
+                active_children: [],
               },
             }
           }
@@ -1794,6 +1860,111 @@ async function mockLauncherApis(
         const detailMatch = path.match(/^\/api\/model-evaluations\/([^/]+)$/)
         if (detailMatch && currentModelEvaluation) {
           if (method === "GET") {
+            modelEvaluationDetailReads += 1
+            if (
+              currentModelEvaluation.status === "running" &&
+              modelEvaluationDetailReads >= 2
+            ) {
+              currentModelEvaluation = {
+                ...currentModelEvaluation,
+                version: Number(currentModelEvaluation.version) + 1,
+                status: "completed",
+                progress: {
+                  ...(currentModelEvaluation.progress as Record<
+                    string,
+                    unknown
+                  >),
+                  stage: "completed",
+                  message: "Repository model evaluation completed.",
+                  completed_files: 2,
+                  completed_tasks: 4,
+                  completed_calls: 4,
+                  active_children: [],
+                  current_model: "",
+                  current_path: "",
+                  percent: 100,
+                },
+                usage: {
+                  requests: 12,
+                  input_tokens: 120_000,
+                  cached_input_tokens: 10_000,
+                  output_tokens: 24_000,
+                  reasoning_tokens: 8_000,
+                  duration_millis: 180_000,
+                },
+                comparisons: [
+                  {
+                    model_alias: "code",
+                    concrete_models: { "gpt-code": 2 },
+                    completion: "completed",
+                    failures: 0,
+                    rank: 1,
+                    overall_score: 92.5,
+                    scores: {
+                      correctness: 95,
+                      evidence: 93,
+                      coverage: 88,
+                      actionability: 94,
+                    },
+                    languages: ["go"],
+                    regions: ["pkg", "cmd"],
+                    files_analyzed: 2,
+                    bytes_analyzed: 12_000,
+                    confirmed_findings: 8,
+                    unsupported_claims: 1,
+                    unsupported_files: 1,
+                    usage: {
+                      requests: 4,
+                      input_tokens: 40_000,
+                      cached_input_tokens: 0,
+                      output_tokens: 10_000,
+                      reasoning_tokens: 4_000,
+                      duration_millis: 120_000,
+                    },
+                    verdict: "Best evidence-grounded analysis.",
+                    strengths: ["Precise source evidence"],
+                    limitations: ["Higher cumulative model time"],
+                  },
+                  {
+                    model_alias: "fast",
+                    concrete_models: { "gpt-fast": 2 },
+                    completion: "completed",
+                    failures: 0,
+                    rank: 2,
+                    overall_score: 84,
+                    scores: {
+                      correctness: 86,
+                      evidence: 85,
+                      coverage: 76,
+                      actionability: 82,
+                    },
+                    languages: ["go"],
+                    regions: ["pkg", "cmd"],
+                    files_analyzed: 2,
+                    bytes_analyzed: 12_000,
+                    confirmed_findings: 5,
+                    unsupported_claims: 2,
+                    unsupported_files: 2,
+                    usage: {
+                      requests: 4,
+                      input_tokens: 40_000,
+                      cached_input_tokens: 0,
+                      output_tokens: 6_000,
+                      reasoning_tokens: 2_000,
+                      duration_millis: 60_000,
+                    },
+                    verdict: "Fast, but materially narrower.",
+                    strengths: ["Lower cumulative model time"],
+                    limitations: ["Missed important findings"],
+                  },
+                ],
+                warnings: [
+                  "Quality scores are comparative AI judgments, not ground truth.",
+                ],
+                finished_at: "2026-08-21T12:03:00Z",
+                updated_at: "2026-08-21T12:03:00Z",
+              }
+            }
             return json(route, {
               evaluation: structuredClone(currentModelEvaluation),
             })
@@ -2881,6 +3052,8 @@ async function mockLauncherApis(
           return json(route, { repositories: [] })
         case "/api/repository-reviews/automations":
           return json(route, { automations: [] })
+        case "/api/repository-reviews/profiles":
+          return json(route, { profiles: [] })
         case "/api/repository-reviews/automation-options":
           return json(route, { models: [], accounts: [] })
         case "/api/model-evaluations":
@@ -3418,7 +3591,7 @@ for (const routePath of smokeRoutes) {
   })
 }
 
-test("model evaluations create, preflight, start, and cancel a bounded corpus", async ({
+test("model review probes compare models without producing findings", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -3430,8 +3603,13 @@ test("model evaluations create, preflight, start, and cancel a bounded corpus", 
     modelEvaluationRequests: requests,
   })
   const workspace = page.getByRole("region", {
-    name: "Model evaluation workspace",
+    name: "Model probe workspace",
   })
+
+  await expect(workspace.getByText(/Comparison-only flow/)).toBeVisible()
+  await expect(
+    workspace.getByText(/do not create repository findings/),
+  ).toBeVisible()
 
   await workspace.getByLabel("Repository", { exact: true }).fill("owner/repo")
   await workspace
@@ -3440,35 +3618,77 @@ test("model evaluations create, preflight, start, and cancel a bounded corpus", 
   await workspace
     .getByRole("checkbox", { name: "Select candidate model fast" })
     .check()
+  await workspace.getByRole("button", { name: /^Advanced/ }).click()
   await workspace.getByLabel("File selector model").selectOption("review")
   await workspace.getByLabel("Judge and analyzer model").selectOption("review")
   await workspace.getByLabel("Include folders").fill("pkg\ncmd")
-  await workspace.getByRole("button", { name: "Create evaluation" }).click()
+  await workspace.getByRole("button", { name: "Run probe" }).click()
 
   await expect(
-    workspace.getByRole("button", { name: "Analyze repository" }),
-  ).toBeEnabled()
-  await workspace.getByRole("button", { name: "Analyze repository" }).click()
-  await expect(workspace.getByText("Corpus by language")).toBeVisible()
-  await expect(workspace.getByText("Corpus preview")).toBeVisible()
-  await expect(workspace.getByText(/Commit a{40}/)).toBeVisible()
-  await workspace.getByRole("button", { name: "Start evaluation" }).click()
-
-  await expect(
-    workspace.getByRole("progressbar", { name: "Evaluation progress" }),
+    workspace.getByRole("progressbar", { name: "Model probe progress" }),
   ).toHaveAttribute("aria-valuenow", "40")
   await expect(
     workspace.getByText("Model code · File pkg/service.go"),
   ).toBeVisible()
-  await workspace.getByRole("button", { name: "Cancel" }).click()
-  await expect(workspace.getByText("Canceled.")).toBeVisible()
-  await expect(workspace.getByRole("button", { name: "Resume" })).toBeVisible()
+  const candidateCalls = workspace.getByRole("region", {
+    name: "Candidate call progress",
+  })
+  await expect(candidateCalls.getByText("Batch 1/2")).toBeVisible()
+  await expect(candidateCalls.getByText("1/4 candidate calls")).toBeVisible()
+  await expect(candidateCalls.getByText("2 active")).toBeVisible()
+  await expect(
+    workspace.getByText("Repository model evaluation completed."),
+  ).toBeVisible({ timeout: 5_000 })
+  await expect(workspace.getByText("Visual report ready")).toBeVisible()
+  await expect(
+    workspace.getByLabel("Repository", { exact: true }),
+  ).toBeDisabled()
+  await expect(
+    workspace.getByRole("button", { name: "Run probe" }),
+  ).toHaveCount(0)
+  await expect(workspace.getByRole("button", { name: "Restart" })).toHaveCount(
+    0,
+  )
+  await expect(
+    workspace.getByRole("button", { name: "Start over" }),
+  ).toHaveCount(0)
+  await expect(workspace.getByRole("button", { name: "Delete" })).toHaveCount(0)
+
+  await workspace.getByRole("button", { name: "View full report" }).click()
+  await expect(page).toHaveURL(/\/model-evaluations\/rme_[0-9a-f]{32}\/report$/)
+  const report = page.getByRole("region", { name: "Model probe report" })
+  await expect(
+    report.getByRole("heading", {
+      name: "Use code when review quality matters.",
+    }),
+  ).toBeVisible()
+  await expect(
+    report.getByRole("heading", { name: "Quality score comparison" }),
+  ).toBeVisible()
+  if ((page.viewportSize()?.width ?? 0) < 640) {
+    await expect(
+      report.getByText("Quality", { exact: true }).first(),
+    ).toBeVisible()
+    await expect(
+      report.getByText("Time", { exact: true }).first(),
+    ).toBeVisible()
+  } else {
+    await expect(
+      report.getByRole("img", { name: /Efficiency graph/i }),
+    ).toBeVisible()
+  }
+  await expect(
+    report.getByRole("img", { name: /code: AI-judge supported claims 8/i }),
+  ).toBeVisible()
+  await expect(
+    report.getByText("Best evidence-grounded analysis."),
+  ).toBeVisible()
+  await expect(report.getByText("Precise source evidence")).toBeVisible()
+  await report.getByRole("button", { name: "View analysis" }).click()
+  await expect(report.getByText("Missed important findings")).toBeVisible()
 
   expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
-    "POST /api/model-evaluations",
-    `POST /api/model-evaluations/rme_${"1".repeat(32)}/preflight`,
-    `POST /api/model-evaluations/rme_${"1".repeat(32)}/start`,
-    `POST /api/model-evaluations/rme_${"1".repeat(32)}/cancel`,
+    "POST /api/model-evaluations/run",
   ])
   expect(requests[0]?.body).toMatchObject({
     repository: "owner/repo",

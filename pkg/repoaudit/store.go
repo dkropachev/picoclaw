@@ -324,7 +324,7 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 					File: primary, Line: candidate.Line, Severity: candidate.Severity,
 					Title: candidate.Title, Symbol: candidate.Symbol,
 					Message: candidate.Message, Evidence: candidate.Evidence,
-					Impact: candidate.Impact, Recommendation: candidate.Recommendation,
+					Impact:     candidate.Impact,
 					Validation: candidate.Validation, ContextIDs: []string{contextRecord.ID},
 					Models: []string{observation.Model}, ObservationCount: 1, Status: FindingOpen,
 					Observations: []FindingObservation{candidateObservation},
@@ -1259,7 +1259,6 @@ func normalizeCandidate(candidate FindingCandidate) FindingCandidate {
 	candidate.Message = strings.TrimSpace(candidate.Message)
 	candidate.Evidence = strings.TrimSpace(candidate.Evidence)
 	candidate.Impact = strings.TrimSpace(candidate.Impact)
-	candidate.Recommendation = strings.TrimSpace(candidate.Recommendation)
 	candidate.Validation.Status = strings.ToLower(strings.TrimSpace(candidate.Validation.Status))
 	candidate.Validation.Summary = strings.TrimSpace(candidate.Validation.Summary)
 	return candidate
@@ -1272,13 +1271,12 @@ func validateCandidate(candidate FindingCandidate) error {
 		return errors.New("invalid severity")
 	}
 	if candidate.Title == "" || candidate.File == "" || candidate.Evidence == "" || candidate.Impact == "" ||
-		candidate.Recommendation == "" ||
 		candidate.Validation.Summary == "" {
 		return errors.New("finding is incomplete")
 	}
 	for _, value := range []string{
 		candidate.Title, candidate.File, candidate.Evidence,
-		candidate.Impact, candidate.Recommendation, candidate.Validation.Summary,
+		candidate.Impact, candidate.Validation.Summary,
 	} {
 		if !validBoundedText(value, maxFindingTextBytes) {
 			return errors.New("finding text exceeds its limit or is invalid UTF-8")
@@ -1362,8 +1360,7 @@ func findingObservationFrom(
 		ContextID: contextID, Model: strings.TrimSpace(model), Reviewer: strings.TrimSpace(reviewer),
 		Severity: candidate.Severity, Title: candidate.Title, Symbol: candidate.Symbol,
 		Line: candidate.Line, Message: candidate.Message, Evidence: candidate.Evidence,
-		Impact: candidate.Impact, Recommendation: candidate.Recommendation,
-		Validation: candidate.Validation,
+		Impact: candidate.Impact, Validation: candidate.Validation,
 	}
 }
 
@@ -1628,12 +1625,11 @@ func defaultIssueBody(state RepositoryState, findings []Finding) string {
 		}
 		fmt.Fprintf(
 			&section,
-			"` (commit `%s`, blob `%s`)\n\n%s\n\nImpact: %s\n\nRecommendation: %s\n\nValidation: %s\n\n",
+			"` (commit `%s`, blob `%s`)\n\n%s\n\nImpact: %s\n\nValidation: %s\n\n",
 			finding.CommitSHA,
 			finding.File.BlobSHA,
 			truncateUTF8Bytes(finding.Evidence, issueFieldBytes),
 			truncateUTF8Bytes(finding.Impact, issueFieldBytes),
-			truncateUTF8Bytes(finding.Recommendation, issueFieldBytes),
 			truncateUTF8Bytes(finding.Validation.Summary, issueFieldBytes),
 		)
 		if builder.Len()+section.Len()+128 > maximumBodyBytes {

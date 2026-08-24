@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -71,11 +72,13 @@ type repositoryModelEvaluationRepositoryOption struct {
 func (h *Handler) registerRepositoryModelEvaluationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/model-evaluations", h.handleListRepositoryModelEvaluations)
 	mux.HandleFunc("POST /api/model-evaluations", h.handleCreateRepositoryModelEvaluation)
+	mux.HandleFunc("POST /api/model-evaluations/run", h.handleRunRepositoryModelEvaluation)
 	mux.HandleFunc("GET /api/model-evaluations/options", h.handleRepositoryModelEvaluationOptions)
 	mux.HandleFunc("GET /api/model-evaluations/{id}", h.handleGetRepositoryModelEvaluation)
 	mux.HandleFunc("PATCH /api/model-evaluations/{id}", h.handlePatchRepositoryModelEvaluation)
 	mux.HandleFunc("DELETE /api/model-evaluations/{id}", h.handleDeleteRepositoryModelEvaluation)
 	mux.HandleFunc("POST /api/model-evaluations/{id}/preflight", h.handlePreflightRepositoryModelEvaluation)
+	mux.HandleFunc("POST /api/model-evaluations/{id}/run", h.handleRunExistingRepositoryModelEvaluation)
 	mux.HandleFunc("POST /api/model-evaluations/{id}/start", h.handleStartRepositoryModelEvaluation)
 	mux.HandleFunc("POST /api/model-evaluations/{id}/cancel", h.handleCancelRepositoryModelEvaluation)
 	mux.HandleFunc("POST /api/model-evaluations/{id}/resume", h.handleResumeRepositoryModelEvaluation)
@@ -118,8 +121,8 @@ func (h *Handler) handleCreateRepositoryModelEvaluation(w http.ResponseWriter, r
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
-	var request repoeval.CreateRequest
-	if err := decodeRepositoryModelEvaluationRequest(r, &request); err != nil {
+	request, err := decodeRepositoryModelEvaluationCreateRequest(r)
+	if err != nil {
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
@@ -147,6 +150,46 @@ func (h *Handler) handleCreateRepositoryModelEvaluation(w http.ResponseWriter, r
 		http.StatusCreated,
 		repositoryModelEvaluationDetail{Evaluation: projectRepositoryModelEvaluation(created)},
 	)
+}
+
+func (h *Handler) handleRunRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
+	if err := validateRepositoryModelEvaluationMutation(r); err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	request, err := decodeRepositoryModelEvaluationCreateRequest(r)
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	controller, err := h.ensureRepositoryModelEvaluationController()
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	evaluation, err := controller.Run(r.Context(), request)
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	writeRepositoryReviewJSON(
+		w,
+		http.StatusAccepted,
+		repositoryModelEvaluationDetail{Evaluation: projectRepositoryModelEvaluation(evaluation)},
+	)
+}
+
+func decodeRepositoryModelEvaluationCreateRequest(r *http.Request) (repoeval.CreateRequest, error) {
+	var request repoeval.CreateRequest
+	if err := decodeRepositoryModelEvaluationRequest(r, &request); err != nil {
+		return repoeval.CreateRequest{}, err
+	}
+	normalizedRepository, err := normalizeRepositoryModelEvaluationRepository(r.Context(), request.Repository)
+	if err != nil {
+		return repoeval.CreateRequest{}, err
+	}
+	request.Repository = normalizedRepository
+	return request, nil
 }
 
 func (h *Handler) handleGetRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +231,17 @@ func (h *Handler) handlePatchRepositoryModelEvaluation(w http.ResponseWriter, r 
 		writeRepositoryModelEvaluationError(w, errors.Join(repoeval.ErrInvalidEvaluation, err))
 		return
 	}
+	if request.Repository != nil {
+		normalizedRepository, normalizeErr := normalizeRepositoryModelEvaluationRepository(
+			r.Context(),
+			*request.Repository,
+		)
+		if normalizeErr != nil {
+			writeRepositoryModelEvaluationError(w, normalizeErr)
+			return
+		}
+		request.Repository = &normalizedRepository
+	}
 	store, cfg, err := h.repositoryModelEvaluationStore()
 	if err != nil {
 		writeRepositoryModelEvaluationError(w, err)
@@ -199,6 +253,10 @@ func (h *Handler) handlePatchRepositoryModelEvaluation(w http.ResponseWriter, r 
 			err = os.ErrNotExist
 		}
 		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	if current.Status != repoeval.StatusDraft {
+		writeRepositoryModelEvaluationError(w, repoeval.ErrInvalidTransition)
 		return
 	}
 	proposed := repoeval.Clone(current)
@@ -265,6 +323,72 @@ func applyRepositoryModelEvaluationPatch(
 	}
 }
 
+func normalizeRepositoryModelEvaluationRepository(ctx context.Context, repository string) (string, error) {
+	normalized, err := normalizeRepositoryReviewAutomationRepository(repository)
+	if err != nil {
+		return "", errors.Join(repoeval.ErrInvalidEvaluation, err)
+	}
+	if filepath.IsAbs(normalized) {
+		canonical, resolveErr := filepath.EvalSymlinks(normalized)
+		if resolveErr != nil {
+			return "", fmt.Errorf(
+				"%w: local repository path is unavailable",
+				repoeval.ErrInvalidEvaluation,
+			)
+		}
+		info, statErr := os.Stat(canonical)
+		if statErr != nil || !info.IsDir() {
+			return "", fmt.Errorf(
+				"%w: local repository path is unavailable",
+				repoeval.ErrInvalidEvaluation,
+			)
+		}
+		if !repositoryModelEvaluationGitRoot(ctx, canonical) {
+			return "", fmt.Errorf(
+				"%w: local repository path must be the root of a Git repository",
+				repoeval.ErrInvalidEvaluation,
+			)
+		}
+		normalized = filepath.Clean(canonical)
+	}
+	return normalized, nil
+}
+
+func repositoryModelEvaluationGitRoot(ctx context.Context, repository string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	validationCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	run := func(arguments ...string) (string, error) {
+		command := exec.CommandContext(validationCtx, "git", append([]string{"-C", repository}, arguments...)...)
+		environment := make([]string, 0, len(os.Environ())+1)
+		for _, variable := range os.Environ() {
+			if !strings.HasPrefix(variable, "GIT_") {
+				environment = append(environment, variable)
+			}
+		}
+		command.Env = append(environment, "GIT_OPTIONAL_LOCKS=0")
+		output, err := command.Output()
+		return strings.TrimSpace(string(output)), err
+	}
+
+	bare, err := run("rev-parse", "--is-bare-repository")
+	if err != nil || bare != "true" && bare != "false" {
+		return false
+	}
+	rootArgument := "--show-toplevel"
+	if bare == "true" {
+		rootArgument = "--absolute-git-dir"
+	}
+	root, err := run("rev-parse", rootArgument)
+	if err != nil || root == "" {
+		return false
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	return err == nil && filepath.Clean(canonicalRoot) == filepath.Clean(repository)
+}
+
 func (h *Handler) handleDeleteRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
 	if err := validateRepositoryModelEvaluationMutation(r); err != nil {
 		writeRepositoryModelEvaluationError(w, err)
@@ -288,8 +412,8 @@ func (h *Handler) handleDeleteRepositoryModelEvaluation(w http.ResponseWriter, r
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
-	if evaluation.Status.InFlight() {
-		writeRepositoryModelEvaluationError(w, errRepositoryModelEvaluationBusy)
+	if evaluation.Status != repoeval.StatusDraft {
+		writeRepositoryModelEvaluationError(w, repoeval.ErrInvalidTransition)
 		return
 	}
 	if err := store.Delete(r.Context(), evaluation.ID, request.ExpectedVersion); err != nil {
@@ -302,6 +426,10 @@ func (h *Handler) handleDeleteRepositoryModelEvaluation(w http.ResponseWriter, r
 
 func (h *Handler) handlePreflightRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
 	h.handleRepositoryModelEvaluationAction(w, r, "preflight")
+}
+
+func (h *Handler) handleRunExistingRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
+	h.handleRepositoryModelEvaluationAction(w, r, "run")
 }
 
 func (h *Handler) handleStartRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +467,8 @@ func (h *Handler) handleRepositoryModelEvaluationAction(w http.ResponseWriter, r
 	switch action {
 	case "preflight":
 		evaluation, err = controller.Preflight(r.Context(), r.PathValue("id"), request.ExpectedVersion)
+	case "run":
+		evaluation, err = controller.RunExisting(r.Context(), r.PathValue("id"), request.ExpectedVersion)
 	case "start":
 		evaluation, err = controller.StartEvaluation(r.Context(), r.PathValue("id"), request.ExpectedVersion)
 	case "cancel":
@@ -448,11 +578,30 @@ func (h *Handler) handleRepositoryModelEvaluationOptions(w http.ResponseWriter, 
 	repositories := make([]repositoryModelEvaluationRepositoryOption, 0)
 	if manager, managerErr := h.gitWorkspaceManager(); managerErr == nil {
 		if stats, statsErr := manager.Stats(r.Context()); statsErr == nil {
+			upstreamByRepository := make(map[string]string)
+			for _, workspace := range stats.Workspaces {
+				upstream := sanitizeRepositoryModelEvaluationIdentity(workspace.UpstreamURL)
+				if upstream != "" {
+					upstreamByRepository[workspace.RepoID] = upstream
+				}
+			}
+			seen := make(map[string]struct{})
 			for _, repository := range stats.Repositories {
 				identity := sanitizeRepositoryModelEvaluationIdentity(repository.RemoteURL)
 				if identity == "" {
+					identity = upstreamByRepository[repository.ID]
+				}
+				if identity == "" {
 					continue
 				}
+				identity, err = normalizeRepositoryModelEvaluationRepository(r.Context(), identity)
+				if err != nil {
+					continue
+				}
+				if _, duplicate := seen[identity]; duplicate {
+					continue
+				}
+				seen[identity] = struct{}{}
 				label := strings.TrimSuffix(filepath.Base(strings.TrimSuffix(identity, "/")), ".git")
 				repositories = append(
 					repositories,
@@ -547,6 +696,50 @@ func projectRepositoryModelEvaluationSummary(evaluation repoeval.Evaluation) rep
 
 func projectRepositoryModelEvaluation(evaluation repoeval.Evaluation) repoeval.Evaluation {
 	projected := repoeval.Clone(evaluation)
+	if len(projected.Checkpoint.Batches) > 0 {
+		_, unsupported := repositoryModelEvaluationJudgedClaimCounts(projected.Checkpoint.Batches)
+		claims := make(map[string][]repoeval.ModelClaim)
+		omittedClaims := make(map[string]int)
+		availableClaims := make(map[string]bool)
+		for _, checkpoint := range projected.Checkpoint.Batches {
+			for alias, ledger := range checkpoint.ClaimLedger {
+				availableClaims[alias] = true
+				claims[alias] = append(claims[alias], ledger...)
+			}
+			for alias, omitted := range checkpoint.ClaimLedgerOmitted {
+				omittedClaims[alias] += omitted
+			}
+		}
+		for index := range projected.Comparisons {
+			alias := projected.Comparisons[index].ModelAlias
+			if availableClaims[alias] {
+				projected.Comparisons[index].Claims = append(
+					[]repoeval.ModelClaim(nil),
+					claims[alias]...,
+				)
+				projected.Comparisons[index].ClaimsOmitted = omittedClaims[alias]
+				projected.Comparisons[index].ClaimLedgerAvailable = true
+				for claimIndex := range projected.Comparisons[index].Claims {
+					claim := &projected.Comparisons[index].Claims[claimIndex]
+					claim.Title = sanitizeRepositoryModelEvaluationRuntimeText(claim.Title, evaluation.Repository)
+					claim.Evidence = sanitizeRepositoryModelEvaluationRuntimeText(claim.Evidence, evaluation.Repository)
+					claim.Impact = sanitizeRepositoryModelEvaluationRuntimeText(claim.Impact, evaluation.Repository)
+					claim.JudgeRationale = sanitizeRepositoryModelEvaluationRuntimeText(
+						claim.JudgeRationale,
+						evaluation.Repository,
+					)
+				}
+			}
+			if projected.Comparisons[index].UnsupportedClaims != nil {
+				continue
+			}
+			count, found := unsupported[projected.Comparisons[index].ModelAlias]
+			if !found {
+				continue
+			}
+			projected.Comparisons[index].UnsupportedClaims = &count
+		}
+	}
 	projected.Failure = sanitizeRepositoryModelEvaluationRuntimeText(projected.Failure, evaluation.Repository)
 	projected.Progress.Message = sanitizeRepositoryModelEvaluationRuntimeText(
 		projected.Progress.Message,

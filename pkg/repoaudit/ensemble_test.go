@@ -75,7 +75,7 @@ func TestFindingContextsRemainImmutableAcrossForceRuns(t *testing.T) {
 	file := repositoryAuditTestFile("service.go", "b", 120)
 	candidate := FindingCandidate{
 		Severity: "high", Title: "Lost update", Symbol: "Save", File: file.Path,
-		Evidence: "No version fence.", Impact: "Data loss.", Recommendation: "Use CAS.",
+		Evidence: "No version fence.", Impact: "Data loss.",
 		Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 	}
 	first, err := store.Plan(context.Background(), "owner/repo", "commit-a", "inventory-a", []FileRef{file}, false)
@@ -127,30 +127,28 @@ func TestStoreMergesCorroboratingModelParaphrasesInSameBlobContext(t *testing.T)
 		Observations: []Observation{
 			{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
 				{
-					Severity:       "high",
-					Title:          "Concurrent writers lose updates",
-					Symbol:         "Save",
-					File:           file.Path,
-					Line:           &line,
-					Message:        "A stale writer overwrites a newer value.",
-					Evidence:       "Both writers save without a version fence.",
-					Impact:         "A successful update disappears.",
-					Recommendation: "Use compare-and-swap.",
-					Validation:     validation,
+					Severity:   "high",
+					Title:      "Concurrent writers lose updates",
+					Symbol:     "Save",
+					File:       file.Path,
+					Line:       &line,
+					Message:    "A stale writer overwrites a newer value.",
+					Evidence:   "Both writers save without a version fence.",
+					Impact:     "A successful update disappears.",
+					Validation: validation,
 				},
 			}},
 			{Model: "review-b", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
 				{
-					Severity:       "high",
-					Title:          "Concurrent write loses an update",
-					Symbol:         "Save",
-					File:           file.Path,
-					Line:           &nearby,
-					Message:        "The stale writer can overwrite the newer stored value.",
-					Evidence:       "The two writers save with no version fence.",
-					Impact:         "A completed update is lost.",
-					Recommendation: "Fence the write with CAS.",
-					Validation:     validation,
+					Severity:   "high",
+					Title:      "Concurrent write loses an update",
+					Symbol:     "Save",
+					File:       file.Path,
+					Line:       &nearby,
+					Message:    "The stale writer can overwrite the newer stored value.",
+					Evidence:   "The two writers save with no version fence.",
+					Impact:     "A completed update is lost.",
+					Validation: validation,
 				},
 			}},
 		},
@@ -184,7 +182,7 @@ func TestStoreDoesNotCountDuplicateCandidateTwiceWithinOneResponse(t *testing.T)
 	}
 	candidate := FindingCandidate{
 		Severity: "high", Title: "Lost update", Symbol: "Save", File: file.Path,
-		Evidence: "Save has no version fence.", Impact: "Data loss.", Recommendation: "Use CAS.",
+		Evidence: "Save has no version fence.", Impact: "Data loss.",
 		Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 	}
 	result, err := store.Record(context.Background(), RecordRequest{
@@ -210,7 +208,7 @@ func TestStoreBoundsFindingContextHistoryWithObservationVariants(t *testing.T) {
 	}
 	candidate := FindingCandidate{
 		Severity: "high", Title: "Lost update", Symbol: "Save", File: file.Path,
-		Evidence: "Save has no version fence.", Impact: "Data loss.", Recommendation: "Use CAS.",
+		Evidence: "Save has no version fence.", Impact: "Data loss.",
 		Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 	}
 	observations := make([]Observation, 65)
@@ -251,30 +249,28 @@ func TestStoreDoesNotCollapseNearbyDistinctAuthorizationFindings(t *testing.T) {
 		Observations: []Observation{
 			{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
 				{
-					Severity:       "high",
-					Title:          "Missing authorization check in read handler",
-					Symbol:         "Read",
-					File:           file.Path,
-					Line:           &readLine,
-					Message:        "Read returns private records without checking ownership.",
-					Evidence:       "Read calls load directly.",
-					Impact:         "Private data leaks.",
-					Recommendation: "Authorize the read.",
-					Validation:     validation,
+					Severity:   "high",
+					Title:      "Missing authorization check in read handler",
+					Symbol:     "Read",
+					File:       file.Path,
+					Line:       &readLine,
+					Message:    "Read returns private records without checking ownership.",
+					Evidence:   "Read calls load directly.",
+					Impact:     "Private data leaks.",
+					Validation: validation,
 				},
 			}},
 			{Model: "review-b", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{
 				{
-					Severity:       "critical",
-					Title:          "Missing authorization check in delete handler",
-					Symbol:         "Delete",
-					File:           file.Path,
-					Line:           &deleteLine,
-					Message:        "Delete removes records without checking ownership.",
-					Evidence:       "Delete calls remove directly.",
-					Impact:         "Attackers delete other users' data.",
-					Recommendation: "Authorize the delete.",
-					Validation:     validation,
+					Severity:   "critical",
+					Title:      "Missing authorization check in delete handler",
+					Symbol:     "Delete",
+					File:       file.Path,
+					Line:       &deleteLine,
+					Message:    "Delete removes records without checking ownership.",
+					Evidence:   "Delete calls remove directly.",
+					Impact:     "Attackers delete other users' data.",
+					Validation: validation,
 				},
 			}},
 		},
@@ -306,7 +302,7 @@ func TestStoreDoesNotCollapseIdenticalCopiedBlobFindingsAcrossPaths(t *testing.T
 	candidate := func(file FileRef) FindingCandidate {
 		return FindingCandidate{
 			Severity: "high", Title: "Copied handler loses updates", Symbol: "Save", File: file.Path,
-			Evidence: "Save lacks a version fence.", Impact: "Updates disappear.", Recommendation: "Use CAS.",
+			Evidence: "Save lacks a version fence.", Impact: "Updates disappear.",
 			Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 		}
 	}
@@ -333,7 +329,7 @@ func TestStoreSemanticCorroborationUsesWorstSeverity(t *testing.T) {
 	base := FindingCandidate{
 		Severity: "low", Title: "Concurrent writers lose updates", Symbol: "Save", File: file.Path, Line: &line,
 		Message: "A stale writer overwrites a newer value.", Evidence: "Both writers save without a version fence.",
-		Impact: "A completed update disappears.", Recommendation: "Use compare-and-swap.",
+		Impact:     "A completed update disappears.",
 		Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 	}
 	critical := base
@@ -361,7 +357,7 @@ func TestStorePreparesEditableIssueFromSelectedFindingSnapshot(t *testing.T) {
 		Plan: plan, RunID: "issue-run",
 		Observations: []Observation{{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
 			Severity: "high", Title: "Lost update", File: file.Path,
-			Evidence: "A write is not fenced.", Impact: "Data disappears.", Recommendation: "Use CAS.",
+			Evidence: "A write is not fenced.", Impact: "Data disappears.",
 			Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 		}}}},
 	})
@@ -403,7 +399,7 @@ func TestDefaultIssueBodyBoundsLargeFindingSelection(t *testing.T) {
 			ID: fmt.Sprintf("finding-%03d", index), Title: strings.Repeat("title", 100),
 			Severity: "high", CommitSHA: "commit", File: FileRef{Path: "service.go", BlobSHA: strings.Repeat("a", 40)},
 			Evidence: strings.Repeat("e", 64<<10), Impact: strings.Repeat("i", 64<<10),
-			Recommendation: strings.Repeat("r", 64<<10), Validation: Validation{Summary: strings.Repeat("v", 64<<10)},
+			Validation: Validation{Summary: strings.Repeat("v", 64<<10)},
 		}
 	}
 	body := defaultIssueBody(RepositoryState{Repository: "owner/repo", LastCommitSHA: "commit"}, findings)
@@ -423,7 +419,7 @@ func TestStoreIssuePublicationIsIdempotentAndMarksSelectedFindings(t *testing.T)
 		Plan: plan, RunID: "post-run",
 		Observations: []Observation{{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
 			Severity: "high", Title: "Lost update", File: file.Path,
-			Evidence: "A write is not fenced.", Impact: "Data disappears.", Recommendation: "Use CAS.",
+			Evidence: "A write is not fenced.", Impact: "Data disappears.",
 			Validation: Validation{Status: "confirmed", Summary: "Reproduced"},
 		}}}},
 	})
@@ -548,7 +544,7 @@ func TestReviewRecordMergesAcrossConcurrentFindingStatusMutation(t *testing.T) {
 		Plan: plan, RunID: "seed",
 		Observations: []Observation{{Model: "review-a", ScopeFiles: []FileRef{first}, Findings: []FindingCandidate{{
 			Severity: "low", Title: "Seed finding", File: first.Path, Evidence: "seed evidence",
-			Impact: "seed impact", Recommendation: "seed recommendation",
+			Impact:     "seed impact",
 			Validation: Validation{Status: "confirmed", Summary: "seed validation"},
 		}}}},
 	})
@@ -632,7 +628,7 @@ func TestIssuePublicationClaimHasExactlyOneWinner(t *testing.T) {
 		Plan: plan, RunID: "claim-seed",
 		Observations: []Observation{{Model: "review-a", ScopeFiles: []FileRef{file}, Findings: []FindingCandidate{{
 			Severity: "low", Title: "Claim seed", File: file.Path, Evidence: "evidence",
-			Impact: "impact", Recommendation: "recommendation",
+			Impact:     "impact",
 			Validation: Validation{Status: "confirmed", Summary: "confirmed"},
 		}}}},
 	})

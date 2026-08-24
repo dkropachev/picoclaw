@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -23,15 +24,12 @@ const (
 
 	defaultAutomationMaxFilesPerRun              = 24
 	defaultAutomationMaxContentBytes             = 512 << 10
-	defaultAutomationMaxParallelChildren         = 1
+	defaultAutomationMaxParallelChildren         = 8
 	defaultAutomationEstimatedOutputTokens       = 1_800
-	defaultAutomationCheckInterval               = 60
 	maxAutomationFileBytes                 int64 = 4 << 20
 	maxAutomationCount                           = 10_000
 	maxAutomationRunIDs                          = 1_000
 	maxAutomationReviewers                       = 32
-	maxAutomationAccounts                        = 64
-	maxAutomationWindowPolicies                  = 32
 	maxAutomationAccountSnapshots                = 256
 	automationModelCoverageSketchBytes           = 8 << 10
 	maxAutomationModelPrice                      = 1_000_000.0
@@ -40,8 +38,10 @@ const (
 )
 
 var (
-	ErrInvalidAutomation          = errors.New("invalid repository review automation")
-	ErrAutomationControllerLocked = errors.New("repository review automation controller is already active")
+	ErrInvalidAutomation                  = errors.New("invalid repository review automation")
+	ErrAutomationControllerLocked         = errors.New("repository review automation controller is already active")
+	ErrAutomationActive                   = errors.New("repository review automation is active")
+	ErrRepositoryReviewRepositoryConflict = errors.New("repository already has a review configuration")
 )
 
 // RepositoryReviewAutomationStatus describes the durable controller state.
@@ -60,34 +60,28 @@ const (
 type RepositoryReviewPauseReason string
 
 const (
-	RepositoryReviewPauseManual         RepositoryReviewPauseReason = "manual"
-	RepositoryReviewPauseTokenBudget    RepositoryReviewPauseReason = "token_budget"
-	RepositoryReviewPauseCostBudget     RepositoryReviewPauseReason = "cost_budget"
-	RepositoryReviewPauseAccountLimit   RepositoryReviewPauseReason = "account_limit"
-	RepositoryReviewPauseRunFailed      RepositoryReviewPauseReason = "run_failed"
-	RepositoryReviewPauseServiceRestart RepositoryReviewPauseReason = "service_restart"
+	RepositoryReviewPauseManual          RepositoryReviewPauseReason = "manual"
+	RepositoryReviewPauseTokenBudget     RepositoryReviewPauseReason = "token_budget"
+	RepositoryReviewPauseCostBudget      RepositoryReviewPauseReason = "cost_budget"
+	RepositoryReviewPauseAccountLimit    RepositoryReviewPauseReason = "account_limit"
+	RepositoryReviewPauseGuardExpression RepositoryReviewPauseReason = "guard_expression"
+	RepositoryReviewPauseRunFailed       RepositoryReviewPauseReason = "run_failed"
+	RepositoryReviewPauseServiceRestart  RepositoryReviewPauseReason = "service_restart"
 )
 
-// RepositoryReviewBudgetPolicy controls admission and automatic quota recovery.
-// Zero token/cost limits disable the corresponding aggregate budget.
+// RepositoryReviewBudgetPolicy controls task admission. GuardExpression is a
+// bounded, diagnosis-independent predicate evaluated immediately before a
+// managed review worker claims its next task.
 type RepositoryReviewBudgetPolicy struct {
-	MaxTotalTokens              int64              `json:"max_total_tokens,omitempty"`
-	MaxEstimatedCostUSD         float64            `json:"max_estimated_cost_usd,omitempty"`
-	AccountIDs                  []string           `json:"account_ids,omitempty"`
-	MinRemainingPercent         float64            `json:"min_remaining_percent,omitempty"`
-	MinRemainingPercentByWindow map[string]float64 `json:"min_remaining_percent_by_window,omitempty"`
-	AutoResume                  bool               `json:"auto_resume"`
-	PauseOnUnknown              bool               `json:"pause_on_unknown"`
-	CheckIntervalSeconds        int                `json:"check_interval_seconds"`
+	GuardExpression string `json:"guard_expression,omitempty"`
 }
 
-// RepositoryReviewModelPrice is caller-supplied comparison metadata keyed by
-// the reviewer alias selected in ReviewerModels.
+// RepositoryReviewModelPrice is a server-resolved accounting snapshot keyed by
+// the reviewer alias selected in ReviewerModels. Subscription inheritance is
+// resolved from central model configuration before this snapshot is stored.
 type RepositoryReviewModelPrice struct {
 	InputPricePer1M  float64 `json:"input_price_per_1m"`
 	OutputPricePer1M float64 `json:"output_price_per_1m"`
-	Subscription     bool    `json:"subscription,omitempty"`
-	EquivalentModel  string  `json:"equivalent_model,omitempty"`
 }
 
 // RepositoryReviewTokenUsage is the cumulative token accounting accepted by
@@ -138,6 +132,10 @@ type RepositoryReviewAutomation struct {
 	SchemaVersion         int                                    `json:"schema_version"`
 	ID                    string                                 `json:"id"`
 	Version               int64                                  `json:"version"`
+	ProfileID             string                                 `json:"profile_id,omitempty"`
+	ProfileVersion        int64                                  `json:"profile_version,omitempty"`
+	AccountRef            string                                 `json:"account_ref,omitempty"`
+	EffectiveAccountRef   string                                 `json:"effective_account_ref,omitempty"`
 	Name                  string                                 `json:"name"`
 	Repository            string                                 `json:"repository"`
 	Ref                   string                                 `json:"ref,omitempty"`
@@ -153,7 +151,7 @@ type RepositoryReviewAutomation struct {
 	MaxFilesPerRun        int                                    `json:"max_files_per_run"`
 	MaxContentBytes       int64                                  `json:"max_content_bytes"`
 	MaxParallelChildren   int                                    `json:"max_parallel_children"`
-	EstimatedOutputTokens int                                    `json:"estimated_output_tokens"`
+	EstimatedOutputTokens int                                    `json:"-"`
 	BudgetPolicy          RepositoryReviewBudgetPolicy           `json:"budget"`
 	Status                RepositoryReviewAutomationStatus       `json:"status"`
 	PauseReason           RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
@@ -168,7 +166,6 @@ type RepositoryReviewAutomation struct {
 	ModelStats            map[string]RepositoryReviewModelStats  `json:"model_stats"`
 	ModelCoverageSketches map[string]string                      `json:"model_coverage_sketches,omitempty"`
 	AccountLimitSnapshots []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
-	NextCheckAt           time.Time                              `json:"next_check_at,omitempty"`
 	StartedAt             time.Time                              `json:"started_at,omitempty"`
 	CompletedAt           time.Time                              `json:"completed_at,omitempty"`
 	CreatedAt             time.Time                              `json:"created_at"`
@@ -199,6 +196,17 @@ func (s Store) listAutomationsWithLoader(
 	if contextErr := ctx.Err(); contextErr != nil {
 		return nil, contextErr
 	}
+	return s.listAutomationsUnlockedWithLoader(maximum, load)
+}
+
+func (s Store) listAutomationsUnlocked(maximum int) ([]RepositoryReviewAutomation, error) {
+	return s.listAutomationsUnlockedWithLoader(maximum, s.loadAutomation)
+}
+
+func (s Store) listAutomationsUnlockedWithLoader(
+	maximum int,
+	load func(string) (RepositoryReviewAutomation, bool, error),
+) ([]RepositoryReviewAutomation, error) {
 	if rootErr := s.requireSafeRoot(true); rootErr != nil {
 		return nil, rootErr
 	}
@@ -300,6 +308,14 @@ func (s Store) CreateAutomation(
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
+	if automation.ProfileID != "" {
+		if err := s.validateAutomationProfileSnapshotUnlocked(automation); err != nil {
+			return RepositoryReviewAutomation{}, err
+		}
+		if err := s.ensureRepositoryAutomationUniqueUnlocked(automation.ID, automation.Repository); err != nil {
+			return RepositoryReviewAutomation{}, err
+		}
+	}
 	if err := s.saveAutomation(automation); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -353,6 +369,24 @@ func (s Store) UpdateAutomation(
 	if err := normalizeAutomation(&candidate); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
+	if candidate.ProfileID != "" {
+		if current.ProfileID != candidate.ProfileID ||
+			current.ProfileVersion != candidate.ProfileVersion ||
+			!repositoryReviewAutomationProfilePolicyEqual(current, candidate) ||
+			repositoryReviewAutomationAdmissionTransition(current, candidate) {
+			if err := s.validateAutomationProfileSnapshotUnlocked(candidate); err != nil {
+				return RepositoryReviewAutomation{}, err
+			}
+		}
+	}
+	if canonicalAutomationRepository(current.Repository) !=
+		canonicalAutomationRepository(candidate.Repository) ||
+		candidate.ProfileID != "" &&
+			repositoryReviewAutomationAdmissionTransition(current, candidate) {
+		if err := s.ensureRepositoryAutomationUniqueUnlocked(candidate.ID, candidate.Repository); err != nil {
+			return RepositoryReviewAutomation{}, err
+		}
+	}
 	if err := s.saveAutomation(candidate); err != nil {
 		return RepositoryReviewAutomation{}, err
 	}
@@ -385,6 +419,10 @@ func (s Store) DeleteAutomation(ctx context.Context, id string, expectedVersion 
 	if expectedVersion < 1 || automation.Version != expectedVersion {
 		return ErrConflict
 	}
+	if automation.Status == RepositoryReviewAutomationRunning ||
+		automation.Status == RepositoryReviewAutomationStopping {
+		return ErrAutomationActive
+	}
 	return fileutil.RemoveDurable(s.automationPath(id))
 }
 
@@ -392,30 +430,37 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if !validAutomationID(id) {
 		return RepositoryReviewAutomation{}, false, fmt.Errorf("%w: invalid ID", ErrInvalidAutomation)
 	}
-	if err := s.requireSafeRoot(true); err != nil {
+	statePath := s.automationPath(id)
+	data, found, err := s.readStateFile(
+		statePath,
+		maxAutomationFileBytes,
+		"repository review automation",
+	)
+	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	statePath := s.automationPath(id)
-	info, err := os.Lstat(statePath)
-	if os.IsNotExist(err) {
+	if !found {
 		return RepositoryReviewAutomation{}, false, nil
 	}
-	if err != nil {
-		return RepositoryReviewAutomation{}, false, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return RepositoryReviewAutomation{}, false, errors.New("repository review automation must be a regular file")
-	}
-	if info.Size() > maxAutomationFileBytes {
-		return RepositoryReviewAutomation{}, false, errors.New("repository review automation exceeds its size limit")
-	}
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		return RepositoryReviewAutomation{}, false, err
-	}
 	var automation RepositoryReviewAutomation
-	if err := json.Unmarshal(data, &automation); err != nil {
+	hadLegacyGuard, err := unmarshalRepositoryReviewGuardState(data, &automation)
+	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
+	}
+	var legacy struct {
+		ModelPrices map[string]map[string]json.RawMessage `json:"model_prices"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return RepositoryReviewAutomation{}, false, err
+	}
+	hasLegacyPriceMetadata := false
+	for _, price := range legacy.ModelPrices {
+		if _, exists := price["subscription"]; exists {
+			hasLegacyPriceMetadata = true
+		}
+		if _, exists := price["equivalent_model"]; exists {
+			hasLegacyPriceMetadata = true
+		}
 	}
 	if automation.ID != id {
 		return RepositoryReviewAutomation{}, false, errors.New("repository review automation identity mismatch")
@@ -423,7 +468,40 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
+	if hasLegacyPriceMetadata || hadLegacyGuard {
+		if err := s.saveAutomation(automation); err != nil {
+			return RepositoryReviewAutomation{}, false, err
+		}
+	}
 	return automation, true, nil
+}
+
+func (s Store) readStateFile(
+	statePath string,
+	maximumBytes int64,
+	kind string,
+) ([]byte, bool, error) {
+	if err := s.requireSafeRoot(true); err != nil {
+		return nil, false, err
+	}
+	info, err := os.Lstat(statePath)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s must be a regular file", kind)
+	}
+	if info.Size() > maximumBytes {
+		return nil, false, fmt.Errorf("%s exceeds its size limit", kind)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 func (s Store) saveAutomation(automation RepositoryReviewAutomation) error {
@@ -481,12 +559,17 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if automation == nil {
 		return fmt.Errorf("%w: state is required", ErrInvalidAutomation)
 	}
+	rawRef := automation.Ref
 	automation.ID = strings.TrimSpace(automation.ID)
+	automation.ProfileID = strings.TrimSpace(automation.ProfileID)
+	automation.AccountRef = strings.TrimSpace(automation.AccountRef)
+	automation.EffectiveAccountRef = strings.TrimSpace(automation.EffectiveAccountRef)
 	automation.Name = strings.TrimSpace(automation.Name)
 	automation.Repository = strings.TrimSpace(automation.Repository)
 	automation.Ref = strings.TrimSpace(automation.Ref)
 	automation.Target = strings.TrimSpace(automation.Target)
 	automation.ReviewFocus = strings.TrimSpace(automation.ReviewFocus)
+	automation.BudgetPolicy.GuardExpression = strings.TrimSpace(automation.BudgetPolicy.GuardExpression)
 	automation.PauseDetail = strings.TrimSpace(automation.PauseDetail)
 	automation.RequestedPauseDetail = strings.TrimSpace(automation.RequestedPauseDetail)
 	automation.ActiveRunID = strings.TrimSpace(automation.ActiveRunID)
@@ -495,6 +578,14 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.PauseReason = RepositoryReviewPauseReason(
 		strings.ToLower(strings.TrimSpace(string(automation.PauseReason))),
 	)
+	if automation.ProfileID != "" {
+		branch, err := NormalizeRepositoryReviewBranch(rawRef)
+		if err != nil {
+			return err
+		}
+		automation.Ref = branch
+		automation.Target = "all"
+	}
 	if automation.Target == "" {
 		automation.Target = "all"
 	}
@@ -510,18 +601,9 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if automation.EstimatedOutputTokens == 0 {
 		automation.EstimatedOutputTokens = defaultAutomationEstimatedOutputTokens
 	}
-	if automation.BudgetPolicy.CheckIntervalSeconds == 0 {
-		automation.BudgetPolicy.CheckIntervalSeconds = defaultAutomationCheckInterval
-	}
 	var err error
 	automation.ReviewerModels, err = normalizeUniqueAutomationStrings(
 		automation.ReviewerModels, maxAutomationReviewers, 256, "reviewer model",
-	)
-	if err != nil {
-		return err
-	}
-	automation.BudgetPolicy.AccountIDs, err = normalizeUniqueAutomationStrings(
-		automation.BudgetPolicy.AccountIDs, maxAutomationAccounts, 1024, "account ID",
 	)
 	if err != nil {
 		return err
@@ -554,13 +636,9 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if err := normalizeRepositoryReviewScopePlan(&automation.ScopePlan); err != nil {
 		return err
 	}
-	if err := normalizeWindowPolicies(&automation.BudgetPolicy); err != nil {
-		return err
-	}
 	if err := normalizeAccountSnapshots(automation); err != nil {
 		return err
 	}
-	automation.NextCheckAt = automation.NextCheckAt.UTC()
 	automation.StartedAt = automation.StartedAt.UTC()
 	automation.CompletedAt = automation.CompletedAt.UTC()
 	automation.CreatedAt = automation.CreatedAt.UTC()
@@ -575,6 +653,8 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validBoundedText(automation.Repository, maxRepositoryIdentityBytes) ||
 		!validAutomationRepository(automation.Repository) ||
 		!validOptionalAutomationText(automation.Ref, 1024) ||
+		!validOptionalAutomationText(automation.AccountRef, 256) ||
+		!validOptionalAutomationText(automation.EffectiveAccountRef, 256) ||
 		!validBoundedText(automation.Target, 4096) ||
 		!validBoundedText(automation.ReviewFocus, maxFindingTextBytes) ||
 		len(automation.ReviewerModels) == 0 || len(automation.ReviewerModels) > maxAutomationReviewers ||
@@ -592,36 +672,16 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		automation.UpdatedAt.Before(automation.CreatedAt) {
 		return ErrInvalidAutomation
 	}
+	if automation.ProfileID == "" {
+		if automation.ProfileVersion != 0 {
+			return fmt.Errorf("%w: profile version requires a profile", ErrInvalidAutomation)
+		}
+	} else if !validProfileID(automation.ProfileID) || automation.ProfileVersion < 1 ||
+		automation.Target != "all" || len(automation.ReviewerModels) != 1 || automation.CompareModels {
+		return fmt.Errorf("%w: invalid profile assignment", ErrInvalidAutomation)
+	}
 	if err := validateBudgetPolicy(automation.BudgetPolicy); err != nil {
 		return err
-	}
-	if (automation.BudgetPolicy.MaxTotalTokens > 0 ||
-		automation.BudgetPolicy.MaxEstimatedCostUSD > 0 ||
-		len(automation.BudgetPolicy.AccountIDs) > 0 ||
-		automation.BudgetPolicy.MinRemainingPercent > 0 ||
-		len(automation.BudgetPolicy.MinRemainingPercentByWindow) > 0 ||
-		automation.BudgetPolicy.PauseOnUnknown) &&
-		automation.MaxParallelChildren != 1 {
-		return fmt.Errorf(
-			"%w: token, cost, and account guards require max_parallel_children=1 to bound overshoot to one provider response",
-			ErrInvalidAutomation,
-		)
-	}
-	if automation.BudgetPolicy.MaxEstimatedCostUSD > 0 {
-		reviewers := automation.ReviewerModels
-		if !automation.CompareModels && len(reviewers) > 1 {
-			reviewers = reviewers[:1]
-		}
-		for _, reviewer := range reviewers {
-			price, exists := automation.ModelPrices[reviewer]
-			if !exists || price.InputPricePer1M <= 0 && price.OutputPricePer1M <= 0 {
-				return fmt.Errorf(
-					"%w: cost budget requires a positive price for reviewer %q",
-					ErrInvalidAutomation,
-					reviewer,
-				)
-			}
-		}
 	}
 	if err := validateTokenUsage(automation.Usage); err != nil {
 		return err
@@ -675,14 +735,129 @@ func validAutomationRepository(repository string) bool {
 	return err == nil && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
+func (s Store) ensureRepositoryAutomationUniqueUnlocked(id, repository string) error {
+	canonical := canonicalAutomationRepository(repository)
+	if canonical == "" {
+		return ErrInvalidAutomation
+	}
+	automations, err := s.listAutomationsUnlocked(maxAutomationCount)
+	if err != nil {
+		return err
+	}
+	for _, existing := range automations {
+		if existing.ID != id && canonicalAutomationRepository(existing.Repository) == canonical {
+			return ErrRepositoryReviewRepositoryConflict
+		}
+	}
+	return nil
+}
+
+func (s Store) validateAutomationProfileSnapshotUnlocked(
+	automation RepositoryReviewAutomation,
+) error {
+	profile, found, err := s.loadProfile(automation.ProfileID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	if profile.Version != automation.ProfileVersion {
+		return ErrConflict
+	}
+	materialized, err := MaterializeRepositoryReviewAutomation(profile, automation)
+	if err != nil {
+		return err
+	}
+	if automation.ReviewFocus != materialized.ReviewFocus ||
+		automation.AccountRef != materialized.AccountRef ||
+		!reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) ||
+		!reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) ||
+		automation.CompareModels != materialized.CompareModels ||
+		!reflect.DeepEqual(automation.ModelPrices, materialized.ModelPrices) ||
+		automation.Force != materialized.Force ||
+		automation.AutoContinue != materialized.AutoContinue ||
+		automation.MaxFilesPerRun != materialized.MaxFilesPerRun ||
+		automation.MaxContentBytes != materialized.MaxContentBytes ||
+		automation.MaxParallelChildren != materialized.MaxParallelChildren ||
+		automation.EstimatedOutputTokens != materialized.EstimatedOutputTokens ||
+		!reflect.DeepEqual(automation.BudgetPolicy, materialized.BudgetPolicy) ||
+		automation.Target != materialized.Target {
+		return fmt.Errorf(
+			"%w: repository review profile snapshot does not match its assigned profile",
+			ErrInvalidAutomation,
+		)
+	}
+	return nil
+}
+
+func repositoryReviewAutomationProfilePolicyEqual(
+	left, right RepositoryReviewAutomation,
+) bool {
+	return left.ReviewFocus == right.ReviewFocus &&
+		left.AccountRef == right.AccountRef &&
+		reflect.DeepEqual(left.ScopePolicy, right.ScopePolicy) &&
+		reflect.DeepEqual(left.ReviewerModels, right.ReviewerModels) &&
+		left.CompareModels == right.CompareModels &&
+		reflect.DeepEqual(left.ModelPrices, right.ModelPrices) &&
+		left.Force == right.Force && left.AutoContinue == right.AutoContinue &&
+		left.MaxFilesPerRun == right.MaxFilesPerRun &&
+		left.MaxContentBytes == right.MaxContentBytes &&
+		left.MaxParallelChildren == right.MaxParallelChildren &&
+		left.EstimatedOutputTokens == right.EstimatedOutputTokens &&
+		reflect.DeepEqual(left.BudgetPolicy, right.BudgetPolicy) &&
+		left.Target == right.Target
+}
+
+func repositoryReviewAutomationAdmissionTransition(
+	current, candidate RepositoryReviewAutomation,
+) bool {
+	currentActive := current.Status == RepositoryReviewAutomationRunning ||
+		current.Status == RepositoryReviewAutomationStopping
+	candidateActive := candidate.Status == RepositoryReviewAutomationRunning ||
+		candidate.Status == RepositoryReviewAutomationStopping
+	return !currentActive && candidateActive
+}
+
+func canonicalAutomationRepository(repository string) string {
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return ""
+	}
+	if filepath.IsAbs(repository) {
+		return filepath.Clean(repository)
+	}
+	if parsed, err := url.Parse(repository); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		path := strings.Trim(parsed.Path, "/")
+		if strings.HasSuffix(strings.ToLower(path), ".git") {
+			path = path[:len(path)-len(".git")]
+		}
+		if strings.EqualFold(parsed.Hostname(), "github.com") && path != "" {
+			return strings.ToLower(path)
+		}
+		return strings.ToLower(parsed.Hostname() + "/" + path)
+	}
+	lower := strings.ToLower(repository)
+	if colon := strings.Index(repository, ":"); colon > 0 &&
+		strings.Contains(repository[:colon], "@") {
+		identity, remotePath := repository[:colon], repository[colon+1:]
+		_, host, found := strings.Cut(identity, "@")
+		if found && strings.TrimSpace(host) != "" {
+			repository = strings.TrimSpace(host) + "/" + remotePath
+		}
+	} else if separator := strings.Index(lower, "github.com:"); separator >= 0 {
+		repository = repository[separator+len("github.com:"):]
+	}
+	repository = strings.Trim(repository, "/")
+	if strings.HasSuffix(strings.ToLower(repository), ".git") {
+		repository = repository[:len(repository)-len(".git")]
+	}
+	return strings.ToLower(repository)
+}
+
 func validateBudgetPolicy(policy RepositoryReviewBudgetPolicy) error {
-	if policy.MaxTotalTokens < 0 || policy.MaxTotalTokens > maxAutomationTokens ||
-		!finiteNonnegative(policy.MaxEstimatedCostUSD, maxAutomationEstimatedCost) ||
-		!validPercent(policy.MinRemainingPercent) ||
-		policy.CheckIntervalSeconds < 15 || policy.CheckIntervalSeconds > 3600 ||
-		len(policy.AccountIDs) > maxAutomationAccounts ||
-		len(policy.MinRemainingPercentByWindow) > maxAutomationWindowPolicies {
-		return fmt.Errorf("%w: invalid budget policy", ErrInvalidAutomation)
+	if err := ValidateRepositoryReviewGuardExpression(policy.GuardExpression); err != nil {
+		return fmt.Errorf("%w: invalid task admission guard: %v", ErrInvalidAutomation, err)
 	}
 	return nil
 }
@@ -717,14 +892,12 @@ func normalizeModelPrices(automation *RepositoryReviewAutomation) error {
 	normalized := make(map[string]RepositoryReviewModelPrice, len(automation.ModelPrices))
 	for rawAlias, price := range automation.ModelPrices {
 		alias := strings.TrimSpace(rawAlias)
-		price.EquivalentModel = strings.TrimSpace(price.EquivalentModel)
 		if alias == "" || alias != rawAlias && containsAutomationMapKey(normalized, alias) {
 			return fmt.Errorf("%w: duplicate model price alias", ErrInvalidAutomation)
 		}
 		if _, exists := selected[alias]; !exists || !validBoundedText(alias, 256) ||
 			!finiteNonnegative(price.InputPricePer1M, maxAutomationModelPrice) ||
-			!finiteNonnegative(price.OutputPricePer1M, maxAutomationModelPrice) ||
-			!validOptionalAutomationText(price.EquivalentModel, 256) {
+			!finiteNonnegative(price.OutputPricePer1M, maxAutomationModelPrice) {
 			return fmt.Errorf("%w: invalid model price", ErrInvalidAutomation)
 		}
 		if _, duplicate := normalized[alias]; duplicate {
@@ -787,32 +960,9 @@ func normalizeModelCoverageSketches(automation *RepositoryReviewAutomation) erro
 	return nil
 }
 
-func normalizeWindowPolicies(policy *RepositoryReviewBudgetPolicy) error {
-	if len(policy.MinRemainingPercentByWindow) > maxAutomationWindowPolicies {
-		return fmt.Errorf("%w: too many account-limit windows", ErrInvalidAutomation)
-	}
-	normalized := make(map[string]float64, len(policy.MinRemainingPercentByWindow))
-	for rawWindow, percent := range policy.MinRemainingPercentByWindow {
-		window := strings.ToLower(strings.TrimSpace(rawWindow))
-		if !validBoundedText(window, 64) || !validPercent(percent) {
-			return fmt.Errorf("%w: invalid account-limit window", ErrInvalidAutomation)
-		}
-		if _, duplicate := normalized[window]; duplicate {
-			return fmt.Errorf("%w: duplicate account-limit window", ErrInvalidAutomation)
-		}
-		normalized[window] = percent
-	}
-	policy.MinRemainingPercentByWindow = normalized
-	return nil
-}
-
 func normalizeAccountSnapshots(automation *RepositoryReviewAutomation) error {
 	if len(automation.AccountLimitSnapshots) > maxAutomationAccountSnapshots {
 		return fmt.Errorf("%w: too many account-limit snapshots", ErrInvalidAutomation)
-	}
-	configured := make(map[string]struct{}, len(automation.BudgetPolicy.AccountIDs))
-	for _, id := range automation.BudgetPolicy.AccountIDs {
-		configured[id] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(automation.AccountLimitSnapshots))
 	for index := range automation.AccountLimitSnapshots {
@@ -828,11 +978,6 @@ func normalizeAccountSnapshots(automation *RepositoryReviewAutomation) error {
 			!validBoundedText(snapshot.Window, 64) ||
 			!validOptionalAutomationText(snapshot.Detail, 1024) || snapshot.CheckedAt.IsZero() {
 			return fmt.Errorf("%w: invalid account-limit snapshot", ErrInvalidAutomation)
-		}
-		if len(configured) > 0 {
-			if _, exists := configured[snapshot.AccountID]; !exists {
-				return fmt.Errorf("%w: account-limit snapshot is not configured", ErrInvalidAutomation)
-			}
 		}
 		if snapshot.RemainingPercent != nil && !validPercent(*snapshot.RemainingPercent) {
 			return fmt.Errorf("%w: invalid remaining percentage", ErrInvalidAutomation)
@@ -889,10 +1034,6 @@ func cloneAutomation(automation RepositoryReviewAutomation) RepositoryReviewAuto
 	)
 	automation.ScopePlan.Warnings = append([]string{}, automation.ScopePlan.Warnings...)
 	automation.RunIDs = append([]string{}, automation.RunIDs...)
-	automation.BudgetPolicy.AccountIDs = append([]string{}, automation.BudgetPolicy.AccountIDs...)
-	automation.BudgetPolicy.MinRemainingPercentByWindow = cloneAutomationFloatMap(
-		automation.BudgetPolicy.MinRemainingPercentByWindow,
-	)
 	if automation.ModelPrices != nil {
 		prices := make(map[string]RepositoryReviewModelPrice, len(automation.ModelPrices))
 		for alias, price := range automation.ModelPrices {
@@ -924,17 +1065,6 @@ func cloneAutomation(automation RepositoryReviewAutomation) RepositoryReviewAuto
 		}
 	}
 	return automation
-}
-
-func cloneAutomationFloatMap(source map[string]float64) map[string]float64 {
-	if source == nil {
-		return nil
-	}
-	cloned := make(map[string]float64, len(source))
-	for key, value := range source {
-		cloned[key] = value
-	}
-	return cloned
 }
 
 func automationReviewerSet(reviewers []string) map[string]struct{} {
@@ -974,7 +1104,8 @@ func validAutomationPauseReason(reason RepositoryReviewPauseReason) bool {
 	switch reason {
 	case "", RepositoryReviewPauseManual, RepositoryReviewPauseTokenBudget,
 		RepositoryReviewPauseCostBudget, RepositoryReviewPauseAccountLimit,
-		RepositoryReviewPauseRunFailed, RepositoryReviewPauseServiceRestart:
+		RepositoryReviewPauseGuardExpression, RepositoryReviewPauseRunFailed,
+		RepositoryReviewPauseServiceRestart:
 		return true
 	default:
 		return false

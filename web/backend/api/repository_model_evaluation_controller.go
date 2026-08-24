@@ -23,7 +23,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
-const repositoryModelEvaluationBatchSize = 12
+const (
+	repositoryModelEvaluationBatchSize         = 12
+	repositoryModelEvaluationPhaseMinTimeout   = 15 * time.Minute
+	repositoryModelEvaluationBatchSetupBudget  = 5 * time.Minute
+	repositoryModelEvaluationTaskBudget        = 2 * time.Minute
+	repositoryModelEvaluationMaxTimeout        = 4 * time.Hour
+	repositoryModelEvaluationMaxClaimsPerModel = 256
+)
 
 var errRepositoryModelEvaluationRunFenced = errors.New("repository model evaluation run is fenced")
 
@@ -37,6 +44,8 @@ type repositoryModelEvaluationWorkflowRun func(
 ) (*workflows.RunResult, error)
 
 type repositoryModelEvaluationStepObserverContextKey struct{}
+
+type repositoryModelEvaluationManagedChildObserverContextKey struct{}
 
 type repositoryModelEvaluationActiveRun struct {
 	token  string
@@ -172,11 +181,14 @@ func (c *repositoryModelEvaluationController) Start() error {
 			_, _ = c.updateLatest(c.ctx, evaluation.ID, func(candidate *repoeval.Evaluation) error {
 				candidate.Status = repoeval.StatusCanceled
 				candidate.Progress.Stage = repoeval.ProgressCanceled
+				repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 				candidate.Progress.Message = "Canceled after launcher recovery."
 				return nil
 			})
 		case repoeval.StatusPreflighting:
 			c.recoverPreflight(evaluation.ID)
+		case repoeval.StatusReady:
+			c.recoverReadyEvaluation(evaluation.ID)
 		case repoeval.StatusRunning, repoeval.StatusJudging, repoeval.StatusAnalyzing:
 			c.recoverEvaluation(evaluation.ID)
 		}
@@ -261,6 +273,80 @@ func (c *repositoryModelEvaluationController) Preflight(
 	if evaluation.Status != repoeval.StatusDraft {
 		return repoeval.Evaluation{}, repoeval.ErrInvalidTransition
 	}
+	return c.startPreflight(ctx, evaluation, false)
+}
+
+func (c *repositoryModelEvaluationController) RunExisting(
+	ctx context.Context,
+	id string,
+	expectedVersion int64,
+) (repoeval.Evaluation, error) {
+	if err := c.Start(); err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	evaluation, found, err := c.store.Get(ctx, id)
+	if err != nil || !found {
+		if err == nil {
+			err = os.ErrNotExist
+		}
+		return repoeval.Evaluation{}, err
+	}
+	if evaluation.Version != expectedVersion {
+		return repoeval.Evaluation{}, repoeval.ErrConflict
+	}
+	if evaluation.Status != repoeval.StatusDraft {
+		return repoeval.Evaluation{}, repoeval.ErrInvalidTransition
+	}
+	return c.startPreflight(ctx, evaluation, true)
+}
+
+func (c *repositoryModelEvaluationController) Run(
+	ctx context.Context,
+	request repoeval.CreateRequest,
+) (repoeval.Evaluation, error) {
+	if err := c.Start(); err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	cfg, err := c.config()
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	if aliasErr := validateRepositoryModelEvaluationAliases(
+		cfg,
+		request.CandidateModels,
+		request.SelectorModelAlias,
+		request.JudgeModelAlias,
+	); aliasErr != nil {
+		return repoeval.Evaluation{}, aliasErr
+	}
+	runID := workflows.NewRunID()
+	request.OneShot = true
+	request.InitialRunID = runID
+	created, err := c.store.Create(ctx, request)
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	return c.launchCreatedPreflight(created, runID)
+}
+
+func (c *repositoryModelEvaluationController) launchCreatedPreflight(
+	created repoeval.Evaluation,
+	runID string,
+) (repoeval.Evaluation, error) {
+	token, runCtx, _, err := c.reserveActive(created.ID)
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	c.wg.Add(1)
+	go c.executePreflight(runCtx, created.ID, token, runID)
+	return created, nil
+}
+
+func (c *repositoryModelEvaluationController) startPreflight(
+	ctx context.Context,
+	evaluation repoeval.Evaluation,
+	oneShot bool,
+) (repoeval.Evaluation, error) {
 	cfg, err := c.config()
 	if err != nil {
 		return repoeval.Evaluation{}, err
@@ -273,13 +359,14 @@ func (c *repositoryModelEvaluationController) Preflight(
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
-	token, runCtx, cancel, err := c.reserveActive(id)
+	token, runCtx, cancel, err := c.reserveActive(evaluation.ID)
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
 	runID := workflows.NewRunID()
-	updated, err := c.store.Update(ctx, id, expectedVersion, func(candidate *repoeval.Evaluation) error {
+	updated, err := c.store.Update(ctx, evaluation.ID, evaluation.Version, func(candidate *repoeval.Evaluation) error {
 		candidate.Status = repoeval.StatusPreflighting
+		candidate.OneShot = candidate.OneShot || oneShot
 		candidate.RunIDs = append(candidate.RunIDs, runID)
 		candidate.Progress.Stage = repoeval.ProgressResolving
 		candidate.Progress.Message = "Resolving the exact repository commit."
@@ -288,11 +375,11 @@ func (c *repositoryModelEvaluationController) Preflight(
 	})
 	if err != nil {
 		cancel()
-		c.releaseActive(id, token)
+		c.releaseActive(evaluation.ID, token)
 		return repoeval.Evaluation{}, err
 	}
 	c.wg.Add(1)
-	go c.executePreflight(runCtx, id, token, runID)
+	go c.executePreflight(runCtx, evaluation.ID, token, runID)
 	return updated, nil
 }
 
@@ -333,29 +420,8 @@ func (c *repositoryModelEvaluationController) StartEvaluation(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	now := c.clock()
-	totalTasks := 1 // final analyzer
-	for _, batch := range repositoryModelEvaluationBatches(evaluation) {
-		totalTasks += repositoryModelEvaluationBatchTaskCount(len(batch.files), len(evaluation.CandidateModels))
-	}
 	updated, err := c.store.Update(ctx, id, expectedVersion, func(candidate *repoeval.Evaluation) error {
-		candidate.Status = repoeval.StatusRunning
-		candidate.Checkpoint = repoeval.Checkpoint{ConcreteModels: make(map[string]map[string]int)}
-		candidate.Progress.Stage = repoeval.ProgressCandidateExecution
-		candidate.Progress.TotalTasks = totalTasks
-		candidate.Progress.CompletedTasks = 0
-		candidate.Progress.CompletedFiles = 0
-		candidate.Progress.Message = "Running candidate models over the frozen corpus."
-		candidate.Progress.Percent = 0
-		candidate.ModelStats = make(map[string]repoeval.ModelStats, len(candidate.CandidateModels))
-		for _, alias := range candidate.CandidateModels {
-			started := now
-			candidate.ModelStats[alias] = repoeval.ModelStats{
-				FilesSelected: len(candidate.Corpus.Files),
-				StartedAt:     &started,
-			}
-		}
-		return nil
+		return c.initializeReadyEvaluation(candidate)
 	})
 	if err != nil {
 		cancel()
@@ -365,6 +431,68 @@ func (c *repositoryModelEvaluationController) StartEvaluation(
 	c.wg.Add(1)
 	go c.executeEvaluation(runCtx, id, token)
 	return updated, nil
+}
+
+func (c *repositoryModelEvaluationController) initializeReadyEvaluation(
+	candidate *repoeval.Evaluation,
+) error {
+	if candidate == nil || candidate.Status != repoeval.StatusReady || candidate.Corpus == nil {
+		return repoeval.ErrInvalidTransition
+	}
+	totalTasks := 1 // final analyzer
+	for _, batch := range repositoryModelEvaluationBatches(*candidate) {
+		totalTasks += repositoryModelEvaluationBatchTaskCount(len(batch.files), len(candidate.CandidateModels))
+	}
+	now := c.clock()
+	candidate.OneShot = true
+	candidate.Status = repoeval.StatusRunning
+	candidate.Checkpoint = repoeval.Checkpoint{ConcreteModels: make(map[string]map[string]int)}
+	candidate.Progress.Stage = repoeval.ProgressCandidateExecution
+	candidate.Progress.TotalTasks = totalTasks
+	candidate.Progress.CompletedTasks = 0
+	candidate.Progress.CompletedFiles = 0
+	candidate.Progress.Message = "Running candidate models over the frozen corpus."
+	candidate.Progress.Percent = 20
+	candidate.ModelStats = make(map[string]repoeval.ModelStats, len(candidate.CandidateModels))
+	for _, alias := range candidate.CandidateModels {
+		started := now
+		candidate.ModelStats[alias] = repoeval.ModelStats{
+			FilesSelected: len(candidate.Corpus.Files),
+			StartedAt:     &started,
+		}
+	}
+	return nil
+}
+
+func (c *repositoryModelEvaluationController) startReadyEvaluationActive(
+	ctx context.Context,
+	id string,
+	token string,
+) (repoeval.Evaluation, error) {
+	cfg, err := c.config()
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	current, found, err := c.store.Get(ctx, id)
+	if err != nil || !found {
+		if err == nil {
+			err = os.ErrNotExist
+		}
+		return repoeval.Evaluation{}, err
+	}
+	if aliasErr := validateRepositoryModelEvaluationAliases(
+		cfg,
+		current.CandidateModels,
+		current.SelectorModelAlias,
+		current.JudgeModelAlias,
+	); aliasErr != nil {
+		return repoeval.Evaluation{}, aliasErr
+	}
+	return c.updateActiveLatest(ctx, id, token, []repoeval.Status{repoeval.StatusReady}, func(
+		candidate *repoeval.Evaluation,
+	) error {
+		return c.initializeReadyEvaluation(candidate)
+	})
 }
 
 func (c *repositoryModelEvaluationController) Cancel(
@@ -390,6 +518,7 @@ func (c *repositoryModelEvaluationController) Cancel(
 		case repoeval.StatusDraft:
 			candidate.Status = repoeval.StatusCanceled
 			candidate.Progress.Stage = repoeval.ProgressCanceled
+			repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 			candidate.Progress.Message = "Canceled."
 		case repoeval.StatusPreflighting,
 			repoeval.StatusReady,
@@ -398,6 +527,7 @@ func (c *repositoryModelEvaluationController) Cancel(
 			repoeval.StatusAnalyzing:
 			candidate.Status = repoeval.StatusCanceling
 			candidate.Progress.Stage = repoeval.ProgressCanceling
+			repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 			candidate.Progress.Message = "Canceling at the current durable boundary."
 		case repoeval.StatusCanceling:
 			return nil
@@ -439,28 +569,13 @@ func (c *repositoryModelEvaluationController) Resume(
 	if evaluation.Version != expectedVersion {
 		return repoeval.Evaluation{}, repoeval.ErrConflict
 	}
-	switch evaluation.Status {
-	case repoeval.StatusDraft:
-		return c.Preflight(ctx, id, expectedVersion)
-	case repoeval.StatusReady:
-		return c.StartEvaluation(ctx, id, expectedVersion)
-	case repoeval.StatusCanceled, repoeval.StatusFailed:
-		if evaluation.Corpus == nil {
-			return c.resumeTerminalPreflight(ctx, evaluation)
-		}
-		return c.resumeTerminalEvaluation(ctx, evaluation)
-	case repoeval.StatusPreflighting, repoeval.StatusRunning, repoeval.StatusJudging, repoeval.StatusAnalyzing:
-		c.mu.Lock()
-		_, active := c.active[id]
-		c.mu.Unlock()
-		if active {
-			return repoeval.Evaluation{}, errRepositoryModelEvaluationBusy
-		}
-		c.recoverEvaluationOrPreflight(evaluation)
-		return evaluation, nil
-	default:
+	if evaluation.Status != repoeval.StatusFailed {
 		return repoeval.Evaluation{}, repoeval.ErrInvalidTransition
 	}
+	if evaluation.Corpus == nil {
+		return c.resumeTerminalPreflight(ctx, evaluation)
+	}
+	return c.resumeTerminalEvaluation(ctx, evaluation)
 }
 
 func (c *repositoryModelEvaluationController) resumeTerminalPreflight(
@@ -486,6 +601,7 @@ func (c *repositoryModelEvaluationController) resumeTerminalPreflight(
 	runID := workflows.NewRunID()
 	updated, err := c.store.Update(ctx, evaluation.ID, evaluation.Version, func(candidate *repoeval.Evaluation) error {
 		candidate.Status = repoeval.StatusPreflighting
+		candidate.OneShot = true
 		candidate.Failure = ""
 		candidate.Checkpoint = repoeval.Checkpoint{}
 		candidate.ModelStats = make(map[string]repoeval.ModelStats)
@@ -538,6 +654,7 @@ func (c *repositoryModelEvaluationController) resumeTerminalEvaluation(
 	now := c.clock()
 	updated, err := c.store.Update(ctx, evaluation.ID, evaluation.Version, func(candidate *repoeval.Evaluation) error {
 		candidate.Status = repoeval.StatusRunning
+		candidate.OneShot = true
 		candidate.Failure = ""
 		candidate.Comparisons = []repoeval.ModelComparison{}
 		candidate.Progress.Stage = repoeval.ProgressCandidateExecution
@@ -547,8 +664,7 @@ func (c *repositoryModelEvaluationController) resumeTerminalEvaluation(
 		candidate.Progress.CurrentPath = ""
 		candidate.Progress.Message = "Resuming from durable corpus batch checkpoints."
 		repositoryModelEvaluationApplyCheckpointMetrics(candidate)
-		candidate.Progress.Percent = 80 * float64(candidate.Progress.CompletedFiles) /
-			float64(max(1, candidate.Progress.SelectedFiles))
+		candidate.Progress.Percent = repositoryModelEvaluationDurableCandidatePercent(*candidate)
 		if candidate.Checkpoint.ConcreteModels == nil {
 			candidate.Checkpoint.ConcreteModels = make(map[string]map[string]int)
 		}
@@ -592,20 +708,38 @@ func (c *repositoryModelEvaluationController) Restart(
 	if evaluation.Version != expectedVersion {
 		return repoeval.Evaluation{}, repoeval.ErrConflict
 	}
-	if evaluation.Status.InFlight() {
-		return repoeval.Evaluation{}, errRepositoryModelEvaluationBusy
+	if evaluation.Status != repoeval.StatusFailed {
+		return repoeval.Evaluation{}, repoeval.ErrInvalidTransition
 	}
+	cfg, err := c.config()
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	if aliasErr := validateRepositoryModelEvaluationAliases(
+		cfg,
+		evaluation.CandidateModels,
+		evaluation.SelectorModelAlias,
+		evaluation.JudgeModelAlias,
+	); aliasErr != nil {
+		return repoeval.Evaluation{}, aliasErr
+	}
+	repository, err := normalizeRepositoryModelEvaluationRepository(ctx, evaluation.Repository)
+	if err != nil {
+		return repoeval.Evaluation{}, err
+	}
+	runID := workflows.NewRunID()
 	created, err := c.store.Create(ctx, repoeval.CreateRequest{
-		Repository: evaluation.Repository, Ref: evaluation.Ref,
+		Repository: repository, Ref: evaluation.Ref,
 		CandidateModels:    append([]string(nil), evaluation.CandidateModels...),
 		SelectorModelAlias: evaluation.SelectorModelAlias, JudgeModelAlias: evaluation.JudgeModelAlias,
 		Focus: evaluation.Focus, DefaultFilesPerLanguage: evaluation.DefaultFilesPerLanguage,
 		FilesPerLanguage: evaluation.FilesPerLanguage,
+		OneShot:          true, InitialRunID: runID,
 	})
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	return c.Preflight(ctx, created.ID, created.Version)
+	return c.launchCreatedPreflight(created, runID)
 }
 
 func (c *repositoryModelEvaluationController) reserveActive(
@@ -669,8 +803,10 @@ func (c *repositoryModelEvaluationController) recoverPreflight(id string) {
 		if candidate.Status != repoeval.StatusPreflighting {
 			return repoeval.ErrInvalidTransition
 		}
+		candidate.OneShot = true
 		candidate.RunIDs = append(candidate.RunIDs, runID)
 		candidate.Progress.Stage = repoeval.ProgressResolving
+		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 		candidate.Progress.Message = "Resuming preflight after launcher recovery."
 		return nil
 	})
@@ -687,16 +823,54 @@ func (c *repositoryModelEvaluationController) recoverEvaluation(id string) {
 	if err != nil {
 		return
 	}
+	if _, err = c.updateLatest(c.ctx, id, func(candidate *repoeval.Evaluation) error {
+		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
+		if candidate.Status == repoeval.StatusRunning {
+			candidate.Progress.CompletedCalls = 0
+			candidate.Progress.TotalCalls = 0
+			candidate.Progress.FailedCalls = 0
+			candidate.Progress.Percent = repositoryModelEvaluationDurableCandidatePercent(*candidate)
+		}
+		candidate.Progress.Message = "Resuming from durable checkpoints after launcher recovery."
+		return nil
+	}); err != nil {
+		c.releaseActive(id, token)
+		return
+	}
 	c.wg.Add(1)
 	go c.executeEvaluation(runCtx, id, token)
 }
 
-func (c *repositoryModelEvaluationController) recoverEvaluationOrPreflight(evaluation repoeval.Evaluation) {
-	if evaluation.Status == repoeval.StatusPreflighting {
-		c.recoverPreflight(evaluation.ID)
-	} else {
-		c.recoverEvaluation(evaluation.ID)
+func (c *repositoryModelEvaluationController) recoverReadyEvaluation(id string) {
+	token, runCtx, _, err := c.reserveActive(id)
+	if err != nil {
+		return
 	}
+	if _, err = c.updateLatest(c.ctx, id, func(candidate *repoeval.Evaluation) error {
+		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
+		return nil
+	}); err != nil {
+		c.releaseActive(id, token)
+		return
+	}
+	c.wg.Add(1)
+	go c.executeReadyEvaluation(runCtx, id, token)
+}
+
+func (c *repositoryModelEvaluationController) executeReadyEvaluation(
+	ctx context.Context,
+	id string,
+	token string,
+) {
+	defer c.wg.Done()
+	defer c.releaseActive(id, token)
+	if _, err := c.startReadyEvaluationActive(ctx, id, token); err != nil {
+		if !c.handleActiveMutationError(id, err) {
+			c.fail(id, token, err.Error())
+		}
+		return
+	}
+	c.executeEvaluationPhase(ctx, id, token)
 }
 
 func (c *repositoryModelEvaluationController) executePreflight(ctx context.Context, id, token, runID string) {
@@ -706,15 +880,20 @@ func (c *repositoryModelEvaluationController) executePreflight(ctx context.Conte
 	if err != nil || !found {
 		return
 	}
+	repository, normalizeErr := normalizeRepositoryModelEvaluationRepository(ctx, evaluation.Repository)
+	if normalizeErr != nil {
+		c.fail(id, token, boundedRepositoryModelEvaluationDetail(normalizeErr.Error()))
+		return
+	}
 	scopeJSON, _ := json.Marshal(repositoryModelEvaluationScopeInput(evaluation.Focus))
 	policyJSON, _ := json.Marshal(repositoryModelEvaluationPolicyInput(evaluation))
-	ctx = repositoryModelEvaluationWithStepObserver(
+	workflowCtx := repositoryModelEvaluationWithStepObserver(
 		ctx,
 		c.preflightStepObserver(id, token),
 	)
-	result, runErr := c.runWorkflow(ctx, workflows.RepositoryModelEvaluationPreflightWorkflowYAML,
+	result, runErr := c.runWorkflow(workflowCtx, workflows.RepositoryModelEvaluationPreflightWorkflowYAML,
 		workflows.RepositoryModelEvaluationPreflightWorkflowRef, runID, map[string]any{
-			"repository": evaluation.Repository, "ref": evaluation.Ref,
+			"repository": repository, "ref": evaluation.Ref,
 			"scope": string(scopeJSON), "selection_policy": string(policyJSON),
 			"selector_model": evaluation.SelectorModelAlias,
 		}, c.usageObserver(id, token, workflows.RepositoryModelEvaluationPreflightWorkflowRef))
@@ -734,7 +913,7 @@ func (c *repositoryModelEvaluationController) executePreflight(ctx context.Conte
 		c.fail(id, token, parseErr.Error())
 		return
 	}
-	_, err = c.updateActiveLatest(
+	updated, err := c.updateActiveLatest(
 		context.Background(),
 		id,
 		token,
@@ -742,13 +921,28 @@ func (c *repositoryModelEvaluationController) executePreflight(ctx context.Conte
 		func(candidate *repoeval.Evaluation) error {
 			candidate.Corpus = manifest
 			candidate.Status = repoeval.StatusReady
+			if candidate.OneShot {
+				progress.Message = "Corpus is frozen; starting model evaluation."
+				progress.Percent = 20
+			}
 			candidate.Progress = progress
 			candidate.Warnings = warnings
 			return nil
 		})
 	if err != nil && !c.handleActiveMutationError(id, err) {
 		c.fail(id, token, err.Error())
+		return
 	}
+	if err != nil || !updated.OneShot {
+		return
+	}
+	if _, err = c.startReadyEvaluationActive(context.Background(), id, token); err != nil {
+		if !c.handleActiveMutationError(id, err) {
+			c.fail(id, token, err.Error())
+		}
+		return
+	}
+	c.executeEvaluationPhase(ctx, id, token)
 }
 
 func (c *repositoryModelEvaluationController) preflightManifest(
@@ -824,7 +1018,7 @@ func (c *repositoryModelEvaluationController) preflightManifest(
 	selector := anyMap(outputs["selector"])
 	rationale := strings.TrimSpace(anyString(selector["rationale"]))
 	policyHash, _ := stableJSONHash(repositoryModelEvaluationPolicyInput(evaluation))
-	rubricHash := sha256.Sum256([]byte("repository-model-evaluation-rubric-v1"))
+	rubricHash := sha256.Sum256([]byte("repository-model-evaluation-rubric-v2"))
 	manifest := &repoeval.CorpusManifest{
 		CommitSHA: commit, InventoryHash: inventoryHash, PolicyHash: policyHash,
 		RubricHash: hex.EncodeToString(rubricHash[:]), SelectorRunID: runID,
@@ -873,6 +1067,10 @@ func (c *repositoryModelEvaluationController) preflightManifest(
 func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Context, id, token string) {
 	defer c.wg.Done()
 	defer c.releaseActive(id, token)
+	c.executeEvaluationPhase(ctx, id, token)
+}
+
+func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context.Context, id, token string) {
 	evaluation, found, err := c.store.Get(ctx, id)
 	if err != nil || !found || evaluation.Corpus == nil {
 		if err == nil {
@@ -897,6 +1095,12 @@ func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Cont
 				candidate.Progress.Stage = repoeval.ProgressCandidateExecution
 				candidate.Progress.CurrentModel = ""
 				candidate.Progress.CurrentPath = ""
+				candidate.Progress.CurrentBatch = batch.index + 1
+				candidate.Progress.TotalBatches = len(repositoryModelEvaluationBatches(*candidate))
+				candidate.Progress.CompletedCalls = 0
+				candidate.Progress.TotalCalls = 0
+				candidate.Progress.FailedCalls = 0
+				candidate.Progress.ActiveChildren = nil
 				candidate.Progress.Message = fmt.Sprintf(
 					"Evaluating pending batch %d of %d.",
 					pendingIndex+1,
@@ -904,8 +1108,7 @@ func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Cont
 				)
 				candidate.Progress.Percent = max(
 					candidate.Progress.Percent,
-					80*float64(candidate.Progress.CompletedFiles)/
-						float64(max(1, candidate.Progress.SelectedFiles)),
+					repositoryModelEvaluationDurableCandidatePercent(*candidate),
 				)
 				return nil
 			})
@@ -937,21 +1140,37 @@ func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Cont
 			c.fail(id, token, "invalid bounded candidate mapping: "+mappingErr.Error())
 			return
 		}
-		if evidenceErr := repositoryModelEvaluationValidateJudgeEvidence(
+		ledgerJSON, ledgerErr := compactJSON(result.Outputs["ledger"])
+		if ledgerErr != nil {
+			c.fail(id, token, "invalid bounded candidate claim ledger: "+ledgerErr.Error())
+			return
+		}
+		claims, evidenceErr := repositoryModelEvaluationValidatedClaimLedger(
 			judgeJSON,
 			mappingJSON,
+			ledgerJSON,
 			batch.models,
-		); evidenceErr != nil {
+			batch.id,
+		)
+		if evidenceErr != nil {
 			c.fail(id, token, evidenceErr.Error())
 			return
 		}
+		judgeJSON, evidenceErr = repositoryModelEvaluationAggregateJudgeJSON(judgeJSON)
+		if evidenceErr != nil {
+			c.fail(id, token, evidenceErr.Error())
+			return
+		}
+		claims, omitted := repositoryModelEvaluationCapClaimLedger(evaluation, claims)
 		checkpoint := repoeval.BatchCheckpoint{
-			ID:           batch.id,
-			CandidateIDs: batch.ids,
-			Candidates:   repositoryModelEvaluationBatchOutcomes(batch, result.Outputs["candidates"]),
-			JudgeJSON:    judgeJSON,
-			MappingJSON:  mappingJSON,
-			CompletedAt:  c.clock(),
+			ID:                 batch.id,
+			CandidateIDs:       batch.ids,
+			Candidates:         repositoryModelEvaluationBatchOutcomes(batch, result.Outputs["candidates"]),
+			ClaimLedger:        claims,
+			ClaimLedgerOmitted: omitted,
+			JudgeJSON:          judgeJSON,
+			MappingJSON:        mappingJSON,
+			CompletedAt:        c.clock(),
 		}
 		evaluation, err = c.updateActiveLatest(
 			context.Background(),
@@ -969,8 +1188,7 @@ func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Cont
 				repositoryModelEvaluationApplyCheckpointMetrics(candidate)
 				candidate.Progress.Percent = max(
 					candidate.Progress.Percent,
-					80*float64(candidate.Progress.CompletedFiles)/
-						float64(max(1, candidate.Progress.SelectedFiles)),
+					repositoryModelEvaluationDurableCandidatePercent(*candidate),
 				)
 				return nil
 			})
@@ -990,6 +1208,7 @@ func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Cont
 			func(candidate *repoeval.Evaluation) error {
 				candidate.Status = repoeval.StatusJudging
 				candidate.Progress.Stage = repoeval.ProgressJudging
+				repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 				candidate.Progress.CurrentModel = candidate.JudgeModelAlias
 				candidate.Progress.CurrentPath = ""
 				candidate.Progress.Message = "Synthesizing durable blinded judgments with the judge model."
@@ -1072,6 +1291,7 @@ func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Cont
 			candidate.Warnings = uniqueBoundedStrings(append(candidate.Warnings, warnings...), 256, 16<<10)
 			candidate.Status = repoeval.StatusCompleted
 			candidate.Progress.Stage = repoeval.ProgressCompleted
+			repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 			repositoryModelEvaluationApplyCheckpointMetrics(candidate)
 			candidate.Progress.TotalTasks = candidate.Progress.CompletedTasks + 1
 			candidate.Progress.CompletedTasks++
@@ -1380,6 +1600,30 @@ func repositoryModelEvaluationApplyCheckpointMetrics(evaluation *repoeval.Evalua
 	}
 }
 
+func repositoryModelEvaluationDurableCandidatePercent(evaluation repoeval.Evaluation) float64 {
+	if evaluation.Corpus == nil || len(evaluation.CandidateModels) == 0 {
+		return 20
+	}
+	totalPairs := len(evaluation.Corpus.Files) * len(evaluation.CandidateModels)
+	completedPairs := 0
+	for _, alias := range evaluation.CandidateModels {
+		completedPairs += min(len(evaluation.Corpus.Files), evaluation.ModelStats[alias].FilesCompleted)
+	}
+	return min(90, 20+70*float64(completedPairs)/float64(max(1, totalPairs)))
+}
+
+func repositoryModelEvaluationBatchPercentShare(
+	evaluation repoeval.Evaluation,
+	batch repositoryModelEvaluationBatch,
+) float64 {
+	if evaluation.Corpus == nil || len(evaluation.CandidateModels) == 0 {
+		return 0
+	}
+	totalPairs := len(evaluation.Corpus.Files) * len(evaluation.CandidateModels)
+	batchPairs := len(batch.files) * len(batch.models)
+	return 70 * float64(batchPairs) / float64(max(1, totalPairs))
+}
+
 func repositoryModelEvaluationBatchTaskCount(files, candidateModels int) int {
 	if files <= 0 || candidateModels <= 0 {
 		return 0
@@ -1396,6 +1640,10 @@ func (c *repositoryModelEvaluationController) runEvaluationBatch(
 	runID string,
 	token string,
 ) (*workflows.RunResult, error) {
+	repository, err := normalizeRepositoryModelEvaluationRepository(ctx, evaluation.Repository)
+	if err != nil {
+		return nil, err
+	}
 	scopeJSON, _ := json.Marshal(repositoryModelEvaluationScopeInput(evaluation.Focus))
 	selected := make([]reposcope.Candidate, 0, len(batch.files))
 	for _, file := range batch.files {
@@ -1415,9 +1663,18 @@ func (c *repositoryModelEvaluationController) runEvaluationBatch(
 		ctx,
 		c.batchStepObserver(evaluation.ID, token, batch, evaluation.JudgeModelAlias),
 	)
+	ctx = repositoryModelEvaluationWithManagedChildObserver(
+		ctx,
+		c.batchManagedChildObserver(
+			evaluation.ID,
+			token,
+			batch,
+			len(repositoryModelEvaluationBatches(evaluation)),
+		),
+	)
 	return c.runWorkflow(ctx, workflows.RepositoryModelEvaluationBatchWorkflowYAML,
 		workflows.RepositoryModelEvaluationBatchWorkflowRef, runID, map[string]any{
-			"repository": evaluation.Repository, "commit": evaluation.Corpus.CommitSHA,
+			"repository": repository, "commit": evaluation.Corpus.CommitSHA,
 			"inventory_hash": evaluation.Corpus.InventoryHash, "scope": string(scopeJSON),
 			"selected_candidates":       string(selectedJSON),
 			"candidate_models":          strings.Join(candidateModels, ","),
@@ -1492,6 +1749,29 @@ func repositoryModelEvaluationStepObserver(ctx context.Context) workflows.StepAc
 	return observer
 }
 
+func repositoryModelEvaluationWithManagedChildObserver(
+	ctx context.Context,
+	observer workflows.ManagedChildActivityEventObserver,
+) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(
+		ctx,
+		repositoryModelEvaluationManagedChildObserverContextKey{},
+		observer,
+	)
+}
+
+func repositoryModelEvaluationManagedChildObserver(
+	ctx context.Context,
+) workflows.ManagedChildActivityEventObserver {
+	observer, _ := ctx.Value(
+		repositoryModelEvaluationManagedChildObserverContextKey{},
+	).(workflows.ManagedChildActivityEventObserver)
+	return observer
+}
+
 func (c *repositoryModelEvaluationController) preflightStepObserver(
 	id string,
 	token string,
@@ -1549,8 +1829,7 @@ func (c *repositoryModelEvaluationController) batchStepObserver(
 			token,
 			[]repoeval.Status{repoeval.StatusRunning, repoeval.StatusJudging},
 			func(candidate *repoeval.Evaluation) error {
-				base := 80 * float64(candidate.Progress.CompletedFiles) /
-					float64(max(1, candidate.Progress.SelectedFiles))
+				base := repositoryModelEvaluationDurableCandidatePercent(*candidate)
 				switch event.StepID {
 				case "checkout", "validate", "freeze", "release":
 					candidate.Progress.Stage = repoeval.ProgressValidating
@@ -1565,9 +1844,9 @@ func (c *repositoryModelEvaluationController) batchStepObserver(
 				case "judge":
 					candidate.Progress.Stage = repoeval.ProgressJudging
 					candidate.Progress.CurrentModel = judgeModel
+					candidate.Progress.ActiveChildren = nil
 					candidate.Progress.Message = "Judging blinded candidate results against exact source."
-					batchShare := 80 * float64(len(batch.files)) /
-						float64(max(1, candidate.Progress.SelectedFiles))
+					batchShare := repositoryModelEvaluationBatchPercentShare(*candidate, batch)
 					candidate.Progress.Percent = max(
 						candidate.Progress.Percent,
 						min(89, base+batchShare*.9),
@@ -1579,6 +1858,94 @@ func (c *repositoryModelEvaluationController) batchStepObserver(
 				return nil
 			},
 		)
+		return err
+	}
+}
+
+func (c *repositoryModelEvaluationController) batchManagedChildObserver(
+	id string,
+	token string,
+	batch repositoryModelEvaluationBatch,
+	totalBatches int,
+) workflows.ManagedChildActivityEventObserver {
+	return func(event workflows.ManagedChildActivityEvent) error {
+		if event.StepID != "candidates" || event.Index < 1 || event.Total < event.Index {
+			return nil
+		}
+		_, err := c.updateActiveLatest(
+			context.Background(), id, token,
+			[]repoeval.Status{repoeval.StatusRunning, repoeval.StatusJudging},
+			func(candidate *repoeval.Evaluation) error {
+				progress := &candidate.Progress
+				progress.Stage = repoeval.ProgressCandidateExecution
+				progress.CurrentBatch = batch.index + 1
+				progress.TotalBatches = max(1, totalBatches)
+				progress.TotalCalls = max(progress.TotalCalls, event.Total)
+				switch event.Phase {
+				case workflows.ManagedChildStarted:
+					active := repoeval.ActiveChildProgress{
+						Index: event.Index, Label: strings.TrimSpace(event.Label),
+						ModelAlias: strings.TrimSpace(event.ModelAlias), ScopeCount: event.ScopeCount,
+						StartedAt: c.clock(),
+					}
+					replaced := false
+					for index := range progress.ActiveChildren {
+						if progress.ActiveChildren[index].Index == event.Index {
+							progress.ActiveChildren[index] = active
+							replaced = true
+							break
+						}
+					}
+					if !replaced && len(progress.ActiveChildren) < repoeval.MaxProgressActiveChildren {
+						progress.ActiveChildren = append(progress.ActiveChildren, active)
+					}
+					sort.Slice(progress.ActiveChildren, func(i, j int) bool {
+						return progress.ActiveChildren[i].Index < progress.ActiveChildren[j].Index
+					})
+					progress.CurrentModel = active.ModelAlias
+					progress.Message = fmt.Sprintf(
+						"Running candidate call %d of %d with %s over %d files.",
+						event.Index, event.Total, active.ModelAlias, active.ScopeCount,
+					)
+				case workflows.ManagedChildCompleted:
+					active := progress.ActiveChildren[:0]
+					for _, child := range progress.ActiveChildren {
+						if child.Index != event.Index {
+							active = append(active, child)
+						}
+					}
+					progress.ActiveChildren = active
+					progress.CompletedCalls = min(progress.TotalCalls, progress.CompletedCalls+1)
+					if !event.Success {
+						progress.FailedCalls = min(progress.CompletedCalls, progress.FailedCalls+1)
+					}
+					progress.CurrentModel = ""
+					if len(progress.ActiveChildren) > 0 {
+						progress.CurrentModel = progress.ActiveChildren[0].ModelAlias
+					}
+					progress.Message = fmt.Sprintf(
+						"Completed candidate call %d of %d (%d failed).",
+						progress.CompletedCalls, progress.TotalCalls, progress.FailedCalls,
+					)
+					base := repositoryModelEvaluationDurableCandidatePercent(*candidate)
+					batchShare := repositoryModelEvaluationBatchPercentShare(*candidate, batch)
+					progress.Percent = max(
+						progress.Percent,
+						min(
+							89,
+							base+batchShare*.9*float64(progress.CompletedCalls)/
+								float64(max(1, progress.TotalCalls)),
+						),
+					)
+				default:
+					return nil
+				}
+				return nil
+			},
+		)
+		if errors.Is(err, errRepositoryModelEvaluationRunFenced) {
+			return context.Canceled
+		}
 		return err
 	}
 }
@@ -1647,15 +2014,54 @@ func (c *repositoryModelEvaluationController) runWorkflowRuntime(
 	if err != nil {
 		return nil, err
 	}
+	executor.DefaultTimeout = repositoryModelEvaluationEffectiveWorkflowTimeout(
+		executor.DefaultTimeout,
+		workflowRef,
+		inputs,
+	)
 	executor.AgentUsageObserver = repositoryModelEvaluationRuntimeUsageObserver(runID, observe)
 	executor.StepActivityObserver = repositoryModelEvaluationRuntimeStepObserver(
 		runID,
 		repositoryModelEvaluationStepObserver(ctx),
 	)
+	executor.ManagedChildActivityObserver = repositoryModelEvaluationRuntimeManagedChildObserver(
+		runID,
+		repositoryModelEvaluationManagedChildObserver(ctx),
+	)
 	return executor.Run(
 		ctx,
 		workflows.RunRequest{RunID: runID, Workflow: workflow, WorkflowRef: workflowRef, Inputs: inputs},
 	)
+}
+
+func repositoryModelEvaluationEffectiveWorkflowTimeout(
+	configured time.Duration,
+	workflowRef string,
+	inputs map[string]any,
+) time.Duration {
+	minimum := time.Duration(0)
+	switch workflowRef {
+	case workflows.RepositoryModelEvaluationPreflightWorkflowRef,
+		workflows.RepositoryModelEvaluationAnalysisWorkflowRef:
+		minimum = repositoryModelEvaluationPhaseMinTimeout
+	case workflows.RepositoryModelEvaluationBatchWorkflowRef:
+		var selected []json.RawMessage
+		_ = decodeAny(inputs["selected_candidates"], &selected)
+		models := 0
+		for _, alias := range strings.Split(anyString(inputs["candidate_models"]), ",") {
+			if strings.TrimSpace(alias) != "" {
+				models++
+			}
+		}
+		// A managed batch may conservatively split every file/model pair into
+		// its own sequential provider call, followed by one judge request.
+		tasks := max(1, len(selected)) * max(1, models)
+		minimum = repositoryModelEvaluationBatchSetupBudget +
+			time.Duration(tasks+1)*repositoryModelEvaluationTaskBudget
+		minimum = max(minimum, repositoryModelEvaluationPhaseMinTimeout)
+		minimum = min(minimum, repositoryModelEvaluationMaxTimeout)
+	}
+	return max(configured, minimum)
 }
 
 func repositoryModelEvaluationRuntimeStepObserver(
@@ -1682,6 +2088,18 @@ func repositoryModelEvaluationRuntimeUsageObserver(
 	}
 }
 
+func repositoryModelEvaluationRuntimeManagedChildObserver(
+	runID string,
+	observe workflows.ManagedChildActivityEventObserver,
+) workflows.ManagedChildActivityEventObserver {
+	return func(event workflows.ManagedChildActivityEvent) error {
+		if event.RunID != runID || observe == nil {
+			return nil
+		}
+		return observe(event)
+	}
+}
+
 func (c *repositoryModelEvaluationController) recordUsage(
 	id string,
 	token string,
@@ -1699,6 +2117,7 @@ func (c *repositoryModelEvaluationController) recordUsage(
 		token,
 		[]repoeval.Status{
 			repoeval.StatusPreflighting,
+			repoeval.StatusReady,
 			repoeval.StatusRunning,
 			repoeval.StatusJudging,
 			repoeval.StatusAnalyzing,
@@ -1773,7 +2192,7 @@ func repositoryModelEvaluationUsagePrice(
 				}
 				if price.inputPerMillion <= 0 && price.outputPerMillion <= 0 &&
 					resolved.Subscription && strings.TrimSpace(resolved.SubscriptionEquivalentModel) != "" {
-					if inherited, ok := repositoryReviewAliasPrice(
+					if inherited, ok := repositoryReviewEquivalentAliasPrice(
 						cfg,
 						resolved.SubscriptionEquivalentModel,
 						make(map[string]bool),
@@ -1915,7 +2334,7 @@ func (c *repositoryModelEvaluationController) finishCanceled(
 		}
 		candidate.Status = repoeval.StatusCanceled
 		candidate.Progress.Stage = repoeval.ProgressCanceled
-		candidate.Progress.CurrentModel = ""
+		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 		candidate.Progress.CurrentPath = ""
 		candidate.Progress.Message = "Canceled at a durable boundary."
 		return nil
@@ -1940,6 +2359,7 @@ func (c *repositoryModelEvaluationController) fail(id, token, detail string) {
 		token,
 		[]repoeval.Status{
 			repoeval.StatusPreflighting,
+			repoeval.StatusReady,
 			repoeval.StatusRunning,
 			repoeval.StatusJudging,
 			repoeval.StatusAnalyzing,
@@ -1968,10 +2388,18 @@ func repositoryModelEvaluationApplyFailure(
 	candidate.Status = repoeval.StatusFailed
 	candidate.Failure = detail
 	candidate.Progress.Stage = repoeval.ProgressFailed
-	candidate.Progress.CurrentModel = ""
+	repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 	candidate.Progress.CurrentPath = ""
 	candidate.Progress.Message = detail
 	return nil
+}
+
+func repositoryModelEvaluationClearActiveChildren(progress *repoeval.Progress) {
+	if progress == nil {
+		return
+	}
+	progress.ActiveChildren = nil
+	progress.CurrentModel = ""
 }
 
 func sanitizeRepositoryModelEvaluationRuntimeText(value string, paths ...string) string {
@@ -1986,7 +2414,37 @@ func sanitizeRepositoryModelEvaluationRuntimeText(value string, paths ...string)
 		}
 		value = strings.ReplaceAll(value, pathValue, "[repository path]")
 	}
+	value = redactRepositoryModelEvaluationAbsolutePaths(value)
 	return boundedRepositoryModelEvaluationDetail(value)
+}
+
+func redactRepositoryModelEvaluationAbsolutePaths(value string) string {
+	var sanitized strings.Builder
+	for index := 0; index < len(value); {
+		if value[index] != '/' || !repositoryModelEvaluationAbsolutePathBoundary(value, index) {
+			sanitized.WriteByte(value[index])
+			index++
+			continue
+		}
+		end := index + 1
+		for end < len(value) && !strings.ContainsRune(" \t\r\n'\"`()[]{}<>,;", rune(value[end])) {
+			end++
+		}
+		sanitized.WriteString("[filesystem path]")
+		index = end
+	}
+	return sanitized.String()
+}
+
+func repositoryModelEvaluationAbsolutePathBoundary(value string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous := value[index-1]
+	if previous == ':' {
+		return index+1 >= len(value) || value[index+1] != '/'
+	}
+	return strings.ContainsRune(" \t\r\n'\"`()[]{}<>=,;", rune(previous))
 }
 
 func (c *repositoryModelEvaluationController) clock() time.Time {
@@ -2205,6 +2663,7 @@ func repositoryModelEvaluationComparisons(
 			alias,
 		)
 		completion := repositoryModelEvaluationObjectiveCompletion(filesAnalyzed, len(evaluation.Corpus.Files))
+		unsupportedClaims := unsupported[alias]
 		comparison := repoeval.ModelComparison{
 			ModelAlias:        alias,
 			ConcreteModels:    cloneNestedConcrete(evaluation.Checkpoint.ConcreteModels[alias]),
@@ -2218,6 +2677,7 @@ func repositoryModelEvaluationComparisons(
 			BytesAnalyzed:     bytesAnalyzed,
 			Failures:          metrics.ModelStats[alias].Failures,
 			ConfirmedFindings: confirmed[alias],
+			UnsupportedClaims: &unsupportedClaims,
 			UnsupportedFiles:  min(filesAnalyzed, unsupported[alias]),
 			Usage:             evaluation.ModelStats[alias].Usage,
 			Verdict:           row.Verdict,
@@ -2352,6 +2812,161 @@ func repositoryModelEvaluationValidateJudgeEvidence(
 	judgeJSON string,
 	mappingJSON string,
 	expectedAliases []string,
+	ledgerJSON ...string,
+) error {
+	if len(ledgerJSON) > 0 {
+		_, err := repositoryModelEvaluationValidatedClaimLedger(
+			judgeJSON,
+			mappingJSON,
+			ledgerJSON[0],
+			expectedAliases,
+			"validation",
+		)
+		return err
+	}
+	return repositoryModelEvaluationValidateJudgeIdentities(judgeJSON, mappingJSON, expectedAliases)
+}
+
+type repositoryModelEvaluationClaimLedgerItem struct {
+	CandidateID string `json:"candidateId"`
+	ClaimID     string `json:"claimId"`
+	Path        string `json:"path"`
+	Title       string `json:"title"`
+	Evidence    string `json:"evidence"`
+	Impact      string `json:"impact"`
+}
+
+type repositoryModelEvaluationJudgeClaimAssessment struct {
+	ClaimID     string                    `json:"claimId"`
+	Disposition repoeval.ClaimDisposition `json:"disposition"`
+	Rationale   string                    `json:"rationale"`
+}
+
+type repositoryModelEvaluationJudgeEvidence struct {
+	Evaluations []struct {
+		CandidateID       string                                           `json:"candidateId"`
+		ConfirmedClaims   int                                              `json:"confirmedClaims"`
+		UnsupportedClaims int                                              `json:"unsupportedClaims"`
+		ClaimAssessments  *[]repositoryModelEvaluationJudgeClaimAssessment `json:"claimAssessments"`
+	} `json:"evaluations"`
+}
+
+func repositoryModelEvaluationValidatedClaimLedger(
+	judgeJSON string,
+	mappingJSON string,
+	ledgerJSON string,
+	expectedAliases []string,
+	batchID string,
+) (map[string][]repoeval.ModelClaim, error) {
+	if err := repositoryModelEvaluationValidateJudgeIdentities(
+		judgeJSON,
+		mappingJSON,
+		expectedAliases,
+	); err != nil {
+		return nil, err
+	}
+	var mapping []struct {
+		CandidateID string `json:"candidateId"`
+		ModelAlias  string `json:"modelAlias"`
+	}
+	var judge repositoryModelEvaluationJudgeEvidence
+	var ledger []repositoryModelEvaluationClaimLedgerItem
+	ledgerDecoder := json.NewDecoder(strings.NewReader(ledgerJSON))
+	ledgerDecoder.DisallowUnknownFields()
+	if json.Unmarshal([]byte(mappingJSON), &mapping) != nil ||
+		json.Unmarshal([]byte(judgeJSON), &judge) != nil ||
+		ledgerDecoder.Decode(&ledger) != nil || len(mapping) == 0 ||
+		len(ledger) > 1024 {
+		return nil, errors.New("invalid bounded candidate claim evidence")
+	}
+	aliasByCandidate := make(map[string]string, len(mapping))
+	for _, item := range mapping {
+		aliasByCandidate[strings.TrimSpace(item.CandidateID)] = strings.TrimSpace(item.ModelAlias)
+	}
+	claimsByID := make(map[string]repositoryModelEvaluationClaimLedgerItem, len(ledger))
+	claimIDsByCandidate := make(map[string]map[string]struct{}, len(mapping))
+	for _, item := range ledger {
+		item.CandidateID = strings.TrimSpace(item.CandidateID)
+		item.ClaimID = strings.TrimSpace(item.ClaimID)
+		item.Path = strings.TrimSpace(item.Path)
+		item.Title = strings.TrimSpace(item.Title)
+		item.Evidence = strings.TrimSpace(item.Evidence)
+		item.Impact = strings.TrimSpace(item.Impact)
+		if aliasByCandidate[item.CandidateID] == "" || !repositoryModelEvaluationValidClaimID(item.ClaimID) ||
+			!strings.HasPrefix(item.ClaimID, "claim-"+strings.TrimPrefix(item.CandidateID, "candidate-")+"-") ||
+			!repositoryModelEvaluationValidClaimPath(item.Path) ||
+			!repositoryModelEvaluationBoundedClaimText(item.Title, 512) ||
+			!repositoryModelEvaluationBoundedClaimText(item.Evidence, 2048) ||
+			!repositoryModelEvaluationBoundedClaimText(item.Impact, 2048) {
+			return nil, errors.New("candidate claim ledger contains invalid diagnosis evidence")
+		}
+		if _, duplicate := claimsByID[item.ClaimID]; duplicate {
+			return nil, errors.New("candidate claim ledger contains a duplicate claim ID")
+		}
+		claimsByID[item.ClaimID] = item
+		if claimIDsByCandidate[item.CandidateID] == nil {
+			claimIDsByCandidate[item.CandidateID] = make(map[string]struct{})
+		}
+		claimIDsByCandidate[item.CandidateID][item.ClaimID] = struct{}{}
+	}
+	result := make(map[string][]repoeval.ModelClaim, len(mapping))
+	for _, alias := range aliasByCandidate {
+		result[alias] = []repoeval.ModelClaim{}
+	}
+	assessed := make(map[string]struct{}, len(ledger))
+	prefix := strings.TrimSpace(batchID)
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	for _, evaluation := range judge.Evaluations {
+		candidateID := strings.TrimSpace(evaluation.CandidateID)
+		expectedClaims := claimIDsByCandidate[candidateID]
+		if evaluation.ClaimAssessments == nil {
+			return nil, errors.New("judge omitted the bounded claim assessments")
+		}
+		assessments := *evaluation.ClaimAssessments
+		supported, unsupported := 0, 0
+		seen := make(map[string]struct{}, len(assessments))
+		for _, assessment := range assessments {
+			assessment.ClaimID = strings.TrimSpace(assessment.ClaimID)
+			assessment.Rationale = strings.TrimSpace(assessment.Rationale)
+			claim, exists := claimsByID[assessment.ClaimID]
+			if !exists || claim.CandidateID != candidateID || !assessment.Disposition.Valid() ||
+				!repositoryModelEvaluationBoundedClaimText(assessment.Rationale, 2048) {
+				return nil, errors.New("judge claim assessment is outside the bounded diagnosis contract")
+			}
+			if _, duplicate := seen[assessment.ClaimID]; duplicate {
+				return nil, errors.New("judge assessed a claim more than once")
+			}
+			seen[assessment.ClaimID] = struct{}{}
+			assessed[assessment.ClaimID] = struct{}{}
+			if assessment.Disposition == repoeval.ClaimDispositionSupported {
+				supported++
+			} else {
+				unsupported++
+			}
+			alias := aliasByCandidate[candidateID]
+			result[alias] = append(result[alias], repoeval.ModelClaim{
+				ID: prefix + "-" + assessment.ClaimID, Path: claim.Path, Title: claim.Title,
+				Evidence: claim.Evidence, Impact: claim.Impact, Disposition: assessment.Disposition,
+				JudgeRationale: assessment.Rationale,
+			})
+		}
+		if len(seen) != len(expectedClaims) || supported != evaluation.ConfirmedClaims ||
+			unsupported != evaluation.UnsupportedClaims {
+			return nil, errors.New("judge claim assessments do not match the candidate claims")
+		}
+	}
+	if len(assessed) != len(claimsByID) {
+		return nil, errors.New("judge omitted a candidate claim")
+	}
+	return result, nil
+}
+
+func repositoryModelEvaluationValidateJudgeIdentities(
+	judgeJSON string,
+	mappingJSON string,
+	expectedAliases []string,
 ) error {
 	var mapping []struct {
 		CandidateID string `json:"candidateId"`
@@ -2403,6 +3018,80 @@ func repositoryModelEvaluationValidateJudgeEvidence(
 		return errors.New("judge omitted a present candidate")
 	}
 	return nil
+}
+
+func repositoryModelEvaluationValidClaimID(value string) bool {
+	parts := strings.Split(value, "-")
+	if len(parts) != 3 || parts[0] != "claim" || len(parts[1]) != 3 || len(parts[2]) != 4 {
+		return false
+	}
+	for _, part := range parts[1:] {
+		for _, character := range part {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func repositoryModelEvaluationValidClaimPath(value string) bool {
+	if !repositoryModelEvaluationBoundedClaimText(value, 4096) || filepath.IsAbs(value) ||
+		strings.Contains(value, "\\") || value == "." {
+		return false
+	}
+	cleaned := filepath.Clean(value)
+	return cleaned == value && cleaned != ".." && !strings.HasPrefix(cleaned, "../")
+}
+
+func repositoryModelEvaluationBoundedClaimText(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum && utf8.ValidString(value)
+}
+
+func repositoryModelEvaluationAggregateJudgeJSON(value string) (string, error) {
+	var output map[string]any
+	if json.Unmarshal([]byte(value), &output) != nil {
+		return "", errors.New("invalid bounded judge output")
+	}
+	evaluations, ok := output["evaluations"].([]any)
+	if !ok {
+		return "", errors.New("invalid bounded judge output")
+	}
+	for _, value := range evaluations {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return "", errors.New("invalid bounded judge output")
+		}
+		delete(item, "claimAssessments")
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		return "", errors.New("invalid bounded judge output")
+	}
+	return string(encoded), nil
+}
+
+func repositoryModelEvaluationCapClaimLedger(
+	evaluation repoeval.Evaluation,
+	claims map[string][]repoeval.ModelClaim,
+) (map[string][]repoeval.ModelClaim, map[string]int) {
+	used := make(map[string]int, len(evaluation.CandidateModels))
+	for _, batch := range evaluation.Checkpoint.Batches {
+		for alias, values := range batch.ClaimLedger {
+			used[alias] += len(values)
+		}
+	}
+	bounded := make(map[string][]repoeval.ModelClaim)
+	omitted := make(map[string]int)
+	for alias, values := range claims {
+		remaining := max(0, repositoryModelEvaluationMaxClaimsPerModel-used[alias])
+		retained := min(remaining, len(values))
+		bounded[alias] = append([]repoeval.ModelClaim(nil), values[:retained]...)
+		if retained < len(values) {
+			omitted[alias] = len(values) - retained
+		}
+	}
+	return bounded, omitted
 }
 
 func cloneNestedConcrete(values map[string]int) map[string]int {

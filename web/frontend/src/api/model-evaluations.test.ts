@@ -9,6 +9,7 @@ import {
   getModelEvaluationCorpus,
   getModelEvaluationOptions,
   listModelEvaluations,
+  runModelEvaluation,
   runModelEvaluationAction,
   updateModelEvaluation,
 } from "./model-evaluations"
@@ -55,12 +56,14 @@ describe("model evaluation API", () => {
     expect(mockedFetch.mock.calls[2]?.[0]).toContain("offset=2&limit=5")
   })
 
-  it("creates, updates, runs actions, and deletes with version fences", async () => {
+  it("starts one-shot probes and preserves legacy version-fenced actions", async () => {
     const evaluation = { id: "rme_a", version: 2 }
-    for (let index = 0; index < 7; index += 1) {
-      mockedFetch.mockResolvedValueOnce(
-        response({ evaluation }, index === 0 ? 201 : index >= 2 ? 202 : 200),
-      )
+    mockedFetch
+      .mockResolvedValueOnce(response({ evaluation }, 201))
+      .mockResolvedValueOnce(response({ evaluation }, 202))
+      .mockResolvedValueOnce(response({ evaluation }))
+    for (let index = 0; index < 6; index += 1) {
+      mockedFetch.mockResolvedValueOnce(response({ evaluation }, 202))
     }
     mockedFetch.mockResolvedValueOnce(response(undefined, 204))
     const input = {
@@ -70,27 +73,37 @@ describe("model evaluation API", () => {
       judge_model_alias: "review",
     }
     expect(await createModelEvaluation(input)).toMatchObject(evaluation)
+    expect(await runModelEvaluation(input)).toMatchObject(evaluation)
     expect(
       await updateModelEvaluation("rme_a", {
         ...input,
         expected_version: 1,
       }),
     ).toMatchObject(evaluation)
-    expect(
-      await runModelEvaluationAction("rme_a", "preflight", 2),
-    ).toMatchObject(evaluation)
-    for (const action of ["start", "cancel", "resume", "restart"] as const) {
+    for (const action of [
+      "preflight",
+      "start",
+      "run",
+      "cancel",
+      "resume",
+      "restart",
+    ] as const) {
       await expect(
         runModelEvaluationAction("rme_a", action, 2),
       ).resolves.toMatchObject(evaluation)
     }
     await deleteModelEvaluation("rme_a", 2)
-    expect(JSON.parse(String(mockedFetch.mock.calls[2]?.[1]?.body))).toEqual({
+    expect(mockedFetch.mock.calls[1]?.[0]).toBe("/api/model-evaluations/run")
+    expect(JSON.parse(String(mockedFetch.mock.calls[1]?.[1]?.body))).toEqual(
+      input,
+    )
+    expect(JSON.parse(String(mockedFetch.mock.calls[3]?.[1]?.body))).toEqual({
       expected_version: 2,
     })
-    expect(mockedFetch.mock.calls.slice(2, 7).map(([path]) => path)).toEqual([
+    expect(mockedFetch.mock.calls.slice(3, 9).map(([path]) => path)).toEqual([
       "/api/model-evaluations/rme_a/preflight",
       "/api/model-evaluations/rme_a/start",
+      "/api/model-evaluations/rme_a/run",
       "/api/model-evaluations/rme_a/cancel",
       "/api/model-evaluations/rme_a/resume",
       "/api/model-evaluations/rme_a/restart",
@@ -181,6 +194,9 @@ describe("model evaluation API", () => {
           languages: [],
           regions: [],
           usage: { requests: 0 },
+          claims: [],
+          claims_omitted: 0,
+          claim_ledger_available: false,
         },
       ],
       warnings: [],

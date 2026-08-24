@@ -1,11 +1,11 @@
 import {
   IconAlertTriangle,
-  IconBrain,
-  IconCheck,
+  IconArrowRight,
   IconLoader2,
   IconPlayerPlay,
   IconRefresh,
-  IconTrash,
+  IconReportAnalytics,
+  IconTrophy,
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 
@@ -14,24 +14,27 @@ import {
   type EvaluationConfigInput,
   type EvaluationCorpusPage,
   type EvaluationModelOption,
+  type EvaluationRepositoryOption,
   ModelEvaluationAPIError,
   type RepositoryModelEvaluation,
   type RepositoryModelEvaluationSummary,
-  createModelEvaluation,
-  deleteModelEvaluation,
   getModelEvaluation,
   getModelEvaluationCorpus,
   getModelEvaluationOptions,
   listModelEvaluations,
+  runModelEvaluation,
   runModelEvaluationAction,
   updateModelEvaluation,
 } from "@/api/model-evaluations"
 import { PageHeader } from "@/components/page-header"
+import { ReviewAdvancedSection } from "@/components/repository-reviews/review-advanced-section"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+
+import { buildModelEvaluationReportAnalysis } from "./model-evaluation-report-analysis"
 
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Horizontally scrollable data regions must be keyboard-focusable. */
 
@@ -44,6 +47,7 @@ const codeTypes: Array<{ value: EvaluationCodeType; label: string }> = [
 
 const activeStatuses = new Set([
   "preflighting",
+  "ready",
   "running",
   "judging",
   "analyzing",
@@ -68,15 +72,30 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-function formatDuration(value: number): string {
-  if (value < 1000) return `${value} ms`
-  return `${(value / 1000).toFixed(1)} s`
+function formatProgressTime(value?: string): string {
+  if (!value) return "not reported"
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) return "not reported"
+  return timestamp.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+}
+
+function formatProgressElapsed(value?: string): string {
+  if (!value) return "unknown"
+  const started = new Date(value).getTime()
+  if (!Number.isFinite(started)) return "unknown"
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - started) / 1000))
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s`
+  return `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s`
 }
 
 function statusTone(status: string): string {
-  if (status === "completed" || status === "ready") return "text-emerald-600"
+  if (status === "completed") return "text-emerald-700 dark:text-emerald-400"
   if (status === "failed" || status === "canceled") return "text-destructive"
-  if (activeStatuses.has(status)) return "text-sky-600"
+  if (activeStatuses.has(status)) return "text-sky-700 dark:text-sky-400"
   return "text-muted-foreground"
 }
 
@@ -171,6 +190,34 @@ function draftInput(
   }
 }
 
+function modelProbeCandidates(
+  draft: EvaluationDraft,
+  candidateModels: string[],
+  models: EvaluationModelOption[],
+): EvaluationDraft {
+  const available = models.filter((model) => model.available)
+  const selector =
+    draft.selector ||
+    candidateModels.find((alias) =>
+      available.some((model) => model.alias === alias),
+    ) ||
+    available.find((model) => model.default)?.alias ||
+    available[0]?.alias ||
+    ""
+  const independentJudge = available.find(
+    (model) => !candidateModels.includes(model.alias),
+  )?.alias
+  const judge =
+    (!draft.judge || (candidateModels.includes(draft.judge) && independentJudge)
+      ? independentJudge
+      : draft.judge) ||
+    candidateModels.find((alias) =>
+      available.some((model) => model.alias === alias),
+    ) ||
+    ""
+  return { ...draft, candidateModels, selector, judge }
+}
+
 function ModelChecks({
   options,
   selected,
@@ -228,16 +275,25 @@ function ModelChecks({
   )
 }
 
-export function ModelEvaluationsPage() {
+export function ModelEvaluationsPage({
+  onOpenReport,
+  initialEvaluationID = "",
+}: {
+  onOpenReport?: (evaluationID: string) => void
+  initialEvaluationID?: string
+} = {}) {
   const [evaluations, setEvaluations] = useState<
     RepositoryModelEvaluationSummary[]
   >([])
-  const [selectedID, setSelectedID] = useState("")
+  const [selectedID, setSelectedID] = useState(initialEvaluationID)
   const [creatingNew, setCreatingNew] = useState(false)
   const [selected, setSelected] = useState<RepositoryModelEvaluation | null>(
     null,
   )
   const [models, setModels] = useState<EvaluationModelOption[]>([])
+  const [repositories, setRepositories] = useState<
+    EvaluationRepositoryOption[]
+  >([])
   const [defaultFilesPerLanguage, setDefaultFilesPerLanguage] = useState(20)
   const [maxFilesPerLanguage, setMaxFilesPerLanguage] = useState(20)
   const [maxCandidateModels, setMaxCandidateModels] = useState(8)
@@ -246,7 +302,6 @@ export function ModelEvaluationsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [conflict, setConflict] = useState(false)
-  const [notice, setNotice] = useState("")
   const [corpusPage, setCorpusPage] = useState<EvaluationCorpusPage | null>(
     null,
   )
@@ -261,6 +316,7 @@ export function ModelEvaluationsPage() {
         ])
         setEvaluations(items)
         setModels(options.models)
+        setRepositories(options.repositories)
         setDefaultFilesPerLanguage(options.default_files_per_language)
         setMaxFilesPerLanguage(options.max_files_per_language)
         setMaxCandidateModels(options.max_candidate_models)
@@ -287,7 +343,7 @@ export function ModelEvaluationsPage() {
         setError(
           loadError instanceof Error
             ? loadError.message
-            : "Failed to load evaluations",
+            : "Failed to load model probes",
         )
       } finally {
         setLoading(false)
@@ -331,7 +387,7 @@ export function ModelEvaluationsPage() {
         setError(
           loadError instanceof Error
             ? loadError.message
-            : "Failed to load evaluation",
+            : "Failed to load model probe",
         )
       }
     },
@@ -421,7 +477,7 @@ export function ModelEvaluationsPage() {
       setError(
         mutationError instanceof Error
           ? mutationError.message
-          : "Evaluation action failed",
+          : "Model probe action failed",
       )
     } finally {
       setBusy(false)
@@ -446,13 +502,9 @@ export function ModelEvaluationsPage() {
     models.some((model) => model.alias === draft.selector && model.available) &&
     models.some((model) => model.alias === draft.judge && model.available)
 
-  const configurationEditable =
-    selected == null ||
-    selected.status === "draft" ||
-    selected.status === "ready"
-  const configurationControlsDisabled = !configurationEditable || busy
-  const recoverable =
-    selected?.status === "failed" || selected?.status === "canceled"
+  const configurationEditable = selected == null || selected.status === "draft"
+  const configurationControlsDisabled =
+    !configurationEditable || busy || loading
   const draftDirty = selected
     ? !draftsEqual(draft, evaluationDraft(selected))
     : false
@@ -495,30 +547,28 @@ export function ModelEvaluationsPage() {
       ),
     [selected],
   )
+  const reportWinner = useMemo(
+    () =>
+      buildModelEvaluationReportAnalysis(selected?.comparisons ?? []).winner,
+    [selected],
+  )
 
-  const save = async () => {
+  const run = async () => {
     if (!validDraft || !configurationEditable) return
-    const previousHadCorpus = selected?.status === "ready"
-    const result = await mutate(async () => {
-      if (selected) {
-        return updateModelEvaluation(
-          selected.id,
-          draftInput(draft, selected.version),
-        )
-      }
-      return createModelEvaluation(draftInput(draft))
+    await mutate(async () => {
+      if (selected == null) return runModelEvaluation(draftInput(draft))
+      const configured = draftDirty
+        ? await updateModelEvaluation(
+            selected.id,
+            draftInput(draft, selected.version),
+          )
+        : selected
+      return runModelEvaluationAction(configured.id, "run", configured.version)
     })
-    if (previousHadCorpus && result?.status === "draft") {
-      setNotice(
-        "Configuration changed. The stale corpus was cleared; analyze the repository again before starting.",
-      )
-    } else if (result) {
-      setNotice("")
-    }
   }
 
   const action = async (
-    name: "preflight" | "start" | "cancel" | "resume" | "restart",
+    name: "preflight" | "start" | "run" | "cancel" | "resume" | "restart",
   ) => {
     if (!selected) return
     await mutate(() =>
@@ -528,40 +578,39 @@ export function ModelEvaluationsPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <PageHeader title="Model evaluations">
+      <PageHeader title="Model review probes">
         <Button
           type="button"
           variant="outline"
           size="sm"
-          disabled={busy}
+          disabled={busy || loading}
           onClick={() => {
             setSelectedID("")
             setSelected(null)
             setCreatingNew(true)
             setCorpusOffset(0)
             setDraft(emptyDraft(defaultFilesPerLanguage))
-            setNotice("")
           }}
         >
-          New evaluation
+          New probe
         </Button>
       </PageHeader>
       <div className="grid min-h-0 flex-1 lg:grid-cols-[18rem_minmax(0,1fr)]">
         <aside
-          aria-label="Saved model evaluations"
+          aria-label="Saved model probes"
           className="border-border max-h-48 min-h-0 overflow-y-auto border-b p-3 lg:max-h-none lg:border-r lg:border-b-0"
         >
           {loading ? (
             <div
               role="status"
-              aria-label="Loading model evaluations"
+              aria-label="Loading model probes"
               className="flex justify-center pt-8"
             >
               <IconLoader2 aria-hidden="true" className="size-5 animate-spin" />
             </div>
           ) : evaluations.length === 0 ? (
             <p className="text-muted-foreground p-3 text-sm">
-              No evaluations yet.
+              No model probes yet.
             </p>
           ) : (
             evaluations.map((evaluation) => (
@@ -579,7 +628,6 @@ export function ModelEvaluationsPage() {
                   setCreatingNew(false)
                   setCorpusOffset(0)
                   setSelectedID(evaluation.id)
-                  setNotice("")
                 }}
               >
                 <span className="block truncate text-sm font-medium">
@@ -594,7 +642,7 @@ export function ModelEvaluationsPage() {
         </aside>
 
         <section
-          aria-label="Model evaluation workspace"
+          aria-label="Model probe workspace"
           className="min-h-0 overflow-y-auto p-4 sm:p-6"
         >
           {error && (
@@ -616,34 +664,29 @@ export function ModelEvaluationsPage() {
               )}
             </div>
           )}
-          {notice && (
-            <div
-              role="status"
-              className="border-border bg-muted mb-4 rounded-lg border p-3 text-sm"
-            >
-              {notice}
-            </div>
-          )}
           <div className="mx-auto max-w-6xl space-y-6">
+            <div className="border-border bg-muted/40 rounded-lg border p-3 text-sm">
+              Comparison-only flow. Probes assess model quality, reliability,
+              usage, and efficiency on the same corpus. They do not create
+              repository findings or issue drafts.
+            </div>
             <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h2 className="font-semibold">
-                    Repository and corpus policy
-                  </h2>
+                  <h2 className="font-semibold">Probe repository</h2>
                   <p className="text-muted-foreground text-xs">
-                    AI ranks safe files; native validation covers every eligible
-                    language and codebase region.
+                    Blank advanced revision uses the repository default branch.
                   </p>
                 </div>
                 {selected && (
                   <Badge variant="secondary">{selected.status}</Badge>
                 )}
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div>
                 <Field label="Repository" required>
                   <Input
                     aria-label="Repository"
+                    list="model-probe-workspace-repositories"
                     value={draft.repository}
                     onChange={(event) =>
                       setDraft({ ...draft, repository: event.target.value })
@@ -651,115 +694,18 @@ export function ModelEvaluationsPage() {
                     placeholder="owner/repository or safe Git URL"
                     disabled={configurationControlsDisabled}
                   />
-                </Field>
-                <Field label="Ref">
-                  <Input
-                    aria-label="Ref"
-                    value={draft.ref}
-                    onChange={(event) =>
-                      setDraft({ ...draft, ref: event.target.value })
-                    }
-                    placeholder="HEAD (default), branch, tag, or commit"
-                    disabled={configurationControlsDisabled}
-                  />
-                </Field>
-              </div>
-              <div className="mt-4">
-                <p className="mb-2 text-sm font-medium">Code types</p>
-                <div className="flex flex-wrap gap-2">
-                  {codeTypes.map((item) => {
-                    const checked = draft.codeTypes.includes(item.value)
-                    return (
-                      <label
-                        key={item.value}
-                        className="border-border flex gap-2 rounded-lg border px-3 py-2 text-sm"
-                      >
-                        <input
-                          aria-label={item.label}
-                          type="checkbox"
-                          checked={checked}
-                          disabled={configurationControlsDisabled}
-                          onChange={() =>
-                            setDraft({
-                              ...draft,
-                              codeTypes: checked
-                                ? draft.codeTypes.filter(
-                                    (value) => value !== item.value,
-                                  )
-                                : [...draft.codeTypes, item.value],
-                            })
-                          }
-                        />
-                        {item.label}
-                      </label>
-                    )
-                  })}
-                </div>
-              </div>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <Field
-                  label="Include folders"
-                  hint="One exact repository-relative prefix per line."
-                >
-                  <Textarea
-                    aria-label="Include folders"
-                    value={draft.includeFolders}
-                    onChange={(event) =>
-                      setDraft({ ...draft, includeFolders: event.target.value })
-                    }
-                    placeholder="pkg/core\nweb/frontend"
-                    disabled={configurationControlsDisabled}
-                  />
-                </Field>
-                <Field label="Ignore folders" hint="Exclusions always win.">
-                  <Textarea
-                    aria-label="Ignore folders"
-                    value={draft.excludeFolders}
-                    onChange={(event) =>
-                      setDraft({ ...draft, excludeFolders: event.target.value })
-                    }
-                    placeholder="examples\ntestdata"
-                    disabled={configurationControlsDisabled}
-                  />
-                </Field>
-              </div>
-              <div className="mt-4 grid gap-4 md:grid-cols-[1fr_12rem]">
-                <Field
-                  label="Free-text scope"
-                  hint="AI may narrow, never widen, the structured scope."
-                >
-                  <Textarea
-                    aria-label="Free-text scope"
-                    value={draft.freeText}
-                    onChange={(event) =>
-                      setDraft({ ...draft, freeText: event.target.value })
-                    }
-                    placeholder="Focus on request routing and persistence boundaries."
-                    disabled={configurationControlsDisabled}
-                  />
-                </Field>
-                <Field
-                  label="Files per language"
-                  hint={`Default quota; hard maximum: ${maxFilesPerLanguage}.`}
-                >
-                  <Input
-                    aria-label="Files per language"
-                    type="number"
-                    min={1}
-                    max={maxFilesPerLanguage}
-                    value={draft.defaultFiles}
-                    disabled={configurationControlsDisabled}
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        defaultFiles: clampLanguageLimit(
-                          event.target.value,
-                          maxFilesPerLanguage,
-                          draft.defaultFiles,
-                        ),
-                      })
-                    }
-                  />
+                  <datalist id="model-probe-workspace-repositories">
+                    {repositories.map((repository) => (
+                      <option key={repository.id} value={repository.repository}>
+                        {repository.label}
+                      </option>
+                    ))}
+                  </datalist>
+                  <p className="text-muted-foreground text-xs">
+                    Choose a registered Git Workspace repository or enter
+                    owner/repository. The probe acquires a managed fresh
+                    checkout and releases it before model calls.
+                  </p>
                 </Field>
               </div>
             </section>
@@ -777,65 +723,204 @@ export function ModelEvaluationsPage() {
                   disabled={configurationControlsDisabled}
                   maximum={maxCandidateModels}
                   onChange={(candidateModels) =>
-                    setDraft({ ...draft, candidateModels })
+                    setDraft(
+                      modelProbeCandidates(
+                        draft,
+                        candidateModels,
+                        displayModels,
+                      ),
+                    )
                   }
                 />
               </Field>
-              <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                <Field label="File selector model" required>
-                  <select
-                    aria-label="File selector model"
-                    className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                    value={draft.selector}
-                    disabled={configurationControlsDisabled}
-                    onChange={(event) =>
-                      setDraft({ ...draft, selector: event.target.value })
-                    }
-                  >
-                    <option value="">Select model</option>
-                    {displayModels.map((model) => (
-                      <option
-                        key={model.alias}
-                        value={model.alias}
-                        disabled={!model.available}
+              <div className="mt-4">
+                <ReviewAdvancedSection description="revision, scope, quotas, selector, and judge">
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-semibold">Repository scope</h3>
+                    <Field
+                      label="Revision"
+                      hint="Optional branch, tag, or commit. Blank uses the repository default branch."
+                    >
+                      <Input
+                        aria-label="Revision"
+                        value={draft.ref}
+                        onChange={(event) =>
+                          setDraft({ ...draft, ref: event.target.value })
+                        }
+                        placeholder="Default repository branch"
+                        disabled={configurationControlsDisabled}
+                      />
+                    </Field>
+                    <div>
+                      <p className="mb-2 text-sm font-medium">Code types</p>
+                      <div className="flex flex-wrap gap-2">
+                        {codeTypes.map((item) => {
+                          const checked = draft.codeTypes.includes(item.value)
+                          return (
+                            <label
+                              key={item.value}
+                              className="border-border flex gap-2 rounded-lg border px-3 py-2 text-sm"
+                            >
+                              <input
+                                aria-label={item.label}
+                                type="checkbox"
+                                checked={checked}
+                                disabled={configurationControlsDisabled}
+                                onChange={() =>
+                                  setDraft({
+                                    ...draft,
+                                    codeTypes: checked
+                                      ? draft.codeTypes.filter(
+                                          (value) => value !== item.value,
+                                        )
+                                      : [...draft.codeTypes, item.value],
+                                  })
+                                }
+                              />
+                              {item.label}
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <Field
+                        label="Include folders"
+                        hint="One exact repository-relative prefix per line."
                       >
-                        {model.alias}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Judge and analyzer model" required>
-                  <select
-                    aria-label="Judge and analyzer model"
-                    className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                    value={draft.judge}
-                    disabled={configurationControlsDisabled}
-                    onChange={(event) =>
-                      setDraft({ ...draft, judge: event.target.value })
-                    }
-                  >
-                    <option value="">Select model</option>
-                    {displayModels.map((model) => (
-                      <option
-                        key={model.alias}
-                        value={model.alias}
-                        disabled={!model.available}
+                        <Textarea
+                          aria-label="Include folders"
+                          value={draft.includeFolders}
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              includeFolders: event.target.value,
+                            })
+                          }
+                          placeholder="pkg/core\nweb/frontend"
+                          disabled={configurationControlsDisabled}
+                        />
+                      </Field>
+                      <Field
+                        label="Ignore folders"
+                        hint="Exclusions always win."
                       >
-                        {model.alias}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
+                        <Textarea
+                          aria-label="Ignore folders"
+                          value={draft.excludeFolders}
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              excludeFolders: event.target.value,
+                            })
+                          }
+                          placeholder="examples\ntestdata"
+                          disabled={configurationControlsDisabled}
+                        />
+                      </Field>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-[1fr_12rem]">
+                      <Field
+                        label="Free-text scope"
+                        hint="AI may narrow, never widen, the structured scope."
+                      >
+                        <Textarea
+                          aria-label="Free-text scope"
+                          value={draft.freeText}
+                          onChange={(event) =>
+                            setDraft({ ...draft, freeText: event.target.value })
+                          }
+                          placeholder="Focus on request routing and persistence boundaries."
+                          disabled={configurationControlsDisabled}
+                        />
+                      </Field>
+                      <Field
+                        label="Files per language"
+                        hint={`Default quota; hard maximum: ${maxFilesPerLanguage}.`}
+                      >
+                        <Input
+                          aria-label="Files per language"
+                          type="number"
+                          min={1}
+                          max={maxFilesPerLanguage}
+                          value={draft.defaultFiles}
+                          disabled={configurationControlsDisabled}
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              defaultFiles: clampLanguageLimit(
+                                event.target.value,
+                                maxFilesPerLanguage,
+                                draft.defaultFiles,
+                              ),
+                            })
+                          }
+                        />
+                      </Field>
+                    </div>
+                  </section>
+                  <section className="space-y-4 border-t pt-4">
+                    <h3 className="text-sm font-semibold">Model roles</h3>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field label="File selector model" required>
+                        <select
+                          aria-label="File selector model"
+                          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+                          value={draft.selector}
+                          disabled={configurationControlsDisabled}
+                          onChange={(event) =>
+                            setDraft({ ...draft, selector: event.target.value })
+                          }
+                        >
+                          <option value="">Select model</option>
+                          {displayModels.map((model) => (
+                            <option
+                              key={model.alias}
+                              value={model.alias}
+                              disabled={!model.available}
+                            >
+                              {model.alias}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Judge and analyzer model" required>
+                        <select
+                          aria-label="Judge and analyzer model"
+                          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+                          value={draft.judge}
+                          disabled={configurationControlsDisabled}
+                          onChange={(event) =>
+                            setDraft({ ...draft, judge: event.target.value })
+                          }
+                        >
+                          <option value="">Select model</option>
+                          {displayModels.map((model) => (
+                            <option
+                              key={model.alias}
+                              value={model.alias}
+                              disabled={!model.available}
+                            >
+                              {model.alias}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    </div>
+                    {draft.candidateModels.includes(draft.judge) &&
+                      draft.judge && (
+                        <p
+                          role="status"
+                          className="mt-3 flex items-center gap-2 text-sm text-amber-600"
+                        >
+                          <IconAlertTriangle className="size-4" /> Judge
+                          overlaps a candidate; results will show a bias
+                          warning.
+                        </p>
+                      )}
+                  </section>
+                </ReviewAdvancedSection>
               </div>
-              {draft.candidateModels.includes(draft.judge) && draft.judge && (
-                <p
-                  role="status"
-                  className="mt-3 flex items-center gap-2 text-sm text-amber-600"
-                >
-                  <IconAlertTriangle className="size-4" /> Judge overlaps a
-                  candidate; results will show a bias warning.
-                </p>
-              )}
               {draft.candidateModels.length >= maxCandidateModels && (
                 <p className="text-muted-foreground mt-3 text-xs">
                   Candidate-model limit reached ({maxCandidateModels}).
@@ -844,49 +929,22 @@ export function ModelEvaluationsPage() {
               {unavailableModelSelected && (
                 <p role="alert" className="text-destructive mt-3 text-sm">
                   Replace unavailable selector/judge models and remove any
-                  unavailable candidate models before saving or running.
-                </p>
-              )}
-              {selected?.status === "ready" && draftDirty && (
-                <p role="status" className="mt-3 text-sm text-amber-600">
-                  Save configuration changes to clear the stale corpus before
-                  analyzing again.
+                  unavailable candidate models before running.
                 </p>
               )}
               <div className="mt-5 flex flex-wrap gap-2">
                 {configurationEditable && (
                   <Button
                     type="button"
-                    disabled={
-                      busy || !validDraft || (selected != null && !draftDirty)
-                    }
-                    onClick={() => void save()}
+                    disabled={busy || loading || !validDraft}
+                    onClick={() => void run()}
                   >
                     {busy ? (
                       <IconLoader2 className="size-4 animate-spin" />
                     ) : (
-                      <IconCheck className="size-4" />
+                      <IconPlayerPlay className="size-4" />
                     )}
-                    {selected ? "Save configuration" : "Create evaluation"}
-                  </Button>
-                )}
-                {selected?.status === "draft" && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy || draftDirty || !validDraft}
-                    onClick={() => void action("preflight")}
-                  >
-                    <IconBrain className="size-4" /> Analyze repository
-                  </Button>
-                )}
-                {selected?.status === "ready" && (
-                  <Button
-                    type="button"
-                    disabled={busy || draftDirty || !validDraft}
-                    onClick={() => void action("start")}
-                  >
-                    <IconPlayerPlay className="size-4" /> Start evaluation
+                    Run probe
                   </Button>
                 )}
                 {selected &&
@@ -901,56 +959,36 @@ export function ModelEvaluationsPage() {
                       Cancel
                     </Button>
                   )}
-                {selected && recoverable && (
+                {selected?.status === "failed" && (
                   <Button
                     type="button"
                     variant="outline"
                     disabled={busy}
                     onClick={() => void action("resume")}
                   >
-                    <IconRefresh className="size-4" /> Resume
+                    <IconRefresh className="size-4" /> Restart
                   </Button>
                 )}
-                {selected?.status === "completed" && (
+                {selected?.status === "failed" && (
                   <Button
                     type="button"
                     variant="outline"
                     disabled={busy}
                     onClick={() => void action("restart")}
                   >
-                    <IconRefresh className="size-4" /> Run again
-                  </Button>
-                )}
-                {selected && !activeStatuses.has(selected.status) && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      void mutate(async () => {
-                        await deleteModelEvaluation(
-                          selected.id,
-                          selected.version,
-                        )
-                        setSelected(null)
-                        setSelectedID("")
-                        setDraft(emptyDraft(defaultFilesPerLanguage))
-                      })
-                    }
-                  >
-                    <IconTrash className="size-4" /> Delete
+                    <IconRefresh className="size-4" /> Start over
                   </Button>
                 )}
               </div>
             </section>
 
             {selected && (
-              <section
-                className="border-border bg-card rounded-xl border p-4 sm:p-5"
-                aria-live="polite"
-                aria-atomic="false"
-              >
-                <div className="flex items-center justify-between gap-3">
+              <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
+                <div
+                  className="flex items-center justify-between gap-3"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
                   <div>
                     <h2 className="font-semibold">Progress</h2>
                     <p className="text-muted-foreground text-xs">
@@ -964,7 +1002,7 @@ export function ModelEvaluationsPage() {
                 <div
                   className="bg-muted mt-3 h-2 overflow-hidden rounded-full"
                   role="progressbar"
-                  aria-label="Evaluation progress"
+                  aria-label="Model probe progress"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={Math.min(
@@ -994,6 +1032,55 @@ export function ModelEvaluationsPage() {
                     tokens
                   </span>
                 </div>
+                {(selected.progress.total_calls ?? 0) > 0 && (
+                  <div
+                    role="region"
+                    aria-label="Candidate call progress"
+                    className="border-border bg-muted/40 mt-4 rounded-lg border p-3"
+                  >
+                    <div className="grid gap-2 text-xs sm:grid-cols-4">
+                      <span>
+                        Batch {selected.progress.current_batch ?? 0}/
+                        {selected.progress.total_batches ?? 0}
+                      </span>
+                      <span>
+                        {selected.progress.completed_calls ?? 0}/
+                        {selected.progress.total_calls ?? 0} candidate calls
+                      </span>
+                      <span>
+                        {selected.progress.active_children?.length ?? 0} active
+                      </span>
+                      <span>{selected.progress.failed_calls ?? 0} failed</span>
+                    </div>
+                    {(selected.progress.active_children?.length ?? 0) > 0 && (
+                      <ul className="mt-3 space-y-2 text-xs">
+                        {selected.progress.active_children?.map((child) => (
+                          <li
+                            key={child.index}
+                            className="border-border flex flex-wrap justify-between gap-2 border-t pt-2 first:border-0 first:pt-0"
+                          >
+                            <span className="font-medium">
+                              {child.label ||
+                                `Candidate call ${child.index} of ${selected.progress.total_calls ?? 0}`}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {child.model_alias || "resolved model"} ·{" "}
+                              {child.scope_count} file
+                              {child.scope_count === 1 ? "" : "s"} · started{" "}
+                              {formatProgressTime(child.started_at)} · running{" "}
+                              {formatProgressElapsed(child.started_at)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="text-muted-foreground mt-3 text-xs">
+                      Candidate calls update live. Analyzed files and durable
+                      task counts advance after the batch is judged and
+                      checkpointed.
+                    </p>
+                  </div>
+                )}
                 {(selected.progress.current_model ||
                   selected.progress.current_path) && (
                   <p className="text-muted-foreground mt-3 text-xs">
@@ -1009,6 +1096,12 @@ export function ModelEvaluationsPage() {
                       : ""}
                   </p>
                 )}
+                <p className="text-muted-foreground mt-3 text-xs">
+                  Last progress update{" "}
+                  <time dateTime={selected.progress.updated_at}>
+                    {formatProgressTime(selected.progress.updated_at)}
+                  </time>
+                </p>
                 {selected.failure && (
                   <p className="text-destructive mt-3 text-sm">
                     {selected.failure}
@@ -1058,7 +1151,7 @@ export function ModelEvaluationsPage() {
                 )}
                 <table className="mt-4 w-full min-w-[42rem] text-left text-sm">
                   <caption className="sr-only">
-                    Selected evaluation corpus grouped by language
+                    Selected model probe corpus grouped by language
                   </caption>
                   <thead>
                     <tr className="border-border border-b">
@@ -1187,7 +1280,7 @@ export function ModelEvaluationsPage() {
                 </div>
                 <table className="mt-4 w-full min-w-[48rem] text-left text-sm">
                   <caption className="sr-only">
-                    Paged immutable evaluation corpus references
+                    Paged immutable model probe corpus references
                   </caption>
                   <thead>
                     <tr className="border-border border-b">
@@ -1251,125 +1344,57 @@ export function ModelEvaluationsPage() {
 
             {selected && selected.comparisons.length > 0 && (
               <section
-                aria-label="AI-judged comparison"
-                tabIndex={0}
-                className="border-border bg-card overflow-x-auto rounded-xl border p-4 sm:p-5"
+                aria-label="Probe report ready"
+                className="via-card overflow-hidden rounded-xl border border-sky-200 bg-gradient-to-br from-sky-50 to-violet-50 p-4 sm:p-5 dark:border-sky-900 dark:from-sky-950/30 dark:to-violet-950/20"
               >
-                <div className="flex items-center gap-2">
-                  <IconBrain className="size-5" />
-                  <h2 className="font-semibold">AI-judged comparison</h2>
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="max-w-2xl">
+                    <div className="flex items-center gap-2 text-sky-700 dark:text-sky-300">
+                      <IconReportAnalytics
+                        className="size-5"
+                        aria-hidden="true"
+                      />
+                      <h2 className="font-semibold">Visual report ready</h2>
+                    </div>
+                    <p className="text-muted-foreground mt-2 text-sm leading-6">
+                      The full report turns this comparison into score graphs,
+                      efficiency tradeoffs, claim assessment, and readable
+                      strengths and limitations.
+                    </p>
+                    <p className="mt-3 flex items-center gap-2 text-sm">
+                      <IconTrophy
+                        className="size-4 text-amber-500"
+                        aria-hidden="true"
+                      />
+                      <strong>
+                        {reportWinner?.model_alias ?? "Results need attention"}
+                      </strong>
+                      {reportWinner?.overall_score == null
+                        ? " · no fully completed scored model"
+                        : ` leads at ${reportWinner.overall_score.toFixed(1)} overall`}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-start gap-2 lg:items-end">
+                    <div className="text-muted-foreground text-xs">
+                      {selected.comparisons.length} models ·{" "}
+                      {selected.progress.completed_files}/
+                      {selected.progress.selected_files} files
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={() =>
+                        onOpenReport
+                          ? onOpenReport(selected.id)
+                          : window.location.assign(
+                              `/model-evaluations/${selected.id}/report`,
+                            )
+                      }
+                    >
+                      View full report
+                      <IconArrowRight aria-hidden="true" />
+                    </Button>
+                  </div>
                 </div>
-                <p className="text-muted-foreground mt-1 text-xs">
-                  Quality scores are comparative AI judgments, not ground-truth
-                  benchmark measurements.
-                </p>
-                <table className="mt-4 w-full min-w-[70rem] text-left text-sm">
-                  <caption className="sr-only">
-                    AI-judged model quality, coverage, reliability, usage, and
-                    cost comparison
-                  </caption>
-                  <thead>
-                    <tr className="border-border border-b">
-                      <th scope="col" className="py-2">
-                        Rank
-                      </th>
-                      <th scope="col">Model alias</th>
-                      <th scope="col">Concrete models</th>
-                      <th scope="col">Completion</th>
-                      <th scope="col">Overall</th>
-                      <th scope="col">Correctness</th>
-                      <th scope="col">Evidence</th>
-                      <th scope="col">Coverage</th>
-                      <th scope="col">Actionability</th>
-                      <th scope="col">Files / bytes / regions / languages</th>
-                      <th scope="col">Findings / unsupported</th>
-                      <th scope="col">Requests / latency</th>
-                      <th scope="col">Tokens / cost</th>
-                      <th scope="col">AI-judged verdict</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...selected.comparisons]
-                      .sort((a, b) => (a.rank || 99) - (b.rank || 99))
-                      .map((row) => (
-                        <tr
-                          key={row.model_alias}
-                          className="border-border border-b align-top last:border-0"
-                        >
-                          <td className="py-3">{row.rank || "—"}</td>
-                          <th
-                            scope="row"
-                            className="text-left font-mono font-normal"
-                          >
-                            {row.model_alias}
-                          </th>
-                          <td>
-                            {Object.entries(row.concrete_models)
-                              .map(([model, count]) => `${model} (${count})`)
-                              .join(", ") || "unknown"}
-                          </td>
-                          <td>
-                            <Badge
-                              variant={
-                                row.completion === "failed"
-                                  ? "destructive"
-                                  : "outline"
-                              }
-                            >
-                              {row.completion}
-                            </Badge>
-                            {row.failures > 0 && (
-                              <span className="text-destructive mt-1 block text-xs">
-                                {row.failures} failed task
-                                {row.failures === 1 ? "" : "s"}
-                              </span>
-                            )}
-                          </td>
-                          <td>{row.overall_score?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.correctness?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.evidence?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.coverage?.toFixed(1) ?? "—"}</td>
-                          <td>{row.scores.actionability?.toFixed(1) ?? "—"}</td>
-                          <td>
-                            {row.files_analyzed} /{" "}
-                            {formatBytes(row.bytes_analyzed)} /{" "}
-                            {row.regions.length} / {row.languages.length}
-                          </td>
-                          <td>
-                            {row.confirmed_findings} / {row.unsupported_files}
-                          </td>
-                          <td>
-                            {row.usage.requests} /{" "}
-                            {formatDuration(row.usage.duration_millis)}
-                          </td>
-                          <td>
-                            {row.usage.input_tokens + row.usage.output_tokens} /{" "}
-                            {row.usage.estimated_cost_usd == null
-                              ? "unknown"
-                              : `$${row.usage.estimated_cost_usd.toFixed(4)}`}
-                          </td>
-                          <td className="max-w-md">
-                            <p>{row.verdict || row.summary || "No verdict."}</p>
-                            {row.failure && (
-                              <p className="text-destructive mt-1 text-xs">
-                                Failure: {row.failure}
-                              </p>
-                            )}
-                            {(row.strengths ?? []).length > 0 && (
-                              <p className="mt-1 text-xs text-emerald-600">
-                                Strengths: {row.strengths?.join("; ")}
-                              </p>
-                            )}
-                            {(row.limitations ?? []).length > 0 && (
-                              <p className="mt-1 text-xs text-amber-600">
-                                Limitations: {row.limitations?.join("; ")}
-                              </p>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
               </section>
             )}
           </div>

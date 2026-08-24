@@ -66,6 +66,45 @@ func TestWebWorkflowRuntimeForwardsReadOnlySessionCapture(t *testing.T) {
 	}
 }
 
+func TestWebWorkflowRuntimeForwardsRepositoryReviewAccount(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.AccountRef = "review-default"
+	cfg.Agents.Defaults.ModelName = "review-model"
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name: "review-model", Model: "gpt-default",
+		AccountOverrides: map[string]string{"review-alt": "gpt-alt"},
+	}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "review-default", Provider: "openai", Model: "gpt-default",
+			APIBase: "http://example.invalid/v1", APIKeys: config.SimpleSecureStrings("default-key"),
+			Enabled: true,
+		},
+		{
+			ModelName: "review-alt", Provider: "openai", Model: "gpt-alt",
+			APIBase: "http://example.invalid/v1", APIKeys: config.SimpleSecureStrings("alt-key"),
+			Enabled: true,
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	loop := agent.NewAgentLoop(cfg, msgBus, workflowRuntimeTestProvider{})
+	runner := &webWorkflowRuntimeRunner{loop: loop, msgBus: msgBus}
+	t.Cleanup(func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+
+	profile, err := runner.ResolveRepositoryReviewProfile(
+		t.Context(), "main", "review-alt", nil,
+	)
+	if err != nil || profile.AccountRef != "review-alt" || profile.Revision == "" {
+		t.Fatalf("repository review profile=%#v err=%v", profile, err)
+	}
+}
+
 func TestWebWorkflowRuntimeResolvesHumanTaskWithoutInitializingAgentLoop(t *testing.T) {
 	runner := &webWorkflowRuntimeRunner{}
 	if got := runner.ResolveWorkflowDependency(

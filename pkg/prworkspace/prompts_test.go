@@ -25,6 +25,15 @@ func TestCompilePromptSeparatesStageAuthorityAndSharedFacts(t *testing.T) {
 		!strings.Contains(repair.UserPrompt, bundle.WorkspaceID) {
 		t.Fatal("shared facts absent from specialized prompt")
 	}
+	if !strings.Contains(review.SystemPrompt, "NON-OVERRIDABLE FINDING POLICY") ||
+		!strings.Contains(review.SystemPrompt, "Never provide") ||
+		strings.Contains(repair.SystemPrompt, "NON-OVERRIDABLE FINDING POLICY") {
+		t.Fatalf("diagnosis-only review boundary review=%q repair=%q", review.SystemPrompt, repair.SystemPrompt)
+	}
+	properties := agentFindingSchema()["properties"].(map[string]any)
+	if _, exists := properties["recommendation"]; exists {
+		t.Fatalf("model finding schema still exposes recommendation: %#v", properties)
+	}
 }
 
 func TestCompilePromptRejectsUnconfirmedCharterOutsideDraft(t *testing.T) {
