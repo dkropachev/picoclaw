@@ -872,6 +872,71 @@ func TestRepositoryModelEvaluationAPIRejectsStrictRequestBoundaries(t *testing.T
 	if badOptionsQuery.Code != http.StatusBadRequest {
 		t.Fatalf("options query status=%d body=%s", badOptionsQuery.Code, badOptionsQuery.Body.String())
 	}
+	badRunQuery := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run?x=1",
+		repositoryModelEvaluationCreateBody("owner/run-query"),
+	)
+	if badRunQuery.Code != http.StatusBadRequest {
+		t.Fatalf("run query status=%d body=%s", badRunQuery.Code, badRunQuery.Body.String())
+	}
+	malformedRun := httptest.NewRequest(
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		strings.NewReader("{"),
+	)
+	malformedRun.Header.Set("Content-Type", "application/json")
+	malformedRun.Header.Set("Sec-Fetch-Site", "same-origin")
+	malformedRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(malformedRunResponse, malformedRun)
+	if malformedRunResponse.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"malformed run status=%d body=%s",
+			malformedRunResponse.Code,
+			malformedRunResponse.Body.String(),
+		)
+	}
+	unavailableRunBody := repositoryModelEvaluationCreateBody("owner/unavailable-run")
+	unavailableRunBody["candidate_models"] = []string{"model-a", "missing-model"}
+	unavailableRun := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		unavailableRunBody,
+	)
+	if unavailableRun.Code != http.StatusBadRequest {
+		t.Fatalf("unavailable run status=%d body=%s", unavailableRun.Code, unavailableRun.Body.String())
+	}
+	invalidPatchRepository := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/model-evaluations/"+created.ID,
+		map[string]any{
+			"expected_version": created.Version,
+			"repository":       filepath.Join(t.TempDir(), "missing"),
+		},
+	)
+	if invalidPatchRepository.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"invalid patch repository status=%d body=%s",
+			invalidPatchRepository.Code,
+			invalidPatchRepository.Body.String(),
+		)
+	}
+	staleDraftDelete := repositoryModelEvaluationRequest(
+		t,
+		mux,
+		http.MethodDelete,
+		"/api/model-evaluations/"+created.ID,
+		map[string]any{"expected_version": created.Version + 10},
+	)
+	if staleDraftDelete.Code != http.StatusConflict {
+		t.Fatalf("stale draft delete status=%d body=%s", staleDraftDelete.Code, staleDraftDelete.Body.String())
+	}
 
 	for _, test := range []struct {
 		name   string
@@ -980,6 +1045,7 @@ func TestRepositoryModelEvaluationAPIConfigStoreAndMissingFailures(t *testing.T)
 	}{
 		{name: "list config", method: http.MethodGet, path: "/api/model-evaluations"},
 		{name: "create config", method: http.MethodPost, path: "/api/model-evaluations", body: repositoryModelEvaluationCreateBody("owner/repo")},
+		{name: "run config", method: http.MethodPost, path: "/api/model-evaluations/run", body: repositoryModelEvaluationCreateBody("owner/run")},
 		{name: "get config", method: http.MethodGet, path: "/api/model-evaluations/" + repositoryModelEvaluationMissingID()},
 		{name: "patch config", method: http.MethodPatch, path: "/api/model-evaluations/" + repositoryModelEvaluationMissingID(), body: map[string]any{"expected_version": 1}},
 		{name: "delete config", method: http.MethodDelete, path: "/api/model-evaluations/" + repositoryModelEvaluationMissingID(), body: map[string]any{"expected_version": 1}},

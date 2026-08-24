@@ -413,6 +413,14 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 			t.Fatalf("%s get failure=%v", name, branchErr)
 		}
 	}
+	controller.store = &repositoryModelEvaluationFaultStore{base: base, getMissing: true}
+	if _, branchErr := controller.startReadyEvaluationActive(
+		t.Context(),
+		ready.ID,
+		"token",
+	); !errors.Is(branchErr, os.ErrNotExist) {
+		t.Fatalf("ready missing error=%v", branchErr)
+	}
 
 	controller.store = base
 	orphanDraft, err := base.Create(t.Context(), repositoryModelEvaluationCreateRequest("owner/orphan-preflight"))
@@ -492,6 +500,12 @@ func TestRepositoryModelEvaluationControllerActionErrorCoverage(t *testing.T) {
 	controller.recoverReadyEvaluation("blocked-recovery")
 	blockedCancel()
 	controller.releaseActive("blocked-recovery", blockedToken)
+	missingToken, missingCtx, _, actionErr := controller.reserveActive(missingID)
+	if actionErr != nil {
+		t.Fatal(actionErr)
+	}
+	controller.wg.Add(1)
+	controller.executePreflight(missingCtx, missingID, missingToken, "wr_missing_preflight")
 }
 
 func TestRepositoryModelEvaluationControllerFaultStoreCoverage(t *testing.T) {
@@ -930,17 +944,34 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 			t.Fatal(err)
 		}
 		ready := seedReadyRepositoryModelEvaluation(t, controller, store, "owner/config-ready")
-		canceled, err := store.Create(t.Context(), repositoryModelEvaluationCreateRequest("owner/config-canceled"))
+		failedPreflight, err := store.Create(
+			t.Context(),
+			repositoryModelEvaluationCreateRequest("owner/config-preflight-failed"),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		canceled, err = store.Update(
+		failedPreflight, err = store.Update(
 			t.Context(),
-			canceled.ID,
-			canceled.Version,
+			failedPreflight.ID,
+			failedPreflight.Version,
 			func(value *repoeval.Evaluation) error {
-				value.Status = repoeval.StatusCanceled
-				value.Progress.Stage = repoeval.ProgressCanceled
+				value.Status = repoeval.StatusPreflighting
+				value.Progress.Stage = repoeval.ProgressResolving
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failedPreflight, err = store.Update(
+			t.Context(),
+			failedPreflight.ID,
+			failedPreflight.Version,
+			func(value *repoeval.Evaluation) error {
+				value.Status = repoeval.StatusFailed
+				value.Progress.Stage = repoeval.ProgressFailed
+				value.Failure = "preflight failed"
 				return nil
 			},
 		)
@@ -956,16 +987,31 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 				_, actionErr := controller.Preflight(t.Context(), draft.ID, draft.Version)
 				return actionErr
 			},
+			"run": func() error {
+				_, actionErr := controller.Run(
+					t.Context(),
+					repositoryModelEvaluationCreateRequest("owner/config-run"),
+				)
+				return actionErr
+			},
 			"start": func() error {
 				_, actionErr := controller.StartEvaluation(t.Context(), ready.ID, ready.Version)
 				return actionErr
 			},
 			"resume preflight": func() error {
-				_, actionErr := controller.Resume(t.Context(), canceled.ID, canceled.Version)
+				_, actionErr := controller.Resume(t.Context(), failedPreflight.ID, failedPreflight.Version)
 				return actionErr
 			},
 			"resume execution": func() error {
 				_, actionErr := controller.Resume(t.Context(), failed.ID, failed.Version)
+				return actionErr
+			},
+			"ready recovery": func() error {
+				_, actionErr := controller.startReadyEvaluationActive(t.Context(), ready.ID, "token")
+				return actionErr
+			},
+			"start over": func() error {
+				_, actionErr := controller.Restart(t.Context(), failed.ID, failed.Version)
 				return actionErr
 			},
 		} {
@@ -996,6 +1042,12 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 			errRepositoryModelEvaluationUnavailableModel,
 		) {
 			t.Fatalf("preflight alias error=%v", branchErr)
+		}
+		if _, branchErr := controller.Run(t.Context(), request); !errors.Is(
+			branchErr,
+			errRepositoryModelEvaluationUnavailableModel,
+		) {
+			t.Fatalf("run alias error=%v", branchErr)
 		}
 		preflighting, err := store.Update(t.Context(), draft.ID, draft.Version, func(value *repoeval.Evaluation) error {
 			value.Status = repoeval.StatusPreflighting
@@ -1039,6 +1091,12 @@ func TestRepositoryModelEvaluationConfigurationAndAliasErrorCoverage(t *testing.
 			errRepositoryModelEvaluationUnavailableModel,
 		) {
 			t.Fatalf("execution resume alias error=%v", branchErr)
+		}
+		if _, branchErr := controller.Restart(t.Context(), unknownFailed.ID, unknownFailed.Version); !errors.Is(
+			branchErr,
+			errRepositoryModelEvaluationUnavailableModel,
+		) {
+			t.Fatalf("start-over alias error=%v", branchErr)
 		}
 	})
 }
