@@ -19,6 +19,19 @@ type AgentRegistry struct {
 	mu       sync.RWMutex
 }
 
+type agentRegistryConstructionGuard struct {
+	registry *AgentRegistry
+}
+
+func (guard *agentRegistryConstructionGuard) cleanupPanic() {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	guard.registry.Close()
+	panic(recovered)
+}
+
 // NewAgentRegistry creates a registry from config, instantiating all agents.
 func NewAgentRegistry(
 	cfg *config.Config,
@@ -29,6 +42,7 @@ func NewAgentRegistry(
 		agents:   make(map[string]*AgentInstance),
 		resolver: routing.NewRouteResolver(cfg),
 	}
+	defer (&agentRegistryConstructionGuard{registry: registry}).cleanupPanic()
 
 	agentConfigs := cfg.Agents.List
 	if len(agentConfigs) == 0 {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,48 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
+
+type agentInstanceCloseTool struct {
+	closeErr   error
+	closePanic any
+	closeCalls atomic.Int64
+}
+
+func (*agentInstanceCloseTool) Name() string        { return "agent_instance_close" }
+func (*agentInstanceCloseTool) Description() string { return "agent instance close probe" }
+func (*agentInstanceCloseTool) Parameters() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+func (*agentInstanceCloseTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+	return tools.SilentResult("closed")
+}
+
+func (tool *agentInstanceCloseTool) Close() error {
+	tool.closeCalls.Add(1)
+	if tool.closePanic != nil {
+		panic(tool.closePanic)
+	}
+	return tool.closeErr
+}
+
+type agentInstanceCloseSessionStore struct {
+	session.SessionStore
+	closeErr   error
+	closePanic any
+	closeCalls atomic.Int64
+}
+
+func (store *agentInstanceCloseSessionStore) Close() error {
+	store.closeCalls.Add(1)
+	if store.closePanic != nil {
+		panic(store.closePanic)
+	}
+	return store.closeErr
+}
 
 func TestResolveAgentWorkspaceMatchesRuntimeResolution(t *testing.T) {
 	defaults := &config.AgentDefaults{Workspace: filepath.Join(t.TempDir(), "workspace")}
@@ -355,6 +396,9 @@ func TestInstanceUtilityHelpersCoverFallbackBranches(t *testing.T) {
 	if err := (&AgentInstance{}).Close(); err != nil {
 		t.Fatalf("Close() error = %v, want nil", err)
 	}
+	if err := (*AgentInstance)(nil).Close(); err != nil {
+		t.Fatalf("nil Close() error = %v, want nil", err)
+	}
 	if !(*AgentInstance)(nil).AllowsMCPServer("github") {
 		t.Fatal("nil agent AllowsMCPServer() = false, want true")
 	}
@@ -381,6 +425,140 @@ func TestInstanceUtilityHelpersCoverFallbackBranches(t *testing.T) {
 	}
 	if got := expandHome("/tmp/workspace"); got != "/tmp/workspace" {
 		t.Fatalf("expandHome(abs) = %q, want /tmp/workspace", got)
+	}
+}
+
+func TestAgentInstanceCloseJoinsToolAndSessionCleanup(t *testing.T) {
+	toolCloseErr := errors.New("tool close failed")
+	sessionCloseErr := errors.New("session close failed")
+	var product *agentInstanceCloseTool
+	factory, err := tools.NewToolFactory(
+		tools.ToolDescriptor{
+			Name: "agent_instance_close", Description: "agent instance close probe",
+			Parameters: map[string]any{"type": "object"},
+		},
+		tools.ToolTraits{},
+		func(tools.ToolBuildContext) (tools.Tool, error) {
+			product = &agentInstanceCloseTool{closeErr: toolCloseErr}
+			return product, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tools.NewOwnedToolRegistry(tools.ToolOwner{Scope: tools.ToolOwnerScopeRegistry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterFactory(factory); err != nil {
+		t.Fatal(err)
+	}
+	if product == nil {
+		t.Fatal("factory did not publish its close probe")
+	}
+	store := &agentInstanceCloseSessionStore{
+		SessionStore: session.NewSessionManager(t.TempDir()),
+		closeErr:     sessionCloseErr,
+	}
+	agent := &AgentInstance{Tools: registry, Sessions: store}
+	closeErr := agent.Close()
+	if !errors.Is(closeErr, toolCloseErr) || !errors.Is(closeErr, sessionCloseErr) {
+		t.Fatalf("Close() error = %v, want both cleanup errors", closeErr)
+	}
+	if product.closeCalls.Load() != 1 || store.closeCalls.Load() != 1 {
+		t.Fatalf("cleanup calls = tool:%d session:%d",
+			product.closeCalls.Load(), store.closeCalls.Load())
+	}
+}
+
+func TestAgentInstanceCloseContainsBothCleanupPanics(t *testing.T) {
+	tool := &agentInstanceCloseTool{closePanic: "tool panic"}
+	factory, err := tools.NewToolFactory(
+		tools.ToolDescriptor{
+			Name: "agent_instance_close", Description: "agent instance close probe",
+			Parameters: map[string]any{"type": "object"},
+		},
+		tools.ToolTraits{},
+		func(tools.ToolBuildContext) (tools.Tool, error) { return tool, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tools.NewOwnedToolRegistry(tools.ToolOwner{Scope: tools.ToolOwnerScopeRegistry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterFactory(factory); err != nil {
+		t.Fatal(err)
+	}
+	store := &agentInstanceCloseSessionStore{
+		SessionStore: session.NewSessionManager(t.TempDir()),
+		closePanic:   "session panic",
+	}
+	closeErr := (&AgentInstance{Tools: registry, Sessions: store}).Close()
+	if closeErr == nil || !strings.Contains(closeErr.Error(), "tool panic") ||
+		!strings.Contains(closeErr.Error(), "session panic") {
+		t.Fatalf("Close() panic error = %v", closeErr)
+	}
+	if tool.closeCalls.Load() != 1 || store.closeCalls.Load() != 1 {
+		t.Fatalf("panic cleanup calls = tool:%d session:%d",
+			tool.closeCalls.Load(), store.closeCalls.Load())
+	}
+	if err := closeAgentResource("none", nil); err != nil {
+		t.Fatalf("nil close resource error = %v", err)
+	}
+}
+
+func TestAgentInstanceConstructionGuardCleansPartialResourcesAndPreservesPanic(t *testing.T) {
+	live := tools.NewUpdatePlanTool()
+	registry := tools.NewToolRegistry()
+	if err := registry.RegisterFactoryBacked(live, tools.NewUpdatePlanToolFactory()); err != nil {
+		t.Fatal(err)
+	}
+	store := &agentInstanceCloseSessionStore{
+		SessionStore: session.NewSessionManager(t.TempDir()),
+		closeErr:     errors.New("partial session close failed"),
+	}
+	sentinel := errors.New("construction panic")
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		guard := &agentInstanceConstructionGuard{partial: AgentInstance{
+			Tools: registry, Sessions: store,
+		}}
+		defer guard.cleanupPanic()
+		panic(sentinel)
+	}()
+	if recovered != sentinel {
+		t.Fatalf("recovered panic = %v, want %v", recovered, sentinel)
+	}
+	if registry.Count() != 0 || store.closeCalls.Load() != 1 {
+		t.Fatalf("partial cleanup = tools:%d sessions:%d", registry.Count(), store.closeCalls.Load())
+	}
+}
+
+func TestAgentInstanceCloseReleasesCompatibilitySourceLease(t *testing.T) {
+	live := tools.NewUpdatePlanTool()
+	factory := tools.NewUpdatePlanToolFactory()
+	source := tools.NewToolRegistry()
+	if err := source.RegisterFactoryBacked(live, factory); err != nil {
+		t.Fatal(err)
+	}
+	competitor := tools.NewToolRegistry()
+	if err := competitor.RegisterFactoryBacked(live, factory); err == nil {
+		t.Fatal("live source pointer was not leased before agent close")
+	}
+	if err := (&AgentInstance{Tools: source}).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if source.Count() != 0 {
+		t.Fatal("agent close retained compatibility source tools")
+	}
+	if err := competitor.RegisterFactoryBacked(live, factory); err != nil {
+		t.Fatalf("agent close did not release compatibility source lease: %v", err)
+	}
+	if err := competitor.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

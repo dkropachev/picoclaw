@@ -114,6 +114,7 @@ type AgentLoop struct {
 	reloadFunc func() error
 
 	providerFactory func(*config.ModelConfig) (providers.LLMProvider, string, error)
+	registryFactory func(*config.Config, providers.LLMProvider) *AgentRegistry
 }
 
 // processOptions configures how a message is processed
@@ -683,18 +684,10 @@ func (al *AgentLoop) WaitStopped(ctx context.Context) error {
 	}
 }
 
-// Close releases resources held by agent session stores. Call after Stop.
+// Close releases quiesced registry, session, context, and generation resources.
+// Call after Stop.
 func (al *AgentLoop) Close() {
 	mcpManager := al.mcp.takeManager()
-
-	if mcpManager != nil {
-		if err := mcpManager.Close(); err != nil {
-			logger.ErrorCF("agent", "Failed to close MCP manager",
-				map[string]any{
-					"error": err.Error(),
-				})
-		}
-	}
 	evolution := al.currentEvolutionBridge()
 	if evolution != nil {
 		if err := evolution.Close(); err != nil {
@@ -712,6 +705,14 @@ func (al *AgentLoop) Close() {
 			})
 	}
 	al.GetRegistry().Close()
+	if mcpManager != nil {
+		if err := mcpManager.Close(); err != nil {
+			logger.ErrorCF("agent", "Failed to close MCP manager",
+				map[string]any{
+					"error": err.Error(),
+				})
+		}
+	}
 	if al.hooks != nil {
 		al.hooks.Close()
 	}
@@ -810,7 +811,11 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				registry = nil
 			}
 		}()
-		registry = NewAgentRegistry(cfg, provider)
+		if al.registryFactory != nil {
+			registry = al.registryFactory(cfg, provider)
+		} else {
+			registry = NewAgentRegistry(cfg, provider)
+		}
 	}()
 	if registry == nil {
 		if err := ctx.Err(); err != nil {
@@ -818,6 +823,12 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		}
 		return nil, fmt.Errorf("registry creation failed")
 	}
+	registryInstalled := false
+	defer func() {
+		if !registryInstalled {
+			registry.Close()
+		}
+	}()
 
 	// Check context again before proceeding
 	if err := ctx.Err(); err != nil {
@@ -842,7 +853,6 @@ func (al *AgentLoop) reloadProviderAndConfig(
 
 	resumeRuntime, err := al.pauseRuntimeUses(ctx)
 	if err != nil {
-		registry.Close()
 		if newEvolution != nil {
 			_ = newEvolution.Close()
 		}
@@ -860,6 +870,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	// Store new values
 	al.cfg = cfg
 	al.registry = registry
+	registryInstalled = true
 	al.evolution = newEvolution
 
 	// Also update fallback chain with new config; rebuild rate limiter registry.
@@ -892,6 +903,12 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	al.contextManager = newContextManager
 	al.mu.Unlock()
 
+	if oldEvolution != nil {
+		if err := oldEvolution.Close(); err != nil {
+			logger.WarnCF("agent", "Failed to close previous evolution bridge during reload",
+				map[string]any{"error": err.Error()})
+		}
+	}
 	if newEvolution != nil {
 		if err := newEvolution.activate(al); err != nil {
 			logger.WarnCF("agent", "Failed to activate reloaded evolution bridge",
@@ -900,6 +917,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	}
 	al.refreshRuntimeEventLogger(cfg)
 
+	oldProvider, hasOldProvider := extractProvider(oldRegistry)
 	oldMCPManager := al.mcp.reset()
 	al.hookRuntime.reset(al)
 	configureHookManagerFromConfig(al.hooks, cfg)
@@ -907,15 +925,13 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		logger.WarnCF("agent", "Configured hooks failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
 	}
+	// Runtime uses are paused and the old context/evolution owners are closed.
+	// Release every old compatibility-source tool lease before its borrowed MCP
+	// manager or provider generation disappears.
+	oldRegistry.Close()
 	if oldMCPManager != nil {
 		if err := oldMCPManager.Close(); err != nil {
 			logger.WarnCF("agent", "Failed to close previous MCP manager during reload",
-				map[string]any{"error": err.Error()})
-		}
-	}
-	if oldEvolution != nil {
-		if err := oldEvolution.Close(); err != nil {
-			logger.WarnCF("agent", "Failed to close previous evolution bridge during reload",
 				map[string]any{"error": err.Error()})
 		}
 	}
@@ -925,7 +941,6 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	}
 	// Close old provider after releasing the lock
 	// This prevents blocking readers while closing
-	oldProvider, hasOldProvider := extractProvider(oldRegistry)
 	if closePrevious && hasOldProvider {
 		if stateful, ok := oldProvider.(providers.StatefulProvider); ok {
 			al.closeReloadedProvider(ctx, stateful)
