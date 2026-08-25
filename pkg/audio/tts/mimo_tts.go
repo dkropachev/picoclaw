@@ -94,12 +94,11 @@ func (t *MimoTTSProvider) Synthesize(ctx context.Context, text string) (io.ReadC
 	if err != nil {
 		return nil, err
 	}
-	t.model = model
 
 	logger.DebugCF("voice-tts", "Starting TTS synthesis", map[string]any{"text_len": len(text), "provider": t.Name()})
 
 	reqBody := map[string]any{
-		"model": t.model,
+		"model": model,
 		"messages": []map[string]string{
 			{"role": "assistant", "content": text},
 		},

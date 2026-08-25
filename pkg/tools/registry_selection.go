@@ -69,6 +69,15 @@ func (r *ToolRegistry) registerFactoryBacked(live Tool, factory ToolFactory, cor
 		r.mu.Unlock()
 		return fmt.Errorf("tool %q is already registered", descriptor.Name)
 	}
+	dependency, dependencyErr := r.factoryDependencyForPromotionLocked(
+		descriptor,
+		traits,
+		factory,
+	)
+	if dependencyErr != nil {
+		r.mu.Unlock()
+		return dependencyErr
+	}
 	store := r.mediaStore
 	mediaGeneration := r.mediaGen
 	r.mu.Unlock()
@@ -105,7 +114,16 @@ func (r *ToolRegistry) registerFactoryBacked(live Tool, factory ToolFactory, cor
 	if r.tools[descriptor.Name] != nil {
 		return fmt.Errorf("tool %q changed during factory-backed registration", descriptor.Name)
 	}
+	if err := r.validateFactoryDependencyPromotionLocked(
+		dependency,
+		descriptor,
+		traits,
+		factory,
+	); err != nil {
+		return err
+	}
 	frozen := cloneToolDescriptor(descriptor)
+	delete(r.constructionCatalog, descriptor.Name)
 	r.tools[descriptor.Name] = &ToolEntry{
 		Tool: live, IsCore: core, TTL: 0,
 		descriptor: &frozen, traits: traits, factory: factory,

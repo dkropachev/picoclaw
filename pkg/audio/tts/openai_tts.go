@@ -138,20 +138,19 @@ func (t *OpenAITTSProvider) Synthesize(ctx context.Context, text string) (io.Rea
 	if err != nil {
 		return nil, err
 	}
-	t.model = model
 
 	logger.DebugCF("voice-tts", "Starting TTS synthesis", map[string]any{"text_len": len(text)})
 
 	responseFormat := t.responseFormat
-	stream, err := t.doSpeechRequest(ctx, text, responseFormat)
+	stream, err := t.doSpeechRequest(ctx, text, model, responseFormat)
 	if err != nil {
 		var apiErr *openAITTSAPIError
 		if errors.As(err, &apiErr) && shouldRetryWithoutResponseFormat(apiErr.body) {
 			logger.InfoCF("voice-tts", "Retrying TTS without response_format after provider rejection", map[string]any{
-				"model": t.model,
+				"model": model,
 			})
 			responseFormat = ""
-			stream, err = t.doSpeechRequest(ctx, text, responseFormat)
+			stream, err = t.doSpeechRequest(ctx, text, model, responseFormat)
 		}
 		if err != nil {
 			return nil, err
@@ -169,10 +168,11 @@ func (t *OpenAITTSProvider) Synthesize(ctx context.Context, text string) (io.Rea
 func (t *OpenAITTSProvider) doSpeechRequest(
 	ctx context.Context,
 	text string,
+	model string,
 	responseFormat string,
 ) (io.ReadCloser, error) {
 	reqBody := map[string]any{
-		"model": t.model,
+		"model": model,
 		"input": text,
 		"voice": t.voice,
 	}

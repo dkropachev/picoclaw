@@ -47,6 +47,22 @@ func NewToolFactory(
 	return &toolFactory{descriptor: frozen, traits: normalized, build: build}, nil
 }
 
+// NewToolFactoryFromPrototype snapshots prototype's complete provider-facing
+// descriptor, including prompt metadata, and creates a per-owner factory from
+// it. The snapshot is panic-safe and does not retain aliases to the
+// prototype's parameter schema.
+func NewToolFactoryFromPrototype(
+	prototype Tool,
+	traits ToolTraits,
+	build ToolBuildFunc,
+) (ToolFactory, error) {
+	descriptor, err := safeToolDescriptor(prototype)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot tool factory prototype: %w", err)
+	}
+	return NewToolFactory(descriptor, traits, build)
+}
+
 func (factory *toolFactory) Descriptor() ToolDescriptor {
 	if factory == nil {
 		return ToolDescriptor{}

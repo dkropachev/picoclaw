@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/media"
 )
 
 func TestCodexExecCommandTool_MapsCommandToExecBackend(t *testing.T) {
@@ -63,4 +64,19 @@ func TestCodexViewImageTool_ForwardsPathToLoader(t *testing.T) {
 	if result.ForLLM != "loaded" {
 		t.Fatalf("ForLLM = %q, want loaded", result.ForLLM)
 	}
+}
+
+func TestCodexViewImageTool_ForwardsMediaStoreToPrivateLoader(t *testing.T) {
+	loader := &mockMediaStoreAwareTool{
+		mockRegistryTool: *newMockTool("load_image", "load"),
+	}
+	store := media.NewFileMediaStore()
+	NewCodexViewImageTool(loader).SetMediaStore(store)
+	if loader.store != store {
+		t.Fatal("view_image did not forward media-store injection to its loader")
+	}
+
+	NewCodexViewImageTool(newMockTool("load_image", "load")).SetMediaStore(store)
+	var nilView *CodexViewImageTool
+	nilView.SetMediaStore(store)
 }

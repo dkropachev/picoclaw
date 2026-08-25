@@ -53,6 +53,15 @@ func (r *ToolRegistry) registerFactory(factory ToolFactory, core bool) error {
 		r.mu.Unlock()
 		return nil
 	}
+	dependency, dependencyErr := r.factoryDependencyForPromotionLocked(
+		descriptor,
+		traits,
+		factory,
+	)
+	if dependencyErr != nil {
+		r.mu.Unlock()
+		return dependencyErr
+	}
 	owner := r.owner
 	sourceEntries := make(
 		map[string]*ToolEntry,
@@ -160,6 +169,16 @@ func (r *ToolRegistry) registerFactory(factory ToolFactory, core bool) error {
 		cleanupErr := cleanupReserved()
 		return errors.Join(fmt.Errorf("tool %q changed during factory construction", descriptor.Name), cleanupErr)
 	}
+	if err := r.validateFactoryDependencyPromotionLocked(
+		dependency,
+		descriptor,
+		traits,
+		factory,
+	); err != nil {
+		r.mu.Unlock()
+		cleanupErr := cleanupReserved()
+		return errors.Join(err, cleanupErr)
+	}
 	for name, expected := range resolved {
 		current := r.tools[name]
 		if current == nil {
@@ -179,6 +198,7 @@ func (r *ToolRegistry) registerFactory(factory ToolFactory, core bool) error {
 	created := services.detachCreated()
 	serviceReservations := services.detachReservations()
 	frozen := cloneToolDescriptor(descriptor)
+	delete(r.constructionCatalog, descriptor.Name)
 	r.tools[descriptor.Name] = &ToolEntry{
 		Tool: tool, IsCore: core, TTL: 0,
 		descriptor: &frozen, traits: traits, factory: factory,
@@ -254,6 +274,13 @@ func (r *ToolRegistry) registerImmutableShared(tool Tool, traits ToolTraits, cor
 	}
 	if !r.toolAllowedLocked(descriptor.Name) {
 		return nil
+	}
+	if r.privateConstruction[descriptor.Name] != nil ||
+		r.constructionCatalog[descriptor.Name] != nil {
+		return fmt.Errorf(
+			"immutable shared tool %q collides with a private factory dependency",
+			descriptor.Name,
+		)
 	}
 	if r.tools[descriptor.Name] != nil {
 		return fmt.Errorf("tool %q is already registered", descriptor.Name)

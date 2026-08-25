@@ -342,6 +342,9 @@ func TestNewAgentLoop_RegistersWebSearchTool(t *testing.T) {
 	if _, ok := agent.Tools.Get("web_search"); !ok {
 		t.Fatal("expected web_search tool to be registered")
 	}
+	if !toolCapabilityIsFactoryBacked(agent.Tools, "web_search") {
+		t.Fatal("expected concrete web_search tool to be factory-backed")
+	}
 }
 
 func TestNewAgentLoop_RegistersWebSearchTool_WhenExplicitProviderUnavailable(t *testing.T) {
@@ -359,6 +362,9 @@ func TestNewAgentLoop_RegistersWebSearchTool_WhenExplicitProviderUnavailable(t *
 	}
 	if _, ok := agent.Tools.Get("web_search"); !ok {
 		t.Fatal("expected web_search tool to fall back to auto provider selection")
+	}
+	if !toolCapabilityIsFactoryBacked(agent.Tools, "web_search") {
+		t.Fatal("expected fallback web_search tool to be factory-backed")
 	}
 }
 
@@ -379,6 +385,18 @@ func TestNewAgentLoop_DoesNotRegisterWebSearchTool_WhenNoReadyProviders(t *testi
 	if _, ok := agent.Tools.Get("web_search"); ok {
 		t.Fatal("expected web_search tool to be absent when no providers are ready")
 	}
+	if toolCapabilityIsFactoryBacked(agent.Tools, "web_search") {
+		t.Fatal("web_search was classified without a concrete live tool")
+	}
+}
+
+func toolCapabilityIsFactoryBacked(registry *tools.ToolRegistry, name string) bool {
+	for _, capability := range registry.InstantiationCapabilities() {
+		if capability.Name == name {
+			return capability.FactoryBacked
+		}
+	}
+	return false
 }
 
 func TestPublishResponseIfNeeded_DismissesToolFeedbackWhenMessageToolAlreadySent(t *testing.T) {

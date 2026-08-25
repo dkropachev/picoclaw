@@ -33,7 +33,11 @@ var (
 	}
 )
 
-type SerialTool struct{}
+type SerialTool struct {
+	// identity keeps per-owner wrappers address-distinct; zero-sized Go values
+	// may legally share one pointer and cannot participate in ownership leases.
+	_ byte
+}
 
 type serialPortInfo struct {
 	Name string `json:"name"`

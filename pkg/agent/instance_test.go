@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -739,9 +741,9 @@ func TestNewAgentInstance_AllowsMediaTempDirForReadListAndExec(t *testing.T) {
 		t.Fatalf("MkdirAll(mediaDir) error = %v", err)
 	}
 
-	mediaFile, err := os.CreateTemp(mediaDir, "instance-tool-*.txt")
-	if err != nil {
-		t.Fatalf("CreateTemp(mediaDir) error = %v", err)
+	mediaFile, createErr := os.CreateTemp(mediaDir, "instance-tool-*.txt")
+	if createErr != nil {
+		t.Fatalf("CreateTemp(mediaDir) error = %v", createErr)
 	}
 	mediaPath := mediaFile.Name()
 	if _, err := mediaFile.WriteString("attachment content"); err != nil {
@@ -774,8 +776,8 @@ func TestNewAgentInstance_AllowsMediaTempDirForReadListAndExec(t *testing.T) {
 
 	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
 
-	readTool, ok := agent.Tools.Get("read_file")
-	if !ok {
+	readTool, readToolOK := agent.Tools.Get("read_file")
+	if !readToolOK {
 		t.Fatal("read_file tool not registered")
 	}
 	readResult := readTool.Execute(context.Background(), map[string]any{"path": mediaPath})
@@ -797,6 +799,30 @@ func TestNewAgentInstance_AllowsMediaTempDirForReadListAndExec(t *testing.T) {
 	if !strings.Contains(listResult.ForLLM, filepath.Base(mediaPath)) {
 		t.Fatalf("list_dir output missing media file: %s", listResult.ForLLM)
 	}
+	child, constructionErr := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "media-reader",
+	}, []string{"list_dir", "read_file"})
+	if constructionErr != nil {
+		t.Fatal(constructionErr)
+	}
+	defer child.Close()
+	childRead, ok := child.Get("read_file")
+	if !ok {
+		t.Fatal("owner-constructed read_file tool not registered")
+	}
+	childReadResult := childRead.Execute(context.Background(), map[string]any{"path": mediaPath})
+	if childReadResult.IsError || !strings.Contains(childReadResult.ForLLM, "attachment content") {
+		t.Fatalf("owner-constructed read_file lost media path policy: %#v", childReadResult)
+	}
+	childList, ok := child.Get("list_dir")
+	if !ok {
+		t.Fatal("owner-constructed list_dir tool not registered")
+	}
+	childListResult := childList.Execute(context.Background(), map[string]any{"path": mediaDir})
+	if childListResult.IsError ||
+		!strings.Contains(childListResult.ForLLM, filepath.Base(mediaPath)) {
+		t.Fatalf("owner-constructed list_dir lost media path policy: %#v", childListResult)
+	}
 
 	execTool, ok := agent.Tools.Get("exec")
 	if !ok {
@@ -812,6 +838,59 @@ func TestNewAgentInstance_AllowsMediaTempDirForReadListAndExec(t *testing.T) {
 	}
 	if !strings.Contains(execResult.ForLLM, "attachment content") {
 		t.Fatalf("exec output missing media content: %s", execResult.ForLLM)
+	}
+}
+
+func TestNewAgentInstanceOwnerFactoriesFreezeOutsideWorkspaceWritePolicy(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	allowWritePaths := []string{
+		"^" + regexp.QuoteMeta(filepath.Clean(outside)) + "(?:" +
+			regexp.QuoteMeta(string(os.PathSeparator)) + "|$)",
+	}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: workspace, ModelName: "test-model", RestrictToWorkspace: true,
+		}},
+		Tools: config.ToolsConfig{
+			AllowWritePaths: allowWritePaths,
+			WriteFile:       config.ToolConfig{Enabled: true},
+			AppendFile:      config.ToolConfig{Enabled: true},
+			EditFile:        config.ToolConfig{Enabled: true},
+		},
+	}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	allowWritePaths[0] = "^" + regexp.QuoteMeta(filepath.Join(workspace, "never")) + "$"
+	child, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "outside-writer",
+	}, []string{"append_file", "edit_file", "write_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	target := filepath.Join(outside, "owner.txt")
+	writeTool, _ := child.Get("write_file")
+	if result := writeTool.Execute(context.Background(), map[string]any{
+		"path": target, "content": "one", "overwrite": false,
+	}); result == nil || result.IsError {
+		t.Fatalf("owner write_file lost frozen allow path: %#v", result)
+	}
+	appendTool, _ := child.Get("append_file")
+	if result := appendTool.Execute(context.Background(), map[string]any{
+		"path": target, "content": " two",
+	}); result == nil || result.IsError {
+		t.Fatalf("owner append_file lost frozen allow path: %#v", result)
+	}
+	editTool, _ := child.Get("edit_file")
+	if result := editTool.Execute(context.Background(), map[string]any{
+		"path": target, "old_text": "one two", "new_text": "final",
+	}); result == nil || result.IsError {
+		t.Fatalf("owner edit_file lost frozen allow path: %#v", result)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "final" {
+		t.Fatalf("owner write policy result = %q, %v", content, err)
 	}
 }
 
@@ -890,6 +969,18 @@ func TestNewAgentInstance_ReadFileModeSelectsSchema(t *testing.T) {
 	if _, ok := props["length"]; ok {
 		t.Fatalf("did not expect line-mode schema to expose length, got %#v", props)
 	}
+	child, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "line-reader",
+	}, []string{"read_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	childRead, childReadOK := child.Get("read_file")
+	if !childReadOK || reflect.TypeOf(childRead) != reflect.TypeOf(readTool) ||
+		!reflect.DeepEqual(childRead.Parameters(), params) {
+		t.Fatalf("line-mode child = %T %#v, want %T %#v", childRead, childRead.Parameters(), readTool, params)
+	}
 }
 
 // write_file copy names append_file/edit_file only when they are registered.
@@ -912,9 +1003,22 @@ func TestNewAgentInstance_WriteFileCopyReflectsAvailableAltTools(t *testing.T) {
 
 	writeToolDesc := func(cfg *config.Config) string {
 		agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+		defer agent.Close()
 		writeTool, ok := agent.Tools.Get("write_file")
 		if !ok {
 			t.Fatal("write_file tool not registered")
+		}
+		child, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+			Scope: tools.ToolOwnerScopeAgent, AgentID: "write-copy",
+		}, []string{"write_file"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer child.Close()
+		childWrite, ok := child.Get("write_file")
+		if !ok || childWrite.Description() != writeTool.Description() ||
+			!reflect.DeepEqual(childWrite.Parameters(), writeTool.Parameters()) {
+			t.Fatal("write_file owner construction changed allowlist-derived copy")
 		}
 		return writeTool.Description()
 	}
@@ -985,6 +1089,17 @@ func TestNewAgentInstance_WriteFileCopyExcludesAllowlistHiddenAltTools(t *testin
 	if desc := writeTool.Description(); strings.Contains(desc, "append_file") ||
 		strings.Contains(desc, "edit_file") {
 		t.Fatalf("write_file must not name allowlist-hidden tools, got: %q", desc)
+	}
+	child, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "allowlisted-write",
+	}, []string{"write_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	childWrite, ok := child.Get("write_file")
+	if !ok || childWrite.Description() != writeTool.Description() {
+		t.Fatal("owner construction restored allowlist-hidden write alternatives")
 	}
 }
 
@@ -1219,15 +1334,27 @@ func TestNewAgentInstance_CodexApplyPatchPreservesFileToolPermissions(t *testing
 	if !ok {
 		t.Fatalf("expected apply_patch to be registered; tools=%v", agent.Tools.List())
 	}
-
-	result := patchTool.Execute(context.Background(), map[string]any{
-		"patch": "*** Begin Patch\n*** Add File: note.txt\n+nope\n*** End Patch",
-	})
-	if !result.IsError {
-		t.Fatal("apply_patch add succeeded even though write_file is disabled")
+	child, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "patch-permissions",
+	}, []string{"apply_patch"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(result.ForLLM, "write_file is disabled") {
-		t.Fatalf("error = %q, want write_file disabled", result.ForLLM)
+	defer child.Close()
+	childPatch, ok := child.Get("apply_patch")
+	if !ok {
+		t.Fatal("owner-constructed apply_patch is unavailable")
+	}
+	for label, candidate := range map[string]tools.Tool{"root": patchTool, "child": childPatch} {
+		result := candidate.Execute(context.Background(), map[string]any{
+			"patch": "*** Begin Patch\n*** Add File: note.txt\n+nope\n*** End Patch",
+		})
+		if !result.IsError {
+			t.Fatalf("%s apply_patch add succeeded even though write_file is disabled", label)
+		}
+		if !strings.Contains(result.ForLLM, "write_file is disabled") {
+			t.Fatalf("%s error = %q, want write_file disabled", label, result.ForLLM)
+		}
 	}
 }
 

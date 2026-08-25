@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/sipeed/picoclaw/pkg/media"
 )
 
 type CodexExecCommandTool struct {
@@ -163,6 +165,15 @@ type CodexViewImageTool struct {
 
 func NewCodexViewImageTool(loader Tool) *CodexViewImageTool {
 	return &CodexViewImageTool{loader: loader}
+}
+
+func (t *CodexViewImageTool) SetMediaStore(store media.MediaStore) {
+	if t == nil {
+		return
+	}
+	if loader, ok := t.loader.(mediaStoreAware); ok {
+		loader.SetMediaStore(store)
+	}
 }
 
 func (t *CodexViewImageTool) Name() string {
