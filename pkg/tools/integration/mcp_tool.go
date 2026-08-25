@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -31,13 +33,34 @@ type MCPManager interface {
 
 // MCPTool wraps an MCP tool to implement the Tool interface
 type MCPTool struct {
-	manager            MCPManager
-	serverName         string
-	tool               *mcp.Tool
+	manager       MCPManager
+	serverName    string
+	toolName      string
+	canonicalName string
+	description   string
+	parameters    map[string]any
+
+	stateMu            sync.RWMutex
 	mediaStore         media.MediaStore
 	workspace          string
 	maxInlineTextRunes int
 	runtimeEvents      runtimeevents.Bus
+	definitionFrozen   bool
+}
+
+// MCPToolSnapshot is a detached, generation-stable MCP tool definition. The
+// manager remains a borrowed runtime-generation service; the snapshot contains
+// no SDK tool pointer and NewMCPToolFromSnapshot recursively detaches Parameters
+// before retaining them.
+type MCPToolSnapshot struct {
+	ServerName         string
+	ToolName           string
+	CanonicalName      string
+	Description        string
+	Parameters         map[string]any
+	Workspace          string
+	MaxInlineTextRunes int
+	EventPublisher     runtimeevents.Bus
 }
 
 // MCPToolCallPayload describes MCP tool execution runtime events.
@@ -49,25 +72,81 @@ type MCPToolCallPayload struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// NewMCPTool creates a new MCP tool wrapper
+// NewMCPTool creates a source-compatible MCP wrapper while immediately
+// snapshotting the mutable SDK definition. Malformed non-nil schemas preserve
+// the legacy empty-object fallback.
 func NewMCPTool(manager MCPManager, serverName string, tool *mcp.Tool) *MCPTool {
+	toolName := ""
+	description := ""
+	var parameters map[string]any
+	if tool != nil {
+		toolName = tool.Name
+		description = tool.Description
+		parameters = normalizeLegacyMCPParameters(tool.InputSchema)
+	} else {
+		parameters = emptyMCPParameters()
+	}
+	return newMCPToolFromSnapshot(manager, MCPToolSnapshot{
+		ServerName:         serverName,
+		ToolName:           toolName,
+		CanonicalName:      picomcp.CanonicalToolName(serverName, toolName),
+		Description:        finalMCPToolDescription(serverName, description),
+		Parameters:         parameters,
+		MaxInlineTextRunes: maxMCPInlineTextRunes,
+	}, false)
+}
+
+// NewMCPToolFromSnapshot builds a strict wrapper whose definition and runtime
+// configuration cannot be changed through the legacy setters. SetMediaStore
+// remains mutable so each destination registry can inject owner-local media.
+func NewMCPToolFromSnapshot(manager MCPManager, snapshot MCPToolSnapshot) *MCPTool {
+	return newMCPToolFromSnapshot(manager, snapshot, true)
+}
+
+func newMCPToolFromSnapshot(
+	manager MCPManager,
+	snapshot MCPToolSnapshot,
+	definitionFrozen bool,
+) *MCPTool {
+	limit := snapshot.MaxInlineTextRunes
+	if limit <= 0 {
+		limit = maxMCPInlineTextRunes
+	}
 	return &MCPTool{
 		manager:            manager,
-		serverName:         serverName,
-		tool:               tool,
-		maxInlineTextRunes: maxMCPInlineTextRunes,
+		serverName:         snapshot.ServerName,
+		toolName:           snapshot.ToolName,
+		canonicalName:      snapshot.CanonicalName,
+		description:        snapshot.Description,
+		parameters:         detachMCPParameters(snapshot.Parameters),
+		workspace:          strings.TrimSpace(snapshot.Workspace),
+		maxInlineTextRunes: limit,
+		runtimeEvents:      snapshot.EventPublisher,
+		definitionFrozen:   definitionFrozen,
 	}
 }
 
 func (t *MCPTool) SetMediaStore(store media.MediaStore) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
 	t.mediaStore = store
 }
 
 func (t *MCPTool) SetWorkspace(workspace string) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	if t.definitionFrozen {
+		return
+	}
 	t.workspace = strings.TrimSpace(workspace)
 }
 
 func (t *MCPTool) SetMaxInlineTextRunes(limit int) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	if t.definitionFrozen {
+		return
+	}
 	if limit > 0 {
 		t.maxInlineTextRunes = limit
 	}
@@ -75,10 +154,170 @@ func (t *MCPTool) SetMaxInlineTextRunes(limit int) {
 
 // SetEventPublisher injects the runtime event bus used for MCP tool observations.
 func (t *MCPTool) SetEventPublisher(eventBus runtimeevents.Bus) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	if t.definitionFrozen {
+		return
+	}
 	t.runtimeEvents = eventBus
 }
 
 const maxMCPInlineTextRunes = 16 * 1024
+
+func emptyMCPParameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+		"required":   []string{},
+	}
+}
+
+func finalMCPToolDescription(serverName, description string) string {
+	if description == "" {
+		description = fmt.Sprintf("MCP tool from %s server", serverName)
+	}
+	return fmt.Sprintf("[MCP:%s] %s", serverName, description)
+}
+
+func normalizeLegacyMCPParameters(schema any) map[string]any {
+	if schema == nil {
+		return emptyMCPParameters()
+	}
+	if schemaMap, ok := schema.(map[string]any); ok {
+		return detachMCPParameters(schemaMap)
+	}
+
+	var jsonData []byte
+	switch raw := schema.(type) {
+	case json.RawMessage:
+		jsonData = raw
+	case []byte:
+		jsonData = raw
+	default:
+		encoded, err := json.Marshal(schema)
+		if err != nil {
+			return emptyMCPParameters()
+		}
+		jsonData = encoded
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(jsonData, &result); err != nil || result == nil {
+		return emptyMCPParameters()
+	}
+	return detachMCPParameters(result)
+}
+
+type mcpParameterVisit struct {
+	typeOf reflect.Type
+	kind   reflect.Kind
+	ptr    uintptr
+}
+
+func detachMCPParameters(source map[string]any) map[string]any {
+	if source == nil {
+		return emptyMCPParameters()
+	}
+	cloned, ok := cloneMCPParameterValue(
+		reflect.ValueOf(source),
+		make(map[mcpParameterVisit]struct{}),
+		0,
+	)
+	if !ok || !cloned.IsValid() {
+		return emptyMCPParameters()
+	}
+	// source is a non-nil map[string]any and the clone preserves exact map
+	// types, so a successful clone has this exact result type.
+	return cloned.Interface().(map[string]any)
+}
+
+func cloneMCPParameterValue(
+	value reflect.Value,
+	active map[mcpParameterVisit]struct{},
+	depth int,
+) (reflect.Value, bool) {
+	if depth > 128 || !value.IsValid() {
+		return reflect.Value{}, false
+	}
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		cloned, ok := cloneMCPParameterValue(value.Elem(), active, depth+1)
+		if !ok {
+			return reflect.Value{}, false
+		}
+		result := reflect.New(value.Type()).Elem()
+		result.Set(cloned)
+		return result, true
+	}
+
+	switch value.Kind() {
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return reflect.Value{}, false
+		}
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		visit := mcpParameterVisit{
+			typeOf: value.Type(), kind: value.Kind(), ptr: value.Pointer(),
+		}
+		if _, exists := active[visit]; exists {
+			return reflect.Value{}, false
+		}
+		active[visit] = struct{}{}
+		defer delete(active, visit)
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			cloned, ok := cloneMCPParameterValue(iterator.Value(), active, depth+1)
+			if !ok {
+				return reflect.Value{}, false
+			}
+			result.SetMapIndex(iterator.Key(), cloned)
+		}
+		return result, true
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), true
+		}
+		visit := mcpParameterVisit{
+			typeOf: value.Type(), kind: value.Kind(), ptr: value.Pointer(),
+		}
+		if _, exists := active[visit]; exists {
+			return reflect.Value{}, false
+		}
+		active[visit] = struct{}{}
+		defer delete(active, visit)
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := range value.Len() {
+			cloned, ok := cloneMCPParameterValue(value.Index(index), active, depth+1)
+			if !ok {
+				return reflect.Value{}, false
+			}
+			result.Index(index).Set(cloned)
+		}
+		return result, true
+	case reflect.Array:
+		result := reflect.New(value.Type()).Elem()
+		for index := range value.Len() {
+			cloned, ok := cloneMCPParameterValue(value.Index(index), active, depth+1)
+			if !ok {
+				return reflect.Value{}, false
+			}
+			result.Index(index).Set(cloned)
+		}
+		return result, true
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return value, true
+	default:
+		return reflect.Value{}, false
+	}
+}
 
 // Name returns the tool name, prefixed with the server name.
 // The total length is capped at 64 characters (OpenAI-compatible API limit).
@@ -86,7 +325,7 @@ const maxMCPInlineTextRunes = 16 * 1024
 // whenever sanitization is lossy or the name is truncated. MCP initialization
 // rejects any remaining canonical-name collision before registration.
 func (t *MCPTool) Name() string {
-	return picomcp.CanonicalToolName(t.serverName, t.tool.Name)
+	return t.canonicalName
 }
 
 // MCPIdentity returns the exact MCP server and tool names represented by this
@@ -96,21 +335,12 @@ func (t *MCPTool) MCPIdentity() (serverName, toolName string) {
 	if t == nil {
 		return "", ""
 	}
-	serverName = t.serverName
-	if t.tool != nil {
-		toolName = t.tool.Name
-	}
-	return serverName, toolName
+	return t.serverName, t.toolName
 }
 
 // Description returns the tool description
 func (t *MCPTool) Description() string {
-	desc := t.tool.Description
-	if desc == "" {
-		desc = fmt.Sprintf("MCP tool from %s server", t.serverName)
-	}
-	// Add server info to description
-	return fmt.Sprintf("[MCP:%s] %s", t.serverName, desc)
+	return t.description
 }
 
 func (t *MCPTool) PromptMetadata() toolshared.PromptMetadata {
@@ -123,67 +353,7 @@ func (t *MCPTool) PromptMetadata() toolshared.PromptMetadata {
 
 // Parameters returns the tool parameters schema
 func (t *MCPTool) Parameters() map[string]any {
-	// The InputSchema is already a JSON Schema object
-	schema := t.tool.InputSchema
-
-	// Handle nil schema
-	if schema == nil {
-		return map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-			"required":   []string{},
-		}
-	}
-
-	// Try direct conversion first (fast path)
-	if schemaMap, ok := schema.(map[string]any); ok {
-		return schemaMap
-	}
-
-	// Handle json.RawMessage and []byte - unmarshal directly
-	var jsonData []byte
-	if rawMsg, ok := schema.(json.RawMessage); ok {
-		jsonData = rawMsg
-	} else if bytes, ok := schema.([]byte); ok {
-		jsonData = bytes
-	}
-
-	if jsonData != nil {
-		var result map[string]any
-		if err := json.Unmarshal(jsonData, &result); err == nil {
-			return result
-		}
-		// Fallback on error
-		return map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-			"required":   []string{},
-		}
-	}
-
-	// For other types (structs, etc.), convert via JSON marshal/unmarshal
-	var err error
-	jsonData, err = json.Marshal(schema)
-	if err != nil {
-		// Fallback to empty schema if marshaling fails
-		return map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-			"required":   []string{},
-		}
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(jsonData, &result); err != nil {
-		// Fallback to empty schema if unmarshaling fails
-		return map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-			"required":   []string{},
-		}
-	}
-
-	return result
+	return detachMCPParameters(t.parameters)
 }
 
 // Execute executes the MCP tool
@@ -191,7 +361,7 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) *ToolResult 
 	startedAt := time.Now()
 	t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallStart, startedAt, false, "")
 
-	result, err := t.manager.CallTool(ctx, t.serverName, t.tool.Name, args)
+	result, err := t.manager.CallTool(ctx, t.serverName, t.toolName, args)
 	if err != nil {
 		t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallEnd, startedAt, true, err.Error())
 		return ErrorResult(fmt.Sprintf("MCP tool execution failed: %v", err)).WithError(err)
@@ -222,7 +392,13 @@ func (t *MCPTool) publishRuntimeEvent(
 	isError bool,
 	errMsg string,
 ) {
-	if t == nil || t.runtimeEvents == nil {
+	if t == nil {
+		return
+	}
+	t.stateMu.RLock()
+	eventPublisher := t.runtimeEvents
+	t.stateMu.RUnlock()
+	if eventPublisher == nil {
 		return
 	}
 
@@ -235,7 +411,7 @@ func (t *MCPTool) publishRuntimeEvent(
 	}
 	payload := MCPToolCallPayload{
 		Server:     t.serverName,
-		Tool:       t.tool.Name,
+		Tool:       t.toolName,
 		DurationMS: time.Since(startedAt).Milliseconds(),
 		IsError:    isError,
 		Error:      errMsg,
@@ -245,7 +421,7 @@ func (t *MCPTool) publishRuntimeEvent(
 		severity = runtimeevents.SeverityError
 	}
 
-	t.runtimeEvents.PublishNonBlocking(runtimeevents.Event{
+	eventPublisher.PublishNonBlocking(runtimeevents.Event{
 		Kind:     kind,
 		Source:   runtimeevents.Source{Component: "mcp", Name: t.serverName},
 		Scope:    scope,
@@ -371,16 +547,16 @@ func (t *MCPTool) normalizeResultContent(ctx context.Context, content []mcp.Cont
 
 func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 	text = strings.TrimSpace(text)
+	t.stateMu.RLock()
+	workspace := t.workspace
 	limit := t.maxInlineTextRunes
-	if limit <= 0 {
-		limit = maxMCPInlineTextRunes
-	}
+	t.stateMu.RUnlock()
 	size := utf8.RuneCountInString(text)
-	if text == "" || size <= limit || t.workspace == "" {
+	if text == "" || size <= limit || workspace == "" {
 		return nil
 	}
 
-	dir := filepath.Join(t.workspace, ".artifacts", "mcp")
+	dir := filepath.Join(workspace, ".artifacts", "mcp")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return t.largeTextArtifactFallback(text, err)
 	}
@@ -389,7 +565,7 @@ func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 	pattern := fmt.Sprintf(
 		"%s_%s_*.txt",
 		picomcp.CanonicalToolNameComponent(t.serverName),
-		picomcp.CanonicalToolNameComponent(t.tool.Name),
+		picomcp.CanonicalToolNameComponent(t.toolName),
 	)
 	tmpFile, err := os.CreateTemp(dir, pattern)
 	if err != nil {
@@ -419,7 +595,7 @@ func (t *MCPTool) largeTextArtifactFallback(text string, err error) *ToolResult 
 	size := utf8.RuneCountInString(text)
 	logger.WarnCF("tool", "Failed to persist large MCP text artifact", map[string]any{
 		"server": t.serverName,
-		"tool":   t.tool.Name,
+		"tool":   t.toolName,
 		"chars":  size,
 		"error":  err.Error(),
 	})
@@ -473,7 +649,10 @@ func (t *MCPTool) storeBinaryContent(
 			mimeType,
 		)
 	}
-	if t.mediaStore == nil {
+	t.stateMu.RLock()
+	mediaStore := t.mediaStore
+	t.stateMu.RUnlock()
+	if mediaStore == nil {
 		return "", fmt.Sprintf(
 			"[MCP returned %s content (%s); omitted from model context because media delivery is unavailable.]",
 			kind,
@@ -522,17 +701,17 @@ func (t *MCPTool) storeBinaryContent(
 	filename := fmt.Sprintf(
 		"%s_%s%s",
 		picomcp.CanonicalToolNameComponent(t.serverName),
-		picomcp.CanonicalToolNameComponent(t.tool.Name),
+		picomcp.CanonicalToolNameComponent(t.toolName),
 		ext,
 	)
 
-	ref, err := t.mediaStore.Store(tmpPath, media.MediaMeta{
+	ref, err := mediaStore.Store(tmpPath, media.MediaMeta{
 		Filename:    filename,
 		ContentType: mimeType,
 		Source: fmt.Sprintf(
 			"tool:mcp:%s:%s",
 			picomcp.CanonicalToolNameComponent(t.serverName),
-			picomcp.CanonicalToolNameComponent(t.tool.Name),
+			picomcp.CanonicalToolNameComponent(t.toolName),
 		),
 	}, scope)
 	if err != nil {
