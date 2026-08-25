@@ -49,6 +49,9 @@ on:
       selector_model:
         type: string
         required: true
+      account_ref:
+        type: string
+        default: ""
     outputs:
       commit:
         value: ${{ jobs.preflight.outputs.commit }}
@@ -98,6 +101,7 @@ jobs:
       - id: selector
         uses: agent/main
         with:
+          account: ${{ inputs.account_ref }}
           model: ${{ inputs.selector_model }}
           tools: none
           session: ephemeral
@@ -176,6 +180,18 @@ on:
       judge_model:
         type: string
         required: true
+      account_ref:
+        type: string
+        default: ""
+      max_files_per_batch:
+        type: number
+        default: 3
+      max_content_bytes_per_batch:
+        type: number
+        default: 524288
+      max_parallel_children:
+        type: number
+        default: 3
       evaluation_focus:
         type: string
         default: "Compare concrete bug-finding correctness, evidence, coverage, and diagnostic utility."
@@ -224,7 +240,9 @@ jobs:
         with:
           action: freeze
           files: ${{ steps.validate.outputs.selectedFiles }}
-          max_content_bytes: 524288
+          max_file_content_bytes: 524288
+          max_group_files: ${{ inputs.max_files_per_batch }}
+          max_group_content_bytes: ${{ inputs.max_content_bytes_per_batch }}
           max_total_content_bytes: 8388608
           copies: 2
       - id: release
@@ -234,6 +252,7 @@ jobs:
       - id: candidates
         uses: agent/main
         with:
+          account: ${{ inputs.account_ref }}
           tools: none
           session: ephemeral
           history: none
@@ -243,9 +262,9 @@ jobs:
           managed:
             mode: auto
             strategy: scope
-            max_items_per_chunk: 3
+            max_items_per_chunk: ${{ inputs.max_files_per_batch }}
             max_tasks_per_chunk: 1
-            max_parallel_children: 3
+            max_parallel_children: ${{ inputs.max_parallel_children }}
             max_parallel_per_reviewer: 1
             adaptive_chunking: false
             continue_on_child_error: true
@@ -307,6 +326,7 @@ jobs:
       - id: judge
         uses: agent/main
         with:
+          account: ${{ inputs.account_ref }}
           model: ${{ inputs.judge_model }}
           tools: none
           session: ephemeral
@@ -316,6 +336,9 @@ jobs:
           scope_snapshot: ${{ steps.freeze.outputs.secondaryToken }}
           prompt: |
             Judge the blinded candidate analyses against the exact immutable source.
+            Score every candidate independently against the fixed rubric. Candidate order,
+            the presence of peer candidates, and a recovery batch containing only previously
+            missing candidates must never change the score you assign to the same analysis.
             Multiple child analyses can share one candidateId. Aggregate all children
             sharing that ID, including their failure diagnostics, and return exactly one
             evaluation for every distinct candidateId present and no other IDs. Penalize
@@ -394,6 +417,9 @@ on:
       candidate_mapping:
         type: string
         required: true
+      account_ref:
+        type: string
+        default: ""
     outputs:
       comparison:
         value: ${{ jobs.analyze.outputs.comparison }}
@@ -406,6 +432,7 @@ jobs:
       - id: analyze
         uses: agent/main
         with:
+          account: ${{ inputs.account_ref }}
           model: ${{ inputs.judge_model }}
           tools: none
           session: ephemeral

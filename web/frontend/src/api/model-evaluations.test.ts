@@ -36,6 +36,20 @@ describe("model evaluation API", () => {
       .mockResolvedValueOnce(
         response({
           models: [],
+          profiles: [
+            {
+              id: "rrpf_profile",
+              version: 2,
+              name: "Production review",
+              reviewer_model: "code",
+              review_focus: "Find concrete bugs.",
+              focus: { code_types: ["code"] },
+              max_files_per_batch: 8,
+              max_content_bytes_per_batch: 131_072,
+              max_parallel_children: 3,
+              available_models: ["code", "fast"],
+            },
+          ],
           max_files_per_language: 20,
           default_files_per_language: 20,
           max_candidate_models: 8,
@@ -52,6 +66,13 @@ describe("model evaluation API", () => {
     })
     expect(await getModelEvaluationOptions()).toMatchObject({
       max_files_per_language: 20,
+      profiles: [
+        {
+          id: "rrpf_profile",
+          focus: { code_types: ["code"], include_folders: [] },
+          available_models: ["code", "fast"],
+        },
+      ],
     })
     expect(mockedFetch.mock.calls[2]?.[0]).toContain("offset=2&limit=5")
   })
@@ -68,9 +89,8 @@ describe("model evaluation API", () => {
     mockedFetch.mockResolvedValueOnce(response(undefined, 204))
     const input = {
       repository: "owner/repo",
+      profile_id: "rrpf_profile",
       candidate_models: ["code", "fast"],
-      selector_model_alias: "review",
-      judge_model_alias: "review",
     }
     expect(await createModelEvaluation(input)).toMatchObject(evaluation)
     expect(await runModelEvaluation(input)).toMatchObject(evaluation)
@@ -205,6 +225,7 @@ describe("model evaluation API", () => {
     await expect(getModelEvaluationOptions()).resolves.toMatchObject({
       models: [],
       repositories: [],
+      profiles: [],
       code_types: ["hotpath-code", "code", "test", "bench-test"],
       max_files_per_language: 20,
       default_files_per_language: 20,

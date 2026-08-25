@@ -105,8 +105,10 @@ func (s Store) Create(ctx context.Context, request CreateRequest) (Evaluation, e
 			SelectorModelAlias:      normalized.SelectorModelAlias,
 			JudgeModelAlias:         normalized.JudgeModelAlias,
 			Focus:                   normalized.Focus,
+			Profile:                 cloneProfileSnapshot(normalized.Profile),
 			DefaultFilesPerLanguage: normalized.DefaultFilesPerLanguage,
 			FilesPerLanguage:        cloneIntMap(normalized.FilesPerLanguage),
+			WorkSizingPlan:          append([]WorkSizingPoint(nil), normalized.WorkSizingPlan...),
 			ModelStats:              make(map[string]ModelStats),
 			Comparisons:             []ModelComparison{}, Warnings: []string{}, RunIDs: runIDs,
 			CreatedAt: now, UpdatedAt: now, StartedAt: startedAt,
@@ -528,8 +530,26 @@ func sameConfiguration(left, right Evaluation) bool {
 		slices.Equal(left.Focus.IncludeFolders, right.Focus.IncludeFolders) &&
 		slices.Equal(left.Focus.ExcludeFolders, right.Focus.ExcludeFolders) &&
 		left.Focus.FreeText == right.Focus.FreeText &&
+		sameProfileSnapshot(left.Profile, right.Profile) &&
 		left.DefaultFilesPerLanguage == right.DefaultFilesPerLanguage &&
-		maps.Equal(left.FilesPerLanguage, right.FilesPerLanguage)
+		maps.Equal(left.FilesPerLanguage, right.FilesPerLanguage) &&
+		slices.Equal(left.WorkSizingPlan, right.WorkSizingPlan)
+}
+
+func sameProfileSnapshot(left, right *ProfileSnapshot) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.ID == right.ID && left.Version == right.Version && left.Name == right.Name &&
+		left.ReviewerModel == right.ReviewerModel && left.AccountRef == right.AccountRef &&
+		left.ReviewFocus == right.ReviewFocus &&
+		slices.Equal(left.Focus.CodeTypes, right.Focus.CodeTypes) &&
+		slices.Equal(left.Focus.IncludeFolders, right.Focus.IncludeFolders) &&
+		slices.Equal(left.Focus.ExcludeFolders, right.Focus.ExcludeFolders) &&
+		left.Focus.FreeText == right.Focus.FreeText &&
+		left.MaxFilesPerBatch == right.MaxFilesPerBatch &&
+		left.MaxContentBytesPerBatch == right.MaxContentBytesPerBatch &&
+		left.MaxParallelChildren == right.MaxParallelChildren
 }
 
 func resetDerivedState(evaluation *Evaluation) {
@@ -537,6 +557,15 @@ func resetDerivedState(evaluation *Evaluation) {
 	evaluation.Corpus = nil
 	evaluation.Progress = Progress{Stage: ProgressIdle, Languages: make(map[string]LanguageProgress)}
 	evaluation.Usage = Usage{}
+	if len(evaluation.WorkSizingPlan) > 0 {
+		evaluation.WorkSizingUsage = make(map[string]map[string]Usage)
+		evaluation.WorkSizingConcreteModels = make(map[string]map[string]map[string]int)
+		evaluation.WorkSizingResults = []WorkSizingModelResult{}
+	} else {
+		evaluation.WorkSizingUsage = nil
+		evaluation.WorkSizingConcreteModels = nil
+		evaluation.WorkSizingResults = nil
+	}
 	evaluation.ModelStats = make(map[string]ModelStats)
 	evaluation.Checkpoint = Checkpoint{}
 	evaluation.Comparisons = []ModelComparison{}

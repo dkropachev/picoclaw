@@ -291,10 +291,10 @@ func TestNativeFrozenGitScopeEnforcesIdentityShapeLifetimeAndCapacity(t *testing
 	if len(refs) != 1 || refs[0]["path"] != "service.go" || refs[0]["content"] != nil {
 		t.Fatalf("safe frozen references = %#v", refs)
 	}
-	if _, _, _, err := nativeReviewableFrozenGitScope("bad", 1); err == nil {
+	if _, _, _, err := nativeReviewableFrozenGitScope("bad", 3, 1); err == nil {
 		t.Fatal("invalid reviewable scope was accepted")
 	}
-	if _, _, _, err := nativeReviewableFrozenGitScope([]any{"bad"}, 1); err == nil {
+	if _, _, _, err := nativeReviewableFrozenGitScope([]any{"bad"}, 3, 1); err == nil {
 		t.Fatal("non-object reviewable scope item was accepted")
 	}
 

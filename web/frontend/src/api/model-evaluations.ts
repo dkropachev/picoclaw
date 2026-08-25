@@ -71,6 +71,71 @@ export interface EvaluationUsage {
   estimated_cost_usd?: number
 }
 
+export type EvaluationWorkSizingAxis =
+  | "files_per_batch"
+  | "content_bytes_per_batch"
+  | "configured"
+
+export interface EvaluationProfileSnapshot {
+  id: string
+  version: number
+  name: string
+  reviewer_model: string
+  account_ref?: string
+  review_focus: string
+  focus: EvaluationFocus
+  max_files_per_batch: number
+  max_content_bytes_per_batch: number
+  max_parallel_children: number
+}
+
+export interface EvaluationProfileOption extends EvaluationProfileSnapshot {
+  available_models: string[]
+}
+
+export interface EvaluationWorkSizingPoint {
+  id: string
+  axis: EvaluationWorkSizingAxis
+  files_per_batch: number
+  content_bytes_per_batch: number
+}
+
+export interface EvaluationWorkSizingScoreStatistics {
+  samples: number
+  weighted_mean: number
+  minimum: number
+  maximum: number
+  standard_deviation: number
+}
+
+export interface EvaluationWorkSizingResult {
+  point_id: string
+  axis: EvaluationWorkSizingAxis
+  model_alias: string
+  completion: "pending" | "completed" | "partial" | "failed"
+  files_per_batch: number
+  content_bytes_per_batch: number
+  batch_samples: number
+  files_analyzed: number
+  bytes_analyzed: number
+  attempts: number
+  successes: number
+  failures: number
+  observed_min_files_per_batch: number
+  observed_max_files_per_batch: number
+  observed_mean_files_per_batch: number
+  observed_min_content_bytes_per_batch: number
+  observed_max_content_bytes_per_batch: number
+  observed_mean_content_bytes_per_batch: number
+  scores: Record<string, EvaluationWorkSizingScoreStatistics>
+  confirmed_findings: number
+  unsupported_claims: number
+  usage: EvaluationUsage
+  concrete_models: Record<string, number>
+  effective_tokens: number
+  effective_tokens_per_kib?: number
+}
+
 export interface EvaluationCorpusFile {
   candidate_id: string
   path: string
@@ -161,6 +226,9 @@ export interface RepositoryModelEvaluation {
   focus: EvaluationFocus
   default_files_per_language: number
   files_per_language: Record<string, number>
+  profile?: EvaluationProfileSnapshot
+  work_sizing_plan?: EvaluationWorkSizingPoint[]
+  work_sizing_results?: EvaluationWorkSizingResult[]
   corpus?: EvaluationCorpus
   progress: EvaluationProgress
   usage: EvaluationUsage
@@ -209,6 +277,8 @@ export interface EvaluationRepositoryOption {
 export interface EvaluationOptions {
   models: EvaluationModelOption[]
   repositories: EvaluationRepositoryOption[]
+  profiles: EvaluationProfileOption[]
+  profile_count?: number
   code_types: EvaluationCodeType[]
   max_files_per_language: number
   default_files_per_language: number
@@ -217,13 +287,9 @@ export interface EvaluationOptions {
 
 export interface EvaluationConfigInput {
   repository: string
-  ref?: string
+  profile_id: string
   candidate_models: string[]
-  selector_model_alias: string
-  judge_model_alias: string
-  focus?: EvaluationFocus
-  default_files_per_language?: number
-  files_per_language?: Record<string, number>
+  ref?: string
   expected_version?: number
 }
 
@@ -397,6 +463,8 @@ export async function getModelEvaluationOptions(
   return {
     models: response.models ?? [],
     repositories: response.repositories ?? [],
+    profiles: (response.profiles ?? []).map(normalizeProfile),
+    profile_count: response.profile_count ?? response.profiles?.length ?? 0,
     code_types: response.code_types ?? [
       "hotpath-code",
       "code",
@@ -420,6 +488,48 @@ const emptyUsage: EvaluationUsage = {
 
 function normalizeUsage(value?: Partial<EvaluationUsage>): EvaluationUsage {
   return { ...emptyUsage, ...value }
+}
+
+function normalizeFocus(value?: EvaluationFocus): EvaluationFocus {
+  return {
+    code_types: value?.code_types ?? [],
+    include_folders: value?.include_folders ?? [],
+    exclude_folders: value?.exclude_folders ?? [],
+    free_text: value?.free_text ?? "",
+  }
+}
+
+function normalizeProfile<Profile extends EvaluationProfileSnapshot>(
+  value: Profile,
+): Profile {
+  return {
+    ...value,
+    account_ref: value.account_ref ?? "",
+    review_focus: value.review_focus ?? "",
+    focus: normalizeFocus(value.focus),
+    max_files_per_batch: value.max_files_per_batch ?? 1,
+    max_content_bytes_per_batch: value.max_content_bytes_per_batch ?? 1,
+    max_parallel_children: value.max_parallel_children ?? 1,
+    ...("available_models" in value
+      ? {
+          available_models: Array.isArray(value.available_models)
+            ? value.available_models
+            : [],
+        }
+      : {}),
+  }
+}
+
+function normalizeWorkSizingResult(
+  value: EvaluationWorkSizingResult,
+): EvaluationWorkSizingResult {
+  return {
+    ...value,
+    scores: value.scores ?? {},
+    usage: normalizeUsage(value.usage),
+    concrete_models: value.concrete_models ?? {},
+    effective_tokens: value.effective_tokens ?? 0,
+  }
 }
 
 function normalizeProgress(
@@ -466,14 +576,14 @@ function normalizeEvaluation(
     ...value,
     ref: value.ref ?? "",
     candidate_models: value.candidate_models ?? [],
-    focus: {
-      code_types: value.focus?.code_types ?? [],
-      include_folders: value.focus?.include_folders ?? [],
-      exclude_folders: value.focus?.exclude_folders ?? [],
-      free_text: value.focus?.free_text ?? "",
-    },
+    focus: normalizeFocus(value.focus),
     default_files_per_language: value.default_files_per_language ?? 20,
     files_per_language: value.files_per_language ?? {},
+    ...(value.profile ? { profile: normalizeProfile(value.profile) } : {}),
+    work_sizing_plan: value.work_sizing_plan ?? [],
+    work_sizing_results: (value.work_sizing_results ?? []).map(
+      normalizeWorkSizingResult,
+    ),
     progress: normalizeProgress(value.progress),
     usage: normalizeUsage(value.usage),
     model_stats: value.model_stats ?? {},

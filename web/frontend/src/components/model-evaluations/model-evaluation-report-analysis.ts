@@ -1,4 +1,9 @@
-import type { EvaluationComparison } from "@/api/model-evaluations"
+import type {
+  EvaluationComparison,
+  EvaluationUsage,
+  EvaluationWorkSizingAxis,
+  EvaluationWorkSizingResult,
+} from "@/api/model-evaluations"
 
 export type ModelEvaluationScoreDimension =
   | "overall"
@@ -20,8 +25,125 @@ export interface ModelEvaluationReportAnalysis {
   fastestQualityGap?: number
 }
 
+export interface ModelEvaluationDegradationCeiling {
+  kind: "degraded" | "at_least"
+  value: number
+  baselineValue: number
+  baselineScore: number
+  degradedAt?: number
+}
+
 export function isFiniteModelEvaluationNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
+}
+
+export function modelEvaluationEffectiveTokens(usage: EvaluationUsage): number {
+  const input = Math.max(0, usage.input_tokens)
+  const cached = Math.min(input, Math.max(0, usage.cached_input_tokens))
+  const output = Math.max(0, usage.output_tokens)
+  return input - cached + cached * 0.1 + output
+}
+
+export function modelEvaluationEffectiveTokensPerKiB(
+  usage: EvaluationUsage,
+  bytesAnalyzed: number,
+): number | undefined {
+  if (!isFiniteModelEvaluationNumber(bytesAnalyzed) || bytesAnalyzed <= 0) {
+    return undefined
+  }
+  return (modelEvaluationEffectiveTokens(usage) * 1024) / bytesAnalyzed
+}
+
+export function modelEvaluationSizingPointAttained(
+  result: EvaluationWorkSizingResult,
+  axis = result.axis,
+): boolean {
+  if (result.completion !== "completed" || result.batch_samples < 1) {
+    return false
+  }
+  if (axis === "configured") {
+    return (
+      result.observed_max_files_per_batch > 0 &&
+      result.observed_max_files_per_batch <= result.files_per_batch &&
+      result.observed_max_content_bytes_per_batch > 0 &&
+      result.observed_max_content_bytes_per_batch <=
+        result.content_bytes_per_batch
+    )
+  }
+  return axis === "files_per_batch"
+    ? result.observed_max_files_per_batch > 0 &&
+        result.observed_max_files_per_batch <= result.files_per_batch
+    : result.observed_max_content_bytes_per_batch > 0 &&
+        result.observed_max_content_bytes_per_batch <=
+          result.content_bytes_per_batch
+}
+
+export function modelEvaluationDegradationCeiling(
+  results: EvaluationWorkSizingResult[],
+  modelAlias: string,
+  axis: EvaluationWorkSizingAxis,
+  score = "overall",
+  drop = 5,
+): ModelEvaluationDegradationCeiling | undefined {
+  const value = (result: EvaluationWorkSizingResult) =>
+    axis === "files_per_batch"
+      ? result.observed_max_files_per_batch
+      : result.observed_max_content_bytes_per_batch
+  const attained = results
+    .filter(
+      (result) =>
+        result.model_alias === modelAlias &&
+        (result.axis === axis || result.axis === "configured") &&
+        modelEvaluationSizingPointAttained(result, axis) &&
+        (result.scores[score]?.samples ?? 0) > 0 &&
+        isFiniteModelEvaluationNumber(result.scores[score]?.weighted_mean),
+    )
+    .sort((left, right) => value(left) - value(right))
+  const observed: Array<{
+    value: number
+    score: number
+    weight: number
+  }> = []
+  for (const result of attained) {
+    const observedValue = value(result)
+    const observedScore = result.scores[score]?.weighted_mean
+    if (!isFiniteModelEvaluationNumber(observedScore)) continue
+    const weight = Math.max(1, result.files_analyzed)
+    const prior = observed.at(-1)
+    if (prior?.value === observedValue) {
+      const combinedWeight = prior.weight + weight
+      prior.score =
+        (prior.score * prior.weight + observedScore * weight) / combinedWeight
+      prior.weight = combinedWeight
+      continue
+    }
+    observed.push({ value: observedValue, score: observedScore, weight })
+  }
+  const baseline = observed[0]
+  if (!baseline) {
+    return undefined
+  }
+  for (let index = 1; index < observed.length; index += 1) {
+    const current = observed[index]
+    if (current && baseline.score - current.score >= drop) {
+      return {
+        kind: "degraded",
+        value: observed[index - 1]?.value ?? baseline.value,
+        baselineValue: baseline.value,
+        baselineScore: baseline.score,
+        degradedAt: current.value,
+      }
+    }
+  }
+  const last = observed.at(-1)
+  return last
+    ? {
+        kind: "at_least",
+        value: last.value,
+        baselineValue: baseline.value,
+        baselineScore: baseline.score,
+      }
+    : undefined
 }
 
 export function modelEvaluationComparisonScore(

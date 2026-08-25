@@ -144,6 +144,56 @@ func TestFrozenGitScopeCopiesAreIndependentOneShotCapabilities(t *testing.T) {
 	}
 }
 
+func TestRepositoryFreezeSeparatesFileHydrationFromGroupByteLimit(t *testing.T) {
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("x", 128)
+	for _, name := range []string{"first.go", "second.go"} {
+		writeTestFile(t, filepath.Join(repo, name), content)
+	}
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "separate freeze limits")
+
+	files := make([]map[string]any, 0, 2)
+	for _, name := range []string{"first.go", "second.go"} {
+		files = append(files, map[string]any{
+			"path": name, "fileHash": strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD:"+name)),
+			"sizeBytes": int64(len(content)), "category": "code",
+			"source": map[string]any{"workspacePath": repo},
+		})
+	}
+	exec := ExecutionContext{
+		WorkspaceDir: workspace, RunID: "wr-separate-freeze-limits",
+		WorkflowRef: RepositoryModelEvaluationBatchWorkflowRef,
+	}
+	output, err := nativeRepositoryReview(context.Background(), map[string]any{
+		"action": "freeze", "files": files,
+		"max_file_content_bytes": 1024, "max_group_files": 2,
+		"max_group_content_bytes": 64, "max_total_content_bytes": 4096,
+	}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output["reviewableCount"] != 2 || output["unavailableCount"] != 0 {
+		t.Fatalf("freeze counts = %#v", output)
+	}
+	frozen, err := consumeNativeFrozenGitScope(exec, nativeAnyString(output["token"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrated := frozen.([]map[string]any)
+	if len(hydrated) != 2 || hydrated[0]["content"] != content || hydrated[1]["content"] != content ||
+		hydrated[0]["reviewGroup"] == hydrated[1]["reviewGroup"] {
+		t.Fatalf("separately bounded frozen scope = %#v", hydrated)
+	}
+}
+
 func TestStoredFrozenGitScopeSnapshotsNestedCallerData(t *testing.T) {
 	exec := ExecutionContext{
 		RunID:       "wr-frozen-snapshot",
@@ -248,7 +298,7 @@ func TestFrozenReviewScopeSkipsUnavailableFilesBeforeModelExecution(t *testing.T
 		file("logo.png", false, "binary"),
 		file("large.go", false, "file_too_large"),
 		file("later.go", false, "aggregate_limit"),
-	}, 1024)
+	}, 3, 1024)
 	if err != nil || len(reviewable) != 1 || len(unsupported) != 2 || unavailable != 3 ||
 		reviewable[0]["path"] != "service.go" {
 		t.Fatalf("reviewable=%#v unsupported=%#v unavailable=%d err=%v", reviewable, unsupported, unavailable, err)
@@ -274,6 +324,31 @@ func TestFrozenReviewScopeGroupsCrossFileReferences(t *testing.T) {
 	}, 2, 1024)
 	if grouped[0]["path"] != "cmd/main.go" || grouped[1]["path"] != "pkg/service.go" {
 		t.Fatalf("cross-file grouping=%#v", grouped)
+	}
+}
+
+func TestFrozenReviewScopeHonorsDynamicGroupFileLimit(t *testing.T) {
+	files := make([]map[string]any, 0, 5)
+	for _, name := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		files = append(files, map[string]any{
+			"path": name, "content": "package sample", "contentComplete": true,
+		})
+	}
+	grouped, _, _, err := nativeReviewableFrozenGitScope(files, 2, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupSizes := make(map[string]int)
+	for _, file := range grouped {
+		groupSizes[nativeAnyString(file["reviewGroup"])]++
+	}
+	if len(groupSizes) != 3 {
+		t.Fatalf("group count = %d, want 3: %#v", len(groupSizes), grouped)
+	}
+	for group, size := range groupSizes {
+		if size > 2 {
+			t.Fatalf("group %q size = %d, want at most 2", group, size)
+		}
 	}
 }
 

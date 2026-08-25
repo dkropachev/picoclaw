@@ -1381,6 +1381,71 @@ async function mockLauncherApis(
   let currentDefaultAgentID = "main"
   let currentModelEvaluation: Record<string, unknown> | null = null
   let modelEvaluationDetailReads = 0
+  const modelEvaluationProfile = {
+    id: "rrpf_model_probe",
+    version: 3,
+    name: "Production bugs",
+    reviewer_model: "code",
+    account_ref: "",
+    review_focus: "Find concrete correctness and reliability defects.",
+    focus: {
+      code_types: ["hotpath-code", "code", "test", "bench-test"],
+      include_folders: ["pkg", "cmd"],
+      exclude_folders: [],
+      free_text: "",
+    },
+    max_files_per_batch: 8,
+    max_content_bytes_per_batch: 131_072,
+    max_parallel_children: 3,
+  }
+  const modelSizingResult = (
+    pointID: string,
+    axis: "files_per_batch" | "content_bytes_per_batch",
+    modelAlias: string,
+    files: number,
+    contentBytes: number,
+    score: number,
+  ) => ({
+    point_id: pointID,
+    axis,
+    model_alias: modelAlias,
+    completion: "completed",
+    files_per_batch: files,
+    content_bytes_per_batch: contentBytes,
+    batch_samples: 2,
+    files_analyzed: 2,
+    bytes_analyzed: 12_000,
+    attempts: 2,
+    successes: 2,
+    failures: 0,
+    observed_min_files_per_batch: files,
+    observed_max_files_per_batch: files,
+    observed_mean_files_per_batch: files,
+    observed_min_content_bytes_per_batch: contentBytes,
+    observed_max_content_bytes_per_batch: contentBytes,
+    observed_mean_content_bytes_per_batch: contentBytes,
+    scores: {
+      overall: {
+        samples: 2,
+        weighted_mean: score,
+        minimum: score - 1,
+        maximum: score + 1,
+        standard_deviation: 0.5,
+      },
+    },
+    confirmed_findings: 4,
+    unsupported_claims: 1,
+    usage: {
+      requests: 2,
+      input_tokens: 2_000,
+      cached_input_tokens: 1_000,
+      output_tokens: 500,
+      reasoning_tokens: 100,
+      duration_millis: 20_000,
+    },
+    effective_tokens: 1_600,
+    effective_tokens_per_kib: 136.533,
+  })
 
   const modelEvaluationFromBody = (
     body: Record<string, unknown>,
@@ -1411,6 +1476,16 @@ async function mockLauncherApis(
       20,
     files_per_language:
       body.files_per_language ?? previous?.files_per_language ?? {},
+    profile: previous?.profile ?? modelEvaluationProfile,
+    work_sizing_plan: previous?.work_sizing_plan ?? [
+      {
+        id: "configured",
+        axis: "configured",
+        files_per_batch: 8,
+        content_bytes_per_batch: 131_072,
+      },
+    ],
+    work_sizing_results: previous?.work_sizing_results ?? [],
     progress: previous?.progress ?? {
       stage: "idle",
       languages: {},
@@ -1752,6 +1827,12 @@ async function mockLauncherApis(
               },
             ],
             repositories: [],
+            profiles: [
+              {
+                ...modelEvaluationProfile,
+                available_models: ["code", "fast"],
+              },
+            ],
             code_types: ["hotpath-code", "code", "test", "bench-test"],
             default_files_per_language: 20,
             max_files_per_language: 20,
@@ -2013,6 +2094,40 @@ async function mockLauncherApis(
                     strengths: ["Lower cumulative model time"],
                     limitations: ["Missed important findings"],
                   },
+                ],
+                work_sizing_results: [
+                  modelSizingResult(
+                    "code-files-1",
+                    "files_per_batch",
+                    "code",
+                    1,
+                    131_072,
+                    94,
+                  ),
+                  modelSizingResult(
+                    "code-files-8",
+                    "files_per_batch",
+                    "code",
+                    8,
+                    131_072,
+                    87,
+                  ),
+                  modelSizingResult(
+                    "code-bytes-32k",
+                    "content_bytes_per_batch",
+                    "code",
+                    8,
+                    32_768,
+                    94,
+                  ),
+                  modelSizingResult(
+                    "code-bytes-128k",
+                    "content_bytes_per_batch",
+                    "code",
+                    8,
+                    131_072,
+                    92,
+                  ),
                 ],
                 warnings: [
                   "Quality scores are comparative AI judgments, not ground truth.",
@@ -3873,16 +3988,18 @@ test("model review probes compare models without producing findings", async ({
   ).toBeVisible()
 
   await workspace.getByLabel("Repository", { exact: true }).fill("owner/repo")
-  await workspace
-    .getByRole("checkbox", { name: "Select candidate model code" })
-    .check()
-  await workspace
-    .getByRole("checkbox", { name: "Select candidate model fast" })
-    .check()
-  await workspace.getByRole("button", { name: /^Advanced/ }).click()
-  await workspace.getByLabel("File selector model").selectOption("review")
-  await workspace.getByLabel("Judge and analyzer model").selectOption("review")
-  await workspace.getByLabel("Include folders").fill("pkg\ncmd")
+  await expect(
+    workspace.getByLabel("Review profile", { exact: true }),
+  ).toHaveValue("rrpf_model_probe")
+  await expect(
+    workspace.getByRole("checkbox", { name: "Select candidate model code" }),
+  ).toBeChecked()
+  await expect(
+    workspace.getByRole("checkbox", { name: "Select candidate model fast" }),
+  ).toBeChecked()
+  await expect(workspace.getByLabel("Frozen review profile")).toContainText(
+    "128.0 KiB",
+  )
   await workspace.getByRole("button", { name: "Run probe" }).click()
 
   await expect(
@@ -3900,7 +4017,14 @@ test("model review probes compare models without producing findings", async ({
   await expect(
     workspace.getByText("Repository model evaluation completed."),
   ).toBeVisible({ timeout: 5_000 })
-  await expect(workspace.getByText("Visual report ready")).toBeVisible()
+  const runTabs = workspace.getByRole("tablist", {
+    name: "Probe run details",
+  })
+  await expect(runTabs.getByRole("tab", { name: "Status" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  )
+  await expect(runTabs.getByRole("tab", { name: "Final report" })).toBeEnabled()
   await expect(
     workspace.getByLabel("Repository", { exact: true }),
   ).toBeDisabled()
@@ -3915,7 +4039,20 @@ test("model review probes compare models without producing findings", async ({
   ).toHaveCount(0)
   await expect(workspace.getByRole("button", { name: "Delete" })).toHaveCount(0)
 
-  await workspace.getByRole("button", { name: "View full report" }).click()
+  await runTabs.getByRole("tab", { name: "Final report" }).click()
+  await expect(
+    workspace.getByRole("heading", {
+      name: "Use code when review quality matters.",
+    }),
+  ).toBeVisible()
+  await expect(
+    workspace.getByRole("heading", { name: "code work sizing" }),
+  ).toBeVisible()
+  await expect(
+    workspace.getByText(/First eligible observed workload at 8 files/),
+  ).toBeVisible()
+  await expect(workspace.getByText(/Effective tokens =/)).toBeVisible()
+  await workspace.getByRole("button", { name: "Open dedicated report" }).click()
   await expect(page).toHaveURL(/\/model-evaluations\/rme_[0-9a-f]{32}\/report$/)
   const report = page.getByRole("region", { name: "Model probe report" })
   await expect(
@@ -3953,11 +4090,15 @@ test("model review probes compare models without producing findings", async ({
   ])
   expect(requests[0]?.body).toMatchObject({
     repository: "owner/repo",
+    profile_id: "rrpf_model_probe",
     candidate_models: ["code", "fast"],
-    selector_model_alias: "review",
-    judge_model_alias: "review",
-    focus: { include_folders: ["pkg", "cmd"] },
-    default_files_per_language: 20,
+    ref: "",
+  })
+  expect(requests[0]?.body).toEqual({
+    repository: "owner/repo",
+    profile_id: "rrpf_model_probe",
+    candidate_models: ["code", "fast"],
+    ref: "",
   })
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)

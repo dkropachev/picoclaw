@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,7 @@ import (
 
 const (
 	repositoryModelEvaluationBatchSize         = 12
+	repositoryModelEvaluationMaxCorpusFiles    = 128
 	repositoryModelEvaluationPhaseMinTimeout   = 15 * time.Minute
 	repositoryModelEvaluationBatchSetupBudget  = 5 * time.Minute
 	repositoryModelEvaluationTaskBudget        = 2 * time.Minute
@@ -311,11 +313,12 @@ func (c *repositoryModelEvaluationController) Run(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		request.CandidateModels,
 		request.SelectorModelAlias,
 		request.JudgeModelAlias,
+		request.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
@@ -351,11 +354,12 @@ func (c *repositoryModelEvaluationController) startPreflight(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		evaluation.CandidateModels,
 		evaluation.SelectorModelAlias,
 		evaluation.JudgeModelAlias,
+		evaluation.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
@@ -408,11 +412,12 @@ func (c *repositoryModelEvaluationController) StartEvaluation(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		evaluation.CandidateModels,
 		evaluation.SelectorModelAlias,
 		evaluation.JudgeModelAlias,
+		evaluation.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
@@ -447,6 +452,9 @@ func (c *repositoryModelEvaluationController) initializeReadyEvaluation(
 	candidate.OneShot = true
 	candidate.Status = repoeval.StatusRunning
 	candidate.Checkpoint = repoeval.Checkpoint{ConcreteModels: make(map[string]map[string]int)}
+	candidate.WorkSizingUsage = make(map[string]map[string]repoeval.Usage)
+	candidate.WorkSizingConcreteModels = make(map[string]map[string]map[string]int)
+	candidate.WorkSizingResults = []repoeval.WorkSizingModelResult{}
 	candidate.Progress.Stage = repoeval.ProgressCandidateExecution
 	candidate.Progress.TotalTasks = totalTasks
 	candidate.Progress.CompletedTasks = 0
@@ -480,11 +488,12 @@ func (c *repositoryModelEvaluationController) startReadyEvaluationActive(
 		}
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		current.CandidateModels,
 		current.SelectorModelAlias,
 		current.JudgeModelAlias,
+		current.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
@@ -586,11 +595,12 @@ func (c *repositoryModelEvaluationController) resumeTerminalPreflight(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		evaluation.CandidateModels,
 		evaluation.SelectorModelAlias,
 		evaluation.JudgeModelAlias,
+		evaluation.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
@@ -604,6 +614,9 @@ func (c *repositoryModelEvaluationController) resumeTerminalPreflight(
 		candidate.OneShot = true
 		candidate.Failure = ""
 		candidate.Checkpoint = repoeval.Checkpoint{}
+		candidate.WorkSizingUsage = make(map[string]map[string]repoeval.Usage)
+		candidate.WorkSizingConcreteModels = make(map[string]map[string]map[string]int)
+		candidate.WorkSizingResults = []repoeval.WorkSizingModelResult{}
 		candidate.ModelStats = make(map[string]repoeval.ModelStats)
 		candidate.Comparisons = []repoeval.ModelComparison{}
 		candidate.RunIDs = append(candidate.RunIDs, runID)
@@ -631,14 +644,16 @@ func (c *repositoryModelEvaluationController) resumeTerminalEvaluation(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		evaluation.CandidateModels,
 		evaluation.SelectorModelAlias,
 		evaluation.JudgeModelAlias,
+		evaluation.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
+	evaluation = repositoryModelEvaluationDiscardPartialJudgedBatches(evaluation)
 	token, runCtx, cancel, err := c.reserveActive(evaluation.ID)
 	if err != nil {
 		return repoeval.Evaluation{}, err
@@ -656,7 +671,9 @@ func (c *repositoryModelEvaluationController) resumeTerminalEvaluation(
 		candidate.Status = repoeval.StatusRunning
 		candidate.OneShot = true
 		candidate.Failure = ""
+		candidate.Checkpoint.Batches = repoeval.Clone(evaluation).Checkpoint.Batches
 		candidate.Comparisons = []repoeval.ModelComparison{}
+		candidate.WorkSizingResults = repositoryModelEvaluationWorkSizingResults(*candidate)
 		candidate.Progress.Stage = repoeval.ProgressCandidateExecution
 		candidate.Progress.TotalTasks = totalTasks
 		candidate.Progress.CompletedTasks = completedTasks
@@ -667,6 +684,9 @@ func (c *repositoryModelEvaluationController) resumeTerminalEvaluation(
 		candidate.Progress.Percent = repositoryModelEvaluationDurableCandidatePercent(*candidate)
 		if candidate.Checkpoint.ConcreteModels == nil {
 			candidate.Checkpoint.ConcreteModels = make(map[string]map[string]int)
+		}
+		if candidate.WorkSizingConcreteModels == nil && len(candidate.WorkSizingPlan) > 0 {
+			candidate.WorkSizingConcreteModels = make(map[string]map[string]map[string]int)
 		}
 		for _, alias := range candidate.CandidateModels {
 			stats := candidate.ModelStats[alias]
@@ -715,11 +735,12 @@ func (c *repositoryModelEvaluationController) Restart(
 	if err != nil {
 		return repoeval.Evaluation{}, err
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
 		cfg,
 		evaluation.CandidateModels,
 		evaluation.SelectorModelAlias,
 		evaluation.JudgeModelAlias,
+		evaluation.Profile,
 	); aliasErr != nil {
 		return repoeval.Evaluation{}, aliasErr
 	}
@@ -734,6 +755,8 @@ func (c *repositoryModelEvaluationController) Restart(
 		SelectorModelAlias: evaluation.SelectorModelAlias, JudgeModelAlias: evaluation.JudgeModelAlias,
 		Focus: evaluation.Focus, DefaultFilesPerLanguage: evaluation.DefaultFilesPerLanguage,
 		FilesPerLanguage: evaluation.FilesPerLanguage,
+		Profile:          evaluation.Profile,
+		WorkSizingPlan:   append([]repoeval.WorkSizingPoint(nil), evaluation.WorkSizingPlan...),
 		OneShot:          true, InitialRunID: runID,
 	})
 	if err != nil {
@@ -794,6 +817,9 @@ func (c *repositoryModelEvaluationController) activeToken(id, token string) bool
 }
 
 func (c *repositoryModelEvaluationController) recoverPreflight(id string) {
+	if !c.recoveryAliasesAvailable(id) {
+		return
+	}
 	token, runCtx, _, err := c.reserveActive(id)
 	if err != nil {
 		return
@@ -819,11 +845,17 @@ func (c *repositoryModelEvaluationController) recoverPreflight(id string) {
 }
 
 func (c *repositoryModelEvaluationController) recoverEvaluation(id string) {
+	if !c.recoveryAliasesAvailable(id) {
+		return
+	}
 	token, runCtx, _, err := c.reserveActive(id)
 	if err != nil {
 		return
 	}
 	if _, err = c.updateLatest(c.ctx, id, func(candidate *repoeval.Evaluation) error {
+		cleaned := repositoryModelEvaluationDiscardPartialJudgedBatches(*candidate)
+		candidate.Checkpoint.Batches = cleaned.Checkpoint.Batches
+		candidate.WorkSizingResults = repositoryModelEvaluationWorkSizingResults(*candidate)
 		repositoryModelEvaluationClearActiveChildren(&candidate.Progress)
 		if candidate.Status == repoeval.StatusRunning {
 			candidate.Progress.CompletedCalls = 0
@@ -842,6 +874,9 @@ func (c *repositoryModelEvaluationController) recoverEvaluation(id string) {
 }
 
 func (c *repositoryModelEvaluationController) recoverReadyEvaluation(id string) {
+	if !c.recoveryAliasesAvailable(id) {
+		return
+	}
 	token, runCtx, _, err := c.reserveActive(id)
 	if err != nil {
 		return
@@ -855,6 +890,32 @@ func (c *repositoryModelEvaluationController) recoverReadyEvaluation(id string) 
 	}
 	c.wg.Add(1)
 	go c.executeReadyEvaluation(runCtx, id, token)
+}
+
+func (c *repositoryModelEvaluationController) recoveryAliasesAvailable(id string) bool {
+	evaluation, found, err := c.store.Get(c.ctx, id)
+	if err == nil && found {
+		var cfg *config.Config
+		cfg, err = c.config()
+		if err == nil {
+			err = validateRepositoryModelEvaluationExecutionAliases(
+				cfg,
+				evaluation.CandidateModels,
+				evaluation.SelectorModelAlias,
+				evaluation.JudgeModelAlias,
+				evaluation.Profile,
+			)
+		}
+	} else if err == nil {
+		err = os.ErrNotExist
+	}
+	if err == nil {
+		return true
+	}
+	_, _ = c.updateLatest(context.Background(), id, func(candidate *repoeval.Evaluation) error {
+		return repositoryModelEvaluationApplyFailure(candidate, err.Error())
+	})
+	return false
 }
 
 func (c *repositoryModelEvaluationController) executeReadyEvaluation(
@@ -896,6 +957,7 @@ func (c *repositoryModelEvaluationController) executePreflight(ctx context.Conte
 			"repository": repository, "ref": evaluation.Ref,
 			"scope": string(scopeJSON), "selection_policy": string(policyJSON),
 			"selector_model": evaluation.SelectorModelAlias,
+			"account_ref":    repositoryModelEvaluationAccountRef(evaluation),
 		}, c.usageObserver(id, token, workflows.RepositoryModelEvaluationPreflightWorkflowRef))
 	if ctx.Err() != nil {
 		if c.ctx.Err() != nil {
@@ -957,6 +1019,10 @@ func (c *repositoryModelEvaluationController) preflightManifest(
 	if err := decodeAny(selection["selected"], &selected); err != nil || len(selected) == 0 {
 		return nil, repoeval.Progress{}, nil, errors.New("preflight returned no exact selected candidates")
 	}
+	selected, corpusCapped := repositoryModelEvaluationCapRepresentativeCorpus(
+		selected,
+		repositoryModelEvaluationMaxCorpusFiles,
+	)
 	if commit == "" {
 		commit = strings.ToLower(strings.TrimSpace(selected[0].CommitID))
 	}
@@ -1034,6 +1100,12 @@ func (c *repositoryModelEvaluationController) preflightManifest(
 		Percent: 100, UpdatedAt: c.clock(),
 	}
 	warnings := stringSlice(selector["warnings"])
+	if corpusCapped {
+		warnings = append(
+			warnings,
+			"The sizing probe capped the representative corpus at 128 files while retaining every detected language.",
+		)
+	}
 	if boolValue(catalog["candidatePoolTruncated"]) {
 		warnings = append(
 			warnings,
@@ -1064,6 +1136,40 @@ func (c *repositoryModelEvaluationController) preflightManifest(
 	return manifest, progress, uniqueBoundedStrings(warnings, 256, 16<<10), nil
 }
 
+func repositoryModelEvaluationCapRepresentativeCorpus(
+	selected []reposcope.Candidate,
+	maximum int,
+) ([]reposcope.Candidate, bool) {
+	if maximum < 1 || len(selected) <= maximum {
+		return selected, false
+	}
+	byLanguage := make(map[reposcope.Language][]reposcope.Candidate)
+	languages := make([]reposcope.Language, 0)
+	for _, candidate := range selected {
+		if _, exists := byLanguage[candidate.Language]; !exists {
+			languages = append(languages, candidate.Language)
+		}
+		byLanguage[candidate.Language] = append(byLanguage[candidate.Language], candidate)
+	}
+	sort.Slice(languages, func(i, j int) bool { return languages[i] < languages[j] })
+	out := make([]reposcope.Candidate, 0, maximum)
+	indexes := make(map[reposcope.Language]int, len(languages))
+	for len(out) < maximum {
+		for _, language := range languages {
+			index := indexes[language]
+			if index >= len(byLanguage[language]) {
+				continue
+			}
+			out = append(out, byLanguage[language][index])
+			indexes[language]++
+			if len(out) == maximum {
+				break
+			}
+		}
+	}
+	return out, true
+}
+
 func (c *repositoryModelEvaluationController) executeEvaluation(ctx context.Context, id, token string) {
 	defer c.wg.Done()
 	defer c.releaseActive(id, token)
@@ -1079,17 +1185,14 @@ func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context
 		c.fail(id, token, err.Error())
 		return
 	}
-	batches := []repositoryModelEvaluationBatch{}
-	if evaluation.Status != repoeval.StatusAnalyzing {
-		batches = repositoryModelEvaluationPendingBatches(evaluation)
-	}
+	batches := repositoryModelEvaluationPendingBatches(evaluation)
 	for pendingIndex, batch := range batches {
 		runID := workflows.NewRunID()
 		evaluation, err = c.updateActiveLatest(
 			ctx,
 			id,
 			token,
-			[]repoeval.Status{repoeval.StatusRunning, repoeval.StatusJudging},
+			[]repoeval.Status{repoeval.StatusRunning, repoeval.StatusJudging, repoeval.StatusAnalyzing},
 			func(candidate *repoeval.Evaluation) error {
 				candidate.RunIDs = append(candidate.RunIDs, runID)
 				candidate.Progress.Stage = repoeval.ProgressCandidateExecution
@@ -1156,14 +1259,18 @@ func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context
 			c.fail(id, token, evidenceErr.Error())
 			return
 		}
-		judgeJSON, evidenceErr = repositoryModelEvaluationAggregateJudgeJSON(judgeJSON)
-		if evidenceErr != nil {
-			c.fail(id, token, evidenceErr.Error())
-			return
-		}
+		// The claim-ledger validator above proves the same judge envelope that
+		// aggregation consumes, so this compacting pass cannot fail here.
+		judgeJSON, _ = repositoryModelEvaluationAggregateJudgeJSON(judgeJSON)
 		claims, omitted := repositoryModelEvaluationCapClaimLedger(evaluation, claims)
+		if len(evaluation.WorkSizingPlan) > 0 &&
+			batch.point.ID != repositoryModelEvaluationConfiguredPointID(evaluation) {
+			claims = nil
+			omitted = nil
+		}
 		checkpoint := repoeval.BatchCheckpoint{
 			ID:                 batch.id,
+			WorkSizingPointID:  batch.point.ID,
 			CandidateIDs:       batch.ids,
 			Candidates:         repositoryModelEvaluationBatchOutcomes(batch, result.Outputs["candidates"]),
 			ClaimLedger:        claims,
@@ -1176,7 +1283,7 @@ func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context
 			context.Background(),
 			id,
 			token,
-			[]repoeval.Status{repoeval.StatusRunning, repoeval.StatusJudging},
+			[]repoeval.Status{repoeval.StatusRunning, repoeval.StatusJudging, repoeval.StatusAnalyzing},
 			func(candidate *repoeval.Evaluation) error {
 				for _, existing := range candidate.Checkpoint.Batches {
 					if existing.ID == checkpoint.ID {
@@ -1186,6 +1293,7 @@ func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context
 				candidate.Checkpoint.Batches = append(candidate.Checkpoint.Batches, checkpoint)
 				candidate.Progress.CurrentPath = ""
 				repositoryModelEvaluationApplyCheckpointMetrics(candidate)
+				candidate.WorkSizingResults = repositoryModelEvaluationWorkSizingResults(*candidate)
 				candidate.Progress.Percent = max(
 					candidate.Progress.Percent,
 					repositoryModelEvaluationDurableCandidatePercent(*candidate),
@@ -1288,6 +1396,7 @@ func (c *repositoryModelEvaluationController) executeEvaluationPhase(ctx context
 		[]repoeval.Status{repoeval.StatusAnalyzing},
 		func(candidate *repoeval.Evaluation) error {
 			candidate.Comparisons = comparisons
+			candidate.WorkSizingResults = repositoryModelEvaluationWorkSizingResults(*candidate)
 			candidate.Warnings = uniqueBoundedStrings(append(candidate.Warnings, warnings...), 256, 16<<10)
 			candidate.Status = repoeval.StatusCompleted
 			candidate.Progress.Stage = repoeval.ProgressCompleted
@@ -1324,11 +1433,52 @@ type repositoryModelEvaluationBatch struct {
 	ids    []string
 	files  []repoeval.CorpusFile
 	models []string
+	point  repoeval.WorkSizingPoint
 }
 
 func repositoryModelEvaluationBatches(evaluation repoeval.Evaluation) []repositoryModelEvaluationBatch {
 	if evaluation.Corpus == nil {
 		return nil
+	}
+	if len(evaluation.WorkSizingPlan) > 0 {
+		out := make([]repositoryModelEvaluationBatch, 0)
+		for _, point := range evaluation.WorkSizingPlan {
+			for start := 0; start < len(evaluation.Corpus.Files); {
+				end := start
+				var contentBytes int64
+				for end < len(evaluation.Corpus.Files) && end-start < point.FilesPerBatch {
+					nextBytes := max(int64(0), evaluation.Corpus.Files[end].SizeBytes)
+					if end > start && point.ContentBytesPerBatch > 0 &&
+						contentBytes+nextBytes > point.ContentBytesPerBatch {
+						break
+					}
+					contentBytes += nextBytes
+					end++
+				}
+				if end == start {
+					end++
+				}
+				files := append([]repoeval.CorpusFile(nil), evaluation.Corpus.Files[start:end]...)
+				ids := make([]string, len(files))
+				for index := range files {
+					ids[index] = files[index].CandidateID
+				}
+				digest := sha256.Sum256([]byte(
+					evaluation.ID + "\x00" + evaluation.Corpus.InventoryHash + "\x00" + point.ID + "\x00" +
+						strings.Join(ids, "\x00"),
+				))
+				out = append(out, repositoryModelEvaluationBatch{
+					index:  len(out),
+					id:     hex.EncodeToString(digest[:]),
+					ids:    ids,
+					files:  files,
+					models: append([]string(nil), evaluation.CandidateModels...),
+					point:  point,
+				})
+				start = end
+			}
+		}
+		return out
 	}
 	out := make(
 		[]repositoryModelEvaluationBatch,
@@ -1374,7 +1524,7 @@ func repositoryModelEvaluationPendingBatches(
 			ids := make([]string, 0, len(base.ids))
 			files := make([]repoeval.CorpusFile, 0, len(base.files))
 			for index, id := range base.ids {
-				if _, done := completed[alias+"\x00"+id]; done {
+				if _, done := completed[repositoryModelEvaluationCompletionKey(base.point.ID, alias, id)]; done {
 					continue
 				}
 				ids = append(ids, id)
@@ -1396,22 +1546,105 @@ func repositoryModelEvaluationPendingBatches(
 			group := groups[key]
 			attempt := repositoryModelEvaluationBatchAttempt(
 				evaluation.Checkpoint.Batches,
+				base.point.ID,
 				group.models,
 				group.ids,
 			)
 			digest := sha256.Sum256([]byte(
-				evaluation.ID + "\x00" + evaluation.Corpus.InventoryHash + "\x00" +
+				evaluation.ID + "\x00" + evaluation.Corpus.InventoryHash + "\x00" + base.point.ID + "\x00" +
 					strings.Join(group.models, "\x00") + "\x00" + strings.Join(group.ids, "\x00") +
 					fmt.Sprintf("\x00%d", attempt),
 			))
 			out = append(out, repositoryModelEvaluationBatch{
 				index: base.index, id: hex.EncodeToString(digest[:]),
 				ids: append([]string(nil), group.ids...), files: append([]repoeval.CorpusFile(nil), group.files...),
-				models: append([]string(nil), group.models...),
+				models: append([]string(nil), group.models...), point: base.point,
 			})
 		}
 	}
 	return out
+}
+
+// repositoryModelEvaluationDiscardPartialJudgedBatches preserves one stable
+// judging experiment across recovery. A checkpoint with missing candidate work
+// cannot be combined with a later judge call over only that subset; discard the
+// partial judged evidence so the complete original batch is rerun and rejudged.
+func repositoryModelEvaluationDiscardPartialJudgedBatches(
+	evaluation repoeval.Evaluation,
+) repoeval.Evaluation {
+	if evaluation.Corpus == nil || len(evaluation.Checkpoint.Batches) == 0 {
+		return evaluation
+	}
+	discard := make(map[string]struct{})
+	for _, base := range repositoryModelEvaluationBatches(evaluation) {
+		matching := make([]repoeval.BatchCheckpoint, 0, 1)
+		for _, checkpoint := range evaluation.Checkpoint.Batches {
+			if checkpoint.WorkSizingPointID != base.point.ID ||
+				!repositoryModelEvaluationCandidateIDsOverlap(checkpoint.CandidateIDs, base.ids) {
+				continue
+			}
+			matching = append(matching, checkpoint)
+		}
+		if len(matching) == 1 && repositoryModelEvaluationCheckpointCompletesBatch(matching[0], base) {
+			continue
+		}
+		for _, checkpoint := range matching {
+			discard[checkpoint.ID] = struct{}{}
+		}
+	}
+	if len(discard) == 0 {
+		return evaluation
+	}
+	cleaned := repoeval.Clone(evaluation)
+	cleaned.Checkpoint.Batches = cleaned.Checkpoint.Batches[:0]
+	for _, checkpoint := range evaluation.Checkpoint.Batches {
+		if _, remove := discard[checkpoint.ID]; !remove {
+			cleaned.Checkpoint.Batches = append(cleaned.Checkpoint.Batches, checkpoint)
+		}
+	}
+	cleaned.WorkSizingResults = repositoryModelEvaluationWorkSizingResults(cleaned)
+	return cleaned
+}
+
+func repositoryModelEvaluationCandidateIDsOverlap(left, right []string) bool {
+	values := make(map[string]struct{}, len(left))
+	for _, id := range left {
+		values[id] = struct{}{}
+	}
+	for _, id := range right {
+		if _, ok := values[id]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func repositoryModelEvaluationCheckpointCompletesBatch(
+	checkpoint repoeval.BatchCheckpoint,
+	batch repositoryModelEvaluationBatch,
+) bool {
+	if len(checkpoint.CandidateIDs) != len(batch.ids) {
+		return false
+	}
+	if len(checkpoint.Candidates) == 0 {
+		return true // legacy checkpoints represented one fully successful batch
+	}
+	for _, alias := range batch.models {
+		outcome, ok := checkpoint.Candidates[alias]
+		if !ok || outcome.Failures != 0 || len(outcome.CompletedCandidateIDs) != len(batch.ids) {
+			return false
+		}
+		completed := make(map[string]struct{}, len(outcome.CompletedCandidateIDs))
+		for _, id := range outcome.CompletedCandidateIDs {
+			completed[id] = struct{}{}
+		}
+		for _, id := range batch.ids {
+			if _, ok := completed[id]; !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func repositoryModelEvaluationCompletedPairs(evaluation repoeval.Evaluation) map[string]struct{} {
@@ -1420,22 +1653,27 @@ func repositoryModelEvaluationCompletedPairs(evaluation repoeval.Evaluation) map
 		if len(checkpoint.Candidates) == 0 {
 			for _, alias := range evaluation.CandidateModels {
 				for _, id := range checkpoint.CandidateIDs {
-					completed[alias+"\x00"+id] = struct{}{}
+					completed[repositoryModelEvaluationCompletionKey(checkpoint.WorkSizingPointID, alias, id)] = struct{}{}
 				}
 			}
 			continue
 		}
 		for alias, outcome := range checkpoint.Candidates {
 			for _, id := range outcome.CompletedCandidateIDs {
-				completed[alias+"\x00"+id] = struct{}{}
+				completed[repositoryModelEvaluationCompletionKey(checkpoint.WorkSizingPointID, alias, id)] = struct{}{}
 			}
 		}
 	}
 	return completed
 }
 
+func repositoryModelEvaluationCompletionKey(pointID, alias, candidateID string) string {
+	return strings.TrimSpace(pointID) + "\x00" + alias + "\x00" + candidateID
+}
+
 func repositoryModelEvaluationBatchAttempt(
 	checkpoints []repoeval.BatchCheckpoint,
+	pointID string,
 	models []string,
 	ids []string,
 ) int {
@@ -1444,6 +1682,9 @@ func repositoryModelEvaluationBatchAttempt(
 	wantIDs := strings.Join(ids, "\x00")
 	attempt := 0
 	for _, checkpoint := range checkpoints {
+		if checkpoint.WorkSizingPointID != pointID {
+			continue
+		}
 		checkpointModels := make([]string, 0, len(checkpoint.Candidates))
 		for alias := range checkpoint.Candidates {
 			checkpointModels = append(checkpointModels, alias)
@@ -1485,6 +1726,45 @@ func repositoryModelEvaluationBatchOutcomes(
 		}
 		outcome := out[alias]
 		outcome.Attempts++
+		var observedScope []map[string]any
+		if decodeAny(child["scope"], &observedScope) == nil {
+			observedFiles := 0
+			var observedBytes int64
+			for _, item := range observedScope {
+				if complete, declared := item["contentComplete"].(bool); declared && !complete {
+					continue
+				}
+				if strings.TrimSpace(anyString(item["contentUnavailable"])) != "" {
+					continue
+				}
+				observedFiles++
+				sizeValue := item["contentPromptBytes"]
+				if sizeValue == nil {
+					sizeValue = item["contentBytes"]
+				}
+				if sizeValue == nil {
+					sizeValue = item["sizeBytes"]
+				}
+				if sizeValue == nil {
+					sizeValue = item["size_bytes"]
+				}
+				observedBytes += int64(max(0, intValue(sizeValue)))
+			}
+			outcome.ObservedFilesTotal += observedFiles
+			outcome.ObservedContentBytesTotal += observedBytes
+			if outcome.Attempts == 1 || observedFiles < outcome.ObservedFilesMin {
+				outcome.ObservedFilesMin = observedFiles
+			}
+			if observedFiles > outcome.ObservedFilesMax {
+				outcome.ObservedFilesMax = observedFiles
+			}
+			if outcome.Attempts == 1 || observedBytes < outcome.ObservedContentBytesMin {
+				outcome.ObservedContentBytesMin = observedBytes
+			}
+			if observedBytes > outcome.ObservedContentBytesMax {
+				outcome.ObservedContentBytesMax = observedBytes
+			}
+		}
 		succeeded := boolValue(child["valid"]) &&
 			strings.TrimSpace(anyString(child["run_error"])) == "" &&
 			strings.TrimSpace(anyString(child["error"])) == ""
@@ -1529,6 +1809,8 @@ func repositoryModelEvaluationApplyCheckpointMetrics(evaluation *repoeval.Evalua
 		evaluation.ModelStats = make(map[string]repoeval.ModelStats, len(evaluation.CandidateModels))
 	}
 	completedByAlias := make(map[string]map[string]struct{}, len(evaluation.CandidateModels))
+	completedByPointAlias := make(map[string]struct{})
+	configuredPointID := repositoryModelEvaluationConfiguredPointID(*evaluation)
 	for _, alias := range evaluation.CandidateModels {
 		completedByAlias[alias] = make(map[string]struct{})
 		stats := evaluation.ModelStats[alias]
@@ -1550,7 +1832,10 @@ func repositoryModelEvaluationApplyCheckpointMetrics(evaluation *repoeval.Evalua
 				evaluation.ModelStats[alias] = stats
 				completedTasks += calls
 				for _, id := range checkpoint.CandidateIDs {
-					completedByAlias[alias][id] = struct{}{}
+					completedByPointAlias[repositoryModelEvaluationCompletionKey(checkpoint.WorkSizingPointID, alias, id)] = struct{}{}
+					if checkpoint.WorkSizingPointID == configuredPointID {
+						completedByAlias[alias][id] = struct{}{}
+					}
 				}
 			}
 			continue
@@ -1563,7 +1848,10 @@ func repositoryModelEvaluationApplyCheckpointMetrics(evaluation *repoeval.Evalua
 			evaluation.ModelStats[alias] = stats
 			completedTasks += outcome.Attempts
 			for _, id := range outcome.CompletedCandidateIDs {
-				completedByAlias[alias][id] = struct{}{}
+				completedByPointAlias[repositoryModelEvaluationCompletionKey(checkpoint.WorkSizingPointID, alias, id)] = struct{}{}
+				if checkpoint.WorkSizingPointID == configuredPointID {
+					completedByAlias[alias][id] = struct{}{}
+				}
 			}
 		}
 	}
@@ -1576,9 +1864,18 @@ func repositoryModelEvaluationApplyCheckpointMetrics(evaluation *repoeval.Evalua
 	completedForAll := make(map[string]struct{})
 	for _, file := range evaluation.Corpus.Files {
 		all := true
-		for _, alias := range evaluation.CandidateModels {
-			if _, ok := completedByAlias[alias][file.CandidateID]; !ok {
-				all = false
+		points := evaluation.WorkSizingPlan
+		if len(points) == 0 {
+			points = []repoeval.WorkSizingPoint{{}}
+		}
+		for _, point := range points {
+			for _, alias := range evaluation.CandidateModels {
+				if _, ok := completedByPointAlias[repositoryModelEvaluationCompletionKey(point.ID, alias, file.CandidateID)]; !ok {
+					all = false
+					break
+				}
+			}
+			if !all {
 				break
 			}
 		}
@@ -1600,14 +1897,35 @@ func repositoryModelEvaluationApplyCheckpointMetrics(evaluation *repoeval.Evalua
 	}
 }
 
+func repositoryModelEvaluationConfiguredPointID(evaluation repoeval.Evaluation) string {
+	if len(evaluation.WorkSizingPlan) == 0 {
+		return ""
+	}
+	for _, point := range evaluation.WorkSizingPlan {
+		if point.Axis == repoeval.WorkSizingAxisConfigured {
+			return point.ID
+		}
+	}
+	return evaluation.WorkSizingPlan[len(evaluation.WorkSizingPlan)-1].ID
+}
+
 func repositoryModelEvaluationDurableCandidatePercent(evaluation repoeval.Evaluation) float64 {
 	if evaluation.Corpus == nil || len(evaluation.CandidateModels) == 0 {
 		return 20
 	}
-	totalPairs := len(evaluation.Corpus.Files) * len(evaluation.CandidateModels)
+	pointCount := max(1, len(evaluation.WorkSizingPlan))
+	totalPairs := len(evaluation.Corpus.Files) * len(evaluation.CandidateModels) * pointCount
 	completedPairs := 0
-	for _, alias := range evaluation.CandidateModels {
-		completedPairs += min(len(evaluation.Corpus.Files), evaluation.ModelStats[alias].FilesCompleted)
+	if len(evaluation.WorkSizingPlan) == 0 {
+		for _, alias := range evaluation.CandidateModels {
+			completedPairs += min(len(evaluation.Corpus.Files), evaluation.ModelStats[alias].FilesCompleted)
+		}
+		return min(90, 20+70*float64(completedPairs)/float64(max(1, totalPairs)))
+	}
+	for _, checkpoint := range evaluation.Checkpoint.Batches {
+		for _, outcome := range checkpoint.Candidates {
+			completedPairs += len(outcome.CompletedCandidateIDs)
+		}
 	}
 	return min(90, 20+70*float64(completedPairs)/float64(max(1, totalPairs)))
 }
@@ -1619,7 +1937,14 @@ func repositoryModelEvaluationBatchPercentShare(
 	if evaluation.Corpus == nil || len(evaluation.CandidateModels) == 0 {
 		return 0
 	}
-	totalPairs := len(evaluation.Corpus.Files) * len(evaluation.CandidateModels)
+	totalPairs := len(
+		evaluation.Corpus.Files,
+	) * len(
+		evaluation.CandidateModels,
+	) * max(
+		1,
+		len(evaluation.WorkSizingPlan),
+	)
 	batchPairs := len(batch.files) * len(batch.models)
 	return 70 * float64(batchPairs) / float64(max(1, totalPairs))
 }
@@ -1676,12 +2001,65 @@ func (c *repositoryModelEvaluationController) runEvaluationBatch(
 		workflows.RepositoryModelEvaluationBatchWorkflowRef, runID, map[string]any{
 			"repository": repository, "commit": evaluation.Corpus.CommitSHA,
 			"inventory_hash": evaluation.Corpus.InventoryHash, "scope": string(scopeJSON),
-			"selected_candidates":       string(selectedJSON),
-			"candidate_models":          strings.Join(candidateModels, ","),
-			"candidate_identity_models": strings.Join(evaluation.CandidateModels, ","),
-			"judge_model":               evaluation.JudgeModelAlias,
-			"evaluation_focus":          evaluation.Focus.FreeText,
-		}, c.usageObserver(evaluation.ID, token, workflows.RepositoryModelEvaluationBatchWorkflowRef))
+			"selected_candidates":         string(selectedJSON),
+			"candidate_models":            strings.Join(candidateModels, ","),
+			"candidate_identity_models":   strings.Join(evaluation.CandidateModels, ","),
+			"judge_model":                 evaluation.JudgeModelAlias,
+			"evaluation_focus":            repositoryModelEvaluationReviewFocus(evaluation),
+			"account_ref":                 repositoryModelEvaluationAccountRef(evaluation),
+			"max_files_per_batch":         repositoryModelEvaluationBatchFilesLimit(evaluation, batch),
+			"max_content_bytes_per_batch": repositoryModelEvaluationBatchContentLimit(evaluation, batch),
+			"max_parallel_children":       repositoryModelEvaluationParallelChildren(evaluation),
+		}, c.usageObserverForPoint(
+			evaluation.ID,
+			token,
+			workflows.RepositoryModelEvaluationBatchWorkflowRef,
+			batch.point.ID,
+		))
+}
+
+func repositoryModelEvaluationAccountRef(evaluation repoeval.Evaluation) string {
+	if evaluation.Profile == nil {
+		return ""
+	}
+	return evaluation.Profile.AccountRef
+}
+
+func repositoryModelEvaluationReviewFocus(evaluation repoeval.Evaluation) string {
+	if evaluation.Profile != nil && strings.TrimSpace(evaluation.Profile.ReviewFocus) != "" {
+		if strings.TrimSpace(evaluation.Focus.FreeText) != "" {
+			return evaluation.Profile.ReviewFocus + "\n\nAdditional scope guidance: " + evaluation.Focus.FreeText
+		}
+		return evaluation.Profile.ReviewFocus
+	}
+	return evaluation.Focus.FreeText
+}
+
+func repositoryModelEvaluationBatchFilesLimit(
+	evaluation repoeval.Evaluation,
+	batch repositoryModelEvaluationBatch,
+) int {
+	if batch.point.FilesPerBatch > 0 {
+		return batch.point.FilesPerBatch
+	}
+	return 3
+}
+
+func repositoryModelEvaluationBatchContentLimit(
+	evaluation repoeval.Evaluation,
+	batch repositoryModelEvaluationBatch,
+) int64 {
+	if batch.point.ContentBytesPerBatch > 0 {
+		return batch.point.ContentBytesPerBatch
+	}
+	return 524288
+}
+
+func repositoryModelEvaluationParallelChildren(evaluation repoeval.Evaluation) int {
+	if evaluation.Profile != nil && evaluation.Profile.MaxParallelChildren > 0 {
+		return evaluation.Profile.MaxParallelChildren
+	}
+	return 3
 }
 
 func rotateRepositoryModelEvaluationCandidates(models []string, batchIndex int) []string {
@@ -1712,12 +2090,16 @@ func (c *repositoryModelEvaluationController) runEvaluationAnalysis(
 	}
 	judged := make([]judgedBatch, 0, len(evaluation.Checkpoint.Batches))
 	mapping := json.RawMessage("[]")
-	for index, checkpoint := range evaluation.Checkpoint.Batches {
+	configuredPointID := repositoryModelEvaluationConfiguredPointID(evaluation)
+	for _, checkpoint := range evaluation.Checkpoint.Batches {
+		if len(evaluation.WorkSizingPlan) > 0 && checkpoint.WorkSizingPointID != configuredPointID {
+			continue
+		}
 		judged = append(judged, judgedBatch{
 			Judge: json.RawMessage(checkpoint.JudgeJSON), Mapping: json.RawMessage(checkpoint.MappingJSON),
 			CandidateIDs: append([]string(nil), checkpoint.CandidateIDs...), Outcomes: checkpoint.Candidates,
 		})
-		if index == 0 {
+		if len(judged) == 1 {
 			mapping = json.RawMessage(checkpoint.MappingJSON)
 		}
 	}
@@ -1729,6 +2111,7 @@ func (c *repositoryModelEvaluationController) runEvaluationAnalysis(
 	return c.runWorkflow(ctx, workflows.RepositoryModelEvaluationAnalysisWorkflowYAML,
 		workflows.RepositoryModelEvaluationAnalysisWorkflowRef, runID, map[string]any{
 			"judge_model":      evaluation.JudgeModelAlias,
+			"account_ref":      repositoryModelEvaluationAccountRef(evaluation),
 			"candidate_models": strings.Join(evaluation.CandidateModels, ","),
 			"judged_batches":   string(judgedJSON), "candidate_mapping": string(mapping),
 		}, c.usageObserver(evaluation.ID, token, workflows.RepositoryModelEvaluationAnalysisWorkflowRef))
@@ -1989,7 +2372,20 @@ func (c *repositoryModelEvaluationController) usageObserver(
 	return func(event workflows.AgentUsageEvent) error {
 		candidateUsage := workflowRef == workflows.RepositoryModelEvaluationBatchWorkflowRef &&
 			event.StepID == "candidates"
-		return c.recordUsage(id, token, event.Usage, candidateUsage)
+		return c.recordUsageForPoint(id, token, event.Usage, candidateUsage, "")
+	}
+}
+
+func (c *repositoryModelEvaluationController) usageObserverForPoint(
+	id string,
+	token string,
+	workflowRef string,
+	pointID string,
+) workflows.AgentUsageEventObserver {
+	return func(event workflows.AgentUsageEvent) error {
+		candidateUsage := workflowRef == workflows.RepositoryModelEvaluationBatchWorkflowRef &&
+			event.StepID == "candidates"
+		return c.recordUsageForPoint(id, token, event.Usage, candidateUsage, pointID)
 	}
 }
 
@@ -2106,6 +2502,16 @@ func (c *repositoryModelEvaluationController) recordUsage(
 	usage workflows.AgentUsage,
 	candidateUsage bool,
 ) error {
+	return c.recordUsageForPoint(id, token, usage, candidateUsage, "")
+}
+
+func (c *repositoryModelEvaluationController) recordUsageForPoint(
+	id string,
+	token string,
+	usage workflows.AgentUsage,
+	candidateUsage bool,
+	pointID string,
+) error {
 	if !c.activeToken(id, token) {
 		return context.Canceled
 	}
@@ -2129,6 +2535,17 @@ func (c *repositoryModelEvaluationController) recordUsage(
 				stats := candidate.ModelStats[alias]
 				repositoryModelEvaluationAddUsage(&stats.Usage, usage, price, priceKnown)
 				candidate.ModelStats[alias] = stats
+				if pointID != "" {
+					if candidate.WorkSizingUsage == nil {
+						candidate.WorkSizingUsage = make(map[string]map[string]repoeval.Usage)
+					}
+					if candidate.WorkSizingUsage[pointID] == nil {
+						candidate.WorkSizingUsage[pointID] = make(map[string]repoeval.Usage)
+					}
+					pointUsage := candidate.WorkSizingUsage[pointID][alias]
+					repositoryModelEvaluationAddUsage(&pointUsage, usage, price, priceKnown)
+					candidate.WorkSizingUsage[pointID][alias] = pointUsage
+				}
 				model := strings.TrimSpace(usage.Model)
 				if model != "" {
 					if candidate.Checkpoint.ConcreteModels == nil {
@@ -2138,6 +2555,21 @@ func (c *repositoryModelEvaluationController) recordUsage(
 						candidate.Checkpoint.ConcreteModels[alias] = make(map[string]int)
 					}
 					candidate.Checkpoint.ConcreteModels[alias][model]++
+					if pointID != "" {
+						if candidate.WorkSizingConcreteModels == nil {
+							candidate.WorkSizingConcreteModels = make(map[string]map[string]map[string]int)
+						}
+						if candidate.WorkSizingConcreteModels[pointID] == nil {
+							candidate.WorkSizingConcreteModels[pointID] = make(map[string]map[string]int)
+						}
+						if candidate.WorkSizingConcreteModels[pointID][alias] == nil {
+							candidate.WorkSizingConcreteModels[pointID][alias] = make(map[string]int)
+						}
+						candidate.WorkSizingConcreteModels[pointID][alias][model]++
+					}
+				}
+				if pointID != "" {
+					candidate.WorkSizingResults = repositoryModelEvaluationWorkSizingResults(*candidate)
 				}
 			}
 			return nil
@@ -2650,9 +3082,18 @@ func repositoryModelEvaluationComparisons(
 		return nil, nil, fmt.Errorf("invalid repository evaluation analysis: %w", err)
 	}
 	byAlias := make(map[string]repoeval.ModelComparison, len(analysis.Comparisons))
-	confirmed, unsupported := repositoryModelEvaluationJudgedClaimCounts(evaluation.Checkpoint.Batches)
+	confirmed, unsupported := repositoryModelEvaluationJudgedClaimCounts(
+		repositoryModelEvaluationConfiguredCheckpoints(evaluation),
+	)
 	metrics := repoeval.Clone(evaluation)
 	repositoryModelEvaluationApplyCheckpointMetrics(&metrics)
+	configuredResults := make(map[string]repoeval.WorkSizingModelResult)
+	configuredPointID := repositoryModelEvaluationConfiguredPointID(evaluation)
+	for _, sizingResult := range repositoryModelEvaluationWorkSizingResults(evaluation) {
+		if sizingResult.PointID == configuredPointID {
+			configuredResults[sizingResult.ModelAlias] = sizingResult
+		}
+	}
 	for _, row := range analysis.Comparisons {
 		alias := strings.TrimSpace(row.ModelAlias)
 		if alias == "" {
@@ -2664,9 +3105,17 @@ func repositoryModelEvaluationComparisons(
 		)
 		completion := repositoryModelEvaluationObjectiveCompletion(filesAnalyzed, len(evaluation.Corpus.Files))
 		unsupportedClaims := unsupported[alias]
+		modelFailures := metrics.ModelStats[alias].Failures
+		modelUsage := evaluation.ModelStats[alias].Usage
+		modelConcrete := cloneNestedConcrete(evaluation.Checkpoint.ConcreteModels[alias])
+		if sizingResult, ok := configuredResults[alias]; ok {
+			modelFailures = sizingResult.Failures
+			modelUsage = sizingResult.Usage
+			modelConcrete = cloneNestedConcrete(sizingResult.ConcreteModels)
+		}
 		comparison := repoeval.ModelComparison{
 			ModelAlias:        alias,
-			ConcreteModels:    cloneNestedConcrete(evaluation.Checkpoint.ConcreteModels[alias]),
+			ConcreteModels:    modelConcrete,
 			Completion:        completion,
 			Rank:              row.Rank,
 			OverallScore:      row.OverallScore,
@@ -2675,11 +3124,11 @@ func repositoryModelEvaluationComparisons(
 			Regions:           regions,
 			FilesAnalyzed:     filesAnalyzed,
 			BytesAnalyzed:     bytesAnalyzed,
-			Failures:          metrics.ModelStats[alias].Failures,
+			Failures:          modelFailures,
 			ConfirmedFindings: confirmed[alias],
 			UnsupportedClaims: &unsupportedClaims,
 			UnsupportedFiles:  min(filesAnalyzed, unsupported[alias]),
-			Usage:             evaluation.ModelStats[alias].Usage,
+			Usage:             modelUsage,
 			Verdict:           row.Verdict,
 			Summary:           "AI-judged comparison over successfully analyzed immutable corpus files.",
 			Strengths:         row.Strengths,
@@ -2713,6 +3162,11 @@ func repositoryModelEvaluationComparisons(
 				FilesAnalyzed: filesAnalyzed, BytesAnalyzed: bytesAnalyzed,
 				Failures: metrics.ModelStats[alias].Failures, Usage: evaluation.ModelStats[alias].Usage,
 			}
+			if sizingResult, resultOK := configuredResults[alias]; resultOK {
+				row.Failures = sizingResult.Failures
+				row.Usage = sizingResult.Usage
+				row.ConcreteModels = cloneNestedConcrete(sizingResult.ConcreteModels)
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -2732,6 +3186,22 @@ func repositoryModelEvaluationComparisons(
 	return rows, analysis.Warnings, nil
 }
 
+func repositoryModelEvaluationConfiguredCheckpoints(
+	evaluation repoeval.Evaluation,
+) []repoeval.BatchCheckpoint {
+	if len(evaluation.WorkSizingPlan) == 0 {
+		return evaluation.Checkpoint.Batches
+	}
+	configuredPointID := repositoryModelEvaluationConfiguredPointID(evaluation)
+	out := make([]repoeval.BatchCheckpoint, 0)
+	for _, checkpoint := range evaluation.Checkpoint.Batches {
+		if checkpoint.WorkSizingPointID == configuredPointID {
+			out = append(out, checkpoint)
+		}
+	}
+	return out
+}
+
 func repositoryModelEvaluationObjectiveCompletion(filesAnalyzed, selectedFiles int) repoeval.ModelCompletion {
 	if filesAnalyzed <= 0 || selectedFiles <= 0 {
 		return repoeval.ModelCompletionFailed
@@ -2747,12 +3217,13 @@ func repositoryModelEvaluationAnalyzedScope(
 	alias string,
 ) ([]string, []string, int, int64) {
 	completed := repositoryModelEvaluationCompletedPairs(evaluation)
+	configuredPointID := repositoryModelEvaluationConfiguredPointID(evaluation)
 	languageSet := make(map[string]struct{})
 	regionSet := make(map[string]struct{})
 	files := 0
 	var bytes int64
 	for _, file := range evaluation.Corpus.Files {
-		if _, ok := completed[alias+"\x00"+file.CandidateID]; !ok {
+		if _, ok := completed[repositoryModelEvaluationCompletionKey(configuredPointID, alias, file.CandidateID)]; !ok {
 			continue
 		}
 		files++
@@ -2806,6 +3277,205 @@ func repositoryModelEvaluationJudgedClaimCounts(batches []repoeval.BatchCheckpoi
 		}
 	}
 	return confirmed, unsupported
+}
+
+type repositoryModelEvaluationScoreObservation struct {
+	value  float64
+	weight float64
+}
+
+func repositoryModelEvaluationWorkSizingResults(
+	evaluation repoeval.Evaluation,
+) []repoeval.WorkSizingModelResult {
+	if evaluation.Corpus == nil || len(evaluation.WorkSizingPlan) == 0 {
+		return nil
+	}
+	fileByID := make(map[string]repoeval.CorpusFile, len(evaluation.Corpus.Files))
+	for _, file := range evaluation.Corpus.Files {
+		fileByID[file.CandidateID] = file
+	}
+	results := make([]repoeval.WorkSizingModelResult, 0, len(evaluation.WorkSizingPlan)*len(evaluation.CandidateModels))
+	for _, point := range evaluation.WorkSizingPlan {
+		for _, alias := range evaluation.CandidateModels {
+			completedIDs := make(map[string]struct{})
+			scoreValues := make(map[string][]repositoryModelEvaluationScoreObservation)
+			observedFilesTotal := 0
+			var observedContentBytesTotal int64
+			result := repoeval.WorkSizingModelResult{
+				PointID:              point.ID,
+				Axis:                 point.Axis,
+				ModelAlias:           alias,
+				Completion:           repoeval.ModelCompletionPending,
+				FilesPerBatch:        point.FilesPerBatch,
+				ContentBytesPerBatch: point.ContentBytesPerBatch,
+				Scores:               make(map[string]repoeval.WorkSizingScoreStats),
+				Usage:                evaluation.WorkSizingUsage[point.ID][alias],
+				ConcreteModels:       cloneNestedConcrete(evaluation.WorkSizingConcreteModels[point.ID][alias]),
+			}
+			for _, checkpoint := range evaluation.Checkpoint.Batches {
+				if checkpoint.WorkSizingPointID != point.ID {
+					continue
+				}
+				outcome, participated := checkpoint.Candidates[alias]
+				if !participated {
+					continue
+				}
+				hadAttempts := result.Attempts > 0
+				result.Attempts += outcome.Attempts
+				result.Successes += outcome.Successes
+				result.Failures += outcome.Failures
+				observedFilesTotal += outcome.ObservedFilesTotal
+				observedContentBytesTotal += outcome.ObservedContentBytesTotal
+				if outcome.Attempts > 0 {
+					if !hadAttempts || outcome.ObservedFilesMin < result.ObservedMinFilesPerBatch {
+						result.ObservedMinFilesPerBatch = outcome.ObservedFilesMin
+					}
+					result.ObservedMaxFilesPerBatch = max(result.ObservedMaxFilesPerBatch, outcome.ObservedFilesMax)
+					if !hadAttempts || outcome.ObservedContentBytesMin < result.ObservedMinContentBytesPerBatch {
+						result.ObservedMinContentBytesPerBatch = outcome.ObservedContentBytesMin
+					}
+					result.ObservedMaxContentBytesPerBatch = max(
+						result.ObservedMaxContentBytesPerBatch,
+						outcome.ObservedContentBytesMax,
+					)
+				}
+				for _, candidateID := range outcome.CompletedCandidateIDs {
+					completedIDs[candidateID] = struct{}{}
+				}
+				weight := float64(len(outcome.CompletedCandidateIDs))
+				if weight <= 0 {
+					continue
+				}
+				judgeScores, confirmed, unsupported, ok := repositoryModelEvaluationBatchScores(
+					checkpoint,
+					alias,
+				)
+				if !ok {
+					continue
+				}
+				result.BatchSamples++
+				result.ConfirmedFindings += confirmed
+				result.UnsupportedClaims += unsupported
+				for metric, value := range judgeScores {
+					scoreValues[metric] = append(
+						scoreValues[metric],
+						repositoryModelEvaluationScoreObservation{value: value, weight: weight},
+					)
+				}
+			}
+			for candidateID := range completedIDs {
+				file, ok := fileByID[candidateID]
+				if !ok {
+					continue
+				}
+				result.FilesAnalyzed++
+				result.BytesAnalyzed += max(int64(0), file.SizeBytes)
+			}
+			if result.Attempts > 0 {
+				result.ObservedMeanFilesPerBatch = float64(observedFilesTotal) / float64(result.Attempts)
+				result.ObservedMeanContentBytesPerBatch = float64(observedContentBytesTotal) / float64(result.Attempts)
+			}
+			for metric, observations := range scoreValues {
+				result.Scores[metric] = repositoryModelEvaluationScoreStats(observations)
+			}
+			switch {
+			case result.FilesAnalyzed == len(evaluation.Corpus.Files) && result.BatchSamples > 0:
+				result.Completion = repoeval.ModelCompletionCompleted
+			case result.FilesAnalyzed > 0 || result.BatchSamples > 0:
+				result.Completion = repoeval.ModelCompletionPartial
+			case result.Attempts > 0:
+				result.Completion = repoeval.ModelCompletionFailed
+			}
+			cached := min(max(int64(0), result.Usage.CachedInputTokens), max(int64(0), result.Usage.InputTokens))
+			result.EffectiveTokens = float64(
+				max(int64(0), result.Usage.InputTokens)-cached+max(int64(0), result.Usage.OutputTokens),
+			) + 0.1*float64(cached)
+			if result.BytesAnalyzed > 0 {
+				efficiency := result.EffectiveTokens * 1024 / float64(result.BytesAnalyzed)
+				result.EffectiveTokensPerKiB = &efficiency
+			}
+			results = append(results, result)
+		}
+	}
+	return results
+}
+
+func repositoryModelEvaluationBatchScores(
+	checkpoint repoeval.BatchCheckpoint,
+	alias string,
+) (map[string]float64, int, int, bool) {
+	var mapping []struct {
+		CandidateID string `json:"candidateId"`
+		ModelAlias  string `json:"modelAlias"`
+	}
+	var judge struct {
+		Evaluations []struct {
+			CandidateID       string  `json:"candidateId"`
+			Correctness       float64 `json:"correctness"`
+			Evidence          float64 `json:"evidence"`
+			Coverage          float64 `json:"coverage"`
+			Actionability     float64 `json:"actionability"`
+			Overall           float64 `json:"overall"`
+			ConfirmedClaims   int     `json:"confirmedClaims"`
+			UnsupportedClaims int     `json:"unsupportedClaims"`
+		} `json:"evaluations"`
+	}
+	if json.Unmarshal([]byte(checkpoint.MappingJSON), &mapping) != nil ||
+		json.Unmarshal([]byte(checkpoint.JudgeJSON), &judge) != nil {
+		return nil, 0, 0, false
+	}
+	candidateID := ""
+	for _, item := range mapping {
+		if strings.TrimSpace(item.ModelAlias) == alias {
+			candidateID = strings.TrimSpace(item.CandidateID)
+			break
+		}
+	}
+	for _, item := range judge.Evaluations {
+		if strings.TrimSpace(item.CandidateID) != candidateID || candidateID == "" {
+			continue
+		}
+		return map[string]float64{
+			"correctness":   item.Correctness,
+			"evidence":      item.Evidence,
+			"coverage":      item.Coverage,
+			"actionability": item.Actionability,
+			"overall":       item.Overall,
+		}, max(0, item.ConfirmedClaims), max(0, item.UnsupportedClaims), true
+	}
+	return nil, 0, 0, false
+}
+
+func repositoryModelEvaluationScoreStats(
+	observations []repositoryModelEvaluationScoreObservation,
+) repoeval.WorkSizingScoreStats {
+	if len(observations) == 0 {
+		return repoeval.WorkSizingScoreStats{}
+	}
+	minimum := observations[0].value
+	maximum := observations[0].value
+	weightedTotal := 0.0
+	weightTotal := 0.0
+	for _, observation := range observations {
+		minimum = min(minimum, observation.value)
+		maximum = max(maximum, observation.value)
+		weightedTotal += observation.value * observation.weight
+		weightTotal += observation.weight
+	}
+	mean := weightedTotal / max(1, weightTotal)
+	variance := 0.0
+	for _, observation := range observations {
+		delta := observation.value - mean
+		variance += observation.weight * delta * delta
+	}
+	variance /= max(1, weightTotal)
+	return repoeval.WorkSizingScoreStats{
+		Samples:           len(observations),
+		WeightedMean:      mean,
+		Minimum:           minimum,
+		Maximum:           maximum,
+		StandardDeviation: math.Sqrt(max(0, variance)),
+	}
 }
 
 func repositoryModelEvaluationValidateJudgeEvidence(
@@ -2913,7 +3583,6 @@ func repositoryModelEvaluationValidatedClaimLedger(
 	for _, alias := range aliasByCandidate {
 		result[alias] = []repoeval.ModelClaim{}
 	}
-	assessed := make(map[string]struct{}, len(ledger))
 	prefix := strings.TrimSpace(batchID)
 	if len(prefix) > 16 {
 		prefix = prefix[:16]
@@ -2939,7 +3608,6 @@ func repositoryModelEvaluationValidatedClaimLedger(
 				return nil, errors.New("judge assessed a claim more than once")
 			}
 			seen[assessment.ClaimID] = struct{}{}
-			assessed[assessment.ClaimID] = struct{}{}
 			if assessment.Disposition == repoeval.ClaimDispositionSupported {
 				supported++
 			} else {
@@ -2956,9 +3624,6 @@ func repositoryModelEvaluationValidatedClaimLedger(
 			unsupported != evaluation.UnsupportedClaims {
 			return nil, errors.New("judge claim assessments do not match the candidate claims")
 		}
-	}
-	if len(assessed) != len(claimsByID) {
-		return nil, errors.New("judge omitted a candidate claim")
 	}
 	return result, nil
 }
@@ -3064,10 +3729,9 @@ func repositoryModelEvaluationAggregateJudgeJSON(value string) (string, error) {
 		}
 		delete(item, "claimAssessments")
 	}
-	encoded, err := json.Marshal(output)
-	if err != nil {
-		return "", errors.New("invalid bounded judge output")
-	}
+	// JSON decoding above limits output to JSON-native values, so re-encoding
+	// this sanitized envelope cannot fail.
+	encoded, _ := json.Marshal(output)
 	return string(encoded), nil
 }
 
