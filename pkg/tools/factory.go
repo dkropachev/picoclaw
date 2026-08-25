@@ -155,7 +155,12 @@ type toolServiceCache struct {
 
 type toolInstanceTracker struct {
 	mu     sync.Mutex
-	issued map[toolInstanceKey]any
+	issued map[toolInstanceKey]toolInstanceLease
+}
+
+type toolInstanceLease struct {
+	value           any
+	immutableShares uint64
 }
 
 var globalOwnedToolInstances = newToolInstanceTracker()
@@ -166,7 +171,7 @@ type toolInstanceKey struct {
 }
 
 func newToolInstanceTracker() *toolInstanceTracker {
-	return &toolInstanceTracker{issued: make(map[toolInstanceKey]any)}
+	return &toolInstanceTracker{issued: make(map[toolInstanceKey]toolInstanceLease)}
 }
 
 func toolInstanceIdentity(tool Tool) (toolInstanceKey, error) {
@@ -186,7 +191,34 @@ func (tracker *toolInstanceTracker) reserve(identity toolInstanceKey, value any)
 	if _, exists := tracker.issued[identity]; exists {
 		return fmt.Errorf("factory reused an instance issued to another owner")
 	}
-	tracker.issued[identity] = value
+	tracker.issued[identity] = toolInstanceLease{value: value}
+	return nil
+}
+
+func (tracker *toolInstanceTracker) reserveImmutableShared(
+	identity toolInstanceKey,
+	value any,
+) error {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	lease, exists := tracker.issued[identity]
+	if exists && lease.immutableShares == 0 {
+		return fmt.Errorf("immutable-shared instance is exclusively leased to another owner")
+	}
+	if exists {
+		if !sameInterfaceIdentity(lease.value, value) {
+			return fmt.Errorf("immutable-shared instance identity changed while leased")
+		}
+		if lease.immutableShares == ^uint64(0) {
+			return fmt.Errorf("immutable-shared instance lease count is exhausted")
+		}
+		lease.immutableShares++
+		tracker.issued[identity] = lease
+		return nil
+	}
+	tracker.issued[identity] = toolInstanceLease{
+		value: value, immutableShares: 1,
+	}
 	return nil
 }
 
@@ -195,13 +227,43 @@ func (tracker *toolInstanceTracker) release(identity toolInstanceKey) {
 		return
 	}
 	tracker.mu.Lock()
-	delete(tracker.issued, identity)
+	if lease, exists := tracker.issued[identity]; exists && lease.immutableShares == 0 {
+		delete(tracker.issued, identity)
+	}
+	tracker.mu.Unlock()
+}
+
+func (tracker *toolInstanceTracker) releaseImmutableShared(identity toolInstanceKey) {
+	if tracker == nil || identity.pointer == 0 {
+		return
+	}
+	tracker.mu.Lock()
+	lease, exists := tracker.issued[identity]
+	if !exists || lease.immutableShares == 0 {
+		tracker.mu.Unlock()
+		return
+	}
+	lease.immutableShares--
+	if lease.immutableShares == 0 {
+		delete(tracker.issued, identity)
+	} else {
+		tracker.issued[identity] = lease
+	}
 	tracker.mu.Unlock()
 }
 
 type toolInstanceReservation struct {
-	tracker  *toolInstanceTracker
-	identity toolInstanceKey
+	tracker         *toolInstanceTracker
+	identity        toolInstanceKey
+	immutableShared bool
+}
+
+func (reservation toolInstanceReservation) release() {
+	if reservation.immutableShared {
+		reservation.tracker.releaseImmutableShared(reservation.identity)
+		return
+	}
+	reservation.tracker.release(reservation.identity)
 }
 
 func newToolServiceCache() *toolServiceCache {
@@ -377,7 +439,7 @@ func (transaction *toolServiceTransaction) cleanupAndRelease(
 	reservations := transaction.detachReservations()
 	reservations = append(reservations, extra...)
 	for index := len(reservations) - 1; index >= 0; index-- {
-		reservations[index].tracker.release(reservations[index].identity)
+		reservations[index].release()
 	}
 	return nil
 }

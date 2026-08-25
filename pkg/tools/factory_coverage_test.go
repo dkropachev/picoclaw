@@ -192,6 +192,55 @@ func TestToolFactoryCoverageInstanceTrackerBoundaries(t *testing.T) {
 	if len(tracker.issued) != 0 {
 		t.Fatalf("tracker retained identities: %#v", tracker.issued)
 	}
+	if err := tracker.reserveImmutableShared(identity, tool); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.reserveImmutableShared(identity, tool); err != nil {
+		t.Fatalf("second immutable share failed: %v", err)
+	}
+	if err := tracker.reserve(identity, tool); err == nil {
+		t.Fatal("exclusive reservation bypassed immutable shares")
+	}
+	tracker.release(identity)
+	if err := tracker.reserve(identity, tool); err == nil {
+		t.Fatal("exclusive release removed immutable shares")
+	}
+	tracker.releaseImmutableShared(identity)
+	if err := tracker.reserve(identity, tool); err == nil {
+		t.Fatal("one immutable release removed two shares")
+	}
+	tracker.releaseImmutableShared(identity)
+	if err := tracker.reserve(identity, tool); err != nil {
+		t.Fatalf("all immutable shares did not release identity: %v", err)
+	}
+	if err := tracker.reserveImmutableShared(identity, tool); err == nil {
+		t.Fatal("immutable share bypassed exclusive reservation")
+	}
+	tracker.releaseImmutableShared(identity)
+	if err := tracker.reserve(identity, tool); err == nil {
+		t.Fatal("immutable release removed an exclusive reservation")
+	}
+	tracker.releaseImmutableShared(toolInstanceKey{})
+	nilTracker.releaseImmutableShared(identity)
+	tracker.release(identity)
+	tracker.issued[identity] = toolInstanceLease{
+		value: &factoryCoverageTool{name: "different"}, immutableShares: 1,
+	}
+	if err := tracker.reserveImmutableShared(identity, tool); err == nil ||
+		!strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("changed immutable identity error = %v", err)
+	}
+	tracker.issued[identity] = toolInstanceLease{
+		value: tool, immutableShares: ^uint64(0),
+	}
+	if err := tracker.reserveImmutableShared(identity, tool); err == nil ||
+		!strings.Contains(err.Error(), "exhausted") {
+		t.Fatalf("immutable lease overflow error = %v", err)
+	}
+	delete(tracker.issued, identity)
+	if len(tracker.issued) != 0 {
+		t.Fatalf("tracker retained mixed leases: %#v", tracker.issued)
+	}
 }
 
 func TestToolFactoryCoverageServiceCacheAndTransactionBoundaries(t *testing.T) {
