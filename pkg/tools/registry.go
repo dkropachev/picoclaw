@@ -20,26 +20,34 @@ type ToolEntry struct {
 	IsCore bool
 	TTL    int
 
-	descriptor      *ToolDescriptor
-	traits          ToolTraits
-	factory         ToolFactory
-	immutableShared bool
+	descriptor         *ToolDescriptor
+	traits             ToolTraits
+	factory            ToolFactory
+	immutableShared    bool
+	visibilityRevision uint64
 }
 
 type ToolRegistry struct {
-	tools        map[string]*ToolEntry
-	mu           sync.RWMutex
-	mediaApplyMu sync.Mutex
-	version      atomic.Uint64 // incremented on Register/RegisterHidden for cache invalidation
-	mediaStore   media.MediaStore
-	mediaGen     uint64
-	allowlist    map[string]struct{}
-	owner        ToolOwner
-	owned        bool
-	services     *toolServiceCache
-	ownedValues  []any
-	reservations []toolInstanceReservation
-	closed       bool
+	tools map[string]*ToolEntry
+	// privateConstruction contains owner-built dependency products. The
+	// constructionCatalog contains dormant frozen specs only; neither map is
+	// callable, discoverable, or outwardly projected.
+	privateConstruction       map[string]*ToolEntry
+	constructionCatalog       map[string]*ToolEntry
+	mu                        sync.RWMutex
+	mediaApplyMu              sync.Mutex
+	version                   atomic.Uint64 // incremented on Register/RegisterHidden for cache invalidation
+	mediaStore                media.MediaStore
+	mediaGen                  uint64
+	allowlist                 map[string]struct{}
+	exactRegistrationCap      map[string]struct{}
+	owner                     ToolOwner
+	owned                     bool
+	services                  *toolServiceCache
+	ownedValues               []any
+	reservations              []toolInstanceReservation
+	compatibilityReservations []toolInstanceReservation
+	closed                    bool
 }
 
 // CoreToolSnapshotEntry preserves the exact registry key used to execute a
@@ -81,8 +89,10 @@ func toolEntryNameDescription(entry *ToolEntry) (string, string) {
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tools:    make(map[string]*ToolEntry),
-		services: newToolServiceCache(),
+		tools:               make(map[string]*ToolEntry),
+		privateConstruction: make(map[string]*ToolEntry),
+		constructionCatalog: make(map[string]*ToolEntry),
+		services:            newToolServiceCache(),
 	}
 }
 
@@ -91,10 +101,12 @@ func NewOwnedToolRegistry(owner ToolOwner) (*ToolRegistry, error) {
 		return nil, err
 	}
 	return &ToolRegistry{
-		tools:    make(map[string]*ToolEntry),
-		owner:    owner,
-		owned:    true,
-		services: newToolServiceCache(),
+		tools:               make(map[string]*ToolEntry),
+		privateConstruction: make(map[string]*ToolEntry),
+		constructionCatalog: make(map[string]*ToolEntry),
+		owner:               owner,
+		owned:               true,
+		services:            newToolServiceCache(),
 	}, nil
 }
 
@@ -120,26 +132,37 @@ func (r *ToolRegistry) Traits(name string) (ToolTraits, bool) {
 	return entry.traits, true
 }
 
-// Close releases only resources created by the strict owner-aware factory
-// path. The owner supervisor must quiesce registry calls and retained Tools
-// before Close. It is an idempotent no-op for legacy unowned registries and
-// never closes explicitly immutable-shared entries.
+// Close releases strict owner-created resources and compatibility-source
+// instance leases after the caller has quiesced registry and retained Tool
+// use. It never closes caller-owned compatibility tools or explicitly
+// immutable-shared entries. Plain legacy unowned registries remain a no-op.
 func (r *ToolRegistry) Close() error {
 	if r == nil {
 		return nil
 	}
 	r.mu.Lock()
-	if !r.owned || r.closed {
+	if r.closed || !r.owned && len(r.compatibilityReservations) == 0 {
 		r.mu.Unlock()
 		return nil
 	}
 	r.closed = true
-	created := append([]any(nil), r.ownedValues...)
-	reservations := append([]toolInstanceReservation(nil), r.reservations...)
+	var created []any
+	var reservations []toolInstanceReservation
+	if r.owned {
+		created = append([]any(nil), r.ownedValues...)
+		reservations = append([]toolInstanceReservation(nil), r.reservations...)
+	}
+	compatibilityReservations := append(
+		[]toolInstanceReservation(nil),
+		r.compatibilityReservations...,
+	)
 	r.ownedValues = nil
 	r.reservations = nil
+	r.compatibilityReservations = nil
 	r.tools = make(map[string]*ToolEntry)
-	if r.services != nil {
+	r.privateConstruction = make(map[string]*ToolEntry)
+	r.constructionCatalog = make(map[string]*ToolEntry)
+	if r.owned && r.services != nil {
 		r.services.mu.Lock()
 		r.services.values = make(map[string]any)
 		r.services.mu.Unlock()
@@ -149,18 +172,23 @@ func (r *ToolRegistry) Close() error {
 	closeErr := closeOwnerCreatedValues(created)
 	if closeErr == nil {
 		for index := len(reservations) - 1; index >= 0; index-- {
-			reservations[index].tracker.release(reservations[index].identity)
+			reservations[index].release()
 		}
+	}
+	for index := len(compatibilityReservations) - 1; index >= 0; index-- {
+		compatibilityReservations[index].release()
 	}
 	return closeErr
 }
 
 // SetAllowlist restricts registrations to the provided runtime tool names.
 // A nil slice means "allow all". An empty-but-non-nil slice means "allow none".
+// It cannot widen an immutable exact registration cap installed by selected
+// owner construction.
 func (r *ToolRegistry) SetAllowlist(names []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.owned && r.closed {
+	if r.closed {
 		return
 	}
 
@@ -208,7 +236,7 @@ func (r *ToolRegistry) registerLegacy(
 ) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.owned && r.closed {
+	if r.closed {
 		return
 	}
 	name := tool.Name()
@@ -240,7 +268,7 @@ func (r *ToolRegistry) registerLegacy(
 func (r *ToolRegistry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.owned && r.closed {
+	if r.closed {
 		return
 	}
 
@@ -263,14 +291,19 @@ func (r *ToolRegistry) SetMediaStore(store media.MediaStore) {
 	defer r.mediaApplyMu.Unlock()
 
 	r.mu.Lock()
-	if r.owned && r.closed {
+	if r.closed {
 		r.mu.Unlock()
 		return
 	}
 	r.mediaStore = store
 	r.mediaGen++
-	awareTools := make([]mediaStoreAware, 0, len(r.tools))
+	awareTools := make([]mediaStoreAware, 0, len(r.tools)+len(r.privateConstruction))
 	for _, entry := range r.tools {
+		if aware, ok := entry.Tool.(mediaStoreAware); ok {
+			awareTools = append(awareTools, aware)
+		}
+	}
+	for _, entry := range r.privateConstruction {
 		if aware, ok := entry.Tool.(mediaStoreAware); ok {
 			awareTools = append(awareTools, aware)
 		}
@@ -287,14 +320,17 @@ func (r *ToolRegistry) SetMediaStore(store media.MediaStore) {
 func (r *ToolRegistry) PromoteTools(names []string, ttl int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.owned && r.closed {
+	if r.closed {
 		return
 	}
 	promoted := 0
 	for _, name := range names {
 		if entry, exists := r.tools[name]; exists {
 			if !entry.IsCore {
-				entry.TTL = ttl
+				if entry.TTL != ttl {
+					entry.TTL = ttl
+					entry.visibilityRevision++
+				}
 				promoted++
 			}
 		}
@@ -310,12 +346,13 @@ func (r *ToolRegistry) PromoteTools(names []string, ttl int) {
 func (r *ToolRegistry) TickTTL() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.owned && r.closed {
+	if r.closed {
 		return
 	}
 	for _, entry := range r.tools {
 		if !entry.IsCore && entry.TTL > 0 {
 			entry.TTL--
+			entry.visibilityRevision++
 		}
 	}
 }
@@ -326,10 +363,15 @@ func (r *ToolRegistry) Version() uint64 {
 }
 
 func (r *ToolRegistry) toolAllowedLocked(name string) bool {
+	if r.exactRegistrationCap != nil {
+		if _, ok := r.exactRegistrationCap[name]; !ok {
+			return false
+		}
+	}
 	if r.allowlist == nil {
 		return true
 	}
-	if isToolDiscoveryToolName(name) {
+	if r.exactRegistrationCap == nil && isToolDiscoveryToolName(name) {
 		// Discovery tools are part of the MCP control plane: they must remain
 		// available whenever configured so deferred MCP tools can still be
 		// unlocked. Per-agent allowlists still apply to the hidden MCP tools
@@ -727,10 +769,10 @@ func (r *ToolRegistry) List() []string {
 // Clone creates an independent copy of the registry containing the same tool
 // entries but intentionally shares every Tool instance. It preserves legacy
 // behavior and is unsafe as an ownership/isolation boundary; new owner-scoped
-// code must use InstantiateForOwner. Calling Clone on an owned registry fails
-// closed with an empty unowned view, avoiding duplicated resource leases. This
-// compatibility path is used to give subagents a
-// snapshot of the parent agent's tools without sharing the same registry —
+// code must use InstantiateForOwner or InstantiateForOwnerSelection. Calling
+// Clone on an owned registry fails closed with an empty unowned view, avoiding
+// duplicated resource leases. This compatibility path is used to give
+// subagents a snapshot of the parent agent's tools without sharing the same registry —
 // tools registered on the parent after cloning (e.g. spawn, spawn_status)
 // will NOT be visible to the clone, preventing recursive subagent spawning.
 // The version counter is reset to 0 in the clone as it's a new independent registry.
@@ -746,16 +788,24 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	clone := &ToolRegistry{
-		tools:      make(map[string]*ToolEntry, len(r.tools)),
-		mediaStore: r.mediaStore,
-		mediaGen:   r.mediaGen,
-		services:   newToolServiceCache(),
+		tools:               make(map[string]*ToolEntry, len(r.tools)),
+		privateConstruction: make(map[string]*ToolEntry),
+		constructionCatalog: make(map[string]*ToolEntry),
+		mediaStore:          r.mediaStore,
+		mediaGen:            r.mediaGen,
+		services:            newToolServiceCache(),
 	}
 	clone.services.values = r.services.snapshot()
 	if r.allowlist != nil {
 		clone.allowlist = make(map[string]struct{}, len(r.allowlist))
 		for name := range r.allowlist {
 			clone.allowlist[name] = struct{}{}
+		}
+	}
+	if r.exactRegistrationCap != nil {
+		clone.exactRegistrationCap = make(map[string]struct{}, len(r.exactRegistrationCap))
+		for name := range r.exactRegistrationCap {
+			clone.exactRegistrationCap[name] = struct{}{}
 		}
 	}
 	for name, entry := range r.tools {
@@ -767,7 +817,7 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 		clone.tools[name] = &ToolEntry{
 			Tool: entry.Tool, IsCore: entry.IsCore, TTL: entry.TTL,
 			descriptor: descriptor, traits: entry.traits, factory: entry.factory,
-			immutableShared: entry.immutableShared,
+			immutableShared: entry.immutableShared, visibilityRevision: entry.visibilityRevision,
 		}
 	}
 	return clone

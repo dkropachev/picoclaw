@@ -208,6 +208,7 @@ func TestToolRegistryFactoryCoverageAdmissionAndRegistrationConflicts(t *testing
 
 	t.Run("source instance reuse", func(t *testing.T) {
 		registry, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "source-reuse-admission"))
+		t.Cleanup(func() { _ = registry.Close() })
 		shared := newMockTool("shared_admission", "shared_admission")
 		if err := registry.RegisterImmutableShared(shared, ToolTraits{Parallel: ToolParallelSafe}); err != nil {
 			t.Fatal(err)
@@ -335,9 +336,14 @@ func TestToolRegistryFactoryCoverageImmutableAdmission(t *testing.T) {
 		t.Fatal("nil registry accepted immutable tool")
 	}
 	registry, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "immutable-nil"))
+	t.Cleanup(func() { _ = registry.Close() })
 	var nilTool *mockRegistryTool
 	if err := registry.RegisterImmutableShared(nilTool, traits); err == nil {
 		t.Fatal("typed-nil immutable tool was accepted")
+	}
+	if err := registry.RegisterImmutableShared(factoryValueTool{}, traits); err == nil ||
+		!strings.Contains(err.Error(), "non-nil pointer") {
+		t.Fatalf("value immutable tool error = %v", err)
 	}
 	if err := NewToolRegistry().RegisterImmutableShared(tool, traits); err == nil {
 		t.Fatal("unowned registry accepted immutable tool")
@@ -383,11 +389,13 @@ func TestToolRegistryFactoryCoverageImmutableAdmission(t *testing.T) {
 	}
 
 	blocked, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "immutable-blocked"))
+	t.Cleanup(func() { _ = blocked.Close() })
 	blocked.SetAllowlist([]string{})
 	if err := blocked.RegisterImmutableShared(tool, traits); err != nil || blocked.Count() != 0 {
 		t.Fatalf("blocked immutable registration = error:%v count:%d", err, blocked.Count())
 	}
 	collision, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "immutable-collision"))
+	t.Cleanup(func() { _ = collision.Close() })
 	if err := collision.RegisterImmutableShared(tool, traits); err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +433,7 @@ func TestToolRegistryFactoryCoverageInstantiationFailures(t *testing.T) {
 
 	t.Run("unsafe immutable metadata", func(t *testing.T) {
 		source, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "unsafe-immutable"))
+		t.Cleanup(func() { _ = source.Close() })
 		if err := source.RegisterImmutableShared(newMockTool("unsafe_immutable", "unsafe_immutable"), ToolTraits{
 			Parallel: ToolParallelSafe,
 		}); err != nil {
@@ -437,6 +446,52 @@ func TestToolRegistryFactoryCoverageInstantiationFailures(t *testing.T) {
 			child != nil {
 			t.Fatalf("unsafe immutable clone = %#v, %v", child, err)
 		}
+	})
+
+	t.Run("invalid immutable product", func(t *testing.T) {
+		source, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "invalid-immutable"))
+		t.Cleanup(func() { _ = source.Close() })
+		shared := newMockTool("invalid_immutable", "invalid immutable")
+		if err := source.RegisterImmutableShared(shared, ToolTraits{
+			Parallel: ToolParallelSafe,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		source.tools["invalid_immutable"].Tool = factoryValueTool{}
+		if child, err := source.InstantiateForOwner(
+			factoryTestOwner(ToolOwnerScopeAgent, "invalid-immutable-child"),
+		); err == nil || child != nil || !strings.Contains(err.Error(), "non-nil pointer") {
+			t.Fatalf("invalid immutable product = %#v, %v", child, err)
+		}
+		_ = source.Close()
+	})
+
+	t.Run("immutable lease conflict", func(t *testing.T) {
+		source, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "immutable-conflict"))
+		t.Cleanup(func() { _ = source.Close() })
+		shared := newMockTool("immutable_conflict", "immutable conflict")
+		if err := source.RegisterImmutableShared(shared, ToolTraits{
+			Parallel: ToolParallelSafe,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		foreign := newMockTool("immutable_conflict", "immutable conflict")
+		identity, identityErr := toolInstanceIdentity(foreign)
+		if identityErr != nil {
+			t.Fatal(identityErr)
+		}
+		if reserveErr := globalOwnedToolInstances.reserve(identity, foreign); reserveErr != nil {
+			t.Fatal(reserveErr)
+		}
+		t.Cleanup(func() { globalOwnedToolInstances.release(identity) })
+		source.tools["immutable_conflict"].Tool = foreign
+		if child, err := source.InstantiateForOwner(
+			factoryTestOwner(ToolOwnerScopeAgent, "immutable-conflict-child"),
+		); err == nil || child != nil || !strings.Contains(err.Error(), "exclusively leased") {
+			t.Fatalf("immutable lease conflict = %#v, %v", child, err)
+		}
+		globalOwnedToolInstances.release(identity)
+		_ = source.Close()
 	})
 
 	t.Run("missing owner factory", func(t *testing.T) {
@@ -642,6 +697,57 @@ func TestToolRegistryFactoryCoverageInstantiationFailures(t *testing.T) {
 			t.Fatalf("destination service clone = %#v, %v", child, err)
 		}
 	})
+}
+
+func TestToolRegistryFactoryCoverageExactSourceEntryFence(t *testing.T) {
+	source, sourceErr := NewOwnedToolRegistry(factoryTestOwner(
+		ToolOwnerScopeRegistry,
+		"full-source-entry-fence",
+	))
+	if sourceErr != nil {
+		t.Fatal(sourceErr)
+	}
+	factory := mustFactoryForTool(t, newMockTool("full_pointer_fence", "full pointer fence"), ToolTraits{},
+		func(ctx ToolBuildContext) (Tool, error) {
+			if ctx.Owner().Scope != ToolOwnerScopeRegistry {
+				source.mu.Lock()
+				current := source.tools["full_pointer_fence"]
+				replacement := *current
+				source.tools["full_pointer_fence"] = &replacement
+				source.mu.Unlock()
+			}
+			return newMockTool("full_pointer_fence", "full pointer fence"), nil
+		})
+	if registerErr := source.RegisterFactory(factory); registerErr != nil {
+		t.Fatal(registerErr)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	if child, instantiateErr := source.InstantiateForOwner(
+		factoryTestOwner(ToolOwnerScopeAgent, "full-source-entry-fence-child"),
+	); instantiateErr == nil || child != nil || !strings.Contains(instantiateErr.Error(), "source tool") {
+		t.Fatalf("full source entry fence = %#v, %v", child, instantiateErr)
+	}
+}
+
+func TestToolRegistryFactoryCoverageIgnoresDormantLegacyCatalogEntry(t *testing.T) {
+	source, sourceErr := NewOwnedToolRegistry(factoryTestOwner(
+		ToolOwnerScopeRegistry,
+		"legacy-catalog-source",
+	))
+	if sourceErr != nil {
+		t.Fatal(sourceErr)
+	}
+	legacy := newMockTool("legacy_catalog", "legacy catalog")
+	source.constructionCatalog["legacy_catalog"] = &ToolEntry{Tool: legacy}
+	child, instantiateErr := source.InstantiateForOwner(
+		factoryTestOwner(ToolOwnerScopeAgent, "legacy-catalog-child"),
+	)
+	if instantiateErr != nil || child == nil || child.Count() != 0 ||
+		len(child.constructionCatalog) != 0 {
+		t.Fatalf("legacy dormant catalog = %#v, %v", child, instantiateErr)
+	}
+	_ = child.Close()
+	_ = source.Close()
 }
 
 func TestToolRegistryFactoryCoverageConstructionFailureQuarantine(t *testing.T) {

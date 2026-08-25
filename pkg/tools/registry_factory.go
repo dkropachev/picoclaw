@@ -54,7 +54,16 @@ func (r *ToolRegistry) registerFactory(factory ToolFactory, core bool) error {
 		return nil
 	}
 	owner := r.owner
-	sourceEntries := make(map[string]*ToolEntry, len(r.tools))
+	sourceEntries := make(
+		map[string]*ToolEntry,
+		len(r.tools)+len(r.privateConstruction)+len(r.constructionCatalog),
+	)
+	for name, entry := range r.constructionCatalog {
+		sourceEntries[name] = entry
+	}
+	for name, entry := range r.privateConstruction {
+		sourceEntries[name] = entry
+	}
 	for name, entry := range r.tools {
 		sourceEntries[name] = entry
 	}
@@ -76,6 +85,9 @@ func (r *ToolRegistry) registerFactory(factory ToolFactory, core bool) error {
 	context.resolve = func(name string) (Tool, error) {
 		r.mu.RLock()
 		entry := r.tools[name]
+		if entry == nil {
+			entry = r.privateConstruction[name]
+		}
 		r.mu.RUnlock()
 		if entry == nil || isTypedNil(entry.Tool) {
 			return nil, fmt.Errorf("tool dependency %q is missing", name)
@@ -149,7 +161,11 @@ func (r *ToolRegistry) registerFactory(factory ToolFactory, core bool) error {
 		return errors.Join(fmt.Errorf("tool %q changed during factory construction", descriptor.Name), cleanupErr)
 	}
 	for name, expected := range resolved {
-		if r.tools[name] != expected {
+		current := r.tools[name]
+		if current == nil {
+			current = r.privateConstruction[name]
+		}
+		if current != expected {
 			r.mu.Unlock()
 			cleanupErr := cleanupReserved()
 			return errors.Join(fmt.Errorf("tool dependency %q changed during factory construction", name), cleanupErr)
@@ -210,6 +226,19 @@ func (r *ToolRegistry) registerImmutableShared(tool Tool, traits ToolTraits, cor
 	if _, mutableMedia := tool.(mediaStoreAware); mutableMedia {
 		return fmt.Errorf("media-store-aware tool cannot be immutable shared")
 	}
+	identity, err := toolInstanceIdentity(tool)
+	if err != nil {
+		return fmt.Errorf("immutable-shared tool: %w", err)
+	}
+	if reserveErr := globalOwnedToolInstances.reserveImmutableShared(identity, tool); reserveErr != nil {
+		return fmt.Errorf("immutable-shared tool: %w", reserveErr)
+	}
+	release := true
+	defer func() {
+		if release {
+			globalOwnedToolInstances.releaseImmutableShared(identity)
+		}
+	}()
 	descriptor, err := safeToolDescriptor(tool)
 	if err != nil {
 		return err
@@ -238,19 +267,128 @@ func (r *ToolRegistry) registerImmutableShared(tool Tool, traits ToolTraits, cor
 		traits:          normalized,
 		immutableShared: true,
 	}
+	r.reservations = append(r.reservations, toolInstanceReservation{
+		tracker: globalOwnedToolInstances, identity: identity, immutableShared: true,
+	})
 	r.version.Add(1)
+	release = false
 	return nil
 }
 
 type factoryEntrySnapshot struct {
-	name            string
-	tool            Tool
-	core            bool
-	ttl             int
-	descriptor      *ToolDescriptor
-	traits          ToolTraits
-	factory         ToolFactory
-	immutableShared bool
+	name               string
+	tool               Tool
+	source             *ToolEntry
+	core               bool
+	ttl                int
+	descriptor         *ToolDescriptor
+	traits             ToolTraits
+	factory            ToolFactory
+	immutableShared    bool
+	visibilityRevision uint64
+	public             bool
+	catalog            bool
+}
+
+type ownerToolConstruction struct {
+	owner        ToolOwner
+	entries      map[string]factoryEntrySnapshot
+	destination  *ToolRegistry
+	services     *toolServiceTransaction
+	reservations *[]toolInstanceReservation
+	built        map[string]Tool
+	resolve      func(string) (Tool, error)
+}
+
+func (construction *ownerToolConstruction) buildEntry(
+	name string,
+	entry factoryEntrySnapshot,
+) (Tool, error) {
+	if entry.immutableShared {
+		if entry.traits.Sharing != ToolSharingImmutableShared ||
+			entry.traits.Parallel != ToolParallelSafe {
+			return nil, fmt.Errorf("tool %q has unsafe immutable sharing metadata", name)
+		}
+		identity, identityErr := toolInstanceIdentity(entry.tool)
+		if identityErr != nil {
+			return nil, fmt.Errorf("immutable-shared tool %q: %w", name, identityErr)
+		}
+		if reserveErr := globalOwnedToolInstances.reserveImmutableShared(
+			identity,
+			entry.tool,
+		); reserveErr != nil {
+			return nil, fmt.Errorf("immutable-shared tool %q: %w", name, reserveErr)
+		}
+		*construction.reservations = append(
+			*construction.reservations,
+			toolInstanceReservation{
+				tracker: globalOwnedToolInstances, identity: identity, immutableShared: true,
+			},
+		)
+		return entry.tool, nil
+	}
+	if isTypedNil(entry.factory) {
+		return nil, fmt.Errorf("tool %q has no owner factory", name)
+	}
+	context := ToolBuildContext{
+		owner: construction.owner, services: construction.services,
+		registry: construction.destination, resolve: construction.resolve,
+	}
+	created, createErr := callToolFactory(entry.factory, name, context)
+	if createErr != nil {
+		if !isTypedNil(created) {
+			if factorySnapshotContainsToolPointer(construction.entries, created) ||
+				toolMapContainsPointer(construction.built, created) {
+				return nil, errors.Join(
+					createErr,
+					fmt.Errorf("factory tool %q returned a foreign instance with an error", name),
+				)
+			}
+			identity, identityErr := toolInstanceIdentity(created)
+			if identityErr != nil {
+				construction.services.track(created)
+				return nil, errors.Join(createErr, identityErr)
+			}
+			if reserveErr := globalOwnedToolInstances.reserve(identity, created); reserveErr != nil {
+				return nil, errors.Join(createErr, reserveErr)
+			}
+			*construction.reservations = append(
+				*construction.reservations,
+				toolInstanceReservation{tracker: globalOwnedToolInstances, identity: identity},
+			)
+			construction.services.track(created)
+		}
+		return nil, createErr
+	}
+	if isTypedNil(created) {
+		return nil, fmt.Errorf("factory tool %q returned nil", name)
+	}
+	if factorySnapshotContainsToolPointer(construction.entries, created) {
+		return nil, fmt.Errorf("per-owner factory for %q reused a source instance", name)
+	}
+	if toolMapContainsPointer(construction.built, created) {
+		return nil, fmt.Errorf("per-owner factory for %q reused an owner instance", name)
+	}
+	identity, identityErr := toolInstanceIdentity(created)
+	if identityErr != nil {
+		construction.services.track(created)
+		return nil, fmt.Errorf("per-owner factory for %q: %w", name, identityErr)
+	}
+	if reserveErr := globalOwnedToolInstances.reserve(identity, created); reserveErr != nil {
+		return nil, fmt.Errorf("per-owner factory for %q: %w", name, reserveErr)
+	}
+	*construction.reservations = append(
+		*construction.reservations,
+		toolInstanceReservation{tracker: globalOwnedToolInstances, identity: identity},
+	)
+	construction.services.track(created)
+	if injectErr := injectFactoryMediaStore(created, construction.destination.mediaStore); injectErr != nil {
+		return nil, fmt.Errorf("configure owner tool %q media store: %w", name, injectErr)
+	}
+	if descriptorErr := validateFactoryToolDescriptor(created, *entry.descriptor); descriptorErr != nil {
+		return nil, descriptorErr
+	}
+	return created, nil
 }
 
 func (r *ToolRegistry) InstantiateForOwner(
@@ -270,30 +408,26 @@ func (r *ToolRegistry) InstantiateForOwner(
 		return nil, err
 	}
 	r.mu.RLock()
-	entries := make(map[string]factoryEntrySnapshot, len(r.tools))
-	for name, entry := range r.tools {
-		if entry == nil {
-			continue
-		}
-		var descriptor *ToolDescriptor
-		if entry.descriptor != nil {
-			frozen := cloneToolDescriptor(*entry.descriptor)
-			descriptor = &frozen
-		}
-		entries[name] = factoryEntrySnapshot{
-			name: name, tool: entry.Tool, core: entry.IsCore, ttl: entry.TTL,
-			descriptor: descriptor, traits: entry.traits, factory: entry.factory,
-			immutableShared: entry.immutableShared,
-		}
-	}
+	entries := snapshotFactoryEntriesLocked(
+		r.tools,
+		r.privateConstruction,
+		r.constructionCatalog,
+	)
 	if r.allowlist != nil {
 		destination.allowlist = make(map[string]struct{}, len(r.allowlist))
 		for name := range r.allowlist {
 			destination.allowlist[name] = struct{}{}
 		}
 	}
+	if r.exactRegistrationCap != nil {
+		destination.exactRegistrationCap = make(map[string]struct{}, len(r.exactRegistrationCap))
+		for name := range r.exactRegistrationCap {
+			destination.exactRegistrationCap[name] = struct{}{}
+		}
+	}
 	destination.mediaStore = r.mediaStore
 	destination.mediaGen = r.mediaGen
+	mediaGeneration := r.mediaGen
 	version := r.version.Load()
 	r.mu.RUnlock()
 
@@ -306,6 +440,11 @@ func (r *ToolRegistry) InstantiateForOwner(
 		}
 	}()
 	states := make(map[string]uint8, len(entries))
+	built := make(map[string]Tool, len(entries))
+	construction := &ownerToolConstruction{
+		owner: owner, entries: entries, destination: destination,
+		services: services, reservations: &reservations, built: built,
+	}
 	var build func(string) (Tool, error)
 	build = func(name string) (Tool, error) {
 		entry, ok := entries[name]
@@ -316,94 +455,38 @@ func (r *ToolRegistry) InstantiateForOwner(
 		case 1:
 			return nil, fmt.Errorf("tool factory dependency cycle at %q", name)
 		case 2:
-			return destination.tools[name].Tool, nil
+			return built[name], nil
 		}
 		states[name] = 1
 		if entry.descriptor == nil {
 			return nil, fmt.Errorf("legacy tool %q has no owner factory", name)
 		}
-
-		var tool Tool
-		if entry.immutableShared {
-			if entry.traits.Sharing != ToolSharingImmutableShared ||
-				entry.traits.Parallel != ToolParallelSafe {
-				return nil, fmt.Errorf("tool %q has unsafe immutable sharing metadata", name)
-			}
-			tool = entry.tool
-		} else {
-			if isTypedNil(entry.factory) {
-				return nil, fmt.Errorf("tool %q has no owner factory", name)
-			}
-			context := ToolBuildContext{
-				owner: owner, services: services, registry: destination, resolve: build,
-			}
-			created, err := callToolFactory(entry.factory, name, context)
-			if err != nil {
-				if !isTypedNil(created) {
-					if factorySnapshotContainsToolPointer(entries, created) ||
-						registryContainsToolPointer(destination.tools, created) {
-						return nil, errors.Join(
-							err,
-							fmt.Errorf("factory tool %q returned a foreign instance with an error", name),
-						)
-					}
-					identity, identityErr := toolInstanceIdentity(created)
-					if identityErr != nil {
-						services.track(created)
-						return nil, errors.Join(err, identityErr)
-					}
-					if reserveErr := globalOwnedToolInstances.reserve(identity, created); reserveErr != nil {
-						return nil, errors.Join(err, reserveErr)
-					}
-					reservations = append(reservations, toolInstanceReservation{
-						tracker: globalOwnedToolInstances, identity: identity,
-					})
-					services.track(created)
-				}
-				return nil, err
-			}
-			if isTypedNil(created) {
-				return nil, fmt.Errorf("factory tool %q returned nil", name)
-			}
-			if factorySnapshotContainsToolPointer(entries, created) {
-				return nil, fmt.Errorf("per-owner factory for %q reused the source instance", name)
-			}
-			if registryContainsToolPointer(destination.tools, created) {
-				return nil, fmt.Errorf("per-owner factory for %q reused a destination instance", name)
-			}
-			identity, identityErr := toolInstanceIdentity(created)
-			if identityErr != nil {
-				services.track(created)
-				return nil, fmt.Errorf("per-owner factory for %q: %w", name, identityErr)
-			}
-			if err := globalOwnedToolInstances.reserve(identity, created); err != nil {
-				return nil, fmt.Errorf("per-owner factory for %q: %w", name, err)
-			}
-			reservations = append(reservations, toolInstanceReservation{
-				tracker: globalOwnedToolInstances, identity: identity,
-			})
-			services.track(created)
-			tool = created
-			if err := injectFactoryMediaStore(tool, destination.mediaStore); err != nil {
-				return nil, fmt.Errorf("configure owner tool %q media store: %w", name, err)
-			}
-			if err := validateFactoryToolDescriptor(tool, *entry.descriptor); err != nil {
-				return nil, err
-			}
+		construction.resolve = build
+		tool, constructionErr := construction.buildEntry(name, entry)
+		if constructionErr != nil {
+			return nil, constructionErr
 		}
 		frozen := cloneToolDescriptor(*entry.descriptor)
-		destination.tools[name] = &ToolEntry{
+		destinationEntry := &ToolEntry{
 			Tool: tool, IsCore: entry.core, TTL: entry.ttl,
 			descriptor: &frozen, traits: entry.traits, factory: entry.factory,
-			immutableShared: entry.immutableShared,
+			immutableShared: entry.immutableShared, visibilityRevision: entry.visibilityRevision,
 		}
+		if entry.public {
+			destination.tools[name] = destinationEntry
+		} else {
+			destination.privateConstruction[name] = destinationEntry
+		}
+		built[name] = tool
 		states[name] = 2
 		return tool, nil
 	}
 
 	names := make([]string, 0, len(entries))
-	for name := range entries {
-		names = append(names, name)
+	for name, entry := range entries {
+		if entry.public {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
@@ -411,12 +494,39 @@ func (r *ToolRegistry) InstantiateForOwner(
 			return nil, err
 		}
 	}
+	dormantReservations, catalogErr := retainDormantConstructionCatalog(
+		destination,
+		entries,
+		built,
+	)
+	reservations = append(reservations, dormantReservations...)
+	if catalogErr != nil {
+		return nil, catalogErr
+	}
 	r.mu.RLock()
 	sourceClosed := r.closed
 	sourceVersion := r.version.Load()
-	if sourceClosed || sourceVersion != version {
+	if sourceClosed || sourceVersion != version || r.mediaGen != mediaGeneration {
 		r.mu.RUnlock()
 		return nil, fmt.Errorf("source tool registry changed during owner instantiation")
+	}
+	for name, entry := range entries {
+		if !factoryEntryClassified(entry) {
+			continue
+		}
+		if sourceFactoryEntryLocked(r, name, entry) != entry.source {
+			r.mu.RUnlock()
+			return nil, fmt.Errorf("source tool %q changed during owner instantiation", name)
+		}
+	}
+	for _, name := range names {
+		entry := entries[name]
+		current := r.tools[name]
+		if current.IsCore != entry.core || current.TTL != entry.ttl ||
+			current.visibilityRevision != entry.visibilityRevision {
+			r.mu.RUnlock()
+			return nil, fmt.Errorf("source tool %q visibility changed during owner instantiation", name)
+		}
 	}
 	if err := services.commit(destination.services); err != nil {
 		r.mu.RUnlock()

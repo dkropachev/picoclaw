@@ -326,6 +326,7 @@ func TestToolRegistryFactoryAllowlistCollisionAndSharingSafety(t *testing.T) {
 	}
 
 	unsafe, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "unsafe"))
+	t.Cleanup(func() { _ = unsafe.Close() })
 	if err := unsafe.RegisterImmutableShared(newMockTool("unsafe", "unsafe"), ToolTraits{}); err == nil {
 		t.Fatal("serialized immutable sharing was accepted")
 	}
@@ -641,6 +642,7 @@ func TestToolRegistryFactoryAtomicFailuresAndReverseCleanup(t *testing.T) {
 	}
 
 	foreignRegistry, _ := NewOwnedToolRegistry(factoryTestOwner(ToolOwnerScopeRegistry, "foreign-error"))
+	t.Cleanup(func() { _ = foreignRegistry.Close() })
 	foreignClosed := []string{}
 	foreign := &factoryCloseTool{
 		mockRegistryTool: newMockTool("foreign", "foreign"), label: "foreign", closed: &foreignClosed,
