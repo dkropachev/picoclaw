@@ -216,13 +216,13 @@ describe("AppSidebar", () => {
   })
 
   it("shows the MCP link when the dedicated MCP route is active", () => {
-    pathname = "/agent/mcp"
+    pathname = "/agent/mcp/servers"
 
     renderSidebar()
 
     expect(screen.getByRole("link", { name: "MCP Servers" })).toHaveAttribute(
       "href",
-      "/agent/mcp",
+      "/agent/mcp/servers",
     )
     expect(screen.getByRole("link", { name: "MCP Servers" })).toBeVisible()
   })

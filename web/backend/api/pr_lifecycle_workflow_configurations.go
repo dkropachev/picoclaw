@@ -313,8 +313,10 @@ func validatePRLifecycleGateActionWorkflows(
 	if cfg == nil {
 		return errors.New("configuration is unavailable")
 	}
-	validated := make(map[string]struct{})
-	active := make(map[string]struct{})
+	references, err := prLifecycleGateActionWorkflowAgentReferences(ctx, lifecycle, cfg)
+	if err != nil {
+		return err
+	}
 	knownAgents := make(map[string]struct{}, len(cfg.Agents.List)+1)
 	if len(cfg.Agents.List) == 0 {
 		knownAgents["main"] = struct{}{}
@@ -323,6 +325,39 @@ func validatePRLifecycleGateActionWorkflows(
 			knownAgents[agent.ID] = struct{}{}
 		}
 	}
+	for _, reference := range references {
+		if _, exists := knownAgents[reference.AgentID]; !exists {
+			return fmt.Errorf(
+				"gate action workflow %q gate %q selects unknown agent %q",
+				reference.WorkflowRef,
+				reference.GateRef,
+				reference.AgentID,
+			)
+		}
+	}
+	return nil
+}
+
+type prLifecycleGateActionWorkflowAgentReference struct {
+	WorkflowRef string
+	GateRef     string
+	AgentID     string
+}
+
+// prLifecycleGateActionWorkflowAgentReferences walks the same bounded,
+// private-safe workflow graph used by lifecycle validation and returns every
+// agent selected by a nested AI default action.
+func prLifecycleGateActionWorkflowAgentReferences(
+	ctx context.Context,
+	lifecycle config.PRLifecycleConfig,
+	cfg *config.Config,
+) ([]prLifecycleGateActionWorkflowAgentReference, error) {
+	if cfg == nil {
+		return nil, errors.New("configuration is unavailable")
+	}
+	validated := make(map[string]struct{})
+	active := make(map[string]struct{})
+	references := make([]prLifecycleGateActionWorkflowAgentReference, 0)
 	var validateRef func(string, int) error
 	validateRef = func(ref string, depth int) error {
 		if depth > workflows.MaxGateActionWorkflowDepth {
@@ -351,7 +386,13 @@ func validatePRLifecycleGateActionWorkflows(
 		if err := workflows.ValidatePrivateGateActionWorkflow(workflow); err != nil {
 			return fmt.Errorf("gate action workflow %q is not private-safe: %w", ref, err)
 		}
-		for gateID, gate := range workflow.Gates {
+		gateIDs := make([]string, 0, len(workflow.Gates))
+		for gateID := range workflow.Gates {
+			gateIDs = append(gateIDs, gateID)
+		}
+		sort.Strings(gateIDs)
+		for _, gateID := range gateIDs {
+			gate := workflow.Gates[gateID]
 			if gate.DefaultAction == nil {
 				return fmt.Errorf("gate action workflow %q gate %q has no default-action", ref, gateID)
 			}
@@ -361,14 +402,11 @@ func validatePRLifecycleGateActionWorkflows(
 					return fmt.Errorf("gate action workflow %q gate %q deterministic default: %w", ref, gateID, err)
 				}
 			case gatetypes.GateActionAI:
-				if _, exists := knownAgents[gate.DefaultAction.AgentID]; !exists {
-					return fmt.Errorf(
-						"gate action workflow %q gate %q selects unknown agent %q",
-						ref,
-						gateID,
-						gate.DefaultAction.AgentID,
-					)
-				}
+				references = append(references, prLifecycleGateActionWorkflowAgentReference{
+					WorkflowRef: ref,
+					GateRef:     gateID,
+					AgentID:     gate.DefaultAction.AgentID,
+				})
 			case gatetypes.GateActionWorkflow:
 				if err := validateRef(gate.DefaultAction.WorkflowRef, depth+1); err != nil {
 					return err
@@ -378,16 +416,25 @@ func validatePRLifecycleGateActionWorkflows(
 		validated[ref] = struct{}{}
 		return nil
 	}
+	rootRefs := make(map[string]struct{})
 	for _, workflowConfiguration := range lifecycle.WorkflowConfigurations {
 		for _, binding := range workflowConfiguration.Bindings {
 			if binding.Action != nil && binding.Action.Type == gatetypes.GateActionWorkflow {
-				if err := validateRef(binding.Action.WorkflowRef, 1); err != nil {
-					return err
-				}
+				rootRefs[binding.Action.WorkflowRef] = struct{}{}
 			}
 		}
 	}
-	return nil
+	orderedRootRefs := make([]string, 0, len(rootRefs))
+	for ref := range rootRefs {
+		orderedRootRefs = append(orderedRootRefs, ref)
+	}
+	sort.Strings(orderedRootRefs)
+	for _, ref := range orderedRootRefs {
+		if err := validateRef(ref, 1); err != nil {
+			return nil, err
+		}
+	}
+	return references, nil
 }
 
 func validatePRLifecycleGateCatalogBindings(lifecycle config.PRLifecycleConfig) error {

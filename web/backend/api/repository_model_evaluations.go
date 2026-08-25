@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,7 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/repoeval"
@@ -27,6 +31,10 @@ const repositoryModelEvaluationRequestMaxBytes = 256 << 10
 var (
 	errRepositoryModelEvaluationBusy             = errors.New("repository model evaluation is active")
 	errRepositoryModelEvaluationUnavailableModel = errors.New("repository model evaluation model alias is unavailable")
+	errRepositoryModelEvaluationMediaType        = errors.New(
+		"repository model evaluation JSON content type is required",
+	)
+	errRepositoryModelEvaluationRequestTooLarge = errors.New("repository model evaluation request is too large")
 )
 
 type repositoryModelEvaluationPatchRequest struct {
@@ -102,9 +110,28 @@ type repositoryModelEvaluationProfileOption struct {
 	AvailableModels         []string       `json:"available_models"`
 }
 
+var repositoryModelEvaluationCollectionSchema = mustCollectionQuerySchema(
+	[]collectionquery.FieldSchema{
+		{Name: "id", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "status", Type: collectionquery.TypeEnum, Sortable: true, SuggestedValues: []string{
+			"draft", "preflighting", "ready", "running", "judging", "analyzing",
+			"completed", "canceling", "canceled", "failed",
+		}},
+		{Name: "repository", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "ref", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "models", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "progress", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "version", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "created", Type: collectionquery.TypeTimestamp, Sortable: true},
+		{Name: "updated", Type: collectionquery.TypeTimestamp, Sortable: true},
+	},
+	[]collectionquery.SortField{{Field: "updated", Direction: collectionquery.Descending}},
+)
+
 func (h *Handler) registerRepositoryModelEvaluationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/model-evaluations", h.handleListRepositoryModelEvaluations)
 	mux.HandleFunc("POST /api/model-evaluations", h.handleCreateRepositoryModelEvaluation)
+	mux.HandleFunc("POST /api/model-evaluations/bulk-delete", h.handleBulkDeleteRepositoryModelEvaluations)
 	mux.HandleFunc("POST /api/model-evaluations/run", h.handleRunRepositoryModelEvaluation)
 	mux.HandleFunc("GET /api/model-evaluations/options", h.handleRepositoryModelEvaluationOptions)
 	mux.HandleFunc("GET /api/model-evaluations/{id}", h.handleGetRepositoryModelEvaluation)
@@ -119,6 +146,35 @@ func (h *Handler) registerRepositoryModelEvaluationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/model-evaluations/{id}/corpus", h.handleRepositoryModelEvaluationCorpus)
 }
 
+type repositoryModelEvaluationBulkDeleteRequest struct {
+	Items []repoeval.BulkDeleteItem `json:"items"`
+}
+
+func (h *Handler) handleBulkDeleteRepositoryModelEvaluations(w http.ResponseWriter, r *http.Request) {
+	if err := validateRepositoryModelEvaluationMutation(r); err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	var request repositoryModelEvaluationBulkDeleteRequest
+	if err := decodeRepositoryModelEvaluationRequest(r, &request); err != nil ||
+		len(request.Items) == 0 || len(request.Items) > 200 {
+		writeRepositoryModelEvaluationError(w, errors.Join(repoeval.ErrInvalidEvaluation, err))
+		return
+	}
+	store, _, err := h.repositoryModelEvaluationStore()
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	result, err := store.BulkDelete(r.Context(), request.Items)
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeRepositoryReviewJSON(w, http.StatusOK, result)
+}
+
 func (h *Handler) repositoryModelEvaluationStore() (repoeval.Store, *config.Config, error) {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
@@ -128,8 +184,8 @@ func (h *Handler) repositoryModelEvaluationStore() (repoeval.Store, *config.Conf
 }
 
 func (h *Handler) handleListRepositoryModelEvaluations(w http.ResponseWriter, r *http.Request) {
-	if r.URL == nil || r.URL.RawQuery != "" {
-		writeRepositoryModelEvaluationError(w, errors.New("invalid repository model evaluation request"))
+	listRequest, ok := parseCollectionListRequest(w, r, repositoryModelEvaluationCollectionSchema)
+	if !ok {
 		return
 	}
 	store, _, err := h.repositoryModelEvaluationStore()
@@ -142,11 +198,77 @@ func (h *Handler) handleListRepositoryModelEvaluations(w http.ResponseWriter, r 
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
-	summaries := make([]repositoryModelEvaluationSummary, len(evaluations))
-	for index, evaluation := range evaluations {
+	page, err := collectionquery.Paginate(
+		evaluations, listRequest.Query, listRequest.Cursor, listRequest.Limit, listRequest.Now,
+		collectionquery.PageOptions[repoeval.Evaluation]{
+			ID:         func(evaluation repoeval.Evaluation) (string, error) { return evaluation.ID, nil },
+			ValidateID: validRepositoryModelEvaluationCollectionID,
+			Clone:      repoeval.Clone,
+			Resolve: func(evaluation repoeval.Evaluation, field collectionquery.Field, _ time.Time) (collectionquery.FieldValue, bool) {
+				switch field {
+				case "id":
+					return collectionquery.StringValue(evaluation.ID), true
+				case "status":
+					return collectionquery.EnumValue(string(evaluation.Status)), true
+				case "repository":
+					return collectionquery.StringValue(
+						sanitizeRepositoryModelEvaluationIdentity(evaluation.Repository),
+					), true
+				case "ref":
+					return collectionquery.StringValue(evaluation.Ref), true
+				case "models":
+					return collectionquery.NumberValue(float64(len(evaluation.CandidateModels))), true
+				case "progress":
+					return collectionquery.NumberValue(evaluation.Progress.Percent), true
+				case "version":
+					return collectionquery.NumberValue(float64(evaluation.Version)), true
+				case "created":
+					return collectionquery.TimestampValue(evaluation.CreatedAt), true
+				case "updated":
+					return collectionquery.TimestampValue(evaluation.UpdatedAt), true
+				default:
+					return collectionquery.FieldValue{}, false
+				}
+			},
+		},
+	)
+	if err != nil {
+		writeCollectionPageError(w, err)
+		return
+	}
+	summaries := make([]repositoryModelEvaluationSummary, len(page.Items))
+	for index, evaluation := range page.Items {
 		summaries[index] = projectRepositoryModelEvaluationSummary(evaluation)
 	}
-	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{"evaluations": summaries})
+	repositories := make([]string, 0, len(evaluations))
+	refs := make([]string, 0, len(evaluations))
+	for _, evaluation := range evaluations {
+		repositories = append(repositories, sanitizeRepositoryModelEvaluationIdentity(evaluation.Repository))
+		refs = append(refs, evaluation.Ref)
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
+		"evaluations": summaries, "total": page.Total, "next_cursor": page.NextCursor,
+		"canonical_query": listRequest.Query.Canonical(),
+		"query_schema": collectionSchemaWithSuggestions(
+			repositoryModelEvaluationCollectionSchema,
+			map[collectionquery.Field][]string{
+				"repository": repositories, "ref": refs,
+			},
+		),
+	})
+}
+
+func validRepositoryModelEvaluationCollectionID(id string) bool {
+	digest, ok := strings.CutPrefix(id, "rme_")
+	if !ok || len(digest) != 32 {
+		return false
+	}
+	for _, character := range digest {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) handleCreateRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -1044,9 +1166,35 @@ func repositoryModelEvaluationAliasTransportSafe(alias string) bool {
 func decodeRepositoryModelEvaluationRequest(r *http.Request, target any) error {
 	if r == nil || r.URL == nil || r.URL.RawQuery != "" || r.Body == nil ||
 		r.ContentLength > repositoryModelEvaluationRequestMaxBytes {
+		if r != nil && r.ContentLength > repositoryModelEvaluationRequestMaxBytes {
+			return errRepositoryModelEvaluationRequestTooLarge
+		}
 		return errors.New("invalid repository model evaluation request")
 	}
-	decoder := json.NewDecoder(io.LimitReader(r.Body, repositoryModelEvaluationRequestMaxBytes+1))
+	contentTypes := r.Header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return errRepositoryModelEvaluationMediaType
+	}
+	mediaType, parameters, err := mime.ParseMediaType(contentTypes[0])
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		return errRepositoryModelEvaluationMediaType
+	}
+	for name, value := range parameters {
+		if !strings.EqualFold(name, "charset") || !strings.EqualFold(value, "utf-8") {
+			return errRepositoryModelEvaluationMediaType
+		}
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, repositoryModelEvaluationRequestMaxBytes+1))
+	if err != nil {
+		return errors.New("invalid repository model evaluation request")
+	}
+	if len(raw) > repositoryModelEvaluationRequestMaxBytes {
+		return errRepositoryModelEvaluationRequestTooLarge
+	}
+	if !utf8.Valid(raw) || rejectDuplicateJSONKeys(raw, 32, repositoryModelEvaluationExactJSONKeySubtree) != nil {
+		return errors.New("invalid repository model evaluation request")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
@@ -1058,9 +1206,18 @@ func decodeRepositoryModelEvaluationRequest(r *http.Request, target any) error {
 	return nil
 }
 
+func repositoryModelEvaluationExactJSONKeySubtree(_ []string, foldedKey string) bool {
+	return foldedKey == foldAgentJSONKey("files_per_language")
+}
+
 func validateRepositoryModelEvaluationMutation(r *http.Request) error {
-	if r == nil || r.URL == nil || r.URL.RawQuery != "" || prWorkspaceMutationCrossSite(r) ||
-		validateEventReplayHeaders(r.Header) != nil {
+	if r == nil || r.URL == nil || r.URL.RawQuery != "" || prWorkspaceMutationCrossSite(r) {
+		return errors.New("invalid repository model evaluation request")
+	}
+	if err := validateEventReplayHeaders(r.Header); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "content type") {
+			return errRepositoryModelEvaluationMediaType
+		}
 		return errors.New("invalid repository model evaluation request")
 	}
 	return nil
@@ -1160,6 +1317,10 @@ func sanitizeRepositoryModelEvaluationIdentity(identity string) string {
 func writeRepositoryModelEvaluationError(w http.ResponseWriter, err error) {
 	status, code := http.StatusInternalServerError, "repository_model_evaluation_unavailable"
 	switch {
+	case errors.Is(err, errRepositoryModelEvaluationMediaType):
+		status, code = http.StatusUnsupportedMediaType, "json_content_type_required"
+	case errors.Is(err, errRepositoryModelEvaluationRequestTooLarge):
+		status, code = http.StatusRequestEntityTooLarge, "repository_model_evaluation_request_too_large"
 	case errors.Is(err, os.ErrNotExist):
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, repoeval.ErrConflict), errors.Is(err, repoeval.ErrInvalidTransition),

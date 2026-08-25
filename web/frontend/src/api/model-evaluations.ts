@@ -1,3 +1,9 @@
+import {
+  type CollectionBulkDeleteResponse,
+  type CollectionQuerySchema,
+  collectionListURL,
+  collectionRequest,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 const BASE = "/api/model-evaluations"
@@ -259,6 +265,14 @@ export interface RepositoryModelEvaluationSummary {
   finished_at?: string
 }
 
+export interface ModelEvaluationCollectionResponse {
+  evaluations: RepositoryModelEvaluationSummary[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
+}
+
 export interface EvaluationModelOption {
   alias: string
   resolved_model: string
@@ -350,6 +364,21 @@ export async function listModelEvaluations(
   return (response.evaluations ?? []).map(normalizeSummary)
 }
 
+export async function listModelEvaluationsPage(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<ModelEvaluationCollectionResponse> {
+  const response = await collectionRequest<ModelEvaluationCollectionResponse>(
+    collectionListURL(BASE, options),
+    undefined,
+    signal,
+  )
+  return {
+    ...response,
+    evaluations: (response.evaluations ?? []).map(normalizeSummary),
+  }
+}
+
 export async function getModelEvaluation(
   id: string,
   signal?: AbortSignal,
@@ -400,6 +429,12 @@ export async function deleteModelEvaluation(
     `${BASE}/${encodeURIComponent(id)}`,
     json("DELETE", { expected_version: expectedVersion }),
   )
+}
+
+export async function bulkDeleteModelEvaluations(
+  items: Array<{ id: string; version: number }>,
+): Promise<CollectionBulkDeleteResponse> {
+  return collectionRequest(`${BASE}/bulk-delete`, json("POST", { items }))
 }
 
 export async function runModelEvaluationAction(

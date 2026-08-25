@@ -152,6 +152,99 @@ func TestStoreCreatesOneShotPreflightAtomically(t *testing.T) {
 	}
 }
 
+func TestStoreBulkDeleteHoldsMixedVersionedDraftSemantics(t *testing.T) {
+	store := newEvaluationTestStore(t, 62)
+	create := func() Evaluation {
+		evaluation, err := store.Create(t.Context(), validCreateRequest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evaluation
+	}
+	deletedDraft := create()
+	duplicateDraft := create()
+	staleDraft := create()
+	invalidVersionDraft := create()
+	active := create()
+	active = updateEvaluation(t, store, active, func(value *Evaluation) {
+		value.Status = StatusPreflighting
+		value.RunIDs = append(value.RunIDs, "run-active")
+	})
+
+	result, err := store.BulkDelete(t.Context(), []BulkDeleteItem{
+		{ID: deletedDraft.ID, Version: deletedDraft.Version},
+		{ID: duplicateDraft.ID, Version: duplicateDraft.Version},
+		{ID: duplicateDraft.ID, Version: duplicateDraft.Version},
+		{ID: staleDraft.ID, Version: staleDraft.Version + 1},
+		{ID: invalidVersionDraft.ID, Version: 0},
+		{ID: active.ID, Version: active.Version},
+		{ID: "rme_ffffffffffffffffffffffffffffffff", Version: 1},
+		{ID: "invalid", Version: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DeletedIDs) != 1 || result.DeletedIDs[0] != deletedDraft.ID ||
+		len(result.Failures) != 6 {
+		t.Fatalf("BulkDelete() = %#v", result)
+	}
+	wantCodes := map[string]string{
+		duplicateDraft.ID:                      "duplicate_id",
+		staleDraft.ID:                          "stale_version",
+		invalidVersionDraft.ID:                 "invalid_version",
+		active.ID:                              "not_draft",
+		"rme_ffffffffffffffffffffffffffffffff": "not_found",
+		"invalid":                              "invalid_id",
+	}
+	for _, failure := range result.Failures {
+		if wantCodes[failure.ID] != failure.Code {
+			t.Fatalf("failure = %#v, want code %q", failure, wantCodes[failure.ID])
+		}
+	}
+	if _, found, getErr := store.Get(t.Context(), deletedDraft.ID); getErr != nil || found {
+		t.Fatalf("deleted draft found=%v err=%v", found, getErr)
+	}
+	for _, retained := range []Evaluation{duplicateDraft, staleDraft, invalidVersionDraft, active} {
+		if _, found, getErr := store.Get(t.Context(), retained.ID); getErr != nil || !found {
+			t.Fatalf("retained %s found=%v err=%v", retained.ID, found, getErr)
+		}
+	}
+}
+
+func TestStoreBulkDeleteCancellationBeforeDeletionRetainsDraft(t *testing.T) {
+	store := newEvaluationTestStore(t, 63)
+	draft, err := store.Create(t.Context(), validCreateRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := store.lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, bulkErr := store.BulkDelete(ctx, []BulkDeleteItem{{ID: draft.ID, Version: draft.Version}})
+		done <- bulkErr
+	}()
+	<-started
+	cancel()
+	unlock()
+	select {
+	case bulkErr := <-done:
+		if !errors.Is(bulkErr, context.Canceled) {
+			t.Fatalf("BulkDelete() error=%v, want context cancellation", bulkErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("BulkDelete did not return after catalog lock release")
+	}
+	if _, found, getErr := store.Get(t.Context(), draft.ID); getErr != nil || !found {
+		t.Fatalf("draft after canceled bulk found=%v err=%v", found, getErr)
+	}
+}
+
 func TestStoreCASNoopAndImmutableInputs(t *testing.T) {
 	store := newEvaluationTestStore(t, 2)
 	created, err := store.Create(context.Background(), validCreateRequest())

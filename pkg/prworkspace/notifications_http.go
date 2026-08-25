@@ -62,7 +62,12 @@ func (handler *HTTPHandler) serveNotifications(w http.ResponseWriter, r *http.Re
 			return
 		}
 		writeHTTPJSON(w, http.StatusOK, map[string]any{
-			"notifications": page.Notifications, "next_cursor": page.Next, "counts": counts,
+			"notifications":   page.Notifications,
+			"total":           page.Total,
+			"next_cursor":     page.Next,
+			"canonical_query": page.CanonicalQuery,
+			"query_schema":    developmentnotifications.QuerySchema(),
+			"counts":          counts,
 		})
 		return
 	}

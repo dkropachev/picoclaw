@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs lint-frontend test-frontend-ui feature-inventory test-featuretools lint-features feature-delta coverage-delta
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs lint-frontend test-frontend-ui test-collection-governance update-frontend-visuals collection-delta feature-inventory test-featuretools lint-features feature-delta coverage-delta
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -406,6 +406,18 @@ test-frontend-ui:
 	@cd web/frontend && pnpm install --frozen-lockfile
 	@cd web/frontend && pnpm exec playwright install chromium
 	@cd web/frontend && pnpm test:ui
+
+## test-collection-governance: Run collection manifest delta-guard tests
+test-collection-governance:
+	@cd web/frontend && pnpm test:collection-governance
+
+## update-frontend-visuals: Intentionally update local collection screenshot baselines
+update-frontend-visuals:
+	@cd web/frontend && COLLECTION_VISUAL_BASELINE=inter pnpm test:ui:visual:update
+
+## collection-delta: Reject new collection debt and require touched legacy surfaces to migrate
+collection-delta:
+	@cd web/frontend && BASE_REF="$(BASE_REF)" HEAD_REF="$(HEAD_REF)" pnpm lint:collection-delta
 
 ## feature-inventory: Print discovered feature-relevant repo surfaces
 feature-inventory:

@@ -40,6 +40,25 @@ type Store struct {
 	newID func() (string, error)
 }
 
+// BulkDeleteItem identifies one explicitly selected evaluation version.
+type BulkDeleteItem struct {
+	ID      string `json:"id"`
+	Version int64  `json:"version"`
+}
+
+// BulkDeleteFailure is a safe, item-scoped reason that a selected evaluation
+// was retained. Codes are stable API values and never include filesystem data.
+type BulkDeleteFailure struct {
+	ID   string `json:"id"`
+	Code string `json:"code"`
+}
+
+// BulkDeleteResult reports the mixed outcome of one catalog-locked deletion.
+type BulkDeleteResult struct {
+	DeletedIDs []string            `json:"deleted_ids"`
+	Failures   []BulkDeleteFailure `json:"failures"`
+}
+
 func NewStore(workspace string) Store {
 	return Store{root: filepath.Join(workspace, storeDirectory), now: time.Now, newID: randomEvaluationID}
 }
@@ -340,6 +359,92 @@ func (s Store) Delete(ctx context.Context, id string, expectedVersion int64) err
 		return err
 	}
 	return fileutil.RemoveDurable(s.path(id))
+}
+
+// BulkDelete holds the catalog lock while it classifies and removes at most
+// 200 explicitly selected evaluations. Only version-matching drafts are
+// removed; every other item remains durable with a stable failure code.
+func (s Store) BulkDelete(ctx context.Context, items []BulkDeleteItem) (BulkDeleteResult, error) {
+	if err := ctx.Err(); err != nil {
+		return BulkDeleteResult{}, err
+	}
+	if len(items) == 0 || len(items) > 200 {
+		return BulkDeleteResult{}, ErrInvalidEvaluation
+	}
+	unlock, err := s.lock()
+	if err != nil {
+		return BulkDeleteResult{}, err
+	}
+	defer unlock()
+	if err := s.requireSafeRoot(true); err != nil {
+		return BulkDeleteResult{}, err
+	}
+
+	counts := make(map[string]int, len(items))
+	versions := make(map[string]int64, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(item.ID)
+		counts[id]++
+		versions[id] = item.Version
+	}
+	ids := make([]string, 0, len(counts))
+	for id := range counts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	result := BulkDeleteResult{
+		DeletedIDs: []string{},
+		Failures:   []BulkDeleteFailure{},
+	}
+	deletable := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return BulkDeleteResult{}, err
+		}
+		if id == "" || !validEvaluationID(id) {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "invalid_id"})
+			continue
+		}
+		if counts[id] != 1 {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "duplicate_id"})
+			continue
+		}
+		if versions[id] < 1 {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "invalid_version"})
+			continue
+		}
+		evaluation, loadErr := s.load(id)
+		if os.IsNotExist(loadErr) {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "not_found"})
+			continue
+		}
+		if loadErr != nil {
+			return result, loadErr
+		}
+		if evaluation.Version != versions[id] {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "stale_version"})
+			continue
+		}
+		if evaluation.Status != StatusDraft {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "not_draft"})
+			continue
+		}
+		deletable = append(deletable, id)
+	}
+	// Cancellation before the deletion phase leaves the catalog unchanged.
+	// Once removal starts, finish classifying every selected draft so callers
+	// never receive a cancellation error after an unreported partial mutation.
+	if err := ctx.Err(); err != nil {
+		return BulkDeleteResult{}, err
+	}
+	for _, id := range deletable {
+		if removeErr := fileutil.RemoveDurable(s.path(id)); removeErr != nil {
+			result.Failures = append(result.Failures, BulkDeleteFailure{ID: id, Code: "delete_failed"})
+			continue
+		}
+		result.DeletedIDs = append(result.DeletedIDs, id)
+	}
+	return result, nil
 }
 
 func (s Store) load(id string) (Evaluation, error) {

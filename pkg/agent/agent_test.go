@@ -7644,6 +7644,10 @@ func TestRunWorkerPanicReleasesSessionTurnState(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("timed out waiting for Run() to exit")
 		}
+		// Run owns inbound admission, but its receive loop can exit before an
+		// already-admitted worker finishes unwinding panic cleanup. Wait for the
+		// retained worker lease before TempDir removes the session store.
+		waitForAgentTurnUXRuntimeIdle(t, al)
 	}()
 
 	msg := bus.InboundMessage{

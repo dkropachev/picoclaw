@@ -1,4 +1,3 @@
-import { QueryClient } from "@tanstack/react-query"
 import {
   RouterProvider,
   createMemoryHistory,
@@ -19,19 +18,16 @@ vi.mock("@/api/launcher-auth", () => ({
 vi.mock("@/components/app-layout", () => ({
   AppLayout: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }))
-vi.mock("@/components/model-evaluations/model-evaluations-page", () => ({
-  ModelEvaluationsPage: ({
-    initialEvaluationID,
-  }: {
-    initialEvaluationID?: string
-  }) => (
-    <>
-      <output>Separate model review probe workspace</output>
-      {initialEvaluationID && (
-        <output>Selected probe {initialEvaluationID}</output>
-      )}
-    </>
+vi.mock("@/components/collections/pilots/model-evaluation-collection", () => ({
+  ModelEvaluationsCollectionPage: () => (
+    <output>Standard model evaluations collection</output>
   ),
+  ModelEvaluationDetailPage: ({ id }: { id: string }) => (
+    <output>Evaluation detail {id}</output>
+  ),
+  ModelEvaluationEditorPage: () => <output>Evaluation editor</output>,
+  ModelEvaluationLanguagesPage: () => <output>Evaluation languages</output>,
+  ModelEvaluationCorpusPage: () => <output>Evaluation corpus</output>,
 }))
 vi.mock("@/components/model-evaluations/model-evaluation-report-page", () => ({
   ModelEvaluationReportPage: ({
@@ -56,15 +52,10 @@ describe("model review probes route", () => {
     const router = createRouter({
       routeTree,
       history: createMemoryHistory({ initialEntries: ["/model-evaluations"] }),
-      context: {
-        queryClient: new QueryClient({
-          defaultOptions: { queries: { retry: false } },
-        }),
-      },
     })
     render(<RouterProvider router={router} />)
     expect(
-      await screen.findByText("Separate model review probe workspace"),
+      await screen.findByText("Standard model evaluations collection"),
     ).toBeVisible()
   })
 
@@ -74,13 +65,10 @@ describe("model review probes route", () => {
     const router = createRouter({
       routeTree,
       history: createMemoryHistory({
-        initialEntries: [`/model-evaluations/${evaluationID}/report`],
+        initialEntries: [
+          `/model-evaluations/${evaluationID}/report?q=status%20%3D%20completed&view=grid`,
+        ],
       }),
-      context: {
-        queryClient: new QueryClient({
-          defaultOptions: { queries: { retry: false } },
-        }),
-      },
     })
     render(<RouterProvider router={router} />)
     expect(
@@ -88,10 +76,15 @@ describe("model review probes route", () => {
     ).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Back to probes" }))
     expect(
-      await screen.findByText(`Selected probe ${evaluationID}`),
+      await screen.findByText(`Evaluation detail ${evaluationID}`),
     ).toBeVisible()
-    expect(router.state.location.pathname).toBe("/model-evaluations")
-    expect(router.state.location.search).toEqual({ probe: evaluationID })
+    expect(router.state.location.pathname).toBe(
+      `/model-evaluations/${evaluationID}`,
+    )
+    expect(router.state.location.search).toEqual({
+      q: "status = completed",
+      view: "grid",
+    })
   })
 
   it("redirects malformed report identities to the probe workspace", async () => {
@@ -100,15 +93,10 @@ describe("model review probes route", () => {
       history: createMemoryHistory({
         initialEntries: ["/model-evaluations/not-a-probe/report"],
       }),
-      context: {
-        queryClient: new QueryClient({
-          defaultOptions: { queries: { retry: false } },
-        }),
-      },
     })
     render(<RouterProvider router={router} />)
     expect(
-      await screen.findByText("Separate model review probe workspace"),
+      await screen.findByText("Standard model evaluations collection"),
     ).toBeVisible()
     expect(router.state.location.pathname).toBe("/model-evaluations")
   })

@@ -1,21 +1,20 @@
 package developmentnotifications
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	collectionquery "github.com/sipeed/picoclaw/pkg/collectionquery"
 )
 
 const (
+	// MaxPageSize remains 100 for notification API compatibility. The shared
+	// collection query package supports the standard 200-item maximum.
 	MaxPageSize    = 100
-	maxCursorBytes = 4096
+	maxCursorBytes = collectionquery.MaxCursorBytes
 	cursorVersion  = 1
 )
 
@@ -24,8 +23,8 @@ var (
 	ErrInvalidPage   = errors.New("invalid development notification page")
 )
 
-// Cursor is an opaque-in-spirit stable keyset position. QueryFingerprint
-// prevents a cursor from being reused with different filters or ordering.
+// Cursor is the notification compatibility form of a shared collection
+// cursor.
 type Cursor struct {
 	QueryFingerprint string
 	EvaluatedAt      time.Time
@@ -35,13 +34,15 @@ type Cursor struct {
 
 // Page is one filtered, stably ordered notification result page.
 type Page struct {
-	Notifications []Notification `json:"notifications"`
-	Next          string         `json:"next_cursor,omitempty"`
+	Notifications  []Notification `json:"notifications"`
+	Total          int            `json:"total"`
+	Next           string         `json:"next_cursor,omitempty"`
+	CanonicalQuery string         `json:"canonical_query"`
 }
 
-// PageNotifications is an in-memory reference implementation of query,
-// ordering, and keyset semantics. Durable stores can use CursorFor and
-// DecodeCursor while translating the same typed order into parameterized SQL.
+// PageNotifications delegates filtering, ordering, and keyset traversal to
+// the shared collection subsystem while preserving notification limits and
+// error identities.
 func PageNotifications(
 	all []Notification,
 	query Query,
@@ -52,134 +53,90 @@ func PageNotifications(
 	if limit < 1 || limit > MaxPageSize || now.IsZero() || query.Validate() != nil {
 		return Page{}, ErrInvalidPage
 	}
-	now = now.UTC()
-	var after *Cursor
-	if encodedCursor != "" {
-		cursor, err := DecodeCursor(encodedCursor, query)
-		if err != nil {
-			return Page{}, err
-		}
-		after = &cursor
-		// Relative-time and snooze predicates remain fixed throughout one
-		// keyset traversal, even if wall clock time advances between requests.
-		now = cursor.EvaluatedAt
+	shared, err := collectionQueryFromNotification(query)
+	if err != nil {
+		return Page{}, ErrInvalidPage
 	}
-	selected := make([]Notification, 0, len(all))
-	for _, notification := range all {
-		if err := notification.Validate(); err != nil {
-			return Page{}, fmt.Errorf("%w: %v", ErrInvalidPage, err)
+	page, err := collectionquery.Paginate(
+		all,
+		shared,
+		encodedCursor,
+		limit,
+		now,
+		notificationPageOptions(),
+	)
+	if err != nil {
+		if errors.Is(err, collectionquery.ErrInvalidCursor) {
+			return Page{}, ErrInvalidCursor
 		}
-		if query.matchValidated(notification, now) {
-			selected = append(selected, cloneNotification(notification))
-		}
+		return Page{}, fmt.Errorf("%w: %v", ErrInvalidPage, err)
 	}
-	sort.SliceStable(selected, func(i, j int) bool {
-		return compareNotifications(selected[i], selected[j], query, now) < 0
-	})
-	if after != nil {
-		write := 0
-		for _, notification := range selected {
-			if compareNotificationCursor(notification, *after, query, now) > 0 {
-				selected[write] = notification
-				write++
-			}
-		}
-		selected = selected[:write]
-	}
-
-	hasMore := len(selected) > limit
-	if hasMore {
-		selected = selected[:limit]
-	}
-	page := Page{Notifications: selected}
-	if hasMore {
-		next, err := CursorFor(query, selected[len(selected)-1], now)
-		if err != nil {
-			return Page{}, err
-		}
-		page.Next = next
-	}
-	return page, nil
+	return Page{
+		Notifications:  page.Items,
+		Total:          page.Total,
+		Next:           page.NextCursor,
+		CanonicalQuery: query.Canonical(),
+	}, nil
 }
 
-// SortNotifications returns a detached stable ordering of matching-agnostic
-// notifications. ID DESC is always the final tie-break.
+// SortNotifications returns a detached stable ordering without filtering.
 func SortNotifications(all []Notification, query Query, now time.Time) ([]Notification, error) {
 	if now.IsZero() || query.Validate() != nil {
 		return nil, ErrInvalidPage
 	}
-	now = now.UTC()
-	result := make([]Notification, len(all))
-	for index, notification := range all {
-		if err := notification.Validate(); err != nil {
-			return nil, err
-		}
-		result[index] = cloneNotification(notification)
+	shared, err := collectionQueryFromNotification(query)
+	if err != nil {
+		return nil, ErrInvalidPage
 	}
-	sort.SliceStable(result, func(i, j int) bool {
-		return compareNotifications(result[i], result[j], query, now) < 0
-	})
+	result, err := collectionquery.SortItems(all, shared, now, notificationPageOptions())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidPage, err)
+	}
 	return result, nil
 }
 
 func CursorFor(query Query, notification Notification, now time.Time) (string, error) {
-	if err := query.Validate(); err != nil || now.IsZero() {
+	if query.Validate() != nil || now.IsZero() {
 		return "", ErrInvalidCursor
 	}
-	if err := notification.Validate(); err != nil {
+	shared, err := collectionQueryFromNotification(query)
+	if err != nil {
+		return "", ErrInvalidCursor
+	}
+	encoded, err := collectionquery.CursorFor(shared, notification, now, notificationPageOptions())
+	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalidCursor, err)
 	}
-	now = now.UTC()
-	values := make([]string, len(query.EffectiveOrder()))
-	for index, order := range query.EffectiveOrder() {
-		values[index] = sortableValue(notification, order.Field, now)
-	}
-	return encodeCursor(Cursor{
-		QueryFingerprint: query.Fingerprint(),
-		EvaluatedAt:      now,
-		Values:           values,
-		ID:               notification.ID,
-	})
+	return encoded, nil
 }
 
 func DecodeCursor(encoded string, query Query) (Cursor, error) {
 	if encoded == "" || len(encoded) > maxCursorBytes || query.Validate() != nil {
 		return Cursor{}, ErrInvalidCursor
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || base64.RawURLEncoding.EncodeToString(raw) != encoded ||
-		len(raw) == 0 || len(raw) > maxCursorBytes {
+	shared, err := collectionQueryFromNotification(query)
+	if err != nil {
 		return Cursor{}, ErrInvalidCursor
 	}
-	var wire cursorWire
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if decodeErr := decoder.Decode(&wire); decodeErr != nil {
+	decoded, err := collectionquery.DecodeCursor(encoded, shared, notificationCursorIDValid)
+	if err != nil {
 		return Cursor{}, ErrInvalidCursor
 	}
-	var trailing json.RawMessage
-	if trailingErr := decoder.Decode(&trailing); !errors.Is(trailingErr, io.EOF) {
-		return Cursor{}, ErrInvalidCursor
-	}
-	canonical, err := json.Marshal(wire)
-	if err != nil || !bytes.Equal(raw, canonical) || wire.Version != cursorVersion ||
-		wire.QueryFingerprint != query.Fingerprint() || !validIdentifier(wire.ID, maxIDBytes) ||
-		len(wire.Values) != len(query.EffectiveOrder()) || !validCursorTime(wire.EvaluatedAt) {
-		return Cursor{}, ErrInvalidCursor
-	}
-	for index, value := range wire.Values {
-		if len(value) > maxRepositoryBytes || !validSortableValue(query.EffectiveOrder()[index].Field, value) {
+	for index, value := range decoded.Values {
+		if !validNotificationCursorValue(query.EffectiveOrder()[index].Field, value) {
 			return Cursor{}, ErrInvalidCursor
 		}
 	}
 	return Cursor{
-		QueryFingerprint: wire.QueryFingerprint,
-		EvaluatedAt:      wire.EvaluatedAt,
-		Values:           append([]string(nil), wire.Values...),
-		ID:               wire.ID,
+		QueryFingerprint: decoded.QueryFingerprint,
+		EvaluatedAt:      decoded.EvaluatedAt,
+		Values:           append([]string(nil), decoded.Values...),
+		ID:               decoded.ID,
 	}, nil
 }
 
+// cursorWire remains for package-local compatibility tests and has the exact
+// canonical wire shape used by collectionquery.
 type cursorWire struct {
 	Version          int       `json:"v"`
 	QueryFingerprint string    `json:"query"`
@@ -188,124 +145,84 @@ type cursorWire struct {
 	ID               string    `json:"id"`
 }
 
-func encodeCursor(cursor Cursor) (string, error) {
-	wire := cursorWire{
-		Version: cursorVersion, QueryFingerprint: cursor.QueryFingerprint,
-		EvaluatedAt: cursor.EvaluatedAt.UTC(),
-		Values:      append([]string(nil), cursor.Values...), ID: cursor.ID,
-	}
-	raw, err := json.Marshal(wire)
-	if err != nil {
-		return "", err
-	}
-	if len(raw) > maxCursorBytes {
-		return "", ErrInvalidCursor
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
-}
-
-func compareNotifications(left, right Notification, query Query, now time.Time) int {
-	order := query.EffectiveOrder()
-	for _, field := range order {
-		comparison := compareSortable(
-			field.Field,
-			sortableValue(left, field.Field, now),
-			sortableValue(right, field.Field, now),
-		)
-		if comparison != 0 {
-			if field.Direction == Descending {
-				comparison = -comparison
+func notificationPageOptions() collectionquery.PageOptions[Notification] {
+	return collectionquery.PageOptions[Notification]{
+		Resolve: func(notification Notification, field collectionquery.Field, now time.Time) (collectionquery.FieldValue, bool) {
+			switch Field(field) {
+			case FieldStatus:
+				return collectionquery.EnumValue(string(notification.Status)), true
+			case FieldRead:
+				return collectionquery.BooleanValue(notification.Read), true
+			case FieldSnoozed:
+				return collectionquery.BooleanValue(notification.IsSnoozed(now)), true
+			case FieldPriority:
+				return collectionquery.EnumValue(string(notification.Priority)), true
+			case FieldReason:
+				return collectionquery.EnumValue(string(notification.Reason)), true
+			case FieldRepository:
+				return collectionquery.StringValue(notification.Repository), true
+			case FieldWorkspace:
+				return collectionquery.StringValue(notification.WorkspaceID), true
+			case FieldIntent:
+				return collectionquery.EnumValue(string(notification.Intent)), true
+			case FieldSource:
+				return collectionquery.EnumValue(string(notification.SourceKind)), true
+			case FieldPhase:
+				return collectionquery.StringValue(notification.Phase), true
+			case FieldCreated:
+				return collectionquery.TimestampValue(notification.CreatedAt), true
+			case FieldUpdated:
+				return collectionquery.TimestampValue(notification.UpdatedAt), true
+			case FieldText:
+				return collectionquery.StringValue(
+					strings.TrimSpace(notification.Title + " " + notification.Summary),
+				), true
+			default:
+				return collectionquery.FieldValue{}, false
 			}
-			return comparison
-		}
-	}
-	// Newer opaque IDs sort first for a deterministic tie-break. Correctness
-	// requires uniqueness, not timestamp-shaped IDs.
-	return -strings.Compare(left.ID, right.ID)
-}
-
-func compareNotificationCursor(notification Notification, cursor Cursor, query Query, now time.Time) int {
-	for index, field := range query.EffectiveOrder() {
-		comparison := compareSortable(
-			field.Field,
-			sortableValue(notification, field.Field, now),
-			cursor.Values[index],
-		)
-		if comparison != 0 {
-			if field.Direction == Descending {
-				comparison = -comparison
+		},
+		ID: func(notification Notification) (string, error) {
+			if err := notification.Validate(); err != nil {
+				return "", err
 			}
-			return comparison
-		}
-	}
-	return -strings.Compare(notification.ID, cursor.ID)
-}
-
-func sortableValue(n Notification, field Field, now time.Time) string {
-	switch field {
-	case FieldRead:
-		return strconv.FormatBool(n.Read)
-	case FieldSnoozed:
-		return strconv.FormatBool(n.IsSnoozed(now))
-	case FieldCreated:
-		return n.CreatedAt.UTC().Format(time.RFC3339Nano)
-	case FieldUpdated:
-		return n.UpdatedAt.UTC().Format(time.RFC3339Nano)
-	default:
-		return strings.ToLower(notificationString(n, field))
+			return notification.ID, nil
+		},
+		ValidateID: notificationCursorIDValid,
+		Clone:      cloneNotification,
+		Compare: func(field collectionquery.Field, left, right collectionquery.FieldValue) (int, bool) {
+			if Field(field) != FieldPriority {
+				return 0, false
+			}
+			return priorityRank(Priority(left.Text)) - priorityRank(Priority(right.Text)), true
+		},
 	}
 }
 
-func validSortableValue(field Field, value string) bool {
+func notificationCursorIDValid(value string) bool {
+	return validIdentifier(value, maxIDBytes)
+}
+
+func validNotificationCursorValue(field Field, value string) bool {
+	if len(value) > maxRepositoryBytes {
+		return false
+	}
 	switch field {
 	case FieldRead, FieldSnoozed:
-		_, err := strconv.ParseBool(value)
-		return err == nil && (value == "true" || value == "false")
+		parsed, err := strconv.ParseBool(value)
+		return err == nil && strconv.FormatBool(parsed) == value
 	case FieldCreated, FieldUpdated:
 		parsed, err := time.Parse(time.RFC3339Nano, value)
 		return err == nil && parsed.UTC().Format(time.RFC3339Nano) == value
+	case FieldStatus, FieldPriority, FieldReason, FieldIntent, FieldSource:
+		return validEnumQueryValue(field, value)
+	case FieldWorkspace:
+		return validIdentifier(value, maxWorkspaceBytes)
+	case FieldRepository:
+		return utf8ValidBounded(value, maxRepositoryBytes)
+	case FieldPhase:
+		return utf8ValidBounded(value, maxPhaseBytes)
 	default:
-		switch field {
-		case FieldStatus, FieldPriority, FieldReason, FieldIntent, FieldSource:
-			return validEnumQueryValue(field, value)
-		case FieldWorkspace:
-			return validIdentifier(value, maxWorkspaceBytes)
-		case FieldRepository:
-			return utf8ValidBounded(value, maxRepositoryBytes)
-		case FieldPhase:
-			return utf8ValidBounded(value, maxPhaseBytes)
-		default:
-			return false
-		}
-	}
-}
-
-func compareSortable(field Field, left, right string) int {
-	switch field {
-	case FieldRead, FieldSnoozed:
-		leftBool, _ := strconv.ParseBool(left)
-		rightBool, _ := strconv.ParseBool(right)
-		if leftBool == rightBool {
-			return 0
-		}
-		if !leftBool {
-			return -1
-		}
-		return 1
-	case FieldCreated, FieldUpdated:
-		leftTime, _ := time.Parse(time.RFC3339Nano, left)
-		rightTime, _ := time.Parse(time.RFC3339Nano, right)
-		if leftTime.Equal(rightTime) {
-			return 0
-		}
-		if leftTime.Before(rightTime) {
-			return -1
-		}
-		return 1
-	case FieldPriority:
-		return priorityRank(Priority(left)) - priorityRank(Priority(right))
-	default:
-		return strings.Compare(left, right)
+		return false
 	}
 }
 
@@ -326,8 +243,4 @@ func priorityRank(priority Priority) int {
 
 func utf8ValidBounded(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && strings.ToValidUTF8(value, "") == value
-}
-
-func validCursorTime(value time.Time) bool {
-	return !value.IsZero() && value.Location() == time.UTC
 }

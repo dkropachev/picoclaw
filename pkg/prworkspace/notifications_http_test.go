@@ -195,12 +195,18 @@ func TestNotificationHTTPSuccessLifecycle(t *testing.T) {
 	var firstPage struct {
 		Notifications []developmentnotifications.Notification `json:"notifications"`
 		NextCursor    string                                  `json:"next_cursor"`
+		Total         int                                     `json:"total"`
+		Canonical     string                                  `json:"canonical_query"`
+		QuerySchema   json.RawMessage                         `json:"query_schema"`
 		Counts        NotificationCounts                      `json:"counts"`
 	}
 	decodeNotificationStackResponse(t, response, &firstPage)
 	require.Len(t, firstPage.Notifications, 1)
 	require.Equal(t, first.ID, firstPage.Notifications[0].ID)
 	require.NotEmpty(t, firstPage.NextCursor)
+	require.Equal(t, 2, firstPage.Total)
+	require.Equal(t, `status = "open" ORDER BY updated ASC`, firstPage.Canonical)
+	require.True(t, json.Valid(firstPage.QuerySchema))
 	require.Equal(t, NotificationCounts{Open: 2, Unread: 2}, firstPage.Counts)
 
 	response = performNotificationStackRequest(

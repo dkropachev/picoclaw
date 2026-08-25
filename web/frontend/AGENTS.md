@@ -7,6 +7,8 @@ These rules apply to files under `web/frontend/`.
 - Treat UI code as an auxiliary surface for the product feature it exposes.
 - When a UI behavior changes, update the owning `docs/features/*.md` spec for that product capability. Do not use a broad UI-only spec to satisfy feature ownership.
 - Use `docs/design/frontend-guidelines.md` for rationale, examples, and enforcement details.
+- For collection work, follow `docs/design/collection-ui-system.md` and register the surface in `collection-surfaces.json`.
+- A frontend-only UI specialist must also follow `UI_AGENT.md`, including its backend-contract preconditions and evidence handoff.
 
 ## Implementation Rules
 
@@ -20,6 +22,8 @@ These rules apply to files under `web/frontend/`.
 - Keep page layouts dense and operational. Avoid marketing-style hero sections, decorative nested cards, and UI text that explains how to use obvious controls.
 - Use icon buttons for clear icon actions and provide `aria-label` or `title` where the visible label is absent.
 - Keep responsive layout stable: avoid horizontal overflow, overlapping controls, and text that can escape buttons, cards, panels, sidebars, or dialogs.
+- Administrative collections must use the shared collection subsystem. Do not add feature-local collection shells, filters, view switches, selection stores, pagination controllers, cards, or tables.
+- Keep one primary resource collection on a route and put creation, detail, and editing on dedicated stable routes.
 
 ## Validation
 
@@ -29,9 +33,13 @@ Run these before handing off frontend UI changes:
 cd web/frontend
 pnpm lint
 pnpm format
+pnpm test:collection-governance
 pnpm test:ui
 ```
 
 From the repository root, `make lint-frontend` installs locked dependencies and
 runs the lint and formatting checks. Use `make test-frontend-ui` for the mocked
 browser smoke suite.
+Use `make collection-delta BASE_REF=<base> HEAD_REF=<head>` for the collection
+debt guard. Update visual baselines locally only with
+`make update-frontend-visuals`; CI never rewrites them.

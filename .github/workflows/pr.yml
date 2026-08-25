@@ -1,7 +1,7 @@
 name: PR
 
 on:
-  pull_request: { }
+  pull_request: {}
 
 permissions:
   contents: read
@@ -61,6 +61,9 @@ jobs:
       - name: Frontend lint
         run: make lint-frontend
 
+      - name: Collection governance tests
+        run: make test-collection-governance
+
       - name: Frontend unit tests
         run: cd web/frontend && pnpm test
 
@@ -77,10 +80,27 @@ jobs:
         run: cd web/frontend && pnpm exec playwright install --with-deps chromium
 
       - name: Frontend UI smoke tests
-        run: cd web/frontend && pnpm test:ui
+        run: cd web/frontend && pnpm test:ui:smoke
+
+      - name: Frontend collection visual tests
+        run: cd web/frontend && COLLECTION_VISUAL_BASELINE=system pnpm test:ui:visual
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            web/frontend/playwright-report
+            web/frontend/test-results
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Fetch base ref
         run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Collection surface delta guard
+        run: make collection-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD
 
       - name: Feature requirements delta guard
         run: make feature-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD

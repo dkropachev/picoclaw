@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	picoauth "github.com/sipeed/picoclaw/pkg/auth"
@@ -25,12 +26,15 @@ const mcpProbeTimeout = 15 * time.Second
 var (
 	mcpProbeServer          = defaultMCPProbeServer
 	mcpSaveConfigIfRevision = config.SaveConfigIfRevision
+	mcpDeleteCredential     = picoauth.DeleteCredential
 )
 
 type mcpConfigResponse struct {
-	Enabled   bool                       `json:"enabled"`
-	Discovery config.ToolDiscoveryConfig `json:"discovery"`
-	Servers   []mcpServerSummary         `json:"servers"`
+	Enabled         bool                       `json:"enabled"`
+	Discovery       config.ToolDiscoveryConfig `json:"discovery"`
+	Servers         []mcpServerSummary         `json:"servers"`
+	Effects         agentEffects               `json:"effects"`
+	CleanupFailures []collectionBulkFailure    `json:"cleanup_failures,omitempty"`
 }
 
 type mcpServerSummary struct {
@@ -59,19 +63,20 @@ type mcpSettingsRequest struct {
 }
 
 type mcpServerRequest struct {
-	Name       string            `json:"name"`
-	Enabled    *bool             `json:"enabled"`
-	Deferred   *bool             `json:"deferred"`
-	Type       string            `json:"type"`
-	URL        string            `json:"url"`
-	Command    string            `json:"command"`
-	Args       []string          `json:"args"`
-	Env        map[string]string `json:"env"`
-	EnvKeys    *[]string         `json:"env_keys"`
-	EnvFile    string            `json:"env_file"`
-	Headers    map[string]string `json:"headers"`
-	HeaderKeys *[]string         `json:"header_keys"`
-	AuthMode   string            `json:"auth_mode"`
+	ExpectedConfigRevision string            `json:"expected_config_revision,omitempty"`
+	Name                   string            `json:"name"`
+	Enabled                *bool             `json:"enabled"`
+	Deferred               *bool             `json:"deferred"`
+	Type                   string            `json:"type"`
+	URL                    string            `json:"url"`
+	Command                string            `json:"command"`
+	Args                   []string          `json:"args"`
+	Env                    map[string]string `json:"env"`
+	EnvKeys                *[]string         `json:"env_keys"`
+	EnvFile                string            `json:"env_file"`
+	Headers                map[string]string `json:"headers"`
+	HeaderKeys             *[]string         `json:"header_keys"`
+	AuthMode               string            `json:"auth_mode"`
 }
 
 type mcpProbeRequest struct {
@@ -100,7 +105,10 @@ type mcpCredentialRequest struct {
 func (h *Handler) registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/mcp", h.handleGetMCP)
 	mux.HandleFunc("PATCH /api/mcp/settings", h.requireMCPMutationOrigin(h.handleUpdateMCPSettings))
+	mux.HandleFunc("GET /api/mcp/servers", h.handleListMCPServers)
 	mux.HandleFunc("POST /api/mcp/servers", h.requireMCPMutationOrigin(h.handleAddMCPServer))
+	mux.HandleFunc("POST /api/mcp/servers/bulk-delete", h.requireMCPMutationOrigin(h.handleBulkDeleteMCPServers))
+	mux.HandleFunc("GET /api/mcp/servers/{name}", h.handleGetMCPServer)
 	mux.HandleFunc("PUT /api/mcp/servers/{name}", h.requireMCPMutationOrigin(h.handleUpdateMCPServer))
 	mux.HandleFunc("DELETE /api/mcp/servers/{name}", h.requireMCPMutationOrigin(h.handleDeleteMCPServer))
 	mux.HandleFunc("POST /api/mcp/servers/test", h.requireMCPMutationOrigin(h.handleTestMCPServer))
@@ -182,7 +190,7 @@ func (h *Handler) handleUpdateMCPSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	unlock := h.lockMCPConfigMutation()
+	unlock := sync.OnceFunc(h.lockMCPConfigMutation())
 	defer unlock()
 
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
@@ -196,22 +204,30 @@ func (h *Handler) handleUpdateMCPSettings(w http.ResponseWriter, r *http.Request
 		writeMCPConfigSaveError(w, err)
 		return
 	}
+	unlock()
 	writeMCPConfigResponse(w, cfg)
 }
 
 func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r, "revision") {
+		return
+	}
 	var request mcpServerRequest
 	if err := decodeMCPJSON(r, &request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	unlock := h.lockMCPConfigMutation()
+	unlock := sync.OnceFunc(h.lockMCPConfigMutation())
 	defer unlock()
 
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
+	if !ok || expectedRevision != "" && !requireCollectionRevision(w, expectedRevision, revision) {
 		return
 	}
 	if findMCPServerName(cfg.Tools.MCP.Servers, request.Name) != "" {
@@ -240,22 +256,30 @@ func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeMCPConfigSaveError(w, err)
 		return
 	}
+	unlock()
 	writeMCPConfigResponse(w, cfg)
 }
 
 func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r, "revision") {
+		return
+	}
 	var request mcpServerRequest
 	if err := decodeMCPJSON(r, &request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	unlock := h.lockMCPConfigMutation()
+	unlock := sync.OnceFunc(h.lockMCPConfigMutation())
 	defer unlock()
 
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
+	if !ok || expectedRevision != "" && !requireCollectionRevision(w, expectedRevision, revision) {
 		return
 	}
 	oldName := r.PathValue("name")
@@ -311,15 +335,22 @@ func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) 
 	if server.Auth != nil {
 		currentCredentialID, _ = picomcp.CredentialID(newName, server.Auth)
 	}
+	cleanupFailures := []collectionBulkFailure(nil)
 	if previousCredentialID != "" && previousCredentialID != currentCredentialID &&
 		!mcpCredentialReferenced(cfg.Tools.MCP.Servers, previousCredentialID) {
-		_ = picoauth.DeleteCredential(previousCredentialID)
+		cleanupFailures = cleanupMCPUnreferencedCredentials(map[string][]string{
+			previousCredentialID: {actualOldName},
+		})
 	}
-	writeMCPConfigResponse(w, cfg)
+	unlock()
+	writeMCPConfigResponseWithCleanupFailures(w, cfg, cleanupFailures)
 }
 
 func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
-	unlock := h.lockMCPConfigMutation()
+	if !validateCollectionQueryParameters(w, r, "revision") {
+		return
+	}
+	unlock := sync.OnceFunc(h.lockMCPConfigMutation())
 	defer unlock()
 
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
@@ -327,9 +358,24 @@ func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
+	expectedRevision, ok := resolveCollectionRevision(w, r, "")
+	if !ok || expectedRevision != "" && !requireCollectionRevision(w, expectedRevision, revision) {
+		return
+	}
 	name := findMCPServerName(cfg.Tools.MCP.Servers, r.PathValue("name"))
 	if name == "" {
 		http.Error(w, fmt.Sprintf("MCP server %q not found", r.PathValue("name")), http.StatusNotFound)
+		return
+	}
+	if blockers := mcpServerReferences(cfg, name); len(blockers) > 0 {
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"mcp_server_referenced",
+			"MCP server is still referenced",
+			-1,
+			blockers,
+		)
 		return
 	}
 	server := cfg.Tools.MCP.Servers[name]
@@ -342,10 +388,16 @@ func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) 
 		writeMCPConfigSaveError(w, err)
 		return
 	}
+	cleanupFailures := []collectionBulkFailure(nil)
 	if server.Auth != nil && credentialID != "" && !mcpCredentialReferenced(cfg.Tools.MCP.Servers, credentialID) {
-		_ = picoauth.DeleteCredential(credentialID)
+		cleanupFailures = cleanupMCPUnreferencedCredentials(map[string][]string{
+			credentialID: {name},
+		})
 	}
-	writeJSON(w, map[string]string{"status": "ok"})
+	unlock()
+	writeCollectionJSON(w, http.StatusOK, map[string]any{
+		"status": "ok", "effects": agentEffectsForConfig(cfg), "cleanup_failures": cleanupFailures,
+	})
 }
 
 func (h *Handler) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
@@ -546,6 +598,7 @@ func buildMCPConfigResponse(cfg *config.Config) (mcpConfigResponse, error) {
 		Enabled:   cfg.Tools.MCP.Enabled,
 		Discovery: cfg.Tools.MCP.Discovery,
 		Servers:   make([]mcpServerSummary, 0, len(cfg.Tools.MCP.Servers)),
+		Effects:   agentEffectsForConfig(cfg),
 	}
 	names := make([]string, 0, len(cfg.Tools.MCP.Servers))
 	for name := range cfg.Tools.MCP.Servers {
@@ -1120,10 +1173,44 @@ func decodeMCPJSON(r *http.Request, target any) error {
 }
 
 func writeMCPConfigResponse(w http.ResponseWriter, cfg *config.Config) {
+	writeMCPConfigResponseWithCleanupFailures(w, cfg, nil)
+}
+
+func writeMCPConfigResponseWithCleanupFailures(
+	w http.ResponseWriter,
+	cfg *config.Config,
+	cleanupFailures []collectionBulkFailure,
+) {
 	response, err := buildMCPConfigResponse(cfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load MCP credentials: %v", err), http.StatusInternalServerError)
 		return
 	}
+	response.CleanupFailures = cleanupFailures
 	writeJSON(w, response)
+}
+
+func cleanupMCPUnreferencedCredentials(
+	credentialOwners map[string][]string,
+) []collectionBulkFailure {
+	credentialIDs := make([]string, 0, len(credentialOwners))
+	for credentialID := range credentialOwners {
+		credentialIDs = append(credentialIDs, credentialID)
+	}
+	sort.Strings(credentialIDs)
+	failures := make([]collectionBulkFailure, 0)
+	for _, credentialID := range credentialIDs {
+		if err := mcpDeleteCredential(credentialID); err == nil {
+			continue
+		}
+		owners := append([]string(nil), credentialOwners[credentialID]...)
+		sort.Strings(owners)
+		for _, owner := range owners {
+			failures = append(failures, collectionBulkFailure{
+				ID: owner, Code: "credential_cleanup_failed",
+			})
+		}
+	}
+	sortCollectionFailures(failures)
+	return failures
 }

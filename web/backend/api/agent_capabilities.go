@@ -30,7 +30,10 @@ var (
 	agentCapabilitiesMutationMu             sync.Mutex
 	agentCapabilitiesBeforeFinalFence       = func() {}
 	agentCapabilitiesAfterConditionalCreate = func() {}
-	writeAgentCapabilitiesFile              = writeAgentCapabilitiesFileIfUnchanged
+	// agentCapabilitiesBeforeResponseEffects is a deterministic test barrier.
+	// Production leaves it as a no-op while holding both mutation locks.
+	agentCapabilitiesBeforeResponseEffects = func() {}
+	writeAgentCapabilitiesFile             = writeAgentCapabilitiesFileIfUnchanged
 )
 
 type agentCapabilityPolicyRequest struct {
@@ -121,9 +124,11 @@ func (h *Handler) handleGetAgentCapabilities(w http.ResponseWriter, r *http.Requ
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	agentCapabilitiesMutationMu.Lock()
-	defer agentCapabilitiesMutationMu.Unlock()
+	releaseCapabilitiesMutation := sync.OnceFunc(agentCapabilitiesMutationMu.Unlock)
+	defer releaseCapabilitiesMutation()
 
 	cfg, configRevision, ok := h.loadCurrentAgentConfig(w)
 	if !ok {
@@ -135,6 +140,9 @@ func (h *Handler) handleGetAgentCapabilities(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	state := loadAgentDefinitionState(cfg, agentConfig)
+	agentCapabilitiesBeforeResponseEffects()
+	releaseCapabilitiesMutation()
+	releaseConfigMutation()
 	writeAgentJSON(
 		w,
 		http.StatusOK,
@@ -174,9 +182,11 @@ func (h *Handler) handlePatchAgentCapabilities(w http.ResponseWriter, r *http.Re
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	agentCapabilitiesMutationMu.Lock()
-	defer agentCapabilitiesMutationMu.Unlock()
+	releaseCapabilitiesMutation := sync.OnceFunc(agentCapabilitiesMutationMu.Unlock)
+	defer releaseCapabilitiesMutation()
 
 	cfg, configRevision, loaded := h.loadCurrentAgentConfig(w)
 	if !loaded {
@@ -421,6 +431,9 @@ func (h *Handler) handlePatchAgentCapabilities(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	agentCapabilitiesBeforeResponseEffects()
+	releaseCapabilitiesMutation()
+	releaseConfigMutation()
 	writeAgentJSON(
 		w,
 		http.StatusOK,

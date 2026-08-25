@@ -1,3 +1,10 @@
+import {
+  type CollectionConfigBulkDeleteResponse,
+  type CollectionMutationEffects,
+  type CollectionQuerySchema,
+  collectionListURL,
+  collectionRequest,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 import { refreshGatewayState } from "@/store/gateway"
 
@@ -125,6 +132,57 @@ export interface ModelAlias {
 export interface ModelAliasCatalogEntry {
   name: string
   description: string
+}
+
+export interface ModelAliasSummary {
+  name: string
+  model: string
+  override_count: number
+  disabled_account_count: number
+}
+
+export interface ModelRouterSummary {
+  name: string
+  enabled: boolean
+  entry: string
+  block_count: number
+  rule_count: number
+}
+
+export interface ModelAliasCollectionResponse {
+  model_aliases: ModelAliasSummary[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
+  config_revision: string
+}
+
+export interface ModelAliasDetailResponse {
+  model_alias: ModelAlias
+  config_revision: string
+}
+
+export interface ModelAliasMutationResponse extends ModelAliasDetailResponse {
+  effects: CollectionMutationEffects
+}
+
+export interface ModelRouterCollectionResponse {
+  model_routers: ModelRouterSummary[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
+  config_revision: string
+}
+
+export interface ModelRouterDetailResponse {
+  model_router: ModelRouterConfig
+  config_revision: string
+}
+
+export interface ModelRouterMutationResponse extends ModelRouterDetailResponse {
+  effects: CollectionMutationEffects
 }
 
 interface ModelsListResponse {
@@ -281,6 +339,156 @@ export async function deleteModelAlias(
       method: "DELETE",
     },
   )
+}
+
+export function listModelAliases(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<ModelAliasCollectionResponse> {
+  return collectionRequest<ModelAliasCollectionResponse>(
+    collectionListURL("/api/model-aliases", options),
+    undefined,
+    signal,
+  )
+}
+
+export function getModelAlias(
+  name: string,
+  signal?: AbortSignal,
+): Promise<ModelAliasDetailResponse> {
+  return collectionRequest<ModelAliasDetailResponse>(
+    `/api/model-aliases/${encodeURIComponent(name)}`,
+    undefined,
+    signal,
+  )
+}
+
+export function createModelAlias(
+  alias: ModelAlias,
+  expectedConfigRevision: string,
+): Promise<ModelAliasMutationResponse> {
+  return collectionRequest<ModelAliasMutationResponse>("/api/model-aliases", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_config_revision: expectedConfigRevision,
+      model_alias: alias,
+    }),
+  })
+}
+
+export function updateModelAliasByName(
+  name: string,
+  alias: ModelAlias,
+  expectedConfigRevision: string,
+): Promise<ModelAliasMutationResponse> {
+  return collectionRequest<ModelAliasMutationResponse>(
+    `/api/model-aliases/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expected_config_revision: expectedConfigRevision,
+        model_alias: alias,
+      }),
+    },
+  )
+}
+
+export function deleteModelAliasByName(
+  name: string,
+  expectedConfigRevision: string,
+): Promise<CollectionConfigBulkDeleteResponse> {
+  return collectionRequest(
+    `/api/model-aliases/${encodeURIComponent(name)}?revision=${encodeURIComponent(expectedConfigRevision)}`,
+    { method: "DELETE" },
+  )
+}
+
+export function bulkDeleteModelAliases(
+  ids: string[],
+  configRevision: string,
+): Promise<CollectionConfigBulkDeleteResponse> {
+  return collectionRequest("/api/model-aliases/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, config_revision: configRevision }),
+  })
+}
+
+export function listModelRouters(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<ModelRouterCollectionResponse> {
+  return collectionRequest<ModelRouterCollectionResponse>(
+    collectionListURL("/api/model-routers", options),
+    undefined,
+    signal,
+  )
+}
+
+export function getModelRouter(
+  name: string,
+  signal?: AbortSignal,
+): Promise<ModelRouterDetailResponse> {
+  return collectionRequest<ModelRouterDetailResponse>(
+    `/api/model-routers/${encodeURIComponent(name)}`,
+    undefined,
+    signal,
+  )
+}
+
+export function createModelRouter(
+  router: ModelRouterConfig,
+  expectedConfigRevision: string,
+): Promise<ModelRouterMutationResponse> {
+  return collectionRequest<ModelRouterMutationResponse>("/api/model-routers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_config_revision: expectedConfigRevision,
+      model_router: router,
+    }),
+  })
+}
+
+export function updateModelRouterByName(
+  name: string,
+  router: ModelRouterConfig,
+  expectedConfigRevision: string,
+): Promise<ModelRouterMutationResponse> {
+  return collectionRequest<ModelRouterMutationResponse>(
+    `/api/model-routers/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expected_config_revision: expectedConfigRevision,
+        model_router: router,
+      }),
+    },
+  )
+}
+
+export function deleteModelRouterByName(
+  name: string,
+  expectedConfigRevision: string,
+): Promise<CollectionConfigBulkDeleteResponse> {
+  return collectionRequest(
+    `/api/model-routers/${encodeURIComponent(name)}?revision=${encodeURIComponent(expectedConfigRevision)}`,
+    { method: "DELETE" },
+  )
+}
+
+export function bulkDeleteModelRouters(
+  ids: string[],
+  configRevision: string,
+): Promise<CollectionConfigBulkDeleteResponse> {
+  return collectionRequest("/api/model-routers/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, config_revision: configRevision }),
+  })
 }
 
 export interface TestModelResponse {

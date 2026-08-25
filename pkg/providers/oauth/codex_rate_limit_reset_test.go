@@ -20,6 +20,8 @@ import (
 
 const codexResetTestRedeemID = "d0c4c978-8f25-4a0d-a863-a92c04f6685c"
 
+var codexResetTestEndpointSequence atomic.Uint64
+
 func TestIsCodexUsageLimitReachedError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1329,8 +1331,10 @@ func configureCodexResetTestURLs(provider *CodexProvider, baseURL string) {
 }
 
 func configureCodexResetterTestURLs(resetter *codexRateLimitResetter, baseURL string) {
-	resetter.usageURL = baseURL + "/backend-api/wham/usage"
-	resetter.consumeURL = baseURL + "/backend-api/wham/rate-limit-reset-credits/consume"
+	testEndpointQuery := fmt.Sprintf("?test_endpoint=%d", codexResetTestEndpointSequence.Add(1))
+	resetter.usageURL = baseURL + "/backend-api/wham/usage" + testEndpointQuery
+	resetter.consumeURL = baseURL +
+		"/backend-api/wham/rate-limit-reset-credits/consume" + testEndpointQuery
 	resetter.newRedeemRequestID = func() string {
 		return codexResetTestRedeemID
 	}

@@ -33,7 +33,7 @@ export function GatewaySetupNotice() {
         </span>
       </p>
       <Button asChild size="sm" variant="outline">
-        <Link to="/models">
+        <Link to="/models/aliases" search={{ q: "ORDER BY name ASC" }}>
           {t("header.gateway.configureModels", "Configure models")}
         </Link>
       </Button>

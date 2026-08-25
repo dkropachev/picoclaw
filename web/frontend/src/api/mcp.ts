@@ -1,3 +1,11 @@
+import {
+  type CollectionBulkDeleteFailure,
+  type CollectionConfigBulkDeleteResponse,
+  type CollectionMutationEffects,
+  type CollectionQuerySchema,
+  collectionListURL,
+  collectionRequest,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export type MCPTransport = "stdio" | "http" | "sse"
@@ -30,10 +38,35 @@ export interface MCPServer {
   auth: MCPAuthSummary
 }
 
+export interface MCPServerCollectionSummary {
+  name: string
+  enabled: boolean
+  deferred: boolean | null
+  type: MCPTransport
+  address: string
+  environment_key_count: number
+  header_key_count: number
+  auth: MCPAuthSummary
+}
+
 export interface MCPConfigResponse {
   enabled: boolean
   discovery: MCPDiscoverySettings
   servers: MCPServer[]
+}
+
+export interface MCPServerCollectionResponse {
+  servers: MCPServerCollectionSummary[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
+  config_revision: string
+}
+
+export interface MCPServerDetailResponse {
+  server: MCPServer
+  config_revision: string
 }
 
 export interface MCPServerInput {
@@ -89,6 +122,16 @@ interface MCPActionResponse {
   status: string
 }
 
+export interface MCPMutationResponse extends MCPConfigResponse {
+  effects: CollectionMutationEffects
+  cleanup_failures?: CollectionBulkDeleteFailure[]
+}
+
+interface MCPMutationActionResponse extends MCPActionResponse {
+  effects: CollectionMutationEffects
+  cleanup_failures?: CollectionBulkDeleteFailure[]
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await launcherFetch(path, options)
   if (!response.ok) {
@@ -101,10 +144,32 @@ export function getMCPConfig(): Promise<MCPConfigResponse> {
   return request<MCPConfigResponse>("/api/mcp")
 }
 
+export function listMCPServers(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<MCPServerCollectionResponse> {
+  return collectionRequest<MCPServerCollectionResponse>(
+    collectionListURL("/api/mcp/servers", options),
+    undefined,
+    signal,
+  )
+}
+
+export function getMCPServer(
+  name: string,
+  signal?: AbortSignal,
+): Promise<MCPServerDetailResponse> {
+  return collectionRequest<MCPServerDetailResponse>(
+    `/api/mcp/servers/${encodeURIComponent(name)}`,
+    undefined,
+    signal,
+  )
+}
+
 export function updateMCPSettings(
   payload: Pick<MCPConfigResponse, "enabled" | "discovery">,
-): Promise<MCPConfigResponse> {
-  return request<MCPConfigResponse>("/api/mcp/settings", {
+): Promise<MCPMutationResponse> {
+  return request<MCPMutationResponse>("/api/mcp/settings", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -113,35 +178,60 @@ export function updateMCPSettings(
 
 export function addMCPServer(
   server: MCPServerInput,
-): Promise<MCPConfigResponse> {
-  return request<MCPConfigResponse>("/api/mcp/servers", {
+  expectedConfigRevision?: string,
+): Promise<MCPMutationResponse> {
+  return request<MCPMutationResponse>("/api/mcp/servers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(server),
+    body: JSON.stringify({
+      ...server,
+      ...(expectedConfigRevision
+        ? { expected_config_revision: expectedConfigRevision }
+        : {}),
+    }),
   })
 }
 
 export function updateMCPServer(
   currentName: string,
   server: MCPServerInput,
-): Promise<MCPConfigResponse> {
-  return request<MCPConfigResponse>(
+  expectedConfigRevision?: string,
+): Promise<MCPMutationResponse> {
+  return request<MCPMutationResponse>(
     `/api/mcp/servers/${encodeURIComponent(currentName)}`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(server),
+      body: JSON.stringify({
+        ...server,
+        ...(expectedConfigRevision
+          ? { expected_config_revision: expectedConfigRevision }
+          : {}),
+      }),
     },
   )
 }
 
-export function deleteMCPServer(name: string): Promise<MCPActionResponse> {
-  return request<MCPActionResponse>(
+export function deleteMCPServer(
+  name: string,
+): Promise<MCPMutationActionResponse> {
+  return request<MCPMutationActionResponse>(
     `/api/mcp/servers/${encodeURIComponent(name)}`,
     {
       method: "DELETE",
     },
   )
+}
+
+export function bulkDeleteMCPServers(
+  ids: string[],
+  configRevision: string,
+): Promise<CollectionConfigBulkDeleteResponse> {
+  return collectionRequest("/api/mcp/servers/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, config_revision: configRevision }),
+  })
 }
 
 export function testMCPServer(

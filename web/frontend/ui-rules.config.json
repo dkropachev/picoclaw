@@ -14,5 +14,14 @@
       "src/components/model-evaluations/model-evaluation-report-page.tsx": "The report needs eight stable, distinguishable chart series because one probe may compare eight models; every series also has direct labels and exact text.",
       "src/lib/ansi-log.ts": "ANSI terminal color palette maps protocol color indexes."
     }
+  },
+  "collectionRules": {
+    "manifest": "collection-surfaces.json",
+    "sharedShellImportPrefixes": ["@/components/collection"],
+    "oneOffInfrastructureImports": [
+      "@/components/models/model-card",
+      "@/components/agent/agents/agent-card",
+      "@/components/agent/mcp/mcp-server-card"
+    ]
   }
 }
