@@ -226,11 +226,9 @@ func detachMCPParameters(source map[string]any) map[string]any {
 	if !ok || !cloned.IsValid() {
 		return emptyMCPParameters()
 	}
-	result, ok := cloned.Interface().(map[string]any)
-	if !ok || result == nil {
-		return emptyMCPParameters()
-	}
-	return result
+	// source is a non-nil map[string]any and the clone preserves exact map
+	// types, so a successful clone has this exact result type.
+	return cloned.Interface().(map[string]any)
 }
 
 func cloneMCPParameterValue(

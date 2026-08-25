@@ -2,9 +2,11 @@ package integrationtools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1272,5 +1274,103 @@ func TestMCPToolConcurrentMutableStateAndExecute(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestMCPToolLegacySchemaNormalizationAndCloneBoundaries(t *testing.T) {
+	empty := func(value map[string]any) bool {
+		properties, propertiesOK := value["properties"].(map[string]any)
+		required, requiredOK := value["required"].([]string)
+		return value["type"] == "object" && propertiesOK && len(properties) == 0 &&
+			requiredOK && len(required) == 0
+	}
+
+	wrapped := NewMCPTool(nil, "nil-sdk", nil)
+	if wrapped == nil {
+		t.Fatal("nil SDK snapshot returned nil wrapper")
+	}
+	server, tool := wrapped.MCPIdentity()
+	if server != "nil-sdk" || tool != "" || !empty(wrapped.Parameters()) {
+		t.Fatalf("nil SDK snapshot = %#v, %q/%q", wrapped, server, tool)
+	}
+	defaultLimit := NewMCPToolFromSnapshot(nil, MCPToolSnapshot{
+		ServerName: "default", ToolName: "limit", CanonicalName: "mcp_default_limit",
+		Description: "default limit", Parameters: map[string]any{"type": "object"},
+	})
+	defaultLimit.stateMu.RLock()
+	gotLimit := defaultLimit.maxInlineTextRunes
+	defaultLimit.stateMu.RUnlock()
+	if gotLimit != maxMCPInlineTextRunes {
+		t.Fatalf("default strict inline limit = %d", gotLimit)
+	}
+
+	validSchemas := []any{
+		json.RawMessage(`{"type":"object","raw":true}`),
+		[]byte(`{"type":"object","bytes":true}`),
+		struct {
+			Type string `json:"type"`
+		}{Type: "object"},
+	}
+	for index, schema := range validSchemas {
+		if got := normalizeLegacyMCPParameters(schema); got["type"] != "object" {
+			t.Fatalf("valid legacy schema %d = %#v", index, got)
+		}
+	}
+	for index, schema := range []any{
+		make(chan int),
+		json.RawMessage(`{"type":`),
+		json.RawMessage(`null`),
+	} {
+		if got := normalizeLegacyMCPParameters(schema); !empty(got) {
+			t.Fatalf("invalid legacy schema %d did not fall back: %#v", index, got)
+		}
+	}
+	if got := detachMCPParameters(nil); !empty(got) {
+		t.Fatalf("nil detached schema = %#v", got)
+	}
+
+	clone := func(value any, depth int) bool {
+		_, ok := cloneMCPParameterValue(
+			reflect.ValueOf(value),
+			make(map[mcpParameterVisit]struct{}),
+			depth,
+		)
+		return ok
+	}
+	if _, ok := cloneMCPParameterValue(
+		reflect.Value{}, make(map[mcpParameterVisit]struct{}), 0,
+	); ok || clone("too deep", 129) {
+		t.Fatal("invalid or over-depth schema clone succeeded")
+	}
+	if !clone(map[string]any{
+		"nil": nil, "bool": true, "int": int64(1), "uint": uint64(2),
+		"float": 3.5, "array": [2]string{"a", "b"},
+	}, 0) {
+		t.Fatal("supported scalar/array schema clone failed")
+	}
+	if clone(map[int]string{1: "bad"}, 0) {
+		t.Fatal("non-string-key schema map clone succeeded")
+	}
+	var nilMap map[string]any
+	if !clone(nilMap, 0) {
+		t.Fatal("typed nil schema map clone failed")
+	}
+	cyclicMap := map[string]any{}
+	cyclicMap["self"] = cyclicMap
+	if clone(cyclicMap, 0) || clone(map[string]any{"bad": func() {}}, 0) {
+		t.Fatal("cyclic or unsupported map schema clone succeeded")
+	}
+	if got := detachMCPParameters(cyclicMap); !empty(got) {
+		t.Fatalf("cyclic detached schema did not fall back: %#v", got)
+	}
+	var nilSlice []any
+	if !clone(nilSlice, 0) {
+		t.Fatal("typed nil schema slice clone failed")
+	}
+	cyclicSlice := make([]any, 1)
+	cyclicSlice[0] = cyclicSlice
+	if clone(cyclicSlice, 0) || clone([]any{func() {}}, 0) ||
+		clone([1]any{func() {}}, 0) || clone(struct{}{}, 0) {
+		t.Fatal("cyclic or unsupported slice/array/value schema clone succeeded")
 	}
 }
