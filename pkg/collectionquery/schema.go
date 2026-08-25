@@ -152,7 +152,11 @@ func (schema Schema) Validate() error {
 		}
 	}
 	if len(schema.DefaultOrder) == 0 || len(schema.DefaultOrder) > MaxQuerySortFields {
-		return fmt.Errorf("%w: default order must contain between 1 and %d fields", ErrInvalidSchema, MaxQuerySortFields)
+		return fmt.Errorf(
+			"%w: default order must contain between 1 and %d fields",
+			ErrInvalidSchema,
+			MaxQuerySortFields,
+		)
 	}
 	seenOrder := make(map[Field]struct{}, len(schema.DefaultOrder))
 	for _, order := range schema.DefaultOrder {
@@ -179,10 +183,10 @@ func (schema Schema) Clone() Schema {
 func (schema Schema) lookup(field Field) (FieldSchema, bool) {
 	for _, declaration := range schema.Fields {
 		if declaration.Name == field {
-			copy := declaration
-			copy.Operators = append([]Operator(nil), declaration.Operators...)
-			copy.SuggestedValues = append([]string(nil), declaration.SuggestedValues...)
-			return copy, true
+			cloned := declaration
+			cloned.Operators = append([]Operator(nil), declaration.Operators...)
+			cloned.SuggestedValues = append([]string(nil), declaration.SuggestedValues...)
+			return cloned, true
 		}
 	}
 	return FieldSchema{}, false
@@ -221,7 +225,14 @@ func validFieldName(field Field) bool {
 func defaultOperators(fieldType FieldType) []Operator {
 	switch fieldType {
 	case TypeString:
-		return []Operator{OperatorEqual, OperatorNotEqual, OperatorContains, OperatorNotContains, OperatorIn, OperatorNotIn}
+		return []Operator{
+			OperatorEqual,
+			OperatorNotEqual,
+			OperatorContains,
+			OperatorNotContains,
+			OperatorIn,
+			OperatorNotIn,
+		}
 	case TypeEnum, TypeBoolean:
 		return []Operator{OperatorEqual, OperatorNotEqual, OperatorIn, OperatorNotIn}
 	case TypeNumber, TypeTimestamp:

@@ -237,7 +237,8 @@ func validatePredicate(schema Schema, predicate Predicate) error {
 func validateValue(field FieldSchema, value Value) error {
 	switch field.Type {
 	case TypeString, TypeEnum:
-		if value.Kind != ValueString || value.Text == "" || len(value.Text) > MaxQueryBytes || !utf8.ValidString(value.Text) {
+		if value.Kind != ValueString || value.Text == "" || len(value.Text) > MaxQueryBytes ||
+			!utf8.ValidString(value.Text) {
 			return fmt.Errorf("field %s requires a non-empty string", field.Name)
 		}
 		if value.Text != strings.ToLower(value.Text) {
@@ -312,7 +313,13 @@ func canonicalExpression(expression Expression) string {
 		}
 		return string(node.Field) + " " + string(node.Operator) + " " + canonicalValue(node.Values[0])
 	case LogicalExpression:
-		return "(" + canonicalExpression(node.Left) + " " + string(node.Operator) + " " + canonicalExpression(node.Right) + ")"
+		return "(" + canonicalExpression(
+			node.Left,
+		) + " " + string(
+			node.Operator,
+		) + " " + canonicalExpression(
+			node.Right,
+		) + ")"
 	case Negation:
 		return "NOT (" + canonicalExpression(node.Expression) + ")"
 	default:

@@ -31,8 +31,10 @@ const repositoryModelEvaluationRequestMaxBytes = 256 << 10
 var (
 	errRepositoryModelEvaluationBusy             = errors.New("repository model evaluation is active")
 	errRepositoryModelEvaluationUnavailableModel = errors.New("repository model evaluation model alias is unavailable")
-	errRepositoryModelEvaluationMediaType        = errors.New("repository model evaluation JSON content type is required")
-	errRepositoryModelEvaluationRequestTooLarge  = errors.New("repository model evaluation request is too large")
+	errRepositoryModelEvaluationMediaType        = errors.New(
+		"repository model evaluation JSON content type is required",
+	)
+	errRepositoryModelEvaluationRequestTooLarge = errors.New("repository model evaluation request is too large")
 )
 
 type repositoryModelEvaluationPatchRequest struct {
@@ -209,7 +211,9 @@ func (h *Handler) handleListRepositoryModelEvaluations(w http.ResponseWriter, r 
 				case "status":
 					return collectionquery.EnumValue(string(evaluation.Status)), true
 				case "repository":
-					return collectionquery.StringValue(sanitizeRepositoryModelEvaluationIdentity(evaluation.Repository)), true
+					return collectionquery.StringValue(
+						sanitizeRepositoryModelEvaluationIdentity(evaluation.Repository),
+					), true
 				case "ref":
 					return collectionquery.StringValue(evaluation.Ref), true
 				case "models":

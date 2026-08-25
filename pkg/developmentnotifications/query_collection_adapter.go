@@ -32,28 +32,108 @@ func mustNotificationCollectionQuerySchema() collectionquery.Schema {
 		collectionquery.OperatorLessEq,
 	}
 	fields := []collectionquery.FieldSchema{
-		{Name: collectionquery.Field(FieldStatus), Type: collectionquery.TypeEnum, Operators: equality, Sortable: true,
-			SuggestedValues: []string{string(StatusOpen), string(StatusResolved), string(StatusArchived)}},
-		{Name: collectionquery.Field(FieldRead), Type: collectionquery.TypeBoolean, Operators: equality, Sortable: true,
-			SuggestedValues: []string{"false", "true"}},
-		{Name: collectionquery.Field(FieldSnoozed), Type: collectionquery.TypeBoolean, Operators: equality, Sortable: true,
-			SuggestedValues: []string{"false", "true"}},
-		{Name: collectionquery.Field(FieldPriority), Type: collectionquery.TypeEnum, Operators: equality, Sortable: true,
-			SuggestedValues: []string{string(PriorityCritical), string(PriorityHigh), string(PriorityMedium), string(PriorityLow)}},
-		{Name: collectionquery.Field(FieldReason), Type: collectionquery.TypeEnum, Operators: equality, Sortable: true,
+		{
+			Name: collectionquery.Field(
+				FieldStatus,
+			),
+			Type:            collectionquery.TypeEnum,
+			Operators:       equality,
+			Sortable:        true,
+			SuggestedValues: []string{string(StatusOpen), string(StatusResolved), string(StatusArchived)},
+		},
+		{
+			Name: collectionquery.Field(
+				FieldRead,
+			),
+			Type:            collectionquery.TypeBoolean,
+			Operators:       equality,
+			Sortable:        true,
+			SuggestedValues: []string{"false", "true"},
+		},
+		{
+			Name: collectionquery.Field(
+				FieldSnoozed,
+			),
+			Type:            collectionquery.TypeBoolean,
+			Operators:       equality,
+			Sortable:        true,
+			SuggestedValues: []string{"false", "true"},
+		},
+		{
+			Name: collectionquery.Field(
+				FieldPriority,
+			),
+			Type:      collectionquery.TypeEnum,
+			Operators: equality,
+			Sortable:  true,
 			SuggestedValues: []string{
-				string(ReasonCharterAmbiguity), string(ReasonScopeException), string(ReasonSteeringScopeChange),
-				string(ReasonImplementationBlocked), string(ReasonProviderOutcomeUnknown), string(ReasonPublicationApproval),
-			}},
-		{Name: collectionquery.Field(FieldRepository), Type: collectionquery.TypeString, Operators: text, Sortable: true},
-		{Name: collectionquery.Field(FieldWorkspace), Type: collectionquery.TypeString, Operators: text, Sortable: true},
-		{Name: collectionquery.Field(FieldIntent), Type: collectionquery.TypeEnum, Operators: equality, Sortable: true,
-			SuggestedValues: []string{string(IntentImplementFeature), string(IntentPickupPR)}},
-		{Name: collectionquery.Field(FieldSource), Type: collectionquery.TypeEnum, Operators: equality, Sortable: true,
-			SuggestedValues: []string{string(SourceIssue), string(SourceBrief), string(SourcePullRequest)}},
+				string(PriorityCritical),
+				string(PriorityHigh),
+				string(PriorityMedium),
+				string(PriorityLow),
+			},
+		},
+		{
+			Name: collectionquery.Field(
+				FieldReason,
+			),
+			Type:      collectionquery.TypeEnum,
+			Operators: equality,
+			Sortable:  true,
+			SuggestedValues: []string{
+				string(ReasonCharterAmbiguity),
+				string(ReasonScopeException),
+				string(ReasonSteeringScopeChange),
+				string(
+					ReasonImplementationBlocked,
+				),
+				string(ReasonProviderOutcomeUnknown),
+				string(ReasonPublicationApproval),
+			},
+		},
+		{
+			Name:      collectionquery.Field(FieldRepository),
+			Type:      collectionquery.TypeString,
+			Operators: text,
+			Sortable:  true,
+		},
+		{
+			Name:      collectionquery.Field(FieldWorkspace),
+			Type:      collectionquery.TypeString,
+			Operators: text,
+			Sortable:  true,
+		},
+		{
+			Name: collectionquery.Field(
+				FieldIntent,
+			),
+			Type:            collectionquery.TypeEnum,
+			Operators:       equality,
+			Sortable:        true,
+			SuggestedValues: []string{string(IntentImplementFeature), string(IntentPickupPR)},
+		},
+		{
+			Name: collectionquery.Field(
+				FieldSource,
+			),
+			Type:            collectionquery.TypeEnum,
+			Operators:       equality,
+			Sortable:        true,
+			SuggestedValues: []string{string(SourceIssue), string(SourceBrief), string(SourcePullRequest)},
+		},
 		{Name: collectionquery.Field(FieldPhase), Type: collectionquery.TypeString, Operators: text, Sortable: true},
-		{Name: collectionquery.Field(FieldCreated), Type: collectionquery.TypeTimestamp, Operators: timestamp, Sortable: true},
-		{Name: collectionquery.Field(FieldUpdated), Type: collectionquery.TypeTimestamp, Operators: timestamp, Sortable: true},
+		{
+			Name:      collectionquery.Field(FieldCreated),
+			Type:      collectionquery.TypeTimestamp,
+			Operators: timestamp,
+			Sortable:  true,
+		},
+		{
+			Name:      collectionquery.Field(FieldUpdated),
+			Type:      collectionquery.TypeTimestamp,
+			Operators: timestamp,
+			Sortable:  true,
+		},
 		{Name: collectionquery.Field(FieldText), Type: collectionquery.TypeString, Operators: text, Sortable: false},
 	}
 	schema, err := collectionquery.NewSchema(fields, []collectionquery.SortField{{
@@ -184,7 +264,11 @@ func collectionPredicateFromNotification(predicate Predicate) (collectionquery.E
 		values[index] = collectionValueFromNotification(value)
 	}
 	return collectionquery.Predicate{
-		Field: collectionquery.Field(predicate.Field), Operator: collectionquery.Operator(predicate.Operator), Values: values,
+		Field: collectionquery.Field(
+			predicate.Field,
+		),
+		Operator: collectionquery.Operator(predicate.Operator),
+		Values:   values,
 	}, nil
 }
 

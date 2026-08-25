@@ -206,11 +206,11 @@ func DecodeCursor(encoded string, query Query, validateID func(string) bool) (Cu
 	var wire cursorWire
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&wire); err != nil {
+	if decodeErr := decoder.Decode(&wire); decodeErr != nil {
 		return Cursor{}, ErrInvalidCursor
 	}
 	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	if trailingErr := decoder.Decode(&trailing); !errors.Is(trailingErr, io.EOF) {
 		return Cursor{}, ErrInvalidCursor
 	}
 	canonical, err := json.Marshal(wire)

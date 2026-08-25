@@ -65,18 +65,70 @@ func TestSchemaRejectsInvalidDeclarations(t *testing.T) {
 		order  []SortField
 	}{
 		{name: "empty", order: []SortField{{Field: "name", Direction: Ascending}}},
-		{name: "bad name", fields: []FieldSchema{{Name: "1name", Type: TypeString}}, order: []SortField{{Field: "1name", Direction: Ascending}}},
-		{name: "reserved name", fields: []FieldSchema{{Name: "all", Type: TypeString, Sortable: true}}, order: []SortField{{Field: "all", Direction: Ascending}}},
-		{name: "unknown type", fields: []FieldSchema{{Name: "name", Type: "object"}}, order: []SortField{{Field: "name", Direction: Ascending}}},
-		{name: "duplicate field", fields: []FieldSchema{valid, valid}, order: []SortField{{Field: "name", Direction: Ascending}}},
-		{name: "duplicate operator", fields: []FieldSchema{{Name: "name", Type: TypeString, Operators: []Operator{OperatorEqual, OperatorEqual}, Sortable: true}}, order: []SortField{{Field: "name", Direction: Ascending}}},
-		{name: "wrong operator", fields: []FieldSchema{{Name: "enabled", Type: TypeBoolean, Operators: []Operator{OperatorContains}, Sortable: true}}, order: []SortField{{Field: "enabled", Direction: Ascending}}},
-		{name: "enum without values", fields: []FieldSchema{{Name: "status", Type: TypeEnum, Sortable: true}}, order: []SortField{{Field: "status", Direction: Ascending}}},
-		{name: "duplicate values", fields: []FieldSchema{{Name: "status", Type: TypeEnum, Sortable: true, SuggestedValues: []string{"x", "X"}}}, order: []SortField{{Field: "status", Direction: Ascending}}},
-		{name: "control value", fields: []FieldSchema{{Name: "status", Type: TypeEnum, Sortable: true, SuggestedValues: []string{"bad\nvalue"}}}, order: []SortField{{Field: "status", Direction: Ascending}}},
-		{name: "unsortable default", fields: []FieldSchema{{Name: "name", Type: TypeString}}, order: []SortField{{Field: "name", Direction: Ascending}}},
+		{
+			name:   "bad name",
+			fields: []FieldSchema{{Name: "1name", Type: TypeString}},
+			order:  []SortField{{Field: "1name", Direction: Ascending}},
+		},
+		{
+			name:   "reserved name",
+			fields: []FieldSchema{{Name: "all", Type: TypeString, Sortable: true}},
+			order:  []SortField{{Field: "all", Direction: Ascending}},
+		},
+		{
+			name:   "unknown type",
+			fields: []FieldSchema{{Name: "name", Type: "object"}},
+			order:  []SortField{{Field: "name", Direction: Ascending}},
+		},
+		{
+			name:   "duplicate field",
+			fields: []FieldSchema{valid, valid},
+			order:  []SortField{{Field: "name", Direction: Ascending}},
+		},
+		{
+			name: "duplicate operator",
+			fields: []FieldSchema{
+				{Name: "name", Type: TypeString, Operators: []Operator{OperatorEqual, OperatorEqual}, Sortable: true},
+			},
+			order: []SortField{{Field: "name", Direction: Ascending}},
+		},
+		{
+			name: "wrong operator",
+			fields: []FieldSchema{
+				{Name: "enabled", Type: TypeBoolean, Operators: []Operator{OperatorContains}, Sortable: true},
+			},
+			order: []SortField{{Field: "enabled", Direction: Ascending}},
+		},
+		{
+			name:   "enum without values",
+			fields: []FieldSchema{{Name: "status", Type: TypeEnum, Sortable: true}},
+			order:  []SortField{{Field: "status", Direction: Ascending}},
+		},
+		{
+			name: "duplicate values",
+			fields: []FieldSchema{
+				{Name: "status", Type: TypeEnum, Sortable: true, SuggestedValues: []string{"x", "X"}},
+			},
+			order: []SortField{{Field: "status", Direction: Ascending}},
+		},
+		{
+			name: "control value",
+			fields: []FieldSchema{
+				{Name: "status", Type: TypeEnum, Sortable: true, SuggestedValues: []string{"bad\nvalue"}},
+			},
+			order: []SortField{{Field: "status", Direction: Ascending}},
+		},
+		{
+			name:   "unsortable default",
+			fields: []FieldSchema{{Name: "name", Type: TypeString}},
+			order:  []SortField{{Field: "name", Direction: Ascending}},
+		},
 		{name: "missing default", fields: []FieldSchema{valid}},
-		{name: "bad direction", fields: []FieldSchema{valid}, order: []SortField{{Field: "name", Direction: "SIDEWAYS"}}},
+		{
+			name:   "bad direction",
+			fields: []FieldSchema{valid},
+			order:  []SortField{{Field: "name", Direction: "SIDEWAYS"}},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -96,15 +148,24 @@ func TestSchemaRejectsInvalidDeclarations(t *testing.T) {
 	for index := range manyValues {
 		manyValues[index] = fmt.Sprintf("v%d", index)
 	}
-	_, err = NewSchema([]FieldSchema{{Name: "status", Type: TypeEnum, Sortable: true, SuggestedValues: manyValues}}, []SortField{{Field: "status", Direction: Ascending}})
+	_, err = NewSchema(
+		[]FieldSchema{{Name: "status", Type: TypeEnum, Sortable: true, SuggestedValues: manyValues}},
+		[]SortField{{Field: "status", Direction: Ascending}},
+	)
 	assert.ErrorIs(t, err, ErrInvalidSchema)
 }
 
 func TestParseCanonicalTypingAndFingerprint(t *testing.T) {
 	schema := testSchema(t)
-	first, err := Parse(`STATUS = ACTIVE and SCORE >= 1.50 AND enabled IN (TRUE, false) ORDER BY SCORE desc, NAME asc`, schema)
+	first, err := Parse(
+		`STATUS = ACTIVE and SCORE >= 1.50 AND enabled IN (TRUE, false) ORDER BY SCORE desc, NAME asc`,
+		schema,
+	)
 	require.NoError(t, err)
-	second, err := Parse(`status=active AND score>=1.5 and enabled in (true,false) order by score DESC,name ASC`, schema)
+	second, err := Parse(
+		`status=active AND score>=1.5 and enabled in (true,false) order by score DESC,name ASC`,
+		schema,
+	)
 	require.NoError(t, err)
 	assert.Equal(t,
 		`((status = "active" AND score >= 1.5) AND enabled IN (true, false)) ORDER BY score DESC, name ASC`,

@@ -50,8 +50,8 @@ func TestModelAliasCollectionQueryPagingDetailAndMixedBulkDelete(t *testing.T) {
 		config.ModelAliasConfig{Name: "review", Model: "gpt-5.4"},
 	)
 	cfg.Agents.Defaults.ModelName = "coding"
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 
 	first := serveModelAliasRequest(
@@ -73,8 +73,8 @@ func TestModelAliasCollectionQueryPagingDetailAndMixedBulkDelete(t *testing.T) {
 		QuerySchema    json.RawMessage           `json:"query_schema"`
 		Revision       string                    `json:"config_revision"`
 	}
-	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(first.Body.Bytes(), &page); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if len(page.Aliases) != 1 || page.Total != 3 || page.NextCursor == "" ||
 		page.CanonicalQuery == "" || len(page.QuerySchema) == 0 || page.Revision == "" {
@@ -113,8 +113,8 @@ func TestModelAliasCollectionQueryPagingDetailAndMixedBulkDelete(t *testing.T) {
 		t.Fatalf("bulk status=%d body=%s", bulk.Code, bulk.Body.String())
 	}
 	var result collectionBulkDeleteResponse
-	if err := json.Unmarshal(bulk.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(bulk.Body.Bytes(), &result); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if len(result.DeletedIDs) != 1 || result.DeletedIDs[0] != "analysis" || len(result.Failures) != 3 {
 		t.Fatalf("bulk result=%#v", result)
@@ -139,7 +139,12 @@ func TestModelRouterCollectionReturnsSummaryRatherThanConfiguration(t *testing.T
 	cfg.ModelRouters = []config.ModelRouterConfig{{
 		Name: "task-router", Enabled: true, Entry: "entry",
 		Blocks: []config.ModelRouterBlock{
-			{ID: "entry", Type: config.ModelRouterBlockTypeRules, Fallback: "fallback", Rules: []config.ModelRouterRule{{Match: config.ModelRouterRuleHasCode, Target: "code"}}},
+			{
+				ID:       "entry",
+				Type:     config.ModelRouterBlockTypeRules,
+				Fallback: "fallback",
+				Rules:    []config.ModelRouterRule{{Match: config.ModelRouterRuleHasCode, Target: "code"}},
+			},
 			{ID: "code", Type: config.ModelRouterBlockTypeModel, Model: "coding"},
 			{ID: "fallback", Type: config.ModelRouterBlockTypeModel, Model: "coding"},
 		},
@@ -181,9 +186,13 @@ func TestCollectionRequestBoundariesFencesAndResponseHeaders(t *testing.T) {
 		t.Fatalf("missing content type status=%d body=%s", missingType.Code, missingType.Body.String())
 	}
 	duplicate := serveCollectionRaw(
-		t, configPath, http.MethodPost, "/api/model-aliases",
+		t,
+		configPath,
+		http.MethodPost,
+		"/api/model-aliases",
 		`{"expected_config_revision":"`+revision+`","model_alias":{"name":"one","model":"gpt-5.4"},"MODEL_ALIAS":{"name":"two","model":"gpt-5.4"}}`,
-		"application/json", nil,
+		"application/json",
+		nil,
 	)
 	if duplicate.Code != http.StatusBadRequest {
 		t.Fatalf("duplicate JSON status=%d body=%s", duplicate.Code, duplicate.Body.String())
@@ -289,8 +298,8 @@ func TestAgentBulkDeleteRecomputesSelectionAwareBlockers(t *testing.T) {
 		t.Fatalf("blocked status=%d body=%s", blocked.Code, blocked.Body.String())
 	}
 	var result agentBulkDeleteResponse
-	if err := json.Unmarshal(blocked.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(blocked.Body.Bytes(), &result); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if len(result.DeletedIDs) != 0 || len(result.Failures) != 2 ||
 		result.Failures[0].ID != "reviewer" || result.Failures[1].ID != "worker" {
@@ -302,8 +311,8 @@ func TestAgentBulkDeleteRecomputesSelectionAwareBlockers(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Agents.List[0].Subagents = nil
-	if err := config.SaveConfig(harness.configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(harness.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	revision, err = config.ConfigRevision(harness.configPath)
 	if err != nil {
@@ -371,30 +380,30 @@ func TestMCPBulkDeleteCanonicalIDsReferencesAndCredentialCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := cfg.WorkspacePath()
-	if err := os.MkdirAll(workspace, 0o700); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.MkdirAll(workspace, 0o700); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := os.WriteFile(
+	if writeErr := os.WriteFile(
 		filepath.Join(workspace, agentDefinitionFileCurrent),
 		[]byte("---\nmcpServers: [protected]\n---\n"),
 		0o600,
-	); err != nil {
-		t.Fatal(err)
+	); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	plainCredentialID, err := picomcp.CredentialID("plain", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := picoauth.SetCredential(plainCredentialID, &picoauth.AuthCredential{
+	if credentialErr := picoauth.SetCredential(plainCredentialID, &picoauth.AuthCredential{
 		Provider: "mcp", AuthMethod: "bearer", AccessToken: "unreferenced-but-unowned",
-	}); err != nil {
-		t.Fatal(err)
+	}); credentialErr != nil {
+		t.Fatal(credentialErr)
 	}
 	const authCredentialID = "mcp:auth-explicit"
-	if err := picoauth.SetCredential(authCredentialID, &picoauth.AuthCredential{
+	if credentialErr := picoauth.SetCredential(authCredentialID, &picoauth.AuthCredential{
 		Provider: "mcp", AuthMethod: "bearer", AccessToken: "owned",
-	}); err != nil {
-		t.Fatal(err)
+	}); credentialErr != nil {
+		t.Fatal(credentialErr)
 	}
 	revision, err := config.ConfigRevision(harness.configPath)
 	if err != nil {
@@ -408,8 +417,8 @@ func TestMCPBulkDeleteCanonicalIDsReferencesAndCredentialCleanup(t *testing.T) {
 		t.Fatalf("case duplicate status=%d body=%s", duplicate.Code, duplicate.Body.String())
 	}
 	var duplicateResult collectionBulkDeleteResponse
-	if err := json.Unmarshal(duplicate.Body.Bytes(), &duplicateResult); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(duplicate.Body.Bytes(), &duplicateResult); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if len(duplicateResult.DeletedIDs) != 0 || len(duplicateResult.Failures) != 1 ||
 		duplicateResult.Failures[0].Code != "duplicate_id" {
@@ -423,8 +432,8 @@ func TestMCPBulkDeleteCanonicalIDsReferencesAndCredentialCleanup(t *testing.T) {
 		t.Fatalf("bulk status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
 	var result collectionBulkDeleteResponse
-	if err := json.Unmarshal(deleted.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(deleted.Body.Bytes(), &result); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if !slices.Equal(result.DeletedIDs, []string{"auth", "plain"}) ||
 		len(result.Failures) != 1 || result.Failures[0].ID != "protected" ||

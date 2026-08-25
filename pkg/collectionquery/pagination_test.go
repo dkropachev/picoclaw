@@ -198,10 +198,34 @@ func TestCursorCanonicalWireAndHostileValues(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidCursor)
 
 	invalidCases := []cursorWire{
-		{Version: cursorVersion, QueryFingerprint: query.Fingerprint(), EvaluatedAt: now, Values: []string{"NaN", now.Format(time.RFC3339Nano)}, ID: item.ID},
-		{Version: cursorVersion, QueryFingerprint: query.Fingerprint(), EvaluatedAt: now, Values: []string{"1.25", "not-a-time"}, ID: item.ID},
-		{Version: cursorVersion, QueryFingerprint: query.Fingerprint(), EvaluatedAt: now, Values: []string{"1.25"}, ID: item.ID},
-		{Version: cursorVersion + 1, QueryFingerprint: query.Fingerprint(), EvaluatedAt: now, Values: decoded.Values, ID: item.ID},
+		{
+			Version:          cursorVersion,
+			QueryFingerprint: query.Fingerprint(),
+			EvaluatedAt:      now,
+			Values:           []string{"NaN", now.Format(time.RFC3339Nano)},
+			ID:               item.ID,
+		},
+		{
+			Version:          cursorVersion,
+			QueryFingerprint: query.Fingerprint(),
+			EvaluatedAt:      now,
+			Values:           []string{"1.25", "not-a-time"},
+			ID:               item.ID,
+		},
+		{
+			Version:          cursorVersion,
+			QueryFingerprint: query.Fingerprint(),
+			EvaluatedAt:      now,
+			Values:           []string{"1.25"},
+			ID:               item.ID,
+		},
+		{
+			Version:          cursorVersion + 1,
+			QueryFingerprint: query.Fingerprint(),
+			EvaluatedAt:      now,
+			Values:           decoded.Values,
+			ID:               item.ID,
+		},
 	}
 	for _, wire := range invalidCases {
 		raw, marshalErr := json.Marshal(wire)
@@ -255,7 +279,6 @@ func TestPaginationCustomComparatorSortAndValidationFailures(t *testing.T) {
 	badID.ID = func(pageTestItem) (string, error) { return "", nil }
 	_, err = Paginate(items, query, "", 1, now, badID)
 	assert.ErrorIs(t, err, ErrInvalidPage)
-
 }
 
 func TestSortItemsAndCursorIDValidation(t *testing.T) {

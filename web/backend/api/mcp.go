@@ -358,7 +358,14 @@ func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if blockers := mcpServerReferences(cfg, name); len(blockers) > 0 {
-		writeCollectionError(w, http.StatusConflict, "mcp_server_referenced", "MCP server is still referenced", -1, blockers)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"mcp_server_referenced",
+			"MCP server is still referenced",
+			-1,
+			blockers,
+		)
 		return
 	}
 	server := cfg.Tools.MCP.Servers[name]

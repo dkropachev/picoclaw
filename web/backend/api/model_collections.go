@@ -20,19 +20,6 @@ import (
 
 const collectionMutationMaxBytes = 1 << 20
 
-type collectionFieldSchema struct {
-	Name            string   `json:"name"`
-	Type            string   `json:"type"`
-	Operators       []string `json:"operators"`
-	Sortable        bool     `json:"sortable"`
-	SuggestedValues []string `json:"suggested_values,omitempty"`
-}
-
-type collectionQuerySchema struct {
-	Fields       []collectionFieldSchema `json:"fields"`
-	DefaultQuery string                  `json:"default_query"`
-}
-
 type collectionBulkDeleteRequest struct {
 	IDs                    []string `json:"ids"`
 	ConfigRevision         string   `json:"config_revision,omitempty"`
@@ -89,7 +76,12 @@ var modelAliasCollectionSchema = mustCollectionQuerySchema(
 var modelRouterCollectionSchema = mustCollectionQuerySchema(
 	[]collectionquery.FieldSchema{
 		{Name: "name", Type: collectionquery.TypeString, Sortable: true},
-		{Name: "enabled", Type: collectionquery.TypeBoolean, Sortable: true, SuggestedValues: []string{"true", "false"}},
+		{
+			Name:            "enabled",
+			Type:            collectionquery.TypeBoolean,
+			Sortable:        true,
+			SuggestedValues: []string{"true", "false"},
+		},
 		{Name: "blocks", Type: collectionquery.TypeNumber, Sortable: true},
 		{Name: "rules", Type: collectionquery.TypeNumber, Sortable: true},
 	},
@@ -99,17 +91,29 @@ var modelRouterCollectionSchema = mustCollectionQuerySchema(
 func (h *Handler) registerModelCollectionRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/model-aliases", h.handleListModelAliases)
 	mux.HandleFunc("POST /api/model-aliases", h.requireCollectionMutationOrigin(h.handleCreateModelAliasByName))
-	mux.HandleFunc("POST /api/model-aliases/bulk-delete", h.requireCollectionMutationOrigin(h.handleBulkDeleteModelAliases))
+	mux.HandleFunc(
+		"POST /api/model-aliases/bulk-delete",
+		h.requireCollectionMutationOrigin(h.handleBulkDeleteModelAliases),
+	)
 	mux.HandleFunc("GET /api/model-aliases/{name}", h.handleGetModelAliasByName)
 	mux.HandleFunc("PUT /api/model-aliases/{name}", h.requireCollectionMutationOrigin(h.handleUpdateModelAliasByName))
-	mux.HandleFunc("DELETE /api/model-aliases/{name}", h.requireCollectionMutationOrigin(h.handleDeleteModelAliasByName))
+	mux.HandleFunc(
+		"DELETE /api/model-aliases/{name}",
+		h.requireCollectionMutationOrigin(h.handleDeleteModelAliasByName),
+	)
 
 	mux.HandleFunc("GET /api/model-routers", h.handleListModelRouters)
 	mux.HandleFunc("POST /api/model-routers", h.requireCollectionMutationOrigin(h.handleCreateModelRouterByName))
-	mux.HandleFunc("POST /api/model-routers/bulk-delete", h.requireCollectionMutationOrigin(h.handleBulkDeleteModelRouters))
+	mux.HandleFunc(
+		"POST /api/model-routers/bulk-delete",
+		h.requireCollectionMutationOrigin(h.handleBulkDeleteModelRouters),
+	)
 	mux.HandleFunc("GET /api/model-routers/{name}", h.handleGetModelRouterByName)
 	mux.HandleFunc("PUT /api/model-routers/{name}", h.requireCollectionMutationOrigin(h.handleUpdateModelRouterByName))
-	mux.HandleFunc("DELETE /api/model-routers/{name}", h.requireCollectionMutationOrigin(h.handleDeleteModelRouterByName))
+	mux.HandleFunc(
+		"DELETE /api/model-routers/{name}",
+		h.requireCollectionMutationOrigin(h.handleDeleteModelRouterByName),
+	)
 }
 
 func (h *Handler) requireCollectionMutationOrigin(next http.HandlerFunc) http.HandlerFunc {
@@ -117,7 +121,14 @@ func (h *Handler) requireCollectionMutationOrigin(next http.HandlerFunc) http.Ha
 		switch strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))) {
 		case "", "none", "same-origin":
 		default:
-			writeCollectionError(w, http.StatusForbidden, "cross_origin_mutation", "Cross-origin collection mutations are not allowed", 0, nil)
+			writeCollectionError(
+				w,
+				http.StatusForbidden,
+				"cross_origin_mutation",
+				"Cross-origin collection mutations are not allowed",
+				0,
+				nil,
+			)
 			return
 		}
 		if rawOrigin := strings.TrimSpace(r.Header.Get("Origin")); rawOrigin != "" {
@@ -125,7 +136,14 @@ func (h *Handler) requireCollectionMutationOrigin(next http.HandlerFunc) http.Ha
 			if err != nil || origin.Scheme == "" || origin.Host == "" ||
 				!strings.EqualFold(origin.Host, mcpRequestHost(h, r)) ||
 				!strings.EqualFold(origin.Scheme, mcpRequestScheme(h, r)) {
-				writeCollectionError(w, http.StatusForbidden, "cross_origin_mutation", "Cross-origin collection mutations are not allowed", 0, nil)
+				writeCollectionError(
+					w,
+					http.StatusForbidden,
+					"cross_origin_mutation",
+					"Cross-origin collection mutations are not allowed",
+					0,
+					nil,
+				)
 				return
 			}
 		}
@@ -147,22 +165,50 @@ func writeCollectionError(w http.ResponseWriter, status int, code, message strin
 
 func decodeCollectionJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	if r == nil || r.Body == nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "A JSON request body is required", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"A JSON request body is required",
+			-1,
+			nil,
+		)
 		return false
 	}
 	contentTypes := r.Header.Values("Content-Type")
 	if len(contentTypes) != 1 {
-		writeCollectionError(w, http.StatusUnsupportedMediaType, "json_content_type_required", "Content-Type must be application/json", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusUnsupportedMediaType,
+			"json_content_type_required",
+			"Content-Type must be application/json",
+			-1,
+			nil,
+		)
 		return false
 	}
 	mediaType, parameters, err := mime.ParseMediaType(contentTypes[0])
 	if err != nil || !strings.EqualFold(mediaType, "application/json") {
-		writeCollectionError(w, http.StatusUnsupportedMediaType, "json_content_type_required", "Content-Type must be application/json", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusUnsupportedMediaType,
+			"json_content_type_required",
+			"Content-Type must be application/json",
+			-1,
+			nil,
+		)
 		return false
 	}
 	for name, value := range parameters {
 		if !strings.EqualFold(name, "charset") || !strings.EqualFold(value, "utf-8") {
-			writeCollectionError(w, http.StatusUnsupportedMediaType, "json_content_type_required", "Content-Type must be application/json", -1, nil)
+			writeCollectionError(
+				w,
+				http.StatusUnsupportedMediaType,
+				"json_content_type_required",
+				"Content-Type must be application/json",
+				-1,
+				nil,
+			)
 			return false
 		}
 	}
@@ -171,25 +217,60 @@ func decodeCollectionJSON(w http.ResponseWriter, r *http.Request, target any) bo
 	if err != nil {
 		var maximum *http.MaxBytesError
 		if errors.As(err, &maximum) {
-			writeCollectionError(w, http.StatusRequestEntityTooLarge, "collection_request_too_large", "Collection request exceeds its size limit", -1, nil)
+			writeCollectionError(
+				w,
+				http.StatusRequestEntityTooLarge,
+				"collection_request_too_large",
+				"Collection request exceeds its size limit",
+				-1,
+				nil,
+			)
 			return false
 		}
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "Invalid JSON request body", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"Invalid JSON request body",
+			-1,
+			nil,
+		)
 		return false
 	}
 	if !utf8.Valid(raw) || rejectDuplicateJSONKeys(raw, 32, collectionExactJSONKeySubtree) != nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "Invalid JSON request body", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"Invalid JSON request body",
+			-1,
+			nil,
+		)
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "Invalid JSON request body", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"Invalid JSON request body",
+			-1,
+			nil,
+		)
 		return false
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "Request body must contain one JSON object", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"Request body must contain one JSON object",
+			-1,
+			nil,
+		)
 		return false
 	}
 	return true
@@ -220,16 +301,37 @@ func resolveCollectionRevision(
 	bodyRevision string,
 ) (string, bool) {
 	if r == nil || r.URL == nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "Invalid collection request", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"Invalid collection request",
+			-1,
+			nil,
+		)
 		return "", false
 	}
 	if len(r.Header.Values("If-Match")) > 1 {
-		writeCollectionError(w, http.StatusBadRequest, "conflicting_config_revision", "Config revision fences conflict", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"conflicting_config_revision",
+			"Config revision fences conflict",
+			-1,
+			nil,
+		)
 		return "", false
 	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_collection_request", "Collection query parameters are malformed", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_collection_request",
+			"Collection query parameters are malformed",
+			-1,
+			nil,
+		)
 		return "", false
 	}
 	candidates := []string{
@@ -243,7 +345,14 @@ func resolveCollectionRevision(
 			continue
 		}
 		if resolved != "" && candidate != resolved {
-			writeCollectionError(w, http.StatusBadRequest, "conflicting_config_revision", "Config revision fences conflict", -1, nil)
+			writeCollectionError(
+				w,
+				http.StatusBadRequest,
+				"conflicting_config_revision",
+				"Config revision fences conflict",
+				-1,
+				nil,
+			)
 			return "", false
 		}
 		resolved = candidate
@@ -258,7 +367,14 @@ func bulkCollectionRevision(
 	configRevision := strings.TrimSpace(request.ConfigRevision)
 	expectedRevision := strings.TrimSpace(request.ExpectedConfigRevision)
 	if configRevision != "" && expectedRevision != "" && configRevision != expectedRevision {
-		writeCollectionError(w, http.StatusBadRequest, "conflicting_config_revision", "Config revision fences conflict", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"conflicting_config_revision",
+			"Config revision fences conflict",
+			-1,
+			nil,
+		)
 		return "", false
 	}
 	if configRevision != "" {
@@ -269,11 +385,25 @@ func bulkCollectionRevision(
 
 func requireCollectionRevision(w http.ResponseWriter, expected, current string) bool {
 	if expected == "" {
-		writeCollectionError(w, http.StatusPreconditionRequired, "config_revision_required", "The current config revision is required", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusPreconditionRequired,
+			"config_revision_required",
+			"The current config revision is required",
+			-1,
+			nil,
+		)
 		return false
 	}
 	if expected != current {
-		writeCollectionError(w, http.StatusConflict, "config_revision_mismatch", "Configuration changed; reload and try again", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"config_revision_mismatch",
+			"Configuration changed; reload and try again",
+			-1,
+			nil,
+		)
 		return false
 	}
 	return true
@@ -371,7 +501,14 @@ func (h *Handler) handleListModelAliases(w http.ResponseWriter, r *http.Request)
 	}
 	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	aliases := make([]config.ModelAliasConfig, len(cfg.ModelAliases))
@@ -422,7 +559,14 @@ func (h *Handler) handleGetModelAliasByName(w http.ResponseWriter, r *http.Reque
 	}
 	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	index := findModelAliasIndexByName(cfg, r.PathValue("name"))
@@ -430,7 +574,11 @@ func (h *Handler) handleGetModelAliasByName(w http.ResponseWriter, r *http.Reque
 		writeCollectionError(w, http.StatusNotFound, "model_alias_not_found", "Model alias not found", -1, nil)
 		return
 	}
-	writeCollectionJSON(w, http.StatusOK, map[string]any{"model_alias": cloneModelAlias(cfg.ModelAliases[index]), "config_revision": revision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		map[string]any{"model_alias": cloneModelAlias(cfg.ModelAliases[index]), "config_revision": revision},
+	)
 }
 
 func (h *Handler) handleCreateModelAliasByName(w http.ResponseWriter, r *http.Request) {
@@ -442,7 +590,14 @@ func (h *Handler) handleCreateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if request.ModelAlias == nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_model_alias", "A model_alias object is required", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_model_alias",
+			"A model_alias object is required",
+			-1,
+			nil,
+		)
 		return
 	}
 	alias := cloneModelAlias(*request.ModelAlias)
@@ -451,14 +606,28 @@ func (h *Handler) handleCreateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !validNameAddressedCollectionID(alias.Name) {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_alias", "Model alias name is not a valid stable identity", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_alias",
+			"Model alias name is not a valid stable identity",
+			-1,
+			nil,
+		)
 		return
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
@@ -466,12 +635,26 @@ func (h *Handler) handleCreateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if findModelAliasIndexByName(cfg, alias.Name) >= 0 {
-		writeCollectionError(w, http.StatusConflict, "model_alias_exists", "A model alias with this name already exists", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"model_alias_exists",
+			"A model alias with this name already exists",
+			-1,
+			nil,
+		)
 		return
 	}
 	cfg.ModelAliases = append(cfg.ModelAliases, alias)
-	if err := validateAPIModelConfiguration(cfg); err != nil {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+	if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_configuration",
+			validationErr.Error(),
+			-1,
+			nil,
+		)
 		return
 	}
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -492,7 +675,14 @@ func (h *Handler) handleUpdateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if request.ModelAlias == nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_model_alias", "A model_alias object is required", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_model_alias",
+			"A model_alias object is required",
+			-1,
+			nil,
+		)
 		return
 	}
 	alias := cloneModelAlias(*request.ModelAlias)
@@ -501,19 +691,40 @@ func (h *Handler) handleUpdateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !validNameAddressedCollectionID(alias.Name) {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_alias", "Model alias name is not a valid stable identity", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_alias",
+			"Model alias name is not a valid stable identity",
+			-1,
+			nil,
+		)
 		return
 	}
 	name := strings.TrimSpace(r.PathValue("name"))
 	if alias.Name != name {
-		writeCollectionError(w, http.StatusConflict, "model_alias_name_immutable", "Model alias names are immutable", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"model_alias_name_immutable",
+			"Model alias names are immutable",
+			-1,
+			nil,
+		)
 		return
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
@@ -526,8 +737,15 @@ func (h *Handler) handleUpdateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	cfg.ModelAliases[index] = alias
-	if err := validateAPIModelConfiguration(cfg); err != nil {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+	if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_configuration",
+			validationErr.Error(),
+			-1,
+			nil,
+		)
 		return
 	}
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -546,7 +764,14 @@ func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Re
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	expectedRevision, ok := resolveCollectionRevision(w, r, "")
@@ -560,12 +785,26 @@ func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if blockers := modelAliasReferences(cfg, name); len(blockers) > 0 {
-		writeCollectionError(w, http.StatusConflict, "model_alias_referenced", "Model alias is still referenced", -1, blockers)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"model_alias_referenced",
+			"Model alias is still referenced",
+			-1,
+			blockers,
+		)
 		return
 	}
 	cfg.ModelAliases = append(cfg.ModelAliases[:index], cfg.ModelAliases[index+1:]...)
-	if err := validateAPIModelConfiguration(cfg); err != nil {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+	if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_configuration",
+			validationErr.Error(),
+			-1,
+			nil,
+		)
 		return
 	}
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -573,7 +812,15 @@ func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Re
 		writeCollectionConfigSaveError(w, err)
 		return
 	}
-	writeCollectionJSON(w, http.StatusOK, collectionBulkDeleteResponse{DeletedIDs: []string{name}, Failures: []collectionBulkFailure{}, ConfigRevision: nextRevision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		collectionBulkDeleteResponse{
+			DeletedIDs:     []string{name},
+			Failures:       []collectionBulkFailure{},
+			ConfigRevision: nextRevision,
+		},
+	)
 }
 
 func (h *Handler) handleBulkDeleteModelAliases(w http.ResponseWriter, r *http.Request) {
@@ -585,14 +832,28 @@ func (h *Handler) handleBulkDeleteModelAliases(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if len(request.IDs) == 0 || len(request.IDs) > 200 {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_bulk_delete", "Bulk deletion requires between 1 and 200 IDs", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_bulk_delete",
+			"Bulk deletion requires between 1 and 200 IDs",
+			-1,
+			nil,
+		)
 		return
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	bodyRevision, ok := bulkCollectionRevision(w, request)
@@ -628,8 +889,15 @@ func (h *Handler) handleBulkDeleteModelAliases(w http.ResponseWriter, r *http.Re
 	cfg.ModelAliases = kept
 	nextRevision := revision
 	if len(deleted) > 0 {
-		if err := validateAPIModelConfiguration(cfg); err != nil {
-			writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+		if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+			writeCollectionError(
+				w,
+				http.StatusUnprocessableEntity,
+				"invalid_model_configuration",
+				validationErr.Error(),
+				-1,
+				nil,
+			)
 			return
 		}
 		nextRevision, err = h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -640,7 +908,11 @@ func (h *Handler) handleBulkDeleteModelAliases(w http.ResponseWriter, r *http.Re
 	}
 	sort.Strings(deleted)
 	sortCollectionFailures(failures)
-	writeCollectionJSON(w, http.StatusOK, collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision},
+	)
 }
 
 func (h *Handler) handleListModelRouters(w http.ResponseWriter, r *http.Request) {
@@ -650,7 +922,14 @@ func (h *Handler) handleListModelRouters(w http.ResponseWriter, r *http.Request)
 	}
 	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	routers := make([]config.ModelRouterConfig, len(cfg.ModelRouters))
@@ -705,7 +984,14 @@ func (h *Handler) handleGetModelRouterByName(w http.ResponseWriter, r *http.Requ
 	}
 	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	index := findModelRouterIndex(cfg, r.PathValue("name"))
@@ -713,7 +999,11 @@ func (h *Handler) handleGetModelRouterByName(w http.ResponseWriter, r *http.Requ
 		writeCollectionError(w, http.StatusNotFound, "model_router_not_found", "Model router not found", -1, nil)
 		return
 	}
-	writeCollectionJSON(w, http.StatusOK, map[string]any{"model_router": cloneModelRouter(cfg.ModelRouters[index]), "config_revision": revision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		map[string]any{"model_router": cloneModelRouter(cfg.ModelRouters[index]), "config_revision": revision},
+	)
 }
 
 func (h *Handler) handleCreateModelRouterByName(w http.ResponseWriter, r *http.Request) {
@@ -725,20 +1015,41 @@ func (h *Handler) handleCreateModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	if request.ModelRouter == nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_model_router", "A model_router object is required", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_model_router",
+			"A model_router object is required",
+			-1,
+			nil,
+		)
 		return
 	}
 	router := cloneModelRouter(*request.ModelRouter)
 	router.Name = strings.TrimSpace(router.Name)
 	if !validNameAddressedCollectionID(router.Name) {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_router", "Model router name is not a valid stable identity", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_router",
+			"Model router name is not a valid stable identity",
+			-1,
+			nil,
+		)
 		return
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
@@ -746,14 +1057,28 @@ func (h *Handler) handleCreateModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	if findModelRouterIndex(cfg, router.Name) >= 0 {
-		writeCollectionError(w, http.StatusConflict, "model_router_exists", "A model router with this name already exists", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"model_router_exists",
+			"A model router with this name already exists",
+			-1,
+			nil,
+		)
 		return
 	}
 	cfg.ModelRouters = append(cfg.ModelRouters, router)
 	cfg.MaterializeAccountRouterModels()
 	cfg.MaterializeModelRouterModels()
-	if err := validateAPIModelConfiguration(cfg); err != nil {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+	if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_configuration",
+			validationErr.Error(),
+			-1,
+			nil,
+		)
 		return
 	}
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -774,25 +1099,53 @@ func (h *Handler) handleUpdateModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	if request.ModelRouter == nil {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_model_router", "A model_router object is required", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_model_router",
+			"A model_router object is required",
+			-1,
+			nil,
+		)
 		return
 	}
 	router := cloneModelRouter(*request.ModelRouter)
 	router.Name = strings.TrimSpace(router.Name)
 	if !validNameAddressedCollectionID(router.Name) {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_router", "Model router name is not a valid stable identity", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_router",
+			"Model router name is not a valid stable identity",
+			-1,
+			nil,
+		)
 		return
 	}
 	name := strings.TrimSpace(r.PathValue("name"))
 	if router.Name != name {
-		writeCollectionError(w, http.StatusConflict, "model_router_name_immutable", "Model router names are immutable", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"model_router_name_immutable",
+			"Model router names are immutable",
+			-1,
+			nil,
+		)
 		return
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
@@ -807,8 +1160,15 @@ func (h *Handler) handleUpdateModelRouterByName(w http.ResponseWriter, r *http.R
 	cfg.ModelRouters[index] = router
 	cfg.MaterializeAccountRouterModels()
 	cfg.MaterializeModelRouterModels()
-	if err := validateAPIModelConfiguration(cfg); err != nil {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+	if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_configuration",
+			validationErr.Error(),
+			-1,
+			nil,
+		)
 		return
 	}
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -827,7 +1187,14 @@ func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.R
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	expectedRevision, ok := resolveCollectionRevision(w, r, "")
@@ -841,14 +1208,28 @@ func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	if blockers := modelAliasReferences(cfg, name); len(blockers) > 0 {
-		writeCollectionError(w, http.StatusConflict, "model_router_referenced", "Model router is still referenced", -1, blockers)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"model_router_referenced",
+			"Model router is still referenced",
+			-1,
+			blockers,
+		)
 		return
 	}
 	cfg.ModelRouters = append(cfg.ModelRouters[:index], cfg.ModelRouters[index+1:]...)
 	cfg.MaterializeAccountRouterModels()
 	cfg.MaterializeModelRouterModels()
-	if err := validateAPIModelConfiguration(cfg); err != nil {
-		writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+	if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_model_configuration",
+			validationErr.Error(),
+			-1,
+			nil,
+		)
 		return
 	}
 	nextRevision, err := h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -856,7 +1237,15 @@ func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.R
 		writeCollectionConfigSaveError(w, err)
 		return
 	}
-	writeCollectionJSON(w, http.StatusOK, collectionBulkDeleteResponse{DeletedIDs: []string{name}, Failures: []collectionBulkFailure{}, ConfigRevision: nextRevision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		collectionBulkDeleteResponse{
+			DeletedIDs:     []string{name},
+			Failures:       []collectionBulkFailure{},
+			ConfigRevision: nextRevision,
+		},
+	)
 }
 
 func (h *Handler) handleBulkDeleteModelRouters(w http.ResponseWriter, r *http.Request) {
@@ -868,14 +1257,28 @@ func (h *Handler) handleBulkDeleteModelRouters(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if len(request.IDs) == 0 || len(request.IDs) > 200 {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_bulk_delete", "Bulk deletion requires between 1 and 200 IDs", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_bulk_delete",
+			"Bulk deletion requires between 1 and 200 IDs",
+			-1,
+			nil,
+		)
 		return
 	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	bodyRevision, ok := bulkCollectionRevision(w, request)
@@ -913,8 +1316,15 @@ func (h *Handler) handleBulkDeleteModelRouters(w http.ResponseWriter, r *http.Re
 	if len(deleted) > 0 {
 		cfg.MaterializeAccountRouterModels()
 		cfg.MaterializeModelRouterModels()
-		if err := validateAPIModelConfiguration(cfg); err != nil {
-			writeCollectionError(w, http.StatusUnprocessableEntity, "invalid_model_configuration", err.Error(), -1, nil)
+		if validationErr := validateAPIModelConfiguration(cfg); validationErr != nil {
+			writeCollectionError(
+				w,
+				http.StatusUnprocessableEntity,
+				"invalid_model_configuration",
+				validationErr.Error(),
+				-1,
+				nil,
+			)
 			return
 		}
 		nextRevision, err = h.saveConfigIfRevision(h.configPath, cfg, revision)
@@ -925,7 +1335,11 @@ func (h *Handler) handleBulkDeleteModelRouters(w http.ResponseWriter, r *http.Re
 	}
 	sort.Strings(deleted)
 	sortCollectionFailures(failures)
-	writeCollectionJSON(w, http.StatusOK, collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision},
+	)
 }
 
 func normalizeBulkIDs(ids []string) ([]string, []collectionBulkFailure) {
@@ -962,8 +1376,22 @@ func sortCollectionFailures(failures []collectionBulkFailure) {
 
 func writeCollectionConfigSaveError(w http.ResponseWriter, err error) {
 	if errors.Is(err, config.ErrConfigRevisionMismatch) {
-		writeCollectionError(w, http.StatusConflict, "config_revision_mismatch", "Configuration changed; reload and try again", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"config_revision_mismatch",
+			"Configuration changed; reload and try again",
+			-1,
+			nil,
+		)
 		return
 	}
-	writeCollectionError(w, http.StatusInternalServerError, "config_save_failed", "Failed to save configuration", -1, nil)
+	writeCollectionError(
+		w,
+		http.StatusInternalServerError,
+		"config_save_failed",
+		"Failed to save configuration",
+		-1,
+		nil,
+	)
 }

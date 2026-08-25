@@ -174,7 +174,9 @@ func notificationPageOptions() collectionquery.PageOptions[Notification] {
 			case FieldUpdated:
 				return collectionquery.TimestampValue(notification.UpdatedAt), true
 			case FieldText:
-				return collectionquery.StringValue(strings.TrimSpace(notification.Title + " " + notification.Summary)), true
+				return collectionquery.StringValue(
+					strings.TrimSpace(notification.Title + " " + notification.Summary),
+				), true
 			default:
 				return collectionquery.FieldValue{}, false
 			}

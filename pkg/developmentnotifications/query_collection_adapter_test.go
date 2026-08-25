@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	collectionquery "github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	collectionquery "github.com/sipeed/picoclaw/pkg/collectionquery"
 )
 
 func TestNotificationQuerySchemaProjectionAndCanonicalRoundTrip(t *testing.T) {

@@ -19,10 +19,30 @@ import (
 var mcpServerCollectionSchema = mustCollectionQuerySchema(
 	[]collectionquery.FieldSchema{
 		{Name: "name", Type: collectionquery.TypeString, Sortable: true},
-		{Name: "enabled", Type: collectionquery.TypeBoolean, Sortable: true, SuggestedValues: []string{"true", "false"}},
-		{Name: "deferred", Type: collectionquery.TypeBoolean, Sortable: true, SuggestedValues: []string{"true", "false"}},
-		{Name: "type", Type: collectionquery.TypeEnum, Sortable: true, SuggestedValues: []string{"stdio", "http", "sse"}},
-		{Name: "auth", Type: collectionquery.TypeEnum, Sortable: true, SuggestedValues: []string{"none", "custom", "bearer", "oauth"}},
+		{
+			Name:            "enabled",
+			Type:            collectionquery.TypeBoolean,
+			Sortable:        true,
+			SuggestedValues: []string{"true", "false"},
+		},
+		{
+			Name:            "deferred",
+			Type:            collectionquery.TypeBoolean,
+			Sortable:        true,
+			SuggestedValues: []string{"true", "false"},
+		},
+		{
+			Name:            "type",
+			Type:            collectionquery.TypeEnum,
+			Sortable:        true,
+			SuggestedValues: []string{"stdio", "http", "sse"},
+		},
+		{
+			Name:            "auth",
+			Type:            collectionquery.TypeEnum,
+			Sortable:        true,
+			SuggestedValues: []string{"none", "custom", "bearer", "oauth"},
+		},
 	},
 	[]collectionquery.SortField{{Field: "name", Direction: collectionquery.Ascending}},
 )
@@ -34,12 +54,26 @@ func (h *Handler) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	response, err := buildMCPConfigResponse(cfg)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "mcp_credentials_failed", "Failed to load MCP credential status", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"mcp_credentials_failed",
+			"Failed to load MCP credential status",
+			-1,
+			nil,
+		)
 		return
 	}
 	names := make([]string, 0, len(response.Servers))
@@ -97,7 +131,14 @@ func (h *Handler) handleGetMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	actualName := findMCPServerName(cfg.Tools.MCP.Servers, r.PathValue("name"))
@@ -107,7 +148,14 @@ func (h *Handler) handleGetMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 	response, err := buildMCPConfigResponse(cfg)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "mcp_credentials_failed", "Failed to load MCP credential status", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"mcp_credentials_failed",
+			"Failed to load MCP credential status",
+			-1,
+			nil,
+		)
 		return
 	}
 	for _, server := range response.Servers {
@@ -128,7 +176,14 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if len(request.IDs) == 0 || len(request.IDs) > 200 {
-		writeCollectionError(w, http.StatusBadRequest, "invalid_bulk_delete", "Bulk deletion requires between 1 and 200 IDs", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_bulk_delete",
+			"Bulk deletion requires between 1 and 200 IDs",
+			-1,
+			nil,
+		)
 		return
 	}
 
@@ -136,7 +191,14 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 	defer unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		writeCollectionError(w, http.StatusInternalServerError, "config_load_failed", "Failed to load configuration", -1, nil)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 	bodyRevision, ok := bulkCollectionRevision(w, request)
@@ -163,7 +225,11 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 		}
 		server := cfg.Tools.MCP.Servers[name]
 		if server.Auth != nil {
-			if credentialID, credentialErr := picomcp.CredentialID(name, server.Auth); credentialErr == nil && credentialID != "" {
+			if credentialID, credentialErr := picomcp.CredentialID(
+				name,
+				server.Auth,
+			); credentialErr == nil &&
+				credentialID != "" {
 				credentialIDs[credentialID] = true
 			}
 		}
@@ -192,7 +258,11 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 	}
 	sort.Strings(deleted)
 	sortCollectionFailures(failures)
-	writeCollectionJSON(w, http.StatusOK, collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision})
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision},
+	)
 }
 
 func normalizeMCPBulkIDs(
