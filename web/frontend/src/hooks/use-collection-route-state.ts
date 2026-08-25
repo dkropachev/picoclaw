@@ -190,6 +190,23 @@ export function useCollectionRouteState({
     [memoryKey],
   )
 
+  const setSelection = useCallback(
+    (ids: Iterable<string>) => {
+      const nextIDs = new Set<string>()
+      for (const id of ids) {
+        if (nextIDs.size >= maximumCollectionBulkDeleteItems) break
+        nextIDs.add(id)
+      }
+      const current = selectionMemory.get(memoryKey)
+      const nextFailures = new Map<string, CollectionBulkDeleteFailure>()
+      for (const [id, failure] of current?.failuresByID ?? failuresByID) {
+        if (nextIDs.has(id)) nextFailures.set(id, failure)
+      }
+      writeSelection(nextIDs, nextFailures)
+    },
+    [failuresByID, memoryKey, writeSelection],
+  )
+
   const clearSelection = useCallback(() => {
     writeSelection(new Set(), new Map())
   }, [writeSelection])
@@ -381,6 +398,7 @@ export function useCollectionRouteState({
     rememberSuccessfulQuery,
     commitQuerySuccess,
     clearHistory,
+    setSelection,
     setItemSelected,
     toggleSelection,
     setLoadedSelection,

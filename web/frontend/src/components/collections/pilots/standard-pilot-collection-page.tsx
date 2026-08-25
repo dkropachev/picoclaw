@@ -214,13 +214,7 @@ export function StandardPilotCollectionPage<T>({
             isItemDisabled: isItemSelectable
               ? (item) => !isItemSelectable(item)
               : undefined,
-            onItemChange: (item, checked) =>
-              state.setItemSelected(definition.getItemID(item), checked),
-            onLoadedChange: (loaded, checked) =>
-              state.setLoadedSelection(
-                loaded.map(definition.getItemID),
-                checked,
-              ),
+            onSelectionChange: state.setSelection,
           }}
           onOpenItem={onOpenItem}
           loading={loading}
@@ -242,8 +236,8 @@ export function StandardPilotCollectionPage<T>({
               {state.selectedCount === 1 ? "" : "s"}?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Only explicitly checked items will be deleted. Referenced or stale
-              items will remain selected with their blocker.
+              Only explicitly selected items will be deleted. Referenced or
+              stale items will remain selected with their blocker.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

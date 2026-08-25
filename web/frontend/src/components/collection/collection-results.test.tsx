@@ -1,9 +1,13 @@
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { useState } from "react"
 import { describe, expect, it, vi } from "vitest"
 
 import { CollectionResults } from "@/components/collection/collection-results"
-import type { CollectionDefinition } from "@/components/collection/collection-types"
+import type {
+  CollectionDefinition,
+  CollectionView,
+} from "@/components/collection/collection-types"
 
 interface Thing {
   id: string
@@ -15,25 +19,115 @@ interface Thing {
 const things: Thing[] = [
   { id: "a", name: "Alpha", status: "ready", owner: "Ada" },
   { id: "b", name: "Beta", status: "blocked", owner: "Bo" },
+  { id: "c", name: "Gamma", status: "ready", owner: "Cy" },
+  { id: "d", name: "Delta", status: "ready", owner: "Dee" },
 ]
 
 describe("CollectionResults", () => {
-  it("renders compact selectable rows, blockers, open, and item actions", async () => {
+  it("selects rows with desktop gestures without rendering checkboxes", async () => {
     const user = userEvent.setup()
-    const onItemChange = vi.fn()
-    const onLoadedChange = vi.fn()
+    render(<SelectableResults />)
+
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument()
+    await user.click(item("a"))
+    expect(selectedIDs()).toEqual(["a"])
+
+    fireEvent.click(item("c"), { ctrlKey: true })
+    expect(selectedIDs()).toEqual(["a", "c"])
+
+    await user.click(item("b"))
+    expect(selectedIDs()).toEqual(["b"])
+
+    await user.click(item("a"))
+    fireEvent.click(item("c"), { shiftKey: true })
+    expect(selectedIDs()).toEqual(["a", "b", "c"])
+
+    fireEvent.click(item("d"), { ctrlKey: true, shiftKey: true })
+    expect(selectedIDs()).toEqual(["a", "b", "c", "d"])
+  })
+
+  it("skips ineligible rows in ranges and respects the selection bound", async () => {
+    const user = userEvent.setup()
+    render(
+      <SelectableResults
+        maximumSelected={2}
+        isItemDisabled={(candidate) => candidate.id === "b"}
+      />,
+    )
+
+    await user.click(item("a"))
+    fireEvent.click(item("d"), { shiftKey: true })
+    expect(selectedIDs()).toEqual(["a", "c"])
+    await user.click(item("b"))
+    expect(selectedIDs()).toEqual(["a", "c"])
+  })
+
+  it("supports keyboard selection, select-loaded, clearing, and opening", async () => {
+    const user = userEvent.setup()
+    const onOpen = vi.fn()
+    render(<SelectableResults onOpenItem={onOpen} />)
+
+    item("b").focus()
+    await user.keyboard(" ")
+    expect(selectedIDs()).toEqual(["b"])
+
+    await user.keyboard("{Control>}a{/Control}")
+    expect(selectedIDs()).toEqual(["a", "b", "c", "d"])
+
+    await user.keyboard("{Escape}")
+    expect(selectedIDs()).toEqual([])
+
+    item("c").focus()
+    await user.keyboard("{Enter}")
+    expect(onOpen).toHaveBeenCalledWith(things[2])
+  })
+
+  it("opens on double-click and exposes item actions only by context menu", async () => {
+    const user = userEvent.setup()
     const onOpen = vi.fn()
     const onInspect = vi.fn()
-    const definition = thingDefinition(onInspect)
     render(
-      <CollectionResults
-        definition={definition}
-        items={things}
-        view="list"
+      <SelectableResults
+        definition={thingDefinition(onInspect)}
         onOpenItem={onOpen}
-        selection={{
-          selectedIDs: new Set(["b"]),
-          failuresByID: new Map([
+      />,
+    )
+
+    expect(
+      screen.queryByRole("button", { name: "Actions for Alpha" }),
+    ).not.toBeInTheDocument()
+    await user.dblClick(item("a"))
+    expect(onOpen).toHaveBeenCalledWith(things[0])
+
+    fireEvent.contextMenu(item("b"))
+    expect(selectedIDs()).toEqual(["b"])
+    await user.click(await screen.findByRole("menuitem", { name: "Inspect" }))
+    expect(onInspect).toHaveBeenCalledWith(things[1])
+  })
+
+  it("uses the same selection gestures in table and grid views", () => {
+    const { rerender } = render(<SelectableResults view="table" />)
+    const tableRow = document.querySelector<HTMLElement>('tr[data-item-id="a"]')
+    if (!tableRow) throw new Error("Missing table row")
+    fireEvent.click(tableRow)
+    expect(selectedIDs()).toContain("a")
+
+    rerender(<SelectableResults view="grid" />)
+    const gridCard = document.querySelector<HTMLElement>(
+      'article[data-item-id="c"]',
+    )
+    if (!gridCard) throw new Error("Missing grid card")
+    fireEvent.click(gridCard, { ctrlKey: true })
+    expect(selectedIDs()).toEqual(["a", "c"])
+  })
+
+  it("renders blockers and applies the same row model to table and grid", () => {
+    const { rerender } = render(
+      <SelectableResults
+        view="table"
+        initialSelected={["b"]}
+        failuresByID={
+          new Map([
             [
               "b",
               {
@@ -42,34 +136,8 @@ describe("CollectionResults", () => {
                 blockers: ["Used by agent main"],
               },
             ],
-          ]),
-          onItemChange,
-          onLoadedChange,
-        }}
-      />,
-    )
-
-    await user.click(screen.getByRole("checkbox", { name: "Select Alpha" }))
-    expect(onItemChange).toHaveBeenCalledWith(things[0], true)
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select all loaded things" }),
-    )
-    expect(onLoadedChange).toHaveBeenCalledWith(things, true)
-    expect(screen.getByText("Used by agent main")).toBeVisible()
-
-    await user.click(screen.getByRole("button", { name: "Alpha" }))
-    expect(onOpen).toHaveBeenCalledWith(things[0])
-    await user.click(screen.getByRole("button", { name: "Actions for Alpha" }))
-    await user.click(screen.getByRole("menuitem", { name: "Inspect" }))
-    expect(onInspect).toHaveBeenCalledWith(things[0])
-  })
-
-  it("provides a desktop table and a mobile row fallback", () => {
-    render(
-      <CollectionResults
-        definition={thingDefinition()}
-        items={things}
-        view="table"
+          ])
+        }
       />,
     )
     expect(screen.getByRole("table")).toBeInTheDocument()
@@ -79,43 +147,13 @@ describe("CollectionResults", () => {
     expect(screen.getByRole("region", { name: "Things list" })).toHaveClass(
       "md:hidden",
     )
-    expect(screen.getByRole("columnheader", { name: "Owner" })).toBeVisible()
-  })
+    expect(screen.getAllByText("Used by agent main")).toHaveLength(2)
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument()
 
-  it("excludes resource-ineligible rows from individual and loaded selection", async () => {
-    const user = userEvent.setup()
-    const onLoadedChange = vi.fn()
-    render(
-      <CollectionResults
-        definition={thingDefinition()}
-        items={things}
-        view="list"
-        selection={{
-          selectedIDs: new Set(),
-          isItemDisabled: (item) => item.status !== "ready",
-          onItemChange: vi.fn(),
-          onLoadedChange,
-        }}
-      />,
-    )
-    expect(screen.getByRole("checkbox", { name: "Select Beta" })).toBeDisabled()
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select all loaded things" }),
-    )
-    expect(onLoadedChange).toHaveBeenCalledWith([things[0]], true)
-  })
-
-  it("renders one-column-first grids with at most four summary facts", () => {
-    render(
-      <CollectionResults
-        definition={thingDefinition()}
-        items={[things[0]]}
-        view="grid"
-      />,
-    )
+    rerender(<SelectableResults view="grid" />)
     const grid = screen.getByRole("region", { name: "Things grid" })
     expect(grid.querySelector(".grid")).toHaveClass("grid-cols-1")
-    expect(screen.getByText("Fact four")).toBeVisible()
+    expect(screen.getAllByText("Fact four").length).toBeGreaterThan(0)
     expect(screen.queryByText("Fact five")).not.toBeInTheDocument()
   })
 
@@ -147,6 +185,58 @@ describe("CollectionResults", () => {
     expect(screen.getByRole("status")).toHaveTextContent("No items found")
   })
 })
+
+function SelectableResults({
+  definition = thingDefinition(),
+  view = "list",
+  initialSelected = [],
+  failuresByID,
+  maximumSelected,
+  isItemDisabled,
+  onOpenItem = vi.fn(),
+}: {
+  definition?: CollectionDefinition<Thing>
+  view?: CollectionView
+  initialSelected?: string[]
+  failuresByID?: ReadonlyMap<
+    string,
+    { id: string; code: string; blockers?: string[] }
+  >
+  maximumSelected?: number
+  isItemDisabled?: (item: Thing) => boolean
+  onOpenItem?: (item: Thing) => void
+}) {
+  const [selected, setSelected] = useState(new Set(initialSelected))
+  return (
+    <CollectionResults
+      definition={definition}
+      items={things}
+      view={view}
+      onOpenItem={onOpenItem}
+      selection={{
+        selectedIDs: selected,
+        failuresByID,
+        maximumSelected,
+        isItemDisabled,
+        onSelectionChange: (next) => setSelected(new Set(next)),
+      }}
+    />
+  )
+}
+
+function item(id: string): HTMLElement {
+  const element = document.querySelector<HTMLElement>(`[data-item-id="${id}"]`)
+  if (!element) throw new Error(`Missing collection item ${id}`)
+  return element
+}
+
+function selectedIDs(): string[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("[data-state=selected]"),
+  )
+    .filter((element) => !element.closest(".md\\:hidden"))
+    .map((element) => element.dataset.itemId ?? "")
+}
 
 function thingDefinition(onInspect = vi.fn()): CollectionDefinition<Thing> {
   return {

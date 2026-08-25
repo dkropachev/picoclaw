@@ -154,6 +154,21 @@ describe("collection route state", () => {
     )
   })
 
+  it("replaces selection atomically and retains blockers only for selected IDs", () => {
+    const state = renderCollectionState()
+    act(() => state.result.current.setLoadedSelection(["a", "b"], true))
+    act(() =>
+      state.result.current.reconcileBulkDelete({
+        deleted_ids: [],
+        failures: [{ id: "a", code: "referenced", blockers: ["Used by main"] }],
+      }),
+    )
+    act(() => state.result.current.setSelection(new Set(["a", "c"])))
+    expect([...state.result.current.selectedIDs]).toEqual(["a", "c"])
+    expect(state.result.current.failuresByID.has("a")).toBe(true)
+    expect(state.result.current.failuresByID.has("b")).toBe(false)
+  })
+
   it("restores in-memory scroll without making it durable", () => {
     const callbacks: FrameRequestCallback[] = []
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {

@@ -20,7 +20,8 @@ in `web/frontend/collection-surfaces.json` when they otherwise resemble a list.
 
 [When selected: N selected]                 [Delete] [Clear selection]
 
-[ ] Item identity   concise metadata   status/time   […] actions
+Item identity   concise metadata   status/time
+Click selects · Shift-click extends · double-click opens · right-click shows actions
 ```
 
 A collection route owns one resource type and summary data only. Related counts
@@ -37,7 +38,7 @@ The collection subsystem provides:
   Grid facts, badges, supported actions, and supported views;
 - `useCollectionRouteState` for canonical URL/local state, cursor loading,
   explicit selection, scroll restoration, and mutation reconciliation;
-- shared checkbox, table, view-switch, loading, empty, and error primitives built
+- shared row-selection, context-menu, table, view-switch, loading, empty, and error primitives built
   on the existing shadcn/Radix layer.
 
 Feature route components stay thin. They provide API functions, resource
@@ -83,7 +84,10 @@ maximum page size 200.
   Generic query code never interpolates SQL or bypasses feature validation.
 - Opaque cursors bind the canonical query, ordering, final sort values, and
   stable item ID. A cursor from another canonical query is rejected.
-- Selection contains only explicitly checked stable IDs. It persists across
+- Selection contains only explicitly selected stable IDs. A plain row click
+  replaces selection, Shift-click extends a contiguous range, Control/Command
+  toggles individual rows, double-click or Enter opens detail, and right-click
+  exposes item actions without a permanent action trigger. Selection persists across
   loaded pages and clears when the canonical query changes.
 - Bulk delete accepts at most 200 IDs and the applicable config revision or
   per-item versions. It always requires confirmation and never offers

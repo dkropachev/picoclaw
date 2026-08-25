@@ -68,6 +68,5 @@ export interface CollectionSelection<T> {
   maximumSelected?: number
   isItemDisabled?: (item: T) => boolean
   failuresByID?: ReadonlyMap<string, CollectionBulkDeleteFailure>
-  onItemChange: (item: T, checked: boolean) => void
-  onLoadedChange: (items: readonly T[], checked: boolean) => void
+  onSelectionChange: (ids: ReadonlySet<string>) => void
 }

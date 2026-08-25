@@ -394,7 +394,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             }
             aria-current={isActive ? "page" : undefined}
             data-status={isActive ? "active" : undefined}
-            search={linkSearch}
+            search={linkSearch ?? {}}
           >
             {content}
           </Link>
