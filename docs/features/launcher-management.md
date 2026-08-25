@@ -149,6 +149,8 @@ Owns: CODE web/frontend/src/components/app-*
 Owns: CODE web/frontend/src/components/config/**
 Owns: CODE web/frontend/src/components/collection/**
 Owns: CODE web/frontend/src/components/collections/pilots/model-alias*
+Owns: CODE web/frontend/src/components/collections/pilots/model-collections.tsx
+Owns: CODE web/frontend/src/components/collections/pilots/standard-pilot-collection-page.tsx
 Owns: CODE web/frontend/src/components/credentials/**
 Owns: CODE web/frontend/src/components/gateway-setup-notice.tsx
 Owns: CODE web/frontend/src/components/models/**
@@ -165,6 +167,7 @@ Owns: CODE web/frontend/src/index.css
 Owns: CODE web/frontend/src/lib/**
 Owns: CODE web/frontend/src/main.tsx
 Owns: CODE web/frontend/src/routes/agent.tsx
+Owns: CODE web/frontend/src/routes/__root.tsx
 Owns: CODE web/frontend/src/routes/config*
 Owns: CODE web/frontend/src/routes/accounts.account-router.$index.tsx
 Owns: CODE web/frontend/src/routes/accounts.account-router.new.tsx
