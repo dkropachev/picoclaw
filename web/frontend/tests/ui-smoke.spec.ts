@@ -3264,7 +3264,7 @@ async function mockLauncherApis(
             })),
             total: models.model_aliases.length,
             next_cursor: "",
-            canonical_query: "ORDER BY name ASC",
+            canonical_query: "ALL ORDER BY name ASC",
             query_schema: mockCollectionSchemas.aliases,
             config_revision: models.revision,
           })
@@ -3290,7 +3290,7 @@ async function mockLauncherApis(
             model_routers: routers,
             total: routers.length,
             next_cursor: "",
-            canonical_query: "ORDER BY name ASC",
+            canonical_query: "ALL ORDER BY name ASC",
             query_schema: mockCollectionSchemas.routers,
             config_revision: models.revision,
           })
@@ -3953,6 +3953,64 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("sidebar navigation survives collection query canonicalization", async ({
+  page,
+}, testInfo) => {
+  const errors = collectPageErrors(page)
+  let routerRequests = 0
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/model-routers") {
+      routerRequests += 1
+    }
+  })
+
+  await gotoMockedRoute(page, "/models/aliases?q=ALL+ORDER+BY+name+ASC")
+  await expect(page).toHaveURL(/\/models\/aliases\?q=ALL\+ORDER\+BY\+name\+ASC/)
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "Toggle Sidebar" }).click()
+    const sidebar = page.getByRole("dialog", { name: "Sidebar" })
+    await sidebar.getByRole("button", { name: "Services", exact: true }).click()
+    await sidebar.getByRole("link", { name: "Model routers" }).click()
+  } else {
+    await page.getByRole("button", { name: "Services", exact: true }).click()
+    await page.getByRole("link", { name: "Model routers" }).click()
+  }
+
+  await expect(page).toHaveURL(/\/models\/routers(?:\?|$)/)
+  await expect(
+    page.getByRole("heading", { name: "Model routers", exact: true }),
+  ).toBeVisible()
+  expect(routerRequests).toBeGreaterThan(0)
+  expect(errors).toEqual([])
+})
+
+test("collection rows use gesture selection and contextual actions", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models/aliases")
+  const results = page.locator('[data-slot="collection-results"]')
+  const rows = results.locator("[data-item-id]")
+  await expect(rows).toHaveCount(2)
+  await expect(results.getByRole("checkbox")).toHaveCount(0)
+  await expect(
+    results.getByRole("button", { name: /Actions for/ }),
+  ).toHaveCount(0)
+
+  await rows.nth(0).click()
+  await rows.nth(1).click({ modifiers: ["Shift"] })
+  await expect(page.getByText("2 selected", { exact: true })).toBeVisible()
+
+  await rows.nth(0).click({ button: "right" })
+  await expect(page.getByRole("menuitem", { name: "Open" })).toBeVisible()
+  await expect(page.getByRole("menuitem", { name: "Edit alias" })).toBeVisible()
+  await page.keyboard.press("Escape")
+
+  await rows.nth(0).dblclick()
+  await expect(page).toHaveURL(/\/models\/aliases\/code(?:\?|$)/)
+  expect(errors).toEqual([])
+})
 
 test("removed collection URLs use the normal not-found boundary", async ({
   page,

@@ -32,10 +32,11 @@ vi.mock("@tanstack/react-router", () => ({
     const active = activeOptions?.exact
       ? pathname === to
       : pathname === to || (to !== "/" && pathname.startsWith(`${to}/`))
+    const searchString = search ? new URLSearchParams(search).toString() : ""
     return (
       <a
         {...props}
-        href={search ? `${to}?${new URLSearchParams(search).toString()}` : to}
+        href={searchString ? `${to}?${searchString}` : to}
         {...(active ? { "aria-current": "page", "data-status": "active" } : {})}
       >
         {children}

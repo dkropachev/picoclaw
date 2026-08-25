@@ -14,26 +14,43 @@ export const Route = createFileRoute("/agent/agents")({
 })
 
 function AgentsCollectionRoute() {
-  const locationSearch = useLocation({
-    select: (location) => location.search,
+  const location = useLocation({
+    select: ({ pathname, search }) => ({ pathname, search }),
   })
+  const locationSearch = location.search
+  const routeSearch = Route.useSearch()
   const navigate = Route.useNavigate()
   const search = useMemo(
+    () => normalizeAgentCollectionSearch({ ...routeSearch }),
+    [routeSearch],
+  )
+  const normalizedLocationSearch = useMemo(
     () => normalizeAgentCollectionSearch({ ...locationSearch }),
     [locationSearch],
   )
 
   useEffect(() => {
+    if (location.pathname !== "/agent/agents") return
+    if (!agentCollectionSearchIsCanonical(normalizedLocationSearch, search)) {
+      return
+    }
     if (!agentCollectionSearchIsCanonical({ ...locationSearch }, search)) {
       void navigate({ search, replace: true })
     }
-  }, [locationSearch, navigate, search])
+  }, [
+    location.pathname,
+    locationSearch,
+    navigate,
+    normalizedLocationSearch,
+    search,
+  ])
 
   const changeSearch = useCallback(
     (next: CollectionRouteSearch, replace = false) => {
+      if (location.pathname !== "/agent/agents") return
       void navigate({ search: next, replace })
     },
-    [navigate],
+    [location.pathname, navigate],
   )
 
   return (

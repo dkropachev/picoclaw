@@ -17,22 +17,42 @@ export const Route = createFileRoute("/agent/mcp_/servers")({
 })
 
 function MCPServersRoute() {
-  const locationSearch = useLocation({ select: (location) => location.search })
+  const location = useLocation({
+    select: ({ pathname, search }) => ({ pathname, search }),
+  })
+  const locationSearch = location.search
+  const routeSearch = Route.useSearch()
   const navigate = Route.useNavigate()
   const search = useMemo(
+    () => normalizeCollectionRouteSearch({ ...routeSearch }, { defaultQuery }),
+    [routeSearch],
+  )
+  const normalizedLocationSearch = useMemo(
     () =>
       normalizeCollectionRouteSearch({ ...locationSearch }, { defaultQuery }),
     [locationSearch],
   )
   useEffect(() => {
+    if (location.pathname !== "/agent/mcp/servers") return
+    if (!collectionRouteSearchIsCanonical(normalizedLocationSearch, search)) {
+      return
+    }
     if (!collectionRouteSearchIsCanonical({ ...locationSearch }, search)) {
       void navigate({ search, replace: true })
     }
-  }, [locationSearch, navigate, search])
+  }, [
+    location.pathname,
+    locationSearch,
+    navigate,
+    normalizedLocationSearch,
+    search,
+  ])
   const changeSearch = useCallback(
-    (next: CollectionRouteSearch, replace = false) =>
-      void navigate({ search: next, replace }),
-    [navigate],
+    (next: CollectionRouteSearch, replace = false) => {
+      if (location.pathname !== "/agent/mcp/servers") return
+      void navigate({ search: next, replace })
+    },
+    [location.pathname, navigate],
   )
   return (
     <MCPServersCollectionPage

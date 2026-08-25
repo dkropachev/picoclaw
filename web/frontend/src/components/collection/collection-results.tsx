@@ -1,23 +1,29 @@
 import {
   IconAlertTriangle,
-  IconDots,
   IconInbox,
   IconLoader2,
   IconRefresh,
 } from "@tabler/icons-react"
-import type { ReactNode } from "react"
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactElement,
+  type ReactNode,
+  useId,
+  useRef,
+} from "react"
 
 import type { CollectionBulkDeleteFailure } from "@/api/collection"
 import { maximumCollectionBulkDeleteItems } from "@/api/collection"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Table,
@@ -65,6 +71,14 @@ export function CollectionResults<T>({
   emptyTitle?: string
   emptyDescription?: ReactNode
 }) {
+  const selectionInstructionsID = useId()
+  const interactions = useCollectionInteractions({
+    definition,
+    items,
+    selection,
+    onOpenItem,
+    instructionsID: selectionInstructionsID,
+  })
   if (loading && items.length === 0) return <CollectionResultsLoading />
   if (error && items.length === 0) {
     return <CollectionResultsError error={error} onRetry={onRetry} />
@@ -80,6 +94,13 @@ export function CollectionResults<T>({
 
   return (
     <div data-slot="collection-results" className="space-y-3">
+      {selection && (
+        <p id={selectionInstructionsID} className="sr-only">
+          Click to select one item. Hold Shift to select a range, or Control or
+          Command to toggle items. Double-click or press Enter to open.
+          Right-click for item actions.
+        </p>
+      )}
       {error && (
         <div
           role="alert"
@@ -100,6 +121,7 @@ export function CollectionResults<T>({
           items={items}
           selection={selection}
           onOpenItem={onOpenItem}
+          interactions={interactions}
         />
       ) : view === "grid" ? (
         <CollectionGridResults
@@ -107,6 +129,7 @@ export function CollectionResults<T>({
           items={items}
           selection={selection}
           onOpenItem={onOpenItem}
+          interactions={interactions}
         />
       ) : (
         <CollectionListResults
@@ -114,6 +137,7 @@ export function CollectionResults<T>({
           items={items}
           selection={selection}
           onOpenItem={onOpenItem}
+          interactions={interactions}
         />
       )}
       {hasNextPage && onLoadMore && (
@@ -138,12 +162,14 @@ function CollectionListResults<T>({
   items,
   selection,
   onOpenItem,
+  interactions,
   className,
 }: {
   definition: CollectionDefinition<T>
   items: readonly T[]
   selection?: CollectionSelection<T>
   onOpenItem?: (item: T) => void
+  interactions: CollectionInteractions<T>
   className?: string
 }) {
   return (
@@ -154,43 +180,31 @@ function CollectionListResults<T>({
         className,
       )}
     >
-      {selection && (
-        <SelectLoadedRow
-          definition={definition}
-          items={items}
-          selection={selection}
-        />
-      )}
       <ul className="divide-border divide-y">
-        {items.map((item) => {
+        {items.map((item, index) => {
           const id = definition.getItemID(item)
           const failure = selection?.failuresByID?.get(id)
-          return (
+          return withItemContextMenu(
+            definition,
+            item,
+            onOpenItem,
             <li
               key={id}
               data-item-id={id}
               data-state={
                 selection?.selectedIDs.has(id) ? "selected" : undefined
               }
-              className="hover:bg-muted/30 data-[state=selected]:bg-muted/40 flex min-h-14 min-w-0 items-center gap-3 px-3 py-2 transition-colors"
+              className="hover:bg-muted/30 data-[state=selected]:bg-muted/40 focus-visible:ring-ring flex min-h-14 min-w-0 cursor-default items-center gap-3 px-3 py-2 transition-colors outline-none select-none focus-visible:ring-2 focus-visible:ring-inset"
+              {...interactions.itemProps(item, index)}
             >
-              {selection && (
-                <ItemCheckbox
-                  definition={definition}
-                  item={item}
-                  selection={selection}
-                />
-              )}
               <IdentityBlock
                 definition={definition}
                 item={item}
                 failure={failure}
-                onOpenItem={onOpenItem}
                 className="flex-1"
               />
               <CollectionBadges definition={definition} item={item} />
-              <ItemActions definition={definition} item={item} />
-            </li>
+            </li>,
           )
         })}
       </ul>
@@ -203,11 +217,13 @@ function CollectionTableResults<T>({
   items,
   selection,
   onOpenItem,
+  interactions,
 }: {
   definition: CollectionDefinition<T>
   items: readonly T[]
   selection?: CollectionSelection<T>
   onOpenItem?: (item: T) => void
+  interactions: CollectionInteractions<T>
 }) {
   return (
     <>
@@ -216,6 +232,7 @@ function CollectionTableResults<T>({
         items={items}
         selection={selection}
         onOpenItem={onOpenItem}
+        interactions={interactions}
         className="md:hidden"
       />
       <section
@@ -225,15 +242,6 @@ function CollectionTableResults<T>({
         <Table>
           <TableHeader className="bg-background sticky top-0 z-10">
             <TableRow>
-              {selection && (
-                <TableHead className="w-10">
-                  <LoadedCheckbox
-                    definition={definition}
-                    items={items}
-                    selection={selection}
-                  />
-                </TableHead>
-              )}
               <TableHead>Identity</TableHead>
               {definition.columns.map((column) => (
                 <TableHead
@@ -243,39 +251,28 @@ function CollectionTableResults<T>({
                   {column.header}
                 </TableHead>
               ))}
-              {(definition.actions?.length ?? 0) > 0 && (
-                <TableHead className="w-10">
-                  <span className="sr-only">Actions</span>
-                </TableHead>
-              )}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {items.map((item) => {
+            {items.map((item, index) => {
               const id = definition.getItemID(item)
               const selected = selection?.selectedIDs.has(id) ?? false
-              return (
+              return withItemContextMenu(
+                definition,
+                item,
+                onOpenItem,
                 <TableRow
                   key={id}
                   data-item-id={id}
                   data-state={selected ? "selected" : undefined}
-                  className="h-14"
+                  className="focus-visible:ring-ring h-14 cursor-default outline-none select-none focus-visible:ring-2 focus-visible:ring-inset"
+                  {...interactions.itemProps(item, index)}
                 >
-                  {selection && (
-                    <TableCell>
-                      <ItemCheckbox
-                        definition={definition}
-                        item={item}
-                        selection={selection}
-                      />
-                    </TableCell>
-                  )}
                   <TableCell className="min-w-52">
                     <IdentityBlock
                       definition={definition}
                       item={item}
                       failure={selection?.failuresByID?.get(id)}
-                      onOpenItem={onOpenItem}
                     />
                   </TableCell>
                   {definition.columns.map((column) => (
@@ -283,12 +280,7 @@ function CollectionTableResults<T>({
                       {column.cell(item)}
                     </TableCell>
                   ))}
-                  {(definition.actions?.length ?? 0) > 0 && (
-                    <TableCell>
-                      <ItemActions definition={definition} item={item} />
-                    </TableCell>
-                  )}
-                </TableRow>
+                </TableRow>,
               )
             })}
           </TableBody>
@@ -303,50 +295,39 @@ function CollectionGridResults<T>({
   items,
   selection,
   onOpenItem,
+  interactions,
 }: {
   definition: CollectionDefinition<T>
   items: readonly T[]
   selection?: CollectionSelection<T>
   onOpenItem?: (item: T) => void
+  interactions: CollectionInteractions<T>
 }) {
   return (
     <section aria-label={`${definition.title} grid`}>
-      {selection && (
-        <SelectLoadedRow
-          definition={definition}
-          items={items}
-          selection={selection}
-          bordered
-        />
-      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {items.map((item) => {
+        {items.map((item, index) => {
           const id = definition.getItemID(item)
           const selected = selection?.selectedIDs.has(id) ?? false
           const facts = definition.gridFacts?.slice(0, 4) ?? []
-          return (
+          return withItemContextMenu(
+            definition,
+            item,
+            onOpenItem,
             <article
               key={id}
               data-item-id={id}
               data-state={selected ? "selected" : undefined}
-              className="border-border bg-card data-[state=selected]:border-primary/60 relative min-w-0 rounded-lg border p-4"
+              className="border-border bg-card data-[state=selected]:border-primary/60 focus-visible:ring-ring relative min-w-0 cursor-default rounded-lg border p-4 outline-none select-none focus-visible:ring-2"
+              {...interactions.itemProps(item, index)}
             >
               <div className="flex min-w-0 items-start gap-3">
-                {selection && (
-                  <ItemCheckbox
-                    definition={definition}
-                    item={item}
-                    selection={selection}
-                  />
-                )}
                 <IdentityBlock
                   definition={definition}
                   item={item}
                   failure={selection?.failuresByID?.get(id)}
-                  onOpenItem={onOpenItem}
                   className="flex-1"
                 />
-                <ItemActions definition={definition} item={item} />
               </div>
               <CollectionBadges
                 definition={definition}
@@ -373,7 +354,7 @@ function CollectionGridResults<T>({
                   })}
                 </dl>
               )}
-            </article>
+            </article>,
           )
         })}
       </div>
@@ -381,107 +362,191 @@ function CollectionGridResults<T>({
   )
 }
 
-function SelectLoadedRow<T>({
+interface CollectionInteractions<T> {
+  itemProps: (
+    item: T,
+    index: number,
+  ) => {
+    tabIndex?: number
+    "aria-label"?: string
+    "aria-describedby"?: string
+    onClick?: (event: MouseEvent<HTMLElement>) => void
+    onDoubleClick?: (event: MouseEvent<HTMLElement>) => void
+    onContextMenu?: (event: MouseEvent<HTMLElement>) => void
+    onKeyDown?: (event: KeyboardEvent<HTMLElement>) => void
+  }
+}
+
+function useCollectionInteractions<T>({
   definition,
   items,
   selection,
-  bordered = false,
+  onOpenItem,
+  instructionsID,
 }: {
   definition: CollectionDefinition<T>
   items: readonly T[]
-  selection: CollectionSelection<T>
-  bordered?: boolean
-}) {
-  return (
-    <div
-      className={cn(
-        "border-border flex h-10 items-center justify-between gap-3 px-3 text-xs",
-        bordered ? "mb-3 rounded-lg border" : "border-b",
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <LoadedCheckbox
-          definition={definition}
-          items={items}
-          selection={selection}
-        />
-        Select loaded
-      </div>
-      <span className="text-muted-foreground tabular-nums">
-        {items.length} loaded
-      </span>
-    </div>
-  )
-}
-
-function LoadedCheckbox<T>({
-  definition,
-  items,
-  selection,
-}: {
-  definition: CollectionDefinition<T>
-  items: readonly T[]
-  selection: CollectionSelection<T>
-}) {
-  const selectableItems = items.filter(
-    (item) => !selection.isItemDisabled?.(item),
-  )
-  const selectedCount = selectableItems.reduce(
-    (count, item) =>
-      count + (selection.selectedIDs.has(definition.getItemID(item)) ? 1 : 0),
-    0,
-  )
-  const checked =
-    selectableItems.length > 0 && selectedCount === selectableItems.length
-      ? true
-      : selectedCount > 0
-        ? "indeterminate"
-        : false
-  return (
-    <Checkbox
-      checked={checked}
-      disabled={selection.disabled || selectableItems.length === 0}
-      aria-label={`Select all loaded ${definition.title.toLowerCase()}`}
-      onCheckedChange={(next) =>
-        selection.onLoadedChange(selectableItems, next === true)
-      }
-    />
-  )
-}
-
-function ItemCheckbox<T>({
-  definition,
-  item,
-  selection,
-}: {
-  definition: CollectionDefinition<T>
-  item: T
-  selection: CollectionSelection<T>
-}) {
-  const id = definition.getItemID(item)
+  selection?: CollectionSelection<T>
+  onOpenItem?: (item: T) => void
+  instructionsID: string
+}): CollectionInteractions<T> {
+  const anchor = useRef<string | null>(null)
+  const itemID = (item: T) => definition.getItemID(item)
+  const selectable = (item: T) =>
+    selection != null &&
+    !selection.disabled &&
+    !selection.isItemDisabled?.(item)
   const maximumSelected =
-    selection.maximumSelected ?? maximumCollectionBulkDeleteItems
-  const selectionLimitReached =
-    !selection.selectedIDs.has(id) &&
-    selection.selectedIDs.size >= maximumSelected
+    selection?.maximumSelected ?? maximumCollectionBulkDeleteItems
+
+  const addWithinLimit = (ids: Set<string>, id: string) => {
+    if (ids.has(id) || ids.size < maximumSelected) ids.add(id)
+  }
+
+  const selectItem = (
+    item: T,
+    index: number,
+    modifiers: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+  ) => {
+    if (!selection || !selectable(item)) return
+    const id = itemID(item)
+    const additive = modifiers.ctrlKey || modifiers.metaKey
+    if (modifiers.shiftKey) {
+      const anchorIndex = items.findIndex(
+        (candidate) => itemID(candidate) === anchor.current,
+      )
+      const start = anchorIndex < 0 ? index : Math.min(anchorIndex, index)
+      const end = anchorIndex < 0 ? index : Math.max(anchorIndex, index)
+      const next = additive ? new Set(selection.selectedIDs) : new Set<string>()
+      for (let rangeIndex = start; rangeIndex <= end; rangeIndex += 1) {
+        const candidate = items[rangeIndex]
+        if (selectable(candidate)) addWithinLimit(next, itemID(candidate))
+      }
+      if (anchorIndex < 0) anchor.current = id
+      selection.onSelectionChange(next)
+      return
+    }
+
+    anchor.current = id
+    if (additive) {
+      const next = new Set(selection.selectedIDs)
+      if (next.has(id)) next.delete(id)
+      else addWithinLimit(next, id)
+      selection.onSelectionChange(next)
+      return
+    }
+    selection.onSelectionChange(new Set([id]))
+  }
+
+  const selectAllLoaded = () => {
+    if (!selection || selection.disabled) return
+    const next = new Set<string>()
+    for (const item of items) {
+      if (selectable(item)) addWithinLimit(next, itemID(item))
+    }
+    selection.onSelectionChange(next)
+  }
+
+  return {
+    itemProps: (item, index) => {
+      const id = itemID(item)
+      const selected = selection?.selectedIDs.has(id) ?? false
+      const focusable = selection != null || onOpenItem != null
+      return {
+        tabIndex: focusable ? 0 : undefined,
+        "aria-label": focusable
+          ? `${definition.getItemLabel(item)}. ${selected ? "Selected" : "Not selected"}.`
+          : undefined,
+        "aria-describedby": selection ? instructionsID : undefined,
+        onClick: selection
+          ? (event) => {
+              if (isInteractiveEventTarget(event)) return
+              selectItem(item, index, event)
+            }
+          : undefined,
+        onDoubleClick: onOpenItem
+          ? (event) => {
+              if (isInteractiveEventTarget(event)) return
+              event.preventDefault()
+              onOpenItem(item)
+            }
+          : undefined,
+        onContextMenu: selection
+          ? () => {
+              if (!selected && selectable(item)) {
+                anchor.current = id
+                selection.onSelectionChange(new Set([id]))
+              }
+            }
+          : undefined,
+        onKeyDown: focusable
+          ? (event) => {
+              if (event.target !== event.currentTarget) return
+              if (event.key === "Enter" && onOpenItem) {
+                event.preventDefault()
+                onOpenItem(item)
+                return
+              }
+              if (event.key === " " && selection) {
+                event.preventDefault()
+                selectItem(item, index, event)
+                return
+              }
+              if (
+                event.key.toLowerCase() === "a" &&
+                (event.ctrlKey || event.metaKey) &&
+                selection
+              ) {
+                event.preventDefault()
+                selectAllLoaded()
+                return
+              }
+              if (event.key === "Escape" && selection) {
+                event.preventDefault()
+                selection.onSelectionChange(new Set())
+              }
+            }
+          : undefined,
+      }
+    },
+  }
+}
+
+function isInteractiveEventTarget(event: MouseEvent<HTMLElement>): boolean {
+  if (event.target === event.currentTarget) return false
   return (
-    <Checkbox
-      checked={selection.selectedIDs.has(id)}
-      disabled={
-        selection.disabled ||
-        selectionLimitReached ||
-        selection.isItemDisabled?.(item)
-      }
-      aria-label={`Select ${definition.getItemLabel(item)}`}
-      title={
-        selectionLimitReached
-          ? `Selection is limited to ${maximumSelected} items`
-          : undefined
-      }
-      onCheckedChange={(checked) =>
-        selection.onItemChange(item, checked === true)
-      }
-    />
+    event.target instanceof Element &&
+    event.target.closest(
+      "a,button,input,select,textarea,[role=button],[role=link],[role=menuitem]",
+    ) != null
+  )
+}
+
+function withItemContextMenu<T>(
+  definition: CollectionDefinition<T>,
+  item: T,
+  onOpenItem: ((item: T) => void) | undefined,
+  child: ReactElement,
+): ReactElement {
+  const actions = (definition.actions ?? []).filter(
+    (action) => !action.hidden?.(item),
+  )
+  if (!onOpenItem && actions.length === 0) return child
+  return (
+    <ContextMenu key={definition.getItemID(item)}>
+      <ContextMenuTrigger asChild>{child}</ContextMenuTrigger>
+      <ContextMenuContent>
+        {onOpenItem && (
+          <ContextMenuItem onSelect={() => onOpenItem(item)}>
+            Open
+          </ContextMenuItem>
+        )}
+        {onOpenItem && actions.length > 0 && <ContextMenuSeparator />}
+        {actions.map((action) => (
+          <CollectionActionItem key={action.id} action={action} item={item} />
+        ))}
+      </ContextMenuContent>
+    </ContextMenu>
   )
 }
 
@@ -489,29 +554,17 @@ function IdentityBlock<T>({
   definition,
   item,
   failure,
-  onOpenItem,
   className,
 }: {
   definition: CollectionDefinition<T>
   item: T
   failure?: CollectionBulkDeleteFailure
-  onOpenItem?: (item: T) => void
   className?: string
 }) {
   const identity = definition.getItemIdentity(item)
   return (
     <div className={cn("min-w-0", className)}>
-      {onOpenItem ? (
-        <button
-          type="button"
-          className="focus-visible:ring-ring max-w-full rounded-sm text-left text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
-          onClick={() => onOpenItem(item)}
-        >
-          <span className="block truncate">{identity.title}</span>
-        </button>
-      ) : (
-        <div className="truncate text-sm font-medium">{identity.title}</div>
-      )}
+      <div className="truncate text-sm font-medium">{identity.title}</div>
       {identity.description && (
         <div className="text-muted-foreground mt-0.5 truncate text-xs">
           {identity.description}
@@ -557,38 +610,6 @@ function CollectionBadges<T>({
   ) : null
 }
 
-function ItemActions<T>({
-  definition,
-  item,
-}: {
-  definition: CollectionDefinition<T>
-  item: T
-}) {
-  const actions = (definition.actions ?? []).filter(
-    (action) => !action.hidden?.(item),
-  )
-  if (actions.length === 0) return null
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={`Actions for ${definition.getItemLabel(item)}`}
-        >
-          <IconDots />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {actions.map((action) => (
-          <CollectionActionItem key={action.id} action={action} item={item} />
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
 function CollectionActionItem<T>({
   action,
   item,
@@ -599,14 +620,14 @@ function CollectionActionItem<T>({
   const label =
     typeof action.label === "function" ? action.label(item) : action.label
   return (
-    <DropdownMenuItem
+    <ContextMenuItem
       variant={action.destructive ? "destructive" : "default"}
       disabled={action.disabled?.(item)}
       onSelect={() => void action.onSelect(item)}
     >
       {action.icon}
       {label}
-    </DropdownMenuItem>
+    </ContextMenuItem>
   )
 }
 
@@ -619,7 +640,6 @@ export function CollectionResultsLoading() {
     >
       {Array.from({ length: 5 }, (_, index) => (
         <div key={index} className="flex h-14 items-center gap-3 px-3">
-          <Skeleton className="size-4 rounded-sm" />
           <div className="min-w-0 flex-1 space-y-2">
             <Skeleton className="h-3 w-1/3" />
             <Skeleton className="h-2.5 w-1/2" />

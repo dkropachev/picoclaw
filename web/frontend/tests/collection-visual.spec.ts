@@ -63,7 +63,7 @@ test("shared query autocomplete is stable", async ({ page }) => {
 test("shared explicit selection is stable", async ({ page }) => {
   const errors = collectPageErrors(page)
   await openCollection(page, "/models/aliases", "light")
-  await page.getByRole("checkbox").nth(1).click()
+  await page.locator("[data-item-id]").first().click()
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
   await assertVisualContract(page, errors)
   await expect(page.locator("#main-content")).toHaveScreenshot(
