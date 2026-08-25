@@ -13,6 +13,7 @@ import { toast } from "sonner"
 import type { CollectionBulkDeleteResponse } from "@/api/collection"
 import {
   type EvaluationConfigInput,
+  type EvaluationModelOption,
   type EvaluationStatus,
   ModelEvaluationAPIError,
   type RepositoryModelEvaluation,
@@ -30,6 +31,10 @@ import {
   type CollectionDefinition,
   CollectionDetailShell,
 } from "@/components/collection"
+import {
+  profileAvailableAliases,
+  selectProfileCandidates,
+} from "@/components/model-evaluations/model-evaluation-candidates"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -551,18 +556,32 @@ function EvaluationForm({
   onCancel: () => void
   onSaved: (id: string) => void
 }) {
+  const initialProfileID = initial?.profile?.id ?? options.profiles[0]?.id ?? ""
+  const initialProfile = options.profiles.find(
+    (profile) => profile.id === initialProfileID,
+  )
   const [repository, setRepository] = useState(
     initial?.repository ?? options.repositories[0]?.repository ?? "",
   )
-  const [profileID, setProfileID] = useState(
-    initial?.profile?.id ?? options.profiles[0]?.id ?? "",
-  )
+  const [profileID, setProfileID] = useState(initialProfileID)
   const [ref, setRef] = useState(initial?.ref ?? "HEAD")
   const [models, setModels] = useState<string[]>(
-    initial?.candidate_models ?? [],
+    initial?.candidate_models ??
+      selectProfileCandidates(
+        [],
+        initialProfile,
+        options.models,
+        options.max_candidate_models,
+      ),
   )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
+  const selectedProfile = options.profiles.find(
+    (profile) => profile.id === profileID,
+  )
+  const compatibleAliases = new Set(
+    profileAvailableAliases(selectedProfile, options.models),
+  )
   const toggleModel = (alias: string, checked: boolean) =>
     setModels((current) =>
       checked
@@ -571,9 +590,20 @@ function EvaluationForm({
     )
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    if (!repository.trim() || !profileID || models.length < 2) {
+    if (!repository.trim() || !selectedProfile) {
       setError(
         "Repository, profile, and at least two candidate models are required.",
+      )
+      return
+    }
+    if (
+      models.length < 2 ||
+      models.length > options.max_candidate_models ||
+      !models.includes(selectedProfile.reviewer_model) ||
+      models.some((alias) => !compatibleAliases.has(alias))
+    ) {
+      setError(
+        "Select the profile reviewer and at least one other compatible candidate model.",
       )
       return
     }
@@ -643,7 +673,20 @@ function EvaluationForm({
         <Select
           value={profileID}
           disabled={saving}
-          onValueChange={setProfileID}
+          onValueChange={(nextProfileID) => {
+            const profile = options.profiles.find(
+              (item) => item.id === nextProfileID,
+            )
+            setProfileID(nextProfileID)
+            setModels((current) =>
+              selectProfileCandidates(
+                current,
+                profile,
+                options.models,
+                options.max_candidate_models,
+              ),
+            )
+          }}
         >
           <SelectTrigger aria-label="Review profile">
             <SelectValue placeholder="Choose a profile" />
@@ -661,26 +704,16 @@ function EvaluationForm({
         <legend className="text-sm font-medium">Candidate models *</legend>
         <div className="border-border divide-border rounded-lg border">
           {options.models.map((model) => (
-            <label
+            <CandidateModelOption
               key={model.alias}
-              className="flex items-center gap-3 border-b px-3 py-3 text-sm last:border-b-0"
-            >
-              <Checkbox
-                checked={models.includes(model.alias)}
-                aria-label={`Select candidate model ${model.alias}`}
-                disabled={saving || !model.available}
-                onCheckedChange={(checked) =>
-                  toggleModel(model.alias, checked === true)
-                }
-              />
-              <span className="min-w-0 flex-1">
-                <span className="font-medium">{model.alias}</span>
-                <span className="text-muted-foreground ml-2 font-mono text-xs">
-                  {model.resolved_model}
-                </span>
-              </span>
-              {!model.available && <Badge variant="outline">Unavailable</Badge>}
-            </label>
+              model={model}
+              selected={models}
+              reviewerModel={selectedProfile?.reviewer_model}
+              compatible={compatibleAliases.has(model.alias)}
+              maximum={options.max_candidate_models}
+              saving={saving}
+              onToggle={toggleModel}
+            />
           ))}
         </div>
       </fieldset>
@@ -703,6 +736,57 @@ function EvaluationForm({
         </Button>
       </div>
     </form>
+  )
+}
+
+function CandidateModelOption({
+  model,
+  selected,
+  reviewerModel,
+  compatible,
+  maximum,
+  saving,
+  onToggle,
+}: {
+  model: EvaluationModelOption
+  selected: string[]
+  reviewerModel?: string
+  compatible: boolean
+  maximum: number
+  saving: boolean
+  onToggle: (alias: string, checked: boolean) => void
+}) {
+  const checked = selected.includes(model.alias)
+  const required = model.alias === reviewerModel
+  const available = model.available && compatible
+  return (
+    <label className="flex items-center gap-3 border-b px-3 py-3 text-sm last:border-b-0">
+      <Checkbox
+        checked={checked}
+        aria-label={`Select candidate model ${model.alias}`}
+        disabled={
+          saving ||
+          (checked && required) ||
+          (!available && !checked) ||
+          (!checked && selected.length >= maximum)
+        }
+        onCheckedChange={(nextChecked) =>
+          onToggle(model.alias, nextChecked === true)
+        }
+      />
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">{model.alias}</span>
+        {required && (
+          <span className="text-muted-foreground ml-2 text-xs">
+            required by profile
+          </span>
+        )}
+        <span className="text-muted-foreground ml-2 font-mono text-xs">
+          {model.resolved_model}
+        </span>
+      </span>
+      {!available && <Badge variant="outline">Unavailable</Badge>}
+    </label>
   )
 }
 
