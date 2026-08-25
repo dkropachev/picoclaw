@@ -182,6 +182,62 @@ func TestWorkflowAuthoringCapabilitiesUsesRegistryKeysAndSanitizesShapes(t *test
 	}
 }
 
+func TestWorkflowAuthoringCapabilitiesUsesFrozenFactorySchema(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.MCP.Enabled = false
+	loop := workflowDependencyTestLoop(cfg)
+	defaultAgent := loop.registry.GetDefaultAgent()
+	registry, err := tools.NewOwnedToolRegistry(tools.ToolOwner{Scope: tools.ToolOwnerScopeAgent, AgentID: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	live := &workflowAuthoringTestTool{
+		name: "strict_frozen",
+		parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"value": map[string]any{"type": "string"},
+			},
+			"required": []string{"value"},
+		},
+	}
+	factory, err := tools.NewToolFactory(tools.ToolDescriptor{
+		Name:        "strict_frozen",
+		Description: "private description",
+		Parameters:  live.parameters,
+	}, tools.ToolTraits{}, func(tools.ToolBuildContext) (tools.Tool, error) {
+		return live, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registerErr := registry.RegisterFactory(factory); registerErr != nil {
+		t.Fatal(registerErr)
+	}
+	live.panicName = true
+	live.panicDescription = true
+	live.panicParameters = true
+	defaultAgent.Tools = registry
+
+	catalog, err := loop.WorkflowAuthoringCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *workflows.WorkflowAuthoringToolCapability
+	for index := range catalog.Tools {
+		if catalog.Tools[index].Name == "strict_frozen" {
+			found = &catalog.Tools[index]
+			break
+		}
+	}
+	if found == nil || !found.ParameterShapeProjected || found.ParameterShape == nil ||
+		len(found.ParameterShape.Properties) != 1 || !found.ParameterShape.Properties[0].Required {
+		t.Fatalf("frozen workflow capability = %#v", found)
+	}
+}
+
 func TestWorkflowAuthoringCapabilitiesUsesConfiguredDefaultAheadOfMain(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()

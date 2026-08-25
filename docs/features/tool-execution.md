@@ -15,6 +15,10 @@ the bytes of one currently live media capability without disclosing its backing
 path. Trusted callers can opt one otherwise generic tool loop into sequential
 response-order execution and private diagnostic suppression, and can construct
 an `apply_patch` tool whose complete path set is guarded before mutation.
+An additive owner-aware factory path can also construct strict registries with
+frozen schemas, conservative execution traits, isolated mutable instances, and
+explicit immutable sharing while legacy registration and shallow cloning keep
+their existing behavior.
 
 ## Reconstruction Notes
 
@@ -50,11 +54,14 @@ an `apply_patch` tool whose complete path set is guarded before mutation.
 | `FR-TOOL-017` | MUST | A model-backed web-search provider requires an explicit configured model alias and never substitutes a provider default. Since Gemini and Perplexity search own their API credentials rather than selecting a model account, they resolve the alias base mapping; account overrides apply only to executions with a concrete model account. | Search must use the same explicit model-selection vocabulary without pretending that a provider-owned credential is an account-router target. |
 | `FR-TOOL-018` | MUST | `FileMediaStore` implements the optional `media.SnapshotReader.ReadSnapshot(ctx, ref, maxBytes)` capability. For one currently registered canonical `media://` UUID reference and a positive caller limit, it holds lifecycle synchronization from lookup through close, opens the mapped entry without following a final symlink or blocking on a special file, verifies the opened handle is regular, and performs one bounded read whose actual bytes cannot exceed the caller limit. Unix uses no-follow plus nonblocking open and a status-change token; Windows opens the final entry itself, rejects every handle carrying the reparse-point attribute, and compares handle change time; other platforms fail closed instead of using a race-prone fallback. Success returns detached bytes and copied metadata, never the backing path or mutable store state. Missing, expired, malformed, unsafe, observably changed-size/modtime/identity/change-token, oversized, cancelled, and safe-open-unavailable captures fail with fixed redacted errors that contain no reference, path, metadata, payload, or raw operating-system error. Store registration normalizes a cleaned absolute exact lexical lifecycle key without an approximate case fold and only coalesces that key when `Lstat` reports the same captured entry identity. A `SameFile` identity found under a distinct key is retained separately and makes all such live lifecycles non-deleting, conservatively covering Windows path aliases without conflating hard-link paths. Re-registration permanently cancels older pending deletion through either the exact key or captured `SameFile` identity; final removal rechecks its token and identity under store synchronization, preserving an already replaced entry. Consequently, an earlier release cannot delete a newly registered path or race a pinned snapshot. The base `MediaStore` interface remains source-compatible, and capture does not promise recovery after release, expiry, store reconstruction, or process restart. | A session freezer needs a race-safe way to detach live capability bytes without extending ordinary temporary-media lifetime or turning local file details into model-visible diagnostics. |
 | `FR-TOOL-019` | MUST | A `ToolLoopConfig` caller may independently request response-order sequential tool execution and suppression of tool arguments and result-derived detail in process logs; both options default off. Sequential mode executes one model-authored call at a time in declared order, preserves thought signatures and call/result identifiers in provider follow-up messages, stops at cancellation boundaries, and normalizes nil or panic-derived results without concurrent sibling execution. Suppression propagates through registry execution into shared filesystem helpers so tool names and coarse outcomes remain observable while raw arguments, paths, validation detail, panic detail, and result/error content do not. `NewApplyPatchToolWithPathGuard` additionally parses the whole patch and validates every source path and move destination before its first operation, while the ordinary constructor retains existing behavior. | Narrow repair controllers need reusable tool primitives that preserve deterministic edit ordering and diagnostics without leaking confined checkout details or allowing a later patch operation to bypass preflight. |
+| `FR-TOOL-020` | MUST | Tool registrations may declare a validated construction `ToolOwner`, conservative `ToolTraits` for risk, parallel behavior, idempotency, and sharing, and a concurrency-safe `ToolFactory` with one exact recursively frozen descriptor. Each per-owner construction returns a non-nil pointer that is not reserved by another live strict owner. Strict owner instantiation transactionally creates distinct per-owner mutable instances, recursively resolves exact dependencies, keeps an owner-local service cache, injects the destination media store, preserves registry key, core/hidden status, TTL, allowlist, prompt metadata, provider schema, and version, and publishes no partial registry on nil, panic, dependency, identity, schema, media-generation, or factory failure. Newly created pointer-valued services use the same live-owner isolation, while immutable scalar services require no lease. Only an explicitly immutable and parallel-safe non-media-aware tool may share its pointer. Global strong live-instance reservations prevent singleton reuse across overlapping live owner lifetimes, whether those owners are constructed sequentially or concurrently and whether they come from different entries, factories, registry lineages, or roots. After its owner supervisor has externally quiesced every registry API, factory registration or instantiation, tool execution, and retained tool use, idempotent strict-registry `Close` releases owner-created resources in reverse order before releasing reservations; cleanup error or panic permanently quarantines the reservations, while legacy unowned close is a no-op. Factory-backed validation and every outward projection, including workflow-authoring inspection, use detached frozen metadata; traits remain runtime-only and model-invisible. Legacy `Register` and `RegisterHidden` remain source-compatible. Legacy unowned shallow `Clone` retains its behavior, while cloning an owned registry fails closed with an empty unowned view. | Child, task, and agent owners need stable metadata and isolated mutable tool state without silently changing the legacy general-agent registry surface or allowing schema/state leakage between siblings. |
 
 ## Data And State Model
 
 Tool state includes visible and hidden registry maps, allowlists, TTL metadata,
-tool context, media store references, removable tool entries, exec background
+optional immutable owner identity, per-entry frozen descriptors, conservative
+traits, factories, owner-local service/cache state, tool context, media store
+references, removable tool entries, exec background
 sessions, filesystem roots, web provider config, redaction caches for sensitive
 values, profile-specific tool adaptation overrides in `tools.adaptation.profile_overrides`,
 and the runtime-learned tool adaptation state file at
@@ -151,10 +158,17 @@ Owns: TOOL write_file
 | Tool | `workflow` action `dev_publish` | Evaluate exact structural and production dependency readiness, derive an opaque dependency revision, and invoke revision-fenced transactional workflow publishing. | `FR-TOOL-015` |
 | Go API | `media.SnapshotReader.ReadSnapshot(ctx, ref, maxBytes)` | Optionally return one path-free detached snapshot of a currently live `media://` capability through a bounded, no-follow, regular-file read; fixed redacted errors preserve optional-capability and temporary-lifetime semantics. | `FR-TOOL-018` |
 | Go API | `ToolLoopConfig.SequentialToolCalls`, `ToolLoopConfig.SuppressToolArguments`, `NewApplyPatchToolWithPathGuard` | Opt a trusted caller into response-order execution, private tool diagnostics, and whole-patch path preflight without changing ordinary loop or patch defaults. | `FR-TOOL-019` |
+| Go API | `ToolOwner`, `ToolTraits`, `ToolDescriptor`, `ToolFactory`, `NewOwnedToolRegistry`, strict factory/immutable-shared registration, `ToolRegistry.InstantiateForOwner`, `ToolRegistry.Close` | Declare conservative trusted metadata, transactionally construct isolated owner registries, and release their resources without changing legacy registration or shallow-clone behavior. | `FR-TOOL-020` |
 
 ## Algorithms And Ordering
 
 1. Build the registry from config, registering only enabled tools and preserving discovery tools where allowed.
+   For strict owner construction, freeze admitted metadata, snapshot registry
+   policy, recursively instantiate exact dependencies and owner-local services
+   outside the source lock, inject media state, validate exact descriptor
+   parity, and publish the complete private registry only after every entry
+   succeeds. Failure closes newly created resources in reverse order and
+   exposes no partial destination.
 2. Convert registry definitions to provider-specific tool schemas.
 3. On execution, inject context, validate args, enforce security constraints,
    then call the tool. Numeric validation preserves `json.Number`; integer
@@ -318,10 +332,13 @@ provider, commit, push, CI, or merge authority.
 | `FR-TOOL-017` | [pkg/config/model_selection_test.go](../../pkg/config/model_selection_test.go), [pkg/tools/integration/web_test.go](../../pkg/tools/integration/web_test.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go) |
 | `FR-TOOL-018` | [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go) |
 | `FR-TOOL-019` | [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/registry_test.go](../../pkg/tools/registry_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go), [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go) |
+| `FR-TOOL-020` | [pkg/tools/traits.go](../../pkg/tools/traits.go), [pkg/tools/factory.go](../../pkg/tools/factory.go), [pkg/tools/registry_factory.go](../../pkg/tools/registry_factory.go), [pkg/tools/registry_factory_test.go](../../pkg/tools/registry_factory_test.go), [pkg/tools/search_tool.go](../../pkg/tools/search_tool.go) |
 
 ## Implementation Anchors
 
 - [pkg/tools/registry.go](../../pkg/tools/registry.go)
+- [pkg/tools/traits.go](../../pkg/tools/traits.go)
+- [pkg/tools/factory.go](../../pkg/tools/factory.go)
 - [pkg/tools/fs](../../pkg/tools/fs)
 - [pkg/tools/integration/web.go](../../pkg/tools/integration/web.go)
 - [pkg/tools/shared/base.go](../../pkg/tools/shared/base.go)

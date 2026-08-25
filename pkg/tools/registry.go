@@ -19,32 +19,140 @@ type ToolEntry struct {
 	Tool   Tool
 	IsCore bool
 	TTL    int
+
+	descriptor      *ToolDescriptor
+	traits          ToolTraits
+	factory         ToolFactory
+	immutableShared bool
 }
 
 type ToolRegistry struct {
-	tools      map[string]*ToolEntry
-	mu         sync.RWMutex
-	version    atomic.Uint64 // incremented on Register/RegisterHidden for cache invalidation
-	mediaStore media.MediaStore
-	allowlist  map[string]struct{}
+	tools        map[string]*ToolEntry
+	mu           sync.RWMutex
+	mediaApplyMu sync.Mutex
+	version      atomic.Uint64 // incremented on Register/RegisterHidden for cache invalidation
+	mediaStore   media.MediaStore
+	mediaGen     uint64
+	allowlist    map[string]struct{}
+	owner        ToolOwner
+	owned        bool
+	services     *toolServiceCache
+	ownedValues  []any
+	reservations []toolInstanceReservation
+	closed       bool
 }
 
 // CoreToolSnapshotEntry preserves the exact registry key used to execute a
 // core tool. Tool.Name can be mutable or panic, so catalog callers must not
 // derive executable targets from it.
 type CoreToolSnapshotEntry struct {
-	Name string
-	Tool Tool
+	Name       string
+	Tool       Tool
+	Descriptor *ToolDescriptor
+}
+
+func (entry CoreToolSnapshotEntry) ParameterSchema() map[string]any {
+	if entry.Descriptor != nil {
+		return cloneToolDescriptor(*entry.Descriptor).Parameters
+	}
+	if entry.Tool == nil {
+		return nil
+	}
+	return entry.Tool.Parameters()
 }
 
 type mediaStoreAware interface {
 	SetMediaStore(store media.MediaStore)
 }
 
+func toolEntryDescription(entry *ToolEntry) string {
+	if entry.descriptor != nil {
+		return entry.descriptor.Description
+	}
+	return entry.Tool.Description()
+}
+
+func toolEntryNameDescription(entry *ToolEntry) (string, string) {
+	if entry.descriptor != nil {
+		return entry.descriptor.Name, entry.descriptor.Description
+	}
+	return entry.Tool.Name(), entry.Tool.Description()
+}
+
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tools: make(map[string]*ToolEntry),
+		tools:    make(map[string]*ToolEntry),
+		services: newToolServiceCache(),
 	}
+}
+
+func NewOwnedToolRegistry(owner ToolOwner) (*ToolRegistry, error) {
+	if err := owner.validate(); err != nil {
+		return nil, err
+	}
+	return &ToolRegistry{
+		tools:    make(map[string]*ToolEntry),
+		owner:    owner,
+		owned:    true,
+		services: newToolServiceCache(),
+	}, nil
+}
+
+func (r *ToolRegistry) Owner() (ToolOwner, bool) {
+	if r == nil {
+		return ToolOwner{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.owner, r.owned
+}
+
+func (r *ToolRegistry) Traits(name string) (ToolTraits, bool) {
+	if r == nil {
+		return ToolTraits{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.tools[name]
+	if !ok || entry == nil {
+		return ToolTraits{}, false
+	}
+	return entry.traits, true
+}
+
+// Close releases only resources created by the strict owner-aware factory
+// path. The owner supervisor must quiesce registry calls and retained Tools
+// before Close. It is an idempotent no-op for legacy unowned registries and
+// never closes explicitly immutable-shared entries.
+func (r *ToolRegistry) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	if !r.owned || r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	created := append([]any(nil), r.ownedValues...)
+	reservations := append([]toolInstanceReservation(nil), r.reservations...)
+	r.ownedValues = nil
+	r.reservations = nil
+	r.tools = make(map[string]*ToolEntry)
+	if r.services != nil {
+		r.services.mu.Lock()
+		r.services.values = make(map[string]any)
+		r.services.mu.Unlock()
+	}
+	r.mu.Unlock()
+
+	closeErr := closeOwnerCreatedValues(created)
+	if closeErr == nil {
+		for index := len(reservations) - 1; index >= 0; index-- {
+			reservations[index].tracker.release(reservations[index].identity)
+		}
+	}
+	return closeErr
 }
 
 // SetAllowlist restricts registrations to the provided runtime tool names.
@@ -52,6 +160,9 @@ func NewToolRegistry() *ToolRegistry {
 func (r *ToolRegistry) SetAllowlist(names []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.owned && r.closed {
+		return
+	}
 
 	if names == nil {
 		r.allowlist = nil
@@ -70,66 +181,68 @@ func (r *ToolRegistry) SetAllowlist(names []string) {
 }
 
 func (r *ToolRegistry) Register(tool Tool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	name := tool.Name()
-	if !r.toolAllowedLocked(name) {
-		logger.DebugCF(
-			"tools",
-			"Skipped core tool registration by agent allowlist",
-			map[string]any{"name": name},
-		)
-		return
-	}
-	if _, exists := r.tools[name]; exists {
-		logger.WarnCF("tools", "Tool registration overwrites existing tool",
-			map[string]any{"name": name})
-	}
-	r.tools[name] = &ToolEntry{
-		Tool:   tool,
-		IsCore: true,
-		TTL:    0, // Core tools do not use TTL
-	}
-	if aware, ok := tool.(mediaStoreAware); ok && r.mediaStore != nil {
-		aware.SetMediaStore(r.mediaStore)
-	}
-	r.version.Add(1)
-	logger.DebugCF("tools", "Registered core tool", map[string]any{"name": name})
+	r.registerLegacy(
+		tool,
+		true,
+		"Skipped core tool registration by agent allowlist",
+		"Tool registration overwrites existing tool",
+		"Registered core tool",
+	)
 }
 
-// RegisterHidden saves hidden tools (visible only via TTL)
+// RegisterHidden saves hidden tools (visible only via TTL).
 func (r *ToolRegistry) RegisterHidden(tool Tool) {
+	r.registerLegacy(
+		tool,
+		false,
+		"Skipped hidden tool registration by agent allowlist",
+		"Hidden tool registration overwrites existing tool",
+		"Registered hidden tool",
+	)
+}
+
+func (r *ToolRegistry) registerLegacy(
+	tool Tool,
+	core bool,
+	skippedMessage, overwriteMessage, registeredMessage string,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.owned && r.closed {
+		return
+	}
 	name := tool.Name()
 	if !r.toolAllowedLocked(name) {
 		logger.DebugCF(
 			"tools",
-			"Skipped hidden tool registration by agent allowlist",
+			skippedMessage,
 			map[string]any{"name": name},
 		)
 		return
 	}
 	if _, exists := r.tools[name]; exists {
-		logger.WarnCF("tools", "Hidden tool registration overwrites existing tool",
-			map[string]any{"name": name})
+		logger.WarnCF("tools", overwriteMessage, map[string]any{"name": name})
 	}
 	r.tools[name] = &ToolEntry{
 		Tool:   tool,
-		IsCore: false,
+		IsCore: core,
 		TTL:    0,
+		traits: conservativeLegacyToolTraits(),
 	}
 	if aware, ok := tool.(mediaStoreAware); ok && r.mediaStore != nil {
 		aware.SetMediaStore(r.mediaStore)
 	}
 	r.version.Add(1)
-	logger.DebugCF("tools", "Registered hidden tool", map[string]any{"name": name})
+	logger.DebugCF("tools", registeredMessage, map[string]any{"name": name})
 }
 
 // Unregister removes a tool from the registry if it is present.
 func (r *ToolRegistry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.owned && r.closed {
+		return
+	}
 
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -146,14 +259,26 @@ func (r *ToolRegistry) Unregister(name string) {
 // SetMediaStore injects a MediaStore into all registered tools that can
 // consume it, and remembers it for future registrations.
 func (r *ToolRegistry) SetMediaStore(store media.MediaStore) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mediaApplyMu.Lock()
+	defer r.mediaApplyMu.Unlock()
 
+	r.mu.Lock()
+	if r.owned && r.closed {
+		r.mu.Unlock()
+		return
+	}
 	r.mediaStore = store
+	r.mediaGen++
+	awareTools := make([]mediaStoreAware, 0, len(r.tools))
 	for _, entry := range r.tools {
 		if aware, ok := entry.Tool.(mediaStoreAware); ok {
-			aware.SetMediaStore(store)
+			awareTools = append(awareTools, aware)
 		}
+	}
+	r.mu.Unlock()
+
+	for _, aware := range awareTools {
+		aware.SetMediaStore(store)
 	}
 }
 
@@ -162,6 +287,9 @@ func (r *ToolRegistry) SetMediaStore(store media.MediaStore) {
 func (r *ToolRegistry) PromoteTools(names []string, ttl int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.owned && r.closed {
+		return
+	}
 	promoted := 0
 	for _, name := range names {
 		if entry, exists := r.tools[name]; exists {
@@ -182,6 +310,9 @@ func (r *ToolRegistry) PromoteTools(names []string, ttl int) {
 func (r *ToolRegistry) TickTTL() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.owned && r.closed {
+		return
+	}
 	for _, entry := range r.tools {
 		if !entry.IsCore && entry.TTL > 0 {
 			entry.TTL--
@@ -241,13 +372,23 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 // GetCoreTool returns one exact core registry entry. Hidden tools remain
 // excluded even while discovery temporarily promotes their TTL.
 func (r *ToolRegistry) GetCoreTool(name string) (Tool, bool) {
+	entry, ok := r.GetCoreToolSnapshot(name)
+	return entry.Tool, ok
+}
+
+func (r *ToolRegistry) GetCoreToolSnapshot(name string) (CoreToolSnapshotEntry, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	entry, ok := r.tools[name]
 	if !ok || entry == nil || !entry.IsCore || entry.Tool == nil {
-		return nil, false
+		return CoreToolSnapshotEntry{}, false
 	}
-	return entry.Tool, true
+	snapshot := CoreToolSnapshotEntry{Name: name, Tool: entry.Tool}
+	if entry.descriptor != nil {
+		descriptor := cloneToolDescriptor(*entry.descriptor)
+		snapshot.Descriptor = &descriptor
+	}
+	return snapshot, true
 }
 
 // HiddenToolSnapshot holds a consistent snapshot of hidden tools and the
@@ -274,7 +415,7 @@ func (r *ToolRegistry) SnapshotHiddenTools() HiddenToolSnapshot {
 		if !entry.IsCore {
 			docs = append(docs, HiddenToolDoc{
 				Name:        name,
-				Description: entry.Tool.Description(),
+				Description: toolEntryDescription(entry),
 			})
 		}
 	}
@@ -296,6 +437,20 @@ func (r *ToolRegistry) Get(name string) (Tool, bool) {
 		return nil, false
 	}
 	return entry.Tool, true
+}
+
+func (r *ToolRegistry) executableEntry(name string) (Tool, *ToolDescriptor, media.MediaStore, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.tools[name]
+	if !ok || entry == nil || isTypedNil(entry.Tool) || !entry.IsCore && entry.TTL <= 0 {
+		return nil, nil, nil, false
+	}
+	if entry.descriptor == nil {
+		return entry.Tool, nil, r.mediaStore, true
+	}
+	descriptor := cloneToolDescriptor(*entry.descriptor)
+	return entry.Tool, &descriptor, r.mediaStore, true
 }
 
 func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string]any) *ToolResult {
@@ -341,7 +496,7 @@ func (r *ToolRegistry) executeWithContext(
 	}
 	logger.InfoCF("tool", "Tool execution started", startFields)
 
-	tool, ok := r.Get(name)
+	tool, descriptor, mediaStore, ok := r.executableEntry(name)
 	if !ok {
 		logger.ErrorCF("tool", "Tool not found",
 			map[string]any{
@@ -353,7 +508,13 @@ func (r *ToolRegistry) executeWithContext(
 	}
 
 	// Validate arguments against the tool's declared schema.
-	if err := validateToolArgs(tool.Parameters(), args); err != nil {
+	var parameters map[string]any
+	if descriptor != nil {
+		parameters = descriptor.Parameters
+	} else {
+		parameters = tool.Parameters()
+	}
+	if err := validateToolArgs(parameters, args); err != nil {
 		fields := map[string]any{"tool": name}
 		if !suppressLogDetails {
 			fields["error"] = err.Error()
@@ -418,7 +579,7 @@ func (r *ToolRegistry) executeWithContext(
 		}
 	}
 
-	result = normalizeToolResult(result, name, r.mediaStore, channel, chatID)
+	result = normalizeToolResult(result, name, mediaStore, channel, chatID)
 
 	duration := time.Since(start)
 
@@ -476,7 +637,11 @@ func (r *ToolRegistry) GetDefinitions() []map[string]any {
 			continue
 		}
 
-		definitions = append(definitions, ToolToSchema(r.tools[name].Tool))
+		if entry.descriptor != nil {
+			definitions = append(definitions, toolDescriptorSchema(*entry.descriptor))
+		} else {
+			definitions = append(definitions, ToolToSchema(entry.Tool))
+		}
 	}
 	return definitions
 }
@@ -496,7 +661,15 @@ func (r *ToolRegistry) ToProviderDefs() []providers.ToolDefinition {
 			continue
 		}
 
-		schema := ToolToSchema(entry.Tool)
+		var schema map[string]any
+		var metadata PromptMetadata
+		if entry.descriptor != nil {
+			schema = toolDescriptorSchema(*entry.descriptor)
+			metadata = entry.descriptor.PromptMetadata
+		} else {
+			schema = ToolToSchema(entry.Tool)
+			metadata = promptMetadataForTool(entry.Tool)
+		}
 
 		// Safely extract nested values with type checks
 		fn, ok := schema["function"].(map[string]any)
@@ -507,8 +680,6 @@ func (r *ToolRegistry) ToProviderDefs() []providers.ToolDefinition {
 		name, _ := fn["name"].(string)
 		desc, _ := fn["description"].(string)
 		params, _ := fn["parameters"].(map[string]any)
-		metadata := promptMetadataForTool(entry.Tool)
-
 		definitions = append(definitions, providers.ToolDefinition{
 			Type: "function",
 			Function: providers.ToolFunctionDefinition{
@@ -554,18 +725,33 @@ func (r *ToolRegistry) List() []string {
 }
 
 // Clone creates an independent copy of the registry containing the same tool
-// entries (shallow copy of each ToolEntry). This is used to give subagents a
+// entries but intentionally shares every Tool instance. It preserves legacy
+// behavior and is unsafe as an ownership/isolation boundary; new owner-scoped
+// code must use InstantiateForOwner. Calling Clone on an owned registry fails
+// closed with an empty unowned view, avoiding duplicated resource leases. This
+// compatibility path is used to give subagents a
 // snapshot of the parent agent's tools without sharing the same registry —
 // tools registered on the parent after cloning (e.g. spawn, spawn_status)
 // will NOT be visible to the clone, preventing recursive subagent spawning.
 // The version counter is reset to 0 in the clone as it's a new independent registry.
 func (r *ToolRegistry) Clone() *ToolRegistry {
 	r.mu.RLock()
+	owned := r.owned
+	r.mu.RUnlock()
+	if owned {
+		// Owned registries carry live resource/reservation leases. Shallow
+		// cloning cannot duplicate that ownership safely, so fail closed.
+		return NewToolRegistry()
+	}
+	r.mu.RLock()
 	defer r.mu.RUnlock()
 	clone := &ToolRegistry{
 		tools:      make(map[string]*ToolEntry, len(r.tools)),
 		mediaStore: r.mediaStore,
+		mediaGen:   r.mediaGen,
+		services:   newToolServiceCache(),
 	}
+	clone.services.values = r.services.snapshot()
 	if r.allowlist != nil {
 		clone.allowlist = make(map[string]struct{}, len(r.allowlist))
 		for name := range r.allowlist {
@@ -573,10 +759,15 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 		}
 	}
 	for name, entry := range r.tools {
+		var descriptor *ToolDescriptor
+		if entry.descriptor != nil {
+			frozen := cloneToolDescriptor(*entry.descriptor)
+			descriptor = &frozen
+		}
 		clone.tools[name] = &ToolEntry{
-			Tool:   entry.Tool,
-			IsCore: entry.IsCore,
-			TTL:    entry.TTL,
+			Tool: entry.Tool, IsCore: entry.IsCore, TTL: entry.TTL,
+			descriptor: descriptor, traits: entry.traits, factory: entry.factory,
+			immutableShared: entry.immutableShared,
 		}
 	}
 	return clone
@@ -604,10 +795,8 @@ func (r *ToolRegistry) GetSummaries() []string {
 			continue
 		}
 
-		summaries = append(
-			summaries,
-			fmt.Sprintf("- `%s` - %s", entry.Tool.Name(), entry.Tool.Description()),
-		)
+		toolName, description := toolEntryNameDescription(entry)
+		summaries = append(summaries, fmt.Sprintf("- `%s` - %s", toolName, description))
 	}
 	return summaries
 }
@@ -654,7 +843,12 @@ func (r *ToolRegistry) VisitCoreTools(
 		if entry == nil || !entry.IsCore || entry.Tool == nil {
 			continue
 		}
-		if !visit(CoreToolSnapshotEntry{Name: name, Tool: entry.Tool}) {
+		snapshot := CoreToolSnapshotEntry{Name: name, Tool: entry.Tool}
+		if entry.descriptor != nil {
+			descriptor := cloneToolDescriptor(*entry.descriptor)
+			snapshot.Descriptor = &descriptor
+		}
+		if !visit(snapshot) {
 			return ctx.Err()
 		}
 	}
