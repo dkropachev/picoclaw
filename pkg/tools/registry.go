@@ -135,13 +135,16 @@ func (r *ToolRegistry) Traits(name string) (ToolTraits, bool) {
 // Close releases strict owner-created resources and compatibility-source
 // instance leases after the caller has quiesced registry and retained Tool
 // use. It never closes caller-owned compatibility tools or explicitly
-// immutable-shared entries. Plain legacy unowned registries remain a no-op.
+// immutable-shared entries. Plain legacy unowned registries remain a no-op;
+// dormant factory-dependency sources are lifecycle-managed even before a
+// compatibility tool is published.
 func (r *ToolRegistry) Close() error {
 	if r == nil {
 		return nil
 	}
 	r.mu.Lock()
-	if r.closed || !r.owned && len(r.compatibilityReservations) == 0 {
+	if r.closed || !r.owned && len(r.compatibilityReservations) == 0 &&
+		len(r.constructionCatalog) == 0 {
 		r.mu.Unlock()
 		return nil
 	}
@@ -244,6 +247,14 @@ func (r *ToolRegistry) registerLegacy(
 		logger.DebugCF(
 			"tools",
 			skippedMessage,
+			map[string]any{"name": name},
+		)
+		return
+	}
+	if r.privateConstruction[name] != nil || r.constructionCatalog[name] != nil {
+		logger.WarnCF(
+			"tools",
+			"Tool registration collides with a private factory dependency",
 			map[string]any{"name": name},
 		)
 		return

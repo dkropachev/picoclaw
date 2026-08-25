@@ -32,6 +32,9 @@ func TestRegisterSharedTools_ThreadsDefaultAgentOnlyByDefault(t *testing.T) {
 	if _, ok := mainAgent.Tools.Get(agenttools.ThreadsToolName); !ok {
 		t.Fatal("default agent should have threads tool")
 	}
+	if toolCapabilityIsFactoryBacked(mainAgent.Tools, agenttools.ThreadsToolName) {
+		t.Fatal("threads must remain legacy/root-only before its detached runner is classified")
+	}
 	if _, ok := workerAgent.Tools.Get(agenttools.ThreadsToolName); ok {
 		t.Fatal("non-default agent should not get threads tool by default")
 	}

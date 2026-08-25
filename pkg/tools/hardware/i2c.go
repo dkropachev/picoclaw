@@ -10,7 +10,11 @@ import (
 )
 
 // I2CTool provides I2C bus interaction for reading sensors and controlling peripherals.
-type I2CTool struct{}
+type I2CTool struct {
+	// identity keeps per-owner wrappers address-distinct; zero-sized Go values
+	// may legally share one pointer and cannot participate in ownership leases.
+	_ byte
+}
 
 func NewI2CTool() *I2CTool {
 	return &I2CTool{}

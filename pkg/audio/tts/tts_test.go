@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -110,6 +111,100 @@ func TestOpenAITTSProvider_SynthesizeSuccess(t *testing.T) {
 	}
 	if string(data) != "audio-bytes" {
 		t.Fatalf("response body mismatch: got %q", string(data))
+	}
+}
+
+func TestOpenAITTSProvider_ConcurrentSynthesizeUsesImmutableModel(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body["model"] != "tts-concurrent" {
+			t.Errorf("request model = %v, want tts-concurrent", body["model"])
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("audio"))
+	}))
+	defer server.Close()
+
+	provider := NewOpenAITTSProvider("key", server.URL, "", "tts-concurrent")
+	var wg sync.WaitGroup
+	errors := make(chan error, 32)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stream, err := provider.Synthesize(context.Background(), "hello")
+			if err != nil {
+				errors <- err
+				return
+			}
+			_, readErr := io.ReadAll(stream)
+			closeErr := stream.Close()
+			if readErr != nil {
+				errors <- readErr
+			} else if closeErr != nil {
+				errors <- closeErr
+			}
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Errorf("concurrent synthesize: %v", err)
+	}
+}
+
+func TestMimoTTSProvider_ConcurrentSynthesizeUsesImmutableModel(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body["model"] != "mimo-concurrent" {
+			t.Errorf("request model = %v, want mimo-concurrent", body["model"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"audio":{"data":"YXVkaW8="}}}]}`))
+	}))
+	defer server.Close()
+
+	provider := NewMimoTTSProvider("key", server.URL, "mimo-concurrent", "")
+	var wg sync.WaitGroup
+	errors := make(chan error, 32)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stream, err := provider.Synthesize(context.Background(), "hello")
+			if err != nil {
+				errors <- err
+				return
+			}
+			_, readErr := io.ReadAll(stream)
+			closeErr := stream.Close()
+			if readErr != nil {
+				errors <- readErr
+			} else if closeErr != nil {
+				errors <- closeErr
+			}
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Errorf("concurrent synthesize: %v", err)
 	}
 }
 

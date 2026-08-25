@@ -140,6 +140,70 @@ func registerSharedTools(
 			logger.WarnCF("voice-tts", "send_tts enabled but no TTS provider configured", nil)
 		}
 	}
+	messageCallback := func(
+		ctx context.Context,
+		channel, chatID, content, replyToMessageID string,
+		mediaParts []bus.MediaPart,
+	) error {
+		outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
+		if tools.ToolChannel(ctx) == channel && tools.ToolChatID(ctx) == chatID {
+			outboundCtx.TurnUXID = tools.ToolTurnUXID(ctx)
+		}
+		outboundCtx.TopicID = tools.ToolTopicID(ctx)
+		outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
+			tools.ToolAgentID(ctx),
+			tools.ToolSessionKey(ctx),
+			tools.ToolSessionScope(ctx),
+		)
+		if len(mediaParts) > 0 {
+			outboundMedia := bus.OutboundMediaMessage{
+				Channel:    channel,
+				ChatID:     chatID,
+				Context:    outboundCtx,
+				AgentID:    outboundAgentID,
+				SessionKey: outboundSessionKey,
+				Scope:      outboundScope,
+				Parts:      mediaParts,
+			}
+			if al.channelManager != nil && channel != "" {
+				return al.channelManager.SendMedia(ctx, outboundMedia)
+			}
+			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer pubCancel()
+			return msgBus.PublishOutboundMedia(pubCtx, outboundMedia)
+		}
+		outboundMessage := bus.OutboundMessage{
+			Channel:          channel,
+			ChatID:           chatID,
+			Context:          outboundCtx,
+			AgentID:          outboundAgentID,
+			SessionKey:       outboundSessionKey,
+			Scope:            outboundScope,
+			Content:          content,
+			ReplyToMessageID: replyToMessageID,
+		}
+		if al.channelManager != nil && channel != "" {
+			return al.channelManager.SendMessage(ctx, outboundMessage)
+		}
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer pubCancel()
+		return msgBus.PublishOutbound(pubCtx, outboundMessage)
+	}
+	reactionCallback := func(ctx context.Context, channel, chatID, messageID string) error {
+		if al.channelManager == nil {
+			return fmt.Errorf("channel manager not configured")
+		}
+		ch, ok := al.channelManager.GetChannel(channel)
+		if !ok {
+			return fmt.Errorf("channel %s not found", channel)
+		}
+		rc, ok := ch.(channels.ReactionCapable)
+		if !ok {
+			return fmt.Errorf("channel %s does not support reactions", channel)
+		}
+		_, err := rc.ReactToMessage(ctx, chatID, messageID)
+		return err
+	}
 
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
@@ -148,39 +212,89 @@ func registerSharedTools(
 		}
 
 		if cfg.Tools.IsToolEnabled("web") {
-			searchTool, err := tools.NewWebSearchTool(tools.WebSearchToolOptionsFromConfig(cfg))
+			options := cloneWebSearchToolOptions(tools.WebSearchToolOptionsFromConfig(cfg))
+			searchTool, err := tools.NewWebSearchTool(cloneWebSearchToolOptions(options))
 			if err != nil {
 				logger.ErrorCF("agent", "Failed to create web search tool", map[string]any{"error": err.Error()})
 			} else if searchTool != nil {
-				agent.Tools.Register(searchTool)
+				factory := mustToolFactoryFromPrototype(
+					searchTool,
+					mustBaseToolFactoryTraits("web_search"),
+					func(tools.ToolBuildContext) (tools.Tool, error) {
+						return tools.NewWebSearchTool(cloneWebSearchToolOptions(options))
+					},
+				)
+				mustRegisterFactoryBackedTool(agent.Tools, searchTool, factory)
 			}
 		}
 		if cfg.Tools.IsToolEnabled("web_fetch") {
-			fetchTool, err := tools.NewWebFetchToolWithProxy(
-				50000,
-				cfg.Tools.Web.Proxy,
-				cfg.Tools.Web.Format,
-				cfg.Tools.Web.FetchLimitBytes,
-				cfg.Tools.Web.PrivateHostWhitelist)
+			proxy := cfg.Tools.Web.Proxy
+			format := cfg.Tools.Web.Format
+			fetchLimitBytes := cfg.Tools.Web.FetchLimitBytes
+			privateHostWhitelist := append(
+				[]string(nil),
+				cfg.Tools.Web.PrivateHostWhitelist...,
+			)
+			buildWebFetch := func() (*tools.WebFetchTool, error) {
+				return tools.NewWebFetchToolWithProxy(
+					50000,
+					proxy,
+					format,
+					fetchLimitBytes,
+					append([]string(nil), privateHostWhitelist...),
+				)
+			}
+			fetchTool, err := buildWebFetch()
 			if err != nil {
 				logger.ErrorCF("agent", "Failed to create web fetch tool", map[string]any{"error": err.Error()})
 			} else {
-				agent.Tools.Register(fetchTool)
+				factory := mustToolFactoryFromPrototype(
+					fetchTool,
+					mustBaseToolFactoryTraits("web_fetch"),
+					func(tools.ToolBuildContext) (tools.Tool, error) { return buildWebFetch() },
+				)
+				mustRegisterFactoryBackedTool(agent.Tools, fetchTool, factory)
 			}
 		}
 		if cfg.Tools.IsToolEnabled("git_workspace") && al.gitWorkspaces != nil {
-			agent.Tools.Register(tools.NewGitWorkspaceTool(al.gitWorkspaces))
+			workspaceManager := al.gitWorkspaces
+			buildGitWorkspace := func() tools.Tool {
+				return tools.NewGitWorkspaceTool(workspaceManager)
+			}
+			live := buildGitWorkspace()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("git_workspace"),
+				func(tools.ToolBuildContext) (tools.Tool, error) {
+					return buildGitWorkspace(), nil
+				},
+			))
 		}
 
 		// Hardware tools (I2C, SPI) - Linux only, returns error on other platforms
 		if cfg.Tools.IsToolEnabled("i2c") {
-			agent.Tools.Register(tools.NewI2CTool())
+			live := tools.NewI2CTool()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("i2c"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return tools.NewI2CTool(), nil },
+			))
 		}
 		if cfg.Tools.IsToolEnabled("spi") {
-			agent.Tools.Register(tools.NewSPITool())
+			live := tools.NewSPITool()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("spi"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return tools.NewSPITool(), nil },
+			))
 		}
 		if cfg.Tools.IsToolEnabled("serial") {
-			agent.Tools.Register(tools.NewSerialTool())
+			live := tools.NewSerialTool()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("serial"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return tools.NewSerialTool(), nil },
+			))
 		}
 
 		if cfg.Tools.IsToolEnabled("threads") && shouldRegisterThreadsTool(agent, defaultAgent) {
@@ -196,117 +310,119 @@ func registerSharedTools(
 
 		// Message tool
 		if cfg.Tools.IsToolEnabled("message") {
-			messageTool := tools.NewMessageTool()
-			if cfg.Tools.Message.MediaEnabled {
-				messageTool.ConfigureLocalMedia(
-					agent.Workspace,
-					cfg.Agents.Defaults.RestrictToWorkspace,
-					cfg.Agents.Defaults.GetMaxMediaSize(),
-					allowReadPaths,
-				)
+			workspace := agent.Workspace
+			restrictToWorkspace := cfg.Agents.Defaults.RestrictToWorkspace
+			maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+			mediaEnabled := cfg.Tools.Message.MediaEnabled
+			pathPatterns := cloneToolPathPatterns(allowReadPaths)
+			buildMessage := func() tools.Tool {
+				messageTool := tools.NewMessageTool()
+				if mediaEnabled {
+					messageTool.ConfigureLocalMedia(
+						workspace,
+						restrictToWorkspace,
+						maxMediaSize,
+						cloneToolPathPatterns(pathPatterns),
+					)
+				}
+				messageTool.SetSendCallback(messageCallback)
+				return messageTool
 			}
-			messageTool.SetSendCallback(func(
-				ctx context.Context,
-				channel, chatID, content, replyToMessageID string,
-				mediaParts []bus.MediaPart,
-			) error {
-				outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
-				if tools.ToolChannel(ctx) == channel &&
-					tools.ToolChatID(ctx) == chatID {
-					outboundCtx.TurnUXID = tools.ToolTurnUXID(ctx)
-				}
-				outboundCtx.TopicID = tools.ToolTopicID(ctx)
-				outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
-					tools.ToolAgentID(ctx),
-					tools.ToolSessionKey(ctx),
-					tools.ToolSessionScope(ctx),
-				)
-				if len(mediaParts) > 0 {
-					outboundMedia := bus.OutboundMediaMessage{
-						Channel:    channel,
-						ChatID:     chatID,
-						Context:    outboundCtx,
-						AgentID:    outboundAgentID,
-						SessionKey: outboundSessionKey,
-						Scope:      outboundScope,
-						Parts:      mediaParts,
-					}
-					if al.channelManager != nil && channel != "" {
-						return al.channelManager.SendMedia(ctx, outboundMedia)
-					}
-					pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer pubCancel()
-					return msgBus.PublishOutboundMedia(pubCtx, outboundMedia)
-				}
-				outboundMessage := bus.OutboundMessage{
-					Channel:          channel,
-					ChatID:           chatID,
-					Context:          outboundCtx,
-					AgentID:          outboundAgentID,
-					SessionKey:       outboundSessionKey,
-					Scope:            outboundScope,
-					Content:          content,
-					ReplyToMessageID: replyToMessageID,
-				}
-				if al.channelManager != nil && channel != "" {
-					return al.channelManager.SendMessage(ctx, outboundMessage)
-				}
-				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer pubCancel()
-				return msgBus.PublishOutbound(pubCtx, outboundMessage)
-			})
-			agent.Tools.Register(messageTool)
+			live := buildMessage()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("message"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return buildMessage(), nil },
+			))
 		}
 		if cfg.Tools.IsToolEnabled("reaction") {
-			reactionTool := tools.NewReactionTool()
-			reactionTool.SetReactionCallback(func(ctx context.Context, channel, chatID, messageID string) error {
-				if al.channelManager == nil {
-					return fmt.Errorf("channel manager not configured")
-				}
-				ch, ok := al.channelManager.GetChannel(channel)
-				if !ok {
-					return fmt.Errorf("channel %s not found", channel)
-				}
-				rc, ok := ch.(channels.ReactionCapable)
-				if !ok {
-					return fmt.Errorf("channel %s does not support reactions", channel)
-				}
-				_, err := rc.ReactToMessage(ctx, chatID, messageID)
-				return err
-			})
-			agent.Tools.Register(reactionTool)
+			buildReaction := func() tools.Tool {
+				reactionTool := tools.NewReactionTool()
+				reactionTool.SetReactionCallback(reactionCallback)
+				return reactionTool
+			}
+			live := buildReaction()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("reaction"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return buildReaction(), nil },
+			))
 		}
 
 		// Send file tool (outbound media via MediaStore — store injected later by SetMediaStore)
 		if cfg.Tools.IsToolEnabled("send_file") {
-			sendFileTool := tools.NewSendFileTool(
-				agent.Workspace,
-				cfg.Agents.Defaults.RestrictToWorkspace,
-				cfg.Agents.Defaults.GetMaxMediaSize(),
-				nil,
-				allowReadPaths,
-			)
-			agent.Tools.Register(sendFileTool)
+			workspace := agent.Workspace
+			restrictToWorkspace := cfg.Agents.Defaults.RestrictToWorkspace
+			maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+			pathPatterns := cloneToolPathPatterns(allowReadPaths)
+			buildSendFile := func() tools.Tool {
+				return tools.NewSendFileTool(
+					workspace,
+					restrictToWorkspace,
+					maxMediaSize,
+					nil,
+					cloneToolPathPatterns(pathPatterns),
+				)
+			}
+			live := buildSendFile()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("send_file"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return buildSendFile(), nil },
+			))
 		}
 
 		if ttsProvider != nil {
-			agent.Tools.Register(tools.NewSendTTSTool(ttsProvider, nil))
+			buildSendTTS := func() tools.Tool {
+				return tools.NewSendTTSTool(ttsProvider, nil)
+			}
+			live := buildSendTTS()
+			mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+				live,
+				mustBaseToolFactoryTraits("send_tts"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return buildSendTTS(), nil },
+			))
 		}
 
 		if cfg.Tools.IsToolEnabled("load_image") {
-			loadImageTool := tools.NewLoadImageTool(
-				agent.Workspace,
-				cfg.Agents.Defaults.RestrictToWorkspace,
-				cfg.Agents.Defaults.GetMaxMediaSize(),
-				nil,
-				allowReadPaths,
+			workspace := agent.Workspace
+			restrictToWorkspace := cfg.Agents.Defaults.RestrictToWorkspace
+			maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+			pathPatterns := cloneToolPathPatterns(allowReadPaths)
+			buildLoadImage := func() tools.Tool {
+				return tools.NewLoadImageTool(
+					workspace,
+					restrictToWorkspace,
+					maxMediaSize,
+					nil,
+					cloneToolPathPatterns(pathPatterns),
+				)
+			}
+			loadImageTool := buildLoadImage()
+			loadImageFactory := mustToolFactoryFromPrototype(
+				loadImageTool,
+				mustBaseToolFactoryTraits("load_image"),
+				func(tools.ToolBuildContext) (tools.Tool, error) { return buildLoadImage(), nil },
 			)
-			agent.Tools.Register(loadImageTool)
+			mustRegisterFactoryDependency(agent.Tools, loadImageFactory)
+			mustRegisterFactoryBackedTool(agent.Tools, loadImageTool, loadImageFactory)
 			if toolAdaptationMayUseCodexCompatibleTools(
 				cfg.Tools.Adaptation,
 				agent.ToolAdaptation,
 			) {
-				agent.Tools.Register(tools.NewCodexViewImageTool(loadImageTool))
+				viewImageTool := tools.NewCodexViewImageTool(loadImageTool)
+				viewImageFactory := mustToolFactoryFromPrototype(
+					viewImageTool,
+					mustBaseToolFactoryTraits("view_image"),
+					func(ctx tools.ToolBuildContext) (tools.Tool, error) {
+						loader, err := ctx.Resolve("load_image")
+						if err != nil {
+							return nil, err
+						}
+						return tools.NewCodexViewImageTool(loader), nil
+					},
+				)
+				mustRegisterFactoryBackedTool(agent.Tools, viewImageTool, viewImageFactory)
 			}
 		}
 
@@ -318,11 +434,20 @@ func registerSharedTools(
 			registryMgr := skills.NewRegistryManagerFromToolsConfig(cfg.Tools.Skills)
 
 			if find_skills_enable {
-				searchCache := skills.NewSearchCache(
-					cfg.Tools.Skills.SearchCache.MaxSize,
-					time.Duration(cfg.Tools.Skills.SearchCache.TTLSeconds)*time.Second,
-				)
-				agent.Tools.Register(tools.NewFindSkillsTool(registryMgr, searchCache))
+				cacheMaxSize := cfg.Tools.Skills.SearchCache.MaxSize
+				cacheTTL := time.Duration(cfg.Tools.Skills.SearchCache.TTLSeconds) * time.Second
+				buildFindSkills := func() tools.Tool {
+					searchCache := skills.NewSearchCache(cacheMaxSize, cacheTTL)
+					return tools.NewFindSkillsTool(registryMgr, searchCache)
+				}
+				live := buildFindSkills()
+				mustRegisterFactoryBackedTool(agent.Tools, live, mustToolFactoryFromPrototype(
+					live,
+					mustBaseToolFactoryTraits("find_skills"),
+					func(tools.ToolBuildContext) (tools.Tool, error) {
+						return buildFindSkills(), nil
+					},
+				))
 			}
 
 			if install_skills_enable {

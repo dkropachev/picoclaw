@@ -10,7 +10,11 @@ import (
 )
 
 // SPITool provides SPI bus interaction for high-speed peripheral communication.
-type SPITool struct{}
+type SPITool struct {
+	// identity keeps per-owner wrappers address-distinct; zero-sized Go values
+	// may legally share one pointer and cannot participate in ownership leases.
+	_ byte
+}
 
 func NewSPITool() *SPITool {
 	return &SPITool{}

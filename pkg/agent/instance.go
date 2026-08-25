@@ -281,26 +281,72 @@ func NewAgentInstance(
 	toolsRegistry := tools.NewToolRegistry()
 	construction.partial.Tools = toolsRegistry
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
+	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
+	writePathPatterns := cloneToolPathPatterns(allowWritePaths)
 
 	if cfg.Tools.IsToolEnabled("read_file") {
 		maxReadFileSize := cfg.Tools.ReadFile.MaxReadFileSize
+		var buildReadFile func() tools.Tool
 		switch cfg.Tools.ReadFile.EffectiveMode() {
 		case config.ReadFileModeLines:
-			toolsRegistry.Register(tools.NewReadFileLinesTool(workspace, readRestrict, maxReadFileSize, allowReadPaths))
+			buildReadFile = func() tools.Tool {
+				return tools.NewReadFileLinesTool(
+					workspace,
+					readRestrict,
+					maxReadFileSize,
+					cloneToolPathPatterns(readPathPatterns),
+				)
+			}
 		default:
-			toolsRegistry.Register(tools.NewReadFileBytesTool(workspace, readRestrict, maxReadFileSize, allowReadPaths))
+			buildReadFile = func() tools.Tool {
+				return tools.NewReadFileBytesTool(
+					workspace,
+					readRestrict,
+					maxReadFileSize,
+					cloneToolPathPatterns(readPathPatterns),
+				)
+			}
 		}
+		live := buildReadFile()
+		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
+			live,
+			mustBaseToolFactoryTraits("read_file"),
+			func(tools.ToolBuildContext) (tools.Tool, error) { return buildReadFile(), nil },
+		))
 	}
 	if cfg.Tools.IsToolEnabled("edit_file") {
-		toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
+		buildEditFile := func() tools.Tool {
+			return tools.NewEditFileTool(
+				workspace,
+				restrict,
+				cloneToolPathPatterns(writePathPatterns),
+			)
+		}
+		live := buildEditFile()
+		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
+			live,
+			mustBaseToolFactoryTraits("edit_file"),
+			func(tools.ToolBuildContext) (tools.Tool, error) { return buildEditFile(), nil },
+		))
 	}
 	if cfg.Tools.IsToolEnabled("append_file") {
-		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
+		buildAppendFile := func() tools.Tool {
+			return tools.NewAppendFileTool(
+				workspace,
+				restrict,
+				cloneToolPathPatterns(writePathPatterns),
+			)
+		}
+		live := buildAppendFile()
+		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
+			live,
+			mustBaseToolFactoryTraits("append_file"),
+			func(tools.ToolBuildContext) (tools.Tool, error) { return buildAppendFile(), nil },
+		))
 	}
 	// Build write_file's copy from the registered editors so it steers the agent
 	// to edit_file/append_file only when those tools are actually available.
 	if cfg.Tools.IsToolEnabled("write_file") {
-		writeTool := tools.NewWriteFileTool(workspace, restrict, allowWritePaths)
 		var altTools []string
 		if toolsRegistry.HasRegistered("append_file") {
 			altTools = append(altTools, "append_file")
@@ -308,21 +354,56 @@ func NewAgentInstance(
 		if toolsRegistry.HasRegistered("edit_file") {
 			altTools = append(altTools, "edit_file")
 		}
-		writeTool.SetAlternativeTools(altTools)
-		toolsRegistry.Register(writeTool)
+		buildWriteFile := func() tools.Tool {
+			writeTool := tools.NewWriteFileTool(
+				workspace,
+				restrict,
+				cloneToolPathPatterns(writePathPatterns),
+			)
+			writeTool.SetAlternativeTools(append([]string(nil), altTools...))
+			return writeTool
+		}
+		live := buildWriteFile()
+		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
+			live,
+			mustBaseToolFactoryTraits("write_file"),
+			func(tools.ToolBuildContext) (tools.Tool, error) { return buildWriteFile(), nil },
+		))
 	}
 	if mayUseCodexCompatibleTools &&
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file")) {
-		toolsRegistry.Register(tools.NewApplyPatchToolWithPermissions(
-			workspace,
-			restrict,
-			cfg.Tools.IsToolEnabled("write_file"),
-			cfg.Tools.IsToolEnabled("edit_file"),
-			allowWritePaths,
+		allowCreate := cfg.Tools.IsToolEnabled("write_file")
+		allowUpdate := cfg.Tools.IsToolEnabled("edit_file")
+		buildApplyPatch := func() tools.Tool {
+			return tools.NewApplyPatchToolWithPermissions(
+				workspace,
+				restrict,
+				allowCreate,
+				allowUpdate,
+				cloneToolPathPatterns(writePathPatterns),
+			)
+		}
+		live := buildApplyPatch()
+		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
+			live,
+			mustBaseToolFactoryTraits("apply_patch"),
+			func(tools.ToolBuildContext) (tools.Tool, error) { return buildApplyPatch(), nil },
 		))
 	}
 	if cfg.Tools.IsToolEnabled("list_dir") {
-		toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
+		buildListDir := func() tools.Tool {
+			return tools.NewListDirTool(
+				workspace,
+				readRestrict,
+				cloneToolPathPatterns(readPathPatterns),
+			)
+		}
+		live := buildListDir()
+		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
+			live,
+			mustBaseToolFactoryTraits("list_dir"),
+			func(tools.ToolBuildContext) (tools.Tool, error) { return buildListDir(), nil },
+		))
 	}
 	if cfg.Tools.IsToolEnabled("exec") {
 		execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg, allowReadPaths)
@@ -338,7 +419,11 @@ func NewAgentInstance(
 		}
 	}
 	if mayUseCodexCompatibleTools {
-		toolsRegistry.Register(tools.NewUpdatePlanTool())
+		mustRegisterFactoryBackedTool(
+			toolsRegistry,
+			tools.NewUpdatePlanTool(),
+			tools.NewUpdatePlanToolFactory(),
+		)
 	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
