@@ -410,9 +410,21 @@ func (al *AgentLoop) continueWithSteeringMessages(
 }
 
 func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
+	if agent, ok := al.resolveAgentForSession(sessionKey); ok {
+		return agent
+	}
+
 	registry := al.GetRegistry()
 	if registry == nil {
 		return nil
+	}
+	return registry.GetDefaultAgent()
+}
+
+func (al *AgentLoop) resolveAgentForSession(sessionKey string) (*AgentInstance, bool) {
+	registry := al.GetRegistry()
+	if registry == nil {
+		return nil, false
 	}
 
 	agentIDs := registry.ListAgentIDs()
@@ -427,11 +439,11 @@ func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
 			continue
 		}
 		if scopedAgent, ok := registry.GetAgent(resolvedAgentID); ok {
-			return scopedAgent
+			return scopedAgent, true
 		}
 	}
 
-	return registry.GetDefaultAgent()
+	return nil, false
 }
 
 // Continue resumes an idle agent by dequeuing any pending steering messages
