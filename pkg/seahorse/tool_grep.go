@@ -19,7 +19,7 @@ func NewGrepTool(engine *RetrievalEngine) *GrepTool {
 }
 
 func (t *GrepTool) Name() string {
-	return "short_grep"
+	return ShortGrepToolName
 }
 
 func (t *GrepTool) Description() string {

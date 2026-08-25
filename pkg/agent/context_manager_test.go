@@ -100,6 +100,52 @@ func TestLookupContextManager_Unknown(t *testing.T) {
 	}
 }
 
+func TestRegisterContextManagerWithContextPreservesLegacyLookup(t *testing.T) {
+	cleanup := resetCMRegistry()
+	defer cleanup()
+
+	legacy := func(json.RawMessage, *AgentLoop) (ContextManager, error) {
+		return &noopContextManager{}, nil
+	}
+	type contextKey struct{}
+	var got string
+	contextual := func(
+		ctx context.Context,
+		_ json.RawMessage,
+		_ *AgentLoop,
+	) (ContextManager, error) {
+		got, _ = ctx.Value(contextKey{}).(string)
+		return &noopContextManager{}, nil
+	}
+	if err := registerContextManagerWithContext(
+		"contextual_cm",
+		legacy,
+		contextual,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if factory, ok := lookupContextManager("contextual_cm"); !ok || factory == nil {
+		t.Fatal("legacy factory lookup was not preserved")
+	}
+	factory, ok := lookupContextManagerWithContext("contextual_cm")
+	if !ok || factory == nil {
+		t.Fatal("context-aware factory lookup is unavailable")
+	}
+	if _, err := factory(
+		context.WithValue(t.Context(), contextKey{}, "exact-context"),
+		nil,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got != "exact-context" {
+		t.Fatalf("context value = %q, want exact-context", got)
+	}
+	if err := registerContextManagerWithContext("nil_context_cm", legacy, nil); err == nil {
+		t.Fatal("nil context factory was accepted")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // resolveContextManager tests
 // ---------------------------------------------------------------------------
@@ -231,6 +277,79 @@ func TestResolveContextManager_FactoryError(t *testing.T) {
 	if _, ok := al.contextManager.(*legacyContextManager); !ok {
 		t.Fatalf("expected fallback to *legacyContextManager on factory error, got %T", al.contextManager)
 	}
+}
+
+func TestResolveContextManagerWithContextAndLoopOverride(t *testing.T) {
+	cleanup := resetCMRegistry()
+	defer cleanup()
+
+	legacy := func(json.RawMessage, *AgentLoop) (ContextManager, error) {
+		return &noopContextManager{}, nil
+	}
+	if err := RegisterContextManager("context_override_cm", legacy); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t)
+	cfg.Agents.Defaults.ContextManager = "context_override_cm"
+	al := newCMTestAgentLoop(cfg)
+
+	type contextKey struct{}
+	var gotName string
+	var gotValue string
+	al.contextResolver = func(
+		ctx context.Context,
+		name string,
+		_ json.RawMessage,
+		owner *AgentLoop,
+	) (ContextManager, error) {
+		gotName = name
+		gotValue, _ = ctx.Value(contextKey{}).(string)
+		if owner != al {
+			t.Fatal("override received a different agent loop")
+		}
+		return &trackingContextManager{}, nil
+	}
+	manager := al.resolveContextManagerWithContext(
+		context.WithValue(t.Context(), contextKey{}, "reload-context"),
+	)
+	if _, ok := manager.(*trackingContextManager); !ok {
+		t.Fatalf("manager = %T, want tracking override", manager)
+	}
+	if gotName != "context_override_cm" || gotValue != "reload-context" {
+		t.Fatalf("override input = %q/%q", gotName, gotValue)
+	}
+}
+
+func TestResolveContextManagerWithContextFallbackEdges(t *testing.T) {
+	t.Run("nil config and context", func(t *testing.T) {
+		loop := &AgentLoop{}
+		if manager := loop.resolveContextManagerWithContext(nil); manager == nil {
+			t.Fatal("nil config did not produce legacy context manager")
+		} else if _, ok := manager.(*legacyContextManager); !ok {
+			t.Fatalf("manager = %T, want legacy", manager)
+		}
+	})
+
+	t.Run("registered factory returns nil", func(t *testing.T) {
+		cleanup := resetCMRegistry()
+		defer cleanup()
+		if err := RegisterContextManager(
+			"nil_result_cm",
+			func(json.RawMessage, *AgentLoop) (ContextManager, error) {
+				return nil, nil
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.Agents.Defaults.ContextManager = "nil_result_cm"
+		loop := newCMTestAgentLoop(cfg)
+		if manager := loop.resolveContextManagerWithContext(t.Context()); manager == nil {
+			t.Fatal("nil factory result did not fall back")
+		} else if _, ok := manager.(*legacyContextManager); !ok {
+			t.Fatalf("manager = %T, want legacy", manager)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,11 +1399,11 @@ func (m *trackingContextManager) Clear(_ context.Context, sessionKey string) err
 // function that restores the original state after the test.
 func resetCMRegistry() func() {
 	cmRegistryMu.Lock()
-	original := make(map[string]ContextManagerFactory, len(cmRegistry))
+	original := make(map[string]contextManagerRegistration, len(cmRegistry))
 	for k, v := range cmRegistry {
 		original[k] = v
 	}
-	cmRegistry = make(map[string]ContextManagerFactory)
+	cmRegistry = make(map[string]contextManagerRegistration)
 	cmRegistryMu.Unlock()
 
 	return func() {

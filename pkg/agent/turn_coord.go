@@ -702,6 +702,13 @@ func messagesHaveMedia(messages []providers.Message) bool {
 }
 
 func (al *AgentLoop) resolveContextManager() ContextManager {
+	return al.resolveContextManagerWithContext(context.Background())
+}
+
+func (al *AgentLoop) resolveContextManagerWithContext(ctx context.Context) ContextManager {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cfg := al.GetConfig()
 	if cfg == nil {
 		return &legacyContextManager{al: al}
@@ -717,7 +724,23 @@ func (al *AgentLoop) resolveContextManager() ContextManager {
 		})
 		return &legacyContextManager{al: al}
 	}
-	cm, err := factory(cfg.Agents.Defaults.ContextManagerConfig, al)
+	var cm ContextManager
+	var err error
+	if al.contextResolver != nil {
+		cm, err = al.contextResolver(
+			ctx,
+			name,
+			cfg.Agents.Defaults.ContextManagerConfig,
+			al,
+		)
+	} else if contextFactory, contextOK := lookupContextManagerWithContext(name); contextOK {
+		cm, err = contextFactory(ctx, cfg.Agents.Defaults.ContextManagerConfig, al)
+	} else {
+		cm, err = factory(cfg.Agents.Defaults.ContextManagerConfig, al)
+	}
+	if err == nil && cm == nil {
+		err = fmt.Errorf("context manager %q factory returned nil", name)
+	}
 	if err != nil {
 		logger.WarnCF(
 			"agent",

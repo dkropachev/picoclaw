@@ -18,7 +18,7 @@ func NewExpandTool(engine *RetrievalEngine) *ExpandTool {
 }
 
 func (t *ExpandTool) Name() string {
-	return "short_expand"
+	return ShortExpandToolName
 }
 
 func (t *ExpandTool) Description() string {
