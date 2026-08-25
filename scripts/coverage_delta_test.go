@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,6 +117,121 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "GOTOOLCHAIN", "auto")
 	assertEnvironmentValue(t, baseEnvironment, "PATH", "/bin")
 	assertEnvironmentValue(t, baseEnvironment, "VALUE", "with=equals")
+}
+
+func TestKnownAgentTempDirCleanupRace(t *testing.T) {
+	cleanupRace := strings.Join([]string{
+		"--- FAIL: TestRunWorkerPanicReleasesSessionTurnState (0.07s)",
+		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestRun/001/sessions: directory not empty",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/pkg/agent\t87.764s",
+	}, "\n")
+	if !isKnownAgentTempDirCleanupRace([]byte(cleanupRace)) {
+		t.Fatal("isKnownAgentTempDirCleanupRace() rejected the exact cleanup-only failure")
+	}
+
+	for _, test := range []struct {
+		name   string
+		output string
+	}{
+		{
+			name: "different failing test",
+			output: cleanupRace + "\n" +
+				"--- FAIL: TestLeaseLoss (0.01s)",
+		},
+		{
+			name: "functional assertion in target test",
+			output: cleanupRace + "\n" +
+				"    agent_test.go:7683: second message did not start a new turn after panic cleanup",
+		},
+		{
+			name: "different temp directory",
+			output: strings.Replace(
+				cleanupRace,
+				"sessions: directory not empty",
+				"cache: directory not empty",
+				1,
+			),
+		},
+		{
+			name:   "test timeout",
+			output: cleanupRace + "\npanic: test timed out after 10m0s",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if isKnownAgentTempDirCleanupRace([]byte(test.output)) {
+				t.Fatal("isKnownAgentTempDirCleanupRace() accepted an unrelated failure")
+			}
+		})
+	}
+}
+
+func TestRunCoverageCommandRetriesKnownCleanupRaceOnce(t *testing.T) {
+	cleanupRace := []byte(strings.Join([]string{
+		"--- FAIL: TestRunWorkerPanicReleasesSessionTurnState (0.07s)",
+		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestRun/001/sessions: directory not empty",
+		"FAIL",
+	}, "\n"))
+	attempts := 0
+	out, err, retried := runCoverageCommandWithCleanupRetry(func() ([]byte, error) {
+		attempts++
+		if attempts == 1 {
+			return cleanupRace, errors.New("exit status 1")
+		}
+		return []byte("ok"), nil
+	})
+	if err != nil || string(out) != "ok" || !retried || attempts != 2 {
+		t.Fatalf(
+			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+			out,
+			err,
+			retried,
+			attempts,
+		)
+	}
+}
+
+func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
+	cleanupRace := []byte(strings.Join([]string{
+		"--- FAIL: TestRunWorkerPanicReleasesSessionTurnState (0.07s)",
+		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestRun/001/sessions: directory not empty",
+		"FAIL",
+	}, "\n"))
+	wantErr := errors.New("exit status 1")
+	attempts := 0
+	out, err, retried := runCoverageCommandWithCleanupRetry(func() ([]byte, error) {
+		attempts++
+		return cleanupRace, wantErr
+	})
+	if !errors.Is(err, wantErr) || string(out) != string(cleanupRace) ||
+		!retried || attempts != 2 {
+		t.Fatalf(
+			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+			out,
+			err,
+			retried,
+			attempts,
+		)
+	}
+}
+
+func TestRunCoverageCommandDoesNotRetryUnrelatedFailure(t *testing.T) {
+	wantErr := errors.New("exit status 1")
+	attempts := 0
+	out, err, retried := runCoverageCommandWithCleanupRetry(func() ([]byte, error) {
+		attempts++
+		return []byte("--- FAIL: TestLeaseLoss (0.01s)"), wantErr
+	})
+	if !errors.Is(err, wantErr) || string(out) != "--- FAIL: TestLeaseLoss (0.01s)" ||
+		retried || attempts != 1 {
+		t.Fatalf(
+			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+			out,
+			err,
+			retried,
+			attempts,
+		)
+	}
 }
 
 func TestTrimCommandOutputPreservesFailureContextAndTail(t *testing.T) {

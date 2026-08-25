@@ -336,7 +336,11 @@ func TestMCPServerCollectionFiltersAndLoadsDetail(t *testing.T) {
 	harness := newMCPAPITestHarness(t, func(cfg *config.Config) {
 		cfg.Tools.MCP.Enabled = true
 		cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
-			"local":  {Enabled: true, Type: "stdio", Command: "tool"},
+			"local": {
+				Enabled: true, Type: "stdio", Command: "/usr/local/bin/tool",
+				Args: []string{"secret-argument"}, EnvFile: "/private/mcp.env",
+				Env: map[string]string{"TOKEN": "secret"},
+			},
 			"remote": {Enabled: false, Type: "http", URL: "https://example.test/mcp"},
 		}
 	})
@@ -348,18 +352,44 @@ func TestMCPServerCollectionFiltersAndLoadsDetail(t *testing.T) {
 		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
 	}
 	var page struct {
-		Servers []mcpServerSummary `json:"servers"`
-		Total   int                `json:"total"`
+		Servers []mcpServerCollectionSummary `json:"servers"`
+		Total   int                          `json:"total"`
 	}
 	if err := json.Unmarshal(list.Body.Bytes(), &page); err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || len(page.Servers) != 1 || page.Servers[0].Name != "local" {
+	if page.Total != 1 || len(page.Servers) != 1 || page.Servers[0].Name != "local" ||
+		page.Servers[0].Address != "tool" || page.Servers[0].EnvironmentKeyCount != 1 {
 		t.Fatalf("page=%#v", page)
+	}
+	var rawPage struct {
+		Servers []map[string]json.RawMessage `json:"servers"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &rawPage); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"url", "command", "args", "env_file", "env_keys", "header_keys"} {
+		if _, leaked := rawPage.Servers[0][forbidden]; leaked {
+			t.Fatalf("collection row leaked %q: %s", forbidden, list.Body.String())
+		}
+	}
+	if strings.Contains(list.Body.String(), "secret-argument") ||
+		strings.Contains(list.Body.String(), "/private/mcp.env") {
+		t.Fatalf("collection leaked MCP configuration: %s", list.Body.String())
 	}
 	detail := harness.request(t, http.MethodGet, "/api/mcp/servers/local", nil)
 	if detail.Code != http.StatusOK || !json.Valid(detail.Body.Bytes()) {
 		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var direct struct {
+		Server mcpServerSummary `json:"server"`
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &direct); err != nil {
+		t.Fatal(err)
+	}
+	if direct.Server.Command != "/usr/local/bin/tool" ||
+		!slices.Equal(direct.Server.Args, []string{"secret-argument"}) {
+		t.Fatalf("direct detail=%#v", direct.Server)
 	}
 }
 

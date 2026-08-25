@@ -1,5 +1,6 @@
 import {
-  type CollectionBulkDeleteResponse,
+  type CollectionConfigBulkDeleteResponse,
+  type CollectionMutationEffects,
   type CollectionQuerySchema,
   collectionListURL,
   collectionRequest,
@@ -162,6 +163,10 @@ export interface ModelAliasDetailResponse {
   config_revision: string
 }
 
+export interface ModelAliasMutationResponse extends ModelAliasDetailResponse {
+  effects: CollectionMutationEffects
+}
+
 export interface ModelRouterCollectionResponse {
   model_routers: ModelRouterSummary[]
   total: number
@@ -174,6 +179,10 @@ export interface ModelRouterCollectionResponse {
 export interface ModelRouterDetailResponse {
   model_router: ModelRouterConfig
   config_revision: string
+}
+
+export interface ModelRouterMutationResponse extends ModelRouterDetailResponse {
+  effects: CollectionMutationEffects
 }
 
 interface ModelsListResponse {
@@ -357,8 +366,8 @@ export function getModelAlias(
 export function createModelAlias(
   alias: ModelAlias,
   expectedConfigRevision: string,
-): Promise<ModelAliasDetailResponse> {
-  return collectionRequest<ModelAliasDetailResponse>("/api/model-aliases", {
+): Promise<ModelAliasMutationResponse> {
+  return collectionRequest<ModelAliasMutationResponse>("/api/model-aliases", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -372,8 +381,8 @@ export function updateModelAliasByName(
   name: string,
   alias: ModelAlias,
   expectedConfigRevision: string,
-): Promise<ModelAliasDetailResponse> {
-  return collectionRequest<ModelAliasDetailResponse>(
+): Promise<ModelAliasMutationResponse> {
+  return collectionRequest<ModelAliasMutationResponse>(
     `/api/model-aliases/${encodeURIComponent(name)}`,
     {
       method: "PUT",
@@ -389,7 +398,7 @@ export function updateModelAliasByName(
 export function deleteModelAliasByName(
   name: string,
   expectedConfigRevision: string,
-): Promise<CollectionBulkDeleteResponse> {
+): Promise<CollectionConfigBulkDeleteResponse> {
   return collectionRequest(
     `/api/model-aliases/${encodeURIComponent(name)}?revision=${encodeURIComponent(expectedConfigRevision)}`,
     { method: "DELETE" },
@@ -399,7 +408,7 @@ export function deleteModelAliasByName(
 export function bulkDeleteModelAliases(
   ids: string[],
   configRevision: string,
-): Promise<CollectionBulkDeleteResponse> {
+): Promise<CollectionConfigBulkDeleteResponse> {
   return collectionRequest("/api/model-aliases/bulk-delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -432,8 +441,8 @@ export function getModelRouter(
 export function createModelRouter(
   router: ModelRouterConfig,
   expectedConfigRevision: string,
-): Promise<ModelRouterDetailResponse> {
-  return collectionRequest<ModelRouterDetailResponse>("/api/model-routers", {
+): Promise<ModelRouterMutationResponse> {
+  return collectionRequest<ModelRouterMutationResponse>("/api/model-routers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -447,8 +456,8 @@ export function updateModelRouterByName(
   name: string,
   router: ModelRouterConfig,
   expectedConfigRevision: string,
-): Promise<ModelRouterDetailResponse> {
-  return collectionRequest<ModelRouterDetailResponse>(
+): Promise<ModelRouterMutationResponse> {
+  return collectionRequest<ModelRouterMutationResponse>(
     `/api/model-routers/${encodeURIComponent(name)}`,
     {
       method: "PUT",
@@ -464,7 +473,7 @@ export function updateModelRouterByName(
 export function deleteModelRouterByName(
   name: string,
   expectedConfigRevision: string,
-): Promise<CollectionBulkDeleteResponse> {
+): Promise<CollectionConfigBulkDeleteResponse> {
   return collectionRequest(
     `/api/model-routers/${encodeURIComponent(name)}?revision=${encodeURIComponent(expectedConfigRevision)}`,
     { method: "DELETE" },
@@ -474,7 +483,7 @@ export function deleteModelRouterByName(
 export function bulkDeleteModelRouters(
   ids: string[],
   configRevision: string,
-): Promise<CollectionBulkDeleteResponse> {
+): Promise<CollectionConfigBulkDeleteResponse> {
   return collectionRequest("/api/model-routers/bulk-delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

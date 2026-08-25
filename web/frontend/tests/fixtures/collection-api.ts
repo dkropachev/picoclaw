@@ -145,6 +145,20 @@ const mcpServers = [
   },
 ]
 
+const mcpServerSummaries = mcpServers.map((server) => ({
+  name: server.name,
+  enabled: server.enabled,
+  deferred: server.deferred,
+  type: server.type,
+  address:
+    server.type === "stdio"
+      ? [server.command, ...server.args].filter(Boolean).join(" ")
+      : server.url,
+  environment_key_count: server.env_keys.length,
+  header_key_count: server.header_keys.length,
+  auth: server.auth,
+}))
+
 const agents = [
   {
     id: "main",
@@ -299,8 +313,8 @@ export async function installCollectionVisualMocks(
           })
         case "/api/mcp/servers":
           return json(route, {
-            servers: state === "empty" ? [] : mcpServers,
-            total: state === "empty" ? 0 : mcpServers.length,
+            servers: state === "empty" ? [] : mcpServerSummaries,
+            total: state === "empty" ? 0 : mcpServerSummaries.length,
             next_cursor: "",
             canonical_query: url.searchParams.get("query") ?? "",
             query_schema: querySchemas.mcp,

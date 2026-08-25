@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -33,9 +34,11 @@ type collectionBulkFailure struct {
 }
 
 type collectionBulkDeleteResponse struct {
-	DeletedIDs     []string                `json:"deleted_ids"`
-	Failures       []collectionBulkFailure `json:"failures"`
-	ConfigRevision string                  `json:"config_revision,omitempty"`
+	DeletedIDs      []string                `json:"deleted_ids"`
+	Failures        []collectionBulkFailure `json:"failures"`
+	CleanupFailures []collectionBulkFailure `json:"cleanup_failures,omitempty"`
+	ConfigRevision  string                  `json:"config_revision,omitempty"`
+	Effects         agentEffects            `json:"effects"`
 }
 
 type modelAliasMutationRequest struct {
@@ -617,7 +620,8 @@ func (h *Handler) handleCreateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -663,7 +667,10 @@ func (h *Handler) handleCreateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Location", "/api/model-aliases/"+url.PathEscape(alias.Name))
-	writeCollectionJSON(w, http.StatusCreated, map[string]any{"model_alias": alias, "config_revision": nextRevision})
+	releaseConfigMutation()
+	writeCollectionJSON(w, http.StatusCreated, map[string]any{
+		"model_alias": alias, "config_revision": nextRevision, "effects": agentEffectsForConfig(cfg),
+	})
 }
 
 func (h *Handler) handleUpdateModelAliasByName(w http.ResponseWriter, r *http.Request) {
@@ -714,7 +721,8 @@ func (h *Handler) handleUpdateModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -753,7 +761,10 @@ func (h *Handler) handleUpdateModelAliasByName(w http.ResponseWriter, r *http.Re
 		writeCollectionConfigSaveError(w, err)
 		return
 	}
-	writeCollectionJSON(w, http.StatusOK, map[string]any{"model_alias": alias, "config_revision": nextRevision})
+	releaseConfigMutation()
+	writeCollectionJSON(w, http.StatusOK, map[string]any{
+		"model_alias": alias, "config_revision": nextRevision, "effects": agentEffectsForConfig(cfg),
+	})
 }
 
 func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Request) {
@@ -761,7 +772,8 @@ func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -812,6 +824,7 @@ func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Re
 		writeCollectionConfigSaveError(w, err)
 		return
 	}
+	releaseConfigMutation()
 	writeCollectionJSON(
 		w,
 		http.StatusOK,
@@ -819,6 +832,7 @@ func (h *Handler) handleDeleteModelAliasByName(w http.ResponseWriter, r *http.Re
 			DeletedIDs:     []string{name},
 			Failures:       []collectionBulkFailure{},
 			ConfigRevision: nextRevision,
+			Effects:        agentEffectsForConfig(cfg),
 		},
 	)
 }
@@ -843,7 +857,8 @@ func (h *Handler) handleBulkDeleteModelAliases(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -908,10 +923,14 @@ func (h *Handler) handleBulkDeleteModelAliases(w http.ResponseWriter, r *http.Re
 	}
 	sort.Strings(deleted)
 	sortCollectionFailures(failures)
+	releaseConfigMutation()
 	writeCollectionJSON(
 		w,
 		http.StatusOK,
-		collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision},
+		collectionBulkDeleteResponse{
+			DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision,
+			Effects: agentEffectsForConfig(cfg),
+		},
 	)
 }
 
@@ -1039,7 +1058,8 @@ func (h *Handler) handleCreateModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -1087,7 +1107,10 @@ func (h *Handler) handleCreateModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	w.Header().Set("Location", "/api/model-routers/"+url.PathEscape(router.Name))
-	writeCollectionJSON(w, http.StatusCreated, map[string]any{"model_router": router, "config_revision": nextRevision})
+	releaseConfigMutation()
+	writeCollectionJSON(w, http.StatusCreated, map[string]any{
+		"model_router": router, "config_revision": nextRevision, "effects": agentEffectsForConfig(cfg),
+	})
 }
 
 func (h *Handler) handleUpdateModelRouterByName(w http.ResponseWriter, r *http.Request) {
@@ -1135,7 +1158,8 @@ func (h *Handler) handleUpdateModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -1176,7 +1200,10 @@ func (h *Handler) handleUpdateModelRouterByName(w http.ResponseWriter, r *http.R
 		writeCollectionConfigSaveError(w, err)
 		return
 	}
-	writeCollectionJSON(w, http.StatusOK, map[string]any{"model_router": router, "config_revision": nextRevision})
+	releaseConfigMutation()
+	writeCollectionJSON(w, http.StatusOK, map[string]any{
+		"model_router": router, "config_revision": nextRevision, "effects": agentEffectsForConfig(cfg),
+	})
 }
 
 func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.Request) {
@@ -1184,7 +1211,8 @@ func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -1237,6 +1265,7 @@ func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.R
 		writeCollectionConfigSaveError(w, err)
 		return
 	}
+	releaseConfigMutation()
 	writeCollectionJSON(
 		w,
 		http.StatusOK,
@@ -1244,6 +1273,7 @@ func (h *Handler) handleDeleteModelRouterByName(w http.ResponseWriter, r *http.R
 			DeletedIDs:     []string{name},
 			Failures:       []collectionBulkFailure{},
 			ConfigRevision: nextRevision,
+			Effects:        agentEffectsForConfig(cfg),
 		},
 	)
 }
@@ -1268,7 +1298,8 @@ func (h *Handler) handleBulkDeleteModelRouters(w http.ResponseWriter, r *http.Re
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeCollectionError(
@@ -1335,10 +1366,14 @@ func (h *Handler) handleBulkDeleteModelRouters(w http.ResponseWriter, r *http.Re
 	}
 	sort.Strings(deleted)
 	sortCollectionFailures(failures)
+	releaseConfigMutation()
 	writeCollectionJSON(
 		w,
 		http.StatusOK,
-		collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision},
+		collectionBulkDeleteResponse{
+			DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision,
+			Effects: agentEffectsForConfig(cfg),
+		},
 	)
 }
 

@@ -1,5 +1,7 @@
 import {
-  type CollectionBulkDeleteResponse,
+  type CollectionBulkDeleteFailure,
+  type CollectionConfigBulkDeleteResponse,
+  type CollectionMutationEffects,
   type CollectionQuerySchema,
   collectionListURL,
   collectionRequest,
@@ -36,6 +38,17 @@ export interface MCPServer {
   auth: MCPAuthSummary
 }
 
+export interface MCPServerCollectionSummary {
+  name: string
+  enabled: boolean
+  deferred: boolean | null
+  type: MCPTransport
+  address: string
+  environment_key_count: number
+  header_key_count: number
+  auth: MCPAuthSummary
+}
+
 export interface MCPConfigResponse {
   enabled: boolean
   discovery: MCPDiscoverySettings
@@ -43,7 +56,7 @@ export interface MCPConfigResponse {
 }
 
 export interface MCPServerCollectionResponse {
-  servers: MCPServer[]
+  servers: MCPServerCollectionSummary[]
   total: number
   next_cursor?: string
   canonical_query: string
@@ -109,6 +122,16 @@ interface MCPActionResponse {
   status: string
 }
 
+export interface MCPMutationResponse extends MCPConfigResponse {
+  effects: CollectionMutationEffects
+  cleanup_failures?: CollectionBulkDeleteFailure[]
+}
+
+interface MCPMutationActionResponse extends MCPActionResponse {
+  effects: CollectionMutationEffects
+  cleanup_failures?: CollectionBulkDeleteFailure[]
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await launcherFetch(path, options)
   if (!response.ok) {
@@ -145,8 +168,8 @@ export function getMCPServer(
 
 export function updateMCPSettings(
   payload: Pick<MCPConfigResponse, "enabled" | "discovery">,
-): Promise<MCPConfigResponse> {
-  return request<MCPConfigResponse>("/api/mcp/settings", {
+): Promise<MCPMutationResponse> {
+  return request<MCPMutationResponse>("/api/mcp/settings", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -156,8 +179,8 @@ export function updateMCPSettings(
 export function addMCPServer(
   server: MCPServerInput,
   expectedConfigRevision?: string,
-): Promise<MCPConfigResponse> {
-  return request<MCPConfigResponse>("/api/mcp/servers", {
+): Promise<MCPMutationResponse> {
+  return request<MCPMutationResponse>("/api/mcp/servers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -173,8 +196,8 @@ export function updateMCPServer(
   currentName: string,
   server: MCPServerInput,
   expectedConfigRevision?: string,
-): Promise<MCPConfigResponse> {
-  return request<MCPConfigResponse>(
+): Promise<MCPMutationResponse> {
+  return request<MCPMutationResponse>(
     `/api/mcp/servers/${encodeURIComponent(currentName)}`,
     {
       method: "PUT",
@@ -189,8 +212,10 @@ export function updateMCPServer(
   )
 }
 
-export function deleteMCPServer(name: string): Promise<MCPActionResponse> {
-  return request<MCPActionResponse>(
+export function deleteMCPServer(
+  name: string,
+): Promise<MCPMutationActionResponse> {
+  return request<MCPMutationActionResponse>(
     `/api/mcp/servers/${encodeURIComponent(name)}`,
     {
       method: "DELETE",
@@ -201,7 +226,7 @@ export function deleteMCPServer(name: string): Promise<MCPActionResponse> {
 export function bulkDeleteMCPServers(
   ids: string[],
   configRevision: string,
-): Promise<CollectionBulkDeleteResponse> {
+): Promise<CollectionConfigBulkDeleteResponse> {
   return collectionRequest("/api/mcp/servers/bulk-delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

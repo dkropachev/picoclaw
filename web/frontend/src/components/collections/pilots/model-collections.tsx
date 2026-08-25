@@ -1,7 +1,7 @@
 import { IconEdit, IconPlus } from "@tabler/icons-react"
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { type FormEvent, useEffect, useMemo, useState } from "react"
-import { toast } from "sonner"
+import { useTranslation } from "react-i18next"
 
 import { CollectionAPIError } from "@/api/collection"
 import {
@@ -44,6 +44,7 @@ import {
   type CollectionRouteSearch,
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
+import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
 import {
@@ -69,6 +70,7 @@ export function ModelAliasesCollectionPage({
   search: PilotCollectionSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
 }) {
+  const { t } = useTranslation()
   const activeQuery = normalizeCollectionRouteSearch(search, {
     defaultQuery: aliasDefaultQuery,
     supportedViews,
@@ -165,10 +167,24 @@ export function ModelAliasesCollectionPage({
           <IconPlus /> Add alias
         </Button>
       }
-      onBulkDelete={(ids) => {
+      onBulkDelete={async (ids) => {
         if (!first?.config_revision)
           throw new Error("Configuration revision is unavailable")
-        return bulkDeleteModelAliases(ids, first.config_revision)
+        const response = await bulkDeleteModelAliases(
+          ids,
+          first.config_revision,
+        )
+        if (response.deleted_ids.length > 0) {
+          const gateway = await refreshGatewayState({ force: true })
+          showSaveSuccessOrRestartToast(
+            t,
+            `Deleted ${response.deleted_ids.length} model alias${response.deleted_ids.length === 1 ? "" : "es"}.`,
+            "Model aliases",
+            response.effects.gateway_effect === "restart_required" ||
+              gateway?.restartRequired === true,
+          )
+        }
+        return response
       }}
       afterBulkDelete={() => query.refetch()}
       emptyTitle="No configured model aliases"
@@ -185,6 +201,7 @@ export function ModelRoutersCollectionPage({
   search: PilotCollectionSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
 }) {
+  const { t } = useTranslation()
   const activeQuery = normalizeCollectionRouteSearch(search, {
     defaultQuery: routerDefaultQuery,
     supportedViews,
@@ -281,10 +298,24 @@ export function ModelRoutersCollectionPage({
           <IconPlus /> Add router
         </Button>
       }
-      onBulkDelete={(ids) => {
+      onBulkDelete={async (ids) => {
         if (!first?.config_revision)
           throw new Error("Configuration revision is unavailable")
-        return bulkDeleteModelRouters(ids, first.config_revision)
+        const response = await bulkDeleteModelRouters(
+          ids,
+          first.config_revision,
+        )
+        if (response.deleted_ids.length > 0) {
+          const gateway = await refreshGatewayState({ force: true })
+          showSaveSuccessOrRestartToast(
+            t,
+            `Deleted ${response.deleted_ids.length} model router${response.deleted_ids.length === 1 ? "" : "s"}.`,
+            "Model routers",
+            response.effects.gateway_effect === "restart_required" ||
+              gateway?.restartRequired === true,
+          )
+        }
+        return response
       }}
       afterBulkDelete={() => query.refetch()}
       emptyTitle="No model routers"
@@ -549,6 +580,7 @@ function ModelAliasForm({
   onCancel: () => void
   onSaved: (name: string) => void
 }) {
+  const { t } = useTranslation()
   const [aliasName, setAliasName] = useState(initial?.name ?? "")
   const [model, setModel] = useState(initial?.model ?? "")
   const [overrides, setOverrides] = useState(
@@ -603,11 +635,17 @@ function ModelAliasForm({
     setSaving(true)
     setError("")
     try {
-      if (initial)
-        await updateModelAliasByName(initial.name, payload, currentRevision)
-      else await createModelAlias(payload, currentRevision)
-      await refreshGatewayState({ force: true })
-      toast.success(initial ? "Model alias saved." : "Model alias created.")
+      const response = initial
+        ? await updateModelAliasByName(initial.name, payload, currentRevision)
+        : await createModelAlias(payload, currentRevision)
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        initial ? "Model alias saved." : "Model alias created.",
+        nextName,
+        response.effects.gateway_effect === "restart_required" ||
+          gateway?.restartRequired === true,
+      )
       onSaved(nextName)
     } catch (saveError) {
       if (saveError instanceof CollectionAPIError && saveError.status === 409) {
@@ -777,6 +815,7 @@ function ModelRouterForm({
   onCancel: () => void
   onSaved: (name: string) => void
 }) {
+  const { t } = useTranslation()
   const parsed = useMemo(() => parseRouterTargets(initial), [initial])
   const [routerName, setRouterName] = useState(initial?.name ?? "")
   const [fallback, setFallback] = useState(parsed.fallback)
@@ -842,15 +881,21 @@ function ModelRouterForm({
     setSaving(true)
     setError("")
     try {
-      if (initial)
-        await updateModelRouterByName(
-          initial.name ?? nextName,
-          router,
-          currentRevision,
-        )
-      else await createModelRouter(router, currentRevision)
-      await refreshGatewayState({ force: true })
-      toast.success(initial ? "Model router saved." : "Model router created.")
+      const response = initial
+        ? await updateModelRouterByName(
+            initial.name ?? nextName,
+            router,
+            currentRevision,
+          )
+        : await createModelRouter(router, currentRevision)
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        initial ? "Model router saved." : "Model router created.",
+        nextName,
+        response.effects.gateway_effect === "restart_required" ||
+          gateway?.restartRequired === true,
+      )
       onSaved(nextName)
     } catch (saveError) {
       if (saveError instanceof CollectionAPIError && saveError.status === 409) {

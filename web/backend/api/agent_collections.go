@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/collectionquery"
@@ -141,7 +142,8 @@ func (h *Handler) handleBulkDeleteAgents(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 	cfg, currentRevision, ok := h.loadAgentConfigForUpdate(w)
 	if !ok {
 		return
@@ -150,6 +152,7 @@ func (h *Handler) handleBulkDeleteAgents(w http.ResponseWriter, r *http.Request)
 		writeAgentError(w, http.StatusConflict, "config_revision_mismatch", nil)
 		return
 	}
+	dependencies := agentDeleteDependenciesForConfig(r.Context(), cfg)
 
 	requested, commonFailures := normalizeBulkIDs(request.IDs)
 	failures := make([]agentBulkDeleteFailure, 0, len(commonFailures))
@@ -179,7 +182,7 @@ func (h *Handler) handleBulkDeleteAgents(w http.ResponseWriter, r *http.Request)
 		changed = false
 		ids := sortedAgentIDSet(deletable)
 		for _, id := range ids {
-			blockers := agentBulkDeleteBlockers(cfg, id, deletable)
+			blockers := agentBulkDeleteBlockers(cfg, id, deletable, dependencies)
 			if len(blockers) == 0 {
 				continue
 			}
@@ -192,6 +195,7 @@ func (h *Handler) handleBulkDeleteAgents(w http.ResponseWriter, r *http.Request)
 	deleted := sortedAgentIDSet(deletable)
 	if len(deleted) == 0 {
 		sortAgentBulkFailures(failures)
+		releaseConfigMutation()
 		writeAgentJSON(w, http.StatusOK, agentBulkDeleteResponse{
 			DeletedIDs: []string{}, Failures: failures, ConfigRevision: currentRevision,
 			Effects: agentEffectsForConfig(cfg),
@@ -227,6 +231,7 @@ func (h *Handler) handleBulkDeleteAgents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	sortAgentBulkFailures(failures)
+	releaseConfigMutation()
 	writeAgentJSON(w, http.StatusOK, agentBulkDeleteResponse{
 		DeletedIDs: deleted, Failures: failures, ConfigRevision: revision,
 		Effects: agentEffectsForConfig(cfg),
@@ -237,15 +242,9 @@ func agentBulkDeleteBlockers(
 	cfg *config.Config,
 	targetID string,
 	deletable map[string]bool,
+	dependencies agentDeleteDependencies,
 ) []agentDeleteBlocker {
-	blockers := make([]agentDeleteBlocker, 0)
-	if cfg.Agents.Dispatch != nil {
-		for _, rule := range cfg.Agents.Dispatch.Rules {
-			if rule.Agent == targetID {
-				blockers = append(blockers, agentDeleteBlocker{Kind: "dispatch_rule", Name: rule.Name})
-			}
-		}
-	}
+	blockers := agentConfigurationDeleteBlockers(cfg, targetID, dependencies)
 	for index := range cfg.Agents.List {
 		agent := &cfg.Agents.List[index]
 		if agent.ID == targetID || deletable[agent.ID] || agent.Subagents == nil {
@@ -258,15 +257,7 @@ func agentBulkDeleteBlockers(
 			}
 		}
 	}
-	sort.SliceStable(blockers, func(i, j int) bool {
-		if blockers[i].Kind == blockers[j].Kind {
-			if blockers[i].AgentID == blockers[j].AgentID {
-				return blockers[i].Name < blockers[j].Name
-			}
-			return blockers[i].AgentID < blockers[j].AgentID
-		}
-		return blockers[i].Kind < blockers[j].Kind
-	})
+	sortAgentDeleteBlockers(blockers)
 	return blockers
 }
 

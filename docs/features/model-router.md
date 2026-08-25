@@ -118,7 +118,7 @@ behavior and requires router entries to remain secret-free.
 | `FR-MODEL-ROUTER-004` | [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go) |
 | `FR-MODEL-ROUTER-005`, `FR-MODEL-ROUTER-006` | [web/frontend/src/hooks/use-chat-models.test.ts](../../web/frontend/src/hooks/use-chat-models.test.ts), [web/frontend/src/components/models/model-card.test.tsx](../../web/frontend/src/components/models/model-card.test.tsx) |
 
-| `FR-MODEL-ROUTER-007` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [pkg/config/model_router_test.go](../../pkg/config/model_router_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
+| `FR-MODEL-ROUTER-007` | [web/backend/api/collection_apis_test.go](../../web/backend/api/collection_apis_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [pkg/config/model_router_test.go](../../pkg/config/model_router_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 
@@ -135,6 +135,7 @@ Owns: CODE pkg/config/model_router.go
 Owns: CODE web/backend/api/model_collections.go
 Owns: CODE web/frontend/src/components/models/model-router-sheet.tsx
 Owns: CODE web/frontend/src/components/models/models-page.tsx
+Owns: CODE web/frontend/src/components/collections/pilots/model-collections.tsx
 Owns: CODE web/frontend/src/components/collections/pilots/model-router*
 Owns: CODE web/frontend/src/routes/models_*router*.tsx
 Owns: HTTP * /api/model-routers*

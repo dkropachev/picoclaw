@@ -111,6 +111,7 @@
       "spec": "docs/features/model-router.md",
       "patterns": [
         "web/frontend/src/components/models/model-router*",
+        "web/frontend/src/components/collections/pilots/model-collections.tsx",
         "web/frontend/src/components/collections/pilots/model-router*",
         "web/frontend/src/routes/models_*router*.tsx"
       ]

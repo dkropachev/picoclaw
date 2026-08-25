@@ -1,12 +1,14 @@
 import { IconEdit, IconPlus, IconSettings } from "@tabler/icons-react"
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { type FormEvent, useEffect, useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { CollectionAPIError } from "@/api/collection"
 import {
   type MCPConfigResponse,
   type MCPServer,
+  type MCPServerCollectionSummary,
   type MCPServerInput,
   addMCPServer,
   bulkDeleteMCPServers,
@@ -42,6 +44,7 @@ import {
   type CollectionRouteSearch,
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
+import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
 import {
@@ -63,10 +66,11 @@ export function MCPServersCollectionPage({
   search: PilotCollectionSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
   onAdd: () => void
-  onOpen: (server: MCPServer) => void
-  onEdit: (server: MCPServer) => void
+  onOpen: (server: MCPServerCollectionSummary) => void
+  onEdit: (server: MCPServerCollectionSummary) => void
   onSettings: () => void
 }) {
+  const { t } = useTranslation()
   const activeQuery = normalizeCollectionRouteSearch(
     { ...search },
     { defaultQuery, supportedViews },
@@ -84,7 +88,7 @@ export function MCPServersCollectionPage({
   })
   const items = query.data?.pages.flatMap((page) => page.servers) ?? []
   const first = query.data?.pages[0]
-  const definition = useMemo<CollectionDefinition<MCPServer>>(
+  const definition = useMemo<CollectionDefinition<MCPServerCollectionSummary>>(
     () => ({
       key: "mcp-servers",
       title: "MCP servers",
@@ -95,10 +99,7 @@ export function MCPServersCollectionPage({
       getItemLabel: (server) => server.name,
       getItemIdentity: (server) => ({
         title: server.name,
-        description:
-          server.type === "stdio"
-            ? [server.command, ...server.args].filter(Boolean).join(" ")
-            : server.url,
+        description: server.address,
         metadata: discoveryLabel(server.deferred),
       }),
       columns: [
@@ -106,7 +107,7 @@ export function MCPServersCollectionPage({
         {
           id: "endpoint",
           header: "Endpoint",
-          cell: (server) => server.url || server.command || "—",
+          cell: (server) => server.address || "—",
           className: "max-w-80 truncate font-mono text-xs",
         },
         {
@@ -125,12 +126,12 @@ export function MCPServersCollectionPage({
         {
           id: "environment",
           label: "Environment keys",
-          value: (server) => server.env_keys.length,
+          value: (server) => server.environment_key_count,
         },
         {
           id: "headers",
           label: "Header keys",
-          value: (server) => server.header_keys.length,
+          value: (server) => server.header_key_count,
         },
       ],
       badges: [
@@ -184,10 +185,22 @@ export function MCPServersCollectionPage({
           </Button>
         </>
       }
-      onBulkDelete={(ids) => {
+      onBulkDelete={async (ids) => {
         if (!first?.config_revision)
           throw new Error("Configuration revision is unavailable")
-        return bulkDeleteMCPServers(ids, first.config_revision)
+        const response = await bulkDeleteMCPServers(ids, first.config_revision)
+        if (response.deleted_ids.length > 0) {
+          const gateway = await refreshGatewayState({ force: true })
+          showSaveSuccessOrRestartToast(
+            t,
+            `Deleted ${response.deleted_ids.length} MCP server${response.deleted_ids.length === 1 ? "" : "s"}.`,
+            "MCP servers",
+            response.effects.gateway_effect === "restart_required" ||
+              gateway?.restartRequired === true,
+          )
+        }
+        showMCPCleanupFailureWarning(response.cleanup_failures)
+        return response
       }}
       afterBulkDelete={() => query.refetch()}
       emptyTitle="No MCP servers"
@@ -345,6 +358,7 @@ function MCPServerForm({
   onCancel: () => void
   onSaved: (name: string) => void
 }) {
+  const { t } = useTranslation()
   const seed = initial ? serverInputFromServer(initial) : undefined
   const [serverName, setServerName] = useState(seed?.name ?? "")
   const [transport, setTransport] = useState<MCPServerInput["type"]>(
@@ -480,8 +494,9 @@ function MCPServerForm({
     setSaving(true)
     setError("")
     try {
-      if (initial) await updateMCPServer(initial.name, payload, currentRevision)
-      else await addMCPServer(payload, currentRevision)
+      const response = initial
+        ? await updateMCPServer(initial.name, payload, currentRevision)
+        : await addMCPServer(payload, currentRevision)
       if (
         transport !== "stdio" &&
         authMode === "bearer" &&
@@ -503,8 +518,15 @@ function MCPServerForm({
           globalThis.open(flow.auth_url, "_blank", "noopener,noreferrer")
         }
       }
-      await refreshGatewayState({ force: true })
-      toast.success(initial ? "MCP server saved." : "MCP server created.")
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        initial ? "MCP server saved." : "MCP server created.",
+        name,
+        response.effects.gateway_effect === "restart_required" ||
+          gateway?.restartRequired === true,
+      )
+      showMCPCleanupFailureWarning(response.cleanup_failures)
       onSaved(name)
     } catch (saveError) {
       oauthWindow?.close()
@@ -760,6 +782,7 @@ function MCPSettingsForm({
   initial: MCPConfigResponse
   onSaved: (next: MCPConfigResponse) => unknown
 }) {
+  const { t } = useTranslation()
   const [enabled, setEnabled] = useState(initial.enabled)
   const [discovery, setDiscovery] = useState(initial.discovery.enabled)
   const [ttl, setTTL] = useState(String(initial.discovery.ttl))
@@ -796,8 +819,14 @@ function MCPSettingsForm({
         },
       })
       onSaved(next)
-      await refreshGatewayState({ force: true })
-      toast.success("MCP settings saved.")
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        "MCP settings saved.",
+        "MCP settings",
+        next.effects.gateway_effect === "restart_required" ||
+          gateway?.restartRequired === true,
+      )
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Save failed")
     } finally {
@@ -906,6 +935,16 @@ function DetailRows({ rows }: { rows: Array<[string, string]> }) {
       ))}
     </dl>
   )
+}
+
+function showMCPCleanupFailureWarning(
+  cleanupFailures?: ReadonlyArray<{ id: string; code: string }>,
+) {
+  if (!cleanupFailures?.length) return
+  toast.warning("Credential cleanup needs attention.", {
+    description:
+      "The server changes were saved, but one or more unreferenced credentials could not be removed.",
+  })
 }
 
 function parseSecretLines(value: string): Record<string, string> {

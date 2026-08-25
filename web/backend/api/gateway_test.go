@@ -1745,6 +1745,61 @@ func TestConfigSignatureTracksFullOrderedAgentConfiguration(t *testing.T) {
 	}
 }
 
+func TestConfigSignatureTracksModelRouterGraph(t *testing.T) {
+	newConfig := func() *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.ModelRouters = []config.ModelRouterConfig{{
+			Name: "task-router", Enabled: true, Entry: "entry",
+			Blocks: []config.ModelRouterBlock{
+				{
+					ID: "entry", Type: config.ModelRouterBlockTypeRules, Fallback: "fallback",
+					Rules: []config.ModelRouterRule{{
+						Match: config.ModelRouterRuleContains, Value: "private-sentinel",
+						Target: "code",
+					}},
+				},
+				{ID: "code", Type: config.ModelRouterBlockTypeModel, Model: "coding"},
+				{ID: "fallback", Type: config.ModelRouterBlockTypeModel, Model: "default"},
+			},
+		}}
+		return cfg
+	}
+
+	baseline := computeConfigSignature(newConfig())
+	if strings.Contains(baseline, "private-sentinel") {
+		t.Fatal("model router rule values must be hashed in the config signature")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*config.ModelRouterConfig)
+	}{
+		{name: "enabled", mutate: func(router *config.ModelRouterConfig) { router.Enabled = false }},
+		{name: "entry", mutate: func(router *config.ModelRouterConfig) { router.Entry = "code" }},
+		{
+			name: "rule value",
+			mutate: func(router *config.ModelRouterConfig) {
+				router.Blocks[0].Rules[0].Value = "changed"
+			},
+		},
+		{
+			name: "rule target",
+			mutate: func(router *config.ModelRouterConfig) {
+				router.Blocks[0].Rules[0].Target = "fallback"
+			},
+		},
+		{name: "terminal model", mutate: func(router *config.ModelRouterConfig) { router.Blocks[1].Model = "review" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := newConfig()
+			test.mutate(&cfg.ModelRouters[0])
+			if got := computeConfigSignature(cfg); got == baseline {
+				t.Fatalf("%s must change the config signature", test.name)
+			}
+		})
+	}
+}
+
 func TestSignatureCanonicalizerKeepsLegacyNilCollectionSemanticsOutsideAgents(
 	t *testing.T,
 ) {

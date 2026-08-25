@@ -470,10 +470,24 @@ func runGoCoverage(
 		args = append(args, "-coverpkg", strings.Join(coverImports, ","))
 	}
 	args = append(args, testImports...)
-	cmd := exec.Command("go", args...)
-	cmd.Dir = worktree
-	cmd.Env = append([]string(nil), environment...)
-	out, err := cmd.CombinedOutput()
+	run := func() ([]byte, error) {
+		cmd := exec.Command("go", args...)
+		cmd.Dir = worktree
+		cmd.Env = append([]string(nil), environment...)
+		return cmd.CombinedOutput()
+	}
+	// The guard tests detached base and head worktrees. A synchronization fix
+	// in head cannot change the historical base test, so retry only its exact
+	// cleanup-only failure signature once.
+	out, err, retried := runCoverageCommandWithCleanupRetry(run)
+	if retried {
+		fmt.Fprintf(
+			os.Stderr,
+			"coverage delta: retried %s (%s) after known agent TempDir cleanup race\n",
+			label,
+			ref,
+		)
+	}
 	if err != nil {
 		return coverageProfile{}, fmt.Errorf("go coverage for %s (%s): %w\n%s", label, ref, err, trimCommandOutput(out))
 	}
@@ -487,6 +501,50 @@ func runGoCoverage(
 		return coverageProfile{}, fmt.Errorf("parse %s coverage profile: %w", label, err)
 	}
 	return profile, nil
+}
+
+func runCoverageCommandWithCleanupRetry(
+	run func() ([]byte, error),
+) ([]byte, error, bool) {
+	out, err := run()
+	if err == nil || !isKnownAgentTempDirCleanupRace(out) {
+		return out, err, false
+	}
+	out, err = run()
+	return out, err, true
+}
+
+func isKnownAgentTempDirCleanupRace(out []byte) bool {
+	const (
+		testFailurePrefix = "--- FAIL: TestRunWorkerPanicReleasesSessionTurnState ("
+		cleanupPrefix     = "TempDir RemoveAll cleanup:"
+		cleanupSuffix     = "sessions: directory not empty"
+	)
+
+	failures := 0
+	cleanupFailures := 0
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "--- FAIL:") {
+			if !strings.HasPrefix(line, testFailurePrefix) {
+				return false
+			}
+			failures++
+		}
+		if strings.Contains(line, cleanupPrefix) && strings.Contains(line, cleanupSuffix) {
+			cleanupFailures++
+		}
+		// A functional assertion from this test must not be reclassified as
+		// the cleanup-only race merely because TempDir also reports a failure.
+		if strings.Contains(line, "agent_test.go:") {
+			return false
+		}
+		if strings.HasPrefix(line, "panic:") || strings.Contains(line, "[build failed]") {
+			return false
+		}
+	}
+	return scanner.Err() == nil && failures == 1 && cleanupFailures == 1
 }
 
 func runIntegrationCoverage(

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -150,12 +153,14 @@ func (h *Handler) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 
 	cfg, revision, ok := h.loadCurrentAgentConfig(w)
 	if !ok {
 		return
 	}
+	releaseConfigMutation()
 	response := h.buildAgentsCollectionResponse(cfg, revision)
 	allResources := append([]agentResource(nil), response.Agents...)
 	page, err := pageAgentResources(response.Agents, listRequest)
@@ -200,7 +205,8 @@ func (h *Handler) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 
 	cfg, revision, ok := h.loadCurrentAgentConfig(w)
 	if !ok {
@@ -211,6 +217,7 @@ func (h *Handler) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 		writeAgentError(w, http.StatusNotFound, "agent_not_found", nil)
 		return
 	}
+	releaseConfigMutation()
 	writeAgentJSON(w, http.StatusOK, agentItemResponse{
 		Agent:          resource,
 		DefaultAgentID: effectiveDefaultAgentID(cfg),
@@ -245,7 +252,8 @@ func (h *Handler) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 
 	cfg, currentRevision, ok := h.loadAgentConfigForUpdate(w)
 	if !ok {
@@ -280,6 +288,7 @@ func (h *Handler) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	releaseConfigMutation()
 	writeAgentJSON(
 		w,
 		http.StatusCreated,
@@ -322,7 +331,8 @@ func (h *Handler) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 
 	cfg, currentRevision, ok := h.loadAgentConfigForUpdate(w)
 	if !ok {
@@ -359,6 +369,7 @@ func (h *Handler) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	releaseConfigMutation()
 	writeAgentJSON(
 		w,
 		http.StatusOK,
@@ -383,7 +394,8 @@ func (h *Handler) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 
 	cfg, currentRevision, ok := h.loadAgentConfigForUpdate(w)
 	if !ok {
@@ -402,7 +414,8 @@ func (h *Handler) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeAgentError(w, http.StatusNotFound, "agent_not_found", nil)
 		return
 	}
-	if blockers := agentDeleteBlockers(cfg, id); len(blockers) > 0 {
+	dependencies := agentDeleteDependenciesForConfig(r.Context(), cfg)
+	if blockers := agentDeleteBlockers(cfg, id, dependencies); len(blockers) > 0 {
 		writeAgentError(w, http.StatusConflict, "agent_referenced", blockers)
 		return
 	}
@@ -426,6 +439,7 @@ func (h *Handler) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	releaseConfigMutation()
 	writeAgentJSON(
 		w,
 		http.StatusOK,
@@ -450,7 +464,8 @@ func (h *Handler) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
+	releaseConfigMutation := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseConfigMutation()
 
 	cfg, currentRevision, ok := h.loadAgentConfigForUpdate(w)
 	if !ok {
@@ -463,6 +478,7 @@ func (h *Handler) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request) 
 	index, exists := findConfiguredAgent(cfg, id)
 	if !exists {
 		if len(cfg.Agents.List) == 0 && id == routing.DefaultAgentID {
+			releaseConfigMutation()
 			writeAgentJSON(
 				w,
 				http.StatusOK,
@@ -474,6 +490,7 @@ func (h *Handler) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if cfg.Agents.List[index].Default {
+		releaseConfigMutation()
 		writeAgentJSON(
 			w,
 			http.StatusOK,
@@ -488,6 +505,7 @@ func (h *Handler) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	releaseConfigMutation()
 	writeAgentJSON(
 		w,
 		http.StatusOK,
@@ -536,7 +554,7 @@ func (h *Handler) saveAgentConfig(
 	cfg *config.Config,
 	expectedRevision string,
 ) (string, bool) {
-	revision, err := config.SaveConfigIfRevision(h.configPath, cfg, expectedRevision)
+	revision, err := h.saveConfigIfRevision(h.configPath, cfg, expectedRevision)
 	if errors.Is(err, config.ErrConfigRevisionMismatch) {
 		writeAgentError(w, http.StatusConflict, "config_revision_mismatch", nil)
 		return "", false
@@ -1018,17 +1036,11 @@ func cloneStrings(values []string) []string {
 func agentDeleteBlockers(
 	cfg *config.Config,
 	targetID string,
+	dependencies agentDeleteDependencies,
 ) []agentDeleteBlocker {
-	var blockers []agentDeleteBlocker
-	if cfg.Agents.Dispatch != nil {
-		for _, rule := range cfg.Agents.Dispatch.Rules {
-			if rule.Agent == targetID {
-				blockers = append(blockers, agentDeleteBlocker{
-					Kind: "dispatch_rule",
-					Name: rule.Name,
-				})
-			}
-		}
+	blockers := agentConfigurationDeleteBlockers(cfg, targetID, dependencies)
+	if cfg == nil {
+		return blockers
 	}
 	for index := range cfg.Agents.List {
 		agent := &cfg.Agents.List[index]
@@ -1045,7 +1057,99 @@ func agentDeleteBlockers(
 			}
 		}
 	}
+	sortAgentDeleteBlockers(blockers)
 	return blockers
+}
+
+type agentDeleteDependencies struct {
+	workflowReferences          []prLifecycleGateActionWorkflowAgentReference
+	workflowReferencesAvailable bool
+}
+
+func agentDeleteDependenciesForConfig(
+	ctx context.Context,
+	cfg *config.Config,
+) agentDeleteDependencies {
+	if cfg == nil {
+		return agentDeleteDependencies{workflowReferencesAvailable: true}
+	}
+	references, err := prLifecycleGateActionWorkflowAgentReferences(
+		ctx,
+		cfg.PRLifecycle,
+		cfg,
+	)
+	return agentDeleteDependencies{
+		workflowReferences:          references,
+		workflowReferencesAvailable: err == nil,
+	}
+}
+
+// agentConfigurationDeleteBlockers returns references that remain regardless
+// of which other agents are selected for the same bulk deletion. Agent-to-agent
+// allowlists are handled separately so a selected referrer can be co-deleted.
+func agentConfigurationDeleteBlockers(
+	cfg *config.Config,
+	targetID string,
+	dependencies agentDeleteDependencies,
+) []agentDeleteBlocker {
+	if cfg == nil {
+		return nil
+	}
+	blockers := make([]agentDeleteBlocker, 0)
+	if cfg.Agents.Dispatch != nil {
+		for _, rule := range cfg.Agents.Dispatch.Rules {
+			if rule.Agent == targetID {
+				blockers = append(blockers, agentDeleteBlocker{
+					Kind: "dispatch_rule",
+					Name: rule.Name,
+				})
+			}
+		}
+	}
+	for configurationID, workflowConfiguration := range cfg.PRLifecycle.WorkflowConfigurations {
+		for _, binding := range workflowConfiguration.Bindings {
+			action := binding.Action
+			if action == nil || string(action.Type) != "ai" || action.Session == "source" ||
+				strings.TrimSpace(action.AgentID) != targetID {
+				continue
+			}
+			blockers = append(blockers, agentDeleteBlocker{
+				Kind: "pr_lifecycle_action",
+				Name: strings.Join(
+					[]string{configurationID, binding.WorkflowRef, binding.GateRef},
+					":",
+				),
+			})
+		}
+	}
+	if !dependencies.workflowReferencesAvailable {
+		blockers = append(blockers, agentDeleteBlocker{
+			Kind: "pr_lifecycle_workflow_unavailable",
+		})
+	} else {
+		for _, reference := range dependencies.workflowReferences {
+			if strings.TrimSpace(reference.AgentID) != targetID {
+				continue
+			}
+			blockers = append(blockers, agentDeleteBlocker{
+				Kind: "pr_lifecycle_action",
+				Name: reference.WorkflowRef + ":" + reference.GateRef,
+			})
+		}
+	}
+	return blockers
+}
+
+func sortAgentDeleteBlockers(blockers []agentDeleteBlocker) {
+	sort.SliceStable(blockers, func(i, j int) bool {
+		if blockers[i].Kind == blockers[j].Kind {
+			if blockers[i].AgentID == blockers[j].AgentID {
+				return blockers[i].Name < blockers[j].Name
+			}
+			return blockers[i].AgentID < blockers[j].AgentID
+		}
+		return blockers[i].Kind < blockers[j].Kind
+	})
 }
 
 func decodeAgentRequest(w http.ResponseWriter, r *http.Request, destination any) bool {

@@ -3,13 +3,15 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	picoagent "github.com/sipeed/picoclaw/pkg/agent"
-	picoauth "github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
@@ -47,6 +49,46 @@ var mcpServerCollectionSchema = mustCollectionQuerySchema(
 	[]collectionquery.SortField{{Field: "name", Direction: collectionquery.Ascending}},
 )
 
+// mcpServerCollectionSummary deliberately excludes executable arguments,
+// endpoint paths, environment-file paths, and key inventories. Those belong
+// only to the direct item endpoint and editor.
+type mcpServerCollectionSummary struct {
+	Name                string         `json:"name"`
+	Enabled             bool           `json:"enabled"`
+	Deferred            *bool          `json:"deferred"`
+	Type                string         `json:"type"`
+	Address             string         `json:"address,omitempty"`
+	EnvironmentKeyCount int            `json:"environment_key_count"`
+	HeaderKeyCount      int            `json:"header_key_count"`
+	Auth                mcpAuthSummary `json:"auth"`
+}
+
+func projectMCPServerCollectionSummary(server mcpServerSummary) mcpServerCollectionSummary {
+	address := strings.TrimSpace(server.Command)
+	if server.Type == "stdio" {
+		if separator := strings.LastIndexAny(address, `/\`); separator >= 0 {
+			address = address[separator+1:]
+		}
+	} else if endpoint, err := url.Parse(server.URL); err == nil && endpoint.Scheme != "" && endpoint.Host != "" {
+		address = endpoint.Scheme + "://" + endpoint.Host
+	} else {
+		address = ""
+	}
+	address = strings.TrimSpace(strings.ToValidUTF8(address, ""))
+	if len(address) > 256 {
+		address = address[:256]
+		for !utf8.ValidString(address) {
+			address = address[:len(address)-1]
+		}
+	}
+	return mcpServerCollectionSummary{
+		Name: server.Name, Enabled: server.Enabled, Deferred: cloneBoolPointer(server.Deferred),
+		Type: server.Type, Address: address,
+		EnvironmentKeyCount: len(server.EnvKeys), HeaderKeyCount: len(server.HeaderKeys),
+		Auth: server.Auth,
+	}
+}
+
 func (h *Handler) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	listRequest, ok := parseCollectionListRequest(w, r, mcpServerCollectionSchema)
 	if !ok {
@@ -76,23 +118,19 @@ func (h *Handler) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	summaries := make([]mcpServerCollectionSummary, len(response.Servers))
 	names := make([]string, 0, len(response.Servers))
-	for _, server := range response.Servers {
+	for index, server := range response.Servers {
+		summaries[index] = projectMCPServerCollectionSummary(server)
 		names = append(names, server.Name)
 	}
 	sort.Strings(names)
 	page, err := collectionquery.Paginate(
-		response.Servers, listRequest.Query, listRequest.Cursor, listRequest.Limit, listRequest.Now,
-		collectionquery.PageOptions[mcpServerSummary]{
-			ID:         func(server mcpServerSummary) (string, error) { return server.Name, nil },
+		summaries, listRequest.Query, listRequest.Cursor, listRequest.Limit, listRequest.Now,
+		collectionquery.PageOptions[mcpServerCollectionSummary]{
+			ID:         func(server mcpServerCollectionSummary) (string, error) { return server.Name, nil },
 			ValidateID: func(name string) bool { return validateMCPServerName(name) == nil },
-			Clone: func(server mcpServerSummary) mcpServerSummary {
-				server.Args = append([]string(nil), server.Args...)
-				server.EnvKeys = append([]string(nil), server.EnvKeys...)
-				server.HeaderKeys = append([]string(nil), server.HeaderKeys...)
-				return server
-			},
-			Resolve: func(server mcpServerSummary, field collectionquery.Field, _ time.Time) (collectionquery.FieldValue, bool) {
+			Resolve: func(server mcpServerCollectionSummary, field collectionquery.Field, _ time.Time) (collectionquery.FieldValue, bool) {
 				switch field {
 				case "name":
 					return collectionquery.StringValue(server.Name), true
@@ -187,7 +225,7 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	unlock := h.lockMCPConfigMutation()
+	unlock := sync.OnceFunc(h.lockMCPConfigMutation())
 	defer unlock()
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
@@ -212,7 +250,7 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 
 	requested, failures := normalizeMCPBulkIDs(cfg.Tools.MCP.Servers, request.IDs)
 	deleteNames := make(map[string]bool, len(requested))
-	credentialIDs := make(map[string]bool)
+	credentialOwners := make(map[string][]string)
 	for _, requestedName := range requested {
 		name := findMCPServerName(cfg.Tools.MCP.Servers, requestedName)
 		if name == "" {
@@ -230,7 +268,7 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 				server.Auth,
 			); credentialErr == nil &&
 				credentialID != "" {
-				credentialIDs[credentialID] = true
+				credentialOwners[credentialID] = append(credentialOwners[credentialID], name)
 			}
 		}
 		deleteNames[name] = true
@@ -250,18 +288,25 @@ func (h *Handler) handleBulkDeleteMCPServers(w http.ResponseWriter, r *http.Requ
 			writeMCPConfigSaveError(w, err)
 			return
 		}
-		for credentialID := range credentialIDs {
+		for credentialID := range credentialOwners {
 			if !mcpCredentialReferenced(cfg.Tools.MCP.Servers, credentialID) {
-				_ = picoauth.DeleteCredential(credentialID)
+				continue
 			}
+			delete(credentialOwners, credentialID)
 		}
 	}
+	cleanupFailures := cleanupMCPUnreferencedCredentials(credentialOwners)
 	sort.Strings(deleted)
 	sortCollectionFailures(failures)
+	unlock()
 	writeCollectionJSON(
 		w,
 		http.StatusOK,
-		collectionBulkDeleteResponse{DeletedIDs: deleted, Failures: failures, ConfigRevision: nextRevision},
+		collectionBulkDeleteResponse{
+			DeletedIDs: deleted, Failures: failures, CleanupFailures: cleanupFailures,
+			ConfigRevision: nextRevision,
+			Effects:        agentEffectsForConfig(cfg),
+		},
 	)
 }
 

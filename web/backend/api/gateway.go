@@ -480,6 +480,17 @@ func computeConfigSignature(cfg *config.Config) string {
 			strings.Join(disabledAccounts, ","),
 		}, ":"))
 	}
+	if len(cfg.ModelRouters) > 0 {
+		modelRouters, err := json.Marshal(
+			canonicalizeSignatureValue(reflect.ValueOf(cfg.ModelRouters)),
+		)
+		if err == nil {
+			digest := sha256.Sum256(modelRouters)
+			parts = append(parts, fmt.Sprintf("model_routers:%x", digest))
+		} else {
+			parts = append(parts, "model_routers:<invalid>")
+		}
+	}
 	modelStreamingSignatures := computeModelStreamingSignatures(cfg)
 	if len(modelStreamingSignatures) > 0 {
 		parts = append(parts, "model_streaming:"+strings.Join(modelStreamingSignatures, ","))

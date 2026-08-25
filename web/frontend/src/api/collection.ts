@@ -40,9 +40,21 @@ export interface CollectionBulkDeleteFailure {
   blockers?: string[]
 }
 
+export interface CollectionMutationEffects {
+  launcher_effect: "applied"
+  catalog_effect: "applied"
+  gateway_effect: "applied" | "restart_required"
+}
+
 export interface CollectionBulkDeleteResponse {
   deleted_ids: string[]
   failures: CollectionBulkDeleteFailure[]
+}
+
+export interface CollectionConfigBulkDeleteResponse extends CollectionBulkDeleteResponse {
+  config_revision: string
+  effects: CollectionMutationEffects
+  cleanup_failures?: CollectionBulkDeleteFailure[]
 }
 
 export interface CollectionBulkDeleteRequest {
