@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,6 +74,22 @@ type AgentInstance struct {
 	ConfigurationError error
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
+}
+
+type agentInstanceConstructionGuard struct {
+	partial AgentInstance
+}
+
+func (guard *agentInstanceConstructionGuard) cleanupPanic() {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	if closeErr := guard.partial.Close(); closeErr != nil {
+		logger.WarnCF("agent", "Failed to close partially constructed agent",
+			map[string]any{"error": closeErr.Error()})
+	}
+	panic(recovered)
 }
 
 var (
@@ -209,6 +226,8 @@ func NewAgentInstance(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 ) *AgentInstance {
+	construction := &agentInstanceConstructionGuard{}
+	defer construction.cleanupPanic()
 	if cfg != nil {
 		// Keep the subprocess isolation runtime aligned with the latest loaded config
 		// before any tools or providers start spawning child processes.
@@ -260,6 +279,7 @@ func NewAgentInstance(
 	agentMCPServerAllowlist := resolveAgentMCPServerAllowlist(definition)
 
 	toolsRegistry := tools.NewToolRegistry()
+	construction.partial.Tools = toolsRegistry
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 
 	if cfg.Tools.IsToolEnabled("read_file") {
@@ -323,6 +343,7 @@ func NewAgentInstance(
 
 	sessionsDir := filepath.Join(workspace, "sessions")
 	sessions := initSessionStore(sessionsDir)
+	construction.partial.Sessions = sessions
 
 	mcpDiscoveryActive := agentHasDiscoverableMCPServers(cfg, agentMCPServerAllowlist)
 	contextBuilder := NewContextBuilder(workspace).
@@ -993,10 +1014,34 @@ func mediaTempDirPattern() string {
 	return "^" + regexp.QuoteMeta(filepath.Clean(media.TempDir())) + "(?:" + sep + "|$)"
 }
 
-// Close releases resources held by the agent's session store.
+// Close releases the quiesced agent's tool registry and session store. Both
+// cleanup paths run even when one fails so a stale generation cannot retain
+// factory-backed source leases.
 func (a *AgentInstance) Close() error {
+	if a == nil {
+		return nil
+	}
+	var closeErrors []error
+	if a.Tools != nil {
+		closeErrors = append(closeErrors, closeAgentResource("tool registry", a.Tools.Close))
+	}
 	if a.Sessions != nil {
-		return a.Sessions.Close()
+		closeErrors = append(closeErrors, closeAgentResource("session store", a.Sessions.Close))
+	}
+	return errors.Join(closeErrors...)
+}
+
+func closeAgentResource(name string, closeResource func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("close agent %s: panic: %v", name, recovered)
+		}
+	}()
+	if closeResource == nil {
+		return nil
+	}
+	if closeErr := closeResource(); closeErr != nil {
+		return fmt.Errorf("close agent %s: %w", name, closeErr)
 	}
 	return nil
 }

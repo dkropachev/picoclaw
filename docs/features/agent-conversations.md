@@ -36,6 +36,8 @@ separate from ordinary interactive sessions. Ask answers from bounded frozen
 workspace evidence without edit authority. Steer classifies scope first and
 queues only charter-compatible instructions for the next implementation repair
 boundary; it never interrupts or edits inside the message request.
+Quiesced shutdown and reload also close each retired agent's tool registry and
+session store before generation-owned dependencies disappear.
 
 ## Reconstruction Notes
 
@@ -115,6 +117,7 @@ boundary; it never interrupts or edits inside the message request.
 | `FR-AGENT-028` | MUST | Turn-profile authority composes as a monotonic meet between configured global defaults and an incoming runtime profile. A disabled whole profile is the identity; `off` dominates `default` for history and system prompt; and skills/tools follow the `default`, case-insensitive `custom` intersection, `off` lattice. Custom names are trimmed, normalized, deterministically deduplicated, and detached; an empty custom set becomes `off`; stale allowlists are cleared outside custom mode; and any unknown enabled mode fails before provider or tool execution. Existing no-history and no-tools process caps remain authoritative, `DisableTools` is applied last, and history-off disables persistence and summarization. Repeated resolution, including message, side-question, and child paths, is idempotent, while the meet is commutative and associative so no later layer can restore authority removed by an earlier layer. | Task, workflow, and child callers must be able to narrow ambient agent defaults without a second resolution pass or broader global profile silently restoring history, prompt, skill, or tool authority. |
 | `FR-AGENT-029` | MUST | `runTurn` admits each turn state once, binds its owning loop, non-closing result mailbox, and effective subturn-concurrency limit before active publication, and owns one exactly-once terminal transition for completed, error, hard-abort, and panic outcomes. Terminal commitment rejects later child attachment and result delivery, closes only `Finished`, and preserves exact active ownership through descendant policy, restore-point rollback for hard abort or panic, bounded cancellation-detached Git cleanup, and exactly one ordered `agent.turn.end` publication attempt before exact-pointer removal. Each external cleanup step is panic-isolated so later steps still run; exact owner removal and local cancellation are mandatory, cleanup panic is re-raised afterward, and an original turn panic takes precedence. Hard-interrupt APIs only atomically mark and cancel the exact retained root/child/descendant pointer graph before any cancellation and never call `Finish` or truncate history; repeated or post-terminal hard abort has no effect. Completion signals children so only critical work may survive, while error or panic cancels every nonterminal descendant without relabeling it hard-aborted, and hard abort reaches critical descendants through terminal intermediate parents. Async result delivery is serialized with terminal commitment, never sends to a closed channel, and classifies each attempt exactly once as delivered or orphaned (`parent_finished`, `parent_mailbox_unavailable`, `nil_result`, or `channel_full`). | Turn completion, rollback, child supervision, workspace release, and result delivery must have one linearizable owner so a stop cannot race session mutation, a child cannot escape through a removed parent, and late results cannot panic or be counted twice. |
 | `FR-AGENT-030` | MUST | Agent-side capability inspection preserves the exact executable registry key and, for factory-backed entries, uses only a recursively detached frozen descriptor for parameter-shape projection. A mutable or panicking live tool name, description, parameter map, or prompt-metadata method cannot alter or block the projected workflow-authoring capability after strict registration. Legacy entries retain their compatibility behavior. | Owner-isolated tool construction must not be bypassed by an auxiliary agent projection calling mutable live schema methods or exposing a descriptor graph shared with execution. |
+| `FR-AGENT-031` | MUST | Once shutdown or reload has quiesced the retiring runtime generation, every `AgentInstance.Close` panic-isolates and attempts both ToolRegistry and session-store cleanup and joins their failures. AgentInstance construction tracks those owners as soon as they exist and closes them before rethrowing a constructor panic; AgentRegistry construction likewise closes every completed partial agent before rethrowing. A successfully constructed reload candidate remains cleanup-owned until the exact registry/config swap commits, so cancellation or drain failure closes it without retiring the current generation. A committed reload closes the retired context/evolution owners, extracts any retained provider, closes the old AgentRegistry so compatibility-source tool leases are released, and only then closes borrowed old MCP/provider generation services; terminal shutdown uses the same agent close path. Cleanup failure is reported without reopening a retired registry, while a plain legacy tool registry retains its existing no-op close behavior. | Factory-backed live catalog entries hold process-wide leases; failing to close partial, rejected, or retired agent registries leaks those leases across reload and can strand or alias later owner construction. |
 
 ## Data And State Model
 
@@ -231,6 +234,7 @@ Owns: EVENT agent.*
 | HTTP/UI | `/api/development-workspaces/:id/conversation/messages`, development chat | Revision-fenced Ask answers and safe-boundary Steer queues over optional exact candidate evidence, with explicit queued/applied/clarification status. | `FR-AGENT-026` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 | HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
+| Runtime | `AgentInstance.Close`, `AgentRegistry.Close`, provider/config reload | After generation quiescence, close tool/session owners and release compatibility-source leases before borrowed retired generation services. | `FR-AGENT-031` |
 
 ## Algorithms And Ordering
 
@@ -307,6 +311,9 @@ Owns: EVENT agent.*
    exact config/registry identity for summarizers and gateway-owned
    scheduled/event work, remove the runtime-event subscription for the outer
    transaction, and recreate it for the final config before admission resumes.
+   After committing the registry swap, close retired context/evolution owners,
+   extract any retained provider, close every old agent tool registry and
+   session store, then close borrowed old MCP/provider generation services.
 9. On terminal shutdown, remember Stop even if `Run` has not registered yet,
    quiesce runtime producers, cancel and join the AgentLoop and its automation
    controller, and hold a permanent runtime pause until active leases reach
@@ -501,6 +508,10 @@ metadata but does not persist or reinterpret those trust facts.
 - A reload waits for turns and retained asynchronous work from the old
   generation. Nested subturn work borrows the retained marker and cannot block
   behind the pause that is waiting for its parent generation to drain.
+- Retired agent cleanup attempts both tool and session closure. A cleanup error
+  is reported and never makes the old registry live again; successfully closed
+  factory-backed sources release global pointer leases before borrowed retired
+  services close.
 - Background work created by a provisional or cached config waits at the same
   gate and fails closed if that exact config generation is not active when
   admission resumes.
@@ -564,6 +575,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-028` | [pkg/agent/turn_profile_policy_test.go](../../pkg/agent/turn_profile_policy_test.go), [pkg/agent/turn_profile_test.go](../../pkg/agent/turn_profile_test.go), [pkg/agent/turn_profile_policy.go](../../pkg/agent/turn_profile_policy.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-029` | [pkg/agent/turn_supervisor_test.go](../../pkg/agent/turn_supervisor_test.go), [pkg/agent/subturn_test.go](../../pkg/agent/subturn_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go), [pkg/agent/turn_state.go](../../pkg/agent/turn_state.go), [pkg/agent/steering.go](../../pkg/agent/steering.go), [pkg/agent/subturn.go](../../pkg/agent/subturn.go) |
 | `FR-AGENT-030` | [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go), [pkg/agent/workflow_authoring_test.go](../../pkg/agent/workflow_authoring_test.go), [pkg/tools/registry.go](../../pkg/tools/registry.go) |
+| `FR-AGENT-031` | [pkg/agent/instance.go](../../pkg/agent/instance.go), [pkg/agent/instance_test.go](../../pkg/agent/instance_test.go), [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/agent_mcp_test.go](../../pkg/agent/agent_mcp_test.go), [pkg/tools/registry.go](../../pkg/tools/registry.go) |
 
 ## Implementation Anchors
 

@@ -16,9 +16,46 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/mcp"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	agenttools "github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+type reloadToolRegistryLeaseProbe struct{ marker byte }
+
+func (*reloadToolRegistryLeaseProbe) Name() string { return "reload_tool_registry_lease" }
+func (*reloadToolRegistryLeaseProbe) Description() string {
+	return "reload tool registry lease probe"
+}
+
+func (*reloadToolRegistryLeaseProbe) Parameters() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+func (*reloadToolRegistryLeaseProbe) Execute(
+	context.Context,
+	map[string]any,
+) *agenttools.ToolResult {
+	return agenttools.SilentResult("lease")
+}
+
+func reloadToolRegistryLeaseFactory(t *testing.T) agenttools.ToolFactory {
+	t.Helper()
+	factory, err := agenttools.NewToolFactory(
+		agenttools.ToolDescriptor{
+			Name: "reload_tool_registry_lease", Description: "reload tool registry lease probe",
+			Parameters: map[string]any{"type": "object"},
+		},
+		agenttools.ToolTraits{},
+		func(agenttools.ToolBuildContext) (agenttools.Tool, error) {
+			return &reloadToolRegistryLeaseProbe{marker: 1}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return factory
+}
 
 func boolPtr(b bool) *bool { return &b }
 
@@ -76,6 +113,115 @@ func TestReloadProviderAndConfig_ResetsMCPRuntime(t *testing.T) {
 	al.mcp.initOnce.Do(func() { reran = true })
 	if !reran {
 		t.Fatal("expected MCP initOnce to be reset after reload")
+	}
+}
+
+func TestReloadClosesOldToolRegistryCompatibilitySources(t *testing.T) {
+	al, cfg, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	defer al.Close()
+
+	oldRegistry := al.GetRegistry()
+	oldAgent := oldRegistry.GetDefaultAgent()
+	if oldAgent == nil || oldAgent.Tools == nil {
+		t.Fatal("old agent tool registry is unavailable")
+	}
+	live := &reloadToolRegistryLeaseProbe{marker: 2}
+	factory := reloadToolRegistryLeaseFactory(t)
+	if err := oldAgent.Tools.RegisterFactoryBacked(live, factory); err != nil {
+		t.Fatal(err)
+	}
+	competitor := agenttools.NewToolRegistry()
+	if err := competitor.RegisterFactoryBacked(live, factory); err == nil {
+		t.Fatal("old generation did not retain its compatibility source lease")
+	}
+
+	if err := al.ReloadProviderAndConfig(context.Background(), &mockProvider{}, cfg); err != nil {
+		t.Fatalf("ReloadProviderAndConfig() error = %v", err)
+	}
+	if al.GetRegistry() == oldRegistry {
+		t.Fatal("reload retained the previous agent registry")
+	}
+	if oldAgent.Tools.Count() != 0 {
+		t.Fatal("reload did not close the previous tool registry")
+	}
+	if err := competitor.RegisterFactoryBacked(live, factory); err != nil {
+		t.Fatalf("reload did not release old compatibility source lease: %v", err)
+	}
+	if err := competitor.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCanceledReloadClosesCandidateWithoutRetiringCurrentRegistry(t *testing.T) {
+	al, cfg, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	defer al.Close()
+
+	currentRegistry := al.GetRegistry()
+	currentAgent := currentRegistry.GetDefaultAgent()
+	if currentAgent == nil || currentAgent.Tools == nil {
+		t.Fatal("current agent tool registry is unavailable")
+	}
+	live := &reloadToolRegistryLeaseProbe{marker: 3}
+	factory := reloadToolRegistryLeaseFactory(t)
+	if err := currentAgent.Tools.RegisterFactoryBacked(live, factory); err != nil {
+		t.Fatal(err)
+	}
+	competitor := agenttools.NewToolRegistry()
+	if err := competitor.RegisterFactoryBacked(live, factory); err == nil {
+		t.Fatal("current registry did not retain its compatibility lease")
+	}
+	candidateRegistry := NewAgentRegistry(cfg, &mockProvider{})
+	candidateAgent := candidateRegistry.GetDefaultAgent()
+	if candidateAgent == nil || candidateAgent.Tools == nil {
+		t.Fatal("candidate agent tool registry is unavailable")
+	}
+	candidateLive := &reloadToolRegistryLeaseProbe{marker: 4}
+	candidateFactory := reloadToolRegistryLeaseFactory(t)
+	if err := candidateAgent.Tools.RegisterFactoryBacked(
+		candidateLive,
+		candidateFactory,
+	); err != nil {
+		t.Fatal(err)
+	}
+	candidateCompetitor := agenttools.NewToolRegistry()
+	if err := candidateCompetitor.RegisterFactoryBacked(
+		candidateLive,
+		candidateFactory,
+	); err == nil {
+		t.Fatal("candidate registry did not retain its compatibility lease")
+	}
+	al.registryFactory = func(
+		gotConfig *config.Config,
+		gotProvider providers.LLMProvider,
+	) *AgentRegistry {
+		if gotConfig != cfg || gotProvider == nil {
+			t.Fatal("candidate registry factory received unexpected inputs")
+		}
+		return candidateRegistry
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := al.ReloadProviderAndConfig(ctx, &mockProvider{}, cfg)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reload error = %v, want context canceled", err)
+	}
+	if al.GetRegistry() != currentRegistry || currentAgent.Tools.Count() == 0 {
+		t.Fatal("failed candidate reload retired the current registry")
+	}
+	if err := competitor.RegisterFactoryBacked(live, factory); err == nil {
+		t.Fatal("failed candidate reload released the current generation lease")
+	}
+	if err := candidateCompetitor.RegisterFactoryBacked(
+		candidateLive,
+		candidateFactory,
+	); err != nil {
+		t.Fatalf("failed candidate reload did not release candidate lease: %v", err)
+	}
+	if err := candidateCompetitor.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

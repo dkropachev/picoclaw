@@ -150,6 +150,19 @@ func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing
 	providerB := &runtimeGateProvider{name: "provider-b", closed: make(chan struct{})}
 	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), providerA)
 	defer al.Close()
+	factory := reloadToolRegistryLeaseFactory(t)
+	liveA := &reloadToolRegistryLeaseProbe{marker: 10}
+	agentA := al.GetRegistry().GetDefaultAgent()
+	if agentA == nil || agentA.Tools == nil {
+		t.Fatal("generation A tool registry is unavailable")
+	}
+	if registerErr := agentA.Tools.RegisterFactoryBacked(liveA, factory); registerErr != nil {
+		t.Fatal(registerErr)
+	}
+	competitorA := tools.NewToolRegistry()
+	if registerErr := competitorA.RegisterFactoryBacked(liveA, factory); registerErr == nil {
+		t.Fatal("generation A compatibility lease was not retained")
+	}
 
 	previous, err := al.ReloadProviderAndConfigRetainingPrevious(
 		context.Background(),
@@ -162,6 +175,27 @@ func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing
 	if previous != providerA {
 		t.Fatalf("reload A -> B retained %T, want provider A", previous)
 	}
+	if registerErr := competitorA.RegisterFactoryBacked(liveA, factory); registerErr != nil {
+		t.Fatalf("reload A -> B did not release generation A tool lease: %v", registerErr)
+	}
+	if closeErr := competitorA.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	select {
+	case <-providerA.closed:
+		t.Fatal("retained provider A was closed with its agent registry")
+	default:
+	}
+	if response, chatErr := providerA.Chat(
+		context.Background(),
+		nil,
+		nil,
+		"",
+		nil,
+	); chatErr != nil || response == nil ||
+		response.Content != "provider-a" {
+		t.Fatalf("retained provider A is unusable: %#v, %v", response, chatErr)
+	}
 
 	_, releaseRuntime, err := al.acquireRuntimeUse(context.Background())
 	if err != nil {
@@ -171,6 +205,16 @@ func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing
 	if captured == nil || captured.Provider != providerB {
 		releaseRuntime()
 		t.Fatalf("captured agent provider = %v, want provider B", captured)
+	}
+	liveB := &reloadToolRegistryLeaseProbe{marker: 11}
+	if registerErr := captured.Tools.RegisterFactoryBacked(liveB, factory); registerErr != nil {
+		releaseRuntime()
+		t.Fatal(registerErr)
+	}
+	competitorB := tools.NewToolRegistry()
+	if registerErr := competitorB.RegisterFactoryBacked(liveB, factory); registerErr == nil {
+		releaseRuntime()
+		t.Fatal("generation B compatibility lease was not retained")
 	}
 
 	rollbackDone := make(chan struct {
@@ -217,6 +261,17 @@ func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing
 	}
 	if result.provider != providerB {
 		t.Fatalf("rollback retained %T, want provider B", result.provider)
+	}
+	if registerErr := competitorB.RegisterFactoryBacked(liveB, factory); registerErr != nil {
+		t.Fatalf("rollback did not release generation B tool lease: %v", registerErr)
+	}
+	if closeErr := competitorB.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	select {
+	case <-providerB.closed:
+		t.Fatal("retained provider B closed before explicit disposal")
+	default:
 	}
 
 	al.CloseRetainedProvider(context.Background(), result.provider)

@@ -2,15 +2,46 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 type mockRegistryProvider struct{}
+
+func TestAgentRegistryConstructionGuardClosesCompletedAgentsAndPreservesPanic(t *testing.T) {
+	live := tools.NewUpdatePlanTool()
+	toolRegistry := tools.NewToolRegistry()
+	if err := toolRegistry.RegisterFactoryBacked(live, tools.NewUpdatePlanToolFactory()); err != nil {
+		t.Fatal(err)
+	}
+	store := &agentInstanceCloseSessionStore{
+		SessionStore: session.NewSessionManager(t.TempDir()),
+	}
+	partial := &AgentRegistry{agents: map[string]*AgentInstance{
+		"first": {ID: "first", Tools: toolRegistry, Sessions: store},
+	}}
+	sentinel := errors.New("registry construction panic")
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		defer (&agentRegistryConstructionGuard{registry: partial}).cleanupPanic()
+		panic(sentinel)
+	}()
+	if recovered != sentinel {
+		t.Fatalf("recovered panic = %v, want %v", recovered, sentinel)
+	}
+	if toolRegistry.Count() != 0 || store.closeCalls.Load() != 1 {
+		t.Fatalf("partial registry cleanup = tools:%d sessions:%d",
+			toolRegistry.Count(), store.closeCalls.Load())
+	}
+}
 
 func (m *mockRegistryProvider) Chat(
 	ctx context.Context,
