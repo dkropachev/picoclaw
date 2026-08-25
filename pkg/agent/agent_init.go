@@ -362,15 +362,9 @@ func registerSharedTools(
 				if parentTS == nil {
 					// Fallback: If no turnState exists in context, create an isolated ad-hoc root turn state
 					// so that the tool can still function outside of an agent loop (e.g. tests, raw invocations).
-					parentTS = &turnState{
-						ctx:            ctx,
-						turnID:         "adhoc-root",
-						depth:          0,
-						session:        nil, // Ephemeral session not needed for adhoc spawn
-						pendingResults: make(chan *tools.ToolResult, 16),
-						concurrencySem: make(chan struct{}, 5),
-					}
+					parentTS = al.newAdHocRootTurnState(ctx)
 				}
+				al.prepareTurnState(parentTS)
 
 				// 2. Build Tools slice from registry
 				var tlSlice []tools.Tool

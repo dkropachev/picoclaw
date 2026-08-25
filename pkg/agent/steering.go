@@ -646,9 +646,9 @@ func (al *AgentLoop) dequeuePendingSubTurnResults(sessionKey string) []*tools.To
 
 // ====================== Hard Abort ======================
 
-// HardAbort immediately cancels the running agent loop for the given session,
-// cascading the cancellation to all child SubTurns. This is a destructive operation
-// that terminates execution without waiting for graceful cleanup.
+// HardAbort requests cancellation of the exact running turn tree. runTurn owns
+// the terminal transition, restore-point rollback, event, and active-owner
+// cleanup; this method never truncates history or calls Finish.
 //
 // Use this when the user explicitly requests immediate termination (e.g., "stop now", "abort").
 // For graceful interruption that allows the agent to finish the current tool and summarize,
@@ -672,25 +672,13 @@ func (al *AgentLoop) HardAbort(sessionKey string) error {
 		"session_key":            sessionKey,
 		"turn_id":                ts.turnID,
 		"depth":                  ts.depth,
-		"initial_history_length": ts.initialHistoryLength,
+		"restore_history_length": ts.restorePointHistoryLength(),
 	})
 
-	// Cancel the active provider/tool turn contexts immediately so long-running
-	// execution stops as soon as possible on the root turn.
-	_ = ts.requestHardAbort()
-
-	// IMPORTANT: Trigger cascading cancellation FIRST to stop all child SubTurns
-	// from adding more messages to the session. This prevents race conditions
-	// where rollback happens while children are still writing.
-	// Use isHardAbort=true for hard abort to immediately cancel all children.
-	ts.Finish(true)
-
-	// Roll back session history to the state before the turn started.
-	if ts.session != nil {
-		history := ts.session.GetHistory(sessionKey)
-		if ts.initialHistoryLength < len(history) {
-			ts.session.SetHistory(sessionKey, history[:ts.initialHistoryLength])
-		}
+	// requestHardAbort atomically marks every nonterminal descendant before
+	// invoking any provider/turn/owned-context cancellation.
+	if !ts.requestHardAbort() {
+		return fmt.Errorf("turn %s is already aborting or finished", ts.turnID)
 	}
 
 	return nil

@@ -101,14 +101,29 @@ When the provider returns a context length error (e.g., `context_length_exceeded
 SubTurns operate within an independent context but maintain a structural link to their parent `turnState`.
 
 ### Graceful Parent Finish
-When the parent task finishes naturally (`Finish(false)`):
+When the parent task finishes naturally:
 - **Non-critical** sub-turns receive a signal to exit gracefully without throwing an error.
 - **Critical** (`Critical: true`) sub-turns continue running in the background. Once finished, their results are emitted as **Orphan Results** so the data is not lost.
 
+An error or panic is not a graceful finish: every nonterminal descendant,
+including critical work, is cancellation-requested and ends with error status.
+
 ### Hard Abort
 When the parent task is forcefully aborted (e.g., user interrupts with `/stop`):
-- A cascading cancellation is triggered, instantly terminating all child and grandchild sub-turns.
-- The root turn's session history rolls back to the snapshot taken at turn start (`initialHistoryLength`), preventing dirty context. SubTurns are not affected by this rollback as they use ephemeral sessions that are discarded anyway.
+- `HardAbort` and `InterruptHard` only request cancellation. They atomically
+  mark the exact retained root/child/descendant graph before invoking any
+  context cancellation; they do not finish the turn or edit session history.
+- The `runTurn` supervisor commits one immutable aborted outcome, restores the
+  captured history and summary restore point once, performs bounded detached
+  Git-workspace cleanup, attempts one ordered `agent.turn.end` publication, and
+  removes only its exact active owner. Cleanup steps are individually
+  panic-isolated so later steps still run; exact owner removal and local
+  cancellation are mandatory. A panic follows the same rollback ordering and
+  is re-raised after bookkeeping, with the original turn panic taking
+  precedence over a cleanup panic.
+- Exact child pointers remain reachable through terminal intermediate parents,
+  so a critical grandchild cannot escape a later ancestor hard abort merely
+  because its direct parent already left the active-turn registry.
 
 ## Agent Loop Integration
 
@@ -130,6 +145,14 @@ The agent loop polls for async SubTurn results at two points per iteration:
 1. **Before the LLM call**: injects any arrived results as `[SubTurn Result]` messages into the conversation context.
 2. **After all tool executions**: polls again during the tool loop to catch results that arrived during tool execution.
 3. **After the final iteration**: one last poll before the turn ends to avoid losing late-arriving results.
+
+Each turn receives a buffered mailbox before active publication. The mailbox
+is never closed; `Finished` is the terminal signal and garbage collection owns
+mailbox lifetime. Delivery and terminal commitment take the same parent lock,
+so each async result is classified exactly once. A running parent with space
+receives it; a terminal parent, missing mailbox, nil result, or full channel
+emits an orphan with reason `parent_finished`,
+`parent_mailbox_unavailable`, `nil_result`, or `channel_full`.
 
 ### Turn State Tracking
 
@@ -209,11 +232,17 @@ ctx = withTurnState(ctx, turnState)
 
 ### Independent Child Context
 
-**Important**: The child SubTurn uses an **independent context** derived from `context.Background()`, not from the parent context. This design choice:
+**Important**: The child SubTurn uses an independently cancelable context
+derived with `context.WithoutCancel` from the retained runtime context. Values
+and the runtime-generation lease remain available, while parent context
+cancellation does not implicitly decide child policy. This design choice:
 
-- Allows critical SubTurns to continue after parent cancellation
-- Prevents parent timeout from affecting child execution
-- Child has its own timeout for self-protection (`Timeout` config or 5 minutes default)
+- Allows critical SubTurns to continue only after the parent commits a
+  successful graceful completion.
+- Lets the structural supervisor explicitly cancel every child after parent
+  error, external cancellation, timeout, panic, or hard abort.
+- Keeps the child timeout as independent self-protection (`Timeout` config or
+  5 minutes by default).
 
 ## Error Types
 
@@ -229,9 +258,15 @@ ctx = withTurnState(ctx, turnState)
 SubTurns are designed for concurrent execution:
 
 - **Parent-child relationships**: Managed under mutex (`parentTS.mu.Lock()`)
+- **Child publication**: Parent edge and active child are published atomically;
+  terminal or cancellation-requested parents reject attachment.
+- **Cascade graph**: Exact child pointers are retained and validated by parent
+  pointer and ID before traversal.
 - **Active turn tracking**: Uses `sync.Map` for concurrent access to `activeTurnStates`
 - **ID generation**: Uses `atomic.Int64` for unique SubTurn IDs (format: `subturn-N`, globally monotonic per `AgentLoop` instance)
-- **Result delivery**: Reads parent state under lock, releases before channel send (small race window acceptable)
+- **Result delivery**: Performs one non-blocking send while holding the same
+  parent lock used by terminal commitment; no channel close or panic recovery
+  is part of synchronization.
 
 ## Orphan Results
 

@@ -25,10 +25,14 @@ func (p *Pipeline) Finalize(
 
 	// When allResponsesHandled=true, ExecuteTools already finalized
 	// (added handledToolResponseSummary, saved session, set phase to Completed).
-	// But still check for hard abort - if requested, abort the turn.
+	// But still check for hard abort. Session rollback and terminal ownership
+	// belong exclusively to runTurn's supervisor.
 	if exec.allResponsesHandled {
 		if ts.hardAbortRequested() {
-			return al.abortTurn(ts)
+			return turnResult{
+				usage:  ts.workflowAgentUsageSnapshot(),
+				status: TurnEndStatusAborted,
+			}, nil
 		}
 		ts.setPhase(TurnPhaseCompleted)
 		return turnResult{
