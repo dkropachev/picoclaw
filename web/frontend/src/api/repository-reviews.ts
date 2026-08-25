@@ -437,7 +437,7 @@ export async function createRepositoryReviewProfile(
   return profileFromMutation(
     await requestJSON<RepositoryReviewProfile | ProfileMutationResult>(
       `${apiRoot}/profiles`,
-      jsonMutation("POST", input),
+      jsonMutation("POST", repositoryReviewProfileConfigPayload(input)),
       signal,
     ),
   )
@@ -451,7 +451,10 @@ export async function updateRepositoryReviewProfile(
   return profileFromMutation(
     await requestJSON<RepositoryReviewProfile | ProfileMutationResult>(
       profilePath(profileID),
-      jsonMutation("PATCH", input),
+      jsonMutation("PATCH", {
+        ...repositoryReviewProfileConfigPayload(input),
+        expected_version: input.expected_version,
+      }),
       signal,
     ),
   )
@@ -1004,6 +1007,24 @@ function automationPath(automationID: string): string {
 
 function profilePath(profileID: string): string {
   return `${apiRoot}/profiles/${encodeURIComponent(profileID)}`
+}
+
+function repositoryReviewProfileConfigPayload(
+  input: RepositoryReviewProfileConfig,
+): RepositoryReviewProfileConfig {
+  return {
+    name: input.name,
+    account_ref: input.account_ref,
+    review_focus: input.review_focus,
+    scope_policy: input.scope_policy,
+    reviewer_model: input.reviewer_model,
+    force: input.force,
+    auto_continue: input.auto_continue,
+    max_files_per_run: input.max_files_per_run,
+    max_content_bytes: input.max_content_bytes,
+    max_parallel_children: input.max_parallel_children,
+    budget: input.budget,
+  }
 }
 
 function jsonMutation(
