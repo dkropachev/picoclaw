@@ -30,7 +30,7 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	for _, step := range job.Steps {
 		byID[step.ID] = step
 	}
-	plan, review, record := byID["plan"], byID["review"], byID["record"]
+	plan, freeze, review, record := byID["plan"], byID["freeze"], byID["review"], byID["record"]
 	for _, id := range []string{
 		"checkout", "inventory", "scope_catalog", "release_structure", "plan_scope",
 		"scope_checkout", "scope_inventory", "full_scope_catalog", "scope", "scope_files",
@@ -59,8 +59,14 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	if profile := nativeMapValue(plan.With["profile"]); profile["account_ref"] != "${{ inputs.account_ref }}" {
 		t.Fatalf("plan profile account=%#v", profile)
 	}
+	if freeze.With["max_file_content_bytes"] != 524288 ||
+		freeze.With["max_group_files"] != "${{ inputs.max_files_per_run }}" ||
+		freeze.With["max_group_content_bytes"] != "${{ steps.plan.outputs.maxContentBytes }}" {
+		t.Fatalf("freeze sizing=%#v", freeze.With)
+	}
 	managed, ok := review.With["managed"].(map[string]any)
 	if !ok || managed["reviewer_models"] != "${{ steps.plan.outputs.reviewerModels }}" ||
+		managed["max_items_per_chunk"] != "${{ inputs.max_files_per_run }}" ||
 		managed["max_tasks_per_chunk"] != 1 || managed["continue_on_child_error"] != true {
 		t.Fatalf("managed ensemble=%#v", review.With["managed"])
 	}

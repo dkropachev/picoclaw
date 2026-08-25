@@ -1,5 +1,4 @@
 import {
-  act,
   fireEvent,
   render,
   screen,
@@ -8,9 +7,12 @@ import {
 } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { RepositoryModelEvaluation } from "@/api/model-evaluations"
+import type {
+  EvaluationProfileOption,
+  RepositoryModelEvaluation,
+} from "@/api/model-evaluations"
 import {
   ModelEvaluationAPIError,
   getModelEvaluation,
@@ -59,6 +61,34 @@ vi.mock("@/components/page-header", () => ({
   ),
 }))
 
+const profile: EvaluationProfileOption = {
+  id: "rrpf_main",
+  version: 4,
+  name: "Production bugs",
+  reviewer_model: "code",
+  account_ref: "primary",
+  review_focus: "Find concrete correctness and reliability defects.",
+  focus: {
+    code_types: ["hotpath-code", "code"],
+    include_folders: ["pkg"],
+    exclude_folders: ["vendor"],
+    free_text: "Prioritize persistence boundaries.",
+  },
+  max_files_per_batch: 8,
+  max_content_bytes_per_batch: 131_072,
+  max_parallel_children: 3,
+  available_models: ["code", "fast"],
+}
+
+const alternativeProfile: EvaluationProfileOption = {
+  ...profile,
+  id: "rrpf_alternative",
+  version: 2,
+  name: "Alternative account",
+  reviewer_model: "fast",
+  available_models: ["fast", "review"],
+}
+
 const evaluation: RepositoryModelEvaluation = {
   schema_version: 1,
   id: "rme_11111111111111111111111111111111",
@@ -67,16 +97,21 @@ const evaluation: RepositoryModelEvaluation = {
   repository: "owner/repo",
   ref: "main",
   candidate_models: ["code", "fast"],
-  selector_model_alias: "review",
-  judge_model_alias: "review",
-  focus: {
-    code_types: ["hotpath-code", "code", "test", "bench-test"],
-    include_folders: ["pkg", "web"],
-    exclude_folders: ["web/fixtures"],
-    free_text: "Choose request and storage boundaries.",
-  },
+  selector_model_alias: "code",
+  judge_model_alias: "code",
+  focus: profile.focus,
   default_files_per_language: 20,
   files_per_language: {},
+  profile,
+  work_sizing_plan: [
+    {
+      id: "configured",
+      axis: "configured",
+      files_per_batch: 8,
+      content_bytes_per_batch: 131_072,
+    },
+  ],
+  work_sizing_results: [],
   progress: {
     stage: "validating",
     languages: {
@@ -85,7 +120,7 @@ const evaluation: RepositoryModelEvaluation = {
         selected_files: 20,
         completed_files: 0,
         selected_bytes: 240_000,
-        regions: ["pkg", "cmd", "web/backend"],
+        regions: ["pkg", "cmd"],
         limited: false,
       },
       typescript: {
@@ -104,21 +139,100 @@ const evaluation: RepositoryModelEvaluation = {
     completed_tasks: 0,
     message: "Corpus ready",
     percent: 20,
+    updated_at: "2026-08-21T12:01:00Z",
   },
   usage: {
     requests: 1,
     input_tokens: 100,
-    cached_input_tokens: 0,
+    cached_input_tokens: 20,
     output_tokens: 30,
-    reasoning_tokens: 0,
+    reasoning_tokens: 10,
     duration_millis: 500,
   },
   model_stats: {},
   comparisons: [],
-  warnings: [],
+  warnings: [
+    "Several catalog languages contain fewer than the default target number of substantive candidates; selected available representative files.",
+  ],
   run_ids: ["wr_selector"],
   created_at: "2026-08-21T12:00:00Z",
   updated_at: "2026-08-21T12:01:00Z",
+}
+
+const completed: RepositoryModelEvaluation = {
+  ...evaluation,
+  status: "completed",
+  progress: {
+    ...evaluation.progress,
+    stage: "completed",
+    completed_files: 28,
+    percent: 100,
+  },
+  comparisons: [
+    {
+      model_alias: "code",
+      concrete_models: { "gpt-code": 2 },
+      completion: "completed",
+      failures: 0,
+      rank: 1,
+      overall_score: 92.5,
+      scores: {
+        correctness: 95,
+        evidence: 93,
+        coverage: 88,
+        actionability: 94,
+      },
+      languages: ["go", "typescript"],
+      regions: ["pkg", "web/frontend"],
+      files_analyzed: 28,
+      bytes_analyzed: 280_000,
+      confirmed_findings: 5,
+      unsupported_claims: 1,
+      unsupported_files: 1,
+      usage: {
+        requests: 4,
+        input_tokens: 4_000,
+        cached_input_tokens: 2_000,
+        output_tokens: 1_000,
+        reasoning_tokens: 500,
+        duration_millis: 20_000,
+      },
+      verdict: "Best evidence-grounded analysis.",
+      strengths: ["Strong evidence"],
+      limitations: ["Higher latency"],
+    },
+    {
+      model_alias: "fast",
+      concrete_models: { "gpt-fast": 2 },
+      completion: "completed",
+      failures: 0,
+      rank: 2,
+      overall_score: 84,
+      scores: {
+        correctness: 86,
+        evidence: 84,
+        coverage: 80,
+        actionability: 83,
+      },
+      languages: ["go", "typescript"],
+      regions: ["pkg", "web/frontend"],
+      files_analyzed: 28,
+      bytes_analyzed: 280_000,
+      confirmed_findings: 4,
+      unsupported_claims: 2,
+      unsupported_files: 2,
+      usage: {
+        requests: 4,
+        input_tokens: 3_000,
+        cached_input_tokens: 1_000,
+        output_tokens: 700,
+        reasoning_tokens: 200,
+        duration_millis: 10_000,
+      },
+      verdict: "Faster but narrower.",
+    },
+  ],
+  finished_at: "2026-08-21T12:03:00Z",
 }
 
 function renderPage(onOpenReport?: (evaluationID: string) => void) {
@@ -158,6 +272,7 @@ describe("ModelEvaluationsPage", () => {
           label: "seastar",
         },
       ],
+      profiles: [profile, alternativeProfile],
       code_types: ["hotpath-code", "code", "test", "bench-test"],
       max_files_per_language: 20,
       default_files_per_language: 20,
@@ -165,9 +280,7 @@ describe("ModelEvaluationsPage", () => {
     })
   })
 
-  afterEach(() => vi.useRealTimers())
-
-  it("runs a separate repository evaluation with structured scope in one request", async () => {
+  it("uses a review profile, auto-selects compatible candidates, and sends only the new payload", async () => {
     const user = userEvent.setup()
     vi.mocked(runModelEvaluation).mockResolvedValue({
       ...evaluation,
@@ -180,467 +293,68 @@ describe("ModelEvaluationsPage", () => {
       "list",
       "model-probe-workspace-repositories",
     )
+    expect(screen.getByLabelText("Review profile")).toHaveValue(profile.id)
     expect(
-      document.querySelector(
-        '#model-probe-workspace-repositories option[value="https://github.com/scylladb/seastar.git"]',
-      ),
-    ).not.toBeNull()
-    expect(screen.getByText(/managed fresh checkout/i)).toBeVisible()
-    await user.type(repository, "owner/repo")
-    await user.click(
       screen.getByRole("checkbox", { name: "Select candidate model code" }),
-    )
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
-    )
-    const advanced = screen.getAllByRole("button", { name: /^Advanced/ })
-    expect(advanced).toHaveLength(1)
-    await user.click(advanced[0])
-    await user.selectOptions(
-      screen.getByLabelText("File selector model"),
-      "review",
-    )
-    await user.selectOptions(
-      screen.getByLabelText("Judge and analyzer model"),
-      "review",
-    )
-    await user.type(screen.getByLabelText("Include folders"), "pkg\nweb")
-    await user.type(screen.getByLabelText("Ignore folders"), "web/fixtures")
-    await user.click(screen.getByRole("button", { name: "Run probe" }))
-
-    await waitFor(() => expect(runModelEvaluation).toHaveBeenCalledTimes(1))
-    expect(vi.mocked(runModelEvaluation).mock.calls[0]?.[0]).toMatchObject({
-      repository: "owner/repo",
-      candidate_models: ["code", "fast"],
-      selector_model_alias: "review",
-      default_files_per_language: 20,
-      focus: {
-        include_folders: ["pkg", "web"],
-        exclude_folders: ["web/fixtures"],
-      },
-    })
-  })
-
-  it("creates a basic comparison probe while advanced options stay closed", async () => {
-    const user = userEvent.setup()
-    vi.mocked(runModelEvaluation).mockResolvedValue({
-      ...evaluation,
-      status: "preflighting",
-    })
-    renderPage()
-
-    await user.type(await screen.findByLabelText("Repository"), "owner/repo")
-    await user.click(
+    ).toBeChecked()
+    expect(
       screen.getByRole("checkbox", { name: "Select candidate model code" }),
-    )
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
-    )
-    const advanced = screen.getAllByRole("button", { name: /^Advanced/ })
-    expect(advanced).toHaveLength(1)
-    expect(advanced[0]).toHaveAttribute("aria-expanded", "false")
-    expect(screen.queryByLabelText("Revision")).not.toBeInTheDocument()
-    expect(
-      screen.queryByLabelText("File selector model"),
-    ).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole("button", { name: "Run probe" }))
-
-    await waitFor(() => expect(runModelEvaluation).toHaveBeenCalledTimes(1))
-    expect(vi.mocked(runModelEvaluation).mock.calls[0]?.[0]).toMatchObject({
-      repository: "owner/repo",
-      candidate_models: ["code", "fast"],
-      selector_model_alias: "code",
-      judge_model_alias: "review",
-    })
-  })
-
-  it("keeps a newly created evaluation selected after refreshing an existing list", async () => {
-    const user = userEvent.setup()
-    const created = {
-      ...evaluation,
-      id: "rme_22222222222222222222222222222222",
-      version: 1,
-      status: "preflighting" as const,
-      repository: "other/repo",
-      progress: {
-        ...evaluation.progress,
-        stage: "idle",
-        languages: {},
-        selected_files: 0,
-        percent: 0,
-      },
-    }
-    vi.mocked(listModelEvaluations)
-      .mockResolvedValueOnce([evaluation])
-      .mockResolvedValue([created, evaluation])
-    vi.mocked(getModelEvaluation).mockImplementation(async (id) =>
-      id === created.id ? created : evaluation,
-    )
-    vi.mocked(runModelEvaluation).mockResolvedValue(created)
-    renderPage()
-
-    expect(await screen.findByDisplayValue("owner/repo")).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "New probe" }))
-    await user.type(screen.getByLabelText("Repository"), "other/repo")
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select candidate model code" }),
-    )
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
-    )
-    await user.click(screen.getByRole("button", { name: "Run probe" }))
-    await waitFor(() =>
-      expect(screen.getByLabelText("Repository")).toHaveValue("other/repo"),
-    )
-    expect(
-      screen.getAllByText("preflighting", { exact: true }).length,
-    ).toBeGreaterThan(0)
-  })
-
-  it("shows a legacy ready corpus as frozen while automatic execution continues", async () => {
-    vi.mocked(listModelEvaluations).mockResolvedValue([evaluation])
-    vi.mocked(getModelEvaluation).mockResolvedValue(evaluation)
-    vi.mocked(getModelEvaluationCorpus).mockResolvedValue({
-      files: [],
-      total: 28,
-      offset: 0,
-      commit_sha: "a".repeat(40),
-      inventory_hash: "sha256:inventory",
-      language_counts: { go: 20, typescript: 8 },
-    })
-    renderPage()
-
-    expect(await screen.findByText("Corpus by language")).toBeVisible()
-    expect(
-      await screen.findByText(
-        /Commit a{40} · inventory sha256:inventory · 28 files/,
-      ),
-    ).toBeVisible()
-    const typescriptRow = screen.getByText("typescript").closest("tr")
-    expect(typescriptRow).not.toBeNull()
-    expect(within(typescriptRow!).getByText("limited")).toBeVisible()
-    expect(screen.getByLabelText("Repository")).toBeDisabled()
-    expect(
-      screen.getByRole("spinbutton", { name: "typescript files" }),
     ).toBeDisabled()
     expect(
-      screen.queryByRole("button", { name: "Start probe" }),
-    ).not.toBeInTheDocument()
+      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
+    ).toBeChecked()
     expect(
-      screen.queryByRole("button", { name: "Run probe" }),
-    ).not.toBeInTheDocument()
-  })
+      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
+    ).toBeEnabled()
+    expect(
+      screen.getByRole("checkbox", { name: "Select candidate model review" }),
+    ).toBeDisabled()
+    expect(screen.queryByRole("button", { name: /^Advanced/ })).toBeNull()
+    expect(screen.getByLabelText("Frozen review profile")).toHaveTextContent(
+      "8",
+    )
+    expect(screen.getByLabelText("Frozen review profile")).toHaveTextContent(
+      "128.0 KiB",
+    )
 
-  it("updates and runs a legacy draft from one click", async () => {
-    const user = userEvent.setup()
-    const draftEvaluation: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "draft",
-      corpus: undefined,
-      progress: {
-        ...evaluation.progress,
-        stage: "idle",
-        languages: {},
-        selected_files: 0,
-        percent: 0,
-      },
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([draftEvaluation])
-    vi.mocked(getModelEvaluation).mockResolvedValue(draftEvaluation)
-    vi.mocked(updateModelEvaluation).mockResolvedValue({
-      ...draftEvaluation,
-      version: 4,
+    await user.type(repository, "owner/repo")
+    await user.type(screen.getByLabelText("Revision"), "release")
+    await user.click(screen.getByRole("button", { name: "Run probe" }))
+
+    await waitFor(() => expect(runModelEvaluation).toHaveBeenCalledTimes(1))
+    expect(runModelEvaluation).toHaveBeenCalledWith({
+      repository: "owner/repo",
+      profile_id: profile.id,
+      candidate_models: ["code", "fast"],
       ref: "release",
     })
-    vi.mocked(runModelEvaluationAction).mockResolvedValue({
-      ...draftEvaluation,
-      version: 5,
-      ref: "release",
-      status: "preflighting",
-      progress: {
-        ...draftEvaluation.progress,
-        stage: "resolving",
-        message: "Resolving exact commit.",
-        percent: 1,
-      },
-    })
-    renderPage()
-
-    await screen.findByDisplayValue("owner/repo")
-    await user.click(screen.getAllByRole("button", { name: /^Advanced/ })[0])
-    const ref = await screen.findByLabelText("Revision")
-    fireEvent.change(ref, { target: { value: "release" } })
-    await user.click(screen.getByRole("button", { name: "Run probe" }))
-    await waitFor(() =>
-      expect(updateModelEvaluation).toHaveBeenCalledWith(
-        evaluation.id,
-        expect.objectContaining({ ref: "release", expected_version: 3 }),
-      ),
-    )
-    expect(runModelEvaluation).not.toHaveBeenCalled()
-    expect(runModelEvaluationAction).toHaveBeenCalledWith(
-      evaluation.id,
-      "run",
-      4,
-    )
   })
 
-  it("runs an untouched legacy draft without patching it", async () => {
+  it("reconciles candidates when the selected profile account changes", async () => {
     const user = userEvent.setup()
-    const draftEvaluation: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "draft",
-      corpus: undefined,
-      progress: {
-        ...evaluation.progress,
-        stage: "idle",
-        languages: {},
-        selected_files: 0,
-        percent: 0,
-      },
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([draftEvaluation])
-    vi.mocked(getModelEvaluation).mockResolvedValue(draftEvaluation)
-    vi.mocked(runModelEvaluationAction).mockResolvedValue({
-      ...draftEvaluation,
-      version: 4,
-      status: "preflighting",
-    })
     renderPage()
+    await screen.findByLabelText("Review profile")
 
-    await user.click(await screen.findByRole("button", { name: "Run probe" }))
-    await waitFor(() =>
-      expect(runModelEvaluationAction).toHaveBeenCalledWith(
-        evaluation.id,
-        "run",
-        3,
-      ),
+    await user.selectOptions(
+      screen.getByLabelText("Review profile"),
+      alternativeProfile.id,
     )
-    expect(updateModelEvaluation).not.toHaveBeenCalled()
+
+    expect(
+      screen.getByRole("checkbox", { name: "Select candidate model code" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
+    ).toBeChecked()
+    expect(
+      screen.getByRole("checkbox", { name: "Select candidate model fast" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("checkbox", { name: "Select candidate model review" }),
+    ).toBeChecked()
   })
 
-  it("polls active progress serially to completion", async () => {
-    const running: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "running",
-      version: 4,
-      progress: {
-        ...evaluation.progress,
-        stage: "candidate_execution",
-        message: "Running candidate models.",
-        current_model: "code",
-        current_path: "pkg/service.go",
-        completed_tasks: 2,
-        current_batch: 2,
-        total_batches: 7,
-        completed_calls: 4,
-        total_calls: 12,
-        failed_calls: 1,
-        active_children: [
-          {
-            index: 5,
-            label: "scope chunk 2 of 4, reviewer 2 of 3 (code)",
-            model_alias: "code",
-            scope_count: 3,
-            started_at: "2026-08-24T09:45:14Z",
-          },
-          {
-            index: 6,
-            label: "scope chunk 2 of 4, reviewer 3 of 3 (fast)",
-            model_alias: "fast",
-            scope_count: 3,
-            started_at: "2026-08-24T09:45:15Z",
-          },
-        ],
-        updated_at: "2026-08-24T09:45:15Z",
-        percent: 40,
-      },
-    }
-    const completed: RepositoryModelEvaluation = {
-      ...running,
-      status: "completed",
-      version: 5,
-      progress: {
-        ...running.progress,
-        stage: "completed",
-        message: "Evaluation complete.",
-        completed_tasks: running.progress.total_tasks,
-        active_children: [],
-        percent: 100,
-      },
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([running])
-    vi.mocked(getModelEvaluation)
-      .mockResolvedValueOnce(running)
-      .mockResolvedValueOnce(completed)
-    renderPage()
-
-    expect(
-      await screen.findByRole("progressbar", { name: "Model probe progress" }),
-    ).toHaveAttribute("aria-valuenow", "40")
-    expect(screen.getByText(/Model code · File pkg\/service.go/)).toBeVisible()
-    const calls = screen.getByRole("region", {
-      name: "Candidate call progress",
-    })
-    expect(within(calls).getByText("Batch 2/7")).toBeVisible()
-    expect(within(calls).getByText("4/12 candidate calls")).toBeVisible()
-    expect(within(calls).getByText("2 active")).toBeVisible()
-    expect(within(calls).getByText("1 failed")).toBeVisible()
-    expect(within(calls).getAllByText(/scope chunk 2 of 4/)).toHaveLength(2)
-    expect(within(calls).getAllByText(/3 files · started/)).toHaveLength(2)
-    expect(screen.getByText(/Last progress update/)).toBeVisible()
-    expect(
-      await screen.findByText("Evaluation complete.", {}, { timeout: 3_000 }),
-    ).toBeVisible()
-    expect(getModelEvaluation).toHaveBeenCalledTimes(2)
-    expect(
-      screen.queryByRole("button", { name: "Cancel" }),
-    ).not.toBeInTheDocument()
-  })
-
-  it("cancels an active evaluation with its exact version", async () => {
-    const user = userEvent.setup()
-    const running: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "running",
-      version: 4,
-      progress: {
-        ...evaluation.progress,
-        stage: "candidate_execution",
-        message: "Running candidate models.",
-        percent: 40,
-      },
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([running])
-    vi.mocked(getModelEvaluation).mockResolvedValue(running)
-    vi.mocked(runModelEvaluationAction).mockResolvedValue({
-      ...running,
-      status: "canceling",
-      version: 5,
-    })
-    renderPage()
-
-    await user.click(await screen.findByRole("button", { name: "Cancel" }))
-    await waitFor(() =>
-      expect(runModelEvaluationAction).toHaveBeenCalledWith(
-        evaluation.id,
-        "cancel",
-        4,
-      ),
-    )
-  })
-
-  it("locks navigation and configuration while a mutation is pending", async () => {
-    const user = userEvent.setup()
-    const draftEvaluation: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "draft",
-      progress: {
-        ...evaluation.progress,
-        stage: "idle",
-        languages: {},
-        selected_files: 0,
-        percent: 0,
-      },
-    }
-    let resolveAction!: (value: RepositoryModelEvaluation) => void
-    vi.mocked(listModelEvaluations).mockResolvedValue([draftEvaluation])
-    vi.mocked(getModelEvaluation).mockResolvedValue(draftEvaluation)
-    vi.mocked(runModelEvaluationAction).mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveAction = resolve
-        }),
-    )
-    renderPage()
-
-    await user.click(
-      (await screen.findAllByRole("button", { name: /^Advanced/ }))[0],
-    )
-    await user.click(await screen.findByRole("button", { name: "Run probe" }))
-    expect(screen.getByRole("button", { name: "New probe" })).toBeDisabled()
-    expect(screen.getByRole("button", { name: /owner\/repo/i })).toBeDisabled()
-    expect(screen.getByLabelText("Repository")).toBeDisabled()
-    expect(screen.getByLabelText("Production code")).toBeDisabled()
-    await act(async () =>
-      resolveAction({
-        ...draftEvaluation,
-        status: "preflighting",
-        version: 4,
-      }),
-    )
-    expect(screen.getByRole("button", { name: "New probe" })).toBeEnabled()
-  })
-
-  it("offers explicit reload after a stale version conflict", async () => {
-    const user = userEvent.setup()
-    const draftEvaluation: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "draft",
-    }
-    const latest: RepositoryModelEvaluation = {
-      ...draftEvaluation,
-      version: 4,
-      ref: "latest-main",
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([draftEvaluation])
-    vi.mocked(getModelEvaluation)
-      .mockResolvedValueOnce(draftEvaluation)
-      .mockResolvedValueOnce(latest)
-    vi.mocked(updateModelEvaluation).mockRejectedValue(
-      new ModelEvaluationAPIError(
-        409,
-        "repository model evaluation changed",
-        "stale_repository_model_evaluation",
-      ),
-    )
-    renderPage()
-
-    await screen.findByDisplayValue("owner/repo")
-    await user.click(screen.getAllByRole("button", { name: /^Advanced/ })[0])
-    const ref = await screen.findByLabelText("Revision")
-    fireEvent.change(ref, { target: { value: "release" } })
-    await user.click(screen.getByRole("button", { name: "Run probe" }))
-    expect(
-      await screen.findByRole("button", { name: "Reload latest" }),
-    ).toBeVisible()
-    expect(ref).toHaveValue("release")
-    await user.click(screen.getByRole("button", { name: "Reload latest" }))
-    await waitFor(() => expect(ref).toHaveValue("latest-main"))
-    expect(
-      screen.queryByRole("button", { name: "Reload latest" }),
-    ).not.toBeInTheDocument()
-  })
-
-  it("bounds per-language overrides and restores the configured default", async () => {
-    const user = userEvent.setup()
-    const draftEvaluation: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "draft",
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([draftEvaluation])
-    vi.mocked(getModelEvaluation).mockResolvedValue(draftEvaluation)
-    renderPage()
-
-    const goLimit = await screen.findByRole("spinbutton", { name: "go files" })
-    fireEvent.change(goLimit, { target: { value: "99" } })
-    expect(goLimit).toHaveValue(20)
-    fireEvent.change(goLimit, { target: { value: "0" } })
-    expect(goLimit).toHaveValue(1)
-    expect(
-      screen.getByRole("button", { name: "Use default quota for go" }),
-    ).toBeVisible()
-    await user.click(
-      screen.getByRole("button", { name: "Use default quota for go" }),
-    )
-    expect(goLimit).toHaveValue(20)
-    expect(
-      screen.getAllByText("default", { exact: true }).length,
-    ).toBeGreaterThan(0)
-  })
-
-  it("pages safe corpus references and exposes bounded run history", async () => {
+  it("separates status, language summary, and paged corpus preview into accessible tabs", async () => {
     const user = userEvent.setup()
     const corpusFile = (path: string, candidateID: string) => ({
       candidate_id: candidateID,
@@ -675,9 +389,43 @@ describe("ModelEvaluationsPage", () => {
       })
     renderPage()
 
-    expect(await screen.findByText("Corpus preview")).toBeVisible()
-    expect(screen.getByText("pkg/first.go")).toBeVisible()
-    expect(screen.queryByText(/source content/i)).toBeVisible()
+    const tabs = await screen.findByRole("tablist", {
+      name: "Probe run details",
+    })
+    expect(within(tabs).getByRole("tab", { name: "Status" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    )
+    expect(
+      screen.getByText(/Several catalog languages contain fewer/),
+    ).toBeVisible()
+    expect(
+      screen.queryByRole("heading", { name: "Corpus by language" }),
+    ).toBeNull()
+
+    const languageTab = within(tabs).getByRole("tab", {
+      name: "Corpus by language",
+    })
+    expect(languageTab).not.toHaveAttribute("aria-controls")
+    languageTab.focus()
+    fireEvent.keyDown(languageTab, { key: "ArrowRight" })
+    expect(
+      within(tabs).getByRole("tab", { name: "Corpus preview" }),
+    ).toHaveFocus()
+    expect(await screen.findByText("pkg/first.go")).toBeVisible()
+
+    await user.click(
+      within(tabs).getByRole("tab", { name: "Corpus by language" }),
+    )
+    expect(languageTab).toHaveAttribute("aria-controls")
+    expect(
+      screen.getByRole("heading", { name: "Corpus by language" }),
+    ).toBeVisible()
+    expect(screen.getByText("typescript").closest("tr")).toHaveTextContent(
+      "limited",
+    )
+
+    await user.click(within(tabs).getByRole("tab", { name: "Corpus preview" }))
     await user.click(screen.getByRole("button", { name: "Next corpus page" }))
     expect(await screen.findByText("pkg/last.go")).toBeVisible()
     expect(getModelEvaluationCorpus).toHaveBeenLastCalledWith(
@@ -686,267 +434,127 @@ describe("ModelEvaluationsPage", () => {
       20,
       expect.any(AbortSignal),
     )
-    await user.click(screen.getByText("Run history (1)"))
-    expect(screen.getByRole("link", { name: "wr_selector" })).toHaveAttribute(
-      "href",
-      "/agent/workflows?mode=operate&run=wr_selector",
+  })
+
+  it("embeds the complete report in the final tab and retains its deep link", async () => {
+    const user = userEvent.setup()
+    const onOpenReport = vi.fn()
+    vi.mocked(listModelEvaluations).mockResolvedValue([completed])
+    vi.mocked(getModelEvaluation).mockResolvedValue(completed)
+    renderPage(onOpenReport)
+
+    const reportTab = await screen.findByRole("tab", { name: "Final report" })
+    expect(reportTab).toBeEnabled()
+    expect(
+      screen.queryByRole("heading", {
+        name: "Use code when review quality matters.",
+      }),
+    ).toBeNull()
+    await user.click(reportTab)
+    expect(
+      screen.getByRole("heading", {
+        name: "Use code when review quality matters.",
+      }),
+    ).toBeVisible()
+    expect(
+      screen.getByRole("heading", { name: "Work-sizing quality ceilings" }),
+    ).toBeVisible()
+    await user.click(
+      screen.getByRole("button", { name: "Open dedicated report" }),
+    )
+    expect(onOpenReport).toHaveBeenCalledWith(completed.id)
+  })
+
+  it("cancels an active probe with its exact version", async () => {
+    const user = userEvent.setup()
+    const running = { ...evaluation, status: "running" as const }
+    vi.mocked(listModelEvaluations).mockResolvedValue([running])
+    vi.mocked(getModelEvaluation).mockResolvedValue(running)
+    vi.mocked(runModelEvaluationAction).mockResolvedValue({
+      ...running,
+      status: "canceled",
+      version: 4,
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "Cancel" }))
+    expect(runModelEvaluationAction).toHaveBeenCalledWith(
+      evaluation.id,
+      "cancel",
+      evaluation.version,
     )
   })
 
-  it("lets operators repair model aliases removed from the catalog", async () => {
+  it("offers a reload when a profile-based draft patch loses its version fence", async () => {
     const user = userEvent.setup()
-    const stale: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "draft",
-      candidate_models: ["retired", "fast"],
-      selector_model_alias: "retired",
-      judge_model_alias: "retired",
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([stale])
-    vi.mocked(getModelEvaluation).mockResolvedValue(stale)
-    vi.mocked(updateModelEvaluation).mockResolvedValue({
-      ...evaluation,
-      status: "draft",
-      version: 4,
-      corpus: undefined,
+    const draft = { ...evaluation, status: "draft" as const }
+    vi.mocked(listModelEvaluations).mockResolvedValue([draft])
+    vi.mocked(getModelEvaluation).mockResolvedValue(draft)
+    vi.mocked(updateModelEvaluation).mockRejectedValue(
+      new ModelEvaluationAPIError(
+        409,
+        "repository model evaluation changed",
+        "stale_repository_model_evaluation",
+      ),
+    )
+    renderPage()
+
+    await screen.findByDisplayValue("owner/repo")
+    const repository = screen.getByLabelText("Repository")
+    await user.clear(repository)
+    await user.type(repository, "other/repo")
+    await user.clear(screen.getByLabelText("Revision"))
+    await user.click(screen.getByRole("button", { name: "Run probe" }))
+
+    expect(
+      await screen.findByText("repository model evaluation changed"),
+    ).toBeVisible()
+    expect(updateModelEvaluation).toHaveBeenCalledWith(draft.id, {
+      repository: "other/repo",
+      profile_id: profile.id,
+      candidate_models: ["code", "fast"],
+      ref: "",
+      expected_version: draft.version,
     })
-    vi.mocked(runModelEvaluationAction).mockResolvedValue({
-      ...evaluation,
-      status: "preflighting",
-      version: 5,
-      corpus: undefined,
+    await user.click(screen.getByRole("button", { name: "Reload latest" }))
+    expect(getModelEvaluation).toHaveBeenCalledWith(draft.id, undefined)
+  })
+
+  it("requires an existing review profile", async () => {
+    vi.mocked(getModelEvaluationOptions).mockResolvedValue({
+      models: [],
+      repositories: [],
+      profiles: [],
+      code_types: [],
+      max_files_per_language: 20,
+      default_files_per_language: 20,
+      max_candidate_models: 8,
     })
     renderPage()
 
     expect(
-      await screen.findByText(/Replace unavailable selector\/judge models/i),
+      await screen.findByText(
+        "Create a repository review profile before running a probe.",
+      ),
     ).toBeVisible()
     expect(screen.getByRole("button", { name: "Run probe" })).toBeDisabled()
-    await user.click(
-      screen.getByRole("checkbox", {
-        name: "Select candidate model retired",
-      }),
-    )
-    await user.click(
-      screen.getByRole("checkbox", { name: "Select candidate model code" }),
-    )
-    await user.click(screen.getAllByRole("button", { name: /^Advanced/ })[0])
-    await user.selectOptions(
-      screen.getByLabelText("File selector model"),
-      "review",
-    )
-    await user.selectOptions(
-      screen.getByLabelText("Judge and analyzer model"),
-      "review",
-    )
-    await user.click(screen.getByRole("button", { name: "Run probe" }))
-    await waitFor(() =>
-      expect(updateModelEvaluation).toHaveBeenCalledWith(
-        stale.id,
-        expect.objectContaining({
-          candidate_models: ["fast", "code"],
-          selector_model_alias: "review",
-          judge_model_alias: "review",
-          expected_version: stale.version,
-        }),
-      ),
-    )
-    expect(runModelEvaluationAction).toHaveBeenCalledWith(stale.id, "run", 4)
   })
 
-  it("renders completed results as immutable terminal work", async () => {
-    const user = userEvent.setup()
-    const onOpenReport = vi.fn()
-    const completed: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "completed",
-      progress: { ...evaluation.progress, stage: "completed", percent: 100 },
-      comparisons: [
-        {
-          model_alias: "code",
-          concrete_models: { "gpt-code": 2 },
-          completion: "completed",
-          failures: 0,
-          rank: 1,
-          overall_score: 92.5,
-          scores: {
-            correctness: 95,
-            evidence: 93,
-            coverage: 88,
-            actionability: 94,
-          },
-          languages: ["go", "typescript"],
-          regions: ["pkg", "web/frontend"],
-          files_analyzed: 28,
-          bytes_analyzed: 280_000,
-          confirmed_findings: 5,
-          unsupported_files: 0,
-          usage: { ...evaluation.usage, estimated_cost_usd: 0.42 },
-          verdict: "Best evidence-grounded analysis.",
-          strengths: ["Strong evidence"],
-          limitations: ["Higher latency"],
-        },
-      ],
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([completed])
-    vi.mocked(getModelEvaluation).mockResolvedValue(completed)
-    renderPage(onOpenReport)
-
-    expect(await screen.findByText("Visual report ready")).toBeVisible()
-    expect(screen.getByLabelText("Probe report ready")).toHaveTextContent(
-      "code leads at 92.5 overall",
-    )
-    expect(
-      screen.queryByText("Best evidence-grounded analysis."),
-    ).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "View full report" }))
-    expect(onOpenReport).toHaveBeenCalledWith(completed.id)
-    expect(screen.getByLabelText("Repository")).toBeDisabled()
-    expect(
-      screen.queryByRole("button", { name: "Run probe" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("button", { name: "Run again" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("button", { name: "Restart" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("button", { name: "Start over" }),
-    ).not.toBeInTheDocument()
-    expect(
-      screen.queryByRole("button", { name: "Delete" }),
-    ).not.toBeInTheDocument()
-  })
-
-  it("keeps partial and failed comparison evidence honest with unknown cost", async () => {
-    const user = userEvent.setup()
-    const onOpenReport = vi.fn()
-    const completed: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "completed",
-      progress: { ...evaluation.progress, stage: "completed", percent: 100 },
-      comparisons: [
-        {
-          model_alias: "code",
-          concrete_models: { "gpt-code": 2 },
-          completion: "partial",
-          failure: "One corpus task timed out.",
-          failures: 1,
-          rank: 1,
-          overall_score: 81,
-          scores: { correctness: 82, evidence: 80 },
-          languages: ["go", "typescript"],
-          regions: ["pkg", "web"],
-          files_analyzed: 24,
-          bytes_analyzed: 240_000,
-          confirmed_findings: 4,
-          unsupported_files: 2,
-          usage: { ...evaluation.usage, requests: 25 },
-          verdict: "Useful but incomplete.",
-        },
-        {
-          model_alias: "fast",
-          concrete_models: {},
-          completion: "failed",
-          failure: "No valid candidate output.",
-          failures: 3,
-          rank: 0,
-          scores: {},
-          languages: [],
-          regions: [],
-          files_analyzed: 0,
-          bytes_analyzed: 0,
-          confirmed_findings: 0,
-          unsupported_files: 0,
-          usage: {
-            ...evaluation.usage,
-            requests: 3,
-            estimated_cost_usd: 0,
-          },
-        },
-      ],
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([completed])
-    vi.mocked(getModelEvaluation).mockResolvedValue(completed)
-    renderPage(onOpenReport)
-
-    expect(await screen.findByText("Visual report ready")).toBeVisible()
-    expect(screen.getByLabelText("Probe report ready")).toHaveTextContent(
-      "Results need attention · no fully completed scored model",
-    )
-    expect(
-      screen.queryByText("One corpus task timed out."),
-    ).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "View full report" }))
-    expect(onOpenReport).toHaveBeenCalledWith(completed.id)
-  })
-
-  it("restarts failed evaluations from checkpoints with the exact version", async () => {
-    const user = userEvent.setup()
-    const failed: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "failed",
-      failure: "Candidate execution failed.",
-    }
-    vi.mocked(listModelEvaluations).mockResolvedValue([failed])
-    vi.mocked(getModelEvaluation).mockResolvedValue(failed)
-    vi.mocked(runModelEvaluationAction).mockResolvedValue({
-      ...failed,
-      id: failed.id,
-      status: "preflighting",
-      version: 1,
+  it("distinguishes incompatible profiles from an empty profile catalog", async () => {
+    vi.mocked(getModelEvaluationOptions).mockResolvedValue({
+      models: [],
+      repositories: [],
+      profiles: [],
+      profile_count: 2,
+      code_types: [],
+      max_files_per_language: 20,
+      default_files_per_language: 20,
+      max_candidate_models: 8,
     })
     renderPage()
 
-    expect(await screen.findByRole("button", { name: "Restart" })).toBeVisible()
-    expect(screen.getByRole("button", { name: "Start over" })).toBeVisible()
     expect(
-      screen.queryByRole("button", { name: "Run probe" }),
-    ).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Restart" }))
-    await waitFor(() =>
-      expect(runModelEvaluationAction).toHaveBeenCalledWith(
-        failed.id,
-        "resume",
-        failed.version,
-      ),
-    )
-  })
-
-  it("starts failed evaluations over as a fresh selected probe", async () => {
-    const user = userEvent.setup()
-    const failed: RepositoryModelEvaluation = {
-      ...evaluation,
-      status: "failed",
-      failure: "Candidate execution failed.",
-    }
-    const restarted: RepositoryModelEvaluation = {
-      ...evaluation,
-      id: "rme_22222222222222222222222222222222",
-      version: 2,
-      status: "preflighting",
-      run_ids: ["wr_restart"],
-    }
-    vi.mocked(listModelEvaluations)
-      .mockResolvedValueOnce([failed])
-      .mockResolvedValue([restarted])
-    vi.mocked(getModelEvaluation).mockImplementation(async (id) =>
-      id === restarted.id ? restarted : failed,
-    )
-    vi.mocked(runModelEvaluationAction).mockResolvedValue(restarted)
-    renderPage()
-
-    await user.click(await screen.findByRole("button", { name: "Start over" }))
-    await waitFor(() =>
-      expect(runModelEvaluationAction).toHaveBeenCalledWith(
-        failed.id,
-        "restart",
-        failed.version,
-      ),
-    )
-    expect(
-      await screen.findByRole("button", { name: /owner\/repo.*preflighting/i }),
-    ).toHaveAttribute("aria-pressed", "true")
+      await screen.findByText(/No review profile has a runnable reviewer/),
+    ).toBeVisible()
   })
 })

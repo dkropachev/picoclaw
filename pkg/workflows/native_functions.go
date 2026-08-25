@@ -307,13 +307,29 @@ func nativeRepositoryReview(
 		output["maxFiles"] = maximumPending
 		return output, nil
 	case "freeze":
-		scope, err := hydrateImmutableGitScope(ctx, args["files"], args, exec)
+		hydrationArgs := args
+		if maximumFileBytes := int(nativeInt64Any(
+			args, "max_file_content_bytes", "maxFileContentBytes",
+		)); maximumFileBytes > 0 {
+			hydrationArgs = cloneMap(args)
+			hydrationArgs["max_content_bytes"] = maximumFileBytes
+		}
+		scope, err := hydrateImmutableGitScope(ctx, args["files"], hydrationArgs, exec)
 		if err != nil {
 			return nil, err
 		}
-		groupContentBytes := int(nativeInt64Any(args, "max_content_bytes", "maxContentBytes"))
+		maximumGroupFiles := int(nativeInt64Any(args, "max_group_files", "maxGroupFiles"))
+		if maximumGroupFiles <= 0 {
+			maximumGroupFiles = 3
+		}
+		groupContentBytes := int(nativeInt64Any(
+			args, "max_group_content_bytes", "maxGroupContentBytes",
+		))
+		if groupContentBytes <= 0 {
+			groupContentBytes = int(nativeInt64Any(args, "max_content_bytes", "maxContentBytes"))
+		}
 		reviewableScope, unsupportedFiles, unavailableCount, err := nativeReviewableFrozenGitScope(
-			scope, groupContentBytes,
+			scope, maximumGroupFiles, groupContentBytes,
 		)
 		if err != nil {
 			return nil, err
@@ -537,7 +553,7 @@ func nativeFrozenGitScopeReferences(scope any) []map[string]any {
 		ref := make(map[string]any)
 		for _, key := range []string{
 			"path", "fileHash", "sizeBytes", "category", "mode", "selected",
-			"contentComplete", "contentUnavailable",
+			"contentBytes", "contentPromptBytes", "contentComplete", "contentUnavailable",
 		} {
 			if value, exists := item[key]; exists {
 				ref[key] = value
@@ -550,6 +566,7 @@ func nativeFrozenGitScopeReferences(scope any) []map[string]any {
 
 func nativeReviewableFrozenGitScope(
 	scope any,
+	maximumGroupFiles int,
 	maximumGroupBytes int,
 ) ([]map[string]any, []map[string]any, int, error) {
 	items, _, err := nativeScopeItems(scope)
@@ -574,7 +591,9 @@ func nativeReviewableFrozenGitScope(
 			unsupported = append(unsupported, nativeFrozenGitScopeReferences([]map[string]any{item})[0])
 		}
 	}
-	return nativeGroupFrozenReviewScope(reviewable, 3, maximumGroupBytes), unsupported, unavailable, nil
+	return nativeGroupFrozenReviewScope(
+		reviewable, maximumGroupFiles, maximumGroupBytes,
+	), unsupported, unavailable, nil
 }
 
 func nativeGroupFrozenReviewScope(

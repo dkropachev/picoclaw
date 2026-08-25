@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/repoeval"
 	"github.com/sipeed/picoclaw/pkg/reposcope"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -47,12 +48,9 @@ func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T)
 		"/api/model-evaluations/"+created.ID,
 		map[string]any{
 			"expected_version": created.Version,
+			"profile_id":       "rrpf_kttutlpoaklekkcrod5fqpz3qw",
 			"repository":       "acme/core",
 			"ref":              "release",
-			"focus": map[string]any{
-				"code_types":      []string{"code", "test"},
-				"include_folders": []string{"pkg"},
-			},
 		},
 	)
 	if patched.Code != http.StatusOK {
@@ -72,7 +70,8 @@ func TestRepositoryModelEvaluationRoutesLifecycleAndSafeProjection(t *testing.T)
 		http.MethodPatch,
 		"/api/model-evaluations/"+created.ID,
 		map[string]any{
-			"expected_version": created.Version, "ref": "stale",
+			"expected_version": created.Version, "profile_id": "rrpf_kttutlpoaklekkcrod5fqpz3qw",
+			"ref": "stale",
 		},
 	)
 	if stale.Code != http.StatusConflict {
@@ -208,6 +207,32 @@ func TestRepositoryModelEvaluationRoutesRejectUnsafeRequestsModelsAndPages(t *te
 	if unsafe.Code != http.StatusBadRequest {
 		t.Fatalf("unsafe alias status=%d body=%s", unsafe.Code, unsafe.Body.String())
 	}
+	missingProfileBody := repositoryModelEvaluationCreateBody("owner/repo")
+	delete(missingProfileBody, "profile_id")
+	missingProfile := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		missingProfileBody,
+	)
+	if missingProfile.Code != http.StatusBadRequest ||
+		!strings.Contains(missingProfile.Body.String(), "profile_id is required") {
+		t.Fatalf("missing profile status=%d body=%s", missingProfile.Code, missingProfile.Body.String())
+	}
+	emptyCustomBody := repositoryModelEvaluationCreateBody("owner/repo")
+	emptyCustomBody["selector_model_alias"] = ""
+	emptyCustom := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/model-evaluations/run",
+		emptyCustomBody,
+	)
+	if emptyCustom.Code != http.StatusBadRequest ||
+		!strings.Contains(emptyCustom.Body.String(), "do not accept custom") {
+		t.Fatalf("empty custom field status=%d body=%s", emptyCustom.Code, emptyCustom.Body.String())
+	}
 
 	unknownBody := repositoryModelEvaluationCreateBody("owner/repo")
 	unknownBody["unexpected"] = true
@@ -285,21 +310,142 @@ func TestRepositoryModelEvaluationOptionsExposeOnlySafeModelsAndRepositories(t *
 		t.Fatalf("options status=%d body=%s", response.Code, response.Body.String())
 	}
 	var options struct {
-		Models    []repositoryReviewModelOption `json:"models"`
-		CodeTypes []repoeval.CodeType           `json:"code_types"`
-		Default   int                           `json:"default_files_per_language"`
-		Maximum   int                           `json:"max_files_per_language"`
+		Models       []repositoryReviewModelOption            `json:"models"`
+		Profiles     []repositoryModelEvaluationProfileOption `json:"profiles"`
+		ProfileCount int                                      `json:"profile_count"`
+		CodeTypes    []repoeval.CodeType                      `json:"code_types"`
+		Default      int                                      `json:"default_files_per_language"`
+		Maximum      int                                      `json:"max_files_per_language"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
 		t.Fatal(err)
 	}
-	if len(options.Models) != 4 || len(options.CodeTypes) != 4 || options.Default != 20 || options.Maximum != 20 {
+	if len(options.Models) != 4 || len(options.Profiles) != 1 || options.ProfileCount != 1 ||
+		len(options.CodeTypes) != 4 || options.Default != 20 || options.Maximum != 20 {
 		t.Fatalf("options=%#v", options)
 	}
 	for _, option := range options.Models {
 		if option.Alias == "unsafe" || !option.Available || option.BlockedReason != "" {
 			t.Fatalf("unsafe model leaked into options: %#v", option)
 		}
+	}
+}
+
+func TestRepositoryModelEvaluationProfileAdmissionFreezesSizingPlan(t *testing.T) {
+	handler, mux, workspace := newRepositoryModelEvaluationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	profile, err := repoaudit.NewStore(workspace).CreateProfile(t.Context(), repoaudit.RepositoryReviewProfile{
+		Name:                "probe-default",
+		ReviewFocus:         "Find concrete correctness and reliability bugs.",
+		ReviewerModel:       "model-a",
+		AutoContinue:        true,
+		MaxFilesPerRun:      8,
+		MaxContentBytes:     32 << 10,
+		MaxParallelChildren: 4,
+		ScopePolicy: repoaudit.RepositoryReviewScopePolicy{
+			CodeTypes: []repoaudit.RepositoryReviewCodeType{
+				repoaudit.RepositoryReviewCodeTypeHotpathCode,
+				repoaudit.RepositoryReviewCodeTypeCode,
+			},
+			IncludeFolders: []string{"pkg"},
+			ExcludeFolders: []string{"pkg/generated"},
+			FreeText:       "Prioritize persistence boundaries.",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{
+		"repository":       "owner/profile-probe",
+		"profile_id":       profile.ID,
+		"candidate_models": []string{"model-a", "model-b"},
+	}
+	response := repositoryModelEvaluationMutation(t, mux, http.MethodPost, "/api/model-evaluations", body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("profile create status=%d body=%s", response.Code, response.Body.String())
+	}
+	var detail repositoryModelEvaluationDetail
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	evaluation := detail.Evaluation
+	if evaluation.Profile == nil || evaluation.Profile.ID != profile.ID ||
+		evaluation.Profile.Version != profile.Version || evaluation.Profile.Name != profile.Name ||
+		evaluation.Profile.MaxFilesPerBatch != 8 ||
+		evaluation.Profile.MaxContentBytesPerBatch != 32<<10 ||
+		evaluation.Profile.MaxParallelChildren != 4 ||
+		evaluation.SelectorModelAlias != "model-a" || evaluation.JudgeModelAlias == "" ||
+		!reflect.DeepEqual(evaluation.Focus.IncludeFolders, []string{"pkg"}) {
+		t.Fatalf("materialized profile evaluation=%#v", evaluation)
+	}
+	if got := evaluation.WorkSizingPlan; len(got) != 5 ||
+		got[0].Axis != repoeval.WorkSizingAxisFilesPerBatch || got[0].FilesPerBatch != 2 ||
+		got[1].FilesPerBatch != 4 || got[2].Axis != repoeval.WorkSizingAxisContentBytesPerBatch ||
+		got[2].ContentBytesPerBatch != 8<<10 || got[3].ContentBytesPerBatch != 16<<10 ||
+		got[4].Axis != repoeval.WorkSizingAxisConfigured || got[4].FilesPerBatch != 8 ||
+		got[4].ContentBytesPerBatch != 32<<10 {
+		t.Fatalf("work sizing plan=%#v", got)
+	}
+	patched := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/model-evaluations/"+evaluation.ID,
+		map[string]any{
+			"expected_version": evaluation.Version,
+			"profile_id":       profile.ID,
+			"repository":       "owner/profile-probe-renamed",
+			"candidate_models": []string{"model-a", "model-b"},
+		},
+	)
+	if patched.Code != http.StatusOK || !strings.Contains(
+		patched.Body.String(),
+		"https://github.com/owner/profile-probe-renamed.git",
+	) {
+		t.Fatalf("profile patch status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	var patchedDetail repositoryModelEvaluationDetail
+	if err := json.Unmarshal(patched.Body.Bytes(), &patchedDetail); err != nil {
+		t.Fatal(err)
+	}
+	escape := repositoryModelEvaluationMutation(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/model-evaluations/"+evaluation.ID,
+		map[string]any{
+			"expected_version":     patchedDetail.Evaluation.Version,
+			"selector_model_alias": "selector",
+		},
+	)
+	if escape.Code != http.StatusBadRequest || !strings.Contains(escape.Body.String(), "profile_id is required") {
+		t.Fatalf("profile escape status=%d body=%s", escape.Code, escape.Body.String())
+	}
+	cfg := mustLoadRepositoryModelEvaluationConfig(t, handler.configPath)
+	if aliasErr := validateRepositoryModelEvaluationExecutionAliases(
+		cfg,
+		[]string{"model-a", "model-b"},
+		"model-a",
+		"judge",
+		&repoeval.ProfileSnapshot{AccountRef: "missing-account"},
+	); !errors.Is(aliasErr, errRepositoryModelEvaluationUnavailableModel) {
+		t.Fatalf("frozen account alias validation error=%v", aliasErr)
+	}
+
+	optionsResponse := httptest.NewRecorder()
+	mux.ServeHTTP(
+		optionsResponse,
+		httptest.NewRequest(http.MethodGet, "/api/model-evaluations/options", nil),
+	)
+	if optionsResponse.Code != http.StatusOK || !strings.Contains(optionsResponse.Body.String(), profile.ID) ||
+		!strings.Contains(optionsResponse.Body.String(), `"max_files_per_batch":8`) {
+		t.Fatalf("profile options status=%d body=%s", optionsResponse.Code, optionsResponse.Body.String())
+	}
+
+	body["focus"] = map[string]any{"code_types": []string{"test"}}
+	rejected := repositoryModelEvaluationMutation(t, mux, http.MethodPost, "/api/model-evaluations", body)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "do not accept custom") {
+		t.Fatalf("custom profile options status=%d body=%s", rejected.Code, rejected.Body.String())
 	}
 }
 
@@ -350,20 +496,11 @@ func TestRepositoryModelEvaluationRoutesFullPatchResumeAndBusyDelete(t *testing.
 		http.MethodPatch,
 		"/api/model-evaluations/"+created.ID,
 		map[string]any{
-			"expected_version":     created.Version,
-			"repository":           "https://github.com/acme/other.git",
-			"ref":                  "release",
-			"candidate_models":     []string{"model-b", "model-a"},
-			"selector_model_alias": "selector",
-			"judge_model_alias":    "judge",
-			"focus": map[string]any{
-				"code_types":      []string{"hotpath-code"},
-				"include_folders": []string{"cmd"},
-				"exclude_folders": []string{"cmd/generated"},
-				"free_text":       "focus auth",
-			},
-			"default_files_per_language": 9,
-			"files_per_language":         map[string]int{"go": 7},
+			"expected_version": created.Version,
+			"profile_id":       "rrpf_kttutlpoaklekkcrod5fqpz3qw",
+			"repository":       "https://github.com/acme/other.git",
+			"ref":              "release",
+			"candidate_models": []string{"model-b", "model-a"},
 		},
 	)
 	if patched.Code != http.StatusOK {
@@ -373,9 +510,8 @@ func TestRepositoryModelEvaluationRoutesFullPatchResumeAndBusyDelete(t *testing.
 	if err := json.Unmarshal(patched.Body.Bytes(), &patchedDetail); err != nil {
 		t.Fatal(err)
 	}
-	if patchedDetail.Evaluation.DefaultFilesPerLanguage != 9 ||
-		patchedDetail.Evaluation.FilesPerLanguage["go"] != 7 ||
-		patchedDetail.Evaluation.Focus.FreeText != "focus auth" ||
+	if patchedDetail.Evaluation.Profile == nil ||
+		patchedDetail.Evaluation.Ref != "release" ||
 		patchedDetail.Evaluation.CandidateModels[0] != "model-b" {
 		t.Fatalf("patched detail=%#v", patchedDetail.Evaluation)
 	}
@@ -554,11 +690,11 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 	completed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCompleted)
 	if len(completed.Comparisons) != 2 || completed.Comparisons[0].ModelAlias != "model-a" ||
 		completed.Comparisons[0].Rank != 1 ||
-		completed.Usage.Requests != 3 ||
+		completed.Usage.Requests != 11 ||
 		completed.ModelStats["model-a"].FilesCompleted != 2 ||
-		completed.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 1 ||
-		len(completed.Checkpoint.Batches) != 1 ||
-		len(completed.Checkpoint.Batches[0].ClaimLedger["model-a"]) != 3 {
+		completed.Checkpoint.ConcreteModels["model-a"]["gpt-a"] != 5 ||
+		len(completed.Checkpoint.Batches) != 5 || len(completed.WorkSizingResults) != 10 ||
+		len(completed.Checkpoint.Batches[4].ClaimLedger["model-a"]) != 3 {
 		t.Fatalf("completed evaluation=%#v", completed)
 	}
 	completedDetailResponse := httptest.NewRecorder()
@@ -611,8 +747,15 @@ func TestRepositoryModelEvaluationControllerCompletesDeterministicWorkflow(t *te
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(refs) != 3 || refs[0] != workflows.RepositoryModelEvaluationPreflightWorkflowRef ||
-		refs[2] != workflows.RepositoryModelEvaluationAnalysisWorkflowRef {
+	validRefs := len(refs) == len(completed.WorkSizingPlan)+2 &&
+		refs[0] == workflows.RepositoryModelEvaluationPreflightWorkflowRef &&
+		refs[len(refs)-1] == workflows.RepositoryModelEvaluationAnalysisWorkflowRef
+	if validRefs {
+		for _, ref := range refs[1 : len(refs)-1] {
+			validRefs = validRefs && ref == workflows.RepositoryModelEvaluationBatchWorkflowRef
+		}
+	}
+	if !validRefs {
 		t.Fatalf("workflow refs=%v", refs)
 	}
 }
@@ -664,12 +807,15 @@ func TestRepositoryModelEvaluationOneShotRunCompletesWithoutReadyAction(t *testi
 	completed := waitRepositoryModelEvaluationStatus(t, handler, accepted.Evaluation.ID, repoeval.StatusCompleted)
 	mu.Lock()
 	defer mu.Unlock()
-	if !completed.OneShot || len(completed.Comparisons) != len(completed.CandidateModels) ||
-		!reflect.DeepEqual(refs, []string{
-			workflows.RepositoryModelEvaluationPreflightWorkflowRef,
-			workflows.RepositoryModelEvaluationBatchWorkflowRef,
-			workflows.RepositoryModelEvaluationAnalysisWorkflowRef,
-		}) {
+	validRefs := len(refs) == len(completed.WorkSizingPlan)+2 &&
+		refs[0] == workflows.RepositoryModelEvaluationPreflightWorkflowRef &&
+		refs[len(refs)-1] == workflows.RepositoryModelEvaluationAnalysisWorkflowRef
+	if validRefs {
+		for _, ref := range refs[1 : len(refs)-1] {
+			validRefs = validRefs && ref == workflows.RepositoryModelEvaluationBatchWorkflowRef
+		}
+	}
+	if !completed.OneShot || len(completed.Comparisons) != len(completed.CandidateModels) || !validRefs {
 		t.Fatalf("completed=%#v refs=%v", completed, refs)
 	}
 }
@@ -1481,6 +1627,22 @@ func newRepositoryModelEvaluationTestHandler(t *testing.T) (*Handler, *http.Serv
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := repoaudit.NewStore(workspace).CreateProfile(
+		t.Context(),
+		repoaudit.RepositoryReviewProfile{
+			ID: "rrpf_kttutlpoaklekkcrod5fqpz3qw", Name: "API test profile",
+			ReviewFocus: "Find concrete bugs.", ReviewerModel: "model-a", AutoContinue: true,
+			MaxFilesPerRun: 12, MaxContentBytes: 512 << 10, MaxParallelChildren: 3,
+			ScopePolicy: repoaudit.RepositoryReviewScopePolicy{
+				CodeTypes: []repoaudit.RepositoryReviewCodeType{
+					repoaudit.RepositoryReviewCodeTypeCode,
+					repoaudit.RepositoryReviewCodeTypeTest,
+				},
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
 	handler := NewHandler(configPath)
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
@@ -1489,10 +1651,8 @@ func newRepositoryModelEvaluationTestHandler(t *testing.T) (*Handler, *http.Serv
 
 func repositoryModelEvaluationCreateBody(repository string) map[string]any {
 	return map[string]any{
-		"repository": repository, "ref": "main", "candidate_models": []string{"model-a", "model-b"},
-		"selector_model_alias": "selector", "judge_model_alias": "judge",
-		"focus":                      map[string]any{"code_types": []string{"code", "test"}},
-		"default_files_per_language": 20, "files_per_language": map[string]int{"go": 20},
+		"repository": repository, "ref": "main", "profile_id": "rrpf_kttutlpoaklekkcrod5fqpz3qw",
+		"candidate_models": []string{"model-a", "model-b"},
 	}
 }
 

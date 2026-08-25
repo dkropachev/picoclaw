@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -259,7 +262,7 @@ func TestRepositoryModelEvaluationUsagePricesConcreteModelsAndSeparatesJudge(t *
 	}
 }
 
-func TestRepositoryModelEvaluationPendingBatchesResumeOnlyMissingAliasFilePairs(t *testing.T) {
+func TestRepositoryModelEvaluationRecoveryRejudgesPartialBatchWithFullContext(t *testing.T) {
 	evaluation := repositoryModelEvaluationMetricsFixture()
 	evaluation.Checkpoint.Batches = []repoeval.BatchCheckpoint{{
 		ID: "attempt-one", CandidateIDs: []string{"candidate-go", "candidate-ts"},
@@ -278,6 +281,17 @@ func TestRepositoryModelEvaluationPendingBatchesResumeOnlyMissingAliasFilePairs(
 		!slices.Equal(pending[0].ids, []string{"candidate-ts"}) {
 		t.Fatalf("pending resume batches=%#v", pending)
 	}
+	cleaned := repositoryModelEvaluationDiscardPartialJudgedBatches(evaluation)
+	pending = repositoryModelEvaluationPendingBatches(cleaned)
+	if len(cleaned.Checkpoint.Batches) != 0 || len(pending) != 1 ||
+		!slices.Equal(pending[0].models, []string{"model-a", "model-b"}) ||
+		!slices.Equal(pending[0].ids, []string{"candidate-go", "candidate-ts"}) {
+		t.Fatalf(
+			"partial batch did not restore full judging context: cleaned=%#v pending=%#v",
+			cleaned.Checkpoint,
+			pending,
+		)
+	}
 	evaluation.Checkpoint.Batches = append(evaluation.Checkpoint.Batches, repoeval.BatchCheckpoint{
 		ID: "attempt-two", CandidateIDs: []string{"candidate-ts"},
 		Candidates: map[string]repoeval.BatchCandidateCheckpoint{
@@ -287,8 +301,10 @@ func TestRepositoryModelEvaluationPendingBatchesResumeOnlyMissingAliasFilePairs(
 		},
 		JudgeJSON: `{}`, MappingJSON: `[]`, CompletedAt: time.Now().UTC(),
 	})
-	if pending = repositoryModelEvaluationPendingBatches(evaluation); len(pending) != 0 {
-		t.Fatalf("successful alias/file tasks were scheduled again: %#v", pending)
+	cleaned = repositoryModelEvaluationDiscardPartialJudgedBatches(evaluation)
+	if pending = repositoryModelEvaluationPendingBatches(cleaned); len(cleaned.Checkpoint.Batches) != 0 ||
+		len(pending) != 1 || !slices.Equal(pending[0].models, []string{"model-a", "model-b"}) {
+		t.Fatalf("split-context checkpoints were retained: cleaned=%#v pending=%#v", cleaned.Checkpoint, pending)
 	}
 }
 
@@ -634,6 +650,7 @@ func TestRepositoryModelEvaluationBatchOutcomeAndAttemptEdges(t *testing.T) {
 			CandidateIDs: []string{"candidate-go"},
 			Candidates:   map[string]repoeval.BatchCandidateCheckpoint{"different": {}},
 		}},
+		"",
 		[]string{"model-a"},
 		[]string{"candidate-go"},
 	); attempt != 0 {
@@ -644,6 +661,7 @@ func TestRepositoryModelEvaluationBatchOutcomeAndAttemptEdges(t *testing.T) {
 			CandidateIDs: []string{"candidate-go"},
 			Candidates:   map[string]repoeval.BatchCandidateCheckpoint{"model-a": {}},
 		}},
+		"",
 		[]string{"model-a"},
 		[]string{"candidate-go"},
 	); attempt != 1 {
@@ -1223,7 +1241,7 @@ func TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation(t
 			t.Fatalf("resume failed status=%d body=%s", resume.Code, resume.Body.String())
 		}
 		completed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCompleted)
-		if completed.ID != failed.ID || len(completed.Checkpoint.Batches) != 1 {
+		if completed.ID != failed.ID || len(completed.Checkpoint.Batches) != len(completed.WorkSizingPlan) {
 			t.Fatalf("resumed completion=%#v", completed)
 		}
 	})
@@ -1269,14 +1287,20 @@ func TestRepositoryModelEvaluationControllerBatchFailureAndRunningCancellation(t
 			t.Fatalf("start ready status=%d body=%s", start.Code, start.Body.String())
 		}
 		<-batchEntered
-		active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
-		cancel := repositoryModelEvaluationMutation(
-			t,
-			mux,
-			http.MethodPost,
-			"/api/model-evaluations/"+created.ID+"/cancel",
-			map[string]any{"expected_version": active.Version},
-		)
+		var cancel *httptest.ResponseRecorder
+		for attempt := 0; attempt < 5; attempt++ {
+			active, _, _ := handler.getRepositoryModelEvaluation(t.Context(), created.ID)
+			cancel = repositoryModelEvaluationMutation(
+				t,
+				mux,
+				http.MethodPost,
+				"/api/model-evaluations/"+created.ID+"/cancel",
+				map[string]any{"expected_version": active.Version},
+			)
+			if cancel.Code != http.StatusConflict {
+				break
+			}
+		}
 		if cancel.Code != http.StatusAccepted {
 			t.Fatalf("cancel status=%d body=%s", cancel.Code, cancel.Body.String())
 		}
@@ -1332,7 +1356,8 @@ func TestRepositoryModelEvaluationResumeSkipsDurableJudgedBatch(t *testing.T) {
 		map[string]any{"expected_version": ready.Version},
 	)
 	failed := waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusFailed)
-	if len(failed.Checkpoint.Batches) != 1 || batchRuns != 1 || analysisRuns != 1 {
+	if len(failed.Checkpoint.Batches) != len(failed.WorkSizingPlan) ||
+		batchRuns != len(failed.WorkSizingPlan) || analysisRuns != 1 {
 		t.Fatalf("first attempt batches=%d analyses=%d checkpoint=%#v", batchRuns, analysisRuns, failed.Checkpoint)
 	}
 	analysisFails = false
@@ -1347,7 +1372,7 @@ func TestRepositoryModelEvaluationResumeSkipsDurableJudgedBatch(t *testing.T) {
 		t.Fatalf("resume status=%d body=%s", resume.Code, resume.Body.String())
 	}
 	waitRepositoryModelEvaluationStatus(t, handler, created.ID, repoeval.StatusCompleted)
-	if batchRuns != 1 || analysisRuns != 2 {
+	if batchRuns != len(failed.WorkSizingPlan) || analysisRuns != 2 {
 		t.Fatalf("resume reran durable work: batches=%d analyses=%d", batchRuns, analysisRuns)
 	}
 }
@@ -1876,6 +1901,134 @@ func TestRepositoryModelEvaluationResidualOneShotBranches(t *testing.T) {
 	}
 	usageCancel()
 	controller.releaseActive(usageDraft.ID, usageToken)
+}
+
+func TestRepositoryModelEvaluationProfileSizingBatchesRespectBothLimits(t *testing.T) {
+	evaluation := repoeval.Evaluation{
+		ID:              "rme_" + strings.Repeat("a", 32),
+		CandidateModels: []string{"model-a", "model-b"},
+		WorkSizingPlan: []repoeval.WorkSizingPoint{
+			{ID: "small", Axis: repoeval.WorkSizingAxisFilesPerBatch, FilesPerBatch: 2, ContentBytesPerBatch: 10},
+			{ID: "configured", Axis: repoeval.WorkSizingAxisConfigured, FilesPerBatch: 3, ContentBytesPerBatch: 100},
+		},
+		Corpus: &repoeval.CorpusManifest{
+			InventoryHash: strings.Repeat("b", 64),
+			Files: []repoeval.CorpusFile{
+				{CandidateID: "one", SizeBytes: 4},
+				{CandidateID: "two", SizeBytes: 5},
+				{CandidateID: "three", SizeBytes: 20},
+			},
+		},
+	}
+	batches := repositoryModelEvaluationBatches(evaluation)
+	if len(batches) != 3 || batches[0].point.ID != "small" || len(batches[0].files) != 2 ||
+		batches[1].point.ID != "small" || len(batches[1].files) != 1 ||
+		batches[2].point.ID != "configured" || len(batches[2].files) != 3 ||
+		batches[0].id == batches[2].id {
+		t.Fatalf("sizing batches=%#v", batches)
+	}
+	evaluation.Checkpoint.Batches = []repoeval.BatchCheckpoint{{
+		ID: "done-small", WorkSizingPointID: "small", CandidateIDs: []string{"one", "two"},
+		Candidates: map[string]repoeval.BatchCandidateCheckpoint{
+			"model-a": {CompletedCandidateIDs: []string{"one", "two"}},
+			"model-b": {CompletedCandidateIDs: []string{"one", "two"}},
+		},
+	}}
+	pending := repositoryModelEvaluationPendingBatches(evaluation)
+	if len(pending) != 2 || pending[0].point.ID != "small" ||
+		!slices.Equal(pending[0].ids, []string{"three"}) || pending[1].point.ID != "configured" {
+		t.Fatalf("point-scoped pending batches=%#v", pending)
+	}
+}
+
+func TestRepositoryModelEvaluationWorkSizingStatisticsAndWeightedTokens(t *testing.T) {
+	point := repoeval.WorkSizingPoint{
+		ID: "configured", Axis: repoeval.WorkSizingAxisConfigured,
+		FilesPerBatch: 1, ContentBytesPerBatch: 1024,
+	}
+	checkpoint := func(id, candidateID string, overall float64, confirmed, unsupported int) repoeval.BatchCheckpoint {
+		observedBytes := int64(512)
+		if id == "batch-one" {
+			observedBytes = 0
+		}
+		return repoeval.BatchCheckpoint{
+			ID: id, WorkSizingPointID: point.ID, CandidateIDs: []string{candidateID},
+			Candidates: map[string]repoeval.BatchCandidateCheckpoint{
+				"model-a": {
+					CompletedCandidateIDs: []string{candidateID}, Attempts: 1, Successes: 1,
+					ObservedFilesTotal: 1, ObservedFilesMin: 1, ObservedFilesMax: 1,
+					ObservedContentBytesTotal: observedBytes, ObservedContentBytesMin: observedBytes,
+					ObservedContentBytesMax: observedBytes,
+				},
+			},
+			MappingJSON: `[{"candidateId":"candidate-001","modelAlias":"model-a"}]`,
+			JudgeJSON: fmt.Sprintf(
+				`{"evaluations":[{"candidateId":"candidate-001","correctness":%[1]f,"evidence":%[1]f,"coverage":%[1]f,"actionability":%[1]f,"overall":%[1]f,"confirmedClaims":%d,"unsupportedClaims":%d}]}`,
+				overall,
+				confirmed,
+				unsupported,
+			),
+		}
+	}
+	evaluation := repoeval.Evaluation{
+		CandidateModels: []string{"model-a"},
+		WorkSizingPlan:  []repoeval.WorkSizingPoint{point},
+		WorkSizingUsage: map[string]map[string]repoeval.Usage{
+			point.ID: {
+				"model-a": {
+					Requests: 2, InputTokens: 100, CachedInputTokens: 40,
+					OutputTokens: 20, ReasoningTokens: 999,
+				},
+			},
+		},
+		WorkSizingConcreteModels: map[string]map[string]map[string]int{
+			point.ID: {"model-a": {"openai/gpt-a": 2}},
+		},
+		Corpus: &repoeval.CorpusManifest{Files: []repoeval.CorpusFile{
+			{CandidateID: "one", SizeBytes: 512},
+			{CandidateID: "two", SizeBytes: 512},
+		}},
+		Checkpoint: repoeval.Checkpoint{Batches: []repoeval.BatchCheckpoint{
+			checkpoint("batch-one", "one", 90, 2, 1),
+			checkpoint("batch-two", "two", 80, 1, 2),
+		}},
+	}
+	results := repositoryModelEvaluationWorkSizingResults(evaluation)
+	if len(results) != 1 {
+		t.Fatalf("sizing results=%#v", results)
+	}
+	result := results[0]
+	overall := result.Scores["overall"]
+	if result.Completion != repoeval.ModelCompletionCompleted || result.FilesAnalyzed != 2 ||
+		result.BytesAnalyzed != 1024 || result.Attempts != 2 || result.Successes != 2 ||
+		result.BatchSamples != 2 || result.ObservedMinFilesPerBatch != 1 ||
+		result.ObservedMinContentBytesPerBatch != 0 ||
+		result.ObservedMaxContentBytesPerBatch != 512 || overall.Samples != 2 ||
+		math.Abs(overall.WeightedMean-85) > 0.0001 || math.Abs(overall.StandardDeviation-5) > 0.0001 ||
+		result.EffectiveTokens != 84 || result.EffectiveTokensPerKiB == nil ||
+		math.Abs(*result.EffectiveTokensPerKiB-84) > 0.0001 ||
+		result.ConfirmedFindings != 3 || result.UnsupportedClaims != 3 {
+		t.Fatalf("weighted sizing result=%#v", result)
+	}
+	if !reflect.DeepEqual(result.ConcreteModels, map[string]int{"openai/gpt-a": 2}) {
+		t.Fatalf("point concrete models=%#v", result.ConcreteModels)
+	}
+	evaluation.Checkpoint.ConcreteModels = map[string]map[string]int{
+		"model-a": {"openai/other-point": 99},
+	}
+	rows, _, err := repositoryModelEvaluationComparisons(evaluation, map[string]any{
+		"comparisons": []map[string]any{{
+			"modelAlias":   "model-a",
+			"overallScore": 85,
+			"scores":       map[string]float64{"overall": 85},
+		}},
+	})
+	if err != nil || len(rows) != 1 || !reflect.DeepEqual(
+		rows[0].ConcreteModels,
+		map[string]int{"openai/gpt-a": 2},
+	) {
+		t.Fatalf("configured comparison concrete models=%#v err=%v", rows, err)
+	}
 }
 
 func repositoryModelEvaluationCreateRequest(repository string) repoeval.CreateRequest {

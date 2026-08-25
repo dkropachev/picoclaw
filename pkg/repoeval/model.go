@@ -231,6 +231,88 @@ type Usage struct {
 	EstimatedCostUSD  *float64 `json:"estimated_cost_usd,omitempty"`
 }
 
+// ProfileSnapshot freezes the reusable repository-review policy that defines a
+// profile-backed evaluation. It deliberately contains no credentials, mutable
+// runtime state, or budget/account telemetry.
+type ProfileSnapshot struct {
+	ID                      string `json:"id"`
+	Version                 int64  `json:"version"`
+	Name                    string `json:"name"`
+	ReviewerModel           string `json:"reviewer_model"`
+	AccountRef              string `json:"account_ref,omitempty"`
+	ReviewFocus             string `json:"review_focus"`
+	Focus                   Focus  `json:"focus"`
+	MaxFilesPerBatch        int    `json:"max_files_per_batch"`
+	MaxContentBytesPerBatch int64  `json:"max_content_bytes_per_batch"`
+	MaxParallelChildren     int    `json:"max_parallel_children"`
+}
+
+type WorkSizingAxis string
+
+const (
+	WorkSizingAxisConfigured           WorkSizingAxis = "configured"
+	WorkSizingAxisFilesPerBatch        WorkSizingAxis = "files_per_batch"
+	WorkSizingAxisContentBytesPerBatch WorkSizingAxis = "content_bytes_per_batch"
+)
+
+func (axis WorkSizingAxis) Valid() bool {
+	switch axis {
+	case WorkSizingAxisConfigured, WorkSizingAxisFilesPerBatch, WorkSizingAxisContentBytesPerBatch:
+		return true
+	default:
+		return false
+	}
+}
+
+// WorkSizingPoint is one immutable requested workload shape in a profile-backed
+// probe. Observed child-call sizes are recorded separately because file sizes
+// and unavailable content can prevent a request from attaining this ceiling.
+type WorkSizingPoint struct {
+	ID                   string         `json:"id"`
+	Axis                 WorkSizingAxis `json:"axis"`
+	FilesPerBatch        int            `json:"files_per_batch"`
+	ContentBytesPerBatch int64          `json:"content_bytes_per_batch"`
+}
+
+type WorkSizingScoreStats struct {
+	Samples           int     `json:"samples"`
+	WeightedMean      float64 `json:"weighted_mean"`
+	Minimum           float64 `json:"minimum"`
+	Maximum           float64 `json:"maximum"`
+	StandardDeviation float64 `json:"standard_deviation"`
+}
+
+// WorkSizingModelResult is the bounded native aggregate for one model at one
+// requested sizing point. Usage contains candidate calls only; shared selector,
+// judge, and analyzer calls remain in Evaluation.Usage.
+type WorkSizingModelResult struct {
+	PointID                          string                          `json:"point_id"`
+	Axis                             WorkSizingAxis                  `json:"axis"`
+	ModelAlias                       string                          `json:"model_alias"`
+	Completion                       ModelCompletion                 `json:"completion"`
+	FilesPerBatch                    int                             `json:"files_per_batch"`
+	ContentBytesPerBatch             int64                           `json:"content_bytes_per_batch"`
+	BatchSamples                     int                             `json:"batch_samples"`
+	FilesAnalyzed                    int                             `json:"files_analyzed"`
+	BytesAnalyzed                    int64                           `json:"bytes_analyzed"`
+	Attempts                         int                             `json:"attempts"`
+	Successes                        int                             `json:"successes"`
+	Failures                         int                             `json:"failures"`
+	ObservedMinFilesPerBatch         int                             `json:"observed_min_files_per_batch"`
+	ObservedMaxFilesPerBatch         int                             `json:"observed_max_files_per_batch"`
+	ObservedMeanFilesPerBatch        float64                         `json:"observed_mean_files_per_batch"`
+	ObservedMinContentBytesPerBatch  int64                           `json:"observed_min_content_bytes_per_batch"`
+	ObservedMaxContentBytesPerBatch  int64                           `json:"observed_max_content_bytes_per_batch"`
+	ObservedMeanContentBytesPerBatch float64                         `json:"observed_mean_content_bytes_per_batch"`
+	Scores                           map[string]WorkSizingScoreStats `json:"scores"`
+	ConfirmedFindings                int                             `json:"confirmed_findings"`
+	UnsupportedClaims                int                             `json:"unsupported_claims"`
+	Usage                            Usage                           `json:"usage"`
+	ConcreteModels                   map[string]int                  `json:"concrete_models,omitempty"`
+	EffectiveTokens                  float64                         `json:"effective_tokens"`
+	EffectiveTokensPerKiB            *float64                        `json:"effective_tokens_per_kib,omitempty"`
+}
+
 type ModelStats struct {
 	FilesSelected  int        `json:"files_selected"`
 	FilesCompleted int        `json:"files_completed"`
@@ -248,10 +330,16 @@ type ModelStats struct {
 // child-call outcomes for one candidate alias in a judged batch. It is the
 // durable task boundary used to resume only missing alias/file pairs.
 type BatchCandidateCheckpoint struct {
-	CompletedCandidateIDs []string `json:"completed_candidate_ids"`
-	Attempts              int      `json:"attempts"`
-	Successes             int      `json:"successes"`
-	Failures              int      `json:"failures"`
+	CompletedCandidateIDs     []string `json:"completed_candidate_ids"`
+	Attempts                  int      `json:"attempts"`
+	Successes                 int      `json:"successes"`
+	Failures                  int      `json:"failures"`
+	ObservedFilesTotal        int      `json:"observed_files_total,omitempty"`
+	ObservedFilesMin          int      `json:"observed_files_min,omitempty"`
+	ObservedFilesMax          int      `json:"observed_files_max,omitempty"`
+	ObservedContentBytesTotal int64    `json:"observed_content_bytes_total,omitempty"`
+	ObservedContentBytesMin   int64    `json:"observed_content_bytes_min,omitempty"`
+	ObservedContentBytesMax   int64    `json:"observed_content_bytes_max,omitempty"`
 }
 
 // ClaimDisposition is the judge's diagnosis-only assessment of one candidate
@@ -288,6 +376,7 @@ type ModelClaim struct {
 // repository files, and provider payloads never enter the evaluation store.
 type BatchCheckpoint struct {
 	ID                 string                              `json:"id"`
+	WorkSizingPointID  string                              `json:"work_sizing_point_id,omitempty"`
 	CandidateIDs       []string                            `json:"candidate_ids"`
 	Candidates         map[string]BatchCandidateCheckpoint `json:"candidates,omitempty"`
 	ClaimLedger        map[string][]ModelClaim             `json:"claim_ledger,omitempty"`
@@ -353,32 +442,37 @@ type ModelComparison struct {
 }
 
 type Evaluation struct {
-	SchemaVersion           int                   `json:"schema_version"`
-	ID                      string                `json:"id"`
-	Version                 int64                 `json:"version"`
-	Status                  Status                `json:"status"`
-	OneShot                 bool                  `json:"one_shot,omitempty"`
-	Repository              string                `json:"repository"`
-	Ref                     string                `json:"ref"`
-	CandidateModels         []string              `json:"candidate_models"`
-	SelectorModelAlias      string                `json:"selector_model_alias"`
-	JudgeModelAlias         string                `json:"judge_model_alias"`
-	Focus                   Focus                 `json:"focus"`
-	DefaultFilesPerLanguage int                   `json:"default_files_per_language"`
-	FilesPerLanguage        map[string]int        `json:"files_per_language"`
-	Corpus                  *CorpusManifest       `json:"corpus,omitempty"`
-	Progress                Progress              `json:"progress"`
-	Usage                   Usage                 `json:"usage"`
-	ModelStats              map[string]ModelStats `json:"model_stats"`
-	Checkpoint              Checkpoint            `json:"checkpoint,omitempty"`
-	Comparisons             []ModelComparison     `json:"comparisons"`
-	Warnings                []string              `json:"warnings"`
-	RunIDs                  []string              `json:"run_ids"`
-	Failure                 string                `json:"failure,omitempty"`
-	CreatedAt               time.Time             `json:"created_at"`
-	UpdatedAt               time.Time             `json:"updated_at"`
-	StartedAt               *time.Time            `json:"started_at,omitempty"`
-	FinishedAt              *time.Time            `json:"finished_at,omitempty"`
+	SchemaVersion            int                                  `json:"schema_version"`
+	ID                       string                               `json:"id"`
+	Version                  int64                                `json:"version"`
+	Status                   Status                               `json:"status"`
+	OneShot                  bool                                 `json:"one_shot,omitempty"`
+	Repository               string                               `json:"repository"`
+	Ref                      string                               `json:"ref"`
+	CandidateModels          []string                             `json:"candidate_models"`
+	SelectorModelAlias       string                               `json:"selector_model_alias"`
+	JudgeModelAlias          string                               `json:"judge_model_alias"`
+	Focus                    Focus                                `json:"focus"`
+	Profile                  *ProfileSnapshot                     `json:"profile,omitempty"`
+	DefaultFilesPerLanguage  int                                  `json:"default_files_per_language"`
+	FilesPerLanguage         map[string]int                       `json:"files_per_language"`
+	WorkSizingPlan           []WorkSizingPoint                    `json:"work_sizing_plan,omitempty"`
+	WorkSizingUsage          map[string]map[string]Usage          `json:"work_sizing_usage,omitempty"`
+	WorkSizingConcreteModels map[string]map[string]map[string]int `json:"work_sizing_concrete_models,omitempty"`
+	WorkSizingResults        []WorkSizingModelResult              `json:"work_sizing_results,omitempty"`
+	Corpus                   *CorpusManifest                      `json:"corpus,omitempty"`
+	Progress                 Progress                             `json:"progress"`
+	Usage                    Usage                                `json:"usage"`
+	ModelStats               map[string]ModelStats                `json:"model_stats"`
+	Checkpoint               Checkpoint                           `json:"checkpoint,omitempty"`
+	Comparisons              []ModelComparison                    `json:"comparisons"`
+	Warnings                 []string                             `json:"warnings"`
+	RunIDs                   []string                             `json:"run_ids"`
+	Failure                  string                               `json:"failure,omitempty"`
+	CreatedAt                time.Time                            `json:"created_at"`
+	UpdatedAt                time.Time                            `json:"updated_at"`
+	StartedAt                *time.Time                           `json:"started_at,omitempty"`
+	FinishedAt               *time.Time                           `json:"finished_at,omitempty"`
 }
 
 func (evaluation Evaluation) RestartDirective() RecoveryDirective {
@@ -393,14 +487,16 @@ func (evaluation Evaluation) LatestRunID() string {
 }
 
 type CreateRequest struct {
-	Repository              string         `json:"repository"`
-	Ref                     string         `json:"ref"`
-	CandidateModels         []string       `json:"candidate_models"`
-	SelectorModelAlias      string         `json:"selector_model_alias"`
-	JudgeModelAlias         string         `json:"judge_model_alias"`
-	Focus                   Focus          `json:"focus"`
-	DefaultFilesPerLanguage int            `json:"default_files_per_language,omitempty"`
-	FilesPerLanguage        map[string]int `json:"files_per_language,omitempty"`
-	OneShot                 bool           `json:"-"`
-	InitialRunID            string         `json:"-"`
+	Repository              string            `json:"repository"`
+	Ref                     string            `json:"ref"`
+	CandidateModels         []string          `json:"candidate_models"`
+	SelectorModelAlias      string            `json:"selector_model_alias"`
+	JudgeModelAlias         string            `json:"judge_model_alias"`
+	Focus                   Focus             `json:"focus"`
+	Profile                 *ProfileSnapshot  `json:"profile,omitempty"`
+	DefaultFilesPerLanguage int               `json:"default_files_per_language,omitempty"`
+	FilesPerLanguage        map[string]int    `json:"files_per_language,omitempty"`
+	WorkSizingPlan          []WorkSizingPoint `json:"-"`
+	OneShot                 bool              `json:"-"`
+	InitialRunID            string            `json:"-"`
 }

@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/repoeval"
 )
 
@@ -29,9 +31,26 @@ var (
 
 type repositoryModelEvaluationPatchRequest struct {
 	ExpectedVersion         int64           `json:"expected_version"`
+	ProfileID               *string         `json:"profile_id,omitempty"`
 	Repository              *string         `json:"repository,omitempty"`
 	Ref                     *string         `json:"ref,omitempty"`
 	CandidateModels         *[]string       `json:"candidate_models,omitempty"`
+	SelectorModelAlias      *string         `json:"selector_model_alias,omitempty"`
+	JudgeModelAlias         *string         `json:"judge_model_alias,omitempty"`
+	Focus                   *repoeval.Focus `json:"focus,omitempty"`
+	DefaultFilesPerLanguage *int            `json:"default_files_per_language,omitempty"`
+	FilesPerLanguage        *map[string]int `json:"files_per_language,omitempty"`
+}
+
+// repositoryModelEvaluationCreateAPIRequest keeps the public profile-driven
+// admission contract separate from the fully materialized durable request.
+// Deprecated custom fields are decoded only so admission can reject them with a
+// clear profile-driven error; existing durable legacy evaluations remain readable.
+type repositoryModelEvaluationCreateAPIRequest struct {
+	Repository              string          `json:"repository"`
+	Ref                     string          `json:"ref,omitempty"`
+	ProfileID               string          `json:"profile_id,omitempty"`
+	CandidateModels         []string        `json:"candidate_models"`
 	SelectorModelAlias      *string         `json:"selector_model_alias,omitempty"`
 	JudgeModelAlias         *string         `json:"judge_model_alias,omitempty"`
 	Focus                   *repoeval.Focus `json:"focus,omitempty"`
@@ -67,6 +86,20 @@ type repositoryModelEvaluationRepositoryOption struct {
 	ID         string `json:"id"`
 	Repository string `json:"repository"`
 	Label      string `json:"label"`
+}
+
+type repositoryModelEvaluationProfileOption struct {
+	ID                      string         `json:"id"`
+	Version                 int64          `json:"version"`
+	Name                    string         `json:"name"`
+	ReviewerModel           string         `json:"reviewer_model"`
+	AccountRef              string         `json:"account_ref,omitempty"`
+	ReviewFocus             string         `json:"review_focus"`
+	Focus                   repoeval.Focus `json:"focus"`
+	MaxFilesPerBatch        int            `json:"max_files_per_batch"`
+	MaxContentBytesPerBatch int64          `json:"max_content_bytes_per_batch"`
+	MaxParallelChildren     int            `json:"max_parallel_children"`
+	AvailableModels         []string       `json:"available_models"`
 }
 
 func (h *Handler) registerRepositoryModelEvaluationRoutes(mux *http.ServeMux) {
@@ -121,7 +154,7 @@ func (h *Handler) handleCreateRepositoryModelEvaluation(w http.ResponseWriter, r
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
-	request, err := decodeRepositoryModelEvaluationCreateRequest(r)
+	payload, err := decodeRepositoryModelEvaluationCreateAPIRequest(r)
 	if err != nil {
 		writeRepositoryModelEvaluationError(w, err)
 		return
@@ -131,13 +164,9 @@ func (h *Handler) handleCreateRepositoryModelEvaluation(w http.ResponseWriter, r
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
-	if aliasErr := validateRepositoryModelEvaluationAliases(
-		cfg,
-		request.CandidateModels,
-		request.SelectorModelAlias,
-		request.JudgeModelAlias,
-	); aliasErr != nil {
-		writeRepositoryModelEvaluationError(w, aliasErr)
+	request, err := h.materializeRepositoryModelEvaluationCreateRequest(r.Context(), cfg, payload)
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
 	created, err := store.Create(r.Context(), request)
@@ -157,7 +186,17 @@ func (h *Handler) handleRunRepositoryModelEvaluation(w http.ResponseWriter, r *h
 		writeRepositoryModelEvaluationError(w, err)
 		return
 	}
-	request, err := decodeRepositoryModelEvaluationCreateRequest(r)
+	payload, err := decodeRepositoryModelEvaluationCreateAPIRequest(r)
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	_, cfg, err := h.repositoryModelEvaluationStore()
+	if err != nil {
+		writeRepositoryModelEvaluationError(w, err)
+		return
+	}
+	request, err := h.materializeRepositoryModelEvaluationCreateRequest(r.Context(), cfg, payload)
 	if err != nil {
 		writeRepositoryModelEvaluationError(w, err)
 		return
@@ -179,17 +218,237 @@ func (h *Handler) handleRunRepositoryModelEvaluation(w http.ResponseWriter, r *h
 	)
 }
 
-func decodeRepositoryModelEvaluationCreateRequest(r *http.Request) (repoeval.CreateRequest, error) {
-	var request repoeval.CreateRequest
+func decodeRepositoryModelEvaluationCreateAPIRequest(
+	r *http.Request,
+) (repositoryModelEvaluationCreateAPIRequest, error) {
+	var request repositoryModelEvaluationCreateAPIRequest
 	if err := decodeRepositoryModelEvaluationRequest(r, &request); err != nil {
-		return repoeval.CreateRequest{}, err
+		return repositoryModelEvaluationCreateAPIRequest{}, err
 	}
 	normalizedRepository, err := normalizeRepositoryModelEvaluationRepository(r.Context(), request.Repository)
 	if err != nil {
-		return repoeval.CreateRequest{}, err
+		return repositoryModelEvaluationCreateAPIRequest{}, err
 	}
 	request.Repository = normalizedRepository
 	return request, nil
+}
+
+func (h *Handler) materializeRepositoryModelEvaluationCreateRequest(
+	ctx context.Context,
+	cfg *config.Config,
+	payload repositoryModelEvaluationCreateAPIRequest,
+) (repoeval.CreateRequest, error) {
+	profileID := strings.TrimSpace(payload.ProfileID)
+	if profileID == "" {
+		return repoeval.CreateRequest{}, fmt.Errorf(
+			"%w: profile_id is required",
+			repoeval.ErrInvalidEvaluation,
+		)
+	}
+	if payload.Focus != nil || payload.DefaultFilesPerLanguage != nil || payload.FilesPerLanguage != nil ||
+		payload.SelectorModelAlias != nil || payload.JudgeModelAlias != nil {
+		return repoeval.CreateRequest{}, fmt.Errorf(
+			"%w: profile-driven probes do not accept custom scope, quota, selector, or judge options",
+			repoeval.ErrInvalidEvaluation,
+		)
+	}
+	store, err := h.repositoryReviewStore()
+	if err != nil {
+		return repoeval.CreateRequest{}, err
+	}
+	profile, found, err := store.GetProfile(ctx, profileID)
+	if err != nil {
+		return repoeval.CreateRequest{}, err
+	}
+	if !found {
+		return repoeval.CreateRequest{}, os.ErrNotExist
+	}
+	if profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > 128 {
+		return repoeval.CreateRequest{}, fmt.Errorf(
+			"%w: profile files per batch must be between 1 and 128 for a model probe",
+			repoeval.ErrInvalidEvaluation,
+		)
+	}
+	focus := repositoryModelEvaluationFocusFromReviewProfile(profile)
+	effectiveAccount := repositoryReviewEffectiveAccountRef(cfg, profile.AccountRef)
+	candidates := normalizeRepositoryModelEvaluationAliases(payload.CandidateModels)
+	if len(candidates) < 2 || !slices.Contains(candidates, strings.TrimSpace(profile.ReviewerModel)) {
+		return repoeval.CreateRequest{}, fmt.Errorf(
+			"%w: candidate models must include the selected profile reviewer and at least one comparison model",
+			repoeval.ErrInvalidEvaluation,
+		)
+	}
+	available := repositoryModelEvaluationAvailableAliasesForAccount(cfg, effectiveAccount)
+	for _, alias := range candidates {
+		if !available[alias] {
+			return repoeval.CreateRequest{}, fmt.Errorf(
+				"%w: %q is unavailable for profile account %q",
+				errRepositoryModelEvaluationUnavailableModel,
+				alias,
+				effectiveAccount,
+			)
+		}
+	}
+	selector := strings.TrimSpace(profile.ReviewerModel)
+	judge := repositoryModelEvaluationAutomaticJudge(cfg, effectiveAccount, candidates, selector)
+	snapshot := &repoeval.ProfileSnapshot{
+		ID:                      profile.ID,
+		Version:                 profile.Version,
+		Name:                    profile.Name,
+		ReviewerModel:           selector,
+		AccountRef:              effectiveAccount,
+		ReviewFocus:             profile.ReviewFocus,
+		Focus:                   focus,
+		MaxFilesPerBatch:        profile.MaxFilesPerRun,
+		MaxContentBytesPerBatch: profile.MaxContentBytes,
+		MaxParallelChildren:     profile.MaxParallelChildren,
+	}
+	return repoeval.CreateRequest{
+		Repository:              payload.Repository,
+		Ref:                     payload.Ref,
+		CandidateModels:         candidates,
+		SelectorModelAlias:      selector,
+		JudgeModelAlias:         judge,
+		Focus:                   focus,
+		DefaultFilesPerLanguage: repoeval.DefaultFilesPerLanguage,
+		FilesPerLanguage:        map[string]int{},
+		Profile:                 snapshot,
+		WorkSizingPlan: repositoryModelEvaluationWorkSizingPlan(
+			profile.MaxFilesPerRun,
+			profile.MaxContentBytes,
+		),
+	}, nil
+}
+
+func normalizeRepositoryModelEvaluationAliases(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		alias := strings.TrimSpace(raw)
+		if alias == "" {
+			continue
+		}
+		if _, duplicate := seen[alias]; duplicate {
+			continue
+		}
+		seen[alias] = struct{}{}
+		out = append(out, alias)
+	}
+	return out
+}
+
+func repositoryModelEvaluationFocusFromReviewProfile(
+	profile repoaudit.RepositoryReviewProfile,
+) repoeval.Focus {
+	codeTypes := make([]repoeval.CodeType, 0, len(profile.ScopePolicy.CodeTypes))
+	for _, codeType := range profile.ScopePolicy.CodeTypes {
+		codeTypes = append(codeTypes, repoeval.CodeType(codeType))
+	}
+	return repoeval.Focus{
+		CodeTypes:      codeTypes,
+		IncludeFolders: append([]string(nil), profile.ScopePolicy.IncludeFolders...),
+		ExcludeFolders: append([]string(nil), profile.ScopePolicy.ExcludeFolders...),
+		FreeText:       profile.ScopePolicy.FreeText,
+	}
+}
+
+func repositoryModelEvaluationAvailableAliasesForAccount(
+	cfg *config.Config,
+	accountRef string,
+) map[string]bool {
+	available := make(map[string]bool)
+	for _, option := range repositoryReviewModelOptions(cfg) {
+		alias := strings.TrimSpace(option.Alias)
+		if alias == "" || !option.Available || option.BlockedReason != "" ||
+			!repositoryModelEvaluationAliasTransportSafe(alias) ||
+			!repositoryReviewAliasAvailableForAccount(cfg, alias, accountRef) {
+			continue
+		}
+		available[alias] = true
+	}
+	return available
+}
+
+func repositoryModelEvaluationAutomaticJudge(
+	cfg *config.Config,
+	accountRef string,
+	candidates []string,
+	fallback string,
+) string {
+	selected := make(map[string]struct{}, len(candidates))
+	for _, alias := range candidates {
+		selected[alias] = struct{}{}
+	}
+	available := repositoryModelEvaluationAvailableAliasesForAccount(cfg, accountRef)
+	options := repositoryReviewModelOptions(cfg)
+	for _, preferDefault := range []bool{true, false} {
+		for _, option := range options {
+			alias := strings.TrimSpace(option.Alias)
+			if option.Default != preferDefault || !available[alias] {
+				continue
+			}
+			if _, candidate := selected[alias]; !candidate {
+				return alias
+			}
+		}
+	}
+	if available[fallback] {
+		return fallback
+	}
+	return ""
+}
+
+func repositoryModelEvaluationWorkSizingPlan(
+	maximumFiles int,
+	maximumContentBytes int64,
+) []repoeval.WorkSizingPoint {
+	fileValues := repositoryModelEvaluationSizingLadder(int64(maximumFiles))
+	contentValues := repositoryModelEvaluationSizingLadder(maximumContentBytes)
+	points := make([]repoeval.WorkSizingPoint, 0, len(fileValues)+len(contentValues)-1)
+	for _, value := range fileValues {
+		if value == int64(maximumFiles) {
+			continue
+		}
+		points = append(points, repoeval.WorkSizingPoint{
+			ID:                   fmt.Sprintf("wsp_files_%d_bytes_%d", value, maximumContentBytes),
+			Axis:                 repoeval.WorkSizingAxisFilesPerBatch,
+			FilesPerBatch:        int(value),
+			ContentBytesPerBatch: maximumContentBytes,
+		})
+	}
+	for _, value := range contentValues {
+		if value == maximumContentBytes {
+			continue
+		}
+		points = append(points, repoeval.WorkSizingPoint{
+			ID:                   fmt.Sprintf("wsp_files_%d_bytes_%d", maximumFiles, value),
+			Axis:                 repoeval.WorkSizingAxisContentBytesPerBatch,
+			FilesPerBatch:        maximumFiles,
+			ContentBytesPerBatch: value,
+		})
+	}
+	points = append(points, repoeval.WorkSizingPoint{
+		ID:                   fmt.Sprintf("wsp_files_%d_bytes_%d", maximumFiles, maximumContentBytes),
+		Axis:                 repoeval.WorkSizingAxisConfigured,
+		FilesPerBatch:        maximumFiles,
+		ContentBytesPerBatch: maximumContentBytes,
+	})
+	return points
+}
+
+func repositoryModelEvaluationSizingLadder(maximum int64) []int64 {
+	if maximum <= 0 {
+		return nil
+	}
+	values := []int64{(maximum + 3) / 4, (maximum + 1) / 2, maximum}
+	out := make([]int64, 0, len(values))
+	for _, value := range values {
+		value = max(int64(1), value)
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (h *Handler) handleGetRepositoryModelEvaluation(w http.ResponseWriter, r *http.Request) {
@@ -259,23 +518,47 @@ func (h *Handler) handlePatchRepositoryModelEvaluation(w http.ResponseWriter, r 
 		writeRepositoryModelEvaluationError(w, repoeval.ErrInvalidTransition)
 		return
 	}
-	proposed := repoeval.Clone(current)
-	applyRepositoryModelEvaluationPatch(&proposed, request)
-	if aliasErr := validateRepositoryModelEvaluationAliases(
-		cfg,
-		proposed.CandidateModels,
-		proposed.SelectorModelAlias,
-		proposed.JudgeModelAlias,
-	); aliasErr != nil {
-		writeRepositoryModelEvaluationError(w, aliasErr)
+	if request.ProfileID == nil {
+		writeRepositoryModelEvaluationError(
+			w,
+			fmt.Errorf(
+				"%w: profile_id is required when editing a model probe",
+				repoeval.ErrInvalidEvaluation,
+			),
+		)
 		return
 	}
+	proposed := repoeval.Clone(current)
+	applyRepositoryModelEvaluationPatch(&proposed, request)
+	if request.Focus != nil || request.SelectorModelAlias != nil || request.JudgeModelAlias != nil ||
+		request.DefaultFilesPerLanguage != nil || request.FilesPerLanguage != nil {
+		writeRepositoryModelEvaluationError(
+			w,
+			fmt.Errorf("%w: profile-driven probes do not accept custom options", repoeval.ErrInvalidEvaluation),
+		)
+		return
+	}
+	payload := repositoryModelEvaluationCreateAPIRequest{
+		Repository:      proposed.Repository,
+		Ref:             proposed.Ref,
+		ProfileID:       *request.ProfileID,
+		CandidateModels: append([]string(nil), proposed.CandidateModels...),
+	}
+	materialized, materializeErr := h.materializeRepositoryModelEvaluationCreateRequest(
+		r.Context(), cfg, payload,
+	)
+	if materializeErr != nil {
+		writeRepositoryModelEvaluationError(w, materializeErr)
+		return
+	}
+	applyRepositoryModelEvaluationMaterialized(&proposed, materialized)
 	updated, err := store.Update(
 		r.Context(),
 		current.ID,
 		request.ExpectedVersion,
 		func(candidate *repoeval.Evaluation) error {
 			applyRepositoryModelEvaluationPatch(candidate, request)
+			applyRepositoryModelEvaluationMaterialized(candidate, materialized)
 			return nil
 		},
 	)
@@ -288,6 +571,28 @@ func (h *Handler) handlePatchRepositoryModelEvaluation(w http.ResponseWriter, r 
 		http.StatusOK,
 		repositoryModelEvaluationDetail{Evaluation: projectRepositoryModelEvaluation(updated)},
 	)
+}
+
+func applyRepositoryModelEvaluationMaterialized(
+	evaluation *repoeval.Evaluation,
+	request repoeval.CreateRequest,
+) {
+	if evaluation == nil {
+		return
+	}
+	evaluation.Repository = request.Repository
+	evaluation.Ref = request.Ref
+	evaluation.CandidateModels = append([]string(nil), request.CandidateModels...)
+	evaluation.SelectorModelAlias = request.SelectorModelAlias
+	evaluation.JudgeModelAlias = request.JudgeModelAlias
+	evaluation.Focus = request.Focus
+	evaluation.Profile = request.Profile
+	evaluation.DefaultFilesPerLanguage = request.DefaultFilesPerLanguage
+	evaluation.FilesPerLanguage = make(map[string]int, len(request.FilesPerLanguage))
+	for language, limit := range request.FilesPerLanguage {
+		evaluation.FilesPerLanguage[language] = limit
+	}
+	evaluation.WorkSizingPlan = append([]repoeval.WorkSizingPoint(nil), request.WorkSizingPlan...)
 }
 
 func applyRepositoryModelEvaluationPatch(
@@ -575,6 +880,51 @@ func (h *Handler) handleRepositoryModelEvaluationOptions(w http.ResponseWriter, 
 			safeModels = append(safeModels, model)
 		}
 	}
+	profiles := make([]repositoryModelEvaluationProfileOption, 0)
+	reviewStore := repoaudit.NewStore(cfg.WorkspacePath())
+	storedProfiles, listErr := reviewStore.ListProfiles(r.Context())
+	if listErr != nil {
+		writeRepositoryModelEvaluationError(w, listErr)
+		return
+	}
+	for _, profile := range storedProfiles {
+		if profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > 128 {
+			continue
+		}
+		accountRef := repositoryReviewEffectiveAccountRef(cfg, profile.AccountRef)
+		availableSet := repositoryModelEvaluationAvailableAliasesForAccount(cfg, accountRef)
+		if !availableSet[strings.TrimSpace(profile.ReviewerModel)] {
+			continue
+		}
+		availableAliases := make([]string, 0, len(availableSet))
+		for _, model := range safeModels {
+			if availableSet[model.Alias] {
+				availableAliases = append(availableAliases, model.Alias)
+			}
+		}
+		if len(availableAliases) < 2 {
+			continue
+		}
+		profiles = append(profiles, repositoryModelEvaluationProfileOption{
+			ID:                      profile.ID,
+			Version:                 profile.Version,
+			Name:                    profile.Name,
+			ReviewerModel:           profile.ReviewerModel,
+			AccountRef:              accountRef,
+			ReviewFocus:             profile.ReviewFocus,
+			Focus:                   repositoryModelEvaluationFocusFromReviewProfile(profile),
+			MaxFilesPerBatch:        profile.MaxFilesPerRun,
+			MaxContentBytesPerBatch: profile.MaxContentBytes,
+			MaxParallelChildren:     profile.MaxParallelChildren,
+			AvailableModels:         availableAliases,
+		})
+	}
+	sort.Slice(profiles, func(i, j int) bool {
+		if profiles[i].Name == profiles[j].Name {
+			return profiles[i].ID < profiles[j].ID
+		}
+		return profiles[i].Name < profiles[j].Name
+	})
 	repositories := make([]repositoryModelEvaluationRepositoryOption, 0)
 	if manager, managerErr := h.gitWorkspaceManager(); managerErr == nil {
 		if stats, statsErr := manager.Stats(r.Context()); statsErr == nil {
@@ -612,8 +962,10 @@ func (h *Handler) handleRepositoryModelEvaluationOptions(w http.ResponseWriter, 
 	}
 	sort.Slice(repositories, func(i, j int) bool { return repositories[i].Label < repositories[j].Label })
 	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
-		"models":       safeModels,
-		"repositories": repositories,
+		"models":        safeModels,
+		"profiles":      profiles,
+		"profile_count": len(storedProfiles),
+		"repositories":  repositories,
 		"code_types": []repoeval.CodeType{
 			repoeval.CodeTypeHotpath,
 			repoeval.CodeTypeCode,
@@ -640,6 +992,39 @@ func validateRepositoryModelEvaluationAliases(cfg *config.Config, candidates []s
 		}
 		if alias == "" || !available[alias] {
 			return fmt.Errorf("%w: %q", errRepositoryModelEvaluationUnavailableModel, alias)
+		}
+		if index < len(candidates) {
+			if _, duplicate := seenCandidates[alias]; duplicate {
+				return fmt.Errorf("%w: duplicate candidate alias", repoeval.ErrInvalidEvaluation)
+			}
+			seenCandidates[alias] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateRepositoryModelEvaluationExecutionAliases(
+	cfg *config.Config,
+	candidates []string,
+	selector string,
+	judge string,
+	profile *repoeval.ProfileSnapshot,
+) error {
+	if profile == nil {
+		return validateRepositoryModelEvaluationAliases(cfg, candidates, selector, judge)
+	}
+	available := repositoryModelEvaluationAvailableAliasesForAccount(cfg, profile.AccountRef)
+	aliases := append(append([]string(nil), candidates...), selector, judge)
+	seenCandidates := make(map[string]struct{}, len(candidates))
+	for index, rawAlias := range aliases {
+		alias := strings.TrimSpace(rawAlias)
+		if !repositoryModelEvaluationAliasTransportSafe(alias) || !available[alias] {
+			return fmt.Errorf(
+				"%w: %q is unavailable for frozen profile account %q",
+				errRepositoryModelEvaluationUnavailableModel,
+				alias,
+				profile.AccountRef,
+			)
 		}
 		if index < len(candidates) {
 			if _, duplicate := seenCandidates[alias]; duplicate {
@@ -750,6 +1135,8 @@ func projectRepositoryModelEvaluation(evaluation repoeval.Evaluation) repoeval.E
 		projected.Corpus.Files = nil
 	}
 	projected.Checkpoint = repoeval.Checkpoint{}
+	projected.WorkSizingUsage = nil
+	projected.WorkSizingConcreteModels = nil
 	if len(projected.RunIDs) > 50 {
 		projected.RunIDs = append([]string(nil), projected.RunIDs[len(projected.RunIDs)-50:]...)
 	}

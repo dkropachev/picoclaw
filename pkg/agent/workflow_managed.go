@@ -1708,7 +1708,7 @@ func workflowManagedScopeReferences(scope []any) []any {
 		ref := make(map[string]any)
 		for _, key := range []string{
 			"id", "path", "fileHash", "blob_sha", "sizeBytes", "size_bytes",
-			"category", "mode", "selected", "contentComplete", "contentUnavailable",
+			"contentBytes", "contentPromptBytes", "category", "mode", "selected", "contentComplete", "contentUnavailable",
 			"reviewGroup",
 		} {
 			if value, exists := mapped[key]; exists {

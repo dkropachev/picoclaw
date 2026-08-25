@@ -328,7 +328,9 @@ jobs:
         with:
           action: freeze
           files: ${{ steps.plan.outputs.pendingFiles }}
-          max_content_bytes: ${{ steps.plan.outputs.maxContentBytes }}
+          max_file_content_bytes: 524288
+          max_group_files: ${{ inputs.max_files_per_run }}
+          max_group_content_bytes: ${{ steps.plan.outputs.maxContentBytes }}
       - id: release
         name: Release repository workspace after immutable freeze
         uses: tool/git_workspace
@@ -347,7 +349,7 @@ jobs:
           managed:
             mode: auto
             strategy: auto
-            max_items_per_chunk: 3
+            max_items_per_chunk: ${{ inputs.max_files_per_run }}
             max_tasks_per_chunk: 1
             max_parallel_children: ${{ inputs.max_parallel_children }}
             adaptive_chunking: false

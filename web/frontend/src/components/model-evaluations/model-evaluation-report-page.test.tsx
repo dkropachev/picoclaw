@@ -5,12 +5,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type {
   EvaluationComparison,
+  EvaluationWorkSizingResult,
   RepositoryModelEvaluation,
 } from "@/api/model-evaluations"
 import { getModelEvaluation } from "@/api/model-evaluations"
 
 import {
   buildModelEvaluationReportAnalysis,
+  modelEvaluationDegradationCeiling,
+  modelEvaluationEffectiveTokens,
+  modelEvaluationEffectiveTokensPerKiB,
+  modelEvaluationSizingPointAttained,
   positionModelEvaluationDonutSegments,
 } from "./model-evaluation-report-analysis"
 import { ModelEvaluationReportPage } from "./model-evaluation-report-page"
@@ -81,6 +86,109 @@ function comparison(
   }
 }
 
+function sizingResult(
+  input: Partial<EvaluationWorkSizingResult> &
+    Pick<
+      EvaluationWorkSizingResult,
+      | "point_id"
+      | "axis"
+      | "model_alias"
+      | "files_per_batch"
+      | "content_bytes_per_batch"
+    > & { overall: number },
+): EvaluationWorkSizingResult {
+  const files = input.files_per_batch
+  const bytes = input.content_bytes_per_batch
+  return {
+    point_id: input.point_id,
+    axis: input.axis,
+    model_alias: input.model_alias,
+    completion: input.completion ?? "completed",
+    files_per_batch: files,
+    content_bytes_per_batch: bytes,
+    batch_samples: input.batch_samples ?? 4,
+    files_analyzed: input.files_analyzed ?? 16,
+    bytes_analyzed: input.bytes_analyzed ?? 10_240,
+    attempts: input.attempts ?? 4,
+    successes: input.successes ?? 4,
+    failures: input.failures ?? 0,
+    observed_min_files_per_batch: input.observed_min_files_per_batch ?? files,
+    observed_max_files_per_batch: input.observed_max_files_per_batch ?? files,
+    observed_mean_files_per_batch: input.observed_mean_files_per_batch ?? files,
+    observed_min_content_bytes_per_batch:
+      input.observed_min_content_bytes_per_batch ?? bytes,
+    observed_max_content_bytes_per_batch:
+      input.observed_max_content_bytes_per_batch ?? bytes,
+    observed_mean_content_bytes_per_batch:
+      input.observed_mean_content_bytes_per_batch ?? bytes,
+    scores: input.scores ?? {
+      overall: {
+        samples: 4,
+        weighted_mean: input.overall,
+        minimum: input.overall - 1,
+        maximum: input.overall + 1,
+        standard_deviation: 0.75,
+      },
+    },
+    confirmed_findings: input.confirmed_findings ?? 6,
+    unsupported_claims: input.unsupported_claims ?? 1,
+    usage: input.usage ?? {
+      requests: 4,
+      input_tokens: 1_000,
+      cached_input_tokens: 500,
+      output_tokens: 100,
+      reasoning_tokens: 20,
+      duration_millis: 4_000,
+    },
+    concrete_models: input.concrete_models ?? { "openai/review": 4 },
+    effective_tokens: input.effective_tokens ?? 650,
+    effective_tokens_per_kib: input.effective_tokens_per_kib ?? 65,
+  }
+}
+
+const sizingResults = [
+  sizingResult({
+    point_id: "files-1",
+    axis: "files_per_batch",
+    model_alias: "review",
+    files_per_batch: 1,
+    content_bytes_per_batch: 131_072,
+    overall: 95,
+  }),
+  sizingResult({
+    point_id: "files-4",
+    axis: "files_per_batch",
+    model_alias: "review",
+    files_per_batch: 4,
+    content_bytes_per_batch: 131_072,
+    overall: 94,
+  }),
+  sizingResult({
+    point_id: "files-8",
+    axis: "files_per_batch",
+    model_alias: "review",
+    files_per_batch: 8,
+    content_bytes_per_batch: 131_072,
+    overall: 89,
+  }),
+  sizingResult({
+    point_id: "bytes-32k",
+    axis: "content_bytes_per_batch",
+    model_alias: "review",
+    files_per_batch: 8,
+    content_bytes_per_batch: 32_768,
+    overall: 95,
+  }),
+  sizingResult({
+    point_id: "bytes-128k",
+    axis: "content_bytes_per_batch",
+    model_alias: "review",
+    files_per_batch: 8,
+    content_bytes_per_batch: 131_072,
+    overall: 93,
+  }),
+]
+
 const completed: RepositoryModelEvaluation = {
   schema_version: 1,
   id: "rme_012d820e0d5cf890740e990be0bc3651",
@@ -94,6 +202,19 @@ const completed: RepositoryModelEvaluation = {
   focus: { code_types: ["code", "test"] },
   default_files_per_language: 20,
   files_per_language: {},
+  profile: {
+    id: "rrpf_production",
+    version: 4,
+    name: "Production bugs",
+    reviewer_model: "review",
+    account_ref: "primary",
+    review_focus: "Find concrete production defects.",
+    focus: { code_types: ["code", "test"] },
+    max_files_per_batch: 8,
+    max_content_bytes_per_batch: 131_072,
+    max_parallel_children: 3,
+  },
+  work_sizing_results: sizingResults,
   progress: {
     stage: "completed",
     languages: {
@@ -274,6 +395,140 @@ describe("model evaluation report analysis", () => {
     })
     expect(buildModelEvaluationReportAnalysis([partial]).winner).toBeUndefined()
   })
+
+  it("discounts cached tokens and finds only attained five-point degradation", () => {
+    expect(
+      modelEvaluationEffectiveTokens({
+        requests: 1,
+        input_tokens: 1_000,
+        cached_input_tokens: 500,
+        output_tokens: 100,
+        reasoning_tokens: 700,
+        duration_millis: 1,
+      }),
+    ).toBe(650)
+    expect(
+      modelEvaluationEffectiveTokensPerKiB(sizingResults[0]!.usage, 10_240),
+    ).toBe(65)
+    expect(
+      modelEvaluationDegradationCeiling(
+        sizingResults,
+        "review",
+        "files_per_batch",
+      ),
+    ).toMatchObject({ kind: "degraded", value: 4, degradedAt: 8 })
+    expect(
+      modelEvaluationDegradationCeiling(
+        sizingResults,
+        "review",
+        "content_bytes_per_batch",
+      ),
+    ).toMatchObject({ kind: "at_least", value: 131_072 })
+
+    const configured = sizingResult({
+      point_id: "configured",
+      axis: "configured",
+      model_alias: "review",
+      files_per_batch: 8,
+      content_bytes_per_batch: 131_072,
+      overall: 88,
+    })
+    expect(
+      modelEvaluationDegradationCeiling(
+        [sizingResults[0]!, sizingResults[1]!, configured],
+        "review",
+        "files_per_batch",
+      ),
+    ).toMatchObject({ kind: "degraded", value: 4, degradedAt: 8 })
+
+    configured.observed_max_files_per_batch = 7
+    const incomplete = sizingResult({
+      point_id: "files-16-partial",
+      axis: "files_per_batch",
+      model_alias: "review",
+      files_per_batch: 16,
+      content_bytes_per_batch: 131_072,
+      completion: "partial",
+      overall: 60,
+    })
+    expect(
+      modelEvaluationDegradationCeiling(
+        [sizingResults[0]!, sizingResults[1]!, configured, incomplete],
+        "review",
+        "files_per_batch",
+      ),
+    ).toMatchObject({ kind: "degraded", value: 4, degradedAt: 7 })
+
+    const underfilledContent = [
+      sizingResult({
+        point_id: "bytes-underfilled-small",
+        axis: "content_bytes_per_batch",
+        model_alias: "review",
+        files_per_batch: 8,
+        content_bytes_per_batch: 32_768,
+        observed_max_content_bytes_per_batch: 20_000,
+        overall: 95,
+      }),
+      sizingResult({
+        point_id: "bytes-underfilled-large",
+        axis: "content_bytes_per_batch",
+        model_alias: "review",
+        files_per_batch: 8,
+        content_bytes_per_batch: 131_072,
+        observed_max_content_bytes_per_batch: 50_000,
+        overall: 93,
+      }),
+    ]
+    expect(
+      modelEvaluationDegradationCeiling(
+        underfilledContent,
+        "review",
+        "content_bytes_per_batch",
+      ),
+    ).toMatchObject({ kind: "at_least", value: 50_000 })
+
+    const equalObservedWorkload = [
+      sizingResult({
+        point_id: "files-request-4",
+        axis: "files_per_batch",
+        model_alias: "review",
+        files_per_batch: 4,
+        content_bytes_per_batch: 131_072,
+        observed_max_files_per_batch: 2,
+        overall: 95,
+      }),
+      sizingResult({
+        point_id: "files-request-8",
+        axis: "files_per_batch",
+        model_alias: "review",
+        files_per_batch: 8,
+        content_bytes_per_batch: 131_072,
+        observed_max_files_per_batch: 2,
+        overall: 80,
+      }),
+    ]
+    expect(
+      modelEvaluationDegradationCeiling(
+        equalObservedWorkload,
+        "review",
+        "files_per_batch",
+      ),
+    ).toMatchObject({ kind: "at_least", value: 2 })
+
+    expect(
+      modelEvaluationSizingPointAttained(
+        sizingResult({
+          point_id: "oversized-single-file",
+          axis: "content_bytes_per_batch",
+          model_alias: "review",
+          files_per_batch: 8,
+          content_bytes_per_batch: 8_192,
+          observed_max_content_bytes_per_batch: 50_000,
+          overall: 99,
+        }),
+      ),
+    ).toBe(false)
+  })
 })
 
 describe("ModelEvaluationReportPage", () => {
@@ -302,6 +557,17 @@ describe("ModelEvaluationReportPage", () => {
       screen.getByRole("heading", { name: "Quality score comparison" }),
     ).toBeVisible()
     expect(screen.getByRole("img", { name: /Efficiency graph/i })).toBeVisible()
+    expect(
+      screen.getByRole("heading", { name: "Work-sizing quality ceilings" }),
+    ).toBeVisible()
+    expect(
+      screen.getByRole("heading", { name: "review work sizing" }),
+    ).toBeVisible()
+    expect(
+      screen.getByText(/First eligible observed workload at 8 files/),
+    ).toBeVisible()
+    expect(screen.getAllByText(/650 effective tokens/)[0]).toBeVisible()
+    expect(screen.getAllByText(/Concrete: openai\/review × 4/)[0]).toBeVisible()
     expect(
       screen.getByRole("img", { name: /selected files:.*cpp 20/i }),
     ).toBeVisible()

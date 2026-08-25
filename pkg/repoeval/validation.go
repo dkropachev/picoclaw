@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"path"
@@ -47,6 +48,9 @@ const (
 	maxCounter             = int64(1<<62 - 1)
 	maxBatchCheckpoints    = 1024
 	maxBatchEvidenceBytes  = 256 << 10
+	maxWorkSizingPoints    = 64
+	maxWorkSizingResults   = maxWorkSizingPoints * 8
+	maxWorkSizingContent   = int64(512 << 10)
 )
 
 var (
@@ -62,7 +66,21 @@ func Clone(evaluation Evaluation) Evaluation {
 	clone.Focus.CodeTypes = append([]CodeType(nil), evaluation.Focus.CodeTypes...)
 	clone.Focus.IncludeFolders = append([]string(nil), evaluation.Focus.IncludeFolders...)
 	clone.Focus.ExcludeFolders = append([]string(nil), evaluation.Focus.ExcludeFolders...)
+	clone.Profile = cloneProfileSnapshot(evaluation.Profile)
 	clone.FilesPerLanguage = cloneIntMap(evaluation.FilesPerLanguage)
+	clone.WorkSizingPlan = append([]WorkSizingPoint(nil), evaluation.WorkSizingPlan...)
+	clone.WorkSizingUsage = cloneWorkSizingUsage(evaluation.WorkSizingUsage)
+	clone.WorkSizingConcreteModels = cloneWorkSizingConcreteModels(evaluation.WorkSizingConcreteModels)
+	if evaluation.WorkSizingResults != nil {
+		clone.WorkSizingResults = make([]WorkSizingModelResult, len(evaluation.WorkSizingResults))
+		for index, result := range evaluation.WorkSizingResults {
+			clone.WorkSizingResults[index] = result
+			clone.WorkSizingResults[index].Scores = cloneWorkSizingScoreMap(result.Scores)
+			clone.WorkSizingResults[index].ConcreteModels = cloneIntMap(result.ConcreteModels)
+			clone.WorkSizingResults[index].Usage.EstimatedCostUSD = cloneFloat(result.Usage.EstimatedCostUSD)
+			clone.WorkSizingResults[index].EffectiveTokensPerKiB = cloneFloat(result.EffectiveTokensPerKiB)
+		}
+	}
 	clone.Corpus = cloneCorpus(evaluation.Corpus)
 	clone.Progress.Languages = cloneLanguageProgressMap(evaluation.Progress.Languages)
 	clone.Progress.ActiveChildren = append([]ActiveChildProgress(nil), evaluation.Progress.ActiveChildren...)
@@ -127,6 +145,59 @@ func Clone(evaluation Evaluation) Evaluation {
 	clone.RunIDs = append([]string(nil), evaluation.RunIDs...)
 	clone.StartedAt = cloneTime(evaluation.StartedAt)
 	clone.FinishedAt = cloneTime(evaluation.FinishedAt)
+	return clone
+}
+
+func cloneWorkSizingConcreteModels(
+	values map[string]map[string]map[string]int,
+) map[string]map[string]map[string]int {
+	if values == nil {
+		return nil
+	}
+	clone := make(map[string]map[string]map[string]int, len(values))
+	for pointID, byAlias := range values {
+		clone[pointID] = make(map[string]map[string]int, len(byAlias))
+		for alias, byModel := range byAlias {
+			clone[pointID][alias] = cloneIntMap(byModel)
+		}
+	}
+	return clone
+}
+
+func cloneProfileSnapshot(snapshot *ProfileSnapshot) *ProfileSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	clone := *snapshot
+	clone.Focus.CodeTypes = append([]CodeType(nil), snapshot.Focus.CodeTypes...)
+	clone.Focus.IncludeFolders = append([]string(nil), snapshot.Focus.IncludeFolders...)
+	clone.Focus.ExcludeFolders = append([]string(nil), snapshot.Focus.ExcludeFolders...)
+	return &clone
+}
+
+func cloneWorkSizingUsage(values map[string]map[string]Usage) map[string]map[string]Usage {
+	if values == nil {
+		return nil
+	}
+	clone := make(map[string]map[string]Usage, len(values))
+	for pointID, byModel := range values {
+		clone[pointID] = make(map[string]Usage, len(byModel))
+		for alias, usage := range byModel {
+			usage.EstimatedCostUSD = cloneFloat(usage.EstimatedCostUSD)
+			clone[pointID][alias] = usage
+		}
+	}
+	return clone
+}
+
+func cloneWorkSizingScoreMap(values map[string]WorkSizingScoreStats) map[string]WorkSizingScoreStats {
+	if values == nil {
+		return nil
+	}
+	clone := make(map[string]WorkSizingScoreStats, len(values))
+	for dimension, stats := range values {
+		clone[dimension] = stats
+	}
 	return clone
 }
 
@@ -217,6 +288,14 @@ func normalizeCreate(request CreateRequest) (CreateRequest, error) {
 		return CreateRequest{}, err
 	}
 	request.Focus = focus
+	request.Profile, err = normalizeProfileSnapshot(request.Profile)
+	if err != nil {
+		return CreateRequest{}, err
+	}
+	request.WorkSizingPlan, err = normalizeWorkSizingPlan(request.WorkSizingPlan)
+	if err != nil {
+		return CreateRequest{}, err
+	}
 	if request.DefaultFilesPerLanguage == 0 {
 		request.DefaultFilesPerLanguage = DefaultFilesPerLanguage
 	}
@@ -239,6 +318,28 @@ func normalizeEvaluation(evaluation Evaluation) (Evaluation, error) {
 		return Evaluation{}, err
 	}
 	evaluation.Focus = focus
+	evaluation.Profile, err = normalizeProfileSnapshot(evaluation.Profile)
+	if err != nil {
+		return Evaluation{}, err
+	}
+	evaluation.WorkSizingPlan, err = normalizeWorkSizingPlan(evaluation.WorkSizingPlan)
+	if err != nil {
+		return Evaluation{}, err
+	}
+	evaluation.WorkSizingUsage, err = normalizeWorkSizingUsage(evaluation.WorkSizingUsage)
+	if err != nil {
+		return Evaluation{}, err
+	}
+	evaluation.WorkSizingConcreteModels, err = normalizeWorkSizingConcreteModels(
+		evaluation.WorkSizingConcreteModels,
+	)
+	if err != nil {
+		return Evaluation{}, err
+	}
+	evaluation.WorkSizingResults, err = normalizeWorkSizingResults(evaluation.WorkSizingResults)
+	if err != nil {
+		return Evaluation{}, err
+	}
 	evaluation.FilesPerLanguage, err = normalizeIntMap(evaluation.FilesPerLanguage)
 	if err != nil {
 		return Evaluation{}, err
@@ -281,6 +382,11 @@ func normalizeEvaluation(evaluation Evaluation) (Evaluation, error) {
 		stats[model] = value
 	}
 	evaluation.ModelStats = stats
+	for index := range evaluation.Checkpoint.Batches {
+		evaluation.Checkpoint.Batches[index].WorkSizingPointID = strings.TrimSpace(
+			evaluation.Checkpoint.Batches[index].WorkSizingPointID,
+		)
+	}
 	for index := range evaluation.Comparisons {
 		comparison := &evaluation.Comparisons[index]
 		comparison.ModelAlias = strings.TrimSpace(comparison.ModelAlias)
@@ -314,6 +420,124 @@ func normalizeEvaluation(evaluation Evaluation) (Evaluation, error) {
 	evaluation.StartedAt = utcTime(evaluation.StartedAt)
 	evaluation.FinishedAt = utcTime(evaluation.FinishedAt)
 	return evaluation, nil
+}
+
+func normalizeProfileSnapshot(snapshot *ProfileSnapshot) (*ProfileSnapshot, error) {
+	if snapshot == nil {
+		return nil, nil
+	}
+	clone := cloneProfileSnapshot(snapshot)
+	clone.ID = strings.TrimSpace(clone.ID)
+	clone.Name = strings.TrimSpace(clone.Name)
+	clone.ReviewerModel = strings.TrimSpace(clone.ReviewerModel)
+	clone.AccountRef = strings.TrimSpace(clone.AccountRef)
+	clone.ReviewFocus = strings.TrimSpace(clone.ReviewFocus)
+	focus, err := normalizeFocus(clone.Focus)
+	if err != nil {
+		return nil, err
+	}
+	clone.Focus = focus
+	return clone, nil
+}
+
+func normalizeWorkSizingPlan(plan []WorkSizingPoint) ([]WorkSizingPoint, error) {
+	if plan == nil {
+		return nil, nil
+	}
+	out := append([]WorkSizingPoint(nil), plan...)
+	seen := make(map[string]struct{}, len(out))
+	for index := range out {
+		out[index].ID = strings.TrimSpace(out[index].ID)
+		out[index].Axis = WorkSizingAxis(strings.TrimSpace(string(out[index].Axis)))
+		if _, duplicate := seen[out[index].ID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate work sizing point ID", ErrInvalidEvaluation)
+		}
+		seen[out[index].ID] = struct{}{}
+	}
+	return out, nil
+}
+
+func normalizeWorkSizingUsage(
+	values map[string]map[string]Usage,
+) (map[string]map[string]Usage, error) {
+	if values == nil {
+		return nil, nil
+	}
+	out := make(map[string]map[string]Usage, len(values))
+	for rawPointID, byModel := range values {
+		pointID := strings.TrimSpace(rawPointID)
+		if _, duplicate := out[pointID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate normalized work sizing usage point", ErrInvalidEvaluation)
+		}
+		out[pointID] = make(map[string]Usage, len(byModel))
+		for rawAlias, usage := range byModel {
+			alias := strings.TrimSpace(rawAlias)
+			if _, duplicate := out[pointID][alias]; duplicate {
+				return nil, fmt.Errorf("%w: duplicate normalized work sizing usage model", ErrInvalidEvaluation)
+			}
+			usage.EstimatedCostUSD = cloneFloat(usage.EstimatedCostUSD)
+			out[pointID][alias] = usage
+		}
+	}
+	return out, nil
+}
+
+func normalizeWorkSizingConcreteModels(
+	values map[string]map[string]map[string]int,
+) (map[string]map[string]map[string]int, error) {
+	if values == nil {
+		return nil, nil
+	}
+	out := make(map[string]map[string]map[string]int, len(values))
+	for rawPointID, byAlias := range values {
+		pointID := strings.TrimSpace(rawPointID)
+		if _, duplicate := out[pointID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate normalized work sizing concrete point", ErrInvalidEvaluation)
+		}
+		out[pointID] = make(map[string]map[string]int, len(byAlias))
+		for rawAlias, byModel := range byAlias {
+			alias := strings.TrimSpace(rawAlias)
+			if _, duplicate := out[pointID][alias]; duplicate {
+				return nil, fmt.Errorf("%w: duplicate normalized work sizing concrete alias", ErrInvalidEvaluation)
+			}
+			normalized, err := normalizeIntMap(byModel)
+			if err != nil {
+				return nil, err
+			}
+			out[pointID][alias] = normalized
+		}
+	}
+	return out, nil
+}
+
+func normalizeWorkSizingResults(results []WorkSizingModelResult) ([]WorkSizingModelResult, error) {
+	if results == nil {
+		return nil, nil
+	}
+	out := make([]WorkSizingModelResult, len(results))
+	for index, result := range results {
+		result.PointID = strings.TrimSpace(result.PointID)
+		result.Axis = WorkSizingAxis(strings.TrimSpace(string(result.Axis)))
+		result.ModelAlias = strings.TrimSpace(result.ModelAlias)
+		result.Usage.EstimatedCostUSD = cloneFloat(result.Usage.EstimatedCostUSD)
+		var err error
+		result.ConcreteModels, err = normalizeIntMap(result.ConcreteModels)
+		if err != nil {
+			return nil, err
+		}
+		result.EffectiveTokensPerKiB = cloneFloat(result.EffectiveTokensPerKiB)
+		scores := make(map[string]WorkSizingScoreStats, len(result.Scores))
+		for rawDimension, stats := range result.Scores {
+			dimension := strings.TrimSpace(rawDimension)
+			if _, duplicate := scores[dimension]; duplicate {
+				return nil, fmt.Errorf("%w: duplicate normalized work sizing score", ErrInvalidEvaluation)
+			}
+			scores[dimension] = stats
+		}
+		result.Scores = scores
+		out[index] = result
+	}
+	return out, nil
 }
 
 func normalizeFocus(focus Focus) (Focus, error) {
@@ -503,6 +727,26 @@ func validateCreate(request CreateRequest) error {
 	if err := validateFocus(request.Focus); err != nil {
 		return err
 	}
+	if err := validateProfileSnapshot(request.Profile); err != nil {
+		return err
+	}
+	if err := validateWorkSizingPlan(request.WorkSizingPlan, request.Profile); err != nil {
+		return err
+	}
+	if request.Profile != nil {
+		reviewerSelected := false
+		for _, alias := range request.CandidateModels {
+			if alias == request.Profile.ReviewerModel {
+				reviewerSelected = true
+				break
+			}
+		}
+		if len(request.WorkSizingPlan) == 0 || request.SelectorModelAlias != request.Profile.ReviewerModel ||
+			!reviewerSelected || !reflect.DeepEqual(request.Focus, request.Profile.Focus) ||
+			request.DefaultFilesPerLanguage != DefaultFilesPerLanguage || len(request.FilesPerLanguage) != 0 {
+			return ErrInvalidEvaluation
+		}
+	}
 	return validateLanguageLimits(request.FilesPerLanguage)
 }
 
@@ -511,8 +755,9 @@ func validateEvaluation(evaluation Evaluation) error {
 		Repository: evaluation.Repository, Ref: evaluation.Ref,
 		CandidateModels:    evaluation.CandidateModels,
 		SelectorModelAlias: evaluation.SelectorModelAlias, JudgeModelAlias: evaluation.JudgeModelAlias,
-		Focus: evaluation.Focus, DefaultFilesPerLanguage: evaluation.DefaultFilesPerLanguage,
-		FilesPerLanguage: evaluation.FilesPerLanguage,
+		Focus: evaluation.Focus, Profile: evaluation.Profile,
+		DefaultFilesPerLanguage: evaluation.DefaultFilesPerLanguage,
+		FilesPerLanguage:        evaluation.FilesPerLanguage, WorkSizingPlan: evaluation.WorkSizingPlan,
 	}
 	if evaluation.SchemaVersion != SchemaVersion || !validEvaluationID(evaluation.ID) ||
 		evaluation.Version < 1 || !evaluation.Status.Valid() || validateCreate(request) != nil ||
@@ -527,6 +772,9 @@ func validateEvaluation(evaluation Evaluation) error {
 		return err
 	}
 	if err := validateUsage(evaluation.Usage); err != nil {
+		return err
+	}
+	if err := validateWorkSizingData(evaluation); err != nil {
 		return err
 	}
 	if err := validateModelStats(evaluation.ModelStats); err != nil {
@@ -567,6 +815,202 @@ func validateEvaluation(evaluation Evaluation) error {
 	return nil
 }
 
+func validateProfileSnapshot(snapshot *ProfileSnapshot) error {
+	if snapshot == nil {
+		return nil
+	}
+	if !validText(snapshot.ID, maxAliasBytes, false) || snapshot.Version < 1 ||
+		!validText(snapshot.Name, maxAliasBytes, false) ||
+		!validText(snapshot.ReviewerModel, maxAliasBytes, false) ||
+		!validText(snapshot.AccountRef, maxAliasBytes, true) ||
+		!validText(snapshot.ReviewFocus, maxSummaryBytes, false) ||
+		snapshot.MaxFilesPerBatch < 1 || snapshot.MaxFilesPerBatch > maxProgressCount ||
+		snapshot.MaxContentBytesPerBatch < 1 || snapshot.MaxContentBytesPerBatch > maxWorkSizingContent ||
+		snapshot.MaxParallelChildren < 1 || snapshot.MaxParallelChildren > 64 ||
+		validateFocus(snapshot.Focus) != nil {
+		return ErrInvalidEvaluation
+	}
+	return nil
+}
+
+func validateWorkSizingPlan(plan []WorkSizingPoint, snapshot *ProfileSnapshot) error {
+	if len(plan) > maxWorkSizingPoints || len(plan) > 0 && snapshot == nil {
+		return ErrInvalidEvaluation
+	}
+	seen := make(map[string]struct{}, len(plan))
+	configured := 0
+	for _, point := range plan {
+		if !validText(point.ID, maxAliasBytes, false) || !point.Axis.Valid() ||
+			point.FilesPerBatch < 1 || point.FilesPerBatch > maxProgressCount ||
+			point.ContentBytesPerBatch < 1 || point.ContentBytesPerBatch > maxWorkSizingContent {
+			return ErrInvalidEvaluation
+		}
+		if _, duplicate := seen[point.ID]; duplicate {
+			return ErrInvalidEvaluation
+		}
+		seen[point.ID] = struct{}{}
+		if snapshot != nil && (point.FilesPerBatch > snapshot.MaxFilesPerBatch ||
+			point.ContentBytesPerBatch > snapshot.MaxContentBytesPerBatch) {
+			return ErrInvalidEvaluation
+		}
+		if point.Axis == WorkSizingAxisConfigured {
+			configured++
+			if snapshot == nil || point.FilesPerBatch != snapshot.MaxFilesPerBatch ||
+				point.ContentBytesPerBatch != snapshot.MaxContentBytesPerBatch {
+				return ErrInvalidEvaluation
+			}
+		}
+	}
+	if len(plan) > 0 && configured != 1 {
+		return ErrInvalidEvaluation
+	}
+	return nil
+}
+
+func validateWorkSizingData(evaluation Evaluation) error {
+	if len(evaluation.WorkSizingPlan) == 0 {
+		if len(evaluation.WorkSizingUsage) != 0 || len(evaluation.WorkSizingConcreteModels) != 0 ||
+			len(evaluation.WorkSizingResults) != 0 {
+			return ErrInvalidEvaluation
+		}
+		return nil
+	}
+	points := make(map[string]WorkSizingPoint, len(evaluation.WorkSizingPlan))
+	for _, point := range evaluation.WorkSizingPlan {
+		points[point.ID] = point
+	}
+	candidates := make(map[string]struct{}, len(evaluation.CandidateModels))
+	for _, alias := range evaluation.CandidateModels {
+		candidates[alias] = struct{}{}
+	}
+	if len(evaluation.WorkSizingUsage) > len(points) {
+		return ErrInvalidEvaluation
+	}
+	for pointID, byModel := range evaluation.WorkSizingUsage {
+		if _, ok := points[pointID]; !ok || len(byModel) > len(candidates) {
+			return ErrInvalidEvaluation
+		}
+		for alias, usage := range byModel {
+			if _, ok := candidates[alias]; !ok || validateUsage(usage) != nil {
+				return ErrInvalidEvaluation
+			}
+		}
+	}
+	if len(evaluation.WorkSizingConcreteModels) > len(points) {
+		return ErrInvalidEvaluation
+	}
+	for pointID, byAlias := range evaluation.WorkSizingConcreteModels {
+		if _, ok := points[pointID]; !ok || len(byAlias) > len(candidates) {
+			return ErrInvalidEvaluation
+		}
+		for alias, byModel := range byAlias {
+			if _, ok := candidates[alias]; !ok || len(byModel) > 128 {
+				return ErrInvalidEvaluation
+			}
+			for model, count := range byModel {
+				if !validText(model, maxAliasBytes, false) || count < 1 || count > maxProgressCount {
+					return ErrInvalidEvaluation
+				}
+			}
+		}
+	}
+	if len(evaluation.WorkSizingResults) > maxWorkSizingResults ||
+		len(evaluation.WorkSizingResults) > len(points)*len(candidates) {
+		return ErrInvalidEvaluation
+	}
+	seen := make(map[string]struct{}, len(evaluation.WorkSizingResults))
+	for _, result := range evaluation.WorkSizingResults {
+		point, pointOK := points[result.PointID]
+		_, candidateOK := candidates[result.ModelAlias]
+		key := result.PointID + "\x00" + result.ModelAlias
+		if !pointOK || !candidateOK || result.Axis != point.Axis ||
+			result.FilesPerBatch != point.FilesPerBatch ||
+			result.ContentBytesPerBatch != point.ContentBytesPerBatch ||
+			!result.Completion.Valid() || result.BatchSamples < 0 ||
+			result.BatchSamples > maxProgressCount || result.FilesAnalyzed < 0 ||
+			result.FilesAnalyzed > maxProgressCount || result.BytesAnalyzed < 0 ||
+			result.BytesAnalyzed > maxCounter || result.Attempts < 0 ||
+			result.Attempts > maxProgressCount || result.Successes < 0 || result.Failures < 0 ||
+			result.Successes+result.Failures > result.Attempts ||
+			result.ConfirmedFindings < 0 || result.ConfirmedFindings > maxProgressCount ||
+			result.UnsupportedClaims < 0 || result.UnsupportedClaims > maxProgressCount ||
+			len(result.Scores) > maxScoreMetrics || validateUsage(result.Usage) != nil ||
+			len(result.ConcreteModels) > 128 ||
+			!finiteBetween(result.EffectiveTokens, 0, math.MaxFloat64) ||
+			result.EffectiveTokensPerKiB != nil &&
+				!finiteBetween(*result.EffectiveTokensPerKiB, 0, math.MaxFloat64) ||
+			!validObservedWorkSizing(result) || !validWorkSizingEfficiency(result) {
+			return ErrInvalidEvaluation
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return ErrInvalidEvaluation
+		}
+		seen[key] = struct{}{}
+		if expectedUsage := evaluation.WorkSizingUsage[result.PointID][result.ModelAlias]; !reflect.DeepEqual(
+			result.Usage,
+			expectedUsage,
+		) ||
+			!maps.Equal(
+				result.ConcreteModels,
+				evaluation.WorkSizingConcreteModels[result.PointID][result.ModelAlias],
+			) {
+			return ErrInvalidEvaluation
+		}
+		for dimension, stats := range result.Scores {
+			if !validText(dimension, maxAliasBytes, false) || stats.Samples < 1 ||
+				stats.Samples > maxProgressCount ||
+				!finiteBetween(stats.WeightedMean, 0, 100) ||
+				!finiteBetween(stats.Minimum, 0, 100) ||
+				!finiteBetween(stats.Maximum, 0, 100) ||
+				!finiteBetween(stats.StandardDeviation, 0, 100) ||
+				stats.Minimum > stats.WeightedMean || stats.WeightedMean > stats.Maximum {
+				return ErrInvalidEvaluation
+			}
+		}
+	}
+	return nil
+}
+
+func validObservedWorkSizing(result WorkSizingModelResult) bool {
+	if result.ObservedMinFilesPerBatch < 0 ||
+		result.ObservedMaxFilesPerBatch < result.ObservedMinFilesPerBatch ||
+		!finiteBetween(
+			result.ObservedMeanFilesPerBatch,
+			float64(result.ObservedMinFilesPerBatch),
+			float64(result.ObservedMaxFilesPerBatch),
+		) || result.ObservedMinContentBytesPerBatch < 0 ||
+		result.ObservedMaxContentBytesPerBatch < result.ObservedMinContentBytesPerBatch ||
+		!finiteBetween(
+			result.ObservedMeanContentBytesPerBatch,
+			float64(result.ObservedMinContentBytesPerBatch),
+			float64(result.ObservedMaxContentBytesPerBatch),
+		) {
+		return false
+	}
+	if result.Attempts == 0 {
+		return result.ObservedMinFilesPerBatch == 0 && result.ObservedMaxFilesPerBatch == 0 &&
+			result.ObservedMeanFilesPerBatch == 0 && result.ObservedMinContentBytesPerBatch == 0 &&
+			result.ObservedMaxContentBytesPerBatch == 0 && result.ObservedMeanContentBytesPerBatch == 0
+	}
+	return true
+}
+
+func validWorkSizingEfficiency(result WorkSizingModelResult) bool {
+	cached := min(result.Usage.CachedInputTokens, result.Usage.InputTokens)
+	effective := float64(result.Usage.InputTokens-cached+result.Usage.OutputTokens) + 0.1*float64(cached)
+	if math.Abs(result.EffectiveTokens-effective) > 1e-9*max(1, math.Abs(effective)) {
+		return false
+	}
+	if result.BytesAnalyzed == 0 {
+		return result.EffectiveTokensPerKiB == nil
+	}
+	if result.EffectiveTokensPerKiB == nil {
+		return false
+	}
+	want := effective * 1024 / float64(result.BytesAnalyzed)
+	return math.Abs(*result.EffectiveTokensPerKiB-want) <= 1e-9*max(1, math.Abs(want))
+}
+
 func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 	if len(checkpoint.Batches) > maxBatchCheckpoints ||
 		len(checkpoint.ConcreteModels) > len(evaluation.CandidateModels) {
@@ -590,6 +1034,10 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 			}
 		}
 	}
+	workSizingPoints := make(map[string]struct{}, len(evaluation.WorkSizingPlan))
+	for _, point := range evaluation.WorkSizingPlan {
+		workSizingPoints[point.ID] = struct{}{}
+	}
 	knownCandidates := make(map[string]struct{})
 	if evaluation.Corpus != nil {
 		for _, file := range evaluation.Corpus.Files {
@@ -606,6 +1054,13 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 			!json.Valid(
 				[]byte(batch.MappingJSON),
 			) || batch.CompletedAt.IsZero() || batch.CompletedAt.Location() != time.UTC {
+			return ErrInvalidEvaluation
+		}
+		if len(workSizingPoints) == 0 {
+			if batch.WorkSizingPointID != "" {
+				return ErrInvalidEvaluation
+			}
+		} else if _, ok := workSizingPoints[batch.WorkSizingPointID]; !ok {
 			return ErrInvalidEvaluation
 		}
 		if _, duplicate := seenBatches[batch.ID]; duplicate {
@@ -633,7 +1088,7 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 		if len(batch.Candidates) == 0 {
 			for alias := range candidateAliases {
 				for candidateID := range batchCandidates {
-					pair := alias + "\x00" + candidateID
+					pair := batch.WorkSizingPointID + "\x00" + alias + "\x00" + candidateID
 					if _, duplicate := seenCompletedPairs[pair]; duplicate {
 						return ErrInvalidEvaluation
 					}
@@ -647,7 +1102,8 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 				outcome.Attempts != outcome.Successes+outcome.Failures ||
 				outcome.Attempts > len(batch.CandidateIDs) ||
 				len(outcome.CompletedCandidateIDs) > len(batch.CandidateIDs) ||
-				len(outcome.CompletedCandidateIDs) > 3*outcome.Successes {
+				len(outcome.CompletedCandidateIDs) > 0 && outcome.Successes == 0 ||
+				!validBatchCandidateObservations(outcome, len(batch.CandidateIDs)) {
 				return ErrInvalidEvaluation
 			}
 			seenInOutcome := make(map[string]struct{}, len(outcome.CompletedCandidateIDs))
@@ -659,7 +1115,7 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 					return ErrInvalidEvaluation
 				}
 				seenInOutcome[candidateID] = struct{}{}
-				pair := alias + "\x00" + candidateID
+				pair := batch.WorkSizingPointID + "\x00" + alias + "\x00" + candidateID
 				if _, duplicate := seenCompletedPairs[pair]; duplicate {
 					return ErrInvalidEvaluation
 				}
@@ -668,6 +1124,24 @@ func validateCheckpoint(checkpoint Checkpoint, evaluation Evaluation) error {
 		}
 	}
 	return nil
+}
+
+func validBatchCandidateObservations(outcome BatchCandidateCheckpoint, candidateCount int) bool {
+	if outcome.ObservedFilesTotal < 0 || outcome.ObservedFilesTotal > maxProgressCount ||
+		outcome.ObservedFilesMin < 0 || outcome.ObservedFilesMax < outcome.ObservedFilesMin ||
+		outcome.ObservedFilesMax > candidateCount || outcome.ObservedContentBytesTotal < 0 ||
+		outcome.ObservedContentBytesTotal > maxCounter || outcome.ObservedContentBytesMin < 0 ||
+		outcome.ObservedContentBytesMax < outcome.ObservedContentBytesMin ||
+		outcome.ObservedContentBytesMax > maxCounter {
+		return false
+	}
+	if outcome.Attempts == 0 {
+		return outcome.ObservedFilesTotal == 0 && outcome.ObservedFilesMin == 0 &&
+			outcome.ObservedFilesMax == 0 && outcome.ObservedContentBytesTotal == 0 &&
+			outcome.ObservedContentBytesMin == 0 && outcome.ObservedContentBytesMax == 0
+	}
+	return outcome.ObservedFilesTotal >= outcome.ObservedFilesMax &&
+		outcome.ObservedContentBytesTotal >= outcome.ObservedContentBytesMax
 }
 
 func validateFocus(focus Focus) error {
@@ -888,6 +1362,9 @@ func validateUsage(usage Usage) error {
 		}
 	}
 	if usage.EstimatedCostUSD != nil && !finiteBetween(*usage.EstimatedCostUSD, 0, math.MaxFloat64) {
+		return ErrInvalidEvaluation
+	}
+	if usage.CachedInputTokens > usage.InputTokens {
 		return ErrInvalidEvaluation
 	}
 	return nil

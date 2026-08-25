@@ -16,6 +16,8 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 
 import {
   type EvaluationComparison,
+  type EvaluationWorkSizingAxis,
+  type EvaluationWorkSizingResult,
   type RepositoryModelEvaluation,
   getModelEvaluation,
 } from "@/api/model-evaluations"
@@ -29,10 +31,16 @@ import {
   buildModelEvaluationReportAnalysis,
   isFiniteModelEvaluationNumber,
   modelEvaluationComparisonScore,
+  modelEvaluationDegradationCeiling,
+  modelEvaluationEffectiveTokens,
+  modelEvaluationEffectiveTokensPerKiB,
+  modelEvaluationSizingPointAttained,
   modelEvaluationSupportedClaimRate,
   modelEvaluationUnsupportedClaims,
   positionModelEvaluationDonutSegments,
 } from "./model-evaluation-report-analysis"
+
+/* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Wide exact statistics tables must be keyboard-scrollable. */
 
 const chartColors = [
   "#0284c7",
@@ -103,6 +111,12 @@ function concreteModels(comparison: EvaluationComparison): string {
 
 function totalTokens(comparison: EvaluationComparison): number {
   return comparison.usage.input_tokens + comparison.usage.output_tokens
+}
+
+function formatDecimal(value: number, maximumFractionDigits = 1): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(
+    value,
+  )
 }
 
 function SectionHeading({
@@ -460,6 +474,330 @@ function EfficiencyScatterPlot({
         ))}
       </ul>
     </figure>
+  )
+}
+
+function sizingAxisLabel(axis: EvaluationWorkSizingAxis): string {
+  if (axis === "files_per_batch") return "Files per batch"
+  if (axis === "content_bytes_per_batch") return "Content bytes per batch"
+  return "Configured baseline"
+}
+
+function sizingValue(axis: EvaluationWorkSizingAxis, value: number): string {
+  return axis === "files_per_batch"
+    ? `${formatNumber(value)} files`
+    : formatBytes(value)
+}
+
+function sizingScoreStatistics(result: EvaluationWorkSizingResult) {
+  return Object.entries(result.scores).sort(([left], [right]) => {
+    if (left === "overall") return -1
+    if (right === "overall") return 1
+    return left.localeCompare(right)
+  })
+}
+
+function DegradationCeilingCard({
+  results,
+  modelAlias,
+  axis,
+}: {
+  results: EvaluationWorkSizingResult[]
+  modelAlias: string
+  axis: EvaluationWorkSizingAxis
+}) {
+  const ceiling = modelEvaluationDegradationCeiling(results, modelAlias, axis)
+  return (
+    <div className="bg-muted/50 rounded-lg p-3">
+      <p className="text-muted-foreground text-xs">
+        {sizingAxisLabel(axis)} quality ceiling
+      </p>
+      {ceiling ? (
+        <>
+          <p className="mt-1 font-semibold tabular-nums">
+            {ceiling.kind === "at_least" ? "At least " : ""}
+            {sizingValue(axis, ceiling.value)}
+          </p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            {ceiling.kind === "degraded" && ceiling.degradedAt != null
+              ? `First eligible observed workload at ${sizingValue(axis, ceiling.degradedAt)} fell at least 5 points below the smallest observed baseline.`
+              : "No eligible complete observation fell at least 5 points below the smallest observed baseline."}
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="mt-1 font-semibold">Not established</p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            No complete, eligible observation has an overall score.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+function WorkSizingStatistics({
+  evaluation,
+}: {
+  evaluation: RepositoryModelEvaluation
+}) {
+  const results = evaluation.work_sizing_results ?? []
+  if (results.length === 0) {
+    return (
+      <section className="border-border bg-card rounded-2xl border p-5 md:p-6">
+        <SectionHeading
+          icon={IconChartDots}
+          title="Work-sizing quality ceilings"
+          description="Requested versus observed files and source bytes for each model."
+        />
+        <p className="text-muted-foreground mt-5 text-sm">
+          This result does not contain work-sizing observations. Legacy probes
+          cannot establish a file or content-byte ceiling.
+        </p>
+      </section>
+    )
+  }
+  const aliases = [
+    ...new Set([
+      ...evaluation.candidate_models,
+      ...results.map((result) => result.model_alias),
+    ]),
+  ]
+  return (
+    <section className="space-y-5" aria-labelledby="work-sizing-title">
+      <SectionHeading
+        icon={IconChartDots}
+        title="Work-sizing quality ceilings"
+        description="Each exact table compares requested and observed batch size, judged score variation, failures, analyzed source, and cached-weighted token efficiency."
+        titleID="work-sizing-title"
+      />
+      <aside
+        role="note"
+        className="border-border bg-muted/40 rounded-xl border p-4 text-sm"
+      >
+        Effective tokens = (input − cached) + 0.1 × cached + output. Reasoning
+        tokens are reported separately and are not added again. A ceiling uses
+        only complete observations that obeyed the requested ceiling. Ceiling
+        values use the maximum workload actually delivered, so sparse batches
+        cannot masquerade as a larger context test. The first overall
+        weighted-mean drop of at least 5 points makes the prior observed value
+        the ceiling; otherwise the report says “at least” the largest eligible
+        observed value.
+      </aside>
+      {aliases.map((modelAlias) => {
+        const modelResults = results
+          .filter((result) => result.model_alias === modelAlias)
+          .sort((left, right) => {
+            if (left.axis !== right.axis)
+              return left.axis.localeCompare(right.axis)
+            return left.axis === "files_per_batch"
+              ? left.files_per_batch - right.files_per_batch
+              : left.content_bytes_per_batch - right.content_bytes_per_batch
+          })
+        if (modelResults.length === 0) return null
+        return (
+          <article
+            key={modelAlias}
+            className="border-border bg-card overflow-hidden rounded-2xl border"
+          >
+            <header className="border-border border-b p-5">
+              <h3 className="font-mono text-lg font-semibold">
+                {modelAlias} work sizing
+              </h3>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <DegradationCeilingCard
+                  results={modelResults}
+                  modelAlias={modelAlias}
+                  axis="files_per_batch"
+                />
+                <DegradationCeilingCard
+                  results={modelResults}
+                  modelAlias={modelAlias}
+                  axis="content_bytes_per_batch"
+                />
+              </div>
+            </header>
+            <div
+              role="region"
+              aria-label={`${modelAlias} work-sizing statistics table`}
+              className="overflow-x-auto"
+              tabIndex={0}
+            >
+              <table className="w-full min-w-[92rem] text-left text-xs">
+                <caption className="sr-only">
+                  Requested and observed work-sizing statistics for {modelAlias}
+                </caption>
+                <thead>
+                  <tr className="border-border bg-muted/30 border-b">
+                    <th scope="col" className="p-3">
+                      Sweep point
+                    </th>
+                    <th scope="col" className="p-3">
+                      Requested
+                    </th>
+                    <th scope="col" className="p-3">
+                      Observed min / mean / max
+                    </th>
+                    <th scope="col" className="p-3">
+                      Score statistics
+                    </th>
+                    <th scope="col" className="p-3">
+                      Samples / outcome
+                    </th>
+                    <th scope="col" className="p-3">
+                      Analyzed
+                    </th>
+                    <th scope="col" className="p-3">
+                      Token efficiency
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modelResults.map((result) => {
+                    const effectiveTokens = modelEvaluationEffectiveTokens(
+                      result.usage,
+                    )
+                    const tokensPerKiB = modelEvaluationEffectiveTokensPerKiB(
+                      result.usage,
+                      result.bytes_analyzed,
+                    )
+                    const attained = modelEvaluationSizingPointAttained(result)
+                    return (
+                      <tr
+                        key={`${result.point_id}-${result.model_alias}`}
+                        className="border-border border-b align-top last:border-0"
+                      >
+                        <th scope="row" className="p-3 font-normal">
+                          <span className="block font-medium">
+                            {sizingAxisLabel(result.axis)}
+                          </span>
+                          <span className="text-muted-foreground mt-1 block font-mono">
+                            {result.point_id}
+                          </span>
+                          <span className="mt-2 flex flex-wrap gap-1">
+                            <Badge variant="outline">{result.completion}</Badge>
+                            {!attained && (
+                              <Badge variant="secondary">
+                                excluded from ceiling
+                              </Badge>
+                            )}
+                          </span>
+                        </th>
+                        <td className="p-3 tabular-nums">
+                          <span className="block">
+                            {result.files_per_batch} files
+                          </span>
+                          <span className="text-muted-foreground block">
+                            {formatBytes(result.content_bytes_per_batch)}
+                          </span>
+                        </td>
+                        <td className="p-3 tabular-nums">
+                          <span className="block">
+                            Files: {result.observed_min_files_per_batch} /{" "}
+                            {formatDecimal(
+                              result.observed_mean_files_per_batch,
+                              2,
+                            )}{" "}
+                            / {result.observed_max_files_per_batch}
+                          </span>
+                          <span className="text-muted-foreground mt-1 block">
+                            Bytes:{" "}
+                            {formatBytes(
+                              result.observed_min_content_bytes_per_batch,
+                            )}{" "}
+                            /{" "}
+                            {formatBytes(
+                              result.observed_mean_content_bytes_per_batch,
+                            )}{" "}
+                            /{" "}
+                            {formatBytes(
+                              result.observed_max_content_bytes_per_batch,
+                            )}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          {sizingScoreStatistics(result).length === 0 ? (
+                            <span className="text-muted-foreground">
+                              No judged scores
+                            </span>
+                          ) : (
+                            <ul className="space-y-1">
+                              {sizingScoreStatistics(result).map(
+                                ([metric, statistics]) => (
+                                  <li key={metric}>
+                                    <span className="font-medium capitalize">
+                                      {metric.replaceAll("_", " ")}
+                                    </span>
+                                    : weighted mean{" "}
+                                    {formatDecimal(statistics.weighted_mean, 2)}{" "}
+                                    · σ{" "}
+                                    {formatDecimal(
+                                      statistics.standard_deviation,
+                                      2,
+                                    )}{" "}
+                                    · {formatDecimal(statistics.minimum, 2)}–
+                                    {formatDecimal(statistics.maximum, 2)} · n=
+                                    {statistics.samples}
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          )}
+                        </td>
+                        <td className="p-3 tabular-nums">
+                          <span className="block">
+                            {result.batch_samples} batch samples
+                          </span>
+                          <span className="text-muted-foreground mt-1 block">
+                            {result.successes}/{result.attempts} successful ·{" "}
+                            {result.failures} failed
+                          </span>
+                          <span className="text-muted-foreground mt-1 block">
+                            {result.confirmed_findings} supported ·{" "}
+                            {result.unsupported_claims} unsupported
+                          </span>
+                          <span className="text-muted-foreground mt-1 block">
+                            Concrete:{" "}
+                            {Object.entries(result.concrete_models)
+                              .sort(([left], [right]) =>
+                                left.localeCompare(right),
+                              )
+                              .map(([model, count]) => `${model} × ${count}`)
+                              .join(", ") || "not reported"}
+                          </span>
+                        </td>
+                        <td className="p-3 tabular-nums">
+                          <span className="block">
+                            {result.files_analyzed} files
+                          </span>
+                          <span className="text-muted-foreground block">
+                            {formatBytes(result.bytes_analyzed)}
+                          </span>
+                        </td>
+                        <td className="p-3 tabular-nums">
+                          <span className="block">
+                            {formatDecimal(effectiveTokens, 1)} effective tokens
+                          </span>
+                          <span className="text-muted-foreground mt-1 block">
+                            {tokensPerKiB == null
+                              ? "Unavailable per KiB"
+                              : `${formatDecimal(tokensPerKiB, 2)} per KiB`}
+                          </span>
+                          <span className="text-muted-foreground mt-1 block">
+                            {formatNumber(result.usage.cached_input_tokens)}{" "}
+                            cached
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        )
+      })}
+    </section>
   )
 }
 
@@ -835,6 +1173,11 @@ function ModelAnalysisCard({
 }) {
   const cost = comparison.usage.estimated_cost_usd
   const unsupportedClaims = modelEvaluationUnsupportedClaims(comparison)
+  const effectiveTokens = modelEvaluationEffectiveTokens(comparison.usage)
+  const effectiveTokensPerKiB = modelEvaluationEffectiveTokensPerKiB(
+    comparison.usage,
+    comparison.bytes_analyzed,
+  )
   const [expanded, setExpanded] = useState(comparison.rank === 1)
   const detailID = `model-analysis-${comparison.model_alias.replace(/[^a-zA-Z0-9_-]/g, "-")}`
   return (
@@ -962,6 +1305,14 @@ function ModelAnalysisCard({
               value={`${comparison.usage.requests} requests · ${formatNumber(totalTokens(comparison))} input + output`}
             />
             <Definition
+              label="Weighted token efficiency"
+              value={
+                effectiveTokensPerKiB == null
+                  ? `${formatDecimal(effectiveTokens, 1)} effective tokens · per KiB unavailable`
+                  : `${formatDecimal(effectiveTokens, 1)} effective · ${formatDecimal(effectiveTokensPerKiB, 2)} per KiB`
+              }
+            />
+            <Definition
               label="Failed candidate calls"
               value={formatNumber(comparison.failures)}
             />
@@ -999,7 +1350,11 @@ function Definition({ label, value }: { label: string; value: string }) {
   )
 }
 
-function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
+export function ModelEvaluationReportContent({
+  evaluation,
+}: {
+  evaluation: RepositoryModelEvaluation
+}) {
   const analysis = useMemo(
     () => buildModelEvaluationReportAnalysis(evaluation.comparisons),
     [evaluation.comparisons],
@@ -1052,7 +1407,7 @@ function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
         <MetricCard
           label="Provider usage"
           value={`${evaluation.usage.requests} requests`}
-          detail={`${formatNumber(evaluation.usage.input_tokens + evaluation.usage.output_tokens)} input + output tokens`}
+          detail={`${formatDecimal(modelEvaluationEffectiveTokens(evaluation.usage), 1)} cached-weighted effective tokens`}
         />
       </section>
 
@@ -1082,6 +1437,11 @@ function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
           {hasKnownCost
             ? "known model prices are included."
             : "pricing metadata was unavailable; zero was not assumed."}
+        </p>
+        <p>
+          <strong>Token efficiency:</strong> (input − cached) + 0.1 × cached +
+          output, divided by analyzed source bytes. Reasoning is shown
+          separately and not double-counted.
         </p>
         <p className={judgeOverlap ? "text-amber-700 dark:text-amber-300" : ""}>
           <strong>Judge:</strong> {evaluation.judge_model_alias}
@@ -1113,6 +1473,8 @@ function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
           </div>
         </section>
       </div>
+
+      <WorkSizingStatistics evaluation={evaluation} />
 
       <section className="border-border bg-card rounded-2xl border p-5 md:p-6">
         <SectionHeading
@@ -1228,11 +1590,27 @@ function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
           <Definition label="Commit" value={commit || "Not exposed"} />
           <Definition
             label="Selector model"
-            value={evaluation.selector_model_alias}
+            value={evaluation.selector_model_alias || "Profile managed"}
           />
           <Definition
             label="Judge / analyzer"
-            value={evaluation.judge_model_alias}
+            value={evaluation.judge_model_alias || "Profile managed"}
+          />
+          <Definition
+            label="Review profile"
+            value={
+              evaluation.profile
+                ? `${evaluation.profile.name} · v${evaluation.profile.version}`
+                : "Legacy custom configuration"
+            }
+          />
+          <Definition
+            label="Configured work sizing"
+            value={
+              evaluation.profile
+                ? `${evaluation.profile.max_files_per_batch} files · ${formatBytes(evaluation.profile.max_content_bytes_per_batch)}`
+                : "Not recorded"
+            }
           />
           <Definition label="Probe ID" value={evaluation.id} />
           <Definition
@@ -1250,6 +1628,25 @@ function ReportBody({ evaluation }: { evaluation: RepositoryModelEvaluation }) {
             value={`${evaluation.run_ids.length} durable workflow runs`}
           />
         </dl>
+        {evaluation.profile && (
+          <div className="bg-muted/50 mt-5 rounded-xl p-4">
+            <h3 className="text-sm font-semibold">Frozen review profile</h3>
+            <p className="mt-2 text-sm leading-6">
+              {evaluation.profile.review_focus}
+            </p>
+            <p className="text-muted-foreground mt-2 text-xs">
+              Code types:{" "}
+              {evaluation.profile.focus.code_types?.join(", ") || "none"}
+              {evaluation.profile.focus.include_folders?.length
+                ? ` · include ${evaluation.profile.focus.include_folders.join(", ")}`
+                : " · all eligible folders"}
+              {evaluation.profile.focus.exclude_folders?.length
+                ? ` · exclude ${evaluation.profile.focus.exclude_folders.join(", ")}`
+                : ""}
+              {` · ${evaluation.profile.max_parallel_children} parallel workers`}
+            </p>
+          </div>
+        )}
         {evaluation.corpus?.selection_rationale && (
           <div className="bg-muted/50 mt-5 rounded-xl p-4">
             <h3 className="text-sm font-semibold">
@@ -1356,7 +1753,8 @@ export function ModelEvaluationReportPage({
             </div>
           ) : evaluation &&
             evaluation.status === "completed" &&
-            evaluation.comparisons.length > 0 ? (
+            (evaluation.comparisons.length > 0 ||
+              (evaluation.work_sizing_results?.length ?? 0) > 0) ? (
             <>
               <header className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                 <div className="min-w-0">
@@ -1381,7 +1779,7 @@ export function ModelEvaluationReportPage({
                   )}
                 </div>
               </header>
-              <ReportBody evaluation={evaluation} />
+              <ModelEvaluationReportContent evaluation={evaluation} />
             </>
           ) : evaluation ? (
             <div className="border-border bg-card rounded-2xl border p-6">

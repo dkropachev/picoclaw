@@ -1,19 +1,18 @@
 import {
   IconAlertTriangle,
-  IconArrowRight,
+  IconExternalLink,
   IconLoader2,
   IconPlayerPlay,
   IconRefresh,
-  IconReportAnalytics,
-  IconTrophy,
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 
 import {
-  type EvaluationCodeType,
   type EvaluationConfigInput,
   type EvaluationCorpusPage,
   type EvaluationModelOption,
+  type EvaluationProfileOption,
+  type EvaluationProfileSnapshot,
   type EvaluationRepositoryOption,
   ModelEvaluationAPIError,
   type RepositoryModelEvaluation,
@@ -27,23 +26,14 @@ import {
   updateModelEvaluation,
 } from "@/api/model-evaluations"
 import { PageHeader } from "@/components/page-header"
-import { ReviewAdvancedSection } from "@/components/repository-reviews/review-advanced-section"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 
-import { buildModelEvaluationReportAnalysis } from "./model-evaluation-report-analysis"
+import { ModelEvaluationReportContent } from "./model-evaluation-report-page"
 
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Horizontally scrollable data regions must be keyboard-focusable. */
-
-const codeTypes: Array<{ value: EvaluationCodeType; label: string }> = [
-  { value: "hotpath-code", label: "Hot-path code" },
-  { value: "code", label: "Production code" },
-  { value: "test", label: "Tests" },
-  { value: "bench-test", label: "Benchmarks" },
-]
 
 const activeStatuses = new Set([
   "preflighting",
@@ -55,15 +45,13 @@ const activeStatuses = new Set([
 ])
 const corpusPageSize = 20
 
-function lines(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[\n,]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ]
+type ProbeRunTab = "status" | "languages" | "corpus" | "report"
+
+interface EvaluationDraft {
+  repository: string
+  ref: string
+  profileID: string
+  candidateModels: string[]
 }
 
 function formatBytes(value: number): string {
@@ -103,68 +91,60 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
 }
 
-function clampLanguageLimit(
-  raw: string,
+function profileAvailableAliases(
+  profile: EvaluationProfileOption | undefined,
+  models: EvaluationModelOption[],
+): string[] {
+  if (!profile) return []
+  const configured = new Set(
+    models.filter((model) => model.available).map((model) => model.alias),
+  )
+  return profile.available_models.filter((alias) => configured.has(alias))
+}
+
+function selectProfileCandidates(
+  current: string[],
+  profile: EvaluationProfileOption | undefined,
+  models: EvaluationModelOption[],
   maximum: number,
-  fallback: number,
-): number {
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed)) return fallback
-  return Math.min(maximum, Math.max(1, Math.trunc(parsed)))
-}
-
-function draftsEqual(left: EvaluationDraft, right: EvaluationDraft): boolean {
-  return JSON.stringify(draftInput(left)) === JSON.stringify(draftInput(right))
-}
-
-interface EvaluationDraft {
-  repository: string
-  ref: string
-  candidateModels: string[]
-  selector: string
-  judge: string
-  codeTypes: EvaluationCodeType[]
-  includeFolders: string
-  excludeFolders: string
-  freeText: string
-  defaultFiles: number
-  languageFiles: Record<string, number>
+): string[] {
+  const available = profileAvailableAliases(profile, models)
+  const allowed = new Set(available)
+  const selected = current.filter((alias) => allowed.has(alias))
+  if (
+    profile?.reviewer_model &&
+    allowed.has(profile.reviewer_model) &&
+    !selected.includes(profile.reviewer_model)
+  ) {
+    selected.unshift(profile.reviewer_model)
+  }
+  for (const alias of available) {
+    if (selected.length >= 2) break
+    if (!selected.includes(alias)) selected.push(alias)
+  }
+  return selected.slice(0, maximum)
 }
 
 function emptyDraft(
-  defaultFiles = 20,
-  availableCodeTypes: EvaluationCodeType[] = codeTypes.map(
-    (item) => item.value,
-  ),
+  profiles: EvaluationProfileOption[] = [],
+  models: EvaluationModelOption[] = [],
+  maximum = 8,
 ): EvaluationDraft {
+  const profile = profiles[0]
   return {
     repository: "",
     ref: "",
-    candidateModels: [],
-    selector: "",
-    judge: "",
-    codeTypes: [...availableCodeTypes],
-    includeFolders: "",
-    excludeFolders: "",
-    freeText: "",
-    defaultFiles,
-    languageFiles: {},
+    profileID: profile?.id ?? "",
+    candidateModels: selectProfileCandidates([], profile, models, maximum),
   }
 }
 
 function evaluationDraft(value: RepositoryModelEvaluation): EvaluationDraft {
   return {
     repository: value.repository,
-    ref: value.ref,
+    ref: value.ref === "HEAD" ? "" : value.ref,
+    profileID: value.profile?.id ?? "",
     candidateModels: [...value.candidate_models],
-    selector: value.selector_model_alias,
-    judge: value.judge_model_alias,
-    codeTypes: value.focus.code_types ?? [],
-    includeFolders: (value.focus.include_folders ?? []).join("\n"),
-    excludeFolders: (value.focus.exclude_folders ?? []).join("\n"),
-    freeText: value.focus.free_text ?? "",
-    defaultFiles: value.default_files_per_language,
-    languageFiles: { ...value.files_per_language },
   }
 }
 
@@ -174,48 +154,22 @@ function draftInput(
 ): EvaluationConfigInput {
   return {
     repository: draft.repository.trim(),
-    ref: draft.ref.trim(),
+    profile_id: draft.profileID,
     candidate_models: draft.candidateModels,
-    selector_model_alias: draft.selector,
-    judge_model_alias: draft.judge,
-    focus: {
-      code_types: draft.codeTypes,
-      include_folders: lines(draft.includeFolders),
-      exclude_folders: lines(draft.excludeFolders),
-      free_text: draft.freeText.trim(),
-    },
-    default_files_per_language: draft.defaultFiles,
-    files_per_language: draft.languageFiles,
+    ref: draft.ref.trim(),
     ...(expectedVersion == null ? {} : { expected_version: expectedVersion }),
   }
 }
 
-function modelProbeCandidates(
-  draft: EvaluationDraft,
+function draftsEqual(left: EvaluationDraft, right: EvaluationDraft): boolean {
+  return JSON.stringify(draftInput(left)) === JSON.stringify(draftInput(right))
+}
+
+function profileAsOption(
+  profile: EvaluationProfileSnapshot,
   candidateModels: string[],
-  models: EvaluationModelOption[],
-): EvaluationDraft {
-  const available = models.filter((model) => model.available)
-  const selector =
-    draft.selector ||
-    candidateModels.find((alias) =>
-      available.some((model) => model.alias === alias),
-    ) ||
-    available.find((model) => model.default)?.alias ||
-    available[0]?.alias ||
-    ""
-  const independentJudge = available.find(
-    (model) => !candidateModels.includes(model.alias),
-  )?.alias
-  const judge =
-    (!draft.judge || (candidateModels.includes(draft.judge) && independentJudge)
-      ? independentJudge
-      : draft.judge) ||
-    candidateModels.find((alias) =>
-      available.some((model) => model.alias === alias),
-    ) ||
-    ""
-  return { ...draft, candidateModels, selector, judge }
+): EvaluationProfileOption {
+  return { ...profile, available_models: [...candidateModels] }
 }
 
 function ModelChecks({
@@ -223,12 +177,14 @@ function ModelChecks({
   selected,
   disabled,
   maximum,
+  requiredAlias,
   onChange,
 }: {
   options: EvaluationModelOption[]
   selected: string[]
   disabled: boolean
   maximum: number
+  requiredAlias?: string
   onChange: (models: string[]) => void
 }) {
   return (
@@ -247,6 +203,7 @@ function ModelChecks({
               checked={checked}
               disabled={
                 disabled ||
+                (checked && option.alias === requiredAlias) ||
                 (!option.available && !checked) ||
                 (!checked && selected.length >= maximum)
               }
@@ -262,15 +219,100 @@ function ModelChecks({
             />
             <span className="min-w-0">
               <span className="font-mono">{option.alias}</span>
+              {option.alias === requiredAlias && (
+                <span className="text-muted-foreground ml-2 text-xs">
+                  required by profile
+                </span>
+              )}
               <span className="text-muted-foreground block truncate text-xs">
                 {option.available
                   ? option.resolved_model
-                  : option.blocked_reason || "Unavailable"}
+                  : option.blocked_reason || "Unavailable for this profile"}
               </span>
             </span>
           </label>
         )
       })}
+    </div>
+  )
+}
+
+function ProbeTabs({
+  evaluation,
+  active,
+  onChange,
+}: {
+  evaluation: RepositoryModelEvaluation
+  active: ProbeRunTab
+  onChange: (tab: ProbeRunTab) => void
+}) {
+  const availability: Record<ProbeRunTab, boolean> = {
+    status: true,
+    languages: Object.keys(evaluation.progress.languages).length > 0,
+    corpus: evaluation.progress.selected_files > 0,
+    report:
+      evaluation.status === "completed" &&
+      (evaluation.comparisons.length > 0 ||
+        (evaluation.work_sizing_results?.length ?? 0) > 0),
+  }
+  const tabs: Array<{ id: ProbeRunTab; label: string }> = [
+    { id: "status", label: "Status" },
+    { id: "languages", label: "Corpus by language" },
+    { id: "corpus", label: "Corpus preview" },
+    { id: "report", label: "Final report" },
+  ]
+  const focusTab = (tab: ProbeRunTab) => {
+    onChange(tab)
+    document.getElementById(`probe-tab-${evaluation.id}-${tab}`)?.focus()
+  }
+  return (
+    <div
+      role="tablist"
+      aria-label="Probe run details"
+      className="border-border bg-muted/40 flex gap-1 overflow-x-auto rounded-xl border p-1"
+    >
+      {tabs.map((tab) => (
+        <button
+          key={tab.id}
+          id={`probe-tab-${evaluation.id}-${tab.id}`}
+          type="button"
+          role="tab"
+          aria-selected={active === tab.id}
+          aria-controls={
+            active === tab.id
+              ? `probe-panel-${evaluation.id}-${tab.id}`
+              : undefined
+          }
+          tabIndex={active === tab.id ? 0 : -1}
+          disabled={!availability[tab.id]}
+          className="aria-selected:bg-background aria-selected:text-foreground text-muted-foreground shrink-0 rounded-lg px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-45 aria-selected:shadow-sm"
+          onClick={() => onChange(tab.id)}
+          onKeyDown={(event) => {
+            const enabled = tabs.filter(
+              (candidate) => availability[candidate.id],
+            )
+            const index = enabled.findIndex(
+              (candidate) => candidate.id === tab.id,
+            )
+            let next: ProbeRunTab | undefined
+            if (event.key === "ArrowRight") {
+              next = enabled[(index + 1) % enabled.length]?.id
+            } else if (event.key === "ArrowLeft") {
+              next = enabled[(index - 1 + enabled.length) % enabled.length]?.id
+            } else if (event.key === "Home") {
+              next = enabled[0]?.id
+            } else if (event.key === "End") {
+              next = enabled.at(-1)?.id
+            }
+            if (next) {
+              event.preventDefault()
+              focusTab(next)
+            }
+          }}
+        >
+          {tab.label}
+        </button>
+      ))}
     </div>
   )
 }
@@ -294,8 +336,8 @@ export function ModelEvaluationsPage({
   const [repositories, setRepositories] = useState<
     EvaluationRepositoryOption[]
   >([])
-  const [defaultFilesPerLanguage, setDefaultFilesPerLanguage] = useState(20)
-  const [maxFilesPerLanguage, setMaxFilesPerLanguage] = useState(20)
+  const [profiles, setProfiles] = useState<EvaluationProfileOption[]>([])
+  const [profileCount, setProfileCount] = useState(0)
   const [maxCandidateModels, setMaxCandidateModels] = useState(8)
   const [draft, setDraft] = useState<EvaluationDraft>(emptyDraft)
   const [busy, setBusy] = useState(false)
@@ -306,6 +348,7 @@ export function ModelEvaluationsPage({
     null,
   )
   const [corpusOffset, setCorpusOffset] = useState(0)
+  const [activeRunTab, setActiveRunTab] = useState<ProbeRunTab>("status")
 
   const load = useCallback(
     async (signal?: AbortSignal, newEditor = creatingNew) => {
@@ -317,8 +360,9 @@ export function ModelEvaluationsPage({
         setEvaluations(items)
         setModels(options.models)
         setRepositories(options.repositories)
-        setDefaultFilesPerLanguage(options.default_files_per_language)
-        setMaxFilesPerLanguage(options.max_files_per_language)
+        const availableProfiles = options.profiles ?? []
+        setProfiles(availableProfiles)
+        setProfileCount(options.profile_count ?? availableProfiles.length)
         setMaxCandidateModels(options.max_candidate_models)
         setSelectedID((current) => {
           if (newEditor) return ""
@@ -332,8 +376,9 @@ export function ModelEvaluationsPage({
             current.repository || current.candidateModels.length > 0
               ? current
               : emptyDraft(
-                  options.default_files_per_language,
-                  options.code_types,
+                  availableProfiles,
+                  options.models,
+                  options.max_candidate_models,
                 ),
           )
         }
@@ -393,6 +438,7 @@ export function ModelEvaluationsPage({
     },
     [selectedID],
   )
+
   const selectedStatus = selected?.status
   const selectedFileCount = selected?.progress.selected_files ?? 0
 
@@ -401,11 +447,14 @@ export function ModelEvaluationsPage({
     void load(controller.signal)
     return () => controller.abort()
   }, [load])
+
   useEffect(() => {
     const controller = new AbortController()
     void loadSelected(controller.signal)
     return () => controller.abort()
   }, [loadSelected])
+
+  useEffect(() => setActiveRunTab("status"), [selectedID])
 
   useEffect(() => {
     if (!selectedID || selectedFileCount === 0) {
@@ -484,35 +533,39 @@ export function ModelEvaluationsPage({
     }
   }
 
-  const validDraft =
-    draft.repository.trim() !== "" &&
-    draft.candidateModels.length >= 2 &&
-    draft.selector !== "" &&
-    draft.judge !== "" &&
-    draft.codeTypes.length > 0 &&
-    draft.candidateModels.length <= maxCandidateModels &&
-    draft.defaultFiles >= 1 &&
-    draft.defaultFiles <= maxFilesPerLanguage &&
-    Object.values(draft.languageFiles).every(
-      (value) => value >= 1 && value <= maxFilesPerLanguage,
-    ) &&
-    draft.candidateModels.every((alias) =>
-      models.some((model) => model.alias === alias && model.available),
-    ) &&
-    models.some((model) => model.alias === draft.selector && model.available) &&
-    models.some((model) => model.alias === draft.judge && model.available)
-
-  const configurationEditable = selected == null || selected.status === "draft"
-  const configurationControlsDisabled =
-    !configurationEditable || busy || loading
-  const draftDirty = selected
-    ? !draftsEqual(draft, evaluationDraft(selected))
-    : false
+  const displayProfiles = useMemo(() => {
+    if (!selected?.profile) return profiles
+    if (
+      selected.status === "draft" &&
+      profiles.some((profile) => profile.id === selected.profile?.id)
+    ) {
+      return profiles
+    }
+    return [
+      profileAsOption(selected.profile, selected.candidate_models),
+      ...profiles.filter((profile) => profile.id !== selected.profile?.id),
+    ]
+  }, [profiles, selected])
+  const selectedProfile = displayProfiles.find(
+    (profile) => profile.id === draft.profileID,
+  )
+  const compatibleAliases = useMemo(
+    () => new Set(profileAvailableAliases(selectedProfile, models)),
+    [models, selectedProfile],
+  )
   const displayModels = useMemo(
     () => [
-      ...models,
-      ...[...new Set([...draft.candidateModels, draft.selector, draft.judge])]
-        .filter(Boolean)
+      ...models.map((model) => ({
+        ...model,
+        available: model.available && compatibleAliases.has(model.alias),
+        blocked_reason:
+          model.available && compatibleAliases.has(model.alias)
+            ? model.blocked_reason
+            : !selectedProfile
+              ? "Select a review profile first."
+              : "Unavailable for this profile account.",
+      })),
+      ...draft.candidateModels
         .filter((alias) => !models.some((model) => model.alias === alias))
         .map((alias) => ({
           alias,
@@ -521,35 +574,29 @@ export function ModelEvaluationsPage({
           blocked_reason: "No longer present in the model catalog.",
         })),
     ],
-    [draft.candidateModels, draft.judge, draft.selector, models],
+    [compatibleAliases, draft.candidateModels, models, selectedProfile],
   )
-  const unavailableModelSelected =
-    !validDraft &&
-    (draft.candidateModels.some(
-      (alias) =>
-        !models.some((model) => model.alias === alias && model.available),
-    ) ||
-      Boolean(
-        draft.selector &&
-        !models.some(
-          (model) => model.alias === draft.selector && model.available,
-        ),
-      ) ||
-      Boolean(
-        draft.judge &&
-        !models.some((model) => model.alias === draft.judge && model.available),
-      ))
-
+  const validDraft =
+    draft.repository.trim() !== "" &&
+    Boolean(selectedProfile) &&
+    draft.candidateModels.length >= 2 &&
+    draft.candidateModels.length <= maxCandidateModels &&
+    draft.candidateModels.every((alias) => compatibleAliases.has(alias)) &&
+    draft.candidateModels.includes(selectedProfile?.reviewer_model ?? "")
+  const configurationEditable = selected == null || selected.status === "draft"
+  const configurationControlsDisabled =
+    !configurationEditable || busy || loading
+  const draftDirty = selected
+    ? !draftsEqual(draft, evaluationDraft(selected))
+    : false
+  const unavailableModelSelected = draft.candidateModels.some(
+    (alias) => !compatibleAliases.has(alias),
+  )
   const languages = useMemo(
     () =>
       Object.entries(selected?.progress.languages ?? {}).sort(([a], [b]) =>
         a.localeCompare(b),
       ),
-    [selected],
-  )
-  const reportWinner = useMemo(
-    () =>
-      buildModelEvaluationReportAnalysis(selected?.comparisons ?? []).winner,
     [selected],
   )
 
@@ -576,6 +623,15 @@ export function ModelEvaluationsPage({
     )
   }
 
+  const openDedicatedReport = () => {
+    if (!selected) return
+    if (onOpenReport) {
+      onOpenReport(selected.id)
+    } else {
+      window.location.assign(`/model-evaluations/${selected.id}/report`)
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <PageHeader title="Model review probes">
@@ -589,7 +645,8 @@ export function ModelEvaluationsPage({
             setSelected(null)
             setCreatingNew(true)
             setCorpusOffset(0)
-            setDraft(emptyDraft(defaultFilesPerLanguage))
+            setActiveRunTab("status")
+            setDraft(emptyDraft(profiles, models, maxCandidateModels))
           }}
         >
           New probe
@@ -667,22 +724,24 @@ export function ModelEvaluationsPage({
           <div className="mx-auto max-w-6xl space-y-6">
             <div className="border-border bg-muted/40 rounded-lg border p-3 text-sm">
               Comparison-only flow. Probes assess model quality, reliability,
-              usage, and efficiency on the same corpus. They do not create
-              repository findings or issue drafts.
+              usage, and efficiency under one reusable review profile. They do
+              not create repository findings or issue drafts.
             </div>
+
             <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h2 className="font-semibold">Probe repository</h2>
+                  <h2 className="font-semibold">Probe setup</h2>
                   <p className="text-muted-foreground text-xs">
-                    Blank advanced revision uses the repository default branch.
+                    The selected profile freezes scope, reviewer policy,
+                    account, and the work-sizing sweep when the probe starts.
                   </p>
                 </div>
                 {selected && (
                   <Badge variant="secondary">{selected.status}</Badge>
                 )}
               </div>
-              <div>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 <Field label="Repository" required>
                   <Input
                     aria-label="Repository"
@@ -702,224 +761,180 @@ export function ModelEvaluationsPage({
                     ))}
                   </datalist>
                   <p className="text-muted-foreground text-xs">
-                    Choose a registered Git Workspace repository or enter
-                    owner/repository. The probe acquires a managed fresh
-                    checkout and releases it before model calls.
+                    The probe uses a managed fresh checkout and releases it
+                    before model calls.
                   </p>
                 </Field>
+                <Field
+                  label="Revision"
+                  hint="Optional branch, tag, or commit. Blank uses the repository default branch."
+                >
+                  <Input
+                    aria-label="Revision"
+                    value={draft.ref}
+                    onChange={(event) =>
+                      setDraft({ ...draft, ref: event.target.value })
+                    }
+                    placeholder="Default repository branch"
+                    disabled={configurationControlsDisabled}
+                  />
+                </Field>
+                <Field label="Review profile" required>
+                  <select
+                    aria-label="Review profile"
+                    className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+                    value={draft.profileID}
+                    disabled={configurationControlsDisabled}
+                    onChange={(event) => {
+                      const profile = displayProfiles.find(
+                        (item) => item.id === event.target.value,
+                      )
+                      setDraft({
+                        ...draft,
+                        profileID: event.target.value,
+                        candidateModels: selectProfileCandidates(
+                          draft.candidateModels,
+                          profile,
+                          models,
+                          maxCandidateModels,
+                        ),
+                      })
+                    }}
+                  >
+                    <option value="">Select profile</option>
+                    {displayProfiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.name} · {profile.reviewer_model}
+                      </option>
+                    ))}
+                  </select>
+                  {profileCount === 0 && !selected?.profile && (
+                    <p role="alert" className="text-destructive text-xs">
+                      Create a repository review profile before running a probe.
+                    </p>
+                  )}
+                  {profileCount > 0 &&
+                    profiles.length === 0 &&
+                    !selected?.profile && (
+                      <p role="alert" className="text-destructive text-xs">
+                        No review profile has a runnable reviewer plus a second
+                        compatible model on its selected account.
+                      </p>
+                    )}
+                  <a
+                    className="text-primary text-xs underline underline-offset-2"
+                    href="/repository-reviews/profiles"
+                  >
+                    Manage review profiles
+                  </a>
+                </Field>
               </div>
-            </section>
 
-            <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
-              <h2 className="font-semibold">Models</h2>
-              <p className="text-muted-foreground mb-4 text-xs">
-                Every candidate receives identical immutable chunks. Judge
-                scores are labeled AI judged.
-              </p>
-              <Field label="Candidate models" required>
-                <ModelChecks
-                  options={displayModels}
-                  selected={draft.candidateModels}
-                  disabled={configurationControlsDisabled}
-                  maximum={maxCandidateModels}
-                  onChange={(candidateModels) =>
-                    setDraft(
-                      modelProbeCandidates(
-                        draft,
-                        candidateModels,
-                        displayModels,
-                      ),
-                    )
-                  }
-                />
-              </Field>
-              <div className="mt-4">
-                <ReviewAdvancedSection description="revision, scope, quotas, selector, and judge">
-                  <section className="space-y-4">
-                    <h3 className="text-sm font-semibold">Repository scope</h3>
-                    <Field
-                      label="Revision"
-                      hint="Optional branch, tag, or commit. Blank uses the repository default branch."
-                    >
-                      <Input
-                        aria-label="Revision"
-                        value={draft.ref}
-                        onChange={(event) =>
-                          setDraft({ ...draft, ref: event.target.value })
-                        }
-                        placeholder="Default repository branch"
-                        disabled={configurationControlsDisabled}
-                      />
-                    </Field>
+              {selectedProfile && (
+                <div
+                  aria-label="Frozen review profile"
+                  className="border-border bg-muted/40 mt-4 rounded-lg border p-4"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
-                      <p className="mb-2 text-sm font-medium">Code types</p>
-                      <div className="flex flex-wrap gap-2">
-                        {codeTypes.map((item) => {
-                          const checked = draft.codeTypes.includes(item.value)
-                          return (
-                            <label
-                              key={item.value}
-                              className="border-border flex gap-2 rounded-lg border px-3 py-2 text-sm"
-                            >
-                              <input
-                                aria-label={item.label}
-                                type="checkbox"
-                                checked={checked}
-                                disabled={configurationControlsDisabled}
-                                onChange={() =>
-                                  setDraft({
-                                    ...draft,
-                                    codeTypes: checked
-                                      ? draft.codeTypes.filter(
-                                          (value) => value !== item.value,
-                                        )
-                                      : [...draft.codeTypes, item.value],
-                                  })
-                                }
-                              />
-                              {item.label}
-                            </label>
-                          )
-                        })}
-                      </div>
+                      <h3 className="font-medium">{selectedProfile.name}</h3>
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        v{selectedProfile.version} · reviewer{" "}
+                        <span className="font-mono">
+                          {selectedProfile.reviewer_model}
+                        </span>
+                        {selectedProfile.account_ref
+                          ? ` · account ${selectedProfile.account_ref}`
+                          : " · default account"}
+                      </p>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <Field
-                        label="Include folders"
-                        hint="One exact repository-relative prefix per line."
-                      >
-                        <Textarea
-                          aria-label="Include folders"
-                          value={draft.includeFolders}
-                          onChange={(event) =>
-                            setDraft({
-                              ...draft,
-                              includeFolders: event.target.value,
-                            })
-                          }
-                          placeholder="pkg/core\nweb/frontend"
-                          disabled={configurationControlsDisabled}
-                        />
-                      </Field>
-                      <Field
-                        label="Ignore folders"
-                        hint="Exclusions always win."
-                      >
-                        <Textarea
-                          aria-label="Ignore folders"
-                          value={draft.excludeFolders}
-                          onChange={(event) =>
-                            setDraft({
-                              ...draft,
-                              excludeFolders: event.target.value,
-                            })
-                          }
-                          placeholder="examples\ntestdata"
-                          disabled={configurationControlsDisabled}
-                        />
-                      </Field>
+                    <Badge variant="outline">Profile policy</Badge>
+                  </div>
+                  <p className="mt-3 text-sm">{selectedProfile.review_focus}</p>
+                  <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                      <dt className="text-muted-foreground">Code types</dt>
+                      <dd className="mt-1 font-medium">
+                        {selectedProfile.focus.code_types?.join(", ") || "None"}
+                      </dd>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-[1fr_12rem]">
-                      <Field
-                        label="Free-text scope"
-                        hint="AI may narrow, never widen, the structured scope."
-                      >
-                        <Textarea
-                          aria-label="Free-text scope"
-                          value={draft.freeText}
-                          onChange={(event) =>
-                            setDraft({ ...draft, freeText: event.target.value })
-                          }
-                          placeholder="Focus on request routing and persistence boundaries."
-                          disabled={configurationControlsDisabled}
-                        />
-                      </Field>
-                      <Field
-                        label="Files per language"
-                        hint={`Default quota; hard maximum: ${maxFilesPerLanguage}.`}
-                      >
-                        <Input
-                          aria-label="Files per language"
-                          type="number"
-                          min={1}
-                          max={maxFilesPerLanguage}
-                          value={draft.defaultFiles}
-                          disabled={configurationControlsDisabled}
-                          onChange={(event) =>
-                            setDraft({
-                              ...draft,
-                              defaultFiles: clampLanguageLimit(
-                                event.target.value,
-                                maxFilesPerLanguage,
-                                draft.defaultFiles,
-                              ),
-                            })
-                          }
-                        />
-                      </Field>
+                    <div>
+                      <dt className="text-muted-foreground">Scope folders</dt>
+                      <dd className="mt-1 font-medium">
+                        {selectedProfile.focus.include_folders?.join(", ") ||
+                          "All eligible folders"}
+                      </dd>
                     </div>
-                  </section>
-                  <section className="space-y-4 border-t pt-4">
-                    <h3 className="text-sm font-semibold">Model roles</h3>
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <Field label="File selector model" required>
-                        <select
-                          aria-label="File selector model"
-                          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                          value={draft.selector}
-                          disabled={configurationControlsDisabled}
-                          onChange={(event) =>
-                            setDraft({ ...draft, selector: event.target.value })
-                          }
-                        >
-                          <option value="">Select model</option>
-                          {displayModels.map((model) => (
-                            <option
-                              key={model.alias}
-                              value={model.alias}
-                              disabled={!model.available}
-                            >
-                              {model.alias}
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
-                      <Field label="Judge and analyzer model" required>
-                        <select
-                          aria-label="Judge and analyzer model"
-                          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                          value={draft.judge}
-                          disabled={configurationControlsDisabled}
-                          onChange={(event) =>
-                            setDraft({ ...draft, judge: event.target.value })
-                          }
-                        >
-                          <option value="">Select model</option>
-                          {displayModels.map((model) => (
-                            <option
-                              key={model.alias}
-                              value={model.alias}
-                              disabled={!model.available}
-                            >
-                              {model.alias}
-                            </option>
-                          ))}
-                        </select>
-                      </Field>
+                    <div>
+                      <dt className="text-muted-foreground">
+                        Excluded folders
+                      </dt>
+                      <dd className="mt-1 font-medium">
+                        {selectedProfile.focus.exclude_folders?.join(", ") ||
+                          "None"}
+                      </dd>
                     </div>
-                    {draft.candidateModels.includes(draft.judge) &&
-                      draft.judge && (
-                        <p
-                          role="status"
-                          className="mt-3 flex items-center gap-2 text-sm text-amber-600"
-                        >
-                          <IconAlertTriangle className="size-4" /> Judge
-                          overlaps a candidate; results will show a bias
-                          warning.
-                        </p>
-                      )}
-                  </section>
-                </ReviewAdvancedSection>
+                    <div>
+                      <dt className="text-muted-foreground">
+                        Files per batch ceiling
+                      </dt>
+                      <dd className="mt-1 font-medium tabular-nums">
+                        {selectedProfile.max_files_per_batch}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">
+                        Content bytes per batch ceiling
+                      </dt>
+                      <dd className="mt-1 font-medium tabular-nums">
+                        {formatBytes(
+                          selectedProfile.max_content_bytes_per_batch,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">
+                        Parallel review workers
+                      </dt>
+                      <dd className="mt-1 font-medium tabular-nums">
+                        {selectedProfile.max_parallel_children}
+                      </dd>
+                    </div>
+                  </dl>
+                  {selectedProfile.focus.free_text && (
+                    <p className="text-muted-foreground mt-3 text-xs">
+                      <strong className="text-foreground">
+                        Additional scope guidance:
+                      </strong>{" "}
+                      {selectedProfile.focus.free_text}
+                    </p>
+                  )}
+                  <p className="text-muted-foreground mt-3 text-xs">
+                    The probe varies files and content bytes independently up to
+                    these configured ceilings and records requested versus
+                    observed batch sizes.
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-5">
+                <Field label="Candidate models" required>
+                  <ModelChecks
+                    options={displayModels}
+                    selected={draft.candidateModels}
+                    disabled={configurationControlsDisabled}
+                    maximum={maxCandidateModels}
+                    requiredAlias={selectedProfile?.reviewer_model}
+                    onChange={(candidateModels) =>
+                      setDraft({ ...draft, candidateModels })
+                    }
+                  />
+                </Field>
+                <p className="text-muted-foreground mt-2 text-xs">
+                  Every compatible candidate is tested on the same immutable
+                  corpus and sizing plan. The profile reviewer and a second
+                  compatible model are selected automatically.
+                </p>
               </div>
               {draft.candidateModels.length >= maxCandidateModels && (
                 <p className="text-muted-foreground mt-3 text-xs">
@@ -928,8 +943,15 @@ export function ModelEvaluationsPage({
               )}
               {unavailableModelSelected && (
                 <p role="alert" className="text-destructive mt-3 text-sm">
-                  Replace unavailable selector/judge models and remove any
-                  unavailable candidate models before running.
+                  Remove candidate models unavailable for the selected profile
+                  account before running.
+                </p>
+              )}
+              {selectedProfile && compatibleAliases.size < 2 && (
+                <p role="alert" className="text-destructive mt-3 text-sm">
+                  This profile account exposes fewer than two compatible models.
+                  Update the profile account or model catalog before running a
+                  comparison probe.
                 </p>
               )}
               <div className="mt-5 flex flex-wrap gap-2">
@@ -983,419 +1005,381 @@ export function ModelEvaluationsPage({
             </section>
 
             {selected && (
-              <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
-                <div
-                  className="flex items-center justify-between gap-3"
-                  aria-live="polite"
-                  aria-atomic="true"
-                >
-                  <div>
-                    <h2 className="font-semibold">Progress</h2>
-                    <p className="text-muted-foreground text-xs">
-                      {selected.progress.message || selected.progress.stage}
-                    </p>
-                  </div>
-                  <span className="font-mono text-sm">
-                    {selected.progress.percent.toFixed(0)}%
-                  </span>
-                </div>
-                <div
-                  className="bg-muted mt-3 h-2 overflow-hidden rounded-full"
-                  role="progressbar"
-                  aria-label="Model probe progress"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.min(
-                    100,
-                    Math.max(0, selected.progress.percent),
-                  )}
-                >
-                  {/* ui-rule-allow dynamic-style: width reflects durable evaluation progress. */}
+              <ProbeTabs
+                evaluation={selected}
+                active={activeRunTab}
+                onChange={setActiveRunTab}
+              />
+            )}
+
+            {selected && activeRunTab === "status" && (
+              <div
+                id={`probe-panel-${selected.id}-status`}
+                role="tabpanel"
+                aria-labelledby={`probe-tab-${selected.id}-status`}
+              >
+                <section className="border-border bg-card rounded-xl border p-4 sm:p-5">
                   <div
-                    className="bg-primary h-full"
-                    style={{
-                      width: `${Math.min(100, Math.max(0, selected.progress.percent))}%`,
-                    }}
-                  />
-                </div>
-                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-4">
-                  <span>{selected.progress.selected_files} files selected</span>
-                  <span>
-                    {selected.progress.completed_files} files analyzed
-                  </span>
-                  <span>
-                    {selected.progress.completed_tasks}/
-                    {selected.progress.total_tasks} tasks
-                  </span>
-                  <span>
-                    {selected.usage.input_tokens + selected.usage.output_tokens}{" "}
-                    tokens
-                  </span>
-                </div>
-                {(selected.progress.total_calls ?? 0) > 0 && (
-                  <div
-                    role="region"
-                    aria-label="Candidate call progress"
-                    className="border-border bg-muted/40 mt-4 rounded-lg border p-3"
+                    className="flex items-center justify-between gap-3"
+                    aria-live="polite"
+                    aria-atomic="true"
                   >
-                    <div className="grid gap-2 text-xs sm:grid-cols-4">
-                      <span>
-                        Batch {selected.progress.current_batch ?? 0}/
-                        {selected.progress.total_batches ?? 0}
-                      </span>
-                      <span>
-                        {selected.progress.completed_calls ?? 0}/
-                        {selected.progress.total_calls ?? 0} candidate calls
-                      </span>
-                      <span>
-                        {selected.progress.active_children?.length ?? 0} active
-                      </span>
-                      <span>{selected.progress.failed_calls ?? 0} failed</span>
+                    <div>
+                      <h2 className="font-semibold">Progress and status</h2>
+                      <p className="text-muted-foreground text-xs">
+                        {selected.progress.message || selected.progress.stage}
+                      </p>
                     </div>
-                    {(selected.progress.active_children?.length ?? 0) > 0 && (
-                      <ul className="mt-3 space-y-2 text-xs">
-                        {selected.progress.active_children?.map((child) => (
-                          <li
-                            key={child.index}
-                            className="border-border flex flex-wrap justify-between gap-2 border-t pt-2 first:border-0 first:pt-0"
-                          >
-                            <span className="font-medium">
-                              {child.label ||
-                                `Candidate call ${child.index} of ${selected.progress.total_calls ?? 0}`}
-                            </span>
-                            <span className="text-muted-foreground">
-                              {child.model_alias || "resolved model"} ·{" "}
-                              {child.scope_count} file
-                              {child.scope_count === 1 ? "" : "s"} · started{" "}
-                              {formatProgressTime(child.started_at)} · running{" "}
-                              {formatProgressElapsed(child.started_at)}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
+                    <span className="font-mono text-sm">
+                      {selected.progress.percent.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div
+                    className="bg-muted mt-3 h-2 overflow-hidden rounded-full"
+                    role="progressbar"
+                    aria-label="Model probe progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.min(
+                      100,
+                      Math.max(0, selected.progress.percent),
                     )}
-                    <p className="text-muted-foreground mt-3 text-xs">
-                      Candidate calls update live. Analyzed files and durable
-                      task counts advance after the batch is judged and
-                      checkpointed.
-                    </p>
-                  </div>
-                )}
-                {(selected.progress.current_model ||
-                  selected.progress.current_path) && (
-                  <p className="text-muted-foreground mt-3 text-xs">
-                    {selected.progress.current_model
-                      ? `Model ${selected.progress.current_model}`
-                      : ""}
-                    {selected.progress.current_model &&
-                    selected.progress.current_path
-                      ? " · "
-                      : ""}
-                    {selected.progress.current_path
-                      ? `File ${selected.progress.current_path}`
-                      : ""}
-                  </p>
-                )}
-                <p className="text-muted-foreground mt-3 text-xs">
-                  Last progress update{" "}
-                  <time dateTime={selected.progress.updated_at}>
-                    {formatProgressTime(selected.progress.updated_at)}
-                  </time>
-                </p>
-                {selected.failure && (
-                  <p className="text-destructive mt-3 text-sm">
-                    {selected.failure}
-                  </p>
-                )}
-                {selected.warnings.map((warning) => (
-                  <p key={warning} className="mt-2 text-sm text-amber-600">
-                    {warning}
-                  </p>
-                ))}
-                {selected.run_ids.length > 0 && (
-                  <details className="border-border mt-4 rounded-lg border p-3 text-xs">
-                    <summary className="cursor-pointer font-medium">
-                      Run history ({selected.run_ids.length})
-                    </summary>
-                    <ul className="text-muted-foreground mt-2 space-y-1">
-                      {selected.run_ids
-                        .slice()
-                        .reverse()
-                        .map((runID) => (
-                          <li key={runID}>
-                            <a
-                              className="text-primary underline underline-offset-2"
-                              href={`/agent/workflows?mode=operate&run=${encodeURIComponent(runID)}`}
-                            >
-                              {runID}
-                            </a>
-                          </li>
-                        ))}
-                    </ul>
-                  </details>
-                )}
-              </section>
-            )}
-
-            {selected && languages.length > 0 && (
-              <section
-                aria-label="Corpus by language"
-                tabIndex={0}
-                className="border-border bg-card overflow-x-auto rounded-xl border p-4 sm:p-5"
-              >
-                <h2 className="font-semibold">Corpus by language</h2>
-                {selected.corpus?.selection_rationale && (
-                  <p className="text-muted-foreground mt-1 text-xs">
-                    {selected.corpus.selection_rationale}
-                  </p>
-                )}
-                <table className="mt-4 w-full min-w-[42rem] text-left text-sm">
-                  <caption className="sr-only">
-                    Selected model probe corpus grouped by language
-                  </caption>
-                  <thead>
-                    <tr className="border-border border-b">
-                      <th scope="col" className="py-2">
-                        Language
-                      </th>
-                      <th scope="col">Available</th>
-                      <th scope="col">Selected</th>
-                      <th scope="col">Bytes</th>
-                      <th scope="col">Regions</th>
-                      <th scope="col">Per-language limit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {languages.map(([language, progress]) => (
-                      <tr
-                        key={language}
-                        className="border-border border-b last:border-0"
-                      >
-                        <th
-                          scope="row"
-                          className="py-2 text-left font-mono font-normal"
-                        >
-                          {language}
-                          {progress.limited && (
-                            <Badge className="ml-2" variant="outline">
-                              limited
-                            </Badge>
-                          )}
-                        </th>
-                        <td>{progress.available_files}</td>
-                        <td>{progress.selected_files}</td>
-                        <td>{formatBytes(progress.selected_bytes)}</td>
-                        <td>{progress.regions.length}</td>
-                        <td>
-                          <div className="flex min-w-40 items-center gap-2">
-                            <Input
-                              aria-label={`${language} files`}
-                              className="w-20"
-                              type="number"
-                              min={1}
-                              max={maxFilesPerLanguage}
-                              value={
-                                draft.languageFiles[language] ??
-                                draft.defaultFiles
-                              }
-                              disabled={configurationControlsDisabled}
-                              onChange={(event) =>
-                                setDraft({
-                                  ...draft,
-                                  languageFiles: {
-                                    ...draft.languageFiles,
-                                    [language]: clampLanguageLimit(
-                                      event.target.value,
-                                      maxFilesPerLanguage,
-                                      draft.languageFiles[language] ??
-                                        draft.defaultFiles,
-                                    ),
-                                  },
-                                })
-                              }
-                            />
-                            {Object.hasOwn(draft.languageFiles, language) ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="ghost"
-                                disabled={configurationControlsDisabled}
-                                aria-label={`Use default quota for ${language}`}
-                                onClick={() => {
-                                  const languageFiles = {
-                                    ...draft.languageFiles,
-                                  }
-                                  delete languageFiles[language]
-                                  setDraft({ ...draft, languageFiles })
-                                }}
-                              >
-                                Default
-                              </Button>
-                            ) : (
-                              <span className="text-muted-foreground text-xs">
-                                default
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {(selected.corpus || corpusPage?.commit_sha) && (
-                  <p className="text-muted-foreground mt-3 font-mono text-xs">
-                    Commit{" "}
-                    {selected.corpus?.commit_sha ?? corpusPage?.commit_sha} ·
-                    inventory{" "}
-                    {selected.corpus?.inventory_hash ??
-                      corpusPage?.inventory_hash}
-                    {corpusPage ? ` · ${corpusPage.total} files` : ""}
-                  </p>
-                )}
-              </section>
-            )}
-
-            {selected && corpusPage && corpusPage.total > 0 && (
-              <section
-                aria-label="Corpus preview"
-                tabIndex={0}
-                className="border-border bg-card overflow-x-auto rounded-xl border p-4 sm:p-5"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h2 className="font-semibold">Corpus preview</h2>
-                    <p className="text-muted-foreground text-xs">
-                      Safe immutable references only; source content and local
-                      checkout paths are never returned.
-                    </p>
-                  </div>
-                  <span className="text-muted-foreground text-xs">
-                    Showing {corpusOffset + 1}–
-                    {Math.min(
-                      corpusOffset + corpusPage.files.length,
-                      corpusPage.total,
-                    )}{" "}
-                    of {corpusPage.total}
-                  </span>
-                </div>
-                <table className="mt-4 w-full min-w-[48rem] text-left text-sm">
-                  <caption className="sr-only">
-                    Paged immutable model probe corpus references
-                  </caption>
-                  <thead>
-                    <tr className="border-border border-b">
-                      <th scope="col" className="py-2">
-                        Path
-                      </th>
-                      <th scope="col">Language</th>
-                      <th scope="col">Code type</th>
-                      <th scope="col">Region</th>
-                      <th scope="col">Size</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {corpusPage.files.map((file) => (
-                      <tr
-                        key={file.candidate_id}
-                        className="border-border border-b last:border-0"
-                      >
-                        <th
-                          scope="row"
-                          className="py-2 text-left font-mono font-normal"
-                        >
-                          {file.path}
-                        </th>
-                        <td>{file.language}</td>
-                        <td>{file.code_type}</td>
-                        <td>{file.region}</td>
-                        <td>{formatBytes(file.size_bytes)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="mt-3 flex justify-end gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={busy || corpusOffset === 0}
-                    onClick={() =>
-                      setCorpusOffset(
-                        Math.max(0, corpusOffset - corpusPageSize),
-                      )
-                    }
                   >
-                    Previous corpus page
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={busy || corpusPage.next_offset == null}
-                    onClick={() =>
-                      setCorpusOffset(corpusPage.next_offset ?? corpusOffset)
-                    }
-                  >
-                    Next corpus page
-                  </Button>
-                </div>
-              </section>
-            )}
-
-            {selected && selected.comparisons.length > 0 && (
-              <section
-                aria-label="Probe report ready"
-                className="via-card overflow-hidden rounded-xl border border-sky-200 bg-gradient-to-br from-sky-50 to-violet-50 p-4 sm:p-5 dark:border-sky-900 dark:from-sky-950/30 dark:to-violet-950/20"
-              >
-                <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="max-w-2xl">
-                    <div className="flex items-center gap-2 text-sky-700 dark:text-sky-300">
-                      <IconReportAnalytics
-                        className="size-5"
-                        aria-hidden="true"
-                      />
-                      <h2 className="font-semibold">Visual report ready</h2>
-                    </div>
-                    <p className="text-muted-foreground mt-2 text-sm leading-6">
-                      The full report turns this comparison into score graphs,
-                      efficiency tradeoffs, claim assessment, and readable
-                      strengths and limitations.
-                    </p>
-                    <p className="mt-3 flex items-center gap-2 text-sm">
-                      <IconTrophy
-                        className="size-4 text-amber-500"
-                        aria-hidden="true"
-                      />
-                      <strong>
-                        {reportWinner?.model_alias ?? "Results need attention"}
-                      </strong>
-                      {reportWinner?.overall_score == null
-                        ? " · no fully completed scored model"
-                        : ` leads at ${reportWinner.overall_score.toFixed(1)} overall`}
-                    </p>
+                    {/* ui-rule-allow dynamic-style: width reflects durable evaluation progress. */}
+                    <div
+                      className="bg-primary h-full"
+                      style={{
+                        width: `${Math.min(100, Math.max(0, selected.progress.percent))}%`,
+                      }}
+                    />
                   </div>
-                  <div className="flex shrink-0 flex-col items-start gap-2 lg:items-end">
-                    <div className="text-muted-foreground text-xs">
-                      {selected.comparisons.length} models ·{" "}
-                      {selected.progress.completed_files}/
-                      {selected.progress.selected_files} files
-                    </div>
-                    <Button
-                      type="button"
-                      onClick={() =>
-                        onOpenReport
-                          ? onOpenReport(selected.id)
-                          : window.location.assign(
-                              `/model-evaluations/${selected.id}/report`,
-                            )
-                      }
+                  <div className="mt-3 grid gap-2 text-xs sm:grid-cols-4">
+                    <span>
+                      {selected.progress.selected_files} files selected
+                    </span>
+                    <span>
+                      {selected.progress.completed_files} files analyzed
+                    </span>
+                    <span>
+                      {selected.progress.completed_tasks}/
+                      {selected.progress.total_tasks} tasks
+                    </span>
+                    <span>
+                      {selected.usage.input_tokens +
+                        selected.usage.output_tokens}{" "}
+                      tokens
+                    </span>
+                  </div>
+                  {(selected.progress.total_calls ?? 0) > 0 && (
+                    <div
+                      role="region"
+                      aria-label="Candidate call progress"
+                      className="border-border bg-muted/40 mt-4 rounded-lg border p-3"
                     >
-                      View full report
-                      <IconArrowRight aria-hidden="true" />
-                    </Button>
+                      <div className="grid gap-2 text-xs sm:grid-cols-4">
+                        <span>
+                          Batch {selected.progress.current_batch ?? 0}/
+                          {selected.progress.total_batches ?? 0}
+                        </span>
+                        <span>
+                          {selected.progress.completed_calls ?? 0}/
+                          {selected.progress.total_calls ?? 0} candidate calls
+                        </span>
+                        <span>
+                          {selected.progress.active_children?.length ?? 0}{" "}
+                          active
+                        </span>
+                        <span>
+                          {selected.progress.failed_calls ?? 0} failed
+                        </span>
+                      </div>
+                      {(selected.progress.active_children?.length ?? 0) > 0 && (
+                        <ul className="mt-3 space-y-2 text-xs">
+                          {selected.progress.active_children?.map((child) => (
+                            <li
+                              key={child.index}
+                              className="border-border flex flex-wrap justify-between gap-2 border-t pt-2 first:border-0 first:pt-0"
+                            >
+                              <span className="font-medium">
+                                {child.label ||
+                                  `Candidate call ${child.index} of ${selected.progress.total_calls ?? 0}`}
+                              </span>
+                              <span className="text-muted-foreground">
+                                {child.model_alias || "resolved model"} ·{" "}
+                                {child.scope_count} file
+                                {child.scope_count === 1 ? "" : "s"} · started{" "}
+                                {formatProgressTime(child.started_at)} · running{" "}
+                                {formatProgressElapsed(child.started_at)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                  {(selected.progress.current_model ||
+                    selected.progress.current_path) && (
+                    <p className="text-muted-foreground mt-3 text-xs">
+                      {selected.progress.current_model
+                        ? `Model ${selected.progress.current_model}`
+                        : ""}
+                      {selected.progress.current_model &&
+                      selected.progress.current_path
+                        ? " · "
+                        : ""}
+                      {selected.progress.current_path
+                        ? `File ${selected.progress.current_path}`
+                        : ""}
+                    </p>
+                  )}
+                  <p className="text-muted-foreground mt-3 text-xs">
+                    Last progress update{" "}
+                    <time dateTime={selected.progress.updated_at}>
+                      {formatProgressTime(selected.progress.updated_at)}
+                    </time>
+                  </p>
+                  {selected.failure && (
+                    <p className="text-destructive mt-3 text-sm">
+                      {selected.failure}
+                    </p>
+                  )}
+                  {selected.warnings.map((warning) => (
+                    <p key={warning} className="mt-2 text-sm text-amber-600">
+                      <IconAlertTriangle
+                        className="mr-1 inline size-4"
+                        aria-hidden="true"
+                      />
+                      {warning}
+                    </p>
+                  ))}
+                  {selected.run_ids.length > 0 && (
+                    <details className="border-border mt-4 rounded-lg border p-3 text-xs">
+                      <summary className="cursor-pointer font-medium">
+                        Run history ({selected.run_ids.length})
+                      </summary>
+                      <ul className="text-muted-foreground mt-2 space-y-1">
+                        {selected.run_ids
+                          .slice()
+                          .reverse()
+                          .map((runID) => (
+                            <li key={runID}>
+                              <a
+                                className="text-primary underline underline-offset-2"
+                                href={`/agent/workflows?mode=operate&run=${encodeURIComponent(runID)}`}
+                              >
+                                {runID}
+                              </a>
+                            </li>
+                          ))}
+                      </ul>
+                    </details>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {selected && activeRunTab === "languages" && (
+              <div
+                id={`probe-panel-${selected.id}-languages`}
+                role="tabpanel"
+                aria-labelledby={`probe-tab-${selected.id}-languages`}
+              >
+                <section
+                  aria-label="Corpus by language"
+                  tabIndex={0}
+                  className="border-border bg-card overflow-x-auto rounded-xl border p-4 sm:p-5"
+                >
+                  <h2 className="font-semibold">Corpus by language</h2>
+                  {selected.corpus?.selection_rationale && (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      {selected.corpus.selection_rationale}
+                    </p>
+                  )}
+                  <table className="mt-4 w-full min-w-[36rem] text-left text-sm">
+                    <caption className="sr-only">
+                      Selected model probe corpus grouped by language
+                    </caption>
+                    <thead>
+                      <tr className="border-border border-b">
+                        <th scope="col" className="py-2">
+                          Language
+                        </th>
+                        <th scope="col">Available</th>
+                        <th scope="col">Selected</th>
+                        <th scope="col">Completed</th>
+                        <th scope="col">Bytes</th>
+                        <th scope="col">Regions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {languages.map(([language, progress]) => (
+                        <tr
+                          key={language}
+                          className="border-border border-b last:border-0"
+                        >
+                          <th
+                            scope="row"
+                            className="py-2 text-left font-mono font-normal"
+                          >
+                            {language}
+                            {progress.limited && (
+                              <Badge className="ml-2" variant="outline">
+                                limited
+                              </Badge>
+                            )}
+                          </th>
+                          <td>{progress.available_files}</td>
+                          <td>{progress.selected_files}</td>
+                          <td>{progress.completed_files}</td>
+                          <td>{formatBytes(progress.selected_bytes)}</td>
+                          <td>{progress.regions.length}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {(selected.corpus || corpusPage?.commit_sha) && (
+                    <p className="text-muted-foreground mt-3 font-mono text-xs">
+                      Commit{" "}
+                      {selected.corpus?.commit_sha ?? corpusPage?.commit_sha} ·
+                      inventory{" "}
+                      {selected.corpus?.inventory_hash ??
+                        corpusPage?.inventory_hash}
+                      {corpusPage ? ` · ${corpusPage.total} files` : ""}
+                    </p>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {selected && activeRunTab === "corpus" && (
+              <div
+                id={`probe-panel-${selected.id}-corpus`}
+                role="tabpanel"
+                aria-labelledby={`probe-tab-${selected.id}-corpus`}
+              >
+                <section
+                  aria-label="Corpus preview"
+                  tabIndex={0}
+                  className="border-border bg-card overflow-x-auto rounded-xl border p-4 sm:p-5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="font-semibold">Corpus preview</h2>
+                      <p className="text-muted-foreground text-xs">
+                        Safe immutable references only; source content and local
+                        checkout paths are never returned.
+                      </p>
+                    </div>
+                    {corpusPage && corpusPage.total > 0 && (
+                      <span className="text-muted-foreground text-xs">
+                        Showing {corpusOffset + 1}–
+                        {Math.min(
+                          corpusOffset + corpusPage.files.length,
+                          corpusPage.total,
+                        )}{" "}
+                        of {corpusPage.total}
+                      </span>
+                    )}
                   </div>
+                  {!corpusPage ? (
+                    <p className="text-muted-foreground mt-4 text-sm">
+                      Loading corpus references…
+                    </p>
+                  ) : corpusPage.total === 0 ? (
+                    <p className="text-muted-foreground mt-4 text-sm">
+                      No corpus references are available yet.
+                    </p>
+                  ) : (
+                    <>
+                      <table className="mt-4 w-full min-w-[48rem] text-left text-sm">
+                        <caption className="sr-only">
+                          Paged immutable model probe corpus references
+                        </caption>
+                        <thead>
+                          <tr className="border-border border-b">
+                            <th scope="col" className="py-2">
+                              Path
+                            </th>
+                            <th scope="col">Language</th>
+                            <th scope="col">Code type</th>
+                            <th scope="col">Region</th>
+                            <th scope="col">Size</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {corpusPage.files.map((file) => (
+                            <tr
+                              key={file.candidate_id}
+                              className="border-border border-b last:border-0"
+                            >
+                              <th
+                                scope="row"
+                                className="py-2 text-left font-mono font-normal"
+                              >
+                                {file.path}
+                              </th>
+                              <td>{file.language}</td>
+                              <td>{file.code_type}</td>
+                              <td>{file.region}</td>
+                              <td>{formatBytes(file.size_bytes)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="mt-3 flex justify-end gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy || corpusOffset === 0}
+                          onClick={() =>
+                            setCorpusOffset(
+                              Math.max(0, corpusOffset - corpusPageSize),
+                            )
+                          }
+                        >
+                          Previous corpus page
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy || corpusPage.next_offset == null}
+                          onClick={() =>
+                            setCorpusOffset(
+                              corpusPage.next_offset ?? corpusOffset,
+                            )
+                          }
+                        >
+                          Next corpus page
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {selected && activeRunTab === "report" && (
+              <div
+                id={`probe-panel-${selected.id}-report`}
+                role="tabpanel"
+                aria-labelledby={`probe-tab-${selected.id}-report`}
+                className="space-y-4"
+              >
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={openDedicatedReport}
+                  >
+                    Open dedicated report
+                    <IconExternalLink aria-hidden="true" />
+                  </Button>
                 </div>
-              </section>
+                <ModelEvaluationReportContent evaluation={selected} />
+              </div>
             )}
           </div>
         </section>
