@@ -83,7 +83,7 @@ jobs:
         run: cd web/frontend && pnpm test:ui:smoke
 
       - name: Frontend collection visual tests
-        run: cd web/frontend && pnpm test:ui:visual
+        run: cd web/frontend && COLLECTION_VISUAL_BASELINE=system pnpm test:ui:visual
 
       - name: Upload Playwright failure artifacts
         if: failure()

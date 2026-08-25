@@ -20,8 +20,8 @@
     "format": "prettier --check .",
     "test:ui": "playwright test",
     "test:ui:smoke": "playwright test tests/ui-smoke.spec.ts",
-    "test:ui:visual": "playwright test tests/collection-visual.spec.ts",
-    "test:ui:visual:update": "playwright test tests/collection-visual.spec.ts --update-snapshots",
+    "test:ui:visual": "COLLECTION_VISUAL_BASELINE=${COLLECTION_VISUAL_BASELINE:-inter} playwright test tests/collection-visual.spec.ts",
+    "test:ui:visual:update": "COLLECTION_VISUAL_BASELINE=${COLLECTION_VISUAL_BASELINE:-inter} playwright test tests/collection-visual.spec.ts --update-snapshots",
     "check": "prettier --write . && eslint --fix && pnpm lint:ui"
   },
   "dependencies": {

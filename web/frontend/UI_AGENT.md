@@ -88,4 +88,5 @@ pnpm test:ui:visual
 ```
 
 Use `pnpm test:ui:visual:update` only after human review of an intentional visual
-change. CI never updates snapshots.
+change. It updates the bundled-font (`inter`) baseline; CI validates the
+GitHub-runner system-font (`system`) baseline. CI never updates either set.

@@ -209,7 +209,7 @@ test-collection-governance:
 	cd $(FRONTEND_DIR) && pnpm test:collection-governance
 
 update-frontend-visuals:
-	cd $(FRONTEND_DIR) && pnpm test:ui:visual:update
+	cd $(FRONTEND_DIR) && COLLECTION_VISUAL_BASELINE=inter pnpm test:ui:visual:update
 
 collection-delta:
 	cd $(FRONTEND_DIR) && BASE_REF="$(BASE_REF)" HEAD_REF="$(HEAD_REF)" pnpm lint:collection-delta

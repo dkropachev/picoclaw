@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test"
 
 const PORT = Number(process.env.PLAYWRIGHT_PORT ?? 4173)
 const baseURL = `http://127.0.0.1:${PORT}`
+const collectionVisualBaseline =
+  process.env.COLLECTION_VISUAL_BASELINE ?? "system"
 
 export default defineConfig({
   testDir: "./tests",
@@ -24,6 +26,7 @@ export default defineConfig({
       ]
     : "list",
   outputDir: "test-results",
+  snapshotPathTemplate: `{testDir}/{testFilePath}-snapshots-${collectionVisualBaseline}/{arg}-{projectName}{ext}`,
   use: {
     baseURL,
     locale: "en-US",

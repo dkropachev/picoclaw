@@ -413,7 +413,7 @@ test-collection-governance:
 
 ## update-frontend-visuals: Intentionally update local collection screenshot baselines
 update-frontend-visuals:
-	@cd web/frontend && pnpm test:ui:visual:update
+	@cd web/frontend && COLLECTION_VISUAL_BASELINE=inter pnpm test:ui:visual:update
 
 ## collection-delta: Reject new collection debt and require touched legacy surfaces to migrate
 collection-delta:

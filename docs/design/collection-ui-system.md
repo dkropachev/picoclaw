@@ -166,13 +166,15 @@ Vitest, the production build, mocked Playwright smoke tests, and deterministic
 visual tests. Visual coverage includes canonical views and states, both themes,
 both viewports, and every pilot. Tests freeze visible time, disable animations,
 wait for fonts, use mocked APIs, and retain traces and screenshot diffs on
-failure. CI never rewrites baselines.
+failure. Bundled-font (`inter`) and GitHub-runner system-font (`system`)
+baselines are kept separately because Chromium font rasterization is
+platform-dependent. CI never rewrites either baseline family.
 
 Local baseline update:
 
 ```bash
 cd web/frontend
-pnpm test:ui:visual:update
+COLLECTION_VISUAL_BASELINE=inter pnpm test:ui:visual:update
 ```
 
 Before accepting updated images, inspect every diff and record why the visual
