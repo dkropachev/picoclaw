@@ -28,6 +28,15 @@ func NewRegexSearchTool(r *ToolRegistry, ttl int, maxSearchResults int) *RegexSe
 	return &RegexSearchTool{registry: r, ttl: ttl, maxSearchResults: maxSearchResults}
 }
 
+func NewRegexSearchToolFactory(ttl int, maxSearchResults int) ToolFactory {
+	return newDiscoveryToolFactory(
+		NewRegexSearchTool(nil, ttl, maxSearchResults),
+		func(registry *ToolRegistry) Tool {
+			return NewRegexSearchTool(registry, ttl, maxSearchResults)
+		},
+	)
+}
+
 func (t *RegexSearchTool) Name() string {
 	return RegexSearchToolName
 }
@@ -95,6 +104,38 @@ type BM25SearchTool struct {
 
 func NewBM25SearchTool(r *ToolRegistry, ttl int, maxSearchResults int) *BM25SearchTool {
 	return &BM25SearchTool{registry: r, ttl: ttl, maxSearchResults: maxSearchResults}
+}
+
+func NewBM25SearchToolFactory(ttl int, maxSearchResults int) ToolFactory {
+	return newDiscoveryToolFactory(
+		NewBM25SearchTool(nil, ttl, maxSearchResults),
+		func(registry *ToolRegistry) Tool {
+			return NewBM25SearchTool(registry, ttl, maxSearchResults)
+		},
+	)
+}
+
+func newDiscoveryToolFactory(prototype Tool, build func(*ToolRegistry) Tool) ToolFactory {
+	descriptor, err := toolDescriptorFromTool(prototype)
+	if err != nil {
+		panic(fmt.Sprintf("build discovery tool descriptor: %v", err))
+	}
+	factory, err := NewToolFactory(descriptor, ToolTraits{
+		Risk:        ToolRiskMutation,
+		Parallel:    ToolParallelSerialized,
+		Idempotency: ToolIdempotencyNonIdempotent,
+		Sharing:     ToolSharingPerOwner,
+	}, func(ctx ToolBuildContext) (Tool, error) {
+		registry := destinationRegistryForBuild(ctx)
+		if registry == nil {
+			return nil, fmt.Errorf("destination tool registry is unavailable")
+		}
+		return build(registry), nil
+	})
+	if err != nil {
+		panic(fmt.Sprintf("build discovery tool factory: %v", err))
+	}
+	return factory
 }
 
 func (t *BM25SearchTool) Name() string {
@@ -188,8 +229,9 @@ func (r *ToolRegistry) SearchRegex(pattern string, maxSearchResults int) ([]Tool
 		entry := r.tools[name]
 		// Search only among the hidden tools (Core tools are already visible)
 		if !entry.IsCore {
-			// Directly call interface methods! No reflection/unmarshalling needed.
-			desc := entry.Tool.Description()
+			// Factory-backed metadata is frozen at registration. Legacy entries
+			// retain their historical live-description behavior.
+			desc := toolEntryDescription(entry)
 
 			if regex.MatchString(name) || regex.MatchString(desc) {
 				results = append(results, ToolSearchResult{
@@ -265,11 +307,6 @@ func buildBM25Engine(docs []searchDoc) *utils.BM25Engine[searchDoc] {
 // getOrBuildEngine returns a cached BM25 engine, rebuilding it only when
 // the registry version has changed (new tools registered).
 func (t *BM25SearchTool) getOrBuildEngine() *bm25CachedEngine {
-	// Fast path: optimistic check without locking.
-	if t.cachedEngine != nil && t.cacheVersion == t.registry.Version() {
-		return t.cachedEngine
-	}
-
 	t.cacheMu.Lock()
 	defer t.cacheMu.Unlock()
 

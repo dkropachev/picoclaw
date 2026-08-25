@@ -214,6 +214,26 @@ func NewUpdatePlanTool() *UpdatePlanTool {
 	return &UpdatePlanTool{}
 }
 
+func NewUpdatePlanToolFactory() ToolFactory {
+	prototype := NewUpdatePlanTool()
+	descriptor, err := toolDescriptorFromTool(prototype)
+	if err != nil {
+		panic(fmt.Sprintf("build update_plan descriptor: %v", err))
+	}
+	factory, err := NewToolFactory(descriptor, ToolTraits{
+		Risk:        ToolRiskMutation,
+		Parallel:    ToolParallelSerialized,
+		Idempotency: ToolIdempotencyIdempotent,
+		Sharing:     ToolSharingPerOwner,
+	}, func(ToolBuildContext) (Tool, error) {
+		return NewUpdatePlanTool(), nil
+	})
+	if err != nil {
+		panic(fmt.Sprintf("build update_plan factory: %v", err))
+	}
+	return factory
+}
+
 func (t *UpdatePlanTool) Name() string {
 	return "update_plan"
 }

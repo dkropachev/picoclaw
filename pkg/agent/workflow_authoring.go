@@ -365,7 +365,7 @@ func (al *AgentLoop) projectWorkflowAuthoringTools(
 			return nil, nil, limits, err
 		}
 		target := "tool/" + candidate.primary
-		shape, projected := projectWorkflowToolParameters(candidate.entry.Tool, shapeSanitizer)
+		shape, projected := projectWorkflowToolParameters(candidate.entry, shapeSanitizer)
 		if !projected {
 			limits = append(limits, workflows.WorkflowAuthoringParameterShapesOmitted)
 		}
@@ -392,7 +392,7 @@ func (al *AgentLoop) projectWorkflowAuthoringTools(
 		}
 		target := "mcp/" + candidate.primary + "/" + candidate.secondary
 		shape, projected := projectWorkflowToolParameters(
-			candidate.entry.Tool,
+			candidate.entry,
 			shapeSanitizer,
 		)
 		if !projected {
@@ -530,19 +530,17 @@ func (al *AgentLoop) selectReadyWorkflowAuthoringMCPTools(
 					continue
 				}
 				canonical := mcp.CanonicalToolName(serverName, tool.Name)
-				registered, core := defaultAgent.Tools.GetCoreTool(canonical)
+				registeredEntry, core := defaultAgent.Tools.GetCoreToolSnapshot(canonical)
 				if !core {
 					continue
 				}
+				registered := registeredEntry.Tool
 				if !workflowMCPToolMatches(registered, serverName, tool.Name) {
 					unsafe = true
 					continue
 				}
 				candidate := workflowAuthoringToolCandidate{
-					entry: tools.CoreToolSnapshotEntry{
-						Name: canonical,
-						Tool: registered,
-					},
+					entry:     registeredEntry,
 					primary:   serverName,
 					secondary: tool.Name,
 				}
@@ -626,10 +624,10 @@ func safeWorkflowMCPIdentity(
 }
 
 func projectWorkflowToolParameters(
-	tool tools.Tool,
+	entry tools.CoreToolSnapshotEntry,
 	sanitizer *workflows.WorkflowAuthoringShapeSanitizer,
 ) (shape *workflows.WorkflowAuthoringParameterShape, projected bool) {
-	if tool == nil || sanitizer == nil {
+	if entry.Tool == nil || sanitizer == nil {
 		return nil, false
 	}
 	var parameters map[string]any
@@ -640,7 +638,7 @@ func projectWorkflowToolParameters(
 				ok = false
 			}
 		}()
-		parameters = tool.Parameters()
+		parameters = entry.ParameterSchema()
 	}()
 	if !ok {
 		return nil, false
