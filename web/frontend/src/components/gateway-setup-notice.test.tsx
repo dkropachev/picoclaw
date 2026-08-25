@@ -46,7 +46,7 @@ describe("GatewaySetupNotice", () => {
     )
     expect(
       screen.getByRole("link", { name: "Configure models" }),
-    ).toHaveAttribute("href", "/models")
+    ).toHaveAttribute("href", "/models/aliases")
   })
 
   it("stays hidden when model setup is complete", () => {

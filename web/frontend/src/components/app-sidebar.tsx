@@ -177,10 +177,17 @@ const accountsNavItem: NavItem = {
 }
 
 const modelsNavItem: NavItem = {
-  title: "navigation.models",
-  url: "/models",
+  title: "Model aliases",
+  url: "/models/aliases",
   icon: IconDatabase,
-  translateTitle: true,
+  translateTitle: false,
+}
+
+const modelRoutersNavItem: NavItem = {
+  title: "Model routers",
+  url: "/models/routers",
+  icon: IconRoute,
+  translateTitle: false,
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
@@ -297,7 +304,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           },
           {
             title: "navigation.mcp",
-            url: "/agent/mcp",
+            url: "/agent/mcp/servers",
             icon: IconPlugConnected,
             translateTitle: true,
           },
@@ -418,7 +425,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       }
       className="group/service-section mb-1 last:mb-0"
     >
-      <CollapsibleTrigger className="text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
+      <CollapsibleTrigger className="text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
         <span>
           {section.translateLabel === false ? section.label : t(section.label)}
         </span>
@@ -431,7 +438,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             <SidebarMenuItem key="channels-more-toggle">
               <SidebarMenuButton
                 onClick={toggleShowAllChannels}
-                className="text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground h-9 px-3"
+                className="text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground h-9 px-3"
               >
                 {showAllChannels ? (
                   <IconChevronsUp className="size-4 opacity-60" />
@@ -460,7 +467,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <Collapsible defaultOpen className="group/chat-collapsible mb-1">
           <SidebarGroup className="px-2 py-0">
             <SidebarGroupLabel asChild>
-              <CollapsibleTrigger className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">
+              <CollapsibleTrigger className="!text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">
                 <span>{t("navigation.chat")}</span>
                 <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/chat-collapsible:rotate-90" />
               </CollapsibleTrigger>
@@ -483,7 +490,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         >
           <SidebarGroup className="px-2 py-0">
             <SidebarGroupLabel asChild>
-              <CollapsibleTrigger className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">
+              <CollapsibleTrigger className="!text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">
                 <span>{t("navigation.services")}</span>
                 <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/services-collapsible:rotate-90" />
               </CollapsibleTrigger>
@@ -493,6 +500,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <SidebarMenu className="mb-1">
                   {renderNavItem(configNavItem)}
                   {renderNavItem(modelsNavItem)}
+                  {renderNavItem(modelRoutersNavItem)}
                   {renderNavItem(accountsNavItem)}
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}

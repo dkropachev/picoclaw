@@ -224,6 +224,10 @@ export interface AgentsResponse {
   default_agent_id: string
   config_revision: string
   effects: AgentMutationEffects
+  total?: number
+  next_cursor?: string
+  canonical_query?: string
+  query_schema?: import("@/api/collection").CollectionQuerySchema
 }
 
 export interface AgentResponse {
@@ -248,17 +252,23 @@ export class AgentsAPIError extends Error {
   readonly status: number
   readonly code?: string
   readonly blockers?: AgentDeleteBlocker[]
+  readonly position?: number
 
   constructor(
     message: string,
     status: number,
-    options: { code?: string; blockers?: AgentDeleteBlocker[] } = {},
+    options: {
+      code?: string
+      blockers?: AgentDeleteBlocker[]
+      position?: number
+    } = {},
   ) {
     super(message)
     this.name = "AgentsAPIError"
     this.status = status
     this.code = options.code
     this.blockers = options.blockers
+    this.position = options.position
   }
 }
 
@@ -269,6 +279,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     let message = text.trim()
     let code: string | undefined
     let blockers: AgentDeleteBlocker[] | undefined
+    let position: number | undefined
 
     try {
       const body = JSON.parse(text) as {
@@ -276,6 +287,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         message?: unknown
         code?: unknown
         blockers?: unknown
+        position?: unknown
       }
       if (typeof body.message === "string" && body.message.trim() !== "") {
         message = body.message
@@ -298,6 +310,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
           blockers = projected
         }
       }
+      if (
+        typeof body.position === "number" &&
+        Number.isSafeInteger(body.position) &&
+        body.position >= 0 &&
+        body.position <= 4096
+      ) {
+        position = body.position
+      }
     } catch {
       // Preserve a plain-text API error.
     }
@@ -305,7 +325,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new AgentsAPIError(
       message || `API error: ${response.status} ${response.statusText}`,
       response.status,
-      { code, blockers },
+      { code, blockers, position },
     )
   }
 
@@ -314,8 +334,24 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 const jsonHeaders = { "Content-Type": "application/json" }
 
-export async function getAgents(): Promise<AgentsResponse> {
-  return request<AgentsResponse>("/api/agents")
+export async function getAgents(
+  options: {
+    query?: string
+    cursor?: string
+    limit?: number
+    signal?: AbortSignal
+  } = {},
+): Promise<AgentsResponse> {
+  const parameters = new URLSearchParams()
+  if (options.query) parameters.set("query", options.query)
+  if (options.cursor) parameters.set("cursor", options.cursor)
+  if (options.limit != null) parameters.set("limit", String(options.limit))
+  const suffix = parameters.size > 0 ? `?${parameters.toString()}` : ""
+  return options.signal
+    ? request<AgentsResponse>(`/api/agents${suffix}`, {
+        signal: options.signal,
+      })
+    : request<AgentsResponse>(`/api/agents${suffix}`)
 }
 
 export async function getAgent(id: string): Promise<AgentResponse> {
@@ -940,6 +976,30 @@ export async function deleteAgent(
     body: JSON.stringify({
       expected_config_revision: expectedConfigRevision,
     }),
+  })
+}
+
+export interface AgentBulkDeleteFailure {
+  id: string
+  code: string
+  blockers?: AgentDeleteBlocker[]
+}
+
+export interface AgentBulkDeleteResponse {
+  deleted_ids: string[]
+  failures: AgentBulkDeleteFailure[]
+  config_revision: string
+  effects: AgentMutationEffects
+}
+
+export async function bulkDeleteAgents(
+  ids: string[],
+  configRevision: string,
+): Promise<AgentBulkDeleteResponse> {
+  return request<AgentBulkDeleteResponse>("/api/agents/bulk-delete", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ ids, config_revision: configRevision }),
   })
 }
 

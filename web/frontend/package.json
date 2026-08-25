@@ -13,10 +13,15 @@
     "build:backend": "tsc -b && vite build --outDir ../backend/dist --emptyOutDir && node ./scripts/ensure-backend-gitkeep.cjs",
     "lint": "eslint . && pnpm lint:ui",
     "lint:ui": "node ./scripts/lint-ui-rules.mjs",
+    "lint:collection-delta": "node ./scripts/check-collection-delta.mjs",
+    "test:collection-governance": "node --test ./scripts/check-collection-delta.test.mjs",
     "test": "vitest run",
     "preview": "vite preview",
     "format": "prettier --check .",
     "test:ui": "playwright test",
+    "test:ui:smoke": "playwright test tests/ui-smoke.spec.ts",
+    "test:ui:visual": "playwright test tests/collection-visual.spec.ts",
+    "test:ui:visual:update": "playwright test tests/collection-visual.spec.ts --update-snapshots",
     "check": "prettier --write . && eslint --fix && pnpm lint:ui"
   },
   "dependencies": {

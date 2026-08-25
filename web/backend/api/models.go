@@ -24,6 +24,7 @@ import (
 
 // registerModelRoutes binds account-owned model management endpoints to the ServeMux.
 func (h *Handler) registerModelRoutes(mux *http.ServeMux) {
+	h.registerModelCollectionRoutes(mux)
 	mux.HandleFunc("GET /api/accounts/models", h.handleListModels)
 	mux.HandleFunc("POST /api/accounts/models/fetch", h.handleFetchModels)
 	mux.HandleFunc("GET /api/accounts/models/catalog", h.handleListCatalogs)

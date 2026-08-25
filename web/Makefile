@@ -1,5 +1,6 @@
 .PHONY: dev dev-frontend dev-backend build build-frontend build-dev-picoclaw test lint clean \
-	build-android-arm64 build-android-bundle test-frontend-ui
+	build-android-arm64 build-android-bundle test-frontend-ui \
+	test-collection-governance update-frontend-visuals collection-delta
 
 # Go variables
 GO?=go
@@ -203,6 +204,15 @@ lint:
 test-frontend-ui:
 	cd $(FRONTEND_DIR) && pnpm exec playwright install chromium
 	cd $(FRONTEND_DIR) && pnpm test:ui
+
+test-collection-governance:
+	cd $(FRONTEND_DIR) && pnpm test:collection-governance
+
+update-frontend-visuals:
+	cd $(FRONTEND_DIR) && pnpm test:ui:visual:update
+
+collection-delta:
+	cd $(FRONTEND_DIR) && BASE_REF="$(BASE_REF)" HEAD_REF="$(HEAD_REF)" pnpm lint:collection-delta
 
 # Clean build artifacts
 clean:

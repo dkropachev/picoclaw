@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as ThreadsRouteImport } from './routes/threads'
 import { Route as RepositoryReviewsRouteImport } from './routes/repository-reviews'
 import { Route as NotificationsRouteImport } from './routes/notifications'
-import { Route as ModelsRouteImport } from './routes/models'
 import { Route as ModelEvaluationsRouteImport } from './routes/model-evaluations'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
@@ -32,6 +31,10 @@ import { Route as RepositoryReviewsResultsRouteImport } from './routes/repositor
 import { Route as RepositoryReviewsRepositoriesRouteImport } from './routes/repository-reviews_.repositories'
 import { Route as RepositoryReviewsProfilesRouteImport } from './routes/repository-reviews_.profiles'
 import { Route as NotificationsNotificationIDRouteImport } from './routes/notifications_.$notificationID'
+import { Route as ModelsRoutersRouteImport } from './routes/models_.routers'
+import { Route as ModelsAliasesRouteImport } from './routes/models_.aliases'
+import { Route as ModelEvaluationsNewRouteImport } from './routes/model-evaluations_.new'
+import { Route as ModelEvaluationsIdRouteImport } from './routes/model-evaluations_.$id'
 import { Route as DevelopmentWorkflowConfigurationsRouteImport } from './routes/development_.workflow-configurations'
 import { Route as DevelopmentSettingsRouteImport } from './routes/development_.settings'
 import { Route as DevelopmentRepositoriesRouteImport } from './routes/development_.repositories'
@@ -42,14 +45,32 @@ import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
 import { Route as AgentWorkflowsRouteImport } from './routes/agent/workflows'
 import { Route as AgentToolsRouteImport } from './routes/agent/tools'
 import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
-import { Route as AgentMcpRouteImport } from './routes/agent/mcp'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
+import { Route as ModelsRoutersNewRouteImport } from './routes/models_.routers_.new'
+import { Route as ModelsRoutersNameRouteImport } from './routes/models_.routers_.$name'
+import { Route as ModelsAliasesNewRouteImport } from './routes/models_.aliases_.new'
+import { Route as ModelsAliasesNameRouteImport } from './routes/models_.aliases_.$name'
+import { Route as ModelEvaluationsIdLanguagesRouteImport } from './routes/model-evaluations_.$id_.languages'
+import { Route as ModelEvaluationsIdEditRouteImport } from './routes/model-evaluations_.$id_.edit'
+import { Route as ModelEvaluationsIdCorpusRouteImport } from './routes/model-evaluations_.$id_.corpus'
 import { Route as ModelEvaluationsEvaluationIDReportRouteImport } from './routes/model-evaluations_.$evaluationID.report'
+import { Route as AgentMcpSettingsRouteImport } from './routes/agent/mcp_.settings'
+import { Route as AgentMcpServersRouteImport } from './routes/agent/mcp_.servers'
+import { Route as AgentAgentsNewRouteImport } from './routes/agent/agents_.new'
+import { Route as AgentAgentsIdRouteImport } from './routes/agent/agents_.$id'
 import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
 import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
+import { Route as ModelsRoutersNameEditRouteImport } from './routes/models_.routers_.$name_.edit'
+import { Route as ModelsAliasesNameEditRouteImport } from './routes/models_.aliases_.$name_.edit'
+import { Route as AgentMcpServersNewRouteImport } from './routes/agent/mcp_.servers_.new'
+import { Route as AgentMcpServersNameRouteImport } from './routes/agent/mcp_.servers_.$name'
+import { Route as AgentAgentsIdEditRouteImport } from './routes/agent/agents_.$id_.edit'
+import { Route as AgentAgentsIdCapabilitiesRouteImport } from './routes/agent/agents_.$id_.capabilities'
+import { Route as AgentAgentsIdActivityRouteImport } from './routes/agent/agents_.$id_.activity'
+import { Route as AgentMcpServersNameEditRouteImport } from './routes/agent/mcp_.servers_.$name_.edit'
 
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
@@ -64,11 +85,6 @@ const RepositoryReviewsRoute = RepositoryReviewsRouteImport.update({
 const NotificationsRoute = NotificationsRouteImport.update({
   id: '/notifications',
   path: '/notifications',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ModelsRoute = ModelsRouteImport.update({
-  id: '/models',
-  path: '/models',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ModelEvaluationsRoute = ModelEvaluationsRouteImport.update({
@@ -170,6 +186,26 @@ const NotificationsNotificationIDRoute =
     path: '/notifications/$notificationID',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ModelsRoutersRoute = ModelsRoutersRouteImport.update({
+  id: '/models_/routers',
+  path: '/models/routers',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelsAliasesRoute = ModelsAliasesRouteImport.update({
+  id: '/models_/aliases',
+  path: '/models/aliases',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelEvaluationsNewRoute = ModelEvaluationsNewRouteImport.update({
+  id: '/model-evaluations_/new',
+  path: '/model-evaluations/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelEvaluationsIdRoute = ModelEvaluationsIdRouteImport.update({
+  id: '/model-evaluations_/$id',
+  path: '/model-evaluations/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DevelopmentWorkflowConfigurationsRoute =
   DevelopmentWorkflowConfigurationsRouteImport.update({
     id: '/development_/workflow-configurations',
@@ -221,11 +257,6 @@ const AgentSkillsRoute = AgentSkillsRouteImport.update({
   path: '/skills',
   getParentRoute: () => AgentRoute,
 } as any)
-const AgentMcpRoute = AgentMcpRouteImport.update({
-  id: '/mcp',
-  path: '/mcp',
-  getParentRoute: () => AgentRoute,
-} as any)
 const AgentHubRoute = AgentHubRouteImport.update({
   id: '/hub',
   path: '/hub',
@@ -246,12 +277,69 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
+const ModelsRoutersNewRoute = ModelsRoutersNewRouteImport.update({
+  id: '/models_/routers_/new',
+  path: '/models/routers/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelsRoutersNameRoute = ModelsRoutersNameRouteImport.update({
+  id: '/models_/routers_/$name',
+  path: '/models/routers/$name',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelsAliasesNewRoute = ModelsAliasesNewRouteImport.update({
+  id: '/models_/aliases_/new',
+  path: '/models/aliases/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelsAliasesNameRoute = ModelsAliasesNameRouteImport.update({
+  id: '/models_/aliases_/$name',
+  path: '/models/aliases/$name',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelEvaluationsIdLanguagesRoute =
+  ModelEvaluationsIdLanguagesRouteImport.update({
+    id: '/model-evaluations_/$id_/languages',
+    path: '/model-evaluations/$id/languages',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ModelEvaluationsIdEditRoute = ModelEvaluationsIdEditRouteImport.update({
+  id: '/model-evaluations_/$id_/edit',
+  path: '/model-evaluations/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelEvaluationsIdCorpusRoute =
+  ModelEvaluationsIdCorpusRouteImport.update({
+    id: '/model-evaluations_/$id_/corpus',
+    path: '/model-evaluations/$id/corpus',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ModelEvaluationsEvaluationIDReportRoute =
   ModelEvaluationsEvaluationIDReportRouteImport.update({
     id: '/model-evaluations_/$evaluationID/report',
     path: '/model-evaluations/$evaluationID/report',
     getParentRoute: () => rootRouteImport,
   } as any)
+const AgentMcpSettingsRoute = AgentMcpSettingsRouteImport.update({
+  id: '/mcp_/settings',
+  path: '/mcp/settings',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentMcpServersRoute = AgentMcpServersRouteImport.update({
+  id: '/mcp_/servers',
+  path: '/mcp/servers',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentAgentsNewRoute = AgentAgentsNewRouteImport.update({
+  id: '/agents_/new',
+  path: '/agents/new',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentAgentsIdRoute = AgentAgentsIdRouteImport.update({
+  id: '/agents_/$id',
+  path: '/agents/$id',
+  getParentRoute: () => AgentRoute,
+} as any)
 const AccountsAccountRouterNewRoute =
   AccountsAccountRouterNewRouteImport.update({
     id: '/account-router/new',
@@ -264,6 +352,47 @@ const AccountsAccountRouterIndexRoute =
     path: '/account-router/$index',
     getParentRoute: () => AccountsRoute,
   } as any)
+const ModelsRoutersNameEditRoute = ModelsRoutersNameEditRouteImport.update({
+  id: '/models_/routers_/$name_/edit',
+  path: '/models/routers/$name/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelsAliasesNameEditRoute = ModelsAliasesNameEditRouteImport.update({
+  id: '/models_/aliases_/$name_/edit',
+  path: '/models/aliases/$name/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AgentMcpServersNewRoute = AgentMcpServersNewRouteImport.update({
+  id: '/mcp_/servers_/new',
+  path: '/mcp/servers/new',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentMcpServersNameRoute = AgentMcpServersNameRouteImport.update({
+  id: '/mcp_/servers_/$name',
+  path: '/mcp/servers/$name',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentAgentsIdEditRoute = AgentAgentsIdEditRouteImport.update({
+  id: '/agents_/$id_/edit',
+  path: '/agents/$id/edit',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentAgentsIdCapabilitiesRoute =
+  AgentAgentsIdCapabilitiesRouteImport.update({
+    id: '/agents_/$id_/capabilities',
+    path: '/agents/$id/capabilities',
+    getParentRoute: () => AgentRoute,
+  } as any)
+const AgentAgentsIdActivityRoute = AgentAgentsIdActivityRouteImport.update({
+  id: '/agents_/$id_/activity',
+  path: '/agents/$id/activity',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentMcpServersNameEditRoute = AgentMcpServersNameEditRouteImport.update({
+  id: '/mcp_/servers_/$name_/edit',
+  path: '/mcp/servers/$name/edit',
+  getParentRoute: () => AgentRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -278,14 +407,12 @@ export interface FileRoutesByFullPath {
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
   '/model-evaluations': typeof ModelEvaluationsRoute
-  '/models': typeof ModelsRoute
   '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
-  '/agent/mcp': typeof AgentMcpRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
   '/agent/workflows': typeof AgentWorkflowsRoute
@@ -296,6 +423,10 @@ export interface FileRoutesByFullPath {
   '/development/repositories': typeof DevelopmentRepositoriesRoute
   '/development/settings': typeof DevelopmentSettingsRoute
   '/development/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/model-evaluations/$id': typeof ModelEvaluationsIdRoute
+  '/model-evaluations/new': typeof ModelEvaluationsNewRoute
+  '/models/aliases': typeof ModelsAliasesRoute
+  '/models/routers': typeof ModelsRoutersRoute
   '/notifications/$notificationID': typeof NotificationsNotificationIDRoute
   '/repository-reviews/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews/repositories': typeof RepositoryReviewsRepositoriesRoute
@@ -305,8 +436,27 @@ export interface FileRoutesByFullPath {
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/agent/agents/$id': typeof AgentAgentsIdRoute
+  '/agent/agents/new': typeof AgentAgentsNewRoute
+  '/agent/mcp/servers': typeof AgentMcpServersRoute
+  '/agent/mcp/settings': typeof AgentMcpSettingsRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
+  '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
+  '/model-evaluations/$id/edit': typeof ModelEvaluationsIdEditRoute
+  '/model-evaluations/$id/languages': typeof ModelEvaluationsIdLanguagesRoute
+  '/models/aliases/$name': typeof ModelsAliasesNameRoute
+  '/models/aliases/new': typeof ModelsAliasesNewRoute
+  '/models/routers/$name': typeof ModelsRoutersNameRoute
+  '/models/routers/new': typeof ModelsRoutersNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
+  '/agent/agents/$id/activity': typeof AgentAgentsIdActivityRoute
+  '/agent/agents/$id/capabilities': typeof AgentAgentsIdCapabilitiesRoute
+  '/agent/agents/$id/edit': typeof AgentAgentsIdEditRoute
+  '/agent/mcp/servers/$name': typeof AgentMcpServersNameRoute
+  '/agent/mcp/servers/new': typeof AgentMcpServersNewRoute
+  '/models/aliases/$name/edit': typeof ModelsAliasesNameEditRoute
+  '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
+  '/agent/mcp/servers/$name/edit': typeof AgentMcpServersNameEditRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -321,14 +471,12 @@ export interface FileRoutesByTo {
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
   '/model-evaluations': typeof ModelEvaluationsRoute
-  '/models': typeof ModelsRoute
   '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
-  '/agent/mcp': typeof AgentMcpRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
   '/agent/workflows': typeof AgentWorkflowsRoute
@@ -339,6 +487,10 @@ export interface FileRoutesByTo {
   '/development/repositories': typeof DevelopmentRepositoriesRoute
   '/development/settings': typeof DevelopmentSettingsRoute
   '/development/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/model-evaluations/$id': typeof ModelEvaluationsIdRoute
+  '/model-evaluations/new': typeof ModelEvaluationsNewRoute
+  '/models/aliases': typeof ModelsAliasesRoute
+  '/models/routers': typeof ModelsRoutersRoute
   '/notifications/$notificationID': typeof NotificationsNotificationIDRoute
   '/repository-reviews/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews/repositories': typeof RepositoryReviewsRepositoriesRoute
@@ -348,8 +500,27 @@ export interface FileRoutesByTo {
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/agent/agents/$id': typeof AgentAgentsIdRoute
+  '/agent/agents/new': typeof AgentAgentsNewRoute
+  '/agent/mcp/servers': typeof AgentMcpServersRoute
+  '/agent/mcp/settings': typeof AgentMcpSettingsRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
+  '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
+  '/model-evaluations/$id/edit': typeof ModelEvaluationsIdEditRoute
+  '/model-evaluations/$id/languages': typeof ModelEvaluationsIdLanguagesRoute
+  '/models/aliases/$name': typeof ModelsAliasesNameRoute
+  '/models/aliases/new': typeof ModelsAliasesNewRoute
+  '/models/routers/$name': typeof ModelsRoutersNameRoute
+  '/models/routers/new': typeof ModelsRoutersNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
+  '/agent/agents/$id/activity': typeof AgentAgentsIdActivityRoute
+  '/agent/agents/$id/capabilities': typeof AgentAgentsIdCapabilitiesRoute
+  '/agent/agents/$id/edit': typeof AgentAgentsIdEditRoute
+  '/agent/mcp/servers/$name': typeof AgentMcpServersNameRoute
+  '/agent/mcp/servers/new': typeof AgentMcpServersNewRoute
+  '/models/aliases/$name/edit': typeof ModelsAliasesNameEditRoute
+  '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
+  '/agent/mcp/servers/$name/edit': typeof AgentMcpServersNameEditRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -365,14 +536,12 @@ export interface FileRoutesById {
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
   '/model-evaluations': typeof ModelEvaluationsRoute
-  '/models': typeof ModelsRoute
   '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
-  '/agent/mcp': typeof AgentMcpRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
   '/agent/workflows': typeof AgentWorkflowsRoute
@@ -383,6 +552,10 @@ export interface FileRoutesById {
   '/development_/repositories': typeof DevelopmentRepositoriesRoute
   '/development_/settings': typeof DevelopmentSettingsRoute
   '/development_/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/model-evaluations_/$id': typeof ModelEvaluationsIdRoute
+  '/model-evaluations_/new': typeof ModelEvaluationsNewRoute
+  '/models_/aliases': typeof ModelsAliasesRoute
+  '/models_/routers': typeof ModelsRoutersRoute
   '/notifications_/$notificationID': typeof NotificationsNotificationIDRoute
   '/repository-reviews_/profiles': typeof RepositoryReviewsProfilesRoute
   '/repository-reviews_/repositories': typeof RepositoryReviewsRepositoriesRoute
@@ -392,8 +565,27 @@ export interface FileRoutesById {
   '/threads/search': typeof ThreadsSearchRoute
   '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
   '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/agent/agents_/$id': typeof AgentAgentsIdRoute
+  '/agent/agents_/new': typeof AgentAgentsNewRoute
+  '/agent/mcp_/servers': typeof AgentMcpServersRoute
+  '/agent/mcp_/settings': typeof AgentMcpSettingsRoute
   '/model-evaluations_/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
+  '/model-evaluations_/$id_/corpus': typeof ModelEvaluationsIdCorpusRoute
+  '/model-evaluations_/$id_/edit': typeof ModelEvaluationsIdEditRoute
+  '/model-evaluations_/$id_/languages': typeof ModelEvaluationsIdLanguagesRoute
+  '/models_/aliases_/$name': typeof ModelsAliasesNameRoute
+  '/models_/aliases_/new': typeof ModelsAliasesNewRoute
+  '/models_/routers_/$name': typeof ModelsRoutersNameRoute
+  '/models_/routers_/new': typeof ModelsRoutersNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
+  '/agent/agents_/$id_/activity': typeof AgentAgentsIdActivityRoute
+  '/agent/agents_/$id_/capabilities': typeof AgentAgentsIdCapabilitiesRoute
+  '/agent/agents_/$id_/edit': typeof AgentAgentsIdEditRoute
+  '/agent/mcp_/servers_/$name': typeof AgentMcpServersNameRoute
+  '/agent/mcp_/servers_/new': typeof AgentMcpServersNewRoute
+  '/models_/aliases_/$name_/edit': typeof ModelsAliasesNameEditRoute
+  '/models_/routers_/$name_/edit': typeof ModelsRoutersNameEditRoute
+  '/agent/mcp_/servers_/$name_/edit': typeof AgentMcpServersNameEditRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -410,14 +602,12 @@ export interface FileRouteTypes {
     | '/launcher-setup'
     | '/logs'
     | '/model-evaluations'
-    | '/models'
     | '/notifications'
     | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
     | '/agent/hub'
-    | '/agent/mcp'
     | '/agent/skills'
     | '/agent/tools'
     | '/agent/workflows'
@@ -428,6 +618,10 @@ export interface FileRouteTypes {
     | '/development/repositories'
     | '/development/settings'
     | '/development/workflow-configurations'
+    | '/model-evaluations/$id'
+    | '/model-evaluations/new'
+    | '/models/aliases'
+    | '/models/routers'
     | '/notifications/$notificationID'
     | '/repository-reviews/profiles'
     | '/repository-reviews/repositories'
@@ -437,8 +631,27 @@ export interface FileRouteTypes {
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/agent/agents/$id'
+    | '/agent/agents/new'
+    | '/agent/mcp/servers'
+    | '/agent/mcp/settings'
     | '/model-evaluations/$evaluationID/report'
+    | '/model-evaluations/$id/corpus'
+    | '/model-evaluations/$id/edit'
+    | '/model-evaluations/$id/languages'
+    | '/models/aliases/$name'
+    | '/models/aliases/new'
+    | '/models/routers/$name'
+    | '/models/routers/new'
     | '/threads/open/$threadId'
+    | '/agent/agents/$id/activity'
+    | '/agent/agents/$id/capabilities'
+    | '/agent/agents/$id/edit'
+    | '/agent/mcp/servers/$name'
+    | '/agent/mcp/servers/new'
+    | '/models/aliases/$name/edit'
+    | '/models/routers/$name/edit'
+    | '/agent/mcp/servers/$name/edit'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -453,14 +666,12 @@ export interface FileRouteTypes {
     | '/launcher-setup'
     | '/logs'
     | '/model-evaluations'
-    | '/models'
     | '/notifications'
     | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
     | '/agent/hub'
-    | '/agent/mcp'
     | '/agent/skills'
     | '/agent/tools'
     | '/agent/workflows'
@@ -471,6 +682,10 @@ export interface FileRouteTypes {
     | '/development/repositories'
     | '/development/settings'
     | '/development/workflow-configurations'
+    | '/model-evaluations/$id'
+    | '/model-evaluations/new'
+    | '/models/aliases'
+    | '/models/routers'
     | '/notifications/$notificationID'
     | '/repository-reviews/profiles'
     | '/repository-reviews/repositories'
@@ -480,8 +695,27 @@ export interface FileRouteTypes {
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/agent/agents/$id'
+    | '/agent/agents/new'
+    | '/agent/mcp/servers'
+    | '/agent/mcp/settings'
     | '/model-evaluations/$evaluationID/report'
+    | '/model-evaluations/$id/corpus'
+    | '/model-evaluations/$id/edit'
+    | '/model-evaluations/$id/languages'
+    | '/models/aliases/$name'
+    | '/models/aliases/new'
+    | '/models/routers/$name'
+    | '/models/routers/new'
     | '/threads/open/$threadId'
+    | '/agent/agents/$id/activity'
+    | '/agent/agents/$id/capabilities'
+    | '/agent/agents/$id/edit'
+    | '/agent/mcp/servers/$name'
+    | '/agent/mcp/servers/new'
+    | '/models/aliases/$name/edit'
+    | '/models/routers/$name/edit'
+    | '/agent/mcp/servers/$name/edit'
   id:
     | '__root__'
     | '/'
@@ -496,14 +730,12 @@ export interface FileRouteTypes {
     | '/launcher-setup'
     | '/logs'
     | '/model-evaluations'
-    | '/models'
     | '/notifications'
     | '/repository-reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
     | '/agent/hub'
-    | '/agent/mcp'
     | '/agent/skills'
     | '/agent/tools'
     | '/agent/workflows'
@@ -514,6 +746,10 @@ export interface FileRouteTypes {
     | '/development_/repositories'
     | '/development_/settings'
     | '/development_/workflow-configurations'
+    | '/model-evaluations_/$id'
+    | '/model-evaluations_/new'
+    | '/models_/aliases'
+    | '/models_/routers'
     | '/notifications_/$notificationID'
     | '/repository-reviews_/profiles'
     | '/repository-reviews_/repositories'
@@ -523,8 +759,27 @@ export interface FileRouteTypes {
     | '/threads/search'
     | '/accounts/account-router/$index'
     | '/accounts/account-router/new'
+    | '/agent/agents_/$id'
+    | '/agent/agents_/new'
+    | '/agent/mcp_/servers'
+    | '/agent/mcp_/settings'
     | '/model-evaluations_/$evaluationID/report'
+    | '/model-evaluations_/$id_/corpus'
+    | '/model-evaluations_/$id_/edit'
+    | '/model-evaluations_/$id_/languages'
+    | '/models_/aliases_/$name'
+    | '/models_/aliases_/new'
+    | '/models_/routers_/$name'
+    | '/models_/routers_/new'
     | '/threads/open/$threadId'
+    | '/agent/agents_/$id_/activity'
+    | '/agent/agents_/$id_/capabilities'
+    | '/agent/agents_/$id_/edit'
+    | '/agent/mcp_/servers_/$name'
+    | '/agent/mcp_/servers_/new'
+    | '/models_/aliases_/$name_/edit'
+    | '/models_/routers_/$name_/edit'
+    | '/agent/mcp_/servers_/$name_/edit'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -540,7 +795,6 @@ export interface RootRouteChildren {
   LauncherSetupRoute: typeof LauncherSetupRoute
   LogsRoute: typeof LogsRoute
   ModelEvaluationsRoute: typeof ModelEvaluationsRoute
-  ModelsRoute: typeof ModelsRoute
   NotificationsRoute: typeof NotificationsRoute
   RepositoryReviewsRoute: typeof RepositoryReviewsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
@@ -549,11 +803,24 @@ export interface RootRouteChildren {
   DevelopmentRepositoriesRoute: typeof DevelopmentRepositoriesRoute
   DevelopmentSettingsRoute: typeof DevelopmentSettingsRoute
   DevelopmentWorkflowConfigurationsRoute: typeof DevelopmentWorkflowConfigurationsRoute
+  ModelEvaluationsIdRoute: typeof ModelEvaluationsIdRoute
+  ModelEvaluationsNewRoute: typeof ModelEvaluationsNewRoute
+  ModelsAliasesRoute: typeof ModelsAliasesRoute
+  ModelsRoutersRoute: typeof ModelsRoutersRoute
   NotificationsNotificationIDRoute: typeof NotificationsNotificationIDRoute
   RepositoryReviewsProfilesRoute: typeof RepositoryReviewsProfilesRoute
   RepositoryReviewsRepositoriesRoute: typeof RepositoryReviewsRepositoriesRoute
   RepositoryReviewsResultsRoute: typeof RepositoryReviewsResultsRoute
   ModelEvaluationsEvaluationIDReportRoute: typeof ModelEvaluationsEvaluationIDReportRoute
+  ModelEvaluationsIdCorpusRoute: typeof ModelEvaluationsIdCorpusRoute
+  ModelEvaluationsIdEditRoute: typeof ModelEvaluationsIdEditRoute
+  ModelEvaluationsIdLanguagesRoute: typeof ModelEvaluationsIdLanguagesRoute
+  ModelsAliasesNameRoute: typeof ModelsAliasesNameRoute
+  ModelsAliasesNewRoute: typeof ModelsAliasesNewRoute
+  ModelsRoutersNameRoute: typeof ModelsRoutersNameRoute
+  ModelsRoutersNewRoute: typeof ModelsRoutersNewRoute
+  ModelsAliasesNameEditRoute: typeof ModelsAliasesNameEditRoute
+  ModelsRoutersNameEditRoute: typeof ModelsRoutersNameEditRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -577,13 +844,6 @@ declare module '@tanstack/react-router' {
       path: '/notifications'
       fullPath: '/notifications'
       preLoaderRoute: typeof NotificationsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/models': {
-      id: '/models'
-      path: '/models'
-      fullPath: '/models'
-      preLoaderRoute: typeof ModelsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/model-evaluations': {
@@ -719,6 +979,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NotificationsNotificationIDRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/models_/routers': {
+      id: '/models_/routers'
+      path: '/models/routers'
+      fullPath: '/models/routers'
+      preLoaderRoute: typeof ModelsRoutersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/models_/aliases': {
+      id: '/models_/aliases'
+      path: '/models/aliases'
+      fullPath: '/models/aliases'
+      preLoaderRoute: typeof ModelsAliasesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-evaluations_/new': {
+      id: '/model-evaluations_/new'
+      path: '/model-evaluations/new'
+      fullPath: '/model-evaluations/new'
+      preLoaderRoute: typeof ModelEvaluationsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-evaluations_/$id': {
+      id: '/model-evaluations_/$id'
+      path: '/model-evaluations/$id'
+      fullPath: '/model-evaluations/$id'
+      preLoaderRoute: typeof ModelEvaluationsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/development_/workflow-configurations': {
       id: '/development_/workflow-configurations'
       path: '/development/workflow-configurations'
@@ -789,13 +1077,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentSkillsRouteImport
       parentRoute: typeof AgentRoute
     }
-    '/agent/mcp': {
-      id: '/agent/mcp'
-      path: '/mcp'
-      fullPath: '/agent/mcp'
-      preLoaderRoute: typeof AgentMcpRouteImport
-      parentRoute: typeof AgentRoute
-    }
     '/agent/hub': {
       id: '/agent/hub'
       path: '/hub'
@@ -824,12 +1105,89 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
     }
+    '/models_/routers_/new': {
+      id: '/models_/routers_/new'
+      path: '/models/routers/new'
+      fullPath: '/models/routers/new'
+      preLoaderRoute: typeof ModelsRoutersNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/models_/routers_/$name': {
+      id: '/models_/routers_/$name'
+      path: '/models/routers/$name'
+      fullPath: '/models/routers/$name'
+      preLoaderRoute: typeof ModelsRoutersNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/models_/aliases_/new': {
+      id: '/models_/aliases_/new'
+      path: '/models/aliases/new'
+      fullPath: '/models/aliases/new'
+      preLoaderRoute: typeof ModelsAliasesNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/models_/aliases_/$name': {
+      id: '/models_/aliases_/$name'
+      path: '/models/aliases/$name'
+      fullPath: '/models/aliases/$name'
+      preLoaderRoute: typeof ModelsAliasesNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-evaluations_/$id_/languages': {
+      id: '/model-evaluations_/$id_/languages'
+      path: '/model-evaluations/$id/languages'
+      fullPath: '/model-evaluations/$id/languages'
+      preLoaderRoute: typeof ModelEvaluationsIdLanguagesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-evaluations_/$id_/edit': {
+      id: '/model-evaluations_/$id_/edit'
+      path: '/model-evaluations/$id/edit'
+      fullPath: '/model-evaluations/$id/edit'
+      preLoaderRoute: typeof ModelEvaluationsIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/model-evaluations_/$id_/corpus': {
+      id: '/model-evaluations_/$id_/corpus'
+      path: '/model-evaluations/$id/corpus'
+      fullPath: '/model-evaluations/$id/corpus'
+      preLoaderRoute: typeof ModelEvaluationsIdCorpusRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/model-evaluations_/$evaluationID/report': {
       id: '/model-evaluations_/$evaluationID/report'
       path: '/model-evaluations/$evaluationID/report'
       fullPath: '/model-evaluations/$evaluationID/report'
       preLoaderRoute: typeof ModelEvaluationsEvaluationIDReportRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/agent/mcp_/settings': {
+      id: '/agent/mcp_/settings'
+      path: '/mcp/settings'
+      fullPath: '/agent/mcp/settings'
+      preLoaderRoute: typeof AgentMcpSettingsRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/mcp_/servers': {
+      id: '/agent/mcp_/servers'
+      path: '/mcp/servers'
+      fullPath: '/agent/mcp/servers'
+      preLoaderRoute: typeof AgentMcpServersRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/agents_/new': {
+      id: '/agent/agents_/new'
+      path: '/agents/new'
+      fullPath: '/agent/agents/new'
+      preLoaderRoute: typeof AgentAgentsNewRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/agents_/$id': {
+      id: '/agent/agents_/$id'
+      path: '/agents/$id'
+      fullPath: '/agent/agents/$id'
+      preLoaderRoute: typeof AgentAgentsIdRouteImport
+      parentRoute: typeof AgentRoute
     }
     '/accounts/account-router/new': {
       id: '/accounts/account-router/new'
@@ -844,6 +1202,62 @@ declare module '@tanstack/react-router' {
       fullPath: '/accounts/account-router/$index'
       preLoaderRoute: typeof AccountsAccountRouterIndexRouteImport
       parentRoute: typeof AccountsRoute
+    }
+    '/models_/routers_/$name_/edit': {
+      id: '/models_/routers_/$name_/edit'
+      path: '/models/routers/$name/edit'
+      fullPath: '/models/routers/$name/edit'
+      preLoaderRoute: typeof ModelsRoutersNameEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/models_/aliases_/$name_/edit': {
+      id: '/models_/aliases_/$name_/edit'
+      path: '/models/aliases/$name/edit'
+      fullPath: '/models/aliases/$name/edit'
+      preLoaderRoute: typeof ModelsAliasesNameEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agent/mcp_/servers_/new': {
+      id: '/agent/mcp_/servers_/new'
+      path: '/mcp/servers/new'
+      fullPath: '/agent/mcp/servers/new'
+      preLoaderRoute: typeof AgentMcpServersNewRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/mcp_/servers_/$name': {
+      id: '/agent/mcp_/servers_/$name'
+      path: '/mcp/servers/$name'
+      fullPath: '/agent/mcp/servers/$name'
+      preLoaderRoute: typeof AgentMcpServersNameRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/agents_/$id_/edit': {
+      id: '/agent/agents_/$id_/edit'
+      path: '/agents/$id/edit'
+      fullPath: '/agent/agents/$id/edit'
+      preLoaderRoute: typeof AgentAgentsIdEditRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/agents_/$id_/capabilities': {
+      id: '/agent/agents_/$id_/capabilities'
+      path: '/agents/$id/capabilities'
+      fullPath: '/agent/agents/$id/capabilities'
+      preLoaderRoute: typeof AgentAgentsIdCapabilitiesRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/agents_/$id_/activity': {
+      id: '/agent/agents_/$id_/activity'
+      path: '/agents/$id/activity'
+      fullPath: '/agent/agents/$id/activity'
+      preLoaderRoute: typeof AgentAgentsIdActivityRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/mcp_/servers_/$name_/edit': {
+      id: '/agent/mcp_/servers_/$name_/edit'
+      path: '/mcp/servers/$name/edit'
+      fullPath: '/agent/mcp/servers/$name/edit'
+      preLoaderRoute: typeof AgentMcpServersNameEditRouteImport
+      parentRoute: typeof AgentRoute
     }
   }
 }
@@ -878,20 +1292,38 @@ interface AgentRouteChildren {
   AgentAgentsRoute: typeof AgentAgentsRoute
   AgentGitWorkspacesRoute: typeof AgentGitWorkspacesRoute
   AgentHubRoute: typeof AgentHubRoute
-  AgentMcpRoute: typeof AgentMcpRoute
   AgentSkillsRoute: typeof AgentSkillsRoute
   AgentToolsRoute: typeof AgentToolsRoute
   AgentWorkflowsRoute: typeof AgentWorkflowsRoute
+  AgentAgentsIdRoute: typeof AgentAgentsIdRoute
+  AgentAgentsNewRoute: typeof AgentAgentsNewRoute
+  AgentMcpServersRoute: typeof AgentMcpServersRoute
+  AgentMcpSettingsRoute: typeof AgentMcpSettingsRoute
+  AgentAgentsIdActivityRoute: typeof AgentAgentsIdActivityRoute
+  AgentAgentsIdCapabilitiesRoute: typeof AgentAgentsIdCapabilitiesRoute
+  AgentAgentsIdEditRoute: typeof AgentAgentsIdEditRoute
+  AgentMcpServersNameRoute: typeof AgentMcpServersNameRoute
+  AgentMcpServersNewRoute: typeof AgentMcpServersNewRoute
+  AgentMcpServersNameEditRoute: typeof AgentMcpServersNameEditRoute
 }
 
 const AgentRouteChildren: AgentRouteChildren = {
   AgentAgentsRoute: AgentAgentsRoute,
   AgentGitWorkspacesRoute: AgentGitWorkspacesRoute,
   AgentHubRoute: AgentHubRoute,
-  AgentMcpRoute: AgentMcpRoute,
   AgentSkillsRoute: AgentSkillsRoute,
   AgentToolsRoute: AgentToolsRoute,
   AgentWorkflowsRoute: AgentWorkflowsRoute,
+  AgentAgentsIdRoute: AgentAgentsIdRoute,
+  AgentAgentsNewRoute: AgentAgentsNewRoute,
+  AgentMcpServersRoute: AgentMcpServersRoute,
+  AgentMcpSettingsRoute: AgentMcpSettingsRoute,
+  AgentAgentsIdActivityRoute: AgentAgentsIdActivityRoute,
+  AgentAgentsIdCapabilitiesRoute: AgentAgentsIdCapabilitiesRoute,
+  AgentAgentsIdEditRoute: AgentAgentsIdEditRoute,
+  AgentMcpServersNameRoute: AgentMcpServersNameRoute,
+  AgentMcpServersNewRoute: AgentMcpServersNewRoute,
+  AgentMcpServersNameEditRoute: AgentMcpServersNameEditRoute,
 }
 
 const AgentRouteWithChildren = AgentRoute._addFileChildren(AgentRouteChildren)
@@ -947,7 +1379,6 @@ const rootRouteChildren: RootRouteChildren = {
   LauncherSetupRoute: LauncherSetupRoute,
   LogsRoute: LogsRoute,
   ModelEvaluationsRoute: ModelEvaluationsRoute,
-  ModelsRoute: ModelsRoute,
   NotificationsRoute: NotificationsRoute,
   RepositoryReviewsRoute: RepositoryReviewsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
@@ -957,12 +1388,25 @@ const rootRouteChildren: RootRouteChildren = {
   DevelopmentSettingsRoute: DevelopmentSettingsRoute,
   DevelopmentWorkflowConfigurationsRoute:
     DevelopmentWorkflowConfigurationsRoute,
+  ModelEvaluationsIdRoute: ModelEvaluationsIdRoute,
+  ModelEvaluationsNewRoute: ModelEvaluationsNewRoute,
+  ModelsAliasesRoute: ModelsAliasesRoute,
+  ModelsRoutersRoute: ModelsRoutersRoute,
   NotificationsNotificationIDRoute: NotificationsNotificationIDRoute,
   RepositoryReviewsProfilesRoute: RepositoryReviewsProfilesRoute,
   RepositoryReviewsRepositoriesRoute: RepositoryReviewsRepositoriesRoute,
   RepositoryReviewsResultsRoute: RepositoryReviewsResultsRoute,
   ModelEvaluationsEvaluationIDReportRoute:
     ModelEvaluationsEvaluationIDReportRoute,
+  ModelEvaluationsIdCorpusRoute: ModelEvaluationsIdCorpusRoute,
+  ModelEvaluationsIdEditRoute: ModelEvaluationsIdEditRoute,
+  ModelEvaluationsIdLanguagesRoute: ModelEvaluationsIdLanguagesRoute,
+  ModelsAliasesNameRoute: ModelsAliasesNameRoute,
+  ModelsAliasesNewRoute: ModelsAliasesNewRoute,
+  ModelsRoutersNameRoute: ModelsRoutersNameRoute,
+  ModelsRoutersNewRoute: ModelsRoutersNewRoute,
+  ModelsAliasesNameEditRoute: ModelsAliasesNameEditRoute,
+  ModelsRoutersNameEditRoute: ModelsRoutersNameEditRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

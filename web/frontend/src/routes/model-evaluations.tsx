@@ -1,34 +1,58 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, useLocation } from "@tanstack/react-router"
+import { useCallback, useEffect, useMemo } from "react"
 
-import { ModelEvaluationsPage } from "@/components/model-evaluations/model-evaluations-page"
+import { ModelEvaluationsCollectionPage } from "@/components/collections/pilots/model-evaluation-collection"
+import {
+  type CollectionRouteSearch,
+  collectionRouteSearchIsCanonical,
+  normalizeCollectionRouteSearch,
+} from "@/hooks/use-collection-route-state"
 
-const evaluationIDPattern = /^rme_[0-9a-f]{32}$/
+const defaultQuery = "ORDER BY updated DESC"
 
-interface ModelEvaluationsSearch {
-  probe?: string
-}
+export const Route = createFileRoute("/model-evaluations")({
+  validateSearch: (raw: Record<string, unknown>) =>
+    normalizeCollectionRouteSearch(raw, { defaultQuery }),
+  component: ModelEvaluationsRoute,
+})
 
-function ModelEvaluationsRoutePage() {
+function ModelEvaluationsRoute() {
+  const locationSearch = useLocation({ select: (location) => location.search })
   const navigate = Route.useNavigate()
-  const search = Route.useSearch()
+  const search = useMemo(
+    () =>
+      normalizeCollectionRouteSearch({ ...locationSearch }, { defaultQuery }),
+    [locationSearch],
+  )
+  useEffect(() => {
+    if (!collectionRouteSearchIsCanonical({ ...locationSearch }, search)) {
+      void navigate({ search, replace: true })
+    }
+  }, [locationSearch, navigate, search])
+  const changeSearch = useCallback(
+    (next: CollectionRouteSearch, replace = false) =>
+      void navigate({ search: next, replace }),
+    [navigate],
+  )
   return (
-    <ModelEvaluationsPage
-      initialEvaluationID={search.probe}
-      onOpenReport={(evaluationID) =>
+    <ModelEvaluationsCollectionPage
+      search={search}
+      onSearchChange={changeSearch}
+      onAdd={() => void navigate({ to: "/model-evaluations/new", search })}
+      onOpen={(evaluation) =>
         void navigate({
-          to: "/model-evaluations/$evaluationID/report",
-          params: { evaluationID },
+          to: "/model-evaluations/$id",
+          params: { id: evaluation.id },
+          search,
+        })
+      }
+      onEdit={(evaluation) =>
+        void navigate({
+          to: "/model-evaluations/$id/edit",
+          params: { id: evaluation.id },
+          search,
         })
       }
     />
   )
 }
-
-export const Route = createFileRoute("/model-evaluations")({
-  validateSearch: (raw: Record<string, unknown>): ModelEvaluationsSearch => ({
-    ...(typeof raw.probe === "string" && evaluationIDPattern.test(raw.probe)
-      ? { probe: raw.probe }
-      : {}),
-  }),
-  component: ModelEvaluationsRoutePage,
-})

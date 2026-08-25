@@ -8,14 +8,29 @@ export default defineConfig({
   timeout: 30_000,
   expect: {
     timeout: 5_000,
+    toHaveScreenshot: {
+      animations: "disabled",
+      caret: "hide",
+      maxDiffPixelRatio: 0.005,
+    },
   },
   fullyParallel: true,
   workers: process.env.CI ? 2 : 4,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? "github" : "list",
+  reporter: process.env.CI
+    ? [
+        ["github"],
+        ["html", { open: "never", outputFolder: "playwright-report" }],
+      ]
+    : "list",
+  outputDir: "test-results",
   use: {
     baseURL,
+    locale: "en-US",
+    timezoneId: "UTC",
+    reducedMotion: "reduce",
     trace: "retain-on-failure",
+    screenshot: "only-on-failure",
   },
   webServer: {
     command: `pnpm dev --host 127.0.0.1 --port ${PORT}`,

@@ -1,9 +1,15 @@
-import { Outlet, createRootRoute, useRouterState } from "@tanstack/react-router"
+import {
+  Link,
+  Outlet,
+  createRootRoute,
+  useRouterState,
+} from "@tanstack/react-router"
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools"
 import { useEffect, useState } from "react"
 
 import { getLauncherAuthStatus } from "@/api/launcher-auth"
 import { AppLayout } from "@/components/app-layout"
+import { Button } from "@/components/ui/button"
 import { initializeChatStore } from "@/features/chat/controller"
 import { isLauncherAuthPathname } from "@/lib/launcher-login-path"
 
@@ -98,4 +104,23 @@ const RootLayout = () => {
   )
 }
 
-export const Route = createRootRoute({ component: RootLayout })
+function NotFoundPage() {
+  return (
+    <div className="flex h-full items-center justify-center px-4 py-10">
+      <div className="border-border max-w-lg rounded-lg border border-dashed p-8 text-center">
+        <h1 className="text-lg font-semibold">Page not found</h1>
+        <p className="text-muted-foreground mt-2 text-sm">
+          This address is not part of the current launcher interface.
+        </p>
+        <Button asChild variant="outline" className="mt-4">
+          <Link to="/">Return to chat</Link>
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+export const Route = createRootRoute({
+  component: RootLayout,
+  notFoundComponent: NotFoundPage,
+})

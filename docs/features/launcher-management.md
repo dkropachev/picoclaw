@@ -68,9 +68,20 @@ continues to fail locally until a concrete model is configured.
 | `FR-LAUNCHER-022` | MUST | A development workspace exposes URL-owned Overview, Changes, Files, and Activity views plus responsive Ask/Steer chat. Overview renders current lifecycle, validation, and only actionable Gate or unknown-publication controls. Changes/Files lazy-load an exact read-only Monaco candidate/base view with inline mobile layout and accessible plain-text fallback. Workflow configurations, repository assignments, and lifecycle settings remain separate revision-fenced pages and never execute a Gate. | Development evidence must be inspectable and steerable without turning browser navigation into code or publication authority. |
 | `FR-LAUNCHER-024` | MUST | `/notifications` and `/notifications/:notificationID` provide a durable responsive attention inbox with open/unread/snoozed/resolved state, filtered previous/next navigation, bulk read/unread/snooze/archive, bounded JQL-like filtering, URL-owned queries, and pinned/default saved views. Desktop uses split list/detail; mobile preserves filtered position and uses sheets without unsolicited modals. Production composition registers the branded PicoClaw service worker; install caches only fixed public branding assets, activation removes older PicoClaw cache generations, push clicks open an authenticated notification detail, and browser/PWA support failure leaves the inbox usable. Permission is requested only from **Enable mobile notifications**. Users can name, disable, rename, or revoke devices and independently opt into repository display. Push delivery is limited to newly open critical/high generations and lock-screen content contains only the fixed PicoClaw title, bounded reason category, optional opted-in repository, and notification identity. | Attention should interrupt only when action is important while preserving a sortable, private, durable backlog. |
 
-| `FR-LAUNCHER-023` | MUST | The authenticated shared shell exposes a separate `/model-evaluations` Model review probes destination and `/api/model-evaluations*` control surface. The responsive setup accepts a repository, reusable review profile, two-to-eight-model candidate experiment, and optional ref; displays the profile's inherited reviewer/account/focus/scope/parallelism and files/content work-sizing maxima; rejects custom probe scope/quota/selector/judge controls; creates and version-fences the frozen evaluation; runs asynchronous preflight, deterministic one-dimensional sizing points, judging, and analysis; locks controls after Run; and polls only active durable state. Each selected run exposes accessible **Status**, **Corpus by language**, **Corpus preview**, and **Final report** tabs, pages safe corpus references, shows bounded run history, requested versus observed provider-call sizing and score statistics, cached-weighted effective tokens per analyzed KiB, explicit degradation ceilings, and honest AI-judged partial/failure/unattained/unknown-cost states. Final report also deep-links to `/model-evaluations/{evaluation_id}/report`. The page explicitly states that probes read a profile snapshot but do not start repository reviews, mutate profiles/assignments, or write finding ledgers. | Model comparison must be a discoverable, restart-safe controlled experiment rather than a hidden repository-review mode, a form of unrelated custom options, or a browser-owned timer. |
+| `FR-LAUNCHER-023` | MUST | The authenticated shared shell exposes a `/model-evaluations` Model review probes collection and `/api/model-evaluations*` control surface. Setup lives at `/model-evaluations/new` and accepts a repository, reusable review profile, two-to-eight-model candidate experiment, and optional ref; it displays inherited reviewer/account/focus/scope/parallelism and work-sizing maxima, rejects custom scope/quota/selector/judge controls, and creates a version-fenced draft. Detail and item-owned language, corpus, and report routes run asynchronous preflight, deterministic sizing points, judging, and analysis; lock configuration after Run; poll only active durable state; page safe corpus references; show bounded run history, sizing/score/token statistics, degradation ceilings, and honest partial/failure/unattained/unknown-cost states. The canonical report route is `/model-evaluations/{evaluation_id}/report`. The UI states that probes read a profile snapshot but do not start repository reviews, mutate profiles/assignments, or write finding ledgers. | Model comparison must be a discoverable, restart-safe controlled experiment rather than a hidden repository-review mode, a combined list/editor workspace, unrelated custom options, or a browser-owned timer. |
+
+| `FR-LAUNCHER-025` | MUST | Administrative collections use the registered shared collection shell, server-authoritative bounded query schema, canonical `q` URL state, browser-local recent queries and view preference, explicit cross-page selection, partial-success reconciliation, and dedicated list/new/detail/edit routes defined by `docs/design/collection-ui-system.md`; new collection debt and modified legacy collection implementations are rejected by the manifest and base/head gates. Model Aliases specifically expose configured aliases only through name-addressed list/detail/create/update/delete and at-most-200 bulk-delete APIs with opaque config-revision fencing, allowlisted typed filtering/sorting, additive `total`, `next_cursor`, `canonical_query`, and `query_schema`, selection-aware reference blockers, full candidate validation, restart effects, and no unrelated config mutation. The UI uses `/models/aliases`, `/models/aliases/new`, `/models/aliases/{name}`, and `/models/aliases/{name}/edit`; developer catalog entries are creation templates rather than list items, direct details use the item endpoint, and legacy `/models` is not compatibility-rendered. | Shared collection behavior must remain consistent and enforceable, while aliases need stable names and safe concurrency instead of mutable array indexes or catalog placeholders masquerading as configured resources. |
 
 ## Data And State Model
+
+Model Alias collection identity is normalized alias `name`. Query fields are
+sortable `name`, `model`, `overrides`, and `disabled_accounts`; default ordering
+is name plus stable name. Bulk failure codes include `invalid_id`,
+`duplicate_id`, `not_found`, and `referenced`; blockers contain bounded safe
+labels only. The returned config revision fences name-addressed and bulk
+mutations. Browser-local collection state stores at most eight successful recent
+queries and one preferred view per manifest key; selection and scroll position
+remain in memory and are never durable server state.
 
 The launcher owns an HttpOnly dashboard session, process-local login throttles,
 a shared config mutation lock, public-plus-security config revisions, managed
@@ -122,8 +133,10 @@ Owns: CODE cmd/picoclaw/internal/migrate/**
 Owns: CODE cmd/picoclaw/internal/onboard/**
 Owns: CODE pkg/migrate/**
 Owns: CODE pkg/config/mutation*.go
+Owns: CODE pkg/collectionquery/**
 Owns: CODE web/backend/**
 Owns: CODE web/frontend/src/api/launcher-auth.ts
+Owns: CODE web/frontend/src/api/collection.ts
 Owns: CODE web/frontend/src/api/models.ts
 Owns: CODE web/frontend/src/api/oauth.ts
 Owns: CODE web/frontend/src/api/system.ts
@@ -134,6 +147,8 @@ Owns: CODE web/frontend/public/site.webmanifest
 Owns: CODE web/frontend/src/api/notifications.ts
 Owns: CODE web/frontend/src/components/app-*
 Owns: CODE web/frontend/src/components/config/**
+Owns: CODE web/frontend/src/components/collection/**
+Owns: CODE web/frontend/src/components/collections/pilots/model-alias*
 Owns: CODE web/frontend/src/components/credentials/**
 Owns: CODE web/frontend/src/components/gateway-setup-notice.tsx
 Owns: CODE web/frontend/src/components/models/**
@@ -143,6 +158,7 @@ Owns: CODE web/frontend/src/components/shared-form.tsx
 Owns: CODE web/frontend/src/components/tour/**
 Owns: CODE web/frontend/src/components/ui/**
 Owns: CODE web/frontend/src/hooks/use-credentials-page.ts
+Owns: CODE web/frontend/src/hooks/use-collection-route-state.ts
 Owns: CODE web/frontend/src/hooks/use-theme.ts
 Owns: CODE web/frontend/src/i18n/**
 Owns: CODE web/frontend/src/index.css
@@ -156,6 +172,7 @@ Owns: CODE web/frontend/src/routes/accounts.tsx
 Owns: CODE web/frontend/src/routes/credentials.tsx
 Owns: CODE web/frontend/src/routes/launcher-*
 Owns: CODE web/frontend/src/routes/models.tsx
+Owns: CODE web/frontend/src/routes/models_*alias*.tsx
 Owns: CODE web/frontend/src/routes/notifications*
 Owns: CODE web/frontend/src/store/**
 Owns: CODE web/frontend/src/test/**
@@ -169,6 +186,8 @@ Owns: HTTP * /api/auth*
 Owns: HTTP * /api/config*
 Owns: HTTP * /api/accounts/models*
 Owns: HTTP * /api/accounts/model-aliases*
+Owns: HTTP * /api/model-aliases*
+Owns: UI /models/aliases*
 Owns: HTTP * /api/oauth*
 Owns: HTTP GET /oauth/callback
 Owns: HTTP * /api/system*
@@ -190,6 +209,7 @@ Owns: TEST pkg/migrate/* *
 Owns: TEST pkg/migrate/internal/* *
 Owns: TEST pkg/migrate/sources/openclaw/* *
 Owns: TEST pkg/config/mutation_test.go *
+Owns: TEST pkg/collectionquery/**
 Owns: TEST scripts/featuretools_lib_test.go *
 Owns: TEST web/backend/* *
 Owns: TEST web/backend/api/auth*
@@ -214,6 +234,9 @@ Owns: TEST web/backend/api/weixin*
 | UI | `/development*` | Mutually exclusive intake, portfolio, aggregate workspace, read-only code evidence, workflow configurations, repositories, and lifecycle settings. | `FR-LAUNCHER-009`, `FR-LAUNCHER-021`, `FR-LAUNCHER-022` |
 | UI/PWA | `/notifications*`, manifest, service worker | Sortable attention backlog, saved queries, device controls, app badge, privacy-minimal push, and authenticated deep links. | `FR-LAUNCHER-009`, `FR-LAUNCHER-024` |
 | HTTP | `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/agents*`, `/api/workflows*` | Existing authenticated management surfaces retain their scoped contracts and shared mutation fencing. | `FR-LAUNCHER-001` through `FR-LAUNCHER-012` |
+
+| HTTP/UI | `/api/model-aliases*`; `/models/aliases*` | Name-addressed typed query/list/detail/CRUD, revision-fenced explicit-name bulk delete, catalog templates on creation only, and standard collection/detail/editor routes. | `FR-LAUNCHER-025` |
+| UI governance | `web/frontend/collection-surfaces.json`, shared collection subsystem, UI linter, and base/head guard | Audited standard/legacy/exempt inventory, canonical collection state/presentation, static route/shell enforcement, and touched-legacy migration enforcement. | `FR-LAUNCHER-009`, `FR-LAUNCHER-025` |
 
 ## Algorithms And Ordering
 
@@ -307,6 +330,8 @@ removes or resolves the durable inbox item.
 | `FR-LAUNCHER-021` | [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-intake-page.test.tsx](../../web/frontend/src/components/development-workspaces/development-intake-page.test.tsx), [web/frontend/src/routes/-development.test.ts](../../web/frontend/src/routes/-development.test.ts), [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx) |
 | `FR-LAUNCHER-022` | [web/frontend/src/components/development-workspaces/development-pages.test.tsx](../../web/frontend/src/components/development-workspaces/development-pages.test.tsx), [web/frontend/src/components/development-workspaces/development-code-browser.test.tsx](../../web/frontend/src/components/development-workspaces/development-code-browser.test.tsx), [web/frontend/src/components/development-workspaces/development-action-panel.test.tsx](../../web/frontend/src/components/development-workspaces/development-action-panel.test.tsx) |
 | `FR-LAUNCHER-024` | [web/frontend/src/api/notifications.test.ts](../../web/frontend/src/api/notifications.test.ts), [web/frontend/src/components/notifications/notification-inbox-page.test.tsx](../../web/frontend/src/components/notifications/notification-inbox-page.test.tsx), [web/frontend/src/components/notifications/notification-query.test.ts](../../web/frontend/src/components/notifications/notification-query.test.ts), [web/frontend/src/components/notifications/push-notification-settings.test.tsx](../../web/frontend/src/components/notifications/push-notification-settings.test.tsx), [web/frontend/src/lib/pwa-notifications.test.ts](../../web/frontend/src/lib/pwa-notifications.test.ts) |
+
+| `FR-LAUNCHER-025` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/scripts/check-collection-delta.test.mjs](../../web/frontend/scripts/check-collection-delta.test.mjs), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 

@@ -46,7 +46,8 @@
       "patterns": [
         "web/frontend/src/api/mcp*.ts",
         "web/frontend/src/components/agent/mcp/**",
-        "web/frontend/src/routes/agent/mcp.tsx"
+        "web/frontend/src/components/collections/pilots/mcp*",
+        "web/frontend/src/routes/agent/mcp*.tsx"
       ]
     },
     {
@@ -92,8 +93,9 @@
       "patterns": [
         "web/frontend/src/api/model-evaluations*.ts",
         "web/frontend/src/components/model-evaluations/**",
+        "web/frontend/src/components/collections/pilots/model-evaluation*",
         "web/frontend/src/routes/-model-evaluations-route.test.tsx",
-        "web/frontend/src/routes/model-evaluations.tsx"
+        "web/frontend/src/routes/model-evaluations*.tsx"
       ]
     },
     {
@@ -101,7 +103,16 @@
       "patterns": [
         "web/frontend/src/api/agents*.ts",
         "web/frontend/src/components/agent/agents/**",
-        "web/frontend/src/routes/agent/agents.tsx"
+        "web/frontend/src/components/collections/pilots/agent*",
+        "web/frontend/src/routes/agent/agents*.tsx"
+      ]
+    },
+    {
+      "spec": "docs/features/model-router.md",
+      "patterns": [
+        "web/frontend/src/components/models/model-router*",
+        "web/frontend/src/components/collections/pilots/model-router*",
+        "web/frontend/src/routes/models_*router*.tsx"
       ]
     },
     {
@@ -113,9 +124,9 @@
         "web/frontend/src/api/notifications.ts",
         "web/frontend/src/api/pr-lifecycle-flow.ts",
         "web/frontend/src/api/pr-lifecycle-workflow-configurations.ts",
-		"web/frontend/src/api/pr-lifecycle-repository-assignments.ts",
-		"web/frontend/src/api/pr-workspace-gates.ts",
-		"web/frontend/src/api/pr-workspaces.ts",
+        "web/frontend/src/api/pr-lifecycle-repository-assignments.ts",
+        "web/frontend/src/api/pr-workspace-gates.ts",
+        "web/frontend/src/api/pr-workspaces.ts",
         "web/frontend/src/app-providers.tsx",
         "web/frontend/src/components/app-sidebar.tsx",
         "web/frontend/src/components/development-workspaces/**",
@@ -129,8 +140,8 @@
         "web/frontend/src/routes/development.tsx",
         "web/frontend/src/routes/development_*.tsx",
         "web/frontend/src/routes/notifications.tsx",
-		"web/frontend/src/routes/notifications_*.tsx",
-		"web/frontend/src/routes/pull-requests*.tsx"
+        "web/frontend/src/routes/notifications_*.tsx",
+        "web/frontend/src/routes/pull-requests*.tsx"
       ]
     },
     {
@@ -145,6 +156,7 @@
       "spec": "docs/features/launcher-management.md",
       "patterns": [
         "web/frontend/src/api/launcher-auth.ts",
+        "web/frontend/src/api/collection.ts",
         "web/frontend/src/api/models.ts",
         "web/frontend/src/api/oauth.ts",
         "web/frontend/src/api/system.ts",
@@ -153,10 +165,13 @@
         "web/frontend/src/components/config/**",
         "web/frontend/src/components/credentials/**",
         "web/frontend/src/components/models/**",
+        "web/frontend/src/components/collection/**",
+        "web/frontend/src/components/collections/pilots/model-alias*",
         "web/frontend/src/components/shared-form.tsx",
         "web/frontend/src/components/tour/**",
         "web/frontend/src/components/ui/**",
         "web/frontend/src/hooks/use-credentials-page.ts",
+        "web/frontend/src/hooks/use-collection-route-state.ts",
         "web/frontend/src/i18n/**",
         "web/frontend/src/lib/**",
         "web/frontend/src/main.tsx",
@@ -167,6 +182,7 @@
         "web/frontend/src/routes/accounts.tsx",
         "web/frontend/src/routes/credentials.tsx",
         "web/frontend/src/routes/launcher-*",
+        "web/frontend/src/routes/models_*alias*.tsx",
         "web/frontend/src/store/**"
       ]
     },

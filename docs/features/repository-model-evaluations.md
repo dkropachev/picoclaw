@@ -63,7 +63,17 @@ explicitly AI-judged comparison report that survives process restarts.
 | `FR-REPOEVAL-011` | MUST | Progress is projected from actual backend workflow-step and managed-child dispatch. It distinguishes resolving, inventorying, classifying, selecting, validating, candidate batch execution, judging, analyzing, completion, cancellation, and failure; records current/total batch and completed/total/failed candidate calls; and exposes a bounded active-child list containing only index, safe label, model alias, scope count, and start time. Child completion advances progress exactly once independently of provider retries or structured-output repair calls. Judge, failure, cancellation, and launcher recovery clear stale active children. The judge alias is shown while one exact judge call is active, alongside per-language available/selected files, bytes, regions, and limited status. | A long evaluation must show real work rather than mock timer stages, an indeterminate spinner, or a stale model/file label. |
 | `FR-REPOEVAL-012` | MUST | Ordinary API responses omit repository source content, credentials, absolute checkout/artifact paths, internal capabilities, and raw provider payloads. Persisted corpus entries contain only exact references and compact bounded results. | Durable comparison state must not become a source or credential exfiltration surface. |
 
+| `FR-REPOEVAL-013` | MUST | Model Evaluation inventory accepts the shared bounded `query`, opaque `cursor`, and `limit` contract and returns summary-only rows with `total`, `next_cursor`, `canonical_query`, and a typed allowlisted `query_schema`; direct item lookup does not depend on a loaded list. Bulk delete accepts at most 200 explicitly selected IDs with per-item versions, holds the catalog lock, deletes only version-matching drafts, and reports `deleted_ids` plus stable failures while active, completed, stale, unknown, or duplicate selections remain safe and selected. The UI uses the standard List/Table/Grid collection at `/model-evaluations`, dedicated `/new`, `/{id}`, and draft-only `/{id}/edit` routes, and item-owned `/{id}/languages`, `/{id}/corpus`, and `/{id}/report` routes. Active polling and lifecycle actions remain on detail, the report path stays canonical, Back restores collection state, and legacy `?probe=` selection is not interpreted. | Evaluation configuration, lifecycle, corpus, and results must have stable deep links without combining creation, inventory, and one selected workspace or allowing completed evidence to be deleted. |
+
 ## Data And State Model
+
+Evaluation collection identity is immutable `id`; each deletion fence is the
+item `version`. Query fields are sortable `id`, `status`, `repository`, `ref`,
+`models`, `progress`, `version`, `created`, and `updated`; status suggestions are
+the bounded lifecycle states and default ordering remains deterministic with
+stable ID. Bulk failure codes are `invalid_id`, `duplicate_id`, `not_found`,
+`stale_version`, `not_draft`, and `delete_failed`; only version-matching drafts
+are removed while the catalog lock is held.
 
 | State | Shape And Location | Contract |
 | --- | --- | --- |
@@ -86,11 +96,12 @@ Owns: TEST web/backend/api/repository_model_evaluation*_test.go
 Owns: CODE web/frontend/src/api/model-evaluations.ts
 Owns: TEST web/frontend/src/api/model-evaluations.test.ts
 Owns: CODE web/frontend/src/components/model-evaluations/**
+Owns: CODE web/frontend/src/components/collections/pilots/model-evaluation*
 Owns: TEST web/frontend/src/components/model-evaluations/**
 Owns: CODE web/frontend/src/routes/model-evaluations*.tsx
 Owns: TEST web/frontend/src/routes/-model-evaluations-route.test.tsx
 Owns: HTTP * /api/model-evaluations*
-Owns: UI /model-evaluations
+Owns: UI /model-evaluations*
 
 Shared executor/model-resolution and built-in workflow registry behavior remains
 owned by Workflows and Agent Execution Optimization. Repository Reviews owns
@@ -124,6 +135,8 @@ bug-finder scope planning even when both features call `reposcope`.
   force/continuation/task-guard behavior. Evaluation reads one profile at Run,
   freezes only its evaluation-relevant policy, and never assigns, mutates, or
   otherwise changes that profile, a repository review, or a finding ledger.
+
+| HTTP/UI | `/api/model-evaluations*`; `/model-evaluations`, `/new`, `/{id}`, `/{id}/edit`, `/{id}/languages`, `/{id}/corpus`, `/{id}/report` | Typed query/cursor summaries, direct detail, version-fenced draft-only explicit-ID bulk delete, and dedicated lifecycle/detail sections. | `FR-REPOEVAL-010`, `FR-REPOEVAL-013` |
 
 ## Algorithms And Ordering
 
@@ -203,6 +216,8 @@ bug-finder scope planning even when both features call `reposcope`.
 | `FR-REPOEVAL-003`, `FR-REPOEVAL-004`, `FR-REPOEVAL-005` | [pkg/reposcope/candidates_test.go](../../pkg/reposcope/candidates_test.go), [pkg/reposcope/selection_test.go](../../pkg/reposcope/selection_test.go), [pkg/workflows/repository_model_evaluation_native_test.go](../../pkg/workflows/repository_model_evaluation_native_test.go) |
 | `FR-REPOEVAL-006`, `FR-REPOEVAL-007`, `FR-REPOEVAL-008`, `FR-REPOEVAL-009` | [pkg/repoeval/work_sizing_test.go](../../pkg/repoeval/work_sizing_test.go), [web/backend/api/repository_model_evaluation_controller_test.go](../../web/backend/api/repository_model_evaluation_controller_test.go), [pkg/workflows/immutable_scope_test.go](../../pkg/workflows/immutable_scope_test.go), [pkg/workflows/repository_model_evaluation_native_test.go](../../pkg/workflows/repository_model_evaluation_native_test.go), [pkg/workflows/repository_model_evaluation_workflows_test.go](../../pkg/workflows/repository_model_evaluation_workflows_test.go), [web/frontend/src/components/model-evaluations/model-evaluation-report-page.test.tsx](../../web/frontend/src/components/model-evaluations/model-evaluation-report-page.test.tsx), [web/frontend/src/routes/-model-evaluations-route.test.tsx](../../web/frontend/src/routes/-model-evaluations-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-REPOEVAL-010`, `FR-REPOEVAL-011` | [web/frontend/src/api/model-evaluations.test.ts](../../web/frontend/src/api/model-evaluations.test.ts), [web/frontend/src/components/model-evaluations/model-evaluations-page.test.tsx](../../web/frontend/src/components/model-evaluations/model-evaluations-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+
+| `FR-REPOEVAL-013` | [web/backend/api/repository_model_evaluations_test.go](../../web/backend/api/repository_model_evaluations_test.go), [web/backend/api/repository_model_evaluation_controller_test.go](../../web/backend/api/repository_model_evaluation_controller_test.go), [web/frontend/src/api/model-evaluations.test.ts](../../web/frontend/src/api/model-evaluations.test.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 

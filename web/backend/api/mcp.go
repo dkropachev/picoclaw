@@ -59,19 +59,20 @@ type mcpSettingsRequest struct {
 }
 
 type mcpServerRequest struct {
-	Name       string            `json:"name"`
-	Enabled    *bool             `json:"enabled"`
-	Deferred   *bool             `json:"deferred"`
-	Type       string            `json:"type"`
-	URL        string            `json:"url"`
-	Command    string            `json:"command"`
-	Args       []string          `json:"args"`
-	Env        map[string]string `json:"env"`
-	EnvKeys    *[]string         `json:"env_keys"`
-	EnvFile    string            `json:"env_file"`
-	Headers    map[string]string `json:"headers"`
-	HeaderKeys *[]string         `json:"header_keys"`
-	AuthMode   string            `json:"auth_mode"`
+	ExpectedConfigRevision string            `json:"expected_config_revision,omitempty"`
+	Name                   string            `json:"name"`
+	Enabled                *bool             `json:"enabled"`
+	Deferred               *bool             `json:"deferred"`
+	Type                   string            `json:"type"`
+	URL                    string            `json:"url"`
+	Command                string            `json:"command"`
+	Args                   []string          `json:"args"`
+	Env                    map[string]string `json:"env"`
+	EnvKeys                *[]string         `json:"env_keys"`
+	EnvFile                string            `json:"env_file"`
+	Headers                map[string]string `json:"headers"`
+	HeaderKeys             *[]string         `json:"header_keys"`
+	AuthMode               string            `json:"auth_mode"`
 }
 
 type mcpProbeRequest struct {
@@ -100,7 +101,10 @@ type mcpCredentialRequest struct {
 func (h *Handler) registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/mcp", h.handleGetMCP)
 	mux.HandleFunc("PATCH /api/mcp/settings", h.requireMCPMutationOrigin(h.handleUpdateMCPSettings))
+	mux.HandleFunc("GET /api/mcp/servers", h.handleListMCPServers)
 	mux.HandleFunc("POST /api/mcp/servers", h.requireMCPMutationOrigin(h.handleAddMCPServer))
+	mux.HandleFunc("POST /api/mcp/servers/bulk-delete", h.requireMCPMutationOrigin(h.handleBulkDeleteMCPServers))
+	mux.HandleFunc("GET /api/mcp/servers/{name}", h.handleGetMCPServer)
 	mux.HandleFunc("PUT /api/mcp/servers/{name}", h.requireMCPMutationOrigin(h.handleUpdateMCPServer))
 	mux.HandleFunc("DELETE /api/mcp/servers/{name}", h.requireMCPMutationOrigin(h.handleDeleteMCPServer))
 	mux.HandleFunc("POST /api/mcp/servers/test", h.requireMCPMutationOrigin(h.handleTestMCPServer))
@@ -200,6 +204,9 @@ func (h *Handler) handleUpdateMCPSettings(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r, "revision") {
+		return
+	}
 	var request mcpServerRequest
 	if err := decodeMCPJSON(r, &request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -212,6 +219,10 @@ func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
+	if !ok || expectedRevision != "" && !requireCollectionRevision(w, expectedRevision, revision) {
 		return
 	}
 	if findMCPServerName(cfg.Tools.MCP.Servers, request.Name) != "" {
@@ -244,6 +255,9 @@ func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r, "revision") {
+		return
+	}
 	var request mcpServerRequest
 	if err := decodeMCPJSON(r, &request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -256,6 +270,10 @@ func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) 
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	expectedRevision, ok := resolveCollectionRevision(w, r, request.ExpectedConfigRevision)
+	if !ok || expectedRevision != "" && !requireCollectionRevision(w, expectedRevision, revision) {
 		return
 	}
 	oldName := r.PathValue("name")
@@ -319,6 +337,9 @@ func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r, "revision") {
+		return
+	}
 	unlock := h.lockMCPConfigMutation()
 	defer unlock()
 
@@ -327,9 +348,17 @@ func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
+	expectedRevision, ok := resolveCollectionRevision(w, r, "")
+	if !ok || expectedRevision != "" && !requireCollectionRevision(w, expectedRevision, revision) {
+		return
+	}
 	name := findMCPServerName(cfg.Tools.MCP.Servers, r.PathValue("name"))
 	if name == "" {
 		http.Error(w, fmt.Sprintf("MCP server %q not found", r.PathValue("name")), http.StatusNotFound)
+		return
+	}
+	if blockers := mcpServerReferences(cfg, name); len(blockers) > 0 {
+		writeCollectionError(w, http.StatusConflict, "mcp_server_referenced", "MCP server is still referenced", -1, blockers)
 		return
 	}
 	server := cfg.Tools.MCP.Servers[name]
@@ -345,7 +374,7 @@ func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) 
 	if server.Auth != nil && credentialID != "" && !mcpCredentialReferenced(cfg.Tools.MCP.Servers, credentialID) {
 		_ = picoauth.DeleteCredential(credentialID)
 	}
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeCollectionJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {

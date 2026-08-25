@@ -1,0 +1,416 @@
+{
+  "version": 1,
+  "surfaces": [
+    {
+      "key": "model-aliases",
+      "route": "/models/aliases",
+      "owningSpec": "docs/features/launcher-management.md",
+      "implementationGlobs": [
+        "src/routes/models_.*.tsx",
+        "src/routes/models.aliases*.tsx",
+        "src/routes/models/aliases*.tsx",
+        "src/components/models/model-alias*.tsx",
+        "src/components/collections/pilots/**"
+      ],
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/models/aliases",
+        "new": "/models/aliases/new",
+        "detail": "/models/aliases/:name",
+        "edit": "/models/aliases/:name/edit"
+      }
+    },
+    {
+      "key": "model-routers",
+      "route": "/models/routers",
+      "owningSpec": "docs/features/model-router.md",
+      "implementationGlobs": [
+        "src/routes/models_.*.tsx",
+        "src/routes/models.routers*.tsx",
+        "src/routes/models/routers*.tsx",
+        "src/components/models/model-router*.tsx",
+        "src/components/collections/pilots/**"
+      ],
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/models/routers",
+        "new": "/models/routers/new",
+        "detail": "/models/routers/:name",
+        "edit": "/models/routers/:name/edit"
+      }
+    },
+    {
+      "key": "mcp-servers",
+      "route": "/agent/mcp/servers",
+      "owningSpec": "docs/features/mcp-integration.md",
+      "implementationGlobs": [
+        "src/routes/agent/mcp*.tsx",
+        "src/components/agent/mcp/**",
+        "src/components/collections/pilots/**"
+      ],
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit",
+        "settings"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/agent/mcp/servers",
+        "new": "/agent/mcp/servers/new",
+        "detail": "/agent/mcp/servers/:name",
+        "edit": "/agent/mcp/servers/:name/edit",
+        "settings": "/agent/mcp/settings"
+      }
+    },
+    {
+      "key": "agents",
+      "route": "/agent/agents",
+      "owningSpec": "docs/features/agent-conversations.md",
+      "implementationGlobs": [
+        "src/routes/agent/agents*.tsx",
+        "src/components/agent/agents/**",
+        "src/components/collections/pilots/**"
+      ],
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit",
+        "related"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/agent/agents",
+        "new": "/agent/agents/new",
+        "detail": "/agent/agents/:id",
+        "edit": "/agent/agents/:id/edit",
+        "related": [
+          "/agent/agents/:id/capabilities",
+          "/agent/agents/:id/activity"
+        ]
+      }
+    },
+    {
+      "key": "model-evaluations",
+      "route": "/model-evaluations",
+      "owningSpec": "docs/features/repository-model-evaluations.md",
+      "implementationGlobs": [
+        "src/routes/model-evaluations*.tsx",
+        "src/components/model-evaluations/**",
+        "src/components/collections/pilots/**"
+      ],
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit",
+        "related"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/model-evaluations",
+        "new": "/model-evaluations/new",
+        "detail": "/model-evaluations/:id",
+        "edit": "/model-evaluations/:id/edit",
+        "related": [
+          "/model-evaluations/:id/languages",
+          "/model-evaluations/:id/corpus",
+          "/model-evaluations/:id/report"
+        ]
+      }
+    },
+    {
+      "key": "accounts",
+      "route": "/accounts",
+      "owningSpec": "docs/features/launcher-management.md",
+      "implementationGlobs": [
+        "src/routes/accounts*.tsx",
+        "src/components/credentials/accounts-page.tsx"
+      ],
+      "capabilities": ["create", "detail", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/accounts" }
+    },
+    {
+      "key": "account-routers",
+      "route": "/accounts",
+      "owningSpec": "docs/features/account-router.md",
+      "implementationGlobs": [
+        "src/routes/accounts.account-router*.tsx",
+        "src/components/credentials/account-router-editor-page.tsx",
+        "src/components/credentials/accounts-page.tsx"
+      ],
+      "capabilities": ["create", "detail", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": {
+        "list": "/accounts",
+        "new": "/accounts/account-router/new",
+        "edit": "/accounts/account-router/:index"
+      }
+    },
+    {
+      "key": "development-workspaces",
+      "route": "/development",
+      "owningSpec": "docs/features/event-automation.md",
+      "implementationGlobs": [
+        "src/routes/development*.tsx",
+        "src/components/development-workspaces/**"
+      ],
+      "capabilities": ["create", "detail"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": {
+        "list": "/development",
+        "new": "/development/new",
+        "detail": "/development/:workspaceID"
+      }
+    },
+    {
+      "key": "development-repository-assignments",
+      "route": "/development/repositories",
+      "owningSpec": "docs/features/event-automation.md",
+      "implementationGlobs": [
+        "src/routes/development_.repositories.tsx",
+        "src/components/pr-workspaces/pr-lifecycle-repository-assignments-page.tsx"
+      ],
+      "capabilities": ["create", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/development/repositories" }
+    },
+    {
+      "key": "development-workflow-configurations",
+      "route": "/development/workflow-configurations",
+      "owningSpec": "docs/features/event-automation.md",
+      "implementationGlobs": [
+        "src/routes/development_.workflow-configurations.tsx",
+        "src/components/pr-workspaces/pr-lifecycle-workflow-configurations-page.tsx"
+      ],
+      "capabilities": ["create", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/development/workflow-configurations" }
+    },
+    {
+      "key": "event-sources",
+      "route": "/event-sources",
+      "owningSpec": "docs/features/event-automation.md",
+      "implementationGlobs": [
+        "src/routes/event-sources.tsx",
+        "src/components/events/event-sources-page.tsx"
+      ],
+      "capabilities": ["create", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/event-sources" }
+    },
+    {
+      "key": "repository-review-runs",
+      "route": "/repository-reviews",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews.tsx",
+        "src/components/repository-reviews/repository-review-runs-page.tsx"
+      ],
+      "capabilities": ["detail"],
+      "views": ["grid"],
+      "status": "legacy",
+      "routes": { "list": "/repository-reviews" }
+    },
+    {
+      "key": "repository-review-repositories",
+      "route": "/repository-reviews/repositories",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.repositories.tsx",
+        "src/components/repository-reviews/repository-review-repositories-page.tsx"
+      ],
+      "capabilities": ["create", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/repository-reviews/repositories" }
+    },
+    {
+      "key": "repository-review-profiles",
+      "route": "/repository-reviews/profiles",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.profiles.tsx",
+        "src/components/repository-reviews/repository-review-profiles-page.tsx"
+      ],
+      "capabilities": ["create", "edit"],
+      "views": ["grid"],
+      "status": "legacy",
+      "routes": { "list": "/repository-reviews/profiles" }
+    },
+    {
+      "key": "skills",
+      "route": "/agent/skills",
+      "owningSpec": "docs/features/skills.md",
+      "implementationGlobs": [
+        "src/routes/agent/skills.tsx",
+        "src/components/agent/skills/**"
+      ],
+      "capabilities": ["query", "create", "detail"],
+      "views": ["grid"],
+      "status": "legacy",
+      "routes": { "list": "/agent/skills" }
+    },
+    {
+      "key": "tools",
+      "route": "/agent/tools",
+      "owningSpec": "docs/features/tool-execution.md",
+      "implementationGlobs": [
+        "src/routes/agent/tools.tsx",
+        "src/components/agent/tools/**"
+      ],
+      "capabilities": ["query", "edit"],
+      "views": ["grid"],
+      "status": "legacy",
+      "routes": { "list": "/agent/tools" }
+    },
+    {
+      "key": "workflows",
+      "route": "/agent/workflows",
+      "owningSpec": "docs/features/workflows.md",
+      "implementationGlobs": [
+        "src/routes/agent/workflows.tsx",
+        "src/components/workflows/**"
+      ],
+      "capabilities": ["create", "detail", "edit"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/agent/workflows" }
+    },
+    {
+      "key": "git-workspaces",
+      "route": "/agent/git-workspaces",
+      "owningSpec": "docs/features/git-workspaces.md",
+      "implementationGlobs": [
+        "src/routes/agent/git-workspaces.tsx",
+        "src/components/agent/git-workspaces/**"
+      ],
+      "capabilities": ["detail"],
+      "views": ["list"],
+      "status": "legacy",
+      "routes": { "list": "/agent/git-workspaces" }
+    },
+    {
+      "key": "event-ledger",
+      "route": "/events",
+      "owningSpec": "docs/features/event-automation.md",
+      "implementationGlobs": [
+        "src/routes/events.tsx",
+        "src/components/events/events-page.tsx"
+      ],
+      "capabilities": ["query", "pagination", "detail"],
+      "views": ["table"],
+      "status": "exempt",
+      "exemptionReason": "Append-only operational event inspection is a log surface, not administration of resource items.",
+      "routes": { "list": "/events" }
+    },
+    {
+      "key": "notification-inbox",
+      "route": "/notifications",
+      "owningSpec": "docs/features/event-automation.md",
+      "implementationGlobs": [
+        "src/routes/notifications*.tsx",
+        "src/components/notifications/**"
+      ],
+      "capabilities": ["query", "pagination", "detail"],
+      "views": ["list"],
+      "status": "exempt",
+      "exemptionReason": "The attention inbox is an operational triage stream with notification-specific state and navigation.",
+      "routes": { "list": "/notifications" }
+    },
+    {
+      "key": "thread-search",
+      "route": "/threads/search",
+      "owningSpec": "docs/features/threads.md",
+      "implementationGlobs": [
+        "src/routes/threads*.tsx",
+        "src/components/threads/**"
+      ],
+      "capabilities": ["query", "detail"],
+      "views": ["grid"],
+      "status": "exempt",
+      "exemptionReason": "Conversation discovery and transcript navigation are not administrative resource management.",
+      "routes": { "list": "/threads/search" }
+    },
+    {
+      "key": "runtime-logs",
+      "route": "/logs",
+      "owningSpec": "docs/features/session-memory.md",
+      "implementationGlobs": ["src/routes/logs.tsx", "src/components/logs/**"],
+      "capabilities": ["query"],
+      "views": ["list"],
+      "status": "exempt",
+      "exemptionReason": "Streaming runtime logs are explicitly outside the administrative collection standard.",
+      "routes": { "list": "/logs" }
+    },
+    {
+      "key": "skill-marketplace",
+      "route": "/agent/hub",
+      "owningSpec": "docs/features/skills.md",
+      "implementationGlobs": [
+        "src/routes/agent/hub.tsx",
+        "src/components/agent/hub/**"
+      ],
+      "capabilities": ["query"],
+      "views": ["grid"],
+      "status": "exempt",
+      "exemptionReason": "Remote marketplace discovery is a search/catalog experience rather than local resource administration.",
+      "routes": { "list": "/agent/hub" }
+    },
+    {
+      "key": "repository-review-results",
+      "route": "/repository-reviews/results",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.results.tsx",
+        "src/components/repository-reviews/repository-reviews-page.tsx"
+      ],
+      "capabilities": ["detail"],
+      "views": ["list"],
+      "status": "exempt",
+      "exemptionReason": "The route is a result-analysis workbench with nested evidence, not an administrative item collection.",
+      "routes": { "list": "/repository-reviews/results" }
+    }
+  ]
+}

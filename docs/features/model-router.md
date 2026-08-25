@@ -33,10 +33,19 @@ the independent `account_ref` axis.
 | `FR-MODEL-ROUTER-002` | MUST | A model router has a name, enabled flag, entry block, and typed blocks. Rule blocks evaluate ordered rules over the current input, and terminal model blocks point to exact configured model aliases only. Supported rules include contains, regex, code-block presence, and media presence. | Users need concrete input-based routing logic without mixing model and account routing. |
 | `FR-MODEL-ROUTER-003` | MUST | Config validation rejects missing entry blocks, duplicate block IDs, invalid regex rules, fallback cycles, model-router-to-model-router targets, unknown targets, and account routers that try to reference model-router aliases as accounts. | Invalid graphs should fail before runtime. |
 | `FR-MODEL-ROUTER-004` | MUST | Agent execution evaluates a selected model router to an exact alias before provider execution. It independently resolves `account_ref` (including account-router expansion), then resolves the selected alias base model or its concrete-account override. | Model routers and account routers must compose without either owning the other axis. |
-| `FR-MODEL-ROUTER-005` | MUST | The launcher Models surface can list, create, edit, delete, and select model routers as the agent-default alias reference without storing API secrets or account selection on router entries; account routers remain managed on the Accounts surface. | Router setup needs a browser UI while keeping model and account administration separate. |
+| `FR-MODEL-ROUTER-005` | MUST | The launcher `/models/routers` surface can list, create, inspect, edit, delete, and select model routers as the agent-default alias reference without storing API secrets or account selection on router entries; account routers remain managed on the Accounts surface. | Router setup needs a browser UI while keeping model and account administration separate. |
 | `FR-MODEL-ROUTER-006` | MUST | The chat model selector keeps account choices, account routers, and model routers in separate groups, and model-router virtual rows are selectable as default chat targets. | Users need to see what kind of routing target they are selecting. |
 
+| `FR-MODEL-ROUTER-007` | MUST | Model Routers expose configured routers through name-addressed list/detail/create/update/delete endpoints and the shared bounded query contract with `total`, opaque `next_cursor`, `canonical_query`, and typed allowlisted `query_schema`. At-most-200 explicit-name bulk deletion requires the current config revision, computes selection-aware agent/default/router reference blockers, removes all valid routers in one fully validated fenced save, and returns `deleted_ids`, stable per-name failures/blockers, the new revision, and restart effects without changing unrelated config. The shared List/Table/Grid UI lives at `/models/routers`, with dedicated `/new`, `/{name}`, and `/{name}/edit` routes; detail links load independently, and legacy `/models` is not compatibility-rendered. | Router administration needs stable identities, server-authoritative paging, and safe partial deletion rather than mutable model-array indexes and an embedded editor. |
+
 ## Data And State Model
+
+Model Router collection identity is normalized router `name`. Query fields are
+sortable `name`, `enabled`, `blocks`, and `rules`; `enabled` suggests `true` and
+`false`, and default ordering is name plus stable name. Bulk failure codes
+include `invalid_id`, `duplicate_id`, `not_found`, and `referenced`; blockers
+contain bounded safe labels only. The returned config revision fences every
+name-addressed or bulk mutation.
 
 Router config lives in `model_routers[]`:
 
@@ -65,7 +74,9 @@ Router config lives in `model_routers[]`:
 | Config | `model_routers[]` | Persist and validate model-router graphs, then materialize virtual model rows. | `FR-MODEL-ROUTER-001` through `FR-MODEL-ROUTER-003` |
 | Runtime | `pkg/modelrouter` | Evaluate ordered input rules and return the selected downstream target. | `FR-MODEL-ROUTER-002`, `FR-MODEL-ROUTER-004` |
 | Agent | model resolution and turn setup | Resolve model-router aliases before provider/account-router execution. | `FR-MODEL-ROUTER-004` |
-| HTTP/UI | `/api/accounts/models*`, `/models`, Chat selector | Manage model routers and expose them as selectable chat models. | `FR-MODEL-ROUTER-005`, `FR-MODEL-ROUTER-006` |
+| HTTP/UI | `/api/accounts/models*`, `/models/routers`, Chat selector | Manage model routers and expose them as selectable chat models. | `FR-MODEL-ROUTER-005`, `FR-MODEL-ROUTER-006` |
+
+| HTTP/UI | `/api/model-routers*`; `/models/routers*` | Name-addressed typed query/list/detail/CRUD, revision-fenced explicit-name bulk delete, and standard collection/detail/editor routes. | `FR-MODEL-ROUTER-005`, `FR-MODEL-ROUTER-007` |
 
 ## Algorithms And Ordering
 
@@ -107,6 +118,8 @@ behavior and requires router entries to remain secret-free.
 | `FR-MODEL-ROUTER-004` | [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go) |
 | `FR-MODEL-ROUTER-005`, `FR-MODEL-ROUTER-006` | [web/frontend/src/hooks/use-chat-models.test.ts](../../web/frontend/src/hooks/use-chat-models.test.ts), [web/frontend/src/components/models/model-card.test.tsx](../../web/frontend/src/components/models/model-card.test.tsx) |
 
+| `FR-MODEL-ROUTER-007` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [pkg/config/model_router_test.go](../../pkg/config/model_router_test.go), [web/frontend/src/api/models.test.ts](../../web/frontend/src/api/models.test.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
+
 ## Implementation Anchors
 
 - [pkg/config/model_router.go](../../pkg/config/model_router.go)
@@ -119,9 +132,13 @@ behavior and requires router entries to remain secret-free.
 
 Owns: CODE pkg/modelrouter/**
 Owns: CODE pkg/config/model_router.go
+Owns: CODE web/backend/api/model_collections.go
 Owns: CODE web/frontend/src/components/models/model-router-sheet.tsx
 Owns: CODE web/frontend/src/components/models/models-page.tsx
-Owns: CODE web/frontend/src/routes/models.tsx
+Owns: CODE web/frontend/src/components/collections/pilots/model-router*
+Owns: CODE web/frontend/src/routes/models_*router*.tsx
+Owns: HTTP * /api/model-routers*
+Owns: UI /models/routers*
 Owns: CONFIG.model_routers
 Owns: CONFIG.model_routers.*.blocks
 Owns: CONFIG.model_routers.*.blocks.*.fallback

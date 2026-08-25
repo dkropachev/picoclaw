@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/routing"
 )
@@ -50,10 +51,14 @@ type agentEffects struct {
 }
 
 type agentsCollectionResponse struct {
-	Agents         []agentResource `json:"agents"`
-	DefaultAgentID string          `json:"default_agent_id"`
-	ConfigRevision string          `json:"config_revision"`
-	Effects        agentEffects    `json:"effects"`
+	Agents         []agentResource         `json:"agents"`
+	Total          int                     `json:"total"`
+	NextCursor     string                  `json:"next_cursor,omitempty"`
+	CanonicalQuery string                  `json:"canonical_query,omitempty"`
+	QuerySchema    *collectionquery.Schema `json:"query_schema,omitempty"`
+	DefaultAgentID string                  `json:"default_agent_id"`
+	ConfigRevision string                  `json:"config_revision"`
+	Effects        agentEffects            `json:"effects"`
 }
 
 type agentItemResponse struct {
@@ -89,6 +94,10 @@ func (h *Handler) registerAgentRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(
 		"POST /api/agents",
 		h.requireAgentMutationOrigin(h.handleCreateAgent),
+	)
+	mux.HandleFunc(
+		"POST /api/agents/bulk-delete",
+		h.requireAgentMutationOrigin(h.handleBulkDeleteAgents),
 	)
 	mux.HandleFunc("GET /api/agents/{id}", h.handleGetAgent)
 	mux.HandleFunc(
@@ -135,7 +144,11 @@ func (h *Handler) requireAgentMutationOrigin(next http.HandlerFunc) http.Handler
 	}
 }
 
-func (h *Handler) handleListAgents(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	listRequest, ok := parseCollectionListRequest(w, r, agentCollectionSchema)
+	if !ok {
+		return
+	}
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 
@@ -143,14 +156,43 @@ func (h *Handler) handleListAgents(w http.ResponseWriter, _ *http.Request) {
 	if !ok {
 		return
 	}
-	writeAgentJSON(
-		w,
-		http.StatusOK,
-		h.buildAgentsCollectionResponse(cfg, revision),
+	response := h.buildAgentsCollectionResponse(cfg, revision)
+	allResources := append([]agentResource(nil), response.Agents...)
+	page, err := pageAgentResources(response.Agents, listRequest)
+	if err != nil {
+		writeCollectionPageError(w, err)
+		return
+	}
+	response.Agents = page.Items
+	response.Total = page.Total
+	response.NextCursor = page.NextCursor
+	response.CanonicalQuery = listRequest.Query.Canonical()
+	names := make([]string, 0, len(allResources))
+	workspaces := make([]string, 0, len(allResources))
+	accounts := make([]string, 0, len(allResources))
+	models := make([]string, 0, len(allResources))
+	for _, resource := range allResources {
+		names = append(names, resource.Name)
+		workspaces = append(workspaces, resource.Workspace)
+		accounts = append(accounts, resource.AccountRef)
+		if resource.Model != nil {
+			models = append(models, resource.Model.Primary)
+		}
+	}
+	schema := collectionSchemaWithSuggestions(
+		agentCollectionSchema,
+		map[collectionquery.Field][]string{
+			"name": names, "workspace": workspaces, "account": accounts, "model": models,
+		},
 	)
+	response.QuerySchema = &schema
+	writeAgentJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) handleGetAgent(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	if !routing.IsCanonicalAgentID(id) {
 		writeAgentError(w, http.StatusBadRequest, "invalid_agent_id", nil)
