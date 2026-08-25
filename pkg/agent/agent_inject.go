@@ -35,19 +35,43 @@ func (al *AgentLoop) GetConfig() *config.Config {
 	return al.cfg
 }
 
+// SetMediaStore replaces the generation media store. The caller must hold the
+// startup barrier or a paused/drained runtime boundary while tools can run.
 func (al *AgentLoop) SetMediaStore(s media.MediaStore) {
-	al.mediaStore = s
+	// Media-aware tools are mutable. Callers must use the startup barrier or a
+	// paused/drained runtime generation before replacing a live store. This
+	// mutex additionally serializes setters with each other and with reload's
+	// candidate media apply/swap boundary.
+	al.mediaStoreMu.Lock()
+	defer al.mediaStoreMu.Unlock()
 
+	al.mu.Lock()
+	al.mediaStore = s
+	registry := al.registry
+	al.mu.Unlock()
+
+	setAgentRegistryMediaStore(registry, s)
+}
+
+func (al *AgentLoop) mediaStoreSnapshot() media.MediaStore {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	return al.mediaStore
+}
+
+func setAgentRegistryMediaStore(registry *AgentRegistry, store media.MediaStore) {
+	if registry == nil {
+		return
+	}
 	// Propagate store to all registered tools that can emit media.
-	registry := al.GetRegistry()
 	for _, agentID := range registry.ListAgentIDs() {
 		if agent, ok := registry.GetAgent(agentID); ok {
-			agent.Tools.SetMediaStore(s)
+			agent.Tools.SetMediaStore(store)
 		}
 	}
 	registry.ForEachTool("send_tts", func(t tools.Tool) {
 		if st, ok := t.(*tools.SendTTSTool); ok {
-			st.SetMediaStore(s)
+			st.SetMediaStore(store)
 		}
 	})
 }
