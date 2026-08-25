@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 type turnProfileCaptureProvider struct {
@@ -34,6 +35,7 @@ func (p *turnProfileCaptureProvider) Chat(
 
 type turnProfileSideQuestionCaptureProvider struct {
 	messages []providers.Message
+	calls    int
 }
 
 func (p *turnProfileSideQuestionCaptureProvider) Chat(
@@ -43,8 +45,16 @@ func (p *turnProfileSideQuestionCaptureProvider) Chat(
 	model string,
 	opts map[string]any,
 ) (*providers.LLMResponse, error) {
+	p.calls++
 	p.messages = append([]providers.Message(nil), messages...)
-	return &providers.LLMResponse{Content: "side answer"}, nil
+	return &providers.LLMResponse{
+		Content: "side answer",
+		Usage: &providers.UsageInfo{
+			PromptTokens:     7,
+			CompletionTokens: 3,
+			TotalTokens:      10,
+		},
+	}, nil
 }
 
 func newTurnProfileAgentLoop(
@@ -270,6 +280,163 @@ func TestTurnProfile_BtwCommandUsesEnabledTurnProfile(t *testing.T) {
 	}
 }
 
+func TestTurnProfile_SideQuestionHistoryOffSuppressesProvidedSnapshot(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace:         t.TempDir(),
+			ModelName:         "test-model",
+			MaxTokens:         4096,
+			MaxToolIterations: 10,
+		}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "test-model",
+			Model:     "openai/test-model",
+		}},
+	}
+	sideProvider := &turnProfileSideQuestionCaptureProvider{}
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &turnProfileCaptureProvider{})
+	defer al.Close()
+	al.providerFactory = func(*config.ModelConfig) (providers.LLMProvider, string, error) {
+		return sideProvider, "test-model", nil
+	}
+	agent := al.GetRegistry().GetDefaultAgent()
+	opts := &processOptions{
+		Dispatch: DispatchRequest{SessionKey: "side-question-history-off"},
+		TurnProfile: config.EffectiveTurnProfile{
+			Enabled:     true,
+			HistoryMode: config.TurnProfileModeOff,
+		},
+	}
+
+	response, err := al.askSideQuestionWithOptions(
+		context.Background(),
+		agent,
+		opts,
+		"current side question",
+		sideQuestionExecutionOptions{
+			contextSnapshot: &sideQuestionContextSnapshot{
+				history: []providers.Message{{Role: "user", Content: "frozen-history-canary"}},
+				summary: "frozen-summary-canary",
+			},
+			disablePromptCache: true,
+			skipHooks:          true,
+		},
+	)
+	if err != nil || response != "side answer" {
+		t.Fatalf("askSideQuestionWithOptions() = (%q, %v)", response, err)
+	}
+	if !opts.NoHistory {
+		t.Fatal("history-off profile did not set NoHistory")
+	}
+	for _, message := range sideProvider.messages {
+		if strings.Contains(message.Content, "frozen-history-canary") ||
+			strings.Contains(message.Content, "frozen-summary-canary") {
+			t.Fatalf("history-off side question leaked frozen snapshot: %#v", sideProvider.messages)
+		}
+	}
+
+	callsBeforeInvalid := sideProvider.calls
+	invalidOpts := &processOptions{
+		Dispatch: DispatchRequest{SessionKey: "side-question-invalid-profile"},
+		TurnProfile: config.EffectiveTurnProfile{
+			Enabled:   true,
+			ToolsMode: "unknown",
+		},
+	}
+	if _, err := al.askSideQuestionWithOptions(
+		context.Background(),
+		agent,
+		invalidOpts,
+		"must fail before provider",
+		sideQuestionExecutionOptions{disablePromptCache: true, skipHooks: true},
+	); err == nil {
+		t.Fatal("invalid incoming profile error = nil")
+	}
+	if sideProvider.calls != callsBeforeInvalid {
+		t.Fatalf("invalid incoming profile reached provider: calls %d -> %d", callsBeforeInvalid, sideProvider.calls)
+	}
+}
+
+func TestTurnProfile_SideQuestionValidationAndNilOptionsSnapshot(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace:         t.TempDir(),
+			ModelName:         "test-model",
+			MaxTokens:         4096,
+			MaxToolIterations: 10,
+		}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "test-model",
+			Model:     "openai/test-model",
+		}},
+	}
+	sideProvider := &turnProfileSideQuestionCaptureProvider{}
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &turnProfileCaptureProvider{})
+	defer al.Close()
+	al.providerFactory = func(*config.ModelConfig) (providers.LLMProvider, string, error) {
+		return sideProvider, "test-model", nil
+	}
+	agent := al.GetRegistry().GetDefaultAgent()
+
+	var rejectedUsage []workflows.AgentUsage
+	if _, err := al.askSideQuestionWithOptions(
+		context.Background(),
+		nil,
+		nil,
+		"question",
+		sideQuestionExecutionOptions{resultUsage: &rejectedUsage},
+	); err == nil || !strings.Contains(err.Error(), "no agent available") {
+		t.Fatalf("nil-agent error = %v", err)
+	}
+	if len(rejectedUsage) != 0 || sideProvider.calls != 0 {
+		t.Fatalf("nil-agent call produced usage/provider call: usage=%#v calls=%d", rejectedUsage, sideProvider.calls)
+	}
+	if _, err := al.askSideQuestionWithOptions(
+		context.Background(),
+		agent,
+		nil,
+		" \t\n ",
+		sideQuestionExecutionOptions{},
+	); err == nil || !strings.Contains(err.Error(), "Usage: /btw <question>") {
+		t.Fatalf("blank-question error = %v", err)
+	}
+	if sideProvider.calls != 0 {
+		t.Fatalf("blank question reached provider: calls=%d", sideProvider.calls)
+	}
+
+	var usage []workflows.AgentUsage
+	response, err := al.askSideQuestionWithOptions(
+		context.Background(),
+		agent,
+		nil,
+		"current snapshot question",
+		sideQuestionExecutionOptions{
+			contextSnapshot: &sideQuestionContextSnapshot{
+				history: []providers.Message{{Role: "user", Content: "retained-history-canary"}},
+				summary: "retained-summary-canary",
+			},
+			disablePromptCache: true,
+			skipHooks:          true,
+			resultUsage:        &usage,
+		},
+	)
+	if err != nil || response != "side answer" {
+		t.Fatalf("askSideQuestionWithOptions() = (%q, %v)", response, err)
+	}
+	allContent := ""
+	for _, message := range sideProvider.messages {
+		allContent += message.Content + "\n"
+	}
+	for _, canary := range []string{"retained-history-canary", "retained-summary-canary"} {
+		if !strings.Contains(allContent, canary) {
+			t.Fatalf("nil-options side question omitted %q: %#v", canary, sideProvider.messages)
+		}
+	}
+	if len(usage) != 1 || usage[0].TotalTokens != 10 || usage[0].Model != "test-model" {
+		t.Fatalf("result usage = %#v, want one test-model usage", usage)
+	}
+}
+
 func TestTurnProfile_BtwCommandDoesNotAddToolFallbackWhenSystemPromptOff(t *testing.T) {
 	workspace := t.TempDir()
 	cfg := &config.Config{
@@ -371,7 +538,7 @@ func TestTurnProfile_BtwHookCannotReenableNativeSearchWhenToolsOff(t *testing.T)
 	}
 }
 
-func TestTurnProfile_SubTurnInheritsParentToolProfile(t *testing.T) {
+func TestTurnProfile_SubTurnCannotRegainGloballyAllowedTool(t *testing.T) {
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
@@ -384,7 +551,7 @@ func TestTurnProfile_SubTurnInheritsParentToolProfile(t *testing.T) {
 					History: config.TurnProfileBlock{Mode: config.TurnProfileModeOff},
 					Tools: config.TurnProfileBlock{
 						Mode:  config.TurnProfileModeCustom,
-						Allow: []string{"echo_text"},
+						Allow: []string{"echo_text", "echo_text_rewritten"},
 					},
 				},
 			},
@@ -395,25 +562,22 @@ func TestTurnProfile_SubTurnInheritsParentToolProfile(t *testing.T) {
 	al.RegisterTool(&echoTextTool{})
 	al.RegisterTool(&echoTextRewrittenTool{})
 	agent := al.GetRegistry().GetDefaultAgent()
-	profile, ok, err := cfg.Agents.Defaults.ResolveTurnProfile()
-	if err != nil {
-		t.Fatalf("ResolveTurnProfile() error = %v", err)
-	}
-	if !ok {
-		t.Fatal("ResolveTurnProfile() did not return enabled profile")
-	}
 	parentOpts := processOptions{
 		Dispatch: DispatchRequest{
 			SessionKey:  "agent:default:test-parent",
 			UserMessage: "parent",
 		},
-		TurnProfile: profile,
+		TurnProfile: config.EffectiveTurnProfile{
+			Enabled:      true,
+			ToolsMode:    config.TurnProfileModeCustom,
+			AllowedTools: []string{"echo_text"},
+		},
 	}
 	parentTS := newTurnState(agent, parentOpts, turnEventScope{
 		turnID: "parent-turn-profile",
 	})
 
-	_, err = spawnSubTurn(context.Background(), al, parentTS, SubTurnConfig{
+	_, err := spawnSubTurn(context.Background(), al, parentTS, SubTurnConfig{
 		Model:        "test-model",
 		SystemPrompt: "child task",
 		Timeout:      time.Second,
@@ -614,6 +778,47 @@ func TestTurnProfile_SkillsOffAndCustomControlCatalogAndActiveSkills(t *testing.
 	}
 }
 
+func TestTurnProfile_SkillsCustomEmptySuppressesCatalogAndActiveSkills(t *testing.T) {
+	workspace := t.TempDir()
+	writeTurnProfileSkill(
+		t,
+		workspace,
+		"shell",
+		"---\ndescription: shell skill\n---\n# shell\n\nUse shell carefully.",
+	)
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				TurnProfile: config.TurnProfileConfig{
+					Enabled: true,
+					History: config.TurnProfileBlock{Mode: config.TurnProfileModeOff},
+					Skills:  config.TurnProfileBlock{Mode: config.TurnProfileModeCustom},
+				},
+			},
+		},
+	}
+	provider := &turnProfileCaptureProvider{}
+	al := newTurnProfileAgentLoop(t, cfg, provider)
+	defer al.Close()
+
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), processOptions{
+		SessionKey:      "agent:default:test-skills-custom-empty",
+		UserMessage:     "hello",
+		DefaultResponse: defaultResponse,
+		ForcedSkills:    []string{"shell"},
+	})
+	if err != nil {
+		t.Fatalf("runAgentLoop() error = %v", err)
+	}
+	prompt := provider.messages[0].Content
+	for _, forbidden := range []string{"# Skills", "<name>shell</name>", "# Active Skills", "### Skill: shell"} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("custom-empty skills prompt includes %q:\n%s", forbidden, prompt)
+		}
+	}
+}
+
 type turnProfileAddToolHook struct{}
 
 func (h turnProfileAddToolHook) BeforeLLM(
@@ -740,6 +945,47 @@ func TestTurnProfile_ToolsCustomFiltersProviderToolsAndHookAdditions(t *testing.
 	}
 	if provider.tools[0].Function.Name != "echo_text" {
 		t.Fatalf("provider tool = %q, want echo_text", provider.tools[0].Function.Name)
+	}
+}
+
+func TestTurnProfile_IncomingProfileCanOnlyNarrowGlobalTools(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				TurnProfile: config.TurnProfileConfig{
+					Enabled: true,
+					Tools: config.TurnProfileBlock{
+						Mode:  config.TurnProfileModeCustom,
+						Allow: []string{"echo_text", "echo_text_rewritten"},
+					},
+				},
+			},
+		},
+	}
+	provider := &turnProfileCaptureProvider{}
+	al := newTurnProfileAgentLoop(t, cfg, provider)
+	al.RegisterTool(&echoTextTool{})
+	al.RegisterTool(&echoTextRewrittenTool{})
+
+	_, err := al.runAgentLoop(
+		context.Background(),
+		al.GetRegistry().GetDefaultAgent(),
+		processOptions{
+			SessionKey:      "agent:default:test-incoming-tools-narrow",
+			UserMessage:     "hello",
+			DefaultResponse: defaultResponse,
+			TurnProfile: config.EffectiveTurnProfile{
+				Enabled:      true,
+				ToolsMode:    config.TurnProfileModeCustom,
+				AllowedTools: []string{"echo_text"},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("runAgentLoop() error = %v", err)
+	}
+	if len(provider.tools) != 1 || provider.tools[0].Function.Name != "echo_text" {
+		t.Fatalf("provider tools = %#v, want only echo_text", provider.tools)
 	}
 }
 

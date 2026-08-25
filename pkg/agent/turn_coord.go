@@ -661,7 +661,7 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 	// Build messages with context but WITHOUT adding to session history
 	var history []providers.Message
 	var summary string
-	if execution.contextSnapshot != nil {
+	if execution.contextSnapshot != nil && (opts == nil || !opts.NoHistory) {
 		history = session.CloneMessages(execution.contextSnapshot.history)
 		summary = execution.contextSnapshot.summary
 	} else if opts != nil && !opts.NoHistory {
