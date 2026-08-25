@@ -400,6 +400,7 @@ describe("repository review API", () => {
       },
     }
     const profile = {
+      schema_version: 1,
       id: "profile/slash",
       version: 2,
       ...config,
@@ -433,7 +434,7 @@ describe("repository review API", () => {
     })
     await createRepositoryReviewProfile(config)
     await updateRepositoryReviewProfile("profile/slash", {
-      ...config,
+      ...profile,
       expected_version: 2,
     })
     await deleteRepositoryReviewProfile("profile/slash", {
