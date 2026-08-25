@@ -306,6 +306,10 @@ func spawnSubTurn(
 
 	// Get effective SubTurn configuration
 	rtCfg := al.getSubTurnConfig()
+	al.prepareTurnState(parentTS)
+	if !parentTS.acceptsChildren() {
+		return nil, fmt.Errorf("parent turn %s no longer accepts children: %w", parentTS.turnID, context.Canceled)
+	}
 
 	// 0. Acquire concurrency semaphore FIRST to ensure it's released even if early validation fails.
 	// Blocks if parent already has maxConcurrentSubTurns running, with a timeout to prevent indefinite blocking.
@@ -329,6 +333,12 @@ func spawnSubTurn(
 					<-parentTS.concurrencySem
 				}
 			}()
+		case <-parentTS.Finished():
+			return nil, fmt.Errorf(
+				"parent turn %s finished while waiting for a concurrency slot: %w",
+				parentTS.turnID,
+				context.Canceled,
+			)
 		case <-timeoutCtx.Done():
 			// Check parent context first - if it was canceled, propagate that error
 			if ctx.Err() != nil {
@@ -452,10 +462,8 @@ func spawnSubTurn(
 	childTS.depth = parentTS.depth + 1
 	childTS.parentTurnID = parentTS.turnID
 	childTS.parentTurnState = parentTS
-	childTS.pendingResults = make(chan *tools.ToolResult, 16)
-	childTS.concurrencySem = make(chan struct{}, rtCfg.maxConcurrent)
-	childTS.al = al                  // back-ref for hard abort cascade
 	childTS.session = ephemeralStore // same store as agent.Sessions
+	al.prepareTurnState(childTS)
 
 	// Token budget initialization/inheritance
 	// If InitialTokenBudget is explicitly provided (e.g., by team tool), use it.
@@ -477,14 +485,13 @@ func spawnSubTurn(
 
 	childTS.ctx = childCtx
 
-	// Register child turn state so GetAllActiveTurns/Subagents can find it
-	al.activeTurnStates.Store(childID, childTS)
-	defer al.activeTurnStates.Delete(childID)
-
-	// 5. Establish parent-child relationship (thread-safe)
-	parentTS.mu.Lock()
-	parentTS.childTurnIDs = append(parentTS.childTurnIDs, childID)
-	parentTS.mu.Unlock()
+	// Publish the exact child and parent edge as one parent-locked operation.
+	// A terminal/canceling parent rejects attachment, so no child can escape a
+	// concurrent error or hard-abort tree traversal.
+	if !al.attachChildTurn(parentTS, childTS) {
+		return nil, fmt.Errorf("parent turn %s no longer accepts children: %w", parentTS.turnID, context.Canceled)
+	}
+	defer al.releaseSessionTurnState(childTS.sessionKey, childTS)
 
 	// 6. Emit Spawn event
 	al.emitEvent(runtimeevents.KindAgentSubTurnSpawn,
@@ -496,12 +503,16 @@ func spawnSubTurn(
 		},
 	)
 
+	childOutcome := TurnEndStatusError
 	// 7. Defer cleanup: deliver result (for async), emit End event, and recover from panics
 	defer func() {
 		if r := recover(); r != nil {
 			logger.RecoverPanicNoExit(r)
 			err = fmt.Errorf("subturn panicked: %v", r)
-			result = nil
+			result = &tools.ToolResult{
+				Err:    err,
+				ForLLM: fmt.Sprintf("SubTurn failed: %v", err),
+			}
 			logger.ErrorCF("subturn", "SubTurn panicked", map[string]any{
 				"child_id":  childID,
 				"parent_id": parentTS.turnID,
@@ -514,9 +525,9 @@ func spawnSubTurn(
 			deliverSubTurnResult(al, parentTS, childID, result)
 		}
 
-		status := "completed"
-		if err != nil {
-			status = "error"
+		status := "error"
+		if err == nil && childOutcome == TurnEndStatusCompleted {
+			status = "completed"
 		}
 		al.emitEvent(runtimeevents.KindAgentSubTurnEnd,
 			childTS.eventMeta("spawnSubTurn", "subturn.end"),
@@ -530,6 +541,7 @@ func spawnSubTurn(
 	// 8. Execute sub-turn via the real agent loop.
 	pipeline := NewPipeline(al)
 	turnRes, turnErr := al.runTurn(childCtx, childTS, pipeline)
+	childOutcome = turnRes.status
 
 	// Release the concurrency semaphore immediately after runTurn completes,
 	// before the cleanup defer runs. This prevents a deadlock where:
@@ -548,6 +560,18 @@ func spawnSubTurn(
 		result = &tools.ToolResult{
 			Err:    turnErr,
 			ForLLM: fmt.Sprintf("SubTurn failed: %v", turnErr),
+		}
+	} else if turnRes.status == TurnEndStatusAborted {
+		err = fmt.Errorf("subturn aborted: %w", context.Canceled)
+		result = &tools.ToolResult{
+			Err:    err,
+			ForLLM: "SubTurn aborted",
+		}
+	} else if turnRes.status == TurnEndStatusError {
+		err = fmt.Errorf("subturn canceled after parent failure: %w", context.Canceled)
+		result = &tools.ToolResult{
+			Err:    err,
+			ForLLM: "SubTurn canceled after parent failure",
 		}
 	} else {
 		result = &tools.ToolResult{
@@ -573,79 +597,57 @@ func spawnSubTurn(
 //   - If parent turn has finished: emits agent.subturn.orphan (late arrival)
 //
 // Thread safety:
-//   - Reads parent state under lock, then releases lock before channel send
-//   - Small race window exists but is acceptable (worst case: result becomes orphan)
+//   - Terminal commit and the non-blocking send are serialized by parent.mu
+//   - pendingResults is never closed; GC owns mailbox lifetime
 //
 // Event emissions:
 //   - agent.subturn.result_delivered: successful delivery to channel
 //   - agent.subturn.orphan: delivery failed (parent finished or channel full)
 func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, result *tools.ToolResult) {
-	// Let GC clean up the pendingResults channel; parent Finish will no longer close it.
-	// We use defer/recover to catch any unlikely channel panics if it were ever closed.
-	defer func() {
-		if r := recover(); r != nil {
-			logger.RecoverPanicNoExit(r)
-			logger.WarnCF("subturn", "recovered panic sending to pendingResults", map[string]any{
-				"parent_id": parentTS.turnID,
-				"child_id":  childID,
-				"recover":   r,
-			})
-			if result != nil && al != nil {
-				al.emitEvent(runtimeevents.KindAgentSubTurnOrphan,
-					parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
-					SubTurnOrphanPayload{ParentTurnID: parentTS.turnID, ChildTurnID: childID, Reason: "panic"},
-				)
-			}
-		}
-	}()
-	parentTS.mu.Lock()
-	isFinished := parentTS.isFinished.Load()
-	resultChan := parentTS.pendingResults
-	parentTS.mu.Unlock()
-
-	// If parent turn has already finished, treat this as an orphan result
-	if isFinished || resultChan == nil {
-		if result != nil && al != nil {
-			al.emitEvent(runtimeevents.KindAgentSubTurnOrphan,
-				parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
-				SubTurnOrphanPayload{ParentTurnID: parentTS.turnID, ChildTurnID: childID, Reason: "parent_finished"},
-			)
-		}
+	if parentTS == nil {
 		return
 	}
 
-	// Parent Turn is still running → attempt to deliver result
-	// We use a select statement with parentTS.Finished() to ensure that if the
-	// parent turn finishes while we are waiting to send the result (e.g. channel
-	// is full), we don't leak this goroutine by blocking forever.
-	select {
-	case resultChan <- result:
-		// Successfully delivered
-		if al != nil {
-			al.emitEvent(runtimeevents.KindAgentSubTurnResultDelivered,
-				parentTS.eventMeta("deliverSubTurnResult", "subturn.result_delivered"),
-				SubTurnResultDeliveredPayload{ContentLen: len(result.ForLLM)},
-			)
-		}
-	case <-parentTS.Finished():
-		// Parent finished while we were waiting to deliver.
-		// The result cannot be delivered to the LLM, so it becomes an orphan.
-		logger.WarnCF("subturn", "parent finished before result could be delivered", map[string]any{
-			"parent_id": parentTS.turnID,
-			"child_id":  childID,
-		})
-		if result != nil && al != nil {
-			al.emitEvent(
-				runtimeevents.KindAgentSubTurnOrphan,
-				parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
-				SubTurnOrphanPayload{
-					ParentTurnID: parentTS.turnID,
-					ChildTurnID:  childID,
-					Reason:       "parent_finished_waiting",
-				},
-			)
+	delivered := false
+	reason := ""
+	contentLen := 0
+	parentTS.mu.Lock()
+	switch {
+	case result == nil:
+		reason = "nil_result"
+	case parentTS.terminalClaimed || parentTS.isFinished.Load() || parentTS.cancelRequested:
+		reason = "parent_finished"
+	case parentTS.pendingResults == nil:
+		reason = "parent_mailbox_unavailable"
+	default:
+		select {
+		case parentTS.pendingResults <- result:
+			delivered = true
+			contentLen = len(result.ForLLM)
+		default:
+			reason = "channel_full"
 		}
 	}
+	parentTS.mu.Unlock()
+
+	if al == nil {
+		return
+	}
+	if delivered {
+		al.emitEvent(runtimeevents.KindAgentSubTurnResultDelivered,
+			parentTS.eventMeta("deliverSubTurnResult", "subturn.result_delivered"),
+			SubTurnResultDeliveredPayload{ContentLen: contentLen},
+		)
+		return
+	}
+	al.emitEvent(runtimeevents.KindAgentSubTurnOrphan,
+		parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
+		SubTurnOrphanPayload{
+			ParentTurnID: parentTS.turnID,
+			ChildTurnID:  childID,
+			Reason:       reason,
+		},
+	)
 }
 
 // ====================== Other Types ======================

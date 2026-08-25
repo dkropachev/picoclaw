@@ -18,68 +18,213 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+const turnCleanupTimeout = 30 * time.Second
+
+func runTurnTerminalStep(firstPanic *any, step func()) {
+	if step == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil && firstPanic != nil && *firstPanic == nil {
+			*firstPanic = recovered
+		}
+	}()
+	step()
+}
+
+func turnCancellationError(ctx, turnCtx context.Context, ts *turnState) error {
+	if ts == nil || ts.hardAbortRequested() {
+		return nil
+	}
+	if turnCtx != nil && turnCtx.Err() != nil {
+		return turnCtx.Err()
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if ts.cancellationRequested() {
+		return context.Canceled
+	}
+	return nil
+}
+
 func (al *AgentLoop) runTurn(
 	ctx context.Context,
 	ts *turnState,
 	pipeline *Pipeline,
-) (turnResult, error) {
+) (result turnResult, err error) {
+	if ts == nil {
+		return turnResult{}, fmt.Errorf("turn state is required")
+	}
+	if !ts.admitRun() {
+		return turnResult{}, fmt.Errorf("turn %q has already started", ts.turnID)
+	}
 	turnCtx, turnCancel := context.WithCancel(ctx)
-	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
+	ts.setRuntimeContext(turnCtx)
+	al.prepareTurnState(ts)
 
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
 
 	if !al.registerActiveTurn(ts) {
+		ts.releaseRunAdmission()
+		turnCancel()
 		return turnResult{}, fmt.Errorf(
 			"session %q is already owned by another turn",
 			ts.sessionKey,
 		)
 	}
-	defer al.clearActiveTurn(ts)
-	defer al.releaseGitWorkspacesForTurn(turnCtx, ts)
+	completionLinearized := false
+	finalize := func(exec *turnExecution, finalContent string) (turnResult, error) {
+		if ts.hardAbortRequested() {
+			return turnResult{}, nil
+		}
+		if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+			return turnResult{}, cancelErr
+		}
+		finalized, finalizeErr := pipeline.Finalize(
+			ctx,
+			turnCtx,
+			ts,
+			exec,
+			TurnEndStatusCompleted,
+			finalContent,
+		)
+		if finalizeErr == nil && finalized.status == TurnEndStatusCompleted &&
+			ctx.Err() == nil && turnCtx.Err() == nil {
+			// Success linearizes here. Cancellation arriving after this point
+			// cannot relabel a fully finalized response in the supervisor defer.
+			completionLinearized = true
+		}
+		return finalized, finalizeErr
+	}
+	defer func() {
+		originalPanic := recover()
+		var cleanupPanic any
+		defer func() {
+			if unexpected := recover(); unexpected != nil && cleanupPanic == nil {
+				cleanupPanic = unexpected
+			}
+			runTurnTerminalStep(&cleanupPanic, func() {
+				al.clearActiveTurn(ts)
+			})
+			turnCancel()
+			if originalPanic != nil {
+				panic(originalPanic)
+			}
+			if cleanupPanic != nil {
+				panic(cleanupPanic)
+			}
+		}()
+
+		candidate := TurnEndStatusCompleted
+		switch {
+		case originalPanic != nil, err != nil,
+			result.status == TurnEndStatusError,
+			result.status == TurnEndStatusAborted:
+			candidate = TurnEndStatusError
+		case ts.cancellationRequested():
+			candidate = TurnEndStatusError
+		case result.status == TurnEndStatusCompleted && completionLinearized:
+			// Finalize already linearized success; a deadline firing between
+			// its return and this defer cannot relabel the outcome.
+		case ctx.Err() != nil, turnCtx.Err() != nil:
+			candidate = TurnEndStatusError
+		}
+
+		status := candidate
+		committed := false
+		runTurnTerminalStep(&cleanupPanic, func() {
+			status, committed = ts.claimRunTerminal(candidate)
+		})
+		if !committed {
+			runTurnTerminalStep(&cleanupPanic, func() {
+				status = ts.terminalStatusSnapshot(candidate)
+			})
+		}
+		if status == TurnEndStatusAborted {
+			result = turnResult{
+				usage:  ts.workflowAgentUsageSnapshot(),
+				status: TurnEndStatusAborted,
+			}
+			// Provider/context cancellation is expected for an accepted hard
+			// abort. Only restore failure is returned to the caller.
+			err = nil
+		} else {
+			result.status = status
+		}
+		if status == TurnEndStatusError && originalPanic == nil && err == nil {
+			switch {
+			case ctx.Err() != nil:
+				err = ctx.Err()
+			case turnCtx.Err() != nil:
+				err = turnCtx.Err()
+			default:
+				err = fmt.Errorf("turn ended with error")
+			}
+		}
+
+		// Failure cancellation is distinct from explicit hard abort: it
+		// cancels critical descendants without marking them aborted.
+		if status == TurnEndStatusError {
+			runTurnTerminalStep(&cleanupPanic, func() {
+				requestTurnTreeCancellation(al, ts, false)
+			})
+		}
+
+		// Hard-abort requests mark and cancel the complete tree before
+		// runTurn unwinds. Panic follows the failure-cancel policy. Both
+		// restore through the one captured restore point before cleanup.
+		if (status == TurnEndStatusAborted || originalPanic != nil) && !ts.opts.NoHistory {
+			runTurnTerminalStep(&cleanupPanic, func() {
+				restoreErr := ts.restoreSession(ts.agent)
+				if restoreErr == nil {
+					return
+				}
+				if originalPanic == nil {
+					err = restoreErr
+				}
+				runTurnTerminalStep(&cleanupPanic, func() {
+					al.emitEvent(
+						runtimeevents.KindAgentError,
+						ts.eventMeta("runTurn", "turn.error"),
+						ErrorPayload{Stage: "session_restore", Message: restoreErr.Error()},
+					)
+				})
+			})
+		}
+
+		// turnCtx may already be canceled by hard abort. Preserve runtime
+		// values but give Git cleanup one bounded, cancellation-independent
+		// context before attempting the terminal event.
+		runTurnTerminalStep(&cleanupPanic, func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(
+				context.WithoutCancel(turnCtx),
+				turnCleanupTimeout,
+			)
+			defer cleanupCancel()
+			al.releaseGitWorkspacesForTurn(cleanupCtx, ts)
+		})
+		runTurnTerminalStep(&cleanupPanic, func() {
+			al.emitTurnEnd(ts, status)
+		})
+	}()
 
 	if al.takePendingStop(ts.sessionKey) {
 		_ = ts.requestHardAbort()
 	}
 
-	turnStatus := TurnEndStatusCompleted
-	defer func() {
-		attemptedSkills := ts.attemptedSkillsSnapshot()
-		skillContextSnapshots := ts.skillContextSnapshotsSnapshot()
-		finalSuccessfulPath := []string(nil)
-		if turnStatus == TurnEndStatusCompleted {
-			if latest := ts.latestSkillContextSnapshot(); len(latest) > 0 {
-				finalSuccessfulPath = latest
-			} else {
-				finalSuccessfulPath = append([]string(nil), attemptedSkills...)
-			}
-		}
-		al.emitEvent(
-			runtimeevents.KindAgentTurnEnd,
-			ts.eventMeta("runTurn", "turn.end"),
-			TurnEndPayload{
-				Status:                turnStatus,
-				Workspace:             ts.workspace,
-				Iterations:            ts.currentIteration(),
-				Duration:              time.Since(ts.startedAt),
-				FinalContentLen:       ts.finalContentLen(),
-				UserMessage:           ts.userMessage,
-				FinalContent:          ts.finalContentSnapshot(),
-				ActiveSkills:          append([]string(nil), ts.activeSkills...),
-				AttemptedSkills:       attemptedSkills,
-				FinalSuccessfulPath:   finalSuccessfulPath,
-				SkillContextSnapshots: skillContextSnapshots,
-				ToolKinds:             ts.toolKindsSnapshot(),
-				ToolExecutions:        ts.toolExecutionsSnapshot(),
-			},
-		)
-	}()
-
 	if ts.hardAbortRequested() {
-		turnStatus = TurnEndStatusAborted
-		return al.abortTurn(ts)
+		return turnResult{}, nil
+	}
+	if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+		return turnResult{}, cancelErr
+	}
+	if ts.parentTurnState != nil && ts.IsParentEnded() && !ts.critical {
+		completionLinearized = true
+		return turnResult{status: TurnEndStatusCompleted}, nil
 	}
 
 	al.emitEvent(
@@ -96,6 +241,12 @@ func (al *AgentLoop) runTurn(
 	if err != nil {
 		return turnResult{}, err
 	}
+	if ts.hardAbortRequested() {
+		return turnResult{}, nil
+	}
+	if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+		return turnResult{}, cancelErr
+	}
 
 	// Convenience references to exec fields used throughout the turn loop.
 	messages := exec.messages
@@ -108,8 +259,10 @@ func (al *AgentLoop) runTurn(
 		return graceful
 	}() {
 		if ts.hardAbortRequested() {
-			turnStatus = TurnEndStatusAborted
-			return al.abortTurn(ts)
+			return turnResult{}, nil
+		}
+		if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+			return turnResult{}, cancelErr
 		}
 
 		iteration := ts.currentIteration() + 1
@@ -213,11 +366,22 @@ func (al *AgentLoop) runTurn(
 			})
 
 		// Execute LLM call via Pipeline
+		if ts.hardAbortRequested() {
+			return turnResult{}, nil
+		}
+		if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+			return turnResult{}, cancelErr
+		}
 		ts.setPhase(TurnPhaseRunning)
 		ctrl, callErr := pipeline.CallLLM(ctx, turnCtx, ts, exec, iteration)
 		if callErr != nil {
-			turnStatus = TurnEndStatusError
 			return turnResult{}, callErr
+		}
+		if ts.hardAbortRequested() {
+			return turnResult{}, nil
+		}
+		if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+			return turnResult{}, cancelErr
 		}
 		messages = exec.messages
 		pendingMessages = exec.pendingMessages
@@ -227,35 +391,29 @@ func (al *AgentLoop) runTurn(
 		case ControlContinue:
 			continue
 		case ControlBreak:
-			// Hard abort: delegate to abortTurn (sets TurnEndStatusAborted)
+			// Accepted hard abort is terminalized by runTurn's supervisor.
 			if exec.abortedByHardAbort {
-				turnStatus = TurnEndStatusAborted
-				return al.abortTurn(ts)
+				return turnResult{}, nil
 			}
-			// Hook abort (HookActionAbortTurn): sets TurnEndStatusError, returns error
+			// Hook abort is a failure terminal.
 			if exec.abortedByHook {
-				turnStatus = TurnEndStatusError
 				return turnResult{}, fmt.Errorf("hook requested turn abort")
 			}
 			// Ensure empty response falls back to DefaultResponse
 			if finalContent == "" {
 				finalContent = ts.opts.DefaultResponse
 			}
-			result, finalizeErr := pipeline.Finalize(
-				ctx,
-				turnCtx,
-				ts,
-				exec,
-				turnStatus,
-				finalContent,
-			)
-			if finalizeErr != nil {
-				turnStatus = TurnEndStatusError
-			}
+			result, finalizeErr := finalize(exec, finalContent)
 			return result, finalizeErr
 		case ControlToolLoop:
 			// Execute tools via Pipeline
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
+			if ts.hardAbortRequested() {
+				return turnResult{}, nil
+			}
+			if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+				return turnResult{}, cancelErr
+			}
 			switch toolCtrl {
 			case ToolControlContinue:
 				// Re-read exec.messages since ExecuteTools may have updated it
@@ -263,14 +421,12 @@ func (al *AgentLoop) runTurn(
 				messages = exec.messages
 				continue
 			case ToolControlBreak:
-				// Hard abort: delegate to abortTurn (sets TurnEndStatusAborted)
+				// Accepted hard abort is terminalized by runTurn's supervisor.
 				if exec.abortedByHardAbort {
-					turnStatus = TurnEndStatusAborted
-					return al.abortTurn(ts)
+					return turnResult{}, nil
 				}
-				// Hook abort (HookActionAbortTurn): sets TurnEndStatusError, returns error
+				// Hook abort is a failure terminal.
 				if exec.abortedByHook {
-					turnStatus = TurnEndStatusError
 					return turnResult{}, fmt.Errorf("hook requested turn abort")
 				}
 				// ExecuteTools returned ControlBreak:
@@ -279,25 +435,17 @@ func (al *AgentLoop) runTurn(
 				if exec.allResponsesHandled {
 					finalContent = ""
 				}
-				result, finalizeErr := pipeline.Finalize(
-					ctx,
-					turnCtx,
-					ts,
-					exec,
-					turnStatus,
-					finalContent,
-				)
-				if finalizeErr != nil {
-					turnStatus = TurnEndStatusError
-				}
+				result, finalizeErr := finalize(exec, finalContent)
 				return result, finalizeErr
 			}
 		}
 	}
 
 	if ts.hardAbortRequested() {
-		turnStatus = TurnEndStatusAborted
-		return al.abortTurn(ts)
+		return turnResult{}, nil
+	}
+	if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+		return turnResult{}, cancelErr
 	}
 
 	if finalContent == "" {
@@ -310,36 +458,42 @@ func (al *AgentLoop) runTurn(
 
 	// Check hard abort before finalizing (may have been set during tool execution)
 	if ts.hardAbortRequested() {
-		turnStatus = TurnEndStatusAborted
-		return al.abortTurn(ts)
+		return turnResult{}, nil
 	}
 
-	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
-	if err != nil {
-		turnStatus = TurnEndStatusError
-	}
-	return result, err
+	return finalize(exec, finalContent)
 }
 
-func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
-	ts.setPhase(TurnPhaseAborted)
-	if !ts.opts.NoHistory {
-		if err := ts.restoreSession(ts.agent); err != nil {
-			al.emitEvent(
-				runtimeevents.KindAgentError,
-				ts.eventMeta("abortTurn", "turn.error"),
-				ErrorPayload{
-					Stage:   "session_restore",
-					Message: err.Error(),
-				},
-			)
-			return turnResult{}, err
+func (al *AgentLoop) emitTurnEnd(ts *turnState, status TurnEndStatus) {
+	attemptedSkills := ts.attemptedSkillsSnapshot()
+	skillContextSnapshots := ts.skillContextSnapshotsSnapshot()
+	finalSuccessfulPath := []string(nil)
+	if status == TurnEndStatusCompleted {
+		if latest := ts.latestSkillContextSnapshot(); len(latest) > 0 {
+			finalSuccessfulPath = latest
+		} else {
+			finalSuccessfulPath = append([]string(nil), attemptedSkills...)
 		}
 	}
-	return turnResult{
-		usage:  ts.workflowAgentUsageSnapshot(),
-		status: TurnEndStatusAborted,
-	}, nil
+	al.emitEvent(
+		runtimeevents.KindAgentTurnEnd,
+		ts.eventMeta("runTurn", "turn.end"),
+		TurnEndPayload{
+			Status:                status,
+			Workspace:             ts.workspace,
+			Iterations:            ts.currentIteration(),
+			Duration:              time.Since(ts.startedAt),
+			FinalContentLen:       ts.finalContentLen(),
+			UserMessage:           ts.userMessage,
+			FinalContent:          ts.finalContentSnapshot(),
+			ActiveSkills:          append([]string(nil), ts.activeSkills...),
+			AttemptedSkills:       attemptedSkills,
+			FinalSuccessfulPath:   finalSuccessfulPath,
+			SkillContextSnapshots: skillContextSnapshots,
+			ToolKinds:             ts.toolKindsSnapshot(),
+			ToolExecutions:        ts.toolExecutionsSnapshot(),
+		},
+	)
 }
 
 func (al *AgentLoop) selectCandidates(

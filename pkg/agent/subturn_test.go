@@ -467,6 +467,7 @@ func TestHardAbortCascading(t *testing.T) {
 		ctx:            rootCtx,
 		cancelFunc:     rootCancel,
 		turnID:         sessionKey,
+		sessionKey:     sessionKey,
 		depth:          0,
 		session:        &ephemeralSessionStore{},
 		pendingResults: make(chan *tools.ToolResult, 16),
@@ -482,17 +483,19 @@ func TestHardAbortCascading(t *testing.T) {
 	childCtx, childCancel := context.WithCancel(context.Background())
 	childID := "child-independent"
 	childTS := &turnState{
-		ctx:            childCtx,
-		cancelFunc:     childCancel,
-		turnID:         childID,
-		pendingResults: make(chan *tools.ToolResult, 4),
-		al:             al,
+		ctx:             childCtx,
+		cancelFunc:      childCancel,
+		turnID:          childID,
+		sessionKey:      childID,
+		parentTurnID:    rootTS.turnID,
+		parentTurnState: rootTS,
+		pendingResults:  make(chan *tools.ToolResult, 4),
+		al:              al,
 	}
-	al.activeTurnStates.Store(childID, childTS)
-	defer al.activeTurnStates.Delete(childID)
-
-	// Wire child into root's childTurnIDs (as spawnSubTurn would do)
-	rootTS.childTurnIDs = append(rootTS.childTurnIDs, childID)
+	if !al.attachChildTurn(rootTS, childTS) {
+		t.Fatal("failed to attach exact child graph")
+	}
+	defer al.releaseSessionTurnState(childID, childTS)
 
 	// Verify neither context is canceled yet
 	select {
@@ -506,7 +509,7 @@ func TestHardAbortCascading(t *testing.T) {
 	default:
 	}
 
-	// Trigger Hard Abort via al.HardAbort (goes through steering.go → Finish(true))
+	// Trigger request-only hard abort through the session-safe API.
 	err := al.HardAbort(sessionKey)
 	if err != nil {
 		t.Fatalf("HardAbort failed: %v", err)
@@ -532,9 +535,9 @@ func TestHardAbortCascading(t *testing.T) {
 	}
 }
 
-// TestHardAbortSessionRollback verifies that HardAbort rolls back session history
-// to the state before the turn started, discarding all messages added during the turn.
-func TestHardAbortSessionRollback(t *testing.T) {
+// TestHardAbortDefersRollbackToRunTurn verifies the request API never mutates
+// history. The owning runTurn supervisor performs restore-point rollback.
+func TestHardAbortDefersRollbackToRunTurn(t *testing.T) {
 	al, _, _, provider, cleanup := newTestAgentLoop(t)
 	_ = provider
 	defer cleanup()
@@ -576,15 +579,13 @@ func TestHardAbortSessionRollback(t *testing.T) {
 		t.Fatalf("HardAbort failed: %v", err)
 	}
 
-	// Verify history rolled back to initial 2 messages
+	// History remains untouched until the owning runTurn unwinds.
 	finalHistory := sess.GetHistory("")
-	if len(finalHistory) != 2 {
-		t.Errorf("expected history to rollback to 2 messages, got %d", len(finalHistory))
+	if len(finalHistory) != 4 {
+		t.Errorf("expected request-only history length 4, got %d", len(finalHistory))
 	}
-
-	// Verify the content matches the initial state
-	if finalHistory[0].Content != "initial message 1" || finalHistory[1].Content != "initial response 1" {
-		t.Error("history content does not match initial state after rollback")
+	if !rootTS.hardAbortRequested() {
+		t.Fatal("hard abort request was not recorded")
 	}
 }
 
@@ -662,8 +663,8 @@ func TestNestedSubTurnHierarchy(t *testing.T) {
 	rootTS.mu.Unlock()
 }
 
-// TestDeliverSubTurnResultNoDeadlock verifies that deliverSubTurnResult doesn't
-// deadlock when multiple goroutines are accessing the parent turnState concurrently.
+// TestDeliverSubTurnResultNoDeadlock verifies that a full mailbox never blocks
+// concurrent result producers.
 func TestDeliverSubTurnResultNoDeadlock(t *testing.T) {
 	parent := &turnState{
 		ctx:            context.Background(),
@@ -685,19 +686,6 @@ func TestDeliverSubTurnResultNoDeadlock(t *testing.T) {
 		}(i)
 	}
 
-	// Concurrently read from the channel to prevent blocking
-	// and to actually retrieve the matched number of results
-	go func() {
-		for i := 0; i < numChildren; i++ {
-			select {
-			case <-parent.pendingResults:
-			case <-time.After(5 * time.Second):
-				t.Error("timeout waiting for result")
-				return
-			}
-		}
-	}()
-
 	// Wait for all deliveries to complete (with timeout)
 	done := make(chan struct{})
 	go func() {
@@ -711,12 +699,14 @@ func TestDeliverSubTurnResultNoDeadlock(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("deadlock detected: deliverSubTurnResult blocked")
 	}
+	if got := len(parent.pendingResults); got > cap(parent.pendingResults) {
+		t.Fatalf("mailbox length = %d, capacity = %d", got, cap(parent.pendingResults))
+	}
 }
 
-// TestHardAbortOrderOfOperations verifies that HardAbort calls Finish() before
-// rolling back session history, minimizing the race window where new messages
-// could be added after rollback.
-func TestHardAbortOrderOfOperations(t *testing.T) {
+// TestHardAbortOnlyRequestsCancellation verifies HardAbort cancels execution
+// but neither finishes state nor owns rollback.
+func TestHardAbortOnlyRequestsCancellation(t *testing.T) {
 	al, _, _, provider, cleanup := newTestAgentLoop(t)
 	_ = provider
 	defer cleanup()
@@ -751,7 +741,7 @@ func TestHardAbortOrderOfOperations(t *testing.T) {
 		t.Fatalf("HardAbort failed: %v", err)
 	}
 
-	// Verify context was canceled (Finish() was called)
+	// Verify context was canceled by the tree request.
 	select {
 	case <-rootTS.ctx.Done():
 		// Good - context was canceled
@@ -759,14 +749,13 @@ func TestHardAbortOrderOfOperations(t *testing.T) {
 		t.Error("expected context to be canceled after HardAbort")
 	}
 
-	// Verify history was rolled back
+	// History is restored later by runTurn's sole terminal supervisor.
 	finalHistory := sess.GetHistory("")
-	if len(finalHistory) != 1 {
-		t.Errorf("expected history to rollback to 1 message, got %d", len(finalHistory))
+	if len(finalHistory) != 3 {
+		t.Errorf("expected request-only history length 3, got %d", len(finalHistory))
 	}
-
-	if finalHistory[0].Content != "initial message" {
-		t.Error("history content does not match initial state after rollback")
+	if rootTS.isFinished.Load() {
+		t.Fatal("HardAbort must not finish the turn")
 	}
 }
 
@@ -888,9 +877,9 @@ func TestSpawnSubTurn_PanicRecovery(t *testing.T) {
 		t.Error("expected error from panic recovery")
 	}
 
-	// Result should be nil because panic occurred before runTurn could return
-	if result != nil {
-		t.Error("expected nil result after panic")
+	// Panic is converted into an explicit bounded failure result.
+	if result == nil || result.Err == nil || result.ForLLM == "" {
+		t.Fatalf("expected explicit panic failure result, got %#v", result)
 	}
 
 	time.Sleep(10 * time.Millisecond) // let event goroutine flush
@@ -899,11 +888,12 @@ func TestSpawnSubTurn_PanicRecovery(t *testing.T) {
 		t.Error("SubTurnEndEvent not emitted after panic")
 	}
 
-	// For async call, result should still be delivered to channel (even if nil)
+	// For async call, the explicit failure is delivered to the parent mailbox.
 	select {
 	case res := <-parent.pendingResults:
-		// Result was delivered (nil due to panic)
-		_ = res
+		if res == nil || res.Err == nil {
+			t.Fatalf("delivered panic result = %#v", res)
+		}
 	default:
 		t.Error("async result should be delivered to channel even after panic")
 	}
@@ -1632,30 +1622,39 @@ func TestGrandchildAbort_CascadingCancellation(t *testing.T) {
 	parentCtx, parentCancel := context.WithCancel(context.Background())
 	childCtx, childCancel := context.WithCancel(context.Background())
 
-	childTS := &turnState{
-		ctx:        childCtx,
-		cancelFunc: childCancel,
-		turnID:     "grandchild",
-		al:         al,
-	}
-	parentTS := &turnState{
-		ctx:          parentCtx,
-		cancelFunc:   parentCancel,
-		turnID:       "parent",
-		childTurnIDs: []string{"grandchild"},
-		al:           al,
-	}
 	grandparentTS := &turnState{
 		ctx:            gpCtx,
 		cancelFunc:     gpCancel,
 		turnID:         "grandparent",
+		sessionKey:     "grandparent",
 		depth:          0,
 		session:        newEphemeralSession(nil),
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
-		childTurnIDs:   []string{"parent"},
 		al:             al,
 	}
+	parentTS := &turnState{
+		ctx:             parentCtx,
+		cancelFunc:      parentCancel,
+		turnID:          "parent-turn",
+		sessionKey:      "parent",
+		parentTurnID:    grandparentTS.turnID,
+		parentTurnState: grandparentTS,
+		al:              al,
+	}
+	childTS := &turnState{
+		ctx:             childCtx,
+		cancelFunc:      childCancel,
+		turnID:          "grandchild-turn",
+		sessionKey:      "grandchild",
+		parentTurnID:    parentTS.turnID,
+		parentTurnState: parentTS,
+		al:              al,
+	}
+	grandparentTS.childTurnIDs = []string{parentTS.sessionKey}
+	grandparentTS.childTurns = map[string]*turnState{parentTS.sessionKey: parentTS}
+	parentTS.childTurnIDs = []string{childTS.sessionKey}
+	parentTS.childTurns = map[string]*turnState{childTS.sessionKey: childTS}
 
 	al.activeTurnStates.Store("grandparent", grandparentTS)
 	al.activeTurnStates.Store("parent", parentTS)

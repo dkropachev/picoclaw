@@ -235,20 +235,26 @@ type turnState struct {
 	depth                int                    // SubTurn depth (0 for root turn)
 	parentTurnID         string                 // Parent turn ID (empty for root turn)
 	childTurnIDs         []string               // Child turn IDs
+	childTurns           map[string]*turnState  // Exact retained child graph for cascades
 	pendingResults       chan *tools.ToolResult // Channel for SubTurn results
 	concurrencySem       chan struct{}          // Semaphore for limiting concurrent SubTurns
+	runAdmitted          bool                   // One runTurn admission, guarded by mu
+	terminalClaimed      bool                   // Linearizes terminal commit against admission/abort
 	isFinished           atomic.Bool            // Whether this turn has finished
 	session              session.SessionStore   // Session store reference
 	initialHistoryLength int                    // Snapshot of history length at turn start
 
 	// Additional SubTurn fields
-	ctx             context.Context    // Context for this turn
-	cancelFunc      context.CancelFunc // Cancel function for this turn's context
-	critical        bool               // Whether this SubTurn should continue after parent ends
-	parentTurnState *turnState         // Reference to parent turnState
-	parentEnded     atomic.Bool        // Whether parent has ended
-	closeOnce       sync.Once          // Ensures pendingResults channel is closed once
-	finishedChan    chan struct{}      // Closed when turn finishes
+	ctx              context.Context    // Context for this turn
+	cancelFunc       context.CancelFunc // Cancel function for this turn's context
+	critical         bool               // Whether this SubTurn should continue after parent ends
+	parentTurnState  *turnState         // Reference to parent turnState
+	parentEnded      atomic.Bool        // Whether parent has ended
+	finishOnce       sync.Once          // Owns the complete terminal transition
+	finishedChan     chan struct{}      // Closed when turn finishes
+	terminalStatus   TurnEndStatus      // Final status, guarded by mu
+	cancelRequested  bool               // Rejects child attachment during error/abort cascade
+	cancelDispatched bool               // Prevents repeated non-hard subtree cancellation
 
 	// Token budget tracking
 	tokenBudget      *atomic.Int64        // Shared token budget counter
@@ -256,7 +262,7 @@ type turnState struct {
 	lastUsage        *providers.UsageInfo // Last LLM usage info
 	usage            *workflowAgentUsageAccumulator
 
-	// Back-reference to the owning AgentLoop (set for SubTurns only, used for hard abort cascade)
+	// Back-reference to the owning AgentLoop, bound before active publication.
 	al *AgentLoop
 }
 
@@ -270,6 +276,8 @@ type sessionTurnLock struct {
 }
 
 type turnReservationContextKey struct{}
+
+const defaultPendingSubTurnResultBuffer = 16
 
 func withTurnReservation(ctx context.Context, reservation *turnState) context.Context {
 	if ctx == nil {
@@ -338,9 +346,12 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 		phase:        TurnPhaseSetup,
 		startedAt:    time.Now(),
 		usage:        newWorkflowAgentUsageAccumulator(opts.usageObserver),
+		finishedChan: make(chan struct{}),
 	}
 
-	// Bind session store and capture initial history length for rollback logic
+	// Bind the session store. restorePointHistory/restorePointSummary are the
+	// authoritative rollback source; initialHistoryLength remains telemetry for
+	// compatibility with existing turn snapshots.
 	if agent != nil && agent.Sessions != nil {
 		ts.session = agent.Sessions
 		history := agent.Sessions.GetHistory(opts.Dispatch.SessionKey)
@@ -350,6 +361,106 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 	}
 
 	return ts
+}
+
+// prepareTurnState binds every supervisor-owned dependency before a turn can
+// become visible in activeTurnStates. It is idempotent so spawnSubTurn can
+// prepare a child before attaching it and runTurn can repeat the invariant at
+// its own publication boundary.
+func (al *AgentLoop) prepareTurnState(ts *turnState) {
+	if al == nil || ts == nil {
+		return
+	}
+	runtimeCfg := al.getSubTurnConfig()
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.al = al
+	if ts.pendingResults == nil {
+		ts.pendingResults = make(chan *tools.ToolResult, defaultPendingSubTurnResultBuffer)
+	}
+	if ts.concurrencySem == nil {
+		ts.concurrencySem = make(chan struct{}, runtimeCfg.maxConcurrent)
+	}
+	if ts.finishedChan == nil {
+		ts.finishedChan = make(chan struct{})
+	}
+}
+
+func (al *AgentLoop) newAdHocRootTurnState(ctx context.Context) *turnState {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ts := &turnState{
+		ctx:     ctx,
+		turnID:  "adhoc-root",
+		depth:   0,
+		session: nil,
+	}
+	al.prepareTurnState(ts)
+	return ts
+}
+
+// attachChildTurn publishes one exact child while holding the parent's state
+// lock. Abort/error terminalization takes the same lock before setting its
+// rejection markers, so a child is either fully attached and discoverable by
+// cascade traversal or rejected before publication.
+func (al *AgentLoop) attachChildTurn(parent, child *turnState) bool {
+	if al == nil || parent == nil || child == nil {
+		return false
+	}
+	if child.sessionKey == "" || child.turnID == "" ||
+		child.parentTurnState != parent || child.parentTurnID != parent.turnID {
+		return false
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.terminalClaimed || parent.isFinished.Load() || parent.cancelRequested || parent.hardAbort {
+		return false
+	}
+	if _, loaded := al.activeTurnStates.LoadOrStore(child.sessionKey, child); loaded {
+		return false
+	}
+	if parent.childTurns == nil {
+		parent.childTurns = make(map[string]*turnState)
+	}
+	parent.childTurns[child.sessionKey] = child
+	parent.childTurnIDs = append(parent.childTurnIDs, child.sessionKey)
+	return true
+}
+
+func (ts *turnState) acceptsChildren() bool {
+	if ts == nil {
+		return false
+	}
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return !ts.terminalClaimed && !ts.isFinished.Load() && !ts.cancelRequested && !ts.hardAbort
+}
+
+func (ts *turnState) admitRun() bool {
+	if ts == nil {
+		return false
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.runAdmitted || ts.terminalClaimed || ts.isFinished.Load() {
+		return false
+	}
+	ts.runAdmitted = true
+	return true
+}
+
+func (ts *turnState) releaseRunAdmission() {
+	if ts == nil {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if !ts.terminalClaimed && !ts.isFinished.Load() {
+		ts.runAdmitted = false
+	}
 }
 
 func (al *AgentLoop) registerActiveTurn(ts *turnState) bool {
@@ -1013,6 +1124,12 @@ func (ts *turnState) setTurnCancel(cancel context.CancelFunc) {
 	ts.turnCancel = cancel
 }
 
+func (ts *turnState) setRuntimeContext(ctx context.Context) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.ctx = ctx
+}
+
 func (ts *turnState) setProviderCancel(cancel context.CancelFunc) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -1028,7 +1145,7 @@ func (ts *turnState) clearProviderCancel(_ context.CancelFunc) {
 func (ts *turnState) requestGracefulInterrupt(hint string) bool {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if ts.hardAbort {
+	if ts.hardAbort || ts.cancelRequested || ts.terminalClaimed || ts.isFinished.Load() {
 		return false
 	}
 	ts.gracefulInterrupt = true
@@ -1049,29 +1166,163 @@ func (ts *turnState) markGracefulTerminalUsed() {
 }
 
 func (ts *turnState) requestHardAbort() bool {
-	ts.mu.Lock()
-	if ts.hardAbort {
-		ts.mu.Unlock()
+	return requestTurnTreeCancellationWithClaim(ts.al, ts, true, false)
+}
+
+// requestTurnTreeCancellation first marks every reachable descendant and only
+// then invokes cancellation. Exact child pointers are retained after an
+// intermediate child leaves activeTurnStates, so critical grandchildren cannot
+// escape a later ancestor abort. The active registry lookup is compatibility
+// support for turn states built before the pointer graph was populated.
+func requestTurnTreeCancellation(al *AgentLoop, root *turnState, hard bool) bool {
+	return requestTurnTreeCancellationWithClaim(al, root, hard, false)
+}
+
+func requestTurnTreeCancellationWithClaim(
+	al *AgentLoop,
+	root *turnState,
+	hard bool,
+	allowClaimedRoot bool,
+) bool {
+	if root == nil {
 		return false
 	}
-	ts.hardAbort = true
-	turnCancel := ts.turnCancel
-	providerCancel := ts.providerCancel
-	ts.mu.Unlock()
 
-	if providerCancel != nil {
-		providerCancel()
+	type cancellationSet struct {
+		provider context.CancelFunc
+		turn     context.CancelFunc
+		owned    context.CancelFunc
 	}
-	if turnCancel != nil {
-		turnCancel()
+
+	stack := []*turnState{root}
+	visited := make(map[*turnState]struct{})
+	cancellations := make([]cancellationSet, 0, 4)
+	rootChanged := false
+
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		current := stack[last]
+		stack = stack[:last]
+		if current == nil {
+			continue
+		}
+		if _, seen := visited[current]; seen {
+			continue
+		}
+		visited[current] = struct{}{}
+
+		current.mu.Lock()
+		if current == root && hard && (current.isFinished.Load() || current.hardAbort ||
+			current.terminalClaimed && !allowClaimedRoot) {
+			current.mu.Unlock()
+			return false
+		}
+		if current == root && !hard && current.cancelDispatched {
+			current.mu.Unlock()
+			return false
+		}
+		if !hard && current.cancelDispatched {
+			current.mu.Unlock()
+			continue
+		}
+		terminal := current.isFinished.Load() ||
+			current.terminalClaimed && !(current == root && hard && allowClaimedRoot)
+		if current == root && hard && !current.hardAbort {
+			rootChanged = true
+		}
+		if !terminal {
+			current.cancelRequested = true
+			if hard {
+				current.hardAbort = true
+			}
+		}
+		if !hard {
+			current.cancelDispatched = true
+		}
+		children := make([]*turnState, 0, len(current.childTurns))
+		retained := make(map[string]struct{}, len(current.childTurns))
+		for childID, child := range current.childTurns {
+			retained[childID] = struct{}{}
+			if child != nil && child.sessionKey == childID &&
+				child.parentTurnState == current && child.parentTurnID == current.turnID {
+				children = append(children, child)
+			}
+		}
+		legacyChildIDs := append([]string(nil), current.childTurnIDs...)
+		if !terminal {
+			cancellations = append(cancellations, cancellationSet{
+				provider: current.providerCancel,
+				turn:     current.turnCancel,
+				owned:    current.cancelFunc,
+			})
+		}
+		current.mu.Unlock()
+
+		stack = append(stack, children...)
+		if al == nil {
+			continue
+		}
+		for _, childID := range legacyChildIDs {
+			if _, ok := retained[childID]; ok {
+				continue
+			}
+			value, ok := al.activeTurnStates.Load(childID)
+			if !ok {
+				continue
+			}
+			child, ok := value.(*turnState)
+			if !ok || child == nil {
+				continue
+			}
+			child.mu.RLock()
+			exactParent := child.parentTurnState == current &&
+				child.parentTurnID == current.turnID
+			child.mu.RUnlock()
+			if exactParent {
+				stack = append(stack, child)
+			}
+		}
 	}
-	return true
+
+	for _, cancellation := range cancellations {
+		if cancellation.provider != nil {
+			cancellation.provider()
+		}
+		if cancellation.turn != nil {
+			cancellation.turn()
+		}
+		if cancellation.owned != nil {
+			cancellation.owned()
+		}
+	}
+	return rootChanged
 }
 
 func (ts *turnState) hardAbortRequested() bool {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	return ts.hardAbort
+}
+
+func (ts *turnState) cancellationRequested() bool {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.cancelRequested
+}
+
+func (ts *turnState) terminalStatusSnapshot(fallback TurnEndStatus) TurnEndStatus {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if ts.terminalStatus != "" {
+		return ts.terminalStatus
+	}
+	if ts.hardAbort {
+		return TurnEndStatusAborted
+	}
+	if ts.cancelRequested && fallback == TurnEndStatusCompleted {
+		return TurnEndStatusError
+	}
+	return fallback
 }
 
 func (ts *turnState) eventMeta(source, tracePath string) HookMeta {
@@ -1092,6 +1343,12 @@ func (ts *turnState) captureRestorePoint(history []providers.Message, summary st
 	defer ts.mu.Unlock()
 	ts.restorePointHistory = append([]providers.Message(nil), history...)
 	ts.restorePointSummary = summary
+}
+
+func (ts *turnState) restorePointHistoryLength() int {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return len(ts.restorePointHistory)
 }
 
 func (ts *turnState) recordPersistedMessage(msg providers.Message) {
@@ -1243,47 +1500,92 @@ func (ts *turnState) interruptHintMessage() providers.Message {
 // SubTurn-related methods
 // =============================================================================
 
-// Finish marks the turn as finished and closes the pendingResults channel
-func (ts *turnState) Finish(isHardAbort bool) {
-	ts.isFinished.Store(true)
-
-	// Close pendingResults channel exactly once
-	ts.closeOnce.Do(func() {
-		if ts.pendingResults != nil {
-			close(ts.pendingResults)
-		}
+// commitClaimedTerminal commits one immutable terminal outcome. External
+// cleanup deliberately remains outside finishOnce so a panicking dependency
+// cannot poison the once and strand active ownership.
+func (ts *turnState) commitClaimedTerminal(candidate TurnEndStatus) (TurnEndStatus, bool) {
+	actual := candidate
+	committed := false
+	ts.finishOnce.Do(func() {
+		committed = true
 		ts.mu.Lock()
+		defer ts.mu.Unlock()
+		if ts.hardAbort {
+			actual = TurnEndStatusAborted
+		} else if ts.cancelRequested && actual == TurnEndStatusCompleted {
+			actual = TurnEndStatusError
+		}
+		ts.terminalStatus = actual
+		ts.isFinished.Store(true)
+		switch actual {
+		case TurnEndStatusCompleted:
+			ts.phase = TurnPhaseCompleted
+			ts.parentEnded.Store(true)
+		case TurnEndStatusAborted:
+			ts.phase = TurnPhaseAborted
+		}
 		if ts.finishedChan == nil {
 			ts.finishedChan = make(chan struct{})
 		}
 		close(ts.finishedChan)
-		ts.mu.Unlock()
 	})
-
-	// Any graceful finish must signal direct children so nested SubTurns can
-	// observe parent completion and decide whether to stop or continue.
-	if !isHardAbort {
-		ts.parentEnded.Store(true)
+	if committed {
+		return actual, true
 	}
 
-	// Cancel the turn context
-	if ts.cancelFunc != nil {
-		ts.cancelFunc()
-	}
+	ts.mu.RLock()
+	actual = ts.terminalStatus
+	ts.mu.RUnlock()
+	return actual, false
+}
 
-	// Hard abort cascades to all child turns
-	if isHardAbort && ts.al != nil {
+func (ts *turnState) claimRunTerminal(candidate TurnEndStatus) (TurnEndStatus, bool) {
+	ts.mu.Lock()
+	if !ts.runAdmitted || ts.terminalClaimed || ts.isFinished.Load() {
+		actual := ts.terminalStatus
+		ts.mu.Unlock()
+		return actual, false
+	}
+	ts.terminalClaimed = true
+	ts.mu.Unlock()
+	return ts.commitClaimedTerminal(candidate)
+}
+
+func (ts *turnState) claimDetachedTerminal() bool {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.runAdmitted || ts.terminalClaimed || ts.isFinished.Load() {
+		return false
+	}
+	ts.terminalClaimed = true
+	return true
+}
+
+// runTerminal is the detached compatibility terminal primitive used by
+// isolated state tests. Production runTurn uses claimRunTerminal.
+func (ts *turnState) runTerminal(candidate TurnEndStatus) (TurnEndStatus, bool) {
+	if !ts.claimDetachedTerminal() {
 		ts.mu.RLock()
-		children := append([]string(nil), ts.childTurnIDs...)
+		actual := ts.terminalStatus
 		ts.mu.RUnlock()
-		for _, childID := range children {
-			if val, ok := ts.al.activeTurnStates.Load(childID); ok {
-				if child, ok := val.(*turnState); ok {
-					child.Finish(true)
-				}
-			}
-		}
+		return actual, false
 	}
+	return ts.commitClaimedTerminal(candidate)
+}
+
+// Finish remains as an internal compatibility helper for isolated SubTurn
+// state tests. Production turn completion is owned exclusively by runTurn.
+// pendingResults is intentionally never closed; GC owns mailbox lifetime.
+func (ts *turnState) Finish(isHardAbort bool) {
+	if !ts.claimDetachedTerminal() {
+		return
+	}
+	status := TurnEndStatusCompleted
+	if isHardAbort {
+		status = TurnEndStatusAborted
+		_ = requestTurnTreeCancellationWithClaim(ts.al, ts, true, true)
+	}
+	ts.commitClaimedTerminal(status)
 }
 
 // Finished returns whether the turn has finished
