@@ -56,6 +56,7 @@ type AgentLoop struct {
 	contextManager  ContextManager
 	fallback        *providers.FallbackChain
 	channelManager  interfaces.ChannelManager
+	mediaStoreMu    sync.Mutex
 	mediaStore      media.MediaStore
 	transcriber     asr.Transcriber
 	cmdRegistry     *commands.Registry
@@ -843,6 +844,19 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
 			map[string]any{"error": evolutionErr.Error()})
 	}
+	evolutionInstalled := false
+	defer func() {
+		if evolutionInstalled || newEvolution == nil {
+			return
+		}
+		if closeErr := closeAgentResource(
+			"reload candidate evolution bridge",
+			newEvolution.Close,
+		); closeErr != nil {
+			logger.WarnCF("agent", "Failed to close reloaded evolution candidate",
+				map[string]any{"error": closeErr.Error()})
+		}
+	}()
 	if newEvolution != nil {
 		newEvolution.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := newEvolution.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
@@ -853,42 +867,52 @@ func (al *AgentLoop) reloadProviderAndConfig(
 
 	resumeRuntime, err := al.pauseRuntimeUses(ctx)
 	if err != nil {
-		if newEvolution != nil {
-			_ = newEvolution.Close()
-		}
 		return nil, fmt.Errorf("drain active agent runtime before reload: %w", err)
 	}
 	defer resumeRuntime()
 
-	// Atomically swap the config and registry under write lock
-	// This ensures readers see a consistent pair
-	al.mu.Lock()
-	oldRegistry := al.registry
-	oldEvolution := al.evolution
-	oldContextManager := al.contextManager
+	// SetMediaStore and candidate media application/publication share this
+	// boundary, so no setter can retain the retired registry or overtake a
+	// candidate swap. The runtime gate is already paused and drained here.
+	var oldRegistry *AgentRegistry
+	var oldEvolution *evolutionBridge
+	var oldContextManager ContextManager
+	func() {
+		al.mediaStoreMu.Lock()
+		defer al.mediaStoreMu.Unlock()
 
-	// Store new values
-	al.cfg = cfg
-	al.registry = registry
-	registryInstalled = true
-	al.evolution = newEvolution
+		mediaStore := al.mediaStoreSnapshot()
+		setAgentRegistryMediaStore(registry, mediaStore)
 
-	// Also update fallback chain with new config; rebuild rate limiter registry.
-	newRL := providers.NewRateLimiterRegistry()
-	for _, agentID := range registry.ListAgentIDs() {
-		if agent, ok := registry.GetAgent(agentID); ok {
-			newRL.RegisterCandidates(agent.Candidates)
-			newRL.RegisterCandidates(agent.LightCandidates)
-			if agent.AccountRouter != nil {
-				for _, account := range agent.AccountRouter.Accounts {
-					newRL.RegisterCandidates(account.Candidates)
+		// Atomically swap the config and registry under the same lock order used
+		// by SetMediaStore: mediaStoreMu then al.mu.
+		al.mu.Lock()
+		oldRegistry = al.registry
+		oldEvolution = al.evolution
+		oldContextManager = al.contextManager
+
+		al.cfg = cfg
+		al.registry = registry
+		registryInstalled = true
+		al.evolution = newEvolution
+		evolutionInstalled = true
+
+		// Also update fallback chain with new config; rebuild rate limiter registry.
+		newRL := providers.NewRateLimiterRegistry()
+		for _, agentID := range registry.ListAgentIDs() {
+			if agent, ok := registry.GetAgent(agentID); ok {
+				newRL.RegisterCandidates(agent.Candidates)
+				newRL.RegisterCandidates(agent.LightCandidates)
+				if agent.AccountRouter != nil {
+					for _, account := range agent.AccountRouter.Accounts {
+						newRL.RegisterCandidates(account.Candidates)
+					}
 				}
 			}
 		}
-	}
-	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
-
-	al.mu.Unlock()
+		al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
+		al.mu.Unlock()
+	}()
 
 	// Context-manager factories derive per-agent resources from the current
 	// registry. Rebuild after the registry/config swap while the runtime gate
@@ -935,7 +959,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
-	if err := al.ensureMCPInitialized(ctx); err != nil {
+	if err := al.ensureMCPInitializedForGeneration(ctx, cfg, registry); err != nil {
 		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
 	}

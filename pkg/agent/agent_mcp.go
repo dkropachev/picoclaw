@@ -19,13 +19,29 @@ import (
 )
 
 type mcpRuntime struct {
+	// initMu serializes every operation that executes or replaces initOnce.
+	// sync.Once is safe for concurrent Do calls, but assigning a fresh Once
+	// while another Do is running is not. reset and takeManager therefore join
+	// the same protocol as do.
+	initMu   sync.Mutex
 	initOnce sync.Once
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	manager  *mcp.Manager
 	initErr  error
 }
 
+func (r *mcpRuntime) do(initialize func()) error {
+	r.initMu.Lock()
+	defer r.initMu.Unlock()
+
+	r.initOnce.Do(initialize)
+	return r.getInitErr()
+}
+
 func (r *mcpRuntime) reset() *mcp.Manager {
+	r.initMu.Lock()
+	defer r.initMu.Unlock()
+
 	r.mu.Lock()
 	manager := r.manager
 	r.manager = nil
@@ -49,12 +65,15 @@ func (r *mcpRuntime) setInitErr(err error) {
 }
 
 func (r *mcpRuntime) getInitErr() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.initErr
 }
 
 func (r *mcpRuntime) takeManager() *mcp.Manager {
+	r.initMu.Lock()
+	defer r.initMu.Unlock()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	manager := r.manager
@@ -63,14 +82,14 @@ func (r *mcpRuntime) takeManager() *mcp.Manager {
 }
 
 func (r *mcpRuntime) hasManager() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.manager != nil
 }
 
 func (r *mcpRuntime) getManager() *mcp.Manager {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.manager
 }
 
@@ -83,19 +102,90 @@ func (al *AgentLoop) EnsureMCPInitialized(ctx context.Context) error {
 	return al.ensureMCPInitialized(ctx)
 }
 
-// ensureMCPInitialized loads MCP servers/tools once so both Run() and direct
-// agent mode share the same initialization path.
+// ensureMCPInitialized snapshots one exact runtime generation and leases it
+// before entering any manager/network initialization. Static no-op generations
+// need no admission. A context that already owns this loop's lease is reused so
+// callers inside a turn do not self-deadlock.
 func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
-	if !al.cfg.Tools.IsToolEnabled("mcp") {
-		return nil
+	if al == nil {
+		return fmt.Errorf("agent loop not configured")
 	}
 
-	if al.cfg.Tools.MCP.Servers == nil || len(al.cfg.Tools.MCP.Servers) == 0 {
+	// Preserve the static no-op path without depending on runtime admission.
+	// This matters during startup and shutdown: there is no manager or registry
+	// mutation to protect when this exact captured generation cannot initialize
+	// any MCP server. A reload that publishes an enabled generation initializes
+	// that candidate itself while holding the reload pause.
+	al.mu.RLock()
+	cfg := al.cfg
+	registry := al.registry
+	al.mu.RUnlock()
+	if !mcpGenerationNeedsRuntimeLease(cfg, registry) {
+		return al.ensureMCPInitializedForGeneration(ctx, cfg, registry)
+	}
+
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseRuntime()
+
+	al.mu.RLock()
+	cfg = al.cfg
+	registry = al.registry
+	al.mu.RUnlock()
+
+	return al.ensureMCPInitializedForGeneration(leaseCtx, cfg, registry)
+}
+
+func mcpGenerationNeedsRuntimeLease(
+	cfg *config.Config,
+	registry *AgentRegistry,
+) bool {
+	if cfg == nil || registry == nil || !cfg.Tools.IsToolEnabled("mcp") ||
+		len(cfg.Tools.MCP.Servers) == 0 {
+		return false
+	}
+	filtered := filterMCPConfigServers(
+		cfg.Tools.MCP,
+		registry.allowedMCPServers(),
+	)
+	for _, serverCfg := range filtered.Servers {
+		if serverCfg.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureMCPInitializedForGeneration initializes MCP for the exact config and
+// registry supplied by a caller that either owns a runtime-generation lease or
+// holds the reload pause. It intentionally does not acquire admission itself:
+// reload uses it while new runtime admissions are paused.
+func (al *AgentLoop) ensureMCPInitializedForGeneration(
+	ctx context.Context,
+	cfg *config.Config,
+	registry *AgentRegistry,
+) error {
+	if al == nil {
+		return fmt.Errorf("agent loop not configured")
+	}
+	if cfg == nil {
+		return fmt.Errorf("MCP config generation is not configured")
+	}
+	if !cfg.Tools.IsToolEnabled("mcp") {
+		return nil
+	}
+	if registry == nil {
+		return fmt.Errorf("MCP agent registry generation is not configured")
+	}
+
+	if cfg.Tools.MCP.Servers == nil || len(cfg.Tools.MCP.Servers) == 0 {
 		logger.WarnCF("agent", "MCP is enabled but no servers are configured, skipping MCP initialization", nil)
 		return nil
 	}
 
-	mcpCfg := filterMCPConfigServers(al.cfg.Tools.MCP, al.registry.allowedMCPServers())
+	mcpCfg := filterMCPConfigServers(cfg.Tools.MCP, registry.allowedMCPServers())
 	if mcpCfg.Servers == nil || len(mcpCfg.Servers) == 0 {
 		logger.InfoCF(
 			"agent",
@@ -116,11 +206,11 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		return nil
 	}
 
-	al.mcp.initOnce.Do(func() {
+	return al.mcp.do(func() {
 		mcpManager := mcp.NewManager(mcp.WithRuntimeEvents(al.runtimeEvents))
 
-		defaultAgent := al.registry.GetDefaultAgent()
-		workspacePath := al.cfg.WorkspacePath()
+		defaultAgent := registry.GetDefaultAgent()
+		workspacePath := cfg.WorkspacePath()
 		if defaultAgent != nil && defaultAgent.Workspace != "" {
 			workspacePath = defaultAgent.Workspace
 		}
@@ -145,7 +235,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		if collisionErr := validateMCPToolRegistrations(
 			servers,
 			mcpCfg,
-			al.registry,
+			registry,
 		); collisionErr != nil {
 			al.mcp.setInitErr(fmt.Errorf("ambiguous MCP tool registration: %w", collisionErr))
 			logger.ErrorCF("agent", "Refusing ambiguous MCP tool registration",
@@ -162,7 +252,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		}
 		uniqueTools := 0
 		totalRegistrations := 0
-		agentIDs := al.registry.ListAgentIDs()
+		agentIDs := registry.ListAgentIDs()
 		agentCount := len(agentIDs)
 
 		for serverName, conn := range servers {
@@ -171,12 +261,12 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			// Determine whether this server's tools should be deferred (hidden).
 			// Per-server "deferred" field takes precedence over the global Discovery.Enabled.
 			serverCfg := mcpCfg.Servers[serverName]
-			registerAsHidden := serverIsDeferred(al.cfg.Tools.MCP.Discovery.Enabled, serverCfg)
+			registerAsHidden := serverIsDeferred(cfg.Tools.MCP.Discovery.Enabled, serverCfg)
 			registeredToolsByAgent := make(map[string]map[string]struct{}, len(agentIDs))
 
 			for _, tool := range conn.Tools {
 				for _, agentID := range agentIDs {
-					agent, ok := al.registry.GetAgent(agentID)
+					agent, ok := registry.GetAgent(agentID)
 					if !ok {
 						continue
 					}
@@ -193,7 +283,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 					mcpTool := tools.NewMCPTool(mcpManager, serverName, tool)
 					toolName := mcpTool.Name()
 					mcpTool.SetWorkspace(agent.Workspace)
-					mcpTool.SetMaxInlineTextRunes(al.cfg.Tools.MCP.GetMaxInlineTextChars())
+					mcpTool.SetMaxInlineTextRunes(cfg.Tools.MCP.GetMaxInlineTextChars())
 					mcpTool.SetEventPublisher(al.runtimeEvents)
 
 					if registerAsHidden {
@@ -219,7 +309,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			}
 
 			for _, agentID := range agentIDs {
-				agent, ok := al.registry.GetAgent(agentID)
+				agent, ok := registry.GetAgent(agentID)
 				if !ok {
 					continue
 				}
@@ -241,9 +331,9 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			})
 
 		// Initializes Discovery Tools only if enabled by configuration
-		if al.cfg.Tools.MCP.Enabled && al.cfg.Tools.MCP.Discovery.Enabled {
-			useBM25 := al.cfg.Tools.MCP.Discovery.UseBM25
-			useRegex := al.cfg.Tools.MCP.Discovery.UseRegex
+		if cfg.Tools.MCP.Enabled && cfg.Tools.MCP.Discovery.Enabled {
+			useBM25 := cfg.Tools.MCP.Discovery.UseBM25
+			useRegex := cfg.Tools.MCP.Discovery.UseRegex
 
 			// Fail fast: If discovery is enabled but no search method is turned on
 			if !useBM25 && !useRegex {
@@ -259,12 +349,12 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 				return
 			}
 
-			ttl := al.cfg.Tools.MCP.Discovery.TTL
+			ttl := cfg.Tools.MCP.Discovery.TTL
 			if ttl <= 0 {
 				ttl = 5 // Default value
 			}
 
-			maxSearchResults := al.cfg.Tools.MCP.Discovery.MaxSearchResults
+			maxSearchResults := cfg.Tools.MCP.Discovery.MaxSearchResults
 			if maxSearchResults <= 0 {
 				maxSearchResults = 5 // Default value
 			}
@@ -274,11 +364,11 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			})
 
 			for _, agentID := range agentIDs {
-				agent, ok := al.registry.GetAgent(agentID)
+				agent, ok := registry.GetAgent(agentID)
 				if !ok {
 					continue
 				}
-				if !agentHasDiscoverableMCPServers(al.cfg, agent.MCPServerAllowlist) {
+				if !agentHasDiscoverableMCPServers(cfg, agent.MCPServerAllowlist) {
 					continue
 				}
 
@@ -293,8 +383,6 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 
 		al.mcp.setManager(mcpManager)
 	})
-
-	return al.mcp.getInitErr()
 }
 
 func validateCanonicalMCPToolNames(servers map[string]*mcp.ServerConnection) error {
