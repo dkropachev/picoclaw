@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -179,9 +182,70 @@ func formatThreadRuleThresholds(rule config.ThreadPolicyRule) string {
 }
 
 type mcpServerPromptContributor struct {
-	serverName string
-	toolCount  int
-	deferred   bool
+	serverName             string
+	admittedCanonicalNames []string
+	discoveryToolNames     []string
+	deferred               bool
+}
+
+const mcpPromptSourceHashDomain = "picoclaw:mcp-prompt-source:v1\x00"
+
+func newMCPServerPromptContributor(
+	serverName string,
+	admittedCanonicalNames []string,
+	discoveryToolNames []string,
+	deferred bool,
+) (mcpServerPromptContributor, error) {
+	if strings.TrimSpace(serverName) == "" {
+		return mcpServerPromptContributor{}, fmt.Errorf("MCP prompt server name is required")
+	}
+
+	admitted, err := detachedSortedUniquePromptToolNames(
+		"admitted canonical",
+		admittedCanonicalNames,
+	)
+	if err != nil {
+		return mcpServerPromptContributor{}, err
+	}
+	if len(admitted) == 0 {
+		return mcpServerPromptContributor{}, fmt.Errorf(
+			"MCP prompt server %q has no admitted canonical tools",
+			serverName,
+		)
+	}
+	discovery, err := detachedSortedUniquePromptToolNames(
+		"discovery",
+		discoveryToolNames,
+	)
+	if err != nil {
+		return mcpServerPromptContributor{}, err
+	}
+
+	return mcpServerPromptContributor{
+		serverName:             serverName,
+		admittedCanonicalNames: admitted,
+		discoveryToolNames:     discovery,
+		deferred:               deferred,
+	}, nil
+}
+
+func detachedSortedUniquePromptToolNames(
+	label string,
+	names []string,
+) ([]string, error) {
+	unique := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" || name != strings.TrimSpace(name) {
+			return nil, fmt.Errorf("MCP prompt %s tool name must be exact and non-empty", label)
+		}
+		unique[name] = struct{}{}
+	}
+	detached := make([]string, 0, len(unique))
+	for name := range unique {
+		detached = append(detached, name)
+	}
+	sort.Strings(detached)
+	return detached, nil
 }
 
 func (c mcpServerPromptContributor) PromptSource() PromptSourceDescriptor {
@@ -201,12 +265,15 @@ func (c mcpServerPromptContributor) ContributePrompt(
 	if req.SuppressToolUseRule {
 		return nil, nil
 	}
-	serverName := strings.TrimSpace(c.serverName)
-	if serverName == "" || c.toolCount <= 0 {
+	serverName := c.serverName
+	if strings.TrimSpace(serverName) == "" || len(c.admittedCanonicalNames) == 0 {
 		return nil, nil
 	}
-	if len(req.AllowedTools) > 0 &&
-		!promptAllowsToolPrefix(req, "mcp_"+promptSourceComponent(serverName)+"_") {
+	admittedCount := promptAllowedExactNameCount(req, c.admittedCanonicalNames)
+	if admittedCount == 0 {
+		return nil, nil
+	}
+	if c.deferred && promptAllowedExactNameCount(req, c.discoveryToolNames) == 0 {
 		return nil, nil
 	}
 
@@ -217,7 +284,7 @@ func (c mcpServerPromptContributor) ContributePrompt(
 
 	return []PromptPart{
 		{
-			ID:     "capability.mcp." + promptSourceComponent(serverName),
+			ID:     mcpPromptPartID(serverName),
 			Layer:  PromptLayerCapability,
 			Slot:   PromptSlotMCP,
 			Source: PromptSource{ID: mcpPromptSourceID(serverName), Name: "mcp:" + serverName},
@@ -225,7 +292,7 @@ func (c mcpServerPromptContributor) ContributePrompt(
 			Content: fmt.Sprintf(
 				"MCP server `%s` is connected. It contributes %d tool(s), currently %s.",
 				serverName,
-				c.toolCount,
+				admittedCount,
 				availability,
 			),
 			Stable: true,
@@ -282,7 +349,31 @@ func (c agentDiscoveryPromptContributor) ContributePrompt(
 }
 
 func mcpPromptSourceID(serverName string) PromptSourceID {
-	return PromptSourceID("mcp:" + promptSourceComponent(serverName))
+	component, digest := mcpPromptIdentityComponents(serverName)
+	if digest == "" {
+		return PromptSourceID("mcp:" + component)
+	}
+	return PromptSourceID("mcp:" + component + ":sha256:" + digest)
+}
+
+func mcpPromptPartID(serverName string) string {
+	component, digest := mcpPromptIdentityComponents(serverName)
+	if digest == "" {
+		return "capability.mcp." + component
+	}
+	return "capability.mcp." + component + ".sha256." + digest
+}
+
+func mcpPromptIdentityComponents(serverName string) (component, digest string) {
+	component = promptSourceComponent(serverName)
+	if serverName == component {
+		return component, ""
+	}
+	sum := sha256.Sum256(append(
+		[]byte(mcpPromptSourceHashDomain),
+		[]byte(serverName)...,
+	))
+	return component, hex.EncodeToString(sum[:])
 }
 
 func promptSourceComponent(value string) string {
@@ -335,18 +426,16 @@ func promptAllowsTool(req PromptBuildRequest, name string) bool {
 	return ok
 }
 
-func promptAllowsToolPrefix(req PromptBuildRequest, prefix string) bool {
+func promptAllowedExactNameCount(req PromptBuildRequest, exactNames []string) int {
 	if len(req.AllowedTools) == 0 {
-		return true
+		return len(exactNames)
 	}
-	prefix = strings.ToLower(strings.TrimSpace(prefix))
-	if prefix == "" {
-		return false
-	}
-	for _, name := range req.AllowedTools {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), prefix) {
-			return true
+	allowed := cleanAllowedSet(req.AllowedTools)
+	count := 0
+	for _, name := range exactNames {
+		if _, ok := allowed[strings.ToLower(name)]; ok {
+			count++
 		}
 	}
-	return false
+	return count
 }

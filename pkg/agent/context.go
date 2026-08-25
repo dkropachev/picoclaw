@@ -147,7 +147,16 @@ func (cb *ContextBuilder) RegisterPromptSource(desc PromptSourceDescriptor) erro
 }
 
 func (cb *ContextBuilder) RegisterPromptContributor(contributor PromptContributor) error {
-	err := cb.promptRegistryOrDefault().RegisterContributor(contributor)
+	return cb.RegisterPromptContributors([]PromptContributor{contributor})
+}
+
+func (cb *ContextBuilder) RegisterPromptContributors(
+	contributors []PromptContributor,
+) error {
+	if len(contributors) == 0 {
+		return nil
+	}
+	err := cb.promptRegistryOrDefault().RegisterContributors(contributors)
 	if err == nil {
 		cb.InvalidateCache()
 	}

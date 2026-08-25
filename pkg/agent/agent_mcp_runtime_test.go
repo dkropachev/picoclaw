@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -174,6 +175,29 @@ func TestMCPRuntimeCachesErrorUntilReset(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("initializer calls after reset = %d, want 2", calls)
+	}
+}
+
+func TestMCPRuntimeCachesPanicAndNilInitializerUntilReset(t *testing.T) {
+	var runtime mcpRuntime
+	calls := 0
+	panicErr := runtime.do(func() {
+		calls++
+		panic("initializer panic")
+	})
+	if panicErr == nil || !strings.Contains(panicErr.Error(), "initializer panic") {
+		t.Fatalf("panic initializer error = %v", panicErr)
+	}
+	if cachedErr := runtime.do(func() { calls++ }); cachedErr == nil ||
+		cachedErr.Error() != panicErr.Error() || calls != 1 {
+		t.Fatalf("cached panic = %v calls=%d, want %v calls=1", cachedErr, calls, panicErr)
+	}
+	if manager := runtime.reset(); manager != nil {
+		t.Fatalf("panic reset manager = %p, want nil", manager)
+	}
+	if nilErr := runtime.do(nil); nilErr == nil ||
+		!strings.Contains(nilErr.Error(), "initializer is nil") {
+		t.Fatalf("nil initializer error = %v", nilErr)
 	}
 }
 
