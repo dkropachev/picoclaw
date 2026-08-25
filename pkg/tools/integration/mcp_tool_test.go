@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +23,72 @@ import (
 type MockMCPManager struct {
 	callToolFunc func(ctx context.Context, serverName, toolName string, arguments map[string]any) (*mcp.CallToolResult, error)
 }
+
+type snapshotMCPCall struct {
+	server string
+	tool   string
+}
+
+type snapshotMCPManager struct {
+	mu         sync.Mutex
+	calls      []snapshotMCPCall
+	result     func() *mcp.CallToolResult
+	closeCalls atomic.Int64
+}
+
+func (manager *snapshotMCPManager) CallTool(
+	_ context.Context,
+	serverName, toolName string,
+	_ map[string]any,
+) (*mcp.CallToolResult, error) {
+	manager.mu.Lock()
+	manager.calls = append(manager.calls, snapshotMCPCall{server: serverName, tool: toolName})
+	manager.mu.Unlock()
+	if manager.result != nil {
+		return manager.result(), nil
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: "snapshot result"}},
+	}, nil
+}
+
+func (manager *snapshotMCPManager) Close() error {
+	manager.closeCalls.Add(1)
+	return nil
+}
+
+func (manager *snapshotMCPManager) lastCall() snapshotMCPCall {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.calls) == 0 {
+		return snapshotMCPCall{}
+	}
+	return manager.calls[len(manager.calls)-1]
+}
+
+type discardMCPMediaStore struct {
+	calls atomic.Int64
+}
+
+func (store *discardMCPMediaStore) Store(
+	localPath string,
+	_ media.MediaMeta,
+	_ string,
+) (string, error) {
+	call := store.calls.Add(1)
+	_ = os.Remove(localPath)
+	return fmt.Sprintf("media://discard-%d", call), nil
+}
+
+func (*discardMCPMediaStore) Resolve(string) (string, error) {
+	return "", fmt.Errorf("discard media store does not retain paths")
+}
+
+func (*discardMCPMediaStore) ResolveWithMeta(string) (string, media.MediaMeta, error) {
+	return "", media.MediaMeta{}, fmt.Errorf("discard media store does not retain paths")
+}
+
+func (*discardMCPMediaStore) ReleaseAll(string) error { return nil }
 
 func (m *MockMCPManager) CallTool(
 	ctx context.Context,
@@ -931,5 +999,278 @@ func TestMCPTool_Execute_WhitespaceWorkspaceDisablesArtifactPersistence(t *testi
 	}
 	if !strings.Contains(result.ForLLM, "This is a large MCP text payload") {
 		t.Fatalf("expected large text to remain inline when workspace is blank, got %q", result.ForLLM)
+	}
+}
+
+func TestNewMCPToolDetachesSDKDefinitionAndReturnedParameters(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{
+				"type":        "string",
+				"description": "original nested description",
+			},
+		},
+		"required": []string{"query"},
+	}
+	sdkTool := &mcp.Tool{
+		Name: "original_tool", Description: "original description", InputSchema: schema,
+	}
+	wrapped := NewMCPTool(&MockMCPManager{}, "Original Server", sdkTool)
+
+	sdkTool.Name = "mutated_tool"
+	sdkTool.Description = "mutated description"
+	schema["properties"].(map[string]any)["query"].(map[string]any)["description"] = "mutated nested description"
+	schema["required"].([]string)[0] = "mutated"
+
+	if got, want := wrapped.Name(), picomcp.CanonicalToolName("Original Server", "original_tool"); got != want {
+		t.Fatalf("detached name = %q, want %q", got, want)
+	}
+	if got := wrapped.Description(); got != "[MCP:Original Server] original description" {
+		t.Fatalf("detached description = %q", got)
+	}
+	if server, tool := wrapped.MCPIdentity(); server != "Original Server" || tool != "original_tool" {
+		t.Fatalf("detached identity = %q/%q", server, tool)
+	}
+
+	first := wrapped.Parameters()
+	query := first["properties"].(map[string]any)["query"].(map[string]any)
+	if query["description"] != "original nested description" ||
+		first["required"].([]string)[0] != "query" {
+		t.Fatalf("detached parameters = %#v", first)
+	}
+	query["description"] = "caller mutation"
+	first["required"].([]string)[0] = "caller mutation"
+	first["type"] = "caller mutation"
+
+	second := wrapped.Parameters()
+	secondQuery := second["properties"].(map[string]any)["query"].(map[string]any)
+	if second["type"] != "object" ||
+		secondQuery["description"] != "original nested description" ||
+		second["required"].([]string)[0] != "query" {
+		t.Fatalf("Parameters retained a caller alias: %#v", second)
+	}
+}
+
+func TestNewMCPToolFromSnapshotFreezesRuntimeDefinitionAndKeepsMediaMutable(t *testing.T) {
+	workspace := t.TempDir()
+	ignoredWorkspace := t.TempDir()
+	events := runtimeevents.NewBus()
+	ignoredEvents := runtimeevents.NewBus()
+	defer func() {
+		_ = events.Close()
+		_ = ignoredEvents.Close()
+	}()
+	_, eventsCh, err := events.Channel().OfKind(
+		runtimeevents.KindMCPToolCallStart,
+		runtimeevents.KindMCPToolCallEnd,
+	).SubscribeChan(t.Context(), runtimeevents.SubscribeOptions{
+		Name: "strict-mcp-snapshot", Buffer: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parameters := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{"type": "string"},
+		},
+		"required": []string{"value"},
+	}
+	manager := &snapshotMCPManager{result: func() *mcp.CallToolResult {
+		return &mcp.CallToolResult{Content: []mcp.Content{
+			&mcp.TextContent{Text: strings.Repeat("frozen payload ", 16)},
+			&mcp.ImageContent{Data: []byte("frozen-image"), MIMEType: "image/png"},
+		}}
+	}}
+	wrapped := NewMCPToolFromSnapshot(manager, MCPToolSnapshot{
+		ServerName:         "Frozen Server",
+		ToolName:           "Frozen.Tool",
+		CanonicalName:      "mcp_frozen_server_frozen_tool",
+		Description:        "[MCP:Frozen Server] frozen description",
+		Parameters:         parameters,
+		Workspace:          workspace,
+		MaxInlineTextRunes: 8,
+		EventPublisher:     events,
+	})
+
+	parameters["type"] = "mutated"
+	parameters["required"].([]string)[0] = "mutated"
+	wrapped.SetWorkspace(ignoredWorkspace)
+	wrapped.SetMaxInlineTextRunes(1 << 20)
+	wrapped.SetEventPublisher(ignoredEvents)
+	firstStore := media.NewFileMediaStore()
+	latestStore := media.NewFileMediaStore()
+	wrapped.SetMediaStore(firstStore)
+	wrapped.SetMediaStore(latestStore)
+
+	if wrapped.Name() != "mcp_frozen_server_frozen_tool" ||
+		wrapped.Description() != "[MCP:Frozen Server] frozen description" {
+		t.Fatalf("strict definition = %q / %q", wrapped.Name(), wrapped.Description())
+	}
+	if server, tool := wrapped.MCPIdentity(); server != "Frozen Server" || tool != "Frozen.Tool" {
+		t.Fatalf("strict identity = %q/%q", server, tool)
+	}
+	if got := wrapped.Parameters(); got["type"] != "object" ||
+		got["required"].([]string)[0] != "value" {
+		t.Fatalf("strict parameters retained snapshot aliases: %#v", got)
+	}
+
+	ctx := WithToolContext(context.Background(), "telegram", "strict-chat")
+	result := wrapped.Execute(ctx, map[string]any{"value": "test"})
+	if result == nil || result.IsError || len(result.Media) != 1 || len(result.ArtifactTags) != 1 {
+		t.Fatalf("strict execute result = %#v", result)
+	}
+	if call := manager.lastCall(); call != (snapshotMCPCall{server: "Frozen Server", tool: "Frozen.Tool"}) {
+		t.Fatalf("manager call used mutable identity: %#v", call)
+	}
+
+	const artifactPrefix = "[file:"
+	artifactPath := strings.TrimSuffix(strings.TrimPrefix(result.ArtifactTags[0], artifactPrefix), "]")
+	if !strings.HasPrefix(artifactPath, workspace+string(os.PathSeparator)) ||
+		strings.HasPrefix(artifactPath, ignoredWorkspace+string(os.PathSeparator)) {
+		t.Fatalf("strict artifact path = %q", artifactPath)
+	}
+	wantArtifactPrefix := picomcp.CanonicalToolNameComponent("Frozen Server") + "_" +
+		picomcp.CanonicalToolNameComponent("Frozen.Tool") + "_"
+	if !strings.HasPrefix(filepath.Base(artifactPath), wantArtifactPrefix) {
+		t.Fatalf("artifact filename = %q, want prefix %q", filepath.Base(artifactPath), wantArtifactPrefix)
+	}
+
+	mediaPath, meta, err := latestStore.ResolveWithMeta(result.Media[0])
+	if err != nil {
+		t.Fatalf("latest media store did not receive strict output: %v", err)
+	}
+	defer os.Remove(mediaPath)
+	if _, err := firstStore.Resolve(result.Media[0]); err == nil {
+		t.Fatal("strict SetMediaStore retained the superseded owner store")
+	}
+	wantFilename := picomcp.CanonicalToolNameComponent("Frozen Server") + "_" +
+		picomcp.CanonicalToolNameComponent("Frozen.Tool") + ".png"
+	if meta.Filename != wantFilename ||
+		meta.Source != "tool:mcp:frozen_server:frozen_tool" {
+		t.Fatalf("frozen media metadata = %#v", meta)
+	}
+
+	for range 2 {
+		event := receiveMCPToolRuntimeEvent(t, eventsCh)
+		payload, ok := event.Payload.(MCPToolCallPayload)
+		if !ok || payload.Server != "Frozen Server" || payload.Tool != "Frozen.Tool" ||
+			event.Source.Name != "Frozen Server" {
+			t.Fatalf("strict runtime event = %#v", event)
+		}
+	}
+	if ignoredEvents.Stats().Published != 0 {
+		t.Fatal("strict SetEventPublisher replaced the frozen event bus")
+	}
+
+	if closer, ok := any(wrapped).(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if manager.closeCalls.Load() != 0 {
+		t.Fatal("MCP wrapper assumed ownership of its borrowed manager")
+	}
+}
+
+func TestMCPToolConcurrentMutableStateAndExecute(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		label := "legacy"
+		if strict {
+			label = "strict"
+		}
+		t.Run(label, func(t *testing.T) {
+			manager := &snapshotMCPManager{result: func() *mcp.CallToolResult {
+				return &mcp.CallToolResult{Content: []mcp.Content{
+					&mcp.TextContent{Text: strings.Repeat("race payload ", 8)},
+					&mcp.ImageContent{Data: []byte("race-image"), MIMEType: "image/png"},
+				}}
+			}}
+			firstEvents := runtimeevents.NewBus()
+			secondEvents := runtimeevents.NewBus()
+			defer func() {
+				_ = firstEvents.Close()
+				_ = secondEvents.Close()
+			}()
+			firstWorkspace := t.TempDir()
+			secondWorkspace := t.TempDir()
+			var wrapped *MCPTool
+			if strict {
+				wrapped = NewMCPToolFromSnapshot(manager, MCPToolSnapshot{
+					ServerName: "race-server", ToolName: "race-tool",
+					CanonicalName: picomcp.CanonicalToolName("race-server", "race-tool"),
+					Description:   "[MCP:race-server] race tool",
+					Parameters:    map[string]any{"type": "object"},
+					Workspace:     firstWorkspace, MaxInlineTextRunes: 8,
+					EventPublisher: firstEvents,
+				})
+			} else {
+				wrapped = NewMCPTool(manager, "race-server", &mcp.Tool{Name: "race-tool"})
+				wrapped.SetWorkspace(firstWorkspace)
+				wrapped.SetMaxInlineTextRunes(8)
+				wrapped.SetEventPublisher(firstEvents)
+			}
+			firstStore := &discardMCPMediaStore{}
+			secondStore := &discardMCPMediaStore{}
+			wrapped.SetMediaStore(firstStore)
+
+			const executions = 32
+			var wg sync.WaitGroup
+			errorsCh := make(chan string, executions)
+			for range 4 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for range executions / 4 {
+						result := wrapped.Execute(
+							WithToolContext(context.Background(), "race", "chat"),
+							nil,
+						)
+						if result == nil || result.IsError {
+							errorsCh <- fmt.Sprintf("execute result = %#v", result)
+						}
+					}
+				}()
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for iteration := range executions {
+					if iteration%2 == 0 {
+						wrapped.SetMediaStore(firstStore)
+						wrapped.SetWorkspace(firstWorkspace)
+						wrapped.SetMaxInlineTextRunes(8)
+						wrapped.SetEventPublisher(firstEvents)
+					} else {
+						wrapped.SetMediaStore(secondStore)
+						wrapped.SetWorkspace(secondWorkspace)
+						wrapped.SetMaxInlineTextRunes(1 << 20)
+						wrapped.SetEventPublisher(secondEvents)
+					}
+					_ = wrapped.Parameters()
+					_, _ = wrapped.MCPIdentity()
+				}
+			}()
+			wg.Wait()
+			close(errorsCh)
+			for message := range errorsCh {
+				t.Error(message)
+			}
+			manager.mu.Lock()
+			callCount := len(manager.calls)
+			manager.mu.Unlock()
+			if callCount != executions {
+				t.Fatalf("manager calls = %d, want %d", callCount, executions)
+			}
+			if firstStore.calls.Load()+secondStore.calls.Load() != executions {
+				t.Fatalf(
+					"media stores received %d calls, want %d",
+					firstStore.calls.Load()+secondStore.calls.Load(),
+					executions,
+				)
+			}
+		})
 	}
 }
