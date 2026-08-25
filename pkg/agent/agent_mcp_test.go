@@ -285,42 +285,6 @@ func TestServerIsDeferred(t *testing.T) {
 	}
 }
 
-func TestRegisterMCPServerPromptContributorUsesActualRegisteredToolCount(t *testing.T) {
-	cb := NewContextBuilder(t.TempDir())
-	agent := &AgentInstance{ContextBuilder: cb}
-
-	registerMCPServerPromptContributor("research", agent, "github", 0, false)
-	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	if prompt := messages[0].Content; strings.Contains(prompt, "MCP server `github`") {
-		t.Fatalf("expected no MCP prompt when no tools were registered, got %q", prompt)
-	}
-
-	registerMCPServerPromptContributor("research", agent, "github", 2, false)
-	messages = cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
-	prompt := messages[0].Content
-	if !strings.Contains(prompt, "MCP server `github` is connected") {
-		t.Fatalf("expected MCP prompt for registered tools, got %q", prompt)
-	}
-	if !strings.Contains(prompt, "It contributes 2 tool(s)") {
-		t.Fatalf("expected actual registered tool count in prompt, got %q", prompt)
-	}
-}
-
-func TestToolRegistryIncludesReportsOnlyRegisteredTools(t *testing.T) {
-	registry := agenttools.NewToolRegistry()
-	registry.SetAllowlist([]string{"mcp_github_search"})
-
-	registry.RegisterHidden(&allowlistTestTool{name: "mcp_github_search"})
-	registry.RegisterHidden(&allowlistTestTool{name: "mcp_github_create_issue"})
-
-	if !toolRegistryIncludes(registry, "mcp_github_search") {
-		t.Fatal("expected hidden registered MCP tool to be included")
-	}
-	if toolRegistryIncludes(registry, "mcp_github_create_issue") {
-		t.Fatal("blocked MCP tool should not be included")
-	}
-}
-
 func TestValidateCanonicalMCPToolNamesRejectsAmbiguousCaseVariants(t *testing.T) {
 	servers := map[string]*mcp.ServerConnection{
 		"GitHub": {
@@ -396,49 +360,6 @@ func TestEnsureMCPInitializedRejectsRegistryCollisionBeforeExposure(t *testing.T
 				}
 			}
 		})
-	}
-}
-
-func TestValidateMCPToolRegistrationsRejectsDifferentRegisteredMCPIdentity(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = t.TempDir()
-	cfg.Tools.MCP = config.MCPConfig{
-		ToolConfig: config.ToolConfig{Enabled: true},
-		Servers: map[string]config.MCPServerConfig{
-			"a": {Enabled: true},
-		},
-	}
-	registry := NewAgentRegistry(cfg, nil)
-	defer registry.Close()
-	previousManager := mcp.NewManager()
-	defer func() {
-		if err := previousManager.Close(); err != nil {
-			t.Errorf("close previous MCP manager: %v", err)
-		}
-	}()
-	registry.GetDefaultAgent().Tools.Register(agenttools.NewMCPTool(
-		previousManager,
-		"a_b",
-		&sdkmcp.Tool{Name: "c"},
-	))
-
-	err := validateMCPToolRegistrations(
-		map[string]*mcp.ServerConnection{
-			"a": {Tools: []*sdkmcp.Tool{{Name: "b_c"}}},
-		},
-		cfg.Tools.MCP,
-		registry,
-	)
-	if !errors.Is(err, mcp.ErrCanonicalToolNameCollision) {
-		t.Fatalf("validateMCPToolRegistrations() error = %v, want canonical collision", err)
-	}
-	var collision *mcp.CanonicalToolNameCollisionError
-	if !errors.As(err, &collision) {
-		t.Fatalf("error type = %T, want canonical collision details", err)
-	}
-	if collision.First != (mcp.ToolIdentity{Server: "a_b", Tool: "c"}) ||
-		collision.Second != (mcp.ToolIdentity{Server: "a", Tool: "b_c"}) {
-		t.Fatalf("collision identities = %#v / %#v", collision.First, collision.Second)
 	}
 }
 

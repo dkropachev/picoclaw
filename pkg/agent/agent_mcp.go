@@ -8,8 +8,8 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sort"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -23,19 +23,41 @@ type mcpRuntime struct {
 	// sync.Once is safe for concurrent Do calls, but assigning a fresh Once
 	// while another Do is running is not. reset and takeManager therefore join
 	// the same protocol as do.
-	initMu   sync.Mutex
-	initOnce sync.Once
-	mu       sync.RWMutex
-	manager  *mcp.Manager
-	initErr  error
+	initMu    sync.Mutex
+	initOnce  sync.Once
+	mu        sync.RWMutex
+	manager   *mcp.Manager
+	initErr   error
+	installer mcpFactoryBackedInstaller
 }
 
 func (r *mcpRuntime) do(initialize func()) error {
 	r.initMu.Lock()
 	defer r.initMu.Unlock()
 
-	r.initOnce.Do(initialize)
+	r.initOnce.Do(func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				r.setInitErr(fmt.Errorf("initialize MCP generation: panic: %v", recovered))
+			}
+		}()
+		if initialize == nil {
+			r.setInitErr(fmt.Errorf("MCP initializer is nil"))
+			return
+		}
+		initialize()
+	})
 	return r.getInitErr()
+}
+
+func (r *mcpRuntime) installFactoryBacked(
+	batches []tools.FactoryBackedBatch,
+) ([]tools.FactoryBackedAdmission, error) {
+	install := r.installer
+	if install == nil {
+		install = tools.InstallFactoryBackedTransaction
+	}
+	return install(batches)
 }
 
 func (r *mcpRuntime) reset() *mcp.Manager {
@@ -207,182 +229,271 @@ func (al *AgentLoop) ensureMCPInitializedForGeneration(
 	}
 
 	return al.mcp.do(func() {
-		mcpManager := mcp.NewManager(mcp.WithRuntimeEvents(al.runtimeEvents))
-
-		defaultAgent := registry.GetDefaultAgent()
-		workspacePath := cfg.WorkspacePath()
-		if defaultAgent != nil && defaultAgent.Workspace != "" {
-			workspacePath = defaultAgent.Workspace
+		if err := al.initializeMCPGeneration(ctx, cfg, registry, mcpCfg); err != nil {
+			al.mcp.setInitErr(err)
+			logger.WarnCF(
+				"agent",
+				"Failed to initialize MCP generation",
+				map[string]any{"error": err.Error()},
+			)
 		}
+	})
+}
 
-		if err := mcpManager.LoadFromMCPConfig(ctx, mcpCfg, workspacePath); err != nil {
-			al.mcp.setInitErr(fmt.Errorf("failed to load MCP servers: %w", err))
-			logger.WarnCF("agent", "Failed to load MCP servers, MCP tools will not be available",
-				map[string]any{
-					"error": err.Error(),
-				})
-			if closeErr := mcpManager.Close(); closeErr != nil {
-				logger.ErrorCF("agent", "Failed to close MCP manager",
-					map[string]any{
-						"error": closeErr.Error(),
-					})
-			}
-			return
-		}
+type mcpManagerOwnership uint8
 
-		// Register MCP tools for all agents
-		servers := mcpManager.GetServers()
-		if collisionErr := validateMCPToolRegistrations(
-			servers,
-			mcpCfg,
-			registry,
-		); collisionErr != nil {
-			al.mcp.setInitErr(fmt.Errorf("ambiguous MCP tool registration: %w", collisionErr))
-			logger.ErrorCF("agent", "Refusing ambiguous MCP tool registration",
-				map[string]any{
-					"error": collisionErr.Error(),
-				})
-			if closeErr := mcpManager.Close(); closeErr != nil {
-				logger.ErrorCF("agent", "Failed to close MCP manager",
-					map[string]any{
-						"error": closeErr.Error(),
-					})
-			}
-			return
-		}
-		uniqueTools := 0
-		totalRegistrations := 0
-		agentIDs := registry.ListAgentIDs()
-		agentCount := len(agentIDs)
+const (
+	mcpManagerPrivate mcpManagerOwnership = iota
+	mcpManagerRegistryCommitted
+	mcpManagerRuntimePublished
+)
 
-		for serverName, conn := range servers {
-			uniqueTools += len(conn.Tools)
+// initializeMCPGeneration owns one candidate manager from connection through
+// the all-registry tool commit. Transaction success is the irreversible
+// ownership boundary: published wrappers already borrow the candidate, so no
+// later prompt or projection failure may close it beneath them.
+func (al *AgentLoop) initializeMCPGeneration(
+	ctx context.Context,
+	cfg *config.Config,
+	registry *AgentRegistry,
+	mcpCfg config.MCPConfig,
+) (returnErr error) {
+	discovery, err := resolveMCPDiscoverySettings(mcpCfg.Discovery)
+	if err != nil {
+		return err
+	}
+	agents, err := snapshotMCPCatalogAgents(registry)
+	if err != nil {
+		return err
+	}
 
-			// Determine whether this server's tools should be deferred (hidden).
-			// Per-server "deferred" field takes precedence over the global Discovery.Enabled.
-			serverCfg := mcpCfg.Servers[serverName]
-			registerAsHidden := serverIsDeferred(cfg.Tools.MCP.Discovery.Enabled, serverCfg)
-			registeredToolsByAgent := make(map[string]map[string]struct{}, len(agentIDs))
-
-			for _, tool := range conn.Tools {
-				for _, agentID := range agentIDs {
-					agent, ok := registry.GetAgent(agentID)
-					if !ok {
-						continue
-					}
-					if !agent.AllowsMCPServer(serverName) {
-						logger.DebugCF("agent", "Skipped MCP tool registration by agent mcpServers allowlist",
-							map[string]any{
-								"agent_id": agentID,
-								"server":   serverName,
-								"tool":     tool.Name,
-							})
-						continue
-					}
-
-					mcpTool := tools.NewMCPTool(mcpManager, serverName, tool)
-					toolName := mcpTool.Name()
-					mcpTool.SetWorkspace(agent.Workspace)
-					mcpTool.SetMaxInlineTextRunes(cfg.Tools.MCP.GetMaxInlineTextChars())
-					mcpTool.SetEventPublisher(al.runtimeEvents)
-
-					if registerAsHidden {
-						agent.Tools.RegisterHidden(mcpTool)
-					} else {
-						agent.Tools.Register(mcpTool)
-					}
-					if !toolRegistryIncludes(agent.Tools, toolName) {
-						continue
-					}
-
-					recordRegisteredMCPTool(registeredToolsByAgent, agentID, toolName)
-					totalRegistrations++
-					logger.DebugCF("agent", "Registered MCP tool",
-						map[string]any{
-							"agent_id": agentID,
-							"server":   serverName,
-							"tool":     tool.Name,
-							"name":     toolName,
-							"deferred": registerAsHidden,
-						})
-				}
-			}
-
-			for _, agentID := range agentIDs {
-				agent, ok := registry.GetAgent(agentID)
-				if !ok {
-					continue
-				}
-				registerMCPServerPromptContributor(
-					agentID,
-					agent,
-					serverName,
-					len(registeredToolsByAgent[agentID]),
-					registerAsHidden,
+	manager := mcp.NewManager(mcp.WithRuntimeEvents(al.runtimeEvents))
+	ownership := mcpManagerPrivate
+	defer func() {
+		recovered := recover()
+		if ownership == mcpManagerPrivate {
+			if recovered != nil {
+				returnErr = errors.Join(
+					returnErr,
+					fmt.Errorf("initialize MCP generation: panic: %v", recovered),
 				)
 			}
-		}
-		logger.InfoCF("agent", "MCP tools registered successfully",
-			map[string]any{
-				"server_count":        len(servers),
-				"unique_tools":        uniqueTools,
-				"total_registrations": totalRegistrations,
-				"agent_count":         agentCount,
-			})
-
-		// Initializes Discovery Tools only if enabled by configuration
-		if cfg.Tools.MCP.Enabled && cfg.Tools.MCP.Discovery.Enabled {
-			useBM25 := cfg.Tools.MCP.Discovery.UseBM25
-			useRegex := cfg.Tools.MCP.Discovery.UseRegex
-
-			// Fail fast: If discovery is enabled but no search method is turned on
-			if !useBM25 && !useRegex {
-				al.mcp.setInitErr(fmt.Errorf(
-					"tool discovery is enabled but neither 'use_bm25' nor 'use_regex' is set to true in the configuration",
-				))
-				if closeErr := mcpManager.Close(); closeErr != nil {
-					logger.ErrorCF("agent", "Failed to close MCP manager",
-						map[string]any{
-							"error": closeErr.Error(),
-						})
-				}
-				return
+			if closeErr := manager.Close(); closeErr != nil {
+				returnErr = errors.Join(
+					returnErr,
+					fmt.Errorf("close private MCP manager: %w", closeErr),
+				)
 			}
-
-			ttl := cfg.Tools.MCP.Discovery.TTL
-			if ttl <= 0 {
-				ttl = 5 // Default value
-			}
-
-			maxSearchResults := cfg.Tools.MCP.Discovery.MaxSearchResults
-			if maxSearchResults <= 0 {
-				maxSearchResults = 5 // Default value
-			}
-
-			logger.InfoCF("agent", "Initializing tool discovery", map[string]any{
-				"bm25": useBM25, "regex": useRegex, "ttl": ttl, "max_results": maxSearchResults,
-			})
-
-			for _, agentID := range agentIDs {
-				agent, ok := registry.GetAgent(agentID)
-				if !ok {
-					continue
-				}
-				if !agentHasDiscoverableMCPServers(cfg, agent.MCPServerAllowlist) {
-					continue
-				}
-
-				if useRegex {
-					agent.Tools.Register(tools.NewRegexSearchTool(agent.Tools, ttl, maxSearchResults))
-				}
-				if useBM25 {
-					agent.Tools.Register(tools.NewBM25SearchTool(agent.Tools, ttl, maxSearchResults))
-				}
-			}
+			return
 		}
 
-		al.mcp.setManager(mcpManager)
+		if ownership == mcpManagerRegistryCommitted {
+			al.mcp.setManager(manager)
+			ownership = mcpManagerRuntimePublished
+		}
+		if recovered != nil {
+			logger.ErrorCF(
+				"agent",
+				"MCP post-commit publication panicked; retained committed manager",
+				map[string]any{"panic": fmt.Sprint(recovered)},
+			)
+			returnErr = nil
+		}
+	}()
+
+	defaultAgent := registry.GetDefaultAgent()
+	workspacePath := cfg.WorkspacePath()
+	if defaultAgent != nil && defaultAgent.Workspace != "" {
+		workspacePath = defaultAgent.Workspace
+	}
+	if loadErr := manager.LoadFromMCPConfig(ctx, mcpCfg, workspacePath); loadErr != nil {
+		return fmt.Errorf("failed to load MCP servers: %w", loadErr)
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return fmt.Errorf("MCP initialization canceled after server load: %w", contextErr)
+	}
+
+	servers := manager.GetServers()
+	if len(servers) == 0 {
+		return fmt.Errorf("MCP initialization connected no enabled server")
+	}
+	stage, err := stageMCPGeneration(
+		manager,
+		servers,
+		mcpCfg,
+		discovery,
+		agents,
+		al.runtimeEvents,
+	)
+	if err != nil {
+		return fmt.Errorf("stage MCP factory catalog: %w", err)
+	}
+	potentialPrompts, projectionErr := allAdmittedMCPProjection(stage)
+	if projectionErr != nil {
+		return fmt.Errorf("prevalidate MCP admission projection: %w", projectionErr)
+	}
+	if _, promptErr := prepareMCPAdmissionPrompts(registry, potentialPrompts); promptErr != nil {
+		return fmt.Errorf("prevalidate MCP admission prompts: %w", promptErr)
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return fmt.Errorf("MCP initialization canceled before catalog commit: %w", contextErr)
+	}
+
+	admissions, err := al.mcp.installFactoryBacked(stage.Batches)
+	if err != nil {
+		return fmt.Errorf("install MCP factory catalog: %w", err)
+	}
+	ownership = mcpManagerRegistryCommitted
+	// No fallible operation may run between transaction success and this
+	// transfer. The deferred guard repeats the transfer if an unexpected panic
+	// occurs in this tiny boundary.
+	al.mcp.setManager(manager)
+	ownership = mcpManagerRuntimePublished
+
+	summary, err := aggregateMCPAdmissions(stage, admissions)
+	if err != nil {
+		logger.ErrorCF(
+			"agent",
+			"MCP admission projection failed after catalog commit",
+			map[string]any{"error": err.Error()},
+		)
+		return nil
+	}
+	prompts, err := prepareMCPAdmissionPrompts(registry, summary)
+	if err != nil {
+		logger.ErrorCF(
+			"agent",
+			"MCP prompt preparation failed after catalog commit",
+			map[string]any{"error": err.Error()},
+		)
+		return nil
+	}
+	if err := applyMCPAdmissionPrompts(prompts); err != nil {
+		logger.WarnCF(
+			"agent",
+			"MCP prompt publication was incomplete",
+			map[string]any{"error": err.Error()},
+		)
+	}
+
+	logger.InfoCF("agent", "MCP factory catalog installed successfully", map[string]any{
+		"server_count":        len(servers),
+		"unique_tools":        stage.UniqueTools,
+		"total_registrations": summary.TotalRegistrations,
+		"agent_count":         stage.AgentCount,
 	})
+	return nil
+}
+
+type preparedMCPAgentPrompts struct {
+	agentID   string
+	builder   *ContextBuilder
+	servers   []mcpServerPromptContributor
+	discovery *toolDiscoveryPromptContributor
+}
+
+func allAdmittedMCPProjection(
+	stage stagedMCPGeneration,
+) (admittedMCPGeneration, error) {
+	admissions := make([]tools.FactoryBackedAdmission, len(stage.Sidecars))
+	for index, sidecar := range stage.Sidecars {
+		admissions[index] = tools.FactoryBackedAdmission{
+			BatchIndex: sidecar.BatchIndex, InstallIndex: sidecar.InstallIndex,
+			Name: sidecar.Name, Admitted: true,
+		}
+	}
+	return aggregateMCPAdmissions(stage, admissions)
+}
+
+func prepareMCPAdmissionPrompts(
+	registry *AgentRegistry,
+	summary admittedMCPGeneration,
+) ([]preparedMCPAgentPrompts, error) {
+	if registry == nil {
+		return nil, fmt.Errorf("MCP prompt agent registry is nil")
+	}
+	prepared := make([]preparedMCPAgentPrompts, 0, len(summary.Agents))
+	for _, admittedAgent := range summary.Agents {
+		agent, ok := registry.GetAgent(admittedAgent.AgentID)
+		if !ok || agent == nil || agent.ContextBuilder == nil {
+			return nil, fmt.Errorf(
+				"MCP prompt agent %q is unavailable",
+				admittedAgent.AgentID,
+			)
+		}
+		item := preparedMCPAgentPrompts{
+			agentID: admittedAgent.AgentID,
+			builder: agent.ContextBuilder,
+			servers: make([]mcpServerPromptContributor, 0, len(admittedAgent.Servers)),
+		}
+		seenSources := make(map[PromptSourceID]string, len(admittedAgent.Servers))
+		seenParts := make(map[string]string, len(admittedAgent.Servers))
+		for _, server := range admittedAgent.Servers {
+			contributor, err := newMCPServerPromptContributor(
+				server.Name,
+				server.ToolNames,
+				admittedAgent.DiscoveryToolNames,
+				server.Deferred,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"prepare MCP server prompt for agent %q: %w",
+					admittedAgent.AgentID,
+					err,
+				)
+			}
+			sourceID := contributor.PromptSource().ID
+			if previous, duplicate := seenSources[sourceID]; duplicate {
+				return nil, fmt.Errorf(
+					"MCP servers %q and %q collide on prompt source %q",
+					previous,
+					server.Name,
+					sourceID,
+				)
+			}
+			seenSources[sourceID] = server.Name
+			partID := mcpPromptPartID(server.Name)
+			if previous, duplicate := seenParts[partID]; duplicate {
+				return nil, fmt.Errorf(
+					"MCP servers %q and %q collide on prompt part %q",
+					previous,
+					server.Name,
+					partID,
+				)
+			}
+			seenParts[partID] = server.Name
+			item.servers = append(item.servers, contributor)
+		}
+		if admittedAgent.UseBM25 || admittedAgent.UseRegex {
+			item.discovery = &toolDiscoveryPromptContributor{
+				useBM25:  admittedAgent.UseBM25,
+				useRegex: admittedAgent.UseRegex,
+			}
+		}
+		prepared = append(prepared, item)
+	}
+	return prepared, nil
+}
+
+func applyMCPAdmissionPrompts(prepared []preparedMCPAgentPrompts) error {
+	var result error
+	for _, agent := range prepared {
+		batch := make([]PromptContributor, 0, len(agent.servers)+1)
+		for _, contributor := range agent.servers {
+			batch = append(batch, contributor)
+		}
+		if agent.discovery != nil {
+			batch = append(batch, *agent.discovery)
+		}
+		if err := agent.builder.RegisterPromptContributors(batch); err != nil {
+			result = errors.Join(result, fmt.Errorf(
+				"register MCP prompt batch for agent %q: %w",
+				agent.agentID,
+				err,
+			))
+		}
+	}
+	return result
 }
 
 func validateCanonicalMCPToolNames(servers map[string]*mcp.ServerConnection) error {
@@ -402,133 +513,6 @@ func validateCanonicalMCPToolNames(servers map[string]*mcp.ServerConnection) err
 		}
 	}
 	return mcp.DetectCanonicalToolNameCollision(identities)
-}
-
-// validateMCPToolRegistrations preflights every MCP wrapper that would be
-// admitted to an agent registry. It must run before the first registration so
-// one conflicting built-in, local, or plugin tool cannot leave a partially
-// exposed MCP surface.
-func validateMCPToolRegistrations(
-	servers map[string]*mcp.ServerConnection,
-	mcpCfg config.MCPConfig,
-	registry *AgentRegistry,
-) error {
-	if err := validateCanonicalMCPToolNames(servers); err != nil {
-		return err
-	}
-	if registry == nil {
-		return nil
-	}
-
-	agentIDs := registry.ListAgentIDs()
-	sort.Strings(agentIDs)
-	serverNames := make([]string, 0, len(servers))
-	for serverName := range servers {
-		serverNames = append(serverNames, serverName)
-	}
-	sort.Strings(serverNames)
-
-	for _, agentID := range agentIDs {
-		agent, ok := registry.GetAgent(agentID)
-		if !ok || agent == nil || agent.Tools == nil {
-			continue
-		}
-		for _, serverName := range serverNames {
-			connection := servers[serverName]
-			if connection == nil || !agent.AllowsMCPServer(serverName) {
-				continue
-			}
-			if serverCfg, configured := mcpCfg.Servers[serverName]; configured &&
-				!serverCfg.Enabled {
-				continue
-			}
-			for _, tool := range connection.Tools {
-				if tool == nil {
-					continue
-				}
-				name := mcp.CanonicalToolName(serverName, tool.Name)
-				if !agent.Tools.AllowsRegistration(name) {
-					continue
-				}
-				existing, occupied := agent.Tools.GetRegistered(name)
-				if !occupied {
-					continue
-				}
-				existingMCP, isMCPWrapper := existing.(*tools.MCPTool)
-				if !isMCPWrapper {
-					return fmt.Errorf(
-						"%w %q for %q/%q conflicts with an existing tool in agent %q",
-						mcp.ErrCanonicalToolNameCollision,
-						name,
-						serverName,
-						tool.Name,
-						agentID,
-					)
-				}
-				existingServer, existingTool := existingMCP.MCPIdentity()
-				if existingServer == serverName && existingTool == tool.Name {
-					continue
-				}
-				return fmt.Errorf(
-					"agent %q: %w",
-					agentID,
-					&mcp.CanonicalToolNameCollisionError{
-						Name: name,
-						First: mcp.ToolIdentity{
-							Server: existingServer,
-							Tool:   existingTool,
-						},
-						Second: mcp.ToolIdentity{
-							Server: serverName,
-							Tool:   tool.Name,
-						},
-					},
-				)
-			}
-		}
-	}
-	return nil
-}
-
-func registerMCPServerPromptContributor(
-	agentID string,
-	agent *AgentInstance,
-	serverName string,
-	toolCount int,
-	registerAsHidden bool,
-) {
-	if agent == nil || agent.ContextBuilder == nil || toolCount <= 0 {
-		return
-	}
-	if err := agent.ContextBuilder.RegisterPromptContributor(mcpServerPromptContributor{
-		serverName: serverName,
-		toolCount:  toolCount,
-		deferred:   registerAsHidden,
-	}); err != nil {
-		logger.WarnCF("agent", "Failed to register MCP prompt contributor",
-			map[string]any{
-				"agent_id": agentID,
-				"server":   serverName,
-				"error":    err.Error(),
-			})
-	}
-}
-
-func recordRegisteredMCPTool(
-	registeredToolsByAgent map[string]map[string]struct{},
-	agentID, toolName string,
-) {
-	if registeredToolsByAgent[agentID] == nil {
-		registeredToolsByAgent[agentID] = make(map[string]struct{})
-	}
-	registeredToolsByAgent[agentID][toolName] = struct{}{}
-}
-
-func toolRegistryIncludes(registry *tools.ToolRegistry, name string) bool {
-	if registry == nil {
-		return false
-	}
-	return registry.HasRegistered(name)
 }
 
 func filterMCPConfigServers(

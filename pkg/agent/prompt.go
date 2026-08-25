@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -133,10 +134,11 @@ type PromptContributor interface {
 }
 
 type PromptRegistry struct {
-	mu           sync.RWMutex
-	sources      map[PromptSourceID]PromptSourceDescriptor
-	contributors []PromptContributor
-	warned       map[PromptSourceID]struct{}
+	mu             sync.RWMutex
+	sources        map[PromptSourceID]PromptSourceDescriptor
+	contributors   []PromptContributor
+	contributorIDs []PromptSourceID
+	warned         map[PromptSourceID]struct{}
 }
 
 func NewPromptRegistry() *PromptRegistry {
@@ -305,25 +307,111 @@ func (r *PromptRegistry) RegisterSource(desc PromptSourceDescriptor) error {
 }
 
 func (r *PromptRegistry) RegisterContributor(contributor PromptContributor) error {
+	return r.RegisterContributors([]PromptContributor{contributor})
+}
+
+// RegisterContributors validates a complete contributor batch before replacing
+// any registry state. Contributors with matching source IDs replace prior
+// contributors atomically; unrelated contributors remain in their current
+// order and the prepared batch is appended in input order.
+func (r *PromptRegistry) RegisterContributors(contributors []PromptContributor) error {
 	if r == nil {
 		return fmt.Errorf("prompt registry is nil")
 	}
-	if contributor == nil {
-		return fmt.Errorf("prompt contributor is nil")
+	if len(contributors) == 0 {
+		return nil
 	}
-	desc := contributor.PromptSource()
-	desc.ID = PromptSourceID(strings.TrimSpace(string(desc.ID)))
-	if err := r.RegisterSource(desc); err != nil {
-		return err
+
+	type preparedPromptContributor struct {
+		contributor PromptContributor
+		descriptor  PromptSourceDescriptor
+	}
+	prepared := make([]preparedPromptContributor, 0, len(contributors))
+	batchIDs := make(map[PromptSourceID]struct{}, len(contributors))
+	for index, contributor := range contributors {
+		if promptContributorIsNil(contributor) {
+			return fmt.Errorf("prompt contributor %d is nil", index)
+		}
+		descriptor, err := snapshotPromptContributorDescriptor(contributor)
+		if err != nil {
+			return fmt.Errorf("prompt contributor %d: %w", index, err)
+		}
+		if _, duplicate := batchIDs[descriptor.ID]; duplicate {
+			return fmt.Errorf(
+				"prompt contributor source %q is duplicated within one batch",
+				descriptor.ID,
+			)
+		}
+		batchIDs[descriptor.ID] = struct{}{}
+		prepared = append(prepared, preparedPromptContributor{
+			contributor: contributor,
+			descriptor:  descriptor,
+		})
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.contributors = slices.DeleteFunc(r.contributors, func(existing PromptContributor) bool {
-		return PromptSourceID(strings.TrimSpace(string(existing.PromptSource().ID))) == desc.ID
-	})
-	r.contributors = append(r.contributors, contributor)
+	if len(r.contributorIDs) != len(r.contributors) {
+		return fmt.Errorf("prompt registry contributor index is inconsistent")
+	}
+	if r.sources == nil {
+		r.sources = make(map[PromptSourceID]PromptSourceDescriptor)
+	}
+
+	nextContributors := make([]PromptContributor, 0, len(r.contributors)+len(prepared))
+	nextIDs := make([]PromptSourceID, 0, len(r.contributorIDs)+len(prepared))
+	for index, existing := range r.contributors {
+		if _, replaced := batchIDs[r.contributorIDs[index]]; replaced {
+			continue
+		}
+		nextContributors = append(nextContributors, existing)
+		nextIDs = append(nextIDs, r.contributorIDs[index])
+	}
+	for _, candidate := range prepared {
+		r.sources[candidate.descriptor.ID] = candidate.descriptor
+		nextContributors = append(nextContributors, candidate.contributor)
+		nextIDs = append(nextIDs, candidate.descriptor.ID)
+	}
+	r.contributors = nextContributors
+	r.contributorIDs = nextIDs
 	return nil
+}
+
+func promptContributorIsNil(contributor PromptContributor) bool {
+	if contributor == nil {
+		return true
+	}
+	value := reflect.ValueOf(contributor)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func snapshotPromptContributorDescriptor(
+	contributor PromptContributor,
+) (descriptor PromptSourceDescriptor, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			descriptor = PromptSourceDescriptor{}
+			err = fmt.Errorf("read prompt source descriptor: panic: %v", recovered)
+		}
+	}()
+	descriptor = contributor.PromptSource()
+	descriptor.ID = PromptSourceID(strings.TrimSpace(string(descriptor.ID)))
+	if descriptor.ID == "" {
+		return PromptSourceDescriptor{}, fmt.Errorf("prompt source id is required")
+	}
+	if len(descriptor.Allowed) == 0 {
+		return PromptSourceDescriptor{}, fmt.Errorf(
+			"prompt source %q must declare at least one placement",
+			descriptor.ID,
+		)
+	}
+	return clonePromptSourceDescriptor(descriptor), nil
 }
 
 func (r *PromptRegistry) Collect(ctx context.Context, req PromptBuildRequest) ([]PromptPart, error) {
@@ -333,6 +421,10 @@ func (r *PromptRegistry) Collect(ctx context.Context, req PromptBuildRequest) ([
 
 	r.mu.RLock()
 	contributors := append([]PromptContributor(nil), r.contributors...)
+	sources := make(map[PromptSourceID]PromptSourceDescriptor, len(r.sources))
+	for sourceID, descriptor := range r.sources {
+		sources[sourceID] = clonePromptSourceDescriptor(descriptor)
+	}
 	r.mu.RUnlock()
 
 	var parts []PromptPart
@@ -342,8 +434,12 @@ func (r *PromptRegistry) Collect(ctx context.Context, req PromptBuildRequest) ([
 			return nil, err
 		}
 		for _, part := range contributed {
-			if err := r.ValidatePart(part); err != nil {
+			registered, err := validatePromptPartAgainstSources(part, sources)
+			if err != nil {
 				return nil, err
+			}
+			if !registered {
+				r.warnUnregisteredPromptSource(part)
 			}
 			parts = append(parts, part)
 		}
@@ -356,30 +452,72 @@ func (r *PromptRegistry) ValidatePart(part PromptPart) error {
 		return nil
 	}
 	sourceID := PromptSourceID(strings.TrimSpace(string(part.Source.ID)))
-	if sourceID == "" {
-		return fmt.Errorf("prompt part %q has empty source id", part.ID)
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	r.mu.RLock()
 	desc, ok := r.sources[sourceID]
+	r.mu.RUnlock()
+	var sources map[PromptSourceID]PromptSourceDescriptor
+	if ok {
+		sources = map[PromptSourceID]PromptSourceDescriptor{sourceID: desc}
+	}
+	registered, err := validatePromptPartAgainstSources(
+		part,
+		sources,
+	)
+	if err != nil {
+		return err
+	}
+	if !ok || !registered {
+		r.warnUnregisteredPromptSource(part)
+	}
+	return nil
+}
+
+func validatePromptPartAgainstSources(
+	part PromptPart,
+	sources map[PromptSourceID]PromptSourceDescriptor,
+) (bool, error) {
+	sourceID := PromptSourceID(strings.TrimSpace(string(part.Source.ID)))
+	if sourceID == "" {
+		return false, fmt.Errorf("prompt part %q has empty source id", part.ID)
+	}
+	desc, ok := sources[sourceID]
 	if !ok {
-		if _, warned := r.warned[sourceID]; !warned {
-			r.warned[sourceID] = struct{}{}
-			logger.WarnCF("agent", "Unregistered prompt source allowed in compatibility mode", map[string]any{
-				"source": sourceID,
-				"layer":  part.Layer,
-				"slot":   part.Slot,
-				"part":   part.ID,
-			})
-		}
-		return nil
+		return false, nil
 	}
 	if promptPlacementAllowed(desc.Allowed, PromptPlacement{Layer: part.Layer, Slot: part.Slot}) {
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("prompt source %q cannot write to %s/%s", sourceID, part.Layer, part.Slot)
+	return true, fmt.Errorf(
+		"prompt source %q cannot write to %s/%s",
+		sourceID,
+		part.Layer,
+		part.Slot,
+	)
+}
+
+func (r *PromptRegistry) warnUnregisteredPromptSource(part PromptPart) {
+	if r == nil {
+		return
+	}
+	sourceID := PromptSourceID(strings.TrimSpace(string(part.Source.ID)))
+	r.mu.Lock()
+	if r.warned == nil {
+		r.warned = make(map[PromptSourceID]struct{})
+	}
+	_, warned := r.warned[sourceID]
+	if !warned {
+		r.warned[sourceID] = struct{}{}
+	}
+	r.mu.Unlock()
+	if warned {
+		return
+	}
+	logger.WarnCF("agent", "Unregistered prompt source allowed in compatibility mode", map[string]any{
+		"source": sourceID,
+		"layer":  part.Layer,
+		"slot":   part.Slot,
+		"part":   part.ID,
+	})
 }
 
 func promptPlacementAllowed(allowed []PromptPlacement, placement PromptPlacement) bool {

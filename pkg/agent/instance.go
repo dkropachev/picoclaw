@@ -430,12 +430,7 @@ func NewAgentInstance(
 	sessions := initSessionStore(sessionsDir)
 	construction.partial.Sessions = sessions
 
-	mcpDiscoveryActive := agentHasDiscoverableMCPServers(cfg, agentMCPServerAllowlist)
 	contextBuilder := NewContextBuilder(workspace).
-		WithToolDiscovery(
-			mcpDiscoveryActive && cfg.Tools.MCP.Discovery.UseBM25,
-			mcpDiscoveryActive && cfg.Tools.MCP.Discovery.UseRegex,
-		).
 		WithSplitOnMarker(cfg.Agents.Defaults.SplitOnMarker)
 
 	agentID := routing.DefaultAgentID
