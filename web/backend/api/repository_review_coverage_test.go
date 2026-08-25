@@ -147,7 +147,8 @@ func TestRepositoryReviewCoverageAutomationOptionsAndAccountProjection(t *testin
 		t.Fatal(err)
 	}
 	if len(options.Models) != 2 || len(options.Accounts) != 1 ||
-		options.Accounts[0].ID != "api" || !options.Accounts[0].Default {
+		options.Accounts[0].ID != "api" || !options.Accounts[0].Default ||
+		!options.Accounts[0].Available {
 		t.Fatalf("options=%#v", options)
 	}
 

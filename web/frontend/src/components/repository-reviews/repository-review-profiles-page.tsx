@@ -12,6 +12,8 @@ import {
   type RepositoryReviewCodeType,
   type RepositoryReviewProfile,
   type RepositoryReviewProfileConfig,
+  type ReviewAccountOption,
+  type ReviewModelOption,
   createRepositoryReviewProfile,
   deleteRepositoryReviewProfile,
   getRepositoryReviewAutomationOptions,
@@ -106,6 +108,7 @@ export function RepositoryReviewProfilesPage() {
   })
   const profiles = profilesQuery.data?.profiles ?? []
   const options = optionsQuery.data ?? { models: [], accounts: [] }
+  const optionsUsable = optionsQuery.isSuccess && !optionsQuery.isFetching
 
   const saveMutation = useMutation({
     mutationFn: ({
@@ -178,14 +181,18 @@ export function RepositoryReviewProfilesPage() {
 
   const openNew = () => {
     setActionError("")
-    const defaultAccount = options.accounts.find((account) => account.default)
-    const model = options.models.find(
-      (item) =>
-        item.available &&
-        (defaultAccount?.models === undefined ||
-          defaultAccount.models.includes(item.alias)),
+    const defaultAccount = options.accounts.find(
+      (account) =>
+        account.default && firstAvailableProfileModel(options.models, account),
     )
+    const account =
+      defaultAccount ??
+      options.accounts.find((candidate) =>
+        firstAvailableProfileModel(options.models, candidate),
+      )
+    const model = firstAvailableProfileModel(options.models, account)
     const value = copyProfile(emptyProfile)
+    value.account_ref = account && !account.default ? account.id : ""
     if (model) {
       value.reviewer_model = model.alias
     }
@@ -222,7 +229,12 @@ export function RepositoryReviewProfilesPage() {
         >
           <IconRefresh /> Refresh
         </Button>
-        <Button type="button" size="sm" onClick={openNew}>
+        <Button
+          type="button"
+          size="sm"
+          disabled={!optionsUsable}
+          onClick={openNew}
+        >
           <IconPlus /> New profile
         </Button>
       </PageHeader>
@@ -238,6 +250,15 @@ export function RepositoryReviewProfilesPage() {
               className="text-destructive flex items-center gap-2 text-sm"
             >
               <IconAlertTriangle className="size-4" /> {actionError}
+            </div>
+          )}
+          {optionsQuery.isError && !editor && (
+            <div
+              role="alert"
+              className="text-destructive flex items-center gap-2 text-sm"
+            >
+              <IconAlertTriangle className="size-4" /> Reviewer models and
+              execution accounts could not be loaded. Refresh to retry.
             </div>
           )}
           {profilesQuery.isPending ? (
@@ -291,7 +312,9 @@ export function RepositoryReviewProfilesPage() {
                         size="sm"
                         variant="outline"
                         disabled={
-                          saveMutation.isPending || deleteMutation.isPending
+                          !optionsUsable ||
+                          saveMutation.isPending ||
+                          deleteMutation.isPending
                         }
                         onClick={() => openEdit(profile)}
                       >
@@ -354,8 +377,8 @@ export function RepositoryReviewProfilesPage() {
               {editor?.profile ? "Edit profile" : "New review profile"}
             </DialogTitle>
             <DialogDescription>
-              Name, model, review focus, and scope stay visible. Execution
-              sizing and guardrails remain under Advanced until needed.
+              Name, execution account, model, review focus, and scope stay
+              visible. Sizing and guardrails remain under Advanced until needed.
             </DialogDescription>
           </DialogHeader>
           {actionError && (
@@ -366,12 +389,22 @@ export function RepositoryReviewProfilesPage() {
               <IconAlertTriangle className="size-4" /> {actionError}
             </div>
           )}
+          {optionsQuery.isError && editor && (
+            <div
+              role="alert"
+              className="text-destructive flex items-center gap-2 text-sm"
+            >
+              <IconAlertTriangle className="size-4" /> Reviewer models and
+              execution accounts could not be refreshed. Close this editor and
+              refresh before saving.
+            </div>
+          )}
           {editor && (
             <ProfileForm
               editor={editor}
               models={options.models}
               accounts={options.accounts}
-              busy={saveMutation.isPending}
+              busy={saveMutation.isPending || !optionsUsable}
               onChange={(next) => {
                 setActionError("")
                 setEditor(next)
@@ -426,13 +459,35 @@ function ProfileForm({
   const selectedAccount = value.account_ref
     ? accounts.find((account) => account.id === value.account_ref)
     : accounts.find((account) => account.default)
-  const modelAvailableOnSelectedAccount = (alias: string) =>
-    selectedAccount?.models === undefined ||
-    selectedAccount.models.includes(alias)
+  const selectedModel = models.find(
+    (model) => model.alias === value.reviewer_model,
+  )
+  const selectedModelAvailability = profileModelAvailability(
+    selectedModel,
+    selectedAccount,
+  )
+  const availableModel = firstAvailableProfileModel(models, selectedAccount)
+  const accountIssue = selectedAccount
+    ? selectedAccount.available
+      ? ""
+      : `Execution account ${selectedAccount.label || selectedAccount.id} is unavailable (${selectedAccount.status || "credential unavailable"}).`
+    : value.account_ref
+      ? `Execution account ${value.account_ref} is no longer available.`
+      : "No default execution account is available. Choose an account."
+  const modelIssue = value.reviewer_model
+    ? selectedModelAvailability.reason
+    : !selectedAccount
+      ? "Choose an available execution account before selecting a reviewer model."
+      : models.length === 0
+        ? "No reviewer model aliases are configured."
+        : !availableModel
+          ? `No reviewer models are available on ${selectedAccount.label || selectedAccount.id}.`
+          : ""
   const valid =
     value.name.trim() !== "" &&
     value.reviewer_model !== "" &&
-    modelAvailableOnSelectedAccount(value.reviewer_model) &&
+    selectedAccount !== undefined &&
+    selectedModelAvailability.available &&
     value.scope_policy.code_types.length > 0 &&
     value.max_files_per_run >= 1 &&
     value.max_content_bytes >= 1 &&
@@ -440,44 +495,150 @@ function ProfileForm({
 
   return (
     <div className="space-y-5">
+      <Field label="Profile name" controlId="review-profile-name">
+        <Input
+          id="review-profile-name"
+          aria-label="Profile name"
+          value={value.name}
+          onChange={(event) => setValue("name", event.target.value)}
+        />
+      </Field>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Profile name" controlId="review-profile-name">
-          <Input
-            id="review-profile-name"
-            aria-label="Profile name"
-            value={value.name}
-            onChange={(event) => setValue("name", event.target.value)}
-          />
+        <Field
+          label="Execution account"
+          hint="Default account follows the runtime's configured default account."
+          hintId="review-account-help"
+          controlId="review-execution-account"
+        >
+          <select
+            id="review-execution-account"
+            aria-label="Execution account"
+            aria-describedby={
+              accountIssue
+                ? "review-account-help review-account-availability"
+                : "review-account-help"
+            }
+            aria-invalid={accountIssue ? true : undefined}
+            className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+            value={value.account_ref}
+            onChange={(event) => {
+              const accountRef = event.target.value
+              const account = accountRef
+                ? accounts.find((candidate) => candidate.id === accountRef)
+                : accounts.find((candidate) => candidate.default)
+              const current = models.find(
+                (model) => model.alias === value.reviewer_model,
+              )
+              const reviewerModel = profileModelAvailability(current, account)
+                .available
+                ? value.reviewer_model
+                : (firstAvailableProfileModel(models, account)?.alias ?? "")
+              onChange({
+                ...editor,
+                value: {
+                  ...value,
+                  account_ref: accountRef,
+                  reviewer_model: reviewerModel,
+                },
+              })
+            }}
+          >
+            <option
+              value=""
+              disabled={
+                !firstAvailableProfileModel(
+                  models,
+                  accounts.find((account) => account.default),
+                )
+              }
+            >
+              {defaultAccountOptionLabel(
+                accounts,
+                Boolean(
+                  firstAvailableProfileModel(
+                    models,
+                    accounts.find((account) => account.default),
+                  ),
+                ),
+              )}
+            </option>
+            {value.account_ref &&
+              !accounts.some((account) => account.id === value.account_ref) && (
+                <option value={value.account_ref} disabled>
+                  {value.account_ref} (unavailable)
+                </option>
+              )}
+            {accounts.map((account) => {
+              const selectable = Boolean(
+                firstAvailableProfileModel(models, account),
+              )
+              return (
+                <option
+                  key={account.id}
+                  value={account.id}
+                  disabled={!selectable}
+                >
+                  {accountOptionLabel(account, selectable)}
+                </option>
+              )
+            })}
+          </select>
+          {accountIssue && (
+            <p
+              id="review-account-availability"
+              role="alert"
+              className="text-destructive text-xs"
+            >
+              {accountIssue}
+            </p>
+          )}
         </Field>
         <Field label="Reviewer model" controlId="review-profile-model">
           <select
             id="review-profile-model"
             aria-label="Reviewer model"
+            aria-describedby={
+              modelIssue ? "review-model-availability" : undefined
+            }
+            aria-invalid={modelIssue ? true : undefined}
             className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
             value={value.reviewer_model}
+            disabled={!selectedAccount?.available}
             onChange={(event) => {
               setValue("reviewer_model", event.target.value)
             }}
           >
             <option value="">Select model</option>
-            {models.map((model) => (
-              <option
-                key={model.alias}
-                value={model.alias}
-                disabled={
-                  !model.available ||
-                  !modelAvailableOnSelectedAccount(model.alias)
-                }
-              >
-                {model.alias}
-                {!model.available
-                  ? " (unavailable)"
-                  : modelAvailableOnSelectedAccount(model.alias)
-                    ? ""
-                    : " (unavailable on account)"}
+            {value.reviewer_model && !selectedModel && (
+              <option value={value.reviewer_model} disabled>
+                {value.reviewer_model} (unavailable)
               </option>
-            ))}
+            )}
+            {models.map((model) => {
+              const availability = profileModelAvailability(
+                model,
+                selectedAccount,
+              )
+              return (
+                <option
+                  key={model.alias}
+                  value={model.alias}
+                  disabled={!availability.available}
+                >
+                  {modelOptionLabel(model, availability)}
+                </option>
+              )
+            })}
           </select>
+          {modelIssue && (
+            <p
+              id="review-model-availability"
+              role="alert"
+              className="text-destructive text-xs"
+            >
+              {modelIssue}
+            </p>
+          )}
         </Field>
       </div>
       <Field
@@ -560,76 +721,8 @@ function ProfileForm({
         </Field>
       </section>
 
-      <ReviewAdvancedSection description="execution, sizing, and task admission">
+      <ReviewAdvancedSection description="sizing and task admission">
         <section className="space-y-3">
-          <h3 className="text-sm font-semibold">Execution</h3>
-          <Field
-            label="Execution account"
-            hint="Default account follows the runtime's configured default account."
-            hintId="review-account-help"
-            controlId="review-execution-account"
-          >
-            <select
-              id="review-execution-account"
-              aria-label="Execution account"
-              aria-describedby="review-account-help"
-              className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-              value={value.account_ref}
-              onChange={(event) => {
-                const accountRef = event.target.value
-                const account = accountRef
-                  ? accounts.find((candidate) => candidate.id === accountRef)
-                  : accounts.find((candidate) => candidate.default)
-                const reviewerModel =
-                  account?.models === undefined ||
-                  account.models.includes(value.reviewer_model)
-                    ? value.reviewer_model
-                    : (models.find(
-                        (model) =>
-                          model.available &&
-                          account.models?.includes(model.alias),
-                      )?.alias ?? "")
-                onChange({
-                  ...editor,
-                  value: {
-                    ...value,
-                    account_ref: accountRef,
-                    reviewer_model: reviewerModel,
-                  },
-                })
-              }}
-            >
-              <option value="">
-                {accounts.find((account) => account.default)?.label
-                  ? `Default account (currently ${accounts.find((account) => account.default)?.label})`
-                  : "Default account"}
-              </option>
-              {value.account_ref &&
-                !accounts.some(
-                  (account) => account.id === value.account_ref,
-                ) && (
-                  <option value={value.account_ref}>
-                    {value.account_ref} (unavailable)
-                  </option>
-                )}
-              {accounts.map((account) => (
-                <option
-                  key={account.id}
-                  value={account.id}
-                  disabled={account.models?.length === 0}
-                >
-                  {account.label || account.id}
-                  {account.provider ? ` · ${account.provider}` : ""}
-                  {account.models?.length === 0
-                    ? " (no compatible review models)"
-                    : ""}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </section>
-
-        <section className="space-y-3 border-t pt-4">
           <h3 className="text-sm font-semibold">Work sizing</h3>
           <div className="grid gap-4 sm:grid-cols-2">
             <NumberField
@@ -697,6 +790,96 @@ function ProfileForm({
       </div>
     </div>
   )
+}
+
+interface ProfileModelAvailability {
+  available: boolean
+  reason: string
+}
+
+function firstAvailableProfileModel(
+  models: ReviewModelOption[],
+  account: ReviewAccountOption | undefined,
+): ReviewModelOption | undefined {
+  if (!account?.available) return undefined
+  return models.find(
+    (model) =>
+      model.available && account.models?.includes(model.alias) === true,
+  )
+}
+
+function profileModelAvailability(
+  model: ReviewModelOption | undefined,
+  account: ReviewAccountOption | undefined,
+): ProfileModelAvailability {
+  if (!model) {
+    return {
+      available: false,
+      reason: "Reviewer model alias is no longer configured.",
+    }
+  }
+  if (!model.available) {
+    return {
+      available: false,
+      reason:
+        model.blocked_reason ||
+        "Reviewer model is unavailable for every execution account.",
+    }
+  }
+  if (!account) {
+    return {
+      available: false,
+      reason: "Choose an available execution account first.",
+    }
+  }
+  if (!account.available) {
+    return {
+      available: false,
+      reason: `Execution account ${account.label || account.id} is unavailable.`,
+    }
+  }
+  if (account.models?.includes(model.alias) !== true) {
+    return {
+      available: false,
+      reason: `Reviewer model is unavailable on ${account.label || account.id}.`,
+    }
+  }
+  return { available: true, reason: "" }
+}
+
+function modelOptionLabel(
+  model: ReviewModelOption,
+  availability: ProfileModelAvailability,
+): string {
+  return availability.available
+    ? model.alias
+    : `${model.alias} (${availability.reason})`
+}
+
+function defaultAccountOptionLabel(
+  accounts: ReviewAccountOption[],
+  selectable: boolean,
+): string {
+  const account = accounts.find((candidate) => candidate.default)
+  if (!account) return "Default account (unavailable)"
+  const label = `Default account (currently ${account.label || account.id})`
+  if (!account.available) {
+    return `${label} (${account.status || "credential unavailable"})`
+  }
+  return selectable ? label : `${label} (no available reviewer models)`
+}
+
+function accountOptionLabel(
+  account: ReviewAccountOption,
+  selectable: boolean,
+): string {
+  const label = `${account.label || account.id}${
+    account.provider ? ` · ${account.provider}` : ""
+  }`
+  if (!account.available) {
+    return `${label} (${account.status || "credential unavailable"})`
+  }
+  return selectable ? label : `${label} (no available reviewer models)`
 }
 
 function Field({

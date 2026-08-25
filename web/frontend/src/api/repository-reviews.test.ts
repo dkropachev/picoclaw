@@ -236,6 +236,7 @@ describe("repository review API", () => {
           accounts: [
             {
               id: "acct",
+              models: null,
               entries: [
                 {
                   name: "Weekly",
@@ -307,6 +308,8 @@ describe("repository review API", () => {
         accounts: [
           {
             id: "acct",
+            available: false,
+            models: [],
             entries: [
               {
                 label: "Weekly",

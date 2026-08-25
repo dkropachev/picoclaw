@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -1015,6 +1016,136 @@ func TestRepositoryReviewProfileRejectsUnsafeModelAliases(t *testing.T) {
 		"", "cheap", repoaudit.RepositoryReviewBudgetPolicy{},
 	); err == nil {
 		t.Fatal("missing config model validation succeeded")
+	}
+}
+
+func TestRepositoryReviewProfileAcceptsDefaultCredentialRouterAndAvailableDirectCredential(t *testing.T) {
+	withPicoclawAuthHome(t)
+	setOpenAIAuthCredential(
+		t,
+		"openai:work",
+		"access-token",
+		"refresh-token",
+		"account-work",
+		"work@example.test",
+	)
+	if err := auth.SetCredential("github-copilot:gh-copilot", &auth.AuthCredential{
+		AccessToken: "ghp_invalid-copilot-token",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.ModelName = "review"
+	cfg.Agents.Defaults.AccountRef = "review-router"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name: "review", Model: "gpt-review",
+		AccountOverrides: map[string]string{
+			"credential:github-copilot:gh-copilot": "gpt-review-copilot",
+		},
+	}}
+	cfg.ModelList = nil
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name: "review-router", Enabled: true, Entry: "copilot",
+		Blocks: []config.AccountRouterBlock{
+			{
+				ID: "copilot", Type: config.AccountRouterBlockTypeAccount,
+				Account: "credential:github-copilot:gh-copilot", Fallback: "openai",
+			},
+			{
+				ID: "openai", Type: config.AccountRouterBlockTypeLoadBalance,
+				Accounts: []string{
+					"credential:openai:work",
+					"credential:openai:missing",
+				},
+			},
+		},
+	}}
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(configPath)
+	t.Cleanup(handler.Shutdown)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	blankDefault := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/profiles",
+		repositoryReviewProfileCreateBody("Default router", "review"),
+	)
+	if blankDefault.Code != http.StatusCreated {
+		t.Fatalf("default-router create status=%d body=%s", blankDefault.Code, blankDefault.Body.String())
+	}
+	var created struct {
+		Profile repoaudit.RepositoryReviewProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(blankDefault.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	updateBody := repositoryReviewProfileBody(created.Profile)
+	updateBody["account_ref"] = "credential:openai:work"
+	updateBody["expected_version"] = created.Profile.Version
+	updated := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPatch,
+		"/api/repository-reviews/profiles/"+created.Profile.ID,
+		updateBody,
+	)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("direct-credential update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+
+	directBody := repositoryReviewProfileCreateBody("Direct credential", "review")
+	directBody["account_ref"] = "credential:openai:work"
+	direct := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/profiles",
+		directBody,
+	)
+	if direct.Code != http.StatusCreated {
+		t.Fatalf("direct-credential create status=%d body=%s", direct.Code, direct.Body.String())
+	}
+
+	missingBody := repositoryReviewProfileCreateBody("Missing credential", "review")
+	missingBody["account_ref"] = "credential:openai:missing"
+	missing := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/profiles",
+		missingBody,
+	)
+	if missing.Code != http.StatusBadRequest ||
+		!strings.Contains(missing.Body.String(), "account_ref") {
+		t.Fatalf("missing-credential create status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	invalidCopilotBody := repositoryReviewProfileCreateBody("Invalid Copilot credential", "review")
+	invalidCopilotBody["account_ref"] = "credential:github-copilot:gh-copilot"
+	invalidCopilot := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/profiles",
+		invalidCopilotBody,
+	)
+	if invalidCopilot.Code != http.StatusBadRequest ||
+		!strings.Contains(invalidCopilot.Body.String(), "account_ref") {
+		t.Fatalf(
+			"invalid-copilot create status=%d body=%s",
+			invalidCopilot.Code,
+			invalidCopilot.Body.String(),
+		)
 	}
 }
 

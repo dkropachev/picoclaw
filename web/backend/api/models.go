@@ -1299,10 +1299,15 @@ func credentialAccountAvailable(accountRef string) bool {
 		return false
 	}
 	cred := store.Credentials[credentialID]
-	return cred != nil &&
-		credentialProviderMatches(cred, provider) &&
-		strings.TrimSpace(cred.AccessToken) != "" &&
-		!cred.IsExpired()
+	if cred == nil ||
+		!credentialProviderMatches(cred, provider) ||
+		!isCredentialAuthMethod(cred.AuthMethod) ||
+		strings.TrimSpace(cred.AccessToken) == "" ||
+		cred.IsExpired() {
+		return false
+	}
+	return providers.NormalizeProvider(provider) != "github-copilot" ||
+		auth.ValidateGitHubCopilotToken(strings.TrimSpace(cred.AccessToken)) == nil
 }
 
 func credentialProviderMatches(credential *auth.AuthCredential, provider string) bool {
