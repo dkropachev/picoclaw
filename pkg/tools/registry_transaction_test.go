@@ -32,14 +32,15 @@ func (factory *transactionTestFactory) New(ToolBuildContext) (Tool, error) {
 }
 
 type transactionMediaTool struct {
-	mu         sync.RWMutex
-	name       string
-	desc       string
-	params     map[string]any
-	store      media.MediaStore
-	setHook    func(*transactionMediaTool, media.MediaStore)
-	setCalls   atomic.Int64
-	closeCalls atomic.Int64
+	mu              sync.RWMutex
+	name            string
+	desc            string
+	params          map[string]any
+	store           media.MediaStore
+	setHook         func(*transactionMediaTool, media.MediaStore)
+	setCalls        atomic.Int64
+	closeCalls      atomic.Int64
+	panicDescriptor atomic.Bool
 }
 
 func newTransactionMediaTool(name string) *transactionMediaTool {
@@ -50,18 +51,27 @@ func newTransactionMediaTool(name string) *transactionMediaTool {
 }
 
 func (tool *transactionMediaTool) Name() string {
+	if tool.panicDescriptor.Load() {
+		panic("transaction descriptor panic")
+	}
 	tool.mu.RLock()
 	defer tool.mu.RUnlock()
 	return tool.name
 }
 
 func (tool *transactionMediaTool) Description() string {
+	if tool.panicDescriptor.Load() {
+		panic("transaction descriptor panic")
+	}
 	tool.mu.RLock()
 	defer tool.mu.RUnlock()
 	return tool.desc
 }
 
 func (tool *transactionMediaTool) Parameters() map[string]any {
+	if tool.panicDescriptor.Load() {
+		panic("transaction descriptor panic")
+	}
 	tool.mu.RLock()
 	defer tool.mu.RUnlock()
 	return tool.params
@@ -130,6 +140,13 @@ func TestInstallFactoryBackedTransactionEmptyAndStructuralValidation(t *testing.
 	admissions, err := InstallFactoryBackedTransaction(nil)
 	if err != nil || admissions == nil || len(admissions) != 0 {
 		t.Fatalf("empty transaction = %#v, %v", admissions, err)
+	}
+	emptyRegistry := NewToolRegistry()
+	admissions, err = InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+		Registry: emptyRegistry,
+	}})
+	if err != nil || admissions == nil || len(admissions) != 0 {
+		t.Fatalf("empty valid batch = %#v, %v", admissions, err)
 	}
 
 	validRegistry := NewToolRegistry()
@@ -223,6 +240,111 @@ func TestInstallFactoryBackedTransactionEmptyAndStructuralValidation(t *testing.
 	}}); expectedErr == nil || got != nil {
 		t.Fatalf("denied value expected result = %#v, %v", got, expectedErr)
 	}
+}
+
+func TestInstallFactoryBackedTransactionMetadataAndDescriptorFailures(t *testing.T) {
+	t.Run("factory metadata panic", func(t *testing.T) {
+		registry := NewToolRegistry()
+		live := newTransactionMediaTool("transaction_factory_metadata_panic")
+		factory := &coverageToolFactory{
+			descriptorFn: func() ToolDescriptor { panic("factory metadata panic") },
+		}
+		got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+			Registry: registry,
+			Installs: []FactoryBackedInstall{{Live: live, Factory: factory}},
+		}})
+		if err == nil || got != nil || registry.Count() != 0 {
+			t.Fatalf("factory metadata result = %#v, %v", got, err)
+		}
+	})
+
+	t.Run("immutable sharing", func(t *testing.T) {
+		registry := NewToolRegistry()
+		live := newTransactionMediaTool("transaction_immutable_factory")
+		factory := &transactionTestFactory{
+			descriptor: coverageFactoryDescriptor("transaction_immutable_factory"),
+			traits: ToolTraits{
+				Parallel: ToolParallelSafe,
+				Sharing:  ToolSharingImmutableShared,
+			},
+		}
+		got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+			Registry: registry,
+			Installs: []FactoryBackedInstall{{Live: live, Factory: factory}},
+		}})
+		if err == nil || got != nil || !strings.Contains(err.Error(), "per-owner") ||
+			registry.Count() != 0 {
+			t.Fatalf("immutable sharing result = %#v, %v", got, err)
+		}
+	})
+
+	t.Run("initial live descriptor panic", func(t *testing.T) {
+		registry := NewToolRegistry()
+		live := newTransactionMediaTool("transaction_initial_descriptor_panic")
+		factory := transactionFactoryForTool(t, live, nil)
+		live.panicDescriptor.Store(true)
+		got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+			Registry: registry,
+			Installs: []FactoryBackedInstall{{Live: live, Factory: factory}},
+		}})
+		if err == nil || got != nil || registry.Count() != 0 {
+			t.Fatalf("initial descriptor panic result = %#v, %v", got, err)
+		}
+		live.panicDescriptor.Store(false)
+		probe := NewToolRegistry()
+		if registerErr := probe.RegisterFactoryBacked(live, factory); registerErr != nil {
+			t.Fatalf("initial descriptor panic leaked candidate lease: %v", registerErr)
+		}
+		_ = probe.Close()
+	})
+
+	t.Run("initial live descriptor mismatch", func(t *testing.T) {
+		registry := NewToolRegistry()
+		live := newTransactionMediaTool("transaction_live_descriptor_actual")
+		factory := &transactionTestFactory{
+			descriptor: coverageFactoryDescriptor("transaction_live_descriptor_expected"),
+			traits:     ToolTraits{Sharing: ToolSharingPerOwner},
+		}
+		got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+			Registry: registry,
+			Installs: []FactoryBackedInstall{{Live: live, Factory: factory}},
+		}})
+		if err == nil || got != nil || !strings.Contains(err.Error(), "frozen descriptor") ||
+			registry.Count() != 0 {
+			t.Fatalf("initial descriptor mismatch result = %#v, %v", got, err)
+		}
+		matchingFactory := transactionFactoryForTool(t, live, nil)
+		probe := NewToolRegistry()
+		if registerErr := probe.RegisterFactoryBacked(live, matchingFactory); registerErr != nil {
+			t.Fatalf("descriptor mismatch leaked candidate lease: %v", registerErr)
+		}
+		_ = probe.Close()
+	})
+
+	t.Run("post-media live descriptor panic", func(t *testing.T) {
+		registry := NewToolRegistry()
+		live := newTransactionMediaTool("transaction_post_media_descriptor_panic")
+		factory := transactionFactoryForTool(t, live, nil)
+		live.setHook = func(tool *transactionMediaTool, _ media.MediaStore) {
+			tool.panicDescriptor.Store(true)
+		}
+		got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+			Registry: registry,
+			Installs: []FactoryBackedInstall{{Live: live, Factory: factory}},
+		}})
+		if err == nil || got != nil || registry.Count() != 0 {
+			t.Fatalf("post-media descriptor panic result = %#v, %v", got, err)
+		}
+		live.panicDescriptor.Store(false)
+		live.mu.Lock()
+		live.setHook = nil
+		live.mu.Unlock()
+		probe := NewToolRegistry()
+		if registerErr := probe.RegisterFactoryBacked(live, factory); registerErr != nil {
+			t.Fatalf("post-media descriptor panic leaked candidate lease: %v", registerErr)
+		}
+		_ = probe.Close()
+	})
 }
 
 func TestInstallFactoryBackedTransactionAdmissionInsertAndMedia(t *testing.T) {
@@ -654,6 +776,79 @@ func TestInstallFactoryBackedTransactionLateOccupantCASRollback(t *testing.T) {
 	}
 	_ = probe.Close()
 	_ = registry.Close()
+}
+
+func TestInstallFactoryBackedTransactionLateExpectedPointerCASRollback(t *testing.T) {
+	registry := NewToolRegistry()
+	old := newMockTool("transaction_expected_pointer_cas", "transaction_expected_pointer_cas")
+	if err := registry.RegisterFactoryBacked(old, transactionFactoryForTool(t, old, nil)); err != nil {
+		t.Fatal(err)
+	}
+	entry := registry.tools["transaction_expected_pointer_cas"]
+	candidate := newTransactionMediaTool("transaction_expected_pointer_cas")
+	factory := transactionFactoryForTool(t, candidate, nil)
+	interloper := newMockTool("transaction_expected_pointer_cas", "transaction_expected_pointer_cas")
+	candidate.setHook = func(*transactionMediaTool, media.MediaStore) {
+		registry.mu.Lock()
+		entry.Tool = interloper
+		registry.mu.Unlock()
+	}
+	version := registry.Version()
+	got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+		Registry: registry,
+		Installs: []FactoryBackedInstall{{
+			Live: candidate, Factory: factory, Expected: old,
+		}},
+	}})
+	if err == nil || got != nil || !strings.Contains(err.Error(), "expected occupant changed") {
+		t.Fatalf("late expected-pointer CAS result = %#v, %v", got, err)
+	}
+	if registry.tools["transaction_expected_pointer_cas"] != entry ||
+		entry.Tool != interloper || registry.Version() != version {
+		t.Fatal("late expected-pointer CAS rollback overwrote external state or changed version")
+	}
+	candidate.mu.Lock()
+	candidate.setHook = nil
+	candidate.mu.Unlock()
+	probe := NewToolRegistry()
+	if registerErr := probe.RegisterFactoryBacked(candidate, factory); registerErr != nil {
+		t.Fatalf("late expected-pointer CAS rollback leaked candidate lease: %v", registerErr)
+	}
+	_ = probe.Close()
+	_ = registry.Close()
+}
+
+func TestInstallFactoryBackedTransactionLateOwnershipRollback(t *testing.T) {
+	registry := NewToolRegistry()
+	candidate := newTransactionMediaTool("transaction_ownership_cas")
+	factory := transactionFactoryForTool(t, candidate, nil)
+	candidate.setHook = func(*transactionMediaTool, media.MediaStore) {
+		registry.mu.Lock()
+		registry.owned = true
+		registry.mu.Unlock()
+	}
+	version := registry.Version()
+	got, err := InstallFactoryBackedTransaction([]FactoryBackedBatch{{
+		Registry: registry,
+		Installs: []FactoryBackedInstall{{Live: candidate, Factory: factory}},
+	}})
+	registry.mu.Lock()
+	registry.owned = false
+	registry.mu.Unlock()
+	if err == nil || got != nil || !strings.Contains(err.Error(), "ownership changed") {
+		t.Fatalf("late ownership result = %#v, %v", got, err)
+	}
+	if registry.Count() != 0 || registry.Version() != version {
+		t.Fatal("late ownership rollback published a candidate or changed version")
+	}
+	candidate.mu.Lock()
+	candidate.setHook = nil
+	candidate.mu.Unlock()
+	probe := NewToolRegistry()
+	if registerErr := probe.RegisterFactoryBacked(candidate, factory); registerErr != nil {
+		t.Fatalf("late ownership rollback leaked candidate lease: %v", registerErr)
+	}
+	_ = probe.Close()
 }
 
 func TestInstallFactoryBackedTransactionMediaFailureAndDescriptorMutation(t *testing.T) {

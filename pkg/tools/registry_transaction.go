@@ -443,14 +443,10 @@ func recheckFactoryBackedTransaction(
 				plan.descriptor.Name,
 			)
 		}
-		if plan.expected == nil {
-			if entry != nil {
-				return fmt.Errorf(
-					"factory-backed tool %q expected slot changed during installation",
-					plan.descriptor.Name,
-				)
-			}
-		} else if entry == nil || !samePointerIdentity(entry.Tool, plan.expected) {
+		// Exact entry identity already proves that an initially empty slot is
+		// still empty. For a replacement, also fence an in-place Tool pointer
+		// change that does not replace its ToolEntry.
+		if plan.expected != nil && !samePointerIdentity(entry.Tool, plan.expected) {
 			return fmt.Errorf(
 				"factory-backed tool %q expected occupant changed during installation",
 				plan.descriptor.Name,
