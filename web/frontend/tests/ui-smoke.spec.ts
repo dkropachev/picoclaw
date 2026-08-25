@@ -1311,6 +1311,7 @@ interface MockLauncherApiOptions {
   fetchModelEmptyCredentials?: string[]
   fetchModelFailures?: Record<string, string>
   modelResponse?: unknown
+  repositoryReviewAutomationOptions?: unknown
   modelEvaluationRequests?: Array<{
     method: string
     path: string
@@ -3135,7 +3136,13 @@ async function mockLauncherApis(
         case "/api/repository-reviews/profiles":
           return json(route, { profiles: [] })
         case "/api/repository-reviews/automation-options":
-          return json(route, { models: [], accounts: [] })
+          return json(
+            route,
+            options.repositoryReviewAutomationOptions ?? {
+              models: [],
+              accounts: [],
+            },
+          )
         case "/api/model-evaluations":
           return json(route, { evaluations: [] })
         case "/api/model-evaluations/options":
@@ -3777,9 +3784,54 @@ test("notification inbox opens the exact development action target", async ({
 test("review profile guard autocompletes fields and keeps reference behind help", async ({
   page,
 }) => {
-  await gotoMockedRoute(page, "/repository-reviews/profiles")
+  await gotoMockedRoute(page, "/repository-reviews/profiles", {
+    repositoryReviewAutomationOptions: {
+      models: [
+        { alias: "safe-a", available: true },
+        { alias: "safe-b", available: true },
+        {
+          alias: "blocked",
+          available: false,
+          blocked_reason: "Reviewer route is blocked by policy.",
+        },
+      ],
+      accounts: [
+        {
+          id: "primary",
+          label: "Primary",
+          status: "available",
+          available: true,
+          default: true,
+          models: ["safe-a", "blocked"],
+          entries: [],
+        },
+        {
+          id: "backup",
+          label: "Backup",
+          status: "available",
+          available: true,
+          models: ["safe-a", "safe-b"],
+          entries: [],
+        },
+      ],
+    },
+  })
   await page.getByRole("button", { name: "New profile" }).click()
   const dialog = page.getByRole("dialog", { name: "New review profile" })
+  const account = dialog.getByRole("combobox", { name: "Execution account" })
+  const model = dialog.getByRole("combobox", { name: "Reviewer model" })
+  await expect(account).toBeVisible()
+  await expect(model).toHaveValue("safe-a")
+  await expect(
+    dialog.getByRole("option", {
+      name: "blocked (Reviewer route is blocked by policy.)",
+    }),
+  ).toBeDisabled()
+  await account.selectOption("backup")
+  await expect(model).toHaveValue("safe-a")
+  await model.selectOption("safe-b")
+  await account.selectOption("")
+  await expect(model).toHaveValue("safe-a")
   await dialog.getByRole("button", { name: /^Advanced/ }).click()
 
   await expect(dialog.getByText("Guard expression reference")).toHaveCount(0)

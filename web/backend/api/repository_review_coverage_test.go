@@ -147,7 +147,8 @@ func TestRepositoryReviewCoverageAutomationOptionsAndAccountProjection(t *testin
 		t.Fatal(err)
 	}
 	if len(options.Models) != 2 || len(options.Accounts) != 1 ||
-		options.Accounts[0].ID != "api" || !options.Accounts[0].Default {
+		options.Accounts[0].ID != "api" || !options.Accounts[0].Default ||
+		!options.Accounts[0].Available {
 		t.Fatalf("options=%#v", options)
 	}
 
@@ -2458,6 +2459,17 @@ func TestRepositoryReviewCoverageFinishMismatchedRunAndControllerTiming(t *testi
 }
 
 func TestRepositoryReviewCoverageAccountSelectionAndPricingBoundaries(t *testing.T) {
+	if repositoryReviewAccountAvailable(nil, "", codexAccountLimitAccount{}, false) ||
+		repositoryReviewAccountAvailable(nil, "direct", codexAccountLimitAccount{}, false) {
+		t.Fatal("invalid account option was available")
+	}
+	if repositoryReviewAliasAvailableForRuntime(
+		config.DefaultConfig(),
+		config.ModelAliasConfig{Name: "review"},
+		" ",
+	) {
+		t.Fatal("blank additional account made alias available")
+	}
 	if refs := repositoryReviewAccountRefsForSelection(nil, "account"); refs != nil {
 		t.Fatalf("nil configuration refs=%#v", refs)
 	}

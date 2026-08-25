@@ -217,6 +217,7 @@ export interface ReviewAccountOption {
   provider?: string
   label: string
   status: string
+  available?: boolean
   default?: boolean
   models?: string[]
   entries: ReviewAccountLimitEntry[]
@@ -906,6 +907,8 @@ function normalizeModelStats(value: unknown): RepositoryReviewModelStats[] {
 function normalizeAccount<T extends ReviewAccountOption>(account: T): T {
   return {
     ...account,
+    available: account.available ?? false,
+    models: Array.isArray(account.models) ? account.models : [],
     entries: (account.entries ?? []).map((entry) => ({
       ...entry,
       label: entry.label ?? entry.name,

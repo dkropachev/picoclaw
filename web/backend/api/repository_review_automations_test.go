@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -903,6 +904,156 @@ func TestRepositoryReviewModelOptionsExposePriceAndBlockAgenticCLI(t *testing.T)
 		!options[0].PriceKnown || options[0].InputPricePer1M != 0.2 ||
 		options[1].Alias != "unsafe" || options[1].Available || options[1].BlockedReason == "" {
 		t.Fatalf("options=%#v", options)
+	}
+}
+
+func TestRepositoryReviewModelOptionsSupportCredentialOnlyAccountRouter(t *testing.T) {
+	withPicoclawAuthHome(t)
+	for _, credentialID := range []string{"openai:work", "openai:backup", "openai:overflow"} {
+		setOpenAIAuthCredential(
+			t,
+			credentialID,
+			"access-token-"+credentialID,
+			"refresh-token-"+credentialID,
+			"account-"+credentialID,
+			credentialID+"@example.test",
+		)
+	}
+	if err := auth.SetCredential("openai:expired", &auth.AuthCredential{
+		AccessToken: "expired-access-token",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+		ExpiresAt:   time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.SetCredential("github-copilot:gh-copilot", &auth.AuthCredential{
+		AccessToken: "ghp_invalid-copilot-token",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = "review"
+	cfg.Agents.Defaults.AccountRef = "review-router"
+	credentialRefs := []string{
+		"credential:github-copilot:gh-copilot",
+		"credential:openai:work",
+		"credential:openai:backup",
+		"credential:openai:overflow",
+	}
+	cfg.ModelAliases = []config.ModelAliasConfig{
+		{
+			Name: "review", Model: "gpt-review",
+			AccountOverrides: map[string]string{
+				"credential:github-copilot:gh-copilot": "gpt-review-copilot",
+			},
+		},
+		{
+			Name: "partial", Model: "gpt-partial",
+			DisabledAccounts: []string{"credential:openai:backup"},
+		},
+		{
+			Name: "disabled", Model: "gpt-disabled",
+			DisabledAccounts: credentialRefs,
+		},
+		{Name: "unsafe", Model: "codex-cli/codex"},
+	}
+	cfg.ModelList = nil
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name: "review-router", Enabled: true, Entry: "copilot",
+		Blocks: []config.AccountRouterBlock{
+			{
+				ID: "copilot", Type: config.AccountRouterBlockTypeAccount,
+				Account: "credential:github-copilot:gh-copilot", Fallback: "openai",
+			},
+			{
+				ID: "openai", Type: config.AccountRouterBlockTypeLoadBalance,
+				Accounts: []string{
+					"credential:openai:work",
+					"credential:openai:backup",
+					"credential:openai:overflow",
+				},
+			},
+		},
+	}}
+
+	accounts := repositoryReviewAccountOptions(cfg, codexAccountLimitsResponse{Accounts: []codexAccountLimitAccount{
+		{
+			ID: "github-copilot:gh-copilot", Provider: "github-copilot",
+			CredentialStatus: "invalid", LimitsStatus: "unavailable",
+		},
+		{
+			ID: "openai:work", Provider: "openai",
+			CredentialStatus: "available", LimitsStatus: "available",
+		},
+		{
+			ID: "openai:backup", Provider: "openai",
+			CredentialStatus: "available", LimitsStatus: "error", LimitsError: "telemetry_offline",
+		},
+		{
+			ID: "openai:overflow", Provider: "openai",
+			CredentialStatus: "available", LimitsStatus: "available",
+		},
+		{
+			ID: "openai:expired", Provider: "openai",
+			CredentialStatus: "available", LimitsStatus: "error", LimitsError: "token_expired",
+		},
+	}})
+	availableRefs := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if account.Available {
+			availableRefs = append(availableRefs, account.ID)
+		}
+	}
+	options := repositoryReviewModelOptions(cfg, availableRefs...)
+	byAlias := make(map[string]repositoryReviewModelOption, len(options))
+	for _, option := range options {
+		byAlias[option.Alias] = option
+	}
+	if review := byAlias["review"]; !review.Available || !review.Default || review.BlockedReason != "" {
+		t.Fatalf("credential-router review option=%#v", review)
+	}
+	if partial := byAlias["partial"]; !partial.Available || partial.BlockedReason != "" {
+		t.Fatalf("directly selectable partial option=%#v", partial)
+	}
+	for _, alias := range []string{"disabled", "unsafe"} {
+		if option := byAlias[alias]; option.Available || option.BlockedReason == "" {
+			t.Fatalf("blocked credential-router option %q=%#v", alias, option)
+		}
+	}
+
+	if len(accounts) != 6 || accounts[0].ID != "review-router" || !accounts[0].Default ||
+		!accounts[0].Available {
+		t.Fatalf("credential-router accounts=%#v", accounts)
+	}
+	accountByID := make(map[string]repositoryReviewAccountOption, len(accounts))
+	for _, account := range accounts {
+		accountByID[account.ID] = account
+		for _, alias := range account.Models {
+			if account.Available && !byAlias[alias].Available {
+				t.Fatalf("account %q exposes globally unavailable alias %q", account.ID, alias)
+			}
+		}
+	}
+	if accountByID["credential:github-copilot:gh-copilot"].Available ||
+		accountByID["credential:openai:expired"].Available ||
+		!accountByID["credential:openai:work"].Available ||
+		!accountByID["credential:openai:backup"].Available ||
+		accountByID["credential:openai:backup"].Status != "error" {
+		t.Fatalf("credential availability=%#v", accountByID)
+	}
+	if !reflect.DeepEqual(accountByID["review-router"].Models, []string{"review"}) ||
+		!reflect.DeepEqual(
+			accountByID["credential:openai:work"].Models,
+			[]string{"partial", "review"},
+		) ||
+		!reflect.DeepEqual(
+			accountByID["credential:openai:backup"].Models,
+			[]string{"review"},
+		) {
+		t.Fatalf("credential model projection=%#v", accountByID)
 	}
 }
 

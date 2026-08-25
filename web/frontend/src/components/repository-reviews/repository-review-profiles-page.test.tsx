@@ -50,7 +50,17 @@ describe("RepositoryReviewProfilesPage", () => {
           output_price_per_1m: 4,
         },
       ],
-      accounts: [],
+      accounts: [
+        {
+          id: "default-account",
+          label: "Default account",
+          status: "available",
+          available: true,
+          default: true,
+          entries: [],
+          models: ["review-model"],
+        },
+      ],
     })
     vi.mocked(createRepositoryReviewProfile).mockReset()
     vi.mocked(updateRepositoryReviewProfile).mockReset()
@@ -72,6 +82,8 @@ describe("RepositoryReviewProfilesPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "New profile" }))
     await user.type(screen.getByLabelText("Profile name"), "Core bugs")
+    expect(screen.getByLabelText("Execution account")).toBeVisible()
+    expect(screen.getByLabelText("Reviewer model")).toBeVisible()
     expect(
       screen.getByText(
         "Narrows defect classes only. Findings diagnose validated defects and never include fixes or remediation.",
@@ -182,6 +194,7 @@ describe("RepositoryReviewProfilesPage", () => {
           provider: "openai",
           label: "Work account",
           status: "available",
+          available: true,
           entries: [],
           models: ["review-model"],
         },
@@ -190,6 +203,7 @@ describe("RepositoryReviewProfilesPage", () => {
           provider: "openai",
           label: "No models account",
           status: "available",
+          available: true,
           entries: [],
           models: [],
         },
@@ -208,22 +222,21 @@ describe("RepositoryReviewProfilesPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "New profile" }))
     await user.type(screen.getByLabelText("Profile name"), "Guarded review")
-    expect(screen.queryByLabelText("Execution account")).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: /^Advanced/ }))
     const account = screen.getByLabelText("Execution account")
-    expect(account).toHaveValue("")
-    expect(screen.getByRole("option", { name: "Default account" })).toHaveValue(
-      "",
-    )
+    expect(account).toBeVisible()
+    expect(account).toHaveValue("credential:openai:work")
+    expect(
+      screen.getByRole("option", { name: "Default account (unavailable)" }),
+    ).toBeDisabled()
     expect(
       screen.getByRole("option", { name: "Work account · openai" }),
     ).toHaveValue("credential:openai:work")
     expect(
       screen.getByRole("option", {
-        name: "No models account · openai (no compatible review models)",
+        name: "No models account · openai (no available reviewer models)",
       }),
     ).toBeDisabled()
-    await user.selectOptions(account, "credential:openai:work")
+    await user.click(screen.getByRole("button", { name: /^Advanced/ }))
 
     const guard = screen.getByLabelText("Guard expression")
     expect(guard).toHaveAttribute(
@@ -296,6 +309,7 @@ describe("RepositoryReviewProfilesPage", () => {
           provider: "openai",
           label: "Work account",
           status: "available",
+          available: true,
           default: true,
           models: ["review-model"],
           entries: [
@@ -392,6 +406,240 @@ describe("RepositoryReviewProfilesPage", () => {
     expect(guard).toHaveValue("account.limits.known and ")
   })
 
+  it("filters reviewer models by account and preserves or replaces the selection safely", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [
+        modelOption("safe-a"),
+        modelOption("safe-b"),
+        {
+          ...modelOption("blocked"),
+          available: false,
+          blocked_reason:
+            "Agentic CLI models are not allowed for immutable repository review.",
+        },
+      ],
+      accounts: [
+        accountOption("primary", "Primary", ["safe-a", "blocked"], true),
+        accountOption("backup", "Backup", ["safe-a", "safe-b"]),
+        accountOption("secondary", "Secondary", ["safe-b"]),
+        accountOption("blocked-only", "Blocked only", ["blocked"]),
+      ],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    const account = screen.getByLabelText("Execution account")
+    const model = screen.getByLabelText("Reviewer model")
+    expect(account).toHaveValue("")
+    expect(model).toHaveValue("safe-a")
+    expect(screen.getByRole("option", { name: "safe-a" })).toBeEnabled()
+    expect(
+      screen.getByRole("option", {
+        name: "safe-b (Reviewer model is unavailable on Primary.)",
+      }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("option", {
+        name: /blocked \(Agentic CLI models are not allowed/,
+      }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("option", {
+        name: "Blocked only · openai (no available reviewer models)",
+      }),
+    ).toBeDisabled()
+
+    await user.selectOptions(account, "backup")
+    expect(model).toHaveValue("safe-a")
+    await user.selectOptions(model, "safe-b")
+    await user.selectOptions(account, "")
+    expect(model).toHaveValue("safe-a")
+    await user.selectOptions(account, "secondary")
+    expect(model).toHaveValue("safe-b")
+  })
+
+  it("fails closed when global and account availability contradict each other", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [
+        {
+          ...modelOption("blocked"),
+          available: false,
+          blocked_reason: "Reviewer route is blocked by policy.",
+        },
+      ],
+      accounts: [accountOption("primary", "Primary", ["blocked"], true)],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    expect(screen.getByLabelText("Execution account")).toHaveValue("")
+    expect(screen.getByLabelText("Reviewer model")).toBeEnabled()
+    expect(
+      screen.getByRole("option", {
+        name: "blocked (Reviewer route is blocked by policy.)",
+      }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText("No reviewer models are available on Primary."),
+    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
+  })
+
+  it("skips an unavailable default credential but keeps telemetry-error accounts selectable", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [modelOption("safe")],
+      accounts: [
+        {
+          ...accountOption("expired", "Expired", ["safe"], true),
+          status: "invalid",
+          available: false,
+        },
+        {
+          ...accountOption("telemetry-error", "Telemetry error", ["safe"]),
+          status: "error",
+          available: true,
+        },
+      ],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    const account = screen.getByLabelText("Execution account")
+    expect(account).toHaveValue("telemetry-error")
+    expect(screen.getByLabelText("Reviewer model")).toHaveValue("safe")
+    expect(
+      screen.getByRole("option", {
+        name: "Default account (currently Expired) (invalid)",
+      }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("option", { name: "Expired · openai (invalid)" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole("option", { name: "Telemetry error · openai" }),
+    ).toBeEnabled()
+  })
+
+  it("shows stale account and model values and repairs both through account selection", async () => {
+    const user = userEvent.setup()
+    vi.mocked(listRepositoryReviewProfiles).mockResolvedValue({
+      profiles: [storedProfile("missing-account", "missing-model")],
+    })
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [modelOption("safe")],
+      accounts: [
+        accountOption("valid-account", "Valid account", ["safe"], true),
+      ],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "Edit" }))
+    const account = screen.getByLabelText("Execution account")
+    const model = screen.getByLabelText("Reviewer model")
+    expect(account).toHaveValue("missing-account")
+    expect(
+      screen.getByRole("option", {
+        name: "missing-account (unavailable)",
+      }),
+    ).toBeDisabled()
+    expect(model).toHaveValue("missing-model")
+    expect(
+      screen.getByRole("option", { name: "missing-model (unavailable)" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(
+        "Execution account missing-account is no longer available.",
+      ),
+    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
+
+    await user.selectOptions(account, "valid-account")
+    expect(model).toHaveValue("safe")
+    expect(screen.queryByText(/is no longer available/)).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeEnabled()
+  })
+
+  it("explains missing execution routes and disables profile creation", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [modelOption("safe")],
+      accounts: [],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    expect(screen.getByLabelText("Execution account")).toBeVisible()
+    expect(
+      screen.getByRole("option", { name: "Default account (unavailable)" }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(
+        "No default execution account is available. Choose an account.",
+      ),
+    ).toBeVisible()
+    expect(screen.getByLabelText("Reviewer model")).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
+  })
+
+  it("explains an empty reviewer model catalog", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [],
+      accounts: [accountOption("primary", "Primary", [], true)],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    expect(screen.getByLabelText("Execution account")).toHaveValue("")
+    expect(screen.getByLabelText("Reviewer model")).toBeEnabled()
+    expect(
+      screen.getByText("No reviewer model aliases are configured."),
+    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
+  })
+
+  it("keeps profile editing unavailable when model and account options fail to load", async () => {
+    vi.mocked(getRepositoryReviewAutomationOptions).mockRejectedValue(
+      new Error("options offline"),
+    )
+    renderPage()
+
+    expect(
+      await screen.findByText(
+        "Reviewer models and execution accounts could not be loaded. Refresh to retry.",
+      ),
+    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "New profile" })).toBeDisabled()
+  })
+
+  it("disables saving when a refresh fails instead of trusting cached options", async () => {
+    const user = userEvent.setup()
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    renderPage(queryClient)
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    await user.type(screen.getByLabelText("Profile name"), "Cached options")
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeEnabled()
+
+    vi.mocked(getRepositoryReviewAutomationOptions).mockRejectedValueOnce(
+      new Error("refresh failed"),
+    )
+    await queryClient.refetchQueries({
+      queryKey: ["repository-review-automation-options"],
+    })
+    expect(
+      await screen.findByText(
+        "Reviewer models and execution accounts could not be refreshed. Close this editor and refresh before saving.",
+      ),
+    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
+  })
+
   it("shows save validation errors inside the open profile dialog", async () => {
     const user = userEvent.setup()
     vi.mocked(createRepositoryReviewProfile).mockRejectedValue(
@@ -427,6 +675,7 @@ describe("RepositoryReviewProfilesPage", () => {
           id: "empty-default",
           label: "Empty default",
           status: "available",
+          available: true,
           default: true,
           entries: [],
           models: [],
@@ -437,19 +686,79 @@ describe("RepositoryReviewProfilesPage", () => {
 
     await user.click(await screen.findByRole("button", { name: "New profile" }))
     await user.type(screen.getByLabelText("Profile name"), "No route")
+    expect(screen.getByLabelText("Execution account")).toBeVisible()
     expect(screen.getByLabelText("Reviewer model")).toHaveValue("")
+    expect(screen.getByLabelText("Reviewer model")).toBeEnabled()
+    expect(
+      screen.getByText("No reviewer models are available on Empty default."),
+    ).toBeVisible()
     expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
   })
 })
 
-function renderPage() {
+function renderPage(
+  queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  }),
+) {
   return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
+    <QueryClientProvider client={queryClient}>
       <RepositoryReviewProfilesPage />
     </QueryClientProvider>,
   )
+}
+
+function modelOption(alias: string) {
+  return {
+    alias,
+    resolved_model: `openai/${alias}`,
+    provider: "openai",
+    available: true,
+    price_known: true,
+    input_price_per_1m: 1,
+    output_price_per_1m: 4,
+  }
+}
+
+function accountOption(
+  id: string,
+  label: string,
+  models: string[],
+  defaultAccount = false,
+) {
+  return {
+    id,
+    label,
+    provider: "openai",
+    status: "available",
+    available: true,
+    default: defaultAccount,
+    entries: [],
+    models,
+  }
+}
+
+function storedProfile(accountRef: string, reviewerModel: string) {
+  return {
+    id: "profile_stale",
+    version: 1,
+    name: "Stale profile",
+    account_ref: accountRef,
+    reviewer_model: reviewerModel,
+    review_focus: "Find correctness bugs.",
+    force: false,
+    auto_continue: true,
+    max_files_per_run: 24,
+    max_content_bytes: 524_288,
+    max_parallel_children: 8,
+    scope_policy: {
+      code_types: ["code" as const],
+      include_folders: [],
+      exclude_folders: [],
+      free_text: "",
+    },
+    budget: { guard_expression: "" },
+    created_at: "2026-08-23T00:00:00Z",
+    updated_at: "2026-08-23T00:00:00Z",
+  }
 }

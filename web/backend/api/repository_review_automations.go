@@ -65,13 +65,14 @@ type repositoryReviewModelOption struct {
 }
 
 type repositoryReviewAccountOption struct {
-	ID       string                               `json:"id"`
-	Provider string                               `json:"provider,omitempty"`
-	Label    string                               `json:"label"`
-	Status   string                               `json:"status"`
-	Default  bool                                 `json:"default,omitempty"`
-	Models   []string                             `json:"models"`
-	Entries  []repositoryReviewAccountLimitOption `json:"entries"`
+	ID        string                               `json:"id"`
+	Provider  string                               `json:"provider,omitempty"`
+	Label     string                               `json:"label"`
+	Status    string                               `json:"status"`
+	Available bool                                 `json:"available"`
+	Default   bool                                 `json:"default,omitempty"`
+	Models    []string                             `json:"models"`
+	Entries   []repositoryReviewAccountLimitOption `json:"entries"`
 }
 
 type repositoryReviewAccountLimitOption struct {
@@ -744,11 +745,17 @@ func (h *Handler) handleRepositoryReviewAutomationOptions(w http.ResponseWriter,
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	models := repositoryReviewModelOptions(cfg)
 	limitsCtx, cancelLimits := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancelLimits()
 	limits, limitsErr := loadCodexAccountLimits(limitsCtx)
 	accounts := repositoryReviewAccountOptions(cfg, limits)
+	selectableAccountRefs := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if account.Available {
+			selectableAccountRefs = append(selectableAccountRefs, account.ID)
+		}
+	}
+	models := repositoryReviewModelOptions(cfg, selectableAccountRefs...)
 	response := map[string]any{"models": models, "accounts": accounts}
 	if limitsError := repositoryReviewLimitsError(limits, limitsErr); limitsError != "" {
 		response["limits_error"] = limitsError
@@ -763,7 +770,10 @@ func repositoryReviewLimitsError(limits codexAccountLimitsResponse, limitsErr er
 	return strings.TrimSpace(limits.Error)
 }
 
-func repositoryReviewModelOptions(cfg *config.Config) []repositoryReviewModelOption {
+func repositoryReviewModelOptions(
+	cfg *config.Config,
+	additionalAccountRefs ...string,
+) []repositoryReviewModelOption {
 	if cfg == nil {
 		return []repositoryReviewModelOption{}
 	}
@@ -777,7 +787,7 @@ func repositoryReviewModelOptions(cfg *config.Config) []repositoryReviewModelOpt
 		}
 		option := repositoryReviewModelOption{
 			Alias: alias.Name, ResolvedModel: resolved, Provider: provider,
-			Available: repositoryReviewAliasAvailableForRuntime(cfg, alias),
+			Available: repositoryReviewAliasAvailableForRuntime(cfg, alias, additionalAccountRefs...),
 			Default:   alias.Name == defaultModel,
 		}
 		if repositoryReviewAliasUsesAgenticCLI(cfg, alias) {
@@ -869,13 +879,23 @@ func repositoryReviewRefreshAccountingSnapshot(
 func repositoryReviewAliasAvailableForRuntime(
 	cfg *config.Config,
 	alias config.ModelAliasConfig,
+	additionalAccountRefs ...string,
 ) bool {
 	if cfg == nil || strings.TrimSpace(alias.Name) == "" {
 		return false
 	}
-	for _, accountRef := range repositoryReviewSelectableAccountRefs(cfg) {
-		resolved, err := cfg.ResolveModelAlias(alias.Name, accountRef)
-		if err == nil && strings.TrimSpace(resolved) != "" {
+	accountRefs := append(repositoryReviewSelectableAccountRefs(cfg), additionalAccountRefs...)
+	seen := make(map[string]struct{}, len(accountRefs))
+	for _, accountRef := range accountRefs {
+		accountRef = strings.TrimSpace(accountRef)
+		if accountRef == "" {
+			continue
+		}
+		if _, duplicate := seen[accountRef]; duplicate {
+			continue
+		}
+		seen[accountRef] = struct{}{}
+		if repositoryReviewAliasAvailableForAccount(cfg, alias.Name, accountRef) {
 			return true
 		}
 	}
@@ -1282,6 +1302,36 @@ func repositoryReviewEquivalentAliasPrice(
 	return aggregate, found
 }
 
+func repositoryReviewAccountAvailable(
+	cfg *config.Config,
+	accountRef string,
+	telemetry codexAccountLimitAccount,
+	hasTelemetry bool,
+) bool {
+	accountRef = strings.TrimSpace(accountRef)
+	if accountRef == "" {
+		return false
+	}
+	if _, credential := config.AccountRouterCredentialAccountID(accountRef); credential {
+		if !credentialAccountAvailable(accountRef) {
+			return false
+		}
+		return !hasTelemetry ||
+			strings.EqualFold(strings.TrimSpace(telemetry.CredentialStatus), "available")
+	}
+	if cfg == nil {
+		return false
+	}
+	for index := range cfg.AccountRouters {
+		if cfg.AccountRouters[index].Enabled &&
+			strings.TrimSpace(cfg.AccountRouters[index].Name) == accountRef {
+			return true
+		}
+	}
+	account, err := cfg.GetEnabledModelConfig(accountRef)
+	return err == nil && account != nil && !account.IsModelRouter()
+}
+
 func repositoryReviewAccountOptions(
 	cfg *config.Config,
 	limits codexAccountLimitsResponse,
@@ -1335,8 +1385,9 @@ func repositoryReviewAccountOptions(
 		}
 		option := repositoryReviewAccountOption{
 			ID: ref, Provider: provider, Label: label, Status: status, Default: ref == defaultRef,
-			Entries: make([]repositoryReviewAccountLimitOption, 0, len(telemetry.Entries)),
-			Models:  []string{},
+			Available: repositoryReviewAccountAvailable(cfg, ref, telemetry, hasTelemetry),
+			Entries:   make([]repositoryReviewAccountLimitOption, 0, len(telemetry.Entries)),
+			Models:    []string{},
 		}
 		if cfg != nil {
 			for _, alias := range cfg.ModelAliases {

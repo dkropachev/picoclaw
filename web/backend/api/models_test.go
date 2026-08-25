@@ -4769,7 +4769,7 @@ func TestResolveAccountModelConfigNormalizesNamedCredentialAliases(t *testing.T)
 
 	for credentialID, credential := range map[string]*auth.AuthCredential{
 		"github-copilot:work": {
-			AccessToken: "gho-work-token",
+			AccessToken: "gho_work-token",
 			Provider:    "github-copilot",
 			AuthMethod:  "token",
 		},
@@ -4820,6 +4820,38 @@ func TestResolveAccountModelConfigNormalizesNamedCredentialAliases(t *testing.T)
 				)
 			}
 		})
+	}
+}
+
+func TestCredentialAccountAvailableRejectsUnusableStoredCredentials(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	credentials := map[string]*auth.AuthCredential{
+		"github-copilot:invalid": {
+			AccessToken: "ghp_invalid-copilot-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		},
+		"openai:wrong-method": {
+			AccessToken: "openai-token",
+			Provider:    "openai",
+			AuthMethod:  "api-key",
+		},
+		"openai:expired": {
+			AccessToken: "expired-openai-token",
+			Provider:    "openai",
+			AuthMethod:  "oauth",
+			ExpiresAt:   time.Now().Add(-time.Hour),
+		},
+	}
+	for credentialID, credential := range credentials {
+		if err := auth.SetCredential(credentialID, credential); err != nil {
+			t.Fatalf("SetCredential(%q) error = %v", credentialID, err)
+		}
+		if credentialAccountAvailable("credential:" + credentialID) {
+			t.Fatalf("credentialAccountAvailable(%q) = true", credentialID)
+		}
 	}
 }
 
