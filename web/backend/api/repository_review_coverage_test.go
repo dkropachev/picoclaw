@@ -2459,6 +2459,17 @@ func TestRepositoryReviewCoverageFinishMismatchedRunAndControllerTiming(t *testi
 }
 
 func TestRepositoryReviewCoverageAccountSelectionAndPricingBoundaries(t *testing.T) {
+	if repositoryReviewAccountAvailable(nil, "", codexAccountLimitAccount{}, false) ||
+		repositoryReviewAccountAvailable(nil, "direct", codexAccountLimitAccount{}, false) {
+		t.Fatal("invalid account option was available")
+	}
+	if repositoryReviewAliasAvailableForRuntime(
+		config.DefaultConfig(),
+		config.ModelAliasConfig{Name: "review"},
+		" ",
+	) {
+		t.Fatal("blank additional account made alias available")
+	}
 	if refs := repositoryReviewAccountRefsForSelection(nil, "account"); refs != nil {
 		t.Fatalf("nil configuration refs=%#v", refs)
 	}
