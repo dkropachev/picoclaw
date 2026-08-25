@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,6 +287,112 @@ func TestLegacyAssemble_EmptyHistory(t *testing.T) {
 	}
 }
 
+func TestLegacyContext_UnownedExplicitSessionFailsClosed(t *testing.T) {
+	tests := map[string]string{
+		"opaque":               session.BuildOpaqueSessionKey("unowned-legacy-context"),
+		"removed legacy agent": "agent:removed:test:direct:unowned",
+	}
+	for name, sessionKey := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Agents.Defaults.ContextWindow = 8000
+			cfg.Agents.Defaults.SummarizeMessageThreshold = 2
+			al := newCMTestAgentLoop(cfg)
+			defer al.Close()
+
+			defaultAgent := al.registry.GetDefaultAgent()
+			if defaultAgent == nil {
+				t.Fatal("expected default agent")
+			}
+			defaultHistory := legacyContextTestHistory("default-private")
+			defaultAgent.Sessions.SetHistory(sessionKey, defaultHistory)
+			defaultAgent.Sessions.SetSummary(sessionKey, "default-private-summary")
+			defaultHistoryBefore := defaultAgent.Sessions.GetHistory(sessionKey)
+
+			resp, err := al.contextManager.Assemble(t.Context(), &AssembleRequest{
+				SessionKey: sessionKey,
+				Budget:     8000,
+				MaxTokens:  4096,
+			})
+			if err != nil {
+				t.Fatalf("Assemble() error = %v", err)
+			}
+			if resp == nil || len(resp.History) != 0 || resp.Summary != "" {
+				t.Fatalf("Assemble() = %#v, want empty context for unowned explicit session", resp)
+			}
+
+			for _, reason := range []ContextCompressReason{
+				ContextCompressReasonRetry,
+				ContextCompressReasonSummarize,
+			} {
+				if err := al.contextManager.Compact(t.Context(), &CompactRequest{
+					SessionKey: sessionKey,
+					Reason:     reason,
+				}); err != nil {
+					t.Fatalf("Compact(%q) error = %v", reason, err)
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+			if err := al.contextManager.Clear(t.Context(), sessionKey); err == nil {
+				t.Fatal("Clear() succeeded for unowned explicit session")
+			}
+			if got := defaultAgent.Sessions.GetHistory(sessionKey); !reflect.DeepEqual(got, defaultHistoryBefore) {
+				t.Fatalf("default history mutated: %#v", got)
+			}
+			if got := defaultAgent.Sessions.GetSummary(sessionKey); got != "default-private-summary" {
+				t.Fatalf("default summary mutated: %q", got)
+			}
+		})
+	}
+}
+
+func TestLegacyAssemble_NamedAgentUsesOwningSessionStore(t *testing.T) {
+	defaultProvider := &contextCompletionCaptureProvider{response: "default"}
+	namedProvider := &contextCompletionCaptureProvider{response: "named"}
+	al, defaultAgent, namedAgent := newNamedLegacyContextTestLoop(
+		t,
+		defaultProvider,
+		namedProvider,
+	)
+	defer al.Close()
+
+	sessionKey := admitLegacyContextTestSession(t, namedAgent, "named-assemble")
+	defaultAgent.Sessions.SetHistory(sessionKey, []providers.Message{{
+		Role: "user", Content: "default-store-history",
+	}})
+	defaultAgent.Sessions.SetSummary(sessionKey, "default-store-summary")
+	namedHistory := []providers.Message{
+		{Role: "user", Content: "named-store-history"},
+		{Role: "assistant", Content: "named-store-answer"},
+	}
+	namedAgent.Sessions.SetHistory(sessionKey, namedHistory)
+	namedAgent.Sessions.SetSummary(sessionKey, "named-store-summary")
+
+	resp, err := al.contextManager.Assemble(t.Context(), &AssembleRequest{
+		SessionKey: sessionKey,
+		Budget:     8000,
+		MaxTokens:  4096,
+	})
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if !reflect.DeepEqual(resp.History, namedAgent.Sessions.GetHistory(sessionKey)) {
+		t.Fatalf("Assemble() history = %#v, want named history %#v", resp.History, namedHistory)
+	}
+	if len(resp.History) != len(namedHistory) {
+		t.Fatalf("Assemble() history length = %d, want %d", len(resp.History), len(namedHistory))
+	}
+	for i := range namedHistory {
+		if resp.History[i].Role != namedHistory[i].Role ||
+			resp.History[i].Content != namedHistory[i].Content {
+			t.Fatalf("Assemble() history[%d] = %#v, want role/content %#v", i, resp.History[i], namedHistory[i])
+		}
+	}
+	if resp.Summary != "named-store-summary" {
+		t.Fatalf("Assemble() summary = %q, want named-store-summary", resp.Summary)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Legacy Compact overflow tests
 // ---------------------------------------------------------------------------
@@ -427,6 +535,58 @@ func TestLegacyCompact_Overflow_TooShortToCompress(t *testing.T) {
 	}
 }
 
+func TestLegacyCompact_Overflow_NamedAgentDoesNotMutateDefaultStore(t *testing.T) {
+	defaultProvider := &contextCompletionCaptureProvider{response: "default"}
+	namedProvider := &contextCompletionCaptureProvider{response: "named"}
+	al, defaultAgent, namedAgent := newNamedLegacyContextTestLoop(
+		t,
+		defaultProvider,
+		namedProvider,
+	)
+	defer al.Close()
+
+	sessionKey := admitLegacyContextTestSession(t, namedAgent, "named-overflow")
+	defaultAgent.Sessions.SetHistory(sessionKey, legacyContextTestHistory("default-only"))
+	defaultAgent.Sessions.SetSummary(sessionKey, "default-summary-before")
+	namedAgent.Sessions.SetHistory(sessionKey, legacyContextTestHistory("named-only"))
+	namedAgent.Sessions.SetSummary(sessionKey, "named-summary-before")
+	defaultHistoryBefore := defaultAgent.Sessions.GetHistory(sessionKey)
+	runtimeCh, closeRuntimeEvents := subscribeRuntimeEventsForTest(
+		t,
+		al,
+		4,
+		runtimeevents.KindAgentContextCompress,
+	)
+	defer closeRuntimeEvents()
+
+	if err := al.contextManager.Compact(t.Context(), &CompactRequest{
+		SessionKey: sessionKey,
+		Reason:     ContextCompressReasonRetry,
+	}); err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+
+	if got := defaultAgent.Sessions.GetHistory(sessionKey); !reflect.DeepEqual(got, defaultHistoryBefore) {
+		t.Fatalf("default history mutated: got %#v, want %#v", got, defaultHistoryBefore)
+	}
+	if got := defaultAgent.Sessions.GetSummary(sessionKey); got != "default-summary-before" {
+		t.Fatalf("default summary mutated: got %q", got)
+	}
+	if got := namedAgent.Sessions.GetHistory(sessionKey); len(got) >= len(legacyContextTestHistory("named-only")) {
+		t.Fatalf("named history was not compressed: %#v", got)
+	}
+	if got := namedAgent.Sessions.GetSummary(sessionKey); !strings.Contains(got, "named-summary-before") ||
+		!strings.Contains(got, "Emergency compression") {
+		t.Fatalf("named summary = %q, want prior summary plus compression note", got)
+	}
+	compressEvent := waitForRuntimeEvent(t, runtimeCh, time.Second, func(evt runtimeevents.Event) bool {
+		return evt.Kind == runtimeevents.KindAgentContextCompress
+	})
+	if compressEvent.Scope.AgentID != namedAgent.ID {
+		t.Fatalf("compression event agent = %q, want %q", compressEvent.Scope.AgentID, namedAgent.ID)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Legacy Compact post-turn tests
 // ---------------------------------------------------------------------------
@@ -519,6 +679,65 @@ func TestLegacyCompact_PostTurn_ExceedsMessageThreshold(t *testing.T) {
 	if len(newHistory) >= len(history) {
 		t.Fatalf("expected summarization to reduce history from %d messages, got %d", len(history), len(newHistory))
 	}
+}
+
+func TestLegacyCompact_PostTurn_ConcurrentAgentsUseOwningProviderAndStore(t *testing.T) {
+	defaultProvider := &contextCompletionCaptureProvider{response: "default generated summary"}
+	namedProvider := &contextCompletionCaptureProvider{response: "named generated summary"}
+	al, defaultAgent, namedAgent := newNamedLegacyContextTestLoop(
+		t,
+		defaultProvider,
+		namedProvider,
+	)
+	defer al.Close()
+
+	defaultSession := admitLegacyContextTestSession(t, defaultAgent, "default-summarize")
+	namedSession := admitLegacyContextTestSession(t, namedAgent, "named-summarize")
+	defaultAgent.Sessions.SetHistory(defaultSession, legacyContextTestHistory("default-only"))
+	namedAgent.Sessions.SetHistory(namedSession, legacyContextTestHistory("named-only"))
+
+	runtimeCh, closeRuntimeEvents := subscribeRuntimeEventsForTest(
+		t,
+		al,
+		16,
+		runtimeevents.KindAgentSessionSummarize,
+	)
+	defer closeRuntimeEvents()
+
+	var compactWG sync.WaitGroup
+	for _, sessionKey := range []string{defaultSession, namedSession} {
+		compactWG.Add(1)
+		go func() {
+			defer compactWG.Done()
+			if err := al.contextManager.Compact(context.Background(), &CompactRequest{
+				SessionKey: sessionKey,
+				Reason:     ContextCompressReasonSummarize,
+			}); err != nil {
+				t.Errorf("Compact(%q) error = %v", sessionKey, err)
+			}
+		}()
+	}
+	compactWG.Wait()
+	for range 2 {
+		waitForRuntimeEvent(t, runtimeCh, 5*time.Second, func(evt runtimeevents.Event) bool {
+			return evt.Kind == runtimeevents.KindAgentSessionSummarize
+		})
+	}
+
+	if got := defaultAgent.Sessions.GetSummary(defaultSession); got != "default generated summary" {
+		t.Fatalf("default summary = %q", got)
+	}
+	if got := namedAgent.Sessions.GetSummary(namedSession); got != "named generated summary" {
+		t.Fatalf("named summary = %q", got)
+	}
+	if got := defaultProvider.Models(); !reflect.DeepEqual(got, []string{"default-upstream-model"}) {
+		t.Fatalf("default provider models = %#v", got)
+	}
+	if got := namedProvider.Models(); !reflect.DeepEqual(got, []string{"named-upstream-model"}) {
+		t.Fatalf("named provider models = %#v", got)
+	}
+	assertLegacyContextPromptIsolation(t, defaultProvider.Prompts(), "default-only", "named-only")
+	assertLegacyContextPromptIsolation(t, namedProvider.Prompts(), "named-only", "default-only")
 }
 
 func TestLegacySummarizationUsesConcreteAliasModel(t *testing.T) {
@@ -1089,6 +1308,111 @@ func testConfig(t *testing.T) *config.Config {
 	}
 }
 
+func newNamedLegacyContextTestLoop(
+	t *testing.T,
+	defaultProvider *contextCompletionCaptureProvider,
+	namedProvider *contextCompletionCaptureProvider,
+) (*AgentLoop, *AgentInstance, *AgentInstance) {
+	t.Helper()
+	defaultWorkspace := t.TempDir()
+	namedWorkspace := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:                 defaultWorkspace,
+				ModelName:                 "default-summary",
+				MaxTokens:                 4096,
+				MaxToolIterations:         10,
+				ContextWindow:             8000,
+				SummarizeMessageThreshold: 2,
+				SummarizeTokenPercent:     75,
+			},
+			List: []config.AgentConfig{
+				{ID: "main", Default: true, Workspace: defaultWorkspace},
+				{
+					ID:        "named",
+					Workspace: namedWorkspace,
+					Model:     &config.AgentModelConfig{Primary: "named-summary"},
+				},
+			},
+		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "default-summary", Model: "default-upstream-model"},
+			{Name: "named-summary", Model: "named-upstream-model"},
+		},
+	}
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), defaultProvider)
+	defaultAgent := al.registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		al.Close()
+		t.Fatal("default agent is nil")
+	}
+	namedAgent, ok := al.registry.GetAgent("named")
+	if !ok || namedAgent == nil {
+		al.Close()
+		t.Fatal("named agent is nil")
+	}
+	if defaultAgent.ConfigurationError != nil {
+		al.Close()
+		t.Fatalf("default agent configuration error = %v", defaultAgent.ConfigurationError)
+	}
+	if namedAgent.ConfigurationError != nil {
+		al.Close()
+		t.Fatalf("named agent configuration error = %v", namedAgent.ConfigurationError)
+	}
+	if len(namedAgent.Candidates) != 1 {
+		al.Close()
+		t.Fatalf("named candidates = %#v, want one", namedAgent.Candidates)
+	}
+	bindBootstrapProvider(namedAgent.CandidateProviders, namedAgent.Candidates[0], namedProvider)
+	return al, defaultAgent, namedAgent
+}
+
+func admitLegacyContextTestSession(t *testing.T, agent *AgentInstance, identity string) string {
+	t.Helper()
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    agent.ID,
+		Channel:    "test",
+		Dimensions: []string{"chat"},
+		Values:     map[string]string{"chat": "direct:" + identity},
+	}
+	sessionKey := session.BuildSessionKey(scope)
+	if err := admitSessionMetadata(t.Context(), agent.Sessions, sessionKey, &scope, nil, agent.ID); err != nil {
+		t.Fatalf("admit session metadata: %v", err)
+	}
+	return sessionKey
+}
+
+func legacyContextTestHistory(prefix string) []providers.Message {
+	return []providers.Message{
+		{Role: "user", Content: prefix + " question 1"},
+		{Role: "assistant", Content: prefix + " answer 1"},
+		{Role: "user", Content: prefix + " question 2"},
+		{Role: "assistant", Content: prefix + " answer 2"},
+		{Role: "user", Content: prefix + " question 3"},
+		{Role: "assistant", Content: prefix + " answer 3"},
+	}
+}
+
+func assertLegacyContextPromptIsolation(
+	t *testing.T,
+	prompts []string,
+	want string,
+	unwanted string,
+) {
+	t.Helper()
+	if len(prompts) != 1 {
+		t.Fatalf("provider prompts = %#v, want one", prompts)
+	}
+	if !strings.Contains(prompts[0], want) {
+		t.Fatalf("provider prompt does not contain %q: %q", want, prompts[0])
+	}
+	if strings.Contains(prompts[0], unwanted) {
+		t.Fatalf("provider prompt contains foreign context %q: %q", unwanted, prompts[0])
+	}
+}
+
 func newCMTestAgentLoop(cfg *config.Config) *AgentLoop {
 	msgBus := bus.NewMessageBus()
 	return newTestAgentLoopWithStrictModels(cfg, msgBus, &simpleMockProvider{response: "test"})
@@ -1098,17 +1422,24 @@ type contextCompletionCaptureProvider struct {
 	mu       sync.Mutex
 	response string
 	models   []string
+	prompts  []string
 }
 
 func (p *contextCompletionCaptureProvider) Chat(
 	_ context.Context,
-	_ []providers.Message,
+	messages []providers.Message,
 	_ []providers.ToolDefinition,
 	model string,
 	_ map[string]any,
 ) (*providers.LLMResponse, error) {
+	var prompt strings.Builder
+	for _, message := range messages {
+		prompt.WriteString(message.Content)
+		prompt.WriteByte('\n')
+	}
 	p.mu.Lock()
 	p.models = append(p.models, model)
+	p.prompts = append(p.prompts, prompt.String())
 	p.mu.Unlock()
 	return &providers.LLMResponse{Content: p.response}, nil
 }
@@ -1117,4 +1448,10 @@ func (p *contextCompletionCaptureProvider) Models() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.models...)
+}
+
+func (p *contextCompletionCaptureProvider) Prompts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.prompts...)
 }

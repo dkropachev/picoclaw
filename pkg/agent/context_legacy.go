@@ -12,6 +12,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // legacyContextManager wraps the existing summarization/compression logic
@@ -26,7 +27,7 @@ func (m *legacyContextManager) Assemble(_ context.Context, req *AssembleRequest)
 	// Legacy: read history from session, return as-is.
 	// Budget enforcement happens in BuildMessages caller via
 	// isOverContextBudget + forceCompression.
-	agent := m.al.registry.GetDefaultAgent()
+	agent := m.agentForSession(req.SessionKey)
 	if agent == nil {
 		return &AssembleResponse{}, nil
 	}
@@ -43,9 +44,14 @@ func (m *legacyContextManager) Compact(_ context.Context, req *CompactRequest) e
 	case ContextCompressReasonProactive, ContextCompressReasonRetry:
 		// Sync emergency compression — budget exceeded.
 		if result, ok := m.forceCompression(req.SessionKey); ok {
+			eventMeta := m.al.newTurnEventScope(
+				result.AgentID,
+				req.SessionKey,
+				nil,
+			).meta(0, "forceCompression", "turn.context.compress")
 			m.al.emitEvent(
 				runtimeevents.KindAgentContextCompress,
-				m.al.newTurnEventScope("", req.SessionKey, nil).meta(0, "forceCompression", "turn.context.compress"),
+				eventMeta,
 				ContextCompressPayload{
 					Reason:            req.Reason,
 					DroppedMessages:   result.DroppedMessages,
@@ -67,7 +73,7 @@ func (m *legacyContextManager) Ingest(_ context.Context, _ *IngestRequest) error
 func (m *legacyContextManager) Clear(_ context.Context, sessionKey string) error {
 	// Routed (non-default) agents keep history in their own session store,
 	// so resolve the owning agent instead of assuming the default one.
-	agent := m.al.agentForSession(sessionKey)
+	agent := m.agentForSession(sessionKey)
 	if agent == nil || agent.Sessions == nil {
 		return fmt.Errorf("sessions not initialized")
 	}
@@ -83,8 +89,14 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 	if registry == nil {
 		return
 	}
-	agent := registry.GetDefaultAgent()
+	agent := m.agentForSession(sessionKey)
 	if agent == nil {
+		return
+	}
+	// A reload between the registry snapshot and session-owner resolution makes
+	// this scheduling attempt stale. The next completed turn will retry against
+	// the current generation.
+	if m.al.GetRegistry() != registry {
 		return
 	}
 
@@ -134,6 +146,7 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 }
 
 type compressionResult struct {
+	AgentID           string
 	DroppedMessages   int
 	RemainingMessages int
 }
@@ -142,7 +155,7 @@ type compressionResult struct {
 // It drops the oldest ~50% of Turns (a Turn is a complete user→LLM→response
 // cycle, as defined in #1316), so tool-call sequences are never split.
 func (m *legacyContextManager) forceCompression(sessionKey string) (compressionResult, bool) {
-	agent := m.al.registry.GetDefaultAgent()
+	agent := m.agentForSession(sessionKey)
 	if agent == nil {
 		return compressionResult{}, false
 	}
@@ -193,9 +206,24 @@ func (m *legacyContextManager) forceCompression(sessionKey string) (compressionR
 	})
 
 	return compressionResult{
+		AgentID:           agent.ID,
 		DroppedMessages:   droppedCount,
 		RemainingMessages: len(keptHistory),
 	}, true
+}
+
+func (m *legacyContextManager) agentForSession(sessionKey string) *AgentInstance {
+	if agent, ok := m.al.resolveAgentForSession(sessionKey); ok {
+		return agent
+	}
+	if session.IsExplicitSessionKey(sessionKey) {
+		return nil
+	}
+	registry := m.al.GetRegistry()
+	if registry == nil {
+		return nil
+	}
+	return registry.GetDefaultAgent()
 }
 
 func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey string) {
