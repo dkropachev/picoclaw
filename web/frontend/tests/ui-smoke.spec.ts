@@ -3774,6 +3774,32 @@ test("notification inbox opens the exact development action target", async ({
   expect(errors).toEqual([])
 })
 
+test("review profile guard autocompletes fields and keeps reference behind help", async ({
+  page,
+}) => {
+  await gotoMockedRoute(page, "/repository-reviews/profiles")
+  await page.getByRole("button", { name: "New profile" }).click()
+  const dialog = page.getByRole("dialog", { name: "New review profile" })
+  await dialog.getByRole("button", { name: /^Advanced/ }).click()
+
+  await expect(dialog.getByText("Guard expression reference")).toHaveCount(0)
+  await dialog.getByRole("button", { name: "Guard expression help" }).click()
+  await expect(page.getByText("Guard expression reference")).toBeVisible()
+  await page.keyboard.press("Escape")
+
+  const guard = dialog.getByRole("combobox", { name: "Guard expression" })
+  await guard.fill("spent.tok")
+  await expect(
+    dialog.getByRole("listbox", { name: "Guard expression suggestions" }),
+  ).toBeVisible()
+  await dialog
+    .getByRole("option", { name: "spent.tokens.total number field" })
+    .click()
+  await expect(guard).toHaveValue("spent.tokens.total ")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+})
+
 test("model review probes compare models without producing findings", async ({
   page,
 }) => {

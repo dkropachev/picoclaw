@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -233,7 +233,7 @@ describe("RepositoryReviewProfilesPage", () => {
     expect(guard).toHaveAttribute("aria-describedby", "review-task-guard-help")
     expect(
       screen.getByText(
-        /Supported fields: account\.limits\.\*, spent\.tokens\.\*, and spend\.total\.\*/i,
+        /Start typing or press Ctrl\+Space for fields and operators/i,
       ),
     ).toBeVisible()
     expect(
@@ -274,6 +274,122 @@ describe("RepositoryReviewProfilesPage", () => {
     expect(await screen.findByText("Account: Work account")).toBeVisible()
     expect(screen.getByText("Task guard configured")).toBeVisible()
     expect(screen.getByText("12 parallel workers")).toBeVisible()
+  })
+
+  it("autocompletes guard fields and opens the expression reference from help", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [
+        {
+          alias: "review-model",
+          resolved_model: "openai/review-model",
+          provider: "openai",
+          available: true,
+          price_known: true,
+          input_price_per_1m: 1,
+          output_price_per_1m: 4,
+        },
+      ],
+      accounts: [
+        {
+          id: "credential:openai:work",
+          provider: "openai",
+          label: "Work account",
+          status: "available",
+          default: true,
+          models: ["review-model"],
+          entries: [
+            {
+              name: "Five hour limit",
+              status: "available",
+              window: "5h",
+              remaining_percent: 75,
+            },
+          ],
+        },
+      ],
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }))
+    await user.click(screen.getByRole("button", { name: /^Advanced/ }))
+
+    expect(
+      screen.queryByText("Guard expression reference"),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/Operators: AND, OR, NOT/),
+    ).not.toBeInTheDocument()
+    await user.click(
+      screen.getByRole("button", { name: "Guard expression help" }),
+    )
+    expect(screen.getByText("Guard expression reference")).toBeVisible()
+    expect(screen.getByText(/Operators: AND, OR, NOT/)).toBeVisible()
+    expect(screen.queryByText("Expression reference")).not.toBeInTheDocument()
+    await user.keyboard("{Escape}")
+
+    const guard = screen.getByRole("combobox", {
+      name: "Guard expression",
+    }) as HTMLTextAreaElement
+    await user.type(guard, "spent.tok")
+    expect(guard).toHaveAttribute("aria-autocomplete", "list")
+    expect(guard).toHaveAttribute("aria-expanded", "true")
+    expect(
+      screen.getByRole("listbox", { name: "Guard expression suggestions" }),
+    ).toBeVisible()
+    expect(
+      screen.getByRole("option", { name: /spent\.tokens\.total number field/ }),
+    ).toBeVisible()
+
+    await user.keyboard("{ArrowDown}{Enter}")
+    expect(guard).toHaveValue("spent.tokens.total ")
+    await user.click(screen.getByRole("option", { name: "< operator" }))
+    await user.type(guard, "10 and account.limits.5")
+    await user.click(
+      screen.getByRole("option", {
+        name: /account\.limits\.5h\.remaining_percent number field/,
+      }),
+    )
+    expect(guard).toHaveValue(
+      "spent.tokens.total < 10 and account.limits.5h.remaining_percent ",
+    )
+
+    await user.clear(guard)
+    expect(screen.getByRole("option", { name: "( grouping" })).toBeVisible()
+    await user.type(guard, "spent.tokens.total < t")
+    expect(
+      screen.queryByRole("option", { name: "true boolean" }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("option", { name: /spent\.tokens\.total number field/ }),
+    ).toBeVisible()
+
+    await user.clear(guard)
+    await user.type(guard, "true = ")
+    expect(screen.getByRole("option", { name: "true boolean" })).toBeVisible()
+    expect(
+      screen.queryByRole("option", { name: "10 number" }),
+    ).not.toBeInTheDocument()
+
+    await user.clear(guard)
+    await user.type(guard, "spent.tokens.total < spend.total.usd ")
+    expect(screen.getByRole("option", { name: "and keyword" })).toBeVisible()
+    expect(
+      screen.queryByRole("option", { name: "< operator" }),
+    ).not.toBeInTheDocument()
+
+    await user.clear(guard)
+    await user.type(guard, "account.limits.known ")
+    guard.setSelectionRange(8, 8)
+    fireEvent.select(guard)
+    await user.click(
+      screen.getByRole("option", {
+        name: "account.limits.known boolean field",
+      }),
+    )
+    await user.keyboard("{End}")
+    await user.type(guard, "and ")
+    expect(guard).toHaveValue("account.limits.known and ")
   })
 
   it("shows save validation errors inside the open profile dialog", async () => {
