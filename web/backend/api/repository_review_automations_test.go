@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -91,6 +93,102 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		map[string]any{"expected_version": changed.Automation.Version})
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+}
+
+func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstInput := testRepositoryReviewAutomation()
+	firstInput.ID = "rra_collection_first"
+	firstInput.Repository = "https://github.com/acme/first.git"
+	firstInput.Name = "First review"
+	firstInput.Status = repoaudit.RepositoryReviewAutomationPaused
+	firstInput.PauseReason = repoaudit.RepositoryReviewPauseManual
+	firstInput.PauseDetail = "paused"
+	first, err := store.CreateAutomation(t.Context(), firstInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput := testRepositoryReviewAutomation()
+	secondInput.ID = "rra_collection_second"
+	secondInput.Repository = "https://github.com/acme/second.git"
+	secondInput.Name = "Second review"
+	secondInput.Status = repoaudit.RepositoryReviewAutomationPaused
+	secondInput.PauseReason = repoaudit.RepositoryReviewPauseManual
+	secondInput.PauseDetail = "paused"
+	second, err := store.CreateAutomation(t.Context(), secondInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	query := url.QueryEscape("status = paused ORDER BY name ASC")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query="+query+"&limit=1",
+		nil,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("collection status=%d body=%s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Automations []repoaudit.RepositoryReviewAutomation `json:"automations"`
+		Total       int                                    `json:"total"`
+		NextCursor  string                                 `json:"next_cursor"`
+		Canonical   string                                 `json:"canonical_query"`
+		QuerySchema json.RawMessage                        `json:"query_schema"`
+	}
+	if decodeErr := json.Unmarshal(response.Body.Bytes(), &page); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if page.Total != 2 || len(page.Automations) != 1 || page.Automations[0].ID != first.ID ||
+		page.NextCursor == "" || page.Canonical != `status = "paused" ORDER BY name ASC` ||
+		!json.Valid(page.QuerySchema) {
+		t.Fatalf("collection page=%#v first=%s second=%s", page, first.ID, second.ID)
+	}
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query=status%20%3D%20missing",
+		nil,
+	))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid collection status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_collection_fields"
+	automation.Name = "Collection fields"
+	automation.Status = repoaudit.RepositoryReviewAutomationRunning
+	automation.Progress.CompletedBatches = 1
+	automation.Progress.TotalBatches = 4
+	automation.Progress.ReviewedFiles = 7
+	automation.Progress.Findings = 2
+	automation.UpdatedAt = time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	for _, field := range []collectionquery.Field{
+		"id", "name", "repository", "branch", "status", "progress", "reviewed", "findings", "updated",
+	} {
+		if _, ok := repositoryReviewAutomationCollectionField(automation, field); !ok {
+			t.Fatalf("field %q was not resolved", field)
+		}
+	}
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 25 {
+		t.Fatalf("progress field=%#v ok=%v", value, ok)
+	}
+	automation.Progress.TotalBatches = 0
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 0 {
+		t.Fatalf("zero progress field=%#v ok=%v", value, ok)
+	}
+	if _, ok := repositoryReviewAutomationCollectionField(automation, "missing"); ok {
+		t.Fatal("unknown collection field resolved")
 	}
 }
 

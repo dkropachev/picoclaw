@@ -1,3 +1,8 @@
+import type {
+  CollectionListRequest,
+  CollectionPageMetadata,
+} from "@/api/collection"
+import { collectionListURL } from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export type RepositoryReviewFindingStatus = "open" | "dismissed" | "posted"
@@ -367,6 +372,10 @@ export interface RepositoryReviewAutomationOptions {
   limits_error?: string
 }
 
+export interface RepositoryReviewAutomationPage extends CollectionPageMetadata {
+  automations: RepositoryReviewAutomation[]
+}
+
 export interface RepositoryReviewCommitOption {
   sha: string
   short_sha: string
@@ -417,6 +426,24 @@ export async function listRepositoryReviewAutomations(
   }>(`${apiRoot}/automations`, undefined, signal)
   return {
     automations: (page.automations ?? []).map(normalizeAutomation),
+  }
+}
+
+export async function listRepositoryReviewAutomationsPage(
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewAutomationPage> {
+  const page = await requestJSON<Partial<RepositoryReviewAutomationPage>>(
+    collectionListURL(`${apiRoot}/automations`, input),
+    undefined,
+    signal,
+  )
+  return {
+    automations: (page.automations ?? []).map(normalizeAutomation),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
   }
 }
 

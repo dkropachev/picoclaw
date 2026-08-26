@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
@@ -64,6 +65,24 @@ type repositoryReviewCommitOptionsResponse struct {
 	Latest               repositoryReviewCommitReference `json:"latest"`
 	NewerCommitAvailable bool                            `json:"newer_commit_available"`
 }
+
+var repositoryReviewAutomationCollectionSchema = mustCollectionQuerySchema(
+	[]collectionquery.FieldSchema{
+		{Name: "id", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "name", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "repository", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "branch", Type: collectionquery.TypeString, Sortable: true},
+		{
+			Name: "status", Type: collectionquery.TypeEnum, Sortable: true,
+			SuggestedValues: []string{"idle", "running", "stopping", "paused", "completed", "failed"},
+		},
+		{Name: "progress", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "reviewed", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "findings", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "updated", Type: collectionquery.TypeTimestamp, Sortable: true},
+	},
+	[]collectionquery.SortField{{Field: "updated", Direction: collectionquery.Descending}},
+)
 
 type repositoryReviewModelOption struct {
 	Alias            string  `json:"alias"`
@@ -145,11 +164,106 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	projected := make([]repoaudit.RepositoryReviewAutomation, len(automations))
-	for index := range automations {
-		projected[index] = projectRepositoryReviewAutomation(automations[index])
+	query, queryErr := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)
+	if queryErr != nil {
+		writeCollectionPageError(w, queryErr)
+		return
 	}
-	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{"automations": projected})
+	projected := automations
+	total := len(automations)
+	nextCursor := ""
+	if r.URL != nil && r.URL.RawQuery != "" {
+		listRequest, ok := parseCollectionListRequest(w, r, repositoryReviewAutomationCollectionSchema)
+		if !ok {
+			return
+		}
+		query = listRequest.Query
+		page, pageErr := collectionquery.Paginate(
+			automations,
+			query,
+			listRequest.Cursor,
+			listRequest.Limit,
+			listRequest.Now,
+			collectionquery.PageOptions[repoaudit.RepositoryReviewAutomation]{
+				ID: func(automation repoaudit.RepositoryReviewAutomation) (string, error) {
+					return automation.ID, nil
+				},
+				Clone: projectRepositoryReviewAutomation,
+				Resolve: func(
+					automation repoaudit.RepositoryReviewAutomation,
+					field collectionquery.Field,
+					_ time.Time,
+				) (collectionquery.FieldValue, bool) {
+					return repositoryReviewAutomationCollectionField(automation, field)
+				},
+			},
+		)
+		if pageErr != nil {
+			writeCollectionPageError(w, pageErr)
+			return
+		}
+		projected = page.Items
+		total = page.Total
+		nextCursor = page.NextCursor
+	} else {
+		projected = make([]repoaudit.RepositoryReviewAutomation, len(automations))
+		for index := range automations {
+			projected[index] = projectRepositoryReviewAutomation(automations[index])
+		}
+	}
+	repositories := make([]string, 0, len(automations))
+	branches := make([]string, 0, len(automations))
+	names := make([]string, 0, len(automations))
+	for _, automation := range automations {
+		repositories = append(repositories, automation.Repository)
+		branches = append(branches, automation.Ref)
+		names = append(names, automation.Name)
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
+		"automations":     projected,
+		"total":           total,
+		"next_cursor":     nextCursor,
+		"canonical_query": query.Canonical(),
+		"query_schema": collectionSchemaWithSuggestions(
+			repositoryReviewAutomationCollectionSchema,
+			map[collectionquery.Field][]string{
+				"name": names, "repository": repositories, "branch": branches,
+			},
+		),
+	})
+}
+
+func repositoryReviewAutomationCollectionField(
+	automation repoaudit.RepositoryReviewAutomation,
+	field collectionquery.Field,
+) (collectionquery.FieldValue, bool) {
+	switch field {
+	case "id":
+		return collectionquery.StringValue(automation.ID), true
+	case "name":
+		return collectionquery.StringValue(automation.Name), true
+	case "repository":
+		return collectionquery.StringValue(automation.Repository), true
+	case "branch":
+		return collectionquery.StringValue(automation.Ref), true
+	case "status":
+		return collectionquery.EnumValue(string(automation.Status)), true
+	case "progress":
+		percent := 0.0
+		if automation.Progress.TotalBatches > 0 {
+			percent = float64(automation.Progress.CompletedBatches) /
+				float64(automation.Progress.TotalBatches) * 100
+		}
+		return collectionquery.NumberValue(percent), true
+	case "reviewed":
+		return collectionquery.NumberValue(float64(automation.Progress.ReviewedFiles)), true
+	case "findings":
+		return collectionquery.NumberValue(float64(automation.Progress.Findings)), true
+	case "updated":
+		return collectionquery.TimestampValue(automation.UpdatedAt), true
+	default:
+		return collectionquery.FieldValue{}, false
+	}
 }
 
 func (h *Handler) handleCreateRepositoryReviewAutomation(w http.ResponseWriter, r *http.Request) {

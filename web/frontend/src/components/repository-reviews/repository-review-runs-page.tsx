@@ -6,8 +6,13 @@ import {
   IconRefresh,
   IconRotateClockwise,
 } from "@tabler/icons-react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
+import { useEffect, useState } from "react"
 
 import {
   type RepositoryReviewAutomation,
@@ -16,26 +21,23 @@ import {
   type ReviewAccountOption,
   getRepositoryReviewAutomationOptions,
   getRepositoryReviewCommitOptions,
-  listRepositoryReviewAutomations,
+  listRepositoryReviewAutomationsPage,
   pauseRepositoryReviewAutomation,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
   startRepositoryReviewAutomation,
 } from "@/api/repository-reviews"
-import { PageHeader } from "@/components/page-header"
+import {
+  type CollectionDefinition,
+  CollectionResults,
+  CollectionShell,
+  CollectionToolbar,
+} from "@/components/collection"
 import {
   githubCommitURL,
   shortCommitSHA,
 } from "@/components/repository-reviews/repository-review-actions"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -45,10 +47,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  type CollectionRouteSearch,
+  useCollectionRouteState,
+} from "@/hooks/use-collection-route-state"
 
 const runsKey = ["repository-review-automations"] as const
 const activeStatuses = new Set(["running", "stopping"])
 const fullCommitSHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu
+const defaultQuery = "ORDER BY repository ASC"
+const supportedViews = ["list", "table", "grid"] as const
 
 type ReviewRunAction = "start" | "pause" | "resume" | "restart"
 type CommitChoice = "remembered" | "latest" | "custom"
@@ -60,16 +68,43 @@ interface ContinueDialogState {
   customSHA: string
 }
 
-export function RepositoryReviewRunsPage() {
+export function RepositoryReviewRunsPage({
+  search,
+  onSearchChange,
+}: {
+  search: { q?: string; view?: "list" | "table" | "grid" }
+  onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
+}) {
   const queryClient = useQueryClient()
   const [continueDialog, setContinueDialog] =
     useState<ContinueDialogState | null>(null)
-  const runsQuery = useQuery({
-    queryKey: runsKey,
-    queryFn: ({ signal }) => listRepositoryReviewAutomations(signal),
+  const routeState = useCollectionRouteState({
+    collectionKey: "repository-review-runs",
+    defaultQuery,
+    supportedViews,
+    defaultView: "list",
+    search,
+    onSearchChange,
+  })
+  const runsQuery = useInfiniteQuery({
+    queryKey: [...runsKey, routeState.query],
+    initialPageParam: "",
+    queryFn: ({ pageParam, signal }) =>
+      listRepositoryReviewAutomationsPage(
+        {
+          query: routeState.query,
+          cursor: pageParam || undefined,
+          limit: 50,
+        },
+        signal,
+      ),
+    getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
+    retry: false,
     refetchInterval: (query) =>
-      (query.state.data?.automations ?? []).some(
-        (run) => activeStatuses.has(run.status) || isQueuedHandoff(run),
+      (query.state.data?.pages ?? []).some((page) =>
+        page.automations.some(
+          (run) => activeStatuses.has(run.status) || isQueuedHandoff(run),
+        ),
       )
         ? 2_000
         : false,
@@ -106,16 +141,9 @@ export function RepositoryReviewRunsPage() {
         })
       return restartRepositoryReviewAutomation(run.id, input)
     },
-    onSuccess: (updated) => {
+    onSuccess: () => {
       setContinueDialog(null)
-      queryClient.setQueryData<{ automations: RepositoryReviewAutomation[] }>(
-        runsKey,
-        (current) => ({
-          automations: (current?.automations ?? []).map((run) =>
-            run.id === updated.id ? updated : run,
-          ),
-        }),
-      )
+      void queryClient.invalidateQueries({ queryKey: runsKey })
     },
     onError: () => void runsQuery.refetch(),
   })
@@ -140,66 +168,161 @@ export function RepositoryReviewRunsPage() {
     },
     onError: () => void runsQuery.refetch(),
   })
-  const runs = runsQuery.data?.automations ?? []
+  const runs = runsQuery.data?.pages.flatMap((page) => page.automations) ?? []
+  const firstPage = runsQuery.data?.pages[0]
   const actionError = mutation.error || commitOptionsMutation.error
+  const commitQuerySuccess = routeState.commitQuerySuccess
+
+  useEffect(() => {
+    if (firstPage?.canonical_query) {
+      commitQuerySuccess(firstPage.canonical_query)
+    }
+  }, [commitQuerySuccess, firstPage?.canonical_query])
+
+  const accounts = optionsQuery.data?.accounts ?? []
+  const busy = mutation.isPending || commitOptionsMutation.isPending
+  const definition: CollectionDefinition<RepositoryReviewAutomation> = {
+    key: "repository-review-runs",
+    title: "Review runs",
+    defaultQuery,
+    supportedViews,
+    defaultView: "list",
+    getItemID: (run) => run.id,
+    getItemLabel: (run) => `${run.repository} review run`,
+    getItemIdentity: (run) => ({
+      title: run.repository,
+      description: runDescription(run),
+      metadata: (
+        <RunSummary
+          run={run}
+          accounts={accounts}
+          busy={busy}
+          resolvingCommit={
+            commitOptionsMutation.isPending &&
+            commitOptionsMutation.variables?.id === run.id
+          }
+          showPrimaryMetrics={routeState.view === "list"}
+          onAction={(action) => mutation.mutate({ run, action })}
+          onContinue={() => {
+            mutation.reset()
+            commitOptionsMutation.mutate(run)
+          }}
+        />
+      ),
+    }),
+    columns: [
+      {
+        id: "stage",
+        header: "Stage",
+        cell: (run) => run.progress.stage || "waiting",
+      },
+      {
+        id: "progress",
+        header: "Progress",
+        cell: runProgressLabel,
+        className: "w-28 tabular-nums",
+      },
+      {
+        id: "reviewed",
+        header: "Reviewed",
+        cell: (run) => run.progress.reviewed_files,
+        className: "w-24 tabular-nums",
+      },
+      {
+        id: "findings",
+        header: "Findings",
+        cell: (run) => run.progress.findings,
+        className: "w-24 tabular-nums",
+      },
+    ],
+    gridFacts: [
+      {
+        id: "stage",
+        label: "Stage",
+        value: (run) => run.progress.stage || "waiting",
+      },
+      { id: "progress", label: "Progress", value: runProgressLabel },
+      {
+        id: "reviewed",
+        label: "Reviewed",
+        value: (run) => run.progress.reviewed_files,
+      },
+      {
+        id: "findings",
+        label: "Findings",
+        value: (run) => run.progress.findings,
+      },
+    ],
+    badges: [
+      {
+        id: "status",
+        label: (run) => (isQueuedHandoff(run) ? "continuing" : run.status),
+        variant: "secondary",
+      },
+    ],
+  }
+  const queryError = collectionQueryError(runsQuery.error)
+  const resultsError = runsQuery.error
+    ? errorMessage(runsQuery.error, "Review runs could not be loaded.")
+    : actionError
+      ? errorMessage(actionError)
+      : undefined
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <PageHeader title="Review runs">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={runsQuery.isFetching}
-          onClick={() => void runsQuery.refetch()}
-        >
-          <IconRefresh /> Refresh
-        </Button>
-      </PageHeader>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 md:px-6">
-        <div className="mx-auto max-w-6xl space-y-4">
-          <div className="text-muted-foreground text-sm">
+    <>
+      <CollectionShell
+        title="Review runs"
+        total={firstPage?.total}
+        resultsRef={routeState.setScrollContainerRef}
+        onResultsScroll={routeState.onResultsScroll}
+        actions={
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="outline"
+            disabled={runsQuery.isFetching}
+            aria-label="Refresh review runs"
+            title="Refresh"
+            onClick={() => void runsQuery.refetch()}
+          >
+            <IconRefresh />
+          </Button>
+        }
+        toolbar={
+          <CollectionToolbar
+            activeQuery={routeState.query}
+            defaultQuery={defaultQuery}
+            schema={firstPage?.query_schema}
+            queryError={queryError}
+            onApplyQuery={routeState.applyQuery}
+            view={routeState.view}
+            supportedViews={routeState.supportedViews}
+            recentQueries={routeState.recentQueries}
+            onClearHistory={routeState.clearHistory}
+            onViewChange={routeState.setView}
+          />
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-muted-foreground text-sm">
             Start and monitor durable repository reviews. Each run uses its
             repository&apos;s assigned profile and one reviewer model.
-          </div>
-          {actionError && (
-            <div
-              role="alert"
-              className="text-destructive flex items-center gap-2 text-sm"
-            >
-              <IconAlertTriangle className="size-4" />
-              {errorMessage(actionError)}
-            </div>
-          )}
-          {runsQuery.isPending ? (
-            <EmptyCard text="Loading review runs…" />
-          ) : runsQuery.isError ? (
-            <EmptyCard text="Review runs could not be loaded." />
-          ) : runs.length === 0 ? (
-            <EmptyCard text="No repository configured. Assign a profile from Repositories first." />
-          ) : (
-            <div className="grid gap-4 xl:grid-cols-2">
-              {runs.map((run) => (
-                <RunCard
-                  key={run.id}
-                  run={run}
-                  accounts={optionsQuery.data?.accounts ?? []}
-                  busy={mutation.isPending || commitOptionsMutation.isPending}
-                  resolvingCommit={
-                    commitOptionsMutation.isPending &&
-                    commitOptionsMutation.variables?.id === run.id
-                  }
-                  onAction={(action) => mutation.mutate({ run, action })}
-                  onContinue={() => {
-                    mutation.reset()
-                    commitOptionsMutation.mutate(run)
-                  }}
-                />
-              ))}
-            </div>
-          )}
+          </p>
+          <CollectionResults
+            definition={definition}
+            items={runs}
+            view={routeState.view}
+            loading={runsQuery.isLoading}
+            error={resultsError}
+            onRetry={() => void runsQuery.refetch()}
+            hasNextPage={runsQuery.hasNextPage}
+            loadingMore={runsQuery.isFetchingNextPage}
+            onLoadMore={() => void runsQuery.fetchNextPage()}
+            emptyTitle="No repository configured"
+            emptyDescription="Assign a profile from Repositories first."
+          />
         </div>
-      </div>
+      </CollectionShell>
       <ContinueReviewDialog
         state={continueDialog}
         busy={mutation.isPending}
@@ -215,15 +338,16 @@ export function RepositoryReviewRunsPage() {
           })
         }
       />
-    </div>
+    </>
   )
 }
 
-function RunCard({
+function RunSummary({
   run,
   accounts,
   busy,
   resolvingCommit,
+  showPrimaryMetrics,
   onAction,
   onContinue,
 }: {
@@ -231,11 +355,10 @@ function RunCard({
   accounts: ReviewAccountOption[]
   busy: boolean
   resolvingCommit: boolean
+  showPrimaryMetrics: boolean
   onAction: (action: Exclude<ReviewRunAction, "resume">) => void
   onContinue: () => void
 }) {
-  const branch = run.branch || run.ref
-  const model = run.reviewer_models[0] || "Profile model unavailable"
   const effectiveAccountRef = run.effective_account_ref || run.account_ref
   const account = effectiveAccountRef
     ? accounts.find((candidate) => candidate.id === effectiveAccountRef)
@@ -254,127 +377,107 @@ function RunCard({
         (price.input_price_per_1m > 0 || price.output_price_per_1m > 0),
       )
     })
-  const progress = run.progress.total_batches
-    ? Math.round(
-        (run.progress.completed_batches / run.progress.total_batches) * 100,
-      )
-    : 0
   const handoffQueued = isQueuedHandoff(run)
   const resolvedCommitSHA =
     run.resolved_commit_sha || run.scope_plan?.commit_sha
 
   return (
-    <Card size="sm" data-testid={`review-run-${run.id}`}>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <CardTitle className="truncate">{run.repository}</CardTitle>
-            <CardDescription className="mt-1">
-              {run.name} ·{" "}
-              {branch ? `Branch ${branch}` : "Default repository branch"} ·{" "}
-              {model}
-            </CardDescription>
-          </div>
-          <Badge variant="secondary">
-            {handoffQueued ? "continuing" : run.status}
-          </Badge>
+    <div
+      className="mt-2 space-y-3 font-normal"
+      data-testid={`review-run-${run.id}`}
+    >
+      {showPrimaryMetrics && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          <span>Stage: {run.progress.stage || "waiting"}</span>
+          <span>Progress: {runProgressLabel(run)}</span>
+          <span>Reviewed: {run.progress.reviewed_files}</span>
+          <span>Findings: {run.progress.findings}</span>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Metric label="Stage" value={run.progress.stage || "waiting"} />
-          <Metric
-            label="Progress"
-            value={run.progress.total_batches ? `${progress}%` : "Not started"}
+      )}
+      <div className="grid gap-1 text-xs sm:grid-cols-2">
+        <span>{formatInteger(run.usage.total_tokens)} tokens used</span>
+        <span>
+          {priceKnown
+            ? `$${run.estimated_cost_usd.toFixed(2)} estimated cost`
+            : "Estimated cost unknown"}
+        </span>
+        <span>{run.progress.remaining_files} files remaining</span>
+        <span>{run.progress.unsupported_files} unsupported files</span>
+        <span>Account: {accountLabel}</span>
+      </div>
+      {resolvedCommitSHA && (
+        <p className="text-xs break-all">
+          Resolved commit{" "}
+          <CommitReference
+            repository={run.repository}
+            commit={{
+              sha: resolvedCommitSHA,
+              short_sha: shortCommitSHA(resolvedCommitSHA),
+            }}
           />
-          <Metric label="Reviewed" value={run.progress.reviewed_files} />
-          <Metric label="Findings" value={run.progress.findings} />
-        </div>
-        <div className="text-muted-foreground grid gap-1 text-xs sm:grid-cols-2">
-          <span>{formatInteger(run.usage.total_tokens)} tokens used</span>
-          <span>
-            {priceKnown
-              ? `$${run.estimated_cost_usd.toFixed(2)} estimated cost`
-              : "Estimated cost unknown"}
-          </span>
-          <span>{run.progress.remaining_files} files remaining</span>
-          <span>{run.progress.unsupported_files} unsupported files</span>
-          <span>Account: {accountLabel}</span>
-        </div>
-        {resolvedCommitSHA && (
-          <p className="text-muted-foreground text-xs break-all">
-            Resolved commit{" "}
-            <CommitReference
-              repository={run.repository}
-              commit={{
-                sha: resolvedCommitSHA,
-                short_sha: shortCommitSHA(resolvedCommitSHA),
-              }}
-            />
-          </p>
+        </p>
+      )}
+      {run.pause_detail && (
+        <p className="bg-muted text-foreground rounded-md p-3 text-sm">
+          {run.status === "failed" ? "Failed" : "Paused"}: {run.pause_detail}
+        </p>
+      )}
+      {run.run_ids.length > 0 && (
+        <details className="rounded-lg border p-3 text-xs">
+          <summary className="text-foreground cursor-pointer font-medium">
+            Run history ({run.run_ids.length})
+          </summary>
+          <ul className="mt-2 space-y-1">
+            {run.run_ids
+              .slice()
+              .reverse()
+              .map((runID) => (
+                <li key={runID} className="break-all">
+                  {runID}
+                </li>
+              ))}
+          </ul>
+        </details>
+      )}
+      <div className="flex flex-wrap gap-2 border-t pt-3">
+        {run.status === "idle" && !handoffQueued && (
+          <Button size="sm" disabled={busy} onClick={() => onAction("start")}>
+            <IconPlayerPlay /> Start review
+          </Button>
         )}
-        {run.pause_detail && (
-          <p className="bg-muted rounded-md p-3 text-sm">
-            {run.status === "failed" ? "Failed" : "Paused"}: {run.pause_detail}
-          </p>
+        {(run.status === "running" || handoffQueued) && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => onAction("pause")}
+          >
+            <IconPlayerPause /> Stop safely
+          </Button>
         )}
-        {run.run_ids.length > 0 && (
-          <details className="rounded-lg border p-3 text-xs">
-            <summary className="cursor-pointer font-medium">
-              Run history ({run.run_ids.length})
-            </summary>
-            <ul className="text-muted-foreground mt-2 space-y-1">
-              {run.run_ids
-                .slice()
-                .reverse()
-                .map((runID) => (
-                  <li key={runID} className="break-all">
-                    {runID}
-                  </li>
-                ))}
-            </ul>
-          </details>
+        {run.status === "paused" && (
+          <Button size="sm" disabled={busy} onClick={onContinue}>
+            <IconPlayerPlay />
+            {resolvingCommit ? "Resolving commits…" : "Continue review"}
+          </Button>
         )}
-        <div className="flex flex-wrap gap-2 border-t pt-4">
-          {run.status === "idle" && !handoffQueued && (
-            <Button size="sm" disabled={busy} onClick={() => onAction("start")}>
-              <IconPlayerPlay /> Start review
-            </Button>
-          )}
-          {(run.status === "running" || handoffQueued) && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => onAction("pause")}
-            >
-              <IconPlayerPause /> Stop safely
-            </Button>
-          )}
-          {run.status === "paused" && (
-            <Button size="sm" disabled={busy} onClick={onContinue}>
-              <IconPlayerPlay />
-              {resolvingCommit ? "Resolving commits…" : "Continue review"}
-            </Button>
-          )}
-          {(run.status === "completed" || run.status === "failed") && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => onAction("restart")}
-            >
-              <IconRotateClockwise /> Run again
-            </Button>
-          )}
-          {run.status === "stopping" && (
-            <Button size="sm" variant="outline" disabled>
-              Stopping safely…
-            </Button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+        {(run.status === "completed" || run.status === "failed") && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => onAction("restart")}
+          >
+            <IconRotateClockwise /> Run again
+          </Button>
+        )}
+        {run.status === "stopping" && (
+          <Button size="sm" variant="outline" disabled>
+            Stopping safely…
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -604,31 +707,43 @@ function selectedCommitSHA(state: ContinueDialogState): string {
   return state.customSHA.trim()
 }
 
-function Metric({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="bg-muted/50 rounded-md p-2">
-      <div className="text-muted-foreground text-[0.7rem]">{label}</div>
-      <div className="truncate text-sm font-medium">{value}</div>
-    </div>
-  )
+function runDescription(run: RepositoryReviewAutomation): string {
+  const branch = run.branch || run.ref
+  const model = run.reviewer_models[0] || "Profile model unavailable"
+  return `${run.name} · ${branch ? `Branch ${branch}` : "Default repository branch"} · ${model}`
 }
 
-function EmptyCard({ text }: { text: string }) {
-  return (
-    <Card size="sm" className="border-dashed">
-      <CardContent className="text-muted-foreground py-10 text-center text-sm">
-        {text}
-      </CardContent>
-    </Card>
-  )
+function runProgressLabel(run: RepositoryReviewAutomation): string {
+  if (!run.progress.total_batches) return "Not started"
+  return `${Math.round(
+    (run.progress.completed_batches / run.progress.total_batches) * 100,
+  )}%`
+}
+
+function collectionQueryError(
+  error: unknown,
+): { position: number; message: string } | undefined {
+  if (!error || typeof error !== "object") return undefined
+  const candidate = error as { position?: unknown; message?: unknown }
+  if (typeof candidate.position !== "number") return undefined
+  return {
+    position: candidate.position,
+    message:
+      typeof candidate.message === "string"
+        ? candidate.message
+        : "Invalid collection query",
+  }
 }
 
 function formatInteger(value: number): string {
   return new Intl.NumberFormat().format(value)
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Review action failed."
+function errorMessage(
+  error: unknown,
+  fallback = "Review action failed.",
+): string {
+  return error instanceof Error ? error.message : fallback
 }
 
 function isQueuedHandoff(run: RepositoryReviewAutomation): boolean {

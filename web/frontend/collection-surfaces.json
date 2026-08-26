@@ -248,9 +248,9 @@
         "src/routes/repository-reviews.tsx",
         "src/components/repository-reviews/repository-review-runs-page.tsx"
       ],
-      "capabilities": ["detail"],
-      "views": ["grid"],
-      "status": "legacy",
+      "capabilities": [],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
       "routes": { "list": "/repository-reviews" }
     },
     {

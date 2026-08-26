@@ -7,7 +7,7 @@ import type { RepositoryReviewAutomation } from "@/api/repository-reviews"
 import {
   getRepositoryReviewAutomationOptions,
   getRepositoryReviewCommitOptions,
-  listRepositoryReviewAutomations,
+  listRepositoryReviewAutomationsPage,
   pauseRepositoryReviewAutomation,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
@@ -33,7 +33,7 @@ vi.mock("@/components/page-header", () => ({
 vi.mock("@/api/repository-reviews", () => ({
   getRepositoryReviewAutomationOptions: vi.fn(),
   getRepositoryReviewCommitOptions: vi.fn(),
-  listRepositoryReviewAutomations: vi.fn(),
+  listRepositoryReviewAutomationsPage: vi.fn(),
   pauseRepositoryReviewAutomation: vi.fn(),
   restartRepositoryReviewAutomation: vi.fn(),
   resumeRepositoryReviewAutomation: vi.fn(),
@@ -122,8 +122,12 @@ describe("RepositoryReviewRunsPage", () => {
         },
       ],
     })
-    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
       automations: [run],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
     })
     vi.mocked(getRepositoryReviewCommitOptions).mockReset()
     vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
@@ -156,7 +160,7 @@ describe("RepositoryReviewRunsPage", () => {
     expect(
       screen.getByText(/Core bugs.*Default repository branch.*review-model/),
     ).toBeVisible()
-    expect(screen.getByText("25%")).toBeVisible()
+    expect(screen.getByText(/25%/)).toBeVisible()
     expect(screen.getByText("1,000 tokens used")).toBeVisible()
     expect(screen.getByText("Estimated cost unknown")).toBeVisible()
     expect(screen.getByText("Account: Default (Primary API)")).toBeVisible()
@@ -180,9 +184,35 @@ describe("RepositoryReviewRunsPage", () => {
     )
   })
 
+  it("uses the canonical collection query and shared view controls", async () => {
+    const user = userEvent.setup()
+    const onSearchChange = vi.fn()
+    renderPage(onSearchChange)
+
+    expect(await screen.findByText("owner/repo")).toBeVisible()
+    expect(listRepositoryReviewAutomationsPage).toHaveBeenCalledWith(
+      {
+        query: "ORDER BY repository ASC",
+        cursor: undefined,
+        limit: 50,
+      },
+      expect.anything(),
+    )
+
+    await user.click(screen.getByRole("button", { name: "Grid view" }))
+    expect(onSearchChange).toHaveBeenCalledWith(
+      { q: "ORDER BY repository ASC", view: "grid" },
+      true,
+    )
+  })
+
   it("shows the commit-bound scope SHA for legacy runs without a resolved commit field", async () => {
-    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
       automations: [{ ...run, resolved_commit_sha: undefined }],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
     })
     renderPage()
 
@@ -198,8 +228,12 @@ describe("RepositoryReviewRunsPage", () => {
       pause_reason: "token_budget" as const,
       pause_detail: "Task admission guard evaluated to false.",
     }
-    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
       automations: [paused],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
     })
     vi.mocked(resumeRepositoryReviewAutomation).mockResolvedValue({
       ...paused,
@@ -235,8 +269,12 @@ describe("RepositoryReviewRunsPage", () => {
       repository: "https://github.com/owner/repo.git",
       status: "paused" as const,
     }
-    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
       automations: [paused],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
     })
     vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
       expected_version: 9,
@@ -307,8 +345,12 @@ describe("RepositoryReviewRunsPage", () => {
     const user = userEvent.setup()
     const customSHA = "c".repeat(64)
     const paused = { ...run, status: "paused" as const }
-    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
       automations: [paused],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
     })
     vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
       expected_version: 8,
@@ -360,8 +402,12 @@ describe("RepositoryReviewRunsPage", () => {
       status,
       progress: { ...run.progress, stage },
     }
-    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
       automations: [active],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
     })
     vi.mocked(pauseRepositoryReviewAutomation).mockResolvedValue({
       ...active,
@@ -380,14 +426,17 @@ describe("RepositoryReviewRunsPage", () => {
   })
 })
 
-function renderPage() {
+function renderPage(onSearchChange = vi.fn()) {
   return render(
     <QueryClientProvider
       client={
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      <RepositoryReviewRunsPage />
+      <RepositoryReviewRunsPage
+        search={{ q: "ORDER BY repository ASC" }}
+        onSearchChange={onSearchChange}
+      />
     </QueryClientProvider>,
   )
 }

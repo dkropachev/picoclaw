@@ -13,6 +13,7 @@ import {
   getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
   listRepositoryReviewAutomations,
+  listRepositoryReviewAutomationsPage,
   listRepositoryReviewProfiles,
   listRepositoryReviews,
   pauseRepositoryReviewAutomation,
@@ -688,6 +689,34 @@ describe("repository review API", () => {
           commit_sha: latestSHA,
         }),
       }),
+    )
+  })
+
+  it("loads a query-bound repository review run collection page", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        automations: [{ id: "auto_1", status: "paused" }],
+        total: 1,
+        next_cursor: "next-page",
+        canonical_query: 'status = "paused" ORDER BY repository ASC',
+        query_schema: { fields: [{ name: "status", type: "enum" }] },
+      }),
+    )
+
+    await expect(
+      listRepositoryReviewAutomationsPage({
+        query: "status = paused ORDER BY repository ASC",
+        cursor: "cursor",
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({
+      automations: [{ id: "auto_1", status: "paused" }],
+      total: 1,
+      next_cursor: "next-page",
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/repository-reviews/automations?query=status+%3D+paused+ORDER+BY+repository+ASC&cursor=cursor&limit=50",
+      { signal: undefined },
     )
   })
 })
