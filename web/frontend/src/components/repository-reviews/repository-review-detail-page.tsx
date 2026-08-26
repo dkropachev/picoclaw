@@ -375,7 +375,12 @@ function LifecycleAction({
 }) {
   if (review.status === "idle" && !isQueuedHandoff(review)) {
     return (
-      <Button size="sm" disabled={busy} onClick={() => onAction("start")}>
+      <Button
+        type="button"
+        size="sm"
+        disabled={busy}
+        onClick={() => onAction("start")}
+      >
         <IconPlayerPlay /> Start
       </Button>
     )
@@ -383,6 +388,7 @@ function LifecycleAction({
   if (review.status === "running" || isQueuedHandoff(review)) {
     return (
       <Button
+        type="button"
         size="sm"
         variant="outline"
         disabled={busy}
@@ -394,14 +400,48 @@ function LifecycleAction({
   }
   if (review.status === "paused") {
     return (
-      <Button size="sm" disabled={busy} onClick={() => onAction("resume")}>
+      <Button
+        type="button"
+        size="sm"
+        disabled={busy}
+        onClick={() => onAction("resume")}
+      >
         <IconPlayerPlay /> {resolvingCommit ? "Resolving commits…" : "Continue"}
       </Button>
     )
   }
-  if (review.status === "completed" || review.status === "failed") {
+  if (review.status === "failed") {
+    return (
+      <>
+        <Button
+          type="button"
+          size="sm"
+          disabled={busy}
+          title="Continue this campaign from its durable checkpoints"
+          onClick={() => onAction("resume")}
+        >
+          <IconPlayerPlay />
+          {resolvingCommit ? "Resolving commits…" : "Continue"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          aria-label="Run again"
+          title="Start a new campaign and reset its progress"
+          onClick={() => onAction("restart")}
+        >
+          <IconRotateClockwise />{" "}
+          <span className="hidden sm:inline">Run again</span>
+        </Button>
+      </>
+    )
+  }
+  if (review.status === "completed") {
     return (
       <Button
+        type="button"
         size="sm"
         variant="outline"
         disabled={busy}
@@ -412,7 +452,7 @@ function LifecycleAction({
     )
   }
   return (
-    <Button size="sm" variant="outline" disabled>
+    <Button type="button" size="sm" variant="outline" disabled>
       Stopping safely…
     </Button>
   )
