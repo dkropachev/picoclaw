@@ -1,6 +1,7 @@
 name: build
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "main" ]
 
@@ -21,7 +22,6 @@ jobs:
         run: bash ./scripts/run-integration-tests.sh
 
   build:
-    needs: integration
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -53,7 +53,6 @@ jobs:
 
   launcher:
     name: Build launcher
-    needs: integration
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
