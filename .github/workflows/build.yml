@@ -101,12 +101,8 @@ jobs:
         run: make build-launcher
 
   frontend_tests:
-    name: Frontend unit tests (${{ matrix.shard }}/2)
+    name: Frontend unit tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -137,5 +133,5 @@ jobs:
       - name: Install frontend dependencies
         run: cd web/frontend && pnpm install --frozen-lockfile
 
-      - name: Run frontend unit test shard
-        run: cd web/frontend && pnpm exec vitest run --shard=${{ matrix.shard }}/2
+      - name: Run frontend unit tests
+        run: cd web/frontend && pnpm test
