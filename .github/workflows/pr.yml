@@ -123,9 +123,6 @@ jobs:
       - name: Collection governance tests
         run: make test-collection-governance
 
-      - name: Frontend unit tests
-        run: cd web/frontend && pnpm test
-
       - name: Launcher production build
         run: make build-launcher
 
@@ -134,6 +131,42 @@ jobs:
 
       - name: Collection surface delta guard
         run: make collection-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
+
+  frontend_unit:
+    name: Frontend unit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - name: Get pnpm store path
+        id: pnpm-store
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/frontend/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install frontend dependencies
+        run: cd web/frontend && pnpm install --frozen-lockfile
+
+      - name: Frontend unit tests
+        run: cd web/frontend && pnpm test
 
   frontend_ui:
     name: Frontend UI (${{ matrix.label }})
