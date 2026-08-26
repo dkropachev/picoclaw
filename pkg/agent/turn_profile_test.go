@@ -559,9 +559,27 @@ func TestTurnProfile_SubTurnCannotRegainGloballyAllowedTool(t *testing.T) {
 	}
 	provider := &turnProfileCaptureProvider{}
 	al := newTurnProfileAgentLoop(t, cfg, provider)
-	al.RegisterTool(&echoTextTool{})
-	al.RegisterTool(&echoTextRewrittenTool{})
 	agent := al.GetRegistry().GetDefaultAgent()
+	for _, prototype := range []tools.Tool{
+		&turnProfileFactoryTool{delegate: &echoTextTool{}},
+		&turnProfileFactoryTool{delegate: &echoTextRewrittenTool{}},
+	} {
+		factory, err := tools.NewToolFactoryFromPrototype(
+			prototype,
+			tools.ToolTraits{},
+			func(tools.ToolBuildContext) (tools.Tool, error) {
+				return &turnProfileFactoryTool{
+					delegate: prototype.(*turnProfileFactoryTool).delegate,
+				}, nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := agent.Tools.RegisterFactoryBacked(prototype, factory); err != nil {
+			t.Fatal(err)
+		}
+	}
 	parentOpts := processOptions{
 		Dispatch: DispatchRequest{
 			SessionKey:  "agent:default:test-parent",
@@ -591,6 +609,31 @@ func TestTurnProfile_SubTurnCannotRegainGloballyAllowedTool(t *testing.T) {
 	if provider.tools[0].Function.Name != "echo_text" {
 		t.Fatalf("child provider tool = %q, want echo_text", provider.tools[0].Function.Name)
 	}
+}
+
+type turnProfileFactoryTool struct {
+	delegate tools.Tool
+	marker   byte
+}
+
+func (tool *turnProfileFactoryTool) Name() string {
+	_ = tool.marker
+	return tool.delegate.Name()
+}
+
+func (tool *turnProfileFactoryTool) Description() string {
+	return tool.delegate.Description()
+}
+
+func (tool *turnProfileFactoryTool) Parameters() map[string]any {
+	return tool.delegate.Parameters()
+}
+
+func (tool *turnProfileFactoryTool) Execute(
+	ctx context.Context,
+	args map[string]any,
+) *tools.ToolResult {
+	return tool.delegate.Execute(ctx, args)
 }
 
 func TestTurnProfile_SystemPromptOffUsesExternalPromptOnly(t *testing.T) {

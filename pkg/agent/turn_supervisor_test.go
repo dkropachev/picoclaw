@@ -317,8 +317,8 @@ func TestRunTurnSupervisorHardAbortOwnsRollbackAndCleanup(t *testing.T) {
 		<-releaseGate
 		select {
 		case <-ts.Finished():
-		default:
 			releaseLive.Store(false)
+		default:
 		}
 	}}
 
@@ -363,8 +363,8 @@ func TestRunTurnSupervisorHardAbortOwnsRollbackAndCleanup(t *testing.T) {
 	}
 	select {
 	case <-ts.Finished():
+		t.Fatal("Finished closed before Git and owned-resource cleanup")
 	default:
-		t.Fatal("Finished not closed before Git release")
 	}
 	if al.getActiveTurnState(ts.sessionKey) != ts {
 		t.Fatal("exact active owner cleared before Git release")

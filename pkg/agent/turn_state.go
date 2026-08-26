@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -141,20 +142,21 @@ type turnExecution struct {
 	routerSelection   accountrouter.Selection
 
 	// LLM call per-iteration state
-	response            *providers.LLMResponse
-	normalizedToolCalls []providers.ToolCall
-	allResponsesHandled bool
-	streamingPublisher  *streamingChunkPublisher
-	streamingFallback   bool
-	suppressReasoning   bool
-	callMessages        []providers.Message
-	providerToolDefs    []providers.ToolDefinition
-	visibleToolSurface  string
-	llmModel            string
-	llmModelName        string
-	llmOpts             map[string]any
-	gracefulTerminal    bool
-	useNativeSearch     bool
+	response             *providers.LLMResponse
+	normalizedToolCalls  []providers.ToolCall
+	allResponsesHandled  bool
+	streamingPublisher   *streamingChunkPublisher
+	streamingFallback    bool
+	suppressReasoning    bool
+	callMessages         []providers.Message
+	providerToolDefs     []providers.ToolDefinition
+	visibleToolSurface   string
+	llmModel             string
+	llmModelName         string
+	llmOpts              map[string]any
+	gracefulTerminal     bool
+	useNativeSearch      bool
+	nativeSearchNarrowed bool
 
 	// Phase tracking
 	phase LLMPhase
@@ -256,6 +258,22 @@ type turnState struct {
 	cancelRequested  bool               // Rejects child attachment during error/abort cascade
 	cancelDispatched bool               // Prevents repeated non-hard subtree cancellation
 
+	// Strict SubTurn tool authority and resources. Root turns leave ownership
+	// fields nil and continue borrowing their generation AgentInstance.
+	toolAuthorityBound   bool
+	nativeSearchAllowed  bool
+	nativeSearchObserved bool
+	turnTools            *tools.ToolRegistry
+	turnSession          session.SessionStore
+	turnResourcesState   turnResourceCloseState
+	turnResourcesErr     error
+
+	// Async spawn reserves one short source-construction lease before its
+	// goroutine is scheduled. Terminal claim closes new admission and waits for
+	// existing leases to construct/attach before closing turnTools.
+	subTurnConstructionUses    int
+	subTurnConstructionChanged chan struct{}
+
 	// Token budget tracking
 	tokenBudget      *atomic.Int64        // Shared token budget counter
 	lastFinishReason string               // Last LLM finish_reason
@@ -265,6 +283,51 @@ type turnState struct {
 	// Back-reference to the owning AgentLoop, bound before active publication.
 	al *AgentLoop
 }
+
+type subTurnConstructionLease struct {
+	owner             *turnState
+	state             atomic.Uint32
+	nativeAuthority   subTurnNativeAuthoritySnapshot
+	attachmentMu      sync.Mutex
+	attachmentKey     string
+	attachmentTurn    string
+	attachmentClaimed bool
+}
+
+type subTurnNativeAuthoritySnapshot struct {
+	strict   bool
+	observed bool
+	allowed  bool
+}
+
+type subTurnConcurrencyLease struct {
+	owner *turnState
+	slot  chan struct{}
+	state atomic.Uint32
+}
+
+type turnResourceCloseState uint8
+
+const (
+	turnResourcesOpen turnResourceCloseState = iota
+	turnResourcesPending
+	turnResourcesClosing
+	turnResourcesClosed
+)
+
+type subTurnConstructionLeaseContextKey struct{}
+
+const (
+	subTurnConstructionLeasePrepared uint32 = iota + 1
+	subTurnConstructionLeaseConsumed
+	subTurnConstructionLeaseReleased
+)
+
+const (
+	subTurnConcurrencyLeasePrepared uint32 = iota + 1
+	subTurnConcurrencyLeaseConsumed
+	subTurnConcurrencyLeaseReleased
+)
 
 // =============================================================================
 // turnState constructors and active turn management
@@ -295,6 +358,26 @@ func turnReservationFromContext(ctx context.Context) *turnState {
 	}
 	reservation, _ := ctx.Value(turnReservationContextKey{}).(*turnState)
 	return reservation
+}
+
+func withSubTurnConstructionLease(
+	ctx context.Context,
+	lease *subTurnConstructionLease,
+) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, subTurnConstructionLeaseContextKey{}, lease)
+}
+
+func subTurnConstructionLeaseFromContext(
+	ctx context.Context,
+) *subTurnConstructionLease {
+	if ctx == nil {
+		return nil
+	}
+	lease, _ := ctx.Value(subTurnConstructionLeaseContextKey{}).(*subTurnConstructionLease)
+	return lease
 }
 
 // lockSessionTurn serializes the short ownership handoff between the active
@@ -406,6 +489,13 @@ func (al *AgentLoop) newAdHocRootTurnState(ctx context.Context) *turnState {
 // rejection markers, so a child is either fully attached and discoverable by
 // cascade traversal or rejected before publication.
 func (al *AgentLoop) attachChildTurn(parent, child *turnState) bool {
+	return al.attachChildTurnWithLease(parent, child, nil)
+}
+
+func (al *AgentLoop) attachChildTurnWithLease(
+	parent, child *turnState,
+	lease *subTurnConstructionLease,
+) bool {
 	if al == nil || parent == nil || child == nil {
 		return false
 	}
@@ -414,9 +504,12 @@ func (al *AgentLoop) attachChildTurn(parent, child *turnState) bool {
 		return false
 	}
 
+	preAdmitted := lease.attachmentAdmittedFor(parent, child)
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
-	if parent.terminalClaimed || parent.isFinished.Load() || parent.cancelRequested || parent.hardAbort {
+	if parent.isFinished.Load() || parent.cancelRequested ||
+		parent.cancelDispatched || parent.hardAbort ||
+		(parent.terminalClaimed && !preAdmitted) {
 		return false
 	}
 	if _, loaded := al.activeTurnStates.LoadOrStore(child.sessionKey, child); loaded {
@@ -430,6 +523,190 @@ func (al *AgentLoop) attachChildTurn(parent, child *turnState) bool {
 	return true
 }
 
+func (ts *turnState) retainSubTurnConstruction() (*subTurnConstructionLease, error) {
+	if ts == nil {
+		return nil, fmt.Errorf("parent turn is unavailable")
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.terminalClaimed || ts.isFinished.Load() || ts.cancelRequested || ts.hardAbort ||
+		ts.turnResourcesState != turnResourcesOpen {
+		return nil, fmt.Errorf("parent turn %s no longer accepts children: %w", ts.turnID, context.Canceled)
+	}
+	if ts.concurrencySem != nil && cap(ts.concurrencySem) > 0 &&
+		ts.subTurnConstructionUses >= cap(ts.concurrencySem) {
+		return nil, fmt.Errorf(
+			"%w: all %d scheduled construction slots occupied",
+			ErrConcurrencyTimeout,
+			cap(ts.concurrencySem),
+		)
+	}
+	lease := &subTurnConstructionLease{
+		owner: ts,
+		nativeAuthority: subTurnNativeAuthoritySnapshot{
+			strict:   ts.toolAuthorityBound,
+			observed: ts.nativeSearchObserved,
+			allowed:  ts.nativeSearchAllowed,
+		},
+	}
+	lease.state.Store(subTurnConstructionLeasePrepared)
+	ts.subTurnConstructionUses++
+	return lease, nil
+}
+
+func (lease *subTurnConstructionLease) release() {
+	if lease == nil || lease.owner == nil {
+		return
+	}
+	lease.attachmentMu.Lock()
+	for {
+		state := lease.state.Load()
+		if state == 0 || state == subTurnConstructionLeaseReleased {
+			lease.attachmentMu.Unlock()
+			return
+		}
+		if lease.state.CompareAndSwap(state, subTurnConstructionLeaseReleased) {
+			break
+		}
+	}
+	lease.attachmentMu.Unlock()
+	owner := lease.owner
+	owner.mu.Lock()
+	if owner.subTurnConstructionUses > 0 {
+		owner.subTurnConstructionUses--
+	}
+	finishResourceClose := owner.subTurnConstructionUses == 0 &&
+		owner.turnResourcesState == turnResourcesPending
+	if finishResourceClose {
+		owner.turnResourcesState = turnResourcesClosing
+	}
+	owner.signalSubTurnConstructionChangedLocked()
+	owner.mu.Unlock()
+	if finishResourceClose {
+		if closeErr := owner.finishOwnedTurnResourceClose(); closeErr != nil {
+			logger.ErrorCF("agent", "Deferred turn resource cleanup failed", map[string]any{
+				"agent_id": owner.agentID,
+				"turn_id":  owner.turnID,
+				"error":    closeErr.Error(),
+			})
+		}
+	}
+}
+
+func (lease *subTurnConstructionLease) consumeFor(owner *turnState) bool {
+	if lease == nil || owner == nil || lease.owner != owner ||
+		!lease.state.CompareAndSwap(
+			subTurnConstructionLeasePrepared,
+			subTurnConstructionLeaseConsumed,
+		) {
+		return false
+	}
+	return true
+}
+
+func (lease *subTurnConstructionLease) consumedFor(owner *turnState) bool {
+	return lease != nil && owner != nil && lease.owner == owner &&
+		lease.state.Load() == subTurnConstructionLeaseConsumed
+}
+
+func (lease *subTurnConstructionLease) reserveAttachmentFor(
+	owner *turnState,
+	child *turnState,
+) bool {
+	if lease == nil || owner == nil || child == nil || lease.owner != owner ||
+		!lease.consumedFor(owner) || child.sessionKey == "" || child.turnID == "" {
+		return false
+	}
+	lease.attachmentMu.Lock()
+	defer lease.attachmentMu.Unlock()
+	if !lease.consumedFor(owner) {
+		return false
+	}
+	if lease.attachmentKey != "" || lease.attachmentTurn != "" {
+		return lease.attachmentKey == child.sessionKey &&
+			lease.attachmentTurn == child.turnID
+	}
+	lease.attachmentKey = child.sessionKey
+	lease.attachmentTurn = child.turnID
+	return true
+}
+
+func (lease *subTurnConstructionLease) attachmentAdmittedFor(
+	owner *turnState,
+	child *turnState,
+) bool {
+	if lease == nil || owner == nil || child == nil || lease.owner != owner {
+		return false
+	}
+	lease.attachmentMu.Lock()
+	defer lease.attachmentMu.Unlock()
+	if lease.attachmentClaimed || lease.attachmentKey == "" ||
+		lease.attachmentKey != child.sessionKey || lease.attachmentTurn != child.turnID {
+		return false
+	}
+	lease.attachmentClaimed = true
+	return true
+}
+
+func (lease *subTurnConcurrencyLease) consumeFor(owner *turnState) bool {
+	return lease != nil && owner != nil && lease.owner == owner &&
+		lease.state.CompareAndSwap(
+			subTurnConcurrencyLeasePrepared,
+			subTurnConcurrencyLeaseConsumed,
+		)
+}
+
+func (lease *subTurnConcurrencyLease) release() {
+	if lease == nil || lease.owner == nil {
+		return
+	}
+	for {
+		state := lease.state.Load()
+		if state == 0 || state == subTurnConcurrencyLeaseReleased {
+			return
+		}
+		if lease.state.CompareAndSwap(state, subTurnConcurrencyLeaseReleased) {
+			if lease.slot != nil {
+				<-lease.slot
+			}
+			return
+		}
+	}
+}
+
+func (ts *turnState) waitForSubTurnConstructions(ctx context.Context) error {
+	if ts == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		ts.mu.Lock()
+		if ts.subTurnConstructionUses == 0 {
+			ts.mu.Unlock()
+			return nil
+		}
+		if ts.subTurnConstructionChanged == nil {
+			ts.subTurnConstructionChanged = make(chan struct{})
+		}
+		changed := ts.subTurnConstructionChanged
+		ts.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (ts *turnState) signalSubTurnConstructionChangedLocked() {
+	if ts.subTurnConstructionChanged != nil {
+		close(ts.subTurnConstructionChanged)
+	}
+	ts.subTurnConstructionChanged = make(chan struct{})
+}
+
 func (ts *turnState) acceptsChildren() bool {
 	if ts == nil {
 		return false
@@ -437,6 +714,54 @@ func (ts *turnState) acceptsChildren() bool {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	return !ts.terminalClaimed && !ts.isFinished.Load() && !ts.cancelRequested && !ts.hardAbort
+}
+
+func (ts *turnState) acceptsPreAdmittedSubTurnConstruction(
+	lease *subTurnConstructionLease,
+) bool {
+	if ts == nil {
+		return false
+	}
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	if ts.isFinished.Load() || ts.cancelRequested || ts.cancelDispatched || ts.hardAbort {
+		return false
+	}
+	if !ts.terminalClaimed {
+		return true
+	}
+	return lease != nil && lease.owner == ts &&
+		lease.state.Load() == subTurnConstructionLeasePrepared
+}
+
+// nativeSearchAuthoritySnapshot distinguishes a strict child's frozen logical
+// authority from a root turn's most recently observed request surface. The
+// latter prevents a routed or hook-narrowed root provider from granting native
+// search to a descendant when that exact parent request did not have it.
+func (ts *turnState) nativeSearchAuthoritySnapshot() subTurnNativeAuthoritySnapshot {
+	if ts == nil {
+		return subTurnNativeAuthoritySnapshot{}
+	}
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return subTurnNativeAuthoritySnapshot{
+		strict:   ts.toolAuthorityBound,
+		observed: ts.nativeSearchObserved,
+		allowed:  ts.nativeSearchAllowed,
+	}
+}
+
+func (ts *turnState) recordNativeSearchObservation(allowed bool) {
+	if ts == nil {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.toolAuthorityBound {
+		return
+	}
+	ts.nativeSearchObserved = true
+	ts.nativeSearchAllowed = allowed
 }
 
 func (ts *turnState) admitRun() bool {
@@ -1504,13 +1829,29 @@ func (ts *turnState) interruptHintMessage() providers.Message {
 // cleanup deliberately remains outside finishOnce so a panicking dependency
 // cannot poison the once and strand active ownership.
 func (ts *turnState) commitClaimedTerminal(candidate TurnEndStatus) (TurnEndStatus, bool) {
+	return ts.commitClaimedTerminalWithPolicy(candidate, false)
+}
+
+func (ts *turnState) commitClaimedRunTerminal(
+	candidate TurnEndStatus,
+	forceError bool,
+) (TurnEndStatus, bool) {
+	return ts.commitClaimedTerminalWithPolicy(candidate, forceError)
+}
+
+func (ts *turnState) commitClaimedTerminalWithPolicy(
+	candidate TurnEndStatus,
+	forceError bool,
+) (TurnEndStatus, bool) {
 	actual := candidate
 	committed := false
 	ts.finishOnce.Do(func() {
 		committed = true
 		ts.mu.Lock()
 		defer ts.mu.Unlock()
-		if ts.hardAbort {
+		if forceError {
+			actual = TurnEndStatusError
+		} else if ts.hardAbort {
 			actual = TurnEndStatusAborted
 		} else if ts.cancelRequested && actual == TurnEndStatusCompleted {
 			actual = TurnEndStatusError
@@ -1539,16 +1880,79 @@ func (ts *turnState) commitClaimedTerminal(candidate TurnEndStatus) (TurnEndStat
 	return actual, false
 }
 
-func (ts *turnState) claimRunTerminal(candidate TurnEndStatus) (TurnEndStatus, bool) {
+func (ts *turnState) claimRunTerminalOwnership() bool {
 	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	if !ts.runAdmitted || ts.terminalClaimed || ts.isFinished.Load() {
-		actual := ts.terminalStatus
-		ts.mu.Unlock()
-		return actual, false
+		return false
 	}
 	ts.terminalClaimed = true
-	ts.mu.Unlock()
+	ts.signalSubTurnConstructionChangedLocked()
+	return true
+}
+
+func (ts *turnState) claimRunTerminal(candidate TurnEndStatus) (TurnEndStatus, bool) {
+	if !ts.claimRunTerminalOwnership() {
+		ts.mu.RLock()
+		actual := ts.terminalStatus
+		ts.mu.RUnlock()
+		return actual, false
+	}
 	return ts.commitClaimedTerminal(candidate)
+}
+
+func (ts *turnState) closeOwnedTurnResources() (error, bool) {
+	if ts == nil {
+		return nil, false
+	}
+	ts.mu.Lock()
+	switch ts.turnResourcesState {
+	case turnResourcesClosed:
+		closeErr := ts.turnResourcesErr
+		ts.mu.Unlock()
+		return closeErr, false
+	case turnResourcesClosing:
+		ts.mu.Unlock()
+		return nil, false
+	case turnResourcesOpen, turnResourcesPending:
+		if ts.subTurnConstructionUses > 0 {
+			ts.turnResourcesState = turnResourcesPending
+			ts.mu.Unlock()
+			return nil, false
+		}
+		ts.turnResourcesState = turnResourcesClosing
+		ts.mu.Unlock()
+		return ts.finishOwnedTurnResourceClose(), true
+	default:
+		ts.mu.Unlock()
+		return fmt.Errorf("invalid turn resource close state"), false
+	}
+}
+
+// finishOwnedTurnResourceClose is called only by the goroutine that changes
+// turnResourcesState to closing while holding ts.mu. A construction-lease
+// releaser performs deferred cleanup synchronously so its retained runtime
+// generation remains alive until every borrowed close dependency is done.
+func (ts *turnState) finishOwnedTurnResourceClose() error {
+	var closeErrors []error
+	if ts.turnTools != nil {
+		closeErrors = append(closeErrors, closeAgentResource(
+			"turn tool registry",
+			ts.turnTools.Close,
+		))
+	}
+	if ts.turnSession != nil {
+		closeErrors = append(closeErrors, closeAgentResource(
+			"turn session store",
+			ts.turnSession.Close,
+		))
+	}
+	closeErr := errors.Join(closeErrors...)
+	ts.mu.Lock()
+	ts.turnResourcesErr = closeErr
+	ts.turnResourcesState = turnResourcesClosed
+	ts.mu.Unlock()
+	return closeErr
 }
 
 func (ts *turnState) claimDetachedTerminal() bool {

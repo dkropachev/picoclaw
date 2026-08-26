@@ -31,6 +31,11 @@ func (p *Pipeline) CallLLM(
 	iteration int,
 ) (Control, error) {
 	al := p.al
+	// BeforeLLM narrowing is request-local. Preserve it across retries and
+	// fallback candidates for this request, then let the next iteration's hook
+	// decide again within the frozen turn capability cap.
+	exec.nativeSearchNarrowed = false
+	exec.useNativeSearch = false
 	maxMediaSize := p.Cfg.Agents.Defaults.GetMaxMediaSize()
 
 	// PreLLM: resolve media refs (except on iteration 1 where user media is already resolved)
@@ -45,29 +50,6 @@ func (p *Pipeline) CallLLM(
 	exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
 	exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, baseProviderToolDefs)
 
-	// Native web search support
-	webSearchEnabled := al.cfg.Tools.IsToolEnabled("web") && turnProfileToolAllowed(ts.profile, "web_search")
-	exec.useNativeSearch = webSearchEnabled && al.cfg.Tools.Web.PreferNative &&
-		func() bool {
-			if ns, ok := ts.agent.Provider.(providers.NativeSearchCapable); ok {
-				return ns.SupportsNativeSearch()
-			}
-			return false
-		}()
-	if exec.useNativeSearch {
-		filtered := make([]providers.ToolDefinition, 0, len(baseProviderToolDefs))
-		for _, td := range baseProviderToolDefs {
-			if td.Function.Name != "web_search" {
-				filtered = append(filtered, td)
-			}
-		}
-		baseProviderToolDefs = filtered
-		exec.providerToolDefs = applyToolAdaptationSurface(
-			exec.visibleToolSurface,
-			baseProviderToolDefs,
-		)
-	}
-
 	exec.callMessages = exec.messages
 	if exec.gracefulTerminal {
 		exec.callMessages = append(append([]providers.Message(nil), exec.messages...), ts.interruptHintMessage())
@@ -78,14 +60,6 @@ func (p *Pipeline) CallLLM(
 	if err := p.routeMediaTurn(ts, exec); err != nil {
 		return ControlBreak, err
 	}
-	if !exec.gracefulTerminal {
-		exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
-		exec.providerToolDefs = applyToolAdaptationSurface(
-			exec.visibleToolSurface,
-			baseProviderToolDefs,
-		)
-	}
-
 	exec.llmOpts = map[string]any{
 		"max_tokens":  ts.agent.MaxTokens,
 		"temperature": ts.agent.Temperature,
@@ -97,8 +71,21 @@ func (p *Pipeline) CallLLM(
 		}
 		exec.llmOpts["prompt_cache_key"] = cacheKey
 	}
-	if exec.useNativeSearch {
-		exec.llmOpts["native_search"] = true
+	if !exec.gracefulTerminal {
+		projectedDefinitions := baseProviderToolDefs
+		projectedDefinitions, exec.useNativeSearch = projectNativeSearchForProvider(
+			p.Cfg,
+			ts,
+			exec.activeProvider,
+			!exec.nativeSearchNarrowed,
+			projectedDefinitions,
+			exec.llmOpts,
+		)
+		exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+		exec.providerToolDefs = applyToolAdaptationSurface(
+			exec.visibleToolSurface,
+			projectedDefinitions,
+		)
 	}
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 	applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
@@ -122,18 +109,39 @@ func (p *Pipeline) CallLLM(
 		case HookActionContinue, HookActionModify:
 			if llmReq != nil {
 				prevAlias := exec.llmModelName
+				hookSawNativeSearch := exec.useNativeSearch
+				hookSawPhysicalSearch := toolDefinitionsContainFoldedName(
+					hookInputToolDefs,
+					subTurnNativeSearchCapability,
+				)
 				exec.callMessages = llmReq.Messages
 				baseProviderToolDefs = mergeHookToolDefinitionChanges(
 					baseProviderToolDefs,
 					hookInputToolDefs,
 					filterToolsByTurnProfile(llmReq.Tools, ts.profile),
 				)
-				exec.llmOpts = llmReq.Options
-				nativeSearchAllowed := exec.useNativeSearch &&
-					turnProfileToolAllowed(ts.profile, "web_search")
-				if !nativeSearchAllowed {
-					delete(exec.llmOpts, "native_search")
+				baseProviderToolDefs = filterSubTurnHookDefinitionsToPhysicalTools(
+					ts,
+					baseProviderToolDefs,
+				)
+				if llmReq.Options == nil {
+					llmReq.Options = make(map[string]any)
 				}
+				if nativeValue, present := llmReq.Options["native_search"]; present {
+					nativeEnabled, valid := nativeValue.(bool)
+					if !valid || !nativeEnabled {
+						exec.nativeSearchNarrowed = true
+					}
+				} else if hookSawNativeSearch {
+					exec.nativeSearchNarrowed = true
+				}
+				if hookSawPhysicalSearch && !toolDefinitionsContainFoldedName(
+					baseProviderToolDefs,
+					subTurnNativeSearchCapability,
+				) {
+					exec.nativeSearchNarrowed = true
+				}
+				exec.llmOpts = llmReq.Options
 				if strings.TrimSpace(llmReq.Model) != strings.TrimSpace(prevAlias) {
 					if err := p.applyBeforeLLMModelRewrite(ts, exec, llmReq.Model); err != nil {
 						return ControlBreak, err
@@ -142,9 +150,18 @@ func (p *Pipeline) CallLLM(
 					applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
 				}
 				exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+				projectedDefinitions, nativeSearch := projectNativeSearchForProvider(
+					p.Cfg,
+					ts,
+					exec.activeProvider,
+					!exec.gracefulTerminal && !exec.nativeSearchNarrowed,
+					baseProviderToolDefs,
+					exec.llmOpts,
+				)
+				exec.useNativeSearch = nativeSearch
 				exec.providerToolDefs = applyToolAdaptationSurface(
 					exec.visibleToolSurface,
-					baseProviderToolDefs,
+					projectedDefinitions,
 				)
 			}
 		case HookActionAbortTurn:
@@ -193,6 +210,23 @@ func (p *Pipeline) CallLLM(
 	callLLM := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
 		if usageErr := ts.workflowAgentUsageError(); usageErr != nil {
 			return nil, usageErr
+		}
+		if !exec.gracefulTerminal {
+			projectedDefinitions, nativeSearch := projectNativeSearchForProvider(
+				p.Cfg,
+				ts,
+				exec.activeProvider,
+				!exec.nativeSearchNarrowed,
+				baseProviderToolDefs,
+				exec.llmOpts,
+			)
+			exec.useNativeSearch = nativeSearch
+			exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+			toolDefsForCall = applyToolAdaptationSurface(
+				exec.visibleToolSurface,
+				projectedDefinitions,
+			)
+			exec.providerToolDefs = toolDefsForCall
 		}
 		providerCtx, providerCancel := context.WithCancel(turnCtx)
 		ts.setProviderCancel(providerCancel)
@@ -256,13 +290,21 @@ func (p *Pipeline) CallLLM(
 			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
 			applyReasoningEffortOption(callOpts, candidateCfg)
 			applyReasoningEffortOverride(callOpts, ts.opts.ReasoningEffortOverride)
+			candidateBaseDefinitions, candidateNativeSearch := projectNativeSearchForProvider(
+				p.Cfg,
+				ts,
+				candidateProvider,
+				!exec.nativeSearchNarrowed,
+				baseProviderToolDefs,
+				callOpts,
+			)
 			candidateSurface, candidateToolDefs := toolAdaptationForCandidate(
 				p.Cfg,
 				ts,
 				exec,
 				candidate,
 				candidateCfg,
-				baseProviderToolDefs,
+				candidateBaseDefinitions,
 			)
 			startedAt := time.Now()
 			response, err := candidateProvider.Chat(
@@ -285,6 +327,7 @@ func (p *Pipeline) CallLLM(
 			if err == nil {
 				exec.visibleToolSurface = candidateSurface
 				exec.providerToolDefs = candidateToolDefs
+				exec.useNativeSearch = candidateNativeSearch
 				exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
 			}
 			return response, err
@@ -828,6 +871,14 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(
 			"model alias %q with account %q has no runnable provider",
 			modelAlias,
 			accountRef,
+		)
+	}
+	if !exec.gracefulTerminal && !exec.nativeSearchNarrowed &&
+		subTurnRequiresPseudoOnlyNativeSearch(ts) &&
+		!subTurnCandidatesSupportNativeSearch(ts.agent, candidates) {
+		return fmt.Errorf(
+			"model alias %q is unavailable for pseudo-only native web search",
+			modelAlias,
 		)
 	}
 	exec.activeCandidates = candidates

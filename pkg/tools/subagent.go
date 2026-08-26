@@ -18,8 +18,10 @@ type SubTurnSpawner interface {
 
 // SubTurnConfig holds configuration for spawning a sub-turn.
 type SubTurnConfig struct {
-	Model              string
-	ModelFallbacks     []string
+	Model          string
+	ModelFallbacks []string
+	// Tools selects child authority by tool name only. Nil inherits, a non-nil
+	// empty slice selects no tools, and supplied pointers are never injected.
 	Tools              []Tool
 	SystemPrompt       string
 	MaxTokens          int
