@@ -975,52 +975,71 @@ func (c *repositoryReviewController) pauseAutomationForRun(
 	}
 	latchedRunID := current.ActiveRunID
 	updated, err := c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
-		if expectedRunID == "" && candidate.Version != expectedVersion {
-			return repoaudit.ErrConflict
-		}
-		if expectedRunID != "" && !repositoryReviewPauseRunMatches(*candidate, expectedRunID) {
-			return repoaudit.ErrConflict
-		}
-		switch candidate.Status {
-		case repoaudit.RepositoryReviewAutomationRunning:
-			candidate.Status = repoaudit.RepositoryReviewAutomationStopping
-			candidate.RequestedPauseReason = repoaudit.RepositoryReviewPauseManual
-			candidate.RequestedPauseDetail = "Paused manually after the current safe checkpoint."
-			candidate.Progress.Stage = "stopping after current batch"
-		case repoaudit.RepositoryReviewAutomationIdle:
-			if !candidate.AutoContinue ||
-				!strings.EqualFold(strings.TrimSpace(candidate.Progress.Stage), "next batch queued") {
-				return errRepositoryReviewInvalidTransition
-			}
-			candidate.Status = repoaudit.RepositoryReviewAutomationPaused
-			candidate.PauseReason = repoaudit.RepositoryReviewPauseManual
-			candidate.PauseDetail = "Paused before the next review batch started."
-			candidate.Progress.Stage = "paused"
-		case repoaudit.RepositoryReviewAutomationStopping,
-			repoaudit.RepositoryReviewAutomationPaused,
-			repoaudit.RepositoryReviewAutomationCompleted,
-			repoaudit.RepositoryReviewAutomationFailed:
-			return errRepositoryReviewPauseSettled
-		default:
-			return errRepositoryReviewInvalidTransition
-		}
-		return nil
+		return applyRepositoryReviewPauseTransition(candidate, expectedVersion, expectedRunID)
 	})
 	if errors.Is(err, errRepositoryReviewPauseSettled) {
-		settled, settledFound, settledErr := store.GetAutomation(ctx, id)
-		if settledErr != nil {
-			return repoaudit.RepositoryReviewAutomation{}, settledErr
-		}
-		if !settledFound {
-			return repoaudit.RepositoryReviewAutomation{}, os.ErrNotExist
-		}
-		return settled, nil
+		return loadSettledRepositoryReviewPause(ctx, store, id)
 	}
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
 	c.latchManualPause(id, latchedRunID)
 	return updated, nil
+}
+
+func loadSettledRepositoryReviewPause(
+	ctx context.Context,
+	store repoaudit.Store,
+	id string,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	settled, found, err := store.GetAutomation(ctx, id)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if !found {
+		return repoaudit.RepositoryReviewAutomation{}, os.ErrNotExist
+	}
+	return settled, nil
+}
+
+func applyRepositoryReviewPauseTransition(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	expectedVersion int64,
+	expectedRunID string,
+) error {
+	if candidate == nil {
+		return errRepositoryReviewInvalidTransition
+	}
+	if expectedRunID == "" && candidate.Version != expectedVersion {
+		return repoaudit.ErrConflict
+	}
+	if expectedRunID != "" && !repositoryReviewPauseRunMatches(*candidate, expectedRunID) {
+		return repoaudit.ErrConflict
+	}
+	switch candidate.Status {
+	case repoaudit.RepositoryReviewAutomationRunning:
+		candidate.Status = repoaudit.RepositoryReviewAutomationStopping
+		candidate.RequestedPauseReason = repoaudit.RepositoryReviewPauseManual
+		candidate.RequestedPauseDetail = "Paused manually after the current safe checkpoint."
+		candidate.Progress.Stage = "stopping after current batch"
+	case repoaudit.RepositoryReviewAutomationIdle:
+		if !candidate.AutoContinue ||
+			!strings.EqualFold(strings.TrimSpace(candidate.Progress.Stage), "next batch queued") {
+			return errRepositoryReviewInvalidTransition
+		}
+		candidate.Status = repoaudit.RepositoryReviewAutomationPaused
+		candidate.PauseReason = repoaudit.RepositoryReviewPauseManual
+		candidate.PauseDetail = "Paused before the next review batch started."
+		candidate.Progress.Stage = "paused"
+	case repoaudit.RepositoryReviewAutomationStopping,
+		repoaudit.RepositoryReviewAutomationPaused,
+		repoaudit.RepositoryReviewAutomationCompleted,
+		repoaudit.RepositoryReviewAutomationFailed:
+		return errRepositoryReviewPauseSettled
+	default:
+		return errRepositoryReviewInvalidTransition
+	}
+	return nil
 }
 
 func (c *repositoryReviewController) latchManualPause(id, runID string) {

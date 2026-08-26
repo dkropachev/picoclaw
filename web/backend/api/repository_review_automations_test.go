@@ -161,6 +161,26 @@ func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid collection status=%d body=%s", response.Code, response.Body.String())
 	}
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query="+query+"&cursor=invalid",
+		nil,
+	))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid cursor status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/rra_absent/commit-options",
+		nil,
+	))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing commit options status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
@@ -189,6 +209,29 @@ func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
 	}
 	if _, ok := repositoryReviewAutomationCollectionField(automation, "missing"); ok {
 		t.Fatal("unknown collection field resolved")
+	}
+}
+
+func TestRepositoryReviewGitHubCommitURLBoundaries(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	if got := repositoryReviewGitHubCommitURL("owner/repo", "invalid"); got != "" {
+		t.Fatalf("invalid commit URL=%q", got)
+	}
+	if got := repositoryReviewGitHubCommitURL(
+		"git@github.com:owner/repo.git", commit,
+	); got != "https://github.com/owner/repo/commit/"+commit {
+		t.Fatalf("SCP commit URL=%q", got)
+	}
+	for _, repository := range []string{
+		"git@gitlab.com:owner/repo.git",
+		"relative-repository",
+		"https://github.com/owner",
+		"https://github.com//repo",
+		"https://github.com/owner/.git",
+	} {
+		if got := repositoryReviewGitHubCommitURL(repository, commit); got != "" {
+			t.Fatalf("repository %q commit URL=%q", repository, got)
+		}
 	}
 }
 
