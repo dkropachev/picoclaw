@@ -404,3 +404,90 @@ func TestSpawnStatusTool_ChannelFiltering_NoContext(t *testing.T) {
 		t.Errorf("Expected task visible from no-context caller, got:\n%s", result.ForLLM)
 	}
 }
+
+func TestSpawnStatusTool_ExactAgentSessionOriginScoping(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "test-model", t.TempDir())
+	manager.mu.Lock()
+	manager.tasks["subagent-1"] = &SubagentTask{
+		ID: "subagent-1", Task: "private", Status: subagentTaskStatusRunning,
+		AgentID: "target-agent", OriginAgentID: "source-agent",
+		OriginSessionKey: "session-a", OriginChannel: "telegram", OriginChatID: "chat-a",
+	}
+	manager.tasks["subagent-2"] = &SubagentTask{
+		ID: "subagent-2", Task: "originless", Status: subagentTaskStatusRunning,
+	}
+	manager.mu.Unlock()
+	tool := NewSpawnStatusTool(manager)
+
+	ownerCtx := WithToolContext(context.Background(), "telegram", "chat-a")
+	ownerCtx = WithToolSessionContext(ownerCtx, "source-agent", "session-a", nil)
+	ownerResult := tool.Execute(ownerCtx, map[string]any{})
+	if ownerResult.IsError || !strings.Contains(ownerResult.ForLLM, "subagent-1") ||
+		strings.Contains(ownerResult.ForLLM, "subagent-2") {
+		t.Fatalf("owner-scoped status = %#v", ownerResult)
+	}
+	originlessID := tool.Execute(ownerCtx, map[string]any{"task_id": "subagent-2"})
+	if !originlessID.IsError {
+		t.Fatalf("scoped caller observed originless ID: %#v", originlessID)
+	}
+	agentSessionOnly := WithToolSessionContext(
+		context.Background(), "source-agent", "session-a", nil,
+	)
+	agentSessionResult := tool.Execute(agentSessionOnly, map[string]any{})
+	if agentSessionResult.IsError || !strings.Contains(agentSessionResult.ForLLM, "subagent-1") ||
+		strings.Contains(agentSessionResult.ForLLM, "subagent-2") {
+		t.Fatalf("agent/session-only status = %#v", agentSessionResult)
+	}
+
+	for name, foreignCtx := range map[string]context.Context{
+		"session": WithToolSessionContext(
+			WithToolContext(context.Background(), "telegram", "chat-a"),
+			"source-agent", "session-b", nil,
+		),
+		"source agent": WithToolSessionContext(
+			WithToolContext(context.Background(), "telegram", "chat-a"),
+			"target-agent", "session-a", nil,
+		),
+		"partial channel": WithToolContext(
+			context.Background(), "telegram", "",
+		),
+		"partial session": WithToolSessionContext(
+			context.Background(), "source-agent", "", nil,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			listResult := tool.Execute(foreignCtx, map[string]any{})
+			if listResult.IsError || !strings.Contains(
+				listResult.ForLLM,
+				"No subagents found for this conversation.",
+			) {
+				t.Fatalf("foreign list result = %#v", listResult)
+			}
+			idResult := tool.Execute(foreignCtx, map[string]any{"task_id": "subagent-1"})
+			missingResult := tool.Execute(foreignCtx, map[string]any{"task_id": "missing"})
+			if !idResult.IsError || !missingResult.IsError ||
+				!strings.HasPrefix(idResult.ForLLM, "No subagent found with task ID:") ||
+				!strings.HasPrefix(missingResult.ForLLM, "No subagent found with task ID:") {
+				t.Fatalf("foreign/missing lookup = %#v / %#v", idResult, missingResult)
+			}
+		})
+	}
+	emptyManager := NewSubagentManager(&MockLLMProvider{}, "test-model", t.TempDir())
+	foreignCtx := WithToolSessionContext(
+		WithToolContext(context.Background(), "telegram", "chat-a"),
+		"source-agent",
+		"session-b",
+		nil,
+	)
+	foreignOnly := tool.Execute(foreignCtx, map[string]any{})
+	scopedEmpty := NewSpawnStatusTool(emptyManager).Execute(foreignCtx, map[string]any{})
+	if foreignOnly.IsError || scopedEmpty.IsError || foreignOnly.ForLLM != scopedEmpty.ForLLM {
+		t.Fatalf("foreign/empty existence projection = %#v / %#v", foreignOnly, scopedEmpty)
+	}
+
+	noContext := tool.Execute(context.Background(), map[string]any{})
+	if noContext.IsError || !strings.Contains(noContext.ForLLM, "subagent-1") ||
+		!strings.Contains(noContext.ForLLM, "subagent-2") {
+		t.Fatalf("no-context compatibility = %#v", noContext)
+	}
+}

@@ -2,11 +2,13 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -37,16 +39,34 @@ type SubTurnConfig struct {
 }
 
 type SubagentTask struct {
-	ID            string
-	Task          string
-	Label         string
-	AgentID       string
-	OriginChannel string
-	OriginChatID  string
-	Status        string
-	Result        string
-	Created       int64
+	ID               string
+	Task             string
+	Label            string
+	AgentID          string
+	OriginAgentID    string
+	OriginSessionKey string
+	OriginChannel    string
+	OriginChatID     string
+	Status           string
+	Result           string
+	Created          int64
 }
+
+const (
+	subagentTaskStatusRunning   = "running"
+	subagentTaskStatusCompleted = "completed"
+	subagentTaskStatusFailed    = "failed"
+	subagentTaskStatusCanceled  = "canceled"
+)
+
+type subagentTaskOrigin struct {
+	agentID string
+	session string
+	channel string
+	chatID  string
+}
+
+type subagentTaskRunner func(context.Context, SubagentTask) (*ToolResult, error)
 
 type SpawnSubTurnFunc func(
 	ctx context.Context,
@@ -157,58 +177,117 @@ func (sm *SubagentManager) Spawn(
 	task, label, agentID, originChannel, originChatID string,
 	callback AsyncCallback,
 ) (string, error) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runner := sm.legacyTaskRunnerSnapshot()
+	taskID, err := sm.spawnTracked(
+		ctx,
+		task,
+		label,
+		agentID,
+		subagentTaskOrigin{
+			agentID: ToolAgentID(ctx),
+			session: ToolSessionKey(ctx),
+			channel: originChannel,
+			chatID:  originChatID,
+		},
+		runner,
+		callback,
+		nil,
+	)
+	if err != nil {
+		return "", err
+	}
+	return formatSubagentSpawnAcknowledgement(taskID, task, label), nil
+}
 
+func (sm *SubagentManager) spawnTracked(
+	ctx context.Context,
+	task, label, agentID string,
+	origin subagentTaskOrigin,
+	runner subagentTaskRunner,
+	callback AsyncCallback,
+	onDone func(),
+) (string, error) {
+	if sm == nil {
+		return "", fmt.Errorf("subagent manager is nil")
+	}
+	if runner == nil {
+		return "", fmt.Errorf("subagent task runner is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	sm.mu.Lock()
+	if sm.tasks == nil {
+		sm.tasks = make(map[string]*SubagentTask)
+	}
+	if sm.nextID <= 0 {
+		sm.nextID = 1
+	}
 	taskID := fmt.Sprintf("subagent-%d", sm.nextID)
 	sm.nextID++
-
-	subagentTask := &SubagentTask{
-		ID:            taskID,
-		Task:          task,
-		Label:         label,
-		AgentID:       agentID,
-		OriginChannel: originChannel,
-		OriginChatID:  originChatID,
-		Status:        "running",
-		Created:       time.Now().UnixMilli(),
+	sm.tasks[taskID] = &SubagentTask{
+		ID:               taskID,
+		Task:             task,
+		Label:            label,
+		AgentID:          agentID,
+		OriginAgentID:    origin.agentID,
+		OriginSessionKey: origin.session,
+		OriginChannel:    origin.channel,
+		OriginChatID:     origin.chatID,
+		Status:           subagentTaskStatusRunning,
+		Created:          time.Now().UnixMilli(),
 	}
-	sm.tasks[taskID] = subagentTask
+	sm.mu.Unlock()
 
-	// Start task in background with context cancellation support
-	go sm.runTask(ctx, subagentTask, callback)
-
-	if label != "" {
-		return fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task), nil
-	}
-	return fmt.Sprintf("Spawned subagent for task: %s", task), nil
+	go sm.runTask(ctx, taskID, runner, callback, onDone)
+	return taskID, nil
 }
 
 func (sm *SubagentManager) runTask(
 	ctx context.Context,
-	task *SubagentTask,
+	taskID string,
+	runner subagentTaskRunner,
 	callback AsyncCallback,
+	onDone func(),
 ) {
-	task.Status = "running"
-	task.Created = time.Now().UnixMilli()
-	// TODO(eventbus): once subagents are modeled as child turns inside
-	// pkg/agent, emit SubTurnEnd and SubTurnResultDelivered from the parent
-	// AgentLoop instead of this legacy manager.
+	defer callSubagentTaskFinalizer(onDone)
 
-	// Check if context is already canceled before starting
-	select {
-	case <-ctx.Done():
-		sm.mu.Lock()
-		task.Status = "canceled"
-		task.Result = "Task canceled before execution"
-		sm.mu.Unlock()
+	task, ok := sm.GetTaskCopy(taskID)
+	if !ok {
 		return
-	default:
 	}
 
+	preCanceled := ctx.Err() != nil
+	var result *ToolResult
+	var err error
+	if preCanceled {
+		err = ctx.Err()
+	} else {
+		result, err = callSubagentTaskRunner(ctx, task, runner)
+	}
+
+	status, storedResult, callbackResult := normalizeSubagentTaskOutcome(
+		result,
+		err,
+		preCanceled,
+	)
+	sm.commitTaskTerminal(taskID, status, storedResult)
+	callSubagentTaskCallback(ctx, callback, callbackResult)
+}
+
+func (sm *SubagentManager) legacyTaskRunnerSnapshot() subagentTaskRunner {
+	if sm == nil {
+		return nil
+	}
 	sm.mu.RLock()
 	spawner := sm.spawner
-	tools := sm.tools
+	toolRegistry := sm.tools
+	provider := sm.provider
+	model := sm.defaultModel
 	maxIter := sm.maxIterations
 	maxTokens := sm.maxTokens
 	temperature := sm.temperature
@@ -217,35 +296,31 @@ func (sm *SubagentManager) runTask(
 	mediaResolver := sm.mediaResolver
 	sm.mu.RUnlock()
 
-	var result *ToolResult
-	var err error
+	return func(ctx context.Context, task SubagentTask) (*ToolResult, error) {
+		if spawner != nil {
+			return spawner(
+				ctx,
+				task.Task,
+				task.Label,
+				task.AgentID,
+				toolRegistry,
+				maxTokens,
+				temperature,
+				hasMaxTokens,
+				hasTemperature,
+			)
+		}
 
-	if spawner != nil {
-		result, err = spawner(
-			ctx,
-			task.Task,
-			task.Label,
-			task.AgentID,
-			tools,
-			maxTokens,
-			temperature,
-			hasMaxTokens,
-			hasTemperature,
-		)
-	} else {
-		// Fallback to legacy RunToolLoop
 		systemPrompt := `You are a subagent. Complete the given task independently and report the result.
 You have access to tools - use them as needed to complete your task.
 After completing the task, provide a clear summary of what was done.`
-
 		messages := []providers.Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: task.Task},
 		}
-
 		var llmOptions map[string]any
 		if hasMaxTokens || hasTemperature {
-			llmOptions = map[string]any{}
+			llmOptions = make(map[string]any)
 			if hasMaxTokens {
 				llmOptions["max_tokens"] = maxTokens
 			}
@@ -253,69 +328,146 @@ After completing the task, provide a clear summary of what was done.`
 				llmOptions["temperature"] = temperature
 			}
 		}
-
-		var loopResult *ToolLoopResult
-		loopResult, err = RunToolLoop(ctx, ToolLoopConfig{
-			Provider:      sm.provider,
-			Model:         sm.defaultModel,
-			Tools:         tools,
+		loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
+			Provider:      provider,
+			Model:         model,
+			Tools:         toolRegistry,
 			MaxIterations: maxIter,
 			LLMOptions:    llmOptions,
 			MediaResolver: mediaResolver,
 		}, messages, task.OriginChannel, task.OriginChatID)
-
-		if err == nil {
-			result = &ToolResult{
-				ForLLM: fmt.Sprintf(
-					"Subagent '%s' completed (iterations: %d): %s",
-					task.Label,
-					loopResult.Iterations,
-					loopResult.Content,
-				),
-				ForUser: loopResult.Content,
-				Silent:  false,
-				IsError: false,
-				Async:   false,
-			}
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	sm.mu.Lock()
-	defer func() {
-		sm.mu.Unlock()
-		// Call callback if provided and result is set
-		if callback != nil && result != nil {
-			callback(ctx, result)
-		}
-	}()
-
-	if err != nil {
-		task.Status = "failed"
-		task.Result = fmt.Sprintf("Error: %v", err)
-		// Check if it was canceled
-		if ctx.Err() != nil {
-			task.Status = "canceled"
-			task.Result = "Task canceled during execution"
-		}
-		result = &ToolResult{
-			ForLLM:  task.Result,
-			ForUser: "",
-			Silent:  false,
-			IsError: true,
-			Async:   false,
-			Err:     err,
-		}
-	} else {
-		task.Status = "completed"
-		task.Result = result.ForLLM
+		return &ToolResult{
+			ForLLM: fmt.Sprintf(
+				"Subagent '%s' completed (iterations: %d): %s",
+				task.Label,
+				loopResult.Iterations,
+				loopResult.Content,
+			),
+			ForUser: loopResult.Content,
+		}, nil
 	}
 }
 
+func (sm *SubagentManager) commitTaskTerminal(taskID, status, result string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	task := sm.tasks[taskID]
+	if task == nil || task.Status != subagentTaskStatusRunning {
+		return
+	}
+	task.Status = status
+	task.Result = result
+}
+
+func callSubagentTaskRunner(
+	ctx context.Context,
+	task SubagentTask,
+	runner subagentTaskRunner,
+) (result *ToolResult, returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.RecoverPanicNoExit(recovered)
+			result = nil
+			returnErr = fmt.Errorf("subagent task panicked: %v", recovered)
+		}
+	}()
+	return runner(ctx, task)
+}
+
+func normalizeSubagentTaskOutcome(
+	result *ToolResult,
+	err error,
+	preCanceled bool,
+) (status, storedResult string, callbackResult *ToolResult) {
+	if err == nil && result == nil {
+		err = fmt.Errorf("subagent task returned nil result")
+	}
+	if err == nil && result.IsError {
+		err = result.Err
+		if err == nil {
+			err = fmt.Errorf("subagent task returned an error result")
+		}
+	}
+	if err == nil {
+		return subagentTaskStatusCompleted, result.ForLLM, result
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		storedResult = "Task canceled during execution"
+		if preCanceled {
+			storedResult = "Task canceled before execution"
+		}
+		status = subagentTaskStatusCanceled
+	} else {
+		storedResult = fmt.Sprintf("Error: %v", err)
+		status = subagentTaskStatusFailed
+	}
+	if result != nil && result.IsError {
+		callbackCopy := *result
+		callbackCopy.Err = err
+		callbackResult = &callbackCopy
+		if content := callbackResult.ContentForLLM(); content != "" {
+			storedResult = content
+		}
+	} else {
+		callbackResult = ErrorResult(storedResult).WithError(err)
+	}
+	return status, storedResult, callbackResult
+}
+
+func callSubagentTaskCallback(
+	ctx context.Context,
+	callback AsyncCallback,
+	result *ToolResult,
+) {
+	if callback == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.RecoverPanicNoExit(recovered)
+		}
+	}()
+	callback(ctx, result)
+}
+
+func callSubagentTaskFinalizer(finalizer func()) {
+	if finalizer == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.RecoverPanicNoExit(recovered)
+		}
+	}()
+	finalizer()
+}
+
+func formatSubagentSpawnAcknowledgement(taskID, task, label string) string {
+	if label != "" {
+		return fmt.Sprintf(
+			"Spawned subagent '%s' for task: %s (task_id=%s)",
+			label,
+			task,
+			taskID,
+		)
+	}
+	return fmt.Sprintf("Spawned subagent for task: %s (task_id=%s)", task, taskID)
+}
+
+// GetTask returns a detached compatibility pointer, never the live map entry.
 func (sm *SubagentManager) GetTask(taskID string) (*SubagentTask, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	task, ok := sm.tasks[taskID]
-	return task, ok
+	if !ok {
+		return nil, false
+	}
+	snapshot := *task
+	return &snapshot, true
 }
 
 // GetTaskCopy returns a copy of the task with the given ID, taken under the
@@ -330,13 +482,15 @@ func (sm *SubagentManager) GetTaskCopy(taskID string) (SubagentTask, bool) {
 	return *task, true
 }
 
+// ListTasks returns detached compatibility pointers for every current record.
 func (sm *SubagentManager) ListTasks() []*SubagentTask {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	tasks := make([]*SubagentTask, 0, len(sm.tasks))
 	for _, task := range sm.tasks {
-		tasks = append(tasks, task)
+		snapshot := *task
+		tasks = append(tasks, &snapshot)
 	}
 	return tasks
 }

@@ -708,13 +708,23 @@ func TestSpawnToolRetainsRuntimeBeforeLaunchingBackgroundSubturn(t *testing.T) {
 		entered:  make(chan struct{}),
 		admit:    make(chan struct{}),
 	}
-	spawnTool := tools.NewSpawnTool(nil)
+	spawnTool := tools.NewSpawnTool(tools.NewSubagentManager(
+		providerA,
+		parentAgent.Model,
+		parentAgent.Workspace,
+	))
 	spawnTool.SetSpawner(delayed)
+	callbackEntered := make(chan struct{})
+	releaseCallback := make(chan struct{})
 	callbackDone := make(chan struct{})
 	result := spawnTool.ExecuteAsync(
 		rootCtx,
 		map[string]any{"task": "finish", "agent_id": parentAgent.ID},
-		func(context.Context, *tools.ToolResult) { close(callbackDone) },
+		func(context.Context, *tools.ToolResult) {
+			close(callbackEntered)
+			<-releaseCallback
+			close(callbackDone)
+		},
 	)
 	if result == nil || result.IsError {
 		releaseRoot()
@@ -739,6 +749,17 @@ func TestSpawnToolRetainsRuntimeBeforeLaunchingBackgroundSubturn(t *testing.T) {
 	}
 
 	close(delayed.admit)
+	select {
+	case <-callbackEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background subturn callback did not start")
+	}
+	select {
+	case err := <-reloadDone:
+		t.Fatalf("reload returned before tracked callback completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCallback)
 	select {
 	case <-callbackDone:
 	case <-time.After(2 * time.Second):

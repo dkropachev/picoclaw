@@ -7,6 +7,7 @@ import (
 )
 
 type SpawnTool struct {
+	manager               *SubagentManager
 	spawner               SubTurnSpawner
 	defaultModel          string
 	defaultModelFallbacks []string
@@ -26,7 +27,10 @@ func NewSpawnTool(manager *SubagentManager) *SpawnTool {
 	if manager == nil {
 		return &SpawnTool{}
 	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
 	return &SpawnTool{
+		manager:               manager,
 		defaultModel:          manager.defaultModel,
 		defaultModelFallbacks: cloneStringSlice(manager.defaultModelFallbacks),
 		maxTokens:             manager.maxTokens,
@@ -91,6 +95,9 @@ func (t *SpawnTool) execute(
 	args map[string]any,
 	cb AsyncCallback,
 ) *ToolResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	task, ok := args["task"].(string)
 	if !ok || strings.TrimSpace(task) == "" {
 		return ErrorResult("task is required and must be a non-empty string")
@@ -131,62 +138,61 @@ Task: %s`,
 		)
 	}
 
-	// Use spawner if available (direct SpawnSubTurn call)
-	if t.spawner != nil {
-		// Snapshot every wrapper field before async preparation. A strict turn
-		// owner may close its registry as soon as ExecuteAsync returns; the
-		// goroutine must retain only detached values and the borrowed spawner.
-		spawner := t.spawner
-		defaultModel := t.defaultModel
-		defaultModelFallbacks := cloneStringSlice(t.defaultModelFallbacks)
-		maxTokens := t.maxTokens
-		temperature := t.temperature
-		spawnCtx := ctx
-		releaseRuntime := func() {}
-		if preparer, ok := spawner.(asyncSubTurnContextPreparer); ok {
-			var err error
-			spawnCtx, releaseRuntime, err = preparer.PrepareAsyncSubTurn(ctx)
-			if err != nil {
-				return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
-			}
-		}
-		// Launch async sub-turn in goroutine
-		go func(
-			spawner SubTurnSpawner,
-			model string,
-			fallbacks []string,
-			tokenLimit int,
-			temperature float64,
-		) {
-			defer releaseRuntime()
-			result, err := spawner.SpawnSubTurn(spawnCtx, SubTurnConfig{
-				Model:          model,
-				ModelFallbacks: cloneStringSlice(fallbacks),
-				Tools:          nil, // Will inherit from parent via context
-				SystemPrompt:   systemPrompt,
-				MaxTokens:      tokenLimit,
-				Temperature:    temperature,
-				Async:          true, // Async execution
-				Critical:       true, // Background spawn should survive parent turn completion
-				TargetAgentID:  targetAgentID,
-			})
-			if err != nil {
-				result = ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
-			}
-
-			// Call callback if provided
-			if cb != nil {
-				cb(spawnCtx, result)
-			}
-		}(spawner, defaultModel, defaultModelFallbacks, maxTokens, temperature)
-
-		// Return immediate acknowledgment
-		if label != "" {
-			return AsyncResult(fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task))
-		}
-		return AsyncResult(fmt.Sprintf("Spawned subagent for task: %s", task))
+	if t.manager == nil || t.spawner == nil {
+		return ErrorResult("Subagent manager not configured")
 	}
 
-	// Fallback: spawner not configured
-	return ErrorResult("Subagent manager not configured")
+	// Snapshot every wrapper and request field before async preparation. A
+	// strict turn owner may close its registry as soon as ExecuteAsync returns;
+	// the manager-owned goroutine retains detached values only.
+	manager := t.manager
+	spawner := t.spawner
+	turnConfig := SubTurnConfig{
+		Model:          t.defaultModel,
+		ModelFallbacks: cloneStringSlice(t.defaultModelFallbacks),
+		Tools:          nil,
+		SystemPrompt:   systemPrompt,
+		MaxTokens:      t.maxTokens,
+		Temperature:    t.temperature,
+		Async:          true,
+		Critical:       true,
+		TargetAgentID:  targetAgentID,
+	}
+	origin := subagentTaskOrigin{
+		agentID: ToolAgentID(ctx),
+		session: ToolSessionKey(ctx),
+		channel: ToolChannel(ctx),
+		chatID:  ToolChatID(ctx),
+	}
+	spawnCtx := ctx
+	releasePrepared := func() {}
+	if preparer, ok := spawner.(asyncSubTurnContextPreparer); ok {
+		var err error
+		spawnCtx, releasePrepared, err = preparer.PrepareAsyncSubTurn(ctx)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
+		}
+	}
+	runner := func(runCtx context.Context, _ SubagentTask) (*ToolResult, error) {
+		result, err := spawner.SpawnSubTurn(runCtx, turnConfig)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err), err
+		}
+		return result, nil
+	}
+	taskID, err := manager.spawnTracked(
+		spawnCtx,
+		task,
+		label,
+		targetAgentID,
+		origin,
+		runner,
+		cb,
+		releasePrepared,
+	)
+	if err != nil {
+		releasePrepared()
+		return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
+	}
+	return AsyncResult(formatSubagentSpawnAcknowledgement(taskID, task, label))
 }

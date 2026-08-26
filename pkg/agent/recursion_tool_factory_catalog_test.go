@@ -321,6 +321,41 @@ func TestRecursionCatalogOwnerBundlesAreFreshAndSharedWithinOwner(t *testing.T) 
 		constructed[1] == constructed[2] || constructed[0] == constructed[2] {
 		t.Fatalf("manager identities = %#v", constructed)
 	}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for index, manager := range constructed[1:] {
+		ack, spawnErr := manager.Spawn(
+			canceledCtx,
+			fmt.Sprintf("owner-%d task", index+1),
+			"",
+			"",
+			"catalog",
+			fmt.Sprintf("owner-%d", index+1),
+			nil,
+		)
+		if spawnErr != nil || !strings.Contains(ack, "task_id=subagent-1") {
+			t.Fatalf("owner %d tracked spawn = %q, %v", index+1, ack, spawnErr)
+		}
+	}
+	for index, manager := range constructed[1:] {
+		deadline := time.Now().Add(time.Second)
+		for {
+			task, ok := manager.GetTaskCopy("subagent-1")
+			if ok && task.Status == "canceled" {
+				if !strings.Contains(task.Task, fmt.Sprintf("owner-%d", index+1)) {
+					t.Fatalf("owner %d task = %#v", index+1, task)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("owner %d tracked task did not cancel: %#v", index+1, task)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if _, ok := constructed[0].GetTaskCopy("subagent-1"); ok {
+		t.Fatal("strict owner task leaked into root manager")
+	}
 	for _, name := range roots {
 		source, _ := fixture.agents["main"].Tools.GetRegistered(name)
 		firstTool, _ := first.GetRegistered(name)
@@ -794,7 +829,7 @@ func TestRecursionCatalogSmallFailureBoundaries(t *testing.T) {
 	}
 	fixture := newRecursionCatalogFixture(t, "alpha", "beta")
 	fixture.agents["alpha"].Subagents = &config.SubagentsConfig{
-		AllowAgents: []string{"beta"},
+		AllowAgents: []string{"*"},
 	}
 	bundle := &recursionOwnerBundle{
 		manager: tools.NewSubagentManager(
@@ -815,6 +850,9 @@ func TestRecursionCatalogSmallFailureBoundaries(t *testing.T) {
 	if result == nil || !result.IsError ||
 		!strings.Contains(result.ForLLM, "not allowed") {
 		t.Fatalf("spawn authorization result = %#v", result)
+	}
+	if tasks := bundle.manager.ListTaskCopies(); len(tasks) != 0 {
+		t.Fatalf("missing wildcard target created records: %#v", tasks)
 	}
 }
 
@@ -1225,6 +1263,7 @@ func TestProductionRecursionCatalogSupportsStrictRuntimeSelection(t *testing.T) 
 func TestRecursionCatalogOwnerSpawnRetainsRuntimeAcrossReload(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.SpawnStatus.Enabled = true
 	messageBus := bus.NewMessageBus()
 	providerA := &simpleMockProvider{response: "generation-a"}
 	providerB := &simpleMockProvider{response: "generation-b"}
@@ -1236,7 +1275,7 @@ func TestRecursionCatalogOwnerSpawnRetainsRuntimeAcrossReload(t *testing.T) {
 	agent := loop.GetRegistry().GetDefaultAgent()
 	owned, err := agent.Tools.InstantiateForOwnerSelection(
 		tools.ToolOwner{Scope: tools.ToolOwnerScopeTurn, TurnID: "retained-spawn-owner"},
-		[]string{"spawn"},
+		[]string{"spawn", "spawn_status"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1249,6 +1288,10 @@ func TestRecursionCatalogOwnerSpawnRetainsRuntimeAcrossReload(t *testing.T) {
 	asyncSpawn, ok := spawn.(tools.AsyncExecutor)
 	if !ok {
 		t.Fatalf("owner spawn type = %T, want AsyncExecutor", spawn)
+	}
+	statusTool, ok := owned.GetRegistered("spawn_status")
+	if !ok {
+		t.Fatal("paired owner spawn_status is unavailable")
 	}
 	rootCtx, releaseRoot, err := loop.acquireRuntimeUse(context.Background())
 	if err != nil {
@@ -1289,6 +1332,18 @@ func TestRecursionCatalogOwnerSpawnRetainsRuntimeAcrossReload(t *testing.T) {
 		releaseRoot()
 		t.Fatalf("owner spawn acknowledgement = %#v", result)
 	}
+	if !strings.Contains(result.ForLLM, "task_id=subagent-1") {
+		releaseRoot()
+		t.Fatalf("owner spawn acknowledgement has no task ID: %#v", result)
+	}
+	runningStatus := statusTool.Execute(context.Background(), map[string]any{
+		"task_id": "subagent-1",
+	})
+	if runningStatus == nil || runningStatus.IsError ||
+		!strings.Contains(runningStatus.ForLLM, "status=running") {
+		releaseRoot()
+		t.Fatalf("owner tracked running status = %#v", runningStatus)
+	}
 	releaseRoot()
 	reloadDone := make(chan error, 1)
 	go func() {
@@ -1307,6 +1362,13 @@ func TestRecursionCatalogOwnerSpawnRetainsRuntimeAcrossReload(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("catalog spawn did not complete")
 	}
+	completedStatus := statusTool.Execute(context.Background(), map[string]any{
+		"task_id": "subagent-1",
+	})
+	if completedStatus == nil || completedStatus.IsError ||
+		!strings.Contains(completedStatus.ForLLM, "status=completed") {
+		t.Fatalf("owner tracked completed status = %#v", completedStatus)
+	}
 	select {
 	case err := <-reloadDone:
 		if err != nil {
@@ -1314,6 +1376,103 @@ func TestRecursionCatalogOwnerSpawnRetainsRuntimeAcrossReload(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("reload remained blocked after catalog spawn completed")
+	}
+}
+
+func TestRecursionCatalogTrackedSpawnRecordsHardAbortAsCanceled(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.SpawnStatus.Enabled = true
+	messageBus := bus.NewMessageBus()
+	provider := &subTurnBlockingProvider{started: make(chan struct{})}
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, provider)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	agent := loop.GetRegistry().GetDefaultAgent()
+	owned, err := agent.Tools.InstantiateForOwnerSelection(
+		tools.ToolOwner{Scope: tools.ToolOwnerScopeTurn, TurnID: "tracked-abort-owner"},
+		[]string{"spawn", "spawn_status"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	spawnRaw, _ := owned.GetRegistered("spawn")
+	spawn, ok := spawnRaw.(tools.AsyncExecutor)
+	if !ok {
+		t.Fatalf("tracked abort spawn type = %T", spawnRaw)
+	}
+	status, ok := owned.GetRegistered("spawn_status")
+	if !ok {
+		t.Fatal("tracked abort status tool is unavailable")
+	}
+	parent := &turnState{
+		turnID: "tracked-abort-parent", agent: agent,
+		session:        newEphemeralSession(nil),
+		pendingResults: make(chan *tools.ToolResult, 2),
+		concurrencySem: make(chan struct{}, 1),
+		opts: processOptions{
+			Dispatch: DispatchRequest{SessionKey: "tracked-abort-parent"},
+		},
+	}
+	loop.prepareTurnState(parent)
+	ctx := withTurnState(WithAgentLoop(context.Background(), loop), parent)
+	callback := make(chan *tools.ToolResult, 1)
+	ack := spawn.ExecuteAsync(
+		ctx,
+		map[string]any{"task": "block until hard abort"},
+		func(_ context.Context, result *tools.ToolResult) { callback <- result },
+	)
+	if ack == nil || ack.IsError || !strings.Contains(ack.ForLLM, "task_id=subagent-1") {
+		t.Fatalf("tracked abort acknowledgement = %#v", ack)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tracked abort child provider did not start")
+	}
+	var childID string
+	deadline := time.Now().Add(2 * time.Second)
+	for childID == "" && time.Now().Before(deadline) {
+		parent.mu.RLock()
+		if len(parent.childTurnIDs) > 0 {
+			childID = parent.childTurnIDs[0]
+		}
+		parent.mu.RUnlock()
+		if childID == "" {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if childID == "" {
+		t.Fatal("tracked abort child was not attached")
+	}
+	if err := loop.HardAbort(childID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-callback:
+		if result == nil || !result.IsError || !errors.Is(result.Err, context.Canceled) {
+			t.Fatalf("tracked abort callback = %#v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tracked abort callback did not complete")
+	}
+	select {
+	case pending := <-parent.pendingResults:
+		if pending == nil || !pending.IsError {
+			t.Fatalf("tracked abort pending result = %#v", pending)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tracked abort pending-result path changed before P007")
+	}
+	statusResult := status.Execute(context.Background(), map[string]any{
+		"task_id": "subagent-1",
+	})
+	if statusResult == nil || statusResult.IsError ||
+		!strings.Contains(statusResult.ForLLM, "status=canceled") {
+		t.Fatalf("tracked abort status = %#v", statusResult)
 	}
 }
 

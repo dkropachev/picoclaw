@@ -385,6 +385,12 @@ func buildSpawnTool(
 	tool := tools.NewSpawnTool(bundle.manager)
 	tool.SetSpawner(bundle.spawner)
 	tool.SetAllowlistChecker(func(targetAgentID string) bool {
+		if spec.registry == nil {
+			return false
+		}
+		if target, exists := spec.registry.GetAgent(targetAgentID); !exists || target == nil {
+			return false
+		}
 		return spec.registry.CanSpawnSubagent(spec.agentID, targetAgentID)
 	})
 	return tool
