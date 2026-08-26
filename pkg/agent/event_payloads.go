@@ -141,10 +141,14 @@ type SteeringInjectedPayload struct {
 	TotalContentLen int
 }
 
-// FollowUpQueuedPayload describes an async follow-up queued back into the inbound bus.
+// FollowUpQueuedPayload describes an async follow-up queued into either the
+// generic inbound path or the tracked exact-session mailbox.
 type FollowUpQueuedPayload struct {
-	SourceTool string
-	ContentLen int
+	SourceTool   string
+	SourceTurnID string
+	TaskID       string
+	Status       string
+	ContentLen   int
 }
 
 type InterruptKind string
@@ -181,6 +185,9 @@ type SubTurnEndPayload struct {
 type SubTurnResultDeliveredPayload struct {
 	TargetChannel string
 	TargetChatID  string
+	SourceTurnID  string
+	TaskID        string
+	Status        string
 	ContentLen    int
 }
 
@@ -188,6 +195,9 @@ type SubTurnResultDeliveredPayload struct {
 type SubTurnOrphanPayload struct {
 	ParentTurnID string
 	ChildTurnID  string
+	SourceTurnID string
+	TaskID       string
+	Status       string
 	Reason       string
 }
 

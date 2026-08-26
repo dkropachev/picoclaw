@@ -66,10 +66,16 @@ type AgentLoop struct {
 	hookRuntime     hookRuntime
 	steering        *steeringQueue
 	steeringRescues sync.Map
-	gitWorkspaces   gitWorkspaceManager
-	pendingSkills   sync.Map
-	pendingStops    sync.Map
-	mu              sync.RWMutex
+
+	trackedSubagentResults      trackedSubagentResultMailbox
+	trackedSubagentWorkerMu     sync.Mutex
+	trackedSubagentWorkerCtx    context.Context
+	trackedSubagentWorkerCancel context.CancelFunc
+
+	gitWorkspaces gitWorkspaceManager
+	pendingSkills sync.Map
+	pendingStops  sync.Map
+	mu            sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -134,32 +140,37 @@ type processOptions struct {
 	UserMessage             string          // User message content (may include prefix)
 	ForcedSkills            []string        // Skills explicitly requested for this message
 	TurnProfile             config.EffectiveTurnProfile
-	SystemPromptOverride    string                  // Override the default system prompt (Used by SubTurns)
-	SuppressDefaultContext  bool                    // Keep only explicit system overlays for isolated turns
-	Media                   []string                // media:// refs from inbound message
-	InitialSteeringMessages []providers.Message     // Steering messages from refactor/agent
-	DefaultResponse         string                  // Response when LLM returns empty
-	PromptCacheKey          string                  // Optional provider prompt cache key override
-	ModelNameOverride       string                  // Optional exact model alias override for this isolated turn
-	ModelFallbacksOverride  []string                // Optional exact fallback aliases; non-nil replaces inherited fallbacks
-	AccountRefOverride      string                  // Optional concrete account or account-router override for this isolated turn
-	ReasoningEffortOverride string                  // Optional reasoning_effort override for this isolated turn
-	EnableSummary           bool                    // Whether to trigger summarization
-	SendResponse            bool                    // Whether to send response via bus
-	AllowInterimPicoPublish bool                    // Whether pico tool-call interim text can be published when SendResponse is false
-	SuppressToolFeedback    bool                    // Whether to suppress inline tool feedback messages
-	NoHistory               bool                    // If true, don't load session history (for heartbeat)
-	DisableTools            bool                    // If true, no provider or runtime tools are callable this turn
-	DisablePromptCache      bool                    // If true, omit provider prompt cache key
-	SkipInitialSteeringPoll bool                    // If true, skip the steering poll at loop start (used by Continue)
-	InboundContext          *bus.InboundContext     // Normalized inbound facts for events/hooks
-	RouteResult             *routing.ResolvedRoute  // Route decision snapshot for events/hooks
-	SessionScope            *session.SessionScope   // Session scope snapshot for events/hooks
-	turnReservation         *turnState              // exact root/continuation placeholder, process-local only
-	resultModelName         *string                 // private caller-owned successful model provenance
-	resultUsage             *[]workflows.AgentUsage // private caller-owned detached per-model usage
-	usageObserver           workflows.AgentUsageObserver
-	callAdmission           workflows.AgentCallAdmission
+	SystemPromptOverride    string              // Override the default system prompt (Used by SubTurns)
+	SuppressDefaultContext  bool                // Keep only explicit system overlays for isolated turns
+	Media                   []string            // media:// refs from inbound message
+	InitialSteeringMessages []providers.Message // Steering messages from refactor/agent
+	DefaultResponse         string              // Response when LLM returns empty
+	PromptCacheKey          string              // Optional provider prompt cache key override
+	ModelNameOverride       string              // Optional exact model alias override for this isolated turn
+	ModelFallbacksOverride  []string            // Optional exact fallback aliases; non-nil replaces inherited fallbacks
+	AccountRefOverride      string              // Optional concrete account or account-router override for this isolated turn
+	ReasoningEffortOverride string              // Optional reasoning_effort override for this isolated turn
+	EnableSummary           bool                // Whether to trigger summarization
+	SendResponse            bool                // Whether to send response via bus
+	AllowInterimPicoPublish bool                // Whether pico tool-call interim text can be published when SendResponse is false
+	SuppressToolFeedback    bool                // Whether to suppress inline tool feedback messages
+	NoHistory               bool                // If true, don't load session history (for heartbeat)
+	DisableTools            bool                // If true, no provider or runtime tools are callable this turn
+	DisablePromptCache      bool                // If true, omit provider prompt cache key
+	SkipInitialSteeringPoll bool                // If true, skip the steering poll at loop start (used by Continue)
+
+	trackedResultOutputOwner *trackedSubagentResultOutputOwner // outer response owner releases late-result pumping
+	requireExistingSession   bool                              // strict continuation must not create/admit a missing key
+	retainSessionUntilOutput bool                              // exact result continuation keeps ownership through output
+
+	InboundContext  *bus.InboundContext     // Normalized inbound facts for events/hooks
+	RouteResult     *routing.ResolvedRoute  // Route decision snapshot for events/hooks
+	SessionScope    *session.SessionScope   // Session scope snapshot for events/hooks
+	turnReservation *turnState              // exact root/continuation placeholder, process-local only
+	resultModelName *string                 // private caller-owned successful model provenance
+	resultUsage     *[]workflows.AgentUsage // private caller-owned detached per-model usage
+	usageObserver   workflows.AgentUsageObserver
+	callAdmission   workflows.AgentCallAdmission
 }
 
 type continuationTarget struct {
@@ -659,6 +670,7 @@ func (al *AgentLoop) Stop() {
 	al.runtimeGateStopped = true
 	al.signalRuntimeGateChangedLocked()
 	al.runtimeGateMu.Unlock()
+	al.cancelTrackedSubagentWorkers()
 	al.runLifecycleMu.Lock()
 	al.runStopRequested = true
 	cancel := al.runCancel
@@ -690,6 +702,7 @@ func (al *AgentLoop) WaitStopped(ctx context.Context) error {
 // Close releases quiesced registry, session, context, and generation resources.
 // Call after Stop.
 func (al *AgentLoop) Close() {
+	al.cancelTrackedSubagentWorkers()
 	mcpManager := al.mcp.takeManager()
 	evolution := al.currentEvolutionBridge()
 	if evolution != nil {
@@ -1045,14 +1058,25 @@ func (al *AgentLoop) runAgentLoop(
 	if err != nil {
 		return "", err
 	}
-	if admissionErr := admitSessionMetadata(
-		ctx,
-		agent.Sessions,
-		opts.Dispatch.SessionKey,
-		opts.Dispatch.SessionScope,
-		opts.Dispatch.SessionAliases,
-		agent.ID,
-	); admissionErr != nil {
+	var admissionErr error
+	if opts.requireExistingSession {
+		admissionErr = validateTrackedSubagentExistingSession(
+			ctx,
+			agent,
+			opts.Dispatch.SessionKey,
+			opts.Dispatch.SessionScope,
+		)
+	} else {
+		admissionErr = admitSessionMetadata(
+			ctx,
+			agent.Sessions,
+			opts.Dispatch.SessionKey,
+			opts.Dispatch.SessionScope,
+			opts.Dispatch.SessionAliases,
+			agent.ID,
+		)
+	}
+	if admissionErr != nil {
 		return "", fmt.Errorf("admit live session scope: %w", admissionErr)
 	}
 
@@ -1076,6 +1100,12 @@ func (al *AgentLoop) runAgentLoop(
 		newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope),
 	)
 	ts := newTurnState(agent, opts, turnScope)
+	outputOwner := opts.trackedResultOutputOwner
+	if outputOwner == nil {
+		outputOwner = &trackedSubagentResultOutputOwner{}
+		defer outputOwner.release(al)
+	}
+	outputOwner.record(al, ts.turnID, opts.Dispatch.SessionKey)
 	if opts.resultUsage != nil {
 		defer func() {
 			*opts.resultUsage = cloneWorkflowAgentUsage(ts.workflowAgentUsageSnapshot())

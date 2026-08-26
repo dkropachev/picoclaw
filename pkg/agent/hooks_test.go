@@ -905,6 +905,22 @@ type respondHook struct {
 	respondTools map[string]bool // tool names to respond to
 }
 
+type steeringRespondHook struct {
+	respondHook
+	steer    func() error
+	steerErr error
+}
+
+func (h *steeringRespondHook) BeforeTool(
+	ctx context.Context,
+	call *ToolCallHookRequest,
+) (*ToolCallHookRequest, HookDecision, error) {
+	if h.respondTools[call.Tool] && h.steer != nil {
+		h.steerErr = h.steer()
+	}
+	return h.respondHook.BeforeTool(ctx, call)
+}
+
 func (h *respondHook) BeforeTool(
 	ctx context.Context,
 	call *ToolCallHookRequest,
@@ -1437,8 +1453,13 @@ func TestAgentLoop_HookRespond_SteeringSkipsRemaining(t *testing.T) {
 	al.RegisterTool(&slowTool{name: "tool_two", duration: 100 * time.Millisecond})
 	al.RegisterTool(&slowTool{name: "tool_three", duration: 100 * time.Millisecond})
 
-	hook := &respondHook{
-		respondTools: map[string]bool{"tool_one": true},
+	hook := &steeringRespondHook{
+		respondHook: respondHook{
+			respondTools: map[string]bool{"tool_one": true},
+		},
+		steer: func() error {
+			return al.Steer(providers.Message{Role: "user", Content: "change direction"})
+		},
 	}
 	if err := al.MountHook(NamedHook("respond-hook", hook)); err != nil {
 		t.Fatalf("MountHook failed: %v", err)
@@ -1448,66 +1469,32 @@ func TestAgentLoop_HookRespond_SteeringSkipsRemaining(t *testing.T) {
 		t,
 		al,
 		32,
-		runtimeevents.KindAgentToolExecEnd,
 		runtimeevents.KindAgentToolExecSkipped,
 	)
 	defer closeRuntimeEvents()
 
 	sessionKey := session.BuildMainSessionKey(routing.DefaultAgentID)
-
-	type result struct {
-		resp string
-		err  error
+	if _, err := al.ProcessDirectWithChannel(
+		context.Background(),
+		"run tools",
+		sessionKey,
+		"cli",
+		"chat1",
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	resultCh := make(chan result, 1)
-	go func() {
-		resp, err := al.ProcessDirectWithChannel(
-			context.Background(),
-			"run tools",
-			sessionKey,
-			"cli",
-			"chat1",
-		)
-		resultCh <- result{resp: resp, err: err}
-	}()
-
-	collectedEvents := make([]runtimeevents.Event, 0, 8)
-	steered := false
-	deadline := time.After(3 * time.Second)
-	for !steered {
-		select {
-		case evt := <-runtimeCh:
-			collectedEvents = append(collectedEvents, evt)
-			if evt.Kind != runtimeevents.KindAgentToolExecEnd {
-				continue
-			}
-			payload, ok := evt.Payload.(ToolExecEndPayload)
-			if !ok || payload.Tool != "tool_one" {
-				continue
-			}
-			al.Steer(providers.Message{Role: "user", Content: "change direction"})
-			steered = true
-		case <-deadline:
-			t.Fatal("timeout waiting for tool_one to finish before steering")
-		}
+	if hook.steerErr != nil {
+		t.Fatalf("synchronous steering failed: %v", hook.steerErr)
 	}
 
-	select {
-	case r := <-resultCh:
-		if r.err != nil {
-			t.Fatalf("unexpected error: %v", r.err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for result")
-	}
-
-	events := append(collectedEvents, collectRuntimeEventStream(runtimeCh)...)
+	events := collectRuntimeEventStream(runtimeCh)
 
 	skippedEvts := filterRuntimeEvents(events, runtimeevents.KindAgentToolExecSkipped)
-	if len(skippedEvts) < 1 {
-		t.Fatal("expected at least one ToolExecSkipped event after steering")
+	if len(skippedEvts) != 2 {
+		t.Fatalf("skipped event count = %d, want 2", len(skippedEvts))
 	}
 
+	skippedTools := make(map[string]bool, len(skippedEvts))
 	for _, evt := range skippedEvts {
 		payload, ok := evt.Payload.(ToolExecSkippedPayload)
 		if !ok {
@@ -1515,6 +1502,12 @@ func TestAgentLoop_HookRespond_SteeringSkipsRemaining(t *testing.T) {
 		}
 		if payload.Reason != "queued user steering message" {
 			t.Fatalf("expected skip reason 'queued user steering message', got %q", payload.Reason)
+		}
+		skippedTools[payload.Tool] = true
+	}
+	for _, toolName := range []string{"tool_two", "tool_three"} {
+		if !skippedTools[toolName] {
+			t.Fatalf("missing skipped event for %s: %#v", toolName, skippedTools)
 		}
 	}
 }

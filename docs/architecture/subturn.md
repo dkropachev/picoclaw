@@ -16,6 +16,10 @@ By using a SubTurn, an agent can break down a problem and run a separate LLM inv
   - **Maximum Concurrency**: Up to 5 concurrent sub-turns per parent turn (managed via a semaphore with a 30-second timeout).
 - **Context Protection**: Supports soft context limits (`MaxContextRunes`). It proactively truncates old messages (while preserving system prompts and recent context) before hitting the provider's hard context window limit.
 - **Error Recovery**: Automatically detects and recovers from provider context length exceeded errors and truncation errors by compressing history and retrying.
+- **Tracked Spawn Delivery**: `spawn` is backgrounded by its owner-local
+  manager, but its direct SubTurn uses `Async:false`. One committed manager
+  completion enters an exact-named-session, composite-ID result envelope rather
+  than the legacy direct-SubTurn pending channel.
 
 ## Configuration (`SubTurnConfig`)
 
@@ -34,6 +38,11 @@ When spawning a SubTurn, you must provide a `SubTurnConfig`:
 | `MaxContextRunes`| `int` | Soft context limit. `0` = auto-calculate (75% of model's context window, recommended), `-1` = no limit (disable soft truncation, rely only on hard context error recovery), `>0` = use specified rune limit. |
 
 > **Note:** The `Async` flag does **not** make the call non-blocking. It only controls whether the result is also delivered to the parent's `pendingResults` channel. Both modes block the caller until the sub-turn completes. For true non-blocking execution, the caller must spawn the sub-turn in a separate goroutine.
+
+The first-party `spawn` tool follows that rule deliberately: its manager owns
+the background goroutine and invokes the direct child with `Async:false` and
+`Critical:true`. Its result is delivered through the tracked envelope described
+below. Generic callers of `SpawnSubTurn` retain the modes in this section.
 
 ## Execution Modes
 
@@ -103,7 +112,10 @@ SubTurns operate within an independent context but maintain a structural link to
 ### Graceful Parent Finish
 When the parent task finishes naturally:
 - **Non-critical** sub-turns receive a signal to exit gracefully without throwing an error.
-- **Critical** (`Critical: true`) sub-turns continue running in the background. Once finished, their results are emitted as **Orphan Results** so the data is not lost.
+- **Critical** (`Critical: true`) sub-turns continue running in the background.
+  A direct `Async:true` caller may subsequently classify its legacy-channel
+  result as orphaned; tracked `spawn` instead offers one exact-session result
+  envelope that can start a late continuation.
 
 An error or panic is not a graceful finish: every nonterminal descendant,
 including critical work, is cancellation-requested and ends with error status.
@@ -139,12 +151,16 @@ This ensures that:
 - Messages from the **same session** are strictly **serialized** — they go to the steering queue and are processed sequentially within the active turn
 - No background drain goroutine is needed; steering is handled by the worker itself after processing
 
-### Pending Result Polling
+### Legacy Direct-SubTurn Result Polling
 
-The agent loop polls for async SubTurn results at two points per iteration:
+For direct callers that select `Async:true`, the agent loop polls the
+compatibility `pendingResults` channel at the established checkpoints:
 1. **Before the LLM call**: injects any arrived results as `[SubTurn Result]` messages into the conversation context.
-2. **After all tool executions**: polls again during the tool loop to catch results that arrived during tool execution.
-3. **After the final iteration**: one last poll before the turn ends to avoid losing late-arriving results.
+2. **After each tool/hook-response checkpoint**: polls during the tool loop to catch results that arrived during tool execution.
+
+There is no compatibility-channel terminal drain. A result that arrives after
+the last checkpoint is classified by the legacy parent-terminal policy below;
+only tracked `spawn` receives the exact-session terminal wake described next.
 
 Each turn receives a buffered mailbox before active publication. The mailbox
 is never closed; `Finished` is the terminal signal and garbage collection owns
@@ -153,6 +169,59 @@ so each async result is classified exactly once. A running parent with space
 receives it; a terminal parent, missing mailbox, nil result, or full channel
 emits an orphan with reason `parent_finished`,
 `parent_mailbox_unavailable`, `nil_result`, or `channel_full`.
+
+Tracked `spawn` never writes this channel.
+
+### Tracked Spawn Result Delivery
+
+`spawn` returns its manager-local `subagent-N` acknowledgement immediately.
+The manager owns the only background goroutine and runs the direct SubTurn with
+`Async:false` and `Critical:true`. After it commits `completed`, `failed`, or
+`canceled`, its sole callback carries the committed task ID/status and offers
+one filtered, bounded result envelope to AgentLoop delivery.
+
+The envelope freezes the exact named destination agent/session/channel/chat and
+uses the source parent turn ID plus manager-local task ID as its composite
+identity. This matters because separate owner-local managers can both allocate
+`subagent-1`. Identical callback replay is ignored, while conflicting identity
+reuse or an invalid route/result is orphaned rather than overwriting another
+completion.
+
+The model-visible form is
+`[Subagent Result task_id=... status=... source_turn_id=...] ...`, so nested
+owner-local ID reuse remains distinguishable. A future active turn may claim
+only when agent, canonical session, semantic scope, channel, and chat all match
+the frozen route. The late continuation reapplies the root's effective profile
+and process caps; it retains no full parent prompt/context snapshot.
+
+An eligible active turn claims the envelope at a result checkpoint. If the
+named session is idle when the child finishes, one continuation claims it and
+resolves only that named agent/session through a fresh coherent runtime
+generation. It never routes through raw callback `ForUser` output, synthetic
+`system` inbound, or the default agent/session. Claim is terminal: a later
+provider, persistence, finalization, cancellation, or publication failure does
+not replay the envelope because replay could expose it twice.
+
+Late pumping waits until the original output owner finishes publication, then
+uses one exact placeholder. Placeholder deletion wakes pending results, and
+same-session steering committed during the continuation is drained through the
+same strict agent/scope route. Manual steering fallback is never consumed. A
+result claimed at the final tool checkpoint permits one additional no-tool LLM
+call but cannot extend the configured tool loop.
+
+The late path performs strict non-creating session reads both before claim and
+at the run boundary. Linearizing a concurrent external administrative session
+deletion against later history appends requires the process/session ownership
+work planned after P007; this in-memory mailbox does not itself add a new
+cross-component deletion transaction.
+
+This is process-lifetime, in-memory at-most-once delivery. It is not durable
+across crash/restart and does not promise exactly-once provider execution.
+Generic asynchronous tool callbacks, direct `Async:true` SubTurns,
+`subagent`, `delegate`, and `/subagents` keep their existing behavior.
+An explicitly authorized child `message` call also remains a separate tool
+side effect; the single-envelope guarantee governs terminal completion
+delivery, not independently requested child delivery actions.
 
 ### Turn State Tracking
 
@@ -166,8 +235,8 @@ SubTurns emit runtime events through `pkg/events` for observability and debuggin
 |:------|:-------------|:--------|
 | `agent.subturn.spawn` | Sub-turn successfully initialized | `SubTurnSpawnPayload{AgentID, Label, ParentTurnID}` |
 | `agent.subturn.end` | Sub-turn finishes (success or error) | `SubTurnEndPayload{AgentID, Status}` |
-| `agent.subturn.result_delivered` | Async result successfully delivered to parent | `SubTurnResultDeliveredPayload{TargetChannel, TargetChatID, ContentLen}` |
-| `agent.subturn.orphan` | Result cannot be delivered (parent finished or channel full) | `SubTurnOrphanPayload{ParentTurnID, ChildTurnID, Reason}` |
+| `agent.subturn.result_delivered` | Direct `Async:true` result reaches its compatibility parent channel, or a tracked envelope is claimed by its exact turn | `SubTurnResultDeliveredPayload{TargetChannel, TargetChatID, SourceTurnID, TaskID, Status, ContentLen}` |
+| `agent.subturn.orphan` | A direct `Async:true` result cannot use its compatibility parent channel, or a tracked envelope fails admission/routing before claim | `SubTurnOrphanPayload{ParentTurnID, ChildTurnID, SourceTurnID, TaskID, Status, Reason}` |
 
 ## API Reference
 
@@ -264,13 +333,16 @@ SubTurns are designed for concurrent execution:
   pointer and ID before traversal.
 - **Active turn tracking**: Uses `sync.Map` for concurrent access to `activeTurnStates`
 - **ID generation**: Uses `atomic.Int64` for unique SubTurn IDs (format: `subturn-N`, globally monotonic per `AgentLoop` instance)
-- **Result delivery**: Performs one non-blocking send while holding the same
-  parent lock used by terminal commitment; no channel close or panic recovery
-  is part of synchronization.
+- **Direct async result delivery**: Performs one non-blocking compatibility-
+  channel send while holding the same parent lock used by terminal commitment;
+  no channel close or panic recovery is part of synchronization.
+- **Tracked spawn result delivery**: Atomically deduplicates a composite source-
+  turn/task ID, reserves at most one exact-session continuation, and makes claim
+  terminal before model execution so the same completion cannot be replayed.
 
-## Orphan Results
+## Direct Async Orphan Results
 
-An orphan result occurs when:
+For a direct `Async:true` SubTurn, an orphan result occurs when:
 1. Parent turn finishes before the SubTurn completes
 2. The `pendingResults` channel is full (buffer size: 16)
 
@@ -283,6 +355,11 @@ When a result becomes orphan:
 - Use `Critical: true` for important SubTurns that must complete
 - Monitor `agent.subturn.orphan` for observability
 - Consider the 16-buffer limit when spawning many async SubTurns
+
+Tracked `spawn` does not use this 16-entry compatibility channel. Its separate
+envelope can continue the exact named session after the spawning turn exits,
+but invalid/conflicting/full admission is still orphaned and process exit loses
+unclaimed in-memory state.
 
 ## Tool Inheritance
 
@@ -314,5 +391,5 @@ cfg := agent.SubTurnConfig{
 | `concurrencyTimeout` | 30s |
 | `defaultSubTurnTimeout` | 5m |
 | `maxEphemeralHistorySize` | 50 messages |
-| `pendingResults` buffer | 16 |
+| direct `Async:true` `pendingResults` buffer | 16 |
 | `MaxContextRunes` default | 75% of model context window |

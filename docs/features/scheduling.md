@@ -15,7 +15,7 @@ through channels or run gated shell commands.
 - Similarity target: recreate cron tool actions, persistent job storage, CLI job management, execution delivery modes, command gates, and heartbeat scheduling.
 - Core types/functions: cron tool, job parser/store, Cobra cron subcommands, heartbeat service, gateway delivery handler, and exec gate checks.
 - Runtime ordering: parse schedule, validate command/delivery gates, persist job, list/enable/disable/remove, run due jobs, route delivered prompts or execute command jobs.
-- Non-obvious constraints: command jobs require both cron and exec permissions, disabled jobs stay stored, and heartbeat uses ordinary agent execution.
+- Non-obvious constraints: command jobs require both cron and exec permissions, disabled jobs stay stored, heartbeat uses ordinary agent execution, and a concrete agent loop publishes a scheduled direct response before releasing tracked-result output ownership.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ through channels or run gated shell commands.
 | `FR-SCHED-004` | MUST | Command jobs require cron command enablement and exec remote permission gates before shell execution. | Scheduled shell execution is high risk. |
 | `FR-SCHED-005` | MUST | CLI cron add/list/enable/disable/remove reflects persisted job state. | Operators need direct schedule management. |
 | `FR-SCHED-006` | SHOULD | Heartbeat prompts run on configured interval and share the normal agent execution path. | Periodic assistant behavior should stay consistent. |
-| `FR-SCHED-007` | MUST | Gateway-owned cron commands, cron agent turns, heartbeat prompts, and workflow schedules acquire the exact config generation that created them before effects. A cron service obtains that admission before clearing and persisting a due occurrence and holds it through callback bookkeeping; reload starts replacement cron only after other fallible initialization. Already-due durable occurrences remain due across restart, while stale candidate or cached schedule work is rejected without executing commands, creating workflow runs, or publishing trigger telemetry. | Background schedules must not escape the reload transaction, lose a one-shot occurrence, execute against another workspace, or observe provisional provider/config state. |
+| `FR-SCHED-007` | MUST | Gateway-owned cron commands, cron agent turns, heartbeat prompts, and workflow schedules acquire the exact config generation that created them before effects. A cron service obtains that admission before clearing and persisting a due occurrence and holds it through callback bookkeeping; reload starts replacement cron only after other fallible initialization. When its executor supports the concrete direct-publishing boundary, an agent cron turn publishes or suppresses the root response inside that boundary before tracked child-result pumping may resume; compatibility executors retain the separate response callback. Already-due durable occurrences remain due across restart, while stale candidate or cached schedule work is rejected without executing commands, creating workflow runs, or publishing trigger telemetry. | Background schedules must not escape the reload transaction, lose a one-shot occurrence, reorder a tracked child result ahead of its root response, execute against another workspace, or observe provisional provider/config state. |
 
 ## Data And State Model
 
@@ -58,6 +58,7 @@ Owns: TOOL cron
 | Tool | `cron` | Agent-callable scheduling actions. | `FR-SCHED-001` through `FR-SCHED-004` |
 | Config | `tools.cron.*`, `heartbeat.*` | Command gates, timeout, allowed remotes, and heartbeat interval. | `FR-SCHED-004`, `FR-SCHED-006` |
 | Runtime | `AgentLoop.AcquireRuntimeGeneration`, gateway reload lifecycle | Fence due work to its originating config/provider generation and activate replacement cron only after fallible service setup. | `FR-SCHED-007` |
+| Runtime | optional direct-publishing job executor | Keep a scheduled root response inside the agent turn's tracked-result output boundary, with compatibility fallback for alternate executors. | `FR-SCHED-007` |
 
 ## Algorithms And Ordering
 
@@ -75,6 +76,9 @@ Owns: TOOL cron
    discards the old cache, and admits asynchronous runs before goroutine
    launch. Reload initializes replacement services with cron stopped, starts
    cron last, and resumes the generation gate only after commit or rollback.
+8. A concrete AgentLoop executor publishes the scheduled agent response inside
+   its direct output-owner boundary; alternate JobExecutor implementations use
+   the historical separate `PublishResponseIfNeeded` callback.
 
 ## Cross-Feature Behavior
 

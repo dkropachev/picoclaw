@@ -24,6 +24,13 @@ type JobExecutor interface {
 	PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string)
 }
 
+type directPublishingJobExecutor interface {
+	ProcessDirectWithChannelAndPublish(
+		ctx context.Context,
+		content, sessionKey, channel, chatID string,
+	) (string, error)
+}
+
 type cronRuntimeGenerationGuard interface {
 	AcquireRuntimeGeneration(
 		ctx context.Context,
@@ -662,18 +669,31 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, uuid.New().String())
 
 	// Call agent with the job message
-	response, err := t.executor.ProcessDirectWithChannel(
-		ctx,
-		job.Payload.Message,
-		sessionKey,
-		channel,
-		chatID,
-	)
+	var response string
+	var err error
+	_, publishesDirectly := t.executor.(directPublishingJobExecutor)
+	if publisher, ok := t.executor.(directPublishingJobExecutor); ok {
+		response, err = publisher.ProcessDirectWithChannelAndPublish(
+			ctx,
+			job.Payload.Message,
+			sessionKey,
+			channel,
+			chatID,
+		)
+	} else {
+		response, err = t.executor.ProcessDirectWithChannel(
+			ctx,
+			job.Payload.Message,
+			sessionKey,
+			channel,
+			chatID,
+		)
+	}
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err)
 	}
 
-	if response != "" {
+	if response != "" && !publishesDirectly {
 		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, response)
 	}
 	return "ok"

@@ -84,6 +84,46 @@ func waitForTrackedTaskStatus(
 	return SubagentTask{}
 }
 
+func TestSubagentCompletionFromContextReturnsDetachedValue(t *testing.T) {
+	if _, ok := SubagentCompletionFromContext(nil); ok {
+		t.Fatal("nil context unexpectedly carried a subagent completion")
+	}
+	if _, ok := SubagentCompletionFromContext(context.Background()); ok {
+		t.Fatal("background context unexpectedly carried a subagent completion")
+	}
+
+	ctx := withSubagentCompletion(context.Background(), SubagentCompletion{
+		TaskID: "subagent-7",
+		Status: subagentTaskStatusCompleted,
+	})
+	first, ok := SubagentCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("completion context value missing")
+	}
+	first.TaskID = "mutated"
+	first.Status = "mutated"
+	if first.TaskID != "mutated" || first.Status != "mutated" {
+		t.Fatalf("local completion mutation did not apply: %#v", first)
+	}
+	second, ok := SubagentCompletionFromContext(ctx)
+	if !ok || second.TaskID != "subagent-7" || second.Status != subagentTaskStatusCompleted {
+		t.Fatalf("detached completion = %#v, %t", second, ok)
+	}
+}
+
+type forgedSubagentCompletionContext struct{ context.Context }
+
+func (forgedSubagentCompletionContext) Value(any) any {
+	return SubagentCompletion{TaskID: "forged", Status: subagentTaskStatusCompleted}
+}
+
+func TestSubagentCompletionFromContextRejectsForgedExportedValue(t *testing.T) {
+	ctx := forgedSubagentCompletionContext{Context: context.Background()}
+	if completion, ok := SubagentCompletionFromContext(ctx); ok {
+		t.Fatalf("forged completion accepted: %#v", completion)
+	}
+}
+
 func TestSpawnToolTrackedLifecycleIsImmediateAndSnapshotBound(t *testing.T) {
 	manager := NewSubagentManager(&MockLLMProvider{}, "model-a", t.TempDir())
 	manager.SetDefaultModelFallbacks([]string{"fallback-a"})
@@ -165,10 +205,47 @@ func TestSpawnToolTrackedLifecycleIsImmediateAndSnapshotBound(t *testing.T) {
 	config := spawner.configSnapshot()
 	if config.Model != "model-a" || len(config.ModelFallbacks) != 1 ||
 		config.ModelFallbacks[0] != "fallback-a" || config.MaxTokens != 1234 ||
-		config.Temperature != 0.25 || !config.Async || !config.Critical ||
+		config.Temperature != 0.25 || config.Async || !config.Critical ||
 		config.Tools != nil || config.TargetAgentID != "target-agent" ||
 		!strings.Contains(config.SystemPrompt, "tracked task") {
 		t.Fatalf("detached tracked config = %#v", config)
+	}
+}
+
+func TestSpawnToolFastCompletionCallbackCarriesCommittedIdentity(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "model", t.TempDir())
+	spawner := &trackedSpawnTestSpawner{result: NewToolResult("fast completion")}
+	tool := NewSpawnTool(manager)
+	tool.SetSpawner(spawner)
+	type callbackObservation struct {
+		completion SubagentCompletion
+		found      bool
+		result     *ToolResult
+	}
+	observed := make(chan callbackObservation, 1)
+	ack := tool.ExecuteAsync(
+		context.Background(),
+		map[string]any{"task": "finish immediately"},
+		func(ctx context.Context, result *ToolResult) {
+			completion, ok := TrackedSpawnCompletionFromContext(ctx)
+			observed <- callbackObservation{completion: completion, found: ok, result: result}
+		},
+	)
+	if ack == nil || ack.IsError || !ack.Async {
+		t.Fatalf("fast acknowledgement = %#v", ack)
+	}
+	select {
+	case observation := <-observed:
+		if !observation.found || observation.completion.TaskID != "subagent-1" ||
+			observation.completion.Status != subagentTaskStatusCompleted {
+			t.Fatalf("fast callback completion = %#v, found=%t",
+				observation.completion, observation.found)
+		}
+		if observation.result == nil || observation.result.ForLLM != "fast completion" {
+			t.Fatalf("fast callback result = %#v", observation.result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fast completion callback did not run")
 	}
 }
 
@@ -188,6 +265,115 @@ func TestSpawnToolPreparationFailureCreatesNoTrackedRecord(t *testing.T) {
 	if spawner.runCalls.Load() != 0 || len(manager.ListTaskCopies()) != 0 {
 		t.Fatalf("preparation effects = runs:%d tasks:%#v",
 			spawner.runCalls.Load(), manager.ListTaskCopies())
+	}
+}
+
+func TestSpawnToolAdmissionObserverFailureReleasesWithoutTask(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "model", t.TempDir())
+	spawner := &trackedSpawnTestSpawner{result: NewToolResult("must not run")}
+	tool := NewSpawnTool(manager)
+	tool.SetSpawner(spawner)
+	var observed atomic.Int64
+	ctx := WithTrackedSpawnAdmissionObserver(context.Background(), func() error {
+		observed.Add(1)
+		if len(manager.ListTaskCopies()) != 0 {
+			t.Error("observer ran after manager task insertion")
+		}
+		return errors.New("route rejected")
+	})
+	result := tool.ExecuteAsync(ctx, map[string]any{"task": "reject route"}, func(
+		context.Context,
+		*ToolResult,
+	) {
+		t.Error("unexpected callback")
+	})
+	if result == nil || !result.IsError || !strings.Contains(result.ForLLM, "route rejected") {
+		t.Fatalf("observer rejection = %#v", result)
+	}
+	if observed.Load() != 1 || spawner.prepared.Load() != 1 ||
+		spawner.finalized.Load() != 1 || spawner.runCalls.Load() != 0 ||
+		len(manager.ListTaskCopies()) != 0 {
+		t.Fatalf(
+			"observer rejection effects = observed:%d prepared:%d finalized:%d runs:%d tasks:%d",
+			observed.Load(),
+			spawner.prepared.Load(),
+			spawner.finalized.Load(),
+			spawner.runCalls.Load(),
+			len(manager.ListTaskCopies()),
+		)
+	}
+}
+
+func TestSpawnToolAdmissionObserverPrecedesManagerLaunch(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "model", t.TempDir())
+	spawner := &trackedSpawnTestSpawner{
+		result:     NewToolResult("observed launch"),
+		runEntered: make(chan struct{}),
+	}
+	tool := NewSpawnTool(manager)
+	tool.SetSpawner(spawner)
+	var observed atomic.Bool
+	ctx := WithTrackedSpawnAdmissionObserver(context.Background(), func() error {
+		if !observed.CompareAndSwap(false, true) {
+			t.Error("observer ran more than once")
+		}
+		if len(manager.ListTaskCopies()) != 0 {
+			t.Error("observer ran after manager task insertion")
+		}
+		return nil
+	})
+	callback := make(chan struct{}, 1)
+	ack := tool.ExecuteAsync(ctx, map[string]any{"task": "observe route"}, func(
+		ctx context.Context,
+		_ *ToolResult,
+	) {
+		if _, ok := TrackedSpawnCompletionFromContext(ctx); !ok {
+			t.Error("first-party callback lost provenance")
+		}
+		callback <- struct{}{}
+	})
+	if ack == nil || ack.IsError || !ack.Async || !observed.Load() {
+		t.Fatalf("observed acknowledgement = %#v, observed=%v", ack, observed.Load())
+	}
+	select {
+	case <-spawner.runEntered:
+	case <-time.After(time.Second):
+		t.Fatal("manager runner did not launch")
+	}
+	select {
+	case <-callback:
+	case <-time.After(time.Second):
+		t.Fatal("manager callback did not finish")
+	}
+}
+
+func TestSpawnToolAdmissionObserverPanicReleasesWithoutTask(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "model", t.TempDir())
+	spawner := &trackedSpawnTestSpawner{result: NewToolResult("must not run")}
+	tool := NewSpawnTool(manager)
+	tool.SetSpawner(spawner)
+	ctx := WithTrackedSpawnAdmissionObserver(context.Background(), func() error {
+		panic("observer panic")
+	})
+	result := tool.ExecuteAsync(ctx, map[string]any{"task": "panic route"}, func(
+		context.Context,
+		*ToolResult,
+	) {
+		t.Error("unexpected callback")
+	})
+	if result == nil || !result.IsError ||
+		!strings.Contains(result.ForLLM, "admission observer panicked") {
+		t.Fatalf("observer panic result = %#v", result)
+	}
+	if spawner.prepared.Load() != 1 || spawner.finalized.Load() != 1 ||
+		spawner.runCalls.Load() != 0 || len(manager.ListTaskCopies()) != 0 {
+		t.Fatalf(
+			"observer panic effects = prepared:%d finalized:%d runs:%d tasks:%d",
+			spawner.prepared.Load(),
+			spawner.finalized.Load(),
+			spawner.runCalls.Load(),
+			len(manager.ListTaskCopies()),
+		)
 	}
 }
 
@@ -270,16 +456,29 @@ func TestSubagentManagerTrackedTerminalOutcomes(t *testing.T) {
 				runs.Add(1)
 				return testCase.runner(ctx, task)
 			}
-			callback := make(chan *ToolResult, 1)
+			type callbackObservation struct {
+				completion SubagentCompletion
+				found      bool
+				result     *ToolResult
+			}
+			callback := make(chan callbackObservation, 1)
 			finalized := make(chan struct{})
 			taskID, err := manager.spawnTracked(
 				testCase.ctx(), "task", "label", "", subagentTaskOrigin{}, runner,
-				func(_ context.Context, result *ToolResult) {
+				func(ctx context.Context, result *ToolResult) {
 					task, _ := manager.GetTaskCopy("subagent-1")
 					if task.Status == subagentTaskStatusRunning {
 						t.Error("callback ran before terminal commit")
 					}
-					callback <- result
+					completion, ok := SubagentCompletionFromContext(ctx)
+					if _, tracked := TrackedSpawnCompletionFromContext(ctx); tracked {
+						t.Error("direct manager callback carried first-party spawn provenance")
+					}
+					callback <- callbackObservation{
+						completion: completion,
+						found:      ok,
+						result:     result,
+					}
 				},
 				func() { close(finalized) },
 			)
@@ -287,9 +486,15 @@ func TestSubagentManagerTrackedTerminalOutcomes(t *testing.T) {
 				t.Fatalf("spawnTracked() = %q, %v", taskID, err)
 			}
 			select {
-			case result := <-callback:
-				if result == nil || (testCase.wantStatus != subagentTaskStatusCompleted && !result.IsError) {
-					t.Fatalf("terminal callback result = %#v", result)
+			case observation := <-callback:
+				if !observation.found || observation.completion.TaskID != taskID ||
+					observation.completion.Status != testCase.wantStatus {
+					t.Fatalf("terminal callback completion = %#v, found=%t",
+						observation.completion, observation.found)
+				}
+				if observation.result == nil ||
+					(testCase.wantStatus != subagentTaskStatusCompleted && !observation.result.IsError) {
+					t.Fatalf("terminal callback result = %#v", observation.result)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("terminal callback did not run")
@@ -304,6 +509,75 @@ func TestSubagentManagerTrackedTerminalOutcomes(t *testing.T) {
 				t.Fatalf("terminal task = %#v, runs=%d", task, runs.Load())
 			}
 		})
+	}
+}
+
+func TestSubagentManagerOnlyWinningTerminalCommitInvokesCallback(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "model", t.TempDir())
+	manager.mu.Lock()
+	manager.tasks["subagent-1"] = &SubagentTask{
+		ID:     "subagent-1",
+		Task:   "competing completion",
+		Status: subagentTaskStatusRunning,
+	}
+	manager.mu.Unlock()
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	callbacks := make(chan struct {
+		completion SubagentCompletion
+		result     *ToolResult
+	}, 2)
+	finalized := make(chan struct{}, 2)
+	run := func(content string) {
+		manager.runTask(
+			context.Background(),
+			"subagent-1",
+			func(context.Context, SubagentTask) (*ToolResult, error) {
+				entered <- struct{}{}
+				<-release
+				return NewToolResult(content), nil
+			},
+			func(ctx context.Context, result *ToolResult) {
+				completion, ok := SubagentCompletionFromContext(ctx)
+				if !ok {
+					t.Error("winning callback missing completion identity")
+				}
+				callbacks <- struct {
+					completion SubagentCompletion
+					result     *ToolResult
+				}{completion: completion, result: result}
+			},
+			func() { finalized <- struct{}{} },
+		)
+	}
+	go run("first")
+	go run("second")
+	<-entered
+	<-entered
+	close(release)
+	<-finalized
+	<-finalized
+
+	var callback struct {
+		completion SubagentCompletion
+		result     *ToolResult
+	}
+	select {
+	case callback = <-callbacks:
+	default:
+		t.Fatal("winning terminal transition did not invoke callback")
+	}
+	select {
+	case duplicate := <-callbacks:
+		t.Fatalf("losing terminal transition invoked callback: %#v", duplicate)
+	default:
+	}
+	task, ok := manager.GetTaskCopy("subagent-1")
+	if !ok || callback.result == nil || callback.completion.TaskID != task.ID ||
+		callback.completion.Status != task.Status || callback.result.ForLLM != task.Result {
+		t.Fatalf("winning callback/task mismatch: callback=%#v task=%#v",
+			callback, task)
 	}
 }
 

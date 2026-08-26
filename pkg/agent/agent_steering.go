@@ -50,6 +50,9 @@ func (al *AgentLoop) runTurnWithSteering(
 	prepared bool,
 ) bool {
 	outboundEnqueued := false
+	trackedResultOwner := &trackedSubagentResultOutputOwner{}
+	ctx = withTrackedSubagentResultOutputOwner(ctx, trackedResultOwner)
+	defer trackedResultOwner.release(al)
 
 	// Process the initial message
 	var response string

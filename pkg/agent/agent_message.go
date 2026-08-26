@@ -47,6 +47,24 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
+	return al.processDirectWithChannel(ctx, content, sessionKey, channel, chatID, false)
+}
+
+// ProcessDirectWithChannelAndPublish keeps the direct turn's output ownership
+// through publication. Scheduled/background callers use this boundary so a
+// late tracked result cannot overtake the response returned by the root turn.
+func (al *AgentLoop) ProcessDirectWithChannelAndPublish(
+	ctx context.Context,
+	content, sessionKey, channel, chatID string,
+) (string, error) {
+	return al.processDirectWithChannel(ctx, content, sessionKey, channel, chatID, true)
+}
+
+func (al *AgentLoop) processDirectWithChannel(
+	ctx context.Context,
+	content, sessionKey, channel, chatID string,
+	publish bool,
+) (string, error) {
 	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
 	if err != nil {
 		return "", err
@@ -54,11 +72,11 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	defer releaseRuntime()
 	ctx = leaseCtx
 
-	if err := al.ensureHooksInitialized(ctx); err != nil {
-		return "", err
+	if hookErr := al.ensureHooksInitialized(ctx); hookErr != nil {
+		return "", hookErr
 	}
-	if err := al.ensureMCPInitialized(ctx); err != nil {
-		return "", err
+	if mcpErr := al.ensureMCPInitialized(ctx); mcpErr != nil {
+		return "", mcpErr
 	}
 
 	msg := bus.InboundMessage{
@@ -71,8 +89,14 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 		Content:    content,
 		SessionKey: sessionKey,
 	}
-
-	return al.processMessage(ctx, msg)
+	outputOwner := &trackedSubagentResultOutputOwner{}
+	ctx = withTrackedSubagentResultOutputOwner(ctx, outputOwner)
+	defer outputOwner.release(al)
+	response, err := al.processMessage(ctx, msg)
+	if err == nil && publish && response != "" {
+		al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, response)
+	}
+	return response, err
 }
 
 func (al *AgentLoop) ProcessHeartbeat(
@@ -351,13 +375,14 @@ func (al *AgentLoop) processMessageWithPreparation(
 			UserMessage:    msg.Content,
 			Media:          append([]string(nil), msg.Media...),
 		},
-		SenderID:                msg.SenderID,
-		SenderDisplayName:       msg.Sender.DisplayName,
-		DefaultResponse:         defaultResponse,
-		EnableSummary:           true,
-		SendResponse:            false,
-		AllowInterimPicoPublish: true,
-		turnReservation:         turnReservationFromContext(ctx),
+		SenderID:                 msg.SenderID,
+		SenderDisplayName:        msg.Sender.DisplayName,
+		DefaultResponse:          defaultResponse,
+		EnableSummary:            true,
+		SendResponse:             false,
+		AllowInterimPicoPublish:  true,
+		trackedResultOutputOwner: trackedSubagentResultOutputOwnerFromContext(ctx),
+		turnReservation:          turnReservationFromContext(ctx),
 	}
 	if msg.Context.Raw != nil {
 		opts.ModelNameOverride = strings.TrimSpace(msg.Context.Raw["model_name"])
