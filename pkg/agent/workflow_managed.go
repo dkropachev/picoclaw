@@ -163,7 +163,8 @@ func (r *workflowAgentRunner) runManagedSplit(
 	metadata["strategy"] = strategy
 	metadata["split"] = workflowManagedSplitMetadata(req, agent, options, strategy, plans)
 	managedSingle := len(plans) == 1 &&
-		(req.ManagedChildObserver != nil || len(options.reviewerModels) > 0)
+		(req.ManagedChildObserver != nil || len(options.reviewerModels) > 0 ||
+			!options.combineStructuredOutputs)
 	if len(plans) == 0 || len(plans) == 1 && !managedSingle {
 		fallbackReq := req
 		fallbackReq.Managed = "off"
@@ -317,6 +318,24 @@ func (r *workflowAgentRunner) runManagedSplit(
 			"successful_children": len(results) - failed,
 			"continued":           true,
 		}
+	}
+	// Domain-owned reducers consume independently validated children. Avoid
+	// applying their per-child schema to an unused synthetic aggregate.
+	if !options.combineStructuredOutputs {
+		outputs = workflowAgentBaseOutputs(
+			"",
+			agentID,
+			sessionKey,
+			historyMode,
+			cacheMode,
+			promptCacheKey,
+			req.MessageID,
+			req.Tools,
+		)
+		outputs["managed"] = metadata
+		outputs["managed_children"] = childOutputs
+		outputs["structured_repairs"] = totalRepairs
+		return outputs, nil
 	}
 
 	combined := workflows.CombineStructuredOutputs(partials, req.Output.Schema)
@@ -1734,7 +1753,9 @@ func workflowManagedSplitStrategy(req workflows.AgentRequest, agent *AgentInstan
 	scopeSplittable := len(workflowManagedScopeChunks(req, options)) > 1
 	taskSplittable := len(tasks) > options.maxTasksPerChunk && options.maxTasksPerChunk > 0
 	reviewerSplittable := len(options.reviewerModels) > 1 ||
-		options.includeDefaultReviewer && len(options.reviewerModels) > 0
+		options.includeDefaultReviewer && len(options.reviewerModels) > 0 ||
+		!options.combineStructuredOutputs &&
+			(len(options.reviewerModels) > 0 || options.includeDefaultReviewer)
 	switch requested {
 	case "scope_split":
 		if scopeSplittable || reviewerSplittable {
@@ -1879,20 +1900,21 @@ func workflowManagedSplitMetadata(
 		)
 	}
 	return map[string]any{
-		"status":                    "split",
-		"strategy":                  strategy,
-		"child_count":               len(plans),
-		"max_items_per_chunk":       options.maxItemsPerChunk,
-		"max_tasks_per_chunk":       options.maxTasksPerChunk,
-		"max_parallel_children":     options.maxParallelChildren,
-		"max_parallel_per_reviewer": options.maxParallelPerReviewer,
-		"reviewer_models":           append([]string(nil), options.reviewerModels...),
-		"include_default_reviewer":  options.includeDefaultReviewer,
-		"adaptive_chunking":         options.adaptiveChunking,
-		"scope_count":               len(workflowScopeItems(req.Scope)),
-		"task_count":                len(workflowAssignedOrAgentTasks(req, agent)),
-		"child_scope_counts":        scopeCounts,
-		"child_task_counts":         taskCounts,
+		"status":                     "split",
+		"strategy":                   strategy,
+		"child_count":                len(plans),
+		"max_items_per_chunk":        options.maxItemsPerChunk,
+		"max_tasks_per_chunk":        options.maxTasksPerChunk,
+		"max_parallel_children":      options.maxParallelChildren,
+		"max_parallel_per_reviewer":  options.maxParallelPerReviewer,
+		"reviewer_models":            append([]string(nil), options.reviewerModels...),
+		"include_default_reviewer":   options.includeDefaultReviewer,
+		"combine_structured_outputs": options.combineStructuredOutputs,
+		"adaptive_chunking":          options.adaptiveChunking,
+		"scope_count":                len(workflowScopeItems(req.Scope)),
+		"task_count":                 len(workflowAssignedOrAgentTasks(req, agent)),
+		"child_scope_counts":         scopeCounts,
+		"child_task_counts":          taskCounts,
 		"token_efficiency": workflowManagedTokenEfficiency(
 			workflows.EstimateAgentPayloadTokens(workflowAgentMessage(req)),
 			childPromptTokens,

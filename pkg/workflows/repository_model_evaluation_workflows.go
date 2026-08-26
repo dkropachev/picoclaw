@@ -268,6 +268,7 @@ jobs:
             max_parallel_per_reviewer: 1
             adaptive_chunking: false
             continue_on_child_error: true
+            combine_structured_outputs: false
             reviewer_models: ${{ inputs.candidate_models }}
             include_default_reviewer: false
             estimated_output_tokens: 1600

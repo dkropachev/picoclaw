@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -12,6 +13,146 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+func TestWorkflowManagedChildrenOnlyUsesPerChildOutputContract(t *testing.T) {
+	contract := &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []any{"summary", "claims", "residualRisks"},
+			"properties": map[string]any{
+				"summary": map[string]any{"type": "string"},
+				"claims": map[string]any{
+					"type":     "array",
+					"maxItems": 32,
+					"items": map[string]any{
+						"type":                 "object",
+						"additionalProperties": false,
+						"required":             []any{"id"},
+						"properties": map[string]any{
+							"id": map[string]any{"type": "string"},
+						},
+					},
+				},
+				"residualRisks": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "string"},
+				},
+			},
+		},
+	}
+	run := func(
+		t *testing.T,
+		models []string,
+		claimCounts map[string]int,
+	) (map[string]any, error) {
+		t.Helper()
+		req := workflows.AgentRequest{
+			Prompt: "Analyze assigned scope.",
+			Managed: map[string]any{
+				"strategy":                   "scope_split",
+				"max_items_per_chunk":        1,
+				"max_parallel_children":      3,
+				"reviewer_models":            models,
+				"combine_structured_outputs": false,
+				"calibration":                map[string]any{"enabled": false},
+			},
+			Scope:  []any{map[string]any{"path": "batch.go"}},
+			Output: contract,
+		}
+		runOnce := func(
+			_ string,
+			_ bool,
+			options workflowAgentRunOptions,
+		) (string, error) {
+			count, exists := claimCounts[options.ModelName]
+			if !exists {
+				return "", fmt.Errorf("unexpected reviewer %q", options.ModelName)
+			}
+			claims := make([]map[string]any, count)
+			for index := range claims {
+				claims[index] = map[string]any{
+					"id": fmt.Sprintf("%s-%02d", options.ModelName, index+1),
+				}
+			}
+			encoded, err := json.Marshal(map[string]any{
+				"summary":       options.ModelName,
+				"claims":        claims,
+				"residualRisks": []string{},
+			})
+			return string(encoded), err
+		}
+		return (&workflowAgentRunner{}).runManagedSplit(
+			req,
+			&AgentInstance{ID: "reviewer", Model: "default"},
+			"reviewer",
+			"workflow:test",
+			"none",
+			"none",
+			"",
+			"scope_split",
+			runOnce,
+		)
+	}
+
+	t.Run("keeps valid child outputs beyond combined bound", func(t *testing.T) {
+		claimCounts := map[string]int{
+			"review-cheap":   8,
+			"review-cheap-2": 8,
+			"review":         19,
+		}
+		outputs, err := run(
+			t,
+			[]string{"review-cheap", "review-cheap-2", "review"},
+			claimCounts,
+		)
+		if err != nil {
+			t.Fatalf("runManagedSplit() error = %v", err)
+		}
+		for _, key := range []string{
+			"structured", "structured_json", "structured_valid", "structured_error",
+		} {
+			if _, exists := outputs[key]; exists {
+				t.Fatalf("children-only output contains %q: %#v", key, outputs[key])
+			}
+		}
+		if outputs["text"] != "" || outputs["structured_repairs"] != 0 {
+			t.Fatalf("children-only aggregate fields = %#v", outputs)
+		}
+		children, ok := outputs["managed_children"].([]map[string]any)
+		if !ok || len(children) != 3 {
+			t.Fatalf("managed children = %#v", outputs["managed_children"])
+		}
+		totalClaims := 0
+		for _, child := range children {
+			if child["valid"] != true {
+				t.Fatalf("invalid managed child = %#v", child)
+			}
+			structured := child["structured"].(map[string]any)
+			totalClaims += len(structured["claims"].([]any))
+		}
+		if totalClaims != 35 {
+			t.Fatalf("retained claims = %d, want 35", totalClaims)
+		}
+		split := outputs["managed"].(map[string]any)["split"].(map[string]any)
+		if split["combine_structured_outputs"] != false {
+			t.Fatalf("managed split metadata = %#v", split)
+		}
+	})
+
+	t.Run("still rejects an oversized child", func(t *testing.T) {
+		outputs, err := run(t, []string{"review"}, map[string]int{"review": 33})
+		if err == nil || !strings.Contains(err.Error(), "at most 32 items") {
+			t.Fatalf("oversized child error = %v", err)
+		}
+		children := outputs["managed_children"].([]map[string]any)
+		if len(children) != 1 || children[0]["valid"] != false {
+			t.Fatalf("oversized managed child = %#v", children)
+		}
+	})
+}
 
 func TestWorkflowManagedEnsembleAssignsEveryScopeChunkToEveryModel(t *testing.T) {
 	req := workflows.AgentRequest{
@@ -546,6 +687,14 @@ func TestWorkflowManagedEnsembleSplitsSingleFileAcrossModels(t *testing.T) {
 	}
 	if strategy := workflowManagedSplitStrategy(req, &AgentInstance{}); strategy != "scope_split" {
 		t.Fatalf("strategy=%q, want scope_split for one file with multiple reviewers", strategy)
+	}
+	req.Managed = map[string]any{
+		"strategy":                   "scope_split",
+		"reviewer_models":            []any{"review-a"},
+		"combine_structured_outputs": false,
+	}
+	if strategy := workflowManagedSplitStrategy(req, &AgentInstance{}); strategy != "scope_split" {
+		t.Fatalf("strategy=%q, want scope_split for one children-only reviewer", strategy)
 	}
 }
 

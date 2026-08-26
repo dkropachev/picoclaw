@@ -178,15 +178,19 @@ func TestWorkflowHandledMediaDeliveryPropagatesFailuresAndBusFallback(t *testing
 }
 
 func TestWorkflowManagedOptionAliasesAndUtilityBoundaries(t *testing.T) {
+	if !workflowManagedOptions(nil).combineStructuredOutputs {
+		t.Fatal("managed structured outputs are not combined by default")
+	}
 	options := workflowManagedOptions(map[string]any{
-		"mode":                   "scope_split",
-		"maxItemsPerChunk":       int64(3),
-		"calibrationSampleSize":  float64(4),
-		"maxTasksPerChunk":       json.Number("5"),
-		"maxParallelChildren":    "6",
-		"maxParallelPerReviewer": "7",
-		"adaptiveChunking":       false,
-		"estimatedOutputTokens":  700,
+		"mode":                     "scope_split",
+		"maxItemsPerChunk":         int64(3),
+		"calibrationSampleSize":    float64(4),
+		"maxTasksPerChunk":         json.Number("5"),
+		"maxParallelChildren":      "6",
+		"maxParallelPerReviewer":   "7",
+		"adaptiveChunking":         false,
+		"combineStructuredOutputs": false,
+		"estimatedOutputTokens":    700,
 		"calibration": map[string]any{
 			"enabled":             false,
 			"sampleSize":          8,
@@ -207,7 +211,8 @@ func TestWorkflowManagedOptionAliasesAndUtilityBoundaries(t *testing.T) {
 	if options.maxItemsPerChunk != 3 || options.calibrationSampleSize != 8 ||
 		options.maxTasksPerChunk != 5 || options.maxParallelChildren != 6 ||
 		options.maxParallelPerReviewer != 7 ||
-		options.adaptiveChunking || options.estimatedOutputTokens != 700 ||
+		options.adaptiveChunking || options.combineStructuredOutputs ||
+		options.estimatedOutputTokens != 700 ||
 		options.calibrationEnabled || options.calibrationTaskSampleSize != 9 ||
 		options.calibrationRequiredMatches != 2 || options.calibrationMaxTrials != 3 ||
 		options.calibrationCacheEnabled || options.calibrationCacheMaxInterval != 11 ||
