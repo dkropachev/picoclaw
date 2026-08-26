@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"sync"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sipeed/picoclaw/pkg/audio/tts"
@@ -50,6 +52,14 @@ func NewFindSkillsTool(registryMgr *skills.RegistryManager, cache *skills.Search
 
 func NewInstallSkillTool(registryMgr *skills.RegistryManager, workspace string) *InstallSkillTool {
 	return integrationtools.NewInstallSkillTool(registryMgr, workspace)
+}
+
+func NewInstallSkillToolWithLock(
+	registryMgr *skills.RegistryManager,
+	workspace string,
+	installMu *sync.Mutex,
+) *InstallSkillTool {
+	return integrationtools.NewInstallSkillToolWithLock(registryMgr, workspace, installMu)
 }
 
 func NewMessageTool() *MessageTool {

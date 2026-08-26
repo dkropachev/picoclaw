@@ -115,8 +115,9 @@ type AgentLoop struct {
 
 	reloadFunc func() error
 
-	providerFactory func(*config.ModelConfig) (providers.LLMProvider, string, error)
-	registryFactory func(*config.Config, providers.LLMProvider) *AgentRegistry
+	providerFactory    func(*config.ModelConfig) (providers.LLMProvider, string, error)
+	registryFactory    func(*config.Config, providers.LLMProvider) *AgentRegistry
+	recursionInstaller recursionCatalogInstaller
 }
 
 // processOptions configures how a message is processed
@@ -838,7 +839,9 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	}
 
 	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(al, cfg, al.bus, registry, provider)
+	if err := registerSharedTools(al, cfg, al.bus, registry, provider); err != nil {
+		return nil, fmt.Errorf("install reloaded shared tool catalog: %w", err)
+	}
 
 	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, provider)
 	if evolutionErr != nil {

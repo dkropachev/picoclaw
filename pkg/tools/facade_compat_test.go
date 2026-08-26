@@ -1,6 +1,11 @@
 package tools
 
-import "testing"
+import (
+	"sync"
+	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/skills"
+)
 
 func TestFacadeConstructorsRemainAvailable(t *testing.T) {
 	if NewI2CTool() == nil {
@@ -14,5 +19,12 @@ func TestFacadeConstructorsRemainAvailable(t *testing.T) {
 	}
 	if NewMessageTool() == nil {
 		t.Fatal("NewMessageTool should return a tool")
+	}
+	if NewInstallSkillToolWithLock(
+		skills.NewRegistryManager(),
+		t.TempDir(),
+		&sync.Mutex{},
+	) == nil {
+		t.Fatal("NewInstallSkillToolWithLock should return a tool")
 	}
 }

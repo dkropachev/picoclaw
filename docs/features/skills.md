@@ -8,14 +8,22 @@
 
 PicoClaw loads skills from workspace, global, and builtin locations, includes
 selected skill prompts in agent context, supports registry search and install,
-and lets chat users force a skill for one request or the next message.
+and lets chat users force a skill for one request or the next message. Agent
+install wrappers can additionally borrow one shared process-local workspace
+lock so owner-local factory products do not race one another during installation.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate skill discovery/loading, registry search, install/import/remove, and chat command forced-skill behavior.
-- Core types/functions: skill loader, registry manager, ClawHub/GitHub registries, installer, search cache, CLI handlers, launcher handlers, and command executor handlers.
+- Core types/functions: skill loader, registry manager, ClawHub/GitHub registries,
+  installer, search cache, `InstallSkillTool`,
+  `NewInstallSkillToolWithLock`, CLI handlers, launcher handlers, and command
+  executor handlers.
 - Runtime ordering: resolve skill roots, load valid `SKILL.md` files, search configured registries, install/import to workspace, refresh list/search detail, apply `/use` selection during command execution.
-- Non-obvious constraints: workspace skills override lower-precedence roots, registry failures remain scoped, and deletion must not remove builtin/global content.
+- Non-obvious constraints: workspace skills override lower-precedence roots,
+  registry failures remain scoped, deletion must not remove builtin/global
+  content, and a shared install mutex covers the complete destructive
+  install/reinstall transaction rather than only its final write.
 
 ## Requirements
 
@@ -29,12 +37,15 @@ and lets chat users force a skill for one request or the next message.
 | `FR-SKILLS-006` | MUST | `/use` and related commands force a selected skill for the requested message scope and can clear pending selection. | Chat workflows need direct skill control. |
 | `FR-SKILLS-007` | SHOULD | Deprecated GitHub registry config remains accepted while canonical registry config is preferred. | Existing configs must keep working. |
 | `FR-SKILLS-008` | MUST | Browser skill surfaces identify skill origin with accessible text and badge colors that retain sufficient contrast in supported themes. | Origin is operationally important and must remain perceivable without relying on low-contrast color alone. |
+| `FR-SKILLS-009` | MUST | `NewInstallSkillToolWithLock` accepts one borrowed process-local mutex and every `Execute` holds it from before argument and registry validation through existing-install inspection, backup, download, installed-skill validation, origin-metadata persistence, rollback or backup cleanup, and result construction. Wrappers given the same mutex serialize that complete operation, while wrappers given distinct mutexes may overlap. A nil mutex creates a private compatibility lock, `NewInstallSkillTool` remains source-compatible with a fresh private lock, and a zero-value wrapper uses a safe fallback lock rather than panicking. The wrapper borrows its registry manager and supplied mutex and does not acquire lifecycle ownership of either. | Owner-local install wrappers must not race backup, replacement, validation, metadata, or rollback in one workspace, while unrelated workspaces must remain independently runnable. |
 
 ## Data And State Model
 
 Skill state includes workspace/global/builtin roots, parsed skill metadata and
 content, registry definitions, cached search results, install target paths, and
-per-chat pending forced-skill command state.
+per-chat pending forced-skill command state. An agent-created install wrapper may
+also retain a borrowed generation-local process mutex selected by its caller;
+the mutex carries no persistent or cross-process state.
 
 ## Surface Ownership
 
@@ -66,7 +77,7 @@ Owns: TOOL install_skill
 | --- | --- | --- | --- |
 | CLI | `picoclaw skills list/search/show/install/remove/list-builtin/install-builtin` | Workspace and registry skill management. | `FR-SKILLS-001` through `FR-SKILLS-005` |
 | HTTP | `/api/skills*` | Launcher list, detail, search, install, import, and delete. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
-| Tools | `find_skills`, `install_skill` | Agent-callable registry search and install. | `FR-SKILLS-003`, `FR-SKILLS-004` |
+| Tools | `find_skills`, `install_skill`, `NewInstallSkillToolWithLock` | Agent-callable registry search and install, with optional caller-coordinated serialization across wrappers. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-009` |
 | Config | `tools.skills.*` | Registries, cache, concurrency, and legacy GitHub fields. | `FR-SKILLS-003`, `FR-SKILLS-007` |
 | Frontend | Skill list, import, detail, and hub marketplace pages under `web/frontend/src/components/agent/skills/**` and `web/frontend/src/components/agent/hub/**` | Browser skill management and registry discovery surfaces follow shared frontend API, accessibility, formatting, and route smoke-test rules; origin badges retain accessible text and contrast. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005`, `FR-SKILLS-008` |
 
@@ -75,14 +86,20 @@ Owns: TOOL install_skill
 1. Resolve builtin, global, and workspace roots.
 2. Load valid skill directories and apply precedence.
 3. For search, query enabled registries with cache/concurrency controls.
-4. For install/import, validate source content and write to workspace.
+4. For an agent-tool install, acquire the borrowed workspace mutex before
+   validation and retain it through backup/download/validation/metadata and any
+   cleanup or rollback. For every install/import surface, validate source
+   content and write to the workspace.
 5. During command execution, apply or clear forced-skill state before normal agent prompt construction.
 
 ## Cross-Feature Behavior
 
 Agent conversations inject loaded skill content. Commands are executed through
 the central command path. Self-evolution can draft or apply skills. Security
-policies apply to registry tokens and generated content.
+policies apply to registry tokens and generated content. Agent Conversations
+owns the generation-local workspace-identity coordinator that supplies one lock
+to root and owner-local `install_skill` wrappers; this feature owns the wrapper's
+borrowed-lock execution semantics.
 
 ## Failure And Edge Cases
 
@@ -90,6 +107,9 @@ policies apply to registry tokens and generated content.
 - Registry failures are reported with registry context.
 - Skill names are normalized for workspace paths.
 - Import rejects unsafe or structurally invalid archives.
+- A nil borrowed lock falls back to a private lock. Sharing is process-local and
+  caller-directed; this contract does not serialize CLI, HTTP, another process,
+  or wrappers constructed with a different mutex.
 
 ## Acceptance Evidence
 
@@ -100,9 +120,11 @@ policies apply to registry tokens and generated content.
 | `FR-SKILLS-004`, `FR-SKILLS-005` | [pkg/skills/installer_test.go](../../pkg/skills/installer_test.go), [web/backend/api/skills_test.go](../../web/backend/api/skills_test.go) |
 | `FR-SKILLS-006` | [pkg/commands/show_list_handlers_test.go](../../pkg/commands/show_list_handlers_test.go), [docs/guides/configuration.md](../guides/configuration.md) |
 | `FR-SKILLS-008` | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/src/components/agent/skills/origin-utils.ts](../../web/frontend/src/components/agent/skills/origin-utils.ts) |
+| `FR-SKILLS-009` | [pkg/tools/integration/skills_install.go](../../pkg/tools/integration/skills_install.go), [pkg/tools/integration/skills_install_test.go](../../pkg/tools/integration/skills_install_test.go), [pkg/tools/integration_facade.go](../../pkg/tools/integration_facade.go), [pkg/tools/facade_compat_test.go](../../pkg/tools/facade_compat_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/skills](../../pkg/skills)
+- [pkg/tools/integration/skills_install.go](../../pkg/tools/integration/skills_install.go)
 - [web/backend/api/skills.go](../../web/backend/api/skills.go)
 - [cmd/picoclaw/internal/skills](../../cmd/picoclaw/internal/skills)

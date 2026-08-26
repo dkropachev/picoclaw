@@ -20,23 +20,43 @@ const defaultSkillRegistryName = "github"
 
 var persistInstalledSkillOriginMeta = writeOriginMeta
 
+// zeroValueInstallSkillMu keeps the exported wrapper's zero value panic-free.
+// Ordinary constructors always install either a fresh or caller-borrowed lock.
+var zeroValueInstallSkillMu sync.Mutex
+
 // InstallSkillTool allows the LLM agent to install skills from registries.
 // It shares the same RegistryManager that FindSkillsTool uses,
 // so all registries configured in config are available for installation.
 type InstallSkillTool struct {
 	registryMgr *skills.RegistryManager
 	workspace   string
-	mu          sync.Mutex
+	installMu   *sync.Mutex
 }
 
 // NewInstallSkillTool creates a new InstallSkillTool.
 // registryMgr is the shared registry manager (same instance as FindSkillsTool).
 // workspace is the root workspace directory; skills install to {workspace}/skills/{slug}/.
 func NewInstallSkillTool(registryMgr *skills.RegistryManager, workspace string) *InstallSkillTool {
+	return NewInstallSkillToolWithLock(registryMgr, workspace, nil)
+}
+
+// NewInstallSkillToolWithLock creates an install wrapper using one borrowed
+// workspace lock. Callers that construct multiple owner-local wrappers for the
+// same workspace pass the same lock so the full backup/download/validation/
+// metadata transaction remains serialized across those owners. A nil lock is
+// safe and allocates a private compatibility lock.
+func NewInstallSkillToolWithLock(
+	registryMgr *skills.RegistryManager,
+	workspace string,
+	installMu *sync.Mutex,
+) *InstallSkillTool {
+	if installMu == nil {
+		installMu = &sync.Mutex{}
+	}
 	return &InstallSkillTool{
 		registryMgr: registryMgr,
 		workspace:   workspace,
-		mu:          sync.Mutex{},
+		installMu:   installMu,
 	}
 }
 
@@ -74,14 +94,24 @@ func (t *InstallSkillTool) Parameters() map[string]any {
 }
 
 func (t *InstallSkillTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	if t == nil {
+		return ErrorResult("install_skill tool is not configured")
+	}
 	// Install lock to prevent concurrent directory operations.
 	// Ideally this should be done at a `slug` level, currently, its at a `workspace` level.
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	installMu := t.installMu
+	if installMu == nil {
+		installMu = &zeroValueInstallSkillMu
+	}
+	installMu.Lock()
+	defer installMu.Unlock()
 
 	slug, _ := args["slug"].(string)
 	if strings.TrimSpace(slug) == "" {
 		return ErrorResult("identifier is required and must be a non-empty string")
+	}
+	if t.registryMgr == nil {
+		return ErrorResult("skill registry manager is not configured")
 	}
 
 	// Validate registry

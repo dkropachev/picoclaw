@@ -82,6 +82,14 @@ var expectedBaseFactoryCatalog = []string{
 	"write_file",
 }
 
+var expectedAdjacentFactoryCatalog = map[string]struct{}{
+	"delegate":      {},
+	"install_skill": {},
+	"spawn":         {},
+	"spawn_status":  {},
+	"subagent":      {},
+}
+
 var expectedBaseFactoryTraits = map[string]tools.ToolTraits{
 	"read_file": {
 		Risk: tools.ToolRiskReadOnly, Parallel: tools.ToolParallelSafe,
@@ -231,6 +239,9 @@ func TestBaseToolFactoryCatalogExactPartitionAndTraits(t *testing.T) {
 			}
 			continue
 		}
+		if _, adjacent := expectedAdjacentFactoryCatalog[capability.Name]; adjacent {
+			continue
+		}
 		if capability.FactoryBacked || capability.ImmutableShared {
 			t.Errorf("deferred/root-only capability was classified: %#v", capability)
 		}
@@ -253,8 +264,7 @@ func TestBaseToolFactoryCatalogExactPartitionAndTraits(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		"exec", "exec_command", "write_stdin", "threads", "workflow", "install_skill",
-		"spawn", "spawn_status", "subagent", "delegate",
+		"exec", "exec_command", "write_stdin", "threads", "workflow",
 	} {
 		for _, capability := range agent.Tools.InstantiationCapabilities() {
 			if capability.Name == name && (capability.FactoryBacked || capability.ImmutableShared) {
