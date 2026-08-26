@@ -448,6 +448,66 @@ describe("routed repository review pages", () => {
     )
   })
 
+  it("continues a failed campaign without removing the run-again option", async () => {
+    const failedReview: RepositoryReviewAutomation = {
+      ...automation,
+      version: 12,
+      status: "failed",
+      pause_reason: "run_failed",
+      pause_detail: "The provider was temporarily unavailable.",
+    }
+    const rememberedSHA = "f".repeat(40)
+    vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(failedReview)
+    vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
+      expected_version: 13,
+      remembered: {
+        sha: rememberedSHA,
+        short_sha: rememberedSHA.slice(0, 8),
+      },
+      latest: {
+        sha: rememberedSHA,
+        short_sha: rememberedSHA.slice(0, 8),
+      },
+      newer_commit_available: false,
+    })
+    vi.mocked(resumeRepositoryReviewAutomation).mockResolvedValue({
+      ...failedReview,
+      version: 14,
+      status: "running",
+      pause_reason: undefined,
+      pause_detail: undefined,
+      resolved_commit_sha: rememberedSHA,
+    })
+    const user = userEvent.setup()
+    renderPage(
+      <RepositoryReviewDetailPage
+        id={failedReview.id}
+        onBack={vi.fn()}
+        onReport={vi.fn()}
+        onIssues={vi.fn()}
+      />,
+    )
+
+    const continueButton = await screen.findByRole("button", {
+      name: "Continue",
+    })
+    expect(screen.getByRole("button", { name: "Run again" })).toBeVisible()
+    await user.click(continueButton)
+
+    await waitFor(() =>
+      expect(getRepositoryReviewCommitOptions).toHaveBeenCalledWith(
+        failedReview.id,
+      ),
+    )
+    await waitFor(() =>
+      expect(resumeRepositoryReviewAutomation).toHaveBeenCalledWith(
+        failedReview.id,
+        { expected_version: 13 },
+      ),
+    )
+    expect(restartRepositoryReviewAutomation).not.toHaveBeenCalled()
+  })
+
   it("runs a completed review again from its detail page", async () => {
     const completedReview: RepositoryReviewAutomation = {
       ...automation,

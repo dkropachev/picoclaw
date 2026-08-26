@@ -49,8 +49,8 @@ From review detail you can:
 - **Start review**, **Stop safely**, **Continue review**, or **Run again**;
 - inspect the exact admitted commit, live workflow stage, bounded-batch
   progress, actual token usage, estimated cost, pause reason, and run history;
-- choose the remembered, latest, or a custom full commit SHA when a paused
-  branch has moved; and
+- choose the remembered, latest, or a custom full commit SHA when a paused or
+  failed campaign's branch has moved; and
 - open **Report** or **Issue previews** at any time, including before the first
   batch finishes.
 
@@ -58,9 +58,13 @@ Start resolves the configured branch or remote default to one canonical full
 commit SHA and persists it with the workflow run ID before a worker starts.
 Automatic batches stay on that commit. **Stop safely** prevents another batch
 while allowing already admitted work to checkpoint. **Continue review**
-re-enters through the same task guard. **Run again** begins a new campaign; the
-repository ledger still skips unchanged blob SHA/size pairs unless the profile
-uses force mode.
+re-enters a paused or failed campaign through the same task guard, preserving
+its durable checkpoints, progress, usage, and run history when the assigned
+profile has not changed. Choose the remembered commit to retry unfinished work
+against the exact source revision used before the failure. **Run again** instead
+begins a new campaign and resets its campaign progress and accounting; the
+repository ledger may still skip matching blob and profile checkpoints unless
+the profile uses force mode.
 
 The launcher does not poll quotas or auto-resume a stopped guard. After a
 launcher restart, orphaned work becomes an explicit `service_restart` pause and

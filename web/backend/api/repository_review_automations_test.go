@@ -974,8 +974,8 @@ func TestRepositoryReviewAutomationCommitOptionsExposeRememberedAndLatest(t *tes
 		t.Fatalf("commit options status=%d body=%s", response.Code, response.Body.String())
 	}
 	var options repositoryReviewCommitOptionsResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
-		t.Fatal(err)
+	if decodeErr := json.Unmarshal(response.Body.Bytes(), &options); decodeErr != nil {
+		t.Fatal(decodeErr)
 	}
 	if options.ExpectedVersion != automation.Version || !options.NewerCommitAvailable ||
 		options.Remembered.SHA != rememberedCommit ||
@@ -984,6 +984,90 @@ func TestRepositoryReviewAutomationCommitOptionsExposeRememberedAndLatest(t *tes
 		options.Latest.SHA != latestCommit || options.Latest.ShortSHA != latestCommit[:8] ||
 		options.Latest.URL != "https://github.com/acme/core/commit/"+latestCommit {
 		t.Fatalf("commit options=%#v", options)
+	}
+}
+
+func TestRepositoryReviewAutomationCommitOptionsAcceptFailed(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	rememberedCommit := strings.Repeat("4", 40)
+	latestCommit := strings.Repeat("5", 40)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return latestCommit, nil
+	}
+	var batchCalls atomic.Int32
+	controller.runBatch = func(
+		context.Context,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+		workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		batchCalls.Add(1)
+		return nil, errors.New("unexpected batch")
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationFailed
+	input.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
+	input.PauseDetail = "temporary provider outage"
+	input.ResolvedCommitSHA = rememberedCommit
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/"+automation.ID+"/commit-options",
+			nil,
+		),
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("failed commit options status=%d body=%s", response.Code, response.Body.String())
+	}
+	var options repositoryReviewCommitOptionsResponse
+	if decodeErr := json.Unmarshal(response.Body.Bytes(), &options); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if options.ExpectedVersion != automation.Version || !options.NewerCommitAvailable ||
+		options.Remembered.SHA != rememberedCommit || options.Latest.SHA != latestCommit {
+		t.Fatalf("failed commit options=%#v", options)
+	}
+
+	resume := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/resume",
+		map[string]any{"expected_version": options.ExpectedVersion},
+	)
+	if resume.Code != http.StatusConflict ||
+		!strings.Contains(resume.Body.String(), "repository_review_commit_selection_required") {
+		t.Fatalf("failed resume status=%d body=%s", resume.Code, resume.Body.String())
+	}
+	current, found, err := store.GetAutomation(t.Context(), automation.ID)
+	if err != nil || !found || current.Status != repoaudit.RepositoryReviewAutomationFailed ||
+		current.Version != automation.Version || current.ResolvedCommitSHA != rememberedCommit ||
+		batchCalls.Load() != 0 {
+		t.Fatalf(
+			"failed campaign after unfenced resume=%#v found=%v err=%v batches=%d",
+			current,
+			found,
+			err,
+			batchCalls.Load(),
+		)
 	}
 }
 
@@ -1217,6 +1301,126 @@ func TestRepositoryReviewAutomationResumePersistsExactCommitSelection(t *testing
 				t.Fatalf("completed automation=%#v", completed)
 			}
 		})
+	}
+}
+
+func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	rememberedCommit := strings.Repeat("c", 40)
+	type batchObservation struct {
+		automation repoaudit.RepositoryReviewAutomation
+		runID      string
+	}
+	batchStarted := make(chan batchObservation, 1)
+	releaseBatch := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBatch) }) }
+	defer release()
+	controller.runBatch = func(
+		_ context.Context,
+		automation repoaudit.RepositoryReviewAutomation,
+		runID string,
+		_ workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		batchStarted <- batchObservation{automation: automation, runID: runID}
+		<-releaseBatch
+		return &workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{
+				"commit": rememberedCommit, "remainingFiles": 0,
+			},
+		}, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 8, 25, 14, 30, 0, 0, time.UTC)
+	usage := repoaudit.RepositoryReviewTokenUsage{
+		PromptTokens: 120, CompletionTokens: 30, CachedTokens: 20, TotalTokens: 150,
+	}
+	progress := repoaudit.RepositoryReviewProgress{
+		Stage: "failed", CompletedBatches: 2, TotalBatches: 4,
+		ReviewedFiles: 7, RemainingFiles: 3, UnsupportedFiles: 1, Findings: 2,
+	}
+	previousRunIDs := []string{"wr_completed_batch", "wr_failed_batch"}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationFailed
+	input.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
+	input.PauseDetail = "temporary provider outage"
+	input.ResolvedCommitSHA = rememberedCommit
+	input.RunIDs = append([]string(nil), previousRunIDs...)
+	input.Usage = usage
+	input.EstimatedCostUSD = 0.0042
+	input.Progress = progress
+	input.StartedAt = startedAt
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/resume",
+		map[string]any{
+			"expected_version": automation.Version,
+			"commit_sha":       rememberedCommit,
+		},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("failed resume status=%d body=%s", response.Code, response.Body.String())
+	}
+	var resumed struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if decodeErr := json.Unmarshal(response.Body.Bytes(), &resumed); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	newRunID := resumed.Automation.ActiveRunID
+	expectedRunIDs := append(append([]string(nil), previousRunIDs...), newRunID)
+	expectedQueuedProgress := progress
+	expectedQueuedProgress.Stage = "queued"
+	if resumed.Automation.Status != repoaudit.RepositoryReviewAutomationRunning || newRunID == "" ||
+		!reflect.DeepEqual(resumed.Automation.RunIDs, expectedRunIDs) ||
+		resumed.Automation.Usage != usage ||
+		math.Abs(resumed.Automation.EstimatedCostUSD-input.EstimatedCostUSD) > 0.0000001 ||
+		resumed.Automation.Progress != expectedQueuedProgress ||
+		!resumed.Automation.StartedAt.Equal(startedAt) {
+		t.Fatalf("resumed failed campaign=%#v", resumed.Automation)
+	}
+	select {
+	case observed := <-batchStarted:
+		if observed.runID != newRunID || observed.automation.Usage != usage ||
+			observed.automation.Progress != expectedQueuedProgress ||
+			!observed.automation.StartedAt.Equal(startedAt) ||
+			!reflect.DeepEqual(observed.automation.RunIDs, expectedRunIDs) {
+			t.Fatalf("resumed batch=%#v run_id=%q", observed.automation, observed.runID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resumed failed batch did not start")
+	}
+
+	release()
+	completed := waitForRepositoryReviewAutomationStatus(
+		t,
+		store,
+		automation.ID,
+		repoaudit.RepositoryReviewAutomationCompleted,
+	)
+	if completed.Usage != usage ||
+		math.Abs(completed.EstimatedCostUSD-input.EstimatedCostUSD) > 0.0000001 ||
+		completed.Progress.CompletedBatches != progress.CompletedBatches+1 ||
+		completed.Progress.ReviewedFiles != progress.ReviewedFiles ||
+		completed.Progress.RemainingFiles != 0 ||
+		completed.Progress.UnsupportedFiles != progress.UnsupportedFiles ||
+		completed.Progress.Findings != progress.Findings ||
+		!completed.StartedAt.Equal(startedAt) ||
+		!reflect.DeepEqual(completed.RunIDs, expectedRunIDs) {
+		t.Fatalf("completed resumed campaign=%#v", completed)
 	}
 }
 

@@ -380,6 +380,13 @@ func repositoryReviewValidCommitSelection(value string) bool {
 	return repositoryReviewValidCommitSHA(strings.ToLower(strings.TrimSpace(value)))
 }
 
+func repositoryReviewAutomationCanResume(
+	status repoaudit.RepositoryReviewAutomationStatus,
+) bool {
+	return status == repoaudit.RepositoryReviewAutomationPaused ||
+		status == repoaudit.RepositoryReviewAutomationFailed
+}
+
 func (c *repositoryReviewController) startAutomation(
 	ctx context.Context,
 	id string,
@@ -436,7 +443,7 @@ func (c *repositoryReviewController) repositoryReviewCommitOptions(
 	if !found {
 		return repoaudit.RepositoryReviewAutomation{}, "", "", os.ErrNotExist
 	}
-	if automation.Status != repoaudit.RepositoryReviewAutomationPaused {
+	if !repositoryReviewAutomationCanResume(automation.Status) {
 		return repoaudit.RepositoryReviewAutomation{}, "", "", errRepositoryReviewInvalidTransition
 	}
 	remembered := repositoryReviewRememberedCommit(automation)
@@ -465,7 +472,7 @@ func (c *repositoryReviewController) repositoryReviewCommitOptions(
 		return repoaudit.RepositoryReviewAutomation{}, "", "", os.ErrNotExist
 	}
 	if current.Version != automation.Version ||
-		current.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		!repositoryReviewAutomationCanResume(current.Status) ||
 		repositoryReviewRememberedCommit(current) != repositoryReviewRememberedCommit(automation) {
 		return repoaudit.RepositoryReviewAutomation{}, "", "", repoaudit.ErrConflict
 	}
@@ -520,7 +527,7 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 			return repoaudit.RepositoryReviewAutomation{}, errRepositoryReviewInvalidTransition
 		}
 	case "resume":
-		if automation.Status != repoaudit.RepositoryReviewAutomationPaused {
+		if !repositoryReviewAutomationCanResume(automation.Status) {
 			return repoaudit.RepositoryReviewAutomation{}, errRepositoryReviewInvalidTransition
 		}
 	case "restart":
