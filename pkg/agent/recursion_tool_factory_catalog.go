@@ -421,13 +421,27 @@ func legacyRecursionSpawner(spec recursionCatalogSpec) tools.SpawnSubTurnFunc {
 		parent := turnStateFromContext(ctx)
 		if parent == nil {
 			parent = spec.al.newAdHocRootTurnState(ctx)
+			if source, ok := spec.registry.GetAgent(spec.agentID); ok && source != nil {
+				parent.agent = source
+				parent.agentID = source.ID
+			}
 		}
 		spec.al.prepareTurnState(parent)
 
+		constructible := make(map[string]struct{})
+		if source, ok := spec.registry.GetAgent(spec.agentID); ok && source != nil &&
+			source.Tools != nil {
+			for _, capability := range source.Tools.InstantiationCapabilities() {
+				if capability.FactoryBacked || capability.ImmutableShared {
+					constructible[capability.Name] = struct{}{}
+				}
+			}
+		}
 		toolSlice := make([]tools.Tool, 0)
 		if registry != nil {
 			for _, name := range registry.List() {
-				if tool, ok := registry.Get(name); ok {
+				_, eligible := constructible[name]
+				if tool, ok := registry.Get(name); eligible && ok {
 					toolSlice = append(toolSlice, tool)
 				}
 			}

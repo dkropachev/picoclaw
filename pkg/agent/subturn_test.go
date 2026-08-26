@@ -208,6 +208,7 @@ func TestSpawnSubTurn_EphemeralSessionIsolation(t *testing.T) {
 		pendingResults: make(chan *tools.ToolResult, 4),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
 		session:        parentSession,
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	cfg := SubTurnConfig{Model: "gpt-4o-mini", Tools: []tools.Tool{}}
@@ -247,6 +248,7 @@ func TestSpawnSubTurn_ResultDelivery(t *testing.T) {
 		depth:          0,
 		pendingResults: make(chan *tools.ToolResult, 1),
 		session:        &ephemeralSessionStore{},
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	// Set Async=true to test async result delivery via pendingResults channel
@@ -277,6 +279,7 @@ func TestSpawnSubTurn_ResultDeliverySync(t *testing.T) {
 		depth:          0,
 		pendingResults: make(chan *tools.ToolResult, 1),
 		session:        &ephemeralSessionStore{},
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	// Sync call (Async=false, the default) - result should be returned directly
@@ -318,6 +321,7 @@ func TestSpawnSubTurn_OrphanResultRouting(t *testing.T) {
 		depth:          0,
 		pendingResults: make(chan *tools.ToolResult, 1),
 		session:        &ephemeralSessionStore{},
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	// Simulate parent finishing before child delivers result
@@ -350,6 +354,7 @@ func TestSubTurnResultChannelRegistration(t *testing.T) {
 		depth:          0,
 		pendingResults: make(chan *tools.ToolResult, 4),
 		session:        &ephemeralSessionStore{},
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	cfg := SubTurnConfig{Model: "gpt-4o-mini", Tools: []tools.Tool{}}
@@ -472,6 +477,7 @@ func TestHardAbortCascading(t *testing.T) {
 		session:        &ephemeralSessionStore{},
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, 5),
+		agent:          al.registry.GetDefaultAgent(),
 		al:             al,
 	}
 	al.activeTurnStates.Store(sessionKey, rootTS)
@@ -634,6 +640,7 @@ func TestNestedSubTurnHierarchy(t *testing.T) {
 		session:        rootSession,
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, 5),
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	// Spawn a child (depth 1)
@@ -863,6 +870,7 @@ func TestSpawnSubTurn_PanicRecovery(t *testing.T) {
 		depth:          0,
 		pendingResults: make(chan *tools.ToolResult, 1),
 		session:        &ephemeralSessionStore{},
+		agent:          al.registry.GetDefaultAgent(),
 	}
 
 	collector, collectCleanup := newEventCollector(t, al)
@@ -1292,6 +1300,7 @@ func TestDeliverSubTurnResult_RaceWithFinish(t *testing.T) {
 		depth:          0,
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		agent:          al.registry.GetDefaultAgent(),
 	}
 	parentTS.ctx, parentTS.cancelFunc = context.WithCancel(ctx)
 
@@ -1375,6 +1384,7 @@ func TestConcurrencySemaphore_Timeout(t *testing.T) {
 		session:        newEphemeralSession(nil),
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		agent:          al.registry.GetDefaultAgent(),
 	}
 	parentTS.ctx, parentTS.cancelFunc = context.WithCancel(ctx)
 	defer parentTS.Finish(false)
@@ -1475,6 +1485,7 @@ func TestContextWrapping_SingleLayer(t *testing.T) {
 		session:        newEphemeralSession(nil),
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		agent:          al.registry.GetDefaultAgent(),
 	}
 	parentTS.ctx, parentTS.cancelFunc = context.WithCancel(ctx)
 	defer parentTS.Finish(false)
@@ -1521,6 +1532,7 @@ func TestSyncSubTurn_NoChannelDelivery(t *testing.T) {
 		session:        newEphemeralSession(nil),
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		agent:          al.registry.GetDefaultAgent(),
 	}
 	parentTS.ctx, parentTS.cancelFunc = context.WithCancel(ctx)
 	defer parentTS.Finish(false)
@@ -1578,6 +1590,7 @@ func TestAsyncSubTurn_ChannelDelivery(t *testing.T) {
 		session:        newEphemeralSession(nil),
 		pendingResults: make(chan *tools.ToolResult, 16),
 		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		agent:          al.registry.GetDefaultAgent(),
 	}
 	parentTS.ctx, parentTS.cancelFunc = context.WithCancel(ctx)
 	defer parentTS.Finish(false)
@@ -2202,6 +2215,7 @@ func newMultiAgentLoop(t *testing.T, provider providers.LLMProvider) (*AgentLoop
 					ID:        "alpha",
 					Workspace: alphaDir,
 					Model:     &config.AgentModelConfig{Primary: "model-alpha"},
+					Subagents: &config.SubagentsConfig{AllowAgents: []string{"*"}},
 				},
 				{
 					ID:        "beta",

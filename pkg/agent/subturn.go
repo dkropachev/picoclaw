@@ -76,6 +76,53 @@ type subTurnRuntimeConfig struct {
 	defaultTokenBudget int
 }
 
+func acquireSubTurnConcurrencyLease(
+	ctx context.Context,
+	parent *turnState,
+	runtimeCfg subTurnRuntimeConfig,
+) (*subTurnConcurrencyLease, error) {
+	if parent == nil {
+		return nil, fmt.Errorf("parent turn is unavailable")
+	}
+	lease := &subTurnConcurrencyLease{owner: parent, slot: parent.concurrencySem}
+	lease.state.Store(subTurnConcurrencyLeasePrepared)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if lease.slot == nil {
+		return lease, nil
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, runtimeCfg.concurrencyTimeout)
+	defer cancel()
+	select {
+	case lease.slot <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			lease.release()
+			return nil, err
+		}
+		return lease, nil
+	case <-parent.Finished():
+		return nil, fmt.Errorf(
+			"parent turn %s finished while waiting for a concurrency slot: %w",
+			parent.turnID,
+			context.Canceled,
+		)
+	case <-timeoutCtx.Done():
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf(
+			"%w: all %d slots occupied for %v",
+			ErrConcurrencyTimeout,
+			runtimeCfg.maxConcurrent,
+			runtimeCfg.concurrencyTimeout,
+		)
+	}
+}
+
 // ====================== SubTurn Config ======================
 
 // SubTurnConfig configures the execution of a child sub-turn.
@@ -106,9 +153,13 @@ type subTurnRuntimeConfig struct {
 type SubTurnConfig struct {
 	Model          string
 	ModelFallbacks []string
-	Tools          []tools.Tool
-	SystemPrompt   string
-	MaxTokens      int
+	// Tools is an optional name-only child authority cap. Nil inherits the
+	// immediate parent's eligible capabilities; a non-nil empty slice permits
+	// no tools. Non-empty entries contribute only panic-safely resolved names;
+	// their pointers are never registered or executed.
+	Tools        []tools.Tool
+	SystemPrompt string
+	MaxTokens    int
 
 	// Async controls the result delivery mechanism:
 	//
@@ -227,7 +278,37 @@ func (s *AgentLoopSpawner) PrepareAsyncSubTurn(
 	if s == nil || s.al == nil {
 		return ctx, func() {}, errors.New("agent loop not configured")
 	}
-	return s.al.retainRuntimeUse(ctx)
+	retainedCtx, releaseRuntime, err := s.al.retainRuntimeUse(ctx)
+	if err != nil {
+		return ctx, func() {}, err
+	}
+	parent := turnStateFromContext(retainedCtx)
+	if parent == nil {
+		releaseRuntime()
+		return ctx, func() {}, errors.New(
+			"parent turnState not found in context - cannot prepare sub-turn",
+		)
+	}
+	s.al.prepareTurnState(parent)
+	lease, err := parent.retainSubTurnConstruction()
+	if err != nil {
+		releaseRuntime()
+		return ctx, func() {}, err
+	}
+	if err := retainedCtx.Err(); err != nil {
+		lease.release()
+		releaseRuntime()
+		return ctx, func() {}, err
+	}
+	retainedCtx = withSubTurnConstructionLease(retainedCtx, lease)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			lease.release()
+			releaseRuntime()
+		})
+	}
+	return retainedCtx, release, nil
 }
 
 // SpawnSubTurn implements tools.SubTurnSpawner interface.
@@ -293,6 +374,17 @@ func spawnSubTurn(
 	parentTS *turnState,
 	cfg SubTurnConfig,
 ) (result *tools.ToolResult, err error) {
+	// Freeze every caller-owned slice before retention, validation, or detached
+	// construction. Async tool wrappers already snapshot these inputs, while
+	// this boundary also protects direct exported/custom callers.
+	cfg.ModelFallbacks = cloneOptionalModelFallbacks(cfg.ModelFallbacks)
+	if cfg.Tools != nil {
+		frozenTools := make([]tools.Tool, len(cfg.Tools))
+		copy(frozenTools, cfg.Tools)
+		cfg.Tools = frozenTools
+	}
+	cfg.InitialMessages = cloneProviderMessages(cfg.InitialMessages)
+
 	var releaseRuntime func()
 	if cfg.Async || cfg.Critical {
 		ctx, releaseRuntime, err = al.retainRuntimeUse(ctx)
@@ -303,52 +395,48 @@ func spawnSubTurn(
 		return nil, err
 	}
 	defer releaseRuntime()
-
-	// Get effective SubTurn configuration
 	rtCfg := al.getSubTurnConfig()
 	al.prepareTurnState(parentTS)
-	if !parentTS.acceptsChildren() {
-		return nil, fmt.Errorf("parent turn %s no longer accepts children: %w", parentTS.turnID, context.Canceled)
-	}
-
-	// 0. Acquire concurrency semaphore FIRST to ensure it's released even if early validation fails.
-	// Blocks if parent already has maxConcurrentSubTurns running, with a timeout to prevent indefinite blocking.
-	// Also respects context cancellation so we don't block forever if parent is aborted.
-	// NOTE: The semaphore is released immediately after runTurn completes (not in a defer) to
-	// ensure it is freed before the cleanup phase (async result delivery), which may block on
-	// a full pendingResults channel. Holding the semaphore through cleanup would allow the
-	// parent's goroutine to be blocked waiting for a semaphore slot while child turns are
-	// blocked delivering results — a deadlock.
-	var semAcquired bool
-	if parentTS.concurrencySem != nil {
-		// Create a timeout context for semaphore acquisition
-		timeoutCtx, cancel := context.WithTimeout(ctx, rtCfg.concurrencyTimeout)
-		defer cancel()
-
-		select {
-		case parentTS.concurrencySem <- struct{}{}:
-			semAcquired = true
-			defer func() {
-				if semAcquired {
-					<-parentTS.concurrencySem
-				}
-			}()
-		case <-parentTS.Finished():
-			return nil, fmt.Errorf(
-				"parent turn %s finished while waiting for a concurrency slot: %w",
-				parentTS.turnID,
-				context.Canceled,
-			)
-		case <-timeoutCtx.Done():
-			// Check parent context first - if it was canceled, propagate that error
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			// Otherwise it's our timeout
-			return nil, fmt.Errorf("%w: all %d slots occupied for %v",
-				ErrConcurrencyTimeout, rtCfg.maxConcurrent, rtCfg.concurrencyTimeout)
+	sourceLease := subTurnConstructionLeaseFromContext(ctx)
+	concurrencyLease, err := acquireSubTurnConcurrencyLease(ctx, parentTS, rtCfg)
+	if err != nil {
+		if sourceLease != nil && sourceLease.owner == parentTS {
+			sourceLease.release()
 		}
+		return nil, err
 	}
+	if !concurrencyLease.consumeFor(parentTS) {
+		concurrencyLease.release()
+		return nil, fmt.Errorf("cannot consume child concurrency lease")
+	}
+	defer concurrencyLease.release()
+	if !parentTS.acceptsPreAdmittedSubTurnConstruction(sourceLease) {
+		if sourceLease != nil && sourceLease.owner == parentTS {
+			sourceLease.release()
+		}
+		return nil, fmt.Errorf(
+			"parent turn %s no longer accepts children: %w",
+			parentTS.turnID,
+			context.Canceled,
+		)
+	}
+	if !sourceLease.consumeFor(parentTS) {
+		sourceLease, err = parentTS.retainSubTurnConstruction()
+		if err != nil {
+			return nil, err
+		}
+		if !sourceLease.consumeFor(parentTS) {
+			sourceLease.release()
+			return nil, fmt.Errorf("cannot consume child construction lease")
+		}
+		ctx = withSubTurnConstructionLease(ctx, sourceLease)
+	}
+	sourceLeaseReleased := false
+	defer func() {
+		if !sourceLeaseReleased {
+			sourceLease.release()
+		}
+	}()
 
 	// 1. Depth limit check
 	if parentTS.depth >= rtCfg.maxDepth {
@@ -390,44 +478,95 @@ func spawnSubTurn(
 	}
 	var baseAgent *AgentInstance
 	if cfg.TargetAgentID != "" {
+		if parentTS.agent == nil || parentTS.agent.ID == "" ||
+			!registry.CanSpawnSubagent(parentTS.agent.ID, cfg.TargetAgentID) {
+			return nil, fmt.Errorf(
+				"target agent %q is not allowed for parent %q: %w",
+				cfg.TargetAgentID,
+				parentTS.agentID,
+				ErrInvalidSubTurnConfig,
+			)
+		}
 		var ok bool
 		baseAgent, ok = registry.GetAgent(cfg.TargetAgentID)
 		if !ok {
-			return nil, fmt.Errorf("target agent %q not found in registry", cfg.TargetAgentID)
+			return nil, fmt.Errorf(
+				"%w: target agent %q not found in registry",
+				ErrInvalidSubTurnConfig,
+				cfg.TargetAgentID,
+			)
 		}
+		cfg.TargetAgentID = baseAgent.ID
 	} else {
-		if parentTS.agent != nil && parentTS.agent.ID != "" {
-			baseAgent, _ = registry.GetAgent(parentTS.agent.ID)
-		}
-		if baseAgent == nil {
-			baseAgent = registry.GetDefaultAgent()
-		}
+		baseAgent = parentTS.agent
 	}
 	if baseAgent == nil {
 		return nil, errors.New("parent turnState has no agent instance")
 	}
 	ephemeralStore := newEphemeralSession(nil)
+	resourceGuard := &turnState{turnSession: ephemeralStore}
+	resourcesTransferred := false
+	defer func() {
+		if !resourcesTransferred {
+			_, _ = resourceGuard.closeOwnedTurnResources()
+		}
+	}()
 	agent := *baseAgent // shallow copy
 	agent.Sessions = ephemeralStore
-	// Clone the tool registry so child turn's tool registrations
-	// don't pollute the parent's registry.
-	if baseAgent.Tools != nil {
-		agent.Tools = baseAgent.Tools.Clone()
-		agent.Tools.Unregister(tools.ThreadsToolName)
+	toolSelection, selectionErr := selectEffectiveSubTurnTools(
+		al.GetConfig(),
+		parentTS,
+		baseAgent,
+		cfg.Tools,
+		parentTS.depth+1,
+		rtCfg.maxDepth,
+		subTurnToolSelectionOptions{
+			implementationProviderSetProven: subTurnUsesProvenImplementationProviderSet(
+				baseAgent,
+				cfg,
+			),
+			parentAuthorityFrozen: true,
+			parentAuthority:       sourceLease.nativeAuthority,
+		},
+	)
+	if selectionErr != nil {
+		return nil, selectionErr
 	}
-
-	// Create processOptions for the child turn
+	// Selectors are name-only input. Drop every caller pointer before child
+	// construction or execution so the turn retains only exact resolved keys.
+	cfg.Tools = nil
 	dispatch := DispatchRequest{
 		SessionKey:     childID,
 		UserMessage:    cfg.SystemPrompt,
 		Media:          nil,
 		InboundContext: cloneInboundContext(parentTS.opts.Dispatch.InboundContext),
 	}
+	scope := al.newTurnEventScope(
+		agent.ID,
+		childID,
+		newTurnContext(dispatch.InboundContext, dispatch.RouteResult, dispatch.SessionScope),
+	)
+	ownedTools, constructionErr := baseAgent.Tools.InstantiateForOwnerSelection(
+		tools.ToolOwner{
+			Scope:      tools.ToolOwnerScopeTurn,
+			AgentID:    baseAgent.ID,
+			SessionKey: childID,
+			TurnID:     scope.turnID,
+		},
+		toolSelection.roots,
+	)
+	if constructionErr != nil {
+		return nil, fmt.Errorf("construct child tools: %w", constructionErr)
+	}
+	resourceGuard.turnTools = ownedTools
+	agent.Tools = ownedTools
+
+	// Create processOptions for the child turn
 	opts := processOptions{
 		Dispatch:                dispatch,
 		SenderID:                parentTS.opts.Dispatch.SenderID(),
 		SenderDisplayName:       parentTS.opts.SenderDisplayName,
-		TurnProfile:             parentTS.profile,
+		TurnProfile:             toolSelection.profile,
 		SystemPromptOverride:    cfg.ActualSystemPrompt,
 		InitialSteeringMessages: cfg.InitialMessages,
 		DefaultResponse:         "",
@@ -446,13 +585,6 @@ func spawnSubTurn(
 		opts.TurnProfile = parentTS.opts.TurnProfile
 	}
 
-	// Create event scope for the child turn
-	scope := al.newTurnEventScope(
-		agent.ID,
-		childID,
-		newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope),
-	)
-
 	// Create child turnState using the new API
 	childTS := newTurnState(&agent, opts, scope)
 
@@ -463,6 +595,21 @@ func spawnSubTurn(
 	childTS.parentTurnID = parentTS.turnID
 	childTS.parentTurnState = parentTS
 	childTS.session = ephemeralStore // same store as agent.Sessions
+	childTS.toolAuthorityBound = true
+	childTS.nativeSearchAllowed = toolSelection.nativeSearch
+	childTS.turnTools = ownedTools
+	childTS.turnSession = ephemeralStore
+	defer func() {
+		closeErr, closed := childTS.closeOwnedTurnResources()
+		if !closed || closeErr == nil {
+			return
+		}
+		err = errors.Join(err, closeErr)
+		if result != nil {
+			result = tools.ErrorResult(fmt.Sprintf("SubTurn cleanup failed: %v", closeErr)).WithError(err)
+		}
+	}()
+	resourcesTransferred = true
 	al.prepareTurnState(childTS)
 
 	// Token budget initialization/inheritance
@@ -485,12 +632,18 @@ func spawnSubTurn(
 
 	childTS.ctx = childCtx
 
+	if !sourceLease.reserveAttachmentFor(parentTS, childTS) {
+		return nil, fmt.Errorf("cannot reserve child attachment")
+	}
+
 	// Publish the exact child and parent edge as one parent-locked operation.
 	// A terminal/canceling parent rejects attachment, so no child can escape a
 	// concurrent error or hard-abort tree traversal.
-	if !al.attachChildTurn(parentTS, childTS) {
+	if !al.attachChildTurnWithLease(parentTS, childTS, sourceLease) {
 		return nil, fmt.Errorf("parent turn %s no longer accepts children: %w", parentTS.turnID, context.Canceled)
 	}
+	sourceLease.release()
+	sourceLeaseReleased = true
 	defer al.releaseSessionTurnState(childTS.sessionKey, childTS)
 
 	// 6. Emit Spawn event
@@ -509,10 +662,7 @@ func spawnSubTurn(
 		if r := recover(); r != nil {
 			logger.RecoverPanicNoExit(r)
 			err = fmt.Errorf("subturn panicked: %v", r)
-			result = &tools.ToolResult{
-				Err:    err,
-				ForLLM: fmt.Sprintf("SubTurn failed: %v", err),
-			}
+			result = tools.ErrorResult(fmt.Sprintf("SubTurn failed: %v", err)).WithError(err)
 			logger.ErrorCF("subturn", "SubTurn panicked", map[string]any{
 				"child_id":  childID,
 				"parent_id": parentTS.turnID,
@@ -543,36 +693,20 @@ func spawnSubTurn(
 	turnRes, turnErr := al.runTurn(childCtx, childTS, pipeline)
 	childOutcome = turnRes.status
 
-	// Release the concurrency semaphore immediately after runTurn completes,
-	// before the cleanup defer runs. This prevents a deadlock where:
-	// - All semaphore slots are held by sub-turns in their cleanup phase
-	// - Cleanup blocks on a full pendingResults channel
-	// - The parent goroutine is blocked waiting for a semaphore slot
-	// - The parent cannot consume pendingResults because it is blocked on the semaphore
-	if semAcquired {
-		<-parentTS.concurrencySem
-		semAcquired = false // prevent the defer from double-releasing
-	}
+	// Free the execution slot before async result delivery can block on the
+	// parent's mailbox. The idempotent defer covers every earlier return.
+	concurrencyLease.release()
 
 	// Convert turnResult to tools.ToolResult
 	if turnErr != nil {
 		err = turnErr
-		result = &tools.ToolResult{
-			Err:    turnErr,
-			ForLLM: fmt.Sprintf("SubTurn failed: %v", turnErr),
-		}
+		result = tools.ErrorResult(fmt.Sprintf("SubTurn failed: %v", turnErr)).WithError(turnErr)
 	} else if turnRes.status == TurnEndStatusAborted {
 		err = fmt.Errorf("subturn aborted: %w", context.Canceled)
-		result = &tools.ToolResult{
-			Err:    err,
-			ForLLM: "SubTurn aborted",
-		}
+		result = tools.ErrorResult("SubTurn aborted").WithError(err)
 	} else if turnRes.status == TurnEndStatusError {
 		err = fmt.Errorf("subturn canceled after parent failure: %w", context.Canceled)
-		result = &tools.ToolResult{
-			Err:    err,
-			ForLLM: "SubTurn canceled after parent failure",
-		}
+		result = tools.ErrorResult("SubTurn canceled after parent failure").WithError(err)
 	} else {
 		result = &tools.ToolResult{
 			ForLLM:  turnRes.finalContent,

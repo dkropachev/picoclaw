@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -134,57 +135,56 @@ func (al *AgentLoop) runTurn(
 			candidate = TurnEndStatusError
 		}
 
-		status := candidate
-		committed := false
+		claimed := false
 		runTurnTerminalStep(&cleanupPanic, func() {
-			status, committed = ts.claimRunTerminal(candidate)
+			claimed = ts.claimRunTerminalOwnership()
 		})
-		if !committed {
-			runTurnTerminalStep(&cleanupPanic, func() {
-				status = ts.terminalStatusSnapshot(candidate)
-			})
-		}
-		if status == TurnEndStatusAborted {
-			result = turnResult{
-				usage:  ts.workflowAgentUsageSnapshot(),
-				status: TurnEndStatusAborted,
-			}
-			// Provider/context cancellation is expected for an accepted hard
-			// abort. Only restore failure is returned to the caller.
-			err = nil
-		} else {
-			result.status = status
-		}
-		if status == TurnEndStatusError && originalPanic == nil && err == nil {
-			switch {
-			case ctx.Err() != nil:
-				err = ctx.Err()
-			case turnCtx.Err() != nil:
-				err = turnCtx.Err()
-			default:
-				err = fmt.Errorf("turn ended with error")
+		status := ts.terminalStatusSnapshot(candidate)
+		forceError := originalPanic != nil
+		restoreRequired := status == TurnEndStatusAborted || originalPanic != nil
+		if claimed {
+			constructionDrainCtx, constructionDrainCancel := context.WithTimeout(
+				context.Background(),
+				turnCleanupTimeout,
+			)
+			constructionDrainErr := ts.waitForSubTurnConstructions(constructionDrainCtx)
+			constructionDrainCancel()
+			if constructionDrainErr != nil {
+				forceError = true
+				status = TurnEndStatusError
+				err = errors.Join(
+					err,
+					fmt.Errorf("wait for child tool construction: %w", constructionDrainErr),
+				)
 			}
 		}
 
 		// Failure cancellation is distinct from explicit hard abort: it
 		// cancels critical descendants without marking them aborted.
+		failureCancellationDispatched := false
 		if status == TurnEndStatusError {
 			runTurnTerminalStep(&cleanupPanic, func() {
 				requestTurnTreeCancellation(al, ts, false)
 			})
+			failureCancellationDispatched = true
+		}
+		if status == TurnEndStatusAborted {
+			// Provider/context cancellation is expected for an accepted hard
+			// abort. Only later cleanup failures are returned to the caller.
+			err = nil
 		}
 
 		// Hard-abort requests mark and cancel the complete tree before
 		// runTurn unwinds. Panic follows the failure-cancel policy. Both
 		// restore through the one captured restore point before cleanup.
-		if (status == TurnEndStatusAborted || originalPanic != nil) && !ts.opts.NoHistory {
+		if restoreRequired && !ts.opts.NoHistory {
 			runTurnTerminalStep(&cleanupPanic, func() {
 				restoreErr := ts.restoreSession(ts.agent)
 				if restoreErr == nil {
 					return
 				}
 				if originalPanic == nil {
-					err = restoreErr
+					err = errors.Join(err, restoreErr)
 				}
 				runTurnTerminalStep(&cleanupPanic, func() {
 					al.emitEvent(
@@ -207,6 +207,45 @@ func (al *AgentLoop) runTurn(
 			defer cleanupCancel()
 			al.releaseGitWorkspacesForTurn(cleanupCtx, ts)
 		})
+		closeErr, _ := ts.closeOwnedTurnResources()
+		if closeErr != nil {
+			forceError = true
+			status = TurnEndStatusError
+			err = errors.Join(err, closeErr)
+		}
+		if forceError && !failureCancellationDispatched {
+			runTurnTerminalStep(&cleanupPanic, func() {
+				requestTurnTreeCancellation(al, ts, false)
+			})
+		}
+
+		committed := false
+		if claimed {
+			runTurnTerminalStep(&cleanupPanic, func() {
+				status, committed = ts.commitClaimedRunTerminal(status, forceError)
+			})
+		}
+		if !committed {
+			status = ts.terminalStatusSnapshot(status)
+		}
+		if status == TurnEndStatusAborted {
+			result = turnResult{
+				usage:  ts.workflowAgentUsageSnapshot(),
+				status: TurnEndStatusAborted,
+			}
+		} else {
+			result.status = status
+		}
+		if status == TurnEndStatusError && originalPanic == nil && err == nil {
+			switch {
+			case ctx.Err() != nil:
+				err = ctx.Err()
+			case turnCtx.Err() != nil:
+				err = turnCtx.Err()
+			default:
+				err = fmt.Errorf("turn ended with error")
+			}
+		}
 		runTurnTerminalStep(&cleanupPanic, func() {
 			al.emitTurnEnd(ts, status)
 		})
@@ -407,6 +446,7 @@ func (al *AgentLoop) runTurn(
 			return result, finalizeErr
 		case ControlToolLoop:
 			// Execute tools via Pipeline
+			ts.recordNativeSearchObservation(exec.useNativeSearch)
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
 			if ts.hardAbortRequested() {
 				return turnResult{}, nil

@@ -1190,7 +1190,7 @@ func TestRecursionCatalogInstallSkillRootAndOwnerShareWorkspaceLock(t *testing.T
 	}
 }
 
-func TestProductionRecursionCatalogIsFactoryBackedWithoutRuntimeSwitch(t *testing.T) {
+func TestProductionRecursionCatalogSupportsStrictRuntimeSelection(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	messageBus := bus.NewMessageBus()
@@ -1205,13 +1205,19 @@ func TestProductionRecursionCatalogIsFactoryBackedWithoutRuntimeSwitch(t *testin
 			t.Fatalf("production recursion tool %q is not factory-backed", name)
 		}
 	}
-	clone := agent.Tools.Clone()
-	defer clone.Close()
+	owned, err := agent.Tools.InstantiateForOwnerSelection(
+		tools.ToolOwner{Scope: tools.ToolOwnerScopeTurn, TurnID: "production-recursion-owner"},
+		[]string{"install_skill", "spawn", "subagent"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
 	for _, name := range []string{"install_skill", "spawn", "subagent"} {
 		source, sourceOK := agent.Tools.GetRegistered(name)
-		cloned, cloneOK := clone.GetRegistered(name)
-		if !sourceOK || !cloneOK || source != cloned {
-			t.Fatalf("pre-P005c shallow clone parity %q = %T/%T", name, source, cloned)
+		selected, selectedOK := owned.GetRegistered(name)
+		if !sourceOK || !selectedOK || source == selected {
+			t.Fatalf("strict recursion selection %q = %T/%T", name, source, selected)
 		}
 	}
 }

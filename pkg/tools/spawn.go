@@ -133,9 +133,17 @@ Task: %s`,
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
+		// Snapshot every wrapper field before async preparation. A strict turn
+		// owner may close its registry as soon as ExecuteAsync returns; the
+		// goroutine must retain only detached values and the borrowed spawner.
+		spawner := t.spawner
+		defaultModel := t.defaultModel
+		defaultModelFallbacks := cloneStringSlice(t.defaultModelFallbacks)
+		maxTokens := t.maxTokens
+		temperature := t.temperature
 		spawnCtx := ctx
 		releaseRuntime := func() {}
-		if preparer, ok := t.spawner.(asyncSubTurnContextPreparer); ok {
+		if preparer, ok := spawner.(asyncSubTurnContextPreparer); ok {
 			var err error
 			spawnCtx, releaseRuntime, err = preparer.PrepareAsyncSubTurn(ctx)
 			if err != nil {
@@ -143,15 +151,21 @@ Task: %s`,
 			}
 		}
 		// Launch async sub-turn in goroutine
-		go func() {
+		go func(
+			spawner SubTurnSpawner,
+			model string,
+			fallbacks []string,
+			tokenLimit int,
+			temperature float64,
+		) {
 			defer releaseRuntime()
-			result, err := t.spawner.SpawnSubTurn(spawnCtx, SubTurnConfig{
-				Model:          t.defaultModel,
-				ModelFallbacks: cloneStringSlice(t.defaultModelFallbacks),
+			result, err := spawner.SpawnSubTurn(spawnCtx, SubTurnConfig{
+				Model:          model,
+				ModelFallbacks: cloneStringSlice(fallbacks),
 				Tools:          nil, // Will inherit from parent via context
 				SystemPrompt:   systemPrompt,
-				MaxTokens:      t.maxTokens,
-				Temperature:    t.temperature,
+				MaxTokens:      tokenLimit,
+				Temperature:    temperature,
 				Async:          true, // Async execution
 				Critical:       true, // Background spawn should survive parent turn completion
 				TargetAgentID:  targetAgentID,
@@ -164,7 +178,7 @@ Task: %s`,
 			if cb != nil {
 				cb(spawnCtx, result)
 			}
-		}()
+		}(spawner, defaultModel, defaultModelFallbacks, maxTokens, temperature)
 
 		// Return immediate acknowledgment
 		if label != "" {

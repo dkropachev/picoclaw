@@ -31,7 +31,7 @@ func promptBuildRequestForTurn(
 	hasCallableTools := true
 	if ts.profile.Enabled {
 		hasCallableTools = turnProfileHasCallableTools(ts.profile, ts.agent.Tools.ToProviderDefs()) ||
-			turnProfileNativeSearchCallable(cfg, ts.profile, ts.agent)
+			subTurnNativeSearchForProvider(cfg, ts, ts.agent.Provider)
 	}
 	if turnProfileSystemPromptOff(ts.profile) {
 		req.SuppressDefaultSystemPrompt = true
@@ -50,16 +50,24 @@ func promptBuildRequestForTurn(
 	if ts.profile.Enabled && ts.profile.ToolsMode == config.TurnProfileModeCustom {
 		req.AllowedTools = append([]string(nil), ts.profile.AllowedTools...)
 	}
-	restrictChildPromptToRegisteredTools(ts, &req)
+	restrictChildPromptToRegisteredTools(ts, &req, cfg)
 	return req
 }
 
-func restrictChildPromptToRegisteredTools(ts *turnState, req *PromptBuildRequest) {
+func restrictChildPromptToRegisteredTools(
+	ts *turnState,
+	req *PromptBuildRequest,
+	cfg *config.Config,
+) {
 	if ts == nil || req == nil || ts.depth <= 0 || ts.agent == nil || ts.agent.Tools == nil {
 		return
 	}
 
 	registered := ts.agent.Tools.List()
+	if subTurnNativeSearchForProvider(cfg, ts, ts.agent.Provider) &&
+		!containsFoldedSubTurnToolName(registered, subTurnNativeSearchCapability) {
+		registered = append(registered, subTurnNativeSearchCapability)
+	}
 	if len(registered) == 0 {
 		req.SuppressToolUseRule = true
 		req.AllowedTools = nil
@@ -75,24 +83,6 @@ func restrictChildPromptToRegisteredTools(ts *turnState, req *PromptBuildRequest
 	if len(req.AllowedTools) == 0 {
 		req.SuppressToolUseRule = true
 	}
-}
-
-func turnProfileNativeSearchCallable(
-	cfg *config.Config,
-	profile config.EffectiveTurnProfile,
-	agent *AgentInstance,
-) bool {
-	if cfg == nil || agent == nil {
-		return false
-	}
-	if !cfg.Tools.IsToolEnabled("web") || !cfg.Tools.Web.PreferNative {
-		return false
-	}
-	if !turnProfileToolAllowed(profile, "web_search") {
-		return false
-	}
-	nativeProvider, ok := agent.Provider.(providers.NativeSearchCapable)
-	return ok && nativeProvider.SupportsNativeSearch()
 }
 
 func promptBuildRequestForProcessOptions(
