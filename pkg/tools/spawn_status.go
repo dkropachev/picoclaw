@@ -29,8 +29,8 @@ func (t *SpawnStatusTool) Description() string {
 		"Returns a list of all subagents and their current state " +
 		"(running, completed, failed, or canceled), or retrieves details " +
 		"for a specific subagent task when task_id is provided. " +
-		"Results are scoped to the current conversation's channel and chat ID; " +
-		"all tasks are listed only when no channel/chat context is injected " +
+		"Results are scoped to the current agent, session, channel, and chat; " +
+		"all tasks are listed only when no origin context is injected " +
 		"(e.g. direct programmatic calls via Execute)."
 }
 
@@ -52,12 +52,16 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 	if t.manager == nil {
 		return ErrorResult("Subagent manager not configured")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	// Derive the calling conversation's identity so we can scope results to the
-	// current chat only — preventing cross-conversation task leakage in
-	// multi-user deployments.
-	callerChannel := ToolChannel(ctx)
-	callerChatID := ToolChatID(ctx)
+	callerOrigin := subagentTaskOrigin{
+		agentID: ToolAgentID(ctx),
+		session: ToolSessionKey(ctx),
+		channel: ToolChannel(ctx),
+		chatID:  ToolChatID(ctx),
+	}
 
 	var taskID string
 	if rawTaskID, ok := args["task_id"]; ok && rawTaskID != nil {
@@ -76,11 +80,7 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 			return ErrorResult(fmt.Sprintf("No subagent found with task ID: %s", taskID))
 		}
 
-		// Restrict lookup to tasks that belong to this conversation.
-		if callerChannel != "" && taskCopy.OriginChannel != "" && taskCopy.OriginChannel != callerChannel {
-			return ErrorResult(fmt.Sprintf("No subagent found with task ID: %s", taskID))
-		}
-		if callerChatID != "" && taskCopy.OriginChatID != "" && taskCopy.OriginChatID != callerChatID {
+		if !subagentTaskVisibleToOrigin(taskCopy, callerOrigin) {
 			return ErrorResult(fmt.Sprintf("No subagent found with task ID: %s", taskID))
 		}
 
@@ -90,6 +90,9 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 	// ListTaskCopies returns consistent snapshots under the manager lock.
 	origTasks := t.manager.ListTaskCopies()
 	if len(origTasks) == 0 {
+		if !subagentTaskOriginEmpty(callerOrigin) {
+			return NewToolResult("No subagents found for this conversation.")
+		}
 		return NewToolResult("No subagents have been spawned yet.")
 	}
 
@@ -97,11 +100,7 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 	for i := range origTasks {
 		cpy := &origTasks[i]
 
-		// Filter to tasks that originate from the current conversation only.
-		if callerChannel != "" && cpy.OriginChannel != "" && cpy.OriginChannel != callerChannel {
-			continue
-		}
-		if callerChatID != "" && cpy.OriginChatID != "" && cpy.OriginChatID != callerChatID {
+		if !subagentTaskVisibleToOrigin(*cpy, callerOrigin) {
 			continue
 		}
 
@@ -142,6 +141,35 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 	}
 
 	return NewToolResult(strings.TrimRight(sb.String(), "\n"))
+}
+
+func subagentTaskVisibleToOrigin(task SubagentTask, caller subagentTaskOrigin) bool {
+	if subagentTaskOriginEmpty(caller) {
+		return true
+	}
+	if (caller.agentID == "") != (caller.session == "") ||
+		(caller.channel == "") != (caller.chatID == "") {
+		return false
+	}
+	for _, field := range []struct {
+		caller string
+		task   string
+	}{
+		{caller: caller.agentID, task: task.OriginAgentID},
+		{caller: caller.session, task: task.OriginSessionKey},
+		{caller: caller.channel, task: task.OriginChannel},
+		{caller: caller.chatID, task: task.OriginChatID},
+	} {
+		if field.caller != "" && field.task != field.caller {
+			return false
+		}
+	}
+	return true
+}
+
+func subagentTaskOriginEmpty(origin subagentTaskOrigin) bool {
+	return origin.agentID == "" && origin.session == "" &&
+		origin.channel == "" && origin.chatID == ""
 }
 
 // spawnStatusFormatTask renders a single SubagentTask as a human-readable block.

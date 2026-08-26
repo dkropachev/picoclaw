@@ -327,10 +327,14 @@ In practice, this is what makes targeted `spawn(..., agent_id="research")` or `d
 Subagent execution semantics that matter:
 
 - subagents run in isolated ephemeral session history, so their reasoning and intermediate steps do not pollute the parent conversation
-- `spawn` returns immediately and launches background work in a goroutine
+- `spawn` returns immediately with a manager-local `task_id`, records `running`
+  before launch, and later records `completed`, `failed`, or `canceled`
 - `subagent` waits for completion and returns the result directly
 - `delegate` is synchronous and runs as the target peer agent instead of a generic child task
-- `spawn_status` is scoped to the current conversation when channel/chat context exists
+- `spawn_status(task_id=...)` inspects that exact record; omitting the ID lists
+  records visible to the current source agent/session/channel/chat
+- spawn IDs and status records are in-memory and owner/generation-local, not
+  durable or shared across sibling child owners, agents, or reload generations
 - all subagents still share the same workspace security boundary; they do not bypass sandbox or path restrictions
 
 Runtime limits and lifecycle rules:
@@ -394,8 +398,12 @@ delegate(
 
 For live visibility:
 
-- call `spawn_status` to inspect one task or list visible tasks in the current conversation
-- use `/subagents` in chat channels to show the active subagent tree for the current session
+- copy the `task_id` from the immediate spawn acknowledgement and call
+  `spawn_status(task_id="subagent-N")` to inspect that exact task
+- call `spawn_status` without an ID to list tracked spawn records visible to the
+  current conversation origin
+- use `/subagents` in chat channels to show the separate active subagent turn
+  tree for the current session; it is not the tracked spawn record catalog
 
 ## Voice, Transcription, and TTS
 
