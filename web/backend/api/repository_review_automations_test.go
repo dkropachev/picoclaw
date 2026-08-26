@@ -955,8 +955,8 @@ func TestRepositoryReviewAutomationResumeRechecksTipAfterCommitOptions(t *testin
 		t.Fatalf("commit options status=%d body=%s", optionsResponse.Code, optionsResponse.Body.String())
 	}
 	var options repositoryReviewCommitOptionsResponse
-	if err := json.Unmarshal(optionsResponse.Body.Bytes(), &options); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(optionsResponse.Body.Bytes(), &options); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	if options.NewerCommitAvailable || options.Latest.SHA != rememberedCommit {
 		t.Fatalf("initial commit options=%#v", options)

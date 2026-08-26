@@ -348,10 +348,11 @@ func repositoryReviewGitEnvironment() []string {
 func repositoryReviewRememberedCommit(
 	automation repoaudit.RepositoryReviewAutomation,
 ) string {
-	if commit := strings.ToLower(strings.TrimSpace(automation.ResolvedCommitSHA)); repositoryReviewValidCommitSHA(commit) {
+	commit := strings.ToLower(strings.TrimSpace(automation.ResolvedCommitSHA))
+	if repositoryReviewValidCommitSHA(commit) {
 		return commit
 	}
-	commit := strings.ToLower(strings.TrimSpace(automation.ScopePlan.CommitSHA))
+	commit = strings.ToLower(strings.TrimSpace(automation.ScopePlan.CommitSHA))
 	if repositoryReviewValidCommitSHA(commit) {
 		return commit
 	}
