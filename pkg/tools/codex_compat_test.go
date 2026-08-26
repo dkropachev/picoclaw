@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -369,31 +368,9 @@ func TestCodexExecCommandTool_BackgroundPTYProjectsSnakeCaseAndChains(t *testing
 	if err != nil {
 		t.Fatalf("NewExecTool() error = %v", err)
 	}
-	manager := NewSessionManager()
-	manager.Stop()
-	execTool.sessionManager = manager
-	ctx := context.Background()
-	t.Cleanup(func() {
-		for _, info := range manager.List() {
-			session, cleanupErr := manager.Get(info.ID)
-			if cleanupErr != nil {
-				t.Errorf("cleanup Get(%q): %v", info.ID, cleanupErr)
-				continue
-			}
-			if !session.IsDone() {
-				if cleanupErr = session.Kill(); cleanupErr != nil {
-					t.Errorf("cleanup Kill(%q): %v", info.ID, cleanupErr)
-				}
-			}
-			if session.ptyMaster != nil {
-				if cleanupErr = session.ptyMaster.Close(); cleanupErr != nil &&
-					!errors.Is(cleanupErr, os.ErrClosed) {
-					t.Errorf("cleanup PTY close(%q): %v", info.ID, cleanupErr)
-				}
-			}
-			manager.Remove(info.ID)
-		}
-	})
+	owner := processTestOwner("codex-pty")
+	manager := installProcessTestManager(t, execTool, owner)
+	ctx := processTestContext(owner)
 
 	background := NewCodexExecCommandTool(execTool).Execute(ctx, map[string]any{
 		"cmd":        "cat",
@@ -417,7 +394,7 @@ func TestCodexExecCommandTool_BackgroundPTYProjectsSnakeCaseAndChains(t *testing
 	if background.ForLLM != wantBackground || strings.Contains(background.ForLLM, "sessionId") {
 		t.Fatalf("background response = %q, want exact %q", background.ForLLM, wantBackground)
 	}
-	session, err := manager.Get(started.SessionID)
+	session, err := manager.Get(owner, started.SessionID)
 	if err != nil {
 		t.Fatalf("Get(%q) error = %v", started.SessionID, err)
 	}
@@ -439,19 +416,29 @@ func TestCodexExecCommandTool_BackgroundPTYProjectsSnakeCaseAndChains(t *testing
 
 func TestCodexWriteStdinTool_ForwardsExactCharactersWithoutConsumingOutput(t *testing.T) {
 	manager := NewSessionManager()
-	manager.Stop()
+	t.Cleanup(manager.Stop)
+	owner := processTestOwner("codex-exact-input")
 	var stdin bytes.Buffer
 	bufferedOutput := bytes.NewBufferString("buffered-output-canary")
-	manager.Add(&ProcessSession{
+	session := &ProcessSession{
 		ID:           "memory-session",
+		PID:          1,
+		Command:      "memory command",
+		Background:   true,
+		StartTime:    time.Now().Unix(),
 		Status:       "running",
 		stdinWriter:  &stdin,
 		outputBuffer: bufferedOutput,
-	})
+		waitDone:     closedShellProcessTestWaitDone(),
+	}
+	if err := manager.Add(owner, session); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Remove(owner, session.ID, session) })
 	execTool := &ExecTool{sessionManager: manager}
 	chars := " \n\x00\tcontrol\r"
 
-	result := NewCodexWriteStdinTool(execTool).Execute(context.Background(), map[string]any{
+	result := NewCodexWriteStdinTool(execTool).Execute(processTestContext(owner), map[string]any{
 		"session_id": "  memory-session  ",
 		"chars":      chars,
 	})
@@ -471,19 +458,39 @@ func TestCodexWriteStdinTool_ForwardsExactCharactersWithoutConsumingOutput(t *te
 }
 
 func TestCodexWriteStdinTool_PropagatesSessionLifecycleErrors(t *testing.T) {
-	manager := &SessionManager{sessions: map[string]*ProcessSession{
-		"exited-session": {
-			ID:          "exited-session",
-			Status:      "done",
-			ExitCode:    23,
-			stdinWriter: &bytes.Buffer{},
-		},
-		"no-stdin-session": {
-			ID:     "no-stdin-session",
-			Status: "running",
-		},
-	}}
+	manager := NewSessionManager()
+	t.Cleanup(manager.Stop)
+	owner := processTestOwner("codex-lifecycle")
+	exited := &ProcessSession{
+		ID:           "exited-session",
+		PID:          1,
+		Command:      "exited command",
+		Background:   true,
+		StartTime:    time.Now().Unix(),
+		Status:       "done",
+		ExitCode:     23,
+		stdinWriter:  &bytes.Buffer{},
+		outputBuffer: &bytes.Buffer{},
+		waitDone:     closedShellProcessTestWaitDone(),
+	}
+	noStdin := &ProcessSession{
+		ID:           "no-stdin-session",
+		PID:          1,
+		Command:      "no stdin command",
+		Background:   true,
+		StartTime:    time.Now().Unix(),
+		Status:       "running",
+		outputBuffer: &bytes.Buffer{},
+		waitDone:     closedShellProcessTestWaitDone(),
+	}
+	for _, session := range []*ProcessSession{exited, noStdin} {
+		if err := manager.Add(owner, session); err != nil {
+			t.Fatalf("Add(%q) error = %v", session.ID, err)
+		}
+		t.Cleanup(func() { _ = manager.Remove(owner, session.ID, session) })
+	}
 	tool := NewCodexWriteStdinTool(&ExecTool{sessionManager: manager})
+	ctx := processTestContext(owner)
 	tests := []struct {
 		name      string
 		sessionID string
@@ -496,7 +503,7 @@ func TestCodexWriteStdinTool_PropagatesSessionLifecycleErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := tool.Execute(context.Background(), map[string]any{
+			result := tool.Execute(ctx, map[string]any{
 				"session_id": test.sessionID,
 				"chars":      "exact input",
 			})
@@ -542,21 +549,37 @@ func TestSessionManagerCleanupRemovesOnlyOldCompletedSessions(t *testing.T) {
 	now := time.Now()
 	old := now.Add(-31 * time.Minute).Unix()
 	recent := now.Add(-29 * time.Minute).Unix()
-	manager := &SessionManager{sessions: map[string]*ProcessSession{
-		"old-done":    {ID: "old-done", Status: "done", StartTime: old},
-		"old-exited":  {ID: "old-exited", Status: "exited", StartTime: old},
-		"old-running": {ID: "old-running", Status: "running", StartTime: old},
-		"recent-done": {ID: "recent-done", Status: "done", StartTime: recent},
-	}}
+	manager := NewSessionManager()
+	t.Cleanup(manager.Stop)
+	owner := processTestOwner("cleanup")
+	for _, spec := range []struct {
+		id      string
+		status  string
+		started int64
+	}{
+		{id: "old-done", status: "done", started: old},
+		{id: "old-exited", status: "exited", started: old},
+		{id: "old-running", status: "running", started: old},
+		{id: "recent-done", status: "done", started: recent},
+	} {
+		session := &ProcessSession{
+			ID: spec.id, PID: 1, Command: "cleanup command", Background: true,
+			StartTime: spec.started, Status: spec.status, outputBuffer: &bytes.Buffer{},
+			waitDone: closedShellProcessTestWaitDone(),
+		}
+		if err := manager.Add(owner, session); err != nil {
+			t.Fatalf("Add(%q) error = %v", spec.id, err)
+		}
+	}
 
 	manager.cleanupOldSessions()
 	for _, removed := range []string{"old-done", "old-exited"} {
-		if _, err := manager.Get(removed); !errors.Is(err, ErrSessionNotFound) {
+		if _, err := manager.Get(owner, removed); !errors.Is(err, ErrSessionNotFound) {
 			t.Fatalf("old completed session %q was retained: %v", removed, err)
 		}
 	}
 	for _, retained := range []string{"old-running", "recent-done"} {
-		if session, err := manager.Get(retained); err != nil || session.ID != retained {
+		if session, err := manager.Get(owner, retained); err != nil || session.ID != retained {
 			t.Fatalf("eligible session %q was removed: session=%#v err=%v", retained, session, err)
 		}
 	}
