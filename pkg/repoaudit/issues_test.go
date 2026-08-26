@@ -188,10 +188,10 @@ func TestIssueGenerationFailureRetryRegenerationAndDeletion(t *testing.T) {
 		regenerating.AttemptResolvedInstructions != regeneration.ResolvedInstructions {
 		t.Fatalf("regeneration reservation=%#v began=%v err=%v", regenerating, began, err)
 	}
-	if _, replay, reserved, err := store.ReserveIssueGeneration(regeneration); err != nil ||
+	if _, replay, reserved, reserveErr := store.ReserveIssueGeneration(regeneration); reserveErr != nil ||
 		reserved || replay.ID != regenerating.ID ||
 		replay.AttemptGenerationID != regeneration.GenerationID {
-		t.Fatalf("active regeneration replay=%#v reserved=%v err=%v", replay, reserved, err)
+		t.Fatalf("active regeneration replay=%#v reserved=%v err=%v", replay, reserved, reserveErr)
 	}
 	_, preserved, err := store.CompleteIssueGeneration(
 		state.Repository, good.ID, regeneration.GenerationID, "", "", nil, "unsafe provider failure",
@@ -395,8 +395,8 @@ func TestLegacyDraftBackfillPrefersPublicationThenNewestEditing(t *testing.T) {
 		t.Fatal(err)
 	}
 	var legacy map[string]any
-	if err := json.Unmarshal(rawData, &legacy); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(rawData, &legacy); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	for _, rawFinding := range legacy["findings"].([]any) {
 		delete(rawFinding.(map[string]any), "issue_draft_id")
@@ -410,8 +410,8 @@ func TestLegacyDraftBackfillPrefersPublicationThenNewestEditing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statePath, rawData, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(statePath, rawData, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	loaded, found, err := store.Get(state.Repository)
 	if err != nil || !found {
@@ -432,10 +432,10 @@ func TestLegacyDraftBackfillPrefersPublicationThenNewestEditing(t *testing.T) {
 		!byID["unknown"].Canonical {
 		t.Fatalf("legacy canonical flags=%#v", byID)
 	}
-	if _, _, err := store.UpdateIssueDraft(
+	if _, _, updateErr := store.UpdateIssueDraft(
 		state.Repository, "editing-old", "Changed", "Changed", nil, 1,
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("noncanonical legacy edit error=%v", err)
+	); !errors.Is(updateErr, ErrConflict) {
+		t.Fatalf("noncanonical legacy edit error=%v", updateErr)
 	}
 	rewritten, err := os.ReadFile(statePath)
 	if err != nil || !strings.Contains(string(rewritten), `"origin":"legacy"`) ||
@@ -540,10 +540,10 @@ func TestIssueMutationBoundaryFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.ExpectedDraftVersion = legacy.Version
-		if _, _, _, err := store.BeginIssueRegeneration(
+		if _, _, _, regenerationErr := store.BeginIssueRegeneration(
 			state.Repository, legacy.ID, request,
-		); !errors.Is(err, ErrConflict) {
-			t.Fatalf("legacy regeneration error=%v", err)
+		); !errors.Is(regenerationErr, ErrConflict) {
+			t.Fatalf("legacy regeneration error=%v", regenerationErr)
 		}
 		store, state = repositoryReviewIssueState(t, 1)
 		request = testIssueGenerationRequest(state.Repository, state.Findings[0].ID, "first")
@@ -567,19 +567,19 @@ func TestIssueMutationBoundaryFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := store.CompleteIssueGeneration(
+		if _, _, completionErr := store.CompleteIssueGeneration(
 			state.Repository, "missing", request.GenerationID, "title", "body", nil, "",
-		); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("missing completion draft error=%v", err)
+		); !errors.Is(completionErr, os.ErrNotExist) {
+			t.Fatalf("missing completion draft error=%v", completionErr)
 		}
-		if _, _, err := store.CompleteIssueGeneration(
+		if _, _, completionErr := store.CompleteIssueGeneration(
 			state.Repository, draft.ID, "wrong", "title", "body", nil, "",
-		); !errors.Is(err, ErrConflict) {
-			t.Fatalf("wrong generation completion error=%v", err)
+		); !errors.Is(completionErr, ErrConflict) {
+			t.Fatalf("wrong generation completion error=%v", completionErr)
 		}
-		if _, _, err := store.CompleteIssueGeneration(
+		if _, _, completionErr := store.CompleteIssueGeneration(
 			state.Repository, draft.ID, request.GenerationID, "", "", nil, "",
-		); err == nil {
+		); completionErr == nil {
 			t.Fatal("empty generated preview was accepted")
 		}
 		_, draft, err = store.CompleteIssueGeneration(
@@ -649,25 +649,27 @@ func TestIssueMutationBoundaryFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.ExpectedFindingVersion = linkedState.Findings[0].Version
-		if _, _, err := store.LinkExistingIssue(request); !errors.Is(err, ErrConflict) {
-			t.Fatalf("unconfirmed replacement error=%v", err)
+		if _, _, linkErr := store.LinkExistingIssue(request); !errors.Is(linkErr, ErrConflict) {
+			t.Fatalf("unconfirmed replacement error=%v", linkErr)
 		}
 		request.Replace = true
-		if _, replay, err := store.LinkExistingIssue(request); err != nil || replay.ID != linked.ID {
-			t.Fatalf("idempotent replacement=%#v err=%v", replay, err)
+		if _, replay, linkErr := store.LinkExistingIssue(request); linkErr != nil || replay.ID != linked.ID {
+			t.Fatalf("idempotent replacement=%#v err=%v", replay, linkErr)
 		}
-		if _, err := store.UnlinkExistingIssue(
+		if _, unlinkErr := store.UnlinkExistingIssue(
 			state.Repository, state.Findings[1].ID, state.Findings[1].Version, false,
-		); err == nil {
+		); unlinkErr == nil {
 			t.Fatal("unconfirmed unlink was accepted")
 		}
-		if _, err := store.UnlinkExistingIssue(state.Repository, "missing", 1, true); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("missing unlink finding error=%v", err)
+		if _, unlinkErr := store.UnlinkExistingIssue(
+			state.Repository, "missing", 1, true,
+		); !errors.Is(unlinkErr, os.ErrNotExist) {
+			t.Fatalf("missing unlink finding error=%v", unlinkErr)
 		}
-		if _, err := store.UnlinkExistingIssue(
+		if _, unlinkErr := store.UnlinkExistingIssue(
 			state.Repository, state.Findings[1].ID, state.Findings[1].Version, true,
-		); !errors.Is(err, ErrConflict) {
-			t.Fatalf("unassociated unlink error=%v", err)
+		); !errors.Is(unlinkErr, ErrConflict) {
+			t.Fatalf("unassociated unlink error=%v", unlinkErr)
 		}
 		current, found, err := store.Get(state.Repository)
 		if err != nil || !found {
@@ -914,16 +916,24 @@ func TestIssueAssociationValidationBoundaries(t *testing.T) {
 	clearIssueDraftAttempt(nil)
 	for _, drafts := range [][]IssueDraft{
 		{
-			{ID: "newer", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
-				State: IssueDraftEditing, CreatedAt: now.Add(time.Minute), UpdatedAt: now},
-			{ID: "older", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
-				State: IssueDraftEditing, CreatedAt: now, UpdatedAt: now},
+			{
+				ID: "newer", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
+				State: IssueDraftEditing, CreatedAt: now.Add(time.Minute), UpdatedAt: now,
+			},
+			{
+				ID: "older", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
+				State: IssueDraftEditing, CreatedAt: now, UpdatedAt: now,
+			},
 		},
 		{
-			{ID: "b", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
-				State: IssueDraftEditing, CreatedAt: now, UpdatedAt: now},
-			{ID: "a", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
-				State: IssueDraftEditing, CreatedAt: now, UpdatedAt: now},
+			{
+				ID: "b", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
+				State: IssueDraftEditing, CreatedAt: now, UpdatedAt: now,
+			},
+			{
+				ID: "a", FindingIDs: []string{"finding"}, Origin: IssueDraftOriginLegacy,
+				State: IssueDraftEditing, CreatedAt: now, UpdatedAt: now,
+			},
 		},
 	} {
 		state := RepositoryState{Findings: []Finding{{ID: "finding"}}, IssueDrafts: drafts}

@@ -618,8 +618,7 @@ func (h *Handler) handleRegenerateRepositoryReviewAutomationIssue(w http.Respons
 	writerModel := draft.GeneratorModel
 	generationID := draft.GenerationID
 	if draft.State == repoaudit.IssueDraftGenerating {
-		generationID, instructions, mode, writerModel, account =
-			repositoryReviewIssueAttemptProvenance(draft)
+		generationID, instructions, mode, writerModel, account = repositoryReviewIssueAttemptProvenance(draft)
 	}
 	if draft.State != repoaudit.IssueDraftGenerating {
 		account, err = h.repositoryReviewIssueWriterAccount(ledger.Automation)
@@ -660,8 +659,9 @@ func (h *Handler) handleRegenerateRepositoryReviewAutomationIssue(w http.Respons
 		defer releaseRepositoryReviewIssueGeneration(generating)
 		finding, _ := repositoryReviewFindingByID(updated, draft.FindingIDs[0])
 		contexts := repositoryReviewFindingContexts(updated, []repoaudit.Finding{finding})
-		activeGenerationID, activeInstructions, _, activeModel, activeAccount :=
-			repositoryReviewIssueAttemptProvenance(generating)
+		activeGenerationID, activeInstructions, _, activeModel, activeAccount := repositoryReviewIssueAttemptProvenance(
+			generating,
+		)
 		writerAutomation := ledger.Automation
 		writerAutomation.IssueWriterModel = activeModel
 		generated, generationErr := runRepositoryReviewIssueWriterWithSlot(
@@ -702,8 +702,7 @@ func (h *Handler) generateRepositoryReviewIssue(
 		if existing, found := repositoryReviewIssueByID(ledger.State, finding.IssueDraftID); found &&
 			existing.Origin == repoaudit.IssueDraftOriginAIGenerated &&
 			repositoryReviewIssueAttemptGenerationID(existing) == generationID {
-			_, instructions, mode, generatorModel, account =
-				repositoryReviewIssueAttemptProvenance(existing)
+			_, instructions, mode, generatorModel, account = repositoryReviewIssueAttemptProvenance(existing)
 		}
 	}
 	request := repoaudit.IssueGenerationRequest{
@@ -725,8 +724,9 @@ func (h *Handler) generateRepositoryReviewIssue(
 	defer releaseRepositoryReviewIssueGeneration(draft)
 	finding, _ := repositoryReviewFindingByID(state, findingID)
 	contexts := repositoryReviewFindingContexts(state, []repoaudit.Finding{finding})
-	activeGenerationID, activeInstructions, _, activeModel, activeAccount :=
-		repositoryReviewIssueAttemptProvenance(draft)
+	activeGenerationID, activeInstructions, _, activeModel, activeAccount := repositoryReviewIssueAttemptProvenance(
+		draft,
+	)
 	writerAutomation := ledger.Automation
 	writerAutomation.IssueWriterModel = activeModel
 	generated, generationErr := runRepositoryReviewIssueWriterWithSlot(
@@ -734,7 +734,7 @@ func (h *Handler) generateRepositoryReviewIssue(
 		activeInstructions, activeAccount,
 	)
 	if generationErr != nil {
-		state, draft, err = ledger.Store.CompleteIssueGeneration(
+		_, draft, err = ledger.Store.CompleteIssueGeneration(
 			state.Repository, draft.ID, activeGenerationID, "", "", nil,
 			"Issue preview generation failed.",
 		)
@@ -823,19 +823,19 @@ func defaultRunRepositoryReviewIssueWriter(
 	if err != nil {
 		return repositoryReviewIssueWriterResult{}, err
 	}
-	if err := validateRepositoryReviewIssueWriterAlias(
+	if validationErr := validateRepositoryReviewIssueWriterAlias(
 		cfg, account, automation.IssueWriterModel,
-	); err != nil {
-		return repositoryReviewIssueWriterResult{}, err
+	); validationErr != nil {
+		return repositoryReviewIssueWriterResult{}, validationErr
 	}
 	runner := &webWorkflowRuntimeRunner{configPath: h.configPath, config: cfg}
 	defer runner.Close()
 	runCtx, cancel := context.WithTimeout(ctx, repositoryReviewIssueWriterTimeout)
 	defer cancel()
-	if _, err := runner.ResolveRepositoryReviewProfile(
+	if _, resolutionErr := runner.ResolveRepositoryReviewProfile(
 		runCtx, "main", account, []string{automation.IssueWriterModel},
-	); err != nil {
-		return repositoryReviewIssueWriterResult{}, err
+	); resolutionErr != nil {
+		return repositoryReviewIssueWriterResult{}, resolutionErr
 	}
 	agentRequest := repositoryReviewIssueWriterAgentRequest(
 		automation, finding, contexts, instructions, account,

@@ -412,8 +412,8 @@ func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *
 		t.Fatal(err)
 	}
 	var persisted repoaudit.RepositoryState
-	if err := json.Unmarshal(raw, &persisted); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(raw, &persisted); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	newer := draft
 	newer.ID = "rid_newer_legacy_conflict"
@@ -1277,8 +1277,8 @@ func TestRepositoryReviewAutomationStateFallsBackOnlyToUnambiguousRunMembership(
 		if statePath == "" {
 			t.Fatal("authoritative state file was not found")
 		}
-		if err := os.WriteFile(statePath, []byte(`{`), 0o600); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(statePath, []byte(`{`), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 		_, found, err := repositoryReviewAutomationState(
 			repoaudit.NewStore(workspace),

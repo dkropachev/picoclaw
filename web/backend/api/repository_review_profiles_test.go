@@ -64,7 +64,12 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 		json.Unmarshal(collectionList.Body.Bytes(), &collectionPage) != nil ||
 		len(collectionPage.Profiles) != 1 || collectionPage.Total != 1 ||
 		collectionPage.CanonicalQuery != "ALL ORDER BY name ASC" || collectionPage.QuerySchema == nil {
-		t.Fatalf("collection list status=%d page=%#v body=%s", collectionList.Code, collectionPage, collectionList.Body.String())
+		t.Fatalf(
+			"collection list status=%d page=%#v body=%s",
+			collectionList.Code,
+			collectionPage,
+			collectionList.Body.String(),
+		)
 	}
 	get := httptest.NewRecorder()
 	mux.ServeHTTP(

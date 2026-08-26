@@ -140,7 +140,8 @@ func TestRepositoryReviewReportCurrentMembershipAndEmptyActiveLedger(t *testing.
 	now := time.Now().UTC()
 	state := repoaudit.RepositoryState{
 		Findings: []repoaudit.Finding{
-			{ID: "historical"}, {ID: "current"},
+			{ID: "historical"},
+			{ID: "current"},
 			{ID: "context-current", ContextIDs: []string{"context-new"}},
 			{ID: "context-old", ContextIDs: []string{"context-old"}},
 		},
@@ -384,8 +385,8 @@ func TestRepositoryReviewInterruptedGenerationResumesWithSameGenerationID(t *tes
 	cfg.ModelList = append(cfg.ModelList, &config.ModelConfig{
 		ModelName: "old-account", Provider: "openai", Model: "openai/old", Enabled: true,
 	})
-	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	state := seedRepositoryReviewAPIState(t, workspace)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
@@ -496,8 +497,8 @@ func TestRepositoryReviewIssueWriterFailsClosedAfterAliasBecomesAgentic(t *testi
 	cfg.ModelList[0].Model = "codex-cli/gpt-5"
 	cfg.ModelAliases[0].Model = "codex-cli/gpt-5"
 	cfg.ModelAliases[0].AccountOverrides = nil
-	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	_, err = defaultRunRepositoryReviewIssueWriter(
 		t.Context(), handler,
@@ -956,7 +957,9 @@ func TestRepositoryReviewDetailHelperBoundaryCoverage(t *testing.T) {
 	if got := repositoryReviewGenerationFailure("finding", "generation_failed"); got["message"] != "generation failed" {
 		t.Fatalf("generation failure=%#v", got)
 	}
-	if got := repositoryReviewResolvedIssueInstructions(repositoryReviewGenerationRequest{}); got != repositoryReviewDefaultIssueInstructions {
+	if got := repositoryReviewResolvedIssueInstructions(
+		repositoryReviewGenerationRequest{},
+	); got != repositoryReviewDefaultIssueInstructions {
 		t.Fatalf("default instructions=%q", got)
 	}
 	custom := repositoryReviewResolvedIssueInstructions(repositoryReviewGenerationRequest{
@@ -1134,10 +1137,10 @@ func TestRepositoryReviewIssueGenerationClaimBoundaryCoverage(t *testing.T) {
 	staleRequest := regenRequest
 	staleRequest.GenerationID = "rrig_regen_stale"
 	staleRequest.ExpectedDraftVersion = 1
-	if _, _, _, err := claimRepositoryReviewIssueRegeneration(
+	if _, _, _, claimErr := claimRepositoryReviewIssueRegeneration(
 		store, state.Repository, firstDraft.ID, staleRequest,
-	); !errors.Is(err, repoaudit.ErrConflict) {
-		t.Fatalf("stale regeneration error=%v", err)
+	); !errors.Is(claimErr, repoaudit.ErrConflict) {
+		t.Fatalf("stale regeneration error=%v", claimErr)
 	}
 
 	previousBegin := beginRepositoryReviewIssueRegeneration
@@ -1151,12 +1154,12 @@ func TestRepositoryReviewIssueGenerationClaimBoundaryCoverage(t *testing.T) {
 	) (func(), bool, error) {
 		return nil, false, errors.New("injected attempt-lock failure")
 	}
-	if _, _, _, err := claimRepositoryReviewIssueGeneration(store, secondRequest); err == nil {
+	if _, _, _, claimErr := claimRepositoryReviewIssueGeneration(store, secondRequest); claimErr == nil {
 		t.Fatal("generation attempt-lock failure was ignored")
 	}
-	if _, _, _, err := claimRepositoryReviewIssueRegeneration(
+	if _, _, _, claimErr := claimRepositoryReviewIssueRegeneration(
 		store, state.Repository, firstDraft.ID, regenRequest,
-	); err == nil {
+	); claimErr == nil {
 		t.Fatal("regeneration attempt-lock failure was ignored")
 	}
 	tryLockRepositoryReviewIssueGenerationAttempt = previousTryLock
@@ -1165,7 +1168,7 @@ func TestRepositoryReviewIssueGenerationClaimBoundaryCoverage(t *testing.T) {
 		t.Fatalf("load failed retry state found=%v err=%v", found, err)
 	}
 	currentThird, _ := repositoryReviewIssueByID(current, retriedDraft.ID)
-	_, currentThird, err = store.CompleteIssueGeneration(
+	_, _, err = store.CompleteIssueGeneration(
 		state.Repository, currentThird.ID, currentThird.AttemptGenerationID,
 		"", "", nil, "failed again",
 	)
@@ -1252,7 +1255,11 @@ func TestRepositoryReviewIssueWriterAndCapabilityHelperCoverage(t *testing.T) {
 	}
 	localCapabilities := repositoryReviewIssueCapabilities(
 		repoaudit.RepositoryState{Repository: "/tmp/repo"},
-		repoaudit.IssueDraft{Canonical: true, Origin: repoaudit.IssueDraftOriginLegacy, State: repoaudit.IssueDraftEditing},
+		repoaudit.IssueDraft{
+			Canonical: true,
+			Origin:    repoaudit.IssueDraftOriginLegacy,
+			State:     repoaudit.IssueDraftEditing,
+		},
 	)
 	if localCapabilities.GitHub || localCapabilities.CanPublish || !localCapabilities.CanEdit {
 		t.Fatalf("local capabilities=%#v", localCapabilities)
@@ -1302,8 +1309,8 @@ func TestRepositoryReviewIssueWriterAndCapabilityHelperCoverage(t *testing.T) {
 	}
 	cfg.ModelList[0].APIBase = "http://127.0.0.1:1/v1"
 	cfg.ModelList[0].APIKeys = config.SimpleSecureStrings("test-key")
-	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	_, err = defaultRunRepositoryReviewIssueWriter(
 		t.Context(), handler,
@@ -1402,7 +1409,10 @@ func TestRepositoryReviewGatewayProxyAndPublicationBoundaryCoverage(t *testing.T
 			t.Fatalf("missing publication=%d %s", missing.Code, missing.Body.String())
 		}
 		installEventProxyStubs(t, func(_ *http.Request, _ time.Duration) (*http.Response, error) {
-			response := eventUpstreamResponse(http.StatusServiceUnavailable, `{"code":"publication_failed","message":"safe"}`)
+			response := eventUpstreamResponse(
+				http.StatusServiceUnavailable,
+				`{"code":"publication_failed","message":"safe"}`,
+			)
 			response.Header.Set("Retry-After", "1")
 			return response, nil
 		})
@@ -1410,7 +1420,12 @@ func TestRepositoryReviewGatewayProxyAndPublicationBoundaryCoverage(t *testing.T
 			"expected_version": draft.Version, "confirmed": true,
 		})
 		if failure.Code != http.StatusServiceUnavailable || failure.Header().Get("Retry-After") != "1" {
-			t.Fatalf("gateway publication failure=%d headers=%v body=%s", failure.Code, failure.Header(), failure.Body.String())
+			t.Fatalf(
+				"gateway publication failure=%d headers=%v body=%s",
+				failure.Code,
+				failure.Header(),
+				failure.Body.String(),
+			)
 		}
 	})
 
@@ -1559,8 +1574,8 @@ func TestRepositoryReviewDefaultIssueWriterProviderBoundaries(t *testing.T) {
 	}
 	cfg.ModelList[0].APIBase = server.URL + "/v1"
 	cfg.ModelList[0].APIKeys = config.SimpleSecureStrings("test-key")
-	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-		t.Fatal(err)
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	automation := repoaudit.RepositoryReviewAutomation{
 		IssueWriterModel: "cheap", EffectiveAccountRef: "api",
@@ -1578,17 +1593,17 @@ func TestRepositoryReviewDefaultIssueWriterProviderBoundaries(t *testing.T) {
 		t.Fatalf("generated=%#v err=%v", generated, err)
 	}
 	responseContent = `not structured JSON`
-	if _, err := defaultRunRepositoryReviewIssueWriter(
+	if _, writerErr := defaultRunRepositoryReviewIssueWriter(
 		t.Context(), handler, automation, finding, nil,
 		repositoryReviewDefaultIssueInstructions, "api",
-	); err == nil || !strings.Contains(err.Error(), "structured output") {
-		t.Fatalf("invalid structured response error=%v", err)
+	); writerErr == nil || !strings.Contains(writerErr.Error(), "structured output") {
+		t.Fatalf("invalid structured response error=%v", writerErr)
 	}
 	responseStatus = http.StatusServiceUnavailable
-	if _, err := defaultRunRepositoryReviewIssueWriter(
+	if _, writerErr := defaultRunRepositoryReviewIssueWriter(
 		t.Context(), handler, automation, finding, nil,
 		repositoryReviewDefaultIssueInstructions, "api",
-	); err == nil {
+	); writerErr == nil {
 		t.Fatal("provider failure was accepted")
 	}
 	responseStatus = http.StatusOK
@@ -1914,11 +1929,11 @@ func TestRepositoryReviewAutomationLedgerResolutionBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Record(t.Context(), repoaudit.RecordRequest{
+		if _, recordErr := store.Record(t.Context(), repoaudit.RecordRequest{
 			Plan: unmatchedPlan, RunID: "unmatched-run",
 			Observations: []repoaudit.Observation{{Model: "review", ScopeFiles: []repoaudit.FileRef{unmatchedFile}}},
-		}); err != nil {
-			t.Fatal(err)
+		}); recordErr != nil {
+			t.Fatal(recordErr)
 		}
 		automation := testRepositoryReviewAutomation()
 		automation.ID = "rra_scanned_ledger"
@@ -1959,11 +1974,11 @@ func TestRepositoryReviewAutomationLedgerResolutionBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Record(t.Context(), repoaudit.RecordRequest{
+		if _, recordErr := store.Record(t.Context(), repoaudit.RecordRequest{
 			Plan: plan, RunID: first.Runs[0].ID,
 			Observations: []repoaudit.Observation{{Model: "review", ScopeFiles: []repoaudit.FileRef{file}}},
-		}); err != nil {
-			t.Fatal(err)
+		}); recordErr != nil {
+			t.Fatal(recordErr)
 		}
 		automation := testRepositoryReviewAutomation()
 		automation.ID = "rra_ambiguous_ledger"
@@ -1988,8 +2003,8 @@ func TestRepositoryReviewGenerationPersistenceAndAccountFailureBoundaries(t *tes
 			t.Fatal(err)
 		}
 		cfg.Agents.Defaults.AccountRef = ""
-		if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-			t.Fatal(err)
+		if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+			t.Fatal(saveErr)
 		}
 		state := seedRepositoryReviewAPIState(t, workspace)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
@@ -2192,17 +2207,31 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := handler.repositoryReviewAutomationFinding(t.Context(), empty.ID, "finding"); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("empty owned finding error=%v", err)
+		if _, _, lookupErr := handler.repositoryReviewAutomationFinding(t.Context(), empty.ID, "finding"); !errors.Is(
+			lookupErr,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("empty owned finding error=%v", lookupErr)
 		}
-		if _, _, err := handler.repositoryReviewAutomationIssue(t.Context(), empty.ID, "draft"); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("empty owned issue error=%v", err)
+		if _, _, lookupErr := handler.repositoryReviewAutomationIssue(t.Context(), empty.ID, "draft"); !errors.Is(
+			lookupErr,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("empty owned issue error=%v", lookupErr)
 		}
-		if _, _, err := handler.repositoryReviewAutomationFinding(t.Context(), "rra_missing", "finding"); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("missing automation finding error=%v", err)
+		if _, _, lookupErr := handler.repositoryReviewAutomationFinding(
+			t.Context(), "rra_missing", "finding",
+		); !errors.Is(
+			lookupErr,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("missing automation finding error=%v", lookupErr)
 		}
-		if _, _, err := handler.repositoryReviewAutomationIssue(t.Context(), "rra_missing", "draft"); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("missing automation issue error=%v", err)
+		if _, _, lookupErr := handler.repositoryReviewAutomationIssue(t.Context(), "rra_missing", "draft"); !errors.Is(
+			lookupErr,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("missing automation issue error=%v", lookupErr)
 		}
 
 		withRuns := testRepositoryReviewAutomation()

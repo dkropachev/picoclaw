@@ -433,13 +433,22 @@ func TestRepositoryReviewGatewayLedgerIdentityNormalizationIsExact(t *testing.T)
 	}
 	absolute := filepath.Join(string(filepath.Separator), "tmp", "repo")
 	dirtyAbsolute := filepath.Join(string(filepath.Separator), "tmp", "..", "tmp", "repo")
-	if identities := repositoryReviewGatewayLedgerIdentities(" " + dirtyAbsolute + " "); !reflect.DeepEqual(identities, []string{absolute}) {
+	if identities := repositoryReviewGatewayLedgerIdentities(
+		" " + dirtyAbsolute + " ",
+	); !reflect.DeepEqual(identities, []string{absolute}) {
 		t.Fatalf("absolute identities=%#v", identities)
 	}
-	if identities := repositoryReviewGatewayLedgerIdentities("https://github.com/Owner/Repo.git"); !reflect.DeepEqual(identities, []string{"owner/repo", "https://github.com/Owner/Repo.git"}) {
+	if identities := repositoryReviewGatewayLedgerIdentities(
+		"https://github.com/Owner/Repo.git",
+	); !reflect.DeepEqual(
+		identities,
+		[]string{"owner/repo", "https://github.com/Owner/Repo.git"},
+	) {
 		t.Fatalf("GitHub identities=%#v", identities)
 	}
-	if identities := repositoryReviewGatewayLedgerIdentities("opaque-repository"); !reflect.DeepEqual(identities, []string{"opaque-repository"}) {
+	if identities := repositoryReviewGatewayLedgerIdentities(
+		"opaque-repository",
+	); !reflect.DeepEqual(identities, []string{"opaque-repository"}) {
 		t.Fatalf("opaque identities=%#v", identities)
 	}
 }
@@ -673,7 +682,10 @@ func TestRepositoryReviewEffectiveAccountUsesImmutableFallbackOrder(t *testing.T
 	}); got != "profile" {
 		t.Fatalf("profile account=%q", got)
 	}
-	if got := repositoryReviewEffectiveAutomationAccount(loop, repoaudit.RepositoryReviewAutomation{}); got != "default-account" {
+	if got := repositoryReviewEffectiveAutomationAccount(
+		loop,
+		repoaudit.RepositoryReviewAutomation{},
+	); got != "default-account" {
 		t.Fatalf("default account=%q", got)
 	}
 	if got := repositoryReviewEffectiveAutomationAccount(nil, repoaudit.RepositoryReviewAutomation{}); got != "" {
