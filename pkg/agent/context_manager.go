@@ -75,13 +75,53 @@ type IngestRequest struct {
 // cfg is the raw JSON configuration from config.json (may be nil).
 type ContextManagerFactory func(cfg json.RawMessage, al *AgentLoop) (ContextManager, error)
 
+// contextManagerContextFactory is the internal context-aware form used by
+// built-in managers whose construction can perform bounded I/O. The public
+// registration API remains source-compatible for external managers.
+type contextManagerContextFactory func(
+	ctx context.Context,
+	cfg json.RawMessage,
+	al *AgentLoop,
+) (ContextManager, error)
+
+type contextManagerResolver func(
+	ctx context.Context,
+	name string,
+	cfg json.RawMessage,
+	al *AgentLoop,
+) (ContextManager, error)
+
+type contextManagerRegistration struct {
+	factory        ContextManagerFactory
+	contextFactory contextManagerContextFactory
+}
+
 var (
 	cmRegistryMu sync.RWMutex
-	cmRegistry   = map[string]ContextManagerFactory{}
+	cmRegistry   = map[string]contextManagerRegistration{}
 )
 
 // RegisterContextManager registers a named ContextManager factory.
 func RegisterContextManager(name string, factory ContextManagerFactory) error {
+	return registerContextManager(name, factory, nil)
+}
+
+func registerContextManagerWithContext(
+	name string,
+	factory ContextManagerFactory,
+	contextFactory contextManagerContextFactory,
+) error {
+	if contextFactory == nil {
+		return fmt.Errorf("context manager %q context factory is nil", name)
+	}
+	return registerContextManager(name, factory, contextFactory)
+}
+
+func registerContextManager(
+	name string,
+	factory ContextManagerFactory,
+	contextFactory contextManagerContextFactory,
+) error {
 	if name == "" {
 		return fmt.Errorf("context manager name is required")
 	}
@@ -95,7 +135,9 @@ func RegisterContextManager(name string, factory ContextManagerFactory) error {
 	if _, exists := cmRegistry[name]; exists {
 		return fmt.Errorf("context manager %q is already registered", name)
 	}
-	cmRegistry[name] = factory
+	cmRegistry[name] = contextManagerRegistration{
+		factory: factory, contextFactory: contextFactory,
+	}
 	return nil
 }
 
@@ -103,6 +145,19 @@ func lookupContextManager(name string) (ContextManagerFactory, bool) {
 	cmRegistryMu.RLock()
 	defer cmRegistryMu.RUnlock()
 
-	f, ok := cmRegistry[name]
-	return f, ok
+	registration, ok := cmRegistry[name]
+	return registration.factory, ok
+}
+
+func lookupContextManagerWithContext(
+	name string,
+) (contextManagerContextFactory, bool) {
+	cmRegistryMu.RLock()
+	defer cmRegistryMu.RUnlock()
+
+	registration, ok := cmRegistry[name]
+	if !ok || registration.contextFactory == nil {
+		return nil, false
+	}
+	return registration.contextFactory, true
 }

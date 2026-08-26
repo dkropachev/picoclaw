@@ -54,6 +54,7 @@ type AgentLoop struct {
 	// Runtime state
 	running         atomic.Bool
 	contextManager  ContextManager
+	contextResolver contextManagerResolver
 	fallback        *providers.FallbackChain
 	channelManager  interfaces.ChannelManager
 	mediaStoreMu    sync.Mutex
@@ -922,7 +923,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		logger.WarnCF("agent", "Failed to close previous context manager during reload",
 			map[string]any{"error": err.Error()})
 	}
-	newContextManager := al.resolveContextManager()
+	newContextManager := al.resolveContextManagerWithContext(ctx)
 	al.mu.Lock()
 	al.contextManager = newContextManager
 	al.mu.Unlock()

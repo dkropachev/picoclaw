@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -24,76 +23,35 @@ import (
 
 // seahorseContextManager adapts seahorse.Engine to agent.ContextManager.
 type seahorseContextManager struct {
-	engine   *seahorse.Engine
-	sessions session.SessionStore // for startup bootstrap
-	al       *AgentLoop           // for resolving the agent that owns a session
-	engines  map[string]*seahorse.Engine
-	closeMu  sync.Mutex
-	closed   bool
+	engine      *seahorse.Engine
+	sessions    session.SessionStore // for startup bootstrap
+	al          *AgentLoop           // for resolving the agent that owns a session
+	engines     map[string]*seahorse.Engine
+	engineIDs   []string
+	closeEngine seahorseEngineCloser
+	closeMu     sync.Mutex
+	closed      bool
 }
 
 // newSeahorseContextManager creates a seahorse-backed ContextManager.
-func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager, error) {
-	if al == nil {
-		return nil, fmt.Errorf("seahorse: AgentLoop is required")
-	}
+func newSeahorseContextManager(
+	raw json.RawMessage,
+	al *AgentLoop,
+) (ContextManager, error) {
+	return newSeahorseContextManagerWithContext(context.Background(), raw, al)
+}
 
-	registry := al.GetRegistry()
-	if registry == nil {
-		return nil, fmt.Errorf("seahorse: agent registry is required")
-	}
-	defaultAgent := registry.GetDefaultAgent()
-	if defaultAgent == nil {
-		return nil, fmt.Errorf("seahorse: default agent is required")
-	}
-	mgr := &seahorseContextManager{
-		sessions: defaultAgent.Sessions,
-		al:       al,
-		engines:  make(map[string]*seahorse.Engine),
-	}
-
-	agentIDs := registry.ListAgentIDs()
-	sort.Strings(agentIDs)
-	for _, agentID := range agentIDs {
-		agent, ok := registry.GetAgent(agentID)
-		if !ok || agent == nil {
-			continue
-		}
-		engine, err := seahorse.NewEngine(seahorse.Config{
-			DBPath: filepath.Join(agent.Workspace, "sessions", "seahorse.db"),
-		}, agentProviderToCompleteFn(al, agent))
-		if err != nil {
-			for _, created := range mgr.engines {
-				_ = created.Close()
-			}
-			return nil, fmt.Errorf(
-				"seahorse: create engine for agent %q: %w",
-				agent.ID,
-				err,
-			)
-		}
-		mgr.engines[agent.ID] = engine
-		if agent == defaultAgent {
-			mgr.engine = engine
-		}
-
-		if agent.Tools != nil {
-			retrieval := engine.GetRetrieval()
-			agent.Tools.Register(seahorse.NewGrepTool(retrieval))
-			agent.Tools.Register(seahorse.NewExpandTool(retrieval))
-		}
-		if agent.Sessions != nil {
-			ctx := context.Background()
-			for _, sessionKey := range agent.Sessions.ListSessions() {
-				mgr.bootstrapAgentSession(ctx, agent, engine, sessionKey)
-			}
-		}
-	}
-	if mgr.engine == nil {
-		return nil, fmt.Errorf("seahorse: default agent engine is required")
-	}
-
-	return mgr, nil
+func newSeahorseContextManagerWithContext(
+	ctx context.Context,
+	raw json.RawMessage,
+	al *AgentLoop,
+) (ContextManager, error) {
+	return newSeahorseContextManagerWithDependencies(
+		ctx,
+		raw,
+		al,
+		defaultSeahorseContextDependencies(),
+	)
 }
 
 // providerToCompleteFn wraps providers.LLMProvider as a seahorse.CompleteFn.
@@ -199,13 +157,27 @@ func (m *seahorseContextManager) Close() error {
 	m.closed = true
 	engines := m.engines
 	defaultEngine := m.engine
+	engineIDs := append([]string(nil), m.engineIDs...)
+	closeEngine := m.closeEngine
 	m.engines = nil
 	m.engine = nil
+	m.engineIDs = nil
 	m.closeMu.Unlock()
 
 	seen := make(map[*seahorse.Engine]struct{}, len(engines))
+	seenIDs := make(map[string]struct{}, len(engineIDs))
+	for _, agentID := range engineIDs {
+		seenIDs[agentID] = struct{}{}
+	}
+	for agentID := range engines {
+		if _, exists := seenIDs[agentID]; !exists {
+			engineIDs = append(engineIDs, agentID)
+		}
+	}
+	sort.Strings(engineIDs)
 	closeErrors := make([]error, 0)
-	for agentID, engine := range engines {
+	for _, agentID := range engineIDs {
+		engine := engines[agentID]
 		if engine == nil {
 			continue
 		}
@@ -213,7 +185,7 @@ func (m *seahorseContextManager) Close() error {
 			continue
 		}
 		seen[engine] = struct{}{}
-		if err := engine.Close(); err != nil {
+		if err := closeSeahorseEngine(closeEngine, engine); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf(
 				"close Seahorse engine for agent %q: %w",
 				agentID,
@@ -223,7 +195,7 @@ func (m *seahorseContextManager) Close() error {
 	}
 	if defaultEngine != nil {
 		if _, duplicate := seen[defaultEngine]; !duplicate {
-			if err := defaultEngine.Close(); err != nil {
+			if err := closeSeahorseEngine(closeEngine, defaultEngine); err != nil {
 				closeErrors = append(closeErrors, fmt.Errorf(
 					"close default Seahorse engine: %w",
 					err,
@@ -354,9 +326,9 @@ func (m *seahorseContextManager) bootstrapAgentSession(
 	agent *AgentInstance,
 	engine *seahorse.Engine,
 	sessionKey string,
-) {
+) error {
 	if agent == nil || agent.Sessions == nil || engine == nil {
-		return
+		return nil
 	}
 
 	bootstrapKey := sessionKey
@@ -364,29 +336,32 @@ func (m *seahorseContextManager) bootstrapAgentSession(
 	if reader, ok := agent.Sessions.(session.SnapshotReader); ok {
 		snapshot, found, err := reader.ReadSessionSnapshot(ctx, sessionKey)
 		if err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return contextErr
+			}
 			logger.WarnCF("seahorse", "bootstrap snapshot", map[string]any{
 				"session": sessionKey,
 				"error":   err.Error(),
 			})
-			return
+			return nil
 		}
 		if !found || strings.TrimSpace(snapshot.Key) == "" {
-			return
+			return nil
 		}
 		if isReviewSessionScope(snapshot.Scope) {
-			return
+			return nil
 		}
 		bootstrapKey = snapshot.Key
 		history = snapshot.History
 	} else {
 		if metadata, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok &&
 			isReviewSessionScope(metadata.GetSessionScope(sessionKey)) {
-			return
+			return nil
 		}
 		history = agent.Sessions.GetHistory(sessionKey)
 	}
 	if len(history) == 0 {
-		return
+		return nil
 	}
 
 	// Convert provider messages to seahorse messages
@@ -396,11 +371,9 @@ func (m *seahorseContextManager) bootstrapAgentSession(
 	}
 
 	if err := engine.Bootstrap(ctx, bootstrapKey, msgs); err != nil {
-		logger.WarnCF("seahorse", "bootstrap", map[string]any{
-			"session": bootstrapKey,
-			"error":   err.Error(),
-		})
+		return fmt.Errorf("bootstrap session %q: %w", bootstrapKey, err)
 	}
+	return nil
 }
 
 // providerToSeahorseMessage converts a providers.Message to a seahorse.Message.
@@ -554,7 +527,11 @@ func promptIRPartTypeFromMime(mimeType string) string {
 }
 
 func init() {
-	if err := RegisterContextManager("seahorse", newSeahorseContextManager); err != nil {
+	if err := registerContextManagerWithContext(
+		"seahorse",
+		newSeahorseContextManager,
+		newSeahorseContextManagerWithContext,
+	); err != nil {
 		panic(fmt.Sprintf("register seahorse context manager: %v", err))
 	}
 }

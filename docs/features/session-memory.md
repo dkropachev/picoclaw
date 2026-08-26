@@ -19,7 +19,10 @@ metadata commit point, so readers observe either the old session or the new
 session and never a mixture. A separate media-freezing capability can detach
 every provider-neutral locator in a strict snapshot into one self-contained,
 versioned frozen set and later materialize the same bytes after the live media
-store has been released or reconstructed.
+store has been released or reconstructed. When the Seahorse context strategy is
+selected, one generation additionally owns distinct per-agent SQLite context
+engines and exposes their retrieval capabilities only after every engine and
+startup bootstrap has completed successfully.
 
 ## Reconstruction Notes
 
@@ -28,14 +31,16 @@ store has been released or reconstructed.
   `SessionSnapshotReplacement`, `SnapshotReplacer`, route session allocator,
   canonical key helpers, JSONL backend, memory store, session API handlers,
   `media.FreezeInputs`, `media.FrozenSet`,
-  `FreezeSessionSnapshotMedia`, and `MaterializeSessionSnapshotMedia`.
+  `FreezeSessionSnapshotMedia`, `MaterializeSessionSnapshotMedia`,
+  `seahorseContextManager`, `seahorse.Engine`, and the Seahorse retrieval tools.
 - Runtime ordering: normalize route policy, derive dimensions, canonicalize
   identity, create metadata, promote aliases only when safe, append/read
   messages, capture strict existing-session snapshots when requested,
   compare-and-swap whole-session replacements only through a supporting
   backend, preflight and freeze all media locators when an isolated consumer
   requests it, materialize only from the resulting self-contained frozen set,
-  and
+  construct and bootstrap a complete isolated Seahorse engine generation before
+  atomically publishing its retrieval wrappers, and
   expose list/detail/delete from the committed history selector.
 - Non-obvious constraints: invalid dimensions are dropped, corrupt JSONL lines
   are skipped, existing canonical history is never overwritten by alias
@@ -50,7 +55,9 @@ store has been released or reconstructed.
   `media://` capability must still be live at capture, every potential locator
   field is inspected even when another provider-neutral field currently takes
   precedence, and restart safety begins only after a complete frozen set has
-  been obtained.
+  been obtained. Seahorse engines never share one canonical database path across
+  agents, and a context-manager fallback never leaves retrieval tools bound to a
+  rejected or closed engine.
 
 ## Requirements
 
@@ -68,6 +75,7 @@ store has been released or reconstructed.
 | `FR-SESSION-010` | MUST | A backend may implement `SnapshotReplacer.ReplaceSessionSnapshot(ctx, replacement)` to compare-and-swap one canonical session's visible history, summary, scope, and aliases. The replacement key must be the exact opaque key derived from a canonical current-version scope: channel/account/dimensions/values are normalized, dimensions are unique, and `Values` contains exactly one nonblank canonical value per listed dimension with no unlisted semantic fields. Aliases and messages must be canonical and persistable, and `ExpectedRevision` must exactly match the opaque revision returned by a strict snapshot; an empty expected revision means the canonical session must not exist. JSONL replacement holds shared process-wide directory and session locks, rejects corrupt current state and new alias conflicts, durably writes the inactive bounded `a`/`b` history slot, checks cancellation, and atomically renames metadata that selects that slot as the sole commit point before verifying committed alias ownership. It may preserve an unchanged shared legacy fallback alias, including a main fallback, or retained promoted direct shadow already owned by the session, but may not introduce that ambiguity. Empty `HistorySlot` continues to select the legacy `.jsonl` file, while `a` and `b` select only their exact slot; invalid or missing selected slots fail closed. Strict metadata requires nonnegative `Skip`/`Count`, `Skip <= Count`, and at least `Count` physical nonempty records; a missing legacy file is valid only for an exact empty metadata tuple. Every append or rewrite rejects an encoded record that cannot be read within the shared scanner limit. Alias-aware reads and ordinary mutations retain the directory read lock from alias resolution through canonical session access; adjacent metadata mutations resolve under the directory write lock. All use compatible selector rules, so aliases cannot move between resolution and access, concurrent callers see only the complete old tuple or complete new tuple, and stale revisions conflict without a visible mutation. An observed cancellation at the check after staging history, or another error before metadata rename, leaves the old tuple visible; cancellation after that check does not undo metadata publication. Any error after metadata rename, including directory synchronization, cancellation, or alias verification, is an uncertain outcome and requires a fresh strict read before retry. The capability is optional: unsupported adapters return `ErrSnapshotUnsupported` and callers must never emulate it with individual legacy setters. This is an additive metadata/file-layout extension and does not change the scope schema or its version. | An AI-authored session rewrite must not tear history from its metadata, overwrite concurrent work, silently recover corrupt inputs, or assume a failed call was definitely uncommitted. |
 | `FR-SESSION-011` | MUST | `FreezeSessionSnapshotMedia` counts one already detached `SessionSnapshot` before cloning, rejects a 33rd nonempty locator, then deep-clones and discovers every admitted occurrence in `Message.Media[]`, `Attachment.Ref`, `Attachment.URL`, and `PromptPart.URI` without applying provider precedence. Only a canonical `media://` UUID capability or a strict `data:` locator with canonical MIME, the base64 marker, and canonical padded base64 is admitted; raw paths, `file:`, network URLs, malformed/noncanonical data, unknown schemes, and unresolved or no-longer-live media capabilities fail the whole capture without changing the source snapshot or returning a partial set. At most 16 distinct nonempty frozen assets are admitted; each decoded asset is at most 2 MiB, the sum of decoded bytes counted per occurrence is at most 3 MiB, and both materialized encoding and frozen-set JSON are at most 5 MiB. At most four `FreezeInputs` operations hold capture admission concurrently; an excess operation waits only until a slot is available or its context is cancelled before its reader is invoked. Raw filename input is at most 4 KiB before basename sanitization; the result is valid UTF-8, control-free, and at most 255 bytes. Supplied MIME is at most 127 bytes; captured MIME input is at most 1 KiB before normalization to canonical parameter-free form of at most 127 bytes. Success returns the cloned snapshot with every locator rewritten to a canonical frozen reference plus one deterministic, versioned, self-contained `FrozenSet` containing detached bytes and canonical metadata; the caller can embed that pair in durable state. `MaterializeSessionSnapshotMedia(ctx, snapshot, set)` validates count and set before cloning, strictly resolves every frozen reference, requires each provider-authoritative attachment or prompt-part metadata field to equal its bound asset metadata, and deterministically replaces all four locator surfaces with canonical padded-base64 `data:` values without consulting a live `MediaStore`; when an attachment has both fields, URL metadata is authoritative and Ref metadata remains independently bound inside its frozen identity. The snapshot/set pair survives strict frozen-set JSON marshal/unmarshal and materializes identically with an empty reconstructed media store. Unknown/duplicate/trailing frozen-set JSON members, invalid UTF-8 or unpaired surrogate strings, unsupported versions, noncanonical encodings, missing/duplicate/unused assets, invalid sizes or digests, reference/metadata mismatches, cancellation, and any bound violation fail closed through fixed redacted errors. This capability does not automatically change ordinary session persistence, provider execution, or agent history resolution, and does not guarantee that a provider consumes the materialized modality. | A delayed isolated decision needs the exact captured media bytes after restart, while every hidden or precedence-inactive locator must be validated so durable context cannot conceal a local-path/network capability or silently degrade to text-only history. |
 | `FR-SESSION-012` | MUST | A replacement-capable session backend also implements `ScopeAdmitter.AdmitSessionScope(ctx, admission)` so an ordinary live turn and a protected review projection arbitrate ownership under the same process-wide directory-write and strictly resolved canonical-session lock used by snapshot replacement. Live mode rejects any existing or requested `review` scope, including spoofed review-channel input, but may atomically migrate/update ordinary legacy scope and aliases before alias-history promotion. Review mode requires an exact canonical v1 review scope whose derived opaque key equals the admitted key, reserves only a genuinely absent key with exclusive immutable aliases, preserves an existing review tuple for subsequent strict binding validation, and rejects ordinary, unscoped, malformed, mismatched, or conflicting alias state. Admission through an existing ordinary alias preserves that alias and its canonical history without reopening an ownership gap. A typed conflict, unsupported capability, cancellation, decode error, or alias collision returns before the losing caller can use protected transcript content, mutate, clear, attach, or invoke a provider; scope and ownership checks may read metadata. Cancellation is rechecked after lock acquisition and before commit. The capability and locks are process-local; sharing one JSONL directory across processes remains outside the contract. | A check followed by an unconditional metadata upsert lets a live turn overwrite a review projection created between those operations; one atomic ownership boundary must decide which namespace wins. |
+| `FR-SESSION-013` | MUST | A supported Seahorse context generation snapshots sorted configured agents and requires each to have one distinct canonical `sessions/seahorse.db` path; exact, case-insensitive existing-ancestor, hard-link, or resolved-parent aliases fail the complete candidate rather than sharing history, including `all_conversations`, across agents. It privately creates and records every per-agent engine, then revalidates persistent path identity and physical-file uniqueness before exposure, and bootstraps detached session keys in deterministic order with the construction context. Review-scoped sessions, missing snapshots, and strict unreadable/corrupt snapshots retain fail-closed skip behavior, while cancellation, panic, a real engine/bootstrap failure, an aliased database, persistent construction-time path drift, or a later-agent failure closes every created engine exactly once and yields the legacy context strategy with no Seahorse retrieval surface. Only the installed context manager owns engine shutdown. A successful generation gives Assemble, Compact, Ingest, Clear, grep, and expand the exact owning agent engine/database; another agent, owner-created wrapper, sibling, or reload generation cannot observe or close it. Reload constructs B only after the paused/drained A context manager has closed, and shutdown closes the context manager before releasing its factory-backed source registries. Unsupported platforms retain the legacy strategy and expose no Seahorse factory capability. The path guarantee assumes a stable trusted-workspace namespace during paused construction; hostile out-of-process symlink, mount, or rename swaps during SQLite's internal open are outside this contract because the engine exposes no opened-file identity. | Per-agent context memory must not leak through a shared SQLite path in the stable namespace, partial bootstrap, stale reload engine, or retrieval wrapper that outlives the context manager generation owning its database. |
 
 ## Data And State Model
 
@@ -101,6 +109,11 @@ the same 32-occurrence, 16-asset, 2 MiB per-asset, 3 MiB per-occurrence raw, and
 5 MiB encoded/JSON ceilings. A filename is retained only as a valid UTF-8,
 control-free, at-most-255-byte basename; a MIME value is canonical,
 parameter-free, and at most 127 bytes.
+When Seahorse is active, runtime state also contains one context-manager-owned
+engine and retrieval object per agent. Each engine stores derived context in a
+distinct canonical workspace `sessions/seahorse.db`; these databases do not
+replace the canonical JSONL session store and never become a shared multi-agent
+namespace.
 
 ## Surface Ownership
 
@@ -134,6 +147,7 @@ Owns: TEST web/backend/api/session*
 | Config | `session.dimensions`, `session.identity_links`, legacy `dm_scope` | Session isolation policy and compatibility input. | `FR-SESSION-001`, `FR-SESSION-003` |
 | HTTP | `GET /api/sessions`, `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | Launcher history list/detail resolves promoted ownership and reads the metadata-selected legacy or `a`/`b` history as one coherent tuple; delete revalidates and atomically removes all current owners of the projected Pico ID plus compatible shadows. | `FR-SESSION-006`, `FR-SESSION-010` |
 | Storage | Workspace session JSONL files, bounded history slots, and metadata | Durable conversation messages, summaries, aliases, and the additive `HistorySlot` commit selector. | `FR-SESSION-004`, `FR-SESSION-005`, `FR-SESSION-010` |
+| Storage/runtime | Per-agent `sessions/seahorse.db`, `seahorseContextManager`, engines, and retrieval objects | Build one isolated derived context index per agent, bootstrap it from strict session evidence, and close it only with its exact context generation. | `FR-SESSION-013` |
 | Chat/history wire | Inbound Pico payloads and frontend `SessionDetail.messages[]` | Inbound requests carry optional `account_ref` plus alias-valued `model_name`; stored/backend-projected messages preserve `model_name`, and frontend projections tolerate optional `account_ref` without requiring it. | `FR-SESSION-008` |
 | Go API | `session.SnapshotReader.ReadSessionSnapshot(ctx, key)` | Strictly read and deep-clone one existing session, resolving aliases to a canonical key without creation or recovery-style corruption skipping; replacement-capable backends also return committed aliases and an opaque revision. | `FR-SESSION-009`, `FR-SESSION-010` |
 | Go API | `session.SnapshotReplacer.ReplaceSessionSnapshot(ctx, replacement)` | Optionally publish an exact-revision whole-session replacement atomically, or fail closed with conflict/unsupported errors. | `FR-SESSION-010` |
@@ -210,6 +224,13 @@ Owns: TEST web/backend/api/session*
     capability locator remains, and return only the complete result. Never fall
     back to the live media store, filesystem, network, or original locator
     text.
+13. To construct Seahorse context, canonicalize and reject aliased per-agent DB
+    paths before I/O, create every engine under one private cleanup guard, and
+    bootstrap sorted agent/session snapshots with the caller's context. Only
+    after every bootstrap succeeds may the agent feature atomically publish
+    retrieval wrappers and return the owning manager. Any precommit failure
+    closes the complete candidate; a committed manager remains responsible for
+    its engines until quiesced reload or shutdown closes it.
 
 ## Cross-Feature Behavior
 
@@ -232,6 +253,11 @@ capability; it does not reinterpret the existing workflow `history_revision`
 fingerprint as a session CAS token. Launcher session and thread consumers use the
 metadata-selected history and coordinated mutation helpers instead of opening
 the legacy `.jsonl` file independently.
+The optional Seahorse strategy derives a per-agent SQLite retrieval index from
+the owning session store. Session Memory owns engine/database/bootstrap
+isolation, while Agent Conversations owns atomic tool-catalog publication and
+runtime-generation ordering. A Seahorse construction failure falls back to the
+legacy context strategy without changing canonical JSONL history.
 Frozen session media reuses the tool feature's optional path-free
 `media.SnapshotReader` for capture and the security feature's no-follow,
 resource-bound, consistency-check, and redacted-failure rules. The session
@@ -333,6 +359,12 @@ feature must opt in explicitly and preserve provider-specific message ordering.
   before capture cannot be recovered; after capture, release, TTL cleanup, an
   empty new `FileMediaStore`, and process restart do not affect strict JSON
   round-trip or materialization from the returned self-contained set.
+- Seahorse rejects an aliased per-agent database path before engine creation.
+  Review/corrupt snapshot skips do not weaken that isolation; a real bootstrap
+  error, cancellation, panic, or later-engine failure closes the whole private
+  generation. Once retrieval wrappers commit, later detached-result faults
+  cannot close their engine underneath them. Reload and repeated shutdown close
+  each engine at most once, and unsupported platforms remain legacy-only.
 
 ## Acceptance Evidence
 
@@ -346,6 +378,7 @@ feature must opt in explicitly and preserve provider-specific message ordering.
 | `FR-SESSION-010` | [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [pkg/memory/jsonl_test.go](../../pkg/memory/jsonl_test.go), [pkg/threads/threads_test.go](../../pkg/threads/threads_test.go), [web/backend/api/session_test.go](../../web/backend/api/session_test.go), [pkg/session/session_store.go](../../pkg/session/session_store.go), [pkg/session/jsonl_backend.go](../../pkg/session/jsonl_backend.go), [pkg/memory/jsonl.go](../../pkg/memory/jsonl.go) |
 | `FR-SESSION-011` | [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go) |
 | `FR-SESSION-012` | [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [pkg/memory/jsonl_test.go](../../pkg/memory/jsonl_test.go), [pkg/agent/agent_message_review_test.go](../../pkg/agent/agent_message_review_test.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go) |
+| `FR-SESSION-013` | [pkg/agent/context_seahorse.go](../../pkg/agent/context_seahorse.go), [pkg/agent/context_seahorse_catalog.go](../../pkg/agent/context_seahorse_catalog.go), [pkg/agent/context_seahorse_catalog_test.go](../../pkg/agent/context_seahorse_catalog_test.go), [pkg/agent/context_seahorse_catalog_runtime_test.go](../../pkg/agent/context_seahorse_catalog_runtime_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/context_manager_test.go](../../pkg/agent/context_manager_test.go), [pkg/agent/context_seahorse_unsupported.go](../../pkg/agent/context_seahorse_unsupported.go), [pkg/seahorse/tool_factory.go](../../pkg/seahorse/tool_factory.go), [pkg/seahorse/tool_factory_test.go](../../pkg/seahorse/tool_factory_test.go), [pkg/seahorse/short_engine_test.go](../../pkg/seahorse/short_engine_test.go), [pkg/seahorse/short_retrieval_test.go](../../pkg/seahorse/short_retrieval_test.go) |
 
 ## Implementation Anchors
 
@@ -355,4 +388,9 @@ feature must opt in explicitly and preserve provider-specific message ordering.
 - [pkg/session/frozen_media.go](../../pkg/session/frozen_media.go)
 - [pkg/memory/jsonl.go](../../pkg/memory/jsonl.go)
 - [pkg/media/frozen.go](../../pkg/media/frozen.go)
+- [pkg/agent/context_seahorse.go](../../pkg/agent/context_seahorse.go)
+- [pkg/agent/context_seahorse_catalog.go](../../pkg/agent/context_seahorse_catalog.go)
+- [pkg/seahorse/short_engine.go](../../pkg/seahorse/short_engine.go)
+- [pkg/seahorse/short_retrieval.go](../../pkg/seahorse/short_retrieval.go)
+- [pkg/seahorse/tool_factory.go](../../pkg/seahorse/tool_factory.go)
 - [web/backend/api/session.go](../../web/backend/api/session.go)
