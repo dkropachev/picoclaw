@@ -1478,6 +1478,76 @@ func TestRepositoryReviewExecutionReachesProviderAdmissionOnLocalRepository(t *t
 	}
 }
 
+func TestRepositoryReviewCommitResolverPinsBranchAndExactCommit(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	repository := t.TempDir()
+	git := func(arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", arguments...)
+		command.Dir = repository
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-b", "main")
+	git("config", "user.email", "review@example.test")
+	git("config", "user.name", "Repository Review Test")
+	if err := os.WriteFile(filepath.Join(repository, "first.go"), []byte("package first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "first.go")
+	git("commit", "-m", "first")
+	first := git("rev-parse", "HEAD")
+
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_resolver"
+	automation.Repository = repository
+	resolved, err := resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, "")
+	if err != nil || resolved != first {
+		t.Fatalf("initial resolved commit = %q, want %q, err=%v", resolved, first, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repository, "second.go"), []byte("package second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "second.go")
+	git("commit", "-m", "second")
+	latest := git("rev-parse", "HEAD")
+	resolved, err = resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, "")
+	if err != nil || resolved != latest {
+		t.Fatalf("latest resolved commit = %q, want %q, err=%v", resolved, latest, err)
+	}
+	resolved, err = resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, first)
+	if err != nil || resolved != first {
+		t.Fatalf("exact resolved commit = %q, want %q, err=%v", resolved, first, err)
+	}
+	if _, err = resolveRepositoryReviewAutomationCommit(
+		t.Context(), cfg, automation, strings.Repeat("f", 40),
+	); err == nil {
+		t.Fatal("unreachable exact commit resolved")
+	}
+	git("checkout", "-b", "feature/review")
+	if err := os.WriteFile(filepath.Join(repository, "feature.go"), []byte("package feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "feature.go")
+	git("commit", "-m", "feature")
+	feature := git("rev-parse", "HEAD")
+	git("checkout", "main")
+	automation.Ref = "feature/review"
+	resolved, err = resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, "")
+	if err != nil || resolved != feature {
+		t.Fatalf("feature resolved commit = %q, want %q, err=%v", resolved, feature, err)
+	}
+}
+
 func TestRepositoryReviewCoverageRunAndProgressHelpers(t *testing.T) {
 	if repositoryReviewWorkflowStage(nil) != "" || repositoryReviewRunStep(nil, "review").ID != "" {
 		t.Fatal("nil workflow helpers returned state")
@@ -1808,6 +1878,14 @@ func repositoryReviewCoverageLeasedController(
 		t.Fatal(err)
 	}
 	controller := newRepositoryReviewController(handler)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return strings.Repeat("a", 40), nil
+	}
 	controller.startOnce.Do(func() {})
 	controller.leasedStore = store
 	controller.leasedConfig = cfg

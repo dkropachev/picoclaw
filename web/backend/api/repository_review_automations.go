@@ -47,7 +47,22 @@ type repositoryReviewAutomationConfigRequest struct {
 }
 
 type repositoryReviewAutomationActionRequest struct {
-	ExpectedVersion int64 `json:"expected_version"`
+	ExpectedVersion int64  `json:"expected_version"`
+	CommitSHA       string `json:"commit_sha,omitempty"`
+	RunID           string `json:"run_id,omitempty"`
+}
+
+type repositoryReviewCommitReference struct {
+	SHA      string `json:"sha"`
+	ShortSHA string `json:"short_sha"`
+	URL      string `json:"url,omitempty"`
+}
+
+type repositoryReviewCommitOptionsResponse struct {
+	ExpectedVersion      int64                           `json:"expected_version"`
+	Remembered           repositoryReviewCommitReference `json:"remembered"`
+	Latest               repositoryReviewCommitReference `json:"latest"`
+	NewerCommitAvailable bool                            `json:"newer_commit_available"`
 }
 
 type repositoryReviewModelOption struct {
@@ -111,6 +126,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(
 		"POST /api/repository-reviews/automations/{automation_id}/restart",
 		h.handleRestartRepositoryReviewAutomation,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/commit-options",
+		h.handleRepositoryReviewAutomationCommitOptions,
 	)
 	mux.HandleFunc("GET /api/repository-reviews/automation-options", h.handleRepositoryReviewAutomationOptions)
 }
@@ -227,6 +246,7 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 			if executionChanged {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+				candidate.ResolvedCommitSHA = ""
 				candidate.PauseReason = ""
 				candidate.PauseDetail = ""
 				candidate.RequestedPauseReason = ""
@@ -337,8 +357,9 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 		writeRepositoryReviewAutomationError(w, errors.New("repository review controller unavailable"))
 		return
 	}
-	automation, err := controller.startAutomation(
+	automation, err := controller.startAutomationAtCommit(
 		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion, reset, action,
+		request.CommitSHA,
 	)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
@@ -347,6 +368,31 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
 		"automation": projectRepositoryReviewAutomation(automation),
 		"outcome":    "started",
+	})
+}
+
+func (h *Handler) handleRepositoryReviewAutomationCommitOptions(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	controller := h.repositoryReviewControllerInstance()
+	if controller == nil {
+		writeRepositoryReviewAutomationError(w, errors.New("repository review controller unavailable"))
+		return
+	}
+	automation, remembered, latest, err := controller.repositoryReviewCommitOptions(
+		r.Context(),
+		r.PathValue("automation_id"),
+	)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, repositoryReviewCommitOptionsResponse{
+		ExpectedVersion:      automation.Version,
+		Remembered:           repositoryReviewCommitReferenceForAutomation(automation, remembered),
+		Latest:               repositoryReviewCommitReferenceForAutomation(automation, latest),
+		NewerCommitAvailable: remembered != latest,
 	})
 }
 
@@ -365,8 +411,8 @@ func (h *Handler) handlePauseRepositoryReviewAutomation(w http.ResponseWriter, r
 		writeRepositoryReviewAutomationError(w, errors.New("repository review controller unavailable"))
 		return
 	}
-	automation, err := controller.pauseAutomation(
-		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion,
+	automation, err := controller.pauseAutomationForRun(
+		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion, request.RunID,
 	)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
@@ -382,6 +428,60 @@ func projectRepositoryReviewAutomation(
 ) repoaudit.RepositoryReviewAutomation {
 	automation.ModelCoverageSketches = nil
 	return automation
+}
+
+func repositoryReviewCommitReferenceForAutomation(
+	automation repoaudit.RepositoryReviewAutomation,
+	commit string,
+) repositoryReviewCommitReference {
+	commit = strings.ToLower(strings.TrimSpace(commit))
+	short := commit
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return repositoryReviewCommitReference{
+		SHA:      commit,
+		ShortSHA: short,
+		URL:      repositoryReviewGitHubCommitURL(automation.Repository, commit),
+	}
+}
+
+func repositoryReviewGitHubCommitURL(repository string, commit string) string {
+	commit = strings.ToLower(strings.TrimSpace(commit))
+	if !repositoryReviewValidCommitSHA(commit) {
+		return ""
+	}
+	repository = strings.TrimSpace(repository)
+	host := ""
+	repositoryPath := ""
+	if owner, name, found := strings.Cut(repository, "/"); found &&
+		!strings.Contains(name, "/") && validRepositoryReviewGitHubSegment(owner) &&
+		validRepositoryReviewGitHubSegment(strings.TrimSuffix(name, ".git")) {
+		host = "github.com"
+		repositoryPath = owner + "/" + name
+	} else if parsed, err := url.Parse(repository); err == nil && parsed.Scheme != "" {
+		host = parsed.Hostname()
+		repositoryPath = parsed.Path
+	} else if identity, remotePath, found := strings.Cut(repository, ":"); found {
+		_, host, _ = strings.Cut(identity, "@")
+		repositoryPath = remotePath
+	}
+	if !strings.EqualFold(strings.TrimSpace(host), "github.com") {
+		return ""
+	}
+	components := strings.Split(strings.Trim(strings.TrimSpace(repositoryPath), "/"), "/")
+	if len(components) != 2 || components[0] == "" || components[1] == "" {
+		return ""
+	}
+	name := strings.TrimSuffix(components[1], ".git")
+	if name == "" {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: "https",
+		Host:   "github.com",
+		Path:   "/" + components[0] + "/" + name + "/commit/" + commit,
+	}).String()
 }
 
 func repositoryReviewAutomationFromRequest(
@@ -1426,6 +1526,8 @@ func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "not found"):
 		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, errRepositoryReviewCommitSelection):
+		status, code = http.StatusConflict, "repository_review_commit_selection_required"
 	case errors.Is(err, repoaudit.ErrConflict), errors.Is(err, repoaudit.ErrAutomationActive),
 		errors.Is(err, errRepositoryReviewAutomationBusy),
 		errors.Is(err, errRepositoryReviewInvalidTransition),

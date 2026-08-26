@@ -1,11 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { RepositoryReviewAutomation } from "@/api/repository-reviews"
 import {
   getRepositoryReviewAutomationOptions,
+  getRepositoryReviewCommitOptions,
   listRepositoryReviewAutomations,
   pauseRepositoryReviewAutomation,
   restartRepositoryReviewAutomation,
@@ -31,6 +32,7 @@ vi.mock("@/components/page-header", () => ({
 
 vi.mock("@/api/repository-reviews", () => ({
   getRepositoryReviewAutomationOptions: vi.fn(),
+  getRepositoryReviewCommitOptions: vi.fn(),
   listRepositoryReviewAutomations: vi.fn(),
   pauseRepositoryReviewAutomation: vi.fn(),
   restartRepositoryReviewAutomation: vi.fn(),
@@ -87,6 +89,7 @@ const run: RepositoryReviewAutomation = {
   },
   model_stats: [],
   account_limits: [],
+  resolved_commit_sha: "a".repeat(40),
   scope_plan: {
     commit_sha: "a".repeat(40),
     policy_hash: "policy",
@@ -122,6 +125,19 @@ describe("RepositoryReviewRunsPage", () => {
     vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
       automations: [run],
     })
+    vi.mocked(getRepositoryReviewCommitOptions).mockReset()
+    vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
+      expected_version: 3,
+      remembered: {
+        sha: "a".repeat(40),
+        short_sha: "aaaaaaaa",
+      },
+      latest: {
+        sha: "a".repeat(40),
+        short_sha: "aaaaaaaa",
+      },
+      newer_commit_available: false,
+    })
     vi.mocked(startRepositoryReviewAutomation).mockResolvedValue({
       ...run,
       version: 4,
@@ -144,7 +160,12 @@ describe("RepositoryReviewRunsPage", () => {
     expect(screen.getByText("1,000 tokens used")).toBeVisible()
     expect(screen.getByText("Estimated cost unknown")).toBeVisible()
     expect(screen.getByText("Account: Default (Primary API)")).toBeVisible()
-    expect(screen.getByText(`Resolved commit ${"a".repeat(40)}`)).toBeVisible()
+    const commitLink = screen.getByRole("link", { name: "aaaaaaaa" })
+    expect(commitLink).toHaveAttribute(
+      "href",
+      `https://github.com/owner/repo/commit/${"a".repeat(40)}`,
+    )
+    expect(commitLink).toHaveAttribute("title", "a".repeat(40))
     expect(screen.queryByLabelText("Repository")).not.toBeInTheDocument()
     expect(screen.queryByLabelText("Reviewer model")).not.toBeInTheDocument()
     expect(screen.queryByText("Model comparison")).not.toBeInTheDocument()
@@ -157,6 +178,16 @@ describe("RepositoryReviewRunsPage", () => {
         expected_version: 3,
       }),
     )
+  })
+
+  it("shows the commit-bound scope SHA for legacy runs without a resolved commit field", async () => {
+    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+      automations: [{ ...run, resolved_commit_sha: undefined }],
+    })
+    renderPage()
+
+    const commitLink = await screen.findByRole("link", { name: "aaaaaaaa" })
+    expect(commitLink).toHaveAttribute("title", "a".repeat(40))
   })
 
   it("resumes a guard-paused run without hidden budget-reset semantics", async () => {
@@ -183,11 +214,167 @@ describe("RepositoryReviewRunsPage", () => {
     expect(
       screen.queryByRole("button", { name: /reset budget/i }),
     ).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Resume" }))
+    await user.click(screen.getByRole("button", { name: "Continue review" }))
 
+    await waitFor(() =>
+      expect(getRepositoryReviewCommitOptions).toHaveBeenCalledWith("auto_1"),
+    )
     await waitFor(() =>
       expect(resumeRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
         expected_version: 3,
+      }),
+    )
+  })
+
+  it("offers remembered, latest, and custom commits when the branch moved", async () => {
+    const user = userEvent.setup()
+    const rememberedSHA = "a".repeat(40)
+    const latestSHA = "b".repeat(40)
+    const paused = {
+      ...run,
+      repository: "https://github.com/owner/repo.git",
+      status: "paused" as const,
+    }
+    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+      automations: [paused],
+    })
+    vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
+      expected_version: 9,
+      remembered: { sha: rememberedSHA, short_sha: "aaaaaaaa" },
+      latest: { sha: latestSHA, short_sha: "bbbbbbbb" },
+      newer_commit_available: true,
+    })
+    vi.mocked(resumeRepositoryReviewAutomation).mockResolvedValue({
+      ...paused,
+      version: 10,
+      status: "running",
+      resolved_commit_sha: latestSHA,
+    })
+    renderPage()
+
+    await user.click(
+      await screen.findByRole("button", { name: "Continue review" }),
+    )
+    let dialog = await screen.findByRole("dialog", {
+      name: "Choose commit to continue",
+    })
+    expect(
+      within(dialog).getByRole("radio", {
+        name: "Continue on remembered commit",
+      }),
+    ).toBeChecked()
+    expect(
+      within(dialog).getByRole("link", { name: "aaaaaaaa" }),
+    ).toHaveAttribute(
+      "href",
+      `https://github.com/owner/repo/commit/${rememberedSHA}`,
+    )
+    expect(
+      within(dialog).getByRole("link", { name: "bbbbbbbb" }),
+    ).toHaveAttribute(
+      "href",
+      `https://github.com/owner/repo/commit/${latestSHA}`,
+    )
+    expect(
+      within(dialog).getByRole("radio", { name: "Choose another commit" }),
+    ).toBeVisible()
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+    expect(resumeRepositoryReviewAutomation).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Continue review" }))
+    dialog = await screen.findByRole("dialog", {
+      name: "Choose commit to continue",
+    })
+    await user.click(
+      within(dialog).getByRole("radio", {
+        name: "Continue on latest commit",
+      }),
+    )
+    await user.click(
+      within(dialog).getByRole("button", { name: "Continue review" }),
+    )
+
+    await waitFor(() =>
+      expect(resumeRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
+        expected_version: 9,
+        commit_sha: latestSHA,
+      }),
+    )
+  })
+
+  it("accepts a full custom SHA and sends it exactly", async () => {
+    const user = userEvent.setup()
+    const customSHA = "c".repeat(64)
+    const paused = { ...run, status: "paused" as const }
+    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+      automations: [paused],
+    })
+    vi.mocked(getRepositoryReviewCommitOptions).mockResolvedValue({
+      expected_version: 8,
+      remembered: { sha: "a".repeat(40), short_sha: "aaaaaaaa" },
+      latest: { sha: "b".repeat(40), short_sha: "bbbbbbbb" },
+      newer_commit_available: true,
+    })
+    vi.mocked(resumeRepositoryReviewAutomation).mockResolvedValue({
+      ...paused,
+      version: 9,
+      status: "running",
+      resolved_commit_sha: customSHA,
+    })
+    renderPage()
+
+    await user.click(
+      await screen.findByRole("button", { name: "Continue review" }),
+    )
+    const dialog = await screen.findByRole("dialog")
+    await user.type(
+      within(dialog).getByLabelText("Custom commit SHA"),
+      customSHA,
+    )
+    expect(
+      within(dialog).getByRole("link", { name: "cccccccc" }),
+    ).toHaveAttribute(
+      "href",
+      `https://github.com/owner/repo/commit/${customSHA}`,
+    )
+    await user.click(
+      within(dialog).getByRole("button", { name: "Continue review" }),
+    )
+
+    await waitFor(() =>
+      expect(resumeRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
+        expected_version: 8,
+        commit_sha: customSHA,
+      }),
+    )
+  })
+
+  it.each([
+    ["running", "reviewing"],
+    ["idle", "next batch queued"],
+  ] as const)("stops safely from %s state", async (status, stage) => {
+    const user = userEvent.setup()
+    const active = {
+      ...run,
+      status,
+      progress: { ...run.progress, stage },
+    }
+    vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
+      automations: [active],
+    })
+    vi.mocked(pauseRepositoryReviewAutomation).mockResolvedValue({
+      ...active,
+      version: 4,
+      status: "stopping",
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole("button", { name: "Stop safely" }))
+    await waitFor(() =>
+      expect(pauseRepositoryReviewAutomation).toHaveBeenCalledWith("auto_1", {
+        expected_version: 3,
+        run_id: "workflow_run_1",
       }),
     )
   })

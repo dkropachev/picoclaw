@@ -139,6 +139,7 @@ type RepositoryReviewAutomation struct {
 	Name                  string                                 `json:"name"`
 	Repository            string                                 `json:"repository"`
 	Ref                   string                                 `json:"ref,omitempty"`
+	ResolvedCommitSHA     string                                 `json:"resolved_commit_sha,omitempty"`
 	Target                string                                 `json:"target"`
 	ReviewFocus           string                                 `json:"review_focus"`
 	ScopePolicy           RepositoryReviewScopePolicy            `json:"scope_policy"`
@@ -567,6 +568,7 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.Name = strings.TrimSpace(automation.Name)
 	automation.Repository = strings.TrimSpace(automation.Repository)
 	automation.Ref = strings.TrimSpace(automation.Ref)
+	automation.ResolvedCommitSHA = strings.ToLower(strings.TrimSpace(automation.ResolvedCommitSHA))
 	automation.Target = strings.TrimSpace(automation.Target)
 	automation.ReviewFocus = strings.TrimSpace(automation.ReviewFocus)
 	automation.BudgetPolicy.GuardExpression = strings.TrimSpace(automation.BudgetPolicy.GuardExpression)
@@ -653,6 +655,8 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validBoundedText(automation.Repository, maxRepositoryIdentityBytes) ||
 		!validAutomationRepository(automation.Repository) ||
 		!validOptionalAutomationText(automation.Ref, 1024) ||
+		(automation.ResolvedCommitSHA != "" &&
+			!validRepositoryReviewCommitSHA(automation.ResolvedCommitSHA)) ||
 		!validOptionalAutomationText(automation.AccountRef, 256) ||
 		!validOptionalAutomationText(automation.EffectiveAccountRef, 256) ||
 		!validBoundedText(automation.Target, 4096) ||
