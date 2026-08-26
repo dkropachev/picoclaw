@@ -24,7 +24,7 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 
 	created := createRepositoryReviewProfileForTest(t, mux, "Focused review", "cheap")
 	if created.ID == "" || created.Version != 1 || created.ReviewerModel != "cheap" ||
-		!created.AutoContinue {
+		created.IssueWriterModel != "" || !created.AutoContinue {
 		t.Fatalf("created profile=%#v", created)
 	}
 	legacyPriceBody := repositoryReviewProfileCreateBody("Legacy price", "cheap")
@@ -44,6 +44,28 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), created.ID) {
 		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
 	}
+	collectionList := httptest.NewRecorder()
+	mux.ServeHTTP(
+		collectionList,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/profiles?query=ORDER+BY+name+ASC&limit=1",
+			nil,
+		),
+	)
+	var collectionPage struct {
+		Profiles       []repoaudit.RepositoryReviewProfile `json:"profiles"`
+		Total          int                                 `json:"total"`
+		NextCursor     string                              `json:"next_cursor"`
+		CanonicalQuery string                              `json:"canonical_query"`
+		QuerySchema    map[string]any                      `json:"query_schema"`
+	}
+	if collectionList.Code != http.StatusOK ||
+		json.Unmarshal(collectionList.Body.Bytes(), &collectionPage) != nil ||
+		len(collectionPage.Profiles) != 1 || collectionPage.Total != 1 ||
+		collectionPage.CanonicalQuery != "ALL ORDER BY name ASC" || collectionPage.QuerySchema == nil {
+		t.Fatalf("collection list status=%d page=%#v body=%s", collectionList.Code, collectionPage, collectionList.Body.String())
+	}
 	get := httptest.NewRecorder()
 	mux.ServeHTTP(
 		get,
@@ -55,6 +77,7 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 
 	updateBody := repositoryReviewProfileBody(created)
 	updateBody["name"] = "Focused review v2"
+	updateBody["issue_writer_model"] = "quality"
 	updateBody["expected_version"] = created.Version
 	updatedResponse := repositoryReviewAutomationMutation(
 		t, mux, http.MethodPatch, "/api/repository-reviews/profiles/"+created.ID, updateBody,
@@ -69,7 +92,8 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated := updatedResult.Profile
-	if updated.Version != 2 || updated.Name != "Focused review v2" {
+	if updated.Version != 2 || updated.Name != "Focused review v2" ||
+		updated.IssueWriterModel != "quality" {
 		t.Fatalf("updated profile=%#v", updated)
 	}
 
@@ -93,6 +117,7 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	if assigned.ProfileID != updated.ID || assigned.ProfileVersion != updated.Version ||
 		assigned.Ref != "" || assigned.Target != "all" ||
 		len(assigned.ReviewerModels) != 1 || assigned.ReviewerModels[0] != "cheap" ||
+		assigned.IssueWriterModel != "quality" ||
 		!strings.Contains(assigned.Name, updated.Name) || !strings.Contains(assigned.Name, "profiled") {
 		t.Fatalf("assigned automation=%#v", assigned)
 	}
@@ -984,12 +1009,54 @@ func TestRepositoryReviewProfileRejectsUnsafeModelAliases(t *testing.T) {
 	cfg.ModelAliases = append(cfg.ModelAliases,
 		config.ModelAliasConfig{Name: "agentic", Model: "codex-cli/gpt-5"},
 		config.ModelAliasConfig{
+			Name: "writer-override", Model: "codex-cli/gpt-5",
+			AccountOverrides: map[string]string{"api": "openai/gpt-5"},
+		},
+		config.ModelAliasConfig{
 			Name: "disabled", Model: "openai/disabled",
 			DisabledAccounts: []string{cfg.Agents.Defaults.AccountRef},
 		},
 	)
 	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
 		t.Fatal(err)
+	}
+	writerOverride := repositoryReviewProfileCreateBody("Account-safe writer", "cheap")
+	writerOverride["issue_writer_model"] = "writer-override"
+	writerResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", writerOverride,
+	)
+	if writerResponse.Code != http.StatusCreated {
+		t.Fatalf(
+			"account-safe writer status=%d body=%s",
+			writerResponse.Code,
+			writerResponse.Body.String(),
+		)
+	}
+	optionsResponse := httptest.NewRecorder()
+	mux.ServeHTTP(
+		optionsResponse,
+		httptest.NewRequest(http.MethodGet, "/api/repository-reviews/automation-options", nil),
+	)
+	var options struct {
+		Accounts []repositoryReviewAccountOption `json:"accounts"`
+	}
+	if optionsResponse.Code != http.StatusOK || json.Unmarshal(optionsResponse.Body.Bytes(), &options) != nil {
+		t.Fatalf("writer options status=%d body=%s", optionsResponse.Code, optionsResponse.Body.String())
+	}
+	writerSelectable, reviewerSelectable := false, false
+	for _, account := range options.Accounts {
+		if account.ID != "api" {
+			continue
+		}
+		for _, alias := range account.WriterModels {
+			writerSelectable = writerSelectable || alias == "writer-override"
+		}
+		for _, alias := range account.Models {
+			reviewerSelectable = reviewerSelectable || alias == "writer-override"
+		}
+	}
+	if !writerSelectable || reviewerSelectable {
+		t.Fatalf("writer options=%#v", options.Accounts)
 	}
 	for _, model := range []string{"missing", "agentic", "disabled"} {
 		response := repositoryReviewAutomationMutation(
@@ -999,6 +1066,20 @@ func TestRepositoryReviewProfileRejectsUnsafeModelAliases(t *testing.T) {
 		if response.Code != http.StatusBadRequest ||
 			!strings.Contains(response.Body.String(), "invalid_repository_review_profile") {
 			t.Fatalf("model %q status=%d body=%s", model, response.Code, response.Body.String())
+		}
+		writerBody := repositoryReviewProfileCreateBody("Unsafe writer "+model, "cheap")
+		writerBody["issue_writer_model"] = model
+		writerResponse := repositoryReviewAutomationMutation(
+			t, mux, http.MethodPost, "/api/repository-reviews/profiles", writerBody,
+		)
+		if writerResponse.Code != http.StatusBadRequest ||
+			!strings.Contains(writerResponse.Body.String(), "invalid_repository_review_profile") {
+			t.Fatalf(
+				"issue writer %q status=%d body=%s",
+				model,
+				writerResponse.Code,
+				writerResponse.Body.String(),
+			)
 		}
 	}
 	updateBody := repositoryReviewProfileBody(validProfile)
@@ -1016,6 +1097,66 @@ func TestRepositoryReviewProfileRejectsUnsafeModelAliases(t *testing.T) {
 		"", "cheap", repoaudit.RepositoryReviewBudgetPolicy{},
 	); err == nil {
 		t.Fatal("missing config model validation succeeded")
+	}
+}
+
+func TestRepositoryReviewAdmissionRejectsWriterAliasDrift(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	profileBody := repositoryReviewProfileCreateBody("Writer admission", "cheap")
+	profileBody["issue_writer_model"] = "quality"
+	profileResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/profiles", profileBody,
+	)
+	if profileResponse.Code != http.StatusCreated {
+		t.Fatalf("profile status=%d body=%s", profileResponse.Code, profileResponse.Body.String())
+	}
+	var profileResult struct {
+		Profile repoaudit.RepositoryReviewProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(profileResponse.Body.Bytes(), &profileResult); err != nil {
+		t.Fatal(err)
+	}
+	automationResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost, "/api/repository-reviews/automations", map[string]any{
+			"repository": "https://github.com/acme/writer-admission.git",
+			"profile_id": profileResult.Profile.ID,
+		},
+	)
+	if automationResponse.Code != http.StatusCreated {
+		t.Fatalf(
+			"automation status=%d body=%s",
+			automationResponse.Code, automationResponse.Body.String(),
+		)
+	}
+	var automationResult struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(automationResponse.Body.Bytes(), &automationResult); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range cfg.ModelAliases {
+		if cfg.ModelAliases[index].Name == "quality" {
+			cfg.ModelAliases[index].DisabledAccounts = append(
+				cfg.ModelAliases[index].DisabledAccounts, "api",
+			)
+		}
+	}
+	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	start := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automationResult.Automation.ID+"/start",
+		map[string]any{"expected_version": automationResult.Automation.Version},
+	)
+	if start.Code != http.StatusBadRequest ||
+		!strings.Contains(start.Body.String(), "issue_writer_model") {
+		t.Fatalf("writer drift start status=%d body=%s", start.Code, start.Body.String())
 	}
 }
 
@@ -1323,8 +1464,9 @@ func repositoryReviewProfileBody(profile repoaudit.RepositoryReviewProfile) map[
 		"name": profile.Name, "review_focus": profile.ReviewFocus,
 		"account_ref":  profile.AccountRef,
 		"scope_policy": profile.ScopePolicy, "reviewer_model": profile.ReviewerModel,
-		"force":         profile.Force,
-		"auto_continue": profile.AutoContinue, "max_files_per_run": profile.MaxFilesPerRun,
+		"issue_writer_model": profile.IssueWriterModel,
+		"force":              profile.Force,
+		"auto_continue":      profile.AutoContinue, "max_files_per_run": profile.MaxFilesPerRun,
 		"max_content_bytes":     profile.MaxContentBytes,
 		"max_parallel_children": profile.MaxParallelChildren,
 		"budget":                profile.BudgetPolicy,

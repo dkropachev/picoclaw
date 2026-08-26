@@ -1571,6 +1571,42 @@ func TestRepositoryReviewPublicMutationsRejectUnsafeStore(t *testing.T) {
 			_, _, _, err := unsafe.ClaimIssueDraftPublication(state.Repository, "draft", 1)
 			return err
 		},
+		func() error {
+			_, _, err := unsafe.SetFindingStatusByVersion(
+				state.Repository, "finding", FindingOpen, 1,
+			)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(state.Repository, "finding", "generation")
+			_, _, _, err := unsafe.ReserveIssueGeneration(request)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(state.Repository, "finding", "generation")
+			request.ExpectedDraftVersion = 1
+			_, _, _, err := unsafe.BeginIssueRegeneration(state.Repository, "draft", request)
+			return err
+		},
+		func() error {
+			_, _, err := unsafe.CompleteIssueGeneration(
+				state.Repository, "draft", "generation", "title", "body", nil, "",
+			)
+			return err
+		},
+		func() error { _, err := unsafe.DeleteIssueDraft(state.Repository, "draft", 1); return err },
+		func() error {
+			_, _, err := unsafe.LinkExistingIssue(ExistingIssueLink{
+				Repository: state.Repository, FindingID: "finding", ExpectedFindingVersion: 1,
+				ExternalID: "1", ExternalURL: "https://github.com/owner/repo/issues/1",
+				Title: "title", Confirmed: true,
+			})
+			return err
+		},
+		func() error {
+			_, err := unsafe.UnlinkExistingIssue(state.Repository, "finding", 1, true)
+			return err
+		},
 	}
 	for index, call := range calls {
 		if err := call(); err == nil {
@@ -1845,6 +1881,37 @@ func TestRepositoryReviewCorruptStatePropagatesAcrossMutations(t *testing.T) {
 			return err
 		},
 		func() error { _, _, _, err := store.ClaimIssueDraftPublication(repository, "draft", 1); return err },
+		func() error {
+			_, _, err := store.SetFindingStatusByVersion(repository, "finding", FindingOpen, 1)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(repository, "finding", "generation")
+			_, _, _, err := store.ReserveIssueGeneration(request)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(repository, "finding", "generation")
+			request.ExpectedDraftVersion = 1
+			_, _, _, err := store.BeginIssueRegeneration(repository, "draft", request)
+			return err
+		},
+		func() error {
+			_, _, err := store.CompleteIssueGeneration(
+				repository, "draft", "generation", "title", "body", nil, "",
+			)
+			return err
+		},
+		func() error { _, err := store.DeleteIssueDraft(repository, "draft", 1); return err },
+		func() error {
+			_, _, err := store.LinkExistingIssue(ExistingIssueLink{
+				Repository: repository, FindingID: "finding", ExpectedFindingVersion: 1,
+				ExternalID: "1", ExternalURL: "https://github.com/owner/repo/issues/1",
+				Title: "title", Confirmed: true,
+			})
+			return err
+		},
+		func() error { _, err := store.UnlinkExistingIssue(repository, "finding", 1, true); return err },
 	}
 	for index, call := range calls {
 		if err := call(); err == nil {

@@ -7,10 +7,18 @@ import { launcherFetch } from "@/api/http"
 
 export type RepositoryReviewFindingStatus = "open" | "dismissed" | "posted"
 export type RepositoryReviewIssueDraftState =
+  | "generating"
+  | "failed"
   | "editing"
   | "publishing"
   | "posted"
   | "unknown"
+export type RepositoryReviewIssueDraftOrigin =
+  | "ai_generated"
+  | "linked"
+  | "legacy"
+export type RepositoryReviewIssueInstructionsMode = "default" | "custom"
+export type RepositoryReviewReportScope = "current" | "all"
 
 export interface RepositoryReviewFileRef {
   path: string
@@ -73,6 +81,7 @@ export interface RepositoryReviewFinding {
   observation_count: number
   observations?: RepositoryReviewFindingObservation[]
   status: RepositoryReviewFindingStatus
+  issue_draft_id?: string
   version: number
   created_at: string
   updated_at: string
@@ -115,6 +124,25 @@ export interface RepositoryReviewIssueDraft {
   id: string
   repository: string
   finding_ids: string[]
+  origin?: RepositoryReviewIssueDraftOrigin
+  generation_id?: string
+  resolved_instructions?: string
+  instructions_mode?: RepositoryReviewIssueInstructionsMode
+  generator_model?: string
+  generator_account?: string
+  attempt_generation_id?: string
+  attempt_resolved_instructions?: string
+  attempt_instructions_mode?: RepositoryReviewIssueInstructionsMode
+  attempt_generator_model?: string
+  attempt_generator_account?: string
+  generation_error?: string
+  canonical?: boolean
+  read_only?: boolean
+  publishable?: boolean
+  deletable?: boolean
+  regeneratable?: boolean
+  unlinkable?: boolean
+  conflict_reason?: string
   title: string
   body: string
   labels?: string[]
@@ -124,6 +152,102 @@ export interface RepositoryReviewIssueDraft {
   version: number
   created_at: string
   updated_at: string
+}
+
+export interface RepositoryReviewCapabilities {
+  github?: boolean
+  can_generate?: boolean
+  can_publish?: boolean
+  can_search_issues?: boolean
+  can_link_issue?: boolean
+  can_unlink_issue?: boolean
+  can_replace_issue?: boolean
+  can_edit?: boolean
+  can_delete?: boolean
+  can_regenerate?: boolean
+  read_only_reason?: string
+}
+
+export interface RepositoryReviewFindingDetail {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  finding: RepositoryReviewFinding
+  contexts: RepositoryReviewFindingContext[]
+  issue?: RepositoryReviewIssueDraft
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewReportPage {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  findings: RepositoryReviewFinding[]
+  contexts?: RepositoryReviewFindingContext[]
+  scope: RepositoryReviewReportScope
+  offset: number
+  total: number
+  next_offset?: number
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewIssuePage {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  issues: RepositoryReviewIssueDraft[]
+  offset: number
+  total: number
+  next_offset?: number
+  generation_id?: string
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewIssueDetail {
+  automation: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  issue: RepositoryReviewIssueDraft
+  finding?: RepositoryReviewFinding
+  capabilities?: RepositoryReviewCapabilities
+}
+
+export interface RepositoryReviewMutationResult {
+  id?: string
+  draft_id?: string
+  state?: RepositoryReviewIssueDraftState
+  outcome?: "posted" | "failed" | "unknown" | "deleted" | "linked"
+  success?: boolean
+  code?: string
+  message?: string
+  external_url?: string
+}
+
+export interface RepositoryReviewIssueMutationResponse {
+  automation?: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  issue?: RepositoryReviewIssueDraft
+  draft?: RepositoryReviewIssueDraft
+  finding?: RepositoryReviewFinding
+  generation_id?: string
+  issues?: RepositoryReviewIssueDraft[]
+  results?: RepositoryReviewMutationResult[]
+}
+
+export interface RepositoryReviewIssueCandidate {
+  id?: string
+  number: number
+  title: string
+  url: string
+  state?: "open" | "closed" | string
+  labels?: string[]
+  score?: number
+  rank?: number
+  explanation?: string
+}
+
+export interface RepositoryReviewIssueCandidatesResponse {
+  automation?: RepositoryReviewAutomation
+  finding?: RepositoryReviewFinding
+  candidates: RepositoryReviewIssueCandidate[]
+  generator_model?: string
+  generator_account?: string
 }
 
 export interface RepositoryReviewSummary {
@@ -225,6 +349,7 @@ export interface ReviewAccountOption {
   available?: boolean
   default?: boolean
   models?: string[]
+  writer_models?: string[]
   entries: ReviewAccountLimitEntry[]
 }
 
@@ -305,6 +430,7 @@ export interface RepositoryReviewAutomationConfig {
   review_focus: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_models: string[]
+  issue_writer_model?: string
   compare_models: boolean
   force: boolean
   max_files_per_run: number
@@ -321,6 +447,7 @@ export interface RepositoryReviewProfileConfig {
   review_focus: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_model: string
+  issue_writer_model?: string
   force: boolean
   auto_continue: boolean
   max_files_per_run: number
@@ -374,6 +501,10 @@ export interface RepositoryReviewAutomationOptions {
 
 export interface RepositoryReviewAutomationPage extends CollectionPageMetadata {
   automations: RepositoryReviewAutomation[]
+}
+
+export interface RepositoryReviewProfilePage extends CollectionPageMetadata {
+  profiles: RepositoryReviewProfile[]
 }
 
 export interface RepositoryReviewCommitOption {
@@ -456,6 +587,24 @@ export async function listRepositoryReviewProfiles(
     signal,
   )
   return { profiles: (page.profiles ?? []).map(normalizeProfile) }
+}
+
+export async function listRepositoryReviewProfilesPage(
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewProfilePage> {
+  const page = await requestJSON<Partial<RepositoryReviewProfilePage>>(
+    collectionListURL(`${apiRoot}/profiles`, input),
+    undefined,
+    signal,
+  )
+  return {
+    profiles: (page.profiles ?? []).map(normalizeProfile),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
+  }
 }
 
 export async function getRepositoryReviewProfile(
@@ -616,6 +765,312 @@ export async function restartRepositoryReviewAutomation(
   return mutateAutomationAction(automationID, "restart", input, signal)
 }
 
+export async function getRepositoryReviewAutomation(
+  automationID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewAutomation> {
+  const value = await requestJSON<
+    RepositoryReviewAutomation | AutomationMutationResult
+  >(automationPath(automationID), undefined, signal)
+  return automationFromMutation(value)
+}
+
+export async function getRepositoryReviewAutomationReport(
+  automationID: string,
+  input: {
+    scope?: RepositoryReviewReportScope
+    offset?: number
+    limit?: number
+  } = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewReportPage> {
+  const params = new URLSearchParams()
+  params.set("scope", input.scope ?? "current")
+  if (input.offset) params.set("offset", String(input.offset))
+  if (input.limit) params.set("limit", String(input.limit))
+  const value = await requestJSON<
+    Partial<RepositoryReviewReportPage> & {
+      finding_total?: number
+      next_finding_offset?: number
+    }
+  >(
+    `${automationPath(automationID)}/report?${params.toString()}`,
+    undefined,
+    signal,
+  )
+  return {
+    ...value,
+    automation: normalizeAutomation(value.automation!),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    findings: (value.findings ?? []).map(normalizeFinding),
+    contexts: (value.contexts ?? []).map(normalizeFindingContext),
+    scope: value.scope === "all" ? "all" : "current",
+    offset: value.offset ?? input.offset ?? 0,
+    total: value.total ?? value.finding_total ?? value.findings?.length ?? 0,
+    next_offset: value.next_offset ?? value.next_finding_offset,
+  }
+}
+
+export async function getRepositoryReviewAutomationFinding(
+  automationID: string,
+  findingID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewFindingDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(automationFindingPath(automationID, findingID), undefined, signal)
+  return normalizeFindingDetail(value)
+}
+
+export async function updateRepositoryReviewAutomationFinding(
+  automationID: string,
+  findingID: string,
+  input: {
+    status: Exclude<RepositoryReviewFindingStatus, "posted">
+    expected_version: number
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewFindingDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    automationFindingPath(automationID, findingID),
+    jsonMutation("PATCH", input),
+    signal,
+  )
+  return normalizeFindingDetail(value)
+}
+
+export async function listRepositoryReviewAutomationIssues(
+  automationID: string,
+  input: { generation_id?: string; offset?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssuePage> {
+  const params = new URLSearchParams()
+  if (input.generation_id) params.set("generation_id", input.generation_id)
+  if (input.offset) params.set("offset", String(input.offset))
+  if (input.limit) params.set("limit", String(input.limit))
+  const query = params.size > 0 ? `?${params.toString()}` : ""
+  const value = await requestJSON<
+    Partial<RepositoryReviewIssuePage> & {
+      drafts?: RepositoryReviewIssueDraft[]
+      issue_total?: number
+      next_issue_offset?: number
+    }
+  >(`${automationPath(automationID)}/issues${query}`, undefined, signal)
+  return {
+    ...value,
+    automation: normalizeAutomation(value.automation!),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    issues: (value.issues ?? value.drafts ?? []).map(normalizeIssueDraft),
+    offset: value.offset ?? input.offset ?? 0,
+    total:
+      value.total ??
+      value.issue_total ??
+      value.issues?.length ??
+      value.drafts?.length ??
+      0,
+    next_offset: value.next_offset ?? value.next_issue_offset,
+    generation_id: value.generation_id ?? input.generation_id,
+  }
+}
+
+export async function generateRepositoryReviewIssues(
+  automationID: string,
+  input: {
+    generation_id: string
+    finding_ids: string[]
+    instructions_mode: RepositoryReviewIssueInstructionsMode
+    instructions?: string
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueMutationResponse> {
+  return normalizeIssueMutationResponse(
+    await requestJSON<RepositoryReviewIssueMutationResponse>(
+      `${automationPath(automationID)}/issues/generations`,
+      jsonMutation("POST", input),
+      signal,
+    ),
+  )
+}
+
+export async function publishRepositoryReviewIssues(
+  automationID: string,
+  input: {
+    issues: Array<{ id: string; expected_version: number }>
+    confirmed: true
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueMutationResponse> {
+  return normalizeIssueMutationResponse(
+    await requestJSON<RepositoryReviewIssueMutationResponse>(
+      `${automationPath(automationID)}/issues/publish`,
+      jsonMutation("POST", input),
+      signal,
+    ),
+  )
+}
+
+export async function getRepositoryReviewAutomationIssue(
+  automationID: string,
+  draftID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewIssueDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(automationIssuePath(automationID, draftID), undefined, signal)
+  return normalizeIssueDetail(value)
+}
+
+export async function updateRepositoryReviewAutomationIssue(
+  automationID: string,
+  draftID: string,
+  input: {
+    title: string
+    body: string
+    labels: string[]
+    expected_version: number
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewIssueDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    automationIssuePath(automationID, draftID),
+    jsonMutation("PATCH", input),
+    signal,
+  )
+  return normalizeIssueDetail(value)
+}
+
+export async function deleteRepositoryReviewAutomationIssue(
+  automationID: string,
+  draftID: string,
+  input: { expected_version: number; confirmed: true },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueMutationResponse> {
+  return normalizeIssueMutationResponse(
+    await requestJSON<RepositoryReviewIssueMutationResponse>(
+      automationIssuePath(automationID, draftID),
+      jsonMutation("DELETE", input),
+      signal,
+    ),
+  )
+}
+
+export async function regenerateRepositoryReviewAutomationIssue(
+  automationID: string,
+  draftID: string,
+  input: { expected_version: number },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewIssueDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    `${automationIssuePath(automationID, draftID)}/regenerate`,
+    jsonMutation("POST", input),
+    signal,
+  )
+  return normalizeIssueDetail(value)
+}
+
+export async function publishRepositoryReviewAutomationIssue(
+  automationID: string,
+  draftID: string,
+  input: { expected_version: number; confirmed: true },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewIssueDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    `${automationIssuePath(automationID, draftID)}/publish`,
+    jsonMutation("POST", input),
+    signal,
+  )
+  return normalizeIssueDetail(value)
+}
+
+export async function findRepositoryReviewIssueCandidates(
+  automationID: string,
+  findingID: string,
+  input: { expected_version: number },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueCandidatesResponse> {
+  const value = await requestJSON<RepositoryReviewIssueCandidatesResponse>(
+    `${automationFindingPath(automationID, findingID)}/issue-link/candidates`,
+    jsonMutation("POST", input),
+    signal,
+  )
+  return {
+    ...value,
+    automation: value.automation
+      ? normalizeAutomation(value.automation)
+      : undefined,
+    finding: value.finding ? normalizeFinding(value.finding) : undefined,
+    candidates: (value.candidates ?? []).map((candidate) => ({
+      ...candidate,
+      labels: candidate.labels ?? [],
+    })),
+  }
+}
+
+export async function linkRepositoryReviewIssue(
+  automationID: string,
+  findingID: string,
+  input: {
+    issue_url: string
+    expected_version: number
+    confirmed: true
+    replace?: boolean
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewFindingDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    `${automationFindingPath(automationID, findingID)}/issue-link`,
+    jsonMutation("POST", input),
+    signal,
+  )
+  return normalizeFindingDetail(value)
+}
+
+export async function unlinkRepositoryReviewIssue(
+  automationID: string,
+  findingID: string,
+  input: { expected_version: number; confirmed: true },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingDetail> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewFindingDetail> & {
+      draft?: RepositoryReviewIssueDraft
+    }
+  >(
+    `${automationFindingPath(automationID, findingID)}/issue-link`,
+    jsonMutation("DELETE", input),
+    signal,
+  )
+  return normalizeFindingDetail(value)
+}
+
 export async function getRepositoryReview(
   repositoryID: string,
   signal?: AbortSignal,
@@ -772,6 +1227,12 @@ function normalizeFinding(
   }
 }
 
+function normalizeFindingContext(
+  context: RepositoryReviewFindingContext,
+): RepositoryReviewFindingContext {
+  return { ...context, files: context.files ?? [] }
+}
+
 function normalizeIssueDraft(
   draft: RepositoryReviewIssueDraft,
 ): RepositoryReviewIssueDraft {
@@ -779,6 +1240,62 @@ function normalizeIssueDraft(
     ...draft,
     finding_ids: draft.finding_ids ?? [],
     labels: draft.labels ?? [],
+  }
+}
+
+function normalizeFindingDetail(
+  value: Partial<RepositoryReviewFindingDetail> & {
+    draft?: RepositoryReviewIssueDraft
+  },
+): RepositoryReviewFindingDetail {
+  return {
+    ...value,
+    automation: normalizeAutomation(value.automation!),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    finding: normalizeFinding(value.finding!),
+    contexts: (value.contexts ?? []).map(normalizeFindingContext),
+    issue: value.issue
+      ? normalizeIssueDraft(value.issue)
+      : value.draft
+        ? normalizeIssueDraft(value.draft)
+        : undefined,
+  }
+}
+
+function normalizeIssueDetail(
+  value: Partial<RepositoryReviewIssueDetail> & {
+    draft?: RepositoryReviewIssueDraft
+  },
+): RepositoryReviewIssueDetail {
+  return {
+    ...value,
+    automation: normalizeAutomation(value.automation!),
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    issue: normalizeIssueDraft(value.issue ?? value.draft!),
+    finding: value.finding ? normalizeFinding(value.finding) : undefined,
+  }
+}
+
+function normalizeIssueMutationResponse(
+  value: RepositoryReviewIssueMutationResponse,
+): RepositoryReviewIssueMutationResponse {
+  return {
+    ...value,
+    automation: value.automation
+      ? normalizeAutomation(value.automation)
+      : undefined,
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    issue: value.issue ? normalizeIssueDraft(value.issue) : undefined,
+    draft: value.draft ? normalizeIssueDraft(value.draft) : undefined,
+    finding: value.finding ? normalizeFinding(value.finding) : undefined,
+    issues: value.issues?.map(normalizeIssueDraft),
+    results: value.results ?? [],
   }
 }
 
@@ -826,6 +1343,7 @@ function normalizeProfile(
     account_ref: profile.account_ref ?? "",
     review_focus: profile.review_focus ?? "",
     reviewer_model: profile.reviewer_model ?? "",
+    issue_writer_model: profile.issue_writer_model ?? "",
     force: profile.force ?? false,
     auto_continue: profile.auto_continue ?? true,
     max_files_per_run: profile.max_files_per_run ?? 24,
@@ -869,6 +1387,8 @@ function normalizeAutomation(
       free_text: automation.scope_policy?.free_text ?? "",
     },
     reviewer_models: automation.reviewer_models ?? [],
+    issue_writer_model:
+      automation.issue_writer_model ?? automation.reviewer_models?.[0] ?? "",
     compare_models: automation.compare_models ?? false,
     force: automation.force ?? false,
     max_files_per_run: automation.max_files_per_run ?? 24,
@@ -964,6 +1484,11 @@ function normalizeAccount<T extends ReviewAccountOption>(account: T): T {
     ...account,
     available: account.available ?? false,
     models: Array.isArray(account.models) ? account.models : [],
+    writer_models: Array.isArray(account.writer_models)
+      ? account.writer_models
+      : Array.isArray(account.models)
+        ? account.models
+        : [],
     entries: (account.entries ?? []).map((entry) => ({
       ...entry,
       label: entry.label ?? entry.name,
@@ -1057,6 +1582,17 @@ function automationPath(automationID: string): string {
   return `${apiRoot}/automations/${encodeURIComponent(automationID)}`
 }
 
+function automationFindingPath(
+  automationID: string,
+  findingID: string,
+): string {
+  return `${automationPath(automationID)}/findings/${encodeURIComponent(findingID)}`
+}
+
+function automationIssuePath(automationID: string, draftID: string): string {
+  return `${automationPath(automationID)}/issues/${encodeURIComponent(draftID)}`
+}
+
 function profilePath(profileID: string): string {
   return `${apiRoot}/profiles/${encodeURIComponent(profileID)}`
 }
@@ -1070,6 +1606,9 @@ function repositoryReviewProfileConfigPayload(
     review_focus: input.review_focus,
     scope_policy: input.scope_policy,
     reviewer_model: input.reviewer_model,
+    ...(input.issue_writer_model !== undefined
+      ? { issue_writer_model: input.issue_writer_model }
+      : {}),
     force: input.force,
     auto_continue: input.auto_continue,
     max_files_per_run: input.max_files_per_run,

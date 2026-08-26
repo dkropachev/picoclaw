@@ -227,6 +227,8 @@ Owns: CODE web/frontend/src/api/pr-lifecycle-workflow-configurations.ts
 Owns: CODE web/frontend/src/api/pr-lifecycle-repository-assignments.ts
 Owns: CODE web/frontend/src/app-providers.tsx
 Owns: CODE web/frontend/src/components/app-sidebar.tsx
+The shared sidebar may change another feature's nested navigation entries while
+preserving Event sources and Events placement and active-route behavior.
 Owns: CODE web/frontend/src/components/development-workspaces/**
 Owns: CODE web/frontend/src/components/events/**
 Owns: CODE web/frontend/src/components/notifications/**

@@ -64,6 +64,7 @@ export interface CollectionDefinition<T> {
 
 export interface CollectionSelection<T> {
   selectedIDs: ReadonlySet<string>
+  additive?: boolean
   disabled?: boolean
   maximumSelected?: number
   isItemDisabled?: (item: T) => boolean

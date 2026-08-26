@@ -46,6 +46,17 @@ describe("CollectionResults", () => {
     expect(selectedIDs()).toEqual(["a", "b", "c", "d"])
   })
 
+  it("supports additive touch-friendly selection when requested", async () => {
+    const user = userEvent.setup()
+    render(<SelectableResults additive />)
+
+    await user.click(item("a"))
+    await user.click(item("c"))
+    expect(selectedIDs()).toEqual(["a", "c"])
+    await user.click(item("a"))
+    expect(selectedIDs()).toEqual(["c"])
+  })
+
   it("skips ineligible rows in ranges and respects the selection bound", async () => {
     const user = userEvent.setup()
     render(
@@ -192,6 +203,7 @@ function SelectableResults({
   initialSelected = [],
   failuresByID,
   maximumSelected,
+  additive = false,
   isItemDisabled,
   onOpenItem = vi.fn(),
 }: {
@@ -203,6 +215,7 @@ function SelectableResults({
     { id: string; code: string; blockers?: string[] }
   >
   maximumSelected?: number
+  additive?: boolean
   isItemDisabled?: (item: Thing) => boolean
   onOpenItem?: (item: Thing) => void
 }) {
@@ -215,6 +228,7 @@ function SelectableResults({
       onOpenItem={onOpenItem}
       selection={{
         selectedIDs: selected,
+        additive,
         failuresByID,
         maximumSelected,
         isItemDisabled,

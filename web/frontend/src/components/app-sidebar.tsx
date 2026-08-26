@@ -3,7 +3,6 @@ import {
   IconBellRinging,
   IconBrain,
   IconBug,
-  IconChecks,
   IconChevronsDown,
   IconChevronsUp,
   IconDatabase,
@@ -145,13 +144,6 @@ const repositoryReviewProfilesNavItem: NavItem = {
   title: "Profiles",
   url: "/repository-reviews/profiles",
   icon: IconSettings,
-  translateTitle: false,
-}
-
-const repositoryReviewResultsNavItem: NavItem = {
-  title: "Results",
-  url: "/repository-reviews/results",
-  icon: IconChecks,
   translateTitle: false,
 }
 
@@ -341,7 +333,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           repositoryReviewsNavItem,
           repositoryReviewRepositoriesNavItem,
           repositoryReviewProfilesNavItem,
-          repositoryReviewResultsNavItem,
           modelEvaluationsNavItem,
         ],
       },
@@ -349,6 +340,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   }, [channelItems])
 
   const isNavItemActive = (item: NavItem) => {
+    if (item.url === "/repository-reviews") {
+      return (
+        currentPath === item.url ||
+        (currentPath.startsWith(`${item.url}/`) &&
+          !currentPath.startsWith("/repository-reviews/repositories") &&
+          !currentPath.startsWith("/repository-reviews/profiles") &&
+          currentPath !== "/repository-reviews/results")
+      )
+    }
     const pathActive =
       currentPath === item.url ||
       (!item.exact &&

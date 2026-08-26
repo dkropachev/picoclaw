@@ -1,0 +1,631 @@
+import {
+  IconBrandGithub,
+  IconEdit,
+  IconExternalLink,
+  IconRefresh,
+  IconSparkles,
+  IconTrash,
+} from "@tabler/icons-react"
+import { useMutation, useQuery } from "@tanstack/react-query"
+import { useEffect, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import rehypeSanitize from "rehype-sanitize"
+import remarkGfm from "remark-gfm"
+import { toast } from "sonner"
+
+import {
+  RepositoryReviewAPIError,
+  deleteRepositoryReviewAutomationIssue,
+  getRepositoryReviewAutomationIssue,
+  publishRepositoryReviewAutomationIssue,
+  regenerateRepositoryReviewAutomationIssue,
+  updateRepositoryReviewAutomationIssue,
+} from "@/api/repository-reviews"
+import { CollectionDetailShell } from "@/components/collection"
+import { githubRepositoryPath } from "@/components/repository-reviews/repository-review-actions"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+
+export function RepositoryReviewIssuePage({
+  automationID,
+  draftID,
+  onBack,
+  onDeleted,
+  onOpenFinding,
+  onManageLink,
+}: {
+  automationID: string
+  draftID: string
+  onBack: () => void
+  onDeleted: () => void
+  onOpenFinding: (findingID: string) => void
+  onManageLink: (findingID: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState("")
+  const [body, setBody] = useState("")
+  const [labels, setLabels] = useState("")
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [publishOpen, setPublishOpen] = useState(false)
+  const query = useQuery({
+    queryKey: ["repository-review-issue", automationID, draftID],
+    queryFn: ({ signal }) =>
+      getRepositoryReviewAutomationIssue(automationID, draftID, signal),
+    retry: false,
+    refetchInterval: (current) =>
+      current.state.data &&
+      new Set(["generating", "publishing", "unknown"]).has(
+        current.state.data.issue.state,
+      )
+        ? 2_000
+        : false,
+  })
+  const detail = query.data
+  const issue = detail?.issue
+  const notFound =
+    query.error instanceof RepositoryReviewAPIError &&
+    query.error.status === 404
+  useEffect(() => {
+    if (!issue) return
+    setTitle(issue.title)
+    setBody(issue.body)
+    setLabels(issue.labels?.join(", ") ?? "")
+  }, [issue])
+  const save = useMutation({
+    mutationFn: () =>
+      updateRepositoryReviewAutomationIssue(automationID, draftID, {
+        title: title.trim(),
+        body: body.trim(),
+        labels: parseLabels(labels),
+        expected_version: issue?.version ?? 0,
+      }),
+    onSuccess: async () => {
+      setEditing(false)
+      await query.refetch()
+      toast.success("Issue preview saved.")
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Preview save failed.",
+      ),
+  })
+  const regenerate = useMutation({
+    mutationFn: () =>
+      regenerateRepositoryReviewAutomationIssue(automationID, draftID, {
+        expected_version: issue?.version ?? 0,
+      }),
+    onSuccess: async (result) => {
+      await query.refetch()
+      if (result.issue.state === "generating") {
+        toast.info("Issue preview generation is already in progress.")
+      } else if (result.issue.generation_error) {
+        toast.error("Regeneration failed; the last good preview was preserved.")
+      } else {
+        toast.success("Preview regeneration finished.")
+      }
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Regeneration failed; the last good preview was preserved.",
+      )
+      void query.refetch()
+    },
+  })
+  const remove = useMutation({
+    mutationFn: () =>
+      deleteRepositoryReviewAutomationIssue(automationID, draftID, {
+        expected_version: issue?.version ?? 0,
+        confirmed: true,
+      }),
+    onSuccess: () => {
+      setDeleteOpen(false)
+      toast.success(
+        "Unpublished preview deleted; the finding is available again.",
+      )
+      onDeleted()
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Preview deletion failed.",
+      ),
+  })
+  const publish = useMutation({
+    mutationFn: () =>
+      publishRepositoryReviewAutomationIssue(automationID, draftID, {
+        expected_version: issue?.version ?? 0,
+        confirmed: true,
+      }),
+    onSuccess: async () => {
+      setPublishOpen(false)
+      await query.refetch()
+      toast.success("Publication state reconciled.")
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Publication failed.",
+      ),
+  })
+  const github =
+    detail?.capabilities?.github ??
+    Boolean(detail && githubRepositoryPath(detail.automation.repository))
+  const canonical = issue?.canonical !== false && !issue?.read_only
+  const editable =
+    canonical && (detail?.capabilities?.can_edit ?? issue?.state === "editing")
+  const deletable =
+    canonical &&
+    (detail?.capabilities?.can_delete ??
+      issue?.deletable ??
+      (issue?.state === "editing" || issue?.state === "failed"))
+  const regeneratable =
+    canonical &&
+    (detail?.capabilities?.can_regenerate ??
+      issue?.regeneratable ??
+      (issue?.origin === "ai_generated" &&
+        new Set(["generating", "editing", "failed"]).has(issue?.state ?? "")))
+  const publishable =
+    github &&
+    canonical &&
+    (detail?.capabilities?.can_publish ??
+      issue?.publishable ??
+      new Set(["editing", "publishing", "unknown"]).has(issue?.state ?? ""))
+  const dirty = Boolean(
+    issue &&
+    (title.trim() !== issue.title ||
+      body.trim() !== issue.body ||
+      parseLabels(labels).join("\u0000") !==
+        (issue.labels ?? []).join("\u0000")),
+  )
+  const externalURL = safeHTTPSURL(issue?.external_url)
+
+  return (
+    <>
+      <CollectionDetailShell
+        title={issue?.title || "Issue preview"}
+        identity={<span className="font-mono text-xs">{draftID}</span>}
+        status={
+          issue ? (
+            <div className="flex items-center gap-2">
+              <Badge variant="outline">{issue.state}</Badge>
+              <Badge variant="secondary">{issue.origin || "legacy"}</Badge>
+              {!canonical && <Badge variant="destructive">read only</Badge>}
+            </div>
+          ) : undefined
+        }
+        actions={
+          issue ? (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="outline"
+                aria-label="Refresh issue preview"
+                onClick={() => void query.refetch()}
+              >
+                <IconRefresh />
+              </Button>
+              {editable && !editing && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setEditing(true)}
+                >
+                  <IconEdit /> Edit
+                </Button>
+              )}
+            </div>
+          ) : undefined
+        }
+        loading={query.isLoading}
+        error={!notFound ? query.error?.message : undefined}
+        notFound={notFound}
+        onBack={onBack}
+        onRetry={() => void query.refetch()}
+        backLabel="Issue previews"
+        contentClassName="max-w-6xl"
+      >
+        {detail && issue && (
+          <div className="space-y-6">
+            {issue.generation_error && (
+              <div
+                role="alert"
+                className="border-destructive/40 bg-destructive/5 text-destructive rounded-lg border p-3 text-sm"
+              >
+                {issue.generation_error}
+                {issue.body && (
+                  <span className="mt-1 block text-xs">
+                    The last good preview remains available below.
+                  </span>
+                )}
+              </div>
+            )}
+            {!canonical && (
+              <div
+                role="status"
+                className="border-border rounded-lg border p-3 text-sm"
+              >
+                This preserved legacy record is not the finding’s canonical
+                association and cannot be edited or published.
+                {issue.conflict_reason ? ` ${issue.conflict_reason}` : ""}
+              </div>
+            )}
+
+            <section className="border-border space-y-3 rounded-lg border p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold">Finding association</h2>
+                <span className="text-muted-foreground text-xs">
+                  {issue.finding_ids.length === 1
+                    ? "One finding"
+                    : `${issue.finding_ids.length} grouped legacy findings`}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {issue.finding_ids.map((findingID) => (
+                  <Button
+                    key={findingID}
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onOpenFinding(findingID)}
+                  >
+                    Finding {findingID}
+                  </Button>
+                ))}
+                {issue.origin === "linked" && issue.finding_ids[0] && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onManageLink(issue.finding_ids[0]!)}
+                  >
+                    Manage manual link
+                  </Button>
+                )}
+              </div>
+            </section>
+
+            <section aria-labelledby="preview-provenance" className="space-y-3">
+              <h2 id="preview-provenance" className="font-semibold">
+                Generation provenance
+              </h2>
+              <dl className="border-border divide-border rounded-lg border text-sm">
+                <DetailRow
+                  label="Generation ID"
+                  value={issue.generation_id || "Not generated"}
+                  mono
+                />
+                <DetailRow
+                  label="Instruction mode"
+                  value={issue.instructions_mode || "legacy"}
+                />
+                <DetailRow
+                  label="Generator model"
+                  value={issue.generator_model || "Not recorded"}
+                  mono
+                />
+                <DetailRow
+                  label="Generator account"
+                  value={issue.generator_account || "Not recorded"}
+                  mono
+                />
+              </dl>
+              {issue.resolved_instructions && (
+                <details className="border-border rounded-lg border p-3 text-sm">
+                  <summary className="cursor-pointer font-medium">
+                    Resolved issue-writing instructions
+                  </summary>
+                  <p className="text-muted-foreground mt-2 whitespace-pre-wrap">
+                    {issue.resolved_instructions}
+                  </p>
+                </details>
+              )}
+              {issue.generation_error && issue.attempt_generation_id && (
+                <details className="border-border rounded-lg border p-3 text-sm">
+                  <summary className="cursor-pointer font-medium">
+                    Last failed regeneration attempt
+                  </summary>
+                  <dl className="mt-3 grid gap-2">
+                    <DetailRow
+                      label="Attempt ID"
+                      value={issue.attempt_generation_id}
+                      mono
+                    />
+                    <DetailRow
+                      label="Instruction mode"
+                      value={issue.attempt_instructions_mode || "Not recorded"}
+                    />
+                    <DetailRow
+                      label="Generator model"
+                      value={issue.attempt_generator_model || "Not recorded"}
+                      mono
+                    />
+                    <DetailRow
+                      label="Generator account"
+                      value={issue.attempt_generator_account || "Not recorded"}
+                      mono
+                    />
+                    <DetailRow
+                      label="Resolved instructions"
+                      value={
+                        issue.attempt_resolved_instructions || "Not recorded"
+                      }
+                    />
+                  </dl>
+                </details>
+              )}
+            </section>
+
+            {editing ? (
+              <section aria-labelledby="edit-preview" className="space-y-4">
+                <h2 id="edit-preview" className="font-semibold">
+                  Edit preview
+                </h2>
+                <label
+                  htmlFor="repository-review-issue-title"
+                  className="grid gap-2 text-sm"
+                >
+                  <span className="font-medium">Title</span>
+                  <Input
+                    id="repository-review-issue-title"
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                  />
+                </label>
+                <label
+                  htmlFor="repository-review-issue-body"
+                  className="grid gap-2 text-sm"
+                >
+                  <span className="font-medium">
+                    GitHub-flavored Markdown body
+                  </span>
+                  <Textarea
+                    id="repository-review-issue-body"
+                    className="min-h-80 font-mono text-xs"
+                    value={body}
+                    onChange={(event) => setBody(event.target.value)}
+                  />
+                </label>
+                <label
+                  htmlFor="repository-review-issue-labels"
+                  className="grid gap-2 text-sm"
+                >
+                  <span className="font-medium">Labels · comma separated</span>
+                  <Input
+                    id="repository-review-issue-labels"
+                    value={labels}
+                    onChange={(event) => setLabels(event.target.value)}
+                  />
+                </label>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={save.isPending}
+                    onClick={() => {
+                      setEditing(false)
+                      setTitle(issue.title)
+                      setBody(issue.body)
+                      setLabels(issue.labels?.join(", ") ?? "")
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={
+                      save.isPending || !dirty || !title.trim() || !body.trim()
+                    }
+                    onClick={() => save.mutate()}
+                  >
+                    {save.isPending ? "Saving…" : "Save preview"}
+                  </Button>
+                </div>
+              </section>
+            ) : (
+              <section aria-labelledby="rendered-preview" className="space-y-4">
+                <div>
+                  <h2 id="rendered-preview" className="text-xl font-semibold">
+                    {issue.title || "Untitled preview"}
+                  </h2>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {issue.labels?.map((label) => (
+                      <Badge key={label} variant="secondary">
+                        {label}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+                {issue.body ? (
+                  <div className="prose dark:prose-invert prose-pre:overflow-x-auto border-border max-w-none rounded-lg border p-4 [overflow-wrap:anywhere]">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeSanitize]}
+                    >
+                      {issue.body}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <div className="border-border rounded-lg border border-dashed p-8 text-center text-sm">
+                    {issue.state === "generating"
+                      ? "The AI-written preview is still generating."
+                      : "No generated preview is available."}
+                  </div>
+                )}
+              </section>
+            )}
+
+            <div className="border-border flex flex-wrap items-center justify-end gap-2 border-t pt-4">
+              {externalURL && (
+                <Button asChild type="button" size="sm" variant="outline">
+                  <a
+                    href={externalURL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <IconExternalLink /> Open GitHub issue
+                  </a>
+                </Button>
+              )}
+              {regeneratable && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={regenerate.isPending || editing}
+                  onClick={() => regenerate.mutate()}
+                >
+                  <IconSparkles />{" "}
+                  {regenerate.isPending
+                    ? "Regenerating…"
+                    : issue.state === "generating"
+                      ? "Retry generation"
+                      : "Regenerate with AI"}
+                </Button>
+              )}
+              {deletable && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={editing}
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <IconTrash /> Delete preview
+                </Button>
+              )}
+              {publishable && (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={editing || dirty}
+                  onClick={() => setPublishOpen(true)}
+                >
+                  <IconBrandGithub />
+                  {issue.state === "unknown" || issue.state === "publishing"
+                    ? "Reconcile publication"
+                    : "Publish issue"}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+      </CollectionDetailShell>
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete this unpublished preview?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The preview is removed and its finding becomes available for
+              generation or linking again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={remove.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={remove.isPending}
+              onClick={(event) => {
+                event.preventDefault()
+                remove.mutate()
+              }}
+            >
+              {remove.isPending ? "Deleting…" : "Delete preview"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={publishOpen} onOpenChange={setPublishOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {issue?.state === "unknown" || issue?.state === "publishing"
+                ? "Reconcile this publication?"
+                : "Publish this issue?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The protected gateway uses the exact saved title, body, labels,
+              and stable marker. Ambiguous results are retained for
+              reconciliation.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={publish.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={publish.isPending}
+              onClick={(event) => {
+                event.preventDefault()
+                publish.mutate()
+              }}
+            >
+              {publish.isPending ? "Working…" : "Confirm"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  )
+}
+
+function DetailRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className="grid gap-1 border-b px-3 py-3 last:border-b-0 sm:grid-cols-[11rem_minmax(0,1fr)]">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className={mono ? "font-mono text-xs break-all" : "break-words"}>
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+function parseLabels(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(",")
+        .map((label) => label.trim())
+        .filter(Boolean),
+    ),
+  ]
+}
+
+function safeHTTPSURL(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    const url = new URL(value)
+    return url.protocol === "https:" && !url.username && !url.password
+      ? url.toString()
+      : undefined
+  } catch {
+    return undefined
+  }
+}

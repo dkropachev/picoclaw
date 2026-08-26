@@ -99,25 +99,55 @@ const (
 type IssueDraftState string
 
 const (
+	IssueDraftGenerating IssueDraftState = "generating"
+	IssueDraftFailed     IssueDraftState = "failed"
 	IssueDraftEditing    IssueDraftState = "editing"
 	IssueDraftPublishing IssueDraftState = "publishing"
 	IssueDraftPosted     IssueDraftState = "posted"
 	IssueDraftUnknown    IssueDraftState = "unknown"
 )
 
+type IssueDraftOrigin string
+
+const (
+	IssueDraftOriginAIGenerated IssueDraftOrigin = "ai_generated"
+	IssueDraftOriginLinked      IssueDraftOrigin = "linked"
+	IssueDraftOriginLegacy      IssueDraftOrigin = "legacy"
+)
+
+type IssueDraftInstructionsMode string
+
+const (
+	IssueDraftInstructionsDefault IssueDraftInstructionsMode = "default"
+	IssueDraftInstructionsCustom  IssueDraftInstructionsMode = "custom"
+)
+
 type IssueDraft struct {
-	ID          string          `json:"id"`
-	Repository  string          `json:"repository"`
-	FindingIDs  []string        `json:"finding_ids"`
-	Title       string          `json:"title"`
-	Body        string          `json:"body"`
-	Labels      []string        `json:"labels,omitempty"`
-	State       IssueDraftState `json:"state"`
-	ExternalID  string          `json:"external_id,omitempty"`
-	ExternalURL string          `json:"external_url,omitempty"`
-	Version     int64           `json:"version"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	ID                          string                     `json:"id"`
+	Repository                  string                     `json:"repository"`
+	FindingIDs                  []string                   `json:"finding_ids"`
+	Origin                      IssueDraftOrigin           `json:"origin"`
+	GenerationID                string                     `json:"generation_id,omitempty"`
+	ResolvedInstructions        string                     `json:"resolved_instructions,omitempty"`
+	InstructionsMode            IssueDraftInstructionsMode `json:"instructions_mode,omitempty"`
+	GeneratorModel              string                     `json:"generator_model,omitempty"`
+	GeneratorAccount            string                     `json:"generator_account,omitempty"`
+	AttemptGenerationID         string                     `json:"attempt_generation_id,omitempty"`
+	AttemptResolvedInstructions string                     `json:"attempt_resolved_instructions,omitempty"`
+	AttemptInstructionsMode     IssueDraftInstructionsMode `json:"attempt_instructions_mode,omitempty"`
+	AttemptGeneratorModel       string                     `json:"attempt_generator_model,omitempty"`
+	AttemptGeneratorAccount     string                     `json:"attempt_generator_account,omitempty"`
+	GenerationError             string                     `json:"generation_error,omitempty"`
+	Canonical                   bool                       `json:"canonical"`
+	Title                       string                     `json:"title"`
+	Body                        string                     `json:"body"`
+	Labels                      []string                   `json:"labels,omitempty"`
+	State                       IssueDraftState            `json:"state"`
+	ExternalID                  string                     `json:"external_id,omitempty"`
+	ExternalURL                 string                     `json:"external_url,omitempty"`
+	Version                     int64                      `json:"version"`
+	CreatedAt                   time.Time                  `json:"created_at"`
+	UpdatedAt                   time.Time                  `json:"updated_at"`
 }
 
 type Finding struct {
@@ -139,6 +169,7 @@ type Finding struct {
 	ObservationCount int                  `json:"observation_count"`
 	Observations     []FindingObservation `json:"observations,omitempty"`
 	Status           FindingStatus        `json:"status"`
+	IssueDraftID     string               `json:"issue_draft_id,omitempty"`
 	Version          int64                `json:"version"`
 	CreatedAt        time.Time            `json:"created_at"`
 	UpdatedAt        time.Time            `json:"updated_at"`

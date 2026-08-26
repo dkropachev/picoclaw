@@ -171,10 +171,21 @@ describe("AppSidebar", () => {
       "href",
       "/repository-reviews/profiles",
     )
-    expect(screen.getByRole("link", { name: "Results" })).toHaveAttribute(
-      "href",
-      "/repository-reviews/results",
-    )
+    expect(
+      screen.queryByRole("link", { name: "Results" }),
+    ).not.toBeInTheDocument()
+  })
+
+  it("marks Review runs through routed report and issue details", () => {
+    pathname = "/repository-reviews/auto_1/issues/draft_1"
+
+    renderSidebar()
+
+    expect(
+      screen
+        .getByRole("link", { name: "Review runs" })
+        .closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "true")
   })
 
   it("reveals and marks Model review probes from its direct route", () => {

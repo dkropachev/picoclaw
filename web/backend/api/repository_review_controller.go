@@ -35,6 +35,9 @@ var (
 	errRepositoryReviewProfileActive     = errors.New(
 		"repository review profile is assigned to an active repository review",
 	)
+	repositoryReviewCommandContext = osexec.CommandContext
+	repositoryReviewReadAll        = io.ReadAll
+	repositoryReviewParseWorkflow  = workflows.Parse
 )
 
 const (
@@ -308,7 +311,7 @@ func repositoryReviewGitOutput(
 	name string,
 	arguments ...string,
 ) ([]byte, error) {
-	command := osexec.CommandContext(ctx, name, arguments...)
+	command := repositoryReviewCommandContext(ctx, name, arguments...)
 	command.Dir = directory
 	command.Env = repositoryReviewGitEnvironment()
 	stdout, err := command.StdoutPipe()
@@ -318,7 +321,7 @@ func repositoryReviewGitOutput(
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	output, readErr := io.ReadAll(io.LimitReader(stdout, maximumBytes+1))
+	output, readErr := repositoryReviewReadAll(io.LimitReader(stdout, maximumBytes+1))
 	waitErr := command.Wait()
 	if readErr != nil {
 		return nil, readErr
@@ -558,6 +561,13 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 				repoaudit.ErrInvalidAutomation, model, effectiveAccount,
 			)
 		}
+	}
+	if writerErr := validateRepositoryReviewIssueWriterAlias(
+		cfg, effectiveAccount, automation.IssueWriterModel,
+	); writerErr != nil {
+		return repoaudit.RepositoryReviewAutomation{}, fmt.Errorf(
+			"%w: %v", repoaudit.ErrInvalidAutomation, writerErr,
+		)
 	}
 	commitAutomation := automation
 	if repositoryReviewRememberedCommit(commitAutomation) == "" && rememberedAtAdmission != "" {
@@ -868,6 +878,7 @@ func repositoryReviewProfileSnapshotMatches(
 		automation.ReviewFocus == materialized.ReviewFocus &&
 		reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) &&
 		reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) &&
+		automation.IssueWriterModel == materialized.IssueWriterModel &&
 		!automation.CompareModels &&
 		automation.Force == materialized.Force &&
 		automation.AutoContinue == materialized.AutoContinue &&
@@ -1107,7 +1118,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		return
 	}
 	defer closeWorkflowRuntime(executor)
-	workflow, err := workflows.Parse([]byte(workflows.RepositoryBugFinderWorkflowYAML))
+	workflow, err := repositoryReviewParseWorkflow([]byte(workflows.RepositoryBugFinderWorkflowYAML))
 	if err != nil {
 		c.finishAutomationRun(id, runID, nil, err, false)
 		return

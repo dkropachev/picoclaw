@@ -52,6 +52,33 @@ const querySchemas = {
     field("created", "timestamp"),
     field("updated", "timestamp"),
   ]),
+  reviews: schema([
+    field("id", "string"),
+    field("name", "string"),
+    field("repository", "string"),
+    field("branch", "string"),
+    field("status", "enum", [
+      "idle",
+      "running",
+      "stopping",
+      "paused",
+      "completed",
+      "failed",
+    ]),
+    field("progress", "number"),
+    field("reviewed", "number"),
+    field("findings", "number"),
+    field("updated", "timestamp"),
+  ]),
+  reviewProfiles: schema([
+    field("id", "string"),
+    field("name", "string"),
+    field("account", "string"),
+    field("reviewer", "string"),
+    field("issue_writer", "string"),
+    field("parallel", "number"),
+    field("updated", "timestamp"),
+  ]),
 }
 
 const aliases = [
@@ -242,6 +269,307 @@ const evaluation = {
   updated_at: fixedNow,
 }
 
+export const repositoryReviewVisualIDs = {
+  automation: "rra_visual",
+  finding: "rrf_visual_1",
+  secondFinding: "rrf_visual_2",
+  issue: "rrid_visual_1",
+  failedIssue: "rrid_visual_2",
+  generation: "rig_visual",
+} as const
+
+const repositoryReviewCommit = "a".repeat(40)
+
+const repositoryReviewAutomation = {
+  id: repositoryReviewVisualIDs.automation,
+  version: 9,
+  profile_id: "rrpf_visual",
+  profile_version: 4,
+  branch: "main",
+  name: "Durable correctness review",
+  repository: "octo/picoclaw",
+  ref: "main",
+  target: "all",
+  account_ref: "openai-primary",
+  effective_account_ref: "openai-primary",
+  review_focus: "Find concrete correctness and reliability defects.",
+  scope_policy: {
+    code_types: ["hotpath-code", "code", "test"],
+    include_folders: ["pkg", "web"],
+    exclude_folders: ["vendor"],
+    free_text: "Prioritize durable state transitions.",
+  },
+  reviewer_models: ["review"],
+  issue_writer_model: "issue-writer",
+  compare_models: false,
+  force: false,
+  max_files_per_run: 24,
+  max_content_bytes: 524288,
+  max_parallel_children: 4,
+  auto_continue: true,
+  model_prices: {},
+  budget: { guard_expression: "tokens.total < 250000" },
+  status: "completed",
+  run_ids: ["rrun_visual_1", "rrun_visual_2"],
+  usage: {
+    prompt_tokens: 48240,
+    completion_tokens: 7840,
+    total_tokens: 56080,
+    cached_tokens: 12120,
+  },
+  estimated_cost_usd: 1.27,
+  progress: {
+    stage: "complete",
+    completed_batches: 5,
+    total_batches: 5,
+    reviewed_files: 40,
+    remaining_files: 0,
+    unsupported_files: 1,
+    findings: 2,
+  },
+  model_stats: [],
+  account_limits: [],
+  scope_plan: {
+    commit_sha: repositoryReviewCommit,
+    policy_hash: "sha256:visual-policy",
+    hash: "sha256:visual-scope",
+    summary: "40 source and test files pinned at the selected commit.",
+    warnings: ["One generated fixture file was unsupported."],
+    counts: {
+      total_files: 48,
+      code_type_files: 46,
+      include_files: 43,
+      excluded_files: 3,
+      selected_files: 40,
+    },
+  },
+  resolved_commit_sha: repositoryReviewCommit,
+  started_at: "2026-08-25T13:00:00Z",
+  completed_at: "2026-08-25T14:20:00Z",
+  created_at: "2026-08-24T12:00:00Z",
+  updated_at: "2026-08-25T14:20:00Z",
+}
+
+const repositoryReviewProfile = {
+  id: "rrpf_visual",
+  version: 4,
+  name: "Durable correctness review",
+  account_ref: "openai-primary",
+  reviewer_model: "review",
+  issue_writer_model: "issue-writer",
+  review_focus: "Find concrete correctness and reliability defects.",
+  scope_policy: {
+    code_types: ["hotpath-code", "code", "test"],
+    include_folders: ["pkg", "web"],
+    exclude_folders: ["vendor"],
+    free_text: "Prioritize durable state transitions.",
+  },
+  force: false,
+  auto_continue: true,
+  max_files_per_run: 24,
+  max_content_bytes: 524288,
+  max_parallel_children: 4,
+  budget: { guard_expression: "" },
+  created_at: "2026-08-20T12:00:00Z",
+  updated_at: fixedNow,
+}
+
+const repositoryReviewSummary = {
+  schema_version: 1,
+  id: "rrs_visual",
+  repository: "octo/picoclaw",
+  version: 14,
+  review_version: 5,
+  last_commit_sha: repositoryReviewCommit,
+  finding_count: 2,
+  open_finding_count: 2,
+  issue_draft_count: 2,
+  unsupported_count: 1,
+  reviewed_file_count: 40,
+  excluded_file_count: 3,
+  updated_at: "2026-08-25T14:20:00Z",
+}
+
+const repositoryReviewFindings = [
+  {
+    id: repositoryReviewVisualIDs.finding,
+    fingerprint: "sha256:visual-lost-update",
+    repository: "octo/picoclaw",
+    commit_sha: repositoryReviewCommit,
+    file: {
+      path: "pkg/repoaudit/store.go",
+      blob_sha: "b".repeat(40),
+      size_bytes: 16842,
+      category: "hotpath-code",
+    },
+    line: 418,
+    severity: "high",
+    title: "Concurrent checkpoint writes can lose a finding",
+    symbol: "Store.SaveFinding",
+    message: "The read-modify-write sequence has no version fence.",
+    evidence:
+      "Two callers load the same ledger version and each replaces the findings slice; the later atomic rename discards the earlier checkpoint.",
+    impact:
+      "A validated repository finding can disappear from the durable report.",
+    validation: {
+      status: "confirmed",
+      summary: "Traced both writers through the atomic rename path.",
+      checks: ["Compared caller snapshots", "Verified no CAS guard"],
+    },
+    context_ids: ["rrctx_visual_1"],
+    models: ["review", "code"],
+    observation_count: 2,
+    observations: [
+      {
+        context_id: "rrctx_visual_1",
+        model: "review",
+        reviewer: "review-child-2",
+        severity: "high",
+        title: "Concurrent checkpoint writes can lose a finding",
+        symbol: "Store.SaveFinding",
+        line: 418,
+        evidence: "Both writers persist snapshots derived from version 13.",
+        impact: "One validated checkpoint is overwritten.",
+        validation: {
+          status: "confirmed",
+          summary: "Interleaving reproduced from both call paths.",
+        },
+      },
+    ],
+    status: "open",
+    issue_draft_id: repositoryReviewVisualIDs.issue,
+    version: 3,
+    created_at: "2026-08-25T14:05:00Z",
+    updated_at: "2026-08-25T14:10:00Z",
+  },
+  {
+    id: repositoryReviewVisualIDs.secondFinding,
+    fingerprint: "sha256:visual-cancel-retry",
+    repository: "octo/picoclaw",
+    commit_sha: repositoryReviewCommit,
+    file: {
+      path: "pkg/repoaudit/control.go",
+      blob_sha: "c".repeat(40),
+      size_bytes: 9240,
+      category: "code",
+    },
+    line: 206,
+    severity: "medium",
+    title: "Canceled batches are retried without backoff",
+    symbol: "Controller.continueRun",
+    message: "Cancellation is classified as a transient review error.",
+    evidence: "context.Canceled reaches the immediate continuation branch.",
+    impact: "Shutdown can produce a tight retry loop and duplicate work.",
+    validation: {
+      status: "confirmed",
+      summary: "Followed cancellation through continuation scheduling.",
+      checks: ["Verified the retry delay remains zero"],
+    },
+    context_ids: ["rrctx_visual_2"],
+    models: ["review"],
+    observation_count: 1,
+    status: "open",
+    issue_draft_id: repositoryReviewVisualIDs.failedIssue,
+    version: 2,
+    created_at: "2026-08-25T14:12:00Z",
+    updated_at: "2026-08-25T14:15:00Z",
+  },
+]
+
+const repositoryReviewContexts = repositoryReviewFindings.map(
+  (finding, index) => ({
+    id: finding.context_ids[0],
+    repository: finding.repository,
+    commit_sha: finding.commit_sha,
+    inventory_hash: "sha256:visual-inventory",
+    profile_hash: "sha256:visual-profile",
+    run_id: `rrun_visual_${index + 1}`,
+    model: finding.models[0],
+    reviewer: `review-child-${index + 1}`,
+    files: [finding.file],
+    raw_digest: `sha256:visual-context-${index + 1}`,
+    created_at: finding.created_at,
+  }),
+)
+
+const repositoryReviewIssues = [
+  {
+    id: repositoryReviewVisualIDs.issue,
+    repository: "octo/picoclaw",
+    finding_ids: [repositoryReviewVisualIDs.finding],
+    origin: "ai_generated",
+    generation_id: repositoryReviewVisualIDs.generation,
+    resolved_instructions:
+      "Write a concise grounded issue with evidence, impact, validation, location, and commit provenance.",
+    instructions_mode: "default",
+    generator_model: "issue-writer",
+    generator_account: "openai-primary",
+    canonical: true,
+    publishable: true,
+    deletable: true,
+    regeneratable: true,
+    title: "Concurrent checkpoint writes can lose a finding",
+    body: [
+      "## Evidence",
+      "",
+      "Two writers persist snapshots derived from the same ledger version.",
+      "",
+      "| Location | Commit |",
+      "| --- | --- |",
+      `| \`pkg/repoaudit/store.go:418\` | \`${repositoryReviewCommit}\` |`,
+      "",
+      "## Impact",
+      "",
+      "A validated finding can disappear from the durable report.",
+      "",
+      "## Validation",
+      "",
+      "- Compared both caller snapshots",
+      "- Verified there is no version fence",
+    ].join("\n"),
+    labels: ["bug", "data-loss"],
+    state: "editing",
+    version: 3,
+    created_at: "2026-08-25T14:10:00Z",
+    updated_at: "2026-08-25T14:10:00Z",
+  },
+  {
+    id: repositoryReviewVisualIDs.failedIssue,
+    repository: "octo/picoclaw",
+    finding_ids: [repositoryReviewVisualIDs.secondFinding],
+    origin: "ai_generated",
+    generation_id: repositoryReviewVisualIDs.generation,
+    resolved_instructions:
+      "Write a concise grounded issue with evidence, impact, validation, location, and commit provenance.",
+    instructions_mode: "default",
+    generator_model: "issue-writer",
+    generator_account: "openai-primary",
+    generation_error: "The issue writer returned an invalid structured body.",
+    canonical: true,
+    publishable: false,
+    deletable: true,
+    regeneratable: true,
+    title: "",
+    body: "",
+    labels: [],
+    state: "failed",
+    version: 1,
+    created_at: "2026-08-25T14:15:00Z",
+    updated_at: "2026-08-25T14:15:00Z",
+  },
+]
+
+const repositoryReviewCapabilities = {
+  github: true,
+  can_generate: true,
+  can_publish: true,
+  can_search_issues: true,
+  can_link_issue: true,
+  can_edit: true,
+  can_delete: true,
+  can_regenerate: true,
+}
+
 export async function installCollectionVisualMocks(
   page: Page,
   state: CollectionVisualState = "ready",
@@ -354,8 +682,117 @@ export async function installCollectionVisualMocks(
           })
         case "/api/model-evaluations/options":
           return json(route, evaluationOptions())
+        case "/api/repository-reviews/automations":
+          return json(route, {
+            automations: state === "empty" ? [] : [repositoryReviewAutomation],
+            total: state === "empty" ? 0 : 1,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY repository ASC",
+            query_schema: querySchemas.reviews,
+          })
+        case "/api/repository-reviews/profiles":
+          return json(route, {
+            profiles: state === "empty" ? [] : [repositoryReviewProfile],
+            total: state === "empty" ? 0 : 1,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ALL ORDER BY name ASC",
+            query_schema: querySchemas.reviewProfiles,
+          })
         case "/api/accounts/models":
           return json(route, modelOptions())
+      }
+
+      const reviewRoot = `/api/repository-reviews/automations/${repositoryReviewVisualIDs.automation}`
+      if (path === reviewRoot) {
+        return json(route, repositoryReviewAutomation)
+      }
+      if (path === `${reviewRoot}/report`) {
+        const scope =
+          url.searchParams.get("scope") === "all" ? "all" : "current"
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          findings: repositoryReviewFindings,
+          contexts: repositoryReviewContexts,
+          scope,
+          offset: 0,
+          total: repositoryReviewFindings.length,
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      if (path === `${reviewRoot}/issues`) {
+        const generationID = url.searchParams.get("generation_id")
+        const issues = generationID
+          ? repositoryReviewIssues.filter(
+              (issue) => issue.generation_id === generationID,
+            )
+          : repositoryReviewIssues
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          issues,
+          offset: 0,
+          total: issues.length,
+          ...(generationID ? { generation_id: generationID } : {}),
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      const reviewFindingPrefix = `${reviewRoot}/findings/`
+      if (path.startsWith(reviewFindingPrefix)) {
+        const findingID = decodeURIComponent(
+          path.slice(reviewFindingPrefix.length),
+        )
+        const finding = repositoryReviewFindings.find(
+          (candidate) => candidate.id === findingID,
+        )
+        if (!finding) {
+          return json(
+            route,
+            { code: "not_found", message: "Finding not found" },
+            404,
+          )
+        }
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          finding,
+          contexts: repositoryReviewContexts.filter((context) =>
+            finding.context_ids.includes(context.id),
+          ),
+          issue: repositoryReviewIssues.find((issue) =>
+            issue.finding_ids.includes(finding.id),
+          ),
+          capabilities: repositoryReviewCapabilities,
+        })
+      }
+      const reviewIssuePrefix = `${reviewRoot}/issues/`
+      if (path.startsWith(reviewIssuePrefix)) {
+        const issueID = decodeURIComponent(path.slice(reviewIssuePrefix.length))
+        const issue = repositoryReviewIssues.find(
+          (candidate) => candidate.id === issueID,
+        )
+        if (!issue) {
+          return json(
+            route,
+            { code: "not_found", message: "Issue preview not found" },
+            404,
+          )
+        }
+        return json(route, {
+          automation: repositoryReviewAutomation,
+          repository: repositoryReviewSummary,
+          issue,
+          finding: repositoryReviewFindings.find((finding) =>
+            issue.finding_ids.includes(finding.id),
+          ),
+          capabilities: {
+            ...repositoryReviewCapabilities,
+            can_publish: issue.state === "editing",
+            can_edit: issue.state === "editing",
+          },
+        })
       }
 
       const aliasName = decodedTail(path, "/api/model-aliases/")
@@ -521,6 +958,8 @@ function isCollectionList(path: string) {
     "/api/mcp/servers",
     "/api/agents",
     "/api/model-evaluations",
+    "/api/repository-reviews/automations",
+    "/api/repository-reviews/profiles",
   ].includes(path)
 }
 
