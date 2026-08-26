@@ -131,23 +131,19 @@ toolLoop:
 
 		toolName := tc.Name
 		toolArgs := cloneStringAnyMap(tc.Arguments)
-		denyByTurnProfile := func() bool {
-			if turnProfileToolAllowed(ts.profile, toolName) {
-				return false
-			}
+		skipToolCall := func(reason string) {
 			exec.allResponsesHandled = false
-			denyContent := fmt.Sprintf("Tool %q is not allowed by the active turn profile.", toolName)
 			al.emitEvent(
 				runtimeevents.KindAgentToolExecSkipped,
 				ts.eventMeta("runTurn", "turn.tool.skipped"),
 				ToolExecSkippedPayload{
 					Tool:   toolName,
-					Reason: denyContent,
+					Reason: reason,
 				},
 			)
 			deniedMsg := providers.Message{
 				Role:       "tool",
-				Content:    denyContent,
+				Content:    reason,
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, deniedMsg)
@@ -155,9 +151,31 @@ toolLoop:
 				ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
 				ts.recordPersistedMessage(deniedMsg)
 			}
+		}
+		denyReservedModelTool := func() bool {
+			if !isReservedModelToolName(toolName) {
+				return false
+			}
+			skipToolCall(fmt.Sprintf(
+				"Tool %q is unavailable until durable plan support is available.",
+				toolName,
+			))
+			return true
+		}
+		denyByTurnProfile := func() bool {
+			if turnProfileToolAllowed(ts.profile, toolName) {
+				return false
+			}
+			skipToolCall(fmt.Sprintf(
+				"Tool %q is not allowed by the active turn profile.",
+				toolName,
+			))
 			return true
 		}
 
+		if denyReservedModelTool() {
+			continue
+		}
 		if denyByTurnProfile() {
 			continue
 		}
@@ -417,26 +435,10 @@ toolLoop:
 						"action":   "respond",
 					})
 			case HookActionDenyTool:
-				exec.allResponsesHandled = false
-				denyContent := hookDeniedToolContent("Tool execution denied by hook", decision.Reason)
-				al.emitEvent(
-					runtimeevents.KindAgentToolExecSkipped,
-					ts.eventMeta("runTurn", "turn.tool.skipped"),
-					ToolExecSkippedPayload{
-						Tool:   toolName,
-						Reason: denyContent,
-					},
-				)
-				deniedMsg := providers.Message{
-					Role:       "tool",
-					Content:    denyContent,
-					ToolCallID: tc.ID,
-				}
-				messages = append(messages, deniedMsg)
-				if !ts.opts.NoHistory {
-					ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
-					ts.recordPersistedMessage(deniedMsg)
-				}
+				skipToolCall(hookDeniedToolContent(
+					"Tool execution denied by hook",
+					decision.Reason,
+				))
 				continue
 			case HookActionAbortTurn:
 				exec.abortedByHook = true
@@ -448,6 +450,10 @@ toolLoop:
 			}
 		}
 
+		if denyReservedModelTool() {
+			continue
+		}
+
 		if al.hooks != nil {
 			approval := al.hooks.ApproveTool(turnCtx, &ToolApprovalRequest{
 				Meta:      ts.eventMeta("runTurn", "turn.tool.approve"),
@@ -456,26 +462,10 @@ toolLoop:
 				Arguments: toolArgs,
 			})
 			if !approval.Approved {
-				exec.allResponsesHandled = false
-				denyContent := hookDeniedToolContent("Tool execution denied by approval hook", approval.Reason)
-				al.emitEvent(
-					runtimeevents.KindAgentToolExecSkipped,
-					ts.eventMeta("runTurn", "turn.tool.skipped"),
-					ToolExecSkippedPayload{
-						Tool:   toolName,
-						Reason: denyContent,
-					},
-				)
-				deniedMsg := providers.Message{
-					Role:       "tool",
-					Content:    denyContent,
-					ToolCallID: tc.ID,
-				}
-				messages = append(messages, deniedMsg)
-				if !ts.opts.NoHistory {
-					ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
-					ts.recordPersistedMessage(deniedMsg)
-				}
+				skipToolCall(hookDeniedToolContent(
+					"Tool execution denied by approval hook",
+					approval.Reason,
+				))
 				continue
 			}
 		}

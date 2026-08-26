@@ -36,7 +36,9 @@ func TestApplyToolAdaptationSurfaceSimpleTransformsSchemas(t *testing.T) {
 }
 
 func TestApplyToolAdaptationSurfaceHidesCodexToolsForNonCodexSurface(t *testing.T) {
-	defs := toolDefsForAdaptationTest("exec", "exec_command", "write_stdin", "read_file", "apply_patch")
+	defs := toolDefsForAdaptationTest(
+		"exec", "exec_command", "write_stdin", "read_file", "apply_patch", reservedUpdatePlanToolName,
+	)
 
 	got := applyToolAdaptationSurface(config.ToolSurfacePicoClaw, defs)
 	gotNames := toolDefNamesForAdaptationTest(got)
@@ -47,7 +49,10 @@ func TestApplyToolAdaptationSurfaceHidesCodexToolsForNonCodexSurface(t *testing.
 }
 
 func TestApplyToolAdaptationSurfaceCodexHidesNativeReplacedTools(t *testing.T) {
-	defs := toolDefsForAdaptationTest("exec", "exec_command", "write_stdin", "read_file", "apply_patch", "edit_file")
+	defs := toolDefsForAdaptationTest(
+		"exec", "exec_command", "write_stdin", "read_file", "apply_patch", "edit_file",
+		reservedUpdatePlanToolName,
+	)
 
 	got := applyToolAdaptationSurface(config.ToolSurfaceCodex, defs)
 	gotNames := toolDefNamesForAdaptationTest(got)
@@ -356,6 +361,7 @@ func TestPipelineCallLLMUsesFallbackProfileToolSurface(t *testing.T) {
 	agent.Tools = picotools.NewToolRegistry()
 	agent.Tools.Register(adaptationNamedTool("exec"))
 	agent.Tools.Register(adaptationNamedTool("exec_command"))
+	agent.Tools.Register(adaptationNamedTool(reservedUpdatePlanToolName))
 	agent.Candidates = []providers.FallbackCandidate{
 		{
 			Provider:    "openai",

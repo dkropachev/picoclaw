@@ -318,9 +318,13 @@ func TestAgentCapabilityToolCatalogUsesCapturedDefinitionModel(t *testing.T) {
 		"config-revision",
 		state,
 	)
-	item := agentCapabilityToolCatalogItemByName(t, response.Catalogs.Tools, "update_plan")
+	item := agentCapabilityToolCatalogItemByName(t, response.Catalogs.Tools, "exec_command")
 	if item.Status != "blocked" || item.ReasonCode != "requires_codex_surface" {
-		t.Fatalf("captured-model update_plan item = %#v, want blocked", item)
+		t.Fatalf("captured-model exec_command item = %#v, want blocked", item)
+	}
+	planItem := agentCapabilityToolCatalogItemByName(t, response.Catalogs.Tools, "update_plan")
+	if planItem.Status != "blocked" || planItem.ReasonCode != "requires_durable_plan" {
+		t.Fatalf("captured-model update_plan item = %#v, want durable-plan block", planItem)
 	}
 
 	freshState := loadAgentDefinitionState(cfg, agentConfig)
@@ -334,10 +338,14 @@ func TestAgentCapabilityToolCatalogUsesCapturedDefinitionModel(t *testing.T) {
 	freshItem := agentCapabilityToolCatalogItemByName(
 		t,
 		freshResponse.Catalogs.Tools,
-		"update_plan",
+		"exec_command",
 	)
 	if freshItem.Status != "enabled" {
-		t.Fatalf("fresh-model update_plan item = %#v, want enabled", freshItem)
+		t.Fatalf("fresh-model exec_command item = %#v, want enabled", freshItem)
+	}
+	freshPlan := agentCapabilityToolCatalogItemByName(t, freshResponse.Catalogs.Tools, "update_plan")
+	if freshPlan.Status != "blocked" || freshPlan.ReasonCode != "requires_durable_plan" {
+		t.Fatalf("fresh-model update_plan item = %#v, want durable-plan block", freshPlan)
 	}
 }
 

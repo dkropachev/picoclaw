@@ -2,17 +2,20 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"math"
-	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
+type codexExecBackend interface {
+	Execute(ctx context.Context, args map[string]any) *ToolResult
+}
+
 type CodexExecCommandTool struct {
-	exec *ExecTool
+	exec codexExecBackend
 }
 
 func NewCodexExecCommandTool(exec *ExecTool) *CodexExecCommandTool {
@@ -24,12 +27,17 @@ func (t *CodexExecCommandTool) Name() string {
 }
 
 func (t *CodexExecCommandTool) Description() string {
-	return "Run a shell command using a Codex-compatible argument shape. Returns command output, or a session id when background=true."
+	return "Run a shell command. Synchronous calls return captured output. Set background=true to return an input-only session for write_stdin; this surface does not expose session output, polling, or termination."
 }
 
 func (t *CodexExecCommandTool) Parameters() map[string]any {
+	return codexExecCommandParameters()
+}
+
+func codexExecCommandParameters() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"cmd": map[string]any{
 				"type":        "string",
@@ -37,35 +45,15 @@ func (t *CodexExecCommandTool) Parameters() map[string]any {
 			},
 			"workdir": map[string]any{
 				"type":        "string",
-				"description": "Working directory for the command. Relative paths are resolved by the shell tool backend.",
-			},
-			"yield_time_ms": map[string]any{
-				"type":        "integer",
-				"description": "Approximate foreground timeout in milliseconds.",
-			},
-			"timeout": map[string]any{
-				"type":        "integer",
-				"description": "Foreground timeout in seconds. Overrides yield_time_ms when provided.",
+				"description": "Working directory for the command. Blank uses the configured backend working directory.",
 			},
 			"background": map[string]any{
 				"type":        "boolean",
-				"description": "Run in the background and return a reusable session id.",
+				"description": "Run in the background and return an input-only session id for write_stdin.",
 			},
 			"tty": map[string]any{
 				"type":        "boolean",
-				"description": "Run in a pseudo-terminal when supported.",
-			},
-			"login": map[string]any{
-				"type":        "boolean",
-				"description": "Accepted for Codex compatibility. PicoClaw's exec backend controls shell login behavior.",
-			},
-			"shell": map[string]any{
-				"type":        "string",
-				"description": "Accepted for Codex compatibility. PicoClaw executes through its configured shell backend.",
-			},
-			"max_output_tokens": map[string]any{
-				"type":        "integer",
-				"description": "Accepted for Codex compatibility. PicoClaw applies its backend output limits.",
+				"description": "Run the background session in a pseudo-terminal when supported. Requires background=true.",
 			},
 		},
 		"required": []string{"cmd"},
@@ -73,38 +61,52 @@ func (t *CodexExecCommandTool) Parameters() map[string]any {
 }
 
 func (t *CodexExecCommandTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
-	if t == nil || t.exec == nil {
-		return ErrorResult("exec backend not configured")
+	if err := validateToolArgs(codexExecCommandParameters(), args); err != nil {
+		return ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", "exec_command", err))
 	}
-	command := strings.TrimSpace(compatStringArg(args, "cmd"))
+
+	command := strings.TrimSpace(args["cmd"].(string))
 	if command == "" {
-		return ErrorResult("cmd is required")
+		return ErrorResult("cmd must be nonblank")
+	}
+	workdir, _ := args["workdir"].(string)
+	workdir = strings.TrimSpace(workdir)
+	background, _ := args["background"].(bool)
+	tty, _ := args["tty"].(bool)
+	if tty && !background {
+		return ErrorResult("tty=true requires background=true")
+	}
+
+	if t == nil || isTypedNil(t.exec) {
+		return ErrorResult("exec backend not configured")
 	}
 
 	mapped := map[string]any{
 		"action":  "run",
 		"command": command,
 	}
-	if workdir := strings.TrimSpace(compatStringArg(args, "workdir")); workdir != "" {
+	if workdir != "" {
 		mapped["cwd"] = workdir
 	}
-	if background, ok := compatBoolArg(args, "background"); ok {
+	if _, present := args["background"]; present {
 		mapped["background"] = background
 	}
-	if tty, ok := compatBoolArg(args, "tty"); ok {
+	if _, present := args["tty"]; present {
 		mapped["pty"] = tty
 	}
-	if timeout, ok := compatIntArg(args, "timeout"); ok && timeout > 0 {
-		mapped["timeout"] = timeout
-	} else if yieldMS, ok := compatIntArg(args, "yield_time_ms"); ok && yieldMS > 0 {
-		mapped["timeout"] = int(math.Ceil(float64(yieldMS) / 1000.0))
-	}
 
-	return t.exec.Execute(ctx, mapped)
+	result := t.exec.Execute(ctx, mapped)
+	if result == nil {
+		return ErrorResult("exec backend returned no result")
+	}
+	if !background || result.IsError {
+		return result
+	}
+	return projectCodexSessionResult(result, "")
 }
 
 type CodexWriteStdinTool struct {
-	exec *ExecTool
+	exec codexExecBackend
 }
 
 func NewCodexWriteStdinTool(exec *ExecTool) *CodexWriteStdinTool {
@@ -116,47 +118,93 @@ func (t *CodexWriteStdinTool) Name() string {
 }
 
 func (t *CodexWriteStdinTool) Description() string {
-	return "Write characters to an existing exec_command session."
+	return "Write exact characters to an input-only background exec_command session and return its current status. This tool does not poll or return session output."
 }
 
 func (t *CodexWriteStdinTool) Parameters() map[string]any {
+	return codexWriteStdinParameters()
+}
+
+func codexWriteStdinParameters() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
 			"session_id": map[string]any{
 				"type":        "string",
-				"description": "Session id returned by exec_command.",
+				"description": "Input-only session id returned by background exec_command.",
 			},
 			"chars": map[string]any{
 				"type":        "string",
-				"description": "Characters to write to stdin.",
-			},
-			"yield_time_ms": map[string]any{
-				"type":        "integer",
-				"description": "Accepted for Codex compatibility.",
-			},
-			"max_output_tokens": map[string]any{
-				"type":        "integer",
-				"description": "Accepted for Codex compatibility.",
+				"description": "Nonempty characters to write exactly, without trimming.",
 			},
 		},
-		"required": []string{"session_id"},
+		"required": []string{"session_id", "chars"},
 	}
 }
 
 func (t *CodexWriteStdinTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
-	if t == nil || t.exec == nil {
+	if err := validateToolArgs(codexWriteStdinParameters(), args); err != nil {
+		return ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", "write_stdin", err))
+	}
+
+	sessionID := strings.TrimSpace(args["session_id"].(string))
+	if sessionID == "" {
+		return ErrorResult("session_id must be nonblank")
+	}
+	chars := args["chars"].(string)
+	if chars == "" {
+		return ErrorResult("chars must be nonempty")
+	}
+
+	if t == nil || isTypedNil(t.exec) {
 		return ErrorResult("exec backend not configured")
 	}
-	sessionID := strings.TrimSpace(compatStringArg(args, "session_id"))
-	if sessionID == "" {
-		return ErrorResult("session_id is required")
-	}
-	return t.exec.Execute(ctx, map[string]any{
+	result := t.exec.Execute(ctx, map[string]any{
 		"action":    "write",
 		"sessionId": sessionID,
-		"data":      compatStringArg(args, "chars"),
+		"data":      chars,
 	})
+	if result == nil {
+		return ErrorResult("exec backend returned no result")
+	}
+	if result.IsError {
+		return result
+	}
+	return projectCodexSessionResult(result, sessionID)
+}
+
+type codexSessionResponse struct {
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"`
+}
+
+func projectCodexSessionResult(result *ToolResult, expectedSessionID string) *ToolResult {
+	var native ExecResponse
+	if err := json.Unmarshal([]byte(result.ForLLM), &native); err != nil {
+		return ErrorResult(fmt.Sprintf("exec backend returned an invalid session response: %v", err))
+	}
+	sessionID := strings.TrimSpace(native.SessionID)
+	if expectedSessionID != "" {
+		if sessionID != expectedSessionID {
+			return ErrorResult("exec backend returned a mismatched session id")
+		}
+		sessionID = expectedSessionID
+	}
+	status := strings.TrimSpace(native.Status)
+	if sessionID == "" || status == "" {
+		return ErrorResult("exec backend returned an incomplete session response")
+	}
+	payload, err := json.Marshal(codexSessionResponse{SessionID: sessionID, Status: status})
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("failed to project exec session response: %v", err))
+	}
+	projected := *result
+	projected.Media = append([]string(nil), result.Media...)
+	projected.Messages = append(result.Messages[:0:0], result.Messages...)
+	projected.ArtifactTags = append([]string(nil), result.ArtifactTags...)
+	projected.ForLLM = string(payload)
+	return &projected
 }
 
 type CodexViewImageTool struct {
@@ -332,33 +380,5 @@ func compatStringArg(args map[string]any, key string) string {
 		return fmt.Sprint(v)
 	default:
 		return ""
-	}
-}
-
-func compatBoolArg(args map[string]any, key string) (bool, bool) {
-	switch v := args[key].(type) {
-	case bool:
-		return v, true
-	case string:
-		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
-		return parsed, err == nil
-	default:
-		return false, false
-	}
-}
-
-func compatIntArg(args map[string]any, key string) (int, bool) {
-	switch v := args[key].(type) {
-	case int:
-		return v, true
-	case int64:
-		return int(v), true
-	case float64:
-		return int(v), true
-	case string:
-		parsed, err := strconv.Atoi(strings.TrimSpace(v))
-		return parsed, err == nil
-	default:
-		return 0, false
 	}
 }

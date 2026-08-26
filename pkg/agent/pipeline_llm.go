@@ -1364,6 +1364,9 @@ func filterToolDefinitionsForAdaptationSurface(
 	filtered := make([]providers.ToolDefinition, 0, len(defs))
 	for _, def := range defs {
 		name := def.Function.Name
+		if isReservedModelToolName(name) {
+			continue
+		}
 		if surface == config.ToolSurfaceCodex {
 			if nativeToolReplacedByCodexSurface(name) {
 				continue
@@ -1376,9 +1379,31 @@ func filterToolDefinitionsForAdaptationSurface(
 	return filtered
 }
 
+const reservedUpdatePlanToolName = "update_plan"
+
+func isReservedModelToolName(name string) bool {
+	return name == reservedUpdatePlanToolName
+}
+
+func filterReservedModelToolDefinitions(
+	defs []providers.ToolDefinition,
+) []providers.ToolDefinition {
+	if len(defs) == 0 {
+		return defs
+	}
+	filtered := make([]providers.ToolDefinition, 0, len(defs))
+	for _, def := range defs {
+		if isReservedModelToolName(def.Function.Name) {
+			continue
+		}
+		filtered = append(filtered, def)
+	}
+	return filtered
+}
+
 func codexCompatibleToolName(name string) bool {
 	switch name {
-	case "apply_patch", "exec_command", "write_stdin", "update_plan", "view_image":
+	case "apply_patch", "exec_command", "write_stdin", reservedUpdatePlanToolName, "view_image":
 		return true
 	default:
 		return false
