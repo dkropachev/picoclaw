@@ -2,9 +2,19 @@ name: PR
 
 on:
   pull_request: {}
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Base branch used by the delta checks
+        required: false
+        default: main
+        type: string
 
 permissions:
   contents: read
+
+env:
+  BASE_REF_NAME: ${{ github.base_ref || inputs.base_ref || github.event.repository.default_branch }}
 
 jobs:
   lint:
@@ -97,13 +107,13 @@ jobs:
           retention-days: 14
 
       - name: Fetch base ref
-        run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+        run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
 
       - name: Collection surface delta guard
-        run: make collection-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD
+        run: make collection-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
 
       - name: Feature requirements delta guard
-        run: make feature-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD
+        run: make feature-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
 
   vuln_check:
     name: Security Check
@@ -149,10 +159,10 @@ jobs:
         run: go test -tags goolm,stdjson ./...
 
       - name: Fetch base ref
-        run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+        run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
 
       - name: Coverage delta guard
-        run: make coverage-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD
+        run: make coverage-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
 
   integration:
     name: Integration Tests
