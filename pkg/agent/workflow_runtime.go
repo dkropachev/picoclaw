@@ -2094,6 +2094,7 @@ type workflowManagedExecutionOptions struct {
 	reviewerModels                 []string
 	includeDefaultReviewer         bool
 	continueOnChildError           bool
+	combineStructuredOutputs       bool
 	requestedSplitStrategy         string
 	estimatedOutputTokens          int
 }
@@ -2115,6 +2116,7 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 		calibrationSimilarityThreshold: 0.72,
 		modelOptimization:              true,
 		effortOptimization:             true,
+		combineStructuredOutputs:       true,
 		estimatedOutputTokens:          1000,
 	}
 	values, ok := raw.(map[string]any)
@@ -2151,6 +2153,13 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 	}
 	if enabled, exists := boolMapValue(values, "continue_on_child_error", "continueOnChildError"); exists {
 		options.continueOnChildError = enabled
+	}
+	if enabled, exists := boolMapValue(
+		values,
+		"combine_structured_outputs",
+		"combineStructuredOutputs",
+	); exists {
+		options.combineStructuredOutputs = enabled
 	}
 	if n := intFromAny(values["estimated_output_tokens"]); n > 0 {
 		options.estimatedOutputTokens = n

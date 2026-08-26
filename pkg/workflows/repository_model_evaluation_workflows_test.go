@@ -221,6 +221,7 @@ func TestRepositoryModelEvaluationWorkflowContracts(t *testing.T) {
 	managed, ok := candidates.With["managed"].(map[string]any)
 	if !ok || managed["reviewer_models"] != "${{ inputs.candidate_models }}" ||
 		managed["include_default_reviewer"] != false ||
+		managed["combine_structured_outputs"] != false ||
 		managed["max_items_per_chunk"] != "${{ inputs.max_files_per_batch }}" ||
 		managed["max_parallel_children"] != "${{ inputs.max_parallel_children }}" ||
 		managed["max_parallel_per_reviewer"] != 1 {
