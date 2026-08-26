@@ -120,11 +120,12 @@ type ActiveTurnInfo struct {
 
 type turnExecution struct {
 	// Core message state (accumulates throughout the turn)
-	messages         []providers.Message // built from ContextBuilder, grows per-iteration
-	pendingMessages  []providers.Message // steering/SubTurn messages awaiting injection
-	history          []providers.Message // from ContextManager.Assemble
-	summary          string
-	currentTurnStart int
+	messages              []providers.Message // built from ContextBuilder, grows per-iteration
+	pendingMessages       []providers.Message // steering/SubTurn messages awaiting injection
+	pendingResultMessages []providers.Message // claimed tracked results awaiting one LLM follow-up
+	history               []providers.Message // from ContextManager.Assemble
+	summary               string
+	currentTurnStart      int
 
 	// Turn output
 	finalContent string
@@ -815,14 +816,44 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 	al.releaseSessionTurnState(ts.sessionKey, ts)
 }
 
-func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
-	unlock := al.lockSessionTurn(sessionKey)
-	defer unlock()
-	if expected == nil {
+func (al *AgentLoop) restoreTrackedSubagentOutputReservation(ts *turnState) {
+	if al == nil || ts == nil {
 		return
 	}
+	if ts.opts.turnReservation == nil ||
+		ts.opts.turnReservation.sessionKey != ts.sessionKey ||
+		ts.opts.turnReservation.agentID != ts.agentID {
+		al.clearActiveTurn(ts)
+		return
+	}
+	reservation := ts.opts.turnReservation
+	restored := false
+	unlock := al.lockSessionTurn(ts.sessionKey)
+	if actual, ok := al.activeTurnStates.Load(ts.sessionKey); ok && actual == ts {
+		al.activeTurnStates.Store(ts.sessionKey, reservation)
+		restored = true
+	}
+	unlock()
+	if restored {
+		al.handleTrackedSubagentResultTurnReleased(ts)
+	}
+}
+
+func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
+	unlock := al.lockSessionTurn(sessionKey)
+	if expected == nil {
+		unlock()
+		return
+	}
+	released := false
 	if actual, ok := al.activeTurnStates.Load(sessionKey); ok && actual == expected {
 		al.activeTurnStates.Delete(sessionKey)
+		released = true
+	}
+	unlock()
+	if released {
+		al.handleTrackedSubagentResultTurnReleased(expected)
+		al.wakeTrackedSubagentResultsForSession(sessionKey)
 	}
 }
 
@@ -848,6 +879,7 @@ func (al *AgentLoop) abandonSessionTurnState(
 
 	al.activeTurnStates.Delete(sessionKey)
 	unlock()
+	al.wakeTrackedSubagentResultsForSession(sessionKey)
 
 	return al.rescueOrClearOrphanedSteering(
 		ctx,
@@ -972,6 +1004,9 @@ func (al *AgentLoop) runSteeringRescue(
 	}
 	resumeCtx, cancel := context.WithTimeout(resumeCtx, 30*time.Second)
 	defer cancel()
+	trackedResultOwner := &trackedSubagentResultOutputOwner{}
+	resumeCtx = withTrackedSubagentResultOutputOwner(resumeCtx, trackedResultOwner)
+	defer trackedResultOwner.release(al)
 
 	response, err := al.continueWithInboundContext(
 		resumeCtx,
@@ -1263,6 +1298,16 @@ func (ts *turnState) setPhase(phase TurnPhase) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.phase = phase
+}
+
+func (ts *turnState) disableToolsForResultFollowUp() {
+	if ts == nil {
+		return
+	}
+	ts.mu.Lock()
+	ts.profile = turnProfileWithToolsOff(ts.profile)
+	ts.opts.DisableTools = true
+	ts.mu.Unlock()
 }
 
 func (ts *turnState) setIteration(iteration int) {
@@ -1845,6 +1890,7 @@ func (ts *turnState) commitClaimedTerminalWithPolicy(
 ) (TurnEndStatus, bool) {
 	actual := candidate
 	committed := false
+	var trackedResultOrphans []trackedSubagentResultOrphan
 	ts.finishOnce.Do(func() {
 		committed = true
 		ts.mu.Lock()
@@ -1869,7 +1915,18 @@ func (ts *turnState) commitClaimedTerminalWithPolicy(
 			ts.finishedChan = make(chan struct{})
 		}
 		close(ts.finishedChan)
+		if ts.al != nil {
+			trackedResultOrphans = ts.al.noteTrackedSubagentResultTurnTerminalSafely(
+				ts.turnID,
+				actual,
+			)
+		}
 	})
+	if ts.al != nil {
+		for _, orphan := range trackedResultOrphans {
+			ts.al.emitTrackedSubagentResultOrphan(orphan)
+		}
+	}
 	if committed {
 		return actual, true
 	}

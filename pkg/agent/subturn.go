@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -36,7 +37,11 @@ var (
 
 // getSubTurnConfig returns the effective SubTurn configuration with defaults applied.
 func (al *AgentLoop) getSubTurnConfig() subTurnRuntimeConfig {
-	cfg := al.cfg.Agents.Defaults.SubTurn
+	runtimeConfig := al.GetConfig()
+	if runtimeConfig == nil {
+		runtimeConfig = config.DefaultConfig()
+	}
+	cfg := runtimeConfig.Agents.Defaults.SubTurn
 
 	maxDepth := cfg.MaxDepth
 	if maxDepth <= 0 {

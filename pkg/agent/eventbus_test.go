@@ -649,6 +649,15 @@ func TestAgentLoop_EmitsFollowUpQueuedEvent(t *testing.T) {
 		t.Fatal("timeout waiting for async tool completion")
 	}
 
+	select {
+	case inbound := <-msgBus.InboundChan():
+		if inbound.Channel != "system" || inbound.Content != "background result" {
+			t.Fatalf("generic async follow-up inbound = %#v", inbound)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("generic async tool did not retain its system-inbound follow-up")
+	}
+
 	followUpEvt := waitForRuntimeEvent(t, runtimeCh, 2*time.Second, func(evt runtimeevents.Event) bool {
 		return evt.Kind == runtimeevents.KindAgentFollowUpQueued
 	})
@@ -667,6 +676,74 @@ func TestAgentLoop_EmitsFollowUpQueuedEvent(t *testing.T) {
 	}
 	if followUpEvt.Scope.TurnID == "" {
 		t.Fatal("expected follow-up event to include turn id")
+	}
+}
+
+func TestAgentLoop_GenericAsyncToolNamedSpawnKeepsGenericDelivery(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	provider := &toolCallProvider{
+		toolCalls: []providers.ToolCall{{
+			ID:   "call_generic_spawn",
+			Type: "function",
+			Name: "spawn",
+			Function: &providers.FunctionCall{
+				Name:      "spawn",
+				Arguments: "{}",
+			},
+			Arguments: map[string]any{},
+		}},
+		finalResp: "generic spawn launched",
+	}
+	msgBus := bus.NewMessageBus()
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
+	t.Cleanup(func() {
+		al.Close()
+		msgBus.Close()
+	})
+	done := make(chan struct{})
+	al.RegisterTool(&asyncFollowUpTool{
+		name:          "spawn",
+		followUpText:  "generic named-spawn result",
+		completionSig: done,
+	})
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected default agent")
+	}
+	response, err := al.runAgentLoop(context.Background(), agent, processOptions{
+		SessionKey:      "generic-named-spawn-session",
+		Channel:         "cli",
+		ChatID:          "direct",
+		UserMessage:     "run generic named spawn",
+		DefaultResponse: defaultResponse,
+		EnableSummary:   false,
+		SendResponse:    false,
+	})
+	if err != nil || response != "generic spawn launched" {
+		t.Fatalf("generic named-spawn run = %q, %v", response, err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("generic named-spawn callback did not complete")
+	}
+	select {
+	case inbound := <-msgBus.InboundChan():
+		if inbound.Channel != "system" || inbound.Content != "generic named-spawn result" {
+			t.Fatalf("generic named-spawn inbound = %#v", inbound)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("generic named-spawn result was incorrectly consumed by tracked delivery")
 	}
 }
 

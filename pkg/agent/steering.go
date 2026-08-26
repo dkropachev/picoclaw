@@ -399,13 +399,14 @@ func (al *AgentLoop) continueWithSteeringMessages(
 		}
 	}
 	return al.runAgentLoop(ctx, agent, processOptions{
-		Dispatch:                dispatch,
-		DefaultResponse:         defaultResponse,
-		EnableSummary:           true,
-		SendResponse:            false,
-		InitialSteeringMessages: steeringMsgs,
-		SkipInitialSteeringPoll: true,
-		turnReservation:         reservation,
+		Dispatch:                 dispatch,
+		DefaultResponse:          defaultResponse,
+		EnableSummary:            true,
+		SendResponse:             false,
+		InitialSteeringMessages:  steeringMsgs,
+		SkipInitialSteeringPoll:  true,
+		trackedResultOutputOwner: trackedSubagentResultOutputOwnerFromContext(ctx),
+		turnReservation:          reservation,
 	})
 }
 
@@ -541,6 +542,7 @@ func (al *AgentLoop) continueWithInboundContext(
 	if len(steeringMsgs) == 0 {
 		al.activeTurnStates.CompareAndDelete(sessionKey, placeholder)
 		unlockSessionTurn()
+		al.wakeTrackedSubagentResultsForSession(sessionKey)
 		return "", nil
 	}
 	unlockSessionTurn()

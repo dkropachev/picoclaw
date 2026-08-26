@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -18,6 +19,40 @@ type SpawnTool struct {
 
 type asyncSubTurnContextPreparer interface {
 	PrepareAsyncSubTurn(ctx context.Context) (context.Context, func(), error)
+}
+
+type trackedSpawnAdmissionObserverContextKey struct{}
+
+// WithTrackedSpawnAdmissionObserver installs the agent-owned route admission
+// callback that first-party SpawnTool invokes after asynchronous preparation
+// succeeds but before the manager record/goroutine is created.
+func WithTrackedSpawnAdmissionObserver(
+	ctx context.Context,
+	observer func() error,
+) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, trackedSpawnAdmissionObserverContextKey{}, observer)
+}
+
+func notifyTrackedSpawnAdmission(ctx context.Context) (err error) {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(trackedSpawnAdmissionObserverContextKey{}).(func() error)
+	if observer == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = errors.New("tracked spawn admission observer panicked")
+		}
+	}()
+	return observer()
 }
 
 // Compile-time check: SpawnTool implements AsyncExecutor.
@@ -154,7 +189,7 @@ Task: %s`,
 		SystemPrompt:   systemPrompt,
 		MaxTokens:      t.maxTokens,
 		Temperature:    t.temperature,
-		Async:          true,
+		Async:          false,
 		Critical:       true,
 		TargetAgentID:  targetAgentID,
 	}
@@ -173,12 +208,22 @@ Task: %s`,
 			return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
 		}
 	}
+	if err := notifyTrackedSpawnAdmission(spawnCtx); err != nil {
+		releasePrepared()
+		return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
+	}
 	runner := func(runCtx context.Context, _ SubagentTask) (*ToolResult, error) {
 		result, err := spawner.SpawnSubTurn(runCtx, turnConfig)
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err), err
 		}
 		return result, nil
+	}
+	trackedCallback := cb
+	if cb != nil {
+		trackedCallback = func(callbackCtx context.Context, result *ToolResult) {
+			cb(withTrackedSpawnCompletion(callbackCtx), result)
+		}
 	}
 	taskID, err := manager.spawnTracked(
 		spawnCtx,
@@ -187,7 +232,7 @@ Task: %s`,
 		targetAgentID,
 		origin,
 		runner,
-		cb,
+		trackedCallback,
 		releasePrepared,
 	)
 	if err != nil {

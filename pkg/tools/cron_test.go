@@ -37,6 +37,27 @@ type guardedStubJobExecutor struct {
 	released bool
 }
 
+type directPublishingStubJobExecutor struct {
+	*stubJobExecutor
+	directCalls int
+}
+
+func (executor *directPublishingStubJobExecutor) ProcessDirectWithChannelAndPublish(
+	_ context.Context,
+	content, sessionKey, channel, chatID string,
+) (string, error) {
+	executor.directCalls++
+	executor.lastPrompt = content
+	executor.lastKey = sessionKey
+	executor.lastChan = channel
+	executor.lastChatID = chatID
+	executor.publishedResp = executor.response
+	executor.publishedChan = channel
+	executor.publishedChatID = chatID
+	executor.publishedKey = sessionKey
+	return executor.response, executor.err
+}
+
 func (s *guardedStubJobExecutor) AcquireRuntimeGeneration(
 	ctx context.Context,
 	expected *config.Config,
@@ -1216,6 +1237,28 @@ func TestCronTool_ExecuteJobPublishesAgentResponse(t *testing.T) {
 	}
 	if executor.publishedChan != "telegram" || executor.publishedChatID != "chat-1" {
 		t.Fatalf("published target = %s/%s, want telegram/chat-1", executor.publishedChan, executor.publishedChatID)
+	}
+}
+
+func TestCronTool_ExecuteJobUsesDirectPublishingBoundaryWhenAvailable(t *testing.T) {
+	executor := &directPublishingStubJobExecutor{
+		stubJobExecutor: &stubJobExecutor{response: "directly published reply"},
+	}
+	tool := newTestCronToolWithExecutorAndConfig(t, executor, config.DefaultConfig())
+	job := &cron.CronJob{ID: "job-direct"}
+	job.Payload.Channel = "telegram"
+	job.Payload.To = "chat-direct"
+	job.Payload.Message = "publish within direct boundary"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+	if executor.directCalls != 1 || executor.publishedResp != "directly published reply" {
+		t.Fatalf("direct publish calls/result = %d/%q", executor.directCalls, executor.publishedResp)
+	}
+	if executor.lastPrompt != job.Payload.Message || executor.lastChan != "telegram" ||
+		executor.lastChatID != "chat-direct" || executor.lastKey == "" {
+		t.Fatalf("direct publish target = %#v", executor.stubJobExecutor)
 	}
 }
 

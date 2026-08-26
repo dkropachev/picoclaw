@@ -329,12 +329,25 @@ Subagent execution semantics that matter:
 - subagents run in isolated ephemeral session history, so their reasoning and intermediate steps do not pollute the parent conversation
 - `spawn` returns immediately with a manager-local `task_id`, records `running`
   before launch, and later records `completed`, `failed`, or `canceled`
+- the spawn manager owns background execution; its direct child uses
+  `Async:false` and `Critical:true`, so tracked completion does not also enter
+  the legacy direct-SubTurn pending channel
+- one committed completion is offered through a filtered, bounded in-memory
+  envelope keyed by the source parent turn plus manager-local task ID and routed
+  only to the exact named parent agent/session/scope/channel/chat; it is not
+  also sent as raw callback output or synthetic default-session system input
 - `subagent` waits for completion and returns the result directly
 - `delegate` is synchronous and runs as the target peer agent instead of a generic child task
 - `spawn_status(task_id=...)` inspects that exact record; omitting the ID lists
   records visible to the current source agent/session/channel/chat
 - spawn IDs and status records are in-memory and owner/generation-local, not
   durable or shared across sibling child owners, agents, or reload generations
+- tracked result envelopes and replay suppression are also process-local: they
+  provide at-most-once visibility, not crash durability or exactly-once provider
+  execution; a late continuation after reload acquires a fresh coherent runtime
+  generation, preserves the root's capability caps, waits for its original
+  output owner, drains exact-session steering, and never falls back to the
+  default agent/session or manual steering scope
 - all subagents still share the same workspace security boundary; they do not bypass sandbox or path restrictions
 
 Runtime limits and lifecycle rules:
@@ -402,6 +415,9 @@ For live visibility:
   `spawn_status(task_id="subagent-N")` to inspect that exact task
 - call `spawn_status` without an ID to list tracked spawn records visible to the
   current conversation origin
+- expect one tracked completion to re-enter only its exact named conversation;
+  duplicate callback replay is suppressed, and a failed claimed continuation is
+  not retried because retry could show the completion twice
 - use `/subagents` in chat channels to show the separate active subagent turn
   tree for the current session; it is not the tracked spawn record catalog
 

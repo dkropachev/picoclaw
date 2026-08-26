@@ -108,9 +108,15 @@ func (al *AgentLoop) runTurn(
 			if unexpected := recover(); unexpected != nil && cleanupPanic == nil {
 				cleanupPanic = unexpected
 			}
-			runTurnTerminalStep(&cleanupPanic, func() {
-				al.clearActiveTurn(ts)
-			})
+			if ts.opts.retainSessionUntilOutput {
+				runTurnTerminalStep(&cleanupPanic, func() {
+					al.restoreTrackedSubagentOutputReservation(ts)
+				})
+			} else {
+				runTurnTerminalStep(&cleanupPanic, func() {
+					al.clearActiveTurn(ts)
+				})
+			}
 			turnCancel()
 			if originalPanic != nil {
 				panic(originalPanic)
@@ -293,7 +299,8 @@ func (al *AgentLoop) runTurn(
 	maxMediaSize := pipeline.Cfg.Agents.Defaults.GetMaxMediaSize()
 	finalContent := exec.finalContent
 
-	for ts.currentIteration() < ts.agent.MaxIterations || len(exec.pendingMessages) > 0 || func() bool {
+	for ts.currentIteration() < ts.agent.MaxIterations ||
+		len(exec.pendingMessages) > 0 || len(exec.pendingResultMessages) > 0 || func() bool {
 		graceful, _ := ts.gracefulInterruptRequested()
 		return graceful
 	}() {
@@ -314,13 +321,23 @@ func (al *AgentLoop) runTurn(
 			// We do NOT call dequeueSteeringMessagesForScope here because
 			// steering was already consumed from al.steering by ExecuteTools.
 			if len(exec.pendingMessages) > 0 {
-				pendingMessages = append(pendingMessages, exec.pendingMessages...)
+				pendingMessages = append([]providers.Message(nil), exec.pendingMessages...)
 				exec.pendingMessages = nil
 			}
 		} else if !ts.opts.SkipInitialSteeringPoll {
 			if steerMsgs := al.dequeueSteeringMessagesForScopeWithFallback(ts.sessionKey); len(steerMsgs) > 0 {
 				pendingMessages = append(pendingMessages, steerMsgs...)
 			}
+		}
+		if len(exec.pendingResultMessages) > 0 {
+			if ts.agent.MaxIterations > 0 && iteration > ts.agent.MaxIterations {
+				// One result-only follow-up may exceed the ordinary tool-loop cap,
+				// but it cannot use tools to create a self-sustaining chain beyond
+				// that cap.
+				ts.disableToolsForResultFollowUp()
+			}
+			pendingMessages = append(pendingMessages, exec.pendingResultMessages...)
+			exec.pendingResultMessages = nil
 		}
 
 		// Check if parent turn has ended (SubTurn support from HEAD)
@@ -346,6 +363,16 @@ func (al *AgentLoop) runTurn(
 					"turn_id":   ts.turnID,
 				},
 			)
+		}
+
+		// Managed spawn results use one consume-once, exact-session envelope.
+		// Poll it before the compatibility channel used by direct async
+		// SubTurn callers.
+		if trackedResult, ok := al.dequeueTrackedSubagentResult(ts); ok {
+			if ts.agent.MaxIterations > 0 && iteration > ts.agent.MaxIterations {
+				ts.disableToolsForResultFollowUp()
+			}
+			pendingMessages = append(pendingMessages, trackedResult)
 		}
 
 		// Poll for pending SubTurn results (from HEAD)
@@ -393,6 +420,7 @@ func (al *AgentLoop) runTurn(
 			// Clear exec.pendingMessages after injection so InitialSteeringMessages
 			// are not re-injected on subsequent iterations (Issue 2 fix).
 			exec.pendingMessages = nil
+			pendingMessages = nil
 		}
 		// Always sync messages into exec.messages so CallLLM sees the updated state
 		exec.messages = messages
@@ -423,7 +451,6 @@ func (al *AgentLoop) runTurn(
 			return turnResult{}, cancelErr
 		}
 		messages = exec.messages
-		pendingMessages = exec.pendingMessages
 		finalContent = exec.finalContent
 
 		switch ctrl {

@@ -385,6 +385,14 @@ toolLoop:
 						break toolLoop
 					}
 
+					if trackedResult, ok := al.dequeueTrackedSubagentResult(ts); ok {
+						exec.allResponsesHandled = false
+						exec.pendingResultMessages = append(
+							exec.pendingResultMessages,
+							trackedResult,
+						)
+					}
+
 					if ts.pendingResults != nil {
 						select {
 						case result, ok := <-ts.pendingResults:
@@ -516,7 +524,50 @@ toolLoop:
 
 		toolCallID := tc.ID
 		asyncToolName := toolName
-		asyncCallback := func(_ context.Context, result *tools.ToolResult) {
+		var (
+			trackedSpawnRoute    trackedSubagentResultRoute
+			trackedSpawnRouteErr error
+		)
+		asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
+			if tools.IsTrackedSpawnCompletionCallback(callbackCtx) {
+				completion, trackedSpawn := tools.SubagentCompletionFromContext(callbackCtx)
+				if !trackedSpawn {
+					al.emitEvent(
+						runtimeevents.KindAgentSubTurnOrphan,
+						ts.eventMeta("runTurn", "subturn.orphan"),
+						SubTurnOrphanPayload{
+							ParentTurnID: ts.turnID,
+							TaskID:       completion.TaskID,
+							Reason:       "missing_task_identity",
+						},
+					)
+					return
+				}
+				if trackedSpawnRouteErr != nil {
+					logger.WarnCF(
+						"agent",
+						"Tracked spawn completion has no valid parent route",
+						map[string]any{
+							"task_id": completion.TaskID,
+							"turn_id": ts.turnID,
+							"reason":  "invalid_parent_route",
+						},
+					)
+					al.emitEvent(
+						runtimeevents.KindAgentSubTurnOrphan,
+						ts.eventMeta("runTurn", "subturn.orphan"),
+						SubTurnOrphanPayload{
+							ParentTurnID: ts.turnID,
+							TaskID:       completion.TaskID,
+							Reason:       "invalid_parent_route",
+						},
+					)
+					return
+				}
+				al.acceptTrackedSubagentResult(trackedSpawnRoute, completion, result)
+				return
+			}
+
 			if !result.Silent && result.ForUser != "" {
 				outCtx, outCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer outCancel()
@@ -575,6 +626,14 @@ toolLoop:
 			ts.sessionKey,
 			ts.opts.Dispatch.SessionScope,
 		)
+		execCtx = tools.WithTrackedSpawnAdmissionObserver(execCtx, func() error {
+			trackedSpawnRoute, trackedSpawnRouteErr = snapshotTrackedSubagentResultRoute(ts)
+			if trackedSpawnRouteErr != nil {
+				return trackedSpawnRouteErr
+			}
+			al.watchTrackedSubagentResultRoute(trackedSpawnRoute)
+			return nil
+		})
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
@@ -776,6 +835,11 @@ toolLoop:
 				}
 			}
 			break toolLoop
+		}
+
+		if trackedResult, ok := al.dequeueTrackedSubagentResult(ts); ok {
+			exec.allResponsesHandled = false
+			exec.pendingResultMessages = append(exec.pendingResultMessages, trackedResult)
 		}
 
 		if ts.pendingResults != nil {

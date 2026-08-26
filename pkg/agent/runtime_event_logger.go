@@ -304,6 +304,9 @@ func appendRuntimeEventPayloadSummary(fields map[string]any, payload any) {
 		fields["total_content_len"] = payload.TotalContentLen
 	case FollowUpQueuedPayload:
 		fields["source_tool"] = payload.SourceTool
+		setStringField(fields, "source_turn_id", payload.SourceTurnID)
+		setStringField(fields, "task_id", payload.TaskID)
+		setStringField(fields, "status", payload.Status)
 		fields["content_len"] = payload.ContentLen
 	case InterruptReceivedPayload:
 		fields["interrupt_kind"] = payload.Kind
@@ -320,10 +323,16 @@ func appendRuntimeEventPayloadSummary(fields map[string]any, payload any) {
 	case SubTurnResultDeliveredPayload:
 		fields["target_channel"] = payload.TargetChannel
 		fields["target_chat_id"] = payload.TargetChatID
+		setStringField(fields, "source_turn_id", payload.SourceTurnID)
+		setStringField(fields, "task_id", payload.TaskID)
+		setStringField(fields, "status", payload.Status)
 		fields["content_len"] = payload.ContentLen
 	case SubTurnOrphanPayload:
 		fields["parent_turn_id"] = payload.ParentTurnID
 		fields["child_turn_id"] = payload.ChildTurnID
+		setStringField(fields, "source_turn_id", payload.SourceTurnID)
+		setStringField(fields, "task_id", payload.TaskID)
+		setStringField(fields, "status", payload.Status)
 		fields["reason"] = payload.Reason
 	case ErrorPayload:
 		fields["stage"] = payload.Stage

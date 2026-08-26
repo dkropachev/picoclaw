@@ -1461,11 +1461,8 @@ func TestRecursionCatalogTrackedSpawnRecordsHardAbortAsCanceled(t *testing.T) {
 	}
 	select {
 	case pending := <-parent.pendingResults:
-		if pending == nil || !pending.IsError {
-			t.Fatalf("tracked abort pending result = %#v", pending)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("tracked abort pending-result path changed before P007")
+		t.Fatalf("tracked abort was delivered through the legacy mailbox: %#v", pending)
+	case <-time.After(100 * time.Millisecond):
 	}
 	statusResult := status.Execute(context.Background(), map[string]any{
 		"task_id": "subagent-1",

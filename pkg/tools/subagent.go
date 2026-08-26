@@ -28,7 +28,7 @@ type SubTurnConfig struct {
 	SystemPrompt       string
 	MaxTokens          int
 	Temperature        float64
-	Async              bool          // true for async (spawn), false for sync (subagent)
+	Async              bool          // direct SubTurn result-channel mode; manager-backed spawn uses false
 	Critical           bool          // continue running after parent finishes gracefully
 	Timeout            time.Duration // 0 = use default (5 minutes)
 	MaxContextRunes    int           // 0 = auto, -1 = no limit, >0 = explicit limit
@@ -50,6 +50,85 @@ type SubagentTask struct {
 	Status           string
 	Result           string
 	Created          int64
+}
+
+// SubagentCompletion identifies the committed terminal state associated with
+// an asynchronous subagent callback. Values returned from
+// SubagentCompletionFromContext are detached copies.
+type SubagentCompletion struct {
+	TaskID string
+	Status string
+}
+
+type subagentCompletionContextKey struct{}
+
+type subagentCompletionContextValue struct {
+	completion SubagentCompletion
+}
+
+type trackedSpawnCompletionContextKey struct{}
+
+type trackedSpawnCompletionContextValue struct{}
+
+func withSubagentCompletion(
+	ctx context.Context,
+	completion SubagentCompletion,
+) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(
+		ctx,
+		subagentCompletionContextKey{},
+		subagentCompletionContextValue{completion: completion},
+	)
+}
+
+// SubagentCompletionFromContext returns the committed task identity and
+// terminal status attached to a tracked subagent callback.
+func SubagentCompletionFromContext(ctx context.Context) (SubagentCompletion, bool) {
+	if ctx == nil {
+		return SubagentCompletion{}, false
+	}
+	value, ok := ctx.Value(subagentCompletionContextKey{}).(subagentCompletionContextValue)
+	if !ok {
+		return SubagentCompletion{}, false
+	}
+	return value.completion, true
+}
+
+func withTrackedSpawnCompletion(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(
+		ctx,
+		trackedSpawnCompletionContextKey{},
+		trackedSpawnCompletionContextValue{},
+	)
+}
+
+// TrackedSpawnCompletionFromContext returns committed task metadata only when
+// the callback came through the first-party SpawnTool delivery wrapper. Public
+// SubagentManager callbacks carry SubagentCompletion but not this additional
+// unforgeable provenance marker.
+func TrackedSpawnCompletionFromContext(ctx context.Context) (SubagentCompletion, bool) {
+	if !IsTrackedSpawnCompletionCallback(ctx) {
+		return SubagentCompletion{}, false
+	}
+	return SubagentCompletionFromContext(ctx)
+}
+
+// IsTrackedSpawnCompletionCallback reports whether the callback came through
+// the private first-party SpawnTool wrapper, independently of manager metadata.
+func IsTrackedSpawnCompletionCallback(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	if _, ok := ctx.Value(trackedSpawnCompletionContextKey{}).(trackedSpawnCompletionContextValue); !ok {
+		return false
+	}
+	return true
 }
 
 const (
@@ -275,8 +354,15 @@ func (sm *SubagentManager) runTask(
 		err,
 		preCanceled,
 	)
-	sm.commitTaskTerminal(taskID, status, storedResult)
-	callSubagentTaskCallback(ctx, callback, callbackResult)
+	committedTask, committed := sm.commitTaskTerminal(taskID, status, storedResult)
+	if !committed {
+		return
+	}
+	callbackCtx := withSubagentCompletion(ctx, SubagentCompletion{
+		TaskID: committedTask.ID,
+		Status: committedTask.Status,
+	})
+	callSubagentTaskCallback(callbackCtx, callback, callbackResult)
 }
 
 func (sm *SubagentManager) legacyTaskRunnerSnapshot() subagentTaskRunner {
@@ -351,15 +437,18 @@ After completing the task, provide a clear summary of what was done.`
 	}
 }
 
-func (sm *SubagentManager) commitTaskTerminal(taskID, status, result string) {
+func (sm *SubagentManager) commitTaskTerminal(
+	taskID, status, result string,
+) (SubagentTask, bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	task := sm.tasks[taskID]
 	if task == nil || task.Status != subagentTaskStatusRunning {
-		return
+		return SubagentTask{}, false
 	}
 	task.Status = status
 	task.Result = result
+	return *task, true
 }
 
 func callSubagentTaskRunner(

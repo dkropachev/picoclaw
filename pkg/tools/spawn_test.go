@@ -97,6 +97,9 @@ func TestSpawnTool_Execute_ValidTask(t *testing.T) {
 	if !spawner.lastConfig.Critical {
 		t.Error("SpawnTool should mark background subturns as critical")
 	}
+	if spawner.lastConfig.Async {
+		t.Error("tracked SpawnTool should leave child result delivery to the manager")
+	}
 }
 
 func TestSpawnTool_Execute_RejectsTargetDeniedByAgentPolicy(t *testing.T) {
