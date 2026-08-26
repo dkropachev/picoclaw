@@ -31,6 +31,10 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
+import {
+  profileAvailableAliases,
+  selectProfileCandidates,
+} from "./model-evaluation-candidates"
 import { ModelEvaluationReportContent } from "./model-evaluation-report-page"
 
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Horizontally scrollable data regions must be keyboard-focusable. */
@@ -89,40 +93,6 @@ function statusTone(status: string): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
-}
-
-function profileAvailableAliases(
-  profile: EvaluationProfileOption | undefined,
-  models: EvaluationModelOption[],
-): string[] {
-  if (!profile) return []
-  const configured = new Set(
-    models.filter((model) => model.available).map((model) => model.alias),
-  )
-  return profile.available_models.filter((alias) => configured.has(alias))
-}
-
-function selectProfileCandidates(
-  current: string[],
-  profile: EvaluationProfileOption | undefined,
-  models: EvaluationModelOption[],
-  maximum: number,
-): string[] {
-  const available = profileAvailableAliases(profile, models)
-  const allowed = new Set(available)
-  const selected = current.filter((alias) => allowed.has(alias))
-  if (
-    profile?.reviewer_model &&
-    allowed.has(profile.reviewer_model) &&
-    !selected.includes(profile.reviewer_model)
-  ) {
-    selected.unshift(profile.reviewer_model)
-  }
-  for (const alias of available) {
-    if (selected.length >= 2) break
-    if (!selected.includes(alias)) selected.push(alias)
-  }
-  return selected.slice(0, maximum)
 }
 
 function emptyDraft(
