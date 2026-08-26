@@ -1118,23 +1118,14 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		runID,
 		func() error { return c.admitProviderCall(id, runID) },
 	)
-	executor.ManagedChildActivityObserver = func(event workflows.ManagedChildActivityEvent) error {
-		if event.RunID != runID || event.StepID != "review" {
-			return nil
-		}
-		return c.observeRepositoryReviewTask(id, runID, event.ManagedChildActivity)
-	}
+	executor.ManagedChildActivityObserver = c.repositoryReviewManagedChildObserver(id, runID)
 
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
 		c.monitorWorkflowProgress(runCtx, store, workflowStore, id, runID)
 	}()
-	scopePolicyJSON, err := json.Marshal(automation.ScopePolicy)
-	if err != nil {
-		c.finishAutomationRun(id, runID, nil, err, false)
-		return
-	}
+	scopePolicyJSON, _ := json.Marshal(automation.ScopePolicy)
 	result, runErr := executor.Run(runCtx, workflows.RunRequest{
 		RunID:       runID,
 		Workflow:    workflow,
@@ -1155,9 +1146,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 			"estimated_output_tokens": automation.EstimatedOutputTokens,
 		},
 	})
-	if commitErr := repositoryReviewValidateExecutionCommit(automation, result); commitErr != nil {
-		runErr = errors.Join(runErr, commitErr)
-	}
+	runErr = repositoryReviewJoinCommitError(automation, result, runErr)
 	checkpointed := false
 	if persisted, persistedErr := workflowStore.GetRun(context.Background(), runID); persistedErr == nil {
 		c.recordManagedChildOutcomes(id, runID, persisted, priceIndex)
@@ -1166,6 +1155,26 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	cancel()
 	<-monitorDone
 	c.finishAutomationRun(id, runID, result, runErr, checkpointed)
+}
+
+func repositoryReviewJoinCommitError(
+	automation repoaudit.RepositoryReviewAutomation,
+	result *workflows.RunResult,
+	runErr error,
+) error {
+	return errors.Join(runErr, repositoryReviewValidateExecutionCommit(automation, result))
+}
+
+func (c *repositoryReviewController) repositoryReviewManagedChildObserver(
+	id string,
+	runID string,
+) workflows.ManagedChildActivityEventObserver {
+	return func(event workflows.ManagedChildActivityEvent) error {
+		if event.RunID != runID || event.StepID != "review" {
+			return nil
+		}
+		return c.observeRepositoryReviewTask(id, runID, event.ManagedChildActivity)
+	}
 }
 
 func repositoryReviewWorkflowRef(branch string) string {

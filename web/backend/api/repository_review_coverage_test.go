@@ -1660,6 +1660,11 @@ func TestRepositoryReviewCommitResolutionBoundaryCoverage(t *testing.T) {
 	); got != "refs/heads/main" {
 		t.Fatalf("fallback execution ref=%q", got)
 	}
+	if got := repositoryReviewExecutionRef(repoaudit.RepositoryReviewAutomation{
+		ResolvedCommitSHA: commit,
+	}); got != commit {
+		t.Fatalf("remembered execution ref=%q", got)
+	}
 }
 
 func TestRepositoryReviewAdmissionCommitBoundaryCoverage(t *testing.T) {
@@ -1765,6 +1770,19 @@ func TestRepositoryReviewAdmissionCommitBoundaryCoverage(t *testing.T) {
 
 func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 	commit := strings.Repeat("a", 40)
+	response := httptest.NewRecorder()
+	var nilHandler *Handler
+	nilHandler.handleRepositoryReviewAutomationCommitOptions(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/rra_missing/commit-options",
+			nil,
+		),
+	)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("nil handler commit options status=%d", response.Code)
+	}
 	setup := func(
 		t *testing.T,
 		status repoaudit.RepositoryReviewAutomationStatus,
@@ -1856,6 +1874,26 @@ func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
 			t.Context(), automation.ID,
 		); !errors.Is(err, errRepositoryReviewInvalidTransition) {
 			t.Fatalf("idle options error=%v", err)
+		}
+	})
+	t.Run("invalid legacy branch", func(t *testing.T) {
+		_, store, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		automation, err := store.UpdateAutomation(
+			t.Context(), automation.ID, automation.Version,
+			func(candidate *repoaudit.RepositoryReviewAutomation) error {
+				candidate.Ref = "not a branch"
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("invalid legacy branch returned no error")
 		}
 	})
 	t.Run("resolver errors", func(t *testing.T) {
@@ -2209,6 +2247,78 @@ func TestRepositoryReviewPausedTaskAdmissionBoundaryCoverage(t *testing.T) {
 	if !errors.Is(err, errRepositoryReviewSafeStop) ||
 		!strings.Contains(err.Error(), "operator paused this task") {
 		t.Fatalf("paused task admission error=%v", err)
+	}
+
+	guard := &sync.Mutex{}
+	guard.Lock()
+	controller.active["rra_mid_admission_pause"] = &repositoryReviewActiveRun{
+		runID:        "wr_mid_admission_pause",
+		guardMu:      guard,
+		reservations: make(map[int]repositoryReviewTaskReservation),
+	}
+	result := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		result <- controller.observeRepositoryReviewTask(
+			"rra_mid_admission_pause",
+			"wr_mid_admission_pause",
+			workflows.ManagedChildActivity{
+				Phase: workflows.ManagedChildStarted,
+				Index: 2,
+			},
+		)
+	}()
+	<-started
+	time.Sleep(10 * time.Millisecond)
+	controller.mu.Lock()
+	controller.active["rra_mid_admission_pause"].pauseReason = repoaudit.RepositoryReviewPauseManual
+	controller.active["rra_mid_admission_pause"].pauseDetail = "paused while waiting for admission"
+	controller.mu.Unlock()
+	guard.Unlock()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errRepositoryReviewSafeStop) ||
+			!strings.Contains(err.Error(), "paused while waiting for admission") {
+			t.Fatalf("mid-admission pause error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mid-admission pause did not finish")
+	}
+}
+
+func TestRepositoryReviewExecutionObserverBoundaryCoverage(t *testing.T) {
+	controller := &repositoryReviewController{}
+	observer := controller.repositoryReviewManagedChildObserver("rra_observer", "wr_observer")
+	if err := observer(workflows.ManagedChildActivityEvent{
+		RunID: "wr_other", StepID: "review",
+	}); err != nil {
+		t.Fatalf("other-run observer error=%v", err)
+	}
+	if err := observer(workflows.ManagedChildActivityEvent{
+		RunID: "wr_observer", StepID: "other",
+	}); err != nil {
+		t.Fatalf("other-step observer error=%v", err)
+	}
+	if err := observer(workflows.ManagedChildActivityEvent{
+		RunID: "wr_observer", StepID: "review",
+		ManagedChildActivity: workflows.ManagedChildActivity{
+			Phase: workflows.ManagedChildActivityPhase("unknown"),
+		},
+	}); err != nil {
+		t.Fatalf("ignored activity observer error=%v", err)
+	}
+	commitA := strings.Repeat("a", 40)
+	commitB := strings.Repeat("b", 40)
+	automation := repoaudit.RepositoryReviewAutomation{ResolvedCommitSHA: commitA}
+	result := &workflows.RunResult{Outputs: map[string]any{"commit": commitB}}
+	runErr := repositoryReviewJoinCommitError(automation, result, nil)
+	if runErr == nil || !strings.Contains(runErr.Error(), commitA) {
+		t.Fatalf("joined commit error=%v", runErr)
+	}
+	original := errors.New("run failed")
+	if joined := repositoryReviewJoinCommitError(automation, nil, original); !errors.Is(joined, original) {
+		t.Fatalf("joined run error=%v", joined)
 	}
 }
 

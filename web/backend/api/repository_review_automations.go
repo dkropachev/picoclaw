@@ -164,11 +164,7 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	query, queryErr := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)
-	if queryErr != nil {
-		writeCollectionPageError(w, queryErr)
-		return
-	}
+	query, _ := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)
 	var projected []repoaudit.RepositoryReviewAutomation
 	total := len(automations)
 	nextCursor := ""
