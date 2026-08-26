@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
@@ -47,8 +48,41 @@ type repositoryReviewAutomationConfigRequest struct {
 }
 
 type repositoryReviewAutomationActionRequest struct {
-	ExpectedVersion int64 `json:"expected_version"`
+	ExpectedVersion int64  `json:"expected_version"`
+	CommitSHA       string `json:"commit_sha,omitempty"`
+	RunID           string `json:"run_id,omitempty"`
 }
+
+type repositoryReviewCommitReference struct {
+	SHA      string `json:"sha"`
+	ShortSHA string `json:"short_sha"`
+	URL      string `json:"url,omitempty"`
+}
+
+type repositoryReviewCommitOptionsResponse struct {
+	ExpectedVersion      int64                           `json:"expected_version"`
+	Remembered           repositoryReviewCommitReference `json:"remembered"`
+	Latest               repositoryReviewCommitReference `json:"latest"`
+	NewerCommitAvailable bool                            `json:"newer_commit_available"`
+}
+
+var repositoryReviewAutomationCollectionSchema = mustCollectionQuerySchema(
+	[]collectionquery.FieldSchema{
+		{Name: "id", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "name", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "repository", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "branch", Type: collectionquery.TypeString, Sortable: true},
+		{
+			Name: "status", Type: collectionquery.TypeEnum, Sortable: true,
+			SuggestedValues: []string{"idle", "running", "stopping", "paused", "completed", "failed"},
+		},
+		{Name: "progress", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "reviewed", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "findings", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "updated", Type: collectionquery.TypeTimestamp, Sortable: true},
+	},
+	[]collectionquery.SortField{{Field: "updated", Direction: collectionquery.Descending}},
+)
 
 type repositoryReviewModelOption struct {
 	Alias            string  `json:"alias"`
@@ -112,6 +146,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		"POST /api/repository-reviews/automations/{automation_id}/restart",
 		h.handleRestartRepositoryReviewAutomation,
 	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/commit-options",
+		h.handleRepositoryReviewAutomationCommitOptions,
+	)
 	mux.HandleFunc("GET /api/repository-reviews/automation-options", h.handleRepositoryReviewAutomationOptions)
 }
 
@@ -126,11 +164,102 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	projected := make([]repoaudit.RepositoryReviewAutomation, len(automations))
-	for index := range automations {
-		projected[index] = projectRepositoryReviewAutomation(automations[index])
+	query, _ := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)
+	var projected []repoaudit.RepositoryReviewAutomation
+	total := len(automations)
+	nextCursor := ""
+	if r.URL != nil && r.URL.RawQuery != "" {
+		listRequest, ok := parseCollectionListRequest(w, r, repositoryReviewAutomationCollectionSchema)
+		if !ok {
+			return
+		}
+		query = listRequest.Query
+		page, pageErr := collectionquery.Paginate(
+			automations,
+			query,
+			listRequest.Cursor,
+			listRequest.Limit,
+			listRequest.Now,
+			collectionquery.PageOptions[repoaudit.RepositoryReviewAutomation]{
+				ID: func(automation repoaudit.RepositoryReviewAutomation) (string, error) {
+					return automation.ID, nil
+				},
+				Clone: projectRepositoryReviewAutomation,
+				Resolve: func(
+					automation repoaudit.RepositoryReviewAutomation,
+					field collectionquery.Field,
+					_ time.Time,
+				) (collectionquery.FieldValue, bool) {
+					return repositoryReviewAutomationCollectionField(automation, field)
+				},
+			},
+		)
+		if pageErr != nil {
+			writeCollectionPageError(w, pageErr)
+			return
+		}
+		projected = page.Items
+		total = page.Total
+		nextCursor = page.NextCursor
+	} else {
+		projected = make([]repoaudit.RepositoryReviewAutomation, len(automations))
+		for index := range automations {
+			projected[index] = projectRepositoryReviewAutomation(automations[index])
+		}
 	}
-	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{"automations": projected})
+	repositories := make([]string, 0, len(automations))
+	branches := make([]string, 0, len(automations))
+	names := make([]string, 0, len(automations))
+	for _, automation := range automations {
+		repositories = append(repositories, automation.Repository)
+		branches = append(branches, automation.Ref)
+		names = append(names, automation.Name)
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
+		"automations":     projected,
+		"total":           total,
+		"next_cursor":     nextCursor,
+		"canonical_query": query.Canonical(),
+		"query_schema": collectionSchemaWithSuggestions(
+			repositoryReviewAutomationCollectionSchema,
+			map[collectionquery.Field][]string{
+				"name": names, "repository": repositories, "branch": branches,
+			},
+		),
+	})
+}
+
+func repositoryReviewAutomationCollectionField(
+	automation repoaudit.RepositoryReviewAutomation,
+	field collectionquery.Field,
+) (collectionquery.FieldValue, bool) {
+	switch field {
+	case "id":
+		return collectionquery.StringValue(automation.ID), true
+	case "name":
+		return collectionquery.StringValue(automation.Name), true
+	case "repository":
+		return collectionquery.StringValue(automation.Repository), true
+	case "branch":
+		return collectionquery.StringValue(automation.Ref), true
+	case "status":
+		return collectionquery.EnumValue(string(automation.Status)), true
+	case "progress":
+		percent := 0.0
+		if automation.Progress.TotalBatches > 0 {
+			percent = float64(automation.Progress.CompletedBatches) /
+				float64(automation.Progress.TotalBatches) * 100
+		}
+		return collectionquery.NumberValue(percent), true
+	case "reviewed":
+		return collectionquery.NumberValue(float64(automation.Progress.ReviewedFiles)), true
+	case "findings":
+		return collectionquery.NumberValue(float64(automation.Progress.Findings)), true
+	case "updated":
+		return collectionquery.TimestampValue(automation.UpdatedAt), true
+	default:
+		return collectionquery.FieldValue{}, false
+	}
 }
 
 func (h *Handler) handleCreateRepositoryReviewAutomation(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +356,7 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 			if executionChanged {
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+				candidate.ResolvedCommitSHA = ""
 				candidate.PauseReason = ""
 				candidate.PauseDetail = ""
 				candidate.RequestedPauseReason = ""
@@ -337,8 +467,9 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 		writeRepositoryReviewAutomationError(w, errors.New("repository review controller unavailable"))
 		return
 	}
-	automation, err := controller.startAutomation(
+	automation, err := controller.startAutomationAtCommit(
 		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion, reset, action,
+		request.CommitSHA,
 	)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
@@ -347,6 +478,31 @@ func (h *Handler) handleRepositoryReviewAutomationStartAction(
 	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
 		"automation": projectRepositoryReviewAutomation(automation),
 		"outcome":    "started",
+	})
+}
+
+func (h *Handler) handleRepositoryReviewAutomationCommitOptions(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	controller := h.repositoryReviewControllerInstance()
+	if controller == nil {
+		writeRepositoryReviewAutomationError(w, errors.New("repository review controller unavailable"))
+		return
+	}
+	automation, remembered, latest, err := controller.repositoryReviewCommitOptions(
+		r.Context(),
+		r.PathValue("automation_id"),
+	)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, repositoryReviewCommitOptionsResponse{
+		ExpectedVersion:      automation.Version,
+		Remembered:           repositoryReviewCommitReferenceForAutomation(automation, remembered),
+		Latest:               repositoryReviewCommitReferenceForAutomation(automation, latest),
+		NewerCommitAvailable: remembered != latest,
 	})
 }
 
@@ -365,8 +521,8 @@ func (h *Handler) handlePauseRepositoryReviewAutomation(w http.ResponseWriter, r
 		writeRepositoryReviewAutomationError(w, errors.New("repository review controller unavailable"))
 		return
 	}
-	automation, err := controller.pauseAutomation(
-		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion,
+	automation, err := controller.pauseAutomationForRun(
+		r.Context(), r.PathValue("automation_id"), request.ExpectedVersion, request.RunID,
 	)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
@@ -382,6 +538,60 @@ func projectRepositoryReviewAutomation(
 ) repoaudit.RepositoryReviewAutomation {
 	automation.ModelCoverageSketches = nil
 	return automation
+}
+
+func repositoryReviewCommitReferenceForAutomation(
+	automation repoaudit.RepositoryReviewAutomation,
+	commit string,
+) repositoryReviewCommitReference {
+	commit = strings.ToLower(strings.TrimSpace(commit))
+	short := commit
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	return repositoryReviewCommitReference{
+		SHA:      commit,
+		ShortSHA: short,
+		URL:      repositoryReviewGitHubCommitURL(automation.Repository, commit),
+	}
+}
+
+func repositoryReviewGitHubCommitURL(repository string, commit string) string {
+	commit = strings.ToLower(strings.TrimSpace(commit))
+	if !repositoryReviewValidCommitSHA(commit) {
+		return ""
+	}
+	repository = strings.TrimSpace(repository)
+	host := ""
+	repositoryPath := ""
+	if owner, name, found := strings.Cut(repository, "/"); found &&
+		!strings.Contains(name, "/") && validRepositoryReviewGitHubSegment(owner) &&
+		validRepositoryReviewGitHubSegment(strings.TrimSuffix(name, ".git")) {
+		host = "github.com"
+		repositoryPath = owner + "/" + name
+	} else if parsed, err := url.Parse(repository); err == nil && parsed.Scheme != "" {
+		host = parsed.Hostname()
+		repositoryPath = parsed.Path
+	} else if identity, remotePath, found := strings.Cut(repository, ":"); found {
+		_, host, _ = strings.Cut(identity, "@")
+		repositoryPath = remotePath
+	}
+	if !strings.EqualFold(strings.TrimSpace(host), "github.com") {
+		return ""
+	}
+	components := strings.Split(strings.Trim(strings.TrimSpace(repositoryPath), "/"), "/")
+	if len(components) != 2 || components[0] == "" || components[1] == "" {
+		return ""
+	}
+	name := strings.TrimSuffix(components[1], ".git")
+	if name == "" {
+		return ""
+	}
+	return (&url.URL{
+		Scheme: "https",
+		Host:   "github.com",
+		Path:   "/" + components[0] + "/" + name + "/commit/" + commit,
+	}).String()
 }
 
 func repositoryReviewAutomationFromRequest(
@@ -1426,6 +1636,8 @@ func writeRepositoryReviewAutomationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "not found"):
 		status, code = http.StatusNotFound, "not_found"
+	case errors.Is(err, errRepositoryReviewCommitSelection):
+		status, code = http.StatusConflict, "repository_review_commit_selection_required"
 	case errors.Is(err, repoaudit.ErrConflict), errors.Is(err, repoaudit.ErrAutomationActive),
 		errors.Is(err, errRepositoryReviewAutomationBusy),
 		errors.Is(err, errRepositoryReviewInvalidTransition),

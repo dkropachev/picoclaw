@@ -115,3 +115,55 @@ export function githubRepositoryPath(repository: string): string | undefined {
   if (!match || match[2] === "." || match[2] === "..") return undefined
   return `${match[1]}/${match[2]}`
 }
+
+function githubCommitRepositoryPath(repository: string): string | undefined {
+  const normalized = repository.trim()
+  const shorthand = githubRepositoryPath(normalized)
+  if (shorthand) return shorthand
+
+  const scp = /^git@github\.com:(.+)$/iu.exec(normalized)
+  if (scp) return githubPath(scp[1])
+
+  let parsed: URL
+  try {
+    parsed = new URL(normalized)
+  } catch {
+    return undefined
+  }
+  if (
+    parsed.hostname.toLowerCase() !== "github.com" ||
+    !new Set(["git:", "http:", "https:", "ssh:"]).has(parsed.protocol) ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    return undefined
+  }
+  return githubPath(parsed.pathname)
+}
+
+export function githubCommitURL(
+  repository: string,
+  commitSHA: string,
+): string | undefined {
+  const path = githubCommitRepositoryPath(repository)
+  const normalizedSHA = commitSHA.trim().toLowerCase()
+  if (!path || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(normalizedSHA)) {
+    return undefined
+  }
+  return `https://github.com/${path}/commit/${normalizedSHA}`
+}
+
+export function shortCommitSHA(commitSHA: string): string {
+  return commitSHA.trim().slice(0, 8)
+}
+
+function githubPath(value: string): string | undefined {
+  const match =
+    /^\/?([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9_.-]+?)\/?$/u.exec(
+      value,
+    )
+  if (!match) return undefined
+  const repository = match[2].replace(/\.git$/iu, "")
+  if (!repository || repository === "." || repository === "..") return undefined
+  return `${match[1]}/${repository}`
+}

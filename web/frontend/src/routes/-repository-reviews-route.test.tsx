@@ -83,6 +83,11 @@ describe("repository reviews route", () => {
     render(<RouterProvider router={router} />)
 
     expect(await screen.findByText("Review runs workspace")).toBeVisible()
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        q: "ORDER BY repository ASC",
+      }),
+    )
   })
 
   it("keeps finding discussions in the dedicated results route", async () => {

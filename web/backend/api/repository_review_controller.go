@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"math"
+	"os"
+	osexec "os/exec"
 	"reflect"
 	"slices"
 	"strings"
@@ -17,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -26,6 +30,8 @@ var (
 	errRepositoryReviewAutomationBusy    = errors.New("repository review automation is already active")
 	errRepositoryReviewSafeStop          = errors.New("repository review stopped at a safe checkpoint")
 	errRepositoryReviewInvalidTransition = errors.New("repository review action is not valid for the current status")
+	errRepositoryReviewCommitSelection   = errors.New("repository review commit selection is required")
+	errRepositoryReviewPauseSettled      = errors.New("repository review is already stopped")
 	errRepositoryReviewProfileActive     = errors.New(
 		"repository review profile is assigned to an active repository review",
 	)
@@ -62,6 +68,13 @@ type repositoryReviewAutomationUpdater func(
 	func(*repoaudit.RepositoryReviewAutomation) error,
 ) (repoaudit.RepositoryReviewAutomation, error)
 
+type repositoryReviewCommitResolver func(
+	context.Context,
+	*config.Config,
+	repoaudit.RepositoryReviewAutomation,
+	string,
+) (string, error)
+
 func updateRepositoryReviewAutomation(
 	ctx context.Context,
 	store repoaudit.Store,
@@ -93,6 +106,7 @@ type repositoryReviewController struct {
 	now           func() time.Time
 	probe         func(context.Context) (codexAccountLimitsResponse, error)
 	update        repositoryReviewAutomationUpdater
+	resolveCommit repositoryReviewCommitResolver
 	stopTimeout   time.Duration
 	monitorEvery  time.Duration
 	progressEvery time.Duration
@@ -114,6 +128,7 @@ func newRepositoryReviewController(handler *Handler) *repositoryReviewController
 		now:           time.Now,
 		probe:         loadCodexAccountLimits,
 		update:        updateRepositoryReviewAutomation,
+		resolveCommit: resolveRepositoryReviewAutomationCommit,
 		stopTimeout:   10 * time.Second,
 		monitorEvery:  repositoryReviewControllerInterval,
 		progressEvery: time.Second,
@@ -220,12 +235,247 @@ func (c *repositoryReviewController) store() (repoaudit.Store, *config.Config, e
 	return repoaudit.NewStore(cfg.WorkspacePath()), cfg, nil
 }
 
+func resolveRepositoryReviewAutomationCommit(
+	ctx context.Context,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+	revision string,
+) (string, error) {
+	if cfg == nil {
+		return "", errors.New("repository review configuration is unavailable")
+	}
+	manager, err := gitworkspace.NewManager(gitworkspace.Options{
+		RootDir:             cfg.GitWorkspaceRootPath(),
+		MaxTotalSizeBytes:   cfg.GitWorkspaces.EffectiveMaxTotalSizeBytes(),
+		IgnoredCleanupDelay: cfg.GitWorkspaces.EffectiveIgnoredCleanupDelay(),
+		DropDelay:           cfg.GitWorkspaces.EffectiveDropDelay(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("initialize repository review commit resolver: %w", err)
+	}
+	ref := strings.TrimSpace(revision)
+	if ref == "" {
+		ref = strings.TrimSpace(automation.Ref)
+	}
+	sessionKey := "repository-review-commit/" + automation.ID + "/" + workflows.NewRunID()
+	workspace, err := manager.Acquire(ctx, gitworkspace.AcquireRequest{
+		Repository: automation.Repository,
+		Ref:        ref,
+		Fresh:      true,
+		SessionKey: sessionKey,
+		AgentID:    "repository-review-controller",
+	})
+	if err != nil {
+		return "", fmt.Errorf("resolve repository review commit: %w", err)
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, releaseErr := manager.ReleaseSession(releaseCtx, gitworkspace.ReleaseRequest{
+			SessionKey: sessionKey,
+			AgentID:    "repository-review-controller",
+		}); releaseErr != nil {
+			logger.WarnCF("repository-review", "Failed to release commit-resolution workspace", map[string]any{
+				"automation_id": automation.ID,
+				"error":         releaseErr.Error(),
+			})
+		}
+	}()
+	output, err := repositoryReviewGitOutput(
+		ctx,
+		workspace.Path,
+		128,
+		"git",
+		"rev-parse",
+		"--verify",
+		"--end-of-options",
+		"HEAD^{commit}",
+	)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository review commit ID: %w", err)
+	}
+	commit := strings.ToLower(strings.TrimSpace(string(output)))
+	if !repositoryReviewValidCommitSHA(commit) {
+		return "", errors.New("repository review resolved a noncanonical commit")
+	}
+	return commit, nil
+}
+
+func repositoryReviewGitOutput(
+	ctx context.Context,
+	directory string,
+	maximumBytes int64,
+	name string,
+	arguments ...string,
+) ([]byte, error) {
+	command := osexec.CommandContext(ctx, name, arguments...)
+	command.Dir = directory
+	command.Env = repositoryReviewGitEnvironment()
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	output, readErr := io.ReadAll(io.LimitReader(stdout, maximumBytes+1))
+	waitErr := command.Wait()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if waitErr != nil {
+		return nil, waitErr
+	}
+	if int64(len(output)) > maximumBytes {
+		return nil, errors.New("git command output is too large")
+	}
+	return output, nil
+}
+
+func repositoryReviewGitEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(name) {
+		case "LC_ALL", "GIT_PAGER":
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, "LC_ALL=C", "GIT_PAGER=cat")
+}
+
+func repositoryReviewRememberedCommit(
+	automation repoaudit.RepositoryReviewAutomation,
+) string {
+	commit := strings.ToLower(strings.TrimSpace(automation.ResolvedCommitSHA))
+	if repositoryReviewValidCommitSHA(commit) {
+		return commit
+	}
+	commit = strings.ToLower(strings.TrimSpace(automation.ScopePlan.CommitSHA))
+	if repositoryReviewValidCommitSHA(commit) {
+		return commit
+	}
+	return ""
+}
+
+func repositoryReviewValidCommitSHA(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func repositoryReviewValidCommitSelection(value string) bool {
+	return repositoryReviewValidCommitSHA(strings.ToLower(strings.TrimSpace(value)))
+}
+
 func (c *repositoryReviewController) startAutomation(
 	ctx context.Context,
 	id string,
 	expectedVersion int64,
 	resetBudget bool,
 	action string,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	return c.startAutomationAtCommit(
+		ctx,
+		id,
+		expectedVersion,
+		resetBudget,
+		action,
+		"",
+	)
+}
+
+func (c *repositoryReviewController) repositoryReviewCommitOptions(
+	ctx context.Context,
+	id string,
+) (repoaudit.RepositoryReviewAutomation, string, string, error) {
+	if c == nil || c.resolveCommit == nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", errors.New(
+			"repository review commit resolver is unavailable",
+		)
+	}
+	if err := c.Start(); err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", err
+	}
+	c.lifecycleMu.Lock()
+	if c.stopped || c.ctx.Err() != nil {
+		c.lifecycleMu.Unlock()
+		return repoaudit.RepositoryReviewAutomation{}, "", "", context.Canceled
+	}
+	c.admissionWG.Add(1)
+	c.lifecycleMu.Unlock()
+	defer c.admissionWG.Done()
+	optionsCtx, cancelOptions := context.WithCancel(c.ctx)
+	stopCallerCancellation := context.AfterFunc(ctx, cancelOptions)
+	defer func() {
+		stopCallerCancellation()
+		cancelOptions()
+	}()
+	ctx = optionsCtx
+	store := c.leasedStore
+	cfg, err := c.currentLeasedConfiguration()
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", err
+	}
+	automation, found, err := store.GetAutomation(ctx, id)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", err
+	}
+	if !found {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", os.ErrNotExist
+	}
+	if automation.Status != repoaudit.RepositoryReviewAutomationPaused {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", errRepositoryReviewInvalidTransition
+	}
+	remembered := repositoryReviewRememberedCommit(automation)
+	resolutionAutomation, err := repositoryReviewAutomationResolutionTarget(automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", err
+	}
+	latest, err := c.resolveCommit(ctx, cfg, resolutionAutomation, "")
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", err
+	}
+	latest = strings.ToLower(strings.TrimSpace(latest))
+	if !repositoryReviewValidCommitSHA(latest) {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", errors.New(
+			"repository review resolved a noncanonical latest commit",
+		)
+	}
+	if remembered == "" {
+		remembered = latest
+	}
+	current, currentFound, err := store.GetAutomation(ctx, id)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", err
+	}
+	if !currentFound {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", os.ErrNotExist
+	}
+	if current.Version != automation.Version ||
+		current.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		repositoryReviewRememberedCommit(current) != repositoryReviewRememberedCommit(automation) {
+		return repoaudit.RepositoryReviewAutomation{}, "", "", repoaudit.ErrConflict
+	}
+	return current, remembered, latest, nil
+}
+
+func (c *repositoryReviewController) startAutomationAtCommit(
+	ctx context.Context,
+	id string,
+	expectedVersion int64,
+	resetBudget bool,
+	action string,
+	commitSelection string,
 ) (repoaudit.RepositoryReviewAutomation, error) {
 	if err := c.Start(); err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
@@ -260,6 +510,7 @@ func (c *repositoryReviewController) startAutomation(
 	if automation.Version != expectedVersion {
 		return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict
 	}
+	rememberedAtAdmission := repositoryReviewRememberedCommit(automation)
 	switch action {
 	case "start":
 		if automation.Status != repoaudit.RepositoryReviewAutomationIdle {
@@ -307,6 +558,20 @@ func (c *repositoryReviewController) startAutomation(
 				repoaudit.ErrInvalidAutomation, model, effectiveAccount,
 			)
 		}
+	}
+	commitAutomation := automation
+	if repositoryReviewRememberedCommit(commitAutomation) == "" && rememberedAtAdmission != "" {
+		commitAutomation.ResolvedCommitSHA = rememberedAtAdmission
+	}
+	resolvedCommit, err := c.resolveRepositoryReviewAdmissionCommit(
+		ctx,
+		cfg,
+		commitAutomation,
+		action,
+		commitSelection,
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
 	}
 	expectedVersion = automation.Version
 	priced := automation
@@ -378,6 +643,10 @@ func (c *repositoryReviewController) startAutomation(
 		id,
 		expectedVersion,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			if candidate.ResolvedCommitSHA != resolvedCommit {
+				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+			}
+			candidate.ResolvedCommitSHA = resolvedCommit
 			candidate.Status = repoaudit.RepositoryReviewAutomationRunning
 			candidate.PauseReason = ""
 			candidate.PauseDetail = ""
@@ -410,9 +679,102 @@ func (c *repositoryReviewController) startAutomation(
 	return updated, nil
 }
 
+func (c *repositoryReviewController) resolveRepositoryReviewAdmissionCommit(
+	ctx context.Context,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+	action string,
+	selection string,
+) (string, error) {
+	if c == nil || c.resolveCommit == nil {
+		return "", errors.New("repository review commit resolver is unavailable")
+	}
+	selection = strings.TrimSpace(selection)
+	if selection != "" && !repositoryReviewValidCommitSelection(selection) {
+		return "", fmt.Errorf(
+			"%w: commit_sha must be a full 40 or 64 character hexadecimal commit ID",
+			repoaudit.ErrInvalidAutomation,
+		)
+	}
+	remembered := repositoryReviewRememberedCommit(automation)
+	if action == "start" && selection == "" && remembered != "" &&
+		strings.EqualFold(strings.TrimSpace(automation.Progress.Stage), "next batch queued") {
+		return remembered, nil
+	}
+	if action == "resume" && selection == "" {
+		latest, err := c.resolveCommit(ctx, cfg, automation, "")
+		if err != nil {
+			return "", err
+		}
+		latest = strings.ToLower(strings.TrimSpace(latest))
+		if !repositoryReviewValidCommitSHA(latest) {
+			return "", errors.New("repository review resolved a noncanonical latest commit")
+		}
+		if remembered != "" && remembered != latest {
+			return "", fmt.Errorf(
+				"%w: remembered commit %s differs from latest commit %s",
+				errRepositoryReviewCommitSelection,
+				remembered,
+				latest,
+			)
+		}
+		if remembered != "" {
+			return remembered, nil
+		}
+		return latest, nil
+	}
+	resolved, err := c.resolveCommit(ctx, cfg, automation, selection)
+	if err != nil {
+		if selection != "" {
+			return "", fmt.Errorf(
+				"%w: commit_sha could not be resolved in this repository: %v",
+				repoaudit.ErrInvalidAutomation,
+				err,
+			)
+		}
+		return "", err
+	}
+	resolved = strings.ToLower(strings.TrimSpace(resolved))
+	if !repositoryReviewValidCommitSHA(resolved) {
+		return "", errors.New("repository review resolved a noncanonical commit")
+	}
+	return resolved, nil
+}
+
 func (c *repositoryReviewController) normalizeRepositoryReviewAutomationAdmission(
 	ctx context.Context,
 	store repoaudit.Store,
+	automation repoaudit.RepositoryReviewAutomation,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	normalized, err := repositoryReviewAutomationResolutionTarget(automation)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if automation.Repository == normalized.Repository &&
+		automation.Ref == normalized.Ref &&
+		automation.Target == "all" {
+		return automation, nil
+	}
+	updated, err := c.update(
+		ctx,
+		store,
+		automation.ID,
+		automation.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.Repository = normalized.Repository
+			candidate.Ref = normalized.Ref
+			candidate.Target = "all"
+			resetRepositoryReviewExecutionCampaign(candidate)
+			return nil
+		},
+	)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	return updated, nil
+}
+
+func repositoryReviewAutomationResolutionTarget(
 	automation repoaudit.RepositoryReviewAutomation,
 ) (repoaudit.RepositoryReviewAutomation, error) {
 	repository, err := normalizeRepositoryReviewAutomationRepository(automation.Repository)
@@ -428,26 +790,10 @@ func (c *repositoryReviewController) normalizeRepositoryReviewAutomationAdmissio
 			return repoaudit.RepositoryReviewAutomation{}, err
 		}
 	}
-	if automation.Repository == repository && automation.Ref == branch && automation.Target == "all" {
-		return automation, nil
-	}
-	updated, err := c.update(
-		ctx,
-		store,
-		automation.ID,
-		automation.Version,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			candidate.Repository = repository
-			candidate.Ref = branch
-			candidate.Target = "all"
-			resetRepositoryReviewExecutionCampaign(candidate)
-			return nil
-		},
-	)
-	if err != nil {
-		return repoaudit.RepositoryReviewAutomation{}, err
-	}
-	return updated, nil
+	automation.Repository = repository
+	automation.Ref = branch
+	automation.Target = "all"
+	return automation, nil
 }
 
 func (c *repositoryReviewController) materializeLatestRepositoryReviewProfile(
@@ -537,6 +883,7 @@ func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryRevi
 		return
 	}
 	automation.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+	automation.ResolvedCommitSHA = ""
 	automation.RequestedPauseReason = ""
 	automation.RequestedPauseDetail = ""
 	automation.ActiveRunID = ""
@@ -570,6 +917,15 @@ func (c *repositoryReviewController) pauseAutomation(
 	id string,
 	expectedVersion int64,
 ) (repoaudit.RepositoryReviewAutomation, error) {
+	return c.pauseAutomationForRun(ctx, id, expectedVersion, "")
+}
+
+func (c *repositoryReviewController) pauseAutomationForRun(
+	ctx context.Context,
+	id string,
+	expectedVersion int64,
+	expectedRunID string,
+) (repoaudit.RepositoryReviewAutomation, error) {
 	if err := c.Start(); err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
@@ -593,35 +949,123 @@ func (c *repositoryReviewController) pauseAutomation(
 	if !locallyActive {
 		store = c.leasedStore
 	}
-	updated, err := store.UpdateAutomation(
-		ctx,
-		id,
-		expectedVersion,
-		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			switch candidate.Status {
-			case repoaudit.RepositoryReviewAutomationRunning:
-				candidate.Status = repoaudit.RepositoryReviewAutomationStopping
-				candidate.RequestedPauseReason = repoaudit.RepositoryReviewPauseManual
-				candidate.RequestedPauseDetail = "Paused manually after the current safe checkpoint."
-				candidate.Progress.Stage = "stopping after current batch"
-			case repoaudit.RepositoryReviewAutomationStopping:
-				return nil
-			default:
-				return errRepositoryReviewInvalidTransition
-			}
-			return nil
-		},
-	)
+	current, found, err := store.GetAutomation(ctx, id)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
+	if !found {
+		return repoaudit.RepositoryReviewAutomation{}, os.ErrNotExist
+	}
+	if expectedVersion < 1 || expectedVersion > current.Version {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict
+	}
+	expectedRunID = strings.TrimSpace(expectedRunID)
+	if expectedRunID == "" {
+		if expectedVersion != current.Version {
+			return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict
+		}
+	} else if len(expectedRunID) > 1024 || !repositoryReviewPauseRunMatches(current, expectedRunID) {
+		return repoaudit.RepositoryReviewAutomation{}, repoaudit.ErrConflict
+	}
+	if current.Status == repoaudit.RepositoryReviewAutomationStopping ||
+		current.Status == repoaudit.RepositoryReviewAutomationPaused ||
+		current.Status == repoaudit.RepositoryReviewAutomationCompleted ||
+		current.Status == repoaudit.RepositoryReviewAutomationFailed {
+		return current, nil
+	}
+	latchedRunID := current.ActiveRunID
+	updated, err := c.updateLatest(ctx, store, id, func(candidate *repoaudit.RepositoryReviewAutomation) error {
+		return applyRepositoryReviewPauseTransition(candidate, expectedVersion, expectedRunID)
+	})
+	if errors.Is(err, errRepositoryReviewPauseSettled) {
+		return loadSettledRepositoryReviewPause(ctx, store, id)
+	}
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	c.latchManualPause(id, latchedRunID)
+	return updated, nil
+}
+
+func loadSettledRepositoryReviewPause(
+	ctx context.Context,
+	store repoaudit.Store,
+	id string,
+) (repoaudit.RepositoryReviewAutomation, error) {
+	settled, found, err := store.GetAutomation(ctx, id)
+	if err != nil {
+		return repoaudit.RepositoryReviewAutomation{}, err
+	}
+	if !found {
+		return repoaudit.RepositoryReviewAutomation{}, os.ErrNotExist
+	}
+	return settled, nil
+}
+
+func applyRepositoryReviewPauseTransition(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	expectedVersion int64,
+	expectedRunID string,
+) error {
+	if candidate == nil {
+		return errRepositoryReviewInvalidTransition
+	}
+	if expectedRunID == "" && candidate.Version != expectedVersion {
+		return repoaudit.ErrConflict
+	}
+	if expectedRunID != "" && !repositoryReviewPauseRunMatches(*candidate, expectedRunID) {
+		return repoaudit.ErrConflict
+	}
+	switch candidate.Status {
+	case repoaudit.RepositoryReviewAutomationRunning:
+		candidate.Status = repoaudit.RepositoryReviewAutomationStopping
+		candidate.RequestedPauseReason = repoaudit.RepositoryReviewPauseManual
+		candidate.RequestedPauseDetail = "Paused manually after the current safe checkpoint."
+		candidate.Progress.Stage = "stopping after current batch"
+	case repoaudit.RepositoryReviewAutomationIdle:
+		if !candidate.AutoContinue ||
+			!strings.EqualFold(strings.TrimSpace(candidate.Progress.Stage), "next batch queued") {
+			return errRepositoryReviewInvalidTransition
+		}
+		candidate.Status = repoaudit.RepositoryReviewAutomationPaused
+		candidate.PauseReason = repoaudit.RepositoryReviewPauseManual
+		candidate.PauseDetail = "Paused before the next review batch started."
+		candidate.Progress.Stage = "paused"
+	case repoaudit.RepositoryReviewAutomationStopping,
+		repoaudit.RepositoryReviewAutomationPaused,
+		repoaudit.RepositoryReviewAutomationCompleted,
+		repoaudit.RepositoryReviewAutomationFailed:
+		return errRepositoryReviewPauseSettled
+	default:
+		return errRepositoryReviewInvalidTransition
+	}
+	return nil
+}
+
+func (c *repositoryReviewController) latchManualPause(id, runID string) {
+	if c == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
 	c.mu.Lock()
-	if active := c.active[id]; active != nil {
+	if active := c.active[id]; active != nil && active.runID == runID {
 		active.pauseReason = repoaudit.RepositoryReviewPauseManual
 		active.pauseDetail = "Paused manually after the current safe checkpoint."
 	}
 	c.mu.Unlock()
-	return updated, nil
+}
+
+func repositoryReviewPauseRunMatches(
+	automation repoaudit.RepositoryReviewAutomation,
+	expectedRunID string,
+) bool {
+	expectedRunID = strings.TrimSpace(expectedRunID)
+	if expectedRunID == "" {
+		return false
+	}
+	if automation.ActiveRunID != "" {
+		return automation.ActiveRunID == expectedRunID
+	}
+	return len(automation.RunIDs) > 0 && automation.RunIDs[len(automation.RunIDs)-1] == expectedRunID
 }
 
 func (c *repositoryReviewController) executeAutomation(id, runID string) {
@@ -649,6 +1093,9 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	}
 	if c.runBatch != nil {
 		result, runErr := c.runBatch(runCtx, automation, runID, observeUsage)
+		if commitErr := repositoryReviewValidateExecutionCommit(automation, result); commitErr != nil {
+			runErr = errors.Join(runErr, commitErr)
+		}
 		checkpointed := runErr == nil && result != nil && result.Status == workflows.RunStatusSucceeded
 		c.finishAutomationRun(id, runID, result, runErr, checkpointed)
 		return
@@ -671,23 +1118,14 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		runID,
 		func() error { return c.admitProviderCall(id, runID) },
 	)
-	executor.ManagedChildActivityObserver = func(event workflows.ManagedChildActivityEvent) error {
-		if event.RunID != runID || event.StepID != "review" {
-			return nil
-		}
-		return c.observeRepositoryReviewTask(id, runID, event.ManagedChildActivity)
-	}
+	executor.ManagedChildActivityObserver = c.repositoryReviewManagedChildObserver(id, runID)
 
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
 		c.monitorWorkflowProgress(runCtx, store, workflowStore, id, runID)
 	}()
-	scopePolicyJSON, err := json.Marshal(automation.ScopePolicy)
-	if err != nil {
-		c.finishAutomationRun(id, runID, nil, err, false)
-		return
-	}
+	scopePolicyJSON, _ := json.Marshal(automation.ScopePolicy)
 	result, runErr := executor.Run(runCtx, workflows.RunRequest{
 		RunID:       runID,
 		Workflow:    workflow,
@@ -695,7 +1133,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		Inputs: map[string]any{
 			"repository":              automation.Repository,
 			"account_ref":             repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
-			"ref":                     repositoryReviewWorkflowRef(automation.Ref),
+			"ref":                     repositoryReviewExecutionRef(automation),
 			"target":                  automation.Target,
 			"review_focus":            automation.ReviewFocus,
 			"review_models":           strings.Join(repositoryReviewExecutionModels(automation), ","),
@@ -708,14 +1146,35 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 			"estimated_output_tokens": automation.EstimatedOutputTokens,
 		},
 	})
+	runErr = repositoryReviewJoinCommitError(automation, result, runErr)
 	checkpointed := false
 	if persisted, persistedErr := workflowStore.GetRun(context.Background(), runID); persistedErr == nil {
 		c.recordManagedChildOutcomes(id, runID, persisted, priceIndex)
-		checkpointed = repositoryReviewRunCheckpointed(persisted, result)
+		checkpointed = runErr == nil && repositoryReviewRunCheckpointed(persisted, result)
 	}
 	cancel()
 	<-monitorDone
 	c.finishAutomationRun(id, runID, result, runErr, checkpointed)
+}
+
+func repositoryReviewJoinCommitError(
+	automation repoaudit.RepositoryReviewAutomation,
+	result *workflows.RunResult,
+	runErr error,
+) error {
+	return errors.Join(runErr, repositoryReviewValidateExecutionCommit(automation, result))
+}
+
+func (c *repositoryReviewController) repositoryReviewManagedChildObserver(
+	id string,
+	runID string,
+) workflows.ManagedChildActivityEventObserver {
+	return func(event workflows.ManagedChildActivityEvent) error {
+		if event.RunID != runID || event.StepID != "review" {
+			return nil
+		}
+		return c.observeRepositoryReviewTask(id, runID, event.ManagedChildActivity)
+	}
 }
 
 func repositoryReviewWorkflowRef(branch string) string {
@@ -724,6 +1183,35 @@ func repositoryReviewWorkflowRef(branch string) string {
 		return ""
 	}
 	return "refs/heads/" + branch
+}
+
+func repositoryReviewExecutionRef(automation repoaudit.RepositoryReviewAutomation) string {
+	if commit := repositoryReviewRememberedCommit(automation); commit != "" {
+		return commit
+	}
+	return repositoryReviewWorkflowRef(automation.Ref)
+}
+
+func repositoryReviewValidateExecutionCommit(
+	automation repoaudit.RepositoryReviewAutomation,
+	result *workflows.RunResult,
+) error {
+	expected := repositoryReviewRememberedCommit(automation)
+	if expected == "" || result == nil || result.Outputs == nil {
+		return nil
+	}
+	actual := strings.ToLower(strings.TrimSpace(fmt.Sprint(result.Outputs["commit"])))
+	if actual == "" || actual == "<nil>" {
+		return nil
+	}
+	if actual != expected {
+		return fmt.Errorf(
+			"repository review workflow resolved commit %s, want remembered commit %s",
+			actual,
+			expected,
+		)
+	}
+	return nil
 }
 
 func repositoryReviewAgentUsageObserver(

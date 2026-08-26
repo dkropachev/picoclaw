@@ -19,6 +19,7 @@ import {
 import { createThread, dropThread } from "@/api/threads"
 import {
   discussionPrompt,
+  githubCommitURL,
   githubNewIssueURL,
 } from "@/components/repository-reviews/repository-review-actions"
 import { RepositoryReviewsPage } from "@/components/repository-reviews/repository-reviews-page"
@@ -550,6 +551,19 @@ describe("githubNewIssueURL", () => {
       undefined,
     )
     expect(githubNewIssueURL("owner/repo/extra", draft)).toBe(undefined)
+  })
+
+  it("builds GitHub links only for full commit SHAs", () => {
+    const sha40 = "a".repeat(40)
+    const sha64 = "b".repeat(64)
+    expect(githubCommitURL("https://github.com/owner/repo.git", sha40)).toBe(
+      `https://github.com/owner/repo/commit/${sha40}`,
+    )
+    expect(githubCommitURL("git@github.com:owner/repo.git", sha64)).toBe(
+      `https://github.com/owner/repo/commit/${sha64}`,
+    )
+    expect(githubCommitURL("owner/repo", "abc1234")).toBe(undefined)
+    expect(githubCommitURL("/srv/repo", sha40)).toBe(undefined)
   })
 })
 

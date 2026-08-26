@@ -16,6 +16,30 @@ import (
 
 var automationTestNow = time.Date(2026, 8, 20, 15, 0, 0, 0, time.UTC)
 
+func TestAutomationStorePersistsCanonicalResolvedCommit(t *testing.T) {
+	store := newAutomationTestStore(t)
+	input := validAutomationForTest("rra_resolved_commit", "Resolved commit")
+	input.ResolvedCommitSHA = strings.Repeat("A", 40)
+	created, err := store.CreateAutomation(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("a", 40)
+	if created.ResolvedCommitSHA != want {
+		t.Fatalf("resolved commit = %q, want %q", created.ResolvedCommitSHA, want)
+	}
+	loaded, found, err := store.GetAutomation(context.Background(), created.ID)
+	if err != nil || !found || loaded.ResolvedCommitSHA != want {
+		t.Fatalf("reopened resolved commit = %q found=%v err=%v", loaded.ResolvedCommitSHA, found, err)
+	}
+
+	invalid := validAutomationForTest("rra_invalid_commit", "Invalid commit")
+	invalid.ResolvedCommitSHA = "main"
+	if _, err := store.CreateAutomation(context.Background(), invalid); !errors.Is(err, ErrInvalidAutomation) {
+		t.Fatalf("invalid resolved commit error = %v", err)
+	}
+}
+
 func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
 	store := NewStore(t.TempDir())
 	store.now = func() time.Time { return automationTestNow }

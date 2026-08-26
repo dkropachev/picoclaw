@@ -1,3 +1,8 @@
+import type {
+  CollectionListRequest,
+  CollectionPageMetadata,
+} from "@/api/collection"
+import { collectionListURL } from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export type RepositoryReviewFindingStatus = "open" | "dismissed" | "posted"
@@ -354,6 +359,7 @@ export interface RepositoryReviewAutomation extends RepositoryReviewAutomationCo
   model_stats: RepositoryReviewModelStats[]
   account_limits: RepositoryReviewAccountSnapshot[]
   scope_plan?: RepositoryReviewScopePlan
+  resolved_commit_sha?: string
   started_at?: string
   completed_at?: string
   created_at: string
@@ -364,6 +370,23 @@ export interface RepositoryReviewAutomationOptions {
   models: ReviewModelOption[]
   accounts: ReviewAccountOption[]
   limits_error?: string
+}
+
+export interface RepositoryReviewAutomationPage extends CollectionPageMetadata {
+  automations: RepositoryReviewAutomation[]
+}
+
+export interface RepositoryReviewCommitOption {
+  sha: string
+  short_sha: string
+  url?: string
+}
+
+export interface RepositoryReviewCommitOptions {
+  expected_version: number
+  remembered: RepositoryReviewCommitOption
+  latest: RepositoryReviewCommitOption
+  newer_commit_available: boolean
 }
 
 export class RepositoryReviewAPIError extends Error {
@@ -403,6 +426,24 @@ export async function listRepositoryReviewAutomations(
   }>(`${apiRoot}/automations`, undefined, signal)
   return {
     automations: (page.automations ?? []).map(normalizeAutomation),
+  }
+}
+
+export async function listRepositoryReviewAutomationsPage(
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewAutomationPage> {
+  const page = await requestJSON<Partial<RepositoryReviewAutomationPage>>(
+    collectionListURL(`${apiRoot}/automations`, input),
+    undefined,
+    signal,
+  )
+  return {
+    automations: (page.automations ?? []).map(normalizeAutomation),
+    total: page.total ?? 0,
+    next_cursor: page.next_cursor ?? "",
+    canonical_query: page.canonical_query ?? "",
+    query_schema: page.query_schema ?? { fields: [] },
   }
 }
 
@@ -493,6 +534,17 @@ export async function getRepositoryReviewAutomationOptions(
   }
 }
 
+export async function getRepositoryReviewCommitOptions(
+  automationID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryReviewCommitOptions> {
+  return requestJSON<RepositoryReviewCommitOptions>(
+    `${automationPath(automationID)}/commit-options`,
+    undefined,
+    signal,
+  )
+}
+
 export async function createRepositoryReviewAutomation(
   input: RepositoryReviewRepositoryConfigInput,
   signal?: AbortSignal,
@@ -542,7 +594,7 @@ export async function startRepositoryReviewAutomation(
 
 export async function pauseRepositoryReviewAutomation(
   automationID: string,
-  input: { expected_version: number },
+  input: { expected_version: number; run_id?: string },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return mutateAutomationAction(automationID, "pause", input, signal)
@@ -550,7 +602,7 @@ export async function pauseRepositoryReviewAutomation(
 
 export async function resumeRepositoryReviewAutomation(
   automationID: string,
-  input: { expected_version: number },
+  input: { expected_version: number; commit_sha?: string },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return mutateAutomationAction(automationID, "resume", input, signal)
@@ -741,7 +793,7 @@ interface ProfileMutationResult {
 async function mutateAutomationAction(
   automationID: string,
   action: "start" | "pause" | "resume" | "restart",
-  input: { expected_version: number },
+  input: { expected_version: number; commit_sha?: string; run_id?: string },
   signal?: AbortSignal,
 ): Promise<RepositoryReviewAutomation> {
   return automationFromMutation(

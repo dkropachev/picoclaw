@@ -279,6 +279,13 @@ func TestRepositoryReviewCoverageAutomationMutationBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	running, err = store.UpdateAutomation(
+		t.Context(), running.ID, running.Version,
+		func(*repoaudit.RepositoryReviewAutomation) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	controller := handler.repositoryReviewControllerInstance()
 	controller.mu.Lock()
 	controller.active[running.ID] = &repositoryReviewActiveRun{runID: running.ActiveRunID, store: store}
@@ -1478,6 +1485,843 @@ func TestRepositoryReviewExecutionReachesProviderAdmissionOnLocalRepository(t *t
 	}
 }
 
+func TestRepositoryReviewCommitResolverPinsBranchAndExactCommit(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	repository := t.TempDir()
+	git := func(arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", arguments...)
+		command.Dir = repository
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-b", "main")
+	git("config", "user.email", "review@example.test")
+	git("config", "user.name", "Repository Review Test")
+	if err := os.WriteFile(filepath.Join(repository, "first.go"), []byte("package first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "first.go")
+	git("commit", "-m", "first")
+	first := git("rev-parse", "HEAD")
+
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_resolver"
+	automation.Repository = repository
+	resolved, err := resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, "")
+	if err != nil || resolved != first {
+		t.Fatalf("initial resolved commit = %q, want %q, err=%v", resolved, first, err)
+	}
+
+	if writeErr := os.WriteFile(
+		filepath.Join(repository, "second.go"),
+		[]byte("package second\n"),
+		0o600,
+	); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	git("add", "second.go")
+	git("commit", "-m", "second")
+	latest := git("rev-parse", "HEAD")
+	resolved, err = resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, "")
+	if err != nil || resolved != latest {
+		t.Fatalf("latest resolved commit = %q, want %q, err=%v", resolved, latest, err)
+	}
+	resolved, err = resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, first)
+	if err != nil || resolved != first {
+		t.Fatalf("exact resolved commit = %q, want %q, err=%v", resolved, first, err)
+	}
+	if _, err = resolveRepositoryReviewAutomationCommit(
+		t.Context(), cfg, automation, strings.Repeat("f", 40),
+	); err == nil {
+		t.Fatal("unreachable exact commit resolved")
+	}
+	git("checkout", "-b", "feature/review")
+	if writeErr := os.WriteFile(
+		filepath.Join(repository, "feature.go"),
+		[]byte("package feature\n"),
+		0o600,
+	); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	git("add", "feature.go")
+	git("commit", "-m", "feature")
+	feature := git("rev-parse", "HEAD")
+	git("checkout", "main")
+	automation.Ref = "feature/review"
+	resolved, err = resolveRepositoryReviewAutomationCommit(t.Context(), cfg, automation, "")
+	if err != nil || resolved != feature {
+		t.Fatalf("feature resolved commit = %q, want %q, err=%v", resolved, feature, err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		revParse   string
+		wantPhrase string
+	}{
+		{name: "rev parse fails", revParse: "exit 9", wantPhrase: "commit ID"},
+		{name: "rev parse is invalid", revParse: "printf 'not-a-commit\\n'", wantPhrase: "noncanonical"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wrapperRoot := t.TempDir()
+			wrapper := filepath.Join(wrapperRoot, "git")
+			script := "#!/bin/sh\nif [ \"$1\" = \"rev-parse\" ]; then " + test.revParse +
+				"; fi\nexec \"" + realGit + "\" \"$@\"\n"
+			if writeErr := os.WriteFile(wrapper, []byte(script), 0o700); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			t.Setenv("PATH", wrapperRoot+string(os.PathListSeparator)+os.Getenv("PATH"))
+			candidate := automation
+			candidate.ID += "_" + strings.ReplaceAll(test.name, " ", "_")
+			resolverConfig := *cfg
+			resolverConfig.GitWorkspaces.RootDir = t.TempDir()
+			_, resolveErr := resolveRepositoryReviewAutomationCommit(
+				t.Context(), &resolverConfig, candidate, feature,
+			)
+			if resolveErr == nil || !strings.Contains(resolveErr.Error(), test.wantPhrase) {
+				t.Fatalf("wrapped resolver error=%v", resolveErr)
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewCommitResolutionBoundaryCoverage(t *testing.T) {
+	if _, err := resolveRepositoryReviewAutomationCommit(
+		t.Context(), nil, repoaudit.RepositoryReviewAutomation{}, "",
+	); err == nil {
+		t.Fatal("nil configuration resolved a commit")
+	}
+	invalidRootConfig := config.DefaultConfig()
+	invalidRootConfig.Agents.Defaults.Workspace = t.TempDir()
+	invalidRoot := filepath.Join(t.TempDir(), "root-file")
+	if writeErr := os.WriteFile(invalidRoot, nil, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	invalidRootConfig.GitWorkspaces.RootDir = invalidRoot
+	if _, err := resolveRepositoryReviewAutomationCommit(
+		t.Context(), invalidRootConfig, testRepositoryReviewAutomation(), "",
+	); err == nil {
+		t.Fatal("invalid git workspace root initialized")
+	}
+	validConfig := config.DefaultConfig()
+	validConfig.Agents.Defaults.Workspace = t.TempDir()
+	validConfig.GitWorkspaces.RootDir = t.TempDir()
+	invalidRepository := testRepositoryReviewAutomation()
+	invalidRepository.ID = "rra_invalid_repository"
+	invalidRepository.Repository = "https://127.0.0.1:1/unavailable.git"
+	if _, err := resolveRepositoryReviewAutomationCommit(
+		t.Context(), validConfig, invalidRepository, "",
+	); err == nil {
+		t.Fatal("unavailable repository resolved")
+	}
+
+	if _, err := repositoryReviewGitOutput(
+		t.Context(), "", 16, "repository-review-command-that-does-not-exist",
+	); err == nil {
+		t.Fatal("missing command succeeded")
+	}
+	if _, err := repositoryReviewGitOutput(
+		t.Context(), "", 16, "sh", "-c", "exit 7",
+	); err == nil {
+		t.Fatal("failed command succeeded")
+	}
+	if _, err := repositoryReviewGitOutput(
+		t.Context(), "", 2, "sh", "-c", "printf 12345",
+	); err == nil {
+		t.Fatal("oversized command output succeeded")
+	}
+
+	commit := strings.Repeat("a", 40)
+	automation := repoaudit.RepositoryReviewAutomation{
+		ScopePlan: repoaudit.RepositoryReviewScopePlan{CommitSHA: commit},
+	}
+	if got := repositoryReviewRememberedCommit(automation); got != commit {
+		t.Fatalf("scope-plan commit=%q", got)
+	}
+	if got := repositoryReviewRememberedCommit(repoaudit.RepositoryReviewAutomation{}); got != "" {
+		t.Fatalf("empty remembered commit=%q", got)
+	}
+	if repositoryReviewValidCommitSHA(strings.Repeat("g", 40)) {
+		t.Fatal("non-hex commit accepted")
+	}
+	if got := repositoryReviewExecutionRef(
+		repoaudit.RepositoryReviewAutomation{Ref: "main"},
+	); got != "refs/heads/main" {
+		t.Fatalf("fallback execution ref=%q", got)
+	}
+	if got := repositoryReviewExecutionRef(repoaudit.RepositoryReviewAutomation{
+		ResolvedCommitSHA: commit,
+	}); got != commit {
+		t.Fatalf("remembered execution ref=%q", got)
+	}
+}
+
+func TestRepositoryReviewAdmissionCommitBoundaryCoverage(t *testing.T) {
+	commitA := strings.Repeat("a", 40)
+	commitB := strings.Repeat("b", 40)
+	cfg := config.DefaultConfig()
+	automation := testRepositoryReviewAutomation()
+	automation.ResolvedCommitSHA = commitA
+
+	if _, err := (*repositoryReviewController)(nil).resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "start", "",
+	); err == nil {
+		t.Fatal("nil resolver admitted a commit")
+	}
+	controller := &repositoryReviewController{}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "resume", "short",
+	); err == nil {
+		t.Fatal("short commit selection admitted")
+	}
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return "", errors.New("resolve failed")
+	}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "resume", "",
+	); err == nil {
+		t.Fatal("resume resolver failure admitted")
+	}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "resume", commitB,
+	); !errors.Is(err, repoaudit.ErrInvalidAutomation) {
+		t.Fatalf("selected resolver failure=%v", err)
+	}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "start", "",
+	); err == nil {
+		t.Fatal("start resolver failure admitted")
+	}
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return "not-a-commit", nil
+	}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "resume", "",
+	); err == nil {
+		t.Fatal("invalid latest commit admitted")
+	}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "start", "",
+	); err == nil {
+		t.Fatal("invalid start commit admitted")
+	}
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return commitB, nil
+	}
+	if _, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "resume", "",
+	); !errors.Is(err, errRepositoryReviewCommitSelection) {
+		t.Fatalf("moved resume error=%v", err)
+	}
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return commitA, nil
+	}
+	if got, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, automation, "resume", "",
+	); err != nil || got != commitA {
+		t.Fatalf("same resume commit=%q err=%v", got, err)
+	}
+	withoutRemembered := automation
+	withoutRemembered.ResolvedCommitSHA = ""
+	if got, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, withoutRemembered, "resume", "",
+	); err != nil || got != commitA {
+		t.Fatalf("new resume commit=%q err=%v", got, err)
+	}
+	queued := automation
+	queued.Progress.Stage = "next batch queued"
+	if got, err := controller.resolveRepositoryReviewAdmissionCommit(
+		t.Context(), cfg, queued, "start", "",
+	); err != nil || got != commitA {
+		t.Fatalf("queued commit=%q err=%v", got, err)
+	}
+}
+
+func TestRepositoryReviewCommitOptionsBoundaryCoverage(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	response := httptest.NewRecorder()
+	var nilHandler *Handler
+	nilHandler.handleRepositoryReviewAutomationCommitOptions(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/rra_missing/commit-options",
+			nil,
+		),
+	)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("nil handler commit options status=%d", response.Code)
+	}
+	setup := func(
+		t *testing.T,
+		status repoaudit.RepositoryReviewAutomationStatus,
+		remembered string,
+	) (*Handler, repoaudit.Store, repoaudit.RepositoryReviewAutomation, *repositoryReviewController, string) {
+		t.Helper()
+		handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+		t.Cleanup(handler.Shutdown)
+		store, err := handler.repositoryReviewStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		automation := testRepositoryReviewAutomation()
+		testID := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+		automation.ID = "rra_commit_options_" + strings.ToLower(testID)
+		automation.Status = status
+		automation.ResolvedCommitSHA = remembered
+		if status == repoaudit.RepositoryReviewAutomationPaused {
+			automation.PauseReason = repoaudit.RepositoryReviewPauseManual
+			automation.PauseDetail = "paused"
+		}
+		automation, err = store.CreateAutomation(t.Context(), automation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := repositoryReviewCoverageLeasedController(t, handler, store)
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return commit, nil
+		}
+		t.Cleanup(controller.cancel)
+		return handler, store, automation, controller, workspace
+	}
+
+	if _, _, _, err := (*repositoryReviewController)(nil).repositoryReviewCommitOptions(
+		t.Context(), "rra_missing",
+	); err == nil {
+		t.Fatal("nil commit-options controller succeeded")
+	}
+	if _, _, _, err := newRepositoryReviewController(nil).repositoryReviewCommitOptions(
+		t.Context(), "rra_missing",
+	); err == nil {
+		t.Fatal("unavailable commit-options controller succeeded")
+	}
+
+	t.Run("stopped", func(t *testing.T) {
+		_, _, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		controller.cancel()
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); !errors.Is(err, context.Canceled) {
+			t.Fatalf("stopped options error=%v", err)
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		handler, _, _, _, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		store, err := handler.repositoryReviewStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := repositoryReviewCoverageLeasedController(t, handler, store)
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return commit, nil
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), "rra_not_found",
+		); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing options error=%v", err)
+		}
+	})
+	t.Run("invalid status", func(t *testing.T) {
+		_, _, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationIdle, "",
+		)
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); !errors.Is(err, errRepositoryReviewInvalidTransition) {
+			t.Fatalf("idle options error=%v", err)
+		}
+	})
+	t.Run("invalid legacy branch", func(t *testing.T) {
+		_, store, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		automation, err := store.UpdateAutomation(
+			t.Context(), automation.ID, automation.Version,
+			func(candidate *repoaudit.RepositoryReviewAutomation) error {
+				candidate.Ref = "not a branch"
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("invalid legacy branch returned no error")
+		}
+	})
+	t.Run("resolver errors", func(t *testing.T) {
+		_, _, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return "", errors.New("resolver failed")
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("resolver failure returned no error")
+		}
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return "invalid", nil
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("invalid resolver commit returned no error")
+		}
+	})
+	t.Run("adopts latest", func(t *testing.T) {
+		_, _, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, "",
+		)
+		_, remembered, latest, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		)
+		if err != nil || remembered != commit || latest != commit {
+			t.Fatalf("adopted options remembered=%q latest=%q err=%v", remembered, latest, err)
+		}
+	})
+	t.Run("configuration changes", func(t *testing.T) {
+		handler, _, automation, controller, _ := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		if writeErr := os.WriteFile(handler.configPath, []byte("{"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("corrupt current configuration returned no error")
+		}
+	})
+	t.Run("state corrupts during resolution", func(t *testing.T) {
+		_, _, automation, controller, workspace := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		statePath := filepath.Join(
+			workspace,
+			"repository_reviews",
+			"automation_"+automation.ID+".json",
+		)
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return commit, os.WriteFile(statePath, []byte("{"), 0o600)
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("mid-resolution corruption returned no error")
+		}
+	})
+	t.Run("state changes", func(t *testing.T) {
+		_, store, automation, controller, workspace := setup(
+			t, repoaudit.RepositoryReviewAutomationPaused, commit,
+		)
+		controller.resolveCommit = func(
+			ctx context.Context,
+			_ *config.Config,
+			_ repoaudit.RepositoryReviewAutomation,
+			_ string,
+		) (string, error) {
+			_, updateErr := store.UpdateAutomation(ctx, automation.ID, automation.Version, func(
+				candidate *repoaudit.RepositoryReviewAutomation,
+			) error {
+				candidate.PauseDetail = "changed"
+				return nil
+			})
+			return commit, updateErr
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); !errors.Is(err, repoaudit.ErrConflict) {
+			t.Fatalf("changed options error=%v", err)
+		}
+
+		current, found, err := store.GetAutomation(t.Context(), automation.ID)
+		if err != nil || !found {
+			t.Fatalf("changed automation found=%v err=%v", found, err)
+		}
+		controller.resolveCommit = func(
+			ctx context.Context,
+			_ *config.Config,
+			_ repoaudit.RepositoryReviewAutomation,
+			_ string,
+		) (string, error) {
+			return commit, store.DeleteAutomation(ctx, current.ID, current.Version)
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), current.ID,
+		); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("deleted options error=%v", err)
+		}
+
+		statePath := filepath.Join(
+			workspace,
+			"repository_reviews",
+			"automation_"+automation.ID+".json",
+		)
+		if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if _, _, _, err := controller.repositoryReviewCommitOptions(
+			t.Context(), automation.ID,
+		); err == nil {
+			t.Fatal("corrupt options state returned no error")
+		}
+	})
+}
+
+func TestRepositoryReviewPauseBoundaryCoverage(t *testing.T) {
+	if err := applyRepositoryReviewPauseTransition(nil, 1, ""); !errors.Is(err, errRepositoryReviewInvalidTransition) {
+		t.Fatalf("nil pause transition error=%v", err)
+	}
+	transition := testRepositoryReviewAutomation()
+	transition.Version = 2
+	transition.Status = repoaudit.RepositoryReviewAutomationRunning
+	transition.ActiveRunID = "wr_transition"
+	transition.RunIDs = []string{transition.ActiveRunID}
+	if err := applyRepositoryReviewPauseTransition(&transition, 1, ""); !errors.Is(err, repoaudit.ErrConflict) {
+		t.Fatalf("stale pause transition error=%v", err)
+	}
+	if err := applyRepositoryReviewPauseTransition(&transition, 2, "wr_other"); !errors.Is(err, repoaudit.ErrConflict) {
+		t.Fatalf("wrong-run pause transition error=%v", err)
+	}
+	for _, status := range []repoaudit.RepositoryReviewAutomationStatus{
+		repoaudit.RepositoryReviewAutomationStopping,
+		repoaudit.RepositoryReviewAutomationPaused,
+		repoaudit.RepositoryReviewAutomationCompleted,
+		repoaudit.RepositoryReviewAutomationFailed,
+	} {
+		candidate := transition
+		candidate.Status = status
+		candidate.ActiveRunID = ""
+		candidate.RunIDs = []string{"wr_transition"}
+		if err := applyRepositoryReviewPauseTransition(
+			&candidate, 2, "wr_transition",
+		); !errors.Is(err, errRepositoryReviewPauseSettled) {
+			t.Fatalf("settled status %q error=%v", status, err)
+		}
+	}
+	invalid := transition
+	invalid.Status = repoaudit.RepositoryReviewAutomationStatus("unknown")
+	if err := applyRepositoryReviewPauseTransition(
+		&invalid, 2, "wr_transition",
+	); !errors.Is(err, errRepositoryReviewInvalidTransition) {
+		t.Fatalf("invalid pause transition error=%v", err)
+	}
+	idleTransition := transition
+	idleTransition.Status = repoaudit.RepositoryReviewAutomationIdle
+	idleTransition.ActiveRunID = ""
+	idleTransition.RunIDs = []string{"wr_transition"}
+	idleTransition.AutoContinue = true
+	idleTransition.Progress.Stage = "not queued"
+	if err := applyRepositoryReviewPauseTransition(
+		&idleTransition, 2, "wr_transition",
+	); !errors.Is(err, errRepositoryReviewInvalidTransition) {
+		t.Fatalf("unqueued pause transition error=%v", err)
+	}
+	idleTransition.Progress.Stage = "next batch queued"
+	if err := applyRepositoryReviewPauseTransition(&idleTransition, 2, "wr_transition"); err != nil ||
+		idleTransition.Status != repoaudit.RepositoryReviewAutomationPaused {
+		t.Fatalf("queued pause transition=%#v error=%v", idleTransition, err)
+	}
+
+	if repositoryReviewPauseRunMatches(repoaudit.RepositoryReviewAutomation{}, "") {
+		t.Fatal("empty pause run matched")
+	}
+	if repositoryReviewPauseRunMatches(
+		repoaudit.RepositoryReviewAutomation{ActiveRunID: "wr_active"}, "wr_other",
+	) {
+		t.Fatal("different active run matched")
+	}
+	if !repositoryReviewPauseRunMatches(
+		repoaudit.RepositoryReviewAutomation{RunIDs: []string{"wr_done"}}, "wr_done",
+	) {
+		t.Fatal("latest completed run did not match")
+	}
+	if repositoryReviewPauseRunMatches(
+		repoaudit.RepositoryReviewAutomation{RunIDs: []string{"wr_done"}}, "wr_other",
+	) {
+		t.Fatal("different completed run matched")
+	}
+
+	handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := repositoryReviewCoverageLeasedController(t, handler, store)
+	if _, pauseErr := controller.pauseAutomationForRun(
+		t.Context(), "rra_not_found", 1, "wr_missing",
+	); !errors.Is(pauseErr, os.ErrNotExist) {
+		t.Fatalf("missing pause error=%v", pauseErr)
+	}
+
+	runningInput := testRepositoryReviewAutomation()
+	runningInput.ID = "rra_pause_boundaries"
+	runningInput.Status = repoaudit.RepositoryReviewAutomationRunning
+	runningInput.ActiveRunID = "wr_pause_boundaries"
+	runningInput.RunIDs = []string{runningInput.ActiveRunID}
+	running, err := store.CreateAutomation(t.Context(), runningInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err = store.UpdateAutomation(
+		t.Context(), running.ID, running.Version,
+		func(*repoaudit.RepositoryReviewAutomation) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []struct {
+		name    string
+		version int64
+		runID   string
+	}{
+		{name: "zero version", version: 0, runID: running.ActiveRunID},
+		{name: "future version", version: running.Version + 1, runID: running.ActiveRunID},
+		{name: "stale without run", version: running.Version - 1},
+		{name: "long run", version: running.Version, runID: strings.Repeat("x", 1025)},
+		{name: "wrong run", version: running.Version, runID: "wr_other"},
+	} {
+		t.Run(request.name, func(t *testing.T) {
+			if _, pauseErr := controller.pauseAutomationForRun(
+				t.Context(), running.ID, request.version, request.runID,
+			); !errors.Is(pauseErr, repoaudit.ErrConflict) {
+				t.Fatalf("pause error=%v", pauseErr)
+			}
+		})
+	}
+
+	idleInput := testRepositoryReviewAutomation()
+	idleInput.ID = "rra_pause_idle_boundary"
+	idleInput.AutoContinue = false
+	idle, err := store.CreateAutomation(t.Context(), idleInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, pauseErr := controller.pauseAutomationForRun(
+		t.Context(), idle.ID, idle.Version, "",
+	); !errors.Is(pauseErr, errRepositoryReviewInvalidTransition) {
+		t.Fatalf("idle pause error=%v", pauseErr)
+	}
+
+	pausedInput := testRepositoryReviewAutomation()
+	pausedInput.ID = "rra_pause_settled_boundary"
+	pausedInput.Status = repoaudit.RepositoryReviewAutomationPaused
+	pausedInput.PauseReason = repoaudit.RepositoryReviewPauseManual
+	pausedInput.PauseDetail = "paused"
+	paused, err := store.CreateAutomation(t.Context(), pausedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, pauseErr := controller.pauseAutomationForRun(
+		t.Context(), paused.ID, paused.Version, "",
+	); pauseErr != nil || got.Status != repoaudit.RepositoryReviewAutomationPaused {
+		t.Fatalf("settled pause=%#v err=%v", got, pauseErr)
+	}
+	if got, loadErr := loadSettledRepositoryReviewPause(
+		t.Context(), store, paused.ID,
+	); loadErr != nil || got.ID != paused.ID {
+		t.Fatalf("loaded settled pause=%#v err=%v", got, loadErr)
+	}
+	if _, loadErr := loadSettledRepositoryReviewPause(
+		t.Context(), store, "rra_settled_missing",
+	); !errors.Is(loadErr, os.ErrNotExist) {
+		t.Fatalf("missing settled pause error=%v", loadErr)
+	}
+
+	corruptInput := testRepositoryReviewAutomation()
+	corruptInput.ID = "rra_pause_corrupt_boundary"
+	corrupt, err := store.CreateAutomation(t.Context(), corruptInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(
+		workspace,
+		"repository_reviews",
+		"automation_"+corrupt.ID+".json",
+	)
+	if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if _, pauseErr := controller.pauseAutomationForRun(
+		t.Context(), corrupt.ID, corrupt.Version, "",
+	); pauseErr == nil {
+		t.Fatal("corrupt pause state returned no error")
+	}
+	if _, loadErr := loadSettledRepositoryReviewPause(
+		t.Context(), store, corrupt.ID,
+	); loadErr == nil {
+		t.Fatal("corrupt settled pause state returned no error")
+	}
+
+	controller.cancel()
+	if _, pauseErr := controller.pauseAutomationForRun(
+		t.Context(), running.ID, running.Version, running.ActiveRunID,
+	); !errors.Is(pauseErr, context.Canceled) {
+		t.Fatalf("stopped pause error=%v", pauseErr)
+	}
+}
+
+func TestRepositoryReviewPausedTaskAdmissionBoundaryCoverage(t *testing.T) {
+	controller := &repositoryReviewController{
+		ctx: context.Background(),
+		active: map[string]*repositoryReviewActiveRun{
+			"rra_paused_task": {
+				runID:        "wr_paused_task",
+				pauseReason:  repoaudit.RepositoryReviewPauseManual,
+				pauseDetail:  "operator paused this task",
+				guardMu:      &sync.Mutex{},
+				reservations: make(map[int]repositoryReviewTaskReservation),
+			},
+		},
+	}
+	err := controller.observeRepositoryReviewTask(
+		"rra_paused_task",
+		"wr_paused_task",
+		workflows.ManagedChildActivity{Phase: workflows.ManagedChildStarted, Index: 1},
+	)
+	if !errors.Is(err, errRepositoryReviewSafeStop) ||
+		!strings.Contains(err.Error(), "operator paused this task") {
+		t.Fatalf("paused task admission error=%v", err)
+	}
+
+	guard := &sync.Mutex{}
+	guard.Lock()
+	controller.active["rra_mid_admission_pause"] = &repositoryReviewActiveRun{
+		runID:        "wr_mid_admission_pause",
+		guardMu:      guard,
+		reservations: make(map[int]repositoryReviewTaskReservation),
+	}
+	result := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		result <- controller.observeRepositoryReviewTask(
+			"rra_mid_admission_pause",
+			"wr_mid_admission_pause",
+			workflows.ManagedChildActivity{
+				Phase: workflows.ManagedChildStarted,
+				Index: 2,
+			},
+		)
+	}()
+	<-started
+	time.Sleep(10 * time.Millisecond)
+	controller.mu.Lock()
+	controller.active["rra_mid_admission_pause"].pauseReason = repoaudit.RepositoryReviewPauseManual
+	controller.active["rra_mid_admission_pause"].pauseDetail = "paused while waiting for admission"
+	controller.mu.Unlock()
+	guard.Unlock()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errRepositoryReviewSafeStop) ||
+			!strings.Contains(err.Error(), "paused while waiting for admission") {
+			t.Fatalf("mid-admission pause error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mid-admission pause did not finish")
+	}
+}
+
+func TestRepositoryReviewExecutionObserverBoundaryCoverage(t *testing.T) {
+	controller := &repositoryReviewController{}
+	observer := controller.repositoryReviewManagedChildObserver("rra_observer", "wr_observer")
+	if err := observer(workflows.ManagedChildActivityEvent{
+		RunID: "wr_other", StepID: "review",
+	}); err != nil {
+		t.Fatalf("other-run observer error=%v", err)
+	}
+	if err := observer(workflows.ManagedChildActivityEvent{
+		RunID: "wr_observer", StepID: "other",
+	}); err != nil {
+		t.Fatalf("other-step observer error=%v", err)
+	}
+	if err := observer(workflows.ManagedChildActivityEvent{
+		RunID: "wr_observer", StepID: "review",
+		ManagedChildActivity: workflows.ManagedChildActivity{
+			Phase: workflows.ManagedChildActivityPhase("unknown"),
+		},
+	}); err != nil {
+		t.Fatalf("ignored activity observer error=%v", err)
+	}
+	commitA := strings.Repeat("a", 40)
+	commitB := strings.Repeat("b", 40)
+	automation := repoaudit.RepositoryReviewAutomation{ResolvedCommitSHA: commitA}
+	result := &workflows.RunResult{Outputs: map[string]any{"commit": commitB}}
+	runErr := repositoryReviewJoinCommitError(automation, result, nil)
+	if runErr == nil || !strings.Contains(runErr.Error(), commitA) {
+		t.Fatalf("joined commit error=%v", runErr)
+	}
+	original := errors.New("run failed")
+	if joined := repositoryReviewJoinCommitError(automation, nil, original); !errors.Is(joined, original) {
+		t.Fatalf("joined run error=%v", joined)
+	}
+}
+
 func TestRepositoryReviewCoverageRunAndProgressHelpers(t *testing.T) {
 	if repositoryReviewWorkflowStage(nil) != "" || repositoryReviewRunStep(nil, "review").ID != "" {
 		t.Fatal("nil workflow helpers returned state")
@@ -1808,6 +2652,14 @@ func repositoryReviewCoverageLeasedController(
 		t.Fatal(err)
 	}
 	controller := newRepositoryReviewController(handler)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return strings.Repeat("a", 40), nil
+	}
 	controller.startOnce.Do(func() {})
 	controller.leasedStore = store
 	controller.leasedConfig = cfg

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -91,6 +93,145 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 		map[string]any{"expected_version": changed.Automation.Version})
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+}
+
+func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstInput := testRepositoryReviewAutomation()
+	firstInput.ID = "rra_collection_first"
+	firstInput.Repository = "https://github.com/acme/first.git"
+	firstInput.Name = "First review"
+	firstInput.Status = repoaudit.RepositoryReviewAutomationPaused
+	firstInput.PauseReason = repoaudit.RepositoryReviewPauseManual
+	firstInput.PauseDetail = "paused"
+	first, err := store.CreateAutomation(t.Context(), firstInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput := testRepositoryReviewAutomation()
+	secondInput.ID = "rra_collection_second"
+	secondInput.Repository = "https://github.com/acme/second.git"
+	secondInput.Name = "Second review"
+	secondInput.Status = repoaudit.RepositoryReviewAutomationPaused
+	secondInput.PauseReason = repoaudit.RepositoryReviewPauseManual
+	secondInput.PauseDetail = "paused"
+	second, err := store.CreateAutomation(t.Context(), secondInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	query := url.QueryEscape("status = paused ORDER BY name ASC")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query="+query+"&limit=1",
+		nil,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("collection status=%d body=%s", response.Code, response.Body.String())
+	}
+	var page struct {
+		Automations []repoaudit.RepositoryReviewAutomation `json:"automations"`
+		Total       int                                    `json:"total"`
+		NextCursor  string                                 `json:"next_cursor"`
+		Canonical   string                                 `json:"canonical_query"`
+		QuerySchema json.RawMessage                        `json:"query_schema"`
+	}
+	if decodeErr := json.Unmarshal(response.Body.Bytes(), &page); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if page.Total != 2 || len(page.Automations) != 1 || page.Automations[0].ID != first.ID ||
+		page.NextCursor == "" || page.Canonical != `status = "paused" ORDER BY name ASC` ||
+		!json.Valid(page.QuerySchema) {
+		t.Fatalf("collection page=%#v first=%s second=%s", page, first.ID, second.ID)
+	}
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query=status%20%3D%20missing",
+		nil,
+	))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid collection status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations?query="+query+"&cursor=invalid",
+		nil,
+	))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid cursor status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/rra_absent/commit-options",
+		nil,
+	))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing commit options status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRepositoryReviewAutomationCollectionFields(t *testing.T) {
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_collection_fields"
+	automation.Name = "Collection fields"
+	automation.Status = repoaudit.RepositoryReviewAutomationRunning
+	automation.Progress.CompletedBatches = 1
+	automation.Progress.TotalBatches = 4
+	automation.Progress.ReviewedFiles = 7
+	automation.Progress.Findings = 2
+	automation.UpdatedAt = time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	for _, field := range []collectionquery.Field{
+		"id", "name", "repository", "branch", "status", "progress", "reviewed", "findings", "updated",
+	} {
+		if _, ok := repositoryReviewAutomationCollectionField(automation, field); !ok {
+			t.Fatalf("field %q was not resolved", field)
+		}
+	}
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 25 {
+		t.Fatalf("progress field=%#v ok=%v", value, ok)
+	}
+	automation.Progress.TotalBatches = 0
+	if value, ok := repositoryReviewAutomationCollectionField(automation, "progress"); !ok || value.Number != 0 {
+		t.Fatalf("zero progress field=%#v ok=%v", value, ok)
+	}
+	if _, ok := repositoryReviewAutomationCollectionField(automation, "missing"); ok {
+		t.Fatal("unknown collection field resolved")
+	}
+}
+
+func TestRepositoryReviewGitHubCommitURLBoundaries(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	if got := repositoryReviewGitHubCommitURL("owner/repo", "invalid"); got != "" {
+		t.Fatalf("invalid commit URL=%q", got)
+	}
+	if got := repositoryReviewGitHubCommitURL(
+		"git@github.com:owner/repo.git", commit,
+	); got != "https://github.com/owner/repo/commit/"+commit {
+		t.Fatalf("SCP commit URL=%q", got)
+	}
+	for _, repository := range []string{
+		"git@gitlab.com:owner/repo.git",
+		"relative-repository",
+		"https://github.com/owner",
+		"https://github.com//repo",
+		"https://github.com/owner/.git",
+	} {
+		if got := repositoryReviewGitHubCommitURL(repository, commit); got != "" {
+			t.Fatalf("repository %q commit URL=%q", repository, got)
+		}
 	}
 }
 
@@ -620,6 +761,715 @@ func TestRepositoryReviewAutomationStartAutoContinuesBoundedBatches(t *testing.T
 		math.Abs(completed.EstimatedCostUSD-0.00055) > 0.0000001 ||
 		price.InputPricePer1M != 9 || price.OutputPricePer1M != 13 {
 		t.Fatalf("completed=%#v stats=%#v calls=%d", completed, stats, calls.Load())
+	}
+}
+
+func TestRepositoryReviewAutomationStartPersistsResolvedCommitBeforeBatch(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedCommit := strings.Repeat("1", 40)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return resolvedCommit, nil
+	}
+	type batchObservation struct {
+		argument  repoaudit.RepositoryReviewAutomation
+		persisted repoaudit.RepositoryReviewAutomation
+		found     bool
+		err       error
+	}
+	observed := make(chan batchObservation, 1)
+	release := make(chan struct{})
+	defer close(release)
+	controller.runBatch = func(
+		_ context.Context,
+		automation repoaudit.RepositoryReviewAutomation,
+		runID string,
+		_ workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		persisted, found, getErr := store.GetAutomation(context.Background(), automation.ID)
+		observed <- batchObservation{
+			argument: automation, persisted: persisted, found: found, err: getErr,
+		}
+		<-release
+		return &workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"commit": resolvedCommit, "remainingFiles": 0},
+		}, nil
+	}
+
+	automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/start",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", response.Code, response.Body.String())
+	}
+	var started struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Automation.Status != repoaudit.RepositoryReviewAutomationRunning ||
+		started.Automation.ResolvedCommitSHA != resolvedCommit ||
+		started.Automation.ActiveRunID == "" {
+		t.Fatalf("started automation=%#v", started.Automation)
+	}
+	select {
+	case observation := <-observed:
+		if observation.err != nil || !observation.found {
+			t.Fatalf("persisted automation found=%v err=%v", observation.found, observation.err)
+		}
+		if observation.argument.ResolvedCommitSHA != resolvedCommit ||
+			observation.persisted.ResolvedCommitSHA != resolvedCommit ||
+			observation.argument.ActiveRunID == "" ||
+			observation.argument.ActiveRunID != observation.persisted.ActiveRunID ||
+			observation.persisted.Status != repoaudit.RepositoryReviewAutomationRunning {
+			t.Fatalf(
+				"batch argument=%#v persisted=%#v",
+				observation.argument,
+				observation.persisted,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("repository review batch did not observe admitted commit")
+	}
+}
+
+func TestRepositoryReviewAutomationAutoContinueReusesResolvedCommit(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	rememberedCommit := strings.Repeat("2", 40)
+	newerCommit := strings.Repeat("3", 40)
+	var resolveCalls atomic.Int32
+	controller.resolveCommit = func(
+		_ context.Context,
+		_ *config.Config,
+		_ repoaudit.RepositoryReviewAutomation,
+		revision string,
+	) (string, error) {
+		if revision != "" {
+			return strings.ToLower(strings.TrimSpace(revision)), nil
+		}
+		if resolveCalls.Add(1) == 1 {
+			return rememberedCommit, nil
+		}
+		return newerCommit, nil
+	}
+	seenCommits := make(chan string, 2)
+	var batches atomic.Int32
+	controller.runBatch = func(
+		_ context.Context,
+		automation repoaudit.RepositoryReviewAutomation,
+		runID string,
+		_ workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		seenCommits <- automation.ResolvedCommitSHA
+		remaining := 1
+		if batches.Add(1) == 2 {
+			remaining = 0
+		}
+		return &workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"commit": rememberedCommit, "remainingFiles": remaining},
+		}, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/start",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", response.Code, response.Body.String())
+	}
+	completed := waitForRepositoryReviewAutomationStatus(
+		t,
+		store,
+		automation.ID,
+		repoaudit.RepositoryReviewAutomationCompleted,
+	)
+	close(seenCommits)
+	var observed []string
+	for commit := range seenCommits {
+		observed = append(observed, commit)
+	}
+	if !reflect.DeepEqual(observed, []string{rememberedCommit, rememberedCommit}) ||
+		resolveCalls.Load() != 1 || batches.Load() != 2 ||
+		completed.ResolvedCommitSHA != rememberedCommit {
+		t.Fatalf(
+			"observed commits=%#v resolver calls=%d batches=%d completed=%#v",
+			observed,
+			resolveCalls.Load(),
+			batches.Load(),
+			completed,
+		)
+	}
+}
+
+func TestRepositoryReviewAutomationCommitOptionsExposeRememberedAndLatest(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	rememberedCommit := strings.Repeat("4", 40)
+	latestCommit := strings.Repeat("5", 40)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return latestCommit, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationPaused
+	input.PauseReason = repoaudit.RepositoryReviewPauseManual
+	input.PauseDetail = "paused between batches"
+	input.ResolvedCommitSHA = rememberedCommit
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/"+automation.ID+"/commit-options",
+			nil,
+		),
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("commit options status=%d body=%s", response.Code, response.Body.String())
+	}
+	var options repositoryReviewCommitOptionsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if options.ExpectedVersion != automation.Version || !options.NewerCommitAvailable ||
+		options.Remembered.SHA != rememberedCommit ||
+		options.Remembered.ShortSHA != rememberedCommit[:8] ||
+		options.Remembered.URL != "https://github.com/acme/core/commit/"+rememberedCommit ||
+		options.Latest.SHA != latestCommit || options.Latest.ShortSHA != latestCommit[:8] ||
+		options.Latest.URL != "https://github.com/acme/core/commit/"+latestCommit {
+		t.Fatalf("commit options=%#v", options)
+	}
+}
+
+func TestRepositoryReviewAutomationCommitOptionsNormalizeLegacyTarget(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	latestCommit := strings.Repeat("5", 40)
+	var resolvedTarget repoaudit.RepositoryReviewAutomation
+	controller.resolveCommit = func(
+		_ context.Context,
+		_ *config.Config,
+		automation repoaudit.RepositoryReviewAutomation,
+		_ string,
+	) (string, error) {
+		resolvedTarget = automation
+		return latestCommit, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Repository = "owner/repo"
+	input.Ref = "HEAD"
+	input.Status = repoaudit.RepositoryReviewAutomationPaused
+	input.PauseReason = repoaudit.RepositoryReviewPauseServiceRestart
+	input.PauseDetail = "legacy run paused after restart"
+	input.ResolvedCommitSHA = strings.Repeat("4", 40)
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/"+automation.ID+"/commit-options",
+			nil,
+		),
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("legacy commit options status=%d body=%s", response.Code, response.Body.String())
+	}
+	if resolvedTarget.Repository != "https://github.com/owner/repo.git" || resolvedTarget.Ref != "" {
+		t.Fatalf("legacy resolution target=%#v", resolvedTarget)
+	}
+	var options repositoryReviewCommitOptionsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if options.Remembered.URL != "https://github.com/owner/repo/commit/"+input.ResolvedCommitSHA ||
+		options.Latest.URL != "https://github.com/owner/repo/commit/"+latestCommit {
+		t.Fatalf("legacy commit options=%#v", options)
+	}
+}
+
+func TestRepositoryReviewAutomationResumeRechecksTipAfterCommitOptions(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	rememberedCommit := strings.Repeat("6", 40)
+	latestCommit := strings.Repeat("7", 40)
+	var resolveCalls atomic.Int32
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		if resolveCalls.Add(1) == 1 {
+			return rememberedCommit, nil
+		}
+		return latestCommit, nil
+	}
+	var batchCalls atomic.Int32
+	controller.runBatch = func(
+		context.Context,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+		workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		batchCalls.Add(1)
+		return nil, errors.New("unexpected batch")
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationPaused
+	input.PauseReason = repoaudit.RepositoryReviewPauseManual
+	input.PauseDetail = "paused between batches"
+	input.ResolvedCommitSHA = rememberedCommit
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	optionsResponse := httptest.NewRecorder()
+	mux.ServeHTTP(
+		optionsResponse,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/"+automation.ID+"/commit-options",
+			nil,
+		),
+	)
+	if optionsResponse.Code != http.StatusOK {
+		t.Fatalf("commit options status=%d body=%s", optionsResponse.Code, optionsResponse.Body.String())
+	}
+	var options repositoryReviewCommitOptionsResponse
+	if unmarshalErr := json.Unmarshal(optionsResponse.Body.Bytes(), &options); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	if options.NewerCommitAvailable || options.Latest.SHA != rememberedCommit {
+		t.Fatalf("initial commit options=%#v", options)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/resume",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "repository_review_commit_selection_required") {
+		t.Fatalf("resume status=%d body=%s", response.Code, response.Body.String())
+	}
+	current, found, err := store.GetAutomation(t.Context(), automation.ID)
+	if err != nil || !found || current.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		current.ResolvedCommitSHA != rememberedCommit || current.Version != automation.Version ||
+		batchCalls.Load() != 0 || resolveCalls.Load() != 2 {
+		t.Fatalf("current=%#v found=%v err=%v batch calls=%d", current, found, err, batchCalls.Load())
+	}
+}
+
+func TestRepositoryReviewAutomationResumePersistsExactCommitSelection(t *testing.T) {
+	rememberedCommit := strings.Repeat("8", 40)
+	latestCommit := strings.Repeat("9", 40)
+	customCommit := strings.Repeat("b", 40)
+	for _, testCase := range []struct {
+		name      string
+		selection string
+	}{
+		{name: "remembered", selection: rememberedCommit},
+		{name: "latest", selection: latestCommit},
+		{name: "custom", selection: customCommit},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+			t.Cleanup(handler.Shutdown)
+			controller := handler.repositoryReviewControllerInstance()
+			controller.resolveCommit = func(
+				_ context.Context,
+				_ *config.Config,
+				_ repoaudit.RepositoryReviewAutomation,
+				revision string,
+			) (string, error) {
+				if revision == "" {
+					return latestCommit, nil
+				}
+				return strings.ToLower(strings.TrimSpace(revision)), nil
+			}
+			seen := make(chan repoaudit.RepositoryReviewAutomation, 1)
+			controller.runBatch = func(
+				_ context.Context,
+				automation repoaudit.RepositoryReviewAutomation,
+				runID string,
+				_ workflows.AgentUsageObserver,
+			) (*workflows.RunResult, error) {
+				seen <- automation
+				return &workflows.RunResult{
+					RunID: runID, Status: workflows.RunStatusSucceeded,
+					Outputs: map[string]any{
+						"commit": testCase.selection, "remainingFiles": 0,
+					},
+				}, nil
+			}
+			store, err := handler.repositoryReviewStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := testRepositoryReviewAutomation()
+			input.Status = repoaudit.RepositoryReviewAutomationPaused
+			input.PauseReason = repoaudit.RepositoryReviewPauseManual
+			input.PauseDetail = "paused between batches"
+			input.ResolvedCommitSHA = rememberedCommit
+			automation, err := store.CreateAutomation(t.Context(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := repositoryReviewAutomationMutation(
+				t,
+				mux,
+				http.MethodPost,
+				"/api/repository-reviews/automations/"+automation.ID+"/resume",
+				map[string]any{
+					"expected_version": automation.Version,
+					"commit_sha":       testCase.selection,
+				},
+			)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("resume status=%d body=%s", response.Code, response.Body.String())
+			}
+			var resumed struct {
+				Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &resumed); err != nil {
+				t.Fatal(err)
+			}
+			if resumed.Automation.ResolvedCommitSHA != testCase.selection ||
+				resumed.Automation.Status != repoaudit.RepositoryReviewAutomationRunning {
+				t.Fatalf("resumed automation=%#v", resumed.Automation)
+			}
+			select {
+			case observed := <-seen:
+				if observed.ResolvedCommitSHA != testCase.selection {
+					t.Fatalf("batch automation=%#v", observed)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("resumed batch did not start")
+			}
+			completed := waitForRepositoryReviewAutomationStatus(
+				t,
+				store,
+				automation.ID,
+				repoaudit.RepositoryReviewAutomationCompleted,
+			)
+			if completed.ResolvedCommitSHA != testCase.selection {
+				t.Fatalf("completed automation=%#v", completed)
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewAutomationResumeRejectsMalformedCustomCommit(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	var resolveCalls atomic.Int32
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		resolveCalls.Add(1)
+		return strings.Repeat("c", 40), nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationPaused
+	input.PauseReason = repoaudit.RepositoryReviewPauseManual
+	input.PauseDetail = "paused between batches"
+	input.ResolvedCommitSHA = strings.Repeat("d", 40)
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/resume",
+		map[string]any{
+			"expected_version": automation.Version,
+			"commit_sha":       "not-a-full-commit",
+		},
+	)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), "invalid_repository_review_automation") {
+		t.Fatalf("malformed resume status=%d body=%s", response.Code, response.Body.String())
+	}
+	current, found, err := store.GetAutomation(t.Context(), automation.ID)
+	if err != nil || !found || current.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		current.ResolvedCommitSHA != input.ResolvedCommitSHA || current.Version != automation.Version ||
+		resolveCalls.Load() != 0 {
+		t.Fatalf("current=%#v found=%v err=%v resolver calls=%d", current, found, err, resolveCalls.Load())
+	}
+}
+
+func TestRepositoryReviewAutomationPauseQueuedHandoff(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationIdle
+	input.Progress.Stage = "next batch queued"
+	input.Progress.CompletedBatches = 1
+	input.Progress.TotalBatches = 2
+	input.Progress.RemainingFiles = 1
+	input.ResolvedCommitSHA = strings.Repeat("e", 40)
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/pause",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("pause queued handoff status=%d body=%s", response.Code, response.Body.String())
+	}
+	var paused struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused.Automation.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		paused.Automation.PauseReason != repoaudit.RepositoryReviewPauseManual ||
+		paused.Automation.Progress.Stage != "paused" ||
+		paused.Automation.ResolvedCommitSHA != input.ResolvedCommitSHA ||
+		paused.Automation.ActiveRunID != "" {
+		t.Fatalf("paused queued handoff=%#v", paused.Automation)
+	}
+}
+
+func TestRepositoryReviewAutomationPauseAcceptsStaleRunningVersion(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationRunning
+	input.ActiveRunID = "wr_stale_pause"
+	input.RunIDs = []string{input.ActiveRunID}
+	input.Progress.Stage = "Reviewing bounded file batch"
+	input.Progress.TotalBatches = 1
+	input.ResolvedCommitSHA = strings.Repeat("f", 40)
+	created, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.UpdateAutomation(
+		t.Context(),
+		created.ID,
+		created.Version,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			candidate.Usage = repoaudit.RepositoryReviewTokenUsage{
+				PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5,
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	controller.active[current.ID] = &repositoryReviewActiveRun{
+		runID: current.ActiveRunID,
+		store: store,
+	}
+	controller.mu.Unlock()
+	delayed := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+current.ID+"/pause",
+		map[string]any{
+			"expected_version": created.Version,
+			"run_id":           "wr_prior_campaign",
+		},
+	)
+	if delayed.Code != http.StatusConflict {
+		t.Fatalf("prior-run pause status=%d body=%s", delayed.Code, delayed.Body.String())
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+current.ID+"/pause",
+		map[string]any{
+			"expected_version": created.Version,
+			"run_id":           current.ActiveRunID,
+		},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("stale pause status=%d body=%s", response.Code, response.Body.String())
+	}
+	var paused struct {
+		Automation repoaudit.RepositoryReviewAutomation `json:"automation"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused.Automation.Status != repoaudit.RepositoryReviewAutomationStopping ||
+		paused.Automation.RequestedPauseReason != repoaudit.RepositoryReviewPauseManual ||
+		paused.Automation.ResolvedCommitSHA != input.ResolvedCommitSHA ||
+		paused.Automation.Version <= current.Version {
+		t.Fatalf("stale pause result=%#v current version=%d", paused.Automation, current.Version)
+	}
+	controller.mu.Lock()
+	active := controller.active[current.ID]
+	controller.mu.Unlock()
+	if active == nil || active.pauseReason != repoaudit.RepositoryReviewPauseManual {
+		t.Fatalf("active pause latch=%#v", active)
+	}
+}
+
+func TestRepositoryReviewAutomationPauseLatchDoesNotTransferToNewRun(t *testing.T) {
+	controller := newRepositoryReviewController(nil)
+	controller.active["rra_pause_race"] = &repositoryReviewActiveRun{runID: "wr_new"}
+
+	controller.latchManualPause("rra_pause_race", "wr_old")
+	if active := controller.active["rra_pause_race"]; active.pauseReason != "" || active.pauseDetail != "" {
+		t.Fatalf("old pause transferred to new run: %#v", active)
+	}
+
+	controller.latchManualPause("rra_pause_race", "wr_new")
+	active := controller.active["rra_pause_race"]
+	if active.pauseReason != repoaudit.RepositoryReviewPauseManual ||
+		!strings.Contains(active.pauseDetail, "safe checkpoint") {
+		t.Fatalf("matching pause was not latched: %#v", active)
+	}
+}
+
+func TestRepositoryReviewAutomationFailsOnWorkflowCommitMismatch(t *testing.T) {
+	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	rememberedCommit := strings.Repeat("a", 40)
+	workflowCommit := strings.Repeat("b", 40)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return rememberedCommit, nil
+	}
+	controller.runBatch = func(
+		_ context.Context,
+		_ repoaudit.RepositoryReviewAutomation,
+		runID string,
+		_ workflows.AgentUsageObserver,
+	) (*workflows.RunResult, error) {
+		return &workflows.RunResult{
+			RunID: runID, Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"commit": workflowCommit, "remainingFiles": 0},
+		}, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/start",
+		map[string]any{"expected_version": automation.Version},
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start status=%d body=%s", response.Code, response.Body.String())
+	}
+	failed := waitForRepositoryReviewAutomationStatus(
+		t,
+		store,
+		automation.ID,
+		repoaudit.RepositoryReviewAutomationFailed,
+	)
+	if failed.ResolvedCommitSHA != rememberedCommit ||
+		failed.Progress.CompletedBatches != 0 ||
+		failed.PauseReason != repoaudit.RepositoryReviewPauseRunFailed ||
+		!strings.Contains(failed.PauseDetail, "workflow resolved commit") ||
+		!strings.Contains(failed.PauseDetail, rememberedCommit) ||
+		!strings.Contains(failed.PauseDetail, workflowCommit) {
+		t.Fatalf("commit mismatch failure=%#v", failed)
 	}
 }
 
@@ -1437,6 +2287,17 @@ func newRepositoryReviewAutomationTestHandler(t *testing.T) (*Handler, *http.Ser
 	handler := NewHandler(configPath)
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
+	handler.repositoryReviewControllerInstance().resolveCommit = func(
+		_ context.Context,
+		_ *config.Config,
+		_ repoaudit.RepositoryReviewAutomation,
+		revision string,
+	) (string, error) {
+		if repositoryReviewValidCommitSelection(revision) {
+			return strings.ToLower(strings.TrimSpace(revision)), nil
+		}
+		return strings.Repeat("a", 40), nil
+	}
 	return handler, mux, workspace
 }
 

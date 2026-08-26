@@ -10,8 +10,10 @@ import {
   deleteRepositoryReviewProfile,
   getRepositoryReview,
   getRepositoryReviewAutomationOptions,
+  getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
   listRepositoryReviewAutomations,
+  listRepositoryReviewAutomationsPage,
   listRepositoryReviewProfiles,
   listRepositoryReviews,
   pauseRepositoryReviewAutomation,
@@ -567,6 +569,7 @@ describe("repository review API", () => {
     })
     await pauseRepositoryReviewAutomation("auto/slash", {
       expected_version: 7,
+      run_id: "wr_observed",
     })
     await resumeRepositoryReviewAutomation("auto/slash", {
       expected_version: 8,
@@ -607,7 +610,7 @@ describe("repository review API", () => {
       5,
       "/api/repository-reviews/automations/auto%2Fslash/pause",
       expect.objectContaining({
-        body: JSON.stringify({ expected_version: 7 }),
+        body: JSON.stringify({ expected_version: 7, run_id: "wr_observed" }),
       }),
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
@@ -623,6 +626,97 @@ describe("repository review API", () => {
       expect.objectContaining({
         body: JSON.stringify({ expected_version: 9 }),
       }),
+    )
+  })
+
+  it("loads commit choices and submits an exact commit when resuming", async () => {
+    const rememberedSHA = "a".repeat(40)
+    const latestSHA = "b".repeat(40)
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          expected_version: 11,
+          remembered: {
+            sha: rememberedSHA,
+            short_sha: rememberedSHA.slice(0, 8),
+            url: `https://github.com/owner/repo/commit/${rememberedSHA}`,
+          },
+          latest: {
+            sha: latestSHA,
+            short_sha: latestSHA.slice(0, 8),
+            url: `https://github.com/owner/repo/commit/${latestSHA}`,
+          },
+          newer_commit_available: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation: {
+            id: "auto/slash",
+            version: 12,
+            resolved_commit_sha: latestSHA,
+          },
+        }),
+      )
+
+    await expect(
+      getRepositoryReviewCommitOptions("auto/slash"),
+    ).resolves.toMatchObject({
+      expected_version: 11,
+      newer_commit_available: true,
+      remembered: { sha: rememberedSHA },
+      latest: { sha: latestSHA },
+    })
+    await expect(
+      resumeRepositoryReviewAutomation("auto/slash", {
+        expected_version: 11,
+        commit_sha: latestSHA,
+      }),
+    ).resolves.toMatchObject({ resolved_commit_sha: latestSHA })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations/auto%2Fslash/commit-options",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto%2Fslash/resume",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: 11,
+          commit_sha: latestSHA,
+        }),
+      }),
+    )
+  })
+
+  it("loads a query-bound repository review run collection page", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        automations: [{ id: "auto_1", status: "paused" }],
+        total: 1,
+        next_cursor: "next-page",
+        canonical_query: 'status = "paused" ORDER BY repository ASC',
+        query_schema: { fields: [{ name: "status", type: "enum" }] },
+      }),
+    )
+
+    await expect(
+      listRepositoryReviewAutomationsPage({
+        query: "status = paused ORDER BY repository ASC",
+        cursor: "cursor",
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({
+      automations: [{ id: "auto_1", status: "paused" }],
+      total: 1,
+      next_cursor: "next-page",
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/repository-reviews/automations?query=status+%3D+paused+ORDER+BY+repository+ASC&cursor=cursor&limit=50",
+      { signal: undefined },
     )
   })
 })
