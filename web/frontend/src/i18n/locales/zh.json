@@ -1039,6 +1039,7 @@
           "requires_mcp_discovery": "需要先启用 `tools.mcp.discovery`，MCP 发现工具才会可用。",
           "requires_web_search_provider": "请至少配置一个可用的外部网络搜索 provider。",
           "requires_workflows": "需要先启用工作流，才能使用工作流工具。",
+          "requires_durable_plan": "将在实现持久化编码任务计划状态后可用。",
           "unknown_dependency": "该工具因依赖项未满足而被阻止。"
         }
       }

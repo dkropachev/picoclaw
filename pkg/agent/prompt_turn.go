@@ -28,17 +28,18 @@ func promptBuildRequestForTurn(
 		ActiveSkills:      activeSkillNames(ts.agent, ts.opts),
 		Overlays:          promptOverlaysForOptions(ts.opts),
 	}
-	hasCallableTools := true
+	toolDefs := filterReservedModelToolDefinitions(ts.agent.Tools.ToProviderDefs())
+	nativeSearch := subTurnNativeSearchForProvider(cfg, ts, ts.agent.Provider)
+	hasCallableTools := len(toolDefs) > 0 || nativeSearch
 	if ts.profile.Enabled {
-		hasCallableTools = turnProfileHasCallableTools(ts.profile, ts.agent.Tools.ToProviderDefs()) ||
-			subTurnNativeSearchForProvider(cfg, ts, ts.agent.Provider)
+		hasCallableTools = turnProfileHasCallableTools(ts.profile, toolDefs) || nativeSearch
 	}
 	if turnProfileSystemPromptOff(ts.profile) {
 		req.SuppressDefaultSystemPrompt = true
 		req.SuppressSkillContext = true
 		req.ToolUseFallback = hasCallableTools
 	}
-	if ts.profile.Enabled && !hasCallableTools {
+	if !hasCallableTools {
 		req.SuppressToolUseRule = true
 	}
 	if turnProfileSkillsOff(ts.profile) {
@@ -48,7 +49,7 @@ func promptBuildRequestForTurn(
 		req.AllowedSkills = append([]string(nil), ts.profile.AllowedSkills...)
 	}
 	if ts.profile.Enabled && ts.profile.ToolsMode == config.TurnProfileModeCustom {
-		req.AllowedTools = append([]string(nil), ts.profile.AllowedTools...)
+		req.AllowedTools = filterReservedModelToolNames(ts.profile.AllowedTools)
 	}
 	restrictChildPromptToRegisteredTools(ts, &req, cfg)
 	return req
@@ -63,7 +64,7 @@ func restrictChildPromptToRegisteredTools(
 		return
 	}
 
-	registered := ts.agent.Tools.List()
+	registered := filterReservedModelToolNames(ts.agent.Tools.List())
 	if subTurnNativeSearchForProvider(cfg, ts, ts.agent.Provider) &&
 		!containsFoldedSubTurnToolName(registered, subTurnNativeSearchCapability) {
 		registered = append(registered, subTurnNativeSearchCapability)
@@ -107,8 +108,13 @@ func promptBuildRequestForProcessOptions(
 	}
 	profile := opts.TurnProfile
 	hasCallableTools := true
+	var toolDefs []providers.ToolDefinition
+	if agent != nil && agent.Tools != nil {
+		toolDefs = filterReservedModelToolDefinitions(agent.Tools.ToProviderDefs())
+		hasCallableTools = len(toolDefs) > 0
+	}
 	if profile.Enabled && agent != nil {
-		hasCallableTools = turnProfileHasCallableTools(profile, agent.Tools.ToProviderDefs())
+		hasCallableTools = turnProfileHasCallableTools(profile, toolDefs)
 	}
 	if turnProfileSystemPromptOff(profile) {
 		req.SuppressDefaultSystemPrompt = true
@@ -121,7 +127,7 @@ func promptBuildRequestForProcessOptions(
 		req.SuppressToolUseRule = true
 		req.ToolUseFallback = false
 	}
-	if profile.Enabled && !hasCallableTools {
+	if !hasCallableTools {
 		req.SuppressToolUseRule = true
 	}
 	if turnProfileSkillsOff(profile) {
@@ -131,9 +137,23 @@ func promptBuildRequestForProcessOptions(
 		req.AllowedSkills = append([]string(nil), profile.AllowedSkills...)
 	}
 	if profile.Enabled && profile.ToolsMode == config.TurnProfileModeCustom {
-		req.AllowedTools = append([]string(nil), profile.AllowedTools...)
+		req.AllowedTools = filterReservedModelToolNames(profile.AllowedTools)
 	}
 	return req
+}
+
+func filterReservedModelToolNames(names []string) []string {
+	if len(names) == 0 {
+		return names
+	}
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if isReservedModelToolName(name) {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered
 }
 
 func promptOverlaysForOptions(opts processOptions) []PromptPart {

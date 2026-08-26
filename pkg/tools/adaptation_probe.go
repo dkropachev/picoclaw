@@ -2,8 +2,9 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
+	"reflect"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -81,11 +82,28 @@ func RunToolAdaptationProbe(
 		)
 		return result
 	}
+	if len(resp.ToolCalls) != 1 {
+		result.Error = fmt.Sprintf(
+			"model returned %d tool calls, want exactly one",
+			len(resp.ToolCalls),
+		)
+		ObserveToolAdaptationToolOutcome(
+			result.Profile,
+			result.VisibleToolSurface,
+			result.ToolName,
+			false,
+			result.Error,
+			time.Duration(result.DurationMS)*time.Millisecond,
+		)
+		return result
+	}
 
 	call := providers.NormalizeToolCall(resp.ToolCalls[0])
 	if call.Name != toolDef.Function.Name {
 		result.Error = fmt.Sprintf("model called %q, want %q", call.Name, toolDef.Function.Name)
-	} else if !probeArgsMatch(call.Arguments, expectedArgs) {
+	} else if err = validateToolArgs(toolDef.Function.Parameters, call.Arguments); err != nil {
+		result.Error = fmt.Sprintf("model called %q with invalid arguments: %v", call.Name, err)
+	} else if !reflect.DeepEqual(call.Arguments, expectedArgs) {
 		result.Error = fmt.Sprintf("model called %q with unexpected arguments", call.Name)
 	} else {
 		result.Success = true
@@ -102,47 +120,26 @@ func RunToolAdaptationProbe(
 	return result
 }
 
-func formatProbeExpectedArgs(expected map[string]string) string {
-	if expected["plan.0.step"] != "" || expected["plan.0.status"] != "" {
-		return `{"plan":[{"step":"probe","status":"completed"}]}`
+func formatProbeExpectedArgs(expected map[string]any) string {
+	encoded, err := json.Marshal(expected)
+	if err != nil {
+		return "{}"
 	}
-	if expected["value"] != "" {
-		return `{"value":"probe-ok"}`
-	}
-	return "{}"
+	return string(encoded)
 }
 
-func probeToolDefinition(surface string) (providers.ToolDefinition, map[string]string) {
+func probeToolDefinition(surface string) (providers.ToolDefinition, map[string]any) {
 	if config.NormalizeToolSurface(surface) == config.ToolSurfaceCodex {
+		prototype := NewCodexExecCommandTool(nil)
 		return providers.ToolDefinition{
 				Type: "function",
 				Function: providers.ToolFunctionDefinition{
-					Name:        "update_plan",
-					Description: "Update a short task plan. Probe only; the call is validated but not executed.",
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"explanation": map[string]any{"type": "string"},
-							"plan": map[string]any{
-								"type": "array",
-								"items": map[string]any{
-									"type": "object",
-									"properties": map[string]any{
-										"step": map[string]any{"type": "string"},
-										"status": map[string]any{
-											"type": "string",
-											"enum": []string{"pending", "in_progress", "completed"},
-										},
-									},
-									"required": []string{"step", "status"},
-								},
-							},
-						},
-						"required": []string{"plan"},
-					},
+					Name:        prototype.Name(),
+					Description: "Probe only: validate an exec_command call without executing it.",
+					Parameters:  prototype.Parameters(),
 				},
 			},
-			map[string]string{"plan.0.step": "probe", "plan.0.status": "completed"}
+			map[string]any{"cmd": "printf probe-ok"}
 	}
 
 	return providers.ToolDefinition{
@@ -151,7 +148,8 @@ func probeToolDefinition(surface string) (providers.ToolDefinition, map[string]s
 				Name:        "adaptation_probe_echo",
 				Description: "No-op probe tool. The call is validated but not executed.",
 				Parameters: map[string]any{
-					"type": "object",
+					"type":                 "object",
+					"additionalProperties": false,
 					"properties": map[string]any{
 						"value": map[string]any{
 							"type":        "string",
@@ -162,37 +160,5 @@ func probeToolDefinition(surface string) (providers.ToolDefinition, map[string]s
 				},
 			},
 		},
-		map[string]string{"value": "probe-ok"}
-}
-
-func probeArgsMatch(args map[string]any, expected map[string]string) bool {
-	for path, want := range expected {
-		got, ok := nestedProbeString(args, strings.Split(path, "."))
-		if !ok || got != want {
-			return false
-		}
-	}
-	return true
-}
-
-func nestedProbeString(value any, path []string) (string, bool) {
-	if len(path) == 0 {
-		got, ok := value.(string)
-		return got, ok
-	}
-	switch current := value.(type) {
-	case map[string]any:
-		next, ok := current[path[0]]
-		if !ok {
-			return "", false
-		}
-		return nestedProbeString(next, path[1:])
-	case []any:
-		if path[0] != "0" || len(current) == 0 {
-			return "", false
-		}
-		return nestedProbeString(current[0], path[1:])
-	default:
-		return "", false
-	}
+		map[string]any{"value": "probe-ok"}
 }

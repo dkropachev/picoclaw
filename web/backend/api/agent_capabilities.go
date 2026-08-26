@@ -921,13 +921,13 @@ func buildAgentCapabilityToolSupport(
 	)
 	addCodex(
 		"exec_command",
-		"Run shell commands with the Codex-compatible command interface.",
+		"Run synchronous commands or start an input-only background session through the reduced Codex-compatible interface.",
 		"filesystem",
 		cfg.Tools.IsToolEnabled("exec"),
 	)
 	addCodex(
 		"write_stdin",
-		"Write input to a running Codex-compatible command session.",
+		"Write exact input to a running compatibility session and return status without polling its output.",
 		"filesystem",
 		cfg.Tools.IsToolEnabled("exec"),
 	)
@@ -937,11 +937,12 @@ func buildAgentCapabilityToolSupport(
 		"filesystem",
 		cfg.Tools.IsToolEnabled("load_image"),
 	)
-	addCodex(
+	add(
 		"update_plan",
-		"Maintain a structured task plan through the Codex-compatible interface.",
+		"Reserved until structured plans are backed by durable coding-task state.",
 		"agents",
-		true,
+		"blocked",
+		"requires_durable_plan",
 	)
 	return items
 }

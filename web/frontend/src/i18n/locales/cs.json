@@ -1037,6 +1037,7 @@
           "requires_mcp_discovery": "Nejprve aktivujte `tools.mcp.discovery`, aby byly nástroje MCP discovery dostupné.",
           "requires_web_search_provider": "Nakonfigurujte alespoň jednoho připraveného externího providera webového vyhledávání.",
           "requires_workflows": "Nejprve povolte workflow, aby bylo možné nástroj workflow použít.",
+          "requires_durable_plan": "Bude dostupné po implementaci trvalého stavu plánu programovací úlohy.",
           "unknown_dependency": "Tento nástroj je blokován nesplněnou závislostí."
         }
       }

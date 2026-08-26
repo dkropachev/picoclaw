@@ -292,11 +292,14 @@ func TestAgentCapabilityToolCatalogCoversRuntimeAllowlistIdentities(t *testing.T
 		"exec_command",
 		"write_stdin",
 		"view_image",
-		"update_plan",
 	} {
 		if byName[name].Status != "enabled" {
 			t.Fatalf("catalog status for %q = %#v, want enabled", name, byName[name])
 		}
+	}
+	if plan := byName["update_plan"]; plan.Status != "blocked" ||
+		plan.ReasonCode != "requires_durable_plan" {
+		t.Fatalf("catalog status for update_plan = %#v, want durable-plan block", plan)
 	}
 
 	runtimeAgent := picoagent.NewAgentInstance(

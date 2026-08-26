@@ -1039,6 +1039,7 @@
           "requires_mcp_discovery": "Habilite `tools.mcp.discovery` antes que as ferramentas de descoberta MCP fiquem disponíveis.",
           "requires_web_search_provider": "Configure ao menos um provedor externo de pesquisa web pronto para uso.",
           "requires_workflows": "Habilite os workflows antes que a ferramenta de workflow possa ser usada.",
+          "requires_durable_plan": "Disponível após a implementação do estado durável do plano de tarefas de código.",
           "unknown_dependency": "Esta ferramenta está bloqueada por uma dependência não atendida."
         }
       }

@@ -886,21 +886,23 @@ func TestToolRegistryFactoryCoverageFrozenHiddenAndCompatibilityOffsets(t *testi
 	execCompat = NewCodexExecCommandTool(execBackend)
 	if result := execCompat.Execute(context.Background(), map[string]any{
 		"cmd": "printf coverage", "workdir": t.TempDir(), "background": false,
-		"tty": false, "timeout": "1",
+		"tty": false,
 	}); result.IsError {
 		t.Fatalf("mapped exec command failed: %s", result.ForLLM)
 	}
 	if result := execCompat.Execute(context.Background(), map[string]any{
-		"cmd": "printf yield", "yield_time_ms": 1,
-	}); result.IsError {
-		t.Fatalf("yield-mapped exec command failed: %s", result.ForLLM)
+		"cmd": "printf rejected", "yield_time_ms": 1,
+	}); !result.IsError {
+		t.Fatal("removed yield-time argument was accepted")
 	}
 	stdinCompat := NewCodexWriteStdinTool(nil)
 	if stdinCompat.Name() != "write_stdin" || stdinCompat.Description() == "" ||
 		stdinCompat.Parameters()["type"] != "object" {
 		t.Fatal("stdin compatibility metadata is incomplete")
 	}
-	if result := stdinCompat.Execute(context.Background(), map[string]any{"session_id": "x"}); !result.IsError {
+	if result := stdinCompat.Execute(context.Background(), map[string]any{
+		"session_id": "x", "chars": "x",
+	}); !result.IsError {
 		t.Fatal("nil stdin backend was accepted")
 	}
 	if result := (&CodexWriteStdinTool{exec: &ExecTool{}}).Execute(
@@ -941,23 +943,6 @@ func TestToolRegistryFactoryCoverageFrozenHiddenAndCompatibilityOffsets(t *testi
 	}
 	if compatStringArg(map[string]any{"value": struct{}{}}, "value") != "" {
 		t.Fatal("unsupported string conversion succeeded")
-	}
-	if value, ok := compatBoolArg(map[string]any{"value": true}, "value"); !ok || !value {
-		t.Fatal("bool compatibility conversion failed")
-	}
-	if value, ok := compatBoolArg(map[string]any{"value": " false "}, "value"); !ok || value {
-		t.Fatal("string bool compatibility conversion failed")
-	}
-	if _, ok := compatBoolArg(map[string]any{"value": 1}, "value"); ok {
-		t.Fatal("unsupported bool conversion succeeded")
-	}
-	for _, value := range []any{1, int64(2), float64(3), "4"} {
-		if _, ok := compatIntArg(map[string]any{"value": value}, "value"); !ok {
-			t.Fatalf("integer compatibility conversion failed: %T", value)
-		}
-	}
-	if _, ok := compatIntArg(map[string]any{"value": true}, "value"); ok {
-		t.Fatal("unsupported integer conversion succeeded")
 	}
 }
 

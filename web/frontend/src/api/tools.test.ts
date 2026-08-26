@@ -19,7 +19,7 @@ describe("tools API", () => {
       jsonResponse({
         profile: { provider: "openai", model: "gpt-5.4" },
         visible_tool_surface: "codex",
-        tool_name: "update_plan",
+        tool_name: "exec_command",
         success: true,
         duration_ms: 12,
         ran_at: "2026-07-28T12:00:00Z",

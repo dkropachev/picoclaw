@@ -1530,6 +1530,7 @@
           "requires_mcp_discovery": "Enable `tools.mcp.discovery` before MCP discovery tools become available.",
           "requires_web_search_provider": "Configure at least one ready external web-search provider.",
           "requires_workflows": "Enable workflows before the workflow tool can be used.",
+          "requires_durable_plan": "Available after durable coding-task plan state is implemented.",
           "unknown_dependency": "This tool is blocked by an unmet dependency."
         }
       }
