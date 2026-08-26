@@ -136,14 +136,24 @@ jobs:
         run: make collection-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
 
   frontend_ui:
-    name: Frontend UI (${{ matrix.suite }})
+    name: Frontend UI (${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        suite:
-          - smoke
-          - visual
+        include:
+          - label: smoke / desktop
+            suite: smoke
+            project: desktop
+            artifact: smoke-desktop
+          - label: smoke / mobile
+            suite: smoke
+            project: mobile
+            artifact: smoke-mobile
+          - label: visual
+            suite: visual
+            project: all
+            artifact: visual
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -185,7 +195,7 @@ jobs:
 
       - name: Frontend UI smoke tests
         if: matrix.suite == 'smoke'
-        run: cd web/frontend && pnpm test:ui:smoke
+        run: cd web/frontend && pnpm exec playwright test tests/ui-smoke.spec.ts --project="${{ matrix.project }}"
 
       - name: Frontend collection visual tests
         if: matrix.suite == 'visual'
@@ -195,7 +205,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-${{ matrix.suite }}-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: playwright-${{ matrix.artifact }}-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             web/frontend/playwright-report
             web/frontend/test-results
