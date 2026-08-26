@@ -4,18 +4,41 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
 
+const (
+	applyPatchBeginMarker     = "*** Begin Patch"
+	applyPatchEndMarker       = "*** End Patch"
+	applyPatchEndOfFileMarker = "*** End of File"
+	applyPatchNoNewlineMarker = `\ No newline at end of file`
+)
+
+// ApplyPatchPreflightPolicy adds exact protected filesystem roots and a raw
+// caller guard to the built-in workspace and Git-control policy. Inputs are
+// detached by NewApplyPatchToolWithPermissionsAndPolicy.
+type ApplyPatchPreflightPolicy struct {
+	ProtectedRoots []string
+	PathGuard      func(string) error
+}
+
 type ApplyPatchTool struct {
-	workspace   string
-	restrict    bool
-	allowPaths  []*regexp.Regexp
-	allowCreate bool
-	allowUpdate bool
-	pathGuard   func(string) error
+	workspace      string
+	restrict       bool
+	allowPaths     []*regexp.Regexp
+	allowCreate    bool
+	allowUpdate    bool
+	pathGuard      func(string) error
+	protectedRoots []applyPatchProtectedRoot
+
+	// Deterministic package-test seams. Both run while the canonical workspace
+	// gate is held and before the point of no return.
+	beforeRevalidate     func(*applyPatchPlan)
+	beforeCommit         func(*applyPatchPlan)
+	beforeSourceOpen     func(string)
+	beforePathFence      func(string)
+	afterPointOfNoReturn func(*applyPatchPlan)
 }
 
 func NewApplyPatchTool(workspace string, restrict bool, allowPaths ...[]*regexp.Regexp) *ApplyPatchTool {
@@ -23,10 +46,7 @@ func NewApplyPatchTool(workspace string, restrict bool, allowPaths ...[]*regexp.
 }
 
 // NewApplyPatchToolWithPathGuard creates an apply-patch tool whose caller-owned
-// guard validates every source and move destination after the complete patch
-// parses and before the first operation mutates the filesystem. It is intended
-// for narrow controller runtimes that impose a stricter boundary than the
-// ordinary workspace restriction (for example, denying Git control paths).
+// guard participates in the complete preflight before any filesystem mutation.
 func NewApplyPatchToolWithPathGuard(
 	workspace string,
 	restrict bool,
@@ -51,17 +71,43 @@ func NewApplyPatchToolWithPermissions(
 	allowUpdate bool,
 	allowPaths ...[]*regexp.Regexp,
 ) *ApplyPatchTool {
-	var patterns []*regexp.Regexp
-	if len(allowPaths) > 0 {
-		patterns = allowPaths[0]
+	return &ApplyPatchTool{
+		workspace: workspace, restrict: restrict,
+		allowCreate: allowCreate, allowUpdate: allowUpdate,
+		allowPaths: cloneApplyPatchPatterns(allowPaths),
+	}
+}
+
+// NewApplyPatchToolWithPermissionsAndPolicy constructs a tool with detached,
+// canonical protected-root policy. Invalid roots fail before a tool is exposed.
+func NewApplyPatchToolWithPermissionsAndPolicy(
+	workspace string,
+	restrict bool,
+	allowCreate bool,
+	allowUpdate bool,
+	policy ApplyPatchPreflightPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*ApplyPatchTool, error) {
+	protected, err := prepareApplyPatchProtectedRoots(workspace, policy.ProtectedRoots)
+	if err != nil {
+		return nil, err
 	}
 	return &ApplyPatchTool{
-		workspace:   workspace,
-		restrict:    restrict,
-		allowPaths:  patterns,
-		allowCreate: allowCreate,
-		allowUpdate: allowUpdate,
+		workspace:      workspace,
+		restrict:       restrict,
+		allowPaths:     cloneApplyPatchPatterns(allowPaths),
+		allowCreate:    allowCreate,
+		allowUpdate:    allowUpdate,
+		pathGuard:      policy.PathGuard,
+		protectedRoots: protected,
+	}, nil
+}
+
+func cloneApplyPatchPatterns(allowPaths [][]*regexp.Regexp) []*regexp.Regexp {
+	if len(allowPaths) == 0 {
+		return nil
 	}
+	return append([]*regexp.Regexp(nil), allowPaths[0]...)
 }
 
 func (t *ApplyPatchTool) Name() string {
@@ -85,44 +131,61 @@ func (t *ApplyPatchTool) Parameters() map[string]any {
 	}
 }
 
-func (t *ApplyPatchTool) Execute(_ context.Context, args map[string]any) *ToolResult {
-	patch := strings.TrimSpace(compatStringArg(args, "patch"))
-	if patch == "" {
+func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	patch := compatStringArg(args, "patch")
+	if strings.TrimSpace(patch) == "" {
 		return ErrorResult("patch is required")
 	}
-	ops, err := parseCodexPatch(patch)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ErrorResult(err.Error())
+	}
+	ops, err := parseCodexPatchContext(ctx, patch)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
 	if len(ops) == 0 {
 		return ErrorResult("patch contains no file operations")
 	}
-	if t.pathGuard != nil {
-		for _, op := range ops {
-			if err := t.pathGuard(op.path); err != nil {
-				return ErrorResult(fmt.Sprintf("patch path %q is denied: %v", op.path, err))
-			}
-			if op.moveTo != "" {
-				if err := t.pathGuard(op.moveTo); err != nil {
-					return ErrorResult(fmt.Sprintf(
-						"patch move path %q is denied: %v",
-						op.moveTo,
-						err,
-					))
-				}
-			}
-		}
+
+	workspace, unlock, err := globalApplyPatchGates.lock(ctx, t.workspace)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
+	defer unlock()
+
+	plan, err := t.planPatch(ctx, workspace, ops)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
+	if t.beforeRevalidate != nil {
+		t.beforeRevalidate(plan)
+	}
+	if err := ctx.Err(); err != nil {
+		return ErrorResult(err.Error())
+	}
+	if err := revalidateApplyPatchPlan(ctx, plan); err != nil {
+		return ErrorResult(err.Error())
+	}
+	if t.beforeCommit != nil {
+		t.beforeCommit(plan)
+	}
+	if err := ctx.Err(); err != nil {
+		return ErrorResult(err.Error())
 	}
 
-	var summaries []string
-	for _, op := range ops {
-		summary, err := t.applyOp(op)
-		if err != nil {
-			return ErrorResult(err.Error())
-		}
-		summaries = append(summaries, summary)
+	// Point of no return for P010. P011 replaces this legacy sequential
+	// mutation loop with staging and rollback. Cancellation after this point
+	// cannot intentionally stop between operations and create a partial patch.
+	if t.afterPointOfNoReturn != nil {
+		t.afterPointOfNoReturn(plan)
 	}
-	return NewToolResult(strings.Join(summaries, "\n"))
+	if err := commitApplyPatchPlan(plan); err != nil {
+		return ErrorResult(err.Error())
+	}
+	return NewToolResult(strings.Join(plan.summaries, "\n"))
 }
 
 type codexPatchOp struct {
@@ -130,40 +193,61 @@ type codexPatchOp struct {
 	path   string
 	moveTo string
 	hunks  []codexPatchHunk
-	add    string
+	add    []byte
 }
 
 type codexPatchHunk struct {
-	oldText string
-	newText string
+	section   string
+	lines     []codexPatchLine
+	endOfFile bool
 }
 
-func parseCodexPatch(patch string) ([]codexPatchOp, error) {
-	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
-	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "*** Begin Patch" {
-		return nil, fmt.Errorf("patch must start with *** Begin Patch")
+type codexPatchLine struct {
+	kind      byte
+	text      string
+	newline   bool
+	noNewline bool
+}
+
+func parseCodexPatchContext(ctx context.Context, patch string) ([]codexPatchOp, error) {
+	patch = strings.ReplaceAll(patch, "\r\n", "\n")
+	if strings.HasSuffix(patch, "\n") {
+		patch = strings.TrimSuffix(patch, "\n")
 	}
-	if strings.TrimSpace(lines[len(lines)-1]) != "*** End Patch" {
-		return nil, fmt.Errorf("patch must end with *** End Patch")
+	lines := strings.Split(patch, "\n")
+	if len(lines) < 2 || strings.TrimSpace(lines[0]) != applyPatchBeginMarker {
+		return nil, fmt.Errorf("patch must start with %s", applyPatchBeginMarker)
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != applyPatchEndMarker {
+		return nil, fmt.Errorf("patch must end with %s", applyPatchEndMarker)
 	}
 
-	var ops []codexPatchOp
+	ops := make([]codexPatchOp, 0)
 	for i := 1; i < len(lines)-1; {
-		line := strings.TrimSpace(lines[i])
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		line := lines[i]
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Add File: "))
 			i++
-			var content strings.Builder
-			for i < len(lines)-1 && !strings.HasPrefix(strings.TrimSpace(lines[i]), "*** ") {
+			content := make([]byte, 0)
+			for i < len(lines)-1 && !isCodexPatchOperationLine(lines[i]) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				if !strings.HasPrefix(lines[i], "+") {
 					return nil, fmt.Errorf("add file %q line must start with +", path)
 				}
-				content.WriteString(strings.TrimPrefix(lines[i], "+"))
-				content.WriteByte('\n')
+				var appendErr error
+				content, appendErr = appendApplyPatchTextContext(ctx, content, lines[i][1:], true)
+				if appendErr != nil {
+					return nil, appendErr
+				}
 				i++
 			}
-			ops = append(ops, codexPatchOp{kind: "add", path: path, add: content.String()})
+			ops = append(ops, codexPatchOp{kind: "add", path: path, add: content})
 		case strings.HasPrefix(line, "*** Delete File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Delete File: "))
 			ops = append(ops, codexPatchOp{kind: "delete", path: path})
@@ -171,164 +255,211 @@ func parseCodexPatch(patch string) ([]codexPatchOp, error) {
 		case strings.HasPrefix(line, "*** Update File: "):
 			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Update File: "))
 			op := codexPatchOp{kind: "update", path: path}
+			moveSeen := false
 			i++
 			for i < len(lines)-1 {
-				trimmed := strings.TrimSpace(lines[i])
-				if strings.HasPrefix(trimmed, "*** Move to: ") {
-					op.moveTo = strings.TrimSpace(strings.TrimPrefix(trimmed, "*** Move to: "))
-					i++
-					continue
+				if err := ctx.Err(); err != nil {
+					return nil, err
 				}
-				if strings.HasPrefix(trimmed, "*** ") {
-					break
-				}
-				if strings.HasPrefix(trimmed, "@@") {
+				current := lines[i]
+				switch {
+				case strings.HasPrefix(current, "*** Move to: "):
+					if moveSeen {
+						return nil, fmt.Errorf("update file %q has an invalid move directive", path)
+					}
+					moveSeen = true
+					op.moveTo = strings.TrimSpace(strings.TrimPrefix(current, "*** Move to: "))
+					if op.moveTo == "" {
+						return nil, fmt.Errorf("update file %q has a blank move destination", path)
+					}
 					i++
-					hunk, next, err := parseCodexPatchHunk(lines, i)
-					if err != nil {
-						return nil, fmt.Errorf("update file %q: %w", path, err)
+				case isCodexPatchOperationLine(current):
+					goto updateDone
+				case strings.HasPrefix(current, "@@"):
+					hunk, next, hunkErr := parseCodexPatchHunk(
+						ctx,
+						lines,
+						i+1,
+						strings.TrimSpace(strings.TrimPrefix(current, "@@")),
+					)
+					if hunkErr != nil {
+						return nil, fmt.Errorf("update file %q: %w", path, hunkErr)
 					}
 					op.hunks = append(op.hunks, hunk)
 					i = next
-					continue
+				default:
+					return nil, fmt.Errorf("update file %q expected hunk header or move directive", path)
 				}
-				return nil, fmt.Errorf("update file %q expected hunk header or move directive", path)
+			}
+		updateDone:
+			if len(op.hunks) == 0 && op.moveTo == "" {
+				return nil, fmt.Errorf("update file %q contains no hunks or move", path)
 			}
 			ops = append(ops, op)
 		case line == "":
 			i++
 		default:
-			return nil, fmt.Errorf("unexpected patch line: %s", lines[i])
+			return nil, fmt.Errorf("unexpected patch line: %s", line)
 		}
 	}
 	return ops, nil
 }
 
-func parseCodexPatchHunk(lines []string, start int) (codexPatchHunk, int, error) {
-	var oldText strings.Builder
-	var newText strings.Builder
-	i := start
-	for i < len(lines)-1 {
+func isCodexPatchOperationLine(line string) bool {
+	return strings.HasPrefix(line, "*** Add File: ") ||
+		strings.HasPrefix(line, "*** Delete File: ") ||
+		strings.HasPrefix(line, "*** Update File: ")
+}
+
+func parseCodexPatchHunk(
+	ctx context.Context,
+	lines []string,
+	start int,
+	section string,
+) (codexPatchHunk, int, error) {
+	hunk := codexPatchHunk{section: section}
+	for i := start; i < len(lines)-1; i++ {
+		if err := ctx.Err(); err != nil {
+			return codexPatchHunk{}, i, err
+		}
 		line := lines[i]
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "*** ") || strings.HasPrefix(trimmed, "@@") {
-			break
+		if strings.HasPrefix(line, "@@") || isCodexPatchOperationLine(line) ||
+			strings.HasPrefix(line, "*** Move to: ") {
+			if len(hunk.lines) == 0 {
+				return codexPatchHunk{}, i, fmt.Errorf("hunk is empty")
+			}
+			return hunk, i, validateCodexPatchHunk(ctx, hunk)
 		}
-		if line == `\ No newline at end of file` {
-			i++
+		if line == applyPatchEndOfFileMarker {
+			if len(hunk.lines) == 0 || hunk.endOfFile {
+				return codexPatchHunk{}, i, fmt.Errorf("end-of-file marker is misplaced or duplicated")
+			}
+			hunk.endOfFile = true
+			next := i + 1
+			if next < len(lines)-1 && !isCodexPatchOperationLine(lines[next]) {
+				return codexPatchHunk{}, next, fmt.Errorf("end-of-file marker must terminate the hunk")
+			}
+			return hunk, next, validateCodexPatchHunk(ctx, hunk)
+		}
+		if line == applyPatchNoNewlineMarker {
+			if len(hunk.lines) == 0 || hunk.lines[len(hunk.lines)-1].noNewline {
+				return codexPatchHunk{}, i, fmt.Errorf("no-newline marker is misplaced or duplicated")
+			}
+			hunk.lines[len(hunk.lines)-1].newline = false
+			hunk.lines[len(hunk.lines)-1].noNewline = true
 			continue
 		}
+
+		parsed := codexPatchLine{newline: true}
 		if line == "" {
-			oldText.WriteByte('\n')
-			newText.WriteByte('\n')
-			i++
-			continue
+			parsed.kind = ' '
+		} else {
+			parsed.kind = line[0]
+			parsed.text = line[1:]
+			if parsed.kind != ' ' && parsed.kind != '-' && parsed.kind != '+' {
+				return codexPatchHunk{}, i, fmt.Errorf("hunk line must start with space, -, or +")
+			}
 		}
-		prefix := line[0]
-		text := line[1:] + "\n"
-		switch prefix {
+		hunk.lines = append(hunk.lines, parsed)
+	}
+	if len(hunk.lines) == 0 {
+		return codexPatchHunk{}, len(lines) - 1, fmt.Errorf("hunk is empty")
+	}
+	return hunk, len(lines) - 1, validateCodexPatchHunk(ctx, hunk)
+}
+
+func validateCodexPatchHunk(ctx context.Context, hunk codexPatchHunk) error {
+	oldTerminal := false
+	newTerminal := false
+	hasChange := false
+	for _, line := range hunk.lines {
+		if line.kind == '-' || line.kind == '+' {
+			hasChange = true
+		}
+		if oldTerminal && (line.kind == ' ' || line.kind == '-') {
+			return fmt.Errorf("old side continues after no-newline marker")
+		}
+		if newTerminal && (line.kind == ' ' || line.kind == '+') {
+			return fmt.Errorf("new side continues after no-newline marker")
+		}
+		if line.noNewline {
+			if line.kind == ' ' || line.kind == '-' {
+				oldTerminal = true
+			}
+			if line.kind == ' ' || line.kind == '+' {
+				newTerminal = true
+			}
+		}
+	}
+	if !hasChange {
+		return fmt.Errorf("hunk contains no changes")
+	}
+	oldBytes, _, err := codexPatchHunkBytesContext(ctx, hunk)
+	if err != nil {
+		return err
+	}
+	if len(oldBytes) == 0 && !hunk.endOfFile {
+		return fmt.Errorf("pure insertion requires %s", applyPatchEndOfFileMarker)
+	}
+	return nil
+}
+
+func codexPatchHunkBytesContext(
+	ctx context.Context,
+	hunk codexPatchHunk,
+) ([]byte, []byte, error) {
+	oldText := make([]byte, 0)
+	newText := make([]byte, 0)
+	for _, line := range hunk.lines {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		switch line.kind {
 		case ' ':
-			oldText.WriteString(text)
-			newText.WriteString(text)
+			var err error
+			oldText, err = appendApplyPatchTextContext(ctx, oldText, line.text, line.newline)
+			if err != nil {
+				return nil, nil, err
+			}
+			newText, err = appendApplyPatchTextContext(ctx, newText, line.text, line.newline)
+			if err != nil {
+				return nil, nil, err
+			}
 		case '-':
-			oldText.WriteString(text)
+			var err error
+			oldText, err = appendApplyPatchTextContext(ctx, oldText, line.text, line.newline)
+			if err != nil {
+				return nil, nil, err
+			}
 		case '+':
-			newText.WriteString(text)
-		default:
-			return codexPatchHunk{}, i, fmt.Errorf("hunk line must start with space, -, or +")
+			var err error
+			newText, err = appendApplyPatchTextContext(ctx, newText, line.text, line.newline)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
-		i++
 	}
-	return codexPatchHunk{oldText: oldText.String(), newText: newText.String()}, i, nil
+	return oldText, newText, nil
 }
 
-func (t *ApplyPatchTool) applyOp(op codexPatchOp) (string, error) {
-	switch op.kind {
-	case "add":
-		if !t.allowCreate {
-			return "", fmt.Errorf("add file %q failed: write_file is disabled", op.path)
+func appendApplyPatchTextContext(
+	ctx context.Context,
+	destination []byte,
+	text string,
+	newline bool,
+) ([]byte, error) {
+	const chunkSize = 64 * 1024
+	for start := 0; start < len(text); start += chunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		path, err := t.resolveWritePath(op.path)
-		if err != nil {
-			return "", err
-		}
-		if _, err := os.Stat(path); err == nil {
-			return "", fmt.Errorf("add file %q failed: file already exists", op.path)
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return "", fmt.Errorf("add file %q failed: %w", op.path, err)
-		}
-		if err := os.WriteFile(path, []byte(op.add), 0o644); err != nil {
-			return "", fmt.Errorf("add file %q failed: %w", op.path, err)
-		}
-		return fmt.Sprintf("added %s", op.path), nil
-	case "delete":
-		if !t.allowCreate {
-			return "", fmt.Errorf("delete file %q failed: write_file is disabled", op.path)
-		}
-		path, err := t.resolveWritePath(op.path)
-		if err != nil {
-			return "", err
-		}
-		if err := os.Remove(path); err != nil {
-			return "", fmt.Errorf("delete file %q failed: %w", op.path, err)
-		}
-		return fmt.Sprintf("deleted %s", op.path), nil
-	case "update":
-		return t.applyUpdate(op)
-	default:
-		return "", fmt.Errorf("unsupported patch operation %q", op.kind)
+		end := min(start+chunkSize, len(text))
+		destination = append(destination, text[start:end]...)
 	}
-}
-
-func (t *ApplyPatchTool) applyUpdate(op codexPatchOp) (string, error) {
-	if !t.allowUpdate {
-		return "", fmt.Errorf("update file %q failed: edit_file is disabled", op.path)
+	if newline {
+		destination = append(destination, '\n')
 	}
-	path, err := t.resolveWritePath(op.path)
-	if err != nil {
-		return "", err
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("update file %q failed: %w", op.path, err)
-	}
-	updated := string(before)
-	for _, hunk := range op.hunks {
-		if hunk.oldText == "" && hunk.newText == "" {
-			continue
-		}
-		if !strings.Contains(updated, hunk.oldText) {
-			return "", fmt.Errorf("update file %q failed: hunk context not found", op.path)
-		}
-		updated = strings.Replace(updated, hunk.oldText, hunk.newText, 1)
-	}
-
-	target := path
-	targetLabel := op.path
-	if strings.TrimSpace(op.moveTo) != "" {
-		if !t.allowCreate {
-			return "", fmt.Errorf("move file %q failed: write_file is disabled", op.path)
-		}
-		target, err = t.resolveWritePath(op.moveTo)
-		if err != nil {
-			return "", err
-		}
-		targetLabel = op.moveTo
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return "", fmt.Errorf("move file %q failed: %w", op.moveTo, err)
-		}
-	}
-	if err := os.WriteFile(target, []byte(updated), 0o644); err != nil {
-		return "", fmt.Errorf("update file %q failed: %w", targetLabel, err)
-	}
-	if target != path {
-		if err := os.Remove(path); err != nil {
-			return "", fmt.Errorf("move file %q failed after writing target: %w", op.path, err)
-		}
-		return fmt.Sprintf("moved %s to %s", op.path, op.moveTo), nil
-	}
-	return fmt.Sprintf("updated %s", op.path), nil
+	return destination, ctx.Err()
 }
 
 func (t *ApplyPatchTool) resolveWritePath(path string) (string, error) {
@@ -337,3 +468,6 @@ func (t *ApplyPatchTool) resolveWritePath(path string) (string, error) {
 	}
 	return validatePathWithAllowPaths(path, t.workspace, t.restrict, t.allowPaths)
 }
+
+func applyPatchParentMode() os.FileMode { return 0o755 }
+func applyPatchFileMode() os.FileMode   { return 0o644 }
