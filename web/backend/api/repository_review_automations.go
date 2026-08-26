@@ -169,7 +169,7 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 		writeCollectionPageError(w, queryErr)
 		return
 	}
-	projected := automations
+	var projected []repoaudit.RepositoryReviewAutomation
 	total := len(automations)
 	nextCursor := ""
 	if r.URL != nil && r.URL.RawQuery != "" {
