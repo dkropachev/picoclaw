@@ -9,9 +9,28 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/repoaudit"
+)
+
+var repositoryReviewProfileCollectionSchema = mustCollectionQuerySchema(
+	[]collectionquery.FieldSchema{
+		{Name: "id", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "name", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "account", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "reviewer", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "issue_writer", Type: collectionquery.TypeString, Sortable: true},
+		{Name: "force", Type: collectionquery.TypeBoolean, Sortable: true},
+		{Name: "auto_continue", Type: collectionquery.TypeBoolean, Sortable: true},
+		{Name: "files", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "parallel", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "version", Type: collectionquery.TypeNumber, Sortable: true},
+		{Name: "updated", Type: collectionquery.TypeTimestamp, Sortable: true},
+	},
+	[]collectionquery.SortField{{Field: "name", Direction: collectionquery.Ascending}},
 )
 
 type repositoryReviewProfileConfigRequest struct {
@@ -19,6 +38,7 @@ type repositoryReviewProfileConfigRequest struct {
 	ReviewFocus         string                                 `json:"review_focus"`
 	ScopePolicy         repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel       string                                 `json:"reviewer_model"`
+	IssueWriterModel    string                                 `json:"issue_writer_model,omitempty"`
 	AccountRef          string                                 `json:"account_ref,omitempty"`
 	Force               bool                                   `json:"force"`
 	AutoContinue        *bool                                  `json:"auto_continue,omitempty"`
@@ -75,7 +95,108 @@ func (h *Handler) handleListRepositoryReviewProfiles(w http.ResponseWriter, r *h
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{"profiles": profiles})
+	query, _ := collectionquery.Parse("", repositoryReviewProfileCollectionSchema)
+	projected := profiles
+	total := len(profiles)
+	nextCursor := ""
+	if r.URL != nil && r.URL.RawQuery != "" {
+		listRequest, ok := parseCollectionListRequest(w, r, repositoryReviewProfileCollectionSchema)
+		if !ok {
+			return
+		}
+		query = listRequest.Query
+		page, pageErr := collectionquery.Paginate(
+			profiles,
+			query,
+			listRequest.Cursor,
+			listRequest.Limit,
+			listRequest.Now,
+			collectionquery.PageOptions[repoaudit.RepositoryReviewProfile]{
+				ID: func(profile repoaudit.RepositoryReviewProfile) (string, error) {
+					return profile.ID, nil
+				},
+				Clone: func(profile repoaudit.RepositoryReviewProfile) repoaudit.RepositoryReviewProfile {
+					return profile
+				},
+				Resolve: func(
+					profile repoaudit.RepositoryReviewProfile,
+					field collectionquery.Field,
+					_ time.Time,
+				) (collectionquery.FieldValue, bool) {
+					return repositoryReviewProfileCollectionField(profile, field)
+				},
+			},
+		)
+		if pageErr != nil {
+			writeCollectionPageError(w, pageErr)
+			return
+		}
+		projected = page.Items
+		total = page.Total
+		nextCursor = page.NextCursor
+	}
+	names := make([]string, 0, len(profiles))
+	accounts := make([]string, 0, len(profiles))
+	reviewers := make([]string, 0, len(profiles))
+	writers := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		names = append(names, profile.Name)
+		accounts = append(accounts, profile.AccountRef)
+		reviewers = append(reviewers, profile.ReviewerModel)
+		writer := profile.IssueWriterModel
+		if writer == "" {
+			writer = profile.ReviewerModel
+		}
+		writers = append(writers, writer)
+	}
+	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
+		"profiles":        projected,
+		"total":           total,
+		"next_cursor":     nextCursor,
+		"canonical_query": query.Canonical(),
+		"query_schema": collectionSchemaWithSuggestions(
+			repositoryReviewProfileCollectionSchema,
+			map[collectionquery.Field][]string{
+				"name": names, "account": accounts, "reviewer": reviewers, "issue_writer": writers,
+			},
+		),
+	})
+}
+
+func repositoryReviewProfileCollectionField(
+	profile repoaudit.RepositoryReviewProfile,
+	field collectionquery.Field,
+) (collectionquery.FieldValue, bool) {
+	switch field {
+	case "id":
+		return collectionquery.StringValue(profile.ID), true
+	case "name":
+		return collectionquery.StringValue(profile.Name), true
+	case "account":
+		return collectionquery.StringValue(profile.AccountRef), true
+	case "reviewer":
+		return collectionquery.StringValue(profile.ReviewerModel), true
+	case "issue_writer":
+		writer := profile.IssueWriterModel
+		if writer == "" {
+			writer = profile.ReviewerModel
+		}
+		return collectionquery.StringValue(writer), true
+	case "force":
+		return collectionquery.BooleanValue(profile.Force), true
+	case "auto_continue":
+		return collectionquery.BooleanValue(profile.AutoContinue), true
+	case "files":
+		return collectionquery.NumberValue(float64(profile.MaxFilesPerRun)), true
+	case "parallel":
+		return collectionquery.NumberValue(float64(profile.MaxParallelChildren)), true
+	case "version":
+		return collectionquery.NumberValue(float64(profile.Version)), true
+	case "updated":
+		return collectionquery.TimestampValue(profile.UpdatedAt), true
+	default:
+		return collectionquery.FieldValue{}, false
+	}
 }
 
 func (h *Handler) handleCreateRepositoryReviewProfile(w http.ResponseWriter, r *http.Request) {
@@ -93,8 +214,8 @@ func (h *Handler) handleCreateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	if validationErr := h.validateRepositoryReviewProfileSelection(
-		request.AccountRef, request.ReviewerModel, request.Budget,
+	if validationErr := h.validateRepositoryReviewProfileSelectionWithIssueWriter(
+		request.AccountRef, request.ReviewerModel, request.IssueWriterModel, request.Budget,
 	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
@@ -122,8 +243,8 @@ func (h *Handler) handleUpdateRepositoryReviewProfile(w http.ResponseWriter, r *
 		writeRepositoryReviewProfileError(w, err)
 		return
 	}
-	if validationErr := h.validateRepositoryReviewProfileSelection(
-		request.AccountRef, request.ReviewerModel, request.Budget,
+	if validationErr := h.validateRepositoryReviewProfileSelectionWithIssueWriter(
+		request.AccountRef, request.ReviewerModel, request.IssueWriterModel, request.Budget,
 	); validationErr != nil {
 		writeRepositoryReviewProfileError(w, validationErr)
 		return
@@ -155,6 +276,17 @@ func (h *Handler) validateRepositoryReviewProfileSelection(
 	reviewerModel string,
 	budget repoaudit.RepositoryReviewBudgetPolicy,
 ) error {
+	return h.validateRepositoryReviewProfileSelectionWithIssueWriter(
+		accountRef, reviewerModel, "", budget,
+	)
+}
+
+func (h *Handler) validateRepositoryReviewProfileSelectionWithIssueWriter(
+	accountRef string,
+	reviewerModel string,
+	issueWriterModel string,
+	budget repoaudit.RepositoryReviewBudgetPolicy,
+) error {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
 		return err
@@ -164,22 +296,18 @@ func (h *Handler) validateRepositoryReviewProfileSelection(
 		return fmt.Errorf("%w: account_ref: %v", repoaudit.ErrInvalidProfile, err)
 	}
 	reviewerModel = strings.TrimSpace(reviewerModel)
-	aliasConfig, aliasErr := cfg.GetModelAlias(reviewerModel)
-	if aliasErr != nil {
-		return fmt.Errorf("%w: reviewer_model %q is not configured", repoaudit.ErrInvalidProfile, reviewerModel)
+	if err := validateRepositoryReviewPassiveModelAlias(
+		cfg, accountRef, reviewerModel, "reviewer_model",
+	); err != nil {
+		return err
 	}
-	if repositoryReviewAliasUsesAgenticCLI(cfg, *aliasConfig) ||
-		repositoryReviewAliasUsesAgenticCLIOnAccount(cfg, reviewerModel, accountRef) {
-		return fmt.Errorf(
-			"%w: reviewer_model %q uses an agentic CLI provider unavailable to immutable review",
-			repoaudit.ErrInvalidProfile, reviewerModel,
-		)
-	}
-	if !repositoryReviewAliasAvailableForAccount(cfg, reviewerModel, accountRef) {
-		return fmt.Errorf(
-			"%w: reviewer_model %q is unavailable on account %q",
-			repoaudit.ErrInvalidProfile, reviewerModel, accountRef,
-		)
+	issueWriterModel = strings.TrimSpace(issueWriterModel)
+	if issueWriterModel != "" {
+		if err := validateRepositoryReviewIssueWriterAlias(
+			cfg, accountRef, issueWriterModel,
+		); err != nil {
+			return err
+		}
 	}
 	if repoaudit.RepositoryReviewGuardUsesSpend(budget.GuardExpression) {
 		if price, known := repositoryReviewAliasPriceForAccount(
@@ -190,6 +318,61 @@ func (h *Handler) validateRepositoryReviewProfileSelection(
 				repoaudit.ErrInvalidProfile, reviewerModel, accountRef,
 			)
 		}
+	}
+	return nil
+}
+
+func validateRepositoryReviewIssueWriterAlias(
+	cfg *config.Config,
+	accountRef string,
+	modelAlias string,
+) error {
+	if _, aliasErr := cfg.GetModelAlias(modelAlias); aliasErr != nil {
+		return fmt.Errorf(
+			"%w: issue_writer_model %q is not configured",
+			repoaudit.ErrInvalidProfile, modelAlias,
+		)
+	}
+	if repositoryReviewAliasUsesAgenticCLIOnAccount(cfg, modelAlias, accountRef) {
+		return fmt.Errorf(
+			"%w: issue_writer_model %q uses an agentic CLI provider unavailable to immutable review on account %q",
+			repoaudit.ErrInvalidProfile, modelAlias, accountRef,
+		)
+	}
+	if !repositoryReviewAliasAvailableForAccount(cfg, modelAlias, accountRef) {
+		return fmt.Errorf(
+			"%w: issue_writer_model %q is unavailable on account %q",
+			repoaudit.ErrInvalidProfile, modelAlias, accountRef,
+		)
+	}
+	return nil
+}
+
+func validateRepositoryReviewPassiveModelAlias(
+	cfg *config.Config,
+	accountRef string,
+	modelAlias string,
+	field string,
+) error {
+	aliasConfig, aliasErr := cfg.GetModelAlias(modelAlias)
+	if aliasErr != nil {
+		return fmt.Errorf(
+			"%w: %s %q is not configured",
+			repoaudit.ErrInvalidProfile, field, modelAlias,
+		)
+	}
+	if repositoryReviewAliasUsesAgenticCLI(cfg, *aliasConfig) ||
+		repositoryReviewAliasUsesAgenticCLIOnAccount(cfg, modelAlias, accountRef) {
+		return fmt.Errorf(
+			"%w: %s %q uses an agentic CLI provider unavailable to immutable review",
+			repoaudit.ErrInvalidProfile, field, modelAlias,
+		)
+	}
+	if !repositoryReviewAliasAvailableForAccount(cfg, modelAlias, accountRef) {
+		return fmt.Errorf(
+			"%w: %s %q is unavailable on account %q",
+			repoaudit.ErrInvalidProfile, field, modelAlias, accountRef,
+		)
 	}
 	return nil
 }
@@ -238,6 +421,7 @@ func applyRepositoryReviewProfileRequest(
 	profile.ReviewFocus = request.ReviewFocus
 	profile.ScopePolicy = request.ScopePolicy
 	profile.ReviewerModel = request.ReviewerModel
+	profile.IssueWriterModel = request.IssueWriterModel
 	profile.AccountRef = request.AccountRef
 	profile.Force = request.Force
 	if request.AutoContinue != nil {

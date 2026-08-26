@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -377,6 +378,70 @@ func TestRepositoryReviewPublicationHandlerCoversDurableDraftStates(t *testing.T
 	}
 }
 
+func TestRepositoryReviewPublicationHandlerRejectsNoncanonicalLegacyConflict(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	messageBus := bus.NewMessageBus()
+	loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "not used"})
+	t.Cleanup(func() {
+		loop.Stop()
+		messageBus.Close()
+		loop.Close()
+	})
+	_, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
+
+	root := filepath.Join(workspace, "repository_reviews")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statePath string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") &&
+			!strings.HasSuffix(entry.Name(), ".summary.json") {
+			statePath = filepath.Join(root, entry.Name())
+			break
+		}
+	}
+	if statePath == "" {
+		t.Fatal("authoritative repository-review state file was not found")
+	}
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted repoaudit.RepositoryState
+	if unmarshalErr := json.Unmarshal(raw, &persisted); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	newer := draft
+	newer.ID = "rid_newer_legacy_conflict"
+	newer.Canonical = false
+	newer.CreatedAt = draft.CreatedAt.Add(1)
+	newer.UpdatedAt = draft.UpdatedAt.Add(1)
+	persisted.IssueDrafts = append(persisted.IssueDrafts, newer)
+	raw, err = json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+state.ID+"/issue-drafts/"+draft.ID+"/publish",
+		strings.NewReader(`{"expected_version":`+strconv.FormatInt(draft.Version, 10)+`}`),
+	)
+	response := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), `"code":"noncanonical_issue_preview"`) {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+	}
+}
+
 func repositoryReviewPublicationTestDraft(
 	t *testing.T,
 	workspace string,
@@ -416,12 +481,1031 @@ func repositoryReviewPublicationTestDraft(
 	return store, state, draft
 }
 
+func repositoryReviewIssueLinkTestFixture(
+	t *testing.T,
+	workspace string,
+	repository string,
+) (repoaudit.Store, repoaudit.RepositoryState, repoaudit.Finding, repoaudit.RepositoryReviewAutomation) {
+	t.Helper()
+	store, state, draft := repositoryReviewPublicationTestDraft(t, workspace, repository)
+	state, err := store.DeleteIssueDraft(state.Repository, draft.ID, draft.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := state.Findings[0]
+	automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
+		ID:   "rra_issue_link_fixture",
+		Name: "Issue-link test", Repository: state.Repository,
+		Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
+		IssueWriterModel: "issue-writer", AccountRef: "writer-account",
+		EffectiveAccountRef: "writer-account", MaxFilesPerRun: 1, MaxContentBytes: 1024,
+		MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
+		RunIDs: []string{"publication-run"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, state, finding, automation
+}
+
 type repositoryReviewPublicationMCPManager struct {
 	searchText   string
 	createText   string
 	searchErr    error
 	createErr    error
 	beforeReturn func(string)
+}
+
+type repositoryReviewRankingProvider struct {
+	responses []string
+	err       error
+	calls     int
+	models    []string
+	tools     []int
+}
+
+func repositoryReviewRankingTestLoop(
+	t *testing.T,
+	provider *repositoryReviewRankingProvider,
+) *agent.AgentLoop {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("ranker provider path=%q", r.URL.Path)
+		}
+		defer r.Body.Close()
+		var request struct {
+			Model string `json:"model"`
+			Tools []any  `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode ranker request: %v", err)
+		}
+		provider.models = append(provider.models, request.Model)
+		provider.tools = append(provider.tools, len(request.Tools))
+		provider.calls++
+		if provider.err != nil {
+			http.Error(w, provider.err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		response := ""
+		if len(provider.responses) > 0 {
+			response = provider.responses[min(provider.calls-1, len(provider.responses)-1)]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"content": response}, "finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode ranker response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.AccountRef = "writer-account"
+	cfg.Agents.Defaults.ModelName = "issue-writer"
+	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "issue-writer", Model: "writer-v1"}}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "writer-account", Provider: "openai", Model: "writer-v1",
+		APIBase: server.URL, APIKeys: config.SimpleSecureStrings("test-key"), Enabled: true,
+	}}
+	messageBus := bus.NewMessageBus()
+	loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "bootstrap provider unused"})
+	t.Cleanup(func() {
+		loop.Stop()
+		messageBus.Close()
+		loop.Close()
+	})
+	return loop
+}
+
+func TestRepositoryReviewIssueCandidateRankingAcceptsOnlyGroundedUniqueResults(t *testing.T) {
+	provider := &repositoryReviewRankingProvider{responses: []string{
+		`{"rankings":[` +
+			`{"id":"2","score":91,"explanation":"Same stable symbol and path."},` +
+			`{"id":"1","score":73.5,"explanation":"Same failure mechanism."}` +
+			`]}`,
+	}}
+	loop := repositoryReviewRankingTestLoop(t, provider)
+	candidates := []repositoryReviewIssueCandidate{
+		{ID: "1", Number: 1, Title: "First", body: "first body"},
+		{ID: "2", Number: 2, Title: "Second", body: "second body"},
+	}
+	ranked, err := rankRepositoryReviewIssueCandidates(
+		t.Context(), loop,
+		repoaudit.RepositoryReviewAutomation{IssueWriterModel: "issue-writer"},
+		repoaudit.Finding{Title: "Finding", Symbol: "Store.Save", File: repoaudit.FileRef{Path: "store.go"}},
+		candidates,
+		"writer-account",
+	)
+	if err != nil || len(ranked) != 2 || ranked[0].ID != "2" || ranked[0].Score != 91 ||
+		ranked[1].ID != "1" || ranked[1].Explanation != "Same failure mechanism." {
+		t.Fatalf("ranked=%#v err=%v", ranked, err)
+	}
+	if provider.calls != 1 || len(provider.tools) != 1 || provider.tools[0] != 0 {
+		t.Fatalf("provider calls=%d models=%#v tools=%#v", provider.calls, provider.models, provider.tools)
+	}
+}
+
+func TestRepositoryReviewIssueCandidateRankingRejectsUngroundedOrMalformedResults(t *testing.T) {
+	tests := []struct {
+		name      string
+		response  string
+		provider  error
+		wantError string
+	}{
+		{
+			name: "unknown candidate",
+			response: `{"rankings":[` +
+				`{"id":"99","score":80,"explanation":"Not in the bounded input."}` +
+				`]}`,
+			wantError: "invalid structured output",
+		},
+		{
+			name: "duplicate candidate",
+			response: `{"rankings":[` +
+				`{"id":"1","score":80,"explanation":"First."},` +
+				`{"id":"1","score":70,"explanation":"Duplicate."}` +
+				`]}`,
+			wantError: "duplicate candidate",
+		},
+		{
+			name: "score above parser bound",
+			response: `{"rankings":[` +
+				`{"id":"1","score":101,"explanation":"Out of range."}` +
+				`]}`,
+			wantError: "invalid structured output",
+		},
+		{name: "invalid JSON", response: `not-json`, wantError: "structured output invalid"},
+		{
+			name: "schema violation", response: `{"rankings":[{"id":"1","score":80,"explanation":""}]}`,
+			wantError: "structured output invalid",
+		},
+		{name: "provider failure", provider: errors.New("ranker offline"), wantError: "API request failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &repositoryReviewRankingProvider{
+				responses: []string{test.response}, err: test.provider,
+			}
+			loop := repositoryReviewRankingTestLoop(t, provider)
+			_, err := rankRepositoryReviewIssueCandidates(
+				t.Context(), loop,
+				repoaudit.RepositoryReviewAutomation{IssueWriterModel: "issue-writer"},
+				repoaudit.Finding{Title: "Finding"},
+				[]repositoryReviewIssueCandidate{{ID: "1", Number: 1, Title: "Candidate"}},
+				"writer-account",
+			)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("rank error=%v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewIssueCandidateRankingRejectsOversizedInputBeforeDispatch(t *testing.T) {
+	candidates := make([]repositoryReviewIssueCandidate, 600)
+	for index := range candidates {
+		candidates[index] = repositoryReviewIssueCandidate{
+			ID: strconv.Itoa(index + 1), Number: int64(index + 1),
+			Title: "candidate", body: strings.Repeat("x", 2048),
+		}
+	}
+	_, err := rankRepositoryReviewIssueCandidates(
+		t.Context(), nil,
+		repoaudit.RepositoryReviewAutomation{IssueWriterModel: "issue-writer"},
+		repoaudit.Finding{Title: "Finding"}, candidates, "writer-account",
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeds its safe bound") {
+		t.Fatalf("oversized rank input error=%v", err)
+	}
+}
+
+func TestRepositoryReviewValidatedWriterAccountRequiresCompletePassiveSnapshot(t *testing.T) {
+	if _, err := repositoryReviewValidatedIssueWriterAccount(
+		t.Context(), nil, repoaudit.RepositoryReviewAutomation{},
+	); err == nil {
+		t.Fatal("nil writer runtime was accepted")
+	}
+
+	loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+	if _, err := repositoryReviewValidatedIssueWriterAccount(
+		t.Context(), loop,
+		repoaudit.RepositoryReviewAutomation{EffectiveAccountRef: "writer-account"},
+	); err == nil {
+		t.Fatal("writer snapshot without a model was accepted")
+	}
+	emptyConfig := config.DefaultConfig()
+	emptyConfig.Agents.Defaults.Workspace = t.TempDir()
+	emptyConfig.Agents.Defaults.AccountRef = ""
+	emptyBus := bus.NewMessageBus()
+	emptyLoop := agent.NewAgentLoop(
+		emptyConfig, emptyBus, &startupBlockedProvider{reason: "not used"},
+	)
+	t.Cleanup(func() {
+		emptyLoop.Stop()
+		emptyBus.Close()
+		emptyLoop.Close()
+	})
+	if _, err := repositoryReviewValidatedIssueWriterAccount(
+		t.Context(), emptyLoop,
+		repoaudit.RepositoryReviewAutomation{IssueWriterModel: "issue-writer"},
+	); err == nil {
+		t.Fatal("writer snapshot without an account was accepted")
+	}
+	account, err := repositoryReviewValidatedIssueWriterAccount(
+		t.Context(), loop,
+		repoaudit.RepositoryReviewAutomation{
+			IssueWriterModel: "issue-writer", EffectiveAccountRef: "writer-account",
+		},
+	)
+	if err != nil || account != "writer-account" {
+		t.Fatalf("validated account=%q err=%v", account, err)
+	}
+}
+
+func TestRepositoryReviewProtectedIssueLinkRefetchesAndPersistsValidatedIssue(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	messageBus := bus.NewMessageBus()
+	loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "not used"})
+	t.Cleanup(func() {
+		loop.Stop()
+		messageBus.Close()
+		loop.Close()
+	})
+	manager := &repositoryReviewPublicationMCPManager{searchText: `{
+		"id":99,"number":12,"title":"Existing lost-update report",
+		"body":"The same write loses data.","state":"closed",
+		"html_url":"https://github.com/owner/repo/issues/12",
+		"labels":[{"name":"bug"}]
+	}`}
+	loop.RegisterTool(tools.NewMCPTool(manager, reviews.DefaultGitHubMCPServer, &sdkmcp.Tool{
+		Name:        reviews.GitHubIssueReadTool,
+		InputSchema: map[string]any{"type": "object", "additionalProperties": true},
+	}))
+	store, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
+	state, err := store.DeleteIssueDraft(state.Repository, draft.ID, draft.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := state.Findings[0]
+	automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
+		ID: "rra_link_test", Name: "Link test", Repository: state.Repository,
+		Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"review"},
+		IssueWriterModel: "writer", MaxFilesPerRun: 1, MaxContentBytes: 1024,
+		MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
+		RunIDs: []string{"publication-run"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossRepository := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+			finding.ID+"/issue-link",
+		strings.NewReader(`{"issue_url":"https://github.com/other/repo/issues/12","expected_version":`+
+			strconv.FormatInt(finding.Version, 10)+`,"confirmed":true}`),
+	)
+	crossResponse := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(crossResponse, crossRepository)
+	if crossResponse.Code != http.StatusBadRequest {
+		t.Fatalf("cross-repository link response=%d %s", crossResponse.Code, crossResponse.Body.String())
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+			finding.ID+"/issue-link",
+		strings.NewReader(`{"issue_url":"https://github.com/owner/repo/issues/12","expected_version":`+
+			strconv.FormatInt(finding.Version, 10)+`,"confirmed":true}`),
+	)
+	response := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"origin":"linked"`) ||
+		!strings.Contains(response.Body.String(), `"external_url":"https://github.com/owner/repo/issues/12"`) {
+		t.Fatalf("link response=%d %s", response.Code, response.Body.String())
+	}
+	persisted, found, err := store.Get(state.Repository)
+	if err != nil || !found || persisted.Findings[0].Status != repoaudit.FindingPosted ||
+		len(persisted.IssueDrafts) != 1 ||
+		persisted.IssueDrafts[0].Origin != repoaudit.IssueDraftOriginLinked {
+		t.Fatalf("persisted link=%#v found=%v err=%v", persisted, found, err)
+	}
+	manager.searchText = `{
+		"id":100,"number":13,"title":"Replacement lost-update report",
+		"body":"An even closer existing report.","state":"open",
+		"html_url":"https://github.com/owner/repo/issues/13",
+		"labels":[{"name":"bug"}]
+	}`
+	replaceRequest := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+			finding.ID+"/issue-link",
+		strings.NewReader(`{"issue_url":"https://github.com/owner/repo/issues/13","expected_version":`+
+			strconv.FormatInt(persisted.Findings[0].Version, 10)+`,"confirmed":true,"replace":true}`),
+	)
+	replaceResponse := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(replaceResponse, replaceRequest)
+	replaced, found, err := store.Get(state.Repository)
+	if replaceResponse.Code != http.StatusOK || err != nil || !found ||
+		len(replaced.IssueDrafts) != 1 || replaced.IssueDrafts[0].ExternalID != "100" ||
+		replaced.IssueDrafts[0].ExternalURL != "https://github.com/owner/repo/issues/13" {
+		t.Fatalf(
+			"replace response=%d %s state=%#v found=%v err=%v",
+			replaceResponse.Code, replaceResponse.Body.String(), replaced, found, err,
+		)
+	}
+	unlinkRequest := httptest.NewRequest(
+		http.MethodDelete,
+		repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+			finding.ID+"/issue-link",
+		strings.NewReader(`{"expected_version":`+
+			strconv.FormatInt(replaced.Findings[0].Version, 10)+`,"confirmed":true}`),
+	)
+	unlinkResponse := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(unlinkResponse, unlinkRequest)
+	unlinked, found, err := store.Get(state.Repository)
+	if unlinkResponse.Code != http.StatusOK || err != nil || !found ||
+		unlinked.Findings[0].Status != repoaudit.FindingOpen ||
+		unlinked.Findings[0].IssueDraftID != "" || len(unlinked.IssueDrafts) != 0 {
+		t.Fatalf(
+			"unlink response=%d %s state=%#v found=%v err=%v",
+			unlinkResponse.Code, unlinkResponse.Body.String(), unlinked, found, err,
+		)
+	}
+}
+
+func TestRepositoryReviewIssueLinkAndUnlinkRejectInvalidOrStaleRequests(t *testing.T) {
+	workspace := t.TempDir()
+	store, state, finding, automation := repositoryReviewIssueLinkTestFixture(
+		t, workspace, "owner/repo",
+	)
+	handler := newRepositoryReviewPublicationHandler(nil)
+
+	for _, test := range []struct {
+		name   string
+		body   string
+		status int
+		code   string
+	}{
+		{name: "malformed", body: `{`, status: http.StatusBadRequest, code: "invalid_request"},
+		{
+			name:   "confirmation required",
+			body:   `{"issue_url":"https://github.com/owner/repo/issues/12","expected_version":1}`,
+			status: http.StatusBadRequest, code: "invalid_request",
+		},
+		{
+			name:   "stale",
+			body:   `{"issue_url":"https://github.com/owner/repo/issues/12","expected_version":99,"confirmed":true}`,
+			status: http.StatusConflict, code: "stale_repository_review",
+		},
+		{
+			name: "invalid URL",
+			body: `{"issue_url":"http://github.com/owner/repo/issues/12","expected_version":` +
+				strconv.FormatInt(finding.Version, 10) + `,"confirmed":true}`,
+			status: http.StatusBadRequest, code: "invalid_issue_url",
+		},
+		{
+			name: "tool runtime unavailable",
+			body: `{"issue_url":"https://github.com/owner/repo/issues/12","expected_version":` +
+				strconv.FormatInt(finding.Version, 10) + `,"confirmed":true}`,
+			status: http.StatusServiceUnavailable, code: "issue_link_unavailable",
+		},
+	} {
+		t.Run("link "+test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.serveRepositoryReviewIssueLink(
+				response, request, nil, store, automation, state, finding,
+			)
+			if response.Code != test.status ||
+				!strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("response=%d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		body   string
+		status int
+		code   string
+	}{
+		{name: "malformed", body: `{`, status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "confirmation required", body: `{"expected_version":1}`, status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "stale", body: `{"expected_version":99,"confirmed":true}`, status: http.StatusConflict, code: "stale_repository_review"},
+		{
+			name:   "not linked",
+			body:   `{"expected_version":` + strconv.FormatInt(finding.Version, 10) + `,"confirmed":true}`,
+			status: http.StatusConflict, code: "stale_repository_review",
+		},
+	} {
+		t.Run("unlink "+test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodDelete, "/", strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.serveRepositoryReviewIssueUnlink(
+				response, request, store, automation, state, finding,
+			)
+			if response.Code != test.status ||
+				!strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("response=%d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewIssueLinkReportsProviderAndPersistenceFailuresSafely(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		issueText  string
+		issueErr   error
+		poisonRoot bool
+		status     int
+		code       string
+	}{
+		{
+			name: "provider failure", issueErr: errors.New("GitHub unavailable"),
+			status: http.StatusServiceUnavailable, code: "issue_link_unavailable",
+		},
+		{
+			name: "invalid response",
+			issueText: `{"id":99,"number":12,"title":"Wrong number",` +
+				`"html_url":"https://github.com/owner/repo/issues/13"}`,
+			status: http.StatusBadGateway, code: "invalid_gateway_response",
+		},
+		{
+			name: "persistence failure",
+			issueText: `{"id":99,"number":12,"title":"Existing issue",` +
+				`"html_url":"https://github.com/owner/repo/issues/12"}`,
+			poisonRoot: true, status: http.StatusServiceUnavailable, code: "publication_unavailable",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+			workspace := loop.GetConfig().WorkspacePath()
+			manager := &repositoryReviewPublicationMCPManager{
+				searchText: test.issueText, searchErr: test.issueErr,
+			}
+			if test.poisonRoot {
+				manager.beforeReturn = func(toolName string) {
+					if toolName != reviews.GitHubIssueReadTool {
+						return
+					}
+					root := filepath.Join(workspace, "repository_reviews")
+					if err := os.RemoveAll(root); err != nil {
+						t.Errorf("remove store root: %v", err)
+						return
+					}
+					if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+						t.Errorf("replace store root: %v", err)
+					}
+				}
+			}
+			loop.RegisterTool(tools.NewMCPTool(manager, reviews.DefaultGitHubMCPServer, &sdkmcp.Tool{
+				Name:        reviews.GitHubIssueReadTool,
+				InputSchema: map[string]any{"type": "object", "additionalProperties": true},
+			}))
+			store, state, finding, automation := repositoryReviewIssueLinkTestFixture(
+				t, workspace, "owner/repo",
+			)
+			request := httptest.NewRequest(
+				http.MethodPost, "/",
+				strings.NewReader(`{"issue_url":"https://github.com/owner/repo/issues/12",`+
+					`"expected_version":`+strconv.FormatInt(finding.Version, 10)+`,"confirmed":true}`),
+			)
+			response := httptest.NewRecorder()
+			newRepositoryReviewPublicationHandler(loop).serveRepositoryReviewIssueLink(
+				response, request, loop, store, automation, state, finding,
+			)
+			if response.Code != test.status ||
+				!strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("response=%d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewIssueLinkReportsConcurrentFindingMutation(t *testing.T) {
+	loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+	manager := &repositoryReviewPublicationMCPManager{searchText: `{
+		"id":99,"number":12,"title":"Existing issue",
+		"html_url":"https://github.com/owner/repo/issues/12"
+	}`}
+	loop.RegisterTool(tools.NewMCPTool(manager, reviews.DefaultGitHubMCPServer, &sdkmcp.Tool{
+		Name:        reviews.GitHubIssueReadTool,
+		InputSchema: map[string]any{"type": "object", "additionalProperties": true},
+	}))
+	store, state, finding, automation := repositoryReviewIssueLinkTestFixture(
+		t, loop.GetConfig().WorkspacePath(), "owner/repo",
+	)
+	if _, err := store.SetFindingStatus(
+		state.Repository, finding.ID, repoaudit.FindingDismissed, state.Version,
+	); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost, "/",
+		strings.NewReader(`{"issue_url":"https://github.com/owner/repo/issues/12",`+
+			`"expected_version":`+strconv.FormatInt(finding.Version, 10)+`,"confirmed":true}`),
+	)
+	response := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).serveRepositoryReviewIssueLink(
+		response, request, loop, store, automation, state, finding,
+	)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), `"code":"stale_repository_review"`) {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRepositoryReviewProtectedIssueCandidateDiscoverySearchesThenRanks(t *testing.T) {
+	rankingProvider := &repositoryReviewRankingProvider{responses: []string{
+		`{"rankings":[{"id":"99","score":94,"explanation":"Same write and data-loss mechanism."}]}`,
+	}}
+	loop := repositoryReviewRankingTestLoop(t, rankingProvider)
+	workspace := loop.GetConfig().WorkspacePath()
+	manager := &repositoryReviewPublicationMCPManager{searchText: `{"items":[{
+		"id":99,"number":12,"title":"Existing lost-update report",
+		"body":"The same write loses data.","state":"closed",
+		"html_url":"https://github.com/owner/repo/issues/12",
+		"labels":[{"name":"bug"}]
+	}]}`}
+	loop.RegisterTool(tools.NewMCPTool(manager, reviews.DefaultGitHubMCPServer, &sdkmcp.Tool{
+		Name:        reviews.GitHubSearchIssuesTool,
+		InputSchema: map[string]any{"type": "object", "additionalProperties": true},
+	}))
+	store, state, draft := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
+	state, err := store.DeleteIssueDraft(state.Repository, draft.ID, draft.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := state.Findings[0]
+	automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
+		ID: "rra_candidate_test", Name: "Candidate test", Repository: state.Repository,
+		Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
+		IssueWriterModel: "issue-writer", AccountRef: "writer-account",
+		EffectiveAccountRef: "writer-account", MaxFilesPerRun: 1, MaxContentBytes: 1024,
+		MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
+		RunIDs: []string{"publication-run"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+			finding.ID+"/issue-link/candidates",
+		strings.NewReader(`{"expected_version":`+strconv.FormatInt(finding.Version, 10)+`}`),
+	)
+	response := httptest.NewRecorder()
+	newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"score":94`) ||
+		!strings.Contains(response.Body.String(), `"generator_model":"issue-writer"`) ||
+		!strings.Contains(response.Body.String(), `"generator_account":"writer-account"`) {
+		t.Fatalf("candidate response=%d %s", response.Code, response.Body.String())
+	}
+	if rankingProvider.calls != 1 || rankingProvider.tools[0] != 0 {
+		t.Fatalf("ranking calls=%d tools=%#v", rankingProvider.calls, rankingProvider.tools)
+	}
+}
+
+func TestRepositoryReviewAutomationOperationRejectsMissingOrUnsafeState(t *testing.T) {
+	t.Run("runtime unavailable", func(t *testing.T) {
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/missing/findings/missing/issue-link",
+			strings.NewReader(`{}`),
+		)
+		response := httptest.NewRecorder()
+		newRepositoryReviewPublicationHandler(nil).ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), `"code":"repository_review_unavailable"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("automation missing", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.Agents.Defaults.Workspace = t.TempDir()
+		messageBus := bus.NewMessageBus()
+		loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "not used"})
+		t.Cleanup(func() {
+			loop.Stop()
+			messageBus.Close()
+			loop.Close()
+		})
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/missing/findings/missing/issue-link",
+			strings.NewReader(`{}`),
+		)
+		response := httptest.NewRecorder()
+		newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("automation ledger missing", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		store := repoaudit.NewStore(loop.GetConfig().WorkspacePath())
+		automation, err := store.CreateAutomation(t.Context(), repoaudit.RepositoryReviewAutomation{
+			ID: "rra_missing_ledger", Name: "Missing ledger", Repository: "owner/missing",
+			Target: "all", ReviewFocus: "Find bugs.", ReviewerModels: []string{"issue-writer"},
+			IssueWriterModel: "issue-writer", AccountRef: "writer-account",
+			EffectiveAccountRef: "writer-account", MaxFilesPerRun: 1, MaxContentBytes: 1024,
+			MaxParallelChildren: 1, Status: repoaudit.RepositoryReviewAutomationIdle,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/"+automation.ID+
+				"/findings/missing/issue-link",
+			strings.NewReader(`{}`),
+		)
+		response := httptest.NewRecorder()
+		newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("finding missing", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		_, _, _, automation := repositoryReviewIssueLinkTestFixture(
+			t, loop.GetConfig().WorkspacePath(), "owner/repo",
+		)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/"+automation.ID+
+				"/findings/missing/issue-link",
+			strings.NewReader(`{}`),
+		)
+		response := httptest.NewRecorder()
+		newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("repository not linkable", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		_, _, finding, automation := repositoryReviewIssueLinkTestFixture(
+			t, loop.GetConfig().WorkspacePath(), "/tmp/local-repository",
+		)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+				finding.ID+"/issue-link",
+			strings.NewReader(`{}`),
+		)
+		response := httptest.NewRecorder()
+		newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest ||
+			!strings.Contains(response.Body.String(), `"code":"repository_not_linkable"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("unknown operation", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		_, _, finding, automation := repositoryReviewIssueLinkTestFixture(
+			t, loop.GetConfig().WorkspacePath(), "owner/unknown-operation",
+		)
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+		response := httptest.NewRecorder()
+		newRepositoryReviewPublicationHandler(loop).serveRepositoryReviewAutomationOperation(
+			response, request,
+			repositoryReviewAutomationOperation{
+				AutomationID: automation.ID, FindingID: finding.ID, Action: "unknown",
+			},
+		)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+func TestRepositoryReviewAutomationStateFallsBackOnlyToUnambiguousRunMembership(t *testing.T) {
+	t.Run("direct identity", func(t *testing.T) {
+		workspace := t.TempDir()
+		store, expected, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/repo")
+		state, found, err := repositoryReviewAutomationState(
+			store,
+			repoaudit.RepositoryReviewAutomation{Repository: "https://github.com/Owner/Repo.git"},
+		)
+		if err != nil || !found || state.ID != expected.ID {
+			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
+		}
+	})
+
+	t.Run("no run membership", func(t *testing.T) {
+		store := repoaudit.NewStore(t.TempDir())
+		state, found, err := repositoryReviewAutomationState(
+			store, repoaudit.RepositoryReviewAutomation{Repository: "missing/repo"},
+		)
+		if err != nil || found || state.ID != "" {
+			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
+		}
+	})
+
+	t.Run("unique run fallback", func(t *testing.T) {
+		workspace := t.TempDir()
+		store, expected, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/actual")
+		state, found, err := repositoryReviewAutomationState(
+			store,
+			repoaudit.RepositoryReviewAutomation{
+				Repository: "missing/repo", RunIDs: []string{"publication-run", "unrelated"},
+			},
+		)
+		if err != nil || !found || state.ID != expected.ID {
+			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
+		}
+	})
+
+	t.Run("unmatched run", func(t *testing.T) {
+		workspace := t.TempDir()
+		store, _, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/actual")
+		state, found, err := repositoryReviewAutomationState(
+			store,
+			repoaudit.RepositoryReviewAutomation{
+				Repository: "missing/repo", RunIDs: []string{"other-run"},
+			},
+		)
+		if err != nil || found || state.ID != "" {
+			t.Fatalf("state=%#v found=%v err=%v", state, found, err)
+		}
+	})
+
+	t.Run("ambiguous run", func(t *testing.T) {
+		workspace := t.TempDir()
+		store, _, _ := repositoryReviewPublicationTestDraft(t, workspace, "owner/first")
+		_, _, _ = repositoryReviewPublicationTestDraft(t, workspace, "owner/second")
+		_, found, err := repositoryReviewAutomationState(
+			store,
+			repoaudit.RepositoryReviewAutomation{
+				Repository: "missing/repo", RunIDs: []string{"publication-run"},
+			},
+		)
+		if err == nil || found || !strings.Contains(err.Error(), "ambiguous") {
+			t.Fatalf("found=%v err=%v", found, err)
+		}
+	})
+
+	t.Run("ledger list failure", func(t *testing.T) {
+		workspace := t.TempDir()
+		_, _, _ = repositoryReviewPublicationTestDraft(t, workspace, "owner/corrupt")
+		root := filepath.Join(workspace, "repository_reviews")
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		statePath := ""
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") &&
+				!strings.HasSuffix(entry.Name(), ".summary.json") {
+				statePath = filepath.Join(root, entry.Name())
+				break
+			}
+		}
+		if statePath == "" {
+			t.Fatal("authoritative state file was not found")
+		}
+		if writeErr := os.WriteFile(statePath, []byte(`{`), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		_, found, err := repositoryReviewAutomationState(
+			repoaudit.NewStore(workspace),
+			repoaudit.RepositoryReviewAutomation{
+				Repository: "missing/repo", RunIDs: []string{"publication-run"},
+			},
+		)
+		if err == nil || found {
+			t.Fatalf("found=%v err=%v", found, err)
+		}
+	})
+}
+
+func TestRepositoryReviewCandidateEndpointRejectsInvalidStaleAndUnavailableRequests(t *testing.T) {
+	state := repoaudit.RepositoryState{Repository: "owner/repo"}
+	baseFinding := repoaudit.Finding{ID: "rfn_test", Version: 3, Status: repoaudit.FindingOpen}
+	automation := repoaudit.RepositoryReviewAutomation{
+		IssueWriterModel: "issue-writer", EffectiveAccountRef: "writer-account",
+	}
+	handler := newRepositoryReviewPublicationHandler(nil)
+	for _, test := range []struct {
+		name    string
+		body    string
+		finding repoaudit.Finding
+		status  int
+		code    string
+	}{
+		{name: "malformed", body: `{`, finding: baseFinding, status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "unknown field", body: `{"expected_version":3,"extra":true}`, finding: baseFinding, status: http.StatusBadRequest, code: "invalid_request"},
+		{name: "stale", body: `{"expected_version":2}`, finding: baseFinding, status: http.StatusConflict, code: "stale_repository_review"},
+		{
+			name: "not open", body: `{"expected_version":3}`,
+			finding: func() repoaudit.Finding {
+				finding := baseFinding
+				finding.Status = repoaudit.FindingDismissed
+				return finding
+			}(),
+			status: http.StatusConflict, code: "stale_repository_review",
+		},
+		{
+			name: "associated", body: `{"expected_version":3}`,
+			finding: func() repoaudit.Finding {
+				finding := baseFinding
+				finding.IssueDraftID = "rid_existing"
+				return finding
+			}(),
+			status: http.StatusConflict, code: "stale_repository_review",
+		},
+		{name: "writer unavailable", body: `{"expected_version":3}`, finding: baseFinding, status: http.StatusServiceUnavailable, code: "issue_ranking_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.serveRepositoryReviewIssueCandidates(
+				response, request, nil, automation, state, test.finding,
+			)
+			if response.Code != test.status ||
+				!strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("response=%d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewCandidateEndpointReportsSearchAndRankingFailuresSafely(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		searchText string
+		searchErr  error
+		ranking    string
+		code       string
+	}{
+		{
+			name: "search failure", searchErr: errors.New("GitHub unavailable"),
+			ranking: `{"rankings":[]}`, code: "issue_search_unavailable",
+		},
+		{
+			name:       "invalid search response",
+			searchText: `{"items":42}`, ranking: `{"rankings":[]}`,
+			code: "issue_search_unavailable",
+		},
+		{
+			name: "ranking failure",
+			searchText: `{"items":[{"id":12,"number":12,"title":"Candidate",` +
+				`"html_url":"https://github.com/owner/repo/issues/12"}]}`,
+			ranking: `not-json`, code: "issue_ranking_unavailable",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{
+				responses: []string{test.ranking},
+			})
+			manager := &repositoryReviewPublicationMCPManager{
+				searchText: test.searchText, searchErr: test.searchErr,
+			}
+			loop.RegisterTool(tools.NewMCPTool(manager, reviews.DefaultGitHubMCPServer, &sdkmcp.Tool{
+				Name:        reviews.GitHubSearchIssuesTool,
+				InputSchema: map[string]any{"type": "object", "additionalProperties": true},
+			}))
+			_, _, finding, automation := repositoryReviewIssueLinkTestFixture(
+				t, loop.GetConfig().WorkspacePath(), "owner/repo",
+			)
+			request := httptest.NewRequest(
+				http.MethodPost,
+				repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+					finding.ID+"/issue-link/candidates",
+				strings.NewReader(`{"expected_version":`+strconv.FormatInt(finding.Version, 10)+`}`),
+			)
+			response := httptest.NewRecorder()
+			newRepositoryReviewPublicationHandler(loop).ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable ||
+				!strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("response=%d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewGatewayHandlersFailClosedWhenDependenciesCannotInitialize(t *testing.T) {
+	t.Run("candidate tool runner", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		_, _, finding, automation := repositoryReviewIssueLinkTestFixture(
+			t, loop.GetConfig().WorkspacePath(), "owner/repo",
+		)
+		handler := newRepositoryReviewPublicationHandler(loop)
+		handler.newToolRunner = func(*agent.AgentLoop, string) (workflows.ToolRunner, error) {
+			return nil, errors.New("tool runtime unavailable")
+		}
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+				finding.ID+"/issue-link/candidates",
+			strings.NewReader(`{"expected_version":`+strconv.FormatInt(finding.Version, 10)+`}`),
+		)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), `"code":"issue_search_unavailable"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("candidate provider", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		_, _, finding, automation := repositoryReviewIssueLinkTestFixture(
+			t, loop.GetConfig().WorkspacePath(), "owner/repo",
+		)
+		handler := newRepositoryReviewPublicationHandler(loop)
+		handler.newGitHubProvider = func(
+			workflows.ToolRunner,
+			string,
+		) (*reviews.GitHubProvider, error) {
+			return nil, errors.New("GitHub provider unavailable")
+		}
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+"automations/"+automation.ID+"/findings/"+
+				finding.ID+"/issue-link/candidates",
+			strings.NewReader(`{"expected_version":`+strconv.FormatInt(finding.Version, 10)+`}`),
+		)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), `"code":"issue_search_unavailable"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("link provider", func(t *testing.T) {
+		loop := repositoryReviewRankingTestLoop(t, &repositoryReviewRankingProvider{})
+		store, state, finding, automation := repositoryReviewIssueLinkTestFixture(
+			t, loop.GetConfig().WorkspacePath(), "owner/repo",
+		)
+		handler := newRepositoryReviewPublicationHandler(loop)
+		handler.newGitHubProvider = func(
+			workflows.ToolRunner,
+			string,
+		) (*reviews.GitHubProvider, error) {
+			return nil, errors.New("GitHub provider unavailable")
+		}
+		request := httptest.NewRequest(
+			http.MethodPost, "/",
+			strings.NewReader(`{"issue_url":"https://github.com/owner/repo/issues/12",`+
+				`"expected_version":`+strconv.FormatInt(finding.Version, 10)+`,"confirmed":true}`),
+		)
+		response := httptest.NewRecorder()
+		handler.serveRepositoryReviewIssueLink(
+			response, request, loop, store, automation, state, finding,
+		)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), `"code":"issue_link_unavailable"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("publication provider", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.Agents.Defaults.Workspace = t.TempDir()
+		messageBus := bus.NewMessageBus()
+		loop := agent.NewAgentLoop(cfg, messageBus, &startupBlockedProvider{reason: "not used"})
+		t.Cleanup(func() {
+			loop.Stop()
+			messageBus.Close()
+			loop.Close()
+		})
+		_, state, draft := repositoryReviewPublicationTestDraft(
+			t, cfg.WorkspacePath(), "owner/repo",
+		)
+		handler := newRepositoryReviewPublicationHandler(loop)
+		handler.newGitHubProvider = func(
+			workflows.ToolRunner,
+			string,
+		) (*reviews.GitHubProvider, error) {
+			return nil, errors.New("GitHub provider unavailable")
+		}
+		request := httptest.NewRequest(
+			http.MethodPost,
+			repositoryReviewPublicationRoute+state.ID+"/issue-drafts/"+draft.ID+"/publish",
+			strings.NewReader(`{"expected_version":`+strconv.FormatInt(draft.Version, 10)+`}`),
+		)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), `"code":"publication_unavailable"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	})
 }
 
 func (manager *repositoryReviewPublicationMCPManager) CallTool(

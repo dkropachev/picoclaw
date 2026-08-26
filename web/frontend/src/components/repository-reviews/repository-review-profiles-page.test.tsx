@@ -1,16 +1,25 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   createRepositoryReviewProfile,
-  deleteRepositoryReviewProfile,
   getRepositoryReviewAutomationOptions,
-  listRepositoryReviewProfiles,
+  getRepositoryReviewProfile,
+  listRepositoryReviewProfilesPage,
   updateRepositoryReviewProfile,
 } from "@/api/repository-reviews"
-import { RepositoryReviewProfilesPage } from "@/components/repository-reviews/repository-review-profiles-page"
+import {
+  RepositoryReviewProfileEditorPage,
+  RepositoryReviewProfilesPage,
+} from "@/components/repository-reviews/repository-review-profiles-page"
 
 vi.mock("@/components/page-header", () => ({
   PageHeader: ({
@@ -28,16 +37,18 @@ vi.mock("@/components/page-header", () => ({
 }))
 
 vi.mock("@/api/repository-reviews", () => ({
+  RepositoryReviewAPIError: class RepositoryReviewAPIError extends Error {
+    status = 500
+  },
   createRepositoryReviewProfile: vi.fn(),
-  deleteRepositoryReviewProfile: vi.fn(),
   getRepositoryReviewAutomationOptions: vi.fn(),
-  listRepositoryReviewProfiles: vi.fn(),
+  getRepositoryReviewProfile: vi.fn(),
+  listRepositoryReviewProfilesPage: vi.fn(),
   updateRepositoryReviewProfile: vi.fn(),
 }))
 
 describe("RepositoryReviewProfilesPage", () => {
   beforeEach(() => {
-    vi.mocked(listRepositoryReviewProfiles).mockResolvedValue({ profiles: [] })
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [
         {
@@ -63,8 +74,36 @@ describe("RepositoryReviewProfilesPage", () => {
       ],
     })
     vi.mocked(createRepositoryReviewProfile).mockReset()
+    vi.mocked(getRepositoryReviewProfile).mockReset()
+    vi.mocked(listRepositoryReviewProfilesPage).mockReset()
     vi.mocked(updateRepositoryReviewProfile).mockReset()
-    vi.mocked(deleteRepositoryReviewProfile).mockReset()
+  })
+
+  it("uses the shared collection with canonical query and all three views", async () => {
+    const user = userEvent.setup()
+    const profile = storedProfile("", "review-model")
+    vi.mocked(listRepositoryReviewProfilesPage).mockResolvedValue({
+      profiles: [profile],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ALL ORDER BY name ASC",
+      query_schema: { fields: [] },
+    })
+    const onSearchChange = vi.fn()
+    const onOpen = vi.fn()
+    renderCollection(onSearchChange, onOpen)
+
+    expect(await screen.findByText("Stale profile")).toBeVisible()
+    expect(
+      document.querySelector('[data-slot="collection-shell"]'),
+    ).not.toBeNull()
+    await user.click(screen.getByRole("button", { name: "Grid view" }))
+    expect(onSearchChange).toHaveBeenCalledWith(
+      { q: "ALL ORDER BY name ASC", view: "grid" },
+      true,
+    )
+    await user.dblClick(screen.getByText("Stale profile"))
+    expect(onOpen).toHaveBeenCalledWith(profile)
   })
 
   it("keeps advanced values hidden, preserved, and sends one reviewer model", async () => {
@@ -80,9 +119,8 @@ describe("RepositoryReviewProfilesPage", () => {
     )
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.type(screen.getByLabelText("Profile name"), "Core bugs")
-    expect(screen.getByLabelText("Execution account")).toBeVisible()
+    await user.type(await screen.findByLabelText("Profile name"), "Core bugs")
+    expect(await screen.findByLabelText("Execution account")).toBeVisible()
     expect(screen.getByLabelText("Reviewer model")).toBeVisible()
     expect(
       screen.getByText(
@@ -115,7 +153,7 @@ describe("RepositoryReviewProfilesPage", () => {
     expect(
       screen.queryByLabelText("Estimated output tokens"),
     ).not.toBeInTheDocument()
-    expect(screen.getByLabelText("Execution account")).toHaveValue("")
+    expect(await screen.findByLabelText("Execution account")).toHaveValue("")
     expect(
       screen.queryByLabelText("Account check interval (seconds)"),
     ).not.toBeInTheDocument()
@@ -152,12 +190,97 @@ describe("RepositoryReviewProfilesPage", () => {
     ).not.toHaveProperty("reviewer_models")
   })
 
+  it("keeps blank writer inheritance and saves an explicit compatible writer", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [modelOption("review-model"), modelOption("writer-model")],
+      accounts: [
+        accountOption(
+          "default-account",
+          "Default account",
+          ["review-model", "writer-model"],
+          true,
+        ),
+      ],
+    })
+    vi.mocked(createRepositoryReviewProfile).mockImplementation(
+      async (value) => ({
+        ...value,
+        id: "profile_writer",
+        version: 1,
+        created_at: "2026-08-23T00:00:00Z",
+        updated_at: "2026-08-23T00:00:00Z",
+      }),
+    )
+    renderPage()
+
+    await user.type(await screen.findByLabelText("Profile name"), "Writer")
+    const writer = screen.getByLabelText("Issue writer model")
+    expect(writer).toHaveValue("")
+    expect(
+      within(writer).getByRole("option", {
+        name: "Same as reviewer (review-model)",
+      }),
+    ).toBeVisible()
+    await user.selectOptions(writer, "writer-model")
+    await user.click(screen.getByRole("button", { name: "Save profile" }))
+
+    await waitFor(() =>
+      expect(createRepositoryReviewProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reviewer_model: "review-model",
+          issue_writer_model: "writer-model",
+        }),
+      ),
+    )
+  })
+
+  it("allows an account-passive writer alias without exposing it as a reviewer", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
+      models: [
+        modelOption("review-model"),
+        {
+          ...modelOption("account-writer"),
+          available: false,
+          blocked_reason: "The default route is agentic.",
+        },
+      ],
+      accounts: [
+        accountOption(
+          "default-account",
+          "Default account",
+          ["review-model"],
+          true,
+          ["review-model", "account-writer"],
+        ),
+      ],
+    })
+    renderPage()
+
+    await user.type(await screen.findByLabelText("Profile name"), "Writer")
+    const reviewer = screen.getByLabelText("Reviewer model")
+    const writer = screen.getByLabelText("Issue writer model")
+    expect(
+      within(reviewer).getByRole("option", {
+        name: "account-writer (The default route is agentic.)",
+      }),
+    ).toBeDisabled()
+    expect(
+      within(writer).getByRole("option", { name: "account-writer" }),
+    ).toBeEnabled()
+    await user.selectOptions(writer, "account-writer")
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeEnabled()
+  })
+
   it("validates always-visible code scope without opening advanced", async () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.type(screen.getByLabelText("Profile name"), "Scoped review")
+    await user.type(
+      await screen.findByLabelText("Profile name"),
+      "Scoped review",
+    )
     expect(screen.queryByLabelText("Files per batch")).not.toBeInTheDocument()
 
     await user.click(
@@ -220,9 +343,11 @@ describe("RepositoryReviewProfilesPage", () => {
     )
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.type(screen.getByLabelText("Profile name"), "Guarded review")
-    const account = screen.getByLabelText("Execution account")
+    await user.type(
+      await screen.findByLabelText("Profile name"),
+      "Guarded review",
+    )
+    const account = await screen.findByLabelText("Execution account")
     expect(account).toBeVisible()
     expect(account).toHaveValue("credential:openai:work")
     expect(
@@ -236,7 +361,7 @@ describe("RepositoryReviewProfilesPage", () => {
         name: "No models account · openai (no available reviewer models)",
       }),
     ).toBeDisabled()
-    await user.click(screen.getByRole("button", { name: /^Advanced/ }))
+    await user.click(await screen.findByRole("button", { name: /^Advanced/ }))
 
     const guard = screen.getByLabelText("Guard expression")
     expect(guard).toHaveAttribute(
@@ -284,9 +409,6 @@ describe("RepositoryReviewProfilesPage", () => {
     expect(
       vi.mocked(createRepositoryReviewProfile).mock.calls[0]?.[0],
     ).not.toHaveProperty("estimated_output_tokens")
-    expect(await screen.findByText("Account: Work account")).toBeVisible()
-    expect(screen.getByText("Task guard configured")).toBeVisible()
-    expect(screen.getByText("12 parallel workers")).toBeVisible()
   })
 
   it("autocompletes guard fields and opens the expression reference from help", async () => {
@@ -325,8 +447,7 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.click(screen.getByRole("button", { name: /^Advanced/ }))
+    await user.click(await screen.findByRole("button", { name: /^Advanced/ }))
 
     expect(
       screen.queryByText("Guard expression reference"),
@@ -428,19 +549,18 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    const account = screen.getByLabelText("Execution account")
+    const account = await screen.findByLabelText("Execution account")
     const model = screen.getByLabelText("Reviewer model")
     expect(account).toHaveValue("")
     expect(model).toHaveValue("safe-a")
-    expect(screen.getByRole("option", { name: "safe-a" })).toBeEnabled()
+    expect(within(model).getByRole("option", { name: "safe-a" })).toBeEnabled()
     expect(
-      screen.getByRole("option", {
+      within(model).getByRole("option", {
         name: "safe-b (Reviewer model is unavailable on Primary.)",
       }),
     ).toBeDisabled()
     expect(
-      screen.getByRole("option", {
+      within(model).getByRole("option", {
         name: /blocked \(Agentic CLI models are not allowed/,
       }),
     ).toBeDisabled()
@@ -460,7 +580,6 @@ describe("RepositoryReviewProfilesPage", () => {
   })
 
   it("fails closed when global and account availability contradict each other", async () => {
-    const user = userEvent.setup()
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [
         {
@@ -473,11 +592,11 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    expect(screen.getByLabelText("Execution account")).toHaveValue("")
-    expect(screen.getByLabelText("Reviewer model")).toBeEnabled()
+    expect(await screen.findByLabelText("Execution account")).toHaveValue("")
+    const model = screen.getByLabelText("Reviewer model")
+    expect(model).toBeEnabled()
     expect(
-      screen.getByRole("option", {
+      within(model).getByRole("option", {
         name: "blocked (Reviewer route is blocked by policy.)",
       }),
     ).toBeDisabled()
@@ -488,7 +607,6 @@ describe("RepositoryReviewProfilesPage", () => {
   })
 
   it("skips an unavailable default credential but keeps telemetry-error accounts selectable", async () => {
-    const user = userEvent.setup()
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [modelOption("safe")],
       accounts: [
@@ -506,8 +624,7 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    const account = screen.getByLabelText("Execution account")
+    const account = await screen.findByLabelText("Execution account")
     expect(account).toHaveValue("telemetry-error")
     expect(screen.getByLabelText("Reviewer model")).toHaveValue("safe")
     expect(
@@ -525,19 +642,17 @@ describe("RepositoryReviewProfilesPage", () => {
 
   it("shows stale account and model values and repairs both through account selection", async () => {
     const user = userEvent.setup()
-    vi.mocked(listRepositoryReviewProfiles).mockResolvedValue({
-      profiles: [storedProfile("missing-account", "missing-model")],
-    })
+    vi.mocked(getRepositoryReviewProfile).mockResolvedValue(
+      storedProfile("missing-account", "missing-model"),
+    )
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [modelOption("safe")],
       accounts: [
         accountOption("valid-account", "Valid account", ["safe"], true),
       ],
     })
-    renderPage()
-
-    await user.click(await screen.findByRole("button", { name: "Edit" }))
-    const account = screen.getByLabelText("Execution account")
+    renderPage(undefined, "profile_stale")
+    const account = await screen.findByLabelText("Execution account")
     const model = screen.getByLabelText("Reviewer model")
     expect(account).toHaveValue("missing-account")
     expect(
@@ -563,15 +678,13 @@ describe("RepositoryReviewProfilesPage", () => {
   })
 
   it("explains missing execution routes and disables profile creation", async () => {
-    const user = userEvent.setup()
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [modelOption("safe")],
       accounts: [],
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    expect(screen.getByLabelText("Execution account")).toBeVisible()
+    expect(await screen.findByLabelText("Execution account")).toBeVisible()
     expect(
       screen.getByRole("option", { name: "Default account (unavailable)" }),
     ).toBeDisabled()
@@ -585,15 +698,13 @@ describe("RepositoryReviewProfilesPage", () => {
   })
 
   it("explains an empty reviewer model catalog", async () => {
-    const user = userEvent.setup()
     vi.mocked(getRepositoryReviewAutomationOptions).mockResolvedValue({
       models: [],
       accounts: [accountOption("primary", "Primary", [], true)],
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    expect(screen.getByLabelText("Execution account")).toHaveValue("")
+    expect(await screen.findByLabelText("Execution account")).toHaveValue("")
     expect(screen.getByLabelText("Reviewer model")).toBeEnabled()
     expect(
       screen.getByText("No reviewer model aliases are configured."),
@@ -607,12 +718,8 @@ describe("RepositoryReviewProfilesPage", () => {
     )
     renderPage()
 
-    expect(
-      await screen.findByText(
-        "Reviewer models and execution accounts could not be loaded. Refresh to retry.",
-      ),
-    ).toBeVisible()
-    expect(screen.getByRole("button", { name: "New profile" })).toBeDisabled()
+    expect(await screen.findByText("Details could not be loaded")).toBeVisible()
+    expect(screen.getByText("options offline")).toBeVisible()
   })
 
   it("disables saving when a refresh fails instead of trusting cached options", async () => {
@@ -622,8 +729,10 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     renderPage(queryClient)
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.type(screen.getByLabelText("Profile name"), "Cached options")
+    await user.type(
+      await screen.findByLabelText("Profile name"),
+      "Cached options",
+    )
     expect(screen.getByRole("button", { name: "Save profile" })).toBeEnabled()
 
     vi.mocked(getRepositoryReviewAutomationOptions).mockRejectedValueOnce(
@@ -634,26 +743,27 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     expect(
       await screen.findByText(
-        "Reviewer models and execution accounts could not be refreshed. Close this editor and refresh before saving.",
+        "Reviewer models and execution accounts could not be refreshed. Refresh before saving.",
       ),
     ).toBeVisible()
     expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled()
   })
 
-  it("shows save validation errors inside the open profile dialog", async () => {
+  it("shows save validation errors inside the profile editor", async () => {
     const user = userEvent.setup()
     vi.mocked(createRepositoryReviewProfile).mockRejectedValue(
       new Error("Selected model is unavailable on this account."),
     )
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.type(screen.getByLabelText("Profile name"), "Invalid route")
+    await user.type(
+      await screen.findByLabelText("Profile name"),
+      "Invalid route",
+    )
     await user.click(screen.getByRole("button", { name: "Save profile" }))
 
     const alert = await screen.findByRole("alert")
     expect(alert).toHaveTextContent("unavailable on this account")
-    expect(screen.getByRole("dialog")).toContainElement(alert)
   })
 
   it("does not auto-select a model for a default account with no compatible aliases", async () => {
@@ -684,9 +794,8 @@ describe("RepositoryReviewProfilesPage", () => {
     })
     renderPage()
 
-    await user.click(await screen.findByRole("button", { name: "New profile" }))
-    await user.type(screen.getByLabelText("Profile name"), "No route")
-    expect(screen.getByLabelText("Execution account")).toBeVisible()
+    await user.type(await screen.findByLabelText("Profile name"), "No route")
+    expect(await screen.findByLabelText("Execution account")).toBeVisible()
     expect(screen.getByLabelText("Reviewer model")).toHaveValue("")
     expect(screen.getByLabelText("Reviewer model")).toBeEnabled()
     expect(
@@ -697,13 +806,38 @@ describe("RepositoryReviewProfilesPage", () => {
 })
 
 function renderPage(
-  queryClient = new QueryClient({
+  queryClient: QueryClient | undefined = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   }),
+  profileID?: string,
 ) {
+  const client =
+    queryClient ??
+    new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={client}>
+      <RepositoryReviewProfileEditorPage
+        profileID={profileID}
+        onBack={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    </QueryClientProvider>,
+  )
+}
+
+function renderCollection(onSearchChange = vi.fn(), onOpen = vi.fn()) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
   return render(
     <QueryClientProvider client={queryClient}>
-      <RepositoryReviewProfilesPage />
+      <RepositoryReviewProfilesPage
+        search={{ q: "ALL ORDER BY name ASC" }}
+        onSearchChange={onSearchChange}
+        onAdd={vi.fn()}
+        onOpen={onOpen}
+        onEdit={vi.fn()}
+      />
     </QueryClientProvider>,
   )
 }
@@ -725,6 +859,7 @@ function accountOption(
   label: string,
   models: string[],
   defaultAccount = false,
+  writerModels: string[] = models,
 ) {
   return {
     id,
@@ -735,6 +870,7 @@ function accountOption(
     default: defaultAccount,
     entries: [],
     models,
+    writer_models: writerModels,
   }
 }
 

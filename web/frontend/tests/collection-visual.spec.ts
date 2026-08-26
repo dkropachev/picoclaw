@@ -4,6 +4,7 @@ import { type Page, expect, test } from "@playwright/test"
 import {
   type CollectionVisualState,
   installCollectionVisualMocks,
+  repositoryReviewVisualIDs,
 } from "./fixtures/collection-api"
 
 type VisualTheme = "light" | "dark"
@@ -14,6 +15,11 @@ const pilots = [
   { key: "mcp-servers", route: "/agent/mcp/servers" },
   { key: "agents", route: "/agent/agents" },
   { key: "model-evaluations", route: "/model-evaluations" },
+  { key: "repository-reviews", route: "/repository-reviews" },
+  {
+    key: "repository-review-profiles",
+    route: "/repository-reviews/profiles",
+  },
 ] as const
 
 for (const pilot of pilots) {
@@ -114,6 +120,47 @@ for (const target of [
       `shared-${target.state}.png`,
     )
   })
+}
+
+const repositoryReviewStates = [
+  {
+    key: "repository-review-detail",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}`,
+  },
+  {
+    key: "repository-review-report",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/report?scope=current`,
+  },
+  {
+    key: "repository-review-finding",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings/${repositoryReviewVisualIDs.finding}`,
+  },
+  {
+    key: "repository-review-issues",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/issues?generation_id=${repositoryReviewVisualIDs.generation}`,
+  },
+  {
+    key: "repository-review-issue-detail",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/issues/${repositoryReviewVisualIDs.issue}`,
+  },
+] as const
+
+for (const target of repositoryReviewStates) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`${target.key} is stable in ${theme} theme`, async ({ page }) => {
+      const errors = collectPageErrors(page)
+      await prepareVisualPage(page, theme)
+      await installCollectionVisualMocks(page)
+      await page.goto(target.route)
+      await expect(
+        page.locator('[data-slot="collection-detail-shell"]'),
+      ).toBeVisible()
+      await assertVisualContract(page, errors)
+      await expect(page.locator("#main-content")).toHaveScreenshot(
+        `${target.key}-${theme}.png`,
+      )
+    })
+  }
 }
 
 async function openCollection(

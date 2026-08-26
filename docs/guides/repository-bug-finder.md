@@ -1,56 +1,179 @@
 # Repository Bug Finder
 
-PicoClaw's repository bug finder reviews an exact Git commit, stores validated
-findings, and skips unchanged Git blobs on later runs.
+PicoClaw's repository bug finder reviews one exact Git commit, checkpoints
+validated findings as bounded batches finish, and skips unchanged Git blobs on
+later runs. The dashboard keeps the review lifecycle, live report, finding
+evidence, AI-written issue previews, and canonical GitHub issue association on
+directly addressable routes.
 
-## Configure And Run From The Dashboard
+## Configure A Review
 
-Open **Repository reviews** and choose **New pre-review**. Save a reusable
-profile with:
+Open **Repository reviews**. Configuration is split into two reusable resource
+types:
 
-- the repository URL or local checkout, ref, target, and review focus;
-- one or more target code types: hot-path production code, normal production
-  code, tests, and benchmark/performance tests;
-- optional exact include-folder and exclude-folder prefixes (excludes win), plus
-  free-text guidance that AI may use only to narrow that structured boundary;
-- one reviewer alias, or several aliases in comparison mode;
-- the bounded files per batch and parallel child count;
-- optional input/output prices for aliases whose account configuration has no
-  safe price metadata;
-- a maximum token or estimated USD budget;
-- account-specific default, daily, weekly, or provider-window minimum remaining
-  percentages; and
-- whether unknown account telemetry pauses the review, whether completed
-  batches continue automatically, and whether quota-paused work resumes after
-  the criteria recover.
+1. In **Profiles**, use the shared list, table, or grid collection to create the
+   review policy on its dedicated editor route. Choose an execution account,
+   one passive reviewer alias, and optionally an **Issue writer** alias. A blank
+   issue writer means “same as reviewer.” An explicit writer must be available
+   on the selected account and cannot use an agentic CLI provider. Profile
+   detail and edit links are stable and Browser Back restores the collection
+   query, view, and scroll position.
+2. Set the review focus and Scope: one or more code types, optional exact
+   repository-relative include and exclude folder prefixes, and optional
+   guidance that may narrow but never expand the structured boundary.
+3. In **Advanced**, set bounded files per batch, content bytes per provider
+   request, parallel review workers, automatic continuation, and an optional
+   task-admission guard expression. Profiles default to eight review workers.
+4. In **Repositories**, assign that profile to one repository and optionally a
+   branch. Blank follows the acquired repository's advertised default branch.
 
-When any token, cost, or account guard is active, the controller enforces one
-provider request at a time. A threshold is evaluated from actual usage after a
-response returns, so the maximum overshoot is one provider response; that paid
-response is still validated and checkpointed when possible, and no subsequent
-request is admitted.
+Profiles do not contain repository URLs, mutable refs, prices, account lists,
+polling intervals, or separate token/cost/quota switches. Repository branch
+configuration accepts a branch name only; it rejects `HEAD`, commit hashes,
+tags, full refs, revision expressions, URLs, and query or fragment forms.
 
-Select **Start pre-review** to launch the first bounded batch. The control card
-shows the live workflow stage, run ID, files reviewed and remaining, actual
-tokens, estimated cost, current account snapshots, and a per-model comparison.
-**Pause safely** finishes and checkpoints the current bounded batch but admits
-no next batch. **Resume** continues pending blobs; a token/cost pause offers a
-budget-counter reset. **Restart** resets campaign progress and statistics (the
-repository's durable blob ledger still prevents unchanged work unless force
-mode is enabled).
+The execution account appears before reviewer and issue-writer selection
+because it constrains both model lists. Blank account follows the runtime
+default when a campaign starts. PicoClaw snapshots the effective account,
+reviewer, writer, and profile version into that campaign, so later default or
+profile changes cannot rewrite issue-generation provenance.
 
-Quota monitoring and automatic resume run in the launcher backend, so the
-dashboard does not have to remain open. After a launcher restart, an interrupted
-profile is shown with the `service_restart` reason and resumes automatically
-only when that profile opted in.
+## Run And Observe
 
-Before the first reviewer call in every batch, PicoClaw inventories the exact
-commit and classifies the structured scope. It releases the checkout, asks AI
-to plan a metadata-only target filter, reacquires only the pinned commit, and
-validates the plan natively against opaque candidate IDs and folder/type
-boundaries. The scope preflight summary records its commit, selection counts,
-rationale, and warnings. AI cannot invent a path, re-include an ignored folder,
-or select an unchosen code type.
+The **Repository reviews** collection contains compact review summaries. Open a
+summary to reach its detail page; lifecycle controls and complete operational
+state do not expand inside the collection.
+
+From review detail you can:
+
+- **Start review**, **Stop safely**, **Continue review**, or **Run again**;
+- inspect the exact admitted commit, live workflow stage, bounded-batch
+  progress, actual token usage, estimated cost, pause reason, and run history;
+- choose the remembered, latest, or a custom full commit SHA when a paused
+  branch has moved; and
+- open **Report** or **Issue previews** at any time, including before the first
+  batch finishes.
+
+Start resolves the configured branch or remote default to one canonical full
+commit SHA and persists it with the workflow run ID before a worker starts.
+Automatic batches stay on that commit. **Stop safely** prevents another batch
+while allowing already admitted work to checkpoint. **Continue review**
+re-enters through the same task guard. **Run again** begins a new campaign; the
+repository ledger still skips unchanged blob SHA/size pairs unless the profile
+uses force mode.
+
+The launcher does not poll quotas or auto-resume a stopped guard. After a
+launcher restart, orphaned work becomes an explicit `service_restart` pause and
+requires Continue.
+
+Before reviewer calls, PicoClaw inventories the exact commit and classifies the
+structured scope. It releases the checkout, asks AI to plan a metadata-only
+target filter, reacquires only the pinned commit, and validates the plan
+natively against opaque candidate IDs and folder/type boundaries. AI cannot
+invent a path, re-include an excluded folder, or select an unchosen code type.
+
+## Use The Live Report
+
+**Report** is always available and shows durable finding checkpoints while a
+review is active. Before the first finding checkpoint it displays an empty
+in-progress report rather than hiding the route.
+
+The default **Current campaign** scope contains findings attributable to the
+selected automation's durable run IDs and campaign start. Switch to **All
+durable findings** to inspect the complete repository ledger. Both scopes are
+paged, and the current report polls for newly checkpointed findings while the
+review remains active.
+
+The report shows compact finding summaries. Open a finding for its complete
+evidence, validation, model observations, commit and primary blob provenance,
+opaque contexts, and every context path/blob/size reference. Finding detail
+also provides status controls, **Discuss with AI**, and navigation to its one
+canonical preview or GitHub issue.
+
+Discussion creates a separate durable reviewing thread seeded with the exact
+finding and context provenance. Returning from chat does not generate, link,
+or publish an issue; each of those effects still requires an explicit action.
+
+Collection query/view, report scope/offset, explicit selection, and in-memory
+scroll are preserved through finding, discussion, and issue routes. Browser
+Back restores that state. The former **Results** sidebar destination is gone;
+old `/repository-reviews/results` links return to the review collection.
+
+## Generate Issue Previews
+
+Select up to 200 explicit open findings across loaded report pages and choose
+issue generation. Selection is never implicit or query-wide. One batch receives
+one generation ID, creates one preview per finding, and runs at most four
+issue-writer calls concurrently across launcher processes sharing the workspace.
+A per-attempt OS lock also prevents two processes from dispatching the same
+reservation. A partial failure keeps successful previews
+and opens the durable Issue previews route filtered or highlighted by that
+generation.
+
+Every writer call is private, ephemeral, no-history, no-cache, no-tools, and
+structured. It uses the campaign's snapshotted issue-writer alias and effective
+account. The fixed policy permits grounded diagnosis only. By default, the
+writer produces:
+
+- a concise title;
+- GitHub-flavored Markdown covering evidence, observable impact, validation
+  already performed, and exact location;
+- the reviewed commit and blob provenance; and
+- a `bug` label.
+
+Optional batch instructions may change presentation, but cannot introduce a
+fix, workaround, unsupported fact, invented reproduction, or external lookup.
+PicoClaw persists the resolved instructions, mode, generation ID, model/account
+provenance, and validated preview. It never stores the raw provider response.
+
+Open a preview to render its Markdown, edit title/body/labels, regenerate it,
+delete an unpublished preview, publish or reconcile it, or return to its
+finding. A failed initial generation remains retryable or deletable. A failed
+regeneration keeps the last good preview and its original model/instruction
+provenance; the failed attempt remains separately attributable. Deleting an editable or failed
+unpublished preview frees its finding for another generation. Publishing,
+unknown, and posted previews cannot be deleted.
+
+Each finding can have at most one active preview or canonical issue. Retrying
+the same generation ID is idempotent, and concurrent attempts cannot reserve
+the same finding twice. Older grouped drafts remain visible for history;
+conflicting noncanonical legacy drafts are read-only and cannot publish.
+
+## Publish To GitHub
+
+For a repository whose acquired `origin` resolves to a canonical
+`github.com/owner/repository` identity, select any subset of editable previews
+and confirm publication. PicoClaw freezes each exact title/body/labels payload
+before the protected gateway call. It searches a stable marker before creating
+an issue, reports success or a safe failure per preview, and records `unknown`
+when a transport outcome may have changed GitHub.
+
+An unknown preview is reconciled by its marker and is never blindly created a
+second time. Only successful publication or a validated existing-issue link
+sets the canonical association to posted and stores the provider issue ID/URL.
+There is no manual **Mark posted** action. An issue created by PicoClaw remains
+permanently associated with its finding.
+
+Local and non-GitHub repositories can still generate, edit, regenerate, and
+delete previews, but they expose no publish, issue-search, or issue-link action.
+
+## Link An Existing GitHub Issue
+
+From an open, unassociated finding, open **Link existing issue**. You can enter
+an issue URL manually or choose **Ask AI to find existing issues**.
+
+Candidate discovery derives bounded GitHub searches from the finding's
+immutable title, smallest stable symbol, and path. The server merges and
+deduplicates at most 50 open or closed issues from the same repository. The
+snapshotted issue-writer model, without tools, ranks and explains at most 10
+candidates. AI never links automatically.
+
+After you select and confirm one issue, PicoClaw re-fetches it and validates
+the canonical URL and repository before storing a linked association. A
+missing, deleted, malformed, or cross-repository issue is rejected. The same
+existing issue may be linked to more than one finding. Unlike issues created by
+PicoClaw, a manually linked issue may be unlinked or replaced after explicit
+confirmation.
 
 ## Install And Run From The CLI
 
@@ -67,60 +190,37 @@ picoclaw workflow run workflows/repository-bug-finder.yml \
   --inputs '{"repository":"https://github.com/owner/repository.git","ref":"main"}'
 ```
 
-The default run admits at most 24 pending files, groups related files into
-bounded contexts of up to three, and may reduce the effective file count when
-many required reviewer aliases are selected. Inspect `remainingFiles` in the
-run output or the banner on **Repository reviews**, then run the workflow again
-until the latest run reports zero remaining files. Unchanged blob
-SHA/size pairs under the same review profile are not sent to a model again. The
-profile includes the resolved model graph, so a relevant alias, account route,
-or model configuration change invalidates the checkpoint.
+The default standalone run admits at most 24 pending files, groups related
+files into bounded contexts of up to three, and may reduce the effective file
+count when several required reviewer aliases are supplied. Inspect
+`remainingFiles` in the run output and run the workflow again until it reaches
+zero. Unchanged blob SHA/size pairs under the same review profile are not sent
+to a model again. A relevant alias, account route, or model configuration
+change invalidates that checkpoint.
 
-To challenge every file with several configured model aliases:
+To challenge every file with several configured reviewer aliases in a direct
+workflow run:
 
 ```sh
 picoclaw workflow run workflows/repository-bug-finder.yml \
   --inputs '{"repository":"https://github.com/owner/repository.git","ref":"main","review_models":"review-a,review-b"}'
 ```
 
-Each bounded file-context chunk is reviewed under four correctness, security,
-recovery, and integration challenge nudges. Without `review_models`, the main
-agent's ordinary model/fallback chain is required and configured fallback
-aliases are also tried as opportunistic corroborators. With `review_models`,
-every requested alias receives the same chunks as an independent required
-reviewer with inherited fallbacks disabled. The finding records the alias that
-actually produced each validated observation.
+The profile-backed dashboard deliberately uses one reviewer alias; comparative
+testing belongs to **Model review probes**. Direct workflow `review_models`
+remains a standalone compatibility input. Every requested alias receives the
+same immutable chunks as an independent required reviewer with inherited
+fallbacks disabled. Without it, the main agent's configured fallback chain is
+used and safe fallback aliases may corroborate findings.
 
 Use passive API-backed reviewer providers. Repository review rejects
-`codex-cli` and `claude-cli` aliases because those agentic CLIs run with broad
-local execution permissions that are incompatible with the immutable no-tool
-evidence boundary.
-
-Use `force: true` to start or continue a durable force-review campaign. The
-campaign advances through bounded batches rather than repeatedly selecting the
-first files.
-
-## Findings And Follow-up
-
-Open **Repository reviews** in the dashboard to:
-
-- inspect complete commit/blob hashes, validation checks, model contributors,
-  and the exact file manifest for every opaque context ID;
-- select one or many findings and start a durable AI discussion seeded with
-  that provenance;
-- dismiss, reopen, or mark findings posted;
-- prepare and edit an issue draft, then publish immediately or after chatting.
-
-For GitHub publication, the reviewed checkout's actual `origin` must resolve to
-`github.com/owner/repository`, and the GitHub MCP connection must provide issue
-create and search capabilities. Publication freezes the draft before the
-external call and reconciles a stable marker after an ambiguous response; it
-does not blindly create a second issue.
+`codex-cli` and `claude-cli` aliases because agentic CLIs have local execution
+permissions incompatible with the immutable no-tool evidence boundary.
 
 ## Bounded Failures
 
-Repository bytes are read from their immutable Git objects only into no-tool
-model requests. Binary and individually oversized files become visible terminal
+Repository bytes are read only from immutable Git objects into no-tool model
+requests. Binary and individually oversized files become visible terminal
 unsupported entries. Aggregate-limited or failed files remain retryable and
 rotate behind unattempted files. Explicit provider safety/content-filter errors
 use bounded request-local handling without marking the provider or account

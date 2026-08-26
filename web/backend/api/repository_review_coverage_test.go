@@ -739,17 +739,17 @@ func TestRepositoryReviewCoverageHandlerRequestFailures(t *testing.T) {
 		{
 			method:          http.MethodPatch,
 			path:            "/api/repository-reviews/" + state.ID + "/findings/missing",
-			malformedStatus: http.StatusInternalServerError,
+			malformedStatus: http.StatusBadRequest,
 		},
 		{
 			method:          http.MethodPost,
 			path:            "/api/repository-reviews/" + state.ID + "/issue-drafts",
-			malformedStatus: http.StatusInternalServerError,
+			malformedStatus: http.StatusBadRequest,
 		},
 		{
 			method:          http.MethodPatch,
 			path:            "/api/repository-reviews/" + state.ID + "/issue-drafts/missing",
-			malformedStatus: http.StatusInternalServerError,
+			malformedStatus: http.StatusBadRequest,
 		},
 	}
 	for _, mutation := range mutations {
@@ -1288,6 +1288,29 @@ func TestRepositoryReviewCoverageExecuteAndFinishBoundaries(t *testing.T) {
 			t.Fatalf("real runtime automation=%#v found=%v err=%v", updated, found, getErr)
 		}
 	})
+	t.Run("workflow parse failure", func(t *testing.T) {
+		automation := repositoryReviewCoverageRunningAutomation(t, store, "run-parse", false)
+		cfg, loadErr := config.LoadConfig(handler.configPath)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		previousParse := repositoryReviewParseWorkflow
+		repositoryReviewParseWorkflow = func([]byte) (*workflows.Workflow, error) {
+			return nil, errors.New("injected workflow parse failure")
+		}
+		t.Cleanup(func() { repositoryReviewParseWorkflow = previousParse })
+		controller := newRepositoryReviewController(handler)
+		controller.active[automation.ID] = &repositoryReviewActiveRun{
+			runID: automation.ActiveRunID, store: store, config: cfg,
+		}
+		controller.wg.Add(1)
+		controller.executeAutomation(automation.ID, automation.ActiveRunID)
+		repositoryReviewParseWorkflow = previousParse
+		updated, found, getErr := store.GetAutomation(t.Context(), automation.ID)
+		if getErr != nil || !found || updated.Status != repoaudit.RepositoryReviewAutomationFailed {
+			t.Fatalf("parse failure automation=%#v found=%v err=%v", updated, found, getErr)
+		}
+	})
 
 	finish := func(
 		t *testing.T,
@@ -1641,6 +1664,30 @@ func TestRepositoryReviewCommitResolutionBoundaryCoverage(t *testing.T) {
 	); err == nil {
 		t.Fatal("oversized command output succeeded")
 	}
+	previousCommandContext := repositoryReviewCommandContext
+	previousReadAll := repositoryReviewReadAll
+	t.Cleanup(func() {
+		repositoryReviewCommandContext = previousCommandContext
+		repositoryReviewReadAll = previousReadAll
+	})
+	repositoryReviewCommandContext = func(context.Context, string, ...string) *exec.Cmd {
+		command := exec.Command("sh", "-c", "printf output")
+		command.Stdout = io.Discard
+		return command
+	}
+	if _, err := repositoryReviewGitOutput(t.Context(), "", 16, "ignored"); err == nil {
+		t.Fatal("command with an occupied stdout pipe succeeded")
+	}
+	repositoryReviewCommandContext = previousCommandContext
+	repositoryReviewReadAll = func(io.Reader) ([]byte, error) {
+		return nil, errors.New("injected stdout read failure")
+	}
+	if _, err := repositoryReviewGitOutput(
+		t.Context(), "", 16, "sh", "-c", "printf output",
+	); err == nil {
+		t.Fatal("stdout read failure was ignored")
+	}
+	repositoryReviewReadAll = previousReadAll
 
 	commit := strings.Repeat("a", 40)
 	automation := repoaudit.RepositoryReviewAutomation{

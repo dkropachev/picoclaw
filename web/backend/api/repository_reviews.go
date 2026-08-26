@@ -55,10 +55,24 @@ func (h *Handler) registerRepositoryReviewRoutes(mux *http.ServeMux) {
 		"PATCH /api/repository-reviews/{repository_id}/issue-drafts/{draft_id}",
 		h.handleUpdateRepositoryReviewIssue,
 	)
+	// The legacy repository-owned publish route is dispatched from a tail
+	// wildcard so the standard automation-owned issue routes can remain more
+	// specific under Go's ServeMux precedence rules.
 	mux.HandleFunc(
-		"POST /api/repository-reviews/{repository_id}/issue-drafts/{draft_id}/publish",
-		h.handlePublishRepositoryReviewIssue,
+		"POST /api/repository-reviews/{repository_id}/{legacy_action...}",
+		h.handleLegacyRepositoryReviewAction,
 	)
+}
+
+func (h *Handler) handleLegacyRepositoryReviewAction(w http.ResponseWriter, r *http.Request) {
+	segments := strings.Split(strings.Trim(r.PathValue("legacy_action"), "/"), "/")
+	if len(segments) != 3 || segments[0] != "issue-drafts" || segments[1] == "" ||
+		segments[2] != "publish" {
+		http.NotFound(w, r)
+		return
+	}
+	r.SetPathValue("draft_id", segments[1])
+	h.handlePublishRepositoryReviewIssue(w, r)
 }
 
 func (h *Handler) handlePublishRepositoryReviewIssue(w http.ResponseWriter, r *http.Request) {
@@ -400,11 +414,14 @@ func writeRepositoryReviewError(w http.ResponseWriter, err error) {
 	case errors.Is(err, repoaudit.ErrConflict):
 		status, code = http.StatusConflict, "stale_repository_review"
 	case errors.Is(err, repoaudit.ErrInvalidPlan),
+		errors.Is(err, io.ErrUnexpectedEOF),
+		isRepositoryReviewJSONError(err),
 		strings.Contains(strings.ToLower(err.Error()), "invalid"),
 		strings.Contains(strings.ToLower(err.Error()), "required"),
 		strings.Contains(strings.ToLower(err.Error()), "duplicate"),
 		strings.Contains(strings.ToLower(err.Error()), "unknown field"),
 		strings.Contains(strings.ToLower(err.Error()), "cannot unmarshal"),
+		strings.Contains(strings.ToLower(err.Error()), "unexpected end"),
 		errors.Is(err, io.EOF):
 		status, code = http.StatusBadRequest, "invalid_request"
 	}

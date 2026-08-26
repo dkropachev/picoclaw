@@ -96,9 +96,9 @@ export function CollectionResults<T>({
     <div data-slot="collection-results" className="space-y-3">
       {selection && (
         <p id={selectionInstructionsID} className="sr-only">
-          Click to select one item. Hold Shift to select a range, or Control or
-          Command to toggle items. Double-click or press Enter to open.
-          Right-click for item actions.
+          {selection.additive
+            ? "Click, tap, or press Space to toggle items. Hold Shift to select a range. Double-click, double-tap, or press Enter to open. Right-click for item actions."
+            : "Click to select one item. Hold Shift to select a range, or Control or Command to toggle items. Double-click or press Enter to open. Right-click for item actions."}
         </p>
       )}
       {error && (
@@ -410,7 +410,8 @@ function useCollectionInteractions<T>({
   ) => {
     if (!selection || !selectable(item)) return
     const id = itemID(item)
-    const additive = modifiers.ctrlKey || modifiers.metaKey
+    const additive =
+      selection.additive || modifiers.ctrlKey || modifiers.metaKey
     if (modifiers.shiftKey) {
       const anchorIndex = items.findIndex(
         (candidate) => itemID(candidate) === anchor.current,

@@ -198,6 +198,7 @@ func TestMaterializeRepositoryReviewAutomation(t *testing.T) {
 	if materialized.ProfileID != profile.ID || materialized.ProfileVersion != profile.Version ||
 		materialized.Ref != "release/next" || materialized.Target != "all" ||
 		len(materialized.ReviewerModels) != 1 || materialized.ReviewerModels[0] != profile.ReviewerModel ||
+		materialized.IssueWriterModel != profile.ReviewerModel ||
 		materialized.CompareModels || materialized.ReviewFocus != profile.ReviewFocus ||
 		materialized.MaxFilesPerRun != profile.MaxFilesPerRun {
 		t.Fatalf("materialized automation = %#v", materialized)
@@ -205,6 +206,29 @@ func TestMaterializeRepositoryReviewAutomation(t *testing.T) {
 	materialized.ScopePolicy.CodeTypes[0] = RepositoryReviewCodeTypeTest
 	if profile.ScopePolicy.CodeTypes[0] == RepositoryReviewCodeTypeTest {
 		t.Fatal("materialization aliased profile scope")
+	}
+}
+
+func TestProfileBackedAutomationRejectsForgedIssueWriterSnapshot(t *testing.T) {
+	store := NewStore(t.TempDir())
+	input := validProfileForTest("rrpf_writer_forged", "Writer snapshot")
+	input.IssueWriterModel = "writer-model"
+	profile, err := store.CreateProfile(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation := validAutomationForTest("rra_writer_forged", "Writer snapshot")
+	automation.Repository = "owner/writer-forged"
+	automation, err = MaterializeRepositoryReviewAutomation(profile, automation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation.IssueWriterModel = profile.ReviewerModel
+	if _, createErr := store.CreateAutomation(context.Background(), automation); !errors.Is(
+		createErr,
+		ErrInvalidAutomation,
+	) {
+		t.Fatalf("CreateAutomation() forged issue writer snapshot error = %v", createErr)
 	}
 }
 

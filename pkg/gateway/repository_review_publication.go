@@ -26,8 +26,10 @@ const repositoryReviewPublicationRoute = "/runtime/repository-reviews/"
 var repositoryReviewHTTPStatusPattern = regexp.MustCompile(`(?i)(?:status|http(?:/\d(?:\.\d)?)?)[:\s]+(\d{3})`)
 
 type repositoryReviewPublicationHandler struct {
-	loop      atomic.Pointer[agent.AgentLoop]
-	publishMu sync.Mutex
+	loop              atomic.Pointer[agent.AgentLoop]
+	publishMu         sync.Mutex
+	newToolRunner     func(*agent.AgentLoop, string) (workflows.ToolRunner, error)
+	newGitHubProvider func(workflows.ToolRunner, string) (*reviews.GitHubProvider, error)
 }
 
 type repositoryReviewPublishRequest struct {
@@ -35,7 +37,9 @@ type repositoryReviewPublishRequest struct {
 }
 
 func newRepositoryReviewPublicationHandler(loop *agent.AgentLoop) *repositoryReviewPublicationHandler {
-	handler := &repositoryReviewPublicationHandler{}
+	handler := &repositoryReviewPublicationHandler{
+		newToolRunner: agent.NewWorkflowToolRunner, newGitHubProvider: reviews.NewGitHubProvider,
+	}
 	handler.loop.Store(loop)
 	return handler
 }
@@ -82,6 +86,10 @@ func releaseRepositoryReviewPublicationRoute(runningServices *services) {
 
 func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setRepositoryReviewPublicationHeaders(w)
+	if operation, ok := repositoryReviewAutomationOperationFromRequest(r); ok {
+		handler.serveRepositoryReviewAutomationOperation(w, r, operation)
+		return
+	}
 	repositoryID, draftID, ok := repositoryReviewPublicationRouteIDs(r)
 	if !ok {
 		writeRepositoryReviewPublicationError(w, http.StatusNotFound, "not_found")
@@ -117,6 +125,10 @@ func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWrit
 		writeRepositoryReviewPublicationError(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if !draft.Canonical {
+		writeRepositoryReviewPublicationError(w, http.StatusConflict, "noncanonical_issue_preview")
+		return
+	}
 	if draft.State == repoaudit.IssueDraftPosted {
 		writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 			"repository": repoaudit.Summarize(state), "draft": draft,
@@ -131,12 +143,12 @@ func (handler *repositoryReviewPublicationHandler) ServeHTTP(w http.ResponseWrit
 		writeRepositoryReviewPublicationError(w, http.StatusBadRequest, "repository_not_publishable")
 		return
 	}
-	runner, err := agent.NewWorkflowToolRunner(loop, "")
+	runner, err := handler.newToolRunner(loop, "")
 	if err != nil {
 		writeRepositoryReviewPublicationError(w, http.StatusServiceUnavailable, "publication_unavailable")
 		return
 	}
-	provider, err := reviews.NewGitHubProvider(runner, githubMCPArtifactRoot(loop.GetConfig(), loop))
+	provider, err := handler.newGitHubProvider(runner, githubMCPArtifactRoot(loop.GetConfig(), loop))
 	if err != nil {
 		writeRepositoryReviewPublicationError(w, http.StatusServiceUnavailable, "publication_unavailable")
 		return

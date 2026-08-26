@@ -62,6 +62,7 @@ func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
 	price := prices["review-a"].(map[string]any)
 	price["subscription"] = true
 	price["equivalent_model"] = "metered-review"
+	delete(raw, "issue_writer_model")
 	data, err = json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +78,9 @@ func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
 	if loaded.ModelPrices["review-a"].InputPricePer1M != 1 {
 		t.Fatalf("numeric price snapshot changed: %#v", loaded.ModelPrices)
 	}
+	if loaded.IssueWriterModel != loaded.ReviewerModels[0] {
+		t.Fatalf("legacy issue writer snapshot=%q reviewers=%#v", loaded.IssueWriterModel, loaded.ReviewerModels)
+	}
 	rewritten, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +88,9 @@ func TestAutomationLoadRemovesLegacyPriceResolutionMetadata(t *testing.T) {
 	if strings.Contains(string(rewritten), `"subscription"`) ||
 		strings.Contains(string(rewritten), `"equivalent_model"`) {
 		t.Fatalf("legacy price metadata was not removed: %s", rewritten)
+	}
+	if !strings.Contains(string(rewritten), `"issue_writer_model":"review-a"`) {
+		t.Fatalf("legacy issue writer snapshot was not persisted: %s", rewritten)
 	}
 }
 

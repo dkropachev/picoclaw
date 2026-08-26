@@ -1,15 +1,16 @@
 import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
+import {
+  repositoryReviewDefaultQuery,
+  repositoryReviewViews,
+} from "@/components/repository-reviews/repository-review-route-state"
 import { RepositoryReviewRunsPage } from "@/components/repository-reviews/repository-review-runs-page"
 import {
   type CollectionRouteSearch,
   collectionRouteSearchIsCanonical,
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
-
-const defaultQuery = "ORDER BY repository ASC"
-const supportedViews = ["list", "table", "grid"] as const
 
 function RepositoryReviewsRoutePage() {
   const location = useLocation({
@@ -22,7 +23,10 @@ function RepositoryReviewsRoutePage() {
     () =>
       normalizeCollectionRouteSearch(
         { ...routeSearch },
-        { defaultQuery, supportedViews },
+        {
+          defaultQuery: repositoryReviewDefaultQuery,
+          supportedViews: repositoryReviewViews,
+        },
       ),
     [routeSearch],
   )
@@ -30,7 +34,10 @@ function RepositoryReviewsRoutePage() {
     () =>
       normalizeCollectionRouteSearch(
         { ...locationSearch },
-        { defaultQuery, supportedViews },
+        {
+          defaultQuery: repositoryReviewDefaultQuery,
+          supportedViews: repositoryReviewViews,
+        },
       ),
     [locationSearch],
   )
@@ -58,12 +65,29 @@ function RepositoryReviewsRoutePage() {
   )
 
   return (
-    <RepositoryReviewRunsPage search={search} onSearchChange={changeSearch} />
+    <RepositoryReviewRunsPage
+      search={search}
+      onSearchChange={changeSearch}
+      onOpen={(review) =>
+        void navigate({
+          to: "/repository-reviews/$id",
+          params: { id: review.id },
+          search: {
+            ...search,
+            scope: "current",
+            offset: 0,
+          },
+        })
+      }
+    />
   )
 }
 
 export const Route = createFileRoute("/repository-reviews")({
   validateSearch: (raw: Record<string, unknown>) =>
-    normalizeCollectionRouteSearch(raw, { defaultQuery, supportedViews }),
+    normalizeCollectionRouteSearch(raw, {
+      defaultQuery: repositoryReviewDefaultQuery,
+      supportedViews: repositoryReviewViews,
+    }),
   component: RepositoryReviewsRoutePage,
 })

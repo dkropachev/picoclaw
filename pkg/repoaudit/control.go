@@ -145,6 +145,7 @@ type RepositoryReviewAutomation struct {
 	ScopePolicy           RepositoryReviewScopePolicy            `json:"scope_policy"`
 	ScopePlan             RepositoryReviewScopePlan              `json:"scope_plan"`
 	ReviewerModels        []string                               `json:"reviewer_models"`
+	IssueWriterModel      string                                 `json:"issue_writer_model"`
 	CompareModels         bool                                   `json:"compare_models"`
 	ModelPrices           map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
 	Force                 bool                                   `json:"force"`
@@ -463,13 +464,14 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 			hasLegacyPriceMetadata = true
 		}
 	}
+	hadLegacyIssueWriter := strings.TrimSpace(automation.IssueWriterModel) == ""
 	if automation.ID != id {
 		return RepositoryReviewAutomation{}, false, errors.New("repository review automation identity mismatch")
 	}
 	if err := normalizeAutomation(&automation); err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	if hasLegacyPriceMetadata || hadLegacyGuard {
+	if hasLegacyPriceMetadata || hadLegacyGuard || hadLegacyIssueWriter {
 		if err := s.saveAutomation(automation); err != nil {
 			return RepositoryReviewAutomation{}, false, err
 		}
@@ -571,6 +573,7 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.ResolvedCommitSHA = strings.ToLower(strings.TrimSpace(automation.ResolvedCommitSHA))
 	automation.Target = strings.TrimSpace(automation.Target)
 	automation.ReviewFocus = strings.TrimSpace(automation.ReviewFocus)
+	automation.IssueWriterModel = strings.TrimSpace(automation.IssueWriterModel)
 	automation.BudgetPolicy.GuardExpression = strings.TrimSpace(automation.BudgetPolicy.GuardExpression)
 	automation.PauseDetail = strings.TrimSpace(automation.PauseDetail)
 	automation.RequestedPauseDetail = strings.TrimSpace(automation.RequestedPauseDetail)
@@ -612,6 +615,9 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	}
 	if len(automation.RunIDs) > maxAutomationRunIDs {
 		automation.RunIDs = append([]string(nil), automation.RunIDs[len(automation.RunIDs)-maxAutomationRunIDs:]...)
+	}
+	if automation.IssueWriterModel == "" && len(automation.ReviewerModels) > 0 {
+		automation.IssueWriterModel = automation.ReviewerModels[0]
 	}
 	automation.RunIDs, err = normalizeUniqueAutomationStrings(
 		automation.RunIDs, maxAutomationRunIDs, 1024, "run ID",
@@ -661,6 +667,7 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validOptionalAutomationText(automation.EffectiveAccountRef, 256) ||
 		!validBoundedText(automation.Target, 4096) ||
 		!validBoundedText(automation.ReviewFocus, maxFindingTextBytes) ||
+		!validBoundedText(automation.IssueWriterModel, 256) ||
 		len(automation.ReviewerModels) == 0 || len(automation.ReviewerModels) > maxAutomationReviewers ||
 		automation.CompareModels && len(automation.ReviewerModels) < 2 ||
 		automation.MaxFilesPerRun < 1 || automation.MaxFilesPerRun > maxReviewFiles ||
@@ -777,6 +784,7 @@ func (s Store) validateAutomationProfileSnapshotUnlocked(
 		automation.AccountRef != materialized.AccountRef ||
 		!reflect.DeepEqual(automation.ScopePolicy, materialized.ScopePolicy) ||
 		!reflect.DeepEqual(automation.ReviewerModels, materialized.ReviewerModels) ||
+		automation.IssueWriterModel != materialized.IssueWriterModel ||
 		automation.CompareModels != materialized.CompareModels ||
 		!reflect.DeepEqual(automation.ModelPrices, materialized.ModelPrices) ||
 		automation.Force != materialized.Force ||
@@ -802,6 +810,7 @@ func repositoryReviewAutomationProfilePolicyEqual(
 		left.AccountRef == right.AccountRef &&
 		reflect.DeepEqual(left.ScopePolicy, right.ScopePolicy) &&
 		reflect.DeepEqual(left.ReviewerModels, right.ReviewerModels) &&
+		left.IssueWriterModel == right.IssueWriterModel &&
 		left.CompareModels == right.CompareModels &&
 		reflect.DeepEqual(left.ModelPrices, right.ModelPrices) &&
 		left.Force == right.Force && left.AutoContinue == right.AutoContinue &&

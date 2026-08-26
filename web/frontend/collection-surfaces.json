@@ -246,12 +246,30 @@
       "owningSpec": "docs/features/repository-reviews.md",
       "implementationGlobs": [
         "src/routes/repository-reviews.tsx",
-        "src/components/repository-reviews/repository-review-runs-page.tsx"
+        "src/routes/repository-reviews_.$id*.tsx",
+        "src/routes/repository-reviews_.results.tsx",
+        "src/components/repository-reviews/repository-review-runs-page.tsx",
+        "src/components/repository-reviews/repository-review-detail-page.tsx",
+        "src/components/repository-reviews/repository-review-report-page.tsx",
+        "src/components/repository-reviews/repository-review-finding-page.tsx",
+        "src/components/repository-reviews/repository-review-link-issue-page.tsx",
+        "src/components/repository-reviews/repository-review-issues-page.tsx",
+        "src/components/repository-reviews/repository-review-issue-page.tsx"
       ],
-      "capabilities": [],
+      "capabilities": ["query", "pagination", "detail", "related"],
       "views": ["list", "table", "grid"],
       "status": "standard",
-      "routes": { "list": "/repository-reviews" }
+      "routes": {
+        "list": "/repository-reviews",
+        "detail": "/repository-reviews/:id",
+        "related": [
+          "/repository-reviews/:id/report",
+          "/repository-reviews/:id/findings/:findingId",
+          "/repository-reviews/:id/findings/:findingId/link-issue",
+          "/repository-reviews/:id/issues",
+          "/repository-reviews/:id/issues/:draftId"
+        ]
+      }
     },
     {
       "key": "repository-review-repositories",
@@ -271,13 +289,18 @@
       "route": "/repository-reviews/profiles",
       "owningSpec": "docs/features/repository-reviews.md",
       "implementationGlobs": [
-        "src/routes/repository-reviews_.profiles.tsx",
+        "src/routes/repository-reviews_.profiles*.tsx",
         "src/components/repository-reviews/repository-review-profiles-page.tsx"
       ],
-      "capabilities": ["create", "edit"],
-      "views": ["grid"],
-      "status": "legacy",
-      "routes": { "list": "/repository-reviews/profiles" }
+      "capabilities": ["query", "pagination", "create", "detail", "edit"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/repository-reviews/profiles",
+        "new": "/repository-reviews/profiles/new",
+        "detail": "/repository-reviews/profiles/:profileID",
+        "edit": "/repository-reviews/profiles/:profileID/edit"
+      }
     },
     {
       "key": "skills",
@@ -397,20 +420,6 @@
       "status": "exempt",
       "exemptionReason": "Remote marketplace discovery is a search/catalog experience rather than local resource administration.",
       "routes": { "list": "/agent/hub" }
-    },
-    {
-      "key": "repository-review-results",
-      "route": "/repository-reviews/results",
-      "owningSpec": "docs/features/repository-reviews.md",
-      "implementationGlobs": [
-        "src/routes/repository-reviews_.results.tsx",
-        "src/components/repository-reviews/repository-reviews-page.tsx"
-      ],
-      "capabilities": ["detail"],
-      "views": ["list"],
-      "status": "exempt",
-      "exemptionReason": "The route is a result-analysis workbench with nested evidence, not an administrative item collection.",
-      "routes": { "list": "/repository-reviews/results" }
     }
   ]
 }

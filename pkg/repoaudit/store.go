@@ -658,7 +658,7 @@ func (s Store) SetFindingStatus(
 	status FindingStatus,
 	expectedVersion int64,
 ) (RepositoryState, error) {
-	if status != FindingOpen && status != FindingDismissed && status != FindingPosted {
+	if status != FindingOpen && status != FindingDismissed {
 		return RepositoryState{}, errors.New("invalid repository review finding status")
 	}
 	unlock, err := s.lock(repository)
@@ -683,6 +683,9 @@ func (s Store) SetFindingStatus(
 	if state.Findings[index].Status == status {
 		return state, nil
 	}
+	if state.Findings[index].Status == FindingPosted || state.Findings[index].IssueDraftID != "" {
+		return RepositoryState{}, ErrConflict
+	}
 	if expectedVersion < 1 || state.Version != expectedVersion {
 		return RepositoryState{}, ErrConflict
 	}
@@ -700,6 +703,11 @@ func (s Store) SetFindingStatus(
 
 func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDraft, error) {
 	request.Repository = strings.TrimSpace(request.Repository)
+	if len(request.FindingIDs) != 1 {
+		return RepositoryState{}, IssueDraft{}, errors.New(
+			"legacy repository review issue drafts require exactly one finding",
+		)
+	}
 	unlock, err := s.lock(request.Repository)
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
@@ -744,6 +752,7 @@ func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDr
 	draft := IssueDraft{
 		ID:         draftID,
 		Repository: state.Repository, FindingIDs: ids, Title: title, Body: body,
+		Origin: IssueDraftOriginLegacy,
 		Labels: labels, State: IssueDraftEditing, Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	state.IssueDrafts = append(state.IssueDrafts, draft)
@@ -751,6 +760,9 @@ func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDr
 	state.UpdatedAt = now
 	if err := s.save(&state); err != nil {
 		return RepositoryState{}, IssueDraft{}, err
+	}
+	if index := issueDraftIndexByID(state.IssueDrafts, draft.ID); index >= 0 {
+		draft = state.IssueDrafts[index]
 	}
 	return state, draft, nil
 }
@@ -780,7 +792,7 @@ func (s Store) UpdateIssueDraft(
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
-	if draft.State != IssueDraftEditing {
+	if draft.State != IssueDraftEditing || !draft.Canonical {
 		return RepositoryState{}, IssueDraft{}, ErrConflict
 	}
 	title, body = strings.TrimSpace(title), strings.TrimSpace(body)
@@ -836,6 +848,9 @@ func (s Store) SetIssueDraftPublication(
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
+	if !draft.Canonical {
+		return RepositoryState{}, IssueDraft{}, ErrConflict
+	}
 	if draft.State == IssueDraftPosted {
 		return state, *draft, nil
 	}
@@ -906,6 +921,9 @@ func (s Store) ClaimIssueDraftPublication(
 		return RepositoryState{}, IssueDraft{}, false, os.ErrNotExist
 	}
 	draft := &state.IssueDrafts[index]
+	if !draft.Canonical {
+		return RepositoryState{}, IssueDraft{}, false, ErrConflict
+	}
 	if draft.State == IssueDraftPosted || draft.State == IssueDraftPublishing ||
 		draft.State == IssueDraftUnknown {
 		return state, *draft, false, nil
@@ -970,6 +988,7 @@ func repositoryReviewStateFromEntry(root string, entry os.DirEntry) (RepositoryS
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		return RepositoryState{}, jsonErr
 	}
+	backfillCanonicalIssueAssociations(&state)
 	if err := validateState(state); err != nil {
 		return RepositoryState{}, err
 	}
@@ -1014,6 +1033,7 @@ func (s Store) load(repository string) (RepositoryState, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return RepositoryState{}, err
 	}
+	migrated := backfillCanonicalIssueAssociations(&state)
 	if err := validateState(state); err != nil {
 		return RepositoryState{}, err
 	}
@@ -1044,6 +1064,11 @@ func (s Store) load(repository string) (RepositoryState, error) {
 	if state.IssueDrafts == nil {
 		state.IssueDrafts = []IssueDraft{}
 	}
+	if migrated {
+		if err := s.save(&state); err != nil {
+			return RepositoryState{}, err
+		}
+	}
 	return state, nil
 }
 
@@ -1051,6 +1076,7 @@ func (s Store) save(state *RepositoryState) error {
 	if state == nil {
 		return errors.New("repository review state is required")
 	}
+	backfillCanonicalIssueAssociations(state)
 	summary := Summarize(*state)
 	state.FindingCount = summary.FindingCount
 	state.OpenFindingCount = summary.OpenFindingCount
@@ -1544,6 +1570,9 @@ func validateState(state RepositoryState) error {
 		if len(finding.Observations) > 64 || len(finding.ContextIDs) > 64 {
 			return errors.New("invalid repository review finding observations")
 		}
+	}
+	if err := validateIssueAssociations(state); err != nil {
+		return err
 	}
 	return nil
 }

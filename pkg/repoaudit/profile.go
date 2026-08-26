@@ -37,6 +37,7 @@ type RepositoryReviewProfile struct {
 	ReviewFocus         string                       `json:"review_focus"`
 	ScopePolicy         RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel       string                       `json:"reviewer_model"`
+	IssueWriterModel    string                       `json:"issue_writer_model,omitempty"`
 	AccountRef          string                       `json:"account_ref,omitempty"`
 	Force               bool                         `json:"force"`
 	AutoContinue        bool                         `json:"auto_continue"`
@@ -257,6 +258,10 @@ func MaterializeRepositoryReviewAutomation(
 	automation.ReviewFocus = profile.ReviewFocus
 	automation.ScopePolicy = profile.ScopePolicy
 	automation.ReviewerModels = []string{profile.ReviewerModel}
+	automation.IssueWriterModel = strings.TrimSpace(profile.IssueWriterModel)
+	if automation.IssueWriterModel == "" {
+		automation.IssueWriterModel = profile.ReviewerModel
+	}
 	automation.CompareModels = false
 	price, hasPrice := automation.ModelPrices[profile.ReviewerModel]
 	automation.ModelPrices = make(map[string]RepositoryReviewModelPrice)
@@ -396,6 +401,7 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.ReviewFocus = strings.TrimSpace(profile.ReviewFocus)
 	profile.ReviewerModel = strings.TrimSpace(profile.ReviewerModel)
+	profile.IssueWriterModel = strings.TrimSpace(profile.IssueWriterModel)
 	profile.AccountRef = strings.TrimSpace(profile.AccountRef)
 	profile.BudgetPolicy.GuardExpression = strings.TrimSpace(profile.BudgetPolicy.GuardExpression)
 	if profile.MaxFilesPerRun == 0 {
@@ -416,6 +422,7 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		profile.Version < 1 || !validBoundedText(profile.Name, 256) ||
 		!validBoundedText(profile.ReviewFocus, maxFindingTextBytes) ||
 		!validBoundedText(profile.ReviewerModel, 256) ||
+		!validOptionalAutomationText(profile.IssueWriterModel, 256) ||
 		!validOptionalAutomationText(profile.AccountRef, 256) ||
 		profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > maxReviewFiles ||
 		profile.MaxContentBytes < 1 || profile.MaxContentBytes > defaultAutomationMaxContentBytes ||

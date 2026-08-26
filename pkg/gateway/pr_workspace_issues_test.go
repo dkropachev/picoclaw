@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/prworkspace"
@@ -97,5 +98,111 @@ func TestIssueURLRepositoryComparisonIsCaseInsensitive(t *testing.T) {
 		"owner/repo",
 	) {
 		t.Fatal("canonical GitHub issue URL casing did not match repository identity")
+	}
+}
+
+func TestPRWorkspaceIssuePublisherFindByMarkerValidatesAndReconcilesExactlyOneIssue(t *testing.T) {
+	marker := "picoclaw-pr-publication:ppb_test:sha256:test"
+	for _, test := range []struct {
+		name       string
+		publisher  *prWorkspaceGitHubIssuePublisher
+		repository string
+		marker     string
+	}{
+		{name: "nil publisher", repository: "octo/repo", marker: marker},
+		{
+			name: "nil provider", publisher: &prWorkspaceGitHubIssuePublisher{},
+			repository: "octo/repo", marker: marker,
+		},
+		{
+			name: "empty marker", publisher: &prWorkspaceGitHubIssuePublisher{},
+			repository: "octo/repo",
+		},
+		{
+			name: "invalid repository", publisher: &prWorkspaceGitHubIssuePublisher{},
+			repository: "octo/repo/extra", marker: marker,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, found, err := test.publisher.FindIssueByMarker(
+				t.Context(), "https://github.com", "ignored", test.repository, test.marker,
+			)
+			if found || !errors.Is(err, prworkspace.ErrInvalid) {
+				t.Fatalf("FindIssueByMarker() found=%v err=%v", found, err)
+			}
+		})
+	}
+
+	tests := []struct {
+		name        string
+		response    string
+		providerErr error
+		wantFound   bool
+		wantID      string
+		wantURL     string
+		wantError   string
+	}{
+		{name: "provider failure", providerErr: errors.New("GitHub unavailable"), wantError: "GitHub unavailable"},
+		{name: "invalid wire shape", response: `42`, wantError: "search response is invalid"},
+		{name: "empty envelope", response: `{"items":[]}`},
+		{
+			name: "direct array",
+			response: `[{"number":7,"html_url":"https://github.com/octo/repo/issues/7",` +
+				`"body":"<!-- ` + marker + ` -->"}]`,
+			wantFound: true, wantID: "7", wantURL: "https://github.com/octo/repo/issues/7",
+		},
+		{
+			name: "filters foreign repository and body mismatch",
+			response: `{"items":[` +
+				`{"id":6,"html_url":"https://github.com/other/repo/issues/6","body":"` + marker + `"},` +
+				`{"id":7,"html_url":"https://github.com/octo/repo/issues/7","body":"different marker"},` +
+				`{"id":8,"html_url":"https://github.com/octo/repo/issues/8","body":"` + marker + `"}` +
+				`]}`,
+			wantFound: true, wantID: "8", wantURL: "https://github.com/octo/repo/issues/8",
+		},
+		{
+			name: "multiple exact matches",
+			response: `{"items":[` +
+				`{"id":8,"html_url":"https://github.com/octo/repo/issues/8","body":"` + marker + `"},` +
+				`{"id":9,"html_url":"https://github.com/octo/repo/issues/9","body":"` + marker + `"}` +
+				`]}`,
+			wantError: "multiple GitHub issues",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			provider, err := reviews.NewGitHubProvider(prWorkspaceProviderToolRunnerFunc(func(
+				_ context.Context,
+				request workflows.ToolRequest,
+			) (map[string]any, error) {
+				calls++
+				if request.MCPTool != reviews.GitHubSearchIssuesTool ||
+					request.Args["query"] != `"`+marker+`" in:body is:issue repo:octo/repo` {
+					t.Fatalf("issue search request=%#v", request)
+				}
+				if test.providerErr != nil {
+					return nil, test.providerErr
+				}
+				return map[string]any{"text": test.response}, nil
+			}), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, found, findErr := (&prWorkspaceGitHubIssuePublisher{
+				provider: provider,
+			}).FindIssueByMarker(
+				t.Context(), "https://github.com", "ignored", "octo/repo", marker,
+			)
+			if calls != 1 || found != test.wantFound || result.ExternalID != test.wantID ||
+				result.ExternalURL != test.wantURL ||
+				(test.wantError == "" && findErr != nil) ||
+				(test.wantError != "" && (findErr == nil || !strings.Contains(findErr.Error(), test.wantError))) {
+				t.Fatalf(
+					"FindIssueByMarker() result=%#v found=%v err=%v calls=%d",
+					result, found, findErr, calls,
+				)
+			}
+		})
 	}
 }

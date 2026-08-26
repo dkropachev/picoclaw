@@ -12,6 +12,13 @@ import type {
   MCPServer,
   MCPServerInput,
 } from "../src/api/mcp"
+import type {
+  RepositoryReviewAutomation,
+  RepositoryReviewFinding,
+  RepositoryReviewFindingContext,
+  RepositoryReviewIssueDraft,
+  RepositoryReviewSummary,
+} from "../src/api/repository-reviews"
 import prLifecycleFlowFixture from "./fixtures/pr-lifecycle-flow.json" with { type: "json" }
 
 const smokeRoutes = [
@@ -27,7 +34,12 @@ const smokeRoutes = [
   "/repository-reviews",
   "/repository-reviews/repositories",
   "/repository-reviews/profiles",
-  "/repository-reviews/results",
+  "/repository-reviews/rra_smoke",
+  "/repository-reviews/rra_smoke/report",
+  "/repository-reviews/rra_smoke/findings/rrf_smoke_1",
+  "/repository-reviews/rra_smoke/findings/rrf_smoke_3/link-issue",
+  "/repository-reviews/rra_smoke/issues",
+  "/repository-reviews/rra_smoke/issues/rrid_smoke_1",
   "/model-evaluations",
   "/logs",
   "/agent/agents",
@@ -1054,6 +1066,349 @@ const channelCatalogResponse = {
   ],
 }
 
+const repositoryReviewAutomationID = "rra_smoke"
+const repositoryReviewFindingOneID = "rrf_smoke_1"
+const repositoryReviewFindingTwoID = "rrf_smoke_2"
+const repositoryReviewFindingThreeID = "rrf_smoke_3"
+const repositoryReviewFindingFourID = "rrf_smoke_4"
+const repositoryReviewIssueOneID = "rrid_smoke_1"
+const repositoryReviewIssueTwoID = "rrid_smoke_2"
+const repositoryReviewCommitSHA = "a".repeat(40)
+
+const repositoryReviewAutomationFixture: RepositoryReviewAutomation = {
+  id: repositoryReviewAutomationID,
+  version: 7,
+  profile_id: "rrpf_smoke",
+  profile_version: 3,
+  branch: "main",
+  name: "Durable correctness review",
+  repository: "octo/repo",
+  ref: "main",
+  target: "all",
+  account_ref: "openai-primary",
+  effective_account_ref: "openai-primary",
+  review_focus: "Find concrete correctness and reliability defects.",
+  scope_policy: {
+    code_types: ["hotpath-code", "code", "test"],
+    include_folders: ["pkg", "cmd"],
+    exclude_folders: ["vendor"],
+    free_text: "Prioritize durable state transitions.",
+  },
+  reviewer_models: ["review"],
+  issue_writer_model: "issue-writer",
+  compare_models: false,
+  force: false,
+  max_files_per_run: 24,
+  max_content_bytes: 524_288,
+  max_parallel_children: 4,
+  auto_continue: true,
+  model_prices: {},
+  budget: { guard_expression: "tokens.total < 250000" },
+  status: "running",
+  active_run_id: "rrun_smoke_current",
+  run_ids: ["rrun_smoke_previous", "rrun_smoke_current"],
+  usage: {
+    prompt_tokens: 18_240,
+    completion_tokens: 3_840,
+    total_tokens: 22_080,
+    cached_tokens: 5_120,
+  },
+  estimated_cost_usd: 0.42,
+  progress: {
+    stage: "reviewing durable checkpoints",
+    completed_batches: 3,
+    total_batches: 5,
+    reviewed_files: 24,
+    remaining_files: 16,
+    unsupported_files: 1,
+    findings: 4,
+  },
+  model_stats: [],
+  account_limits: [],
+  scope_plan: {
+    commit_sha: repositoryReviewCommitSHA,
+    policy_hash: "sha256:scope-policy-smoke",
+    hash: "sha256:scope-plan-smoke",
+    summary: "40 source and test files pinned at the selected commit.",
+    warnings: [],
+    counts: {
+      total_files: 46,
+      code_type_files: 44,
+      include_files: 42,
+      excluded_files: 2,
+      selected_files: 40,
+    },
+  },
+  resolved_commit_sha: repositoryReviewCommitSHA,
+  started_at: "2026-08-26T12:00:00Z",
+  created_at: "2026-08-25T12:00:00Z",
+  updated_at: "2026-08-26T12:05:00Z",
+}
+
+const repositoryReviewSummaryFixture: RepositoryReviewSummary = {
+  schema_version: 1,
+  id: "rrs_smoke",
+  repository: "octo/repo",
+  version: 12,
+  review_version: 4,
+  last_commit_sha: repositoryReviewCommitSHA,
+  finding_count: 4,
+  open_finding_count: 2,
+  issue_draft_count: 2,
+  unsupported_count: 1,
+  reviewed_file_count: 24,
+  excluded_file_count: 2,
+  updated_at: "2026-08-26T12:05:00Z",
+}
+
+const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
+  {
+    id: repositoryReviewFindingOneID,
+    fingerprint: "sha256:lost-update",
+    repository: "octo/repo",
+    commit_sha: repositoryReviewCommitSHA,
+    file: {
+      path: "pkg/store/ledger.go",
+      blob_sha: "b".repeat(40),
+      size_bytes: 8_192,
+      category: "hotpath-code",
+    },
+    line: 142,
+    severity: "high",
+    title: "Concurrent checkpoint writes can lose a finding",
+    symbol: "Ledger.SaveFinding",
+    message: "The read-modify-write sequence has no version fence.",
+    evidence:
+      "Two callers load the same ledger version and each replaces the findings slice; the later rename discards the earlier checkpoint.",
+    impact:
+      "A validated repository finding can disappear from the durable report.",
+    validation: {
+      status: "confirmed",
+      summary: "Traced both writers through the atomic rename path.",
+      checks: ["Compared both caller snapshots", "Verified no CAS guard"],
+    },
+    context_ids: ["rrctx_smoke_1"],
+    models: ["review"],
+    observation_count: 1,
+    observations: [
+      {
+        context_id: "rrctx_smoke_1",
+        model: "review",
+        reviewer: "review-child-2",
+        severity: "high",
+        title: "Concurrent checkpoint writes can lose a finding",
+        symbol: "Ledger.SaveFinding",
+        line: 142,
+        message: "The read-modify-write sequence has no version fence.",
+        evidence: "Both writers persist snapshots derived from version 11.",
+        impact: "One validated checkpoint is overwritten.",
+        validation: {
+          status: "confirmed",
+          summary: "Interleaving reproduced from the two call paths.",
+        },
+      },
+    ],
+    status: "open",
+    version: 2,
+    created_at: "2026-08-26T12:02:00Z",
+    updated_at: "2026-08-26T12:02:00Z",
+  },
+  {
+    id: repositoryReviewFindingTwoID,
+    fingerprint: "sha256:path-escape",
+    repository: "octo/repo",
+    commit_sha: repositoryReviewCommitSHA,
+    file: {
+      path: "pkg/archive/extract.go",
+      blob_sha: "c".repeat(40),
+      size_bytes: 4_096,
+      category: "code",
+    },
+    line: 88,
+    severity: "critical",
+    title: "Archive extraction accepts paths outside the workspace",
+    symbol: "Extractor.Write",
+    message: "The joined path is not checked against the destination root.",
+    evidence: "A ../ entry reaches os.Create after filepath.Join.",
+    impact: "A crafted archive can overwrite files outside the workspace.",
+    validation: {
+      status: "confirmed",
+      summary: "Normalized an escaping entry and followed it to os.Create.",
+      checks: ["Checked platform path normalization"],
+    },
+    context_ids: ["rrctx_smoke_2"],
+    models: ["review", "code"],
+    observation_count: 2,
+    status: "open",
+    issue_draft_id: repositoryReviewIssueOneID,
+    version: 3,
+    created_at: "2026-08-26T12:02:30Z",
+    updated_at: "2026-08-26T12:03:00Z",
+  },
+  {
+    id: repositoryReviewFindingThreeID,
+    fingerprint: "sha256:retry-storm",
+    repository: "octo/repo",
+    commit_sha: repositoryReviewCommitSHA,
+    file: {
+      path: "pkg/queue/worker.go",
+      blob_sha: "d".repeat(40),
+      size_bytes: 6_144,
+      category: "hotpath-code",
+    },
+    line: 211,
+    severity: "medium",
+    title: "Canceled jobs are retried without backoff",
+    symbol: "Worker.retry",
+    message: "Cancellation is classified as a transient queue error.",
+    evidence: "context.Canceled reaches the immediate retry branch.",
+    impact: "Shutdown can produce a tight retry loop and noisy duplicate work.",
+    validation: {
+      status: "confirmed",
+      summary: "Followed cancellation from dequeue through retry scheduling.",
+      checks: ["Verified retry delay remains zero"],
+    },
+    context_ids: ["rrctx_smoke_3"],
+    models: ["review"],
+    observation_count: 1,
+    status: "open",
+    version: 1,
+    created_at: "2026-08-26T12:03:30Z",
+    updated_at: "2026-08-26T12:03:30Z",
+  },
+  {
+    id: repositoryReviewFindingFourID,
+    fingerprint: "sha256:stale-cache",
+    repository: "octo/repo",
+    commit_sha: repositoryReviewCommitSHA,
+    file: {
+      path: "pkg/config/cache.go",
+      blob_sha: "e".repeat(40),
+      size_bytes: 3_072,
+      category: "code",
+    },
+    line: 57,
+    severity: "low",
+    title: "Configuration cache survives a failed reload",
+    symbol: "Cache.Reload",
+    message: "The stale value remains readable after an invalidation failure.",
+    evidence: "The error branch returns before clearing the cached revision.",
+    impact:
+      "Callers can observe configuration older than the reported revision.",
+    validation: {
+      status: "confirmed",
+      summary: "Compared revision and cached value updates on every branch.",
+    },
+    context_ids: ["rrctx_smoke_4"],
+    models: ["review"],
+    observation_count: 1,
+    status: "open",
+    issue_draft_id: repositoryReviewIssueTwoID,
+    version: 2,
+    created_at: "2026-08-26T12:04:00Z",
+    updated_at: "2026-08-26T12:04:00Z",
+  },
+]
+
+const repositoryReviewContextsFixture: RepositoryReviewFindingContext[] =
+  repositoryReviewFindingsFixture.map((finding, index) => ({
+    id: finding.context_ids[0]!,
+    repository: finding.repository,
+    commit_sha: finding.commit_sha,
+    inventory_hash: "sha256:inventory-smoke",
+    profile_hash: "sha256:profile-smoke",
+    run_id: index < 2 ? "rrun_smoke_previous" : "rrun_smoke_current",
+    model: finding.models[0]!,
+    reviewer: `review-child-${index + 1}`,
+    files: [finding.file],
+    raw_digest: `sha256:raw-context-${index + 1}`,
+    created_at: finding.created_at,
+  }))
+
+const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
+  {
+    id: repositoryReviewIssueOneID,
+    repository: "octo/repo",
+    finding_ids: [repositoryReviewFindingTwoID],
+    origin: "ai_generated",
+    generation_id: "rig_smoke_existing",
+    resolved_instructions:
+      "Write a concise grounded issue with evidence, impact, validation, location, and commit provenance.",
+    instructions_mode: "default",
+    generator_model: "issue-writer",
+    generator_account: "openai-primary",
+    canonical: true,
+    publishable: true,
+    deletable: true,
+    regeneratable: true,
+    title: "Archive extraction can write outside the workspace",
+    body: [
+      "## Evidence",
+      "",
+      "A `../` archive entry reaches `os.Create` without a destination-root check.",
+      "",
+      "| Location | Commit |",
+      "| --- | --- |",
+      `| \`pkg/archive/extract.go:88\` | \`${repositoryReviewCommitSHA}\` |`,
+      "",
+      "## Impact",
+      "",
+      "A crafted archive can overwrite files outside the workspace.",
+      "",
+      "## Validation",
+      "",
+      "- Normalized an escaping entry",
+      "- Followed it to `os.Create`",
+    ].join("\n"),
+    labels: ["bug", "security"],
+    state: "editing",
+    version: 3,
+    created_at: "2026-08-26T12:03:00Z",
+    updated_at: "2026-08-26T12:03:00Z",
+  },
+  {
+    id: repositoryReviewIssueTwoID,
+    repository: "octo/repo",
+    finding_ids: [repositoryReviewFindingFourID],
+    origin: "ai_generated",
+    generation_id: "rig_smoke_existing",
+    resolved_instructions:
+      "Write a concise grounded issue with evidence, impact, validation, location, and commit provenance.",
+    instructions_mode: "default",
+    generator_model: "issue-writer",
+    generator_account: "openai-primary",
+    canonical: true,
+    publishable: true,
+    deletable: true,
+    regeneratable: true,
+    title: "Failed reload leaves the configuration cache stale",
+    body: "## Evidence\n\nThe error branch preserves the prior cached revision.\n\n## Impact\n\nReaders can observe stale configuration.",
+    labels: ["bug"],
+    state: "editing",
+    version: 2,
+    created_at: "2026-08-26T12:04:30Z",
+    updated_at: "2026-08-26T12:04:30Z",
+  },
+]
+
+interface RepositoryReviewMockState {
+  automation: RepositoryReviewAutomation
+  summary: RepositoryReviewSummary
+  findings: RepositoryReviewFinding[]
+  contexts: RepositoryReviewFindingContext[]
+  issues: RepositoryReviewIssueDraft[]
+}
+
+function createRepositoryReviewMockState(): RepositoryReviewMockState {
+  return {
+    automation: structuredClone(repositoryReviewAutomationFixture),
+    summary: structuredClone(repositoryReviewSummaryFixture),
+    findings: structuredClone(repositoryReviewFindingsFixture),
+    contexts: structuredClone(repositoryReviewContextsFixture),
+    issues: structuredClone(repositoryReviewIssuesFixture),
+  }
+}
+
 const developmentWorkspaceID = `devw_${"1".repeat(32)}`
 const developmentWorkspaceCharterID = `pcr_${"2".repeat(32)}`
 const developmentWorkspaceAggregate = {
@@ -1376,6 +1731,11 @@ interface MockLauncherApiOptions {
   fetchModelFailures?: Record<string, string>
   modelResponse?: unknown
   repositoryReviewAutomationOptions?: unknown
+  repositoryReviewRequests?: Array<{
+    method: string
+    path: string
+    body: Record<string, unknown> | null
+  }>
   modelEvaluationRequests?: Array<{
     method: string
     path: string
@@ -1443,6 +1803,7 @@ async function mockLauncherApis(
   let currentAgentRevision = 1
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
+  const repositoryReviewState = createRepositoryReviewMockState()
   let currentModelEvaluation: Record<string, unknown> | null = null
   let modelEvaluationDetailReads = 0
   const modelEvaluationProfile = {
@@ -1861,6 +2222,15 @@ async function mockLauncherApis(
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+
+      if (path.startsWith("/api/repository-reviews/automations")) {
+        return mockRepositoryReviewAutomationRequest(
+          route,
+          url,
+          repositoryReviewState,
+          options.repositoryReviewRequests,
+        )
+      }
 
       if (
         options.statefulModelEvaluations &&
@@ -3938,6 +4308,477 @@ async function gotoMockedRoute(
   await expect(page.locator("#main-content")).toBeVisible()
 }
 
+async function mockRepositoryReviewAutomationRequest(
+  route: Route,
+  url: URL,
+  state: RepositoryReviewMockState,
+  requests?: MockLauncherApiOptions["repositoryReviewRequests"],
+) {
+  const request = route.request()
+  const method = request.method()
+  const path = url.pathname
+  const rawBody = request.postData()
+  const body = rawBody
+    ? (request.postDataJSON() as Record<string, unknown>)
+    : null
+  if (method !== "GET") requests?.push({ method, path, body })
+
+  const automationRoot = `/api/repository-reviews/automations/${repositoryReviewAutomationID}`
+  const capabilities = {
+    github: true,
+    can_generate: true,
+    can_publish: true,
+    can_search_issues: true,
+    can_link_issue: true,
+    can_unlink_issue: true,
+    can_replace_issue: true,
+    can_edit: true,
+    can_delete: true,
+    can_regenerate: true,
+  }
+  const findFinding = (findingID: string) =>
+    state.findings.find((finding) => finding.id === findingID)
+  const findIssue = (draftID: string) =>
+    state.issues.find((issue) => issue.id === draftID)
+  const contextsFor = (finding: RepositoryReviewFinding) =>
+    state.contexts.filter((context) => finding.context_ids.includes(context.id))
+  const issueFor = (finding: RepositoryReviewFinding) =>
+    finding.issue_draft_id
+      ? state.issues.find((issue) => issue.id === finding.issue_draft_id)
+      : undefined
+  const findingDetail = (finding: RepositoryReviewFinding) => ({
+    automation: state.automation,
+    repository: state.summary,
+    finding,
+    contexts: contextsFor(finding),
+    ...(issueFor(finding) ? { issue: issueFor(finding) } : {}),
+    capabilities,
+  })
+  const issueDetail = (issue: RepositoryReviewIssueDraft) => ({
+    automation: state.automation,
+    repository: state.summary,
+    issue,
+    finding: state.findings.find((finding) =>
+      issue.finding_ids.includes(finding.id),
+    ),
+    capabilities: {
+      ...capabilities,
+      can_edit: issue.state === "editing" && issue.canonical !== false,
+      can_delete:
+        (issue.state === "editing" || issue.state === "failed") &&
+        issue.canonical !== false,
+      can_regenerate:
+        (issue.state === "editing" || issue.state === "failed") &&
+        issue.canonical !== false,
+      can_publish:
+        new Set(["editing", "publishing", "unknown"]).has(issue.state) &&
+        issue.canonical !== false,
+    },
+  })
+
+  if (path === "/api/repository-reviews/automations") {
+    if (method !== "GET") {
+      return json(route, { code: "method_not_allowed" }, 405)
+    }
+    return json(route, {
+      automations: [state.automation],
+      total: 1,
+      next_cursor: "",
+      canonical_query:
+        url.searchParams.get("query") ?? "ORDER BY repository ASC",
+      query_schema: collectionSchema([
+        ["id", "string"],
+        ["name", "string"],
+        ["repository", "string"],
+        ["branch", "string"],
+        ["status", "enum"],
+        ["progress", "number"],
+        ["reviewed", "number"],
+        ["findings", "number"],
+        ["updated", "timestamp"],
+      ]),
+    })
+  }
+
+  if (path === `${automationRoot}/report` && method === "GET") {
+    const offset = Number(url.searchParams.get("offset") ?? 0)
+    const limit = Number(url.searchParams.get("limit") ?? 50)
+    const scope = url.searchParams.get("scope") === "all" ? "all" : "current"
+    const findings = state.findings.slice(offset, offset + limit)
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      findings,
+      contexts: state.contexts.filter((context) =>
+        findings.some((finding) => finding.context_ids.includes(context.id)),
+      ),
+      scope,
+      offset,
+      total: state.findings.length,
+      ...(offset + findings.length < state.findings.length
+        ? { next_offset: offset + findings.length }
+        : {}),
+      capabilities,
+    })
+  }
+
+  const candidateMatch = path.match(
+    new RegExp(`^${automationRoot}/findings/([^/]+)/issue-link/candidates$`),
+  )
+  if (candidateMatch && method === "POST") {
+    const finding = findFinding(decodeURIComponent(candidateMatch[1]!))
+    if (!finding) return json(route, { code: "not_found" }, 404)
+    return json(route, {
+      automation: state.automation,
+      finding,
+      generator_model: state.automation.issue_writer_model,
+      generator_account: state.automation.effective_account_ref,
+      candidates: [
+        {
+          id: "github:184",
+          number: 184,
+          title: "Worker retries cancellation immediately",
+          url: "https://github.com/octo/repo/issues/184",
+          state: "open",
+          labels: ["bug", "queue"],
+          score: 0.94,
+          rank: 1,
+          explanation:
+            "The issue names the same worker retry behavior and queue path.",
+        },
+        {
+          id: "github:133",
+          number: 133,
+          title: "Reduce shutdown retry noise",
+          url: "https://github.com/octo/repo/issues/133",
+          state: "closed",
+          labels: ["reliability"],
+          score: 0.68,
+          rank: 2,
+          explanation:
+            "This older issue mentions shutdown noise but not the zero-delay branch.",
+        },
+      ],
+    })
+  }
+
+  const linkMatch = path.match(
+    new RegExp(`^${automationRoot}/findings/([^/]+)/issue-link$`),
+  )
+  if (linkMatch) {
+    const finding = findFinding(decodeURIComponent(linkMatch[1]!))
+    if (!finding) return json(route, { code: "not_found" }, 404)
+    if (method === "DELETE") {
+      const associated = issueFor(finding)
+      if (associated?.origin === "linked") {
+        state.issues = state.issues.filter(
+          (issue) => issue.id !== associated.id,
+        )
+        finding.issue_draft_id = undefined
+        finding.status = "open"
+        finding.version += 1
+      }
+      return json(route, findingDetail(finding))
+    }
+    if (method === "POST") {
+      const issueURL = String(body?.issue_url ?? "")
+      const number = Number(issueURL.match(/\/issues\/(\d+)/u)?.[1] ?? 184)
+      const previous = issueFor(finding)
+      if (previous?.origin === "linked") {
+        state.issues = state.issues.filter((issue) => issue.id !== previous.id)
+      }
+      const linked: RepositoryReviewIssueDraft = {
+        id: `rrid_linked_${number}`,
+        repository: finding.repository,
+        finding_ids: [finding.id],
+        origin: "linked",
+        canonical: true,
+        read_only: true,
+        publishable: false,
+        deletable: false,
+        regeneratable: false,
+        unlinkable: true,
+        title:
+          number === 184
+            ? "Worker retries cancellation immediately"
+            : `Existing GitHub issue #${number}`,
+        body: "This record points to an existing GitHub issue.",
+        labels: ["bug", "queue"],
+        state: "posted",
+        external_id: String(number),
+        external_url: issueURL,
+        version: 1,
+        created_at: "2026-08-26T12:06:00Z",
+        updated_at: "2026-08-26T12:06:00Z",
+      }
+      state.issues.push(linked)
+      finding.issue_draft_id = linked.id
+      finding.status = "posted"
+      finding.version += 1
+      return json(route, findingDetail(finding))
+    }
+  }
+
+  const findingMatch = path.match(
+    new RegExp(`^${automationRoot}/findings/([^/]+)$`),
+  )
+  if (findingMatch) {
+    const finding = findFinding(decodeURIComponent(findingMatch[1]!))
+    if (!finding) return json(route, { code: "not_found" }, 404)
+    if (method === "PATCH") {
+      finding.status = body?.status === "dismissed" ? "dismissed" : "open"
+      finding.version += 1
+    }
+    return json(route, findingDetail(finding))
+  }
+
+  if (path === `${automationRoot}/issues/generations` && method === "POST") {
+    const generationID = String(body?.generation_id ?? "rig_smoke_generated")
+    const requestedFindingIDs = Array.isArray(body?.finding_ids)
+      ? body.finding_ids.filter(
+          (candidate): candidate is string => typeof candidate === "string",
+        )
+      : []
+    const existing = state.issues.filter(
+      (issue) => issue.generation_id === generationID,
+    )
+    const generated =
+      existing.length > 0
+        ? existing
+        : requestedFindingIDs.flatMap((findingID, index) => {
+            const finding = findFinding(findingID)
+            if (
+              !finding ||
+              finding.status !== "open" ||
+              finding.issue_draft_id
+            ) {
+              return []
+            }
+            const issue: RepositoryReviewIssueDraft = {
+              id: `rrid_generated_${state.issues.length + index + 1}`,
+              repository: finding.repository,
+              finding_ids: [finding.id],
+              origin: "ai_generated",
+              generation_id: generationID,
+              resolved_instructions:
+                body?.instructions_mode === "custom" &&
+                typeof body.instructions === "string"
+                  ? body.instructions
+                  : "Write a concise grounded issue with evidence, impact, validation, location, and commit provenance.",
+              instructions_mode:
+                body?.instructions_mode === "custom" ? "custom" : "default",
+              generator_model: state.automation.issue_writer_model,
+              generator_account: state.automation.effective_account_ref,
+              canonical: true,
+              publishable: true,
+              deletable: true,
+              regeneratable: true,
+              title: finding.title,
+              body: `## Evidence\n\n${finding.evidence}\n\n## Impact\n\n${finding.impact}\n\n## Validation\n\n${finding.validation.summary}\n\n## Location\n\n\`${finding.file.path}:${finding.line ?? 1}\` at commit \`${finding.commit_sha}\`.`,
+              labels: ["bug"],
+              state: "editing",
+              version: 1,
+              created_at: "2026-08-26T12:06:00Z",
+              updated_at: "2026-08-26T12:06:00Z",
+            }
+            state.issues.push(issue)
+            finding.issue_draft_id = issue.id
+            finding.version += 1
+            return [issue]
+          })
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      generation_id: generationID,
+      issues: generated,
+      results: requestedFindingIDs.map((findingID) => {
+        const issue = generated.find((candidate) =>
+          candidate.finding_ids.includes(findingID),
+        )
+        return issue
+          ? {
+              id: findingID,
+              draft_id: issue.id,
+              state: issue.state,
+              success: true,
+            }
+          : {
+              id: findingID,
+              outcome: "failed",
+              success: false,
+              message: "Finding is not available for generation.",
+            }
+      }),
+    })
+  }
+
+  if (path === `${automationRoot}/issues/publish` && method === "POST") {
+    const requested = Array.isArray(body?.issues)
+      ? (body.issues as Array<{ id?: unknown }>)
+      : []
+    const results = requested.map((candidate) => {
+      const id = typeof candidate.id === "string" ? candidate.id : ""
+      const issue = findIssue(id)
+      if (!issue) {
+        return {
+          draft_id: id,
+          outcome: "failed",
+          success: false,
+          message: "Preview not found.",
+        }
+      }
+      issue.state = "posted"
+      issue.external_id = String(300 + state.issues.indexOf(issue))
+      issue.external_url = `https://github.com/octo/repo/issues/${issue.external_id}`
+      issue.publishable = false
+      issue.deletable = false
+      issue.regeneratable = false
+      issue.version += 1
+      issue.updated_at = "2026-08-26T12:07:00Z"
+      const finding = state.findings.find((candidateFinding) =>
+        issue.finding_ids.includes(candidateFinding.id),
+      )
+      if (finding) {
+        finding.status = "posted"
+        finding.version += 1
+      }
+      return {
+        draft_id: issue.id,
+        state: issue.state,
+        outcome: "posted",
+        success: true,
+        external_url: issue.external_url,
+      }
+    })
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      issues: state.issues,
+      results,
+    })
+  }
+
+  if (path === `${automationRoot}/issues` && method === "GET") {
+    const offset = Number(url.searchParams.get("offset") ?? 0)
+    const limit = Number(url.searchParams.get("limit") ?? 50)
+    const generationID = url.searchParams.get("generation_id") ?? undefined
+    const filtered = generationID
+      ? state.issues.filter((issue) => issue.generation_id === generationID)
+      : state.issues
+    const issues = filtered.slice(offset, offset + limit)
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      issues,
+      offset,
+      total: filtered.length,
+      ...(offset + issues.length < filtered.length
+        ? { next_offset: offset + issues.length }
+        : {}),
+      ...(generationID ? { generation_id: generationID } : {}),
+      capabilities,
+    })
+  }
+
+  const issueActionMatch = path.match(
+    new RegExp(`^${automationRoot}/issues/([^/]+)/(regenerate|publish)$`),
+  )
+  if (issueActionMatch && method === "POST") {
+    const issue = findIssue(decodeURIComponent(issueActionMatch[1]!))
+    if (!issue) return json(route, { code: "not_found" }, 404)
+    if (issueActionMatch[2] === "regenerate") {
+      issue.title = `${issue.title} (regenerated)`
+      issue.version += 1
+      issue.updated_at = "2026-08-26T12:07:00Z"
+    } else {
+      issue.state = "posted"
+      issue.external_id = "401"
+      issue.external_url = "https://github.com/octo/repo/issues/401"
+      issue.publishable = false
+      issue.deletable = false
+      issue.regeneratable = false
+      issue.version += 1
+    }
+    return json(route, issueDetail(issue))
+  }
+
+  const issueMatch = path.match(
+    new RegExp(`^${automationRoot}/issues/([^/]+)$`),
+  )
+  if (issueMatch) {
+    const issue = findIssue(decodeURIComponent(issueMatch[1]!))
+    if (!issue) return json(route, { code: "not_found" }, 404)
+    if (method === "DELETE") {
+      state.issues = state.issues.filter(
+        (candidate) => candidate.id !== issue.id,
+      )
+      for (const finding of state.findings) {
+        if (finding.issue_draft_id === issue.id) {
+          finding.issue_draft_id = undefined
+          finding.version += 1
+        }
+      }
+      return json(route, {
+        outcome: "deleted",
+        results: [{ draft_id: issue.id, outcome: "deleted", success: true }],
+      })
+    }
+    if (method === "PATCH") {
+      issue.title = String(body?.title ?? issue.title)
+      issue.body = String(body?.body ?? issue.body)
+      issue.labels = Array.isArray(body?.labels)
+        ? body.labels.filter(
+            (candidate): candidate is string => typeof candidate === "string",
+          )
+        : issue.labels
+      issue.version += 1
+      issue.updated_at = "2026-08-26T12:07:00Z"
+    }
+    return json(route, issueDetail(issue))
+  }
+
+  if (path === `${automationRoot}/commit-options` && method === "GET") {
+    return json(route, {
+      expected_version: state.automation.version,
+      remembered: {
+        sha: repositoryReviewCommitSHA,
+        short_sha: repositoryReviewCommitSHA.slice(0, 12),
+      },
+      latest: {
+        sha: "f".repeat(40),
+        short_sha: "f".repeat(12),
+      },
+      newer_commit_available: true,
+    })
+  }
+
+  const actionMatch = path.match(
+    new RegExp(`^${automationRoot}/(start|pause|resume|restart)$`),
+  )
+  if (actionMatch && method === "POST") {
+    const action = actionMatch[1]
+    state.automation.status =
+      action === "pause"
+        ? "paused"
+        : action === "restart" || action === "start" || action === "resume"
+          ? "running"
+          : state.automation.status
+    state.automation.version += 1
+    state.automation.updated_at = "2026-08-26T12:08:00Z"
+    return json(route, { automation: state.automation })
+  }
+
+  if (path === automationRoot && method === "GET") {
+    return json(route, state.automation)
+  }
+
+  return json(
+    route,
+    { code: "not_found", message: "Repository review fixture not found." },
+    404,
+  )
+}
+
 for (const routePath of smokeRoutes) {
   test(`${routePath} renders without console errors or horizontal overflow`, async ({
     page,
@@ -3953,6 +4794,204 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("repository review routing preserves context through generation and subset publication", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["repositoryReviewRequests"]
+  > = []
+  await gotoMockedRoute(
+    page,
+    "/repository-reviews?q=ORDER+BY+repository+ASC&view=list",
+    { repositoryReviewRequests: requests },
+  )
+
+  const reviewRow = page.locator(
+    `[data-item-id="${repositoryReviewAutomationID}"]`,
+  )
+  await expect(reviewRow).toBeVisible()
+  await reviewRow.focus()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}`),
+  )
+  await expect(
+    page.getByRole("heading", { name: "octo/repo", exact: true }),
+  ).toBeVisible()
+
+  await page.getByRole("button", { name: "Stop safely" }).click()
+  await expect(page.getByText("paused", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: /^Report/ }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/report`),
+  )
+
+  const findingRow = page.locator(
+    `[data-item-id="${repositoryReviewFindingOneID}"]`,
+  )
+  await expect(findingRow).toBeVisible()
+  await findingRow.focus()
+  await page.keyboard.press("Space")
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/findings/${repositoryReviewFindingOneID}`,
+    ),
+  )
+  await expect(page.getByText("Traced both writers through")).toBeVisible()
+
+  await page.goBack()
+  await expect(page).toHaveURL(
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/report`),
+  )
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Generate issue previews" }).click()
+  const generationDialog = page.getByRole("dialog", {
+    name: "Generate 1 issue previews",
+  })
+  await expect(generationDialog).toBeVisible()
+  await generationDialog
+    .getByRole("button", { name: "Generate previews" })
+    .click()
+
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/issues\\?.*generation_id=rig_`,
+    ),
+  )
+  await expect(page.getByText(/Showing generation/)).toBeVisible()
+  await page.getByRole("button", { name: "Show all previews" }).click()
+  await expect(page.getByText(/Showing generation/)).toHaveCount(0)
+
+  const publishRow = page.locator(
+    `[data-item-id="${repositoryReviewIssueOneID}"]`,
+  )
+  await publishRow.focus()
+  await page.keyboard.press("Space")
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Publish selected" }).click()
+  const publicationDialog = page.getByRole("alertdialog", {
+    name: "Publish 1 selected preview?",
+  })
+  await expect(publicationDialog).toBeVisible()
+  await publicationDialog
+    .getByRole("button", { name: "Publish selected" })
+    .click()
+  await expect(page.getByText("Publication outcomes")).toBeVisible()
+  await expect(
+    page.getByText(`${repositoryReviewIssueOneID}: posted`),
+  ).toBeVisible()
+
+  await page.getByRole("button", { name: "Review details" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}(?:\\?|$)`),
+  )
+  const restoredURL = new URL(page.url())
+  expect(restoredURL.searchParams.get("q")).toBe("ORDER BY repository ASC")
+  expect(restoredURL.searchParams.get("scope")).toBe("current")
+
+  const generationRequest = requests.find((request) =>
+    request.path.endsWith("/issues/generations"),
+  )
+  expect(generationRequest?.body).toMatchObject({
+    finding_ids: [repositoryReviewFindingOneID],
+    instructions_mode: "default",
+  })
+  const publicationRequest = requests.find((request) =>
+    request.path.endsWith("/issues/publish"),
+  )
+  expect(publicationRequest?.body).toMatchObject({
+    confirmed: true,
+    issues: [{ id: repositoryReviewIssueOneID, expected_version: 3 }],
+  })
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("repository review candidate linking requires explicit confirmation", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<
+    MockLauncherApiOptions["repositoryReviewRequests"]
+  > = []
+  await gotoMockedRoute(
+    page,
+    `/repository-reviews/${repositoryReviewAutomationID}/findings/${repositoryReviewFindingThreeID}/link-issue`,
+    { repositoryReviewRequests: requests },
+  )
+
+  await page
+    .getByRole("button", { name: "Ask AI to find existing issues" })
+    .click()
+  await expect(
+    page.getByRole("heading", {
+      name: "#184 Worker retries cancellation immediately",
+    }),
+  ).toBeVisible()
+  await page
+    .getByRole("heading", {
+      name: "#184 Worker retries cancellation immediately",
+    })
+    .locator("xpath=ancestor::article")
+    .getByRole("button", { name: "Select" })
+    .click()
+
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Link this existing issue?",
+  })
+  await expect(confirmation).toBeVisible()
+  expect(requests.some((request) => request.path.endsWith("/issue-link"))).toBe(
+    false,
+  )
+  await confirmation.getByRole("button", { name: "Cancel" }).click()
+  await expect(confirmation).toBeHidden()
+
+  await page
+    .getByRole("heading", {
+      name: "#184 Worker retries cancellation immediately",
+    })
+    .locator("xpath=ancestor::article")
+    .getByRole("button", { name: "Select" })
+    .click()
+  await confirmation.getByRole("button", { name: "Link issue" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/issues/rrid_linked_184`,
+    ),
+  )
+  await expect(
+    page.getByRole("link", { name: "Open GitHub issue" }),
+  ).toHaveAttribute("href", "https://github.com/octo/repo/issues/184")
+  const linkRequest = requests.find((request) =>
+    request.path.endsWith("/issue-link"),
+  )
+  expect(linkRequest?.body).toEqual({
+    issue_url: "https://github.com/octo/repo/issues/184",
+    expected_version: 1,
+    confirmed: true,
+  })
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("legacy repository review results redirect to the standard collection", async ({
+  page,
+}) => {
+  await gotoMockedRoute(
+    page,
+    "/repository-reviews/results?q=status+%3D+running&view=grid",
+  )
+  await expect(page).toHaveURL(
+    /\/repository-reviews\?q=status(?:\+|%20)%3D(?:\+|%20)running&view=grid$/,
+  )
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+})
 
 test("sidebar navigation survives collection query canonicalization", async ({
   page,
@@ -4147,34 +5186,53 @@ test("review profile guard autocompletes fields and keeps reference behind help"
     },
   })
   await page.getByRole("button", { name: "New profile" }).click()
-  const dialog = page.getByRole("dialog", { name: "New review profile" })
-  const account = dialog.getByRole("combobox", { name: "Execution account" })
-  const model = dialog.getByRole("combobox", { name: "Reviewer model" })
+  await expect(page).toHaveURL(/\/repository-reviews\/profiles\/new(?:\?|$)/)
+  const editor = page.locator('[data-slot="collection-detail-shell"]')
+  await expect(
+    editor.getByRole("heading", { name: "New review profile" }),
+  ).toBeVisible()
+  const account = editor.getByRole("combobox", {
+    name: "Execution account",
+  })
+  const model = editor.getByRole("combobox", { name: "Reviewer model" })
+  const writer = editor.getByRole("combobox", {
+    name: "Issue writer model",
+  })
   await expect(account).toBeVisible()
   await expect(model).toHaveValue("safe-a")
+  await expect(writer).toHaveValue("")
   await expect(
-    dialog.getByRole("option", {
+    writer.getByRole("option", { name: "Same as reviewer (safe-a)" }),
+  ).toHaveCount(1)
+  await expect(
+    model.getByRole("option", {
       name: "blocked (Reviewer route is blocked by policy.)",
     }),
   ).toBeDisabled()
   await account.selectOption("backup")
   await expect(model).toHaveValue("safe-a")
   await model.selectOption("safe-b")
+  await writer.selectOption("safe-b")
+  await expect(writer).toHaveValue("safe-b")
   await account.selectOption("")
   await expect(model).toHaveValue("safe-a")
-  await dialog.getByRole("button", { name: /^Advanced/ }).click()
+  await expect(writer).toHaveValue("")
+  await expect(
+    writer.getByRole("option", { name: "Same as reviewer (safe-a)" }),
+  ).toHaveCount(1)
+  await editor.getByRole("button", { name: /^Advanced/ }).click()
 
-  await expect(dialog.getByText("Guard expression reference")).toHaveCount(0)
-  await dialog.getByRole("button", { name: "Guard expression help" }).click()
+  await expect(editor.getByText("Guard expression reference")).toHaveCount(0)
+  await editor.getByRole("button", { name: "Guard expression help" }).click()
   await expect(page.getByText("Guard expression reference")).toBeVisible()
   await page.keyboard.press("Escape")
 
-  const guard = dialog.getByRole("combobox", { name: "Guard expression" })
+  const guard = editor.getByRole("combobox", { name: "Guard expression" })
   await guard.fill("spent.tok")
   await expect(
-    dialog.getByRole("listbox", { name: "Guard expression suggestions" }),
+    editor.getByRole("listbox", { name: "Guard expression suggestions" }),
   ).toBeVisible()
-  await dialog
+  await editor
     .getByRole("option", { name: "spent.tokens.total number field" })
     .click()
   await expect(guard).toHaveValue("spent.tokens.total ")

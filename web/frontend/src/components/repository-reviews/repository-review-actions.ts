@@ -1,6 +1,6 @@
 import type {
   RepositoryReviewFinding,
-  RepositoryReviewIssueDraft,
+  RepositoryReviewFindingContext,
   RepositoryReviewState,
 } from "@/api/repository-reviews"
 
@@ -23,10 +23,12 @@ function boundedDiscussionCheck(value: string): string {
     : `${new TextDecoder().decode(encoded.slice(0, discussionCheckBytes))}…`
 }
 
-export function discussionPrompt(
-  repository: RepositoryReviewState,
-  findings: RepositoryReviewFinding[],
-): string {
+export function discussionPrompt<
+  T extends Pick<
+    RepositoryReviewState,
+    "id" | "repository" | "last_commit_sha"
+  > & { contexts: RepositoryReviewFindingContext[] },
+>(repository: T, findings: RepositoryReviewFinding[]): string {
   const contextByID = new Map(
     repository.contexts.map((context) => [context.id, context]),
   )
@@ -91,21 +93,6 @@ export function discussionPrompt(
     }
   }
   return lines.join("\n")
-}
-
-export function githubNewIssueURL(
-  repository: string,
-  draft: Pick<RepositoryReviewIssueDraft, "title" | "body" | "labels">,
-): string | undefined {
-  const path = githubRepositoryPath(repository)
-  if (!path) return undefined
-  const url = new URL(`https://github.com/${path}/issues/new`)
-  url.searchParams.set("title", draft.title)
-  url.searchParams.set("body", draft.body)
-  if (draft.labels && draft.labels.length > 0) {
-    url.searchParams.set("labels", draft.labels.join(","))
-  }
-  return url.toString()
 }
 
 export function githubRepositoryPath(repository: string): string | undefined {

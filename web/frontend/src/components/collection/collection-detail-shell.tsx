@@ -1,5 +1,5 @@
 import { IconArrowLeft, IconLoader2, IconRefresh } from "@tabler/icons-react"
-import type { ReactNode } from "react"
+import type { ReactNode, RefCallback, UIEventHandler } from "react"
 
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
@@ -18,6 +18,8 @@ export function CollectionDetailShell({
   onRetry,
   backLabel = "Back to collection",
   contentClassName,
+  contentRef,
+  onContentScroll,
 }: {
   title: string
   identity?: ReactNode
@@ -31,6 +33,8 @@ export function CollectionDetailShell({
   onRetry?: () => void
   backLabel?: string
   contentClassName?: string
+  contentRef?: RefCallback<HTMLDivElement>
+  onContentScroll?: UIEventHandler<HTMLDivElement>
 }) {
   return (
     <div
@@ -49,7 +53,11 @@ export function CollectionDetailShell({
           <div className="ml-auto flex items-center gap-2">{status}</div>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6">
+      <div
+        ref={contentRef}
+        onScroll={onContentScroll}
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6"
+      >
         <div className={cn("mx-auto w-full max-w-5xl", contentClassName)}>
           {loading ? (
             <CollectionDetailState

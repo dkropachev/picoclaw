@@ -7,14 +7,22 @@ import {
   createRepositoryReviewIssueDraft,
   createRepositoryReviewProfile,
   deleteRepositoryReviewAutomation,
+  deleteRepositoryReviewAutomationIssue,
   deleteRepositoryReviewProfile,
+  generateRepositoryReviewIssues,
   getRepositoryReview,
+  getRepositoryReviewAutomation,
+  getRepositoryReviewAutomationFinding,
+  getRepositoryReviewAutomationIssue,
   getRepositoryReviewAutomationOptions,
+  getRepositoryReviewAutomationReport,
   getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
+  listRepositoryReviewAutomationIssues,
   listRepositoryReviewAutomations,
   listRepositoryReviewAutomationsPage,
   listRepositoryReviewProfiles,
+  listRepositoryReviewProfilesPage,
   listRepositoryReviews,
   pauseRepositoryReviewAutomation,
   publishRepositoryReviewIssueDraft,
@@ -22,6 +30,7 @@ import {
   resumeRepositoryReviewAutomation,
   startRepositoryReviewAutomation,
   updateRepositoryReviewAutomation,
+  updateRepositoryReviewAutomationIssue,
   updateRepositoryReviewFinding,
   updateRepositoryReviewIssueDraft,
   updateRepositoryReviewProfile,
@@ -379,6 +388,48 @@ describe("repository review API", () => {
     )
   })
 
+  it("loads a canonical paged review-profile collection", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        profiles: [
+          {
+            id: "rrpf_one",
+            name: "Core review",
+            reviewer_model: "reviewer",
+            issue_writer_model: null,
+          },
+        ],
+        total: 1,
+        next_cursor: "cursor-2",
+        canonical_query: "ORDER BY name ASC",
+        query_schema: { fields: [] },
+      }),
+    )
+
+    await expect(
+      listRepositoryReviewProfilesPage({
+        query: "ORDER BY name ASC",
+        cursor: "cursor-1",
+        limit: 25,
+      }),
+    ).resolves.toMatchObject({
+      profiles: [
+        {
+          id: "rrpf_one",
+          issue_writer_model: "",
+          max_parallel_children: 8,
+        },
+      ],
+      total: 1,
+      next_cursor: "cursor-2",
+      canonical_query: "ORDER BY name ASC",
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/repository-reviews/profiles?query=ORDER+BY+name+ASC&cursor=cursor-1&limit=25",
+      { signal: undefined },
+    )
+  })
+
   it("sends strict profile CRUD envelopes and normalizes wrappers", async () => {
     const config: RepositoryReviewProfileConfig = {
       name: "Core bugs",
@@ -717,6 +768,149 @@ describe("repository review API", () => {
     expect(mockedLauncherFetch).toHaveBeenCalledWith(
       "/api/repository-reviews/automations?query=status+%3D+paused+ORDER+BY+repository+ASC&cursor=cursor&limit=50",
       { signal: undefined },
+    )
+  })
+
+  it("uses automation-owned routed detail and report endpoints", async () => {
+    const automation = {
+      id: "auto/slash",
+      repository: "owner/repo",
+      reviewer_models: ["reviewer"],
+      issue_writer_model: "writer",
+      progress: { findings: 1 },
+    }
+    const finding = {
+      id: "finding/slash",
+      context_ids: null,
+      models: null,
+      observations: null,
+      validation: { status: "confirmed", summary: "Confirmed", checks: null },
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse({ automation }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          findings: [finding],
+          contexts: [],
+          scope: "all",
+          offset: 50,
+          total: 51,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ automation, finding, contexts: [], capabilities: {} }),
+      )
+
+    await expect(
+      getRepositoryReviewAutomation("auto/slash"),
+    ).resolves.toMatchObject({
+      id: "auto/slash",
+      issue_writer_model: "writer",
+    })
+    await expect(
+      getRepositoryReviewAutomationReport("auto/slash", {
+        scope: "all",
+        offset: 50,
+        limit: 50,
+      }),
+    ).resolves.toMatchObject({ scope: "all", offset: 50, total: 51 })
+    await expect(
+      getRepositoryReviewAutomationFinding("auto/slash", "finding/slash"),
+    ).resolves.toMatchObject({
+      finding: { id: "finding/slash", context_ids: [] },
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations/auto%2Fslash",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto%2Fslash/report?scope=all&offset=50&limit=50",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/repository-reviews/automations/auto%2Fslash/findings/finding%2Fslash",
+      { signal: undefined },
+    )
+  })
+
+  it("uses durable automation-owned issue endpoints and strict mutation bodies", async () => {
+    const automation = { id: "auto", repository: "owner/repo" }
+    const issue = {
+      id: "draft/slash",
+      finding_ids: ["finding"],
+      state: "editing",
+      labels: null,
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ automation, issues: [issue], offset: 0, total: 1 }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ automation, issue }))
+      .mockResolvedValueOnce(jsonResponse({ automation, issue }))
+      .mockResolvedValueOnce(
+        jsonResponse({ generation_id: "rrig_1", issues: [issue], results: [] }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          results: [{ draft_id: "draft/slash", outcome: "deleted" }],
+        }),
+      )
+
+    await listRepositoryReviewAutomationIssues("auto", {
+      generation_id: "rrig_1",
+      limit: 200,
+    })
+    await getRepositoryReviewAutomationIssue("auto", "draft/slash")
+    await updateRepositoryReviewAutomationIssue("auto", "draft/slash", {
+      title: "Title",
+      body: "Body",
+      labels: ["bug"],
+      expected_version: 2,
+    })
+    await generateRepositoryReviewIssues("auto", {
+      generation_id: "rrig_1",
+      finding_ids: ["finding"],
+      instructions_mode: "default",
+    })
+    await deleteRepositoryReviewAutomationIssue("auto", "draft/slash", {
+      expected_version: 3,
+      confirmed: true,
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/repository-reviews/automations/auto/issues?generation_id=rrig_1&limit=200",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/repository-reviews/automations/auto/issues/draft%2Fslash",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          title: "Title",
+          body: "Body",
+          labels: ["bug"],
+          expected_version: 2,
+        }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/repository-reviews/automations/auto/issues/generations",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          generation_id: "rrig_1",
+          finding_ids: ["finding"],
+          instructions_mode: "default",
+        }),
+      }),
     )
   })
 })

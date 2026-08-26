@@ -1556,7 +1556,10 @@ func TestRepositoryReviewPublicMutationsRejectUnsafeStore(t *testing.T) {
 			return err
 		},
 		func() error {
-			_, _, err := unsafe.PrepareIssue(IssueDraftRequest{Repository: state.Repository})
+			_, _, err := unsafe.PrepareIssue(IssueDraftRequest{
+				Repository: state.Repository,
+				FindingIDs: []string{"finding"},
+			})
 			return err
 		},
 		func() error {
@@ -1569,6 +1572,42 @@ func TestRepositoryReviewPublicMutationsRejectUnsafeStore(t *testing.T) {
 		},
 		func() error {
 			_, _, _, err := unsafe.ClaimIssueDraftPublication(state.Repository, "draft", 1)
+			return err
+		},
+		func() error {
+			_, _, err := unsafe.SetFindingStatusByVersion(
+				state.Repository, "finding", FindingOpen, 1,
+			)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(state.Repository, "finding", "generation")
+			_, _, _, err := unsafe.ReserveIssueGeneration(request)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(state.Repository, "finding", "generation")
+			request.ExpectedDraftVersion = 1
+			_, _, _, err := unsafe.BeginIssueRegeneration(state.Repository, "draft", request)
+			return err
+		},
+		func() error {
+			_, _, err := unsafe.CompleteIssueGeneration(
+				state.Repository, "draft", "generation", "title", "body", nil, "",
+			)
+			return err
+		},
+		func() error { _, err := unsafe.DeleteIssueDraft(state.Repository, "draft", 1); return err },
+		func() error {
+			_, _, err := unsafe.LinkExistingIssue(ExistingIssueLink{
+				Repository: state.Repository, FindingID: "finding", ExpectedFindingVersion: 1,
+				ExternalID: "1", ExternalURL: "https://github.com/owner/repo/issues/1",
+				Title: "title", Confirmed: true,
+			})
+			return err
+		},
+		func() error {
+			_, err := unsafe.UnlinkExistingIssue(state.Repository, "finding", 1, true)
 			return err
 		},
 	}
@@ -1845,6 +1884,37 @@ func TestRepositoryReviewCorruptStatePropagatesAcrossMutations(t *testing.T) {
 			return err
 		},
 		func() error { _, _, _, err := store.ClaimIssueDraftPublication(repository, "draft", 1); return err },
+		func() error {
+			_, _, err := store.SetFindingStatusByVersion(repository, "finding", FindingOpen, 1)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(repository, "finding", "generation")
+			_, _, _, err := store.ReserveIssueGeneration(request)
+			return err
+		},
+		func() error {
+			request := testIssueGenerationRequest(repository, "finding", "generation")
+			request.ExpectedDraftVersion = 1
+			_, _, _, err := store.BeginIssueRegeneration(repository, "draft", request)
+			return err
+		},
+		func() error {
+			_, _, err := store.CompleteIssueGeneration(
+				repository, "draft", "generation", "title", "body", nil, "",
+			)
+			return err
+		},
+		func() error { _, err := store.DeleteIssueDraft(repository, "draft", 1); return err },
+		func() error {
+			_, _, err := store.LinkExistingIssue(ExistingIssueLink{
+				Repository: repository, FindingID: "finding", ExpectedFindingVersion: 1,
+				ExternalID: "1", ExternalURL: "https://github.com/owner/repo/issues/1",
+				Title: "title", Confirmed: true,
+			})
+			return err
+		},
+		func() error { _, err := store.UnlinkExistingIssue(repository, "finding", 1, true); return err },
 	}
 	for index, call := range calls {
 		if err := call(); err == nil {
@@ -2277,6 +2347,11 @@ func TestRepositoryReviewMutationsReportPersistenceFailures(t *testing.T) {
 
 	t.Run("finding status", func(t *testing.T) {
 		store, state := newState(t)
+		state.Findings[0].IssueDraftID = ""
+		state.IssueDrafts = nil
+		if saveErr := store.save(&state); saveErr != nil {
+			t.Fatal(saveErr)
+		}
 		poisonRepositoryReviewStoreOnClock(t, &store)
 		if _, mutationErr := store.SetFindingStatus(
 			state.Repository,
@@ -2408,4 +2483,106 @@ func TestRepositoryReviewLoadNormalizesExplicitNullMaps(t *testing.T) {
 		loaded.ReviewAttemptIdentities == nil {
 		t.Fatalf("normalized state=%#v err=%v", loaded, loadErr)
 	}
+}
+
+func TestRepositoryReviewRemainingPersistenceAndAssociationBoundaries(t *testing.T) {
+	t.Run("noncanonical publication", func(t *testing.T) {
+		store, state := repositoryReviewCoverageStore(t, "owner/noncanonical")
+		now := repositoryAuditTestNow
+		state.Findings = []Finding{{
+			ID: "finding", Repository: state.Repository, Status: FindingOpen,
+			IssueDraftID: "canonical", Version: 1, CreatedAt: now, UpdatedAt: now,
+		}}
+		state.IssueDrafts = []IssueDraft{
+			{
+				ID: "canonical", Repository: state.Repository, FindingIDs: []string{"finding"},
+				Title: "canonical", Body: "canonical", Origin: IssueDraftOriginLegacy,
+				State: IssueDraftEditing, Canonical: true, Version: 1, CreatedAt: now, UpdatedAt: now,
+			},
+			{
+				ID: "legacy-conflict", Repository: state.Repository, FindingIDs: []string{"finding"},
+				Title: "legacy", Body: "legacy", Origin: IssueDraftOriginLegacy,
+				State: IssueDraftEditing, Version: 1, CreatedAt: now, UpdatedAt: now,
+			},
+		}
+		if saveErr := store.save(&state); saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		if _, statusErr := store.SetFindingStatus(
+			state.Repository, "finding", FindingDismissed, state.Version,
+		); !errors.Is(statusErr, ErrConflict) {
+			t.Fatalf("associated finding status error = %v", statusErr)
+		}
+		if _, _, publicationErr := store.SetIssueDraftPublication(
+			state.Repository, "legacy-conflict", 1, IssueDraftUnknown, "", "",
+		); !errors.Is(publicationErr, ErrConflict) {
+			t.Fatalf("noncanonical publication error = %v", publicationErr)
+		}
+		if _, _, _, claimErr := store.ClaimIssueDraftPublication(
+			state.Repository, "legacy-conflict", 1,
+		); !errors.Is(claimErr, ErrConflict) {
+			t.Fatalf("noncanonical claim error = %v", claimErr)
+		}
+	})
+
+	t.Run("legacy rewrite failure", func(t *testing.T) {
+		store := NewStore(t.TempDir())
+		state := repositoryReviewCoverageState("owner/legacy-rewrite")
+		now := repositoryAuditTestNow
+		state.Findings = []Finding{{
+			ID: "finding", Repository: state.Repository, Status: FindingOpen,
+			Version: 1, CreatedAt: now, UpdatedAt: now,
+		}}
+		state.IssueDrafts = []IssueDraft{{
+			ID: "legacy", Repository: state.Repository, FindingIDs: []string{"finding"},
+			Title: "legacy", Body: "legacy", State: IssueDraftEditing,
+			Version: 1, CreatedAt: now, UpdatedAt: now,
+		}}
+		data, marshalErr := json.Marshal(state)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if mkdirErr := os.MkdirAll(store.root, 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		statePath := store.path(state.Repository)
+		if writeErr := os.WriteFile(statePath, data, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		summaryPath := strings.TrimSuffix(statePath, ".json") + ".summary.json"
+		if mkdirErr := os.Mkdir(summaryPath, 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(summaryPath, "keep"), []byte("keep"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if _, loadErr := store.load(state.Repository); loadErr == nil {
+			t.Fatal("legacy rewrite ignored an unremovable summary projection")
+		}
+	})
+
+	t.Run("state size limit", func(t *testing.T) {
+		store := NewStore(t.TempDir())
+		state := repositoryReviewCoverageState("owner/oversized")
+		state.Findings = []Finding{{
+			ID: "finding", Repository: state.Repository, Status: FindingOpen,
+			Evidence: strings.Repeat("x", int(maxStateFileBytes)),
+		}}
+		if saveErr := store.save(&state); saveErr == nil ||
+			!strings.Contains(saveErr.Error(), "exceeds its size limit") {
+			t.Fatalf("oversized state error = %v", saveErr)
+		}
+	})
+
+	t.Run("finding selection cardinality", func(t *testing.T) {
+		findings := []Finding{{ID: "finding"}}
+		if _, _, selectionErr := selectedFindings(findings, nil); selectionErr == nil {
+			t.Fatal("empty finding selection was accepted")
+		}
+		if _, _, selectionErr := selectedFindings(
+			findings, []string{"finding", "finding"},
+		); selectionErr == nil || !strings.Contains(selectionErr.Error(), "duplicate") {
+			t.Fatalf("duplicate finding selection error = %v", selectionErr)
+		}
+	})
 }

@@ -5,10 +5,16 @@ import {
   IconRefresh,
   IconTrash,
 } from "@tabler/icons-react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
+import { useEffect, useMemo, useState } from "react"
 
 import {
+  RepositoryReviewAPIError,
   type RepositoryReviewCodeType,
   type RepositoryReviewProfile,
   type RepositoryReviewProfileConfig,
@@ -17,11 +23,22 @@ import {
   createRepositoryReviewProfile,
   deleteRepositoryReviewProfile,
   getRepositoryReviewAutomationOptions,
-  listRepositoryReviewProfiles,
+  getRepositoryReviewProfile,
+  listRepositoryReviewProfilesPage,
   updateRepositoryReviewProfile,
 } from "@/api/repository-reviews"
-import { PageHeader } from "@/components/page-header"
+import {
+  type CollectionDefinition,
+  CollectionDetailShell,
+  CollectionResults,
+  CollectionShell,
+  CollectionToolbar,
+} from "@/components/collection"
 import { RepositoryReviewGuardExpressionEditor } from "@/components/repository-reviews/repository-review-guard-expression-editor"
+import {
+  repositoryReviewProfileDefaultQuery,
+  repositoryReviewProfileViews,
+} from "@/components/repository-reviews/repository-review-profile-route-state"
 import { ReviewAdvancedSection } from "@/components/repository-reviews/review-advanced-section"
 import {
   AlertDialog,
@@ -36,23 +53,13 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  type CollectionRouteSearch,
+  useCollectionRouteState,
+} from "@/hooks/use-collection-route-state"
 
 const profilesKey = ["repository-review-profiles"] as const
 const optionsKey = ["repository-review-automation-options"] as const
@@ -77,6 +84,7 @@ const emptyProfile: RepositoryReviewProfileConfig = {
   name: "",
   account_ref: "",
   reviewer_model: "",
+  issue_writer_model: "",
   review_focus: "Find correctness, security, and reliability bugs.",
   force: false,
   auto_continue: true,
@@ -94,328 +102,448 @@ const emptyProfile: RepositoryReviewProfileConfig = {
   },
 }
 
-export function RepositoryReviewProfilesPage() {
+export function RepositoryReviewProfilesPage({
+  search,
+  onSearchChange,
+  onAdd,
+  onOpen,
+  onEdit,
+}: {
+  search: { q?: string; view?: "list" | "table" | "grid" }
+  onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
+  onAdd: () => void
+  onOpen: (profile: RepositoryReviewProfile) => void
+  onEdit: (profile: RepositoryReviewProfile) => void
+}) {
+  const routeState = useCollectionRouteState({
+    collectionKey: "repository-review-profiles",
+    defaultQuery: repositoryReviewProfileDefaultQuery,
+    supportedViews: repositoryReviewProfileViews,
+    defaultView: "list",
+    search,
+    onSearchChange,
+  })
+  const query = useInfiniteQuery({
+    queryKey: [...profilesKey, routeState.query],
+    initialPageParam: "",
+    queryFn: ({ pageParam, signal }) =>
+      listRepositoryReviewProfilesPage(
+        {
+          query: routeState.query,
+          cursor: pageParam || undefined,
+          limit: 50,
+        },
+        signal,
+      ),
+    getNextPageParam: (page) => page.next_cursor || undefined,
+    retry: false,
+  })
+  const profiles = useMemo(
+    () => query.data?.pages.flatMap((page) => page.profiles) ?? [],
+    [query.data?.pages],
+  )
+  const firstPage = query.data?.pages[0]
+  const commitQuerySuccess = routeState.commitQuerySuccess
+  useEffect(() => {
+    if (firstPage?.canonical_query) {
+      commitQuerySuccess(firstPage.canonical_query)
+    }
+  }, [commitQuerySuccess, firstPage?.canonical_query])
+  const definition = useMemo<CollectionDefinition<RepositoryReviewProfile>>(
+    () => ({
+      key: "repository-review-profiles",
+      title: "Review profiles",
+      defaultQuery: repositoryReviewProfileDefaultQuery,
+      supportedViews: repositoryReviewProfileViews,
+      defaultView: "list",
+      getItemID: (profile) => profile.id,
+      getItemLabel: (profile) => profile.name,
+      getItemIdentity: (profile) => ({
+        title: profile.name,
+        description: profile.reviewer_model,
+        metadata: profile.review_focus,
+      }),
+      columns: [
+        {
+          id: "account",
+          header: "Account",
+          cell: (profile) => profile.account_ref || "Default",
+        },
+        {
+          id: "writer",
+          header: "Issue writer",
+          cell: profileWriterLabel,
+        },
+        {
+          id: "parallel",
+          header: "Workers",
+          cell: (profile) => profile.max_parallel_children,
+          className: "w-24 tabular-nums",
+        },
+        {
+          id: "updated",
+          header: "Updated",
+          cell: (profile) => formatTimestamp(profile.updated_at),
+          className: "w-44",
+        },
+      ],
+      gridFacts: [
+        {
+          id: "account",
+          label: "Account",
+          value: (profile) => profile.account_ref || "Default",
+        },
+        {
+          id: "writer",
+          label: "Issue writer",
+          value: profileWriterLabel,
+        },
+        {
+          id: "files",
+          label: "Files per batch",
+          value: (profile) => profile.max_files_per_run,
+        },
+        {
+          id: "parallel",
+          label: "Workers",
+          value: (profile) => profile.max_parallel_children,
+        },
+      ],
+      badges: [
+        {
+          id: "version",
+          label: (profile) => `v${profile.version}`,
+          variant: "secondary",
+        },
+        {
+          id: "force",
+          label: (profile) => (profile.force ? "force" : null),
+          variant: "outline",
+        },
+      ],
+      actions: [
+        {
+          id: "edit",
+          label: "Edit profile",
+          icon: <IconEdit />,
+          onSelect: onEdit,
+        },
+      ],
+    }),
+    [onEdit],
+  )
+  return (
+    <CollectionShell
+      title="Review profiles"
+      total={firstPage?.total}
+      resultsRef={routeState.setScrollContainerRef}
+      onResultsScroll={routeState.onResultsScroll}
+      actions={
+        <>
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="outline"
+            disabled={query.isFetching}
+            aria-label="Refresh review profiles"
+            title="Refresh"
+            onClick={() => void query.refetch()}
+          >
+            <IconRefresh />
+          </Button>
+          <Button type="button" size="sm" onClick={onAdd}>
+            <IconPlus /> New profile
+          </Button>
+        </>
+      }
+      toolbar={
+        <CollectionToolbar
+          activeQuery={routeState.query}
+          defaultQuery={repositoryReviewProfileDefaultQuery}
+          schema={firstPage?.query_schema}
+          queryError={collectionQueryError(query.error)}
+          onApplyQuery={routeState.applyQuery}
+          view={routeState.view}
+          supportedViews={routeState.supportedViews}
+          recentQueries={routeState.recentQueries}
+          onClearHistory={routeState.clearHistory}
+          onViewChange={routeState.setView}
+        />
+      }
+    >
+      <CollectionResults
+        definition={definition}
+        items={profiles}
+        view={routeState.view}
+        loading={query.isLoading}
+        error={errorMessage(query.error) || undefined}
+        onRetry={() => void query.refetch()}
+        onOpenItem={onOpen}
+        hasNextPage={query.hasNextPage}
+        loadingMore={query.isFetchingNextPage}
+        onLoadMore={() => void query.fetchNextPage()}
+        emptyTitle="No review profiles"
+        emptyDescription="Create a reusable review policy before assigning a repository."
+      />
+    </CollectionShell>
+  )
+}
+
+export function RepositoryReviewProfileDetailPage({
+  profileID,
+  onBack,
+  onEdit,
+  onDeleted,
+}: {
+  profileID: string
+  onBack: () => void
+  onEdit: () => void
+  onDeleted: () => void
+}) {
   const queryClient = useQueryClient()
-  const [editor, setEditor] = useState<ProfileEditor | null>(null)
   const [actionError, setActionError] = useState("")
-  const profilesQuery = useQuery({
-    queryKey: profilesKey,
-    queryFn: ({ signal }) => listRepositoryReviewProfiles(signal),
+  const query = useQuery({
+    queryKey: [...profilesKey, "detail", profileID],
+    queryFn: ({ signal }) => getRepositoryReviewProfile(profileID, signal),
+    retry: false,
   })
   const optionsQuery = useQuery({
     queryKey: optionsKey,
     queryFn: ({ signal }) => getRepositoryReviewAutomationOptions(signal),
+    retry: false,
   })
-  const profiles = profilesQuery.data?.profiles ?? []
-  const options = optionsQuery.data ?? { models: [], accounts: [] }
-  const optionsUsable = optionsQuery.isSuccess && !optionsQuery.isFetching
-
-  const saveMutation = useMutation({
-    mutationFn: ({
-      profile,
-      value,
-      includeFolders,
-      excludeFolders,
-    }: ProfileEditor) => {
-      const config: RepositoryReviewProfileConfig = {
-        ...value,
-        name: value.name.trim(),
-        review_focus: value.review_focus.trim(),
-        scope_policy: {
-          ...value.scope_policy,
-          include_folders: lines(includeFolders),
-          exclude_folders: lines(excludeFolders),
-          free_text: value.scope_policy.free_text.trim(),
-        },
-        budget: {
-          guard_expression: value.budget.guard_expression.trim(),
-        },
+  const profile = query.data
+  const notFound =
+    query.error instanceof RepositoryReviewAPIError &&
+    query.error.status === 404
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      if (!profile) throw new Error("Review profile is unavailable.")
+      return deleteRepositoryReviewProfile(profile.id, {
+        expected_version: profile.version,
+      })
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: profilesKey })
+      onDeleted()
+    },
+    onError: (error) => setActionError(errorMessage(error)),
+  })
+  const accounts = optionsQuery.data?.accounts ?? []
+  return (
+    <CollectionDetailShell
+      title={profile?.name || "Review profile"}
+      identity={
+        profile ? (
+          <span className="font-mono text-xs">{profile.id}</span>
+        ) : undefined
       }
-      return profile
-        ? updateRepositoryReviewProfile(profile.id, {
+      status={
+        profile ? (
+          <Badge variant="secondary">v{profile.version}</Badge>
+        ) : undefined
+      }
+      actions={
+        profile ? (
+          <>
+            <Button type="button" size="sm" variant="outline" onClick={onEdit}>
+              <IconEdit /> Edit
+            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={deleteMutation.isPending}
+                >
+                  <IconTrash /> Delete
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete {profile.name}?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Assigned profiles cannot be deleted. Reassign any
+                    repositories first.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => deleteMutation.mutate()}>
+                    Delete profile
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </>
+        ) : undefined
+      }
+      loading={query.isLoading}
+      error={!notFound ? query.error?.message : undefined}
+      notFound={notFound}
+      onBack={onBack}
+      onRetry={() => void query.refetch()}
+      backLabel="All review profiles"
+    >
+      {profile && (
+        <div className="space-y-6">
+          {actionError && <InlineError message={actionError} />}
+          <ProfileDetailRows
+            rows={[
+              [
+                "Execution account",
+                profileAccountLabel(profile.account_ref, accounts),
+              ],
+              ["Reviewer", profile.reviewer_model],
+              ["Issue writer", profileWriterLabel(profile)],
+              ["Files per batch", String(profile.max_files_per_run)],
+              ["Content bytes", String(profile.max_content_bytes)],
+              ["Parallel workers", String(profile.max_parallel_children)],
+              ["Auto continue", profile.auto_continue ? "Yes" : "No"],
+              ["Force unchanged files", profile.force ? "Yes" : "No"],
+              ["Updated", formatTimestamp(profile.updated_at)],
+            ]}
+          />
+          <ProfileSection title="Review focus">
+            <p className="text-sm whitespace-pre-wrap">
+              {profile.review_focus}
+            </p>
+          </ProfileSection>
+          <ProfileSection title="Scope">
+            <ProfileDetailRows
+              rows={[
+                ["Code types", profile.scope_policy.code_types.join(", ")],
+                [
+                  "Included folders",
+                  profile.scope_policy.include_folders.join(", ") ||
+                    "All matching folders",
+                ],
+                [
+                  "Excluded folders",
+                  profile.scope_policy.exclude_folders.join(", ") || "None",
+                ],
+                ["Guidance", profile.scope_policy.free_text || "None"],
+              ]}
+            />
+          </ProfileSection>
+          <ProfileSection title="Task admission">
+            <p className="font-mono text-sm whitespace-pre-wrap">
+              {profile.budget.guard_expression || "No guard expression"}
+            </p>
+          </ProfileSection>
+        </div>
+      )}
+    </CollectionDetailShell>
+  )
+}
+
+export function RepositoryReviewProfileEditorPage({
+  profileID,
+  onBack,
+  onSaved,
+}: {
+  profileID?: string
+  onBack: () => void
+  onSaved: (profile: RepositoryReviewProfile) => void
+}) {
+  const queryClient = useQueryClient()
+  const [editor, setEditor] = useState<ProfileEditor | null>(null)
+  const [actionError, setActionError] = useState("")
+  const profileQuery = useQuery({
+    queryKey: [...profilesKey, "detail", profileID],
+    queryFn: ({ signal }) =>
+      getRepositoryReviewProfile(profileID || "", signal),
+    enabled: Boolean(profileID),
+    retry: false,
+  })
+  const optionsQuery = useQuery({
+    queryKey: optionsKey,
+    queryFn: ({ signal }) => getRepositoryReviewAutomationOptions(signal),
+    retry: false,
+  })
+  useEffect(() => {
+    if (editor || !optionsQuery.data) return
+    if (profileID) {
+      if (!profileQuery.data) return
+      setEditor(profileEditor(profileQuery.data))
+      return
+    }
+    setEditor(
+      newProfileEditor(optionsQuery.data.models, optionsQuery.data.accounts),
+    )
+  }, [editor, optionsQuery.data, profileID, profileQuery.data])
+  const saveMutation = useMutation({
+    mutationFn: (current: ProfileEditor) => {
+      const config = profileConfig(current)
+      return current.profile
+        ? updateRepositoryReviewProfile(current.profile.id, {
             ...config,
-            expected_version: profile.version,
+            expected_version: current.profile.version,
           })
         : createRepositoryReviewProfile(config)
     },
-    onSuccess: (saved) => {
-      queryClient.setQueryData<{ profiles: RepositoryReviewProfile[] }>(
-        profilesKey,
-        (current) => ({
-          profiles: current?.profiles.some((item) => item.id === saved.id)
-            ? current.profiles.map((item) =>
-                item.id === saved.id ? saved : item,
-              )
-            : [saved, ...(current?.profiles ?? [])],
-        }),
-      )
-      setEditor(null)
-      setActionError("")
+    onSuccess: async (saved) => {
+      queryClient.setQueryData([...profilesKey, "detail", saved.id], saved)
+      await queryClient.invalidateQueries({ queryKey: profilesKey })
+      onSaved(saved)
     },
-    onError: (error) => {
-      setActionError(errorMessage(error))
-      void profilesQuery.refetch()
-    },
+    onError: (error) => setActionError(errorMessage(error)),
   })
-  const deleteMutation = useMutation({
-    mutationFn: (profile: RepositoryReviewProfile) =>
-      deleteRepositoryReviewProfile(profile.id, {
-        expected_version: profile.version,
-      }),
-    onSuccess: (_result, removed) => {
-      queryClient.setQueryData<{ profiles: RepositoryReviewProfile[] }>(
-        profilesKey,
-        (current) => ({
-          profiles: (current?.profiles ?? []).filter(
-            (item) => item.id !== removed.id,
-          ),
-        }),
-      )
-      setActionError("")
-    },
-    onError: (error) => {
-      setActionError(errorMessage(error))
-      void profilesQuery.refetch()
-    },
-  })
-
-  const openNew = () => {
-    setActionError("")
-    const defaultAccount = options.accounts.find(
-      (account) =>
-        account.default && firstAvailableProfileModel(options.models, account),
-    )
-    const account =
-      defaultAccount ??
-      options.accounts.find((candidate) =>
-        firstAvailableProfileModel(options.models, candidate),
-      )
-    const model = firstAvailableProfileModel(options.models, account)
-    const value = copyProfile(emptyProfile)
-    value.account_ref = account && !account.default ? account.id : ""
-    if (model) {
-      value.reviewer_model = model.alias
-    }
-    setEditor({
-      profile: null,
-      value,
-      includeFolders: "",
-      excludeFolders: "",
-    })
-  }
-  const openEdit = (profile: RepositoryReviewProfile) => {
-    setActionError("")
-    const value = copyProfile(profile)
-    setEditor({
-      profile,
-      value,
-      includeFolders: profile.scope_policy.include_folders.join("\n"),
-      excludeFolders: profile.scope_policy.exclude_folders.join("\n"),
-    })
-  }
-
+  const notFound =
+    profileQuery.error instanceof RepositoryReviewAPIError &&
+    profileQuery.error.status === 404
+  const loading =
+    optionsQuery.isLoading || (Boolean(profileID) && profileQuery.isLoading)
+  const loadError =
+    (!optionsQuery.data ? optionsQuery.error : undefined) ??
+    (!notFound ? profileQuery.error : undefined)
+  const options = optionsQuery.data ?? { models: [], accounts: [] }
+  const optionsUsable = optionsQuery.isSuccess && !optionsQuery.isFetching
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <PageHeader title="Review profiles">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={profilesQuery.isFetching || optionsQuery.isFetching}
-          onClick={() => {
-            void profilesQuery.refetch()
-            void optionsQuery.refetch()
-          }}
-        >
-          <IconRefresh /> Refresh
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          disabled={!optionsUsable}
-          onClick={openNew}
-        >
-          <IconPlus /> New profile
-        </Button>
-      </PageHeader>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 md:px-6">
-        <div className="mx-auto max-w-5xl space-y-4">
+    <CollectionDetailShell
+      title={profileID ? "Edit review profile" : "New review profile"}
+      identity={
+        profileID ? (
+          <span className="font-mono text-xs">{profileID}</span>
+        ) : undefined
+      }
+      loading={loading}
+      error={loadError?.message}
+      notFound={notFound}
+      onBack={onBack}
+      onRetry={() => {
+        void optionsQuery.refetch()
+        if (profileID) void profileQuery.refetch()
+      }}
+      backLabel={profileID ? "Profile details" : "All review profiles"}
+      contentClassName="max-w-3xl"
+    >
+      {editor && (
+        <div className="space-y-5">
           <p className="text-muted-foreground text-sm">
-            Reusable review behavior. Every profile selects one reviewer model;
-            repository assignment happens separately.
+            Account, reviewer, issue writer, focus, and scope are always
+            visible. Sizing and task admission remain under Advanced.
           </p>
-          {actionError && !editor && (
-            <div
-              role="alert"
-              className="text-destructive flex items-center gap-2 text-sm"
-            >
-              <IconAlertTriangle className="size-4" /> {actionError}
-            </div>
+          {actionError && <InlineError message={actionError} />}
+          {optionsQuery.isError && (
+            <InlineError message="Reviewer models and execution accounts could not be refreshed. Refresh before saving." />
           )}
-          {optionsQuery.isError && !editor && (
-            <div
-              role="alert"
-              className="text-destructive flex items-center gap-2 text-sm"
-            >
-              <IconAlertTriangle className="size-4" /> Reviewer models and
-              execution accounts could not be loaded. Refresh to retry.
-            </div>
-          )}
-          {profilesQuery.isPending ? (
-            <Empty text="Loading review profiles…" />
-          ) : profilesQuery.isError ? (
-            <Empty text="Review profiles could not be loaded." />
-          ) : profiles.length === 0 ? (
-            <Empty text="No review profile yet." />
-          ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
-              {profiles.map((profile) => (
-                <Card key={profile.id} size="sm">
-                  <CardHeader>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <CardTitle className="truncate">
-                          {profile.name}
-                        </CardTitle>
-                        <CardDescription className="mt-1 font-mono">
-                          {profile.reviewer_model}
-                        </CardDescription>
-                      </div>
-                      <Badge variant="secondary">v{profile.version}</Badge>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <p className="line-clamp-2 text-sm">
-                      {profile.review_focus}
-                    </p>
-                    <div className="text-muted-foreground grid gap-1 text-xs sm:grid-cols-2">
-                      <span>
-                        Account:{" "}
-                        {profileAccountLabel(
-                          profile.account_ref,
-                          options.accounts,
-                        )}
-                      </span>
-                      <span>
-                        {profile.budget.guard_expression.trim()
-                          ? "Task guard configured"
-                          : "No task guard"}
-                      </span>
-                      <span>{profile.max_files_per_run} files per batch</span>
-                      <span>
-                        {profile.max_parallel_children} parallel workers
-                      </span>
-                    </div>
-                    <div className="flex gap-2 border-t pt-3">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={
-                          !optionsUsable ||
-                          saveMutation.isPending ||
-                          deleteMutation.isPending
-                        }
-                        onClick={() => openEdit(profile)}
-                      >
-                        <IconEdit /> Edit
-                      </Button>
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            disabled={
-                              saveMutation.isPending || deleteMutation.isPending
-                            }
-                          >
-                            <IconTrash /> Delete
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              Delete {profile.name}?
-                            </AlertDialogTitle>
-                            <AlertDialogDescription>
-                              Assigned profiles cannot be deleted. Reassign any
-                              repositories first.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => deleteMutation.mutate(profile)}
-                            >
-                              Delete profile
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
+          <ProfileForm
+            editor={editor}
+            models={options.models}
+            accounts={options.accounts}
+            busy={saveMutation.isPending || !optionsUsable}
+            onChange={(next) => {
+              setActionError("")
+              setEditor(next)
+            }}
+            onCancel={onBack}
+            onSave={() => saveMutation.mutate(editor)}
+          />
         </div>
-      </div>
-
-      <Dialog
-        open={editor !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setEditor(null)
-            setActionError("")
-          }
-        }}
-      >
-        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>
-              {editor?.profile ? "Edit profile" : "New review profile"}
-            </DialogTitle>
-            <DialogDescription>
-              Name, execution account, model, review focus, and scope stay
-              visible. Sizing and guardrails remain under Advanced until needed.
-            </DialogDescription>
-          </DialogHeader>
-          {actionError && (
-            <div
-              role="alert"
-              className="text-destructive flex items-center gap-2 text-sm"
-            >
-              <IconAlertTriangle className="size-4" /> {actionError}
-            </div>
-          )}
-          {optionsQuery.isError && editor && (
-            <div
-              role="alert"
-              className="text-destructive flex items-center gap-2 text-sm"
-            >
-              <IconAlertTriangle className="size-4" /> Reviewer models and
-              execution accounts could not be refreshed. Close this editor and
-              refresh before saving.
-            </div>
-          )}
-          {editor && (
-            <ProfileForm
-              editor={editor}
-              models={options.models}
-              accounts={options.accounts}
-              busy={saveMutation.isPending || !optionsUsable}
-              onChange={(next) => {
-                setActionError("")
-                setEditor(next)
-              }}
-              onCancel={() => setEditor(null)}
-              onSave={() => saveMutation.mutate(editor)}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
-    </div>
+      )}
+    </CollectionDetailShell>
   )
 }
 
@@ -467,6 +595,13 @@ function ProfileForm({
     selectedAccount,
   )
   const availableModel = firstAvailableProfileModel(models, selectedAccount)
+  const selectedWriterModel = value.issue_writer_model
+    ? models.find((model) => model.alias === value.issue_writer_model)
+    : selectedModel
+  const selectedWriterAvailability = profileModelAvailability(
+    selectedWriterModel,
+    selectedAccount,
+  )
   const accountIssue = selectedAccount
     ? selectedAccount.available
       ? ""
@@ -483,11 +618,21 @@ function ProfileForm({
         : !availableModel
           ? `No reviewer models are available on ${selectedAccount.label || selectedAccount.id}.`
           : ""
+  const explicitWriterAvailability = profileWriterModelAvailability(
+    selectedWriterModel,
+    selectedAccount,
+  )
+  const writerIssue = value.issue_writer_model
+    ? explicitWriterAvailability.reason
+    : selectedModelAvailability.reason
   const valid =
     value.name.trim() !== "" &&
     value.reviewer_model !== "" &&
     selectedAccount !== undefined &&
     selectedModelAvailability.available &&
+    (value.issue_writer_model
+      ? explicitWriterAvailability.available
+      : selectedWriterAvailability.available) &&
     value.scope_policy.code_types.length > 0 &&
     value.max_files_per_run >= 1 &&
     value.max_content_bytes >= 1 &&
@@ -533,12 +678,23 @@ function ProfileForm({
                 .available
                 ? value.reviewer_model
                 : (firstAvailableProfileModel(models, account)?.alias ?? "")
+              const writer = value.issue_writer_model
+                ? models.find(
+                    (model) => model.alias === value.issue_writer_model,
+                  )
+                : undefined
+              const issueWriterModel = value.issue_writer_model
+                ? profileWriterModelAvailability(writer, account).available
+                  ? value.issue_writer_model
+                  : ""
+                : ""
               onChange({
                 ...editor,
                 value: {
                   ...value,
                   account_ref: accountRef,
                   reviewer_model: reviewerModel,
+                  issue_writer_model: issueWriterModel,
                 },
               })
             }}
@@ -641,6 +797,65 @@ function ProfileForm({
           )}
         </Field>
       </div>
+      <Field
+        label="Issue writer model"
+        hint="Blank uses the reviewer model. An explicit alias writes previews and ranks existing-issue candidates on the same execution account."
+        hintId="review-issue-writer-help"
+        controlId="review-profile-issue-writer"
+      >
+        <select
+          id="review-profile-issue-writer"
+          aria-label="Issue writer model"
+          aria-describedby={
+            writerIssue
+              ? "review-issue-writer-help review-issue-writer-availability"
+              : "review-issue-writer-help"
+          }
+          aria-invalid={writerIssue ? true : undefined}
+          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+          value={value.issue_writer_model ?? ""}
+          disabled={
+            !selectedAccount?.available || !selectedModelAvailability.available
+          }
+          onChange={(event) =>
+            setValue("issue_writer_model", event.target.value)
+          }
+        >
+          <option value="">
+            Same as reviewer
+            {value.reviewer_model ? ` (${value.reviewer_model})` : ""}
+          </option>
+          {value.issue_writer_model && !selectedWriterModel && (
+            <option value={value.issue_writer_model} disabled>
+              {value.issue_writer_model} (unavailable)
+            </option>
+          )}
+          {models.map((model) => {
+            const availability = profileWriterModelAvailability(
+              model,
+              selectedAccount,
+            )
+            return (
+              <option
+                key={model.alias}
+                value={model.alias}
+                disabled={!availability.available}
+              >
+                {modelOptionLabel(model, availability)}
+              </option>
+            )
+          })}
+        </select>
+        {writerIssue && (
+          <p
+            id="review-issue-writer-availability"
+            role="alert"
+            className="text-destructive text-xs"
+          >
+            {writerIssue}
+          </p>
+        )}
+      </Field>
       <Field
         label="Review focus"
         hint="Narrows defect classes only. Findings diagnose validated defects and never include fixes or remediation."
@@ -847,6 +1062,37 @@ function profileModelAvailability(
   return { available: true, reason: "" }
 }
 
+function profileWriterModelAvailability(
+  model: ReviewModelOption | undefined,
+  account: ReviewAccountOption | undefined,
+): ProfileModelAvailability {
+  if (!model) {
+    return {
+      available: false,
+      reason: "Issue writer model alias is no longer configured.",
+    }
+  }
+  if (!account) {
+    return {
+      available: false,
+      reason: "Choose an available execution account first.",
+    }
+  }
+  if (!account.available) {
+    return {
+      available: false,
+      reason: `Execution account ${account.label || account.id} is unavailable.`,
+    }
+  }
+  if (account.writer_models?.includes(model.alias) !== true) {
+    return {
+      available: false,
+      reason: `Issue writer model is unavailable on ${account.label || account.id}.`,
+    }
+  }
+  return { available: true, reason: "" }
+}
+
 function modelOptionLabel(
   model: ReviewModelOption,
   availability: ProfileModelAvailability,
@@ -993,6 +1239,117 @@ function copyProfile(
   }
 }
 
+function newProfileEditor(
+  models: ReviewModelOption[],
+  accounts: ReviewAccountOption[],
+): ProfileEditor {
+  const defaultAccount = accounts.find(
+    (account) => account.default && firstAvailableProfileModel(models, account),
+  )
+  const account =
+    defaultAccount ??
+    accounts.find((candidate) => firstAvailableProfileModel(models, candidate))
+  const model = firstAvailableProfileModel(models, account)
+  const value = copyProfile(emptyProfile)
+  value.account_ref = account && !account.default ? account.id : ""
+  value.reviewer_model = model?.alias ?? ""
+  return { profile: null, value, includeFolders: "", excludeFolders: "" }
+}
+
+function profileEditor(profile: RepositoryReviewProfile): ProfileEditor {
+  return {
+    profile,
+    value: copyProfile(profile),
+    includeFolders: profile.scope_policy.include_folders.join("\n"),
+    excludeFolders: profile.scope_policy.exclude_folders.join("\n"),
+  }
+}
+
+function profileConfig(editor: ProfileEditor): RepositoryReviewProfileConfig {
+  return {
+    ...editor.value,
+    name: editor.value.name.trim(),
+    review_focus: editor.value.review_focus.trim(),
+    scope_policy: {
+      ...editor.value.scope_policy,
+      include_folders: lines(editor.includeFolders),
+      exclude_folders: lines(editor.excludeFolders),
+      free_text: editor.value.scope_policy.free_text.trim(),
+    },
+    budget: {
+      guard_expression: editor.value.budget.guard_expression.trim(),
+    },
+  }
+}
+
+function profileWriterLabel(profile: RepositoryReviewProfile): string {
+  return profile.issue_writer_model || `${profile.reviewer_model} (reviewer)`
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.valueOf())
+    ? value || "Not reported"
+    : date.toLocaleString()
+}
+
+function collectionQueryError(
+  error: unknown,
+): { position: number; message: string } | undefined {
+  if (!error || typeof error !== "object") return undefined
+  const candidate = error as { position?: unknown; message?: unknown }
+  if (typeof candidate.position !== "number") return undefined
+  return {
+    position: candidate.position,
+    message:
+      typeof candidate.message === "string"
+        ? candidate.message
+        : "Invalid collection query",
+  }
+}
+
+function ProfileDetailRows({ rows }: { rows: Array<[string, string]> }) {
+  return (
+    <dl className="border-border divide-border divide-y rounded-lg border">
+      {rows.map(([label, value]) => (
+        <div
+          key={label}
+          className="grid gap-1 px-3 py-3 text-sm sm:grid-cols-[12rem_minmax(0,1fr)]"
+        >
+          <dt className="text-muted-foreground">{label}</dt>
+          <dd className="min-w-0 break-words">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function ProfileSection({
+  title,
+  children,
+}: {
+  title: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className="space-y-3">
+      <h2 className="text-base font-semibold">{title}</h2>
+      {children}
+    </section>
+  )
+}
+
+function InlineError({ message }: { message: string }) {
+  return (
+    <div
+      role="alert"
+      className="text-destructive flex items-center gap-2 text-sm"
+    >
+      <IconAlertTriangle className="size-4 shrink-0" /> {message}
+    </div>
+  )
+}
+
 function lines(value: string): string[] {
   return [
     ...new Set(
@@ -1015,17 +1372,8 @@ function profileAccountLabel(
   return account?.label || accountRef
 }
 
-function Empty({ text }: { text: string }) {
-  return (
-    <Card size="sm" className="border-dashed">
-      <CardContent className="text-muted-foreground py-10 text-center text-sm">
-        {text}
-      </CardContent>
-    </Card>
-  )
-}
-
 function errorMessage(error: unknown): string {
+  if (!error) return ""
   return error instanceof Error
     ? error.message
     : "Review profile request failed."

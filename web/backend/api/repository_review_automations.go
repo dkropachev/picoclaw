@@ -99,14 +99,15 @@ type repositoryReviewModelOption struct {
 }
 
 type repositoryReviewAccountOption struct {
-	ID        string                               `json:"id"`
-	Provider  string                               `json:"provider,omitempty"`
-	Label     string                               `json:"label"`
-	Status    string                               `json:"status"`
-	Available bool                                 `json:"available"`
-	Default   bool                                 `json:"default,omitempty"`
-	Models    []string                             `json:"models"`
-	Entries   []repositoryReviewAccountLimitOption `json:"entries"`
+	ID           string                               `json:"id"`
+	Provider     string                               `json:"provider,omitempty"`
+	Label        string                               `json:"label"`
+	Status       string                               `json:"status"`
+	Available    bool                                 `json:"available"`
+	Default      bool                                 `json:"default,omitempty"`
+	Models       []string                             `json:"models"`
+	WriterModels []string                             `json:"writer_models"`
+	Entries      []repositoryReviewAccountLimitOption `json:"entries"`
 }
 
 type repositoryReviewAccountLimitOption struct {
@@ -122,6 +123,66 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	h.registerRepositoryReviewProfileRoutes(mux)
 	mux.HandleFunc("GET /api/repository-reviews/automations", h.handleListRepositoryReviewAutomations)
 	mux.HandleFunc("POST /api/repository-reviews/automations", h.handleCreateRepositoryReviewAutomation)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}",
+		h.handleGetRepositoryReviewAutomation,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/report",
+		h.handleGetRepositoryReviewAutomationReport,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
+		h.handleGetRepositoryReviewAutomationFinding,
+	)
+	mux.HandleFunc(
+		"PATCH /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
+		h.handleUpdateRepositoryReviewAutomationFinding,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/issues",
+		h.handleListRepositoryReviewAutomationIssues,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/issues/generations",
+		h.handleGenerateRepositoryReviewAutomationIssues,
+	)
+	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/issues/{draft_id}",
+		h.handleGetRepositoryReviewAutomationIssue,
+	)
+	mux.HandleFunc(
+		"PATCH /api/repository-reviews/automations/{automation_id}/issues/{draft_id}",
+		h.handleUpdateRepositoryReviewAutomationIssue,
+	)
+	mux.HandleFunc(
+		"DELETE /api/repository-reviews/automations/{automation_id}/issues/{draft_id}",
+		h.handleDeleteRepositoryReviewAutomationIssue,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/issues/{draft_id}/regenerate",
+		h.handleRegenerateRepositoryReviewAutomationIssue,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/issues/{draft_id}/publish",
+		h.handlePublishRepositoryReviewAutomationIssue,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/issues/publish",
+		h.handlePublishRepositoryReviewAutomationIssues,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/issue-link/candidates",
+		h.handleRepositoryReviewIssueLinkCandidates,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/issue-link",
+		h.handleRepositoryReviewIssueLink,
+	)
+	mux.HandleFunc(
+		"DELETE /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/issue-link",
+		h.handleRepositoryReviewIssueLink,
+	)
 	mux.HandleFunc(
 		"PATCH /api/repository-reviews/automations/{automation_id}",
 		h.handleUpdateRepositoryReviewAutomation,
@@ -857,6 +918,7 @@ func applyRepositoryReviewMaterializedPolicy(
 	candidate.ReviewFocus = materialized.ReviewFocus
 	candidate.ScopePolicy = materialized.ScopePolicy
 	candidate.ReviewerModels = append([]string(nil), materialized.ReviewerModels...)
+	candidate.IssueWriterModel = materialized.IssueWriterModel
 	candidate.CompareModels = false
 	candidate.ModelPrices = maps.Clone(materialized.ModelPrices)
 	candidate.Force = materialized.Force
@@ -903,6 +965,7 @@ func repositoryReviewExecutionConfigurationChanged(
 		previous.Repository != next.Repository || previous.Ref != next.Ref ||
 		previous.Target != next.Target || previous.ReviewFocus != next.ReviewFocus ||
 		!repositoryReviewScopePoliciesEqual(previous.ScopePolicy, next.ScopePolicy) ||
+		previous.IssueWriterModel != next.IssueWriterModel ||
 		previous.CompareModels != next.CompareModels || previous.Force != next.Force ||
 		previous.MaxContentBytes != next.MaxContentBytes || previous.MaxParallelChildren != next.MaxParallelChildren ||
 		!reflect.DeepEqual(previous.BudgetPolicy, next.BudgetPolicy) ||
@@ -1304,16 +1367,11 @@ func repositoryReviewRuntimeAccountRefs(cfg *config.Config) []string {
 	if router != nil {
 		refs = repositoryReviewReachableAccountRouterRefs(router)
 	}
-	seen := make(map[string]struct{}, len(refs))
 	out := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		if ref == "" {
 			continue
 		}
-		if _, duplicate := seen[ref]; duplicate {
-			continue
-		}
-		seen[ref] = struct{}{}
 		out = append(out, ref)
 	}
 	return out
@@ -1559,9 +1617,6 @@ func repositoryReviewAccountOptions(
 	defaultRef := repositoryReviewEffectiveAccountRef(cfg, "")
 	for _, ref := range refs {
 		ref = strings.TrimSpace(ref)
-		if ref == "" {
-			continue
-		}
 		if _, duplicate := seen[ref]; duplicate {
 			continue
 		}
@@ -1595,9 +1650,10 @@ func repositoryReviewAccountOptions(
 		}
 		option := repositoryReviewAccountOption{
 			ID: ref, Provider: provider, Label: label, Status: status, Default: ref == defaultRef,
-			Available: repositoryReviewAccountAvailable(cfg, ref, telemetry, hasTelemetry),
-			Entries:   make([]repositoryReviewAccountLimitOption, 0, len(telemetry.Entries)),
-			Models:    []string{},
+			Available:    repositoryReviewAccountAvailable(cfg, ref, telemetry, hasTelemetry),
+			Entries:      make([]repositoryReviewAccountLimitOption, 0, len(telemetry.Entries)),
+			Models:       []string{},
+			WriterModels: []string{},
 		}
 		if cfg != nil {
 			for _, alias := range cfg.ModelAliases {
@@ -1606,8 +1662,13 @@ func repositoryReviewAccountOptions(
 					!repositoryReviewAliasUsesAgenticCLIOnAccount(cfg, alias.Name, ref) {
 					option.Models = append(option.Models, alias.Name)
 				}
+				if repositoryReviewAliasAvailableForAccount(cfg, alias.Name, ref) &&
+					!repositoryReviewAliasUsesAgenticCLIOnAccount(cfg, alias.Name, ref) {
+					option.WriterModels = append(option.WriterModels, alias.Name)
+				}
 			}
 			sort.Strings(option.Models)
+			sort.Strings(option.WriterModels)
 		}
 		for _, entry := range telemetry.Entries {
 			limit := repositoryReviewAccountLimitOption{
