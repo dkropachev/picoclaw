@@ -374,14 +374,22 @@ func NewAgentInstance(
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file")) {
 		allowCreate := cfg.Tools.IsToolEnabled("write_file")
 		allowUpdate := cfg.Tools.IsToolEnabled("edit_file")
+		applyPatchProtectedRoots := agentApplyPatchProtectedRoots(workspace, cfg)
 		buildApplyPatch := func() tools.Tool {
-			return tools.NewApplyPatchToolWithPermissions(
+			tool, err := tools.NewApplyPatchToolWithPermissionsAndPolicy(
 				workspace,
 				restrict,
 				allowCreate,
 				allowUpdate,
+				tools.ApplyPatchPreflightPolicy{
+					ProtectedRoots: append([]string(nil), applyPatchProtectedRoots...),
+				},
 				cloneToolPathPatterns(writePathPatterns),
 			)
+			if err != nil {
+				panic(fmt.Sprintf("build apply_patch policy: %v", err))
+			}
+			return tool
 		}
 		live := buildApplyPatch()
 		mustRegisterFactoryBackedTool(toolsRegistry, live, mustToolFactoryFromPrototype(
