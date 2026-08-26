@@ -46,7 +46,32 @@ type ExecTool struct {
 	restrictToWorkspace bool
 	allowRemote         bool
 	sessionManager      *SessionManager
+	sessionIDGenerator  func() string
+	backgroundOps       *backgroundProcessOperations
+	sessionWaitTimeout  time.Duration
+	ptyDrainTimeout     time.Duration
+	beforePromotion     func(*processSessionReservation)
+	beforeSessionRemove func(ProcessSessionOwner, string, *ProcessSession)
 }
+
+// backgroundProcessOperations keeps failure-path tests deterministic while
+// production resolves every nil operation to the real OS implementation.
+// A run snapshots the resolved value before acquiring any process resource.
+type backgroundProcessOperations struct {
+	openPTY    func() (*os.File, *os.File, error)
+	stdoutPipe func(*exec.Cmd) (io.ReadCloser, error)
+	stderrPipe func(*exec.Cmd) (io.ReadCloser, error)
+	stdinPipe  func(*exec.Cmd) (io.WriteCloser, error)
+	start      func(*exec.Cmd) error
+	terminate  func(*exec.Cmd) error
+	wait       func(*exec.Cmd) error
+}
+
+const (
+	processSessionIDReservationAttempts = 8
+	processSessionWaitTimeout           = 5 * time.Second
+	processSessionPTYDrainTimeout       = time.Second
+)
 
 var (
 	defaultDenyPatterns = []*regexp.Regexp{
@@ -208,6 +233,9 @@ func NewExecToolWithConfig(
 		restrictToWorkspace: restrict,
 		allowRemote:         allowRemote,
 		sessionManager:      getSessionManager(),
+		sessionIDGenerator:  generateSessionID,
+		sessionWaitTimeout:  processSessionWaitTimeout,
+		ptyDrainTimeout:     processSessionPTYDrainTimeout,
 	}, nil
 }
 
@@ -276,17 +304,17 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	case "run":
 		return t.executeRun(ctx, args)
 	case "list":
-		return t.executeList()
+		return t.executeList(ctx)
 	case "poll":
-		return t.executePoll(args)
+		return t.executePoll(ctx, args)
 	case "read":
-		return t.executeRead(args)
+		return t.executeRead(ctx, args)
 	case "write":
-		return t.executeWrite(args)
+		return t.executeWrite(ctx, args)
 	case "kill":
-		return t.executeKill(args)
+		return t.executeKill(ctx, args)
 	case "send-keys":
-		return t.executeSendKeys(args)
+		return t.executeSendKeys(ctx, args)
 	default:
 		return ErrorResult(fmt.Sprintf("unknown action: %s", action))
 	}
@@ -377,7 +405,13 @@ func (t *ExecTool) executeRun(ctx context.Context, args map[string]any) *ToolRes
 	}
 
 	if isBackground {
-		return t.runBackground(ctx, command, cwd, isPty)
+		return t.runBackground(
+			ctx,
+			processSessionOwnerFromContext(ctx),
+			command,
+			cwd,
+			isPty,
+		)
 	}
 
 	return t.runSync(ctx, command, cwd)
@@ -504,17 +538,174 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	}
 }
 
-func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEnabled bool) *ToolResult {
-	sessionID := generateSessionID()
-	session := &ProcessSession{
-		ID:         sessionID,
-		Command:    command,
-		PTY:        ptyEnabled,
-		Background: true,
-		StartTime:  time.Now().Unix(),
-		Status:     "running",
-		ptyKeyMode: PtyKeyModeCSI,
+func processSessionOwnerFromContext(ctx context.Context) ProcessSessionOwner {
+	if ctx == nil {
+		return ProcessSessionOwner{}
 	}
+	return ProcessSessionOwner{
+		AgentID:    ToolAgentID(ctx),
+		SessionKey: ToolSessionKey(ctx),
+	}
+}
+
+func (t *ExecTool) resolveBackgroundProcessOperations() backgroundProcessOperations {
+	operations := backgroundProcessOperations{
+		openPTY: pty.Open,
+		stdoutPipe: func(cmd *exec.Cmd) (io.ReadCloser, error) {
+			return cmd.StdoutPipe()
+		},
+		stderrPipe: func(cmd *exec.Cmd) (io.ReadCloser, error) {
+			return cmd.StderrPipe()
+		},
+		stdinPipe: func(cmd *exec.Cmd) (io.WriteCloser, error) {
+			return cmd.StdinPipe()
+		},
+		start:     isolation.Start,
+		terminate: terminateProcessTree,
+		wait: func(cmd *exec.Cmd) error {
+			return cmd.Wait()
+		},
+	}
+	if t == nil || t.backgroundOps == nil {
+		return operations
+	}
+	overrides := *t.backgroundOps
+	if overrides.openPTY != nil {
+		operations.openPTY = overrides.openPTY
+	}
+	if overrides.stdoutPipe != nil {
+		operations.stdoutPipe = overrides.stdoutPipe
+	}
+	if overrides.stderrPipe != nil {
+		operations.stderrPipe = overrides.stderrPipe
+	}
+	if overrides.stdinPipe != nil {
+		operations.stdinPipe = overrides.stdinPipe
+	}
+	if overrides.start != nil {
+		operations.start = overrides.start
+	}
+	if overrides.terminate != nil {
+		operations.terminate = overrides.terminate
+	}
+	if overrides.wait != nil {
+		operations.wait = overrides.wait
+	}
+	return operations
+}
+
+func (t *ExecTool) processSessionWaitBound() time.Duration {
+	if t != nil && t.sessionWaitTimeout > 0 {
+		return t.sessionWaitTimeout
+	}
+	return processSessionWaitTimeout
+}
+
+func (t *ExecTool) processSessionPTYDrainBound() time.Duration {
+	if t != nil && t.ptyDrainTimeout > 0 {
+		return t.ptyDrainTimeout
+	}
+	return processSessionPTYDrainTimeout
+}
+
+func awaitProcessSessionPTYDrain(
+	readDone <-chan struct{},
+	timeout time.Duration,
+	closeMaster func(),
+) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-readDone:
+		return
+	case <-timer.C:
+		closeMaster()
+		<-readDone
+	}
+}
+
+func (t *ExecTool) reserveProcessSessionID(
+	owner ProcessSessionOwner,
+) (*processSessionReservation, error) {
+	if t == nil || t.sessionManager == nil {
+		return nil, fmt.Errorf("process session manager not configured")
+	}
+	generator := t.sessionIDGenerator
+	if generator == nil {
+		generator = generateSessionID
+	}
+	for attempt := 0; attempt < processSessionIDReservationAttempts; attempt++ {
+		reservation, err := t.sessionManager.reserveID(owner, generator())
+		if err == nil {
+			return reservation, nil
+		}
+		if !errors.Is(err, ErrSessionAlreadyExists) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf(
+		"process session id allocation exhausted after %d attempts: %w",
+		processSessionIDReservationAttempts,
+		ErrSessionAlreadyExists,
+	)
+}
+
+func closeProcessHandle(closer io.Closer) {
+	if closer != nil {
+		_ = closer.Close()
+	}
+}
+
+func closeBackgroundProcessHandles(
+	ptyMaster, ptySlave *os.File,
+	stdinWriter io.WriteCloser,
+	stdoutReader, stderrReader io.ReadCloser,
+) {
+	closeProcessHandle(stdinWriter)
+	closeProcessHandle(stdoutReader)
+	closeProcessHandle(stderrReader)
+	closeProcessHandle(ptySlave)
+	closeProcessHandle(ptyMaster)
+}
+
+func cleanupStartedBackgroundProcess(
+	operations backgroundProcessOperations,
+	cmd *exec.Cmd,
+	ptyMaster, ptySlave *os.File,
+	stdinWriter io.WriteCloser,
+	stdoutReader, stderrReader io.ReadCloser,
+) {
+	_ = operations.terminate(cmd)
+	closeBackgroundProcessHandles(
+		ptyMaster,
+		ptySlave,
+		stdinWriter,
+		stdoutReader,
+		stderrReader,
+	)
+	if cmd != nil {
+		_ = operations.wait(cmd)
+	}
+}
+
+func (t *ExecTool) runBackground(
+	ctx context.Context,
+	owner ProcessSessionOwner,
+	command, cwd string,
+	ptyEnabled bool,
+) *ToolResult {
+	reservation, err := t.reserveProcessSessionID(owner)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
+	reservationLive := true
+	defer func() {
+		if reservationLive {
+			t.sessionManager.releaseReservation(reservation)
+		}
+	}()
+	operations := t.resolveBackgroundProcessOperations()
+	ptyDrainTimeout := t.processSessionPTYDrainBound()
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -531,81 +722,116 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	var stdoutReader io.ReadCloser
 	var stderrReader io.ReadCloser
 	var stdinWriter io.WriteCloser
+	var ptyMaster *os.File
+	var ptySlave *os.File
 
 	if ptyEnabled {
-		ptmx, tty, err := pty.Open()
+		ptyMaster, ptySlave, err = operations.openPTY()
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("failed to create PTY: %v", err))
 		}
+		interruptibleMaster, prepareErr := makePTYMasterInterruptible(ptyMaster)
+		if prepareErr != nil {
+			closeBackgroundProcessHandles(ptyMaster, ptySlave, nil, nil, nil)
+			return ErrorResult(fmt.Sprintf("failed to prepare PTY: %v", prepareErr))
+		}
+		ptyMaster = interruptibleMaster
 
-		cmd.Stdin = tty
-		cmd.Stdout = tty
-		cmd.Stderr = tty
+		cmd.Stdin = ptySlave
+		cmd.Stdout = ptySlave
+		cmd.Stderr = ptySlave
 
 		// For PTY, we need Setsid to create a new session.
 		// Note: Setsid and Setpgid conflict, so we must replace SysProcAttr entirely.
 		setSysProcAttrForPty(cmd)
-
-		session.ptyMaster = ptmx
 	} else {
-		var err error
-		stdoutReader, err = cmd.StdoutPipe()
+		stdoutReader, err = operations.stdoutPipe(cmd)
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("failed to create stdout pipe: %v", err))
 		}
-		stderrReader, err = cmd.StderrPipe()
+		stderrReader, err = operations.stderrPipe(cmd)
 		if err != nil {
+			closeBackgroundProcessHandles(nil, nil, nil, stdoutReader, nil)
 			return ErrorResult(fmt.Sprintf("failed to create stderr pipe: %v", err))
 		}
-		stdinWriter, err = cmd.StdinPipe()
+		stdinWriter, err = operations.stdinPipe(cmd)
 		if err != nil {
+			closeBackgroundProcessHandles(nil, nil, nil, stdoutReader, stderrReader)
 			return ErrorResult(fmt.Sprintf("failed to create stdin pipe: %v", err))
 		}
-		session.stdoutPipe = io.MultiReader(stdoutReader, stderrReader)
-		session.stdinWriter = stdinWriter
 	}
 
 	// Background sessions use the same startup path so isolation stays consistent
 	// with synchronous exec runs.
-	if err := isolation.Start(cmd); err != nil {
-		if session.ptyMaster != nil {
-			_ = session.ptyMaster.Close()
-		}
+	if err = operations.start(cmd); err != nil {
+		closeBackgroundProcessHandles(
+			ptyMaster,
+			ptySlave,
+			stdinWriter,
+			stdoutReader,
+			stderrReader,
+		)
 		return ErrorResult(fmt.Sprintf("failed to start command: %v", err))
 	}
 
-	session.PID = cmd.Process.Pid
-	t.sessionManager.Add(session)
-
-	session.outputBuffer = &bytes.Buffer{}
+	if ptySlave != nil {
+		_ = ptySlave.Close()
+		ptySlave = nil
+	}
+	session := &ProcessSession{
+		ID:           reservation.id,
+		PID:          cmd.Process.Pid,
+		Command:      command,
+		PTY:          ptyEnabled,
+		Background:   true,
+		StartTime:    time.Now().Unix(),
+		Status:       "running",
+		stdinWriter:  stdinWriter,
+		outputBuffer: &bytes.Buffer{},
+		ptyMaster:    ptyMaster,
+		ptyKeyMode:   PtyKeyModeCSI,
+		waitDone:     make(chan struct{}),
+	}
+	if !ptyEnabled {
+		session.stdoutPipe = io.MultiReader(stdoutReader, stderrReader)
+	}
+	if t.beforePromotion != nil {
+		t.beforePromotion(reservation)
+	}
+	if err = t.sessionManager.promoteReservation(reservation, session); err != nil {
+		cleanupStartedBackgroundProcess(
+			operations,
+			cmd,
+			ptyMaster,
+			ptySlave,
+			stdinWriter,
+			stdoutReader,
+			stderrReader,
+		)
+		return ErrorResult(fmt.Sprintf("failed to publish process session: %v", err))
+	}
+	reservationLive = false
 
 	// PTY mode: read from ptyMaster and wait for process
 	// Note: On Linux, closing ptyMaster doesn't interrupt blocking Read() calls,
 	// so we need cmd.Wait() in a separate goroutine to detect process exit.
 	if session.PTY && session.ptyMaster != nil {
+		ptyMasterHandle := session.ptyMaster
+		var ptyMasterCloseOnce sync.Once
+		closePTYMaster := func() {
+			ptyMasterCloseOnce.Do(func() {
+				// Closing a PTY master from another goroutine does not reliably
+				// wake a blocked Read on Linux. An immediate deadline wakes the
+				// poller before the handle is closed, so bounded drain cleanup can
+				// join the reader without leaking its goroutine.
+				_ = ptyMasterHandle.SetReadDeadline(time.Now())
+				closeProcessHandle(ptyMasterHandle)
+			})
+		}
+		ptyReadDone := make(chan struct{})
 		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.ErrorCF("shell", "PTY cmd.Wait goroutine panic recovered",
-						map[string]any{
-							"panic": fmt.Sprintf("%v", r),
-							"stack": string(debug.Stack()),
-						})
-					session.mu.Lock()
-					session.Status = "error"
-					session.mu.Unlock()
-				}
-			}()
-			cmd.Wait() // Wait for process to exit
-			session.mu.Lock()
-			if cmd.ProcessState != nil {
-				session.ExitCode = cmd.ProcessState.ExitCode()
-			}
-			session.Status = "done"
-			session.mu.Unlock()
-		}()
-
-		go func() {
+			defer close(ptyReadDone)
+			defer closePTYMaster()
 			defer func() {
 				if r := recover(); r != nil {
 					logger.ErrorCF("shell", "PTY read goroutine panic recovered",
@@ -617,7 +843,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 			}()
 			buf := make([]byte, 4096)
 			for {
-				n, err := session.ptyMaster.Read(buf)
+				n, readErr := ptyMasterHandle.Read(buf)
 				if n > 0 {
 					raw := string(buf[:n])
 					if mode := detectPtyKeyMode(raw); mode != PtyKeyModeNotFound && mode != session.GetPtyKeyMode() {
@@ -635,16 +861,61 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 					}
 					session.mu.Unlock()
 				}
-				if err != nil {
-					break
+				if readErr != nil {
+					return
 				}
 			}
+		}()
+
+		go func() {
+			defer session.signalWaitDone()
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorCF("shell", "PTY cmd.Wait goroutine panic recovered",
+						map[string]any{
+							"panic": fmt.Sprintf("%v", r),
+							"stack": string(debug.Stack()),
+						})
+					_ = operations.terminate(cmd)
+					session.mu.Lock()
+					session.ExitCode = -1
+					session.processExited = true
+					session.mu.Unlock()
+					awaitProcessSessionPTYDrain(
+						ptyReadDone,
+						ptyDrainTimeout,
+						closePTYMaster,
+					)
+					session.mu.Lock()
+					session.Status = "done"
+					session.mu.Unlock()
+				}
+			}()
+			_ = operations.wait(cmd) // This goroutine is the sole successful-path wait owner.
+			session.mu.Lock()
+			if cmd.ProcessState != nil {
+				session.ExitCode = cmd.ProcessState.ExitCode()
+			}
+			session.processExited = true
+			session.mu.Unlock()
+			awaitProcessSessionPTYDrain(
+				ptyReadDone,
+				ptyDrainTimeout,
+				closePTYMaster,
+			)
+			session.mu.Lock()
+			session.Status = "done"
+			session.mu.Unlock()
 		}()
 	} else {
 		// Non-PTY mode: single goroutine reads pipes.
 		// When Read() returns EOF (pipe closed), we break.
 		// When process exits, OS closes pipe write end → Read() returns EOF → we exit.
 		go func() {
+			defer session.signalWaitDone()
+			defer closeProcessHandle(stdinWriter)
+			defer closeProcessHandle(stdoutReader)
+			defer closeProcessHandle(stderrReader)
 			defer func() {
 				if r := recover(); r != nil {
 					logger.ErrorCF("shell", "pipe read goroutine panic recovered",
@@ -658,7 +929,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 
 			// Read stdout
 			for {
-				n, err := stdoutReader.Read(buf)
+				n, readErr := stdoutReader.Read(buf)
 				if n > 0 {
 					session.mu.Lock()
 					if session.outputBuffer.Len() >= maxOutputBufferSize {
@@ -671,14 +942,14 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 					}
 					session.mu.Unlock()
 				}
-				if err != nil {
+				if readErr != nil {
 					break
 				}
 			}
 
 			// Read stderr
 			for {
-				n, err := stderrReader.Read(buf)
+				n, readErr := stderrReader.Read(buf)
 				if n > 0 {
 					session.mu.Lock()
 					if session.outputBuffer.Len() >= maxOutputBufferSize {
@@ -691,7 +962,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 					}
 					session.mu.Unlock()
 				}
-				if err != nil {
+				if readErr != nil {
 					break
 				}
 			}
@@ -700,19 +971,20 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 			if stdinWriter != nil {
 				_ = stdinWriter.Close()
 			}
-			cmd.Wait()
+			_ = operations.wait(cmd)
 
 			session.mu.Lock()
 			if cmd.ProcessState != nil {
 				session.ExitCode = cmd.ProcessState.ExitCode()
 			}
 			session.Status = "done"
+			session.processExited = true
 			session.mu.Unlock()
 		}()
 	}
 
 	resp := ExecResponse{
-		SessionID: sessionID,
+		SessionID: session.ID,
 		Status:    "running",
 	}
 	data, err := json.Marshal(resp)
@@ -721,13 +993,26 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	}
 	return &ToolResult{
 		ForLLM:  string(data),
-		ForUser: fmt.Sprintf("Session %s started", sessionID),
+		ForUser: fmt.Sprintf("Session %s started", session.ID),
 		IsError: false,
 	}
 }
 
-func (t *ExecTool) executeList() *ToolResult {
-	sessions := t.sessionManager.List()
+func processSessionAccessError(sessionID string, err error) *ToolResult {
+	if errors.Is(err, ErrSessionNotFound) {
+		return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
+	}
+	return ErrorResult(err.Error())
+}
+
+func (t *ExecTool) executeList(ctx context.Context) *ToolResult {
+	if t == nil || t.sessionManager == nil {
+		return ErrorResult("process session manager not configured")
+	}
+	sessions, err := t.sessionManager.List(processSessionOwnerFromContext(ctx))
+	if err != nil {
+		return processSessionAccessError("", err)
+	}
 	resp := ExecResponse{
 		Sessions: sessions,
 	}
@@ -742,18 +1027,18 @@ func (t *ExecTool) executeList() *ToolResult {
 	}
 }
 
-func (t *ExecTool) executePoll(args map[string]any) *ToolResult {
+func (t *ExecTool) executePoll(ctx context.Context, args map[string]any) *ToolResult {
 	sessionID, ok := args["sessionId"].(string)
 	if !ok {
 		return ErrorResult("sessionId is required")
 	}
 
-	session, err := t.sessionManager.Get(sessionID)
+	if t == nil || t.sessionManager == nil {
+		return ErrorResult("process session manager not configured")
+	}
+	session, err := t.sessionManager.Get(processSessionOwnerFromContext(ctx), sessionID)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
-		}
-		return ErrorResult(err.Error())
+		return processSessionAccessError(sessionID, err)
 	}
 
 	resp := ExecResponse{
@@ -771,18 +1056,18 @@ func (t *ExecTool) executePoll(args map[string]any) *ToolResult {
 	}
 }
 
-func (t *ExecTool) executeRead(args map[string]any) *ToolResult {
+func (t *ExecTool) executeRead(ctx context.Context, args map[string]any) *ToolResult {
 	sessionID, ok := args["sessionId"].(string)
 	if !ok {
 		return ErrorResult("sessionId is required")
 	}
 
-	session, err := t.sessionManager.Get(sessionID)
+	if t == nil || t.sessionManager == nil {
+		return ErrorResult("process session manager not configured")
+	}
+	session, err := t.sessionManager.Get(processSessionOwnerFromContext(ctx), sessionID)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
-		}
-		return ErrorResult(err.Error())
+		return processSessionAccessError(sessionID, err)
 	}
 
 	output := session.Read()
@@ -802,7 +1087,7 @@ func (t *ExecTool) executeRead(args map[string]any) *ToolResult {
 	}
 }
 
-func (t *ExecTool) executeWrite(args map[string]any) *ToolResult {
+func (t *ExecTool) executeWrite(ctx context.Context, args map[string]any) *ToolResult {
 	sessionID, ok := args["sessionId"].(string)
 	if !ok {
 		return ErrorResult("sessionId is required")
@@ -813,12 +1098,12 @@ func (t *ExecTool) executeWrite(args map[string]any) *ToolResult {
 		return ErrorResult("data is required")
 	}
 
-	session, err := t.sessionManager.Get(sessionID)
+	if t == nil || t.sessionManager == nil {
+		return ErrorResult("process session manager not configured")
+	}
+	session, err := t.sessionManager.Get(processSessionOwnerFromContext(ctx), sessionID)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
-		}
-		return ErrorResult(err.Error())
+		return processSessionAccessError(sessionID, err)
 	}
 
 	if session.IsDone() {
@@ -846,18 +1131,19 @@ func (t *ExecTool) executeWrite(args map[string]any) *ToolResult {
 	}
 }
 
-func (t *ExecTool) executeKill(args map[string]any) *ToolResult {
+func (t *ExecTool) executeKill(ctx context.Context, args map[string]any) *ToolResult {
 	sessionID, ok := args["sessionId"].(string)
 	if !ok {
 		return ErrorResult("sessionId is required")
 	}
 
-	session, err := t.sessionManager.Get(sessionID)
+	if t == nil || t.sessionManager == nil {
+		return ErrorResult("process session manager not configured")
+	}
+	owner := processSessionOwnerFromContext(ctx)
+	session, err := t.sessionManager.Get(owner, sessionID)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
-		}
-		return ErrorResult(err.Error())
+		return processSessionAccessError(sessionID, err)
 	}
 
 	if session.IsDone() {
@@ -867,8 +1153,26 @@ func (t *ExecTool) executeKill(args map[string]any) *ToolResult {
 	if err = session.Kill(); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to kill session: %v", err))
 	}
+	waitBase := ctx
+	if waitBase == nil {
+		waitBase = context.Background()
+	}
+	waitCtx, waitCancel := context.WithTimeout(
+		context.WithoutCancel(waitBase),
+		t.processSessionWaitBound(),
+	)
+	err = session.waitForProcessExit(waitCtx)
+	waitCancel()
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("failed waiting for process session exit: %v", err))
+	}
 
-	t.sessionManager.Remove(sessionID)
+	if t.beforeSessionRemove != nil {
+		t.beforeSessionRemove(owner, sessionID, session)
+	}
+	if err = t.sessionManager.Remove(owner, sessionID, session); err != nil {
+		return processSessionAccessError(sessionID, err)
+	}
 
 	resp := ExecResponse{
 		SessionID: sessionID,
@@ -1041,7 +1345,7 @@ func encodeKeySequence(tokens []string, ptyKeyMode PtyKeyMode) (string, error) {
 	return result, nil
 }
 
-func (t *ExecTool) executeSendKeys(args map[string]any) *ToolResult {
+func (t *ExecTool) executeSendKeys(ctx context.Context, args map[string]any) *ToolResult {
 	sessionID, ok := args["sessionId"].(string)
 	if !ok {
 		return ErrorResult("sessionId is required")
@@ -1070,12 +1374,12 @@ func (t *ExecTool) executeSendKeys(args map[string]any) *ToolResult {
 		return ErrorResult("keys cannot be empty")
 	}
 
-	session, err := t.sessionManager.Get(sessionID)
+	if t == nil || t.sessionManager == nil {
+		return ErrorResult("process session manager not configured")
+	}
+	session, err := t.sessionManager.Get(processSessionOwnerFromContext(ctx), sessionID)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
-		}
-		return ErrorResult(err.Error())
+		return processSessionAccessError(sessionID, err)
 	}
 
 	ptyKeyMode := session.GetPtyKeyMode()

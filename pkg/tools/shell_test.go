@@ -970,7 +970,9 @@ func TestShellTool_Background_ReturnsImmediately(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	owner := processTestOwner("returns-immediately")
+	installProcessTestManager(t, tool, owner)
+	ctx := processTestContext(owner)
 	args := map[string]any{
 		"action":     "run",
 		"command":    "sleep 5",
@@ -990,11 +992,10 @@ func TestShellTool_List_Empty(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := context.Background()
+	ctx := processTestContext(owner)
 	args := map[string]any{"action": "list"}
 
 	result := tool.Execute(ctx, args)
@@ -1006,11 +1007,10 @@ func TestShellTool_RunBackground_List(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
@@ -1046,11 +1046,10 @@ func TestShellTool_Read_Output(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
@@ -1081,11 +1080,10 @@ func TestShellTool_Kill(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
@@ -1121,11 +1119,10 @@ func TestShellTool_PTY_AllowedCommands(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Test that PTY is allowed for non-interpreter commands
 	result := tool.Execute(ctx, map[string]any{
@@ -1157,11 +1154,10 @@ func TestShellTool_PTY_WriteRead(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a PTY session with a command that waits for input
 	// Using 'cat' which will wait for stdin
@@ -1217,11 +1213,10 @@ func TestShellTool_PTY_Poll(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a PTY session with a long-running command
 	result := tool.Execute(ctx, map[string]any{
@@ -1271,11 +1266,10 @@ func TestShellTool_PTY_Kill(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a PTY session with a long-running command
 	result := tool.Execute(ctx, map[string]any{
@@ -1317,11 +1311,10 @@ func TestShellTool_Write_Read_NonPTY(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a background process that reads from stdin and outputs it
 	// Using 'cat' which echoes stdin to stdout
@@ -1371,11 +1364,10 @@ func TestShellTool_Read_NonPTY_Running(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a long-running process that produces output over time
 	// Using sh -c with sleep at the end so process doesn't exit immediately
@@ -1440,11 +1432,10 @@ func TestShellTool_ProcessGroupKill(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a shell that spawns child processes (non-PTY mode)
 	// The sh -c command creates child sleep processes
@@ -1501,11 +1492,10 @@ func TestShellTool_PTY_ProcessGroupKill(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start the test binary with PTY mode
 	// It forks 4 child sleep processes and waits for signals
@@ -1554,16 +1544,18 @@ func TestShellTool_PTY_Background_Read(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	manager := installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
+	terminalSentinel := "pty-terminal-sentinel"
+	payload := strings.Repeat("x", 32*1024) + terminalSentinel
 
-	// Start a fast command with PTY + background mode
+	// Start a fast command whose final sentinel spans enough PTY traffic to make
+	// premature master closure observable.
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
-		"command":    "echo hello",
+		"command":    "printf '" + payload + "\\n'",
 		"pty":        "true",
 		"background": "true",
 	})
@@ -1575,16 +1567,20 @@ func TestShellTool_PTY_Background_Read(t *testing.T) {
 	require.NotEmpty(t, runResp.SessionID)
 	require.Equal(t, "running", runResp.Status)
 
-	// Wait for command to complete
-	time.Sleep(500 * time.Millisecond)
+	// Completion is published only after the PTY reader has drained and closed
+	// the master, so output must be available when waitDone is signaled.
+	session, err := manager.Get(owner, runResp.SessionID)
+	require.NoError(t, err)
+	awaitProcessTestWait(t, session, runResp.SessionID)
 
-	// Read output - this is the key test: PTY + background mode should preserve output
+	// Read output - this is the key test: PTY + background mode should preserve
+	// the final chunk before completion is published.
 	readResult := tool.Execute(ctx, map[string]any{
 		"action":    "read",
 		"sessionId": runResp.SessionID,
 	})
 	require.False(t, readResult.IsError, "read should succeed: %s", readResult.ForLLM)
-	require.Contains(t, readResult.ForLLM, "hello", "output should contain 'hello'")
+	require.Contains(t, readResult.ForLLM, terminalSentinel, "output should contain the terminal sentinel")
 }
 
 func TestShellTool_PTY_Background_ReadNoBlock(t *testing.T) {
@@ -1595,11 +1591,10 @@ func TestShellTool_PTY_Background_ReadNoBlock(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	// Start a long-running command with PTY + background mode
 	// This command produces no output, just sleeps
@@ -1640,11 +1635,10 @@ func TestShellTool_Poll_Status(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	sm := NewSessionManager()
-	t.Cleanup(sm.Stop)
-	tool.sessionManager = sm
+	owner := processTestOwner("shell")
+	installProcessTestManager(t, tool, owner)
 
-	ctx := WithToolContext(context.Background(), "cli", "test")
+	ctx := processTestContext(owner)
 
 	runResult := tool.Execute(ctx, map[string]any{
 		"action":     "run",
@@ -1702,7 +1696,9 @@ func TestShellTool_Background_ReadAfterExit(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	require.NoError(t, err)
 
-	ctx := context.Background()
+	owner := processTestOwner("read-after-exit")
+	installProcessTestManager(t, tool, owner)
+	ctx := processTestContext(owner)
 
 	// Start a background command that produces output and exits quickly
 	runResult := tool.Execute(ctx, map[string]any{
