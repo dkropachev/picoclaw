@@ -20,6 +20,9 @@ jobs:
   lint:
     name: Linter
     runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -31,6 +34,17 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go dependencies and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -140,6 +154,9 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -151,6 +168,17 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go dependencies and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
 
       - name: Run go generate
         run: go generate ./...
