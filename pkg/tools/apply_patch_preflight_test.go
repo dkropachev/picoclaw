@@ -1662,7 +1662,7 @@ func TestApplyPatchCompatibilityExactSummaryAndRegistryParity(t *testing.T) {
 			if result == nil || result.IsError {
 				t.Fatalf("surface=%s result=%#v", surface, result)
 			}
-			if result.ForLLM != wantSummary || result.ForUser != "" ||
+			if result.ForLLM != wantSummary || result.ForUser == "" ||
 				result.Silent || result.Async || result.ResponseHandled {
 				t.Fatalf("surface=%s result=%#v", surface, result)
 			}

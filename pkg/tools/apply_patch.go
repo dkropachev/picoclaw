@@ -160,6 +160,10 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) *Tool
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
+	candidateResult, err := buildApplyPatchCandidateResult(ctx, plan)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
 	if t.beforeRevalidate != nil {
 		t.beforeRevalidate(plan)
 	}
@@ -185,7 +189,7 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) *Tool
 	if err := commitApplyPatchPlan(plan); err != nil {
 		return ErrorResult(err.Error())
 	}
-	return NewToolResult(strings.Join(plan.summaries, "\n"))
+	return candidateResult
 }
 
 type codexPatchOp struct {
