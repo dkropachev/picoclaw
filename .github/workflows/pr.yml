@@ -46,6 +46,56 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
 
+      - name: Run go generate
+        run: go generate ./...
+
+      - name: Golangci Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.10.1
+          args: --build-tags=goolm,stdjson
+
+      - name: Feature requirements lint
+        run: make lint-features
+
+      - name: Feature tooling tests
+        run: make test-featuretools
+
+      - name: Fetch base ref
+        run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
+
+      - name: Feature requirements delta guard
+        run: make feature-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go dependencies and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            .cache/go-build
+            .cache/go-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go-v2-${{ github.job }}-
+
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -67,21 +117,6 @@ jobs:
           key: ${{ runner.os }}-pnpm-${{ hashFiles('web/frontend/pnpm-lock.yaml') }}
           restore-keys: ${{ runner.os }}-pnpm-
 
-      - name: Run go generate
-        run: go generate ./...
-
-      - name: Golangci Lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
-        with:
-          version: v2.10.1
-          args: --build-tags=goolm,stdjson
-
-      - name: Feature requirements lint
-        run: make lint-features
-
-      - name: Feature tooling tests
-        run: make test-featuretools
-
       - name: Frontend lint
         run: make lint-frontend
 
@@ -94,6 +129,51 @@ jobs:
       - name: Launcher production build
         run: make build-launcher
 
+      - name: Fetch base ref
+        run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
+
+      - name: Collection surface delta guard
+        run: make collection-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
+
+  frontend_ui:
+    name: Frontend UI (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - smoke
+          - visual
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - name: Get pnpm store path
+        id: pnpm-store
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/frontend/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install frontend dependencies
+        run: cd web/frontend && pnpm install --frozen-lockfile
+
       - name: Cache Playwright browsers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -104,30 +184,23 @@ jobs:
         run: cd web/frontend && pnpm exec playwright install --with-deps chromium
 
       - name: Frontend UI smoke tests
+        if: matrix.suite == 'smoke'
         run: cd web/frontend && pnpm test:ui:smoke
 
       - name: Frontend collection visual tests
+        if: matrix.suite == 'visual'
         run: cd web/frontend && COLLECTION_VISUAL_BASELINE=system pnpm test:ui:visual
 
       - name: Upload Playwright failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: playwright-${{ matrix.suite }}-failure-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             web/frontend/playwright-report
             web/frontend/test-results
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Fetch base ref
-        run: git fetch origin "${BASE_REF_NAME}:refs/remotes/origin/${BASE_REF_NAME}"
-
-      - name: Collection surface delta guard
-        run: make collection-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
-
-      - name: Feature requirements delta guard
-        run: make feature-delta BASE_REF="origin/${BASE_REF_NAME}" HEAD_REF=HEAD
 
   vuln_check:
     name: Security Check
