@@ -750,7 +750,9 @@ func (c *repositoryReviewController) normalizeRepositoryReviewAutomationAdmissio
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
-	if automation.Repository == normalized.Repository && automation.Ref == normalized.Ref && automation.Target == "all" {
+	if automation.Repository == normalized.Repository &&
+		automation.Ref == normalized.Ref &&
+		automation.Target == "all" {
 		return automation, nil
 	}
 	updated, err := c.update(

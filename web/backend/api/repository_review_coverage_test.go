@@ -1514,7 +1514,11 @@ func TestRepositoryReviewCommitResolverPinsBranchAndExactCommit(t *testing.T) {
 		t.Fatalf("initial resolved commit = %q, want %q, err=%v", resolved, first, err)
 	}
 
-	if writeErr := os.WriteFile(filepath.Join(repository, "second.go"), []byte("package second\n"), 0o600); writeErr != nil {
+	if writeErr := os.WriteFile(
+		filepath.Join(repository, "second.go"),
+		[]byte("package second\n"),
+		0o600,
+	); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 	git("add", "second.go")
@@ -1534,7 +1538,11 @@ func TestRepositoryReviewCommitResolverPinsBranchAndExactCommit(t *testing.T) {
 		t.Fatal("unreachable exact commit resolved")
 	}
 	git("checkout", "-b", "feature/review")
-	if writeErr := os.WriteFile(filepath.Join(repository, "feature.go"), []byte("package feature\n"), 0o600); writeErr != nil {
+	if writeErr := os.WriteFile(
+		filepath.Join(repository, "feature.go"),
+		[]byte("package feature\n"),
+		0o600,
+	); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 	git("add", "feature.go")
