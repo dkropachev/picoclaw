@@ -185,6 +185,29 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	} {
 		assertEnvironmentMissing(t, baseEnvironment, name)
 	}
+	fallbackEnvironment := coverageFallbackHomeEnvironment(baseEnvironment)
+	assertEnvironmentValue(t, fallbackEnvironment, "HOME", "/isolated/base")
+	assertEnvironmentValue(t, fallbackEnvironment, "PICOCLAW_HOME", "")
+	assertEnvironmentValue(t, fallbackEnvironment, "PICOCLAW_CONFIG", "")
+	assertEnvironmentValue(t, fallbackEnvironment, "PICOCLAW_BINARY", "/isolated/base/bin/picoclaw")
+	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_HOME", "/isolated/base/.picoclaw")
+}
+
+func TestPrepareCoverageStorageDefersConfigUntilAfterUnitCoverage(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "coverage-home")
+	if err := prepareCoverageStorage(home); err != nil {
+		t.Fatalf("prepareCoverageStorage() error = %v", err)
+	}
+	configPath := filepath.Join(home, ".picoclaw", "config.json")
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("coverage config existed during fallback-home unit tests: %v", err)
+	}
+	if err := writeCoverageConfig(home); err != nil {
+		t.Fatalf("writeCoverageConfig() error = %v", err)
+	}
+	if info, err := os.Stat(configPath); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("coverage config = (%v, %v), want regular file", info, err)
+	}
 }
 
 func TestPrepareCoverageHomeCreatesIsolatedRuntimeState(t *testing.T) {

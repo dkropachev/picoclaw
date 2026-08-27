@@ -403,7 +403,7 @@ func coverageForRef(
 		return coverageProfile{}, err
 	}
 	environment := coverageEnvironment(os.Environ(), coverageHome, goCaches)
-	if err = prepareCoverageHome(coverageHome); err != nil {
+	if err = prepareCoverageStorage(coverageHome); err != nil {
 		return coverageProfile{}, fmt.Errorf("create %s coverage home: %w", label, err)
 	}
 
@@ -436,10 +436,13 @@ func coverageForRef(
 		profilePath,
 		coverImports,
 		testImports,
-		environment,
+		coverageFallbackHomeEnvironment(environment),
 	)
 	if err != nil {
 		return coverageProfile{}, err
+	}
+	if err = writeCoverageConfig(coverageHome); err != nil {
+		return coverageProfile{}, fmt.Errorf("write %s coverage config: %w", label, err)
 	}
 
 	if includeIntegration && len(plan.IntegrationSuites) > 0 && len(coverImports) > 0 {
@@ -840,6 +843,24 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 	return result
 }
 
+// Historical base tests intentionally override HOME to exercise fallback
+// discovery. Keep that semantic while running unit coverage: HOME is already
+// disposable, and the explicit runtime config is published only after unit
+// coverage, before any integration suite can launch the built product binary.
+func coverageFallbackHomeEnvironment(environment []string) []string {
+	result := make([]string, len(environment))
+	for index, entry := range environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(name, "PICOCLAW_HOME") ||
+			strings.EqualFold(name, "PICOCLAW_CONFIG")) {
+			result[index] = name + "="
+			continue
+		}
+		result[index] = entry
+	}
+	return result
+}
+
 func isAmbientTestCredentialOrAuthority(name string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(name))
 	for _, prefix := range []string{
@@ -908,6 +929,13 @@ func isAmbientTestCredentialOrAuthority(name string) bool {
 }
 
 func prepareCoverageHome(home string) error {
+	if err := prepareCoverageStorage(home); err != nil {
+		return err
+	}
+	return writeCoverageConfig(home)
+}
+
+func prepareCoverageStorage(home string) error {
 	picoHome := filepath.Join(home, ".picoclaw")
 	workspace := filepath.Join(picoHome, "workspace")
 	eventDB := filepath.Join(workspace, "eventing", "events.db")
@@ -932,6 +960,17 @@ func prepareCoverageHome(home string) error {
 			return err
 		}
 	}
+	database, err := os.OpenFile(eventDB, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	return database.Close()
+}
+
+func writeCoverageConfig(home string) error {
+	picoHome := filepath.Join(home, ".picoclaw")
+	workspace := filepath.Join(picoHome, "workspace")
+	eventDB := filepath.Join(workspace, "eventing", "events.db")
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -948,14 +987,7 @@ func prepareCoverageHome(home string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(filepath.Join(picoHome, "config.json"), append(configData, '\n'), 0o600); err != nil {
-		return err
-	}
-	database, err := os.OpenFile(eventDB, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	return database.Close()
+	return os.WriteFile(filepath.Join(picoHome, "config.json"), append(configData, '\n'), 0o600)
 }
 
 func buildCoverageTestBinary(
