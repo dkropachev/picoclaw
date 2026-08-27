@@ -228,8 +228,9 @@ func TestAPITestRuntimeOverridesHostileInheritedState(t *testing.T) {
 		"PICOCLAW_LOG_FILE":                     filepath.Join(hostileRoot, "hostile.log"),
 		apiTestRuntimeProbeOutputEnv:            probePath,
 	})
-	if output, err := probeCommand.CombinedOutput(); err != nil {
-		t.Fatalf("runtime probe failed: %v\n%s", err, output)
+	probeOutput, probeErr := probeCommand.CombinedOutput()
+	if probeErr != nil {
+		t.Fatalf("runtime probe failed: %v\n%s", probeErr, probeOutput)
 	}
 	rawProbe, err := os.ReadFile(probePath)
 	if err != nil {

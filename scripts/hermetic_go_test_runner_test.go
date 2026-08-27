@@ -137,8 +137,9 @@ cp "$PICOCLAW_TEST_CONFIG" "$CAPTURE_DIR/config.json"
 	if _, err = os.Stat(testRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("test root survived command: %q, err=%v", testRoot, err)
 	}
-	if got, err := os.ReadFile(operatorSentinel); err != nil || string(got) != "untouched" {
-		t.Fatalf("operator state changed: data=%q err=%v", got, err)
+	sentinelData, readErr := os.ReadFile(operatorSentinel)
+	if readErr != nil || string(sentinelData) != "untouched" {
+		t.Fatalf("operator state changed: data=%q err=%v", sentinelData, readErr)
 	}
 
 	wantValues := map[string]string{
@@ -196,7 +197,8 @@ cp "$PICOCLAW_TEST_CONFIG" "$CAPTURE_DIR/config.json"
 	assertHermeticRunnerFile(t, filepath.Join(captureDir, "arg-2"), "*\n")
 	assertHermeticRunnerFile(t, filepath.Join(captureDir, "build-cwd"), repoRoot+"\n")
 
-	buildArgs := strings.Split(strings.TrimSpace(readHermeticRunnerFile(t, filepath.Join(captureDir, "build-args"))), "\n")
+	buildArgsRaw := readHermeticRunnerFile(t, filepath.Join(captureDir, "build-args"))
+	buildArgs := strings.Split(strings.TrimSpace(buildArgsRaw), "\n")
 	if len(buildArgs) != 6 || buildArgs[0] != "build" || buildArgs[1] != "-tags" ||
 		buildArgs[2] != "goolm,stdjson" || buildArgs[3] != "-o" ||
 		buildArgs[4] != filepath.Join(testRoot, "bin", "picoclaw") || buildArgs[5] != "./cmd/picoclaw" {
