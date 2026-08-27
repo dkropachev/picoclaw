@@ -15,8 +15,9 @@ import type {
   WorkflowDevelopmentSession,
   WorkflowDevelopmentTestReconciliation,
 } from "@/api/workflows"
-import type { WorkflowsRouteSearch } from "@/components/workflows/workflow-route-search"
-import { WorkflowsPage } from "@/components/workflows/workflows-page"
+import { WorkflowAuthoringPage } from "@/components/workflows/workflow-authoring-page"
+
+type WorkflowsRouteSearch = { run?: string }
 
 const workflowMocks = vi.hoisted(() => ({
   checkWorkflowDependencies: vi.fn(),
@@ -99,7 +100,7 @@ function developmentSession(): WorkflowDevelopmentSession {
   }
 }
 
-describe("WorkflowsPage draft-test reconciliation", () => {
+describe("WorkflowAuthoringPage draft-test reconciliation", () => {
   beforeEach(() => {
     for (const mock of [
       ...Object.values(workflowMocks),
@@ -165,10 +166,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
         name: `Open reconciled run ${runID}`,
       }),
     )
-    expect(onSearchChange).toHaveBeenCalledWith(
-      { mode: "operate", run: runID },
-      false,
-    )
+    expect(onSearchChange).toHaveBeenCalledWith({ run: runID }, false)
   })
 
   it("warns for an accepted degraded launch and still selects its durable run", async () => {
@@ -233,7 +231,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     })
     expect(screen.getByRole("alert")).toHaveTextContent(reconciliation.message)
     expect(toastMocks.error).not.toHaveBeenCalled()
-    expect(onSearchChange).toHaveBeenCalledWith({ run: runID }, false)
+    expect(onSearchChange).not.toHaveBeenCalled()
   })
 
   it("preserves the editor and records the run while a truncated 202 refetches", async () => {
@@ -298,7 +296,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     expect(screen.getAllByText(runID, { exact: true }).length).toBeGreaterThan(
       0,
     )
-    expect(onSearchChange).toHaveBeenCalledWith({ run: runID }, false)
+    expect(onSearchChange).not.toHaveBeenCalled()
     expect(toastMocks.warning).toHaveBeenCalledWith(
       truncatedResponseReconciliation.message,
     )
@@ -404,7 +402,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     expect(onSearchChange).not.toHaveBeenCalledWith({ run: runID }, false)
   })
 
-  it("blocks draft actions and mode changes while builder edits are pending", async () => {
+  it("blocks draft actions while builder edits are pending", async () => {
     const session = developmentSession()
     workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
     const onSearchChange = vi.fn()
@@ -433,53 +431,11 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     ]) {
       expect(screen.getByRole("button", { name })).toBeDisabled()
     }
-    expect(screen.getByRole("button", { name: "Refresh" })).toBeDisabled()
-
     await user.click(screen.getByRole("tab", { name: "YAML" }))
     expect(screen.getByRole("tab", { name: "Builder" })).toHaveAttribute(
       "aria-selected",
       "true",
     )
-    expect(toastMocks.warning).toHaveBeenCalledWith(
-      "Apply or reset the trigger builder changes before leaving or running another draft action.",
-    )
-
-    onSearchChange.mockClear()
-    await user.click(screen.getByRole("button", { name: "Operate" }))
-    expect(onSearchChange).not.toHaveBeenCalled()
-    expect(toastMocks.warning).toHaveBeenLastCalledWith(
-      "Apply or reset the trigger builder changes before leaving or running another draft action.",
-    )
-  })
-
-  it("retains builder edits when browser navigation requests Operate mode", async () => {
-    const session = developmentSession()
-    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
-    const onSearchChange = vi.fn()
-    const user = userEvent.setup()
-    const view = renderWorkflowsPage(onSearchChange)
-
-    await user.click(await screen.findByRole("tab", { name: "Builder" }))
-    const manualSwitch = await screen.findByRole("switch", {
-      name: "Enable manual trigger",
-    })
-    await user.click(manualSwitch)
-    await screen.findByText("Structured builder changes are pending.")
-    onSearchChange.mockClear()
-
-    view.rerenderPage({ mode: "operate" })
-
-    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({}, true))
-    expect(screen.getByRole("tab", { name: "Builder" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    )
-    expect(
-      screen.getByRole("switch", { name: "Enable manual trigger" }),
-    ).toBeChecked()
-    expect(
-      screen.getByText("Structured builder changes are pending."),
-    ).toBeInTheDocument()
     expect(toastMocks.warning).toHaveBeenCalledWith(
       "Apply or reset the trigger builder changes before leaving or running another draft action.",
     )
@@ -701,7 +657,6 @@ function triggerSimulationResponse() {
 
 function renderWorkflowsPage(
   onSearchChange: (search: WorkflowsRouteSearch, replace?: boolean) => void,
-  search: WorkflowsRouteSearch = {},
 ) {
   const client = new QueryClient({
     defaultOptions: {
@@ -709,17 +664,16 @@ function renderWorkflowsPage(
       mutations: { retry: false },
     },
   })
-  const page = (nextSearch: WorkflowsRouteSearch) => (
+  const page = () => (
     <QueryClientProvider client={client}>
-      <WorkflowsPage search={nextSearch} onSearchChange={onSearchChange} />
+      <WorkflowAuthoringPage
+        onOpenRun={(runID) => onSearchChange({ run: runID }, false)}
+      />
     </QueryClientProvider>
   )
-  const view = render(page(search))
+  const view = render(page())
   return {
     ...view,
     client,
-    rerenderPage(nextSearch: WorkflowsRouteSearch) {
-      view.rerender(page(nextSearch))
-    },
   }
 }

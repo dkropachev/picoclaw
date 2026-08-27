@@ -1329,7 +1329,7 @@ func writeAcceptedReviewedWorkflowDevelopmentTestRun(
 		"result": runningResult,
 	}
 	if session != nil {
-		payload["session"] = session
+		payload["session"] = projectWorkflowDevelopmentSession(session)
 	}
 	if session == nil {
 		runID := ""

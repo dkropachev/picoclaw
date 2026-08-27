@@ -24,8 +24,11 @@ func TestReviseWorkflowDevelopmentAPIPreservesExactTrailingYAMLBytes(t *testing.
 	previousDraftRevision := session.DraftRevision
 	exactYAML := session.YAML + " \t\n\n"
 	body, err := json.Marshal(map[string]any{
-		"target_ref": session.TargetWorkflowRef,
-		"yaml":       exactYAML,
+		"session_id":                session.ID,
+		"expected_session_revision": session.SessionRevision,
+		"expected_draft_revision":   session.DraftRevision,
+		"target_ref":                session.TargetWorkflowRef,
+		"yaml":                      exactYAML,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +38,7 @@ func TestReviseWorkflowDevelopmentAPIPreservesExactTrailingYAMLBytes(t *testing.
 		"/api/workflows/development/revise",
 		bytes.NewReader(body),
 	)
+	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	handler.handleReviseWorkflowDevelopment(recorder, request)
 	if recorder.Code != http.StatusOK {

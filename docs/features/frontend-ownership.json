@@ -161,7 +161,7 @@
       "patterns": [
         "web/frontend/src/api/workflows.ts",
         "web/frontend/src/components/workflows/**",
-        "web/frontend/src/routes/agent/workflows.tsx"
+        "web/frontend/src/routes/agent/workflows*.tsx"
       ]
     },
     {

@@ -111,6 +111,13 @@ type WorkflowDevelopmentTestDraftFence struct {
 	ExpectedDraftRevision   string `json:"expected_draft_revision"`
 }
 
+// WorkflowDevelopmentDiscardRequest fences browser discard to one exact
+// active singleton session revision. Both fields are required and opaque.
+type WorkflowDevelopmentDiscardRequest struct {
+	SessionID               string `json:"session_id"`
+	ExpectedSessionRevision string `json:"expected_session_revision"`
+}
+
 type WorkflowDevelopmentPublishResult struct {
 	WorkflowRef string                      `json:"workflow_ref"`
 	Session     *WorkflowDevelopmentSession `json:"session"`
@@ -362,6 +369,37 @@ func ValidateWorkflowDevelopment(
 	if sessionErr != nil {
 		return nil, sessionErr
 	}
+	return validateWorkflowDevelopmentLocked(workspace, session, opts...)
+}
+
+// ValidateWorkflowDevelopmentFenced validates only when the active singleton
+// session still matches the exact browser draft snapshot. The comparison and
+// write happen under the same workspace mutation lock.
+func ValidateWorkflowDevelopmentFenced(
+	workspace string,
+	fence WorkflowDevelopmentTestDraftFence,
+	opts ...LocalOption,
+) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	session, sessionErr := requireActiveDevelopment(workspace)
+	if sessionErr != nil {
+		return nil, sessionErr
+	}
+	if !workflowDevelopmentTestDraftFenceMatches(session, fence) {
+		return nil, ErrWorkflowDevelopmentFenceMismatch
+	}
+	return validateWorkflowDevelopmentLocked(workspace, session, opts...)
+}
+
+func validateWorkflowDevelopmentLocked(
+	workspace string,
+	session *WorkflowDevelopmentSession,
+	opts ...LocalOption,
+) (*WorkflowDevelopmentSession, error) {
 	if err := ensureNoCurrentRunningDevelopmentTest(session); err != nil {
 		return nil, err
 	}
@@ -1105,12 +1143,42 @@ func DiscardWorkflowDevelopment(workspace string) (*WorkflowDevelopmentSession, 
 	if err != nil {
 		return nil, err
 	}
-	if archiveErr := archiveDevelopmentSession(workspace, session, "discarded"); archiveErr != nil {
-		return nil, archiveErr
+	return discardWorkflowDevelopmentLocked(workspace, session)
+}
+
+// DiscardWorkflowDevelopmentFenced discards only when the exact active
+// singleton session and revision still match the browser snapshot.
+func DiscardWorkflowDevelopmentFenced(
+	workspace string,
+	request WorkflowDevelopmentDiscardRequest,
+) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
 	}
+	defer unlock()
+	session, err := requireActiveDevelopment(workspace)
+	if err != nil {
+		return nil, err
+	}
+	if request.SessionID == "" || request.SessionID != session.ID ||
+		request.ExpectedSessionRevision == "" ||
+		request.ExpectedSessionRevision != session.SessionRevision {
+		return nil, ErrWorkflowSessionRevisionMismatch
+	}
+	return discardWorkflowDevelopmentLocked(workspace, session)
+}
+
+func discardWorkflowDevelopmentLocked(
+	workspace string,
+	session *WorkflowDevelopmentSession,
+) (*WorkflowDevelopmentSession, error) {
 	activePath, err := checkedActiveDevelopmentPath(workspace)
 	if err != nil {
 		return nil, err
+	}
+	if archiveErr := archiveDevelopmentSession(workspace, session, "discarded"); archiveErr != nil {
+		return nil, archiveErr
 	}
 	if err := fileutil.RemoveDurable(activePath); err != nil && !os.IsNotExist(err) {
 		return nil, err

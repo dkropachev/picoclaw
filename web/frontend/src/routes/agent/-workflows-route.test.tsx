@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import {
   RouterProvider,
   createMemoryHistory,
@@ -9,9 +9,11 @@ import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { describe, expect, it, vi } from "vitest"
 
+import type { WorkflowDefinitionSummary } from "@/api/workflows"
+import type { CollectionRouteSearch } from "@/hooks/use-collection-route-state"
 import { routeTree } from "@/routeTree.gen"
 
-import type { WorkflowsRouteSearch } from "../../components/workflows/workflow-route-search"
+const workflowID = "a".repeat(43)
 
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
@@ -26,127 +28,118 @@ vi.mock("@/components/app-layout", () => ({
   ),
 }))
 
-vi.mock("@/components/workflows/workflows-page", () => ({
-  WorkflowsPage: ({
+vi.mock("@/components/workflows/workflow-collections", () => ({
+  WorkflowDefinitionsCollectionPage: ({
     search,
     onSearchChange,
+    onOpen,
   }: {
-    search: WorkflowsRouteSearch
-    onSearchChange: (search: WorkflowsRouteSearch, replace?: boolean) => void
+    search: CollectionRouteSearch
+    onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
+    onOpen: (workflow: WorkflowDefinitionSummary) => void
   }) => (
     <div>
       <output data-testid="workflow-search">{JSON.stringify(search)}</output>
       <button
         type="button"
-        onClick={() =>
-          onSearchChange({
-            mode: "operate",
-            workflow: "workflows/github-issue-triage.yml",
-            run: "wr_linked-run_01",
-          })
-        }
+        onClick={() => onSearchChange({ ...search, q: "status = valid" }, true)}
       >
-        Select linked run
+        Filter workflows
       </button>
       <button
         type="button"
-        onClick={() => onSearchChange({ ...search, q: "failed" }, true)}
+        onClick={() =>
+          onOpen({
+            id: workflowID,
+            ref: "workflows/review.yml",
+            status: "valid",
+            trigger: "manual",
+            inputs: 0,
+            secrets: 0,
+          })
+        }
       >
-        Filter runs
+        Open workflow
       </button>
     </div>
   ),
 }))
 
-vi.mock("@/features/chat/controller", () => ({
-  initializeChatStore: vi.fn(),
-}))
+vi.mock("@/features/chat/controller", () => ({ initializeChatStore: vi.fn() }))
 
 function renderWorkflowRoute(pathname: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
   const router = createRouter({
     routeTree,
     history: createMemoryHistory({ initialEntries: [pathname] }),
     context: {
-      queryClient: new QueryClient({
-        defaultOptions: { queries: { retry: false } },
-      }),
+      queryClient,
     },
   })
-
-  render(<RouterProvider router={router} />)
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  )
   return router
 }
 
-describe("workflow route navigation", () => {
-  it("restores the exact event-dashboard deep link", async () => {
+describe("workflow collection routes", () => {
+  it("hard-cuts legacy mode, workflow, and run search state", async () => {
     const router = renderWorkflowRoute(
-      "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_linked-run_01",
+      "/agent/workflows?mode=operate&workflow=workflows%2Freview.yml&run=wr_old&q=status%20%3D%20valid&view=grid",
     )
 
     expect(await screen.findByTestId("workflow-search")).toHaveTextContent(
-      JSON.stringify({
-        mode: "operate",
-        workflow: "workflows/github-issue-triage.yml",
-        run: "wr_linked-run_01",
+      JSON.stringify({ q: "status = valid", view: "grid" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({
+        q: "status = valid",
+        view: "grid",
       }),
     )
-    expect(router.state.location.search).toEqual({
-      mode: "operate",
-      workflow: "workflows/github-issue-triage.yml",
-      run: "wr_linked-run_01",
-    })
   })
 
-  it("normalizes invalid search values away", async () => {
-    const router = renderWorkflowRoute(
-      "/agent/workflows?mode=invalid&workflow=%20%20&run=other&q=%20",
+  it("injects the canonical default query and drops invalid views", async () => {
+    const router = renderWorkflowRoute("/agent/workflows?view=other")
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ q: "ORDER BY ref ASC" }),
     )
-
-    await waitFor(() => {
-      expect(screen.getByTestId("workflow-search")).toHaveTextContent("{}")
-    })
-    expect(router.state.matches.at(-1)?.search).toEqual({})
-    expect(router.state.location.search).toEqual({})
   })
 
-  it("removes the default develop mode from the canonical URL", async () => {
-    const router = renderWorkflowRoute("/agent/workflows?mode=develop")
-
-    await waitFor(() => {
-      expect(router.state.location.search).toEqual({})
-    })
-    expect(screen.getByTestId("workflow-search")).toHaveTextContent("{}")
-  })
-
-  it("pushes explicit selection and replaces live filter edits", async () => {
+  it("replaces live query edits", async () => {
     const router = renderWorkflowRoute("/agent/workflows")
     const user = userEvent.setup()
-
-    await user.click(
-      await screen.findByRole("button", { name: "Select linked run" }),
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ q: "ORDER BY ref ASC" }),
     )
-    await waitFor(() => {
-      expect(router.state.location.search).toEqual({
-        mode: "operate",
-        workflow: "workflows/github-issue-triage.yml",
-        run: "wr_linked-run_01",
-      })
-    })
-    expect(router.history.canGoBack()).toBe(true)
+    await user.click(
+      await screen.findByRole("button", { name: "Filter workflows" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ q: "status = valid" }),
+    )
+  })
 
-    await user.click(screen.getByRole("button", { name: "Filter runs" }))
-    await waitFor(() => {
-      expect(router.state.location.search).toEqual({
-        mode: "operate",
-        workflow: "workflows/github-issue-triage.yml",
-        run: "wr_linked-run_01",
-        q: "failed",
-      })
-    })
-
-    router.history.back()
-    await waitFor(() => {
-      expect(router.state.location.search).toEqual({})
+  it("preserves collection state through direct stable-ID detail", async () => {
+    const router = renderWorkflowRoute(
+      "/agent/workflows?q=status%20%3D%20valid&view=table",
+    )
+    const user = userEvent.setup()
+    await user.click(
+      await screen.findByRole("button", { name: "Open workflow" }),
+    )
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        `/agent/workflows/${workflowID}`,
+      ),
+    )
+    expect(router.state.location.search).toEqual({
+      q: "status = valid",
+      view: "table",
     })
   })
 })

@@ -1135,7 +1135,7 @@ export function ModelEvaluationsPage({
                             <li key={runID}>
                               <a
                                 className="text-primary underline underline-offset-2"
-                                href={`/agent/workflows?mode=operate&run=${encodeURIComponent(runID)}`}
+                                href={`/agent/workflows/runs/${encodeURIComponent(runID)}`}
                               >
                                 {runID}
                               </a>

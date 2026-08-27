@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 const (
@@ -162,6 +163,7 @@ type DispatchView struct {
 	ID               string                  `json:"id"`
 	EventID          string                  `json:"event_id"`
 	WorkflowRef      string                  `json:"workflow_ref"`
+	WorkflowID       string                  `json:"workflow_id,omitempty"`
 	WorkflowRevision string                  `json:"workflow_revision,omitempty"`
 	RunID            string                  `json:"run_id"`
 	Status           eventing.DispatchStatus `json:"status"`
@@ -500,10 +502,12 @@ func projectSubject(subject *eventing.Subject) *SubjectView {
 }
 
 func projectDispatch(dispatch eventing.DispatchMetadata) DispatchView {
+	workflowID, _ := workflows.WorkflowDefinitionID(dispatch.WorkflowRef)
 	return DispatchView{
 		ID:               dispatch.ID,
 		EventID:          dispatch.EventID,
 		WorkflowRef:      dispatch.WorkflowRef,
+		WorkflowID:       workflowID,
 		WorkflowRevision: dispatch.WorkflowRevision,
 		RunID:            dispatch.RunID,
 		Status:           dispatch.Status,

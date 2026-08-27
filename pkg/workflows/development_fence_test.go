@@ -216,3 +216,71 @@ func TestReviseWorkflowDevelopmentFencedAppliesExactRevision(t *testing.T) {
 		t.Fatalf("revised session = %#v", revised)
 	}
 }
+
+func TestValidateWorkflowDevelopmentFencedRejectsReplacedSessionWithoutWrite(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	first, err := StartWorkflowDevelopment(
+		context.Background(),
+		workspace,
+		RuntimeCompatibility{},
+		WorkflowDevelopmentStartRequest{
+			Prompt:    "first",
+			TargetRef: "workflows/first.yml",
+		},
+	)
+	if err != nil {
+		t.Fatalf("StartWorkflowDevelopment(first) error = %v", err)
+	}
+	if _, err = DiscardWorkflowDevelopment(workspace); err != nil {
+		t.Fatalf("DiscardWorkflowDevelopment() error = %v", err)
+	}
+	second, err := StartWorkflowDevelopment(
+		context.Background(),
+		workspace,
+		RuntimeCompatibility{},
+		WorkflowDevelopmentStartRequest{
+			Prompt:    "second",
+			TargetRef: "workflows/second.yml",
+		},
+	)
+	if err != nil {
+		t.Fatalf("StartWorkflowDevelopment(second) error = %v", err)
+	}
+	activePath, err := checkedActiveDevelopmentPath(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(activePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validated, validateErr := ValidateWorkflowDevelopmentFenced(
+		workspace,
+		WorkflowDevelopmentTestDraftFence{
+			SessionID:               first.ID,
+			ExpectedSessionRevision: first.SessionRevision,
+			ExpectedDraftRevision:   first.DraftRevision,
+		},
+	)
+	if validated != nil ||
+		!errors.Is(validateErr, ErrWorkflowDevelopmentFenceMismatch) {
+		t.Fatalf(
+			"ValidateWorkflowDevelopmentFenced() = %#v, %v",
+			validated,
+			validateErr,
+		)
+	}
+	after, err := os.ReadFile(activePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("stale validation changed replacement session")
+	}
+	active, err := GetWorkflowDevelopmentSession(workspace)
+	if err != nil || active == nil || active.ID != second.ID {
+		t.Fatalf("active session = %#v, %v; want %q", active, err, second.ID)
+	}
+}

@@ -4,9 +4,12 @@ import { launcherFetch } from "@/api/http"
 import {
   WorkflowAPIError,
   type WorkflowTriggerSimulationRequest,
+  aiReviseWorkflowDevelopment,
   cancelWorkflowRun,
   checkWorkflowDependencies,
+  discardWorkflowDevelopment,
   executeWorkflowDevelopmentTrigger,
+  getWorkflowDefinition,
   getWorkflowDevelopment,
   getWorkflowRun,
   getWorkflowRunEvents,
@@ -17,6 +20,7 @@ import {
   inspectWorkflowTemplate,
   inspectWorkflowTriggers,
   installWorkflowTemplate,
+  listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowTemplates,
   listWorkflows,
@@ -27,9 +31,11 @@ import {
   renderWorkflowEventTrigger,
   renderWorkflowTrigger,
   retryWorkflowRun,
+  reviseWorkflowDevelopment,
   runWorkflow,
   simulateWorkflowDevelopmentTrigger,
   testWorkflowDevelopment,
+  validateWorkflowDevelopment,
   workflowTriggerSimulationRequestBody,
 } from "@/api/workflows"
 
@@ -137,9 +143,86 @@ describe("workflow API normalization", () => {
     })
   })
 
+  it("loads paged workflow definitions by opaque ID", async () => {
+    const id = "a".repeat(43)
+    const workflow = {
+      id,
+      ref: "workflows/review.yml",
+      name: "Review",
+      status: "valid",
+      trigger: "workflow_call",
+      inputs: 1,
+      secrets: 1,
+      workflow_call: { inputs: {}, secrets: {} },
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          workflows: [workflow],
+          total: 1,
+          next_cursor: "next",
+          canonical_query: 'status = "valid" ORDER BY ref ASC',
+          query_schema: { fields: [] },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ workflow }))
+
+    await expect(
+      listWorkflowDefinitions({
+        query: "status = valid ORDER BY ref ASC",
+        cursor: "cursor",
+        limit: 25,
+      }),
+    ).resolves.toMatchObject({ workflows: [workflow], total: 1 })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/definitions?query=status+%3D+valid+ORDER+BY+ref+ASC&cursor=cursor&limit=25",
+      undefined,
+    )
+    await expect(getWorkflowDefinition(id)).resolves.toEqual(workflow)
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      `/api/workflows/definitions/${id}`,
+      undefined,
+    )
+  })
+
+  it("rejects malformed and duplicate workflow collection identities", async () => {
+    const workflow = {
+      id: "a".repeat(43),
+      ref: "workflows/review.yml",
+      status: "valid",
+      trigger: "manual",
+      inputs: 0,
+      secrets: 0,
+    }
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        workflows: [workflow, workflow],
+        total: 2,
+        canonical_query: "ORDER BY ref ASC",
+        query_schema: { fields: [] },
+      }),
+    )
+    await expect(listWorkflowDefinitions()).rejects.toMatchObject({
+      status: 502,
+    })
+  })
+
   it("normalizes nullable workflow run payloads", async () => {
-    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse({ runs: null }))
-    await expect(listWorkflowRuns()).resolves.toEqual({ runs: [] })
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        runs: null,
+        total: 0,
+        canonical_query: "ORDER BY created DESC",
+        query_schema: { fields: [] },
+      }),
+    )
+    await expect(listWorkflowRuns()).resolves.toMatchObject({
+      runs: [],
+      total: 0,
+      canonical_query: "ORDER BY created DESC",
+    })
 
     mockedLauncherFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -158,6 +241,144 @@ describe("workflow API normalization", () => {
       child_run_ids: [],
       jobs: {},
       steps: {},
+    })
+  })
+
+  it("keeps workflow run collection rows concise", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        runs: [
+          {
+            id: "wr_summary",
+            workflow_id: "a".repeat(43),
+            workflow_ref: "workflows/summary.yml",
+            status: "failed",
+            session: "workflow:summary",
+            origin: {
+              kind: "external_event",
+              event_id: "ev_summary",
+              root_run_id: "wr_summary",
+            },
+            created_at: "2026-07-16T12:00:00Z",
+            updated_at: "2026-07-16T12:00:01Z",
+            completed_at: "2026-07-16T12:00:01Z",
+            delivery: { channel: "private" },
+            event: { private: true },
+            inputs: { private: true },
+            outputs: { private: true },
+            jobs: { private: {} },
+            steps: { private: {} },
+            error: "private diagnostic",
+            cancel_reason: "private reason",
+          },
+        ],
+        total: 1,
+        canonical_query: "ORDER BY created DESC",
+        query_schema: { fields: [] },
+      }),
+    )
+
+    const page = await listWorkflowRuns()
+    expect(page.runs).toEqual([
+      {
+        id: "wr_summary",
+        workflow_id: "a".repeat(43),
+        workflow_ref: "workflows/summary.yml",
+        status: "failed",
+        session: "workflow:summary",
+        origin: {
+          kind: "external_event",
+          event_id: "ev_summary",
+          root_run_id: "wr_summary",
+        },
+        created_at: "2026-07-16T12:00:00Z",
+        updated_at: "2026-07-16T12:00:01Z",
+        completed_at: "2026-07-16T12:00:01Z",
+      },
+    ])
+  })
+
+  it("sends exact draft fences for save, validation, and AI revision", async () => {
+    const fence = {
+      session_id: "dev_exact",
+      expected_session_revision: "sha256:session-exact",
+      expected_draft_revision: "sha256:draft-exact",
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse({ session: { id: "dev_exact" } }))
+      .mockResolvedValueOnce(jsonResponse({ session: { id: "dev_exact" } }))
+      .mockResolvedValueOnce(jsonResponse({ session: { id: "dev_exact" } }))
+
+    await reviseWorkflowDevelopment({
+      ...fence,
+      prompt: "save exact",
+      yaml: "name: Exact\n",
+    })
+    await validateWorkflowDevelopment(fence)
+    await aiReviseWorkflowDevelopment({ ...fence, prompt: "AI exact" })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/development/revise",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          ...fence,
+          prompt: "save exact",
+          yaml: "name: Exact\n",
+        }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workflows/development/validate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(fence),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/workflows/development/ai-revise",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ ...fence, prompt: "AI exact" }),
+      }),
+    )
+  })
+
+  it("exposes only bounded stable structured workflow error codes", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "workflow_development_fence_mismatch",
+            message: "Workflow development session changed",
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { code: "INVALID CODE WITH SPACES", message: "Invalid response" },
+          409,
+        ),
+      )
+    const fence = {
+      session_id: "dev_stale",
+      expected_session_revision: "stale-session",
+      expected_draft_revision: "stale-draft",
+    }
+
+    await expect(validateWorkflowDevelopment(fence)).rejects.toMatchObject({
+      status: 409,
+      code: "workflow_development_fence_mismatch",
+      message: "Workflow development session changed",
+    })
+    await expect(validateWorkflowDevelopment(fence)).rejects.toMatchObject({
+      status: 409,
+      code: undefined,
+      message: "Invalid response",
     })
   })
 
@@ -285,6 +506,37 @@ describe("workflow API normalization", () => {
       cancelWorkflowRun("wr_running", ` ${"é".repeat(513)} `),
     ).rejects.toMatchObject({ status: 400 })
     expect(mockedLauncherFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("sends an exact discard fence and surfaces structured conflicts", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "workflow_development_conflict",
+          message: "Workflow development changed elsewhere.",
+        },
+        409,
+      ),
+    )
+    await expect(
+      discardWorkflowDevelopment({
+        session_id: "dev_1",
+        expected_session_revision: "session-1",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Workflow development changed elsewhere.",
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/workflows/development/discard",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          session_id: "dev_1",
+          expected_session_revision: "session-1",
+        }),
+      }),
+    )
   })
 
   it("keeps exact run lookup status and identity authoritative", async () => {

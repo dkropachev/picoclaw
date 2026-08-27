@@ -929,13 +929,21 @@ func TestEventBackedDraftFailureIsSafeAcrossPostRunListEventsAndSSE(t *testing.T
 				httptest.NewRequest(http.MethodGet, "/api/workflows/runs", nil),
 			)
 			var listed struct {
-				Runs []workflows.Run `json:"runs"`
+				Runs []workflowRunCollectionSummary `json:"runs"`
 			}
 			if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil ||
 				len(listed.Runs) != 1 {
 				t.Fatalf("list response = %#v, error=%v", listed, err)
 			}
-			assertSafeEventDraftRunProjection(t, &listed.Runs[0])
+			if listed.Runs[0].ID != runID || listed.Runs[0].Status != workflows.RunStatusFailed ||
+				listed.Runs[0].Origin == nil ||
+				listed.Runs[0].Origin.Kind != workflows.RunOriginExternalEventDraftTest ||
+				strings.Contains(list.Body.String(), `"error"`) ||
+				strings.Contains(list.Body.String(), `"event"`) ||
+				strings.Contains(list.Body.String(), `"jobs"`) ||
+				strings.Contains(list.Body.String(), `"steps"`) {
+				t.Fatalf("unsafe run-list summary = %s", list.Body.String())
+			}
 
 			events := httptest.NewRecorder()
 			eventsReq := httptest.NewRequest(
@@ -1062,13 +1070,19 @@ func TestUnsafeFallbackAncestryStaysMaskedAcrossWorkflowRunHTTP(t *testing.T) {
 				)
 			}
 			var listed struct {
-				Runs []workflows.Run `json:"runs"`
+				Runs []workflowRunCollectionSummary `json:"runs"`
 			}
 			if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil ||
 				len(listed.Runs) != 1 {
 				t.Fatalf("list response = %#v, error=%v", listed, err)
 			}
-			assertUnsafeFallbackRunMasked(t, &listed.Runs[0])
+			if listed.Runs[0].ID != run.ID || listed.Runs[0].Origin != nil ||
+				strings.Contains(list.Body.String(), `"error"`) ||
+				strings.Contains(list.Body.String(), `"event"`) ||
+				strings.Contains(list.Body.String(), `"jobs"`) ||
+				strings.Contains(list.Body.String(), `"steps"`) {
+				t.Fatalf("unsafe fallback run-list summary = %s", list.Body.String())
+			}
 
 			events := httptest.NewRecorder()
 			eventsRequest := httptest.NewRequest(
@@ -1338,20 +1352,25 @@ func TestPrunedTrustedOriginKindControlsWorkflowRunHTTPFamily(t *testing.T) {
 		)
 	}
 	var listResponse struct {
-		Runs []workflows.Run `json:"runs"`
+		Runs []workflowRunCollectionSummary `json:"runs"`
 	}
 	if err := json.Unmarshal(listRecorder.Body.Bytes(), &listResponse); err != nil {
 		t.Fatalf("list JSON error = %v", err)
 	}
-	listed := make(map[string]workflows.Run, len(listResponse.Runs))
+	listed := make(map[string]workflowRunCollectionSummary, len(listResponse.Runs))
 	for _, run := range listResponse.Runs {
 		listed[run.ID] = run
 	}
-	if listed[productionChildID].Error != eventDraftPrivateAPIDiagnostic {
+	if listed[productionChildID].Origin == nil ||
+		listed[productionChildID].Origin.Kind != workflows.RunOriginExternalEvent {
 		t.Fatalf("pruned production list = %#v", listed[productionChildID])
 	}
-	if listed[draftChildID].Error != workflows.EventBackedDraftRunErrorDiagnostic {
+	if listed[draftChildID].Origin == nil ||
+		listed[draftChildID].Origin.Kind != workflows.RunOriginExternalEventDraftTest {
 		t.Fatalf("pruned draft list = %#v", listed[draftChildID])
+	}
+	if strings.Contains(listRecorder.Body.String(), `"error"`) {
+		t.Fatalf("pruned run list leaked diagnostics: %s", listRecorder.Body.String())
 	}
 
 	getEvents := func(runID string) []workflows.RunEvent {

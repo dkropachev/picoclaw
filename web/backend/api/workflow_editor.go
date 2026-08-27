@@ -81,7 +81,7 @@ func (h *Handler) registerWorkflowEditorRoutes(mux *http.ServeMux) {
 	)
 	mux.HandleFunc(
 		"POST /api/workflows/development/test/execute",
-		h.handleExecuteWorkflowDevelopmentTest,
+		h.requireCollectionMutationOrigin(h.handleExecuteWorkflowDevelopmentTest),
 	)
 	mux.HandleFunc(
 		"POST /api/workflows/development/event-trigger/inspect",

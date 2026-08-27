@@ -25,6 +25,10 @@ type workflowHumanTaskCancelRequest struct {
 
 func (h *Handler) handleListWorkflowHumanTasks(w http.ResponseWriter, r *http.Request) {
 	setWorkflowHumanTaskResponseHeaders(w)
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 	_, store, executor, err := h.workflowRuntime(r.Context())
 	if err != nil {
 		writeWorkflowJSONStatus(w, http.StatusInternalServerError, map[string]any{
@@ -48,6 +52,10 @@ func (h *Handler) handleListWorkflowHumanTasks(w http.ResponseWriter, r *http.Re
 
 func (h *Handler) handleResumeWorkflowHumanTask(w http.ResponseWriter, r *http.Request) {
 	setWorkflowHumanTaskResponseHeaders(w)
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 	var request workflows.HumanTaskResumeRequest
 	if err := decodeWorkflowHumanTaskRequest(w, r, &request); err != nil {
 		writeWorkflowHumanTaskDecodeError(w, err, "invalid_task_resume_request")
@@ -133,6 +141,10 @@ func (h *Handler) handleResumeWorkflowHumanTask(w http.ResponseWriter, r *http.R
 
 func (h *Handler) handleCancelWorkflowHumanTask(w http.ResponseWriter, r *http.Request) {
 	setWorkflowHumanTaskResponseHeaders(w)
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 	var request workflowHumanTaskCancelRequest
 	if err := decodeWorkflowHumanTaskRequest(w, r, &request); err != nil {
 		writeWorkflowHumanTaskDecodeError(w, err, "invalid_task_cancel_request")

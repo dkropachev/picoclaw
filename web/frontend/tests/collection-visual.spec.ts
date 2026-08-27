@@ -25,6 +25,8 @@ const pilots = [
   },
   { key: "skills", route: "/agent/skills" },
   { key: "tools", route: "/agent/tools" },
+  { key: "workflow-definitions", route: "/agent/workflows" },
+  { key: "workflow-runs", route: "/agent/workflows/runs" },
 ] as const
 
 for (const pilot of pilots) {

@@ -1,3 +1,9 @@
+import {
+  type CollectionListRequest,
+  type CollectionPageMetadata,
+  collectionListURL,
+  collectionRequest,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export interface WorkflowDefinition {
@@ -7,6 +13,18 @@ export interface WorkflowDefinition {
   error?: string
   workflow_call?: WorkflowCallDefinition
   event_trigger?: WorkflowEventTrigger | null
+}
+
+export interface WorkflowDefinitionSummary extends WorkflowDefinition {
+  id: string
+  status: string
+  trigger: string
+  inputs: number
+  secrets: number
+}
+
+export interface WorkflowDefinitionsPage extends CollectionPageMetadata {
+  workflows: WorkflowDefinitionSummary[]
 }
 
 export interface WorkflowCallDefinition {
@@ -93,6 +111,7 @@ export interface WorkflowDevelopmentSession {
   status: string
   prompt?: string
   source_workflow_ref?: string
+  source_workflow_id?: string
   target_workflow_ref: string
   target_picoclaw_version?: string
   target_git_commit?: string
@@ -404,16 +423,23 @@ export interface WorkflowEventTriggerMatchResult {
   validation?: WorkflowDevelopmentValidation
 }
 
-export interface WorkflowRun {
+export interface WorkflowRunSummary {
   id: string
+  workflow_id?: string
   workflow_ref: string
   status: string
   origin?: WorkflowRunOrigin
+  session?: string
+  created_at: string
+  updated_at: string
+  completed_at?: string
+}
+
+export interface WorkflowRun extends WorkflowRunSummary {
   parent_run_id?: string
   child_run_ids?: string[]
   caller_job_id?: string
   retry_of_run_id?: string
-  session?: string
   delivery?: Record<string, unknown>
   event?: Record<string, unknown>
   inputs?: Record<string, unknown>
@@ -422,10 +448,11 @@ export interface WorkflowRun {
   steps?: Record<string, WorkflowStepExecution>
   error?: string
   cancel_reason?: string
-  created_at: string
-  updated_at: string
-  completed_at?: string
   cancel_requested_at?: string
+}
+
+export interface WorkflowRunsPage extends CollectionPageMetadata {
+  runs: WorkflowRunSummary[]
 }
 
 export interface WorkflowRunOrigin {
@@ -938,12 +965,15 @@ export interface WorkflowDevelopmentPublishRequest {
   expected_dependency_revision: string
 }
 
-export type WorkflowDeliveryPayload = Record<string, unknown>
-
-export interface WorkflowTriggerSimulationRequestBase {
+export interface WorkflowDevelopmentDraftFence {
   session_id: string
   expected_session_revision: string
   expected_draft_revision: string
+}
+
+export type WorkflowDeliveryPayload = Record<string, unknown>
+
+export interface WorkflowTriggerSimulationRequestBase extends WorkflowDevelopmentDraftFence {
   prompt: string
   target_ref: string
   yaml: string
@@ -1075,16 +1105,19 @@ export interface WorkflowTriggerSimulationResponse {
 
 export class WorkflowAPIError extends Error {
   readonly status: number
+  readonly code?: string
   readonly candidateValidation?: WorkflowDevelopmentValidation
 
   constructor(
     message: string,
     status: number,
     candidateValidation?: WorkflowDevelopmentValidation,
+    code?: string,
   ) {
     super(message)
     this.name = "WorkflowAPIError"
     this.status = status
+    this.code = code
     this.candidateValidation = candidateValidation
   }
 }
@@ -1106,6 +1139,7 @@ export class WorkflowJobsEditorAPIError extends WorkflowAPIError {
 export const WORKFLOW_CANCEL_REASON_MAX_BYTES = 1024
 
 const workflowRunIDPattern = /^wr_[A-Za-z0-9_-]+$/
+const workflowAPIErrorCodePattern = /^[a-z0-9_.-]{1,64}$/
 const maximumWorkflowRunIDBytes = 1024
 
 function validWorkflowRunID(value: string): boolean {
@@ -1124,6 +1158,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       details.message,
       res.status,
       details.candidateValidation,
+      details.code,
     )
   }
   return res.json() as Promise<T>
@@ -1135,15 +1170,27 @@ function apiErrorMessage(text: string, status: number, statusText: string) {
 
 function apiErrorDetails(text: string, status: number, statusText: string) {
   let message = text.trim()
+  let code: string | undefined
   let candidateValidation: WorkflowDevelopmentValidation | undefined
   try {
     const body = JSON.parse(text) as {
+      code?: string
+      message?: string
       error?: string
       errors?: string[]
       candidate_validation?: unknown
     }
-    if (typeof body.error === "string" && body.error.trim() !== "") {
+    code =
+      typeof body.code === "string" &&
+      workflowAPIErrorCodePattern.test(body.code)
+        ? body.code
+        : undefined
+    if (typeof body.message === "string" && body.message.trim() !== "") {
+      message = body.message
+    } else if (typeof body.error === "string" && body.error.trim() !== "") {
       message = body.error
+    } else if (code != null) {
+      message = code.replaceAll("_", " ")
     } else if (Array.isArray(body.errors) && body.errors.length > 0) {
       message = body.errors.join("; ")
     }
@@ -1153,6 +1200,7 @@ function apiErrorDetails(text: string, status: number, statusText: string) {
   }
   return {
     message: message || `API error: ${status} ${statusText}`,
+    code,
     candidateValidation,
   }
 }
@@ -1227,6 +1275,40 @@ export async function listWorkflows(): Promise<{
         ? undefined
         : normalizeWorkflowCompatibilitySummary(payload.compatibility),
   }
+}
+
+export async function listWorkflowDefinitions(
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<WorkflowDefinitionsPage> {
+  const payload = await collectionRequest<unknown>(
+    collectionListURL("/api/workflows/definitions", input),
+    undefined,
+    signal,
+  )
+  return workflowDefinitionsPage(payload)
+}
+
+export async function getWorkflowDefinition(
+  id: string,
+  signal?: AbortSignal,
+): Promise<WorkflowDefinitionSummary> {
+  const payload = await collectionRequest<unknown>(
+    `/api/workflows/definitions/${encodeURIComponent(id)}`,
+    undefined,
+    signal,
+  )
+  if (!isWorkflowRecord(payload) || !isWorkflowRecord(payload.workflow)) {
+    throw malformedWorkflowResponse()
+  }
+  const workflow = workflowDefinitionSummary(payload.workflow)
+  if (workflow.id !== id) {
+    throw new WorkflowAPIError(
+      "The workflow service returned a mismatched definition.",
+      502,
+    )
+  }
+  return workflow
 }
 
 export async function getWorkflowCompatibility(): Promise<WorkflowCompatibilitySummary> {
@@ -1395,12 +1477,14 @@ export async function startWorkflowDevelopment(payload: {
   throw new Error(apiErrorMessage(text, res.status, res.statusText))
 }
 
-export async function reviseWorkflowDevelopment(payload: {
-  prompt?: string
-  target_ref?: string
-  yaml?: string
-  regenerate?: boolean
-}): Promise<{ session: WorkflowDevelopmentSession }> {
+export async function reviseWorkflowDevelopment(
+  payload: WorkflowDevelopmentDraftFence & {
+    prompt?: string
+    target_ref?: string
+    yaml?: string
+    regenerate?: boolean
+  },
+): Promise<{ session: WorkflowDevelopmentSession }> {
   return request("/api/workflows/development/revise", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1526,11 +1610,13 @@ export async function matchWorkflowEventTrigger(
   })
 }
 
-export async function aiReviseWorkflowDevelopment(payload: {
-  prompt?: string
-  target_ref?: string
-  yaml?: string
-}): Promise<{ session: WorkflowDevelopmentSession }> {
+export async function aiReviseWorkflowDevelopment(
+  payload: WorkflowDevelopmentDraftFence & {
+    prompt?: string
+    target_ref?: string
+    yaml?: string
+  },
+): Promise<{ session: WorkflowDevelopmentSession }> {
   return request("/api/workflows/development/ai-revise", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1538,10 +1624,16 @@ export async function aiReviseWorkflowDevelopment(payload: {
   })
 }
 
-export async function validateWorkflowDevelopment(): Promise<{
+export async function validateWorkflowDevelopment(
+  payload: WorkflowDevelopmentDraftFence,
+): Promise<{
   session: WorkflowDevelopmentSession
 }> {
-  return request("/api/workflows/development/validate", { method: "POST" })
+  return request("/api/workflows/development/validate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function testWorkflowDevelopment(payload: {
@@ -1709,6 +1801,7 @@ export async function executeWorkflowDevelopmentTrigger(
 export async function publishWorkflowDevelopment(
   payload: WorkflowDevelopmentPublishRequest,
 ): Promise<{
+  workflow_id: string
   workflow_ref: string
   session: WorkflowDevelopmentSession
 }> {
@@ -1723,10 +1816,17 @@ export async function publishWorkflowDevelopment(
   )
 }
 
-export async function discardWorkflowDevelopment(): Promise<{
+export async function discardWorkflowDevelopment(payload: {
+  session_id: string
+  expected_session_revision: string
+}): Promise<{
   session: WorkflowDevelopmentSession
 }> {
-  return request("/api/workflows/development/discard", { method: "POST" })
+  return request("/api/workflows/development/discard", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function reloadWorkflows(): Promise<WorkflowReloadResult> {
@@ -1784,11 +1884,16 @@ async function workflowRunLaunchResultFromResponse(
   )
 }
 
-export async function listWorkflowRuns(): Promise<{ runs: WorkflowRun[] }> {
-  const payload = await request<{ runs?: WorkflowRun[] | null }>(
-    "/api/workflows/runs",
+export async function listWorkflowRuns(
+  input: CollectionListRequest = {},
+  signal?: AbortSignal,
+): Promise<WorkflowRunsPage> {
+  const payload = await collectionRequest<unknown>(
+    collectionListURL("/api/workflows/runs", input),
+    undefined,
+    signal,
   )
-  return { runs: arrayOrEmpty(payload.runs).map(normalizeWorkflowRun) }
+  return workflowRunsPage(payload)
 }
 
 export async function getWorkflowRun(runID: string): Promise<WorkflowRun> {
@@ -5335,6 +5440,128 @@ function normalizeWorkflowReloadResult(
     workflows: arrayOrEmpty(result.workflows),
     errors: arrayOrEmpty(result.errors),
   }
+}
+
+function workflowDefinitionsPage(value: unknown): WorkflowDefinitionsPage {
+  if (!isWorkflowRecord(value)) throw malformedWorkflowResponse()
+  const raw = value.workflows == null ? [] : value.workflows
+  if (!Array.isArray(raw)) throw malformedWorkflowResponse()
+  const workflows = raw.map(workflowDefinitionSummary)
+  rejectDuplicateWorkflowIDs(workflows.map((workflow) => workflow.id))
+  return {
+    ...collectionPageMetadata(value),
+    workflows,
+  }
+}
+
+function workflowDefinitionSummary(value: unknown): WorkflowDefinitionSummary {
+  if (
+    !isWorkflowRecord(value) ||
+    typeof value.id !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value.id) ||
+    typeof value.ref !== "string" ||
+    value.ref === "" ||
+    (value.name != null && typeof value.name !== "string") ||
+    typeof value.status !== "string" ||
+    value.status === "" ||
+    typeof value.trigger !== "string" ||
+    value.trigger === "" ||
+    !nonnegativeInteger(value.inputs) ||
+    !nonnegativeInteger(value.secrets)
+  ) {
+    throw malformedWorkflowResponse()
+  }
+  return value as unknown as WorkflowDefinitionSummary
+}
+
+function workflowRunsPage(value: unknown): WorkflowRunsPage {
+  if (!isWorkflowRecord(value)) throw malformedWorkflowResponse()
+  const raw = value.runs == null ? [] : value.runs
+  if (!Array.isArray(raw)) throw malformedWorkflowResponse()
+  const runs = raw.map((run) => {
+    if (
+      !isWorkflowRecord(run) ||
+      typeof run.id !== "string" ||
+      !validWorkflowRunID(run.id) ||
+      typeof run.workflow_ref !== "string" ||
+      run.workflow_ref === "" ||
+      typeof run.status !== "string" ||
+      run.status === "" ||
+      typeof run.created_at !== "string" ||
+      typeof run.updated_at !== "string" ||
+      (run.workflow_id != null &&
+        (typeof run.workflow_id !== "string" ||
+          !/^[A-Za-z0-9_-]{43}$/.test(run.workflow_id)))
+    ) {
+      throw malformedWorkflowResponse()
+    }
+    return {
+      id: run.id,
+      ...(typeof run.workflow_id === "string"
+        ? { workflow_id: run.workflow_id }
+        : {}),
+      workflow_ref: run.workflow_ref,
+      status: run.status,
+      ...(isWorkflowRecord(run.origin)
+        ? { origin: run.origin as unknown as WorkflowRunOrigin }
+        : {}),
+      ...(typeof run.session === "string" ? { session: run.session } : {}),
+      created_at: run.created_at,
+      updated_at: run.updated_at,
+      ...(typeof run.completed_at === "string"
+        ? { completed_at: run.completed_at }
+        : {}),
+    }
+  })
+  rejectDuplicateWorkflowIDs(runs.map((run) => run.id))
+  return {
+    ...collectionPageMetadata(value),
+    runs,
+  }
+}
+
+function collectionPageMetadata(
+  value: Record<string, unknown>,
+): CollectionPageMetadata {
+  if (
+    typeof value.total !== "number" ||
+    !Number.isSafeInteger(value.total) ||
+    value.total < 0 ||
+    typeof value.canonical_query !== "string" ||
+    !isWorkflowRecord(value.query_schema) ||
+    !Array.isArray(value.query_schema.fields) ||
+    (value.next_cursor != null && typeof value.next_cursor !== "string")
+  ) {
+    throw malformedWorkflowResponse()
+  }
+  return {
+    total: value.total,
+    canonical_query: value.canonical_query,
+    query_schema:
+      value.query_schema as unknown as CollectionPageMetadata["query_schema"],
+    ...(typeof value.next_cursor === "string"
+      ? { next_cursor: value.next_cursor }
+      : {}),
+  }
+}
+
+function rejectDuplicateWorkflowIDs(ids: string[]): void {
+  if (new Set(ids).size !== ids.length) throw malformedWorkflowResponse()
+}
+
+function isWorkflowRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function nonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+}
+
+function malformedWorkflowResponse(): WorkflowAPIError {
+  return new WorkflowAPIError(
+    "Workflow service returned a malformed response.",
+    502,
+  )
 }
 
 function normalizeWorkflowRun(run: WorkflowRun): WorkflowRun {

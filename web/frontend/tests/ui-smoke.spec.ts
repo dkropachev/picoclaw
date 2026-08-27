@@ -45,6 +45,14 @@ const smokeEventSourceIDs = {
   channel: "MLlxF-61ul3LWbQ4FYizmxMV4hRFb0pm7lh1O4uJ7gs",
 } as const
 
+const smokeWorkflowDefinitionIDs: Record<string, string> = {
+  "workflows/code-review.yml": "W41H3aj_ymqpg1aP8Vs6TJXUddSpYgjW7VRRcTHj_-I",
+  "workflows/github-issue-triage.yml":
+    "16gg1Z-92X47AwRe90IKZvdf1a6cNTojnoCdW4qXQQw",
+  "workflows/summarize-text.yml": "tpC6ep8WMy-TZuE8ZnYqpGVom7Yf4X3fhF01wP528JU",
+  "workflows/support-triage.yml": "uGbxNNOw68IoG1RENU5o7x_Cn0-Z03-MHPhAZUSRANc",
+}
+
 const smokeRoutes = [
   "/",
   "/models/aliases",
@@ -91,6 +99,12 @@ const smokeRoutes = [
   `/agent/tools/${smokeSkillToolIDs.tool}/edit`,
   "/agent/tools/settings/adaptation",
   "/agent/workflows",
+  "/agent/workflows/new",
+  `/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}`,
+  `/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}/edit`,
+  "/agent/workflows/settings",
+  "/agent/workflows/runs",
+  "/agent/workflows/runs/wr_test",
   "/agent/skills",
   "/agent/skills/new",
   `/agent/skills/${smokeSkillToolIDs.skill}`,
@@ -424,6 +438,50 @@ const mockCollectionSchemas = {
     ["status", "enum", ["enabled", "disabled", "blocked"]],
     ["reason", "string"],
     ["config_key", "string"],
+  ]),
+  workflowDefinitions: collectionSchema([
+    ["ref", "string"],
+    ["name", "string"],
+    [
+      "status",
+      "enum",
+      ["valid", "invalid", "pending_revalidation", "needs_review"],
+    ],
+    [
+      "trigger",
+      "enum",
+      [
+        "manual",
+        "schedule",
+        "channel_message",
+        "command",
+        "runtime_event",
+        "event",
+        "workflow_call",
+        "multiple",
+        "none",
+      ],
+    ],
+    ["inputs", "number"],
+    ["secrets", "number"],
+  ]),
+  workflowRuns: collectionSchema([
+    ["id", "string"],
+    ["workflow", "string"],
+    [
+      "status",
+      "enum",
+      ["running", "waiting", "succeeded", "failed", "canceled", "skipped"],
+    ],
+    ["session", "string"],
+    [
+      "origin",
+      "enum",
+      ["manual", "external_event", "external_event_draft_test"],
+    ],
+    ["created", "timestamp"],
+    ["updated", "timestamp"],
+    ["completed", "timestamp"],
   ]),
 }
 
@@ -804,6 +862,7 @@ const eventResponse = {
 const eventDispatchResponse = {
   id: "dsp_0123456789abcdef0123456789abcdef",
   event_id: eventResponse.id,
+  workflow_id: "16gg1Z-92X47AwRe90IKZvdf1a6cNTojnoCdW4qXQQw",
   workflow_ref: "workflows/github-issue-triage.yml",
   workflow_revision: "sha256:0123456789abcdef",
   run_id: "wr_smoke",
@@ -948,8 +1007,36 @@ const skillsResponse = {
   query_schema: mockCollectionSchemas.skills,
 }
 
+const workflowSettingsResponse = {
+  configured: {
+    enabled: true,
+    tool_enabled: false,
+    definitions_dir: "",
+    max_concurrent_runs: 0,
+    default_timeout_seconds: 0,
+    max_call_depth: 0,
+    retention_days: 0,
+  },
+  effective: {
+    enabled: true,
+    tool_enabled: false,
+    definitions_dir: "workflows",
+    max_concurrent_runs: 4,
+    default_timeout_seconds: 300,
+    max_call_depth: 8,
+    retention_days: 30,
+  },
+  config_revision: "sha256:workflow-settings-1",
+  effects: {
+    launcher_effect: "applied",
+    catalog_effect: "applied",
+    gateway_effect: "applied",
+  },
+}
+
 const workflowRun = {
   id: "wr_test",
+  workflow_id: smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"],
   workflow_ref: "workflows/summarize-text.yml",
   status: "succeeded",
   session: "workflow:demo",
@@ -1251,6 +1338,29 @@ const supportTriageWorkflowDefinition = {
       },
     },
   },
+}
+
+function smokeWorkflowDefinitionSummary(
+  workflow:
+    | typeof supportTriageWorkflowDefinition
+    | { ref: string; name?: string },
+  status: string,
+) {
+  const workflowCall =
+    "workflow_call" in workflow ? workflow.workflow_call : undefined
+  return {
+    ...workflow,
+    id:
+      smokeWorkflowDefinitionIDs[workflow.ref] ??
+      smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"],
+    status,
+    trigger: workflowCall ? "workflow_call" : "manual",
+    inputs: Object.keys(workflowCall?.inputs ?? {}).length,
+    secrets: Object.keys(
+      (workflowCall as { secrets?: Record<string, unknown> } | undefined)
+        ?.secrets ?? {},
+    ).length,
+  }
 }
 
 const workflowDraftSession = {
@@ -3637,6 +3747,18 @@ async function mockLauncherApis(
         return json(route, { status: "ok" })
       }
 
+      if (method === "PATCH" && path === "/api/workflows/settings") {
+        const body = request.postDataJSON() as Record<string, unknown>
+        return json(route, {
+          ...workflowSettingsResponse,
+          configured: {
+            ...workflowSettingsResponse.configured,
+            ...body,
+          },
+          config_revision: "sha256:workflow-settings-2",
+        })
+      }
+
       if (method === "POST") {
         switch (path) {
           case "/api/accounts/models/fetch": {
@@ -3684,12 +3806,19 @@ async function mockLauncherApis(
               ref?: string
               target_ref?: string
             }
-            if (body.reason === "version_revalidation") {
+            if (
+              body.reason === "version_revalidation" ||
+              body.reason === "edit"
+            ) {
               activeDevelopmentSession = {
                 ...workflowDraftSession,
-                reason: "version_revalidation",
+                reason: body.reason,
                 prompt: body.prompt ?? "",
                 source_workflow_ref: body.ref,
+                source_workflow_id:
+                  body.ref == null
+                    ? undefined
+                    : smokeWorkflowDefinitionIDs[body.ref],
                 target_workflow_ref:
                   body.target_ref ??
                   body.ref ??
@@ -4216,6 +4345,10 @@ async function mockLauncherApis(
               )
             }
             activeDevelopmentSession = null
+            // Publish stamps the complete compatibility catalog against the
+            // current runtime, so the newly routed definition is immediately
+            // runnable in the same way as the production response.
+            workflowsRevalidated = true
             if (
               !workflowDefinitions.some(
                 (workflow) =>
@@ -4228,6 +4361,10 @@ async function mockLauncherApis(
               ]
             }
             return json(route, {
+              workflow_id:
+                smokeWorkflowDefinitionIDs[
+                  workflowDraftSession.target_workflow_ref
+                ],
               workflow_ref: workflowDraftSession.target_workflow_ref,
               session: publishSession,
             })
@@ -4355,6 +4492,31 @@ async function mockLauncherApis(
               {
                 code: "account_router_not_found",
                 message: "Account router not found",
+              },
+              404,
+            )
+      }
+
+      const workflowDefinitionDetailMatch = path.match(
+        /^\/api\/workflows\/definitions\/([^/]+)$/,
+      )
+      if (workflowDefinitionDetailMatch) {
+        const id = decodeURIComponent(workflowDefinitionDetailMatch[1])
+        const workflow = workflowDefinitions
+          .map((candidate) =>
+            smokeWorkflowDefinitionSummary(
+              candidate,
+              workflowsRevalidated ? "valid" : "pending_revalidation",
+            ),
+          )
+          .find((candidate) => candidate.id === id)
+        return workflow
+          ? json(route, { workflow })
+          : json(
+              route,
+              {
+                code: "workflow_definition_not_found",
+                message: "Workflow definition not found",
               },
               404,
             )
@@ -4717,6 +4879,24 @@ async function mockLauncherApis(
                 }
               : compatibilityResponse(),
           })
+        case "/api/workflows/definitions": {
+          const workflows = options.nullableWorkflowPayloads
+            ? []
+            : workflowDefinitions.map((workflow) =>
+                smokeWorkflowDefinitionSummary(
+                  workflow,
+                  workflowsRevalidated ? "valid" : "pending_revalidation",
+                ),
+              )
+          return json(route, {
+            workflows,
+            total: workflows.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY ref ASC",
+            query_schema: mockCollectionSchemas.workflowDefinitions,
+          })
+        }
         case "/api/workflows/compatibility":
           return json(
             route,
@@ -4728,6 +4908,8 @@ async function mockLauncherApis(
                 }
               : compatibilityResponse(),
           )
+        case "/api/workflows/settings":
+          return json(route, workflowSettingsResponse)
         case "/api/workflows/development":
           return json(route, { session: activeDevelopmentSession })
         case "/api/workflows/authoring/capabilities":
@@ -4762,23 +4944,66 @@ async function mockLauncherApis(
             ]
             completeDraftViaPolling = false
           }
-          return json(route, { runs })
+          return json(route, {
+            runs: runs.map((run) => ({
+              ...run,
+              workflow_id: smokeWorkflowDefinitionIDs[run.workflow_ref],
+            })),
+            total: runs.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY created DESC",
+            query_schema: mockCollectionSchemas.workflowRuns,
+          })
         case "/api/workflows/runs/wr_nulls":
-          return json(route, nullableWorkflowRun)
+          return json(route, {
+            ...nullableWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[nullableWorkflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_test":
-          return json(route, workflowRun)
+          return json(route, {
+            ...workflowRun,
+            workflow_id: smokeWorkflowDefinitionIDs[workflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_retry":
-          return json(route, retryWorkflowRun)
+          return json(route, {
+            ...retryWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[retryWorkflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_lifecycle":
-          return json(route, lifecycleWorkflowRun)
+          return json(route, {
+            ...lifecycleWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[lifecycleWorkflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_cancel":
-          return json(route, currentCancelableWorkflowRun)
+          return json(route, {
+            ...currentCancelableWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[
+                currentCancelableWorkflowRun.workflow_ref
+              ],
+          })
         case "/api/workflows/runs/wr_draft":
-          return json(route, draftWorkflowRun)
+          return json(route, {
+            ...draftWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[draftWorkflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_draft_failed":
-          return json(route, failedDraftWorkflowRun)
+          return json(route, {
+            ...failedDraftWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[failedDraftWorkflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_manual":
-          return json(route, manualWorkflowRun)
+          return json(route, {
+            ...manualWorkflowRun,
+            workflow_id:
+              smokeWorkflowDefinitionIDs[manualWorkflowRun.workflow_ref],
+          })
         case "/api/workflows/runs/wr_test/events":
           return json(route, {
             run_id: "wr_test",
@@ -6923,11 +7148,11 @@ test("dispatch and workflow deep links survive reload with exact relationships",
     page.getByRole("link", { name: "Open workflow" }),
   ).toHaveAttribute(
     "href",
-    "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml",
+    `/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/github-issue-triage.yml"]}`,
   )
   await expect(page.getByRole("link", { name: "Open run" })).toHaveAttribute(
     "href",
-    "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_smoke",
+    "/agent/workflows/runs/wr_smoke",
   )
   await page.reload()
   await expect(
@@ -6935,22 +7160,19 @@ test("dispatch and workflow deep links survive reload with exact relationships",
   ).toBeVisible()
   await expectNoHorizontalOverflow(page)
 
-  await page.goto(
-    "/agent/workflows?mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_test&q=succeeded",
-  )
+  await page.goto("/agent/workflows/runs/wr_test")
   await expect(page.getByText("wr_test", { exact: true }).first()).toBeVisible()
   await expect(
     page.getByRole("link", { name: "workflows/summarize-text.yml" }),
   ).toHaveAttribute(
     "href",
-    expect.stringContaining(
-      "mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_test",
+    new RegExp(
+      `^/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}(?:\\?|$)`,
     ),
   )
   await page.reload()
   await expect(page.getByText("wr_test", { exact: true }).first()).toBeVisible()
-  await expect(page).toHaveURL(/mode=operate/)
-  await expect(page).toHaveURL(/run=wr_test/)
+  await expect(page).toHaveURL(/\/agent\/workflows\/runs\/wr_test(?:\?|$)/)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
@@ -6960,10 +7182,7 @@ test("workflow lifecycle links use only validated server origin", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
-  await gotoMockedRoute(
-    page,
-    "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_lifecycle",
-  )
+  await gotoMockedRoute(page, "/agent/workflows/runs/wr_lifecycle")
 
   await expect(
     page.getByRole("link", { name: lifecycleEventID }),
@@ -6978,7 +7197,7 @@ test("workflow lifecycle links use only validated server origin", async ({
     page.getByRole("link", { name: "wr_lifecycle_root" }),
   ).toHaveAttribute(
     "href",
-    "/agent/workflows?mode=operate&run=wr_lifecycle_root",
+    /^\/agent\/workflows\/runs\/wr_lifecycle_root(?:\?|$)/,
   )
   await expect(page.locator(`a[href*="${lifecycleDecoyEventID}"]`)).toHaveCount(
     0,
@@ -6996,11 +7215,9 @@ test("workflow cancellation requires and persists an accessible explicit reason"
 }) => {
   const errors = collectPageErrors(page)
   const workflowCancelReasons: string[] = []
-  await gotoMockedRoute(
-    page,
-    "/agent/workflows?mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_cancel",
-    { workflowCancelReasons },
-  )
+  await gotoMockedRoute(page, "/agent/workflows/runs/wr_cancel", {
+    workflowCancelReasons,
+  })
 
   const cancelButton = page.getByRole("button", { name: "Cancel" })
   await expect(cancelButton).toBeEnabled()
@@ -8370,7 +8587,114 @@ test("tool adaptation worst-state row fits a narrow mobile viewport", async ({
   expect(errors).toEqual([])
 })
 
-test("workflow dashboard tolerates null persisted collections", async ({
+test("workflow definitions and runs use canonical routed collections", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    "/agent/workflows?mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_test&view=grid",
+  )
+
+  const definitions = page.locator('[data-slot="collection-shell"]')
+  await expect(definitions).toBeVisible()
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("ORDER BY ref ASC")
+  const normalized = new URL(page.url())
+  expect(normalized.searchParams.get("mode")).toBeNull()
+  expect(normalized.searchParams.get("workflow")).toBeNull()
+  expect(normalized.searchParams.get("run")).toBeNull()
+  expect(normalized.searchParams.get("view")).toBe("grid")
+
+  const summary = page.locator(
+    `[data-item-id="${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}"]`,
+  )
+  await expect(summary).toBeVisible()
+  await summary.focus()
+  await page.keyboard.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe(
+      `/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}`,
+    )
+  await expect(
+    page.locator('[data-slot="collection-detail-shell"]'),
+  ).toBeVisible()
+
+  await page.goBack()
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/agent/workflows")
+  const restored = new URL(page.url())
+  expect(restored.searchParams.get("q")).toBe("ORDER BY ref ASC")
+  expect(restored.searchParams.get("view")).toBe("grid")
+  await expect(summary).toBeVisible()
+
+  await page.goto("/agent/workflows/settings")
+  await expect(
+    page.getByRole("heading", { name: "Workflow settings" }),
+  ).toBeVisible()
+  await expect(page.getByText("Runtime policy", { exact: true })).toBeVisible()
+
+  await page.goto("/agent/workflows/runs")
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("ORDER BY created DESC")
+  await expect(page.getByRole("button", { name: "Grid view" })).toHaveCount(0)
+  const run = page.locator('[data-item-id="wr_test"]')
+  await expect(run).toBeVisible()
+  await run.focus()
+  await page.keyboard.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe("/agent/workflows/runs/wr_test")
+  await expect(
+    page.locator('[data-slot="collection-detail-shell"]'),
+  ).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow authoring routes preserve the singleton active draft", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/agent/workflows/new")
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets")
+  await page.getByRole("button", { name: "Start with AI" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
+
+  await page.goto(
+    `/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}/edit`,
+  )
+  const conflict = page.getByRole("alert")
+  await expect(
+    conflict.getByRole("heading", { name: "Active workflow draft conflict" }),
+  ).toBeVisible()
+  await expect(
+    conflict.getByRole("button", { name: "Open active draft" }),
+  ).toBeVisible()
+  await expect(
+    conflict.getByRole("button", { name: "Discard draft" }),
+  ).toBeVisible()
+  await conflict.getByRole("button", { name: "Open active draft" }).click()
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe("/agent/workflows/new")
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow run detail tolerates null persisted collections", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -8382,11 +8706,10 @@ test("workflow dashboard tolerates null persisted collections", async ({
     )
   })
   await mockLauncherApis(page, { nullableWorkflowPayloads: true })
-  await page.goto("/agent/workflows")
+  await page.goto("/agent/workflows/runs/wr_nulls")
 
   await expect(page.getByRole("banner")).toBeVisible()
   await expect(page.locator("main")).toBeVisible()
-  await page.getByRole("button", { name: "Operate" }).click()
   await expect(page.getByText("wr_nulls").first()).toBeVisible()
   await expect(page.getByText("No events")).toBeVisible()
   await expect(page.getByText("No graph")).toBeVisible()
@@ -8395,7 +8718,7 @@ test("workflow dashboard tolerates null persisted collections", async ({
   expect(errors).toEqual([])
 })
 
-test("workflow Operate shows only the sanitized published definition inspection", async ({
+test("workflow detail shows only the sanitized published definition inspection", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -8407,10 +8730,11 @@ test("workflow Operate shows only the sanitized published definition inspection"
     MockLauncherApiOptions["workflowInspectionRequests"]
   > = []
 
-  await gotoMockedRoute(page, "/agent/workflows", {
-    workflowInspectionRequests: inspectionRequests,
-  })
-  await page.getByRole("button", { name: "Operate" }).click()
+  await gotoMockedRoute(
+    page,
+    `/agent/workflows/${smokeWorkflowDefinitionIDs["workflows/summarize-text.yml"]}`,
+    { workflowInspectionRequests: inspectionRequests },
+  )
 
   const inspectionTrigger = page.getByRole("button", {
     name: "Published definition: workflows/summarize-text.yml",
@@ -8440,7 +8764,7 @@ test("workflow Operate shows only the sanitized published definition inspection"
   expect(errors).toEqual([])
 })
 
-test("workflow capability catalog is lazy, searchable, and available across workflow modes", async ({
+test("workflow authoring capability catalog is lazy and searchable", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -8452,7 +8776,7 @@ test("workflow capability catalog is lazy, searchable, and available across work
     MockLauncherApiOptions["workflowCapabilityRequests"]
   > = []
 
-  await gotoMockedRoute(page, "/agent/workflows", {
+  await gotoMockedRoute(page, "/agent/workflows/new", {
     workflowCapabilityRequests: capabilityRequests,
   })
   const capabilitiesButton = page.getByRole("button", {
@@ -8498,9 +8822,7 @@ test("workflow capability catalog is lazy, searchable, and available across work
   await expectNoSeriousA11yViolations(page)
   await dialog.getByRole("button", { name: "Close" }).click()
 
-  await page.getByRole("button", { name: "Operate" }).click()
   await expect(capabilitiesButton).toBeVisible()
-  await page.getByRole("button", { name: "Develop", exact: true }).click()
   await page
     .getByPlaceholder("Describe the workflow outcome")
     .fill("Triage support tickets")
@@ -8525,7 +8847,7 @@ test("workflow capability catalog fits and wraps exact targets at 320px", async 
   await page.setViewportSize({ width: 320, height: 720 })
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/workflows")
+  await gotoMockedRoute(page, "/agent/workflows/new")
   await page.getByRole("button", { name: "Workflow capabilities" }).click()
   const dialog = page.getByRole("dialog", {
     name: "Workflow capabilities",
@@ -8560,7 +8882,7 @@ test("narrow mobile lazily opens a sanitized built-in workflow inspection", asyn
     MockLauncherApiOptions["workflowInspectionRequests"]
   > = []
 
-  await gotoMockedRoute(page, "/agent/workflows", {
+  await gotoMockedRoute(page, "/agent/workflows/new", {
     workflowInspectionRequests: inspectionRequests,
   })
   const template = page.getByRole("article", {
@@ -8609,18 +8931,11 @@ test("mobile workflow trigger simulator reviews one explicit redacted scenario",
   const payloadRequests: string[] = []
   const secretCanary = "mobile-trigger-secret-value-must-not-render"
 
-  await gotoMockedRoute(page, "/agent/workflows?mode=develop", {
+  await gotoMockedRoute(page, "/agent/workflows/new", {
     workflowDevelopmentYAML: workflowEventDraftYAML,
     workflowTriggerSimulationRequests: simulationRequests,
     workflowTriggerExecutionRequests: executionRequests,
     workflowEventPayloadRequests: payloadRequests,
-  })
-  await page.waitForURL((url) => {
-    return (
-      !url.searchParams.has("mode") &&
-      url.searchParams.get("workflow") === "workflows/summarize-text.yml" &&
-      url.searchParams.get("run") === "wr_test"
-    )
   })
   await page
     .getByPlaceholder("Describe the workflow outcome")
@@ -8735,7 +9050,7 @@ test("workflow event builder routes one exact durable event through server revie
 }) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/workflows")
+  await gotoMockedRoute(page, "/agent/workflows/new")
   await page
     .getByPlaceholder("Describe the workflow outcome")
     .fill("Triage support tickets")
@@ -8814,7 +9129,7 @@ test("workflow jobs builder applies a surgical action field edit", async ({
     MockLauncherApiOptions["workflowJobRequests"]
   > = []
 
-  await gotoMockedRoute(page, "/agent/workflows", {
+  await gotoMockedRoute(page, "/agent/workflows/new", {
     workflowJobRequests: jobRequests,
   })
   await page
@@ -8868,106 +9183,15 @@ test("workflow jobs builder applies a surgical action field edit", async ({
   expect(errors).toEqual([])
 })
 
-test("workflow dashboard supports AI draft, publish, and manual run loop", async ({
+test("routed workflow authoring supports AI draft, publish, and manual run", async ({
   page,
 }) => {
   test.slow()
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/workflows", {
+  await gotoMockedRoute(page, "/agent/workflows/new", {
     completeDraftViaPolling: true,
   })
-  await expect(
-    page
-      .locator(
-        '[title="workflow must be revalidated after the current Picoclaw version change"]',
-      )
-      .first(),
-  ).toBeAttached()
-  await expect(
-    page.getByRole("heading", { name: "Built-in templates" }),
-  ).toBeVisible()
-  await expect(
-    page.getByRole("article", { name: "Code review template" }),
-  ).toBeVisible()
-  await expect(page.getByRole("button", { name: "AI Review" })).toBeVisible()
-  await page.getByRole("button", { name: "AI Review" }).click()
-  await expect(
-    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
-  ).toBeVisible()
-  await expect(page.getByRole("textbox", { name: "AI brief" })).toHaveValue(
-    /Review this workflow against the current PicoClaw runtime/,
-  )
-  await expect(
-    page.getByText(
-      "Finish or discard the active workflow draft before installing or restoring templates.",
-    ),
-  ).toBeVisible()
-  await expect(page.getByRole("button", { name: "Install" })).toBeDisabled()
-  await expect(
-    page.getByRole("button", { name: "Restore built-in" }),
-  ).toBeDisabled()
-  await expect(page.getByText("version revalidation")).toBeVisible()
-  await page.getByRole("button", { name: "Discard" }).click()
-  await expect(page.getByText("New workflow")).toBeVisible()
-
-  await page.getByRole("button", { name: "Operate" }).click()
-  await page
-    .getByRole("button", { name: "Inspect workflow dependencies" })
-    .click()
-  const publishedReadiness = page.getByRole("region", {
-    name: "Published workflow dependency readiness",
-  })
-  await expect(publishedReadiness).toContainText("workflows/summarize-text.yml")
-  await expect(publishedReadiness).toContainText("Runtime dependencies (1)")
-  await expect(publishedReadiness).toContainText("agent/main")
-  await page.keyboard.press("Escape")
-  await expect(page.getByText("Run workflow").first()).toBeVisible()
-  await page.getByRole("button", { name: "Run workflow" }).first().click()
-  await expect(
-    page.getByText("Revalidate this workflow before running it."),
-  ).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Run workflow" }).last(),
-  ).toBeDisabled()
-  await page.keyboard.press("Escape")
-  await expect(
-    page.getByRole("button", { name: "Retry", exact: true }),
-  ).toBeDisabled()
-  await expect(
-    page.getByRole("button", { name: "Retry", exact: true }),
-  ).toHaveAttribute(
-    "title",
-    "Revalidate this workflow before retrying the run.",
-  )
-  await page.getByRole("button", { name: "Revalidate" }).click()
-  await page.getByRole("button", { name: "Run workflow" }).first().click()
-  await expect(page.getByText("Ready to run.")).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Run workflow" }).last(),
-  ).toBeEnabled()
-  await page.keyboard.press("Escape")
-  const retrySecrets = page.getByRole("textbox", {
-    name: "Retry secrets JSON",
-  })
-  await expect(retrySecrets).toBeVisible()
-  await retrySecrets.fill("{")
-  await expect(page.getByText(/Retry secrets JSON is invalid/)).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Retry", exact: true }),
-  ).toBeDisabled()
-  await retrySecrets.fill('{"token":"retry-token"}')
-  await expect(page.getByText("Ready to retry.")).toBeVisible()
-  await expect(
-    page.getByRole("button", { name: "Retry", exact: true }),
-  ).toBeEnabled()
-  await page.getByRole("button", { name: "Retry", exact: true }).click()
-  await expect(page.getByText("wr_retry").first()).toBeVisible()
-  await expect(page.getByText("retry summary").first()).toBeVisible()
-  await expect(page.getByText('"result": "retry event"')).toBeVisible()
-  await expect(page.getByText('"streamed": "retry stream"')).toBeVisible()
-  await page.getByRole("button", { name: "Develop", exact: true }).click()
-
   await expect(
     page.getByText("Describe the workflow outcome before starting."),
   ).toBeVisible()
@@ -9069,7 +9293,10 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     page.getByText('"streamed": "draft stream"').first(),
   ).toBeVisible()
 
-  await page.getByRole("button", { name: "Develop", exact: true }).click()
+  await page.goBack()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
   await page.getByRole("button", { name: "Publish" }).click()
 
   await expect(page.getByText("Run workflow").first()).toBeVisible()
@@ -9110,7 +9337,7 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   expect(errors).toEqual([])
 })
 
-test("workflow dashboard refreshes async draft status from polling without SSE", async ({
+test("workflow editor refreshes async draft status from polling without SSE", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -9126,7 +9353,7 @@ test("workflow dashboard refreshes async draft status from polling without SSE",
     })
   })
   await mockLauncherApis(page, { completeDraftViaPolling: true })
-  await page.goto("/agent/workflows")
+  await page.goto("/agent/workflows/new")
   await expect(page.getByRole("banner")).toBeVisible()
   await expect(page.locator("main")).toBeVisible()
 

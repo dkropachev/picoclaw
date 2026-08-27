@@ -9,19 +9,18 @@ export function exactDispatchHref(dispatchID: string): string {
   })
 }
 
-export function workflowOperateHref(workflowRef: string): string {
-  return withSearch("/agent/workflows", {
-    mode: "operate",
-    workflow: workflowRef,
-  })
+export function workflowOperateHref(
+  _workflowRef: string,
+  workflowID?: string,
+): string | undefined {
+  if (workflowID && /^[A-Za-z0-9_-]{43}$/.test(workflowID)) {
+    return `/agent/workflows/${encodeURIComponent(workflowID)}`
+  }
+  return undefined
 }
 
-export function workflowRunHref(workflowRef: string, runID: string): string {
-  return withSearch("/agent/workflows", {
-    mode: "operate",
-    workflow: workflowRef,
-    run: runID,
-  })
+export function workflowRunHref(_workflowRef: string, runID: string): string {
+  return `/agent/workflows/runs/${encodeURIComponent(runID)}`
 }
 
 function withSearch(path: string, values: Record<string, string>): string {

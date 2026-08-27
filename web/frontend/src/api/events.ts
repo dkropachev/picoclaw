@@ -58,6 +58,7 @@ export interface DispatchView {
   id: string
   event_id: string
   workflow_ref: string
+  workflow_id?: string
   workflow_revision?: string
   run_id: string
   status: DispatchStatus
@@ -282,6 +283,9 @@ function isDispatchView(value: unknown): value is DispatchView {
     isDispatchID(value.id) &&
     isEventID(value.event_id) &&
     isBoundedTrimmedString(value.workflow_ref, MAX_WORKFLOW_REF_BYTES) &&
+    (value.workflow_id === undefined ||
+      (typeof value.workflow_id === "string" &&
+        /^[A-Za-z0-9_-]{43}$/.test(value.workflow_id))) &&
     (value.workflow_revision === undefined ||
       isBoundedTrimmedString(
         value.workflow_revision,
