@@ -1160,6 +1160,7 @@ func TestSuccessfulReloadRotatesEventChannelModeAndStoreGeneration(t *testing.T)
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,
@@ -1310,6 +1311,7 @@ func TestFailedCandidateReloadRestoresPreparedEventChannelGeneration(t *testing.
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,

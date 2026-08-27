@@ -255,7 +255,24 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 
 	logger.InfoCF("agent", "Agent initialized", startupStatus.logFields)
 
-	runningServices, err = setupAndStartServices(cfg, agentLoop, msgBus, pidData.Token, listenResult)
+	startupCtx, releaseStartup, err := agentLoop.AcquireRuntimeStartupUse(
+		context.Background(),
+		cfg,
+	)
+	if err != nil {
+		return fmt.Errorf("claim startup runtime generation: %w", err)
+	}
+	func() {
+		defer releaseStartup()
+		runningServices, err = setupAndStartServices(
+			startupCtx,
+			cfg,
+			agentLoop,
+			msgBus,
+			pidData.Token,
+			listenResult,
+		)
+	}()
 	if err != nil {
 		return err
 	}
@@ -532,13 +549,17 @@ func createStartupProvider(
 }
 
 func setupAndStartServices(
+	ctx context.Context,
 	cfg *config.Config,
 	agentLoop *agent.AgentLoop,
 	msgBus *bus.MessageBus,
 	authToken string,
 	listenResult netbind.OpenResult,
 ) (*services, error) {
-	if err := validateEventAutomationRuntime(context.Background(), cfg, agentLoop); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateEventAutomationRuntime(ctx, cfg, agentLoop); err != nil {
 		return nil, fmt.Errorf("validate event automation runtime: %w", err)
 	}
 
@@ -688,7 +709,7 @@ func setupAndStartServices(
 	}
 
 	runningServices.EventAutomation, err = setupEventAutomationService(
-		context.Background(),
+		ctx,
 		cfg,
 		agentLoop,
 	)
@@ -911,7 +932,7 @@ func handleConfigReload(
 
 type configReloadServiceOps struct {
 	stop    func(*services, time.Duration, bool) error
-	restart func(*agent.AgentLoop, *services, *bus.MessageBus) error
+	restart func(context.Context, *agent.AgentLoop, *services, *bus.MessageBus) error
 }
 
 func handleConfigReloadWithServiceOps(
@@ -1024,7 +1045,10 @@ func handleConfigReloadWithServiceOps(
 		)
 	}
 	pauseCtx, pauseCancel := context.WithTimeout(ctx, providerReloadTimeout)
-	resumeRuntime, pauseErr := al.PauseRuntimeForReload(pauseCtx)
+	runtimeCtx, resumeRuntime, pauseErr := al.PauseRuntimeForReloadWithContext(
+		pauseCtx,
+		ctx,
+	)
 	pauseCancel()
 	if pauseErr != nil {
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
@@ -1077,7 +1101,7 @@ func handleConfigReloadWithServiceOps(
 		if recoveryStopErr == nil {
 			recoveryRestartErr = prepareEventChannelAdmission(runningServices, oldCfg)
 			if recoveryRestartErr == nil {
-				recoveryRestartErr = serviceOps.restart(al, runningServices, msgBus)
+				recoveryRestartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
 			}
 			if recoveryRestartErr == nil {
 				recoveryActivateErr = activateEventAdmissions(runningServices)
@@ -1113,7 +1137,7 @@ func handleConfigReloadWithServiceOps(
 		logger.Warn("  Attempting to restart services with old provider and config...")
 		restartErr := prepareEventChannelAdmission(runningServices, oldCfg)
 		if restartErr == nil {
-			restartErr = serviceOps.restart(al, runningServices, msgBus)
+			restartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
 		}
 		var reactivateErr error
 		if restartErr == nil {
@@ -1138,12 +1162,12 @@ func handleConfigReloadWithServiceOps(
 
 	logger.Info("  Preflighting and restarting all services with new configuration...")
 	candidateServicesStarted := false
-	restartErr := validateEventAutomationRuntime(reloadCtx, newCfg, al)
+	restartErr := validateEventAutomationRuntime(runtimeCtx, newCfg, al)
 	if restartErr != nil {
 		restartErr = fmt.Errorf("preflight replacement event runtime: %w", restartErr)
 	} else {
 		candidateServicesStarted = true
-		restartErr = serviceOps.restart(al, runningServices, msgBus)
+		restartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
 		if restartErr == nil {
 			restartErr = activateEventAdmissions(runningServices)
 		}
@@ -1186,7 +1210,7 @@ func handleConfigReloadWithServiceOps(
 		}
 		recoveryErr := prepareEventChannelAdmission(runningServices, oldCfg)
 		if recoveryErr == nil {
-			recoveryErr = serviceOps.restart(al, runningServices, msgBus)
+			recoveryErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
 		}
 		var recoveryActivateErr error
 		if recoveryErr == nil {
@@ -1235,6 +1259,7 @@ func closeRetainedProviderAfterReload(
 }
 
 func restartServices(
+	ctx context.Context,
 	al *agent.AgentLoop,
 	runningServices *services,
 	msgBus *bus.MessageBus,
@@ -1336,7 +1361,7 @@ func restartServices(
 	logChannelVoiceCapabilities(runningServices.ChannelManager, transcriber != nil, ttsAvailable)
 
 	runningServices.EventAutomation, err = setupEventAutomationService(
-		context.Background(),
+		ctx,
 		cfg,
 		al,
 	)

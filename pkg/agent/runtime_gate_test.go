@@ -141,6 +141,64 @@ func TestAgentLoopStopWakesPausedRootRuntimeAdmission(t *testing.T) {
 	}
 }
 
+func TestPauseRuntimeForReloadWithContextRevokesOwnershipOnResume(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	messageBus := bus.NewMessageBus()
+	al := newTestAgentLoopWithStrictModels(
+		cfg,
+		messageBus,
+		&runtimeGateProvider{name: "provider", closed: make(chan struct{})},
+	)
+	defer func() {
+		al.Close()
+		messageBus.Close()
+	}()
+
+	ownedCtx, resume, err := al.PauseRuntimeForReloadWithContext(
+		context.Background(),
+		context.Background(),
+	)
+	if err != nil {
+		t.Fatalf("PauseRuntimeForReloadWithContext() error = %v", err)
+	}
+	if runtimeLeaseOwner(ownedCtx) != al {
+		resume()
+		t.Fatal("paused runtime context did not own the agent loop")
+	}
+
+	leaseCtx, release, err := al.acquireRuntimeUse(ownedCtx)
+	if err != nil {
+		resume()
+		t.Fatalf("acquireRuntimeUse(owned context) error = %v", err)
+	}
+	release()
+	if leaseCtx != ownedCtx {
+		resume()
+		t.Fatal("owned reload context was replaced by a nested runtime lease")
+	}
+	al.runtimeGateMu.Lock()
+	paused := al.runtimeGatePaused
+	active := al.runtimeGateActive
+	al.runtimeGateMu.Unlock()
+	if !paused || active != 0 {
+		resume()
+		t.Fatalf("paused runtime gate = (paused=%t active=%d), want true/0", paused, active)
+	}
+
+	resume()
+	if runtimeLeaseOwner(ownedCtx) != nil {
+		t.Fatal("resumed reload context retained runtime ownership")
+	}
+	_, releaseRuntime, err := al.acquireRuntimeUse(context.Background())
+	if err != nil {
+		t.Fatalf("runtime admission after resume error = %v", err)
+	}
+	releaseRuntime()
+}
+
 func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing.T) {
 	t.Parallel()
 

@@ -658,6 +658,7 @@ func TestHandleConfigReloadFailedCandidateCannotPruneWithShorterRetention(t *tes
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,
@@ -917,6 +918,7 @@ func TestHandleConfigReloadRollsBackPostSwapWorkflowRuntimeFailure(t *testing.T)
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,
@@ -1027,6 +1029,7 @@ func TestHandleConfigReloadDoesNotAdmitTurnIntoProvisionalGeneration(t *testing.
 	serviceOps := configReloadServiceOps{
 		stop: func(*services, time.Duration, bool) error { return nil },
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			_ *services,
 			_ *bus.MessageBus,
@@ -1135,6 +1138,7 @@ func TestHandleConfigReloadFencesDueCandidateCommandOnRollback(t *testing.T) {
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			currentBus *bus.MessageBus,
@@ -1283,6 +1287,7 @@ func TestHandleConfigReloadRecoversServicesAfterInitialDrainFailure(t *testing.T
 			return stopErr
 		},
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,

@@ -1658,6 +1658,7 @@ func TestSetupServicesRejectsWebhookRouteCollisionBeforeStorage(t *testing.T) {
 	}
 
 	runningServices, setupErr := setupAndStartServices(
+		context.Background(),
 		cfg,
 		agentLoop,
 		messageBus,
@@ -1887,6 +1888,7 @@ func TestSuccessfulReloadRotatesWebhookSecretAndStoreGeneration(t *testing.T) {
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,
@@ -2042,6 +2044,7 @@ func TestFailedCandidateReloadNeverActivatesWebhookAndRestoresOldGeneration(t *t
 	serviceOps := configReloadServiceOps{
 		stop: stopAndCleanupServices,
 		restart: func(
+			_ context.Context,
 			currentLoop *agent.AgentLoop,
 			currentServices *services,
 			_ *bus.MessageBus,
