@@ -17,7 +17,6 @@ func TestCollectionResourceIDIsDeterministicFixedLengthAndURLSafe(t *testing.T) 
 		strings.Repeat("w", collectionResourceIDIdentityMaxBytes),
 	}
 	for index, identity := range identities {
-		identity := identity
 		name := identity
 		if len(name) > 80 {
 			name = "maximum identity"
@@ -151,11 +150,13 @@ func TestCollectionResourceIDRejectsInvalidSourceInputs(t *testing.T) {
 		{name: "invalid UTF-8 identity", namespace: "workflow", identity: invalidUTF8},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := encodeCollectionResourceID(test.namespace, test.identity); !errors.Is(err, errInvalidCollectionResourceID) {
+			if _, err := encodeCollectionResourceID(
+				test.namespace,
+				test.identity,
+			); !errors.Is(err, errInvalidCollectionResourceID) {
 				t.Fatalf("encode error = %v, want %v", err, errInvalidCollectionResourceID)
 			}
 		})
@@ -197,7 +198,6 @@ func TestCollectionResourceIDStrictWireValidation(t *testing.T) {
 		{name: "noncanonical trailing bits", encoded: noncanonicalTrailingBits},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
