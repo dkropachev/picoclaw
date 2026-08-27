@@ -799,6 +799,17 @@ func (al *AgentLoop) PauseRuntimeForReload(ctx context.Context) (func(), error) 
 	return al.pauseRuntimeUses(ctx)
 }
 
+// PauseRuntimeForReloadWithContext pauses and drains root runtime admission,
+// then marks runtimeCtx as owned by that pause for synchronous replacement
+// setup. The returned resume function revokes the context before reopening
+// admission and must always be called.
+func (al *AgentLoop) PauseRuntimeForReloadWithContext(
+	waitCtx context.Context,
+	runtimeCtx context.Context,
+) (context.Context, func(), error) {
+	return al.pauseRuntimeUsesWithContext(waitCtx, runtimeCtx)
+}
+
 func (al *AgentLoop) reloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
