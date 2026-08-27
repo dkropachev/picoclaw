@@ -603,3 +603,135 @@ func TestObservationFieldsReturnsDetachedMap(t *testing.T) {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
 }
+
+func TestObservationLegacyWireEnumsFrozen(t *testing.T) {
+	legacyDomains := []string{
+		"", "prompt", "message_graph", "model_response", "reasoning",
+		"tool_schema", "tool_arguments", "tool_result", "query", "regex",
+		"command", "stdout", "transcription", "path", "url", "proxy",
+		"provider_body", "response_header", "process_stderr", "identity.agent",
+		"identity.session", "identity.chat", "identity.sender", "identity.message",
+		"identity.turn", "identity.tool", "identity.tool_call", "identity.hook",
+		"identity.runtime", "identity.account", "identity.request", "identity.trace",
+		"identity.task", "identity.topic", "identity.space", "identity.provider",
+		"identity.mcp_server", "identity.mcp_tool", "identity.audio", "error_type",
+		"error_text",
+	}
+	for numeric, label := range legacyDomains {
+		if numeric >= len(observationDomainLabels) ||
+			observationDomainLabels[numeric] != label {
+			t.Fatalf("legacy domain %d = %q; want %q", numeric, observationDomainLabels[numeric], label)
+		}
+	}
+
+	legacyPrefixes := []string{
+		"", "prompt", "message_graph", "model_response", "reasoning",
+		"tool_schema", "tool_arguments", "tool_result", "query", "regex",
+		"command", "stdout", "transcription", "path", "url", "proxy",
+		"provider_body", "response_header", "process_stderr", "identity_agent",
+		"identity_session", "identity_chat", "identity_sender", "identity_message",
+		"identity_turn", "identity_tool", "identity_tool_call", "identity_hook",
+		"identity_runtime", "identity_account", "identity_request", "identity_trace",
+		"identity_task", "identity_topic", "identity_space", "identity_provider",
+		"identity_mcp_server", "identity_mcp_tool", "identity_audio", "error_type",
+		"error_text", "error", "credential", "environment", "request_header",
+		"authorization", "cookie", "private_key",
+	}
+	for numeric, label := range legacyPrefixes {
+		if numeric >= len(observationPrefixLabels) ||
+			observationPrefixLabels[numeric] != label {
+			t.Fatalf("legacy prefix %d = %q; want %q", numeric, observationPrefixLabels[numeric], label)
+		}
+	}
+	if ObservationDomainErrorText != 40 || ObservationPrefixPrivateKey != 47 {
+		t.Fatalf(
+			"legacy enum tails moved: domain=%d prefix=%d",
+			ObservationDomainErrorText,
+			ObservationPrefixPrivateKey,
+		)
+	}
+}
+
+func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
+	if ObservationDomainHookMessage != 41 ||
+		ObservationDomainIdentityContextManager != 47 ||
+		len(observationDomainLabels) != 48 {
+		t.Fatalf(
+			"appended domain wire moved: first=%d last=%d labels=%d",
+			ObservationDomainHookMessage,
+			ObservationDomainIdentityContextManager,
+			len(observationDomainLabels),
+		)
+	}
+	if ObservationPrefixHookMessage != 48 ||
+		ObservationPrefixIdentityContextManager != 54 ||
+		len(observationPrefixLabels) != 55 {
+		t.Fatalf(
+			"appended prefix wire moved: first=%d last=%d labels=%d",
+			ObservationPrefixHookMessage,
+			ObservationPrefixIdentityContextManager,
+			len(observationPrefixLabels),
+		)
+	}
+	tests := []struct {
+		domain   ObservationDomain
+		prefix   ObservationFieldPrefix
+		label    string
+		identity bool
+	}{
+		{ObservationDomainHookMessage, ObservationPrefixHookMessage, "hook_message", false},
+		{ObservationDomainIdentityChannel, ObservationPrefixIdentityChannel, "identity_channel", true},
+		{ObservationDomainIdentityModel, ObservationPrefixIdentityModel, "identity_model", true},
+		{ObservationDomainIdentityWorkflow, ObservationPrefixIdentityWorkflow, "identity_workflow", true},
+		{ObservationDomainIdentitySkill, ObservationPrefixIdentitySkill, "identity_skill", true},
+		{ObservationDomainIdentityRoute, ObservationPrefixIdentityRoute, "identity_route", true},
+		{
+			ObservationDomainIdentityContextManager,
+			ObservationPrefixIdentityContextManager,
+			"identity_context_manager",
+			true,
+		},
+	}
+	digests := make(map[string]struct{}, len(tests))
+	for _, test := range tests {
+		prefix, ok := prefixForDomain(test.domain)
+		if !ok || prefix != test.prefix {
+			t.Fatalf("domain %d prefix = %d, %v; want %d", test.domain, prefix, ok, test.prefix)
+		}
+		label, ok := observationPrefixLabel(test.prefix)
+		if !ok || label != test.label {
+			t.Fatalf("prefix %d label = %q, %v; want %q", test.prefix, label, ok, test.label)
+		}
+		var observation Observation
+		if test.identity {
+			observation = ObserveIdentity(test.domain, "same-value")
+		} else {
+			observation = ObserveText(test.domain, "same-value")
+			bytesObservation := ObserveBytes(
+				test.domain,
+				[]byte("same-value"),
+			)
+			if bytesObservation.State != observationStateComplete ||
+				bytesObservation.Digest == observation.Digest {
+				t.Fatalf("hook message byte/text separation failed: %#v %#v", observation, bytesObservation)
+			}
+		}
+		if observation.State != observationStateComplete {
+			t.Fatalf("domain %d observation unavailable: %#v", test.domain, observation)
+		}
+		if _, duplicate := digests[observation.Digest]; duplicate {
+			t.Fatalf("appended domain digest collision for %d", test.domain)
+		}
+		digests[observation.Digest] = struct{}{}
+	}
+	if ObservationDomainHookMessage <= ObservationDomainErrorText ||
+		ObservationPrefixHookMessage <= ObservationPrefixPrivateKey {
+		t.Fatal("appended enums were not appended")
+	}
+	if validDomain(ObservationDomainIdentityContextManager + 1) {
+		t.Fatal("domain after append-only tail accepted")
+	}
+	if _, ok := observationPrefixLabel(ObservationPrefixIdentityContextManager + 1); ok {
+		t.Fatal("prefix after append-only tail accepted")
+	}
+}

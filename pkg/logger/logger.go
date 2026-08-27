@@ -353,8 +353,15 @@ func getCallerSkip() (int, string) {
 			continue
 		}
 
-		// bypass common loggers
-		if strings.HasSuffix(file, "/logger.go") ||
+		// Bypass this package's implementation frames without hiding callers in
+		// the external logger_test package, even though those source files live
+		// in the same directory.
+		packageFunc := fn.Name()
+		if slash := strings.LastIndexByte(packageFunc, '/'); slash >= 0 {
+			packageFunc = packageFunc[slash+1:]
+		}
+		if strings.HasPrefix(packageFunc, "logger.") ||
+			strings.HasSuffix(file, "/logger.go") ||
 			strings.HasSuffix(file, "/logger_3rd_party.go") ||
 			strings.HasSuffix(file, "/log.go") {
 			continue
