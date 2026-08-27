@@ -146,6 +146,11 @@ func TestRepositoryReviewRunFindingStatusProjection(t *testing.T) {
 			finding: repoaudit.Finding{ID: "rfn_provisional", RepositoryFindingID: "rrf_provisional"},
 			want:    repositoryReviewRunFindingNeedsReview,
 		},
+		{
+			name:    "known association without aggregate projection",
+			finding: repoaudit.Finding{ID: "rfn_known", RepositoryFindingID: "rrf_missing", RepositoryMatchState: repoaudit.RepositoryMatchKnown},
+			want:    repositoryReviewRunFindingAssociatedExisting,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := repositoryReviewRunFindingStatusFor(test.state, test.finding); got != test.want {
@@ -255,6 +260,183 @@ func TestRepositoryReviewRunFindingStatusRetryRoute(t *testing.T) {
 	)
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("associated retry=%d %s", conflict.Code, conflict.Body.String())
+	}
+}
+
+func TestRepositoryReviewRunFindingStatusRetryRouteErrors(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	automation := seedRepositoryReviewDetailAutomation(
+		t,
+		handler,
+		state.Repository,
+		state.Runs[0].ID,
+	)
+	base := "/api/repository-reviews/automations/" + automation.ID + "/findings/status"
+
+	missingHeaders := httptest.NewRecorder()
+	mux.ServeHTTP(missingHeaders, httptest.NewRequest(
+		http.MethodPost,
+		base,
+		strings.NewReader(`{"finding_ids":[]}`),
+	))
+	if missingHeaders.Code < http.StatusBadRequest {
+		t.Fatalf("missing-header retry status=%d", missingHeaders.Code)
+	}
+
+	queryResponse := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		base+"?unexpected=true",
+		map[string]any{"finding_ids": []string{state.Findings[0].ID}},
+	)
+	if queryResponse.Code < http.StatusBadRequest {
+		t.Fatalf("query retry status=%d", queryResponse.Code)
+	}
+
+	malformedRequest := httptest.NewRequest(
+		http.MethodPost,
+		base,
+		strings.NewReader(`{`),
+	)
+	setRepositoryReviewMutationHeaders(malformedRequest)
+	malformedResponse := httptest.NewRecorder()
+	mux.ServeHTTP(malformedResponse, malformedRequest)
+	if malformedResponse.Code < http.StatusBadRequest {
+		t.Fatalf("malformed retry status=%d", malformedResponse.Code)
+	}
+
+	missingAutomation := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/rra_missing/findings/status",
+		map[string]any{"finding_ids": []string{state.Findings[0].ID}},
+	)
+	if missingAutomation.Code != http.StatusNotFound {
+		t.Fatalf(
+			"missing-automation retry status=%d body=%s",
+			missingAutomation.Code,
+			missingAutomation.Body.String(),
+		)
+	}
+
+	automationStore, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyAutomation := testRepositoryReviewAutomation()
+	emptyAutomation.ID = automation.ID + "_empty"
+	emptyAutomation.Repository = "owner/repository-without-ledger"
+	emptyAutomation.RunIDs = []string{"run_without_ledger"}
+	emptyAutomation, err = automationStore.CreateAutomation(t.Context(), emptyAutomation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingLedger := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		"/api/repository-reviews/automations/"+emptyAutomation.ID+"/findings/status",
+		map[string]any{"finding_ids": []string{state.Findings[0].ID}},
+	)
+	if missingLedger.Code != http.StatusNotFound {
+		t.Fatalf(
+			"missing-ledger retry status=%d body=%s",
+			missingLedger.Code,
+			missingLedger.Body.String(),
+		)
+	}
+}
+
+func TestRepositoryReviewAggregateDetailSkipsUnassociatedOccurrenceBeforeLinkedIssue(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	state := seedRepositoryReviewGenerationFindings(t, workspace, 2)
+	store := repoaudit.NewStore(workspace)
+	occurrenceIDs := append([]string(nil), state.Runs[0].FindingIDs...)
+	slices.Sort(occurrenceIDs)
+
+	jobFor := func(findingID string) repoaudit.RepositoryMappingJob {
+		t.Helper()
+		for _, job := range state.MappingJobs {
+			if job.ReviewFindingID == findingID {
+				return job
+			}
+		}
+		t.Fatalf("mapping job for %s not found", findingID)
+		return repoaudit.RepositoryMappingJob{}
+	}
+	claim := func(findingID string) repoaudit.RepositoryMappingJob {
+		t.Helper()
+		claimedState, job, _, claimed, err := store.ClaimMappingJob(
+			state.Repository,
+			jobFor(findingID).ID,
+			repoaudit.RepositoryMappingModelSnapshot{},
+		)
+		if err != nil || !claimed {
+			t.Fatalf("claim %s: claimed=%v err=%v", findingID, claimed, err)
+		}
+		state = claimedState
+		return job
+	}
+
+	firstJob := claim(occurrenceIDs[0])
+	var aggregate repoaudit.RepositoryFinding
+	var err error
+	state, aggregate, err = store.CompleteMappingJob(
+		state.Repository,
+		repoaudit.RepositoryMappingCompletion{
+			JobID: firstJob.ID, CreateMatchState: repoaudit.RepositoryMatchNew,
+			DefaultBranchVerified: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJob := claim(occurrenceIDs[1])
+	state, aggregate, err = store.CompleteMappingJob(
+		state.Repository,
+		repoaudit.RepositoryMappingCompletion{
+			JobID: secondJob.ID, RepositoryFindingID: aggregate.ID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var linkedOccurrence repoaudit.Finding
+	for _, finding := range state.Findings {
+		if finding.ID == occurrenceIDs[1] {
+			linkedOccurrence = finding
+			break
+		}
+	}
+	linkedState, linkedIssue, err := store.LinkExistingIssue(repoaudit.ExistingIssueLink{
+		Repository: state.Repository, FindingID: linkedOccurrence.ID,
+		ExpectedFindingVersion: linkedOccurrence.Version,
+		ExternalID:             "91",
+		ExternalURL:            "https://github.com/owner/repo-batch/issues/91",
+		Title:                  "Existing aggregate issue", Confirmed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation := seedRepositoryReviewDetailAutomation(
+		t,
+		handler,
+		linkedState.Repository,
+		linkedState.Runs[0].ID,
+	)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+"/findings/"+aggregate.ID,
+		nil,
+	))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"id":"`+linkedIssue.ID+`"`) ||
+		!strings.Contains(response.Body.String(), `"can_unlink_issue":true`) {
+		t.Fatalf("linked aggregate status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
