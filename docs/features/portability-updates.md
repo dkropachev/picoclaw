@@ -31,7 +31,7 @@ compatible with low-cost hardware.
 | `FR-PORT-001` | MUST | Makefile builds produce core binaries for supported Linux, Darwin, Windows, ARM, MIPS, RISC-V, and LoongArch targets. | Portability is a project-level promise. |
 | `FR-PORT-002` | MUST | Launcher builds include frontend assets and backend binary packaging for supported desktop targets. | Web UI distribution must be reproducible. |
 | `FR-PORT-003` | MUST | Updater downloads release assets, validates target platform naming, retries transient HTTP failures, and reports clear status. | Updates must be safe and diagnosable. |
-| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Coverage-delta execution clears inherited `PICOCLAW_HOME`, gives each compared Git ref a distinct fallback `HOME` for generation, package discovery, Go tests, and integration suites, and compares uncovered-statement debt rather than percentage or covered-statement count. Global debt cannot increase, impacted feature debt retains a ten-statement tolerance, and deletion is not a regression when it adds no uncovered debt. A coverage command may retry exactly once only when its output proves the single known `TestRunWorkerPanicReleasesSessionTurnState` TempDir session-cleanup race and contains no assertion, panic, build failure, or second failing test; every other failure is final. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests, tests that intentionally override `HOME` must retain fallback-home semantics, structural removals must not be mistaken for lost test coverage, and one asynchronous cleanup race in either immutable comparison ref must not make the debt gate nondeterministic or conceal a real failure. |
+| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Coverage-delta execution clears inherited `PICOCLAW_HOME`, gives each compared Git ref a distinct fallback `HOME` for generation, package discovery, Go tests, and integration suites, and compares uncovered-statement debt rather than percentage or covered-statement count. Global debt cannot increase, impacted feature debt retains a ten-statement tolerance, and deletion is not a regression when it adds no uncovered debt. A base coverage command may retry exactly once only when its output proves one known cleanup-only TempDir race: the agent panic worker's `sessions` cleanup or the asynchronous workflow handler's `workflow_runs/wr_` cleanup. The classifier rejects assertions, panics, build failures, another failing test, or the wrong package; every head failure and every repeated or unrecognized base failure is final. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests, tests that intentionally override `HOME` must retain fallback-home semantics, structural removals must not be mistaken for lost test coverage, and a synchronization fix in the PR cannot repair an asynchronous cleanup race in the immutable historical base. |
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 
 ## Data And State Model
@@ -85,8 +85,9 @@ Owns: TEST scripts/portability_requirements_test.go *
    uncovered-statement debt (`total statements - covered statements`), allowing
    code removal when debt does not grow even if percentage or covered count
    falls. If and only if one coverage command reports the exact cleanup-only
-   agent TempDir race, rerun that complete command once; do not retry an
-   assertion, timeout, panic, build failure, unrelated test, or repeated race.
+   base-only agent-session or workflow-run TempDir race, rerun that complete
+   base command once; do not retry head, an assertion, timeout, panic, build
+   failure, unrelated test or package, or repeated race.
 
 ## Cross-Feature Behavior
 
@@ -107,9 +108,9 @@ credentialed release publishing.
 - Coverage comparison fails on any global uncovered-debt increase or an impacted
   feature increase beyond ten statements; a percentage or covered-count drop
   caused only by deleting code is not a failure.
-- Coverage comparison retries the exact recognized agent TempDir cleanup race at
-  most once and preserves the second attempt's result; all unrecognized or
-  repeated failures remain visible.
+- Coverage comparison retries either exact recognized base TempDir cleanup race
+  at most once and preserves the second attempt's result; all head,
+  unrecognized, or repeated failures remain visible.
 
 ## Acceptance Evidence
 

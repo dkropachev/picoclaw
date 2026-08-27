@@ -119,15 +119,39 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	assertEnvironmentValue(t, baseEnvironment, "VALUE", "with=equals")
 }
 
-func TestKnownAgentTempDirCleanupRace(t *testing.T) {
-	cleanupRace := strings.Join([]string{
+func knownAgentTempDirCleanupRaceOutput() string {
+	return strings.Join([]string{
 		"--- FAIL: TestRunWorkerPanicReleasesSessionTurnState (0.07s)",
 		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestRun/001/sessions: directory not empty",
 		"FAIL",
 		"FAIL\tgithub.com/sipeed/picoclaw/pkg/agent\t87.764s",
 	}, "\n")
-	if !isKnownAgentTempDirCleanupRace([]byte(cleanupRace)) {
-		t.Fatal("isKnownAgentTempDirCleanupRace() rejected the exact cleanup-only failure")
+}
+
+func knownWorkflowTempDirCleanupRaceOutput() string {
+	return strings.Join([]string{
+		"--- FAIL: TestHandleRunWorkflowStartsAsyncRun (0.08s)",
+		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestHandleRunWorkflowStartsAsyncRun123/001/workflow_runs/wr_abc123: directory not empty",
+		"FAIL",
+		"FAIL\tgithub.com/sipeed/picoclaw/web/backend/api\t109.578s",
+	}, "\n")
+}
+
+func TestKnownCoverageTempDirCleanupRace(t *testing.T) {
+	agentCleanupRace := knownAgentTempDirCleanupRaceOutput()
+	workflowCleanupRace := knownWorkflowTempDirCleanupRaceOutput()
+	for _, test := range []struct {
+		name   string
+		output string
+	}{
+		{name: "agent", output: agentCleanupRace},
+		{name: "workflow", output: workflowCleanupRace},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !isKnownCoverageTempDirCleanupRace([]byte(test.output)) {
+				t.Fatal("exact cleanup-only failure was rejected")
+			}
+		})
 	}
 
 	for _, test := range []struct {
@@ -136,51 +160,208 @@ func TestKnownAgentTempDirCleanupRace(t *testing.T) {
 	}{
 		{
 			name: "different failing test",
-			output: cleanupRace + "\n" +
+			output: agentCleanupRace + "\n" +
 				"--- FAIL: TestLeaseLoss (0.01s)",
 		},
 		{
-			name: "functional assertion in target test",
-			output: cleanupRace + "\n" +
+			name: "agent plus another failed package",
+			output: agentCleanupRace + "\n" +
+				"FAIL\tgithub.com/sipeed/picoclaw/pkg/reviews\t0.01s",
+		},
+		{
+			name: "workflow plus another failed package",
+			output: workflowCleanupRace + "\n" +
+				"FAIL\tgithub.com/sipeed/picoclaw/pkg/workflows\t0.01s",
+		},
+		{
+			name: "extra cleanup failure",
+			output: workflowCleanupRace + "\n" +
+				"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestOther/001/cache: directory not empty",
+		},
+		{
+			name: "agent functional assertion",
+			output: agentCleanupRace + "\n" +
 				"    agent_test.go:7683: second message did not start a new turn after panic cleanup",
 		},
 		{
-			name: "different temp directory",
+			name: "workflow functional assertion",
+			output: workflowCleanupRace + "\n" +
+				"    workflow_ai_test.go:755: run status = running, want succeeded",
+		},
+		{
+			name: "helper functional assertion",
+			output: agentCleanupRace + "\n" +
+				"    rescue_helper_test.go:42: cleanup invariant failed",
+		},
+		{
+			name: "different agent temp directory",
 			output: strings.Replace(
-				cleanupRace,
+				agentCleanupRace,
 				"sessions: directory not empty",
 				"cache: directory not empty",
 				1,
 			),
 		},
 		{
+			name: "agent path prefix collision",
+			output: strings.Replace(
+				agentCleanupRace,
+				"/sessions: directory not empty",
+				"/not-sessions: directory not empty",
+				1,
+			),
+		},
+		{
+			name: "different workflow run directory",
+			output: strings.Replace(
+				workflowCleanupRace,
+				"workflow_runs/wr_abc123",
+				"workflow_runs/run_abc123",
+				1,
+			),
+		},
+		{
+			name: "workflow path prefix collision",
+			output: strings.Replace(
+				workflowCleanupRace,
+				"/workflow_runs/wr_abc123",
+				"/other_workflow_runs/wr_abc123",
+				1,
+			),
+		},
+		{
+			name: "nested workflow artifact",
+			output: strings.Replace(
+				workflowCleanupRace,
+				"workflow_runs/wr_abc123: directory not empty",
+				"workflow_runs/wr_abc123/artifacts: directory not empty",
+				1,
+			),
+		},
+		{
+			name: "wrong agent package",
+			output: strings.Replace(
+				agentCleanupRace,
+				"github.com/sipeed/picoclaw/pkg/agent",
+				"github.com/sipeed/picoclaw/pkg/agents",
+				1,
+			),
+		},
+		{
+			name: "wrong workflow package",
+			output: strings.Replace(
+				workflowCleanupRace,
+				"github.com/sipeed/picoclaw/web/backend/api",
+				"github.com/sipeed/picoclaw/pkg/workflows",
+				1,
+			),
+		},
+		{
 			name:   "test timeout",
-			output: cleanupRace + "\npanic: test timed out after 10m0s",
+			output: agentCleanupRace + "\npanic: test timed out after 10m0s",
+		},
+		{
+			name:   "fatal runtime error",
+			output: agentCleanupRace + "\nfatal error: concurrent map writes",
+		},
+		{
+			name:   "setup failure",
+			output: agentCleanupRace + "\nFAIL\tother/package [setup failed]",
+		},
+		{
+			name:   "build failure",
+			output: agentCleanupRace + "\nFAIL\tother/package [build failed]",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if isKnownAgentTempDirCleanupRace([]byte(test.output)) {
-				t.Fatal("isKnownAgentTempDirCleanupRace() accepted an unrelated failure")
+			if isKnownCoverageTempDirCleanupRace([]byte(test.output)) {
+				t.Fatal("cleanup classifier accepted an unrelated failure")
 			}
 		})
 	}
 }
 
 func TestRunCoverageCommandRetriesKnownCleanupRaceOnce(t *testing.T) {
-	cleanupRace := []byte(strings.Join([]string{
-		"--- FAIL: TestRunWorkerPanicReleasesSessionTurnState (0.07s)",
-		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestRun/001/sessions: directory not empty",
-		"FAIL",
-	}, "\n"))
+	for _, test := range []struct {
+		name   string
+		output string
+	}{
+		{name: "agent", output: knownAgentTempDirCleanupRaceOutput()},
+		{name: "workflow", output: knownWorkflowTempDirCleanupRaceOutput()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			attempts := 0
+			out, err, retried := runCoverageCommandWithCleanupRetry(
+				"base",
+				func() ([]byte, error) {
+					attempts++
+					if attempts == 1 {
+						return []byte(test.output), errors.New("exit status 1")
+					}
+					return []byte("ok"), nil
+				},
+			)
+			if err != nil || string(out) != "ok" || !retried || attempts != 2 {
+				t.Fatalf(
+					"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+					out,
+					err,
+					retried,
+					attempts,
+				)
+			}
+		})
+	}
+}
+
+func TestRunCoverageCommandDoesNotRetryHeadCleanupRace(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		output string
+	}{
+		{name: "agent", output: knownAgentTempDirCleanupRaceOutput()},
+		{name: "workflow", output: knownWorkflowTempDirCleanupRaceOutput()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wantErr := errors.New("exit status 1")
+			attempts := 0
+			out, err, retried := runCoverageCommandWithCleanupRetry(
+				"head",
+				func() ([]byte, error) {
+					attempts++
+					return []byte(test.output), wantErr
+				},
+			)
+			if !errors.Is(err, wantErr) || string(out) != test.output ||
+				retried || attempts != 1 {
+				t.Fatalf(
+					"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
+					out,
+					err,
+					retried,
+					attempts,
+				)
+			}
+		})
+	}
+}
+
+func TestRunCoverageCommandPreservesFunctionalSecondAttempt(t *testing.T) {
+	wantErr := errors.New("exit status 1")
+	wantOutput := "--- FAIL: TestLeaseLoss (0.01s)"
 	attempts := 0
-	out, err, retried := runCoverageCommandWithCleanupRetry(func() ([]byte, error) {
-		attempts++
-		if attempts == 1 {
-			return cleanupRace, errors.New("exit status 1")
-		}
-		return []byte("ok"), nil
-	})
-	if err != nil || string(out) != "ok" || !retried || attempts != 2 {
+	out, err, retried := runCoverageCommandWithCleanupRetry(
+		"base",
+		func() ([]byte, error) {
+			attempts++
+			if attempts == 1 {
+				return []byte(knownAgentTempDirCleanupRaceOutput()), wantErr
+			}
+			return []byte(wantOutput), wantErr
+		},
+	)
+	if !errors.Is(err, wantErr) || string(out) != wantOutput ||
+		!retried || attempts != 2 {
 		t.Fatalf(
 			"runCoverageCommandWithCleanupRetry() = (%q, %v, %t), attempts = %d",
 			out,
@@ -192,17 +373,16 @@ func TestRunCoverageCommandRetriesKnownCleanupRaceOnce(t *testing.T) {
 }
 
 func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
-	cleanupRace := []byte(strings.Join([]string{
-		"--- FAIL: TestRunWorkerPanicReleasesSessionTurnState (0.07s)",
-		"    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/TestRun/001/sessions: directory not empty",
-		"FAIL",
-	}, "\n"))
+	cleanupRace := []byte(knownAgentTempDirCleanupRaceOutput())
 	wantErr := errors.New("exit status 1")
 	attempts := 0
-	out, err, retried := runCoverageCommandWithCleanupRetry(func() ([]byte, error) {
-		attempts++
-		return cleanupRace, wantErr
-	})
+	out, err, retried := runCoverageCommandWithCleanupRetry(
+		"base",
+		func() ([]byte, error) {
+			attempts++
+			return cleanupRace, wantErr
+		},
+	)
 	if !errors.Is(err, wantErr) || string(out) != string(cleanupRace) ||
 		!retried || attempts != 2 {
 		t.Fatalf(
@@ -218,10 +398,13 @@ func TestRunCoverageCommandDoesNotRetryKnownCleanupRaceTwice(t *testing.T) {
 func TestRunCoverageCommandDoesNotRetryUnrelatedFailure(t *testing.T) {
 	wantErr := errors.New("exit status 1")
 	attempts := 0
-	out, err, retried := runCoverageCommandWithCleanupRetry(func() ([]byte, error) {
-		attempts++
-		return []byte("--- FAIL: TestLeaseLoss (0.01s)"), wantErr
-	})
+	out, err, retried := runCoverageCommandWithCleanupRetry(
+		"base",
+		func() ([]byte, error) {
+			attempts++
+			return []byte("--- FAIL: TestLeaseLoss (0.01s)"), wantErr
+		},
+	)
 	if !errors.Is(err, wantErr) || string(out) != "--- FAIL: TestLeaseLoss (0.01s)" ||
 		retried || attempts != 1 {
 		t.Fatalf(
