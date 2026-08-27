@@ -294,6 +294,7 @@ func TestResolveSystemVersionInfoSkipsCommandWhenContextCanceled(t *testing.T) {
 
 func TestResolveGatewayBinaryForVersionInfoPrefersGatewayCommandPath(t *testing.T) {
 	setupVersionTestIsolation(t)
+	resetGatewayTestState(t)
 
 	originalFinder := findPicoclawBinaryForInfo
 	t.Cleanup(func() {

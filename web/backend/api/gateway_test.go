@@ -104,6 +104,7 @@ func resetGatewayTestState(t *testing.T) {
 	originalRestartForceKillWindow := gatewayRestartForceKillWindow
 	originalRestartPollInterval := gatewayRestartPollInterval
 	t.Setenv("PICOCLAW_HOME", t.TempDir())
+	clearGatewayTestState()
 	t.Cleanup(func() {
 		gatewayHealthGet = originalHealthGet
 		gatewayProcessMatcher = originalProcessMatcher
@@ -113,15 +114,78 @@ func resetGatewayTestState(t *testing.T) {
 		gatewayRestartForceKillWindow = originalRestartForceKillWindow
 		gatewayRestartPollInterval = originalRestartPollInterval
 
-		gateway.mu.Lock()
-		gateway.cmd = nil
-		gateway.pidData = nil
-		gateway.owned = false
-		gateway.bootDefaultModel = ""
-		gateway.bootConfigSignature = ""
-		setGatewayRuntimeStatusLocked("stopped")
-		gateway.mu.Unlock()
+		clearGatewayTestState()
 	})
+}
+
+func clearGatewayTestState() {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+
+	// Never signal an inherited process here. A test that owns a subprocess is
+	// responsible for its cleanup; shared-state reset only drops authority.
+	gateway.cmd = nil
+	gateway.pidData = nil
+	gateway.owned = false
+	gateway.bootDefaultModel = ""
+	gateway.bootConfigSignature = ""
+	gateway.picoToken = ""
+	setGatewayRuntimeStatusLocked("stopped")
+}
+
+func TestResetGatewayTestStateDropsInheritedProcessWithoutSignalingIt(t *testing.T) {
+	cmd := startLongRunningProcess(t)
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
+
+	gateway.mu.Lock()
+	gateway.cmd = cmd
+	gateway.pidData = &ppid.PidFileData{PID: cmd.Process.Pid, Token: "test-token"}
+	gateway.owned = true
+	gateway.bootDefaultModel = "test-model"
+	gateway.bootConfigSignature = "test-signature"
+	gateway.picoToken = "test-pico-token"
+	setGatewayRuntimeStatusLocked("running")
+	gateway.mu.Unlock()
+
+	resetGatewayTestState(t)
+
+	gateway.mu.Lock()
+	tracked := gateway.cmd
+	pidData := gateway.pidData
+	owned := gateway.owned
+	bootDefaultModel := gateway.bootDefaultModel
+	bootConfigSignature := gateway.bootConfigSignature
+	picoToken := gateway.picoToken
+	status := gateway.runtimeStatus
+	startupDeadline := gateway.startupDeadline
+	gateway.mu.Unlock()
+	if tracked != nil || pidData != nil || owned || bootDefaultModel != "" ||
+		bootConfigSignature != "" || picoToken != "" || status != "stopped" ||
+		!startupDeadline.IsZero() {
+		t.Fatalf(
+			"gateway state after reset = (cmd=%v, pidData=%v, owned=%v, bootModel=%q, bootSignature=%q, picoToken=%q, status=%q, deadline=%v), want cleared stopped state",
+			tracked,
+			pidData,
+			owned,
+			bootDefaultModel,
+			bootConfigSignature,
+			picoToken,
+			status,
+			startupDeadline,
+		)
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !isCmdProcessAliveLocked(cmd) {
+			t.Fatal("reset signaled inherited process")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // stopHandlerStartedGatewayProcess terminates a process started through
@@ -193,14 +257,11 @@ func TestGatewayStartHelperProcess(t *testing.T) {
 		ConfigPath:     os.Getenv(config.EnvConfig),
 	})
 	if err != nil {
-		_, _ = io.WriteString(os.Stderr, err.Error())
-		os.Exit(2)
+		t.Fatalf("marshal gateway environment snapshot: %v", err)
 	}
 	if err := os.WriteFile(envPath, raw, 0o600); err != nil {
-		_, _ = io.WriteString(os.Stderr, err.Error())
-		os.Exit(2)
+		t.Fatalf("write gateway environment snapshot: %v", err)
 	}
-	os.Exit(0)
 }
 
 func unsetGatewayStartEnvForTest(t *testing.T, key string) {
@@ -1087,6 +1148,8 @@ func TestGatewayStartReady_OAuthModelRequiresStoredCredential(t *testing.T) {
 }
 
 func TestGatewayStatusAllowsLimitedModeWithoutModel(t *testing.T) {
+	resetGatewayTestState(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	h := NewHandler(configPath)
 	mux := http.NewServeMux()
@@ -1124,6 +1187,8 @@ func TestGatewayStatusAllowsLimitedModeWithoutModel(t *testing.T) {
 }
 
 func TestGatewayStatusReportsModelSetupCompleteWithChatAlias(t *testing.T) {
+	resetGatewayTestState(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
 	cfg.ModelAliases = []config.ModelAliasConfig{{
@@ -3413,6 +3478,8 @@ func TestGatewayStatusReturnsRestartingDuringRestartGap(t *testing.T) {
 }
 
 func TestGatewayRestartKeepsRunningProcessWhenPreconditionsFail(t *testing.T) {
+	resetGatewayTestState(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
 	model := addGatewayTestModel(cfg)
@@ -3580,6 +3647,8 @@ func TestGatewayRestartReturnsErrorStatusWhenReplacementFailsToStart(t *testing.
 }
 
 func TestGatewayStatusExcludesLogsFields(t *testing.T) {
+	resetGatewayTestState(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	h := NewHandler(configPath)
 	mux := http.NewServeMux()

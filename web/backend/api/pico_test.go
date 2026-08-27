@@ -751,6 +751,8 @@ func TestCreatePicoHTTPProxyInjectsGatewayAuth(t *testing.T) {
 }
 
 func TestHandlePicoMediaProxyUsesRawBearerToken(t *testing.T) {
+	resetGatewayTestState(t)
+
 	home := t.TempDir()
 	t.Setenv("PICOCLAW_HOME", home)
 
@@ -822,6 +824,8 @@ func TestHandlePicoMediaProxyUsesRawBearerToken(t *testing.T) {
 }
 
 func TestHandleWebSocketProxyRejectsStalePidDataAfterProcessExit(t *testing.T) {
+	resetGatewayTestState(t)
+
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("PICOCLAW_HOME", filepath.Join(tmpDir, ".picoclaw"))
