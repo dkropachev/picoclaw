@@ -1080,28 +1080,7 @@ func gatewayRestartRequiredBySignature(bootSignature, currentSignature, gatewayS
 }
 
 func isCmdProcessAliveLocked(cmd *exec.Cmd) bool {
-	if cmd == nil || cmd.Process == nil {
-		return false
-	}
-
-	// Wait() sets ProcessState when the process exits; use it when available.
-	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-		return false
-	}
-
-	// Windows does not support Signal(0) probing. If we still own cmd and it
-	// has not reported exit, treat it as alive.
-	if runtime.GOOS == "windows" {
-		return true
-	}
-
-	err := cmd.Process.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	var errno syscall.Errno
-	// EPERM means the process exists but cannot be signaled by this user.
-	return errors.As(err, &errno) && errno == syscall.EPERM
+	return gatewayProcessOps.Alive(cmd)
 }
 
 func setGatewayRuntimeStatusLocked(status string) {
@@ -1117,7 +1096,7 @@ func setGatewayRuntimeStatusLocked(status string) {
 // and updates the gateway state accordingly.
 // Assumes gateway.mu is held by the caller.
 func attachToGatewayProcessLocked(pid int, cfg *config.Config) error {
-	process, err := os.FindProcess(pid)
+	process, err := gatewayProcessOps.Find(pid)
 	if err != nil {
 		return fmt.Errorf("failed to find process for PID %d: %w", pid, err)
 	}
@@ -1221,9 +1200,9 @@ func stopGatewayLocked() (int, error) {
 	// Send SIGTERM for graceful shutdown (SIGKILL on Windows)
 	var sigErr error
 	if runtime.GOOS == "windows" {
-		sigErr = gateway.cmd.Process.Kill()
+		sigErr = gatewayProcessOps.Kill(gateway.cmd)
 	} else {
-		sigErr = gateway.cmd.Process.Signal(syscall.SIGTERM)
+		sigErr = gatewayProcessOps.Signal(gateway.cmd, syscall.SIGTERM)
 	}
 
 	if sigErr != nil {
@@ -1247,9 +1226,9 @@ func stopGatewayProcessForRestart(cmd *exec.Cmd) error {
 
 	var stopErr error
 	if runtime.GOOS == "windows" {
-		stopErr = cmd.Process.Kill()
+		stopErr = gatewayProcessOps.Kill(cmd)
 	} else {
-		stopErr = cmd.Process.Signal(syscall.SIGTERM)
+		stopErr = gatewayProcessOps.Signal(cmd, syscall.SIGTERM)
 	}
 	if stopErr != nil && isCmdProcessAliveLocked(cmd) {
 		return fmt.Errorf("failed to stop existing gateway: %w", stopErr)
@@ -1260,7 +1239,7 @@ func stopGatewayProcessForRestart(cmd *exec.Cmd) error {
 	}
 
 	if runtime.GOOS != "windows" {
-		killErr := cmd.Process.Signal(syscall.SIGKILL)
+		killErr := gatewayProcessOps.Signal(cmd, syscall.SIGKILL)
 		if killErr != nil && isCmdProcessAliveLocked(cmd) {
 			return fmt.Errorf("failed to force-stop existing gateway: %w", killErr)
 		}
@@ -1348,6 +1327,7 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("failed to start gateway: %w", err)
 	}
+	gatewayProcessOps.Track(cmd)
 
 	gateway.cmd = cmd
 	gateway.owned = true // We started this process
@@ -1368,6 +1348,7 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 		} else {
 			logger.InfoC("gateway", "Gateway process exited normally")
 		}
+		gatewayProcessOps.Forget(cmd)
 
 		gateway.mu.Lock()
 		if gateway.cmd == cmd {

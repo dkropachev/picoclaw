@@ -69,6 +69,13 @@ make generate    # Run go generate only
 make check       # Full pre-commit check: deps + fmt + vet + test + docs consistency checks
 ```
 
+`make test` and CI run Go tests through the hermetic test runner. It builds the
+current checkout into a disposable directory with its own OS/PicoClaw homes,
+config, workspace, database, and loopback port; it never installs or starts a
+PicoClaw service. Prefer `make test` for the full suite. Direct launcher API
+package tests retain the same host-safety boundary through their package
+`TestMain` fixture.
+
 ### Running Tests
 
 ```bash

@@ -3,7 +3,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -97,6 +100,30 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 		"GOCACHE=/shared/build-cache",
 		"GOMODCACHE=/shared/module-cache",
 		"GOTOOLCHAIN=local",
+		"AWS_ACCESS_KEY_ID=operator-access-key",
+		"AWS_SECRET_ACCESS_KEY=operator-secret-key",
+		"AWS_PROFILE=operator-profile",
+		"AWS_SHARED_CREDENTIALS_FILE=/operator/aws-credentials",
+		"OPENAI_API_KEY=operator-openai-key",
+		"ANTHROPIC_API_KEY=operator-anthropic-key",
+		"GITHUB_TOKEN=operator-github-token",
+		"GITHUB_PAT=operator-github-pat",
+		"GH_TOKEN=operator-gh-token",
+		"GH_PAT=operator-gh-pat",
+		"SSH_AUTH_SOCK=/operator/ssh-agent.sock",
+		"GOOGLE_APPLICATION_CREDENTIALS=/operator/google.json",
+		"AZURE_CLIENT_SECRET=operator-azure-secret",
+		"KUBECONFIG=/operator/kubeconfig",
+		"DOCKER_HOST=unix:///operator/docker.sock",
+		"GIT_ASKPASS=/operator/askpass",
+		"GIT_TERMINAL_PROMPT=1",
+		"GCM_INTERACTIVE=always",
+		"NETRC=/operator/netrc",
+		"SERVICE_API_KEY=operator-generic-key",
+		"NOTIFY_SOCKET=/operator/notify.sock",
+		"LISTEN_FDS=3",
+		"GOAUTH=/operator/goauth-helper",
+		"GOENV=/operator/goenv",
 		"VALUE=with=equals",
 	}
 	original := append([]string(nil), base...)
@@ -110,13 +137,95 @@ func TestCoverageEnvironmentIsolatesRefState(t *testing.T) {
 	}
 	assertEnvironmentValue(t, baseEnvironment, "HOME", "/isolated/base")
 	assertEnvironmentValue(t, headEnvironment, "HOME", "/isolated/head")
-	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_HOME", "")
-	assertEnvironmentValue(t, headEnvironment, "PICOCLAW_HOME", "")
+	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_HOME", "/isolated/base/.picoclaw")
+	assertEnvironmentValue(t, headEnvironment, "PICOCLAW_HOME", "/isolated/head/.picoclaw")
+	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_CONFIG", "/isolated/base/.picoclaw/config.json")
+	assertEnvironmentValue(t, baseEnvironment, "PICOCLAW_BINARY", "/isolated/base/bin/picoclaw")
+	assertEnvironmentValue(t, baseEnvironment, "XDG_RUNTIME_DIR", "/isolated/base/.xdg/runtime")
+	assertEnvironmentValue(t, baseEnvironment, "TMPDIR", "/isolated/base/.tmp")
+	assertEnvironmentValue(t, baseEnvironment, "GNUPGHOME", "/isolated/base/.gnupg")
+	assertEnvironmentValue(t, baseEnvironment, "GIT_CONFIG_NOSYSTEM", "1")
+	assertEnvironmentValue(
+		t,
+		baseEnvironment,
+		"DBUS_SESSION_BUS_ADDRESS",
+		"unix:path=/isolated/base/.no-systemd-bus",
+	)
 	assertEnvironmentValue(t, baseEnvironment, "GOCACHE", "/cache/build")
 	assertEnvironmentValue(t, baseEnvironment, "GOMODCACHE", "/cache/modules")
 	assertEnvironmentValue(t, baseEnvironment, "GOTOOLCHAIN", "auto")
+	assertEnvironmentValue(t, baseEnvironment, "AWS_EC2_METADATA_DISABLED", "true")
+	assertEnvironmentValue(t, baseEnvironment, "GIT_TERMINAL_PROMPT", "0")
+	assertEnvironmentValue(t, baseEnvironment, "GCM_INTERACTIVE", "never")
+	assertEnvironmentValue(t, baseEnvironment, "GOAUTH", "off")
+	assertEnvironmentValue(t, baseEnvironment, "GOENV", "off")
 	assertEnvironmentValue(t, baseEnvironment, "PATH", "/bin")
 	assertEnvironmentValue(t, baseEnvironment, "VALUE", "with=equals")
+	for _, name := range []string{
+		"ANTHROPIC_API_KEY",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_PROFILE",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SHARED_CREDENTIALS_FILE",
+		"AZURE_CLIENT_SECRET",
+		"DOCKER_HOST",
+		"GH_TOKEN",
+		"GH_PAT",
+		"GITHUB_TOKEN",
+		"GITHUB_PAT",
+		"GIT_ASKPASS",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"KUBECONFIG",
+		"NETRC",
+		"NOTIFY_SOCKET",
+		"LISTEN_FDS",
+		"OPENAI_API_KEY",
+		"SERVICE_API_KEY",
+		"SSH_AUTH_SOCK",
+	} {
+		assertEnvironmentMissing(t, baseEnvironment, name)
+	}
+}
+
+func TestPrepareCoverageHomeCreatesIsolatedRuntimeState(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "coverage-home")
+	if err := prepareCoverageHome(home); err != nil {
+		t.Fatalf("prepareCoverageHome() error = %v", err)
+	}
+	configPath := filepath.Join(home, ".picoclaw", "config.json")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read coverage config: %v", err)
+	}
+	var configFile struct {
+		Agents struct {
+			Defaults struct {
+				Workspace string `json:"workspace"`
+			} `json:"defaults"`
+		} `json:"agents"`
+		Gateway struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+		} `json:"gateway"`
+		Events struct {
+			Ingress struct {
+				DatabasePath string `json:"database_path"`
+			} `json:"ingress"`
+		} `json:"events"`
+	}
+	if err = json.Unmarshal(raw, &configFile); err != nil {
+		t.Fatalf("decode coverage config: %v", err)
+	}
+	wantWorkspace := filepath.Join(home, ".picoclaw", "workspace")
+	wantDB := filepath.Join(wantWorkspace, "eventing", "events.db")
+	if configFile.Agents.Defaults.Workspace != wantWorkspace ||
+		configFile.Events.Ingress.DatabasePath != wantDB ||
+		configFile.Gateway.Host != "127.0.0.1" || configFile.Gateway.Port <= 0 {
+		t.Fatalf("coverage config escaped runtime: %#v", configFile)
+	}
+	if info, statErr := os.Stat(wantDB); statErr != nil || !info.Mode().IsRegular() {
+		t.Fatalf("coverage event database = (%v, %v), want regular file", info, statErr)
+	}
 }
 
 func knownAgentTempDirCleanupRaceOutput() string {
@@ -515,5 +624,15 @@ func assertEnvironmentValue(t *testing.T, environment []string, name, want strin
 	}
 	if len(values) != 1 || values[0] != want {
 		t.Fatalf("environment %s values = %#v, want [%q]", name, values, want)
+	}
+}
+
+func assertEnvironmentMissing(t *testing.T, environment []string, name string) {
+	t.Helper()
+	for _, entry := range environment {
+		entryName, _, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(entryName, name) {
+			t.Fatalf("environment unexpectedly contains %s", name)
+		}
 	}
 }

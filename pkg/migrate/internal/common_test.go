@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +53,8 @@ func TestRelPathError(t *testing.T) {
 }
 
 func TestResolveTargetHome(t *testing.T) {
+	t.Setenv(config.EnvHome, "")
+
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
 

@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -376,16 +374,11 @@ func TestDisableConsole(t *testing.T) {
 }
 
 func TestConfigureFromEnv(t *testing.T) {
-	home := os.Getenv("HOME")
-	if home == "" {
-		t.Skip("HOME not set")
-	}
-
-	tmpFile := "/tmp/picoclaw_test_log_" + fmt.Sprintf("%d", time.Now().UnixNano())
-	defer os.Remove(tmpFile)
-
-	os.Setenv("PICOCLAW_LOG_FILE", tmpFile)
-	defer os.Unsetenv("PICOCLAW_LOG_FILE")
+	home := t.TempDir()
+	t.Cleanup(DisableFileLogging)
+	t.Setenv("HOME", home)
+	tmpFile := filepath.Join(t.TempDir(), "picoclaw.log")
+	t.Setenv("PICOCLAW_LOG_FILE", tmpFile)
 
 	ConfigureFromEnv()
 
@@ -395,15 +388,18 @@ func TestConfigureFromEnv(t *testing.T) {
 
 	Info("test message")
 
-	os.Setenv("PICOCLAW_LOG_FILE", "~/test_log")
+	t.Setenv("PICOCLAW_LOG_FILE", "~/test_log")
 	ConfigureFromEnv()
 
 	expanded := filepath.Join(home, "test_log")
-	defer os.Remove(expanded)
+	if _, err := os.Stat(expanded); err != nil {
+		t.Fatalf("expanded log path was not created: %v", err)
+	}
 }
 
 func TestConfigureFromEnvNoEnv(t *testing.T) {
-	os.Unsetenv("PICOCLAW_LOG_FILE")
+	t.Cleanup(DisableFileLogging)
+	t.Setenv("PICOCLAW_LOG_FILE", "")
 	ConfigureFromEnv()
 }
 

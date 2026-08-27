@@ -398,6 +398,7 @@ func TestCloseoutThreadsFilesystemAndPolicyErrors(t *testing.T) {
 	}); result == nil || !result.IsError {
 		t.Fatalf("policy save failure = %#v", result)
 	}
+	saveThreadPolicyConfig = originalSave
 
 	if result := validTool.Execute(context.Background(), map[string]any{
 		"action": "search",
