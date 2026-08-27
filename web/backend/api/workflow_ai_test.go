@@ -719,6 +719,11 @@ jobs:
 	oldRunners := newWorkflowRuntimeRunners
 	t.Cleanup(func() {
 		runner.release()
+		select {
+		case <-runner.closed:
+		case <-time.After(2 * time.Second):
+			t.Error("async workflow runtime did not close")
+		}
 		newWorkflowRuntimeRunners = oldRunners
 	})
 	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {

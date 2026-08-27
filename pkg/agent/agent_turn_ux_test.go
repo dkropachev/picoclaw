@@ -1534,6 +1534,12 @@ func TestAgentTurnUXRescueTreatsCompetingOwnerAsQueueTransfer(t *testing.T) {
 		runtime.Gosched()
 	}
 	select {
+	case call := <-manager.cleanupCalled:
+		assertAgentTurnUXCall(t, call, channel, chatID, turnUXID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("ownership transfer did not clean its abandoned rescue owner")
+	}
+	select {
 	case outbound := <-innerBus.OutboundChan():
 		t.Fatalf(
 			"ownership transfer was published as a user-facing error: %#v",

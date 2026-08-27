@@ -477,13 +477,13 @@ func runGoCoverage(
 		return cmd.CombinedOutput()
 	}
 	// The guard tests detached base and head worktrees. A synchronization fix
-	// in head cannot change the historical base test, so retry only its exact
-	// cleanup-only failure signature once.
-	out, err, retried := runCoverageCommandWithCleanupRetry(run)
+	// in head cannot change the historical base test, so retry only an exact
+	// cleanup-only failure from base once. Head failures are always final.
+	out, err, retried := runCoverageCommandWithCleanupRetry(label, run)
 	if retried {
 		fmt.Fprintf(
 			os.Stderr,
-			"coverage delta: retried %s (%s) after known agent TempDir cleanup race\n",
+			"coverage delta: retried %s (%s) after known TempDir cleanup race\n",
 			label,
 			ref,
 		)
@@ -504,47 +504,119 @@ func runGoCoverage(
 }
 
 func runCoverageCommandWithCleanupRetry(
+	label string,
 	run func() ([]byte, error),
 ) ([]byte, error, bool) {
 	out, err := run()
-	if err == nil || !isKnownAgentTempDirCleanupRace(out) {
+	if err == nil || label != "base" || !isKnownCoverageTempDirCleanupRace(out) {
 		return out, err, false
 	}
 	out, err = run()
 	return out, err, true
 }
 
-func isKnownAgentTempDirCleanupRace(out []byte) bool {
+func isKnownCoverageTempDirCleanupRace(out []byte) bool {
 	const (
-		testFailurePrefix = "--- FAIL: TestRunWorkerPanicReleasesSessionTurnState ("
-		cleanupPrefix     = "TempDir RemoveAll cleanup:"
-		cleanupSuffix     = "sessions: directory not empty"
+		agentFailurePrefix    = "--- FAIL: TestRunWorkerPanicReleasesSessionTurnState ("
+		workflowFailurePrefix = "--- FAIL: TestHandleRunWorkflowStartsAsyncRun ("
+		cleanupPrefix         = "TempDir RemoveAll cleanup:"
+		agentCleanupSuffix    = "sessions: directory not empty"
+		workflowCleanupPath   = "workflow_runs/wr_"
+		cleanupSuffix         = ": directory not empty"
+		agentPackage          = "github.com/sipeed/picoclaw/pkg/agent"
+		workflowPackage       = "github.com/sipeed/picoclaw/web/backend/api"
 	)
 
-	failures := 0
-	cleanupFailures := 0
+	var (
+		agentFailures          int
+		workflowFailures       int
+		cleanupFailures        int
+		agentCleanupFailures   int
+		workflowCleanupFailure int
+		packageFailures        int
+		failedPackage          string
+	)
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "--- FAIL:") {
-			if !strings.HasPrefix(line, testFailurePrefix) {
+			switch {
+			case strings.HasPrefix(line, agentFailurePrefix):
+				agentFailures++
+			case strings.HasPrefix(line, workflowFailurePrefix):
+				workflowFailures++
+			default:
 				return false
 			}
-			failures++
 		}
-		if strings.Contains(line, cleanupPrefix) && strings.Contains(line, cleanupSuffix) {
+		if _, diagnostic, found := strings.Cut(line, cleanupPrefix); found {
 			cleanupFailures++
+			diagnostic = strings.ReplaceAll(strings.TrimSpace(diagnostic), `\`, "/")
+			switch {
+			case strings.HasSuffix(diagnostic, "/"+agentCleanupSuffix):
+				agentCleanupFailures++
+			case isKnownWorkflowRunTempDirCleanupDiagnostic(
+				diagnostic,
+				workflowCleanupPath,
+				cleanupSuffix,
+			):
+				workflowCleanupFailure++
+			}
 		}
-		// A functional assertion from this test must not be reclassified as
-		// the cleanup-only race merely because TempDir also reports a failure.
-		if strings.Contains(line, "agent_test.go:") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "FAIL" {
+			packageFailures++
+			failedPackage = fields[1]
+		}
+		// Any test-file diagnostic may be a functional assertion from the
+		// target test or one of its helpers. Only testing.go may report the
+		// recognized cleanup line.
+		if strings.Contains(line, "_test.go:") {
 			return false
 		}
-		if strings.HasPrefix(line, "panic:") || strings.Contains(line, "[build failed]") {
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") ||
+			strings.Contains(line, "[build failed]") ||
+			strings.Contains(line, "[setup failed]") {
 			return false
 		}
 	}
-	return scanner.Err() == nil && failures == 1 && cleanupFailures == 1
+	if scanner.Err() != nil {
+		return false
+	}
+	return cleanupFailures == 1 && packageFailures == 1 &&
+		((agentFailures == 1 && workflowFailures == 0 &&
+			agentCleanupFailures == 1 && workflowCleanupFailure == 0 &&
+			failedPackage == agentPackage) ||
+			(workflowFailures == 1 && agentFailures == 0 &&
+				workflowCleanupFailure == 1 && agentCleanupFailures == 0 &&
+				failedPackage == workflowPackage))
+}
+
+func isKnownWorkflowRunTempDirCleanupDiagnostic(
+	diagnostic string,
+	pathMarker string,
+	cleanupSuffix string,
+) bool {
+	if !strings.HasSuffix(diagnostic, cleanupSuffix) {
+		return false
+	}
+	path := strings.TrimSuffix(diagnostic, cleanupSuffix)
+	marker := "/" + pathMarker
+	index := strings.LastIndex(path, marker)
+	if index < 0 {
+		return false
+	}
+	runID := path[index+len(marker):]
+	if runID == "" {
+		return false
+	}
+	for _, character := range runID {
+		if (character < '0' || character > '9') &&
+			(character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func runIntegrationCoverage(
