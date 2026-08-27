@@ -304,8 +304,26 @@ func TestGatewayDirectBinaryUsesOnlyTestRuntime(t *testing.T) {
 
 	stop()
 	if runtime.GOOS != "windows" {
+		if _, err = os.Stat(pidPath); err == nil {
+			var remaining ppid.PidFileData
+			remainingRaw, readErr := os.ReadFile(pidPath)
+			decodeErr := json.Unmarshal(remainingRaw, &remaining)
+			if readErr != nil || decodeErr != nil || remaining.PID != command.Process.Pid {
+				t.Fatalf(
+					"gateway left unexpected PID authority: pid=%d read=%v decode=%v",
+					remaining.PID,
+					readErr,
+					decodeErr,
+				)
+			}
+			if !ppid.RemovePidFileIfPID(harness.PicoHome, command.Process.Pid) {
+				t.Fatalf("remove test-owned gateway PID file after forced shutdown")
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat gateway PID file after stop: %v", err)
+		}
 		if _, err = os.Stat(pidPath); !os.IsNotExist(err) {
-			t.Fatalf("gateway PID file remains after graceful stop: %v", err)
+			t.Fatalf("test-owned gateway PID file remains after cleanup: %v", err)
 		}
 	}
 }
