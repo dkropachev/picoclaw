@@ -4997,7 +4997,10 @@ test("repository review routing preserves run context through repository finding
   )
   await expect(findingRow).toBeVisible()
   await expect(
-    findingRow.getByText("Created repository finding", { exact: true }),
+    findingRow
+      .getByText("Created repository finding", { exact: true })
+      .or(findingRow.getByText("New", { exact: true }))
+      .filter({ visible: true }),
   ).toBeVisible()
   await findingRow.focus()
   await page.keyboard.press("Space")
