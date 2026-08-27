@@ -85,6 +85,10 @@ the state directory contains exactly its authenticated binding and lock
 controls. Any transaction, cleanup, or alien entry keeps the path mismatch
 fail-closed.
 
+Linux object device IDs and link counts are normalized to unsigned 64-bit
+journal state at the platform boundary, so 32-bit and 64-bit targets share one
+canonical transaction schema without narrowing the kernel values.
+
 ## Data And State Model
 
 Tool state includes visible and hidden registry maps, allowlists, TTL metadata,

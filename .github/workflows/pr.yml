@@ -269,6 +269,9 @@ jobs:
       - name: Run go test
         run: go test -tags goolm,stdjson ./...
 
+      - name: Cross-compile core binaries
+        run: make build-all
+
   coverage:
     name: Coverage Delta
     runs-on: ubuntu-latest

@@ -29,6 +29,16 @@ func TestMakefileBuildAllCoversRequiredTargets(t *testing.T) {
 	}
 }
 
+func TestPRRunsBuildAllBeforeMerge(t *testing.T) {
+	workflow := readRepoFile(t, ".github/workflows/pr.yml")
+	if !strings.Contains(
+		workflow,
+		"- name: Cross-compile core binaries\n        run: make build-all",
+	) {
+		t.Fatal("PR workflow does not run the complete core cross-build matrix")
+	}
+}
+
 func TestLauncherBuildIncludesFrontendAndBackendPackaging(t *testing.T) {
 	rootMakefile := readRepoFile(t, "Makefile")
 	rootLauncher := targetBlock(t, rootMakefile, "## build-launcher:", "build-launcher-frontend:")
