@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
-	"sync"
 
 	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -39,37 +39,12 @@ type UserEnv struct {
 	LocalAppData string
 }
 
-var (
-	isolationMu      sync.RWMutex
-	currentIsolation = config.DefaultConfig().Isolation
-)
-
-// Configure updates the process-wide isolation state used by subsequent child
-// process launches.
-func Configure(cfg *config.Config) {
-	isolationMu.Lock()
-	defer isolationMu.Unlock()
-	if cfg == nil {
-		defaults := config.DefaultConfig()
-		currentIsolation = defaults.Isolation
-		return
-	}
-	currentIsolation = cfg.Isolation
-}
-
-// CurrentConfig returns the currently active isolation settings.
-func CurrentConfig() config.IsolationConfig {
-	isolationMu.RLock()
-	defer isolationMu.RUnlock()
-	return currentIsolation
-}
-
 // ResolveInstanceRoot resolves the instance root used to build the isolated
 // filesystem and redirected user environment.
 func ResolveInstanceRoot() (string, error) {
 	root := filepath.Clean(config.GetHome())
-	if root == "." {
-		return "", fmt.Errorf("instance root resolved to current directory")
+	if root == "." || !filepath.IsAbs(root) {
+		return "", fmt.Errorf("instance root must resolve to an absolute directory")
 	}
 	return root, nil
 }
@@ -128,34 +103,66 @@ func ResolveUserEnv(root string) UserEnv {
 // ApplyUserEnv rewrites the child process environment so home, temp, and
 // platform-specific user-data directories point into the instance root.
 func ApplyUserEnv(cmd *exec.Cmd, root string) {
-	userEnv := ResolveUserEnv(root)
-	envMap := make(map[string]string)
-	for _, item := range cmd.Environ() {
+	if cmd == nil {
+		return
+	}
+	cmd.Env = projectUserEnvironment(cmd.Environ(), ResolveUserEnv(root), runtime.GOOS)
+}
+
+type projectedEnvironmentValue struct {
+	key   string
+	value string
+}
+
+func projectUserEnvironment(base []string, userEnv UserEnv, goos string) []string {
+	envMap := make(map[string]projectedEnvironmentValue, len(base)+6)
+	canonicalKey := func(key string) string {
+		if goos == "windows" {
+			return strings.ToUpper(key)
+		}
+		return key
+	}
+	set := func(key, value string) {
+		canonical := canonicalKey(key)
+		outputKey := key
+		if goos == "windows" {
+			outputKey = canonical
+		}
+		envMap[canonical] = projectedEnvironmentValue{key: outputKey, value: value}
+	}
+
+	for _, item := range base {
 		if idx := strings.IndexRune(item, '='); idx > 0 {
-			envMap[item[:idx]] = item[idx+1:]
+			set(item[:idx], item[idx+1:])
 		}
 	}
 
-	if runtime.GOOS == "windows" {
-		envMap["USERPROFILE"] = userEnv.Home
-		envMap["HOME"] = userEnv.Home
-		envMap["TEMP"] = userEnv.Tmp
-		envMap["TMP"] = userEnv.Tmp
-		envMap["APPDATA"] = userEnv.AppData
-		envMap["LOCALAPPDATA"] = userEnv.LocalAppData
+	if goos == "windows" {
+		set("USERPROFILE", userEnv.Home)
+		set("HOME", userEnv.Home)
+		set("TEMP", userEnv.Tmp)
+		set("TMP", userEnv.Tmp)
+		set("APPDATA", userEnv.AppData)
+		set("LOCALAPPDATA", userEnv.LocalAppData)
 	} else {
-		envMap["HOME"] = userEnv.Home
-		envMap["TMPDIR"] = userEnv.Tmp
-		envMap["XDG_CONFIG_HOME"] = userEnv.Config
-		envMap["XDG_CACHE_HOME"] = userEnv.Cache
-		envMap["XDG_STATE_HOME"] = userEnv.State
+		set("HOME", userEnv.Home)
+		set("TMPDIR", userEnv.Tmp)
+		set("XDG_CONFIG_HOME", userEnv.Config)
+		set("XDG_CACHE_HOME", userEnv.Cache)
+		set("XDG_STATE_HOME", userEnv.State)
 	}
 
-	env := make([]string, 0, len(envMap))
-	for k, v := range envMap {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		keys = append(keys, key)
 	}
-	cmd.Env = env
+	sort.Strings(keys)
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := envMap[key]
+		env = append(env, fmt.Sprintf("%s=%s", value.key, value.value))
+	}
+	return env
 }
 
 // ValidateExposePaths verifies the user-supplied path exposure rules before a
@@ -177,6 +184,9 @@ func ValidateExposePaths(items []config.ExposePath) error {
 		}
 		target = filepath.Clean(target)
 
+		if strings.IndexByte(source, 0) >= 0 || strings.IndexByte(target, 0) >= 0 {
+			return fmt.Errorf("source and target must not contain NUL bytes")
+		}
 		if !filepath.IsAbs(source) || !filepath.IsAbs(target) {
 			return fmt.Errorf("source and target must be absolute paths")
 		}
@@ -277,7 +287,11 @@ func MergeExposePaths(defaults []config.ExposePath, overrides []config.ExposePat
 // BuildLinuxMountPlan converts the merged expose-path configuration into the
 // mount rules consumed by the Linux bubblewrap backend.
 func BuildLinuxMountPlan(root string, overrides []config.ExposePath) []MountRule {
-	merged := MergeExposePaths(DefaultExposePaths(root), overrides)
+	return buildLinuxMountPlan(DefaultExposePaths(root), overrides)
+}
+
+func buildLinuxMountPlan(defaults, overrides []config.ExposePath) []MountRule {
+	merged := MergeExposePaths(defaults, overrides)
 	plan := make([]MountRule, 0, len(merged))
 	for _, item := range merged {
 		plan = append(plan, MountRule{Source: item.Source, Target: item.Target, Mode: item.Mode})
@@ -319,98 +333,216 @@ func isSupportedOn(goos string) bool {
 	}
 }
 
-// Preflight validates the configured isolation state and prepares the instance
-// runtime directories before any child process is launched.
-func Preflight() error {
-	isolation := CurrentConfig()
-	if !isolation.Enabled {
-		return nil
+type launchProjection struct {
+	isolation       config.IsolationConfig
+	root            string
+	goos            string
+	linuxBaseMounts []MountRule
+	windowsAccess   []AccessRule
+	environment     []string
+}
+
+type launchOperations struct {
+	goos        string
+	resolveRoot func() (string, error)
+	prepareRoot func(string) error
+	apply       func(*exec.Cmd, launchProjection) error
+	start       func(*exec.Cmd) error
+	postStart   func(*exec.Cmd, launchProjection) error
+	cleanup     func(*exec.Cmd)
+	terminate   func(*exec.Cmd)
+	wait        func(*exec.Cmd) error
+}
+
+func defaultLaunchOperations() launchOperations {
+	return launchOperations{
+		goos:        runtime.GOOS,
+		resolveRoot: ResolveInstanceRoot,
+		prepareRoot: PrepareInstanceRoot,
+		apply:       applyPlatformIsolation,
+		start: func(cmd *exec.Cmd) error {
+			return cmd.Start()
+		},
+		postStart: postStartPlatformIsolation,
+		cleanup:   cleanupPendingPlatformResources,
+		terminate: terminateStartedCommand,
+		wait: func(cmd *exec.Cmd) error {
+			return cmd.Wait()
+		},
 	}
-	if !IsSupported() {
-		return fmt.Errorf("subprocess isolation is not supported on %s", runtime.GOOS)
+}
+
+func buildLaunchProjection(
+	isolationCfg config.IsolationConfig,
+	operations launchOperations,
+) (launchProjection, error) {
+	launch := launchProjection{
+		isolation: cloneIsolationConfig(isolationCfg),
+		goos:      operations.goos,
 	}
-	root, err := ResolveInstanceRoot()
+	if !launch.isolation.Enabled {
+		return launch, nil
+	}
+	if !isSupportedOn(launch.goos) {
+		return launchProjection{}, fmt.Errorf(
+			"subprocess isolation is not supported on %s",
+			launch.goos,
+		)
+	}
+	root, err := operations.resolveRoot()
+	if err != nil {
+		return launchProjection{}, err
+	}
+	root = filepath.Clean(root)
+	if root == "." || !filepath.IsAbs(root) {
+		return launchProjection{}, fmt.Errorf(
+			"instance root must resolve to an absolute directory",
+		)
+	}
+	launch.root = root
+	if err = ValidateExposePaths(launch.isolation.ExposePaths); err != nil {
+		return launchProjection{}, err
+	}
+
+	switch launch.goos {
+	case "linux":
+		launch.linuxBaseMounts = BuildLinuxMountPlan(
+			launch.root,
+			launch.isolation.ExposePaths,
+		)
+	case "windows":
+		if err = validateWindowsExposePaths(launch.isolation.ExposePaths); err != nil {
+			return launchProjection{}, err
+		}
+		launch.windowsAccess = BuildWindowsAccessRules(
+			launch.root,
+			launch.isolation.ExposePaths,
+		)
+	}
+	if err = operations.prepareRoot(launch.root); err != nil {
+		return launchProjection{}, err
+	}
+	return launch, nil
+}
+
+func projectionForPolicy(
+	policy ExecutionPolicy,
+	operations launchOperations,
+) (launchProjection, error) {
+	isolationCfg, ok := policy.detachedIsolation()
+	if !ok {
+		return launchProjection{}, ErrExecutionPolicyUnavailable
+	}
+	return buildLaunchProjection(isolationCfg, operations)
+}
+
+func prepareCommandForPolicy(
+	policy ExecutionPolicy,
+	cmd *exec.Cmd,
+	operations launchOperations,
+) (launchProjection, error) {
+	isolationCfg, ok := policy.detachedIsolation()
+	if !ok {
+		return launchProjection{}, ErrExecutionPolicyUnavailable
+	}
+	if cmd == nil {
+		return launchProjection{}, fmt.Errorf("command is required")
+	}
+	launch, err := buildLaunchProjection(isolationCfg, operations)
+	if err != nil {
+		return launchProjection{}, err
+	}
+	if !launch.isolation.Enabled {
+		return launch, nil
+	}
+	launch.environment = projectUserEnvironment(
+		cmd.Environ(),
+		ResolveUserEnv(launch.root),
+		launch.goos,
+	)
+	cmd.Env = append([]string(nil), launch.environment...)
+	if err = operations.apply(cmd, launch); err != nil {
+		operations.cleanup(cmd)
+		return launchProjection{}, err
+	}
+	return launch, nil
+}
+
+func startExecutionPolicy(
+	policy ExecutionPolicy,
+	cmd *exec.Cmd,
+	operations launchOperations,
+) error {
+	launch, err := prepareCommandForPolicy(policy, cmd, operations)
 	if err != nil {
 		return err
 	}
-	if err := PrepareInstanceRoot(root); err != nil {
+	if err = operations.start(cmd); err != nil {
+		operations.cleanup(cmd)
 		return err
 	}
-	if err := ValidateExposePaths(isolation.ExposePaths); err != nil {
+	if err = operations.postStart(cmd, launch); err != nil {
+		operations.terminate(cmd)
 		return err
-	}
-	if runtime.GOOS == "linux" {
-		for _, rule := range BuildLinuxMountPlan(root, isolation.ExposePaths) {
-			if rule.Source == "" || rule.Target == "" {
-				return fmt.Errorf("invalid linux mount rule")
-			}
-		}
-	}
-	if runtime.GOOS == "windows" {
-		if err := validateWindowsExposePaths(isolation.ExposePaths); err != nil {
-			return err
-		}
-		for _, rule := range BuildWindowsAccessRules(root, isolation.ExposePaths) {
-			if rule.Path == "" {
-				return fmt.Errorf("invalid windows access rule")
-			}
-		}
 	}
 	return nil
 }
 
-// Start prepares isolation for the command, starts it, and applies any
-// post-start platform hooks required by the active backend.
+func runExecutionPolicy(
+	policy ExecutionPolicy,
+	cmd *exec.Cmd,
+	operations launchOperations,
+) error {
+	if err := startExecutionPolicy(policy, cmd, operations); err != nil {
+		return err
+	}
+	return operations.wait(cmd)
+}
+
+func startLegacyPolicy(cmd *exec.Cmd, operations launchOperations) error {
+	return startExecutionPolicy(currentLegacyPolicy(), cmd, operations)
+}
+
+func runLegacyPolicy(cmd *exec.Cmd, operations launchOperations) error {
+	return runExecutionPolicy(currentLegacyPolicy(), cmd, operations)
+}
+
+func prepareLegacyPolicy(cmd *exec.Cmd, operations launchOperations) error {
+	policy := currentLegacyPolicy()
+	isolationCfg, ok := policy.detachedIsolation()
+	if !ok {
+		return ErrExecutionPolicyUnavailable
+	}
+	if isolationCfg.Enabled && operations.goos == "windows" {
+		return fmt.Errorf(
+			"PrepareCommand cannot complete Windows isolation; use Start or Run",
+		)
+	}
+	_, err := prepareCommandForPolicy(policy, cmd, operations)
+	return err
+}
+
+// Preflight validates one snapshot of the compatibility policy and prepares
+// the instance runtime directories.
+//
+// Deprecated: call Start or Run on an explicit ExecutionPolicy.
+func Preflight() error {
+	_, err := projectionForPolicy(currentLegacyPolicy(), defaultLaunchOperations())
+	return err
+}
+
+// Start uses one snapshot of the compatibility policy for the complete launch.
+//
+// Deprecated: call ExecutionPolicy.Start.
 func Start(cmd *exec.Cmd) error {
-	if err := PrepareCommand(cmd); err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		cleanupPendingPlatformResources(cmd)
-		return err
-	}
-	isolation := CurrentConfig()
-	root := ""
-	if isolation.Enabled {
-		var err error
-		root, err = ResolveInstanceRoot()
-		if err != nil {
-			terminateStartedCommand(cmd)
-			return err
-		}
-	}
-	if err := postStartPlatformIsolation(cmd, isolation, root); err != nil {
-		terminateStartedCommand(cmd)
-		return err
-	}
-	return nil
+	return startLegacyPolicy(cmd, defaultLaunchOperations())
 }
 
-// Run is the Start-and-Wait helper that keeps the same isolation behavior as
-// Start while returning the command's final exit status.
+// Run uses one snapshot of the compatibility policy for start and wait.
+//
+// Deprecated: call ExecutionPolicy.Run.
 func Run(cmd *exec.Cmd) error {
-	if err := PrepareCommand(cmd); err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		cleanupPendingPlatformResources(cmd)
-		return err
-	}
-	isolation := CurrentConfig()
-	root := ""
-	if isolation.Enabled {
-		var err error
-		root, err = ResolveInstanceRoot()
-		if err != nil {
-			terminateStartedCommand(cmd)
-			return err
-		}
-	}
-	if err := postStartPlatformIsolation(cmd, isolation, root); err != nil {
-		terminateStartedCommand(cmd)
-		return err
-	}
-	return cmd.Wait()
+	return runLegacyPolicy(cmd, defaultLaunchOperations())
 }
 
 func terminateStartedCommand(cmd *exec.Cmd) {
@@ -422,22 +554,10 @@ func terminateStartedCommand(cmd *exec.Cmd) {
 	_ = cmd.Wait()
 }
 
-// PrepareCommand mutates the command in-place so it inherits the configured
-// isolated environment before being started by the caller.
+// PrepareCommand mutates the command using one compatibility-policy snapshot.
+// It cannot complete the Windows post-start Job Object step.
+//
+// Deprecated: call Start or Run on an explicit ExecutionPolicy.
 func PrepareCommand(cmd *exec.Cmd) error {
-	isolation := CurrentConfig()
-	if err := Preflight(); err != nil {
-		return err
-	}
-	if isolation.Enabled {
-		root, err := ResolveInstanceRoot()
-		if err != nil {
-			return err
-		}
-		ApplyUserEnv(cmd, root)
-		if err := applyPlatformIsolation(cmd, isolation, root); err != nil {
-			return err
-		}
-	}
-	return nil
+	return prepareLegacyPolicy(cmd, defaultLaunchOperations())
 }
