@@ -16,6 +16,8 @@ import (
 )
 
 func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing.T) {
+	resetGatewayTestState(t)
+
 	workspace := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
@@ -120,6 +122,8 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 }
 
 func TestWorkflowSettingsToolFlagAndMasterRemainIndependent(t *testing.T) {
+	resetGatewayTestState(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
@@ -201,6 +205,8 @@ func TestWorkflowSettingsToolFlagAndMasterRemainIndependent(t *testing.T) {
 }
 
 func TestToolStateMutationInvalidatesWorkflowSettingsRevision(t *testing.T) {
+	resetGatewayTestState(t)
+
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
