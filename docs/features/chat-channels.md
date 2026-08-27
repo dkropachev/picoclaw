@@ -220,6 +220,8 @@ or outbound chat delivery behavior.
 - Platform media delivery falls back to text when supported by the channel.
 - Disabled or disconnected chat composer states expose actionable text without
   relying on placeholder-only or title-only labels.
+- The empty chat model-setup action opens the canonical Accounts collection
+  with its default provider-and-ID ordering instead of a legacy combined page.
 - The chat account selector groups concrete Accounts and Account Routers. The
   independent model selector lists configured exact aliases and enabled model
   routers. Sending carries `account_ref` plus alias-valued `model_name`; it is

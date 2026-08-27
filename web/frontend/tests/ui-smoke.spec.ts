@@ -2,6 +2,11 @@ import AxeBuilder from "@axe-core/playwright"
 import { type Page, type Route, expect, test } from "@playwright/test"
 
 import type {
+  AccountRouter,
+  AccountRouterSummary,
+  AccountSummary,
+} from "../src/api/accounts"
+import type {
   AgentCapabilitiesResponse,
   AgentInfo,
   AgentMutationInput,
@@ -12,6 +17,7 @@ import type {
   MCPServer,
   MCPServerInput,
 } from "../src/api/mcp"
+import type { OAuthProviderStatus } from "../src/api/oauth"
 import type {
   RepositoryFinding,
   RepositoryReviewAutomation,
@@ -22,11 +28,24 @@ import type {
 } from "../src/api/repository-reviews"
 import prLifecycleFlowFixture from "./fixtures/pr-lifecycle-flow.json" with { type: "json" }
 
+const smokeAccountIDs = {
+  primary: "YWNjb3VudABvcGVuYWk6cHJpbWFyeQ",
+  review: "YWNjb3VudABhbnRocm9waWM6cmV2aWV3",
+  router: "balanced-router",
+} as const
+
 const smokeRoutes = [
   "/",
   "/models/aliases",
   "/models/routers",
   "/accounts",
+  "/accounts/new",
+  `/accounts/${smokeAccountIDs.primary}`,
+  `/accounts/${smokeAccountIDs.primary}/edit`,
+  "/accounts/routers",
+  "/accounts/routers/new",
+  `/accounts/routers/${smokeAccountIDs.router}`,
+  `/accounts/routers/${smokeAccountIDs.router}/edit`,
   "/events",
   "/event-sources",
   "/development",
@@ -260,6 +279,23 @@ const mcpResponse: MCPConfigResponse = {
 }
 
 const mockCollectionSchemas = {
+  accounts: collectionSchema([
+    ["id", "string"],
+    ["provider", "string"],
+    ["account", "string"],
+    ["status", "enum"],
+    ["auth_method", "string"],
+    ["expires_at", "string"],
+  ]),
+  accountRouters: collectionSchema([
+    ["name", "string"],
+    ["enabled", "boolean"],
+    ["is_default", "boolean"],
+    ["status", "enum"],
+    ["entry", "string"],
+    ["accounts", "number"],
+    ["blocks", "number"],
+  ]),
   aliases: collectionSchema([
     ["name", "string"],
     ["model", "string"],
@@ -300,6 +336,175 @@ const mockCollectionSchemas = {
     ["created", "timestamp"],
     ["updated", "timestamp"],
   ]),
+}
+
+const defaultOAuthProviders: OAuthProviderStatus[] = [
+  {
+    provider: "openai",
+    credential_id: "openai",
+    display_name: "OpenAI",
+    methods: ["browser", "device_code", "token"],
+    logged_in: true,
+    status: "connected",
+    credentials: [
+      {
+        provider: "openai",
+        credential_id: "openai:primary",
+        display_name: "OpenAI",
+        methods: ["browser", "device_code", "token"],
+        logged_in: true,
+        status: "connected",
+        auth_method: "oauth",
+        account_id: "acct-primary",
+      },
+    ],
+  },
+  {
+    provider: "anthropic",
+    credential_id: "anthropic",
+    display_name: "Anthropic",
+    methods: ["token"],
+    logged_in: true,
+    status: "needs_refresh",
+    credentials: [
+      {
+        provider: "anthropic",
+        credential_id: "anthropic:review",
+        display_name: "Anthropic",
+        methods: ["token"],
+        logged_in: true,
+        status: "needs_refresh",
+        auth_method: "token",
+      },
+    ],
+  },
+  {
+    provider: "deepseek",
+    credential_id: "deepseek",
+    display_name: "DeepSeek",
+    methods: ["token"],
+    logged_in: false,
+    status: "not_logged_in",
+    credentials: [],
+  },
+  {
+    provider: "gemini",
+    credential_id: "gemini",
+    display_name: "Google Gemini",
+    methods: ["token"],
+    logged_in: false,
+    status: "not_logged_in",
+    credentials: [],
+  },
+]
+
+const defaultSmokeAccounts: AccountSummary[] = [
+  {
+    id: smokeAccountIDs.review,
+    provider: "anthropic",
+    account: "anthropic:review",
+    status: "needs_refresh",
+    auth_method: "token",
+    expires_at: "",
+  },
+  {
+    id: smokeAccountIDs.primary,
+    provider: "openai",
+    account: "openai:primary",
+    status: "connected",
+    auth_method: "oauth",
+    expires_at: "2026-09-01T16:00:00Z",
+  },
+]
+
+const defaultSmokeAccountRouters: AccountRouter[] = [
+  {
+    id: smokeAccountIDs.router,
+    name: "balanced-router",
+    enabled: true,
+    is_default: true,
+    status: "available",
+    entry: "pool",
+    accounts: ["credential:openai:primary", "credential:anthropic:review"],
+    refresh_interval_seconds: 60,
+    blocks: [
+      {
+        id: "pool",
+        type: "load_balance",
+        accounts: ["credential:openai:primary", "credential:anthropic:review"],
+        strategy: "closest_limit",
+        fallback: "review",
+      },
+      {
+        id: "review",
+        type: "account",
+        account: "credential:anthropic:review",
+      },
+    ],
+  },
+  {
+    id: "batch-router",
+    name: "batch-router",
+    enabled: true,
+    is_default: false,
+    status: "unconfigured",
+    entry: "batch",
+    accounts: ["credential:openai:primary"],
+    refresh_interval_seconds: 120,
+    blocks: [
+      {
+        id: "batch",
+        type: "account",
+        account: "credential:openai:primary",
+      },
+    ],
+  },
+]
+
+function accountRouterSummary(router: AccountRouter): AccountRouterSummary {
+  return {
+    id: router.id,
+    name: router.name,
+    enabled: router.enabled,
+    is_default: router.is_default,
+    status: router.status,
+    entry: router.entry,
+    accounts: router.accounts.length,
+    blocks: router.blocks.length,
+  }
+}
+
+function accountIDForCredential(credentialID: string): string {
+  return Buffer.from(`account\0${credentialID}`).toString("base64url")
+}
+
+function accountsFromOAuthProviders(
+  providers: OAuthProviderStatus[],
+): AccountSummary[] {
+  return providers
+    .flatMap((provider) => {
+      const credentials = provider.credentials?.length
+        ? provider.credentials
+        : provider.logged_in
+          ? [provider]
+          : []
+      return credentials.map((credential) => {
+        const account = credential.credential_id ?? credential.provider
+        return {
+          id: accountIDForCredential(account),
+          provider: credential.provider,
+          account,
+          status: credential.status,
+          auth_method: credential.auth_method ?? "",
+          expires_at: credential.expires_at ?? "",
+        } satisfies AccountSummary
+      })
+    })
+    .sort(
+      (left, right) =>
+        left.provider.localeCompare(right.provider) ||
+        left.id.localeCompare(right.id),
+    )
 }
 
 function collectionSchema(
@@ -1773,6 +1978,8 @@ const prLifecycleRepositoryAssignments = {
 }
 
 interface MockLauncherApiOptions {
+  accounts?: AccountSummary[]
+  accountRouters?: AccountRouter[]
   agentActivityRequests?: Array<{ method: string; path: string }>
   agentCapabilityRequests?: Array<{
     method: string
@@ -1802,7 +2009,7 @@ interface MockLauncherApiOptions {
   }>
   statefulModelEvaluations?: boolean
   nullableWorkflowPayloads?: boolean
-  oauthProviders?: unknown[]
+  oauthProviders?: OAuthProviderStatus[]
   statefulAgents?: boolean
   statefulMCP?: boolean
   gatewayRunning?: boolean
@@ -1844,6 +2051,18 @@ async function mockLauncherApis(
   page: Page,
   options: MockLauncherApiOptions = {},
 ) {
+  const currentOAuthProviders = structuredClone(
+    options.oauthProviders ?? defaultOAuthProviders,
+  )
+  const currentAccounts = structuredClone(
+    options.accounts ??
+      (options.oauthProviders
+        ? accountsFromOAuthProviders(options.oauthProviders)
+        : defaultSmokeAccounts),
+  )
+  const currentAccountRouters = structuredClone(
+    options.accountRouters ?? defaultSmokeAccountRouters,
+  )
   let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
   let workflowDefinitions = [
     {
@@ -3604,6 +3823,42 @@ async function mockLauncherApis(
         return json(route, { status: "ok" })
       }
 
+      const accountDetailMatch = path.match(/^\/api\/accounts\/([^/]+)$/)
+      if (accountDetailMatch && accountDetailMatch[1] !== "models") {
+        const id = decodeURIComponent(accountDetailMatch[1])
+        const account = currentAccounts.find((candidate) => candidate.id === id)
+        return account
+          ? json(route, { account })
+          : json(
+              route,
+              { code: "account_not_found", message: "Account not found" },
+              404,
+            )
+      }
+
+      const accountRouterDetailMatch = path.match(
+        /^\/api\/account-routers\/([^/]+)$/,
+      )
+      if (accountRouterDetailMatch) {
+        const id = decodeURIComponent(accountRouterDetailMatch[1])
+        const accountRouter = currentAccountRouters.find(
+          (candidate) => candidate.id === id,
+        )
+        return accountRouter
+          ? json(route, {
+              account_router: accountRouter,
+              config_revision: "account-router-revision-1",
+            })
+          : json(
+              route,
+              {
+                code: "account_router_not_found",
+                message: "Account router not found",
+              },
+              404,
+            )
+      }
+
       const templateInspectionMatch = path.match(
         /^\/api\/workflows\/templates\/([^/]+)\/inspect$/,
       )
@@ -3679,6 +3934,25 @@ async function mockLauncherApis(
               },
             },
           })
+        case "/api/accounts":
+          return json(route, {
+            accounts: currentAccounts,
+            total: currentAccounts.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY provider ASC, id ASC",
+            query_schema: mockCollectionSchemas.accounts,
+          })
+        case "/api/account-routers":
+          return json(route, {
+            account_routers: currentAccountRouters.map(accountRouterSummary),
+            total: currentAccountRouters.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: mockCollectionSchemas.accountRouters,
+            config_revision: "account-router-revision-1",
+          })
         case "/api/accounts/models":
           return json(route, options.modelResponse ?? modelResponse)
         case "/api/model-aliases": {
@@ -3727,14 +4001,15 @@ async function mockLauncherApis(
         case "/api/accounts/models/catalog":
           return json(route, { entries: [], total: 0 })
         case "/api/oauth/providers":
-          return json(route, { providers: options.oauthProviders ?? [] })
+          return json(route, { providers: currentOAuthProviders })
         case "/api/oauth/codex-account-limits":
           return json(
             route,
             options.codexAccountLimits ?? {
               accounts: [
                 {
-                  id: "openai",
+                  id: "openai:primary",
+                  provider: "openai",
                   default: true,
                   email: "primary@example.test",
                   account_id: "acct-primary",
@@ -6342,238 +6617,55 @@ test.skip("legacy MCP server sheet workflow is not compatibility-rendered", asyn
   ).toBe(true)
 })
 
-test("accounts page lists registered accounts and opens onboarding", async ({
+test("accounts collection preserves route state through detail and onboarding", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
-  const accountModel = {
-    index: 2,
-    model_name: "gpt-4o-work",
-    provider: "openai",
-    model: "gpt-4o",
-    api_key: "",
-    enabled: true,
-    available: true,
-    status: "available",
-    is_default: false,
-    is_virtual: false,
-    auth_method: "oauth",
-    credential_id: "openai:work",
-  }
-  await gotoMockedRoute(page, "/accounts", {
-    modelResponse: {
-      ...modelResponse,
-      models: [...modelResponse.models, accountModel],
-      total: modelResponse.total + 1,
-    },
-    oauthProviders: [
-      {
-        provider: "openai",
-        credential_id: "openai",
-        display_name: "OpenAI",
-        methods: ["browser", "device_code", "token"],
-        logged_in: true,
-        status: "connected",
-        credentials: [
-          {
-            provider: "openai",
-            credential_id: "openai:work",
-            display_name: "OpenAI",
-            methods: ["browser", "device_code", "token"],
-            logged_in: true,
-            status: "connected",
-            auth_method: "oauth",
-            account_id: "acc_123",
-          },
-          {
-            provider: "openai",
-            credential_id: "openai:zero",
-            display_name: "OpenAI",
-            methods: ["browser", "device_code", "token"],
-            logged_in: true,
-            status: "connected",
-            auth_method: "oauth",
-            account_id: "acc_zero",
-          },
-          {
-            provider: "openai",
-            credential_id: "openai:unsupported",
-            display_name: "OpenAI",
-            methods: ["browser", "device_code", "token"],
-            logged_in: true,
-            status: "connected",
-            auth_method: "oauth",
-            account_id: "acc_unsupported",
-          },
-        ],
-      },
-      {
-        provider: "anthropic",
-        credential_id: "anthropic",
-        display_name: "Anthropic",
-        methods: ["token"],
-        logged_in: false,
-        status: "not_logged_in",
-        credentials: [],
-      },
-      {
-        provider: "deepseek",
-        credential_id: "deepseek",
-        display_name: "DeepSeek",
-        methods: ["token"],
-        logged_in: false,
-        status: "not_logged_in",
-        credentials: [],
-      },
-      {
-        provider: "gemini",
-        credential_id: "gemini",
-        display_name: "Google Gemini",
-        methods: ["token"],
-        logged_in: false,
-        status: "not_logged_in",
-        credentials: [],
-      },
-    ],
-    codexAccountLimits: {
-      accounts: [
-        {
-          id: "openai:work",
-          email: "work@example.test",
-          account_id: "acc_123",
-          plan: "pro",
-          limits_status: "available",
-          rate_limit_reset_credits: {
-            available_count: 2,
-            auto_reset: true,
-          },
-          entries: [
-            {
-              name: "codex",
-              status: "available",
-              window: "5h",
-              used_percent: 8,
-            },
-            {
-              name: "codex",
-              status: "available",
-              window: "weekly",
-              used_percent: 64,
-            },
-            {
-              name: "GPT-5.3-Codex-Spark",
-              status: "available",
-              window: "weekly",
-              used_percent: 0,
-            },
-          ],
-        },
-        {
-          id: "openai:zero",
-          email: "zero@example.test",
-          account_id: "acc_zero",
-          plan: "plus",
-          limits_status: "available",
-          rate_limit_reset_credits: {
-            available_count: 0,
-            auto_reset: true,
-          },
-          entries: [
-            {
-              name: "codex",
-              status: "available",
-              window: "weekly",
-              used_percent: 12,
-            },
-          ],
-        },
-        {
-          id: "openai:unsupported",
-          email: "unsupported@example.test",
-          account_id: "acc_unsupported",
-          plan: "plus",
-          limits_status: "available",
-          entries: [
-            {
-              name: "codex",
-              status: "available",
-              window: "weekly",
-              used_percent: 18,
-            },
-          ],
-        },
-        {
-          id: "personal",
-          email: "personal@example.test",
-          plan: "plus",
-          limits_status: "available",
-          entries: [
-            {
-              name: "codex",
-              status: "available",
-              window: "weekly",
-              used_percent: 12,
-            },
-          ],
-        },
-      ],
-    },
-  })
+  await gotoMockedRoute(page, "/accounts?view=list")
 
-  await expect(page.getByRole("heading", { name: "work" })).toBeVisible()
-  await expect(
-    page.getByText(
-      "Manage registered provider accounts and add named accounts for supported login methods.",
-    ),
-  ).toHaveCount(0)
-  await expect(page.getByText("OpenAI oauth (pro)")).toBeVisible()
-  await expect(page.getByText("openai:work")).toBeVisible()
-  await expect(page.getByText("Codex Account Limits")).not.toBeVisible()
-  await expect(page.getByText("personal@example.test")).not.toBeVisible()
-  await expect(page.getByText("Anthropic")).not.toBeVisible()
-  await expect(page.getByText("gpt-4o-mini")).toHaveCount(0)
+  const url = new URL(page.url())
+  expect(url.pathname).toBe("/accounts")
+  expect(url.searchParams.get("q")).toBe("ORDER BY provider ASC, id ASC")
+  expect(url.searchParams.get("view")).toBe("list")
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect(page.locator("[data-item-id]")).toHaveCount(2)
+  await expect(page.getByText("primary", { exact: true })).toBeVisible()
+  await expect(page.getByText("review", { exact: true })).toBeVisible()
+  await expect(page.getByText("Usage limits")).toHaveCount(0)
 
-  const accountCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "work" }),
-  })
-  await expect(accountCard.getByText("codex 5h")).toBeVisible()
-  await expect(accountCard.getByText("codex Weekly")).toBeVisible()
+  const primary = page.locator(`[data-item-id="${smokeAccountIDs.primary}"]`)
+  await primary.focus()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(`/accounts/${smokeAccountIDs.primary}\\?.*view=list`),
+  )
   await expect(
-    accountCard.getByText("GPT-5.3-Codex-Spark Weekly"),
+    page.locator('[data-slot="collection-detail-shell"]'),
   ).toBeVisible()
-  await expect(accountCard.getByText("64%")).toBeVisible()
-  await expect(accountCard.getByText("Usage limit resets: 2")).toBeVisible()
-  await expect(accountCard.getByText("Auto-use when available")).toBeVisible()
   await expect(
-    accountCard.getByRole("button", {
-      name: "When Codex reaches an eligible usage limit and a reset is available, PicoClaw uses one automatically and retries once.",
-    }),
+    page.getByRole("definition").filter({ hasText: "openai:primary" }),
   ).toBeVisible()
-  await expect(accountCard.getByRole("combobox")).toHaveCount(0)
-
-  const zeroCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "zero" }),
-  })
-  await expect(zeroCard.getByText("Usage limit resets: 0")).toBeVisible()
-  await expect(zeroCard.getByText("Auto-use when available")).toBeVisible()
-
-  const unsupportedCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "unsupported" }),
-  })
-  await expect(unsupportedCard.getByText(/Usage limit resets:/)).toHaveCount(0)
-
-  await page.getByRole("button", { name: "Add Account" }).first().click()
   await expect(
-    page.getByRole("dialog", { name: "Onboard Account" }),
+    page.getByRole("heading", { name: "Usage limits" }),
   ).toBeVisible()
-  await page.getByRole("combobox").first().click()
+  await expect(page.getByText("64%", { exact: true })).toBeVisible()
+
+  await page.getByRole("button", { name: "All accounts" }).click()
+  await expect(page).toHaveURL(/\/accounts\?.*view=list/)
+  await page.getByRole("button", { name: "Add account" }).click()
+  await expect(page).toHaveURL(/\/accounts\/new\?.*view=list/)
+  await expect(
+    page.getByRole("heading", { name: "Onboard Account" }),
+  ).toBeVisible()
+  await page.getByRole("combobox", { name: "Provider" }).click()
   await expect(page.getByRole("option", { name: "DeepSeek" })).toBeVisible()
   await expect(
     page.getByRole("option", { name: "Google Gemini" }),
   ).toBeVisible()
   await page.keyboard.press("Escape")
   await expect(page.getByPlaceholder("work")).toBeVisible()
-  await expect(page.getByText("OAuth logins can infer this")).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
 })
 
@@ -6582,6 +6674,7 @@ test("Codex renewal opens device login directly for the exact account", async ({
 }) => {
   const errors = collectPageErrors(page)
   const credentialID = "openai:expired-work"
+  const accountID = accountIDForCredential(credentialID)
   const flowID = "device-renewal"
   const userCode = "ABCD-EFGH"
   const verifyURL = "https://auth.openai.com/device"
@@ -6590,7 +6683,17 @@ test("Codex renewal opens device login directly for the exact account", async ({
     releaseDeviceLogin = resolve
   })
 
-  await gotoMockedRoute(page, "/accounts", {
+  await gotoMockedRoute(page, `/accounts/${accountID}/edit`, {
+    accounts: [
+      {
+        id: accountID,
+        provider: "openai",
+        account: credentialID,
+        status: "expired",
+        auth_method: "oauth",
+        expires_at: "2026-08-01T12:00:00Z",
+      },
+    ],
     oauthProviders: [
       {
         provider: "openai",
@@ -6641,11 +6744,11 @@ test("Codex renewal opens device login directly for the exact account", async ({
     })
   })
 
-  const accountCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "expired-work" }),
-  })
-  await expect(accountCard.getByText("Expired", { exact: true })).toBeVisible()
-  const renew = accountCard.getByRole("button", { name: "Renew login" })
+  await expect(
+    page.getByRole("heading", { name: "Renew Account Login" }),
+  ).toBeVisible()
+  await expect(page.getByLabel("Credential ID")).toHaveValue(credentialID)
+  const renew = page.getByRole("button", { name: "Start Renewal" })
   await expect(renew).toBeVisible()
   const firstLoginRequest = page.waitForRequest((request) => {
     const url = new URL(request.url())
@@ -6665,10 +6768,6 @@ test("Codex renewal opens device login directly for the exact account", async ({
     credential_id: credentialID,
     method: "device_code",
   })
-  await expect(
-    page.getByRole("dialog", { name: "Renew Account Login" }),
-  ).toHaveCount(0)
-
   const deviceLogin = page.getByRole("dialog", {
     name: "OpenAI Device Login",
   })
@@ -6724,9 +6823,20 @@ test("token account renewal keeps its method and exact identity locked", async (
 }) => {
   const errors = collectPageErrors(page)
   const credentialID = "anthropic:expired-work"
+  const accountID = accountIDForCredential(credentialID)
   const replacementToken = "replacement-account-token"
 
-  await gotoMockedRoute(page, "/accounts", {
+  await gotoMockedRoute(page, `/accounts/${accountID}/edit`, {
+    accounts: [
+      {
+        id: accountID,
+        provider: "anthropic",
+        account: credentialID,
+        status: "expired",
+        auth_method: "token",
+        expires_at: "",
+      },
+    ],
     oauthProviders: [
       {
         provider: "anthropic",
@@ -6751,12 +6861,7 @@ test("token account renewal keeps its method and exact identity locked", async (
     codexAccountLimits: { accounts: [] },
   })
 
-  const accountCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "expired-work" }),
-  })
-  await accountCard.getByRole("button", { name: "Renew login" }).click()
-
-  const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
+  const renewal = page.locator('[data-slot="collection-detail-shell"]')
   await expect(renewal).toBeVisible()
   await expect(renewal.getByLabel("Provider")).toHaveValue("Anthropic")
   await expect(renewal.getByLabel("Provider")).toHaveJSProperty(
@@ -6780,17 +6885,6 @@ test("token account renewal keeps its method and exact identity locked", async (
     const url = new URL(request.url())
     return request.method() === "POST" && url.pathname === "/api/oauth/login"
   })
-  const modelsRefresh = page.waitForRequest((request) => {
-    const url = new URL(request.url())
-    return request.method() === "GET" && url.pathname === "/api/accounts/models"
-  })
-  const limitsRefresh = page.waitForRequest((request) => {
-    const url = new URL(request.url())
-    return (
-      request.method() === "GET" &&
-      url.pathname === "/api/oauth/codex-account-limits"
-    )
-  })
   await renewal.getByRole("button", { name: "Save New Token" }).click()
 
   expect((await loginRequest).postDataJSON()).toEqual({
@@ -6799,18 +6893,28 @@ test("token account renewal keeps its method and exact identity locked", async (
     method: "token",
     token: replacementToken,
   })
-  await Promise.all([modelsRefresh, limitsRefresh])
-  await expect(renewal).toBeHidden()
+  await expect(page).toHaveURL(new RegExp(`/accounts/${accountID}(?:\\?|$)`))
   expect(errors).toEqual([])
 })
 
-test("a rejected account renewal remains visible in its sheet", async ({
+test("a rejected account renewal remains visible on its editor route", async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "desktop error smoke coverage")
   const credentialID = "anthropic:expired-work"
+  const accountID = accountIDForCredential(credentialID)
 
-  await gotoMockedRoute(page, "/accounts", {
+  await gotoMockedRoute(page, `/accounts/${accountID}/edit`, {
+    accounts: [
+      {
+        id: accountID,
+        provider: "anthropic",
+        account: credentialID,
+        status: "expired",
+        auth_method: "token",
+        expires_at: "",
+      },
+    ],
     oauthProviders: [
       {
         provider: "anthropic",
@@ -6842,11 +6946,7 @@ test("a rejected account renewal remains visible in its sheet", async ({
     })
   })
 
-  const accountCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "expired-work" }),
-  })
-  await accountCard.getByRole("button", { name: "Renew login" }).click()
-  const renewal = page.getByRole("dialog", { name: "Renew Account Login" })
+  const renewal = page.locator('[data-slot="collection-detail-shell"]')
   await renewal.getByLabel("Token").fill("rejected-token")
   await renewal.getByRole("button", { name: "Save New Token" }).click()
 
@@ -6854,6 +6954,7 @@ test("a rejected account renewal remains visible in its sheet", async ({
   await expect(renewal.getByRole("alert")).toHaveText(
     "Replacement token was rejected",
   )
+  await expect(page).toHaveURL(new RegExp(`/accounts/${accountID}/edit`))
 })
 
 test.skip("legacy combined models page is not compatibility-rendered", async ({
@@ -6995,131 +7096,65 @@ test.skip("legacy model alias dialog is not compatibility-rendered", async ({
   expect(errors).toEqual([])
 })
 
-test("accounts page shows account routers beside registered accounts", async ({
+test("account routers use a separate keyboard-complete collection and detail route", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
-
-  await gotoMockedRoute(page, "/accounts", {
-    modelResponse: {
-      ...modelResponse,
-      models: [
-        ...modelResponse.models,
-        {
-          index: 2,
-          model_name: "router-main",
-          provider: "router",
-          model: "gpt-4o",
-          api_key: "",
-          enabled: true,
-          available: true,
-          status: "available",
-          is_default: false,
-          is_virtual: false,
-          router: {
-            enabled: true,
-            entry: "pool",
-            blocks: [
-              {
-                id: "pool",
-                type: "load_balance",
-                accounts: [
-                  "credential:openai:work",
-                  "credential:openai:backup",
-                ],
-                strategy: "blind",
-              },
-            ],
-          },
-        },
-      ],
-      total: 3,
-    },
-    oauthProviders: [
-      {
-        provider: "openai",
-        credential_id: "openai",
-        display_name: "OpenAI",
-        methods: ["browser", "device_code", "token"],
-        logged_in: true,
-        status: "connected",
-        credentials: [
-          {
-            provider: "openai",
-            credential_id: "openai:work",
-            display_name: "OpenAI",
-            methods: ["browser", "device_code", "token"],
-            logged_in: true,
-            status: "connected",
-            auth_method: "oauth",
-          },
-          {
-            provider: "openai",
-            credential_id: "openai:backup",
-            display_name: "OpenAI",
-            methods: ["browser", "device_code", "token"],
-            logged_in: true,
-            status: "needs_refresh",
-            auth_method: "oauth",
-          },
-        ],
-      },
-    ],
-  })
-
-  const mainRouterCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "router-main" }),
-  })
-
-  await expect(page.getByRole("heading", { name: "router-main" })).toBeVisible()
-  await expect(mainRouterCard.getByText("Account Router")).toBeVisible()
-  await expect(mainRouterCard.getByText("Needs attention")).toBeVisible()
-  await expect(page.getByText("work: Connected")).toBeVisible()
-  await expect(page.getByText("backup: Needs refresh")).toBeVisible()
+  await gotoMockedRoute(page, "/accounts")
+  await expect(page.getByText("balanced-router")).toHaveCount(0)
+  if ((page.viewportSize()?.width ?? 0) >= 640) {
+    await page.getByRole("button", { name: "Account routers" }).click()
+  } else {
+    await page.goto("/accounts/routers")
+  }
+  await expect(page).toHaveURL(/\/accounts\/routers\?.*q=ORDER/)
   await expect(
-    page.getByRole("heading", { name: "Account Routers" }),
+    page.getByRole("heading", { name: "Account routers", exact: true }),
+  ).toBeVisible()
+
+  const balanced = page.locator(`[data-item-id="${smokeAccountIDs.router}"]`)
+  await balanced.focus()
+  await page.keyboard.press("Space")
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await balanced.click({ button: "right" })
+  await expect(page.getByRole("menuitem", { name: "Open" })).toBeVisible()
+  await expect(
+    page.getByRole("menuitem", { name: "Edit router" }),
+  ).toBeVisible()
+  await page.keyboard.press("Escape")
+  await balanced.focus()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(`/accounts/routers/${smokeAccountIDs.router}`),
+  )
+  await expect(
+    page.locator('[data-slot="collection-detail-shell"]'),
   ).toBeVisible()
   await expect(
-    page.getByText(
-      "Joint accounts that route requests through connected accounts.",
-    ),
+    page.getByRole("heading", { name: "Decision blocks" }),
   ).toBeVisible()
-  await expect(
-    mainRouterCard.getByRole("button", { name: "Edit account router" }),
-  ).toBeVisible()
-  await expect(mainRouterCard.getByText("Decision Graph")).toBeVisible()
-  await expect(page.getByText("No account routers configured.")).toHaveCount(0)
+  await expect(page.getByText("pool · load_balance")).toBeVisible()
+  await page.getByRole("button", { name: "All account routers" }).click()
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
 })
 
-test("accounts page creates accounts through account actions only", async ({
+test("index-addressed account router URLs use the not-found boundary", async ({
   page,
 }) => {
-  const errors = collectPageErrors(page)
-
-  await gotoMockedRoute(page, "/accounts")
-
-  await expect(
-    page.getByRole("button", { name: "Add Account" }).first(),
-  ).toBeVisible()
-  await expect(
-    page
-      .locator("section")
-      .filter({
-        has: page.getByRole("heading", { name: "Account Routers" }),
-      })
-      .getByRole("button", { name: "Account Router" })
-      .first(),
-  ).toBeVisible()
-  await expect(page.getByRole("button", { name: "Add Model" })).toHaveCount(0)
-  await expect(
-    page.getByRole("button", { name: "Saved Catalogs" }),
-  ).toHaveCount(0)
-  await expectNoHorizontalOverflow(page)
-  await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
+  for (const routePath of [
+    "/accounts/account-router/0",
+    "/accounts/account-router/new",
+  ] as const) {
+    await gotoMockedRoute(page, routePath)
+    expect(new URL(page.url()).pathname).toBe(routePath)
+    await expect(page.locator('[data-slot="collection-shell"]')).toHaveCount(0)
+    await expect(
+      page.locator('[data-slot="collection-detail-shell"]'),
+    ).toHaveCount(0)
+  }
 })
 
 test("account router editor supports block fallback graph editing", async ({
@@ -7127,7 +7162,7 @@ test("account router editor supports block fallback graph editing", async ({
 }) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/accounts", {
+  await gotoMockedRoute(page, "/accounts/routers/new", {
     oauthProviders: [
       {
         provider: "openai",
@@ -7173,16 +7208,7 @@ test("account router editor supports block fallback graph editing", async ({
       },
     ],
   })
-  await page
-    .locator("section")
-    .filter({
-      has: page.getByRole("heading", { name: "Account Routers" }),
-    })
-    .getByRole("button", { name: "Account Router" })
-    .first()
-    .click()
-
-  await expect(page).toHaveURL(/\/accounts\/account-router\/new$/)
+  await expect(page).toHaveURL(/\/accounts\/routers\/new(?:\?|$)/)
   await expect(
     page.getByRole("heading", { name: "Create Account Router" }),
   ).toBeVisible()
@@ -8276,7 +8302,10 @@ test("mobile sidebar opens, fits the viewport, and navigates", async ({
   )
   await sidebar.getByRole("button", { name: "Services" }).click()
   await sidebar.getByRole("link", { name: /Accounts/ }).click()
-  await expect(page).toHaveURL(/\/accounts$/)
+  await expect(page).toHaveURL(/\/accounts\?q=/)
+  expect(new URL(page.url()).searchParams.get("q")).toBe(
+    "ORDER BY provider ASC, id ASC",
+  )
   await expect(sidebar).toBeHidden()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)

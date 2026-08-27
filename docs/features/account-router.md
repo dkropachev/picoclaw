@@ -45,6 +45,8 @@ selects an exact model alias.
 | `FR-ACCOUNT-ROUTER-007` | MUST  | Launcher Accounts management can add, edit, list, delete, and select an account router as `account_ref` without storing API secrets or a model setting on it; invalid account references return validation errors. The Accounts page and graph editor keep account/load-balancer/branch blocks account-only. Pico Chat lists routers separately from concrete accounts and pairs either choice with an exact configured model alias from the independent model selector. | Browser setup must expose routers safely without coupling an account graph to a model or raw upstream model discovery. |
 | `FR-ACCOUNT-ROUTER-009` | MUST  | Private agent execution records provider fallback outcomes through the router's private-result path. That path preserves stable account attribution, classified failure reason, health/cooldown transitions, request/token accounting, and success recovery, but replaces every persisted upstream or wrapper error with the fixed `provider request failed` text. Ordinary non-private result recording retains its existing diagnostics. | A provider error can echo compiler-private workflow context or frozen media; router health must remain accurate without turning shared durable state into an exfiltration surface. |
 
+| `FR-ACCOUNT-ROUTER-010` | MUST | Authenticated `/api/account-routers` provides a name-identified standard collection with bounded typed `query`, opaque cursor paging, total and schema metadata, direct detail, create/update/delete, revision-fenced make-default, and at-most-200 explicit-ID bulk deletion. Canonical path-safe nonreserved names are their own IDs; an unsafe, dot-segment, reserved-route, or opaque-shaped persisted name receives a deterministic backend-issued base64url digest ID and remains viewable/editable without data migration. One config revision fences each mutation; candidate validation and one save preserve unrelated configuration and return restart effects. Structurally valid disabled routers persist and remain editable but are unavailable to runtime selection and cannot become default. Bulk results return successful IDs plus stable `default`, `referenced`, and `not_found` failures with safe blockers. The UI uses List/Table/Grid at `/accounts/routers` with dedicated `/new`, `/{id}`, and `/{id}/edit` routes, optional enable/disable and make-default item actions, partial-success selection reconciliation, and no compatibility handling for `/accounts/account-router/new` or index-addressed URLs. | Router administration needs stable names, safe concurrency, and directly loadable editors without mutable model-list indexes, combined credential cards, or query-wide deletion. |
+
 ## Data And State Model
 
 Router config shape:
@@ -72,6 +74,14 @@ Runtime state persists under the agent workspace as
 `account_router_state.json`. Each router stores a config hash, account status and
 usage, session block affinities, block cursors, and timestamps.
 
+The administrative collection uses canonical router `name` directly when it is
+path-safe and nonreserved; otherwise it prefixes a fixed base64url SHA-256 ID
+derived from the `account-router` namespace and canonical name. Query fields are
+`name`, `enabled`, `is_default`, `status`, `entry`, `accounts`, and `blocks`,
+ordered by name. Status is one of `available`,
+`disabled`, `unconfigured`, `unreachable`, or `invalid`; it is a safe projection
+and exposes neither credentials nor runtime error detail.
+
 ## Auxiliary Interfaces
 
 | Type    | Surface                                       | Contract                                                                                                                              | Requirement IDs                                         |
@@ -79,7 +89,7 @@ usage, session block affinities, block cursors, and timestamps.
 | Config  | `account_routers[]`                           | Router name, static account-only block graph, fallback refs, strategy, and refresh interval; no model field.                                      | `FR-ACCOUNT-ROUTER-001` through `FR-ACCOUNT-ROUTER-003` |
 | Runtime | `pkg/accountrouter`                           | Select candidates, enforce session affinity, track health/usage, redact private provider errors, persist state, and recover corrupt state.                                       | `FR-ACCOUNT-ROUTER-003` through `FR-ACCOUNT-ROUTER-005`, `FR-ACCOUNT-ROUTER-009` |
 | Agent   | Agent model resolution and fallback execution | Select/reselect concrete accounts, resolve the exact alias for each selected account, and record results by account identity. | `FR-ACCOUNT-ROUTER-004`, `FR-ACCOUNT-ROUTER-006`        |
-| HTTP/UI | `/api/accounts/models*`, `/accounts`          | Manage account-only router graphs and select an independent model alias without persisting one on a router. | `FR-ACCOUNT-ROUTER-007`                                 |
+| HTTP/UI | `/api/account-routers*`, `/accounts/routers*` | Name-identified typed collection/detail/CRUD with backend-issued IDs for unsafe names, revision-fenced default selection and explicit-ID bulk deletion, routed graph editing, and independent model-alias selection. | `FR-ACCOUNT-ROUTER-007`, `FR-ACCOUNT-ROUTER-010` |
 
 ## Algorithms And Ordering
 
@@ -143,8 +153,9 @@ semantics; router entries intentionally do not store API keys.
 | `FR-ACCOUNT-ROUTER-001`, `FR-ACCOUNT-ROUTER-002`, `FR-ACCOUNT-ROUTER-003`, `FR-ACCOUNT-ROUTER-008` | [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go)                                                                                                                                                                                                     |
 | `FR-ACCOUNT-ROUTER-003`, `FR-ACCOUNT-ROUTER-008`, `FR-ACCOUNT-ROUTER-004`, `FR-ACCOUNT-ROUTER-005` | [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go)                                                                                                                                                                                                       |
 | `FR-ACCOUNT-ROUTER-006`                                                                            | [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go)                                                                                                                               |
-| `FR-ACCOUNT-ROUTER-007`                                                                            | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/frontend/src/components/models/model-card.test.tsx](../../web/frontend/src/components/models/model-card.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-ACCOUNT-ROUTER-007`                                                                            | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/account_router_collections_test.go](../../web/backend/api/account_router_collections_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-ACCOUNT-ROUTER-009`                                                                            | [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go)                                                                                                                        |
+| `FR-ACCOUNT-ROUTER-010`                                                                            | [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go), [web/backend/api/account_router_collections_test.go](../../web/backend/api/account_router_collections_test.go), [web/frontend/src/api/accounts.test.ts](../../web/frontend/src/api/accounts.test.ts), [web/frontend/src/routes/-accounts-route.test.tsx](../../web/frontend/src/routes/-accounts-route.test.tsx), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 
@@ -155,6 +166,8 @@ semantics; router entries intentionally do not store API keys.
 - [pkg/agent/pipeline_llm.go](../../pkg/agent/pipeline_llm.go)
 - [pkg/providers/fallback.go](../../pkg/providers/fallback.go)
 - [web/backend/api/models.go](../../web/backend/api/models.go)
+- [web/backend/api/account_router_collections.go](../../web/backend/api/account_router_collections.go)
+- [web/frontend/src/api/accounts.ts](../../web/frontend/src/api/accounts.ts)
 - [web/frontend/src/components/credentials](../../web/frontend/src/components/credentials)
 
 ## Surface Ownership
@@ -162,7 +175,19 @@ semantics; router entries intentionally do not store API keys.
 ```text
 Owns: CODE pkg/accountrouter/**
 Owns: CODE pkg/agent/fallback_result.go
+Owns: CODE web/backend/api/account_router_collections.go
+Owns: CODE web/frontend/src/api/accounts.ts
+Owns: CODE web/frontend/src/components/credentials/account-collection-route-state.ts
+Owns: CODE web/frontend/src/components/credentials/account-collections.tsx
+Owns: CODE web/frontend/src/components/credentials/account-router-editor-page.tsx
+Owns: CODE web/frontend/src/components/credentials/account-router-validation.ts
+Owns: CODE web/frontend/src/routes/accounts_.routers*.tsx
 Owns: CONFIG.account_routers*
+Owns: HTTP * /api/account-routers*
+Owns: UI /accounts/routers*
 Owns: TEST pkg/accountrouter/**
 Owns: TEST pkg/config/account_router_test.go*
+Owns: TEST web/backend/api/account_router_collections_test.go
+Owns: TEST web/frontend/src/api/accounts.test.ts
+Owns: TEST web/frontend/src/routes/-accounts-route.test.tsx
 ```

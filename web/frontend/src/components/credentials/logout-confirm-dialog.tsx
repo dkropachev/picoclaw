@@ -45,8 +45,17 @@ export function LogoutConfirmDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm} variant="destructive">
+          <AlertDialogCancel disabled={isSubmitting}>
+            {t("common.cancel")}
+          </AlertDialogCancel>
+          <AlertDialogAction
+            disabled={isSubmitting}
+            onClick={(event) => {
+              event.preventDefault()
+              void onConfirm()
+            }}
+            variant="destructive"
+          >
             {isSubmitting && <IconLoader2 className="size-4 animate-spin" />}
             {t("credentials.actions.logout")}
           </AlertDialogAction>

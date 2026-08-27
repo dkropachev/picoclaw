@@ -25,6 +25,7 @@ import (
 // registerModelRoutes binds account-owned model management endpoints to the ServeMux.
 func (h *Handler) registerModelRoutes(mux *http.ServeMux) {
 	h.registerModelCollectionRoutes(mux)
+	h.registerAccountRouterCollectionRoutes(mux)
 	mux.HandleFunc("GET /api/accounts/models", h.handleListModels)
 	mux.HandleFunc("POST /api/accounts/models/fetch", h.handleFetchModels)
 	mux.HandleFunc("GET /api/accounts/models/catalog", h.handleListCatalogs)
@@ -1280,6 +1281,13 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 }
 
 func credentialAccountAvailable(accountRef string) bool {
+	return credentialAccountAvailableAt(accountRef, time.Now().UTC())
+}
+
+func credentialAccountAvailableAt(accountRef string, evaluatedAt time.Time) bool {
+	if evaluatedAt.IsZero() {
+		return false
+	}
 	credentialID, ok := config.AccountRouterCredentialAccountID(accountRef)
 	if !ok {
 		return false
@@ -1304,7 +1312,7 @@ func credentialAccountAvailable(accountRef string) bool {
 		!credentialProviderMatches(cred, provider) ||
 		!isCredentialAuthMethod(cred.AuthMethod) ||
 		strings.TrimSpace(cred.AccessToken) == "" ||
-		cred.IsExpired() {
+		!cred.ExpiresAt.IsZero() && evaluatedAt.After(cred.ExpiresAt) {
 		return false
 	}
 	return providers.NormalizeProvider(provider) != "github-copilot" ||

@@ -155,30 +155,55 @@
       "route": "/accounts",
       "owningSpec": "docs/features/launcher-management.md",
       "implementationGlobs": [
-        "src/routes/accounts*.tsx",
-        "src/components/credentials/accounts-page.tsx"
+        "src/routes/accounts.tsx",
+        "src/routes/accounts_.new.tsx",
+        "src/routes/accounts_.$id.tsx",
+        "src/routes/accounts_.$id_.edit.tsx",
+        "src/api/accounts.ts",
+        "src/components/credentials/account-auth-editor-page.tsx",
+        "src/components/credentials/account-collection-route-state.ts",
+        "src/components/credentials/account-collections.tsx",
+        "src/components/credentials/account-oauth-callback-recovery.tsx",
+        "src/lib/safe-oauth-flow-message.ts"
       ],
-      "capabilities": ["create", "detail", "edit"],
-      "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/accounts" }
+      "capabilities": ["query", "pagination", "create", "detail", "edit"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/accounts",
+        "new": "/accounts/new",
+        "detail": "/accounts/:id",
+        "edit": "/accounts/:id/edit"
+      }
     },
     {
       "key": "account-routers",
-      "route": "/accounts",
+      "route": "/accounts/routers",
       "owningSpec": "docs/features/account-router.md",
       "implementationGlobs": [
-        "src/routes/accounts.account-router*.tsx",
+        "src/routes/accounts_.routers*.tsx",
+        "src/components/credentials/account-collection-route-state.ts",
+        "src/components/credentials/account-collections.tsx",
         "src/components/credentials/account-router-editor-page.tsx",
-        "src/components/credentials/accounts-page.tsx"
+        "src/components/credentials/account-router-validation.ts",
+        "src/api/accounts.ts"
       ],
-      "capabilities": ["create", "detail", "edit"],
-      "views": ["list"],
-      "status": "legacy",
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
       "routes": {
-        "list": "/accounts",
-        "new": "/accounts/account-router/new",
-        "edit": "/accounts/account-router/:index"
+        "list": "/accounts/routers",
+        "new": "/accounts/routers/new",
+        "detail": "/accounts/routers/:id",
+        "edit": "/accounts/routers/:id/edit"
       }
     },
     {

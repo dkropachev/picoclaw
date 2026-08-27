@@ -113,6 +113,17 @@
       ]
     },
     {
+      "spec": "docs/features/account-router.md",
+      "patterns": [
+        "web/frontend/src/api/accounts.ts",
+        "web/frontend/src/components/credentials/account-collection-route-state.ts",
+        "web/frontend/src/components/credentials/account-collections.tsx",
+        "web/frontend/src/components/credentials/account-router-editor-page.tsx",
+        "web/frontend/src/components/credentials/account-router-validation.ts",
+        "web/frontend/src/routes/accounts_.routers*.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/event-automation.md",
       "patterns": [
         "web/frontend/src/api/event-sources.ts",
@@ -152,6 +163,7 @@
     {
       "spec": "docs/features/launcher-management.md",
       "patterns": [
+        "web/frontend/src/api/accounts.ts",
         "web/frontend/src/api/launcher-auth.ts",
         "web/frontend/src/api/collection.ts",
         "web/frontend/src/api/models.ts",
@@ -174,9 +186,7 @@
         "web/frontend/src/routes/agent.tsx",
         "web/frontend/src/routes/__root.tsx",
         "web/frontend/src/routes/config*",
-        "web/frontend/src/routes/accounts.account-router.$index.tsx",
-        "web/frontend/src/routes/accounts.account-router.new.tsx",
-        "web/frontend/src/routes/accounts.tsx",
+        "web/frontend/src/routes/accounts*.tsx",
         "web/frontend/src/routes/credentials.tsx",
         "web/frontend/src/routes/launcher-*",
         "web/frontend/src/routes/models_*alias*.tsx",
@@ -186,10 +196,11 @@
     {
       "spec": "docs/features/github-copilot-subscription.md",
       "patterns": [
+        "web/frontend/src/api/accounts.ts",
         "web/frontend/src/api/oauth.ts",
+        "web/frontend/src/components/credentials/account-auth-editor-page.tsx",
+        "web/frontend/src/components/credentials/account-collections.tsx",
         "web/frontend/src/components/credentials/account-router-editor-page.tsx",
-        "web/frontend/src/components/credentials/account-onboarding-sheet.tsx",
-        "web/frontend/src/components/credentials/accounts-page.tsx",
         "web/frontend/src/hooks/use-credentials-page.ts",
         "web/frontend/src/i18n/locales/bn-in.json",
         "web/frontend/src/i18n/locales/cs.json",

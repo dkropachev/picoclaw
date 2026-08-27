@@ -166,6 +166,16 @@ const accountsNavItem: NavItem = {
   url: "/accounts",
   icon: IconKey,
   translateTitle: true,
+  exact: true,
+  search: { q: "ORDER BY provider ASC, id ASC" },
+}
+
+const accountRoutersNavItem: NavItem = {
+  title: "Account routers",
+  url: "/accounts/routers",
+  icon: IconRoute,
+  translateTitle: false,
+  search: { q: "ORDER BY name ASC" },
 }
 
 const modelsNavItem: NavItem = {
@@ -221,10 +231,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     currentPath.startsWith("/model-evaluations/")
       ? currentPath
       : null
+  const accountsDestination =
+    currentPath === "/accounts" || currentPath.startsWith("/accounts/")
+      ? currentPath
+      : null
+  const isAccountRoutersPath =
+    currentPath === "/accounts/routers" ||
+    currentPath.startsWith("/accounts/routers/")
   const servicesDestination =
     developmentDestination ??
     repositoryReviewsDestination ??
-    modelEvaluationsDestination
+    modelEvaluationsDestination ??
+    accountsDestination
   const [servicesOpen, setServicesOpen] = useAutoRevealCollapsible(
     servicesDestination,
     currentPath.startsWith("/agent/") || servicesDestination != null,
@@ -340,6 +358,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   }, [channelItems])
 
   const isNavItemActive = (item: NavItem) => {
+    if (item.url === "/accounts") {
+      return (
+        currentPath === "/accounts" ||
+        (currentPath.startsWith("/accounts/") && !isAccountRoutersPath)
+      )
+    }
     if (item.url === "/repository-reviews") {
       return (
         currentPath === item.url ||
@@ -390,7 +414,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <Link
             to={linkTo}
             activeOptions={
-              item.url === "/development" ? { exact: true } : undefined
+              item.exact || item.url === "/development"
+                ? { exact: true }
+                : undefined
             }
             aria-current={isActive ? "page" : undefined}
             data-status={isActive ? "active" : undefined}
@@ -502,6 +528,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   {renderNavItem(modelsNavItem)}
                   {renderNavItem(modelRoutersNavItem)}
                   {renderNavItem(accountsNavItem)}
+                  {renderNavItem(accountRoutersNavItem)}
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>

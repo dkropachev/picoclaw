@@ -42,6 +42,49 @@ func TestAccountRouterConfigValidateAcceptsFallbackAndLoadBalance(t *testing.T) 
 	}
 }
 
+func TestAccountRouterConfigValidateAcceptsDisabledStructurallyValidRouter(t *testing.T) {
+	cfg := validRouterConfigForTest()
+	cfg.AccountRouters[0].Enabled = false
+
+	if err := cfg.ValidateModelList(); err != nil {
+		t.Fatalf("ValidateModelList() disabled router error = %v", err)
+	}
+
+	cfg.MaterializeAccountRouterModels()
+	model, err := cfg.GetModelConfig("router-main")
+	if err != nil {
+		t.Fatalf("GetModelConfig(router-main): %v", err)
+	}
+	if model.Enabled {
+		t.Fatal("disabled account router remained runtime-selectable")
+	}
+	if _, err = cfg.GetEnabledModelConfig("router-main"); err == nil {
+		t.Fatal("GetEnabledModelConfig(router-main) selected a disabled router")
+	}
+}
+
+func TestAccountRouterConfigValidateStillChecksDisabledRouterGraph(t *testing.T) {
+	cfg := validRouterConfigForTest()
+	cfg.AccountRouters[0].Enabled = false
+	cfg.AccountRouters[0].Entry = "missing"
+
+	err := cfg.ValidateModelList()
+	if err == nil || !strings.Contains(err.Error(), "does not reference a block") {
+		t.Fatalf("ValidateModelList() error = %v, want invalid entry", err)
+	}
+}
+
+func TestAccountRouterConfigValidateStillChecksDisabledRouterReferences(t *testing.T) {
+	cfg := validRouterConfigForTest()
+	cfg.AccountRouters[0].Enabled = false
+	cfg.AccountRouters[0].Blocks[0].Account = "missing"
+
+	err := cfg.ValidateModelList()
+	if err == nil || !strings.Contains(err.Error(), "unknown account") {
+		t.Fatalf("ValidateModelList() error = %v, want unknown account", err)
+	}
+}
+
 func TestAccountRouterConfigValidateAcceptsGitHubCopilotCredentialAccountRef(t *testing.T) {
 	cfg := &Config{
 		AccountRouters: []AccountRouterConfig{

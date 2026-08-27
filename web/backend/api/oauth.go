@@ -133,17 +133,33 @@ func newOAuthProviderCredentialStatus(
 	provider, credentialID string,
 	cred *auth.AuthCredential,
 ) oauthProviderStatus {
+	return newOAuthProviderCredentialStatusAt(provider, credentialID, cred, time.Now())
+}
+
+func newOAuthProviderCredentialStatusAt(
+	provider, credentialID string,
+	cred *auth.AuthCredential,
+	now time.Time,
+) oauthProviderStatus {
 	s := oauthProviderStatus{}
 	s.Provider = provider
 	s.CredentialID = credentialID
 	s.DisplayName = oauthProviderLabel(provider)
 	s.Methods = oauthProviderMethodsForProvider(provider)
 	s.Status = "not_logged_in"
-	s.applyCredential(provider, credentialID, cred)
+	s.applyCredentialAt(provider, credentialID, cred, now)
 	return s
 }
 
 func (s *oauthProviderStatus) applyCredential(provider, credentialID string, cred *auth.AuthCredential) {
+	s.applyCredentialAt(provider, credentialID, cred, time.Now())
+}
+
+func (s *oauthProviderStatus) applyCredentialAt(
+	provider, credentialID string,
+	cred *auth.AuthCredential,
+	now time.Time,
+) {
 	s.Provider = provider
 	s.CredentialID = credentialID
 	if s.DisplayName == "" {
@@ -165,9 +181,9 @@ func (s *oauthProviderStatus) applyCredential(provider, credentialID string, cre
 		s.ExpiresAt = cred.ExpiresAt.Format(time.RFC3339)
 	}
 	switch {
-	case cred.IsExpired():
+	case !cred.ExpiresAt.IsZero() && now.After(cred.ExpiresAt):
 		s.Status = "expired"
-	case cred.NeedsRefresh():
+	case !cred.ExpiresAt.IsZero() && now.Add(5*time.Minute).After(cred.ExpiresAt):
 		s.Status = "needs_refresh"
 	default:
 		s.Status = "connected"

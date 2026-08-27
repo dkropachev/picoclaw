@@ -162,6 +162,73 @@ describe("useCredentialsPage OAuth flow fencing", () => {
     )
   })
 
+  it("recovers an explicit hard-navigation callback without relying on window search", async () => {
+    const onOAuthCallbackConsumed = vi.fn()
+    vi.mocked(getOAuthFlow).mockResolvedValue({
+      flow_id: "flow-hard-navigation",
+      provider: "google-antigravity",
+      credential_id: "google-antigravity:work",
+      method: "browser",
+      status: "success",
+    })
+
+    const { result } = renderHook(() =>
+      useCredentialsPage({
+        oauthCallbackFlowID: "flow-hard-navigation",
+        onOAuthCallbackConsumed,
+      }),
+    )
+
+    await waitFor(() =>
+      expect(getOAuthFlow).toHaveBeenCalledWith("flow-hard-navigation"),
+    )
+    expect(onOAuthCallbackConsumed).toHaveBeenCalledOnce()
+    await waitFor(() => expect(result.current.credentialsRevision).toBe(1))
+    expect(result.current.activeFlow?.status).toBe("success")
+  })
+
+  it.each([
+    {
+      status: "error" as const,
+      flowError: `Provider rejected login\n${"x".repeat(800)}`,
+      expectedPrefix: "Provider rejected login ",
+    },
+    {
+      status: "expired" as const,
+      flowError: "",
+      expectedPrefix: "credentials.flow.expired",
+    },
+  ])(
+    "reports a bounded safe terminal $status callback after consuming it",
+    async ({ status, flowError, expectedPrefix }) => {
+      const onOAuthCallbackConsumed = vi.fn()
+      vi.mocked(getOAuthFlow).mockResolvedValue({
+        flow_id: `flow-${status}`,
+        provider: "google-antigravity",
+        credential_id: "google-antigravity:work",
+        method: "browser",
+        status,
+        error: flowError,
+      })
+
+      const { result } = renderHook(() =>
+        useCredentialsPage({
+          oauthCallbackFlowID: `flow-${status}`,
+          onOAuthCallbackConsumed,
+        }),
+      )
+
+      expect(onOAuthCallbackConsumed).toHaveBeenCalledOnce()
+      await waitFor(() =>
+        expect(result.current.activeFlow?.status).toBe(status),
+      )
+      expect(result.current.error).toMatch(new RegExp(`^${expectedPrefix}`))
+      expect(result.current.error).not.toMatch(/[\r\n\t]/)
+      expect(result.current.error.length).toBeLessThanOrEqual(512)
+      expect(result.current.credentialsRevision).toBe(0)
+    },
+  )
+
   it("ignores a stale browser error during device renewal and fences canceled device completion", async () => {
     const staleBrowser = deferred<OAuthFlowState>()
     const deviceRenewal = deferred<OAuthFlowState>()
