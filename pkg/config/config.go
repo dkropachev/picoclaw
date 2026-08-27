@@ -1214,9 +1214,6 @@ func (r *AccountRouterConfig) validate(requireName bool) error {
 	if requireName && strings.TrimSpace(r.Name) == "" {
 		return fmt.Errorf("router.name is required")
 	}
-	if !r.Enabled {
-		return fmt.Errorf("router must be enabled")
-	}
 	entry := strings.TrimSpace(r.Entry)
 	if entry == "" {
 		return fmt.Errorf("router.entry is required")

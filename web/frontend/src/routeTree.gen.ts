@@ -49,6 +49,9 @@ import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as AgentAgentsRouteImport } from './routes/agent/agents'
+import { Route as AccountsRoutersRouteImport } from './routes/accounts_.routers'
+import { Route as AccountsNewRouteImport } from './routes/accounts_.new'
+import { Route as AccountsIdRouteImport } from './routes/accounts_.$id'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
 import { Route as RepositoryReviewsRepositoriesNewRouteImport } from './routes/repository-reviews_.repositories_.new'
 import { Route as RepositoryReviewsRepositoriesIdRouteImport } from './routes/repository-reviews_.repositories_.$id'
@@ -69,8 +72,9 @@ import { Route as AgentMcpSettingsRouteImport } from './routes/agent/mcp_.settin
 import { Route as AgentMcpServersRouteImport } from './routes/agent/mcp_.servers'
 import { Route as AgentAgentsNewRouteImport } from './routes/agent/agents_.new'
 import { Route as AgentAgentsIdRouteImport } from './routes/agent/agents_.$id'
-import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
-import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
+import { Route as AccountsRoutersNewRouteImport } from './routes/accounts_.routers_.new'
+import { Route as AccountsRoutersIdRouteImport } from './routes/accounts_.routers_.$id'
+import { Route as AccountsIdEditRouteImport } from './routes/accounts_.$id_.edit'
 import { Route as RepositoryReviewsRepositoriesIdFindingsRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings'
 import { Route as RepositoryReviewsRepositoriesIdEditRouteImport } from './routes/repository-reviews_.repositories_.$id_.edit'
 import { Route as RepositoryReviewsProfilesProfileIDEditRouteImport } from './routes/repository-reviews_.profiles_.$profileID_.edit'
@@ -83,6 +87,7 @@ import { Route as AgentMcpServersNameRouteImport } from './routes/agent/mcp_.ser
 import { Route as AgentAgentsIdEditRouteImport } from './routes/agent/agents_.$id_.edit'
 import { Route as AgentAgentsIdCapabilitiesRouteImport } from './routes/agent/agents_.$id_.capabilities'
 import { Route as AgentAgentsIdActivityRouteImport } from './routes/agent/agents_.$id_.activity'
+import { Route as AccountsRoutersIdEditRouteImport } from './routes/accounts_.routers_.$id_.edit'
 import { Route as RepositoryReviewsRepositoriesIdFindingsFindingIdRouteImport } from './routes/repository-reviews_.repositories_.$id_.findings_.$findingId'
 import { Route as RepositoryReviewsIdFindingsFindingIdLinkIssueRouteImport } from './routes/repository-reviews_.$id_.findings_.$findingId_.link-issue'
 import { Route as AgentMcpServersNameEditRouteImport } from './routes/agent/mcp_.servers_.$name_.edit'
@@ -293,6 +298,21 @@ const AgentAgentsRoute = AgentAgentsRouteImport.update({
   path: '/agents',
   getParentRoute: () => AgentRoute,
 } as any)
+const AccountsRoutersRoute = AccountsRoutersRouteImport.update({
+  id: '/accounts_/routers',
+  path: '/accounts/routers',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsNewRoute = AccountsNewRouteImport.update({
+  id: '/accounts_/new',
+  path: '/accounts/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsIdRoute = AccountsIdRouteImport.update({
+  id: '/accounts_/$id',
+  path: '/accounts/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   id: '/$threadId',
   path: '/$threadId',
@@ -403,18 +423,21 @@ const AgentAgentsIdRoute = AgentAgentsIdRouteImport.update({
   path: '/agents/$id',
   getParentRoute: () => AgentRoute,
 } as any)
-const AccountsAccountRouterNewRoute =
-  AccountsAccountRouterNewRouteImport.update({
-    id: '/account-router/new',
-    path: '/account-router/new',
-    getParentRoute: () => AccountsRoute,
-  } as any)
-const AccountsAccountRouterIndexRoute =
-  AccountsAccountRouterIndexRouteImport.update({
-    id: '/account-router/$index',
-    path: '/account-router/$index',
-    getParentRoute: () => AccountsRoute,
-  } as any)
+const AccountsRoutersNewRoute = AccountsRoutersNewRouteImport.update({
+  id: '/accounts_/routers_/new',
+  path: '/accounts/routers/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsRoutersIdRoute = AccountsRoutersIdRouteImport.update({
+  id: '/accounts_/routers_/$id',
+  path: '/accounts/routers/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsIdEditRoute = AccountsIdEditRouteImport.update({
+  id: '/accounts_/$id_/edit',
+  path: '/accounts/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RepositoryReviewsRepositoriesIdFindingsRoute =
   RepositoryReviewsRepositoriesIdFindingsRouteImport.update({
     id: '/repository-reviews_/repositories_/$id_/findings',
@@ -481,6 +504,11 @@ const AgentAgentsIdActivityRoute = AgentAgentsIdActivityRouteImport.update({
   path: '/agents/$id/activity',
   getParentRoute: () => AgentRoute,
 } as any)
+const AccountsRoutersIdEditRoute = AccountsRoutersIdEditRouteImport.update({
+  id: '/accounts_/routers_/$id_/edit',
+  path: '/accounts/routers/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RepositoryReviewsRepositoriesIdFindingsFindingIdRoute =
   RepositoryReviewsRepositoriesIdFindingsFindingIdRouteImport.update({
     id: '/repository-reviews_/repositories_/$id_/findings_/$findingId',
@@ -508,7 +536,7 @@ const RepositoryReviewsRepositoriesIdFindingsFindingIdLinkIssueRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
-  '/accounts': typeof AccountsRouteWithChildren
+  '/accounts': typeof AccountsRoute
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
   '/development': typeof DevelopmentRoute
@@ -521,6 +549,9 @@ export interface FileRoutesByFullPath {
   '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
+  '/accounts/$id': typeof AccountsIdRoute
+  '/accounts/new': typeof AccountsNewRoute
+  '/accounts/routers': typeof AccountsRoutersRoute
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
@@ -546,8 +577,9 @@ export interface FileRoutesByFullPath {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
-  '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
-  '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/accounts/$id/edit': typeof AccountsIdEditRoute
+  '/accounts/routers/$id': typeof AccountsRoutersIdRoute
+  '/accounts/routers/new': typeof AccountsRoutersNewRoute
   '/agent/agents/$id': typeof AgentAgentsIdRoute
   '/agent/agents/new': typeof AgentAgentsNewRoute
   '/agent/mcp/servers': typeof AgentMcpServersRoute
@@ -568,6 +600,7 @@ export interface FileRoutesByFullPath {
   '/repository-reviews/repositories/$id': typeof RepositoryReviewsRepositoriesIdRoute
   '/repository-reviews/repositories/new': typeof RepositoryReviewsRepositoriesNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
+  '/accounts/routers/$id/edit': typeof AccountsRoutersIdEditRoute
   '/agent/agents/$id/activity': typeof AgentAgentsIdActivityRoute
   '/agent/agents/$id/capabilities': typeof AgentAgentsIdCapabilitiesRoute
   '/agent/agents/$id/edit': typeof AgentAgentsIdEditRoute
@@ -588,7 +621,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
-  '/accounts': typeof AccountsRouteWithChildren
+  '/accounts': typeof AccountsRoute
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
   '/development': typeof DevelopmentRoute
@@ -601,6 +634,9 @@ export interface FileRoutesByTo {
   '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
+  '/accounts/$id': typeof AccountsIdRoute
+  '/accounts/new': typeof AccountsNewRoute
+  '/accounts/routers': typeof AccountsRoutersRoute
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
@@ -626,8 +662,9 @@ export interface FileRoutesByTo {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
-  '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
-  '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/accounts/$id/edit': typeof AccountsIdEditRoute
+  '/accounts/routers/$id': typeof AccountsRoutersIdRoute
+  '/accounts/routers/new': typeof AccountsRoutersNewRoute
   '/agent/agents/$id': typeof AgentAgentsIdRoute
   '/agent/agents/new': typeof AgentAgentsNewRoute
   '/agent/mcp/servers': typeof AgentMcpServersRoute
@@ -648,6 +685,7 @@ export interface FileRoutesByTo {
   '/repository-reviews/repositories/$id': typeof RepositoryReviewsRepositoriesIdRoute
   '/repository-reviews/repositories/new': typeof RepositoryReviewsRepositoriesNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
+  '/accounts/routers/$id/edit': typeof AccountsRoutersIdEditRoute
   '/agent/agents/$id/activity': typeof AgentAgentsIdActivityRoute
   '/agent/agents/$id/capabilities': typeof AgentAgentsIdCapabilitiesRoute
   '/agent/agents/$id/edit': typeof AgentAgentsIdEditRoute
@@ -669,7 +707,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
-  '/accounts': typeof AccountsRouteWithChildren
+  '/accounts': typeof AccountsRoute
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
   '/development': typeof DevelopmentRoute
@@ -682,6 +720,9 @@ export interface FileRoutesById {
   '/notifications': typeof NotificationsRoute
   '/repository-reviews': typeof RepositoryReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
+  '/accounts_/$id': typeof AccountsIdRoute
+  '/accounts_/new': typeof AccountsNewRoute
+  '/accounts_/routers': typeof AccountsRoutersRoute
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
@@ -707,8 +748,9 @@ export interface FileRoutesById {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
-  '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
-  '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
+  '/accounts_/$id_/edit': typeof AccountsIdEditRoute
+  '/accounts_/routers_/$id': typeof AccountsRoutersIdRoute
+  '/accounts_/routers_/new': typeof AccountsRoutersNewRoute
   '/agent/agents_/$id': typeof AgentAgentsIdRoute
   '/agent/agents_/new': typeof AgentAgentsNewRoute
   '/agent/mcp_/servers': typeof AgentMcpServersRoute
@@ -729,6 +771,7 @@ export interface FileRoutesById {
   '/repository-reviews_/repositories_/$id': typeof RepositoryReviewsRepositoriesIdRoute
   '/repository-reviews_/repositories_/new': typeof RepositoryReviewsRepositoriesNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
+  '/accounts_/routers_/$id_/edit': typeof AccountsRoutersIdEditRoute
   '/agent/agents_/$id_/activity': typeof AgentAgentsIdActivityRoute
   '/agent/agents_/$id_/capabilities': typeof AgentAgentsIdCapabilitiesRoute
   '/agent/agents_/$id_/edit': typeof AgentAgentsIdEditRoute
@@ -764,6 +807,9 @@ export interface FileRouteTypes {
     | '/notifications'
     | '/repository-reviews'
     | '/threads'
+    | '/accounts/$id'
+    | '/accounts/new'
+    | '/accounts/routers'
     | '/agent/agents'
     | '/agent/git-workspaces'
     | '/agent/hub'
@@ -789,8 +835,9 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
-    | '/accounts/account-router/$index'
-    | '/accounts/account-router/new'
+    | '/accounts/$id/edit'
+    | '/accounts/routers/$id'
+    | '/accounts/routers/new'
     | '/agent/agents/$id'
     | '/agent/agents/new'
     | '/agent/mcp/servers'
@@ -811,6 +858,7 @@ export interface FileRouteTypes {
     | '/repository-reviews/repositories/$id'
     | '/repository-reviews/repositories/new'
     | '/threads/open/$threadId'
+    | '/accounts/routers/$id/edit'
     | '/agent/agents/$id/activity'
     | '/agent/agents/$id/capabilities'
     | '/agent/agents/$id/edit'
@@ -844,6 +892,9 @@ export interface FileRouteTypes {
     | '/notifications'
     | '/repository-reviews'
     | '/threads'
+    | '/accounts/$id'
+    | '/accounts/new'
+    | '/accounts/routers'
     | '/agent/agents'
     | '/agent/git-workspaces'
     | '/agent/hub'
@@ -869,8 +920,9 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
-    | '/accounts/account-router/$index'
-    | '/accounts/account-router/new'
+    | '/accounts/$id/edit'
+    | '/accounts/routers/$id'
+    | '/accounts/routers/new'
     | '/agent/agents/$id'
     | '/agent/agents/new'
     | '/agent/mcp/servers'
@@ -891,6 +943,7 @@ export interface FileRouteTypes {
     | '/repository-reviews/repositories/$id'
     | '/repository-reviews/repositories/new'
     | '/threads/open/$threadId'
+    | '/accounts/routers/$id/edit'
     | '/agent/agents/$id/activity'
     | '/agent/agents/$id/capabilities'
     | '/agent/agents/$id/edit'
@@ -924,6 +977,9 @@ export interface FileRouteTypes {
     | '/notifications'
     | '/repository-reviews'
     | '/threads'
+    | '/accounts_/$id'
+    | '/accounts_/new'
+    | '/accounts_/routers'
     | '/agent/agents'
     | '/agent/git-workspaces'
     | '/agent/hub'
@@ -949,8 +1005,9 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
-    | '/accounts/account-router/$index'
-    | '/accounts/account-router/new'
+    | '/accounts_/$id_/edit'
+    | '/accounts_/routers_/$id'
+    | '/accounts_/routers_/new'
     | '/agent/agents_/$id'
     | '/agent/agents_/new'
     | '/agent/mcp_/servers'
@@ -971,6 +1028,7 @@ export interface FileRouteTypes {
     | '/repository-reviews_/repositories_/$id'
     | '/repository-reviews_/repositories_/new'
     | '/threads/open/$threadId'
+    | '/accounts_/routers_/$id_/edit'
     | '/agent/agents_/$id_/activity'
     | '/agent/agents_/$id_/capabilities'
     | '/agent/agents_/$id_/edit'
@@ -992,7 +1050,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChannelsRouteRoute: typeof ChannelsRouteRouteWithChildren
-  AccountsRoute: typeof AccountsRouteWithChildren
+  AccountsRoute: typeof AccountsRoute
   AgentRoute: typeof AgentRouteWithChildren
   ConfigRoute: typeof ConfigRouteWithChildren
   DevelopmentRoute: typeof DevelopmentRoute
@@ -1005,6 +1063,9 @@ export interface RootRouteChildren {
   NotificationsRoute: typeof NotificationsRoute
   RepositoryReviewsRoute: typeof RepositoryReviewsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
+  AccountsIdRoute: typeof AccountsIdRoute
+  AccountsNewRoute: typeof AccountsNewRoute
+  AccountsRoutersRoute: typeof AccountsRoutersRoute
   DevelopmentWorkspaceIDRoute: typeof DevelopmentWorkspaceIDRoute
   DevelopmentNewRoute: typeof DevelopmentNewRoute
   DevelopmentRepositoriesRoute: typeof DevelopmentRepositoriesRoute
@@ -1019,6 +1080,9 @@ export interface RootRouteChildren {
   RepositoryReviewsProfilesRoute: typeof RepositoryReviewsProfilesRoute
   RepositoryReviewsRepositoriesRoute: typeof RepositoryReviewsRepositoriesRoute
   RepositoryReviewsResultsRoute: typeof RepositoryReviewsResultsRoute
+  AccountsIdEditRoute: typeof AccountsIdEditRoute
+  AccountsRoutersIdRoute: typeof AccountsRoutersIdRoute
+  AccountsRoutersNewRoute: typeof AccountsRoutersNewRoute
   ModelEvaluationsEvaluationIDReportRoute: typeof ModelEvaluationsEvaluationIDReportRoute
   ModelEvaluationsIdCorpusRoute: typeof ModelEvaluationsIdCorpusRoute
   ModelEvaluationsIdEditRoute: typeof ModelEvaluationsIdEditRoute
@@ -1034,6 +1098,7 @@ export interface RootRouteChildren {
   RepositoryReviewsProfilesNewRoute: typeof RepositoryReviewsProfilesNewRoute
   RepositoryReviewsRepositoriesIdRoute: typeof RepositoryReviewsRepositoriesIdRoute
   RepositoryReviewsRepositoriesNewRoute: typeof RepositoryReviewsRepositoriesNewRoute
+  AccountsRoutersIdEditRoute: typeof AccountsRoutersIdEditRoute
   ModelsAliasesNameEditRoute: typeof ModelsAliasesNameEditRoute
   ModelsRoutersNameEditRoute: typeof ModelsRoutersNameEditRoute
   RepositoryReviewsIdFindingsFindingIdRoute: typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -1328,6 +1393,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentAgentsRouteImport
       parentRoute: typeof AgentRoute
     }
+    '/accounts_/routers': {
+      id: '/accounts_/routers'
+      path: '/accounts/routers'
+      fullPath: '/accounts/routers'
+      preLoaderRoute: typeof AccountsRoutersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts_/new': {
+      id: '/accounts_/new'
+      path: '/accounts/new'
+      fullPath: '/accounts/new'
+      preLoaderRoute: typeof AccountsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts_/$id': {
+      id: '/accounts_/$id'
+      path: '/accounts/$id'
+      fullPath: '/accounts/$id'
+      preLoaderRoute: typeof AccountsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/threads/open/$threadId': {
       id: '/threads/open/$threadId'
       path: '/$threadId'
@@ -1468,19 +1554,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentAgentsIdRouteImport
       parentRoute: typeof AgentRoute
     }
-    '/accounts/account-router/new': {
-      id: '/accounts/account-router/new'
-      path: '/account-router/new'
-      fullPath: '/accounts/account-router/new'
-      preLoaderRoute: typeof AccountsAccountRouterNewRouteImport
-      parentRoute: typeof AccountsRoute
+    '/accounts_/routers_/new': {
+      id: '/accounts_/routers_/new'
+      path: '/accounts/routers/new'
+      fullPath: '/accounts/routers/new'
+      preLoaderRoute: typeof AccountsRoutersNewRouteImport
+      parentRoute: typeof rootRouteImport
     }
-    '/accounts/account-router/$index': {
-      id: '/accounts/account-router/$index'
-      path: '/account-router/$index'
-      fullPath: '/accounts/account-router/$index'
-      preLoaderRoute: typeof AccountsAccountRouterIndexRouteImport
-      parentRoute: typeof AccountsRoute
+    '/accounts_/routers_/$id': {
+      id: '/accounts_/routers_/$id'
+      path: '/accounts/routers/$id'
+      fullPath: '/accounts/routers/$id'
+      preLoaderRoute: typeof AccountsRoutersIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts_/$id_/edit': {
+      id: '/accounts_/$id_/edit'
+      path: '/accounts/$id/edit'
+      fullPath: '/accounts/$id/edit'
+      preLoaderRoute: typeof AccountsIdEditRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/repository-reviews_/repositories_/$id_/findings': {
       id: '/repository-reviews_/repositories_/$id_/findings'
@@ -1566,6 +1659,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentAgentsIdActivityRouteImport
       parentRoute: typeof AgentRoute
     }
+    '/accounts_/routers_/$id_/edit': {
+      id: '/accounts_/routers_/$id_/edit'
+      path: '/accounts/routers/$id/edit'
+      fullPath: '/accounts/routers/$id/edit'
+      preLoaderRoute: typeof AccountsRoutersIdEditRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/repository-reviews_/repositories_/$id_/findings_/$findingId': {
       id: '/repository-reviews_/repositories_/$id_/findings_/$findingId'
       path: '/repository-reviews/repositories/$id/findings/$findingId'
@@ -1607,20 +1707,6 @@ const ChannelsRouteRouteChildren: ChannelsRouteRouteChildren = {
 
 const ChannelsRouteRouteWithChildren = ChannelsRouteRoute._addFileChildren(
   ChannelsRouteRouteChildren,
-)
-
-interface AccountsRouteChildren {
-  AccountsAccountRouterIndexRoute: typeof AccountsAccountRouterIndexRoute
-  AccountsAccountRouterNewRoute: typeof AccountsAccountRouterNewRoute
-}
-
-const AccountsRouteChildren: AccountsRouteChildren = {
-  AccountsAccountRouterIndexRoute: AccountsAccountRouterIndexRoute,
-  AccountsAccountRouterNewRoute: AccountsAccountRouterNewRoute,
-}
-
-const AccountsRouteWithChildren = AccountsRoute._addFileChildren(
-  AccountsRouteChildren,
 )
 
 interface AgentRouteChildren {
@@ -1704,7 +1790,7 @@ const ThreadsRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChannelsRouteRoute: ChannelsRouteRouteWithChildren,
-  AccountsRoute: AccountsRouteWithChildren,
+  AccountsRoute: AccountsRoute,
   AgentRoute: AgentRouteWithChildren,
   ConfigRoute: ConfigRouteWithChildren,
   DevelopmentRoute: DevelopmentRoute,
@@ -1717,6 +1803,9 @@ const rootRouteChildren: RootRouteChildren = {
   NotificationsRoute: NotificationsRoute,
   RepositoryReviewsRoute: RepositoryReviewsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
+  AccountsIdRoute: AccountsIdRoute,
+  AccountsNewRoute: AccountsNewRoute,
+  AccountsRoutersRoute: AccountsRoutersRoute,
   DevelopmentWorkspaceIDRoute: DevelopmentWorkspaceIDRoute,
   DevelopmentNewRoute: DevelopmentNewRoute,
   DevelopmentRepositoriesRoute: DevelopmentRepositoriesRoute,
@@ -1732,6 +1821,9 @@ const rootRouteChildren: RootRouteChildren = {
   RepositoryReviewsProfilesRoute: RepositoryReviewsProfilesRoute,
   RepositoryReviewsRepositoriesRoute: RepositoryReviewsRepositoriesRoute,
   RepositoryReviewsResultsRoute: RepositoryReviewsResultsRoute,
+  AccountsIdEditRoute: AccountsIdEditRoute,
+  AccountsRoutersIdRoute: AccountsRoutersIdRoute,
+  AccountsRoutersNewRoute: AccountsRoutersNewRoute,
   ModelEvaluationsEvaluationIDReportRoute:
     ModelEvaluationsEvaluationIDReportRoute,
   ModelEvaluationsIdCorpusRoute: ModelEvaluationsIdCorpusRoute,
@@ -1749,6 +1841,7 @@ const rootRouteChildren: RootRouteChildren = {
   RepositoryReviewsProfilesNewRoute: RepositoryReviewsProfilesNewRoute,
   RepositoryReviewsRepositoriesIdRoute: RepositoryReviewsRepositoriesIdRoute,
   RepositoryReviewsRepositoriesNewRoute: RepositoryReviewsRepositoriesNewRoute,
+  AccountsRoutersIdEditRoute: AccountsRoutersIdEditRoute,
   ModelsAliasesNameEditRoute: ModelsAliasesNameEditRoute,
   ModelsRoutersNameEditRoute: ModelsRoutersNameEditRoute,
   RepositoryReviewsIdFindingsFindingIdRoute:

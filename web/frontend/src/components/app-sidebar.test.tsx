@@ -144,6 +144,55 @@ describe("AppSidebar", () => {
     expect(activeItem).toHaveAttribute("data-active", "true")
   })
 
+  it.each([
+    "/accounts/new",
+    "/accounts/opaque-account-id",
+    "/accounts/opaque-account-id/edit",
+  ])("reveals Services and marks Accounts on %s", (accountPath) => {
+    pathname = accountPath
+    renderSidebar()
+
+    expect(screen.getByRole("button", { name: "Services" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    )
+    expect(
+      screen
+        .getByRole("link", { name: "Accounts" })
+        .closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "true")
+    expect(
+      screen
+        .getByRole("link", { name: "Account routers" })
+        .closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "false")
+  })
+
+  it.each([
+    "/accounts/routers",
+    "/accounts/routers/new",
+    "/accounts/routers/team-router",
+    "/accounts/routers/team-router/edit",
+  ])("reveals Services and marks only Account routers on %s", (routerPath) => {
+    pathname = routerPath
+    renderSidebar()
+
+    expect(screen.getByRole("button", { name: "Services" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    )
+    expect(
+      screen
+        .getByRole("link", { name: "Account routers" })
+        .closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "true")
+    expect(
+      screen
+        .getByRole("link", { name: "Accounts" })
+        .closest('[data-sidebar="menu-button"]'),
+    ).toHaveAttribute("data-active", "false")
+  })
+
   it("reveals repository review navigation and marks Review runs", () => {
     pathname = "/repository-reviews"
 

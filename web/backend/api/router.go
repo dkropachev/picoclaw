@@ -55,25 +55,33 @@ type Handler struct {
 	sessionDeleteAfterLookup              func()
 	saveToolStateConfig                   func(string, *config.Config, string) (string, error)
 	saveConfigIfRevision                  func(string, *config.Config, string) (string, error)
+	projectAccountRouterItems             accountRouterItemsProjector
+	projectAccountRouterResource          accountRouterResourceProjector
+	pageAccountRouters                    accountRouterPager
+	validateAccountRouterCandidate        accountRouterCandidateValidator
 }
 
 // NewHandler creates an instance of the API handler.
 func NewHandler(configPath string) *Handler {
 	return &Handler{
-		configPath:                 configPath,
-		serverPort:                 launcherconfig.DefaultPort,
-		serverAllowLocalhostBypass: launcherconfig.Default().AllowLocalhostBypass,
-		oauthFlows:                 make(map[string]*oauthFlow),
-		oauthState:                 make(map[string]string),
-		weixinFlows:                make(map[string]*weixinFlow),
-		wecomFlows:                 make(map[string]*wecomFlow),
-		mcpOAuthFlows:              make(map[string]*mcpOAuthFlow),
-		mcpOAuthState:              make(map[string]string),
-		mcpOAuthLatestByServer:     make(map[string]string),
-		workflowTriggerReviewNow:   time.Now,
-		workflowTriggerReviewUsed:  make(map[[32]byte]int64),
-		saveToolStateConfig:        config.SaveConfigIfRevision,
-		saveConfigIfRevision:       config.SaveConfigIfRevision,
+		configPath:                     configPath,
+		serverPort:                     launcherconfig.DefaultPort,
+		serverAllowLocalhostBypass:     launcherconfig.Default().AllowLocalhostBypass,
+		oauthFlows:                     make(map[string]*oauthFlow),
+		oauthState:                     make(map[string]string),
+		weixinFlows:                    make(map[string]*weixinFlow),
+		wecomFlows:                     make(map[string]*wecomFlow),
+		mcpOAuthFlows:                  make(map[string]*mcpOAuthFlow),
+		mcpOAuthState:                  make(map[string]string),
+		mcpOAuthLatestByServer:         make(map[string]string),
+		workflowTriggerReviewNow:       time.Now,
+		workflowTriggerReviewUsed:      make(map[[32]byte]int64),
+		saveToolStateConfig:            config.SaveConfigIfRevision,
+		saveConfigIfRevision:           config.SaveConfigIfRevision,
+		projectAccountRouterItems:      projectAccountRouterItems,
+		projectAccountRouterResource:   accountRouterResourceForConfig,
+		pageAccountRouters:             pageAccountRouters,
+		validateAccountRouterCandidate: materializeAndValidateAccountRouterCandidate,
 	}
 }
 
@@ -128,6 +136,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// OAuth login and credential management
 	h.registerOAuthRoutes(mux)
+	h.registerAccountRoutes(mux)
 
 	// Model list management
 	h.registerModelRoutes(mux)

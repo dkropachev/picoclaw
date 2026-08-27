@@ -1,5 +1,4 @@
 import {
-  IconArrowLeft,
   IconArrowsShuffle,
   IconBraces,
   IconCheck,
@@ -15,7 +14,6 @@ import {
   IconZoomOut,
   IconZoomReset,
 } from "@tabler/icons-react"
-import { useNavigate } from "@tanstack/react-router"
 import {
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -27,17 +25,22 @@ import {
 import { useTranslation } from "react-i18next"
 
 import {
+  type AccountRouter,
+  type AccountRouterSummary,
+  createAccountRouter,
+  getAccountRouter,
+  listAccountRouters,
+  updateAccountRouter,
+} from "@/api/accounts"
+import { CollectionAPIError } from "@/api/collection"
+import {
   type AccountRouterBlock,
   type AccountRouterConfig,
   type AccountRouterExpression,
-  type ModelInfo,
-  addModel,
-  getModels,
-  updateModel,
 } from "@/api/models"
 import { type OAuthProviderStatus, getOAuthProviders } from "@/api/oauth"
+import { CollectionDetailShell } from "@/components/collection"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
-import { PageHeader } from "@/components/page-header"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -56,10 +59,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { cn } from "@/lib/utils"
 import { refreshGatewayState } from "@/store/gateway"
+
+import { isReservedAccountRouterCreateName } from "./account-router-validation"
 
 type EditorMode = "visual" | "json"
 type BlockType = "account" | "load_balance" | "branch"
@@ -85,7 +91,9 @@ interface RouterAccount {
 
 interface AccountRouterEditorPageProps {
   mode: "create" | "edit"
-  modelIndex?: number
+  routerID?: string
+  onBack: () => void
+  onSaved: (id: string) => void
 }
 
 type Point = {
@@ -194,10 +202,6 @@ function safeParseRouterConfig(raw: string): AccountRouterConfig | null {
   } catch {
     return null
   }
-}
-
-function isRouterModel(model: ModelInfo): boolean {
-  return model.provider === "router" || model.router != null
 }
 
 function accountRefForCredential(credentialID: string): string {
@@ -684,7 +688,6 @@ function validateRouterConfig(
   config: AccountRouterConfig,
   t: ReturnType<typeof useTranslation>["t"],
 ): string {
-  if (!config.enabled) return t("models.router.errorRawDisabled")
   const blocks = config.blocks ?? []
   if (blocks.length === 0) return t("models.router.errorNoBlocks")
   if (!config.entry?.trim()) return t("models.router.errorRawEntry")
@@ -780,15 +783,18 @@ function validateFallbackAcyclic(
 
 export function AccountRouterEditorPage({
   mode,
-  modelIndex,
+  routerID,
+  onBack,
+  onSaved,
 }: AccountRouterEditorPageProps) {
   const { t } = useTranslation()
-  const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState("")
+  const [notFound, setNotFound] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
-  const [models, setModels] = useState<ModelInfo[]>([])
+  const [routers, setRouters] = useState<AccountRouterSummary[]>([])
+  const [editingRouter, setEditingRouter] = useState<AccountRouter | null>(null)
   const [configRevision, setConfigRevision] = useState("")
   const [accounts, setAccounts] = useState<RouterAccount[]>([])
   const [modelName, setModelName] = useState("")
@@ -805,10 +811,6 @@ export function AccountRouterEditorPage({
   const [autoArrange, setAutoArrange] = useState(true)
 
   const isEdit = mode === "edit"
-  const editingModel = useMemo(
-    () => models.find((item) => item.index === modelIndex) ?? null,
-    [modelIndex, models],
-  )
   const accountsByID = useMemo(() => accountByID(accounts), [accounts])
   const selectedBlock = selectedBlockID
     ? routerConfig.blocks?.find((block) => block.id === selectedBlockID)
@@ -817,57 +819,68 @@ export function AccountRouterEditorPage({
     () => routerAccountNames(routerConfig),
     [routerConfig],
   )
-  const activeAccountsResolved =
-    activeAccountNames.length > 0 &&
-    activeAccountNames.every((name) => accountsByID.has(name))
   const existingNames = useMemo(
     () =>
       new Set(
-        models
-          .filter((item) => item.index !== editingModel?.index)
-          .map((item) => item.model_name),
+        routers
+          .filter((item) => item.id !== editingRouter?.id)
+          .map((item) => item.name),
       ),
-    [editingModel?.index, models],
+    [editingRouter?.id, routers],
   )
 
   const loadData = useCallback(async () => {
     setLoading(true)
     setLoadError("")
+    setNotFound(false)
     try {
-      const [modelsData, oauthData] = await Promise.all([
-        getModels(),
+      const [routersData, oauthData, detailData] = await Promise.all([
+        listAccountRouters({ limit: 200 }),
         getOAuthProviders(),
+        mode === "edit" && routerID ? getAccountRouter(routerID) : null,
       ])
-      setModels(modelsData.models)
-      setConfigRevision(modelsData.revision)
+      setRouters(routersData.account_routers)
+      setConfigRevision(
+        detailData?.config_revision ?? routersData.config_revision,
+      )
       const nextAccounts = flattenCredentialAccounts(oauthData.providers)
       setAccounts(nextAccounts)
 
-      const nextModel =
-        mode === "edit"
-          ? (modelsData.models.find((item) => item.index === modelIndex) ??
-            null)
-          : null
-      if (mode === "edit" && (!nextModel || !isRouterModel(nextModel))) {
-        setLoadError(t("models.router.errorNotFound"))
+      const nextRouter = detailData?.account_router ?? null
+      if (mode === "edit" && !nextRouter) {
+        setNotFound(true)
         return
       }
 
-      const nextRouter = normalizeRouterConfig(nextModel?.router)
-      setModelName(nextModel?.model_name ?? "")
-      setRouterConfig(nextRouter)
-      setBlockPositions(createFallbackPileLayout(nextRouter))
+      setEditingRouter(nextRouter)
+      const nextConfig = normalizeRouterConfig(
+        nextRouter
+          ? {
+              enabled: nextRouter.enabled,
+              entry: nextRouter.entry,
+              refresh_interval_seconds: nextRouter.refresh_interval_seconds,
+              blocks: nextRouter.blocks,
+            }
+          : undefined,
+      )
+      setModelName(nextRouter?.name ?? "")
+      setRouterConfig(nextConfig)
+      setBlockPositions(createFallbackPileLayout(nextConfig))
       setAutoArrange(true)
-      setRawJson(formatRouterConfig(nextRouter))
+      setRawJson(formatRouterConfig(nextConfig))
       setSelectedBlockID("")
       setError("")
       setRawError("")
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : t("models.loadError"))
+      if (err instanceof CollectionAPIError && err.status === 404) {
+        setNotFound(true)
+      } else {
+        setLoadError(err instanceof Error ? err.message : t("models.loadError"))
+      }
     } finally {
       setLoading(false)
     }
-  }, [mode, modelIndex, t])
+  }, [mode, routerID, t])
 
   useEffect(() => {
     void loadData()
@@ -1012,30 +1025,34 @@ export function AccountRouterEditorPage({
     })
   }
 
-  const validate = () => {
+  const validate = (candidate: AccountRouterConfig) => {
     const trimmedName = modelName.trim()
     if (!trimmedName) return t("models.router.errorNameRequired")
+    if (!isEdit && isReservedAccountRouterCreateName(trimmedName)) {
+      return 'The name "new" is reserved for the creation route.'
+    }
     if (existingNames.has(trimmedName)) return t("models.router.errorDuplicate")
-    const routerValidation = validateRouterConfig(routerConfig, t)
+    const routerValidation = validateRouterConfig(candidate, t)
     if (routerValidation) return routerValidation
-    if (activeAccountNames.length === 0) return t("models.router.noAccounts")
-    if (editorMode === "visual" && !activeAccountsResolved) {
+    const candidateAccounts = routerAccountNames(candidate)
+    if (candidateAccounts.length === 0) return t("models.router.noAccounts")
+    if (
+      editorMode === "visual" &&
+      !candidateAccounts.every((name) => accountsByID.has(name))
+    ) {
       return t("models.router.errorMissingAccounts")
     }
     return ""
   }
 
   const save = async () => {
-    if (editorMode === "json") {
-      const parsed = safeParseRouterConfig(rawJson)
-      if (!parsed) {
-        setRawError(t("models.router.rawInvalid"))
-        return
-      }
-      setRouterConfig(parsed)
+    const candidate =
+      editorMode === "json" ? safeParseRouterConfig(rawJson) : routerConfig
+    if (!candidate) {
+      setRawError(t("models.router.rawInvalid"))
+      return
     }
-
-    const validationError = validate()
+    const validationError = validate(candidate)
     if (validationError) {
       setError(validationError)
       return
@@ -1043,27 +1060,27 @@ export function AccountRouterEditorPage({
     setSaving(true)
     setError("")
     try {
+      const config = candidate
       const payload = {
-        model_name: modelName.trim(),
-        provider: "router",
-        router:
-          editorMode === "json"
-            ? (safeParseRouterConfig(rawJson) ?? routerConfig)
-            : routerConfig,
+        name: modelName.trim(),
+        enabled: config.enabled,
+        entry: config.entry,
+        refresh_interval_seconds: config.refresh_interval_seconds,
+        blocks: config.blocks,
       }
-      if (isEdit && editingModel) {
-        await updateModel(editingModel.index, configRevision, payload)
-      } else {
-        await addModel(payload)
-      }
+      const response =
+        isEdit && editingRouter
+          ? await updateAccountRouter(editingRouter.id, payload, configRevision)
+          : await createAccountRouter(payload, configRevision)
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
         isEdit ? t("models.router.saveSuccess") : t("models.router.addSuccess"),
-        payload.model_name,
-        gateway?.restartRequired === true,
+        payload.name,
+        response.effects.gateway_effect === "restart_required" ||
+          gateway?.restartRequired === true,
       )
-      void navigate({ to: "/accounts" })
+      onSaved(response.account_router.id)
     } catch (err) {
       setError(
         err instanceof Error ? err.message : t("models.router.saveError"),
@@ -1073,199 +1090,192 @@ export function AccountRouterEditorPage({
     }
   }
 
-  if (loading) {
-    return (
-      <div className="flex h-full flex-col">
-        <PageHeader title={t("models.router.title")} />
-        <div className="text-muted-foreground flex items-center gap-2 px-6 py-10 text-sm">
-          <IconLoader2 className="size-4 animate-spin" />
-          {t("credentials.loading")}
-        </div>
-      </div>
-    )
-  }
-
   return (
-    <div className="flex h-full flex-col">
-      <PageHeader
-        title={
-          isEdit
-            ? t("models.router.editPageTitle", {
-                name: editingModel?.model_name ?? modelName,
-              })
-            : t("models.router.title")
-        }
-      >
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => void navigate({ to: "/accounts" })}
-        >
-          <IconArrowLeft className="size-4" />
-          {t("navigation.accounts")}
-        </Button>
-        <Button size="sm" onClick={() => void save()} disabled={saving}>
-          {saving ? (
-            <IconLoader2 className="size-4 animate-spin" />
-          ) : (
-            <IconRoute className="size-4" />
-          )}
-          {t("common.save")}
-        </Button>
-      </PageHeader>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 sm:px-6">
-        {loadError ? (
-          <div className="bg-destructive/10 mt-4 rounded-lg px-4 py-3 text-sm">
-            <p className="text-destructive">{loadError}</p>
-            <Button
-              className="mt-3"
-              size="sm"
-              variant="outline"
-              onClick={() => void loadData()}
-            >
-              {t("models.retry")}
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-5">
-            <div className="pt-2">
-              <Field
-                label={t("models.router.routerName")}
-                hint={t("models.router.nameHint")}
-                required
-              >
-                <Input
-                  value={modelName}
-                  onChange={(event) => setModelName(event.target.value)}
-                  placeholder="account-router-main"
-                  disabled={isEdit}
-                  aria-label={t("models.router.routerName")}
-                />
-              </Field>
-            </div>
-
-            <EditorModeTabs mode={editorMode} onChange={switchEditorMode} />
-
-            {editorMode === "visual" ? (
-              <div className="min-h-[620px]">
-                <section className="border-border/80 bg-background min-h-0 rounded-lg border">
-                  <div className="border-border/70 flex flex-wrap items-center justify-between gap-2 border-b p-3">
-                    <div className="min-w-0">
-                      <h3 className="text-sm font-semibold">
-                        {t("models.router.diagram")}
-                      </h3>
-                      <p className="text-muted-foreground text-xs">
-                        {t("models.router.diagramHint")}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => addBlock("account")}
-                      >
-                        <IconPlus className="size-4" />
-                        {t("models.router.addAccountBlock")}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => addBlock("load_balance")}
-                      >
-                        <IconPlus className="size-4" />
-                        {t("models.router.addLoadBalanceBlock")}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => addBlock("branch")}
-                      >
-                        <IconPlus className="size-4" />
-                        {t("models.router.addBranchBlock")}
-                      </Button>
-                    </div>
-                  </div>
-                  <RouterDiagram
-                    routerConfig={routerConfig}
-                    accountsByID={accountsByID}
-                    positions={blockPositions}
-                    selectedBlockID={selectedBlockID}
-                    onSelect={(blockID) => setSelectedBlockID(blockID)}
-                    onMoveBlock={handleMoveBlock}
-                    onAutoLayout={handleAutoLayout}
-                  />
-                </section>
-                <Dialog
-                  open={Boolean(selectedBlock)}
-                  onOpenChange={(open) => {
-                    if (!open) setSelectedBlockID("")
-                  }}
-                >
-                  <DialogContent
-                    className={cn(
-                      "flex max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-2rem)]",
-                      selectedBlock?.type === "account"
-                        ? "w-[min(42rem,calc(100vw-2rem))]"
-                        : "w-[min(72rem,calc(100vw-2rem))]",
-                    )}
-                  >
-                    <DialogHeader className="border-border/70 border-b px-5 py-4">
-                      <DialogTitle>{selectedBlock?.id}</DialogTitle>
-                      <DialogDescription>
-                        {selectedBlock
-                          ? blockTitle(selectedBlock)
-                          : t("models.router.noBlocksEmpty")}
-                      </DialogDescription>
-                    </DialogHeader>
-                    <BlockInspector
-                      block={selectedBlock}
-                      blocks={routerConfig.blocks ?? []}
-                      accounts={accounts}
-                      accountsByID={accountsByID}
-                      onSelect={setSelectedBlockID}
-                      onUpdateID={updateBlockID}
-                      onUpdate={(blockID, updater) =>
-                        updateBlock(blockID, updater)
-                      }
-                      onRemove={removeBlock}
-                      onToggleAccount={toggleLoadBalanceAccount}
-                      onClose={() => setSelectedBlockID("")}
-                    />
-                  </DialogContent>
-                </Dialog>
-              </div>
+    <CollectionDetailShell
+      title={
+        isEdit
+          ? t("models.router.editPageTitle", {
+              name: editingRouter?.name ?? modelName,
+            })
+          : t("models.router.title")
+      }
+      identity={
+        routerID ? (
+          <span className="font-mono text-xs">{routerID}</span>
+        ) : undefined
+      }
+      loading={loading}
+      error={loadError || undefined}
+      notFound={notFound}
+      onBack={onBack}
+      onRetry={() => void loadData()}
+      backLabel={t("models.router.sectionTitle")}
+      contentClassName="max-w-none"
+      actions={
+        !loading && !loadError && !notFound ? (
+          <Button size="sm" onClick={() => void save()} disabled={saving}>
+            {saving ? (
+              <IconLoader2 className="size-4 animate-spin" />
             ) : (
-              <RawRouterEditor
-                value={rawJson}
-                error={rawError}
-                onChange={(value) => {
-                  setRawJson(value)
-                  setRawError("")
-                  if (error) setError("")
-                }}
-              />
+              <IconRoute className="size-4" />
             )}
-
-            <ConnectedAccountsPreview
-              accounts={activeAccountNames}
-              accountMap={accountsByID}
-              missingLabel={t("models.router.accountMissing")}
-            />
-
-            {error && <p className="text-destructive text-sm">{error}</p>}
-            <ConfigChangeNotice
-              kind="save"
-              title={t("common.saveChangesTitle")}
-              description={t("models.unsavedPrompt")}
-            />
+            {t("common.save")}
+          </Button>
+        ) : undefined
+      }
+    >
+      {!loading && !loadError && !notFound && (
+        <div className="space-y-5 pb-2">
+          <div className="grid gap-5 pt-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <Field
+              label={t("models.router.routerName")}
+              hint={t("models.router.nameHint")}
+              required
+            >
+              <Input
+                value={modelName}
+                onChange={(event) => setModelName(event.target.value)}
+                placeholder="account-router-main"
+                disabled={isEdit}
+                aria-label={t("models.router.routerName")}
+              />
+            </Field>
+            <Field label="Enabled">
+              <div className="flex h-9 items-center gap-2">
+                <Switch
+                  checked={routerConfig.enabled !== false}
+                  onCheckedChange={(checked) =>
+                    updateRouter({ ...routerConfig, enabled: checked })
+                  }
+                  aria-label="Enabled"
+                />
+                <span className="text-muted-foreground text-sm">
+                  {routerConfig.enabled !== false ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+            </Field>
           </div>
-        )}
-      </div>
-    </div>
+
+          <EditorModeTabs mode={editorMode} onChange={switchEditorMode} />
+
+          {editorMode === "visual" ? (
+            <div className="min-h-[620px]">
+              <section className="border-border/80 bg-background min-h-0 rounded-lg border">
+                <div className="border-border/70 flex flex-wrap items-center justify-between gap-2 border-b p-3">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold">
+                      {t("models.router.diagram")}
+                    </h3>
+                    <p className="text-muted-foreground text-xs">
+                      {t("models.router.diagramHint")}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => addBlock("account")}
+                    >
+                      <IconPlus className="size-4" />
+                      {t("models.router.addAccountBlock")}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => addBlock("load_balance")}
+                    >
+                      <IconPlus className="size-4" />
+                      {t("models.router.addLoadBalanceBlock")}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => addBlock("branch")}
+                    >
+                      <IconPlus className="size-4" />
+                      {t("models.router.addBranchBlock")}
+                    </Button>
+                  </div>
+                </div>
+                <RouterDiagram
+                  routerConfig={routerConfig}
+                  accountsByID={accountsByID}
+                  positions={blockPositions}
+                  selectedBlockID={selectedBlockID}
+                  onSelect={(blockID) => setSelectedBlockID(blockID)}
+                  onMoveBlock={handleMoveBlock}
+                  onAutoLayout={handleAutoLayout}
+                />
+              </section>
+              <Dialog
+                open={Boolean(selectedBlock)}
+                onOpenChange={(open) => {
+                  if (!open) setSelectedBlockID("")
+                }}
+              >
+                <DialogContent
+                  className={cn(
+                    "flex max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-2rem)]",
+                    selectedBlock?.type === "account"
+                      ? "w-[min(42rem,calc(100vw-2rem))]"
+                      : "w-[min(72rem,calc(100vw-2rem))]",
+                  )}
+                >
+                  <DialogHeader className="border-border/70 border-b px-5 py-4">
+                    <DialogTitle>{selectedBlock?.id}</DialogTitle>
+                    <DialogDescription>
+                      {selectedBlock
+                        ? blockTitle(selectedBlock)
+                        : t("models.router.noBlocksEmpty")}
+                    </DialogDescription>
+                  </DialogHeader>
+                  <BlockInspector
+                    block={selectedBlock}
+                    blocks={routerConfig.blocks ?? []}
+                    accounts={accounts}
+                    accountsByID={accountsByID}
+                    onSelect={setSelectedBlockID}
+                    onUpdateID={updateBlockID}
+                    onUpdate={(blockID, updater) =>
+                      updateBlock(blockID, updater)
+                    }
+                    onRemove={removeBlock}
+                    onToggleAccount={toggleLoadBalanceAccount}
+                    onClose={() => setSelectedBlockID("")}
+                  />
+                </DialogContent>
+              </Dialog>
+            </div>
+          ) : (
+            <RawRouterEditor
+              value={rawJson}
+              error={rawError}
+              onChange={(value) => {
+                setRawJson(value)
+                setRawError("")
+                if (error) setError("")
+              }}
+            />
+          )}
+
+          <ConnectedAccountsPreview
+            accounts={activeAccountNames}
+            accountMap={accountsByID}
+            missingLabel={t("models.router.accountMissing")}
+          />
+
+          {error && <p className="text-destructive text-sm">{error}</p>}
+          <ConfigChangeNotice
+            kind="save"
+            title={t("common.saveChangesTitle")}
+            description={t("models.unsavedPrompt")}
+          />
+        </div>
+      )}
+    </CollectionDetailShell>
   )
 }
 

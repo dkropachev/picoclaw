@@ -11,6 +11,7 @@ import {
   logoutOAuth,
   pollOAuthFlow,
 } from "@/api/oauth"
+import { safeOAuthFlowMessage } from "@/lib/safe-oauth-flow-message"
 
 type FlowWatchMode = "" | "status" | "poll"
 
@@ -23,6 +24,11 @@ interface FlowWatchTarget {
 
 interface StartDeviceCodeOptions {
   openImmediately?: boolean
+}
+
+export interface UseCredentialsPageOptions {
+  oauthCallbackFlowID?: string | null
+  onOAuthCallbackConsumed?: () => void
 }
 
 function getProviderLabel(provider: OAuthProvider | ""): string {
@@ -38,7 +44,10 @@ function credentialPayload(value: string): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
-export function useCredentialsPage() {
+export function useCredentialsPage({
+  oauthCallbackFlowID,
+  onOAuthCallbackConsumed,
+}: UseCredentialsPageOptions = {}) {
   const { t } = useTranslation()
   const [providers, setProviders] = useState<OAuthProviderStatus[]>([])
   const [loading, setLoading] = useState(true)
@@ -169,6 +178,14 @@ export function useCredentialsPage() {
         }
         if (flow.status === "success") {
           setCredentialsRevision((revision) => revision + 1)
+        } else if (flow.status === "error") {
+          setError(
+            safeOAuthFlowMessage(flow.error, t("credentials.flow.error")),
+          )
+        } else if (flow.status === "expired") {
+          setError(
+            safeOAuthFlowMessage(flow.error, t("credentials.flow.expired")),
+          )
         }
       } catch (err) {
         if (!isExpectedFlow()) {
@@ -202,7 +219,10 @@ export function useCredentialsPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    const flowID = params.get("oauth_flow_id")
+    const flowID =
+      oauthCallbackFlowID === undefined
+        ? params.get("oauth_flow_id")
+        : oauthCallbackFlowID
     if (!flowID) {
       return
     }
@@ -215,8 +235,24 @@ export function useCredentialsPage() {
       actionGeneration,
     })
 
-    window.history.replaceState({}, "", window.location.pathname)
-  }, [bumpActionToken, watchExpectedFlow])
+    if (oauthCallbackFlowID !== undefined) {
+      onOAuthCallbackConsumed?.()
+      return
+    }
+
+    params.delete("oauth_flow_id")
+    const search = params.toString()
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${search ? `?${search}` : ""}`,
+    )
+  }, [
+    bumpActionToken,
+    oauthCallbackFlowID,
+    onOAuthCallbackConsumed,
+    watchExpectedFlow,
+  ])
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {

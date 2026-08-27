@@ -5,6 +5,34 @@ export type CollectionVisualState = "ready" | "empty" | "error" | "loading"
 const fixedNow = "2026-08-25T14:30:00Z"
 
 const querySchemas = {
+  accounts: schema([
+    field("id", "string"),
+    field("provider", "string"),
+    field("account", "string"),
+    field("status", "enum", [
+      "connected",
+      "expired",
+      "needs_refresh",
+      "not_logged_in",
+    ]),
+    field("auth_method", "string"),
+    field("expires_at", "string"),
+  ]),
+  accountRouters: schema([
+    field("name", "string"),
+    field("enabled", "boolean", ["true", "false"]),
+    field("is_default", "boolean", ["true", "false"]),
+    field("status", "enum", [
+      "available",
+      "disabled",
+      "invalid",
+      "unconfigured",
+      "unreachable",
+    ]),
+    field("entry", "string"),
+    field("accounts", "number"),
+    field("blocks", "number"),
+  ]),
   aliases: schema([
     field("name", "string"),
     field("model", "string"),
@@ -80,6 +108,154 @@ const querySchemas = {
     field("updated", "timestamp"),
   ]),
 }
+
+export const accountVisualIDs = {
+  primary: "YWNjb3VudABvcGVuYWk6cHJpbWFyeQ",
+  review: "YWNjb3VudABhbnRocm9waWM6cmV2aWV3",
+  copilot: "YWNjb3VudABnaXRodWItY29waWxvdDp3b3Jr",
+  router: "balanced-router",
+} as const
+
+const accounts = [
+  {
+    id: accountVisualIDs.review,
+    provider: "anthropic",
+    account: "anthropic:review",
+    status: "needs_refresh",
+    auth_method: "token",
+    expires_at: "",
+  },
+  {
+    id: accountVisualIDs.copilot,
+    provider: "github-copilot",
+    account: "github-copilot:work",
+    status: "connected",
+    auth_method: "token",
+    expires_at: "2026-09-02T12:00:00Z",
+  },
+  {
+    id: accountVisualIDs.primary,
+    provider: "openai",
+    account: "openai:primary",
+    status: "connected",
+    auth_method: "oauth",
+    expires_at: "2026-09-01T16:00:00Z",
+  },
+] as const
+
+const accountRouters = [
+  {
+    id: accountVisualIDs.router,
+    name: "balanced-router",
+    enabled: true,
+    is_default: true,
+    status: "available",
+    entry: "pool",
+    accounts: ["credential:openai:primary", "credential:anthropic:review"],
+    refresh_interval_seconds: 60,
+    blocks: [
+      {
+        id: "pool",
+        type: "load_balance",
+        accounts: ["credential:openai:primary", "credential:anthropic:review"],
+        strategy: "closest_limit",
+        fallback: "review",
+      },
+      {
+        id: "review",
+        type: "account",
+        account: "credential:anthropic:review",
+      },
+    ],
+  },
+  {
+    id: "batch-router",
+    name: "batch-router",
+    enabled: true,
+    is_default: false,
+    status: "unconfigured",
+    entry: "batch",
+    accounts: ["credential:github-copilot:work"],
+    refresh_interval_seconds: 120,
+    blocks: [
+      {
+        id: "batch",
+        type: "account",
+        account: "credential:github-copilot:work",
+      },
+    ],
+  },
+  {
+    id: "offline-router",
+    name: "offline-router",
+    enabled: false,
+    is_default: false,
+    status: "disabled",
+    entry: "offline",
+    accounts: ["credential:openai:primary"],
+    refresh_interval_seconds: 60,
+    blocks: [
+      {
+        id: "offline",
+        type: "account",
+        account: "credential:openai:primary",
+      },
+    ],
+  },
+] as const
+
+const accountRouterSummaries = accountRouters.map((router) => ({
+  id: router.id,
+  name: router.name,
+  enabled: router.enabled,
+  is_default: router.is_default,
+  status: router.status,
+  entry: router.entry,
+  accounts: router.accounts.length,
+  blocks: router.blocks.length,
+}))
+
+const oauthProviders = [
+  {
+    provider: "openai",
+    credential_id: "openai",
+    display_name: "OpenAI",
+    methods: ["browser", "device_code", "token"],
+    logged_in: true,
+    status: "connected",
+    credentials: [
+      {
+        provider: "openai",
+        credential_id: "openai:primary",
+        display_name: "OpenAI",
+        methods: ["browser", "device_code", "token"],
+        logged_in: true,
+        status: "connected",
+        auth_method: "oauth",
+        account_id: "acct-primary",
+      },
+    ],
+  },
+  {
+    provider: "anthropic",
+    credential_id: "anthropic",
+    display_name: "Anthropic",
+    methods: ["token"],
+    logged_in: true,
+    status: "needs_refresh",
+    credentials: [
+      {
+        provider: "anthropic",
+        credential_id: "anthropic:review",
+        display_name: "Anthropic",
+        methods: ["token"],
+        logged_in: true,
+        status: "needs_refresh",
+        auth_method: "token",
+      },
+    ],
+  },
+] as const
 
 const aliases = [
   {
@@ -664,6 +840,48 @@ export async function installCollectionVisualMocks(
           return json(route, { channels: [] })
         case "/api/config":
           return json(route, { channels: {}, channel_list: {} })
+        case "/api/accounts":
+          return json(route, {
+            accounts: state === "empty" ? [] : accounts,
+            total: state === "empty" ? 0 : accounts.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY provider ASC, id ASC",
+            query_schema: querySchemas.accounts,
+          })
+        case "/api/account-routers":
+          return json(route, {
+            account_routers: state === "empty" ? [] : accountRouterSummaries,
+            total: state === "empty" ? 0 : accountRouterSummaries.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: querySchemas.accountRouters,
+            config_revision: "cfg-visual-1",
+          })
+        case "/api/oauth/providers":
+          return json(route, { providers: oauthProviders })
+        case "/api/oauth/codex-account-limits":
+          return json(route, {
+            accounts: [
+              {
+                id: "openai:primary",
+                provider: "openai",
+                default: true,
+                plan: "pro",
+                limits_status: "available",
+                entries: [
+                  {
+                    name: "codex",
+                    status: "available",
+                    window: "weekly",
+                    used_percent: 36,
+                    refreshes_at: "2026-09-01T16:00:00Z",
+                  },
+                ],
+              },
+            ],
+          })
         case "/api/model-aliases":
           return json(route, {
             model_aliases: state === "empty" ? [] : aliases,
@@ -847,6 +1065,36 @@ export async function installCollectionVisualMocks(
           ? json(route, { model_alias: alias, config_revision: "cfg-visual-1" })
           : json(route, { code: "not_found", message: "Alias not found" }, 404)
       }
+      const accountID = decodedTail(path, "/api/accounts/")
+      if (accountID && accountID !== "models") {
+        const account = accounts.find((item) => item.id === accountID)
+        return account
+          ? json(route, { account })
+          : json(
+              route,
+              { code: "account_not_found", message: "Account not found" },
+              404,
+            )
+      }
+      const accountRouterID = decodedTail(path, "/api/account-routers/")
+      if (accountRouterID && !accountRouterID.includes("/")) {
+        const accountRouter = accountRouters.find(
+          (item) => item.id === accountRouterID,
+        )
+        return accountRouter
+          ? json(route, {
+              account_router: accountRouter,
+              config_revision: "cfg-visual-1",
+            })
+          : json(
+              route,
+              {
+                code: "account_router_not_found",
+                message: "Account router not found",
+              },
+              404,
+            )
+      }
       const routerName = decodedTail(path, "/api/model-routers/")
       if (routerName) {
         const router = routers.find((item) => item.name === routerName)
@@ -999,6 +1247,8 @@ function modelOptions() {
 function isCollectionList(path: string) {
   return [
     "/api/model-aliases",
+    "/api/accounts",
+    "/api/account-routers",
     "/api/model-routers",
     "/api/mcp/servers",
     "/api/agents",
