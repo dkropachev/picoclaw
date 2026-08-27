@@ -165,13 +165,34 @@ func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 		h.requireCollectionMutationOrigin(h.handleRunWorkflow),
 	)
 	mux.HandleFunc("GET /api/workflows/development", h.handleGetWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/start", h.requireCollectionMutationOrigin(h.handleStartWorkflowDevelopment))
-	mux.HandleFunc("POST /api/workflows/development/revise", h.requireCollectionMutationOrigin(h.handleReviseWorkflowDevelopment))
-	mux.HandleFunc("POST /api/workflows/development/ai-revise", h.requireCollectionMutationOrigin(h.handleAIReviseWorkflowDevelopment))
-	mux.HandleFunc("POST /api/workflows/development/validate", h.requireCollectionMutationOrigin(h.handleValidateWorkflowDevelopment))
-	mux.HandleFunc("POST /api/workflows/development/test", h.requireCollectionMutationOrigin(h.handleTestWorkflowDevelopment))
-	mux.HandleFunc("POST /api/workflows/development/publish", h.requireCollectionMutationOrigin(h.handlePublishWorkflowDevelopment))
-	mux.HandleFunc("POST /api/workflows/development/discard", h.requireCollectionMutationOrigin(h.handleDiscardWorkflowDevelopment))
+	mux.HandleFunc(
+		"POST /api/workflows/development/start",
+		h.requireCollectionMutationOrigin(h.handleStartWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/revise",
+		h.requireCollectionMutationOrigin(h.handleReviseWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/ai-revise",
+		h.requireCollectionMutationOrigin(h.handleAIReviseWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/validate",
+		h.requireCollectionMutationOrigin(h.handleValidateWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/test",
+		h.requireCollectionMutationOrigin(h.handleTestWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/publish",
+		h.requireCollectionMutationOrigin(h.handlePublishWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/discard",
+		h.requireCollectionMutationOrigin(h.handleDiscardWorkflowDevelopment),
+	)
 	mux.HandleFunc("GET /api/workflows/runs", h.handleListWorkflowRuns)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}", h.handleGetWorkflowRun)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/tasks", h.handleListWorkflowHumanTasks)
@@ -186,8 +207,14 @@ func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/events", h.handleGetWorkflowRunEvents)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/events/stream", h.handleStreamWorkflowRunEvents)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/graph", h.handleGetWorkflowRunGraph)
-	mux.HandleFunc("POST /api/workflows/runs/{run_id}/cancel", h.requireCollectionMutationOrigin(h.handleCancelWorkflowRun))
-	mux.HandleFunc("POST /api/workflows/runs/{run_id}/retry", h.requireCollectionMutationOrigin(h.handleRetryWorkflowRun))
+	mux.HandleFunc(
+		"POST /api/workflows/runs/{run_id}/cancel",
+		h.requireCollectionMutationOrigin(h.handleCancelWorkflowRun),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/runs/{run_id}/retry",
+		h.requireCollectionMutationOrigin(h.handleRetryWorkflowRun),
+	)
 }
 
 func (h *Handler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {

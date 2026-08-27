@@ -537,14 +537,53 @@ func TestWorkflowCollectionHelperAndProjectionBoundaries(t *testing.T) {
 	}{
 		{nil, "none"},
 		{&workflows.Workflow{}, "none"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{Manual: map[string]any{}}}, "manual"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{Schedule: []workflows.ScheduleTrigger{{Cron: "* * * * *"}}}}, "schedule"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{ChannelMessage: &workflows.ChannelMessageTrigger{}}}, "channel_message"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{Command: &workflows.CommandTrigger{}}}, "command"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{RuntimeEvent: &workflows.RuntimeEventTrigger{}}}, "runtime_event"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{Event: &workflows.EventTrigger{}}}, "event"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{WorkflowCall: &workflows.WorkflowCall{}}}, "workflow_call"},
-		{&workflows.Workflow{On: workflows.WorkflowTriggers{Manual: map[string]any{}, WorkflowCall: &workflows.WorkflowCall{}}}, "multiple"},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{Manual: map[string]any{}}},
+			"manual",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				Schedule: []workflows.ScheduleTrigger{{Cron: "* * * * *"}},
+			}},
+			"schedule",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				ChannelMessage: &workflows.ChannelMessageTrigger{},
+			}},
+			"channel_message",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				Command: &workflows.CommandTrigger{},
+			}},
+			"command",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				RuntimeEvent: &workflows.RuntimeEventTrigger{},
+			}},
+			"runtime_event",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				Event: &workflows.EventTrigger{},
+			}},
+			"event",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				WorkflowCall: &workflows.WorkflowCall{},
+			}},
+			"workflow_call",
+		},
+		{
+			&workflows.Workflow{On: workflows.WorkflowTriggers{
+				Manual:       map[string]any{},
+				WorkflowCall: &workflows.WorkflowCall{},
+			}},
+			"multiple",
+		},
 	}
 	for _, test := range triggerCases {
 		if got := workflowDefinitionTriggerLabel(test.workflow); got != test.want {

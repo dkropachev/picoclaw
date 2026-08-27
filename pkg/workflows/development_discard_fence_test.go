@@ -31,7 +31,8 @@ func TestDiscardWorkflowDevelopmentFencedRequiresExactActiveRevision(t *testing.
 		{SessionID: "dev_other", ExpectedSessionRevision: session.SessionRevision},
 		{SessionID: session.ID, ExpectedSessionRevision: "sha256:stale"},
 	} {
-		if _, discardErr := DiscardWorkflowDevelopmentFenced(workspace, request); !errors.Is(discardErr, ErrWorkflowSessionRevisionMismatch) {
+		_, discardErr := DiscardWorkflowDevelopmentFenced(workspace, request)
+		if !errors.Is(discardErr, ErrWorkflowSessionRevisionMismatch) {
 			t.Fatalf("stale discard error = %v", discardErr)
 		}
 		active, getErr := GetWorkflowDevelopmentSession(workspace)
@@ -58,7 +59,8 @@ func TestDiscardWorkflowDevelopmentFencedRequiresExactActiveRevision(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, discardErr := DiscardWorkflowDevelopmentFenced(workspace, valid); !errors.Is(discardErr, ErrWorkflowSessionRevisionMismatch) {
+	_, discardErr := DiscardWorkflowDevelopmentFenced(workspace, valid)
+	if !errors.Is(discardErr, ErrWorkflowSessionRevisionMismatch) {
 		t.Fatalf("replaced-session discard error = %v", discardErr)
 	}
 	if active, getErr := GetWorkflowDevelopmentSession(workspace); getErr != nil ||
