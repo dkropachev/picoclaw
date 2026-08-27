@@ -174,6 +174,7 @@ V1 不需要把所有 runtime event kind 都变成可拦截点。
 - `agent.turn.end`
 - `agent.llm.request`
 - `agent.llm.response`
+- `agent.tool.policy_decision`
 - `agent.tool.exec_start`
 - `agent.tool.exec_end`
 - `agent.tool.exec_skipped`

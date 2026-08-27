@@ -881,7 +881,7 @@ func TestAgentLoop_Hooks_ToolApproverCanDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAgentLoop failed: %v", err)
 	}
-	expected := "Tool execution denied by approval hook: blocked"
+	expected := toolApprovalDeniedMessage
 	if resp != expected {
 		t.Fatalf("expected %q, got %q", expected, resp)
 	}
@@ -1136,6 +1136,7 @@ func TestAgentLoop_HookRespond_MediaError(t *testing.T) {
 	}
 	al, agent, cleanup := newHookTestLoop(t, provider)
 	defer cleanup()
+	al.RegisterTool(&slowTool{name: "media_tool"})
 
 	hook := &respondWithMediaHook{
 		respondTools:    map[string]bool{"media_tool": true},
@@ -1201,6 +1202,7 @@ func TestAgentLoop_HookRespond_BusFallback(t *testing.T) {
 	}
 	al, agent, cleanup := newHookTestLoop(t, provider)
 	defer cleanup()
+	al.RegisterTool(&slowTool{name: "media_tool"})
 
 	hook := &respondWithMediaHook{
 		respondTools:    map[string]bool{"media_tool": true},
@@ -1261,6 +1263,7 @@ func TestAgentLoop_HookRespond_ResponseHandledMediaPreservesOutboundContext(t *t
 	}
 	al, agent, cleanup := newHookTestLoop(t, provider)
 	defer cleanup()
+	al.RegisterTool(&slowTool{name: "media_tool"})
 
 	hook := &respondWithMediaHook{
 		respondTools:    map[string]bool{"media_tool": true},
@@ -1364,6 +1367,7 @@ func TestAgentLoop_HookRespond_InterruptSkipsRemaining(t *testing.T) {
 	al, _, cleanup := newHookTestLoop(t, provider)
 	defer cleanup()
 
+	al.RegisterTool(&slowTool{name: "tool_one"})
 	tool1ExecCh := make(chan struct{}, 1)
 	al.RegisterTool(&slowTool{name: "tool_two", duration: 100 * time.Millisecond, execCh: tool1ExecCh})
 	al.RegisterTool(&slowTool{name: "tool_three", duration: 100 * time.Millisecond})
@@ -1450,6 +1454,7 @@ func TestAgentLoop_HookRespond_SteeringSkipsRemaining(t *testing.T) {
 	al, _, cleanup := newHookTestLoop(t, provider)
 	defer cleanup()
 
+	al.RegisterTool(&slowTool{name: "tool_one"})
 	al.RegisterTool(&slowTool{name: "tool_two", duration: 100 * time.Millisecond})
 	al.RegisterTool(&slowTool{name: "tool_three", duration: 100 * time.Millisecond})
 
@@ -1560,4 +1565,262 @@ func TestCloneStringAnyMap_EmptyMapReturnsNonNil(t *testing.T) {
 			t.Fatal("modifying clone should not affect source")
 		}
 	})
+
+	t.Run("clone deeply detaches nested maps and slices", func(t *testing.T) {
+		src := map[string]any{
+			"nested": map[string]any{
+				"items": []any{map[string]any{"value": "original"}},
+			},
+		}
+		cloned := cloneStringAnyMap(src)
+		clonedNested := cloned["nested"].(map[string]any)
+		clonedItems := clonedNested["items"].([]any)
+		clonedItems[0].(map[string]any)["value"] = "changed"
+
+		originalNested := src["nested"].(map[string]any)
+		originalItems := originalNested["items"].([]any)
+		if got := originalItems[0].(map[string]any)["value"]; got != "original" {
+			t.Fatalf("nested source value = %v, want original", got)
+		}
+	})
+}
+
+type untrustedMutationHook struct{}
+
+func (untrustedMutationHook) BeforeLLM(
+	_ context.Context,
+	req *LLMHookRequest,
+) (*LLMHookRequest, HookDecision, error) {
+	req.Model = "untrusted-model"
+	req.Options["nested"].(map[string]any)["value"] = "untrusted"
+	return req, HookDecision{Action: HookActionModify}, nil
+}
+
+func (untrustedMutationHook) AfterLLM(
+	_ context.Context,
+	resp *LLMHookResponse,
+) (*LLMHookResponse, HookDecision, error) {
+	resp.Response.Content = "untrusted-content"
+	resp.Response.ToolCalls[0].Arguments["nested"].(map[string]any)["value"] = "untrusted"
+	return resp, HookDecision{Action: HookActionModify}, nil
+}
+
+func (untrustedMutationHook) BeforeTool(
+	_ context.Context,
+	call *ToolCallHookRequest,
+) (*ToolCallHookRequest, HookDecision, error) {
+	call.Tool = "untrusted_tool"
+	call.Arguments["nested"].(map[string]any)["value"] = "untrusted"
+	call.HookResult = tools.SilentResult("untrusted response")
+	return call, HookDecision{Action: HookActionRespond}, nil
+}
+
+func (untrustedMutationHook) AfterTool(
+	_ context.Context,
+	result *ToolResultHookResponse,
+) (*ToolResultHookResponse, HookDecision, error) {
+	result.Tool = "untrusted_tool"
+	result.Arguments["nested"].(map[string]any)["value"] = "untrusted"
+	result.Result.ForLLM = "untrusted result"
+	return result, HookDecision{Action: HookActionModify}, nil
+}
+
+func TestHookManager_UntrustedMutationsAndRespondAreDiscarded(t *testing.T) {
+	hm := NewHookManager(nil)
+	defer hm.Close()
+	if err := hm.Mount(UntrustedNamedHook("untrusted", untrustedMutationHook{})); err != nil {
+		t.Fatalf("Mount() error = %v", err)
+	}
+
+	llmRequest := &LLMHookRequest{
+		Model:   "original-model",
+		Options: map[string]any{"nested": map[string]any{"value": "original"}},
+	}
+	gotRequest, requestDecision := hm.BeforeLLM(context.Background(), llmRequest)
+	if requestDecision.normalizedAction() != HookActionContinue || gotRequest.Model != "original-model" {
+		t.Fatalf("BeforeLLM = %#v / %#v, want unchanged continue", gotRequest, requestDecision)
+	}
+	if got := gotRequest.Options["nested"].(map[string]any)["value"]; got != "original" {
+		t.Fatalf("BeforeLLM nested value = %v, want original", got)
+	}
+
+	llmResponse := &LLMHookResponse{Response: &providers.LLMResponse{
+		Content: "original-content",
+		ToolCalls: []providers.ToolCall{{
+			ID:        "call-1",
+			Name:      "original_tool",
+			Arguments: map[string]any{"nested": map[string]any{"value": "original"}},
+		}},
+	}}
+	gotResponse, responseDecision := hm.AfterLLM(context.Background(), llmResponse)
+	if responseDecision.normalizedAction() != HookActionContinue || gotResponse.Response.Content != "original-content" {
+		t.Fatalf("AfterLLM = %#v / %#v, want unchanged continue", gotResponse, responseDecision)
+	}
+	if got := gotResponse.Response.ToolCalls[0].Arguments["nested"].(map[string]any)["value"]; got != "original" {
+		t.Fatalf("AfterLLM nested value = %v, want original", got)
+	}
+
+	toolRequest := &ToolCallHookRequest{
+		Tool:      "original_tool",
+		Arguments: map[string]any{"nested": map[string]any{"value": "original"}},
+	}
+	gotTool, toolDecision := hm.BeforeTool(context.Background(), toolRequest)
+	if toolDecision.normalizedAction() != HookActionContinue || gotTool.Tool != "original_tool" ||
+		gotTool.HookResult != nil {
+		t.Fatalf("BeforeTool = %#v / %#v, want unchanged continue", gotTool, toolDecision)
+	}
+	if got := gotTool.Arguments["nested"].(map[string]any)["value"]; got != "original" {
+		t.Fatalf("BeforeTool nested value = %v, want original", got)
+	}
+
+	afterInput := &ToolResultHookResponse{
+		Tool:      "original_tool",
+		Arguments: map[string]any{"nested": map[string]any{"value": "original"}},
+		Result:    tools.SilentResult("original result"),
+	}
+	gotAfter, afterDecision := hm.AfterTool(context.Background(), afterInput)
+	if afterDecision.normalizedAction() != HookActionContinue || gotAfter.Tool != "original_tool" ||
+		gotAfter.Result.ForLLM != "original result" {
+		t.Fatalf("AfterTool = %#v / %#v, want unchanged continue", gotAfter, afterDecision)
+	}
+	if got := gotAfter.Arguments["nested"].(map[string]any)["value"]; got != "original" {
+		t.Fatalf("AfterTool nested value = %v, want original", got)
+	}
+
+	// The hook inputs were detached from both the caller and manager state.
+	if got := toolRequest.Arguments["nested"].(map[string]any)["value"]; got != "original" {
+		t.Fatalf("caller nested value = %v, want original", got)
+	}
+}
+
+type trustedProvenanceHook struct {
+	retained *ToolCallHookRequest
+}
+
+func (hook *trustedProvenanceHook) BeforeTool(
+	_ context.Context,
+	call *ToolCallHookRequest,
+) (*ToolCallHookRequest, HookDecision, error) {
+	call.Tool = "rewritten_tool"
+	call.Arguments["nested"].(map[string]any)["value"] = "rewritten"
+	hook.retained = call
+	return call, HookDecision{Action: HookActionModify}, nil
+}
+
+func (*trustedProvenanceHook) AfterTool(
+	_ context.Context,
+	result *ToolResultHookResponse,
+) (*ToolResultHookResponse, HookDecision, error) {
+	result.Tool = "forged_audit_name"
+	result.Arguments["nested"].(map[string]any)["value"] = "forged"
+	result.Result.ForLLM = "rewritten result"
+	return result, HookDecision{Action: HookActionModify}, nil
+}
+
+func TestHookManager_TrustedRewriteProvenanceAndAfterToolIdentity(t *testing.T) {
+	hm := NewHookManager(nil)
+	defer hm.Close()
+	hook := &trustedProvenanceHook{}
+	if err := hm.Mount(NamedHook("trusted-rewrite", hook)); err != nil {
+		t.Fatalf("Mount() error = %v", err)
+	}
+
+	before, decision := hm.BeforeTool(context.Background(), &ToolCallHookRequest{
+		Tool:      "original_tool",
+		Arguments: map[string]any{"nested": map[string]any{"value": "original"}},
+	})
+	if decision.normalizedAction() != HookActionContinue || before.Tool != "rewritten_tool" {
+		t.Fatalf("BeforeTool = %#v / %#v, want trusted rewrite", before, decision)
+	}
+	provenance := before.policyHookProvenance()
+	if provenance.Name != "trusted-rewrite" || provenance.Source != "in_process" || !provenance.Trusted {
+		t.Fatalf("provenance = %#v, want trusted in-process hook", provenance)
+	}
+
+	// A hook retaining and mutating its returned graph cannot change the
+	// manager-owned accepted request.
+	hook.retained.Arguments["nested"].(map[string]any)["value"] = "late mutation"
+	if got := before.Arguments["nested"].(map[string]any)["value"]; got != "rewritten" {
+		t.Fatalf("accepted nested value = %v, want rewritten", got)
+	}
+
+	after, afterDecision := hm.AfterTool(context.Background(), &ToolResultHookResponse{
+		Tool:      before.Tool,
+		Arguments: before.Arguments,
+		Result:    tools.SilentResult("original result"),
+	})
+	if afterDecision.normalizedAction() != HookActionContinue {
+		t.Fatalf("AfterTool decision = %#v, want continue", afterDecision)
+	}
+	if after.Tool != "rewritten_tool" {
+		t.Fatalf("AfterTool tool = %q, want authorized identity", after.Tool)
+	}
+	if got := after.Arguments["nested"].(map[string]any)["value"]; got != "rewritten" {
+		t.Fatalf("AfterTool arguments = %v, want authorized identity", got)
+	}
+	if after.Result.ForLLM != "rewritten result" {
+		t.Fatalf("AfterTool result = %q, want trusted result rewrite", after.Result.ForLLM)
+	}
+}
+
+type untrustedDenyAbortHook struct{}
+
+func (untrustedDenyAbortHook) BeforeTool(
+	_ context.Context,
+	call *ToolCallHookRequest,
+) (*ToolCallHookRequest, HookDecision, error) {
+	return call, HookDecision{Action: HookActionDenyTool, Reason: "narrowed"}, nil
+}
+
+func (untrustedDenyAbortHook) AfterTool(
+	_ context.Context,
+	result *ToolResultHookResponse,
+) (*ToolResultHookResponse, HookDecision, error) {
+	return result, HookDecision{Action: HookActionContinue}, nil
+}
+
+func (untrustedDenyAbortHook) BeforeLLM(
+	_ context.Context,
+	req *LLMHookRequest,
+) (*LLMHookRequest, HookDecision, error) {
+	return req, HookDecision{Action: HookActionAbortTurn}, nil
+}
+
+func (untrustedDenyAbortHook) AfterLLM(
+	_ context.Context,
+	resp *LLMHookResponse,
+) (*LLMHookResponse, HookDecision, error) {
+	return resp, HookDecision{Action: HookActionContinue}, nil
+}
+
+func TestHookManager_UntrustedDenyAndAbortRemainEffective(t *testing.T) {
+	hm := NewHookManager(nil)
+	defer hm.Close()
+	if err := hm.Mount(UntrustedNamedHook("narrowing", untrustedDenyAbortHook{})); err != nil {
+		t.Fatalf("Mount() error = %v", err)
+	}
+
+	_, llmDecision := hm.BeforeLLM(context.Background(), &LLMHookRequest{})
+	if llmDecision.normalizedAction() != HookActionAbortTurn {
+		t.Fatalf("BeforeLLM decision = %#v, want abort", llmDecision)
+	}
+	_, toolDecision := hm.BeforeTool(context.Background(), &ToolCallHookRequest{
+		Tool:      "tool",
+		Arguments: map[string]any{},
+	})
+	if toolDecision.normalizedAction() != HookActionDenyTool || toolDecision.Reason != "narrowed" {
+		t.Fatalf("BeforeTool decision = %#v, want deny", toolDecision)
+	}
+}
+
+func TestHookRegistration_TrustDefaultsAndHelpers(t *testing.T) {
+	if got := (HookRegistration{}).Trust; got != HookTrustUntrusted {
+		t.Fatalf("raw trust = %v, want untrusted", got)
+	}
+	if got := NamedHook("trusted", struct{}{}).Trust; got != HookTrustTrusted {
+		t.Fatalf("NamedHook trust = %v, want trusted", got)
+	}
+	if got := UntrustedNamedHook("untrusted", struct{}{}).Trust; got != HookTrustUntrusted {
+		t.Fatalf("UntrustedNamedHook trust = %v, want untrusted", got)
+	}
 }

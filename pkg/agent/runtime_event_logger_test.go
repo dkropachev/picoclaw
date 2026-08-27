@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 func TestRuntimeEventLoggerFiltering(t *testing.T) {
@@ -102,6 +103,66 @@ func TestRuntimeEventLogFieldsSummarizeAgentPayload(t *testing.T) {
 	}
 	if _, ok := fields["payload"]; ok {
 		t.Fatalf("raw payload should not be included by runtimeEventLogFields: %#v", fields)
+	}
+}
+
+func TestRuntimeEventLogFieldsSummarizeToolPolicyDecisionSafely(t *testing.T) {
+	payload := ToolPolicyDecisionPayload{
+		Tool:        "apply_patch",
+		Risk:        tools.ToolRiskDestructive,
+		Fulfillment: tools.ToolFulfillmentHookRespond,
+		Outcome:     ToolPolicyOutcomeDeny,
+		ReasonCode:  "approval_denied",
+	}
+	fields := runtimeEventLogFields(runtimeevents.Event{
+		ID:       "evt-policy",
+		Kind:     runtimeevents.KindAgentToolPolicyDecision,
+		Severity: runtimeSeverityForAgentEvent(runtimeevents.KindAgentToolPolicyDecision, payload),
+		Source: runtimeevents.Source{
+			Component: "agent",
+			Name:      "main",
+		},
+		Payload: payload,
+	})
+
+	if fields["tool"] != "apply_patch" || fields["risk"] != tools.ToolRiskDestructive ||
+		fields["fulfillment"] != tools.ToolFulfillmentHookRespond ||
+		fields["outcome"] != ToolPolicyOutcomeDeny ||
+		fields["reason_code"] != "approval_denied" {
+		t.Fatalf("policy decision summary fields = %#v", fields)
+	}
+	for _, forbidden := range []string{
+		"args", "args_count", "arguments", "approval", "hook_result", "raw_error", "payload",
+	} {
+		if _, ok := fields[forbidden]; ok {
+			t.Fatalf("policy decision summary exposed %q: %#v", forbidden, fields)
+		}
+	}
+	if fields["severity"] != string(runtimeevents.SeverityWarn) {
+		t.Fatalf("deny severity = %v, want warn", fields["severity"])
+	}
+
+	allow := payload
+	allow.Outcome = ToolPolicyOutcomeAllow
+	if got := runtimeSeverityForAgentEvent(
+		runtimeevents.KindAgentToolPolicyDecision,
+		allow,
+	); got != runtimeevents.SeverityInfo {
+		t.Fatalf("allow severity = %q, want %q", got, runtimeevents.SeverityInfo)
+	}
+	for _, outcome := range []ToolPolicyOutcome{
+		ToolPolicyOutcomeDeny,
+		ToolPolicyOutcomeError,
+		ToolPolicyOutcomeCanceled,
+	} {
+		failed := payload
+		failed.Outcome = outcome
+		if got := runtimeSeverityForAgentEvent(
+			runtimeevents.KindAgentToolPolicyDecision,
+			failed,
+		); got != runtimeevents.SeverityWarn {
+			t.Errorf("%s severity = %q, want %q", outcome, got, runtimeevents.SeverityWarn)
+		}
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
+	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -50,6 +51,7 @@ type AgentLoop struct {
 	agentActivity      *agentActivityRecorder
 	agentActivitySub   runtimeevents.Subscription
 	hooks              *HookManager
+	toolPolicy         tools.ToolPolicy
 
 	// Runtime state
 	running         atomic.Bool

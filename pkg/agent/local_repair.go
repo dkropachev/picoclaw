@@ -282,6 +282,8 @@ func (runner *LocalRepairRunner) runPinned(
 			Provider:      provider,
 			Model:         runner.model,
 			Tools:         registry,
+			Policy:        tools.CompatibilityAllowToolPolicy{},
+			PolicySubject: tools.ToolPolicySubject{Source: tools.ToolPolicySourceLocalRepair},
 			MaxIterations: runner.maxIterations,
 			LLMOptions: map[string]any{
 				"max_tokens":  runner.maxTokens,

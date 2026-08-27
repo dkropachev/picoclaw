@@ -198,6 +198,14 @@ edit-tool isolation. Launcher Management owns browser authentication and local
 proxy composition. Security defines the boundaries all of them must preserve;
 it does not advance lifecycle state.
 
+Hooks and Tool Execution own the model-action policy seam. Shared security
+configuration exposes process-hook transform/respond authority only through the
+explicit `hooks.processes.*.trusted` boolean: omission/false remains untrusted,
+transport/source never implies trust, and the hook runtime still applies exact
+offered/profile/policy/approval checks before a synthetic result or registry
+effect. This is an administrative capability declaration, not an OS sandbox or
+a substitute for later network/process isolation.
+
 Signed webhooks authenticate bytes, not author intent. A confirmed charter
 authorizes a product scope, not arbitrary model tools. A Gate field value can
 trigger only the application branch that explicitly handles it. A successful

@@ -366,6 +366,7 @@ type BuiltinHookConfig struct {
 type ProcessHookConfig struct {
 	Enabled   bool              `json:"enabled"`
 	Priority  int               `json:"priority,omitempty"`
+	Trusted   bool              `json:"trusted,omitempty"`
 	Transport string            `json:"transport,omitempty"`
 	Command   []string          `json:"command,omitempty"`
 	Dir       string            `json:"dir,omitempty"`

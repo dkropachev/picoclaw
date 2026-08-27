@@ -73,4 +73,22 @@ func TestSubscribeEventsFiltersRuntimeBusToLegacyAgentEvents(t *testing.T) {
 	if got := evt.Context.Inbound.MessageID; got != "message-1" {
 		t.Fatalf("inbound message_id = %q, want message-1", got)
 	}
+
+	policyPayload := ToolPolicyDecisionPayload{
+		Tool:       "exec_command",
+		Outcome:    ToolPolicyOutcomeAllow,
+		ReasonCode: "compatibility_allow",
+	}
+	al.RuntimeEventBus().Publish(context.Background(), runtimeevents.Event{
+		Kind:    runtimeevents.KindAgentToolPolicyDecision,
+		Source:  runtimeevents.Source{Component: "agent", Name: "main"},
+		Payload: policyPayload,
+	})
+	policyEvent := waitForEvent(t, sub.C, 2*time.Second, nil)
+	if policyEvent.Kind != EventKindToolPolicyDecision {
+		t.Fatalf("legacy policy event kind = %q, want %q", policyEvent.Kind, EventKindToolPolicyDecision)
+	}
+	if got, ok := policyEvent.Payload.(ToolPolicyDecisionPayload); !ok || got != policyPayload {
+		t.Fatalf("legacy policy payload = %#v, want %#v", policyEvent.Payload, policyPayload)
+	}
 }

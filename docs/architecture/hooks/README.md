@@ -45,23 +45,25 @@ Hooks can return different actions to control the flow:
 
 The `respond` action is special: it allows a `before_tool` hook to provide the tool result directly, skipping the actual tool execution. This is useful for:
 
-1. **Plugin tool injection**: External hooks can implement tools without registering them in the tool registry
+1. **Alternate fulfillment**: Trusted hooks can answer an already registered and offered tool from a cache or service
 2. **Tool result caching**: Return cached results for repeated tool calls
 3. **Tool mocking**: Return mock results for testing purposes
 
 When a hook returns `respond` with a `HookResult`, the agent loop:
-1. Skips the actual tool execution
-2. Uses the provided result as if the tool had executed
-3. Continues the turn normally with the result
+1. Requires explicit hook trust, the exact registered/offered tool, central policy allow, and approval
+2. Skips the registered tool execution and `AfterTool`
+3. Uses the provided result as if the tool had executed and continues normally
 
 Example (Go in-process hook):
+
+Assume `weather_lookup` is already registered and included in the exact provider request.
 
 ```go
 func (h *MyHook) BeforeTool(
     ctx context.Context,
     call *agent.ToolCallHookRequest,
 ) (*agent.ToolCallHookRequest, agent.HookDecision, error) {
-    if call.Tool == "my_plugin_tool" {
+    if call.Tool == "weather_lookup" {
         next := call.Clone()
         next.HookResult = &tools.ToolResult{
             ForLLM:  "Plugin tool executed successfully",
@@ -136,6 +138,7 @@ Example:
           "/tmp/review_gate.py"
         ],
         "observe": [
+          "agent.tool.policy_decision",
           "agent.tool.exec_start",
           "agent.tool.exec_end",
           "agent.tool.exec_skipped"
@@ -607,6 +610,7 @@ if __name__ == "__main__":
           "/abs/path/to/review_gate.py"
         ],
         "observe": [
+          "agent.tool.policy_decision",
           "agent.tool.exec_start",
           "agent.tool.exec_end",
           "agent.tool.exec_skipped"

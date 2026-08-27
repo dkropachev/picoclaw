@@ -145,12 +145,14 @@ type turnExecution struct {
 	// LLM call per-iteration state
 	response             *providers.LLMResponse
 	normalizedToolCalls  []providers.ToolCall
+	toolCallProvenance   []tools.ToolHookProvenance
 	allResponsesHandled  bool
 	streamingPublisher   *streamingChunkPublisher
 	streamingFallback    bool
 	suppressReasoning    bool
 	callMessages         []providers.Message
 	providerToolDefs     []providers.ToolDefinition
+	toolCatalog          *tools.ModelToolCatalog
 	visibleToolSurface   string
 	llmModel             string
 	llmModelName         string
@@ -268,6 +270,8 @@ type turnState struct {
 	turnSession          session.SessionStore
 	turnResourcesState   turnResourceCloseState
 	turnResourcesErr     error
+	toolPolicy           tools.ToolPolicy
+	toolPolicyBound      bool
 
 	// Async spawn reserves one short source-construction lease before its
 	// goroutine is scheduled. Terminal claim closes new admission and waits for
@@ -456,10 +460,26 @@ func (al *AgentLoop) prepareTurnState(ts *turnState) {
 		return
 	}
 	runtimeCfg := al.getSubTurnConfig()
+	policy := al.toolPolicy
+	if parent := ts.parentTurnState; parent != nil {
+		parent.mu.Lock()
+		if parent.toolPolicyBound {
+			policy = parent.toolPolicy
+		} else {
+			// A child must never regain loop authority when its parent was not
+			// prepared correctly. Bind nil so model dispatch fails closed.
+			policy = nil
+		}
+		parent.mu.Unlock()
+	}
 
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.al = al
+	if !ts.toolPolicyBound {
+		ts.toolPolicy = policy
+		ts.toolPolicyBound = true
+	}
 	if ts.pendingResults == nil {
 		ts.pendingResults = make(chan *tools.ToolResult, defaultPendingSubTurnResultBuffer)
 	}

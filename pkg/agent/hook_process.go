@@ -28,6 +28,7 @@ type ProcessHookOptions struct {
 	Command       []string
 	Dir           string
 	Env           []string
+	Trusted       bool
 	Observe       bool
 	ObserveKinds  []string
 	InterceptLLM  bool
@@ -494,6 +495,7 @@ func (al *AgentLoop) MountProcessHook(ctx context.Context, name string, opts Pro
 	if err := al.MountHook(HookRegistration{
 		Name:   name,
 		Source: HookSourceProcess,
+		Trust:  hookTrustFromBool(opts.Trusted),
 		Hook:   processHook,
 	}); err != nil {
 		_ = processHook.Close()

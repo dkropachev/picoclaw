@@ -32,6 +32,7 @@ const (
 	EventKindLLMRetry               EventKind = runtimeevents.KindAgentLLMRetry
 	EventKindContextCompress        EventKind = runtimeevents.KindAgentContextCompress
 	EventKindSessionSummarize       EventKind = runtimeevents.KindAgentSessionSummarize
+	EventKindToolPolicyDecision     EventKind = runtimeevents.KindAgentToolPolicyDecision
 	EventKindToolExecStart          EventKind = runtimeevents.KindAgentToolExecStart
 	EventKindToolExecEnd            EventKind = runtimeevents.KindAgentToolExecEnd
 	EventKindToolExecSkipped        EventKind = runtimeevents.KindAgentToolExecSkipped

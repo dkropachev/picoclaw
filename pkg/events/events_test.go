@@ -53,6 +53,17 @@ func TestKnownKindsIncludesWorkflowCanceled(t *testing.T) {
 	t.Fatalf("KnownKinds() missing %q", KindWorkflowRunCanceled)
 }
 
+func TestKnownKindsIncludesAgentToolPolicyDecision(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range KnownKinds() {
+		if kind == KindAgentToolPolicyDecision {
+			return
+		}
+	}
+	t.Fatalf("KnownKinds() missing %q", KindAgentToolPolicyDecision)
+}
+
 func TestDropNewestIncrementsStats(t *testing.T) {
 	t.Parallel()
 

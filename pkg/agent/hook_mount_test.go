@@ -132,6 +132,7 @@ func TestAgentLoop_ProcessDirectWithChannel_AutoMountsProcessHook(t *testing.T) 
 		Processes: map[string]config.ProcessHookConfig{
 			"ipc-auto": {
 				Enabled: true,
+				Trusted: true,
 				Command: processHookHelperCommand(),
 				Env: map[string]string{
 					"PICOCLAW_HOOK_HELPER":    "1",
@@ -167,6 +168,8 @@ func TestProcessHookObserveKindsFromConfigAcceptsRuntimeNames(t *testing.T) {
 	kinds, enabled, err := processHookObserveKindsFromConfig([]string{
 		"tool_exec_start",
 		"agent.tool.exec_end",
+		"tool_policy_decision",
+		"agent.tool.policy_decision",
 		"gateway.ready",
 		"mcp.server.failed",
 	})
@@ -177,9 +180,41 @@ func TestProcessHookObserveKindsFromConfigAcceptsRuntimeNames(t *testing.T) {
 		t.Fatal("expected observe to be enabled")
 	}
 
-	want := []string{"agent.tool.exec_start", "agent.tool.exec_end", "gateway.ready", "mcp.server.failed"}
+	want := []string{
+		"agent.tool.exec_start",
+		"agent.tool.exec_end",
+		"agent.tool.policy_decision",
+		"agent.tool.policy_decision",
+		"gateway.ready",
+		"mcp.server.failed",
+	}
 	if !slices.Equal(kinds, want) {
 		t.Fatalf("observe kinds = %v, want %v", kinds, want)
+	}
+}
+
+func TestProcessHookOptionsFromConfigRequiresExplicitTrust(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		trusted bool
+	}{
+		{name: "default untrusted"},
+		{name: "explicit trusted", trusted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts, err := processHookOptionsFromConfig(config.ProcessHookConfig{
+				Enabled:   true,
+				Trusted:   test.trusted,
+				Command:   []string{"hook"},
+				Intercept: []string{"before_tool"},
+			})
+			if err != nil {
+				t.Fatalf("processHookOptionsFromConfig() error = %v", err)
+			}
+			if opts.Trusted != test.trusted {
+				t.Fatalf("Trusted = %v, want %v", opts.Trusted, test.trusted)
+			}
+		})
 	}
 }
 

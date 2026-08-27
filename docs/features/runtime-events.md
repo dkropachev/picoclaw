@@ -9,7 +9,9 @@
 Runtime events provide observable envelopes for agent, channel, gateway, bus,
 and MCP behavior. Event logging filters decide which published events are printed
 without changing event publication. They are process-local observability signals,
-not the durable external-event inbox used for restart-safe automation.
+not the durable external-event inbox used for restart-safe automation. A
+model-tool policy decision has its own scalar-only audit event before execution
+or skip telemetry.
 
 ## Reconstruction Notes
 
@@ -34,6 +36,7 @@ not the durable external-event inbox used for restart-safe automation.
 | `FR-EVENTS-004` | MUST | Known event names cover agent, workflow, channel, bus, gateway, and MCP domains. | Feature telemetry must be discoverable. |
 | `FR-EVENTS-005` | SHOULD | Event payloads avoid full sensitive args by default and include lengths/counts when safer. | Logs should be useful without leaking secrets. |
 | `FR-EVENTS-006` | MUST | Per-agent browser activity is derived through a bounded non-blocking subscriber and fixed-capacity recorder that accepts only an explicit typed allowlist of agent event kinds. Its cursor-based projection uses one opaque recorder generation plus decimal-string sequence and drop counters, reports resets and retained-window truncation, and never exposes generic payload maps, text, prompts, tool arguments/results, raw errors, attributes, paths, chat/session/provider/model identity, or credentials. | Live operator visibility must neither stall the runtime event bus nor turn internal telemetry into a sensitive-data API. |
+| `FR-EVENTS-007` | MUST | Each Agent-pipeline model-tool action that reaches the complete central-policy and legacy-approval meet emits one `agent.tool.policy_decision` before its corresponding `agent.tool.exec_start` or `agent.tool.exec_skipped`. Its typed payload contains only the exact bounded tool name, normalized trusted risk class, fulfillment kind, fixed outcome (`allow`, `deny`, `error`, or `canceled`), and bounded reason code; it contains no arguments, results, hook or approval text, or raw errors. The event is available on the runtime bus, safe logger projection, legacy Agent-event adapter, and process-hook observation, but remains outside the browser Agent Activity allowlist until that separate privacy surface explicitly admits it. | Authorization must be auditable without turning model arguments, extension output, or infrastructure diagnostics into telemetry disclosure. |
 
 ## Data And State Model
 
@@ -42,6 +45,8 @@ scope, and payload fields; subscriber registrations with prefix filters and
 buffered channels; bus closed state; event logging include/exclude/min-severity
 config; known kind constants for each runtime domain; and a process-local,
 generation-scoped bounded activity window containing only safe typed fields.
+Tool-policy outcomes are fixed scalar values and are not a copy of the policy
+request, approval response, or tool result.
 
 ## Surface Ownership
 
@@ -63,7 +68,7 @@ Owns: EVENT *
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `events.logging.*` | Event logging enablement, filters, payload inclusion, and severity threshold. | `FR-EVENTS-003`, `FR-EVENTS-005` |
-| Events | `agent.*`, `workflow.*`, `channel.*`, `bus.*`, `gateway.*`, `mcp.*` | Published runtime event kinds. | `FR-EVENTS-001`, `FR-EVENTS-004` |
+| Events | `agent.*`, `workflow.*`, `channel.*`, `bus.*`, `gateway.*`, `mcp.*` | Published runtime event kinds, including the safe model-tool policy decision. | `FR-EVENTS-001`, `FR-EVENTS-004`, `FR-EVENTS-007` |
 | HTTP/UI | Protected `/runtime/agents/{id}/activity`, authenticated `/api/agents/{id}/activity`, and the Agent Activity tab | Return only the bounded typed per-agent activity projection with opaque cursor, reset, truncation, and drop state. | `FR-EVENTS-006` |
 
 ## Algorithms And Ordering
@@ -84,6 +89,10 @@ Owns: EVENT *
    events therefore cannot evict supported activity. Store only the safe typed
    projection and page the retained window in ascending sequence order without
    placing cursors or activity in durable browser state.
+7. For an Agent model-tool action that reaches authorization, publish its safe
+   combined decision after policy and approval complete but before either the
+   execution-start or skipped event; pre-policy structural rejection is not
+   mislabeled as a policy decision.
 
 ## Cross-Feature Behavior
 
@@ -114,6 +123,7 @@ semantics defined here.
 | `FR-EVENTS-001`, `FR-EVENTS-002`, `FR-EVENTS-004` | [pkg/events/events_test.go](../../pkg/events/events_test.go), [pkg/events/subscription_test.go](../../pkg/events/subscription_test.go), [pkg/events/kind.go](../../pkg/events/kind.go) |
 | `FR-EVENTS-003`, `FR-EVENTS-005` | [pkg/events/filter_test.go](../../pkg/events/filter_test.go), [pkg/config/events_test.go](../../pkg/config/events_test.go), [docs/architecture/runtime-events.md](../architecture/runtime-events.md) |
 | `FR-EVENTS-006` | [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-EVENTS-007` | [pkg/events/events_test.go](../../pkg/events/events_test.go), [pkg/agent/runtime_event_logger_test.go](../../pkg/agent/runtime_event_logger_test.go), [pkg/agent/legacy_events_test.go](../../pkg/agent/legacy_events_test.go), [pkg/agent/hook_mount_test.go](../../pkg/agent/hook_mount_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [pkg/agent/pipeline_tool_policy_test.go](../../pkg/agent/pipeline_tool_policy_test.go) |
 
 ## Implementation Anchors
 

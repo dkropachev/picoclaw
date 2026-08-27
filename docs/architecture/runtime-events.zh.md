@@ -94,6 +94,7 @@ PICOCLAW_EVENTS_LOGGING_INCLUDE_PAYLOAD=false
 | `agent.llm.retry` | LLM 请求因上下文、限流、临时错误等原因准备重试前 | `attempt`, `max_retries`, `reason`, `error`, `backoff_ms` |
 | `agent.context.compress` | 上下文历史被压缩时，例如主动预算检查或 LLM retry 处理 | `reason`, `dropped_messages`, `remaining_messages` |
 | `agent.session.summarize` | 会话历史异步摘要完成时 | `summarized_messages`, `kept_messages`, `summary_len`, `omitted_oversized` |
+| `agent.tool.policy_decision` | 模型发起的工具调用到达中央策略以及适用时的旧 approval 汇合点时；该事件先于对应的执行开始或跳过事件 | `tool`, `risk`, `fulfillment`, `outcome`, `reason_code`; 不包含参数、结果、hook/approval 文本或原始错误 |
 | `agent.tool.exec_start` | agent 准备执行一个工具调用前 | `tool`, `args_count`; 默认不打印完整参数 |
 | `agent.tool.exec_end` | 工具调用完成后，包括成功、工具错误和 async 结果 | `tool`, `duration_ms`, `for_llm_len`, `for_user_len`, `is_error`, `async` |
 | `agent.tool.exec_skipped` | 工具调用被跳过时，例如工具不可用、参数无效或 turn 控制逻辑要求跳过 | `tool`, `reason` |
@@ -105,6 +106,11 @@ PICOCLAW_EVENTS_LOGGING_INCLUDE_PAYLOAD=false
 | `agent.subturn.result_delivered` | 子 turn 结果成功投递到目标 channel/chat 时 | `target_channel`, `target_chat_id`, `content_len` |
 | `agent.subturn.orphan` | 子 turn 结果无法投递或无法关联回父 turn 时 | `parent_turn_id`, `child_turn_id`, `reason` |
 | `agent.error` | agent 执行流程报告错误时 | `stage`, `error` |
+
+`agent.tool.policy_decision` 可通过 runtime event bus 和 process hook observer
+观察。它有意不进入有界的浏览器 Agent Activity 投影；该隐私 allowlist 必须
+显式接纳每一种新事件。`allow` outcome 使用 `info` 日志级别；`deny`、
+`error` 和 `canceled` 使用 `warn`。
 
 ### Channel
 
@@ -191,6 +197,7 @@ agent 事件还会追加 payload 摘要字段：
 | `agent.llm.retry` | `attempt`, `max_retries`, `reason`, `error`, `backoff_ms` |
 | `agent.context.compress` | `reason`, `dropped_messages`, `remaining_messages` |
 | `agent.session.summarize` | `summarized_messages`, `kept_messages`, `summary_len`, `omitted_oversized` |
+| `agent.tool.policy_decision` | `tool`, `risk`, `fulfillment`, `outcome`, `reason_code` |
 | `agent.tool.exec_start` | `tool`, `args_count` |
 | `agent.tool.exec_end` | `tool`, `duration_ms`, `for_llm_len`, `for_user_len`, `is_error`, `async` |
 | `agent.tool.exec_skipped` | `tool`, `reason` |

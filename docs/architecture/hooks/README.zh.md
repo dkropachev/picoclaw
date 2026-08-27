@@ -45,23 +45,25 @@ Hook 可以返回不同的 action 来控制流程：
 
 `respond` action 是特殊的：它允许 `before_tool` hook 直接提供工具结果，跳过实际工具执行。适用于：
 
-1. **插件工具注入**：外部 hook 可以实现工具，无需在 ToolRegistry 注册
+1. **替代履行方式**：可信 hook 可通过缓存或服务响应已注册且实际提供的工具
 2. **工具结果缓存**：对重复调用返回缓存结果
 3. **工具模拟**：测试时返回模拟结果
 
 当 hook 返回 `respond` 并携带 `HookResult` 时，agent loop 会：
-1. 跳过实际工具执行
-2. 使用提供的结果作为工具执行结果
-3. 正常继续 turn 流程
+1. 要求显式 hook trust、精确注册/提供的工具、中央 policy 允许和 approval
+2. 跳过已注册工具执行与 `AfterTool`
+3. 将提供的结果视为工具执行结果并继续正常 turn
 
 示例（Go 进程内 hook）：
+
+以下示例假设 `weather_lookup` 已注册，并包含在 provider 实际收到的工具定义中。
 
 ```go
 func (h *MyHook) BeforeTool(
     ctx context.Context,
     call *agent.ToolCallHookRequest,
 ) (*agent.ToolCallHookRequest, agent.HookDecision, error) {
-    if call.Tool == "my_plugin_tool" {
+    if call.Tool == "weather_lookup" {
         next := call.Clone()
         next.HookResult = &tools.ToolResult{
             ForLLM:  "Plugin tool executed successfully",
@@ -136,6 +138,7 @@ HookManager 的排序规则是：
           "/tmp/review_gate.py"
         ],
         "observe": [
+          "agent.tool.policy_decision",
           "agent.tool.exec_start",
           "agent.tool.exec_end",
           "agent.tool.exec_skipped"
@@ -607,6 +610,7 @@ if __name__ == "__main__":
           "/abs/path/to/review_gate.py"
         ],
         "observe": [
+          "agent.tool.policy_decision",
           "agent.tool.exec_start",
           "agent.tool.exec_end",
           "agent.tool.exec_skipped"

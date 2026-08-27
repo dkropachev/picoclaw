@@ -171,6 +171,7 @@ func legacyAgentEventKinds() []runtimeevents.Kind {
 		EventKindLLMRetry,
 		EventKindContextCompress,
 		EventKindSessionSummarize,
+		EventKindToolPolicyDecision,
 		EventKindToolExecStart,
 		EventKindToolExecEnd,
 		EventKindToolExecSkipped,

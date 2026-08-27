@@ -4,10 +4,20 @@ import (
 	"strings"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // AgentLoopOption configures an AgentLoop at construction time.
 type AgentLoopOption func(*AgentLoop)
+
+// WithToolPolicy installs the immutable policy used by model-authored tool
+// actions. Passing nil is intentional and fails closed; constructors preserve
+// legacy behavior by installing CompatibilityAllowToolPolicy explicitly.
+func WithToolPolicy(policy tools.ToolPolicy) AgentLoopOption {
+	return func(al *AgentLoop) {
+		al.toolPolicy = policy
+	}
+}
 
 // WithRuntimeEvents injects the runtime event bus used for new observation APIs.
 //

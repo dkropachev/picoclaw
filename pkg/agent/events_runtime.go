@@ -68,6 +68,12 @@ func runtimeSeverityForAgentEvent(kind runtimeevents.Kind, payload any) runtimee
 			return runtimeevents.SeverityWarn
 		}
 		return runtimeevents.SeverityInfo
+	case runtimeevents.KindAgentToolPolicyDecision:
+		payload, ok := payload.(ToolPolicyDecisionPayload)
+		if ok && payload.Outcome == ToolPolicyOutcomeAllow {
+			return runtimeevents.SeverityInfo
+		}
+		return runtimeevents.SeverityWarn
 	default:
 		return runtimeevents.SeverityInfo
 	}
