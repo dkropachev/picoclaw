@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -50,14 +51,20 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 		return aliasErr
 	}
 
-	provider, _, err := providers.CreateProvider(cfg)
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	provider, _, err := providers.CreateProviderWithExecutionPolicy(cfg, executionPolicy)
 	if err != nil {
 		return fmt.Errorf("error creating provider: %w", err)
 	}
 
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()
-	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+		cfg,
+		msgBus,
+		provider,
+		executionPolicy,
+	)
 	defer agentLoop.Close()
 
 	// Print agent startup info (only for interactive mode)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -21,6 +22,29 @@ func newTestAgentLoopWithStrictModels(
 		strings.TrimSpace(cfg.Agents.Defaults.AccountRef) != ""
 	ensureStrictTestModelSelection(cfg, provider)
 	loop := NewAgentLoop(cfg, msgBus, provider, opts...)
+	if !hadExplicitAccount {
+		bindLegacyTestProviderToAliases(loop, cfg, provider)
+	}
+	return loop
+}
+
+func newTestAgentLoopWithStrictModelsAndExecutionPolicy(
+	cfg *config.Config,
+	msgBus *bus.MessageBus,
+	provider providers.LLMProvider,
+	policy isolation.ExecutionPolicy,
+	opts ...AgentLoopOption,
+) *AgentLoop {
+	hadExplicitAccount := cfg != nil &&
+		strings.TrimSpace(cfg.Agents.Defaults.AccountRef) != ""
+	ensureStrictTestModelSelection(cfg, provider)
+	loop := NewAgentLoopWithExecutionPolicy(
+		cfg,
+		msgBus,
+		provider,
+		policy,
+		opts...,
+	)
 	if !hadExplicitAccount {
 		bindLegacyTestProviderToAliases(loop, cfg, provider)
 	}

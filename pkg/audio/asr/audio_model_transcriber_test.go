@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -71,6 +72,28 @@ func TestNewAudioModelTranscriberInvalidConfig(t *testing.T) {
 				t.Fatalf("NewAudioModelTranscriber() = %#v, want nil", tr)
 			}
 		})
+	}
+}
+
+func TestNewAudioModelTranscriberWithExecutionPolicyRetainsStrictPolicy(t *testing.T) {
+	tr := NewAudioModelTranscriberWithExecutionPolicy(
+		&config.ModelConfig{
+			Model:     "claude-cli/claude-model",
+			Workspace: t.TempDir(),
+		},
+		isolation.ExecutionPolicy{},
+	)
+	if tr == nil {
+		t.Fatal("NewAudioModelTranscriberWithExecutionPolicy() = nil")
+	}
+
+	audioPath := filepath.Join(t.TempDir(), "clip.ogg")
+	if err := os.WriteFile(audioPath, []byte("fake-audio-data"), 0o600); err != nil {
+		t.Fatalf("write audio fixture: %v", err)
+	}
+	_, err := tr.Transcribe(context.Background(), audioPath)
+	if !errors.Is(err, isolation.ErrExecutionPolicyUnavailable) {
+		t.Fatalf("Transcribe() error = %v, want %v", err, isolation.ErrExecutionPolicyUnavailable)
 	}
 }
 

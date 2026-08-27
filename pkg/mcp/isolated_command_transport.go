@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -22,6 +23,7 @@ var isolatedCommandTerminateDuration = 5 * time.Second
 // process startup through pkg/isolation so Windows post-start hooks run too.
 type isolatedCommandTransport struct {
 	Command           *exec.Cmd
+	ExecutionPolicy   isolation.ExecutionPolicy
 	TerminateDuration time.Duration
 }
 
@@ -30,12 +32,14 @@ func (t *isolatedCommandTransport) Connect(ctx context.Context) (sdkmcp.Connecti
 	if err != nil {
 		return nil, err
 	}
-	stdout = io.NopCloser(stdout)
 	stdin, err := t.Command.StdinPipe()
 	if err != nil {
+		_ = stdout.Close()
 		return nil, err
 	}
-	if err := isolation.Start(t.Command); err != nil {
+	if err := t.ExecutionPolicy.Start(t.Command); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return nil, err
 	}
 	td := t.TerminateDuration
@@ -61,8 +65,9 @@ func (s *isolatedPipeRWC) Write(p []byte) (n int, err error) {
 }
 
 func (s *isolatedPipeRWC) Close() error {
+	var closeErr error
 	if err := s.stdin.Close(); err != nil {
-		return fmt.Errorf("closing stdin: %w", err)
+		closeErr = fmt.Errorf("closing stdin: %w", err)
 	}
 	resChan := make(chan error, 1)
 	go func() {
@@ -76,21 +81,24 @@ func (s *isolatedPipeRWC) Close() error {
 		}
 		return nil, false
 	}
-	if err, ok := wait(); ok {
-		return err
+	if waitErr, ok := wait(); ok {
+		return errors.Join(closeErr, waitErr)
 	}
+	var signalErr error
 	if err := s.cmd.Process.Signal(syscall.SIGTERM); err == nil {
-		if err, ok := wait(); ok {
-			return err
+		if waitErr, ok := wait(); ok {
+			return errors.Join(closeErr, waitErr)
 		}
+	} else {
+		signalErr = err
 	}
 	if err := s.cmd.Process.Kill(); err != nil {
-		return err
+		return errors.Join(closeErr, signalErr, err)
 	}
-	if err, ok := wait(); ok {
-		return err
+	if waitErr, ok := wait(); ok {
+		return errors.Join(closeErr, signalErr, waitErr)
 	}
-	return fmt.Errorf("unresponsive subprocess")
+	return errors.Join(closeErr, signalErr, fmt.Errorf("unresponsive subprocess"))
 }
 
 type isolatedIOConn struct {

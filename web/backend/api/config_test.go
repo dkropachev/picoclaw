@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -65,6 +67,135 @@ func TestValidateConfigRejectsInvalidCommonChannelSettings(t *testing.T) {
 		if !found {
 			t.Errorf("validateConfig() errors = %#v, want error containing %q", errs, want)
 		}
+	}
+}
+
+func TestValidateConfigRejectsInvalidIsolationEnvironmentAllowlist(t *testing.T) {
+	for _, allowlist := range [][]string{
+		{"BAD-NAME"},
+		{"PATH", "path"},
+		func() []string {
+			values := make([]string, 129)
+			for index := range values {
+				values[index] = fmt.Sprintf("P014_VALUE_%03d", index)
+			}
+			return values
+		}(),
+	} {
+		cfg := config.DefaultConfig()
+		cfg.Isolation.EnvironmentAllowlist = allowlist
+		errs := validateConfig(cfg)
+		found := false
+		for _, got := range errs {
+			if strings.Contains(got, "isolation:") &&
+				strings.Contains(got, "environment_allowlist") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("validateConfig(%#v) errors = %#v", allowlist, errs)
+		}
+	}
+}
+
+func TestConfigMutationRejectsInvalidIsolationEnvironmentAllowlist(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		var body []byte
+		if method == http.MethodPatch {
+			body = []byte(`{"isolation":{"environment_allowlist":["PATH","path"]}}`)
+		} else {
+			cfg, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Isolation.EnvironmentAllowlist = []string{"PATH", "path"}
+			body, err = json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		req := httptest.NewRequest(method, "/api/config", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest ||
+			!strings.Contains(rec.Body.String(), "validation_error") ||
+			!strings.Contains(rec.Body.String(), "environment_allowlist") {
+			t.Fatalf("%s invalid isolation response = %d %s", method, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestConfigPatchPreservesIsolationAllowlistStates(t *testing.T) {
+	tests := []struct {
+		name      string
+		initial   []string
+		patch     string
+		wantNil   bool
+		wantEmpty bool
+		want      []string
+	}{
+		{
+			name:    "omitted preserves custom",
+			initial: []string{"PATH", "P014_CUSTOM"},
+			patch:   `{"gateway":{"log_level":"info"}}`,
+			want:    []string{"PATH", "P014_CUSTOM"},
+		},
+		{
+			name:      "explicit empty",
+			initial:   []string{"PATH"},
+			patch:     `{"isolation":{"environment_allowlist":[]}}`,
+			wantEmpty: true,
+		},
+		{
+			name:    "null selects defaults",
+			initial: []string{"PATH"},
+			patch:   `{"isolation":{"environment_allowlist":null}}`,
+			wantNil: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+			cfg, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Isolation.EnvironmentAllowlist = append([]string(nil), test.initial...)
+			if err = config.SaveConfig(configPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+			req := httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(test.patch))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("PATCH response = %d %s", rec.Code, rec.Body.String())
+			}
+			loaded, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := loaded.Isolation.EnvironmentAllowlist
+			switch {
+			case test.wantNil && got != nil:
+				t.Fatalf("allowlist = %#v, want nil/default", got)
+			case test.wantEmpty && (got == nil || len(got) != 0):
+				t.Fatalf("allowlist = %#v, want allocated empty", got)
+			case test.want != nil && !reflect.DeepEqual(got, test.want):
+				t.Fatalf("allowlist = %#v, want %#v", got, test.want)
+			}
+		})
 	}
 }
 

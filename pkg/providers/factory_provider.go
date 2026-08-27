@@ -13,6 +13,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	anthropicmessages "github.com/sipeed/picoclaw/pkg/providers/anthropic_messages"
 	"github.com/sipeed/picoclaw/pkg/providers/azure"
 	"github.com/sipeed/picoclaw/pkg/providers/bedrock"
@@ -261,6 +262,18 @@ func ResolveAPIBase(cfg *config.ModelConfig) string {
 // switch below handles providers with specialized construction.
 // Returns the provider, the effective model ID from ExtractProtocol, and any error.
 func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, error) {
+	return CreateProviderFromConfigWithExecutionPolicy(
+		cfg,
+		isolation.NewExecutionPolicy(config.DefaultConfig().Isolation),
+	)
+}
+
+// CreateProviderFromConfigWithExecutionPolicy creates a provider bound to one
+// exact subprocess execution policy.
+func CreateProviderFromConfigWithExecutionPolicy(
+	cfg *config.ModelConfig,
+	policy isolation.ExecutionPolicy,
+) (LLMProvider, string, error) {
 	if cfg == nil {
 		return nil, "", fmt.Errorf("config is nil")
 	}
@@ -571,14 +584,22 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		if workspace == "" {
 			workspace = "."
 		}
-		return finalizeProviderFromConfig(NewClaudeCliProvider(workspace), modelID, cfg)
+		return finalizeProviderFromConfig(
+			NewClaudeCliProviderWithExecutionPolicy(workspace, policy),
+			modelID,
+			cfg,
+		)
 
 	case "codex-cli":
 		workspace := cfg.Workspace
 		if workspace == "" {
 			workspace = "."
 		}
-		return finalizeProviderFromConfig(NewCodexCliProvider(workspace), modelID, cfg)
+		return finalizeProviderFromConfig(
+			NewCodexCliProviderWithExecutionPolicy(workspace, policy),
+			modelID,
+			cfg,
+		)
 
 	case "github-copilot":
 		if authMethod == "oauth" || authMethod == "token" {

@@ -16,6 +16,7 @@ import (
 
 	picoauth "github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
 type mcpAPITestHarness struct {
@@ -1225,8 +1226,28 @@ func TestMCPReplacingSharedCredentialForksCredentialOwnership(t *testing.T) {
 	}
 }
 
+func TestDefaultMCPProbeServerUsesExplicitExecutionPolicy(t *testing.T) {
+	_, err := defaultMCPProbeServer(
+		context.Background(),
+		"strict",
+		config.MCPServerConfig{
+			Enabled: true,
+			Type:    "stdio",
+			Command: "picoclaw-p014-probe-does-not-exist",
+		},
+		t.TempDir(),
+		isolation.ExecutionPolicy{},
+	)
+	if !errors.Is(err, isolation.ErrExecutionPolicyUnavailable) {
+		t.Fatalf("defaultMCPProbeServer() error = %v, want %v", err, isolation.ErrExecutionPolicyUnavailable)
+	}
+}
+
 func TestMCPProbeReportsToolsAndAuthRequired(t *testing.T) {
+	const policyEnvironmentName = "PICOCLAW_TEST_MCP_POLICY"
+	t.Setenv(policyEnvironmentName, "captured-policy-value")
 	harness := newMCPAPITestHarness(t, func(cfg *config.Config) {
+		cfg.Isolation.EnvironmentAllowlist = []string{policyEnvironmentName}
 		cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
 			"saved": {
 				Enabled: false,
@@ -1251,11 +1272,13 @@ func TestMCPProbeReportsToolsAndAuthRequired(t *testing.T) {
 	var capturedName string
 	var capturedServer config.MCPServerConfig
 	var capturedWorkspace string
+	var capturedPolicyValue string
 	mcpProbeServer = func(
 		ctx context.Context,
 		name string,
 		server config.MCPServerConfig,
 		workspace string,
+		executionPolicy isolation.ExecutionPolicy,
 	) (mcpProbeResponse, error) {
 		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 			return mcpProbeResponse{}, errors.New("probe context has no deadline")
@@ -1263,6 +1286,7 @@ func TestMCPProbeReportsToolsAndAuthRequired(t *testing.T) {
 		capturedName = name
 		capturedServer = server
 		capturedWorkspace = workspace
+		capturedPolicyValue, _ = executionPolicy.LookupEnvironment(policyEnvironmentName)
 		return mcpProbeResponse{
 			OK:        true,
 			ToolCount: 2,
@@ -1309,6 +1333,9 @@ func TestMCPProbeReportsToolsAndAuthRequired(t *testing.T) {
 	if capturedWorkspace != wantWorkspace {
 		t.Fatalf("workspace = %q, want %q", capturedWorkspace, wantWorkspace)
 	}
+	if capturedPolicyValue != "captured-policy-value" {
+		t.Fatalf("execution policy value = %q, want captured config allowlist value", capturedPolicyValue)
+	}
 
 	probePayload["server"].(map[string]any)["url"] = "https://different.example.test/mcp"
 	rec = harness.request(t, http.MethodPost, "/api/mcp/servers/test", probePayload)
@@ -1325,6 +1352,7 @@ func TestMCPProbeReportsToolsAndAuthRequired(t *testing.T) {
 		string,
 		config.MCPServerConfig,
 		string,
+		isolation.ExecutionPolicy,
 	) (mcpProbeResponse, error) {
 		return mcpProbeResponse{}, fmt.Errorf("remote returned HTTP 401 unauthorized")
 	}

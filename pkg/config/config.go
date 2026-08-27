@@ -313,8 +313,9 @@ func (c EvolutionConfig) AutoAppliesDrafts() bool {
 // IsolationConfig controls subprocess isolation for commands started by PicoClaw.
 // It is applied by the isolation package rather than by sandboxing the main process.
 type IsolationConfig struct {
-	Enabled     bool         `json:"enabled,omitempty"`
-	ExposePaths []ExposePath `json:"expose_paths,omitempty"`
+	Enabled              bool         `json:"enabled,omitempty"`
+	ExposePaths          []ExposePath `json:"expose_paths,omitempty"`
+	EnvironmentAllowlist []string     `json:"environment_allowlist"`
 }
 
 // ExposePath describes a host path that should remain visible inside the isolated
@@ -2549,6 +2550,9 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 	default:
 		return nil, fmt.Errorf("unsupported config version: %d", versionInfo.Version)
 	}
+	if err = cfg.Isolation.ValidateEnvironmentAllowlist(); err != nil {
+		return nil, fmt.Errorf("invalid isolation config: %w", err)
+	}
 
 	applyLegacyBindingsMigration(data, cfg)
 
@@ -2776,6 +2780,9 @@ func SaveConfig(path string, cfg *Config) error {
 func saveConfigUnlocked(path string, cfg *Config) error {
 	if cfg == nil {
 		return errors.New("config is required")
+	}
+	if err := cfg.Isolation.ValidateEnvironmentAllowlist(); err != nil {
+		return fmt.Errorf("invalid isolation config: %w", err)
 	}
 	if cfg.PRLifecycle.IsZero() {
 		cfg.PRLifecycle = DefaultPRLifecycleConfig()

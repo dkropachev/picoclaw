@@ -3,9 +3,12 @@
 package agent
 
 import (
+	"fmt"
+
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -33,6 +36,22 @@ func (al *AgentLoop) GetConfig() *config.Config {
 	al.mu.RLock()
 	defer al.mu.RUnlock()
 	return al.cfg
+}
+
+// ExecutionPolicyForGeneration returns the immutable subprocess policy paired
+// with expected. A stale or nil config identity fails closed.
+func (al *AgentLoop) ExecutionPolicyForGeneration(
+	expected *config.Config,
+) (isolation.ExecutionPolicy, error) {
+	if al == nil || expected == nil {
+		return isolation.ExecutionPolicy{}, fmt.Errorf("runtime generation is not configured")
+	}
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	if al.cfg != expected {
+		return isolation.ExecutionPolicy{}, fmt.Errorf("runtime generation is stale")
+	}
+	return al.executionPolicy, nil
 }
 
 // SetMediaStore replaces the generation media store. The caller must hold the

@@ -1,5 +1,38 @@
 {
-  "version": 4,
+  "version": 6,
+  "isolation": {
+    "enabled": false,
+    "expose_paths": [],
+    "environment_allowlist": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "XDG_CONFIG_HOME",
+      "XDG_CACHE_HOME",
+      "XDG_STATE_HOME",
+      "PATHEXT",
+      "USERPROFILE",
+      "HOMEDRIVE",
+      "HOMEPATH",
+      "TEMP",
+      "TMP",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "LANG",
+      "LANGUAGE",
+      "LC_ALL",
+      "LC_CTYPE",
+      "LC_COLLATE",
+      "LC_MESSAGES",
+      "LC_MONETARY",
+      "LC_NUMERIC",
+      "LC_TIME",
+      "TZ",
+      "TERM",
+      "COLORTERM",
+      "NO_COLOR"
+    ]
+  },
   "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",

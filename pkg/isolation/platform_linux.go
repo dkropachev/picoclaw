@@ -20,23 +20,9 @@ func applyPlatformIsolation(cmd *exec.Cmd, launch launchProjection) error {
 	}
 	// Bubblewrap is the only supported Linux backend right now. Fail closed when
 	// it is unavailable instead of silently running the child process unisolated.
-	bwrapPath, err := exec.LookPath("bwrap")
-	if err != nil {
-		hint := bwrapInstallHint()
-		disableHint := `set "isolation.enabled": false in config.json`
-		logger.WarnCF("isolation", "bubblewrap is required for Linux isolation",
-			map[string]any{
-				"binary":            "bwrap",
-				"install":           hint,
-				"disable_isolation": disableHint,
-				"risk":              "disabling isolation lets child processes run without Linux filesystem isolation",
-			})
-		return fmt.Errorf(
-			"linux isolation requires bwrap and does not fall back automatically: %w; install bubblewrap with one of: %s; or disable isolation by setting %s; disabling isolation means child processes can run without Linux filesystem isolation and may access or modify more host files",
-			err,
-			hint,
-			disableHint,
-		)
+	bwrapPath := launch.backendPath
+	if bwrapPath == "" {
+		return linuxBackendUnavailableError(exec.ErrNotFound)
 	}
 	if cmd == nil || cmd.Path == "" || len(cmd.Args) == 0 {
 		return nil
@@ -86,6 +72,24 @@ func applyPlatformIsolation(cmd *exec.Cmd, launch launchProjection) error {
 	cmd.Args = bwrapArgs
 	cmd.Dir = ""
 	return nil
+}
+
+func linuxBackendUnavailableError(err error) error {
+	hint := bwrapInstallHint()
+	disableHint := `set "isolation.enabled": false in config.json`
+	logger.WarnCF("isolation", "bubblewrap is required for Linux isolation",
+		map[string]any{
+			"binary":            "bwrap",
+			"install":           hint,
+			"disable_isolation": disableHint,
+			"risk":              "disabling isolation lets child processes run without Linux filesystem isolation",
+		})
+	return fmt.Errorf(
+		"linux isolation requires bwrap and does not fall back automatically: %w; install bubblewrap with one of: %s; or disable isolation by setting %s; disabling isolation means child processes can run without Linux filesystem isolation and may access or modify more host files",
+		err,
+		hint,
+		disableHint,
+	)
 }
 
 func bwrapInstallHint() string {

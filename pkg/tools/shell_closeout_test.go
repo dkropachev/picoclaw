@@ -92,13 +92,16 @@ func TestCloseoutShellKeyEncodingBranches(t *testing.T) {
 }
 
 func TestCloseoutShellEnvironmentAllowlistAndPathHelpers(t *testing.T) {
-	t.Setenv("PICOCLAW_CLOSEOUT_PS", "expanded")
-	t.Setenv("PICOCLAW_CLOSEOUT_MISSING", "")
-	got := expandPowerShellEnvVars(
-		`$env:PICOCLAW_CLOSEOUT_PS ${env:PICOCLAW_CLOSEOUT_PS} %PICOCLAW_CLOSEOUT_PS% ` +
+	values := map[string]string{"PICOCLAW_CLOSEOUT_PS": "expanded"}
+	got, _ := expandPowerShellEnvVarsWithLookup(
+		`$env:PICOCLAW_CLOSEOUT_PS $Env:PICOCLAW_CLOSEOUT_PS ${ENV:PICOCLAW_CLOSEOUT_PS} %PICOCLAW_CLOSEOUT_PS% `+
 			`$env:PICOCLAW_CLOSEOUT_MISSING %PICOCLAW_CLOSEOUT_MISSING%`,
+		func(name string) (string, bool) {
+			value, ok := values[name]
+			return value, ok
+		},
 	)
-	if got != "expanded expanded expanded $env:PICOCLAW_CLOSEOUT_MISSING %PICOCLAW_CLOSEOUT_MISSING%" {
+	if got != "expanded expanded expanded expanded $env:PICOCLAW_CLOSEOUT_MISSING %PICOCLAW_CLOSEOUT_MISSING%" {
 		t.Fatalf("expanded environment = %q", got)
 	}
 
@@ -336,7 +339,11 @@ func TestCloseoutShellSynchronousAndSendKeysSuccess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell and PTY success commands are Unix-specific")
 	}
-	tool := &ExecTool{allowRemote: true}
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.allowRemote = true
 	if result := tool.Execute(context.Background(), map[string]any{
 		"action":  "run",
 		"command": ":",
@@ -651,7 +658,11 @@ func TestCloseoutShellSessionWriteErrorsAndCompletedKeys(t *testing.T) {
 func TestCloseoutShellSynchronousExceptionalResults(t *testing.T) {
 	t.Run("missing shell", func(t *testing.T) {
 		t.Setenv("PATH", "")
-		result := (&ExecTool{}).runSync(context.Background(), ":", "")
+		tool, err := NewExecTool("", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := tool.runSync(context.Background(), ":", "")
 		if result == nil || !result.IsError || !strings.Contains(result.ForLLM, "failed to start") {
 			t.Fatalf("missing shell result = %#v", result)
 		}
@@ -659,7 +670,11 @@ func TestCloseoutShellSynchronousExceptionalResults(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		return
 	}
-	result := (&ExecTool{}).runSync(context.Background(), "kill -9 $$", "")
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := tool.runSync(context.Background(), "kill -9 $$", "")
 	if result == nil || !result.IsError || !strings.Contains(result.ForLLM, "killed by signal") {
 		t.Fatalf("signal exit result = %#v", result)
 	}

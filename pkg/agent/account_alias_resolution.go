@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -153,6 +154,7 @@ func candidateForAccountAlias(
 	modelAlias string,
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
+	policy isolation.ExecutionPolicy,
 ) (providers.FallbackCandidate, error) {
 	modelCfg, err := concreteAccountModelConfig(
 		cfg,
@@ -170,7 +172,10 @@ func candidateForAccountAlias(
 	candidate.DisplayName = strings.TrimSpace(modelAlias)
 	candidate.IdentityKey = accountAliasIdentityKey(accountRef, modelAlias)
 
-	provider, _, err := providers.CreateProviderFromConfig(modelCfg)
+	provider, _, err := providers.CreateProviderFromConfigWithExecutionPolicy(
+		modelCfg,
+		policy,
+	)
 	if err != nil {
 		return providers.FallbackCandidate{}, err
 	}
@@ -187,7 +192,18 @@ func candidatesForAccountAliases(
 	fallbackAliases []string,
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
+	executionPolicies ...isolation.ExecutionPolicy,
 ) ([]providers.FallbackCandidate, error) {
+	var policy isolation.ExecutionPolicy
+	if len(executionPolicies) > 0 {
+		policy = executionPolicies[0]
+	} else {
+		isolationCfg := config.DefaultConfig().Isolation
+		if cfg != nil {
+			isolationCfg = cfg.Isolation
+		}
+		policy = isolation.NewExecutionPolicy(isolationCfg)
+	}
 	if err := validateModelAliasReferences(cfg, primaryAlias, fallbackAliases); err != nil {
 		return nil, err
 	}
@@ -208,6 +224,7 @@ func candidatesForAccountAliases(
 			alias,
 			workspace,
 			providersOut,
+			policy,
 		)
 		if err != nil {
 			if aliasIndex > 0 && errors.Is(err, config.ErrModelAliasDisabled) {
@@ -262,6 +279,7 @@ func buildAccountRouterWithAliases(
 	fallbackAliases []string,
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
+	executionPolicies ...isolation.ExecutionPolicy,
 ) *accountrouter.Router {
 	routerCfg := lookupAccountRouterConfig(cfg, accountRef)
 	if routerCfg == nil {
@@ -285,6 +303,7 @@ func buildAccountRouterWithAliases(
 			fallbackAliases,
 			workspace,
 			providersOut,
+			executionPolicies...,
 		)
 		if err != nil {
 			logger.WarnCF("agent", "Account router account has no runnable model alias", map[string]any{

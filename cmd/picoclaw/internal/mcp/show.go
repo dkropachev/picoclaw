@@ -12,6 +12,7 @@ import (
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliui"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 )
 
@@ -35,8 +36,9 @@ func defaultServerShowProbe(
 	name string,
 	server config.MCPServerConfig,
 	workspacePath string,
+	executionPolicy isolation.ExecutionPolicy,
 ) ([]toolDetail, error) {
-	mgr := picomcp.NewManager()
+	mgr := picomcp.NewManagerWithExecutionPolicy(executionPolicy)
 	defer func() { _ = mgr.Close() }()
 
 	server.Enabled = true
@@ -169,7 +171,14 @@ func newShowCommand() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 
-			details, err := serverShowProbe(ctx, name, server, cfg.WorkspacePath())
+			executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+			details, err := serverShowProbe(
+				ctx,
+				name,
+				server,
+				cfg.WorkspacePath(),
+				executionPolicy,
+			)
 			if err != nil {
 				return fmt.Errorf("failed to connect to MCP server %q: %w", name, err)
 			}

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
 func newTestCommand() *cobra.Command {
@@ -30,7 +32,14 @@ func newTestCommand() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 
-			result, err := serverProbe(ctx, name, server, cfg.WorkspacePath())
+			executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+			result, err := serverProbe(
+				ctx,
+				name,
+				server,
+				cfg.WorkspacePath(),
+				executionPolicy,
+			)
 			if err != nil {
 				return fmt.Errorf("failed to reach MCP server %q: %w", name, err)
 			}

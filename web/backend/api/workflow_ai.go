@@ -11,6 +11,7 @@ import (
 	agentloop "github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -114,16 +115,18 @@ func defaultRunWorkflowAuthorAgent(
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
 	}
-	provider, _, err := providers.CreateProvider(cfg)
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	provider, _, err := providers.CreateProviderWithExecutionPolicy(cfg, executionPolicy)
 	if err != nil {
 		return "", fmt.Errorf("failed to create provider: %w", err)
 	}
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()
-	agentLoop := agentloop.NewAgentLoop(
+	agentLoop := agentloop.NewAgentLoopWithExecutionPolicy(
 		cfg,
 		msgBus,
 		provider,
+		executionPolicy,
 		agentloop.WithConfigPath(h.configPath),
 	)
 	defer agentLoop.Close()

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	picotools "github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -556,7 +557,11 @@ func (h *Handler) handleRunToolAdaptationProbe(w http.ResponseWriter, r *http.Re
 	if strings.TrimSpace(modelCfg.Workspace) == "" {
 		modelCfg.Workspace = cfg.WorkspacePath()
 	}
-	llmProvider, modelID, err := providers.CreateProviderFromConfig(modelCfg)
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	llmProvider, modelID, err := providers.CreateProviderFromConfigWithExecutionPolicy(
+		modelCfg,
+		executionPolicy,
+	)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create probe provider: %v", err), http.StatusBadRequest)
 		return

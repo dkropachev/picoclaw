@@ -17,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/commands"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
@@ -30,7 +31,61 @@ func NewAgentLoop(
 	provider providers.LLMProvider,
 	opts ...AgentLoopOption,
 ) *AgentLoop {
-	registry := NewAgentRegistry(cfg, provider)
+	return newAgentLoop(
+		cfg,
+		msgBus,
+		provider,
+		isolation.NewExecutionPolicy(cfg.Isolation),
+		opts...,
+	)
+}
+
+// NewAgentLoopWithExecutionPolicy constructs a loop from one caller-owned
+// process generation snapshot. It avoids the compatibility constructor's
+// default snapshot when the provider already owns this exact value.
+func NewAgentLoopWithExecutionPolicy(
+	cfg *config.Config,
+	msgBus *bus.MessageBus,
+	provider providers.LLMProvider,
+	policy isolation.ExecutionPolicy,
+	opts ...AgentLoopOption,
+) *AgentLoop {
+	return newAgentLoop(cfg, msgBus, provider, policy, opts...)
+}
+
+func newAgentLoop(
+	cfg *config.Config,
+	msgBus *bus.MessageBus,
+	provider providers.LLMProvider,
+	policy isolation.ExecutionPolicy,
+	opts ...AgentLoopOption,
+) *AgentLoop {
+	al := &AgentLoop{
+		bus:               msgBus,
+		cfg:               cfg,
+		cmdRegistry:       commands.NewRegistry(commands.BuiltinDefinitions()),
+		steering:          newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		gitWorkspaces:     newGitWorkspaceManagerFromConfig(cfg),
+		ownsRuntimeEvents: true,
+		toolPolicy:        tools.CompatibilityAllowToolPolicy{},
+		executionPolicy:   policy,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(al)
+		}
+	}
+	if al.runtimeEvents == nil {
+		al.runtimeEvents = runtimeevents.NewBus()
+		al.ownsRuntimeEvents = true
+	}
+
+	registry := NewAgentRegistryWithExecutionPolicy(
+		cfg,
+		provider,
+		al.executionPolicy,
+	)
+	al.registry = registry
 
 	// Set up shared fallback chain with rate limiting.
 	cooldown := providers.NewCooldownTracker()
@@ -70,29 +125,10 @@ func NewAgentLoop(
 		workerPoolSize = 1
 	}
 
-	al := &AgentLoop{
-		bus:               msgBus,
-		cfg:               cfg,
-		registry:          registry,
-		state:             stateManager,
-		fallback:          fallbackChain,
-		cmdRegistry:       commands.NewRegistry(commands.BuiltinDefinitions()),
-		evolution:         bridge,
-		steering:          newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
-		gitWorkspaces:     newGitWorkspaceManagerFromConfig(cfg),
-		workerSem:         make(chan struct{}, workerPoolSize),
-		ownsRuntimeEvents: true,
-		toolPolicy:        tools.CompatibilityAllowToolPolicy{},
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(al)
-		}
-	}
-	if al.runtimeEvents == nil {
-		al.runtimeEvents = runtimeevents.NewBus()
-		al.ownsRuntimeEvents = true
-	}
+	al.state = stateManager
+	al.fallback = fallbackChain
+	al.evolution = bridge
+	al.workerSem = make(chan struct{}, workerPoolSize)
 	if bridge != nil {
 		bridge.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := bridge.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
@@ -115,7 +151,7 @@ func NewAgentLoop(
 		})
 	}
 	al.refreshRuntimeEventLogger(cfg)
-	al.providerFactory = providers.CreateProviderFromConfig
+	al.policyProviderFactory = providers.CreateProviderFromConfigWithExecutionPolicy
 	al.hooks = NewHookManager(al.runtimeEvents.Channel())
 	configureHookManagerFromConfig(al.hooks, cfg)
 	al.contextManager = al.resolveContextManager()

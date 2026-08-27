@@ -52,6 +52,7 @@ type ExecTool struct {
 	ptyDrainTimeout     time.Duration
 	beforePromotion     func(*processSessionReservation)
 	beforeSessionRemove func(ProcessSessionOwner, string, *ProcessSession)
+	executionPolicy     isolation.ExecutionPolicy
 }
 
 // backgroundProcessOperations keeps failure-path tests deterministic while
@@ -171,6 +172,28 @@ func NewExecToolWithConfig(
 	cfg *config.Config,
 	allowPaths ...[]*regexp.Regexp,
 ) (*ExecTool, error) {
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	return NewExecToolWithConfigAndExecutionPolicy(
+		workingDir,
+		restrict,
+		cfg,
+		isolation.NewExecutionPolicy(isolationCfg),
+		allowPaths...,
+	)
+}
+
+// NewExecToolWithConfigAndExecutionPolicy constructs an ExecTool bound to one
+// exact subprocess execution policy.
+func NewExecToolWithConfigAndExecutionPolicy(
+	workingDir string,
+	restrict bool,
+	cfg *config.Config,
+	policy isolation.ExecutionPolicy,
+	allowPaths ...[]*regexp.Regexp,
+) (*ExecTool, error) {
 	denyPatterns := make([]*regexp.Regexp, 0)
 	customAllowPatterns := make([]*regexp.Regexp, 0)
 	var allowedPathPatterns []*regexp.Regexp
@@ -236,6 +259,7 @@ func NewExecToolWithConfig(
 		sessionIDGenerator:  generateSessionID,
 		sessionWaitTimeout:  processSessionWaitTimeout,
 		ptyDrainTimeout:     processSessionPTYDrainTimeout,
+		executionPolicy:     policy,
 	}, nil
 }
 
@@ -446,7 +470,7 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 
 	// Route shell execution through the shared isolation entry point so exec tool
 	// subprocesses receive the same isolation policy as other integrations.
-	if err := isolation.Start(cmd); err != nil {
+	if err := t.executionPolicy.Start(cmd); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to start command: %v", err))
 	}
 
@@ -549,6 +573,10 @@ func processSessionOwnerFromContext(ctx context.Context) ProcessSessionOwner {
 }
 
 func (t *ExecTool) resolveBackgroundProcessOperations() backgroundProcessOperations {
+	policy := isolation.ExecutionPolicy{}
+	if t != nil {
+		policy = t.executionPolicy
+	}
 	operations := backgroundProcessOperations{
 		openPTY: pty.Open,
 		stdoutPipe: func(cmd *exec.Cmd) (io.ReadCloser, error) {
@@ -560,7 +588,7 @@ func (t *ExecTool) resolveBackgroundProcessOperations() backgroundProcessOperati
 		stdinPipe: func(cmd *exec.Cmd) (io.WriteCloser, error) {
 			return cmd.StdinPipe()
 		},
-		start:     isolation.Start,
+		start:     policy.Start,
 		terminate: terminateProcessTree,
 		wait: func(cmd *exec.Cmd) error {
 			return cmd.Wait()
@@ -1415,28 +1443,44 @@ func (t *ExecTool) executeSendKeys(ctx context.Context, args map[string]any) *To
 	}
 }
 
-// expandPowerShellEnvVars expands environment variable syntax used by both
-// PowerShell ($env:VAR) and CMD (%VAR%) to their actual values.
-func expandPowerShellEnvVars(cmd string) string {
+func expandPowerShellEnvVarsWithLookup(
+	cmd string,
+	lookup func(string) (string, bool),
+) (string, bool) {
+	unresolved := false
 	// Handle PowerShell style: $env:VAR and ${env:VAR}
-	rePs := regexp.MustCompile(`\$\{?env:(\w+)\}?`)
+	rePs := regexp.MustCompile(`(?i)\$\{?env:(\w+)\}?`)
 	cmd = rePs.ReplaceAllStringFunc(cmd, func(match string) string {
 		varName := rePs.FindStringSubmatch(match)[1]
-		if val := os.Getenv(varName); val != "" {
+		if val, ok := lookup(varName); ok {
 			return val
 		}
+		unresolved = true
 		return match
 	})
 
 	// Handle CMD style: %VAR%
 	reCmd := regexp.MustCompile(`%([^%]+)%`)
-	return reCmd.ReplaceAllStringFunc(cmd, func(match string) string {
+	cmd = reCmd.ReplaceAllStringFunc(cmd, func(match string) string {
 		varName := reCmd.FindStringSubmatch(match)[1]
-		if val := os.Getenv(varName); val != "" {
+		if val, ok := lookup(varName); ok {
 			return val
 		}
+		unresolved = true
 		return match
 	})
+	return cmd, unresolved
+}
+
+func (t *ExecTool) lookupGuardEnvironment(name, cwd string) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	value, present, err := t.executionPolicy.LookupCommandEnvironment(name, cwd)
+	if err != nil {
+		return "", false
+	}
+	return value, present
 }
 
 func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
@@ -1491,10 +1535,23 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 		// On Windows, expand ~ and PowerShell environment variables ($env:VAR) before path checking
 		if runtime.GOOS == "windows" {
 			// Expand PowerShell environment variables ($env:VAR and ${env:VAR})
-			cmd = expandPowerShellEnvVars(cmd)
+			var unresolved bool
+			cmd, unresolved = expandPowerShellEnvVarsWithLookup(
+				cmd,
+				func(name string) (string, bool) {
+					return t.lookupGuardEnvironment(name, cwd)
+				},
+			)
+			if unresolved {
+				return "Command blocked by safety guard (environment path is unavailable)"
+			}
 			// Also expand ~ for completeness
-			if home, err := os.UserHomeDir(); err == nil {
+			if home, ok := t.lookupGuardEnvironment("USERPROFILE", cwd); ok {
 				cmd = strings.ReplaceAll(cmd, "~", filepath.FromSlash(home))
+			} else if home, ok = t.lookupGuardEnvironment("HOME", cwd); ok {
+				cmd = strings.ReplaceAll(cmd, "~", filepath.FromSlash(home))
+			} else if strings.ContainsRune(cmd, '~') {
+				return "Command blocked by safety guard (home path is unavailable)"
 			}
 		}
 

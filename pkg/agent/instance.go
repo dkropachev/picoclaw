@@ -72,6 +72,7 @@ type AgentInstance struct {
 	LightAccountRouter *accountrouter.Router
 	ModelRouter        *modelrouter.Router
 	ConfigurationError error
+	executionPolicy    isolation.ExecutionPolicy
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -226,13 +227,30 @@ func NewAgentInstance(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 ) *AgentInstance {
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	return NewAgentInstanceWithExecutionPolicy(
+		agentCfg,
+		defaults,
+		cfg,
+		provider,
+		isolation.NewExecutionPolicy(isolationCfg),
+	)
+}
+
+// NewAgentInstanceWithExecutionPolicy constructs every process-capable
+// dependency from one exact immutable runtime-generation policy.
+func NewAgentInstanceWithExecutionPolicy(
+	agentCfg *config.AgentConfig,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	policy isolation.ExecutionPolicy,
+) *AgentInstance {
 	construction := &agentInstanceConstructionGuard{}
 	defer construction.cleanupPanic()
-	if cfg != nil {
-		// Keep the subprocess isolation runtime aligned with the latest loaded config
-		// before any tools or providers start spawning child processes.
-		isolation.Configure(cfg)
-	}
 
 	workspace := resolveAgentWorkspace(agentCfg, defaults)
 	os.MkdirAll(workspace, 0o755)
@@ -432,7 +450,13 @@ func NewAgentInstance(
 		))
 	}
 	if cfg.Tools.IsToolEnabled("exec") {
-		execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg, allowReadPaths)
+		execTool, err := tools.NewExecToolWithConfigAndExecutionPolicy(
+			workspace,
+			restrict,
+			cfg,
+			policy,
+			allowReadPaths,
+		)
 		if err != nil {
 			logger.ErrorCF("agent", "Failed to initialize exec tool; continuing without exec",
 				map[string]any{"error": err.Error()})
@@ -545,6 +569,7 @@ func NewAgentInstance(
 			fallbacks,
 			workspace,
 			candidateProviders,
+			policy,
 		)
 		if accountRouter != nil {
 			initialSelection := accountRouter.Select("", accountrouter.SelectReasonInitial)
@@ -565,6 +590,7 @@ func NewAgentInstance(
 				fallbacks,
 				workspace,
 				candidateProviders,
+				policy,
 			)
 			if err != nil {
 				configurationErr = err
@@ -592,6 +618,7 @@ func NewAgentInstance(
 			defaults.ImageModelFallbacks,
 			workspace,
 			candidateProviders,
+			policy,
 		)
 		var imageErr error
 		if imageAccountRouter != nil {
@@ -607,6 +634,7 @@ func NewAgentInstance(
 				defaults.ImageModelFallbacks,
 				workspace,
 				candidateProviders,
+				policy,
 			)
 		}
 		if imageErr != nil && configurationErr == nil {
@@ -647,6 +675,7 @@ func NewAgentInstance(
 			nil,
 			workspace,
 			candidateProviders,
+			policy,
 		)
 		if lightAccountRouter != nil {
 			selection := lightAccountRouter.Select("", accountrouter.SelectReasonInitial)
@@ -659,6 +688,7 @@ func NewAgentInstance(
 				nil,
 				workspace,
 				candidateProviders,
+				policy,
 			)
 		}
 		if len(lightCandidates) == 0 {
@@ -711,6 +741,7 @@ func NewAgentInstance(
 		LightAccountRouter:        lightAccountRouter,
 		ModelRouter:               modelRouter,
 		ConfigurationError:        configurationErr,
+		executionPolicy:           policy,
 		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }

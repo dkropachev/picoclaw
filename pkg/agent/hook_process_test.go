@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
+const (
+	processHookHelperEnvReportPath = "PICOCLAW_HOOK_ENV_REPORT_PATH"
+	processHookHelperEnvReportKeys = "PICOCLAW_HOOK_ENV_REPORT_KEYS"
+)
+
+type processHookHelperEnvObservation struct {
+	Present bool   `json:"present"`
+	Value   string `json:"value"`
+}
+
 func TestProcessHook_HelperProcess(t *testing.T) {
 	if os.Getenv("PICOCLAW_HOOK_HELPER") != "1" {
 		return
@@ -27,6 +38,163 @@ func TestProcessHook_HelperProcess(t *testing.T) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+func TestNewProcessHookWithExecutionPolicy_ZeroFailsClosed(t *testing.T) {
+	reportPath := filepath.Join(t.TempDir(), "environment.json")
+	opts := ProcessHookOptions{
+		Command: processHookHelperCommand(),
+		Env: append(
+			processHookHelperEnv("rewrite", ""),
+			processHookEnvironmentReportEnv(reportPath, "P014_ZERO_POLICY_STARTED")...,
+		),
+		InterceptLLM: true,
+	}
+
+	hook, err := NewProcessHookWithExecutionPolicy(
+		context.Background(),
+		"zero-policy",
+		opts,
+		isolation.ExecutionPolicy{},
+	)
+	if hook != nil {
+		_ = hook.Close()
+		t.Fatal("NewProcessHookWithExecutionPolicy() returned a hook for zero policy")
+	}
+	if !errors.Is(err, isolation.ErrExecutionPolicyUnavailable) {
+		t.Fatalf("NewProcessHookWithExecutionPolicy() error = %v, want execution policy unavailable", err)
+	}
+	if _, statErr := os.Stat(reportPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("zero-policy hook process started; environment report stat error = %v", statErr)
+	}
+}
+
+func TestNewProcessHook_UsesDisabledRestrictedCompatibilityPolicy(t *testing.T) {
+	const ambientKey = "P014_HOOK_COMPAT_AMBIENT_SECRET"
+	t.Cleanup(func() {
+		isolation.Configure(config.DefaultConfig())
+	})
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv(ambientKey, "must-not-pass")
+
+	legacyCfg := config.DefaultConfig()
+	legacyCfg.Isolation.Enabled = true
+	isolation.Configure(legacyCfg)
+
+	command := processHookHelperCommand()
+	absoluteCommand, err := filepath.Abs(command[0])
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+	command[0] = absoluteCommand
+	reportPath := filepath.Join(t.TempDir(), "environment.json")
+	env := processHookHelperEnv("rewrite", "")
+	env = append(env, processHookEnvironmentReportEnv(reportPath, ambientKey)...)
+	hook, err := NewProcessHook(context.Background(), "compatibility-policy", ProcessHookOptions{
+		Command:      command,
+		Env:          env,
+		InterceptLLM: true,
+	})
+	if err != nil {
+		t.Fatalf("NewProcessHook() error = %v", err)
+	}
+	defer hook.Close()
+
+	if got := readProcessHookEnvironmentReport(t, reportPath)[ambientKey]; got.Present {
+		t.Fatalf("compatibility policy inherited ambient secret: %+v", got)
+	}
+}
+
+func TestNewProcessHookWithExecutionPolicy_ExplicitEnvironmentDoesNotInheritAmbient(t *testing.T) {
+	const (
+		ambientKey  = "P014_HOOK_AMBIENT_SECRET"
+		explicitKey = "P014_HOOK_EXPLICIT_VALUE"
+		emptyKey    = "P014_HOOK_EXPLICIT_EMPTY"
+	)
+	t.Setenv(ambientKey, "must-not-pass")
+	t.Setenv(explicitKey, "ambient-value")
+
+	reportPath := filepath.Join(t.TempDir(), "environment.json")
+	env := processHookHelperEnv("rewrite", "")
+	env = append(env, processHookEnvironmentReportEnv(
+		reportPath,
+		ambientKey,
+		explicitKey,
+		emptyKey,
+	)...)
+	env = append(env, explicitKey+"=explicit-value", emptyKey+"=")
+
+	hook, err := NewProcessHookWithExecutionPolicy(
+		context.Background(),
+		"restricted-environment",
+		ProcessHookOptions{
+			Command:      processHookHelperCommand(),
+			Env:          env,
+			InterceptLLM: true,
+		},
+		isolation.NewExecutionPolicy(config.DefaultConfig().Isolation),
+	)
+	if err != nil {
+		t.Fatalf("NewProcessHookWithExecutionPolicy() error = %v", err)
+	}
+	defer hook.Close()
+
+	report := readProcessHookEnvironmentReport(t, reportPath)
+	if got := report[ambientKey]; got.Present {
+		t.Fatalf("ambient secret was inherited: %+v", got)
+	}
+	if got := report[explicitKey]; !got.Present || got.Value != "explicit-value" {
+		t.Fatalf("explicit environment value = %+v, want present explicit-value", got)
+	}
+	if got := report[emptyKey]; !got.Present || got.Value != "" {
+		t.Fatalf("explicit empty environment value = %+v, want present empty", got)
+	}
+}
+
+func TestNewProcessHookWithExecutionPolicy_UsesExactCapturedPolicy(t *testing.T) {
+	const policyKey = "P014_HOOK_POLICY_GENERATION"
+	isolationCfg := config.DefaultConfig().Isolation
+	isolationCfg.EnvironmentAllowlist = []string{policyKey}
+
+	t.Setenv(policyKey, "generation-a")
+	policyA := isolation.NewExecutionPolicy(isolationCfg)
+	t.Setenv(policyKey, "generation-b")
+	policyB := isolation.NewExecutionPolicy(isolationCfg)
+	t.Setenv(policyKey, "live-parent")
+
+	for _, test := range []struct {
+		name   string
+		policy isolation.ExecutionPolicy
+		want   string
+	}{
+		{name: "generation a", policy: policyA, want: "generation-a"},
+		{name: "generation b", policy: policyB, want: "generation-b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reportPath := filepath.Join(t.TempDir(), "environment.json")
+			env := processHookHelperEnv("rewrite", "")
+			env = append(env, processHookEnvironmentReportEnv(reportPath, policyKey)...)
+			hook, err := NewProcessHookWithExecutionPolicy(
+				context.Background(),
+				test.name,
+				ProcessHookOptions{
+					Command:      processHookHelperCommand(),
+					Env:          env,
+					InterceptLLM: true,
+				},
+				test.policy,
+			)
+			if err != nil {
+				t.Fatalf("NewProcessHookWithExecutionPolicy() error = %v", err)
+			}
+			defer hook.Close()
+
+			got := readProcessHookEnvironmentReport(t, reportPath)[policyKey]
+			if !got.Present || got.Value != test.want {
+				t.Fatalf("policy environment = %+v, want present %q", got, test.want)
+			}
+		})
+	}
 }
 
 func TestAgentLoop_MountProcessHook_LLMAndObserver(t *testing.T) {
@@ -228,10 +396,6 @@ func TestAgentLoop_MountProcessHook_IsolationSupportsRelativeDirAndCommand(t *te
 		t.Skip("linux-only isolation path handling")
 	}
 
-	provider := &llmHookTestProvider{}
-	al, agent, cleanup := newHookTestLoop(t, provider)
-	defer cleanup()
-
 	root := t.TempDir()
 	t.Setenv(config.EnvHome, filepath.Join(root, "picoclaw-home"))
 	binDir := filepath.Join(root, "bin")
@@ -248,8 +412,11 @@ func TestAgentLoop_MountProcessHook_IsolationSupportsRelativeDirAndCommand(t *te
 
 	cfg := config.DefaultConfig()
 	cfg.Isolation.Enabled = true
-	isolation.Configure(cfg)
-	t.Cleanup(func() { isolation.Configure(config.DefaultConfig()) })
+	policy := isolation.NewExecutionPolicy(cfg.Isolation)
+
+	provider := &llmHookTestProvider{}
+	al, agent, cleanup := newHookTestLoop(t, provider, policy)
+	defer cleanup()
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -303,10 +470,50 @@ func processHookHelperEnv(mode, eventLog string) []string {
 		"PICOCLAW_HOOK_HELPER=1",
 		"PICOCLAW_HOOK_MODE=" + mode,
 	}
+	if coverageDir, ok := os.LookupEnv("GOCOVERDIR"); ok {
+		env = append(env, "GOCOVERDIR="+coverageDir)
+	}
 	if eventLog != "" {
 		env = append(env, "PICOCLAW_HOOK_EVENT_LOG="+eventLog)
 	}
 	return env
+}
+
+func processHookHelperEnvMap(mode, eventLog string) map[string]string {
+	env := map[string]string{
+		"PICOCLAW_HOOK_HELPER": "1",
+		"PICOCLAW_HOOK_MODE":   mode,
+	}
+	if coverageDir, ok := os.LookupEnv("GOCOVERDIR"); ok {
+		env["GOCOVERDIR"] = coverageDir
+	}
+	if eventLog != "" {
+		env["PICOCLAW_HOOK_EVENT_LOG"] = eventLog
+	}
+	return env
+}
+
+func processHookEnvironmentReportEnv(path string, keys ...string) []string {
+	return []string{
+		processHookHelperEnvReportPath + "=" + path,
+		processHookHelperEnvReportKeys + "=" + strings.Join(keys, ","),
+	}
+}
+
+func readProcessHookEnvironmentReport(
+	t *testing.T,
+	path string,
+) map[string]processHookHelperEnvObservation {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read process hook environment report: %v", err)
+	}
+	var report map[string]processHookHelperEnvObservation
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatalf("decode process hook environment report: %v", err)
+	}
+	return report
 }
 
 func writeFakeBwrap(t *testing.T, path string) {
@@ -379,6 +586,9 @@ func waitForFileContains(t *testing.T, path, substring string) {
 }
 
 func runProcessHookHelper() error {
+	if err := writeProcessHookEnvironmentReport(); err != nil {
+		return err
+	}
 	mode := os.Getenv("PICOCLAW_HOOK_MODE")
 	eventLog := os.Getenv("PICOCLAW_HOOK_EVENT_LOG")
 
@@ -427,6 +637,30 @@ func runProcessHookHelper() error {
 	}
 
 	return scanner.Err()
+}
+
+func writeProcessHookEnvironmentReport() error {
+	path := os.Getenv(processHookHelperEnvReportPath)
+	if path == "" {
+		return nil
+	}
+
+	report := make(map[string]processHookHelperEnvObservation)
+	for _, key := range strings.Split(os.Getenv(processHookHelperEnvReportKeys), ",") {
+		if key == "" {
+			continue
+		}
+		value, present := os.LookupEnv(key)
+		report[key] = processHookHelperEnvObservation{
+			Present: present,
+			Value:   value,
+		}
+	}
+	body, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0o600)
 }
 
 func handleProcessHookRequest(mode string, msg processHookRPCMessage) (any, *processHookRPCError) {

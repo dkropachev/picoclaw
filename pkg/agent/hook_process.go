@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -103,31 +103,53 @@ type processHookAfterToolResponse struct {
 	Result *ToolResultHookResponse `json:"result,omitempty"`
 }
 
+// NewProcessHook starts a process hook with a fresh disabled, restricted
+// compatibility policy. It never consults the deprecated global policy.
 func NewProcessHook(ctx context.Context, name string, opts ProcessHookOptions) (*ProcessHook, error) {
+	isolationCfg := config.DefaultConfig().Isolation
+	isolationCfg.Enabled = false
+	return NewProcessHookWithExecutionPolicy(
+		ctx,
+		name,
+		opts,
+		isolation.NewExecutionPolicy(isolationCfg),
+	)
+}
+
+// NewProcessHookWithExecutionPolicy starts a process hook with one exact,
+// immutable execution policy. The zero policy is intentionally fail-closed.
+func NewProcessHookWithExecutionPolicy(
+	ctx context.Context,
+	name string,
+	opts ProcessHookOptions,
+	policy isolation.ExecutionPolicy,
+) (*ProcessHook, error) {
 	if len(opts.Command) == 0 {
 		return nil, fmt.Errorf("process hook command is required")
 	}
 
 	cmd := exec.Command(opts.Command[0], opts.Command[1:]...)
 	cmd.Dir = opts.Dir
-	if len(opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), opts.Env...)
-	}
+	cmd.Env = append(make([]string, 0, len(opts.Env)), opts.Env...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("create process hook stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, fmt.Errorf("create process hook stdout: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return nil, fmt.Errorf("create process hook stderr: %w", err)
 	}
-	// Route hook subprocess startup through the shared isolation entry point so
-	// process hooks inherit the same isolation behavior as other child processes.
-	if err := isolation.Start(cmd); err != nil {
+	if err := policy.Start(cmd); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, fmt.Errorf("start process hook: %w", err)
 	}
 
@@ -484,11 +506,18 @@ func (ph *ProcessHook) removePending(id uint64) {
 	}
 }
 
+// MountProcessHook starts and mounts a manual process hook with the policy
+// current at admission. Manual hooks retain that launch policy across reloads.
 func (al *AgentLoop) MountProcessHook(ctx context.Context, name string, opts ProcessHookOptions) error {
 	if al == nil {
 		return fmt.Errorf("agent loop is nil")
 	}
-	processHook, err := NewProcessHook(ctx, name, opts)
+	cfg := al.GetConfig()
+	policy, err := al.ExecutionPolicyForGeneration(cfg)
+	if err != nil {
+		return fmt.Errorf("snapshot process hook execution policy: %w", err)
+	}
+	processHook, err := NewProcessHookWithExecutionPolicy(ctx, name, opts, policy)
 	if err != nil {
 		return err
 	}

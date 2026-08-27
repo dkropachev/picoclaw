@@ -24,6 +24,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/health"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/netbind"
 	ppid "github.com/sipeed/picoclaw/pkg/pid"
@@ -438,7 +439,11 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 		}
 	}
 
-	provider, _, providerErr := providers.CreateProvider(cfg)
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	provider, _, providerErr := providers.CreateProviderWithExecutionPolicy(
+		cfg,
+		executionPolicy,
+	)
 	if providerErr != nil {
 		return false, "", providerErr
 	}
@@ -454,6 +459,7 @@ func computeConfigSignature(cfg *config.Config) string {
 		return ""
 	}
 	var parts []string
+	parts = append(parts, "isolation:"+computeIsolationConfigSignature(cfg.Isolation))
 	if agentSignature := computeAgentConfigSignature(cfg); agentSignature != "" {
 		parts = append(parts, "agents:"+agentSignature)
 	}
@@ -582,6 +588,32 @@ func computeConfigSignature(cfg *config.Config) string {
 		parts = append(parts, "event_ingress:"+eventIngressSignature)
 	}
 	return strings.Join(parts, ";")
+}
+
+func computeIsolationConfigSignature(isolationConfig config.IsolationConfig) string {
+	allowlist := append([]string(nil), isolationConfig.EnvironmentAllowlist...)
+	if isolationConfig.EnvironmentAllowlist == nil {
+		allowlist = config.DefaultIsolationEnvironmentAllowlist()
+	}
+	exposePaths := make([]config.ExposePath, len(isolationConfig.ExposePaths))
+	for index, exposePath := range isolationConfig.ExposePaths {
+		exposePaths[index] = isolation.NormalizeExposePath(exposePath)
+	}
+	payload := struct {
+		Enabled              bool                `json:"enabled"`
+		ExposePaths          []config.ExposePath `json:"expose_paths"`
+		EnvironmentAllowlist []string            `json:"environment_allowlist"`
+	}{
+		Enabled:              isolationConfig.Enabled,
+		ExposePaths:          exposePaths,
+		EnvironmentAllowlist: allowlist,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "<invalid>"
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest)
 }
 
 func computeAgentConfigSignature(cfg *config.Config) string {

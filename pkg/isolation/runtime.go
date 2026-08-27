@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -101,12 +102,35 @@ func ResolveUserEnv(root string) UserEnv {
 }
 
 // ApplyUserEnv rewrites the child process environment so home, temp, and
-// platform-specific user-data directories point into the instance root.
+// platform-specific user-data directories point into the instance root. It
+// treats cmd.Env as the complete explicit base and never inherits optional
+// ambient values. If its legacy void signature cannot report projection
+// failure, it installs an empty fail-closed environment (and an explicit empty
+// SYSTEMROOT on Windows).
+//
+// Deprecated: construct an ExecutionPolicy and call Start or Run.
 func ApplyUserEnv(cmd *exec.Cmd, root string) {
 	if cmd == nil {
 		return
 	}
-	cmd.Env = projectUserEnvironment(cmd.Environ(), ResolveUserEnv(root), runtime.GOOS)
+	captured := captureCurrentPolicyEnvironment(config.IsolationConfig{
+		EnvironmentAllowlist: make([]string, 0),
+	})
+	environment, err := restrictedEnvironmentForCommand(
+		captured,
+		cmd.Env,
+		cmd.Dir,
+		true,
+		ResolveUserEnv(root),
+	)
+	if err != nil {
+		cmd.Env = make([]string, 0)
+		if runtime.GOOS == "windows" {
+			cmd.Env = append(cmd.Env, "SYSTEMROOT=")
+		}
+		return
+	}
+	cmd.Env = environment
 }
 
 type projectedEnvironmentValue struct {
@@ -340,6 +364,8 @@ type launchProjection struct {
 	linuxBaseMounts []MountRule
 	windowsAccess   []AccessRule
 	environment     []string
+	executablePath  string
+	backendPath     string
 }
 
 type launchOperations struct {
@@ -352,6 +378,7 @@ type launchOperations struct {
 	cleanup     func(*exec.Cmd)
 	terminate   func(*exec.Cmd)
 	wait        func(*exec.Cmd) error
+	resolvePath func(string, string, string, bool) (string, error)
 }
 
 func defaultLaunchOperations() launchOperations {
@@ -369,10 +396,11 @@ func defaultLaunchOperations() launchOperations {
 		wait: func(cmd *exec.Cmd) error {
 			return cmd.Wait()
 		},
+		resolvePath: resolveExecutablePath,
 	}
 }
 
-func buildLaunchProjection(
+func buildLaunchProjectionMetadata(
 	isolationCfg config.IsolationConfig,
 	operations launchOperations,
 ) (launchProjection, error) {
@@ -419,8 +447,21 @@ func buildLaunchProjection(
 			launch.isolation.ExposePaths,
 		)
 	}
-	if err = operations.prepareRoot(launch.root); err != nil {
+	return launch, nil
+}
+
+func buildLaunchProjection(
+	isolationCfg config.IsolationConfig,
+	operations launchOperations,
+) (launchProjection, error) {
+	launch, err := buildLaunchProjectionMetadata(isolationCfg, operations)
+	if err != nil {
 		return launchProjection{}, err
+	}
+	if launch.isolation.Enabled {
+		if err = operations.prepareRoot(launch.root); err != nil {
+			return launchProjection{}, err
+		}
 	}
 	return launch, nil
 }
@@ -429,11 +470,14 @@ func projectionForPolicy(
 	policy ExecutionPolicy,
 	operations launchOperations,
 ) (launchProjection, error) {
-	isolationCfg, ok := policy.detachedIsolation()
+	snapshot, ok := policy.detachedSnapshot()
 	if !ok {
 		return launchProjection{}, ErrExecutionPolicyUnavailable
 	}
-	return buildLaunchProjection(isolationCfg, operations)
+	if snapshot.environment.err != nil {
+		return launchProjection{}, snapshot.environment.err
+	}
+	return buildLaunchProjection(snapshot.isolation, operations)
 }
 
 func prepareCommandForPolicy(
@@ -441,31 +485,112 @@ func prepareCommandForPolicy(
 	cmd *exec.Cmd,
 	operations launchOperations,
 ) (launchProjection, error) {
-	isolationCfg, ok := policy.detachedIsolation()
+	snapshot, ok := policy.detachedSnapshot()
 	if !ok {
 		return launchProjection{}, ErrExecutionPolicyUnavailable
 	}
 	if cmd == nil {
 		return launchProjection{}, fmt.Errorf("command is required")
 	}
-	launch, err := buildLaunchProjection(isolationCfg, operations)
+	if snapshot.environment.err != nil {
+		return launchProjection{}, snapshot.environment.err
+	}
+	launch, err := buildLaunchProjectionMetadata(snapshot.isolation, operations)
 	if err != nil {
 		return launchProjection{}, err
+	}
+	userEnv := UserEnv{}
+	if launch.isolation.Enabled {
+		userEnv = ResolveUserEnv(launch.root)
+	}
+	launch.environment, err = restrictedEnvironmentForCommand(
+		snapshot.environment,
+		cmd.Env,
+		cmd.Dir,
+		launch.isolation.Enabled,
+		userEnv,
+	)
+	if err != nil {
+		return launchProjection{}, err
+	}
+	launch.executablePath, err = resolveCommandExecutable(
+		cmd,
+		launch.environment,
+		launch.goos,
+		operations.resolvePath,
+	)
+	if err != nil {
+		return launchProjection{}, err
+	}
+	if launch.isolation.Enabled && launch.goos == "linux" && operations.resolvePath != nil {
+		launch.backendPath, err = operations.resolvePath(
+			"bwrap",
+			snapshot.environment.hostPath,
+			snapshot.environment.hostPathExt,
+			snapshot.environment.hostPathExtPresent,
+		)
+		if err != nil {
+			return launchProjection{}, linuxBackendUnavailableError(err)
+		}
+	}
+	if launch.isolation.Enabled {
+		if err = operations.prepareRoot(launch.root); err != nil {
+			return launchProjection{}, err
+		}
+	}
+	cmd.Env = append([]string(nil), launch.environment...)
+	if launch.executablePath != "" {
+		cmd.Path = launch.executablePath
+		cmd.Err = nil
 	}
 	if !launch.isolation.Enabled {
 		return launch, nil
 	}
-	launch.environment = projectUserEnvironment(
-		cmd.Environ(),
-		ResolveUserEnv(launch.root),
-		launch.goos,
-	)
-	cmd.Env = append([]string(nil), launch.environment...)
 	if err = operations.apply(cmd, launch); err != nil {
 		operations.cleanup(cmd)
 		return launchProjection{}, err
 	}
 	return launch, nil
+}
+
+func resolveCommandExecutable(
+	cmd *exec.Cmd,
+	environment []string,
+	goos string,
+	resolver func(string, string, string, bool) (string, error),
+) (string, error) {
+	if cmd == nil {
+		return "", fmt.Errorf("command is required")
+	}
+	requested := cmd.Path
+	if len(cmd.Args) > 0 {
+		requested = cmd.Args[0]
+	}
+	if requested == "" || strings.IndexByte(requested, 0) >= 0 {
+		return "", fmt.Errorf("executable name is invalid")
+	}
+	if len(requested) > 4096 || !utf8.ValidString(requested) {
+		return "", fmt.Errorf("executable name is invalid")
+	}
+	for _, character := range requested {
+		if character < 0x20 || character == 0x7f {
+			return "", fmt.Errorf("executable name is invalid")
+		}
+	}
+	requested, err := normalizeExecutableRequest(requested, cmd.Dir)
+	if err != nil {
+		return "", err
+	}
+	if resolver == nil {
+		return "", nil
+	}
+	pathValue := environmentSliceValue(environment, "PATH", goos)
+	pathExtValue, pathExtPresent := environmentSliceLookup(environment, "PATHEXT", goos)
+	resolved, err := resolver(requested, pathValue, pathExtValue, pathExtPresent)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 func startExecutionPolicy(

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
 // CreateProvider creates a provider based on the configuration.
@@ -20,6 +21,22 @@ import (
 // routers choose a concrete account, then the configured alias resolves the
 // model for that account.
 func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	return CreateProviderWithExecutionPolicy(
+		cfg,
+		isolation.NewExecutionPolicy(isolationCfg),
+	)
+}
+
+// CreateProviderWithExecutionPolicy creates a provider bound to one exact
+// subprocess execution policy.
+func CreateProviderWithExecutionPolicy(
+	cfg *config.Config,
+	policy isolation.ExecutionPolicy,
+) (LLMProvider, string, error) {
 	if cfg == nil {
 		return nil, "", fmt.Errorf("config is nil")
 	}
@@ -42,6 +59,7 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 			accountRef,
 			modelAlias,
 			routerCfg,
+			policy,
 		)
 		return provider, requestedSelector, err
 	}
@@ -54,7 +72,7 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 		if credentialCfg == nil {
 			return nil, "", fmt.Errorf("credential account %q is not supported", accountRef)
 		}
-		provider, _, createErr := CreateProviderFromConfig(credentialCfg)
+		provider, _, createErr := CreateProviderFromConfigWithExecutionPolicy(credentialCfg, policy)
 		if createErr != nil {
 			return nil, "", fmt.Errorf(
 				"failed to create provider for model alias %q with account %q: %w",
@@ -91,7 +109,7 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 		modelCfg.Workspace = cfg.WorkspacePath()
 	}
 
-	provider, _, err := CreateProviderFromConfig(modelCfg)
+	provider, _, err := CreateProviderFromConfigWithExecutionPolicy(modelCfg, policy)
 	if err != nil {
 		return nil, "", fmt.Errorf(
 			"failed to create provider for model alias %q with account %q: %w",
@@ -156,6 +174,7 @@ func createAccountRouterBootstrapProvider(
 	routerName string,
 	modelAlias string,
 	routerCfg *config.AccountRouterConfig,
+	policy isolation.ExecutionPolicy,
 ) (LLMProvider, string, error) {
 	accountNames := reachableRouterAccounts(routerCfg)
 	if len(accountNames) == 0 {
@@ -174,7 +193,7 @@ func createAccountRouterBootstrapProvider(
 			continue
 		}
 
-		provider, _, err := CreateProviderFromConfig(accountCfg)
+		provider, _, err := CreateProviderFromConfigWithExecutionPolicy(accountCfg, policy)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%q: %v", accountName, err))
 			continue

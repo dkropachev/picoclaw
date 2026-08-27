@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliui"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
 func newListCommand() *cobra.Command {
@@ -30,6 +31,7 @@ func newListCommand() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No MCP servers configured.")
 				return nil
 			}
+			executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
 
 			rows := make([]cliui.MCPListRow, 0, len(cfg.Tools.MCP.Servers))
 			for _, name := range sortedServerNames(cfg.Tools.MCP.Servers) {
@@ -41,7 +43,13 @@ func newListCommand() *cobra.Command {
 
 				if includeStatus && server.Enabled {
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					result, probeErr := serverProbe(ctx, name, server, cfg.WorkspacePath())
+					result, probeErr := serverProbe(
+						ctx,
+						name,
+						server,
+						cfg.WorkspacePath(),
+						executionPolicy,
+					)
 					cancel()
 					if probeErr != nil {
 						status = "error"

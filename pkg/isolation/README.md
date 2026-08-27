@@ -9,9 +9,14 @@ It does not sandbox the main `picoclaw` process itself.
 The current scope is the child-process startup path:
 
 - `exec` tool
+- Cron commands executed through the `exec` tool
 - CLI providers such as `claude-cli` and `codex-cli`
 - process hooks
 - MCP `stdio` servers
+
+Other trusted administrative subprocesses in the repository are outside this
+targeted agent-owned boundary unless their package explicitly adopts an
+`ExecutionPolicy`.
 
 ## One-Sentence Model
 
@@ -19,20 +24,23 @@ The current scope is the child-process startup path:
 - New subprocess owners construct an explicit immutable `ExecutionPolicy` from
   their effective isolation config and launch through `policy.Start` or
   `policy.Run`.
-- One launch carries one detached config and, when enabled, one resolved
-  instance root through validation, platform preparation, process start, and
-  post-start handling.
+- Construction captures one restricted host-environment and executable-lookup
+  snapshot. One launch carries that snapshot, one detached config and, when
+  enabled, one resolved instance root through validation, platform preparation,
+  process start, and post-start handling.
 
 ## Architecture
 
 The implementation has four layers:
 
 1. Policy layer: `NewExecutionPolicy(config.IsolationConfig)` recursively copies
-   the ordered exposed-path configuration into an opaque, concurrency-safe
-   value.
+   the ordered exposed-path/environment-allowlist configuration and captures
+   only admitted host variables plus private executable lookup state into an
+   opaque, concurrency-safe value.
 2. Per-launch projection layer: resolves `config.GetHome()` at most once,
    validates the exact policy/platform combination, prepares instance
-   directories, and derives the child environment.
+   directories, derives an empty-base restricted child environment, and resolves
+   the executable against the exact final `PATH`/`PATHEXT`.
 3. Platform backend layer: Linux uses `bwrap`; Windows uses a restricted token, low integrity, and a `Job Object`; other platforms are not implemented.
 4. Unified startup layer: `ExecutionPolicy.Start(cmd)` and
    `ExecutionPolicy.Run(cmd)` carry that same projection through pre-start and
@@ -54,11 +62,12 @@ if err := policy.Run(cmd); err != nil {
 }
 ```
 
-Construction has no filesystem or process effect. It preserves the distinction
-between a nil and an allocated-empty `expose_paths` slice and does not retain
-caller-owned slice storage. A copied policy may be reused concurrently. Each
-launch makes its own detached projection, and later mutation of the source
-config cannot change it.
+Construction has no filesystem or process effect, but intentionally reads the
+host environment once. It preserves the distinction between nil and
+allocated-empty `expose_paths` and `environment_allowlist` slices and does not
+retain caller-owned slice storage. A copied policy may be reused concurrently.
+Each launch makes its own detached projection; later source-config mutation,
+`os.Setenv`, reload, or deprecated-global mutation cannot change it.
 
 `ExecutionPolicy{}` is deliberately invalid and fails closed with
 `ErrExecutionPolicyUnavailable`. An explicitly constructed policy with
@@ -81,22 +90,24 @@ last-writer-wins.
 fails closed when Windows isolation is enabled. Use `ExecutionPolicy.Start` or
 `ExecutionPolicy.Run`.
 
-Existing shell/background, process-hook, stdio MCP, and CLI-provider call sites
-still use this compatibility path. The follow-up propagation work will bind one
-`ExecutionPolicy` to each exact runtime/config generation, pass it to every
-subprocess owner, and remove agent-construction calls to `Configure`. Until
-then, the explicit API is safe from mutable global policy state, but the legacy
-production consumers do not yet have per-agent generation isolation.
+Production shell/background, Cron, process-hook, stdio MCP, and CLI-provider
+owners do not use this compatibility path. One exact policy is constructed
+before each provider/agent generation, published atomically with its config and
+registry, and retained by every owner, including MCP reconnects and gateway
+rollback. `NewAgentInstance` never calls `Configure`. The deprecated globals
+remain only for external source compatibility and tests.
 
 ## Configuration
 
-Isolation lives under:
+Isolation lives under `isolation`. This minimal example uses an explicit
+allowlist; it replaces, rather than extends, the portable defaults:
 
 ```json
 {
   "isolation": {
     "enabled": false,
-    "expose_paths": []
+    "expose_paths": [],
+    "environment_allowlist": ["PATH", "HOME", "TMPDIR", "LANG", "TERM"]
   }
 }
 ```
@@ -105,6 +116,52 @@ Field meanings:
 
 - `enabled`: enables or disables subprocess isolation. Default: `false`.
 - `expose_paths`: explicitly exposes host paths inside the isolated environment. It only matters when `enabled=true`. This is currently supported on Linux only.
+- `environment_allowlist`: exact host environment names captured when the
+  policy generation is constructed. Environment restriction applies even when
+  `enabled=false`.
+
+An omitted or programmatic nil `environment_allowlist` uses portable
+compatibility defaults. An explicit JSON `[]` admits no optional ambient
+variables. The field is persisted without `omitempty`, so empty remains
+different from omitted/default. Names use portable
+`[A-Za-z_][A-Za-z0-9_]*` syntax, are capped at 128 entries/128 bytes, and must be
+unique case-insensitively so a Unix config remains unambiguous on Windows.
+
+Portable defaults are:
+
+```text
+PATH
+HOME TMPDIR XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME
+PATHEXT USERPROFILE HOMEDRIVE HOMEPATH TEMP TMP APPDATA LOCALAPPDATA
+LANG LANGUAGE LC_ALL LC_CTYPE LC_COLLATE LC_MESSAGES
+LC_MONETARY LC_NUMERIC LC_TIME
+TZ TERM COLORTERM NO_COLOR
+```
+
+Credential/token/key/password variables, proxy variables, SSH/GPG/DBus
+sockets, loader injection, custom trust roots, provider-specific homes, Git
+overrides, and language/toolchain injection variables are not defaults. Adding
+one name is an explicit host-capability grant. With Linux isolation, a value
+that names a host path may also require a matching `expose_paths` rule.
+
+Migration guide:
+
+| Existing dependency | Explicit replacement |
+| --- | --- |
+| Shell/Cron command reads an ordinary host variable | Add its exact name to `isolation.environment_allowlist`. |
+| Process hook needs a hook-only value | Prefer `hooks.processes.<name>.env`; use the global allowlist only when every targeted process should receive it. |
+| Stdio MCP server needs a server-only value | Prefer that server's `env_file` or `env`; config `env` overrides `env_file`. |
+| Enterprise proxy contains credentials | Opt in the exact proxy names deliberately; they are never defaults. |
+| Custom CA/trust root | Opt in the exact trust variable and expose its host path when filesystem isolation is enabled. |
+| Toolchain/runtime home or cache | Opt in the exact name and expose required paths; avoid granting provider credentials to shell/hooks/MCP globally. |
+| Codex/Claude login directory under enabled isolation | Do not auto-mount it. Configure deliberate paths only with the corresponding provider/admission policy. |
+
+Reload/restart captures current admitted host values. Running generations keep
+their old snapshot.
+
+Go API note: `config.IsolationConfig` gained `EnvironmentAllowlist`. External
+code using positional (unkeyed) composite literals must migrate to keyed
+literals; keyed literals remain source-compatible.
 
 Example:
 
@@ -171,9 +228,20 @@ Windows also prepares:
 - `runtime-user-env/AppData/Roaming`
 - `runtime-user-env/AppData/Local`
 
-## User Environment Redirect
+## Restricted Child Environment
 
-When isolation is enabled, child processes receive a redirected per-instance user environment.
+Every targeted launch, including `enabled=false`, starts from an empty inherited
+environment. Policy-captured allowlisted values are added first. Trusted
+owner-specific values are then overlaid: process-hook `env`, or MCP `env_file`
+followed by MCP config `env`. `PWD` is computed from the effective command
+directory. Output is detached and sorted.
+
+The maximum final environment is 256 entries, 128 bytes per name, 16 KiB per
+value, and 24 KiB encoded. Names and values must be valid and NUL-free. Empty
+explicit values are preserved. Error messages never include values.
+
+When filesystem isolation is enabled, per-instance redirects are authoritative
+and applied last.
 
 Linux variables:
 
@@ -187,21 +255,30 @@ Windows variables:
 
 - `USERPROFILE`
 - `HOME`
+- `HOMEDRIVE`
+- `HOMEPATH`
 - `TEMP`
 - `TMP`
 - `APPDATA`
 - `LOCALAPPDATA`
 
-These paths point into `runtime-user-env` under the instance root. The current
-ambient environment is otherwise retained, but its projection is deterministic.
-On Windows, names are folded case-insensitively so ambient aliases such as
-`Home` cannot override the canonical redirected `HOME`; other duplicate ambient
-aliases preserve last-value semantics.
+These paths point into `runtime-user-env` under the instance root. Windows names
+are folded case-insensitively. The policy always supplies its frozen
+`SYSTEMROOT` (and coherent `WINDIR`, `SYSTEMDRIVE`, and `COMSPEC`) so Go cannot
+silently inject a later live-parent value; explicit owner values cannot
+override them. `NoDefaultCurrentDirectoryInExePath=1` is also authoritative so
+Go/Windows descendants do not search the working directory before `PATH`.
 
-This is not the restricted child-environment boundary. The follow-up
-propagation/environment change will start restricted processes from an empty
-environment plus an explicit allowlist while preserving required PATH, home,
-hook, MCP, and CLI-provider variables.
+Bare executable lookup is repeated inside `ExecutionPolicy.Start`/`Run` using
+the final child `PATH` and Windows `PATHEXT`. Empty/relative search directories
+are ignored; current-directory lookup is never implicit. The resolved absolute
+path is frozen for that launch, and the child receives the same PATH for
+shebangs and descendants. Linux `bwrap` instead resolves from a private host
+PATH snapshot that child-specific overrides cannot replace.
+
+Environment values are captured at generation construction. Changing the host
+environment later has no effect until a new runtime generation/restart. Gateway
+A-to-B-to-A rollback restores the original A snapshot rather than rebuilding it.
 
 ## Platform Behavior
 
@@ -221,6 +298,9 @@ as `/usr`, `/bin`, `/lib`, `/lib64`, and `/etc/resolv.conf` when they exist on
 the host.
 
 At runtime, PicoClaw also adds the executable path, its directory, the effective working directory, and absolute path arguments when needed.
+
+Both the child executable and `bwrap` are resolved against policy-owned frozen
+lookup state; a later parent PATH change cannot select another binary.
 
 There is no automatic fallback when `bwrap` is missing.
 
@@ -256,6 +336,8 @@ The Windows backend currently uses:
 - low integrity level
 - a `Job Object`
 - redirected child-process user environment
+- policy-owned `PATH`/`PATHEXT` resolution without current-directory search
+- an explicit frozen `SYSTEMROOT` environment value
 
 It does not currently implement true `source -> target` filesystem remapping.
 
@@ -298,10 +380,17 @@ They complement each other and do not replace each other.
 - Windows does not yet implement full host ACL enforcement for every allowed or denied path.
 - macOS is not implemented.
 - The current design isolates child processes, not the main `picoclaw` process.
-- Ambient child-process variables remain available until the restricted
-  environment follow-up lands.
-- Existing production subprocess owners still select the deprecated global
-  compatibility policy until per-generation propagation lands.
+- The restricted environment covers the targeted agent-owned subprocess list,
+  not every trusted administrative `exec.Command` elsewhere in the repository.
+- Proxy, custom CA, provider-home, and toolchain variables require explicit
+  allowlist grants; this can be a compatibility change for existing MCP, hook,
+  shell, or CLI setups.
+- A manual process hook retains its launch policy across reload. Existing
+  background processes likewise retain the environment/sandbox fixed at start.
+- Executable lookup is frozen against environment mutation, but an adversarial
+  external delete/replace of the admitted filesystem entry between final
+  validation and the kernel process-open remains outside this path-based
+  launcher contract.
 - Linux does not promise identical optional system mounts across distributions;
   only paths present in the fixed host view for a launch are included.
 
@@ -316,9 +405,11 @@ If you are new to this code, read it in this order:
 5. `pkg/isolation/platform_windows.go`
 6. Call sites:
 7. `pkg/tools/shell.go`
-8. `pkg/providers/cli/claude_cli_provider.go` and
+8. `pkg/agent/agent_init.go`, `pkg/agent/agent.go`, and
+   `pkg/agent/agent_mcp.go`
+9. `pkg/providers/cli/claude_cli_provider.go` and
    `pkg/providers/cli/codex_cli_provider.go`
-9. `pkg/agent/hook_process.go`
-10. `pkg/mcp/isolated_command_transport.go`
+10. `pkg/agent/hook_process.go`
+11. `pkg/mcp/isolated_command_transport.go`
 
 That path gives the fastest overview of the configuration model, runtime flow, and platform-specific limits.

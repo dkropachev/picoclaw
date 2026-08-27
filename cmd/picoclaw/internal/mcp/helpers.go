@@ -19,6 +19,7 @@ import (
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 )
 
@@ -367,8 +368,9 @@ func defaultServerProbe(
 	name string,
 	server config.MCPServerConfig,
 	workspacePath string,
+	executionPolicy isolation.ExecutionPolicy,
 ) (probeResult, error) {
-	mgr := picomcp.NewManager()
+	mgr := picomcp.NewManagerWithExecutionPolicy(executionPolicy)
 	defer func() { _ = mgr.Close() }()
 
 	server.Enabled = true

@@ -5,6 +5,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
@@ -13,10 +14,12 @@ import (
 
 // AgentRegistry manages multiple agent instances and routes messages to them.
 type AgentRegistry struct {
-	cfg      *config.Config
-	agents   map[string]*AgentInstance
-	resolver *routing.RouteResolver
-	mu       sync.RWMutex
+	cfg               *config.Config
+	agents            map[string]*AgentInstance
+	resolver          *routing.RouteResolver
+	executionPolicy   isolation.ExecutionPolicy
+	bootstrapProvider providers.LLMProvider
+	mu                sync.RWMutex
 }
 
 type agentRegistryConstructionGuard struct {
@@ -28,7 +31,7 @@ func (guard *agentRegistryConstructionGuard) cleanupPanic() {
 	if recovered == nil {
 		return
 	}
-	guard.registry.Close()
+	guard.registry.CloseCandidate()
 	panic(recovered)
 }
 
@@ -37,10 +40,30 @@ func NewAgentRegistry(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 ) *AgentRegistry {
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	return NewAgentRegistryWithExecutionPolicy(
+		cfg,
+		provider,
+		isolation.NewExecutionPolicy(isolationCfg),
+	)
+}
+
+// NewAgentRegistryWithExecutionPolicy constructs every agent process owner
+// from one exact immutable runtime-generation policy.
+func NewAgentRegistryWithExecutionPolicy(
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	policy isolation.ExecutionPolicy,
+) *AgentRegistry {
 	registry := &AgentRegistry{
-		cfg:      cfg,
-		agents:   make(map[string]*AgentInstance),
-		resolver: routing.NewRouteResolver(cfg),
+		cfg:               cfg,
+		agents:            make(map[string]*AgentInstance),
+		resolver:          routing.NewRouteResolver(cfg),
+		executionPolicy:   policy,
+		bootstrapProvider: provider,
 	}
 	defer (&agentRegistryConstructionGuard{registry: registry}).cleanupPanic()
 
@@ -50,14 +73,26 @@ func NewAgentRegistry(
 			ID:      "main",
 			Default: true,
 		}
-		instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider)
+		instance := NewAgentInstanceWithExecutionPolicy(
+			implicitAgent,
+			&cfg.Agents.Defaults,
+			cfg,
+			provider,
+			policy,
+		)
 		registry.agents["main"] = instance
 		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
 	} else {
 		for i := range agentConfigs {
 			ac := &agentConfigs[i]
 			id := routing.NormalizeAgentID(ac.ID)
-			instance := NewAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider)
+			instance := NewAgentInstanceWithExecutionPolicy(
+				ac,
+				&cfg.Agents.Defaults,
+				cfg,
+				provider,
+				policy,
+			)
 			registry.agents[id] = instance
 			logger.InfoCF("agent", "Registered agent",
 				map[string]any{
@@ -76,6 +111,39 @@ func NewAgentRegistry(
 	}
 
 	return registry
+}
+
+// CloseCandidate closes an unpublished registry and every internally-created
+// stateful candidate provider, while retaining the externally supplied
+// bootstrap provider owned by the reload caller.
+func (r *AgentRegistry) CloseCandidate() {
+	if r == nil {
+		return
+	}
+	providersToClose := make(map[providers.LLMProvider]struct{})
+	r.mu.RLock()
+	agents := make([]*AgentInstance, 0, len(r.agents))
+	for _, agent := range r.agents {
+		agents = append(agents, agent)
+	}
+	bootstrap := r.bootstrapProvider
+	r.mu.RUnlock()
+	agentCandidateProvidersMu.RLock()
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		for _, candidateProvider := range agent.CandidateProviders {
+			if candidateProvider != nil && candidateProvider != bootstrap {
+				providersToClose[candidateProvider] = struct{}{}
+			}
+		}
+	}
+	agentCandidateProvidersMu.RUnlock()
+	r.Close()
+	for candidateProvider := range providersToClose {
+		closeProviderIfStateful(candidateProvider)
+	}
 }
 
 // GetAgent returns the agent instance for a given ID.

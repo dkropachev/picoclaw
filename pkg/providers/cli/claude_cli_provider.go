@@ -14,15 +14,26 @@ import (
 
 // ClaudeCliProvider implements LLMProvider using the claude CLI as a subprocess.
 type ClaudeCliProvider struct {
-	command   string
-	workspace string
+	command         string
+	workspace       string
+	executionPolicy isolation.ExecutionPolicy
 }
 
 // NewClaudeCliProvider creates a new Claude CLI provider.
 func NewClaudeCliProvider(workspace string) *ClaudeCliProvider {
+	return NewClaudeCliProviderWithExecutionPolicy(workspace, defaultExecutionPolicy())
+}
+
+// NewClaudeCliProviderWithExecutionPolicy creates a new Claude CLI provider
+// bound to one exact subprocess execution policy.
+func NewClaudeCliProviderWithExecutionPolicy(
+	workspace string,
+	policy isolation.ExecutionPolicy,
+) *ClaudeCliProvider {
 	return &ClaudeCliProvider{
-		command:   "claude",
-		workspace: workspace,
+		command:         "claude",
+		workspace:       workspace,
+		executionPolicy: policy,
 	}
 }
 
@@ -54,9 +65,7 @@ func (p *ClaudeCliProvider) Chat(
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Execute the CLI through the shared isolation wrapper so external provider
-	// processes honor the configured isolation policy.
-	if err := isolation.Run(cmd); err != nil {
+	if err := p.executionPolicy.Run(cmd); err != nil {
 		stderrStr := strings.TrimSpace(stderr.String())
 		stdoutStr := strings.TrimSpace(stdout.String())
 		switch {
