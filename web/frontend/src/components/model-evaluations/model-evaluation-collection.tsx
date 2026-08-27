@@ -30,7 +30,9 @@ import {
 import {
   type CollectionDefinition,
   CollectionDetailShell,
+  type StandardCollectionPageSearch,
 } from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import {
   profileAvailableAliases,
   selectProfileCandidates,
@@ -52,11 +54,6 @@ import {
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
-import {
-  type PilotCollectionSearch,
-  StandardPilotCollectionPage,
-} from "./standard-pilot-collection-page"
-
 const defaultQuery = "ORDER BY updated DESC"
 const supportedViews = ["list", "table", "grid"] as const
 const activeStatuses = new Set<EvaluationStatus>([
@@ -75,7 +72,7 @@ export function ModelEvaluationsCollectionPage({
   onOpen,
   onEdit,
 }: {
-  search: PilotCollectionSearch
+  search: StandardCollectionPageSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
   onAdd: () => void
   onOpen: (evaluation: RepositoryModelEvaluationSummary) => void
@@ -185,7 +182,7 @@ export function ModelEvaluationsCollectionPage({
   )
 
   return (
-    <StandardPilotCollectionPage
+    <StandardCollectionPage
       definition={definition}
       search={search}
       onSearchChange={onSearchChange}

@@ -1,7 +1,7 @@
 import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
-import { ModelRoutersCollectionPage } from "@/components/collections/pilots/model-collections"
+import { ModelRoutersCollectionPage } from "@/components/models/model-collections"
 import {
   type CollectionRouteSearch,
   collectionRouteSearchIsCanonical,

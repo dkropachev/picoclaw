@@ -17,6 +17,12 @@ export { CollectionSelectionBar } from "./collection-selection-bar"
 export { CollectionShell } from "./collection-shell"
 export { CollectionToolbar } from "./collection-toolbar"
 export {
+  StandardCollectionPage,
+  type StandardCollectionBulkDeleteConfirmation,
+  type StandardCollectionPageProps,
+  type StandardCollectionPageSearch,
+} from "./standard-collection-page"
+export {
   collectionViews,
   type CollectionBadge,
   type CollectionColumn,

@@ -13,8 +13,7 @@ import {
   createModelEvaluation,
   getModelEvaluationOptions,
 } from "@/api/model-evaluations"
-
-import { ModelEvaluationEditorPage } from "./model-evaluation-collection"
+import { ModelEvaluationEditorPage } from "@/components/model-evaluations/model-evaluation-collection"
 
 vi.mock("@/api/model-evaluations", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/model-evaluations")>()),

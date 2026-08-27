@@ -46,7 +46,6 @@
       "patterns": [
         "web/frontend/src/api/mcp*.ts",
         "web/frontend/src/components/agent/mcp/**",
-        "web/frontend/src/components/collections/pilots/mcp*",
         "web/frontend/src/routes/agent/mcp*.tsx"
       ]
     },
@@ -93,7 +92,6 @@
       "patterns": [
         "web/frontend/src/api/model-evaluations*.ts",
         "web/frontend/src/components/model-evaluations/**",
-        "web/frontend/src/components/collections/pilots/model-evaluation*",
         "web/frontend/src/routes/-model-evaluations-route.test.tsx",
         "web/frontend/src/routes/model-evaluations*.tsx"
       ]
@@ -103,16 +101,14 @@
       "patterns": [
         "web/frontend/src/api/agents*.ts",
         "web/frontend/src/components/agent/agents/**",
-        "web/frontend/src/components/collections/pilots/agent*",
         "web/frontend/src/routes/agent/agents*.tsx"
       ]
     },
     {
       "spec": "docs/features/model-router.md",
       "patterns": [
+        "web/frontend/src/components/models/model-collections.tsx",
         "web/frontend/src/components/models/model-router*",
-        "web/frontend/src/components/collections/pilots/model-collections.tsx",
-        "web/frontend/src/components/collections/pilots/model-router*",
         "web/frontend/src/routes/models_*router*.tsx"
       ]
     },
@@ -167,9 +163,6 @@
         "web/frontend/src/components/credentials/**",
         "web/frontend/src/components/models/**",
         "web/frontend/src/components/collection/**",
-        "web/frontend/src/components/collections/pilots/model-alias*",
-        "web/frontend/src/components/collections/pilots/model-collections.tsx",
-        "web/frontend/src/components/collections/pilots/standard-pilot-collection-page.tsx",
         "web/frontend/src/components/shared-form.tsx",
         "web/frontend/src/components/tour/**",
         "web/frontend/src/components/ui/**",

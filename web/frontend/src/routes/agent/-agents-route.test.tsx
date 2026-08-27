@@ -24,7 +24,7 @@ vi.mock("@/components/app-layout", () => ({
   ),
 }))
 
-vi.mock("@/components/collections/pilots/agent-collection", () => {
+vi.mock("@/components/agent/agents/agent-collection", () => {
   const defaultQuery = "ORDER BY position ASC"
   const normalize = (raw: object) => {
     const value = raw as Record<string, unknown>

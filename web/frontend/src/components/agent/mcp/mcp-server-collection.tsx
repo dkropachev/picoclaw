@@ -25,7 +25,9 @@ import { serverInputFromServer } from "@/components/agent/mcp/mcp-server-form"
 import {
   type CollectionDefinition,
   CollectionDetailShell,
+  type StandardCollectionPageSearch,
 } from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -47,11 +49,6 @@ import {
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
-import {
-  type PilotCollectionSearch,
-  StandardPilotCollectionPage,
-} from "./standard-pilot-collection-page"
-
 const defaultQuery = "ORDER BY name ASC"
 const supportedViews = ["list", "table", "grid"] as const
 
@@ -63,7 +60,7 @@ export function MCPServersCollectionPage({
   onEdit,
   onSettings,
 }: {
-  search: PilotCollectionSearch
+  search: StandardCollectionPageSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
   onAdd: () => void
   onOpen: (server: MCPServerCollectionSummary) => void
@@ -154,7 +151,7 @@ export function MCPServersCollectionPage({
   )
 
   return (
-    <StandardPilotCollectionPage
+    <StandardCollectionPage
       definition={definition}
       search={search}
       onSearchChange={onSearchChange}
