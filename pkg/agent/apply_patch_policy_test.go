@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -44,6 +46,333 @@ func TestAgentApplyPatchProtectedRootsWithoutConfig(t *testing.T) {
 	}
 	if got := agentApplyPatchProtectedRoots(workspace, nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("nil-config protected roots = %#v, want %#v", got, want)
+	}
+}
+
+func TestAgentApplyPatchTransactionStateRootRejectsAbsFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit removing the process working directory")
+	}
+	originalWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailableWorkingDirectory := t.TempDir()
+	if err = os.Chdir(unavailableWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if restoreErr := os.Chdir(originalWorkingDirectory); restoreErr != nil {
+			t.Errorf("restore working directory: %v", restoreErr)
+		}
+	}()
+	if err = os.Remove(unavailableWorkingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvHome, "relative-home")
+	if got, rootErr := agentApplyPatchTransactionStateRoot(); rootErr == nil || got != "" {
+		t.Fatalf("state root after Abs failure = %q, %v", got, rootErr)
+	}
+}
+
+func TestAgentApplyPatchAdmissionRejectsEverySiblingAuthority(t *testing.T) {
+	transactionRoot := filepath.Join(t.TempDir(), "apply_patch_transactions")
+	safeRoot := t.TempDir()
+	safePatterns := compilePatterns([]string{agentApplyPatchTestPathPattern(safeRoot)})
+	statePatterns := compilePatterns([]string{agentApplyPatchTestPathPattern(transactionRoot)})
+
+	for _, toolName := range []string{
+		"read_file", "list_dir", "message_media", "send_file", "load_image",
+		"write_file", "edit_file", "append_file",
+	} {
+		t.Run("unrestricted_"+toolName, func(t *testing.T) {
+			cfg := &config.Config{}
+			enableAgentApplyPatchTestFilesystemTool(&cfg.Tools, toolName)
+			defaults := &config.AgentDefaults{RestrictToWorkspace: false}
+			if agentApplyPatchAdmissionSafe(
+				defaults, cfg, transactionRoot, safePatterns, safePatterns,
+			) {
+				t.Fatalf("%s global authority admitted apply_patch", toolName)
+			}
+		})
+
+		t.Run("state_pattern_"+toolName, func(t *testing.T) {
+			cfg := &config.Config{}
+			enableAgentApplyPatchTestFilesystemTool(&cfg.Tools, toolName)
+			defaults := &config.AgentDefaults{RestrictToWorkspace: true}
+			readPatterns, writePatterns := safePatterns, safePatterns
+			switch toolName {
+			case "read_file", "list_dir", "message_media", "send_file", "load_image":
+				readPatterns = statePatterns
+			default:
+				writePatterns = statePatterns
+			}
+			if agentApplyPatchAdmissionSafe(
+				defaults, cfg, transactionRoot, readPatterns, writePatterns,
+			) {
+				t.Fatalf("%s state-root regex authority admitted apply_patch", toolName)
+			}
+		})
+	}
+
+	for _, toolName := range []string{
+		"read_file", "list_dir", "message_media", "send_file", "load_image",
+	} {
+		t.Run("outside_read_"+toolName, func(t *testing.T) {
+			cfg := &config.Config{}
+			enableAgentApplyPatchTestFilesystemTool(&cfg.Tools, toolName)
+			defaults := &config.AgentDefaults{
+				RestrictToWorkspace:       true,
+				AllowReadOutsideWorkspace: true,
+			}
+			if agentApplyPatchAdmissionSafe(
+				defaults, cfg, transactionRoot, safePatterns, safePatterns,
+			) {
+				t.Fatalf("%s outside-read authority admitted apply_patch", toolName)
+			}
+		})
+	}
+
+	safeConfig := &config.Config{}
+	for _, toolName := range []string{
+		"read_file", "list_dir", "message_media", "send_file", "load_image",
+		"write_file", "edit_file", "append_file",
+	} {
+		enableAgentApplyPatchTestFilesystemTool(&safeConfig.Tools, toolName)
+	}
+	if !agentApplyPatchAdmissionSafe(
+		&config.AgentDefaults{RestrictToWorkspace: true},
+		safeConfig,
+		transactionRoot,
+		safePatterns,
+		safePatterns,
+	) {
+		t.Fatal("restricted siblings with disjoint path authority did not admit apply_patch")
+	}
+	adjacentPattern := compilePatterns([]string{
+		agentApplyPatchTestPathPattern(transactionRoot + "-adjacent"),
+	})
+	if agentApplyPatchPatternsMayReachStateRoot(transactionRoot, adjacentPattern) {
+		t.Fatal("adjacent but path-disjoint allow root was rejected")
+	}
+	unicodeRoot := filepath.Join(filepath.Dir(transactionRoot), "caf\u00e9", "state")
+	unicodeAlias := filepath.Join(filepath.Dir(transactionRoot), "cafe\u0301", "state")
+	if !agentApplyPatchPatternsMayReachStateRoot(
+		unicodeRoot,
+		compilePatterns([]string{agentApplyPatchTestPathPattern(unicodeAlias)}),
+	) {
+		t.Fatal("Unicode-normalized state-root alias was treated as disjoint")
+	}
+	if !agentApplyPatchPatternsMayReachStateRoot(
+		transactionRoot,
+		compilePatterns([]string{agentApplyPatchTestPathPattern(transactionRoot + ".")}),
+	) {
+		t.Fatal("trailing-dot state-root alias was treated as disjoint")
+	}
+	if got, want := agentApplyPatchAuthorityPathKey(
+		filepath.Join(filepath.Dir(transactionRoot), "...", filepath.Base(transactionRoot)),
+	), agentApplyPatchAuthorityPathKey(transactionRoot); got != want {
+		t.Fatalf("empty normalized alias component = %q, want %q", got, want)
+	}
+	if !agentApplyPatchLiteralPrefixesMayOverlap(
+		string(os.PathSeparator),
+		string(os.PathSeparator)+"control",
+	) {
+		t.Fatal("filesystem root prefix was treated as disjoint from its descendant")
+	}
+	if !agentApplyPatchPatternsMayReachStateRoot(
+		transactionRoot,
+		compilePatterns([]string{"auth\\.key$"}),
+	) {
+		t.Fatal("unanchored control-file pattern was not rejected fail closed")
+	}
+	for name, candidate := range map[string]struct {
+		root     string
+		patterns []*regexp.Regexp
+	}{
+		"relative root": {
+			root: "relative/state", patterns: safePatterns,
+		},
+		"nil pattern": {
+			root: transactionRoot, patterns: []*regexp.Regexp{nil},
+		},
+		"no literal prefix": {
+			root: transactionRoot, patterns: compilePatterns([]string{"^.*auth\\.key$"}),
+		},
+		"relative literal prefix": {
+			root: transactionRoot, patterns: compilePatterns([]string{"^relative/path$"}),
+		},
+	} {
+		if !agentApplyPatchPatternsMayReachStateRoot(candidate.root, candidate.patterns) {
+			t.Fatalf("%s was not rejected fail closed", name)
+		}
+	}
+	if agentApplyPatchAdmissionSafe(nil, safeConfig, transactionRoot, nil, nil) ||
+		agentApplyPatchAdmissionSafe(
+			&config.AgentDefaults{RestrictToWorkspace: true},
+			nil,
+			transactionRoot,
+			nil,
+			nil,
+		) {
+		t.Fatal("incomplete construction policy admitted apply_patch")
+	}
+}
+
+func TestAgentApplyPatchUnsafeAdmissionOmitsRootAndOwnerFactory(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		configure func(*config.Config, string)
+	}{
+		{
+			name: "unrestricted writer",
+			configure: func(cfg *config.Config, _ string) {
+				cfg.Agents.Defaults.RestrictToWorkspace = false
+			},
+		},
+		{
+			name: "global reader",
+			configure: func(cfg *config.Config, _ string) {
+				cfg.Agents.Defaults.AllowReadOutsideWorkspace = true
+				cfg.Tools.ReadFile.Enabled = true
+			},
+		},
+		{
+			name: "write pattern reaches root",
+			configure: func(cfg *config.Config, root string) {
+				cfg.Tools.AllowWritePaths = []string{agentApplyPatchTestPathPattern(root)}
+			},
+		},
+		{
+			name: "read pattern reaches control descendant",
+			configure: func(cfg *config.Config, root string) {
+				cfg.Tools.ReadFile.Enabled = true
+				cfg.Tools.AllowReadPaths = []string{
+					"^" + regexp.QuoteMeta(filepath.Join(root, "auth.key")) + "$",
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv(config.EnvHome, home)
+			workspace := t.TempDir()
+			cfg := &config.Config{
+				Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+					Workspace: workspace, ModelName: "gpt-5", Provider: "openai",
+					RestrictToWorkspace: true,
+				}},
+				Tools: config.ToolsConfig{
+					Adaptation: config.DefaultToolAdaptationConfig(),
+					WriteFile:  config.ToolConfig{Enabled: true},
+				},
+			}
+			root := filepath.Join(home, agentApplyPatchTransactionStateDirectory)
+			testCase.configure(cfg, root)
+			agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+			defer agent.Close()
+			if _, ok := agent.Tools.Get("apply_patch"); ok {
+				t.Fatalf("unsafe root apply_patch registered; tools=%v", agent.Tools.List())
+			}
+			owner, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+				Scope: tools.ToolOwnerScopeAgent, AgentID: "unsafe-apply-policy",
+			}, []string{"apply_patch"})
+			if err == nil || owner != nil {
+				if owner != nil {
+					_ = owner.Close()
+				}
+				t.Fatalf("unsafe owner apply_patch selection = %#v, %v", owner, err)
+			}
+
+			cfg.Agents.Defaults.RestrictToWorkspace = true
+			cfg.Agents.Defaults.AllowReadOutsideWorkspace = false
+			cfg.Tools.AllowReadPaths = nil
+			cfg.Tools.AllowWritePaths = nil
+			owner, err = agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+				Scope: tools.ToolOwnerScopeAgent, AgentID: "mutated-safe-apply-policy",
+			}, []string{"apply_patch"})
+			if err == nil || owner != nil {
+				if owner != nil {
+					_ = owner.Close()
+				}
+				t.Fatalf("config mutation restored omitted apply_patch = %#v, %v", owner, err)
+			}
+		})
+	}
+}
+
+func TestAgentApplyPatchRootAndAdmissionAreFrozenForOwnerFactory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	workspace := t.TempDir()
+	disjointReadRoot := t.TempDir()
+	disjointWriteRoot := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: workspace, ModelName: "gpt-5", Provider: "openai",
+			RestrictToWorkspace: true,
+		}},
+		Tools: config.ToolsConfig{
+			AllowReadPaths:  []string{agentApplyPatchTestPathPattern(disjointReadRoot)},
+			AllowWritePaths: []string{agentApplyPatchTestPathPattern(disjointWriteRoot)},
+			Adaptation:      config.DefaultToolAdaptationConfig(),
+			ReadFile:        config.ReadFileToolConfig{Enabled: true},
+			ListDir:         config.ToolConfig{Enabled: true},
+			EditFile:        config.ToolConfig{Enabled: true},
+			AppendFile:      config.ToolConfig{Enabled: true},
+			WriteFile:       config.ToolConfig{Enabled: true},
+		},
+	}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	defer agent.Close()
+	if _, ok := agent.Tools.Get("apply_patch"); !ok {
+		t.Fatalf("safe root apply_patch missing; tools=%v", agent.Tools.List())
+	}
+
+	// If the owner factory rereads either environment or Config, this mutated
+	// home overlaps the workspace and the now-global sibling policy is unsafe.
+	// The frozen construction snapshot must still produce the same safe tool.
+	t.Setenv(config.EnvHome, filepath.Join(workspace, "mutated-home"))
+	cfg.Agents.Defaults.RestrictToWorkspace = false
+	cfg.Agents.Defaults.AllowReadOutsideWorkspace = true
+	cfg.Tools.AllowReadPaths = []string{".*"}
+	cfg.Tools.AllowWritePaths = []string{".*"}
+	owner, err := agent.Tools.InstantiateForOwnerSelection(tools.ToolOwner{
+		Scope: tools.ToolOwnerScopeAgent, AgentID: "frozen-apply-policy-state",
+	}, []string{"apply_patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if _, ok := owner.Get("apply_patch"); !ok {
+		t.Fatal("owner factory lost frozen apply_patch admission")
+	}
+}
+
+func agentApplyPatchTestPathPattern(root string) string {
+	separator := regexp.QuoteMeta(string(os.PathSeparator))
+	return "^" + regexp.QuoteMeta(filepath.Clean(root)) + "(?:" + separator + "|$)"
+}
+
+func enableAgentApplyPatchTestFilesystemTool(toolsConfig *config.ToolsConfig, name string) {
+	switch name {
+	case "read_file":
+		toolsConfig.ReadFile.Enabled = true
+	case "list_dir":
+		toolsConfig.ListDir.Enabled = true
+	case "message_media":
+		toolsConfig.Message.Enabled = true
+		toolsConfig.Message.MediaEnabled = true
+	case "send_file":
+		toolsConfig.SendFile.Enabled = true
+	case "load_image":
+		toolsConfig.LoadImage.Enabled = true
+	case "write_file":
+		toolsConfig.WriteFile.Enabled = true
+	case "edit_file":
+		toolsConfig.EditFile.Enabled = true
+	case "append_file":
+		toolsConfig.AppendFile.Enabled = true
 	}
 }
 

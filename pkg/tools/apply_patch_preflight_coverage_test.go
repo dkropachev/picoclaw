@@ -25,6 +25,7 @@ func (info applyPatchCoverageFileInfo) IsDir() bool        { return info.mode.Is
 func (info applyPatchCoverageFileInfo) Sys() any           { return info.sys }
 
 func TestApplyPatchCoverageParserAndExecuteErrors(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	workspace := t.TempDir()
 	tool := NewApplyPatchTool(workspace, true)
 	if result := tool.Execute(nil, map[string]any{
@@ -390,6 +391,7 @@ func TestApplyPatchCoverageChunkedErrorPropagation(t *testing.T) {
 }
 
 func TestApplyPatchCoveragePlanningAndCommitFailures(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	workspace := t.TempDir()
 	workspaceSnapshot, workspaceErr := snapshotApplyPatchWorkspace(workspace)
 	if workspaceErr != nil {

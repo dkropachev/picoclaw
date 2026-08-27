@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -806,8 +807,11 @@ func TestApplyPatchCandidateDiffExecuteFailureWithholdsDiffAndMutation(t *testin
 		tool := newApplyPatchPreflightTestTool(
 			t, workspace, true, true, ApplyPatchPreflightPolicy{},
 		)
-		tool.afterPointOfNoReturn = func(plan *applyPatchPlan) {
-			plan.ops[0].targetPath = workspace
+		tool.transactionFault = func(boundary string) error {
+			if boundary == "target_publish:0" {
+				return errors.New("update file injected failure")
+			}
+			return nil
 		}
 		result := executeApplyPatch(
 			t,
@@ -815,7 +819,7 @@ func TestApplyPatchCandidateDiffExecuteFailureWithholdsDiffAndMutation(t *testin
 			context.Background(),
 			"*** Begin Patch\n*** Update File: file.txt\n@@\n-before\n+after\n*** End Patch",
 		)
-		requireApplyPatchCandidateExecuteFailure(t, result, "update file")
+		requireApplyPatchCandidateExecuteFailure(t, result, "transaction failed")
 		assertApplyPatchTreeEqual(t, workspace, before)
 	})
 }
