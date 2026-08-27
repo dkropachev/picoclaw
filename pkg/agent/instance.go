@@ -283,6 +283,24 @@ func NewAgentInstance(
 	toolsRegistry.SetAllowlist(agentToolAllowlist)
 	readPathPatterns := cloneToolPathPatterns(allowReadPaths)
 	writePathPatterns := cloneToolPathPatterns(allowWritePaths)
+	applyPatchCandidate := mayUseCodexCompatibleTools &&
+		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file"))
+	applyPatchTransactionRoot := ""
+	applyPatchAdmission := false
+	if applyPatchCandidate {
+		var applyPatchRootErr error
+		applyPatchTransactionRoot, applyPatchRootErr = agentApplyPatchTransactionStateRoot()
+		if applyPatchRootErr != nil {
+			panic(fmt.Sprintf("build apply_patch policy: %v", applyPatchRootErr))
+		}
+		applyPatchAdmission = agentApplyPatchAdmissionSafe(
+			defaults,
+			cfg,
+			applyPatchTransactionRoot,
+			readPathPatterns,
+			writePathPatterns,
+		)
+	}
 
 	if cfg.Tools.IsToolEnabled("read_file") {
 		maxReadFileSize := cfg.Tools.ReadFile.MaxReadFileSize
@@ -370,8 +388,7 @@ func NewAgentInstance(
 			func(tools.ToolBuildContext) (tools.Tool, error) { return buildWriteFile(), nil },
 		))
 	}
-	if mayUseCodexCompatibleTools &&
-		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file")) {
+	if applyPatchCandidate && applyPatchAdmission {
 		allowCreate := cfg.Tools.IsToolEnabled("write_file")
 		allowUpdate := cfg.Tools.IsToolEnabled("edit_file")
 		applyPatchProtectedRoots := agentApplyPatchProtectedRoots(workspace, cfg)
@@ -382,7 +399,8 @@ func NewAgentInstance(
 				allowCreate,
 				allowUpdate,
 				tools.ApplyPatchPreflightPolicy{
-					ProtectedRoots: append([]string(nil), applyPatchProtectedRoots...),
+					ProtectedRoots:       append([]string(nil), applyPatchProtectedRoots...),
+					TransactionStateRoot: applyPatchTransactionRoot,
 				},
 				cloneToolPathPatterns(writePathPatterns),
 			)

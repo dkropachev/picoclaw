@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -19,8 +20,10 @@ const (
 // caller guard to the built-in workspace and Git-control policy. Inputs are
 // detached by NewApplyPatchToolWithPermissionsAndPolicy.
 type ApplyPatchPreflightPolicy struct {
-	ProtectedRoots []string
-	PathGuard      func(string) error
+	ProtectedRoots       []string
+	PathGuard            func(string) error
+	TransactionStateRoot string
+	WriteAllowRoots      []string
 }
 
 type ApplyPatchTool struct {
@@ -32,13 +35,19 @@ type ApplyPatchTool struct {
 	pathGuard      func(string) error
 	protectedRoots []applyPatchProtectedRoot
 
+	transactionStateRoot applyPatchTransactionStateRoot
+	transactionStateErr  error
+
 	// Deterministic package-test seams. Both run while the canonical workspace
 	// gate is held and before the point of no return.
-	beforeRevalidate     func(*applyPatchPlan)
-	beforeCommit         func(*applyPatchPlan)
-	beforeSourceOpen     func(string)
-	beforePathFence      func(string)
-	afterPointOfNoReturn func(*applyPatchPlan)
+	beforeRevalidate        func(*applyPatchPlan)
+	beforeCommit            func(*applyPatchPlan)
+	beforeSourceOpen        func(string)
+	beforePathFence         func(string)
+	afterPointOfNoReturn    func(*applyPatchPlan)
+	beforeTransactionCommit func(*applyPatchPreparedTransaction)
+	transactionProbeFault   func(string) error
+	transactionFault        func(string) error
 }
 
 func NewApplyPatchTool(workspace string, restrict bool, allowPaths ...[]*regexp.Regexp) *ApplyPatchTool {
@@ -71,11 +80,13 @@ func NewApplyPatchToolWithPermissions(
 	allowUpdate bool,
 	allowPaths ...[]*regexp.Regexp,
 ) *ApplyPatchTool {
-	return &ApplyPatchTool{
+	tool := &ApplyPatchTool{
 		workspace: workspace, restrict: restrict,
 		allowCreate: allowCreate, allowUpdate: allowUpdate,
 		allowPaths: cloneApplyPatchPatterns(allowPaths),
 	}
+	tool.freezeApplyPatchTransactionState("", nil)
+	return tool
 }
 
 // NewApplyPatchToolWithPermissionsAndPolicy constructs a tool with detached,
@@ -88,19 +99,56 @@ func NewApplyPatchToolWithPermissionsAndPolicy(
 	policy ApplyPatchPreflightPolicy,
 	allowPaths ...[]*regexp.Regexp,
 ) (*ApplyPatchTool, error) {
-	protected, err := prepareApplyPatchProtectedRoots(workspace, policy.ProtectedRoots)
+	transactionState, err := prepareApplyPatchTransactionStateRoot(
+		workspace,
+		policy.TransactionStateRoot,
+		append([]string(nil), policy.WriteAllowRoots...),
+	)
+	if err != nil {
+		return nil, err
+	}
+	protectedRootPaths := append([]string(nil), policy.ProtectedRoots...)
+	protectedRootPaths = append(protectedRootPaths, transactionState.path)
+	protected, err := prepareApplyPatchProtectedRoots(workspace, protectedRootPaths)
 	if err != nil {
 		return nil, err
 	}
 	return &ApplyPatchTool{
-		workspace:      workspace,
-		restrict:       restrict,
-		allowPaths:     cloneApplyPatchPatterns(allowPaths),
-		allowCreate:    allowCreate,
-		allowUpdate:    allowUpdate,
-		pathGuard:      policy.PathGuard,
-		protectedRoots: protected,
+		workspace:            workspace,
+		restrict:             restrict,
+		allowPaths:           cloneApplyPatchPatterns(allowPaths),
+		allowCreate:          allowCreate,
+		allowUpdate:          allowUpdate,
+		pathGuard:            policy.PathGuard,
+		protectedRoots:       protected,
+		transactionStateRoot: transactionState,
 	}, nil
+}
+
+func (t *ApplyPatchTool) freezeApplyPatchTransactionState(
+	configuredRoot string,
+	writeAllowRoots []string,
+) {
+	if t == nil {
+		return
+	}
+	prepared, err := prepareApplyPatchTransactionStateRoot(
+		t.workspace,
+		configuredRoot,
+		append([]string(nil), writeAllowRoots...),
+	)
+	if err == nil {
+		var protected []applyPatchProtectedRoot
+		protected, err = prepareApplyPatchProtectedRoots(
+			t.workspace,
+			[]string{prepared.path},
+		)
+		if err == nil {
+			t.protectedRoots = append(t.protectedRoots, protected...)
+			t.transactionStateRoot = prepared
+		}
+	}
+	t.transactionStateErr = err
 }
 
 func cloneApplyPatchPatterns(allowPaths [][]*regexp.Regexp) []*regexp.Regexp {
@@ -131,7 +179,7 @@ func (t *ApplyPatchTool) Parameters() map[string]any {
 	}
 }
 
-func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) (result *ToolResult) {
 	patch := compatStringArg(args, "patch")
 	if strings.TrimSpace(patch) == "" {
 		return ErrorResult("patch is required")
@@ -154,7 +202,78 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) *Tool
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
-	defer unlock()
+	var transactionState *applyPatchTransactionState
+	var transactionWorkspace *applyPatchTransactionWorkspaceState
+	committedOutcome := false
+	defer func() {
+		// The process gate is deliberately released while the kernel lock still
+		// excludes another process from this physical workspace.
+		unlock()
+		var closeErr error
+		if transactionWorkspace != nil {
+			closeErr = errors.Join(closeErr, transactionWorkspace.Close())
+		}
+		if transactionState != nil {
+			closeErr = errors.Join(closeErr, transactionState.Close())
+		}
+		if closeErr != nil && !committedOutcome {
+			if result != nil && result.IsError && result.ForLLM != "" {
+				result = ErrorResult(errors.Join(
+					errors.New(result.ForLLM),
+					errors.New("apply-patch transaction close failed"),
+				).Error())
+			} else {
+				result = ErrorResult("apply-patch transaction close failed")
+			}
+		}
+	}()
+	runtimeSupportErr := requireApplyPatchTxnRuntimeSupport()
+	if runtimeSupportErr != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			runtimeSupportErr,
+			"apply-patch transaction is unavailable",
+		))
+	}
+	if t.transactionStateErr != nil {
+		return ErrorResult("apply-patch transaction state is unavailable")
+	}
+	transactionState, err = openApplyPatchTransactionState(ctx, t.transactionStateRoot)
+	if err != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			privateApplyPatchTxnError(err),
+			"apply-patch transaction state is unavailable",
+		))
+	}
+	transactionWorkspace, err = transactionState.lockWorkspace(ctx, workspace.canonical)
+	if err != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			privateApplyPatchTxnError(err),
+			"apply-patch transaction lock failed",
+		))
+	}
+	recoveryErr := t.recoverApplyPatchTransaction(
+		ctx,
+		transactionState,
+		transactionWorkspace,
+		workspace,
+	)
+	if recoveryErr != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			privateApplyPatchTxnError(recoveryErr),
+			"apply-patch transaction recovery conflict",
+		))
+	}
+	readyErr := transactionWorkspace.withDirectoryAnchor(
+		func(root *os.Root) error {
+			return requireApplyPatchTxnWorkspaceReadyForNewTransaction(root)
+		},
+	)
+	if readyErr != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			privateApplyPatchTxnError(readyErr),
+			"apply-patch transaction recovery conflict",
+		))
+	}
 
 	plan, err := t.planPatch(ctx, workspace, ops)
 	if err != nil {
@@ -164,32 +283,108 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, args map[string]any) *Tool
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
+	transaction, err := beginApplyPatchTransaction(
+		ctx,
+		transactionState,
+		transactionWorkspace,
+		plan,
+		t.transactionProbeFault,
+	)
+	if err != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			privateApplyPatchTxnError(err),
+			"apply-patch transaction preparation failed",
+		))
+	}
+	transaction.fault = t.transactionFault
+	abort := func(primary error) *ToolResult {
+		cleanupErr := transaction.abortPreparing()
+		message := publicApplyPatchTxnError(primary, "apply-patch transaction preparation failed")
+		if cleanupErr == nil {
+			return ErrorResult(message)
+		}
+		return ErrorResult(errors.Join(
+			errors.New(message),
+			errors.New("apply-patch transaction cleanup incomplete"),
+		).Error())
+	}
 	if t.beforeRevalidate != nil {
 		t.beforeRevalidate(plan)
 	}
 	if err := ctx.Err(); err != nil {
-		return ErrorResult(err.Error())
+		return abort(err)
 	}
-	if err := revalidateApplyPatchPlan(ctx, plan); err != nil {
-		return ErrorResult(err.Error())
+	if err := transaction.revalidate(ctx, plan); err != nil {
+		return abort(err)
 	}
 	if t.beforeCommit != nil {
 		t.beforeCommit(plan)
 	}
 	if err := ctx.Err(); err != nil {
-		return ErrorResult(err.Error())
+		return abort(err)
+	}
+	if err := transaction.revalidate(ctx, plan); err != nil {
+		return abort(err)
+	}
+	if err := transaction.markPrepared(ctx); err != nil {
+		return abort(privateApplyPatchTxnError(err))
 	}
 
-	// Point of no return for P010. P011 replaces this legacy sequential
-	// mutation loop with staging and rollback. Cancellation after this point
-	// cannot intentionally stop between operations and create a partial patch.
+	// The durable prepared journal is the point of no return. Cancellation
+	// after this boundary cannot interrupt commit, rollback, or cleanup.
 	if t.afterPointOfNoReturn != nil {
 		t.afterPointOfNoReturn(plan)
 	}
-	if err := commitApplyPatchPlan(plan); err != nil {
-		return ErrorResult(err.Error())
+	if t.beforeTransactionCommit != nil {
+		t.beforeTransactionCommit(transaction)
 	}
+	if err := transaction.commit(); err != nil {
+		return ErrorResult(publicApplyPatchTxnError(
+			privateApplyPatchTxnError(err),
+			"apply-patch transaction failed; patch was not applied",
+		))
+	}
+	committedOutcome = true
 	return candidateResult
+}
+
+type applyPatchTxnPrivateError struct{ cause error }
+
+func (cause *applyPatchTxnPrivateError) Error() string {
+	return "apply-patch private transaction error"
+}
+func (cause *applyPatchTxnPrivateError) Unwrap() error { return cause.cause }
+
+func privateApplyPatchTxnError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &applyPatchTxnPrivateError{cause: err}
+}
+
+func publicApplyPatchTxnError(err error, fallback string) string {
+	if err == nil {
+		return fallback
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled.Error()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded.Error()
+	}
+	switch {
+	case errors.Is(err, errApplyPatchTransactionUnsupported):
+		return errApplyPatchTransactionUnsupported.Error()
+	case errors.Is(err, errApplyPatchCommitUncertain):
+		return errApplyPatchCommitUncertain.Error()
+	case errors.Is(err, errApplyPatchRollbackIncomplete):
+		return errApplyPatchRollbackIncomplete.Error()
+	}
+	var privateCause *applyPatchTxnPrivateError
+	if errors.As(err, &privateCause) {
+		return fallback
+	}
+	return err.Error()
 }
 
 type codexPatchOp struct {

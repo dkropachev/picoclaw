@@ -1143,9 +1143,10 @@ func TestNewAgentInstance_RegistersCodexCompatToolsForCodexSurface(t *testing.T)
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: workspace,
-				ModelName: "gpt-5",
-				Provider:  "openai",
+				Workspace:           workspace,
+				ModelName:           "gpt-5",
+				Provider:            "openai",
+				RestrictToWorkspace: true,
 			},
 		},
 		Tools: config.ToolsConfig{
@@ -1281,9 +1282,10 @@ func TestNewAgentInstance_RegistersCodexCompatToolsForAlternateProfileOverride(t
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: workspace,
-				ModelName: "claude-sonnet",
-				Provider:  "anthropic",
+				Workspace:           workspace,
+				ModelName:           "claude-sonnet",
+				Provider:            "anthropic",
+				RestrictToWorkspace: true,
 			},
 		},
 		Tools: config.ToolsConfig{
@@ -1318,9 +1320,10 @@ func TestNewAgentInstance_CodexApplyPatchPreservesFileToolPermissions(t *testing
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: workspace,
-				ModelName: "gpt-5",
-				Provider:  "openai",
+				Workspace:           workspace,
+				ModelName:           "gpt-5",
+				Provider:            "openai",
+				RestrictToWorkspace: true,
 			},
 		},
 		Tools: config.ToolsConfig{
@@ -1403,9 +1406,10 @@ func TestNewAgentInstance_RegistersCodexCompatToolsForRuntimePromotion(t *testin
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: workspace,
-				ModelName: "unknown-local-model",
-				Provider:  "local",
+				Workspace:           workspace,
+				ModelName:           "unknown-local-model",
+				Provider:            "local",
+				RestrictToWorkspace: true,
 			},
 		},
 		Tools: config.ToolsConfig{

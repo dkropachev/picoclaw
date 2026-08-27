@@ -1920,7 +1920,8 @@ func TestApplyPatchPreflightRevalidationRejectsCanonicalAncestorEscape(t *testin
 		t, workspace, true, true, ApplyPatchPreflightPolicy{},
 	)
 	tool.beforeRevalidate = func(*applyPatchPlan) {
-		if err := os.Remove(realDirectory); err != nil {
+		displaced := filepath.Join(workspace, "real-displaced")
+		if err := os.Rename(realDirectory, displaced); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(outside, realDirectory); err != nil {
