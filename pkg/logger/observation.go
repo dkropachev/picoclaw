@@ -90,6 +90,15 @@ const (
 	ObservationDomainIdentityAudio
 	ObservationDomainErrorType
 	ObservationDomainErrorText
+	// ObservationDomainHookMessage begins append-only domains. Existing numeric
+	// values are part of the digest wire contract and must never move.
+	ObservationDomainHookMessage
+	ObservationDomainIdentityChannel
+	ObservationDomainIdentityModel
+	ObservationDomainIdentityWorkflow
+	ObservationDomainIdentitySkill
+	ObservationDomainIdentityRoute
+	ObservationDomainIdentityContextManager
 )
 
 var observationDomainLabels = [...]string{
@@ -134,6 +143,13 @@ var observationDomainLabels = [...]string{
 	"identity.audio",
 	"error_type",
 	"error_text",
+	"hook_message",
+	"identity.channel",
+	"identity.model",
+	"identity.workflow",
+	"identity.skill",
+	"identity.route",
+	"identity.context_manager",
 }
 
 // ObservationFieldPrefix selects one fixed family of structured log keys.
@@ -189,6 +205,15 @@ const (
 	ObservationPrefixAuthorization
 	ObservationPrefixCookie
 	ObservationPrefixPrivateKey
+	// ObservationPrefixHookMessage begins append-only prefixes. They
+	// intentionally do not share domain numbers.
+	ObservationPrefixHookMessage
+	ObservationPrefixIdentityChannel
+	ObservationPrefixIdentityModel
+	ObservationPrefixIdentityWorkflow
+	ObservationPrefixIdentitySkill
+	ObservationPrefixIdentityRoute
+	ObservationPrefixIdentityContextManager
 )
 
 var observationPrefixLabels = [...]string{
@@ -240,6 +265,13 @@ var observationPrefixLabels = [...]string{
 	"authorization",
 	"cookie",
 	"private_key",
+	"hook_message",
+	"identity_channel",
+	"identity_model",
+	"identity_workflow",
+	"identity_skill",
+	"identity_route",
+	"identity_context_manager",
 }
 
 // ErrorClass is a trusted, fixed classification supplied by an error owner.
@@ -716,14 +748,44 @@ func prefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, bool) {
 	}
 	// Domain constants and their corresponding prefix constants deliberately
 	// share the same declared order through error_text.
-	return ObservationFieldPrefix(domain), true
+	if domain <= ObservationDomainErrorText {
+		return ObservationFieldPrefix(domain), true
+	}
+	switch domain {
+	case ObservationDomainHookMessage:
+		return ObservationPrefixHookMessage, true
+	case ObservationDomainIdentityChannel:
+		return ObservationPrefixIdentityChannel, true
+	case ObservationDomainIdentityModel:
+		return ObservationPrefixIdentityModel, true
+	case ObservationDomainIdentityWorkflow:
+		return ObservationPrefixIdentityWorkflow, true
+	case ObservationDomainIdentitySkill:
+		return ObservationPrefixIdentitySkill, true
+	case ObservationDomainIdentityRoute:
+		return ObservationPrefixIdentityRoute, true
+	case ObservationDomainIdentityContextManager:
+		return ObservationPrefixIdentityContextManager, true
+	default:
+		return 0, false
+	}
 }
 
 func identityPrefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, bool) {
-	if domain < ObservationDomainIdentityAgent || domain > ObservationDomainIdentityAudio {
+	if domain >= ObservationDomainIdentityAgent && domain <= ObservationDomainIdentityAudio {
+		return prefixForDomain(domain)
+	}
+	switch domain {
+	case ObservationDomainIdentityChannel,
+		ObservationDomainIdentityModel,
+		ObservationDomainIdentityWorkflow,
+		ObservationDomainIdentitySkill,
+		ObservationDomainIdentityRoute,
+		ObservationDomainIdentityContextManager:
+		return prefixForDomain(domain)
+	default:
 		return 0, false
 	}
-	return prefixForDomain(domain)
 }
 
 func observationPrefixLabel(prefix ObservationFieldPrefix) (string, bool) {
