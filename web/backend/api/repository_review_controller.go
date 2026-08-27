@@ -43,6 +43,9 @@ var (
 const (
 	repositoryReviewControllerInterval = 5 * time.Second
 	repositoryReviewQuotaProbeTimeout  = 30 * time.Second
+	// Repository reviews run a planning call before managed review children and
+	// reserve the end of the workflow deadline for durable checkpoint cleanup.
+	repositoryReviewWorkflowMinTimeout = 15 * time.Minute
 )
 
 type repositoryReviewActiveRun struct {
@@ -1227,6 +1230,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		c.finishAutomationRun(id, runID, nil, err, false)
 		return
 	}
+	executor.DefaultTimeout = repositoryReviewEffectiveWorkflowTimeout(executor.DefaultTimeout)
 	priceIndex = repositoryReviewAccountingIndex(cfg, automation)
 	executor.AgentUsageObserver = repositoryReviewAgentUsageObserver(runID, observeUsage)
 	executor.AgentCallAdmission = repositoryReviewAgentCallAdmissionObserver(
@@ -1273,6 +1277,10 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	cancel()
 	<-monitorDone
 	c.finishAutomationRun(id, runID, result, runErr, checkpointed)
+}
+
+func repositoryReviewEffectiveWorkflowTimeout(configured time.Duration) time.Duration {
+	return max(configured, repositoryReviewWorkflowMinTimeout)
 }
 
 func repositoryReviewJoinCommitError(
