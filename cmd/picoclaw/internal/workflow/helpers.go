@@ -12,6 +12,7 @@ import (
 	agentloop "github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -196,15 +197,17 @@ func (r *cliWorkflowRuntimeRunner) ensureLoopLocked() error {
 	if r.cfg == nil {
 		return fmt.Errorf("config not loaded")
 	}
-	provider, _, err := providers.CreateProvider(r.cfg)
+	executionPolicy := isolation.NewExecutionPolicy(r.cfg.Isolation)
+	provider, _, err := providers.CreateProviderWithExecutionPolicy(r.cfg, executionPolicy)
 	if err != nil {
 		return err
 	}
 	r.msgBus = bus.NewMessageBus()
-	r.loop = agentloop.NewAgentLoop(
+	r.loop = agentloop.NewAgentLoopWithExecutionPolicy(
 		r.cfg,
 		r.msgBus,
 		provider,
+		executionPolicy,
 		agentloop.WithConfigPath(r.configPath),
 	)
 	return nil

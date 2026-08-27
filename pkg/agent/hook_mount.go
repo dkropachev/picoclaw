@@ -9,17 +9,30 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
 type hookRuntime struct {
-	initOnce sync.Once
-	mu       sync.Mutex
-	initErr  error
-	mounted  []string
+	initMu         sync.Mutex
+	initOnce       sync.Once
+	mu             sync.Mutex
+	initErr        error
+	mounted        []hookRuntimeMount
+	closed         bool
+	beforeInitLock func()
+}
+
+type hookRuntimeMount struct {
+	name    string
+	mountID uint64
 }
 
 func (r *hookRuntime) setInitErr(err error) {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
 	r.initErr = err
 	r.mu.Unlock()
 }
@@ -30,22 +43,58 @@ func (r *hookRuntime) getInitErr() error {
 	return r.initErr
 }
 
-func (r *hookRuntime) setMounted(names []string) {
+func (r *hookRuntime) setMounted(mounts []hookRuntimeMount) {
 	r.mu.Lock()
-	r.mounted = append([]string(nil), names...)
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.mounted = append([]hookRuntimeMount(nil), mounts...)
 	r.mu.Unlock()
 }
 
 func (r *hookRuntime) reset(al *AgentLoop) {
+	// Serialize reset with lazy initialization. A reload that publishes B while
+	// an out-of-band A initialization is finishing must wait, unmount all of A,
+	// then allow B initialization; sync.Once itself cannot race with reset.
+	if r.beforeInitLock != nil {
+		r.beforeInitLock()
+	}
+	r.initMu.Lock()
+	defer r.initMu.Unlock()
+
 	r.mu.Lock()
-	names := append([]string(nil), r.mounted...)
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	mounts := append([]hookRuntimeMount(nil), r.mounted...)
 	r.mounted = nil
 	r.initErr = nil
 	r.initOnce = sync.Once{}
 	r.mu.Unlock()
 
-	for _, name := range names {
-		al.UnmountHook(name)
+	for _, mount := range mounts {
+		al.hooks.unmountTracked(mount.name, mount.mountID)
+	}
+}
+
+func (r *hookRuntime) close(al *AgentLoop) {
+	if r == nil {
+		return
+	}
+	if r.beforeInitLock != nil {
+		r.beforeInitLock()
+	}
+	r.initMu.Lock()
+	r.mu.Lock()
+	r.closed = true
+	r.mounted = nil
+	r.initErr = fmt.Errorf("hook runtime is closed")
+	r.mu.Unlock()
+	r.initMu.Unlock()
+	if al != nil && al.hooks != nil {
+		al.hooks.Close()
 	}
 }
 
@@ -112,36 +161,110 @@ func hookTimeoutFromMS(ms int) time.Duration {
 }
 
 func (al *AgentLoop) ensureHooksInitialized(ctx context.Context) error {
-	if al == nil || al.cfg == nil || al.hooks == nil {
+	if al == nil {
+		return nil
+	}
+	al.mu.RLock()
+	cfg := al.cfg
+	al.mu.RUnlock()
+	if !hookGenerationNeedsRuntimeLease(cfg) {
+		// Preserve the no-op path without depending on runtime admission. Recheck
+		// after taking the generation mutex: a reload may have published enabled
+		// hooks after the first snapshot.
+		al.hookGenerationMu.Lock()
+		al.mu.RLock()
+		cfg = al.cfg
+		al.mu.RUnlock()
+		if !hookGenerationNeedsRuntimeLease(cfg) {
+			defer al.hookGenerationMu.Unlock()
+			return al.ensureHooksInitializedForGeneration(ctx, cfg)
+		}
+		al.hookGenerationMu.Unlock()
+	}
+
+	// Own the current runtime generation before taking the hook-generation
+	// mutex. Configured factories may re-enter runtime-admitted Agent APIs; a
+	// concurrent reload must wait for that work to finish instead of pausing
+	// admission and then deadlocking on this mutex.
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseRuntime()
+
+	al.hookGenerationMu.Lock()
+	defer al.hookGenerationMu.Unlock()
+	al.mu.RLock()
+	cfg = al.cfg
+	al.mu.RUnlock()
+	return al.ensureHooksInitializedForGeneration(leaseCtx, cfg)
+}
+
+func hookGenerationNeedsRuntimeLease(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Hooks.Enabled {
+		return false
+	}
+	return len(enabledBuiltinHookNames(cfg.Hooks.Builtins)) > 0 ||
+		len(enabledProcessHookNames(cfg.Hooks.Processes)) > 0
+}
+
+func (al *AgentLoop) ensureHooksInitializedForGeneration(
+	ctx context.Context,
+	cfg *config.Config,
+) error {
+	if al == nil || al.hooks == nil {
 		return nil
 	}
 
+	al.hookRuntime.initMu.Lock()
+	defer al.hookRuntime.initMu.Unlock()
+	al.hookRuntime.mu.Lock()
+	closed := al.hookRuntime.closed
+	al.hookRuntime.mu.Unlock()
+	if closed {
+		return fmt.Errorf("hook runtime is closed")
+	}
 	al.hookRuntime.initOnce.Do(func() {
-		al.hookRuntime.setInitErr(al.loadConfiguredHooks(ctx))
+		al.hookRuntime.setInitErr(al.loadConfiguredHooks(ctx, cfg))
 	})
 
 	return al.hookRuntime.getInitErr()
 }
 
-func (al *AgentLoop) loadConfiguredHooks(ctx context.Context) (err error) {
-	if al == nil || al.cfg == nil || !al.cfg.Hooks.Enabled {
+func (al *AgentLoop) loadConfiguredHooks(
+	ctx context.Context,
+	cfg *config.Config,
+) (err error) {
+	if al == nil {
+		return nil
+	}
+	if cfg == nil || !cfg.Hooks.Enabled {
 		return nil
 	}
 
-	mounted := make([]string, 0)
+	processNames := enabledProcessHookNames(cfg.Hooks.Processes)
+	var executionPolicy isolation.ExecutionPolicy
+	if len(processNames) > 0 {
+		executionPolicy, err = al.ExecutionPolicyForGeneration(cfg)
+		if err != nil {
+			return fmt.Errorf("snapshot configured hook execution policy: %w", err)
+		}
+	}
+
+	mounted := make([]hookRuntimeMount, 0)
 	defer func() {
 		if err != nil {
-			for _, name := range mounted {
-				al.UnmountHook(name)
+			for _, mount := range mounted {
+				al.hooks.unmountTracked(mount.name, mount.mountID)
 			}
 			return
 		}
 		al.hookRuntime.setMounted(mounted)
 	}()
 
-	builtinNames := enabledBuiltinHookNames(al.cfg.Hooks.Builtins)
+	builtinNames := enabledBuiltinHookNames(cfg.Hooks.Builtins)
 	for _, name := range builtinNames {
-		spec := al.cfg.Hooks.Builtins[name]
+		spec := cfg.Hooks.Builtins[name]
 		factory, ok := lookupBuiltinHook(name)
 		if !ok {
 			return fmt.Errorf("builtin hook %q is not registered", name)
@@ -151,41 +274,48 @@ func (al *AgentLoop) loadConfiguredHooks(ctx context.Context) (err error) {
 		if factoryErr != nil {
 			return fmt.Errorf("build builtin hook %q: %w", name, factoryErr)
 		}
-		if err := al.MountHook(HookRegistration{
+		mountID, mountErr := al.hooks.mountTracked(HookRegistration{
 			Name:     name,
 			Priority: spec.Priority,
 			Source:   HookSourceInProcess,
 			Trust:    HookTrustTrusted,
 			Hook:     hook,
-		}); err != nil {
-			return fmt.Errorf("mount builtin hook %q: %w", name, err)
+		})
+		if mountErr != nil {
+			closeHookIfPossible(hook)
+			return fmt.Errorf("mount builtin hook %q: %w", name, mountErr)
 		}
-		mounted = append(mounted, name)
+		mounted = append(mounted, hookRuntimeMount{name: name, mountID: mountID})
 	}
 
-	processNames := enabledProcessHookNames(al.cfg.Hooks.Processes)
 	for _, name := range processNames {
-		spec := al.cfg.Hooks.Processes[name]
+		spec := cfg.Hooks.Processes[name]
 		opts, buildErr := processHookOptionsFromConfig(spec)
 		if buildErr != nil {
 			return fmt.Errorf("configure process hook %q: %w", name, buildErr)
 		}
 
-		processHook, buildErr := NewProcessHook(ctx, name, opts)
+		processHook, buildErr := NewProcessHookWithExecutionPolicy(
+			ctx,
+			name,
+			opts,
+			executionPolicy,
+		)
 		if buildErr != nil {
 			return fmt.Errorf("start process hook %q: %w", name, buildErr)
 		}
-		if err := al.MountHook(HookRegistration{
+		mountID, mountErr := al.hooks.mountTracked(HookRegistration{
 			Name:     name,
 			Priority: spec.Priority,
 			Source:   HookSourceProcess,
 			Trust:    hookTrustFromBool(opts.Trusted),
 			Hook:     processHook,
-		}); err != nil {
+		})
+		if mountErr != nil {
 			_ = processHook.Close()
-			return fmt.Errorf("mount process hook %q: %w", name, err)
+			return fmt.Errorf("mount process hook %q: %w", name, mountErr)
 		}
-		mounted = append(mounted, name)
+		mounted = append(mounted, hookRuntimeMount{name: name, mountID: mountID})
 	}
 
 	return nil

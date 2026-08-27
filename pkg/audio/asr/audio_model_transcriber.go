@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -24,6 +25,20 @@ const (
 )
 
 func NewAudioModelTranscriber(modelCfg *config.ModelConfig) *AudioModelTranscriber {
+	return NewAudioModelTranscriberWithExecutionPolicy(
+		modelCfg,
+		isolation.NewExecutionPolicy(config.DefaultConfig().Isolation),
+	)
+}
+
+// NewAudioModelTranscriberWithExecutionPolicy constructs an audio-model
+// transcriber whose provider retains the supplied immutable subprocess policy.
+// A zero policy is intentionally strict and leaves CLI-backed provider startup
+// fail-closed.
+func NewAudioModelTranscriberWithExecutionPolicy(
+	modelCfg *config.ModelConfig,
+	executionPolicy isolation.ExecutionPolicy,
+) *AudioModelTranscriber {
 	if modelCfg == nil {
 		return nil
 	}
@@ -34,7 +49,10 @@ func NewAudioModelTranscriber(modelCfg *config.ModelConfig) *AudioModelTranscrib
 		"model":       modelCfg.Model,
 	})
 
-	provider, modelID, err := providers.CreateProviderFromConfig(modelCfg)
+	provider, modelID, err := providers.CreateProviderFromConfigWithExecutionPolicy(
+		modelCfg,
+		executionPolicy,
+	)
 	if err != nil {
 		logger.ErrorCF("voice", "Failed to create audio model provider", map[string]any{"error": err})
 		return nil

@@ -50,6 +50,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/health"
 	"github.com/sipeed/picoclaw/pkg/heartbeat"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/netbind"
@@ -175,6 +176,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	if err = preCheckConfig(cfg); err != nil {
 		return fmt.Errorf("config pre-check failed: %w", err)
 	}
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	if err = executionPolicy.Validate(); err != nil {
+		return fmt.Errorf("invalid subprocess execution policy: %w", err)
+	}
 
 	// Debug mode permanently overrides the config log level to DEBUG.
 	if debug {
@@ -221,16 +226,17 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		}
 	}()
 
-	provider, _, err := createStartupProvider(cfg, allowEmptyStartup)
+	provider, _, err := createStartupProvider(cfg, allowEmptyStartup, executionPolicy)
 	if err != nil {
 		return fmt.Errorf("error creating provider: %w", err)
 	}
 
 	msgBus := bus.NewMessageBus()
-	agentLoop := agent.NewAgentLoop(
+	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
 		cfg,
 		msgBus,
 		provider,
+		executionPolicy,
 		agent.WithConfigPath(configPath),
 		agent.WithRuntimeStartupBarrier(),
 		agent.WithDeferredEvolutionActivation(),
@@ -530,6 +536,7 @@ func executeReload(
 func createStartupProvider(
 	cfg *config.Config,
 	allowEmptyStartup bool,
+	executionPolicy isolation.ExecutionPolicy,
 ) (providers.LLMProvider, string, error) {
 	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelName == "" && allowEmptyStartup {
@@ -541,7 +548,10 @@ func createStartupProvider(
 		return &startupBlockedProvider{reason: reason}, "", nil
 	}
 
-	provider, modelID, err := providers.CreateProvider(cfg)
+	provider, modelID, err := providers.CreateProviderWithExecutionPolicy(
+		cfg,
+		executionPolicy,
+	)
 	if err != nil {
 		return nil, "", err
 	}
@@ -562,14 +572,17 @@ func setupAndStartServices(
 	if err := validateEventAutomationRuntime(ctx, cfg, agentLoop); err != nil {
 		return nil, fmt.Errorf("validate event automation runtime: %w", err)
 	}
+	executionPolicy, err := agentLoop.ExecutionPolicyForGeneration(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot startup execution policy: %w", err)
+	}
 
 	runningServices := &services{}
-	if err := setupEventChannelController(runningServices, msgBus, cfg); err != nil {
-		return runningServices, err
+	if setupErr := setupEventChannelController(runningServices, msgBus, cfg); setupErr != nil {
+		return runningServices, setupErr
 	}
 
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
-	var err error
 	runningServices.CronService, err = setupCronTool(
 		agentLoop,
 		msgBus,
@@ -577,6 +590,7 @@ func setupAndStartServices(
 		cfg.Agents.Defaults.RestrictToWorkspace,
 		execTimeout,
 		cfg,
+		executionPolicy,
 	)
 	if err != nil {
 		return runningServices, fmt.Errorf("error setting up cron service: %w", err)
@@ -612,7 +626,7 @@ func setupAndStartServices(
 	agentLoop.SetChannelManager(runningServices.ChannelManager)
 	agentLoop.SetMediaStore(runningServices.MediaStore)
 
-	transcriber := asr.DetectTranscriber(cfg)
+	transcriber := asr.DetectTranscriberWithExecutionPolicy(cfg, executionPolicy)
 	if transcriber != nil {
 		agentLoop.SetTranscriber(transcriber)
 		logger.InfoCF("voice", "Transcription enabled (agent-level)", map[string]any{"provider": transcriber.Name()})
@@ -956,7 +970,15 @@ func handleConfigReloadWithServiceOps(
 	}
 
 	oldCfg := al.GetConfig()
+	oldExecutionPolicy, err := al.ExecutionPolicyForGeneration(oldCfg)
+	if err != nil {
+		return fmt.Errorf("snapshot active execution policy for reload: %w", err)
+	}
 	oldProvider := *providerRef
+	newExecutionPolicy := isolation.NewExecutionPolicy(newCfg.Isolation)
+	if policyErr := newExecutionPolicy.Validate(); policyErr != nil {
+		return fmt.Errorf("invalid replacement subprocess execution policy: %w", policyErr)
+	}
 	newModel := newCfg.Agents.Defaults.ModelName
 	hadEventWebhookRoute := runningServices != nil &&
 		runningServices.eventWebhookRelease != nil
@@ -999,13 +1021,17 @@ func handleConfigReloadWithServiceOps(
 			prepareEventRoutesErr,
 		)
 	}
-	if err := validateEventAutomationStorage(ctx, newCfg); err != nil {
-		return fmt.Errorf("validate event automation before reload: %w", err)
+	if storageErr := validateEventAutomationStorage(ctx, newCfg); storageErr != nil {
+		return fmt.Errorf("validate event automation before reload: %w", storageErr)
 	}
 
 	logger.Infof(" New model is '%s', recreating provider...", newModel)
 
-	newProvider, _, err := createStartupProvider(newCfg, allowEmptyStartup)
+	newProvider, _, err := createStartupProvider(
+		newCfg,
+		allowEmptyStartup,
+		newExecutionPolicy,
+	)
 	if err != nil {
 		logger.Errorf("  ⚠ Error creating new provider: %v", err)
 		return fmt.Errorf("error creating new provider: %w", err)
@@ -1124,10 +1150,11 @@ func handleConfigReloadWithServiceOps(
 	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
 	defer reloadCancel()
 
-	previousProvider, err := al.ReloadProviderAndConfigRetainingPrevious(
+	previousProvider, err := al.ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy(
 		reloadCtx,
 		newProvider,
 		newCfg,
+		newExecutionPolicy,
 	)
 	if err != nil {
 		logger.Errorf("  ⚠ Error reloading agent loop: %v", err)
@@ -1191,10 +1218,11 @@ func handleConfigReloadWithServiceOps(
 			context.Background(),
 			providerReloadTimeout,
 		)
-		failedProvider, rollbackErr := al.ReloadProviderAndConfigRetainingPrevious(
+		failedProvider, rollbackErr := al.ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy(
 			rollbackCtx,
 			previousProvider,
 			oldCfg,
+			oldExecutionPolicy,
 		)
 		rollbackCancel()
 		if rollbackErr != nil {
@@ -1265,9 +1293,12 @@ func restartServices(
 	msgBus *bus.MessageBus,
 ) error {
 	cfg := al.GetConfig()
+	executionPolicy, err := al.ExecutionPolicyForGeneration(cfg)
+	if err != nil {
+		return fmt.Errorf("snapshot service execution policy: %w", err)
+	}
 
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
-	var err error
 	runningServices.CronService, err = setupCronTool(
 		al,
 		msgBus,
@@ -1275,6 +1306,7 @@ func restartServices(
 		cfg.Agents.Defaults.RestrictToWorkspace,
 		execTimeout,
 		cfg,
+		executionPolicy,
 	)
 	if err != nil {
 		return fmt.Errorf("error restarting cron service: %w", err)
@@ -1343,7 +1375,7 @@ func restartServices(
 		fmt.Println("  ✓ Device event service restarted")
 	}
 
-	transcriber := asr.DetectTranscriber(cfg)
+	transcriber := asr.DetectTranscriberWithExecutionPolicy(cfg, executionPolicy)
 	al.SetTranscriber(transcriber)
 	if transcriber != nil {
 		logger.InfoCF("voice", "Transcription re-enabled (agent-level)", map[string]any{"provider": transcriber.Name()})
@@ -1477,6 +1509,7 @@ func setupCronTool(
 	restrict bool,
 	execTimeout time.Duration,
 	cfg *config.Config,
+	executionPolicy isolation.ExecutionPolicy,
 ) (*cron.CronService, error) {
 	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
 
@@ -1491,7 +1524,16 @@ func setupCronTool(
 	var cronTool *tools.CronTool
 	if cfg.Tools.IsToolEnabled("cron") {
 		var err error
-		cronTool, err = tools.NewCronTool(cronService, agentLoop, msgBus, workspace, restrict, execTimeout, cfg)
+		cronTool, err = tools.NewCronToolWithExecutionPolicy(
+			cronService,
+			agentLoop,
+			msgBus,
+			workspace,
+			restrict,
+			execTimeout,
+			cfg,
+			executionPolicy,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("critical error during CronTool initialization: %w", err)
 		}

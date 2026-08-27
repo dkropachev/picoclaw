@@ -321,6 +321,7 @@ func (al *AgentLoop) buildCommandsRuntime(
 				agent.Fallbacks,
 				agent.Workspace,
 				agent.CandidateProviders,
+				agent.executionPolicy,
 			)
 			if nextRouter != nil {
 				selection := nextRouter.Select(optsSessionKey(opts), accountrouter.SelectReasonInitial)
@@ -334,6 +335,7 @@ func (al *AgentLoop) buildCommandsRuntime(
 					agent.Fallbacks,
 					agent.Workspace,
 					agent.CandidateProviders,
+					agent.executionPolicy,
 				)
 				if err != nil {
 					return "", fmt.Errorf("failed to initialize model alias %q: %w", value, err)

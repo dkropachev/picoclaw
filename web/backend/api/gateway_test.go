@@ -1625,6 +1625,231 @@ func TestGatewayStatusRequiresRestartAfterChannelChange(t *testing.T) {
 	}
 }
 
+func TestGatewayStatusRequiresRestartAfterIsolationPatch(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		patch func(t *testing.T) string
+	}{
+		{
+			name: "enabled",
+			patch: func(*testing.T) string {
+				return `{"isolation":{"enabled":true}}`
+			},
+		},
+		{
+			name: "expose paths",
+			patch: func(t *testing.T) string {
+				body, err := json.Marshal(map[string]any{
+					"isolation": map[string]any{
+						"expose_paths": []map[string]any{{
+							"source": t.TempDir(),
+							"mode":   "ro",
+						}},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(body)
+			},
+		},
+		{
+			name: "explicit empty allowlist",
+			patch: func(*testing.T) string {
+				return `{"isolation":{"environment_allowlist":[]}}`
+			},
+		},
+		{
+			name: "allowlist order",
+			patch: func(*testing.T) string {
+				return `{"isolation":{"environment_allowlist":["HOME","PATH"]}}`
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetGatewayTestState(t)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			cfg := config.DefaultConfig()
+			model := addGatewayTestModel(cfg)
+			cfg.Agents.Defaults.ModelName = model.ModelName
+			model.SetAPIKey("test-key")
+			if err := config.SaveConfig(configPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+			process, err := os.FindProcess(os.Getpid())
+			if err != nil {
+				t.Fatal(err)
+			}
+			gateway.mu.Lock()
+			gateway.cmd = &exec.Cmd{Process: process}
+			gateway.bootDefaultModel = model.ModelName
+			gateway.bootConfigSignature = computeConfigSignature(cfg)
+			setGatewayRuntimeStatusLocked("running")
+			gateway.mu.Unlock()
+			gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
+				return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+			}
+
+			patchReq := httptest.NewRequest(
+				http.MethodPatch,
+				"/api/config",
+				strings.NewReader(test.patch(t)),
+			)
+			patchReq.Header.Set("Content-Type", "application/json")
+			patchRec := httptest.NewRecorder()
+			mux.ServeHTTP(patchRec, patchReq)
+			if patchRec.Code != http.StatusOK {
+				t.Fatalf("PATCH response = %d %s", patchRec.Code, patchRec.Body.String())
+			}
+
+			statusRec := httptest.NewRecorder()
+			mux.ServeHTTP(
+				statusRec,
+				httptest.NewRequest(http.MethodGet, "/api/gateway/status", nil),
+			)
+			var response map[string]any
+			if statusRec.Code != http.StatusOK ||
+				json.Unmarshal(statusRec.Body.Bytes(), &response) != nil {
+				t.Fatalf("status response = %d %s", statusRec.Code, statusRec.Body.String())
+			}
+			if response["gateway_restart_required"] != true {
+				t.Fatalf("gateway_restart_required = %#v", response["gateway_restart_required"])
+			}
+		})
+	}
+}
+
+func TestConfigSignatureTracksCanonicalIsolationConfiguration(t *testing.T) {
+	newConfig := func() *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Isolation = config.IsolationConfig{
+			Enabled: false,
+			ExposePaths: []config.ExposePath{
+				{Source: "/source-a", Target: "/target-a", Mode: "ro"},
+				{Source: "/source-b", Target: "/target-b", Mode: "rw"},
+			},
+			EnvironmentAllowlist: []string{"PATH", "HOME"},
+		}
+		return cfg
+	}
+
+	baseline := computeConfigSignature(newConfig())
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{
+			name: "enabled",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.Enabled = true
+			},
+		},
+		{
+			name: "expose path value",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.ExposePaths[0].Source = "/changed-source"
+			},
+		},
+		{
+			name: "expose path order",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.ExposePaths[0], cfg.Isolation.ExposePaths[1] = cfg.Isolation.ExposePaths[1], cfg.Isolation.ExposePaths[0]
+			},
+		},
+		{
+			name: "environment allowlist value",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.EnvironmentAllowlist[1] = "TMPDIR"
+			},
+		},
+		{
+			name: "environment allowlist order",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.EnvironmentAllowlist[0], cfg.Isolation.EnvironmentAllowlist[1] = cfg.Isolation.EnvironmentAllowlist[1], cfg.Isolation.EnvironmentAllowlist[0]
+			},
+		},
+		{
+			name: "omitted default allowlist state",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.EnvironmentAllowlist = nil
+			},
+		},
+		{
+			name: "explicit empty allowlist state",
+			mutate: func(cfg *config.Config) {
+				cfg.Isolation.EnvironmentAllowlist = []string{}
+			},
+		},
+	}
+
+	seen := map[string]string{baseline: "baseline"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newConfig()
+			tt.mutate(cfg)
+			got := computeConfigSignature(cfg)
+			if got == baseline {
+				t.Fatalf("%s must change the config signature", tt.name)
+			}
+			if previous, exists := seen[got]; exists {
+				t.Fatalf("%s signature matched distinct %s state", tt.name, previous)
+			}
+			seen[got] = tt.name
+			if !gatewayRestartRequiredBySignature(baseline, got, "running") {
+				t.Fatalf("%s must require restart for a running gateway", tt.name)
+			}
+		})
+	}
+	if repeated := computeConfigSignature(newConfig()); repeated != baseline {
+		t.Fatalf("repeated signature = %q, want deterministic %q", repeated, baseline)
+	}
+}
+
+func TestConfigSignatureIsolationDoesNotCaptureHostEnvironment(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Isolation.EnvironmentAllowlist = []string{"PICOCLAW_SIGNATURE_CANARY"}
+
+	t.Setenv("PICOCLAW_SIGNATURE_CANARY", "host-value-before")
+	before := computeConfigSignature(cfg)
+	t.Setenv("PICOCLAW_SIGNATURE_CANARY", "host-value-after")
+	after := computeConfigSignature(cfg)
+
+	if after != before {
+		t.Fatalf("host environment changed config signature: before=%q after=%q", before, after)
+	}
+	if strings.Contains(before, "host-value-before") ||
+		strings.Contains(after, "host-value-after") {
+		t.Fatal("config signature must not contain captured host environment values")
+	}
+}
+
+func TestIsolationConfigSignatureCanonicalizesEffectiveDefaultsAndPaths(t *testing.T) {
+	nilAllowlist := config.IsolationConfig{
+		ExposePaths: []config.ExposePath{{Source: "/source/./child", Mode: "ro"}},
+	}
+	explicitDefaults := config.IsolationConfig{
+		ExposePaths: []config.ExposePath{{
+			Source: "/source/child",
+			Target: "/source/child",
+			Mode:   "ro",
+		}},
+		EnvironmentAllowlist: config.DefaultIsolationEnvironmentAllowlist(),
+	}
+	if left, right := computeIsolationConfigSignature(nilAllowlist),
+		computeIsolationConfigSignature(explicitDefaults); left != right {
+		t.Fatalf("equivalent isolation signatures differ: %q != %q", left, right)
+	}
+	explicitEmpty := explicitDefaults
+	explicitEmpty.EnvironmentAllowlist = []string{}
+	if computeIsolationConfigSignature(explicitEmpty) ==
+		computeIsolationConfigSignature(explicitDefaults) {
+		t.Fatal("explicit-empty allowlist matched effective defaults")
+	}
+}
+
 func TestConfigSignatureHashesDeltaChatPassword(t *testing.T) {
 	cfg := config.DefaultConfig()
 	delta := cfg.Channels.Get(config.ChannelDeltaChat)

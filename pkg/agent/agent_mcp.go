@@ -267,7 +267,10 @@ func (al *AgentLoop) initializeMCPGeneration(
 		return err
 	}
 
-	manager := mcp.NewManager(mcp.WithRuntimeEvents(al.runtimeEvents))
+	manager := mcp.NewManagerWithExecutionPolicy(
+		registry.executionPolicy,
+		mcp.WithRuntimeEvents(al.runtimeEvents),
+	)
 	ownership := mcpManagerPrivate
 	defer func() {
 		recovered := recover()

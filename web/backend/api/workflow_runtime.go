@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -215,15 +216,17 @@ func (r *webWorkflowRuntimeRunner) ensureLoopLocked() error {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 	}
-	provider, _, err := providers.CreateProvider(cfg)
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	provider, _, err := providers.CreateProviderWithExecutionPolicy(cfg, executionPolicy)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
 	r.msgBus = bus.NewMessageBus()
-	r.loop = agentloop.NewAgentLoop(
+	r.loop = agentloop.NewAgentLoopWithExecutionPolicy(
 		cfg,
 		r.msgBus,
 		provider,
+		executionPolicy,
 		agentloop.WithConfigPath(r.configPath),
 	)
 	return nil

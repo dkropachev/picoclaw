@@ -6,6 +6,7 @@ import (
 
 	audiocapabilities "github.com/sipeed/picoclaw/pkg/audio/capabilities"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -26,6 +27,7 @@ type TranscriptionResponse struct {
 
 func transcriberFromModelConfigWithError(
 	modelCfg *config.ModelConfig,
+	executionPolicy isolation.ExecutionPolicy,
 ) (Transcriber, error) {
 	route, provider, modelID, err := asrRouteFromModelConfig(modelCfg)
 	if err != nil {
@@ -60,7 +62,7 @@ func transcriberFromModelConfigWithError(
 		}
 		return transcriber, nil
 	case audiocapabilities.ASRRouteAudioModel:
-		transcriber := NewAudioModelTranscriber(&resolved)
+		transcriber := NewAudioModelTranscriberWithExecutionPolicy(&resolved, executionPolicy)
 		if transcriber == nil {
 			return nil, fmt.Errorf(
 				"failed to initialize audio-model transcription provider %q",
@@ -97,7 +99,21 @@ func asrRouteFromModelConfig(
 // DetectTranscriber resolves the explicitly configured ASR account and model
 // alias. It never scans model_list or invents a provider model.
 func DetectTranscriber(cfg *config.Config) Transcriber {
-	transcriber, _ := DetectTranscriberWithError(cfg)
+	if cfg == nil {
+		return nil
+	}
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	return DetectTranscriberWithExecutionPolicy(cfg, executionPolicy)
+}
+
+// DetectTranscriberWithExecutionPolicy resolves the configured ASR model while
+// retaining the exact immutable subprocess policy owned by the caller's
+// runtime generation.
+func DetectTranscriberWithExecutionPolicy(
+	cfg *config.Config,
+	executionPolicy isolation.ExecutionPolicy,
+) Transcriber {
+	transcriber, _ := detectTranscriberWithExecutionPolicyError(cfg, executionPolicy)
 	return transcriber
 }
 
@@ -105,6 +121,17 @@ func DetectTranscriber(cfg *config.Config) Transcriber {
 // distinguishes intentionally unconfigured ASR from an invalid or unsupported
 // account/model selection.
 func DetectTranscriberWithError(cfg *config.Config) (Transcriber, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	return detectTranscriberWithExecutionPolicyError(cfg, executionPolicy)
+}
+
+func detectTranscriberWithExecutionPolicyError(
+	cfg *config.Config,
+	executionPolicy isolation.ExecutionPolicy,
+) (Transcriber, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -116,5 +143,5 @@ func DetectTranscriberWithError(cfg *config.Config) (Transcriber, error) {
 	if modelCfg == nil {
 		return nil, nil
 	}
-	return transcriberFromModelConfigWithError(modelCfg)
+	return transcriberFromModelConfigWithError(modelCfg, executionPolicy)
 }

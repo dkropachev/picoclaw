@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -1936,5 +1937,94 @@ func TestResolveCurrentWebSearchProvider_IgnoresPreferNativeInConfigView(t *test
 
 	if got := resolveCurrentWebSearchProvider(cfg); got != "" {
 		t.Fatalf("resolveCurrentWebSearchProvider() = %q, want empty when only native search would be available", got)
+	}
+}
+
+func TestApplyToolStateMutatesExactConfigFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		tool    string
+		wantErr bool
+		want    func(*config.Config)
+	}{
+		{name: "read file", tool: "read_file", want: func(cfg *config.Config) {
+			cfg.Tools.ReadFile.Enabled = true
+		}},
+		{name: "write file", tool: "write_file", want: func(cfg *config.Config) {
+			cfg.Tools.WriteFile.Enabled = true
+		}},
+		{name: "list directory", tool: "list_dir", want: func(cfg *config.Config) {
+			cfg.Tools.ListDir.Enabled = true
+		}},
+		{name: "edit file", tool: "edit_file", want: func(cfg *config.Config) {
+			cfg.Tools.EditFile.Enabled = true
+		}},
+		{name: "append file", tool: "append_file", want: func(cfg *config.Config) {
+			cfg.Tools.AppendFile.Enabled = true
+		}},
+		{name: "exec", tool: "exec", want: func(cfg *config.Config) {
+			cfg.Tools.Exec.Enabled = true
+		}},
+		{name: "web search", tool: "web_search", want: func(cfg *config.Config) {
+			cfg.Tools.Web.Enabled = true
+		}},
+		{name: "web fetch", tool: "web_fetch", want: func(cfg *config.Config) {
+			cfg.Tools.WebFetch.Enabled = true
+		}},
+		{name: "git workspace", tool: "git_workspace", want: func(cfg *config.Config) {
+			cfg.Tools.GitWorkspace.Enabled = true
+		}},
+		{name: "message", tool: "message", want: func(cfg *config.Config) {
+			cfg.Tools.Message.Enabled = true
+		}},
+		{name: "send file", tool: "send_file", want: func(cfg *config.Config) {
+			cfg.Tools.SendFile.Enabled = true
+		}},
+		{name: "find skills enables skills runtime", tool: "find_skills", want: func(cfg *config.Config) {
+			cfg.Tools.FindSkills.Enabled = true
+			cfg.Tools.Skills.Enabled = true
+		}},
+		{name: "install skill enables skills runtime", tool: "install_skill", want: func(cfg *config.Config) {
+			cfg.Tools.InstallSkill.Enabled = true
+			cfg.Tools.Skills.Enabled = true
+		}},
+		{name: "spawn status enables spawn runtime", tool: "spawn_status", want: func(cfg *config.Config) {
+			cfg.Tools.SpawnStatus.Enabled = true
+			cfg.Tools.Spawn.Enabled = true
+			cfg.Tools.Subagent.Enabled = true
+		}},
+		{name: "threads", tool: "threads", want: func(cfg *config.Config) {
+			cfg.Tools.Threads.Enabled = true
+		}},
+		{name: "i2c", tool: "i2c", want: func(cfg *config.Config) {
+			cfg.Tools.I2C.Enabled = true
+		}},
+		{name: "spi", tool: "spi", want: func(cfg *config.Config) {
+			cfg.Tools.SPI.Enabled = true
+		}},
+		{name: "BM25 discovery enables MCP runtime", tool: "tool_search_tool_bm25", want: func(cfg *config.Config) {
+			cfg.Tools.MCP.Discovery.UseBM25 = true
+			cfg.Tools.MCP.Enabled = true
+			cfg.Tools.MCP.Discovery.Enabled = true
+		}},
+		{name: "unknown", tool: "not_mutable", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			want := &config.Config{}
+			if test.want != nil {
+				test.want(want)
+			}
+
+			err := applyToolState(cfg, test.tool, true)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("applyToolState(%q) error = %v, wantErr=%t", test.tool, err, test.wantErr)
+			}
+			if !reflect.DeepEqual(cfg.Tools, want.Tools) {
+				t.Fatalf("applyToolState(%q) tools = %#v, want %#v", test.tool, cfg.Tools, want.Tools)
+			}
+		})
 	}
 }

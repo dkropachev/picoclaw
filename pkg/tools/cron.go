@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -54,21 +55,54 @@ type CronTool struct {
 // execTimeout: 0 means no timeout, >0 sets the timeout duration
 func NewCronTool(
 	cronService *cron.CronService, executor JobExecutor, msgBus *bus.MessageBus, workspace string, restrict bool,
-	execTimeout time.Duration, config *config.Config,
+	execTimeout time.Duration, cfg *config.Config,
+) (*CronTool, error) {
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	return NewCronToolWithExecutionPolicy(
+		cronService,
+		executor,
+		msgBus,
+		workspace,
+		restrict,
+		execTimeout,
+		cfg,
+		isolation.NewExecutionPolicy(isolationCfg),
+	)
+}
+
+// NewCronToolWithExecutionPolicy constructs a CronTool whose embedded ExecTool
+// is bound to the exact supplied subprocess generation.
+func NewCronToolWithExecutionPolicy(
+	cronService *cron.CronService,
+	executor JobExecutor,
+	msgBus *bus.MessageBus,
+	workspace string,
+	restrict bool,
+	execTimeout time.Duration,
+	cfg *config.Config,
+	policy isolation.ExecutionPolicy,
 ) (*CronTool, error) {
 	allowCommand := true
 	execEnabled := true
 	var commandAllowedRemotes []string
-	if config != nil {
-		allowCommand = config.Tools.Cron.AllowCommand
-		execEnabled = config.Tools.Exec.Enabled
-		commandAllowedRemotes = config.Tools.Cron.CommandAllowedRemotes
+	if cfg != nil {
+		allowCommand = cfg.Tools.Cron.AllowCommand
+		execEnabled = cfg.Tools.Exec.Enabled
+		commandAllowedRemotes = cfg.Tools.Cron.CommandAllowedRemotes
 	}
 
 	var execTool *ExecTool
 	if execEnabled {
 		var err error
-		execTool, err = NewExecToolWithConfig(workspace, restrict, config)
+		execTool, err = NewExecToolWithConfigAndExecutionPolicy(
+			workspace,
+			restrict,
+			cfg,
+			policy,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to configure exec tool: %w", err)
 		}
@@ -85,7 +119,7 @@ func NewCronTool(
 		allowCommand:          allowCommand,
 		execEnabled:           execEnabled,
 		commandAllowedRemotes: commandAllowedRemotes,
-		runtimeConfig:         config,
+		runtimeConfig:         cfg,
 	}, nil
 }
 

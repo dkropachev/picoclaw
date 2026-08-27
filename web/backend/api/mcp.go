@@ -18,6 +18,7 @@ import (
 
 	picoauth "github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 )
 
@@ -438,7 +439,14 @@ func (h *Handler) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), mcpProbeTimeout)
 	defer cancel()
-	result, probeErr := mcpProbeServer(ctx, name, server, cfg.WorkspacePath())
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	result, probeErr := mcpProbeServer(
+		ctx,
+		name,
+		server,
+		cfg.WorkspacePath(),
+		executionPolicy,
+	)
 	if probeErr != nil {
 		message := probeErr.Error()
 		writeJSON(w, mcpProbeResponse{
@@ -987,8 +995,9 @@ func defaultMCPProbeServer(
 	name string,
 	server config.MCPServerConfig,
 	workspace string,
+	executionPolicy isolation.ExecutionPolicy,
 ) (mcpProbeResponse, error) {
-	manager := picomcp.NewManager()
+	manager := picomcp.NewManagerWithExecutionPolicy(executionPolicy)
 	defer manager.Close()
 	mcpConfig := config.MCPConfig{
 		ToolConfig: config.ToolConfig{Enabled: true},

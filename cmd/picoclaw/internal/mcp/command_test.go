@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +16,42 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 )
+
+func TestMCPProbeHelpersUseExplicitExecutionPolicy(t *testing.T) {
+	server := config.MCPServerConfig{
+		Enabled: true,
+		Type:    "stdio",
+		Command: "picoclaw-p014-probe-does-not-exist",
+	}
+
+	t.Run("test and list probe", func(t *testing.T) {
+		_, err := defaultServerProbe(
+			context.Background(),
+			"strict",
+			server,
+			t.TempDir(),
+			isolation.ExecutionPolicy{},
+		)
+		if !errors.Is(err, isolation.ErrExecutionPolicyUnavailable) {
+			t.Fatalf("defaultServerProbe() error = %v, want %v", err, isolation.ErrExecutionPolicyUnavailable)
+		}
+	})
+
+	t.Run("show probe", func(t *testing.T) {
+		_, err := defaultServerShowProbe(
+			context.Background(),
+			"strict",
+			server,
+			t.TempDir(),
+			isolation.ExecutionPolicy{},
+		)
+		if !errors.Is(err, isolation.ErrExecutionPolicyUnavailable) {
+			t.Fatalf("defaultServerShowProbe() error = %v, want %v", err, isolation.ErrExecutionPolicyUnavailable)
+		}
+	})
+}
 
 func TestNewMCPCommand(t *testing.T) {
 	cmd := NewMCPCommand()
@@ -477,8 +513,11 @@ func TestMCPListPrintsTable(t *testing.T) {
 }
 
 func TestMCPListWithStatusUsesProbe(t *testing.T) {
+	const policyEnvironmentName = "PICOCLAW_TEST_MCP_LIST_POLICY"
+	t.Setenv(policyEnvironmentName, "list-policy-value")
 	configPath := setupMCPConfigEnv(t)
 	writeMCPConfig(t, configPath, &config.Config{
+		Isolation: config.IsolationConfig{EnvironmentAllowlist: []string{policyEnvironmentName}},
 		Tools: config.ToolsConfig{
 			MCP: config.MCPConfig{
 				ToolConfig: config.ToolConfig{Enabled: true},
@@ -495,10 +534,19 @@ func TestMCPListWithStatusUsesProbe(t *testing.T) {
 
 	originalProbe := serverProbe
 	defer func() { serverProbe = originalProbe }()
-	serverProbe = func(_ context.Context, name string, server config.MCPServerConfig, workspacePath string) (probeResult, error) {
+	serverProbe = func(
+		_ context.Context,
+		name string,
+		server config.MCPServerConfig,
+		workspacePath string,
+		executionPolicy isolation.ExecutionPolicy,
+	) (probeResult, error) {
 		assert.Equal(t, "filesystem", name)
 		assert.Equal(t, readMCPConfig(t, configPath).WorkspacePath(), workspacePath)
 		assert.Equal(t, "npx", server.Command)
+		value, ok := executionPolicy.LookupEnvironment(policyEnvironmentName)
+		assert.True(t, ok)
+		assert.Equal(t, "list-policy-value", value)
 		return probeResult{ToolCount: 3}, nil
 	}
 
@@ -545,8 +593,11 @@ func TestMCPEditRequiresEditor(t *testing.T) {
 }
 
 func TestMCPTestUsesProbe(t *testing.T) {
+	const policyEnvironmentName = "PICOCLAW_TEST_MCP_TEST_POLICY"
+	t.Setenv(policyEnvironmentName, "test-policy-value")
 	configPath := setupMCPConfigEnv(t)
 	writeMCPConfig(t, configPath, &config.Config{
+		Isolation: config.IsolationConfig{EnvironmentAllowlist: []string{policyEnvironmentName}},
 		Tools: config.ToolsConfig{
 			MCP: config.MCPConfig{
 				ToolConfig: config.ToolConfig{Enabled: true},
@@ -563,9 +614,18 @@ func TestMCPTestUsesProbe(t *testing.T) {
 
 	originalProbe := serverProbe
 	defer func() { serverProbe = originalProbe }()
-	serverProbe = func(_ context.Context, name string, _ config.MCPServerConfig, workspacePath string) (probeResult, error) {
+	serverProbe = func(
+		_ context.Context,
+		name string,
+		_ config.MCPServerConfig,
+		workspacePath string,
+		executionPolicy isolation.ExecutionPolicy,
+	) (probeResult, error) {
 		assert.Equal(t, "filesystem", name)
 		assert.Equal(t, readMCPConfig(t, configPath).WorkspacePath(), workspacePath)
+		value, ok := executionPolicy.LookupEnvironment(policyEnvironmentName)
+		assert.True(t, ok)
+		assert.Equal(t, "test-policy-value", value)
 		return probeResult{ToolCount: 2}, nil
 	}
 
@@ -648,8 +708,11 @@ func TestMCPShowDisabledServer(t *testing.T) {
 }
 
 func TestMCPShowUsesProbe(t *testing.T) {
+	const policyEnvironmentName = "PICOCLAW_TEST_MCP_SHOW_POLICY"
+	t.Setenv(policyEnvironmentName, "show-policy-value")
 	configPath := setupMCPConfigEnv(t)
 	writeMCPConfig(t, configPath, &config.Config{
+		Isolation: config.IsolationConfig{EnvironmentAllowlist: []string{policyEnvironmentName}},
 		Tools: config.ToolsConfig{
 			MCP: config.MCPConfig{
 				ToolConfig: config.ToolConfig{Enabled: true},
@@ -666,8 +729,17 @@ func TestMCPShowUsesProbe(t *testing.T) {
 
 	original := serverShowProbe
 	defer func() { serverShowProbe = original }()
-	serverShowProbe = func(_ context.Context, name string, _ config.MCPServerConfig, _ string) ([]toolDetail, error) {
+	serverShowProbe = func(
+		_ context.Context,
+		name string,
+		_ config.MCPServerConfig,
+		_ string,
+		executionPolicy isolation.ExecutionPolicy,
+	) ([]toolDetail, error) {
 		assert.Equal(t, "myserver", name)
+		value, ok := executionPolicy.LookupEnvironment(policyEnvironmentName)
+		assert.True(t, ok)
+		assert.Equal(t, "show-policy-value", value)
 		return []toolDetail{
 			{
 				Name:        "read_file",

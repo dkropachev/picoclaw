@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/health"
+	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
@@ -114,6 +119,10 @@ func TestStartupRuntimeBarrierPreservesOverdueCronUntilReadiness(t *testing.T) {
 		agentLoop.Close()
 	}()
 
+	executionPolicy, err := agentLoop.ExecutionPolicyForGeneration(cfg)
+	if err != nil {
+		t.Fatalf("ExecutionPolicyForGeneration() error = %v", err)
+	}
 	cronService, err := setupCronTool(
 		agentLoop,
 		msgBus,
@@ -121,6 +130,7 @@ func TestStartupRuntimeBarrierPreservesOverdueCronUntilReadiness(t *testing.T) {
 		cfg.Agents.Defaults.RestrictToWorkspace,
 		time.Minute,
 		cfg,
+		executionPolicy,
 	)
 	if err != nil {
 		t.Fatalf("setupCronTool() error = %v", err)
@@ -164,6 +174,264 @@ func TestStartupRuntimeBarrierPreservesOverdueCronUntilReadiness(t *testing.T) {
 	case <-jobRan:
 	case <-time.After(2 * time.Second):
 		t.Fatal("overdue cron did not run after startup readiness")
+	}
+}
+
+func TestSetupCronToolUsesExactGenerationExecutionPolicy(t *testing.T) {
+	const environmentName = "PICOCLAW_GATEWAY_CRON_POLICY"
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.RestrictToWorkspace = false
+	cfg.Isolation.EnvironmentAllowlist = []string{"PATH", environmentName}
+
+	t.Setenv(environmentName, "generation-a")
+	executionPolicy := isolation.NewExecutionPolicy(cfg.Isolation)
+	msgBus := bus.NewMessageBus()
+	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+		cfg,
+		msgBus,
+		&startupBlockedProvider{reason: "not used"},
+		executionPolicy,
+	)
+	defer func() {
+		agentLoop.Close()
+		msgBus.Close()
+	}()
+
+	// A compatibility constructor here would recapture this changed value.
+	// Gateway Cron must instead retain the policy installed on generation A.
+	t.Setenv(environmentName, "ambient-after-generation-a")
+	cronService, err := setupCronTool(
+		agentLoop,
+		msgBus,
+		cfg.WorkspacePath(),
+		cfg.Agents.Defaults.RestrictToWorkspace,
+		time.Minute,
+		cfg,
+		executionPolicy,
+	)
+	if err != nil {
+		t.Fatalf("setupCronTool() error = %v", err)
+	}
+	defer cronService.Stop()
+
+	defaultAgent := agentLoop.GetRegistry().GetDefaultAgent()
+	if defaultAgent == nil {
+		t.Fatal("default agent is nil")
+	}
+	registered, ok := defaultAgent.Tools.GetRegistered("cron")
+	if !ok {
+		t.Fatal("Cron tool was not registered")
+	}
+	cronTool, ok := registered.(*tools.CronTool)
+	if !ok {
+		t.Fatalf("registered Cron tool type = %T", registered)
+	}
+
+	result := cronTool.ExecuteJob(context.Background(), &cron.CronJob{
+		Payload: cron.CronPayload{
+			Command: gatewayPolicyEnvironmentCommand(environmentName),
+			Channel: "cli",
+			To:      "direct",
+		},
+	})
+	if result != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", result)
+	}
+	select {
+	case outbound := <-msgBus.OutboundChan():
+		if !strings.Contains(outbound.Content, "generation-a") {
+			t.Fatalf("Cron output = %q, want generation-a", outbound.Content)
+		}
+		if strings.Contains(outbound.Content, "ambient-after-generation-a") {
+			t.Fatalf("Cron output crossed generation policy: %q", outbound.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Cron command did not publish its result")
+	}
+}
+
+func gatewayPolicyEnvironmentCommand(name string) string {
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf(`[Console]::Out.Write($env:%s)`, name)
+	}
+	return fmt.Sprintf(`printf '%%s' "$%s"`, name)
+}
+
+func TestHandleConfigReloadRollbackRestoresExactExecutionPolicy(t *testing.T) {
+	const environmentName = "PICOCLAW_GATEWAY_ROLLBACK_POLICY"
+
+	oldCfg := config.DefaultConfig()
+	oldCfg.Agents.Defaults.Workspace = t.TempDir()
+	oldCfg.Isolation.EnvironmentAllowlist = []string{"PATH", environmentName}
+	newCfg := config.DefaultConfig()
+	newCfg.Agents.Defaults.Workspace = t.TempDir()
+	newCfg.Isolation.EnvironmentAllowlist = []string{"PATH", environmentName}
+
+	t.Setenv(environmentName, "generation-a")
+	oldExecutionPolicy := isolation.NewExecutionPolicy(oldCfg.Isolation)
+	msgBus := bus.NewMessageBus()
+	oldProvider := &startupBlockedProvider{reason: "not used"}
+	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+		oldCfg,
+		msgBus,
+		oldProvider,
+		oldExecutionPolicy,
+	)
+	healthServer := health.NewServer("127.0.0.1", 1, "")
+	healthServer.SetReady(true)
+	runningServices := &services{HealthServer: healthServer}
+	defer func() {
+		agentLoop.Close()
+		msgBus.Close()
+	}()
+
+	t.Setenv(environmentName, "generation-b")
+	forcedRestartErr := errors.New("forced candidate service restart failure")
+	restartCalls := 0
+	serviceOps := configReloadServiceOps{
+		stop: func(*services, time.Duration, bool) error { return nil },
+		restart: func(
+			_ context.Context,
+			currentLoop *agent.AgentLoop,
+			_ *services,
+			_ *bus.MessageBus,
+		) error {
+			restartCalls++
+			currentCfg := currentLoop.GetConfig()
+			currentPolicy, policyErr := currentLoop.ExecutionPolicyForGeneration(currentCfg)
+			if policyErr != nil {
+				return policyErr
+			}
+			captured, ok := currentPolicy.LookupEnvironment(environmentName)
+			if !ok {
+				return fmt.Errorf("%s was not captured", environmentName)
+			}
+			if currentCfg == newCfg {
+				if captured != "generation-b" {
+					return fmt.Errorf("candidate policy = %q, want generation-b", captured)
+				}
+				// A reconstructed rollback policy would capture this later value.
+				t.Setenv(environmentName, "ambient-after-generation-b")
+				return forcedRestartErr
+			}
+			if currentCfg != oldCfg {
+				return fmt.Errorf("unexpected recovered config identity")
+			}
+			if captured != "generation-a" {
+				return fmt.Errorf("rollback policy = %q, want generation-a", captured)
+			}
+			return nil
+		},
+	}
+	var providerRef providers.LLMProvider = oldProvider
+
+	err := handleConfigReloadWithServiceOps(
+		context.Background(),
+		agentLoop,
+		newCfg,
+		&providerRef,
+		runningServices,
+		msgBus,
+		true,
+		false,
+		serviceOps,
+	)
+	if !errors.Is(err, forcedRestartErr) {
+		t.Fatalf("handleConfigReloadWithServiceOps() error = %v, want %v", err, forcedRestartErr)
+	}
+	if restartCalls != 2 {
+		t.Fatalf("restart calls = %d, want candidate and rollback", restartCalls)
+	}
+	if agentLoop.GetConfig() != oldCfg {
+		t.Fatal("rollback did not restore config A")
+	}
+	if providerRef != oldProvider {
+		t.Fatal("rollback did not retain provider A")
+	}
+	restoredPolicy, policyErr := agentLoop.ExecutionPolicyForGeneration(oldCfg)
+	if policyErr != nil {
+		t.Fatalf("ExecutionPolicyForGeneration(old) error = %v", policyErr)
+	}
+	if captured, ok := restoredPolicy.LookupEnvironment(environmentName); !ok || captured != "generation-a" {
+		t.Fatalf("restored policy value = %q, %v; want generation-a, true", captured, ok)
+	}
+}
+
+func TestHandleConfigReloadRejectsInvalidExecutionPolicyBeforeDrain(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.Agents.Defaults.Workspace = t.TempDir()
+	newCfg := config.DefaultConfig()
+	newCfg.Agents.Defaults.Workspace = t.TempDir()
+	newCfg.Isolation.EnvironmentAllowlist = []string{"PATH", "path"}
+
+	msgBus := bus.NewMessageBus()
+	oldProvider := &startupBlockedProvider{reason: "not used"}
+	agentLoop := agent.NewAgentLoopWithExecutionPolicy(
+		oldCfg,
+		msgBus,
+		oldProvider,
+		isolation.NewExecutionPolicy(oldCfg.Isolation),
+	)
+	healthServer := health.NewServer("127.0.0.1", 1, "")
+	healthServer.SetReady(true)
+	runningServices := &services{HealthServer: healthServer}
+	defer func() {
+		agentLoop.Close()
+		msgBus.Close()
+	}()
+
+	stopCalls := 0
+	restartCalls := 0
+	serviceOps := configReloadServiceOps{
+		stop: func(*services, time.Duration, bool) error {
+			stopCalls++
+			return nil
+		},
+		restart: func(
+			context.Context,
+			*agent.AgentLoop,
+			*services,
+			*bus.MessageBus,
+		) error {
+			restartCalls++
+			return nil
+		},
+	}
+	var providerRef providers.LLMProvider = oldProvider
+
+	err := handleConfigReloadWithServiceOps(
+		context.Background(),
+		agentLoop,
+		newCfg,
+		&providerRef,
+		runningServices,
+		msgBus,
+		true,
+		false,
+		serviceOps,
+	)
+	if err == nil || !strings.Contains(
+		err.Error(),
+		"invalid replacement subprocess execution policy",
+	) {
+		t.Fatalf("handleConfigReloadWithServiceOps() error = %v", err)
+	}
+	if stopCalls != 0 || restartCalls != 0 {
+		t.Fatalf("service calls = stop %d, restart %d; want 0, 0", stopCalls, restartCalls)
+	}
+	if agentLoop.GetConfig() != oldCfg {
+		t.Fatal("invalid policy replaced config generation")
+	}
+	if providerRef != oldProvider {
+		t.Fatal("invalid policy replaced provider generation")
+	}
+	if !healthServer.IsReady() {
+		t.Fatal("invalid policy changed readiness before admission drain")
+	}
+	if _, policyErr := agentLoop.ExecutionPolicyForGeneration(oldCfg); policyErr != nil {
+		t.Fatalf("generation A policy changed: %v", policyErr)
 	}
 }
 

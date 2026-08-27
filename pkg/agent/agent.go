@@ -22,6 +22,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -52,6 +53,7 @@ type AgentLoop struct {
 	agentActivitySub   runtimeevents.Subscription
 	hooks              *HookManager
 	toolPolicy         tools.ToolPolicy
+	executionPolicy    isolation.ExecutionPolicy
 
 	// Runtime state
 	running         atomic.Bool
@@ -109,6 +111,10 @@ type AgentLoop struct {
 	runtimeGateActive       int
 	runtimeGateTransitionMu sync.Mutex
 	reloadMu                sync.Mutex
+	hookGenerationMu        sync.Mutex
+	closeOnce               sync.Once
+	closing                 atomic.Bool
+	closed                  bool
 
 	deferEvolutionActivation bool
 
@@ -123,9 +129,11 @@ type AgentLoop struct {
 
 	reloadFunc func() error
 
-	providerFactory    func(*config.ModelConfig) (providers.LLMProvider, string, error)
-	registryFactory    func(*config.Config, providers.LLMProvider) *AgentRegistry
-	recursionInstaller recursionCatalogInstaller
+	providerFactory       func(*config.ModelConfig) (providers.LLMProvider, string, error) // legacy test seam
+	policyProviderFactory func(*config.ModelConfig, isolation.ExecutionPolicy) (providers.LLMProvider, string, error)
+	registryFactory       func(*config.Config, providers.LLMProvider) *AgentRegistry // legacy test seam
+	policyRegistryFactory func(*config.Config, providers.LLMProvider, isolation.ExecutionPolicy) *AgentRegistry
+	recursionInstaller    recursionCatalogInstaller
 }
 
 // processOptions configures how a message is processed
@@ -704,6 +712,19 @@ func (al *AgentLoop) WaitStopped(ctx context.Context) error {
 // Close releases quiesced registry, session, context, and generation resources.
 // Call after Stop.
 func (al *AgentLoop) Close() {
+	if al == nil {
+		return
+	}
+	al.closing.Store(true)
+	al.closeOnce.Do(func() {
+		al.reloadMu.Lock()
+		defer al.reloadMu.Unlock()
+		al.closed = true
+		al.closeQuiescedResources()
+	})
+}
+
+func (al *AgentLoop) closeQuiescedResources() {
 	al.cancelTrackedSubagentWorkers()
 	mcpManager := al.mcp.takeManager()
 	evolution := al.currentEvolutionBridge()
@@ -731,9 +752,7 @@ func (al *AgentLoop) Close() {
 				})
 		}
 	}
-	if al.hooks != nil {
-		al.hooks.Close()
-	}
+	al.hookRuntime.close(al)
 	al.closeRuntimeEventLogger()
 	al.closeAgentActivityRecorder()
 	if al.runtimeEvents != nil && al.ownsRuntimeEvents {
@@ -765,7 +784,24 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	provider providers.LLMProvider,
 	cfg *config.Config,
 ) error {
-	_, err := al.reloadProviderAndConfig(ctx, provider, cfg, true)
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	policy := isolation.NewExecutionPolicy(isolationCfg)
+	_, err := al.reloadProviderAndConfig(ctx, provider, cfg, policy, true, false)
+	return err
+}
+
+// ReloadProviderAndConfigWithExecutionPolicy atomically publishes the supplied
+// config, registry, and exact immutable subprocess policy.
+func (al *AgentLoop) ReloadProviderAndConfigWithExecutionPolicy(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	policy isolation.ExecutionPolicy,
+) error {
+	_, err := al.reloadProviderAndConfig(ctx, provider, cfg, policy, true, true)
 	return err
 }
 
@@ -777,7 +813,24 @@ func (al *AgentLoop) ReloadProviderAndConfigRetainingPrevious(
 	provider providers.LLMProvider,
 	cfg *config.Config,
 ) (providers.LLMProvider, error) {
-	return al.reloadProviderAndConfig(ctx, provider, cfg, false)
+	isolationCfg := config.DefaultConfig().Isolation
+	if cfg != nil {
+		isolationCfg = cfg.Isolation
+	}
+	policy := isolation.NewExecutionPolicy(isolationCfg)
+	return al.reloadProviderAndConfig(ctx, provider, cfg, policy, false, false)
+}
+
+// ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy atomically
+// publishes the supplied generation while retaining the previous provider for
+// an exact rollback transaction.
+func (al *AgentLoop) ReloadProviderAndConfigRetainingPreviousWithExecutionPolicy(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	policy isolation.ExecutionPolicy,
+) (providers.LLMProvider, error) {
+	return al.reloadProviderAndConfig(ctx, provider, cfg, policy, false, true)
 }
 
 // CloseRetainedProvider drains active requests before closing a stateful
@@ -814,13 +867,18 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
 	cfg *config.Config,
+	policy isolation.ExecutionPolicy,
 	closePrevious bool,
+	requireFreshConfig bool,
 ) (providers.LLMProvider, error) {
 	if runtimeLeaseOwner(ctx) == al {
 		return nil, fmt.Errorf("cannot reload provider from an active agent runtime lease")
 	}
 	al.reloadMu.Lock()
 	defer al.reloadMu.Unlock()
+	if al.closed || al.closing.Load() {
+		return nil, fmt.Errorf("agent loop is closed")
+	}
 
 	// Validate inputs
 	if provider == nil {
@@ -828,6 +886,15 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	}
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, fmt.Errorf("execution policy is invalid: %w", err)
+	}
+	al.mu.RLock()
+	sameConfigGeneration := al.cfg == cfg
+	al.mu.RUnlock()
+	if requireFreshConfig && sameConfigGeneration {
+		return nil, fmt.Errorf("reload config must be a new generation snapshot")
 	}
 
 	var registry *AgentRegistry
@@ -840,10 +907,12 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				registry = nil
 			}
 		}()
-		if al.registryFactory != nil {
+		if al.policyRegistryFactory != nil {
+			registry = al.policyRegistryFactory(cfg, provider, policy)
+		} else if al.registryFactory != nil {
 			registry = al.registryFactory(cfg, provider)
 		} else {
-			registry = NewAgentRegistry(cfg, provider)
+			registry = NewAgentRegistryWithExecutionPolicy(cfg, provider, policy)
 		}
 	}()
 	if registry == nil {
@@ -855,7 +924,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	registryInstalled := false
 	defer func() {
 		if !registryInstalled {
-			registry.Close()
+			registry.CloseCandidate()
 		}
 	}()
 
@@ -895,11 +964,16 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		}
 	}
 
-	resumeRuntime, err := al.pauseRuntimeUses(ctx)
+	runtimeCtx, resumeRuntime, err := al.pauseRuntimeUsesWithContext(ctx, ctx)
 	if err != nil {
 		return nil, fmt.Errorf("drain active agent runtime before reload: %w", err)
 	}
 	defer resumeRuntime()
+
+	// Fence configured-hook initialization across cfg/registry/policy
+	// publication, reset, and exact-generation reinitialization.
+	al.hookGenerationMu.Lock()
+	defer al.hookGenerationMu.Unlock()
 
 	// SetMediaStore and candidate media application/publication share this
 	// boundary, so no setter can retain the retired registry or overtake a
@@ -907,12 +981,18 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	var oldRegistry *AgentRegistry
 	var oldEvolution *evolutionBridge
 	var oldContextManager ContextManager
-	func() {
+	if err = func() error {
 		al.mediaStoreMu.Lock()
 		defer al.mediaStoreMu.Unlock()
 
 		mediaStore := al.mediaStoreSnapshot()
 		setAgentRegistryMediaStore(registry, mediaStore)
+		if contextErr := runtimeCtx.Err(); contextErr != nil {
+			return fmt.Errorf("context canceled before runtime generation publication: %w", contextErr)
+		}
+		if al.closing.Load() {
+			return fmt.Errorf("agent loop is closing before runtime generation publication")
+		}
 
 		// Atomically swap the config and registry under the same lock order used
 		// by SetMediaStore: mediaStoreMu then al.mu.
@@ -923,6 +1003,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 
 		al.cfg = cfg
 		al.registry = registry
+		al.executionPolicy = policy
 		registryInstalled = true
 		al.evolution = newEvolution
 		evolutionInstalled = true
@@ -942,7 +1023,10 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		}
 		al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
 		al.mu.Unlock()
-	}()
+		return nil
+	}(); err != nil {
+		return nil, err
+	}
 
 	// Context-manager factories derive per-agent resources from the current
 	// registry. Rebuild after the registry/config swap while the runtime gate
@@ -952,7 +1036,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 		logger.WarnCF("agent", "Failed to close previous context manager during reload",
 			map[string]any{"error": err.Error()})
 	}
-	newContextManager := al.resolveContextManagerWithContext(ctx)
+	newContextManager := al.resolveContextManagerWithContext(runtimeCtx)
 	al.mu.Lock()
 	al.contextManager = newContextManager
 	al.mu.Unlock()
@@ -975,7 +1059,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	oldMCPManager := al.mcp.reset()
 	al.hookRuntime.reset(al)
 	configureHookManagerFromConfig(al.hooks, cfg)
-	if err := al.ensureHooksInitialized(ctx); err != nil {
+	if err := al.ensureHooksInitializedForGeneration(runtimeCtx, cfg); err != nil {
 		logger.WarnCF("agent", "Configured hooks failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
 	}
@@ -989,7 +1073,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
-	if err := al.ensureMCPInitializedForGeneration(ctx, cfg, registry); err != nil {
+	if err := al.ensureMCPInitializedForGeneration(runtimeCtx, cfg, registry); err != nil {
 		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
 	}
@@ -997,7 +1081,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	// This prevents blocking readers while closing
 	if closePrevious && hasOldProvider {
 		if stateful, ok := oldProvider.(providers.StatefulProvider); ok {
-			al.closeReloadedProvider(ctx, stateful)
+			al.closeReloadedProvider(runtimeCtx, stateful)
 		}
 	}
 

@@ -15,15 +15,26 @@ import (
 
 // CodexCliProvider implements LLMProvider by wrapping the codex CLI as a subprocess.
 type CodexCliProvider struct {
-	command   string
-	workspace string
+	command         string
+	workspace       string
+	executionPolicy isolation.ExecutionPolicy
 }
 
 // NewCodexCliProvider creates a new Codex CLI provider.
 func NewCodexCliProvider(workspace string) *CodexCliProvider {
+	return NewCodexCliProviderWithExecutionPolicy(workspace, defaultExecutionPolicy())
+}
+
+// NewCodexCliProviderWithExecutionPolicy creates a new Codex CLI provider
+// bound to one exact subprocess execution policy.
+func NewCodexCliProviderWithExecutionPolicy(
+	workspace string,
+	policy isolation.ExecutionPolicy,
+) *CodexCliProvider {
 	return &CodexCliProvider{
-		command:   "codex",
-		workspace: workspace,
+		command:         "codex",
+		workspace:       workspace,
+		executionPolicy: policy,
 	}
 }
 
@@ -61,9 +72,7 @@ func (p *CodexCliProvider) Chat(
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Execute the CLI through the shared isolation wrapper so external provider
-	// processes honor the configured isolation policy.
-	err = isolation.Run(cmd)
+	err = p.executionPolicy.Run(cmd)
 
 	// Parse JSONL from stdout even if exit code is non-zero,
 	// because codex writes diagnostic noise to stderr (e.g. rollout errors)

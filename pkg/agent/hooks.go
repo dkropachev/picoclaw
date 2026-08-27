@@ -263,17 +263,26 @@ func (r *ToolResultHookResponse) Clone() *ToolResultHookResponse {
 
 type HookManager struct {
 	runtimeEvents      runtimeevents.EventChannel
+	timeoutMu          sync.RWMutex
 	observerTimeout    time.Duration
 	interceptorTimeout time.Duration
 	approvalTimeout    time.Duration
 
-	mu      sync.RWMutex
-	hooks   map[string]HookRegistration
-	ordered []HookRegistration
+	mu       sync.RWMutex
+	hooks    map[string]trackedHookRegistration
+	ordered  []HookRegistration
+	mountSeq uint64
 
 	runtimeSub  runtimeevents.Subscription
 	runtimeDone chan struct{}
 	closeOnce   sync.Once
+	closed      bool
+}
+
+type trackedHookRegistration struct {
+	registration    HookRegistration
+	mountID         uint64
+	generationOwned bool
 }
 
 func NewHookManager(runtimeEvents runtimeevents.EventChannel) *HookManager {
@@ -282,7 +291,7 @@ func NewHookManager(runtimeEvents runtimeevents.EventChannel) *HookManager {
 		observerTimeout:    defaultHookObserverTimeout,
 		interceptorTimeout: defaultHookInterceptorTimeout,
 		approvalTimeout:    defaultHookApprovalTimeout,
-		hooks:              make(map[string]HookRegistration),
+		hooks:              make(map[string]trackedHookRegistration),
 		runtimeDone:        make(chan struct{}),
 	}
 
@@ -313,6 +322,9 @@ func (hm *HookManager) Close() {
 	}
 
 	hm.closeOnce.Do(func() {
+		hm.mu.Lock()
+		hm.closed = true
+		hm.mu.Unlock()
 		if hm.runtimeSub != nil {
 			if err := hm.runtimeSub.Close(); err != nil {
 				logger.WarnCF("hooks", "Failed to close runtime event hook subscription", map[string]any{
@@ -329,6 +341,8 @@ func (hm *HookManager) ConfigureTimeouts(observer, interceptor, approval time.Du
 	if hm == nil {
 		return
 	}
+	hm.timeoutMu.Lock()
+	defer hm.timeoutMu.Unlock()
 	if observer > 0 {
 		hm.observerTimeout = observer
 	}
@@ -340,37 +354,73 @@ func (hm *HookManager) ConfigureTimeouts(observer, interceptor, approval time.Du
 	}
 }
 
-func (hm *HookManager) Mount(reg HookRegistration) error {
+func (hm *HookManager) timeoutSnapshot() (time.Duration, time.Duration, time.Duration) {
 	if hm == nil {
-		return fmt.Errorf("hook manager is nil")
+		return 0, 0, 0
+	}
+	hm.timeoutMu.RLock()
+	defer hm.timeoutMu.RUnlock()
+	return hm.observerTimeout, hm.interceptorTimeout, hm.approvalTimeout
+}
+
+func (hm *HookManager) Mount(reg HookRegistration) error {
+	_, err := hm.mount(reg, false)
+	return err
+}
+
+func (hm *HookManager) mountTracked(reg HookRegistration) (uint64, error) {
+	return hm.mount(reg, true)
+}
+
+func (hm *HookManager) mount(
+	reg HookRegistration,
+	generationOwned bool,
+) (uint64, error) {
+	if hm == nil {
+		return 0, fmt.Errorf("hook manager is nil")
 	}
 	if reg.Name == "" {
-		return fmt.Errorf("hook name is required")
+		return 0, fmt.Errorf("hook name is required")
 	}
 	if reg.Name != strings.TrimSpace(reg.Name) || len(reg.Name) > tools.MaxToolPolicyNameLen {
-		return fmt.Errorf("hook name must be exact and bounded")
+		return 0, fmt.Errorf("hook name must be exact and bounded")
 	}
 	for _, character := range reg.Name {
 		if character < 0x20 || character == 0x7f {
-			return fmt.Errorf("hook name contains control characters")
+			return 0, fmt.Errorf("hook name contains control characters")
 		}
 	}
 	if reg.Hook == nil {
-		return fmt.Errorf("hook %q is nil", reg.Name)
+		return 0, fmt.Errorf("hook %q is nil", reg.Name)
 	}
 	if reg.Trust != HookTrustUntrusted && reg.Trust != HookTrustTrusted {
-		return fmt.Errorf("hook %q has unsupported trust %d", reg.Name, reg.Trust)
+		return 0, fmt.Errorf("hook %q has unsupported trust %d", reg.Name, reg.Trust)
 	}
 
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
+	if hm.closed {
+		return 0, fmt.Errorf("hook manager is closed")
+	}
 
 	if existing, ok := hm.hooks[reg.Name]; ok {
-		closeHookIfPossible(existing.Hook)
+		if generationOwned && !existing.generationOwned {
+			return 0, fmt.Errorf(
+				"configured hook %q collides with a manual hook",
+				reg.Name,
+			)
+		}
+		closeHookIfPossible(existing.registration.Hook)
 	}
-	hm.hooks[reg.Name] = reg
+	hm.mountSeq++
+	mountID := hm.mountSeq
+	hm.hooks[reg.Name] = trackedHookRegistration{
+		registration:    reg,
+		mountID:         mountID,
+		generationOwned: generationOwned,
+	}
 	hm.rebuildOrdered()
-	return nil
+	return mountID, nil
 }
 
 func hookRegistrationTrusted(reg HookRegistration) bool {
@@ -406,8 +456,23 @@ func (hm *HookManager) Unmount(name string) {
 	defer hm.mu.Unlock()
 
 	if existing, ok := hm.hooks[name]; ok {
-		closeHookIfPossible(existing.Hook)
+		closeHookIfPossible(existing.registration.Hook)
 	}
+	delete(hm.hooks, name)
+	hm.rebuildOrdered()
+}
+
+func (hm *HookManager) unmountTracked(name string, mountID uint64) {
+	if hm == nil || name == "" || mountID == 0 {
+		return
+	}
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+	existing, ok := hm.hooks[name]
+	if !ok || existing.mountID != mountID {
+		return
+	}
+	closeHookIfPossible(existing.registration.Hook)
 	delete(hm.hooks, name)
 	hm.rebuildOrdered()
 }
@@ -846,7 +911,7 @@ func (hm *HookManager) ApproveTool(ctx context.Context, req *ToolApprovalRequest
 func (hm *HookManager) rebuildOrdered() {
 	hm.ordered = hm.ordered[:0]
 	for _, reg := range hm.hooks {
-		hm.ordered = append(hm.ordered, reg)
+		hm.ordered = append(hm.ordered, reg.registration)
 	}
 	sort.SliceStable(hm.ordered, func(i, j int) bool {
 		if hm.ordered[i].Source != hm.ordered[j].Source {
@@ -873,7 +938,7 @@ func (hm *HookManager) closeAllHooks() {
 	defer hm.mu.Unlock()
 
 	for name, reg := range hm.hooks {
-		closeHookIfPossible(reg.Hook)
+		closeHookIfPossible(reg.registration.Hook)
 		delete(hm.hooks, name)
 	}
 	hm.ordered = nil
@@ -884,7 +949,8 @@ func (hm *HookManager) runRuntimeObserver(
 	observer RuntimeEventObserver,
 	evt runtimeevents.Event,
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), hm.observerTimeout)
+	observerTimeout, _, _ := hm.timeoutSnapshot()
+	ctx, cancel := context.WithTimeout(context.Background(), observerTimeout)
 	defer cancel()
 
 	done := make(chan error, 1)
@@ -905,7 +971,7 @@ func (hm *HookManager) runRuntimeObserver(
 		logger.WarnCF("hooks", "Runtime event observer timed out", map[string]any{
 			"hook":       name,
 			"event":      evt.Kind.String(),
-			"timeout_ms": hm.observerTimeout.Milliseconds(),
+			"timeout_ms": observerTimeout.Milliseconds(),
 		})
 	}
 }
@@ -916,9 +982,10 @@ func (hm *HookManager) callBeforeLLM(
 	interceptor LLMInterceptor,
 	req *LLMHookRequest,
 ) (*LLMHookRequest, HookDecision, bool) {
+	_, interceptorTimeout, _ := hm.timeoutSnapshot()
 	return runInterceptorHook(
 		parent,
-		hm.interceptorTimeout,
+		interceptorTimeout,
 		name,
 		"before_llm",
 		func(ctx context.Context) (*LLMHookRequest, HookDecision, error) {
@@ -933,9 +1000,10 @@ func (hm *HookManager) callAfterLLM(
 	interceptor LLMInterceptor,
 	resp *LLMHookResponse,
 ) (*LLMHookResponse, HookDecision, bool) {
+	_, interceptorTimeout, _ := hm.timeoutSnapshot()
 	return runInterceptorHook(
 		parent,
-		hm.interceptorTimeout,
+		interceptorTimeout,
 		name,
 		"after_llm",
 		func(ctx context.Context) (*LLMHookResponse, HookDecision, error) {
@@ -950,9 +1018,10 @@ func (hm *HookManager) callBeforeTool(
 	interceptor ToolInterceptor,
 	call *ToolCallHookRequest,
 ) (*ToolCallHookRequest, HookDecision, bool) {
+	_, interceptorTimeout, _ := hm.timeoutSnapshot()
 	return runInterceptorHook(
 		parent,
-		hm.interceptorTimeout,
+		interceptorTimeout,
 		name,
 		"before_tool",
 		func(ctx context.Context) (*ToolCallHookRequest, HookDecision, error) {
@@ -967,9 +1036,10 @@ func (hm *HookManager) callAfterTool(
 	interceptor ToolInterceptor,
 	resultView *ToolResultHookResponse,
 ) (*ToolResultHookResponse, HookDecision, bool) {
+	_, interceptorTimeout, _ := hm.timeoutSnapshot()
 	return runInterceptorHook(
 		parent,
-		hm.interceptorTimeout,
+		interceptorTimeout,
 		name,
 		"after_tool",
 		func(ctx context.Context) (*ToolResultHookResponse, HookDecision, error) {
@@ -984,9 +1054,10 @@ func (hm *HookManager) callApproveTool(
 	approver ToolApprover,
 	req *ToolApprovalRequest,
 ) (ApprovalDecision, bool) {
+	_, _, approvalTimeout := hm.timeoutSnapshot()
 	return runApprovalHook(
 		parent,
-		hm.approvalTimeout,
+		approvalTimeout,
 		name,
 		"approve_tool",
 		func(ctx context.Context) (ApprovalDecision, error) {

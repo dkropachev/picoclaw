@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -22,6 +23,7 @@ import (
 func newHookTestLoop(
 	t *testing.T,
 	provider providers.LLMProvider,
+	policies ...isolation.ExecutionPolicy,
 ) (*AgentLoop, *AgentInstance, func()) {
 	t.Helper()
 
@@ -45,7 +47,17 @@ func newHookTestLoop(
 		},
 	}
 
-	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
+	var al *AgentLoop
+	if len(policies) > 0 {
+		al = newTestAgentLoopWithStrictModelsAndExecutionPolicy(
+			cfg,
+			bus.NewMessageBus(),
+			provider,
+			policies[0],
+		)
+	} else {
+		al = newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
+	}
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
 		t.Fatal("expected default agent")

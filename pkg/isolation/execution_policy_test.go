@@ -74,14 +74,17 @@ func TestExecutionPolicyHelperProcess(t *testing.T) {
 
 func TestExecutionPolicyDetachesSourceAndLaunchProjections(t *testing.T) {
 	paths := make([]config.ExposePath, 1, 4)
+	allowlist := make([]string, 1, 4)
+	allowlist[0] = "PATH"
 	paths[0] = config.ExposePath{
 		Source: "/source-a",
 		Target: "/target-a",
 		Mode:   "ro",
 	}
 	source := config.IsolationConfig{
-		Enabled:     true,
-		ExposePaths: paths,
+		Enabled:              true,
+		ExposePaths:          paths,
+		EnvironmentAllowlist: allowlist,
 	}
 	policy := NewExecutionPolicy(source)
 
@@ -91,6 +94,8 @@ func TestExecutionPolicyDetachesSourceAndLaunchProjections(t *testing.T) {
 	paths[0] = config.ExposePath{Source: "/source-mutated", Target: "/target-mutated", Mode: "rw"}
 	source.ExposePaths = append(source.ExposePaths,
 		config.ExposePath{Source: "/source-spare", Target: "/target-spare", Mode: "rw"})
+	allowlist[0] = "HOME"
+	source.EnvironmentAllowlist = append(source.EnvironmentAllowlist, "P014_SPARE")
 
 	want := config.IsolationConfig{
 		Enabled: true,
@@ -99,6 +104,7 @@ func TestExecutionPolicyDetachesSourceAndLaunchProjections(t *testing.T) {
 			Target: "/target-a",
 			Mode:   "ro",
 		}},
+		EnvironmentAllowlist: []string{"PATH"},
 	}
 	first, ok := policy.detachedIsolation()
 	if !ok || !reflect.DeepEqual(first, want) {
@@ -111,6 +117,8 @@ func TestExecutionPolicyDetachesSourceAndLaunchProjections(t *testing.T) {
 	first.ExposePaths[0].Source = "/projection-mutated"
 	first.ExposePaths = append(first.ExposePaths,
 		config.ExposePath{Source: "/projection-extra", Target: "/projection-extra", Mode: "ro"})
+	first.EnvironmentAllowlist[0] = "HOME"
+	first.EnvironmentAllowlist = append(first.EnvironmentAllowlist, "P014_EXTRA")
 	second, ok := policy.detachedIsolation()
 	if !ok || !reflect.DeepEqual(second, want) {
 		t.Fatalf("policy followed detached projection mutation: %#v, %v", second, ok)
@@ -124,29 +132,40 @@ func TestExecutionPolicyDetachesSourceAndLaunchProjections(t *testing.T) {
 }
 
 func TestExecutionPolicyPreservesNilAndAllocatedEmptyExposePaths(t *testing.T) {
-	nilPolicy := NewExecutionPolicy(config.IsolationConfig{ExposePaths: nil})
+	nilPolicy := NewExecutionPolicy(config.IsolationConfig{
+		ExposePaths:          nil,
+		EnvironmentAllowlist: nil,
+	})
 	nilConfig, ok := nilPolicy.detachedIsolation()
-	if !ok || nilConfig.ExposePaths != nil {
-		t.Fatalf("nil expose paths = %#v, %v; want nil, true", nilConfig.ExposePaths, ok)
+	if !ok || nilConfig.ExposePaths != nil || nilConfig.EnvironmentAllowlist != nil {
+		t.Fatalf("nil isolation slices = %#v, %v; want nil, true", nilConfig, ok)
 	}
 
 	emptySource := make([]config.ExposePath, 0)
-	emptyPolicy := NewExecutionPolicy(config.IsolationConfig{ExposePaths: emptySource})
+	emptyPolicy := NewExecutionPolicy(config.IsolationConfig{
+		ExposePaths:          emptySource,
+		EnvironmentAllowlist: make([]string, 0),
+	})
 	emptyConfig, ok := emptyPolicy.detachedIsolation()
-	if !ok || emptyConfig.ExposePaths == nil || len(emptyConfig.ExposePaths) != 0 {
-		t.Fatalf("allocated empty expose paths = %#v, %v; want non-nil empty", emptyConfig.ExposePaths, ok)
+	if !ok || emptyConfig.ExposePaths == nil || len(emptyConfig.ExposePaths) != 0 ||
+		emptyConfig.EnvironmentAllowlist == nil || len(emptyConfig.EnvironmentAllowlist) != 0 {
+		t.Fatalf("allocated empty isolation slices = %#v, %v; want non-nil empty", emptyConfig, ok)
 	}
 
 	Configure(&config.Config{Isolation: config.IsolationConfig{ExposePaths: nil}})
 	t.Cleanup(func() { Configure(nil) })
-	if got := CurrentConfig().ExposePaths; got != nil {
-		t.Fatalf("legacy nil expose paths = %#v, want nil", got)
+	legacyNil := CurrentConfig()
+	if legacyNil.ExposePaths != nil || legacyNil.EnvironmentAllowlist != nil {
+		t.Fatalf("legacy nil isolation slices = %#v, want nil", legacyNil)
 	}
 	Configure(&config.Config{Isolation: config.IsolationConfig{
-		ExposePaths: make([]config.ExposePath, 0),
+		ExposePaths:          make([]config.ExposePath, 0),
+		EnvironmentAllowlist: make([]string, 0),
 	}})
-	if got := CurrentConfig().ExposePaths; got == nil || len(got) != 0 {
-		t.Fatalf("legacy allocated empty expose paths = %#v, want non-nil empty", got)
+	legacyEmpty := CurrentConfig()
+	if legacyEmpty.ExposePaths == nil || len(legacyEmpty.ExposePaths) != 0 ||
+		legacyEmpty.EnvironmentAllowlist == nil || len(legacyEmpty.EnvironmentAllowlist) != 0 {
+		t.Fatalf("legacy allocated empty isolation slices = %#v, want non-nil empty", legacyEmpty)
 	}
 }
 
@@ -229,7 +248,7 @@ func TestExecutionPolicyDisabledAllowsDormantInvalidExposure(t *testing.T) {
 	}
 }
 
-func TestExecutionPolicyDisabledPreservesCommandBeforeExactStart(t *testing.T) {
+func TestExecutionPolicyDisabledRestrictsEnvironmentBeforeExactStart(t *testing.T) {
 	stdin := strings.NewReader("input")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
@@ -243,7 +262,17 @@ func TestExecutionPolicyDisabledPreservesCommandBeforeExactStart(t *testing.T) {
 	cmd.SysProcAttr = sysProcAttr
 	wantPath := cmd.Path
 	wantArgs := append([]string(nil), cmd.Args...)
-	wantEnv := append([]string(nil), cmd.Env...)
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnv := []string{
+		"A=1",
+		"B=2",
+		"HOME=/captured/home",
+		"PATH=/captured/bin",
+		"PWD=" + filepath.Join(workingDirectory, "relative-working-dir"),
+	}
 	var applyCalls, startCalls atomic.Int32
 	operations := completeExecutionPolicyTestOperations("netbsd", "")
 	operations.apply = func(*exec.Cmd, launchProjection) error {
@@ -261,7 +290,15 @@ func TestExecutionPolicyDisabledPreservesCommandBeforeExactStart(t *testing.T) {
 		return nil
 	}
 	if err := startExecutionPolicy(
-		NewExecutionPolicy(config.IsolationConfig{}),
+		newExecutionPolicyWithEnvironment(
+			config.IsolationConfig{},
+			[]string{
+				"PATH=/captured/bin",
+				"HOME=/captured/home",
+				"AMBIENT_SECRET=must-not-pass",
+			},
+			"netbsd",
+		),
 		cmd,
 		operations,
 	); err != nil {
@@ -274,10 +311,13 @@ func TestExecutionPolicyDisabledPreservesCommandBeforeExactStart(t *testing.T) {
 
 func TestConfigureDeepCopiesAndRestoresDefaultIsolation(t *testing.T) {
 	paths := make([]config.ExposePath, 1, 3)
+	allowlist := make([]string, 1, 3)
+	allowlist[0] = "PATH"
 	paths[0] = config.ExposePath{Source: "/legacy-source", Target: "/legacy-target", Mode: "ro"}
 	cfg := &config.Config{Isolation: config.IsolationConfig{
-		Enabled:     true,
-		ExposePaths: paths,
+		Enabled:              true,
+		ExposePaths:          paths,
+		EnvironmentAllowlist: allowlist,
 	}}
 	Configure(cfg)
 	t.Cleanup(func() { Configure(nil) })
@@ -286,6 +326,11 @@ func TestConfigureDeepCopiesAndRestoresDefaultIsolation(t *testing.T) {
 	cfg.Isolation.Enabled = false
 	cfg.Isolation.ExposePaths = append(cfg.Isolation.ExposePaths,
 		config.ExposePath{Source: "/spare-source", Target: "/spare-target", Mode: "rw"})
+	allowlist[0] = "HOME"
+	cfg.Isolation.EnvironmentAllowlist = append(
+		cfg.Isolation.EnvironmentAllowlist,
+		"P014_SPARE",
+	)
 
 	want := config.IsolationConfig{
 		Enabled: true,
@@ -294,6 +339,7 @@ func TestConfigureDeepCopiesAndRestoresDefaultIsolation(t *testing.T) {
 			Target: "/legacy-target",
 			Mode:   "ro",
 		}},
+		EnvironmentAllowlist: []string{"PATH"},
 	}
 	first := CurrentConfig()
 	if !reflect.DeepEqual(first, want) {
@@ -301,6 +347,7 @@ func TestConfigureDeepCopiesAndRestoresDefaultIsolation(t *testing.T) {
 	}
 	first.Enabled = false
 	first.ExposePaths[0].Source = "/returned-mutation"
+	first.EnvironmentAllowlist[0] = "HOME"
 	if second := CurrentConfig(); !reflect.DeepEqual(second, want) {
 		t.Fatalf("legacy policy followed CurrentConfig output mutation: %#v", second)
 	}
@@ -335,6 +382,7 @@ func TestCurrentConfigFailsClosedForImpossibleZeroLegacyStore(t *testing.T) {
 }
 
 func TestLegacyIsolationDefaultWrappersAndExplicitDisabledPolicy(t *testing.T) {
+	t.Setenv("P014_AMBIENT_SECRET", "must-not-pass")
 	Configure(nil)
 	t.Cleanup(func() { Configure(nil) })
 	if err := Preflight(); err != nil {
@@ -344,14 +392,16 @@ func TestLegacyIsolationDefaultWrappersAndExplicitDisabledPolicy(t *testing.T) {
 	prepared := executionPolicyHelperCommand()
 	wantPath := prepared.Path
 	wantArgs := append([]string(nil), prepared.Args...)
-	wantEnv := append([]string(nil), prepared.Env...)
 	if err := PrepareCommand(prepared); err != nil {
 		t.Fatalf("default PrepareCommand() error = %v", err)
 	}
 	if prepared.Path != wantPath || !reflect.DeepEqual(prepared.Args, wantArgs) ||
-		!reflect.DeepEqual(prepared.Env, wantEnv) {
+		!executionPolicyTestEnvironmentContains(
+			prepared.Env,
+			executionPolicyHelperEnvironment+"=run",
+		) || executionPolicyEnvironmentHasKey(prepared.Env, "P014_AMBIENT_SECRET") {
 		t.Fatalf(
-			"disabled PrepareCommand mutated command: path=%q args=%#v env=%#v",
+			"disabled PrepareCommand projection mismatch: path=%q args=%#v env=%#v",
 			prepared.Path,
 			prepared.Args,
 			prepared.Env,
@@ -759,15 +809,51 @@ func TestExecutionPolicyRootAndPlatformProjectionValidation(t *testing.T) {
 }
 
 func TestApplyUserEnvUsesDetachedDeterministicProjection(t *testing.T) {
+	t.Setenv("P014_APPLY_USER_ENV_AMBIENT", "must-not-pass")
 	base := []string{"ZED=last", "HOME=ambient", "ALPHA=first"}
 	cmd := exec.Command("unused")
 	cmd.Env = append([]string(nil), base...)
 	root := t.TempDir()
-	want := projectUserEnvironment(base, ResolveUserEnv(root), runtime.GOOS)
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userEnv := ResolveUserEnv(root)
+	want := []string{"ALPHA=first", "PWD=" + workingDirectory, "ZED=last"}
+	if runtime.GOOS == "windows" {
+		systemRoot := strings.TrimRight(os.Getenv("SYSTEMROOT"), `\/`)
+		want = append(want,
+			"APPDATA="+userEnv.AppData,
+			"COMSPEC="+windowsJoin(systemRoot, "System32", "cmd.exe"),
+			"HOME="+userEnv.Home,
+			"HOMEDRIVE="+windowsSystemDrive(userEnv.Home),
+			"HOMEPATH="+windowsHomePath(userEnv.Home),
+			"LOCALAPPDATA="+userEnv.LocalAppData,
+			"NODEFAULTCURRENTDIRECTORYINEXEPATH=1",
+			"SYSTEMDRIVE="+windowsSystemDrive(systemRoot),
+			"SYSTEMROOT="+systemRoot,
+			"TEMP="+userEnv.Tmp,
+			"TMP="+userEnv.Tmp,
+			"USERPROFILE="+userEnv.Home,
+			"WINDIR="+systemRoot,
+		)
+	} else {
+		want = append(want,
+			"HOME="+userEnv.Home,
+			"TMPDIR="+userEnv.Tmp,
+			"XDG_CACHE_HOME="+userEnv.Cache,
+			"XDG_CONFIG_HOME="+userEnv.Config,
+			"XDG_STATE_HOME="+userEnv.State,
+		)
+	}
+	sort.Strings(want)
 
 	ApplyUserEnv(cmd, root)
 	if !reflect.DeepEqual(cmd.Env, want) || !sort.StringsAreSorted(cmd.Env) {
 		t.Fatalf("ApplyUserEnv() = %#v, want sorted %#v", cmd.Env, want)
+	}
+	if executionPolicyEnvironmentHasKey(cmd.Env, "P014_APPLY_USER_ENV_AMBIENT") {
+		t.Fatalf("ApplyUserEnv inherited ambient canary: %#v", cmd.Env)
 	}
 	userBase := filepath.Join(root, "runtime-user-env")
 	home := filepath.Join(userBase, "home")
@@ -797,7 +883,11 @@ func TestApplyUserEnvUsesDetachedDeterministicProjection(t *testing.T) {
 		}
 	}
 	cmd.Env[0] = "MUTATED=1"
-	if again := projectUserEnvironment(base, ResolveUserEnv(root), runtime.GOOS); !reflect.DeepEqual(again, want) {
+	againCmd := exec.Command("unused")
+	againCmd.Env = append([]string(nil), base...)
+	ApplyUserEnv(againCmd, root)
+	again := againCmd.Env
+	if !reflect.DeepEqual(again, want) {
 		t.Fatalf("environment projection followed command mutation: %#v", again)
 	}
 	ApplyUserEnv(nil, root)
@@ -1160,6 +1250,7 @@ func TestExecutionPolicyEnabledLinuxExplicitWiring(t *testing.T) {
   printf 'INVOCATION\n'
   printf 'ARG=%s\n' "$@"
   printf 'HOME=%s\n' "$HOME"
+  printf 'PATH=%s\n' "$PATH"
   printf 'CANARY=%s\n' "$P013_EXPLICIT_CANARY"
 } >> "$P013_BWRAP_RECORD"
 exit 0
@@ -1185,10 +1276,11 @@ exit 0
 	})
 	cmd := exec.Command(original, "--flag", "value")
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
-		"P013_BWRAP_RECORD="+recordPath,
+	cmd.Env = []string{
+		"P013_BWRAP_RECORD=" + recordPath,
 		"P013_EXPLICIT_CANARY=retained",
-	)
+		"PATH=/usr/bin:/bin",
+	}
 	if err := policy.Run(cmd); err != nil {
 		t.Fatalf("enabled explicit policy Run() error = %v", err)
 	}
@@ -1206,6 +1298,7 @@ exit 0
 		"ARG=--chdir\nARG=" + workDir,
 		"ARG=--\nARG=" + original + "\nARG=--flag\nARG=value",
 		"HOME=" + filepath.Join(root, "runtime-user-env", "home"),
+		"PATH=/usr/bin:/bin",
 		"CANARY=retained",
 	} {
 		if !strings.Contains(text, want) {
@@ -1218,7 +1311,8 @@ func TestExecutionPolicyEnabledLinuxMissingBwrapFailsClosed(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux bubblewrap fail-closed test")
 	}
-	t.Setenv(config.EnvHome, t.TempDir())
+	root := filepath.Join(t.TempDir(), "missing-bwrap-root")
+	t.Setenv(config.EnvHome, root)
 	t.Setenv("PATH", t.TempDir())
 	cmd := executionPolicyHelperCommand()
 	err := NewExecutionPolicy(config.IsolationConfig{Enabled: true}).Start(cmd)
@@ -1227,6 +1321,9 @@ func TestExecutionPolicyEnabledLinuxMissingBwrapFailsClosed(t *testing.T) {
 	}
 	if cmd.Process != nil || cmd.ProcessState != nil {
 		t.Fatalf("missing bwrap started process: process=%v state=%v", cmd.Process, cmd.ProcessState)
+	}
+	if _, statErr := os.Stat(root); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing bwrap prepared root before failure: %v", statErr)
 	}
 }
 
@@ -1374,8 +1471,207 @@ func executionPolicyHelperCommandWithMode(mode string) *exec.Cmd {
 		"--",
 		executionPolicyHelperArgument,
 	)
-	cmd.Env = append(os.Environ(), executionPolicyHelperEnvironment+"="+mode)
+	cmd.Env = []string{executionPolicyHelperEnvironment + "=" + mode}
+	if coverageDir, ok := os.LookupEnv("GOCOVERDIR"); ok {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+coverageDir)
+	}
 	return cmd
+}
+
+func executionPolicyEnvironmentHasKey(environment []string, key string) bool {
+	prefix := key + "="
+	for _, item := range environment {
+		if strings.HasPrefix(item, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestExecutionPolicyEnvironmentFailurePropagation(t *testing.T) {
+	t.Run("captured validation error", func(t *testing.T) {
+		policy := newExecutionPolicyWithEnvironment(
+			config.IsolationConfig{EnvironmentAllowlist: []string{"BAD-NAME"}},
+			nil,
+			"linux",
+		)
+		working := t.TempDir()
+		if _, _, err := policy.LookupCommandEnvironment("HOME", working); err == nil {
+			t.Fatal("LookupCommandEnvironment() error = nil")
+		}
+		operations := completeExecutionPolicyTestOperations("linux", working)
+		if _, err := projectionForPolicy(policy, operations); err == nil {
+			t.Fatal("projectionForPolicy() error = nil")
+		}
+		if _, err := prepareCommandForPolicy(
+			policy,
+			exec.Command("unused"),
+			operations,
+		); err == nil {
+			t.Fatal("prepareCommandForPolicy() error = nil")
+		}
+	})
+
+	t.Run("enabled lookup rejects relative instance root", func(t *testing.T) {
+		t.Setenv(config.EnvHome, "relative-p014-home")
+		policy := newExecutionPolicyWithEnvironment(
+			config.IsolationConfig{
+				Enabled:              true,
+				EnvironmentAllowlist: []string{},
+			},
+			nil,
+			runtime.GOOS,
+		)
+		if _, _, err := policy.LookupCommandEnvironment("HOME", t.TempDir()); err == nil ||
+			!strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("relative instance root error = %v", err)
+		}
+	})
+
+	t.Run("malformed captured entry", func(t *testing.T) {
+		policy := ExecutionPolicy{snapshot: &executionPolicySnapshot{
+			environment: capturedPolicyEnvironment{
+				goos:    runtime.GOOS,
+				allowed: []string{"malformed"},
+			},
+		}}
+		working := t.TempDir()
+		if _, _, err := policy.LookupCommandEnvironment("HOME", working); err == nil ||
+			!strings.Contains(err.Error(), "captured") {
+			t.Fatalf("lookup malformed capture error = %v", err)
+		}
+		operations := completeExecutionPolicyTestOperations(runtime.GOOS, working)
+		if _, err := prepareCommandForPolicy(
+			policy,
+			exec.Command("unused"),
+			operations,
+		); err == nil || !strings.Contains(err.Error(), "captured") {
+			t.Fatalf("prepare malformed capture error = %v", err)
+		}
+	})
+
+	t.Run("resolver error", func(t *testing.T) {
+		resolveErr := errors.New("injected executable resolution failure")
+		operations := completeExecutionPolicyTestOperations("linux", t.TempDir())
+		operations.resolvePath = func(string, string, string, bool) (string, error) {
+			return "", resolveErr
+		}
+		policy := newExecutionPolicyWithEnvironment(
+			config.IsolationConfig{EnvironmentAllowlist: []string{}},
+			nil,
+			"linux",
+		)
+		cmd := &exec.Cmd{Path: "tool", Args: []string{"tool"}}
+		if _, err := prepareCommandForPolicy(policy, cmd, operations); !errors.Is(err, resolveErr) {
+			t.Fatalf("resolver error = %v, want %v", err, resolveErr)
+		}
+	})
+
+	t.Run("root preparation error", func(t *testing.T) {
+		prepareErr := errors.New("injected root preparation failure")
+		operations := completeExecutionPolicyTestOperations("linux", t.TempDir())
+		operations.resolvePath = func(name, _, _ string, _ bool) (string, error) {
+			return "/resolved/" + name, nil
+		}
+		operations.prepareRoot = func(string) error { return prepareErr }
+		policy := newExecutionPolicyWithEnvironment(
+			config.IsolationConfig{
+				Enabled:              true,
+				EnvironmentAllowlist: []string{},
+			},
+			nil,
+			"linux",
+		)
+		cmd := &exec.Cmd{Path: "tool", Args: []string{"tool"}}
+		if _, err := prepareCommandForPolicy(policy, cmd, operations); !errors.Is(err, prepareErr) {
+			t.Fatalf("root preparation error = %v, want %v", err, prepareErr)
+		}
+	})
+}
+
+func TestResolveCommandExecutableValidationBranches(t *testing.T) {
+	if _, err := resolveCommandExecutable(nil, nil, runtime.GOOS, nil); err == nil {
+		t.Fatal("nil command error = nil")
+	}
+	tests := []struct {
+		name      string
+		requested string
+	}{
+		{name: "empty", requested: ""},
+		{name: "nul", requested: "tool\x00tail"},
+		{name: "too long", requested: strings.Repeat("x", 4097)},
+		{name: "invalid UTF-8", requested: string([]byte{0xff})},
+		{name: "control character", requested: "tool\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := &exec.Cmd{Path: test.requested, Args: []string{test.requested}}
+			if _, err := resolveCommandExecutable(
+				cmd,
+				nil,
+				runtime.GOOS,
+				nil,
+			); err == nil || !strings.Contains(err.Error(), "invalid") {
+				t.Fatalf("resolveCommandExecutable(%q) error = %v", test.requested, err)
+			}
+		})
+	}
+}
+
+func TestLegacyEnvironmentFailureAndUnixProjection(t *testing.T) {
+	t.Run("ApplyUserEnv fails closed", func(t *testing.T) {
+		cmd := exec.Command("unused")
+		cmd.Env = []string{"malformed"}
+		ApplyUserEnv(cmd, t.TempDir())
+		want := []string{}
+		if runtime.GOOS == "windows" {
+			want = []string{"SYSTEMROOT="}
+		}
+		if !reflect.DeepEqual(cmd.Env, want) {
+			t.Fatalf("failed projection environment = %#v, want %#v", cmd.Env, want)
+		}
+	})
+
+	t.Run("Unix projection", func(t *testing.T) {
+		userEnv := UserEnv{
+			Home:   "/runtime/home",
+			Tmp:    "/runtime/tmp",
+			Config: "/runtime/config",
+			Cache:  "/runtime/cache",
+			State:  "/runtime/state",
+		}
+		got := projectUserEnvironment(
+			[]string{"KEEP=value", "malformed"},
+			userEnv,
+			"linux",
+		)
+		want := []string{
+			"HOME=/runtime/home",
+			"KEEP=value",
+			"TMPDIR=/runtime/tmp",
+			"XDG_CACHE_HOME=/runtime/cache",
+			"XDG_CONFIG_HOME=/runtime/config",
+			"XDG_STATE_HOME=/runtime/state",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Unix projected environment = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("instance root preparation rejects a file", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "root-file")
+		if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := PrepareInstanceRoot(root); err == nil ||
+			!strings.Contains(err.Error(), "prepare instance dir") {
+			t.Fatalf("PrepareInstanceRoot(file) error = %v", err)
+		}
+	})
+
+	t.Run("nil started command termination", func(t *testing.T) {
+		terminateStartedCommand(nil)
+	})
 }
 
 func completeExecutionPolicyTestOperations(goos, root string) launchOperations {

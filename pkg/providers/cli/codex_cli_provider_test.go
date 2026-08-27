@@ -418,10 +418,8 @@ func TestCodexCliProvider_MockCLI_Success(t *testing.T) {
 		`{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":15}}`,
 	})
 
-	p := &CodexCliProvider{
-		command:   scriptPath,
-		workspace: "",
-	}
+	p := NewCodexCliProvider("")
+	p.command = scriptPath
 
 	messages := []Message{{Role: "user", Content: "Hello"}}
 	resp, err := p.Chat(context.Background(), messages, nil, "test-model", nil)
@@ -450,10 +448,8 @@ func TestCodexCliProvider_MockCLI_Error(t *testing.T) {
 		`{"type":"turn.failed","error":{"message":"auth token expired"}}`,
 	})
 
-	p := &CodexCliProvider{
-		command:   scriptPath,
-		workspace: "",
-	}
+	p := NewCodexCliProvider("")
+	p.command = scriptPath
 
 	messages := []Message{{Role: "user", Content: "Hello"}}
 	_, err := p.Chat(context.Background(), messages, nil, "test-model", nil)
@@ -482,10 +478,8 @@ echo '{"type":"turn.completed"}'`
 		t.Fatal(err)
 	}
 
-	p := &CodexCliProvider{
-		command:   scriptPath,
-		workspace: "/tmp/test-workspace",
-	}
+	p := NewCodexCliProvider("/tmp/test-workspace")
+	p.command = scriptPath
 
 	messages := []Message{{Role: "user", Content: "test"}}
 	_, err := p.Chat(context.Background(), messages, nil, "gpt-5.3-codex", nil)
@@ -527,10 +521,8 @@ func TestCodexCliProvider_MockCLI_ContextCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := &CodexCliProvider{
-		command:   scriptPath,
-		workspace: "",
-	}
+	p := NewCodexCliProvider("")
+	p.command = scriptPath
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -543,7 +535,8 @@ func TestCodexCliProvider_MockCLI_ContextCancel(t *testing.T) {
 }
 
 func TestCodexCliProvider_EmptyCommand(t *testing.T) {
-	p := &CodexCliProvider{command: ""}
+	p := NewCodexCliProvider("")
+	p.command = ""
 
 	messages := []Message{{Role: "user", Content: "test"}}
 	_, err := p.Chat(context.Background(), messages, nil, "test-model", nil)
@@ -580,10 +573,8 @@ func TestCodexCliProvider_Integration(t *testing.T) {
 		t.Skip("codex CLI not found in PATH")
 	}
 
-	p := &CodexCliProvider{
-		command:   codexPath,
-		workspace: "",
-	}
+	p := NewCodexCliProvider("")
+	p.command = codexPath
 
 	messages := []Message{
 		{Role: "user", Content: "Respond with just the word 'hello' and nothing else."},

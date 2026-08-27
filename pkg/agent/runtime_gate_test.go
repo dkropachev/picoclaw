@@ -222,10 +222,11 @@ func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing
 		t.Fatal("generation A compatibility lease was not retained")
 	}
 
+	cfgB := *cfg
 	previous, err := al.ReloadProviderAndConfigRetainingPrevious(
 		context.Background(),
 		providerB,
-		cfg,
+		&cfgB,
 	)
 	if err != nil {
 		t.Fatalf("reload A -> B error = %v", err)
@@ -436,8 +437,9 @@ jobs:
 	}
 
 	reloadDone := make(chan error, 1)
+	cfgB := *cfg
 	go func() {
-		reloadDone <- al.ReloadProviderAndConfig(context.Background(), providerB, cfg)
+		reloadDone <- al.ReloadProviderAndConfig(context.Background(), providerB, &cfgB)
 	}()
 	select {
 	case err := <-reloadDone:
@@ -797,8 +799,9 @@ func TestSpawnToolRetainsRuntimeBeforeLaunchingBackgroundSubturn(t *testing.T) {
 	releaseRoot()
 
 	reloadDone := make(chan error, 1)
+	cfgB := *cfg
 	go func() {
-		reloadDone <- al.ReloadProviderAndConfig(context.Background(), providerB, cfg)
+		reloadDone <- al.ReloadProviderAndConfig(context.Background(), providerB, &cfgB)
 	}()
 	select {
 	case err := <-reloadDone:

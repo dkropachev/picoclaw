@@ -3,6 +3,7 @@ package providers
 import (
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/isolation"
 	cliprovider "github.com/sipeed/picoclaw/pkg/providers/cli"
 )
 
@@ -19,8 +20,22 @@ func NewClaudeCliProvider(workspace string) *ClaudeCliProvider {
 	return cliprovider.NewClaudeCliProvider(workspace)
 }
 
+func NewClaudeCliProviderWithExecutionPolicy(
+	workspace string,
+	policy isolation.ExecutionPolicy,
+) *ClaudeCliProvider {
+	return cliprovider.NewClaudeCliProviderWithExecutionPolicy(workspace, policy)
+}
+
 func NewCodexCliProvider(workspace string) *CodexCliProvider {
 	return cliprovider.NewCodexCliProvider(workspace)
+}
+
+func NewCodexCliProviderWithExecutionPolicy(
+	workspace string,
+	policy isolation.ExecutionPolicy,
+) *CodexCliProvider {
+	return cliprovider.NewCodexCliProviderWithExecutionPolicy(workspace, policy)
 }
 
 func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*GitHubCopilotProvider, error) {

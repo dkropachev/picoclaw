@@ -581,6 +581,7 @@ func (al *AgentLoop) selectCandidates(
 			agent.Fallbacks,
 			agent.Workspace,
 			agent.CandidateProviders,
+			agent.executionPolicy,
 		); router != nil {
 			selection := router.Select(sessionKey, reason)
 			if len(selection.Candidates) > 0 {
@@ -598,6 +599,7 @@ func (al *AgentLoop) selectCandidates(
 			agent.Fallbacks,
 			agent.Workspace,
 			agent.CandidateProviders,
+			agent.executionPolicy,
 		)
 		if err != nil {
 			return nil, "", nil, accountrouter.Selection{}
@@ -713,6 +715,7 @@ func (al *AgentLoop) selectOverrideCandidates(
 		fallbacks,
 		agent.Workspace,
 		agent.CandidateProviders,
+		agent.executionPolicy,
 	); router != nil {
 		selection := router.Select(sessionKey, reason)
 		if len(selection.Candidates) > 0 {
@@ -728,6 +731,7 @@ func (al *AgentLoop) selectOverrideCandidates(
 		fallbacks,
 		agent.Workspace,
 		agent.CandidateProviders,
+		agent.executionPolicy,
 	)
 	if err != nil {
 		return nil, "", modelAlias, nil, accountrouter.Selection{}
@@ -1149,6 +1153,7 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 						nil,
 						agent.Workspace,
 						agent.CandidateProviders,
+						agent.executionPolicy,
 					)
 					if err != nil {
 						return "", err
@@ -1372,11 +1377,17 @@ func (al *AgentLoop) isolatedSideQuestionProvider(
 		return nil, "", nil, func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
 	}
 
-	factory := al.providerFactory
-	if factory == nil {
-		factory = providers.CreateProviderFromConfig
+	var provider providers.LLMProvider
+	var modelID string
+	if al.providerFactory != nil {
+		provider, modelID, err = al.providerFactory(modelCfg)
+	} else {
+		factory := al.policyProviderFactory
+		if factory == nil {
+			factory = providers.CreateProviderFromConfigWithExecutionPolicy
+		}
+		provider, modelID, err = factory(modelCfg, agent.executionPolicy)
 	}
-	provider, modelID, err := factory(modelCfg)
 	if err != nil {
 		return nil, "", nil, func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
 	}

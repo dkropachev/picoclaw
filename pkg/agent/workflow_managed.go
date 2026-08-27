@@ -2478,6 +2478,7 @@ func workflowManagedModelCandidateAvailable(
 		nil,
 		agent.Workspace,
 		agent.CandidateProviders,
+		agent.executionPolicy,
 	)
 	if router != nil {
 		return candidateSelectionHasProvider(
@@ -2492,6 +2493,7 @@ func workflowManagedModelCandidateAvailable(
 		nil,
 		agent.Workspace,
 		agent.CandidateProviders,
+		agent.executionPolicy,
 	)
 	return err == nil && candidateSelectionHasProvider(agent, candidates)
 }

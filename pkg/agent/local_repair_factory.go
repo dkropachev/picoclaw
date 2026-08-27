@@ -136,6 +136,7 @@ func (al *AgentLoop) ControllerLocalRepairReady(agentID string) bool {
 			agent.Fallbacks,
 			agent.Workspace,
 			agent.CandidateProviders,
+			agent.executionPolicy,
 		); router != nil {
 			for _, account := range router.Accounts {
 				if controllerRepairCandidateReady(
@@ -155,6 +156,7 @@ func (al *AgentLoop) ControllerLocalRepairReady(agentID string) bool {
 			agent.Fallbacks,
 			agent.Workspace,
 			agent.CandidateProviders,
+			agent.executionPolicy,
 		)
 		if err == nil && controllerRepairCandidateReady(
 			workspaces,

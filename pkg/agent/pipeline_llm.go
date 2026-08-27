@@ -913,6 +913,7 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(
 		nil,
 		ts.agent.Workspace,
 		ts.agent.CandidateProviders,
+		ts.agent.executionPolicy,
 	)
 	if err != nil {
 		return err

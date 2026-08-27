@@ -429,6 +429,9 @@ func validateConfig(cfg *config.Config) []string {
 	if err := cfg.ValidateTurnProfile(); err != nil {
 		errs = append(errs, err.Error())
 	}
+	if err := cfg.Isolation.ValidateEnvironmentAllowlist(); err != nil {
+		errs = append(errs, fmt.Sprintf("isolation: %v", err))
+	}
 
 	if err := cfg.Events.Ingress.ValidateWebhookPublicIdentities(
 		cfg.SensitiveDataValues()...,

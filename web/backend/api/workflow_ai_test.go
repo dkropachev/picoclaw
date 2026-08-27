@@ -351,10 +351,12 @@ func TestHandleTestWorkflowDevelopmentStartsAsyncRun(t *testing.T) {
 
 	runner.release()
 	waitForWorkflowRunStatus(t, workspace, got.Result.RunID, workflows.RunStatusSucceeded)
-	active, err := workflows.GetWorkflowDevelopmentSession(workspace)
-	if err != nil {
-		t.Fatalf("GetWorkflowDevelopmentSession() error = %v", err)
-	}
+	active := waitForWorkflowDevelopmentTestStatus(
+		t,
+		workspace,
+		got.Result.RunID,
+		workflows.RunStatusSucceeded,
+	)
 	if active == nil || active.LastTest == nil ||
 		active.LastTest.RunID != got.Result.RunID ||
 		active.LastTest.Status != workflows.RunStatusSucceeded {
