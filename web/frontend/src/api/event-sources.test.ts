@@ -1,422 +1,209 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { getAppConfig, patchAppConfig } from "@/api/channels"
 import {
-  EVENT_SECRET_PLACEHOLDER,
-  buildEventSourcesPatch,
-  loadEventSources,
-  parseEventSourcesConfig,
-  saveEventSources,
+  bulkDeleteEventSources,
+  createEventSource,
+  deleteEventSource,
+  getEventSource,
+  getEventSourceSettings,
+  listEventSources,
+  updateEventSource,
+  updateEventSourceSettings,
 } from "@/api/event-sources"
+import { launcherFetch } from "@/api/http"
 
-vi.mock("@/api/channels", () => ({
-  getAppConfig: vi.fn(),
-  patchAppConfig: vi.fn(),
-}))
+vi.mock("@/api/http", () => ({ launcherFetch: vi.fn() }))
 
-const mockedGetAppConfig = vi.mocked(getAppConfig)
-const mockedPatchAppConfig = vi.mocked(patchAppConfig)
+const mockedLauncherFetch = vi.mocked(launcherFetch)
 
-const appConfig = {
-  gateway: { host: "127.0.0.1", port: 18790 },
-  events: {
-    ingress: {
+describe("event source collection API", () => {
+  beforeEach(() => mockedLauncherFetch.mockReset())
+
+  it("sends collection query, cursor, limit, and abort signal", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(collectionResponse()),
+    )
+    const controller = new AbortController()
+
+    await listEventSources(
+      {
+        query: "kind = webhook ORDER BY name ASC",
+        cursor: "opaque+/cursor",
+        limit: 50,
+      },
+      controller.signal,
+    )
+
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/event-sources?query=kind+%3D+webhook+ORDER+BY+name+ASC&cursor=opaque%2B%2Fcursor&limit=50",
+      { signal: controller.signal },
+    )
+  })
+
+  it("treats detail IDs as opaque path values", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(detailResponse()))
+
+    await getEventSource("event/source+opaque")
+
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/event-sources/event%2Fsource%2Bopaque",
+      undefined,
+    )
+  })
+
+  it("uses one revision fence for source mutations and explicit bulk IDs", async () => {
+    const source = {
+      kind: "webhook" as const,
+      name: "github",
       enabled: true,
-      database_path: "eventing/custom.db",
-      retention_days: 14,
-      max_payload_bytes: 2097152,
+      format: "github" as const,
+      repositories: ["octo/picoclaw"],
+      target_user: "octocat",
+      poll_notifications: true,
+      secret_update: "replace" as const,
+      secret: "x".repeat(32),
+    }
+    mockedLauncherFetch.mockImplementation(async () =>
+      jsonResponse({
+        ...detailResponse(),
+        deleted_ids: ["event-source-id"],
+        failures: [],
+        effects: effects,
+      }),
+    )
+
+    await createEventSource(source, "revision-1")
+    await updateEventSource("event-source-id", source, "revision-2")
+    await deleteEventSource("event-source-id", "revision-3")
+    await bulkDeleteEventSources(["event-source-id"], "revision-4")
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/event-sources",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_config_revision: "revision-1",
+          event_source: source,
+        }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/event-sources/event-source-id",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          expected_config_revision: "revision-2",
+          event_source: source,
+        }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      3,
+      "/api/event-sources/event-source-id",
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({ expected_config_revision: "revision-3" }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      4,
+      "/api/event-sources/bulk-delete",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          ids: ["event-source-id"],
+          config_revision: "revision-4",
+        }),
+      }),
+    )
+  })
+
+  it("reads and revision-fences only global event-source settings", async () => {
+    const settings = {
+      enabled: true,
+      database_path: "eventing/events.db",
+      retention_days: 30,
+      max_payload_bytes: 1_048_576,
       redact_fields: ["customer_number"],
-      webhooks: {
-        primary: {
-          enabled: true,
-          format: "github",
-          repositories: ["scylladb/gocql", "scylladb/scylla"],
-          target_user: "review-user",
-          poll_notifications: true,
-          secret: EVENT_SECRET_PLACEHOLDER,
-        },
-        generic: {
-          enabled: false,
-          secret: EVENT_SECRET_PLACEHOLDER,
-        },
-      },
-      channels: {
-        mail: {
-          enabled: true,
-          source: "email",
-          mode: "event_only",
-          allow_unverified_email: true,
-        },
-        removed: {
-          enabled: false,
-          source: "email",
-          mode: "mirror",
-        },
-      },
-    },
-  },
-  channel_list: {
-    mail: { type: "deltachat", enabled: true },
-    disabled_mail: { type: "deltachat", enabled: false },
-    slack: { type: "slack", enabled: true },
-  },
-}
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          event_source_settings: settings,
+          eligible_channel_adapters: [],
+          config_revision: "revision-1",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          event_source_settings: settings,
+          eligible_channel_adapters: [],
+          config_revision: "revision-2",
+          effects,
+        }),
+      )
 
-describe("event sources API", () => {
-  beforeEach(() => {
-    mockedGetAppConfig.mockReset()
-    mockedPatchAppConfig.mockReset()
-  })
+    await getEventSourceSettings()
+    await updateEventSourceSettings(settings, "revision-1")
 
-  it("projects event policy, webhook secret presence, and Delta Chat instances", () => {
-    const loaded = parseEventSourcesConfig(appConfig)
-
-    expect(loaded.settings).toMatchObject({
-      enabled: true,
-      databasePath: "eventing/custom.db",
-      retentionDays: "14",
-      maxPayloadBytes: "2097152",
-      redactFields: ["customer_number"],
-      gatewayHost: "127.0.0.1",
-      gatewayPort: 18790,
-    })
-    expect(loaded.settings.webhooks).toEqual([
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/event-source-settings",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/event-source-settings",
       expect.objectContaining({
-        name: "generic",
-        format: "standard",
-        persistedFormat: "standard",
-        secretConfigured: true,
-        secretUpdate: "preserve",
-        secret: "",
+        method: "PUT",
+        body: JSON.stringify({
+          expected_config_revision: "revision-1",
+          event_source_settings: settings,
+        }),
       }),
-      expect.objectContaining({
-        name: "primary",
-        format: "github",
-        persistedFormat: "github",
-        repositories: ["scylladb/gocql", "scylladb/scylla"],
-        targetUser: "review-user",
-        pollNotifications: true,
-        persistedPollNotifications: true,
-        secretConfigured: true,
-        secretUpdate: "preserve",
-        secret: "",
-      }),
-    ])
-    expect(loaded.settings.channels).toEqual([
-      expect.objectContaining({
-        name: "disabled_mail",
-        configured: false,
-        available: true,
-        channelEnabled: false,
-      }),
-      expect.objectContaining({
-        name: "mail",
-        enabled: true,
-        configured: true,
-        available: true,
-        channelEnabled: true,
-        mode: "event_only",
-        allowUnverifiedEmail: true,
-      }),
-      expect.objectContaining({
-        name: "removed",
-        configured: true,
-        available: false,
-        channelEnabled: false,
-      }),
-    ])
-    expect(loaded.persisted).toEqual({
-      webhookNames: ["primary", "generic"],
-      channelNames: ["mail", "removed"],
-    })
-  })
-
-  it("builds a merge patch that rotates, preserves, clears, and removes secrets safely", () => {
-    const loaded = parseEventSourcesConfig(appConfig)
-    const primary = loaded.settings.webhooks.find(
-      (source) => source.name === "primary",
-    )
-    const generic = loaded.settings.webhooks.find(
-      (source) => source.name === "generic",
-    )
-    expect(primary).toBeDefined()
-    expect(generic).toBeDefined()
-
-    const patch = buildEventSourcesPatch(
-      {
-        ...loaded.settings,
-        databasePath: "",
-        retentionDays: "",
-        maxPayloadBytes: "1048576",
-        redactFields: [],
-        webhooks: [
-          {
-            ...primary!,
-            secretUpdate: "replace",
-            secret: "01234567890123456789012345678901",
-          },
-          {
-            id: "new",
-            name: "deploy",
-            enabled: false,
-            format: "standard",
-            repositories: [],
-            targetUser: "",
-            pollNotifications: false,
-            secretConfigured: false,
-            secretUpdate: "clear",
-            secret: "",
-          },
-        ],
-        channels: loaded.settings.channels.filter(
-          (source) => source.name !== "removed",
-        ),
-      },
-      loaded.persisted,
-    )
-
-    expect(patch).toEqual({
-      events: {
-        ingress: {
-          enabled: true,
-          database_path: null,
-          retention_days: null,
-          max_payload_bytes: 1048576,
-          redact_fields: null,
-          webhooks: {
-            primary: {
-              enabled: true,
-              format: "github",
-              repositories: ["scylladb/gocql", "scylladb/scylla"],
-              target_user: "review-user",
-              poll_notifications: true,
-              secret: "01234567890123456789012345678901",
-            },
-            deploy: {
-              enabled: false,
-              format: "standard",
-              repositories: null,
-              target_user: null,
-              secret: "",
-            },
-            generic: null,
-          },
-          channels: {
-            mail: {
-              enabled: true,
-              source: "email",
-              mode: "event_only",
-              allow_unverified_email: true,
-            },
-            removed: null,
-          },
-        },
-      },
-    })
-  })
-
-  it("does not persist untouched disabled channel choices", () => {
-    const loaded = parseEventSourcesConfig(appConfig)
-    const patch = buildEventSourcesPatch(
-      {
-        ...loaded.settings,
-        channels: loaded.settings.channels.filter(
-          (source) => source.name !== "mail" && source.name !== "removed",
-        ),
-      },
-      { webhookNames: [], channelNames: [] },
-    )
-
-    expect(patch).toEqual({
-      events: {
-        ingress: {
-          enabled: true,
-          database_path: "eventing/custom.db",
-          retention_days: 14,
-          max_payload_bytes: 2097152,
-          redact_fields: ["customer_number"],
-          webhooks: {
-            primary: {
-              enabled: true,
-              format: "github",
-              repositories: ["scylladb/gocql", "scylladb/scylla"],
-              target_user: "review-user",
-              poll_notifications: true,
-            },
-            generic: {
-              enabled: false,
-              format: "standard",
-              repositories: null,
-              target_user: null,
-            },
-          },
-        },
-      },
-    })
-  })
-
-  it("never treats an erased replacement as an implicit secret clear", () => {
-    const loaded = parseEventSourcesConfig(appConfig)
-    const primary = loaded.settings.webhooks.find(
-      (source) => source.name === "primary",
-    )
-    expect(primary).toBeDefined()
-
-    const patch = buildEventSourcesPatch(
-      {
-        ...loaded.settings,
-        webhooks: [
-          {
-            ...primary!,
-            secretUpdate: "replace",
-            secret: "",
-          },
-        ],
-      },
-      loaded.persisted,
-    )
-
-    expect(patch).toMatchObject({
-      events: {
-        ingress: {
-          webhooks: {
-            primary: {
-              enabled: true,
-              format: "github",
-            },
-          },
-        },
-      },
-    })
-    expect(
-      (
-        (
-          (patch.events as Record<string, unknown>).ingress as Record<
-            string,
-            unknown
-          >
-        ).webhooks as Record<string, Record<string, unknown>>
-      ).primary,
-    ).not.toHaveProperty("secret")
-  })
-
-  it("clears a previously enabled notification poll without emitting default noise", () => {
-    const loaded = parseEventSourcesConfig(appConfig)
-    const primary = loaded.settings.webhooks.find(
-      (source) => source.name === "primary",
-    )
-    const generic = loaded.settings.webhooks.find(
-      (source) => source.name === "generic",
-    )
-    expect(primary).toBeDefined()
-    expect(generic).toBeDefined()
-
-    const patch = buildEventSourcesPatch(
-      {
-        ...loaded.settings,
-        webhooks: [{ ...primary!, pollNotifications: false }, generic!],
-      },
-      loaded.persisted,
-    )
-
-    expect(patch).toMatchObject({
-      events: {
-        ingress: {
-          webhooks: {
-            primary: { poll_notifications: null },
-            generic: {
-              enabled: false,
-              format: "standard",
-            },
-          },
-        },
-      },
-    })
-    expect(
-      (
-        patch.events as {
-          ingress: { webhooks: Record<string, Record<string, unknown>> }
-        }
-      ).ingress.webhooks.generic,
-    ).not.toHaveProperty("poll_notifications")
-  })
-
-  it("rejects renaming a persisted connector because its secret identity cannot move", () => {
-    const loaded = parseEventSourcesConfig(appConfig)
-    const primary = loaded.settings.webhooks.find(
-      (source) => source.name === "primary",
-    )
-    expect(primary).toBeDefined()
-
-    expect(() =>
-      buildEventSourcesPatch(
-        {
-          ...loaded.settings,
-          webhooks: [{ ...primary!, name: "renamed" }],
-        },
-        loaded.persisted,
-      ),
-    ).toThrow(/connector names cannot be changed/)
-  })
-
-  it("preserves prototype-like Delta instance names in merge patches", () => {
-    const loaded = parseEventSourcesConfig(
-      JSON.parse(`{
-        "channel_list": {
-          "__proto__": {"type": "deltachat", "enabled": true}
-        },
-        "events": {
-          "ingress": {
-            "channels": {
-              "__proto__": {
-                "enabled": true,
-                "source": "email",
-                "mode": "event_only"
-              }
-            }
-          }
-        }
-      }`),
-    )
-
-    const patch = buildEventSourcesPatch(loaded.settings, {
-      webhookNames: [],
-      channelNames: ["__proto__", "removed"],
-    })
-    const channels = (
-      (patch.events as Record<string, unknown>).ingress as Record<
-        string,
-        unknown
-      >
-    ).channels as Record<string, unknown>
-    expect(Object.hasOwn(channels, "__proto__")).toBe(true)
-    expect(channels.__proto__).toEqual({
-      enabled: true,
-      source: "email",
-      mode: "event_only",
-      allow_unverified_email: false,
-    })
-    expect(channels.removed).toBeNull()
-    const serialized = JSON.stringify(patch)
-    expect(serialized).toContain('"__proto__"')
-    expect(
-      JSON.parse(serialized).events.ingress.channels["__proto__"],
-    ).toMatchObject({
-      enabled: true,
-      mode: "event_only",
-    })
-  })
-
-  it("loads and saves through the shared authenticated config API", async () => {
-    mockedGetAppConfig.mockResolvedValue(appConfig)
-    mockedPatchAppConfig.mockResolvedValue({ status: "ok" })
-
-    const loaded = await loadEventSources()
-    await saveEventSources(loaded.settings, loaded.persisted)
-
-    expect(mockedPatchAppConfig).toHaveBeenCalledOnce()
-    expect(mockedPatchAppConfig).toHaveBeenCalledWith(
-      buildEventSourcesPatch(loaded.settings, loaded.persisted),
     )
   })
 })
+
+const effects = {
+  launcher_effect: "applied",
+  catalog_effect: "applied",
+  gateway_effect: "restart_required",
+}
+
+function collectionResponse() {
+  return {
+    event_sources: [],
+    total: 0,
+    canonical_query: "ORDER BY name ASC",
+    query_schema: { fields: [] },
+    config_revision: "revision-1",
+  }
+}
+
+function detailResponse() {
+  return {
+    event_source: {
+      id: "event-source-id",
+      name: "github",
+      kind: "webhook",
+      enabled: true,
+      format: "github",
+      status: "available",
+      poll_notifications: true,
+      repositories: ["octo/picoclaw"],
+      target_user: "octocat",
+      secret_configured: true,
+    },
+    config_revision: "revision-2",
+  }
+}
+
+function jsonResponse(value: unknown) {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })
+}

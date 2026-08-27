@@ -146,7 +146,7 @@
         "web/frontend/src/components/notifications/**",
         "web/frontend/src/components/pr-workspaces/**",
         "web/frontend/src/lib/pwa-notifications.ts",
-        "web/frontend/src/routes/event-sources.tsx",
+        "web/frontend/src/routes/event-sources*.tsx",
         "web/frontend/src/routes/events.tsx",
         "web/frontend/src/routes/-development.test.ts",
         "web/frontend/src/routes/development.tsx",

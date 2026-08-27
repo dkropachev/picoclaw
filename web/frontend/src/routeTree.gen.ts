@@ -36,6 +36,9 @@ import { Route as ModelsRoutersRouteImport } from './routes/models_.routers'
 import { Route as ModelsAliasesRouteImport } from './routes/models_.aliases'
 import { Route as ModelEvaluationsNewRouteImport } from './routes/model-evaluations_.new'
 import { Route as ModelEvaluationsIdRouteImport } from './routes/model-evaluations_.$id'
+import { Route as EventSourcesSettingsRouteImport } from './routes/event-sources_.settings'
+import { Route as EventSourcesNewRouteImport } from './routes/event-sources_.new'
+import { Route as EventSourcesIdRouteImport } from './routes/event-sources_.$id'
 import { Route as DevelopmentWorkflowConfigurationsRouteImport } from './routes/development_.workflow-configurations'
 import { Route as DevelopmentSettingsRouteImport } from './routes/development_.settings'
 import { Route as DevelopmentRepositoriesRouteImport } from './routes/development_.repositories'
@@ -68,6 +71,7 @@ import { Route as ModelEvaluationsIdLanguagesRouteImport } from './routes/model-
 import { Route as ModelEvaluationsIdEditRouteImport } from './routes/model-evaluations_.$id_.edit'
 import { Route as ModelEvaluationsIdCorpusRouteImport } from './routes/model-evaluations_.$id_.corpus'
 import { Route as ModelEvaluationsEvaluationIDReportRouteImport } from './routes/model-evaluations_.$evaluationID.report'
+import { Route as EventSourcesIdEditRouteImport } from './routes/event-sources_.$id_.edit'
 import { Route as AgentToolsIdRouteImport } from './routes/agent/tools_.$id'
 import { Route as AgentSkillsNewRouteImport } from './routes/agent/skills_.new'
 import { Route as AgentSkillsIdRouteImport } from './routes/agent/skills_.$id'
@@ -235,6 +239,21 @@ const ModelEvaluationsNewRoute = ModelEvaluationsNewRouteImport.update({
 const ModelEvaluationsIdRoute = ModelEvaluationsIdRouteImport.update({
   id: '/model-evaluations_/$id',
   path: '/model-evaluations/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EventSourcesSettingsRoute = EventSourcesSettingsRouteImport.update({
+  id: '/event-sources_/settings',
+  path: '/event-sources/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EventSourcesNewRoute = EventSourcesNewRouteImport.update({
+  id: '/event-sources_/new',
+  path: '/event-sources/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EventSourcesIdRoute = EventSourcesIdRouteImport.update({
+  id: '/event-sources_/$id',
+  path: '/event-sources/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DevelopmentWorkflowConfigurationsRoute =
@@ -408,6 +427,11 @@ const ModelEvaluationsEvaluationIDReportRoute =
     path: '/model-evaluations/$evaluationID/report',
     getParentRoute: () => rootRouteImport,
   } as any)
+const EventSourcesIdEditRoute = EventSourcesIdEditRouteImport.update({
+  id: '/event-sources_/$id_/edit',
+  path: '/event-sources/$id/edit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentToolsIdRoute = AgentToolsIdRouteImport.update({
   id: '/tools_/$id',
   path: '/tools/$id',
@@ -596,6 +620,9 @@ export interface FileRoutesByFullPath {
   '/development/repositories': typeof DevelopmentRepositoriesRoute
   '/development/settings': typeof DevelopmentSettingsRoute
   '/development/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/event-sources/$id': typeof EventSourcesIdRoute
+  '/event-sources/new': typeof EventSourcesNewRoute
+  '/event-sources/settings': typeof EventSourcesSettingsRoute
   '/model-evaluations/$id': typeof ModelEvaluationsIdRoute
   '/model-evaluations/new': typeof ModelEvaluationsNewRoute
   '/models/aliases': typeof ModelsAliasesRoute
@@ -618,6 +645,7 @@ export interface FileRoutesByFullPath {
   '/agent/skills/$id': typeof AgentSkillsIdRoute
   '/agent/skills/new': typeof AgentSkillsNewRoute
   '/agent/tools/$id': typeof AgentToolsIdRoute
+  '/event-sources/$id/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
   '/model-evaluations/$id/edit': typeof ModelEvaluationsIdEditRoute
@@ -686,6 +714,9 @@ export interface FileRoutesByTo {
   '/development/repositories': typeof DevelopmentRepositoriesRoute
   '/development/settings': typeof DevelopmentSettingsRoute
   '/development/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/event-sources/$id': typeof EventSourcesIdRoute
+  '/event-sources/new': typeof EventSourcesNewRoute
+  '/event-sources/settings': typeof EventSourcesSettingsRoute
   '/model-evaluations/$id': typeof ModelEvaluationsIdRoute
   '/model-evaluations/new': typeof ModelEvaluationsNewRoute
   '/models/aliases': typeof ModelsAliasesRoute
@@ -708,6 +739,7 @@ export interface FileRoutesByTo {
   '/agent/skills/$id': typeof AgentSkillsIdRoute
   '/agent/skills/new': typeof AgentSkillsNewRoute
   '/agent/tools/$id': typeof AgentToolsIdRoute
+  '/event-sources/$id/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
   '/model-evaluations/$id/edit': typeof ModelEvaluationsIdEditRoute
@@ -777,6 +809,9 @@ export interface FileRoutesById {
   '/development_/repositories': typeof DevelopmentRepositoriesRoute
   '/development_/settings': typeof DevelopmentSettingsRoute
   '/development_/workflow-configurations': typeof DevelopmentWorkflowConfigurationsRoute
+  '/event-sources_/$id': typeof EventSourcesIdRoute
+  '/event-sources_/new': typeof EventSourcesNewRoute
+  '/event-sources_/settings': typeof EventSourcesSettingsRoute
   '/model-evaluations_/$id': typeof ModelEvaluationsIdRoute
   '/model-evaluations_/new': typeof ModelEvaluationsNewRoute
   '/models_/aliases': typeof ModelsAliasesRoute
@@ -799,6 +834,7 @@ export interface FileRoutesById {
   '/agent/skills_/$id': typeof AgentSkillsIdRoute
   '/agent/skills_/new': typeof AgentSkillsNewRoute
   '/agent/tools_/$id': typeof AgentToolsIdRoute
+  '/event-sources_/$id_/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations_/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations_/$id_/corpus': typeof ModelEvaluationsIdCorpusRoute
   '/model-evaluations_/$id_/edit': typeof ModelEvaluationsIdEditRoute
@@ -869,6 +905,9 @@ export interface FileRouteTypes {
     | '/development/repositories'
     | '/development/settings'
     | '/development/workflow-configurations'
+    | '/event-sources/$id'
+    | '/event-sources/new'
+    | '/event-sources/settings'
     | '/model-evaluations/$id'
     | '/model-evaluations/new'
     | '/models/aliases'
@@ -891,6 +930,7 @@ export interface FileRouteTypes {
     | '/agent/skills/$id'
     | '/agent/skills/new'
     | '/agent/tools/$id'
+    | '/event-sources/$id/edit'
     | '/model-evaluations/$evaluationID/report'
     | '/model-evaluations/$id/corpus'
     | '/model-evaluations/$id/edit'
@@ -959,6 +999,9 @@ export interface FileRouteTypes {
     | '/development/repositories'
     | '/development/settings'
     | '/development/workflow-configurations'
+    | '/event-sources/$id'
+    | '/event-sources/new'
+    | '/event-sources/settings'
     | '/model-evaluations/$id'
     | '/model-evaluations/new'
     | '/models/aliases'
@@ -981,6 +1024,7 @@ export interface FileRouteTypes {
     | '/agent/skills/$id'
     | '/agent/skills/new'
     | '/agent/tools/$id'
+    | '/event-sources/$id/edit'
     | '/model-evaluations/$evaluationID/report'
     | '/model-evaluations/$id/corpus'
     | '/model-evaluations/$id/edit'
@@ -1049,6 +1093,9 @@ export interface FileRouteTypes {
     | '/development_/repositories'
     | '/development_/settings'
     | '/development_/workflow-configurations'
+    | '/event-sources_/$id'
+    | '/event-sources_/new'
+    | '/event-sources_/settings'
     | '/model-evaluations_/$id'
     | '/model-evaluations_/new'
     | '/models_/aliases'
@@ -1071,6 +1118,7 @@ export interface FileRouteTypes {
     | '/agent/skills_/$id'
     | '/agent/skills_/new'
     | '/agent/tools_/$id'
+    | '/event-sources_/$id_/edit'
     | '/model-evaluations_/$evaluationID/report'
     | '/model-evaluations_/$id_/corpus'
     | '/model-evaluations_/$id_/edit'
@@ -1132,6 +1180,9 @@ export interface RootRouteChildren {
   DevelopmentRepositoriesRoute: typeof DevelopmentRepositoriesRoute
   DevelopmentSettingsRoute: typeof DevelopmentSettingsRoute
   DevelopmentWorkflowConfigurationsRoute: typeof DevelopmentWorkflowConfigurationsRoute
+  EventSourcesIdRoute: typeof EventSourcesIdRoute
+  EventSourcesNewRoute: typeof EventSourcesNewRoute
+  EventSourcesSettingsRoute: typeof EventSourcesSettingsRoute
   ModelEvaluationsIdRoute: typeof ModelEvaluationsIdRoute
   ModelEvaluationsNewRoute: typeof ModelEvaluationsNewRoute
   ModelsAliasesRoute: typeof ModelsAliasesRoute
@@ -1144,6 +1195,7 @@ export interface RootRouteChildren {
   AccountsIdEditRoute: typeof AccountsIdEditRoute
   AccountsRoutersIdRoute: typeof AccountsRoutersIdRoute
   AccountsRoutersNewRoute: typeof AccountsRoutersNewRoute
+  EventSourcesIdEditRoute: typeof EventSourcesIdEditRoute
   ModelEvaluationsEvaluationIDReportRoute: typeof ModelEvaluationsEvaluationIDReportRoute
   ModelEvaluationsIdCorpusRoute: typeof ModelEvaluationsIdCorpusRoute
   ModelEvaluationsIdEditRoute: typeof ModelEvaluationsIdEditRoute
@@ -1361,6 +1413,27 @@ declare module '@tanstack/react-router' {
       path: '/model-evaluations/$id'
       fullPath: '/model-evaluations/$id'
       preLoaderRoute: typeof ModelEvaluationsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/event-sources_/settings': {
+      id: '/event-sources_/settings'
+      path: '/event-sources/settings'
+      fullPath: '/event-sources/settings'
+      preLoaderRoute: typeof EventSourcesSettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/event-sources_/new': {
+      id: '/event-sources_/new'
+      path: '/event-sources/new'
+      fullPath: '/event-sources/new'
+      preLoaderRoute: typeof EventSourcesNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/event-sources_/$id': {
+      id: '/event-sources_/$id'
+      path: '/event-sources/$id'
+      fullPath: '/event-sources/$id'
+      preLoaderRoute: typeof EventSourcesIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/development_/workflow-configurations': {
@@ -1585,6 +1658,13 @@ declare module '@tanstack/react-router' {
       path: '/model-evaluations/$evaluationID/report'
       fullPath: '/model-evaluations/$evaluationID/report'
       preLoaderRoute: typeof ModelEvaluationsEvaluationIDReportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/event-sources_/$id_/edit': {
+      id: '/event-sources_/$id_/edit'
+      path: '/event-sources/$id/edit'
+      fullPath: '/event-sources/$id/edit'
+      preLoaderRoute: typeof EventSourcesIdEditRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agent/tools_/$id': {
@@ -1918,6 +1998,9 @@ const rootRouteChildren: RootRouteChildren = {
   DevelopmentSettingsRoute: DevelopmentSettingsRoute,
   DevelopmentWorkflowConfigurationsRoute:
     DevelopmentWorkflowConfigurationsRoute,
+  EventSourcesIdRoute: EventSourcesIdRoute,
+  EventSourcesNewRoute: EventSourcesNewRoute,
+  EventSourcesSettingsRoute: EventSourcesSettingsRoute,
   ModelEvaluationsIdRoute: ModelEvaluationsIdRoute,
   ModelEvaluationsNewRoute: ModelEvaluationsNewRoute,
   ModelsAliasesRoute: ModelsAliasesRoute,
@@ -1930,6 +2013,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsIdEditRoute: AccountsIdEditRoute,
   AccountsRoutersIdRoute: AccountsRoutersIdRoute,
   AccountsRoutersNewRoute: AccountsRoutersNewRoute,
+  EventSourcesIdEditRoute: EventSourcesIdEditRoute,
   ModelEvaluationsEvaluationIDReportRoute:
     ModelEvaluationsEvaluationIDReportRoute,
   ModelEvaluationsIdCorpusRoute: ModelEvaluationsIdCorpusRoute,

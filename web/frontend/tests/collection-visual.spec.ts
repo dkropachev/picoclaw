@@ -12,6 +12,7 @@ type VisualTheme = "light" | "dark"
 const pilots = [
   { key: "accounts", route: "/accounts" },
   { key: "account-routers", route: "/accounts/routers" },
+  { key: "event-sources", route: "/event-sources" },
   { key: "model-aliases", route: "/models/aliases" },
   { key: "model-routers", route: "/models/routers" },
   { key: "mcp-servers", route: "/agent/mcp/servers" },
