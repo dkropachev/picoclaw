@@ -91,6 +91,15 @@ describe("ToolAdaptationTab", () => {
     })
   })
 
+  it("suppresses the embedded page heading inside a routed detail shell", () => {
+    renderTab({ showHeader: false })
+
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Adaptation" }),
+    ).toBeNull()
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeVisible()
+  })
+
   it("shows an accessible probing state for the selected profile", () => {
     renderTab({
       isProbing: true,
@@ -385,6 +394,7 @@ function renderTab({
   probingProfile = null,
   onRunProbe = vi.fn(),
   onUpdateDraft = vi.fn(),
+  showHeader,
 }: {
   draft?: ToolAdaptationConfig
   isDirty?: boolean
@@ -395,9 +405,11 @@ function renderTab({
   onUpdateDraft?: (
     updater: (current: ToolAdaptationConfig) => ToolAdaptationConfig,
   ) => void
+  showHeader?: boolean
 } = {}) {
   return render(
     <ToolAdaptationTab
+      showHeader={showHeader}
       draft={draft}
       isLoading={false}
       hasError={false}

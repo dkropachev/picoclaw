@@ -46,6 +46,7 @@ import { Switch } from "@/components/ui/switch"
 import type { ToolAdaptationDraftUpdater } from "./types"
 
 interface ToolAdaptationTabProps {
+  showHeader?: boolean
   draft: ToolAdaptationConfig | null
   isLoading: boolean
   hasError: boolean
@@ -94,6 +95,7 @@ const visibleChangePolicies: Array<{
 ]
 
 export function ToolAdaptationTab({
+  showHeader = true,
   draft,
   isLoading,
   hasError,
@@ -123,18 +125,20 @@ export function ToolAdaptationTab({
         <LoadingState />
       ) : (
         <>
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-            <div className="max-w-xl space-y-3">
-              <h1 className="text-foreground/90 text-2xl font-semibold tracking-tight">
-                {t("pages.agent.tools.adaptation.title", "Adaptation")}
-              </h1>
-              <p className="text-muted-foreground/80 text-[14px] leading-relaxed">
-                {t(
-                  "pages.agent.tools.adaptation.description",
-                  "Select how PicoClaw presents equivalent tool capabilities to each model and API.",
-                )}
-              </p>
-            </div>
+          <div className="flex flex-col justify-end gap-6 sm:flex-row sm:items-start sm:justify-between">
+            {showHeader && (
+              <div className="max-w-xl space-y-3">
+                <h1 className="text-foreground/90 text-2xl font-semibold tracking-tight">
+                  {t("pages.agent.tools.adaptation.title", "Adaptation")}
+                </h1>
+                <p className="text-foreground/90 text-[14px] leading-relaxed">
+                  {t(
+                    "pages.agent.tools.adaptation.description",
+                    "Select how PicoClaw presents equivalent tool capabilities to each model and API.",
+                  )}
+                </p>
+              </div>
+            )}
 
             <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
               <Button
@@ -169,7 +173,7 @@ export function ToolAdaptationTab({
           />
 
           <section className="space-y-4">
-            <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
+            <h3 className="text-foreground text-[13px] font-bold tracking-widest uppercase">
               {t("pages.agent.tools.adaptation.selection", "Selection")}
             </h3>
             <div className="bg-card border-border/40 divide-border/40 divide-y overflow-hidden rounded-lg border shadow-sm">
@@ -290,7 +294,7 @@ export function ToolAdaptationTab({
           </section>
 
           <section className="space-y-4">
-            <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
+            <h3 className="text-foreground text-[13px] font-bold tracking-widest uppercase">
               {t("pages.agent.tools.adaptation.cache", "Cache Behavior")}
             </h3>
             <div className="bg-card border-border/40 divide-border/40 divide-y overflow-hidden rounded-lg border shadow-sm">
@@ -363,7 +367,7 @@ export function ToolAdaptationTab({
           </section>
 
           <section className="space-y-4">
-            <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
+            <h3 className="text-foreground text-[13px] font-bold tracking-widest uppercase">
               {t("pages.agent.tools.adaptation.runtime", "Runtime")}
             </h3>
             <div className="bg-card border-border/40 divide-border/40 divide-y overflow-hidden rounded-lg border shadow-sm">
@@ -508,7 +512,7 @@ function AdaptationProfilesPanel({
   return (
     <section className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
+        <h3 className="text-foreground text-[13px] font-bold tracking-widest uppercase">
           {t("pages.agent.tools.adaptation.profiles", "Profiles")}
         </h3>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
@@ -543,7 +547,7 @@ function AdaptationProfilesPanel({
       </div>
       <div className="bg-card border-border/40 overflow-hidden rounded-lg border shadow-sm">
         {profiles.length === 0 ? (
-          <div className="text-muted-foreground p-6 text-center text-[13px]">
+          <div className="text-foreground/90 p-6 text-center text-[13px]">
             {t(
               "pages.agent.tools.adaptation.no_configured_profiles",
               "Configure a model or account before adding profile overrides.",
@@ -604,7 +608,7 @@ function AdaptationProfilesPanel({
             })}
           </div>
         ) : (
-          <div className="text-muted-foreground p-6 text-center text-[13px]">
+          <div className="text-foreground/90 p-6 text-center text-[13px]">
             {t("pages.agent.tools.adaptation.no_profiles", "No profiles found")}
           </div>
         )}
@@ -1025,7 +1029,7 @@ function AdaptationProfileRow({
                 </span>
               )}
             </span>
-            <span className="text-muted-foreground/80 mt-1 block truncate text-[12px]">
+            <span className="text-foreground/90 mt-1 block truncate text-[12px]">
               {profile.source || profile.label}
             </span>
             <span
@@ -1060,7 +1064,7 @@ function AdaptationProfileRow({
             <span className="text-foreground/80 block text-[13px] font-medium">
               {displayedSurface}
             </span>
-            <span className="text-muted-foreground/80 block text-[12px]">
+            <span className="text-foreground/90 block text-[12px]">
               {surfaceEvidence}
             </span>
           </span>
@@ -1068,7 +1072,7 @@ function AdaptationProfileRow({
             <span className="text-foreground/80 block text-[13px] font-medium">
               {displayedCache}
             </span>
-            <span className="text-muted-foreground/80 block text-[12px]">
+            <span className="text-foreground/90 block text-[12px]">
               {cacheEvidence}
             </span>
           </span>
@@ -1095,7 +1099,7 @@ function AdaptationProfileRow({
             {probeDisabledReason && (
               <span
                 id={probeReasonID}
-                className="text-muted-foreground mt-1 block text-left text-[11px] leading-snug break-words sm:text-right"
+                className="text-foreground/90 mt-1 block text-left text-[11px] leading-snug break-words sm:text-right"
               >
                 {probeDisabledReason}
               </span>
@@ -1275,7 +1279,7 @@ function ToolOutcomeRow({ outcome }: { outcome: ToolAdaptationToolOutcome }) {
         <div className="text-foreground/90 truncate text-[14px] font-semibold">
           {outcome.tool_name}
         </div>
-        <div className="text-muted-foreground/80 mt-1 truncate text-[12px]">
+        <div className="text-foreground/90 mt-1 truncate text-[12px]">
           {outcome.visible_tool_surface}
           {outcome.last_error ? ` - ${outcome.last_error}` : ""}
         </div>
@@ -1291,7 +1295,7 @@ function ToolOutcomeRow({ outcome }: { outcome: ToolAdaptationToolOutcome }) {
 function ResolvedMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="border-border/40 bg-card min-w-0 rounded-lg border p-4">
-      <div className="text-muted-foreground/80 text-[12px] font-medium tracking-wide uppercase">
+      <div className="text-foreground/90 text-[12px] font-medium tracking-wide uppercase">
         {label}
       </div>
       <div className="text-foreground/90 mt-2 truncate text-[15px] font-semibold">
@@ -1369,7 +1373,7 @@ function SettingRow({
         <label className="text-foreground/90 text-[15px] font-semibold tracking-tight">
           {label}
         </label>
-        <p className="text-muted-foreground/80 text-[13px] leading-relaxed">
+        <p className="text-foreground/90 text-[13px] leading-relaxed">
           {description}
         </p>
       </div>

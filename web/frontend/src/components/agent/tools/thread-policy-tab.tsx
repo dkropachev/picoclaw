@@ -24,6 +24,7 @@ import { Textarea } from "@/components/ui/textarea"
 import type { ThreadPolicyDraftUpdater } from "./types"
 
 interface ThreadPolicyTabProps {
+  showHeader?: boolean
   draft: ThreadPolicyConfig | null
   isLoading: boolean
   hasError: boolean
@@ -41,6 +42,7 @@ const ruleTypes: ThreadPolicyRuleType[] = [
 ]
 
 export function ThreadPolicyTab({
+  showHeader = true,
   draft,
   isLoading,
   hasError,
@@ -66,18 +68,20 @@ export function ThreadPolicyTab({
         <LoadingState />
       ) : (
         <>
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-            <div className="max-w-xl space-y-3">
-              <h1 className="text-foreground/90 text-2xl font-semibold tracking-tight">
-                {t("pages.agent.tools.thread_policy.title", "Thread Policy")}
-              </h1>
-              <p className="text-muted-foreground/80 text-[14px] leading-relaxed">
-                {t(
-                  "pages.agent.tools.thread_policy.description",
-                  "Configure when the main chat may become or join a PicoClaw thread.",
-                )}
-              </p>
-            </div>
+          <div className="flex flex-col justify-end gap-6 sm:flex-row sm:items-start sm:justify-between">
+            {showHeader && (
+              <div className="max-w-xl space-y-3">
+                <h1 className="text-foreground/90 text-2xl font-semibold tracking-tight">
+                  {t("pages.agent.tools.thread_policy.title", "Thread Policy")}
+                </h1>
+                <p className="text-muted-foreground/80 text-[14px] leading-relaxed">
+                  {t(
+                    "pages.agent.tools.thread_policy.description",
+                    "Configure when the main chat may become or join a PicoClaw thread.",
+                  )}
+                </p>
+              </div>
+            )}
 
             <Button
               onClick={onSave}

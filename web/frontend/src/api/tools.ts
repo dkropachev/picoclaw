@@ -1,16 +1,31 @@
+import {
+  type CollectionQuerySchema,
+  collectionListURL,
+  collectionRequest,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export interface ToolSupportItem {
+  id: string
   name: string
   description: string
   category: string
   config_key: string
   status: "enabled" | "disabled" | "blocked"
+  reason?: string
   reason_code?: string
 }
 
-interface ToolsResponse {
+export interface ToolsCollectionResponse {
   tools: ToolSupportItem[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
+}
+
+export interface ToolDetailResponse {
+  tool: ToolSupportItem
 }
 
 interface ToolActionResponse {
@@ -215,8 +230,31 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export async function getTools(): Promise<ToolsResponse> {
-  return request<ToolsResponse>("/api/tools")
+export function listTools(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<ToolsCollectionResponse> {
+  return collectionRequest<ToolsCollectionResponse>(
+    collectionListURL("/api/tools", options),
+    undefined,
+    signal,
+  )
+}
+
+/** @deprecated Collection UIs should use listTools. */
+export function getTools(): Promise<ToolsCollectionResponse> {
+  return listTools()
+}
+
+export function getTool(
+  id: string,
+  signal?: AbortSignal,
+): Promise<ToolDetailResponse> {
+  return collectionRequest<ToolDetailResponse>(
+    `/api/tools/${encodeURIComponent(id)}`,
+    undefined,
+    signal,
+  )
 }
 
 export async function setToolEnabled(

@@ -372,26 +372,58 @@
       "route": "/agent/skills",
       "owningSpec": "docs/features/skills.md",
       "implementationGlobs": [
-        "src/routes/agent/skills.tsx",
-        "src/components/agent/skills/**"
+        "src/routes/agent/skills*.tsx",
+        "src/api/skills.ts",
+        "src/components/agent/skill-tool-collection-route-state.ts",
+        "src/components/agent/skills/origin-badge.tsx",
+        "src/components/agent/skills/origin-utils.ts",
+        "src/components/agent/skills/skill-collections.tsx",
+        "src/components/agent/skills/skill-detail-content.tsx",
+        "src/components/agent/skills/skill-import-page.tsx",
+        "src/components/agent/skills/types.ts"
       ],
-      "capabilities": ["query", "create", "detail"],
-      "views": ["grid"],
-      "status": "legacy",
-      "routes": { "list": "/agent/skills" }
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/agent/skills",
+        "new": "/agent/skills/new",
+        "detail": "/agent/skills/:id"
+      }
     },
     {
       "key": "tools",
       "route": "/agent/tools",
       "owningSpec": "docs/features/tool-execution.md",
       "implementationGlobs": [
-        "src/routes/agent/tools.tsx",
-        "src/components/agent/tools/**"
+        "src/routes/agent/tools*.tsx",
+        "src/api/tools.ts",
+        "src/components/agent/skill-tool-collection-route-state.ts",
+        "src/components/agent/tools/thread-policy-tab.tsx",
+        "src/components/agent/tools/tool-adaptation-tab.tsx",
+        "src/components/agent/tools/tool-collections.tsx",
+        "src/components/agent/tools/tool-status-badge.tsx",
+        "src/components/agent/tools/types.ts",
+        "src/components/agent/tools/web-search-general-settings.tsx",
+        "src/components/agent/tools/web-search-provider-settings.tsx",
+        "src/components/agent/tools/web-search-tab.tsx"
       ],
-      "capabilities": ["query", "edit"],
-      "views": ["grid"],
-      "status": "legacy",
-      "routes": { "list": "/agent/tools" }
+      "capabilities": ["query", "pagination", "detail", "edit", "settings"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/agent/tools",
+        "detail": "/agent/tools/:id",
+        "edit": "/agent/tools/:id/edit",
+        "settings": "/agent/tools/settings/adaptation"
+      }
     },
     {
       "key": "workflows",

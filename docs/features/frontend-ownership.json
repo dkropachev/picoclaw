@@ -36,9 +36,11 @@
       "spec": "docs/features/tool-execution.md",
       "patterns": [
         "web/frontend/src/api/tools.ts",
+        "web/frontend/src/components/agent/skill-tool-collection-route-state.ts",
         "web/frontend/src/components/agent/tools/**",
         "web/frontend/src/hooks/use-chat-models.ts",
-        "web/frontend/src/routes/agent/tools.tsx"
+        "web/frontend/src/routes/agent/-skills-tools-route.test.tsx",
+        "web/frontend/src/routes/agent/tools*.tsx"
       ]
     },
     {
@@ -54,9 +56,11 @@
       "patterns": [
         "web/frontend/src/api/skills.ts",
         "web/frontend/src/components/agent/hub/**",
+        "web/frontend/src/components/agent/skill-tool-collection-route-state.ts",
         "web/frontend/src/components/agent/skills/**",
+        "web/frontend/src/routes/agent/-skills-tools-route.test.tsx",
         "web/frontend/src/routes/agent/hub.tsx",
-        "web/frontend/src/routes/agent/skills.tsx"
+        "web/frontend/src/routes/agent/skills*.tsx"
       ]
     },
     {

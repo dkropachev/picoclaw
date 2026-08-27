@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -28,16 +29,22 @@ type toolCatalogEntry struct {
 }
 
 type toolSupportItem struct {
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Category    string `json:"category"`
 	ConfigKey   string `json:"config_key"`
 	Status      string `json:"status"`
+	Reason      string `json:"reason,omitempty"`
 	ReasonCode  string `json:"reason_code,omitempty"`
 }
 
 type toolSupportResponse struct {
-	Tools []toolSupportItem `json:"tools"`
+	Tools          []toolSupportItem      `json:"tools"`
+	Total          int                    `json:"total"`
+	NextCursor     string                 `json:"next_cursor,omitempty"`
+	CanonicalQuery string                 `json:"canonical_query,omitempty"`
+	QuerySchema    collectionquery.Schema `json:"query_schema"`
 }
 
 type toolStateRequest struct {
@@ -280,44 +287,107 @@ var toolCatalog = []toolCatalogEntry{
 
 func (h *Handler) registerToolRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/tools", h.handleListTools)
-	mux.HandleFunc("PUT /api/tools/{name}/state", h.handleUpdateToolState)
+	mux.HandleFunc(
+		"PUT /api/tools/{name}/state",
+		h.requireCollectionMutationOrigin(h.handleUpdateToolState),
+	)
 	mux.HandleFunc("GET /api/tools/web-search-config", h.handleGetWebSearchConfig)
-	mux.HandleFunc("PUT /api/tools/web-search-config", h.handleUpdateWebSearchConfig)
+	mux.HandleFunc(
+		"PUT /api/tools/web-search-config",
+		h.requireCollectionMutationOrigin(h.handleUpdateWebSearchConfig),
+	)
 	mux.HandleFunc("GET /api/tools/thread-policy", h.handleGetThreadPolicy)
-	mux.HandleFunc("PUT /api/tools/thread-policy", h.handleUpdateThreadPolicy)
+	mux.HandleFunc(
+		"PUT /api/tools/thread-policy",
+		h.requireCollectionMutationOrigin(h.handleUpdateThreadPolicy),
+	)
 	mux.HandleFunc("GET /api/tools/adaptation", h.handleGetToolAdaptation)
-	mux.HandleFunc("PUT /api/tools/adaptation", h.handleUpdateToolAdaptation)
-	mux.HandleFunc("POST /api/tools/adaptation/probe", h.handleRunToolAdaptationProbe)
+	mux.HandleFunc(
+		"PUT /api/tools/adaptation",
+		h.requireCollectionMutationOrigin(h.handleUpdateToolAdaptation),
+	)
+	mux.HandleFunc(
+		"POST /api/tools/adaptation/probe",
+		h.requireCollectionMutationOrigin(h.handleRunToolAdaptationProbe),
+	)
+	mux.HandleFunc("GET /api/tools/{id}", h.handleGetTool)
 }
 
 func (h *Handler) handleListTools(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
+	listRequest, ok := parseCollectionListRequest(w, r, toolCollectionSchema)
+	if !ok {
+		return
+	}
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "config_load_failed",
+			"Failed to load configuration", -1, nil,
+		)
+		return
+	}
+	items := buildToolSupport(cfg)
+	page, err := pageToolSupportItems(items, listRequest)
+	if err != nil {
+		writeCollectionPageError(w, err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(toolSupportResponse{
-		Tools: buildToolSupport(cfg),
+	writeCollectionJSON(w, http.StatusOK, toolSupportResponse{
+		Tools:          page.Items,
+		Total:          page.Total,
+		NextCursor:     page.NextCursor,
+		CanonicalQuery: listRequest.Query.Canonical(),
+		QuerySchema:    toolCollectionSchemaWithSuggestions(items),
 	})
 }
 
 func (h *Handler) handleUpdateToolState(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
+	if !validateCollectionQueryParameters(w, r) {
+		return
+	}
+	toolName, status, code := resolveToolStateTarget(r.PathValue("name"))
+	if code != "" {
+		message := "Tool not found"
+		if code == "invalid_tool_id" {
+			message = "Tool ID is invalid"
+		}
+		writeCollectionError(w, status, code, message, -1, nil)
+		return
+	}
 	if err := validateToolStateContentType(r); err != nil {
-		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		writeCollectionError(
+			w,
+			http.StatusUnsupportedMediaType,
+			"json_content_type_required",
+			"Content-Type must be application/json",
+			-1,
+			nil,
+		)
 		return
 	}
 	var req toolStateRequest
 	if err := decodeToolStateRequest(w, r, &req); err != nil {
 		var maximum *http.MaxBytesError
 		if errors.As(err, &maximum) {
-			http.Error(w, "Tool state request exceeds 1 MiB", http.StatusRequestEntityTooLarge)
+			writeCollectionError(
+				w,
+				http.StatusRequestEntityTooLarge,
+				"collection_request_too_large",
+				"Tool state request exceeds 1 MiB",
+				-1,
+				nil,
+			)
 			return
 		}
-		http.Error(w, "Invalid tool state request", http.StatusBadRequest)
+		writeCollectionError(
+			w,
+			http.StatusBadRequest,
+			"invalid_tool_state",
+			"Invalid tool state request",
+			-1,
+			nil,
+		)
 		return
 	}
 
@@ -326,30 +396,53 @@ func (h *Handler) handleUpdateToolState(w http.ResponseWriter, r *http.Request) 
 
 	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_load_failed",
+			"Failed to load configuration",
+			-1,
+			nil,
+		)
 		return
 	}
-	if applyErr := applyToolState(cfg, r.PathValue("name"), *req.Enabled); applyErr != nil {
-		http.Error(w, applyErr.Error(), http.StatusBadRequest)
+	if applyErr := applyToolState(cfg, toolName, *req.Enabled); applyErr != nil {
+		writeCollectionError(
+			w,
+			http.StatusUnprocessableEntity,
+			"tool_state_unavailable",
+			"Tool state cannot be updated",
+			-1,
+			nil,
+		)
 		return
 	}
 
 	_, err = h.saveToolStateConfig(h.configPath, cfg, revision)
 	if errors.Is(err, config.ErrConfigRevisionMismatch) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "config_revision_mismatch",
-		})
+		writeCollectionError(
+			w,
+			http.StatusConflict,
+			"config_revision_mismatch",
+			"Configuration changed; reload and try again",
+			-1,
+			nil,
+		)
 		return
 	}
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w,
+			http.StatusInternalServerError,
+			"config_save_failed",
+			"Failed to save configuration",
+			-1,
+			nil,
+		)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeCollectionJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func validateToolStateContentType(r *http.Request) error {
@@ -1432,11 +1525,13 @@ func buildToolSupport(cfg *config.Config) []toolSupportItem {
 		}
 
 		items = append(items, toolSupportItem{
+			ID:          toolCollectionResourceID(entry.Name),
 			Name:        entry.Name,
 			Description: entry.Description,
 			Category:    entry.Category,
 			ConfigKey:   entry.ConfigKey,
 			Status:      status,
+			Reason:      reasonCode,
 			ReasonCode:  reasonCode,
 		})
 	}

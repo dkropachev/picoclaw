@@ -13,12 +13,17 @@ import {
   type SkillRegistrySearchResult,
   type SkillSearchResponse,
   type SkillSupportItem,
-  getSkills,
   installSkill,
   searchSkills,
 } from "@/api/skills"
 import { getTools } from "@/api/tools"
+import { skillsDefaultQuery } from "@/components/agent/skill-tool-collection-route-state"
 
+import {
+  findWorkspaceSkill,
+  indexWorkspaceSkills,
+  loadSkillInventory,
+} from "./skill-inventory"
 import { buildUnavailableToolMessages } from "./tool-support"
 
 const MARKET_SEARCH_LIMIT = 20
@@ -33,8 +38,8 @@ export function useHubMarketplace() {
   const [submittedMarketQuery, setSubmittedMarketQuery] = useState("")
 
   const { data: skillsData } = useQuery({
-    queryKey: ["skills"],
-    queryFn: getSkills,
+    queryKey: ["skills", "inventory"],
+    queryFn: ({ signal }) => loadSkillInventory(signal),
   })
   const { data: toolsData } = useQuery({
     queryKey: ["tools"],
@@ -98,12 +103,7 @@ export function useHubMarketplace() {
     },
   })
 
-  const allSkills = skillsData?.skills ?? []
-  const workspaceSkillsByName = new Map(
-    allSkills
-      .filter((skill) => skill.source === "workspace")
-      .map((skill) => [skill.name, skill] as const),
-  )
+  const workspaceSkillsByName = indexWorkspaceSkills(skillsData ?? [])
   const marketResults =
     marketSearchData?.pages.flatMap((page) => page.results) ?? []
   const hasMoreMarketResults = hasNextPage ?? false
@@ -154,7 +154,10 @@ export function useHubMarketplace() {
   }
 
   const handleViewInstalled = () => {
-    void navigate({ to: "/agent/skills" })
+    void navigate({
+      to: "/agent/skills",
+      search: { q: skillsDefaultQuery },
+    })
   }
 
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -183,7 +186,7 @@ export function useHubMarketplace() {
     if (!installedName) {
       return null
     }
-    return workspaceSkillsByName.get(installedName) ?? null
+    return findWorkspaceSkill(workspaceSkillsByName, installedName)
   }
 
   const isInstallPending = (result: SkillRegistrySearchResult) =>

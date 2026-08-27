@@ -22,6 +22,8 @@ const pilots = [
     key: "repository-review-profiles",
     route: "/repository-reviews/profiles",
   },
+  { key: "skills", route: "/agent/skills" },
+  { key: "tools", route: "/agent/tools" },
 ] as const
 
 for (const pilot of pilots) {
@@ -175,6 +177,7 @@ async function openCollection(
   await installCollectionVisualMocks(page, state)
   await page.goto(route)
   await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect.poll(() => new URL(page.url()).searchParams.has("q")).toBe(true)
 }
 
 async function prepareVisualPage(page: Page, theme: VisualTheme) {
