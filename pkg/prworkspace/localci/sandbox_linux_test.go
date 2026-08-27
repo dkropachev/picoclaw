@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const localCISystemdIntegrationEnv = "PICOCLAW_TEST_LOCALCI_SYSTEMD"
+
 func TestLinuxSandboxUsesDisposableCredentialFreeOfflineWorkspace(t *testing.T) {
 	candidate := t.TempDir()
 	writeTestFile(t, candidate, "input.txt", "candidate\n")
@@ -108,6 +110,8 @@ func TestLinuxSandboxTimeoutAndOutputLimitKillStep(t *testing.T) {
 }
 
 func TestLinuxSandboxCannotHidePidsExhaustionBehindExitZero(t *testing.T) {
+	requireLocalCISystemdIntegration(t)
+
 	candidate := t.TempDir()
 	helperDirectory := t.TempDir()
 	testExecutable, err := os.Executable()
@@ -295,6 +299,7 @@ func testSandboxStep(script string) Step {
 
 func requireLinuxSandbox(t *testing.T) Sandbox {
 	t.Helper()
+	requireLocalCISystemdIntegration(t)
 	sandbox, err := NewSandbox(SandboxConfig{TemporaryRoot: t.TempDir()})
 	if errors.Is(err, ErrSandboxUnavailable) {
 		t.Skipf("mandatory local CI backend unavailable: %v", err)
@@ -303,4 +308,14 @@ func requireLinuxSandbox(t *testing.T) Sandbox {
 		t.Fatalf("NewSandbox() error = %v", err)
 	}
 	return sandbox
+}
+
+func requireLocalCISystemdIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv(localCISystemdIntegrationEnv) != "1" {
+		t.Skipf(
+			"systemd-backed local-CI integration disabled; set %s=1 to enable",
+			localCISystemdIntegrationEnv,
+		)
+	}
 }

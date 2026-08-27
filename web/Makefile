@@ -191,7 +191,7 @@ endif
 
 # Run all tests
 test:
-	cd $(BACKEND_DIR) && ${WEB_GO} test ./...
+	cd $(BACKEND_DIR) && ${WEB_GO} run ../../scripts/hermetic-go-test -- $(GO) test ./...
 	cd $(FRONTEND_DIR) && pnpm lint
 	cd $(FRONTEND_DIR) && pnpm format
 

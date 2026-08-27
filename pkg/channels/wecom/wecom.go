@@ -109,6 +109,15 @@ func (s *recentMessageSet) Mark(id string) bool {
 }
 
 func NewChannel(bc *config.Channel, cfg *config.WeComSettings, messageBus *bus.MessageBus) (*WeComChannel, error) {
+	return newChannelWithRouteStore(bc, cfg, messageBus, "")
+}
+
+func newChannelWithRouteStore(
+	bc *config.Channel,
+	cfg *config.WeComSettings,
+	messageBus *bus.MessageBus,
+	routeStorePath string,
+) (*WeComChannel, error) {
 	if cfg.BotID == "" || cfg.Secret.String() == "" {
 		return nil, fmt.Errorf("wecom bot_id and secret are required")
 	}
@@ -130,7 +139,7 @@ func NewChannel(bc *config.Channel, cfg *config.WeComSettings, messageBus *bus.M
 		pending:     make(map[string]chan wecomEnvelope),
 		turns:       make(map[string][]wecomTurn),
 		recent:      newRecentMessageSet(wecomRecentMessageMax),
-		routes:      newReqIDStore(""),
+		routes:      newReqIDStore(routeStorePath),
 		mediaClient: &http.Client{Timeout: wecomMediaTimeout},
 	}
 	ch.SetOwner(ch)

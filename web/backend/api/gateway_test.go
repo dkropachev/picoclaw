@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,37 +24,64 @@ import (
 	"github.com/sipeed/picoclaw/web/backend/utils"
 )
 
+const gatewayProcessHelperModeEnv = "_PICOCLAW_GATEWAY_PROCESS_HELPER_MODE"
+
+func TestGatewayProcessHelper(t *testing.T) {
+	mode := os.Getenv(gatewayProcessHelperModeEnv)
+	if mode == "" {
+		t.Skip("gateway process helper")
+	}
+	if mode == "ignore-term" && runtime.GOOS != "windows" {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	time.Sleep(30 * time.Second)
+}
+
+func startGatewayProcessHelper(t *testing.T, mode string, gatewayLike bool) *exec.Cmd {
+	t.Helper()
+	if apiSuiteTestRuntime == nil {
+		t.Fatal("API suite runtime is not initialized")
+	}
+	role := "worker"
+	if gatewayLike {
+		role = "gateway"
+	}
+	cmd := exec.Command(
+		apiSuiteTestRuntime.FixtureBinary,
+		"-test.run=^TestGatewayProcessHelper$",
+		"--",
+		role,
+	)
+	cmd.Env = replaceAPITestEnvironment(os.Environ(), map[string]string{
+		gatewayProcessHelperModeEnv: mode,
+	})
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start gateway process helper: %v", err)
+	}
+	registerGatewayTestCommand(t, cmd)
+	return cmd
+}
+
 func startLongRunningProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
+	return startGatewayProcessHelper(t, "normal", false)
+}
 
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 30")
-	} else {
-		cmd = exec.Command("sleep", "30")
-	}
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
+func startOwnedGatewayTestProcess(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := startLongRunningProcess(t)
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
 	return cmd
 }
 
 func startGatewayLikeProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
-
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		t.Skip("gateway-like process commandline check is not deterministic on Windows tests")
-	}
-	cmd = exec.Command("sh", "-c", "sleep 30 # picoclaw gateway")
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
-	return cmd
+	return startGatewayProcessHelper(t, "normal", true)
 }
 
 func writeTestPidFile(t *testing.T, data ppid.PidFileData) string {
@@ -85,12 +114,7 @@ func startIgnoringTermProcess(t *testing.T) *exec.Cmd {
 		t.Skip("TERM handling differs on Windows")
 	}
 
-	cmd := exec.Command("sh", "-c", "trap '' TERM; sleep 30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
-	return cmd
+	return startGatewayProcessHelper(t, "ignore-term", false)
 }
 
 func resetGatewayTestState(t *testing.T) {
@@ -530,9 +554,10 @@ func TestStartGatewayLockedCapturesRuntimeSignatureBeforeChildStart(t *testing.T
 func TestAttachToGatewayUsesUnknownRuntimeSignatureBaseline(t *testing.T) {
 	resetGatewayTestState(t)
 	cfg := config.DefaultConfig()
+	cmd := startOwnedGatewayTestProcess(t)
 
 	gateway.mu.Lock()
-	err := attachToGatewayProcessLocked(os.Getpid(), cfg)
+	err := attachToGatewayProcessLocked(cmd.Process.Pid, cfg)
 	bootSignature := gateway.bootConfigSignature
 	gateway.mu.Unlock()
 	if err != nil {
@@ -1529,7 +1554,7 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelChange(t *testing.T) {
 	}
 
 	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-		return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+		return mockGatewayHealthResponse(http.StatusOK, cmd.Process.Pid), nil
 	}
 
 	rec := httptest.NewRecorder()
@@ -1576,10 +1601,7 @@ func TestGatewayStatusRequiresRestartAfterToolChange(t *testing.T) {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess() error = %v", err)
-	}
+	process := startOwnedGatewayTestProcess(t).Process
 
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
@@ -1599,7 +1621,7 @@ func TestGatewayStatusRequiresRestartAfterToolChange(t *testing.T) {
 	}
 
 	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-		return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+		return mockGatewayHealthResponse(http.StatusOK, process.Pid), nil
 	}
 
 	rec := httptest.NewRecorder()
@@ -1639,10 +1661,7 @@ func TestGatewayStatusRequiresRestartAfterChannelChange(t *testing.T) {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess() error = %v", err)
-	}
+	process := startOwnedGatewayTestProcess(t).Process
 
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
@@ -1666,7 +1685,7 @@ func TestGatewayStatusRequiresRestartAfterChannelChange(t *testing.T) {
 	}
 
 	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-		return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+		return mockGatewayHealthResponse(http.StatusOK, process.Pid), nil
 	}
 
 	rec := httptest.NewRecorder()
@@ -1744,10 +1763,7 @@ func TestGatewayStatusRequiresRestartAfterIsolationPatch(t *testing.T) {
 			h := NewHandler(configPath)
 			mux := http.NewServeMux()
 			h.RegisterRoutes(mux)
-			process, err := os.FindProcess(os.Getpid())
-			if err != nil {
-				t.Fatal(err)
-			}
+			process := startOwnedGatewayTestProcess(t).Process
 			gateway.mu.Lock()
 			gateway.cmd = &exec.Cmd{Process: process}
 			gateway.bootDefaultModel = model.ModelName
@@ -1755,7 +1771,7 @@ func TestGatewayStatusRequiresRestartAfterIsolationPatch(t *testing.T) {
 			setGatewayRuntimeStatusLocked("running")
 			gateway.mu.Unlock()
 			gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-				return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+				return mockGatewayHealthResponse(http.StatusOK, process.Pid), nil
 			}
 
 			patchReq := httptest.NewRequest(
@@ -2513,10 +2529,7 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelStreamingChange(t *testing
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess() error = %v", err)
-	}
+	process := startOwnedGatewayTestProcess(t).Process
 
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
@@ -2536,7 +2549,7 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelStreamingChange(t *testing
 	}
 
 	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-		return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+		return mockGatewayHealthResponse(http.StatusOK, process.Pid), nil
 	}
 
 	rec := httptest.NewRecorder()
@@ -3229,10 +3242,7 @@ func TestGatewayStatusRequiresRestartAfterWebSearchConfigChange(t *testing.T) {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess() error = %v", err)
-	}
+	process := startOwnedGatewayTestProcess(t).Process
 
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
@@ -3252,7 +3262,7 @@ func TestGatewayStatusRequiresRestartAfterWebSearchConfigChange(t *testing.T) {
 	}
 
 	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-		return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+		return mockGatewayHealthResponse(http.StatusOK, process.Pid), nil
 	}
 
 	rec := httptest.NewRecorder()
@@ -3293,10 +3303,7 @@ func TestGatewayStatusRequiresRestartAfterAgentRuntimeChange(t *testing.T) {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess() error = %v", err)
-	}
+	process := startOwnedGatewayTestProcess(t).Process
 
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
@@ -3316,7 +3323,7 @@ func TestGatewayStatusRequiresRestartAfterAgentRuntimeChange(t *testing.T) {
 	}
 
 	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
-		return mockGatewayHealthResponse(http.StatusOK, os.Getpid()), nil
+		return mockGatewayHealthResponse(http.StatusOK, process.Pid), nil
 	}
 
 	rec := httptest.NewRecorder()

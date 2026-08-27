@@ -627,12 +627,16 @@ func newTestWeComChannel(t *testing.T, messageBus *bus.MessageBus) *WeComChannel
 	cfg := &config.WeComSettings{BotID: "bot-1"}
 	cfg.SetSecret("secret-1")
 	bc := &config.Channel{Type: config.ChannelWeCom, Enabled: true}
-	ch, err := NewChannel(bc, cfg, messageBus)
+	ch, err := newChannelWithRouteStore(
+		bc,
+		cfg,
+		messageBus,
+		filepath.Join(t.TempDir(), "reqids.json"),
+	)
 	if err != nil {
 		t.Fatalf("NewChannel() error = %v", err)
 	}
 	ch.ctx = context.Background()
-	ch.routes = newReqIDStore(filepath.Join(t.TempDir(), "reqids.json"))
 	return ch
 }
 

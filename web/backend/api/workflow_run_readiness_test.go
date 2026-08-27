@@ -18,6 +18,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+const (
+	workflowConfigGuardChildEnv     = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_CHILD"
+	workflowConfigGuardPathEnv      = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_PATH"
+	workflowConfigGuardWorkspaceEnv = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_WORKSPACE"
+	workflowConfigGuardReadyEnv     = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_READY"
+	workflowConfigGuardCompletedEnv = "_PICOCLAW_WORKFLOW_CONFIG_GUARD_COMPLETED"
+)
+
 const workflowRunReadinessDefinition = `name: Readiness run
 on:
   manual: {}
@@ -814,7 +822,7 @@ func TestHandleRunAndRetryFenceAdmissionAtDurableCreate(t *testing.T) {
 func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesCapturedConfig(
 	t *testing.T,
 ) {
-	if os.Getenv("PICOCLAW_WORKFLOW_CONFIG_GUARD_CHILD") == "1" {
+	if os.Getenv(workflowConfigGuardChildEnv) == "1" {
 		runWorkflowAdmissionConfigGuardSaveChild(t)
 		return
 	}
@@ -881,11 +889,11 @@ func TestWorkflowAdmissionConfigGuardBlocksCrossProcessSaveThroughCreateAndUsesC
 	)
 	command.Env = append(
 		os.Environ(),
-		"PICOCLAW_WORKFLOW_CONFIG_GUARD_CHILD=1",
-		"PICOCLAW_WORKFLOW_CONFIG_GUARD_PATH="+configPath,
-		"PICOCLAW_WORKFLOW_CONFIG_GUARD_WORKSPACE="+workspace,
-		"PICOCLAW_WORKFLOW_CONFIG_GUARD_READY="+readyPath,
-		"PICOCLAW_WORKFLOW_CONFIG_GUARD_COMPLETED="+completedPath,
+		workflowConfigGuardChildEnv+"=1",
+		workflowConfigGuardPathEnv+"="+configPath,
+		workflowConfigGuardWorkspaceEnv+"="+workspace,
+		workflowConfigGuardReadyEnv+"="+readyPath,
+		workflowConfigGuardCompletedEnv+"="+completedPath,
 	)
 	helperStarted := false
 	helperWaited := false
@@ -1053,13 +1061,17 @@ func TestWorkflowAdmissionConfigGuardClassifiesInfrastructureAndRevisionFailures
 
 func runWorkflowAdmissionConfigGuardSaveChild(t *testing.T) {
 	t.Helper()
-	configPath := os.Getenv("PICOCLAW_WORKFLOW_CONFIG_GUARD_PATH")
-	workspace := os.Getenv("PICOCLAW_WORKFLOW_CONFIG_GUARD_WORKSPACE")
-	readyPath := os.Getenv("PICOCLAW_WORKFLOW_CONFIG_GUARD_READY")
-	completedPath := os.Getenv("PICOCLAW_WORKFLOW_CONFIG_GUARD_COMPLETED")
+	configPath := os.Getenv(workflowConfigGuardPathEnv)
+	workspace := os.Getenv(workflowConfigGuardWorkspaceEnv)
+	readyPath := os.Getenv(workflowConfigGuardReadyEnv)
+	completedPath := os.Getenv(workflowConfigGuardCompletedEnv)
 	if configPath == "" || workspace == "" || readyPath == "" || completedPath == "" {
 		t.Fatal("workflow config guard helper environment is incomplete")
 	}
+	configPath = requireAPITestOwnedHelperPath(t, configPath)
+	workspace = requireAPITestOwnedHelperPath(t, workspace)
+	readyPath = requireAPITestOwnedHelperPath(t, readyPath)
+	completedPath = requireAPITestOwnedHelperPath(t, completedPath)
 	next := config.DefaultConfig()
 	next.Agents.Defaults.Workspace = workspace
 	next.Workflows.Enabled = true

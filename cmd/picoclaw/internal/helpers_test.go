@@ -13,6 +13,8 @@ import (
 )
 
 func TestGetConfigPath(t *testing.T) {
+	t.Setenv(config.EnvConfig, "")
+	t.Setenv(config.EnvHome, "")
 	t.Setenv("HOME", "/tmp/home")
 
 	got := GetConfigPath()
@@ -22,6 +24,7 @@ func TestGetConfigPath(t *testing.T) {
 }
 
 func TestGetConfigPath_WithPICOCLAW_HOME(t *testing.T) {
+	t.Setenv(config.EnvConfig, "")
 	t.Setenv(config.EnvHome, "/custom/picoclaw")
 	t.Setenv("HOME", "/tmp/home")
 
@@ -48,6 +51,8 @@ func TestGetConfigPath_Windows(t *testing.T) {
 	}
 
 	testUserProfilePath := `C:\Users\Test`
+	t.Setenv(config.EnvConfig, "")
+	t.Setenv(config.EnvHome, "")
 	t.Setenv("USERPROFILE", testUserProfilePath)
 
 	got := GetConfigPath()

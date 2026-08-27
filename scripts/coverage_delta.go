@@ -10,10 +10,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -396,16 +398,19 @@ func coverageForRef(
 	}()
 
 	coverageHome := filepath.Join(tmpDir, label+"-picoclaw-home")
-	if err := os.MkdirAll(coverageHome, 0o700); err != nil {
-		return coverageProfile{}, fmt.Errorf("create %s coverage home: %w", label, err)
-	}
 	goCaches, err := resolveGoCachePaths(root, os.Environ())
 	if err != nil {
 		return coverageProfile{}, err
 	}
 	environment := coverageEnvironment(os.Environ(), coverageHome, goCaches)
+	if err = prepareCoverageStorage(coverageHome); err != nil {
+		return coverageProfile{}, fmt.Errorf("create %s coverage home: %w", label, err)
+	}
 
 	if err := runGoGenerate(worktree, label, ref, environment); err != nil {
+		return coverageProfile{}, err
+	}
+	if err = buildCoverageTestBinary(worktree, label, ref, tags, environment); err != nil {
 		return coverageProfile{}, err
 	}
 
@@ -431,10 +436,13 @@ func coverageForRef(
 		profilePath,
 		coverImports,
 		testImports,
-		environment,
+		coverageFallbackHomeEnvironment(environment),
 	)
 	if err != nil {
 		return coverageProfile{}, err
+	}
+	if err = writeCoverageConfig(coverageHome); err != nil {
+		return coverageProfile{}, fmt.Errorf("write %s coverage config: %w", label, err)
 	}
 
 	if includeIntegration && len(plan.IntegrationSuites) > 0 && len(coverImports) > 0 {
@@ -771,11 +779,19 @@ func resolveGoCachePaths(root string, environment []string) (goCachePaths, error
 }
 
 func coverageEnvironment(base []string, home string, caches goCachePaths) []string {
-	environment := make([]string, 0, len(base)+5)
+	environment := make([]string, 0, len(base)+16)
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && (strings.EqualFold(name, "HOME") ||
-			strings.EqualFold(name, "PICOCLAW_HOME") ||
+		upper := strings.ToUpper(name)
+		if ok && (upper == "HOME" || upper == "USERPROFILE" ||
+			isAmbientTestCredentialOrAuthority(upper) ||
+			strings.HasPrefix(upper, "PICOCLAW_") || strings.HasPrefix(upper, "XDG_") ||
+			upper == "CODEX_HOME" || upper == "CLAUDE_CONFIG_DIR" || upper == "OPENCLAW_HOME" ||
+			upper == "GNUPGHOME" || upper == "GIT_CONFIG_GLOBAL" ||
+			upper == "GIT_CONFIG_NOSYSTEM" || upper == "TMPDIR" ||
+			upper == "TEMP" || upper == "TMP" || upper == "DBUS_SESSION_BUS_ADDRESS" ||
+			upper == "APPDATA" || upper == "LOCALAPPDATA" ||
+			upper == "HOMEDRIVE" || upper == "HOMEPATH" ||
 			strings.EqualFold(name, "GOCACHE") ||
 			strings.EqualFold(name, "GOMODCACHE") ||
 			strings.EqualFold(name, "GOTOOLCHAIN")) {
@@ -783,13 +799,241 @@ func coverageEnvironment(base []string, home string, caches goCachePaths) []stri
 		}
 		environment = append(environment, entry)
 	}
-	return append(environment,
+	picoHome := filepath.Join(home, ".picoclaw")
+	result := append(environment,
 		"HOME="+home,
-		"PICOCLAW_HOME=",
+		"USERPROFILE="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".xdg", "config"),
+		"XDG_DATA_HOME="+filepath.Join(home, ".xdg", "data"),
+		"XDG_CACHE_HOME="+filepath.Join(home, ".xdg", "cache"),
+		"XDG_STATE_HOME="+filepath.Join(home, ".xdg", "state"),
+		"XDG_RUNTIME_DIR="+filepath.Join(home, ".xdg", "runtime"),
+		"PICOCLAW_HOME="+picoHome,
+		"PICOCLAW_CONFIG="+filepath.Join(picoHome, "config.json"),
+		"PICOCLAW_BINARY="+filepath.Join(home, "bin", coverageExecutableName("picoclaw")),
+		"CODEX_HOME="+filepath.Join(home, ".codex"),
+		"CLAUDE_CONFIG_DIR="+filepath.Join(home, ".claude"),
+		"OPENCLAW_HOME="+filepath.Join(home, ".openclaw"),
+		"GNUPGHOME="+filepath.Join(home, ".gnupg"),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"TMPDIR="+filepath.Join(home, ".tmp"),
+		"TEMP="+filepath.Join(home, ".tmp"),
+		"TMP="+filepath.Join(home, ".tmp"),
+		"DBUS_SESSION_BUS_ADDRESS=unix:path="+filepath.Join(home, ".no-systemd-bus"),
+		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"AWS_EC2_METADATA_DISABLED=true",
+		"GIT_TERMINAL_PROMPT=0",
+		"GCM_INTERACTIVE=never",
+		"GOAUTH=off",
+		"GOENV=off",
 		"GOCACHE="+caches.Build,
 		"GOMODCACHE="+caches.Modules,
 		"GOTOOLCHAIN=auto",
 	)
+	if runtime.GOOS == "windows" {
+		volume := filepath.VolumeName(home)
+		result = append(
+			result,
+			"HOMEDRIVE="+volume,
+			"HOMEPATH="+strings.TrimPrefix(home, volume),
+		)
+	}
+	return result
+}
+
+// Historical base tests intentionally override HOME to exercise fallback
+// discovery. Keep that semantic while running unit coverage: HOME is already
+// disposable, and the explicit runtime config is published only after unit
+// coverage, before any integration suite can launch the built product binary.
+func coverageFallbackHomeEnvironment(environment []string) []string {
+	result := make([]string, len(environment))
+	for index, entry := range environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(name, "PICOCLAW_HOME") ||
+			strings.EqualFold(name, "PICOCLAW_CONFIG")) {
+			result[index] = name + "="
+			continue
+		}
+		result[index] = entry
+	}
+	return result
+}
+
+func isAmbientTestCredentialOrAuthority(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	for _, prefix := range []string{
+		"AWS_",
+		"AZURE_",
+		"CLOUDSDK_",
+		"COHERE_",
+		"DEEPSEEK_",
+		"GCLOUD_",
+		"GEMINI_",
+		"GOOGLE_",
+		"GROQ_",
+		"HF_",
+		"HUGGINGFACE_",
+		"HUGGING_FACE_",
+		"MISTRAL_",
+		"OCI_",
+		"OPENAI_",
+		"ANTHROPIC_",
+		"LISTEN_",
+		"SYSTEMD_",
+		"VAULT_",
+		"VERTEX_",
+		"WATCHDOG_",
+	} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range []string{
+		"_ACCESS_KEY",
+		"_API_KEY",
+		"_API_KEYS",
+		"_CREDENTIAL",
+		"_CREDENTIALS",
+		"_CREDENTIALS_FILE",
+		"_JWT",
+		"_JWT_V2",
+		"_PAT",
+		"_PASSWORD",
+		"_PRIVATE_KEY",
+		"_SECRET",
+		"_SECRET_KEY",
+		"_TOKEN",
+		"_TOKEN_FILE",
+	} {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	switch upper {
+	case "API_KEY", "ACCESS_TOKEN", "AUTH_TOKEN", "CREDENTIALS", "GH_PAT", "GITHUB_PAT", "PASSWORD", "PAT",
+		"PRIVATE_KEY", "REFRESH_TOKEN", "SECRET", "TOKEN",
+		"BASH_ENV", "BOTO_CONFIG", "DOCKER_AUTH_CONFIG", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_HOST",
+		"GCM_INTERACTIVE", "GIT_ASKPASS", "GIT_CEILING_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG_PARAMETERS", "GIT_DIR",
+		"GIT_EXEC_PATH", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_WORK_TREE",
+		"GIT_TERMINAL_PROMPT", "GOAUTH", "GOENV",
+		"GPG_AGENT_INFO", "KRB5CCNAME", "KRB5_CONFIG", "KUBECONFIG", "LD_LIBRARY_PATH", "LD_PRELOAD",
+		"INVOCATION_ID", "JOURNAL_STREAM", "NOTIFY_SOCKET",
+		"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "MYSQL_PWD", "NETRC", "NODE_AUTH_TOKEN", "NODE_OPTIONS",
+		"NPM_CONFIG_USERCONFIG", "NPM_TOKEN", "PGPASSFILE", "SSH_AGENT_PID", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE",
+		"SSH_AUTH_SOCK", "SSLKEYLOGFILE":
+		return true
+	}
+	return strings.HasPrefix(upper, "GIT_CONFIG_") || strings.HasPrefix(upper, "TF_TOKEN_")
+}
+
+func prepareCoverageHome(home string) error {
+	if err := prepareCoverageStorage(home); err != nil {
+		return err
+	}
+	return writeCoverageConfig(home)
+}
+
+func prepareCoverageStorage(home string) error {
+	picoHome := filepath.Join(home, ".picoclaw")
+	workspace := filepath.Join(picoHome, "workspace")
+	eventDB := filepath.Join(workspace, "eventing", "events.db")
+	for _, directory := range []string{
+		home,
+		filepath.Dir(eventDB),
+		filepath.Join(home, ".xdg", "config"),
+		filepath.Join(home, ".xdg", "data"),
+		filepath.Join(home, ".xdg", "cache"),
+		filepath.Join(home, ".xdg", "state"),
+		filepath.Join(home, ".xdg", "runtime"),
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, ".claude"),
+		filepath.Join(home, ".openclaw"),
+		filepath.Join(home, ".gnupg"),
+		filepath.Join(home, ".tmp"),
+		filepath.Join(home, "bin"),
+		filepath.Join(home, "AppData", "Roaming"),
+		filepath.Join(home, "AppData", "Local"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return err
+		}
+	}
+	database, err := os.OpenFile(eventDB, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	return database.Close()
+}
+
+func writeCoverageConfig(home string) error {
+	picoHome := filepath.Join(home, ".picoclaw")
+	workspace := filepath.Join(picoHome, "workspace")
+	eventDB := filepath.Join(workspace, "eventing", "events.db")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err = listener.Close(); err != nil {
+		return err
+	}
+	configData, err := json.MarshalIndent(map[string]any{
+		"agents":  map[string]any{"defaults": map[string]any{"workspace": workspace}},
+		"gateway": map[string]any{"host": "127.0.0.1", "port": port},
+		"events":  map[string]any{"ingress": map[string]any{"database_path": eventDB}},
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(picoHome, "config.json"), append(configData, '\n'), 0o600)
+}
+
+func buildCoverageTestBinary(
+	worktree, label, ref, tags string,
+	environment []string,
+) error {
+	binary := strings.TrimSpace(coverageEnvironmentValue(environment, "PICOCLAW_BINARY"))
+	if binary == "" {
+		return errors.New("coverage test binary path is unavailable")
+	}
+	arguments := []string{"build", "-buildvcs=false"}
+	if strings.TrimSpace(tags) != "" {
+		arguments = append(arguments, "-tags", tags)
+	}
+	arguments = append(arguments, "-o", binary, "./cmd/picoclaw")
+	command := exec.Command("go", arguments...)
+	command.Dir = worktree
+	command.Env = append([]string(nil), environment...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf(
+			"build isolated test binary for %s (%s): %w\n%s",
+			label,
+			ref,
+			err,
+			trimCommandOutput(output),
+		)
+	}
+	return nil
+}
+
+func coverageEnvironmentValue(environment []string, key string) string {
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(name, key) {
+			return value
+		}
+	}
+	return ""
+}
+
+func coverageExecutableName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".exe"
+	}
+	return base
 }
 
 func resolveGitRef(root, ref string) (string, error) {
