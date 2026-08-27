@@ -39,6 +39,12 @@ const smokeSkillToolIDs = {
   tool: "dG9vbAB3ZWJfc2VhcmNo",
 } as const
 
+const smokeEventSourceIDs = {
+  github: "eD_ny6SHSWjo-BISQjbmabgVi1UiA9LivNmhCwLoVCY",
+  standard: "AtpwqLgv6OwA1riKGYdyok1K5JqqZT0X9HnhIzQlmis",
+  channel: "MLlxF-61ul3LWbQ4FYizmxMV4hRFb0pm7lh1O4uJ7gs",
+} as const
+
 const smokeRoutes = [
   "/",
   "/models/aliases",
@@ -53,6 +59,10 @@ const smokeRoutes = [
   `/accounts/routers/${smokeAccountIDs.router}/edit`,
   "/events",
   "/event-sources",
+  "/event-sources/new",
+  `/event-sources/${smokeEventSourceIDs.github}`,
+  `/event-sources/${smokeEventSourceIDs.github}/edit`,
+  "/event-sources/settings",
   "/development",
   "/development/new",
   "/notifications",
@@ -334,6 +344,19 @@ const mockCollectionSchemas = {
     ["accounts", "number"],
     ["blocks", "number"],
   ]),
+  eventSources: collectionSchema([
+    ["name", "string"],
+    ["kind", "enum", ["webhook", "channel"]],
+    ["enabled", "boolean", ["true", "false"]],
+    ["format", "enum", ["standard", "github", "deltachat"]],
+    [
+      "status",
+      "enum",
+      ["available", "disabled", "unconfigured", "unreachable", "invalid"],
+    ],
+    ["repositories", "number"],
+    ["poll_notifications", "boolean", ["true", "false"]],
+  ]),
   aliases: collectionSchema([
     ["name", "string"],
     ["model", "string"],
@@ -537,6 +560,107 @@ function accountRouterSummary(router: AccountRouter): AccountRouterSummary {
     entry: router.entry,
     accounts: router.accounts.length,
     blocks: router.blocks.length,
+  }
+}
+
+type MockEventSource =
+  | {
+      id: string
+      name: string
+      kind: "webhook"
+      enabled: boolean
+      format: "standard" | "github"
+      status: string
+      poll_notifications: boolean
+      repositories: string[]
+      target_user: string
+      secret_configured: boolean
+      endpoint: string
+    }
+  | {
+      id: string
+      name: string
+      kind: "channel"
+      enabled: boolean
+      format: "deltachat"
+      status: string
+      poll_notifications: false
+      source: "email"
+      mode: "mirror" | "event_only"
+      allow_unverified_email: boolean
+      channel_enabled: boolean
+      channel_type: string
+    }
+
+const defaultSmokeEventSources: MockEventSource[] = [
+  {
+    id: smokeEventSourceIDs.standard,
+    name: "build-system",
+    kind: "webhook",
+    enabled: false,
+    format: "standard",
+    status: "disabled",
+    poll_notifications: false,
+    repositories: [],
+    target_user: "",
+    secret_configured: true,
+    endpoint: "/webhooks/events/build-system",
+  },
+  {
+    id: smokeEventSourceIDs.github,
+    name: "github-primary",
+    kind: "webhook",
+    enabled: true,
+    format: "github",
+    status: "available",
+    poll_notifications: true,
+    repositories: ["sipeed/picoclaw", "octo/launcher"],
+    target_user: "octocat",
+    secret_configured: true,
+    endpoint: "/webhooks/events/github-primary",
+  },
+  {
+    id: smokeEventSourceIDs.channel,
+    name: "primary-inbox",
+    kind: "channel",
+    enabled: true,
+    format: "deltachat",
+    status: "available",
+    poll_notifications: false,
+    source: "email",
+    mode: "mirror",
+    allow_unverified_email: false,
+    channel_enabled: true,
+    channel_type: "deltachat",
+  },
+]
+
+const defaultEventSourceSettings = {
+  enabled: true,
+  database_path: "eventing/events.db",
+  retention_days: 30,
+  max_payload_bytes: 1_048_576,
+  redact_fields: ["tenant_secret", "deployment_token"],
+}
+
+const defaultEligibleEventChannelAdapters = [
+  {
+    name: "secondary-inbox",
+    channel_type: "deltachat",
+    channel_enabled: true,
+  },
+]
+
+function eventSourceSummary(source: MockEventSource) {
+  return {
+    id: source.id,
+    name: source.name,
+    kind: source.kind,
+    enabled: source.enabled,
+    format: source.format,
+    status: source.status,
+    repositories: source.kind === "webhook" ? source.repositories.length : 0,
+    poll_notifications: source.poll_notifications,
   }
 }
 
@@ -2073,6 +2197,13 @@ const prLifecycleRepositoryAssignments = {
 interface MockLauncherApiOptions {
   accounts?: AccountSummary[]
   accountRouters?: AccountRouter[]
+  eventSources?: MockEventSource[]
+  eventSourceBulkFailureIDs?: string[]
+  eventSourceRequests?: Array<{
+    method: string
+    path: string
+    body: Record<string, unknown> | null
+  }>
   agentActivityRequests?: Array<{ method: string; path: string }>
   agentCapabilityRequests?: Array<{
     method: string
@@ -2156,6 +2287,11 @@ async function mockLauncherApis(
   const currentAccountRouters = structuredClone(
     options.accountRouters ?? defaultSmokeAccountRouters,
   )
+  const currentEventSources = structuredClone(
+    options.eventSources ?? defaultSmokeEventSources,
+  )
+  let currentEventSourceSettings = structuredClone(defaultEventSourceSettings)
+  let currentEventSourceRevision = 1
   const currentSkills = structuredClone(skillsResponse.skills)
   const currentTools = structuredClone(toolsResponse.tools)
   let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
@@ -2414,6 +2550,23 @@ async function mockLauncherApis(
     return currentAgentsResponse()
   }
 
+  function eventSourceRevision() {
+    return `event-source-revision-${currentEventSourceRevision}`
+  }
+
+  function eventSourceEffects() {
+    return {
+      launcher_effect: "applied",
+      catalog_effect: "applied",
+      gateway_effect: "restart_required",
+    } as const
+  }
+
+  function advanceEventSourceRevision() {
+    currentEventSourceRevision += 1
+    return eventSourceRevision()
+  }
+
   function mcpServerFromInput(
     input: MCPServerInput,
     existing?: MCPServer,
@@ -2603,6 +2756,196 @@ async function mockLauncherApis(
           repositoryReviewState,
           options.repositoryReviewRequests,
         )
+      }
+
+      if (
+        path === "/api/event-source-settings" ||
+        path === "/api/event-sources" ||
+        path.startsWith("/api/event-sources/")
+      ) {
+        const rawBody = request.postData()
+        const body = rawBody
+          ? (request.postDataJSON() as Record<string, unknown>)
+          : null
+        if (method !== "GET") {
+          options.eventSourceRequests?.push({ method, path, body })
+        }
+
+        if (method === "GET" && path === "/api/event-source-settings") {
+          return json(route, {
+            event_source_settings: structuredClone(currentEventSourceSettings),
+            eligible_channel_adapters: structuredClone(
+              defaultEligibleEventChannelAdapters,
+            ),
+            config_revision: eventSourceRevision(),
+          })
+        }
+        if (method === "PUT" && path === "/api/event-source-settings") {
+          if (body?.expected_config_revision !== eventSourceRevision()) {
+            return json(
+              route,
+              {
+                code: "config_revision_mismatch",
+                message: "Configuration changed; reload and try again",
+              },
+              409,
+            )
+          }
+          currentEventSourceSettings = structuredClone(
+            body.event_source_settings as typeof defaultEventSourceSettings,
+          )
+          const configRevision = advanceEventSourceRevision()
+          return json(route, {
+            event_source_settings: structuredClone(currentEventSourceSettings),
+            eligible_channel_adapters: structuredClone(
+              defaultEligibleEventChannelAdapters,
+            ),
+            config_revision: configRevision,
+            effects: eventSourceEffects(),
+          })
+        }
+        if (method === "GET" && path === "/api/event-sources") {
+          return json(route, {
+            event_sources: currentEventSources.map(eventSourceSummary),
+            total: currentEventSources.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: mockCollectionSchemas.eventSources,
+            config_revision: eventSourceRevision(),
+          })
+        }
+        if (method === "POST" && path === "/api/event-sources") {
+          if (body?.expected_config_revision !== eventSourceRevision()) {
+            return json(route, { code: "config_revision_mismatch" }, 409)
+          }
+          const input = structuredClone(
+            body.event_source as Record<string, unknown>,
+          )
+          const name = String(input.name ?? "new-source")
+          const secretConfigured =
+            input.kind === "webhook" && input.secret_update === "replace"
+          delete input.secret
+          delete input.secret_update
+          const created = {
+            ...input,
+            id: Buffer.from(
+              `event-source\0${String(input.kind ?? "webhook")}:${name}`,
+            ).toString("base64url"),
+            status: input.enabled ? "available" : "disabled",
+            endpoint:
+              input.kind === "webhook" ? `/webhooks/events/${name}` : undefined,
+            secret_configured: secretConfigured,
+          } as MockEventSource
+          currentEventSources.push(created)
+          const configRevision = advanceEventSourceRevision()
+          return json(
+            route,
+            {
+              event_source: structuredClone(created),
+              config_revision: configRevision,
+              effects: eventSourceEffects(),
+            },
+            201,
+          )
+        }
+        if (method === "POST" && path === "/api/event-sources/bulk-delete") {
+          if (body?.config_revision !== eventSourceRevision()) {
+            return json(route, { code: "config_revision_mismatch" }, 409)
+          }
+          const ids = Array.isArray(body.ids)
+            ? body.ids.filter((id): id is string => typeof id === "string")
+            : []
+          const forcedFailures = new Set(
+            options.eventSourceBulkFailureIDs ?? [],
+          )
+          const deletedIDs: string[] = []
+          const failures: Array<{ id: string; code: string }> = []
+          for (const id of ids) {
+            const index = currentEventSources.findIndex(
+              (source) => source.id === id,
+            )
+            if (index < 0 || forcedFailures.has(id)) {
+              failures.push({ id, code: "not_found" })
+              continue
+            }
+            currentEventSources.splice(index, 1)
+            deletedIDs.push(id)
+          }
+          const configRevision =
+            deletedIDs.length > 0
+              ? advanceEventSourceRevision()
+              : eventSourceRevision()
+          return json(route, {
+            deleted_ids: deletedIDs,
+            failures,
+            config_revision: configRevision,
+            effects: eventSourceEffects(),
+          })
+        }
+
+        const detailMatch = path.match(/^\/api\/event-sources\/([^/]+)$/)
+        if (detailMatch) {
+          const id = decodeURIComponent(detailMatch[1])
+          const index = currentEventSources.findIndex(
+            (source) => source.id === id,
+          )
+          if (index < 0) {
+            return json(
+              route,
+              {
+                code: "event_source_not_found",
+                message: "Event source not found",
+              },
+              404,
+            )
+          }
+          if (method === "GET") {
+            return json(route, {
+              event_source: structuredClone(currentEventSources[index]),
+              config_revision: eventSourceRevision(),
+            })
+          }
+          const suppliedRevision = body?.expected_config_revision
+          if (suppliedRevision !== eventSourceRevision()) {
+            return json(route, { code: "config_revision_mismatch" }, 409)
+          }
+          if (method === "PUT") {
+            const input = structuredClone(
+              body.event_source as Record<string, unknown>,
+            )
+            const secretUpdate = input.secret_update
+            delete input.secret
+            delete input.secret_update
+            currentEventSources[index] = {
+              ...currentEventSources[index],
+              ...(input as Partial<MockEventSource>),
+              ...(input.kind === "webhook" && secretUpdate === "replace"
+                ? { secret_configured: true }
+                : input.kind === "webhook" && secretUpdate === "clear"
+                  ? { secret_configured: false }
+                  : {}),
+            } as MockEventSource
+            const configRevision = advanceEventSourceRevision()
+            return json(route, {
+              event_source: structuredClone(currentEventSources[index]),
+              config_revision: configRevision,
+              effects: eventSourceEffects(),
+            })
+          }
+          if (method === "DELETE") {
+            currentEventSources.splice(index, 1)
+            const configRevision = advanceEventSourceRevision()
+            return json(route, {
+              deleted_ids: [id],
+              failures: [],
+              config_revision: configRevision,
+              effects: eventSourceEffects(),
+            })
+          }
+        }
+
+        return json(route, { code: "unsupported_event_source_request" }, 405)
       }
 
       if (
@@ -7349,6 +7692,197 @@ test("account routers use a separate keyboard-complete collection and detail rou
   await expect(page.getByText("pool · load_balance")).toBeVisible()
   await page.getByRole("button", { name: "All account routers" }).click()
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("event sources use configured-only routed collection and revision-fenced bulk actions", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<MockLauncherApiOptions["eventSourceRequests"]> =
+    []
+  await gotoMockedRoute(page, "/event-sources?view=list", {
+    eventSourceBulkFailureIDs: [smokeEventSourceIDs.channel],
+    eventSourceRequests: requests,
+  })
+
+  const listURL = new URL(page.url())
+  expect(listURL.pathname).toBe("/event-sources")
+  expect(listURL.searchParams.get("q")).toBe("ORDER BY name ASC")
+  expect(listURL.searchParams.get("view")).toBe("list")
+  await expect(
+    page.getByRole("heading", { name: "Event sources", exact: true }),
+  ).toBeVisible()
+  await expect(page.getByText("secondary-inbox", { exact: true })).toHaveCount(
+    0,
+  )
+
+  const github = page.locator(`[data-item-id="${smokeEventSourceIDs.github}"]`)
+  await github.focus()
+  await page.keyboard.press("Space")
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await github.click({ button: "right" })
+  await expect(
+    page.getByRole("menuitem", { name: "Edit source" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("menuitem", { name: "Disable source" }),
+  ).toBeVisible()
+  await page.keyboard.press("Escape")
+  await github.focus()
+  await page.keyboard.press("Enter")
+
+  await expect(page).toHaveURL(
+    new RegExp(`/event-sources/${smokeEventSourceIDs.github}`),
+  )
+  const detail = page.locator('[data-slot="collection-detail-shell"]')
+  await expect(detail).toBeVisible()
+  await expect(
+    detail.getByText("Webhook configuration", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    detail.getByText("POST /webhooks/events/github-primary"),
+  ).toBeVisible()
+  await expect(detail.getByText("Configured", { exact: true })).toBeVisible()
+  await detail.getByRole("button", { name: "Edit", exact: true }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/event-sources/${smokeEventSourceIDs.github}/edit`),
+  )
+  await expect(page.getByLabel("Connector name")).toHaveValue("github-primary")
+  await page.getByRole("button", { name: "Back to source" }).click()
+  await page.getByRole("button", { name: "All event sources" }).click()
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Clear selection" }).click()
+
+  const standard = page.locator(
+    `[data-item-id="${smokeEventSourceIDs.standard}"]`,
+  )
+  const channel = page.locator(
+    `[data-item-id="${smokeEventSourceIDs.channel}"]`,
+  )
+  await standard.focus()
+  await page.keyboard.press("Space")
+  await channel.click({ modifiers: ["Control"] })
+  await expect(page.getByText("2 selected", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Delete" }).click()
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Delete 2 selected event sources?",
+  })
+  await confirmation.getByRole("button", { name: "Delete selected" }).click()
+  await expect(standard).toHaveCount(0)
+  await expect(channel).toBeVisible()
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+
+  const bulkRequest = requests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.path === "/api/event-sources/bulk-delete",
+  )
+  expect(bulkRequest?.body?.config_revision).toBe("event-source-revision-1")
+  expect(new Set(bulkRequest?.body?.ids as string[])).toEqual(
+    new Set([smokeEventSourceIDs.standard, smokeEventSourceIDs.channel]),
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("event-source creation choices and global settings use scoped revision fences", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const requests: NonNullable<MockLauncherApiOptions["eventSourceRequests"]> =
+    []
+  await gotoMockedRoute(page, "/event-sources/new", {
+    eventSourceRequests: requests,
+  })
+
+  await expect(
+    page.getByRole("heading", { name: "Add event source", exact: true }),
+  ).toBeVisible()
+  const sourceChoice = page.getByRole("combobox", { name: "Create from" })
+  await sourceChoice.click()
+  await expect(
+    page.getByRole("option", {
+      name: "Delta Chat adapter — secondary-inbox",
+    }),
+  ).toBeVisible()
+  await expect(page.getByRole("option", { name: /primary-inbox/ })).toHaveCount(
+    0,
+  )
+  await page
+    .getByRole("option", { name: "Delta Chat adapter — secondary-inbox" })
+    .click()
+  await expect(
+    page.getByText("Delta Chat email adapter", { exact: true }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+
+  await expect
+    .poll(() =>
+      requests.find(
+        (request) =>
+          request.method === "POST" && request.path === "/api/event-sources",
+      ),
+    )
+    .toBeTruthy()
+  const createRequest = requests.find(
+    (request) =>
+      request.method === "POST" && request.path === "/api/event-sources",
+  )
+  expect(createRequest?.body).toEqual({
+    expected_config_revision: "event-source-revision-1",
+    event_source: {
+      kind: "channel",
+      name: "secondary-inbox",
+      enabled: false,
+      source: "email",
+      mode: "mirror",
+      allow_unverified_email: false,
+    },
+  })
+  await expect(page).toHaveURL(/\/event-sources\/[^/]+(?:\?|$)/)
+  await expect(
+    page
+      .getByText("secondary-inbox", { exact: true })
+      .filter({ visible: true })
+      .first(),
+  ).toBeVisible()
+
+  await page.goto("/event-sources/settings")
+  await expect(
+    page.getByRole("heading", { name: "Event source settings", exact: true }),
+  ).toBeVisible()
+  await page.getByLabel("Retention days").fill("45")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect
+    .poll(() =>
+      requests.find(
+        (request) =>
+          request.method === "PUT" &&
+          request.path === "/api/event-source-settings",
+      ),
+    )
+    .toBeTruthy()
+  const settingsRequest = requests.find(
+    (request) =>
+      request.method === "PUT" && request.path === "/api/event-source-settings",
+  )
+  expect(settingsRequest?.body).toEqual({
+    expected_config_revision: "event-source-revision-2",
+    event_source_settings: {
+      enabled: true,
+      database_path: "eventing/events.db",
+      retention_days: 45,
+      max_payload_bytes: 1_048_576,
+      redact_fields: ["tenant_secret", "deployment_token"],
+    },
+  })
+  await page
+    .locator("[data-sonner-toaster]")
+    .evaluateAll((toasters) => toasters.forEach((toast) => toast.remove()))
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

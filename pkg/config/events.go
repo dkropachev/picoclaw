@@ -410,6 +410,53 @@ func EffectiveEventWebhookFormat(webhook GenericWebhookConfig) string {
 	return webhook.Format
 }
 
+// WebhookSecretStatus is a non-secret projection of one webhook credential.
+// It never returns the configured literal or a resolved reference value.
+type WebhookSecretStatus string
+
+const (
+	// EventWebhookSecretInvalid means a resolved credential does not satisfy
+	// the selected webhook format.
+	EventWebhookSecretInvalid WebhookSecretStatus = "invalid"
+	// EventWebhookSecretUnconfigured means no credential was configured.
+	EventWebhookSecretUnconfigured WebhookSecretStatus = "unconfigured"
+	// EventWebhookSecretUnreachable means a file:// or enc:// reference cannot
+	// currently be resolved.
+	EventWebhookSecretUnreachable WebhookSecretStatus = "unreachable"
+	// EventWebhookSecretAvailable means the resolved credential is valid for
+	// the selected webhook format.
+	EventWebhookSecretAvailable WebhookSecretStatus = "available"
+)
+
+// EventWebhookSecretStatus validates a webhook credential without exposing it.
+// Management APIs use this predicate instead of reading SecureString.String,
+// so invalid literals and readable-but-invalid references remain secret.
+func EventWebhookSecretStatus(webhook GenericWebhookConfig) WebhookSecretStatus {
+	raw := webhook.Secret.raw
+	if raw == "" {
+		raw = webhook.Secret.resolved
+	}
+	if raw == "" {
+		return EventWebhookSecretUnconfigured
+	}
+	resolved, err := resolveKeyQuiet(raw)
+	if err != nil {
+		return EventWebhookSecretUnreachable
+	}
+	switch EffectiveEventWebhookFormat(webhook) {
+	case EventWebhookFormatStandard:
+		err = validateGenericWebhookSecret(resolved)
+	case EventWebhookFormatGitHub:
+		err = validateGitHubWebhookSecret(resolved)
+	default:
+		return EventWebhookSecretInvalid
+	}
+	if err != nil {
+		return EventWebhookSecretInvalid
+	}
+	return EventWebhookSecretAvailable
+}
+
 func validateEventWebhookSecret(webhook GenericWebhookConfig) error {
 	switch EffectiveEventWebhookFormat(webhook) {
 	case EventWebhookFormatStandard:

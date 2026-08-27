@@ -256,13 +256,33 @@
       "route": "/event-sources",
       "owningSpec": "docs/features/event-automation.md",
       "implementationGlobs": [
-        "src/routes/event-sources.tsx",
-        "src/components/events/event-sources-page.tsx"
+        "src/routes/event-sources*.tsx",
+        "src/api/event-sources.ts",
+        "src/components/events/event-source-collection-route-state.ts",
+        "src/components/events/event-source-collections.tsx",
+        "src/components/events/event-source-editor-page.tsx",
+        "src/components/events/event-source-settings-page.tsx",
+        "src/components/events/event-source-validation.ts"
       ],
-      "capabilities": ["create", "edit"],
-      "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/event-sources" }
+      "capabilities": [
+        "query",
+        "pagination",
+        "selection",
+        "bulk-delete",
+        "create",
+        "detail",
+        "edit",
+        "settings"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/event-sources",
+        "new": "/event-sources/new",
+        "detail": "/event-sources/:id",
+        "edit": "/event-sources/:id/edit",
+        "settings": "/event-sources/settings"
+      }
     },
     {
       "key": "repository-review-runs",

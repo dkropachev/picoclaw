@@ -40,6 +40,7 @@ import { EventDetail } from "./event-detail"
 import { EventFilterBar, type EventFilterValues } from "./event-filter-bar"
 import { eventErrorMessage } from "./event-format"
 import { EventList } from "./event-list"
+import { eventSourcesDefaultQuery } from "./event-source-collection-route-state"
 import { ReplayEventDialog } from "./replay-event-dialog"
 
 const EVENT_PAGE_SIZE = 40
@@ -108,7 +109,7 @@ export function EventsPage({
         }
       >
         <Button type="button" variant="outline" asChild>
-          <Link to="/event-sources">
+          <Link to="/event-sources" search={{ q: eventSourcesDefaultQuery }}>
             <IconSettings className="size-4" />
             {t("pages.events.event_sources", "Event sources")}
           </Link>

@@ -4,9 +4,9 @@
 
 PicoClaw administrative collections use one shared presentation and interaction
 system. Standard surfaces include Accounts, Account Routers, Model Aliases,
-Model Routers, MCP Servers, Agents, Model Evaluations, Skills, and Tools. New
-collection surfaces, and legacy collection surfaces when materially changed,
-must adopt this contract.
+Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, and Event
+Sources. New collection surfaces, and legacy collection surfaces when
+materially changed, must adopt this contract.
 
 This standard does not apply to intrinsically unique experiences such as chat,
 logs, code viewers, diagrams, result reports, marketplace search, or a single
@@ -138,6 +138,7 @@ Canonical pilot routes:
 | MCP Servers       | `/agent/mcp/servers` | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name` | `/:name/edit`; settings live at `/agent/mcp/settings`                |
 | Agents            | `/agent/agents`      | `/agent/agents/new`      | `/agent/agents/:id`        | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
 | Model Evaluations | `/model-evaluations` | `/model-evaluations/new` | `/model-evaluations/:id`   | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
+| Event Sources     | `/event-sources`     | `/event-sources/new`     | `/event-sources/:id`       | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
 | Skills            | `/agent/skills`      | `/agent/skills/new`      | `/agent/skills/:id`        | None; marketplace choices remain at `/agent/hub`                     |
 | Tools             | `/agent/tools`       | None                     | `/agent/tools/:id`         | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
 

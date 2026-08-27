@@ -33,6 +33,21 @@ const querySchemas = {
     field("accounts", "number"),
     field("blocks", "number"),
   ]),
+  eventSources: schema([
+    field("name", "string"),
+    field("kind", "enum", ["webhook", "channel"]),
+    field("enabled", "boolean", ["true", "false"]),
+    field("format", "enum", ["standard", "github", "deltachat"]),
+    field("status", "enum", [
+      "available",
+      "disabled",
+      "unconfigured",
+      "unreachable",
+      "invalid",
+    ]),
+    field("repositories", "number"),
+    field("poll_notifications", "boolean", ["true", "false"]),
+  ]),
   aliases: schema([
     field("name", "string"),
     field("model", "string"),
@@ -238,6 +253,86 @@ const accountRouterSummaries = accountRouters.map((router) => ({
   accounts: router.accounts.length,
   blocks: router.blocks.length,
 }))
+
+export const eventSourceVisualIDs = {
+  github: "eD_ny6SHSWjo-BISQjbmabgVi1UiA9LivNmhCwLoVCY",
+  standard: "AtpwqLgv6OwA1riKGYdyok1K5JqqZT0X9HnhIzQlmis",
+  channel: "MLlxF-61ul3LWbQ4FYizmxMV4hRFb0pm7lh1O4uJ7gs",
+} as const
+
+const eventSources = [
+  {
+    id: eventSourceVisualIDs.standard,
+    name: "build-system",
+    kind: "webhook",
+    enabled: false,
+    format: "standard",
+    status: "disabled",
+    repositories: 0,
+    poll_notifications: false,
+  },
+  {
+    id: eventSourceVisualIDs.github,
+    name: "github-primary",
+    kind: "webhook",
+    enabled: true,
+    format: "github",
+    status: "available",
+    repositories: 3,
+    poll_notifications: true,
+  },
+  {
+    id: eventSourceVisualIDs.channel,
+    name: "primary-inbox",
+    kind: "channel",
+    enabled: true,
+    format: "deltachat",
+    status: "available",
+    repositories: 0,
+    poll_notifications: false,
+  },
+] as const
+
+const eventSourceDetails = {
+  [eventSourceVisualIDs.standard]: {
+    ...eventSources[0],
+    repositories: [],
+    target_user: "",
+    secret_configured: true,
+    endpoint: "/webhooks/events/build-system",
+  },
+  [eventSourceVisualIDs.github]: {
+    ...eventSources[1],
+    repositories: ["openai/openai", "sipeed/picoclaw", "octo/launcher"],
+    target_user: "octocat",
+    secret_configured: true,
+    endpoint: "/webhooks/events/github-primary",
+  },
+  [eventSourceVisualIDs.channel]: {
+    ...eventSources[2],
+    source: "email",
+    mode: "mirror",
+    allow_unverified_email: false,
+    channel_enabled: true,
+    channel_type: "deltachat",
+  },
+} as const
+
+const eventSourceSettings = {
+  enabled: true,
+  database_path: "eventing/events.db",
+  retention_days: 30,
+  max_payload_bytes: 1_048_576,
+  redact_fields: ["tenant_secret", "deployment_token"],
+}
+
+const eligibleEventChannelAdapters = [
+  {
+    name: "secondary-inbox",
+    channel_type: "deltachat",
+    channel_enabled: true,
+  },
+] as const
 
 export const skillToolVisualIDs = {
   skill: "c2tpbGwAcmV2aWV3LWhlbHBlcg",
@@ -921,6 +1016,24 @@ export async function installCollectionVisualMocks(
       }
 
       if (method !== "GET") {
+        if (path === "/api/event-sources/bulk-delete") {
+          return json(route, {
+            deleted_ids: [],
+            failures: [],
+            config_revision: "cfg-visual-2",
+            effects: effects(),
+          })
+        }
+        if (
+          path === "/api/event-sources" ||
+          path.startsWith("/api/event-sources/") ||
+          path === "/api/event-source-settings"
+        ) {
+          return json(route, {
+            config_revision: "cfg-visual-2",
+            effects: effects(),
+          })
+        }
         if (path.endsWith("/bulk-delete")) {
           return json(route, { deleted_ids: [], failures: [] })
         }
@@ -961,6 +1074,22 @@ export async function installCollectionVisualMocks(
             canonical_query:
               url.searchParams.get("query") ?? "ORDER BY name ASC",
             query_schema: querySchemas.accountRouters,
+            config_revision: "cfg-visual-1",
+          })
+        case "/api/event-sources":
+          return json(route, {
+            event_sources: state === "empty" ? [] : eventSources,
+            total: state === "empty" ? 0 : eventSources.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: querySchemas.eventSources,
+            config_revision: "cfg-visual-1",
+          })
+        case "/api/event-source-settings":
+          return json(route, {
+            event_source_settings: eventSourceSettings,
+            eligible_channel_adapters: eligibleEventChannelAdapters,
             config_revision: "cfg-visual-1",
           })
         case "/api/oauth/providers":
@@ -1218,6 +1347,24 @@ export async function installCollectionVisualMocks(
               404,
             )
       }
+      const eventSourceID = decodedTail(path, "/api/event-sources/")
+      if (eventSourceID && !eventSourceID.includes("/")) {
+        const eventSource =
+          eventSourceDetails[eventSourceID as keyof typeof eventSourceDetails]
+        return eventSource
+          ? json(route, {
+              event_source: eventSource,
+              config_revision: "cfg-visual-1",
+            })
+          : json(
+              route,
+              {
+                code: "event_source_not_found",
+                message: "Event source not found",
+              },
+              404,
+            )
+      }
       const routerName = decodedTail(path, "/api/model-routers/")
       if (routerName) {
         const router = routers.find((item) => item.name === routerName)
@@ -1389,6 +1536,7 @@ function isCollectionList(path: string) {
     "/api/model-aliases",
     "/api/accounts",
     "/api/account-routers",
+    "/api/event-sources",
     "/api/model-routers",
     "/api/mcp/servers",
     "/api/agents",

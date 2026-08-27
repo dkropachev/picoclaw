@@ -79,6 +79,7 @@ var eventDispatchQueryContract = map[string]eventQueryValidator{
 }
 
 func (h *Handler) registerEventRoutes(mux *http.ServeMux) {
+	h.registerEventSourceCollectionRoutes(mux)
 	mux.HandleFunc("/api/events", h.handleEventList)
 	mux.HandleFunc("/api/events/dispatches", h.handleEventDispatchList)
 	mux.HandleFunc("/api/events/", h.handleEventSubtree)
