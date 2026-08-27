@@ -4,13 +4,19 @@ import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  type RepositoryReviewAutomation,
   createRepositoryReviewAutomation,
   deleteRepositoryReviewAutomation,
+  getRepositoryReviewAutomation,
   listRepositoryReviewAutomations,
+  listRepositoryReviewAutomationsPage,
   listRepositoryReviewProfiles,
   updateRepositoryReviewAutomation,
 } from "@/api/repository-reviews"
-import { RepositoryReviewRepositoriesPage } from "@/components/repository-reviews/repository-review-repositories-page"
+import {
+  RepositoryReviewRepositoriesPage,
+  RepositoryReviewRepositoryEditorPage,
+} from "@/components/repository-reviews/repository-review-repositories-page"
 
 vi.mock("@/components/page-header", () => ({
   PageHeader: ({
@@ -28,9 +34,19 @@ vi.mock("@/components/page-header", () => ({
 }))
 
 vi.mock("@/api/repository-reviews", () => ({
+  RepositoryReviewAPIError: class RepositoryReviewAPIError extends Error {
+    status: number
+
+    constructor(status: number, message: string) {
+      super(message)
+      this.status = status
+    }
+  },
   createRepositoryReviewAutomation: vi.fn(),
   deleteRepositoryReviewAutomation: vi.fn(),
+  getRepositoryReviewAutomation: vi.fn(),
   listRepositoryReviewAutomations: vi.fn(),
+  listRepositoryReviewAutomationsPage: vi.fn(),
   listRepositoryReviewProfiles: vi.fn(),
   updateRepositoryReviewAutomation: vi.fn(),
 }))
@@ -61,6 +77,57 @@ const profile = {
   updated_at: "2026-08-23T00:00:00Z",
 }
 
+const repository = {
+  id: "auto_1",
+  version: 1,
+  profile_id: profile.id,
+  profile_version: profile.version,
+  branch: "",
+  name: profile.name,
+  repository: "owner/repo",
+  ref: "",
+  target: "all",
+  account_ref: profile.account_ref,
+  review_focus: profile.review_focus,
+  scope_policy: profile.scope_policy,
+  reviewer_models: [profile.reviewer_model],
+  compare_models: false,
+  force: false,
+  max_files_per_run: 24,
+  max_content_bytes: 524288,
+  max_parallel_children: 8,
+  auto_continue: true,
+  model_prices: {
+    [profile.reviewer_model]: {
+      input_price_per_1m: 1,
+      output_price_per_1m: 4,
+    },
+  },
+  budget: profile.budget,
+  status: "idle" as const,
+  run_ids: [],
+  usage: {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cached_tokens: 0,
+  },
+  estimated_cost_usd: 0,
+  progress: {
+    stage: "waiting",
+    completed_batches: 0,
+    total_batches: 0,
+    reviewed_files: 0,
+    remaining_files: 0,
+    unsupported_files: 0,
+    findings: 0,
+  },
+  model_stats: [],
+  account_limits: [],
+  created_at: "2026-08-23T00:00:00Z",
+  updated_at: "2026-08-23T00:00:00Z",
+}
+
 describe("RepositoryReviewRepositoriesPage", () => {
   beforeEach(() => {
     vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
@@ -69,9 +136,50 @@ describe("RepositoryReviewRepositoriesPage", () => {
     vi.mocked(listRepositoryReviewProfiles).mockResolvedValue({
       profiles: [profile],
     })
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
+      automations: [],
+      total: 0,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
+    })
+    vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(repository)
     vi.mocked(createRepositoryReviewAutomation).mockReset()
     vi.mocked(updateRepositoryReviewAutomation).mockReset()
     vi.mocked(deleteRepositoryReviewAutomation).mockReset()
+  })
+
+  it("uses the standard collection and exposes repository findings on each item", async () => {
+    const user = userEvent.setup()
+    const onOpenFindings = vi.fn()
+    vi.mocked(listRepositoryReviewAutomationsPage).mockResolvedValue({
+      automations: [repository],
+      total: 1,
+      next_cursor: "",
+      canonical_query: "ORDER BY repository ASC",
+      query_schema: { fields: [] },
+    })
+
+    renderCollection({ onOpenFindings })
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Repository findings for owner/repo",
+      }),
+    )
+
+    expect(listRepositoryReviewAutomationsPage).toHaveBeenCalledWith(
+      {
+        query: "ORDER BY repository ASC",
+        cursor: undefined,
+        limit: 50,
+      },
+      expect.any(AbortSignal),
+    )
+    expect(onOpenFindings).toHaveBeenCalledWith(repository)
+    expect(
+      screen.getByRole("region", { name: "Review repositories list" }),
+    ).toBeVisible()
   })
 
   it("assigns one profile and defaults to the repository base branch", async () => {
@@ -126,12 +234,9 @@ describe("RepositoryReviewRepositoriesPage", () => {
       created_at: "2026-08-23T00:00:00Z",
       updated_at: "2026-08-23T00:00:00Z",
     })
-    renderPage()
+    renderEditor()
 
-    await user.click(
-      await screen.findByRole("button", { name: "Add repository" }),
-    )
-    await user.type(screen.getByLabelText("Repository"), "owner/repo")
+    await user.type(await screen.findByLabelText("Repository"), "owner/repo")
     expect(screen.queryByLabelText("Branch override")).not.toBeInTheDocument()
     await user.click(screen.getByText(/^Advanced/))
     expect(screen.getByLabelText("Branch override")).toHaveValue("")
@@ -151,11 +256,8 @@ describe("RepositoryReviewRepositoriesPage", () => {
     vi.mocked(listRepositoryReviewAutomations).mockResolvedValue({
       automations: [{ id: "auto_1", repository: "Owner/Repo" } as never],
     })
-    renderPage()
-    await user.click(
-      await screen.findByRole("button", { name: "Add repository" }),
-    )
-    await user.type(screen.getByLabelText("Repository"), "owner/repo")
+    renderEditor()
+    await user.type(await screen.findByLabelText("Repository"), "owner/repo")
     expect(
       screen.getByText(/already has a review configuration/i),
     ).toBeVisible()
@@ -166,11 +268,8 @@ describe("RepositoryReviewRepositoriesPage", () => {
 
   it("accepts branches and rejects revision expressions like the backend", async () => {
     const user = userEvent.setup()
-    renderPage()
-    await user.click(
-      await screen.findByRole("button", { name: "Add repository" }),
-    )
-    await user.type(screen.getByLabelText("Repository"), "owner/repo")
+    renderEditor()
+    await user.type(await screen.findByLabelText("Repository"), "owner/repo")
     await user.click(screen.getByRole("button", { name: /^Advanced/ }))
     const branch = screen.getByLabelText("Branch override")
     for (const invalid of [
@@ -200,32 +299,74 @@ describe("RepositoryReviewRepositoriesPage", () => {
     ).toBeEnabled()
   })
 
-  it("shows save errors inside the open repository dialog", async () => {
+  it("shows save errors inside the repository editor", async () => {
     const user = userEvent.setup()
     vi.mocked(createRepositoryReviewAutomation).mockRejectedValue(
       new Error("Repository is already assigned."),
     )
-    renderPage()
-    await user.click(
-      await screen.findByRole("button", { name: "Add repository" }),
+    renderEditor()
+    await user.type(
+      await screen.findByLabelText("Repository"),
+      "owner/new-repo",
     )
-    await user.type(screen.getByLabelText("Repository"), "owner/new-repo")
     await user.click(screen.getByRole("button", { name: "Save repository" }))
 
     const alert = await screen.findByRole("alert")
     expect(alert).toHaveTextContent("already assigned")
-    expect(screen.getByRole("dialog")).toContainElement(alert)
+  })
+
+  it("retries a transient new-editor context error without loading an empty repository ID", async () => {
+    vi.mocked(listRepositoryReviewProfiles)
+      .mockRejectedValueOnce(new Error("Temporary profile load failure."))
+      .mockResolvedValueOnce({ profiles: [profile] })
+    const user = userEvent.setup()
+
+    renderEditor()
+
+    expect(
+      await screen.findByText("Temporary profile load failure."),
+    ).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Retry" }))
+
+    expect(await screen.findByLabelText("Repository")).toBeVisible()
+    expect(getRepositoryReviewAutomation).not.toHaveBeenCalled()
   })
 })
 
-function renderPage() {
+function renderEditor() {
   return render(
     <QueryClientProvider
       client={
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      <RepositoryReviewRepositoriesPage />
+      <RepositoryReviewRepositoryEditorPage
+        onBack={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    </QueryClientProvider>,
+  )
+}
+
+function renderCollection({
+  onOpenFindings = vi.fn(),
+}: {
+  onOpenFindings?: (repository: RepositoryReviewAutomation) => void
+} = {}) {
+  return render(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <RepositoryReviewRepositoriesPage
+        search={{ q: "ORDER BY repository ASC" }}
+        onSearchChange={vi.fn()}
+        onAdd={vi.fn()}
+        onOpen={vi.fn()}
+        onEdit={vi.fn()}
+        onOpenFindings={onOpenFindings}
+      />
     </QueryClientProvider>,
   )
 }

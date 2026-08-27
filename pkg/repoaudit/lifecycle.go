@@ -421,6 +421,7 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 		}
 		job.State = RepositoryMappingPending
 		job.ReservedAt = time.Time{}
+		job.Error = "Run finding status processing was interrupted."
 		job.UpdatedAt = now
 		mappingReset++
 	}
@@ -457,6 +458,65 @@ func (s Store) reconcileRepositoryJobs(repository string) (int, int, int, error)
 		return 0, 0, 0, err
 	}
 	return created, mappingReset, validationReset, nil
+}
+
+// RetryRunFindingStatus resets explicitly selected pending association work.
+// Run findings themselves remain immutable; the durable job is reset under the
+// repository lock so the ordinary worker can safely evaluate a fresh candidate
+// universe while preserving its admitted model/profile snapshot.
+func (s Store) RetryRunFindingStatus(
+	repository string,
+	findingIDs []string,
+) (RepositoryState, []Finding, error) {
+	if len(findingIDs) == 0 || len(findingIDs) > 200 {
+		return RepositoryState{}, nil, errors.New("one to 200 run finding IDs are required")
+	}
+	repository = strings.TrimSpace(repository)
+	unlock, err := s.lock(repository)
+	if err != nil {
+		return RepositoryState{}, nil, err
+	}
+	defer unlock()
+	state, err := s.load(repository)
+	if err != nil {
+		return RepositoryState{}, nil, err
+	}
+	selected, ids, err := selectedFindings(state.Findings, findingIDs)
+	if err != nil {
+		return RepositoryState{}, nil, err
+	}
+	jobIndexes := make(map[string]int, len(state.MappingJobs))
+	for index, job := range state.MappingJobs {
+		jobIndexes[job.ReviewFindingID] = index
+	}
+	// Validate the complete selection before mutating the in-memory state so a
+	// mixed eligible/ineligible request is rejected atomically.
+	for index, finding := range selected {
+		if finding.RepositoryFindingID != "" {
+			return RepositoryState{}, nil, ErrConflict
+		}
+		jobIndex, found := jobIndexes[ids[index]]
+		if !found || state.MappingJobs[jobIndex].State != RepositoryMappingPending ||
+			state.MappingJobs[jobIndex].Attempts < RepositoryRunFindingStatusAttemptLimit {
+			return RepositoryState{}, nil, ErrConflict
+		}
+	}
+	now := s.clock()
+	for _, findingID := range ids {
+		job := &state.MappingJobs[jobIndexes[findingID]]
+		job.Attempts = 0
+		job.Error = ""
+		job.ReservedAt = time.Time{}
+		job.Adjudication = RepositoryMappingAdjudication{}
+		job.CandidateUniverse = ""
+		job.UpdatedAt = now
+	}
+	state.Version++
+	state.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, nil, err
+	}
+	return state, selected, nil
 }
 
 func (s Store) ClaimMappingJob(
@@ -498,6 +558,9 @@ func (s Store) ClaimMappingJob(
 	}
 	if job.State != RepositoryMappingPending {
 		return RepositoryState{}, RepositoryMappingJob{}, Finding{}, false, ErrConflict
+	}
+	if job.Attempts >= RepositoryRunFindingStatusAttemptLimit {
+		return state, *job, *finding, false, nil
 	}
 	if mappingModelSnapshotEmpty(job.ModelSnapshot) {
 		job.ModelSnapshot = snapshot
@@ -686,7 +749,7 @@ func (s Store) CompleteMappingJob(
 			job.State = RepositoryMappingPending
 			job.Adjudication = RepositoryMappingAdjudication{}
 			job.CandidateUniverse = ""
-			job.Error = "Repository finding candidates changed; mapping will restart."
+			job.Error = "Repository finding candidates changed; status processing will restart."
 			job.ReservedAt = time.Time{}
 			job.UpdatedAt = restartNow
 			state.Version++

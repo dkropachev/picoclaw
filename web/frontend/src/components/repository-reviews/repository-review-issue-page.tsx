@@ -73,6 +73,7 @@ export function RepositoryReviewIssuePage({
   })
   const detail = query.data
   const issue = detail?.issue
+  const repositoryFindingID = detail?.finding?.repository_finding_id
   const notFound =
     query.error instanceof RepositoryReviewAPIError &&
     query.error.status === 404
@@ -298,7 +299,11 @@ export function RepositoryReviewIssuePage({
                       type="button"
                       size="sm"
                       variant="outline"
-                      onClick={() => onManageLink(issue.finding_ids[0]!)}
+                      onClick={() =>
+                        onManageLink(
+                          repositoryFindingID || issue.finding_ids[0]!,
+                        )
+                      }
                     >
                       Manage{" "}
                       {issue.origin === "discovered" ? "discovered" : "manual"}{" "}

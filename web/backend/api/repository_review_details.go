@@ -56,6 +56,27 @@ type repositoryReviewCapabilities struct {
 	ReadOnlyReason  string `json:"read_only_reason,omitempty"`
 }
 
+type repositoryReviewRunFindingStatus string
+
+const (
+	repositoryReviewRunFindingPending            repositoryReviewRunFindingStatus = "pending"
+	repositoryReviewRunFindingProcessing         repositoryReviewRunFindingStatus = "processing"
+	repositoryReviewRunFindingFailed             repositoryReviewRunFindingStatus = "failed"
+	repositoryReviewRunFindingAssociatedNew      repositoryReviewRunFindingStatus = "associated_new"
+	repositoryReviewRunFindingAssociatedExisting repositoryReviewRunFindingStatus = "associated_existing"
+	repositoryReviewRunFindingNeedsReview        repositoryReviewRunFindingStatus = "needs_review"
+)
+
+type repositoryReviewRunFindingProjection struct {
+	repoaudit.Finding
+	RunFindingStatus repositoryReviewRunFindingStatus `json:"run_finding_status"`
+}
+
+type repositoryReviewRunFindingStatusProjection struct {
+	ID               string                           `json:"id"`
+	RunFindingStatus repositoryReviewRunFindingStatus `json:"run_finding_status"`
+}
+
 type repositoryReviewGenerationRequest struct {
 	GenerationID     string                               `json:"generation_id"`
 	FindingIDs       []string                             `json:"finding_ids"`
@@ -257,9 +278,10 @@ func (h *Handler) handleGetRepositoryReviewAutomationReport(w http.ResponseWrite
 	for index := range page {
 		page[index].Observations = nil
 	}
+	projectedPage := projectRepositoryReviewRunFindings(ledger.State, page)
 	response := map[string]any{
 		"automation":          projectRepositoryReviewAutomation(ledger.Automation),
-		"findings":            page,
+		"findings":            projectedPage,
 		"repository_findings": []repoaudit.RepositoryFinding{},
 		"scope":               scope,
 		"offset":              offset,
@@ -360,6 +382,28 @@ func (h *Handler) handleGetRepositoryReviewAutomationFinding(w http.ResponseWrit
 			unassociated
 		capabilities.CanLinkIssue = capabilities.GitHub && capabilities.CanGenerate
 		capabilities.CanSearchIssues = capabilities.CanLinkIssue
+		var associatedIssue repoaudit.IssueDraft
+		associatedIssueFound := false
+		if latest.ID != "" {
+			associatedIssue, associatedIssueFound = repositoryReviewAggregateIssueByFinding(
+				ledger.State,
+				latest,
+			)
+		}
+		if associatedIssueFound {
+			for _, occurrence := range occurrences {
+				if occurrence.IssueDraftID != associatedIssue.ID {
+					continue
+				}
+				issueCapabilities := repositoryReviewFindingCapabilities(
+					ledger.State,
+					occurrence,
+				)
+				capabilities.CanUnlinkIssue = issueCapabilities.CanUnlinkIssue
+				capabilities.CanReplaceIssue = issueCapabilities.CanReplaceIssue
+				break
+			}
+		}
 		possibleDuplicateFindings := make([]repoaudit.RepositoryFinding, 0, len(repositoryFinding.PossibleDuplicates))
 		for _, duplicate := range repositoryFinding.PossibleDuplicates {
 			if candidate, candidateFound := repositoryReviewRepositoryFindingByID(
@@ -368,17 +412,21 @@ func (h *Handler) handleGetRepositoryReviewAutomationFinding(w http.ResponseWrit
 				possibleDuplicateFindings = append(possibleDuplicateFindings, candidate)
 			}
 		}
-		writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
+		response := map[string]any{
 			"automation":                  projectRepositoryReviewAutomation(ledger.Automation),
 			"repository":                  repoaudit.Summarize(ledger.State),
-			"finding":                     latest,
-			"action_finding":              actionFinding,
+			"finding":                     projectRepositoryReviewRunFinding(ledger.State, latest),
+			"action_finding":              projectRepositoryReviewRunFinding(ledger.State, actionFinding),
 			"repository_finding":          repositoryFinding,
-			"occurrences":                 occurrences,
+			"occurrences":                 projectRepositoryReviewRunFindings(ledger.State, occurrences),
 			"possible_duplicate_findings": possibleDuplicateFindings,
 			"contexts":                    repositoryReviewFindingContexts(ledger.State, occurrences),
 			"capabilities":                capabilities,
-		})
+		}
+		if associatedIssueFound {
+			response["issue"] = associatedIssue
+		}
+		writeRepositoryReviewJSON(w, http.StatusOK, response)
 		return
 	}
 	writeRepositoryReviewAutomationError(w, os.ErrNotExist)
@@ -1256,7 +1304,7 @@ func repositoryReviewFindingDetail(
 	response := map[string]any{
 		"automation": projectRepositoryReviewAutomation(ledger.Automation),
 		"repository": repoaudit.Summarize(ledger.State),
-		"finding":    finding,
+		"finding":    projectRepositoryReviewRunFinding(ledger.State, finding),
 		"contexts": repositoryReviewFindingContexts(
 			ledger.State, []repoaudit.Finding{finding},
 		),
@@ -1289,7 +1337,7 @@ func repositoryReviewIssueDetail(
 	}
 	if len(draft.FindingIDs) == 1 {
 		if finding, found := repositoryReviewFindingByID(ledger.State, draft.FindingIDs[0]); found {
-			response["finding"] = finding
+			response["finding"] = projectRepositoryReviewRunFinding(ledger.State, finding)
 		}
 	}
 	findings := make([]repoaudit.Finding, 0, len(draft.FindingIDs))
@@ -1298,8 +1346,109 @@ func repositoryReviewIssueDetail(
 			findings = append(findings, finding)
 		}
 	}
-	response["findings"] = findings
+	response["findings"] = projectRepositoryReviewRunFindings(ledger.State, findings)
 	return response
+}
+
+func projectRepositoryReviewRunFinding(
+	state repoaudit.RepositoryState,
+	finding repoaudit.Finding,
+) repositoryReviewRunFindingProjection {
+	index := newRepositoryReviewRunFindingStatusIndex(state)
+	return repositoryReviewRunFindingProjection{
+		Finding:          finding,
+		RunFindingStatus: index.status(finding),
+	}
+}
+
+func projectRepositoryReviewRunFindings(
+	state repoaudit.RepositoryState,
+	findings []repoaudit.Finding,
+) []repositoryReviewRunFindingProjection {
+	index := newRepositoryReviewRunFindingStatusIndex(state)
+	projected := make([]repositoryReviewRunFindingProjection, 0, len(findings))
+	for _, finding := range findings {
+		projected = append(projected, repositoryReviewRunFindingProjection{
+			Finding: finding, RunFindingStatus: index.status(finding),
+		})
+	}
+	return projected
+}
+
+type repositoryReviewRunFindingStatusIndex struct {
+	jobs       map[string]repoaudit.RepositoryMappingJob
+	aggregates map[string]repositoryReviewRunFindingAggregateStatus
+}
+
+type repositoryReviewRunFindingAggregateStatus struct {
+	matchState      repoaudit.RepositoryMatchState
+	firstOccurrence string
+}
+
+func newRepositoryReviewRunFindingStatusIndex(
+	state repoaudit.RepositoryState,
+) repositoryReviewRunFindingStatusIndex {
+	index := repositoryReviewRunFindingStatusIndex{
+		jobs:       make(map[string]repoaudit.RepositoryMappingJob, len(state.MappingJobs)),
+		aggregates: make(map[string]repositoryReviewRunFindingAggregateStatus, len(state.RepositoryFindings)),
+	}
+	for _, job := range state.MappingJobs {
+		index.jobs[job.ReviewFindingID] = job
+	}
+	for _, finding := range state.RepositoryFindings {
+		status := repositoryReviewRunFindingAggregateStatus{matchState: finding.MatchState}
+		if len(finding.ReviewFindingIDs) > 0 {
+			status.firstOccurrence = finding.ReviewFindingIDs[0]
+		}
+		index.aggregates[finding.ID] = status
+	}
+	return index
+}
+
+func repositoryReviewRunFindingStatusFor(
+	state repoaudit.RepositoryState,
+	finding repoaudit.Finding,
+) repositoryReviewRunFindingStatus {
+	return newRepositoryReviewRunFindingStatusIndex(state).status(finding)
+}
+
+func (index repositoryReviewRunFindingStatusIndex) status(
+	finding repoaudit.Finding,
+) repositoryReviewRunFindingStatus {
+	if finding.RepositoryFindingID != "" {
+		matchState := finding.RepositoryMatchState
+		aggregate, aggregateFound := index.aggregates[finding.RepositoryFindingID]
+		if aggregateFound {
+			matchState = aggregate.matchState
+		}
+		if matchState == repoaudit.RepositoryMatchProvisional {
+			return repositoryReviewRunFindingNeedsReview
+		}
+		if aggregateFound && aggregate.firstOccurrence != "" {
+			if aggregate.firstOccurrence == finding.ID {
+				return repositoryReviewRunFindingAssociatedNew
+			}
+			return repositoryReviewRunFindingAssociatedExisting
+		}
+		switch matchState {
+		case repoaudit.RepositoryMatchNew:
+			return repositoryReviewRunFindingAssociatedNew
+		case repoaudit.RepositoryMatchKnown:
+			return repositoryReviewRunFindingAssociatedExisting
+		}
+	}
+	if job, found := index.jobs[finding.ID]; found {
+		switch job.State {
+		case repoaudit.RepositoryMappingRunning:
+			return repositoryReviewRunFindingProcessing
+		case repoaudit.RepositoryMappingPending:
+			if job.Attempts >= repoaudit.RepositoryRunFindingStatusAttemptLimit {
+				return repositoryReviewRunFindingFailed
+			}
+			return repositoryReviewRunFindingPending
+		}
+	}
+	return repositoryReviewRunFindingPending
 }
 
 func repositoryReviewGlobalCapabilities(

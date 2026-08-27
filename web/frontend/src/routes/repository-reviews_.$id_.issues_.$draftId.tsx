@@ -20,6 +20,20 @@ function RepositoryReviewIssueRoute() {
       params: { id },
       search,
     })
+  const manageLink = (findingID: string) => {
+    if (findingID.startsWith("rrf_")) {
+      return navigate({
+        to: "/repository-reviews/repositories/$id/findings/$findingId/link-issue",
+        params: { id, findingId: findingID },
+        search: { ...search, scope: "all" },
+      })
+    }
+    return navigate({
+      to: "/repository-reviews/$id/findings/$findingId/link-issue",
+      params: { id, findingId: findingID },
+      search: { ...search, scope: "current" },
+    })
+  }
   return (
     <RepositoryReviewIssuePage
       automationID={id}
@@ -30,16 +44,10 @@ function RepositoryReviewIssueRoute() {
         void navigate({
           to: "/repository-reviews/$id/findings/$findingId",
           params: { id, findingId: findingID },
-          search,
+          search: { ...search, scope: "current" },
         })
       }
-      onManageLink={(findingID) =>
-        void navigate({
-          to: "/repository-reviews/$id/findings/$findingId/link-issue",
-          params: { id, findingId: findingID },
-          search,
-        })
-      }
+      onManageLink={(findingID) => void manageLink(findingID)}
     />
   )
 }

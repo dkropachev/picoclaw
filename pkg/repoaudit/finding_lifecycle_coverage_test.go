@@ -98,6 +98,86 @@ func TestRepositoryIdentityAndCampaignBoundaryCoverage(t *testing.T) {
 	})
 }
 
+func TestRetryRunFindingStatusErrorCoverage(t *testing.T) {
+	store := newRepositoryAuditTestStore(t)
+	if _, _, err := store.RetryRunFindingStatus("owner/repo", nil); err == nil {
+		t.Fatal("empty run finding status retry succeeded")
+	}
+	if _, _, err := store.RetryRunFindingStatus(
+		"owner/repo",
+		make([]string, 201),
+	); err == nil {
+		t.Fatal("oversized run finding status retry succeeded")
+	}
+	if _, _, err := store.RetryRunFindingStatus(
+		"owner/missing",
+		[]string{"rfn_missing"},
+	); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing run finding status ledger error=%v", err)
+	}
+	corruptPath := store.path("owner/corrupt-status")
+	if err := os.MkdirAll(filepath.Dir(corruptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corruptPath, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RetryRunFindingStatus(
+		"owner/corrupt-status",
+		[]string{"rfn_corrupt"},
+	); err == nil {
+		t.Fatal("corrupt run finding status ledger unexpectedly loaded")
+	}
+
+	blockedRoot := filepath.Join(t.TempDir(), "blocked-store")
+	if err := os.WriteFile(blockedRoot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewStore(blockedRoot).RetryRunFindingStatus(
+		"owner/blocked",
+		[]string{"rfn_blocked"},
+	); err == nil {
+		t.Fatal("blocked run finding status store unexpectedly succeeded")
+	}
+
+	saveStore := newRepositoryAuditTestStore(t)
+	state := recordMappingWorkerFinding(
+		t,
+		saveStore,
+		"status-save-failure",
+		strings.Repeat("8", 40),
+		"status.go",
+		"status.retry",
+	)
+	findingID := state.Findings[len(state.Findings)-1].ID
+	for index := range state.MappingJobs {
+		if state.MappingJobs[index].ReviewFindingID != findingID {
+			continue
+		}
+		state.MappingJobs[index].Attempts = RepositoryRunFindingStatusAttemptLimit
+		state.MappingJobs[index].Error = "Run finding status processing failed."
+	}
+	if err := saveStore.save(&state); err != nil {
+		t.Fatal(err)
+	}
+	summaryPath := strings.TrimSuffix(saveStore.path(state.Repository), ".json") + ".summary.json"
+	if err := os.Remove(summaryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(summaryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(summaryPath, "block"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := saveStore.RetryRunFindingStatus(
+		state.Repository,
+		[]string{findingID},
+	); err == nil {
+		t.Fatal("run finding status retry ignored persistence failure")
+	}
+}
+
 func TestRepositoryMatchingBoundaryCoverage(t *testing.T) {
 	if !repositorySharedAnchor([]string{" Queue ID "}, []string{"queue id"}) ||
 		repositorySharedAnchor([]string{"one"}, []string{"two"}) {
@@ -2668,7 +2748,7 @@ func TestMappingWorkerRemainingErrorAndHelperBranches(t *testing.T) {
 		}
 		current, _, _ := store.Get(later.Repository)
 		job := lifecycleJobForFinding(t, current, later.Findings[len(later.Findings)-1].ID)
-		if job.Error != "AI adjudication is pending." {
+		if job.Error != "Run finding status needs model processing." {
 			t.Fatalf("needs-AI job=%#v", job)
 		}
 	})

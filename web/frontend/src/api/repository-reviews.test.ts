@@ -29,6 +29,7 @@ import {
   repositoryReviewDefaultIssuePrompt,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
+  retryRepositoryReviewRunFindingStatuses,
   startRepositoryReviewAutomation,
   updateRepositoryReviewAutomation,
   updateRepositoryReviewAutomationIssue,
@@ -868,6 +869,66 @@ describe("repository review API", () => {
       3,
       "/api/repository-reviews/automations/auto%2Fslash/findings/finding%2Fslash",
       { signal: undefined },
+    )
+  })
+
+  it("normalizes public run finding status and retries explicit findings", async () => {
+    const automation = {
+      id: "auto/slash",
+      repository: "owner/repo",
+      progress: {},
+    }
+    const finding = {
+      id: "finding/slash",
+      context_ids: null,
+      models: null,
+      observations: null,
+      validation: { status: "confirmed", summary: "Confirmed", checks: null },
+      run_finding_status: "failed",
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          automation,
+          findings: [finding],
+          repository_findings: [],
+          repository_finding_total: 0,
+          scope: "current",
+          offset: 0,
+          total: 1,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            automation,
+            repository: { id: "rrp_repo", repository: "owner/repo" },
+            findings: [{ id: "finding/slash", run_finding_status: "pending" }],
+          },
+          202,
+        ),
+      )
+
+    await expect(
+      getRepositoryReviewAutomationFindings("auto/slash"),
+    ).resolves.toMatchObject({
+      findings: [
+        { id: "finding/slash", run_finding_status: "failed", context_ids: [] },
+      ],
+    })
+    await expect(
+      retryRepositoryReviewRunFindingStatuses("auto/slash", ["finding/slash"]),
+    ).resolves.toMatchObject({
+      findings: [{ id: "finding/slash", run_finding_status: "pending" }],
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/repository-reviews/automations/auto%2Fslash/findings/status",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ finding_ids: ["finding/slash"] }),
+      }),
     )
   })
 

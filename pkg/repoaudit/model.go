@@ -353,6 +353,11 @@ const (
 	RepositoryMappingPending   RepositoryMappingJobState = "pending"
 	RepositoryMappingRunning   RepositoryMappingJobState = "running"
 	RepositoryMappingCompleted RepositoryMappingJobState = "completed"
+
+	// RepositoryRunFindingStatusAttemptLimit bounds automatic attempts to
+	// associate one immutable run finding with repository-level state. An
+	// explicit operator retry resets the counter before work is admitted again.
+	RepositoryRunFindingStatusAttemptLimit = 3
 )
 
 type RepositoryMappingModelSnapshot struct {

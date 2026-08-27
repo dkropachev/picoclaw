@@ -2,6 +2,7 @@ package repoaudit
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -159,6 +160,134 @@ func TestMappingWorkerReleasesFailedAIAndContinuesLaterJobs(t *testing.T) {
 				t.Fatalf("failed mapping job=%#v", failedJob)
 			}
 		})
+	}
+}
+
+func TestRunFindingStatusAttemptsAreBoundedAndExplicitlyRetryable(t *testing.T) {
+	store := newRepositoryAuditTestStore(t)
+	base := recordMappingWorkerFinding(
+		t, store, "base-run", "base-commit", "old/wait.go", "awaiter.signal",
+	)
+	if _, err := store.ProcessPendingMappingJobs(
+		t.Context(),
+		base.Repository,
+		RepositoryMappingProcessOptions{
+			DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	pending := recordMappingWorkerFinding(
+		t, store, "retry-run", "retry-commit", "new/predicate.go", "predicate.wake",
+	)
+	findingID := pending.Findings[len(pending.Findings)-1].ID
+	if _, _, err := store.RetryRunFindingStatus(
+		pending.Repository,
+		[]string{findingID},
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("uncapped pending retry error=%v", err)
+	}
+	calls := 0
+	failedOptions := RepositoryMappingProcessOptions{
+		DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+		Adjudicate: func(
+			context.Context,
+			RepositoryMappingModelSnapshot,
+			RepositoryMappingAIRequest,
+		) (RepositoryMappingAdjudication, error) {
+			calls++
+			return RepositoryMappingAdjudication{}, context.DeadlineExceeded
+		},
+	}
+	for attempt := 0; attempt < RepositoryRunFindingStatusAttemptLimit; attempt++ {
+		if _, err := store.ProcessPendingMappingJobs(
+			t.Context(), pending.Repository, failedOptions,
+		); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d error=%v", attempt+1, err)
+		}
+	}
+	if calls != RepositoryRunFindingStatusAttemptLimit {
+		t.Fatalf("automatic calls=%d", calls)
+	}
+	if result, err := store.ProcessPendingMappingJobs(
+		t.Context(), pending.Repository, failedOptions,
+	); err != nil || result != (RepositoryMappingProcessResult{}) ||
+		calls != RepositoryRunFindingStatusAttemptLimit {
+		t.Fatalf("capped result=%#v calls=%d err=%v", result, calls, err)
+	}
+	failed, found, err := store.Get(pending.Repository)
+	if err != nil || !found {
+		t.Fatalf("failed state found=%v err=%v", found, err)
+	}
+	job := lifecycleJobForFinding(t, failed, findingID)
+	if job.State != RepositoryMappingPending ||
+		job.Attempts != RepositoryRunFindingStatusAttemptLimit || job.Error == "" {
+		t.Fatalf("capped job=%#v", job)
+	}
+	if _, cappedJob, _, claimed, claimErr := store.ClaimMappingJob(
+		pending.Repository,
+		job.ID,
+		RepositoryMappingModelSnapshot{},
+	); claimErr != nil || claimed || cappedJob.Attempts != RepositoryRunFindingStatusAttemptLimit {
+		t.Fatalf("atomic cap job=%#v claimed=%v err=%v", cappedJob, claimed, claimErr)
+	}
+	if _, _, retryErr := store.RetryRunFindingStatus(
+		pending.Repository,
+		[]string{findingID, findingID},
+	); retryErr == nil {
+		t.Fatal("duplicate retry selection succeeded")
+	}
+	unchanged, _, _ := store.Get(pending.Repository)
+	if unchangedJob := lifecycleJobForFinding(
+		t,
+		unchanged,
+		findingID,
+	); unchangedJob.Attempts != RepositoryRunFindingStatusAttemptLimit ||
+		unchangedJob.Error == "" {
+		t.Fatalf("invalid retry mutated job=%#v", unchangedJob)
+	}
+
+	retried, selected, err := store.RetryRunFindingStatus(
+		pending.Repository,
+		[]string{findingID},
+	)
+	if err != nil || len(selected) != 1 || selected[0].ID != findingID {
+		t.Fatalf("retry selected=%#v err=%v", selected, err)
+	}
+	job = lifecycleJobForFinding(t, retried, findingID)
+	if job.State != RepositoryMappingPending || job.Attempts != 0 || job.Error != "" ||
+		!mappingAdjudicationEmpty(job.Adjudication) || job.CandidateUniverse != "" {
+		t.Fatalf("reset job=%#v", job)
+	}
+	result, err := store.ProcessPendingMappingJobs(
+		t.Context(),
+		pending.Repository,
+		RepositoryMappingProcessOptions{
+			DefaultBranchVerified: func(context.Context, Finding) (bool, error) { return true, nil },
+			Adjudicate: func(
+				context.Context,
+				RepositoryMappingModelSnapshot,
+				RepositoryMappingAIRequest,
+			) (RepositoryMappingAdjudication, error) {
+				return RepositoryMappingAdjudication{
+					Decision: "distinct", Confidence: .99,
+					Explanation: "The causal paths are distinct.",
+				}, nil
+			},
+		},
+	)
+	if err != nil || result.Completed != 1 || result.Created != 1 {
+		t.Fatalf("retried result=%#v err=%v", result, err)
+	}
+	completed, _, _ := store.Get(pending.Repository)
+	if finding := completed.Findings[findingIndexByID(completed.Findings, findingID)]; finding.RepositoryFindingID == "" {
+		t.Fatalf("retried finding=%#v", finding)
+	}
+	if _, _, err := store.RetryRunFindingStatus(
+		pending.Repository,
+		[]string{findingID},
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("associated retry error=%v", err)
 	}
 }
 

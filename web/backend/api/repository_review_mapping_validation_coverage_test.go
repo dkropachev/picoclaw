@@ -436,6 +436,12 @@ func TestRepositoryMappingHelpersAndSnapshots(t *testing.T) {
 	}}) {
 		t.Fatal("pending mapping was not detected")
 	}
+	if repositoryStateHasPendingMapping(repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+		State:    repoaudit.RepositoryMappingPending,
+		Attempts: repoaudit.RepositoryRunFindingStatusAttemptLimit,
+	}}}) {
+		t.Fatal("capped run finding status was reported as processable")
+	}
 	if repositoryStateHasPendingValidation(repoaudit.RepositoryState{}) {
 		t.Fatal("empty state reported pending validation")
 	}
@@ -518,6 +524,43 @@ func TestRepositoryMappingHelpersAndSnapshots(t *testing.T) {
 	if schema := repositoryReviewValidationSchema(); schema["type"] != "object" {
 		t.Fatalf("validation schema=%#v", schema)
 	}
+}
+
+func TestWakeRepositoryRunFindingStatusCoverage(t *testing.T) {
+	var nilController *repositoryReviewController
+	nilController.wakeRepositoryRunFindingStatus()
+
+	canceledContext, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	(&repositoryReviewController{
+		ctx:          canceledContext,
+		leasedConfig: &config.Config{},
+	}).wakeRepositoryRunFindingStatus()
+	(&repositoryReviewController{
+		ctx: context.Background(),
+	}).wakeRepositoryRunFindingStatus()
+
+	blockedRoot := filepath.Join(t.TempDir(), "blocked-store")
+	if err := os.WriteFile(blockedRoot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	(&repositoryReviewController{
+		ctx:          context.Background(),
+		leasedConfig: &config.Config{},
+		leasedStore:  repoaudit.NewStore(blockedRoot),
+	}).wakeRepositoryRunFindingStatus()
+
+	controllerContext, cancelController := context.WithCancel(context.Background())
+	controller := &repositoryReviewController{
+		ctx:          controllerContext,
+		cancel:       cancelController,
+		leasedConfig: &config.Config{},
+		leasedStore:  repoaudit.NewStore(t.TempDir()),
+		active:       make(map[string]*repositoryReviewActiveRun),
+	}
+	controller.wakeRepositoryRunFindingStatus()
+	controller.wg.Wait()
+	cancelController()
 }
 
 func TestRepositoryMappingAndValidationControllersUnavailableAndCanceled(t *testing.T) {
