@@ -6,9 +6,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+func isolateApplyPatchDefaultTransactionState(t *testing.T) {
+	t.Helper()
+	t.Setenv(config.EnvHome, filepath.Join(t.TempDir(), "picoclaw-home"))
+}
+
 func TestApplyPatchTool_AddUpdateDelete(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	workspace := t.TempDir()
 	tool := NewApplyPatchTool(workspace, true)
 
@@ -45,6 +53,7 @@ func TestApplyPatchTool_AddUpdateDelete(t *testing.T) {
 }
 
 func TestApplyPatchTool_RejectsOutsideWorkspace(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	tool := NewApplyPatchTool(t.TempDir(), true)
 	result := tool.Execute(context.Background(), map[string]any{
 		"patch": "*** Begin Patch\n*** Add File: /tmp/picoclaw-apply-patch-outside.txt\n+nope\n*** End Patch",
@@ -58,6 +67,7 @@ func TestApplyPatchTool_RejectsOutsideWorkspace(t *testing.T) {
 }
 
 func TestApplyPatchTool_RespectsCreatePermission(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	tool := NewApplyPatchToolWithPermissions(t.TempDir(), true, false, true)
 	result := tool.Execute(context.Background(), map[string]any{
 		"patch": "*** Begin Patch\n*** Add File: note.txt\n+nope\n*** End Patch",
@@ -71,6 +81,7 @@ func TestApplyPatchTool_RespectsCreatePermission(t *testing.T) {
 }
 
 func TestApplyPatchTool_RespectsCreatePermissionForMove(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "note.txt")
 	if err := os.WriteFile(path, []byte("hello\nworld\n"), 0o644); err != nil {
@@ -99,6 +110,7 @@ func TestApplyPatchTool_RespectsCreatePermissionForMove(t *testing.T) {
 }
 
 func TestApplyPatchTool_RespectsUpdatePermission(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "note.txt")
 	if err := os.WriteFile(path, []byte("hello\nworld\n"), 0o644); err != nil {
@@ -124,6 +136,7 @@ func TestApplyPatchTool_RespectsUpdatePermission(t *testing.T) {
 }
 
 func TestApplyPatchToolPathGuardChecksCompletePatchBeforeMutation(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
 	workspace := t.TempDir()
 	allowed := filepath.Join(workspace, "allowed.txt")
 	if err := os.WriteFile(allowed, []byte("before\n"), 0o644); err != nil {

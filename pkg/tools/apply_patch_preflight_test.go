@@ -125,6 +125,12 @@ func newApplyPatchPreflightTestTool(
 	allowPaths ...[]*regexp.Regexp,
 ) *ApplyPatchTool {
 	t.Helper()
+	if policy.TransactionStateRoot == "" {
+		policy.TransactionStateRoot = filepath.Join(
+			t.TempDir(),
+			"apply-patch-transactions",
+		)
+	}
 	tool, err := NewApplyPatchToolWithPermissionsAndPolicy(
 		workspace,
 		true,
@@ -298,14 +304,19 @@ func TestApplyPatchPreflightAllPublicConstructorsUseWholePlan(t *testing.T) {
 		{
 			name: "policy",
 			build: func(t *testing.T, workspace string) *ApplyPatchTool {
-				return newApplyPatchPreflightTestTool(
-					t, workspace, true, true, ApplyPatchPreflightPolicy{},
+				tool, err := NewApplyPatchToolWithPermissionsAndPolicy(
+					workspace, true, true, true, ApplyPatchPreflightPolicy{},
 				)
+				if err != nil {
+					t.Fatalf("NewApplyPatchToolWithPermissionsAndPolicy() error = %v", err)
+				}
+				return tool
 			},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			isolateApplyPatchDefaultTransactionState(t)
 			workspace := t.TempDir()
 			writeApplyPatchFixture(t, workspace, "first.txt", "before\n", 0o751)
 			before := applyPatchSnapshotTree(t, workspace)
@@ -338,6 +349,7 @@ func TestApplyPatchPreflightLegacyConstructorsDenyGitControlPaths(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			isolateApplyPatchDefaultTransactionState(t)
 			workspace := t.TempDir()
 			before := applyPatchSnapshotTree(t, workspace)
 			result := executeApplyPatch(t, test.build(workspace), context.Background(),
@@ -1609,11 +1621,17 @@ func TestApplyPatchCompatibilityExactSummaryAndRegistryParity(t *testing.T) {
 	for _, surface := range []string{"direct", "registry", "owner factory"} {
 		t.Run(surface, func(t *testing.T) {
 			workspace := t.TempDir()
+			transactionStateRoot := filepath.Join(
+				t.TempDir(),
+				"apply-patch-transactions",
+			)
 			writeApplyPatchFixture(t, workspace, "updated.txt", "before\n", 0o751)
 			writeApplyPatchFixture(t, workspace, "deleted.txt", "delete\n", 0o640)
 			writeApplyPatchFixture(t, workspace, "source.txt", "move\n", 0o700)
 			tool := newApplyPatchPreflightTestTool(
-				t, workspace, true, true, ApplyPatchPreflightPolicy{},
+				t, workspace, true, true, ApplyPatchPreflightPolicy{
+					TransactionStateRoot: transactionStateRoot,
+				},
 			)
 			var result *ToolResult
 			switch surface {
@@ -1629,7 +1647,9 @@ func TestApplyPatchCompatibilityExactSummaryAndRegistryParity(t *testing.T) {
 					Sharing:     ToolSharingPerOwner,
 				}, func(ToolBuildContext) (Tool, error) {
 					return NewApplyPatchToolWithPermissionsAndPolicy(
-						workspace, true, true, true, ApplyPatchPreflightPolicy{},
+						workspace, true, true, true, ApplyPatchPreflightPolicy{
+							TransactionStateRoot: transactionStateRoot,
+						},
 					)
 				})
 				if err != nil {
@@ -2042,6 +2062,7 @@ func TestApplyPatchPreflightRevalidationRejectsWorkspaceIdentityDrift(t *testing
 
 func TestApplyPatchPreflightWorkspaceGateCanonicalizesAliases(t *testing.T) {
 	workspace := t.TempDir()
+	transactionStateRoot := filepath.Join(t.TempDir(), "apply-patch-transactions")
 	aliasParent := t.TempDir()
 	alias := filepath.Join(aliasParent, "workspace-alias")
 	if err := os.Symlink(workspace, alias); err != nil {
@@ -2058,6 +2079,7 @@ func TestApplyPatchPreflightWorkspaceGateCanonicalizesAliases(t *testing.T) {
 		}
 	}()
 	firstTool := newApplyPatchPreflightTestTool(t, workspace, true, true, ApplyPatchPreflightPolicy{
+		TransactionStateRoot: transactionStateRoot,
 		PathGuard: func(string) error {
 			select {
 			case <-firstGuardEntered:
@@ -2070,6 +2092,7 @@ func TestApplyPatchPreflightWorkspaceGateCanonicalizesAliases(t *testing.T) {
 	})
 	secondGuardEntered := make(chan struct{})
 	secondTool := newApplyPatchPreflightTestTool(t, alias, true, true, ApplyPatchPreflightPolicy{
+		TransactionStateRoot: transactionStateRoot,
 		PathGuard: func(string) error {
 			close(secondGuardEntered)
 			return nil
@@ -2122,7 +2145,9 @@ func TestApplyPatchPreflightWorkspaceGateCanonicalizesAliases(t *testing.T) {
 		t.Fatalf("canceled waiter mutated second.txt: %v", err)
 	}
 	thirdTool := newApplyPatchPreflightTestTool(
-		t, alias, true, true, ApplyPatchPreflightPolicy{},
+		t, alias, true, true, ApplyPatchPreflightPolicy{
+			TransactionStateRoot: transactionStateRoot,
+		},
 	)
 	third := executeApplyPatch(t, thirdTool, context.Background(),
 		"*** Begin Patch\n*** Add File: third.txt\n+third\n*** End Patch",
@@ -2135,6 +2160,7 @@ func TestApplyPatchPreflightWorkspaceGateCanonicalizesAliases(t *testing.T) {
 func TestApplyPatchPreflightWorkspaceGatesDoNotSerializeUnrelatedRoots(t *testing.T) {
 	firstWorkspace := t.TempDir()
 	secondWorkspace := t.TempDir()
+	transactionStateRoot := filepath.Join(t.TempDir(), "apply-patch-transactions")
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	defer func() {
@@ -2145,6 +2171,7 @@ func TestApplyPatchPreflightWorkspaceGatesDoNotSerializeUnrelatedRoots(t *testin
 		}
 	}()
 	first := newApplyPatchPreflightTestTool(t, firstWorkspace, true, true, ApplyPatchPreflightPolicy{
+		TransactionStateRoot: transactionStateRoot,
 		PathGuard: func(string) error {
 			close(entered)
 			<-release
@@ -2152,7 +2179,9 @@ func TestApplyPatchPreflightWorkspaceGatesDoNotSerializeUnrelatedRoots(t *testin
 		},
 	})
 	second := newApplyPatchPreflightTestTool(
-		t, secondWorkspace, true, true, ApplyPatchPreflightPolicy{},
+		t, secondWorkspace, true, true, ApplyPatchPreflightPolicy{
+			TransactionStateRoot: transactionStateRoot,
+		},
 	)
 	firstResult := make(chan *ToolResult, 1)
 	go func() {
