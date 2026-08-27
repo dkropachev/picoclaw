@@ -102,7 +102,9 @@ func TestIssueGenerationReservesOneCanonicalDraftIdempotently(t *testing.T) {
 	}
 	loaded, found, err := store.Get(state.Repository)
 	if err != nil || !found || len(loaded.IssueDrafts) != 1 ||
-		loaded.Findings[0].IssueDraftID != loaded.IssueDrafts[0].ID {
+		loaded.Findings[0].IssueDraftID != loaded.IssueDrafts[0].ID ||
+		loaded.IssueDrafts[0].GeneratorProfileID != request.GeneratorProfileID ||
+		loaded.IssueDrafts[0].GeneratorProfileVersion != request.GeneratorProfileVersion {
 		t.Fatalf("reserved state=%#v found=%v err=%v", loaded, found, err)
 	}
 	if _, _, _, err := store.ReserveIssueGeneration(
@@ -168,6 +170,8 @@ func TestIssueGenerationFailureRetryRegenerationAndDeletion(t *testing.T) {
 	regeneration.InstructionsMode = IssueDraftInstructionsCustom
 	regeneration.GeneratorModel = "replacement-writer"
 	regeneration.GeneratorAccount = "replacement-account"
+	regeneration.GeneratorProfileID = "rrpf_replacement"
+	regeneration.GeneratorProfileVersion = 4
 	regeneration.ExpectedDraftVersion = good.Version
 	staleRegeneration := regeneration
 	staleRegeneration.ExpectedDraftVersion++
@@ -185,6 +189,8 @@ func TestIssueGenerationFailureRetryRegenerationAndDeletion(t *testing.T) {
 		regenerating.ResolvedInstructions != good.ResolvedInstructions ||
 		regenerating.AttemptGenerationID != regeneration.GenerationID ||
 		regenerating.AttemptGeneratorModel != regeneration.GeneratorModel ||
+		regenerating.AttemptGeneratorProfileID != regeneration.GeneratorProfileID ||
+		regenerating.AttemptGeneratorProfileVersion != regeneration.GeneratorProfileVersion ||
 		regenerating.AttemptResolvedInstructions != regeneration.ResolvedInstructions {
 		t.Fatalf("regeneration reservation=%#v began=%v err=%v", regenerating, began, err)
 	}
@@ -206,6 +212,8 @@ func TestIssueGenerationFailureRetryRegenerationAndDeletion(t *testing.T) {
 		preserved.AttemptGenerationID != regeneration.GenerationID ||
 		preserved.AttemptGeneratorModel != regeneration.GeneratorModel ||
 		preserved.AttemptGeneratorAccount != regeneration.GeneratorAccount ||
+		preserved.AttemptGeneratorProfileID != regeneration.GeneratorProfileID ||
+		preserved.AttemptGeneratorProfileVersion != regeneration.GeneratorProfileVersion ||
 		preserved.AttemptResolvedInstructions != regeneration.ResolvedInstructions ||
 		preserved.AttemptInstructionsMode != regeneration.InstructionsMode {
 		t.Fatalf("preserved preview=%#v err=%v", preserved, err)
@@ -225,6 +233,8 @@ func TestIssueGenerationFailureRetryRegenerationAndDeletion(t *testing.T) {
 	successfulRegeneration.InstructionsMode = IssueDraftInstructionsCustom
 	successfulRegeneration.GeneratorModel = "successful-writer"
 	successfulRegeneration.GeneratorAccount = "successful-account"
+	successfulRegeneration.GeneratorProfileID = "rrpf_successful"
+	successfulRegeneration.GeneratorProfileVersion = 5
 	successfulRegeneration.ExpectedDraftVersion = preserved.Version
 	_, regenerating, began, err = store.BeginIssueRegeneration(
 		state.Repository, good.ID, successfulRegeneration,
@@ -239,6 +249,8 @@ func TestIssueGenerationFailureRetryRegenerationAndDeletion(t *testing.T) {
 	if err != nil || promoted.GenerationID != successfulRegeneration.GenerationID ||
 		promoted.GeneratorModel != successfulRegeneration.GeneratorModel ||
 		promoted.GeneratorAccount != successfulRegeneration.GeneratorAccount ||
+		promoted.GeneratorProfileID != successfulRegeneration.GeneratorProfileID ||
+		promoted.GeneratorProfileVersion != successfulRegeneration.GeneratorProfileVersion ||
 		promoted.ResolvedInstructions != successfulRegeneration.ResolvedInstructions ||
 		promoted.InstructionsMode != successfulRegeneration.InstructionsMode ||
 		promoted.AttemptGenerationID != "" || promoted.GenerationError != "" {
@@ -276,7 +288,7 @@ func TestFindingStatusUsesFindingFenceAndCannotMarkPosted(t *testing.T) {
 	}
 }
 
-func TestExistingIssueMayBeReusedButOnlyManualLinksCanBeUnlinked(t *testing.T) {
+func TestExistingIssueMayBeReusedAndReversibleLinksCanBeUnlinked(t *testing.T) {
 	store, state := repositoryReviewIssueState(t, 2)
 	issueURL := "https://github.com/owner/repo/issues/42"
 	for index := range state.Findings {
@@ -325,6 +337,46 @@ func TestExistingIssueMayBeReusedButOnlyManualLinksCanBeUnlinked(t *testing.T) {
 		state.Repository, second.ID, second.Version+1, true,
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale unlink error=%v", err)
+	}
+}
+
+func TestDiscoveredIssueAssociationIsReversible(t *testing.T) {
+	store, state := repositoryReviewIssueState(t, 1)
+	finding := state.Findings[0]
+	linkedState, discovered, err := store.LinkExistingIssue(ExistingIssueLink{
+		Repository: state.Repository, FindingID: finding.ID,
+		ExpectedFindingVersion: finding.Version,
+		ExternalID:             "42",
+		ExternalURL:            "https://github.com/owner/repo/issues/42",
+		Title:                  "Discovered issue",
+		Origin:                 IssueDraftOriginDiscovered,
+		Confirmed:              true,
+	})
+	if err != nil || discovered.Origin != IssueDraftOriginDiscovered ||
+		linkedState.Findings[0].IssueDraftID != discovered.ID {
+		t.Fatalf("discovered link=%#v state=%#v err=%v", discovered, linkedState, err)
+	}
+	finding = linkedState.Findings[0]
+	linkedState, discovered, err = store.LinkExistingIssue(ExistingIssueLink{
+		Repository: state.Repository, FindingID: finding.ID,
+		ExpectedFindingVersion: finding.Version,
+		ExternalID:             "43",
+		ExternalURL:            "https://github.com/owner/repo/issues/43",
+		Title:                  "Replacement discovered issue",
+		Origin:                 IssueDraftOriginDiscovered,
+		Confirmed:              true,
+		Replace:                true,
+	})
+	if err != nil || discovered.ExternalID != "43" || len(linkedState.IssueDrafts) != 1 {
+		t.Fatalf("replacement discovered link=%#v state=%#v err=%v", discovered, linkedState, err)
+	}
+	finding = linkedState.Findings[0]
+	unlinked, err := store.UnlinkExistingIssue(
+		state.Repository, finding.ID, finding.Version, true,
+	)
+	if err != nil || unlinked.Findings[0].Status != FindingOpen ||
+		unlinked.Findings[0].IssueDraftID != "" || len(unlinked.IssueDrafts) != 0 {
+		t.Fatalf("unlinked discovered state=%#v err=%v", unlinked, err)
 	}
 }
 
@@ -1010,5 +1062,6 @@ func testIssueGenerationRequest(repository, findingID, generationID string) Issu
 		ResolvedInstructions: "Write a concise grounded GitHub issue without proposing a fix.",
 		InstructionsMode:     IssueDraftInstructionsDefault,
 		GeneratorModel:       "writer-model", GeneratorAccount: "default-account",
+		GeneratorProfileID: "rrpf_writer", GeneratorProfileVersion: 3,
 	}
 }

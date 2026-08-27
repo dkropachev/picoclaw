@@ -471,14 +471,57 @@ func repositoryReviewPublicationTestDraft(
 	if err != nil {
 		t.Fatal(err)
 	}
+	mappedState := completeRepositoryReviewPublicationTestMapping(
+		t,
+		store,
+		recorded.State,
+		recorded.State.Findings[0].ID,
+	)
 	state, draft, err := store.PrepareIssue(repoaudit.IssueDraftRequest{
-		Repository: repository, FindingIDs: []string{recorded.State.Findings[0].ID},
-		ExpectedVersion: recorded.State.Version,
+		Repository: repository, FindingIDs: []string{mappedState.Findings[0].ID},
+		ExpectedVersion: mappedState.Version,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return store, state, draft
+}
+
+func completeRepositoryReviewPublicationTestMapping(
+	t *testing.T,
+	store repoaudit.Store,
+	state repoaudit.RepositoryState,
+	findingID string,
+) repoaudit.RepositoryState {
+	t.Helper()
+	for index := range state.MappingJobs {
+		job := state.MappingJobs[index]
+		if job.ReviewFindingID != findingID {
+			continue
+		}
+		claimedState, claimedJob, _, claimed, err := store.ClaimMappingJob(
+			state.Repository,
+			job.ID,
+			repoaudit.RepositoryMappingModelSnapshot{},
+		)
+		if err != nil || !claimed {
+			t.Fatalf("claim mapping job for finding %q: claimed=%v err=%v", findingID, claimed, err)
+		}
+		mappedState, _, err := store.CompleteMappingJob(
+			claimedState.Repository,
+			repoaudit.RepositoryMappingCompletion{
+				JobID:                 claimedJob.ID,
+				CreateMatchState:      repoaudit.RepositoryMatchNew,
+				DefaultBranchVerified: true,
+			},
+		)
+		if err != nil {
+			t.Fatalf("complete mapping job for finding %q: %v", findingID, err)
+		}
+		return mappedState
+	}
+	t.Fatalf("mapping job for finding %q is missing", findingID)
+	return repoaudit.RepositoryState{}
 }
 
 func repositoryReviewIssueLinkTestFixture(

@@ -176,7 +176,7 @@ describe("AppSidebar", () => {
     ).not.toBeInTheDocument()
   })
 
-  it("marks Review runs through routed report and issue details", () => {
+  it("marks Review runs through findings and issue details", () => {
     pathname = "/repository-reviews/auto_1/issues/draft_1"
 
     renderSidebar()

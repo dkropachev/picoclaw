@@ -71,6 +71,48 @@ func TestRepositoryReviewProfileLoadRemovesLegacyModelPrice(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewProfileV1MigratesDefaultIssuePrompt(t *testing.T) {
+	store := NewStore(t.TempDir())
+	store.now = func() time.Time { return automationTestNow }
+	created, err := store.CreateProfile(
+		context.Background(), validProfileForTest("rrpf_issue_prompt_v1", "Legacy prompt"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.profilePath(created.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["schema_version"] = float64(1)
+	delete(raw, "issue_prompt")
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.profilePath(created.ID), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, found, err := store.GetProfile(context.Background(), created.ID)
+	if err != nil || !found || loaded.SchemaVersion != RepositoryReviewProfileSchemaVersion ||
+		loaded.IssuePrompt != DefaultRepositoryReviewIssuePrompt {
+		t.Fatalf("migrated profile=%#v found=%v err=%v", loaded, found, err)
+	}
+	rewritten, err := os.ReadFile(store.profilePath(created.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rewritten, []byte(`"schema_version":2`)) ||
+		!bytes.Contains(rewritten, []byte(`"issue_prompt"`)) {
+		t.Fatalf("v1 profile was not durably rewritten: %s", rewritten)
+	}
+}
+
 func TestRepositoryReviewProfileCRUDCASAndPrivateFile(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewStore(workspace)
@@ -82,6 +124,7 @@ func TestRepositoryReviewProfileCRUDCASAndPrivateFile(t *testing.T) {
 	}
 	if created.ID != "rrpf_crud" || created.Version != 1 ||
 		created.SchemaVersion != RepositoryReviewProfileSchemaVersion ||
+		created.IssuePrompt != DefaultRepositoryReviewIssuePrompt ||
 		!created.CreatedAt.Equal(automationTestNow) || !created.UpdatedAt.Equal(automationTestNow) {
 		t.Fatalf("created profile = %#v", created)
 	}

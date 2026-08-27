@@ -78,6 +78,12 @@ type repositoryReviewCommitResolver func(
 	string,
 ) (string, error)
 
+type repositoryReviewDefaultBranchResolver func(
+	context.Context,
+	*config.Config,
+	repoaudit.RepositoryReviewAutomation,
+) (string, error)
+
 func updateRepositoryReviewAutomation(
 	ctx context.Context,
 	store repoaudit.Store,
@@ -93,27 +99,30 @@ type repositoryReviewController struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	startOnce     sync.Once
-	stopOnce      sync.Once
-	releaseOnce   sync.Once
-	wg            sync.WaitGroup
-	admissionWG   sync.WaitGroup
-	lifecycleMu   sync.Mutex
-	stopped       bool
-	startErr      error
-	releaseLease  func()
-	leasedStore   repoaudit.Store
-	leasedConfig  *config.Config
-	mu            sync.Mutex
-	active        map[string]*repositoryReviewActiveRun
-	now           func() time.Time
-	probe         func(context.Context) (codexAccountLimitsResponse, error)
-	update        repositoryReviewAutomationUpdater
-	resolveCommit repositoryReviewCommitResolver
-	stopTimeout   time.Duration
-	monitorEvery  time.Duration
-	progressEvery time.Duration
-	runBatch      func(
+	startOnce            sync.Once
+	stopOnce             sync.Once
+	releaseOnce          sync.Once
+	wg                   sync.WaitGroup
+	admissionWG          sync.WaitGroup
+	lifecycleMu          sync.Mutex
+	stopped              bool
+	startErr             error
+	releaseLease         func()
+	leasedStore          repoaudit.Store
+	leasedConfig         *config.Config
+	mu                   sync.Mutex
+	mappingMu            sync.Mutex
+	validationMu         sync.Mutex
+	active               map[string]*repositoryReviewActiveRun
+	now                  func() time.Time
+	probe                func(context.Context) (codexAccountLimitsResponse, error)
+	update               repositoryReviewAutomationUpdater
+	resolveCommit        repositoryReviewCommitResolver
+	resolveDefaultBranch repositoryReviewDefaultBranchResolver
+	stopTimeout          time.Duration
+	monitorEvery         time.Duration
+	progressEvery        time.Duration
+	runBatch             func(
 		context.Context,
 		repoaudit.RepositoryReviewAutomation,
 		string,
@@ -124,17 +133,18 @@ type repositoryReviewController struct {
 func newRepositoryReviewController(handler *Handler) *repositoryReviewController {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &repositoryReviewController{
-		handler:       handler,
-		ctx:           ctx,
-		cancel:        cancel,
-		active:        make(map[string]*repositoryReviewActiveRun),
-		now:           time.Now,
-		probe:         loadCodexAccountLimits,
-		update:        updateRepositoryReviewAutomation,
-		resolveCommit: resolveRepositoryReviewAutomationCommit,
-		stopTimeout:   10 * time.Second,
-		monitorEvery:  repositoryReviewControllerInterval,
-		progressEvery: time.Second,
+		handler:              handler,
+		ctx:                  ctx,
+		cancel:               cancel,
+		active:               make(map[string]*repositoryReviewActiveRun),
+		now:                  time.Now,
+		probe:                loadCodexAccountLimits,
+		update:               updateRepositoryReviewAutomation,
+		resolveCommit:        resolveRepositoryReviewAutomationCommit,
+		resolveDefaultBranch: resolveRepositoryReviewAdvertisedDefaultBranch,
+		stopTimeout:          10 * time.Second,
+		monitorEvery:         repositoryReviewControllerInterval,
+		progressEvery:        time.Second,
 	}
 }
 
@@ -193,6 +203,15 @@ func (c *repositoryReviewController) Start() error {
 		}
 		c.leasedStore = store
 		c.leasedConfig = cfg
+		if _, err = store.ReconcileJobs(c.ctx); err != nil {
+			c.startErr = fmt.Errorf("reconcile repository finding jobs: %w", err)
+			if c.releaseLease != nil {
+				c.releaseLease()
+				c.releaseLease = nil
+			}
+			c.cancel()
+			return
+		}
 		c.wg.Add(1)
 		go c.monitor()
 	})
@@ -304,6 +323,55 @@ func resolveRepositoryReviewAutomationCommit(
 	return commit, nil
 }
 
+func resolveRepositoryReviewAdvertisedDefaultBranch(
+	ctx context.Context,
+	cfg *config.Config,
+	automation repoaudit.RepositoryReviewAutomation,
+) (string, error) {
+	if cfg == nil {
+		return "", errors.New("repository review configuration is unavailable")
+	}
+	manager, err := gitworkspace.NewManager(gitworkspace.Options{
+		RootDir:             cfg.GitWorkspaceRootPath(),
+		MaxTotalSizeBytes:   cfg.GitWorkspaces.EffectiveMaxTotalSizeBytes(),
+		IgnoredCleanupDelay: cfg.GitWorkspaces.EffectiveIgnoredCleanupDelay(),
+		DropDelay:           cfg.GitWorkspaces.EffectiveDropDelay(),
+	})
+	if err != nil {
+		return "", err
+	}
+	sessionKey := "repository-review-default-branch/" + automation.ID + "/" + workflows.NewRunID()
+	workspace, err := manager.Acquire(ctx, gitworkspace.AcquireRequest{
+		Repository: automation.Repository, Ref: "", Fresh: true,
+		SessionKey: sessionKey, AgentID: "repository-review-controller",
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = manager.ReleaseSession(releaseCtx, gitworkspace.ReleaseRequest{
+			SessionKey: sessionKey, AgentID: "repository-review-controller",
+		})
+	}()
+	for _, ref := range []string{"refs/remotes/origin/HEAD", "HEAD"} {
+		output, outputErr := repositoryReviewGitOutput(
+			ctx, workspace.Path, 512, "git", "symbolic-ref", "--short", ref,
+		)
+		if outputErr != nil {
+			continue
+		}
+		branch := strings.TrimSpace(string(output))
+		branch = strings.TrimPrefix(branch, "origin/")
+		if normalized, normalizeErr := repoaudit.NormalizeRepositoryReviewBranch(branch); normalizeErr == nil &&
+			normalized != "" {
+			return normalized, nil
+		}
+	}
+	return "", errors.New("repository advertised default branch is unavailable")
+}
+
 func repositoryReviewGitOutput(
 	ctx context.Context,
 	directory string,
@@ -322,30 +390,34 @@ func repositoryReviewGitOutput(
 		return nil, err
 	}
 	output, readErr := repositoryReviewReadAll(io.LimitReader(stdout, maximumBytes+1))
+	_, drainErr := io.Copy(io.Discard, stdout)
 	waitErr := command.Wait()
 	if readErr != nil {
 		return nil, readErr
+	}
+	if drainErr != nil {
+		return nil, drainErr
 	}
 	if waitErr != nil {
 		return nil, waitErr
 	}
 	if int64(len(output)) > maximumBytes {
-		return nil, errors.New("git command output is too large")
+		return output[:maximumBytes], errors.New("git command output is too large")
 	}
 	return output, nil
 }
 
 func repositoryReviewGitEnvironment() []string {
-	environment := make([]string, 0, len(os.Environ())+2)
+	environment := make([]string, 0, len(os.Environ())+3)
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		switch strings.ToUpper(name) {
-		case "LC_ALL", "GIT_PAGER":
+		case "LC_ALL", "GIT_PAGER", "GIT_LITERAL_PATHSPECS":
 			continue
 		}
 		environment = append(environment, entry)
 	}
-	return append(environment, "LC_ALL=C", "GIT_PAGER=cat")
+	return append(environment, "LC_ALL=C", "GIT_PAGER=cat", "GIT_LITERAL_PATHSPECS=1")
 }
 
 func repositoryReviewRememberedCommit(
@@ -590,6 +662,25 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
+	advertisedDefaultBranch := strings.TrimSpace(automation.AdvertisedDefaultBranch)
+	usesDefaultCommitResolver := c.resolveCommit != nil &&
+		reflect.ValueOf(c.resolveCommit).Pointer() ==
+			reflect.ValueOf(repositoryReviewCommitResolver(resolveRepositoryReviewAutomationCommit)).Pointer()
+	if c.resolveDefaultBranch != nil && usesDefaultCommitResolver {
+		resolvedDefault, defaultErr := c.resolveDefaultBranch(ctx, cfg, automation)
+		if defaultErr != nil {
+			return repoaudit.RepositoryReviewAutomation{}, fmt.Errorf(
+				"resolve repository advertised default branch: %w", defaultErr,
+			)
+		}
+		advertisedDefaultBranch = resolvedDefault
+	}
+	resolvedTargetBranch := strings.TrimSpace(automation.Ref)
+	if resolvedTargetBranch == "" {
+		resolvedTargetBranch = advertisedDefaultBranch
+	}
+	targetIsDefault := automation.Ref == "" ||
+		advertisedDefaultBranch != "" && resolvedTargetBranch == advertisedDefaultBranch
 	expectedVersion = automation.Version
 	priced := automation
 	if pricingErr := repositoryReviewRefreshAccountingSnapshot(cfg, &priced); pricingErr != nil {
@@ -664,6 +755,9 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 			}
 			candidate.ResolvedCommitSHA = resolvedCommit
+			candidate.ResolvedTargetBranch = resolvedTargetBranch
+			candidate.AdvertisedDefaultBranch = advertisedDefaultBranch
+			candidate.TargetIsDefault = targetIsDefault
 			candidate.Status = repoaudit.RepositoryReviewAutomationRunning
 			candidate.PauseReason = ""
 			candidate.PauseDetail = ""
@@ -902,6 +996,9 @@ func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryRevi
 	}
 	automation.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 	automation.ResolvedCommitSHA = ""
+	automation.ResolvedTargetBranch = ""
+	automation.AdvertisedDefaultBranch = ""
+	automation.TargetIsDefault = automation.Ref == ""
 	automation.RequestedPauseReason = ""
 	automation.RequestedPauseDetail = ""
 	automation.ActiveRunID = ""
@@ -1149,19 +1246,22 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		Workflow:    workflow,
 		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
-			"repository":              automation.Repository,
-			"account_ref":             repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
-			"ref":                     repositoryReviewExecutionRef(automation),
-			"target":                  automation.Target,
-			"review_focus":            automation.ReviewFocus,
-			"review_models":           strings.Join(repositoryReviewExecutionModels(automation), ","),
-			"planner_model":           repositoryReviewPlannerModel(automation),
-			"scope_policy":            string(scopePolicyJSON),
-			"force":                   automation.Force,
-			"max_content_bytes":       automation.MaxContentBytes,
-			"max_files_per_run":       automation.MaxFilesPerRun,
-			"max_parallel_children":   automation.MaxParallelChildren,
-			"estimated_output_tokens": automation.EstimatedOutputTokens,
+			"repository":                automation.Repository,
+			"account_ref":               repositoryReviewEffectiveAccountRef(cfg, automation.EffectiveAccountRef),
+			"ref":                       repositoryReviewExecutionRef(automation),
+			"target_branch":             automation.ResolvedTargetBranch,
+			"advertised_default_branch": automation.AdvertisedDefaultBranch,
+			"target_is_default":         automation.TargetIsDefault,
+			"target":                    automation.Target,
+			"review_focus":              automation.ReviewFocus,
+			"review_models":             strings.Join(repositoryReviewExecutionModels(automation), ","),
+			"planner_model":             repositoryReviewPlannerModel(automation),
+			"scope_policy":              string(scopePolicyJSON),
+			"force":                     automation.Force,
+			"max_content_bytes":         automation.MaxContentBytes,
+			"max_files_per_run":         automation.MaxFilesPerRun,
+			"max_parallel_children":     automation.MaxParallelChildren,
+			"estimated_output_tokens":   automation.EstimatedOutputTokens,
 		},
 	})
 	runErr = repositoryReviewJoinCommitError(automation, result, runErr)
@@ -1914,6 +2014,26 @@ func (c *repositoryReviewController) finishAutomationRun(
 	outcome := repositoryReviewOutcome{}
 	if currentFound {
 		outcome = loadRepositoryReviewOutcome(store, current)
+		if state, found, resolveErr := store.ResolveRepositoryState(
+			current.Repository, current.RunIDs,
+		); resolveErr == nil && found {
+			if snapshot, snapshotErr := repositoryMappingSnapshot(
+				context.Background(), store, activeSnapshot.config, current,
+			); snapshotErr == nil {
+				campaign := repoaudit.CurrentCampaignFindings(
+					state, current.RunIDs, current.StartedAt,
+				)
+				ids := make([]string, 0, len(campaign))
+				for _, finding := range campaign {
+					if finding.RepositoryFindingID == "" {
+						ids = append(ids, finding.ID)
+					}
+				}
+				if len(ids) > 0 {
+					_, _ = store.SnapshotMappingJobs(state.Repository, ids, snapshot)
+				}
+			}
+		}
 		if pauseReason == "" && current.RequestedPauseReason != "" {
 			pauseReason = current.RequestedPauseReason
 			pauseDetail = current.RequestedPauseDetail
@@ -2100,7 +2220,7 @@ func loadRepositoryReviewOutcome(
 	store repoaudit.Store,
 	automation repoaudit.RepositoryReviewAutomation,
 ) repositoryReviewOutcome {
-	state, found, err := store.Get(automation.Repository)
+	state, found, err := store.ResolveRepositoryState(automation.Repository, automation.RunIDs)
 	if err != nil || !found {
 		return repositoryReviewOutcome{}
 	}
@@ -2123,6 +2243,13 @@ func loadRepositoryReviewOutcome(
 		for _, path := range run.UnsupportedPaths {
 			unsupportedPaths[path] = struct{}{}
 		}
+	}
+	for _, finding := range repoaudit.CurrentCampaignFindings(
+		state,
+		automation.RunIDs,
+		automation.StartedAt,
+	) {
+		findingIDs[finding.ID] = struct{}{}
 	}
 	if len(campaignRuns) == 0 {
 		return repositoryReviewOutcome{}
@@ -2183,7 +2310,7 @@ func applyRepositoryReviewOutcome(
 	}
 	automation.Progress.ReviewedFiles = max(automation.Progress.ReviewedFiles, outcome.reviewedFiles)
 	automation.Progress.UnsupportedFiles = max(automation.Progress.UnsupportedFiles, outcome.unsupportedFiles)
-	automation.Progress.Findings = max(automation.Progress.Findings, outcome.findings)
+	automation.Progress.Findings = outcome.findings
 	for _, alias := range automation.ReviewerModels {
 		stats := automation.ModelStats[alias]
 		stats.Findings = max(stats.Findings, outcome.modelFindings[alias])
@@ -2507,4 +2634,6 @@ func (c *repositoryReviewController) reconcile() {
 			)
 		}
 	}
+	c.startRepositoryFindingMapping(automations)
+	c.startRepositoryFindingValidation(automations)
 }

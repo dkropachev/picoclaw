@@ -3,6 +3,7 @@ package workflows
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,12 +42,15 @@ func TestNativeRepositoryReviewDoesNotCheckpointFileWithFailedChallenge(t *testi
 		t.Fatalf("plan handled=%v err=%v", handled, err)
 	}
 	validated := map[string]any{
-		"summary": "found", "reviewedFiles": []any{"pkg/service.go"}, "findings": []any{map[string]any{
+		"summary":       "found",
+		"reviewedFiles": []any{"pkg/service.go"},
+		"findings": []any{repositoryReviewTestFinding(map[string]any{
 			"severity": "high", "title": "Lost update", "symbol": "Save", "file": "pkg/service.go",
 			"message": "A writer overwrites state.", "evidence": "No version fence.",
 			"impact":     "Data is lost.",
 			"validation": map[string]any{"status": "confirmed", "summary": "Reproduced", "checks": []any{"race test"}},
-		}},
+		})},
+		"residualRisks": []any{},
 	}
 	children := []map[string]any{
 		{
@@ -91,6 +95,29 @@ func TestNativeRepositoryReviewDoesNotCheckpointFileWithFailedChallenge(t *testi
 	}
 }
 
+func repositoryReviewTestFinding(finding map[string]any) map[string]any {
+	finding["match_hints"] = map[string]any{
+		"component": "persistence", "operation": "save versioned state",
+		"failure_mode":       "a later writer replaces an accepted update",
+		"trigger":            "two writers begin from the same version",
+		"violated_invariant": "every accepted update remains represented in committed state",
+		"observable_outcome": "one successful update disappears",
+		"related_symbols":    []any{"Save"}, "source_anchors": []any{"version"},
+		"distinguishing_facts": []any{"requires overlapping writes"},
+	}
+	finding["fix_effort"] = map[string]any{
+		"quick": map[string]any{
+			"loc_min": 5, "loc_max": 20, "class": "small",
+			"rationale": "Containment is localized to the write path.",
+		},
+		"quality": map[string]any{
+			"loc_min": 30, "loc_max": 100, "class": "medium",
+			"rationale": "The state invariant spans persistence and concurrency tests.",
+		},
+	}
+	return finding
+}
+
 func TestNativeRepositoryReviewRejectsFieldsOutsideDiagnosisOnlyContract(t *testing.T) {
 	_, err := nativeRepositoryReviewObservation(
 		map[string]any{
@@ -116,6 +143,123 @@ func TestNativeRepositoryReviewRejectsFieldsOutsideDiagnosisOnlyContract(t *test
 	}
 }
 
+func TestNativeRepositoryReviewRequiresClosedMatchingAndEffortContract(t *testing.T) {
+	emptyOutput := map[string]any{
+		"summary": "none", "reviewedFiles": []any{}, "findings": []any{},
+		"residualRisks": []any{},
+	}
+	if err := nativeValidateRepositoryReviewOutputFields(emptyOutput); err != nil {
+		t.Fatalf("valid empty output was rejected: %v", err)
+	}
+	for _, field := range []string{"summary", "reviewedFiles", "findings", "residualRisks"} {
+		missing := make(map[string]any, len(emptyOutput)-1)
+		for key, value := range emptyOutput {
+			if key != field {
+				missing[key] = value
+			}
+		}
+		if err := nativeValidateRepositoryReviewOutputFields(missing); err == nil ||
+			!strings.Contains(err.Error(), `missing required field "`+field+`"`) {
+			t.Fatalf("missing root field %q error=%v", field, err)
+		}
+	}
+	scope := []map[string]any{{
+		"path": "service.go", "fileHash": strings.Repeat("a", 40),
+		"sizeBytes": int64(10), "contentComplete": true,
+	}}
+	validFinding := func() map[string]any {
+		return repositoryReviewTestFinding(map[string]any{
+			"severity": "high", "title": "Lost update", "symbol": "Save",
+			"file": "service.go", "message": "Concurrent saves overwrite state.",
+			"evidence": "Both writes use one version.", "impact": "Data is lost.",
+			"validation": map[string]any{
+				"status": "confirmed", "summary": "Traced two writers", "checks": []any{},
+			},
+		})
+	}
+	observe := func(finding map[string]any) error {
+		_, err := nativeRepositoryReviewObservation(
+			map[string]any{
+				"summary": "found", "reviewedFiles": []any{"service.go"},
+				"findings": []any{finding}, "residualRisks": []any{},
+			},
+			scope,
+			"review-a",
+			"challenge",
+			"response",
+		)
+		return err
+	}
+	if err := observe(validFinding()); err != nil {
+		t.Fatalf("valid matching contract was rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{
+			name: "missing match hints",
+			mutate: func(finding map[string]any) {
+				delete(finding, "match_hints")
+			},
+			want: "missing required field \"match_hints\"",
+		},
+		{
+			name: "extra match hint",
+			mutate: func(finding map[string]any) {
+				finding["match_hints"].(map[string]any)["remediation"] = "change the lock"
+			},
+			want: "outside the diagnosis-only contract",
+		},
+		{
+			name: "missing effort estimate field",
+			mutate: func(finding map[string]any) {
+				quick := finding["fix_effort"].(map[string]any)["quick"].(map[string]any)
+				delete(quick, "rationale")
+			},
+			want: "missing required field \"rationale\"",
+		},
+		{
+			name: "inconsistent effort class",
+			mutate: func(finding map[string]any) {
+				finding["fix_effort"].(map[string]any)["quick"].(map[string]any)["class"] = "tiny"
+			},
+			want: "class is inconsistent",
+		},
+		{
+			name: "quality smaller than quick",
+			mutate: func(finding map[string]any) {
+				quality := finding["fix_effort"].(map[string]any)["quality"].(map[string]any)
+				quality["loc_min"], quality["loc_max"], quality["class"] = 10, 15, "small"
+			},
+			want: "must not be smaller",
+		},
+		{
+			name: "too many anchors",
+			mutate: func(finding map[string]any) {
+				anchors := make([]any, maxMatchHintItemsForTest+1)
+				for index := range anchors {
+					anchors[index] = fmt.Sprintf("anchor-%d", index)
+				}
+				finding["match_hints"].(map[string]any)["source_anchors"] = anchors
+			},
+			want: "too many identity values",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			finding := validFinding()
+			test.mutate(finding)
+			if err := observe(finding); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("contract error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+const maxMatchHintItemsForTest = 32
+
 func TestNativeRepositoryReviewOptionalDefaultFallbackReviewerDoesNotBlockCoverage(t *testing.T) {
 	file := repoaudit.FileRef{
 		Path: "service.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 10,
@@ -129,7 +273,8 @@ func TestNativeRepositoryReviewOptionalDefaultFallbackReviewerDoesNotBlockCovera
 				"required": true, "valid": true, "scope": scope,
 				"model": map[string]any{"selected": "primary"},
 				"structured": map[string]any{
-					"summary": "reviewed", "reviewedFiles": []any{"service.go"}, "findings": []any{},
+					"summary": "reviewed", "reviewedFiles": []any{"service.go"},
+					"findings": []any{}, "residualRisks": []any{},
 				},
 			},
 			{
@@ -374,6 +519,11 @@ func TestNativeRepositoryReviewHelpersRejectUntrustedReferences(t *testing.T) {
 	}
 
 	gitCmd(t, workspace, "remote", "add", "origin", "git@github.com:Owner/Repo.git")
+	if identity, err := nativeRepositoryReviewIdentity(context.Background(), map[string]any{
+		"repository": "https://github.com/Owner/Repo.git",
+	}, exec); err != nil || identity != "owner/repo" {
+		t.Fatalf("canonical GitHub identity=%q err=%v", identity, err)
+	}
 	if _, err := nativeRepositoryReviewIdentity(context.Background(), map[string]any{
 		"repository": "different/repo",
 	}, exec); err == nil || !strings.Contains(err.Error(), "does not match") {
@@ -453,7 +603,8 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 		t.Fatal("missing single-review evidence was accepted")
 	}
 	structured := map[string]any{
-		"summary": "checked", "reviewedFiles": []any{"service.go"}, "findings": []any{},
+		"summary": "checked", "reviewedFiles": []any{"service.go"},
+		"findings": []any{}, "residualRisks": []any{},
 	}
 	observations, completed, err := nativeRepositoryReviewObservations(map[string]any{
 		"review": structured,
@@ -488,7 +639,10 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 		t.Fatalf("invalid observation scope error = %v", err)
 	}
 	if _, err := nativeRepositoryReviewObservation(
-		map[string]any{"findings": "bad"},
+		map[string]any{
+			"summary": "bad", "reviewedFiles": []any{},
+			"findings": "bad", "residualRisks": []any{},
+		},
 		[]map[string]any{fileMap},
 		"model",
 		"reviewer",
@@ -498,7 +652,8 @@ func TestNativeRepositoryReviewEvidenceContracts(t *testing.T) {
 		t.Fatalf("invalid findings error = %v", err)
 	}
 	if _, err := nativeRepositoryReviewObservation(map[string]any{
-		"reviewedFiles": []any{"service.go"}, "findings": []map[string]any{{"bad": make(chan int)}},
+		"summary": "bad", "reviewedFiles": []any{"service.go"},
+		"findings": []map[string]any{{"bad": make(chan int)}}, "residualRisks": []any{},
 	}, []map[string]any{fileMap}, "model", "reviewer", "raw"); err == nil {
 		t.Fatal("unserializable finding was accepted")
 	}

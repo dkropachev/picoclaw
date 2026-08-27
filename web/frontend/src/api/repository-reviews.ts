@@ -16,9 +16,67 @@ export type RepositoryReviewIssueDraftState =
 export type RepositoryReviewIssueDraftOrigin =
   | "ai_generated"
   | "linked"
+  | "discovered"
   | "legacy"
 export type RepositoryReviewIssueInstructionsMode = "default" | "custom"
-export type RepositoryReviewReportScope = "current" | "all"
+export type RepositoryReviewFindingsScope = "current" | "all"
+/** @deprecated Use RepositoryReviewFindingsScope. */
+export type RepositoryReviewReportScope = RepositoryReviewFindingsScope
+export type RepositoryReviewMatchState = "new" | "known" | "provisional"
+export type RepositoryFindingLifecycle =
+  | "open"
+  | "resolution_pending"
+  | "resolved"
+  | "regressed"
+  | "dismissed"
+export type RepositoryFindingIssueState =
+  | "none"
+  | "draft"
+  | "open"
+  | "closed"
+  | "unknown"
+export type RepositoryFindingValidationState =
+  | "not_requested"
+  | "pending"
+  | "running"
+  | "confirmed"
+  | "not_fixed"
+  | "inconclusive"
+  | "failed"
+export type RepositoryMappingJobState = "pending" | "running" | "completed"
+export type RepositoryReviewFixEffortClass =
+  | "tiny"
+  | "small"
+  | "medium"
+  | "large"
+  | "refactor"
+
+export const repositoryReviewDefaultIssuePrompt =
+  "Present the confirmed diagnosis concisely. Include evidence, impact, validation already performed, the exact location, and commit/blob provenance. Do not include a fix or advice."
+
+export interface RepositoryReviewMatchHints {
+  component: string
+  operation: string
+  failure_mode: string
+  trigger: string
+  violated_invariant: string
+  observable_outcome: string
+  related_symbols: string[]
+  source_anchors: string[]
+  distinguishing_facts: string[]
+}
+
+export interface RepositoryReviewFixEffortEstimate {
+  loc_min: number
+  loc_max: number
+  class: RepositoryReviewFixEffortClass | string
+  rationale: string
+}
+
+export interface RepositoryReviewFixEffort {
+  quick: RepositoryReviewFixEffortEstimate
+  quality: RepositoryReviewFixEffortEstimate
+}
 
 export interface RepositoryReviewFileRef {
   path: string
@@ -76,12 +134,19 @@ export interface RepositoryReviewFinding {
   evidence: string
   impact: string
   validation: RepositoryReviewValidation
+  match_hints?: RepositoryReviewMatchHints
+  fix_effort?: RepositoryReviewFixEffort
   context_ids: string[]
   models: string[]
   observation_count: number
   observations?: RepositoryReviewFindingObservation[]
   status: RepositoryReviewFindingStatus
   issue_draft_id?: string
+  repository_finding_id?: string
+  repository_match_state?: RepositoryReviewMatchState
+  target_branch?: string
+  advertised_default_branch?: string
+  target_is_default?: boolean
   version: number
   created_at: string
   updated_at: string
@@ -99,6 +164,8 @@ export interface RepositoryReviewFindingObservation {
   evidence: string
   impact: string
   validation: RepositoryReviewValidation
+  match_hints?: RepositoryReviewMatchHints
+  fix_effort?: RepositoryReviewFixEffort
 }
 
 export interface RepositoryReviewRun {
@@ -117,6 +184,9 @@ export interface RepositoryReviewRun {
   accepted_findings: number
   rejected_findings: number
   models: string[]
+  target_branch?: string
+  advertised_default_branch?: string
+  target_is_default?: boolean
   completed_at: string
 }
 
@@ -130,11 +200,15 @@ export interface RepositoryReviewIssueDraft {
   instructions_mode?: RepositoryReviewIssueInstructionsMode
   generator_model?: string
   generator_account?: string
+  generator_profile_id?: string
+  generator_profile_version?: number
   attempt_generation_id?: string
   attempt_resolved_instructions?: string
   attempt_instructions_mode?: RepositoryReviewIssueInstructionsMode
   attempt_generator_model?: string
   attempt_generator_account?: string
+  attempt_generator_profile_id?: string
+  attempt_generator_profile_version?: number
   generation_error?: string
   canonical?: boolean
   read_only?: boolean
@@ -149,6 +223,7 @@ export interface RepositoryReviewIssueDraft {
   state: RepositoryReviewIssueDraftState
   external_id?: string
   external_url?: string
+  external_state?: "open" | "closed" | string
   version: number
   created_at: string
   updated_at: string
@@ -172,22 +247,149 @@ export interface RepositoryReviewFindingDetail {
   automation: RepositoryReviewAutomation
   repository?: RepositoryReviewSummary
   finding: RepositoryReviewFinding
+  action_finding?: RepositoryReviewFinding
   contexts: RepositoryReviewFindingContext[]
   issue?: RepositoryReviewIssueDraft
+  repository_finding?: RepositoryFinding
+  occurrences?: RepositoryReviewFinding[]
+  possible_duplicate_findings?: RepositoryFinding[]
   capabilities?: RepositoryReviewCapabilities
 }
 
-export interface RepositoryReviewReportPage {
+export interface RepositoryFindingPathSymbol {
+  review_finding_id: string
+  commit_sha: string
+  path: string
+  symbol?: string
+  default_branch_verified?: boolean
+  observed_at: string
+}
+
+export interface RepositoryFindingPossibleDuplicate {
+  candidate_id: string
+  relation: string
+  confidence: number
+  matching_anchors?: string[]
+  conflicting_anchors?: string[]
+  explanation?: string
+  created_at: string
+}
+
+export interface RepositoryFindingIssueAssociation {
+  external_id?: string
+  url?: string
+  origin?: RepositoryReviewIssueDraftOrigin
+  state: RepositoryFindingIssueState
+  title?: string
+  snapshot_at?: string
+  conflict?: boolean
+  conflict_urls?: string[]
+}
+
+export interface RepositoryFindingResolution {
+  outcome: RepositoryFindingValidationState
+  fix_commit_sha?: string
+  fix_commit_time?: string
+  validated_at: string
+  first_containing_tag?: string
+  summary?: string
+}
+
+export interface RepositoryFinding {
+  id: string
+  repository: string
+  canonical_title: string
+  canonical_severity: string
+  match_hints?: RepositoryReviewMatchHints
+  fix_effort?: RepositoryReviewFixEffort
+  review_finding_ids: string[]
+  occurrence_count?: number
+  found_commits: string[]
+  found_commit_count?: number
+  path_symbol_history: RepositoryFindingPathSymbol[]
+  match_state: RepositoryReviewMatchState
+  lifecycle: RepositoryFindingLifecycle
+  issue: RepositoryFindingIssueAssociation
+  possible_duplicates?: RepositoryFindingPossibleDuplicate[]
+  validation_state: RepositoryFindingValidationState
+  fix_commit_sha?: string
+  fix_commit_time?: string
+  first_containing_tag?: string
+  resolution_history?: RepositoryFindingResolution[]
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryMappingModelSnapshot {
+  profile_id?: string
+  profile_version?: number
+  prompt?: string
+  model?: string
+  account?: string
+}
+
+export interface RepositoryMappingAdjudication {
+  decision: string
+  candidate_id?: string
+  confidence: number
+  matching_anchors?: string[]
+  conflicting_anchors?: string[]
+  explanation?: string
+}
+
+export interface RepositoryMappingJob {
+  id: string
+  review_finding_id: string
+  state: RepositoryMappingJobState
+  repository_finding_id?: string
+  model_snapshot?: RepositoryMappingModelSnapshot
+  adjudication?: RepositoryMappingAdjudication
+  attempts: number
+  error?: string
+  reserved_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryValidationJob {
+  id: string
+  repository_finding_id: string
+  state: RepositoryFindingValidationState
+  model_snapshot?: RepositoryMappingModelSnapshot
+  candidate_commits?: string[]
+  attempts: number
+  error?: string
+  reserved_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryFindingMutationResponse {
+  automation?: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  repository_finding?: RepositoryFinding
+  validation_jobs?: RepositoryValidationJob[]
+}
+
+export interface RepositoryReviewFindingsPage {
   automation: RepositoryReviewAutomation
   repository?: RepositoryReviewSummary
   findings: RepositoryReviewFinding[]
+  repository_findings: RepositoryFinding[]
   contexts?: RepositoryReviewFindingContext[]
-  scope: RepositoryReviewReportScope
+  scope: RepositoryReviewFindingsScope
   offset: number
   total: number
   next_offset?: number
+  repository_finding_total: number
+  repository_finding_offset?: number
+  next_repository_finding_offset?: number
   capabilities?: RepositoryReviewCapabilities
 }
+
+/** @deprecated Use RepositoryReviewFindingsPage. */
+export type RepositoryReviewReportPage = RepositoryReviewFindingsPage
 
 export interface RepositoryReviewIssuePage {
   automation: RepositoryReviewAutomation
@@ -228,6 +430,7 @@ export interface RepositoryReviewIssueMutationResponse {
   generation_id?: string
   issues?: RepositoryReviewIssueDraft[]
   results?: RepositoryReviewMutationResult[]
+  result?: RepositoryReviewMutationResult
 }
 
 export interface RepositoryReviewIssueCandidate {
@@ -240,6 +443,8 @@ export interface RepositoryReviewIssueCandidate {
   score?: number
   rank?: number
   explanation?: string
+  matching_anchors?: string[]
+  conflicting_anchors?: string[]
 }
 
 export interface RepositoryReviewIssueCandidatesResponse {
@@ -248,6 +453,7 @@ export interface RepositoryReviewIssueCandidatesResponse {
   candidates: RepositoryReviewIssueCandidate[]
   generator_model?: string
   generator_account?: string
+  discovered_issue?: RepositoryReviewIssueDraft
 }
 
 export interface RepositoryReviewSummary {
@@ -258,6 +464,7 @@ export interface RepositoryReviewSummary {
   review_version: number
   last_commit_sha?: string
   finding_count?: number
+  repository_finding_count?: number
   open_finding_count?: number
   issue_draft_count?: number
   unsupported_count?: number
@@ -273,6 +480,9 @@ export interface RepositoryReviewState extends RepositoryReviewSummary {
   contexts: RepositoryReviewFindingContext[]
   runs: RepositoryReviewRun[]
   issue_drafts: RepositoryReviewIssueDraft[]
+  repository_findings: RepositoryFinding[]
+  mapping_jobs: RepositoryMappingJob[]
+  validation_jobs: RepositoryValidationJob[]
   finding_offset?: number
   finding_total?: number
   next_finding_offset?: number
@@ -445,6 +655,7 @@ export interface RepositoryReviewProfileConfig {
   name: string
   account_ref: string
   review_focus: string
+  issue_prompt: string
   scope_policy: RepositoryReviewScopePolicy
   reviewer_model: string
   issue_writer_model?: string
@@ -457,6 +668,7 @@ export interface RepositoryReviewProfileConfig {
 }
 
 export interface RepositoryReviewProfile extends RepositoryReviewProfileConfig {
+  schema_version?: number
   id: string
   version: number
   created_at: string
@@ -487,6 +699,9 @@ export interface RepositoryReviewAutomation extends RepositoryReviewAutomationCo
   account_limits: RepositoryReviewAccountSnapshot[]
   scope_plan?: RepositoryReviewScopePlan
   resolved_commit_sha?: string
+  resolved_target_branch?: string
+  advertised_default_branch?: string
+  target_is_default?: boolean
   started_at?: string
   completed_at?: string
   created_at: string
@@ -775,26 +990,26 @@ export async function getRepositoryReviewAutomation(
   return automationFromMutation(value)
 }
 
-export async function getRepositoryReviewAutomationReport(
+export async function getRepositoryReviewAutomationFindings(
   automationID: string,
   input: {
-    scope?: RepositoryReviewReportScope
+    scope?: RepositoryReviewFindingsScope
     offset?: number
     limit?: number
   } = {},
   signal?: AbortSignal,
-): Promise<RepositoryReviewReportPage> {
+): Promise<RepositoryReviewFindingsPage> {
   const params = new URLSearchParams()
   params.set("scope", input.scope ?? "current")
   if (input.offset) params.set("offset", String(input.offset))
   if (input.limit) params.set("limit", String(input.limit))
   const value = await requestJSON<
-    Partial<RepositoryReviewReportPage> & {
+    Partial<RepositoryReviewFindingsPage> & {
       finding_total?: number
       next_finding_offset?: number
     }
   >(
-    `${automationPath(automationID)}/report?${params.toString()}`,
+    `${automationPath(automationID)}/findings?${params.toString()}`,
     undefined,
     signal,
   )
@@ -805,12 +1020,32 @@ export async function getRepositoryReviewAutomationReport(
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
     findings: (value.findings ?? []).map(normalizeFinding),
+    repository_findings: (value.repository_findings ?? []).map(
+      normalizeRepositoryFinding,
+    ),
     contexts: (value.contexts ?? []).map(normalizeFindingContext),
     scope: value.scope === "all" ? "all" : "current",
     offset: value.offset ?? input.offset ?? 0,
     total: value.total ?? value.finding_total ?? value.findings?.length ?? 0,
     next_offset: value.next_offset ?? value.next_finding_offset,
+    repository_finding_total:
+      value.repository_finding_total ?? value.repository_findings?.length ?? 0,
+    repository_finding_offset: value.repository_finding_offset ?? 0,
+    next_repository_finding_offset: value.next_repository_finding_offset,
   }
+}
+
+/** @deprecated Use getRepositoryReviewAutomationFindings. */
+export async function getRepositoryReviewAutomationReport(
+  automationID: string,
+  input: {
+    scope?: RepositoryReviewReportScope
+    offset?: number
+    limit?: number
+  } = {},
+  signal?: AbortSignal,
+): Promise<RepositoryReviewFindingsPage> {
+  return getRepositoryReviewAutomationFindings(automationID, input, signal)
 }
 
 export async function getRepositoryReviewAutomationFinding(
@@ -824,6 +1059,82 @@ export async function getRepositoryReviewAutomationFinding(
     }
   >(automationFindingPath(automationID, findingID), undefined, signal)
   return normalizeFindingDetail(value)
+}
+
+export async function resolveRepositoryReviewPossibleDuplicate(
+  automationID: string,
+  repositoryFindingID: string,
+  input: {
+    candidate_id: string
+    decision: "merge" | "distinct"
+    expected_provisional_version: number
+    expected_candidate_version?: number
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryFindingMutationResponse> {
+  const value = await requestJSON<RepositoryFindingMutationResponse>(
+    `${automationPath(automationID)}/repository-findings/${encodeURIComponent(repositoryFindingID)}/duplicates`,
+    jsonMutation("POST", input),
+    signal,
+  )
+  return normalizeRepositoryFindingMutation(value)
+}
+
+export async function updateRepositoryReviewFindingLifecycle(
+  automationID: string,
+  repositoryFindingID: string,
+  input: {
+    lifecycle: "open" | "dismissed"
+    expected_version: number
+  },
+  signal?: AbortSignal,
+): Promise<RepositoryFindingMutationResponse> {
+  const value = await requestJSON<RepositoryFindingMutationResponse>(
+    `${automationPath(automationID)}/repository-findings/${encodeURIComponent(repositoryFindingID)}`,
+    jsonMutation("PATCH", input),
+    signal,
+  )
+  return normalizeRepositoryFindingMutation(value)
+}
+
+export async function postRepositoryReviewFinding(
+  automationID: string,
+  findingID: string,
+  input: { expected_version: number; instructions?: string },
+  signal?: AbortSignal,
+): Promise<RepositoryReviewIssueMutationResponse> {
+  const value = await requestJSON<RepositoryReviewIssueMutationResponse>(
+    `${automationFindingPath(automationID, findingID)}/post`,
+    jsonMutation("POST", input),
+    signal,
+  )
+  return normalizeIssueMutationResponse(value)
+}
+
+export async function reserveRepositoryReviewValidations(
+  automationID: string,
+  repositoryFindingIDs: string[],
+  signal?: AbortSignal,
+): Promise<RepositoryFindingMutationResponse> {
+  const value = await requestJSON<RepositoryFindingMutationResponse>(
+    `${automationPath(automationID)}/repository-findings/validations`,
+    jsonMutation("POST", { repository_finding_ids: repositoryFindingIDs }),
+    signal,
+  )
+  return normalizeRepositoryFindingMutation(value)
+}
+
+export async function syncRepositoryReviewFinding(
+  automationID: string,
+  repositoryFindingID: string,
+  signal?: AbortSignal,
+): Promise<RepositoryFindingMutationResponse> {
+  const value = await requestJSON<RepositoryFindingMutationResponse>(
+    `${automationPath(automationID)}/repository-findings/${encodeURIComponent(repositoryFindingID)}/sync`,
+    jsonMutation("POST", {}),
+    signal,
+  )
+  return normalizeRepositoryFindingMutation(value)
 }
 
 export async function updateRepositoryReviewAutomationFinding(
@@ -1026,7 +1337,12 @@ export async function findRepositoryReviewIssueCandidates(
     candidates: (value.candidates ?? []).map((candidate) => ({
       ...candidate,
       labels: candidate.labels ?? [],
+      matching_anchors: candidate.matching_anchors ?? [],
+      conflicting_anchors: candidate.conflicting_anchors ?? [],
     })),
+    discovered_issue: value.discovered_issue
+      ? normalizeIssueDraft(value.discovered_issue)
+      : undefined,
   }
 }
 
@@ -1203,6 +1519,13 @@ function normalizeRepositoryReviewState(
       models: run.models ?? [],
     })),
     issue_drafts: (value.issue_drafts ?? []).map(normalizeIssueDraft),
+    repository_findings: (value.repository_findings ?? []).map(
+      normalizeRepositoryFinding,
+    ),
+    mapping_jobs: (value.mapping_jobs ?? []).map(normalizeRepositoryMappingJob),
+    validation_jobs: (value.validation_jobs ?? []).map(
+      normalizeRepositoryValidationJob,
+    ),
   }
 }
 
@@ -1219,7 +1542,25 @@ function normalizeFinding(
     ...finding,
     context_ids: finding.context_ids ?? [],
     models: finding.models ?? [],
-    observations: finding.observations ?? [],
+    observations: (finding.observations ?? []).map((observation) => ({
+      ...observation,
+      match_hints: observation.match_hints
+        ? normalizeMatchHints(observation.match_hints)
+        : undefined,
+      fix_effort: observation.fix_effort
+        ? normalizeFixEffort(observation.fix_effort)
+        : undefined,
+      validation: {
+        ...observation.validation,
+        checks: observation.validation?.checks ?? [],
+      },
+    })),
+    match_hints: finding.match_hints
+      ? normalizeMatchHints(finding.match_hints)
+      : undefined,
+    fix_effort: finding.fix_effort
+      ? normalizeFixEffort(finding.fix_effort)
+      : undefined,
     validation: {
       ...finding.validation,
       checks: finding.validation?.checks ?? [],
@@ -1243,6 +1584,94 @@ function normalizeIssueDraft(
   }
 }
 
+function normalizeMatchHints(
+  hints: RepositoryReviewMatchHints,
+): RepositoryReviewMatchHints {
+  return {
+    ...hints,
+    component: hints.component ?? "",
+    operation: hints.operation ?? "",
+    failure_mode: hints.failure_mode ?? "",
+    trigger: hints.trigger ?? "",
+    violated_invariant: hints.violated_invariant ?? "",
+    observable_outcome: hints.observable_outcome ?? "",
+    related_symbols: hints.related_symbols ?? [],
+    source_anchors: hints.source_anchors ?? [],
+    distinguishing_facts: hints.distinguishing_facts ?? [],
+  }
+}
+
+function normalizeFixEffort(
+  effort: RepositoryReviewFixEffort,
+): RepositoryReviewFixEffort {
+  return {
+    quick: normalizeFixEffortEstimate(effort.quick),
+    quality: normalizeFixEffortEstimate(effort.quality),
+  }
+}
+
+function normalizeFixEffortEstimate(
+  estimate: RepositoryReviewFixEffortEstimate | undefined,
+): RepositoryReviewFixEffortEstimate {
+  return {
+    loc_min: estimate?.loc_min ?? 0,
+    loc_max: estimate?.loc_max ?? 0,
+    class: estimate?.class ?? "",
+    rationale: estimate?.rationale ?? "",
+  }
+}
+
+function normalizeRepositoryFinding(
+  finding: RepositoryFinding,
+): RepositoryFinding {
+  return {
+    ...finding,
+    review_finding_ids: finding.review_finding_ids ?? [],
+    found_commits: finding.found_commits ?? [],
+    path_symbol_history: finding.path_symbol_history ?? [],
+    match_hints: finding.match_hints
+      ? normalizeMatchHints(finding.match_hints)
+      : undefined,
+    fix_effort: finding.fix_effort
+      ? normalizeFixEffort(finding.fix_effort)
+      : undefined,
+    issue: {
+      ...finding.issue,
+      state: finding.issue?.state ?? "none",
+      conflict_urls: finding.issue?.conflict_urls ?? [],
+    },
+    possible_duplicates: (finding.possible_duplicates ?? []).map(
+      (candidate) => ({
+        ...candidate,
+        matching_anchors: candidate.matching_anchors ?? [],
+        conflicting_anchors: candidate.conflicting_anchors ?? [],
+      }),
+    ),
+    resolution_history: finding.resolution_history ?? [],
+  }
+}
+
+function normalizeRepositoryMappingJob(
+  job: RepositoryMappingJob,
+): RepositoryMappingJob {
+  return {
+    ...job,
+    adjudication: job.adjudication
+      ? {
+          ...job.adjudication,
+          matching_anchors: job.adjudication.matching_anchors ?? [],
+          conflicting_anchors: job.adjudication.conflicting_anchors ?? [],
+        }
+      : undefined,
+  }
+}
+
+function normalizeRepositoryValidationJob(
+  job: RepositoryValidationJob,
+): RepositoryValidationJob {
+  return { ...job, candidate_commits: job.candidate_commits ?? [] }
+}
+
 function normalizeFindingDetail(
   value: Partial<RepositoryReviewFindingDetail> & {
     draft?: RepositoryReviewIssueDraft
@@ -1255,7 +1684,17 @@ function normalizeFindingDetail(
       ? normalizeRepositoryReviewSummary(value.repository)
       : undefined,
     finding: normalizeFinding(value.finding!),
+    action_finding: value.action_finding
+      ? normalizeFinding(value.action_finding)
+      : undefined,
     contexts: (value.contexts ?? []).map(normalizeFindingContext),
+    repository_finding: value.repository_finding
+      ? normalizeRepositoryFinding(value.repository_finding)
+      : undefined,
+    occurrences: value.occurrences?.map(normalizeFinding),
+    possible_duplicate_findings: value.possible_duplicate_findings?.map(
+      normalizeRepositoryFinding,
+    ),
     issue: value.issue
       ? normalizeIssueDraft(value.issue)
       : value.draft
@@ -1296,6 +1735,24 @@ function normalizeIssueMutationResponse(
     finding: value.finding ? normalizeFinding(value.finding) : undefined,
     issues: value.issues?.map(normalizeIssueDraft),
     results: value.results ?? [],
+  }
+}
+
+function normalizeRepositoryFindingMutation(
+  value: RepositoryFindingMutationResponse,
+): RepositoryFindingMutationResponse {
+  return {
+    ...value,
+    automation: value.automation
+      ? normalizeAutomation(value.automation)
+      : undefined,
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    repository_finding: value.repository_finding
+      ? normalizeRepositoryFinding(value.repository_finding)
+      : undefined,
+    validation_jobs: value.validation_jobs ?? [],
   }
 }
 
@@ -1342,6 +1799,8 @@ function normalizeProfile(
     name: profile.name ?? "Review profile",
     account_ref: profile.account_ref ?? "",
     review_focus: profile.review_focus ?? "",
+    issue_prompt:
+      profile.issue_prompt?.trim() || repositoryReviewDefaultIssuePrompt,
     reviewer_model: profile.reviewer_model ?? "",
     issue_writer_model: profile.issue_writer_model ?? "",
     force: profile.force ?? false,
@@ -1604,6 +2063,7 @@ function repositoryReviewProfileConfigPayload(
     name: input.name,
     account_ref: input.account_ref,
     review_focus: input.review_focus,
+    issue_prompt: input.issue_prompt,
     scope_policy: input.scope_policy,
     reviewer_model: input.reviewer_model,
     ...(input.issue_writer_model !== undefined

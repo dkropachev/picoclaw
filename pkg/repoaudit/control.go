@@ -129,49 +129,52 @@ type RepositoryReviewAccountLimitSnapshot struct {
 // RepositoryReviewAutomation is independent of a RepositoryState and may be
 // created before the first review plan, run, or finding exists.
 type RepositoryReviewAutomation struct {
-	SchemaVersion         int                                    `json:"schema_version"`
-	ID                    string                                 `json:"id"`
-	Version               int64                                  `json:"version"`
-	ProfileID             string                                 `json:"profile_id,omitempty"`
-	ProfileVersion        int64                                  `json:"profile_version,omitempty"`
-	AccountRef            string                                 `json:"account_ref,omitempty"`
-	EffectiveAccountRef   string                                 `json:"effective_account_ref,omitempty"`
-	Name                  string                                 `json:"name"`
-	Repository            string                                 `json:"repository"`
-	Ref                   string                                 `json:"ref,omitempty"`
-	ResolvedCommitSHA     string                                 `json:"resolved_commit_sha,omitempty"`
-	Target                string                                 `json:"target"`
-	ReviewFocus           string                                 `json:"review_focus"`
-	ScopePolicy           RepositoryReviewScopePolicy            `json:"scope_policy"`
-	ScopePlan             RepositoryReviewScopePlan              `json:"scope_plan"`
-	ReviewerModels        []string                               `json:"reviewer_models"`
-	IssueWriterModel      string                                 `json:"issue_writer_model"`
-	CompareModels         bool                                   `json:"compare_models"`
-	ModelPrices           map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
-	Force                 bool                                   `json:"force"`
-	AutoContinue          bool                                   `json:"auto_continue"`
-	MaxFilesPerRun        int                                    `json:"max_files_per_run"`
-	MaxContentBytes       int64                                  `json:"max_content_bytes"`
-	MaxParallelChildren   int                                    `json:"max_parallel_children"`
-	EstimatedOutputTokens int                                    `json:"-"`
-	BudgetPolicy          RepositoryReviewBudgetPolicy           `json:"budget"`
-	Status                RepositoryReviewAutomationStatus       `json:"status"`
-	PauseReason           RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
-	PauseDetail           string                                 `json:"pause_detail,omitempty"`
-	RequestedPauseReason  RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
-	RequestedPauseDetail  string                                 `json:"requested_pause_detail,omitempty"`
-	ActiveRunID           string                                 `json:"active_run_id,omitempty"`
-	RunIDs                []string                               `json:"run_ids"`
-	Usage                 RepositoryReviewTokenUsage             `json:"usage"`
-	EstimatedCostUSD      float64                                `json:"estimated_cost_usd"`
-	Progress              RepositoryReviewProgress               `json:"progress"`
-	ModelStats            map[string]RepositoryReviewModelStats  `json:"model_stats"`
-	ModelCoverageSketches map[string]string                      `json:"model_coverage_sketches,omitempty"`
-	AccountLimitSnapshots []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
-	StartedAt             time.Time                              `json:"started_at,omitempty"`
-	CompletedAt           time.Time                              `json:"completed_at,omitempty"`
-	CreatedAt             time.Time                              `json:"created_at"`
-	UpdatedAt             time.Time                              `json:"updated_at"`
+	SchemaVersion           int                                    `json:"schema_version"`
+	ID                      string                                 `json:"id"`
+	Version                 int64                                  `json:"version"`
+	ProfileID               string                                 `json:"profile_id,omitempty"`
+	ProfileVersion          int64                                  `json:"profile_version,omitempty"`
+	AccountRef              string                                 `json:"account_ref,omitempty"`
+	EffectiveAccountRef     string                                 `json:"effective_account_ref,omitempty"`
+	Name                    string                                 `json:"name"`
+	Repository              string                                 `json:"repository"`
+	Ref                     string                                 `json:"ref,omitempty"`
+	ResolvedCommitSHA       string                                 `json:"resolved_commit_sha,omitempty"`
+	ResolvedTargetBranch    string                                 `json:"resolved_target_branch,omitempty"`
+	AdvertisedDefaultBranch string                                 `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault         bool                                   `json:"target_is_default"`
+	Target                  string                                 `json:"target"`
+	ReviewFocus             string                                 `json:"review_focus"`
+	ScopePolicy             RepositoryReviewScopePolicy            `json:"scope_policy"`
+	ScopePlan               RepositoryReviewScopePlan              `json:"scope_plan"`
+	ReviewerModels          []string                               `json:"reviewer_models"`
+	IssueWriterModel        string                                 `json:"issue_writer_model"`
+	CompareModels           bool                                   `json:"compare_models"`
+	ModelPrices             map[string]RepositoryReviewModelPrice  `json:"model_prices,omitempty"`
+	Force                   bool                                   `json:"force"`
+	AutoContinue            bool                                   `json:"auto_continue"`
+	MaxFilesPerRun          int                                    `json:"max_files_per_run"`
+	MaxContentBytes         int64                                  `json:"max_content_bytes"`
+	MaxParallelChildren     int                                    `json:"max_parallel_children"`
+	EstimatedOutputTokens   int                                    `json:"-"`
+	BudgetPolicy            RepositoryReviewBudgetPolicy           `json:"budget"`
+	Status                  RepositoryReviewAutomationStatus       `json:"status"`
+	PauseReason             RepositoryReviewPauseReason            `json:"pause_reason,omitempty"`
+	PauseDetail             string                                 `json:"pause_detail,omitempty"`
+	RequestedPauseReason    RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
+	RequestedPauseDetail    string                                 `json:"requested_pause_detail,omitempty"`
+	ActiveRunID             string                                 `json:"active_run_id,omitempty"`
+	RunIDs                  []string                               `json:"run_ids"`
+	Usage                   RepositoryReviewTokenUsage             `json:"usage"`
+	EstimatedCostUSD        float64                                `json:"estimated_cost_usd"`
+	Progress                RepositoryReviewProgress               `json:"progress"`
+	ModelStats              map[string]RepositoryReviewModelStats  `json:"model_stats"`
+	ModelCoverageSketches   map[string]string                      `json:"model_coverage_sketches,omitempty"`
+	AccountLimitSnapshots   []RepositoryReviewAccountLimitSnapshot `json:"account_limits"`
+	StartedAt               time.Time                              `json:"started_at,omitempty"`
+	CompletedAt             time.Time                              `json:"completed_at,omitempty"`
+	CreatedAt               time.Time                              `json:"created_at"`
+	UpdatedAt               time.Time                              `json:"updated_at"`
 }
 
 func (s Store) ListAutomations(ctx context.Context) ([]RepositoryReviewAutomation, error) {
@@ -571,6 +574,8 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.Repository = strings.TrimSpace(automation.Repository)
 	automation.Ref = strings.TrimSpace(automation.Ref)
 	automation.ResolvedCommitSHA = strings.ToLower(strings.TrimSpace(automation.ResolvedCommitSHA))
+	automation.ResolvedTargetBranch = strings.TrimSpace(automation.ResolvedTargetBranch)
+	automation.AdvertisedDefaultBranch = strings.TrimSpace(automation.AdvertisedDefaultBranch)
 	automation.Target = strings.TrimSpace(automation.Target)
 	automation.ReviewFocus = strings.TrimSpace(automation.ReviewFocus)
 	automation.IssueWriterModel = strings.TrimSpace(automation.IssueWriterModel)
@@ -593,6 +598,9 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	}
 	if automation.Target == "" {
 		automation.Target = "all"
+	}
+	if automation.Ref == "" {
+		automation.TargetIsDefault = true
 	}
 	if automation.MaxFilesPerRun == 0 {
 		automation.MaxFilesPerRun = defaultAutomationMaxFilesPerRun
@@ -655,6 +663,19 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 }
 
 func validateAutomation(automation RepositoryReviewAutomation) error {
+	for _, branch := range []string{automation.ResolvedTargetBranch, automation.AdvertisedDefaultBranch} {
+		if branch == "" {
+			continue
+		}
+		if normalized, err := NormalizeRepositoryReviewBranch(branch); err != nil || normalized != branch {
+			return ErrInvalidAutomation
+		}
+	}
+	if automation.ResolvedTargetBranch != "" && automation.AdvertisedDefaultBranch != "" &&
+		automation.TargetIsDefault !=
+			(automation.ResolvedTargetBranch == automation.AdvertisedDefaultBranch) {
+		return ErrInvalidAutomation
+	}
 	if automation.SchemaVersion != RepositoryReviewAutomationSchemaVersion ||
 		!validAutomationID(automation.ID) || automation.Version < 1 ||
 		!validBoundedText(automation.Name, 256) ||
@@ -663,6 +684,8 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		!validOptionalAutomationText(automation.Ref, 1024) ||
 		(automation.ResolvedCommitSHA != "" &&
 			!validRepositoryReviewCommitSHA(automation.ResolvedCommitSHA)) ||
+		!validOptionalAutomationText(automation.ResolvedTargetBranch, maxRepositoryReviewBranchBytes) ||
+		!validOptionalAutomationText(automation.AdvertisedDefaultBranch, maxRepositoryReviewBranchBytes) ||
 		!validOptionalAutomationText(automation.AccountRef, 256) ||
 		!validOptionalAutomationText(automation.EffectiveAccountRef, 256) ||
 		!validBoundedText(automation.Target, 4096) ||
@@ -837,35 +860,28 @@ func canonicalAutomationRepository(repository string) string {
 	if repository == "" {
 		return ""
 	}
+	if github := GitHubRepositoryIdentity(repository); github != "" {
+		return github
+	}
 	if filepath.IsAbs(repository) {
 		return filepath.Clean(repository)
 	}
 	if parsed, err := url.Parse(repository); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		path := strings.Trim(parsed.Path, "/")
-		if strings.HasSuffix(strings.ToLower(path), ".git") {
-			path = path[:len(path)-len(".git")]
-		}
-		if strings.EqualFold(parsed.Hostname(), "github.com") && path != "" {
-			return strings.ToLower(path)
-		}
-		return strings.ToLower(parsed.Hostname() + "/" + path)
+		pathValue := strings.Trim(strings.TrimSuffix(parsed.Path, "/"), "/")
+		pathValue = strings.TrimSuffix(pathValue, ".git")
+		return strings.ToLower(parsed.Hostname() + "/" + pathValue)
 	}
-	lower := strings.ToLower(repository)
-	if colon := strings.Index(repository, ":"); colon > 0 &&
-		strings.Contains(repository[:colon], "@") {
-		identity, remotePath := repository[:colon], repository[colon+1:]
-		_, host, found := strings.Cut(identity, "@")
-		if found && strings.TrimSpace(host) != "" {
-			repository = strings.TrimSpace(host) + "/" + remotePath
+	if identity, remotePath, ok := strings.Cut(repository, ":"); ok {
+		host := identity
+		if _, parsedHost, hasUser := strings.Cut(identity, "@"); hasUser {
+			host = parsedHost
 		}
-	} else if separator := strings.Index(lower, "github.com:"); separator >= 0 {
-		repository = repository[separator+len("github.com:"):]
+		if strings.TrimSpace(host) != "" && strings.TrimSpace(remotePath) != "" {
+			return strings.ToLower(strings.TrimSpace(host) + "/" +
+				strings.TrimSuffix(strings.Trim(remotePath, "/"), ".git"))
+		}
 	}
-	repository = strings.Trim(repository, "/")
-	if strings.HasSuffix(strings.ToLower(repository), ".git") {
-		repository = repository[:len(repository)-len(".git")]
-	}
-	return strings.ToLower(repository)
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(repository, "/"), ".git"))
 }
 
 func validateBudgetPolicy(policy RepositoryReviewBudgetPolicy) error {

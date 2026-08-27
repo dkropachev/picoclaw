@@ -13,9 +13,9 @@ import {
   getRepositoryReview,
   getRepositoryReviewAutomation,
   getRepositoryReviewAutomationFinding,
+  getRepositoryReviewAutomationFindings,
   getRepositoryReviewAutomationIssue,
   getRepositoryReviewAutomationOptions,
-  getRepositoryReviewAutomationReport,
   getRepositoryReviewCommitOptions,
   getRepositoryReviewProfile,
   listRepositoryReviewAutomationIssues,
@@ -26,6 +26,7 @@ import {
   listRepositoryReviews,
   pauseRepositoryReviewAutomation,
   publishRepositoryReviewIssueDraft,
+  repositoryReviewDefaultIssuePrompt,
   restartRepositoryReviewAutomation,
   resumeRepositoryReviewAutomation,
   startRepositoryReviewAutomation,
@@ -208,6 +209,9 @@ describe("repository review API", () => {
         contexts: null,
         runs: null,
         issue_drafts: null,
+        repository_findings: null,
+        mapping_jobs: null,
+        validation_jobs: null,
       }),
     )
 
@@ -217,6 +221,9 @@ describe("repository review API", () => {
       contexts: [],
       runs: [],
       issue_drafts: [],
+      repository_findings: [],
+      mapping_jobs: [],
+      validation_jobs: [],
     })
   })
 
@@ -417,6 +424,7 @@ describe("repository review API", () => {
         {
           id: "rrpf_one",
           issue_writer_model: "",
+          issue_prompt: repositoryReviewDefaultIssuePrompt,
           max_parallel_children: 8,
         },
       ],
@@ -435,6 +443,7 @@ describe("repository review API", () => {
       name: "Core bugs",
       account_ref: "",
       review_focus: "Find correctness bugs.",
+      issue_prompt: "Present confirmed diagnosis with evidence.",
       scope_policy: {
         code_types: ["hotpath-code", "code"],
         include_folders: ["pkg"],
@@ -771,7 +780,7 @@ describe("repository review API", () => {
     )
   })
 
-  it("uses automation-owned routed detail and report endpoints", async () => {
+  it("uses automation-owned detail and canonical findings endpoints", async () => {
     const automation = {
       id: "auto/slash",
       repository: "owner/repo",
@@ -792,6 +801,18 @@ describe("repository review API", () => {
         jsonResponse({
           automation,
           findings: [finding],
+          repository_findings: [
+            {
+              id: "rrf/one",
+              canonical_title: "Cross-commit finding",
+              review_finding_ids: null,
+              found_commits: null,
+              path_symbol_history: null,
+              issue: { state: "none", conflict_urls: null },
+              possible_duplicates: null,
+              resolution_history: null,
+            },
+          ],
           contexts: [],
           scope: "all",
           offset: 50,
@@ -809,12 +830,24 @@ describe("repository review API", () => {
       issue_writer_model: "writer",
     })
     await expect(
-      getRepositoryReviewAutomationReport("auto/slash", {
+      getRepositoryReviewAutomationFindings("auto/slash", {
         scope: "all",
         offset: 50,
         limit: 50,
       }),
-    ).resolves.toMatchObject({ scope: "all", offset: 50, total: 51 })
+    ).resolves.toMatchObject({
+      scope: "all",
+      offset: 50,
+      total: 51,
+      repository_finding_total: 1,
+      repository_findings: [
+        {
+          id: "rrf/one",
+          review_finding_ids: [],
+          issue: { state: "none", conflict_urls: [] },
+        },
+      ],
+    })
     await expect(
       getRepositoryReviewAutomationFinding("auto/slash", "finding/slash"),
     ).resolves.toMatchObject({
@@ -828,7 +861,7 @@ describe("repository review API", () => {
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
       2,
-      "/api/repository-reviews/automations/auto%2Fslash/report?scope=all&offset=50&limit=50",
+      "/api/repository-reviews/automations/auto%2Fslash/findings?scope=all&offset=50&limit=50",
       { signal: undefined },
     )
     expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
@@ -838,7 +871,7 @@ describe("repository review API", () => {
     )
   })
 
-  it("uses durable automation-owned issue endpoints and strict mutation bodies", async () => {
+  it("uses automation-owned issue endpoints and strict mutation bodies", async () => {
     const automation = { id: "auto", repository: "owner/repo" }
     const issue = {
       id: "draft/slash",

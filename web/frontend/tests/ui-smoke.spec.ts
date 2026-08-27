@@ -13,6 +13,7 @@ import type {
   MCPServerInput,
 } from "../src/api/mcp"
 import type {
+  RepositoryFinding,
   RepositoryReviewAutomation,
   RepositoryReviewFinding,
   RepositoryReviewFindingContext,
@@ -35,9 +36,9 @@ const smokeRoutes = [
   "/repository-reviews/repositories",
   "/repository-reviews/profiles",
   "/repository-reviews/rra_smoke",
-  "/repository-reviews/rra_smoke/report",
-  "/repository-reviews/rra_smoke/findings/rrf_smoke_1",
-  "/repository-reviews/rra_smoke/findings/rrf_smoke_3/link-issue",
+  "/repository-reviews/rra_smoke/findings",
+  "/repository-reviews/rra_smoke/findings/rfn_smoke_1",
+  "/repository-reviews/rra_smoke/findings/rfn_smoke_3/link-issue",
   "/repository-reviews/rra_smoke/issues",
   "/repository-reviews/rra_smoke/issues/rrid_smoke_1",
   "/model-evaluations",
@@ -1067,10 +1068,10 @@ const channelCatalogResponse = {
 }
 
 const repositoryReviewAutomationID = "rra_smoke"
-const repositoryReviewFindingOneID = "rrf_smoke_1"
-const repositoryReviewFindingTwoID = "rrf_smoke_2"
-const repositoryReviewFindingThreeID = "rrf_smoke_3"
-const repositoryReviewFindingFourID = "rrf_smoke_4"
+const repositoryReviewFindingOneID = "rfn_smoke_1"
+const repositoryReviewFindingTwoID = "rfn_smoke_2"
+const repositoryReviewFindingThreeID = "rfn_smoke_3"
+const repositoryReviewFindingFourID = "rfn_smoke_4"
 const repositoryReviewIssueOneID = "rrid_smoke_1"
 const repositoryReviewIssueTwoID = "rrid_smoke_2"
 const repositoryReviewCommitSHA = "a".repeat(40)
@@ -1081,7 +1082,7 @@ const repositoryReviewAutomationFixture: RepositoryReviewAutomation = {
   profile_id: "rrpf_smoke",
   profile_version: 3,
   branch: "main",
-  name: "Durable correctness review",
+  name: "Correctness review",
   repository: "octo/repo",
   ref: "main",
   target: "all",
@@ -1092,7 +1093,7 @@ const repositoryReviewAutomationFixture: RepositoryReviewAutomation = {
     code_types: ["hotpath-code", "code", "test"],
     include_folders: ["pkg", "cmd"],
     exclude_folders: ["vendor"],
-    free_text: "Prioritize durable state transitions.",
+    free_text: "Prioritize persistent state transitions.",
   },
   reviewer_models: ["review"],
   issue_writer_model: "issue-writer",
@@ -1115,7 +1116,7 @@ const repositoryReviewAutomationFixture: RepositoryReviewAutomation = {
   },
   estimated_cost_usd: 0.42,
   progress: {
-    stage: "reviewing durable checkpoints",
+    stage: "reviewing checkpoints",
     completed_batches: 3,
     total_batches: 5,
     reviewed_files: 24,
@@ -1153,6 +1154,7 @@ const repositoryReviewSummaryFixture: RepositoryReviewSummary = {
   review_version: 4,
   last_commit_sha: repositoryReviewCommitSHA,
   finding_count: 4,
+  repository_finding_count: 4,
   open_finding_count: 2,
   issue_draft_count: 2,
   unsupported_count: 1,
@@ -1181,7 +1183,7 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     evidence:
       "Two callers load the same ledger version and each replaces the findings slice; the later rename discards the earlier checkpoint.",
     impact:
-      "A validated repository finding can disappear from the durable report.",
+      "A validated repository finding can disappear from the findings view.",
     validation: {
       status: "confirmed",
       summary: "Traced both writers through the atomic rename path.",
@@ -1209,6 +1211,8 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
       },
     ],
     status: "open",
+    repository_finding_id: "rrf_smoke_1",
+    repository_match_state: "known",
     version: 2,
     created_at: "2026-08-26T12:02:00Z",
     updated_at: "2026-08-26T12:02:00Z",
@@ -1241,6 +1245,8 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     observation_count: 2,
     status: "open",
     issue_draft_id: repositoryReviewIssueOneID,
+    repository_finding_id: "rrf_smoke_2",
+    repository_match_state: "known",
     version: 3,
     created_at: "2026-08-26T12:02:30Z",
     updated_at: "2026-08-26T12:03:00Z",
@@ -1272,6 +1278,8 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     models: ["review"],
     observation_count: 1,
     status: "open",
+    repository_finding_id: "rrf_smoke_3",
+    repository_match_state: "known",
     version: 1,
     created_at: "2026-08-26T12:03:30Z",
     updated_at: "2026-08-26T12:03:30Z",
@@ -1304,11 +1312,46 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     observation_count: 1,
     status: "open",
     issue_draft_id: repositoryReviewIssueTwoID,
+    repository_finding_id: "rrf_smoke_4",
+    repository_match_state: "known",
     version: 2,
     created_at: "2026-08-26T12:04:00Z",
     updated_at: "2026-08-26T12:04:00Z",
   },
 ]
+
+const repositoryFindingsFixture: RepositoryFinding[] =
+  repositoryReviewFindingsFixture.map((finding, index) => ({
+    id: `rrf_smoke_${index + 1}`,
+    repository: finding.repository,
+    canonical_title: finding.title,
+    canonical_severity: finding.severity,
+    review_finding_ids: [finding.id],
+    found_commits: [finding.commit_sha],
+    path_symbol_history: [
+      {
+        review_finding_id: finding.id,
+        commit_sha: finding.commit_sha,
+        path: finding.file.path,
+        symbol: finding.symbol,
+        observed_at: finding.created_at,
+      },
+    ],
+    match_state: "known",
+    lifecycle: "open",
+    issue: finding.issue_draft_id
+      ? {
+          state: "draft",
+          origin: "ai_generated",
+          title: finding.title,
+          snapshot_at: finding.updated_at,
+        }
+      : { state: "none" },
+    validation_state: "not_requested",
+    version: 1,
+    created_at: finding.created_at,
+    updated_at: finding.updated_at,
+  }))
 
 const repositoryReviewContextsFixture: RepositoryReviewFindingContext[] =
   repositoryReviewFindingsFixture.map((finding, index) => ({
@@ -1337,6 +1380,8 @@ const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
     instructions_mode: "default",
     generator_model: "issue-writer",
     generator_account: "openai-primary",
+    generator_profile_id: "rrpf_smoke",
+    generator_profile_version: 3,
     canonical: true,
     publishable: true,
     deletable: true,
@@ -1377,6 +1422,8 @@ const repositoryReviewIssuesFixture: RepositoryReviewIssueDraft[] = [
     instructions_mode: "default",
     generator_model: "issue-writer",
     generator_account: "openai-primary",
+    generator_profile_id: "rrpf_smoke",
+    generator_profile_version: 3,
     canonical: true,
     publishable: true,
     deletable: true,
@@ -1395,6 +1442,7 @@ interface RepositoryReviewMockState {
   automation: RepositoryReviewAutomation
   summary: RepositoryReviewSummary
   findings: RepositoryReviewFinding[]
+  repositoryFindings: RepositoryFinding[]
   contexts: RepositoryReviewFindingContext[]
   issues: RepositoryReviewIssueDraft[]
 }
@@ -1404,6 +1452,7 @@ function createRepositoryReviewMockState(): RepositoryReviewMockState {
     automation: structuredClone(repositoryReviewAutomationFixture),
     summary: structuredClone(repositoryReviewSummaryFixture),
     findings: structuredClone(repositoryReviewFindingsFixture),
+    repositoryFindings: structuredClone(repositoryFindingsFixture),
     contexts: structuredClone(repositoryReviewContextsFixture),
     issues: structuredClone(repositoryReviewIssuesFixture),
   }
@@ -4400,7 +4449,7 @@ async function mockRepositoryReviewAutomationRequest(
     })
   }
 
-  if (path === `${automationRoot}/report` && method === "GET") {
+  if (path === `${automationRoot}/findings` && method === "GET") {
     const offset = Number(url.searchParams.get("offset") ?? 0)
     const limit = Number(url.searchParams.get("limit") ?? 50)
     const scope = url.searchParams.get("scope") === "all" ? "all" : "current"
@@ -4409,6 +4458,11 @@ async function mockRepositoryReviewAutomationRequest(
       automation: state.automation,
       repository: state.summary,
       findings,
+      repository_findings: state.repositoryFindings.slice(
+        offset,
+        offset + limit,
+      ),
+      repository_finding_total: state.repositoryFindings.length,
       contexts: state.contexts.filter((context) =>
         findings.some((finding) => finding.context_ids.includes(context.id)),
       ),
@@ -4569,6 +4623,8 @@ async function mockRepositoryReviewAutomationRequest(
                 body?.instructions_mode === "custom" ? "custom" : "default",
               generator_model: state.automation.issue_writer_model,
               generator_account: state.automation.effective_account_ref,
+              generator_profile_id: state.automation.profile_id,
+              generator_profile_version: state.automation.profile_version,
               canonical: true,
               publishable: true,
               deletable: true,
@@ -4823,9 +4879,9 @@ test("repository review routing preserves context through generation and subset 
 
   await page.getByRole("button", { name: "Stop safely" }).click()
   await expect(page.getByText("paused", { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: /^Report/ }).click()
+  await page.getByRole("button", { name: /^Findings/ }).click()
   await expect(page).toHaveURL(
-    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/report`),
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/findings`),
   )
 
   const findingRow = page.locator(
@@ -4845,17 +4901,15 @@ test("repository review routing preserves context through generation and subset 
 
   await page.goBack()
   await expect(page).toHaveURL(
-    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/report`),
+    new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/findings`),
   )
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Generate issue previews" }).click()
+  await page.getByRole("button", { name: "Draft issue previews" }).click()
   const generationDialog = page.getByRole("dialog", {
-    name: "Generate 1 issue previews",
+    name: "Draft 1 issue",
   })
   await expect(generationDialog).toBeVisible()
-  await generationDialog
-    .getByRole("button", { name: "Generate previews" })
-    .click()
+  await generationDialog.getByRole("button", { name: "Draft previews" }).click()
 
   await expect(page).toHaveURL(
     new RegExp(
@@ -4872,15 +4926,8 @@ test("repository review routing preserves context through generation and subset 
   await publishRow.focus()
   await page.keyboard.press("Space")
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Publish selected" }).click()
-  const publicationDialog = page.getByRole("alertdialog", {
-    name: "Publish 1 selected preview?",
-  })
-  await expect(publicationDialog).toBeVisible()
-  await publicationDialog
-    .getByRole("button", { name: "Publish selected" })
-    .click()
-  await expect(page.getByText("Publication outcomes")).toBeVisible()
+  await page.getByRole("button", { name: "Post selected" }).click()
+  await expect(page.getByText("Posting outcomes")).toBeVisible()
   await expect(
     page.getByText(`${repositoryReviewIssueOneID}: posted`),
   ).toBeVisible()

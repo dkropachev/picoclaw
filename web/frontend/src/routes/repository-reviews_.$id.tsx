@@ -24,9 +24,9 @@ function RepositoryReviewDetailRoute() {
           search: collectionSearchFromReviewSearch(search),
         })
       }
-      onReport={() =>
+      onFindings={() =>
         void navigate({
-          to: "/repository-reviews/$id/report",
+          to: "/repository-reviews/$id/findings",
           params: { id },
           search,
         })

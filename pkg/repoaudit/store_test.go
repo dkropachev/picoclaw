@@ -48,10 +48,26 @@ func TestStoreListSummariesDoesNotProjectFindingPayloads(t *testing.T) {
 			Severity: "high", Title: "Large private evidence", Symbol: "Save", File: file.Path,
 			Evidence: strings.Repeat("private-evidence", 1000), Impact: "loss",
 			Validation: Validation{Status: "confirmed", Summary: "confirmed"},
+			MatchHints: MatchHints{
+				Component: "persistence", Operation: "save state", FailureMode: "update is replaced",
+				Trigger: "overlapping writers", ViolatedInvariant: "accepted updates remain committed",
+				ObservableOutcome: "data is lost", RelatedSymbols: []string{"Save"},
+				SourceAnchors: []string{"version"}, DistinguishingFacts: []string{"requires overlap"},
+			},
+			FixEffort: FixEffort{
+				Quick:   FixEffortEstimate{LOCMin: 5, LOCMax: 20, Class: "small", Rationale: "Local containment."},
+				Quality: FixEffortEstimate{LOCMin: 30, LOCMax: 100, Class: "medium", Rationale: "Invariant work."},
+			},
 		}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(result.State.Findings) != 1 || result.State.Findings[0].MatchHints.Operation != "save state" ||
+		result.State.Findings[0].FixEffort.Quality.LOCMax != 100 ||
+		len(result.State.Findings[0].Observations) != 1 ||
+		result.State.Findings[0].Observations[0].MatchHints.Component != "persistence" {
+		t.Fatalf("recorded finding lost matching enrichment: %#v", result.State.Findings)
 	}
 	summaries, err := store.ListSummaries()
 	if err != nil || len(summaries) != 1 || summaries[0].FindingCount != 1 ||
@@ -343,6 +359,9 @@ func TestStoreDropsLegacyFindingRecommendationsFromStateAndIssueDrafts(t *testin
 	if strings.Contains(string(candidatePayload), `"recommendation"`) {
 		t.Fatalf("new candidate payload contains recommendation: %s", candidatePayload)
 	}
+	loaded, _ = completeRepositoryAuditTestMapping(
+		t, store, loaded, result.State.Findings[0].ID,
+	)
 
 	_, draft, err := store.PrepareIssue(IssueDraftRequest{
 		Repository: loaded.Repository, FindingIDs: []string{result.State.Findings[0].ID},
@@ -528,6 +547,45 @@ func newRepositoryAuditTestStore(t *testing.T) Store {
 	store := NewStore(t.TempDir())
 	store.now = func() time.Time { return repositoryAuditTestNow }
 	return store
+}
+
+func completeRepositoryAuditTestMapping(
+	t *testing.T,
+	store Store,
+	state RepositoryState,
+	findingID string,
+) (RepositoryState, RepositoryFinding) {
+	t.Helper()
+	jobIndex := -1
+	for index := range state.MappingJobs {
+		if state.MappingJobs[index].ReviewFindingID == findingID {
+			jobIndex = index
+			break
+		}
+	}
+	if jobIndex < 0 {
+		t.Fatalf("mapping job for finding %q is missing", findingID)
+	}
+	claimedState, job, _, claimed, err := store.ClaimMappingJob(
+		state.Repository,
+		state.MappingJobs[jobIndex].ID,
+		RepositoryMappingModelSnapshot{},
+	)
+	if err != nil || !claimed {
+		t.Fatalf("claim mapping job for finding %q: claimed=%v err=%v", findingID, claimed, err)
+	}
+	mappedState, repositoryFinding, err := store.CompleteMappingJob(
+		claimedState.Repository,
+		RepositoryMappingCompletion{
+			JobID:                 job.ID,
+			CreateMatchState:      RepositoryMatchNew,
+			DefaultBranchVerified: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("complete mapping job for finding %q: %v", findingID, err)
+	}
+	return mappedState, repositoryFinding
 }
 
 func repositoryAuditTestFile(path, marker string, size int64) FileRef {

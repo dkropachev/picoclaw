@@ -55,6 +55,17 @@ func TestRepositoryReviewAutomationIssueLinkRouteParsingIsExact(t *testing.T) {
 			t.Fatalf("operation=%#v ok=%v", operation, ok)
 		}
 	}
+	syncRequest := httptest.NewRequest(
+		http.MethodPost,
+		repositoryReviewPublicationRoute+
+			"automations/rra_test/repository-findings/rrf_test/sync",
+		nil,
+	)
+	syncOperation, ok := repositoryReviewAutomationOperationFromRequest(syncRequest)
+	if !ok || syncOperation.AutomationID != "rra_test" ||
+		syncOperation.FindingID != "rrf_test" || syncOperation.Action != "sync" {
+		t.Fatalf("sync operation=%#v ok=%v", syncOperation, ok)
+	}
 	for _, target := range []string{
 		repositoryReviewPublicationRoute + "automations/rra/findings/rfn/issue-link/extra",
 		repositoryReviewPublicationRoute + "automations/rra/findings//issue-link",

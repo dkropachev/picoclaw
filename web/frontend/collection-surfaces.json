@@ -250,7 +250,7 @@
         "src/routes/repository-reviews_.results.tsx",
         "src/components/repository-reviews/repository-review-runs-page.tsx",
         "src/components/repository-reviews/repository-review-detail-page.tsx",
-        "src/components/repository-reviews/repository-review-report-page.tsx",
+        "src/components/repository-reviews/repository-review-findings-page.tsx",
         "src/components/repository-reviews/repository-review-finding-page.tsx",
         "src/components/repository-reviews/repository-review-link-issue-page.tsx",
         "src/components/repository-reviews/repository-review-issues-page.tsx",
@@ -263,7 +263,7 @@
         "list": "/repository-reviews",
         "detail": "/repository-reviews/:id",
         "related": [
-          "/repository-reviews/:id/report",
+          "/repository-reviews/:id/findings",
           "/repository-reviews/:id/findings/:findingId",
           "/repository-reviews/:id/findings/:findingId/link-issue",
           "/repository-reviews/:id/issues",

@@ -44,6 +44,8 @@ vi.mock("@/api/repository-reviews", () => ({
   getRepositoryReviewAutomationOptions: vi.fn(),
   getRepositoryReviewProfile: vi.fn(),
   listRepositoryReviewProfilesPage: vi.fn(),
+  repositoryReviewDefaultIssuePrompt:
+    "Present confirmed diagnosis with evidence and provenance.",
   updateRepositoryReviewProfile: vi.fn(),
 }))
 
@@ -131,6 +133,9 @@ describe("RepositoryReviewProfilesPage", () => {
       "aria-describedby",
       "review-focus-help",
     )
+    expect(screen.getByLabelText("Issue prompt")).toHaveValue(
+      "Present confirmed diagnosis with evidence and provenance.",
+    )
     expect(screen.getByText("Scope")).toBeVisible()
     const includeFolders = screen.getByLabelText("Include folders")
     expect(includeFolders).toBeVisible()
@@ -180,6 +185,7 @@ describe("RepositoryReviewProfilesPage", () => {
       name: "Core bugs",
       reviewer_model: "review-model",
       account_ref: "",
+      issue_prompt: "Present confirmed diagnosis with evidence and provenance.",
       max_files_per_run: 12,
       max_parallel_children: 6,
       scope_policy: { include_folders: ["pkg/core"] },
@@ -882,6 +888,7 @@ function storedProfile(accountRef: string, reviewerModel: string) {
     account_ref: accountRef,
     reviewer_model: reviewerModel,
     review_focus: "Find correctness bugs.",
+    issue_prompt: "Present confirmed diagnosis with evidence and provenance.",
     force: false,
     auto_continue: true,
     max_files_per_run: 24,

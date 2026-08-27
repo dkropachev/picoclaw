@@ -20,7 +20,7 @@ function RepositoryReviewFindingRoute() {
       findingID={findingId}
       onBack={() =>
         void navigate({
-          to: "/repository-reviews/$id/report",
+          to: "/repository-reviews/$id/findings",
           params: { id },
           search,
         })
@@ -32,10 +32,10 @@ function RepositoryReviewFindingRoute() {
           search,
         })
       }
-      onLinkIssue={() =>
+      onLinkIssue={(targetFindingID) =>
         void navigate({
           to: "/repository-reviews/$id/findings/$findingId/link-issue",
-          params: { id, findingId },
+          params: { id, findingId: targetFindingID || findingId },
           search,
         })
       }
@@ -50,6 +50,14 @@ function RepositoryReviewFindingRoute() {
         void navigate({
           to: "/threads/open/$threadId",
           params: { threadId: threadID },
+        })
+      }
+      onRepositoryFindingReplaced={(repositoryFindingID) =>
+        void navigate({
+          to: "/repository-reviews/$id/findings/$findingId",
+          params: { id, findingId: repositoryFindingID },
+          search,
+          replace: true,
         })
       }
     />

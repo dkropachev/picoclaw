@@ -8,6 +8,7 @@ import {
   maximumRecentCollectionQueries,
   normalizeCollectionRouteSearch,
   reconcileCollectionItemsAfterBulkDelete,
+  removeItemFromCollectionSelectionMemory,
   resetCollectionRouteStateMemoryForTests,
   useCollectionRouteState,
 } from "@/hooks/use-collection-route-state"
@@ -112,6 +113,17 @@ describe("collection route state", () => {
 
     const oldQuery = renderCollectionState()
     expect(oldQuery.result.current.selectedCount).toBe(0)
+  })
+
+  it("forgets one invalidated item without discarding cross-page selection", () => {
+    const first = renderCollectionState()
+    act(() => first.result.current.setLoadedSelection(["merged", "kept"], true))
+    first.unmount()
+
+    removeItemFromCollectionSelectionMemory("test-items", "merged")
+
+    const restored = renderCollectionState()
+    expect([...restored.result.current.selectedIDs]).toEqual(["kept"])
   })
 
   it("keeps failed deletes selected and removes only confirmed deleted rows", () => {

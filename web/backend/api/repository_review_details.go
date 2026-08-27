@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
-	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +33,7 @@ Do not invent facts, validation, impact, paths, symbols, line numbers, commits, 
 Return a concise title and GitHub-flavored Markdown body that states evidence, observable impact, validation already performed, location, and exact commit/blob provenance. Use the bug label unless the grounded record warrants an additional existing-style classification label.
 Return only the required structured JSON. Do not use tools or external knowledge.`
 
-const repositoryReviewDefaultIssueInstructions = `Present the confirmed diagnosis concisely. Include evidence, impact, validation already performed, the exact location, and commit/blob provenance. Do not include a fix or advice.`
+const repositoryReviewDefaultIssueInstructions = repoaudit.DefaultRepositoryReviewIssuePrompt
 
 type repositoryReviewAutomationLedger struct {
 	Store      repoaudit.Store
@@ -63,6 +61,14 @@ type repositoryReviewGenerationRequest struct {
 	FindingIDs       []string                             `json:"finding_ids"`
 	InstructionsMode repoaudit.IssueDraftInstructionsMode `json:"instructions_mode"`
 	Instructions     string                               `json:"instructions,omitempty"`
+}
+
+type repositoryReviewIssueGenerationProfile struct {
+	ID      string
+	Version int64
+	Prompt  string
+	Model   string
+	Account string
 }
 
 type repositoryReviewRegenerationRequest struct {
@@ -133,6 +139,8 @@ func claimRepositoryReviewIssueGeneration(
 		request.InstructionsMode = draft.InstructionsMode
 		request.GeneratorModel = draft.GeneratorModel
 		request.GeneratorAccount = draft.GeneratorAccount
+		request.GeneratorProfileID = draft.GeneratorProfileID
+		request.GeneratorProfileVersion = draft.GeneratorProfileVersion
 		request.ExpectedDraftVersion = draft.Version
 		state, draft, reserved, err = beginRepositoryReviewIssueRegeneration(
 			store, state.Repository, draft.ID, request,
@@ -250,15 +258,33 @@ func (h *Handler) handleGetRepositoryReviewAutomationReport(w http.ResponseWrite
 		page[index].Observations = nil
 	}
 	response := map[string]any{
-		"automation":   projectRepositoryReviewAutomation(ledger.Automation),
-		"findings":     page,
-		"scope":        scope,
-		"offset":       offset,
-		"total":        total,
-		"capabilities": repositoryReviewGlobalCapabilities(ledger),
+		"automation":          projectRepositoryReviewAutomation(ledger.Automation),
+		"findings":            page,
+		"repository_findings": []repoaudit.RepositoryFinding{},
+		"scope":               scope,
+		"offset":              offset,
+		"total":               total,
+		"capabilities":        repositoryReviewGlobalCapabilities(ledger),
 	}
 	if ledger.Found {
 		response["repository"] = repoaudit.Summarize(ledger.State)
+		repositoryOffset := offset
+		if repositoryTotal := len(ledger.State.RepositoryFindings); repositoryTotal == 0 {
+			repositoryOffset = 0
+		} else if repositoryOffset >= repositoryTotal {
+			repositoryOffset = ((repositoryTotal - 1) / limit) * limit
+		}
+		repositoryEnd := min(len(ledger.State.RepositoryFindings), repositoryOffset+limit)
+		repositoryPage := make([]repoaudit.RepositoryFinding, 0, repositoryEnd-repositoryOffset)
+		for _, finding := range ledger.State.RepositoryFindings[repositoryOffset:repositoryEnd] {
+			repositoryPage = append(repositoryPage, repositoryReviewRepositoryFindingSummary(finding))
+		}
+		response["repository_findings"] = repositoryPage
+		response["repository_finding_total"] = len(ledger.State.RepositoryFindings)
+		response["repository_finding_offset"] = repositoryOffset
+		if repositoryEnd < len(ledger.State.RepositoryFindings) {
+			response["next_repository_finding_offset"] = repositoryEnd
+		}
 	}
 	if end < total {
 		response["next_offset"] = end
@@ -266,15 +292,96 @@ func (h *Handler) handleGetRepositoryReviewAutomationReport(w http.ResponseWrite
 	writeRepositoryReviewJSON(w, http.StatusOK, response)
 }
 
+func repositoryReviewRepositoryFindingSummary(
+	finding repoaudit.RepositoryFinding,
+) repoaudit.RepositoryFinding {
+	finding.OccurrenceCount = len(finding.ReviewFindingIDs)
+	finding.FoundCommitCount = len(finding.FoundCommits)
+	finding.ReviewFindingIDs = nil
+	finding.FoundCommits = nil
+	if len(finding.PathSymbolHistory) > 0 {
+		finding.PathSymbolHistory = []repoaudit.RepositoryFindingPathSymbol{
+			finding.PathSymbolHistory[len(finding.PathSymbolHistory)-1],
+		}
+	}
+	finding.MatchHints = repoaudit.MatchHints{}
+	finding.FixEffort = repoaudit.FixEffort{}
+	finding.PossibleDuplicates = nil
+	finding.ResolutionHistory = nil
+	finding.Issue.ConflictURLs = nil
+	return finding
+}
+
 func (h *Handler) handleGetRepositoryReviewAutomationFinding(w http.ResponseWriter, r *http.Request) {
-	ledger, finding, err := h.repositoryReviewAutomationFinding(
-		r.Context(), r.PathValue("automation_id"), r.PathValue("finding_id"),
-	)
+	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	writeRepositoryReviewJSON(w, http.StatusOK, repositoryReviewFindingDetail(ledger, finding))
+	findingID := strings.TrimSpace(r.PathValue("finding_id"))
+	if finding, found := repositoryReviewFindingByID(ledger.State, findingID); found {
+		writeRepositoryReviewJSON(w, http.StatusOK, repositoryReviewFindingDetail(ledger, finding))
+		return
+	}
+	if repositoryFinding, found := repositoryReviewRepositoryFindingByID(ledger.State, findingID); found {
+		occurrences := make([]repoaudit.Finding, 0, len(repositoryFinding.ReviewFindingIDs))
+		for _, occurrenceID := range repositoryFinding.ReviewFindingIDs {
+			if occurrence, occurrenceFound := repositoryReviewFindingByID(ledger.State, occurrenceID); occurrenceFound {
+				occurrences = append(occurrences, occurrence)
+			}
+		}
+		sort.SliceStable(occurrences, func(i, j int) bool {
+			if occurrences[i].CreatedAt.Equal(occurrences[j].CreatedAt) {
+				return occurrences[i].ID < occurrences[j].ID
+			}
+			return occurrences[i].CreatedAt.Before(occurrences[j].CreatedAt)
+		})
+		var latest repoaudit.Finding
+		if len(occurrences) > 0 {
+			latest = occurrences[len(occurrences)-1]
+		}
+		var actionFinding repoaudit.Finding
+		aggregateUnassociated := repositoryFinding.Issue.State == "" ||
+			repositoryFinding.Issue.State == repoaudit.RepositoryFindingIssueNone
+		if aggregateUnassociated && repositoryFinding.MatchState != repoaudit.RepositoryMatchProvisional &&
+			(repositoryFinding.Lifecycle == repoaudit.RepositoryFindingOpen ||
+				repositoryFinding.Lifecycle == repoaudit.RepositoryFindingRegressed) {
+			for index := len(occurrences) - 1; index >= 0; index-- {
+				candidate := occurrences[index]
+				if candidate.Status == repoaudit.FindingOpen && candidate.IssueDraftID == "" {
+					actionFinding = candidate
+					break
+				}
+			}
+		}
+		capabilities := repositoryReviewGlobalCapabilities(ledger)
+		unassociated := actionFinding.ID != ""
+		capabilities.CanGenerate = repositoryFinding.MatchState != repoaudit.RepositoryMatchProvisional &&
+			unassociated
+		capabilities.CanLinkIssue = capabilities.GitHub && capabilities.CanGenerate
+		capabilities.CanSearchIssues = capabilities.CanLinkIssue
+		possibleDuplicateFindings := make([]repoaudit.RepositoryFinding, 0, len(repositoryFinding.PossibleDuplicates))
+		for _, duplicate := range repositoryFinding.PossibleDuplicates {
+			if candidate, candidateFound := repositoryReviewRepositoryFindingByID(
+				ledger.State, duplicate.CandidateID,
+			); candidateFound {
+				possibleDuplicateFindings = append(possibleDuplicateFindings, candidate)
+			}
+		}
+		writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
+			"automation":                  projectRepositoryReviewAutomation(ledger.Automation),
+			"repository":                  repoaudit.Summarize(ledger.State),
+			"finding":                     latest,
+			"action_finding":              actionFinding,
+			"repository_finding":          repositoryFinding,
+			"occurrences":                 occurrences,
+			"possible_duplicate_findings": possibleDuplicateFindings,
+			"contexts":                    repositoryReviewFindingContexts(ledger.State, occurrences),
+			"capabilities":                capabilities,
+		})
+		return
+	}
+	writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 }
 
 func (h *Handler) handleUpdateRepositoryReviewAutomationFinding(w http.ResponseWriter, r *http.Request) {
@@ -287,26 +394,18 @@ func (h *Handler) handleUpdateRepositoryReviewAutomationFinding(w http.ResponseW
 		writeRepositoryReviewError(w, err)
 		return
 	}
-	ledger, finding, err := h.repositoryReviewAutomationFinding(
+	_, _, err := h.repositoryReviewAutomationFinding(
 		r.Context(), r.PathValue("automation_id"), r.PathValue("finding_id"),
 	)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return
 	}
-	if finding.Version != request.ExpectedVersion {
-		writeRepositoryReviewError(w, repoaudit.ErrConflict)
+	if request.Status != repoaudit.FindingOpen && request.Status != repoaudit.FindingDismissed {
+		writeRepositoryReviewError(w, errors.New("invalid immutable review finding status mutation"))
 		return
 	}
-	updated, updatedFinding, err := ledger.Store.SetFindingStatusByVersion(
-		ledger.State.Repository, finding.ID, request.Status, request.ExpectedVersion,
-	)
-	if err != nil {
-		writeRepositoryReviewError(w, err)
-		return
-	}
-	ledger.State = updated
-	writeRepositoryReviewJSON(w, http.StatusOK, repositoryReviewFindingDetail(ledger, updatedFinding))
+	writeRepositoryReviewError(w, repoaudit.ErrConflict)
 }
 
 func (h *Handler) handleListRepositoryReviewAutomationIssues(w http.ResponseWriter, r *http.Request) {
@@ -480,21 +579,26 @@ func (h *Handler) handleGenerateRepositoryReviewAutomationIssues(w http.Response
 		writeRepositoryReviewAutomationError(w, os.ErrNotExist)
 		return
 	}
-	resolvedInstructions := repositoryReviewResolvedIssueInstructions(request)
-	if !repositoryReviewValidGenerationText(resolvedInstructions, 16<<10, false) {
-		writeRepositoryReviewError(w, errors.New("invalid repository review issue instructions"))
-		return
+	generationProfile := repositoryReviewIssueGenerationProfile{
+		Prompt: repoaudit.DefaultRepositoryReviewIssuePrompt,
+		Model:  ledger.Automation.IssueWriterModel,
 	}
-	account := ""
-	if !repositoryReviewGenerationCanUseOnlyExistingReservations(
+	onlyExisting := repositoryReviewGenerationCanUseOnlyExistingReservations(
 		ledger.State, request.FindingIDs, request.GenerationID,
-	) {
-		account, err = h.repositoryReviewIssueWriterAccount(ledger.Automation)
+	)
+	if !onlyExisting {
+		generationProfile, err = h.repositoryReviewCurrentIssueProfile(r.Context(), ledger)
 		if err != nil {
 			writeRepositoryReviewAutomationError(w, err)
 			return
 		}
 	}
+	resolvedInstructions := repositoryReviewResolvedIssueInstructions(request, generationProfile.Prompt)
+	if !repositoryReviewValidGenerationText(resolvedInstructions, 16<<10, false) {
+		writeRepositoryReviewError(w, errors.New("invalid repository review issue instructions"))
+		return
+	}
+	account := generationProfile.Account
 	type generationOutcome struct {
 		index  int
 		draft  repoaudit.IssueDraft
@@ -513,6 +617,7 @@ func (h *Handler) handleGenerateRepositoryReviewAutomationIssues(w http.Response
 				draft, result := h.generateRepositoryReviewIssue(
 					r.Context(), ledger, findingID, request.GenerationID,
 					request.InstructionsMode, resolvedInstructions, account,
+					generationProfile,
 				)
 				outcomes <- generationOutcome{index: index, draft: draft, result: result}
 			}
@@ -608,7 +713,7 @@ func (h *Handler) handleRegenerateRepositoryReviewAutomationIssue(w http.Respons
 	}
 	instructions := draft.ResolvedInstructions
 	if strings.TrimSpace(instructions) == "" {
-		instructions = repositoryReviewDefaultIssueInstructions
+		instructions = repoaudit.DefaultRepositoryReviewIssuePrompt
 	}
 	mode := draft.InstructionsMode
 	if mode == "" {
@@ -616,17 +721,23 @@ func (h *Handler) handleRegenerateRepositoryReviewAutomationIssue(w http.Respons
 	}
 	account := draft.GeneratorAccount
 	writerModel := draft.GeneratorModel
+	profileID, profileVersion := draft.GeneratorProfileID, draft.GeneratorProfileVersion
 	generationID := draft.GenerationID
 	if draft.State == repoaudit.IssueDraftGenerating {
 		generationID, instructions, mode, writerModel, account = repositoryReviewIssueAttemptProvenance(draft)
+		profileID, profileVersion = repositoryReviewIssueAttemptProfileProvenance(draft)
 	}
 	if draft.State != repoaudit.IssueDraftGenerating {
-		account, err = h.repositoryReviewIssueWriterAccount(ledger.Automation)
+		profile, profileErr := h.repositoryReviewCurrentIssueProfile(r.Context(), ledger)
+		err = profileErr
 		if err != nil {
 			writeRepositoryReviewAutomationError(w, err)
 			return
 		}
-		writerModel = ledger.Automation.IssueWriterModel
+		account, writerModel = profile.Account, profile.Model
+		profileID, profileVersion = profile.ID, profile.Version
+		instructions = profile.Prompt
+		mode = repoaudit.IssueDraftInstructionsDefault
 		generationID, err = newRepositoryReviewIssueGenerationID()
 		if err != nil {
 			writeRepositoryReviewError(w, err)
@@ -637,7 +748,9 @@ func (h *Handler) handleRegenerateRepositoryReviewAutomationIssue(w http.Respons
 		Repository: ledger.State.Repository, FindingID: draft.FindingIDs[0],
 		GenerationID: generationID, ResolvedInstructions: instructions,
 		InstructionsMode: mode, GeneratorModel: writerModel,
-		GeneratorAccount: account, ExpectedDraftVersion: request.ExpectedVersion,
+		GeneratorAccount: account, GeneratorProfileID: profileID,
+		GeneratorProfileVersion: profileVersion,
+		ExpectedDraftVersion:    request.ExpectedVersion,
 	}
 	var updated repoaudit.RepositoryState
 	var generating repoaudit.IssueDraft
@@ -696,20 +809,28 @@ func (h *Handler) generateRepositoryReviewIssue(
 	mode repoaudit.IssueDraftInstructionsMode,
 	instructions string,
 	account string,
+	profiles ...repositoryReviewIssueGenerationProfile,
 ) (repoaudit.IssueDraft, map[string]any) {
-	generatorModel := ledger.Automation.IssueWriterModel
+	profile := repositoryReviewIssueGenerationProfile{Model: ledger.Automation.IssueWriterModel, Account: account}
+	if len(profiles) > 0 {
+		profile = profiles[0]
+	}
+	generatorModel := profile.Model
+	account = profile.Account
 	if finding, found := repositoryReviewFindingByID(ledger.State, findingID); found {
 		if existing, found := repositoryReviewIssueByID(ledger.State, finding.IssueDraftID); found &&
 			existing.Origin == repoaudit.IssueDraftOriginAIGenerated &&
 			repositoryReviewIssueAttemptGenerationID(existing) == generationID {
 			_, instructions, mode, generatorModel, account = repositoryReviewIssueAttemptProvenance(existing)
+			profile.ID, profile.Version = repositoryReviewIssueAttemptProfileProvenance(existing)
 		}
 	}
 	request := repoaudit.IssueGenerationRequest{
 		Repository: ledger.State.Repository, FindingID: findingID,
 		GenerationID: generationID, ResolvedInstructions: instructions,
 		InstructionsMode: mode, GeneratorModel: generatorModel,
-		GeneratorAccount: account,
+		GeneratorAccount: account, GeneratorProfileID: profile.ID,
+		GeneratorProfileVersion: profile.Version,
 	}
 	state, draft, claimed, err := claimRepositoryReviewIssueGeneration(ledger.Store, request)
 	if err != nil {
@@ -805,6 +926,15 @@ func repositoryReviewIssueAttemptProvenance(
 	}
 	return draft.GenerationID, draft.ResolvedInstructions, draft.InstructionsMode,
 		draft.GeneratorModel, draft.GeneratorAccount
+}
+
+func repositoryReviewIssueAttemptProfileProvenance(
+	draft repoaudit.IssueDraft,
+) (string, int64) {
+	if strings.TrimSpace(draft.AttemptGenerationID) != "" {
+		return draft.AttemptGeneratorProfileID, draft.AttemptGeneratorProfileVersion
+	}
+	return draft.GeneratorProfileID, draft.GeneratorProfileVersion
 }
 
 func defaultRunRepositoryReviewIssueWriter(
@@ -942,11 +1072,59 @@ func (h *Handler) repositoryReviewIssueWriterAccount(
 	return account, nil
 }
 
-func repositoryReviewResolvedIssueInstructions(request repositoryReviewGenerationRequest) string {
-	if request.InstructionsMode != repoaudit.IssueDraftInstructionsCustom {
-		return repositoryReviewDefaultIssueInstructions
+func (h *Handler) repositoryReviewCurrentIssueProfile(
+	ctx context.Context,
+	ledger repositoryReviewAutomationLedger,
+) (repositoryReviewIssueGenerationProfile, error) {
+	if strings.TrimSpace(ledger.Automation.ProfileID) == "" {
+		account, err := h.repositoryReviewIssueWriterAccount(ledger.Automation)
+		return repositoryReviewIssueGenerationProfile{
+			Prompt: repoaudit.DefaultRepositoryReviewIssuePrompt,
+			Model:  ledger.Automation.IssueWriterModel, Account: account,
+		}, err
 	}
-	return repositoryReviewDefaultIssueInstructions +
+	profile, found, err := ledger.Store.GetProfile(ctx, ledger.Automation.ProfileID)
+	if err != nil {
+		return repositoryReviewIssueGenerationProfile{}, err
+	}
+	if !found {
+		return repositoryReviewIssueGenerationProfile{}, os.ErrNotExist
+	}
+	model := strings.TrimSpace(profile.IssueWriterModel)
+	if model == "" {
+		model = strings.TrimSpace(profile.ReviewerModel)
+	}
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		return repositoryReviewIssueGenerationProfile{}, err
+	}
+	account := repositoryReviewEffectiveAccountRef(cfg, profile.AccountRef)
+	if account == "" {
+		return repositoryReviewIssueGenerationProfile{}, errors.New(
+			"repository review issue-writer account is unavailable",
+		)
+	}
+	if err := validateRepositoryReviewIssueWriterAlias(cfg, account, model); err != nil {
+		return repositoryReviewIssueGenerationProfile{}, err
+	}
+	return repositoryReviewIssueGenerationProfile{
+		ID: profile.ID, Version: profile.Version, Prompt: profile.IssuePrompt,
+		Model: model, Account: account,
+	}, nil
+}
+
+func repositoryReviewResolvedIssueInstructions(
+	request repositoryReviewGenerationRequest,
+	basePrompts ...string,
+) string {
+	basePrompt := repoaudit.DefaultRepositoryReviewIssuePrompt
+	if len(basePrompts) > 0 && strings.TrimSpace(basePrompts[0]) != "" {
+		basePrompt = strings.TrimSpace(basePrompts[0])
+	}
+	if request.InstructionsMode != repoaudit.IssueDraftInstructionsCustom {
+		return basePrompt
+	}
+	return basePrompt +
 		"\n\nAdditional presentation instructions (subordinate to the diagnosis-only policy):\n" +
 		request.Instructions
 }
@@ -975,89 +1153,25 @@ func (h *Handler) repositoryReviewAutomationLedger(
 		return repositoryReviewAutomationLedger{}, os.ErrNotExist
 	}
 	ledger := repositoryReviewAutomationLedger{Store: store, Automation: automation}
-	for _, identity := range repositoryReviewAutomationLedgerIdentities(automation.Repository) {
-		state, stateFound, stateErr := store.Get(identity)
-		if stateErr != nil {
-			return repositoryReviewAutomationLedger{}, stateErr
-		}
-		if stateFound {
-			ledger.State, ledger.Found = state, true
-			return ledger, nil
-		}
-	}
-	if len(automation.RunIDs) == 0 {
-		return ledger, nil
-	}
-	runIDs := make(map[string]struct{}, len(automation.RunIDs))
-	for _, runID := range automation.RunIDs {
-		runIDs[runID] = struct{}{}
-	}
-	states, err := store.List()
+	ledger.State, ledger.Found, err = store.ResolveRepositoryState(
+		automation.Repository,
+		automation.RunIDs,
+	)
 	if err != nil {
 		return repositoryReviewAutomationLedger{}, err
 	}
-	for _, state := range states {
-		matched := false
-		for _, run := range state.Runs {
-			if _, ok := runIDs[run.ID]; ok {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
-		if ledger.Found && ledger.State.Repository != state.Repository {
-			return repositoryReviewAutomationLedger{}, errors.New("repository review automation has ambiguous ledgers")
-		}
-		ledger.State, ledger.Found = state, true
+	if ledger.Found {
+		ledger.Automation.Progress.Findings = len(repoaudit.CurrentCampaignFindings(
+			ledger.State,
+			ledger.Automation.RunIDs,
+			ledger.Automation.StartedAt,
+		))
 	}
 	return ledger, nil
 }
 
 func repositoryReviewAutomationLedgerIdentities(repository string) []string {
-	repository = strings.TrimSpace(repository)
-	if repository == "" {
-		return nil
-	}
-	identities := []string{}
-	add := func(value string) {
-		value = strings.TrimSpace(value)
-		if value != "" && !slices.Contains(identities, value) {
-			identities = append(identities, value)
-		}
-	}
-	if filepath.IsAbs(repository) {
-		add(filepath.Clean(repository))
-		return identities
-	}
-	if strings.Contains(repository, "@") && strings.Contains(repository, ":") &&
-		!strings.Contains(repository, "://") {
-		identity, pathValue, ok := strings.Cut(repository, ":")
-		_, host, hasUser := strings.Cut(identity, "@")
-		if ok && hasUser && strings.EqualFold(host, "github.com") {
-			add(strings.ToLower(strings.TrimSuffix(strings.Trim(pathValue, "/"), ".git")))
-		}
-		add(repository)
-		return identities
-	}
-	parsed, err := url.Parse(repository)
-	if err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		if strings.EqualFold(parsed.Hostname(), "github.com") {
-			add(strings.ToLower(strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git")))
-		}
-		parsed.User = nil
-		parsed.RawQuery = ""
-		parsed.Fragment = ""
-		add(parsed.String())
-		return identities
-	}
-	if owner, name, ok := strings.Cut(repository, "/"); ok && owner != "" && name != "" &&
-		!strings.Contains(name, "/") {
-		add(strings.ToLower(strings.TrimSuffix(repository, ".git")))
-	}
-	add(repository)
-	return identities
+	return repoaudit.RepositoryLedgerIdentities(repository)
 }
 
 func (h *Handler) repositoryReviewAutomationFinding(
@@ -1110,6 +1224,19 @@ func repositoryReviewFindingByID(
 	return repoaudit.Finding{}, false
 }
 
+func repositoryReviewRepositoryFindingByID(
+	state repoaudit.RepositoryState,
+	findingID string,
+) (repoaudit.RepositoryFinding, bool) {
+	findingID = strings.TrimSpace(findingID)
+	for _, finding := range state.RepositoryFindings {
+		if finding.ID == findingID {
+			return finding, true
+		}
+	}
+	return repoaudit.RepositoryFinding{}, false
+}
+
 func repositoryReviewIssueByID(
 	state repoaudit.RepositoryState,
 	draftID string,
@@ -1137,6 +1264,15 @@ func repositoryReviewFindingDetail(
 	}
 	if issue, found := repositoryReviewIssueByID(ledger.State, finding.IssueDraftID); found {
 		response["issue"] = issue
+	} else if issue, found := repositoryReviewAggregateIssueByFinding(ledger.State, finding); found {
+		response["issue"] = issue
+	}
+	if finding.RepositoryFindingID != "" {
+		if aggregate, found := repositoryReviewRepositoryFindingByID(
+			ledger.State, finding.RepositoryFindingID,
+		); found {
+			response["repository_finding"] = aggregate
+		}
 	}
 	return response
 }
@@ -1181,18 +1317,68 @@ func repositoryReviewFindingCapabilities(
 	finding repoaudit.Finding,
 ) repositoryReviewCapabilities {
 	github := validRepositoryReviewGitHubIdentityAPI(state.Repository)
-	unassociated := finding.Status == repoaudit.FindingOpen && finding.IssueDraftID == ""
+	aggregateIssue, aggregateIssueFound := repositoryReviewAggregateIssueByFinding(state, finding)
+	provisional := finding.RepositoryMatchState == repoaudit.RepositoryMatchProvisional
+	mappingPending := false
+	lifecycleAllowsNewIssue := true
+	if finding.RepositoryFindingID == "" {
+		for _, job := range state.MappingJobs {
+			if job.ReviewFindingID == finding.ID && job.State != repoaudit.RepositoryMappingCompleted {
+				mappingPending = true
+				break
+			}
+		}
+	}
+	if finding.RepositoryFindingID != "" {
+		if aggregate, found := repositoryReviewRepositoryFindingByID(state, finding.RepositoryFindingID); found {
+			provisional = provisional || aggregate.MatchState == repoaudit.RepositoryMatchProvisional
+			lifecycleAllowsNewIssue = aggregate.Lifecycle == repoaudit.RepositoryFindingOpen ||
+				aggregate.Lifecycle == repoaudit.RepositoryFindingRegressed
+		} else {
+			lifecycleAllowsNewIssue = false
+		}
+	}
+	unassociated := finding.Status == repoaudit.FindingOpen && finding.IssueDraftID == "" &&
+		!aggregateIssueFound && !provisional && !mappingPending && lifecycleAllowsNewIssue
 	capabilities := repositoryReviewCapabilities{
 		GitHub: github, CanGenerate: unassociated,
 		CanSearchIssues: github && unassociated, CanLinkIssue: github && unassociated,
 	}
-	if issue, found := repositoryReviewIssueByID(state, finding.IssueDraftID); found &&
-		issue.Origin == repoaudit.IssueDraftOriginLinked && issue.Canonical &&
+	issue, found := repositoryReviewIssueByID(state, finding.IssueDraftID)
+	if !found && aggregateIssueFound {
+		issue, found = aggregateIssue, true
+	}
+	if found && finding.IssueDraftID == issue.ID &&
+		(issue.Origin == repoaudit.IssueDraftOriginLinked ||
+			issue.Origin == repoaudit.IssueDraftOriginDiscovered) && issue.Canonical &&
 		issue.State == repoaudit.IssueDraftPosted {
 		capabilities.CanUnlinkIssue = true
 		capabilities.CanReplaceIssue = true
 	}
 	return capabilities
+}
+
+func repositoryReviewAggregateIssueByFinding(
+	state repoaudit.RepositoryState,
+	finding repoaudit.Finding,
+) (repoaudit.IssueDraft, bool) {
+	if finding.RepositoryFindingID == "" {
+		return repoaudit.IssueDraft{}, false
+	}
+	aggregate, found := repositoryReviewRepositoryFindingByID(state, finding.RepositoryFindingID)
+	if !found || aggregate.Issue.State == "" || aggregate.Issue.State == repoaudit.RepositoryFindingIssueNone {
+		return repoaudit.IssueDraft{}, false
+	}
+	for _, occurrenceID := range aggregate.ReviewFindingIDs {
+		occurrence, occurrenceFound := repositoryReviewFindingByID(state, occurrenceID)
+		if !occurrenceFound || occurrence.IssueDraftID == "" {
+			continue
+		}
+		if issue, issueFound := repositoryReviewIssueByID(state, occurrence.IssueDraftID); issueFound {
+			return issue, true
+		}
+	}
+	return repoaudit.IssueDraft{}, false
 }
 
 func repositoryReviewIssueCapabilities(
@@ -1212,10 +1398,12 @@ func repositoryReviewIssueCapabilities(
 		(draft.State == repoaudit.IssueDraftGenerating ||
 			draft.State == repoaudit.IssueDraftEditing || draft.State == repoaudit.IssueDraftFailed)
 	capabilities.CanPublish = github && draft.Origin != repoaudit.IssueDraftOriginLinked &&
+		draft.Origin != repoaudit.IssueDraftOriginDiscovered &&
 		(draft.State == repoaudit.IssueDraftEditing ||
 			draft.State == repoaudit.IssueDraftPublishing ||
 			draft.State == repoaudit.IssueDraftUnknown)
-	capabilities.CanUnlinkIssue = draft.Origin == repoaudit.IssueDraftOriginLinked &&
+	capabilities.CanUnlinkIssue = (draft.Origin == repoaudit.IssueDraftOriginLinked ||
+		draft.Origin == repoaudit.IssueDraftOriginDiscovered) &&
 		draft.State == repoaudit.IssueDraftPosted
 	return capabilities
 }
@@ -1249,43 +1437,7 @@ func repositoryReviewReportFindings(
 	if scope == "all" {
 		return append([]repoaudit.Finding(nil), state.Findings...)
 	}
-	runIDs := make(map[string]struct{}, len(automation.RunIDs))
-	for _, runID := range automation.RunIDs {
-		runIDs[runID] = struct{}{}
-	}
-	selected := make(map[string]struct{})
-	for _, run := range state.Runs {
-		if _, ok := runIDs[run.ID]; !ok ||
-			!automation.StartedAt.IsZero() && run.CompletedAt.Before(automation.StartedAt) {
-			continue
-		}
-		for _, findingID := range run.FindingIDs {
-			selected[findingID] = struct{}{}
-		}
-	}
-	currentContextIDs := make(map[string]struct{})
-	for _, contextRecord := range state.Contexts {
-		if _, ok := runIDs[contextRecord.RunID]; !ok ||
-			!automation.StartedAt.IsZero() && contextRecord.CreatedAt.Before(automation.StartedAt) {
-			continue
-		}
-		currentContextIDs[contextRecord.ID] = struct{}{}
-	}
-	for _, finding := range state.Findings {
-		for _, contextID := range finding.ContextIDs {
-			if _, current := currentContextIDs[contextID]; current {
-				selected[finding.ID] = struct{}{}
-				break
-			}
-		}
-	}
-	findings := make([]repoaudit.Finding, 0, len(selected))
-	for _, finding := range state.Findings {
-		if _, ok := selected[finding.ID]; ok {
-			findings = append(findings, finding)
-		}
-	}
-	return findings
+	return repoaudit.CurrentCampaignFindings(state, automation.RunIDs, automation.StartedAt)
 }
 
 func repositoryReviewFindingContexts(
@@ -1309,12 +1461,12 @@ func repositoryReviewFindingContexts(
 
 func repositoryReviewReportPage(r *http.Request) (string, int, int, error) {
 	if r == nil || r.URL == nil {
-		return "", 0, 0, errors.New("invalid repository review report request")
+		return "", 0, 0, errors.New("invalid repository review findings request")
 	}
 	query := r.URL.Query()
 	for key, values := range query {
 		if (key != "scope" && key != "offset" && key != "limit") || len(values) != 1 {
-			return "", 0, 0, errors.New("invalid repository review report request")
+			return "", 0, 0, errors.New("invalid repository review findings request")
 		}
 	}
 	scope := strings.TrimSpace(query.Get("scope"))
@@ -1322,7 +1474,7 @@ func repositoryReviewReportPage(r *http.Request) (string, int, int, error) {
 		scope = "current"
 	}
 	if scope != "current" && scope != "all" {
-		return "", 0, 0, errors.New("invalid repository review report scope")
+		return "", 0, 0, errors.New("invalid repository review findings scope")
 	}
 	offset, err := repositoryReviewPageInteger(query.Get("offset"), 0, 0)
 	if err != nil {

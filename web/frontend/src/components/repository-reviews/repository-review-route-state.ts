@@ -1,4 +1,4 @@
-import type { RepositoryReviewReportScope } from "@/api/repository-reviews"
+import type { RepositoryReviewFindingsScope } from "@/api/repository-reviews"
 import type { CollectionView } from "@/components/collection"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
@@ -8,7 +8,7 @@ export const repositoryReviewViews = ["list", "table", "grid"] as const
 export interface RepositoryReviewRouteSearch {
   q: string
   view?: CollectionView
-  scope: RepositoryReviewReportScope
+  scope: RepositoryReviewFindingsScope
   offset: number
   generation_id?: string
 }

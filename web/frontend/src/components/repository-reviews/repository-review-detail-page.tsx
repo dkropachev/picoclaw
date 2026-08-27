@@ -54,12 +54,12 @@ interface ContinueDialogState {
 export function RepositoryReviewDetailPage({
   id,
   onBack,
-  onReport,
+  onFindings,
   onIssues,
 }: {
   id: string
   onBack: () => void
-  onReport: () => void
+  onFindings: () => void
   onIssues: () => void
 }) {
   const [continueDialog, setContinueDialog] =
@@ -179,14 +179,14 @@ export function RepositoryReviewDetailPage({
             <div className="grid gap-3 sm:grid-cols-2">
               <RelatedButton
                 icon={<IconFileDescription />}
-                label="Report"
-                detail={`${review.progress.findings} durable finding${review.progress.findings === 1 ? "" : "s"}`}
-                onClick={onReport}
+                label="Findings"
+                detail={`${review.progress.findings} review finding${review.progress.findings === 1 ? "" : "s"}`}
+                onClick={onFindings}
               />
               <RelatedButton
                 icon={<IconListDetails />}
                 label="Issue previews"
-                detail="Review, edit, link, and publish durable previews"
+                detail="Review, edit, link, and post saved previews"
                 onClick={onIssues}
               />
             </div>
@@ -198,6 +198,15 @@ export function RepositoryReviewDetailPage({
                   "Branch",
                   review.branch || review.ref || "Default repository branch",
                 ],
+                [
+                  "Resolved target branch",
+                  review.resolved_target_branch || "Not resolved",
+                ],
+                [
+                  "Advertised default branch",
+                  review.advertised_default_branch || "Not resolved",
+                ],
+                ["Target is default", review.target_is_default ? "Yes" : "No"],
                 ["Stage", review.progress.stage || "waiting"],
                 ["Progress", progressLabel(review)],
                 [
@@ -322,7 +331,7 @@ export function RepositoryReviewDetailPage({
               </h2>
               {review.run_ids.length === 0 ? (
                 <p className="text-muted-foreground text-sm">
-                  No durable runs yet.
+                  No recorded runs yet.
                 </p>
               ) : (
                 <ol className="border-border divide-border rounded-lg border">

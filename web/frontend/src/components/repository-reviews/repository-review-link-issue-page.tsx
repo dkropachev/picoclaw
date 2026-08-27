@@ -64,6 +64,16 @@ export function RepositoryReviewLinkIssuePage({
       findRepositoryReviewIssueCandidates(automationID, findingID, {
         expected_version: finding?.version ?? 0,
       }),
+    onSuccess: async (response) => {
+      if (response.discovered_issue?.id) {
+        toast.success(
+          "A high-confidence existing issue was discovered and linked.",
+        )
+        onLinked(response.discovered_issue.id)
+        return
+      }
+      await query.refetch()
+    },
     onError: (error) =>
       toast.error(
         error instanceof Error
@@ -99,7 +109,7 @@ export function RepositoryReviewLinkIssuePage({
       }),
     onSuccess: async () => {
       setUnlinkOpen(false)
-      toast.success("Manual issue link removed.")
+      toast.success("Issue association removed.")
       await query.refetch()
     },
     onError: (error) =>
@@ -117,11 +127,12 @@ export function RepositoryReviewLinkIssuePage({
     detail?.capabilities?.can_search_issues ??
     Boolean(github && unassociatedOpen)
   const canReplace =
-    detail?.capabilities?.can_replace_issue ?? issue?.origin === "linked"
+    detail?.capabilities?.can_replace_issue ??
+    (issue?.origin === "linked" || issue?.origin === "discovered")
   const canUnlink =
     detail?.capabilities?.can_unlink_issue ??
     issue?.unlinkable ??
-    issue?.origin === "linked"
+    (issue?.origin === "linked" || issue?.origin === "discovered")
 
   return (
     <>
@@ -244,8 +255,10 @@ export function RepositoryReviewLinkIssuePage({
                           AI-ranked candidates
                         </h2>
                         <p className="text-muted-foreground mt-1 text-sm">
-                          Search is derived from this finding’s immutable title,
-                          symbol, and path. AI never links automatically.
+                          Search uses causal hints, stable symbols, anchors,
+                          path history, and title. Exact high-confidence matches
+                          may create a reversible discovered link after
+                          re-fetch.
                         </p>
                       </div>
                       <Button

@@ -16,10 +16,13 @@ import (
 )
 
 const (
-	RepositoryReviewProfileSchemaVersion       = 1
+	RepositoryReviewProfileSchemaVersion       = 2
 	maxProfileFileBytes                  int64 = 1 << 20
 	maxProfileCount                            = 10_000
+	maxRepositoryReviewIssuePromptBytes        = 16 << 10
 )
+
+const DefaultRepositoryReviewIssuePrompt = `Present the confirmed diagnosis concisely. Include evidence, impact, validation already performed, the exact location, and commit/blob provenance. Do not include a fix or advice.`
 
 var (
 	ErrInvalidProfile  = errors.New("invalid repository review profile")
@@ -38,6 +41,7 @@ type RepositoryReviewProfile struct {
 	ScopePolicy         RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel       string                       `json:"reviewer_model"`
 	IssueWriterModel    string                       `json:"issue_writer_model,omitempty"`
+	IssuePrompt         string                       `json:"issue_prompt"`
 	AccountRef          string                       `json:"account_ref,omitempty"`
 	Force               bool                         `json:"force"`
 	AutoContinue        bool                         `json:"auto_continue"`
@@ -356,11 +360,19 @@ func (s Store) loadProfile(id string) (RepositoryReviewProfile, bool, error) {
 	if profile.ID != id {
 		return RepositoryReviewProfile{}, false, errors.New("repository review profile identity mismatch")
 	}
+	hadLegacySchema := false
+	if profile.SchemaVersion == 1 {
+		profile.SchemaVersion = RepositoryReviewProfileSchemaVersion
+		if strings.TrimSpace(profile.IssuePrompt) == "" {
+			profile.IssuePrompt = DefaultRepositoryReviewIssuePrompt
+		}
+		hadLegacySchema = true
+	}
 	if err := normalizeProfile(&profile); err != nil {
 		return RepositoryReviewProfile{}, false, err
 	}
 	_, hadLegacyPrice := legacy["model_price"]
-	if hadLegacyPrice || hadLegacyGuard {
+	if hadLegacyPrice || hadLegacyGuard || hadLegacySchema {
 		if err := s.saveProfile(profile); err != nil {
 			return RepositoryReviewProfile{}, false, err
 		}
@@ -402,6 +414,10 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 	profile.ReviewFocus = strings.TrimSpace(profile.ReviewFocus)
 	profile.ReviewerModel = strings.TrimSpace(profile.ReviewerModel)
 	profile.IssueWriterModel = strings.TrimSpace(profile.IssueWriterModel)
+	profile.IssuePrompt = strings.TrimSpace(profile.IssuePrompt)
+	if profile.IssuePrompt == "" {
+		profile.IssuePrompt = DefaultRepositoryReviewIssuePrompt
+	}
 	profile.AccountRef = strings.TrimSpace(profile.AccountRef)
 	profile.BudgetPolicy.GuardExpression = strings.TrimSpace(profile.BudgetPolicy.GuardExpression)
 	if profile.MaxFilesPerRun == 0 {
@@ -423,6 +439,7 @@ func normalizeProfile(profile *RepositoryReviewProfile) error {
 		!validBoundedText(profile.ReviewFocus, maxFindingTextBytes) ||
 		!validBoundedText(profile.ReviewerModel, 256) ||
 		!validOptionalAutomationText(profile.IssueWriterModel, 256) ||
+		!validBoundedText(profile.IssuePrompt, maxRepositoryReviewIssuePromptBytes) ||
 		!validOptionalAutomationText(profile.AccountRef, 256) ||
 		profile.MaxFilesPerRun < 1 || profile.MaxFilesPerRun > maxReviewFiles ||
 		profile.MaxContentBytes < 1 || profile.MaxContentBytes > defaultAutomationMaxContentBytes ||

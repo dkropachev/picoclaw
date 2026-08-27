@@ -261,7 +261,7 @@ func (h *Handler) handleUpdateRepositoryReviewFinding(w http.ResponseWriter, r *
 		writeRepositoryReviewError(w, err)
 		return
 	}
-	store, state, ok := h.repositoryReviewMutationState(w, r.PathValue("repository_id"))
+	_, state, ok := h.repositoryReviewMutationState(w, r.PathValue("repository_id"))
 	if !ok {
 		return
 	}
@@ -277,20 +277,11 @@ func (h *Handler) handleUpdateRepositoryReviewFinding(w http.ResponseWriter, r *
 		writeRepositoryReviewError(w, os.ErrNotExist)
 		return
 	}
-	updated, err := store.SetFindingStatus(
-		state.Repository,
-		r.PathValue("finding_id"),
-		request.Status,
-		request.ExpectedVersion,
-	)
-	if err != nil {
-		writeRepositoryReviewError(w, err)
+	if request.Status != repoaudit.FindingOpen && request.Status != repoaudit.FindingDismissed {
+		writeRepositoryReviewError(w, errors.New("invalid immutable review finding status mutation"))
 		return
 	}
-	finding := &updated.Findings[findingIndex]
-	writeRepositoryReviewJSON(w, http.StatusOK, map[string]any{
-		"repository": repoaudit.Summarize(updated), "finding": finding,
-	})
+	writeRepositoryReviewError(w, repoaudit.ErrConflict)
 }
 
 func (h *Handler) handlePrepareRepositoryReviewIssue(w http.ResponseWriter, r *http.Request) {

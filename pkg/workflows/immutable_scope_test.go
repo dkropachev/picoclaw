@@ -244,11 +244,12 @@ func TestUnavailableImmutableScopeCannotProducePersistedFinding(t *testing.T) {
 	}
 	observation, err := nativeRepositoryReviewObservation(
 		map[string]any{
-			"summary": "unavailable", "findings": []map[string]any{{
+			"summary": "unavailable", "reviewedFiles": []any{},
+			"findings": []map[string]any{repositoryReviewTestFinding(map[string]any{
 				"severity": "high", "title": "Invented binary bug", "symbol": "fixture", "file": "tests/fixture.bin",
 				"message": "Invented behavior.", "evidence": "not actually visible", "impact": "unknown",
 				"validation": map[string]any{"status": "confirmed", "summary": "claimed", "checks": []any{}},
-			}},
+			})}, "residualRisks": []any{"tests/fixture.bin: binary"},
 		},
 		[]map[string]any{file},
 		"review-a",

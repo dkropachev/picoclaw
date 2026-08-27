@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -400,6 +401,37 @@ func TestRepositoryReviewCandidateAndSimilarityBoundaries(t *testing.T) {
 		Validation: Validation{Status: "confirmed", Summary: "summary", Checks: []string{"check"}},
 		Line:       &line,
 	}
+	if err := validateCandidate(valid); err != nil {
+		t.Fatalf("legacy candidate was rejected: %v", err)
+	}
+	if err := ValidateGeneratedFindingCandidate(valid); err == nil {
+		t.Fatal("generated candidate without matching hints and effort was accepted")
+	}
+	valid.MatchHints = MatchHints{
+		Component: "persistence", Operation: "save versioned state",
+		FailureMode:       "a later writer replaces an accepted update",
+		Trigger:           "two writers start from one version",
+		ViolatedInvariant: "accepted updates remain committed",
+		ObservableOutcome: "one successful update disappears",
+		RelatedSymbols:    []string{"Save"}, SourceAnchors: []string{"version"},
+		DistinguishingFacts: []string{"requires overlapping writers"},
+	}
+	valid.FixEffort = FixEffort{
+		Quick: FixEffortEstimate{
+			LOCMin: 5, LOCMax: 20, Class: "small", Rationale: "Localized containment.",
+		},
+		Quality: FixEffortEstimate{
+			LOCMin: 30, LOCMax: 100, Class: "medium", Rationale: "Invariant spans related units.",
+		},
+	}
+	if err := ValidateGeneratedFindingCandidate(valid); err != nil {
+		t.Fatalf("valid generated candidate was rejected: %v", err)
+	}
+	observation := findingObservationFrom(valid, "context", "model", "reviewer")
+	if observation.MatchHints.Operation != valid.MatchHints.Operation ||
+		observation.FixEffort.Quality.LOCMax != valid.FixEffort.Quality.LOCMax {
+		t.Fatalf("finding observation lost enrichment: %#v", observation)
+	}
 	invalid := []FindingCandidate{
 		func() FindingCandidate { value := valid; value.Severity = "unknown"; return value }(),
 		func() FindingCandidate { value := valid; value.Title = ""; return value }(),
@@ -409,6 +441,29 @@ func TestRepositoryReviewCandidateAndSimilarityBoundaries(t *testing.T) {
 		func() FindingCandidate { value := valid; value.Validation.Checks = make([]string, 129); return value }(),
 		func() FindingCandidate { value := valid; value.Validation.Checks = []string{""}; return value }(),
 		func() FindingCandidate { value := valid; zero := 0; value.Line = &zero; return value }(),
+		func() FindingCandidate { value := valid; value.MatchHints.Trigger = ""; return value }(),
+		func() FindingCandidate {
+			value := valid
+			value.MatchHints.SourceAnchors = make([]string, maxMatchHintItems+1)
+			for index := range value.MatchHints.SourceAnchors {
+				value.MatchHints.SourceAnchors[index] = fmt.Sprintf("anchor-%d", index)
+			}
+			return value
+		}(),
+		func() FindingCandidate {
+			value := valid
+			value.MatchHints.RelatedSymbols = []string{"Save", " save "}
+			return value
+		}(),
+		func() FindingCandidate { value := valid; value.FixEffort.Quick.LOCMin = 21; return value }(),
+		func() FindingCandidate { value := valid; value.FixEffort.Quick.Class = "tiny"; return value }(),
+		func() FindingCandidate {
+			value := valid
+			value.FixEffort.Quality.LOCMin = 10
+			value.FixEffort.Quality.LOCMax = 15
+			value.FixEffort.Quality.Class = "small"
+			return value
+		}(),
 	}
 	for index, candidate := range invalid {
 		if err := validateCandidate(candidate); err == nil {
@@ -418,7 +473,13 @@ func TestRepositoryReviewCandidateAndSimilarityBoundaries(t *testing.T) {
 	if normalized := normalizeCandidate(FindingCandidate{
 		Severity: " HIGH ", Title: " title ", File: `dir\\file.go`,
 		Validation: Validation{Status: " CONFIRMED ", Summary: " yes "},
-	}); normalized.Severity != "high" || normalized.Title != "title" || normalized.Validation.Status != "confirmed" {
+		MatchHints: MatchHints{Component: " core ", RelatedSymbols: []string{" Save "}},
+		FixEffort:  FixEffort{Quick: FixEffortEstimate{Class: " SMALL ", Rationale: " local "}},
+	}); normalized.Severity != "high" || normalized.Title != "title" ||
+		normalized.Validation.Status != "confirmed" || normalized.MatchHints.Component != "core" ||
+		normalized.MatchHints.RelatedSymbols[0] != "Save" ||
+		normalized.FixEffort.Quick.Class != "small" ||
+		normalized.FixEffort.Quick.Rationale != "local" {
 		t.Fatalf("normalized candidate = %#v", normalized)
 	}
 

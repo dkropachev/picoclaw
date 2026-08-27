@@ -579,6 +579,12 @@ func TestNormalizeRepositoryReviewProfileBoundaries(t *testing.T) {
 			name:   "required fields",
 			mutate: func(profile *RepositoryReviewProfile) { profile.Name = "" },
 		},
+		{
+			name: "issue prompt",
+			mutate: func(profile *RepositoryReviewProfile) {
+				profile.IssuePrompt = strings.Repeat("x", maxRepositoryReviewIssuePromptBytes+1)
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

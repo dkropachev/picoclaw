@@ -425,6 +425,18 @@ export function resetCollectionRouteStateMemoryForTests(): void {
   scrollMemory.clear()
 }
 
+export function removeItemFromCollectionSelectionMemory(
+  collectionKey: string,
+  itemID: string,
+): void {
+  const prefix = `${collectionKey}\u0000`
+  for (const [key, memory] of selectionMemory) {
+    if (!key.startsWith(prefix)) continue
+    memory.selectedIDs.delete(itemID)
+    memory.failuresByID.delete(itemID)
+  }
+}
+
 function normalizedSupportedViews(
   requested?: readonly CollectionView[],
 ): CollectionView[] {
