@@ -25,7 +25,9 @@ import {
 import {
   type CollectionDefinition,
   CollectionDetailShell,
+  type StandardCollectionPageSearch,
 } from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -47,11 +49,6 @@ import {
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
-import {
-  type PilotCollectionSearch,
-  StandardPilotCollectionPage,
-} from "./standard-pilot-collection-page"
-
 const aliasDefaultQuery = "ORDER BY name ASC"
 const routerDefaultQuery = "ORDER BY name ASC"
 const supportedViews = ["list", "table", "grid"] as const
@@ -67,7 +64,7 @@ export function ModelAliasesCollectionPage({
   onSearchChange,
   ...navigation
 }: CollectionNavigation<ModelAliasSummary> & {
-  search: PilotCollectionSearch
+  search: StandardCollectionPageSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
 }) {
   const { t } = useTranslation()
@@ -146,7 +143,7 @@ export function ModelAliasesCollectionPage({
   )
 
   return (
-    <StandardPilotCollectionPage
+    <StandardCollectionPage
       definition={definition}
       search={search}
       onSearchChange={onSearchChange}
@@ -198,7 +195,7 @@ export function ModelRoutersCollectionPage({
   onSearchChange,
   ...navigation
 }: CollectionNavigation<ModelRouterSummary> & {
-  search: PilotCollectionSearch
+  search: StandardCollectionPageSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
 }) {
   const { t } = useTranslation()
@@ -277,7 +274,7 @@ export function ModelRoutersCollectionPage({
   )
 
   return (
-    <StandardPilotCollectionPage
+    <StandardCollectionPage
       definition={definition}
       search={search}
       onSearchChange={onSearchChange}

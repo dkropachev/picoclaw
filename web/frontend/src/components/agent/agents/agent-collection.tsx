@@ -54,7 +54,9 @@ import { AgentTokenListField } from "@/components/agent/agents/agent-token-list-
 import {
   type CollectionDefinition,
   CollectionDetailShell,
+  type StandardCollectionPageSearch,
 } from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -83,11 +85,6 @@ import {
 } from "@/hooks/use-collection-route-state"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
-
-import {
-  type PilotCollectionSearch,
-  StandardPilotCollectionPage,
-} from "./standard-pilot-collection-page"
 
 /* eslint-disable react-refresh/only-export-components -- Route search helpers and their collection components share one pilot contract module. */
 
@@ -126,7 +123,7 @@ export function AgentCollectionPage({
   onSearchChange,
   ...navigation
 }: AgentCollectionNavigation & {
-  search: PilotCollectionSearch
+  search: StandardCollectionPageSearch
   onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
 }) {
   const { t } = useTranslation()
@@ -320,7 +317,7 @@ export function AgentCollectionPage({
   }
 
   return (
-    <StandardPilotCollectionPage
+    <StandardCollectionPage
       definition={definition}
       search={search}
       onSearchChange={onSearchChange}

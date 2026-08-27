@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { MCPServerEditorPage } from "@/components/collections/pilots/mcp-server-collection"
+import { MCPServerEditorPage } from "@/components/agent/mcp/mcp-server-collection"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/agent/mcp_/servers_/$name_/edit")({

@@ -1,7 +1,7 @@
 import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
-import { MCPServersCollectionPage } from "@/components/collections/pilots/mcp-server-collection"
+import { MCPServersCollectionPage } from "@/components/agent/mcp/mcp-server-collection"
 import {
   type CollectionRouteSearch,
   collectionRouteSearchIsCanonical,

@@ -436,18 +436,18 @@ function lintCollectionManifest(sourceFiles) {
       const closureSources = closure
         .map((filePath) => sourceByAbsolutePath.get(filePath))
         .filter(Boolean)
-      const importsSharedShell = closureSources.some(
+      const importsStandardCollectionPage = closureSources.some(
         (source) =>
-          source.text.includes("CollectionShell") &&
+          source.text.includes("<StandardCollectionPage") &&
           importSpecifiers(source.text).some((specifier) =>
             sharedShellImportPrefixes.some((prefix) =>
               specifier.startsWith(prefix),
             ),
           ),
       )
-      if (!importsSharedShell) {
+      if (!importsStandardCollectionPage) {
         pendingFailures.push(
-          "list adapter import closure does not use shared CollectionShell",
+          "list adapter import closure does not use shared StandardCollectionPage",
         )
       }
       for (const source of closureSources) {

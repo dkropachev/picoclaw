@@ -267,7 +267,6 @@ Owns: CODE web/backend/api/agents*
 Owns: CODE web/backend/api/agent_capabilities*
 Owns: CODE web/frontend/src/api/agents*.ts
 Owns: CODE web/frontend/src/components/agent/**
-Owns: CODE web/frontend/src/components/collections/pilots/agent*
 Owns: CODE web/frontend/src/routes/agent/**
 Owns: CLI cmd/picoclaw/main.go *
 Owns: CLI cmd/picoclaw/internal/agent/*

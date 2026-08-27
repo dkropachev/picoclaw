@@ -18,7 +18,7 @@ vi.mock("@/api/launcher-auth", () => ({
 vi.mock("@/components/app-layout", () => ({
   AppLayout: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }))
-vi.mock("@/components/collections/pilots/model-evaluation-collection", () => ({
+vi.mock("@/components/model-evaluations/model-evaluation-collection", () => ({
   ModelEvaluationsCollectionPage: () => (
     <output>Standard model evaluations collection</output>
   ),

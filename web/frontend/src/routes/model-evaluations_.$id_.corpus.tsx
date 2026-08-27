@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { ModelEvaluationCorpusPage } from "@/components/collections/pilots/model-evaluation-collection"
+import { ModelEvaluationCorpusPage } from "@/components/model-evaluations/model-evaluation-collection"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/model-evaluations_/$id_/corpus")({
