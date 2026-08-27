@@ -22,6 +22,22 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+func TestRepositoryReviewAutomationRoutesRegisterRunFindingStatus(t *testing.T) {
+	handler := NewHandler(filepath.Join(t.TempDir(), "config.json"))
+	mux := http.NewServeMux()
+	handler.registerRepositoryReviewAutomationRoutes(mux)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repository-reviews/automations/rra_test/findings/status",
+		nil,
+	)
+	_, pattern := mux.Handler(request)
+	if pattern != "POST /api/repository-reviews/automations/{automation_id}/findings/status" {
+		t.Fatalf("run finding status route pattern=%q", pattern)
+	}
+}
+
 func TestRepositoryReviewAutomationDetailReportAndFindingRoutes(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewAPIState(t, workspace)
@@ -188,9 +204,9 @@ func TestRepositoryReviewRunFindingStatusRetryRoute(t *testing.T) {
 		!strings.Contains(retry.Body.String(), `"id":"`+findingID+`"`) {
 		t.Fatalf("retry=%d %s", retry.Code, retry.Body.String())
 	}
-	reset, _, err := store.Get(state.Repository)
-	if err != nil {
-		t.Fatal(err)
+	reset, _, resetErr := store.Get(state.Repository)
+	if resetErr != nil {
+		t.Fatal(resetErr)
 	}
 	job := reset.MappingJobs[0]
 	if job.Attempts != 0 || job.Error != "" || job.State != repoaudit.RepositoryMappingPending {
@@ -216,9 +232,9 @@ func TestRepositoryReviewRunFindingStatusRetryRoute(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	associated, _, err := store.Get(state.Repository)
-	if err != nil || len(associated.RepositoryFindings) != 1 {
-		t.Fatalf("associated=%#v err=%v", associated.RepositoryFindings, err)
+	associated, _, associatedErr := store.Get(state.Repository)
+	if associatedErr != nil || len(associated.RepositoryFindings) != 1 {
+		t.Fatalf("associated=%#v err=%v", associated.RepositoryFindings, associatedErr)
 	}
 	aggregateDetail := httptest.NewRecorder()
 	mux.ServeHTTP(aggregateDetail, httptest.NewRequest(

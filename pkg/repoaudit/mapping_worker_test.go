@@ -224,17 +224,17 @@ func TestRunFindingStatusAttemptsAreBoundedAndExplicitlyRetryable(t *testing.T) 
 		job.Attempts != RepositoryRunFindingStatusAttemptLimit || job.Error == "" {
 		t.Fatalf("capped job=%#v", job)
 	}
-	if _, cappedJob, _, claimed, err := store.ClaimMappingJob(
+	if _, cappedJob, _, claimed, claimErr := store.ClaimMappingJob(
 		pending.Repository,
 		job.ID,
 		RepositoryMappingModelSnapshot{},
-	); err != nil || claimed || cappedJob.Attempts != RepositoryRunFindingStatusAttemptLimit {
-		t.Fatalf("atomic cap job=%#v claimed=%v err=%v", cappedJob, claimed, err)
+	); claimErr != nil || claimed || cappedJob.Attempts != RepositoryRunFindingStatusAttemptLimit {
+		t.Fatalf("atomic cap job=%#v claimed=%v err=%v", cappedJob, claimed, claimErr)
 	}
-	if _, _, err := store.RetryRunFindingStatus(
+	if _, _, retryErr := store.RetryRunFindingStatus(
 		pending.Repository,
 		[]string{findingID, findingID},
-	); err == nil {
+	); retryErr == nil {
 		t.Fatal("duplicate retry selection succeeded")
 	}
 	unchanged, _, _ := store.Get(pending.Repository)
