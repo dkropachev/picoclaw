@@ -479,10 +479,7 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 				if !previous.StartedAt.IsZero() {
 					candidate.ModelPrices = maps.Clone(previous.ModelPrices)
 				}
-				if !reflect.DeepEqual(previous.BudgetPolicy, candidate.BudgetPolicy) ||
-					previous.AccountRef != candidate.AccountRef {
-					candidate.AccountLimitSnapshots = nil
-				}
+				repositoryReviewClearStaleAccountLimits(candidate, previous)
 			}
 			return nil
 		},
@@ -1016,6 +1013,16 @@ func repositoryReviewExecutionConfigurationChanged(
 		!slicesEqual(previous.ReviewerModels, next.ReviewerModels)
 }
 
+func repositoryReviewClearStaleAccountLimits(
+	next *repoaudit.RepositoryReviewAutomation,
+	previous repoaudit.RepositoryReviewAutomation,
+) {
+	if !reflect.DeepEqual(previous.BudgetPolicy, next.BudgetPolicy) ||
+		previous.AccountRef != next.AccountRef {
+		next.AccountLimitSnapshots = nil
+	}
+}
+
 func repositoryReviewScopePoliciesEqual(
 	left, right repoaudit.RepositoryReviewScopePolicy,
 ) bool {
@@ -1326,16 +1333,15 @@ func repositoryReviewAliasPriceForAccount(
 				return nil, false
 			}
 		}
-		inputPrice, outputPrice := resolved.InputPricePerMTok, resolved.OutputPricePerMTok
 		equivalent := strings.TrimSpace(resolved.SubscriptionEquivalentModel)
-		if inputPrice <= 0 && outputPrice <= 0 && resolved.Subscription && equivalent != "" {
-			inherited, ok := repositoryReviewAliasPriceForAccount(
-				cfg, equivalent, accountRef, visiting,
-			)
-			if !ok {
-				return nil, false
-			}
-			inputPrice, outputPrice = inherited.InputPricePerMTok, inherited.OutputPricePerMTok
+		inputPrice, outputPrice, inherited := repositoryReviewResolvedAliasPrices(
+			resolved,
+			func() (*config.ModelConfig, bool) {
+				return repositoryReviewAliasPriceForAccount(cfg, equivalent, accountRef, visiting)
+			},
+		)
+		if !inherited {
+			return nil, false
 		}
 		if inputPrice <= 0 && outputPrice <= 0 {
 			return nil, false
@@ -1351,6 +1357,22 @@ func repositoryReviewAliasPriceForAccount(
 		}
 	}
 	return aggregate, true
+}
+
+func repositoryReviewResolvedAliasPrices(
+	resolved *config.ModelConfig,
+	inherit func() (*config.ModelConfig, bool),
+) (float64, float64, bool) {
+	inputPrice, outputPrice := resolved.InputPricePerMTok, resolved.OutputPricePerMTok
+	equivalent := strings.TrimSpace(resolved.SubscriptionEquivalentModel)
+	if inputPrice <= 0 && outputPrice <= 0 && resolved.Subscription && equivalent != "" {
+		inherited, ok := inherit()
+		if !ok {
+			return 0, 0, false
+		}
+		inputPrice, outputPrice = inherited.InputPricePerMTok, inherited.OutputPricePerMTok
+	}
+	return inputPrice, outputPrice, true
 }
 
 func repositoryReviewAliasUsesAgenticCLI(

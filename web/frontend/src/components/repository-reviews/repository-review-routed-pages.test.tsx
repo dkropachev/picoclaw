@@ -520,7 +520,7 @@ describe("routed repository review pages", () => {
       <RepositoryReviewDetailPage
         id={failedReview.id}
         onBack={vi.fn()}
-        onReport={vi.fn()}
+        onFindings={vi.fn()}
         onIssues={vi.fn()}
       />,
     )

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -848,6 +849,84 @@ func TestBuildWorkflowAuthorPromptDefinesSafeEventAutomationContract(t *testing.
 	}
 	if request.Prompt != prompt {
 		t.Fatal("workflow author request prompt differs from the audited prompt")
+	}
+}
+
+func TestBuildWorkflowAuthorPromptProjectsDraftContextAndDiagnostics(t *testing.T) {
+	prompt := buildWorkflowAuthorPrompt(&workflows.WorkflowDevelopmentSession{
+		ID:                "dev_repair",
+		Reason:            workflows.WorkflowDevelopmentReasonEdit,
+		TargetWorkflowRef: "workflows/repaired.yml",
+		SourceWorkflowRef: "workflows/original.yml",
+		Prompt:            "Keep the existing event routing policy.",
+		YAML:              "name: Repaired\non:\n  manual: {}\njobs: {}",
+	}, &workflows.WorkflowDevelopmentValidation{
+		Valid: false,
+		Errors: []workflows.WorkflowValidationIssue{{
+			Path:    "jobs.review.steps[0].uses",
+			Message: "unsupported step target",
+		}},
+		Warnings: []workflows.WorkflowValidationIssue{{
+			Message: "workflow has no description",
+		}},
+	}, []workflows.Definition{
+		{},
+		{Ref: "workflows/named.yml", Name: "Named workflow"},
+		{Ref: "workflows/plain.yml"},
+	}, workflowAuthorCapabilities{})
+
+	for _, expected := range []string{
+		"Source workflow ref: workflows/original.yml",
+		"User brief:\nKeep the existing event routing policy.",
+		"- workflows/named.yml (Named workflow)",
+		"- workflows/plain.yml",
+		"- error at jobs.review.steps[0].uses: unsupported step target",
+		"- warning: workflow has no description",
+		"jobs: {}\n",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("prompt does not contain %q:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestWorkflowAuthorPromptHelpersHandleBoundaryInputs(t *testing.T) {
+	tools := make([]string, 25)
+	for i := range tools {
+		tools[i] = fmt.Sprintf("- `tool-%02d` - available", i)
+	}
+	var capabilities strings.Builder
+	writeWorkflowAuthorCapabilities(&capabilities, workflowAuthorCapabilities{
+		Agents: []agentloop.AgentDescriptor{
+			{},
+			{ID: "worker"},
+		},
+		Tools: tools,
+	})
+	projected := capabilities.String()
+	if !strings.Contains(projected, "  - agent/worker\n") ||
+		!strings.Contains(projected, "- ... 1 more tools available") ||
+		strings.Contains(projected, "  - agent/\n") {
+		t.Fatalf("capability projection = %q", projected)
+	}
+
+	longLine := strings.Repeat("x", 181)
+	if got := workflowPromptOneLine(longLine); len(got) != 180 || !strings.HasSuffix(got, "...") {
+		t.Fatalf("workflowPromptOneLine() = %q", got)
+	}
+	if got := trimWorkflowAuthorProse("plain response without YAML keys"); got != "plain response without YAML keys" {
+		t.Fatalf("trimWorkflowAuthorProse() = %q", got)
+	}
+
+	for name, raw := range map[string]string{
+		"blank response": " \n\t ",
+		"empty fence":    "```yaml\n```",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := extractWorkflowAuthorYAML(raw); err == nil {
+				t.Fatal("extractWorkflowAuthorYAML() error = nil")
+			}
+		})
 	}
 }
 

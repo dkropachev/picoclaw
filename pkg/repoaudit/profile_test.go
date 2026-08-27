@@ -85,8 +85,8 @@ func TestRepositoryReviewProfileV1MigratesDefaultIssuePrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(data, &raw); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	raw["schema_version"] = float64(1)
 	delete(raw, "issue_prompt")
@@ -94,8 +94,8 @@ func TestRepositoryReviewProfileV1MigratesDefaultIssuePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(store.profilePath(created.ID), data, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(store.profilePath(created.ID), data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	loaded, found, err := store.GetProfile(context.Background(), created.ID)

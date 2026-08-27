@@ -39,9 +39,9 @@ func TestRepositoryLedgerIdentityVariantsAndRunFallback(t *testing.T) {
 	for _, identity := range []string{
 		"owner/repo", "https://github.com/owner/repo.git", "git@github.com:owner/repo.git",
 	} {
-		resolved, found, err := store.ResolveRepositoryState(identity, nil)
-		if err != nil || !found || resolved.ID != recorded.State.ID {
-			t.Fatalf("resolve %q = found %v id %q err %v", identity, found, resolved.ID, err)
+		resolved, found, resolveErr := store.ResolveRepositoryState(identity, nil)
+		if resolveErr != nil || !found || resolved.ID != recorded.State.ID {
+			t.Fatalf("resolve %q = found %v id %q err %v", identity, found, resolved.ID, resolveErr)
 		}
 	}
 	resolved, found, err := store.ResolveRepositoryState(

@@ -1182,8 +1182,8 @@ func (s Store) load(repository string) (RepositoryState, error) {
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return RepositoryState{}, err
+	if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
+		return RepositoryState{}, unmarshalErr
 	}
 	migrated, err := migrateRepositoryState(&state)
 	if err != nil {

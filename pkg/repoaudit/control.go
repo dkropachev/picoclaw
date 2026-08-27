@@ -452,10 +452,8 @@ func (s Store) loadAutomation(id string) (RepositoryReviewAutomation, bool, erro
 	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
-	var legacy struct {
-		ModelPrices map[string]map[string]json.RawMessage `json:"model_prices"`
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
+	legacy, err := decodeLegacyAutomationPriceMetadata(data)
+	if err != nil {
 		return RepositoryReviewAutomation{}, false, err
 	}
 	hasLegacyPriceMetadata := false
@@ -529,10 +527,27 @@ func (s Store) saveAutomation(automation RepositoryReviewAutomation) error {
 	if err != nil {
 		return err
 	}
+	if err := validateEncodedAutomationSize(data); err != nil {
+		return err
+	}
+	return fileutil.WriteFileAtomic(statePath, data, 0o600)
+}
+
+type legacyAutomationPriceMetadata struct {
+	ModelPrices map[string]map[string]json.RawMessage `json:"model_prices"`
+}
+
+func decodeLegacyAutomationPriceMetadata(data []byte) (legacyAutomationPriceMetadata, error) {
+	var legacy legacyAutomationPriceMetadata
+	err := json.Unmarshal(data, &legacy)
+	return legacy, err
+}
+
+func validateEncodedAutomationSize(data []byte) error {
 	if int64(len(data)) > maxAutomationFileBytes {
 		return errors.New("repository review automation exceeds its size limit")
 	}
-	return fileutil.WriteFileAtomic(statePath, data, 0o600)
+	return nil
 }
 
 func (s Store) automationPath(id string) string {

@@ -27,6 +27,8 @@ type repositoryReviewFindingLifecycleRequest struct {
 	ExpectedVersion int64                                `json:"expected_version"`
 }
 
+var loadRepositoryReviewLifecycleConfig = config.LoadConfig
+
 func (h *Handler) handleUpdateRepositoryReviewFindingLifecycle(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -137,7 +139,7 @@ func (h *Handler) handleReserveRepositoryReviewValidations(
 			return
 		}
 	}
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, err := loadRepositoryReviewLifecycleConfig(h.configPath)
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return

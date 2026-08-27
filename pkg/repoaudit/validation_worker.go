@@ -183,8 +183,8 @@ func (s Store) processValidationJob(
 		byCommit[candidate.CommitSHA] = candidate
 	}
 	if job.CandidateCommits == nil {
-		if _, _, err := s.SetValidationJobCandidates(repository, job.ID, commits); err != nil {
-			return s.failValidationJob(ctx, repository, job.ID, err)
+		if _, _, setErr := s.SetValidationJobCandidates(repository, job.ID, commits); setErr != nil {
+			return s.failValidationJob(ctx, repository, job.ID, setErr)
 		}
 	} else if !stringSlicesEqual(job.CandidateCommits, commits) {
 		return s.failValidationJob(
@@ -247,7 +247,7 @@ func (s Store) failValidationJob(
 		releaseErr := s.releaseValidationJob(repository, jobID)
 		return RepositoryValidationPending, errors.Join(ctx.Err(), releaseErr)
 	}
-	_, _, _, err := s.CompleteValidationJob(repository, RepositoryValidationCompletion{
+	_, _, completed, err := s.CompleteValidationJob(repository, RepositoryValidationCompletion{
 		JobID: jobID, Outcome: RepositoryValidationFailed,
 		Error: "Validation failed.", Summary: "Validation could not reach a conclusive result.",
 	})
@@ -257,7 +257,7 @@ func (s Store) failValidationJob(
 		}
 		return "", errors.Join(cause, err)
 	}
-	return RepositoryValidationFailed, nil
+	return completed.State, nil
 }
 
 func (s Store) releaseValidationJob(repository, jobID string) error {

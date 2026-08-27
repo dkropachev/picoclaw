@@ -72,11 +72,11 @@ func TestValidationWorkerRequeuesStaleEvidenceAfterNewOccurrence(t *testing.T) {
 		"main", "main", true, "stale validation defect",
 	)
 	mapping := lifecycleJobForFinding(t, state, occurrence.ID)
-	_, mapping, _, _, err := store.ClaimMappingJob(
+	_, mapping, _, claimed, err := store.ClaimMappingJob(
 		state.Repository, mapping.ID, RepositoryMappingModelSnapshot{},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !claimed {
+		t.Fatalf("mapping claim=%v err=%v", claimed, err)
 	}
 	state, aggregate, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: mapping.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
@@ -89,11 +89,11 @@ func TestValidationWorkerRequeuesStaleEvidenceAfterNewOccurrence(t *testing.T) {
 		"main", "main", true, "stale validation defect returns",
 	)
 	laterJob := lifecycleJobForFinding(t, state, later.ID)
-	_, laterJob, _, _, err = store.ClaimMappingJob(
+	_, laterJob, _, claimed, err = store.ClaimMappingJob(
 		state.Repository, laterJob.ID, RepositoryMappingModelSnapshot{},
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !claimed {
+		t.Fatalf("later mapping claim=%v err=%v", claimed, err)
 	}
 	_, _, err = store.ReserveValidationJobs(
 		state.Repository, []string{aggregate.ID}, RepositoryMappingModelSnapshot{Model: "reviewer"},

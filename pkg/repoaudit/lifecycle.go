@@ -651,7 +651,6 @@ func (s Store) CompleteMappingJob(
 	now := s.clock()
 	targetIndex := -1
 	createdTarget := false
-	matchState := RepositoryMatchKnown
 	if completion.RepositoryFindingID != "" {
 		targetIndex = repositoryFindingIndexByID(state.RepositoryFindings, completion.RepositoryFindingID)
 		if targetIndex < 0 {
@@ -683,15 +682,15 @@ func (s Store) CompleteMappingJob(
 		}
 		if completion.ExpectedUniverse != "" && completion.ExpectedUniverse !=
 			repositoryMatchingUniverseFingerprint(state.RepositoryFindings) {
-			now := s.clock()
+			restartNow := s.clock()
 			job.State = RepositoryMappingPending
 			job.Adjudication = RepositoryMappingAdjudication{}
 			job.CandidateUniverse = ""
 			job.Error = "Repository finding candidates changed; mapping will restart."
 			job.ReservedAt = time.Time{}
-			job.UpdatedAt = now
+			job.UpdatedAt = restartNow
 			state.Version++
-			state.UpdatedAt = now
+			state.UpdatedAt = restartNow
 			if err := s.save(&state); err != nil {
 				return RepositoryState{}, RepositoryFinding{}, err
 			}
@@ -707,7 +706,7 @@ func (s Store) CompleteMappingJob(
 				return RepositoryState{}, RepositoryFinding{}, errors.New("possible-duplicate candidate is missing")
 			}
 		}
-		matchState = completion.CreateMatchState
+		matchState := completion.CreateMatchState
 		occurrence.DefaultBranchVerified = completion.DefaultBranchVerified
 		occurrence.PostResolutionVerified = completion.RegressionVerified
 		occurrence.PostResolutionFixCommit = completion.RegressionFixCommit

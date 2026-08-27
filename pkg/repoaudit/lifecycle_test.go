@@ -51,15 +51,15 @@ func TestSchemaOneListMigrationAndExplicitJobReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(store.path(state.Repository), data, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(store.path(state.Repository), data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	legacySummary := Summarize(state)
 	legacySummary.SchemaVersion = 1
 	summaryData, _ := json.Marshal(legacySummary)
 	summaryPath := strings.TrimSuffix(store.path(state.Repository), ".json") + ".summary.json"
-	if err := os.WriteFile(summaryPath, summaryData, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(summaryPath, summaryData, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	summaries, err := store.ListSummaries()
@@ -109,11 +109,19 @@ func TestMappingAdjudicationAssociationDefaultBranchFenceAndRestart(t *testing.T
 		Decision: "distinct", CandidateID: "opaque-candidate", Confidence: .98,
 		Explanation: "Causal anchors conflict.",
 	}
-	if _, _, err := store.SaveMappingAdjudication(state.Repository, claimedJob.ID, adjudication); err != nil {
-		t.Fatal(err)
+	if _, _, saveErr := store.SaveMappingAdjudication(
+		state.Repository,
+		claimedJob.ID,
+		adjudication,
+	); saveErr != nil {
+		t.Fatal(saveErr)
 	}
-	if _, _, err := store.SaveMappingAdjudication(state.Repository, claimedJob.ID, adjudication); err != nil {
-		t.Fatalf("adjudication replay: %v", err)
+	if _, _, replayErr := store.SaveMappingAdjudication(
+		state.Repository,
+		claimedJob.ID,
+		adjudication,
+	); replayErr != nil {
+		t.Fatalf("adjudication replay: %v", replayErr)
 	}
 	completed, repositoryFinding, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: claimedJob.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
@@ -141,10 +149,10 @@ func TestMappingAdjudicationAssociationDefaultBranchFenceAndRestart(t *testing.T
 	if err != nil || !claimed {
 		t.Fatalf("second claim=%v err=%v", claimed, err)
 	}
-	if _, _, err := store.CompleteMappingJob(secondState.Repository, RepositoryMappingCompletion{
+	if _, _, completionErr := store.CompleteMappingJob(secondState.Repository, RepositoryMappingCompletion{
 		JobID: secondJob.ID, CreateMatchState: RepositoryMatchNew,
-	}); err == nil || !strings.Contains(err.Error(), "non-default") {
-		t.Fatalf("non-default create error = %v", err)
+	}); completionErr == nil || !strings.Contains(completionErr.Error(), "non-default") {
+		t.Fatalf("non-default create error = %v", completionErr)
 	}
 	joined, known, err := store.CompleteMappingJob(secondState.Repository, RepositoryMappingCompletion{
 		JobID: secondJob.ID, RepositoryFindingID: repositoryFinding.ID,
@@ -159,16 +167,9 @@ func TestMappingAdjudicationAssociationDefaultBranchFenceAndRestart(t *testing.T
 		"main", "main", true, "restart defect",
 	)
 	thirdJob := lifecycleJobForFinding(t, thirdState, third.ID)
-	if _, _, _, claimed, err := store.ClaimMappingJob(
-		thirdState.Repository,
-		thirdJob.ID,
-		snapshot,
-	); err != nil ||
-		!claimed {
-		t.Fatalf("third claim=%v err=%v", claimed, err)
-	}
-	if _, err := store.ReconcileJobs(context.Background()); err != nil {
-		t.Fatal(err)
+	claimLifecycleMappingJob(t, store, thirdState.Repository, thirdJob, snapshot)
+	if _, reconcileErr := store.ReconcileJobs(context.Background()); reconcileErr != nil {
+		t.Fatal(reconcileErr)
 	}
 	after, _, _ := store.Get(thirdState.Repository)
 	thirdJob = lifecycleJobForFinding(t, after, third.ID)
@@ -188,10 +189,7 @@ func TestValidationQueueCommitFenceRegressionAndIssueTTL(t *testing.T) {
 		"main", "main", true, "resolvable defect",
 	)
 	job := lifecycleJobForFinding(t, state, finding.ID)
-	_, job, _, _, err := store.ClaimMappingJob(state.Repository, job.ID, RepositoryMappingModelSnapshot{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
 	state, aggregate, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: job.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
 	})
@@ -214,17 +212,37 @@ func TestValidationQueueCommitFenceRegressionAndIssueTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := store.CompleteValidationJob(state.Repository, RepositoryValidationCompletion{
-		JobID: running.ID, Outcome: RepositoryValidationConfirmed,
-		SelectedCommitSHA: otherCommit, FixCommitTime: clock,
-	}); err == nil || !strings.Contains(err.Error(), "outside") {
-		t.Fatalf("unsupplied commit error = %v", err)
+	outsideState, outsideFinding, outsideJob, outsideErr := store.CompleteValidationJob(
+		state.Repository,
+		RepositoryValidationCompletion{
+			JobID: running.ID, Outcome: RepositoryValidationConfirmed,
+			SelectedCommitSHA: otherCommit, FixCommitTime: clock,
+		})
+	if outsideErr == nil || !strings.Contains(outsideErr.Error(), "outside") ||
+		outsideState.Repository != "" || outsideFinding.ID != "" || outsideJob.ID != "" {
+		t.Fatalf(
+			"unsupplied commit result = %#v / %#v / %#v, error = %v",
+			outsideState,
+			outsideFinding,
+			outsideJob,
+			outsideErr,
+		)
 	}
-	if _, _, _, err := store.CompleteValidationJob(state.Repository, RepositoryValidationCompletion{
-		JobID: running.ID, Outcome: RepositoryValidationConfirmed,
-		SelectedCommitSHA: fixCommit, FixCommitTime: clock, FirstContainingTag: "release-one",
-	}); err == nil || !strings.Contains(err.Error(), "semantic") {
-		t.Fatalf("non-semantic tag error = %v", err)
+	invalidTagState, invalidTagFinding, invalidTagJob, invalidTagErr := store.CompleteValidationJob(
+		state.Repository,
+		RepositoryValidationCompletion{
+			JobID: running.ID, Outcome: RepositoryValidationConfirmed,
+			SelectedCommitSHA: fixCommit, FixCommitTime: clock, FirstContainingTag: "release-one",
+		})
+	if invalidTagErr == nil || !strings.Contains(invalidTagErr.Error(), "semantic") ||
+		invalidTagState.Repository != "" || invalidTagFinding.ID != "" || invalidTagJob.ID != "" {
+		t.Fatalf(
+			"non-semantic tag result = %#v / %#v / %#v, error = %v",
+			invalidTagState,
+			invalidTagFinding,
+			invalidTagJob,
+			invalidTagErr,
+		)
 	}
 	clock = clock.Add(time.Minute)
 	state, resolved, completedJob, err := store.CompleteValidationJob(state.Repository, RepositoryValidationCompletion{
@@ -250,7 +268,7 @@ func TestValidationQueueCommitFenceRegressionAndIssueTTL(t *testing.T) {
 		t.Fatalf("closed snapshot=%#v err=%v", refreshed, err)
 	}
 	clock = clock.Add(RepositoryIssueSnapshotTTL)
-	state, reopened, err := store.UpdateRepositoryFindingIssueSnapshot(state.Repository, RepositoryIssueSnapshotUpdate{
+	_, reopened, err := store.UpdateRepositoryFindingIssueSnapshot(state.Repository, RepositoryIssueSnapshotUpdate{
 		RepositoryFindingID: aggregate.ID, ExpectedVersion: refreshed.Version,
 		ExternalID: "17", URL: "https://github.com/owner/repo/issues/17",
 		Origin: IssueDraftOriginLinked, State: RepositoryFindingIssueOpen, Title: "Tracked defect",
@@ -265,10 +283,7 @@ func TestValidationQueueCommitFenceRegressionAndIssueTTL(t *testing.T) {
 		"main", "main", true, "resolvable defect returns",
 	)
 	newJob := lifecycleJobForFinding(t, newState, newOccurrence.ID)
-	_, newJob, _, _, err = store.ClaimMappingJob(newState.Repository, newJob.ID, RepositoryMappingModelSnapshot{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	newJob = claimLifecycleMappingJob(t, store, newState.Repository, newJob, RepositoryMappingModelSnapshot{})
 	_, regressed, err := store.CompleteMappingJob(newState.Repository, RepositoryMappingCompletion{
 		JobID: newJob.ID, RepositoryFindingID: aggregate.ID,
 	})
@@ -290,21 +305,35 @@ func TestValidationRestartAndPostResolutionOccurrenceRegresses(t *testing.T) {
 		"main", "main", true, "regression target",
 	)
 	job := lifecycleJobForFinding(t, state, finding.ID)
-	_, job, _, _, _ = store.ClaimMappingJob(state.Repository, job.ID, RepositoryMappingModelSnapshot{})
+	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
 	state, aggregate, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: job.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, validationJobs, _ := store.ReserveValidationJobs(
+	state, validationJobs, err := store.ReserveValidationJobs(
 		state.Repository,
 		[]string{aggregate.ID},
 		RepositoryMappingModelSnapshot{},
 	)
-	state, running, _, _, _ := store.ClaimValidationJob(state.Repository, validationJobs[0].ID)
-	if _, err := store.ReconcileJobs(context.Background()); err != nil {
-		t.Fatal(err)
+	if err != nil || len(validationJobs) != 1 {
+		t.Fatalf("validation reservation=%#v err=%v", validationJobs, err)
+	}
+	state, running, validationFinding, validationClaimed, validationClaimErr := store.ClaimValidationJob(
+		state.Repository,
+		validationJobs[0].ID,
+	)
+	if validationClaimErr != nil || !validationClaimed || validationFinding.ID != aggregate.ID {
+		t.Fatalf(
+			"validation claim=%v finding=%#v err=%v",
+			validationClaimed,
+			validationFinding,
+			validationClaimErr,
+		)
+	}
+	if _, reconcileErr := store.ReconcileJobs(context.Background()); reconcileErr != nil {
+		t.Fatal(reconcileErr)
 	}
 	state, _, _ = store.Get(state.Repository)
 	running = lifecycleValidationJobByID(t, state, running.ID)
@@ -331,7 +360,7 @@ func TestValidationRestartAndPostResolutionOccurrenceRegresses(t *testing.T) {
 		"main", "main", true, "regression target returns",
 	)
 	laterJob := lifecycleJobForFinding(t, state, later.ID)
-	_, laterJob, _, _, _ = store.ClaimMappingJob(state.Repository, laterJob.ID, RepositoryMappingModelSnapshot{})
+	laterJob = claimLifecycleMappingJob(t, store, state.Repository, laterJob, RepositoryMappingModelSnapshot{})
 	_, regressed, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: laterJob.ID, RepositoryFindingID: aggregate.ID,
 		DefaultBranchVerified: true, RegressionVerified: true, RegressionFixCommit: fix,
@@ -353,7 +382,7 @@ func TestPossibleDuplicateDistinctAndMergePreserveIssueConflicts(t *testing.T) {
 		"main", "main", true, "canonical defect",
 	)
 	job := lifecycleJobForFinding(t, state, first.ID)
-	_, job, _, _, _ = store.ClaimMappingJob(state.Repository, job.ID, RepositoryMappingModelSnapshot{})
+	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
 	state, target, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: job.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
 	})
@@ -391,8 +420,8 @@ func TestPossibleDuplicateDistinctAndMergePreserveIssueConflicts(t *testing.T) {
 	state.MappingJobs = persistedJobs
 	state.Version++
 	state.UpdatedAt = clock
-	if err := store.save(&state); err != nil {
-		t.Fatal(err)
+	if saveErr := store.save(&state); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	state, _, err = store.LinkExistingIssue(ExistingIssueLink{
 		Repository: state.Repository, FindingID: second.ID,
@@ -403,24 +432,25 @@ func TestPossibleDuplicateDistinctAndMergePreserveIssueConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReconcileJobs(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, reconcileErr := store.ReconcileJobs(context.Background()); reconcileErr != nil {
+		t.Fatal(reconcileErr)
 	}
 	state, _, err = store.Get(state.Repository)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job = lifecycleJobForFinding(t, state, second.ID)
-	_, job, _, _, err = store.ClaimMappingJob(state.Repository, job.ID, RepositoryMappingModelSnapshot{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
 	adjudication := RepositoryMappingAdjudication{
 		Decision: "uncertain", CandidateID: target.ID, Confidence: .74,
 		MatchingAnchors: []string{"Scheduler.Run"}, Explanation: "The code moved and one anchor conflicts.",
 	}
-	if _, _, err := store.SaveMappingAdjudication(state.Repository, job.ID, adjudication); err != nil {
-		t.Fatal(err)
+	if _, _, saveErr := store.SaveMappingAdjudication(
+		state.Repository,
+		job.ID,
+		adjudication,
+	); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	state, provisional, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: job.ID, CreateMatchState: RepositoryMatchProvisional, DefaultBranchVerified: true,
@@ -449,22 +479,22 @@ func TestPossibleDuplicateDistinctAndMergePreserveIssueConflicts(t *testing.T) {
 		t, store, strings.Repeat("c", 40), strings.Repeat("3", 40), "duplicate-distinct",
 		"main", "main", true, "independent nearby defect", MatchHints{
 			Component:           "scheduler",
-			Operation:           "discard cancelled waiter",
-			FailureMode:         "cancelled waiter is retained",
+			Operation:           "discard canceled waiter",
+			FailureMode:         "canceled waiter is retained",
 			Trigger:             "cancellation during queue rotation",
-			ViolatedInvariant:   "cancelled waiters leave every queue",
+			ViolatedInvariant:   "canceled waiters leave every queue",
 			ObservableOutcome:   "queue capacity is exhausted",
 			RelatedSymbols:      []string{"Scheduler.Run", "Scheduler.Cancel"},
-			SourceAnchors:       []string{"cancelled"},
+			SourceAnchors:       []string{"canceled"},
 			DistinguishingFacts: []string{"requires cancellation"},
 		},
 	)
 	job = lifecycleJobForFinding(t, state, third.ID)
-	_, job, _, _, _ = store.ClaimMappingJob(state.Repository, job.ID, RepositoryMappingModelSnapshot{})
-	if _, _, err := store.SaveMappingAdjudication(state.Repository, job.ID, RepositoryMappingAdjudication{
+	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
+	if _, _, saveErr := store.SaveMappingAdjudication(state.Repository, job.ID, RepositoryMappingAdjudication{
 		Decision: "uncertain", CandidateID: target.ID, Confidence: .51,
-	}); err != nil {
-		t.Fatal(err)
+	}); saveErr != nil {
+		t.Fatal(saveErr)
 	}
 	state, provisional, err = store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: job.ID, CreateMatchState: RepositoryMatchProvisional, DefaultBranchVerified: true,
@@ -475,12 +505,19 @@ func TestPossibleDuplicateDistinctAndMergePreserveIssueConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := store.ReserveIssueGeneration(IssueGenerationRequest{
+	reservedState, reservedDraft, reserved, reserveErr := store.ReserveIssueGeneration(IssueGenerationRequest{
 		Repository: state.Repository, FindingID: third.ID, GenerationID: "rrig_provisional",
 		ResolvedInstructions: "Present the diagnosis.", InstructionsMode: IssueDraftInstructionsDefault,
 		GeneratorModel: "writer", GeneratorAccount: "account",
-	}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("provisional issue reservation error=%v", err)
+	})
+	if !errors.Is(reserveErr, ErrConflict) || reserved || reservedState.Repository != "" || reservedDraft.ID != "" {
+		t.Fatalf(
+			"provisional issue reservation=%#v / %#v / %v, error=%v",
+			reservedState,
+			reservedDraft,
+			reserved,
+			reserveErr,
+		)
 	}
 	_, distinct, err := store.ResolvePossibleDuplicate(state.Repository, RepositoryDuplicateResolution{
 		ProvisionalID: provisional.ID, CandidateID: target.ID, Decision: "distinct",
@@ -498,7 +535,7 @@ func TestIssueDraftStateProjectsOntoRepositoryFindingWithoutChangingPublicationF
 		"main", "main", true, "issue projection defect",
 	)
 	job := lifecycleJobForFinding(t, state, occurrence.ID)
-	_, job, _, _, _ = store.ClaimMappingJob(state.Repository, job.ID, RepositoryMappingModelSnapshot{})
+	job = claimLifecycleMappingJob(t, store, state.Repository, job, RepositoryMappingModelSnapshot{})
 	state, aggregate, err := store.CompleteMappingJob(state.Repository, RepositoryMappingCompletion{
 		JobID: job.ID, CreateMatchState: RepositoryMatchNew, DefaultBranchVerified: true,
 	})
@@ -606,17 +643,17 @@ func TestClosedExistingIssueLinkMovesAggregateToResolutionPending(t *testing.T) 
 
 func TestMappingCreationRequeuesWhenCandidateUniverseChanges(t *testing.T) {
 	store := NewStore(t.TempDir())
-	state, first := recordLifecycleFinding(
+	_, first := recordLifecycleFinding(
 		t, store, strings.Repeat("1", 40), strings.Repeat("a", 40), "universe-first",
 		"main", "main", true, "first universe defect",
 	)
 	state, second := recordLifecycleFinding(
 		t, store, strings.Repeat("2", 40), strings.Repeat("b", 40), "universe-second",
 		"main", "main", true, "second universe defect", MatchHints{
-			Component: "scheduler", Operation: "discard cancelled waiter",
-			FailureMode: "cancelled waiter remains queued", Trigger: "queue rotation after cancellation",
-			ViolatedInvariant: "cancelled waiters leave the queue", ObservableOutcome: "queue capacity is exhausted",
-			RelatedSymbols: []string{"Scheduler.Run"}, SourceAnchors: []string{"cancelled"},
+			Component: "scheduler", Operation: "discard canceled waiter",
+			FailureMode: "canceled waiter remains queued", Trigger: "queue rotation after cancellation",
+			ViolatedInvariant: "canceled waiters leave the queue", ObservableOutcome: "queue capacity is exhausted",
+			RelatedSymbols: []string{"Scheduler.Run"}, SourceAnchors: []string{"canceled"},
 			DistinguishingFacts: []string{"requires cancellation"},
 		},
 	)
@@ -750,6 +787,29 @@ func lifecycleJobForFinding(t *testing.T, state RepositoryState, findingID strin
 	return RepositoryMappingJob{}
 }
 
+func claimLifecycleMappingJob(
+	t *testing.T,
+	store Store,
+	repository string,
+	pendingJob RepositoryMappingJob,
+	snapshot RepositoryMappingModelSnapshot,
+) RepositoryMappingJob {
+	t.Helper()
+	state, claimedJob, finding, claimed, err := store.ClaimMappingJob(repository, pendingJob.ID, snapshot)
+	if err != nil || !claimed || state.Repository != repository || claimedJob.ID != pendingJob.ID ||
+		finding.ID != pendingJob.ReviewFindingID {
+		t.Fatalf(
+			"mapping claim=%v state=%#v job=%#v finding=%#v err=%v",
+			claimed,
+			state,
+			claimedJob,
+			finding,
+			err,
+		)
+	}
+	return claimedJob
+}
+
 func lifecycleValidationJobByID(t *testing.T, state RepositoryState, id string) RepositoryValidationJob {
 	t.Helper()
 	for _, job := range state.ValidationJobs {
@@ -771,10 +831,18 @@ func TestLifecycleValidationBatchBoundaries(t *testing.T) {
 	); err == nil {
 		t.Fatal("oversized validation batch accepted")
 	}
-	if _, _, _, _, err := store.ClaimMappingJob(
+	invalidState, invalidJob, invalidFinding, claimed, claimErr := store.ClaimMappingJob(
 		"owner/repo", "missing", RepositoryMappingModelSnapshot{ProfileVersion: 1},
-	); err == nil {
-		t.Fatal("invalid model snapshot accepted")
+	)
+	if claimErr == nil || claimed || invalidState.Repository != "" || invalidJob.ID != "" || invalidFinding.ID != "" {
+		t.Fatalf(
+			"invalid model snapshot result=%#v / %#v / %#v / %v, error=%v",
+			invalidState,
+			invalidJob,
+			invalidFinding,
+			claimed,
+			claimErr,
+		)
 	}
 	if _, _, err := store.SaveMappingAdjudication(
 		"owner/repo", "missing", RepositoryMappingAdjudication{Decision: "same", Confidence: math.NaN()},

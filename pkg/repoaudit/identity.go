@@ -62,7 +62,7 @@ func GitHubRepositoryIdentity(repository string) string {
 	if repository == "" || filepath.IsAbs(repository) {
 		return ""
 	}
-	pathValue := ""
+	var pathValue string
 	if strings.Contains(repository, ":") && !strings.Contains(repository, "://") {
 		identity, remotePath, ok := strings.Cut(repository, ":")
 		host := identity

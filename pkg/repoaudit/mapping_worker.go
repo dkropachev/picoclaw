@@ -212,8 +212,8 @@ func (s Store) repositoryMappingCompletionForJob(
 	for _, candidate := range request.Candidates {
 		opaqueIDs = append(opaqueIDs, candidate.ID)
 	}
-	if err := ValidateRepositoryMappingAdjudication(adjudication, opaqueIDs); err != nil {
-		return RepositoryMappingCompletion{}, matched.Method, err
+	if validationErr := ValidateRepositoryMappingAdjudication(adjudication, opaqueIDs); validationErr != nil {
+		return RepositoryMappingCompletion{}, matched.Method, validationErr
 	}
 	if adjudication.CandidateID != "" {
 		adjudication.CandidateID = opaqueToCanonical[adjudication.CandidateID]
@@ -223,10 +223,10 @@ func (s Store) repositoryMappingCompletionForJob(
 		adjudication.Decision = "uncertain"
 	}
 	universe := repositoryMatchingUniverseFingerprint(state.RepositoryFindings)
-	if _, _, err := s.SaveMappingAdjudication(
+	if _, _, saveErr := s.SaveMappingAdjudication(
 		state.Repository, job.ID, adjudication, universe,
-	); err != nil {
-		return RepositoryMappingCompletion{}, matched.Method, err
+	); saveErr != nil {
+		return RepositoryMappingCompletion{}, matched.Method, saveErr
 	}
 	completion := repositoryCompletionFromAdjudication(
 		job.ID, adjudication, matched.Candidates, verified,
