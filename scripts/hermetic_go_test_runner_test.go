@@ -225,8 +225,10 @@ cp "$PICOCLAW_TEST_CONFIG" "$CAPTURE_DIR/config.json"
 	if err = json.Unmarshal(configData, &configFile); err != nil {
 		t.Fatalf("decode generated config: %v\n%s", err, configData)
 	}
-	if configFile.Agents.Defaults.Workspace != filepath.Join(testRoot, "picoclaw", "workspace") ||
-		configFile.Events.Ingress.DatabasePath != filepath.Join(testRoot, "picoclaw", "workspace", "eventing", "events.db") {
+	wantWorkspace := filepath.Join(testRoot, "picoclaw", "workspace")
+	wantEventDB := filepath.Join(wantWorkspace, "eventing", "events.db")
+	if configFile.Agents.Defaults.Workspace != wantWorkspace ||
+		configFile.Events.Ingress.DatabasePath != wantEventDB {
 		t.Fatalf("generated config escaped sandbox: %#v", configFile)
 	}
 	if configFile.Gateway.Host != "127.0.0.1" || configFile.Gateway.Port <= 0 ||
@@ -246,7 +248,11 @@ func TestHermeticGoTestRunnerPropagatesCommandFailureAndCleansUp(t *testing.T) {
 	captureDir := t.TempDir()
 	stubGo := writeHermeticRunnerGoStub(t, captureDir)
 	probe := filepath.Join(t.TempDir(), "failing-probe")
-	if err = os.WriteFile(probe, []byte("#!/usr/bin/env bash\nprintf '%s' \"$PICOCLAW_TEST_ROOT\" >\"$CAPTURE_DIR/test-root\"\nexit 23\n"), 0o755); err != nil {
+	probeScript := `#!/usr/bin/env bash
+printf '%s' "$PICOCLAW_TEST_ROOT" >"$CAPTURE_DIR/test-root"
+exit 23
+`
+	if err = os.WriteFile(probe, []byte(probeScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command(buildHermeticRunnerExecutable(t), probe)
