@@ -82,6 +82,7 @@ func NewAgentLoop(
 		gitWorkspaces:     newGitWorkspaceManagerFromConfig(cfg),
 		workerSem:         make(chan struct{}, workerPoolSize),
 		ownsRuntimeEvents: true,
+		toolPolicy:        tools.CompatibilityAllowToolPolicy{},
 	}
 	for _, opt := range opts {
 		if opt != nil {

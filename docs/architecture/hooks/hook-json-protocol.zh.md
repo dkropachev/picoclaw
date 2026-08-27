@@ -306,8 +306,8 @@
 }
 ```
 
-`respond` action 允许 hook 直接返回工具结果，跳过实际工具执行。适用于：
-1. **插件工具注入**：外部 hook 可实现工具，无需在 ToolRegistry 注册
+`respond` action 允许管理员可信 hook 为已注册且实际提供的工具返回合成结果。结果对外可见前仍必须通过中央工具 policy 和 approval。适用于：
+1. **替代履行方式**：通过已批准的缓存或服务响应现有工具
 2. **工具结果缓存**：对重复调用返回缓存结果
 3. **工具模拟**：测试时返回模拟结果
 
@@ -469,12 +469,13 @@ runtime 观察型事件，仅广播，无需响应。`id` 为 `0` 或不存在�
 常见 `Kind` 值：
 - `agent.turn.start` / `agent.turn.end`
 - `agent.llm.request` / `agent.llm.response`
+- `agent.tool.policy_decision`
 - `agent.tool.exec_start` / `agent.tool.exec_end` / `agent.tool.exec_skipped`
 - `agent.steering.injected`
 - `agent.interrupt.received`
 - `agent.error`
 
-旧 observe 配置名如 `turn_end`、`tool_exec_start` 仍然可用，并会归一化为 runtime event 名称。新的 process hook 通知使用 `hook.runtime_event`。
+旧 observe 配置名如 `turn_end`、`tool_exec_start`、`tool_policy_decision` 仍然可用，并会归一化为 runtime event 名称。新的 process hook 通知使用 `hook.runtime_event`。
 
 ---
 
@@ -510,62 +511,25 @@ runtime 观察型事件，仅广播，无需响应。`id` 为 `0` 或不存在�
 
 ---
 
-## 通过 `before_llm` 和 `before_tool` 实现插件工具注入
+## 通过 `before_tool` 提供可信替代结果
 
-插件工具注入的标准流程：
-
-1. 在 `before_llm` 中注入工具定义，让 LLM 知道有这个工具可用
-2. 在 `before_tool` 中使用 `respond` action 直接返回工具执行结果
-
-### `before_llm` 注入工具定义
-
-```python
-def handle_before_llm(params: dict) -> dict:
-    tools = params.get("tools", [])
-
-    # 添加插件工具定义
-    tools.append({
-        "type": "function",
-        "function": {
-            "name": "my_plugin_tool",
-            "description": "插件提供的工具",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "input": {"type": "string", "description": "输入内容"}
-                },
-                "required": ["input"]
-            }
-        }
-    })
-
-    return {
-        "action": "modify",
-        "request": {
-            "model": params["model"],
-            "messages": params["messages"],
-            "tools": tools,
-            "options": params.get("options", {})
-        }
-    }
-```
-
-### `before_tool` 返回执行结果
+`before_llm` 不能注入新工具定义；PicoClaw 会保留可信定义集合。必须先通过
+registry/factory 系统注册工具。若成功 provider 请求实际收到该精确工具，配置了
+`trusted: true` 的 process hook 才可提供替代结果：
 
 ```python
 def handle_before_tool(params: dict) -> dict:
     tool = params.get("tool", "")
 
-    if tool == "my_plugin_tool":
-        # 在这里实现工具逻辑
+    if tool == "weather_lookup":
         args = params.get("arguments", {})
-        input_text = args.get("input", "")
+        city = args.get("city", "")
 
-        # 直接返回结果，无需在 ToolRegistry 注册
+        # 结果对外可见前仍会执行 policy 和 approval。
         return {
             "action": "respond",
             "result": {
-                "for_llm": f"插件工具执行成功，输入: {input_text}",
+                "for_llm": f"{city} 的缓存天气：晴",
                 "silent": False,
                 "is_error": False
             }
@@ -574,4 +538,5 @@ def handle_before_tool(params: dict) -> dict:
     return {"action": "continue"}
 ```
 
-通过这种方式，外部 hook 可以完全实现插件工具，无需在 PicoClaw 内部注册任何工具实现。
+不可信 process hook 可以观察或拒绝该调用，但其 `modify` 或 `respond` 结果会被丢弃。
+详情请参阅[可信 Hook 提供工具结果](plugin-tool-injection.zh.md)。

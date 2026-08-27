@@ -543,11 +543,7 @@ func (r *ToolRegistry) executeWithContext(
 	asyncCallback AsyncCallback,
 	suppressLogDetails bool,
 ) *ToolResult {
-	startFields := map[string]any{"tool": name}
-	if !suppressLogDetails {
-		startFields["args"] = args
-	}
-	logger.InfoCF("tool", "Tool execution started", startFields)
+	logToolExecutionStart(name, args, suppressLogDetails)
 
 	tool, descriptor, mediaStore, ok := r.executableEntry(name)
 	if !ok {
@@ -577,6 +573,37 @@ func (r *ToolRegistry) executeWithContext(
 			WithError(fmt.Errorf("%w: argument validation failed: %w", workflows.ErrToolCallNotDispatched, err))
 	}
 
+	return executeResolvedToolWithContext(
+		ctx,
+		name,
+		args,
+		tool,
+		mediaStore,
+		channel,
+		chatID,
+		asyncCallback,
+		suppressLogDetails,
+	)
+}
+
+func logToolExecutionStart(name string, args map[string]any, suppressLogDetails bool) {
+	startFields := map[string]any{"tool": name}
+	if !suppressLogDetails {
+		startFields["args"] = args
+	}
+	logger.InfoCF("tool", "Tool execution started", startFields)
+}
+
+func executeResolvedToolWithContext(
+	ctx context.Context,
+	name string,
+	args map[string]any,
+	tool Tool,
+	mediaStore media.MediaStore,
+	channel, chatID string,
+	asyncCallback AsyncCallback,
+	suppressLogDetails bool,
+) *ToolResult {
 	// Inject channel/chatID into ctx so tools read them via ToolChannel(ctx)/ToolChatID(ctx).
 	// Always inject — tools validate what they require.
 	ctx = WithToolContext(ctx, channel, chatID)

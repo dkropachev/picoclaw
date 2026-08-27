@@ -306,8 +306,8 @@ Triggered before tool execution. Can modify tool name and arguments, deny execut
 }
 ```
 
-The `respond` action allows hooks to return tool results directly, skipping actual tool execution. Use cases:
-1. **Plugin tool injection**: External hooks can implement tools without registering in ToolRegistry
+The `respond` action lets an administratively trusted hook return a synthetic result for an already registered and exactly offered tool. It still crosses central tool policy and approval before output. Use cases:
+1. **Alternate fulfillment**: Answer an existing tool through an approved cache or service
 2. **Tool result caching**: Return cached results for repeated calls
 3. **Tool mocking**: Return mock results during testing
 
@@ -469,12 +469,13 @@ Runtime observer event, broadcast only, no response required. `id` is `0` or abs
 Common `Kind` values:
 - `agent.turn.start` / `agent.turn.end`
 - `agent.llm.request` / `agent.llm.response`
+- `agent.tool.policy_decision`
 - `agent.tool.exec_start` / `agent.tool.exec_end` / `agent.tool.exec_skipped`
 - `agent.steering.injected`
 - `agent.interrupt.received`
 - `agent.error`
 
-Legacy observe configuration names such as `turn_end` and `tool_exec_start` are still accepted and normalized to runtime event names. New process hook notifications use `hook.runtime_event`.
+Legacy observe configuration names such as `turn_end`, `tool_exec_start`, and `tool_policy_decision` are still accepted and normalized to runtime event names. New process hook notifications use `hook.runtime_event`.
 
 ---
 
@@ -510,62 +511,26 @@ Legacy observe configuration names such as `turn_end` and `tool_exec_start` are 
 
 ---
 
-## Plugin Tool Injection via `before_llm` and `before_tool`
+## Trusted Alternate Fulfillment via `before_tool`
 
-Standard flow for plugin tool injection:
-
-1. In `before_llm`, inject tool definition to let LLM know the tool is available
-2. In `before_tool`, use `respond` action to return tool execution result directly
-
-### `before_llm` Inject Tool Definition
-
-```python
-def handle_before_llm(params: dict) -> dict:
-    tools = params.get("tools", [])
-
-    # Add plugin tool definition
-    tools.append({
-        "type": "function",
-        "function": {
-            "name": "my_plugin_tool",
-            "description": "Plugin provided tool",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "input": {"type": "string", "description": "Input content"}
-                },
-                "required": ["input"]
-            }
-        }
-    })
-
-    return {
-        "action": "modify",
-        "request": {
-            "model": params["model"],
-            "messages": params["messages"],
-            "tools": tools,
-            "options": params.get("options", {})
-        }
-    }
-```
-
-### `before_tool` Return Execution Result
+`before_llm` cannot inject a new tool definition; PicoClaw preserves the trusted
+definition set. Register the tool through the registry/factory system first.
+If that exact tool is offered to the successful provider request, a process hook
+configured with `trusted: true` may provide an alternate result:
 
 ```python
 def handle_before_tool(params: dict) -> dict:
     tool = params.get("tool", "")
 
-    if tool == "my_plugin_tool":
-        # Implement tool logic here
+    if tool == "weather_lookup":
         args = params.get("arguments", {})
-        input_text = args.get("input", "")
+        city = args.get("city", "")
 
-        # Return result directly, no need to register in ToolRegistry
+        # Policy and approval still run before this result is exposed.
         return {
             "action": "respond",
             "result": {
-                "for_llm": f"Plugin tool executed successfully, input: {input_text}",
+                "for_llm": f"Cached weather for {city}: sunny",
                 "silent": False,
                 "is_error": False
             }
@@ -574,4 +539,5 @@ def handle_before_tool(params: dict) -> dict:
     return {"action": "continue"}
 ```
 
-This way, external hooks can fully implement plugin tools without registering any tool implementation inside PicoClaw.
+An untrusted process hook may observe or deny this call, but its `modify` or
+`respond` result is discarded. See [Trusted Hook-Provided Tool Results](plugin-tool-injection.md).

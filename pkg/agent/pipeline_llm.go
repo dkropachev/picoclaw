@@ -36,6 +36,7 @@ func (p *Pipeline) CallLLM(
 	// decide again within the frozen turn capability cap.
 	exec.nativeSearchNarrowed = false
 	exec.useNativeSearch = false
+	exec.toolCallProvenance = nil
 	maxMediaSize := p.Cfg.Agents.Defaults.GetMaxMediaSize()
 
 	// PreLLM: resolve media refs (except on iteration 1 where user media is already resolved)
@@ -45,7 +46,12 @@ func (p *Pipeline) CallLLM(
 
 	// PreLLM: graceful terminal handling
 	exec.gracefulTerminal, _ = ts.gracefulInterruptRequested()
-	baseProviderToolDefs := ts.agent.Tools.ToProviderDefs()
+	toolCatalog, catalogErr := ts.agent.Tools.SnapshotModelToolCatalog()
+	if catalogErr != nil {
+		return ControlBreak, fmt.Errorf("snapshot model tool catalog: %w", catalogErr)
+	}
+	exec.toolCatalog = toolCatalog
+	baseProviderToolDefs := toolCatalog.ProviderDefinitions()
 	baseProviderToolDefs = filterToolsByTurnProfile(baseProviderToolDefs, ts.profile)
 	exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
 	exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, baseProviderToolDefs)
@@ -228,6 +234,17 @@ func (p *Pipeline) CallLLM(
 			)
 			exec.providerToolDefs = toolDefsForCall
 		}
+		if err := picotools.ValidateOfferedToolDefinitions(toolDefsForCall); err != nil {
+			return nil, fmt.Errorf("invalid provider tool definitions: %w", err)
+		}
+		authoritativeToolDefs, detachDefsErr := picotools.DetachOfferedToolDefinitions(toolDefsForCall)
+		if detachDefsErr != nil {
+			return nil, fmt.Errorf("detach authoritative tool definitions: %w", detachDefsErr)
+		}
+		providerToolDefs, detachProviderDefsErr := picotools.DetachOfferedToolDefinitions(authoritativeToolDefs)
+		if detachProviderDefsErr != nil {
+			return nil, fmt.Errorf("detach provider tool definitions: %w", detachProviderDefsErr)
+		}
 		providerCtx, providerCancel := context.WithCancel(turnCtx)
 		ts.setProviderCancel(providerCancel)
 		defer func() {
@@ -244,7 +261,7 @@ func (p *Pipeline) CallLLM(
 			ts,
 			exec,
 			messagesForCall,
-			toolDefsForCall,
+			providerToolDefs,
 		); handled {
 			if observeErr := ts.observeWorkflowAgentResponse(
 				exec.llmModel,
@@ -255,6 +272,9 @@ func (p *Pipeline) CallLLM(
 			}
 			if streamErr == nil {
 				streamErr = providers.ResponseSafetyFilterError(response, "", exec.llmModel)
+			}
+			if streamErr == nil {
+				exec.providerToolDefs = authoritativeToolDefs
 			}
 			return response, streamErr
 		}
@@ -306,11 +326,26 @@ func (p *Pipeline) CallLLM(
 				candidateCfg,
 				candidateBaseDefinitions,
 			)
+			if validationErr := picotools.ValidateOfferedToolDefinitions(candidateToolDefs); validationErr != nil {
+				return nil, fmt.Errorf("invalid fallback tool definitions: %w", validationErr)
+			}
+			candidateAuthoritativeToolDefs, detachCandidateErr := picotools.DetachOfferedToolDefinitions(
+				candidateToolDefs,
+			)
+			if detachCandidateErr != nil {
+				return nil, fmt.Errorf("detach fallback tool definitions: %w", detachCandidateErr)
+			}
+			candidateProviderToolDefs, detachCandidateProviderErr := picotools.DetachOfferedToolDefinitions(
+				candidateAuthoritativeToolDefs,
+			)
+			if detachCandidateProviderErr != nil {
+				return nil, fmt.Errorf("detach fallback provider definitions: %w", detachCandidateProviderErr)
+			}
 			startedAt := time.Now()
 			response, err := candidateProvider.Chat(
 				ctx,
 				messagesForCall,
-				candidateToolDefs,
+				candidateProviderToolDefs,
 				candidate.Model,
 				callOpts,
 			)
@@ -326,7 +361,7 @@ func (p *Pipeline) CallLLM(
 			}
 			if err == nil {
 				exec.visibleToolSurface = candidateSurface
-				exec.providerToolDefs = candidateToolDefs
+				exec.providerToolDefs = candidateAuthoritativeToolDefs
 				exec.useNativeSearch = candidateNativeSearch
 				exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
 			}
@@ -383,11 +418,15 @@ func (p *Pipeline) CallLLM(
 		if admissionErr := admitWorkflowAgentCall(ts.opts.callAdmission); admissionErr != nil {
 			return nil, admissionErr
 		}
+		primaryProviderToolDefs, detachPrimaryErr := picotools.DetachOfferedToolDefinitions(authoritativeToolDefs)
+		if detachPrimaryErr != nil {
+			return nil, fmt.Errorf("detach primary provider definitions: %w", detachPrimaryErr)
+		}
 		startedAt := time.Now()
 		resp, err := exec.activeProvider.Chat(
 			providerCtx,
 			messagesForCall,
-			toolDefsForCall,
+			primaryProviderToolDefs,
 			exec.llmModel,
 			exec.llmOpts,
 		)
@@ -400,6 +439,9 @@ func (p *Pipeline) CallLLM(
 		}
 		if err == nil {
 			err = providers.ResponseSafetyFilterError(resp, "", exec.llmModel)
+		}
+		if err == nil {
+			exec.providerToolDefs = authoritativeToolDefs
 		}
 		if exec.accountRouter != nil {
 			candidate := providers.FallbackCandidate{}
@@ -646,6 +688,7 @@ func (p *Pipeline) CallLLM(
 		case HookActionContinue, HookActionModify:
 			if llmResp != nil && llmResp.Response != nil {
 				exec.response = llmResp.Response
+				exec.toolCallProvenance = llmResp.policyToolCallProvenance()
 			}
 		case HookActionAbortTurn:
 			cancelConfiguredStreamingLLM(turnCtx, exec)
@@ -765,7 +808,16 @@ func (p *Pipeline) CallLLM(
 	// Tool-call path: normalize and prepare for tool execution
 	exec.normalizedToolCalls = make([]providers.ToolCall, 0, len(exec.response.ToolCalls))
 	for _, tc := range exec.response.ToolCalls {
-		exec.normalizedToolCalls = append(exec.normalizedToolCalls, providers.NormalizeToolCall(tc))
+		normalized := providers.NormalizeToolCall(tc)
+		arguments, detachErr := picotools.DetachToolArguments(normalized.Arguments)
+		if detachErr != nil {
+			return ControlBreak, fmt.Errorf("detach model tool arguments: %w", detachErr)
+		}
+		normalized.Arguments = arguments
+		exec.normalizedToolCalls = append(exec.normalizedToolCalls, normalized)
+	}
+	if err := picotools.ValidateModelToolCallIdentity(exec.normalizedToolCalls); err != nil {
+		return ControlBreak, fmt.Errorf("invalid model tool-call batch: %w", err)
 	}
 
 	toolNames := make([]string, 0, len(exec.normalizedToolCalls))

@@ -164,6 +164,7 @@ type SubagentManager struct {
 	defaultModelFallbacks []string
 	workspace             string
 	tools                 *ToolRegistry
+	policy                ToolPolicy
 	maxIterations         int
 	maxTokens             int
 	temperature           float64
@@ -189,9 +190,19 @@ func NewSubagentManager(
 		defaultModel:  defaultModel,
 		workspace:     workspace,
 		tools:         NewToolRegistry(),
+		policy:        CompatibilityAllowToolPolicy{},
 		maxIterations: 10,
 		nextID:        1,
 	}
+}
+
+// SetToolPolicy binds the policy used by the legacy RunToolLoop fallback.
+// Standalone managers retain the constructor's explicit compatibility policy;
+// Agent-owned managers install their generation policy.
+func (sm *SubagentManager) SetToolPolicy(policy ToolPolicy) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.policy = policy
 }
 
 func (sm *SubagentManager) SetSpawner(spawner SpawnSubTurnFunc) {
@@ -380,6 +391,7 @@ func (sm *SubagentManager) legacyTaskRunnerSnapshot() subagentTaskRunner {
 	hasMaxTokens := sm.hasMaxTokens
 	hasTemperature := sm.hasTemperature
 	mediaResolver := sm.mediaResolver
+	policy := sm.policy
 	sm.mu.RUnlock()
 
 	return func(ctx context.Context, task SubagentTask) (*ToolResult, error) {
@@ -415,9 +427,14 @@ After completing the task, provide a clear summary of what was done.`
 			}
 		}
 		loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
-			Provider:      provider,
-			Model:         model,
-			Tools:         toolRegistry,
+			Provider: provider,
+			Model:    model,
+			Tools:    toolRegistry,
+			Policy:   policy,
+			PolicySubject: ToolPolicySubject{
+				AgentID: task.AgentID, SessionKey: task.OriginSessionKey,
+				TurnID: task.ID, Source: ToolPolicySourceLegacySubagent,
+			},
 			MaxIterations: maxIter,
 			LLMOptions:    llmOptions,
 			MediaResolver: mediaResolver,

@@ -48,6 +48,10 @@ legacy pending-result channel, direct callback output, or default-session
 system ingress.
 Quiesced shutdown and reload also close each retired agent's tool registry and
 session store before generation-owned dependencies disappear.
+Every client-dispatched model tool action is additionally bound to the exact
+definition set offered to the successful provider attempt and crosses the
+turn-snapshotted central policy plus legacy approval meet before feedback,
+synthetic hook fulfillment, or registry effect.
 
 ## Reconstruction Notes
 
@@ -65,6 +69,10 @@ session store before generation-owned dependencies disappear.
   `AgentLoop.ControllerGitWorkspaceManager`, plus
   `ControllerLocalReviewPromptDigest`, `AgentLoop.ControllerLocalReviewReady`,
   and `AgentLoop.NewControllerLocalReviewRunner`.
+- Tool-authorization types/functions: `WithToolPolicy`, the admitted turn's
+  immutable policy snapshot, `prepareAgentToolInvocation`,
+  `authorizeAgentTool`, and the exact successful-provider catalog retained by
+  `turnExecution`.
 - Runtime ordering: normalize input, resolve route/session, build prompt, select model candidate, call provider, execute tool calls, stream/finalize response, persist history, emit runtime events.
 - Non-obvious constraints: tool iteration limits, media limits, turn profile block
   disabling, fallback candidates, child-turn concurrency, exact transient-UX
@@ -105,6 +113,10 @@ session store before generation-owned dependencies disappear.
   implementations fail closed. Local review instead receives only caller-built
   bounded immutable context, uses a fresh provider instance with detached
   messages, and rejects every tool call or malformed structured outcome.
+  Model-authored registry and trusted hook-response fulfillment both cross the
+  same post-hook policy/approval seam. The compatibility behavior is an explicit
+  constructor-installed policy; nil never means allow, and trusted direct
+  registry/workflow dispatch remains a separate programmatic boundary.
   Development Ask/Steer messages additionally fence the exact conversation
   revision and, when present, the latest browsable candidate revision; scope
   changes become clarification state rather than queued edit instructions.
@@ -160,6 +172,13 @@ session store before generation-owned dependencies disappear.
 | `FR-AGENT-041` | MUST | Until structured plans are backed by durable coding-task state, normal Agent Pipeline provider definitions omit the factory-backed `update_plan` identity for PicoClaw, Simple, and Codex surfaces and reapply that omission after BeforeLLM rewrites, fallback selection, and runtime adaptation. A provider-authored call is converted to one skipped-tool result/event before `BeforeTool`, and a `BeforeTool` rename to the reserved identity is rejected again before approval or dispatch. Prompt callable-tool and allowed-name calculations omit the reserved identity and suppress the generic tool-use rule when no other callable definition remains. The capability catalog reports `update_plan` blocked with `requires_durable_plan`; explicit adaptation probes use a non-executed truthful compatibility tool instead. Trusted direct registry, workflow, and owner-factory calls remain available. | Removing an advertised schema is insufficient if stale history, a provider, a hook, or a prompt can still invoke or encourage volatile plan state; model turns must fail closed without breaking certified native factory contracts. |
 | `FR-AGENT-042` | MUST | When agent construction exposes factory-backed `apply_patch`, it freezes one detached workspace-control protected-root policy before registering the live root or factory. Its `ProtectedRoots` list contains only exact paths authoritative at this boundary: the agent workspace's session directory and account-router state file plus the configured Git-workspace root; the persistent transaction root is governed separately by `FR-AGENT-043`. Root and every later owner product receive independent slices but the same frozen values; mutation of `Config` or helper output after registration cannot rebind a child to another control root. Filesystem existence and path fences are captured per execution under the canonical workspace gate, so roots created later during the same `AgentInstance` construction do not falsely invalidate ordinary patches. Exact protected roots deny both root and owner products, while ordinary repository paths remain editable according to the existing file-tool permissions and adaptation profile. | Per-owner construction must not reread mutable configuration, omit agent-owned control state, or freeze a pre-creation absence snapshot that makes the resulting tool unusable. |
 | `FR-AGENT-043` | MUST | Agent construction freezes one absolute persistent `apply_patch` transaction-state root below the construction-time `config.GetHome()` and supplies that exact value through `ApplyPatchPreflightPolicy` to both the live root and every later owner product, which also makes it an exact protected root. It omits both registration and the owner factory when any enabled `read_file`, `list_dir`, local-media `message`, `send_file`, `load_image`/`view_image`, `write_file`, `edit_file`, or `append_file` sibling has implicit global authority because workspace restriction is disabled, when an enabled reader has `AllowReadOutsideWorkspace`, or when an effective read/write allow-path expression admits or cannot be proven disjoint from the state root and its control descendants. Restricted siblings with provably disjoint path authority retain `apply_patch`. Later environment, `Config`, or allow-pattern mutation cannot rebind the frozen root, restore an omitted factory, or change an admitted factory's authority. | The authenticated journal and recovery key cannot remain trustworthy when a sibling model-facing filesystem tool can read or mutate their namespace, and root/owner products must make the same construction-time admission decision. |
+| `FR-AGENT-044` | MUST | `NewAgentLoop` installs an explicit `CompatibilityAllowToolPolicy`, `WithToolPolicy` installs the exact supplied reference including nil, and every admitted root or strict child turn snapshots that immutable reference before model execution so reload or later loop mutation cannot replace its policy. Each provider attempt starts from one exact callable registry catalog, applies the existing profile/native-search/adaptation and trusted hook narrowing, validates unique bounded definition identity, gives the provider a deep-detached schema copy, and retains a separate authoritative definition set for only the successful attempt. Before `BeforeTool`, every model call must have valid unique identity and an exact original offered name and pass existing reserved/profile checks; after only administratively trusted hook rewrite or response, the final exact name repeats offered/reserved/profile and cancellation checks and prepares the exact schema-valid registry entry. Both registry execution and trusted non-nil hook response then evaluate the same detached final name/arguments, frozen normalized traits, fulfillment kind, trusted turn subject, and hook provenance through the central policy followed by the legacy approval chain. Approval runs for both fulfillment kinds, defaults to compatibility allow only inside an already successful central seam, and cannot widen a policy denial. Nil policy, malformed decision/request, policy panic/error/cancellation, missing or stale prepared entry, or claim failure closes out the current and every remaining authored call with bounded matched tool results and skipped events, emits no feedback/start/end/user/media output/`AfterTool`/registry effect, and terminates through the typed error path; a nil trusted hook response and every ordinary structural or policy denial record one bounded matched result and continue. A complete authorization emits one safe `agent.tool.policy_decision` before `exec_skipped` or `exec_start`; allow then claims the exact prepared entry before feedback/effect, rechecks abort/cancellation, and uses that immutable identity for events, inference, observation, and dispatch. Trusted hook response may publish its synthetic result/media after allow but performs neither registry effect nor `AfterTool`; registry fulfillment dispatches only the claimed entry and may then apply `AfterTool` to result presentation without relabeling identity. Native provider search, no-tool isolated provider paths, self-executing CLI providers, and trusted direct registry/deterministic workflow calls remain their separately owned boundaries. | Every root, named-agent, fallback, and strict-child client tool effect must authorize exactly what the successful provider saw and what will execute, without hook response, reload, stale registry state, nil compatibility, or telemetry ordering becoming an alternate authority path. |
+
+For `FR-AGENT-023`, the controller LocalRepair loop passes
+`CompatibilityAllowToolPolicy` explicitly inside its exact four-tool confined
+registry. Its existing workspace pin, whole-patch guard, response-order
+serialization, cancellation, and postflight checks remain the authority; a nil
+generic-loop policy is never a compatibility fallback.
 
 ## Data And State Model
 
@@ -175,6 +194,11 @@ Agent state includes configured defaults, resolved candidate providers, register
 tools, skills filter, MCP allowlist, context builder cache, runtime event bus,
 turn scope, and session store references. A turn records user input, media,
 assistant content, tool calls/results, optional reasoning, and runtime metadata.
+The admitted turn also holds one immutable ToolPolicy reference. Each active
+provider attempt retains one transient exact callable catalog plus a detached
+authoritative successful-provider definition set; prepared and claimed
+invocations are request-local single-use state and are never persisted as
+session or reload authority.
 Inbound session reservations additionally retain a process-local turn-UX
 identity and detached inbound-context snapshot. Per-session handoff locks
 serialize reservation, steering enqueue/dequeue, rebind, and abandonment;
@@ -287,6 +311,7 @@ Owns: EVENT agent.*
 | CLI | root `picoclaw` command registration | Compose feature-owned subcommands such as workflow and event operations while leaving their implementation and policy in the owning package. | `FR-AGENT-009` |
 | Config | `agents.*`, `model_aliases[]`, `account_routers[]`, `model_routers[]`, `model_list[]` | Default/per-agent account refs, exact aliases and fallback aliases, alias-to-concrete-model mappings, account overrides, routing, provider transport configuration, and execution policy. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
 | Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
+| Go API | `WithToolPolicy`, admitted turn policy snapshot, `Pipeline.ExecuteTools` | Install and freeze one explicit model-tool policy, then compose exact offered/prepared invocation checks, trusted hook fulfillment, legacy approval, safe decision events, and effect dispatch at one post-hook boundary. | `FR-AGENT-044` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting with strict owner-local construction, monotonic nested authority, one tracked manager record for each admitted async spawn, and one at-most-once exact-session result envelope for its terminal completion. | `FR-AGENT-007`, `FR-AGENT-037`, `FR-AGENT-038`, `FR-AGENT-039`, `FR-AGENT-040` |
 | Runtime | `AgentLoop.PauseRuntimeForReload`, retained runtime leases, provider/config reload | Quiesce root and asynchronous runtime users across a registry generation swap, service commit, or rollback. | `FR-AGENT-013` |
 | Go API | `interfaces.ChannelManager`, optional `MessageScopedTypingStopper`, `MessageScopedTurnUXCleaner`, `MessageScopedTurnUXRebinder`, and `MessageScopedPlaceholderSender` | Keep the legacy manager surface sufficient while allowing built-in channels to stop, clean, transfer, and create transient UX for one opaque turn identity. | `FR-AGENT-015`, `FR-AGENT-016` |
@@ -294,10 +319,10 @@ Owns: EVENT agent.*
 | Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
 | Runtime | `workflowAgentRunner.CaptureReadOnlySession`, `workflowAgentRunner.RunAgent`, and `AgentLoop.askSideQuestionWithOptions` frozen-context profile | Capture one strict existing-session snapshot, use Session Memory and Tool Execution primitives to freeze its complete media graph into the persisted private form, or validate/materialize that form without live rereads, then perform no-tool/no-hook provider decisions without joining or mutating the interactive turn lifecycle or exposing raw capabilities through provider identity. | `FR-AGENT-020` |
 | Runtime | `AgentLoop.askSideQuestionWithOptions` stateless profile | Perform no-history/no-cache/no-tool provider calls under one request-local identity while suppressing session-affine account routing and all durable or observable session identity. | `FR-AGENT-021` |
-| Go API | `AgentLoop.ControllerLocalRepairReady`, `AgentLoop.ControllerGitWorkspaceManager`, `ControllerLocalRepairPromptDigest`, `AgentLoop.NewControllerLocalRepairRunner`, `LocalRepairRunner.Run` | Under a caller-held runtime-generation lease, paused construction boundary, or drained generation-owned readiness admission, verify one exact agent has a concrete repair target without a provider call or affinity; expose only the installed concrete production workspace manager and an opaque domain-separated identity of the exact fixed repair prompt for trusted orchestration; under the lease, resolve untrusted routing text with no history and blank account affinity to the first concrete model/provider only, then run a fresh controller-only repair loop against one exact held checkout reservation with four confined file tools and detached postflight validation. The bridges acquire no lease and add no model-facing, workflow-extension, or public authority; the concrete manager remains a trusted-controller-only lifecycle capability. | `FR-AGENT-023` |
+| Go API | `AgentLoop.ControllerLocalRepairReady`, `AgentLoop.ControllerGitWorkspaceManager`, `ControllerLocalRepairPromptDigest`, `AgentLoop.NewControllerLocalRepairRunner`, `LocalRepairRunner.Run` | Under a caller-held runtime-generation lease, paused construction boundary, or drained generation-owned readiness admission, verify one exact agent has a concrete repair target without a provider call or affinity; expose only the installed concrete production workspace manager and an opaque domain-separated identity of the exact fixed repair prompt for trusted orchestration; under the lease, resolve untrusted routing text with no history and blank account affinity to the first concrete model/provider only, then run a fresh controller-only repair loop against one exact held checkout reservation with four confined file tools, an explicit compatibility policy, and detached postflight validation. The bridges acquire no lease and add no model-facing, workflow-extension, or public authority; the concrete manager remains a trusted-controller-only lifecycle capability. | `FR-AGENT-023` |
 | Go API | `AgentLoop.ControllerLocalReviewReady`, `AgentLoop.NewControllerLocalReviewRunner`, `ControllerLocalReviewRunner.Run`, `ControllerLocalReviewPromptDigest` | Under the caller's runtime-generation lease, resolve one exact usable agent and run a detached, no-history/no-cache/no-tool local review using the immutable diagnosis-only prompt and strict bounded schema; return only normalized findings or fixed safe errors. | `FR-AGENT-025` |
 | HTTP/UI | `/api/development-workspaces/:id/conversation/messages`, development chat | Revision-fenced Ask answers and safe-boundary Steer queues over optional exact candidate evidence, with explicit queued/applied/clarification status. | `FR-AGENT-026` |
-| Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
+| Events | `agent.*` | Turn, LLM, tool policy/dispatch, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006`, `FR-AGENT-044` |
 | HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
 | Runtime | `AgentInstance.Close`, `AgentRegistry.Close`, provider/config reload | After generation quiescence, close tool/session owners and release compatibility-source leases before borrowed retired generation services. | `FR-AGENT-031` |
 | Runtime | `AgentLoop.EnsureMCPInitialized`, generation-explicit MCP initialization, `mcpRuntime` reset/take, `AgentLoop.SetMediaStore`, provider/config reload | Serialize lazy dynamic-service ownership across exact runtime generations and converge every published registry on the latest retained media store. | `FR-AGENT-033` |
@@ -331,6 +356,14 @@ Owns: EVENT agent.*
    redemption before fallback observes the error. Failed verification
    suppresses another automatic reset for that exhaustion episode.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
+   Snapshot the turn policy and callable catalog before provider execution;
+   retain an independent exact definition set for the successful attempt. For
+   each client call, apply original offered/reserved/profile checks, trusted
+   `BeforeTool` narrowing, final checks, exact preparation, central policy, and
+   legacy approval. Emit the bounded decision before skip/start. Only an allowed
+   and successfully claimed invocation may publish feedback or fulfill through
+   the exact registry entry or trusted synthetic hook result; `AfterTool` applies
+   only to registry fulfillment.
 5. For an exact read-only workflow decision, accept the already-captured
    history and summary instead of consulting the context manager. For a
    compiler-private launch, first capture and detach one strict session under a
@@ -503,6 +536,13 @@ and security policies can alter the visible tool set or execution outcome.
 Runtime events report each major step. Threads can contribute a policy prompt
 that lets the main chat become or join a thread only after configured routing
 thresholds are satisfied.
+Tool Execution owns the neutral policy, detached request, exact catalog, and
+single-use prepared-dispatch primitives. Hooks owns administrative trust and the
+legacy approval chain. This feature snapshots both policy and successful
+provider authority, composes them after trusted rewriting, emits the safe
+decision event, and guarantees that feedback, hook output, async admission, and
+registry effect occur only after allow. Trusted deterministic workflow/direct
+registry calls remain outside this model-authored seam.
 The optional Seahorse context strategy consumes Session Memory's strict startup
 snapshots and owns the per-agent SQLite engine lifetime. Agent Conversations
 owns atomic `short_grep`/`short_expand` factory publication, registry allowlist
@@ -590,6 +630,12 @@ metadata but does not persist or reinterpret those trust facts.
   controls, additional-model-only limits, and zero-credit accounts never spend
   a reset.
 - Tool lookup misses produce a tool-skipped result instead of a panic.
+- An unoffered original or rewritten tool, reserved/profile-denied name, invalid
+  schema, or nil trusted hook response becomes a bounded matched skipped result
+  with no effect. A central policy/approval denial continues after one safe
+  decision and result; policy nil/panic/error/cancellation or stale claim closes
+  out remaining authored call IDs, starts no pending effect, and terminates the
+  turn through the typed error path.
 - Iteration limits stop repeated tool-call loops.
 - A SubTurn rejects nil/typed-nil, blank, panicking, unknown, ambiguous, or
   unavailable explicit selectors and unauthorized or missing targets before
@@ -759,7 +805,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-020` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-021` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-022` | [pkg/agent/agent_message_review_test.go](../../pkg/agent/agent_message_review_test.go), [pkg/agent/agent_scope_admission_race_test.go](../../pkg/agent/agent_scope_admission_race_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/agent_message.go](../../pkg/agent/agent_message.go), [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
-| `FR-AGENT-023` | [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/agent/local_repair_prompt_test.go](../../pkg/agent/local_repair_prompt_test.go), [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go), [pkg/agent/local_repair_factory.go](../../pkg/agent/local_repair_factory.go), [pkg/agent/local_repair_factory_test.go](../../pkg/agent/local_repair_factory_test.go), [pkg/agent/git_workspace.go](../../pkg/agent/git_workspace.go), [pkg/agent/git_workspace_controller_test.go](../../pkg/agent/git_workspace_controller_test.go), [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go) |
+| `FR-AGENT-023` | [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/agent/local_repair_prompt_test.go](../../pkg/agent/local_repair_prompt_test.go), [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go), [pkg/agent/local_repair_factory.go](../../pkg/agent/local_repair_factory.go), [pkg/agent/local_repair_factory_test.go](../../pkg/agent/local_repair_factory_test.go), [pkg/agent/git_workspace.go](../../pkg/agent/git_workspace.go), [pkg/agent/git_workspace_controller_test.go](../../pkg/agent/git_workspace_controller_test.go), [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/toolloop_policy_test.go](../../pkg/tools/toolloop_policy_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go) |
 | `FR-AGENT-026` | [pkg/prworkspace/conversation.go](../../pkg/prworkspace/conversation.go), [pkg/prworkspace/implementation.go](../../pkg/prworkspace/implementation.go), [web/frontend/src/api/development-workspaces.test.ts](../../web/frontend/src/api/development-workspaces.test.ts), [web/frontend/src/components/development-workspaces/development-chat.test.tsx](../../web/frontend/src/components/development-workspaces/development-chat.test.tsx) |
 | `FR-AGENT-027` | [pkg/agent/context_manager_test.go](../../pkg/agent/context_manager_test.go), [pkg/agent/context_legacy.go](../../pkg/agent/context_legacy.go), [pkg/agent/steering.go](../../pkg/agent/steering.go) |
 | `FR-AGENT-028` | [pkg/agent/turn_profile_policy_test.go](../../pkg/agent/turn_profile_policy_test.go), [pkg/agent/turn_profile_test.go](../../pkg/agent/turn_profile_test.go), [pkg/agent/turn_profile_policy.go](../../pkg/agent/turn_profile_policy.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
@@ -778,12 +824,15 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-041` | [pkg/agent/pipeline_llm.go](../../pkg/agent/pipeline_llm.go), [pkg/agent/pipeline_execute.go](../../pkg/agent/pipeline_execute.go), [pkg/agent/prompt_turn.go](../../pkg/agent/prompt_turn.go), [pkg/agent/pipeline_llm_adaptation_test.go](../../pkg/agent/pipeline_llm_adaptation_test.go), [pkg/agent/p008_codex_schema_parity_test.go](../../pkg/agent/p008_codex_schema_parity_test.go), [web/backend/api/agent_capabilities.go](../../web/backend/api/agent_capabilities.go), [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go) |
 | `FR-AGENT-042` | [pkg/agent/apply_patch_policy.go](../../pkg/agent/apply_patch_policy.go), [pkg/agent/apply_patch_policy_test.go](../../pkg/agent/apply_patch_policy_test.go), [pkg/agent/instance.go](../../pkg/agent/instance.go), [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go), [pkg/tools/apply_patch_preflight.go](../../pkg/tools/apply_patch_preflight.go) |
 | `FR-AGENT-043` | [pkg/agent/apply_patch_policy.go](../../pkg/agent/apply_patch_policy.go), [pkg/agent/apply_patch_policy_test.go](../../pkg/agent/apply_patch_policy_test.go), [pkg/agent/instance.go](../../pkg/agent/instance.go), [pkg/agent/instance_test.go](../../pkg/agent/instance_test.go), [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go) |
+| `FR-AGENT-044` | [pkg/agent/tool_policy.go](../../pkg/agent/tool_policy.go), [pkg/agent/pipeline_tool_policy_test.go](../../pkg/agent/pipeline_tool_policy_test.go), [pkg/agent/pipeline_llm.go](../../pkg/agent/pipeline_llm.go), [pkg/agent/pipeline_execute.go](../../pkg/agent/pipeline_execute.go), [pkg/agent/agent_options.go](../../pkg/agent/agent_options.go), [pkg/agent/turn_state.go](../../pkg/agent/turn_state.go), [pkg/agent/hooks_test.go](../../pkg/agent/hooks_test.go), [pkg/agent/runtime_event_logger_test.go](../../pkg/agent/runtime_event_logger_test.go), [pkg/tools/registry_invocation_test.go](../../pkg/tools/registry_invocation_test.go) |
 
 | `FR-AGENT-034` | [web/backend/api/collection_apis_test.go](../../web/backend/api/collection_apis_test.go), [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/routes/agent/-agents-route.test.tsx](../../web/frontend/src/routes/agent/-agents-route.test.tsx), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 
 - [pkg/agent/pipeline.go](../../pkg/agent/pipeline.go)
+- [pkg/agent/tool_policy.go](../../pkg/agent/tool_policy.go)
+- [pkg/agent/pipeline_execute.go](../../pkg/agent/pipeline_execute.go)
 - [pkg/agent/instance.go](../../pkg/agent/instance.go)
 - [pkg/agent/agent.go](../../pkg/agent/agent.go)
 - [pkg/agent/prompt_turn.go](../../pkg/agent/prompt_turn.go)

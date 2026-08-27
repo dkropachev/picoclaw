@@ -237,6 +237,13 @@ func cloneEventArguments(args map[string]any) map[string]any {
 }
 
 func hookDeniedToolContent(prefix, reason string) string {
+	reason = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return ' '
+		}
+		return character
+	}, reason)
+	reason = utils.Truncate(strings.TrimSpace(reason), 200)
 	if reason == "" {
 		return prefix
 	}

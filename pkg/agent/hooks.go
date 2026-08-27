@@ -6,6 +6,7 @@ import (
 	"io"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,9 +26,12 @@ const (
 type HookAction string
 
 const (
-	HookActionContinue  HookAction = "continue"
-	HookActionModify    HookAction = "modify"
-	HookActionRespond   HookAction = "respond" // Return result directly, skip tool execution. SECURITY: This bypasses ApproveTool checks, allowing hooks to return results for any tool (including sensitive ones like bash) without approval. Use with caution.
+	HookActionContinue HookAction = "continue"
+	HookActionModify   HookAction = "modify"
+	// HookActionRespond lets a trusted BeforeTool hook provide a synthetic
+	// result. Agent Pipeline still requires exact offered/registered authority,
+	// central ToolPolicy allow, and approval before exposing that result.
+	HookActionRespond   HookAction = "respond"
 	HookActionDenyTool  HookAction = "deny_tool"
 	HookActionAbortTurn HookAction = "abort_turn"
 	HookActionHardAbort HookAction = "hard_abort"
@@ -57,10 +61,39 @@ const (
 	HookSourceProcess
 )
 
+func (source HookSource) String() string {
+	switch source {
+	case HookSourceInProcess:
+		return "in_process"
+	case HookSourceProcess:
+		return "process"
+	default:
+		return "unknown"
+	}
+}
+
+// HookTrust is independent of HookSource. Source describes transport and
+// ordering; trust decides whether an interceptor may change execution data or
+// synthesize a tool response. The zero value is deliberately untrusted.
+type HookTrust uint8
+
+const (
+	HookTrustUntrusted HookTrust = iota
+	HookTrustTrusted
+)
+
+func hookTrustFromBool(trusted bool) HookTrust {
+	if trusted {
+		return HookTrustTrusted
+	}
+	return HookTrustUntrusted
+}
+
 type HookRegistration struct {
 	Name     string
 	Priority int
 	Source   HookSource
+	Trust    HookTrust
 	Hook     any
 }
 
@@ -68,6 +101,19 @@ func NamedHook(name string, hook any) HookRegistration {
 	return HookRegistration{
 		Name:   name,
 		Source: HookSourceInProcess,
+		Trust:  HookTrustTrusted,
+		Hook:   hook,
+	}
+}
+
+// UntrustedNamedHook mounts an in-process observer/narrowing hook. Its
+// interceptor return values cannot rewrite requests/results or synthesize a
+// response, but deny/abort decisions remain effective.
+func UntrustedNamedHook(name string, hook any) HookRegistration {
+	return HookRegistration{
+		Name:   name,
+		Source: HookSourceInProcess,
+		Trust:  HookTrustUntrusted,
 		Hook:   hook,
 	}
 }
@@ -118,6 +164,10 @@ type LLMHookResponse struct {
 	Context  *TurnContext           `json:"context,omitempty"`
 	Model    string                 `json:"model"` // Exact configured model alias used for the request.
 	Response *providers.LLMResponse `json:"response,omitempty"`
+
+	// toolCallProvenance is manager-owned, index-aligned authority metadata for
+	// trusted AfterLLM mutations. It is absent from hook JSON.
+	toolCallProvenance []tools.ToolHookProvenance
 }
 
 func (r *LLMHookResponse) Clone() *LLMHookResponse {
@@ -128,7 +178,15 @@ func (r *LLMHookResponse) Clone() *LLMHookResponse {
 	cloned.Meta = cloneHookMeta(r.Meta)
 	cloned.Context = cloneTurnContext(r.Context)
 	cloned.Response = cloneLLMResponse(r.Response)
+	cloned.toolCallProvenance = append([]tools.ToolHookProvenance(nil), r.toolCallProvenance...)
 	return &cloned
+}
+
+func (r *LLMHookResponse) policyToolCallProvenance() []tools.ToolHookProvenance {
+	if r == nil || len(r.toolCallProvenance) == 0 {
+		return nil
+	}
+	return append([]tools.ToolHookProvenance(nil), r.toolCallProvenance...)
 }
 
 type ToolCallHookRequest struct {
@@ -139,6 +197,10 @@ type ToolCallHookRequest struct {
 	Channel    string            `json:"channel,omitempty"`
 	ChatID     string            `json:"chat_id,omitempty"`
 	HookResult *tools.ToolResult `json:"hook_result,omitempty"` // Result returned directly by hook (for respond action). Media is supported - see Media handling section in docs.
+
+	// hookProvenance is manager-owned authority metadata. It is intentionally
+	// absent from hook JSON and cannot be supplied by an external hook.
+	hookProvenance tools.ToolHookProvenance
 }
 
 func (r *ToolCallHookRequest) Clone() *ToolCallHookRequest {
@@ -151,6 +213,13 @@ func (r *ToolCallHookRequest) Clone() *ToolCallHookRequest {
 	cloned.Arguments = cloneStringAnyMap(r.Arguments)
 	cloned.HookResult = cloneToolResult(r.HookResult)
 	return &cloned
+}
+
+func (r *ToolCallHookRequest) policyHookProvenance() tools.ToolHookProvenance {
+	if r == nil || !r.hookProvenance.Trusted {
+		return tools.ToolHookProvenance{}
+	}
+	return r.hookProvenance
 }
 
 type ToolApprovalRequest struct {
@@ -278,8 +347,19 @@ func (hm *HookManager) Mount(reg HookRegistration) error {
 	if reg.Name == "" {
 		return fmt.Errorf("hook name is required")
 	}
+	if reg.Name != strings.TrimSpace(reg.Name) || len(reg.Name) > tools.MaxToolPolicyNameLen {
+		return fmt.Errorf("hook name must be exact and bounded")
+	}
+	for _, character := range reg.Name {
+		if character < 0x20 || character == 0x7f {
+			return fmt.Errorf("hook name contains control characters")
+		}
+	}
 	if reg.Hook == nil {
 		return fmt.Errorf("hook %q is nil", reg.Name)
+	}
+	if reg.Trust != HookTrustUntrusted && reg.Trust != HookTrustTrusted {
+		return fmt.Errorf("hook %q has unsupported trust %d", reg.Name, reg.Trust)
 	}
 
 	hm.mu.Lock()
@@ -291,6 +371,30 @@ func (hm *HookManager) Mount(reg HookRegistration) error {
 	hm.hooks[reg.Name] = reg
 	hm.rebuildOrdered()
 	return nil
+}
+
+func hookRegistrationTrusted(reg HookRegistration) bool {
+	return reg.Trust == HookTrustTrusted
+}
+
+func trustedHookProvenance(reg HookRegistration) tools.ToolHookProvenance {
+	if !hookRegistrationTrusted(reg) {
+		return tools.ToolHookProvenance{}
+	}
+	return tools.ToolHookProvenance{
+		Name:    reg.Name,
+		Source:  reg.Source.String(),
+		Trusted: true,
+	}
+}
+
+func (hm *HookManager) logUntrustedMutation(reg HookRegistration, stage string, action HookAction) {
+	logger.WarnCF("hooks", "Discarded mutation from untrusted hook", map[string]any{
+		"hook":   reg.Name,
+		"source": reg.Source.String(),
+		"stage":  stage,
+		"action": action,
+	})
 }
 
 func (hm *HookManager) Unmount(name string) {
@@ -327,26 +431,60 @@ func (hm *HookManager) BeforeLLM(ctx context.Context, req *LLMHookRequest) (*LLM
 		return req, HookDecision{Action: HookActionContinue}
 	}
 
-	current := req.Clone()
+	current, err := detachLLMHookRequest(req)
+	if err != nil {
+		logger.WarnCF("hooks", "Skipping BeforeLLM hooks for invalid detached request", nil)
+		return req.Clone(), HookDecision{Action: HookActionContinue}
+	}
 	for _, reg := range hm.snapshotHooks() {
 		interceptor, ok := reg.Hook.(LLMInterceptor)
 		if !ok {
 			continue
 		}
 
-		next, decision, ok := hm.callBeforeLLM(ctx, reg.Name, interceptor, current.Clone())
+		hookInput, cloneErr := detachLLMHookRequest(current)
+		if cloneErr != nil {
+			logger.WarnCF(
+				"hooks",
+				"Skipping BeforeLLM hook for invalid detached request",
+				map[string]any{"hook": reg.Name},
+			)
+			continue
+		}
+		next, decision, ok := hm.callBeforeLLM(ctx, reg.Name, interceptor, hookInput)
 		if !ok {
 			continue
 		}
 
 		switch decision.normalizedAction() {
 		case HookActionContinue, HookActionModify:
+			if !hookRegistrationTrusted(reg) {
+				if decision.normalizedAction() == HookActionModify {
+					hm.logUntrustedMutation(reg, "before_llm", decision.normalizedAction())
+				}
+				continue
+			}
 			if next != nil {
-				next = hm.applyBeforeLLMControls(reg.Name, current, next)
-				current = next
+				detached, detachErr := detachLLMHookRequest(next)
+				if detachErr != nil {
+					logger.WarnCF(
+						"hooks",
+						"Discarded invalid BeforeLLM hook mutation",
+						map[string]any{"hook": reg.Name},
+					)
+					continue
+				}
+				detached = hm.applyBeforeLLMControls(reg.Name, current, detached)
+				current = detached
 			}
 		case HookActionAbortTurn, HookActionHardAbort:
 			return current, decision
+		case HookActionRespond:
+			if !hookRegistrationTrusted(reg) {
+				hm.logUntrustedMutation(reg, "before_llm", HookActionRespond)
+				continue
+			}
+			hm.logUnsupportedAction(reg.Name, "before_llm", decision.Action)
 		default:
 			hm.logUnsupportedAction(reg.Name, "before_llm", decision.Action)
 		}
@@ -359,30 +497,88 @@ func (hm *HookManager) AfterLLM(ctx context.Context, resp *LLMHookResponse) (*LL
 		return resp, HookDecision{Action: HookActionContinue}
 	}
 
-	current := resp.Clone()
+	current, err := detachLLMHookResponse(resp)
+	if err != nil {
+		logger.WarnCF("hooks", "Skipping AfterLLM hooks for invalid detached response", nil)
+		return resp.Clone(), HookDecision{Action: HookActionContinue}
+	}
 	for _, reg := range hm.snapshotHooks() {
 		interceptor, ok := reg.Hook.(LLMInterceptor)
 		if !ok {
 			continue
 		}
 
-		next, decision, ok := hm.callAfterLLM(ctx, reg.Name, interceptor, current.Clone())
+		hookInput, cloneErr := detachLLMHookResponse(current)
+		if cloneErr != nil {
+			logger.WarnCF(
+				"hooks",
+				"Skipping AfterLLM hook for invalid detached response",
+				map[string]any{"hook": reg.Name},
+			)
+			continue
+		}
+		next, decision, ok := hm.callAfterLLM(ctx, reg.Name, interceptor, hookInput)
 		if !ok {
 			continue
 		}
 
 		switch decision.normalizedAction() {
 		case HookActionContinue, HookActionModify:
+			if !hookRegistrationTrusted(reg) {
+				if decision.normalizedAction() == HookActionModify {
+					hm.logUntrustedMutation(reg, "after_llm", decision.normalizedAction())
+				}
+				continue
+			}
 			if next != nil {
-				current = next
+				detached, detachErr := detachLLMHookResponse(next)
+				if detachErr != nil {
+					logger.WarnCF("hooks", "Discarded invalid AfterLLM hook mutation", map[string]any{"hook": reg.Name})
+					continue
+				}
+				detached.toolCallProvenance = afterLLMToolCallProvenance(reg, current, detached)
+				current = detached
 			}
 		case HookActionAbortTurn, HookActionHardAbort:
 			return current, decision
+		case HookActionRespond:
+			if !hookRegistrationTrusted(reg) {
+				hm.logUntrustedMutation(reg, "after_llm", HookActionRespond)
+				continue
+			}
+			hm.logUnsupportedAction(reg.Name, "after_llm", decision.Action)
 		default:
 			hm.logUnsupportedAction(reg.Name, "after_llm", decision.Action)
 		}
 	}
 	return current, HookDecision{Action: HookActionContinue}
+}
+
+func afterLLMToolCallProvenance(
+	reg HookRegistration,
+	current, next *LLMHookResponse,
+) []tools.ToolHookProvenance {
+	if next == nil || next.Response == nil || len(next.Response.ToolCalls) == 0 {
+		return nil
+	}
+	provenance := make([]tools.ToolHookProvenance, len(next.Response.ToolCalls))
+	var currentCalls []providers.ToolCall
+	if current != nil && current.Response != nil {
+		currentCalls = current.Response.ToolCalls
+	}
+	for index := range next.Response.ToolCalls {
+		if index < len(currentCalls) && reflect.DeepEqual(
+			currentCalls[index],
+			next.Response.ToolCalls[index],
+		) {
+			if index < len(current.toolCallProvenance) {
+				provenance[index] = current.toolCallProvenance[index]
+			}
+			continue
+		}
+		provenance[index] = trustedHookProvenance(reg)
+	}
+	return provenance
 }
 
 func (hm *HookManager) applyBeforeLLMControls(
@@ -471,27 +667,70 @@ func (hm *HookManager) BeforeTool(
 		return call, HookDecision{Action: HookActionContinue}
 	}
 
-	current := call.Clone()
+	current, err := detachToolCallHookRequest(call)
+	if err != nil {
+		return invalidToolCallHookRequest(call), HookDecision{
+			Action: HookActionDenyTool,
+			Reason: "tool arguments are invalid",
+		}
+	}
 	for _, reg := range hm.snapshotHooks() {
 		interceptor, ok := reg.Hook.(ToolInterceptor)
 		if !ok {
 			continue
 		}
 
-		next, decision, ok := hm.callBeforeTool(ctx, reg.Name, interceptor, current.Clone())
+		hookInput, cloneErr := detachToolCallHookRequest(current)
+		if cloneErr != nil {
+			return invalidToolCallHookRequest(current), HookDecision{
+				Action: HookActionDenyTool,
+				Reason: "tool arguments are invalid",
+			}
+		}
+		next, decision, ok := hm.callBeforeTool(ctx, reg.Name, interceptor, hookInput)
 		if !ok {
 			continue
 		}
 
 		switch decision.normalizedAction() {
 		case HookActionContinue, HookActionModify:
+			if !hookRegistrationTrusted(reg) {
+				if decision.normalizedAction() == HookActionModify {
+					hm.logUntrustedMutation(reg, "before_tool", decision.normalizedAction())
+				}
+				continue
+			}
 			if next != nil {
-				current = next
+				detached, detachErr := detachToolCallHookRequest(next)
+				if detachErr != nil {
+					return invalidToolCallHookRequest(current), HookDecision{
+						Action: HookActionDenyTool,
+						Reason: "trusted hook returned invalid tool arguments",
+					}
+				}
+				previousProvenance := current.hookProvenance
+				detached.hookProvenance = previousProvenance
+				if decision.normalizedAction() == HookActionModify ||
+					detached.Tool != current.Tool ||
+					!reflect.DeepEqual(detached.Arguments, current.Arguments) {
+					detached.hookProvenance = trustedHookProvenance(reg)
+				}
+				current = detached
 			}
 		case HookActionRespond:
-			// Hook returns result directly, skip tool execution
-			// Carry HookResult in ToolCallHookRequest and return
-			return next, decision
+			if !hookRegistrationTrusted(reg) {
+				hm.logUntrustedMutation(reg, "before_tool", HookActionRespond)
+				continue
+			}
+			if next == nil {
+				return nil, decision
+			}
+			detached, detachErr := detachToolCallHookRequest(next)
+			if detachErr != nil {
+				return nil, decision
+			}
+			detached.hookProvenance = trustedHookProvenance(reg)
+			return detached, decision
 		case HookActionDenyTool, HookActionAbortTurn, HookActionHardAbort:
 			return current, decision
 		default:
@@ -509,25 +748,64 @@ func (hm *HookManager) AfterTool(
 		return result, HookDecision{Action: HookActionContinue}
 	}
 
-	current := result.Clone()
+	current, err := detachToolResultHookResponse(result)
+	if err != nil {
+		logger.WarnCF("hooks", "Skipping AfterTool hooks for invalid detached result", nil)
+		return result.Clone(), HookDecision{Action: HookActionContinue}
+	}
 	for _, reg := range hm.snapshotHooks() {
 		interceptor, ok := reg.Hook.(ToolInterceptor)
 		if !ok {
 			continue
 		}
 
-		next, decision, ok := hm.callAfterTool(ctx, reg.Name, interceptor, current.Clone())
+		hookInput, cloneErr := detachToolResultHookResponse(current)
+		if cloneErr != nil {
+			logger.WarnCF(
+				"hooks",
+				"Skipping AfterTool hook for invalid detached result",
+				map[string]any{"hook": reg.Name},
+			)
+			continue
+		}
+		next, decision, ok := hm.callAfterTool(ctx, reg.Name, interceptor, hookInput)
 		if !ok {
 			continue
 		}
 
 		switch decision.normalizedAction() {
 		case HookActionContinue, HookActionModify:
+			if !hookRegistrationTrusted(reg) {
+				if decision.normalizedAction() == HookActionModify {
+					hm.logUntrustedMutation(reg, "after_tool", decision.normalizedAction())
+				}
+				continue
+			}
 			if next != nil {
-				current = next
+				// Tool and Arguments identify the already-authorized effect. Even a
+				// trusted result hook may change only the result projection.
+				nextCopy := *next
+				nextCopy.Tool = current.Tool
+				nextCopy.Arguments = current.Arguments
+				detached, detachErr := detachToolResultHookResponse(&nextCopy)
+				if detachErr != nil {
+					logger.WarnCF(
+						"hooks",
+						"Discarded invalid AfterTool hook mutation",
+						map[string]any{"hook": reg.Name},
+					)
+					continue
+				}
+				current = detached
 			}
 		case HookActionAbortTurn, HookActionHardAbort:
 			return current, decision
+		case HookActionRespond:
+			if !hookRegistrationTrusted(reg) {
+				hm.logUntrustedMutation(reg, "after_tool", HookActionRespond)
+				continue
+			}
+			hm.logUnsupportedAction(reg.Name, "after_tool", decision.Action)
 		default:
 			hm.logUnsupportedAction(reg.Name, "after_tool", decision.Action)
 		}
@@ -546,7 +824,11 @@ func (hm *HookManager) ApproveTool(ctx context.Context, req *ToolApprovalRequest
 			continue
 		}
 
-		decision, ok := hm.callApproveTool(ctx, reg.Name, approver, req.Clone())
+		detached, detachErr := detachToolApprovalRequest(req)
+		if detachErr != nil {
+			return ApprovalDecision{Approved: false, Reason: "tool arguments are invalid"}
+		}
+		decision, ok := hm.callApproveTool(ctx, reg.Name, approver, detached)
 		if !ok {
 			return ApprovalDecision{
 				Approved: false,
@@ -809,6 +1091,150 @@ func (hm *HookManager) logUnsupportedAction(name, stage string, action HookActio
 	})
 }
 
+func validateDetachedMap(values map[string]any) error {
+	_, err := tools.DetachToolArguments(values)
+	return err
+}
+
+func validateProviderToolCallsDetached(calls []providers.ToolCall) error {
+	for index := range calls {
+		if err := validateDetachedMap(calls[index].Arguments); err != nil {
+			return fmt.Errorf("tool call %d arguments: %w", index+1, err)
+		}
+	}
+	return nil
+}
+
+func validateProviderMessagesDetached(messages []providers.Message) error {
+	for index := range messages {
+		if err := validateProviderToolCallsDetached(messages[index].ToolCalls); err != nil {
+			return fmt.Errorf("message %d: %w", index+1, err)
+		}
+	}
+	return nil
+}
+
+func validateToolDefinitionsDetached(definitions []providers.ToolDefinition) error {
+	for index := range definitions {
+		if err := validateDetachedMap(definitions[index].Function.Parameters); err != nil {
+			return fmt.Errorf("tool definition %d parameters: %w", index+1, err)
+		}
+	}
+	return nil
+}
+
+func validateToolResultDetached(result *tools.ToolResult) error {
+	if result == nil {
+		return nil
+	}
+	return validateProviderMessagesDetached(result.Messages)
+}
+
+func detachLLMHookRequest(request *LLMHookRequest) (*LLMHookRequest, error) {
+	if request == nil {
+		return nil, nil
+	}
+	if err := validateProviderMessagesDetached(request.Messages); err != nil {
+		return nil, err
+	}
+	if err := validateToolDefinitionsDetached(request.Tools); err != nil {
+		return nil, err
+	}
+	if err := validateDetachedMap(request.Options); err != nil {
+		return nil, err
+	}
+	return request.Clone(), nil
+}
+
+func detachLLMHookResponse(response *LLMHookResponse) (*LLMHookResponse, error) {
+	if response == nil {
+		return nil, nil
+	}
+	if response.Response != nil {
+		if err := validateProviderToolCallsDetached(response.Response.ToolCalls); err != nil {
+			return nil, err
+		}
+	}
+	cloned := response.Clone()
+	if cloned != nil && cloned.Response != nil {
+		for index := range cloned.Response.ToolCalls {
+			arguments, err := tools.DetachToolArguments(cloned.Response.ToolCalls[index].Arguments)
+			if err != nil {
+				return nil, err
+			}
+			cloned.Response.ToolCalls[index].Arguments = arguments
+		}
+	}
+	return cloned, nil
+}
+
+func detachToolCallHookRequest(request *ToolCallHookRequest) (*ToolCallHookRequest, error) {
+	if request == nil {
+		return nil, nil
+	}
+	if err := validateDetachedMap(request.Arguments); err != nil {
+		return nil, err
+	}
+	if err := validateToolResultDetached(request.HookResult); err != nil {
+		return nil, err
+	}
+	cloned := request.Clone()
+	arguments, err := tools.DetachToolArguments(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	cloned.Arguments = arguments
+	return cloned, nil
+}
+
+func invalidToolCallHookRequest(request *ToolCallHookRequest) *ToolCallHookRequest {
+	if request == nil {
+		return nil
+	}
+	cloned := *request
+	cloned.Meta = cloneHookMeta(request.Meta)
+	cloned.Context = cloneTurnContext(request.Context)
+	cloned.Arguments = map[string]any{}
+	cloned.HookResult = nil
+	cloned.hookProvenance = tools.ToolHookProvenance{}
+	return &cloned
+}
+
+func detachToolApprovalRequest(request *ToolApprovalRequest) (*ToolApprovalRequest, error) {
+	if request == nil {
+		return nil, nil
+	}
+	if err := validateDetachedMap(request.Arguments); err != nil {
+		return nil, err
+	}
+	cloned := request.Clone()
+	arguments, err := tools.DetachToolArguments(request.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	cloned.Arguments = arguments
+	return cloned, nil
+}
+
+func detachToolResultHookResponse(response *ToolResultHookResponse) (*ToolResultHookResponse, error) {
+	if response == nil {
+		return nil, nil
+	}
+	if err := validateDetachedMap(response.Arguments); err != nil {
+		return nil, err
+	}
+	if err := validateToolResultDetached(response.Result); err != nil {
+		return nil, err
+	}
+	cloned := response.Clone()
+	arguments, err := tools.DetachToolArguments(response.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	cloned.Arguments = arguments
+	return cloned, nil
+}
+
 func cloneProviderMessages(messages []providers.Message) []providers.Message {
 	if len(messages) == 0 {
 		return nil
@@ -817,14 +1243,27 @@ func cloneProviderMessages(messages []providers.Message) []providers.Message {
 	cloned := make([]providers.Message, len(messages))
 	for i, msg := range messages {
 		cloned[i] = msg
+		if msg.CreatedAt != nil {
+			createdAt := *msg.CreatedAt
+			cloned[i].CreatedAt = &createdAt
+		}
 		if len(msg.Media) > 0 {
 			cloned[i].Media = append([]string(nil), msg.Media...)
+		}
+		if len(msg.Attachments) > 0 {
+			cloned[i].Attachments = append([]providers.Attachment(nil), msg.Attachments...)
 		}
 		if len(msg.Parts) > 0 {
 			cloned[i].Parts = append([]providers.PromptPart(nil), msg.Parts...)
 		}
 		if len(msg.SystemParts) > 0 {
 			cloned[i].SystemParts = append([]providers.ContentBlock(nil), msg.SystemParts...)
+			for index := range cloned[i].SystemParts {
+				if msg.SystemParts[index].CacheControl != nil {
+					cacheControl := *msg.SystemParts[index].CacheControl
+					cloned[i].SystemParts[index].CacheControl = &cacheControl
+				}
+			}
 		}
 		if len(msg.ToolCalls) > 0 {
 			cloned[i].ToolCalls = cloneProviderToolCalls(msg.ToolCalls)
@@ -890,10 +1329,13 @@ func cloneLLMResponse(resp *providers.LLMResponse) *providers.LLMResponse {
 }
 
 func cloneStringAnyMap(src map[string]any) map[string]any {
-	if len(src) == 0 {
-		return map[string]any{}
+	if cloned, err := tools.DetachToolArguments(src); err == nil {
+		return cloned
 	}
 
+	// Public Clone helpers cannot return an error. HookManager validates and
+	// detaches before invoking or accepting a hook, so this compatibility
+	// fallback is unreachable at an authority boundary.
 	cloned := make(map[string]any, len(src))
 	for k, v := range src {
 		cloned[k] = v
@@ -914,8 +1356,7 @@ func cloneToolResult(result *tools.ToolResult) *tools.ToolResult {
 		cloned.ArtifactTags = append([]string(nil), result.ArtifactTags...)
 	}
 	if len(result.Messages) > 0 {
-		cloned.Messages = make([]providers.Message, len(result.Messages))
-		copy(cloned.Messages, result.Messages)
+		cloned.Messages = cloneProviderMessages(result.Messages)
 	}
 	return &cloned
 }

@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 func toolErrorSummary(result *tools.ToolResult) string {
@@ -114,23 +116,33 @@ func (p *Pipeline) ExecuteTools(
 	ts *turnState,
 	exec *turnExecution,
 	iteration int,
-) ToolControl {
+) (ToolControl, error) {
 	al := p.al
 	normalizedToolCalls := exec.normalizedToolCalls
 
 	ts.setPhase(TurnPhaseTools)
 	messages := exec.messages
+	defer func() {
+		exec.messages = messages
+	}()
 	handledAttachments := make([]providers.Attachment, 0)
 
 toolLoop:
 	for i, tc := range normalizedToolCalls {
 		if ts.hardAbortRequested() {
 			exec.abortedByHardAbort = true
-			return ToolControlBreak
+			return ToolControlBreak, nil
 		}
 
 		toolName := tc.Name
-		toolArgs := cloneStringAnyMap(tc.Arguments)
+		toolArgs, detachErr := tools.DetachToolArguments(tc.Arguments)
+		if detachErr != nil {
+			return ToolControlBreak, fmt.Errorf("detach tool call %q arguments: %w", tc.ID, detachErr)
+		}
+		hookProvenance := tools.ToolHookProvenance{}
+		if i < len(exec.toolCallProvenance) {
+			hookProvenance = exec.toolCallProvenance[i]
+		}
 		skipToolCall := func(reason string) {
 			exec.allResponsesHandled = false
 			al.emitEvent(
@@ -172,11 +184,40 @@ toolLoop:
 			))
 			return true
 		}
+		closeOutAuthorizationFailure := func(reason string) {
+			skipToolCall(reason)
+			for j := i + 1; j < len(normalizedToolCalls); j++ {
+				skippedTC := normalizedToolCalls[j]
+				al.emitEvent(
+					runtimeevents.KindAgentToolExecSkipped,
+					ts.eventMeta("runTurn", "turn.tool.skipped"),
+					ToolExecSkippedPayload{Tool: skippedTC.Name, Reason: reason},
+				)
+				skippedMsg := providers.Message{
+					Role: "tool", Content: reason, ToolCallID: skippedTC.ID,
+				}
+				messages = append(messages, skippedMsg)
+				if !ts.opts.NoHistory {
+					ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+					ts.recordPersistedMessage(skippedMsg)
+				}
+			}
+		}
+		denyUnofferedModelTool := func() bool {
+			if _, offered := exactOfferedToolDefinition(exec.providerToolDefs, toolName); offered {
+				return false
+			}
+			skipToolCall(fmt.Sprintf("Tool %q was not offered to this model request.", toolName))
+			return true
+		}
 
 		if denyReservedModelTool() {
 			continue
 		}
 		if denyByTurnProfile() {
+			continue
+		}
+		if denyUnofferedModelTool() {
 			continue
 		}
 
@@ -190,11 +231,100 @@ toolLoop:
 			switch decision.normalizedAction() {
 			case HookActionContinue, HookActionModify:
 				if toolReq != nil {
+					if nameErr := tools.ValidateToolPolicyName(toolReq.Tool); nameErr != nil {
+						toolName = tc.Name
+						skipToolCall("Tool hook returned an invalid tool name.")
+						continue
+					}
 					toolName = toolReq.Tool
 					toolArgs = toolReq.Arguments
+					if provenance := toolReq.policyHookProvenance(); provenance.Trusted {
+						hookProvenance = provenance
+					}
 				}
 			case HookActionRespond:
 				if toolReq != nil && toolReq.HookResult != nil {
+					if nameErr := tools.ValidateToolPolicyName(toolReq.Tool); nameErr != nil {
+						toolName = tc.Name
+						skipToolCall("Tool hook returned an invalid tool name.")
+						continue
+					}
+					toolName = toolReq.Tool
+					var hookArgsErr error
+					toolArgs, hookArgsErr = tools.DetachToolArguments(toolReq.Arguments)
+					if hookArgsErr != nil {
+						skipToolCall("Tool hook returned invalid arguments.")
+						continue
+					}
+					if denyReservedModelTool() || denyByTurnProfile() || denyUnofferedModelTool() {
+						continue
+					}
+					invocation, prepareErr := prepareAgentToolInvocation(exec, toolName, toolArgs)
+					if prepareErr != nil {
+						if errors.Is(prepareErr, workflows.ErrToolCallNotDispatched) {
+							skipToolCall("Tool hook returned arguments outside the offered schema.")
+							continue
+						}
+						closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+						return ToolControlBreak, fmt.Errorf("prepare hook response authorization: %w", prepareErr)
+					}
+					authorization, policyErr := p.authorizeAgentTool(
+						turnCtx,
+						ts,
+						tc,
+						invocation,
+						tools.ToolFulfillmentHookRespond,
+						toolReq.policyHookProvenance(),
+					)
+					if policyErr != nil {
+						outcome, reasonCode := toolPolicyFailureOutcome(policyErr)
+						p.emitToolPolicyDecision(
+							ts, invocation, tools.ToolFulfillmentHookRespond, outcome, reasonCode,
+						)
+						closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+						return ToolControlBreak, policyErr
+					}
+					if !authorization.allowed {
+						p.emitToolPolicyDecision(
+							ts,
+							invocation,
+							tools.ToolFulfillmentHookRespond,
+							ToolPolicyOutcomeDeny,
+							authorization.reasonCode,
+						)
+						skipToolCall(authorization.message)
+						continue
+					}
+					if _, claimErr := ts.agent.Tools.ClaimPrepared(turnCtx, invocation); claimErr != nil {
+						outcome, reasonCode := toolPolicyFailureOutcome(claimErr)
+						if outcome == ToolPolicyOutcomeError {
+							reasonCode = "dispatch_stale"
+						}
+						p.emitToolPolicyDecision(
+							ts, invocation, tools.ToolFulfillmentHookRespond, outcome, reasonCode,
+						)
+						closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+						return ToolControlBreak, fmt.Errorf("claim hook response authorization: %w", claimErr)
+					}
+					if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+						outcome, reasonCode := toolPolicyFailureOutcome(cancelErr)
+						p.emitToolPolicyDecision(
+							ts, invocation, tools.ToolFulfillmentHookRespond, outcome, reasonCode,
+						)
+						closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+						return ToolControlBreak, cancelErr
+					}
+					p.emitToolPolicyDecision(
+						ts,
+						invocation,
+						tools.ToolFulfillmentHookRespond,
+						ToolPolicyOutcomeAllow,
+						authorization.reasonCode,
+					)
+					if ts.hardAbortRequested() {
+						exec.abortedByHardAbort = true
+						return ToolControlBreak, nil
+					}
 					hookResult := toolReq.HookResult
 
 					argsJSON, _ := json.Marshal(toolArgs)
@@ -234,6 +364,10 @@ toolLoop:
 							outboundTurnMessageOptions{kind: messageKindToolFeedback},
 						))
 						fbCancel()
+					}
+					if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+						closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+						return ToolControlBreak, cancelErr
 					}
 
 					toolDuration := time.Duration(0)
@@ -428,12 +562,14 @@ toolLoop:
 
 					continue
 				}
+				skipToolCall("Tool hook returned no response result.")
 				logger.WarnCF("agent", "Hook returned respond action but no HookResult provided",
 					map[string]any{
 						"agent_id": ts.agent.ID,
 						"tool":     toolName,
 						"action":   "respond",
 					})
+				continue
 			case HookActionDenyTool:
 				skipToolCall(hookDeniedToolContent(
 					"Tool execution denied by hook",
@@ -442,36 +578,90 @@ toolLoop:
 				continue
 			case HookActionAbortTurn:
 				exec.abortedByHook = true
-				return ToolControlBreak
+				return ToolControlBreak, nil
 			case HookActionHardAbort:
 				_ = ts.requestHardAbort()
 				exec.abortedByHardAbort = true
-				return ToolControlBreak
+				return ToolControlBreak, nil
 			}
 		}
 
 		if denyReservedModelTool() {
 			continue
 		}
-
-		if al.hooks != nil {
-			approval := al.hooks.ApproveTool(turnCtx, &ToolApprovalRequest{
-				Meta:      ts.eventMeta("runTurn", "turn.tool.approve"),
-				Context:   cloneTurnContext(ts.turnCtx),
-				Tool:      toolName,
-				Arguments: toolArgs,
-			})
-			if !approval.Approved {
-				skipToolCall(hookDeniedToolContent(
-					"Tool execution denied by approval hook",
-					approval.Reason,
-				))
-				continue
-			}
-		}
-
 		if denyByTurnProfile() {
 			continue
+		}
+		if denyUnofferedModelTool() {
+			continue
+		}
+
+		invocation, prepareErr := prepareAgentToolInvocation(exec, toolName, toolArgs)
+		if prepareErr != nil {
+			if errors.Is(prepareErr, workflows.ErrToolCallNotDispatched) {
+				skipToolCall("Tool arguments do not match the offered schema.")
+				continue
+			}
+			closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+			return ToolControlBreak, fmt.Errorf("prepare tool authorization: %w", prepareErr)
+		}
+		authorization, policyErr := p.authorizeAgentTool(
+			turnCtx,
+			ts,
+			tc,
+			invocation,
+			tools.ToolFulfillmentExecute,
+			hookProvenance,
+		)
+		if policyErr != nil {
+			outcome, reasonCode := toolPolicyFailureOutcome(policyErr)
+			p.emitToolPolicyDecision(
+				ts, invocation, tools.ToolFulfillmentExecute, outcome, reasonCode,
+			)
+			closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+			return ToolControlBreak, policyErr
+		}
+		if !authorization.allowed {
+			p.emitToolPolicyDecision(
+				ts,
+				invocation,
+				tools.ToolFulfillmentExecute,
+				ToolPolicyOutcomeDeny,
+				authorization.reasonCode,
+			)
+			skipToolCall(authorization.message)
+			continue
+		}
+		claimedInvocation, claimErr := ts.agent.Tools.ClaimPrepared(turnCtx, invocation)
+		if claimErr != nil {
+			outcome, reasonCode := toolPolicyFailureOutcome(claimErr)
+			if outcome == ToolPolicyOutcomeError {
+				reasonCode = "dispatch_stale"
+			}
+			p.emitToolPolicyDecision(
+				ts, invocation, tools.ToolFulfillmentExecute, outcome, reasonCode,
+			)
+			closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+			return ToolControlBreak, fmt.Errorf("claim tool authorization: %w", claimErr)
+		}
+		if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+			outcome, reasonCode := toolPolicyFailureOutcome(cancelErr)
+			p.emitToolPolicyDecision(
+				ts, invocation, tools.ToolFulfillmentExecute, outcome, reasonCode,
+			)
+			closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+			return ToolControlBreak, cancelErr
+		}
+		p.emitToolPolicyDecision(
+			ts,
+			invocation,
+			tools.ToolFulfillmentExecute,
+			ToolPolicyOutcomeAllow,
+			authorization.reasonCode,
+		)
+		if ts.hardAbortRequested() {
+			exec.abortedByHardAbort = true
+			return ToolControlBreak, nil
 		}
 
 		argsJSON, _ := json.Marshal(toolArgs)
@@ -510,6 +700,10 @@ toolLoop:
 				outboundTurnMessageOptions{kind: messageKindToolFeedback},
 			))
 			fbCancel()
+		}
+		if cancelErr := turnCancellationError(ctx, turnCtx, ts); cancelErr != nil {
+			closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+			return ToolControlBreak, cancelErr
 		}
 
 		toolCallID := tc.ID
@@ -624,19 +818,23 @@ toolLoop:
 			al.watchTrackedSubagentResultRoute(trackedSpawnRoute)
 			return nil
 		})
-		toolResult := ts.agent.Tools.ExecuteWithContext(
+		toolResult, dispatchErr := ts.agent.Tools.DispatchClaimed(
 			execCtx,
-			toolName,
-			toolArgs,
+			claimedInvocation,
 			ts.channel,
 			ts.chatID,
 			asyncCallback,
+			false,
 		)
+		if dispatchErr != nil {
+			closeOutAuthorizationFailure(toolPolicyUnavailableMessage)
+			return ToolControlBreak, fmt.Errorf("dispatch authorized tool: %w", dispatchErr)
+		}
 		toolDuration := time.Since(toolStart)
 
 		if ts.hardAbortRequested() {
 			exec.abortedByHardAbort = true
-			return ToolControlBreak
+			return ToolControlBreak, nil
 		}
 
 		if al.hooks != nil {
@@ -651,20 +849,17 @@ toolLoop:
 			switch decision.normalizedAction() {
 			case HookActionContinue, HookActionModify:
 				if toolResp != nil {
-					if toolResp.Tool != "" {
-						toolName = toolResp.Tool
-					}
 					if toolResp.Result != nil {
 						toolResult = toolResp.Result
 					}
 				}
 			case HookActionAbortTurn:
 				exec.abortedByHook = true
-				return ToolControlBreak
+				return ToolControlBreak, nil
 			case HookActionHardAbort:
 				_ = ts.requestHardAbort()
 				exec.abortedByHardAbort = true
-				return ToolControlBreak
+				return ToolControlBreak, nil
 			}
 		}
 
@@ -861,7 +1056,7 @@ toolLoop:
 				"allResponsesHandled": exec.allResponsesHandled,
 			})
 		exec.allResponsesHandled = false
-		return ToolControlContinue
+		return ToolControlContinue, nil
 	}
 
 	// Poll for newly arrived steering
@@ -873,7 +1068,7 @@ toolLoop:
 			})
 		exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 		exec.allResponsesHandled = false
-		return ToolControlContinue
+		return ToolControlContinue, nil
 	}
 
 	// No pending steering: finalize or break depending on allResponsesHandled
@@ -913,7 +1108,7 @@ toolLoop:
 				"iteration":  iteration,
 				"tool_count": len(normalizedToolCalls),
 			})
-		return ToolControlBreak
+		return ToolControlBreak, nil
 	}
 
 	// allResponsesHandled=false and no pending steering: continue so coordinator
@@ -923,5 +1118,5 @@ toolLoop:
 	logger.DebugCF("agent", "TTL tick after tool execution", map[string]any{
 		"agent_id": ts.agent.ID, "iteration": iteration,
 	})
-	return ToolControlContinue
+	return ToolControlContinue, nil
 }

@@ -102,7 +102,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		response, streamErr = eventProvider.ChatStreamEvents(
 			ctx,
 			messagesForCall,
-			toolDefsForCall,
+			cloneToolDefinitions(toolDefsForCall),
 			exec.llmModel,
 			exec.llmOpts,
 			func(chunk providers.StreamChunk) {
@@ -119,7 +119,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		response, streamErr = streamProvider.ChatStream(
 			ctx,
 			messagesForCall,
-			toolDefsForCall,
+			cloneToolDefinitions(toolDefsForCall),
 			exec.llmModel,
 			exec.llmOpts,
 			func(accumulated string) {
@@ -146,7 +146,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			fallbackResponse, err := exec.activeProvider.Chat(
 				ctx,
 				messagesForCall,
-				toolDefsForCall,
+				cloneToolDefinitions(toolDefsForCall),
 				exec.llmModel,
 				exec.llmOpts,
 			)
@@ -168,7 +168,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			fallbackResponse, err := exec.activeProvider.Chat(
 				ctx,
 				messagesForCall,
-				toolDefsForCall,
+				cloneToolDefinitions(toolDefsForCall),
 				exec.llmModel,
 				exec.llmOpts,
 			)

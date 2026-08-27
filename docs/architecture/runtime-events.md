@@ -94,6 +94,7 @@ The table below lists the current runtime event kinds, when they are emitted, an
 | `agent.llm.retry` | Before retrying an LLM request after context, rate-limit, transient provider, or fallback handling. | `attempt`, `max_retries`, `reason`, `error`, `backoff_ms` |
 | `agent.context.compress` | Agent context history is compressed, for example during proactive budget checks or LLM retry handling. | `reason`, `dropped_messages`, `remaining_messages` |
 | `agent.session.summarize` | Async session history summarization completes. | `summarized_messages`, `kept_messages`, `summary_len`, `omitted_oversized` |
+| `agent.tool.policy_decision` | A model-authored tool call reaches the central policy and, when applicable, legacy approval meet; emitted before its execution-start or skipped event. | `tool`, `risk`, `fulfillment`, `outcome`, `reason_code`; excludes arguments, results, hook/approval text, and raw errors |
 | `agent.tool.exec_start` | Before the agent executes a tool call. | `tool`, `args_count`; full arguments are not logged by default |
 | `agent.tool.exec_end` | After a tool call completes, including successful results, tool errors, and async results. | `tool`, `duration_ms`, `for_llm_len`, `for_user_len`, `is_error`, `async` |
 | `agent.tool.exec_skipped` | A tool call is skipped because the tool is unavailable, arguments are invalid, or turn control logic requires skipping it. | `tool`, `reason` |
@@ -105,6 +106,12 @@ The table below lists the current runtime event kinds, when they are emitted, an
 | `agent.subturn.result_delivered` | A child turn result is delivered to the target channel/chat. | `target_channel`, `target_chat_id`, `content_len` |
 | `agent.subturn.orphan` | A child turn result cannot be delivered or cannot be associated back to its parent turn. | `parent_turn_id`, `child_turn_id`, `reason` |
 | `agent.error` | Agent execution reports an error. | `stage`, `error` |
+
+`agent.tool.policy_decision` is available on the runtime event bus and to
+process-hook observers. It is intentionally not part of the bounded browser
+Agent Activity projection; that privacy allowlist must admit new kinds
+explicitly. An `allow` outcome logs at `info`; `deny`, `error`, and `canceled`
+log at `warn`.
 
 ### Channel
 
@@ -191,6 +198,7 @@ Agent events add safe payload summaries:
 | `agent.llm.retry` | `attempt`, `max_retries`, `reason`, `error`, `backoff_ms` |
 | `agent.context.compress` | `reason`, `dropped_messages`, `remaining_messages` |
 | `agent.session.summarize` | `summarized_messages`, `kept_messages`, `summary_len`, `omitted_oversized` |
+| `agent.tool.policy_decision` | `tool`, `risk`, `fulfillment`, `outcome`, `reason_code` |
 | `agent.tool.exec_start` | `tool`, `args_count` |
 | `agent.tool.exec_end` | `tool`, `duration_ms`, `for_llm_len`, `for_user_len`, `is_error`, `async` |
 | `agent.tool.exec_skipped` | `tool`, `reason` |

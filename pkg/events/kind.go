@@ -20,6 +20,8 @@ const (
 	// KindAgentSessionSummarize is emitted when session summarization completes.
 	KindAgentSessionSummarize Kind = "agent.session.summarize"
 
+	// KindAgentToolPolicyDecision is emitted after model-tool authorization is decided.
+	KindAgentToolPolicyDecision Kind = "agent.tool.policy_decision"
 	// KindAgentToolExecStart is emitted before a tool executes.
 	KindAgentToolExecStart Kind = "agent.tool.exec_start"
 	// KindAgentToolExecEnd is emitted after a tool finishes.
@@ -137,6 +139,7 @@ var knownKinds = []Kind{
 	KindAgentLLMRetry,
 	KindAgentContextCompress,
 	KindAgentSessionSummarize,
+	KindAgentToolPolicyDecision,
 	KindAgentToolExecStart,
 	KindAgentToolExecEnd,
 	KindAgentToolExecSkipped,

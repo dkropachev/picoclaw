@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -126,7 +127,7 @@ func TestToolLoopCloseoutCushionProviderFailures(t *testing.T) {
 	}
 }
 
-func TestToolLoopCloseoutCushionParallelNoToolsAndMarshalFailure(t *testing.T) {
+func TestToolLoopCloseoutCushionRejectsUnofferedBatchBeforeFollowUp(t *testing.T) {
 	provider := &closeoutToolLoopProvider{responses: []*providers.LLMResponse{
 		{
 			ToolCalls: []providers.ToolCall{
@@ -143,11 +144,11 @@ func TestToolLoopCloseoutCushionParallelNoToolsAndMarshalFailure(t *testing.T) {
 		"",
 		"",
 	)
-	if err != nil || result.Content != "done" || result.Iterations != 2 {
-		t.Fatalf("parallel no-tools loop = %#v, %v", result, err)
+	if err == nil || !strings.Contains(err.Error(), "unoffered tool") || result != nil {
+		t.Fatalf("unoffered no-tools loop = %#v, %v", result, err)
 	}
-	if len(provider.messages) != 2 || len(provider.messages[1]) != 4 {
-		t.Fatalf("parallel follow-up messages = %#v", provider.messages)
+	if len(provider.messages) != 1 {
+		t.Fatalf("provider calls after unoffered batch = %d, want 1", len(provider.messages))
 	}
 }
 
@@ -164,7 +165,8 @@ func TestToolLoopCloseoutCushionMediaResolverAndHandledMedia(t *testing.T) {
 			result, err := RunToolLoop(
 				context.Background(),
 				ToolLoopConfig{
-					Provider: provider, Tools: registry, MaxIterations: 2,
+					Provider: provider, Tools: registry,
+					Policy: CompatibilityAllowToolPolicy{}, MaxIterations: 2,
 					SequentialToolCalls: true,
 					MediaResolver: func(messages []providers.Message) []providers.Message {
 						resolverCalls++
@@ -220,7 +222,8 @@ func TestToolLoopCloseoutCushionSequentialAndFinalCancellation(t *testing.T) {
 	if _, err := RunToolLoop(
 		ctx,
 		ToolLoopConfig{
-			Provider: provider, Tools: registry, MaxIterations: 1,
+			Provider: provider, Tools: registry,
+			Policy: CompatibilityAllowToolPolicy{}, MaxIterations: 1,
 			SequentialToolCalls: true,
 		},
 		nil,

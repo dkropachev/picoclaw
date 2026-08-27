@@ -38,6 +38,7 @@ func TestAgentLoop_MountProcessHook_LLMAndObserver(t *testing.T) {
 	if err := al.MountProcessHook(context.Background(), "ipc-llm", ProcessHookOptions{
 		Command:      processHookHelperCommand(),
 		Env:          processHookHelperEnv("rewrite", eventLog),
+		Trusted:      true,
 		Observe:      true,
 		InterceptLLM: true,
 	}); err != nil {
@@ -70,6 +71,43 @@ func TestAgentLoop_MountProcessHook_LLMAndObserver(t *testing.T) {
 	waitForFileContains(t, eventLog, "agent.turn.end")
 }
 
+func TestAgentLoop_MountProcessHook_DefaultTrustDiscardsRewrite(t *testing.T) {
+	provider := &llmHookTestProvider{}
+	al, agent, cleanup := newHookTestLoop(t, provider)
+	defer cleanup()
+
+	if err := al.MountProcessHook(context.Background(), "ipc-untrusted", ProcessHookOptions{
+		Command:      processHookHelperCommand(),
+		Env:          processHookHelperEnv("rewrite", ""),
+		InterceptLLM: true,
+	}); err != nil {
+		t.Fatalf("MountProcessHook failed: %v", err)
+	}
+
+	resp, err := al.runAgentLoop(context.Background(), agent, processOptions{
+		SessionKey:      "session-untrusted",
+		Channel:         "cli",
+		ChatID:          "direct",
+		UserMessage:     "hello",
+		DefaultResponse: defaultResponse,
+		EnableSummary:   false,
+		SendResponse:    false,
+	})
+	if err != nil {
+		t.Fatalf("runAgentLoop failed: %v", err)
+	}
+	if resp != "provider content" {
+		t.Fatalf("response = %q, want unmodified provider content", resp)
+	}
+
+	provider.mu.Lock()
+	lastModel := provider.lastModel
+	provider.mu.Unlock()
+	if lastModel != "test-model" {
+		t.Fatalf("model = %q, want original test-model", lastModel)
+	}
+}
+
 func TestAgentLoop_MountProcessHook_ToolRewrite(t *testing.T) {
 	provider := &toolHookProvider{}
 	al, agent, cleanup := newHookTestLoop(t, provider)
@@ -79,6 +117,7 @@ func TestAgentLoop_MountProcessHook_ToolRewrite(t *testing.T) {
 	if err := al.MountProcessHook(context.Background(), "ipc-tool", ProcessHookOptions{
 		Command:       processHookHelperCommand(),
 		Env:           processHookHelperEnv("rewrite", ""),
+		Trusted:       true,
 		InterceptTool: true,
 	}); err != nil {
 		t.Fatalf("MountProcessHook failed: %v", err)
@@ -118,7 +157,7 @@ func (p *blockedToolProvider) Chat(
 			ToolCalls: []providers.ToolCall{
 				{
 					ID:        "call-1",
-					Name:      "blocked_tool",
+					Name:      "echo_text",
 					Arguments: map[string]any{},
 				},
 			},
@@ -134,6 +173,7 @@ func TestAgentLoop_MountProcessHook_ApprovalDeny(t *testing.T) {
 	provider := &blockedToolProvider{}
 	al, agent, cleanup := newHookTestLoop(t, provider)
 	defer cleanup()
+	al.RegisterTool(&echoTextTool{})
 
 	if err := al.MountProcessHook(context.Background(), "ipc-approval", ProcessHookOptions{
 		Command:     processHookHelperCommand(),
@@ -164,7 +204,7 @@ func TestAgentLoop_MountProcessHook_ApprovalDeny(t *testing.T) {
 		t.Fatalf("runAgentLoop failed: %v", err)
 	}
 
-	expected := "Tool execution denied by approval hook: blocked by ipc hook"
+	expected := toolApprovalDeniedMessage
 	if resp != expected {
 		t.Fatalf("expected %q, got %q", expected, resp)
 	}
@@ -224,6 +264,7 @@ func TestAgentLoop_MountProcessHook_IsolationSupportsRelativeDirAndCommand(t *te
 		Command:      []string{"./hook-helper", "-test.run=TestProcessHook_HelperProcess", "--"},
 		Dir:          relHookDir,
 		Env:          processHookHelperEnv("rewrite", ""),
+		Trusted:      true,
 		InterceptLLM: true,
 	})
 	if mountErr != nil {

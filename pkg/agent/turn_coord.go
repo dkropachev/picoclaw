@@ -474,7 +474,10 @@ func (al *AgentLoop) runTurn(
 		case ControlToolLoop:
 			// Execute tools via Pipeline
 			ts.recordNativeSearchObservation(exec.useNativeSearch)
-			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
+			toolCtrl, toolErr := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
+			if toolErr != nil {
+				return turnResult{}, toolErr
+			}
 			if ts.hardAbortRequested() {
 				return turnResult{}, nil
 			}

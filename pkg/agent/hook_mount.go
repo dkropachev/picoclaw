@@ -155,6 +155,7 @@ func (al *AgentLoop) loadConfiguredHooks(ctx context.Context) (err error) {
 			Name:     name,
 			Priority: spec.Priority,
 			Source:   HookSourceInProcess,
+			Trust:    HookTrustTrusted,
 			Hook:     hook,
 		}); err != nil {
 			return fmt.Errorf("mount builtin hook %q: %w", name, err)
@@ -178,6 +179,7 @@ func (al *AgentLoop) loadConfiguredHooks(ctx context.Context) (err error) {
 			Name:     name,
 			Priority: spec.Priority,
 			Source:   HookSourceProcess,
+			Trust:    hookTrustFromBool(opts.Trusted),
 			Hook:     processHook,
 		}); err != nil {
 			_ = processHook.Close()
@@ -235,6 +237,7 @@ func processHookOptionsFromConfig(spec config.ProcessHookConfig) (ProcessHookOpt
 		Command: append([]string(nil), spec.Command...),
 		Dir:     spec.Dir,
 		Env:     processHookEnvFromMap(spec.Env),
+		Trusted: spec.Trusted,
 	}
 
 	observeKinds, observeEnabled, err := processHookObserveKindsFromConfig(spec.Observe)
@@ -327,6 +330,7 @@ func validHookEventKinds() map[string]string {
 	kinds["tool_exec_start"] = runtimeevents.KindAgentToolExecStart.String()
 	kinds["tool_exec_end"] = runtimeevents.KindAgentToolExecEnd.String()
 	kinds["tool_exec_skipped"] = runtimeevents.KindAgentToolExecSkipped.String()
+	kinds["tool_policy_decision"] = runtimeevents.KindAgentToolPolicyDecision.String()
 	kinds["steering_injected"] = runtimeevents.KindAgentSteeringInjected.String()
 	kinds["follow_up_queued"] = runtimeevents.KindAgentFollowUpQueued.String()
 	kinds["interrupt_received"] = runtimeevents.KindAgentInterruptReceived.String()

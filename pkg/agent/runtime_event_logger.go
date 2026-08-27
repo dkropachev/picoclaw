@@ -299,6 +299,12 @@ func appendRuntimeEventPayloadSummary(fields map[string]any, payload any) {
 	case ToolExecSkippedPayload:
 		fields["tool"] = payload.Tool
 		fields["reason"] = payload.Reason
+	case ToolPolicyDecisionPayload:
+		fields["tool"] = payload.Tool
+		fields["risk"] = payload.Risk
+		fields["fulfillment"] = payload.Fulfillment
+		fields["outcome"] = payload.Outcome
+		fields["reason_code"] = payload.ReasonCode
 	case SteeringInjectedPayload:
 		fields["count"] = payload.Count
 		fields["total_content_len"] = payload.TotalContentLen

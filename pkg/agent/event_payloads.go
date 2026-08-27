@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/tools"
+)
 
 // TurnEndStatus describes the terminal state of a turn.
 type TurnEndStatus string
@@ -133,6 +137,29 @@ type ToolExecEndPayload struct {
 type ToolExecSkippedPayload struct {
 	Tool   string
 	Reason string
+}
+
+// ToolPolicyOutcome describes the bounded result of the complete model-tool
+// authorization meet. Infrastructure failures are distinct from ordinary
+// policy or approval denial.
+type ToolPolicyOutcome string
+
+const (
+	ToolPolicyOutcomeAllow    ToolPolicyOutcome = "allow"
+	ToolPolicyOutcomeDeny     ToolPolicyOutcome = "deny"
+	ToolPolicyOutcomeError    ToolPolicyOutcome = "error"
+	ToolPolicyOutcomeCanceled ToolPolicyOutcome = "canceled"
+)
+
+// ToolPolicyDecisionPayload is the safe audit projection for one model-tool
+// authorization decision. It deliberately excludes arguments, hook or
+// approval text, result data, and raw errors.
+type ToolPolicyDecisionPayload struct {
+	Tool        string
+	Risk        tools.ToolRiskClass
+	Fulfillment tools.ToolFulfillmentKind
+	Outcome     ToolPolicyOutcome
+	ReasonCode  string
 }
 
 // SteeringInjectedPayload describes steering messages appended before the next LLM call.

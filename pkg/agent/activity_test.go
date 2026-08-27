@@ -324,6 +324,16 @@ func TestAgentActivityRecorderCountsProjectionOmissions(t *testing.T) {
 	}
 }
 
+func TestAgentActivityProjectionExcludesToolPolicyDecision(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range agentActivityProjectedKinds {
+		if kind == runtimeevents.KindAgentToolPolicyDecision {
+			t.Fatalf("browser activity unexpectedly projects %q", kind)
+		}
+	}
+}
+
 func TestAgentActivityRecorderPagingResetAndTruncation(t *testing.T) {
 	t.Parallel()
 

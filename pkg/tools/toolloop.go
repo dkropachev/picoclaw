@@ -9,20 +9,26 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"runtime/debug"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 // ToolLoopConfig configures the tool execution loop.
 type ToolLoopConfig struct {
-	Provider      providers.LLMProvider
-	Model         string
-	Tools         *ToolRegistry
+	Provider providers.LLMProvider
+	Model    string
+	Tools    *ToolRegistry
+	// Policy is mandatory for model-authored tool dispatch. Nil fails closed
+	// when a provider returns a tool call; callers preserving legacy behavior
+	// must pass CompatibilityAllowToolPolicy explicitly.
+	Policy        ToolPolicy
+	PolicySubject ToolPolicySubject
 	MaxIterations int
 	LLMOptions    map[string]any
 	// SequentialToolCalls executes one model-authored tool call at a time in
@@ -75,8 +81,17 @@ func RunToolLoop(
 
 		// 1. Build tool definitions
 		var providerToolDefs []providers.ToolDefinition
+		var toolCatalog *ModelToolCatalog
 		if config.Tools != nil {
-			providerToolDefs = config.Tools.ToProviderDefs()
+			var catalogErr error
+			toolCatalog, catalogErr = config.Tools.SnapshotModelToolCatalog()
+			if catalogErr != nil {
+				return nil, fmt.Errorf("build model tool catalog: %w", catalogErr)
+			}
+			providerToolDefs = toolCatalog.ProviderDefinitions()
+		}
+		if err := ValidateOfferedToolDefinitions(providerToolDefs); err != nil {
+			return nil, fmt.Errorf("invalid model tool definitions: %w", err)
 		}
 
 		// 2. Set default LLM options
@@ -104,7 +119,11 @@ func RunToolLoop(
 		if config.MediaResolver != nil && iteration > 1 {
 			callMessages = config.MediaResolver(messages)
 		}
-		response, err := config.Provider.Chat(ctx, callMessages, providerToolDefs, config.Model, llmOpts)
+		providerDefinitions := providerToolDefs
+		if toolCatalog != nil {
+			providerDefinitions = toolCatalog.ProviderDefinitions()
+		}
+		response, err := config.Provider.Chat(ctx, callMessages, providerDefinitions, config.Model, llmOpts)
 		if err != nil {
 			fields := map[string]any{"iteration": iteration}
 			if !config.SuppressToolArguments {
@@ -135,6 +154,18 @@ func RunToolLoop(
 		for _, tc := range response.ToolCalls {
 			normalizedToolCalls = append(normalizedToolCalls, providers.NormalizeToolCall(tc))
 		}
+		if err := ValidateModelToolCallBatch(normalizedToolCalls, providerToolDefs); err != nil {
+			return nil, fmt.Errorf("invalid model tool-call batch: %w", err)
+		}
+		for index := range normalizedToolCalls {
+			normalized := normalizedToolCalls[index]
+			arguments, detachErr := DetachToolArguments(normalized.Arguments)
+			if detachErr != nil {
+				return nil, fmt.Errorf("detach model tool arguments: %w", detachErr)
+			}
+			normalized.Arguments = arguments
+			normalizedToolCalls[index] = normalized
+		}
 
 		// 5. Log tool calls
 		toolNames := make([]string, 0, len(normalizedToolCalls))
@@ -155,11 +186,7 @@ func RunToolLoop(
 			ReasoningContent: response.ReasoningContent,
 		}
 		for _, tc := range normalizedToolCalls {
-			argumentsJSON, err := json.Marshal(tc.Arguments)
-			if err != nil {
-				logger.Warnf("toolloop: failed to marshal tool call arguments for %s: %v", tc.Name, err)
-				argumentsJSON = []byte("{}")
-			}
+			argumentsJSON, _ := json.Marshal(tc.Arguments)
 			functionThoughtSignature := tc.ThoughtSignature
 			if tc.Function != nil && tc.Function.ThoughtSignature != "" {
 				functionThoughtSignature = tc.Function.ThoughtSignature
@@ -184,24 +211,100 @@ func RunToolLoop(
 		// execution, while mutation-capable controllers opt into response-order
 		// serialization through SequentialToolCalls.
 		type indexedResult struct {
-			result *ToolResult
-			tc     providers.ToolCall
+			result     *ToolResult
+			tc         providers.ToolCall
+			invocation *PreparedToolInvocation
+			claim      *ClaimedToolInvocation
+			decision   ToolPolicyDecision
+			err        error
 		}
 
 		results := make([]indexedResult, len(normalizedToolCalls))
-		execute := func(i int, tc providers.ToolCall) {
+		authorize := func(i int, tc providers.ToolCall) {
 			results[i].tc = tc
-			defer func() {
-				if r := recover(); r != nil {
-					fields := map[string]any{"tool": tc.Name}
-					if !config.SuppressToolArguments {
-						fields["panic"] = fmt.Sprintf("%v", r)
-						fields["stack"] = string(debug.Stack())
-					}
-					logger.ErrorCF("toolloop", "tool execution panic recovered", fields)
-					results[i].result = ErrorResult(fmt.Sprintf("internal panic in tool %s", tc.Name))
+			invocation, prepareErr := toolCatalog.PrepareInvocation(tc.Name, tc.Arguments)
+			if prepareErr != nil {
+				if errors.Is(prepareErr, workflows.ErrToolCallNotDispatched) {
+					results[i].result = ErrorResult(fmt.Sprintf("invalid tool call for %q", tc.Name)).
+						WithError(prepareErr)
+					return
 				}
-			}()
+				results[i].err = prepareErr
+				return
+			}
+			offeredDefinition, _ := findExactToolDefinition(providerToolDefs, tc.Name)
+			if offeredErr := invocation.ValidateOfferedDefinition(offeredDefinition); offeredErr != nil {
+				results[i].result = ErrorResult(fmt.Sprintf("invalid tool call for %q", tc.Name)).
+					WithError(offeredErr)
+				return
+			}
+			policyArguments, detachErr := invocation.PolicyArguments()
+			if detachErr != nil {
+				results[i].err = detachErr
+				return
+			}
+			subject := config.PolicySubject
+			subject.ToolCallID = tc.ID
+			if subject.Source == "" {
+				subject.Source = ToolPolicySourceGenericLoop
+			}
+			decision, policyErr := EvaluateToolPolicy(ctx, config.Policy, ToolPolicyRequest{
+				Subject:     subject,
+				Tool:        invocation.Name(),
+				Arguments:   policyArguments,
+				Traits:      invocation.Traits(),
+				Fulfillment: ToolFulfillmentExecute,
+			})
+			if policyErr != nil {
+				results[i].err = policyErr
+				return
+			}
+			results[i].invocation = invocation
+			results[i].decision = decision
+			if decision.Kind == ToolPolicyDecisionDeny {
+				results[i].result = ErrorResult("Tool execution denied by policy.").
+					WithError(workflows.ErrToolCallNotDispatched)
+			}
+		}
+
+		// Parallel loops authorize the complete provider batch before any effect.
+		// This prevents a policy infrastructure failure from racing an allowed
+		// sibling dispatch.
+		if !config.SequentialToolCalls {
+			var wg sync.WaitGroup
+			for i, tc := range normalizedToolCalls {
+				wg.Add(1)
+				go func(idx int, call providers.ToolCall) {
+					defer wg.Done()
+					authorize(idx, call)
+				}(i, tc)
+			}
+			wg.Wait()
+			for i := range results {
+				if results[i].err != nil {
+					return nil, fmt.Errorf("authorize tool call %d: %w", i+1, results[i].err)
+				}
+			}
+			// Claim every allowed invocation as a second batch barrier. A stale
+			// entry or cancellation prevents all effects from this response,
+			// including siblings that already claimed successfully.
+			for i := range results {
+				if results[i].result != nil {
+					continue
+				}
+				claim, claimErr := config.Tools.ClaimPrepared(ctx, results[i].invocation)
+				if claimErr != nil {
+					return nil, fmt.Errorf("claim tool call %d: %w", i+1, claimErr)
+				}
+				results[i].claim = claim
+			}
+		}
+
+		execute := func(i int) {
+			tc := results[i].tc
+			if results[i].result != nil {
+				return
+			}
 
 			if config.SuppressToolArguments {
 				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s", tc.Name),
@@ -219,21 +322,26 @@ func RunToolLoop(
 					})
 			}
 
-			if config.Tools != nil {
-				results[i].result = config.Tools.executeWithContext(
-					ctx,
-					tc.Name,
-					tc.Arguments,
-					channel,
-					chatID,
-					nil,
-					config.SuppressToolArguments,
-				)
-			} else {
-				results[i].result = ErrorResult("No tools available")
+			if results[i].claim == nil {
+				claim, claimErr := config.Tools.ClaimPrepared(ctx, results[i].invocation)
+				if claimErr != nil {
+					results[i].err = claimErr
+					return
+				}
+				results[i].claim = claim
 			}
-			if results[i].result == nil {
-				results[i].result = ErrorResult(fmt.Sprintf("tool %s returned no result", tc.Name))
+			var dispatchErr error
+			results[i].result, dispatchErr = config.Tools.DispatchClaimed(
+				ctx,
+				results[i].claim,
+				channel,
+				chatID,
+				nil,
+				config.SuppressToolArguments,
+			)
+			if dispatchErr != nil {
+				results[i].err = dispatchErr
+				return
 			}
 		}
 
@@ -242,18 +350,30 @@ func RunToolLoop(
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}
-				execute(i, tc)
+				authorize(i, tc)
+				if results[i].err != nil {
+					return nil, fmt.Errorf("authorize tool call %d: %w", i+1, results[i].err)
+				}
+				execute(i)
+				if results[i].err != nil {
+					return nil, fmt.Errorf("dispatch tool call %d: %w", i+1, results[i].err)
+				}
 			}
 		} else {
 			var wg sync.WaitGroup
-			for i, tc := range normalizedToolCalls {
+			for i := range normalizedToolCalls {
 				wg.Add(1)
-				go func(idx int, call providers.ToolCall) {
+				go func(idx int) {
 					defer wg.Done()
-					execute(idx, call)
-				}(i, tc)
+					execute(idx)
+				}(i)
 			}
 			wg.Wait()
+			for i := range results {
+				if results[i].err != nil {
+					return nil, fmt.Errorf("dispatch tool call %d: %w", i+1, results[i].err)
+				}
+			}
 		}
 
 		// Append results in original order
@@ -279,6 +399,18 @@ func RunToolLoop(
 		Content:    finalContent,
 		Iterations: iteration,
 	}, nil
+}
+
+func findExactToolDefinition(
+	definitions []providers.ToolDefinition,
+	name string,
+) (providers.ToolDefinition, bool) {
+	for _, definition := range definitions {
+		if definition.Function.Name == name {
+			return definition, true
+		}
+	}
+	return providers.ToolDefinition{}, false
 }
 
 func cloneToolLoopExtraContent(value *providers.ExtraContent) *providers.ExtraContent {

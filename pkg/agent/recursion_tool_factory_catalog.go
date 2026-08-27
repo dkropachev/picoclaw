@@ -62,6 +62,7 @@ type recursionCatalogSpec struct {
 	temperature    float64
 	maxMediaSize   int
 	legacyTools    *tools.ToolRegistry
+	policy         tools.ToolPolicy
 	managerService string
 }
 
@@ -237,6 +238,7 @@ func prepareRecursionCatalogCandidate(
 		temperature:    agent.Temperature,
 		maxMediaSize:   cfg.Agents.Defaults.GetMaxMediaSize(),
 		legacyTools:    legacyTools,
+		policy:         al.toolPolicy,
 		managerService: "agent.recursion.manager.v1:" + agentID,
 	}
 	var rootBundle *recursionOwnerBundle
@@ -343,6 +345,7 @@ func buildRecursionOwnerBundle(
 		return nil, fmt.Errorf("subagent manager constructor returned nil")
 	}
 	manager.SetDefaultModelFallbacks(cloneOptionalModelFallbacks(spec.fallbacks))
+	manager.SetToolPolicy(spec.policy)
 	manager.SetLLMOptions(spec.maxTokens, spec.temperature)
 	manager.SetMediaResolver(func(messages []providers.Message) []providers.Message {
 		return resolveMediaRefs(
