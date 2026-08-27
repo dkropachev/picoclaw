@@ -35,18 +35,44 @@ var (
 		FATAL: "FATAL",
 	}
 
-	currentLevel  = INFO
-	logger        zerolog.Logger
+	currentLevel = INFO
+	logger       zerolog.Logger
+	// logFile mirrors managedFile.file for legacy package-local tests. Access is
+	// guarded by mu; emissions retain managedFile rather than this pointer.
 	logFile       *os.File
+	managedFile   *managedLogFile
 	once          sync.Once
-	mu            sync.RWMutex
-	writers       []io.Writer
+	mu            sync.Mutex
 	consoleWriter zerolog.ConsoleWriter
+	consoleOn     = true
+	sinkLevel     = zerolog.TraceLevel
 )
+
+// managedLogFile separates publication from lifetime. A logger snapshot may
+// keep writing a retired file until its last emission lease is released.
+// Every field is guarded by mu.
+type managedLogFile struct {
+	file    *os.File
+	active  uint64
+	retired bool
+	closed  bool
+}
+
+// emissionLease owns the exact logger/file snapshot captured for one record.
+// The logger itself is immutable; only the optional file needs a lifetime
+// reference because console/discard writers are process-lived values.
+type emissionLease struct {
+	logger   zerolog.Logger
+	file     *managedLogFile
+	released bool
+}
 
 func init() {
 	once.Do(func() {
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		// Package admission is decided under mu in acquireEmission. Keep
+		// zerolog's process-global gate permissive so a later SetLevel cannot
+		// revoke an already admitted immutable logger snapshot.
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
 
 		isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
@@ -73,10 +99,76 @@ func init() {
 			NoColor: !isTTY,
 		}
 
-		writers = append(writers, consoleWriter)
-
-		logger = zerolog.New(io.MultiWriter(writers...)).With().Timestamp().Caller().Logger()
+		rebuildLoggerLocked()
 	})
+}
+
+// rebuildLoggerLocked publishes a fresh immutable zerolog value. Always use
+// io.MultiWriter, including for one output: zerolog Fatal closes a top-level
+// io.Closer, which must never bypass managed-file lease retirement.
+func rebuildLoggerLocked() {
+	writers := make([]io.Writer, 0, 2)
+	if consoleOn {
+		writers = append(writers, consoleWriter)
+	} else {
+		writers = append(writers, io.Discard)
+	}
+	if managedFile != nil {
+		writers = append(writers, managedFile.file)
+	}
+	logger = zerolog.New(io.MultiWriter(writers...)).
+		With().Timestamp().Caller().Logger().Level(sinkLevel)
+}
+
+func acquireEmission(level LogLevel) (*emissionLease, bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	if level < currentLevel {
+		return nil, false
+	}
+	lease := &emissionLease{logger: logger, file: managedFile}
+	if lease.file != nil {
+		lease.file.active++
+	}
+	return lease, true
+}
+
+func (lease *emissionLease) release() {
+	if lease == nil || lease.released {
+		return
+	}
+	lease.released = true
+	if lease.file == nil {
+		return
+	}
+
+	var closeFile *os.File
+	mu.Lock()
+	if lease.file.active > 0 {
+		lease.file.active--
+	}
+	if lease.file.retired && lease.file.active == 0 && !lease.file.closed {
+		lease.file.closed = true
+		closeFile = lease.file.file
+	}
+	mu.Unlock()
+	if closeFile != nil {
+		_ = closeFile.Close()
+	}
+}
+
+// retireManagedFileLocked prevents future acquisition and returns a file that
+// can be closed immediately. An active file is closed by its final lease.
+func retireManagedFileLocked(file *managedLogFile) *os.File {
+	if file == nil || file.retired {
+		return nil
+	}
+	file.retired = true
+	if file.active != 0 || file.closed {
+		return nil
+	}
+	file.closed = true
+	return file.file
 }
 
 func formatFieldValue(i any) string {
@@ -112,35 +204,36 @@ func formatFieldValue(i any) string {
 
 func SetLevel(level LogLevel) {
 	mu.Lock()
-	defer mu.Unlock()
 	currentLevel = level
-	zerolog.SetGlobalLevel(level)
+	mu.Unlock()
 }
 
 func SetConsoleLevel(level LogLevel) {
 	mu.Lock()
-	defer mu.Unlock()
-	logger = logger.Level(level)
+	sinkLevel = level
+	rebuildLoggerLocked()
+	mu.Unlock()
 }
 
 func DisableConsole() {
 	mu.Lock()
-	defer mu.Unlock()
-	writers[0] = io.Discard
-	logger = logger.Output(io.MultiWriter(writers...))
+	consoleOn = false
+	rebuildLoggerLocked()
+	mu.Unlock()
 }
 
 func EnableConsole() {
 	mu.Lock()
-	defer mu.Unlock()
-	writers[0] = consoleWriter
-	logger = logger.Output(io.MultiWriter(writers...))
+	consoleOn = true
+	rebuildLoggerLocked()
+	mu.Unlock()
 }
 
 func GetLevel() LogLevel {
-	mu.RLock()
-	defer mu.RUnlock()
-	return currentLevel
+	mu.Lock()
+	level := currentLevel
+	mu.Unlock()
+	return level
 }
 
 // ParseLevel converts a case-insensitive level name to a LogLevel.
@@ -174,46 +267,40 @@ func SetLevelFromString(s string) {
 }
 
 func EnableFileLogging(filePath string) error {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	newFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	newFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
+	candidate := &managedLogFile{file: newFile}
 
-	// Close old file if exists
-	if logFile != nil {
-		logFile.Close()
-	}
-
+	mu.Lock()
+	oldFile := managedFile
+	managedFile = candidate
 	logFile = newFile
-
-	if len(writers) != 1 {
-		return fmt.Errorf("failed to configure file logging: %w", err)
+	rebuildLoggerLocked()
+	closeFile := retireManagedFileLocked(oldFile)
+	mu.Unlock()
+	if closeFile != nil {
+		_ = closeFile.Close()
 	}
-
-	writers = append(writers, logFile)
-	logger = logger.Output(io.MultiWriter(writers...))
 
 	return nil
 }
 
 func DisableFileLogging() {
 	mu.Lock()
-	defer mu.Unlock()
-
-	if logFile != nil {
-		logFile.Close()
-		logFile = nil
-	}
-	if len(writers) > 1 {
-		writers = writers[:1]
-		logger = logger.Output(io.MultiWriter(writers...))
+	oldFile := managedFile
+	managedFile = nil
+	logFile = nil
+	rebuildLoggerLocked()
+	closeFile := retireManagedFileLocked(oldFile)
+	mu.Unlock()
+	if closeFile != nil {
+		_ = closeFile.Close()
 	}
 }
 
@@ -303,13 +390,17 @@ func getEvent(logger zerolog.Logger, level LogLevel) *zerolog.Event {
 }
 
 func logMessage(level LogLevel, component string, message string, fields map[string]any) {
-	if level < currentLevel {
+	lease, ok := acquireEmission(level)
+	if !ok {
 		return
 	}
+	// Install the release before constructing a Fatal event: zerolog may invoke
+	// FatalExitFunc while creating an event disabled by its local/global level.
+	defer lease.release()
 
 	skip, pkg := getCallerSkip()
 
-	event := getEvent(logger, level)
+	event := getEvent(lease.logger, level)
 
 	if component == "" {
 		component = pkg
