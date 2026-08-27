@@ -73,6 +73,175 @@ func TestRepositoryReviewAutomationDetailReportAndFindingRoutes(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewRunFindingStatusProjection(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		state   repoaudit.RepositoryState
+		finding repoaudit.Finding
+		want    repositoryReviewRunFindingStatus
+	}{
+		{
+			name: "pending",
+			state: repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+				ReviewFindingID: "rfn_pending", State: repoaudit.RepositoryMappingPending,
+				Attempts: 2, Error: "private retry detail",
+			}}},
+			finding: repoaudit.Finding{ID: "rfn_pending"}, want: repositoryReviewRunFindingPending,
+		},
+		{
+			name: "processing",
+			state: repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+				ReviewFindingID: "rfn_processing", State: repoaudit.RepositoryMappingRunning,
+			}}},
+			finding: repoaudit.Finding{ID: "rfn_processing"}, want: repositoryReviewRunFindingProcessing,
+		},
+		{
+			name: "failed",
+			state: repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+				ReviewFindingID: "rfn_failed", State: repoaudit.RepositoryMappingPending,
+				Attempts: repoaudit.RepositoryRunFindingStatusAttemptLimit,
+				Error:    "private failure detail",
+			}}},
+			finding: repoaudit.Finding{ID: "rfn_failed"}, want: repositoryReviewRunFindingFailed,
+		},
+		{
+			name: "associated new",
+			state: repoaudit.RepositoryState{RepositoryFindings: []repoaudit.RepositoryFinding{{
+				ID: "rrf_new", MatchState: repoaudit.RepositoryMatchKnown,
+				ReviewFindingIDs: []string{"rfn_new", "rfn_later"},
+			}}},
+			finding: repoaudit.Finding{ID: "rfn_new", RepositoryFindingID: "rrf_new"},
+			want:    repositoryReviewRunFindingAssociatedNew,
+		},
+		{
+			name: "associated existing",
+			state: repoaudit.RepositoryState{RepositoryFindings: []repoaudit.RepositoryFinding{{
+				ID: "rrf_known", MatchState: repoaudit.RepositoryMatchKnown,
+				ReviewFindingIDs: []string{"rfn_original", "rfn_known"},
+			}}},
+			finding: repoaudit.Finding{ID: "rfn_known", RepositoryFindingID: "rrf_known"},
+			want:    repositoryReviewRunFindingAssociatedExisting,
+		},
+		{
+			name: "needs review",
+			state: repoaudit.RepositoryState{RepositoryFindings: []repoaudit.RepositoryFinding{{
+				ID: "rrf_provisional", MatchState: repoaudit.RepositoryMatchProvisional,
+			}}},
+			finding: repoaudit.Finding{ID: "rfn_provisional", RepositoryFindingID: "rrf_provisional"},
+			want:    repositoryReviewRunFindingNeedsReview,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := repositoryReviewRunFindingStatusFor(test.state, test.finding); got != test.want {
+				t.Fatalf("status=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewRunFindingStatusRetryRoute(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	store := repoaudit.NewStore(workspace)
+	for attempt := 0; attempt < repoaudit.RepositoryRunFindingStatusAttemptLimit; attempt++ {
+		if _, err := store.ProcessPendingMappingJobs(
+			t.Context(),
+			state.Repository,
+			repoaudit.RepositoryMappingProcessOptions{
+				DefaultBranchVerified: func(context.Context, repoaudit.Finding) (bool, error) {
+					return false, errors.New("private verifier failure")
+				},
+			},
+		); err == nil {
+			t.Fatalf("attempt %d succeeded", attempt+1)
+		}
+	}
+	state, found, err := store.Get(state.Repository)
+	if err != nil || !found {
+		t.Fatalf("failed state found=%v err=%v", found, err)
+	}
+	findingID := state.Findings[0].ID
+	automation := seedRepositoryReviewDetailAutomation(
+		t, handler, state.Repository, state.Runs[0].ID,
+	)
+	base := "/api/repository-reviews/automations/" + automation.ID
+	page := httptest.NewRecorder()
+	mux.ServeHTTP(page, httptest.NewRequest(
+		http.MethodGet, base+"/findings?scope=current", nil,
+	))
+	if page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), `"run_finding_status":"failed"`) ||
+		strings.Contains(page.Body.String(), "private verifier failure") ||
+		strings.Contains(strings.ToLower(page.Body.String()), "mapping") {
+		t.Fatalf("failed projection=%d %s", page.Code, page.Body.String())
+	}
+
+	retry := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		base+"/findings/status",
+		map[string]any{"finding_ids": []string{findingID}},
+	)
+	if retry.Code != http.StatusAccepted ||
+		!strings.Contains(retry.Body.String(), `"run_finding_status":"pending"`) ||
+		!strings.Contains(retry.Body.String(), `"id":"`+findingID+`"`) {
+		t.Fatalf("retry=%d %s", retry.Code, retry.Body.String())
+	}
+	reset, _, err := store.Get(state.Repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := reset.MappingJobs[0]
+	if job.Attempts != 0 || job.Error != "" || job.State != repoaudit.RepositoryMappingPending {
+		t.Fatalf("reset job=%#v", job)
+	}
+	detail := httptest.NewRecorder()
+	mux.ServeHTTP(detail, httptest.NewRequest(
+		http.MethodGet, base+"/findings/"+findingID, nil,
+	))
+	if detail.Code != http.StatusOK ||
+		!strings.Contains(detail.Body.String(), `"run_finding_status":"pending"`) {
+		t.Fatalf("pending detail=%d %s", detail.Code, detail.Body.String())
+	}
+
+	if _, err := store.ProcessPendingMappingJobs(
+		t.Context(),
+		state.Repository,
+		repoaudit.RepositoryMappingProcessOptions{
+			DefaultBranchVerified: func(context.Context, repoaudit.Finding) (bool, error) {
+				return true, nil
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	associated, _, err := store.Get(state.Repository)
+	if err != nil || len(associated.RepositoryFindings) != 1 {
+		t.Fatalf("associated=%#v err=%v", associated.RepositoryFindings, err)
+	}
+	aggregateDetail := httptest.NewRecorder()
+	mux.ServeHTTP(aggregateDetail, httptest.NewRequest(
+		http.MethodGet,
+		base+"/findings/"+associated.RepositoryFindings[0].ID,
+		nil,
+	))
+	if aggregateDetail.Code != http.StatusOK ||
+		!strings.Contains(aggregateDetail.Body.String(), `"run_finding_status":"associated_new"`) {
+		t.Fatalf("aggregate detail=%d %s", aggregateDetail.Code, aggregateDetail.Body.String())
+	}
+	conflict := repositoryReviewAutomationMutation(
+		t,
+		mux,
+		http.MethodPost,
+		base+"/findings/status",
+		map[string]any{"finding_ids": []string{findingID}},
+	)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("associated retry=%d %s", conflict.Code, conflict.Body.String())
+	}
+}
+
 func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(t *testing.T) {
 	t.Run("linked replacement", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
@@ -106,6 +275,27 @@ func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(
 		} {
 			if response.Code != http.StatusOK || !strings.Contains(body, capability) {
 				t.Fatalf("linked finding capability %s status=%d body=%s", capability, response.Code, body)
+			}
+		}
+		aggregateResponse := httptest.NewRecorder()
+		mux.ServeHTTP(aggregateResponse, httptest.NewRequest(
+			http.MethodGet,
+			"/api/repository-reviews/automations/"+automation.ID+"/findings/"+
+				linkedState.Findings[0].RepositoryFindingID,
+			nil,
+		))
+		aggregateBody := aggregateResponse.Body.String()
+		for _, projection := range []string{
+			`"id":"` + linkedState.Findings[0].IssueDraftID + `"`,
+			`"can_unlink_issue":true`, `"can_replace_issue":true`,
+		} {
+			if aggregateResponse.Code != http.StatusOK || !strings.Contains(aggregateBody, projection) {
+				t.Fatalf(
+					"linked aggregate projection %s status=%d body=%s",
+					projection,
+					aggregateResponse.Code,
+					aggregateBody,
+				)
 			}
 		}
 	})

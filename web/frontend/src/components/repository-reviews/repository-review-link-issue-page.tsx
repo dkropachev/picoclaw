@@ -53,16 +53,25 @@ export function RepositoryReviewLinkIssuePage({
       getRepositoryReviewAutomationFinding(automationID, findingID, signal),
     retry: false,
   })
-  const detail = query.data
+  const detail =
+    query.data?.repository_finding?.id === findingID ? query.data : undefined
   const finding = detail?.finding
   const issue = detail?.issue
+  const actionFinding =
+    (detail?.action_finding?.id ? detail.action_finding : undefined) ??
+    detail?.occurrences?.find(
+      (occurrence) => occurrence.issue_draft_id === issue?.id,
+    ) ??
+    finding
+  const actionFindingID = actionFinding?.id ?? ""
   const notFound =
-    query.error instanceof RepositoryReviewAPIError &&
-    query.error.status === 404
+    (query.error instanceof RepositoryReviewAPIError &&
+      query.error.status === 404) ||
+    Boolean(query.data && !detail)
   const candidates = useMutation({
     mutationFn: () =>
-      findRepositoryReviewIssueCandidates(automationID, findingID, {
-        expected_version: finding?.version ?? 0,
+      findRepositoryReviewIssueCandidates(automationID, actionFindingID, {
+        expected_version: actionFinding?.version ?? 0,
       }),
     onSuccess: async (response) => {
       if (response.discovered_issue?.id) {
@@ -83,9 +92,9 @@ export function RepositoryReviewLinkIssuePage({
   })
   const link = useMutation({
     mutationFn: (pending: PendingLink) =>
-      linkRepositoryReviewIssue(automationID, findingID, {
+      linkRepositoryReviewIssue(automationID, actionFindingID, {
         issue_url: pending.url,
-        expected_version: finding?.version ?? 0,
+        expected_version: actionFinding?.version ?? 0,
         confirmed: true,
         ...(pending.replace ? { replace: true } : {}),
       }),
@@ -103,8 +112,8 @@ export function RepositoryReviewLinkIssuePage({
   })
   const unlink = useMutation({
     mutationFn: () =>
-      unlinkRepositoryReviewIssue(automationID, findingID, {
-        expected_version: finding?.version ?? 0,
+      unlinkRepositoryReviewIssue(automationID, actionFindingID, {
+        expected_version: actionFinding?.version ?? 0,
         confirmed: true,
       }),
     onSuccess: async () => {
@@ -120,19 +129,24 @@ export function RepositoryReviewLinkIssuePage({
   const github =
     detail?.capabilities?.github ??
     Boolean(detail && githubRepositoryPath(detail.automation.repository))
-  const unassociatedOpen = finding?.status === "open" && !issue
+  const unassociatedOpen = actionFinding?.status === "open" && !issue
   const canLink =
-    detail?.capabilities?.can_link_issue ?? Boolean(github && unassociatedOpen)
+    Boolean(actionFindingID) &&
+    (detail?.capabilities?.can_link_issue ??
+      Boolean(github && unassociatedOpen))
   const canSearch =
-    detail?.capabilities?.can_search_issues ??
-    Boolean(github && unassociatedOpen)
+    Boolean(actionFindingID) &&
+    (detail?.capabilities?.can_search_issues ??
+      Boolean(github && unassociatedOpen))
   const canReplace =
-    detail?.capabilities?.can_replace_issue ??
-    (issue?.origin === "linked" || issue?.origin === "discovered")
+    Boolean(actionFindingID) &&
+    (detail?.capabilities?.can_replace_issue ??
+      (issue?.origin === "linked" || issue?.origin === "discovered"))
   const canUnlink =
-    detail?.capabilities?.can_unlink_issue ??
-    issue?.unlinkable ??
-    (issue?.origin === "linked" || issue?.origin === "discovered")
+    Boolean(actionFindingID) &&
+    (detail?.capabilities?.can_unlink_issue ??
+      issue?.unlinkable ??
+      (issue?.origin === "linked" || issue?.origin === "discovered"))
 
   return (
     <>
@@ -140,7 +154,7 @@ export function RepositoryReviewLinkIssuePage({
         title="Link existing GitHub issue"
         identity={
           finding ? (
-            <span className="font-mono text-xs">{finding.id}</span>
+            <span className="font-mono text-xs">{findingID}</span>
           ) : undefined
         }
         loading={query.isLoading}
@@ -153,7 +167,9 @@ export function RepositoryReviewLinkIssuePage({
         {detail && finding && (
           <div className="space-y-6">
             <section className="border-border rounded-lg border p-4">
-              <h2 className="font-semibold">{finding.title}</h2>
+              <h2 className="font-semibold">
+                {detail.repository_finding?.canonical_title || finding.title}
+              </h2>
               <p className="text-muted-foreground mt-1 text-sm">
                 {finding.file.path}
                 {finding.line == null ? "" : `:${finding.line}`}

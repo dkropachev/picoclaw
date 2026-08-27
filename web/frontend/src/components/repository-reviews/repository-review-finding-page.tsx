@@ -1,6 +1,7 @@
 import {
   IconBrandGithub,
   IconChecks,
+  IconExternalLink,
   IconFileCode,
   IconMessageCircle,
   IconRefresh,
@@ -21,6 +22,7 @@ import {
   postRepositoryReviewFinding,
   reserveRepositoryReviewValidations,
   resolveRepositoryReviewPossibleDuplicate,
+  retryRepositoryReviewRunFindingStatuses,
   syncRepositoryReviewFinding,
   updateRepositoryReviewFindingLifecycle,
 } from "@/api/repository-reviews"
@@ -30,6 +32,13 @@ import {
   discussionPrompt,
   githubRepositoryPath,
 } from "@/components/repository-reviews/repository-review-actions"
+import {
+  runFindingRepositoryFindingID,
+  runFindingStatusCanRetry,
+  runFindingStatusDescription,
+  runFindingStatusIsInProgress,
+  runFindingStatusLabel,
+} from "@/components/repository-reviews/repository-review-run-finding-status"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -50,7 +59,9 @@ import { createRepositoryReviewGenerationID } from "./repository-review-generati
 export function RepositoryReviewFindingPage({
   automationID,
   findingID,
+  resourceKind,
   onBack,
+  onOpenRepositoryFinding,
   onOpenIssue,
   onLinkIssue,
   onGenerated,
@@ -59,7 +70,9 @@ export function RepositoryReviewFindingPage({
 }: {
   automationID: string
   findingID: string
+  resourceKind: "run" | "repository"
   onBack: () => void
+  onOpenRepositoryFinding: (findingID: string) => void
   onOpenIssue: (draftID: string) => void
   onLinkIssue: (findingID?: string) => void
   onGenerated: (generationID: string) => void
@@ -74,17 +87,34 @@ export function RepositoryReviewFindingPage({
     queryFn: ({ signal }) =>
       getRepositoryReviewAutomationFinding(automationID, findingID, signal),
     retry: false,
-    refetchInterval: (current) =>
-      current.state.data?.repository_finding &&
-      new Set(["pending", "running"]).has(
-        current.state.data.repository_finding.validation_state,
-      )
-        ? 2_000
-        : false,
+    refetchInterval: (current) => {
+      const currentDetail = current.state.data
+      const shouldPoll =
+        resourceKind === "run"
+          ? Boolean(
+              currentDetail?.finding &&
+              runFindingStatusIsInProgress(currentDetail.finding),
+            )
+          : Boolean(
+              currentDetail?.repository_finding &&
+              new Set(["pending", "running"]).has(
+                currentDetail.repository_finding.validation_state,
+              ),
+            )
+      return shouldPoll ? 2_000 : false
+    },
   })
-  const detail = query.data
+  const detail =
+    resourceKind === "run"
+      ? query.data?.finding.id === findingID
+        ? query.data
+        : undefined
+      : query.data?.repository_finding?.id === findingID
+        ? query.data
+        : undefined
   const finding = detail?.finding
   const repositoryFinding = detail?.repository_finding
+  const isRepositoryResource = resourceKind === "repository"
   const actionFinding = detail?.action_finding ?? finding
   const actionFindingID = repositoryFinding ? actionFinding?.id : findingID
   const issueID =
@@ -94,8 +124,9 @@ export function RepositoryReviewFindingPage({
     detail?.issue?.id
   const repositoryIssueURL = repositoryFinding?.issue.url
   const notFound =
-    query.error instanceof RepositoryReviewAPIError &&
-    query.error.status === 404
+    (query.error instanceof RepositoryReviewAPIError &&
+      query.error.status === 404) ||
+    Boolean(query.data && !detail)
   const generateMutation = useMutation({
     mutationFn: async ({ instructions }: { instructions: string }) => {
       const generationID = createRepositoryReviewGenerationID()
@@ -266,8 +297,25 @@ export function RepositoryReviewFindingPage({
         error instanceof Error ? error.message : "Lifecycle update failed.",
       ),
   })
+  const retryStatusMutation = useMutation({
+    mutationFn: () =>
+      retryRepositoryReviewRunFindingStatuses(automationID, [findingID]),
+    onSuccess: async () => {
+      await query.refetch()
+      toast.success("Run finding status queued.")
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Run finding status could not be retried.",
+      )
+      void query.refetch()
+    },
+  })
   useEffect(() => {
     if (
+      !isRepositoryResource ||
       !repositoryFinding?.issue.url ||
       repositoryFinding.issue.conflict ||
       repositoryFinding.issue.state === "none" ||
@@ -281,7 +329,11 @@ export function RepositoryReviewFindingPage({
     // Snapshot identity is the refresh fence; mutation state must not retrigger
     // a failed provider call in a render loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repositoryFinding?.id, repositoryFinding?.issue.snapshot_at])
+  }, [
+    isRepositoryResource,
+    repositoryFinding?.id,
+    repositoryFinding?.issue.snapshot_at,
+  ])
   const capabilities = detail?.capabilities
   const github =
     capabilities?.github ??
@@ -359,9 +411,11 @@ export function RepositoryReviewFindingPage({
   return (
     <CollectionDetailShell
       title={
-        repositoryFinding?.canonical_title ||
+        (isRepositoryResource
+          ? repositoryFinding?.canonical_title
+          : undefined) ||
         finding?.title ||
-        "Repository finding"
+        (isRepositoryResource ? "Repository finding" : "Run finding")
       }
       identity={
         <span
@@ -372,7 +426,7 @@ export function RepositoryReviewFindingPage({
         </span>
       }
       status={
-        repositoryFinding ? (
+        isRepositoryResource && repositoryFinding ? (
           <div className="flex items-center gap-2">
             <Badge
               variant={severityVariant(repositoryFinding.canonical_severity)}
@@ -399,7 +453,7 @@ export function RepositoryReviewFindingPage({
         ) : undefined
       }
       actions={
-        finding && !repositoryFinding ? (
+        finding && !isRepositoryResource ? (
           <Button
             type="button"
             size="sm"
@@ -419,7 +473,57 @@ export function RepositoryReviewFindingPage({
     >
       {detail && finding && (
         <div className="space-y-6">
-          {repositoryFinding && (
+          {!isRepositoryResource && (
+            <section
+              aria-labelledby="run-finding-status"
+              className="border-border space-y-3 rounded-lg border p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 id="run-finding-status" className="font-semibold">
+                    Run finding status
+                  </h2>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {runFindingStatusDescription(finding)}
+                  </p>
+                </div>
+                <Badge variant="outline">
+                  {runFindingStatusLabel(finding)}
+                </Badge>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {runFindingRepositoryFindingID(finding) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() =>
+                      onOpenRepositoryFinding(
+                        runFindingRepositoryFindingID(finding)!,
+                      )
+                    }
+                  >
+                    <IconExternalLink /> Open repository finding
+                  </Button>
+                )}
+                {runFindingStatusCanRetry(finding) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={retryStatusMutation.isPending}
+                    onClick={() => retryStatusMutation.mutate()}
+                  >
+                    <IconRefresh />
+                    {retryStatusMutation.isPending
+                      ? "Retrying…"
+                      : "Retry status"}
+                  </Button>
+                )}
+              </div>
+            </section>
+          )}
+
+          {isRepositoryResource && repositoryFinding && (
             <>
               <section
                 aria-labelledby="repository-finding-lifecycle"
@@ -822,97 +926,102 @@ export function RepositoryReviewFindingPage({
             </>
           )}
 
-          <section className="border-border space-y-3 rounded-lg border p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="font-semibold">Canonical issue association</h2>
-                <p className="text-muted-foreground mt-1 text-sm">
-                  {repositoryIssueURL
-                    ? `This repository finding is associated with a ${repositoryFinding?.issue.origin || "verified"} GitHub issue.`
-                    : issueID
-                      ? "This finding has one saved preview or linked GitHub issue."
-                      : "No issue preview or existing issue is associated yet."}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {repositoryIssueURL ? (
-                  <>
-                    <Button type="button" size="sm" asChild>
-                      <a
-                        href={repositoryIssueURL}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        <IconBrandGithub /> Open GitHub issue
-                      </a>
-                    </Button>
-                    {issueID && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onOpenIssue(issueID)}
-                      >
-                        Manage association
+          {isRepositoryResource && (
+            <section className="border-border space-y-3 rounded-lg border p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="font-semibold">Canonical issue association</h2>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {repositoryIssueURL
+                      ? `This repository finding is associated with a ${repositoryFinding?.issue.origin || "verified"} GitHub issue.`
+                      : issueID
+                        ? "This finding has one saved preview or linked GitHub issue."
+                        : "No issue preview or existing issue is associated yet."}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {repositoryIssueURL ? (
+                    <>
+                      <Button type="button" size="sm" asChild>
+                        <a
+                          href={repositoryIssueURL}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <IconBrandGithub /> Open GitHub issue
+                        </a>
                       </Button>
-                    )}
-                  </>
-                ) : issueID ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => onOpenIssue(issueID)}
-                  >
-                    <IconBrandGithub /> Open issue record
-                  </Button>
-                ) : (
-                  <>
-                    {canGenerate && (
-                      <>
+                      {issueID && (
                         <Button
                           type="button"
                           size="sm"
-                          disabled={
-                            generateMutation.isPending || postMutation.isPending
-                          }
-                          onClick={() => setInstructionsOpen(true)}
+                          variant="outline"
+                          onClick={() => onOpenIssue(issueID)}
                         >
-                          <IconSparkles />
-                          {generateMutation.isPending
-                            ? "Drafting…"
-                            : "Draft issue"}
+                          Manage association
                         </Button>
-                        {github && (
+                      )}
+                    </>
+                  ) : issueID ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => onOpenIssue(issueID)}
+                    >
+                      <IconBrandGithub /> Open issue record
+                    </Button>
+                  ) : (
+                    <>
+                      {canGenerate && (
+                        <>
                           <Button
                             type="button"
                             size="sm"
                             disabled={
-                              postMutation.isPending ||
-                              generateMutation.isPending
+                              generateMutation.isPending ||
+                              postMutation.isPending
                             }
-                            onClick={() => postMutation.mutate()}
+                            onClick={() => setInstructionsOpen(true)}
                           >
-                            <IconBrandGithub />
-                            {postMutation.isPending ? "Posting…" : "Post issue"}
+                            <IconSparkles />
+                            {generateMutation.isPending
+                              ? "Drafting…"
+                              : "Draft issue"}
                           </Button>
-                        )}
-                      </>
-                    )}
-                    {canLink && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onLinkIssue(actionFindingID)}
-                      >
-                        <IconBrandGithub /> Link existing issue
-                      </Button>
-                    )}
-                  </>
-                )}
+                          {github && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={
+                                postMutation.isPending ||
+                                generateMutation.isPending
+                              }
+                              onClick={() => postMutation.mutate()}
+                            >
+                              <IconBrandGithub />
+                              {postMutation.isPending
+                                ? "Posting…"
+                                : "Post issue"}
+                            </Button>
+                          )}
+                        </>
+                      )}
+                      {canLink && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onLinkIssue(actionFindingID)}
+                        >
+                          <IconBrandGithub /> Link existing issue
+                        </Button>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
-          </section>
+            </section>
+          )}
 
           <section aria-labelledby="finding-location" className="space-y-3">
             <h2 id="finding-location" className="font-semibold">
@@ -968,7 +1077,7 @@ export function RepositoryReviewFindingPage({
             )}
           </section>
 
-          {!repositoryFinding && finding.match_hints && (
+          {!isRepositoryResource && finding.match_hints && (
             <section
               aria-labelledby="occurrence-match-hints"
               className="space-y-3"
@@ -1024,7 +1133,7 @@ export function RepositoryReviewFindingPage({
             </section>
           )}
 
-          {!repositoryFinding && finding.fix_effort && (
+          {!isRepositoryResource && finding.fix_effort && (
             <section
               aria-labelledby="occurrence-fix-effort"
               className="space-y-3"
@@ -1136,71 +1245,73 @@ export function RepositoryReviewFindingPage({
           </section>
         </div>
       )}
-      <Dialog
-        open={instructionsOpen}
-        onOpenChange={(open) => {
-          if (generateMutation.isPending) return
-          setInstructionsOpen(open)
-          if (!open) setCustomInstructions("")
-        }}
-      >
-        <DialogContent className="sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Draft issue</DialogTitle>
-            <DialogDescription>
-              Generate an editable issue preview. Optional instructions apply
-              only to this preview and may change presentation, not the
-              diagnosis.
-            </DialogDescription>
-          </DialogHeader>
-          <label
-            htmlFor="repository-review-finding-generation-instructions"
-            className="space-y-2 text-sm"
-          >
-            <span className="font-medium">
-              Custom presentation instructions
-            </span>
-            <Textarea
-              id="repository-review-finding-generation-instructions"
-              value={customInstructions}
-              className="min-h-28"
-              placeholder="Leave blank to use the profile's default issue format."
-              onChange={(event) => setCustomInstructions(event.target.value)}
-            />
-          </label>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={generateMutation.isPending}
-              onClick={() => {
-                setInstructionsOpen(false)
-                setCustomInstructions("")
-              }}
+      {isRepositoryResource && (
+        <Dialog
+          open={instructionsOpen}
+          onOpenChange={(open) => {
+            if (generateMutation.isPending) return
+            setInstructionsOpen(open)
+            if (!open) setCustomInstructions("")
+          }}
+        >
+          <DialogContent className="sm:max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Draft issue</DialogTitle>
+              <DialogDescription>
+                Generate an editable issue preview. Optional instructions apply
+                only to this preview and may change presentation, not the
+                diagnosis.
+              </DialogDescription>
+            </DialogHeader>
+            <label
+              htmlFor="repository-review-finding-generation-instructions"
+              className="space-y-2 text-sm"
             >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              disabled={generateMutation.isPending || !actionFindingID}
-              onClick={() =>
-                generateMutation.mutate({
-                  instructions: customInstructions.trim(),
-                })
-              }
-            >
-              <IconSparkles />
-              {generateMutation.isPending ? "Drafting…" : "Draft preview"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              <span className="font-medium">
+                Custom presentation instructions
+              </span>
+              <Textarea
+                id="repository-review-finding-generation-instructions"
+                value={customInstructions}
+                className="min-h-28"
+                placeholder="Leave blank to use the profile's default issue format."
+                onChange={(event) => setCustomInstructions(event.target.value)}
+              />
+            </label>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={generateMutation.isPending}
+                onClick={() => {
+                  setInstructionsOpen(false)
+                  setCustomInstructions("")
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                disabled={generateMutation.isPending || !actionFindingID}
+                onClick={() =>
+                  generateMutation.mutate({
+                    instructions: customInstructions.trim(),
+                  })
+                }
+              >
+                <IconSparkles />
+                {generateMutation.isPending ? "Drafting…" : "Draft preview"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </CollectionDetailShell>
   )
 }
 
 function repositoryFindingSelectionKey(automationID: string): string {
-  return `repository-review-report:${automationID}:all`
+  return `repository-review-repository-findings:${automationID}`
 }
 
 function FindingContextCard({

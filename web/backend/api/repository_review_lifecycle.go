@@ -27,7 +27,58 @@ type repositoryReviewFindingLifecycleRequest struct {
 	ExpectedVersion int64                                `json:"expected_version"`
 }
 
+type repositoryReviewRunFindingStatusRetryRequest struct {
+	FindingIDs []string `json:"finding_ids"`
+}
+
 var loadRepositoryReviewLifecycleConfig = config.LoadConfig
+
+func (h *Handler) handleRetryRepositoryReviewRunFindingStatus(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if err := validateRepositoryReviewMutation(r); err != nil || r.URL == nil ||
+		r.URL.RawQuery != "" {
+		writeRepositoryReviewError(w, errors.New("invalid run finding status retry request"))
+		return
+	}
+	var request repositoryReviewRunFindingStatusRetryRequest
+	if err := decodeRepositoryReviewRequest(r, &request); err != nil {
+		writeRepositoryReviewError(w, err)
+		return
+	}
+	ledger, err := h.repositoryReviewAutomationLedger(r.Context(), r.PathValue("automation_id"))
+	if err != nil || !ledger.Found {
+		if err == nil {
+			err = errors.New("repository review ledger not found")
+		}
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	state, selected, err := ledger.Store.RetryRunFindingStatus(
+		ledger.State.Repository,
+		request.FindingIDs,
+	)
+	if err != nil {
+		writeRepositoryReviewError(w, err)
+		return
+	}
+	statusIndex := newRepositoryReviewRunFindingStatusIndex(state)
+	findings := make([]repositoryReviewRunFindingStatusProjection, 0, len(selected))
+	for _, finding := range selected {
+		findings = append(findings, repositoryReviewRunFindingStatusProjection{
+			ID: finding.ID, RunFindingStatus: statusIndex.status(finding),
+		})
+	}
+	if controller := h.repositoryReviewControllerInstance(); controller != nil {
+		controller.wakeRepositoryRunFindingStatus()
+	}
+	writeRepositoryReviewJSON(w, http.StatusAccepted, map[string]any{
+		"automation": projectRepositoryReviewAutomation(ledger.Automation),
+		"repository": repoaudit.Summarize(state),
+		"findings":   findings,
+	})
+}
 
 func (h *Handler) handleUpdateRepositoryReviewFindingLifecycle(
 	w http.ResponseWriter,

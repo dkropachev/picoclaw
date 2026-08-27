@@ -23,6 +23,13 @@ export type RepositoryReviewFindingsScope = "current" | "all"
 /** @deprecated Use RepositoryReviewFindingsScope. */
 export type RepositoryReviewReportScope = RepositoryReviewFindingsScope
 export type RepositoryReviewMatchState = "new" | "known" | "provisional"
+export type RepositoryReviewRunFindingStatusState =
+  | "pending"
+  | "processing"
+  | "failed"
+  | "associated_new"
+  | "associated_existing"
+  | "needs_review"
 export type RepositoryFindingLifecycle =
   | "open"
   | "resolution_pending"
@@ -144,6 +151,7 @@ export interface RepositoryReviewFinding {
   issue_draft_id?: string
   repository_finding_id?: string
   repository_match_state?: RepositoryReviewMatchState
+  run_finding_status?: RepositoryReviewRunFindingStatusState
   target_branch?: string
   advertised_default_branch?: string
   target_is_default?: boolean
@@ -370,6 +378,17 @@ export interface RepositoryFindingMutationResponse {
   repository?: RepositoryReviewSummary
   repository_finding?: RepositoryFinding
   validation_jobs?: RepositoryValidationJob[]
+}
+
+export interface RepositoryReviewRunFindingStatusMutationResponse {
+  automation?: RepositoryReviewAutomation
+  repository?: RepositoryReviewSummary
+  findings: RepositoryReviewRunFindingStatusProjection[]
+}
+
+export interface RepositoryReviewRunFindingStatusProjection {
+  id: string
+  run_finding_status: RepositoryReviewRunFindingStatusState
 }
 
 export interface RepositoryReviewFindingsPage {
@@ -1061,6 +1080,33 @@ export async function getRepositoryReviewAutomationFinding(
   return normalizeFindingDetail(value)
 }
 
+export async function retryRepositoryReviewRunFindingStatuses(
+  automationID: string,
+  findingIDs: string[],
+  signal?: AbortSignal,
+): Promise<RepositoryReviewRunFindingStatusMutationResponse> {
+  const value = await requestJSON<
+    Partial<RepositoryReviewRunFindingStatusMutationResponse>
+  >(
+    `${automationPath(automationID)}/findings/status`,
+    jsonMutation("POST", { finding_ids: findingIDs }),
+    signal,
+  )
+  return {
+    automation: value.automation
+      ? normalizeAutomation(value.automation)
+      : undefined,
+    repository: value.repository
+      ? normalizeRepositoryReviewSummary(value.repository)
+      : undefined,
+    findings: (value.findings ?? []).map((finding) => ({
+      id: finding.id,
+      run_finding_status:
+        normalizeRunFindingStatus(finding.run_finding_status) ?? "pending",
+    })),
+  }
+}
+
 export async function resolveRepositoryReviewPossibleDuplicate(
   automationID: string,
   repositoryFindingID: string,
@@ -1565,7 +1611,23 @@ function normalizeFinding(
       ...finding.validation,
       checks: finding.validation?.checks ?? [],
     },
+    run_finding_status: normalizeRunFindingStatus(finding.run_finding_status),
   }
+}
+
+function normalizeRunFindingStatus(
+  status: RepositoryReviewRunFindingStatusState | undefined,
+): RepositoryReviewRunFindingStatusState | undefined {
+  return new Set<RepositoryReviewRunFindingStatusState>([
+    "pending",
+    "processing",
+    "failed",
+    "associated_new",
+    "associated_existing",
+    "needs_review",
+  ]).has(status as RepositoryReviewRunFindingStatusState)
+    ? status
+    : undefined
 }
 
 function normalizeFindingContext(

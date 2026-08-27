@@ -34,6 +34,12 @@ const smokeRoutes = [
   "/notifications",
   "/repository-reviews",
   "/repository-reviews/repositories",
+  "/repository-reviews/repositories/new",
+  "/repository-reviews/repositories/rra_smoke",
+  "/repository-reviews/repositories/rra_smoke/edit",
+  "/repository-reviews/repositories/rra_smoke/findings",
+  "/repository-reviews/repositories/rra_smoke/findings/rrf_smoke_1",
+  "/repository-reviews/repositories/rra_smoke/findings/rrf_smoke_3/link-issue",
   "/repository-reviews/profiles",
   "/repository-reviews/rra_smoke",
   "/repository-reviews/rra_smoke/findings",
@@ -1213,6 +1219,7 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     status: "open",
     repository_finding_id: "rrf_smoke_1",
     repository_match_state: "known",
+    run_finding_status: "associated_new",
     version: 2,
     created_at: "2026-08-26T12:02:00Z",
     updated_at: "2026-08-26T12:02:00Z",
@@ -1247,6 +1254,7 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     issue_draft_id: repositoryReviewIssueOneID,
     repository_finding_id: "rrf_smoke_2",
     repository_match_state: "known",
+    run_finding_status: "associated_new",
     version: 3,
     created_at: "2026-08-26T12:02:30Z",
     updated_at: "2026-08-26T12:03:00Z",
@@ -1280,6 +1288,7 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     status: "open",
     repository_finding_id: "rrf_smoke_3",
     repository_match_state: "known",
+    run_finding_status: "associated_new",
     version: 1,
     created_at: "2026-08-26T12:03:30Z",
     updated_at: "2026-08-26T12:03:30Z",
@@ -1314,6 +1323,7 @@ const repositoryReviewFindingsFixture: RepositoryReviewFinding[] = [
     issue_draft_id: repositoryReviewIssueTwoID,
     repository_finding_id: "rrf_smoke_4",
     repository_match_state: "known",
+    run_finding_status: "associated_new",
     version: 2,
     created_at: "2026-08-26T12:04:00Z",
     updated_at: "2026-08-26T12:04:00Z",
@@ -4387,6 +4397,8 @@ async function mockRepositoryReviewAutomationRequest(
   }
   const findFinding = (findingID: string) =>
     state.findings.find((finding) => finding.id === findingID)
+  const findRepositoryFinding = (findingID: string) =>
+    state.repositoryFindings.find((finding) => finding.id === findingID)
   const findIssue = (draftID: string) =>
     state.issues.find((issue) => issue.id === draftID)
   const contextsFor = (finding: RepositoryReviewFinding) =>
@@ -4395,14 +4407,72 @@ async function mockRepositoryReviewAutomationRequest(
     finding.issue_draft_id
       ? state.issues.find((issue) => issue.id === finding.issue_draft_id)
       : undefined
-  const findingDetail = (finding: RepositoryReviewFinding) => ({
-    automation: state.automation,
-    repository: state.summary,
-    finding,
-    contexts: contextsFor(finding),
-    ...(issueFor(finding) ? { issue: issueFor(finding) } : {}),
-    capabilities,
-  })
+  const occurrencesFor = (repositoryFinding: RepositoryFinding) =>
+    repositoryFinding.review_finding_ids.flatMap((findingID) => {
+      const finding = findFinding(findingID)
+      return finding ? [finding] : []
+    })
+  const issueForOccurrences = (findings: RepositoryReviewFinding[]) =>
+    findings.map(issueFor).find((issue) => issue !== undefined)
+  const findingDetail = (finding: RepositoryReviewFinding) => {
+    const repositoryFinding = finding.repository_finding_id
+      ? findRepositoryFinding(finding.repository_finding_id)
+      : undefined
+    const issue =
+      issueFor(finding) ||
+      (repositoryFinding
+        ? issueForOccurrences(occurrencesFor(repositoryFinding))
+        : undefined)
+    return {
+      automation: state.automation,
+      repository: state.summary,
+      finding,
+      contexts: contextsFor(finding),
+      ...(repositoryFinding ? { repository_finding: repositoryFinding } : {}),
+      ...(issue ? { issue } : {}),
+      capabilities,
+    }
+  }
+  const repositoryFindingDetail = (repositoryFinding: RepositoryFinding) => {
+    const occurrences = occurrencesFor(repositoryFinding)
+    const finding = occurrences.at(-1)
+    const aggregateCanAcceptIssue =
+      repositoryFinding.match_state !== "provisional" &&
+      (repositoryFinding.lifecycle === "open" ||
+        repositoryFinding.lifecycle === "regressed") &&
+      repositoryFinding.issue.state === "none"
+    const actionFinding = aggregateCanAcceptIssue
+      ? occurrences
+          .toReversed()
+          .find(
+            (candidate) =>
+              candidate.status === "open" && !candidate.issue_draft_id,
+          )
+      : undefined
+    const issue = issueForOccurrences(occurrences)
+    return finding
+      ? {
+          automation: state.automation,
+          repository: state.summary,
+          finding,
+          ...(actionFinding ? { action_finding: actionFinding } : {}),
+          repository_finding: repositoryFinding,
+          occurrences,
+          contexts: state.contexts.filter((context) =>
+            occurrences.some((occurrence) =>
+              occurrence.context_ids.includes(context.id),
+            ),
+          ),
+          ...(issue ? { issue } : {}),
+          capabilities: {
+            ...capabilities,
+            can_generate: Boolean(actionFinding),
+            can_search_issues: capabilities.github && Boolean(actionFinding),
+            can_link_issue: capabilities.github && Boolean(actionFinding),
+          },
+        }
+      : undefined
+  }
   const issueDetail = (issue: RepositoryReviewIssueDraft) => ({
     automation: state.automation,
     repository: state.summary,
@@ -4454,15 +4524,18 @@ async function mockRepositoryReviewAutomationRequest(
     const limit = Number(url.searchParams.get("limit") ?? 50)
     const scope = url.searchParams.get("scope") === "all" ? "all" : "current"
     const findings = state.findings.slice(offset, offset + limit)
+    const repositoryFindings =
+      scope === "all"
+        ? state.repositoryFindings.slice(offset, offset + limit)
+        : []
     return json(route, {
       automation: state.automation,
       repository: state.summary,
       findings,
-      repository_findings: state.repositoryFindings.slice(
-        offset,
-        offset + limit,
-      ),
-      repository_finding_total: state.repositoryFindings.length,
+      repository_findings: repositoryFindings,
+      repository_finding_total:
+        scope === "all" ? state.repositoryFindings.length : 0,
+      repository_finding_offset: scope === "all" ? offset : 0,
       contexts: state.contexts.filter((context) =>
         findings.some((finding) => finding.context_ids.includes(context.id)),
       ),
@@ -4473,6 +4546,32 @@ async function mockRepositoryReviewAutomationRequest(
         ? { next_offset: offset + findings.length }
         : {}),
       capabilities,
+    })
+  }
+
+  if (path === `${automationRoot}/findings/status` && method === "POST") {
+    const findingIDs = Array.isArray(body?.finding_ids)
+      ? body.finding_ids.filter(
+          (candidate): candidate is string => typeof candidate === "string",
+        )
+      : []
+    const findings = findingIDs.flatMap((findingID) => {
+      const finding = findFinding(findingID)
+      if (!finding) return []
+      if (finding.run_finding_status === "failed") {
+        finding.run_finding_status = "pending"
+      }
+      return [
+        {
+          id: finding.id,
+          run_finding_status: finding.run_finding_status ?? "pending",
+        },
+      ]
+    })
+    return json(route, {
+      automation: state.automation,
+      repository: state.summary,
+      findings,
     })
   }
 
@@ -4577,8 +4676,17 @@ async function mockRepositoryReviewAutomationRequest(
     new RegExp(`^${automationRoot}/findings/([^/]+)$`),
   )
   if (findingMatch) {
-    const finding = findFinding(decodeURIComponent(findingMatch[1]!))
-    if (!finding) return json(route, { code: "not_found" }, 404)
+    const findingID = decodeURIComponent(findingMatch[1]!)
+    const finding = findFinding(findingID)
+    if (!finding) {
+      const repositoryFinding = findRepositoryFinding(findingID)
+      const detail = repositoryFinding
+        ? repositoryFindingDetail(repositoryFinding)
+        : undefined
+      return detail
+        ? json(route, detail)
+        : json(route, { code: "not_found" }, 404)
+    }
     if (method === "PATCH") {
       finding.status = body?.status === "dismissed" ? "dismissed" : "open"
       finding.version += 1
@@ -4851,7 +4959,7 @@ for (const routePath of smokeRoutes) {
   })
 }
 
-test("repository review routing preserves context through generation and subset publication", async ({
+test("repository review routing preserves run context through repository finding generation and subset publication", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -4888,21 +4996,65 @@ test("repository review routing preserves context through generation and subset 
     `[data-item-id="${repositoryReviewFindingOneID}"]`,
   )
   await expect(findingRow).toBeVisible()
+  await expect(
+    findingRow.getByText("Created repository finding", { exact: true }),
+  ).toBeVisible()
   await findingRow.focus()
   await page.keyboard.press("Space")
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Draft issue previews" }),
+  ).toHaveCount(0)
   await page.keyboard.press("Enter")
   await expect(page).toHaveURL(
     new RegExp(
       `/repository-reviews/${repositoryReviewAutomationID}/findings/${repositoryReviewFindingOneID}`,
     ),
   )
+  await expect(
+    page.getByRole("heading", { name: "Run finding status" }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("A repository finding was created from this run finding."),
+  ).toBeVisible()
   await expect(page.getByText("Traced both writers through")).toBeVisible()
+  await page.getByRole("button", { name: "Open repository finding" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/rrf_smoke_1`,
+    ),
+  )
+  await expect(
+    page.getByRole("heading", { name: "Occurrence history" }),
+  ).toBeVisible()
 
+  await page.goBack()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/${repositoryReviewAutomationID}/findings/${repositoryReviewFindingOneID}`,
+    ),
+  )
   await page.goBack()
   await expect(page).toHaveURL(
     new RegExp(`/repository-reviews/${repositoryReviewAutomationID}/findings`),
   )
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  const restoredRunFindingsURL = new URL(page.url())
+  expect(restoredRunFindingsURL.searchParams.get("q")).toBe(
+    "ORDER BY repository ASC",
+  )
+  expect(restoredRunFindingsURL.searchParams.get("scope")).toBe("current")
+
+  await page.getByRole("button", { name: "View repository findings" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings`,
+    ),
+  )
+  const repositoryFindingRow = page.locator('[data-item-id="rrf_smoke_1"]')
+  await expect(repositoryFindingRow).toBeVisible()
+  await repositoryFindingRow.focus()
+  await page.keyboard.press("Space")
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Draft issue previews" }).click()
   const generationDialog = page.getByRole("dialog", {
@@ -4938,7 +5090,7 @@ test("repository review routing preserves context through generation and subset 
   )
   const restoredURL = new URL(page.url())
   expect(restoredURL.searchParams.get("q")).toBe("ORDER BY repository ASC")
-  expect(restoredURL.searchParams.get("scope")).toBe("current")
+  expect(restoredURL.searchParams.get("scope")).toBe("all")
 
   const generationRequest = requests.find((request) =>
     request.path.endsWith("/issues/generations"),
@@ -4968,7 +5120,7 @@ test("repository review candidate linking requires explicit confirmation", async
   > = []
   await gotoMockedRoute(
     page,
-    `/repository-reviews/${repositoryReviewAutomationID}/findings/${repositoryReviewFindingThreeID}/link-issue`,
+    `/repository-reviews/repositories/${repositoryReviewAutomationID}/findings/rrf_smoke_3/link-issue`,
     { repositoryReviewRequests: requests },
   )
 

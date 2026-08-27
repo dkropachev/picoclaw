@@ -436,6 +436,12 @@ func TestRepositoryMappingHelpersAndSnapshots(t *testing.T) {
 	}}) {
 		t.Fatal("pending mapping was not detected")
 	}
+	if repositoryStateHasPendingMapping(repoaudit.RepositoryState{MappingJobs: []repoaudit.RepositoryMappingJob{{
+		State:    repoaudit.RepositoryMappingPending,
+		Attempts: repoaudit.RepositoryRunFindingStatusAttemptLimit,
+	}}}) {
+		t.Fatal("capped run finding status was reported as processable")
+	}
 	if repositoryStateHasPendingValidation(repoaudit.RepositoryState{}) {
 		t.Fatal("empty state reported pending validation")
 	}

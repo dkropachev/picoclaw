@@ -2668,7 +2668,7 @@ func TestMappingWorkerRemainingErrorAndHelperBranches(t *testing.T) {
 		}
 		current, _, _ := store.Get(later.Repository)
 		job := lifecycleJobForFinding(t, current, later.Findings[len(later.Findings)-1].ID)
-		if job.Error != "AI adjudication is pending." {
+		if job.Error != "Run finding status needs model processing." {
 			t.Fatalf("needs-AI job=%#v", job)
 		}
 	})

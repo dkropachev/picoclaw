@@ -63,7 +63,8 @@ func (s Store) ProcessPendingMappingJobs(
 	jobIDs := make([]string, 0, len(state.MappingJobs))
 	jobSnapshots := make(map[string]RepositoryMappingModelSnapshot, len(state.MappingJobs))
 	for _, job := range state.MappingJobs {
-		if job.State == RepositoryMappingPending {
+		if job.State == RepositoryMappingPending &&
+			job.Attempts < RepositoryRunFindingStatusAttemptLimit {
 			jobIDs = append(jobIDs, job.ID)
 			jobSnapshots[job.ID] = job.ModelSnapshot
 		}
@@ -374,9 +375,9 @@ func (s Store) releaseMappingJob(repository, jobID string, cause error) error {
 	job.State = RepositoryMappingPending
 	job.ReservedAt = time.Time{}
 	if errors.Is(cause, errRepositoryMappingNeedsAI) {
-		job.Error = "AI adjudication is pending."
+		job.Error = "Run finding status needs model processing."
 	} else {
-		job.Error = "Mapping adjudication failed."
+		job.Error = "Run finding status processing failed."
 	}
 	job.UpdatedAt = s.clock()
 	state.Version++

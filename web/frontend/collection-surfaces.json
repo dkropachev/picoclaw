@@ -252,7 +252,6 @@
         "src/components/repository-reviews/repository-review-detail-page.tsx",
         "src/components/repository-reviews/repository-review-findings-page.tsx",
         "src/components/repository-reviews/repository-review-finding-page.tsx",
-        "src/components/repository-reviews/repository-review-link-issue-page.tsx",
         "src/components/repository-reviews/repository-review-issues-page.tsx",
         "src/components/repository-reviews/repository-review-issue-page.tsx"
       ],
@@ -265,7 +264,6 @@
         "related": [
           "/repository-reviews/:id/findings",
           "/repository-reviews/:id/findings/:findingId",
-          "/repository-reviews/:id/findings/:findingId/link-issue",
           "/repository-reviews/:id/issues",
           "/repository-reviews/:id/issues/:draftId"
         ]
@@ -277,12 +275,55 @@
       "owningSpec": "docs/features/repository-reviews.md",
       "implementationGlobs": [
         "src/routes/repository-reviews_.repositories.tsx",
-        "src/components/repository-reviews/repository-review-repositories-page.tsx"
+        "src/routes/repository-reviews_.repositories_.new.tsx",
+        "src/routes/repository-reviews_.repositories_.$id.tsx",
+        "src/routes/repository-reviews_.repositories_.$id_.edit.tsx",
+        "src/components/repository-reviews/repository-review-repositories-page.tsx",
+        "src/components/repository-reviews/repository-review-repositories-route-state.ts"
       ],
-      "capabilities": ["create", "edit"],
+      "capabilities": [
+        "query",
+        "pagination",
+        "create",
+        "detail",
+        "edit",
+        "related"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/repository-reviews/repositories",
+        "new": "/repository-reviews/repositories/new",
+        "detail": "/repository-reviews/repositories/:id",
+        "edit": "/repository-reviews/repositories/:id/edit",
+        "related": [
+          "/repository-reviews/repositories/:id/findings",
+          "/repository-reviews/repositories/:id/findings/:findingId",
+          "/repository-reviews/repositories/:id/findings/:findingId/link-issue"
+        ]
+      }
+    },
+    {
+      "key": "repository-findings",
+      "route": "/repository-reviews/repositories/:id/findings",
+      "owningSpec": "docs/features/repository-reviews.md",
+      "implementationGlobs": [
+        "src/routes/repository-reviews_.repositories_.$id_.findings*.tsx",
+        "src/components/repository-reviews/repository-review-repository-findings-page.tsx",
+        "src/components/repository-reviews/repository-review-finding-page.tsx",
+        "src/components/repository-reviews/repository-review-link-issue-page.tsx"
+      ],
+      "capabilities": ["pagination", "selection", "detail", "related"],
       "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/repository-reviews/repositories" }
+      "status": "exempt",
+      "exemptionReason": "The canonical ledger is a repository-scoped related collection whose backend contract exposes one fixed paged list view.",
+      "routes": {
+        "list": "/repository-reviews/repositories/:id/findings",
+        "detail": "/repository-reviews/repositories/:id/findings/:findingId",
+        "related": [
+          "/repository-reviews/repositories/:id/findings/:findingId/link-issue"
+        ]
+      }
     },
     {
       "key": "repository-review-profiles",

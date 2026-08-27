@@ -54,6 +54,17 @@ func (c *repositoryReviewController) startRepositoryFindingMapping(
 	}()
 }
 
+func (c *repositoryReviewController) wakeRepositoryRunFindingStatus() {
+	if c == nil || c.ctx.Err() != nil || c.leasedConfig == nil {
+		return
+	}
+	automations, err := c.leasedStore.ListAutomations(c.ctx)
+	if err != nil {
+		return
+	}
+	c.startRepositoryFindingMapping(automations)
+}
+
 func (c *repositoryReviewController) processRepositoryFindingMappings(
 	ctx context.Context,
 	automations []repoaudit.RepositoryReviewAutomation,
@@ -332,7 +343,8 @@ func hasRenamePair(pairs map[string]struct{}, left, right string) bool {
 
 func repositoryStateHasPendingMapping(state repoaudit.RepositoryState) bool {
 	for _, job := range state.MappingJobs {
-		if job.State == repoaudit.RepositoryMappingPending {
+		if job.State == repoaudit.RepositoryMappingPending &&
+			job.Attempts < repoaudit.RepositoryRunFindingStatusAttemptLimit {
 			return true
 		}
 	}

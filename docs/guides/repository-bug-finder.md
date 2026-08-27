@@ -83,18 +83,24 @@ invent a path, re-include an excluded folder, or select an unchosen code type.
 review is active. Before the first finding checkpoint it displays an empty
 in-progress Findings state rather than hiding the route.
 
-The default **This review** scope contains findings attributable to the
-selected automation's recorded run IDs and campaign start. Switch to
-**Repository findings** to inspect canonical cross-commit aggregates. Both scopes are
-paged, and the current review-findings view polls for newly checkpointed findings while the
-review remains active.
+The Findings route contains only run findings attributable to the selected
+automation's recorded run IDs and campaign start. It is paged and polls for new
+checkpoints while the review remains active.
 
 The Findings page shows compact finding summaries. Open a finding for its complete
 evidence, validation, model observations, commit and primary blob provenance,
-opaque contexts, and every context path/blob/size reference. Finding detail
-also shows repository-match state, provides **Discuss with AI** for immutable
-review occurrences, and navigates to its one canonical preview or GitHub issue.
-Repository-finding detail owns dismiss/reopen lifecycle controls.
+opaque contexts, and every context path/blob/size reference. Each occurrence
+shows **Run finding status** as Pending, Processing, Failed, Created repository
+finding, Added to existing repository finding, or Needs review. Associated
+occurrences link directly to their canonical repository finding. Failed status
+work can be retried explicitly without changing the immutable evidence.
+
+Choose **View repository findings** from Run findings, or **Open repository
+finding** on an associated occurrence, to inspect canonical cross-commit
+aggregates. Both actions leave the run surface and open repository-owned routes
+below `/repository-reviews/repositories`. That list and detail flow owns issue
+drafting, publication, existing-issue association, duplicate decisions,
+validation, and dismiss/reopen lifecycle controls.
 
 New review findings also retain causal `match_hints` (component, operation,
 failure mode, trigger, violated invariant, outcome, related symbols, source
@@ -112,17 +118,19 @@ Discussion creates a separate reviewing thread seeded with the exact
 finding and context provenance. Returning from chat does not generate, link,
 or publish an issue; each of those effects still requires an explicit action.
 
-Collection query/view, findings scope/offset, explicit selection, and in-memory
-scroll are preserved through finding, discussion, and issue routes. Browser
-Back restores that state. The former **Results** sidebar destination is gone;
-old `/repository-reviews/results` links return to the review collection.
+Collection query/view, finding offset, explicit selection, and in-memory scroll
+are preserved through finding, discussion, repository-finding, and issue routes.
+Browser Back restores that state. The former **Results** sidebar destination is
+gone; old `/repository-reviews/results` links return to the review collection.
 
 ## Draft Issue Previews
 
-Select up to 200 explicit open findings across loaded Findings pages and choose
-**Draft issue previews**. Selection is never implicit or query-wide. One batch receives
-one generation ID, creates one preview per finding, and runs at most four
-issue-writer calls concurrently across launcher processes sharing the workspace.
+From a repository's **Repository findings** route, select up to 200 explicit
+open, unassociated, non-provisional canonical findings and choose **Draft issue
+previews**. Run-finding routes do not expose issue actions. Selection is never
+implicit or query-wide. One batch receives one generation ID, creates one
+preview per finding, and runs at most four issue-writer calls concurrently
+across launcher processes sharing the workspace.
 A per-attempt OS lock also prevents two processes from dispatching the same
 reservation. A partial failure keeps successful previews
 and opens the saved Issue previews route filtered or highlighted by that

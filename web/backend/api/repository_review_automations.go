@@ -132,6 +132,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleGetRepositoryReviewAutomationReport,
 	)
 	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/findings/status",
+		h.handleRetryRepositoryReviewRunFindingStatus,
+	)
+	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/report",
 		h.handleGetRepositoryReviewAutomationReport,
 	)
