@@ -35,6 +35,21 @@ export function runFindingStatusLabel(
   }
 }
 
+export function runFindingStatusCompactLabel(
+  finding: RepositoryReviewFinding,
+): string {
+  switch (runFindingStatusState(finding)) {
+    case "associated_new":
+      return "New"
+    case "associated_existing":
+      return "Existing"
+    case "needs_review":
+      return "Review needed"
+    default:
+      return runFindingStatusLabel(finding)
+  }
+}
+
 export function runFindingStatusDescription(
   finding: RepositoryReviewFinding,
 ): string {

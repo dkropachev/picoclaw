@@ -25,6 +25,7 @@ import { discussionPrompt } from "@/components/repository-reviews/repository-rev
 import {
   runFindingRepositoryFindingID,
   runFindingStatusCanRetry,
+  runFindingStatusCompactLabel,
   runFindingStatusIsInProgress,
   runFindingStatusLabel,
 } from "@/components/repository-reviews/repository-review-run-finding-status"
@@ -186,7 +187,16 @@ export function RepositoryReviewFindingsPage({
         },
         {
           id: "run-status",
-          label: runFindingStatusLabel,
+          label: (finding) => (
+            <>
+              <span className="hidden sm:inline">
+                {runFindingStatusLabel(finding)}
+              </span>
+              <span className="sm:hidden">
+                {runFindingStatusCompactLabel(finding)}
+              </span>
+            </>
+          ),
           variant: "outline",
         },
       ],
