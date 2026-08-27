@@ -42,6 +42,7 @@ const profile = {
   account_ref: "",
   reviewer_model: "review-model",
   review_focus: "Correctness bugs",
+  issue_prompt: "Present the confirmed diagnosis with evidence.",
   scope_policy: {
     code_types: ["code" as const],
     include_folders: [],

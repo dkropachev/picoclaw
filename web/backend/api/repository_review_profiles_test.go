@@ -24,7 +24,8 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 
 	created := createRepositoryReviewProfileForTest(t, mux, "Focused review", "cheap")
 	if created.ID == "" || created.Version != 1 || created.ReviewerModel != "cheap" ||
-		created.IssueWriterModel != "" || !created.AutoContinue {
+		created.IssueWriterModel != "" ||
+		created.IssuePrompt != repoaudit.DefaultRepositoryReviewIssuePrompt || !created.AutoContinue {
 		t.Fatalf("created profile=%#v", created)
 	}
 	legacyPriceBody := repositoryReviewProfileCreateBody("Legacy price", "cheap")
@@ -83,6 +84,7 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	updateBody := repositoryReviewProfileBody(created)
 	updateBody["name"] = "Focused review v2"
 	updateBody["issue_writer_model"] = "quality"
+	updateBody["issue_prompt"] = "Use compact evidence and impact sections."
 	updateBody["expected_version"] = created.Version
 	updatedResponse := repositoryReviewAutomationMutation(
 		t, mux, http.MethodPatch, "/api/repository-reviews/profiles/"+created.ID, updateBody,
@@ -98,8 +100,31 @@ func TestRepositoryReviewProfileRoutesCRUDAndAssignmentFences(t *testing.T) {
 	}
 	updated := updatedResult.Profile
 	if updated.Version != 2 || updated.Name != "Focused review v2" ||
-		updated.IssueWriterModel != "quality" {
+		updated.IssueWriterModel != "quality" ||
+		updated.IssuePrompt != "Use compact evidence and impact sections." {
 		t.Fatalf("updated profile=%#v", updated)
+	}
+	legacyUpdateBody := repositoryReviewProfileBody(updated)
+	delete(legacyUpdateBody, "issue_prompt")
+	legacyUpdateBody["name"] = "Focused review v3"
+	legacyUpdateBody["expected_version"] = updated.Version
+	legacyUpdateResponse := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPatch, "/api/repository-reviews/profiles/"+created.ID, legacyUpdateBody,
+	)
+	if legacyUpdateResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"prompt-compatible update status=%d body=%s",
+			legacyUpdateResponse.Code,
+			legacyUpdateResponse.Body.String(),
+		)
+	}
+	if err := json.Unmarshal(legacyUpdateResponse.Body.Bytes(), &updatedResult); err != nil {
+		t.Fatal(err)
+	}
+	updated = updatedResult.Profile
+	if updated.Version != 3 || updated.Name != "Focused review v3" ||
+		updated.IssuePrompt != "Use compact evidence and impact sections." {
+		t.Fatalf("omitted issue prompt was not preserved: %#v", updated)
 	}
 
 	createAutomation := repositoryReviewAutomationMutation(
@@ -1454,6 +1479,7 @@ func createRepositoryReviewProfileForTest(
 func repositoryReviewProfileCreateBody(name, model string) map[string]any {
 	return map[string]any{
 		"name": name, "review_focus": "Find correctness and security defects.",
+		"issue_prompt":   repoaudit.DefaultRepositoryReviewIssuePrompt,
 		"account_ref":    "",
 		"scope_policy":   map[string]any{"code_types": []string{"code"}},
 		"reviewer_model": model,
@@ -1467,6 +1493,7 @@ func repositoryReviewProfileCreateBody(name, model string) map[string]any {
 func repositoryReviewProfileBody(profile repoaudit.RepositoryReviewProfile) map[string]any {
 	return map[string]any{
 		"name": profile.Name, "review_focus": profile.ReviewFocus,
+		"issue_prompt": profile.IssuePrompt,
 		"account_ref":  profile.AccountRef,
 		"scope_policy": profile.ScopePolicy, "reviewer_model": profile.ReviewerModel,
 		"issue_writer_model": profile.IssueWriterModel,

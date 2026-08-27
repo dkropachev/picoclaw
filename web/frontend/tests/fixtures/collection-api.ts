@@ -271,8 +271,9 @@ const evaluation = {
 
 export const repositoryReviewVisualIDs = {
   automation: "rra_visual",
-  finding: "rrf_visual_1",
-  secondFinding: "rrf_visual_2",
+  finding: "rfn_visual_1",
+  secondFinding: "rfn_visual_2",
+  repositoryFinding: "rrf_visual_1",
   issue: "rrid_visual_1",
   failedIssue: "rrid_visual_2",
   generation: "rig_visual",
@@ -286,7 +287,7 @@ const repositoryReviewAutomation = {
   profile_id: "rrpf_visual",
   profile_version: 4,
   branch: "main",
-  name: "Durable correctness review",
+  name: "Correctness review",
   repository: "octo/picoclaw",
   ref: "main",
   target: "all",
@@ -297,7 +298,7 @@ const repositoryReviewAutomation = {
     code_types: ["hotpath-code", "code", "test"],
     include_folders: ["pkg", "web"],
     exclude_folders: ["vendor"],
-    free_text: "Prioritize durable state transitions.",
+    free_text: "Prioritize persistent state transitions.",
   },
   reviewer_models: ["review"],
   issue_writer_model: "issue-writer",
@@ -353,16 +354,17 @@ const repositoryReviewAutomation = {
 const repositoryReviewProfile = {
   id: "rrpf_visual",
   version: 4,
-  name: "Durable correctness review",
+  name: "Correctness review",
   account_ref: "openai-primary",
   reviewer_model: "review",
   issue_writer_model: "issue-writer",
   review_focus: "Find concrete correctness and reliability defects.",
+  issue_prompt: "Present the confirmed diagnosis with evidence and provenance.",
   scope_policy: {
     code_types: ["hotpath-code", "code", "test"],
     include_folders: ["pkg", "web"],
     exclude_folders: ["vendor"],
-    free_text: "Prioritize durable state transitions.",
+    free_text: "Prioritize persistent state transitions.",
   },
   force: false,
   auto_continue: true,
@@ -410,7 +412,7 @@ const repositoryReviewFindings = [
     evidence:
       "Two callers load the same ledger version and each replaces the findings slice; the later atomic rename discards the earlier checkpoint.",
     impact:
-      "A validated repository finding can disappear from the durable report.",
+      "A validated repository finding can disappear from the findings view.",
     validation: {
       status: "confirmed",
       summary: "Traced both writers through the atomic rename path.",
@@ -438,6 +440,8 @@ const repositoryReviewFindings = [
     ],
     status: "open",
     issue_draft_id: repositoryReviewVisualIDs.issue,
+    repository_finding_id: repositoryReviewVisualIDs.repositoryFinding,
+    repository_match_state: "known",
     version: 3,
     created_at: "2026-08-25T14:05:00Z",
     updated_at: "2026-08-25T14:10:00Z",
@@ -470,11 +474,46 @@ const repositoryReviewFindings = [
     observation_count: 1,
     status: "open",
     issue_draft_id: repositoryReviewVisualIDs.failedIssue,
+    repository_finding_id: "rrf_visual_2",
+    repository_match_state: "known",
     version: 2,
     created_at: "2026-08-25T14:12:00Z",
     updated_at: "2026-08-25T14:15:00Z",
   },
 ]
+
+const repositoryFindings = repositoryReviewFindings.map((finding, index) => ({
+  id:
+    index === 0
+      ? repositoryReviewVisualIDs.repositoryFinding
+      : `rrf_visual_${index + 1}`,
+  repository: finding.repository,
+  canonical_title: finding.title,
+  canonical_severity: finding.severity,
+  review_finding_ids: [finding.id],
+  found_commits: [finding.commit_sha],
+  path_symbol_history: [
+    {
+      review_finding_id: finding.id,
+      commit_sha: finding.commit_sha,
+      path: finding.file.path,
+      symbol: finding.symbol,
+      observed_at: finding.created_at,
+    },
+  ],
+  match_state: "known",
+  lifecycle: "open",
+  issue: {
+    state: "draft",
+    origin: "ai_generated",
+    title: finding.title,
+    snapshot_at: finding.updated_at,
+  },
+  validation_state: "not_requested",
+  version: 1,
+  created_at: finding.created_at,
+  updated_at: finding.updated_at,
+}))
 
 const repositoryReviewContexts = repositoryReviewFindings.map(
   (finding, index) => ({
@@ -504,6 +543,8 @@ const repositoryReviewIssues = [
     instructions_mode: "default",
     generator_model: "issue-writer",
     generator_account: "openai-primary",
+    generator_profile_id: "rrpf_visual",
+    generator_profile_version: 4,
     canonical: true,
     publishable: true,
     deletable: true,
@@ -520,7 +561,7 @@ const repositoryReviewIssues = [
       "",
       "## Impact",
       "",
-      "A validated finding can disappear from the durable report.",
+      "A validated finding can disappear from the findings view.",
       "",
       "## Validation",
       "",
@@ -544,6 +585,8 @@ const repositoryReviewIssues = [
     instructions_mode: "default",
     generator_model: "issue-writer",
     generator_account: "openai-primary",
+    generator_profile_id: "rrpf_visual",
+    generator_profile_version: 4,
     generation_error: "The issue writer returned an invalid structured body.",
     canonical: true,
     publishable: false,
@@ -708,13 +751,15 @@ export async function installCollectionVisualMocks(
       if (path === reviewRoot) {
         return json(route, repositoryReviewAutomation)
       }
-      if (path === `${reviewRoot}/report`) {
+      if (path === `${reviewRoot}/findings`) {
         const scope =
           url.searchParams.get("scope") === "all" ? "all" : "current"
         return json(route, {
           automation: repositoryReviewAutomation,
           repository: repositoryReviewSummary,
           findings: repositoryReviewFindings,
+          repository_findings: repositoryFindings,
+          repository_finding_total: repositoryFindings.length,
           contexts: repositoryReviewContexts,
           scope,
           offset: 0,

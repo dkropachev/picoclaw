@@ -39,6 +39,7 @@ type repositoryReviewProfileConfigRequest struct {
 	ScopePolicy         repoaudit.RepositoryReviewScopePolicy  `json:"scope_policy"`
 	ReviewerModel       string                                 `json:"reviewer_model"`
 	IssueWriterModel    string                                 `json:"issue_writer_model,omitempty"`
+	IssuePrompt         *string                                `json:"issue_prompt,omitempty"`
 	AccountRef          string                                 `json:"account_ref,omitempty"`
 	Force               bool                                   `json:"force"`
 	AutoContinue        *bool                                  `json:"auto_continue,omitempty"`
@@ -422,6 +423,9 @@ func applyRepositoryReviewProfileRequest(
 	profile.ScopePolicy = request.ScopePolicy
 	profile.ReviewerModel = request.ReviewerModel
 	profile.IssueWriterModel = request.IssueWriterModel
+	if request.IssuePrompt != nil {
+		profile.IssuePrompt = *request.IssuePrompt
+	}
 	profile.AccountRef = request.AccountRef
 	profile.Force = request.Force
 	if request.AutoContinue != nil {

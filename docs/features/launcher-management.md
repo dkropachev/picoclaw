@@ -81,7 +81,10 @@ is name plus stable name. Bulk failure codes include `invalid_id`,
 labels only. The returned config revision fences name-addressed and bulk
 mutations. Browser-local collection state stores at most eight successful recent
 queries and one preferred view per manifest key; selection and scroll position
-remain in memory and are never durable server state.
+remain in memory and are never durable server state. A targeted item
+invalidation removes one merged or deleted identity from every query-local
+selection memory for that collection key while preserving unrelated cross-page
+selections.
 
 The launcher owns an HttpOnly dashboard session, process-local login throttles,
 a shared config mutation lock, public-plus-security config revisions, managed

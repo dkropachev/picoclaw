@@ -17,14 +17,16 @@ const (
 // IssueGenerationRequest is the durable reservation written before an
 // isolated issue-writer call is dispatched.
 type IssueGenerationRequest struct {
-	Repository           string
-	FindingID            string
-	GenerationID         string
-	ResolvedInstructions string
-	InstructionsMode     IssueDraftInstructionsMode
-	GeneratorModel       string
-	GeneratorAccount     string
-	ExpectedDraftVersion int64
+	Repository              string
+	FindingID               string
+	GenerationID            string
+	ResolvedInstructions    string
+	InstructionsMode        IssueDraftInstructionsMode
+	GeneratorModel          string
+	GeneratorAccount        string
+	GeneratorProfileID      string
+	GeneratorProfileVersion int64
+	ExpectedDraftVersion    int64
 }
 
 // ExistingIssueLink is an issue identity that has already been re-fetched and
@@ -35,9 +37,11 @@ type ExistingIssueLink struct {
 	ExpectedFindingVersion int64
 	ExternalID             string
 	ExternalURL            string
+	State                  string
 	Title                  string
 	Body                   string
 	Labels                 []string
+	Origin                 IssueDraftOrigin
 	Confirmed              bool
 	Replace                bool
 }
@@ -112,6 +116,9 @@ func (s Store) ReserveIssueGeneration(
 		return RepositoryState{}, IssueDraft{}, false, os.ErrNotExist
 	}
 	finding := &state.Findings[findingIndex]
+	if !repositoryFindingAllowsIssueActions(state, *finding) {
+		return RepositoryState{}, IssueDraft{}, false, ErrConflict
+	}
 	if finding.IssueDraftID != "" {
 		draftIndex := issueDraftIndexByID(state.IssueDrafts, finding.IssueDraftID)
 		if draftIndex >= 0 {
@@ -131,24 +138,28 @@ func (s Store) ReserveIssueGeneration(
 		ID: stableID(
 			"rid_", state.Repository, finding.ID, request.GenerationID,
 		),
-		Repository:                  state.Repository,
-		FindingIDs:                  []string{finding.ID},
-		Origin:                      IssueDraftOriginAIGenerated,
-		GenerationID:                request.GenerationID,
-		ResolvedInstructions:        request.ResolvedInstructions,
-		InstructionsMode:            request.InstructionsMode,
-		GeneratorModel:              request.GeneratorModel,
-		GeneratorAccount:            request.GeneratorAccount,
-		AttemptGenerationID:         request.GenerationID,
-		AttemptResolvedInstructions: request.ResolvedInstructions,
-		AttemptInstructionsMode:     request.InstructionsMode,
-		AttemptGeneratorModel:       request.GeneratorModel,
-		AttemptGeneratorAccount:     request.GeneratorAccount,
-		Canonical:                   true,
-		State:                       IssueDraftGenerating,
-		Version:                     1,
-		CreatedAt:                   now,
-		UpdatedAt:                   now,
+		Repository:                     state.Repository,
+		FindingIDs:                     []string{finding.ID},
+		Origin:                         IssueDraftOriginAIGenerated,
+		GenerationID:                   request.GenerationID,
+		ResolvedInstructions:           request.ResolvedInstructions,
+		InstructionsMode:               request.InstructionsMode,
+		GeneratorModel:                 request.GeneratorModel,
+		GeneratorAccount:               request.GeneratorAccount,
+		GeneratorProfileID:             request.GeneratorProfileID,
+		GeneratorProfileVersion:        request.GeneratorProfileVersion,
+		AttemptGenerationID:            request.GenerationID,
+		AttemptResolvedInstructions:    request.ResolvedInstructions,
+		AttemptInstructionsMode:        request.InstructionsMode,
+		AttemptGeneratorModel:          request.GeneratorModel,
+		AttemptGeneratorAccount:        request.GeneratorAccount,
+		AttemptGeneratorProfileID:      request.GeneratorProfileID,
+		AttemptGeneratorProfileVersion: request.GeneratorProfileVersion,
+		Canonical:                      true,
+		State:                          IssueDraftGenerating,
+		Version:                        1,
+		CreatedAt:                      now,
+		UpdatedAt:                      now,
 	}
 	state.IssueDrafts = append(state.IssueDrafts, draft)
 	finding.IssueDraftID = draft.ID
@@ -191,6 +202,10 @@ func (s Store) BeginIssueRegeneration(
 		len(draft.FindingIDs) != 1 || draft.FindingIDs[0] != request.FindingID {
 		return RepositoryState{}, IssueDraft{}, false, ErrConflict
 	}
+	findingIndex := findingIndexByID(state.Findings, request.FindingID)
+	if findingIndex < 0 || !repositoryFindingAllowsIssueActions(state, state.Findings[findingIndex]) {
+		return RepositoryState{}, IssueDraft{}, false, ErrConflict
+	}
 	if issueDraftAttemptGenerationID(*draft) == request.GenerationID &&
 		draft.State == IssueDraftGenerating {
 		return state, *draft, false, nil
@@ -207,6 +222,8 @@ func (s Store) BeginIssueRegeneration(
 	draft.AttemptInstructionsMode = request.InstructionsMode
 	draft.AttemptGeneratorModel = request.GeneratorModel
 	draft.AttemptGeneratorAccount = request.GeneratorAccount
+	draft.AttemptGeneratorProfileID = request.GeneratorProfileID
+	draft.AttemptGeneratorProfileVersion = request.GeneratorProfileVersion
 	draft.GenerationError = ""
 	draft.State = IssueDraftGenerating
 	draft.Version++
@@ -333,8 +350,9 @@ func (s Store) DeleteIssueDraft(
 	return state, nil
 }
 
-// LinkExistingIssue persists a provider-validated manual association. The same
-// external issue may intentionally be linked to more than one finding.
+// LinkExistingIssue persists a provider-validated manual or discovered
+// association. The same external issue may intentionally be linked to more
+// than one finding.
 func (s Store) LinkExistingIssue(
 	request ExistingIssueLink,
 ) (RepositoryState, IssueDraft, error) {
@@ -343,11 +361,16 @@ func (s Store) LinkExistingIssue(
 	request.ExternalID = strings.TrimSpace(request.ExternalID)
 	request.ExternalURL = strings.TrimSpace(request.ExternalURL)
 	request.Title = strings.TrimSpace(request.Title)
+	request.State = strings.ToLower(strings.TrimSpace(request.State))
 	request.Body = strings.TrimSpace(request.Body)
 	request.Labels = normalizeLabels(request.Labels)
+	if request.Origin == "" {
+		request.Origin = IssueDraftOriginLinked
+	}
 	if !request.Confirmed || !validBoundedText(request.ExternalID, 1024) ||
 		!validHTTPSURL(request.ExternalURL) || !validBoundedText(request.Title, 256) ||
-		!validOptionalIssueBody(request.Body) {
+		!validOptionalIssueBody(request.Body) || !reversibleIssueDraftOrigin(request.Origin) ||
+		(request.State != "" && request.State != "open" && request.State != "closed") {
 		return RepositoryState{}, IssueDraft{}, errors.New("invalid existing issue link")
 	}
 	unlock, err := s.lock(request.Repository)
@@ -364,13 +387,16 @@ func (s Store) LinkExistingIssue(
 		return RepositoryState{}, IssueDraft{}, os.ErrNotExist
 	}
 	finding := &state.Findings[findingIndex]
+	if !repositoryFindingAllowsIssueActions(state, *finding) {
+		return RepositoryState{}, IssueDraft{}, ErrConflict
+	}
 	if request.ExpectedFindingVersion < 1 || finding.Version != request.ExpectedFindingVersion {
 		return RepositoryState{}, IssueDraft{}, ErrConflict
 	}
 	if finding.IssueDraftID != "" {
 		existingIndex := issueDraftIndexByID(state.IssueDrafts, finding.IssueDraftID)
 		if !request.Replace || existingIndex < 0 ||
-			state.IssueDrafts[existingIndex].Origin != IssueDraftOriginLinked ||
+			!reversibleIssueDraftOrigin(state.IssueDrafts[existingIndex].Origin) ||
 			!state.IssueDrafts[existingIndex].Canonical ||
 			state.IssueDrafts[existingIndex].State != IssueDraftPosted {
 			return RepositoryState{}, IssueDraft{}, ErrConflict
@@ -387,12 +413,13 @@ func (s Store) LinkExistingIssue(
 	}
 	now := s.clock()
 	draft := IssueDraft{
-		ID:         stableID("rid_", state.Repository, finding.ID, "linked", request.ExternalURL),
+		ID:         stableID("rid_", state.Repository, finding.ID, string(request.Origin), request.ExternalURL),
 		Repository: state.Repository, FindingIDs: []string{finding.ID},
-		Origin: IssueDraftOriginLinked, Canonical: true,
+		Origin: request.Origin, Canonical: true,
 		Title: request.Title, Body: request.Body, Labels: request.Labels,
 		State: IssueDraftPosted, ExternalID: request.ExternalID, ExternalURL: request.ExternalURL,
-		Version: 1, CreatedAt: now, UpdatedAt: now,
+		ExternalState: request.State,
+		Version:       1, CreatedAt: now, UpdatedAt: now,
 	}
 	state.IssueDrafts = append(state.IssueDrafts, draft)
 	finding.IssueDraftID = draft.ID
@@ -407,8 +434,8 @@ func (s Store) LinkExistingIssue(
 	return state, draft, nil
 }
 
-// UnlinkExistingIssue is intentionally limited to manually linked issues;
-// issues created from previews remain permanently associated.
+// UnlinkExistingIssue is intentionally limited to reversible manual or
+// discovered links; issues created from previews remain permanently associated.
 func (s Store) UnlinkExistingIssue(
 	repository, findingID string,
 	expectedFindingVersion int64,
@@ -437,22 +464,30 @@ func (s Store) UnlinkExistingIssue(
 		return RepositoryState{}, ErrConflict
 	}
 	draftIndex := issueDraftIndexByID(state.IssueDrafts, finding.IssueDraftID)
-	if draftIndex < 0 || state.IssueDrafts[draftIndex].Origin != IssueDraftOriginLinked ||
+	if draftIndex < 0 || !reversibleIssueDraftOrigin(state.IssueDrafts[draftIndex].Origin) ||
 		!state.IssueDrafts[draftIndex].Canonical || state.IssueDrafts[draftIndex].State != IssueDraftPosted {
 		return RepositoryState{}, ErrConflict
 	}
 	now := s.clock()
+	unlinkedURL := state.IssueDrafts[draftIndex].ExternalURL
 	finding.IssueDraftID = ""
 	finding.Status = FindingOpen
 	finding.Version++
 	finding.UpdatedAt = now
 	state.IssueDrafts = append(state.IssueDrafts[:draftIndex], state.IssueDrafts[draftIndex+1:]...)
+	clearRepositoryFindingIssueAssociation(
+		&state, finding.RepositoryFindingID, unlinkedURL, now,
+	)
 	state.Version++
 	state.UpdatedAt = now
 	if err := s.save(&state); err != nil {
 		return RepositoryState{}, err
 	}
 	return state, nil
+}
+
+func reversibleIssueDraftOrigin(origin IssueDraftOrigin) bool {
+	return origin == IssueDraftOriginLinked || origin == IssueDraftOriginDiscovered
 }
 
 func normalizeIssueGenerationRequest(request IssueGenerationRequest) IssueGenerationRequest {
@@ -462,6 +497,7 @@ func normalizeIssueGenerationRequest(request IssueGenerationRequest) IssueGenera
 	request.ResolvedInstructions = strings.TrimSpace(request.ResolvedInstructions)
 	request.GeneratorModel = strings.TrimSpace(request.GeneratorModel)
 	request.GeneratorAccount = strings.TrimSpace(request.GeneratorAccount)
+	request.GeneratorProfileID = strings.TrimSpace(request.GeneratorProfileID)
 	if request.InstructionsMode == "" {
 		request.InstructionsMode = IssueDraftInstructionsDefault
 	}
@@ -475,6 +511,9 @@ func validateIssueGenerationRequest(request IssueGenerationRequest) error {
 		!validBoundedText(request.ResolvedInstructions, maxIssueInstructionsBytes) ||
 		!validBoundedText(request.GeneratorModel, 256) ||
 		!validBoundedText(request.GeneratorAccount, 256) ||
+		(request.GeneratorProfileID == "") != (request.GeneratorProfileVersion == 0) ||
+		(request.GeneratorProfileID != "" &&
+			(!validProfileID(request.GeneratorProfileID) || request.GeneratorProfileVersion < 1)) ||
 		(request.InstructionsMode != IssueDraftInstructionsDefault &&
 			request.InstructionsMode != IssueDraftInstructionsCustom) {
 		return errors.New("invalid repository review issue generation request")
@@ -507,6 +546,8 @@ func promoteIssueDraftAttempt(draft *IssueDraft) {
 	draft.InstructionsMode = draft.AttemptInstructionsMode
 	draft.GeneratorModel = draft.AttemptGeneratorModel
 	draft.GeneratorAccount = draft.AttemptGeneratorAccount
+	draft.GeneratorProfileID = draft.AttemptGeneratorProfileID
+	draft.GeneratorProfileVersion = draft.AttemptGeneratorProfileVersion
 	clearIssueDraftAttempt(draft)
 }
 
@@ -519,6 +560,8 @@ func clearIssueDraftAttempt(draft *IssueDraft) {
 	draft.AttemptInstructionsMode = ""
 	draft.AttemptGeneratorModel = ""
 	draft.AttemptGeneratorAccount = ""
+	draft.AttemptGeneratorProfileID = ""
+	draft.AttemptGeneratorProfileVersion = 0
 }
 
 func validHTTPSURL(value string) bool {
@@ -722,7 +765,7 @@ func validateIssueAssociations(state RepositoryState) error {
 			return errors.New("duplicate repository review issue preview")
 		}
 		drafts[draft.ID] = draft
-		if draft.Origin != IssueDraftOriginAIGenerated && draft.Origin != IssueDraftOriginLinked &&
+		if draft.Origin != IssueDraftOriginAIGenerated && !reversibleIssueDraftOrigin(draft.Origin) &&
 			draft.Origin != IssueDraftOriginLegacy {
 			return errors.New("invalid repository review issue preview origin")
 		}
@@ -733,7 +776,7 @@ func validateIssueAssociations(state RepositoryState) error {
 		}
 		if draft.State != IssueDraftGenerating && draft.State != IssueDraftFailed &&
 			(!validBoundedText(draft.Title, 256) ||
-				draft.Origin != IssueDraftOriginLinked &&
+				!reversibleIssueDraftOrigin(draft.Origin) &&
 					!validBoundedText(draft.Body, maxIssueDraftBodyBytes)) {
 			return errors.New("invalid repository review issue preview content")
 		}
@@ -743,13 +786,19 @@ func validateIssueAssociations(state RepositoryState) error {
 			!validOptionalAutomationText(draft.ResolvedInstructions, maxIssueInstructionsBytes) ||
 			!validOptionalAutomationText(draft.GeneratorModel, 256) ||
 			!validOptionalAutomationText(draft.GeneratorAccount, 256) ||
+			!validOptionalAutomationText(draft.GeneratorProfileID, 128) ||
+			draft.GeneratorProfileVersion < 0 ||
 			!validOptionalAutomationText(draft.AttemptGenerationID, maxIssueGenerationIDBytes) ||
 			!validOptionalAutomationText(draft.AttemptResolvedInstructions, maxIssueInstructionsBytes) ||
 			!validOptionalAutomationText(draft.AttemptGeneratorModel, 256) ||
 			!validOptionalAutomationText(draft.AttemptGeneratorAccount, 256) ||
+			!validOptionalAutomationText(draft.AttemptGeneratorProfileID, 128) ||
+			draft.AttemptGeneratorProfileVersion < 0 ||
 			!validOptionalAutomationText(draft.GenerationError, maxIssueGenerationErrorBytes) ||
 			!validOptionalAutomationText(draft.ExternalID, 1024) ||
-			!validOptionalAutomationText(draft.ExternalURL, 4096) {
+			!validOptionalAutomationText(draft.ExternalURL, 4096) ||
+			(draft.ExternalState != "" && draft.ExternalState != "open" &&
+				draft.ExternalState != "closed") {
 			return errors.New("invalid repository review issue preview metadata")
 		}
 		if draft.InstructionsMode != "" && draft.InstructionsMode != IssueDraftInstructionsDefault &&
@@ -760,6 +809,14 @@ func validateIssueAssociations(state RepositoryState) error {
 			draft.AttemptInstructionsMode != IssueDraftInstructionsDefault &&
 			draft.AttemptInstructionsMode != IssueDraftInstructionsCustom {
 			return errors.New("invalid repository review issue preview attempt instructions mode")
+		}
+		if (draft.GeneratorProfileID == "") != (draft.GeneratorProfileVersion == 0) ||
+			(draft.GeneratorProfileID != "" && !validProfileID(draft.GeneratorProfileID)) ||
+			(draft.AttemptGeneratorProfileID == "") !=
+				(draft.AttemptGeneratorProfileVersion == 0) ||
+			(draft.AttemptGeneratorProfileID != "" &&
+				!validProfileID(draft.AttemptGeneratorProfileID)) {
+			return errors.New("invalid repository review issue generation profile provenance")
 		}
 		attemptFields := 0
 		for _, present := range []bool{
@@ -772,6 +829,9 @@ func validateIssueAssociations(state RepositoryState) error {
 			}
 		}
 		if attemptFields != 0 && attemptFields != 5 {
+			return errors.New("incomplete repository review issue generation attempt provenance")
+		}
+		if draft.AttemptGeneratorProfileID != "" && attemptFields != 5 {
 			return errors.New("incomplete repository review issue generation attempt provenance")
 		}
 		if attemptFields == 5 && draft.Origin != IssueDraftOriginAIGenerated {
@@ -787,7 +847,7 @@ func validateIssueAssociations(state RepositoryState) error {
 				draft.GeneratorModel == "" || draft.GeneratorAccount == "") {
 			return errors.New("invalid generated repository review issue preview")
 		}
-		if draft.Origin == IssueDraftOriginLinked &&
+		if reversibleIssueDraftOrigin(draft.Origin) &&
 			(len(draft.FindingIDs) != 1 || draft.State != IssueDraftPosted ||
 				draft.ExternalID == "" || !validHTTPSURL(draft.ExternalURL)) {
 			return errors.New("invalid linked repository review issue")

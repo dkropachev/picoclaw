@@ -40,7 +40,7 @@ export function discussionPrompt<
     `Repository: ${repository.repository}`,
     `Repository review ID: ${repository.id}`,
     `Latest reviewed commit SHA: ${repository.last_commit_sha || "unknown"}`,
-    "The context IDs below are opaque durable references. Use them as provenance identifiers; do not invent replacement context.",
+    "The context IDs below are opaque saved references. Use them as provenance identifiers; do not invent replacement context.",
     "",
   ]
   for (const finding of findings) {

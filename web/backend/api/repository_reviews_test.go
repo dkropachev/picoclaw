@@ -26,6 +26,7 @@ func TestRepositoryReviewRoutesSelectDiscussAndIssueData(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	mux := http.NewServeMux()
 	NewHandler(configPath).RegisterRoutes(mux)
 
@@ -47,22 +48,12 @@ func TestRepositoryReviewRoutesSelectDiscussAndIssueData(t *testing.T) {
 	)
 	setRepositoryReviewMutationHeaders(statusRequest)
 	mux.ServeHTTP(statusResponse, statusRequest)
-	if statusResponse.Code != http.StatusOK {
+	if statusResponse.Code != http.StatusConflict {
 		t.Fatalf("status mutation=%d body=%s", statusResponse.Code, statusResponse.Body.String())
-	}
-	var dismissed struct {
-		Repository repoaudit.RepositorySummary `json:"repository"`
-		Finding    repoaudit.Finding           `json:"finding"`
-	}
-	if err := json.Unmarshal(statusResponse.Body.Bytes(), &dismissed); err != nil {
-		t.Fatal(err)
-	}
-	if dismissed.Finding.Status != repoaudit.FindingDismissed || dismissed.Repository.OpenFindingCount != 0 {
-		t.Fatalf("status response=%#v", dismissed)
 	}
 
 	draftBody, _ := json.Marshal(map[string]any{
-		"finding_ids": []string{state.Findings[0].ID}, "expected_version": dismissed.Repository.Version,
+		"finding_ids": []string{state.Findings[0].ID}, "expected_version": state.Version,
 	})
 	draftResponse := httptest.NewRecorder()
 	draftRequest := httptest.NewRequest(
@@ -281,6 +272,37 @@ func seedRepositoryReviewAPIState(t *testing.T, workspace string) repoaudit.Repo
 		t.Fatal(err)
 	}
 	return result.State
+}
+
+func completeRepositoryReviewAPIMappingJobs(
+	t *testing.T,
+	workspace string,
+	state repoaudit.RepositoryState,
+) repoaudit.RepositoryState {
+	t.Helper()
+	store := repoaudit.NewStore(workspace)
+	for _, pending := range state.MappingJobs {
+		if pending.State != repoaudit.RepositoryMappingPending {
+			continue
+		}
+		_, job, _, claimed, err := store.ClaimMappingJob(
+			state.Repository,
+			pending.ID,
+			repoaudit.RepositoryMappingModelSnapshot{},
+		)
+		if err != nil || !claimed {
+			t.Fatalf("claim mapping job %q: claimed=%v err=%v", pending.ID, claimed, err)
+		}
+		state, _, err = store.CompleteMappingJob(state.Repository, repoaudit.RepositoryMappingCompletion{
+			JobID:                 job.ID,
+			CreateMatchState:      repoaudit.RepositoryMatchNew,
+			DefaultBranchVerified: true,
+		})
+		if err != nil {
+			t.Fatalf("complete mapping job %q: %v", job.ID, err)
+		}
+	}
+	return state
 }
 
 func setRepositoryReviewMutationHeaders(request *http.Request) {

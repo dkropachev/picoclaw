@@ -128,8 +128,8 @@ const repositoryReviewStates = [
     route: `/repository-reviews/${repositoryReviewVisualIDs.automation}`,
   },
   {
-    key: "repository-review-report",
-    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/report?scope=current`,
+    key: "repository-review-findings",
+    route: `/repository-reviews/${repositoryReviewVisualIDs.automation}/findings?scope=current`,
   },
   {
     key: "repository-review-finding",

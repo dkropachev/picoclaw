@@ -25,6 +25,7 @@ import {
   getRepositoryReviewAutomationOptions,
   getRepositoryReviewProfile,
   listRepositoryReviewProfilesPage,
+  repositoryReviewDefaultIssuePrompt,
   updateRepositoryReviewProfile,
 } from "@/api/repository-reviews"
 import {
@@ -86,6 +87,7 @@ const emptyProfile: RepositoryReviewProfileConfig = {
   reviewer_model: "",
   issue_writer_model: "",
   review_focus: "Find correctness, security, and reliability bugs.",
+  issue_prompt: repositoryReviewDefaultIssuePrompt,
   force: false,
   auto_continue: true,
   max_files_per_run: 24,
@@ -410,6 +412,11 @@ export function RepositoryReviewProfileDetailPage({
               {profile.review_focus}
             </p>
           </ProfileSection>
+          <ProfileSection title="Issue prompt">
+            <p className="text-sm whitespace-pre-wrap">
+              {profile.issue_prompt}
+            </p>
+          </ProfileSection>
           <ProfileSection title="Scope">
             <ProfileDetailRows
               rows={[
@@ -628,6 +635,7 @@ function ProfileForm({
   const valid =
     value.name.trim() !== "" &&
     value.reviewer_model !== "" &&
+    value.issue_prompt.trim() !== "" &&
     selectedAccount !== undefined &&
     selectedModelAvailability.available &&
     (value.issue_writer_model
@@ -868,6 +876,21 @@ function ProfileForm({
           aria-describedby="review-focus-help"
           value={value.review_focus}
           onChange={(event) => setValue("review_focus", event.target.value)}
+        />
+      </Field>
+      <Field
+        label="Issue prompt"
+        hint="Controls issue presentation. The private diagnosis-only policy remains server-owned."
+        hintId="review-issue-prompt-help"
+        controlId="review-profile-issue-prompt"
+      >
+        <Textarea
+          id="review-profile-issue-prompt"
+          aria-label="Issue prompt"
+          aria-describedby="review-issue-prompt-help"
+          className="min-h-28"
+          value={value.issue_prompt}
+          onChange={(event) => setValue("issue_prompt", event.target.value)}
         />
       </Field>
       <section className="space-y-3 rounded-lg border p-4">
@@ -1270,6 +1293,7 @@ function profileConfig(editor: ProfileEditor): RepositoryReviewProfileConfig {
     ...editor.value,
     name: editor.value.name.trim(),
     review_focus: editor.value.review_focus.trim(),
+    issue_prompt: editor.value.issue_prompt.trim(),
     scope_policy: {
       ...editor.value.scope_policy,
       include_folders: lines(editor.includeFolders),

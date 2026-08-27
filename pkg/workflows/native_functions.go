@@ -280,6 +280,21 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
+		targetIsDefault := true
+		if _, declared := args["target_is_default"]; declared {
+			targetIsDefault = nativeBoolAny(args, "target_is_default")
+		} else if _, declared = args["targetIsDefault"]; declared {
+			targetIsDefault = nativeBoolAny(args, "targetIsDefault")
+		}
+		plan, err = repoaudit.BindPlanBranch(
+			plan,
+			nativeStringAny(args, "target_branch", "targetBranch"),
+			nativeStringAny(args, "advertised_default_branch", "advertisedDefaultBranch"),
+			targetIsDefault,
+		)
+		if err != nil {
+			return nil, err
+		}
 		output, err := nativeRepositoryReviewPlanOutput(
 			plan, args["files"], nativeBoolAny(args, "compact_output", "compactOutput"),
 		)
@@ -373,12 +388,17 @@ func nativeRepositoryReview(
 			nativeRepositoryReviewUnsupportedScopeFiles(args["unsupported_files"]),
 		)
 		result, err := store.Record(ctx, repoaudit.RecordRequest{
-			Plan:             plan,
-			RunID:            strings.TrimSpace(firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID)),
-			Observations:     observations,
-			CompletedFiles:   completedFiles,
-			UnsupportedFiles: unsupportedFiles,
-			ExcludedFiles:    int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+			Plan: plan,
+			RunID: strings.TrimSpace(
+				firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID),
+			),
+			Observations:            observations,
+			CompletedFiles:          completedFiles,
+			UnsupportedFiles:        unsupportedFiles,
+			ExcludedFiles:           int(nativeInt64Any(args, "excluded_count", "excludedCount")),
+			TargetBranch:            plan.TargetBranch,
+			AdvertisedDefaultBranch: plan.AdvertisedDefaultBranch,
+			TargetIsDefault:         plan.TargetIsDefault,
 		})
 		if err != nil {
 			return nil, err
@@ -808,6 +828,8 @@ func nativeRepositoryReviewIdentity(
 	explicit := strings.TrimSpace(nativeString(args, "repository"))
 	if explicit == "auto" {
 		explicit = ""
+	} else if explicit != "" {
+		explicit = repoaudit.CanonicalRepositoryIdentity(explicit)
 	}
 	if derived != "" {
 		if explicit != "" && explicit != derived {
@@ -819,7 +841,9 @@ func nativeRepositoryReviewIdentity(
 		}
 		return derived, nil
 	}
-	sourceIdentity := nativeRepositorySourceIdentity(remote, repo)
+	sourceIdentity := repoaudit.CanonicalRepositoryIdentity(
+		nativeRepositorySourceIdentity(remote, repo),
+	)
 	if explicit != "" && explicit != sourceIdentity {
 		return "", errors.New("a publishable repository identity requires a matching acquired GitHub origin")
 	}
@@ -1220,7 +1244,20 @@ func nativeValidateRepositoryReviewOutputFields(structured map[string]any) error
 	); err != nil {
 		return err
 	}
-	findings, err := nativeOptionalMapSlice(structured["findings"])
+	for _, field := range []string{"summary", "reviewedFiles", "findings", "residualRisks"} {
+		if _, exists := structured[field]; !exists {
+			return fmt.Errorf("repository review output is missing required field %q", field)
+		}
+	}
+	if _, ok := structured["summary"].(string); !ok {
+		return errors.New("repository review output summary is invalid")
+	}
+	for _, field := range []string{"reviewedFiles", "residualRisks"} {
+		if err := nativeValidateRepositoryReviewStringArray(structured[field]); err != nil {
+			return fmt.Errorf("repository review output %s is invalid: %w", field, err)
+		}
+	}
+	findings, err := nativeMapSlice(structured["findings"])
 	if err != nil {
 		return fmt.Errorf("findings: %w", err)
 	}
@@ -1231,6 +1268,7 @@ func nativeValidateRepositoryReviewOutputFields(structured map[string]any) error
 			map[string]struct{}{
 				"severity": {}, "title": {}, "symbol": {}, "file": {}, "line": {},
 				"message": {}, "evidence": {}, "impact": {}, "validation": {},
+				"match_hints": {}, "fix_effort": {},
 			},
 			location,
 		); err != nil {
@@ -1238,6 +1276,7 @@ func nativeValidateRepositoryReviewOutputFields(structured map[string]any) error
 		}
 		for _, field := range []string{
 			"severity", "title", "symbol", "file", "message", "evidence", "impact", "validation",
+			"match_hints", "fix_effort",
 		} {
 			if _, exists := finding[field]; !exists {
 				return fmt.Errorf("repository review %s is missing required field %q", location, field)
@@ -1262,6 +1301,111 @@ func nativeValidateRepositoryReviewOutputFields(structured map[string]any) error
 				)
 			}
 		}
+		if err := nativeValidateGeneratedFindingEnrichment(finding, location); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func nativeValidateRepositoryReviewStringArray(value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var stringsValue []string
+	if err := json.Unmarshal(data, &stringsValue); err != nil || stringsValue == nil {
+		if err == nil {
+			err = errors.New("array is null")
+		}
+		return err
+	}
+	return nil
+}
+
+func nativeValidateGeneratedFindingEnrichment(finding map[string]any, location string) error {
+	matchHints, ok := finding["match_hints"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("repository review %s match_hints is invalid", location)
+	}
+	matchHintFields := map[string]struct{}{
+		"component": {}, "operation": {}, "failure_mode": {}, "trigger": {},
+		"violated_invariant": {}, "observable_outcome": {}, "related_symbols": {},
+		"source_anchors": {}, "distinguishing_facts": {},
+	}
+	if err := nativeValidateRepositoryReviewObjectFields(
+		matchHints, matchHintFields, location+" match_hints",
+	); err != nil {
+		return err
+	}
+	for field := range matchHintFields {
+		if _, exists := matchHints[field]; !exists {
+			return fmt.Errorf(
+				"repository review %s match_hints is missing required field %q",
+				location,
+				field,
+			)
+		}
+	}
+
+	fixEffort, ok := finding["fix_effort"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("repository review %s fix_effort is invalid", location)
+	}
+	if err := nativeValidateRepositoryReviewObjectFields(
+		fixEffort,
+		map[string]struct{}{"quick": {}, "quality": {}},
+		location+" fix_effort",
+	); err != nil {
+		return err
+	}
+	for _, estimateName := range []string{"quick", "quality"} {
+		rawEstimate, exists := fixEffort[estimateName]
+		if !exists {
+			return fmt.Errorf(
+				"repository review %s fix_effort is missing required field %q",
+				location,
+				estimateName,
+			)
+		}
+		estimate, ok := rawEstimate.(map[string]any)
+		if !ok {
+			return fmt.Errorf(
+				"repository review %s fix_effort %s is invalid",
+				location,
+				estimateName,
+			)
+		}
+		estimateFields := map[string]struct{}{
+			"loc_min": {}, "loc_max": {}, "class": {}, "rationale": {},
+		}
+		if err := nativeValidateRepositoryReviewObjectFields(
+			estimate, estimateFields, location+" fix_effort "+estimateName,
+		); err != nil {
+			return err
+		}
+		for field := range estimateFields {
+			if _, exists := estimate[field]; !exists {
+				return fmt.Errorf(
+					"repository review %s fix_effort %s is missing required field %q",
+					location,
+					estimateName,
+					field,
+				)
+			}
+		}
+	}
+
+	data, err := json.Marshal(finding)
+	if err != nil {
+		return fmt.Errorf("repository review %s is invalid: %w", location, err)
+	}
+	var candidate repoaudit.FindingCandidate
+	if err := json.Unmarshal(data, &candidate); err != nil {
+		return fmt.Errorf("repository review %s is invalid: %w", location, err)
+	}
+	if err := repoaudit.ValidateGeneratedFindingCandidate(candidate); err != nil {
+		return fmt.Errorf("repository review %s is invalid: %w", location, err)
 	}
 	return nil
 }

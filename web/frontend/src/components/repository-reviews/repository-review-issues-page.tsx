@@ -15,16 +15,6 @@ import {
   CollectionResults,
 } from "@/components/collection"
 import { githubRepositoryPath } from "@/components/repository-reviews/repository-review-actions"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import {
   type CollectionRouteSearch,
@@ -49,7 +39,6 @@ export function RepositoryReviewIssuesPage({
   onBack: () => void
   onOpenIssue: (draftID: string) => void
 }) {
-  const [publishOpen, setPublishOpen] = useState(false)
   const [resultMessages, setResultMessages] = useState<string[]>([])
   const selection = useCollectionRouteState({
     collectionKey: `repository-review-issues:${automationID}:${search.generation_id || "all"}`,
@@ -113,22 +102,31 @@ export function RepositoryReviewIssuesPage({
         confirmed: true,
       }),
     onSuccess: async (response) => {
-      const messages = (response.results ?? []).map(
+      const outcomes = response.results ?? []
+      const messages = outcomes.map(
         (result) =>
           `${result.draft_id || result.id || "Preview"}: ${result.outcome || (result.success ? "posted" : "failed")}${result.message ? ` — ${result.message}` : ""}`,
       )
       setResultMessages(messages)
-      setPublishOpen(false)
       selection.clearSelection()
       await query.refetch()
-      toast.success(
-        "Publication request reconciled. Review each preview outcome below.",
-      )
+      const successes = outcomes.filter((outcome) => outcome.success).length
+      if (outcomes.length > 0 && successes === 0) {
+        toast.error(
+          "No selected preview was posted. Review each outcome below.",
+        )
+      } else if (successes < outcomes.length) {
+        toast.warning(
+          `${successes} of ${outcomes.length} selected previews were posted.`,
+        )
+      } else {
+        toast.success(
+          "Posting request reconciled. Review each preview outcome below.",
+        )
+      }
     },
     onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Publication failed.",
-      ),
+      toast.error(error instanceof Error ? error.message : "Posting failed."),
   })
   const github =
     page?.capabilities?.github ??
@@ -230,9 +228,9 @@ export function RepositoryReviewIssuesPage({
                 role="status"
                 className="border-border rounded-lg border p-3 text-sm"
               >
-                Preview editing is available. Publication and existing-issue
-                actions are unavailable because this review is not bound to a
-                canonical GitHub repository.
+                Preview editing is available. Posting and existing-issue actions
+                are unavailable because this review is not bound to a canonical
+                GitHub repository.
               </p>
             )}
 
@@ -245,9 +243,11 @@ export function RepositoryReviewIssuesPage({
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => setPublishOpen(true)}
+                    disabled={publish.isPending}
+                    onClick={() => publish.mutate()}
                   >
-                    <IconBrandGithub /> Publish selected
+                    <IconBrandGithub />
+                    {publish.isPending ? "Posting…" : "Post selected"}
                   </Button>
                 )}
                 <Button
@@ -266,7 +266,7 @@ export function RepositoryReviewIssuesPage({
                 role="status"
                 className="border-border rounded-lg border p-3 text-sm"
               >
-                <h2 className="font-medium">Publication outcomes</h2>
+                <h2 className="font-medium">Posting outcomes</h2>
                 <ul className="text-muted-foreground mt-2 list-inside list-disc">
                   {resultMessages.map((message) => (
                     <li key={message}>{message}</li>
@@ -292,7 +292,7 @@ export function RepositoryReviewIssuesPage({
                   ? "No previews in this generation"
                   : "No issue previews"
               }
-              emptyDescription="Generate previews from explicitly selected report findings."
+              emptyDescription="Draft previews from explicitly selected review findings."
             />
 
             {query.hasNextPage && (
@@ -310,36 +310,6 @@ export function RepositoryReviewIssuesPage({
           </div>
         )}
       </CollectionDetailShell>
-
-      <AlertDialog open={publishOpen} onOpenChange={setPublishOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Publish {selection.selectedCount} selected preview
-              {selection.selectedCount === 1 ? "" : "s"}?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Only this explicit subset is sent through the protected GitHub
-              gateway. Ambiguous results remain reconcilable and are never
-              blindly duplicated.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={publish.isPending}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              disabled={publish.isPending || selection.selectedCount === 0}
-              onClick={(event) => {
-                event.preventDefault()
-                publish.mutate()
-              }}
-            >
-              {publish.isPending ? "Publishing…" : "Publish selected"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </>
   )
 }

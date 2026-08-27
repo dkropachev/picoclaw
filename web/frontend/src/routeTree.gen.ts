@@ -54,6 +54,7 @@ import { Route as RepositoryReviewsProfilesNewRouteImport } from './routes/repos
 import { Route as RepositoryReviewsProfilesProfileIDRouteImport } from './routes/repository-reviews_.profiles_.$profileID'
 import { Route as RepositoryReviewsIdReportRouteImport } from './routes/repository-reviews_.$id_.report'
 import { Route as RepositoryReviewsIdIssuesRouteImport } from './routes/repository-reviews_.$id_.issues'
+import { Route as RepositoryReviewsIdFindingsRouteImport } from './routes/repository-reviews_.$id_.findings'
 import { Route as ModelsRoutersNewRouteImport } from './routes/models_.routers_.new'
 import { Route as ModelsRoutersNameRouteImport } from './routes/models_.routers_.$name'
 import { Route as ModelsAliasesNewRouteImport } from './routes/models_.aliases_.new'
@@ -315,6 +316,12 @@ const RepositoryReviewsIdIssuesRoute =
     path: '/repository-reviews/$id/issues',
     getParentRoute: () => rootRouteImport,
   } as any)
+const RepositoryReviewsIdFindingsRoute =
+  RepositoryReviewsIdFindingsRouteImport.update({
+    id: '/repository-reviews_/$id_/findings',
+    path: '/repository-reviews/$id/findings',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ModelsRoutersNewRoute = ModelsRoutersNewRouteImport.update({
   id: '/models_/routers_/new',
   path: '/models/routers/new',
@@ -511,6 +518,7 @@ export interface FileRoutesByFullPath {
   '/models/aliases/new': typeof ModelsAliasesNewRoute
   '/models/routers/$name': typeof ModelsRoutersNameRoute
   '/models/routers/new': typeof ModelsRoutersNewRoute
+  '/repository-reviews/$id/findings': typeof RepositoryReviewsIdFindingsRoute
   '/repository-reviews/$id/issues': typeof RepositoryReviewsIdIssuesRoute
   '/repository-reviews/$id/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews/profiles/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
@@ -584,6 +592,7 @@ export interface FileRoutesByTo {
   '/models/aliases/new': typeof ModelsAliasesNewRoute
   '/models/routers/$name': typeof ModelsRoutersNameRoute
   '/models/routers/new': typeof ModelsRoutersNewRoute
+  '/repository-reviews/$id/findings': typeof RepositoryReviewsIdFindingsRoute
   '/repository-reviews/$id/issues': typeof RepositoryReviewsIdIssuesRoute
   '/repository-reviews/$id/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews/profiles/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
@@ -658,6 +667,7 @@ export interface FileRoutesById {
   '/models_/aliases_/new': typeof ModelsAliasesNewRoute
   '/models_/routers_/$name': typeof ModelsRoutersNameRoute
   '/models_/routers_/new': typeof ModelsRoutersNewRoute
+  '/repository-reviews_/$id_/findings': typeof RepositoryReviewsIdFindingsRoute
   '/repository-reviews_/$id_/issues': typeof RepositoryReviewsIdIssuesRoute
   '/repository-reviews_/$id_/report': typeof RepositoryReviewsIdReportRoute
   '/repository-reviews_/profiles_/$profileID': typeof RepositoryReviewsProfilesProfileIDRoute
@@ -733,6 +743,7 @@ export interface FileRouteTypes {
     | '/models/aliases/new'
     | '/models/routers/$name'
     | '/models/routers/new'
+    | '/repository-reviews/$id/findings'
     | '/repository-reviews/$id/issues'
     | '/repository-reviews/$id/report'
     | '/repository-reviews/profiles/$profileID'
@@ -806,6 +817,7 @@ export interface FileRouteTypes {
     | '/models/aliases/new'
     | '/models/routers/$name'
     | '/models/routers/new'
+    | '/repository-reviews/$id/findings'
     | '/repository-reviews/$id/issues'
     | '/repository-reviews/$id/report'
     | '/repository-reviews/profiles/$profileID'
@@ -879,6 +891,7 @@ export interface FileRouteTypes {
     | '/models_/aliases_/new'
     | '/models_/routers_/$name'
     | '/models_/routers_/new'
+    | '/repository-reviews_/$id_/findings'
     | '/repository-reviews_/$id_/issues'
     | '/repository-reviews_/$id_/report'
     | '/repository-reviews_/profiles_/$profileID'
@@ -936,6 +949,7 @@ export interface RootRouteChildren {
   ModelsAliasesNewRoute: typeof ModelsAliasesNewRoute
   ModelsRoutersNameRoute: typeof ModelsRoutersNameRoute
   ModelsRoutersNewRoute: typeof ModelsRoutersNewRoute
+  RepositoryReviewsIdFindingsRoute: typeof RepositoryReviewsIdFindingsRoute
   RepositoryReviewsIdIssuesRoute: typeof RepositoryReviewsIdIssuesRoute
   RepositoryReviewsIdReportRoute: typeof RepositoryReviewsIdReportRoute
   RepositoryReviewsProfilesProfileIDRoute: typeof RepositoryReviewsProfilesProfileIDRoute
@@ -1263,6 +1277,13 @@ declare module '@tanstack/react-router' {
       path: '/repository-reviews/$id/issues'
       fullPath: '/repository-reviews/$id/issues'
       preLoaderRoute: typeof RepositoryReviewsIdIssuesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repository-reviews_/$id_/findings': {
+      id: '/repository-reviews_/$id_/findings'
+      path: '/repository-reviews/$id/findings'
+      fullPath: '/repository-reviews/$id/findings'
+      preLoaderRoute: typeof RepositoryReviewsIdFindingsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/models_/routers_/new': {
@@ -1594,6 +1615,7 @@ const rootRouteChildren: RootRouteChildren = {
   ModelsAliasesNewRoute: ModelsAliasesNewRoute,
   ModelsRoutersNameRoute: ModelsRoutersNameRoute,
   ModelsRoutersNewRoute: ModelsRoutersNewRoute,
+  RepositoryReviewsIdFindingsRoute: RepositoryReviewsIdFindingsRoute,
   RepositoryReviewsIdIssuesRoute: RepositoryReviewsIdIssuesRoute,
   RepositoryReviewsIdReportRoute: RepositoryReviewsIdReportRoute,
   RepositoryReviewsProfilesProfileIDRoute:

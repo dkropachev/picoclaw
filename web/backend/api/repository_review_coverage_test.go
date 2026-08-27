@@ -66,6 +66,7 @@ func TestRepositoryReviewCoverageDetailAndDraftUpdateHandlers(t *testing.T) {
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing detail status=%d body=%s", missing.Code, missing.Body.String())
 	}
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 
 	prepared := repositoryReviewCoverageMutation(
 		t,

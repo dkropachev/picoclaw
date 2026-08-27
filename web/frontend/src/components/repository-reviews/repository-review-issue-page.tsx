@@ -58,7 +58,6 @@ export function RepositoryReviewIssuePage({
   const [body, setBody] = useState("")
   const [labels, setLabels] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
-  const [publishOpen, setPublishOpen] = useState(false)
   const query = useQuery({
     queryKey: ["repository-review-issue", automationID, draftID],
     queryFn: ({ signal }) =>
@@ -150,14 +149,13 @@ export function RepositoryReviewIssuePage({
         confirmed: true,
       }),
     onSuccess: async () => {
-      setPublishOpen(false)
       await query.refetch()
-      toast.success("Publication state reconciled.")
+      toast.success("Posting state reconciled.")
     },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Publication failed.",
-      ),
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Posting failed.")
+      void query.refetch()
+    },
   })
   const github =
     detail?.capabilities?.github ??
@@ -195,7 +193,14 @@ export function RepositoryReviewIssuePage({
     <>
       <CollectionDetailShell
         title={issue?.title || "Issue preview"}
-        identity={<span className="font-mono text-xs">{draftID}</span>}
+        identity={
+          <span
+            className="block max-w-40 truncate font-mono text-xs sm:max-w-72"
+            title={draftID}
+          >
+            {draftID}
+          </span>
+        }
         status={
           issue ? (
             <div className="flex items-center gap-2">
@@ -259,7 +264,7 @@ export function RepositoryReviewIssuePage({
                 className="border-border rounded-lg border p-3 text-sm"
               >
                 This preserved legacy record is not the finding’s canonical
-                association and cannot be edited or published.
+                association and cannot be edited or posted.
                 {issue.conflict_reason ? ` ${issue.conflict_reason}` : ""}
               </div>
             )}
@@ -281,20 +286,25 @@ export function RepositoryReviewIssuePage({
                     size="sm"
                     variant="outline"
                     onClick={() => onOpenFinding(findingID)}
+                    aria-label={`Open finding ${findingID}`}
+                    title={findingID}
                   >
-                    Finding {findingID}
+                    Finding {shortIdentity(findingID)}
                   </Button>
                 ))}
-                {issue.origin === "linked" && issue.finding_ids[0] && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onManageLink(issue.finding_ids[0]!)}
-                  >
-                    Manage manual link
-                  </Button>
-                )}
+                {(issue.origin === "linked" || issue.origin === "discovered") &&
+                  issue.finding_ids[0] && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onManageLink(issue.finding_ids[0]!)}
+                    >
+                      Manage{" "}
+                      {issue.origin === "discovered" ? "discovered" : "manual"}{" "}
+                      link
+                    </Button>
+                  )}
               </div>
             </section>
 
@@ -320,6 +330,14 @@ export function RepositoryReviewIssuePage({
                 <DetailRow
                   label="Generator account"
                   value={issue.generator_account || "Not recorded"}
+                  mono
+                />
+                <DetailRow
+                  label="Generator profile"
+                  value={profileSnapshotLabel(
+                    issue.generator_profile_id,
+                    issue.generator_profile_version,
+                  )}
                   mono
                 />
               </dl>
@@ -356,6 +374,14 @@ export function RepositoryReviewIssuePage({
                     <DetailRow
                       label="Generator account"
                       value={issue.attempt_generator_account || "Not recorded"}
+                      mono
+                    />
+                    <DetailRow
+                      label="Generator profile"
+                      value={profileSnapshotLabel(
+                        issue.attempt_generator_profile_id,
+                        issue.attempt_generator_profile_version,
+                      )}
                       mono
                     />
                     <DetailRow
@@ -511,13 +537,15 @@ export function RepositoryReviewIssuePage({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={editing || dirty}
-                  onClick={() => setPublishOpen(true)}
+                  disabled={editing || dirty || publish.isPending}
+                  onClick={() => publish.mutate()}
                 >
                   <IconBrandGithub />
-                  {issue.state === "unknown" || issue.state === "publishing"
-                    ? "Reconcile publication"
-                    : "Publish issue"}
+                  {publish.isPending
+                    ? "Working…"
+                    : issue.state === "unknown" || issue.state === "publishing"
+                      ? "Reconcile publication"
+                      : "Post issue"}
                 </Button>
               )}
             </div>
@@ -549,37 +577,6 @@ export function RepositoryReviewIssuePage({
               }}
             >
               {remove.isPending ? "Deleting…" : "Delete preview"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={publishOpen} onOpenChange={setPublishOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {issue?.state === "unknown" || issue?.state === "publishing"
-                ? "Reconcile this publication?"
-                : "Publish this issue?"}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              The protected gateway uses the exact saved title, body, labels,
-              and stable marker. Ambiguous results are retained for
-              reconciliation.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={publish.isPending}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              disabled={publish.isPending}
-              onClick={(event) => {
-                event.preventDefault()
-                publish.mutate()
-              }}
-            >
-              {publish.isPending ? "Working…" : "Confirm"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -616,6 +613,18 @@ function parseLabels(value: string): string[] {
         .filter(Boolean),
     ),
   ]
+}
+
+function profileSnapshotLabel(
+  profileID: string | undefined,
+  profileVersion: number | undefined,
+): string {
+  if (!profileID) return "Not recorded"
+  return profileVersion ? `${profileID} · v${profileVersion}` : profileID
+}
+
+function shortIdentity(value: string): string {
+  return value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value
 }
 
 function safeHTTPSURL(value: string | undefined): string | undefined {

@@ -280,7 +280,8 @@ func TestRepositoryReviewObservationCloseoutBranches(t *testing.T) {
 		file["contentComplete"] = true
 	}
 	valid := map[string]any{
-		"summary": "reviewed", "reviewedFiles": []any{"b.go", "a.go"}, "findings": []any{},
+		"summary": "reviewed", "reviewedFiles": []any{"b.go", "a.go"},
+		"findings": []any{}, "residualRisks": []any{},
 	}
 	observations, completed, err := nativeRepositoryReviewObservations(map[string]any{
 		"managed_children": []map[string]any{
@@ -290,7 +291,10 @@ func TestRepositoryReviewObservationCloseoutBranches(t *testing.T) {
 			},
 			{
 				"valid": true, "required": false, "scope": scope,
-				"structured": map[string]any{"summary": "missing acknowledgement", "findings": []any{}},
+				"structured": map[string]any{
+					"summary": "missing acknowledgement", "findings": []any{},
+					"residualRisks": []any{},
+				},
 			},
 		},
 	}, repoaudit.Plan{})

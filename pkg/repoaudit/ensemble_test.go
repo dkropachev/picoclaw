@@ -107,7 +107,9 @@ func TestFindingContextsRemainImmutableAcrossForceRuns(t *testing.T) {
 		repeated.State.Contexts[0].ID == repeated.State.Contexts[1].ID ||
 		repeated.State.Contexts[0].RunID != "immutable-context-first" ||
 		repeated.State.Contexts[1].RunID != "immutable-context-second" ||
-		len(repeated.State.Findings) != 1 || len(repeated.State.Findings[0].Observations) != 2 ||
+		len(repeated.State.Findings) != 2 || len(repeated.State.Findings[0].Observations) != 1 ||
+		len(repeated.State.Findings[1].Observations) != 1 ||
+		repeated.State.Findings[0].ID == repeated.State.Findings[1].ID ||
 		initial.State.Contexts[0].ID != repeated.State.Contexts[0].ID {
 		t.Fatalf("immutable context history=%#v err=%v", repeated.State, err)
 	}
@@ -364,9 +366,12 @@ func TestStorePreparesEditableIssueFromSelectedFindingSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mapped, _ := completeRepositoryAuditTestMapping(
+		t, store, result.State, result.State.Findings[0].ID,
+	)
 	updated, draft, err := store.PrepareIssue(IssueDraftRequest{
 		Repository: "owner/repo", FindingIDs: []string{result.State.Findings[0].ID},
-		ExpectedVersion: result.State.Version,
+		ExpectedVersion: mapped.Version,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +382,7 @@ func TestStorePreparesEditableIssueFromSelectedFindingSnapshot(t *testing.T) {
 	}
 	replayedState, replayedDraft, err := store.PrepareIssue(IssueDraftRequest{
 		Repository: "owner/repo", FindingIDs: []string{result.State.Findings[0].ID},
-		ExpectedVersion: result.State.Version,
+		ExpectedVersion: mapped.Version,
 	})
 	if err != nil || replayedState.Version != updated.Version || replayedDraft.ID != draft.ID ||
 		len(replayedState.IssueDrafts) != 1 {
@@ -426,9 +431,12 @@ func TestStoreIssuePublicationIsIdempotentAndMarksSelectedFindings(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mapped, _ := completeRepositoryAuditTestMapping(
+		t, store, recorded.State, recorded.State.Findings[0].ID,
+	)
 	withDraft, draft, err := store.PrepareIssue(IssueDraftRequest{
 		Repository: "owner/repo", FindingIDs: []string{recorded.State.Findings[0].ID},
-		ExpectedVersion: recorded.State.Version,
+		ExpectedVersion: mapped.Version,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -635,9 +643,12 @@ func TestIssuePublicationClaimHasExactlyOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mapped, _ := completeRepositoryAuditTestMapping(
+		t, store, recorded.State, recorded.State.Findings[0].ID,
+	)
 	_, draft, err := store.PrepareIssue(IssueDraftRequest{
 		Repository: "owner/repo", FindingIDs: []string{recorded.State.Findings[0].ID},
-		ExpectedVersion: recorded.State.Version,
+		ExpectedVersion: mapped.Version,
 	})
 	if err != nil {
 		t.Fatal(err)

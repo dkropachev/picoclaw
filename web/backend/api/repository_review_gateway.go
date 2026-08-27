@@ -21,6 +21,11 @@ type repositoryReviewGatewayPublishRequest struct {
 	ExpectedVersion int64 `json:"expected_version"`
 }
 
+type repositoryReviewDirectPostRequest struct {
+	ExpectedVersion int64  `json:"expected_version"`
+	Instructions    string `json:"instructions,omitempty"`
+}
+
 type repositoryReviewBatchPublishRequest struct {
 	Issues []struct {
 		ID              string `json:"id"`
@@ -35,6 +40,90 @@ func (h *Handler) handleRepositoryReviewIssueLinkCandidates(w http.ResponseWrite
 
 func (h *Handler) handleRepositoryReviewIssueLink(w http.ResponseWriter, r *http.Request) {
 	h.proxyRepositoryReviewAutomationGateway(w, r, "link")
+}
+
+// handlePostRepositoryReviewAutomationFinding is the explicit no-preview Post
+// action. The click authorizes publication: the server resolves the current
+// assigned profile, durably generates one draft, and immediately publishes the
+// exact saved content through the existing marker/reconciliation boundary.
+func (h *Handler) handlePostRepositoryReviewAutomationFinding(w http.ResponseWriter, r *http.Request) {
+	if err := validateRepositoryReviewMutation(r); err != nil {
+		writeRepositoryReviewError(w, err)
+		return
+	}
+	var request repositoryReviewDirectPostRequest
+	if err := decodeRepositoryReviewRequest(r, &request); err != nil || request.ExpectedVersion < 1 {
+		writeRepositoryReviewError(w, errors.New("invalid repository review direct post request"))
+		return
+	}
+	request.Instructions = strings.TrimSpace(request.Instructions)
+	if !repositoryReviewValidGenerationText(request.Instructions, 16<<10, true) {
+		writeRepositoryReviewError(w, errors.New("invalid repository review presentation instructions"))
+		return
+	}
+	ledger, finding, err := h.repositoryReviewAutomationFinding(
+		r.Context(), r.PathValue("automation_id"), r.PathValue("finding_id"),
+	)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	if finding.Version != request.ExpectedVersion || finding.Status != repoaudit.FindingOpen ||
+		finding.IssueDraftID != "" {
+		writeRepositoryReviewError(w, repoaudit.ErrConflict)
+		return
+	}
+	profile, err := h.repositoryReviewCurrentIssueProfile(r.Context(), ledger)
+	if err != nil {
+		writeRepositoryReviewAutomationError(w, err)
+		return
+	}
+	generationID, err := newRepositoryReviewIssueGenerationID()
+	if err != nil {
+		writeRepositoryReviewError(w, err)
+		return
+	}
+	mode := repoaudit.IssueDraftInstructionsDefault
+	if request.Instructions != "" {
+		mode = repoaudit.IssueDraftInstructionsCustom
+	}
+	resolved := repositoryReviewResolvedIssueInstructions(repositoryReviewGenerationRequest{
+		InstructionsMode: mode,
+		Instructions:     request.Instructions,
+	}, profile.Prompt)
+	draft, result := h.generateRepositoryReviewIssue(
+		r.Context(), ledger, finding.ID, generationID, mode, resolved, profile.Account, profile,
+	)
+	if draft.ID == "" || draft.State != repoaudit.IssueDraftEditing {
+		writeRepositoryReviewJSON(w, http.StatusBadGateway, map[string]any{
+			"automation": projectRepositoryReviewAutomation(ledger.Automation),
+			"finding":    finding, "result": result,
+		})
+		return
+	}
+	if current, found, getErr := ledger.Store.Get(ledger.State.Repository); getErr == nil && found {
+		ledger.State = current
+	}
+	publication := h.publishRepositoryReviewAutomationDraft(r, ledger, draft.ID, draft.Version)
+	current, found, err := ledger.Store.Get(ledger.State.Repository)
+	if err != nil || !found {
+		if err == nil {
+			err = os.ErrNotExist
+		}
+		writeRepositoryReviewError(w, err)
+		return
+	}
+	ledger.State = current
+	posted, _ := repositoryReviewIssueByID(current, draft.ID)
+	status := http.StatusOK
+	if success, _ := publication["success"].(bool); !success && publication["outcome"] != "unknown" {
+		status = http.StatusBadGateway
+	}
+	writeRepositoryReviewJSON(w, status, map[string]any{
+		"automation": projectRepositoryReviewAutomation(ledger.Automation),
+		"repository": repoaudit.Summarize(current), "issue": posted,
+		"result": publication,
+	})
 }
 
 func (h *Handler) proxyRepositoryReviewAutomationGateway(

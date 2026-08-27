@@ -128,6 +128,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 		h.handleGetRepositoryReviewAutomation,
 	)
 	mux.HandleFunc(
+		"GET /api/repository-reviews/automations/{automation_id}/findings",
+		h.handleGetRepositoryReviewAutomationReport,
+	)
+	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/report",
 		h.handleGetRepositoryReviewAutomationReport,
 	)
@@ -138,6 +142,22 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(
 		"PATCH /api/repository-reviews/automations/{automation_id}/findings/{finding_id}",
 		h.handleUpdateRepositoryReviewAutomationFinding,
+	)
+	mux.HandleFunc(
+		"PATCH /api/repository-reviews/automations/{automation_id}/repository-findings/{repository_finding_id}",
+		h.handleUpdateRepositoryReviewFindingLifecycle,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/repository-findings/{repository_finding_id}/duplicates",
+		h.handleResolveRepositoryReviewPossibleDuplicate,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/repository-findings/validations",
+		h.handleReserveRepositoryReviewValidations,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/repository-findings/{repository_finding_id}/sync",
+		h.handleSyncRepositoryReviewFinding,
 	)
 	mux.HandleFunc(
 		"GET /api/repository-reviews/automations/{automation_id}/issues",
@@ -178,6 +198,10 @@ func (h *Handler) registerRepositoryReviewAutomationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(
 		"POST /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/issue-link",
 		h.handleRepositoryReviewIssueLink,
+	)
+	mux.HandleFunc(
+		"POST /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/post",
+		h.handlePostRepositoryReviewAutomationFinding,
 	)
 	mux.HandleFunc(
 		"DELETE /api/repository-reviews/automations/{automation_id}/findings/{finding_id}/issue-link",
@@ -224,6 +248,23 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 	if err != nil {
 		writeRepositoryReviewAutomationError(w, err)
 		return
+	}
+	for index := range automations {
+		state, found, resolveErr := store.ResolveRepositoryState(
+			automations[index].Repository,
+			automations[index].RunIDs,
+		)
+		if resolveErr != nil {
+			writeRepositoryReviewAutomationError(w, resolveErr)
+			return
+		}
+		if found {
+			automations[index].Progress.Findings = len(repoaudit.CurrentCampaignFindings(
+				state,
+				automations[index].RunIDs,
+				automations[index].StartedAt,
+			))
+		}
 	}
 	query, _ := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)
 	var projected []repoaudit.RepositoryReviewAutomation
@@ -418,6 +459,9 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 				candidate.Status = repoaudit.RepositoryReviewAutomationIdle
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
 				candidate.ResolvedCommitSHA = ""
+				candidate.ResolvedTargetBranch = ""
+				candidate.AdvertisedDefaultBranch = ""
+				candidate.TargetIsDefault = candidate.Ref == ""
 				candidate.PauseReason = ""
 				candidate.PauseDetail = ""
 				candidate.RequestedPauseReason = ""
@@ -435,10 +479,7 @@ func (h *Handler) handleUpdateRepositoryReviewAutomation(w http.ResponseWriter, 
 				if !previous.StartedAt.IsZero() {
 					candidate.ModelPrices = maps.Clone(previous.ModelPrices)
 				}
-				if !reflect.DeepEqual(previous.BudgetPolicy, candidate.BudgetPolicy) ||
-					previous.AccountRef != candidate.AccountRef {
-					candidate.AccountLimitSnapshots = nil
-				}
+				repositoryReviewClearStaleAccountLimits(candidate, previous)
 			}
 			return nil
 		},
@@ -972,6 +1013,16 @@ func repositoryReviewExecutionConfigurationChanged(
 		!slicesEqual(previous.ReviewerModels, next.ReviewerModels)
 }
 
+func repositoryReviewClearStaleAccountLimits(
+	next *repoaudit.RepositoryReviewAutomation,
+	previous repoaudit.RepositoryReviewAutomation,
+) {
+	if !reflect.DeepEqual(previous.BudgetPolicy, next.BudgetPolicy) ||
+		previous.AccountRef != next.AccountRef {
+		next.AccountLimitSnapshots = nil
+	}
+}
+
 func repositoryReviewScopePoliciesEqual(
 	left, right repoaudit.RepositoryReviewScopePolicy,
 ) bool {
@@ -1282,16 +1333,15 @@ func repositoryReviewAliasPriceForAccount(
 				return nil, false
 			}
 		}
-		inputPrice, outputPrice := resolved.InputPricePerMTok, resolved.OutputPricePerMTok
 		equivalent := strings.TrimSpace(resolved.SubscriptionEquivalentModel)
-		if inputPrice <= 0 && outputPrice <= 0 && resolved.Subscription && equivalent != "" {
-			inherited, ok := repositoryReviewAliasPriceForAccount(
-				cfg, equivalent, accountRef, visiting,
-			)
-			if !ok {
-				return nil, false
-			}
-			inputPrice, outputPrice = inherited.InputPricePerMTok, inherited.OutputPricePerMTok
+		inputPrice, outputPrice, inherited := repositoryReviewResolvedAliasPrices(
+			resolved,
+			func() (*config.ModelConfig, bool) {
+				return repositoryReviewAliasPriceForAccount(cfg, equivalent, accountRef, visiting)
+			},
+		)
+		if !inherited {
+			return nil, false
 		}
 		if inputPrice <= 0 && outputPrice <= 0 {
 			return nil, false
@@ -1307,6 +1357,22 @@ func repositoryReviewAliasPriceForAccount(
 		}
 	}
 	return aggregate, true
+}
+
+func repositoryReviewResolvedAliasPrices(
+	resolved *config.ModelConfig,
+	inherit func() (*config.ModelConfig, bool),
+) (float64, float64, bool) {
+	inputPrice, outputPrice := resolved.InputPricePerMTok, resolved.OutputPricePerMTok
+	equivalent := strings.TrimSpace(resolved.SubscriptionEquivalentModel)
+	if inputPrice <= 0 && outputPrice <= 0 && resolved.Subscription && equivalent != "" {
+		inherited, ok := inherit()
+		if !ok {
+			return 0, 0, false
+		}
+		inputPrice, outputPrice = inherited.InputPricePerMTok, inherited.OutputPricePerMTok
+	}
+	return inputPrice, outputPrice, true
 }
 
 func repositoryReviewAliasUsesAgenticCLI(

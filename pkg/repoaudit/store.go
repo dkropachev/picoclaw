@@ -28,6 +28,9 @@ const (
 	maxReviewObservations            = 100_000
 	maxFindingsPerObservation        = 256
 	maxFindingTextBytes              = 64 << 10
+	maxMatchHintItems                = 32
+	maxMatchHintIdentityBytes        = 4096
+	maxFixEffortLOC                  = 1_000_000
 	maxIssueDraftBodyBytes           = 60 << 10
 	maxReviewFileMetadataBytes       = 16 << 20
 	maxStateFileBytes          int64 = 64 << 20
@@ -173,11 +176,36 @@ func (s Store) PlanWithProfileLimitAuthoritative(
 	plan := Plan{
 		Repository: repository, CommitSHA: commitSHA, InventoryHash: inventoryHash,
 		ProfileHash: profileHash, ForceCampaignID: forceCampaignID, Authoritative: authoritative,
-		StateVersion: state.ReviewVersion, PendingFiles: pending, DeferredFiles: deferred,
+		TargetIsDefault: true,
+		StateVersion:    state.ReviewVersion, PendingFiles: pending, DeferredFiles: deferred,
 		UnchangedFiles:     unchanged,
 		UnsupportedFiles:   planUnsupported,
 		PreviouslyReviewed: previouslyReviewed, CreatedAt: now,
 	}
+	plan.ID = planDigest(plan)
+	return plan, nil
+}
+
+// BindPlanBranch adds resolved branch provenance before a plan is dispatched.
+// The returned plan receives a new digest so Record can continue to verify the
+// entire immutable plan envelope.
+func BindPlanBranch(
+	plan Plan,
+	targetBranch string,
+	advertisedDefaultBranch string,
+	targetIsDefault bool,
+) (Plan, error) {
+	targetBranch = strings.TrimSpace(targetBranch)
+	advertisedDefaultBranch = strings.TrimSpace(advertisedDefaultBranch)
+	if (targetBranch != "" && !validBoundedText(targetBranch, maxRepositoryReviewBranchBytes)) ||
+		(advertisedDefaultBranch != "" &&
+			!validBoundedText(advertisedDefaultBranch, maxRepositoryReviewBranchBytes)) {
+		return Plan{}, ErrInvalidPlan
+	}
+	plan.ID = ""
+	plan.TargetBranch = targetBranch
+	plan.AdvertisedDefaultBranch = advertisedDefaultBranch
+	plan.TargetIsDefault = targetIsDefault
 	plan.ID = planDigest(plan)
 	return plan, nil
 }
@@ -199,6 +227,9 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 	}
 	if request.ExcludedFiles < 0 || request.ExcludedFiles > maxReviewFiles {
 		return RecordResult{}, ErrInvalidPlan
+	}
+	if err := normalizeRecordBranchProvenance(&request); err != nil {
+		return RecordResult{}, err
 	}
 	files, err := normalizeFiles(request.Plan.PendingFiles)
 	if err != nil || len(files) != len(request.Plan.PendingFiles) {
@@ -259,6 +290,11 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 		unsupportedFiles[unsupported.Path] = unsupported
 	}
 	contexts := make([]FindingContext, 0, len(request.Observations))
+	// Findings present before this atomic Record call are immutable review
+	// occurrences. Corroborating observations may coalesce only with an
+	// occurrence created by this same review checkpoint; cross-run identity is
+	// handled by RepositoryFinding mapping instead.
+	initialFindingCount := len(state.Findings)
 	existingContexts := make(map[string]int, len(state.Contexts))
 	for index, contextRecord := range state.Contexts {
 		existingContexts[contextRecord.ID] = index
@@ -313,22 +349,34 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 			candidateObservation := findingObservationFrom(
 				candidate, contextRecord.ID, observation.Model, observation.Reviewer,
 			)
-			index := findingIndexByFingerprint(state.Findings, fingerprint)
+			index := findingIndexByFingerprint(state.Findings[initialFindingCount:], fingerprint)
+			if index >= 0 {
+				index += initialFindingCount
+			}
 			if index < 0 {
-				index = semanticFindingIndex(state.Findings, primary, candidate)
+				index = semanticFindingIndex(state.Findings[initialFindingCount:], primary, candidate)
+				if index >= 0 {
+					index += initialFindingCount
+				}
 			}
 			if index < 0 {
 				finding := Finding{
-					ID: stableID("rfn_", request.Plan.Repository, fingerprint), Fingerprint: fingerprint,
+					ID: stableID(
+						"rfn_", request.Plan.Repository, request.Plan.CommitSHA, request.RunID, fingerprint,
+					), Fingerprint: fingerprint,
 					Repository: request.Plan.Repository, CommitSHA: request.Plan.CommitSHA,
 					File: primary, Line: candidate.Line, Severity: candidate.Severity,
 					Title: candidate.Title, Symbol: candidate.Symbol,
 					Message: candidate.Message, Evidence: candidate.Evidence,
 					Impact:     candidate.Impact,
-					Validation: candidate.Validation, ContextIDs: []string{contextRecord.ID},
+					Validation: candidate.Validation, MatchHints: candidate.MatchHints,
+					FixEffort: candidate.FixEffort, ContextIDs: []string{contextRecord.ID},
 					Models: []string{observation.Model}, ObservationCount: 1, Status: FindingOpen,
-					Observations: []FindingObservation{candidateObservation},
-					Version:      1, CreatedAt: completedAt, UpdatedAt: completedAt,
+					Observations:            []FindingObservation{candidateObservation},
+					TargetBranch:            request.TargetBranch,
+					AdvertisedDefaultBranch: request.AdvertisedDefaultBranch,
+					TargetIsDefault:         request.TargetIsDefault,
+					Version:                 1, CreatedAt: completedAt, UpdatedAt: completedAt,
 				}
 				state.Findings = append(state.Findings, finding)
 				contextUsed = true
@@ -423,6 +471,9 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 		ExcludedFiles:    request.ExcludedFiles,
 		FindingIDs:       append([]string(nil), acceptedIDs...),
 		RejectedFindings: rejected, Models: models, CompletedAt: completedAt,
+		TargetBranch:            request.TargetBranch,
+		AdvertisedDefaultBranch: request.AdvertisedDefaultBranch,
+		TargetIsDefault:         request.TargetIsDefault,
 	}
 	state.Runs = append(state.Runs, run)
 	if len(state.Runs) > 1000 {
@@ -431,6 +482,7 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 	pruneCheckpointMetadata(&state, request.Plan, files)
 	state.LastCommitSHA = request.Plan.CommitSHA
 	state.LastExcludedFiles = request.ExcludedFiles
+	ensureMappingJobsForFindings(&state, acceptedIDs, completedAt)
 	if request.Plan.ForceCampaignID != "" && run.RemainingFiles > 0 {
 		state.ActiveForceCampaignID = request.Plan.ForceCampaignID
 		state.ActiveForceProfileHash = request.Plan.ProfileHash
@@ -447,6 +499,67 @@ func (s Store) Record(ctx context.Context, request RecordRequest) (RecordResult,
 		return RecordResult{}, err
 	}
 	return RecordResult{State: state, Run: run, AcceptedFindingIDs: acceptedIDs}, nil
+}
+
+// SnapshotMappingJobs freezes the assigned reviewer/profile/account into
+// newly created pending mapping jobs before dispatch. Existing snapshots are
+// immutable, so retries after profile changes continue with original
+// provenance.
+func (s Store) SnapshotMappingJobs(
+	repository string,
+	findingIDs []string,
+	snapshot RepositoryMappingModelSnapshot,
+) (RepositoryState, error) {
+	if err := validateMappingModelSnapshot(snapshot); err != nil || mappingModelSnapshotEmpty(snapshot) {
+		if err == nil {
+			err = errors.New("mapping model snapshot is required")
+		}
+		return RepositoryState{}, err
+	}
+	wanted := make(map[string]struct{}, len(findingIDs))
+	for _, findingID := range findingIDs {
+		if findingID = strings.TrimSpace(findingID); findingID != "" {
+			wanted[findingID] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return RepositoryState{}, errors.New("mapping finding IDs are required")
+	}
+	unlock, err := s.lock(repository)
+	if err != nil {
+		return RepositoryState{}, err
+	}
+	defer unlock()
+	state, err := s.load(repository)
+	if err != nil {
+		return RepositoryState{}, err
+	}
+	now := s.clock()
+	changed := false
+	for index := range state.MappingJobs {
+		job := &state.MappingJobs[index]
+		if _, ok := wanted[job.ReviewFindingID]; !ok || job.State == RepositoryMappingCompleted {
+			continue
+		}
+		if !mappingModelSnapshotEmpty(job.ModelSnapshot) {
+			if !mappingModelSnapshotsEqual(job.ModelSnapshot, snapshot) {
+				return RepositoryState{}, ErrConflict
+			}
+			continue
+		}
+		job.ModelSnapshot = snapshot
+		job.UpdatedAt = now
+		changed = true
+	}
+	if !changed {
+		return state, nil
+	}
+	state.Version++
+	state.UpdatedAt = now
+	if err := s.save(&state); err != nil {
+		return RepositoryState{}, err
+	}
+	return state, nil
 }
 
 func (s Store) FinalizeNoopPlan(plan Plan, excludedFiles ...int) (RepositoryState, error) {
@@ -612,6 +725,16 @@ func (s Store) listSummaries(maximum int) ([]RepositorySummary, error) {
 		if summaryErr != nil {
 			return nil, summaryErr
 		}
+		if summary.SchemaVersion == 1 {
+			state, found, migrationErr := s.Get(summary.Repository)
+			if migrationErr != nil {
+				return nil, migrationErr
+			}
+			if !found {
+				return nil, errors.New("repository review state disappeared during migration")
+			}
+			summary = Summarize(state)
+		}
 		summaries = append(summaries, summary)
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt) })
@@ -646,7 +769,8 @@ func repositoryReviewSummaryFromEntry(root string, entry os.DirEntry) (Repositor
 	if decodeErr != nil || closeErr != nil {
 		return RepositorySummary{}, errors.Join(decodeErr, closeErr)
 	}
-	if summary.SchemaVersion != SchemaVersion || summary.ID != RepositoryID(summary.Repository) {
+	if (summary.SchemaVersion != 1 && summary.SchemaVersion != SchemaVersion) ||
+		summary.ID != RepositoryID(summary.Repository) {
 		return RepositorySummary{}, errors.New("invalid repository review summary")
 	}
 	return summary, nil
@@ -720,6 +844,11 @@ func (s Store) PrepareIssue(request IssueDraftRequest) (RepositoryState, IssueDr
 	findings, ids, err := selectedFindings(state.Findings, request.FindingIDs)
 	if err != nil {
 		return RepositoryState{}, IssueDraft{}, err
+	}
+	for _, finding := range findings {
+		if !repositoryFindingAllowsIssueActions(state, finding) {
+			return RepositoryState{}, IssueDraft{}, ErrConflict
+		}
 	}
 	title := strings.TrimSpace(request.Title)
 	if title == "" {
@@ -869,6 +998,15 @@ func (s Store) SetIssueDraftPublication(
 			!strings.HasPrefix(strings.TrimSpace(externalURL), "https://")) {
 		return RepositoryState{}, IssueDraft{}, errors.New("posted issue identity is required")
 	}
+	if publicationState == IssueDraftPosted {
+		for _, findingID := range draft.FindingIDs {
+			findingIndex := findingIndexByID(state.Findings, findingID)
+			if findingIndex < 0 ||
+				!repositoryFindingAllowsIssueActions(state, state.Findings[findingIndex]) {
+				return RepositoryState{}, IssueDraft{}, ErrConflict
+			}
+		}
+	}
 	now := s.clock()
 	draft.State = publicationState
 	draft.ExternalID = strings.TrimSpace(externalID)
@@ -923,6 +1061,14 @@ func (s Store) ClaimIssueDraftPublication(
 	draft := &state.IssueDrafts[index]
 	if !draft.Canonical {
 		return RepositoryState{}, IssueDraft{}, false, ErrConflict
+	}
+	for _, findingID := range draft.FindingIDs {
+		findingIndex := findingIndexByID(state.Findings, findingID)
+		if findingIndex < 0 ||
+			!repositoryFindingAllowsIssueActions(state, state.Findings[findingIndex]) ||
+			repositoryFindingHasIssueConflict(state, state.Findings[findingIndex]) {
+			return RepositoryState{}, IssueDraft{}, false, ErrConflict
+		}
 	}
 	if draft.State == IssueDraftPosted || draft.State == IssueDraftPublishing ||
 		draft.State == IssueDraftUnknown {
@@ -988,6 +1134,9 @@ func repositoryReviewStateFromEntry(root string, entry os.DirEntry) (RepositoryS
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		return RepositoryState{}, jsonErr
 	}
+	if _, migrationErr := migrateRepositoryState(&state); migrationErr != nil {
+		return RepositoryState{}, migrationErr
+	}
 	backfillCanonicalIssueAssociations(&state)
 	if err := validateState(state); err != nil {
 		return RepositoryState{}, err
@@ -1008,6 +1157,9 @@ func (s Store) load(repository string) (RepositoryState, error) {
 		Contexts:                []FindingContext{},
 		Runs:                    []ReviewRun{},
 		IssueDrafts:             []IssueDraft{},
+		RepositoryFindings:      []RepositoryFinding{},
+		MappingJobs:             []RepositoryMappingJob{},
+		ValidationJobs:          []RepositoryValidationJob{},
 	}
 	if err := s.requireSafeRoot(true); err != nil {
 		return RepositoryState{}, err
@@ -1030,39 +1182,19 @@ func (s Store) load(repository string) (RepositoryState, error) {
 	if err != nil {
 		return RepositoryState{}, err
 	}
-	if err := json.Unmarshal(data, &state); err != nil {
+	if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
+		return RepositoryState{}, unmarshalErr
+	}
+	migrated, err := migrateRepositoryState(&state)
+	if err != nil {
 		return RepositoryState{}, err
 	}
-	migrated := backfillCanonicalIssueAssociations(&state)
+	migrated = backfillCanonicalIssueAssociations(&state) || migrated
 	if err := validateState(state); err != nil {
 		return RepositoryState{}, err
 	}
 	if state.Repository != strings.TrimSpace(repository) {
 		return RepositoryState{}, errors.New("repository review state identity mismatch")
-	}
-	if state.Files == nil {
-		state.Files = make(map[string]ReviewedFile)
-	}
-	if state.Unsupported == nil {
-		state.Unsupported = make(map[string]UnsupportedFile)
-	}
-	if state.ReviewAttempts == nil {
-		state.ReviewAttempts = make(map[string]int)
-	}
-	if state.ReviewAttemptIdentities == nil {
-		state.ReviewAttemptIdentities = make(map[string]string)
-	}
-	if state.Findings == nil {
-		state.Findings = []Finding{}
-	}
-	if state.Contexts == nil {
-		state.Contexts = []FindingContext{}
-	}
-	if state.Runs == nil {
-		state.Runs = []ReviewRun{}
-	}
-	if state.IssueDrafts == nil {
-		state.IssueDrafts = []IssueDraft{}
 	}
 	if migrated {
 		if err := s.save(&state); err != nil {
@@ -1077,8 +1209,10 @@ func (s Store) save(state *RepositoryState) error {
 		return errors.New("repository review state is required")
 	}
 	backfillCanonicalIssueAssociations(state)
+	synchronizeRepositoryFindingIssues(state)
 	summary := Summarize(*state)
 	state.FindingCount = summary.FindingCount
+	state.RepositoryFindingCount = summary.RepositoryFindingCount
 	state.OpenFindingCount = summary.OpenFindingCount
 	state.IssueDraftCount = summary.IssueDraftCount
 	state.UnsupportedCount = summary.UnsupportedCount
@@ -1287,7 +1421,37 @@ func normalizeCandidate(candidate FindingCandidate) FindingCandidate {
 	candidate.Impact = strings.TrimSpace(candidate.Impact)
 	candidate.Validation.Status = strings.ToLower(strings.TrimSpace(candidate.Validation.Status))
 	candidate.Validation.Summary = strings.TrimSpace(candidate.Validation.Summary)
+	candidate.MatchHints.Component = strings.TrimSpace(candidate.MatchHints.Component)
+	candidate.MatchHints.Operation = strings.TrimSpace(candidate.MatchHints.Operation)
+	candidate.MatchHints.FailureMode = strings.TrimSpace(candidate.MatchHints.FailureMode)
+	candidate.MatchHints.Trigger = strings.TrimSpace(candidate.MatchHints.Trigger)
+	candidate.MatchHints.ViolatedInvariant = strings.TrimSpace(candidate.MatchHints.ViolatedInvariant)
+	candidate.MatchHints.ObservableOutcome = strings.TrimSpace(candidate.MatchHints.ObservableOutcome)
+	candidate.MatchHints.RelatedSymbols = normalizeFindingIdentityHints(
+		candidate.MatchHints.RelatedSymbols,
+	)
+	candidate.MatchHints.SourceAnchors = normalizeFindingIdentityHints(
+		candidate.MatchHints.SourceAnchors,
+	)
+	candidate.MatchHints.DistinguishingFacts = normalizeFindingIdentityHints(
+		candidate.MatchHints.DistinguishingFacts,
+	)
+	candidate.FixEffort.Quick.Class = strings.ToLower(strings.TrimSpace(candidate.FixEffort.Quick.Class))
+	candidate.FixEffort.Quick.Rationale = strings.TrimSpace(candidate.FixEffort.Quick.Rationale)
+	candidate.FixEffort.Quality.Class = strings.ToLower(strings.TrimSpace(candidate.FixEffort.Quality.Class))
+	candidate.FixEffort.Quality.Rationale = strings.TrimSpace(candidate.FixEffort.Quality.Rationale)
 	return candidate
+}
+
+func normalizeFindingIdentityHints(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	normalized := make([]string, len(values))
+	for index, value := range values {
+		normalized[index] = strings.TrimSpace(value)
+	}
+	return normalized
 }
 
 func validateCandidate(candidate FindingCandidate) error {
@@ -1325,6 +1489,110 @@ func validateCandidate(candidate FindingCandidate) error {
 	if candidate.Line != nil && *candidate.Line < 1 {
 		return errors.New("finding line must be positive")
 	}
+	if findingCandidateHasEnrichment(candidate) {
+		if err := validateMatchHints(candidate.MatchHints); err != nil {
+			return err
+		}
+		if err := validateFixEffort(candidate.FixEffort); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateGeneratedFindingCandidate applies the complete current finder
+// contract. Store.Record deliberately accepts candidates without enrichment so
+// legacy direct callers and persisted review occurrences remain readable; the
+// workflow's native model-output boundary calls this stricter validator.
+func ValidateGeneratedFindingCandidate(candidate FindingCandidate) error {
+	candidate = normalizeCandidate(candidate)
+	if candidate.Symbol == "" || candidate.Message == "" || candidate.Validation.Status != "confirmed" {
+		return errors.New("generated finding is incomplete or unconfirmed")
+	}
+	if !findingCandidateHasEnrichment(candidate) {
+		return errors.New("generated finding is missing match hints and fix effort")
+	}
+	return validateCandidate(candidate)
+}
+
+func findingCandidateHasEnrichment(candidate FindingCandidate) bool {
+	hints := candidate.MatchHints
+	return hints.Component != "" || hints.Operation != "" || hints.FailureMode != "" ||
+		hints.Trigger != "" || hints.ViolatedInvariant != "" || hints.ObservableOutcome != "" ||
+		len(hints.RelatedSymbols) > 0 || len(hints.SourceAnchors) > 0 ||
+		len(hints.DistinguishingFacts) > 0 || candidate.FixEffort != (FixEffort{})
+}
+
+func validateMatchHints(hints MatchHints) error {
+	for _, value := range []string{
+		hints.Component, hints.Operation, hints.FailureMode, hints.Trigger,
+		hints.ViolatedInvariant, hints.ObservableOutcome,
+	} {
+		if !validBoundedText(value, maxMatchHintIdentityBytes) {
+			return errors.New("finding match hints are incomplete or invalid")
+		}
+	}
+	for _, values := range [][]string{
+		hints.RelatedSymbols, hints.SourceAnchors, hints.DistinguishingFacts,
+	} {
+		if len(values) > maxMatchHintItems {
+			return errors.New("finding match hints have too many identity values")
+		}
+		seen := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			if !validBoundedText(value, maxMatchHintIdentityBytes) ||
+				strings.ContainsAny(value, "\r\n") {
+				return errors.New("finding match hint identity value is invalid")
+			}
+			key := normalizedText(value)
+			if _, duplicate := seen[key]; duplicate {
+				return errors.New("finding match hints contain a duplicate identity value")
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateFixEffort(effort FixEffort) error {
+	if err := validateFixEffortEstimate(effort.Quick); err != nil {
+		return err
+	}
+	if err := validateFixEffortEstimate(effort.Quality); err != nil {
+		return err
+	}
+	if effort.Quick.LOCMin > effort.Quality.LOCMin ||
+		effort.Quick.LOCMax > effort.Quality.LOCMax {
+		return errors.New("finding quality fix effort must not be smaller than quick containment")
+	}
+	return nil
+}
+
+func validateFixEffortEstimate(estimate FixEffortEstimate) error {
+	if estimate.LOCMin < 1 || estimate.LOCMin > estimate.LOCMax ||
+		estimate.LOCMax > maxFixEffortLOC ||
+		!validBoundedText(estimate.Rationale, maxMatchHintIdentityBytes) {
+		return errors.New("finding fix effort range or rationale is invalid")
+	}
+	wantClass := "refactor"
+	switch {
+	case estimate.LOCMax <= 10:
+		wantClass = "tiny"
+	case estimate.LOCMax <= 40:
+		wantClass = "small"
+	case estimate.LOCMax <= 150:
+		wantClass = "medium"
+	case estimate.LOCMax <= 500:
+		wantClass = "large"
+	}
+	rationale := strings.ToLower(estimate.Rationale)
+	architecturalRefactor := estimate.Class == "refactor" &&
+		strings.Contains(rationale, "cross-subsystem") &&
+		(strings.Contains(rationale, "architectural") ||
+			strings.Contains(rationale, "contract migration"))
+	if estimate.Class != wantClass && !architecturalRefactor {
+		return errors.New("finding fix effort class is inconsistent with its maximum LOC")
+	}
 	return nil
 }
 
@@ -1333,11 +1601,16 @@ func findingFingerprint(file FileRef, candidate FindingCandidate) string {
 	if candidate.Line != nil {
 		line = *candidate.Line
 	}
-	return stableID(
-		"sha256:", file.Path, file.BlobSHA, fmt.Sprint(line),
+	values := []string{
+		file.Path, file.BlobSHA, fmt.Sprint(line),
 		normalizedText(candidate.Symbol), normalizedText(candidate.Title),
 		normalizedText(candidate.Message), normalizedText(candidate.Evidence),
-	)
+	}
+	if findingCandidateHasEnrichment(candidate) {
+		encodedHints, _ := json.Marshal(candidate.MatchHints)
+		values = append(values, string(encodedHints))
+	}
+	return stableID("sha256:", values...)
 }
 
 func findingIndexByFingerprint(findings []Finding, fingerprint string) int {
@@ -1357,6 +1630,28 @@ func semanticFindingIndex(findings []Finding, file FileRef, candidate FindingCan
 			!nearbyLines(finding.Line, candidate.Line) || candidate.Symbol == "" ||
 			normalizedText(finding.Symbol) != normalizedText(candidate.Symbol) {
 			continue
+		}
+		if findingCandidateHasEnrichment(candidate) && !matchHintsEmpty(finding.MatchHints) {
+			conflicts := append(
+				repositoryHardCausalConflicts(candidate.MatchHints, finding.MatchHints),
+				repositoryCausalFieldConflicts(candidate.MatchHints, finding.MatchHints)...,
+			)
+			if len(conflicts) > 0 {
+				continue
+			}
+			causalSimilarity := tokenDice(
+				findingTokens(repositoryCausalText(candidate.MatchHints)),
+				findingTokens(repositoryCausalText(finding.MatchHints)),
+			)
+			causalTitleSimilarity := tokenDice(findingTokens(finding.Title), candidateTitle)
+			anchorSimilarity := repositoryAnchorJaccard(
+				candidate.MatchHints.SourceAnchors, finding.MatchHints.SourceAnchors,
+			)
+			if causalSimilarity < 0.72 &&
+				!(causalTitleSimilarity >= 0.65 && causalSimilarity >= 0.50 &&
+					anchorSimilarity >= 0.50) {
+				continue
+			}
 		}
 		titleSimilarity := tokenDice(findingTokens(finding.Title), candidateTitle)
 		bodySimilarity := tokenDice(
@@ -1387,6 +1682,7 @@ func findingObservationFrom(
 		Severity: candidate.Severity, Title: candidate.Title, Symbol: candidate.Symbol,
 		Line: candidate.Line, Message: candidate.Message, Evidence: candidate.Evidence,
 		Impact: candidate.Impact, Validation: candidate.Validation,
+		MatchHints: candidate.MatchHints, FixEffort: candidate.FixEffort,
 	}
 }
 
@@ -1572,6 +1868,9 @@ func validateState(state RepositoryState) error {
 		}
 	}
 	if err := validateIssueAssociations(state); err != nil {
+		return err
+	}
+	if err := validateRepositoryLifecycleState(state); err != nil {
 		return err
 	}
 	return nil

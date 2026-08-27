@@ -91,6 +91,10 @@ func EvaluateRepositoryReviewGuardExpression(
 		fields := sortedGuardUnknownFields(result.unknownFields)
 		return false, &RepositoryReviewGuardUnknownError{Fields: fields}
 	}
+	return repositoryReviewGuardBooleanResult(result)
+}
+
+func repositoryReviewGuardBooleanResult(result repositoryReviewGuardValue) (bool, error) {
 	if result.kind != guardValueBoolean {
 		return false, invalidRepositoryReviewGuardExpressionf("expression does not produce a boolean result")
 	}

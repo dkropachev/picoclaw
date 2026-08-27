@@ -41,15 +41,15 @@ vi.mock(
   () => ({
     RepositoryReviewDetailPage: ({
       id,
-      onReport,
+      onFindings,
     }: {
       id: string
-      onReport: () => void
+      onFindings: () => void
     }) => (
       <div>
         <output>Detail {id}</output>
-        <button type="button" onClick={onReport}>
-          Open report
+        <button type="button" onClick={onFindings}>
+          Open findings
         </button>
       </div>
     ),
@@ -57,9 +57,9 @@ vi.mock(
 )
 
 vi.mock(
-  "@/components/repository-reviews/repository-review-report-page",
+  "@/components/repository-reviews/repository-review-findings-page",
   () => ({
-    RepositoryReviewReportPage: ({
+    RepositoryReviewFindingsPage: ({
       automationID,
       onOpenFinding,
     }: {
@@ -67,7 +67,7 @@ vi.mock(
       onOpenFinding: (id: string) => void
     }) => (
       <div>
-        <output>Report {automationID}</output>
+        <output>Findings {automationID}</output>
         <button type="button" onClick={() => onOpenFinding("finding_1")}>
           Open finding
         </button>
@@ -140,7 +140,7 @@ vi.mock(
 vi.mock("@/features/chat/controller", () => ({ initializeChatStore: vi.fn() }))
 
 describe("repository review routes", () => {
-  it("opens detail and report while preserving collection state", async () => {
+  it("opens detail and findings while preserving collection state", async () => {
     const router = testRouter(
       "/repository-reviews?q=status%20%3D%20running&view=grid",
     )
@@ -157,10 +157,10 @@ describe("repository review routes", () => {
       scope: "current",
       offset: 0,
     })
-    await user.click(screen.getByRole("button", { name: "Open report" }))
+    await user.click(screen.getByRole("button", { name: "Open findings" }))
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(
-        "/repository-reviews/auto_1/report",
+        "/repository-reviews/auto_1/findings",
       ),
     )
     expect(router.state.location.search).toMatchObject({
@@ -169,12 +169,25 @@ describe("repository review routes", () => {
     })
   })
 
-  it("preserves report scope and offset when opening a finding", async () => {
+  it("redirects the old report route and preserves all findings state", async () => {
     const router = testRouter(
-      "/repository-reviews/auto_1/report?q=severity%20%3D%20high&scope=all&offset=50",
+      "/repository-reviews/auto_1/report?q=severity%20%3D%20high&view=grid&scope=all&offset=50&generation_id=rig_1",
     )
     const user = userEvent.setup()
     render(<RouterProvider router={router} />)
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        "/repository-reviews/auto_1/findings",
+      ),
+    )
+    expect(router.state.location.search).toMatchObject({
+      q: "severity = high",
+      view: "grid",
+      scope: "all",
+      offset: 50,
+      generation_id: "rig_1",
+    })
 
     await user.click(
       await screen.findByRole("button", { name: "Open finding" }),
@@ -186,8 +199,10 @@ describe("repository review routes", () => {
     )
     expect(router.state.location.search).toMatchObject({
       q: "severity = high",
+      view: "grid",
       scope: "all",
       offset: 50,
+      generation_id: "rig_1",
     })
   })
 

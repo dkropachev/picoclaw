@@ -46,6 +46,17 @@ func TestRepositoryReviewAutomationDetailReportAndFindingRoutes(t *testing.T) {
 		!strings.Contains(report.Body.String(), `"scope":"current"`) {
 		t.Fatalf("report status=%d body=%s", report.Code, report.Body.String())
 	}
+	findingsPage := httptest.NewRecorder()
+	mux.ServeHTTP(findingsPage, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+"/findings?scope=current&offset=0&limit=50",
+		nil,
+	))
+	if findingsPage.Code != http.StatusOK ||
+		!strings.Contains(findingsPage.Body.String(), state.Findings[0].Evidence) ||
+		!strings.Contains(findingsPage.Body.String(), `"repository_findings"`) {
+		t.Fatalf("findings status=%d body=%s", findingsPage.Code, findingsPage.Body.String())
+	}
 
 	findingPath := "/api/repository-reviews/automations/" + automation.ID +
 		"/findings/" + state.Findings[0].ID
@@ -57,15 +68,8 @@ func TestRepositoryReviewAutomationDetailReportAndFindingRoutes(t *testing.T) {
 	updated := repositoryReviewAutomationMutation(t, mux, http.MethodPatch, findingPath, map[string]any{
 		"status": "dismissed", "expected_version": state.Findings[0].Version,
 	})
-	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"status":"dismissed"`) {
-		t.Fatalf("finding update status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	for _, capability := range []string{
-		`"can_generate":false`, `"can_search_issues":false`, `"can_link_issue":false`,
-	} {
-		if !strings.Contains(updated.Body.String(), capability) {
-			t.Fatalf("dismissed finding omitted capability %s: %s", capability, updated.Body.String())
-		}
+	if updated.Code != http.StatusConflict {
+		t.Fatalf("immutable finding update status=%d body=%s", updated.Code, updated.Body.String())
 	}
 }
 
@@ -73,6 +77,7 @@ func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(
 	t.Run("linked replacement", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		store := repoaudit.NewStore(workspace)
 		linkedState, _, err := store.LinkExistingIssue(repoaudit.ExistingIssueLink{
 			Repository: state.Repository, FindingID: state.Findings[0].ID,
@@ -108,6 +113,7 @@ func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(
 	t.Run("legacy preview", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		store := repoaudit.NewStore(workspace)
 		_, draft, err := store.PrepareIssue(repoaudit.IssueDraftRequest{
 			Repository: state.Repository, FindingIDs: []string{state.Findings[0].ID},
@@ -134,6 +140,67 @@ func TestRepositoryReviewAutomationCapabilitiesAreExplicitForUnavailableActions(
 			}
 		}
 	})
+}
+
+func TestRepositoryReviewRepositoryFindingLifecycleAndValidationRoutes(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	store := repoaudit.NewStore(workspace)
+	if _, err := store.ProcessPendingMappingJobs(
+		t.Context(), state.Repository, repoaudit.RepositoryMappingProcessOptions{
+			DefaultBranchVerified: func(context.Context, repoaudit.Finding) (bool, error) {
+				return true, nil
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := store.Get(state.Repository)
+	if err != nil || !found || len(state.RepositoryFindings) != 1 {
+		t.Fatalf("repository findings=%#v found=%v err=%v", state.RepositoryFindings, found, err)
+	}
+	aggregate := state.RepositoryFindings[0]
+	automation := seedRepositoryReviewDetailAutomation(
+		t, handler, state.Repository, state.Runs[0].ID,
+	)
+	page := httptest.NewRecorder()
+	mux.ServeHTTP(page, httptest.NewRequest(
+		http.MethodGet,
+		"/api/repository-reviews/automations/"+automation.ID+"/findings?scope=all",
+		nil,
+	))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), aggregate.ID) {
+		t.Fatalf("repository findings page=%d %s", page.Code, page.Body.String())
+	}
+	path := "/api/repository-reviews/automations/" + automation.ID +
+		"/repository-findings/" + aggregate.ID
+	dismissed := repositoryReviewAutomationMutation(t, mux, http.MethodPatch, path, map[string]any{
+		"lifecycle": "dismissed", "expected_version": aggregate.Version,
+	})
+	if dismissed.Code != http.StatusOK || !strings.Contains(dismissed.Body.String(), `"lifecycle":"dismissed"`) {
+		t.Fatalf("dismiss=%d %s", dismissed.Code, dismissed.Body.String())
+	}
+	var dismissedPayload struct {
+		Finding repoaudit.RepositoryFinding `json:"repository_finding"`
+	}
+	if err := json.Unmarshal(dismissed.Body.Bytes(), &dismissedPayload); err != nil {
+		t.Fatal(err)
+	}
+	reopened := repositoryReviewAutomationMutation(t, mux, http.MethodPatch, path, map[string]any{
+		"lifecycle": "open", "expected_version": dismissedPayload.Finding.Version,
+	})
+	if reopened.Code != http.StatusOK {
+		t.Fatalf("reopen=%d %s", reopened.Code, reopened.Body.String())
+	}
+	validation := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/repository-findings/validations",
+		map[string]any{"repository_finding_ids": []string{aggregate.ID}},
+	)
+	if validation.Code != http.StatusAccepted ||
+		!strings.Contains(validation.Body.String(), `"state":"pending"`) {
+		t.Fatalf("validation=%d %s", validation.Code, validation.Body.String())
+	}
 }
 
 func TestRepositoryReviewReportCurrentMembershipAndEmptyActiveLedger(t *testing.T) {
@@ -194,6 +261,7 @@ func TestRepositoryReviewReportCurrentMembershipAndEmptyActiveLedger(t *testing.
 func TestRepositoryReviewAutomationIssueGenerationUsesSnapshottedWriter(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 
 	previous := runRepositoryReviewIssueWriter
@@ -265,9 +333,131 @@ func TestRepositoryReviewAutomationIssueGenerationUsesSnapshottedWriter(t *testi
 	}
 }
 
+func TestRepositoryReviewIssueDraftUsesCurrentAssignedProfileAndFreezesProvenance(t *testing.T) {
+	_, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
+	store := repoaudit.NewStore(workspace)
+	profile, err := store.CreateProfile(t.Context(), repoaudit.RepositoryReviewProfile{
+		Name: "Current issue policy", ReviewFocus: "Find bugs.", ReviewerModel: "cheap",
+		IssueWriterModel: "cheap", IssuePrompt: "Initial issue presentation.", AccountRef: "api",
+		AutoContinue: true, MaxFilesPerRun: 4, MaxContentBytes: 65536,
+		MaxParallelChildren: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	automation := testRepositoryReviewAutomation()
+	automation.ID = "rra_current_profile"
+	automation.Repository = state.Repository
+	automation.RunIDs = []string{state.Runs[0].ID}
+	automation.StartedAt = time.Now().UTC().Add(-time.Hour)
+	automation, err = repoaudit.MaterializeRepositoryReviewAutomation(profile, automation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CreateAutomation(t.Context(), automation); err != nil {
+		t.Fatal(err)
+	}
+	profile, err = store.UpdateProfile(
+		t.Context(),
+		profile.ID,
+		profile.Version,
+		func(candidate *repoaudit.RepositoryReviewProfile) error {
+			candidate.IssuePrompt = "Current assigned issue presentation."
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := runRepositoryReviewIssueWriter
+	t.Cleanup(func() { runRepositoryReviewIssueWriter = previous })
+	captured := make(chan string, 1)
+	runRepositoryReviewIssueWriter = func(
+		_ context.Context,
+		_ *Handler,
+		_ repoaudit.RepositoryReviewAutomation,
+		_ repoaudit.Finding,
+		_ []repoaudit.FindingContext,
+		instructions string,
+		_ string,
+	) (repositoryReviewIssueWriterResult, error) {
+		captured <- instructions
+		return repositoryReviewIssueWriterResult{
+			Title: "Current-profile issue", Body: "Grounded diagnosis.", Labels: []string{"bug"},
+		}, nil
+	}
+	response := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/issues/generations",
+		map[string]any{
+			"generation_id":     "rrig_current_profile",
+			"finding_ids":       []string{state.Findings[0].ID},
+			"instructions_mode": "default",
+		},
+	)
+	if response.Code != http.StatusOK || <-captured != profile.IssuePrompt {
+		t.Fatalf("generation status=%d body=%s", response.Code, response.Body.String())
+	}
+	updated, found, err := store.Get(state.Repository)
+	if err != nil || !found || len(updated.IssueDrafts) != 1 {
+		t.Fatalf("updated=%#v found=%v err=%v", updated, found, err)
+	}
+	draft := updated.IssueDrafts[0]
+	if draft.GeneratorProfileID != profile.ID || draft.GeneratorProfileVersion != profile.Version ||
+		draft.ResolvedInstructions != profile.IssuePrompt || draft.GeneratorModel != "cheap" ||
+		draft.GeneratorAccount != "api" {
+		t.Fatalf("draft provenance=%#v", draft)
+	}
+}
+
+func TestRepositoryReviewDirectPostGeneratesThenPublishesWithoutConfirmationPayload(t *testing.T) {
+	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
+	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
+	automation := seedRepositoryReviewDetailAutomation(
+		t, handler, state.Repository, state.Runs[0].ID,
+	)
+	previous := runRepositoryReviewIssueWriter
+	t.Cleanup(func() { runRepositoryReviewIssueWriter = previous })
+	runRepositoryReviewIssueWriter = func(
+		context.Context,
+		*Handler,
+		repoaudit.RepositoryReviewAutomation,
+		repoaudit.Finding,
+		[]repoaudit.FindingContext,
+		string,
+		string,
+	) (repositoryReviewIssueWriterResult, error) {
+		return repositoryReviewIssueWriterResult{
+			Title: "Direct issue", Body: "Grounded diagnosis and provenance.", Labels: []string{"bug"},
+		}, nil
+	}
+	installEventProxyStubs(t, func(request *http.Request, _ time.Duration) (*http.Response, error) {
+		if !strings.Contains(request.URL.Path, "/issue-drafts/") ||
+			!strings.HasSuffix(request.URL.Path, "/publish") {
+			t.Fatalf("unexpected direct-post upstream path %q", request.URL.Path)
+		}
+		return eventUpstreamResponse(http.StatusOK, `{"outcome":"posted"}`), nil
+	})
+	response := repositoryReviewAutomationMutation(
+		t, mux, http.MethodPost,
+		"/api/repository-reviews/automations/"+automation.ID+"/findings/"+
+			state.Findings[0].ID+"/post",
+		map[string]any{"expected_version": state.Findings[0].Version},
+	)
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"outcome":"posted"`) ||
+		!strings.Contains(response.Body.String(), "Direct issue") {
+		t.Fatalf("direct post status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestRepositoryReviewIssueGenerationBoundsConcurrencyAndRetriesOnlyFailure(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewGenerationFindings(t, workspace, 5)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 
 	previous := runRepositoryReviewIssueWriter
@@ -389,6 +579,7 @@ func TestRepositoryReviewInterruptedGenerationResumesWithSameGenerationID(t *tes
 		t.Fatal(saveErr)
 	}
 	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	store, err := handler.repositoryReviewStore()
 	if err != nil {
@@ -515,6 +706,7 @@ func TestRepositoryReviewIssueWriterFailsClosedAfterAliasBecomesAgentic(t *testi
 func TestRepositoryReviewAutomationPublishUsesProtectedLedgerRoute(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	store, err := handler.repositoryReviewStore()
 	if err != nil {
@@ -562,6 +754,7 @@ func TestRepositoryReviewAutomationPublishUsesProtectedLedgerRoute(t *testing.T)
 func TestRepositoryReviewAutomationBatchPublishReportsPartialSelectionFailures(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewGenerationFindings(t, workspace, 2)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	store, err := handler.repositoryReviewStore()
 	if err != nil {
@@ -654,6 +847,7 @@ func TestRepositoryReviewIssueLinkActionsUseProtectedAutomationRoutes(t *testing
 func TestRepositoryReviewAutomationIssueRoutesLifecycleAndPaging(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewGenerationFindings(t, workspace, 2)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	store := repoaudit.NewStore(workspace)
 	drafts := make([]repoaudit.IssueDraft, 0, 2)
@@ -808,6 +1002,7 @@ func TestRepositoryReviewAutomationDetailRequestFailureBoundaries(t *testing.T) 
 func TestRepositoryReviewIssueGenerationRequestAndRegenerationBoundaries(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	state := seedRepositoryReviewAPIState(t, workspace)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 	generationPath := "/api/repository-reviews/automations/" + automation.ID + "/issues/generations"
 	validFinding := state.Findings[0].ID
@@ -1047,6 +1242,7 @@ func TestRepositoryReviewDetailHelperBoundaryCoverage(t *testing.T) {
 func TestRepositoryReviewIssueGenerationClaimBoundaryCoverage(t *testing.T) {
 	workspace := t.TempDir()
 	state := seedRepositoryReviewGenerationFindings(t, workspace, 3)
+	state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 	store := repoaudit.NewStore(workspace)
 	requestFor := func(index int, generationID string) repoaudit.IssueGenerationRequest {
 		return repoaudit.IssueGenerationRequest{
@@ -1369,6 +1565,7 @@ func TestRepositoryReviewGatewayProxyAndPublicationBoundaryCoverage(t *testing.T
 	t.Run("single publication boundaries", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		store := repoaudit.NewStore(workspace)
 		_, draft, _, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
@@ -1670,6 +1867,7 @@ func TestRepositoryReviewAdditionalHandlerBranchCoverage(t *testing.T) {
 	t.Run("issue update and delete errors", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		store := repoaudit.NewStore(workspace)
 		_, draft, _, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
@@ -1748,6 +1946,7 @@ func TestRepositoryReviewAdditionalHandlerBranchCoverage(t *testing.T) {
 	t.Run("generation and regeneration errors", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewGenerationFindings(t, workspace, 3)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		generationPath := "/api/repository-reviews/automations/" + automation.ID + "/issues/generations"
 		cross := httptest.NewRequest(http.MethodPost, "http://launcher.local"+generationPath, strings.NewReader(`{}`))
@@ -2007,6 +2206,7 @@ func TestRepositoryReviewGenerationPersistenceAndAccountFailureBoundaries(t *tes
 			t.Fatal(saveErr)
 		}
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		store := repoaudit.NewStore(workspace)
 		_, draft, _, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
@@ -2048,6 +2248,7 @@ func TestRepositoryReviewGenerationPersistenceAndAccountFailureBoundaries(t *tes
 	t.Run("late persistence failure is safe", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		previous := runRepositoryReviewIssueWriter
 		t.Cleanup(func() { runRepositoryReviewIssueWriter = previous })
@@ -2126,6 +2327,7 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 	t.Run("external regeneration lock", func(t *testing.T) {
 		workspace := t.TempDir()
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		store := repoaudit.NewStore(workspace)
 		_, draft, _, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
 			Repository: state.Repository, FindingID: state.Findings[0].ID,
@@ -2171,6 +2373,7 @@ func TestRepositoryReviewRemainingGenerationAndLedgerBranches(t *testing.T) {
 	t.Run("missing final ledger", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		previous := runRepositoryReviewIssueWriter
 		t.Cleanup(func() { runRepositoryReviewIssueWriter = previous })
@@ -2259,6 +2462,7 @@ func TestRepositoryReviewRemainingGatewayPublicationBranches(t *testing.T) {
 		t.Helper()
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		store := repoaudit.NewStore(workspace)
 		_, draft, _, err := store.ReserveIssueGeneration(repoaudit.IssueGenerationRequest{
@@ -2376,6 +2580,7 @@ func TestRepositoryReviewRemainingGatewayPublicationBranches(t *testing.T) {
 	t.Run("noncanonical batch selection", func(t *testing.T) {
 		handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 		state := seedRepositoryReviewAPIState(t, workspace)
+		state = completeRepositoryReviewAPIMappingJobs(t, workspace, state)
 		automation := seedRepositoryReviewDetailAutomation(t, handler, state.Repository, state.Runs[0].ID)
 		store := repoaudit.NewStore(workspace)
 		state, older, err := store.PrepareIssue(repoaudit.IssueDraftRequest{

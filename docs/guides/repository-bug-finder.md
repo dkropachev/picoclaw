@@ -2,7 +2,7 @@
 
 PicoClaw's repository bug finder reviews one exact Git commit, checkpoints
 validated findings as bounded batches finish, and skips unchanged Git blobs on
-later runs. The dashboard keeps the review lifecycle, live report, finding
+later runs. The dashboard keeps the review lifecycle, live findings, finding
 evidence, AI-written issue previews, and canonical GitHub issue association on
 directly addressable routes.
 
@@ -34,9 +34,10 @@ tags, full refs, revision expressions, URLs, and query or fragment forms.
 
 The execution account appears before reviewer and issue-writer selection
 because it constrains both model lists. Blank account follows the runtime
-default when a campaign starts. PicoClaw snapshots the effective account,
-reviewer, writer, and profile version into that campaign, so later default or
-profile changes cannot rewrite issue-generation provenance.
+default when a campaign starts. PicoClaw snapshots review execution policy into
+the campaign. Each later Draft, Post, or issue-candidate action resolves the
+currently assigned profile and snapshots that action's prompt, writer, account,
+profile ID, and version, so completed attempt provenance cannot be rewritten.
 
 ## Run And Observe
 
@@ -51,7 +52,7 @@ From review detail you can:
   progress, actual token usage, estimated cost, pause reason, and run history;
 - choose the remembered, latest, or a custom full commit SHA when a paused or
   failed campaign's branch has moved; and
-- open **Report** or **Issue previews** at any time, including before the first
+- open **Findings** or **Issue previews** at any time, including before the first
   batch finishes.
 
 Start resolves the configured branch or remote default to one canonical full
@@ -76,47 +77,62 @@ target filter, reacquires only the pinned commit, and validates the plan
 natively against opaque candidate IDs and folder/type boundaries. AI cannot
 invent a path, re-include an excluded folder, or select an unchosen code type.
 
-## Use The Live Report
+## Use Live Findings
 
-**Report** is always available and shows durable finding checkpoints while a
+**Findings** is always available and shows review-finding checkpoints while a
 review is active. Before the first finding checkpoint it displays an empty
-in-progress report rather than hiding the route.
+in-progress Findings state rather than hiding the route.
 
-The default **Current campaign** scope contains findings attributable to the
-selected automation's durable run IDs and campaign start. Switch to **All
-durable findings** to inspect the complete repository ledger. Both scopes are
-paged, and the current report polls for newly checkpointed findings while the
+The default **This review** scope contains findings attributable to the
+selected automation's recorded run IDs and campaign start. Switch to
+**Repository findings** to inspect canonical cross-commit aggregates. Both scopes are
+paged, and the current review-findings view polls for newly checkpointed findings while the
 review remains active.
 
-The report shows compact finding summaries. Open a finding for its complete
+The Findings page shows compact finding summaries. Open a finding for its complete
 evidence, validation, model observations, commit and primary blob provenance,
 opaque contexts, and every context path/blob/size reference. Finding detail
-also provides status controls, **Discuss with AI**, and navigation to its one
-canonical preview or GitHub issue.
+also shows repository-match state, provides **Discuss with AI** for immutable
+review occurrences, and navigates to its one canonical preview or GitHub issue.
+Repository-finding detail owns dismiss/reopen lifecycle controls.
 
-Discussion creates a separate durable reviewing thread seeded with the exact
+New review findings also retain causal `match_hints` (component, operation,
+failure mode, trigger, violated invariant, outcome, related symbols, source
+anchors, and distinguishing facts) so the same defect can be recognized after
+a rename or refactor. They include two diagnosis-only effort ranges: **Quick**
+containment and **Quality** correction. Each range counts hand-edited additions
+plus deletions and is classified by its upper bound: tiny through 10 LOC, small
+through 40, medium through 150, large through 500, and refactor above 500 or
+for cross-subsystem contract migration. These fields identify and size a
+defect; they never contain a fix design, patch, recommendation, or next step.
+Older findings display unknown hints and effort and are not re-reviewed merely
+to populate them.
+
+Discussion creates a separate reviewing thread seeded with the exact
 finding and context provenance. Returning from chat does not generate, link,
 or publish an issue; each of those effects still requires an explicit action.
 
-Collection query/view, report scope/offset, explicit selection, and in-memory
+Collection query/view, findings scope/offset, explicit selection, and in-memory
 scroll are preserved through finding, discussion, and issue routes. Browser
 Back restores that state. The former **Results** sidebar destination is gone;
 old `/repository-reviews/results` links return to the review collection.
 
-## Generate Issue Previews
+## Draft Issue Previews
 
-Select up to 200 explicit open findings across loaded report pages and choose
-issue generation. Selection is never implicit or query-wide. One batch receives
+Select up to 200 explicit open findings across loaded Findings pages and choose
+**Draft issue previews**. Selection is never implicit or query-wide. One batch receives
 one generation ID, creates one preview per finding, and runs at most four
 issue-writer calls concurrently across launcher processes sharing the workspace.
 A per-attempt OS lock also prevents two processes from dispatching the same
 reservation. A partial failure keeps successful previews
-and opens the durable Issue previews route filtered or highlighted by that
+and opens the saved Issue previews route filtered or highlighted by that
 generation.
 
 Every writer call is private, ephemeral, no-history, no-cache, no-tools, and
-structured. It uses the campaign's snapshotted issue-writer alias and effective
-account. The fixed policy permits grounded diagnosis only. By default, the
+structured. A new **Draft issue** or **Post issue** action resolves the currently
+assigned profile, then freezes its profile version, issue prompt, issue-writer
+alias, and effective account into the saved attempt. The fixed policy permits
+grounded diagnosis only. By default, the
 writer produces:
 
 - a concise title;
@@ -131,11 +147,11 @@ PicoClaw persists the resolved instructions, mode, generation ID, model/account
 provenance, and validated preview. It never stores the raw provider response.
 
 Open a preview to render its Markdown, edit title/body/labels, regenerate it,
-delete an unpublished preview, publish or reconcile it, or return to its
+delete an unpublished preview, post or reconcile it, or return to its
 finding. A failed initial generation remains retryable or deletable. A failed
 regeneration keeps the last good preview and its original model/instruction
 provenance; the failed attempt remains separately attributable. Deleting an editable or failed
-unpublished preview frees its finding for another generation. Publishing,
+unpublished preview frees its finding for another generation. Posting,
 unknown, and posted previews cannot be deleted.
 
 Each finding can have at most one active preview or canonical issue. Retrying
@@ -143,11 +159,12 @@ the same generation ID is idempotent, and concurrent attempts cannot reserve
 the same finding twice. Older grouped drafts remain visible for history;
 conflicting noncanonical legacy drafts are read-only and cannot publish.
 
-## Publish To GitHub
+## Post To GitHub
 
 For a repository whose acquired `origin` resolves to a canonical
 `github.com/owner/repository` identity, select any subset of editable previews
-and confirm publication. PicoClaw freezes each exact title/body/labels payload
+and choose **Post selected**. That explicit click authorizes posting without a
+second confirmation dialog. PicoClaw freezes each exact title/body/labels payload
 before the protected gateway call. It searches a stable marker before creating
 an issue, reports success or a safe failure per preview, and records `unknown`
 when a transport outcome may have changed GitHub.
@@ -158,26 +175,52 @@ sets the canonical association to posted and stores the provider issue ID/URL.
 There is no manual **Mark posted** action. An issue created by PicoClaw remains
 permanently associated with its finding.
 
+**Post issue** on a finding without a draft generates one saved payload and
+immediately posts that exact content. Posting an existing draft never regenerates
+or silently edits it.
+
 Local and non-GitHub repositories can still generate, edit, regenerate, and
-delete previews, but they expose no publish, issue-search, or issue-link action.
+delete previews, but they expose no post, issue-search, or issue-link action.
 
 ## Link An Existing GitHub Issue
 
 From an open, unassociated finding, open **Link existing issue**. You can enter
 an issue URL manually or choose **Ask AI to find existing issues**.
 
-Candidate discovery derives bounded GitHub searches from the finding's
-immutable title, smallest stable symbol, and path. The server merges and
+Candidate discovery derives bounded GitHub searches from causal hints, stable
+symbols, source anchors, path history, and title. The server merges and
 deduplicates at most 50 open or closed issues from the same repository. The
-snapshotted issue-writer model, without tools, ranks and explains at most 10
-candidates. AI never links automatically.
+current assigned profile's issue-writer model, without tools, ranks and explains
+at most 10 candidates. A score reserved for exact causal identity may create a
+reversible `discovered` association, but only after PicoClaw re-fetches the
+issue and verifies the exact repository. Lower-confidence candidates remain
+available for manual selection.
 
 After you select and confirm one issue, PicoClaw re-fetches it and validates
 the canonical URL and repository before storing a linked association. A
 missing, deleted, malformed, or cross-repository issue is rejected. The same
 existing issue may be linked to more than one finding. Unlike issues created by
 PicoClaw, a manually linked issue may be unlinked or replaced after explicit
-confirmation.
+confirmation. A discovered association is reversible in the same way.
+
+## Validate Resolution
+
+Issue and code state are shown independently. A closed GitHub issue moves a
+repository finding to `resolution_pending`; it does not prove the defect is
+fixed. Issue snapshots refresh after 15 minutes when the finding or validation
+view opens, before validation, or when you choose **Sync GitHub**. Reopening the
+issue returns the finding to `open`.
+
+Choose **Validate resolution** for one finding or select up to 50 repository
+findings and choose **Validate resolutions**. The restart-safe queue runs at
+most four validators across launcher processes. PicoClaw considers at most 200
+reachable default-branch commits touching known paths or symbols, BM25-ranks
+them, and gives the isolated validator at most eight bounded diffs/current-source
+records. The validator can select only those commits, and the server verifies
+default-branch ancestry. A confirmed result records the fix commit and date,
+validation time, and first chronological semantic-version tag containing it.
+Later observation of the same causal defect marks the finding `regressed`
+without erasing its earlier resolution history.
 
 ## Install And Run From The CLI
 
