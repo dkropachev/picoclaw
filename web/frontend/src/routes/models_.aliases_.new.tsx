@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { ModelAliasEditorPage } from "@/components/collections/pilots/model-collections"
+import { ModelAliasEditorPage } from "@/components/models/model-collections"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/models_/aliases_/new")({

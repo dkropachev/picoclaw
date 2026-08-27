@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { ModelRouterEditorPage } from "@/components/collections/pilots/model-collections"
+import { ModelRouterEditorPage } from "@/components/models/model-collections"
 import { normalizeCollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/models_/routers_/new")({

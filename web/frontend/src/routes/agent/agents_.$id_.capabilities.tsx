@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router"
 import {
   AgentCollectionCapabilitiesPage,
   normalizeAgentCollectionSearch,
-} from "@/components/collections/pilots/agent-collection"
+} from "@/components/agent/agents/agent-collection"
 
 export const Route = createFileRoute("/agent/agents_/$id_/capabilities")({
   validateSearch: normalizeAgentCollectionSearch,

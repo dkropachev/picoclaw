@@ -96,9 +96,7 @@ Owns: TEST web/backend/api/repository_model_evaluation*_test.go
 Owns: CODE web/frontend/src/api/model-evaluations.ts
 Owns: TEST web/frontend/src/api/model-evaluations.test.ts
 Owns: CODE web/frontend/src/components/model-evaluations/**
-Owns: CODE web/frontend/src/components/collections/pilots/model-evaluation*
 Owns: TEST web/frontend/src/components/model-evaluations/**
-Owns: TEST web/frontend/src/components/collections/pilots/model-evaluation*.test.tsx
 Owns: CODE web/frontend/src/routes/model-evaluations*.tsx
 Owns: TEST web/frontend/src/routes/-model-evaluations-route.test.tsx
 Owns: HTTP * /api/model-evaluations*
@@ -213,7 +211,7 @@ bug-finder scope planning even when both features call `reposcope`.
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-REPOEVAL-001`, `FR-REPOEVAL-002`, `FR-REPOEVAL-006`, `FR-REPOEVAL-010`, `FR-REPOEVAL-012` | [pkg/repoeval/store_test.go](../../pkg/repoeval/store_test.go), [pkg/repoeval/work_sizing_test.go](../../pkg/repoeval/work_sizing_test.go), [web/backend/api/repository_model_evaluations_test.go](../../web/backend/api/repository_model_evaluations_test.go), [web/frontend/src/components/collections/pilots/model-evaluation-collection.test.tsx](../../web/frontend/src/components/collections/pilots/model-evaluation-collection.test.tsx) |
+| `FR-REPOEVAL-001`, `FR-REPOEVAL-002`, `FR-REPOEVAL-006`, `FR-REPOEVAL-010`, `FR-REPOEVAL-012` | [pkg/repoeval/store_test.go](../../pkg/repoeval/store_test.go), [pkg/repoeval/work_sizing_test.go](../../pkg/repoeval/work_sizing_test.go), [web/backend/api/repository_model_evaluations_test.go](../../web/backend/api/repository_model_evaluations_test.go), [web/frontend/src/components/model-evaluations/model-evaluation-collection.test.tsx](../../web/frontend/src/components/model-evaluations/model-evaluation-collection.test.tsx) |
 | `FR-REPOEVAL-003`, `FR-REPOEVAL-004`, `FR-REPOEVAL-005` | [pkg/reposcope/candidates_test.go](../../pkg/reposcope/candidates_test.go), [pkg/reposcope/selection_test.go](../../pkg/reposcope/selection_test.go), [pkg/workflows/repository_model_evaluation_native_test.go](../../pkg/workflows/repository_model_evaluation_native_test.go) |
 | `FR-REPOEVAL-006`, `FR-REPOEVAL-007`, `FR-REPOEVAL-008`, `FR-REPOEVAL-009` | [pkg/repoeval/work_sizing_test.go](../../pkg/repoeval/work_sizing_test.go), [web/backend/api/repository_model_evaluation_controller_test.go](../../web/backend/api/repository_model_evaluation_controller_test.go), [pkg/workflows/immutable_scope_test.go](../../pkg/workflows/immutable_scope_test.go), [pkg/workflows/repository_model_evaluation_native_test.go](../../pkg/workflows/repository_model_evaluation_native_test.go), [pkg/workflows/repository_model_evaluation_workflows_test.go](../../pkg/workflows/repository_model_evaluation_workflows_test.go), [web/frontend/src/components/model-evaluations/model-evaluation-report-page.test.tsx](../../web/frontend/src/components/model-evaluations/model-evaluation-report-page.test.tsx), [web/frontend/src/routes/-model-evaluations-route.test.tsx](../../web/frontend/src/routes/-model-evaluations-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-REPOEVAL-010`, `FR-REPOEVAL-011` | [web/frontend/src/api/model-evaluations.test.ts](../../web/frontend/src/api/model-evaluations.test.ts), [web/frontend/src/components/model-evaluations/model-evaluations-page.test.tsx](../../web/frontend/src/components/model-evaluations/model-evaluations-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |

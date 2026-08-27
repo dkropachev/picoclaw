@@ -79,7 +79,6 @@ Owns: CODE pkg/tools/integration/mcp/**
 Owns: CODE web/backend/api/mcp*
 Owns: CODE web/frontend/src/api/mcp*
 Owns: CODE web/frontend/src/components/agent/mcp/**
-Owns: CODE web/frontend/src/components/collections/pilots/mcp*
 Owns: CODE web/frontend/src/routes/agent/mcp*.tsx
 Owns: CODE pkg/tools/integration/mcp_tool.go
 Owns: CODE pkg/agent/agent_mcp.go

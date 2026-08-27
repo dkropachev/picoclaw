@@ -116,6 +116,25 @@ describe("CollectionResults", () => {
     expect(onInspect).toHaveBeenCalledWith(things[1])
   })
 
+  it("keeps action-only rows keyboard-focusable and opens their context menu", async () => {
+    const user = userEvent.setup()
+    const onInspect = vi.fn()
+    render(
+      <CollectionResults
+        definition={thingDefinition(onInspect)}
+        items={things}
+        view="list"
+      />,
+    )
+
+    await user.tab()
+    expect(item("a")).toHaveFocus()
+    expect(item("a")).toHaveAccessibleName("Alpha")
+    await user.keyboard("{Shift>}{F10}{/Shift}")
+    await user.click(await screen.findByRole("menuitem", { name: "Inspect" }))
+    expect(onInspect).toHaveBeenCalledWith(things[0])
+  })
+
   it("uses the same selection gestures in table and grid views", () => {
     const { rerender } = render(<SelectableResults view="table" />)
     const tableRow = document.querySelector<HTMLElement>('tr[data-item-id="a"]')

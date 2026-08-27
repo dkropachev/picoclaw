@@ -5,7 +5,7 @@ import {
   AgentCollectionPage,
   agentCollectionSearchIsCanonical,
   normalizeAgentCollectionSearch,
-} from "@/components/collections/pilots/agent-collection"
+} from "@/components/agent/agents/agent-collection"
 import type { CollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/agent/agents")({

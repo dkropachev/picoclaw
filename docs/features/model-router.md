@@ -135,8 +135,7 @@ Owns: CODE pkg/config/model_router.go
 Owns: CODE web/backend/api/model_collections.go
 Owns: CODE web/frontend/src/components/models/model-router-sheet.tsx
 Owns: CODE web/frontend/src/components/models/models-page.tsx
-Owns: CODE web/frontend/src/components/collections/pilots/model-collections.tsx
-Owns: CODE web/frontend/src/components/collections/pilots/model-router*
+Owns: CODE web/frontend/src/components/models/model-collections.tsx
 Owns: CODE web/frontend/src/routes/models_*router*.tsx
 Owns: HTTP * /api/model-routers*
 Owns: UI /models/routers*

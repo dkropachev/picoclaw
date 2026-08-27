@@ -2,7 +2,6 @@ import {
   IconAlertTriangle,
   IconEdit,
   IconPlus,
-  IconRefresh,
   IconTrash,
 } from "@tabler/icons-react"
 import {
@@ -31,10 +30,8 @@ import {
 import {
   type CollectionDefinition,
   CollectionDetailShell,
-  CollectionResults,
-  CollectionShell,
-  CollectionToolbar,
 } from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import { RepositoryReviewGuardExpressionEditor } from "@/components/repository-reviews/repository-review-guard-expression-editor"
 import {
   repositoryReviewProfileDefaultQuery,
@@ -59,7 +56,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
   type CollectionRouteSearch,
-  useCollectionRouteState,
+  normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
 const profilesKey = ["repository-review-profiles"] as const
@@ -117,21 +114,17 @@ export function RepositoryReviewProfilesPage({
   onOpen: (profile: RepositoryReviewProfile) => void
   onEdit: (profile: RepositoryReviewProfile) => void
 }) {
-  const routeState = useCollectionRouteState({
-    collectionKey: "repository-review-profiles",
+  const activeQuery = normalizeCollectionRouteSearch(search, {
     defaultQuery: repositoryReviewProfileDefaultQuery,
     supportedViews: repositoryReviewProfileViews,
-    defaultView: "list",
-    search,
-    onSearchChange,
-  })
+  }).q
   const query = useInfiniteQuery({
-    queryKey: [...profilesKey, routeState.query],
+    queryKey: [...profilesKey, activeQuery],
     initialPageParam: "",
     queryFn: ({ pageParam, signal }) =>
       listRepositoryReviewProfilesPage(
         {
-          query: routeState.query,
+          query: activeQuery,
           cursor: pageParam || undefined,
           limit: 50,
         },
@@ -145,12 +138,6 @@ export function RepositoryReviewProfilesPage({
     [query.data?.pages],
   )
   const firstPage = query.data?.pages[0]
-  const commitQuerySuccess = routeState.commitQuerySuccess
-  useEffect(() => {
-    if (firstPage?.canonical_query) {
-      commitQuerySuccess(firstPage.canonical_query)
-    }
-  }, [commitQuerySuccess, firstPage?.canonical_query])
   const definition = useMemo<CollectionDefinition<RepositoryReviewProfile>>(
     () => ({
       key: "repository-review-profiles",
@@ -235,59 +222,30 @@ export function RepositoryReviewProfilesPage({
     [onEdit],
   )
   return (
-    <CollectionShell
-      title="Review profiles"
+    <StandardCollectionPage
+      definition={definition}
+      search={search}
+      onSearchChange={onSearchChange}
+      items={profiles}
       total={firstPage?.total}
-      resultsRef={routeState.setScrollContainerRef}
-      onResultsScroll={routeState.onResultsScroll}
-      actions={
-        <>
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="outline"
-            disabled={query.isFetching}
-            aria-label="Refresh review profiles"
-            title="Refresh"
-            onClick={() => void query.refetch()}
-          >
-            <IconRefresh />
-          </Button>
-          <Button type="button" size="sm" onClick={onAdd}>
-            <IconPlus /> New profile
-          </Button>
-        </>
+      schema={firstPage?.query_schema}
+      canonicalQuery={firstPage?.canonical_query}
+      loading={query.isLoading}
+      fetching={query.isFetching}
+      error={query.error}
+      onRefresh={query.refetch}
+      hasNextPage={query.hasNextPage}
+      loadingMore={query.isFetchingNextPage}
+      onLoadMore={query.fetchNextPage}
+      onOpenItem={onOpen}
+      addAction={
+        <Button type="button" size="sm" onClick={onAdd}>
+          <IconPlus /> New profile
+        </Button>
       }
-      toolbar={
-        <CollectionToolbar
-          activeQuery={routeState.query}
-          defaultQuery={repositoryReviewProfileDefaultQuery}
-          schema={firstPage?.query_schema}
-          queryError={collectionQueryError(query.error)}
-          onApplyQuery={routeState.applyQuery}
-          view={routeState.view}
-          supportedViews={routeState.supportedViews}
-          recentQueries={routeState.recentQueries}
-          onClearHistory={routeState.clearHistory}
-          onViewChange={routeState.setView}
-        />
-      }
-    >
-      <CollectionResults
-        definition={definition}
-        items={profiles}
-        view={routeState.view}
-        loading={query.isLoading}
-        error={errorMessage(query.error) || undefined}
-        onRetry={() => void query.refetch()}
-        onOpenItem={onOpen}
-        hasNextPage={query.hasNextPage}
-        loadingMore={query.isFetchingNextPage}
-        onLoadMore={() => void query.fetchNextPage()}
-        emptyTitle="No review profiles"
-        emptyDescription="Create a reusable review policy before assigning a repository."
-      />
-    </CollectionShell>
+      emptyTitle="No review profiles"
+      emptyDescription="Create a reusable review policy before assigning a repository."
+    />
   )
 }
 
@@ -1315,21 +1273,6 @@ function formatTimestamp(value: string): string {
   return Number.isNaN(date.valueOf())
     ? value || "Not reported"
     : date.toLocaleString()
-}
-
-function collectionQueryError(
-  error: unknown,
-): { position: number; message: string } | undefined {
-  if (!error || typeof error !== "object") return undefined
-  const candidate = error as { position?: unknown; message?: unknown }
-  if (typeof candidate.position !== "number") return undefined
-  return {
-    position: candidate.position,
-    message:
-      typeof candidate.message === "string"
-        ? candidate.message
-        : "Invalid collection query",
-  }
 }
 
 function ProfileDetailRows({ rows }: { rows: Array<[string, string]> }) {

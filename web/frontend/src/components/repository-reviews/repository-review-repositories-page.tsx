@@ -3,7 +3,6 @@ import {
   IconEdit,
   IconListDetails,
   IconPlus,
-  IconRefresh,
   IconTrash,
 } from "@tabler/icons-react"
 import {
@@ -12,7 +11,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query"
-import { type FormEvent, useEffect, useMemo, useState } from "react"
+import { type FormEvent, useMemo, useState } from "react"
 
 import {
   RepositoryReviewAPIError,
@@ -29,10 +28,8 @@ import {
 import {
   type CollectionDefinition,
   CollectionDetailShell,
-  CollectionResults,
-  CollectionShell,
-  CollectionToolbar,
 } from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
 import {
   repositoryReviewRepositoryDefaultQuery,
   repositoryReviewRepositoryViews,
@@ -55,7 +52,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
   type CollectionRouteSearch,
-  useCollectionRouteState,
+  normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
 const repositoriesKey = ["repository-review-automations"] as const
@@ -86,21 +83,17 @@ export function RepositoryReviewRepositoriesPage({
   onEdit: (repository: RepositoryReviewAutomation) => void
   onOpenFindings: (repository: RepositoryReviewAutomation) => void
 }) {
-  const routeState = useCollectionRouteState({
-    collectionKey: "repository-review-repositories",
+  const activeQuery = normalizeCollectionRouteSearch(search, {
     defaultQuery: repositoryReviewRepositoryDefaultQuery,
     supportedViews: repositoryReviewRepositoryViews,
-    defaultView: "list",
-    search,
-    onSearchChange,
-  })
+  }).q
   const query = useInfiniteQuery({
-    queryKey: [...repositoriesKey, "configurations", routeState.query],
+    queryKey: [...repositoriesKey, "configurations", activeQuery],
     initialPageParam: "",
     queryFn: ({ pageParam, signal }) =>
       listRepositoryReviewAutomationsPage(
         {
-          query: routeState.query,
+          query: activeQuery,
           cursor: pageParam || undefined,
           limit: 50,
         },
@@ -114,13 +107,6 @@ export function RepositoryReviewRepositoriesPage({
     [query.data?.pages],
   )
   const firstPage = query.data?.pages[0]
-  const commitQuerySuccess = routeState.commitQuerySuccess
-
-  useEffect(() => {
-    if (firstPage?.canonical_query) {
-      commitQuerySuccess(firstPage.canonical_query)
-    }
-  }, [commitQuerySuccess, firstPage?.canonical_query])
 
   const definition = useMemo<CollectionDefinition<RepositoryReviewAutomation>>(
     () => ({
@@ -210,59 +196,30 @@ export function RepositoryReviewRepositoriesPage({
   )
 
   return (
-    <CollectionShell
-      title="Review repositories"
+    <StandardCollectionPage
+      definition={definition}
+      search={search}
+      onSearchChange={onSearchChange}
+      items={repositories}
       total={firstPage?.total}
-      resultsRef={routeState.setScrollContainerRef}
-      onResultsScroll={routeState.onResultsScroll}
-      actions={
-        <>
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="outline"
-            disabled={query.isFetching}
-            aria-label="Refresh review repositories"
-            title="Refresh"
-            onClick={() => void query.refetch()}
-          >
-            <IconRefresh />
-          </Button>
-          <Button type="button" size="sm" onClick={onAdd}>
-            <IconPlus /> Add repository
-          </Button>
-        </>
+      schema={firstPage?.query_schema}
+      canonicalQuery={firstPage?.canonical_query}
+      loading={query.isLoading}
+      fetching={query.isFetching}
+      error={query.error}
+      onRefresh={query.refetch}
+      hasNextPage={query.hasNextPage}
+      loadingMore={query.isFetchingNextPage}
+      onLoadMore={query.fetchNextPage}
+      onOpenItem={onOpen}
+      addAction={
+        <Button type="button" size="sm" onClick={onAdd}>
+          <IconPlus /> Add repository
+        </Button>
       }
-      toolbar={
-        <CollectionToolbar
-          activeQuery={routeState.query}
-          defaultQuery={repositoryReviewRepositoryDefaultQuery}
-          schema={firstPage?.query_schema}
-          queryError={collectionQueryError(query.error)}
-          onApplyQuery={routeState.applyQuery}
-          view={routeState.view}
-          supportedViews={routeState.supportedViews}
-          recentQueries={routeState.recentQueries}
-          onClearHistory={routeState.clearHistory}
-          onViewChange={routeState.setView}
-        />
-      }
-    >
-      <CollectionResults
-        definition={definition}
-        items={repositories}
-        view={routeState.view}
-        loading={query.isLoading}
-        error={query.error instanceof Error ? query.error.message : undefined}
-        onRetry={() => void query.refetch()}
-        onOpenItem={onOpen}
-        hasNextPage={query.hasNextPage}
-        loadingMore={query.isFetchingNextPage}
-        onLoadMore={() => void query.fetchNextPage()}
-        emptyTitle="No repository configured"
-        emptyDescription="Add a repository and assign a review profile."
-      />
-    </CollectionShell>
+      emptyTitle="No repository configured"
+      emptyDescription="Add a repository and assign a review profile."
+    />
   )
 }
 
@@ -717,21 +674,6 @@ function formatTimestamp(value: string): string {
   return Number.isNaN(date.valueOf())
     ? value || "Not reported"
     : date.toLocaleString()
-}
-
-function collectionQueryError(
-  error: unknown,
-): { position: number; message: string } | undefined {
-  if (!error || typeof error !== "object") return undefined
-  const candidate = error as { position?: unknown; message?: unknown }
-  if (typeof candidate.position !== "number") return undefined
-  return {
-    position: candidate.position,
-    message:
-      typeof candidate.message === "string"
-        ? candidate.message
-        : "Invalid collection query",
-  }
 }
 
 function errorMessage(error: unknown): string {

@@ -24,6 +24,10 @@ Item identity   concise metadata   status/time
 Click selects · Shift-click extends · double-click opens · right-click shows actions
 ```
 
+Refresh, Add, selection, and bulk deletion appear only when the collection
+definition and feature controller provide those capabilities. Item actions are
+likewise metadata-driven rather than hard-coded into the shared page.
+
 A collection route owns one resource type and summary data only. Related counts
 may link elsewhere. It must not embed an unrelated list, global settings, a
 creation form, an editor, or an item's complete configuration payload.
@@ -32,23 +36,33 @@ creation form, an editor, or an item's complete configuration payload.
 
 The collection subsystem provides:
 
+- `StandardCollectionPage`, the production controller that composes the shared
+  shell, toolbar, results, optional selection and confirmation flow, paging,
+  refresh, creation, and metadata-defined item actions;
 - `CollectionShell`, `CollectionToolbar`, `CollectionQueryInput`,
   `CollectionResults`, `CollectionSelectionBar`, and `CollectionDetailShell`;
 - typed `CollectionDefinition<T>` metadata for stable IDs, identity, columns,
   Grid facts, badges, supported actions, and supported views;
-- `useCollectionRouteState` for canonical URL/local state, cursor loading,
-  explicit selection, scroll restoration, and mutation reconciliation;
+- `useCollectionRouteState` for canonical URL state and browser/in-memory state:
+  query and view preference, recent queries, explicit selection, scroll
+  restoration, and mutation reconciliation;
 - shared row-selection, context-menu, table, view-switch, loading, empty, and error primitives built
   on the existing shadcn/Radix layer.
 
-Feature route components stay thin. They provide API functions, resource
-metadata, and specialized detail/editor content; they do not recreate collection
-infrastructure.
+Feature controllers own React Query fetching and cursor paging. They flatten
+loaded pages and pass items, totals, schema, canonical query, loading/error
+state, next-page state, refresh, and applicable mutations to
+`StandardCollectionPage`. Route components stay thin and provide search-state
+adapters, resource metadata, navigation, and specialized detail/editor content;
+they do not recreate collection infrastructure.
 
 ## Views And Responsive Layout
 
 - Compact List is the default. Users may choose List, Table, or Grid when the
   surface supports them.
+- Administrative collections support all three views. Operational collections
+  rendered through the shared subsystem may be registered as reviewed
+  exemptions and support List and Table only.
 - URL parameter `view` overrides the browser-local preference. The preferred
   view is stored separately per collection.
 - Rows are 56–72 px high. Table headers are sticky. Table collapses to compact
@@ -84,6 +98,11 @@ maximum page size 200.
   Generic query code never interpolates SQL or bypasses feature validation.
 - Opaque cursors bind the canonical query, ordering, final sort values, and
   stable item ID. A cursor from another canonical query is rejected.
+- Every summary exposes a stable URL-safe `id`. Clients treat it as opaque. If
+  a natural identity is unsafe for a path segment, the backend generates a
+  fixed-length deterministic unpadded base64url digest over the resource
+  namespace and canonical identity, then resolves it against bounded canonical
+  candidates; clients never reconstruct it.
 - Selection contains only explicitly selected stable IDs. A plain row click
   replaces selection, Shift-click extends a contiguous range, Control/Command
   toggles individual rows, double-click or Enter opens detail, and right-click
@@ -140,8 +159,10 @@ list responses also contain:
 ```
 
 Each schema field declares name, type, operators, sortability, and bounded
-suggested values. Each pilot provides a stable name/ID detail endpoint. Bulk
-delete returns:
+suggested values. Every summary and direct-detail response uses the same stable,
+URL-safe ID. Each collection provides an ID-addressed detail endpoint; the
+backend is solely responsible for encoding and resolving opaque IDs. Bulk delete
+returns:
 
 ```json
 {
@@ -160,10 +181,14 @@ catalog lock and deletes only version-matching drafts.
 ## Governance And Evidence
 
 `web/frontend/collection-surfaces.json` is the auditable inventory. `standard`
-entries must use the shared shell and register required routes. A base/head delta
-guard rejects new `legacy` entries and requires a modified legacy implementation
-to migrate to `standard`. `exempt` entries require a specific rationale and are
-not an escape hatch for ordinary administrative collections.
+entries must use `StandardCollectionPage` and declare complete route,
+capability, view, owning-spec, and implementation-glob metadata. A base/head
+delta guard rejects new `legacy` entries and requires a modified legacy
+implementation to migrate to `standard`. `exempt` entries require a specific
+rationale and are not an escape hatch for ordinary administrative collections.
+Workflow runs and Git workspace history are operational exemptions: they are
+not administrative inventories, but still render with the shared page and
+collection primitives and support List and Table.
 
 PR validation runs formatting, ESLint/UI rules, the collection delta guard,
 Vitest, the production build, mocked Playwright smoke tests, and deterministic

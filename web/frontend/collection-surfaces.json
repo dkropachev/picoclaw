@@ -10,7 +10,7 @@
         "src/routes/models.aliases*.tsx",
         "src/routes/models/aliases*.tsx",
         "src/components/models/model-alias*.tsx",
-        "src/components/collections/pilots/**"
+        "src/components/models/model-collections.tsx"
       ],
       "capabilities": [
         "query",
@@ -39,7 +39,7 @@
         "src/routes/models.routers*.tsx",
         "src/routes/models/routers*.tsx",
         "src/components/models/model-router*.tsx",
-        "src/components/collections/pilots/**"
+        "src/components/models/model-collections.tsx"
       ],
       "capabilities": [
         "query",
@@ -65,8 +65,7 @@
       "owningSpec": "docs/features/mcp-integration.md",
       "implementationGlobs": [
         "src/routes/agent/mcp*.tsx",
-        "src/components/agent/mcp/**",
-        "src/components/collections/pilots/**"
+        "src/components/agent/mcp/**"
       ],
       "capabilities": [
         "query",
@@ -94,8 +93,7 @@
       "owningSpec": "docs/features/agent-conversations.md",
       "implementationGlobs": [
         "src/routes/agent/agents*.tsx",
-        "src/components/agent/agents/**",
-        "src/components/collections/pilots/**"
+        "src/components/agent/agents/**"
       ],
       "capabilities": [
         "query",
@@ -126,8 +124,7 @@
       "owningSpec": "docs/features/repository-model-evaluations.md",
       "implementationGlobs": [
         "src/routes/model-evaluations*.tsx",
-        "src/components/model-evaluations/**",
-        "src/components/collections/pilots/**"
+        "src/components/model-evaluations/**"
       ],
       "capabilities": [
         "query",
@@ -189,7 +186,9 @@
       "route": "/development",
       "owningSpec": "docs/features/event-automation.md",
       "implementationGlobs": [
-        "src/routes/development*.tsx",
+        "src/routes/development.tsx",
+        "src/routes/development_.new.tsx",
+        "src/routes/development_.$workspaceID.tsx",
         "src/components/development-workspaces/**"
       ],
       "capabilities": ["create", "detail"],

@@ -452,11 +452,17 @@ function useCollectionInteractions<T>({
     itemProps: (item, index) => {
       const id = itemID(item)
       const selected = selection?.selectedIDs.has(id) ?? false
-      const focusable = selection != null || onOpenItem != null
+      const hasVisibleActions = (definition.actions ?? []).some(
+        (action) => !action.hidden?.(item),
+      )
+      const hasContextMenu = onOpenItem != null || hasVisibleActions
+      const focusable = selection != null || hasContextMenu
       return {
         tabIndex: focusable ? 0 : undefined,
         "aria-label": focusable
-          ? `${definition.getItemLabel(item)}. ${selected ? "Selected" : "Not selected"}.`
+          ? selection
+            ? `${definition.getItemLabel(item)}. ${selected ? "Selected" : "Not selected"}.`
+            : definition.getItemLabel(item)
           : undefined,
         "aria-describedby": selection ? instructionsID : undefined,
         onClick: selection
@@ -483,6 +489,20 @@ function useCollectionInteractions<T>({
         onKeyDown: focusable
           ? (event) => {
               if (event.target !== event.currentTarget) return
+              if (
+                hasContextMenu &&
+                (event.key === "ContextMenu" ||
+                  (event.key === "F10" && event.shiftKey))
+              ) {
+                event.preventDefault()
+                event.currentTarget.dispatchEvent(
+                  new globalThis.MouseEvent("contextmenu", {
+                    bubbles: true,
+                    cancelable: true,
+                  }),
+                )
+                return
+              }
               if (event.key === "Enter" && onOpenItem) {
                 event.preventDefault()
                 onOpenItem(item)
