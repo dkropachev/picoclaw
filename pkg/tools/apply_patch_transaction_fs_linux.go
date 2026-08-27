@@ -52,6 +52,18 @@ func applyPatchTxnPlatformIdentityFromFileInfo(
 	}, nil
 }
 
+func applyPatchTxnPlatformSameFileSnapshot(expected, current os.FileInfo) bool {
+	if expected == nil || current == nil || !os.SameFile(expected, current) ||
+		expected.Mode() != current.Mode() || expected.Size() != current.Size() {
+		return false
+	}
+	expectedStat, expectedOK := expected.Sys().(*syscall.Stat_t)
+	currentStat, currentOK := current.Sys().(*syscall.Stat_t)
+	return expectedOK && currentOK && expectedStat != nil && currentStat != nil &&
+		expectedStat.Ctim.Sec == currentStat.Ctim.Sec &&
+		expectedStat.Ctim.Nsec == currentStat.Ctim.Nsec
+}
+
 func openApplyPatchTxnPlatformAnchor(
 	canonical string,
 ) (applyPatchTxnPlatformAnchor, applyPatchTxnIdentity, error) {
@@ -312,20 +324,45 @@ func applyPatchTxnPlatformRemoveExact(
 	} else {
 		return removalErr
 	}
-	expectedRemovalLinks := removal.Links
+	expectedKind := "regular"
+	if directory {
+		expectedKind = "directory"
+	}
+	pinnedFD, pinErr := unix.Openat(
+		anchor.fd,
+		removalName,
+		unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if pinErr != nil {
+		return fmt.Errorf("pin apply-patch transaction removal: %w", pinErr)
+	}
+	defer unix.Close(pinnedFD)
+	pinned, pinErr := applyPatchTxnStateFromFD(pinnedFD, expectedKind)
+	if pinErr != nil || !pinned.Identity.equal(expected) || pinned.Links != removal.Links {
+		return errors.Join(
+			errors.New("apply-patch transaction removal quarantine changed"),
+			pinErr,
+		)
+	}
+	expectedRemovalLinks := pinned.Links
 	if afterQuarantine != nil {
 		if err := afterQuarantine(); err != nil {
 			return err
 		}
 	}
 	removal, removalErr = applyPatchTxnPlatformInspectAt(anchor, removalName)
-	if removalErr != nil || !removal.Identity.equal(expected) ||
+	pinned, pinErr = applyPatchTxnStateFromFD(pinnedFD, expectedKind)
+	if removalErr != nil || pinErr != nil || !removal.Identity.equal(expected) ||
+		!removal.Identity.equal(pinned.Identity) ||
 		removal.Links != expectedRemovalLinks ||
+		pinned.Links != expectedRemovalLinks ||
 		directory && removal.Identity.Kind != "directory" ||
 		!directory && removal.Identity.Kind != "regular" {
 		return errors.Join(
 			errors.New("apply-patch transaction removal quarantine changed"),
 			removalErr,
+			pinErr,
 		)
 	}
 	_, sourceErr := applyPatchTxnPlatformInspectAt(anchor, name)

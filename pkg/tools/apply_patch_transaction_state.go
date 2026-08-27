@@ -906,10 +906,11 @@ func ensureApplyPatchTransactionWorkspaceBinding(
 	if err != nil {
 		return err
 	}
-	existing, _, readErr := readApplyPatchTransactionPrivateRegular(
+	existing, existingInfo, readErr := readApplyPatchTransactionPrivateRegularBounded(
 		root,
 		applyPatchTransactionWorkspaceBindingFile,
-		len(binding),
+		len(applyPatchTransactionWorkspaceBindingMagic)+4+
+			applyPatchTransactionWorkspacePathLimit+sha256.Size,
 	)
 	if errors.Is(readErr, os.ErrNotExist) {
 		if err = publishApplyPatchTransactionPrivateRegular(
@@ -920,10 +921,11 @@ func ensureApplyPatchTransactionWorkspaceBinding(
 		); err != nil {
 			return err
 		}
-		existing, _, readErr = readApplyPatchTransactionPrivateRegular(
+		existing, existingInfo, readErr = readApplyPatchTransactionPrivateRegularBounded(
 			root,
 			applyPatchTransactionWorkspaceBindingFile,
-			len(binding),
+			len(applyPatchTransactionWorkspaceBindingMagic)+4+
+				applyPatchTransactionWorkspacePathLimit+sha256.Size,
 		)
 	}
 	if readErr != nil {
@@ -933,8 +935,18 @@ func ensureApplyPatchTransactionWorkspaceBinding(
 		existing,
 		authentication,
 	)
-	if err != nil || boundWorkspace != canonicalWorkspace {
+	if err != nil {
 		return errors.New("apply-patch transaction workspace binding conflict")
+	}
+	if boundWorkspace != canonicalWorkspace {
+		if err := rebindIdleApplyPatchTransactionWorkspace(
+			root,
+			rootPath,
+			existingInfo,
+			binding,
+		); err != nil {
+			return err
+		}
 	}
 	return cleanupApplyPatchTransactionPrivateStage(
 		root,
@@ -942,6 +954,56 @@ func ensureApplyPatchTransactionWorkspaceBinding(
 		applyPatchTransactionWorkspaceBindingFile,
 		binding,
 		false,
+	)
+}
+
+// rebindIdleApplyPatchTransactionWorkspace handles physical inode reuse only
+// after the caller holds that identity's kernel lock. A path change with any
+// transaction, cleanup, or alien state still fails closed; the two persistent
+// control files alone carry no recovery decision and may be rebound safely.
+func rebindIdleApplyPatchTransactionWorkspace(
+	root *os.Root,
+	rootPath string,
+	existingInfo os.FileInfo,
+	binding []byte,
+) error {
+	if root == nil || existingInfo == nil {
+		return errors.New("apply-patch transaction workspace binding conflict")
+	}
+	entries, err := readApplyPatchTxnRootEntries(root)
+	if err != nil {
+		return err
+	}
+	seenBinding := false
+	seenLock := false
+	for _, entry := range entries {
+		switch entry.Name() {
+		case applyPatchTransactionWorkspaceBindingFile:
+			seenBinding = true
+		case applyPatchTransactionWorkspaceLockFile:
+			seenLock = true
+		default:
+			return errors.New("apply-patch transaction workspace binding conflict")
+		}
+	}
+	if !seenBinding || !seenLock || len(entries) != 2 {
+		return errors.New("apply-patch transaction workspace binding conflict")
+	}
+	if err := removeApplyPatchTransactionExactRootEntry(
+		root,
+		applyPatchTransactionWorkspaceBindingFile,
+		existingInfo,
+	); err != nil {
+		return err
+	}
+	if err := fileutil.SyncDirectory(rootPath); err != nil {
+		return err
+	}
+	return publishApplyPatchTransactionPrivateRegular(
+		root,
+		rootPath,
+		applyPatchTransactionWorkspaceBindingFile,
+		binding,
 	)
 }
 

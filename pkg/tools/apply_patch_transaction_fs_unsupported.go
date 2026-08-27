@@ -19,6 +19,12 @@ func applyPatchTxnPlatformIdentityFromFileInfo(
 	return applyPatchTxnIdentity{}, errApplyPatchTransactionUnsupported
 }
 
+func applyPatchTxnPlatformSameFileSnapshot(expected, current os.FileInfo) bool {
+	return expected != nil && current != nil && os.SameFile(expected, current) &&
+		expected.Mode() == current.Mode() && expected.Size() == current.Size() &&
+		expected.ModTime().Equal(current.ModTime())
+}
+
 func openApplyPatchTxnPlatformAnchor(string) (
 	applyPatchTxnPlatformAnchor,
 	applyPatchTxnIdentity,

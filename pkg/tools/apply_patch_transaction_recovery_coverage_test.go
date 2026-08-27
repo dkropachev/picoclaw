@@ -413,6 +413,11 @@ func TestApplyPatchTransactionRecoveryCoverageVirtualRemovalViews(t *testing.T) 
 	); err != nil || name != location.RemovalBasename || !present {
 		t.Fatalf("virtual removal quarantine = %q, %v, %v", name, present, err)
 	}
+	held, err := os.Open(filepath.Join(directory, location.RemovalBasename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
 	if err := os.Remove(filepath.Join(directory, location.RemovalBasename)); err != nil {
 		t.Fatal(err)
 	}

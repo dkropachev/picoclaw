@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -111,7 +112,12 @@ func TestApplyPatchTransactionStateOpenCloseoutFenceAndLockedFile(t *testing.T) 
 	if prepareErr != nil {
 		t.Fatal(prepareErr)
 	}
-	if err := os.Chmod(parent, 0o755); err != nil {
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedMode := parentInfo.Mode().Perm() ^ 0o100
+	if err := os.Chmod(parent, changedMode); err != nil {
 		t.Fatal(err)
 	}
 	if err := revalidateApplyPatchTransactionStateFences(prepared); err == nil {
@@ -240,6 +246,15 @@ func TestApplyPatchTransactionStateOpenCloseoutWorkspaceDirectoryConflicts(t *te
 		if err := os.WriteFile(
 			filepath.Join(directory, applyPatchTransactionWorkspaceBindingFile),
 			wrongBinding, 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(
+			filepath.Join(
+				directory,
+				applyPatchTransactionActiveNamePrefix+strings.Repeat("b", 32),
+			),
+			0o700,
 		); err != nil {
 			t.Fatal(err)
 		}

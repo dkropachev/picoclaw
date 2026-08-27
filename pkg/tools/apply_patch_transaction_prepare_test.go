@@ -79,6 +79,11 @@ func TestApplyPatchTransactionIntentRejectsSourceABA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
 	removeErr := os.Remove(path)
 	if removeErr != nil {
 		t.Fatal(removeErr)

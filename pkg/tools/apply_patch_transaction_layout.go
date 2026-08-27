@@ -45,6 +45,10 @@ func openApplyPatchTxnExistingRegular(
 	if err != nil {
 		return nil, err
 	}
+	currentInfo, err := os.Lstat(path)
+	if err != nil || !applyPatchTxnPlatformSameFileSnapshot(expected, currentInfo) {
+		return nil, errors.New("apply-patch transaction source changed")
+	}
 	anchor, err := openApplyPatchTxnAnchor(filepath.Dir(path))
 	if err != nil {
 		return nil, err
@@ -57,6 +61,11 @@ func openApplyPatchTxnExistingRegular(
 			errors.New("apply-patch transaction source changed"),
 			err,
 		)
+	}
+	afterInfo, err := os.Lstat(path)
+	if err != nil || !applyPatchTxnPlatformSameFileSnapshot(expected, afterInfo) {
+		_ = anchor.Close()
+		return nil, errors.New("apply-patch transaction source changed")
 	}
 	return &applyPatchTxnEndpoint{
 		anchor: anchor, basename: basename, state: state,

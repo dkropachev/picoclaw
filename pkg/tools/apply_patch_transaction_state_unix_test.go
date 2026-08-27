@@ -307,9 +307,9 @@ func TestApplyPatchTransactionWorkspaceRenameKeepsPhysicalLockIdentity(t *testin
 		t.Fatal(err)
 	}
 	renamed := workspace + "-renamed"
-	if err := os.Rename(workspace, renamed); err != nil {
+	if renameErr := os.Rename(workspace, renamed); renameErr != nil {
 		_ = lockA.Close()
-		t.Fatal(err)
+		t.Fatal(renameErr)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -321,15 +321,72 @@ func TestApplyPatchTransactionWorkspaceRenameKeepsPhysicalLockIdentity(t *testin
 		_ = lockA.Close()
 		t.Fatalf("renamed physical workspace bypassed live lock: lock=%v err=%v", lockB, lockErr)
 	}
-	if err := lockA.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := lockA.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	lockB, lockErr := stateB.lockWorkspace(context.Background(), renamed)
-	if lockB != nil {
-		_ = lockB.Close()
+	if lockErr != nil || lockB == nil {
+		t.Fatalf("idle renamed workspace did not rebind: lock=%v err=%v", lockB, lockErr)
 	}
-	if lockErr == nil {
-		t.Fatalf("renamed workspace did not fail closed on old recovery binding: %v", lockErr)
+	directory, err := lockB.directoryPath()
+	if err != nil {
+		_ = lockB.Close()
+		t.Fatal(err)
+	}
+	binding, err := os.ReadFile(filepath.Join(
+		directory,
+		applyPatchTransactionWorkspaceBindingFile,
+	))
+	if err != nil {
+		_ = lockB.Close()
+		t.Fatal(err)
+	}
+	bound, err := decodeApplyPatchTransactionWorkspaceBinding(
+		binding,
+		stateB.authentication,
+	)
+	if err != nil || bound != renamed {
+		_ = lockB.Close()
+		t.Fatalf("rebound workspace = %q, %v; want %q", bound, err, renamed)
+	}
+	if err := lockB.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyPatchTransactionWorkspaceRenameWithRecoveryStateFailsClosed(t *testing.T) {
+	workspace, prepared := newApplyPatchTransactionStateFixture(t)
+	state, err := openApplyPatchTransactionState(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	locked, err := state.lockWorkspace(context.Background(), workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := locked.directoryPath()
+	if err != nil {
+		_ = locked.Close()
+		t.Fatal(err)
+	}
+	if err := locked.Close(); err != nil {
+		t.Fatal(err)
+	}
+	activeName := applyPatchTransactionActiveNamePrefix + strings.Repeat("a", 32)
+	if err := os.Mkdir(filepath.Join(directory, activeName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	renamed := workspace + "-renamed"
+	if err := os.Rename(workspace, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if rebound, lockErr := state.lockWorkspace(context.Background(), renamed); lockErr == nil ||
+		rebound != nil {
+		if rebound != nil {
+			_ = rebound.Close()
+		}
+		t.Fatalf("workspace with recovery state rebound: lock=%v err=%v", rebound, lockErr)
 	}
 }
 
