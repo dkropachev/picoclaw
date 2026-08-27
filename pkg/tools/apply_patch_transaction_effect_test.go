@@ -164,6 +164,7 @@ func TestApplyPatchTransactionNoReplaceConflictPreservesAlienTarget(t *testing.T
 
 func buildApplyPatchTxnTestPlan(t *testing.T, workspace string, patch string) *applyPatchPlan {
 	t.Helper()
+	isolateApplyPatchDefaultTransactionState(t)
 	operations, err := parseCodexPatchContext(context.Background(), patch)
 	if err != nil {
 		t.Fatal(err)
@@ -178,6 +179,23 @@ func buildApplyPatchTxnTestPlan(t *testing.T, workspace string, patch string) *a
 		t.Fatal(err)
 	}
 	return plan
+}
+
+func TestBuildApplyPatchTxnTestPlanIsolatesDefaultTransactionState(t *testing.T) {
+	isolateApplyPatchDefaultTransactionState(t)
+	sharedDefaultStateRoot := defaultApplyPatchTransactionStateRoot()
+	workspace := t.TempDir()
+	plan := buildApplyPatchTxnTestPlan(
+		t,
+		workspace,
+		"*** Begin Patch\n*** Add File: target.txt\n+candidate\n*** End Patch",
+	)
+	if err := os.MkdirAll(sharedDefaultStateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := revalidateApplyPatchPlan(context.Background(), plan); err != nil {
+		t.Fatalf("default transaction state changed isolated plan: %v", err)
+	}
 }
 
 func assertApplyPatchTxnTestFile(

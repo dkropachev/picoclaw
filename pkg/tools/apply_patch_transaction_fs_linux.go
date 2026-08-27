@@ -48,7 +48,10 @@ func applyPatchTxnPlatformIdentityFromFileInfo(
 		)
 	}
 	return applyPatchTxnIdentity{
-		Device: stat.Dev, File: stat.Ino, Kind: kind,
+		// Stat_t.Dev is uint32 on some supported Linux architectures.
+		Device: uint64(stat.Dev), //nolint:unconvert
+		File:   stat.Ino,
+		Kind:   kind,
 	}, nil
 }
 
@@ -127,7 +130,10 @@ func applyPatchTxnPlatformAnchorIdentity(
 		return applyPatchTxnIdentity{}, errors.New("apply-patch transaction anchor is unavailable")
 	}
 	return applyPatchTxnIdentity{
-		Device: stat.Dev, File: stat.Ino, Kind: "directory",
+		// Stat_t.Dev is uint32 on some supported Linux architectures.
+		Device: uint64(stat.Dev), //nolint:unconvert
+		File:   stat.Ino,
+		Kind:   "directory",
 	}, nil
 }
 
@@ -516,9 +522,15 @@ func applyPatchTxnStateFromFD(
 	}
 	return applyPatchTxnObjectState{
 		Identity: applyPatchTxnIdentity{
-			Device: stat.Dev, File: stat.Ino, Kind: kind,
+			// Stat_t.Dev is uint32 on some supported Linux architectures.
+			Device: uint64(stat.Dev), //nolint:unconvert
+			File:   stat.Ino,
+			Kind:   kind,
 		},
-		Mode: mode, Links: stat.Nlink, Size: stat.Size,
+		Mode: mode,
+		// Stat_t.Nlink is uint32 on some supported Linux architectures.
+		Links: uint64(stat.Nlink), //nolint:unconvert
+		Size:  stat.Size,
 	}, nil
 }
 
