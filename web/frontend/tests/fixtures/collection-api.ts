@@ -107,6 +107,30 @@ const querySchemas = {
     field("parallel", "number"),
     field("updated", "timestamp"),
   ]),
+  skills: schema([
+    field("name", "string"),
+    field("source", "enum", ["workspace", "global", "builtin"]),
+    field("origin", "enum", ["builtin", "manual", "third_party"]),
+    field("registry", "string"),
+    field("version", "string"),
+    field("installed_at", "number"),
+  ]),
+  tools: schema([
+    field("name", "string"),
+    field("category", "enum", [
+      "agents",
+      "automation",
+      "communication",
+      "discovery",
+      "filesystem",
+      "hardware",
+      "skills",
+      "web",
+    ]),
+    field("status", "enum", ["enabled", "disabled", "blocked"]),
+    field("reason", "string"),
+    field("config_key", "string"),
+  ]),
 }
 
 export const accountVisualIDs = {
@@ -214,6 +238,86 @@ const accountRouterSummaries = accountRouters.map((router) => ({
   accounts: router.accounts.length,
   blocks: router.blocks.length,
 }))
+
+export const skillToolVisualIDs = {
+  skill: "c2tpbGwAcmV2aWV3LWhlbHBlcg",
+  tool: "dG9vbAB3ZWJfc2VhcmNo",
+} as const
+
+const skills = [
+  {
+    id: "c2tpbGwAY29kZS1yZXZpZXc",
+    name: "code-review",
+    path: "/usr/share/picoclaw/skills/code-review",
+    source: "builtin",
+    description: "Inspect changes for correctness and maintainability.",
+    origin: "builtin",
+    origin_kind: "builtin",
+    version: "bundled",
+    installed_version: "bundled",
+    removable: false,
+  },
+  {
+    id: "c2tpbGwAZGVwbG95LWNoZWNrbGlzdA",
+    name: "deploy-checklist",
+    path: "/opt/picoclaw/skills/deploy-checklist",
+    source: "global",
+    description: "Prepare a safe deployment checklist.",
+    origin: "manual",
+    origin_kind: "manual",
+    version: "1.7.0",
+    installed_version: "1.7.0",
+    installed_at: 1_776_864_600_000,
+    removable: false,
+  },
+  {
+    id: skillToolVisualIDs.skill,
+    name: "review-helper",
+    path: "/workspace/skills/review-helper",
+    source: "workspace",
+    description: "Review code changes with repository-aware checks.",
+    origin: "third_party",
+    origin_kind: "third_party",
+    registry: "clawhub",
+    registry_name: "clawhub",
+    registry_url: "https://clawhub.example.test/skills/review-helper",
+    version: "2.4.1",
+    installed_version: "2.4.1",
+    installed_at: 1_777_296_600_000,
+    removable: true,
+  },
+] as const
+
+const tools = [
+  {
+    id: "dG9vbABzZW5kX3R0cw",
+    name: "send_tts",
+    description: "Generate and deliver speech to the active channel.",
+    category: "communication",
+    config_key: "tools.send_tts",
+    status: "disabled",
+    reason: "Disabled in configuration.",
+    reason_code: "configured_disabled",
+  },
+  {
+    id: "dG9vbABpbnN0YWxsX3NraWxs",
+    name: "install_skill",
+    description: "Install a skill from a configured registry.",
+    category: "skills",
+    config_key: "tools.install_skill",
+    status: "blocked",
+    reason: "No writable workspace skill directory is configured.",
+    reason_code: "dependency_unavailable",
+  },
+  {
+    id: skillToolVisualIDs.tool,
+    name: "web_search",
+    description: "Search configured web providers for current information.",
+    category: "web",
+    config_key: "tools.web_search",
+    status: "enabled",
+  },
+] as const
 
 const oauthProviders = [
   {
@@ -961,6 +1065,25 @@ export async function installCollectionVisualMocks(
               url.searchParams.get("query") ?? "ALL ORDER BY name ASC",
             query_schema: querySchemas.reviewProfiles,
           })
+        case "/api/skills":
+          return json(route, {
+            skills: state === "empty" ? [] : skills,
+            total: state === "empty" ? 0 : skills.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: querySchemas.skills,
+          })
+        case "/api/tools":
+          return json(route, {
+            tools: state === "empty" ? [] : tools,
+            total: state === "empty" ? 0 : tools.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ??
+              "ORDER BY category ASC, name ASC",
+            query_schema: querySchemas.tools,
+          })
         case "/api/accounts/models":
           return json(route, modelOptions())
       }
@@ -1132,6 +1255,23 @@ export async function installCollectionVisualMocks(
       if (evaluationID === evaluation.id) {
         return json(route, { evaluation })
       }
+      const skillID = decodedTail(path, "/api/skills/")
+      if (skillID && !skillID.includes("/")) {
+        const skill = skills.find((item) => item.id === skillID)
+        return skill
+          ? json(route, {
+              ...skill,
+              content: `# ${skill.name}\n\n${skill.description}`,
+            })
+          : json(route, { code: "not_found", message: "Skill not found" }, 404)
+      }
+      const toolID = decodedTail(path, "/api/tools/")
+      if (toolID && !toolID.includes("/")) {
+        const tool = tools.find((item) => item.id === toolID)
+        return tool
+          ? json(route, { tool })
+          : json(route, { code: "not_found", message: "Tool not found" }, 404)
+      }
       return json(route, {})
     },
   )
@@ -1255,6 +1395,8 @@ function isCollectionList(path: string) {
     "/api/model-evaluations",
     "/api/repository-reviews/automations",
     "/api/repository-reviews/profiles",
+    "/api/skills",
+    "/api/tools",
   ].includes(path)
 }
 

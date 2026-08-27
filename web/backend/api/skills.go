@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/skills"
@@ -25,19 +26,28 @@ import (
 const defaultInstallSkillRegistry = "github"
 
 type skillSupportResponse struct {
-	Skills []skillSupportItem `json:"skills"`
+	Skills         []skillSupportItem     `json:"skills"`
+	Total          int                    `json:"total"`
+	NextCursor     string                 `json:"next_cursor,omitempty"`
+	CanonicalQuery string                 `json:"canonical_query,omitempty"`
+	QuerySchema    collectionquery.Schema `json:"query_schema"`
 }
 
 type skillSupportItem struct {
+	ID               string `json:"id"`
 	Name             string `json:"name"`
 	Path             string `json:"path"`
 	Source           string `json:"source"`
 	Description      string `json:"description"`
+	Origin           string `json:"origin"`
 	OriginKind       string `json:"origin_kind"`
+	Registry         string `json:"registry,omitempty"`
 	RegistryName     string `json:"registry_name,omitempty"`
 	RegistryURL      string `json:"registry_url,omitempty"`
+	Version          string `json:"version,omitempty"`
 	InstalledVersion string `json:"installed_version,omitempty"`
 	InstalledAt      int64  `json:"installed_at,omitempty"`
+	Removable        bool   `json:"removable"`
 }
 
 type skillDetailResponse struct {
@@ -110,63 +120,100 @@ func (h *Handler) registerSkillRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/skills", h.handleListSkills)
 	mux.HandleFunc("GET /api/skills/{name}", h.handleGetSkill)
 	mux.HandleFunc("GET /api/skills/search", h.handleSearchSkills)
-	mux.HandleFunc("POST /api/skills/install", h.handleInstallSkill)
-	mux.HandleFunc("POST /api/skills/import", h.handleImportSkill)
-	mux.HandleFunc("DELETE /api/skills/{name}", h.handleDeleteSkill)
+	mux.HandleFunc(
+		"POST /api/skills/install",
+		h.requireCollectionMutationOrigin(h.handleInstallSkill),
+	)
+	mux.HandleFunc(
+		"POST /api/skills/import",
+		h.requireCollectionMutationOrigin(h.handleImportSkill),
+	)
+	mux.HandleFunc(
+		"POST /api/skills/bulk-delete",
+		h.requireCollectionMutationOrigin(h.handleBulkDeleteSkills),
+	)
+	mux.HandleFunc(
+		"DELETE /api/skills/{name}",
+		h.requireCollectionMutationOrigin(h.handleDeleteSkill),
+	)
 }
 
 func (h *Handler) handleListSkills(w http.ResponseWriter, r *http.Request) {
+	listRequest, ok := parseCollectionListRequest(w, r, skillCollectionSchema)
+	if !ok {
+		return
+	}
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "config_load_failed",
+			"Failed to load configuration", -1, nil,
+		)
 		return
 	}
 
 	items, err := buildSkillSupportItems(cfg)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to build skill list: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "skill_projection_failed",
+			"Failed to project installed skills", -1, nil,
+		)
+		return
+	}
+	page, err := pageSkillSupportItems(items, listRequest)
+	if err != nil {
+		writeCollectionPageError(w, err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(skillSupportResponse{
-		Skills: items,
+	writeCollectionJSON(w, http.StatusOK, skillSupportResponse{
+		Skills:         page.Items,
+		Total:          page.Total,
+		NextCursor:     page.NextCursor,
+		CanonicalQuery: listRequest.Query.Canonical(),
+		QuerySchema:    skillCollectionSchemaWithSuggestions(items),
 	})
 }
 
 func (h *Handler) handleGetSkill(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r) {
+		return
+	}
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "config_load_failed",
+			"Failed to load configuration", -1, nil,
+		)
 		return
 	}
 
 	skillItems, err := buildSkillSupportItems(cfg)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to build skill list: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "skill_projection_failed",
+			"Failed to project installed skills", -1, nil,
+		)
 		return
 	}
-	name := r.PathValue("name")
-	for _, skillItem := range skillItems {
-		if skillItem.Name != name {
-			continue
-		}
-
+	if skillItem, found := resolveSkillSupportItem(skillItems, r.PathValue("name")); found {
 		content, err := loadSkillContent(skillItem.Path)
 		if err != nil {
-			http.Error(w, "Skill content not found", http.StatusNotFound)
+			writeCollectionError(
+				w, http.StatusNotFound, "skill_content_not_found",
+				"Skill content not found", -1, nil,
+			)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(skillDetailResponse{
+		writeCollectionJSON(w, http.StatusOK, skillDetailResponse{
 			skillSupportItem: skillItem,
 			Content:          content,
 		})
 		return
 	}
 
-	http.Error(w, "Skill not found", http.StatusNotFound)
+	writeCollectionError(w, http.StatusNotFound, "skill_not_found", "Skill not found", -1, nil)
 }
 
 func (h *Handler) handleSearchSkills(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +462,7 @@ func (h *Handler) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	installedSkill := &skillSupportItem{
+	installedSkill := skillSupportItem{
 		Name:             validatedSkill.Name,
 		Path:             validatedSkill.Path,
 		Source:           validatedSkill.Source,
@@ -426,6 +473,12 @@ func (h *Handler) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		InstalledVersion: result.Version,
 		InstalledAt:      installedAt,
 	}
+	projectedInstalledSkill, projectionErr := finalizeSkillSupportItem(installedSkill)
+	if projectionErr != nil {
+		http.Error(w, "Failed to project installed skill", http.StatusInternalServerError)
+		return
+	}
+	installedSkill = projectedInstalledSkill
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(installSkillResponse{
@@ -435,7 +488,7 @@ func (h *Handler) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		Version:        result.Version,
 		Summary:        result.Summary,
 		IsSuspicious:   result.IsSuspicious,
-		InstalledSkill: installedSkill,
+		InstalledSkill: &installedSkill,
 	})
 }
 
@@ -476,46 +529,61 @@ func (h *Handler) handleImportSkill(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), statusCode)
 		return
 	}
+	projected, err := finalizeSkillSupportItem(*importedSkill)
+	if err != nil {
+		http.Error(w, "Failed to project imported skill", http.StatusInternalServerError)
+		return
+	}
+	importedSkill = &projected
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(importedSkill)
 }
 
 func (h *Handler) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r) {
+		return
+	}
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "config_load_failed",
+			"Failed to load configuration", -1, nil,
+		)
 		return
 	}
 
-	loader := newSkillsLoader(cfg.WorkspacePath())
-	name := r.PathValue("name")
 	workspaceSkillWriteMu.Lock()
 	defer workspaceSkillWriteMu.Unlock()
 
-	var matchedNonWorkspace bool
-	for _, skill := range loader.ListSkills() {
-		if skill.Name != name {
-			continue
-		}
-		if skill.Source != "workspace" {
-			matchedNonWorkspace = true
-			continue
-		}
-		if err := os.RemoveAll(filepath.Dir(skill.Path)); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to delete skill: %v", err), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	items, err := buildSkillSupportItems(cfg)
+	if err != nil {
+		writeCollectionError(
+			w, http.StatusInternalServerError, "skill_projection_failed",
+			"Failed to project installed skills", -1, nil,
+		)
 		return
 	}
-	if matchedNonWorkspace {
-		http.Error(w, "only workspace skills can be deleted", http.StatusBadRequest)
+	item, found := resolveSkillSupportItem(items, r.PathValue("name"))
+	if !found {
+		writeCollectionError(w, http.StatusNotFound, "skill_not_found", "Skill not found", -1, nil)
 		return
 	}
-
-	http.Error(w, "Skill not found", http.StatusNotFound)
+	if !item.Removable {
+		writeCollectionError(
+			w, http.StatusConflict, "read_only_origin",
+			"Only workspace skills can be deleted", -1, nil,
+		)
+		return
+	}
+	if err := removeWorkspaceSkill(cfg, item); err != nil {
+		writeCollectionError(
+			w, http.StatusInternalServerError, "skill_delete_failed",
+			"Failed to delete skill", -1, nil,
+		)
+		return
+	}
+	writeCollectionJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": item.ID})
 }
 
 func newSkillsLoader(workspace string) *skills.SkillsLoader {
@@ -545,6 +613,10 @@ func buildSkillSupportItems(cfg *config.Config) ([]skillSupportItem, error) {
 	items := make([]skillSupportItem, 0, len(rawSkills))
 	for _, skill := range rawSkills {
 		item, err := enrichSkillInfo(cfg, skill)
+		if err != nil {
+			return nil, err
+		}
+		item, err = finalizeSkillSupportItem(item)
 		if err != nil {
 			return nil, err
 		}

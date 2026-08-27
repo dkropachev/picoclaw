@@ -10,6 +10,7 @@ import { WebSearchGeneralSettings } from "./web-search-general-settings"
 import { WebSearchProviderSettings } from "./web-search-provider-settings"
 
 interface WebSearchTabProps {
+  showHeader?: boolean
   draft: WebSearchConfigResponse | null
   providerLabelMap: Map<string, string>
   expandedProvider: string | null
@@ -23,6 +24,7 @@ interface WebSearchTabProps {
 }
 
 export function WebSearchTab({
+  showHeader = true,
   draft,
   providerLabelMap,
   expandedProvider,
@@ -51,21 +53,23 @@ export function WebSearchTab({
         <LoadingState />
       ) : (
         <>
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-            <div className="max-w-xl space-y-3">
-              <h1 className="text-foreground/90 text-2xl font-semibold tracking-tight">
-                {t(
-                  "pages.agent.tools.web_search.title",
-                  "Web Search Configuration",
-                )}
-              </h1>
-              <p className="text-muted-foreground/80 text-[14px] leading-relaxed">
-                {t(
-                  "pages.agent.tools.web_search.description",
-                  "Configure how the web search tool behaves by default, including whether the model may use its built-in search capability.",
-                )}
-              </p>
-            </div>
+          <div className="flex flex-col justify-end gap-6 sm:flex-row sm:items-start sm:justify-between">
+            {showHeader && (
+              <div className="max-w-xl space-y-3">
+                <h1 className="text-foreground/90 text-2xl font-semibold tracking-tight">
+                  {t(
+                    "pages.agent.tools.web_search.title",
+                    "Web Search Configuration",
+                  )}
+                </h1>
+                <p className="text-muted-foreground/80 text-[14px] leading-relaxed">
+                  {t(
+                    "pages.agent.tools.web_search.description",
+                    "Configure how the web search tool behaves by default, including whether the model may use its built-in search capability.",
+                  )}
+                </p>
+              </div>
+            )}
 
             <Button
               onClick={onSave}

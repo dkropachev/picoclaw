@@ -34,6 +34,11 @@ const smokeAccountIDs = {
   router: "balanced-router",
 } as const
 
+const smokeSkillToolIDs = {
+  skill: "c2tpbGwAcmV2aWV3LWhlbHBlcg",
+  tool: "dG9vbAB3ZWJfc2VhcmNo",
+} as const
+
 const smokeRoutes = [
   "/",
   "/models/aliases",
@@ -72,8 +77,13 @@ const smokeRoutes = [
   "/agent/git-workspaces",
   "/agent/mcp/servers",
   "/agent/tools",
+  `/agent/tools/${smokeSkillToolIDs.tool}`,
+  `/agent/tools/${smokeSkillToolIDs.tool}/edit`,
+  "/agent/tools/settings/adaptation",
   "/agent/workflows",
   "/agent/skills",
+  "/agent/skills/new",
+  `/agent/skills/${smokeSkillToolIDs.skill}`,
   "/agent/hub",
 ] as const
 
@@ -208,13 +218,7 @@ const modelResponse = {
 const toolsResponse = {
   tools: [
     {
-      name: "web_search",
-      description: "Search the web",
-      category: "web",
-      config_key: "tools.web_search",
-      status: "enabled",
-    },
-    {
+      id: "dG9vbABmaW5kX3NraWxscw",
       name: "find_skills",
       description: "Find skills",
       category: "skills",
@@ -222,13 +226,47 @@ const toolsResponse = {
       status: "enabled",
     },
     {
+      id: "dG9vbABpbnN0YWxsX3NraWxs",
       name: "install_skill",
       description: "Install skills",
       category: "skills",
       config_key: "tools.install_skill",
+      status: "blocked",
+      reason: "No writable workspace skill directory is configured.",
+      reason_code: "dependency_unavailable",
+    },
+    {
+      id: smokeSkillToolIDs.tool,
+      name: "web_search",
+      description: "Search the web",
+      category: "web",
+      config_key: "tools.web_search",
       status: "enabled",
     },
   ],
+  total: 3,
+  next_cursor: "",
+  canonical_query: "ORDER BY category ASC, name ASC",
+  query_schema: collectionSchema([
+    ["name", "string"],
+    [
+      "category",
+      "enum",
+      [
+        "agents",
+        "automation",
+        "communication",
+        "discovery",
+        "filesystem",
+        "hardware",
+        "skills",
+        "web",
+      ],
+    ],
+    ["status", "enum", ["enabled", "disabled", "blocked"]],
+    ["reason", "string"],
+    ["config_key", "string"],
+  ]),
 }
 
 const mcpResponse: MCPConfigResponse = {
@@ -335,6 +373,34 @@ const mockCollectionSchemas = {
     ["version", "number"],
     ["created", "timestamp"],
     ["updated", "timestamp"],
+  ]),
+  skills: collectionSchema([
+    ["name", "string"],
+    ["source", "enum", ["workspace", "global", "builtin"]],
+    ["origin", "enum", ["builtin", "manual", "third_party"]],
+    ["registry", "string"],
+    ["version", "string"],
+    ["installed_at", "number"],
+  ]),
+  tools: collectionSchema([
+    ["name", "string"],
+    [
+      "category",
+      "enum",
+      [
+        "agents",
+        "automation",
+        "communication",
+        "discovery",
+        "filesystem",
+        "hardware",
+        "skills",
+        "web",
+      ],
+    ],
+    ["status", "enum", ["enabled", "disabled", "blocked"]],
+    ["reason", "string"],
+    ["config_key", "string"],
   ]),
 }
 
@@ -509,11 +575,11 @@ function accountsFromOAuthProviders(
 
 function collectionSchema(
   fields: Array<
-    [string, "string" | "enum" | "boolean" | "number" | "timestamp"]
+    [string, "string" | "enum" | "boolean" | "number" | "timestamp", string[]?]
   >,
 ) {
   return {
-    fields: fields.map(([name, type]) => ({
+    fields: fields.map(([name, type, suggestedValues]) => ({
       name,
       type,
       operators:
@@ -522,7 +588,9 @@ function collectionSchema(
           : ["=", "!=", "IN", "NOT IN"],
       sortable: true,
       ...(type === "boolean" ? { suggested_values: ["true", "false"] } : {}),
-      ...(type === "enum" ? { suggested_values: ["draft", "running"] } : {}),
+      ...(type === "enum"
+        ? { suggested_values: suggestedValues ?? ["draft", "running"] }
+        : {}),
     })),
   }
 }
@@ -722,13 +790,38 @@ const toolAdaptationResponse = {
 const skillsResponse = {
   skills: [
     {
+      id: "c2tpbGwAY29kZS1yZXZpZXc",
+      name: "code-review",
+      path: "/usr/share/picoclaw/skills/code-review",
+      source: "builtin",
+      description: "Inspect changes for correctness",
+      origin: "builtin",
+      origin_kind: "builtin",
+      version: "bundled",
+      installed_version: "bundled",
+      removable: false,
+    },
+    {
+      id: smokeSkillToolIDs.skill,
       name: "review-helper",
       path: "/workspace/skills/review-helper",
       source: "workspace",
       description: "Review code changes",
-      origin_kind: "manual",
+      origin: "third_party",
+      origin_kind: "third_party",
+      registry: "clawhub",
+      registry_name: "clawhub",
+      registry_url: "https://clawhub.example.test/skills/review-helper",
+      version: "2.4.1",
+      installed_version: "2.4.1",
+      installed_at: 1_777_296_600_000,
+      removable: true,
     },
   ],
+  total: 2,
+  next_cursor: "",
+  canonical_query: "ORDER BY name ASC",
+  query_schema: mockCollectionSchemas.skills,
 }
 
 const workflowRun = {
@@ -2063,6 +2156,8 @@ async function mockLauncherApis(
   const currentAccountRouters = structuredClone(
     options.accountRouters ?? defaultSmokeAccountRouters,
   )
+  const currentSkills = structuredClone(skillsResponse.skills)
+  const currentTools = structuredClone(toolsResponse.tools)
   let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
   let workflowDefinitions = [
     {
@@ -3136,6 +3231,69 @@ async function mockLauncherApis(
         }
       }
 
+      if (method === "POST" && path === "/api/skills/bulk-delete") {
+        const body = request.postDataJSON() as { ids?: string[] }
+        const ids = Array.isArray(body.ids) ? body.ids : []
+        const deletedIDs: string[] = []
+        const failures: Array<{ id: string; code: string }> = []
+        for (const id of ids) {
+          const index = currentSkills.findIndex((skill) => skill.id === id)
+          if (index < 0) {
+            failures.push({ id, code: "not_found" })
+          } else if (!currentSkills[index].removable) {
+            failures.push({ id, code: "read_only_origin" })
+          } else {
+            currentSkills.splice(index, 1)
+            deletedIDs.push(id)
+          }
+        }
+        return json(route, { deleted_ids: deletedIDs, failures })
+      }
+
+      const skillMutationMatch = path.match(/^\/api\/skills\/([^/]+)$/)
+      if (method === "DELETE" && skillMutationMatch) {
+        const id = decodeURIComponent(skillMutationMatch[1])
+        const index = currentSkills.findIndex(
+          (skill) => skill.id === id || skill.name === id,
+        )
+        if (index < 0) {
+          return json(
+            route,
+            { code: "not_found", message: "Skill not found" },
+            404,
+          )
+        }
+        if (!currentSkills[index].removable) {
+          return json(
+            route,
+            { code: "read_only_origin", message: "Skill is read-only" },
+            409,
+          )
+        }
+        const [deleted] = currentSkills.splice(index, 1)
+        return json(route, { status: "deleted", id: deleted.id })
+      }
+
+      const toolMutationMatch = path.match(/^\/api\/tools\/([^/]+)\/state$/)
+      if (method === "PUT" && toolMutationMatch) {
+        const id = decodeURIComponent(toolMutationMatch[1])
+        const tool = currentTools.find(
+          (candidate) => candidate.id === id || candidate.name === id,
+        )
+        if (!tool) {
+          return json(
+            route,
+            { code: "not_found", message: "Tool not found" },
+            404,
+          )
+        }
+        const body = request.postDataJSON() as { enabled?: boolean }
+        tool.status = body.enabled ? "enabled" : "disabled"
+        delete tool.reason
+        delete tool.reason_code
+        return json(route, { status: "ok" })
+      }
+
       if (method === "POST") {
         switch (path) {
           case "/api/accounts/models/fetch": {
@@ -3859,6 +4017,46 @@ async function mockLauncherApis(
             )
       }
 
+      const skillDetailMatch = path.match(/^\/api\/skills\/([^/]+)$/)
+      if (
+        skillDetailMatch &&
+        !["search", "install", "import"].includes(skillDetailMatch[1])
+      ) {
+        const id = decodeURIComponent(skillDetailMatch[1])
+        const index = currentSkills.findIndex(
+          (skill) => skill.id === id || skill.name === id,
+        )
+        if (method === "GET") {
+          return index >= 0
+            ? json(route, {
+                ...currentSkills[index],
+                content: `# ${currentSkills[index].name}\n\n${currentSkills[index].description}`,
+              })
+            : json(
+                route,
+                { code: "not_found", message: "Skill not found" },
+                404,
+              )
+        }
+      }
+
+      const toolDetailMatch = path.match(/^\/api\/tools\/([^/]+)$/)
+      if (
+        method === "GET" &&
+        toolDetailMatch &&
+        !["web-search-config", "adaptation", "thread-policy"].includes(
+          toolDetailMatch[1],
+        )
+      ) {
+        const id = decodeURIComponent(toolDetailMatch[1])
+        const tool = currentTools.find(
+          (candidate) => candidate.id === id || candidate.name === id,
+        )
+        return tool
+          ? json(route, { tool })
+          : json(route, { code: "not_found", message: "Tool not found" }, 404)
+      }
+
       const templateInspectionMatch = path.match(
         /^\/api\/workflows\/templates\/([^/]+)\/inspect$/,
       )
@@ -4031,7 +4229,15 @@ async function mockLauncherApis(
         case "/api/sessions":
           return json(route, [])
         case "/api/tools":
-          return json(route, toolsResponse)
+          return json(route, {
+            tools: currentTools,
+            total: currentTools.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ??
+              "ORDER BY category ASC, name ASC",
+            query_schema: mockCollectionSchemas.tools,
+          })
         case "/api/mcp":
           return json(
             route,
@@ -4472,7 +4678,14 @@ async function mockLauncherApis(
         case "/api/tools/adaptation":
           return json(route, toolAdaptationResponse)
         case "/api/skills":
-          return json(route, skillsResponse)
+          return json(route, {
+            skills: currentSkills,
+            total: currentSkills.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY name ASC",
+            query_schema: mockCollectionSchemas.skills,
+          })
         case "/api/skills/search":
           return json(route, {
             results: [],
@@ -7414,16 +7627,134 @@ test("account router editor supports block fallback graph editing", async ({
   expect(errors).toEqual([])
 })
 
-test("skill import dialog fits the viewport", async ({ page }) => {
+test("skills use routed collection, detail, import, and removable-only bulk actions", async ({
+  page,
+}) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/skills")
-  await page.getByRole("button", { name: "Import Skill" }).click()
+  await gotoMockedRoute(page, "/agent/skills?view=list")
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  const listURL = new URL(page.url())
+  expect(listURL.searchParams.get("q")).toBe("ORDER BY name ASC")
+  expect(listURL.searchParams.get("view")).toBe("list")
+  const workspaceSkill = page.locator(
+    `[data-item-id="${smokeSkillToolIDs.skill}"]`,
+  )
+  const builtinSkill = page.locator('[data-item-id="c2tpbGwAY29kZS1yZXZpZXc"]')
+  await expect(workspaceSkill).toBeVisible()
+  await expect(builtinSkill).toBeVisible()
 
+  await workspaceSkill.focus()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(`/agent/skills/${smokeSkillToolIDs.skill}\\?.*view=list`),
+  )
   await expect(
-    page.getByRole("dialog", { name: "Import Into Workspace" }),
+    page.locator('[data-slot="collection-detail-shell"]'),
   ).toBeVisible()
-  await expectElementFitsViewport(page, '[role="dialog"]', "skill import")
+  await expect(
+    page.getByRole("heading", { name: "review-helper" }).first(),
+  ).toBeVisible()
+  await expect(page.getByText("Review code changes").first()).toBeVisible()
+
+  await page.goBack()
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await workspaceSkill.click()
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await builtinSkill.click({ modifiers: ["Control"] })
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Delete" }).click()
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Remove 1 selected skill?",
+  })
+  await confirmation.getByRole("button", { name: "Remove selected" }).click()
+  await expect(workspaceSkill).toHaveCount(0)
+  await expect(builtinSkill).toBeVisible()
+
+  await page.getByRole("button", { name: "Import skill" }).click()
+  await expect(page).toHaveURL(/\/agent\/skills\/new(?:\?|$)/)
+  await expect(
+    page.locator('[data-slot="collection-detail-shell"]'),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Import skill" }),
+  ).toBeVisible()
+  const marketplace = page.getByRole("button", { name: "Browse marketplace" })
+  await expect(marketplace).toBeVisible()
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("tools use routed collection, detail, editor, state, and adaptation", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/tools?view=list")
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  const listURL = new URL(page.url())
+  expect(listURL.searchParams.get("q")).toBe("ORDER BY category ASC, name ASC")
+  expect(listURL.searchParams.get("view")).toBe("list")
+  const webSearchTool = page.locator(
+    `[data-item-id="${smokeSkillToolIDs.tool}"]`,
+  )
+  await expect(webSearchTool).toBeVisible()
+  await webSearchTool.focus()
+  await page.keyboard.press("Enter")
+  await expect(page).toHaveURL(
+    new RegExp(`/agent/tools/${smokeSkillToolIDs.tool}\\?.*view=list`),
+  )
+  const detail = page.locator('[data-slot="collection-detail-shell"]')
+  await expect(detail).toBeVisible()
+  await expect(page.getByRole("heading", { name: "web_search" })).toBeVisible()
+  const stateRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return (
+      request.method() === "PUT" &&
+      url.pathname === `/api/tools/${smokeSkillToolIDs.tool}/state`
+    )
+  })
+  await detail.getByRole("button", { name: "Disable" }).click()
+  expect((await stateRequest).postDataJSON()).toEqual({ enabled: false })
+  await detail.getByRole("button", { name: "Configure" }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/agent/tools/${smokeSkillToolIDs.tool}/edit`),
+  )
+  await expect(
+    page.getByRole("heading", { name: "Configure web_search" }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Primary Provider", { exact: true }),
+  ).toBeVisible()
+
+  await page.goto("/agent/tools?tab=adaptation")
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Tool adaptation" }),
+  ).toHaveCount(0)
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("tab"))
+    .toBeNull()
+  const cutoverURL = new URL(page.url())
+  expect(cutoverURL.pathname).toBe("/agent/tools")
+  expect(cutoverURL.searchParams.get("q")).toBe(
+    "ORDER BY category ASC, name ASC",
+  )
+  expect(cutoverURL.searchParams.get("view")).toBeNull()
+  await expect(page.getByRole("button", { name: "List view" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  )
+
+  await page.getByRole("button", { name: "Adaptation settings" }).click()
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe("/agent/tools/settings/adaptation")
+  await expect(
+    page.getByRole("heading", { name: "Tool adaptation" }),
+  ).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
@@ -7434,9 +7765,13 @@ test("web-search provider settings expand without overflow", async ({
 }) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/tools")
-  await page.getByRole("button", { name: "Web Search" }).click()
-  await expect(page.getByRole("heading", { name: "Web Search" })).toBeVisible()
+  await gotoMockedRoute(page, `/agent/tools/${smokeSkillToolIDs.tool}/edit`)
+  await expect(
+    page.getByRole("heading", { name: "Configure web_search" }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Primary Provider", { exact: true }),
+  ).toBeVisible()
 
   await page.getByRole("button", { name: /OpenAI/ }).click()
   await expect(page.getByText("Max Results")).toBeVisible()
@@ -7450,8 +7785,11 @@ test("tool adaptation profile override dialog fits the viewport", async ({
 }) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/tools?tab=adaptation")
-  await expect(page.getByRole("heading", { name: "Adaptation" })).toBeVisible()
+  await gotoMockedRoute(page, "/agent/tools/settings/adaptation")
+  await expect(
+    page.getByRole("heading", { name: "Tool adaptation" }),
+  ).toBeVisible()
+  await expect(page.getByText("Profiles", { exact: true })).toBeVisible()
   await page
     .getByRole("button", { name: "Add override for openai / gpt-4o-mini" })
     .click()
@@ -7472,7 +7810,7 @@ test("tool adaptation worst-state row fits a narrow mobile viewport", async ({
   await page.setViewportSize({ width: 320, height: 720 })
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/tools?tab=adaptation")
+  await gotoMockedRoute(page, "/agent/tools/settings/adaptation")
   const unavailableProbe = page.getByRole("button", {
     name: /^Probe unavailable for /,
   })

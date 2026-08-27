@@ -3,9 +3,10 @@
 ## Decision
 
 PicoClaw administrative collections use one shared presentation and interaction
-system. The first standard surfaces are Model Aliases, Model Routers, MCP
-Servers, Agents, and Model Evaluations. New collection surfaces, and legacy
-collection surfaces when materially changed, must adopt this contract.
+system. Standard surfaces include Accounts, Account Routers, Model Aliases,
+Model Routers, MCP Servers, Agents, Model Evaluations, Skills, and Tools. New
+collection surfaces, and legacy collection surfaces when materially changed,
+must adopt this contract.
 
 This standard does not apply to intrinsically unique experiences such as chat,
 logs, code viewers, diagrams, result reports, marketplace search, or a single
@@ -130,17 +131,20 @@ maximum page size 200.
 
 Canonical pilot routes:
 
-| Collection        | List                 | New                      | Detail                     | Edit / related                                              |
-| ----------------- | -------------------- | ------------------------ | -------------------------- | ----------------------------------------------------------- |
-| Model Aliases     | `/models/aliases`    | `/models/aliases/new`    | `/models/aliases/:name`    | `/:name/edit`                                               |
-| Model Routers     | `/models/routers`    | `/models/routers/new`    | `/models/routers/:name`    | `/:name/edit`                                               |
-| MCP Servers       | `/agent/mcp/servers` | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name` | `/:name/edit`; settings live at `/agent/mcp/settings`       |
-| Agents            | `/agent/agents`      | `/agent/agents/new`      | `/agent/agents/:id`        | `/:id/edit`, `/:id/capabilities`, `/:id/activity`           |
-| Model Evaluations | `/model-evaluations` | `/model-evaluations/new` | `/model-evaluations/:id`   | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report` |
+| Collection        | List                 | New                      | Detail                     | Edit / related                                                       |
+| ----------------- | -------------------- | ------------------------ | -------------------------- | -------------------------------------------------------------------- |
+| Model Aliases     | `/models/aliases`    | `/models/aliases/new`    | `/models/aliases/:name`    | `/:name/edit`                                                        |
+| Model Routers     | `/models/routers`    | `/models/routers/new`    | `/models/routers/:name`    | `/:name/edit`                                                        |
+| MCP Servers       | `/agent/mcp/servers` | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name` | `/:name/edit`; settings live at `/agent/mcp/settings`                |
+| Agents            | `/agent/agents`      | `/agent/agents/new`      | `/agent/agents/:id`        | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
+| Model Evaluations | `/model-evaluations` | `/model-evaluations/new` | `/model-evaluations/:id`   | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
+| Skills            | `/agent/skills`      | `/agent/skills/new`      | `/agent/skills/:id`        | None; marketplace choices remain at `/agent/hub`                     |
+| Tools             | `/agent/tools`       | None                     | `/agent/tools/:id`         | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
 
-Legacy `/models`, `/agent/mcp`, `?agent=`, and `?probe=` UI forms are not
-redirected or compatibility-rendered. The existing evaluation report route
-remains canonical.
+Legacy `/models`, `/agent/mcp`, `?agent=`, `?probe=`, and Tools `?tab=` UI forms
+are not redirected or compatibility-rendered. The existing evaluation report
+route remains canonical. Skill import and item detail are routed pages rather
+than dialog-only navigation.
 
 ## Backend List And Mutation Contract
 

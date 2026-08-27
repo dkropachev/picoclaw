@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { launcherFetch } from "@/api/http"
-import { getToolAdaptation, runToolAdaptationProbe } from "@/api/tools"
+import {
+  getTool,
+  getToolAdaptation,
+  listTools,
+  runToolAdaptationProbe,
+} from "@/api/tools"
 
 vi.mock("@/api/http", () => ({
   launcherFetch: vi.fn(),
@@ -41,6 +46,45 @@ describe("tools API", () => {
           model_alias: "coding",
         }),
       },
+    )
+  })
+
+  it("uses collection paging and backend-issued tool identities", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          tools: [],
+          total: 0,
+          canonical_query: "category = search ORDER BY name ASC",
+          query_schema: { fields: [] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          tool: { id: "tool_d2ViL3NlYXJjaA", name: "web/search" },
+        }),
+      )
+    const controller = new AbortController()
+
+    await listTools(
+      {
+        query: "category = search ORDER BY name ASC",
+        cursor: "next+/page",
+        limit: 25,
+      },
+      controller.signal,
+    )
+    await getTool("tool_d2ViL3NlYXJjaA")
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/tools?query=category+%3D+search+ORDER+BY+name+ASC&cursor=next%2B%2Fpage&limit=25",
+      { signal: controller.signal },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/tools/tool_d2ViL3NlYXJjaA",
+      undefined,
     )
   })
 

@@ -1361,10 +1361,15 @@ func TestHandleUpdateToolStateRejectsCASConflictWithoutOverwrite(t *testing.T) {
 	)
 	request.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusConflict ||
-		!strings.Contains(recorder.Body.String(), "config_revision_mismatch") {
+	if recorder.Code != http.StatusConflict {
 		t.Fatalf("response = %d/%q", recorder.Code, recorder.Body.String())
 	}
+	assertToolStateCollectionError(
+		t,
+		recorder,
+		http.StatusConflict,
+		"config_revision_mismatch",
+	)
 
 	saved, err := config.LoadConfigForUpdate(configPath)
 	if err != nil {

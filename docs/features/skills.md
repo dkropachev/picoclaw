@@ -38,6 +38,7 @@ lock so owner-local factory products do not race one another during installation
 | `FR-SKILLS-007` | SHOULD | Deprecated GitHub registry config remains accepted while canonical registry config is preferred. | Existing configs must keep working. |
 | `FR-SKILLS-008` | MUST | Browser skill surfaces identify skill origin with accessible text and badge colors that retain sufficient contrast in supported themes. | Origin is operationally important and must remain perceivable without relying on low-contrast color alone. |
 | `FR-SKILLS-009` | MUST | `NewInstallSkillToolWithLock` accepts one borrowed process-local mutex and every `Execute` holds it from before argument and registry validation through existing-install inspection, backup, download, installed-skill validation, origin-metadata persistence, rollback or backup cleanup, and result construction. Wrappers given the same mutex serialize that complete operation, while wrappers given distinct mutexes may overlap. A nil mutex creates a private compatibility lock, `NewInstallSkillTool` remains source-compatible with a fresh private lock, and a zero-value wrapper uses a safe fallback lock rather than panicking. The wrapper borrows its registry manager and supplied mutex and does not acquire lifecycle ownership of either. | Owner-local install wrappers must not race backup, replacement, validation, metadata, or rollback in one workspace, while unrelated workspaces must remain independently runnable. |
+| `FR-SKILLS-010` | MUST | The installed-skill inventory accepts the shared bounded `query`, opaque `cursor`, and `limit` contract and returns summary-only rows with stable URL-safe backend-issued `id`, `name`, `source`, `origin`, `registry`, `version`, and `installed_at` fields plus `total`, `next_cursor`, `canonical_query`, and an allowlisted typed `query_schema`. Direct item lookup resolves `id` without a loaded list. `/agent/skills` renders the standard List, Table, and Grid views with compact List as the default; `/agent/skills/new` owns import/install choices and `/agent/skills/:id` owns detail. Only removable workspace skills participate in explicit selection and confirmed bulk deletion; partial `not_found` and `read_only_origin` failures retain selection. Canonical `q` and `view` state, paging, refresh, recent queries, and Back restoration use the shared collection controller. Marketplace results remain creation choices at `/agent/hub`, not installed collection items, and the former dialog-only import/detail flow is not compatibility-rendered. | Installed skills need stable deep links, server-authoritative discovery, and safe multi-item cleanup without confusing builtin, global, registry, or marketplace content with removable workspace state. |
 
 ## Data And State Model
 
@@ -45,7 +46,9 @@ Skill state includes workspace/global/builtin roots, parsed skill metadata and
 content, registry definitions, cached search results, install target paths, and
 per-chat pending forced-skill command state. An agent-created install wrapper may
 also retain a borrowed generation-local process mutex selected by its caller;
-the mutex carries no persistent or cross-process state.
+the mutex carries no persistent or cross-process state. Installed collection
+summaries are bounded projections keyed by backend-issued opaque IDs; detail
+content is loaded only from the ID-addressed item endpoint.
 
 ## Surface Ownership
 
@@ -53,11 +56,14 @@ Owns: CODE cmd/picoclaw/internal/skills/**
 Owns: CODE pkg/skills/**
 Owns: CODE pkg/tools/integration/skills/**
 Owns: CODE web/backend/api/skills.go
+Owns: CODE web/backend/api/skills_collections.go
 Owns: CODE web/frontend/src/api/skills.ts
 Owns: CODE web/frontend/src/components/agent/hub/**
 Owns: CODE web/frontend/src/components/agent/skills/**
+Owns: CODE web/frontend/src/components/agent/skill-tool-collection-route-state.ts
 Owns: CODE web/frontend/src/routes/agent/hub.tsx
-Owns: CODE web/frontend/src/routes/agent/skills.tsx
+Owns: CODE web/frontend/src/routes/agent/skills*.tsx
+Owns: CODE web/frontend/src/routes/agent/-skills-tools-route.test.tsx
 Owns: CLI cmd/picoclaw/internal/skills/*
 Owns: CONFIG.tools.skills*
 Owns: CONFIG.tools.find_skills*
@@ -68,6 +74,7 @@ Owns: TEST pkg/commands/*
 Owns: TEST pkg/skills/*
 Owns: TEST pkg/tools/integration/skills*
 Owns: TEST web/backend/api/skills*
+Owns: TEST web/backend/api/skills_tools_collections*
 Owns: TOOL find_skills
 Owns: TOOL install_skill
 
@@ -76,10 +83,10 @@ Owns: TOOL install_skill
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | CLI | `picoclaw skills list/search/show/install/remove/list-builtin/install-builtin` | Workspace and registry skill management. | `FR-SKILLS-001` through `FR-SKILLS-005` |
-| HTTP | `/api/skills*` | Launcher list, detail, search, install, import, and delete. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
+| HTTP | `/api/skills*` | Shared-query installed inventory, ID-addressed detail, registry search, install/import, item deletion, and explicit-ID bulk deletion with stable per-item failures. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005`, `FR-SKILLS-010` |
 | Tools | `find_skills`, `install_skill`, `NewInstallSkillToolWithLock` | Agent-callable registry search and install, with optional caller-coordinated serialization across wrappers. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-009` |
 | Config | `tools.skills.*` | Registries, cache, concurrency, and legacy GitHub fields. | `FR-SKILLS-003`, `FR-SKILLS-007` |
-| Frontend | Skill list, import, detail, and hub marketplace pages under `web/frontend/src/components/agent/skills/**` and `web/frontend/src/components/agent/hub/**` | Browser skill management and registry discovery surfaces follow shared frontend API, accessibility, formatting, and route smoke-test rules; origin badges retain accessible text and contrast. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005`, `FR-SKILLS-008` |
+| Frontend | `/agent/skills`, `/agent/skills/new`, `/agent/skills/:id`, and `/agent/hub` | Installed skills use the standard routed collection/detail shells and shared query, view, paging, selection, and mutation reconciliation. Import/install and marketplace discovery remain creation surfaces; origin badges retain accessible text and contrast. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005`, `FR-SKILLS-008`, `FR-SKILLS-010` |
 
 ## Algorithms And Ordering
 
@@ -121,10 +128,13 @@ borrowed-lock execution semantics.
 | `FR-SKILLS-006` | [pkg/commands/show_list_handlers_test.go](../../pkg/commands/show_list_handlers_test.go), [docs/guides/configuration.md](../guides/configuration.md) |
 | `FR-SKILLS-008` | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/src/components/agent/skills/origin-utils.ts](../../web/frontend/src/components/agent/skills/origin-utils.ts) |
 | `FR-SKILLS-009` | [pkg/tools/integration/skills_install.go](../../pkg/tools/integration/skills_install.go), [pkg/tools/integration/skills_install_test.go](../../pkg/tools/integration/skills_install_test.go), [pkg/tools/integration_facade.go](../../pkg/tools/integration_facade.go), [pkg/tools/facade_compat_test.go](../../pkg/tools/facade_compat_test.go) |
+| `FR-SKILLS-010` | [web/backend/api/skills_tools_collections_test.go](../../web/backend/api/skills_tools_collections_test.go), [web/frontend/src/api/skills.test.ts](../../web/frontend/src/api/skills.test.ts), [web/frontend/src/components/agent/skills/skill-collections.test.tsx](../../web/frontend/src/components/agent/skills/skill-collections.test.tsx), [web/frontend/src/routes/agent/-skills-tools-route.test.tsx](../../web/frontend/src/routes/agent/-skills-tools-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/tests/collection-visual.spec.ts](../../web/frontend/tests/collection-visual.spec.ts) |
 
 ## Implementation Anchors
 
 - [pkg/skills](../../pkg/skills)
 - [pkg/tools/integration/skills_install.go](../../pkg/tools/integration/skills_install.go)
 - [web/backend/api/skills.go](../../web/backend/api/skills.go)
+- [web/backend/api/skills_collections.go](../../web/backend/api/skills_collections.go)
+- [web/frontend/src/components/agent/skills/skill-collections.tsx](../../web/frontend/src/components/agent/skills/skill-collections.tsx)
 - [cmd/picoclaw/internal/skills](../../cmd/picoclaw/internal/skills)

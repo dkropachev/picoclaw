@@ -1,15 +1,26 @@
+import {
+  type CollectionBulkDeleteResponse,
+  type CollectionQuerySchema,
+  collectionListURL,
+  collectionRequest,
+} from "@/api/collection"
 import { launcherFetch } from "@/api/http"
 
 export interface SkillSupportItem {
+  id: string
   name: string
   path: string
   source: "workspace" | "global" | "builtin" | string
   description: string
+  origin: string
   origin_kind: "builtin" | "third_party" | "manual" | string
+  registry?: string
   registry_name?: string
   registry_url?: string
+  version?: string
   installed_version?: string
   installed_at?: number
+  removable?: boolean
 }
 
 export interface SkillDetailResponse extends SkillSupportItem {
@@ -28,8 +39,12 @@ export interface SkillRegistrySearchResult {
   installed_name?: string
 }
 
-interface SkillsResponse {
+export interface SkillsCollectionResponse {
   skills: SkillSupportItem[]
+  total: number
+  next_cursor?: string
+  canonical_query: string
+  query_schema: CollectionQuerySchema
 }
 
 export interface SkillSearchResponse {
@@ -40,7 +55,7 @@ export interface SkillSearchResponse {
   has_more: boolean
 }
 
-type SkillActionResponse = Partial<SkillSupportItem> & {
+export type SkillActionResponse = Partial<SkillSupportItem> & {
   status?: string
 }
 
@@ -69,12 +84,44 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export async function getSkills(): Promise<SkillsResponse> {
-  return request<SkillsResponse>("/api/skills")
+export function listSkills(
+  options: { query?: string; cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<SkillsCollectionResponse> {
+  return collectionRequest<SkillsCollectionResponse>(
+    collectionListURL("/api/skills", options),
+    undefined,
+    signal,
+  )
 }
 
-export async function getSkill(name: string): Promise<SkillDetailResponse> {
-  return request<SkillDetailResponse>(`/api/skills/${encodeURIComponent(name)}`)
+/** @deprecated Collection UIs should use listSkills. */
+export async function getSkills(): Promise<SkillsCollectionResponse> {
+  return listSkills()
+}
+
+export function getSkill(
+  id: string,
+  signal?: AbortSignal,
+): Promise<SkillDetailResponse> {
+  return collectionRequest<SkillDetailResponse>(
+    `/api/skills/${encodeURIComponent(id)}`,
+    undefined,
+    signal,
+  )
+}
+
+export function bulkDeleteSkills(
+  ids: string[],
+): Promise<CollectionBulkDeleteResponse> {
+  return collectionRequest<CollectionBulkDeleteResponse>(
+    "/api/skills/bulk-delete",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    },
+  )
 }
 
 export async function searchSkills(
@@ -114,9 +161,9 @@ export async function importSkill(file: File): Promise<SkillActionResponse> {
   return res.json() as Promise<SkillActionResponse>
 }
 
-export async function deleteSkill(name: string): Promise<SkillActionResponse> {
-  return request<SkillActionResponse>(
-    `/api/skills/${encodeURIComponent(name)}`,
+export function deleteSkill(id: string): Promise<SkillActionResponse> {
+  return collectionRequest<SkillActionResponse>(
+    `/api/skills/${encodeURIComponent(id)}`,
     {
       method: "DELETE",
     },
