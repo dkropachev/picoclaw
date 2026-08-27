@@ -368,7 +368,10 @@ interfaces owned by their existing feature specifications.
    only changed/profile/account-invalidated work, freezes bounded source
    evidence, and releases the checkout before model calls. Scope planning,
    managed reviewers, fallbacks, and structured repairs all use the profile's
-   frozen effective account.
+   frozen effective account. The controller gives the built-in review workflow
+   at least 15 minutes while preserving any longer configured workflow timeout,
+   so required review children retain time to finish before the durable
+   checkpoint cleanup reserve.
 7. When a worker dequeues one managed child, the controller serializes only the
    admission decision, adds that child's projected prompt/output tokens and
    known cost to current in-flight reservations, refreshes referenced limit

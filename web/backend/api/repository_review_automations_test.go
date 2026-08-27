@@ -96,6 +96,24 @@ func TestRepositoryReviewAutomationRoutesCreateUpdateListAndDelete(t *testing.T)
 	}
 }
 
+func TestRepositoryReviewEffectiveWorkflowTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "unset", want: 15 * time.Minute},
+		{name: "default", configured: 5 * time.Minute, want: 15 * time.Minute},
+		{name: "longer configured", configured: 6 * time.Hour, want: 6 * time.Hour},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := repositoryReviewEffectiveWorkflowTimeout(test.configured); got != test.want {
+				t.Fatalf("effective timeout = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRepositoryReviewAutomationCollectionQueryAndPaging(t *testing.T) {
 	handler, mux, _ := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
