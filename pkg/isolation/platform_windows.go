@@ -11,7 +11,6 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
@@ -31,17 +30,18 @@ var (
 	procCreateRestrictedToken    = advapi32.NewProc("CreateRestrictedToken")
 )
 
-func applyPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, root string) error {
+func applyPlatformIsolation(cmd *exec.Cmd, launch launchProjection) error {
+	isolation := launch.isolation
 	if !isolation.Enabled || cmd == nil {
 		return nil
 	}
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	rules := BuildWindowsAccessRules(root, isolation.ExposePaths)
+	rules := launch.windowsAccess
 	logger.InfoCF("isolation", "windows isolation process constraints",
 		map[string]any{
-			"root":    root,
+			"root":    launch.root,
 			"command": cmd.Path,
 			"rules":   formatWindowsAccessRules(rules),
 			"note":    "Windows currently enforces restricted token, low integrity, and job object limits; expose_paths filesystem remapping is rejected during preflight",
@@ -58,15 +58,19 @@ func applyPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, roo
 	return nil
 }
 
-func postStartPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, root string) error {
+func postStartPlatformIsolation(cmd *exec.Cmd, launch launchProjection) error {
+	isolation := launch.isolation
 	if !isolation.Enabled || cmd == nil || cmd.Process == nil {
 		return nil
 	}
 	resourcesAny, loaded := windowsPendingResources.LoadAndDelete(cmd)
 	if !loaded {
-		return nil
+		return fmt.Errorf("windows isolation pending process resources are unavailable")
 	}
-	resources, _ := resourcesAny.(windowsProcessResources)
+	resources, ok := resourcesAny.(windowsProcessResources)
+	if !ok {
+		return fmt.Errorf("windows isolation pending process resources are invalid")
+	}
 	// Job objects can only be attached after the process exists, so the Windows
 	// backend finishes isolation in this post-start hook.
 	job, err := windows.CreateJobObject(nil, nil)

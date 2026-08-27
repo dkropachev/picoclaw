@@ -33,13 +33,16 @@ workflow routes continue to treat development lifecycle Gate runs as private.
 - Similarity target: capability-separated secret handling, network/filesystem
   confinement, private workflow/model context, and browser-safe projection.
 - Core types/functions: secure config and credential stores, dashboard auth,
-  URL/network guards, isolation runner, frozen workflow context,
+  URL/network guards, immutable subprocess `ExecutionPolicy`, isolation runner,
+  frozen workflow context,
   development-workspace/notification proxies, isolated AI profiles, pinned Git
   browsing/operations, Web Push state, and narrow provider publishers.
 - Runtime ordering: authenticate and canonicalize; validate identity and bounds;
   acquire one exact runtime/config/workspace generation; freeze evidence;
-  execute through the narrow capability; postflight and persist a sanitized
-  result; release authority before any human wait.
+  subprocess startup additionally freezes one policy/root projection through
+  pre-start and post-start handling; execute through the narrow capability;
+  postflight and persist a sanitized result; release authority before any human
+  wait.
 - Non-obvious constraints: signed provider payloads remain untrusted content;
   ownership and head writability are independent; an AI finding or gate result
   is evidence, not code/provider authority; unknown external outcomes are
@@ -55,7 +58,7 @@ workflow routes continue to treat development lifecycle Gate runs as private.
 | `FR-SEC-003` | MUST | Sensitive-data filtering redacts configured secrets from model-visible tool output when enabled. Durable external-event store construction also receives detached resolved secure-config values longer than three bytes for exact-value redaction, without logging or serializing that trusted list. | Tool results and channel-origin event text can contain credentials. |
 | `FR-SEC-004` | MUST | Dashboard auth rejects unauthenticated access, uses CSRF-safe logout, and rate-limits login attempts. | Web management is sensitive. |
 | `FR-SEC-005` | MUST | HTTP guard blocks private/internal targets unless explicitly allowed or proxy first-hop rules apply. Configured MCP URLs reject embedded credentials; credential-bearing remote servers require HTTPS except for intentional loopback development, and remote MCP redirects remain same-origin. MCP OAuth discovery, token exchange, authenticated probing, and refresh clients additionally reject cross-origin or downgrade redirects, disable environment proxies, resolve and pin an approved address into the actual dial, block private and special-use destinations from public-looking hosts, and restrict intentionally local discovery to the configured local address. | Web tools and browser-managed authentication must not become SSRF or credential-exfiltration primitives. |
-| `FR-SEC-006` | MUST | Isolation runtime starts supported commands with configured exposed paths and fails closed on unsupported/invalid setup. | Optional isolation must not silently weaken execution. |
+| `FR-SEC-006` | MUST | Subprocess isolation exposes an opaque `ExecutionPolicy` created from one effective `IsolationConfig`. Construction has no filesystem/process effect, recursively detaches the ordered `ExposePaths` while preserving nil versus allocated-empty compatibility, and yields a copyable concurrently reusable value; its zero value is invalid and no explicit-policy launch falls back to global/default state. Each `Start` or `Run` clones one private launch projection, resolves one absolute instance root when enabled, validates the exact config/platform/root before directory creation or command mutation, and carries the same config/root through deterministic environment and mount/access projection, platform pre-start setup, exactly one process start, post-start setup, cleanup, and wait; `Run` uses that exact start path and waits once. A constructed disabled policy remains valid on unsupported platforms and may retain dormant invalid exposure data, while invalid/zero policy, nil command, enabled unsupported platform, enabled relative root, enabled invalid or NUL-bearing exposure, missing Linux `bwrap`, and enabled Windows exposure fail before an ungoverned process starts. Linux optional system mounts are deterministic for one fixed host-filesystem view rather than identical across distributions. Child environment ordering is stable; Windows names are collapsed case-insensitively with canonical redirected home/temp/data keys taking precedence and other aliases preserving last-value semantics. Legacy nil environment application is harmless. Legacy prepare-only fails closed when Windows isolation is enabled because it cannot complete Job Object setup. Enabled Windows post-start requires exact pending restricted-token resources and fails closed so the child is terminated when those resources are missing or type-invalid. Deprecated global `Configure`/`CurrentConfig`/preflight/prepare/start/run compatibility initializes a valid disabled policy, clones config on ingress/egress, and snapshots one last-writer-wins policy per operation without holding its lock across filesystem/process work. Current production subprocess owners still use that compatibility selector: per-runtime-generation propagation, removal of agent-construction global mutation, and empty-base-plus-allowlist restricted environments are explicitly later boundaries. | Optional isolation must not silently weaken execution, mix config/root generations inside one launch, or expose mutable caller storage as live process authority. |
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
 | `FR-SEC-008` | MUST | Model-list and tool-adaptation config validation rejects unsupported provider-control values such as invalid `reasoning_effort`, invalid account-router account references, invalid model-router target references, and invalid tool-adaptation policy values before those values are persisted or used; profile-specific tool-adaptation overrides normalize provider/model identity and replace earlier duplicate identities as whole entries. Config schema v5 makes exact, unique `model_aliases[]` the only user-facing model selectors: each alias has a non-empty concrete default mapping, optional `account_overrides` and `disabled_accounts` may name only enabled concrete model-list or supported credential accounts and never an account or model router, and the same account cannot appear in both. Every account reachable through a router must be provider-compatible with every alias it can receive, while explicitly disabled alias/account pairs are excluded from that router's runnable candidates. Account routers and model routers are stored in top-level router lists rather than as secret-bearing `model_list[]` entries; agent and subagent model persistence preserves inherited fallbacks separately from an explicit empty fallback list; strict diagnostics tolerate deprecated `account_routers[].model` input, but runtime and output ignore it so routers remain model-agnostic. Default configuration seeds neither a runnable account nor a model alias, and an empty effective selection fails locally with `no model configured` before any provider request. Migration from schemas v1-v4 separates `account_ref` from alias-valued `model_name`, promotes only unambiguous explicitly configured legacy models, and never invents a provider or model default. | Invalid config should fail early instead of producing unsafe or broken provider requests, and persistence must not silently broaden an explicit model policy or delegate selection to an upstream default. |
 | `FR-SEC-009` | MUST | OAuth token response parsing extracts non-secret account email claims from ID-token or access-token JWT payloads when present, preserves the email across refreshes, and leaves the email empty without failing when claims are absent or malformed. | Launcher account naming and credential metadata need stable non-secret account identity without weakening token validation or persistence. |
@@ -86,6 +89,17 @@ redacted sentinels in public configuration. Process bearer, CSRF/session state,
 OAuth state, signing secrets, provider tokens, operation leases, Git reservation
 bearers, workflow private roots, and publication markers are authority-bearing
 and never ordinary DTO fields.
+
+An `ExecutionPolicy` is an in-memory opaque handle to a recursively detached
+isolation-config snapshot; it is not serialized and exports no mutable config or
+path slice. The zero handle is invalid. Every launch derives a separate
+ephemeral projection containing the exact detached config and actual platform;
+when isolation is enabled, it also contains the single resolved instance root
+used by validation, preparation, process start, and post-start handling. The
+deprecated process-global compatibility store holds
+one constructed policy and remains last-writer-wins, but readers retain one
+immutable handle before releasing its lock. That compatibility state is not a
+per-agent or per-runtime-generation ownership boundary.
 
 A public development workspace may contain verified provider display facts, charter,
 findings, corrections, scope grades and measurements, nudge summaries, deferred
@@ -144,6 +158,7 @@ Owns: TEST pkg/config/version*
 | Config | secure strings and `.security.yml` | Redacted public values, encrypted/file-backed secret persistence, masked update preservation, and exact identity binding. | `FR-SEC-001` through `FR-SEC-003`, `FR-SEC-008`, `FR-SEC-010` |
 | Credential | credential store | Canonical provider/auth/account identity with locked atomic persistence and refresh. | `FR-SEC-002`, `FR-SEC-009` |
 | Network | URL guard, pinned dialers, no-proxy/no-redirect clients | Reject credential leaks, unsafe redirects, public-to-private DNS resolution, and untrusted process authority. | `FR-SEC-005`, `FR-SEC-014`, `FR-SEC-017`, `FR-SEC-019`, `FR-SEC-053` |
+| Process | `ExecutionPolicy.Start` / `ExecutionPolicy.Run` and deprecated global wrappers | One detached config/root projection survives validation, platform pre-start, exactly one start, post-start, cleanup, and wait without global rereads; invalid or unsupported enabled launches fail closed. | `FR-SEC-006` |
 | Workflow | private gate root and frozen session/media | Admit only compiler-stamped bounded context; redact default JSON/event/browser views; resume exact frozen evidence. | `FR-SEC-022`, `FR-SEC-023`, `FR-SEC-054` |
 | HTTP | `/api/development-workspaces*`, `/runtime/eventing/development-workspaces*` | Same-origin authenticated launcher authority replacement and bounded public aggregate/conversation/code projection. | `FR-SEC-053`, `FR-SEC-056` |
 | HTTP/PWA | notification/settings/view/subscription APIs and Web Push | Authenticated inbox plus privacy-minimal generation-deduplicated push backed by private subscription/VAPID state. | `FR-SEC-053`, `FR-SEC-057` |
@@ -157,6 +172,27 @@ Secure config and credential operations normalize identity before lookup,
 acquire process and file locks, reload while locked, validate secret/provider
 binding, write a synced same-directory temporary file, atomically replace, and
 return only redacted metadata.
+
+Explicit subprocess startup rejects an invalid zero policy or nil command,
+clones one private policy snapshot, and, when enabled, rejects unsupported
+platforms before resolving and retaining one absolute instance root. It then
+validates exposed paths and the platform projection, prepares instance
+directories, deterministically projects the existing child environment, applies
+platform pre-start isolation, and starts the command exactly once. A start error
+cleans pending native resources. Post-start processing consumes the same retained
+config/root; failure cleans resources and terminates and waits for the child.
+`Run` invokes this exact start path and then waits once. Linux filters optional
+system mounts against the fixed host view observed for that launch. Windows
+rejects every nonempty exposure before token allocation and case-folds logical
+environment names before canonical redirected values are applied.
+
+Deprecated global entry points acquire one immutable policy handle, release the
+selection lock, and delegate to the same internal ordering. They may select
+either complete generation during a concurrent reconfiguration, but never mix
+generations inside one operation. They retain ambient child variables and
+last-writer-wins process-global selection until subprocess owners receive the
+policy attached to their exact runtime/config generation and restricted
+environments are built from an empty base plus explicit allowlists.
 
 Browser operations authenticate first. Mutations additionally validate
 same-origin provenance. The PR proxy canonicalizes and bounds the complete
@@ -206,6 +242,16 @@ offered/profile/policy/approval checks before a synthetic result or registry
 effect. This is an administrative capability declaration, not an OS sandbox or
 a substitute for later network/process isolation.
 
+The explicit isolation policy is the subprocess-start capability, but current
+shell/background, Cron-through-exec, process-hook, stdio MCP, and CLI-provider
+owners still select it through deprecated process-global compatibility. A
+follow-up boundary must store the policy on the exact runtime/config generation,
+pass it to every one of those owners, remove agent-construction `Configure`, and
+replace ambient-environment inheritance with an empty base plus an explicit
+allowlist. The current contract does not claim that concurrent agent generations
+select different policies, that isolation is default-on, or that Linux network/
+PID namespaces, Windows filesystem remapping/ACLs, or a macOS backend exist.
+
 Signed webhooks authenticate bytes, not author intent. A confirmed charter
 authorizes a product scope, not arbitrary model tools. A Gate field value can
 trigger only the application branch that explicitly handles it. A successful
@@ -220,6 +266,17 @@ unsafe Unicode/control text, unsafe filesystem objects, symlink/FIFO/special
 file swaps, private/special-use network targets, redirect or proxy use, typed-nil
 capabilities, unexpected provider/model output, incomplete postflight, or
 cancellation.
+
+Subprocess launch also fails closed on an invalid zero execution policy, nil
+command, relative or unresolved enabled instance root, malformed or duplicate
+exposure while enabled, enabled unsupported platform, unavailable Linux
+`bwrap`, or enabled Windows exposure. Such rejection occurs before an
+ungoverned process starts; unsupported-platform failure precedes directory and
+command mutation. A copied
+explicit policy is unaffected by later source or global compatibility mutation.
+Ubuntu cross-compilation proves Windows source/build portability only and is not
+native evidence for Windows path construction, restricted-token creation,
+low-integrity enforcement, or Job Object assignment.
 
 A missing provider capability disables only its matching effect. No model alias
 causes local model-dependent failure before provider access. Human gates retain
@@ -248,7 +305,8 @@ into the current runtime.
 | `FR-SEC-001`, `FR-SEC-003` | [pkg/config/config_struct_test.go](../../pkg/config/config_struct_test.go), [pkg/config/security_test.go](../../pkg/config/security_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go), [docs/security/sensitive_data_filtering.md](../security/sensitive_data_filtering.md) |
 | `FR-SEC-002`, `FR-SEC-007` | [pkg/credential/store_test.go](../../pkg/credential/store_test.go), [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/auth/store_test.go](../../pkg/auth/store_test.go), [pkg/auth/token_test.go](../../pkg/auth/token_test.go), [pkg/auth/pkce_test.go](../../pkg/auth/pkce_test.go), [pkg/mcp/auth_test.go](../../pkg/mcp/auth_test.go) |
 | `FR-SEC-004` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go) |
-| `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go), [pkg/mcp/network_test.go](../../pkg/mcp/network_test.go), [pkg/mcp/oauth_test.go](../../pkg/mcp/oauth_test.go), [web/backend/api/mcp_oauth_test.go](../../web/backend/api/mcp_oauth_test.go) |
+| `FR-SEC-005` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go), [pkg/mcp/network_test.go](../../pkg/mcp/network_test.go), [pkg/mcp/oauth_test.go](../../pkg/mcp/oauth_test.go), [web/backend/api/mcp_oauth_test.go](../../web/backend/api/mcp_oauth_test.go) |
+| `FR-SEC-006` | [pkg/isolation/execution_policy_test.go](../../pkg/isolation/execution_policy_test.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/isolation/platform_linux_test.go](../../pkg/isolation/platform_linux_test.go) |
 | `FR-SEC-008` | [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/model_alias_test.go](../../pkg/config/model_alias_test.go), [pkg/config/model_alias_migration_test.go](../../pkg/config/model_alias_migration_test.go), [pkg/config/model_selection_test.go](../../pkg/config/model_selection_test.go), [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go) |
 | `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
 | `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |

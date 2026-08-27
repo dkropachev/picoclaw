@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
-func applyPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, root string) error {
+func applyPlatformIsolation(cmd *exec.Cmd, launch launchProjection) error {
+	isolation := launch.isolation
 	if !isolation.Enabled {
 		return nil
 	}
@@ -56,7 +56,7 @@ func applyPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, roo
 	// Start from the configured mount plan, then add only the executable, its
 	// resolved path, the effective working directory, and any absolute path
 	// arguments needed to preserve the original command semantics.
-	plan := BuildLinuxMountPlan(root, isolation.ExposePaths)
+	plan := append([]MountRule(nil), launch.linuxBaseMounts...)
 	plan = ensureLinuxMountRule(plan, resolvedPath, resolvedPath, "ro")
 	plan = ensureLinuxMountRule(plan, filepath.Dir(resolvedPath), filepath.Dir(resolvedPath), "ro")
 	if resolved, resolveErr := filepath.EvalSymlinks(resolvedPath); resolveErr == nil && resolved != resolvedPath {
@@ -72,7 +72,7 @@ func applyPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, roo
 	plan = appendLinuxArgumentMounts(plan, originalArgs[1:])
 	logger.DebugCF("isolation", "linux isolation mount plan",
 		map[string]any{
-			"root":        root,
+			"root":        launch.root,
 			"command":     resolvedPath,
 			"working_dir": execDir,
 			"mounts":      formatLinuxMountPlan(plan),
@@ -105,7 +105,7 @@ func formatLinuxMountPlan(plan []MountRule) []map[string]string {
 	return formatted
 }
 
-func postStartPlatformIsolation(cmd *exec.Cmd, isolation config.IsolationConfig, root string) error {
+func postStartPlatformIsolation(cmd *exec.Cmd, launch launchProjection) error {
 	return nil
 }
 
