@@ -46,6 +46,7 @@ email validation, sidebar discovery, and ordinary gateway restart feedback.
 | `FR-CHANNEL-016` | MUST | Each enabled event-automation service generation composes one development-workspace service and protected HTTP handler from its exact v20 aggregate/notification store, issue/PR/repository resolver, provider evidence loader, isolated AI, gate evaluator, scope/nudge policies, and optional implementation/publication capabilities. Feature implementation and PR pickup share that service/store/generation; implementation is exposed only when the same exact agent, production Git-workspace manager, edit-only repair runner, local-CI validator, and candidate finalizer are ready. Issue read, PR read, repository verification, draft-PR creation, branch push, review, and follow-up issue capabilities are detected independently; a missing effect capability disables only that effect. | Reload must not split one development workspace across generations or let partial composition weaken source exclusivity, a gate, evidence fence, implementation prerequisite, or provider action. |
 | `FR-CHANNEL-017` | MUST | Gateway startup registers only the canonical `/runtime/eventing/development-workspaces` subtree, with notification, view, setting, and subscription resources nested beneath it, and starts generation-owned durable work/publication/notification handling against the v20 store. Every iteration holds the exact runtime generation while claiming, executing, and terminalizing work. Reload or shutdown first stops admission, cancels and joins those workers, and only then retires the event store, workflow executor, agent, provider, Git manager, and CI evidence. No `prw_`, `/runtime/eventing/pr-workspaces`, legacy review/development worker, or compatibility route is composed. | A replacement generation must resume durable development work without competing legacy claims or closing a dependency beneath an active model, gate, Git, CI, notification, or provider operation. |
 | `FR-CHANNEL-018` | MUST | Launcher gateway lifecycle process discovery, liveness, signal, and kill operations pass through one replaceable process-operations boundary. Production preserves normal OS behavior, while tests install a deny-unregistered registry before any case runs, track only exact child process objects created by the fixture, reject PID-only or same-number forged handles, and forget only the matching generation. The lifecycle integration launches the freshly built core binary directly with a test-owned home, config, workspace, event database, and ephemeral loopback port; it uses no installed binary or service manager and leaves no process or PID file. | Unit tests exercise production lifecycle code and therefore need capability-bound process authority rather than ambient same-UID permission over an operator gateway. |
+| `FR-CHANNEL-019` | MUST | Every Gateway operator-log record in the closed G cohort uses one direct fixed-level SafeCF call with a fixed component/message and sealed typed fields. Config/home paths, worker/channel/model/provider/workspace identities, errors, log levels, counts, and booleans use distinct bounded projections; arbitrary methods, maps, formatted values, and transcriber display methods never enter a sink. The 23 intentional stdout progress sites retain their exact lifecycle position, cardinality, indentation, and newline behavior through a private fixed-site renderer that accepts only sealed nonnegative counts or a validated port; it emits no host, health address, channel-name set, or dynamic reason. The renderer is non-emitting and every admitted call is the direct closed `fmt.Print(renderGatewayConsole(...))` shape. Stable source and independent signature ledgers freeze all 54 logger and 23 console identities; the sole `InitPanic` crash artifact remains separately tracked and functional PR-text formatters remain outside operator output. | Gateway startup, reload, shutdown, event automation, and repair process private paths, identities, configuration, provider errors, and operator progress; diagnostics must stay useful without leaking them or silently deleting console behavior. |
 
 ## Data And State Model
 
@@ -59,8 +60,10 @@ Owns: CODE cmd/picoclaw/internal/gateway/**
 Owns: CODE pkg/bus/**
 Owns: CODE pkg/channels/**
 Owns: CODE pkg/gateway/channel_matrix.go
+Owns: CODE pkg/gateway/diagnostic_fields.go
 Owns: CODE pkg/gateway/events.go
 Owns: CODE pkg/gateway/gateway.go
+Owns: CODE pkg/gateway/gateway_console.go
 Owns: CODE pkg/gateway/listen.go
 Owns: CODE pkg/health/**
 Owns: CODE web/backend/api/channels.go
@@ -91,6 +94,9 @@ Owns: HTTP HEAD /pico/*
 Owns: TEST pkg/channels/*
 Owns: TEST pkg/gateway/gateway_test.go *
 Owns: TEST pkg/gateway/listen_test.go *
+Owns: TEST pkg/gateway/diagnostic_fields_test.go *
+Owns: TEST pkg/gateway/gateway_console_test.go *
+Owns: TEST pkg/gateway/p015b2c_* *
 Owns: TEST pkg/bus/*
 Owns: TEST pkg/health/*
 Owns: TEST cmd/picoclaw/internal/gateway/*
@@ -279,6 +285,7 @@ or outbound chat delivery behavior.
 | `FR-CHANNEL-016` | [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/gateway/event_review_readiness_test.go](../../pkg/gateway/event_review_readiness_test.go), [pkg/prworkspace/lifecycle_resume_publication_test.go](../../pkg/prworkspace/lifecycle_resume_publication_test.go) |
 | `FR-CHANNEL-017` | [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/eventing/pr_workspace_store_sqlite_test.go](../../pkg/eventing/pr_workspace_store_sqlite_test.go), [pkg/prworkspace/eventing_store_sqlite_test.go](../../pkg/prworkspace/eventing_store_sqlite_test.go) |
 | `FR-CHANNEL-018` | [web/backend/api/gateway_process_ops_test.go](../../web/backend/api/gateway_process_ops_test.go), [web/backend/api/testmain_runtime_test.go](../../web/backend/api/testmain_runtime_test.go), [web/backend/api/gateway_binary_integration_test.go](../../web/backend/api/gateway_binary_integration_test.go) |
+| `FR-CHANNEL-019` | [pkg/gateway/p015b2c_logging_test.go](../../pkg/gateway/p015b2c_logging_test.go), [pkg/gateway/p015b2c_startup_logging_test.go](../../pkg/gateway/p015b2c_startup_logging_test.go), [pkg/gateway/p015b2c_startup_runtime_test.go](../../pkg/gateway/p015b2c_startup_runtime_test.go), [pkg/gateway/p015b2c_reload_logging_test.go](../../pkg/gateway/p015b2c_reload_logging_test.go), [pkg/gateway/p015b2c_reload_runtime_test.go](../../pkg/gateway/p015b2c_reload_runtime_test.go), [pkg/gateway/p015b2c_shutdown_logging_test.go](../../pkg/gateway/p015b2c_shutdown_logging_test.go), [pkg/gateway/p015b2c_shutdown_runtime_test.go](../../pkg/gateway/p015b2c_shutdown_runtime_test.go), [pkg/gateway/gateway_console_test.go](../../pkg/gateway/gateway_console_test.go), [pkg/gateway/p015b2c_console_lifecycle_test.go](../../pkg/gateway/p015b2c_console_lifecycle_test.go), [scripts/p015b2_logging_gate_test.go](../../scripts/p015b2_logging_gate_test.go), [scripts/p015b2_logging_scan_test.go](../../scripts/p015b2_logging_scan_test.go), [scripts/p015b2c_security_output_guard_test.go](../../scripts/p015b2c_security_output_guard_test.go) |
 
 ## Implementation Anchors
 

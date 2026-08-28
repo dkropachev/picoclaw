@@ -385,6 +385,19 @@ func (scanner *p015ParsedLoggingFile) classifyCall(
 	if !ok {
 		return p015LoggingSite{}, false
 	}
+	if handle, rooted := scanner.directOSOutputHandleRoot(selector); rooted {
+		scanner.addEscape(
+			call.Pos(),
+			owner,
+			"direct os."+handle+" output handle method call "+selector.Sel.Name,
+		)
+		return scanner.site(
+			call,
+			owner,
+			"forbidden_output",
+			"os."+handle+"."+selector.Sel.Name,
+		), true
+	}
 	importPath, imported := scanner.importedSelector(selector)
 	if !imported {
 		if p015EmitterLikeMethod(selector.Sel.Name, len(call.Args)) {
@@ -417,6 +430,9 @@ func (scanner *p015ParsedLoggingFile) classifyCall(
 			return scanner.site(call, owner, "panic_artifact", "pico.InitPanic"), true
 		}
 	case "fmt":
+		if name == "Print" && scanner.closedGatewayConsoleCall(call) {
+			return scanner.site(call, owner, "console_safe", "fmt.Print"), true
+		}
 		if p015NameIn(name, "Print", "Printf", "Println") {
 			return scanner.site(call, owner, "console", "fmt."+name), true
 		}
@@ -458,6 +474,70 @@ func (scanner *p015ParsedLoggingFile) classifyCall(
 		), true
 	}
 	return p015LoggingSite{}, false
+}
+
+type p015GatewayConsoleCallShape struct {
+	constructor string
+	arguments   int
+}
+
+// The console catalog is deliberately a non-emitting package-private renderer.
+// Only these exact site/field-constructor pairs may cross the one remaining
+// direct stdout boundary. The reviewed C signature golden freezes the complete
+// canonical call after the source migration converges.
+var p015GatewayConsoleCallShapes = map[string]p015GatewayConsoleCallShape{
+	"gatewayConsoleC001GatewayStarted":             {"newGatewayConsolePort", 1},
+	"gatewayConsoleC002StopHint":                   {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC003DebugEnabled":               {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC004AgentStatus":                {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC005ToolsLoaded":                {"newGatewayConsoleCount", 1},
+	"gatewayConsoleC006SkillsAvailable":            {"newGatewayConsoleCountPair", 2},
+	"gatewayConsoleC007NoModelConfigured":          {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC008HeartbeatRestarted":         {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC009EventInboxReopened":         {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC010CronRestarted":              {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC011ChannelsRestarted":          {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC012RestartedChannelsEnabled":   {"newGatewayConsoleCount", 1},
+	"gatewayConsoleC013NoRestartedChannelsEnabled": {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC014DeviceServiceRestarted":     {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC015EventWorkersRestarted":      {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC016CronStarted":                {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC017ChannelsEnabled":            {"newGatewayConsoleCount", 1},
+	"gatewayConsoleC018NoChannelsEnabled":          {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC019HealthEndpointsAvailable":   {"newGatewayConsolePort", 1},
+	"gatewayConsoleC020DeviceServiceStarted":       {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC021EventWorkersStarted":        {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC022EventInboxOpened":           {"newGatewayConsoleNoFields", 0},
+	"gatewayConsoleC023HeartbeatStarted":           {"newGatewayConsoleNoFields", 0},
+}
+
+func (scanner *p015ParsedLoggingFile) closedGatewayConsoleCall(call *ast.CallExpr) bool {
+	if scanner.relative != "pkg/gateway/gateway.go" ||
+		call.Ellipsis != token.NoPos || len(call.Args) != 1 {
+		return false
+	}
+	renderCall, ok := p015UnwrapParens(call.Args[0]).(*ast.CallExpr)
+	if !ok || renderCall.Ellipsis != token.NoPos || len(renderCall.Args) != 2 {
+		return false
+	}
+	renderer, ok := p015UnwrapParens(renderCall.Fun).(*ast.Ident)
+	if !ok || renderer.Name != "renderGatewayConsole" || renderer.Obj != nil {
+		return false
+	}
+	site, ok := p015UnwrapParens(renderCall.Args[0]).(*ast.Ident)
+	if !ok || site.Obj != nil {
+		return false
+	}
+	want, reviewed := p015GatewayConsoleCallShapes[site.Name]
+	if !reviewed {
+		return false
+	}
+	fieldsCall, ok := p015UnwrapParens(renderCall.Args[1]).(*ast.CallExpr)
+	if !ok || fieldsCall.Ellipsis != token.NoPos || len(fieldsCall.Args) != want.arguments {
+		return false
+	}
+	constructor, ok := p015UnwrapParens(fieldsCall.Fun).(*ast.Ident)
+	return ok && constructor.Obj == nil && constructor.Name == want.constructor
 }
 
 func p015EmitterLikeMethod(name string, argumentCount int) bool {
@@ -556,6 +636,18 @@ func (scanner *p015ParsedLoggingFile) findFunctionValues(node ast.Node, owner st
 		if !ok {
 			return true
 		}
+		if handle, rooted := scanner.directOSOutputHandleRoot(selector); rooted {
+			if _, direct := directFunctions[selector.Pos()]; direct {
+				// The direct chained call was already inventoried by classifyCall.
+				return true
+			}
+			scanner.addEscape(
+				selector.Pos(),
+				owner,
+				"direct os."+handle+" output handle method value "+selector.Sel.Name,
+			)
+			return true
+		}
 		if _, direct := directFunctions[selector.Pos()]; direct {
 			return true
 		}
@@ -598,6 +690,24 @@ func (scanner *p015ParsedLoggingFile) findFunctionValues(node ast.Node, owner st
 		}
 		return true
 	})
+}
+
+// directOSOutputHandleRoot recognizes only a selector directly rooted at the
+// process stdout/stderr package variables. Ordinary writer values retain their
+// functional Write/WriteString methods without becoming logger-like calls.
+func (scanner *p015ParsedLoggingFile) directOSOutputHandleRoot(
+	selector *ast.SelectorExpr,
+) (string, bool) {
+	receiver, ok := p015UnwrapParens(selector.X).(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	importPath, imported := scanner.importedSelector(receiver)
+	if !imported || importPath != "os" ||
+		(receiver.Sel.Name != "Stdout" && receiver.Sel.Name != "Stderr") {
+		return "", false
+	}
+	return receiver.Sel.Name, true
 }
 
 func p015ParentNodes(node ast.Node) map[ast.Node]ast.Node {

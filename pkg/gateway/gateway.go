@@ -118,11 +118,15 @@ func logChannelVoiceCapabilities(cm *channels.Manager, asrAvailable bool, ttsAva
 			continue
 		}
 		caps := channels.DetectVoiceCapabilities(name, ch, asrAvailable, ttsAvailable)
-		logger.InfoCF("voice", "Channel voice capabilities", map[string]any{
-			"channel": name,
-			"asr":     caps.ASR,
-			"tts":     caps.TTS,
-		})
+		logger.InfoSafeCF(
+			logger.ComponentVoice,
+			logger.DiagnosticMessageVoiceChannelVoiceCapabilities,
+			logger.NewSafeFields(
+				gatewayDiagnosticChannelField(name),
+				logger.SafeBool(logger.FieldASREnabled, caps.ASR),
+				logger.SafeBool(logger.FieldTTSEnabled, caps.TTS),
+			),
+		)
 	}
 }
 
@@ -147,7 +151,13 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	defer panicFunc()
 
 	if err = logger.EnableFileLogging(filepath.Join(homePath, logPath, logFile)); err != nil {
-		logger.Fatal(fmt.Sprintf("error enabling file logging: %v", err))
+		logger.FatalSafeCF(
+			logger.ComponentLogger,
+			logger.DiagnosticMessageLoggerErrorEnablingFileLogging,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 	defer logger.DisableFileLogging()
 
@@ -158,13 +168,17 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 	defer func() {
 		if runErr != nil {
-			logger.ErrorCF("gateway", "Gateway startup failed", map[string]any{
-				"config_path": configPath,
-				"error":       runErr.Error(),
-				"home_path":   homePath,
-				"allow_empty": allowEmptyStartup,
-				"debug":       debug,
-			})
+			logger.ErrorSafeCF(
+				logger.ComponentGateway,
+				logger.DiagnosticMessageGatewayStartupFailed,
+				logger.NewSafeFields(
+					gatewayDiagnosticConfigPathField(configPath),
+					gatewayDiagnosticHomePathField(homePath),
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, runErr),
+					logger.SafeBool(logger.FieldAllowEmpty, allowEmptyStartup),
+					logger.SafeBool(logger.FieldDebugEnabled, debug),
+				),
+			)
 		}
 	}()
 
@@ -183,11 +197,18 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 
 	// Debug mode permanently overrides the config log level to DEBUG.
 	if debug {
-		fmt.Println("🔍 Debug mode enabled")
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC003DebugEnabled,
+			newGatewayConsoleNoFields(),
+		))
 	} else {
 		effectiveLogLevel := config.EffectiveGatewayLogLevel(cfg)
 		logger.SetLevelFromString(effectiveLogLevel)
-		logger.Infof("Log level set to %q", effectiveLogLevel)
+		logger.InfoSafeCF(
+			logger.ComponentLogger,
+			logger.DiagnosticMessageLoggerLogLevelSet,
+			logger.NewSafeFields(gatewayDiagnosticLogLevelField(effectiveLogLevel)),
+		)
 	}
 
 	bindPlan, listenResult, err := openGatewayListeners(cfg.Gateway.Host, cfg.Gateway.Port)
@@ -209,7 +230,13 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	// Enforce singleton: write PID file with generated token.
 	pidData, err := pid.WritePidFile(homePath, pidProbeHost, cfg.Gateway.Port)
 	if err != nil {
-		logger.Warnf("write pid file failed: %v", err)
+		logger.WarnSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayWritePIDFileFailed,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		for _, ln := range listenResult.Listeners {
 			_ = ln.Close()
 		}
@@ -254,12 +281,29 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	msgBus.SetEventPublisher(agentLoop.RuntimeEventBus())
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayStart, startedAt, nil)
 
-	fmt.Println("\n📦 Agent Status:")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC004AgentStatus,
+		newGatewayConsoleNoFields(),
+	))
 	startupStatus := collectGatewayStartupStatus(agentLoop.GetStartupInfo())
-	fmt.Printf("  • Tools: %d loaded\n", startupStatus.toolsCount)
-	fmt.Printf("  • Skills: %d/%d available\n", startupStatus.skillsAvailable, startupStatus.skillsTotal)
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC005ToolsLoaded,
+		newGatewayConsoleCount(startupStatus.toolsCount),
+	))
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC006SkillsAvailable,
+		newGatewayConsoleCountPair(startupStatus.skillsAvailable, startupStatus.skillsTotal),
+	))
 
-	logger.InfoCF("agent", "Agent initialized", startupStatus.logFields)
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentInitialized,
+		logger.NewSafeFields(
+			logger.SafeInt(logger.FieldToolCount, startupStatus.toolsCount),
+			logger.SafeInt(logger.FieldSkillCount, startupStatus.skillsTotal),
+			logger.SafeInt(logger.FieldAvailableCount, startupStatus.skillsAvailable),
+		),
+	)
 
 	startupCtx, releaseStartup, err := agentLoop.AcquireRuntimeStartupUse(
 		context.Background(),
@@ -322,10 +366,16 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	agentLoop.ReleaseRuntimeStartupBarrier()
 	startupResourcesOwned = false
 
-	for _, bindHost := range listenResult.BindHosts {
-		fmt.Printf("✓ Gateway started on %s\n", net.JoinHostPort(bindHost, strconv.Itoa(cfg.Gateway.Port)))
+	for range listenResult.BindHosts {
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC001GatewayStarted,
+			newGatewayConsolePort(cfg.Gateway.Port),
+		))
 	}
-	fmt.Println("Press Ctrl+C to stop")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC002StopHint,
+		newGatewayConsoleNoFields(),
+	))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -336,7 +386,11 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	stopWatch := func() {}
 	if cfg.Gateway.HotReload {
 		configReloadChan, stopWatch = setupConfigWatcherPolling(configPath, debug)
-		logger.Info("Config hot reload enabled")
+		logger.InfoSafeCF(
+			logger.ComponentConfig,
+			logger.DiagnosticMessageConfigHotReloadEnabled,
+			logger.NewSafeFields(),
+		)
 	}
 	defer stopWatch()
 
@@ -346,37 +400,77 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	for {
 		select {
 		case <-sigChan:
-			logger.Info("Shutting down...")
+			logger.InfoSafeCF(
+				logger.ComponentGateway,
+				logger.DiagnosticMessageGatewayShuttingDown,
+				logger.NewSafeFields(),
+			)
 			cancel()
 			shutdownGateway(runningServices, agentLoop, provider, msgBus, true)
 			return nil
 		case newCfg := <-configReloadChan:
 			if !runningServices.reloading.CompareAndSwap(false, true) {
-				logger.Warn("Config reload skipped: another reload is in progress")
+				logger.WarnSafeCF(
+					logger.ComponentConfig,
+					logger.DiagnosticMessageConfigReloadSkippedAnotherReloadIsInProgress,
+					logger.NewSafeFields(),
+				)
 				continue
 			}
 			err := executeReload(ctx, agentLoop, newCfg, &provider, runningServices, msgBus, allowEmptyStartup, debug)
 			if err != nil {
-				logger.Errorf("Config reload failed: %v", err)
+				logger.ErrorSafeCF(
+					logger.ComponentConfig,
+					logger.DiagnosticMessageConfigReloadFailed,
+					logger.NewSafeFields(
+						gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 		case <-manualReloadChan:
-			logger.Info("Manual reload triggered via /reload endpoint")
+			logger.InfoSafeCF(
+				logger.ComponentConfig,
+				logger.DiagnosticMessageConfigManualReloadTriggeredViaReloadEndpoint,
+				logger.NewSafeFields(),
+			)
 			newCfg, err := config.LoadConfig(configPath)
 			if err != nil {
-				logger.Errorf("Error loading config for manual reload: %v", err)
+				logger.ErrorSafeCF(
+					logger.ComponentConfig,
+					logger.DiagnosticMessageConfigErrorLoadingConfigForManualReload,
+					logger.NewSafeFields(
+						gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 				runningServices.reloading.Store(false)
 				continue
 			}
 			if err = newCfg.ValidateModelList(); err != nil {
-				logger.Errorf("Config validation failed: %v", err)
+				logger.ErrorSafeCF(
+					logger.ComponentConfig,
+					logger.DiagnosticMessageConfigValidationFailed,
+					logger.NewSafeFields(
+						gatewayDiagnosticErrorField(logger.ErrorClassValidation, err),
+					),
+				)
 				runningServices.reloading.Store(false)
 				continue
 			}
 			err = executeReload(ctx, agentLoop, newCfg, &provider, runningServices, msgBus, allowEmptyStartup, debug)
 			if err != nil {
-				logger.Errorf("Manual reload failed: %v", err)
+				logger.ErrorSafeCF(
+					logger.ComponentConfig,
+					logger.DiagnosticMessageConfigManualReloadFailed,
+					logger.NewSafeFields(
+						gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			} else {
-				logger.Info("Manual reload completed successfully")
+				logger.InfoSafeCF(
+					logger.ComponentConfig,
+					logger.DiagnosticMessageConfigManualReloadCompletedSuccessfully,
+					logger.NewSafeFields(),
+				)
 			}
 		}
 	}
@@ -464,27 +558,23 @@ type gatewayStartupStatus struct {
 	toolsCount      int
 	skillsAvailable int
 	skillsTotal     int
-	logFields       map[string]any
 }
 
 func collectGatewayStartupStatus(startupInfo map[string]any) gatewayStartupStatus {
-	status := gatewayStartupStatus{logFields: map[string]any{}}
+	status := gatewayStartupStatus{}
 
 	if toolsInfo, ok := startupInfo["tools"].(map[string]any); ok {
 		if count, ok := startupInfoInt(toolsInfo["count"]); ok {
 			status.toolsCount = count
-			status.logFields["tools_count"] = count
 		}
 	}
 
 	if skillsInfo, ok := startupInfo["skills"].(map[string]any); ok {
 		if total, ok := startupInfoInt(skillsInfo["total"]); ok {
 			status.skillsTotal = total
-			status.logFields["skills_total"] = total
 		}
 		if available, ok := startupInfoInt(skillsInfo["available"]); ok {
 			status.skillsAvailable = available
-			status.logFields["skills_available"] = available
 		}
 	}
 
@@ -541,10 +631,17 @@ func createStartupProvider(
 	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelName == "" && allowEmptyStartup {
 		reason := config.ErrNoModelConfigured.Error()
-		fmt.Printf("⚠ Warning: %s\n", reason)
-		logger.WarnCF("gateway", "Gateway started without a configured model alias", map[string]any{
-			"limited_mode": true,
-		})
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC007NoModelConfigured,
+			newGatewayConsoleNoFields(),
+		))
+		logger.WarnSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayStartedWithoutAConfiguredModelAlias,
+			logger.NewSafeFields(
+				logger.SafeBool(logger.FieldLimitedMode, true),
+			),
+		)
 		return &startupBlockedProvider{reason: reason}, "", nil
 	}
 
@@ -629,16 +726,28 @@ func setupAndStartServices(
 	transcriber := asr.DetectTranscriberWithExecutionPolicy(cfg, executionPolicy)
 	if transcriber != nil {
 		agentLoop.SetTranscriber(transcriber)
-		logger.InfoCF("voice", "Transcription enabled (agent-level)", map[string]any{"provider": transcriber.Name()})
+		logger.InfoSafeCF(
+			logger.ComponentVoice,
+			logger.DiagnosticMessageVoiceTranscriptionEnabledAgentLevel,
+			logger.NewSafeFields(
+				gatewayDiagnosticProviderField(gatewayConfiguredVoiceProvider(cfg)),
+			),
+		)
 	}
 
 	ttsAvailable := tts.DetectTTS(cfg) != nil
 
 	enabledChannels := runningServices.ChannelManager.GetEnabledChannels()
 	if len(enabledChannels) > 0 {
-		fmt.Printf("✓ Channels enabled: %s\n", enabledChannels)
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC017ChannelsEnabled,
+			newGatewayConsoleCount(len(enabledChannels)),
+		))
 	} else {
-		fmt.Println("⚠ Warning: No channels enabled")
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC018NoChannelsEnabled,
+			newGatewayConsoleNoFields(),
+		))
 	}
 
 	runningServices.authToken = authToken
@@ -704,11 +813,10 @@ func setupAndStartServices(
 		voiceAgent.Start(vaCtx)
 	}
 
-	healthAddr := net.JoinHostPort(listenResult.ProbeHost, strconv.Itoa(cfg.Gateway.Port))
-	fmt.Printf(
-		"✓ Health endpoints available at http://%s/health, /ready and /reload (POST)\n",
-		healthAddr,
-	)
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC019HealthEndpointsAvailable,
+		newGatewayConsolePort(cfg.Gateway.Port),
+	))
 
 	stateManager := state.NewManager(cfg.WorkspacePath())
 	runningServices.DeviceService = devices.NewService(devices.Config{
@@ -717,9 +825,18 @@ func setupAndStartServices(
 	}, stateManager)
 	runningServices.DeviceService.SetBus(msgBus)
 	if err = runningServices.DeviceService.Start(context.Background()); err != nil {
-		logger.ErrorCF("device", "Error starting device service", map[string]any{"error": err.Error()})
+		logger.ErrorSafeCF(
+			logger.ComponentDevice,
+			logger.DiagnosticMessageDeviceErrorStartingDeviceService,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	} else if cfg.Devices.Enabled {
-		fmt.Println("✓ Device event service started")
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC020DeviceServiceStarted,
+			newGatewayConsoleNoFields(),
+		))
 	}
 
 	runningServices.EventAutomation, err = setupEventAutomationService(
@@ -732,15 +849,24 @@ func setupAndStartServices(
 	}
 	if runningServices.EventAutomation != nil {
 		if cfg.Workflows.Enabled {
-			fmt.Println("✓ Durable event inbox and workflow workers started")
+			fmt.Print(renderGatewayConsole(
+				gatewayConsoleC021EventWorkersStarted,
+				newGatewayConsoleNoFields(),
+			))
 		} else {
-			fmt.Println("✓ Durable event inbox opened (workflow dispatch disabled)")
+			fmt.Print(renderGatewayConsole(
+				gatewayConsoleC022EventInboxOpened,
+				newGatewayConsoleNoFields(),
+			))
 		}
 	}
 	if err = runningServices.HeartbeatService.Start(); err != nil {
 		return runningServices, fmt.Errorf("error starting heartbeat service: %w", err)
 	}
-	fmt.Println("✓ Heartbeat service started")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC023HeartbeatStarted,
+		newGatewayConsoleNoFields(),
+	))
 
 	// Cron is deliberately the final service started. Its durable store may
 	// contain overdue jobs, so starting it before later fallible initialization
@@ -748,7 +874,10 @@ func setupAndStartServices(
 	if err = runningServices.CronService.Start(); err != nil {
 		return runningServices, fmt.Errorf("error starting cron service: %w", err)
 	}
-	fmt.Println("✓ Cron service started")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC016CronStarted,
+		newGatewayConsoleNoFields(),
+	))
 
 	return runningServices, nil
 }
@@ -859,9 +988,13 @@ func shutdownGateway(
 
 	producerErr := stopRuntimeProducers(runningServices, gracefulShutdownTimeout)
 	if producerErr != nil {
-		logger.ErrorCF("gateway", "Failed to stop runtime producers cleanly", map[string]any{
-			"error": producerErr.Error(),
-		})
+		logger.ErrorSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayFailedToStopRuntimeProducersCleanly,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, producerErr),
+			),
+		)
 	}
 
 	agentLoop.Stop()
@@ -869,21 +1002,35 @@ func shutdownGateway(
 	defer drainCancel()
 	runStopErr := agentLoop.WaitStopped(drainCtx)
 	if runStopErr != nil {
-		logger.ErrorCF("gateway", "Agent loop did not stop cleanly", map[string]any{"error": runStopErr.Error()})
+		logger.ErrorSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayAgentLoopDidNotStopCleanly,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, runStopErr),
+			),
+		)
 	}
 	_, runtimeDrainErr := agentLoop.PauseRuntimeForReload(drainCtx)
 	if runtimeDrainErr != nil {
-		logger.ErrorCF("gateway", "Agent runtime did not drain cleanly", map[string]any{
-			"error": runtimeDrainErr.Error(),
-		})
+		logger.ErrorSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayAgentRuntimeDidNotDrainCleanly,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, runtimeDrainErr),
+			),
+		)
 	}
 
 	var dependencyErr error
 	admissionCloseErr := closeEventChannelAdmission(drainCtx, runningServices)
 	if admissionCloseErr != nil {
-		logger.ErrorCF("gateway", "Channel event admission did not close cleanly", map[string]any{
-			"error": admissionCloseErr.Error(),
-		})
+		logger.ErrorSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayChannelEventAdmissionDidNotCloseCleanly,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, admissionCloseErr),
+			),
+		)
 	}
 	if runStopErr == nil && runtimeDrainErr == nil && admissionCloseErr == nil {
 		dependencyErr = stopRuntimeDependencies(
@@ -892,9 +1039,13 @@ func shutdownGateway(
 			true,
 		)
 		if dependencyErr != nil {
-			logger.ErrorCF("gateway", "Failed to stop runtime dependencies cleanly", map[string]any{
-				"error": dependencyErr.Error(),
-			})
+			logger.ErrorSafeCF(
+				logger.ComponentGateway,
+				logger.DiagnosticMessageGatewayFailedToStopRuntimeDependenciesCleanly,
+				logger.NewSafeFields(
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, dependencyErr),
+				),
+			)
 		}
 	}
 
@@ -915,7 +1066,11 @@ func shutdownGateway(
 		}
 	}
 
-	logger.Info("✓ Gateway stopped")
+	logger.InfoSafeCF(
+		logger.ComponentGateway,
+		logger.DiagnosticMessageGatewayStopped,
+		logger.NewSafeFields(),
+	)
 }
 
 func handleConfigReload(
@@ -960,7 +1115,11 @@ func handleConfigReloadWithServiceOps(
 	debug bool,
 	serviceOps configReloadServiceOps,
 ) error {
-	logger.Info("🔄 Config file changed, reloading...")
+	logger.InfoSafeCF(
+		logger.ComponentConfig,
+		logger.DiagnosticMessageConfigFileChangedReloading,
+		logger.NewSafeFields(),
+	)
 
 	if al == nil || al.GetConfig() == nil || providerRef == nil || *providerRef == nil {
 		return fmt.Errorf("active agent configuration and provider are required for reload")
@@ -1025,7 +1184,11 @@ func handleConfigReloadWithServiceOps(
 		return fmt.Errorf("validate event automation before reload: %w", storageErr)
 	}
 
-	logger.Infof(" New model is '%s', recreating provider...", newModel)
+	logger.InfoSafeCF(
+		logger.ComponentProvider,
+		logger.DiagnosticMessageProviderNewModelSelectedRecreatingProvider,
+		logger.NewSafeFields(gatewayDiagnosticModelField(newModel)),
+	)
 
 	newProvider, _, err := createStartupProvider(
 		newCfg,
@@ -1033,7 +1196,13 @@ func handleConfigReloadWithServiceOps(
 		newExecutionPolicy,
 	)
 	if err != nil {
-		logger.Errorf("  ⚠ Error creating new provider: %v", err)
+		logger.ErrorSafeCF(
+			logger.ComponentProvider,
+			logger.DiagnosticMessageProviderErrorCreatingNewProvider,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassProvider, err),
+			),
+		)
 		return fmt.Errorf("error creating new provider: %w", err)
 	}
 	if err = prepareEventChannelAdmission(runningServices, newCfg); err != nil {
@@ -1116,7 +1285,11 @@ func handleConfigReloadWithServiceOps(
 		)
 	}
 
-	logger.Info("  Stopping all services...")
+	logger.InfoSafeCF(
+		logger.ComponentGateway,
+		logger.DiagnosticMessageGatewayStoppingAllServices,
+		logger.NewSafeFields(),
+	)
 	if stopErr := serviceOps.stop(runningServices, serviceShutdownTimeout, true); stopErr != nil {
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
 			stateful.Close()
@@ -1157,11 +1330,21 @@ func handleConfigReloadWithServiceOps(
 		newExecutionPolicy,
 	)
 	if err != nil {
-		logger.Errorf("  ⚠ Error reloading agent loop: %v", err)
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentErrorReloadingAgentLoop,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
 			stateful.Close()
 		}
-		logger.Warn("  Attempting to restart services with old provider and config...")
+		logger.WarnSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayAttemptingToRestartServicesWithOldProviderAndConfig,
+			logger.NewSafeFields(),
+		)
 		restartErr := prepareEventChannelAdmission(runningServices, oldCfg)
 		if restartErr == nil {
 			restartErr = serviceOps.restart(runtimeCtx, al, runningServices, msgBus)
@@ -1171,7 +1354,13 @@ func handleConfigReloadWithServiceOps(
 			reactivateErr = activateEventAdmissions(runningServices)
 		}
 		if restartErr != nil {
-			logger.Errorf("  ⚠ Failed to restart services: %v", restartErr)
+			logger.ErrorSafeCF(
+				logger.ComponentGateway,
+				logger.DiagnosticMessageGatewayFailedToRestartServices,
+				logger.NewSafeFields(
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, restartErr),
+				),
+			)
 		} else if reactivateErr == nil &&
 			runningServices != nil &&
 			runningServices.HealthServer != nil {
@@ -1187,7 +1376,11 @@ func handleConfigReloadWithServiceOps(
 		previousProvider = oldProvider
 	}
 
-	logger.Info("  Preflighting and restarting all services with new configuration...")
+	logger.InfoSafeCF(
+		logger.ComponentGateway,
+		logger.DiagnosticMessageGatewayPreflightingAndRestartingAllServicesWithNewConfiguration,
+		logger.NewSafeFields(),
+	)
 	candidateServicesStarted := false
 	restartErr := validateEventAutomationRuntime(runtimeCtx, newCfg, al)
 	if restartErr != nil {
@@ -1200,7 +1393,13 @@ func handleConfigReloadWithServiceOps(
 		}
 	}
 	if restartErr != nil {
-		logger.Errorf("  ⚠ Error restarting services: %v", restartErr)
+		logger.ErrorSafeCF(
+			logger.ComponentGateway,
+			logger.DiagnosticMessageGatewayErrorRestartingServices,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, restartErr),
+			),
+		)
 		var cleanupErr error
 		if candidateServicesStarted {
 			cleanupErr = serviceOps.stop(runningServices, serviceShutdownTimeout, true)
@@ -1264,14 +1463,22 @@ func handleConfigReloadWithServiceOps(
 	}
 	closeRetainedProviderAfterReload(al, previousProvider)
 
-	logger.Info("  ✓ Provider, configuration, and services reloaded successfully (thread-safe)")
+	logger.InfoSafeCF(
+		logger.ComponentConfig,
+		logger.DiagnosticMessageConfigProviderConfigurationAndServicesReloadedSuccessfully,
+		logger.NewSafeFields(),
+	)
 
 	// Debug mode permanently overrides the config log level to DEBUG.
 	if !debug {
 		// Update log level last so that reload-related info/warn logs above are not suppressed.
 		effectiveLogLevel := config.EffectiveGatewayLogLevel(newCfg)
 		logger.SetLevelFromString(effectiveLogLevel)
-		logger.Infof("Log level changing from current to %q", effectiveLogLevel)
+		logger.InfoSafeCF(
+			logger.ComponentLogger,
+			logger.DiagnosticMessageLoggerLogLevelChangingFromCurrent,
+			logger.NewSafeFields(gatewayDiagnosticLogLevelField(effectiveLogLevel)),
+		)
 	}
 
 	return nil
@@ -1322,7 +1529,10 @@ func restartServices(
 	if err = runningServices.HeartbeatService.Start(); err != nil {
 		return fmt.Errorf("error restarting heartbeat service: %w", err)
 	}
-	fmt.Println("  ✓ Heartbeat service restarted")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC008HeartbeatRestarted,
+		newGatewayConsoleNoFields(),
+	))
 
 	runningServices.MediaStore = media.NewFileMediaStoreWithCleanup(media.MediaCleanerConfig{
 		Enabled:  cfg.Tools.MediaCleanup.Enabled,
@@ -1354,13 +1564,22 @@ func restartServices(
 	if err = runningServices.ChannelManager.Reload(context.Background(), cfg); err != nil {
 		return fmt.Errorf("error reload channels: %w", err)
 	}
-	fmt.Println("  ✓ Channels restarted.")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC011ChannelsRestarted,
+		newGatewayConsoleNoFields(),
+	))
 
 	enabledChannels := runningServices.ChannelManager.GetEnabledChannels()
 	if len(enabledChannels) > 0 {
-		fmt.Printf("  ✓ Channels enabled: %s\n", enabledChannels)
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC012RestartedChannelsEnabled,
+			newGatewayConsoleCount(len(enabledChannels)),
+		))
 	} else {
-		fmt.Println("  ⚠ Warning: No channels enabled")
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC013NoRestartedChannelsEnabled,
+			newGatewayConsoleNoFields(),
+		))
 	}
 
 	stateManager := state.NewManager(cfg.WorkspacePath())
@@ -1370,15 +1589,30 @@ func restartServices(
 	}, stateManager)
 	runningServices.DeviceService.SetBus(msgBus)
 	if startErr := runningServices.DeviceService.Start(context.Background()); startErr != nil {
-		logger.WarnCF("device", "Failed to restart device service", map[string]any{"error": startErr.Error()})
+		logger.WarnSafeCF(
+			logger.ComponentDevice,
+			logger.DiagnosticMessageDeviceFailedToRestartDeviceService,
+			logger.NewSafeFields(
+				gatewayDiagnosticErrorField(logger.ErrorClassInternal, startErr),
+			),
+		)
 	} else if cfg.Devices.Enabled {
-		fmt.Println("  ✓ Device event service restarted")
+		fmt.Print(renderGatewayConsole(
+			gatewayConsoleC014DeviceServiceRestarted,
+			newGatewayConsoleNoFields(),
+		))
 	}
 
 	transcriber := asr.DetectTranscriberWithExecutionPolicy(cfg, executionPolicy)
 	al.SetTranscriber(transcriber)
 	if transcriber != nil {
-		logger.InfoCF("voice", "Transcription re-enabled (agent-level)", map[string]any{"provider": transcriber.Name()})
+		logger.InfoSafeCF(
+			logger.ComponentVoice,
+			logger.DiagnosticMessageVoiceTranscriptionReEnabledAgentLevel,
+			logger.NewSafeFields(
+				gatewayDiagnosticProviderField(gatewayConfiguredVoiceProvider(cfg)),
+			),
+		)
 
 		// Start Voice Agent Orchestrator on reload
 		vaCtx, vaCancel := context.WithCancel(context.Background())
@@ -1386,7 +1620,11 @@ func restartServices(
 		voiceAgent := asr.NewAgent(msgBus, transcriber)
 		voiceAgent.Start(vaCtx)
 	} else {
-		logger.InfoCF("voice", "Transcription disabled", nil)
+		logger.InfoSafeCF(
+			logger.ComponentVoice,
+			logger.DiagnosticMessageVoiceTranscriptionDisabled,
+			logger.NewSafeFields(),
+		)
 	}
 
 	ttsAvailable := tts.DetectTTS(cfg) != nil
@@ -1402,9 +1640,15 @@ func restartServices(
 	}
 	if runningServices.EventAutomation != nil {
 		if cfg.Workflows.Enabled {
-			fmt.Println("  ✓ Durable event inbox and workflow workers restarted")
+			fmt.Print(renderGatewayConsole(
+				gatewayConsoleC015EventWorkersRestarted,
+				newGatewayConsoleNoFields(),
+			))
 		} else {
-			fmt.Println("  ✓ Durable event inbox reopened (workflow dispatch disabled)")
+			fmt.Print(renderGatewayConsole(
+				gatewayConsoleC009EventInboxReopened,
+				newGatewayConsoleNoFields(),
+			))
 		}
 	}
 	// Start cron last. Event workers and agent-backed services are fenced by the
@@ -1413,14 +1657,42 @@ func restartServices(
 	if err = runningServices.CronService.Start(); err != nil {
 		return fmt.Errorf("error restarting cron service: %w", err)
 	}
-	fmt.Println("  ✓ Cron service restarted")
+	fmt.Print(renderGatewayConsole(
+		gatewayConsoleC010CronRestarted,
+		newGatewayConsoleNoFields(),
+	))
 	// NOTE: PID file is written once at startup and not updated on reload.
 	// Changing the gateway listen address requires a full restart.
 
 	return nil
 }
 
-func setupConfigWatcherPolling(configPath string, debug bool) (chan *config.Config, func()) {
+type configWatcherPollingTiming struct {
+	pollInterval time.Duration
+	settleDelay  time.Duration
+	ready        chan<- struct{}
+	processed    chan<- struct{}
+}
+
+func setupConfigWatcherPolling(
+	configPath string,
+	debug bool,
+	timingOverride ...configWatcherPollingTiming,
+) (chan *config.Config, func()) {
+	timing := configWatcherPollingTiming{
+		pollInterval: 2 * time.Second,
+		settleDelay:  500 * time.Millisecond,
+	}
+	if len(timingOverride) > 0 {
+		timing = timingOverride[0]
+		if timing.pollInterval <= 0 {
+			timing.pollInterval = 2 * time.Second
+		}
+		if timing.settleDelay < 0 {
+			timing.settleDelay = 0
+		}
+	}
+
 	configChan := make(chan *config.Config, 1)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1431,8 +1703,11 @@ func setupConfigWatcherPolling(configPath string, debug bool) (chan *config.Conf
 
 		lastModTime := getFileModTime(configPath)
 		lastSize := getFileSize(configPath)
+		if timing.ready != nil {
+			close(timing.ready)
+		}
 
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(timing.pollInterval)
 		defer ticker.Stop()
 
 		for {
@@ -1443,34 +1718,71 @@ func setupConfigWatcherPolling(configPath string, debug bool) (chan *config.Conf
 
 				if currentModTime.After(lastModTime) || currentSize != lastSize {
 					if debug {
-						logger.Debugf("🔍 Config file change detected")
+						logger.DebugSafeCF(
+							logger.ComponentConfig,
+							logger.DiagnosticMessageConfigFileChangeDetected,
+							logger.NewSafeFields(),
+						)
 					}
 
-					time.Sleep(500 * time.Millisecond)
+					if timing.settleDelay > 0 {
+						time.Sleep(timing.settleDelay)
+					}
 
 					lastModTime = currentModTime
 					lastSize = currentSize
 
 					newCfg, err := config.LoadConfig(configPath)
 					if err != nil {
-						logger.Errorf("⚠ Error loading new config: %v", err)
-						logger.Warn("  Using previous valid config")
+						logger.ErrorSafeCF(
+							logger.ComponentConfig,
+							logger.DiagnosticMessageConfigErrorLoadingNewConfig,
+							logger.NewSafeFields(
+								gatewayDiagnosticErrorField(logger.ErrorClassInternal, err),
+							),
+						)
+						logger.WarnSafeCF(
+							logger.ComponentConfig,
+							logger.DiagnosticMessageConfigUsingPreviousValidConfig,
+							logger.NewSafeFields(),
+						)
+						signalConfigWatcherProcessed(timing.processed)
 						continue
 					}
 
 					if err := newCfg.ValidateModelList(); err != nil {
-						logger.Errorf("  ⚠ New config validation failed: %v", err)
-						logger.Warn("  Using previous valid config")
+						logger.ErrorSafeCF(
+							logger.ComponentConfig,
+							logger.DiagnosticMessageConfigNewConfigValidationFailed,
+							logger.NewSafeFields(
+								gatewayDiagnosticErrorField(logger.ErrorClassValidation, err),
+							),
+						)
+						logger.WarnSafeCF(
+							logger.ComponentConfig,
+							logger.DiagnosticMessageConfigUsingPreviousValidConfig,
+							logger.NewSafeFields(),
+						)
+						signalConfigWatcherProcessed(timing.processed)
 						continue
 					}
 
-					logger.Info("✓ Config file validated and loaded")
+					logger.InfoSafeCF(
+						logger.ComponentConfig,
+						logger.DiagnosticMessageConfigFileValidatedAndLoaded,
+						logger.NewSafeFields(),
+					)
 
 					select {
 					case configChan <- newCfg:
 					default:
-						logger.Warn("⚠ Previous config reload still in progress, skipping")
+						logger.WarnSafeCF(
+							logger.ComponentConfig,
+							logger.DiagnosticMessageConfigPreviousReloadStillInProgressSkipping,
+							logger.NewSafeFields(),
+						)
 					}
+					signalConfigWatcherProcessed(timing.processed)
 				}
 			case <-stop:
 				return
@@ -1484,6 +1796,16 @@ func setupConfigWatcherPolling(configPath string, debug bool) (chan *config.Conf
 	}
 
 	return configChan, stopFunc
+}
+
+func signalConfigWatcherProcessed(processed chan<- struct{}) {
+	if processed == nil {
+		return
+	}
+	select {
+	case processed <- struct{}{}:
+	default:
+	}
 }
 
 func getFileModTime(path string) time.Time {

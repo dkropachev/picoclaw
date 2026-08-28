@@ -687,11 +687,12 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		ObservationDomainIdentityReason != 66 ||
 		ObservationDomainIdentityScope != 67 ||
 		ObservationDomainIdentityToolSurface != 68 ||
-		len(observationDomainLabels) != 69 {
+		ObservationDomainConfigPath != 69 || ObservationDomainHomePath != 70 ||
+		len(observationDomainLabels) != 71 {
 		t.Fatalf(
 			"appended domain wire moved: first=%d last=%d labels=%d",
 			ObservationDomainHookMessage,
-			ObservationDomainIdentityToolSurface,
+			ObservationDomainHomePath,
 			len(observationDomainLabels),
 		)
 	}
@@ -704,11 +705,12 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		ObservationPrefixIdentityReason != 73 ||
 		ObservationPrefixIdentityScope != 74 ||
 		ObservationPrefixIdentityToolSurface != 75 ||
-		len(observationPrefixLabels) != 76 {
+		ObservationPrefixConfigPath != 76 || ObservationPrefixHomePath != 77 ||
+		len(observationPrefixLabels) != 78 {
 		t.Fatalf(
 			"appended prefix wire moved: first=%d last=%d labels=%d",
 			ObservationPrefixHookMessage,
-			ObservationPrefixIdentityToolSurface,
+			ObservationPrefixHomePath,
 			len(observationPrefixLabels),
 		)
 	}
@@ -884,11 +886,11 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		ObservationPrefixIdentityHookStage <= ObservationPrefixIdentityContextManager {
 		t.Fatal("appended enums were not appended")
 	}
-	if !validDomain(ObservationDomainIdentityToolSurface) ||
-		validDomain(ObservationDomainIdentityToolSurface+1) {
+	if !validDomain(ObservationDomainHomePath) ||
+		validDomain(ObservationDomainHomePath+1) {
 		t.Fatal("domain after append-only tail accepted")
 	}
-	if _, ok := observationPrefixLabel(ObservationPrefixIdentityToolSurface + 1); ok {
+	if _, ok := observationPrefixLabel(ObservationPrefixHomePath + 1); ok {
 		t.Fatal("prefix after append-only tail accepted")
 	}
 }

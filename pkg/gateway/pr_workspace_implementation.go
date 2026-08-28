@@ -87,11 +87,15 @@ func (runtime *prWorkspaceImplementationRuntime) Repair(
 ) (repairResult prworkspace.RepairResult, repairErr error) {
 	defer func() {
 		if repairErr != nil {
-			logger.ErrorCF("pr-workspace", "PR workspace repair failed", map[string]any{
-				"workspace_id": request.Context.WorkspaceID,
-				"attempt":      request.Attempt,
-				"error":        repairErr.Error(),
-			})
+			logger.ErrorSafeCF(
+				logger.ComponentPRWorkspace,
+				logger.DiagnosticMessagePRWorkspaceRepairFailed,
+				logger.NewSafeFields(
+					gatewayDiagnosticWorkspaceField(request.Context.WorkspaceID),
+					logger.SafeInt(logger.FieldAttempt, request.Attempt),
+					gatewayDiagnosticErrorField(logger.ErrorClassInternal, repairErr),
+				),
+			)
 		}
 	}()
 	provider := request.Context.Provider

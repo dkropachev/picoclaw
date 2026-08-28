@@ -2,12 +2,12 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -28,10 +28,10 @@ func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		prepare    func(t *testing.T, dir string) string
-		wantErr    string
-		wantLogSub string
+		name            string
+		prepare         func(t *testing.T, dir string) string
+		wantErr         string
+		forbiddenLogSub string
 	}{
 		{
 			name: "invalid config returns load error",
@@ -43,8 +43,8 @@ func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
 				}
 				return cfgPath
 			},
-			wantErr:    "error loading config:",
-			wantLogSub: "error loading config:",
+			wantErr:         "error loading config:",
+			forbiddenLogSub: "error loading config:",
 		},
 		{
 			name: "invalid config returns pre-check error",
@@ -58,8 +58,8 @@ func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
 				}
 				return cfgPath
 			},
-			wantErr:    "config pre-check failed: invalid gateway port: 0",
-			wantLogSub: "config pre-check failed: invalid gateway port: 0",
+			wantErr:         "config pre-check failed: invalid gateway port: 0",
+			forbiddenLogSub: "config pre-check failed: invalid gateway port: 0",
 		},
 	}
 
@@ -75,6 +75,7 @@ func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
 				"GO_WANT_GATEWAY_RUN_HELPER=1",
 				"PICO_TEST_HOME="+homeDir,
 				"PICO_TEST_CONFIG="+configPath,
+				"PICOCLAW_LOG_LEVEL=debug",
 			)
 
 			output, err := cmd.CombinedOutput()
@@ -92,11 +93,36 @@ func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
 				t.Fatalf("ReadFile(gateway.log) error = %v", readErr)
 			}
 			logText := string(logData)
-			if !strings.Contains(logText, "Gateway startup failed") {
-				t.Fatalf("gateway.log missing structured startup failure log:\n%s", logText)
+			var startupRecord map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logText), "\n") {
+				var record map[string]any
+				if decodeErr := json.Unmarshal([]byte(line), &record); decodeErr != nil {
+					continue
+				}
+				if record["message"] == "Gateway startup failed" {
+					startupRecord = record
+					break
+				}
 			}
-			if !strings.Contains(logText, tt.wantLogSub) {
-				t.Fatalf("gateway.log missing expected failure detail %q:\n%s", tt.wantLogSub, logText)
+			if startupRecord == nil {
+				t.Fatalf("gateway.log missing structured startup failure record:\n%s", logText)
+			}
+			recordBytes, marshalErr := json.Marshal(startupRecord)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			for _, forbidden := range []string{tt.forbiddenLogSub, homeDir, configPath} {
+				if strings.Contains(string(recordBytes), forbidden) {
+					t.Fatalf("startup record contains private failure value %q: %s", forbidden, recordBytes)
+				}
+			}
+			if startupRecord["error_class"] != "internal" ||
+				startupRecord["error_digest"] == nil ||
+				startupRecord["config_path_digest"] == nil ||
+				startupRecord["home_path_digest"] == nil ||
+				startupRecord["allow_empty"] != false ||
+				startupRecord["debug_enabled"] != false {
+				t.Fatalf("startup record lacks required safe fields: %#v", startupRecord)
 			}
 		})
 	}
@@ -481,12 +507,10 @@ func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {
 		wantToolsCount      int
 		wantSkillsAvailable int
 		wantSkillsTotal     int
-		wantLogFields       map[string]any
 	}{
 		{
-			name:          "missing info",
-			startupInfo:   map[string]any{},
-			wantLogFields: map[string]any{},
+			name:        "missing info",
+			startupInfo: map[string]any{},
 		},
 		{
 			name: "wrong map shapes",
@@ -494,7 +518,6 @@ func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {
 				"tools":  "unexpected",
 				"skills": []any{"unexpected"},
 			},
-			wantLogFields: map[string]any{},
 		},
 		{
 			name: "valid startup info",
@@ -510,11 +533,6 @@ func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {
 			wantToolsCount:      3,
 			wantSkillsAvailable: 2,
 			wantSkillsTotal:     5,
-			wantLogFields: map[string]any{
-				"tools_count":      3,
-				"skills_available": 2,
-				"skills_total":     5,
-			},
 		},
 		{
 			name: "json number startup info",
@@ -530,11 +548,6 @@ func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {
 			wantToolsCount:      4,
 			wantSkillsAvailable: 1,
 			wantSkillsTotal:     6,
-			wantLogFields: map[string]any{
-				"tools_count":      4,
-				"skills_available": 1,
-				"skills_total":     6,
-			},
 		},
 	}
 
@@ -551,9 +564,6 @@ func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {
 			}
 			if got.skillsTotal != tt.wantSkillsTotal {
 				t.Fatalf("skillsTotal = %d, want %d", got.skillsTotal, tt.wantSkillsTotal)
-			}
-			if !reflect.DeepEqual(got.logFields, tt.wantLogFields) {
-				t.Fatalf("logFields = %#v, want %#v", got.logFields, tt.wantLogFields)
 			}
 		})
 	}

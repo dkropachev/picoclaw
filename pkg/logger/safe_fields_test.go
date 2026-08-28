@@ -41,16 +41,17 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 		DiagnosticMessageToolCall != 22 || DiagnosticMessageHookCloseFailed != 54 ||
 		DiagnosticMessageAgentAccountRouterReselectedAfterContextCompression != 55 ||
 		DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered != 153 ||
-		DiagnosticMessageWorkflowRunFailed != 274 || len(diagnosticMessageLabels) != 275 {
+		DiagnosticMessageWorkflowRunFailed != 274 ||
+		DiagnosticMessagePRWorkspaceRepairFailed != 326 || len(diagnosticMessageLabels) != 327 {
 		t.Fatalf(
 			"message wire moved: first=%d last=%d labels=%d",
 			DiagnosticMessageEvent,
-			DiagnosticMessageWorkflowRunFailed,
+			DiagnosticMessagePRWorkspaceRepairFailed,
 			len(diagnosticMessageLabels),
 		)
 	}
 	seenMessages := make(map[string]DiagnosticMessageID)
-	for message := DiagnosticMessageEvent; message <= DiagnosticMessageWorkflowRunFailed; message++ {
+	for message := DiagnosticMessageEvent; message <= DiagnosticMessagePRWorkspaceRepairFailed; message++ {
 		label, ok := diagnosticMessageLabel(message)
 		if !ok || label == "" {
 			t.Fatalf("message %d invalid", message)
@@ -63,7 +64,7 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 	if _, ok := diagnosticMessageLabel(0); ok {
 		t.Fatal("zero message accepted")
 	}
-	if _, ok := diagnosticMessageLabel(DiagnosticMessageWorkflowRunFailed + 1); ok {
+	if _, ok := diagnosticMessageLabel(DiagnosticMessagePRWorkspaceRepairFailed + 1); ok {
 		t.Fatal("message after append-only tail accepted")
 	}
 }
@@ -1035,11 +1036,12 @@ func TestP015b2aFieldWireManifest(t *testing.T) {
 		{FieldFallback, 101, "fallback", safeFieldKindBool},
 		{FieldHasSummary, 102, "has_summary", safeFieldKindBool},
 		{FieldCacheSensitive, 103, "cache_sensitive", safeFieldKindBool},
+		{FieldLogLevel, 104, "log_level", safeFieldKindEnum},
 	}
 
 	const firstWireKey = 64
-	if len(expectedSpecs) != 40 {
-		t.Fatalf("test manifest has %d specs; want 40", len(expectedSpecs))
+	if len(expectedSpecs) != 41 {
+		t.Fatalf("test manifest has %d specs; want 41", len(expectedSpecs))
 	}
 	for offset, expected := range expectedSpecs {
 		numericKey := firstWireKey + offset
@@ -1070,6 +1072,11 @@ func TestP015b2aFieldWireManifest(t *testing.T) {
 		wire  int
 	}{
 		{SafeEnumDeveloper, 25},
+		{SafeEnumDebug, 26},
+		{SafeEnumInfo, 27},
+		{SafeEnumWarn, 28},
+		{SafeEnumError, 29},
+		{SafeEnumFatal, 30},
 	}
 	for _, expected := range namedEnums {
 		if int(expected.value) != expected.wire {
@@ -1087,26 +1094,26 @@ func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 		FieldAsync != 42 || FieldState != 55 || FieldReason != 59 ||
 		FieldRequestedCount != 60 || FieldSource != 63 ||
 		FieldMaxTokens != 64 || FieldFallback != 101 ||
-		FieldHasSummary != 102 || FieldCacheSensitive != 103 {
+		FieldHasSummary != 102 || FieldCacheSensitive != 103 || FieldLogLevel != 104 {
 		t.Fatalf(
 			"field wire moved: first=%d int64=%d bool=%d enum=%d last=%d",
 			FieldIteration,
 			FieldDurationMilliseconds,
 			FieldAsync,
 			FieldState,
-			FieldCacheSensitive,
+			FieldLogLevel,
 		)
 	}
 	if SafeEnumPending != 1 || SafeEnumStopped != 21 ||
 		SafeEnumInProcess != 22 || SafeEnumUnknown != 24 ||
-		SafeEnumDeveloper != 25 || len(safeEnumLabels) != 26 {
+		SafeEnumDeveloper != 25 || SafeEnumFatal != 30 || len(safeEnumLabels) != 31 {
 		t.Fatalf(
 			"safe enum wire moved: first=%d last=%d labels=%d",
-			SafeEnumPending, SafeEnumDeveloper, len(safeEnumLabels),
+			SafeEnumPending, SafeEnumFatal, len(safeEnumLabels),
 		)
 	}
 	seenLabels := make(map[string]FieldKey)
-	for key := FieldIteration; key <= FieldCacheSensitive; key++ {
+	for key := FieldIteration; key <= FieldLogLevel; key++ {
 		label, kind := safeFieldSpec(key)
 		if label == "" || kind == 0 {
 			t.Fatalf("field key %d missing spec", key)
@@ -1138,14 +1145,14 @@ func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 	if label, kind := safeFieldSpec(0); label != "" || kind != 0 {
 		t.Fatalf("zero key spec = %q, %d", label, kind)
 	}
-	if label, kind := safeFieldSpec(FieldCacheSensitive + 1); label != "" || kind != 0 {
+	if label, kind := safeFieldSpec(FieldLogLevel + 1); label != "" || kind != 0 {
 		t.Fatalf("key after append-only tail spec = %q, %d", label, kind)
 	}
 
 	for _, key := range []FieldKey{
-		FieldState, FieldAction, FieldOutcome, FieldRole, FieldReason, FieldSource,
+		FieldState, FieldAction, FieldOutcome, FieldRole, FieldReason, FieldSource, FieldLogLevel,
 	} {
-		for value := SafeEnumPending; value <= SafeEnumDeveloper; value++ {
+		for value := SafeEnumPending; value <= SafeEnumFatal; value++ {
 			if got := SafeEnum(key, value).valid; got != safeEnumAllowed(key, value) {
 				t.Fatalf("key %d enum %d validity = %v", key, value, got)
 			}
@@ -1285,7 +1292,7 @@ func TestSafeFieldsTypedProjectionAndDefensiveValidation(t *testing.T) {
 			t.Fatalf("forged safe field %d accepted: %#v", index, field)
 		}
 	}
-	if safeEnumAllowed(FieldRole, 0) || safeEnumAllowed(FieldRole, SafeEnumDeveloper+1) {
+	if safeEnumAllowed(FieldRole, 0) || safeEnumAllowed(FieldRole, SafeEnumFatal+1) {
 		t.Fatal("out-of-range safe enum accepted")
 	}
 	if SafeFloat64(FieldTemperature, math.NaN()).valid ||
@@ -1383,7 +1390,7 @@ func TestLegacyFatalConvenienceVariantsExit(t *testing.T) {
 
 func firstAllowedSafeEnum(t *testing.T, key FieldKey) SafeEnumValue {
 	t.Helper()
-	for value := SafeEnumPending; value <= SafeEnumDeveloper; value++ {
+	for value := SafeEnumPending; value <= SafeEnumFatal; value++ {
 		if safeEnumAllowed(key, value) {
 			return value
 		}
