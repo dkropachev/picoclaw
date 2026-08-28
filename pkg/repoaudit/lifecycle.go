@@ -175,6 +175,19 @@ func migrateRepositoryState(state *RepositoryState) (bool, error) {
 		state.ValidationJobs = []RepositoryValidationJob{}
 		migrated = true
 	}
+	if state.CurrentCampaign != nil && state.CurrentCampaign.Paths == nil {
+		state.CurrentCampaign.Paths = make(map[string]RepositoryReviewCampaignPathCoverage)
+		// A missing legacy path ledger can never prove exact coverage.
+		state.CurrentCampaign.Exact = false
+		migrated = true
+	}
+	historyMigrated, historyErr := migrateRepositoryReviewCampaignHistory(state)
+	if historyErr != nil {
+		return false, historyErr
+	}
+	if historyMigrated {
+		migrated = true
+	}
 	if backfillRepositoryFindingEvidence(state) {
 		migrated = true
 	}

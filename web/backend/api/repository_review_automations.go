@@ -643,6 +643,7 @@ func (h *Handler) handlePauseRepositoryReviewAutomation(w http.ResponseWriter, r
 func projectRepositoryReviewAutomation(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
+	automation.CampaignID = ""
 	automation.ModelCoverageSketches = nil
 	automation.ScopeSelection = nil
 	return automation

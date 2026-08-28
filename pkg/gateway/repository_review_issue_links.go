@@ -502,6 +502,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewFindingS
 func projectRepositoryReviewGatewayAutomation(
 	automation repoaudit.RepositoryReviewAutomation,
 ) repoaudit.RepositoryReviewAutomation {
+	automation.CampaignID = ""
 	automation.ModelCoverageSketches = nil
 	automation.ScopeSelection = nil
 	return automation

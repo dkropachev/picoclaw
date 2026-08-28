@@ -32,10 +32,12 @@ type UnsupportedFile struct {
 
 type Plan struct {
 	ID                      string            `json:"id"`
+	CampaignID              string            `json:"campaign_id,omitempty"`
 	Repository              string            `json:"repository"`
 	CommitSHA               string            `json:"commit_sha"`
 	InventoryHash           string            `json:"inventory_hash"`
 	ProfileHash             string            `json:"profile_hash"`
+	RequiredAssignments     int               `json:"required_assignments,omitempty"`
 	ForceCampaignID         string            `json:"force_campaign_id,omitempty"`
 	Authoritative           bool              `json:"authoritative,omitempty"`
 	TargetBranch            string            `json:"target_branch,omitempty"`
@@ -106,8 +108,23 @@ type Observation struct {
 	RawDigest  string             `json:"raw_digest,omitempty"`
 }
 
+// RepositoryReviewEvidence is one assigned review child. Campaign-aware Record
+// requires every assigned child, including failures, so completion can be
+// derived from the full required-child denominator instead of caller-supplied
+// aggregate counts. A successful child carries its validated observation and
+// exact acknowledged subset; an unsuccessful child carries neither.
+type RepositoryReviewEvidence struct {
+	AssignmentID      string       `json:"assignment_id"`
+	ScopeFiles        []FileRef    `json:"scope_files"`
+	Required          bool         `json:"required"`
+	Successful        bool         `json:"successful"`
+	AcknowledgedFiles []FileRef    `json:"acknowledged_files,omitempty"`
+	Observation       *Observation `json:"observation,omitempty"`
+}
+
 type FindingContext struct {
 	ID            string    `json:"id"`
+	CampaignID    string    `json:"campaign_id,omitempty"`
 	Repository    string    `json:"repository"`
 	CommitSHA     string    `json:"commit_sha"`
 	InventoryHash string    `json:"inventory_hash"`
@@ -190,6 +207,7 @@ type IssueDraft struct {
 
 type Finding struct {
 	ID                      string               `json:"id"`
+	CampaignID              string               `json:"campaign_id,omitempty"`
 	Fingerprint             string               `json:"fingerprint"`
 	Repository              string               `json:"repository"`
 	CommitSHA               string               `json:"commit_sha"`
@@ -408,9 +426,13 @@ type RepositoryValidationJob struct {
 
 type ReviewRun struct {
 	ID                      string    `json:"id"`
+	CampaignID              string    `json:"campaign_id,omitempty"`
 	PlanID                  string    `json:"plan_id"`
 	CommitSHA               string    `json:"commit_sha"`
 	InventoryHash           string    `json:"inventory_hash"`
+	ProfileHash             string    `json:"profile_hash,omitempty"`
+	ScopeDigest             string    `json:"scope_digest,omitempty"`
+	InspectedFiles          int       `json:"inspected_files,omitempty"`
 	ReviewedFiles           int       `json:"reviewed_files"`
 	UnreviewedFiles         int       `json:"unreviewed_files"`
 	UnsupportedCount        int       `json:"unsupported_files"`
@@ -429,35 +451,65 @@ type ReviewRun struct {
 	CompletedAt             time.Time `json:"completed_at"`
 }
 
+// RepositoryReviewCampaignPathCoverage is the monotonic durable state of one
+// selected repository path in the current controller-owned review campaign.
+// Completed may be true without Inspected when the campaign inherited an exact
+// same-profile checkpoint. Unsupported is terminal and mutually exclusive
+// with both review states.
+type RepositoryReviewCampaignPathCoverage struct {
+	Inspected   bool `json:"inspected,omitempty"`
+	Completed   bool `json:"completed,omitempty"`
+	Unsupported bool `json:"unsupported,omitempty"`
+}
+
+// RepositoryReviewCampaignCoverage is the compact, exact-path ledger for the
+// current controller-owned campaign. InventoryHash and ProfileHash are empty
+// only between trusted BeginCampaign authorization and the first matching
+// Plan or Record. A false Exact value means Paths are only a known lower bound.
+type RepositoryReviewCampaignCoverage struct {
+	ID                  string                                          `json:"id"`
+	CommitSHA           string                                          `json:"commit_sha"`
+	InventoryHash       string                                          `json:"inventory_hash,omitempty"`
+	ProfileHash         string                                          `json:"profile_hash,omitempty"`
+	ScopeDigest         string                                          `json:"scope_digest,omitempty"`
+	RequiredAssignments int                                             `json:"required_assignments,omitempty"`
+	SelectedFiles       int                                             `json:"selected_files"`
+	Exact               bool                                            `json:"exact"`
+	RecoveryDigest      string                                          `json:"recovery_digest,omitempty"`
+	Paths               map[string]RepositoryReviewCampaignPathCoverage `json:"paths"`
+}
+
 type RepositoryState struct {
-	SchemaVersion           int                        `json:"schema_version"`
-	ID                      string                     `json:"id"`
-	Repository              string                     `json:"repository"`
-	Version                 int64                      `json:"version"`
-	ReviewVersion           int64                      `json:"review_version"`
-	LastCommitSHA           string                     `json:"last_commit_sha,omitempty"`
-	Files                   map[string]ReviewedFile    `json:"files"`
-	Unsupported             map[string]UnsupportedFile `json:"unsupported,omitempty"`
-	ReviewAttempts          map[string]int             `json:"review_attempts,omitempty"`
-	ReviewAttemptIdentities map[string]string          `json:"review_attempt_identities,omitempty"`
-	Findings                []Finding                  `json:"findings"`
-	Contexts                []FindingContext           `json:"contexts"`
-	Runs                    []ReviewRun                `json:"runs"`
-	IssueDrafts             []IssueDraft               `json:"issue_drafts"`
-	RepositoryFindings      []RepositoryFinding        `json:"repository_findings"`
-	MappingJobs             []RepositoryMappingJob     `json:"mapping_jobs"`
-	ValidationJobs          []RepositoryValidationJob  `json:"validation_jobs"`
-	ActiveForceCampaignID   string                     `json:"active_force_campaign_id,omitempty"`
-	ActiveForceProfileHash  string                     `json:"active_force_profile_hash,omitempty"`
-	ActiveForceCommitSHA    string                     `json:"active_force_commit_sha,omitempty"`
-	UpdatedAt               time.Time                  `json:"updated_at"`
-	FindingCount            int                        `json:"finding_count"`
-	RepositoryFindingCount  int                        `json:"repository_finding_count"`
-	OpenFindingCount        int                        `json:"open_finding_count"`
-	IssueDraftCount         int                        `json:"issue_draft_count"`
-	UnsupportedCount        int                        `json:"unsupported_count"`
-	ReviewedFileCount       int                        `json:"reviewed_file_count"`
-	LastExcludedFiles       int                        `json:"last_excluded_files"`
+	SchemaVersion           int                               `json:"schema_version"`
+	ID                      string                            `json:"id"`
+	Repository              string                            `json:"repository"`
+	Version                 int64                             `json:"version"`
+	ReviewVersion           int64                             `json:"review_version"`
+	LastCommitSHA           string                            `json:"last_commit_sha,omitempty"`
+	Files                   map[string]ReviewedFile           `json:"files"`
+	Unsupported             map[string]UnsupportedFile        `json:"unsupported,omitempty"`
+	ReviewAttempts          map[string]int                    `json:"review_attempts,omitempty"`
+	ReviewAttemptIdentities map[string]string                 `json:"review_attempt_identities,omitempty"`
+	Findings                []Finding                         `json:"findings"`
+	Contexts                []FindingContext                  `json:"contexts"`
+	Runs                    []ReviewRun                       `json:"runs"`
+	IssueDrafts             []IssueDraft                      `json:"issue_drafts"`
+	RepositoryFindings      []RepositoryFinding               `json:"repository_findings"`
+	MappingJobs             []RepositoryMappingJob            `json:"mapping_jobs"`
+	ValidationJobs          []RepositoryValidationJob         `json:"validation_jobs"`
+	CurrentCampaign         *RepositoryReviewCampaignCoverage `json:"current_campaign,omitempty"`
+	CampaignHistory         map[string]string                 `json:"campaign_history,omitempty"`
+	ActiveForceCampaignID   string                            `json:"active_force_campaign_id,omitempty"`
+	ActiveForceProfileHash  string                            `json:"active_force_profile_hash,omitempty"`
+	ActiveForceCommitSHA    string                            `json:"active_force_commit_sha,omitempty"`
+	UpdatedAt               time.Time                         `json:"updated_at"`
+	FindingCount            int                               `json:"finding_count"`
+	RepositoryFindingCount  int                               `json:"repository_finding_count"`
+	OpenFindingCount        int                               `json:"open_finding_count"`
+	IssueDraftCount         int                               `json:"issue_draft_count"`
+	UnsupportedCount        int                               `json:"unsupported_count"`
+	ReviewedFileCount       int                               `json:"reviewed_file_count"`
+	LastExcludedFiles       int                               `json:"last_excluded_files"`
 }
 
 type RepositorySummary struct {
@@ -506,16 +558,18 @@ type IssueDraftRequest struct {
 }
 
 type RecordRequest struct {
-	Plan                    Plan              `json:"plan"`
-	RunID                   string            `json:"run_id"`
-	Observations            []Observation     `json:"observations"`
-	CompletedFiles          []FileRef         `json:"completed_files,omitempty"`
-	UnsupportedFiles        []UnsupportedFile `json:"unsupported_files,omitempty"`
-	ExcludedFiles           int               `json:"excluded_files,omitempty"`
-	TargetBranch            string            `json:"target_branch,omitempty"`
-	AdvertisedDefaultBranch string            `json:"advertised_default_branch,omitempty"`
-	TargetIsDefault         bool              `json:"target_is_default"`
-	CompletedAt             time.Time         `json:"completed_at,omitempty"`
+	Plan                    Plan                       `json:"plan"`
+	RunID                   string                     `json:"run_id"`
+	Observations            []Observation              `json:"observations"`
+	ReviewEvidence          []RepositoryReviewEvidence `json:"review_evidence,omitempty"`
+	InspectedFiles          []FileRef                  `json:"inspected_files,omitempty"`
+	CompletedFiles          []FileRef                  `json:"completed_files,omitempty"`
+	UnsupportedFiles        []UnsupportedFile          `json:"unsupported_files,omitempty"`
+	ExcludedFiles           int                        `json:"excluded_files,omitempty"`
+	TargetBranch            string                     `json:"target_branch,omitempty"`
+	AdvertisedDefaultBranch string                     `json:"advertised_default_branch,omitempty"`
+	TargetIsDefault         bool                       `json:"target_is_default"`
+	CompletedAt             time.Time                  `json:"completed_at,omitempty"`
 }
 
 type RecordResult struct {

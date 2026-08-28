@@ -166,6 +166,7 @@ type RepositoryReviewAutomation struct {
 	PauseDetail             string                                 `json:"pause_detail,omitempty"`
 	RequestedPauseReason    RepositoryReviewPauseReason            `json:"requested_pause_reason,omitempty"`
 	RequestedPauseDetail    string                                 `json:"requested_pause_detail,omitempty"`
+	CampaignID              string                                 `json:"campaign_id,omitempty"`
 	ActiveRunID             string                                 `json:"active_run_id,omitempty"`
 	RunIDs                  []string                               `json:"run_ids"`
 	Usage                   RepositoryReviewTokenUsage             `json:"usage"`
@@ -600,6 +601,7 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	automation.BudgetPolicy.GuardExpression = strings.TrimSpace(automation.BudgetPolicy.GuardExpression)
 	automation.PauseDetail = strings.TrimSpace(automation.PauseDetail)
 	automation.RequestedPauseDetail = strings.TrimSpace(automation.RequestedPauseDetail)
+	automation.CampaignID = strings.TrimSpace(automation.CampaignID)
 	automation.ActiveRunID = strings.TrimSpace(automation.ActiveRunID)
 	automation.Progress.Stage = strings.TrimSpace(automation.Progress.Stage)
 	automation.Status = RepositoryReviewAutomationStatus(strings.ToLower(strings.TrimSpace(string(automation.Status))))
@@ -730,6 +732,7 @@ func validateAutomation(automation RepositoryReviewAutomation) error {
 		automation.EstimatedOutputTokens < 1 || automation.EstimatedOutputTokens > 65_536 ||
 		!validOptionalAutomationText(automation.PauseDetail, 4096) ||
 		!validOptionalAutomationText(automation.RequestedPauseDetail, 4096) ||
+		(automation.CampaignID != "" && !ValidRepositoryReviewCampaignID(automation.CampaignID)) ||
 		!validOptionalAutomationText(automation.ActiveRunID, 1024) ||
 		len(automation.RunIDs) > maxAutomationRunIDs ||
 		!finiteNonnegative(automation.EstimatedCostUSD, maxAutomationEstimatedCost) ||
