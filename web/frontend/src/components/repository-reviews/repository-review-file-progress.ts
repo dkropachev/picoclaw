@@ -8,7 +8,7 @@ export interface RepositoryReviewFileProgress {
 
 export type RepositoryReviewFileProgressSource = Pick<
   RepositoryReviewAutomation,
-  "status" | "progress" | "scope_plan"
+  "status" | "progress" | "scope_plan" | "run_ids" | "started_at"
 >
 
 export function repositoryReviewFileProgress(
@@ -46,6 +46,21 @@ export function repositoryReviewFileProgressLabel(
 ): string {
   const progress = repositoryReviewFileProgress(review)
   return `${progress.resolved} of ${progress.total} files (${progress.percent}%)`
+}
+
+export function repositoryReviewInspectedFilesLabel(
+  review: RepositoryReviewFileProgressSource,
+): number | string {
+  const inspected = count(review.progress.inspected_files)
+  if (review.progress.coverage_available !== true) {
+    const neverStarted =
+      review.status === "idle" &&
+      review.run_ids.length === 0 &&
+      !review.started_at
+    return neverStarted ? 0 : "Unknown"
+  }
+  if (review.progress.coverage_exact !== true) return `At least ${inspected}`
+  return inspected
 }
 
 function fileProgress(

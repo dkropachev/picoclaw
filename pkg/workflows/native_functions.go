@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/url"
 	"os"
 	osexec "os/exec"
@@ -246,9 +247,25 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
-		profileHash, err := nativeStableHash(firstNonNil(args["profile"], "repository-bug-finder-v1"))
-		if err != nil {
-			return nil, err
+		campaignID := strings.TrimSpace(nativeStringAny(args, "campaign_id", "campaignId"))
+		if campaignID != "" && (exec.WorkflowRef != RepositoryBugFinderWorkflowRef ||
+			!repoaudit.ValidRepositoryReviewCampaignID(campaignID)) {
+			return nil, errors.New("repository review campaign authority is unavailable")
+		}
+		var profileHash string
+		if campaignID == "" {
+			profileDigest, hashErr := nativeStableHash(
+				firstNonNil(args["profile"], "repository-bug-finder-v1"),
+			)
+			if hashErr != nil {
+				return nil, hashErr
+			}
+			profileHash = "sha256:" + profileDigest
+		} else {
+			profileHash, err = nativeRepositoryBugFinderProfileHash(args["profile"])
+			if err != nil {
+				return nil, err
+			}
 		}
 		repository, err := nativeRepositoryReviewIdentity(ctx, args, exec)
 		if err != nil {
@@ -258,25 +275,37 @@ func nativeRepositoryReview(
 		if maximumPending <= 0 || maximumPending > 128 {
 			maximumPending = 24
 		}
-		reviewerCount := len(nativeStringSlice(args["resolved_reviewer_models"]))
-		if nativeBoolAny(args, "include_default_reviewer") {
+		resolvedReviewers := nativeStringSlice(args["resolved_reviewer_models"])
+		includeDefaultReviewer := nativeBoolAny(args, "include_default_reviewer")
+		reviewerCount := len(resolvedReviewers)
+		if includeDefaultReviewer {
 			reviewerCount++
 		}
 		if reviewerCount < 1 {
 			reviewerCount = 1
 		}
 		maximumPending = nativeRepositoryReviewPendingLimit(maximumPending, reviewerCount)
-		plan, err := store.PlanWithProfileLimitAuthoritative(
-			ctx,
-			repository,
-			commit,
-			nativeStringAny(args, "inventory_hash", "inventoryHash"),
-			"sha256:"+profileHash,
-			files,
-			nativeBoolAny(args, "force"),
-			maximumPending,
-			nativeBoolAny(args, "authoritative"),
-		)
+		inventoryHash := nativeStringAny(args, "inventory_hash", "inventoryHash")
+		authoritative := nativeBoolAny(args, "authoritative")
+		var plan repoaudit.Plan
+		if campaignID == "" {
+			plan, err = store.PlanWithProfileLimitAuthoritative(
+				ctx, repository, commit, inventoryHash, profileHash, files,
+				nativeBoolAny(args, "force"), maximumPending, authoritative,
+			)
+		} else {
+			requiredAssignments, assignmentErr := RepositoryBugFinderRequiredAssignments(
+				resolvedReviewers, includeDefaultReviewer,
+			)
+			if assignmentErr != nil {
+				return nil, assignmentErr
+			}
+			plan, err = store.PlanWithProfileLimitAuthoritativeForCampaign(
+				ctx, repository, commit, inventoryHash, profileHash,
+				campaignID, requiredAssignments, files,
+				nativeBoolAny(args, "force"), maximumPending, authoritative,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -358,6 +387,7 @@ func nativeRepositoryReview(
 			"files":            nativeFrozenGitScopeReferences(reviewableScope),
 			"reviewableCount":  len(reviewableScope),
 			"unsupportedFiles": unsupportedFiles,
+			"unavailableFiles": nativeRepositoryReviewUnavailableScopeFiles(scope),
 			"unavailableCount": unavailableCount,
 		}
 		if copies := int(nativeInt64Any(args, "copies")); copies > 1 {
@@ -378,7 +408,7 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
-		observations, completedFiles, err := nativeRepositoryReviewObservations(args, plan)
+		evidence, err := nativeRepositoryReviewRecordEvidence(args, plan)
 		if err != nil {
 			return nil, err
 		}
@@ -392,8 +422,10 @@ func nativeRepositoryReview(
 			RunID: strings.TrimSpace(
 				firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID),
 			),
-			Observations:            observations,
-			CompletedFiles:          completedFiles,
+			Observations:            evidence.Observations,
+			ReviewEvidence:          evidence.ReviewEvidence,
+			InspectedFiles:          evidence.InspectedFiles,
+			CompletedFiles:          evidence.CompletedFiles,
 			UnsupportedFiles:        unsupportedFiles,
 			ExcludedFiles:           int(nativeInt64Any(args, "excluded_count", "excludedCount")),
 			TargetBranch:            plan.TargetBranch,
@@ -432,6 +464,7 @@ func nativeRepositoryReview(
 			}
 			run = map[string]any{
 				"reviewed_files": 0, "unreviewed_files": 0,
+				"inspected_files":   0,
 				"unsupported_files": len(plan.UnsupportedFiles),
 				"remaining_files":   len(plan.PendingFiles) + len(plan.DeferredFiles),
 				"skipped_files":     len(plan.UnchangedFiles),
@@ -748,6 +781,29 @@ func nativeRepositoryReviewUnsupportedScopeFiles(value any) []repoaudit.Unsuppor
 	return out
 }
 
+func nativeRepositoryReviewUnavailableScopeFiles(value any) []map[string]any {
+	items, _, err := nativeScopeItems(value)
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]any, 0)
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok || strings.TrimSpace(nativeAnyString(item["contentUnavailable"])) != "aggregate_limit" {
+			continue
+		}
+		files, fileErr := nativeRepositoryReviewFiles([]map[string]any{item})
+		if fileErr != nil || len(files) != 1 {
+			continue
+		}
+		out = append(out, nativeRepositoryReviewFileMaps(files)[0])
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return nativeAnyString(out[i]["path"]) < nativeAnyString(out[j]["path"])
+	})
+	return out
+}
+
 func mergeNativeRepositoryUnsupportedFiles(groups ...[]repoaudit.UnsupportedFile) []repoaudit.UnsupportedFile {
 	byPath := make(map[string]repoaudit.UnsupportedFile)
 	for _, group := range groups {
@@ -1035,7 +1091,149 @@ func nativeRepositoryReviewFileMaps(files []repoaudit.FileRef) []map[string]any 
 	return out
 }
 
+type nativeRepositoryReviewRecordEvidenceResult struct {
+	Observations   []repoaudit.Observation
+	ReviewEvidence []repoaudit.RepositoryReviewEvidence
+	InspectedFiles []repoaudit.FileRef
+	CompletedFiles []repoaudit.FileRef
+}
+
+func nativeRepositoryReviewRecordEvidence(
+	args map[string]any,
+	plan repoaudit.Plan,
+) (nativeRepositoryReviewRecordEvidenceResult, error) {
+	if plan.CampaignID != "" {
+		return nativeRepositoryReviewCampaignEvidence(args, plan)
+	}
+	observations, completed, err := nativeRepositoryReviewLegacyObservations(args, plan)
+	return nativeRepositoryReviewRecordEvidenceResult{
+		Observations: observations, CompletedFiles: completed,
+	}, err
+}
+
 func nativeRepositoryReviewObservations(
+	args map[string]any,
+	plan repoaudit.Plan,
+) ([]repoaudit.Observation, []repoaudit.FileRef, error) {
+	evidence, err := nativeRepositoryReviewRecordEvidence(args, plan)
+	return evidence.Observations, evidence.CompletedFiles, err
+}
+
+func nativeRepositoryReviewCampaignEvidence(
+	args map[string]any,
+	plan repoaudit.Plan,
+) (nativeRepositoryReviewRecordEvidenceResult, error) {
+	children, err := nativeOptionalMapSlice(args["managed_children"])
+	if err != nil {
+		return nativeRepositoryReviewRecordEvidenceResult{}, fmt.Errorf("managed children: %w", err)
+	}
+	// Current runtime children carry a trusted, contiguous execution index and
+	// an explicit required/optional classification. Preserve those admission
+	// checks before handing the evidence to the shared strict decoder, whose
+	// legacy recovery input intentionally accepts older missing metadata.
+	for ordinal, child := range children {
+		index, indexOK := nativeRepositoryReviewChildIndex(child["index"])
+		if !indexOK || index != ordinal+1 {
+			return nativeRepositoryReviewRecordEvidenceResult{}, fmt.Errorf(
+				"managed child %d has an invalid runtime index", ordinal,
+			)
+		}
+		if _, requiredDeclared := child["required"].(bool); !requiredDeclared {
+			return nativeRepositoryReviewRecordEvidenceResult{}, fmt.Errorf(
+				"managed child %d has no required classification", ordinal,
+			)
+		}
+	}
+	unavailableItems, unavailableErr := nativeOptionalMapSlice(args["unavailable_files"])
+	if unavailableErr != nil {
+		return nativeRepositoryReviewRecordEvidenceResult{}, fmt.Errorf(
+			"unavailable files: %w", unavailableErr,
+		)
+	}
+	unavailableFiles, unavailableErr := nativeRepositoryReviewFiles(unavailableItems)
+	if unavailableErr != nil {
+		return nativeRepositoryReviewRecordEvidenceResult{}, fmt.Errorf(
+			"unavailable files: %w", unavailableErr,
+		)
+	}
+	sort.Slice(unavailableFiles, func(i, j int) bool { return unavailableFiles[i].Path < unavailableFiles[j].Path })
+	unsupported := nativeRepositoryReviewUnsupportedFiles(args["managed_children"])
+	unsupported = mergeNativeRepositoryUnsupportedFiles(
+		unsupported,
+		nativeRepositoryReviewUnsupportedScopeFiles(args["unsupported_files"]),
+	)
+	terminalPaths := make(map[string]struct{}, len(unsupported))
+	for _, file := range unsupported {
+		terminalPaths[file.Path] = struct{}{}
+	}
+	combined := make([]map[string]any, 0, len(children)+len(unavailableFiles)*plan.RequiredAssignments)
+	for _, child := range children {
+		scopeFiles, scopeErr := nativeRepositoryReviewFiles(child["scope"])
+		allTerminal := scopeErr == nil && len(scopeFiles) > 0
+		for _, file := range scopeFiles {
+			if _, terminal := terminalPaths[file.Path]; !terminal {
+				allTerminal = false
+				break
+			}
+		}
+		if !allTerminal {
+			combined = append(combined, child)
+		}
+	}
+	for _, file := range unavailableFiles {
+		for slot := 1; slot <= plan.RequiredAssignments; slot++ {
+			combined = append(combined, map[string]any{
+				"index": len(combined) + 1, "required": true, "valid": false,
+				"scope": nativeRepositoryReviewFileMaps([]repoaudit.FileRef{file}),
+				"run_error": fmt.Sprintf(
+					"aggregate_limit:%s:%03d", file.Path, slot,
+				),
+			})
+		}
+	}
+	terminalUnsupported := make([]repoaudit.FileRef, 0, len(unsupported))
+	for _, file := range unsupported {
+		terminalUnsupported = append(terminalUnsupported, file.FileRef)
+	}
+	decoded, err := DecodeRepositoryReviewManagedEvidence(
+		combined,
+		plan,
+		RepositoryReviewManagedEvidenceOptions{
+			TerminalUnsupportedFiles: terminalUnsupported,
+			RequiredAssignments:      plan.RequiredAssignments,
+		},
+	)
+	if err != nil {
+		return nativeRepositoryReviewRecordEvidenceResult{}, err
+	}
+	return nativeRepositoryReviewRecordEvidenceResult{
+		// Record distinguishes an exact empty projection from absent campaign
+		// evidence. Keep every decoded slice explicitly present for zero-progress
+		// and all-unsupported batches.
+		Observations:   append([]repoaudit.Observation{}, decoded.Observations...),
+		ReviewEvidence: append([]repoaudit.RepositoryReviewEvidence{}, decoded.Children...),
+		InspectedFiles: append([]repoaudit.FileRef{}, decoded.InspectedFiles...),
+		CompletedFiles: append([]repoaudit.FileRef{}, decoded.CompletedFiles...),
+	}, nil
+}
+
+func nativeRepositoryReviewChildIndex(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, typed > 0
+	case int64:
+		return int(typed), typed > 0 && int64(int(typed)) == typed
+	case float64:
+		return int(typed), typed > 0 && typed == math.Trunc(typed) && float64(int(typed)) == typed
+	case json.Number:
+		parsed, err := typed.Int64()
+		return int(parsed), err == nil && parsed > 0 && int64(int(parsed)) == parsed
+	default:
+		return 0, false
+	}
+}
+
+func nativeRepositoryReviewLegacyObservations(
 	args map[string]any,
 	plan repoaudit.Plan,
 ) ([]repoaudit.Observation, []repoaudit.FileRef, error) {

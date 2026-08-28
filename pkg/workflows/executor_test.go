@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -646,6 +647,60 @@ jobs:
 	}
 	if !sawStart || !sawEnd {
 		t.Fatalf("runtime event kinds = %#v, want run start and end", publisher.events)
+	}
+}
+
+func TestExecutorScrubsRepositoryReviewCampaignFromRuntimeEvents(t *testing.T) {
+	registry := NewFunctionRegistry()
+	if err := registry.Register(
+		"campaign-result",
+		func(_ context.Context, _ map[string]any, _ ExecutionContext) (map[string]any, error) {
+			return map[string]any{"run": map[string]any{
+				"campaign_id": "rrc_runtime_canary", "remaining_files": 0,
+			}}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	workflow := parseWorkflow(t, `
+name: Campaign events
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: result
+        uses: function/campaign-result
+`)
+	workspace := t.TempDir()
+	publisher := &fakeRuntimeEventPublisher{}
+	result, err := (&Executor{
+		WorkspaceDir: workspace, Store: NewFileRunStore(workspace),
+		Functions: registry, RuntimeEvents: publisher,
+	}).Run(context.Background(), RunRequest{
+		Workflow: workflow, WorkflowRef: RepositoryBugFinderWorkflowRef,
+		Inputs: map[string]any{
+			"repository": "owner/repo", "campaign_id": "rrc_runtime_canary",
+		},
+	})
+	if err != nil || result.Status != RunStatusSucceeded {
+		t.Fatalf("Run()=%#v err=%v", result, err)
+	}
+	for _, event := range publisher.events {
+		encoded, marshalErr := json.Marshal(event.Payload)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if strings.Contains(string(encoded), "rrc_runtime_canary") ||
+			strings.Contains(string(encoded), "campaign_id") {
+			t.Fatalf("runtime event exposed campaign authority: %s", encoded)
+		}
+	}
+	run, err := NewFileRunStore(workspace).GetRun(context.Background(), result.RunID)
+	if err != nil || run.Inputs["campaign_id"] != "rrc_runtime_canary" ||
+		run.Steps["main/result"].Outputs["run"].(map[string]any)["campaign_id"] != "rrc_runtime_canary" {
+		t.Fatalf("stored run lost campaign authority: %#v err=%v", run, err)
 	}
 }
 

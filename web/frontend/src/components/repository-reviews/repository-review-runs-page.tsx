@@ -12,7 +12,10 @@ import {
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
-import { repositoryReviewFileProgressLabel } from "./repository-review-file-progress"
+import {
+  repositoryReviewFileProgressLabel,
+  repositoryReviewInspectedFilesLabel,
+} from "./repository-review-file-progress"
 import {
   repositoryReviewDefaultQuery,
   repositoryReviewViews,
@@ -108,6 +111,11 @@ export function RepositoryReviewRunsPage({
           id: "progress",
           label: "Progress",
           value: repositoryReviewFileProgressLabel,
+        },
+        {
+          id: "inspected",
+          label: "Inspected files",
+          value: repositoryReviewInspectedFilesLabel,
         },
         {
           id: "reviewed",

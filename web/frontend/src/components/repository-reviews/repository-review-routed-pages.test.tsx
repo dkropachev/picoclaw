@@ -163,10 +163,16 @@ const automation: RepositoryReviewAutomation = {
     stage: "reviewing",
     completed_batches: 1,
     total_batches: 2,
+    coverage_available: false,
+    coverage_exact: false,
+    selected_files: 8,
+    inspected_files: 0,
     reviewed_files: 4,
     remaining_files: 4,
     unsupported_files: 0,
     findings: 1,
+    finding_aggregates: 1,
+    unaggregated_findings: 0,
   },
   model_stats: [],
   account_limits: [],
@@ -545,8 +551,13 @@ describe("routed repository review pages", () => {
     expect(screen.getByText("4 of 8 files (50%)")).toBeVisible()
     expect(screen.getByText("Fully reviewed files")).toBeVisible()
     expect(screen.getByText("Finding occurrences")).toBeVisible()
+    expect(screen.getByText("Unassociated occurrences")).toBeVisible()
+    expect(screen.getByText("Unknown")).toBeVisible()
     expect(
       screen.getByText(/every required reviewer acknowledges the file/i),
+    ).toBeVisible()
+    expect(
+      screen.getByText(/inspected-file coverage is unknown/i),
     ).toBeVisible()
   })
 
@@ -627,6 +638,11 @@ describe("routed repository review pages", () => {
       />,
     )
 
+    const inspected = await screen.findByText("Inspected files")
+    expect(inspected.parentElement).toHaveTextContent("0")
+    expect(
+      screen.queryByText(/inspected-file coverage is unknown/i),
+    ).not.toBeInTheDocument()
     await user.click(await screen.findByRole("button", { name: "Start" }))
     await waitFor(() =>
       expect(startRepositoryReviewAutomation).toHaveBeenCalledWith(

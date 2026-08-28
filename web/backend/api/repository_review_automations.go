@@ -271,11 +271,7 @@ func (h *Handler) handleListRepositoryReviewAutomations(w http.ResponseWriter, r
 			return
 		}
 		if found {
-			automations[index].Progress.Findings = len(repoaudit.CurrentCampaignFindings(
-				state,
-				automations[index].RunIDs,
-				automations[index].StartedAt,
-			))
+			applyRepositoryReviewLiveMetrics(&automations[index], state)
 		}
 	}
 	query, _ := collectionquery.Parse("", repositoryReviewAutomationCollectionSchema)

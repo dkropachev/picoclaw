@@ -679,11 +679,17 @@ export interface RepositoryReviewAutomationProgress {
   stage: string
   completed_batches: number
   total_batches: number
+  coverage_available: boolean
+  coverage_exact: boolean
+  selected_files: number
+  inspected_files: number
   reviewed_files: number
   remaining_files: number
   unsupported_files: number
   findings: number
   scope_frozen?: boolean
+  finding_aggregates: number
+  unaggregated_findings: number
 }
 
 export type RepositoryReviewCodeType =
@@ -2198,11 +2204,17 @@ function normalizeAutomation(
       stage: automation.progress?.stage ?? "waiting",
       completed_batches: automation.progress?.completed_batches ?? 0,
       total_batches: automation.progress?.total_batches ?? 0,
+      coverage_available: automation.progress?.coverage_available ?? false,
+      coverage_exact: automation.progress?.coverage_exact ?? false,
+      selected_files: automation.progress?.selected_files ?? 0,
+      inspected_files: automation.progress?.inspected_files ?? 0,
       reviewed_files: automation.progress?.reviewed_files ?? 0,
       remaining_files: automation.progress?.remaining_files ?? 0,
       unsupported_files: automation.progress?.unsupported_files ?? 0,
       findings: automation.progress?.findings ?? 0,
       scope_frozen: automation.progress?.scope_frozen ?? false,
+      finding_aggregates: automation.progress?.finding_aggregates ?? 0,
+      unaggregated_findings: automation.progress?.unaggregated_findings ?? 0,
     },
     model_stats: normalizeModelStats(automation.model_stats),
     account_limits: normalizeAccountSnapshots(automation.account_limits),

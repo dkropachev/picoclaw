@@ -204,6 +204,9 @@ func projectRepositoryReviewDetail(
 	}
 	end := min(total, page.FindingOffset+page.FindingLimit)
 	state.Findings = append([]repoaudit.Finding(nil), state.Findings[page.FindingOffset:end]...)
+	for index := range state.Findings {
+		state.Findings[index].CampaignID = ""
+	}
 	contextIDs := make(map[string]struct{})
 	for _, finding := range state.Findings {
 		for _, contextID := range finding.ContextIDs {
@@ -213,6 +216,7 @@ func projectRepositoryReviewDetail(
 	contexts := make([]repoaudit.FindingContext, 0, len(contextIDs))
 	for _, contextRecord := range state.Contexts {
 		if _, selected := contextIDs[contextRecord.ID]; selected {
+			contextRecord.CampaignID = ""
 			contexts = append(contexts, contextRecord)
 		}
 	}
@@ -223,6 +227,8 @@ func projectRepositoryReviewDetail(
 	state.ActiveForceCampaignID = ""
 	state.ActiveForceProfileHash = ""
 	state.ActiveForceCommitSHA = ""
+	state.CurrentCampaign = nil
+	state.CampaignHistory = nil
 	unsupportedPaths := make([]string, 0, len(state.Unsupported))
 	for pathValue := range state.Unsupported {
 		unsupportedPaths = append(unsupportedPaths, pathValue)
@@ -233,8 +239,12 @@ func projectRepositoryReviewDetail(
 		projectedUnsupported[pathValue] = state.Unsupported[pathValue]
 	}
 	state.Unsupported = projectedUnsupported
+	state.Runs = append([]repoaudit.ReviewRun(nil), state.Runs...)
 	if len(state.Runs) > 50 {
-		state.Runs = append([]repoaudit.ReviewRun(nil), state.Runs[len(state.Runs)-50:]...)
+		state.Runs = state.Runs[len(state.Runs)-50:]
+	}
+	for index := range state.Runs {
+		state.Runs[index].CampaignID = ""
 	}
 	draftTotal := len(state.IssueDrafts)
 	page.DraftOffset = min(page.DraftOffset, draftTotal)

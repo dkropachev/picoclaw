@@ -69,10 +69,16 @@ const review: RepositoryReviewAutomation = {
     stage: "reviewing",
     completed_batches: 1,
     total_batches: 4,
+    coverage_available: false,
+    coverage_exact: false,
+    selected_files: 49,
+    inspected_files: 0,
     reviewed_files: 12,
     remaining_files: 36,
     unsupported_files: 1,
     findings: 3,
+    finding_aggregates: 3,
+    unaggregated_findings: 0,
   },
   model_stats: [],
   account_limits: [],
@@ -129,8 +135,8 @@ describe("RepositoryReviewRunsPage", () => {
       true,
     )
     expect(await screen.findByText("Fully reviewed files")).toBeVisible()
-    expect(screen.getByText("Finding occurrences")).toBeVisible()
     expect(screen.getByText("13 of 49 files (27%)")).toBeVisible()
+    expect(screen.getByText("Unknown")).toBeVisible()
   })
 
   it("renders a first-class empty collection", async () => {

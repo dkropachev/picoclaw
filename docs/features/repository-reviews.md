@@ -364,16 +364,18 @@ interfaces owned by their existing feature specifications.
    lifecycle, workspace lease, current configuration, assigned profile version,
    selected account/reviewer/writer compatibility, and central pricing required
    by any `spend.total.*` field. It snapshots the effective account, reviewer,
-   writer, profile version, and campaign start before admission. A changed
-   profile is materialized and starts a new campaign. Resume accepts paused or
-   failed campaigns and preserves cumulative counters, checkpoints, start time,
-   and run history; Restart clears campaign counters and progress.
-5. Admission resolves the named branch or advertised remote default before any
-   worker starts. It creates a run ID and atomically persists `running`, run
-   history, and the canonical full `resolved_commit_sha`; the workflow receives
-   only that exact SHA. Automatic handoff reuses it. Resume compares it with the
-   freshly resolved tip and requires an exact old/latest/custom selection when
-   they differ.
+   writer, profile version, exact commit, and an opaque campaign ID while the
+   automation remains inactive. A changed profile or commit and explicit
+   Restart create a new ID and clear campaign counters; automatic continuation
+   and same-commit Resume preserve the existing ID, counters, checkpoints,
+   start time, and run history.
+5. Admission authorizes that ID against the canonical repository ledger and
+   exact commit under review-version CAS before registering an active worker or
+   appending a run ID. It then atomically persists `running`, run history, and
+   the canonical full `resolved_commit_sha`; the workflow receives only that
+   exact SHA. Automatic handoff reuses it. Resume compares it with the freshly
+   resolved tip and requires an exact old/latest/custom selection when they
+   differ.
 6. The workflow acquires a fresh checkout, inventories exact Git blobs, plans
    only changed/profile/account-invalidated work, freezes bounded source
    evidence, and releases the checkout before model calls. Scope planning,
@@ -387,7 +389,14 @@ interfaces owned by their existing feature specifications.
    trusted prefixes and hard scope when no exact ID remains. The first validated
    scope step durably freezes that sanitized canonical selection and plan before
    review work starts; continuation batches revalidate them strictly against the
-   same commit and hard policy without another planner call.
+   same commit and hard policy without another planner call. Campaign planning
+   is admitted only for the built-in workflow, and native code derives the
+   immutable required-assignment denominator from four trusted task assignments
+   multiplied by required resolved reviewers; model output cannot choose it.
+   The immutable profile hash binds requested aliases, resolved model-graph
+   revision, effective reviewer cohort, default-chain classification, effective
+   account, and the resolver-clamped content bound, so routing drift conflicts
+   instead of reusing incompatible checkpoints.
 7. When a worker dequeues one managed child, the controller serializes only the
    admission decision, adds that child's projected prompt/output tokens and
    known cost to current in-flight reservations, refreshes referenced limit
@@ -396,7 +405,14 @@ interfaces owned by their existing feature specifications.
    finish. Every provider response records requested reviewer, actual model,
    actual token usage, cost, and latency. Completion releases the projection;
    accounting persistence failure fails closed.
-8. A completed batch counts only after the qualified record step persisted a
+8. Record consumes every actual managed child, including failed, invalid,
+   zero-finding, and optional children. Trusted runtime ordinals create stable
+   assignment IDs; exact FileRefs are canonicalized; successful same-child
+   acknowledgements produce the inspected union; only every required
+   assignment acknowledging a file produces completion. Aggregate-limit files
+   produce explicit failed required evidence and remain pending, while binary
+   and file-too-large files remain terminal unsupported.
+9. A completed batch counts only after the qualified record step persisted a
    run with an explicit valid nonnegative integer `remaining_files`, or an
    authoritative no-op has both an explicit zero pending count and an explicit
    valid zero persisted-result remaining count. A successful record's persisted
@@ -409,7 +425,8 @@ interfaces owned by their existing feature specifications.
    unsupported files, or campaign-scoped ledger counters rise; projected
    top-level counters and finding occurrences alone never qualify. If
    remaining work is positive and the verified batch resolves zero files, the
-   controller preserves completed-batch telemetry, pauses with `no_progress`,
+   controller applies exact ID-first campaign metrics independent of bounded
+   run history, preserves completed-batch telemetry, pauses with `no_progress`,
    and does not admit another batch until explicit Resume. Existing explicit
    manual, guard, failure, or service pause reasons take precedence.
    Legacy campaign recovery is background/admission work only: for an inactive
@@ -420,22 +437,24 @@ interfaces owned by their existing feature specifications.
    inconsistent, or bound-limited history fails closed without installing a
    campaign or hiding legacy findings; Resume remains unavailable until exact
    provenance can be recovered.
-9. The monitor only reconciles orphaned active runs after launcher failure; it
+10. The monitor only reconciles orphaned active runs after launcher failure; it
    does not poll account limits or auto-resume a guard pause. Explicit Resume
    causes the next worker pickup to fetch current telemetry and evaluate again.
-10. The run-finding projection joins occurrences to the selected automation only
-    through durable campaign run IDs and campaign start time. The repository-owned
+11. New campaign occurrences, contexts, and model projections join by campaign
+    ID rather than the retained run list. Exact metrics distinguish inspected
+    files, fully reviewed files, remaining and unsupported files, finding
+    occurrences, distinct aggregates, and pending mappings. The repository-owned
     projection reads the complete canonical aggregate ledger. Polling observes
     newly committed checkpoints and active status processing; it never starts or
     advances review execution.
-11. Batch generation validates at most 200 explicit finding IDs, rejects every
+12. Batch generation validates at most 200 explicit finding IDs, rejects every
     non-open or associated finding, creates one generation ID, and reserves
     each canonical association under the ledger lock before dispatch. A
     workspace-wide four-slot OS semaphore admits at most four writer calls
     concurrently, while a per-attempt lock prevents duplicate cross-process
     dispatch. Retrying the same generation ID reuses completed results and
     pending reservations.
-12. Each new Draft/Post action resolves and freezes the current assigned profile,
+13. Each new Draft/Post action resolves and freezes the current assigned profile,
     issue prompt, writer, and account with the fixed private structured policy.
     Validated output replaces a `generating` reservation
     with `editing`; a failed initial call stores `failed` and a safe error. On
@@ -613,7 +632,7 @@ interfaces owned by their existing feature specifications.
 | `FR-REPOREVIEW-026` | [pkg/repoaudit/lifecycle_test.go](../../pkg/repoaudit/lifecycle_test.go), [pkg/gateway/repository_review_publication_test.go](../../pkg/gateway/repository_review_publication_test.go), [web/frontend/src/components/repository-reviews/repository-review-routed-pages.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-routed-pages.test.tsx)                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `FR-REPOREVIEW-027` | [pkg/repoaudit/lifecycle_test.go](../../pkg/repoaudit/lifecycle_test.go), [pkg/repoaudit/validation_worker_test.go](../../pkg/repoaudit/validation_worker_test.go), [web/frontend/src/components/repository-reviews/repository-review-routed-pages.test.tsx](../../web/frontend/src/components/repository-reviews/repository-review-routed-pages.test.tsx)                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `FR-REPOREVIEW-028` | [pkg/repoaudit/identity_test.go](../../pkg/repoaudit/identity_test.go), [pkg/repoaudit/campaign_test.go](../../pkg/repoaudit/campaign_test.go), [web/backend/api/repository_review_details_test.go](../../web/backend/api/repository_review_details_test.go), [web/frontend/src/routes/-repository-reviews-route.test.tsx](../../web/frontend/src/routes/-repository-reviews-route.test.tsx)                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `FR-REPOREVIEW-029` | [pkg/repoaudit/campaign_foundation_test.go](../../pkg/repoaudit/campaign_foundation_test.go), [pkg/repoaudit/store_test.go](../../pkg/repoaudit/store_test.go), [pkg/repoaudit/coverage_boundaries_test.go](../../pkg/repoaudit/coverage_boundaries_test.go), [web/backend/api/repository_review_campaign_backfill_test.go](../../web/backend/api/repository_review_campaign_backfill_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [pkg/gateway/repository_review_issue_sync_coverage_test.go](../../pkg/gateway/repository_review_issue_sync_coverage_test.go) |
+| `FR-REPOREVIEW-029` | [pkg/repoaudit/campaign_foundation_test.go](../../pkg/repoaudit/campaign_foundation_test.go), [pkg/repoaudit/store_test.go](../../pkg/repoaudit/store_test.go), [pkg/repoaudit/coverage_boundaries_test.go](../../pkg/repoaudit/coverage_boundaries_test.go), [pkg/workflows/repository_review_campaign_write_test.go](../../pkg/workflows/repository_review_campaign_write_test.go), [pkg/workflows/repository_review_campaign_privacy_test.go](../../pkg/workflows/repository_review_campaign_privacy_test.go), [web/backend/api/repository_review_campaign_backfill_test.go](../../web/backend/api/repository_review_campaign_backfill_test.go), [web/backend/api/repository_review_automations_test.go](../../web/backend/api/repository_review_automations_test.go), [web/backend/api/repository_review_coverage_test.go](../../web/backend/api/repository_review_coverage_test.go), [web/backend/api/repository_reviews_test.go](../../web/backend/api/repository_reviews_test.go), [pkg/gateway/repository_review_issue_sync_coverage_test.go](../../pkg/gateway/repository_review_issue_sync_coverage_test.go) |
 
 ## Implementation Anchors
 

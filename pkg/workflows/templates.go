@@ -100,6 +100,9 @@ on:
       repository:
         type: string
         required: true
+      campaign_id:
+        type: string
+        default: ""
       ref:
         type: string
         default: ""
@@ -161,6 +164,8 @@ on:
         value: ${{ jobs.find_bugs.outputs.findingIds }}
       reviewedFiles:
         value: ${{ jobs.find_bugs.outputs.reviewedFiles }}
+      inspectedFiles:
+        value: ${{ jobs.find_bugs.outputs.inspectedFiles }}
       skippedFiles:
         value: ${{ jobs.find_bugs.outputs.skippedFiles }}
       excludedFiles:
@@ -181,6 +186,7 @@ jobs:
       summary: ${{ steps.result.outputs.summary }}
       findingIds: ${{ steps.result.outputs.findingIds }}
       reviewedFiles: ${{ steps.result.outputs.run.reviewed_files }}
+      inspectedFiles: ${{ steps.result.outputs.run.inspected_files }}
       skippedFiles: ${{ steps.plan.outputs.unchangedCount }}
       excludedFiles: ${{ steps.scope.outputs.scopePlan.counts.excluded_files }}
       remainingFiles: ${{ steps.result.outputs.run.remaining_files }}
@@ -327,6 +333,7 @@ jobs:
         uses: function/review.repository
         with:
           action: plan
+          campaign_id: ${{ inputs.campaign_id }}
           agent: main
           workspace: ${{ steps.scope_checkout.outputs.workspace }}
           commit: ${{ steps.inventory.outputs.commit }}
@@ -599,6 +606,7 @@ jobs:
           text: ${{ steps.review.outputs.text }}
           reviewable_count: ${{ steps.freeze.outputs.reviewableCount }}
           unsupported_files: ${{ steps.freeze.outputs.unsupportedFiles }}
+          unavailable_files: ${{ steps.freeze.outputs.unavailableFiles }}
           excluded_count: ${{ steps.scope.outputs.scopePlan.counts.excluded_files }}
       - id: result
         name: Project explicit repository review result

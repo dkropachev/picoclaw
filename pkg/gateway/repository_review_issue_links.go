@@ -254,7 +254,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewIssueCan
 	projected := projectRepositoryReviewGatewayAutomation(automation)
 	response := map[string]any{
 		"automation":        projected,
-		"finding":           finding,
+		"finding":           projectRepositoryReviewGatewayFinding(finding),
 		"candidates":        candidates,
 		"generator_model":   automation.IssueWriterModel,
 		"generator_account": writerAccount,
@@ -363,8 +363,9 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewIssueLin
 	projected := projectRepositoryReviewGatewayAutomation(automation)
 	writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 		"automation": projected, "repository": repoaudit.Summarize(updated),
-		"finding": updatedFinding, "contexts": repositoryReviewGatewayFindingContexts(updated, updatedFinding),
-		"issue": draft,
+		"finding":  projectRepositoryReviewGatewayFinding(updatedFinding),
+		"contexts": repositoryReviewGatewayFindingContexts(updated, updatedFinding),
+		"issue":    draft,
 		"capabilities": map[string]any{
 			"github": true, "can_unlink_issue": true, "can_replace_issue": true,
 		},
@@ -399,7 +400,8 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewIssueUnl
 	projected := projectRepositoryReviewGatewayAutomation(automation)
 	writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 		"automation": projected, "repository": repoaudit.Summarize(updated),
-		"finding": updatedFinding, "contexts": repositoryReviewGatewayFindingContexts(updated, updatedFinding),
+		"finding":  projectRepositoryReviewGatewayFinding(updatedFinding),
+		"contexts": repositoryReviewGatewayFindingContexts(updated, updatedFinding),
 		"capabilities": map[string]any{
 			"github": true, "can_generate": true, "can_search_issues": true, "can_link_issue": true,
 		},
@@ -576,10 +578,16 @@ func repositoryReviewGatewayFindingContexts(
 	contexts := make([]repoaudit.FindingContext, 0, len(selected))
 	for _, candidate := range state.Contexts {
 		if _, ok := selected[candidate.ID]; ok {
+			candidate.CampaignID = ""
 			contexts = append(contexts, candidate)
 		}
 	}
 	return contexts
+}
+
+func projectRepositoryReviewGatewayFinding(finding repoaudit.Finding) repoaudit.Finding {
+	finding.CampaignID = ""
+	return finding
 }
 
 func searchRepositoryReviewIssueCandidates(

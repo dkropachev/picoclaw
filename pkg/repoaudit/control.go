@@ -96,13 +96,19 @@ type RepositoryReviewTokenUsage struct {
 }
 
 type RepositoryReviewProgress struct {
-	Stage            string `json:"stage,omitempty"`
-	CompletedBatches int    `json:"completed_batches"`
-	TotalBatches     int    `json:"total_batches"`
-	ReviewedFiles    int    `json:"reviewed_files"`
-	RemainingFiles   int    `json:"remaining_files"`
-	UnsupportedFiles int    `json:"unsupported_files"`
-	Findings         int    `json:"findings"`
+	Stage                  string `json:"stage,omitempty"`
+	CompletedBatches       int    `json:"completed_batches"`
+	TotalBatches           int    `json:"total_batches"`
+	CoverageAvailable      bool   `json:"coverage_available"`
+	CoverageExact          bool   `json:"coverage_exact"`
+	SelectedFiles          int    `json:"selected_files"`
+	InspectedFiles         int    `json:"inspected_files"`
+	ReviewedFiles          int    `json:"reviewed_files"`
+	RemainingFiles         int    `json:"remaining_files"`
+	UnsupportedFiles       int    `json:"unsupported_files"`
+	Findings               int    `json:"findings"`
+	FindingAggregates      int    `json:"finding_aggregates"`
+	PendingFindingMappings int    `json:"unaggregated_findings"`
 	// ScopeFrozen is a public projection marker derived from the internal
 	// durable scope selection. Stores never treat this caller-visible value as
 	// campaign authority.
@@ -125,6 +131,17 @@ func RepositoryReviewAutomationFileProgress(
 	automation RepositoryReviewAutomation,
 ) RepositoryReviewFileProgress {
 	progress := automation.Progress
+	if progress.CoverageAvailable && progress.CoverageExact {
+		selected := max(0, progress.SelectedFiles)
+		resolved := min(
+			selected,
+			max(0, progress.ReviewedFiles)+max(0, progress.UnsupportedFiles),
+		)
+		if automation.Status == RepositoryReviewAutomationCompleted {
+			resolved = selected
+		}
+		return repositoryReviewFileProgress(resolved, selected, automation.Status)
+	}
 	selected := max(0, automation.ScopePlan.Counts.SelectedFiles)
 	if automation.ScopeSelection != nil && selected > 0 {
 		resolved := min(selected, max(0, selected-max(0, progress.RemainingFiles)))
@@ -1017,10 +1034,20 @@ func validateTokenUsage(usage RepositoryReviewTokenUsage) error {
 func validateProgress(progress RepositoryReviewProgress) error {
 	if !validOptionalAutomationText(progress.Stage, 256) || progress.CompletedBatches < 0 ||
 		progress.TotalBatches < 0 || progress.CompletedBatches > progress.TotalBatches ||
+		progress.CoverageExact && !progress.CoverageAvailable ||
+		progress.SelectedFiles < 0 || progress.SelectedFiles > maxReviewFiles ||
+		progress.InspectedFiles < 0 || progress.InspectedFiles > maxReviewFiles ||
 		progress.ReviewedFiles < 0 || progress.ReviewedFiles > maxReviewFiles ||
 		progress.RemainingFiles < 0 || progress.RemainingFiles > maxReviewFiles ||
 		progress.UnsupportedFiles < 0 || progress.UnsupportedFiles > maxReviewFiles ||
-		progress.Findings < 0 || progress.Findings > maxReviewObservations {
+		progress.Findings < 0 || progress.Findings > maxReviewObservations ||
+		progress.FindingAggregates < 0 || progress.FindingAggregates > maxReviewObservations ||
+		progress.PendingFindingMappings < 0 || progress.PendingFindingMappings > maxReviewObservations ||
+		progress.FindingAggregates+progress.PendingFindingMappings > progress.Findings ||
+		(progress.CoverageAvailable && (progress.InspectedFiles > progress.SelectedFiles ||
+			progress.ReviewedFiles+progress.UnsupportedFiles > progress.SelectedFiles ||
+			progress.CoverageExact && progress.RemainingFiles !=
+				progress.SelectedFiles-progress.ReviewedFiles-progress.UnsupportedFiles)) {
 		return fmt.Errorf("%w: invalid progress", ErrInvalidAutomation)
 	}
 	return nil

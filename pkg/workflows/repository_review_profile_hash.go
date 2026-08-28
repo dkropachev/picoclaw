@@ -147,3 +147,77 @@ func RepositoryBugFinderEffectiveMaxContentBytes(requested int64, resolvedMaximu
 	}
 	return requested, nil
 }
+
+func nativeRepositoryBugFinderProfileHash(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	var profile map[string]any
+	if decodeErr := json.Unmarshal(data, &profile); decodeErr != nil {
+		return "", decodeErr
+	}
+	models, err := nativeRepositoryBugFinderProfileNames(profile["models"])
+	if err != nil {
+		return "", err
+	}
+	effectiveModels, err := nativeRepositoryBugFinderProfileNames(profile["effective_models"])
+	if err != nil {
+		return "", err
+	}
+	profile["models"] = strings.Join(models, ",")
+	profile["effective_models"] = effectiveModels
+	data, _ = json.Marshal(profile)
+	var input RepositoryBugFinderProfileHashInput
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return "", err
+	}
+	if input.Schema != RepositoryBugFinderProfileSchema ||
+		input.PromptRevision != RepositoryBugFinderPromptRevision {
+		return "", errors.New("invalid repository bug finder profile hash input")
+	}
+	return RepositoryBugFinderProfileHash(NewRepositoryBugFinderProfileHashInput(
+		input.AccountRef, input.Target, input.Focus, input.ScopePolicy,
+		input.ScopePlanHash, input.Models, input.ModelGraphRevision,
+		input.EffectiveModels, input.IncludeDefaultReviewer, input.MaxContentBytes,
+	))
+}
+
+func nativeRepositoryBugFinderProfileNames(value any) ([]string, error) {
+	var raw []string
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		raw = strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == '\n' || r == ';'
+		})
+	case []any:
+		raw = make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, errors.New("invalid repository bug finder profile model list")
+			}
+			raw = append(raw, text)
+		}
+	default:
+		return nil, errors.New("invalid repository bug finder profile model list")
+	}
+	names := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		name := strings.TrimSpace(item)
+		if name == "" {
+			return nil, errors.New("invalid repository bug finder profile model list")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, errors.New("invalid repository bug finder profile model list")
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names, nil
+}

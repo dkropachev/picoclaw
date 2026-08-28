@@ -22,6 +22,103 @@ import (
 
 const eventDraftPrivateAPIDiagnostic = "EVENT_DRAFT_PRIVATE_DIAGNOSTIC"
 
+func TestRepositoryReviewWorkflowEventEndpointScrubsCampaignAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	handler := NewHandler(writeWorkflowEventTestConfig(t, workspace))
+	store := workflows.NewFileRunStore(workspace)
+	now := time.Now().UTC()
+	run := &workflows.Run{
+		ID: workflows.NewRunID(), WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
+		Status: workflows.RunStatusSucceeded, Inputs: map[string]any{
+			"repository": "owner/repo", "campaign_id": "rrc_event_canary",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateRun(t.Context(), run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(t.Context(), workflows.RunEvent{
+		RunID: run.ID, Kind: "workflow.step.end", Payload: map[string]any{
+			"outputs": map[string]any{"run": map[string]any{
+				"campaign_id": "rrc_event_canary", "remaining_files": 0,
+			}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/workflows/runs/"+run.ID+"/events", nil)
+	request.SetPathValue("run_id", run.ID)
+	handler.handleGetWorkflowRunEvents(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "rrc_event_canary") ||
+		strings.Contains(recorder.Body.String(), "campaign_id") ||
+		!strings.Contains(recorder.Body.String(), "remaining_files") {
+		t.Fatalf("event projection status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	raw, err := store.Events(t.Context(), run.ID)
+	if err != nil || len(raw) != 1 ||
+		raw[0].Payload["outputs"].(map[string]any)["run"].(map[string]any)["campaign_id"] != "rrc_event_canary" {
+		t.Fatalf("stored event=%#v err=%v", raw, err)
+	}
+}
+
+func TestRepositoryReviewWorkflowRunProjectionDeeplyScrubsCampaignAuthority(t *testing.T) {
+	const canary = "rrc_api_projection_canary"
+	snapshot := &workflowRunPrivacySnapshot{}
+	ordinary := &workflows.Run{
+		WorkflowRef: "workflows/ordinary.yml",
+		Inputs:      map[string]any{"campaign_id": canary},
+	}
+	if projected := snapshot.projectRunForBrowser(
+		t.Context(), nil, ordinary,
+	); projected.Inputs["campaign_id"] != canary {
+		t.Fatalf("ordinary workflow projection=%#v", projected)
+	}
+
+	run := &workflows.Run{
+		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
+		Inputs: map[string]any{
+			"campaign_id": canary,
+			"nested": map[string]any{
+				"campaignId": canary,
+				"safe":       "input",
+			},
+		},
+		Outputs: map[string]any{
+			"items": []any{
+				map[string]any{"campaign_id": canary, "safe": "slice"},
+				"scalar",
+			},
+			"maps": []map[string]any{{"campaignId": canary, "safe": "typed-slice"}},
+		},
+		Jobs: map[string]workflows.JobExecution{
+			"review": {Outputs: map[string]any{"campaign_id": canary, "safe": "job"}},
+		},
+		Steps: map[string]workflows.StepExecution{
+			"record": {Outputs: map[string]any{"campaignId": canary, "safe": "step"}},
+		},
+	}
+	projected := snapshot.projectRunForBrowser(t.Context(), nil, run)
+	if projected == run || projected.Inputs["campaign_id"] != nil ||
+		projected.Inputs["nested"].(map[string]any)["campaignId"] != nil ||
+		projected.Inputs["nested"].(map[string]any)["safe"] != "input" ||
+		projected.Outputs["items"].([]any)[0].(map[string]any)["campaign_id"] != nil ||
+		projected.Outputs["items"].([]any)[1] != "scalar" ||
+		projected.Outputs["maps"].([]map[string]any)[0]["campaignId"] != nil ||
+		projected.Jobs["review"].Outputs["campaign_id"] != nil ||
+		projected.Steps["record"].Outputs["campaignId"] != nil {
+		t.Fatalf("campaign workflow projection=%#v", projected)
+	}
+	if run.Inputs["campaign_id"] != canary ||
+		run.Inputs["nested"].(map[string]any)["campaignId"] != canary ||
+		run.Outputs["items"].([]any)[0].(map[string]any)["campaign_id"] != canary ||
+		run.Outputs["maps"].([]map[string]any)[0]["campaignId"] != canary ||
+		run.Jobs["review"].Outputs["campaign_id"] != canary ||
+		run.Steps["record"].Outputs["campaignId"] != canary {
+		t.Fatal("campaign projection mutated the stored workflow run")
+	}
+}
+
 func TestLoadWorkflowEventEnvelopeUsesMetadataAndProtectedContextRoutes(t *testing.T) {
 	configPath := writeWorkflowEventTestConfig(t, t.TempDir())
 	var paths []string

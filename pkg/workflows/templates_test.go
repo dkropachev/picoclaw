@@ -100,7 +100,9 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	if call == nil || call.Inputs["scope_planned"].Type != "boolean" ||
 		call.Inputs["scope_planned"].Default != false ||
 		call.Inputs["scope_selection"].Type != "object" ||
-		call.Inputs["scope_plan"].Type != "object" {
+		call.Inputs["scope_plan"].Type != "object" ||
+		call.Inputs["campaign_id"].Type != "string" ||
+		call.Inputs["campaign_id"].Default != "" {
 		t.Fatalf("frozen scope inputs=%#v", call)
 	}
 	if selection := call.Inputs["scope_selection"].Default; !reflect.DeepEqual(selection, map[string]any{}) {
@@ -118,7 +120,8 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	if filter["rationale"] != "${{ steps.scope.outputs.scopePlan.rationale }}" {
 		t.Fatalf("scope file filter=%#v", filter)
 	}
-	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" || plan.With["profile"] == nil {
+	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" ||
+		plan.With["campaign_id"] != "${{ inputs.campaign_id }}" || plan.With["profile"] == nil {
 		t.Fatalf("plan=%#v", plan)
 	}
 	if profile := nativeMapValue(plan.With["profile"]); profile["account_ref"] != "${{ inputs.account_ref }}" {
@@ -142,8 +145,18 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 		t.Fatalf("review authority/scope=%#v", review.With)
 	}
 	if record.Uses != "function/review.repository" || record.With["action"] != "record" ||
-		record.With["managed_children"] != "${{ steps.review.outputs.managed_children }}" {
+		record.With["managed_children"] != "${{ steps.review.outputs.managed_children }}" ||
+		record.With["unavailable_files"] != "${{ steps.freeze.outputs.unavailableFiles }}" {
 		t.Fatalf("record=%#v", record)
+	}
+	if job.Outputs["inspectedFiles"] != "${{ steps.result.outputs.run.inspected_files }}" ||
+		call.Outputs["inspectedFiles"].Value != "${{ jobs.find_bugs.outputs.inspectedFiles }}" {
+		t.Fatalf("inspected outputs job=%#v workflow=%#v", job.Outputs, call.Outputs)
+	}
+	if strings.Count(fmt.Sprint(review.With["context"]), "\n-") != 4 ||
+		managed["max_tasks_per_chunk"] != 1 {
+		t.Fatalf("required assignment denominator drifted: context=%q managed=%#v",
+			review.With["context"], managed)
 	}
 	if result := byID["result"]; result.Uses != "function/review.repository" || result.With["action"] != "result" {
 		t.Fatalf("result=%#v", result)

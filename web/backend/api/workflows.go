@@ -926,7 +926,8 @@ func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Requ
 		w,
 		map[string]any{
 			"run_id": runID,
-			"events": workflows.ProjectWorkflowRunEventsForBrowser(
+			"events": workflows.ProjectRepositoryReviewRunEventsForBrowser(
+				run,
 				events,
 				workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
 				workflows.IsPrivateWorkflowRun(run),
@@ -978,7 +979,8 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 		if err != nil {
 			return
 		}
-		events = workflows.ProjectWorkflowRunEventsForBrowser(
+		events = workflows.ProjectRepositoryReviewRunEventsForBrowser(
+			run,
 			events,
 			maskDiagnostics,
 			workflows.IsPrivateWorkflowRun(run),

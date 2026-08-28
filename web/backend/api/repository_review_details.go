@@ -1096,8 +1096,10 @@ func repositoryReviewIssueWriterAgentRequest(
 	account string,
 ) workflows.AgentRequest {
 	finding.Observations = nil
+	finding.CampaignID = ""
 	contexts = append([]repoaudit.FindingContext(nil), contexts...)
 	for index := range contexts {
+		contexts[index].CampaignID = ""
 		contexts[index].RawDigest = ""
 	}
 	promptPayload, _ := json.Marshal(map[string]any{
@@ -1242,11 +1244,7 @@ func (h *Handler) repositoryReviewAutomationLedger(
 		return repositoryReviewAutomationLedger{}, err
 	}
 	if ledger.Found {
-		ledger.Automation.Progress.Findings = len(repoaudit.CurrentCampaignFindings(
-			ledger.State,
-			ledger.Automation.RunIDs,
-			ledger.Automation.StartedAt,
-		))
+		applyRepositoryReviewLiveMetrics(&ledger.Automation, ledger.State)
 	}
 	return ledger, nil
 }
@@ -1388,6 +1386,7 @@ func projectRepositoryReviewRunFinding(
 	finding repoaudit.Finding,
 ) repositoryReviewRunFindingProjection {
 	index := newRepositoryReviewRunFindingStatusIndex(state)
+	finding.CampaignID = ""
 	return repositoryReviewRunFindingProjection{
 		Finding:          finding,
 		RunFindingStatus: index.status(finding),
@@ -1401,6 +1400,7 @@ func projectRepositoryReviewRunFindings(
 	index := newRepositoryReviewRunFindingStatusIndex(state)
 	projected := make([]repositoryReviewRunFindingProjection, 0, len(findings))
 	for _, finding := range findings {
+		finding.CampaignID = ""
 		projected = append(projected, repositoryReviewRunFindingProjection{
 			Finding: finding, RunFindingStatus: index.status(finding),
 		})
@@ -1619,7 +1619,7 @@ func repositoryReviewReportFindings(
 	if scope == "all" {
 		return append([]repoaudit.Finding(nil), state.Findings...)
 	}
-	return repoaudit.CurrentCampaignFindings(state, automation.RunIDs, automation.StartedAt)
+	return repositoryReviewCurrentFindings(automation, state)
 }
 
 func repositoryReviewFindingContexts(
@@ -1635,6 +1635,7 @@ func repositoryReviewFindingContexts(
 	contexts := make([]repoaudit.FindingContext, 0, len(selected))
 	for _, contextRecord := range state.Contexts {
 		if _, ok := selected[contextRecord.ID]; ok {
+			contextRecord.CampaignID = ""
 			contexts = append(contexts, contextRecord)
 		}
 	}

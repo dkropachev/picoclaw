@@ -1440,19 +1440,31 @@ func (c *repositoryReviewController) recoverLegacyRepositoryReviewCampaign(
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
-	_, err = applyRepositoryReviewLegacyCampaignBackfill(ctx, store, prepared)
+	reconciledState, err := applyRepositoryReviewLegacyCampaignBackfill(ctx, store, prepared)
 	if err != nil {
 		return repoaudit.RepositoryReviewAutomation{}, err
 	}
 	final, err := store.UpdateAutomation(
 		ctx, installed.ID, installed.Version,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			return clearRepositoryReviewLegacyCampaign(
-				candidate, prepared.Request.Coverage.ID,
+			return finalizeRepositoryReviewLegacyCampaign(
+				candidate, prepared.Request.Coverage.ID, reconciledState,
 			)
 		},
 	)
 	return final, err
+}
+
+func finalizeRepositoryReviewLegacyCampaign(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	campaignID string,
+	state repoaudit.RepositoryState,
+) error {
+	if err := clearRepositoryReviewLegacyCampaign(candidate, campaignID); err != nil {
+		return err
+	}
+	applyRepositoryReviewLiveMetrics(candidate, state)
+	return nil
 }
 
 func clearRepositoryReviewLegacyCampaign(
