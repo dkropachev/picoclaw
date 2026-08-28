@@ -1447,16 +1447,24 @@ func (c *repositoryReviewController) recoverLegacyRepositoryReviewCampaign(
 	final, err := store.UpdateAutomation(
 		ctx, installed.ID, installed.Version,
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
-			if clearErr := clearRepositoryReviewLegacyCampaign(
-				candidate, prepared.Request.Coverage.ID,
-			); clearErr != nil {
-				return clearErr
-			}
-			applyRepositoryReviewLiveMetrics(candidate, reconciledState)
-			return nil
+			return finalizeRepositoryReviewLegacyCampaign(
+				candidate, prepared.Request.Coverage.ID, reconciledState,
+			)
 		},
 	)
 	return final, err
+}
+
+func finalizeRepositoryReviewLegacyCampaign(
+	candidate *repoaudit.RepositoryReviewAutomation,
+	campaignID string,
+	state repoaudit.RepositoryState,
+) error {
+	if err := clearRepositoryReviewLegacyCampaign(candidate, campaignID); err != nil {
+		return err
+	}
+	applyRepositoryReviewLiveMetrics(candidate, state)
+	return nil
 }
 
 func clearRepositoryReviewLegacyCampaign(

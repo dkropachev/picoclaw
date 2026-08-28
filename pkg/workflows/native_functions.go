@@ -1157,7 +1157,29 @@ func nativeRepositoryReviewCampaignEvidence(
 		)
 	}
 	sort.Slice(unavailableFiles, func(i, j int) bool { return unavailableFiles[i].Path < unavailableFiles[j].Path })
-	combined := append([]map[string]any(nil), children...)
+	unsupported := nativeRepositoryReviewUnsupportedFiles(args["managed_children"])
+	unsupported = mergeNativeRepositoryUnsupportedFiles(
+		unsupported,
+		nativeRepositoryReviewUnsupportedScopeFiles(args["unsupported_files"]),
+	)
+	terminalPaths := make(map[string]struct{}, len(unsupported))
+	for _, file := range unsupported {
+		terminalPaths[file.Path] = struct{}{}
+	}
+	combined := make([]map[string]any, 0, len(children)+len(unavailableFiles)*plan.RequiredAssignments)
+	for _, child := range children {
+		scopeFiles, scopeErr := nativeRepositoryReviewFiles(child["scope"])
+		allTerminal := scopeErr == nil && len(scopeFiles) > 0
+		for _, file := range scopeFiles {
+			if _, terminal := terminalPaths[file.Path]; !terminal {
+				allTerminal = false
+				break
+			}
+		}
+		if !allTerminal {
+			combined = append(combined, child)
+		}
+	}
 	for _, file := range unavailableFiles {
 		for slot := 1; slot <= plan.RequiredAssignments; slot++ {
 			combined = append(combined, map[string]any{
@@ -1169,11 +1191,6 @@ func nativeRepositoryReviewCampaignEvidence(
 			})
 		}
 	}
-	unsupported := nativeRepositoryReviewUnsupportedFiles(args["managed_children"])
-	unsupported = mergeNativeRepositoryUnsupportedFiles(
-		unsupported,
-		nativeRepositoryReviewUnsupportedScopeFiles(args["unsupported_files"]),
-	)
 	terminalUnsupported := make([]repoaudit.FileRef, 0, len(unsupported))
 	for _, file := range unsupported {
 		terminalUnsupported = append(terminalUnsupported, file.FileRef)

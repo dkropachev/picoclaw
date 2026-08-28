@@ -224,6 +224,29 @@ func TestNativeRepositoryReviewCampaignTransientUnavailableEvidenceRemainsPendin
 	}
 }
 
+func TestNativeRepositoryReviewCampaignEvidenceCarriesTerminalUnsupportedRefs(t *testing.T) {
+	file := repoaudit.FileRef{
+		Path: "binary.dat", BlobSHA: strings.Repeat("e", 40), SizeBytes: 12,
+		Category: "binary", Mode: "100644",
+	}
+	scope := nativeRepositoryReviewFileMaps([]repoaudit.FileRef{file})
+	scope[0]["contentComplete"] = false
+	scope[0]["contentUnavailable"] = "binary"
+	evidence, err := nativeRepositoryReviewRecordEvidence(map[string]any{
+		"managed_children": []map[string]any{{
+			"index": 1, "required": true, "valid": false, "scope": scope,
+			"run_error": "unsupported",
+		}},
+	}, repoaudit.Plan{
+		CampaignID: repoaudit.NewRepositoryReviewCampaignID(), RequiredAssignments: 1,
+		PendingFiles: []repoaudit.FileRef{file},
+	})
+	if err != nil || len(evidence.ReviewEvidence) != 0 ||
+		len(evidence.InspectedFiles) != 0 || len(evidence.CompletedFiles) != 0 {
+		t.Fatalf("terminal unsupported evidence=%#v err=%v", evidence, err)
+	}
+}
+
 func TestNativeRepositoryReviewCampaignEvidenceSortsMultiFileResults(t *testing.T) {
 	file := func(pathValue, digest string) repoaudit.FileRef {
 		return repoaudit.FileRef{

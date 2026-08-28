@@ -3325,8 +3325,9 @@ func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testin
 		commit := strings.Repeat("b", 40)
 		input := testRepositoryReviewAutomation()
 		if _, beginErr := store.BeginCampaign(t.Context(), repoaudit.BeginCampaignRequest{
-			Repository: input.Repository, CampaignID: repoaudit.NewRepositoryReviewCampaignID(),
-			CommitSHA: commit, ExpectedReviewVersion: 0, Exact: true,
+			Repository: repoaudit.CanonicalRepositoryIdentity(input.Repository),
+			CampaignID: repoaudit.NewRepositoryReviewCampaignID(),
+			CommitSHA:  commit, ExpectedReviewVersion: 0, Exact: true,
 		}); beginErr != nil {
 			t.Fatal(beginErr)
 		}

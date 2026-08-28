@@ -842,6 +842,17 @@ func TestRepositoryReviewLegacyCampaignRecoveryAdapterClearsDurableMarker(t *tes
 	}
 }
 
+func TestRepositoryReviewLegacyCampaignFinalizationRejectsMarkerRace(t *testing.T) {
+	candidate := &repoaudit.RepositoryReviewAutomation{
+		CampaignID: repoaudit.NewRepositoryReviewCampaignID(),
+	}
+	if err := finalizeRepositoryReviewLegacyCampaign(
+		candidate, candidate.CampaignID, repoaudit.RepositoryState{},
+	); !errors.Is(err, repoaudit.ErrConflict) {
+		t.Fatalf("marker race finalization error=%v", err)
+	}
+}
+
 func TestRepositoryReviewRecoveredBaselineDoesNotCountAsFirstBatchProgress(t *testing.T) {
 	fixture := newRepositoryReviewBackfillFixture(
 		t, 2,
