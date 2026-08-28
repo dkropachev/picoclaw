@@ -1563,7 +1563,11 @@ func validOpaqueID(value, prefix string) bool {
 	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+32 {
 		return false
 	}
-	_, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
+	suffix := strings.TrimPrefix(value, prefix)
+	if suffix != strings.ToLower(suffix) {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
 	return err == nil
 }
 

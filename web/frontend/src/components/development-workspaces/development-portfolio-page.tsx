@@ -1,211 +1,198 @@
-import {
-  IconAlertTriangle,
-  IconArrowRight,
-  IconGitPullRequest,
-  IconPlus,
-  IconRefresh,
-  IconSearch,
-  IconSparkles,
-} from "@tabler/icons-react"
+import { IconPlus } from "@tabler/icons-react"
 import { useInfiniteQuery } from "@tanstack/react-query"
-import { useMemo, useState } from "react"
+import { useMemo } from "react"
 
 import {
-  type DevelopmentWorkspaceSummary,
+  type DevelopmentWorkspaceCollectionSummary,
   listDevelopmentWorkspaces,
 } from "@/api/development-workspaces"
 import {
-  DevelopmentIntentBadge,
-  DevelopmentPhaseBadge,
-  DevelopmentStateBadge,
-} from "@/components/development-workspaces/development-workspace-status"
-import { PageHeader } from "@/components/page-header"
+  type CollectionDefinition,
+  type StandardCollectionPageSearch,
+} from "@/components/collection"
+import { StandardCollectionPage } from "@/components/collection/standard-collection-page"
+import {
+  developmentWorkspaceCollectionViews,
+  developmentWorkspacesDefaultQuery,
+  normalizeDevelopmentWorkspacesSearch,
+} from "@/components/development-workspaces/development-workspace-collection-route-state"
+import { humanize } from "@/components/development-workspaces/development-workspace-labels"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { cn } from "@/lib/utils"
+import type { CollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export function DevelopmentPortfolioPage({
+  search,
+  onSearchChange,
   onCreate,
   onOpenWorkspace,
 }: {
+  search: StandardCollectionPageSearch
+  onSearchChange: (search: CollectionRouteSearch, replace?: boolean) => void
   onCreate: () => void
   onOpenWorkspace: (workspaceID: string) => void
 }) {
-  const [filter, setFilter] = useState("")
+  const activeQuery =
+    normalizeDevelopmentWorkspacesSearch(search).q ??
+    developmentWorkspacesDefaultQuery
   const query = useInfiniteQuery({
-    queryKey: ["development-workspaces"],
+    queryKey: ["development-workspaces", "collection", activeQuery],
+    initialPageParam: "",
     queryFn: ({ signal, pageParam }) =>
       listDevelopmentWorkspaces(
-        { limit: 100, ...(pageParam ? { cursor: pageParam } : {}) },
+        {
+          query: activeQuery,
+          cursor: pageParam || undefined,
+          limit: 50,
+        },
         signal,
       ),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.next_cursor,
+    getNextPageParam: (page) => page.next_cursor || undefined,
     refetchInterval: 5_000,
+    retry: false,
   })
-  const workspaces = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
-    const values = [
-      ...new Map(
-        (query.data?.pages.flatMap((page) => page.workspaces) ?? []).map(
-          (workspace) => [workspace.id, workspace],
-        ),
-      ).values(),
-    ]
-    if (!needle) return values
-    return values.filter(
-      (workspace) =>
-        workspace.title.toLowerCase().includes(needle) ||
-        workspace.repository.toLowerCase().includes(needle) ||
-        workspace.phase.toLowerCase().includes(needle),
-    )
-  }, [filter, query.data?.pages])
+  const workspaces = useMemo(
+    () =>
+      uniqueByID(query.data?.pages.flatMap((page) => page.workspaces) ?? []),
+    [query.data?.pages],
+  )
+  const first = query.data?.pages[0]
+  const definition = useMemo<
+    CollectionDefinition<DevelopmentWorkspaceCollectionSummary>
+  >(
+    () => ({
+      key: "development-workspaces",
+      title: "Development workspaces",
+      defaultQuery: developmentWorkspacesDefaultQuery,
+      supportedViews: developmentWorkspaceCollectionViews,
+      defaultView: "list",
+      getItemID: (workspace) => workspace.id,
+      getItemLabel: (workspace) => workspace.title,
+      getItemIdentity: (workspace) => ({
+        title: workspace.title,
+        description: workspace.repository,
+        metadata: `Updated ${formatTimestamp(workspace.updated)}`,
+      }),
+      columns: [
+        {
+          id: "source",
+          header: "Source",
+          cell: (workspace) => sourceLabel(workspace.source),
+        },
+        {
+          id: "intent",
+          header: "Intent",
+          cell: (workspace) => intentLabel(workspace.intent),
+        },
+        {
+          id: "repository",
+          header: "Repository",
+          cell: (workspace) => workspace.repository,
+        },
+        {
+          id: "phase",
+          header: "Phase",
+          cell: (workspace) => humanize(workspace.phase),
+        },
+        {
+          id: "updated",
+          header: "Updated",
+          cell: (workspace) => formatTimestamp(workspace.updated),
+          className: "w-44",
+        },
+      ],
+      gridFacts: [
+        {
+          id: "repository",
+          label: "Repository",
+          value: (workspace) => workspace.repository,
+        },
+        {
+          id: "source",
+          label: "Source",
+          value: (workspace) => sourceLabel(workspace.source),
+        },
+        {
+          id: "intent",
+          label: "Intent",
+          value: (workspace) => intentLabel(workspace.intent),
+        },
+        {
+          id: "updated",
+          label: "Updated",
+          value: (workspace) => formatTimestamp(workspace.updated),
+        },
+      ],
+      badges: [
+        {
+          id: "phase",
+          label: (workspace) => humanize(workspace.phase),
+          variant: "secondary",
+        },
+        {
+          id: "state",
+          label: (workspace) => humanize(workspace.execution_state),
+          variant: "outline",
+        },
+      ],
+    }),
+    [],
+  )
 
   return (
-    <div
-      className="bg-background flex h-full min-h-0 flex-col"
-      data-testid="development-portfolio"
-      aria-busy={query.isPending || query.isFetchingNextPage}
-    >
-      <PageHeader title="Development">
-        <Button
-          type="button"
-          size="icon"
-          variant="outline"
-          aria-label="Refresh workspaces"
-          title="Refresh workspaces"
-          onClick={() => void query.refetch()}
-          disabled={query.isFetching}
-        >
-          <IconRefresh
-            className={cn("size-4", query.isFetching && "animate-spin")}
-          />
+    <StandardCollectionPage
+      definition={definition}
+      search={search}
+      onSearchChange={onSearchChange}
+      items={workspaces}
+      total={first?.total}
+      schema={first?.query_schema}
+      canonicalQuery={first?.canonical_query}
+      loading={query.isPending}
+      fetching={query.isFetching}
+      error={query.error}
+      onRefresh={() => query.refetch()}
+      hasNextPage={query.hasNextPage}
+      loadingMore={query.isFetchingNextPage}
+      onLoadMore={() => query.fetchNextPage()}
+      onOpenItem={(workspace) => onOpenWorkspace(workspace.id)}
+      addAction={
+        <Button type="button" size="sm" onClick={onCreate}>
+          <IconPlus /> New work
         </Button>
-        <Button
-          type="button"
-          aria-label="New work"
-          title="New work"
-          onClick={onCreate}
-        >
-          <IconPlus />
-          <span className="hidden sm:inline">New work</span>
-        </Button>
-      </PageHeader>
-
-      <div className="min-h-0 flex-1 overflow-auto px-4 pb-6 md:px-6">
-        <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
-          <label
-            htmlFor="development-workspace-filter"
-            className="relative block max-w-xl"
-          >
-            <span className="sr-only">Filter development workspaces</span>
-            <IconSearch className="text-muted-foreground pointer-events-none absolute top-2.5 left-3 size-4" />
-            <Input
-              id="development-workspace-filter"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              className="pl-9"
-              placeholder="Filter by title, repository, or phase"
-            />
-          </label>
-
-          {query.isPending ? (
-            <p className="text-muted-foreground py-12 text-center text-sm">
-              Loading development workspaces…
-            </p>
-          ) : query.isError ? (
-            <div
-              role="alert"
-              className="border-destructive/40 bg-destructive/5 text-destructive flex items-center gap-2 rounded-lg border p-4 text-sm"
-            >
-              <IconAlertTriangle className="size-4" />
-              Development workspaces could not be loaded.
-            </div>
-          ) : workspaces.length === 0 ? (
-            <div className="border-border text-muted-foreground flex flex-col items-center gap-3 rounded-lg border border-dashed py-16 text-sm">
-              <IconSparkles className="size-8" />
-              <p>
-                {filter.trim()
-                  ? "No matching work."
-                  : "No development work yet."}
-              </p>
-              {!filter.trim() && (
-                <Button type="button" variant="outline" onClick={onCreate}>
-                  Start development
-                </Button>
-              )}
-            </div>
-          ) : (
-            <section aria-label="Development workspaces" className="space-y-2">
-              <p className="text-muted-foreground text-xs">
-                {workspaces.length} workspace
-                {workspaces.length === 1 ? "" : "s"}
-              </p>
-              <div className="grid gap-2 xl:grid-cols-2">
-                {workspaces.map((workspace) => (
-                  <WorkspaceRow
-                    key={workspace.id}
-                    workspace={workspace}
-                    onOpen={() => onOpenWorkspace(workspace.id)}
-                  />
-                ))}
-              </div>
-              {query.hasNextPage && (
-                <div className="flex justify-center pt-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={query.isFetchingNextPage}
-                    onClick={() => void query.fetchNextPage()}
-                  >
-                    {query.isFetchingNextPage && (
-                      <IconRefresh className="animate-spin" />
-                    )}
-                    Load more workspaces
-                  </Button>
-                </div>
-              )}
-            </section>
-          )}
-        </div>
-      </div>
-    </div>
+      }
+      emptyTitle="No development work"
+      emptyDescription="Start from an issue, a feature brief, or an existing pull request."
+    />
   )
 }
 
-function WorkspaceRow({
-  workspace,
-  onOpen,
-}: {
-  workspace: DevelopmentWorkspaceSummary
-  onOpen: () => void
-}) {
-  const SourceIcon =
-    workspace.source_kind === "pull_request" ? IconGitPullRequest : IconSparkles
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="border-border bg-card hover:bg-muted/50 focus-visible:ring-ring grid min-w-0 gap-3 rounded-lg border p-4 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none sm:grid-cols-[minmax(0,1fr)_auto]"
-    >
-      <span className="min-w-0 space-y-2">
-        <span className="flex min-w-0 items-center gap-2">
-          <SourceIcon className="text-muted-foreground size-4 shrink-0" />
-          <span className="truncate font-medium">{workspace.title}</span>
-        </span>
-        <span className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-          <span>{workspace.repository}</span>
-          <span>Updated {formatTimestamp(workspace.updated_at)}</span>
-        </span>
-        <span className="flex flex-wrap gap-1.5">
-          <DevelopmentIntentBadge intent={workspace.intent} />
-          <DevelopmentPhaseBadge phase={workspace.phase} />
-          <DevelopmentStateBadge state={workspace.execution_state} />
-        </span>
-      </span>
-      <IconArrowRight className="text-muted-foreground hidden size-4 self-center sm:block" />
-    </button>
-  )
+function uniqueByID(
+  workspaces: DevelopmentWorkspaceCollectionSummary[],
+): DevelopmentWorkspaceCollectionSummary[] {
+  return [
+    ...new Map(
+      workspaces.map((workspace) => [workspace.id, workspace]),
+    ).values(),
+  ]
+}
+
+function sourceLabel(
+  source: DevelopmentWorkspaceCollectionSummary["source"],
+): string {
+  switch (source) {
+    case "pull_request":
+      return "Pull request"
+    case "issue":
+      return "Issue"
+    case "brief":
+      return "Brief"
+  }
+}
+
+function intentLabel(
+  intent: DevelopmentWorkspaceCollectionSummary["intent"],
+): string {
+  return intent === "implement_feature" ? "Feature" : "PR pickup"
 }
 
 function formatTimestamp(value: string): string {

@@ -9,6 +9,30 @@ This is a breaking replacement for Pull Request Workspaces. Workspace IDs use
 `/api/development-workspaces`. Old `prw_` IDs and `/pull-requests` URLs are not
 translated or redirected.
 
+## Find Work
+
+The `/development` portfolio is a server-paged collection with List, Table, and
+Grid views; compact List is the default. Its query field supports `id`,
+`intent`, `source`, `repository`, `title`, `phase`, `execution_state`,
+`created`, and `updated`, with typed filters and up to three sort fields. The
+default is newest activity first:
+
+```text
+ORDER BY updated DESC
+```
+
+For example, find feature work waiting for a user decision with:
+
+```text
+intent = implement_feature AND execution_state = waiting_user
+ORDER BY updated DESC
+```
+
+The server owns filtering, ordering, totals, and cursors. Opening New work or a
+workspace preserves the portfolio query and view, so Back returns to the same
+collection state. Workspace tabs, selected code path/revision, and attention
+targets remain separate detail state.
+
 ## Start Work
 
 Open **Development → New work** and choose exactly one workflow:

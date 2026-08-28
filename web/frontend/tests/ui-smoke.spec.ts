@@ -54,6 +54,7 @@ const smokeDevelopmentAdminIDs = {
   repositoryAssignment: "Rjljc2epaibQOt_BhFLZFLSNQFrkJGFxU2BnbKKqal8",
   workflowConfiguration: "editable",
 } as const
+const smokeDevelopmentWorkspaceID = `devw_${"1".repeat(32)}`
 
 const smokeWorkflowDefinitionIDs: Record<string, string> = {
   "workflows/code-review.yml": "W41H3aj_ymqpg1aP8Vs6TJXUddSpYgjW7VRRcTHj_-I",
@@ -83,6 +84,7 @@ const smokeRoutes = [
   "/event-sources/settings",
   "/development",
   "/development/new",
+  `/development/${smokeDevelopmentWorkspaceID}`,
   "/development/repositories",
   "/development/repositories/new",
   `/development/repositories/${smokeDevelopmentAdminIDs.repositoryAssignment}`,
@@ -405,6 +407,50 @@ const mockCollectionSchemas = {
     ["bindings", "number"],
     ["deferred_issues", "enum", ["off", "ask", "automatic"]],
   ]),
+  developmentWorkspaces: collectionSchema(
+    [
+      ["id", "string"],
+      ["intent", "enum", ["implement_feature", "pickup_pr"]],
+      ["source", "enum", ["issue", "brief", "pull_request"]],
+      ["repository", "string"],
+      ["title", "string"],
+      [
+        "phase",
+        "enum",
+        [
+          "intake",
+          "charter",
+          "planning",
+          "review",
+          "triage",
+          "implementation",
+          "validation",
+          "completion_audit",
+          "publication",
+          "complete",
+        ],
+      ],
+      [
+        "execution_state",
+        "enum",
+        [
+          "queued",
+          "running",
+          "waiting_gate",
+          "waiting_user",
+          "succeeded",
+          "failed",
+          "blocked",
+          "canceled",
+          "stale",
+          "unknown",
+        ],
+      ],
+      ["created", "timestamp"],
+      ["updated", "timestamp"],
+    ],
+    { field: "updated", direction: "DESC" },
+  ),
   aliases: collectionSchema([
     ["name", "string"],
     ["model", "string"],
@@ -811,6 +857,7 @@ function collectionSchema(
   fields: Array<
     [string, "string" | "enum" | "boolean" | "number" | "timestamp", string[]?]
   >,
+  defaultOrder?: { field: string; direction: "ASC" | "DESC" },
 ) {
   return {
     fields: fields.map(([name, type, suggestedValues]) => ({
@@ -819,13 +866,16 @@ function collectionSchema(
       operators:
         type === "string"
           ? ["=", "!=", "~", "!~", "IN", "NOT IN"]
-          : ["=", "!=", "IN", "NOT IN"],
+          : type === "enum" || type === "boolean"
+            ? ["=", "!=", "IN", "NOT IN"]
+            : ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"],
       sortable: true,
       ...(type === "boolean" ? { suggested_values: ["true", "false"] } : {}),
       ...(type === "enum"
         ? { suggested_values: suggestedValues ?? ["draft", "running"] }
         : {}),
     })),
+    ...(defaultOrder ? { default_order: [defaultOrder] } : {}),
   }
 }
 
@@ -2160,7 +2210,7 @@ function createRepositoryReviewMockState(): RepositoryReviewMockState {
   }
 }
 
-const developmentWorkspaceID = `devw_${"1".repeat(32)}`
+const developmentWorkspaceID = smokeDevelopmentWorkspaceID
 const developmentWorkspaceCharterID = `pcr_${"2".repeat(32)}`
 const developmentWorkspaceAggregate = {
   workspace: {
@@ -2329,6 +2379,37 @@ const developmentWorkspaceAggregate = {
   gates: [],
   publications: [],
   activity: [],
+}
+
+const developmentWorkspaceCollectionResponse = {
+  workspaces: [
+    {
+      id: developmentWorkspaceID,
+      intent: "pickup_pr",
+      source: "pull_request",
+      repository: "octo/repo",
+      title: "Pull request #42",
+      phase: "completion_audit",
+      execution_state: "waiting_user",
+      created: "2026-08-13T10:00:00Z",
+      updated: "2026-08-13T10:05:00Z",
+    },
+    {
+      id: `devw_${"8".repeat(32)}`,
+      intent: "implement_feature",
+      source: "issue",
+      repository: "octo/launcher",
+      title: "Issue #81",
+      phase: "implementation",
+      execution_state: "running",
+      created: "2026-08-12T09:00:00Z",
+      updated: "2026-08-13T09:45:00Z",
+    },
+  ],
+  total: 2,
+  next_cursor: "",
+  canonical_query: "ORDER BY updated DESC",
+  query_schema: mockCollectionSchemas.developmentWorkspaces,
 }
 
 const developmentNotificationID = `dnt_${"7".repeat(32)}`
@@ -5202,7 +5283,9 @@ async function mockLauncherApis(
           return json(route, currentAgentsResponse())
         case "/api/development-workspaces":
           return json(route, {
-            workspaces: [developmentWorkspaceAggregate.workspace],
+            ...developmentWorkspaceCollectionResponse,
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY updated DESC",
           })
         case "/api/development-workspaces/repositories":
           return json(route, {
@@ -6815,14 +6898,31 @@ test("development portfolio opens a durable workspace with inspection tabs", asy
   page,
 }) => {
   const errors = collectPageErrors(page)
-  await gotoMockedRoute(page, "/development")
-
-  await page
-    .getByRole("button", { name: /Pull request #42.*octo\/repo/ })
-    .click()
-  await expect(page).toHaveURL(
-    new RegExp(`/development/${developmentWorkspaceID}\\?tab=overview$`),
+  await gotoMockedRoute(
+    page,
+    "/development?filter=waiting&q=repository%20~%20octo&view=grid",
   )
+
+  await expect(page.locator('[data-slot="collection-shell"]')).toBeVisible()
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("repository ~ octo")
+  expect(new URL(page.url()).searchParams.get("filter")).toBeNull()
+  expect(new URL(page.url()).searchParams.get("view")).toBe("grid")
+
+  const workspace = page.locator(
+    `[data-item-id="${developmentWorkspaceID}"]:visible`,
+  )
+  await expect(workspace).toBeVisible()
+  await workspace.focus()
+  await page.keyboard.press("Enter")
+  await expect
+    .poll(() => new URL(page.url()).pathname)
+    .toBe(`/development/${developmentWorkspaceID}`)
+  let routed = new URL(page.url())
+  expect(routed.searchParams.get("q")).toBe("repository ~ octo")
+  expect(routed.searchParams.get("view")).toBe("grid")
+  expect(routed.searchParams.get("tab")).toBe("overview")
   await expect(page.getByRole("button", { name: "Overview" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -6831,6 +6931,11 @@ test("development portfolio opens a durable workspace with inspection tabs", asy
   await expect(page.getByRole("button", { name: "Files" })).toBeVisible()
   await expect(page.getByRole("button", { name: "Activity" })).toBeVisible()
   await expect(page.getByText("Tests", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "All development workspaces" }).click()
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/development")
+  routed = new URL(page.url())
+  expect(routed.searchParams.get("q")).toBe("repository ~ octo")
+  expect(routed.searchParams.get("view")).toBe("grid")
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
@@ -6853,7 +6958,7 @@ test("notification inbox opens the exact development action target", async ({
   await page.getByRole("button", { name: "Open required action" }).click()
   await expect(page).toHaveURL(
     new RegExp(
-      `/development/${developmentWorkspaceID}\\?tab=overview&panel=publication&entity=gate-1$`,
+      `/development/${developmentWorkspaceID}\\?tab=overview&panel=publication&entity=gate-1&q=ORDER\\+BY\\+updated\\+DESC$`,
     ),
   )
   await expectNoHorizontalOverflow(page)

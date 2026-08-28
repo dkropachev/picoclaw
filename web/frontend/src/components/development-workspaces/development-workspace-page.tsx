@@ -1,13 +1,10 @@
 import {
-  IconAlertTriangle,
-  IconArrowLeft,
   IconBrandGithub,
   IconCheck,
   IconCode,
   IconExternalLink,
   IconFileDiff,
   IconHistory,
-  IconLoader2,
   IconMessageCircle,
   IconRefresh,
 } from "@tabler/icons-react"
@@ -16,9 +13,11 @@ import { type ReactNode, useEffect, useState } from "react"
 
 import {
   type DevelopmentWorkspace,
+  DevelopmentWorkspaceAPIError,
   type DevelopmentWorkspacePhase,
   getDevelopmentWorkspace,
 } from "@/api/development-workspaces"
+import { CollectionDetailShell } from "@/components/collection"
 import { DevelopmentActionPanel } from "@/components/development-workspaces/development-action-panel"
 import { DevelopmentChat } from "@/components/development-workspaces/development-chat"
 import { DevelopmentCodeBrowser } from "@/components/development-workspaces/development-code-browser"
@@ -29,7 +28,6 @@ import {
   DevelopmentPhaseBadge,
   DevelopmentStateBadge,
 } from "@/components/development-workspaces/development-workspace-status"
-import { PageHeader } from "@/components/page-header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -80,64 +78,67 @@ export function DevelopmentWorkspacePage({
     queryKey: ["development-workspace", workspaceID],
     queryFn: ({ signal }) => getDevelopmentWorkspace(workspaceID, signal),
     refetchInterval: 3_000,
+    retry: false,
   })
+  const notFound =
+    query.error instanceof DevelopmentWorkspaceAPIError &&
+    query.error.status === 404
 
   return (
     <div
-      className="bg-background flex h-full min-h-0 flex-col"
+      className="h-full min-h-0"
       data-testid="development-workspace"
       aria-busy={query.isPending}
     >
-      <PageHeader title={query.data?.title ?? "Development workspace"}>
-        <Button
-          type="button"
-          size="icon"
-          variant="outline"
-          aria-label="Back to development"
-          title="Back to development"
-          onClick={onBack}
-        >
-          <IconArrowLeft />
-        </Button>
-        <Button
-          type="button"
-          size="icon"
-          variant="outline"
-          aria-label="Refresh workspace"
-          title="Refresh workspace"
-          disabled={query.isFetching}
-          onClick={() => void query.refetch()}
-        >
-          <IconRefresh className={cn(query.isFetching && "animate-spin")} />
-        </Button>
-      </PageHeader>
-
-      {query.isPending ? (
-        <div className="text-muted-foreground flex min-h-0 flex-1 items-center justify-center gap-2 text-sm">
-          <IconLoader2 className="size-4 animate-spin" /> Loading workspace…
-        </div>
-      ) : query.isError ? (
-        <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-          <div
-            role="alert"
-            className="border-destructive/40 bg-destructive/5 text-destructive flex max-w-lg items-center gap-2 rounded-lg border p-4 text-sm"
+      <CollectionDetailShell
+        title={query.data?.title ?? "Development workspace"}
+        identity={<span className="font-mono text-xs">{workspaceID}</span>}
+        status={
+          query.data ? (
+            <>
+              <DevelopmentPhaseBadge phase={query.data.phase} />
+              <DevelopmentStateBadge state={query.data.execution_state} />
+            </>
+          ) : undefined
+        }
+        actions={
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="outline"
+            aria-label="Refresh workspace"
+            title="Refresh workspace"
+            disabled={query.isFetching}
+            onClick={() => void query.refetch()}
           >
-            <IconAlertTriangle className="size-4 shrink-0" /> Development
-            workspace could not be loaded.
-          </div>
-        </div>
-      ) : (
-        <WorkspaceContent
-          workspace={query.data}
-          tab={tab}
-          selectedPath={selectedPath}
-          selectedRevision={selectedRevision}
-          attentionPanel={attentionPanel}
-          attentionEntityID={attentionEntityID}
-          onTabChange={onTabChange}
-          onPathChange={onPathChange}
-        />
-      )}
+            <IconRefresh className={cn(query.isFetching && "animate-spin")} />
+          </Button>
+        }
+        loading={query.isPending}
+        notFound={notFound}
+        error={
+          !notFound && query.isError
+            ? "Development workspace could not be loaded."
+            : undefined
+        }
+        onBack={onBack}
+        onRetry={() => void query.refetch()}
+        backLabel="All development workspaces"
+        contentClassName="h-full max-w-[100rem]"
+      >
+        {query.data && (
+          <WorkspaceContent
+            workspace={query.data}
+            tab={tab}
+            selectedPath={selectedPath}
+            selectedRevision={selectedRevision}
+            attentionPanel={attentionPanel}
+            attentionEntityID={attentionEntityID}
+            onTabChange={onTabChange}
+            onPathChange={onPathChange}
+          />
+        )}
+      </CollectionDetailShell>
     </div>
   )
 }
@@ -173,12 +174,10 @@ function WorkspaceContent({
   ]
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col px-4 pb-5 md:px-6">
+    <div className="flex h-full min-h-0 flex-1 flex-col pb-1">
       <div className="mx-auto flex min-h-0 w-full max-w-[100rem] flex-1 flex-col gap-3">
         <div className="flex flex-wrap items-center gap-1.5">
           <DevelopmentIntentBadge intent={workspace.intent} />
-          <DevelopmentPhaseBadge phase={workspace.phase} />
-          <DevelopmentStateBadge state={workspace.execution_state} />
           <span className="text-muted-foreground ml-1 truncate text-xs">
             {workspace.repository}
           </span>

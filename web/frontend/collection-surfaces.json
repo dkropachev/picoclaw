@@ -214,15 +214,19 @@
         "src/routes/development.tsx",
         "src/routes/development_.new.tsx",
         "src/routes/development_.$workspaceID.tsx",
-        "src/components/development-workspaces/**"
+        "src/api/development-workspaces.ts",
+        "src/components/development-workspaces/development-workspace-collection-route-state.ts",
+        "src/components/development-workspaces/development-portfolio-page.tsx",
+        "src/components/development-workspaces/development-intake-page.tsx",
+        "src/components/development-workspaces/development-workspace-page.tsx"
       ],
-      "capabilities": ["create", "detail"],
-      "views": ["list"],
-      "status": "legacy",
+      "capabilities": ["query", "pagination", "create", "detail"],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
       "routes": {
         "list": "/development",
         "new": "/development/new",
-        "detail": "/development/:workspaceID"
+        "detail": "/development/:id"
       }
     },
     {

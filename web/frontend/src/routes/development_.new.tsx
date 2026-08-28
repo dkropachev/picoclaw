@@ -1,6 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router"
 
 import { DevelopmentIntakePage } from "@/components/development-workspaces/development-intake-page"
+import {
+  developmentWorkspacesDefaultQuery,
+  normalizeDevelopmentWorkspacesSearch,
+} from "@/components/development-workspaces/development-workspace-collection-route-state"
+import type { CollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 function NewDevelopmentRoutePage() {
   const navigate = Route.useNavigate()
@@ -8,12 +13,17 @@ function NewDevelopmentRoutePage() {
   return (
     <DevelopmentIntakePage
       initialIssueURL={search.issue}
-      onBack={() => void navigate({ to: "/development" })}
+      onBack={() =>
+        void navigate({
+          to: "/development",
+          search: collectionSearch(search),
+        })
+      }
       onCreated={(workspaceID) =>
         void navigate({
           to: "/development/$workspaceID",
           params: { workspaceID },
-          search: { tab: "overview" },
+          search: { ...collectionSearch(search), tab: "overview" },
           replace: true,
         })
       }
@@ -27,9 +37,14 @@ export const Route = createFileRoute("/development_/new")({
 })
 
 export function normalizeNewDevelopmentSearch(raw: Record<string, unknown>): {
+  q?: string
+  view?: CollectionRouteSearch["view"]
   issue?: string
 } {
-  if (typeof raw.issue !== "string" || raw.issue.length > 4096) return {}
+  const collection = normalizeDevelopmentWorkspacesSearch(raw)
+  if (typeof raw.issue !== "string" || raw.issue.length > 4096) {
+    return collection
+  }
   const issue = raw.issue.trim()
   try {
     const parsed = new URL(issue)
@@ -39,10 +54,20 @@ export function normalizeNewDevelopmentSearch(raw: Record<string, unknown>): {
       parsed.password !== "" ||
       !/\/issues\/[1-9][0-9]*\/?$/.test(parsed.pathname)
     ) {
-      return {}
+      return collection
     }
-    return { issue }
+    return { ...collection, issue }
   } catch {
-    return {}
+    return collection
+  }
+}
+
+function collectionSearch(search: {
+  q?: string
+  view?: CollectionRouteSearch["view"]
+}): CollectionRouteSearch {
+  return {
+    q: search.q ?? developmentWorkspacesDefaultQuery,
+    ...(search.view ? { view: search.view } : {}),
   }
 }

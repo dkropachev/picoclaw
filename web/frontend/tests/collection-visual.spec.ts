@@ -13,6 +13,7 @@ const pilots = [
   { key: "accounts", route: "/accounts" },
   { key: "account-routers", route: "/accounts/routers" },
   { key: "event-sources", route: "/event-sources" },
+  { key: "development-workspaces", route: "/development" },
   {
     key: "development-repository-assignments",
     route: "/development/repositories",
@@ -58,6 +59,22 @@ for (const pilot of pilots) {
       )
     })
   }
+}
+
+for (const theme of ["light", "dark"] as const) {
+  test(`development-workspaces Grid is stable in ${theme} theme`, async ({
+    page,
+  }) => {
+    const errors = collectPageErrors(page)
+    await openCollection(page, "/development?view=grid", theme)
+    await expect(
+      page.getByRole("button", { name: "Grid view" }),
+    ).toHaveAttribute("aria-pressed", "true")
+    await assertVisualContract(page, errors)
+    await expect(page.locator("#main-content")).toHaveScreenshot(
+      `development-workspaces-grid-${theme}.png`,
+    )
+  })
 }
 
 for (const view of ["table", "grid"] as const) {

@@ -62,6 +62,9 @@ notification devices against the new runtime.
 
 - Open `/development` and create new work through exactly one intake mode:
   implement an issue or brief, or pick up one existing PR.
+- Recreate any bookmarked client-side portfolio filter as the canonical `q`
+  collection query. Unknown legacy filter parameters are removed; they are not
+  redirected or interpreted.
 - Verify repositories at `/development/repositories` before using brief intake.
 - Review strict/relaxed per-type scope policy at
   `/development/workflow-configurations`. Old `?config=` editor links are not

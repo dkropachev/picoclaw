@@ -5,9 +5,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/collectionquery"
 )
 
 const testPRWorkspaceID = "devw_11111111111111111111111111111111"
@@ -59,6 +62,92 @@ func TestPRWorkspaceRoutesProxyUnifiedContract(t *testing.T) {
 		capturedBody != `{"repository":"acme/widgets","pull_number":7}` ||
 		capturedTimeout != prWorkspaceAIWriteTimeout {
 		t.Fatalf("captured request = %#v, body=%q, timeout=%v", captured, capturedBody, capturedTimeout)
+	}
+}
+
+func TestPRWorkspaceCollectionProxyAllowsBoundedPercentEncodedQuery(t *testing.T) {
+	called := false
+	var capturedQuery string
+	installEventProxyStubs(t, func(request *http.Request, _ time.Duration) (*http.Response, error) {
+		called = true
+		capturedQuery = request.URL.RawQuery
+		return eventUpstreamResponse(http.StatusOK, `{"workspaces":[],"total":0}`), nil
+	})
+	handler := NewHandler(t.TempDir() + "/config.json")
+
+	query := `title ~ "` + strings.Repeat("é", 1800) + `"`
+	rawQuery := url.Values{"query": {query}, "limit": {"200"}}.Encode()
+	if len(query) > collectionquery.MaxQueryBytes || len(rawQuery) <= prWorkspaceMaxQueryBytes ||
+		len(rawQuery) > prWorkspaceMaxListQueryBytes {
+		t.Fatalf("test query bounds decoded=%d encoded=%d", len(query), len(rawQuery))
+	}
+	response := httptest.NewRecorder()
+	handler.handlePRWorkspaceProxy(response, httptest.NewRequest(
+		http.MethodGet,
+		"http://launcher.local"+prWorkspaceAPIPath+"?"+rawQuery,
+		nil,
+	))
+	if response.Code != http.StatusOK || !called || capturedQuery != rawQuery {
+		t.Fatalf(
+			"collection proxy status=%d called=%t query_match=%t body=%s",
+			response.Code,
+			called,
+			capturedQuery == rawQuery,
+			response.Body.String(),
+		)
+	}
+
+	for _, request := range []*http.Request{
+		httptest.NewRequest(
+			http.MethodGet,
+			"http://launcher.local"+prWorkspaceAPIPath+"?query="+
+				strings.Repeat("x", prWorkspaceMaxListQueryBytes),
+			nil,
+		),
+		httptest.NewRequest(
+			http.MethodGet,
+			"http://launcher.local"+prWorkspaceAPIPath+"/"+testPRWorkspaceID+"?query="+
+				strings.Repeat("x", prWorkspaceMaxQueryBytes),
+			nil,
+		),
+	} {
+		called = false
+		response = httptest.NewRecorder()
+		handler.handlePRWorkspaceProxy(response, request)
+		if response.Code != http.StatusBadRequest || called {
+			t.Fatalf("oversized query status=%d called=%t", response.Code, called)
+		}
+	}
+}
+
+func TestPRWorkspaceDirectQueryPassesThroughRuntimeRejection(t *testing.T) {
+	var capturedPath, capturedQuery string
+	installEventProxyStubs(t, func(request *http.Request, _ time.Duration) (*http.Response, error) {
+		capturedPath = request.URL.Path
+		capturedQuery = request.URL.RawQuery
+		return eventUpstreamResponse(
+			http.StatusBadRequest,
+			`{"code":"invalid_query","message":"invalid query"}`,
+		), nil
+	})
+	handler := NewHandler(t.TempDir() + "/config.json")
+	response := httptest.NewRecorder()
+	handler.handlePRWorkspaceProxy(response, httptest.NewRequest(
+		http.MethodGet,
+		"http://launcher.local"+prWorkspaceAPIPath+"/"+testPRWorkspaceID+"?anything=value",
+		nil,
+	))
+	if response.Code != http.StatusBadRequest ||
+		capturedPath != prWorkspaceRuntimePath+"/"+testPRWorkspaceID ||
+		capturedQuery != "anything=value" ||
+		!strings.Contains(response.Body.String(), `"code":"invalid_query"`) {
+		t.Fatalf(
+			"direct query status=%d path=%q query=%q body=%s",
+			response.Code,
+			capturedPath,
+			capturedQuery,
+			response.Body.String(),
+		)
 	}
 }
 

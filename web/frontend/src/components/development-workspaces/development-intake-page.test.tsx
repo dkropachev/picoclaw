@@ -109,6 +109,11 @@ describe("development intake", () => {
     const user = userEvent.setup()
     renderPage()
 
+    expect(
+      screen
+        .getByTestId("development-intake")
+        .querySelector('[data-slot="collection-detail-shell"]'),
+    ).toBeInTheDocument()
     expect(screen.queryByLabelText("GitHub issue URL")).not.toBeInTheDocument()
     expect(
       screen.queryByLabelText("GitHub pull request URL"),

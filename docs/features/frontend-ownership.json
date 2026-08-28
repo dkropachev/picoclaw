@@ -149,6 +149,7 @@
         "web/frontend/src/routes/event-sources*.tsx",
         "web/frontend/src/routes/events.tsx",
         "web/frontend/src/routes/-development.test.ts",
+        "web/frontend/src/routes/-development-collection-route.test.tsx",
         "web/frontend/src/routes/development.tsx",
         "web/frontend/src/routes/development_*.tsx",
         "web/frontend/src/routes/notifications.tsx",
