@@ -127,7 +127,9 @@ type RepositoryReviewAccountLimitSnapshot struct {
 }
 
 // RepositoryReviewAutomation is independent of a RepositoryState and may be
-// created before the first review plan, run, or finding exists.
+// created before the first review plan, run, or finding exists. ScopeSelection
+// is internal durable controller state, not user configuration, and must be
+// cleared together with ScopePlan.
 type RepositoryReviewAutomation struct {
 	SchemaVersion           int                                    `json:"schema_version"`
 	ID                      string                                 `json:"id"`
@@ -147,6 +149,7 @@ type RepositoryReviewAutomation struct {
 	ReviewFocus             string                                 `json:"review_focus"`
 	ScopePolicy             RepositoryReviewScopePolicy            `json:"scope_policy"`
 	ScopePlan               RepositoryReviewScopePlan              `json:"scope_plan"`
+	ScopeSelection          *RepositoryReviewScopeSelection        `json:"scope_selection,omitempty"`
 	ReviewerModels          []string                               `json:"reviewer_models"`
 	IssueWriterModel        string                                 `json:"issue_writer_model"`
 	CompareModels           bool                                   `json:"compare_models"`
@@ -667,6 +670,19 @@ func normalizeAutomation(automation *RepositoryReviewAutomation) error {
 	if err := normalizeRepositoryReviewScopePlan(&automation.ScopePlan); err != nil {
 		return err
 	}
+	if automation.ScopeSelection != nil {
+		selection := *automation.ScopeSelection
+		if err := normalizeRepositoryReviewScopeSelection(&selection); err != nil {
+			return err
+		}
+		automation.ScopeSelection = &selection
+		if repositoryReviewScopePlanEmpty(automation.ScopePlan) {
+			return fmt.Errorf(
+				"%w: frozen scope selection requires a commit-bound scope plan",
+				ErrInvalidAutomation,
+			)
+		}
+	}
 	if err := normalizeAccountSnapshots(automation); err != nil {
 		return err
 	}
@@ -1077,6 +1093,14 @@ func cloneAutomation(automation RepositoryReviewAutomation) RepositoryReviewAuto
 		[]string{}, automation.ScopePolicy.ExcludeFolders...,
 	)
 	automation.ScopePlan.Warnings = append([]string{}, automation.ScopePlan.Warnings...)
+	if automation.ScopeSelection != nil {
+		selection := *automation.ScopeSelection
+		selection.IncludePrefixes = append([]string{}, selection.IncludePrefixes...)
+		selection.ExcludePrefixes = append([]string{}, selection.ExcludePrefixes...)
+		selection.CandidateIDs = append([]string{}, selection.CandidateIDs...)
+		selection.HotpathCandidateIDs = append([]string{}, selection.HotpathCandidateIDs...)
+		automation.ScopeSelection = &selection
+	}
 	automation.RunIDs = append([]string{}, automation.RunIDs...)
 	if automation.ModelPrices != nil {
 		prices := make(map[string]RepositoryReviewModelPrice, len(automation.ModelPrices))

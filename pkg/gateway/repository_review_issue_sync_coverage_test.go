@@ -19,6 +19,18 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+func TestRepositoryReviewGatewayAutomationProjectionHidesInternalScopeState(t *testing.T) {
+	projected := projectRepositoryReviewGatewayAutomation(repoaudit.RepositoryReviewAutomation{
+		ModelCoverageSketches: map[string]string{"review": "internal"},
+		ScopeSelection: &repoaudit.RepositoryReviewScopeSelection{
+			IncludePrefixes: []string{"pkg"},
+		},
+	})
+	if projected.ModelCoverageSketches != nil || projected.ScopeSelection != nil {
+		t.Fatalf("gateway projection exposed internal state: %#v", projected)
+	}
+}
+
 type repositoryReviewIssueSyncMCPManager struct {
 	responses map[string]string
 }

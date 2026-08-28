@@ -10,6 +10,8 @@ import (
 const (
 	maxRepositoryReviewScopeFolders        = 64
 	maxRepositoryReviewScopePrefixBytes    = 1024
+	maxRepositoryReviewSelectionPrefixes   = 128
+	maxRepositoryReviewSelectionCandidates = 4096
 	maxRepositoryReviewScopeTextBytes      = 16 << 10
 	maxRepositoryReviewScopeSummaryBytes   = 4096
 	maxRepositoryReviewScopeRationaleBytes = 16 << 10
@@ -58,6 +60,16 @@ type RepositoryReviewScopePlan struct {
 	Rationale  string                          `json:"rationale,omitempty"`
 	Warnings   []string                        `json:"warnings"`
 	Counts     RepositoryReviewScopePlanCounts `json:"counts"`
+}
+
+// RepositoryReviewScopeSelection is the canonical AI selection frozen for one
+// commit-bound review campaign. Candidate IDs remain opaque and inventory-bound
+// while repository prefixes are normalized before becoming durable authority.
+type RepositoryReviewScopeSelection struct {
+	IncludePrefixes     []string `json:"include_prefixes"`
+	ExcludePrefixes     []string `json:"exclude_prefixes"`
+	CandidateIDs        []string `json:"candidate_ids"`
+	HotpathCandidateIDs []string `json:"hotpath_candidate_ids"`
 }
 
 func defaultRepositoryReviewScopeCodeTypes() []RepositoryReviewCodeType {
@@ -242,4 +254,139 @@ func validRepositoryReviewScopePlanCounts(counts RepositoryReviewScopePlanCounts
 		counts.ExcludedFiles <= counts.IncludeFiles &&
 		counts.SelectedFiles <= counts.IncludeFiles &&
 		counts.SelectedFiles+counts.ExcludedFiles <= counts.IncludeFiles
+}
+
+func normalizeRepositoryReviewScopeSelection(selection *RepositoryReviewScopeSelection) error {
+	if selection == nil {
+		return fmt.Errorf("%w: scope selection is required", ErrInvalidAutomation)
+	}
+	var err error
+	selection.IncludePrefixes, err = normalizeRepositoryReviewSelectionPrefixes(
+		selection.IncludePrefixes,
+		"include",
+	)
+	if err != nil {
+		return err
+	}
+	selection.ExcludePrefixes, err = normalizeRepositoryReviewSelectionPrefixes(
+		selection.ExcludePrefixes,
+		"exclude",
+	)
+	if err != nil {
+		return err
+	}
+	selection.CandidateIDs, err = normalizeRepositoryReviewSelectionCandidateIDs(
+		selection.CandidateIDs,
+		"candidate",
+	)
+	if err != nil {
+		return err
+	}
+	selection.HotpathCandidateIDs, err = normalizeRepositoryReviewSelectionCandidateIDs(
+		selection.HotpathCandidateIDs,
+		"hotpath candidate",
+	)
+	return err
+}
+
+// NormalizeRepositoryReviewScopeSelection validates and canonicalizes a
+// controller-owned frozen scope selection.
+func NormalizeRepositoryReviewScopeSelection(
+	selection RepositoryReviewScopeSelection,
+) (RepositoryReviewScopeSelection, error) {
+	if err := normalizeRepositoryReviewScopeSelection(&selection); err != nil {
+		return RepositoryReviewScopeSelection{}, err
+	}
+	return selection, nil
+}
+
+// NormalizeRepositoryReviewScopePlan validates and canonicalizes a
+// commit-bound scope plan. The empty plan remains the valid not-yet-planned
+// state used by legacy and idle automations.
+func NormalizeRepositoryReviewScopePlan(
+	plan RepositoryReviewScopePlan,
+) (RepositoryReviewScopePlan, error) {
+	if err := normalizeRepositoryReviewScopePlan(&plan); err != nil {
+		return RepositoryReviewScopePlan{}, err
+	}
+	return plan, nil
+}
+
+func normalizeRepositoryReviewSelectionPrefixes(prefixes []string, field string) ([]string, error) {
+	if len(prefixes) > maxRepositoryReviewSelectionPrefixes {
+		return nil, fmt.Errorf("%w: too many frozen %s prefixes", ErrInvalidAutomation, field)
+	}
+	normalized := make([]string, 0, len(prefixes))
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, raw := range prefixes {
+		prefix := strings.TrimSpace(raw)
+		prefix = strings.TrimRight(prefix, "/")
+		if prefix == "" {
+			prefix = "."
+		}
+		if !validRepositoryReviewSelectionPrefix(prefix) {
+			return nil, fmt.Errorf("%w: invalid frozen %s prefix", ErrInvalidAutomation, field)
+		}
+		if _, duplicate := seen[prefix]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate frozen %s prefix", ErrInvalidAutomation, field)
+		}
+		seen[prefix] = struct{}{}
+		normalized = append(normalized, prefix)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func validRepositoryReviewSelectionPrefix(prefix string) bool {
+	if !validBoundedText(prefix, maxRepositoryReviewScopePrefixBytes) ||
+		strings.Contains(prefix, `\`) || strings.HasPrefix(prefix, "/") ||
+		strings.HasPrefix(prefix, "./") || hasRepositoryReviewSelectionControl(prefix) {
+		return false
+	}
+	cleaned := path.Clean(prefix)
+	return cleaned == prefix && cleaned != ".." && !strings.HasPrefix(cleaned, "../")
+}
+
+func normalizeRepositoryReviewSelectionCandidateIDs(ids []string, field string) ([]string, error) {
+	if len(ids) > maxRepositoryReviewSelectionCandidates {
+		return nil, fmt.Errorf("%w: too many frozen %s IDs", ErrInvalidAutomation, field)
+	}
+	normalized := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if !validRepositoryReviewSelectionCandidateID(id) {
+			return nil, fmt.Errorf("%w: invalid frozen %s ID", ErrInvalidAutomation, field)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate frozen %s ID", ErrInvalidAutomation, field)
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func validRepositoryReviewSelectionCandidateID(id string) bool {
+	if len(id) != len("cand_")+64 || !strings.HasPrefix(id, "cand_") {
+		return false
+	}
+	for _, character := range id[len("cand_"):] {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func hasRepositoryReviewSelectionControl(value string) bool {
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return true
+		}
+	}
+	return false
 }

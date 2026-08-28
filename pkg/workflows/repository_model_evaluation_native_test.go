@@ -1617,6 +1617,235 @@ func TestNativeRepositoryEvaluationFilterEnforcesHotpathPromotionAndHardTypes(t 
 	if counts["selected_files"].(int) != len(paths) || plan["policy_hash"] == "" || plan["hash"] == "" {
 		t.Fatalf("scope plan = %#v", plan)
 	}
+	selection := output["scopeSelection"].(map[string]any)
+	frozen, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates":       catalog["candidates"],
+		"hard_scope":       map[string]any{"codeTypes": []any{"hotpath-code"}},
+		"commit":           fixture.commit,
+		"scope_planned":    true,
+		"frozen_selection": selection,
+		"frozen_plan":      plan,
+		"planner": map[string]any{
+			"includePrefixes": []any{"other"}, "excludePrefixes": []any{},
+			"hotpathCandidateIds": []any{}, "candidateIds": []any{},
+			"rationale": "This new proposal must be ignored.", "warnings": []any{},
+		},
+	})
+	if err != nil || !reflect.DeepEqual(frozen["selectedPaths"], output["selectedPaths"]) ||
+		!reflect.DeepEqual(frozen["scopeSelection"], selection) ||
+		!reflect.DeepEqual(frozen["scopePlan"], plan) {
+		t.Fatalf("frozen scope = %#v err=%v, want original %#v", frozen, err, output)
+	}
+	invalidFrozenSelection := cloneMap(selection)
+	invalidFrozenSelection["extra"] = true
+	invalidFrozenPlan := cloneMap(plan)
+	invalidFrozenPlan["extra"] = true
+	changedFrozenPlan := cloneMap(plan)
+	changedFrozenPlan["hash"] = strings.Repeat("d", 64)
+	for _, test := range []struct {
+		name      string
+		commit    string
+		selection map[string]any
+		plan      map[string]any
+		want      string
+	}{
+		{
+			name: "invalid selection in filter", commit: fixture.commit,
+			selection: invalidFrozenSelection, plan: plan, want: "selection",
+		},
+		{name: "invalid plan in filter", commit: fixture.commit, selection: selection, plan: invalidFrozenPlan, want: "plan"},
+		{name: "invalid frozen commit", commit: "not-a-commit", selection: selection, plan: plan, want: "exact commit"},
+		{
+			name: "different frozen commit", commit: strings.Repeat("f", 40),
+			selection: selection, plan: plan, want: "candidates",
+		},
+		{
+			name: "changed frozen plan", commit: fixture.commit,
+			selection: selection, plan: changedFrozenPlan, want: "does not match",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, filterErr := nativeRepositoryEvaluationFilter(map[string]any{
+				"candidates": catalog["candidates"], "hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+				"commit": test.commit, "scope_planned": true,
+				"frozen_selection": test.selection, "frozen_plan": test.plan,
+			})
+			if filterErr == nil || !strings.Contains(filterErr.Error(), test.want) {
+				t.Fatalf("frozen filter error=%v, want %q", filterErr, test.want)
+			}
+		})
+	}
+	var catalogCandidates []reposcope.Candidate
+	if decodeErr := nativeRepositoryEvaluationDecode(catalog["candidates"], &catalogCandidates); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	foreign, _, err := reposcope.BuildCandidates(reposcope.Inventory{
+		CommitID: fixture.commit, ID: strings.Repeat("e", 64),
+		Files: []reposcope.FileMetadata{{
+			Path: "foreign/extra.go", BlobID: strings.Repeat("d", 40), Size: 10,
+			Kind: reposcope.FileKindRegular,
+		}},
+	}, reposcope.Scope{CodeTypes: []reposcope.CodeType{reposcope.CodeTypeCode}}, reposcope.BuildOptions{})
+	if err != nil || len(foreign) != 1 {
+		t.Fatalf("foreign candidate=%#v err=%v", foreign, err)
+	}
+	mixedInventory := append(append([]reposcope.Candidate(nil), catalogCandidates...), foreign[0])
+	if _, filterErr := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": mixedInventory, "hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+		"commit": fixture.commit, "scope_planned": true,
+		"frozen_selection": selection, "frozen_plan": plan,
+	}); filterErr == nil || !strings.Contains(filterErr.Error(), "one inventory") {
+		t.Fatalf("mixed frozen inventory error=%v", filterErr)
+	}
+	if _, filterErr := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit, "scope_planned": true, "frozen_selection": selection,
+	}); filterErr == nil || !strings.Contains(filterErr.Error(), "both selection and plan") {
+		t.Fatalf("unpaired frozen scope error = %v", filterErr)
+	}
+	if _, filterErr := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+		"commit": fixture.commit, "frozen_selection": map[string]any{}, "frozen_plan": map[string]any{},
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"hotpathCandidateIds": []any{promoted}, "candidateIds": []any{},
+			"rationale": "Promote the service runtime path.", "warnings": []any{},
+		},
+	}); filterErr != nil {
+		t.Fatalf("empty frozen defaults blocked initial planning: %v", filterErr)
+	}
+	emptyRationale, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+		"commit": fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"hotpathCandidateIds": []any{promoted}, "candidateIds": []any{},
+			"rationale": "", "warnings": []any{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyPlan := cloneMap(emptyRationale["scopePlan"].(map[string]any))
+	delete(emptyPlan, "rationale") // Matches omitempty persistence in RepositoryReviewScopePlan.
+	if _, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+		"commit": fixture.commit, "scope_planned": true,
+		"frozen_selection": emptyRationale["scopeSelection"],
+		"frozen_plan":      emptyPlan,
+	}); err != nil {
+		t.Fatalf("omitted empty frozen rationale was rejected: %v", err)
+	}
+	if _, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit, "scope_planned": true,
+		"frozen_selection": map[string]any{}, "frozen_plan": map[string]any{},
+	}); err == nil || !strings.Contains(err.Error(), "planned flag") {
+		t.Fatalf("mismatched planned flag error=%v", err)
+	}
+	missingSelectionField := cloneMap(selection)
+	delete(missingSelectionField, "candidate_ids")
+	extraSelectionField := cloneMap(selection)
+	extraSelectionField["extra"] = true
+	invalidSelectionArray := cloneMap(selection)
+	invalidSelectionArray["candidate_ids"] = "invalid"
+	noncanonicalSelection := cloneMap(selection)
+	noncanonicalSelection["include_prefixes"] = []any{" pkg/ "}
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{name: "nil selection", value: nil},
+		{name: "missing selection field", value: missingSelectionField},
+		{name: "extra selection field", value: extraSelectionField},
+		{name: "invalid selection array", value: invalidSelectionArray},
+		{name: "noncanonical selection", value: noncanonicalSelection},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := nativeRepositoryEvaluationParseScopeSelection(test.value); err == nil {
+				t.Fatal("invalid frozen selection was accepted")
+			}
+		})
+	}
+	missingPlanField := cloneMap(plan)
+	delete(missingPlanField, "hash")
+	extraPlanField := cloneMap(plan)
+	extraPlanField["extra"] = true
+	invalidCounts := cloneMap(plan)
+	invalidCounts["counts"] = "invalid"
+	malformedPlan := cloneMap(plan)
+	malformedPlan["warnings"] = "invalid"
+	noncanonicalPlan := cloneMap(plan)
+	noncanonicalPlan["summary"] = " " + plan["summary"].(string)
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{name: "nil plan", value: nil},
+		{name: "missing plan field", value: missingPlanField},
+		{name: "extra plan field", value: extraPlanField},
+		{name: "invalid plan counts", value: invalidCounts},
+		{name: "malformed plan", value: malformedPlan},
+		{name: "noncanonical plan", value: noncanonicalPlan},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := nativeRepositoryEvaluationParseScopePlan(test.value); err == nil {
+				t.Fatal("invalid frozen plan was accepted")
+			}
+		})
+	}
+	if nativeRepositoryEvaluationStringsEqual([]string{"a"}, nil) ||
+		nativeRepositoryEvaluationStringsEqual([]string{"a"}, []string{"b"}) {
+		t.Fatal("different frozen strings compared equal")
+	}
+	if _, err := nativeRepositoryEvaluationPlannerWarnings(map[string]any{
+		"warnings": "invalid",
+	}); err == nil {
+		t.Fatal("malformed planner warnings were accepted")
+	}
+	tooManyWarnings := make([]any, repositoryEvaluationScopeWarnings+1)
+	for index := range tooManyWarnings {
+		tooManyWarnings[index] = fmt.Sprintf("warning-%d", index)
+	}
+	tooManyCandidateIDs := make([]any, repositoryEvaluationAICandidateLimit+1)
+	for index := range tooManyCandidateIDs {
+		tooManyCandidateIDs[index] = promoted
+	}
+	if _, err := nativeRepositoryEvaluationFilter(map[string]any{
+		"candidates": catalog["candidates"], "hard_scope": map[string]any{},
+		"commit": fixture.commit,
+		"planner": map[string]any{
+			"includePrefixes": []any{}, "excludePrefixes": []any{},
+			"candidateIds": tooManyCandidateIDs, "hotpathCandidateIds": []any{},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("oversized planner candidate set error=%v", err)
+	}
+	for _, test := range []struct {
+		name     string
+		warnings []any
+		want     string
+	}{
+		{name: "too many warnings", warnings: tooManyWarnings, want: "too many"},
+		{name: "empty warning", warnings: []any{" "}, want: "invalid warning"},
+		{name: "duplicate warning", warnings: []any{"same", " same "}, want: "duplicate"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := nativeRepositoryEvaluationFilter(map[string]any{
+				"candidates": catalog["candidates"],
+				"hard_scope": map[string]any{"codeTypes": []any{"hotpath-code"}},
+				"commit":     fixture.commit,
+				"planner": map[string]any{
+					"includePrefixes": []any{}, "excludePrefixes": []any{},
+					"hotpathCandidateIds": []any{promoted}, "candidateIds": []any{},
+					"rationale": "bounded", "warnings": test.warnings,
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("warning validation error=%v, want %q", err, test.want)
+			}
+		})
+	}
 
 	for _, test := range []struct {
 		name    string

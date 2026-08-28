@@ -715,6 +715,8 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 				candidate.Usage = repoaudit.RepositoryReviewTokenUsage{}
 				candidate.EstimatedCostUSD = 0
 				if restart {
+					candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+					candidate.ScopeSelection = nil
 					candidate.Progress = repoaudit.RepositoryReviewProgress{}
 					candidate.ModelStats = make(map[string]repoaudit.RepositoryReviewModelStats)
 					candidate.ModelCoverageSketches = make(map[string]string)
@@ -756,6 +758,7 @@ func (c *repositoryReviewController) startAutomationAtCommit(
 		func(candidate *repoaudit.RepositoryReviewAutomation) error {
 			if candidate.ResolvedCommitSHA != resolvedCommit {
 				candidate.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+				candidate.ScopeSelection = nil
 			}
 			candidate.ResolvedCommitSHA = resolvedCommit
 			candidate.ResolvedTargetBranch = resolvedTargetBranch
@@ -998,6 +1001,7 @@ func resetRepositoryReviewExecutionCampaign(automation *repoaudit.RepositoryRevi
 		return
 	}
 	automation.ScopePlan = repoaudit.RepositoryReviewScopePlan{}
+	automation.ScopeSelection = nil
 	automation.ResolvedCommitSHA = ""
 	automation.ResolvedTargetBranch = ""
 	automation.AdvertisedDefaultBranch = ""
@@ -1211,9 +1215,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 	}
 	if c.runBatch != nil {
 		result, runErr := c.runBatch(runCtx, automation, runID, observeUsage)
-		if commitErr := repositoryReviewValidateExecutionCommit(automation, result); commitErr != nil {
-			runErr = errors.Join(runErr, commitErr)
-		}
+		runErr = repositoryReviewJoinCommitError(automation, result, runErr)
 		checkpointed := runErr == nil && result != nil && result.Status == workflows.RunStatusSucceeded
 		c.finishAutomationRun(id, runID, result, runErr, checkpointed)
 		return
@@ -1238,6 +1240,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		func() error { return c.admitProviderCall(id, runID) },
 	)
 	executor.ManagedChildActivityObserver = c.repositoryReviewManagedChildObserver(id, runID)
+	executor.StepActivityObserver = c.repositoryReviewStepObserver(id, runID, store, workflowStore)
 
 	monitorDone := make(chan struct{})
 	go func() {
@@ -1245,6 +1248,7 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 		c.monitorWorkflowProgress(runCtx, store, workflowStore, id, runID)
 	}()
 	scopePolicyJSON, _ := json.Marshal(automation.ScopePolicy)
+	scopePlanned, scopeSelectionInput, scopePlanInput := repositoryReviewWorkflowScopeInputs(automation)
 	result, runErr := executor.Run(runCtx, workflows.RunRequest{
 		RunID:       runID,
 		Workflow:    workflow,
@@ -1261,6 +1265,9 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 			"review_models":             strings.Join(repositoryReviewExecutionModels(automation), ","),
 			"planner_model":             repositoryReviewPlannerModel(automation),
 			"scope_policy":              string(scopePolicyJSON),
+			"scope_planned":             scopePlanned,
+			"scope_selection":           scopeSelectionInput,
+			"scope_plan":                scopePlanInput,
 			"force":                     automation.Force,
 			"max_content_bytes":         automation.MaxContentBytes,
 			"max_files_per_run":         automation.MaxFilesPerRun,
@@ -1268,9 +1275,10 @@ func (c *repositoryReviewController) executeAutomation(id, runID string) {
 			"estimated_output_tokens":   automation.EstimatedOutputTokens,
 		},
 	})
-	runErr = repositoryReviewJoinCommitError(automation, result, runErr)
+	runErr = errors.Join(runErr, repositoryReviewValidateExecutionCommit(automation, result))
 	checkpointed := false
 	if persisted, persistedErr := workflowStore.GetRun(context.Background(), runID); persistedErr == nil {
+		runErr = errors.Join(runErr, repositoryReviewValidatePersistedScope(automation, persisted))
 		c.recordManagedChildOutcomes(id, runID, persisted, priceIndex)
 		checkpointed = runErr == nil && repositoryReviewRunCheckpointed(persisted, result)
 	}
@@ -1283,12 +1291,196 @@ func repositoryReviewEffectiveWorkflowTimeout(configured time.Duration) time.Dur
 	return max(configured, repositoryReviewWorkflowMinTimeout)
 }
 
+func repositoryReviewWorkflowObject(value any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{}
+	}
+	var object map[string]any
+	if json.Unmarshal(encoded, &object) != nil || object == nil {
+		return map[string]any{}
+	}
+	return object
+}
+
+func repositoryReviewWorkflowScopeInputs(
+	automation repoaudit.RepositoryReviewAutomation,
+) (bool, map[string]any, map[string]any) {
+	if automation.ScopeSelection == nil {
+		return false, map[string]any{}, map[string]any{}
+	}
+	return true,
+		repositoryReviewWorkflowObject(automation.ScopeSelection),
+		repositoryReviewWorkflowObject(automation.ScopePlan)
+}
+
 func repositoryReviewJoinCommitError(
 	automation repoaudit.RepositoryReviewAutomation,
 	result *workflows.RunResult,
 	runErr error,
 ) error {
-	return errors.Join(runErr, repositoryReviewValidateExecutionCommit(automation, result))
+	return errors.Join(
+		runErr,
+		repositoryReviewValidateExecutionCommit(automation, result),
+		repositoryReviewValidateExecutionScope(automation, result),
+	)
+}
+
+func repositoryReviewValidateExecutionScope(
+	automation repoaudit.RepositoryReviewAutomation,
+	result *workflows.RunResult,
+) error {
+	if automation.ScopeSelection == nil {
+		return nil
+	}
+	if result == nil || result.Outputs == nil {
+		return errors.New("repository review omitted its frozen scope result")
+	}
+	return repositoryReviewValidateScopeOutputs(automation, result.Outputs)
+}
+
+func repositoryReviewValidatePersistedScope(
+	automation repoaudit.RepositoryReviewAutomation,
+	run *workflows.Run,
+) error {
+	if automation.ScopeSelection == nil {
+		return nil
+	}
+	scope := repositoryReviewRunStep(run, "scope")
+	if scope.Status != workflows.RunStatusSucceeded || strings.TrimSpace(scope.Error) != "" {
+		return errors.New("repository review omitted its frozen scope result")
+	}
+	return repositoryReviewValidateScopeOutputs(automation, scope.Outputs)
+}
+
+func repositoryReviewValidateScopeOutputs(
+	automation repoaudit.RepositoryReviewAutomation,
+	outputs map[string]any,
+) error {
+	rawSelection, selectionFound := repositoryReviewOutputValue(
+		outputs, "scopeSelection", "scope_selection",
+	)
+	rawPlan, planFound := repositoryReviewOutputValue(outputs, "scopePlan", "scope_plan")
+	if !selectionFound || !planFound {
+		return errors.New("repository review omitted its frozen scope result")
+	}
+	var selection repoaudit.RepositoryReviewScopeSelection
+	var plan repoaudit.RepositoryReviewScopePlan
+	if !repositoryReviewDecodeValue(rawSelection, &selection) ||
+		!repositoryReviewDecodeValue(rawPlan, &plan) {
+		return errors.New("repository review returned an invalid frozen scope result")
+	}
+	if !repositoryReviewScopeSelectionsEqual(selection, *automation.ScopeSelection) ||
+		!repositoryReviewScopePlansEqual(plan, automation.ScopePlan) {
+		return errors.New("repository review changed its frozen campaign scope")
+	}
+	return nil
+}
+
+func (c *repositoryReviewController) repositoryReviewStepObserver(
+	id string,
+	runID string,
+	store repoaudit.Store,
+	workflowStore *workflows.FileRunStore,
+) workflows.StepActivityObserver {
+	return func(event workflows.StepActivityEvent) error {
+		if event.RunID != runID || event.StepID != "scope_files" {
+			return nil
+		}
+		if workflowStore == nil {
+			return errors.New("repository review workflow store is unavailable")
+		}
+		run, err := workflowStore.GetRun(context.Background(), runID)
+		if err != nil {
+			return fmt.Errorf("load repository review frozen scope: %w", err)
+		}
+		return c.persistRepositoryReviewFrozenScope(store, id, runID, run)
+	}
+}
+
+func (c *repositoryReviewController) persistRepositoryReviewFrozenScope(
+	store repoaudit.Store,
+	id string,
+	runID string,
+	run *workflows.Run,
+) error {
+	scope := repositoryReviewRunStep(run, "scope")
+	if scope.Status != workflows.RunStatusSucceeded || strings.TrimSpace(scope.Error) != "" {
+		return errors.New("repository review scope was not durably validated")
+	}
+	rawSelection, selectionFound := repositoryReviewOutputValue(
+		scope.Outputs, "scopeSelection", "scope_selection",
+	)
+	rawPlan, planFound := repositoryReviewOutputValue(scope.Outputs, "scopePlan", "scope_plan")
+	var selection repoaudit.RepositoryReviewScopeSelection
+	var plan repoaudit.RepositoryReviewScopePlan
+	if !selectionFound || !planFound ||
+		!repositoryReviewDecodeValue(rawSelection, &selection) ||
+		!repositoryReviewDecodeValue(rawPlan, &plan) {
+		return errors.New("repository review scope step omitted its durable selection")
+	}
+	_, err := c.updateLatest(
+		context.Background(),
+		store,
+		id,
+		func(candidate *repoaudit.RepositoryReviewAutomation) error {
+			if candidate.ActiveRunID != runID {
+				return errRepositoryReviewSafeStop
+			}
+			if candidate.ScopeSelection != nil {
+				if !repositoryReviewScopeSelectionsEqual(*candidate.ScopeSelection, selection) ||
+					!repositoryReviewScopePlansEqual(candidate.ScopePlan, plan) {
+					return errors.New("repository review changed its frozen campaign scope")
+				}
+				return nil
+			}
+			if remembered := repositoryReviewRememberedCommit(*candidate); remembered != "" &&
+				plan.CommitSHA != remembered {
+				return errors.New("repository review scope plan does not match its admitted commit")
+			}
+			candidate.ScopeSelection = &selection
+			candidate.ScopePlan = plan
+			return nil
+		},
+	)
+	return err
+}
+
+func repositoryReviewScopeSelectionsEqual(
+	left repoaudit.RepositoryReviewScopeSelection,
+	right repoaudit.RepositoryReviewScopeSelection,
+) bool {
+	return slices.Equal(left.IncludePrefixes, right.IncludePrefixes) &&
+		slices.Equal(left.ExcludePrefixes, right.ExcludePrefixes) &&
+		slices.Equal(left.CandidateIDs, right.CandidateIDs) &&
+		slices.Equal(left.HotpathCandidateIDs, right.HotpathCandidateIDs)
+}
+
+func repositoryReviewScopePlansEqual(
+	left repoaudit.RepositoryReviewScopePlan,
+	right repoaudit.RepositoryReviewScopePlan,
+) bool {
+	return left.CommitSHA == right.CommitSHA && left.PolicyHash == right.PolicyHash &&
+		left.Hash == right.Hash && left.Summary == right.Summary &&
+		left.Rationale == right.Rationale && left.Counts == right.Counts &&
+		slices.Equal(left.Warnings, right.Warnings)
+}
+
+func repositoryReviewOutputValue(outputs map[string]any, names ...string) (any, bool) {
+	for _, name := range names {
+		if value, exists := outputs[name]; exists && value != nil {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func repositoryReviewDecodeValue(value any, destination any) bool {
+	encoded, err := json.Marshal(value)
+	return err == nil && json.Unmarshal(encoded, destination) == nil
 }
 
 func (c *repositoryReviewController) repositoryReviewManagedChildObserver(
@@ -2182,12 +2374,19 @@ func applyRepositoryReviewRunProgress(
 	if automation == nil || result == nil {
 		return
 	}
-	if rawPlan, exists := result.Outputs["scopePlan"]; exists && rawPlan != nil {
-		if encoded, err := json.Marshal(rawPlan); err == nil {
-			var scopePlan repoaudit.RepositoryReviewScopePlan
-			if json.Unmarshal(encoded, &scopePlan) == nil {
-				automation.ScopePlan = scopePlan
-			}
+	if automation.ScopeSelection == nil {
+		rawPlan, planFound := repositoryReviewOutputValue(result.Outputs, "scopePlan", "scope_plan")
+		rawSelection, selectionFound := repositoryReviewOutputValue(
+			result.Outputs, "scopeSelection", "scope_selection",
+		)
+		var scopePlan repoaudit.RepositoryReviewScopePlan
+		var scopeSelection repoaudit.RepositoryReviewScopeSelection
+		if planFound && selectionFound &&
+			repositoryReviewDecodeValue(rawPlan, &scopePlan) &&
+			repositoryReviewDecodeValue(rawSelection, &scopeSelection) &&
+			scopePlan.CommitSHA != "" && scopePlan.Hash != "" {
+			automation.ScopePlan = scopePlan
+			automation.ScopeSelection = &scopeSelection
 		}
 	}
 	remaining := repositoryReviewInt(result.Outputs["remainingFiles"])

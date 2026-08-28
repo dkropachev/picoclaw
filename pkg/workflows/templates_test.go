@@ -3,6 +3,7 @@ package workflows
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,44 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestWorkflowTemplateDefaultAndCanceledBoundaries(t *testing.T) {
+	template, found := findBuiltInWorkflowTemplate("")
+	if !found || template.name != CodeReviewWorkflowName {
+		t.Fatalf("default built-in template=%#v found=%v", template, found)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := installWorkflowTemplate(
+		ctx, t.TempDir(), "test", "workflows/test.yml", CodeReviewWorkflowYAML, false,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled template install error=%v", err)
+	}
+	if _, err := installWorkflowTemplateLocked(
+		ctx, t.TempDir(), "test", "workflows/test.yml", CodeReviewWorkflowYAML, false,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled locked template install error=%v", err)
+	}
+	blockedWorkspace := filepath.Join(t.TempDir(), "workspace-file")
+	if err := os.WriteFile(blockedWorkspace, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installWorkflowTemplate(
+		t.Context(), blockedWorkspace, "test", "workflows/test.yml", CodeReviewWorkflowYAML, false,
+	); err == nil {
+		t.Fatal("blocked workflow mutation lock was accepted")
+	}
+	if _, err := installWorkflowTemplateLocked(
+		t.Context(), t.TempDir(), "test", "workflows/test.yml", "not a workflow", false,
+	); err == nil {
+		t.Fatal("invalid workflow template was accepted")
+	}
+	if _, err := installWorkflowTemplateLocked(
+		t.Context(), t.TempDir(), "test", "../escape.yml", CodeReviewWorkflowYAML, false,
+	); err == nil {
+		t.Fatal("escaping workflow template ref was accepted")
+	}
+}
 
 func TestInstallCodeReviewWorkflowWritesValidLocalDefinition(t *testing.T) {
 	testInstallWorkflowTemplate(t, CodeReviewWorkflowRef, InstallCodeReviewWorkflow)
@@ -41,7 +80,8 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 		}
 	}
 	planner := byID["plan_scope"]
-	if planner.With["tools"] != "none" || planner.With["session"] != "ephemeral" ||
+	if planner.If != "${{ inputs.scope_planned != true }}" ||
+		planner.With["tools"] != "none" || planner.With["session"] != "ephemeral" ||
 		planner.With["account"] != "${{ inputs.account_ref }}" ||
 		planner.With["model"] != "${{ inputs.planner_model }}" ||
 		planner.With["scope_content"] != "metadata" ||
@@ -50,8 +90,33 @@ func TestRepositoryBugFinderWorkflowBindsIncrementalEnsembleReview(t *testing.T)
 	}
 	scope := byID["scope"]
 	if scope.Uses != "function/evaluation.corpus" || scope.With["action"] != "filter" ||
-		scope.With["hard_scope"] != "${{ inputs.scope_policy }}" {
+		scope.With["hard_scope"] != "${{ inputs.scope_policy }}" ||
+		scope.With["scope_planned"] != "${{ inputs.scope_planned }}" ||
+		scope.With["frozen_selection"] != "${{ inputs.scope_selection }}" ||
+		scope.With["frozen_plan"] != "${{ inputs.scope_plan }}" {
 		t.Fatalf("scope enforcement=%#v", scope)
+	}
+	call := workflow.On.WorkflowCall
+	if call == nil || call.Inputs["scope_planned"].Type != "boolean" ||
+		call.Inputs["scope_planned"].Default != false ||
+		call.Inputs["scope_selection"].Type != "object" ||
+		call.Inputs["scope_plan"].Type != "object" {
+		t.Fatalf("frozen scope inputs=%#v", call)
+	}
+	if selection := call.Inputs["scope_selection"].Default; !reflect.DeepEqual(selection, map[string]any{}) {
+		t.Fatalf("scope_selection default=%#v", selection)
+	}
+	if plan := call.Inputs["scope_plan"].Default; !reflect.DeepEqual(plan, map[string]any{}) {
+		t.Fatalf("scope_plan default=%#v", plan)
+	}
+	if job.Outputs["scopeSelection"] != "${{ steps.scope.outputs.scopeSelection }}" ||
+		call.Outputs["scopeSelection"].Value != "${{ jobs.find_bugs.outputs.scopeSelection }}" {
+		t.Fatalf("scope selection outputs job=%#v workflow=%#v", job.Outputs, call.Outputs)
+	}
+	scopeFiles := byID["scope_files"]
+	filter := nativeMapValue(scopeFiles.With["filter"])
+	if filter["rationale"] != "${{ steps.scope.outputs.scopePlan.rationale }}" {
+		t.Fatalf("scope file filter=%#v", filter)
 	}
 	if plan.Uses != "function/review.repository" || plan.With["action"] != "plan" || plan.With["profile"] == nil {
 		t.Fatalf("plan=%#v", plan)

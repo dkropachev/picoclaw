@@ -62,12 +62,18 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 	}
 
 	request.RunID = ""
+	request.Inputs["scope_planned"] = true
+	request.Inputs["scope_selection"] = first.Outputs["scopeSelection"]
+	request.Inputs["scope_plan"] = first.Outputs["scopePlan"]
 	second, err := executor.Run(context.Background(), request)
 	if err != nil || second.Status != RunStatusSucceeded {
-		t.Fatalf("second run status=%q err=%v", second.Status, err)
+		t.Fatalf(
+			"second run status=%q err=%v selection=%#v plan=%#v",
+			second.Status, err, request.Inputs["scope_selection"], request.Inputs["scope_plan"],
+		)
 	}
-	if agentRunner.calls != 3 {
-		t.Fatalf("unchanged second run calls=%d, want one additional scope preflight", agentRunner.calls)
+	if agentRunner.calls != 2 {
+		t.Fatalf("unchanged second run calls=%d, want frozen scope without another planner", agentRunner.calls)
 	}
 	if second.Outputs["summary"] != "No changed reviewable files required model review." ||
 		second.Outputs["remainingFiles"] != 0 {

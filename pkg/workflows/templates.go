@@ -130,6 +130,15 @@ on:
       scope_policy:
         type: string
         default: "{}"
+      scope_planned:
+        type: boolean
+        default: false
+      scope_selection:
+        type: object
+        default: {}
+      scope_plan:
+        type: object
+        default: {}
       force:
         type: boolean
         default: false
@@ -162,6 +171,8 @@ on:
         value: ${{ jobs.find_bugs.outputs.commit }}
       scopePlan:
         value: ${{ jobs.find_bugs.outputs.scopePlan }}
+      scopeSelection:
+        value: ${{ jobs.find_bugs.outputs.scopeSelection }}
 jobs:
   find_bugs:
     name: Incremental repository bug review
@@ -175,6 +186,7 @@ jobs:
       remainingFiles: ${{ steps.result.outputs.run.remaining_files }}
       commit: ${{ steps.inventory.outputs.commit }}
       scopePlan: ${{ steps.scope.outputs.scopePlan }}
+      scopeSelection: ${{ steps.scope.outputs.scopeSelection }}
     steps:
       - id: checkout
         name: Acquire repository snapshot
@@ -208,6 +220,7 @@ jobs:
           action: release
       - id: plan_scope
         name: Ask AI to plan the target code scope
+        if: ${{ inputs.scope_planned != true }}
         uses: agent/main
         with:
           account: ${{ inputs.account_ref }}
@@ -258,7 +271,7 @@ jobs:
                 rationale: {type: string, maxLength: 8192}
                 warnings:
                   type: array
-                  maxItems: 128
+                  maxItems: 32
                   items: {type: string, maxLength: 2048}
       - id: scope_checkout
         name: Reacquire the exact commit for native scope enforcement
@@ -292,6 +305,9 @@ jobs:
           action: filter
           candidates: ${{ steps.full_scope_catalog.outputs.candidates }}
           planner: ${{ steps.plan_scope.outputs.structured }}
+          scope_planned: ${{ inputs.scope_planned }}
+          frozen_selection: ${{ inputs.scope_selection }}
+          frozen_plan: ${{ inputs.scope_plan }}
           hard_scope: ${{ inputs.scope_policy }}
           commit: ${{ steps.inventory.outputs.commit }}
       - id: scope_files
@@ -305,7 +321,7 @@ jobs:
           target: all
           filter:
             selectedPaths: ${{ steps.scope.outputs.selectedPaths }}
-            rationale: ${{ steps.plan_scope.outputs.structured.rationale }}
+            rationale: ${{ steps.scope.outputs.scopePlan.rationale }}
       - id: plan
         name: Skip blobs reviewed under the same review profile
         uses: function/review.repository
