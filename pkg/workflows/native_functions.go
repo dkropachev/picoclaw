@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/url"
 	"os"
 	osexec "os/exec"
@@ -246,9 +247,25 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
-		profileHash, err := nativeStableHash(firstNonNil(args["profile"], "repository-bug-finder-v1"))
-		if err != nil {
-			return nil, err
+		campaignID := strings.TrimSpace(nativeStringAny(args, "campaign_id", "campaignId"))
+		if campaignID != "" && (exec.WorkflowRef != RepositoryBugFinderWorkflowRef ||
+			!repoaudit.ValidRepositoryReviewCampaignID(campaignID)) {
+			return nil, errors.New("repository review campaign authority is unavailable")
+		}
+		var profileHash string
+		if campaignID == "" {
+			profileDigest, hashErr := nativeStableHash(
+				firstNonNil(args["profile"], "repository-bug-finder-v1"),
+			)
+			if hashErr != nil {
+				return nil, hashErr
+			}
+			profileHash = "sha256:" + profileDigest
+		} else {
+			profileHash, err = nativeRepositoryBugFinderProfileHash(args["profile"])
+			if err != nil {
+				return nil, err
+			}
 		}
 		repository, err := nativeRepositoryReviewIdentity(ctx, args, exec)
 		if err != nil {
@@ -258,25 +275,37 @@ func nativeRepositoryReview(
 		if maximumPending <= 0 || maximumPending > 128 {
 			maximumPending = 24
 		}
-		reviewerCount := len(nativeStringSlice(args["resolved_reviewer_models"]))
-		if nativeBoolAny(args, "include_default_reviewer") {
+		resolvedReviewers := nativeStringSlice(args["resolved_reviewer_models"])
+		includeDefaultReviewer := nativeBoolAny(args, "include_default_reviewer")
+		reviewerCount := len(resolvedReviewers)
+		if includeDefaultReviewer {
 			reviewerCount++
 		}
 		if reviewerCount < 1 {
 			reviewerCount = 1
 		}
 		maximumPending = nativeRepositoryReviewPendingLimit(maximumPending, reviewerCount)
-		plan, err := store.PlanWithProfileLimitAuthoritative(
-			ctx,
-			repository,
-			commit,
-			nativeStringAny(args, "inventory_hash", "inventoryHash"),
-			"sha256:"+profileHash,
-			files,
-			nativeBoolAny(args, "force"),
-			maximumPending,
-			nativeBoolAny(args, "authoritative"),
-		)
+		inventoryHash := nativeStringAny(args, "inventory_hash", "inventoryHash")
+		authoritative := nativeBoolAny(args, "authoritative")
+		var plan repoaudit.Plan
+		if campaignID == "" {
+			plan, err = store.PlanWithProfileLimitAuthoritative(
+				ctx, repository, commit, inventoryHash, profileHash, files,
+				nativeBoolAny(args, "force"), maximumPending, authoritative,
+			)
+		} else {
+			requiredAssignments, assignmentErr := RepositoryBugFinderRequiredAssignments(
+				resolvedReviewers, includeDefaultReviewer,
+			)
+			if assignmentErr != nil {
+				return nil, assignmentErr
+			}
+			plan, err = store.PlanWithProfileLimitAuthoritativeForCampaign(
+				ctx, repository, commit, inventoryHash, profileHash,
+				campaignID, requiredAssignments, files,
+				nativeBoolAny(args, "force"), maximumPending, authoritative,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -358,6 +387,7 @@ func nativeRepositoryReview(
 			"files":            nativeFrozenGitScopeReferences(reviewableScope),
 			"reviewableCount":  len(reviewableScope),
 			"unsupportedFiles": unsupportedFiles,
+			"unavailableFiles": nativeRepositoryReviewUnavailableScopeFiles(scope),
 			"unavailableCount": unavailableCount,
 		}
 		if copies := int(nativeInt64Any(args, "copies")); copies > 1 {
@@ -378,7 +408,7 @@ func nativeRepositoryReview(
 		if err != nil {
 			return nil, err
 		}
-		observations, completedFiles, err := nativeRepositoryReviewObservations(args, plan)
+		evidence, err := nativeRepositoryReviewRecordEvidence(args, plan)
 		if err != nil {
 			return nil, err
 		}
@@ -392,8 +422,10 @@ func nativeRepositoryReview(
 			RunID: strings.TrimSpace(
 				firstNonEmpty(nativeStringAny(args, "run_id", "runId"), exec.RunID),
 			),
-			Observations:            observations,
-			CompletedFiles:          completedFiles,
+			Observations:            evidence.Observations,
+			ReviewEvidence:          evidence.ReviewEvidence,
+			InspectedFiles:          evidence.InspectedFiles,
+			CompletedFiles:          evidence.CompletedFiles,
 			UnsupportedFiles:        unsupportedFiles,
 			ExcludedFiles:           int(nativeInt64Any(args, "excluded_count", "excludedCount")),
 			TargetBranch:            plan.TargetBranch,
@@ -432,6 +464,7 @@ func nativeRepositoryReview(
 			}
 			run = map[string]any{
 				"reviewed_files": 0, "unreviewed_files": 0,
+				"inspected_files":   0,
 				"unsupported_files": len(plan.UnsupportedFiles),
 				"remaining_files":   len(plan.PendingFiles) + len(plan.DeferredFiles),
 				"skipped_files":     len(plan.UnchangedFiles),
@@ -748,6 +781,29 @@ func nativeRepositoryReviewUnsupportedScopeFiles(value any) []repoaudit.Unsuppor
 	return out
 }
 
+func nativeRepositoryReviewUnavailableScopeFiles(value any) []map[string]any {
+	items, _, err := nativeScopeItems(value)
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]any, 0)
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok || strings.TrimSpace(nativeAnyString(item["contentUnavailable"])) != "aggregate_limit" {
+			continue
+		}
+		files, fileErr := nativeRepositoryReviewFiles([]map[string]any{item})
+		if fileErr != nil || len(files) != 1 {
+			continue
+		}
+		out = append(out, nativeRepositoryReviewFileMaps(files)[0])
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return nativeAnyString(out[i]["path"]) < nativeAnyString(out[j]["path"])
+	})
+	return out
+}
+
 func mergeNativeRepositoryUnsupportedFiles(groups ...[]repoaudit.UnsupportedFile) []repoaudit.UnsupportedFile {
 	byPath := make(map[string]repoaudit.UnsupportedFile)
 	for _, group := range groups {
@@ -1035,7 +1091,200 @@ func nativeRepositoryReviewFileMaps(files []repoaudit.FileRef) []map[string]any 
 	return out
 }
 
+type nativeRepositoryReviewRecordEvidenceResult struct {
+	Observations   []repoaudit.Observation
+	ReviewEvidence []repoaudit.RepositoryReviewEvidence
+	InspectedFiles []repoaudit.FileRef
+	CompletedFiles []repoaudit.FileRef
+}
+
+func nativeRepositoryReviewRecordEvidence(
+	args map[string]any,
+	plan repoaudit.Plan,
+) (nativeRepositoryReviewRecordEvidenceResult, error) {
+	if plan.CampaignID != "" {
+		return nativeRepositoryReviewCampaignEvidence(args, plan)
+	}
+	observations, completed, err := nativeRepositoryReviewLegacyObservations(args, plan)
+	return nativeRepositoryReviewRecordEvidenceResult{
+		Observations: observations, CompletedFiles: completed,
+	}, err
+}
+
 func nativeRepositoryReviewObservations(
+	args map[string]any,
+	plan repoaudit.Plan,
+) ([]repoaudit.Observation, []repoaudit.FileRef, error) {
+	evidence, err := nativeRepositoryReviewRecordEvidence(args, plan)
+	return evidence.Observations, evidence.CompletedFiles, err
+}
+
+func nativeRepositoryReviewCampaignEvidence(
+	args map[string]any,
+	plan repoaudit.Plan,
+) (nativeRepositoryReviewRecordEvidenceResult, error) {
+	result := nativeRepositoryReviewRecordEvidenceResult{
+		Observations:   []repoaudit.Observation{},
+		ReviewEvidence: []repoaudit.RepositoryReviewEvidence{},
+		InspectedFiles: []repoaudit.FileRef{},
+		CompletedFiles: []repoaudit.FileRef{},
+	}
+	children, err := nativeOptionalMapSlice(args["managed_children"])
+	if err != nil {
+		return result, fmt.Errorf("managed children: %w", err)
+	}
+	fileRefs := make(map[string]repoaudit.FileRef)
+	inspected := make(map[string]bool)
+	requiredCoverage := make(map[string]int)
+	successfulRequiredCoverage := make(map[string]int)
+	for ordinal, child := range children {
+		index, indexOK := nativeRepositoryReviewChildIndex(child["index"])
+		if !indexOK || index != ordinal+1 {
+			return result, fmt.Errorf("managed child %d has an invalid runtime index", ordinal)
+		}
+		required, requiredDeclared := child["required"].(bool)
+		if !requiredDeclared {
+			return result, fmt.Errorf("managed child %d has no required classification", ordinal)
+		}
+		scopeFiles, scopeErr := nativeRepositoryReviewFiles(child["scope"])
+		if scopeErr != nil || len(scopeFiles) == 0 {
+			return result, fmt.Errorf(
+				"managed child %d scope: %w",
+				ordinal,
+				firstNonNilError(scopeErr, repoaudit.ErrInvalidPlan),
+			)
+		}
+		sort.Slice(scopeFiles, func(i, j int) bool { return scopeFiles[i].Path < scopeFiles[j].Path })
+		for fileIndex, file := range scopeFiles {
+			if fileIndex > 0 && file.Path == scopeFiles[fileIndex-1].Path {
+				return result, fmt.Errorf("managed child %d has duplicate scope path %q", ordinal, file.Path)
+			}
+			fileRefs[file.Path] = file
+			if required {
+				requiredCoverage[file.Path]++
+			}
+		}
+		reviewEvidence := repoaudit.RepositoryReviewEvidence{
+			AssignmentID: fmt.Sprintf("managed-%06d", index),
+			ScopeFiles:   append([]repoaudit.FileRef(nil), scopeFiles...),
+			Required:     required,
+		}
+		structured := nativeMapValue(child["structured"])
+		valid, _ := child["valid"].(bool)
+		_, runFailed := child["run_error"]
+		if structured == nil || !valid || runFailed {
+			result.ReviewEvidence = append(result.ReviewEvidence, reviewEvidence)
+			continue
+		}
+		completeFiles := nativeRepositoryReviewCompletedScopePaths(child["scope"])
+		acknowledgedPaths, acknowledgedErr := nativeRepositoryReviewAcknowledgedPaths(
+			structured, scopeFiles, completeFiles,
+		)
+		if acknowledgedErr != nil {
+			result.ReviewEvidence = append(result.ReviewEvidence, reviewEvidence)
+			continue
+		}
+		modelMeta := nativeMapValue(child["model"])
+		model := strings.TrimSpace(nativeAnyString(modelMeta["selected"]))
+		if model == "" {
+			model = strings.TrimSpace(nativeAnyString(modelMeta["default"]))
+		}
+		if model == "" {
+			result.ReviewEvidence = append(result.ReviewEvidence, reviewEvidence)
+			continue
+		}
+		observation, observationErr := nativeRepositoryReviewObservation(
+			structured, child["scope"], model,
+			strings.TrimSpace(nativeAnyString(child["label"])),
+			strings.TrimSpace(nativeAnyString(child["text"])),
+		)
+		if observationErr != nil {
+			result.ReviewEvidence = append(result.ReviewEvidence, reviewEvidence)
+			continue
+		}
+		observation.ScopeFiles = append([]repoaudit.FileRef(nil), scopeFiles...)
+		acknowledgedFiles := make([]repoaudit.FileRef, 0, len(acknowledgedPaths))
+		for _, file := range scopeFiles {
+			if !acknowledgedPaths[file.Path] {
+				continue
+			}
+			acknowledgedFiles = append(acknowledgedFiles, file)
+			inspected[file.Path] = true
+			if required {
+				successfulRequiredCoverage[file.Path]++
+			}
+		}
+		reviewEvidence.Successful = true
+		reviewEvidence.AcknowledgedFiles = acknowledgedFiles
+		reviewEvidence.Observation = &observation
+		result.ReviewEvidence = append(result.ReviewEvidence, reviewEvidence)
+		result.Observations = append(result.Observations, observation)
+	}
+	unavailableItems, unavailableErr := nativeOptionalMapSlice(args["unavailable_files"])
+	if unavailableErr != nil {
+		return result, fmt.Errorf("unavailable files: %w", unavailableErr)
+	}
+	unavailableFiles, unavailableErr := nativeRepositoryReviewFiles(unavailableItems)
+	if unavailableErr != nil {
+		return result, fmt.Errorf("unavailable files: %w", unavailableErr)
+	}
+	sort.Slice(unavailableFiles, func(i, j int) bool { return unavailableFiles[i].Path < unavailableFiles[j].Path })
+	for _, file := range unavailableFiles {
+		fileRefs[file.Path] = file
+		encoded, _ := json.Marshal(file)
+		digest := sha256.Sum256(encoded)
+		for slot := 1; slot <= plan.RequiredAssignments; slot++ {
+			result.ReviewEvidence = append(result.ReviewEvidence, repoaudit.RepositoryReviewEvidence{
+				AssignmentID: fmt.Sprintf("unavailable-%s-%03d", hex.EncodeToString(digest[:]), slot),
+				ScopeFiles:   []repoaudit.FileRef{file}, Required: true,
+			})
+			requiredCoverage[file.Path]++
+		}
+	}
+	for pathValue, file := range fileRefs {
+		if inspected[pathValue] {
+			result.InspectedFiles = append(result.InspectedFiles, file)
+		}
+		if requiredCoverage[pathValue] > 0 &&
+			successfulRequiredCoverage[pathValue] == requiredCoverage[pathValue] {
+			result.CompletedFiles = append(result.CompletedFiles, file)
+		}
+	}
+	sort.Slice(result.InspectedFiles, func(i, j int) bool {
+		return result.InspectedFiles[i].Path < result.InspectedFiles[j].Path
+	})
+	sort.Slice(result.CompletedFiles, func(i, j int) bool {
+		return result.CompletedFiles[i].Path < result.CompletedFiles[j].Path
+	})
+	return result, nil
+}
+
+func nativeRepositoryReviewChildIndex(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, typed > 0
+	case int64:
+		return int(typed), typed > 0 && int64(int(typed)) == typed
+	case float64:
+		return int(typed), typed > 0 && typed == math.Trunc(typed) && float64(int(typed)) == typed
+	case json.Number:
+		parsed, err := typed.Int64()
+		return int(parsed), err == nil && parsed > 0 && int64(int(parsed)) == parsed
+	default:
+		return 0, false
+	}
+}
+
+func firstNonNilError(values ...error) error {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return errors.New("invalid repository review evidence")
+}
+
+func nativeRepositoryReviewLegacyObservations(
 	args map[string]any,
 	plan repoaudit.Plan,
 ) ([]repoaudit.Observation, []repoaudit.FileRef, error) {

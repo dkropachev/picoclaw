@@ -244,6 +244,32 @@ describe("workflow API normalization", () => {
     })
   })
 
+  it("drops campaign authority from workflow-run payloads", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: "wr_campaign_private",
+        workflow_ref: "workflows/repository-bug-finder.yml",
+        status: "succeeded",
+        inputs: {
+          campaign_id: "rrc_frontend_canary",
+          campaign_recovery_pending: true,
+        },
+        steps: {
+          record: {
+            outputs: {
+              run: { campaign_id: "rrc_frontend_canary" },
+            },
+          },
+        },
+        created_at: "2026-07-16T12:00:00Z",
+        updated_at: "2026-07-16T12:00:01Z",
+      }),
+    )
+    const run = await getWorkflowRun("wr_campaign_private")
+    expect(JSON.stringify(run)).not.toContain("rrc_frontend_canary")
+    expect(JSON.stringify(run)).not.toContain("campaign_id")
+  })
+
   it("keeps workflow run collection rows concise", async () => {
     mockedLauncherFetch.mockResolvedValueOnce(
       jsonResponse({

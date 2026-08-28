@@ -2492,10 +2492,13 @@ func (e *Executor) bindRepositoryReviewModelProfile(
 	profile["account_ref"] = resolved.AccountRef
 	profile["effective_models"] = append([]string(nil), resolved.ReviewerModels...)
 	profile["include_default_reviewer"] = resolved.IncludeDefaultReviewer
-	requestedMaxContent := int(nativeInt64Any(profile, "max_content_bytes"))
-	if requestedMaxContent <= 0 || requestedMaxContent > resolved.MaxContentBytes {
-		requestedMaxContent = resolved.MaxContentBytes
+	requestedMaxContent64, boundErr := RepositoryBugFinderEffectiveMaxContentBytes(
+		nativeInt64Any(profile, "max_content_bytes"), resolved.MaxContentBytes,
+	)
+	if boundErr != nil {
+		return nil, boundErr
 	}
+	requestedMaxContent := int(requestedMaxContent64)
 	profile["max_content_bytes"] = requestedMaxContent
 	bound["profile"] = profile
 	bound["resolved_reviewer_models"] = append([]string(nil), resolved.ReviewerModels...)
@@ -2936,6 +2939,9 @@ func (e *Executor) publishRuntimeEvent(ctx context.Context, store RunStore, even
 		}
 		if IsPrivateWorkflowRun(run) {
 			event = sanitizePrivateWorkflowEvent(event)
+		}
+		if strings.TrimSpace(run.WorkflowRef) == RepositoryBugFinderWorkflowRef {
+			event.Payload = scrubRepositoryReviewCampaignMap(event.Payload)
 		}
 	}
 	evt := runtimeevents.Event{

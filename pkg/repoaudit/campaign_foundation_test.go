@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 const repositoryReviewCampaignTestProfile = "profile-campaign-v1"
@@ -1509,6 +1510,52 @@ func TestRepositoryReviewAutomationPersistsOptionalCampaignID(t *testing.T) {
 	invalid.CampaignID = "not-a-campaign"
 	if _, err := store.CreateAutomation(context.Background(), invalid); !errors.Is(err, ErrInvalidAutomation) {
 		t.Fatalf("invalid automation campaign error = %v", err)
+	}
+	pending := created
+	pending.CampaignRecoveryPending = true
+	pending.Status = RepositoryReviewAutomationFailed
+	pending.PauseReason = RepositoryReviewPauseRunFailed
+	pending.PauseDetail = "legacy campaign recovery pending"
+	pending.RunIDs = []string{"wr_legacy"}
+	pending.StartedAt = pending.CreatedAt
+	pending.ResolvedCommitSHA = repositoryReviewCampaignTestCommit
+	pending.ScopePlan = RepositoryReviewScopePlan{
+		CommitSHA:  repositoryReviewCampaignTestCommit,
+		PolicyHash: strings.Repeat("d", 64), Hash: strings.Repeat("e", 64),
+		Summary: "Recovered scope",
+	}
+	pending.ScopeSelection = &RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	if err := validateAutomation(pending); err != nil {
+		t.Fatalf("valid pending campaign recovery error = %v", err)
+	}
+	for name, mutate := range map[string]func(*RepositoryReviewAutomation){
+		"missing campaign": func(value *RepositoryReviewAutomation) { value.CampaignID = "" },
+		"missing history": func(value *RepositoryReviewAutomation) {
+			value.RunIDs = nil
+			value.StartedAt = time.Time{}
+		},
+		"missing scope": func(value *RepositoryReviewAutomation) {
+			value.ScopeSelection = nil
+		},
+		"commit mismatch": func(value *RepositoryReviewAutomation) {
+			value.ScopePlan.CommitSHA = repositoryReviewCampaignOtherCommit
+		},
+		"active": func(value *RepositoryReviewAutomation) {
+			value.Status = RepositoryReviewAutomationRunning
+			value.ActiveRunID = "wr_active"
+		},
+		"completed": func(value *RepositoryReviewAutomation) {
+			value.Status = RepositoryReviewAutomationCompleted
+			value.CompletedAt = value.UpdatedAt
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := pending
+			mutate(&candidate)
+			if err := validateAutomation(candidate); !errors.Is(err, ErrInvalidAutomation) {
+				t.Fatalf("invalid pending recovery error = %v", err)
+			}
+		})
 	}
 }
 

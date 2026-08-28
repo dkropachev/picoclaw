@@ -34,11 +34,20 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 		Tools:        toolRunner,
 		Agents:       agentRunner,
 	}
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	commit := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+	if _, err := repoaudit.NewStore(workspace).BeginCampaign(context.Background(), repoaudit.BeginCampaignRequest{
+		Repository: repo, CampaignID: campaignID, CommitSHA: commit,
+		ExpectedReviewVersion: 0, Exact: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	request := RunRequest{
 		Workflow:    parseWorkflow(t, RepositoryBugFinderWorkflowYAML),
 		WorkflowRef: RepositoryBugFinderWorkflowRef,
 		Inputs: map[string]any{
 			"repository": repo, "ref": "HEAD", "target": "all",
+			"campaign_id":   campaignID,
 			"review_models": "review-a,review-b",
 			"planner_model": "review-a",
 			"account_ref":   "review-account",
@@ -59,6 +68,11 @@ func TestRepositoryBugFinderWorkflowReviewsChangedBlobThenSkipsIt(t *testing.T) 
 	if state.Findings[0].File.BlobSHA == "" || state.Findings[0].CommitSHA == "" ||
 		len(state.Findings[0].ContextIDs) != 2 || len(state.Findings[0].Models) != 2 || len(state.Contexts) != 2 {
 		t.Fatalf("first finding provenance=%#v contexts=%d", state.Findings[0], len(state.Contexts))
+	}
+	metrics := repoaudit.CurrentCampaignMetrics(state, campaignID, nil, time.Time{})
+	if !metrics.CoverageExact || metrics.InspectedFiles != 1 || metrics.CompletedFiles != 1 ||
+		metrics.RemainingFiles != 0 || metrics.FindingOccurrences != 1 {
+		t.Fatalf("campaign metrics=%#v", metrics)
 	}
 
 	request.RunID = ""
@@ -222,6 +236,7 @@ func (runner *repositoryBugFinderTestAgent) RunAgent(
 			childStructured = structured
 		}
 		children = append(children, map[string]any{
+			"index": index + 1, "required": true,
 			"label": fmt.Sprintf("challenge %d", index+1), "valid": true,
 			"scope": scope, "model": map[string]any{"selected": model},
 			"structured": childStructured, "text": fmt.Sprintf("validated challenge %d", index+1),

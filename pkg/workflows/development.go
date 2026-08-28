@@ -710,6 +710,7 @@ func projectWorkflowRunForBrowser(
 	}
 	projected := cloneRun(run)
 	projected.Origin = cloneRunOrigin(origin)
+	projected = scrubRepositoryReviewCampaignRun(projected)
 	if !eventBackedDraft {
 		return projected
 	}
@@ -730,6 +731,76 @@ func projectWorkflowRunForBrowser(
 			step.Error = EventBackedDraftStepErrorDiagnostic
 			projected.Steps[key] = step
 		}
+	}
+	return projected
+}
+
+func scrubRepositoryReviewCampaignRun(run *Run) *Run {
+	if run == nil || strings.TrimSpace(run.WorkflowRef) != RepositoryBugFinderWorkflowRef {
+		return run
+	}
+	run.Inputs = scrubRepositoryReviewCampaignMap(run.Inputs)
+	run.Outputs = scrubRepositoryReviewCampaignMap(run.Outputs)
+	for key, job := range run.Jobs {
+		job.Outputs = scrubRepositoryReviewCampaignMap(job.Outputs)
+		run.Jobs[key] = job
+	}
+	for key, step := range run.Steps {
+		step.Outputs = scrubRepositoryReviewCampaignMap(step.Outputs)
+		run.Steps[key] = step
+	}
+	return run
+}
+
+func scrubRepositoryReviewCampaignMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		if key == "campaign_id" || key == "campaignId" {
+			continue
+		}
+		out[key] = scrubRepositoryReviewCampaignValue(value)
+	}
+	return out
+}
+
+func scrubRepositoryReviewCampaignValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return scrubRepositoryReviewCampaignMap(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index := range typed {
+			out[index] = scrubRepositoryReviewCampaignValue(typed[index])
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(typed))
+		for index := range typed {
+			out[index] = scrubRepositoryReviewCampaignMap(typed[index])
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// ProjectRepositoryReviewRunEventsForBrowser removes controller-owned
+// campaign authority from lifecycle payloads for the built-in review workflow.
+func ProjectRepositoryReviewRunEventsForBrowser(
+	run *Run,
+	events []RunEvent,
+	eventBackedDraft bool,
+	privateRun bool,
+) []RunEvent {
+	projected := ProjectWorkflowRunEventsForBrowser(events, eventBackedDraft, privateRun)
+	if run == nil || strings.TrimSpace(run.WorkflowRef) != RepositoryBugFinderWorkflowRef {
+		return projected
+	}
+	for index := range projected {
+		projected[index].Payload = scrubRepositoryReviewCampaignMap(projected[index].Payload)
 	}
 	return projected
 }

@@ -696,6 +696,14 @@ func TestRepositoryReviewFileProgressMadeUsesOnlyResolvedFiles(t *testing.T) {
 		}(), outcome: repositoryReviewOutcome{
 			found: true, unsupportedFiles: base.UnsupportedFiles + 1,
 		}, want: true},
+		{name: "exact campaign ledger rise", after: base, outcome: repositoryReviewOutcome{
+			found: true, coverageAvailable: true, coverageExact: true,
+			reviewedFiles: base.ReviewedFiles + 1,
+		}, want: true},
+		{name: "inexact campaign lower bound is not operational progress", after: base, outcome: repositoryReviewOutcome{
+			found: true, coverageAvailable: true, coverageExact: false,
+			reviewedFiles: base.ReviewedFiles + 1,
+		}},
 		{name: "initial remaining baseline is not progress", after: func() repoaudit.RepositoryReviewProgress {
 			value := base
 			value.RemainingFiles = 6
@@ -3196,6 +3204,92 @@ func TestApplyRepositoryReviewRunProgressDoesNotOverwriteWithoutValidRemaining(t
 	)
 	if automation.Progress.RemainingFiles != 4 {
 		t.Fatalf("contradictory projected zero overwrote durable progress: %#v", automation.Progress)
+	}
+}
+
+func TestRepositoryReviewShouldRecoverLegacyCampaignOnlyOnResume(t *testing.T) {
+	legacy := repoaudit.RepositoryReviewAutomation{RunIDs: []string{"wr_legacy"}, StartedAt: time.Now()}
+	if !repositoryReviewShouldRecoverLegacyCampaign(legacy, "resume") {
+		t.Fatal("legacy resume did not request campaign recovery")
+	}
+	legacy.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
+	if repositoryReviewShouldRecoverLegacyCampaign(legacy, "resume") ||
+		repositoryReviewShouldRecoverLegacyCampaign(repoaudit.RepositoryReviewAutomation{}, "start") {
+		t.Fatal("campaign recovery escaped legacy resume boundary")
+	}
+	legacy.CampaignRecoveryPending = true
+	if !repositoryReviewShouldRecoverLegacyCampaign(legacy, "resume") {
+		t.Fatal("torn legacy recovery marker was not resumable")
+	}
+	legacy.CampaignID = ""
+	legacy.CampaignRecoveryPending = false
+	legacy.Progress.Stage = "next batch queued"
+	if !repositoryReviewShouldRecoverLegacyCampaign(legacy, "start") {
+		t.Fatal("legacy automatic handoff did not request campaign recovery")
+	}
+}
+
+func TestApplyRepositoryReviewOutcomeUsesExactCampaignMetrics(t *testing.T) {
+	automation := repoaudit.RepositoryReviewAutomation{Progress: repoaudit.RepositoryReviewProgress{
+		ReviewedFiles: 9, RemainingFiles: 9, UnsupportedFiles: 9,
+	}}
+	applyRepositoryReviewOutcome(&automation, repositoryReviewOutcome{
+		found: true, coverageAvailable: true, coverageExact: true,
+		selectedFiles: 5, inspectedFiles: 4, reviewedFiles: 2, remainingFiles: 2,
+		unsupportedFiles: 1, findings: 7, findingAggregates: 3, pendingFindingMappings: 2,
+		modelFindings: map[string]int{}, modelPaths: map[string][]string{},
+	})
+	progress := automation.Progress
+	if !progress.CoverageAvailable || !progress.CoverageExact || progress.SelectedFiles != 5 ||
+		progress.InspectedFiles != 4 || progress.ReviewedFiles != 2 || progress.RemainingFiles != 2 ||
+		progress.UnsupportedFiles != 1 || progress.Findings != 7 || progress.FindingAggregates != 3 ||
+		progress.PendingFindingMappings != 2 {
+		t.Fatalf("exact campaign progress=%#v", progress)
+	}
+}
+
+func TestRepositoryReviewPreparedCampaignUsesLegacyMembershipUntilCoverageBinds(t *testing.T) {
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	startedAt := time.Now().Add(-time.Hour)
+	automation := repoaudit.RepositoryReviewAutomation{
+		CampaignID: campaignID, CampaignRecoveryPending: true,
+		RunIDs: []string{"wr_legacy"}, StartedAt: startedAt,
+	}
+	state := repoaudit.RepositoryState{
+		CurrentCampaign: &repoaudit.RepositoryReviewCampaignCoverage{
+			ID: campaignID, CommitSHA: strings.Repeat("a", 40),
+			Paths: map[string]repoaudit.RepositoryReviewCampaignPathCoverage{},
+		},
+		Runs: []repoaudit.ReviewRun{{
+			ID: "wr_legacy", FindingIDs: []string{"finding"}, CompletedAt: startedAt.Add(time.Minute),
+		}},
+		Findings: []repoaudit.Finding{{ID: "finding"}},
+	}
+	if findings := repositoryReviewCurrentFindings(automation, state); len(findings) != 1 {
+		t.Fatalf("prepared campaign findings=%#v", findings)
+	}
+	applyRepositoryReviewLiveMetrics(&automation, state)
+	if automation.Progress.Findings != 1 || automation.Progress.CoverageAvailable {
+		t.Fatalf("prepared campaign progress=%#v", automation.Progress)
+	}
+	fresh := automation
+	fresh.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
+	fresh.CampaignRecoveryPending = false
+	fresh.Progress.Findings = 99
+	if findings := repositoryReviewCurrentFindings(fresh, state); len(findings) != 0 {
+		t.Fatalf("fresh unbound campaign resurrected legacy findings=%#v", findings)
+	}
+	applyRepositoryReviewLiveMetrics(&fresh, state)
+	if fresh.Progress.Findings != 0 || fresh.Progress.CoverageAvailable || fresh.Progress.CoverageExact {
+		t.Fatalf("fresh unbound campaign progress=%#v", fresh.Progress)
+	}
+	state.CurrentCampaign.InventoryHash = strings.Repeat("b", 64)
+	state.CurrentCampaign.ProfileHash = strings.Repeat("c", 64)
+	state.Findings[0].CampaignID = campaignID
+	automation.CampaignRecoveryPending = false
+	if findings := repositoryReviewCurrentFindings(automation, state); len(findings) != 1 ||
+		findings[0].CampaignID != campaignID {
+		t.Fatalf("bound campaign findings=%#v", findings)
 	}
 }
 

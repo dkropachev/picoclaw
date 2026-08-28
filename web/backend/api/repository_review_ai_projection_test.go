@@ -9,6 +9,7 @@ import (
 )
 
 func TestRepositoryMappingAdjudicationProjectionBoundsPrivateData(t *testing.T) {
+	canary := repoaudit.NewRepositoryReviewCampaignID()
 	history := make([]repoaudit.RepositoryFindingPathSymbol, 20)
 	commits := make([]string, 20)
 	for index := range history {
@@ -20,6 +21,7 @@ func TestRepositoryMappingAdjudicationProjectionBoundsPrivateData(t *testing.T) 
 	}
 	request := repoaudit.RepositoryMappingAIRequest{
 		Finding: repoaudit.Finding{
+			CampaignID:   canary,
 			ID:           "rvf_occurrence",
 			ContextIDs:   []string{"context-secret"},
 			Models:       []string{"reviewer-secret"},
@@ -48,13 +50,14 @@ func TestRepositoryMappingAdjudicationProjectionBoundsPrivateData(t *testing.T) 
 	}
 
 	projected := repositoryMappingAdjudicationProjection(request)
-	if projected.Finding.IssueDraftID != "" ||
+	if projected.Finding.CampaignID != "" || projected.Finding.IssueDraftID != "" ||
 		projected.Finding.ContextIDs != nil ||
 		projected.Finding.Models != nil ||
 		projected.Finding.Observations != nil {
 		t.Fatalf("occurrence provenance was not stripped: %#v", projected.Finding)
 	}
-	if request.Finding.IssueDraftID != "rid_secret" || len(request.Finding.Observations) != 1 {
+	if request.Finding.CampaignID != canary || request.Finding.IssueDraftID != "rid_secret" ||
+		len(request.Finding.Observations) != 1 {
 		t.Fatal("projection mutated the source occurrence")
 	}
 	if len(projected.Candidates) != 1 || projected.Candidates[0].ID != "candidate_1" {

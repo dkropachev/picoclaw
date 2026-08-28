@@ -41,6 +41,22 @@ func TestRepositoryReviewGatewayAutomationProjectionHidesInternalScopeState(t *t
 	}
 }
 
+func TestRepositoryReviewGatewayFindingProjectionHidesCampaignAuthority(t *testing.T) {
+	canary := repoaudit.NewRepositoryReviewCampaignID()
+	finding := repoaudit.Finding{ID: "finding", CampaignID: canary, ContextIDs: []string{"context"}}
+	state := repoaudit.RepositoryState{Contexts: []repoaudit.FindingContext{{
+		ID: "context", CampaignID: canary,
+	}}}
+	projected := projectRepositoryReviewGatewayFinding(finding)
+	contexts := repositoryReviewGatewayFindingContexts(state, finding)
+	if projected.CampaignID != "" || len(contexts) != 1 || contexts[0].CampaignID != "" {
+		t.Fatalf("gateway campaign projection finding=%#v contexts=%#v", projected, contexts)
+	}
+	if finding.CampaignID != canary || state.Contexts[0].CampaignID != canary {
+		t.Fatal("gateway projection mutated stored campaign authority")
+	}
+}
+
 type repositoryReviewIssueSyncMCPManager struct {
 	responses map[string]string
 }

@@ -97,7 +97,7 @@ func (h *Handler) handlePostRepositoryReviewAutomationFinding(w http.ResponseWri
 	if draft.ID == "" || draft.State != repoaudit.IssueDraftEditing {
 		writeRepositoryReviewJSON(w, http.StatusBadGateway, map[string]any{
 			"automation": projectRepositoryReviewAutomation(ledger.Automation),
-			"finding":    finding, "result": result,
+			"finding":    projectRepositoryReviewRunFinding(ledger.State, finding), "result": result,
 		})
 		return
 	}

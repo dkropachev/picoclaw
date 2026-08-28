@@ -1045,9 +1045,12 @@ func TestRepositoryReviewInterruptedGenerationResumesWithSameGenerationID(t *tes
 }
 
 func TestRepositoryReviewIssueWriterRequestIsPrivateEphemeralAndStructured(t *testing.T) {
+	canary := repoaudit.NewRepositoryReviewCampaignID()
 	request := repositoryReviewIssueWriterAgentRequest(
 		repoaudit.RepositoryReviewAutomation{IssueWriterModel: "writer"},
-		repoaudit.Finding{ID: "finding"}, nil, "instructions", "account",
+		repoaudit.Finding{ID: "finding", CampaignID: canary},
+		[]repoaudit.FindingContext{{ID: "context", CampaignID: canary}},
+		"instructions", "account",
 	)
 	if request.Model != "writer" || request.AccountRef != "account" ||
 		!request.EphemeralSession || request.History != "none" || request.Cache != "none" ||
@@ -1056,6 +1059,9 @@ func TestRepositoryReviewIssueWriterRequestIsPrivateEphemeralAndStructured(t *te
 		request.Output == nil || request.Output.Format != "json" ||
 		request.Output.Schema["additionalProperties"] != false {
 		t.Fatalf("issue writer request=%#v", request)
+	}
+	if strings.Contains(request.Prompt, canary) || strings.Contains(request.Prompt, "campaign_id") {
+		t.Fatalf("issue writer prompt exposed campaign authority: %s", request.Prompt)
 	}
 	invalid := workflows.ValidateAgentStructuredOutput(
 		`{"title":"Bug","body":"Evidence","labels":["bug"],"fix":"change the code"}`,

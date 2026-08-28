@@ -110,6 +110,11 @@ export function RepositoryReviewRunsPage({
           value: repositoryReviewFileProgressLabel,
         },
         {
+          id: "inspected",
+          label: "Inspected files",
+          value: (review) => review.progress.inspected_files,
+        },
+        {
           id: "reviewed",
           label: "Fully reviewed files",
           value: (review) => review.progress.reviewed_files,

@@ -71,8 +71,9 @@ func TestRepositoryReviewRoutesSelectDiscussAndIssueData(t *testing.T) {
 }
 
 func TestRepositoryReviewDetailPaginationProjectsOnlyReferencedContext(t *testing.T) {
-	firstContext := repoaudit.FindingContext{ID: "context-first"}
-	secondContext := repoaudit.FindingContext{ID: "context-second"}
+	canary := repoaudit.NewRepositoryReviewCampaignID()
+	firstContext := repoaudit.FindingContext{ID: "context-first", CampaignID: canary}
+	secondContext := repoaudit.FindingContext{ID: "context-second", CampaignID: canary}
 	drafts := make([]repoaudit.IssueDraft, 12)
 	for index := range drafts {
 		drafts[index].ID = fmt.Sprintf("draft-%02d", index)
@@ -85,12 +86,20 @@ func TestRepositoryReviewDetailPaginationProjectsOnlyReferencedContext(t *testin
 			"large.go": {FileRef: repoaudit.FileRef{Path: "large.go"}, Reason: "file_too_large"},
 		},
 		Findings: []repoaudit.Finding{
-			{ID: "finding-first", ContextIDs: []string{firstContext.ID}},
-			{ID: "finding-second", ContextIDs: []string{secondContext.ID}},
+			{ID: "finding-first", CampaignID: canary, ContextIDs: []string{firstContext.ID}},
+			{ID: "finding-second", CampaignID: canary, ContextIDs: []string{secondContext.ID}},
 		},
 		Contexts:    []repoaudit.FindingContext{firstContext, secondContext},
 		Runs:        make([]repoaudit.ReviewRun, 51),
 		IssueDrafts: drafts,
+		CurrentCampaign: &repoaudit.RepositoryReviewCampaignCoverage{
+			ID: canary, CommitSHA: strings.Repeat("a", 40),
+			Paths: map[string]repoaudit.RepositoryReviewCampaignPathCoverage{},
+		},
+		CampaignHistory: map[string]string{canary: strings.Repeat("a", 40)},
+	}
+	for index := range state.Runs {
+		state.Runs[index].CampaignID = canary
 	}
 
 	projected := projectRepositoryReviewDetail(state, repositoryReviewPageRequest{
@@ -106,6 +115,18 @@ func TestRepositoryReviewDetailPaginationProjectsOnlyReferencedContext(t *testin
 		len(projected.IssueDrafts) != 10 || projected.IssueDrafts[0].ID != "draft-02" ||
 		projected.IssueDrafts[9].ID != "draft-11" {
 		t.Fatalf("projected detail=%#v", projected)
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), canary) || strings.Contains(string(encoded), "current_campaign") ||
+		strings.Contains(string(encoded), "campaign_history") {
+		t.Fatalf("projected detail exposed campaign authority: %s", encoded)
+	}
+	if state.Findings[1].CampaignID != canary || state.Contexts[1].CampaignID != canary ||
+		state.Runs[1].CampaignID != canary || state.CurrentCampaign == nil || len(state.CampaignHistory) != 1 {
+		t.Fatal("detail projection mutated source campaign authority")
 	}
 }
 

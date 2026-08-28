@@ -49,6 +49,30 @@ const mockedLauncherFetch = vi.mocked(launcherFetch)
 describe("repository review API", () => {
   beforeEach(() => mockedLauncherFetch.mockReset())
 
+  it("drops campaign authority from repository-review payloads", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        automations: [
+          {
+            id: "auto_private",
+            repository: "owner/repo",
+            campaign_id: "rrc_frontend_canary",
+            campaign_recovery_pending: true,
+            progress: { findings: 1 },
+          },
+        ],
+      }),
+    )
+    const response = await listRepositoryReviewAutomations()
+    const automation = response.automations[0] as unknown as Record<
+      string,
+      unknown
+    >
+    expect(automation.campaign_id).toBeUndefined()
+    expect(automation.campaign_recovery_pending).toBeUndefined()
+    expect(JSON.stringify(automation)).not.toContain("rrc_frontend_canary")
+  })
+
   it("lists and loads repository review state", async () => {
     mockedLauncherFetch
       .mockResolvedValueOnce(jsonResponse({ repositories: [] }))

@@ -22,6 +22,46 @@ import (
 
 const eventDraftPrivateAPIDiagnostic = "EVENT_DRAFT_PRIVATE_DIAGNOSTIC"
 
+func TestRepositoryReviewWorkflowEventEndpointScrubsCampaignAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	handler := NewHandler(writeWorkflowEventTestConfig(t, workspace))
+	store := workflows.NewFileRunStore(workspace)
+	now := time.Now().UTC()
+	run := &workflows.Run{
+		ID: workflows.NewRunID(), WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
+		Status: workflows.RunStatusSucceeded, Inputs: map[string]any{
+			"repository": "owner/repo", "campaign_id": "rrc_event_canary",
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateRun(t.Context(), run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(t.Context(), workflows.RunEvent{
+		RunID: run.ID, Kind: "workflow.step.end", Payload: map[string]any{
+			"outputs": map[string]any{"run": map[string]any{
+				"campaign_id": "rrc_event_canary", "remaining_files": 0,
+			}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/workflows/runs/"+run.ID+"/events", nil)
+	request.SetPathValue("run_id", run.ID)
+	handler.handleGetWorkflowRunEvents(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "rrc_event_canary") ||
+		strings.Contains(recorder.Body.String(), "campaign_id") ||
+		!strings.Contains(recorder.Body.String(), "remaining_files") {
+		t.Fatalf("event projection status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	raw, err := store.Events(t.Context(), run.ID)
+	if err != nil || len(raw) != 1 ||
+		raw[0].Payload["outputs"].(map[string]any)["run"].(map[string]any)["campaign_id"] != "rrc_event_canary" {
+		t.Fatalf("stored event=%#v err=%v", raw, err)
+	}
+}
+
 func TestLoadWorkflowEventEnvelopeUsesMetadataAndProtectedContextRoutes(t *testing.T) {
 	configPath := writeWorkflowEventTestConfig(t, t.TempDir())
 	var paths []string

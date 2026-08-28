@@ -233,6 +233,10 @@ export function RepositoryReviewDetailPage({
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Metric
+                label="Inspected files"
+                value={review.progress.inspected_files}
+              />
+              <Metric
                 label="Fully reviewed files"
                 value={review.progress.reviewed_files}
               />
@@ -247,6 +251,14 @@ export function RepositoryReviewDetailPage({
               <Metric
                 label="Finding occurrences"
                 value={review.progress.findings}
+              />
+              <Metric
+                label="Aggregated findings"
+                value={review.progress.finding_aggregates}
+              />
+              <Metric
+                label="Awaiting aggregation"
+                value={review.progress.unaggregated_findings}
               />
             </div>
 

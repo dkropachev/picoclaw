@@ -164,7 +164,7 @@ func (snapshot *workflowRunPrivacySnapshot) projectRunForBrowser(
 		safe,
 		workflows.IsEventBackedDraftRunFamily(ctx, store, safe),
 	)
-	return snapshot.sanitizeRun(projected)
+	return scrubRepositoryReviewCampaignRun(snapshot.sanitizeRun(projected))
 }
 
 func (snapshot *workflowRunPrivacySnapshot) projectRunsForBrowser(
@@ -185,10 +185,65 @@ func (snapshot *workflowRunPrivacySnapshot) projectRunsForBrowser(
 	)
 	for index := range projected {
 		if safe := snapshot.sanitizeRun(&projected[index]); safe != nil {
-			projected[index] = *safe
+			projected[index] = *scrubRepositoryReviewCampaignRun(safe)
 		}
 	}
 	return projected
+}
+
+func scrubRepositoryReviewCampaignRun(run *workflows.Run) *workflows.Run {
+	if run == nil || strings.TrimSpace(run.WorkflowRef) != workflows.RepositoryBugFinderWorkflowRef {
+		return run
+	}
+	projected := *run
+	projected.Inputs = scrubRepositoryReviewCampaignMap(run.Inputs)
+	projected.Outputs = scrubRepositoryReviewCampaignMap(run.Outputs)
+	projected.Jobs = make(map[string]workflows.JobExecution, len(run.Jobs))
+	for key, job := range run.Jobs {
+		job.Outputs = scrubRepositoryReviewCampaignMap(job.Outputs)
+		projected.Jobs[key] = job
+	}
+	projected.Steps = make(map[string]workflows.StepExecution, len(run.Steps))
+	for key, step := range run.Steps {
+		step.Outputs = scrubRepositoryReviewCampaignMap(step.Outputs)
+		projected.Steps[key] = step
+	}
+	return &projected
+}
+
+func scrubRepositoryReviewCampaignMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		if key == "campaign_id" || key == "campaignId" {
+			continue
+		}
+		out[key] = scrubRepositoryReviewCampaignValue(value)
+	}
+	return out
+}
+
+func scrubRepositoryReviewCampaignValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return scrubRepositoryReviewCampaignMap(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index := range typed {
+			out[index] = scrubRepositoryReviewCampaignValue(typed[index])
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(typed))
+		for index := range typed {
+			out[index] = scrubRepositoryReviewCampaignMap(typed[index])
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func workflowRunMutationSnapshot(

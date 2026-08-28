@@ -5565,12 +5565,33 @@ function malformedWorkflowResponse(): WorkflowAPIError {
 }
 
 function normalizeWorkflowRun(run: WorkflowRun): WorkflowRun {
+  run = stripWorkflowCampaignAuthority(run)
   return {
     ...run,
     child_run_ids: arrayOrEmpty(run.child_run_ids),
     jobs: recordOrEmpty(run.jobs),
     steps: recordOrEmpty(run.steps),
   }
+}
+
+function stripWorkflowCampaignAuthority<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripWorkflowCampaignAuthority(item)) as T
+  }
+  if (typeof value !== "object" || value === null) return value
+  const projected: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (
+      key === "campaign_id" ||
+      key === "campaignId" ||
+      key === "campaign_recovery_pending" ||
+      key === "campaignRecoveryPending"
+    ) {
+      continue
+    }
+    projected[key] = stripWorkflowCampaignAuthority(item)
+  }
+  return projected as T
 }
 
 function normalizeWorkflowRunGraph(graph: WorkflowRunGraph): WorkflowRunGraph {

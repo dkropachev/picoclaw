@@ -471,6 +471,7 @@ func repositoryMappingAdjudicationProjection(
 	projected := repoaudit.RepositoryMappingAIRequest{
 		Finding: request.Finding,
 	}
+	projected.Finding.CampaignID = ""
 	projected.Finding.ContextIDs = nil
 	projected.Finding.Models = nil
 	projected.Finding.Observations = nil
