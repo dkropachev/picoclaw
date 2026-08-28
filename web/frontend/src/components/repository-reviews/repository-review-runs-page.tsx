@@ -12,6 +12,7 @@ import {
   normalizeCollectionRouteSearch,
 } from "@/hooks/use-collection-route-state"
 
+import { repositoryReviewFileProgressLabel } from "./repository-review-file-progress"
 import {
   repositoryReviewDefaultQuery,
   repositoryReviewViews,
@@ -85,12 +86,12 @@ export function RepositoryReviewRunsPage({
         {
           id: "progress",
           header: "Progress",
-          cell: progressLabel,
+          cell: repositoryReviewFileProgressLabel,
           className: "w-24 tabular-nums",
         },
         {
           id: "findings",
-          header: "Findings",
+          header: "Finding occurrences",
           cell: (review) => review.progress.findings,
           className: "w-24 tabular-nums",
         },
@@ -103,15 +104,19 @@ export function RepositoryReviewRunsPage({
       ],
       gridFacts: [
         { id: "status", label: "Status", value: (review) => review.status },
-        { id: "progress", label: "Progress", value: progressLabel },
+        {
+          id: "progress",
+          label: "Progress",
+          value: repositoryReviewFileProgressLabel,
+        },
         {
           id: "reviewed",
-          label: "Reviewed files",
+          label: "Fully reviewed files",
           value: (review) => review.progress.reviewed_files,
         },
         {
           id: "findings",
-          label: "Findings",
+          label: "Finding occurrences",
           value: (review) => review.progress.findings,
         },
       ],
@@ -147,13 +152,6 @@ export function RepositoryReviewRunsPage({
       emptyDescription="Assign a review profile from Repositories first."
     />
   )
-}
-
-function progressLabel(review: RepositoryReviewAutomation): string {
-  if (!review.progress.total_batches) return "Not started"
-  return `${Math.round(
-    (review.progress.completed_batches / review.progress.total_batches) * 100,
-  )}%`
 }
 
 function isQueuedHandoff(review: RepositoryReviewAutomation): boolean {

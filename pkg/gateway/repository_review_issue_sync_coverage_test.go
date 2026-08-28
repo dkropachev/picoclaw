@@ -28,8 +28,14 @@ func TestRepositoryReviewGatewayAutomationProjectionHidesInternalScopeState(t *t
 		},
 	})
 	if projected.ModelCoverageSketches != nil || projected.ScopeSelection != nil ||
-		projected.CampaignID != "" {
+		projected.CampaignID != "" || !projected.Progress.ScopeFrozen {
 		t.Fatalf("gateway projection exposed internal state: %#v", projected)
+	}
+	projected = projectRepositoryReviewGatewayAutomation(repoaudit.RepositoryReviewAutomation{
+		Progress: repoaudit.RepositoryReviewProgress{ScopeFrozen: true},
+	})
+	if projected.Progress.ScopeFrozen {
+		t.Fatal("gateway projection trusted a non-durable scope_frozen marker")
 	}
 }
 

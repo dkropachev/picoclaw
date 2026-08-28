@@ -539,6 +539,7 @@ export type RepositoryReviewPauseReason =
   | "cost_budget"
   | "account_limit"
   | "guard_expression"
+  | "no_progress"
   | "run_failed"
   | "service_restart"
 
@@ -601,6 +602,7 @@ export interface RepositoryReviewAutomationProgress {
   remaining_files: number
   unsupported_files: number
   findings: number
+  scope_frozen?: boolean
 }
 
 export type RepositoryReviewCodeType =
@@ -1892,6 +1894,7 @@ function normalizeAutomation(
     repository: automation.repository ?? "",
     profile_id: automation.profile_id ?? "",
     profile_version: automation.profile_version ?? 0,
+    pause_reason: normalizePauseReason(automation.pause_reason),
     branch: automation.branch ?? automation.ref ?? "",
     ref: automation.branch ?? automation.ref ?? "",
     target: automation.target ?? "all",
@@ -1929,6 +1932,7 @@ function normalizeAutomation(
       remaining_files: automation.progress?.remaining_files ?? 0,
       unsupported_files: automation.progress?.unsupported_files ?? 0,
       findings: automation.progress?.findings ?? 0,
+      scope_frozen: automation.progress?.scope_frozen ?? false,
     },
     model_stats: normalizeModelStats(automation.model_stats),
     account_limits: normalizeAccountSnapshots(automation.account_limits),
@@ -1947,6 +1951,24 @@ function normalizeAutomation(
       : undefined,
     started_at: normalizeOptionalTimestamp(automation.started_at),
     completed_at: normalizeOptionalTimestamp(automation.completed_at),
+  }
+}
+
+function normalizePauseReason(
+  value: RepositoryReviewPauseReason | undefined,
+): RepositoryReviewPauseReason | undefined {
+  switch (value) {
+    case "manual":
+    case "token_budget":
+    case "cost_budget":
+    case "account_limit":
+    case "guard_expression":
+    case "no_progress":
+    case "run_failed":
+    case "service_restart":
+      return value
+    default:
+      return undefined
   }
 }
 

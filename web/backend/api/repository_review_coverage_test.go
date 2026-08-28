@@ -592,8 +592,10 @@ func TestRepositoryReviewCoverageFinishAutomationBranches(t *testing.T) {
 		Outputs: map[string]any{"remainingFiles": "invalid", "reviewedFiles": 1},
 	}, nil, true, &workflows.Run{Steps: map[string]workflows.StepExecution{
 		"find_bugs/record": {
-			Status:  workflows.RunStatusSucceeded,
-			Outputs: map[string]any{"run": map[string]any{"remaining_files": 2}},
+			Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"run": map[string]any{
+				"remaining_files": 2, "reviewed_files": 1, "unsupported_files": 0,
+			}},
 		},
 	}})
 	checkpointed, _, err = store.GetAutomation(t.Context(), checkpointed.ID)
@@ -628,6 +630,262 @@ func TestRepositoryReviewCoverageFinishAutomationBranches(t *testing.T) {
 	if err != nil || missingCheckpoint.Status != repoaudit.RepositoryReviewAutomationFailed ||
 		!strings.Contains(missingCheckpoint.PauseDetail, "without a verified durable") {
 		t.Fatalf("missing checkpoint finish=%#v err=%v", missingCheckpoint, err)
+	}
+}
+
+func TestRepositoryReviewFileProgressMadeUsesOnlyResolvedFiles(t *testing.T) {
+	base := repoaudit.RepositoryReviewProgress{
+		ReviewedFiles: 2, UnsupportedFiles: 1, RemainingFiles: 7, Findings: 3,
+	}
+	durableRun := func(reviewed, unsupported any) *workflows.Run {
+		return &workflows.Run{Steps: map[string]workflows.StepExecution{
+			"find_bugs/record": {
+				Status: workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": map[string]any{
+					"reviewed_files": reviewed, "unsupported_files": unsupported,
+				}},
+			},
+		}}
+	}
+	for _, test := range []struct {
+		name           string
+		after          repoaudit.RepositoryReviewProgress
+		persistedRun   *workflows.Run
+		outcome        repositoryReviewOutcome
+		allowProjected bool
+		want           bool
+	}{
+		{name: "unchanged", after: base},
+		{name: "finding only", after: func() repoaudit.RepositoryReviewProgress {
+			value := base
+			value.Findings++
+			return value
+		}()},
+		{name: "remaining drop", after: func() repoaudit.RepositoryReviewProgress {
+			value := base
+			value.RemainingFiles--
+			return value
+		}(), want: true},
+		{name: "projected fully completed rise", after: func() repoaudit.RepositoryReviewProgress {
+			value := base
+			value.ReviewedFiles++
+			return value
+		}()},
+		{name: "test seam projected rise", after: func() repoaudit.RepositoryReviewProgress {
+			value := base
+			value.ReviewedFiles++
+			return value
+		}(), allowProjected: true, want: true},
+		{name: "durable reviewed files", after: base, persistedRun: durableRun(1, 0), want: true},
+		{name: "durable unsupported files", after: base, persistedRun: durableRun(0, 1), want: true},
+		{name: "missing durable count", after: base, persistedRun: durableRun(1, nil)},
+		{name: "string durable count", after: base, persistedRun: durableRun("1", 0)},
+		{name: "negative durable count", after: base, persistedRun: durableRun(-1, 0)},
+		{name: "fractional durable count", after: base, persistedRun: durableRun(0.5, 0)},
+		{
+			name: "above-domain durable count", after: base,
+			persistedRun: durableRun(repositoryReviewMaximumFiles+1, 0),
+		},
+		{name: "ledger reviewed rise", after: base, outcome: repositoryReviewOutcome{
+			found: true, reviewedFiles: base.ReviewedFiles + 1,
+		}, want: true},
+		{name: "ledger unsupported rise", after: func() repoaudit.RepositoryReviewProgress {
+			value := base
+			value.UnsupportedFiles++
+			return value
+		}(), outcome: repositoryReviewOutcome{
+			found: true, unsupportedFiles: base.UnsupportedFiles + 1,
+		}, want: true},
+		{name: "initial remaining baseline is not progress", after: func() repoaudit.RepositoryReviewProgress {
+			value := base
+			value.RemainingFiles = 6
+			return value
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := base
+			if test.name == "initial remaining baseline is not progress" {
+				before.RemainingFiles = 0
+			}
+			if got := repositoryReviewFileProgressMade(
+				before,
+				test.after,
+				test.persistedRun,
+				test.outcome,
+				test.allowProjected,
+			); got != test.want {
+				t.Fatalf("file progress=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRepositoryReviewFinishIgnoresProjectedFileProgress(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := repoaudit.FileRef{
+		Path: "pkg/projected.go", BlobSHA: strings.Repeat("d", 40), SizeBytes: 80,
+		Category: "code", Mode: "100644",
+	}
+	plan, err := store.Plan(
+		t.Context(), "owner/projected-progress", "commit-projected", "inventory-projected",
+		[]repoaudit.FileRef{file}, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := 9
+	runID := "wr_projected_progress"
+	recorded, err := store.Record(t.Context(), repoaudit.RecordRequest{
+		Plan: plan, RunID: runID, CompletedFiles: []repoaudit.FileRef{},
+		Observations: []repoaudit.Observation{{
+			Model: "cheap", ScopeFiles: []repoaudit.FileRef{file},
+			Findings: []repoaudit.FindingCandidate{{
+				Severity: "high", Title: "Finding without completed coverage", File: file.Path,
+				Line: &line, Message: "The partial review found a defect.",
+				Evidence:   "The failing path is visible in the assigned evidence.",
+				Impact:     "The operation fails.",
+				Validation: repoaudit.Validation{Status: "confirmed", Summary: "confirmed"},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded.Run.ReviewedFiles != 0 || recorded.Run.RemainingFiles != 1 ||
+		len(recorded.AcceptedFindingIDs) != 1 {
+		t.Fatalf("partial record=%#v", recorded)
+	}
+
+	input := testRepositoryReviewAutomation()
+	input.Repository = plan.Repository
+	input.Name = "Projected progress"
+	input.Status = repoaudit.RepositoryReviewAutomationRunning
+	input.ActiveRunID = runID
+	input.RunIDs = []string{runID}
+	input.AutoContinue = true
+	input.Progress = repoaudit.RepositoryReviewProgress{RemainingFiles: 1, TotalBatches: 1}
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := handler.repositoryReviewControllerInstance()
+	controller.mu.Lock()
+	controller.active[automation.ID] = &repositoryReviewActiveRun{runID: runID, store: store}
+	controller.mu.Unlock()
+	persisted := &workflows.Run{Steps: map[string]workflows.StepExecution{
+		"find_bugs/record": {
+			Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{"run": map[string]any{
+				"remaining_files": 1, "reviewed_files": 0, "unsupported_files": 0,
+			}},
+		},
+	}}
+	result := &workflows.RunResult{
+		RunID: runID, Status: workflows.RunStatusSucceeded,
+		Outputs: map[string]any{
+			"remainingFiles": 1, "reviewedFiles": 1,
+			"findingIds": recorded.AcceptedFindingIDs,
+		},
+	}
+	if !repositoryReviewRunCheckpointed(persisted, result) {
+		t.Fatal("production-style record was not a verified checkpoint")
+	}
+	controller.finishAutomationRun(automation.ID, runID, result, nil, true, persisted)
+
+	paused, found, err := store.GetAutomation(t.Context(), automation.ID)
+	if err != nil || !found {
+		t.Fatalf("paused automation found=%v err=%v", found, err)
+	}
+	if paused.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		paused.PauseReason != repoaudit.RepositoryReviewPauseNoProgress ||
+		paused.Progress.CompletedBatches != 1 || paused.Progress.RemainingFiles != 1 ||
+		paused.Progress.ReviewedFiles != 0 || paused.Progress.Findings != 1 ||
+		paused.ActiveRunID != "" {
+		t.Fatalf("projected progress bypassed no-progress pause: %#v", paused)
+	}
+	if _, active := controller.activeRunSnapshot(automation.ID, runID); active {
+		t.Fatal("no-progress checkpoint admitted another batch")
+	}
+}
+
+func TestRepositoryReviewFinishPausesAfterOneNoProgressCheckpoint(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := func(
+		t *testing.T,
+		reason repoaudit.RepositoryReviewPauseReason,
+	) repoaudit.RepositoryReviewAutomation {
+		t.Helper()
+		runID := "wr_no_progress_" + strings.ReplaceAll(string(reason), "_", "-")
+		if reason == "" {
+			runID = "wr_no_progress_none"
+		}
+		input := testRepositoryReviewAutomation()
+		input.Repository = "owner/" + strings.TrimPrefix(runID, "wr_")
+		input.Name = runID
+		input.Status = repoaudit.RepositoryReviewAutomationRunning
+		input.ActiveRunID = runID
+		input.RunIDs = []string{runID}
+		input.AutoContinue = true
+		input.Progress = repoaudit.RepositoryReviewProgress{
+			RemainingFiles: 2, TotalBatches: 1,
+		}
+		automation, createErr := store.CreateAutomation(t.Context(), input)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		controller := newRepositoryReviewController(handler)
+		controller.active[automation.ID] = &repositoryReviewActiveRun{
+			runID: runID, store: store, pauseReason: reason,
+			pauseDetail: "Explicit pause wins.",
+		}
+		controller.finishAutomationRun(
+			automation.ID,
+			runID,
+			&workflows.RunResult{
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"remainingFiles": 2, "reviewedFiles": 0},
+			},
+			nil,
+			true,
+			&workflows.Run{Steps: map[string]workflows.StepExecution{
+				"find_bugs/record": {
+					Status:  workflows.RunStatusSucceeded,
+					Outputs: map[string]any{"run": map[string]any{"remaining_files": 2}},
+				},
+			}},
+		)
+		updated, found, getErr := store.GetAutomation(t.Context(), automation.ID)
+		if getErr != nil || !found {
+			t.Fatalf("updated automation found=%v err=%v", found, getErr)
+		}
+		return updated
+	}
+
+	paused := finish(t, "")
+	if paused.Status != repoaudit.RepositoryReviewAutomationPaused ||
+		paused.PauseReason != repoaudit.RepositoryReviewPauseNoProgress ||
+		paused.Progress.CompletedBatches != 1 || paused.Progress.RemainingFiles != 2 ||
+		!strings.Contains(paused.PauseDetail, "resolved zero files") {
+		t.Fatalf("no-progress pause=%#v", paused)
+	}
+	for _, reason := range []repoaudit.RepositoryReviewPauseReason{
+		repoaudit.RepositoryReviewPauseManual,
+		repoaudit.RepositoryReviewPauseGuardExpression,
+	} {
+		paused = finish(t, reason)
+		if paused.PauseReason != reason || paused.PauseDetail != "Explicit pause wins." {
+			t.Fatalf("explicit %q pause lost precedence: %#v", reason, paused)
+		}
 	}
 }
 
@@ -1357,6 +1615,14 @@ func TestRepositoryReviewCoverageExecuteAndFinishBoundaries(t *testing.T) {
 			}
 		}
 		controller := newRepositoryReviewController(handler)
+		controller.runBatch = func(
+			context.Context,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+			workflows.AgentUsageObserver,
+		) (*workflows.RunResult, error) {
+			return nil, errors.New("test-only runBatch seam")
+		}
 		active := &repositoryReviewActiveRun{runID: runID, store: store}
 		if configureActive != nil {
 			configureActive(active)
@@ -2875,6 +3141,20 @@ func TestRepositoryReviewNonnegativeIntRejectsAmbiguousNumbers(t *testing.T) {
 		},
 	}); remaining != 0 || found {
 		t.Fatalf("non-map durable result remaining=(%d, %v)", remaining, found)
+	}
+}
+
+func TestRepositoryReviewDurableRecordFileCountsRejectsNonMapRun(t *testing.T) {
+	reviewed, unsupported, found := repositoryReviewDurableRecordFileCounts(&workflows.Run{
+		Steps: map[string]workflows.StepExecution{
+			"record": {
+				Status:  workflows.RunStatusSucceeded,
+				Outputs: map[string]any{"run": true},
+			},
+		},
+	})
+	if reviewed != 0 || unsupported != 0 || found {
+		t.Fatalf("non-map durable file counts = (%d, %d, %v)", reviewed, unsupported, found)
 	}
 }
 

@@ -128,6 +128,9 @@ describe("RepositoryReviewRunsPage", () => {
       { q: "ORDER BY repository ASC", view: "grid" },
       true,
     )
+    expect(await screen.findByText("Fully reviewed files")).toBeVisible()
+    expect(screen.getByText("Finding occurrences")).toBeVisible()
+    expect(screen.getByText("13 of 49 files (27%)")).toBeVisible()
   })
 
   it("renders a first-class empty collection", async () => {

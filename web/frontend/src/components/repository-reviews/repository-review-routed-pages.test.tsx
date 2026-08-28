@@ -434,6 +434,65 @@ describe("routed repository review pages", () => {
     expect(onFindings).toHaveBeenCalled()
     expect(onIssues).toHaveBeenCalled()
     expect(screen.getByText("writer")).toBeVisible()
+    expect(screen.getByText("4 of 8 files (50%)")).toBeVisible()
+    expect(screen.getByText("Fully reviewed files")).toBeVisible()
+    expect(screen.getByText("Finding occurrences")).toBeVisible()
+    expect(
+      screen.getByText(/every required reviewer acknowledges the file/i),
+    ).toBeVisible()
+  })
+
+  it("shows truthful zero file progress for a finding-only paused campaign", async () => {
+    const pausedReview: RepositoryReviewAutomation = {
+      ...automation,
+      status: "paused",
+      pause_reason: "no_progress",
+      pause_detail:
+        "Automatic continuation stopped after a verified batch resolved zero files.",
+      progress: {
+        ...automation.progress,
+        completed_batches: 16,
+        total_batches: 32,
+        reviewed_files: 0,
+        remaining_files: 0,
+        unsupported_files: 0,
+        findings: 74,
+        scope_frozen: true,
+      },
+      scope_plan: {
+        commit_sha: "a".repeat(40),
+        policy_hash: "b".repeat(64),
+        hash: "c".repeat(64),
+        summary: "Frozen scope",
+        rationale: "",
+        warnings: [],
+        counts: {
+          total_files: 10,
+          code_type_files: 10,
+          include_files: 10,
+          excluded_files: 0,
+          selected_files: 10,
+        },
+      },
+    }
+    vi.mocked(getRepositoryReviewAutomation).mockResolvedValue(pausedReview)
+    renderPage(
+      <RepositoryReviewDetailPage
+        id={pausedReview.id}
+        onBack={vi.fn()}
+        onFindings={vi.fn()}
+        onIssues={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText("0 of 10 files (0%)")).toBeVisible()
+    expect(
+      screen.getByText(
+        /automatic continuation stopped after a verified batch/i,
+      ),
+    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "Continue" })).toBeVisible()
+    expect(screen.getByText("74")).toBeVisible()
   })
 
   it("starts an idle review from its detail page", async () => {

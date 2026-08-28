@@ -65,6 +65,7 @@ const (
 	RepositoryReviewPauseCostBudget      RepositoryReviewPauseReason = "cost_budget"
 	RepositoryReviewPauseAccountLimit    RepositoryReviewPauseReason = "account_limit"
 	RepositoryReviewPauseGuardExpression RepositoryReviewPauseReason = "guard_expression"
+	RepositoryReviewPauseNoProgress      RepositoryReviewPauseReason = "no_progress"
 	RepositoryReviewPauseRunFailed       RepositoryReviewPauseReason = "run_failed"
 	RepositoryReviewPauseServiceRestart  RepositoryReviewPauseReason = "service_restart"
 )
@@ -102,6 +103,73 @@ type RepositoryReviewProgress struct {
 	RemainingFiles   int    `json:"remaining_files"`
 	UnsupportedFiles int    `json:"unsupported_files"`
 	Findings         int    `json:"findings"`
+	// ScopeFrozen is a public projection marker derived from the internal
+	// durable scope selection. Stores never treat this caller-visible value as
+	// campaign authority.
+	ScopeFrozen bool `json:"scope_frozen,omitempty"`
+}
+
+// RepositoryReviewFileProgress is the truthful file-resolution projection for
+// one campaign. Batch counts remain operational telemetry and never determine
+// this percentage.
+type RepositoryReviewFileProgress struct {
+	ResolvedFiles int     `json:"resolved_files"`
+	TotalFiles    int     `json:"total_files"`
+	Percent       float64 `json:"percent"`
+}
+
+// RepositoryReviewAutomationFileProgress derives campaign progress from fully
+// completed and unsupported files. A frozen scope supplies the authoritative
+// total; legacy campaigns fall back to their durable file counters.
+func RepositoryReviewAutomationFileProgress(
+	automation RepositoryReviewAutomation,
+) RepositoryReviewFileProgress {
+	progress := automation.Progress
+	selected := max(0, automation.ScopePlan.Counts.SelectedFiles)
+	if automation.ScopeSelection != nil && selected > 0 {
+		resolved := min(selected, max(0, selected-max(0, progress.RemainingFiles)))
+		noFileEvidence := automation.Status != RepositoryReviewAutomationCompleted &&
+			progress.ReviewedFiles == 0 && progress.RemainingFiles == 0 &&
+			progress.UnsupportedFiles == 0
+		if noFileEvidence {
+			resolved = 0
+		}
+		if automation.Status == RepositoryReviewAutomationCompleted {
+			resolved = selected
+		}
+		return repositoryReviewFileProgress(resolved, selected, automation.Status)
+	}
+
+	resolved := max(0, progress.ReviewedFiles) + max(0, progress.UnsupportedFiles)
+	total := max(
+		max(0, progress.ReviewedFiles)+max(0, progress.RemainingFiles)+
+			max(0, progress.UnsupportedFiles),
+		resolved,
+	)
+	if automation.Status == RepositoryReviewAutomationCompleted {
+		resolved = total
+	}
+	return repositoryReviewFileProgress(resolved, total, automation.Status)
+}
+
+func repositoryReviewFileProgress(
+	resolved int,
+	total int,
+	status RepositoryReviewAutomationStatus,
+) RepositoryReviewFileProgress {
+	resolved = min(max(0, resolved), max(0, total))
+	total = max(0, total)
+	percent := 0.0
+	if status == RepositoryReviewAutomationCompleted {
+		percent = 100
+	} else if total > 0 {
+		percent = math.Round(min(100, max(0, float64(resolved)/float64(total)*100)))
+	}
+	return RepositoryReviewFileProgress{
+		ResolvedFiles: resolved,
+		TotalFiles:    total,
+		Percent:       percent,
+	}
 }
 
 type RepositoryReviewModelStats struct {
@@ -1175,7 +1243,8 @@ func validAutomationPauseReason(reason RepositoryReviewPauseReason) bool {
 	switch reason {
 	case "", RepositoryReviewPauseManual, RepositoryReviewPauseTokenBudget,
 		RepositoryReviewPauseCostBudget, RepositoryReviewPauseAccountLimit,
-		RepositoryReviewPauseGuardExpression, RepositoryReviewPauseRunFailed,
+		RepositoryReviewPauseGuardExpression, RepositoryReviewPauseNoProgress,
+		RepositoryReviewPauseRunFailed,
 		RepositoryReviewPauseServiceRestart:
 		return true
 	default:

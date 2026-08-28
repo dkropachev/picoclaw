@@ -504,6 +504,7 @@ func projectRepositoryReviewGatewayAutomation(
 ) repoaudit.RepositoryReviewAutomation {
 	automation.CampaignID = ""
 	automation.ModelCoverageSketches = nil
+	automation.Progress.ScopeFrozen = automation.ScopeSelection != nil
 	automation.ScopeSelection = nil
 	return automation
 }
