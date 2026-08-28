@@ -73,6 +73,39 @@ func TestRecoverRepositoryReviewFrozenScopeRoundTripsAfterAutomationNormalizatio
 	}
 }
 
+func TestRecoverRepositoryReviewFrozenScopeRejectsPartialHardScopeExclusion(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	inventory := reposcope.Inventory{CommitID: commit, ID: "inventory", Files: []reposcope.FileMetadata{
+		{
+			Path: "alpha/router.go", BlobID: strings.Repeat("1", 40), Size: 100,
+			Kind: reposcope.FileKindRegular, Sample: []byte("package alpha\n"),
+		},
+		{
+			Path: "zeta/service_test.go", BlobID: strings.Repeat("2", 40), Size: 120,
+			Kind: reposcope.FileKindRegular, Sample: []byte("package zeta\n"),
+		},
+	}}
+	candidates, rejected, err := reposcope.BuildCandidates(
+		inventory,
+		reposcope.Scope{CodeTypes: []reposcope.CodeType{reposcope.CodeTypeCode, reposcope.CodeTypeTest}},
+		reposcope.BuildOptions{},
+	)
+	if err != nil || len(rejected) != 0 || len(candidates) != 2 {
+		t.Fatalf("catalog = %#v, rejected=%#v, err=%v", candidates, rejected, err)
+	}
+	hardScope := map[string]any{"code_types": []string{"code"}}
+	_, _, err = RecoverRepositoryReviewFrozenScope(
+		candidates,
+		hardScope,
+		commit,
+		inventory.ID,
+		[]string{"alpha/router.go", "zeta/service_test.go"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "exact path union") {
+		t.Fatalf("partial hard-scope exclusion error = %v; candidates=%#v", err, candidates)
+	}
+}
+
 func TestRepositoryReviewRequiredAssignmentsUsesFourTaskCohort(t *testing.T) {
 	for reviewers, want := range map[int]int{1: 4, 2: 8, 32: 128} {
 		if got, err := RepositoryReviewRequiredAssignments(reviewers); err != nil || got != want {

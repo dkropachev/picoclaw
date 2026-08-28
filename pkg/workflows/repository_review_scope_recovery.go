@@ -80,6 +80,9 @@ func RecoverRepositoryReviewFrozenScope(
 	plan, _ := nativeRepositoryEvaluationParseScopePlan(filtered["scopePlan"])
 	actualPaths := nativeStringSlice(filtered["selectedPaths"])
 	sort.Strings(actualPaths)
-	_ = actualPaths // Candidate IDs were mapped one-for-one from paths above.
+	if !nativeRepositoryEvaluationStringsEqual(paths, actualPaths) {
+		return repoaudit.RepositoryReviewScopeSelection{}, repoaudit.RepositoryReviewScopePlan{},
+			errors.New("recovered repository scope did not reproduce its exact path union")
+	}
 	return selection, plan, nil
 }
