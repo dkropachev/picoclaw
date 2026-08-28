@@ -685,8 +685,9 @@ func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFin
 		t.Fatal("durable model coverage sketch was not stored")
 	}
 	updated.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	updated.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
 	if projected := projectRepositoryReviewAutomation(updated); projected.ModelCoverageSketches != nil ||
-		projected.ScopeSelection != nil {
+		projected.ScopeSelection != nil || projected.CampaignID != "" {
 		t.Fatalf(
 			"API projection exposed internal review state: sketches=%#v selection=%#v",
 			projected.ModelCoverageSketches, projected.ScopeSelection,
