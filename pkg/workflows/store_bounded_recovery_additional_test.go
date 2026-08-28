@@ -12,6 +12,18 @@ import (
 )
 
 func TestFileRunStoreGetRunBoundedRejectsPersistenceFailures(t *testing.T) {
+	t.Run("lock parent is a file", func(t *testing.T) {
+		workspace := t.TempDir()
+		blocker := filepath.Join(workspace, "blocker")
+		if err := os.WriteFile(blocker, []byte("file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store := &FileRunStore{root: filepath.Join(blocker, "workflow_runs")}
+		if _, err := store.GetRunBounded(t.Context(), "run", 1024); err == nil {
+			t.Fatal("run-store lock under a file was accepted")
+		}
+	})
+
 	t.Run("lock root", func(t *testing.T) {
 		workspace := t.TempDir()
 		if err := os.WriteFile(filepath.Join(workspace, "workflow_runs"), []byte("file"), 0o600); err != nil {

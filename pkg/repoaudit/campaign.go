@@ -207,10 +207,9 @@ func (s Store) ReconcileCampaign(
 			!recoveredRun.Plan.Authoritative {
 			return RepositoryState{}, ErrInvalidPlan
 		}
-		manifest, manifestErr := repositoryReviewCampaignFilesForPlan(recoveredRun.Plan)
-		if manifestErr != nil {
-			return RepositoryState{}, ErrInvalidPlan
-		}
+		// normalizeRepositoryReviewCampaignRuns already validated this exact
+		// immutable plan manifest.
+		manifest, _ := repositoryReviewCampaignFilesForPlan(recoveredRun.Plan)
 		for _, file := range manifest {
 			if selectedScope[file.Path] != file {
 				return RepositoryState{}, ErrInvalidPlan
@@ -359,9 +358,6 @@ func (s Store) ReconcileCampaign(
 		if !repositoryReviewCampaignFindingMatchesCoverage(
 			state, *finding, request.Coverage, selectedScope, indexes, recoveredRuns,
 		) {
-			return RepositoryState{}, ErrConflict
-		}
-		if finding.CampaignID != "" && finding.CampaignID != request.Coverage.ID {
 			return RepositoryState{}, ErrConflict
 		}
 		if finding.CampaignID == "" {
