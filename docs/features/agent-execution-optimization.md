@@ -63,6 +63,11 @@ scope items, and the structured output schema.
   bounded parallelism, repair and validate each child JSON result, combine child
   structured outputs through the schema, validate the combined object, and return
   one visible step output with managed diagnostics.
+- Structured validation recursively enforces string `pattern` expressions in
+  the bounded, linear-time Go RE2 dialect for ordinary, repaired,
+  managed-child, and combined output. One
+  request-local compiled-pattern cache keeps large arrays bounded; malformed
+  pattern declarations fail closed instead of silently disabling the contract.
 - Non-obvious constraints: managed splitting is disabled without an enabled
   JSON output contract; hidden children must not write to chat history or
   publish intermediate responses; calibration intentionally disables

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -14,6 +15,7 @@ type AgentOutputContract struct {
 	Format         string         `json:"format,omitempty"`
 	Schema         map[string]any `json:"schema,omitempty"`
 	RepairAttempts int            `json:"repair_attempts,omitempty"`
+	patterns       map[string]*regexp.Regexp
 }
 
 type StructuredOutputResult struct {
@@ -22,6 +24,11 @@ type StructuredOutputResult struct {
 	Valid      bool   `json:"valid"`
 	Error      string `json:"error,omitempty"`
 }
+
+const (
+	maxAgentOutputSchemaDepth  = 64
+	maxAgentOutputPatternBytes = 4096
+)
 
 func ParseAgentOutputContract(raw any) (*AgentOutputContract, error) {
 	if raw == nil {
@@ -54,6 +61,10 @@ func ParseAgentOutputContract(raw any) (*AgentOutputContract, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid agent output schema: %w", err)
 		}
+		patterns, err := compileJSONSchemaPatterns(schema)
+		if err != nil {
+			return nil, fmt.Errorf("invalid agent output schema: %w", err)
+		}
 		repairAttempts := nativeInt(v, "repair_attempts", 0)
 		if repairAttempts == 0 {
 			repairAttempts = nativeInt(v, "repairAttempts", 0)
@@ -68,6 +79,7 @@ func ParseAgentOutputContract(raw any) (*AgentOutputContract, error) {
 			Format:         format,
 			Schema:         schema,
 			RepairAttempts: repairAttempts,
+			patterns:       patterns,
 		}, nil
 	default:
 		return nil, fmt.Errorf("agent output must be a string or map")
@@ -98,16 +110,36 @@ func (c *AgentOutputContract) Instruction() string {
 	return b.String()
 }
 
+func (c *AgentOutputContract) Validate() error {
+	if c == nil || len(c.Schema) == 0 {
+		return nil
+	}
+	if c.patterns != nil {
+		return nil
+	}
+	patterns, err := compileJSONSchemaPatterns(c.Schema)
+	if err != nil {
+		return fmt.Errorf("invalid agent output schema: %w", err)
+	}
+	c.patterns = patterns
+	return nil
+}
+
 func ValidateAgentStructuredOutput(text string, contract *AgentOutputContract) StructuredOutputResult {
 	if !contract.Enabled() {
 		return StructuredOutputResult{Valid: true}
+	}
+	if err := contract.Validate(); err != nil {
+		return StructuredOutputResult{Valid: false, Error: err.Error()}
 	}
 	raw, parsed, err := ExtractJSONValue(text)
 	if err != nil {
 		return StructuredOutputResult{Valid: false, Error: err.Error()}
 	}
 	if len(contract.Schema) > 0 {
-		if err := validateJSONSchemaValue(parsed, contract.Schema, "$"); err != nil {
+		if err := validateJSONSchemaValueWithPatterns(
+			parsed, contract.Schema, "$", contract.patterns,
+		); err != nil {
 			return StructuredOutputResult{
 				Structured: parsed,
 				RawJSON:    raw,
@@ -382,6 +414,76 @@ func fencedJSONCandidates(text string) []string {
 }
 
 func validateJSONSchemaValue(value any, schema map[string]any, path string) error {
+	patterns, err := compileJSONSchemaPatterns(schema)
+	if err != nil {
+		return err
+	}
+	return validateJSONSchemaValueWithPatterns(
+		value,
+		schema,
+		path,
+		patterns,
+	)
+}
+
+func compileJSONSchemaPatterns(schema map[string]any) (map[string]*regexp.Regexp, error) {
+	patterns := make(map[string]*regexp.Regexp)
+	if err := compileJSONSchemaPatternsAt(schema, "$", 0, patterns); err != nil {
+		return nil, err
+	}
+	return patterns, nil
+}
+
+func compileJSONSchemaPatternsAt(
+	schema map[string]any,
+	path string,
+	depth int,
+	patterns map[string]*regexp.Regexp,
+) error {
+	if depth > maxAgentOutputSchemaDepth {
+		return fmt.Errorf("%s exceeds maximum schema depth", path)
+	}
+	if raw, configured := schema["pattern"]; configured {
+		pattern, ok := raw.(string)
+		if !ok || len(pattern) > maxAgentOutputPatternBytes {
+			return fmt.Errorf("%s pattern must be a string of at most %d bytes", path, maxAgentOutputPatternBytes)
+		}
+		if patterns[pattern] == nil {
+			compiled, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("%s pattern %q is not valid RE2 syntax: %w", path, pattern, err)
+			}
+			patterns[pattern] = compiled
+		}
+	}
+	for name, child := range schemaProperties(schema) {
+		if err := compileJSONSchemaPatternsAt(child, path+"."+name, depth+1, patterns); err != nil {
+			return err
+		}
+	}
+	if child := schemaItems(schema); len(child) > 0 {
+		if err := compileJSONSchemaPatternsAt(child, path+"[]", depth+1, patterns); err != nil {
+			return err
+		}
+	}
+	if raw, ok := schema["additionalProperties"]; ok && raw != true && raw != false {
+		child, err := normalizeSchemaMap(raw)
+		if err != nil {
+			return fmt.Errorf("%s additionalProperties schema is invalid: %w", path, err)
+		}
+		if err := compileJSONSchemaPatternsAt(child, path+".*", depth+1, patterns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateJSONSchemaValueWithPatterns(
+	value any,
+	schema map[string]any,
+	path string,
+	patterns map[string]*regexp.Regexp,
+) error {
 	if len(schema) == 0 {
 		return nil
 	}
@@ -393,6 +495,11 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 	if enumValues, ok := schema["enum"]; ok {
 		if !schemaEnumContains(enumValues, value) {
 			return fmt.Errorf("%s must be one of %v", path, enumValues)
+		}
+	}
+	if _, isString := value.(string); isString {
+		if err := validateJSONSchemaPattern(value, schema, path, patterns); err != nil {
+			return err
 		}
 	}
 	if schemaType(schema) == "string" {
@@ -424,12 +531,14 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 			}
 		}
 		props := schemaProperties(schema)
-		if err := validateJSONSchemaAdditionalProperties(obj, props, schema, path); err != nil {
+		if err := validateJSONSchemaAdditionalProperties(obj, props, schema, path, patterns); err != nil {
 			return err
 		}
 		for key, child := range props {
 			if item, ok := obj[key]; ok {
-				if err := validateJSONSchemaValue(item, child, path+"."+key); err != nil {
+				if err := validateJSONSchemaValueWithPatterns(
+					item, child, path+"."+key, patterns,
+				); err != nil {
 					return err
 				}
 			}
@@ -444,11 +553,35 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 		}
 		if itemSchema := schemaItems(schema); len(itemSchema) > 0 {
 			for i, item := range arr {
-				if err := validateJSONSchemaValue(item, itemSchema, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				if err := validateJSONSchemaValueWithPatterns(
+					item, itemSchema, fmt.Sprintf("%s[%d]", path, i), patterns,
+				); err != nil {
 					return err
 				}
 			}
 		}
+	}
+	return nil
+}
+
+func validateJSONSchemaPattern(
+	value any,
+	schema map[string]any,
+	path string,
+	patterns map[string]*regexp.Regexp,
+) error {
+	raw, configured := schema["pattern"]
+	if !configured {
+		return nil
+	}
+	pattern, _ := raw.(string)
+	expression := patterns[pattern]
+	if expression == nil {
+		return fmt.Errorf("%s schema pattern was not compiled", path)
+	}
+	text, ok := value.(string)
+	if !ok || !expression.MatchString(text) {
+		return fmt.Errorf("%s must match pattern %q", path, pattern)
 	}
 	return nil
 }
@@ -486,6 +619,7 @@ func validateJSONSchemaAdditionalProperties(
 	properties map[string]map[string]any,
 	schema map[string]any,
 	path string,
+	patterns map[string]*regexp.Regexp,
 ) error {
 	raw, constrained := schema["additionalProperties"]
 	if !constrained || raw == true {
@@ -514,10 +648,11 @@ func validateJSONSchemaAdditionalProperties(
 		return nil
 	}
 	for _, key := range keys {
-		if err := validateJSONSchemaValue(
+		if err := validateJSONSchemaValueWithPatterns(
 			value[key],
 			additionalSchema,
 			path+"."+key,
+			patterns,
 		); err != nil {
 			return err
 		}

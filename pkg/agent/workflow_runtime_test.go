@@ -2286,6 +2286,33 @@ func TestWorkflowAgentRunnerEphemeralRepairsStructuredOutputWithoutPersistence(t
 	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
 }
 
+func TestWorkflowAgentRunnerRejectsInvalidPatternBeforeProviderCall(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{`"unused"`}}
+	loop, agent, configPath, workspace := newWorkflowReadOnlyTestLoop(t, provider)
+	if agent == nil || configPath == "" || workspace == "" {
+		t.Fatal("workflow test loop fixture is incomplete")
+	}
+	req := workflowEphemeralTestRequest("Return a value.")
+	req.Output = &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"optional": map[string]any{"type": "string", "pattern": "["},
+			},
+		},
+	}
+	if _, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(), req,
+	); err == nil || !strings.Contains(err.Error(), "invalid agent output schema") {
+		t.Fatalf("invalid pattern contract error=%v", err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("invalid pattern contract reached provider: %#v", calls)
+	}
+}
+
 func TestWorkflowAgentRunnerEphemeralCreatesAndClosesStatefulProviderPerCall(t *testing.T) {
 	bootstrap := &workflowReadOnlyCaptureProvider{}
 	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, bootstrap)
