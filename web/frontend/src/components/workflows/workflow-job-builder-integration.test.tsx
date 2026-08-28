@@ -15,7 +15,7 @@ import type {
   WorkflowEditorField,
   WorkflowJobsInspection,
 } from "@/api/workflows"
-import { WorkflowsPage } from "@/components/workflows/workflows-page"
+import { WorkflowAuthoringPage } from "@/components/workflows/workflow-authoring-page"
 
 const workflowMocks = vi.hoisted(() => ({
   checkWorkflowDependencies: vi.fn(),
@@ -55,7 +55,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a>,
 }))
 
-describe("WorkflowsPage jobs and actions integration", () => {
+describe("WorkflowAuthoringPage jobs and actions integration", () => {
   beforeAll(() => {
     Object.defineProperties(HTMLElement.prototype, {
       hasPointerCapture: {
@@ -342,7 +342,7 @@ function renderWorkflowsPage() {
   })
   return render(
     <QueryClientProvider client={client}>
-      <WorkflowsPage search={{ mode: "develop" }} onSearchChange={vi.fn()} />
+      <WorkflowAuthoringPage />
     </QueryClientProvider>,
   )
 }

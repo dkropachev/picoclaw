@@ -17,15 +17,15 @@ describe("event relationship links", () => {
 
   it("encodes workflow and run identities without carrying operational data", () => {
     const workflow = "workflows/a b.yml?branch=main"
+    const workflowID = "a".repeat(43)
     const run = "wr_1/2"
 
-    expect(workflowOperateHref(workflow)).toBe(
-      "/agent/workflows?mode=operate&workflow=workflows%2Fa+b.yml%3Fbranch%3Dmain",
+    expect(workflowOperateHref(workflow)).toBeUndefined()
+    expect(workflowOperateHref(workflow, workflowID)).toBe(
+      `/agent/workflows/${workflowID}`,
     )
     const runURL = workflowRunHref(workflow, run)
-    expect(runURL).toBe(
-      "/agent/workflows?mode=operate&workflow=workflows%2Fa+b.yml%3Fbranch%3Dmain&run=wr_1%2F2",
-    )
+    expect(runURL).toBe("/agent/workflows/runs/wr_1%2F2")
     expect(runURL).not.toMatch(/payload|error|cursor/)
   })
 })

@@ -45,6 +45,37 @@ type workflowDevelopmentTestRequest struct {
 	Async     bool               `json:"async,omitempty"`
 }
 
+type workflowDevelopmentFenceRequest struct {
+	SessionID               string `json:"session_id"`
+	ExpectedSessionRevision string `json:"expected_session_revision"`
+	ExpectedDraftRevision   string `json:"expected_draft_revision"`
+}
+
+func (request workflowDevelopmentFenceRequest) workflowFence() workflows.WorkflowDevelopmentTestDraftFence {
+	return workflows.WorkflowDevelopmentTestDraftFence{
+		SessionID:               request.SessionID,
+		ExpectedSessionRevision: request.ExpectedSessionRevision,
+		ExpectedDraftRevision:   request.ExpectedDraftRevision,
+	}
+}
+
+type workflowDevelopmentReviseRequest struct {
+	workflowDevelopmentFenceRequest
+	Prompt     string  `json:"prompt,omitempty"`
+	TargetRef  string  `json:"target_ref,omitempty"`
+	YAML       *string `json:"yaml,omitempty"`
+	Regenerate bool    `json:"regenerate,omitempty"`
+}
+
+func (request workflowDevelopmentReviseRequest) reviseRequest() workflows.WorkflowDevelopmentReviseRequest {
+	return workflows.WorkflowDevelopmentReviseRequest{
+		Prompt:     request.Prompt,
+		TargetRef:  request.TargetRef,
+		YAML:       request.YAML,
+		Regenerate: request.Regenerate,
+	}
+}
+
 const workflowDevelopmentTestRequestMaxBytes = 1 << 20
 
 type workflowCancelRequest struct {
@@ -81,8 +112,13 @@ type workflowRetryRequest struct {
 }
 
 type workflowDefinitionResponse struct {
+	ID           string                        `json:"id"`
 	Ref          string                        `json:"ref"`
 	Name         string                        `json:"name,omitempty"`
+	Status       string                        `json:"status"`
+	Trigger      string                        `json:"trigger"`
+	Inputs       int                           `json:"inputs"`
+	Secrets      int                           `json:"secrets"`
 	Error        string                        `json:"error,omitempty"`
 	WorkflowCall *workflowCallContractResponse `json:"workflow_call,omitempty"`
 	EventTrigger *workflows.EventTrigger       `json:"event_trigger,omitempty"`
@@ -98,46 +134,87 @@ func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 	h.registerWorkflowInspectionRoutes(mux)
 	h.registerWorkflowAuthoringRoutes(mux)
 	mux.HandleFunc("GET /api/workflows", h.handleListWorkflows)
+	mux.HandleFunc("GET /api/workflows/definitions", h.handleListWorkflowDefinitions)
+	mux.HandleFunc("GET /api/workflows/definitions/{id}", h.handleGetWorkflowDefinition)
 	mux.HandleFunc("GET /api/workflows/settings", h.handleGetWorkflowSettings)
-	mux.HandleFunc("PATCH /api/workflows/settings", h.handlePatchWorkflowSettings)
+	mux.HandleFunc(
+		"PATCH /api/workflows/settings",
+		h.requireCollectionMutationOrigin(h.handlePatchWorkflowSettings),
+	)
 	mux.HandleFunc("GET /api/workflows/templates", h.handleListWorkflowTemplates)
 	mux.HandleFunc(
 		"POST /api/workflows/templates/{name}/install",
-		h.handleInstallWorkflowTemplate,
+		h.requireCollectionMutationOrigin(h.handleInstallWorkflowTemplate),
 	)
 	mux.HandleFunc(
 		"POST /api/workflows/dependencies/check",
 		h.handleCheckWorkflowDependencies,
 	)
 	mux.HandleFunc("GET /api/workflows/compatibility", h.handleGetWorkflowCompatibility)
-	mux.HandleFunc("POST /api/workflows/revalidate", h.handleRevalidateWorkflows)
+	mux.HandleFunc(
+		"POST /api/workflows/revalidate",
+		h.requireCollectionMutationOrigin(h.handleRevalidateWorkflows),
+	)
 	mux.HandleFunc("POST /api/workflows/validate", h.handleValidateWorkflow)
-	mux.HandleFunc("POST /api/workflows/reload", h.handleReloadWorkflows)
-	mux.HandleFunc("POST /api/workflows/run", h.handleRunWorkflow)
+	mux.HandleFunc(
+		"POST /api/workflows/reload",
+		h.requireCollectionMutationOrigin(h.handleReloadWorkflows),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/run",
+		h.requireCollectionMutationOrigin(h.handleRunWorkflow),
+	)
 	mux.HandleFunc("GET /api/workflows/development", h.handleGetWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/start", h.handleStartWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/revise", h.handleReviseWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/ai-revise", h.handleAIReviseWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/validate", h.handleValidateWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/test", h.handleTestWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/publish", h.handlePublishWorkflowDevelopment)
-	mux.HandleFunc("POST /api/workflows/development/discard", h.handleDiscardWorkflowDevelopment)
+	mux.HandleFunc(
+		"POST /api/workflows/development/start",
+		h.requireCollectionMutationOrigin(h.handleStartWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/revise",
+		h.requireCollectionMutationOrigin(h.handleReviseWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/ai-revise",
+		h.requireCollectionMutationOrigin(h.handleAIReviseWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/validate",
+		h.requireCollectionMutationOrigin(h.handleValidateWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/test",
+		h.requireCollectionMutationOrigin(h.handleTestWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/publish",
+		h.requireCollectionMutationOrigin(h.handlePublishWorkflowDevelopment),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/discard",
+		h.requireCollectionMutationOrigin(h.handleDiscardWorkflowDevelopment),
+	)
 	mux.HandleFunc("GET /api/workflows/runs", h.handleListWorkflowRuns)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}", h.handleGetWorkflowRun)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/tasks", h.handleListWorkflowHumanTasks)
 	mux.HandleFunc(
 		"POST /api/workflows/runs/{run_id}/tasks/{task_id}/resume",
-		h.handleResumeWorkflowHumanTask,
+		h.requireCollectionMutationOrigin(h.handleResumeWorkflowHumanTask),
 	)
 	mux.HandleFunc(
 		"POST /api/workflows/runs/{run_id}/tasks/{task_id}/cancel",
-		h.handleCancelWorkflowHumanTask,
+		h.requireCollectionMutationOrigin(h.handleCancelWorkflowHumanTask),
 	)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/events", h.handleGetWorkflowRunEvents)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/events/stream", h.handleStreamWorkflowRunEvents)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/graph", h.handleGetWorkflowRunGraph)
-	mux.HandleFunc("POST /api/workflows/runs/{run_id}/cancel", h.handleCancelWorkflowRun)
-	mux.HandleFunc("POST /api/workflows/runs/{run_id}/retry", h.handleRetryWorkflowRun)
+	mux.HandleFunc(
+		"POST /api/workflows/runs/{run_id}/cancel",
+		h.requireCollectionMutationOrigin(h.handleCancelWorkflowRun),
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/runs/{run_id}/retry",
+		h.requireCollectionMutationOrigin(h.handleRetryWorkflowRun),
+	)
 }
 
 func (h *Handler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +245,7 @@ func (h *Handler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, compatErr.Error(), http.StatusInternalServerError)
 		return
 	}
+	applyWorkflowDefinitionCompatibility(responseDefs, compatibility)
 	writeWorkflowJSON(w, map[string]any{"workflows": responseDefs, "compatibility": compatibility})
 }
 
@@ -179,10 +257,17 @@ func workflowDefinitionResponses(
 ) ([]workflowDefinitionResponse, error) {
 	out := make([]workflowDefinitionResponse, 0, len(defs))
 	for _, def := range defs {
+		id, idErr := workflows.WorkflowDefinitionID(def.Ref)
+		if idErr != nil {
+			return nil, idErr
+		}
 		response := workflowDefinitionResponse{
-			Ref:   def.Ref,
-			Name:  def.Name,
-			Error: def.Error,
+			ID:      id,
+			Ref:     def.Ref,
+			Name:    def.Name,
+			Status:  workflows.WorkflowValidationStatusPendingRevalidation,
+			Trigger: "none",
+			Error:   def.Error,
 		}
 		if def.Error == "" {
 			workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, opts...)
@@ -194,10 +279,15 @@ func workflowDefinitionResponses(
 					Inputs:  workflow.On.WorkflowCall.Inputs,
 					Secrets: workflow.On.WorkflowCall.Secrets,
 				}
+				response.Inputs = len(workflow.On.WorkflowCall.Inputs)
+				response.Secrets = len(workflow.On.WorkflowCall.Secrets)
 			}
+			response.Trigger = workflowDefinitionTriggerLabel(workflow)
 			// LoadLocal returns a fresh parsed workflow owned by this response,
 			// so this is a safe read-only projection with no shared runtime state.
 			response.EventTrigger = workflow.On.Event
+		} else {
+			response.Status = workflows.WorkflowValidationStatusInvalid
 		}
 		out = append(out, response)
 	}
@@ -435,6 +525,10 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	var req workflowCancelRequest
 	if err := decodeWorkflowCancelRequest(w, r, &req); err != nil {
 		if errors.Is(err, errInvalidWorkflowCancelReasonEncoding) {
@@ -495,10 +589,19 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.recordCanceledWorkflowDevelopmentRun(r.Context(), run)
-	writeWorkflowJSON(w, privacy.projectRunForBrowser(r.Context(), store, run))
+	projected := privacy.projectRunForBrowser(r.Context(), store, run)
+	if projected == nil {
+		writeWorkflowRunNotFound(w)
+		return
+	}
+	writeWorkflowJSON(w, workflowRunCollectionItemFromRun(*projected))
 }
 
 func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	var req workflowRetryRequest
 	if err := decodeStrictWorkflowJSON(r, &req, true); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
@@ -705,54 +808,104 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request) {
+	request, ok := parseCollectionListRequest(w, r, workflowRunCollectionSchema)
+	if !ok {
+		return
+	}
 	store, err := h.workflowRunStore(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "workflow_runs_unavailable",
+			"Failed to load workflow runs", -1, nil,
+		)
 		return
 	}
 	runs, err := store.ListRuns(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "workflow_runs_unavailable",
+			"Failed to load workflow runs", -1, nil,
+		)
 		return
 	}
 	privacy := newWorkflowRunPrivacySnapshot(runs)
-	writeWorkflowJSON(
-		w,
-		map[string]any{
-			"runs": privacy.projectRunsForBrowser(
-				r.Context(),
-				store,
-				runs,
-			),
-		},
-	)
+	// Privacy projection must precede filtering, total calculation, ordering,
+	// and cursor creation so hidden run identities cannot affect page metadata.
+	projected := privacy.projectRunsForBrowser(r.Context(), store, runs)
+	items := make([]workflowRunCollectionSummary, len(projected))
+	for index := range projected {
+		items[index] = workflowRunCollectionSummaryFromRun(projected[index])
+	}
+	page, err := pageWorkflowRuns(items, request)
+	if err != nil {
+		writeCollectionPageError(w, err)
+		return
+	}
+	writeCollectionJSON(w, http.StatusOK, map[string]any{
+		"runs":            page.Items,
+		"total":           page.Total,
+		"next_cursor":     page.NextCursor,
+		"canonical_query": request.Query.Canonical(),
+		"query_schema":    workflowRunSchemaWithSuggestions(items),
+	})
 }
 
 func (h *Handler) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
-	store, err := h.workflowRunStore(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	runID := r.PathValue("run_id")
+	if !validWorkflowRunResourceID(runID) {
+		writeCollectionError(
+			w, http.StatusBadRequest, "invalid_workflow_run_id",
+			"Invalid workflow run ID", -1, nil,
+		)
 		return
 	}
-	run, err := store.GetRun(r.Context(), r.PathValue("run_id"))
+	if !validateCollectionQueryParameters(w, r) {
+		return
+	}
+	store, err := h.workflowRunStore(r.Context())
+	if err != nil {
+		writeCollectionError(
+			w, http.StatusInternalServerError, "workflow_runs_unavailable",
+			"Failed to load workflow run", -1, nil,
+		)
+		return
+	}
+	run, err := store.GetRun(r.Context(), runID)
 	if err != nil || isPrivateInternalWorkflowRun(run) {
-		writeWorkflowRunNotFound(w)
+		writeCollectionError(
+			w, http.StatusNotFound, "workflow_run_not_found",
+			"Workflow run not found", -1, nil,
+		)
 		return
 	}
 	privacy, err := loadWorkflowRunPrivacySnapshot(r.Context(), store)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeCollectionError(
+			w, http.StatusInternalServerError, "workflow_runs_unavailable",
+			"Failed to load workflow run", -1, nil,
+		)
 		return
 	}
 	projected := privacy.projectRunForBrowser(r.Context(), store, run)
 	if projected == nil {
-		writeWorkflowRunNotFound(w)
+		writeCollectionError(
+			w, http.StatusNotFound, "workflow_run_not_found",
+			"Workflow run not found", -1, nil,
+		)
 		return
 	}
-	writeWorkflowJSON(w, projected)
+	writeCollectionJSON(
+		w,
+		http.StatusOK,
+		workflowRunCollectionItemFromRun(*projected),
+	)
 }
 
 func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Request) {
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	store, err := h.workflowRunStore(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -783,6 +936,10 @@ func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.Request) {
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	store, err := h.workflowRunStore(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -846,6 +1003,10 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 }
 
 func (h *Handler) handleGetWorkflowRunGraph(w http.ResponseWriter, r *http.Request) {
+	if !validWorkflowRunResourceID(r.PathValue("run_id")) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	store, err := h.workflowRunStore(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -944,7 +1105,9 @@ func (h *Handler) handleGetWorkflowDevelopment(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	payload := map[string]any{"session": session}
+	payload := map[string]any{
+		"session": projectWorkflowDevelopmentSession(session),
+	}
 	if session != nil &&
 		session.LastTest != nil &&
 		workflowDevelopmentTestStatusIsActive(session.LastTest.Status) {
@@ -953,7 +1116,7 @@ func (h *Handler) handleGetWorkflowDevelopment(w http.ResponseWriter, r *http.Re
 			workspace,
 			session,
 		)
-		payload["session"] = reconciledSession
+		payload["session"] = projectWorkflowDevelopmentSession(reconciledSession)
 		if reconciliation != nil {
 			payload["reconciliation"] = reconciliation
 		}
@@ -995,20 +1158,24 @@ func (h *Handler) handleStartWorkflowDevelopment(w http.ResponseWriter, r *http.
 			writeWorkflowJSONStatus(
 				w,
 				http.StatusConflict,
-				map[string]any{"error": err.Error(), "session": active},
+				map[string]any{
+					"error":   err.Error(),
+					"session": projectWorkflowDevelopmentSession(active),
+				},
 			)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": session})
+	writeWorkflowJSON(w, map[string]any{
+		"session": projectWorkflowDevelopmentSession(session),
+	})
 }
 
 func (h *Handler) handleReviseWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
-	var req workflows.WorkflowDevelopmentReviseRequest
-	if err := decodeOptionalWorkflowJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+	var req workflowDevelopmentReviseRequest
+	if !decodeWorkflowDevelopmentMutationJSON(w, r, &req) {
 		return
 	}
 	unlock := h.tryLockWorkflowDevelopment(w)
@@ -1022,19 +1189,26 @@ func (h *Handler) handleReviseWorkflowDevelopment(w http.ResponseWriter, r *http
 		return
 	}
 	workspace := cfg.WorkspacePath()
-	session, err := workflows.ReviseWorkflowDevelopment(
+	session, err := workflows.ReviseWorkflowDevelopmentFenced(
 		workspace,
-		req,
+		req.workflowFence(),
+		req.reviseRequest(),
 		workflowLocalOptionsFromConfig(cfg)...,
 	)
 	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
+		writeWorkflowDevelopmentMutationError(w, err)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": session})
+	writeWorkflowJSON(w, map[string]any{
+		"session": projectWorkflowDevelopmentSession(session),
+	})
 }
 
 func (h *Handler) handleValidateWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
+	var req workflowDevelopmentFenceRequest
+	if !decodeWorkflowDevelopmentMutationJSON(w, r, &req) {
+		return
+	}
 	unlock := h.tryLockWorkflowDevelopment(w)
 	if unlock == nil {
 		return
@@ -1046,15 +1220,18 @@ func (h *Handler) handleValidateWorkflowDevelopment(w http.ResponseWriter, r *ht
 		return
 	}
 	workspace := cfg.WorkspacePath()
-	session, err := workflows.ValidateWorkflowDevelopment(
+	session, err := workflows.ValidateWorkflowDevelopmentFenced(
 		workspace,
+		req.workflowFence(),
 		workflowLocalOptionsFromConfig(cfg)...,
 	)
 	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
+		writeWorkflowDevelopmentMutationError(w, err)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": session})
+	writeWorkflowJSON(w, map[string]any{
+		"session": projectWorkflowDevelopmentSession(session),
+	})
 }
 
 func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
@@ -1117,7 +1294,10 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		writeWorkflowJSONStatus(
 			w,
 			http.StatusBadRequest,
-			map[string]any{"session": recorded, "error": "workflow draft is not valid"},
+			map[string]any{
+				"session": projectWorkflowDevelopmentSession(recorded),
+				"error":   "workflow draft is not valid",
+			},
 		)
 		return
 	}
@@ -1140,7 +1320,10 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		writeWorkflowJSONStatus(
 			w,
 			http.StatusBadRequest,
-			map[string]any{"session": recorded, "error": responseError},
+			map[string]any{
+				"session": projectWorkflowDevelopmentSession(recorded),
+				"error":   responseError,
+			},
 		)
 		return
 	}
@@ -1173,7 +1356,7 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 				w,
 				http.StatusBadRequest,
 				map[string]any{
-					"session": recorded,
+					"session": projectWorkflowDevelopmentSession(recorded),
 					"error":   "selected event does not match workflow event trigger",
 				},
 			)
@@ -1284,14 +1467,21 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 				writeWorkflowJSONStatus(
 					w,
 					http.StatusBadRequest,
-					map[string]any{"session": recorded, "error": publicErr.Error()},
+					map[string]any{
+						"session": projectWorkflowDevelopmentSession(recorded),
+						"error":   publicErr.Error(),
+					},
 				)
 				return
 			}
 			writeWorkflowJSONStatus(
 				w,
 				http.StatusBadRequest,
-				map[string]any{"session": recorded, "result": publicResult, "error": publicErr.Error()},
+				map[string]any{
+					"session": projectWorkflowDevelopmentSession(recorded),
+					"result":  publicResult,
+					"error":   publicErr.Error(),
+				},
 			)
 			return
 		}
@@ -1315,11 +1505,18 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 			writeWorkflowJSONStatus(
 				w,
 				http.StatusBadRequest,
-				map[string]any{"session": recorded, "error": runErr.Error()},
+				map[string]any{
+					"session": projectWorkflowDevelopmentSession(recorded),
+					"error":   runErr.Error(),
+				},
 			)
 			return
 		}
-		writeWorkflowJSON(w, map[string]any{"session": recorded, "result": result, "error": runErr.Error()})
+		writeWorkflowJSON(w, map[string]any{
+			"session": projectWorkflowDevelopmentSession(recorded),
+			"result":  result,
+			"error":   runErr.Error(),
+		})
 		return
 	}
 	recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
@@ -1332,10 +1529,20 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		writeWorkflowDevelopmentError(w, recordErr)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": recorded, "result": result})
+	writeWorkflowJSON(w, map[string]any{
+		"session": projectWorkflowDevelopmentSession(recorded),
+		"result":  result,
+	})
 }
 
 func (h *Handler) handleDiscardWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
+	if !validateCollectionQueryParameters(w, r) {
+		return
+	}
+	var request workflows.WorkflowDevelopmentDiscardRequest
+	if !decodeCollectionJSON(w, r, &request) {
+		return
+	}
 	unlock := h.tryLockWorkflowDevelopment(w)
 	if unlock == nil {
 		return
@@ -1346,12 +1553,33 @@ func (h *Handler) handleDiscardWorkflowDevelopment(w http.ResponseWriter, r *htt
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	session, err := workflows.DiscardWorkflowDevelopment(workspace)
+	session, err := workflows.DiscardWorkflowDevelopmentFenced(
+		workspace,
+		request,
+	)
 	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
+		switch {
+		case errors.Is(err, workflows.ErrNoActiveDevelopment):
+			writeCollectionError(
+				w, http.StatusNotFound, "workflow_development_not_found",
+				"Workflow development session not found", -1, nil,
+			)
+		case errors.Is(err, workflows.ErrWorkflowSessionRevisionMismatch):
+			writeCollectionError(
+				w, http.StatusConflict, "session_revision_mismatch",
+				"Workflow development session changed", -1, nil,
+			)
+		default:
+			writeCollectionError(
+				w, http.StatusInternalServerError, "workflow_discard_failed",
+				"Failed to discard workflow development session", -1, nil,
+			)
+		}
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": session})
+	writeCollectionJSON(w, http.StatusOK, map[string]any{
+		"session": projectWorkflowDevelopmentSession(session),
+	})
 }
 
 func (h *Handler) workflowWorkspace() (string, error) {
@@ -1527,6 +1755,14 @@ func decodeOptionalWorkflowJSON(r *http.Request, dest any) error {
 		return nil
 	}
 	return err
+}
+
+func decodeWorkflowDevelopmentMutationJSON(
+	w http.ResponseWriter,
+	r *http.Request,
+	dest any,
+) bool {
+	return decodeCollectionJSON(w, r, dest)
 }
 
 func decodeStrictWorkflowJSON(r *http.Request, dest any, optional bool) error {
@@ -1710,11 +1946,11 @@ func writeAcceptedWorkflowDevelopmentTestRun(
 	started.Release()
 
 	payload := map[string]any{
-		"session": fallbackSession,
+		"session": projectWorkflowDevelopmentSession(fallbackSession),
 		"result":  runningResult,
 	}
 	if recordErr == nil {
-		payload["session"] = recordedSession
+		payload["session"] = projectWorkflowDevelopmentSession(recordedSession)
 	} else {
 		runID := ""
 		if runningResult != nil {
@@ -1853,6 +2089,32 @@ func writeWorkflowDevelopmentError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+}
+
+func writeWorkflowDevelopmentMutationError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, workflows.ErrNoActiveDevelopment):
+		writeCollectionError(
+			w, http.StatusNotFound, "workflow_development_not_found",
+			"Workflow development session not found", -1, nil,
+		)
+	case errors.Is(err, workflows.ErrWorkflowDevelopmentFenceMismatch):
+		writeCollectionError(
+			w, http.StatusConflict, "workflow_development_fence_mismatch",
+			"Workflow development session changed", -1, nil,
+		)
+	case errors.Is(err, workflows.ErrActiveDevelopmentExists),
+		errors.Is(err, workflows.ErrDevelopmentBusy):
+		writeCollectionError(
+			w, http.StatusConflict, "workflow_development_busy",
+			"Workflow development operation is already in progress", -1, nil,
+		)
+	default:
+		writeCollectionError(
+			w, http.StatusBadRequest, "workflow_development_invalid",
+			"Workflow development request is invalid", -1, nil,
+		)
 	}
 }
 
@@ -2206,7 +2468,10 @@ func workflowDevelopmentTestStatusIsActive(status string) bool {
 
 func (h *Handler) tryLockWorkflowDevelopment(w http.ResponseWriter) func() {
 	if !h.workflowDevelopmentMu.TryLock() {
-		http.Error(w, "workflow development operation already in progress", http.StatusConflict)
+		writeCollectionError(
+			w, http.StatusConflict, "workflow_development_busy",
+			"Workflow development operation is already in progress", -1, nil,
+		)
 		return nil
 	}
 	return h.workflowDevelopmentMu.Unlock

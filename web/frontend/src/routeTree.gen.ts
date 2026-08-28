@@ -72,6 +72,10 @@ import { Route as ModelEvaluationsIdEditRouteImport } from './routes/model-evalu
 import { Route as ModelEvaluationsIdCorpusRouteImport } from './routes/model-evaluations_.$id_.corpus'
 import { Route as ModelEvaluationsEvaluationIDReportRouteImport } from './routes/model-evaluations_.$evaluationID.report'
 import { Route as EventSourcesIdEditRouteImport } from './routes/event-sources_.$id_.edit'
+import { Route as AgentWorkflowsSettingsRouteImport } from './routes/agent/workflows_.settings'
+import { Route as AgentWorkflowsRunsRouteImport } from './routes/agent/workflows_.runs'
+import { Route as AgentWorkflowsNewRouteImport } from './routes/agent/workflows_.new'
+import { Route as AgentWorkflowsIdRouteImport } from './routes/agent/workflows_.$id'
 import { Route as AgentToolsIdRouteImport } from './routes/agent/tools_.$id'
 import { Route as AgentSkillsNewRouteImport } from './routes/agent/skills_.new'
 import { Route as AgentSkillsIdRouteImport } from './routes/agent/skills_.$id'
@@ -89,6 +93,8 @@ import { Route as RepositoryReviewsIdIssuesDraftIdRouteImport } from './routes/r
 import { Route as RepositoryReviewsIdFindingsFindingIdRouteImport } from './routes/repository-reviews_.$id_.findings_.$findingId'
 import { Route as ModelsRoutersNameEditRouteImport } from './routes/models_.routers_.$name_.edit'
 import { Route as ModelsAliasesNameEditRouteImport } from './routes/models_.aliases_.$name_.edit'
+import { Route as AgentWorkflowsRunsIdRouteImport } from './routes/agent/workflows_.runs_.$id'
+import { Route as AgentWorkflowsIdEditRouteImport } from './routes/agent/workflows_.$id_.edit'
 import { Route as AgentToolsSettingsAdaptationRouteImport } from './routes/agent/tools_.settings_.adaptation'
 import { Route as AgentToolsIdEditRouteImport } from './routes/agent/tools_.$id_.edit'
 import { Route as AgentMcpServersNewRouteImport } from './routes/agent/mcp_.servers_.new'
@@ -432,6 +438,26 @@ const EventSourcesIdEditRoute = EventSourcesIdEditRouteImport.update({
   path: '/event-sources/$id/edit',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentWorkflowsSettingsRoute = AgentWorkflowsSettingsRouteImport.update({
+  id: '/workflows_/settings',
+  path: '/workflows/settings',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentWorkflowsRunsRoute = AgentWorkflowsRunsRouteImport.update({
+  id: '/workflows_/runs',
+  path: '/workflows/runs',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentWorkflowsNewRoute = AgentWorkflowsNewRouteImport.update({
+  id: '/workflows_/new',
+  path: '/workflows/new',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentWorkflowsIdRoute = AgentWorkflowsIdRouteImport.update({
+  id: '/workflows_/$id',
+  path: '/workflows/$id',
+  getParentRoute: () => AgentRoute,
+} as any)
 const AgentToolsIdRoute = AgentToolsIdRouteImport.update({
   id: '/tools_/$id',
   path: '/tools/$id',
@@ -521,6 +547,16 @@ const ModelsAliasesNameEditRoute = ModelsAliasesNameEditRouteImport.update({
   id: '/models_/aliases_/$name_/edit',
   path: '/models/aliases/$name/edit',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AgentWorkflowsRunsIdRoute = AgentWorkflowsRunsIdRouteImport.update({
+  id: '/workflows_/runs_/$id',
+  path: '/workflows/runs/$id',
+  getParentRoute: () => AgentRoute,
+} as any)
+const AgentWorkflowsIdEditRoute = AgentWorkflowsIdEditRouteImport.update({
+  id: '/workflows_/$id_/edit',
+  path: '/workflows/$id/edit',
+  getParentRoute: () => AgentRoute,
 } as any)
 const AgentToolsSettingsAdaptationRoute =
   AgentToolsSettingsAdaptationRouteImport.update({
@@ -645,6 +681,10 @@ export interface FileRoutesByFullPath {
   '/agent/skills/$id': typeof AgentSkillsIdRoute
   '/agent/skills/new': typeof AgentSkillsNewRoute
   '/agent/tools/$id': typeof AgentToolsIdRoute
+  '/agent/workflows/$id': typeof AgentWorkflowsIdRoute
+  '/agent/workflows/new': typeof AgentWorkflowsNewRoute
+  '/agent/workflows/runs': typeof AgentWorkflowsRunsRoute
+  '/agent/workflows/settings': typeof AgentWorkflowsSettingsRoute
   '/event-sources/$id/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
@@ -670,6 +710,8 @@ export interface FileRoutesByFullPath {
   '/agent/mcp/servers/new': typeof AgentMcpServersNewRoute
   '/agent/tools/$id/edit': typeof AgentToolsIdEditRoute
   '/agent/tools/settings/adaptation': typeof AgentToolsSettingsAdaptationRoute
+  '/agent/workflows/$id/edit': typeof AgentWorkflowsIdEditRoute
+  '/agent/workflows/runs/$id': typeof AgentWorkflowsRunsIdRoute
   '/models/aliases/$name/edit': typeof ModelsAliasesNameEditRoute
   '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews/$id/findings/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -739,6 +781,10 @@ export interface FileRoutesByTo {
   '/agent/skills/$id': typeof AgentSkillsIdRoute
   '/agent/skills/new': typeof AgentSkillsNewRoute
   '/agent/tools/$id': typeof AgentToolsIdRoute
+  '/agent/workflows/$id': typeof AgentWorkflowsIdRoute
+  '/agent/workflows/new': typeof AgentWorkflowsNewRoute
+  '/agent/workflows/runs': typeof AgentWorkflowsRunsRoute
+  '/agent/workflows/settings': typeof AgentWorkflowsSettingsRoute
   '/event-sources/$id/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations/$id/corpus': typeof ModelEvaluationsIdCorpusRoute
@@ -764,6 +810,8 @@ export interface FileRoutesByTo {
   '/agent/mcp/servers/new': typeof AgentMcpServersNewRoute
   '/agent/tools/$id/edit': typeof AgentToolsIdEditRoute
   '/agent/tools/settings/adaptation': typeof AgentToolsSettingsAdaptationRoute
+  '/agent/workflows/$id/edit': typeof AgentWorkflowsIdEditRoute
+  '/agent/workflows/runs/$id': typeof AgentWorkflowsRunsIdRoute
   '/models/aliases/$name/edit': typeof ModelsAliasesNameEditRoute
   '/models/routers/$name/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews/$id/findings/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -834,6 +882,10 @@ export interface FileRoutesById {
   '/agent/skills_/$id': typeof AgentSkillsIdRoute
   '/agent/skills_/new': typeof AgentSkillsNewRoute
   '/agent/tools_/$id': typeof AgentToolsIdRoute
+  '/agent/workflows_/$id': typeof AgentWorkflowsIdRoute
+  '/agent/workflows_/new': typeof AgentWorkflowsNewRoute
+  '/agent/workflows_/runs': typeof AgentWorkflowsRunsRoute
+  '/agent/workflows_/settings': typeof AgentWorkflowsSettingsRoute
   '/event-sources_/$id_/edit': typeof EventSourcesIdEditRoute
   '/model-evaluations_/$evaluationID/report': typeof ModelEvaluationsEvaluationIDReportRoute
   '/model-evaluations_/$id_/corpus': typeof ModelEvaluationsIdCorpusRoute
@@ -859,6 +911,8 @@ export interface FileRoutesById {
   '/agent/mcp_/servers_/new': typeof AgentMcpServersNewRoute
   '/agent/tools_/$id_/edit': typeof AgentToolsIdEditRoute
   '/agent/tools_/settings_/adaptation': typeof AgentToolsSettingsAdaptationRoute
+  '/agent/workflows_/$id_/edit': typeof AgentWorkflowsIdEditRoute
+  '/agent/workflows_/runs_/$id': typeof AgentWorkflowsRunsIdRoute
   '/models_/aliases_/$name_/edit': typeof ModelsAliasesNameEditRoute
   '/models_/routers_/$name_/edit': typeof ModelsRoutersNameEditRoute
   '/repository-reviews_/$id_/findings_/$findingId': typeof RepositoryReviewsIdFindingsFindingIdRoute
@@ -930,6 +984,10 @@ export interface FileRouteTypes {
     | '/agent/skills/$id'
     | '/agent/skills/new'
     | '/agent/tools/$id'
+    | '/agent/workflows/$id'
+    | '/agent/workflows/new'
+    | '/agent/workflows/runs'
+    | '/agent/workflows/settings'
     | '/event-sources/$id/edit'
     | '/model-evaluations/$evaluationID/report'
     | '/model-evaluations/$id/corpus'
@@ -955,6 +1013,8 @@ export interface FileRouteTypes {
     | '/agent/mcp/servers/new'
     | '/agent/tools/$id/edit'
     | '/agent/tools/settings/adaptation'
+    | '/agent/workflows/$id/edit'
+    | '/agent/workflows/runs/$id'
     | '/models/aliases/$name/edit'
     | '/models/routers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId'
@@ -1024,6 +1084,10 @@ export interface FileRouteTypes {
     | '/agent/skills/$id'
     | '/agent/skills/new'
     | '/agent/tools/$id'
+    | '/agent/workflows/$id'
+    | '/agent/workflows/new'
+    | '/agent/workflows/runs'
+    | '/agent/workflows/settings'
     | '/event-sources/$id/edit'
     | '/model-evaluations/$evaluationID/report'
     | '/model-evaluations/$id/corpus'
@@ -1049,6 +1113,8 @@ export interface FileRouteTypes {
     | '/agent/mcp/servers/new'
     | '/agent/tools/$id/edit'
     | '/agent/tools/settings/adaptation'
+    | '/agent/workflows/$id/edit'
+    | '/agent/workflows/runs/$id'
     | '/models/aliases/$name/edit'
     | '/models/routers/$name/edit'
     | '/repository-reviews/$id/findings/$findingId'
@@ -1118,6 +1184,10 @@ export interface FileRouteTypes {
     | '/agent/skills_/$id'
     | '/agent/skills_/new'
     | '/agent/tools_/$id'
+    | '/agent/workflows_/$id'
+    | '/agent/workflows_/new'
+    | '/agent/workflows_/runs'
+    | '/agent/workflows_/settings'
     | '/event-sources_/$id_/edit'
     | '/model-evaluations_/$evaluationID/report'
     | '/model-evaluations_/$id_/corpus'
@@ -1143,6 +1213,8 @@ export interface FileRouteTypes {
     | '/agent/mcp_/servers_/new'
     | '/agent/tools_/$id_/edit'
     | '/agent/tools_/settings_/adaptation'
+    | '/agent/workflows_/$id_/edit'
+    | '/agent/workflows_/runs_/$id'
     | '/models_/aliases_/$name_/edit'
     | '/models_/routers_/$name_/edit'
     | '/repository-reviews_/$id_/findings_/$findingId'
@@ -1667,6 +1739,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EventSourcesIdEditRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agent/workflows_/settings': {
+      id: '/agent/workflows_/settings'
+      path: '/workflows/settings'
+      fullPath: '/agent/workflows/settings'
+      preLoaderRoute: typeof AgentWorkflowsSettingsRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/workflows_/runs': {
+      id: '/agent/workflows_/runs'
+      path: '/workflows/runs'
+      fullPath: '/agent/workflows/runs'
+      preLoaderRoute: typeof AgentWorkflowsRunsRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/workflows_/new': {
+      id: '/agent/workflows_/new'
+      path: '/workflows/new'
+      fullPath: '/agent/workflows/new'
+      preLoaderRoute: typeof AgentWorkflowsNewRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/workflows_/$id': {
+      id: '/agent/workflows_/$id'
+      path: '/workflows/$id'
+      fullPath: '/agent/workflows/$id'
+      preLoaderRoute: typeof AgentWorkflowsIdRouteImport
+      parentRoute: typeof AgentRoute
+    }
     '/agent/tools_/$id': {
       id: '/agent/tools_/$id'
       path: '/tools/$id'
@@ -1786,6 +1886,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ModelsAliasesNameEditRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agent/workflows_/runs_/$id': {
+      id: '/agent/workflows_/runs_/$id'
+      path: '/workflows/runs/$id'
+      fullPath: '/agent/workflows/runs/$id'
+      preLoaderRoute: typeof AgentWorkflowsRunsIdRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/workflows_/$id_/edit': {
+      id: '/agent/workflows_/$id_/edit'
+      path: '/workflows/$id/edit'
+      fullPath: '/agent/workflows/$id/edit'
+      preLoaderRoute: typeof AgentWorkflowsIdEditRouteImport
+      parentRoute: typeof AgentRoute
+    }
     '/agent/tools_/settings_/adaptation': {
       id: '/agent/tools_/settings_/adaptation'
       path: '/tools/settings/adaptation'
@@ -1899,6 +2013,10 @@ interface AgentRouteChildren {
   AgentSkillsIdRoute: typeof AgentSkillsIdRoute
   AgentSkillsNewRoute: typeof AgentSkillsNewRoute
   AgentToolsIdRoute: typeof AgentToolsIdRoute
+  AgentWorkflowsIdRoute: typeof AgentWorkflowsIdRoute
+  AgentWorkflowsNewRoute: typeof AgentWorkflowsNewRoute
+  AgentWorkflowsRunsRoute: typeof AgentWorkflowsRunsRoute
+  AgentWorkflowsSettingsRoute: typeof AgentWorkflowsSettingsRoute
   AgentAgentsIdActivityRoute: typeof AgentAgentsIdActivityRoute
   AgentAgentsIdCapabilitiesRoute: typeof AgentAgentsIdCapabilitiesRoute
   AgentAgentsIdEditRoute: typeof AgentAgentsIdEditRoute
@@ -1906,6 +2024,8 @@ interface AgentRouteChildren {
   AgentMcpServersNewRoute: typeof AgentMcpServersNewRoute
   AgentToolsIdEditRoute: typeof AgentToolsIdEditRoute
   AgentToolsSettingsAdaptationRoute: typeof AgentToolsSettingsAdaptationRoute
+  AgentWorkflowsIdEditRoute: typeof AgentWorkflowsIdEditRoute
+  AgentWorkflowsRunsIdRoute: typeof AgentWorkflowsRunsIdRoute
   AgentMcpServersNameEditRoute: typeof AgentMcpServersNameEditRoute
 }
 
@@ -1923,6 +2043,10 @@ const AgentRouteChildren: AgentRouteChildren = {
   AgentSkillsIdRoute: AgentSkillsIdRoute,
   AgentSkillsNewRoute: AgentSkillsNewRoute,
   AgentToolsIdRoute: AgentToolsIdRoute,
+  AgentWorkflowsIdRoute: AgentWorkflowsIdRoute,
+  AgentWorkflowsNewRoute: AgentWorkflowsNewRoute,
+  AgentWorkflowsRunsRoute: AgentWorkflowsRunsRoute,
+  AgentWorkflowsSettingsRoute: AgentWorkflowsSettingsRoute,
   AgentAgentsIdActivityRoute: AgentAgentsIdActivityRoute,
   AgentAgentsIdCapabilitiesRoute: AgentAgentsIdCapabilitiesRoute,
   AgentAgentsIdEditRoute: AgentAgentsIdEditRoute,
@@ -1930,6 +2054,8 @@ const AgentRouteChildren: AgentRouteChildren = {
   AgentMcpServersNewRoute: AgentMcpServersNewRoute,
   AgentToolsIdEditRoute: AgentToolsIdEditRoute,
   AgentToolsSettingsAdaptationRoute: AgentToolsSettingsAdaptationRoute,
+  AgentWorkflowsIdEditRoute: AgentWorkflowsIdEditRoute,
+  AgentWorkflowsRunsIdRoute: AgentWorkflowsRunsIdRoute,
   AgentMcpServersNameEditRoute: AgentMcpServersNameEditRoute,
 }
 

@@ -106,10 +106,12 @@ const replayedEvent: EventView = {
   },
 }
 
+const dispatchWorkflowID = "a".repeat(43)
 const dispatchA: DispatchView = {
   id: "dsp_11111111111111111111111111111111",
   event_id: eventA.id,
   workflow_ref: "workflows/github-issue-triage.yml",
+  workflow_id: dispatchWorkflowID,
   workflow_revision:
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   run_id: "wr_event_1",
@@ -472,11 +474,11 @@ describe("EventsPage", () => {
     )
     expect(screen.getByRole("link", { name: "Open workflow" })).toHaveAttribute(
       "href",
-      "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml",
+      `/agent/workflows/${dispatchWorkflowID}`,
     )
     expect(screen.getByRole("link", { name: "Open run" })).toHaveAttribute(
       "href",
-      "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_event_1",
+      "/agent/workflows/runs/wr_event_1",
     )
     expect(
       screen.getByRole("link", { name: "Dispatch permalink" }),

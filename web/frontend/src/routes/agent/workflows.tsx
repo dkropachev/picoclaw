@@ -2,37 +2,78 @@ import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
 import {
-  type WorkflowsRouteSearch,
-  normalizeWorkflowsSearch,
-  workflowsSearchIsCanonical,
-} from "@/components/workflows/workflow-route-search"
-import { WorkflowsPage } from "@/components/workflows/workflows-page"
+  normalizeWorkflowDefinitionsSearch,
+  workflowCollectionSearchIsCanonical,
+} from "@/components/workflows/workflow-collection-route-state"
+import { WorkflowDefinitionsCollectionPage } from "@/components/workflows/workflow-collections"
+import type { CollectionRouteSearch } from "@/hooks/use-collection-route-state"
 
 export const Route = createFileRoute("/agent/workflows")({
-  validateSearch: normalizeWorkflowsSearch,
-  component: WorkflowsRoute,
+  validateSearch: normalizeWorkflowDefinitionsSearch,
+  component: WorkflowDefinitionsRoute,
 })
 
-function WorkflowsRoute() {
-  const locationSearch = useLocation({
-    select: (location) => location.search,
+function WorkflowDefinitionsRoute() {
+  const location = useLocation({
+    select: ({ pathname, search }) => ({ pathname, search }),
   })
   const navigate = Route.useNavigate()
   const search = useMemo(
-    () => normalizeWorkflowsSearch({ ...locationSearch }),
-    [locationSearch],
-  )
-  useEffect(() => {
-    if (!workflowsSearchIsCanonical({ ...locationSearch }, search)) {
-      void navigate({ search, replace: true })
-    }
-  }, [locationSearch, navigate, search])
-  const changeSearch = useCallback(
-    (next: WorkflowsRouteSearch, replace = false) => {
-      void navigate({ search: next, replace })
-    },
-    [navigate],
+    () => normalizeWorkflowDefinitionsSearch({ ...location.search }),
+    [location.search],
   )
 
-  return <WorkflowsPage search={search} onSearchChange={changeSearch} />
+  useEffect(() => {
+    if (location.pathname !== "/agent/workflows") return
+    if (!workflowCollectionSearchIsCanonical({ ...location.search }, search)) {
+      void navigate({ search, replace: true })
+    }
+  }, [location.pathname, location.search, navigate, search])
+
+  const changeSearch = useCallback(
+    (next: CollectionRouteSearch, replace = false) => {
+      if (location.pathname === "/agent/workflows") {
+        void navigate({ search: next, replace })
+      }
+    },
+    [location.pathname, navigate],
+  )
+
+  return (
+    <WorkflowDefinitionsCollectionPage
+      search={search}
+      onSearchChange={changeSearch}
+      onOpen={(workflow) =>
+        void navigate({
+          to: "/agent/workflows/$id",
+          params: { id: workflow.id },
+          search,
+        })
+      }
+      onEdit={(workflow) =>
+        void navigate({
+          to: "/agent/workflows/$id/edit",
+          params: { id: workflow.id },
+          search,
+        })
+      }
+      onRun={(workflow) =>
+        void navigate({
+          to: "/agent/workflows/$id",
+          params: { id: workflow.id },
+          search,
+        })
+      }
+      onNew={() => void navigate({ to: "/agent/workflows/new", search })}
+      onRuns={() =>
+        void navigate({
+          to: "/agent/workflows/runs",
+          search: { q: "ORDER BY created DESC" },
+        })
+      }
+      onSettings={() =>
+        void navigate({ to: "/agent/workflows/settings", search })
+      }
+    />
+  )
 }

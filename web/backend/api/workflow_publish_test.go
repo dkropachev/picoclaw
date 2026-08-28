@@ -57,6 +57,18 @@ func TestWorkflowDevelopmentPublishUsesExactDependencyAndRevisionFences(t *testi
 	if strings.Contains(recorder.Body.String(), workspace) {
 		t.Fatalf("publish response leaked workspace path: %s", recorder.Body.String())
 	}
+	var published struct {
+		WorkflowID  string `json:"workflow_id"`
+		WorkflowRef string `json:"workflow_ref"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &published); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+	wantWorkflowID, err := workflows.WorkflowDefinitionID(session.TargetWorkflowRef)
+	if err != nil || published.WorkflowRef != session.TargetWorkflowRef ||
+		published.WorkflowID != wantWorkflowID {
+		t.Fatalf("publish identity = %#v, %v; want %q", published, err, wantWorkflowID)
+	}
 	resolved, err := (workflows.Resolver{
 		WorkspaceDir:   workspace,
 		DefinitionsDir: "automation",

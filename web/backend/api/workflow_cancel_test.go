@@ -422,12 +422,12 @@ func TestWorkflowRunListHTTPProjectionDistinguishesPrunedAndUnreadableAncestor(
 				)
 			}
 			var response struct {
-				Runs []workflows.Run `json:"runs"`
+				Runs []workflowRunCollectionSummary `json:"runs"`
 			}
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("workflow run list JSON error = %v", err)
 			}
-			var listedChild *workflows.Run
+			var listedChild *workflowRunCollectionSummary
 			for index := range response.Runs {
 				if response.Runs[index].ID == childID {
 					listedChild = &response.Runs[index]
@@ -444,10 +444,28 @@ func TestWorkflowRunListHTTPProjectionDistinguishesPrunedAndUnreadableAncestor(
 					test.wantOrigin,
 				)
 			}
-			if listedChild.Error != test.wantError {
+			if strings.Contains(recorder.Body.String(), `"error"`) {
+				t.Fatalf("workflow run list leaked diagnostic: %s", recorder.Body.String())
+			}
+			detail := httptest.NewRecorder()
+			detailRequest := httptest.NewRequest(
+				http.MethodGet,
+				"/api/workflows/runs/"+childID,
+				nil,
+			)
+			detailRequest.SetPathValue("run_id", childID)
+			handler.handleGetWorkflowRun(detail, detailRequest)
+			if detail.Code != http.StatusOK {
+				t.Fatalf("workflow run detail = %d %s", detail.Code, detail.Body.String())
+			}
+			var detailed workflows.Run
+			if err := json.Unmarshal(detail.Body.Bytes(), &detailed); err != nil {
+				t.Fatal(err)
+			}
+			if detailed.Error != test.wantError {
 				t.Fatalf(
-					"listed child error = %q, want %q",
-					listedChild.Error,
+					"detailed child error = %q, want %q",
+					detailed.Error,
 					test.wantError,
 				)
 			}

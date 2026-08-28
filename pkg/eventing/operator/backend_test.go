@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 func TestBackendProjectsSanitizedEventAndExactPayload(t *testing.T) {
@@ -184,6 +185,10 @@ func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {
 		page.Dispatches[0].WorkflowRef != dispatch.WorkflowRef {
 		t.Fatalf("dispatch projection = %#v", page.Dispatches[0])
 	}
+	wantWorkflowID, idErr := workflows.WorkflowDefinitionID(dispatch.WorkflowRef)
+	if idErr != nil || page.Dispatches[0].WorkflowID != wantWorkflowID {
+		t.Fatalf("dispatch workflow ID = %q, %v; want %q", page.Dispatches[0].WorkflowID, idErr, wantWorkflowID)
+	}
 	assertSerializedSecretsAbsent(t, page)
 	serialized, err := json.Marshal(page.Dispatches[0])
 	if err != nil {
@@ -197,6 +202,7 @@ func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {
 		"id",
 		"event_id",
 		"workflow_ref",
+		"workflow_id",
 		"workflow_revision",
 		"run_id",
 		"status",

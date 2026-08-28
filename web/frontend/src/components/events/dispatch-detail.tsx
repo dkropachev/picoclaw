@@ -168,6 +168,10 @@ function DispatchSummary({ dispatch }: { dispatch: DispatchView }) {
 
 function DispatchRelationships({ dispatch }: { dispatch: DispatchView }) {
   const { t } = useTranslation()
+  const workflowHref = workflowOperateHref(
+    dispatch.workflow_ref,
+    dispatch.workflow_id,
+  )
   return (
     <EventPanel
       title={t("pages.events.dispatch_detail.relationships", "Relationships")}
@@ -178,9 +182,11 @@ function DispatchRelationships({ dispatch }: { dispatch: DispatchView }) {
         <RelationshipLink href={exactEventHref(dispatch.event_id)}>
           {t("pages.events.dispatch_detail.open_event", "Open event")}
         </RelationshipLink>
-        <RelationshipLink href={workflowOperateHref(dispatch.workflow_ref)}>
-          {t("pages.events.dispatch_detail.open_workflow", "Open workflow")}
-        </RelationshipLink>
+        {workflowHref ? (
+          <RelationshipLink href={workflowHref}>
+            {t("pages.events.dispatch_detail.open_workflow", "Open workflow")}
+          </RelationshipLink>
+        ) : null}
         {dispatch.run_id ? (
           <RelationshipLink
             href={workflowRunHref(dispatch.workflow_ref, dispatch.run_id)}

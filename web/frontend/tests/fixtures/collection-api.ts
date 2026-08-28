@@ -146,6 +146,50 @@ const querySchemas = {
     field("reason", "string"),
     field("config_key", "string"),
   ]),
+  workflowDefinitions: schema([
+    field("ref", "string"),
+    field("name", "string"),
+    field("status", "enum", [
+      "valid",
+      "invalid",
+      "pending_revalidation",
+      "needs_review",
+    ]),
+    field("trigger", "enum", [
+      "manual",
+      "schedule",
+      "channel_message",
+      "command",
+      "runtime_event",
+      "event",
+      "workflow_call",
+      "multiple",
+      "none",
+    ]),
+    field("inputs", "number"),
+    field("secrets", "number"),
+  ]),
+  workflowRuns: schema([
+    field("id", "string"),
+    field("workflow", "string"),
+    field("status", "enum", [
+      "running",
+      "waiting",
+      "succeeded",
+      "failed",
+      "canceled",
+      "skipped",
+    ]),
+    field("session", "string"),
+    field("origin", "enum", [
+      "manual",
+      "external_event",
+      "external_event_draft_test",
+    ]),
+    field("created", "timestamp"),
+    field("updated", "timestamp"),
+    field("completed", "timestamp"),
+  ]),
 }
 
 export const accountVisualIDs = {
@@ -331,6 +375,80 @@ const eligibleEventChannelAdapters = [
     name: "secondary-inbox",
     channel_type: "deltachat",
     channel_enabled: true,
+  },
+] as const
+
+export const workflowVisualIDs = {
+  summarize: "tpC6ep8WMy-TZuE8ZnYqpGVom7Yf4X3fhF01wP528JU",
+  triage: "16gg1Z-92X47AwRe90IKZvdf1a6cNTojnoCdW4qXQQw",
+  review: "W41H3aj_ymqpg1aP8Vs6TJXUddSpYgjW7VRRcTHj_-I",
+  run: "wr_visual_running",
+} as const
+
+const workflowDefinitions = [
+  {
+    id: workflowVisualIDs.review,
+    ref: "workflows/code-review.yml",
+    name: "Repository code review",
+    status: "needs_review",
+    trigger: "workflow_call",
+    inputs: 3,
+    secrets: 1,
+  },
+  {
+    id: workflowVisualIDs.triage,
+    ref: "workflows/github-issue-triage.yml",
+    name: "GitHub issue triage",
+    status: "valid",
+    trigger: "event",
+    inputs: 0,
+    secrets: 0,
+  },
+  {
+    id: workflowVisualIDs.summarize,
+    ref: "workflows/summarize-text.yml",
+    name: "Summarize text",
+    status: "valid",
+    trigger: "multiple",
+    inputs: 2,
+    secrets: 0,
+  },
+] as const
+
+const workflowRuns = [
+  {
+    id: workflowVisualIDs.run,
+    workflow_id: workflowVisualIDs.summarize,
+    workflow_ref: "workflows/summarize-text.yml",
+    status: "running",
+    session: "workflow:manual:visual",
+    created_at: "2026-08-25T14:20:00Z",
+    updated_at: "2026-08-25T14:28:00Z",
+  },
+  {
+    id: "wr_visual_event",
+    workflow_id: workflowVisualIDs.triage,
+    workflow_ref: "workflows/github-issue-triage.yml",
+    status: "succeeded",
+    session: "workflow:event:visual",
+    origin: {
+      kind: "external_event",
+      event_id: `ev_${"1".repeat(32)}`,
+      dispatch_id: `dsp_${"2".repeat(32)}`,
+      root_run_id: "wr_visual_event",
+    },
+    created_at: "2026-08-25T13:55:00Z",
+    updated_at: "2026-08-25T14:00:00Z",
+    completed_at: "2026-08-25T14:00:00Z",
+  },
+  {
+    id: "wr_visual_failed",
+    workflow_id: workflowVisualIDs.review,
+    workflow_ref: "workflows/code-review.yml",
+    status: "failed",
+    created_at: "2026-08-24T18:15:00Z",
+    updated_at: "2026-08-24T18:16:00Z",
+    completed_at: "2026-08-24T18:16:00Z",
   },
 ] as const
 
@@ -1213,6 +1331,24 @@ export async function installCollectionVisualMocks(
               "ORDER BY category ASC, name ASC",
             query_schema: querySchemas.tools,
           })
+        case "/api/workflows/definitions":
+          return json(route, {
+            workflows: state === "empty" ? [] : workflowDefinitions,
+            total: state === "empty" ? 0 : workflowDefinitions.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY ref ASC",
+            query_schema: querySchemas.workflowDefinitions,
+          })
+        case "/api/workflows/runs":
+          return json(route, {
+            runs: state === "empty" ? [] : workflowRuns,
+            total: state === "empty" ? 0 : workflowRuns.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY created DESC",
+            query_schema: querySchemas.workflowRuns,
+          })
         case "/api/accounts/models":
           return json(route, modelOptions())
       }
@@ -1362,6 +1498,36 @@ export async function installCollectionVisualMocks(
                 code: "event_source_not_found",
                 message: "Event source not found",
               },
+              404,
+            )
+      }
+      const workflowDefinitionID = decodedTail(
+        path,
+        "/api/workflows/definitions/",
+      )
+      if (workflowDefinitionID && !workflowDefinitionID.includes("/")) {
+        const workflow = workflowDefinitions.find(
+          (item) => item.id === workflowDefinitionID,
+        )
+        return workflow
+          ? json(route, { workflow })
+          : json(
+              route,
+              {
+                code: "workflow_definition_not_found",
+                message: "Workflow definition not found",
+              },
+              404,
+            )
+      }
+      const workflowRunID = decodedTail(path, "/api/workflows/runs/")
+      if (workflowRunID && !workflowRunID.includes("/")) {
+        const run = workflowRuns.find((item) => item.id === workflowRunID)
+        return run
+          ? json(route, run)
+          : json(
+              route,
+              { code: "workflow_run_not_found", message: "Run not found" },
               404,
             )
       }
@@ -1545,6 +1711,8 @@ function isCollectionList(path: string) {
     "/api/repository-reviews/profiles",
     "/api/skills",
     "/api/tools",
+    "/api/workflows/definitions",
+    "/api/workflows/runs",
   ].includes(path)
 }
 

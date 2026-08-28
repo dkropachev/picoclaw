@@ -451,12 +451,57 @@
       "owningSpec": "docs/features/workflows.md",
       "implementationGlobs": [
         "src/routes/agent/workflows.tsx",
-        "src/components/workflows/**"
+        "src/routes/agent/workflows_.new.tsx",
+        "src/routes/agent/workflows_.$id.tsx",
+        "src/routes/agent/workflows_.$id_.edit.tsx",
+        "src/routes/agent/workflows_.settings.tsx",
+        "src/api/workflows.ts",
+        "src/components/workflows/workflow-collection-route-state.ts",
+        "src/components/workflows/workflow-collections.tsx",
+        "src/components/workflows/workflow-definition-detail-page.tsx",
+        "src/components/workflows/workflow-authoring-route-page.tsx",
+        "src/components/workflows/workflow-settings-page.tsx",
+        "src/components/workflows/workflow-authoring-page.tsx"
       ],
-      "capabilities": ["create", "detail", "edit"],
-      "views": ["list"],
-      "status": "legacy",
-      "routes": { "list": "/agent/workflows" }
+      "capabilities": [
+        "query",
+        "pagination",
+        "create",
+        "detail",
+        "edit",
+        "settings"
+      ],
+      "views": ["list", "table", "grid"],
+      "status": "standard",
+      "routes": {
+        "list": "/agent/workflows",
+        "new": "/agent/workflows/new",
+        "detail": "/agent/workflows/:id",
+        "edit": "/agent/workflows/:id/edit",
+        "settings": "/agent/workflows/settings"
+      }
+    },
+    {
+      "key": "workflow-runs",
+      "route": "/agent/workflows/runs",
+      "owningSpec": "docs/features/workflows.md",
+      "implementationGlobs": [
+        "src/routes/agent/workflows_.runs.tsx",
+        "src/routes/agent/workflows_.runs_.$id.tsx",
+        "src/api/workflows.ts",
+        "src/components/workflows/workflow-collection-route-state.ts",
+        "src/components/workflows/workflow-collections.tsx",
+        "src/components/workflows/workflow-run-detail-page.tsx",
+        "src/components/workflows/workflow-authoring-page.tsx"
+      ],
+      "capabilities": ["query", "pagination", "detail"],
+      "views": ["list", "table"],
+      "status": "exempt",
+      "exemptionReason": "Workflow runs are an operational execution log rendered with shared collection primitives, not an administrative inventory.",
+      "routes": {
+        "list": "/agent/workflows/runs",
+        "detail": "/agent/workflows/runs/:id"
+      }
     },
     {
       "key": "git-workspaces",

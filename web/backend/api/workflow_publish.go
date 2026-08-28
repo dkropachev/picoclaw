@@ -78,7 +78,20 @@ func (h *Handler) handlePublishWorkflowDevelopment(w http.ResponseWriter, r *htt
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeWorkflowJSON(w, result)
+	workflowID, idErr := workflows.WorkflowDefinitionID(result.WorkflowRef)
+	if idErr != nil {
+		writeWorkflowPublishErrorCode(
+			w,
+			http.StatusInternalServerError,
+			"workflow_publish_projection_failed",
+		)
+		return
+	}
+	writeWorkflowJSON(w, map[string]any{
+		"workflow_ref": result.WorkflowRef,
+		"workflow_id":  workflowID,
+		"session":      projectWorkflowDevelopmentSession(result.Session),
+	})
 }
 
 func decodeWorkflowDevelopmentPublishRequest(

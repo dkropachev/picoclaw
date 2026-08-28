@@ -27,12 +27,13 @@ func TestHandleAIReviseWorkflowDevelopmentAppliesFencedYAML(t *testing.T) {
 	configPath := writeWorkflowAITestConfig(t, workspace)
 	h := NewHandler(configPath)
 
-	if _, err := workflows.StartWorkflowDevelopment(
+	started, err := workflows.StartWorkflowDevelopment(
 		ctx,
 		workspace,
 		workflows.RuntimeCompatibility{PicoclawVersion: "v1.0.0", GitCommit: "abc123"},
 		workflows.WorkflowDevelopmentStartRequest{Prompt: "summarize support issues"},
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
 	}
 
@@ -55,9 +56,15 @@ func TestHandleAIReviseWorkflowDevelopmentAppliesFencedYAML(t *testing.T) {
 		return "```yaml\n" + aiYAML + "```", nil
 	}
 
-	body := `{"prompt":"revise into a triage workflow","target_ref":"workflows/support-triage.yml"}`
+	body := fmt.Sprintf(
+		`{"session_id":%q,"expected_session_revision":%q,"expected_draft_revision":%q,"prompt":"revise into a triage workflow","target_ref":"workflows/support-triage.yml"}`,
+		started.ID,
+		started.SessionRevision,
+		started.DraftRevision,
+	)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/development/ai-revise", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	h.handleAIReviseWorkflowDevelopment(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -87,6 +94,7 @@ func TestHandleAIReviseWorkflowDevelopmentRequiresActiveSession(t *testing.T) {
 	h := NewHandler(writeWorkflowAITestConfig(t, t.TempDir()))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/development/ai-revise", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
 
 	h.handleAIReviseWorkflowDevelopment(rec, req)
 
@@ -102,6 +110,7 @@ func TestHandleAIReviseWorkflowDevelopmentRejectsConcurrentDevelopmentOperation(
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/development/ai-revise", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
 	h.handleAIReviseWorkflowDevelopment(rec, req)
 
 	if rec.Code != http.StatusConflict {

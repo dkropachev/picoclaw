@@ -17,6 +17,7 @@ import (
 )
 
 type workflowAIReviseRequest struct {
+	workflowDevelopmentFenceRequest
 	Prompt    string  `json:"prompt,omitempty"`
 	TargetRef string  `json:"target_ref,omitempty"`
 	YAML      *string `json:"yaml,omitempty"`
@@ -39,8 +40,7 @@ var runWorkflowAuthorAgent workflowAuthorAgent = defaultRunWorkflowAuthorAgent
 
 func (h *Handler) handleAIReviseWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
 	var req workflowAIReviseRequest
-	if err := decodeOptionalWorkflowJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+	if !decodeWorkflowDevelopmentMutationJSON(w, r, &req) {
 		return
 	}
 	unlock := h.tryLockWorkflowDevelopment(w)
@@ -61,17 +61,23 @@ func (h *Handler) handleAIReviseWorkflowDevelopment(w http.ResponseWriter, r *ht
 		TargetRef: req.TargetRef,
 		YAML:      req.YAML,
 	}
-	if _, reviseErr := workflows.ReviseWorkflowDevelopment(
+	revised, reviseErr := workflows.ReviseWorkflowDevelopmentFenced(
 		workspace,
+		req.workflowFence(),
 		reviseReq,
 		localOpts...,
-	); reviseErr != nil {
-		writeWorkflowDevelopmentError(w, reviseErr)
+	)
+	if reviseErr != nil {
+		writeWorkflowDevelopmentMutationError(w, reviseErr)
 		return
 	}
-	session, err := workflows.ValidateWorkflowDevelopment(workspace, localOpts...)
+	session, err := workflows.ValidateWorkflowDevelopmentFenced(
+		workspace,
+		workflowDevelopmentSessionFence(revised),
+		localOpts...,
+	)
 	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
+		writeWorkflowDevelopmentMutationError(w, err)
 		return
 	}
 	defs, err := workflows.ListLocal(r.Context(), workspace, workflowLocalOptionsFromConfig(cfg)...)
@@ -89,19 +95,41 @@ func (h *Handler) handleAIReviseWorkflowDevelopment(w http.ResponseWriter, r *ht
 		writeWorkflowJSONStatus(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
-	_, err = workflows.ReviseWorkflowDevelopment(workspace, workflows.WorkflowDevelopmentReviseRequest{
-		YAML: &nextYAML,
-	}, localOpts...)
+	applied, err := workflows.ReviseWorkflowDevelopmentFenced(
+		workspace,
+		workflowDevelopmentSessionFence(session),
+		workflows.WorkflowDevelopmentReviseRequest{YAML: &nextYAML},
+		localOpts...,
+	)
 	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
+		writeWorkflowDevelopmentMutationError(w, err)
 		return
 	}
-	session, err = workflows.ValidateWorkflowDevelopment(workspace, localOpts...)
+	session, err = workflows.ValidateWorkflowDevelopmentFenced(
+		workspace,
+		workflowDevelopmentSessionFence(applied),
+		localOpts...,
+	)
 	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
+		writeWorkflowDevelopmentMutationError(w, err)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": session})
+	writeWorkflowJSON(w, map[string]any{
+		"session": projectWorkflowDevelopmentSession(session),
+	})
+}
+
+func workflowDevelopmentSessionFence(
+	session *workflows.WorkflowDevelopmentSession,
+) workflows.WorkflowDevelopmentTestDraftFence {
+	if session == nil {
+		return workflows.WorkflowDevelopmentTestDraftFence{}
+	}
+	return workflows.WorkflowDevelopmentTestDraftFence{
+		SessionID:               session.ID,
+		ExpectedSessionRevision: session.SessionRevision,
+		ExpectedDraftRevision:   session.DraftRevision,
+	}
 }
 
 func defaultRunWorkflowAuthorAgent(

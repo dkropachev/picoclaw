@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- Routed authoring and run-detail pages share established workflow form helpers during the hard cutover. */
 import {
   IconActivity,
   IconAlertTriangle,
@@ -6,14 +7,10 @@ import {
   IconDeviceFloppy,
   IconExternalLink,
   IconGitBranch,
-  IconPencil,
   IconPlayerPlay,
-  IconPlayerStop,
   IconRefresh,
-  IconReload,
   IconRocket,
   IconRotateClockwise,
-  IconSettings,
   IconSparkles,
   IconTrash,
 } from "@tabler/icons-react"
@@ -27,11 +24,9 @@ import {
   useRef,
   useState,
 } from "react"
-import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
-  WorkflowAPIError,
   type WorkflowCompatibilitySummary,
   type WorkflowDefinition,
   type WorkflowDeliveryPayload,
@@ -42,36 +37,28 @@ import {
   type WorkflowInputDefinition,
   type WorkflowRun,
   type WorkflowRunEvent,
-  type WorkflowSettingsValues,
   type WorkflowTemplateCatalogEntry,
   type WorkflowValidationIssue,
   type WorkflowValidationStamp,
   aiReviseWorkflowDevelopment,
-  cancelWorkflowRun,
   checkWorkflowDependencies,
   discardWorkflowDevelopment,
   executeWorkflowDevelopmentTrigger,
+  getWorkflowCompatibility,
   getWorkflowDevelopment,
   getWorkflowRun,
   getWorkflowRunEvents,
   getWorkflowRunGraph,
-  getWorkflowSettings,
   installWorkflowTemplate,
   listWorkflowRuns,
   listWorkflowTemplates,
-  listWorkflows,
-  patchWorkflowSettings,
   publishWorkflowDevelopment,
-  reloadWorkflows,
-  retryWorkflowRun,
   revalidateWorkflows,
   reviseWorkflowDevelopment,
-  runWorkflow,
   startWorkflowDevelopment,
   validateWorkflowDevelopment,
   workflowRunEventsStreamURL,
 } from "@/api/workflows"
-import { PageHeader } from "@/components/page-header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -101,16 +88,7 @@ import {
   type WorkflowBuilderSection,
   WorkflowBuilderTabs,
 } from "./workflow-builder-tabs"
-import {
-  WorkflowCancelDialog,
-  type WorkflowCancelTarget,
-} from "./workflow-cancel-dialog"
-import { WorkflowCapabilityCatalog } from "./workflow-capability-catalog"
 import { WorkflowDefinitionInspector } from "./workflow-definition-inspector"
-import {
-  workflowDependencyFence,
-  workflowDependencyFenceMessage,
-} from "./workflow-dependency-fence"
 import { WorkflowDraftTestReviewDialog } from "./workflow-draft-test-review-dialog"
 import {
   type WorkflowEditorMode,
@@ -127,14 +105,10 @@ import {
 } from "./workflow-publish-readiness"
 import { workflowDraftTestRepairPrompt } from "./workflow-repair-context"
 import {
-  type WorkflowPageMode,
-  type WorkflowsRouteSearch,
   isWorkflowRunID,
   navigableWorkflowRef,
-  normalizeWorkflowsSearch,
-} from "./workflow-route-search"
+} from "./workflow-route-identities"
 import { trustedWorkflowRunOrigin } from "./workflow-run-origin"
-import { WorkflowSettingsDialog } from "./workflow-settings-dialog"
 import { WorkflowTemplateCatalog } from "./workflow-template-catalog"
 import {
   WorkflowTriggerEditor,
@@ -171,12 +145,6 @@ const workflowTerminalEventKinds = new Set([
 ])
 
 type DraftEditorMode = WorkflowEditorMode
-type WorkflowRunDetailState =
-  | "none"
-  | "loading"
-  | "ready"
-  | "not-found"
-  | "unavailable"
 type DevelopmentPendingAction =
   | "start-ai"
   | "start"
@@ -218,32 +186,8 @@ type WorkflowDependencyDraftSnapshot = {
   targetRef: string
   yaml: string
 }
-type WorkflowRepairStart = {
-  ref: string
-  status?: string
-}
 type WorkflowRunInputValues = Record<string, string>
 type WorkflowRunSecretValues = Record<string, string>
-type WorkflowRunSubmission = {
-  ref: string
-  expected_dependency_revision: string
-  inputs?: Record<string, unknown>
-  secrets?: Record<string, string>
-  session?: string
-  delivery?: WorkflowDeliveryPayload
-  async: boolean
-}
-type WorkflowRetrySubmission = {
-  runID: string
-  workflowRef: string
-  expectedDependencyRevision: string
-  secrets?: Record<string, string>
-  secretsJSON: string
-}
-type WorkflowCancelSubmission = {
-  runID: string
-  reason: string
-}
 type WorkflowTriggerExecutionSubmission = Extract<
   WorkflowTriggerSimulatorState,
   { status: "ready" }
@@ -267,16 +211,18 @@ const initialJobEditorActivity: WorkflowJobEditorActivity = {
   conflict: false,
 }
 
-export function WorkflowsPage({
-  search,
-  onSearchChange,
+export function WorkflowAuthoringPage({
+  showTemplates = true,
+  onDevelopmentConflict,
+  onOpenRun,
+  onPublished,
 }: {
-  search: WorkflowsRouteSearch
-  onSearchChange: (search: WorkflowsRouteSearch, replace?: boolean) => void
+  showTemplates?: boolean
+  onDevelopmentConflict?: (session: WorkflowDevelopmentSession) => void
+  onOpenRun?: (runID: string) => void
+  onPublished?: (workflowID: string, workflowRef: string) => void
 }) {
-  const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const requestedMode = search.mode ?? "develop"
   const [triggerEditorActivity, setTriggerEditorActivity] =
     useState<WorkflowTriggerEditorActivity>(initialTriggerEditorActivity)
   const [jobEditorActivity, setJobEditorActivity] =
@@ -292,87 +238,7 @@ export function WorkflowsPage({
     workflowTriggerEditorBlockingMessage(triggerEditorActivity) ??
     workflowJobEditorBlockingMessage(jobEditorActivity)
   const triggerEditorBlocked = triggerEditorBlockingMessage != null
-  const [heldOperateRoute, setHeldOperateRoute] = useState(false)
-  const reconciledHeldRouteRef = useRef(false)
-  const holdOperateRoute =
-    requestedMode === "operate" && (triggerEditorBlocked || heldOperateRoute)
-  const mode = holdOperateRoute ? "develop" : requestedMode
-  const query = search.q ?? ""
-  const selectedRunID = search.run ?? null
-  const selectedWorkflowRef = search.workflow ?? null
-  const updateRouteSearch = useCallback(
-    (
-      patch: Partial<Record<keyof WorkflowsRouteSearch, string | undefined>>,
-      replace = false,
-    ) => {
-      const next = normalizeWorkflowsSearch({ ...search, ...patch })
-      onSearchChange(next, replace)
-    },
-    [onSearchChange, search],
-  )
-  useEffect(() => {
-    if (requestedMode !== "operate") {
-      setHeldOperateRoute(false)
-      reconciledHeldRouteRef.current = false
-      return
-    }
-    if (triggerEditorBlocked) {
-      setHeldOperateRoute(true)
-    }
-    if (!holdOperateRoute || reconciledHeldRouteRef.current) {
-      return
-    }
-    reconciledHeldRouteRef.current = true
-    toast.warning(
-      triggerEditorBlockingMessage ??
-        "Pending trigger builder changes were retained in Develop mode.",
-    )
-    updateRouteSearch({ mode: undefined }, true)
-  }, [
-    holdOperateRoute,
-    requestedMode,
-    triggerEditorBlocked,
-    triggerEditorBlockingMessage,
-    updateRouteSearch,
-  ])
-  const setMode = useCallback(
-    (nextMode: WorkflowPageMode) => {
-      if (nextMode === mode) {
-        return
-      }
-      if (nextMode === "operate" && triggerEditorBlockingMessage != null) {
-        toast.warning(triggerEditorBlockingMessage)
-        return
-      }
-      setHeldOperateRoute(false)
-      reconciledHeldRouteRef.current = false
-      updateRouteSearch(
-        { mode: nextMode === "develop" ? undefined : nextMode },
-        false,
-      )
-    },
-    [mode, triggerEditorBlockingMessage, updateRouteSearch],
-  )
-  const setQuery = useCallback(
-    (nextQuery: string) => updateRouteSearch({ q: nextQuery }, true),
-    [updateRouteSearch],
-  )
-  const setSelectedRunID = useCallback(
-    (runID: string) => {
-      if (runID !== selectedRunID) {
-        updateRouteSearch({ run: runID }, false)
-      }
-    },
-    [selectedRunID, updateRouteSearch],
-  )
-  const setSelectedWorkflowRef = useCallback(
-    (workflowRef: string) => {
-      if (workflowRef !== selectedWorkflowRef) {
-        updateRouteSearch({ workflow: workflowRef }, false)
-      }
-    },
-    [selectedWorkflowRef, updateRouteSearch],
-  )
+  const [selectedRunID, setSelectedRunID] = useState<string | null>(null)
   const [startPrompt, setStartPrompt] = useState("")
   const [startTargetRef, setStartTargetRef] = useState("")
   const [draftPrompt, setDraftPrompt] = useState("")
@@ -382,15 +248,6 @@ export function WorkflowsPage({
     useState<DraftEditorMode>("yaml")
   const [eventTriggerInspection, setEventTriggerInspection] =
     useState<WorkflowTriggerInspectionState>(initialEventTriggerInspection)
-  const [runInputValues, setRunInputValues] = useState<WorkflowRunInputValues>(
-    {},
-  )
-  const [runSecretValues, setRunSecretValues] =
-    useState<WorkflowRunSecretValues>({})
-  const [runSecretsJSON, setRunSecretsJSON] = useState("{}")
-  const [runSession, setRunSession] = useState("")
-  const [runDeliveryJSON, setRunDeliveryJSON] = useState("{}")
-  const [retrySecretsJSON, setRetrySecretsJSON] = useState("{}")
   const [lastDraftTest, setLastDraftTest] = useState<DraftTestSnapshot | null>(
     null,
   )
@@ -398,18 +255,14 @@ export function WorkflowsPage({
     useState<DraftEditorSnapshot | null>(null)
   const [streamedRunID, setStreamedRunID] = useState<string | null>(null)
   const [streamedEvents, setStreamedEvents] = useState<WorkflowRunEvent[]>([])
-  const [eventStreamActive, setEventStreamActive] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [cancelTarget, setCancelTarget] = useState<WorkflowCancelTarget | null>(
-    null,
-  )
+  const [, setEventStreamActive] = useState(false)
   const [dependencyDraftSnapshot, setDependencyDraftSnapshot] =
     useState<WorkflowDependencyDraftSnapshot | null>(null)
   const dependencySnapshotCounter = useRef(0)
 
-  const workflowsQuery = useQuery({
-    queryKey: ["workflows"],
-    queryFn: listWorkflows,
+  const compatibilityQuery = useQuery({
+    queryKey: ["workflows", "compatibility"],
+    queryFn: getWorkflowCompatibility,
   })
   const developmentQuery = useQuery({
     queryKey: ["workflows", "development"],
@@ -418,16 +271,11 @@ export function WorkflowsPage({
   const templatesQuery = useQuery({
     queryKey: ["workflows", "templates"],
     queryFn: listWorkflowTemplates,
-    enabled: mode === "develop",
-  })
-  const settingsQuery = useQuery({
-    queryKey: ["workflows", "settings"],
-    queryFn: getWorkflowSettings,
-    enabled: settingsOpen,
+    enabled: showTemplates,
   })
   const runsQuery = useQuery({
     queryKey: ["workflows", "runs"],
-    queryFn: listWorkflowRuns,
+    queryFn: ({ signal }) => listWorkflowRuns({}, signal),
     refetchInterval: 5000,
   })
   const runQuery = useQuery({
@@ -441,29 +289,6 @@ export function WorkflowsPage({
     retry: false,
   })
   const selectedRun = runQuery.data
-  const selectedRunOrigin = trustedWorkflowRunOrigin(selectedRun?.origin)
-  const retryWorkflowRef =
-    selectedRun == null || selectedRun.workflow_ref.startsWith("draft:")
-      ? null
-      : selectedRun.workflow_ref
-  const retryDependencyQuery = useQuery({
-    queryKey: ["workflows", "dependencies", "published", retryWorkflowRef],
-    queryFn: ({ signal }) => {
-      if (retryWorkflowRef == null) {
-        throw new Error(
-          "Select a published workflow run to check dependencies.",
-        )
-      }
-      return checkWorkflowDependencies({ ref: retryWorkflowRef }, signal)
-    },
-    enabled:
-      mode === "operate" &&
-      retryWorkflowRef != null &&
-      selectedRun != null &&
-      terminalStatuses.has(selectedRun.status) &&
-      selectedRunOrigin?.kind !== "external_event_draft_test",
-    retry: false,
-  })
   const eventsQuery = useQuery({
     queryKey: ["workflows", "runs", selectedRunID, "events"],
     queryFn: () => getWorkflowRunEvents(selectedRunID ?? ""),
@@ -471,14 +296,6 @@ export function WorkflowsPage({
     refetchInterval:
       selectedRunID == null || runQuery.data == null ? false : 3000,
   })
-  const graphQuery = useQuery({
-    queryKey: ["workflows", "runs", selectedRunID, "graph"],
-    queryFn: () => getWorkflowRunGraph(selectedRunID ?? ""),
-    enabled: selectedRunID != null && runQuery.data != null,
-    refetchInterval:
-      selectedRunID == null || runQuery.data == null ? false : 5000,
-  })
-
   const authoritativeSession = developmentQuery.data?.session
   const session =
     developmentSessionConflict?.baseSession ??
@@ -534,44 +351,11 @@ export function WorkflowsPage({
         signal,
       )
     },
-    enabled: mode === "develop" && dependencyDraftSnapshot != null,
-    retry: false,
-  })
-  const publishedDependencyQuery = useQuery({
-    queryKey: ["workflows", "dependencies", "published", selectedWorkflowRef],
-    queryFn: ({ signal }) => {
-      if (selectedWorkflowRef == null) {
-        throw new Error("Select a published workflow to check dependencies.")
-      }
-      return checkWorkflowDependencies({ ref: selectedWorkflowRef }, signal)
-    },
-    enabled: mode === "operate" && selectedWorkflowRef != null,
+    enabled: dependencyDraftSnapshot != null,
     retry: false,
   })
   const runs = useMemo(() => runsQuery.data?.runs ?? [], [runsQuery.data?.runs])
-  const workflows = useMemo(
-    () => workflowsQuery.data?.workflows ?? [],
-    [workflowsQuery.data?.workflows],
-  )
-  const compatibility = workflowsQuery.data?.compatibility
-  const compatibilityByRef = useMemo(() => {
-    const map = new Map<string, WorkflowValidationStamp>()
-    for (const stamp of compatibility?.workflows ?? []) {
-      map.set(stamp.workflow_ref, stamp)
-    }
-    return map
-  }, [compatibility?.workflows])
-
-  const runDetailState: WorkflowRunDetailState =
-    selectedRunID == null
-      ? "none"
-      : selectedRun != null
-        ? "ready"
-        : runQuery.isPending
-          ? "loading"
-          : workflowRunWasNotFound(runQuery.error)
-            ? "not-found"
-            : "unavailable"
+  const compatibility = compatibilityQuery.data
   const queriedEvents = useMemo(
     () => eventsQuery.data?.events ?? [],
     [eventsQuery.data?.events],
@@ -608,7 +392,10 @@ export function WorkflowsPage({
       return {
         ...current,
         status: draftRun.status,
-        error: draftRun.error || draftRun.cancel_reason,
+        error:
+          selectedRun?.id === draftRun.id
+            ? selectedRun.error || selectedRun.cancel_reason
+            : current.error,
         testedAt: draftRun.completed_at ?? new Date().toISOString(),
       }
     })
@@ -658,30 +445,6 @@ export function WorkflowsPage({
   }, [applySessionDraft, developmentSessionConflict])
 
   useEffect(() => {
-    if (workflowsQuery.isPending || runsQuery.isPending) {
-      return
-    }
-    const patch: Partial<WorkflowsRouteSearch> = {}
-    if (selectedWorkflowRef == null && workflows.length > 0) {
-      patch.workflow = workflows[0].ref
-    }
-    if (selectedRunID == null && runs.length > 0) {
-      patch.run = runs[0].id
-    }
-    if (patch.workflow || patch.run) {
-      updateRouteSearch(patch, true)
-    }
-  }, [
-    runs,
-    runsQuery.isPending,
-    selectedRunID,
-    selectedWorkflowRef,
-    updateRouteSearch,
-    workflows,
-    workflowsQuery.isPending,
-  ])
-
-  useEffect(() => {
     if (
       selectedRunID == null ||
       selectedRun?.id !== selectedRunID ||
@@ -729,10 +492,6 @@ export function WorkflowsPage({
       source.close()
     }
   }, [queryClient, selectedRun?.id, selectedRunID])
-
-  useEffect(() => {
-    setRetrySecretsJSON("{}")
-  }, [selectedRunID])
 
   useEffect(() => {
     if (developmentQuery.data === undefined) {
@@ -802,20 +561,10 @@ export function WorkflowsPage({
   ])
 
   useEffect(() => {
-    setLastDraftTest(draftTestSnapshotFromSession(session))
+    const snapshot = draftTestSnapshotFromSession(session)
+    setLastDraftTest(snapshot)
+    if (snapshot?.runID) setSelectedRunID(snapshot.runID)
   }, [session])
-
-  const filteredRuns = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    if (needle === "") {
-      return runs
-    }
-    return runs.filter((run) =>
-      [run.id, run.workflow_ref, run.status, run.session]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(needle)),
-    )
-  }, [query, runs])
 
   const invalidWorkflows = useMemo(
     () =>
@@ -875,58 +624,6 @@ export function WorkflowsPage({
   const currentDependencyReport =
     dependencyCheckState === "current" ? dependencyQuery.data : undefined
   const dependencyReady = currentDependencyReport?.ready === true
-  const selectedWorkflow = useMemo(
-    () => workflows.find((workflow) => workflow.ref === selectedWorkflowRef),
-    [selectedWorkflowRef, workflows],
-  )
-  const publishedDependencyState: WorkflowDependencyCheckState =
-    mode !== "operate" || selectedWorkflowRef == null
-      ? "idle"
-      : publishedDependencyQuery.isFetching
-        ? "loading"
-        : publishedDependencyQuery.isError
-          ? "error"
-          : publishedDependencyQuery.data == null
-            ? "loading"
-            : "current"
-  const publishedDependencyReport =
-    publishedDependencyState === "current"
-      ? publishedDependencyQuery.data
-      : undefined
-  const retryDependencyState: WorkflowDependencyCheckState =
-    mode !== "operate" ||
-    retryWorkflowRef == null ||
-    selectedRun == null ||
-    !terminalStatuses.has(selectedRun.status) ||
-    selectedRunOrigin?.kind === "external_event_draft_test"
-      ? "idle"
-      : retryDependencyQuery.isFetching
-        ? "loading"
-        : retryDependencyQuery.isError
-          ? "error"
-          : retryDependencyQuery.data == null
-            ? "loading"
-            : "current"
-  const retryDependencyReport =
-    retryDependencyState === "current" ? retryDependencyQuery.data : undefined
-  const runDependencyFence = workflowDependencyFence(
-    selectedWorkflowRef,
-    publishedDependencyState,
-    publishedDependencyReport,
-  )
-  const retryDependencyFence = workflowDependencyFence(
-    retryWorkflowRef,
-    retryDependencyState,
-    retryDependencyReport,
-  )
-  const selectedWorkflowContractSignature = useMemo(
-    () => workflowRunContractSignature(selectedWorkflow ?? null),
-    [selectedWorkflow],
-  )
-  useEffect(() => {
-    setRunInputValues(workflowRunInitialInputValues(selectedWorkflow ?? null))
-    setRunSecretValues(workflowRunInitialSecretValues(selectedWorkflow ?? null))
-  }, [selectedWorkflow, selectedWorkflowContractSignature])
   const triggerInspectionCurrent =
     eventTriggerInspection.yaml === draftYAML &&
     eventTriggerInspection.status === "ready" &&
@@ -947,24 +644,6 @@ export function WorkflowsPage({
     payloadError: triggerSimulationReadinessError,
     runningTest: draftTestRunning,
   })
-  const runSecretsJSONError = jsonStringObjectValidationMessage(
-    runSecretsJSON,
-    "Secrets",
-  )
-  const runPayloadError = firstMessage([
-    workflowRunInputValidationMessage(selectedWorkflow ?? null, runInputValues),
-    runSecretsJSONError,
-    workflowRunSecretValidationMessage(
-      selectedWorkflow ?? null,
-      runSecretValues,
-      runSecretsJSON,
-    ),
-    jsonObjectValidationMessage(runDeliveryJSON, "Delivery"),
-  ])
-  const retryPayloadError = jsonStringObjectValidationMessage(
-    retrySecretsJSON,
-    "Retry secrets",
-  )
   const publishReadinessMessage = workflowPublishReadinessMessage({
     session,
     targetRef: draftTargetRef,
@@ -976,51 +655,35 @@ export function WorkflowsPage({
     dependencyState: dependencyCheckState,
     dependencyReport: currentDependencyReport,
   })
-  const selectedWorkflowStamp =
-    selectedWorkflowRef == null
-      ? undefined
-      : compatibilityByRef.get(selectedWorkflowRef)
-  const selectedRunWorkflow =
-    selectedRun == null || selectedRun.workflow_ref.startsWith("draft:")
-      ? null
-      : (workflows.find(
-          (workflow) => workflow.ref === selectedRun.workflow_ref,
-        ) ?? null)
-  const selectedRunWorkflowStamp =
-    selectedRun == null || selectedRun.workflow_ref.startsWith("draft:")
-      ? undefined
-      : compatibilityByRef.get(selectedRun.workflow_ref)
-  const workflowRunBaseMessage = workflowRunReadinessMessage(
-    selectedWorkflow ?? null,
-    selectedWorkflowStamp,
-    compatibility,
+  const handleDevelopmentMutationError = useCallback(
+    (err: unknown) => {
+      toast.error(errorMessage(err))
+      if (
+        err != null &&
+        typeof err === "object" &&
+        "status" in err &&
+        err.status === 409
+      ) {
+        void queryClient.invalidateQueries({
+          queryKey: ["workflows", "development"],
+        })
+      }
+    },
+    [queryClient],
   )
-  const runReadinessMessage =
-    runPayloadError ??
-    (workflowRunBaseMessage === "Ready to run."
-      ? workflowDependencyFenceMessage("run", runDependencyFence)
-      : workflowRunBaseMessage)
-  const canRunSelectedWorkflow =
-    selectedWorkflow != null &&
-    !selectedWorkflow.error &&
-    selectedWorkflow.ref.trim() !== "" &&
-    isRunnableWorkflowStatus(selectedWorkflowStamp?.status, compatibility) &&
-    runPayloadError == null &&
-    runDependencyFence.status === "ready"
-
   const startMutation = useMutation({
     mutationFn: startWorkflowDevelopment,
     onSuccess: ({ session: nextSession, conflict }) => {
-      toast.success(
-        conflict
-          ? "Workflow development resumed"
-          : "Workflow development started",
-      )
-      setMode("develop")
+      if (conflict) {
+        onDevelopmentConflict?.(nextSession)
+        toast.warning("Another workflow draft is already active.")
+        return
+      }
+      toast.success("Workflow development started")
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const startWithAIMutation = useMutation({
@@ -1034,58 +697,22 @@ export function WorkflowsPage({
         return started
       }
       return aiReviseWorkflowDevelopment({
+        ...workflowDevelopmentDraftFence(started.session),
         prompt: startPrompt,
         target_ref: startTargetRef || started.session.target_workflow_ref,
       })
     },
     onSuccess: ({ session: nextSession, conflict }) => {
-      toast.success(
-        conflict
-          ? "Workflow development resumed"
-          : nextSession.validation?.valid
-            ? "AI workflow draft ready"
-            : "AI draft needs fixes",
-      )
-      setMode("develop")
-      applySessionDraft(nextSession)
-      void invalidateWorkflowQueries(queryClient)
-    },
-    onError: (err) => {
-      toast.error(errorMessage(err))
-      void invalidateWorkflowQueries(queryClient)
-    },
-  })
-
-  const startRepairWithAIMutation = useMutation({
-    mutationFn: async ({
-      ref,
-      status,
-    }: WorkflowRepairStart): Promise<WorkflowDevelopmentMutationResult> => {
-      const prompt = workflowRepairPrompt(status)
-      const started = await startWorkflowDevelopment({
-        reason: "version_revalidation",
-        prompt,
-        ref,
-        target_ref: ref,
-      })
-      if (started.conflict) {
-        return started
+      if (conflict) {
+        onDevelopmentConflict?.(nextSession)
+        toast.warning("Another workflow draft is already active.")
+        return
       }
-      return aiReviseWorkflowDevelopment({
-        prompt,
-        target_ref: ref,
-        yaml: started.session.yaml,
-      })
-    },
-    onSuccess: ({ session: nextSession, conflict }) => {
       toast.success(
-        conflict
-          ? "Workflow development resumed"
-          : nextSession.validation?.valid
-            ? "AI workflow review ready"
-            : "AI workflow repair needs fixes",
+        nextSession.validation?.valid
+          ? "AI workflow draft ready"
+          : "AI draft needs fixes",
       )
-      setMode("develop")
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
@@ -1098,6 +725,7 @@ export function WorkflowsPage({
   const saveMutation = useMutation({
     mutationFn: () =>
       reviseWorkflowDevelopment({
+        ...workflowDevelopmentDraftFence(session),
         prompt: draftPrompt,
         target_ref: draftTargetRef,
         yaml: draftYAML,
@@ -1107,12 +735,13 @@ export function WorkflowsPage({
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const regenerateMutation = useMutation({
     mutationFn: () =>
       reviseWorkflowDevelopment({
+        ...workflowDevelopmentDraftFence(session),
         prompt: draftPrompt,
         target_ref: draftTargetRef,
         regenerate: true,
@@ -1122,12 +751,13 @@ export function WorkflowsPage({
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const aiReviseMutation = useMutation({
     mutationFn: (promptOverride?: string) =>
       aiReviseWorkflowDevelopment({
+        ...workflowDevelopmentDraftFence(session),
         prompt: promptOverride ?? draftPrompt,
         target_ref: draftTargetRef,
         yaml: draftYAML,
@@ -1141,7 +771,7 @@ export function WorkflowsPage({
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const fixDraftTestMutation = useMutation({
@@ -1182,6 +812,7 @@ export function WorkflowsPage({
                   : lastDraftTest.eventID,
             }
       return aiReviseWorkflowDevelopment({
+        ...workflowDevelopmentDraftFence(session),
         prompt: workflowDraftTestRepairPrompt(
           draftPrompt,
           repairResult,
@@ -1202,17 +833,20 @@ export function WorkflowsPage({
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const validateMutation = useMutation({
     mutationFn: async () => {
-      await reviseWorkflowDevelopment({
+      const revised = await reviseWorkflowDevelopment({
+        ...workflowDevelopmentDraftFence(session),
         prompt: draftPrompt,
         target_ref: draftTargetRef,
         yaml: draftYAML,
       })
-      return validateWorkflowDevelopment()
+      return validateWorkflowDevelopment(
+        workflowDevelopmentDraftFence(revised.session),
+      )
     },
     onSuccess: ({ session: nextSession }) => {
       toast.success(
@@ -1223,7 +857,7 @@ export function WorkflowsPage({
       applySessionDraft(nextSession)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const triggerExecutionFenceRef = useRef({
@@ -1393,10 +1027,7 @@ export function WorkflowsPage({
     },
     onSuccess: (result) => {
       toast.success(`Published ${result.workflow_ref}`)
-      updateRouteSearch(
-        { mode: "operate", workflow: result.workflow_ref },
-        false,
-      )
+      onPublished?.(result.workflow_id, result.workflow_ref)
       setLastDraftTest(null)
       void invalidateWorkflowQueries(queryClient)
       void invalidateWorkflowDefinitionInspections(queryClient)
@@ -1408,13 +1039,19 @@ export function WorkflowsPage({
   })
 
   const discardMutation = useMutation({
-    mutationFn: discardWorkflowDevelopment,
+    mutationFn: () => {
+      if (session == null) throw new Error("No workflow draft is active.")
+      return discardWorkflowDevelopment({
+        session_id: session.id,
+        expected_session_revision: session.session_revision,
+      })
+    },
     onSuccess: () => {
       toast.success("Workflow development discarded")
       setLastDraftTest(null)
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: handleDevelopmentMutationError,
   })
 
   const installTemplateMutation = useMutation({
@@ -1458,203 +1095,6 @@ export function WorkflowsPage({
     onError: (err) => toast.error(errorMessage(err)),
   })
 
-  const reloadMutation = useMutation({
-    mutationFn: reloadWorkflows,
-    onSuccess: (result) => {
-      toast.success(
-        result.errors.length === 0
-          ? "Workflow definitions reloaded"
-          : `Reloaded with ${result.errors.length} validation error(s)`,
-      )
-      void queryClient.invalidateQueries({ queryKey: ["workflows"] })
-      void invalidateWorkflowDefinitionInspections(queryClient)
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
-
-  const settingsMutation = useMutation({
-    mutationFn: ({
-      values,
-      expectedRevision,
-    }: {
-      values: WorkflowSettingsValues
-      expectedRevision: string
-    }) => {
-      return patchWorkflowSettings({
-        expected_config_revision: expectedRevision,
-        ...values,
-      })
-    },
-    onSuccess: (settings, variables) => {
-      const definitionsDirectoryChanged =
-        variables.values.definitions_dir !==
-        settingsQuery.data?.configured.definitions_dir
-      queryClient.setQueryData(["workflows", "settings"], settings)
-      const guidance =
-        settings.effects.gateway_effect === "restart_required"
-          ? " Gateway restart required."
-          : settings.effects.catalog_effect === "reload_required"
-            ? " Reload workflow definitions to apply catalog changes."
-            : ""
-      toast.success(`Workflow settings saved.${guidance}`)
-      void queryClient.invalidateQueries({
-        queryKey: ["workflows"],
-        exact: true,
-      })
-      void queryClient.invalidateQueries({
-        queryKey: ["workflows", "templates"],
-      })
-      if (definitionsDirectoryChanged) {
-        void invalidateWorkflowDefinitionInspections(queryClient)
-      }
-    },
-    onError: (err) => {
-      toast.error(errorMessage(err))
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["workflows", "settings"],
-      })
-      void queryClient.invalidateQueries({
-        queryKey: ["workflows", "dependencies"],
-      })
-      void queryClient.invalidateQueries({ queryKey: ["tools"] })
-    },
-  })
-
-  const runWorkflowMutation = useMutation({
-    mutationFn: (submission: WorkflowRunSubmission) => runWorkflow(submission),
-    onSuccess: ({ result, error }, submission) => {
-      toast[error ? "error" : "success"](
-        error
-          ? `Workflow run ${result.status}: ${error}`
-          : `Workflow run ${result.status}`,
-      )
-      updateRouteSearch(
-        {
-          mode: "operate",
-          workflow: submission.ref,
-          run: result.run_id,
-        },
-        false,
-      )
-      void invalidateRunQueries(queryClient, result.run_id)
-    },
-    onError: (err, submission) => {
-      toast.error(errorMessage(err))
-      void refetchPublishedDependency(queryClient, submission.ref)
-    },
-  })
-
-  const cancelMutation = useMutation({
-    mutationFn: ({ runID, reason }: WorkflowCancelSubmission) =>
-      cancelWorkflowRun(runID, reason),
-    onSuccess: (run, submission) => {
-      queryClient.setQueryData(["workflows", "runs", submission.runID], run)
-      queryClient.setQueryData<{ runs: WorkflowRun[] }>(
-        ["workflows", "runs"],
-        (current) =>
-          current == null
-            ? current
-            : {
-                runs: current.runs.map((candidate) =>
-                  candidate.id === submission.runID ? run : candidate,
-                ),
-              },
-      )
-      if (run.status === "canceled") {
-        toast.success("Workflow run canceled")
-      } else {
-        toast.info(`Workflow run already ${run.status}`)
-      }
-      setCancelTarget((current) =>
-        current?.id === submission.runID ? null : current,
-      )
-      void invalidateRunQueries(queryClient, submission.runID)
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
-
-  const retryMutation = useMutation({
-    mutationFn: (submission: WorkflowRetrySubmission) =>
-      retryWorkflowRun(submission.runID, {
-        expected_dependency_revision: submission.expectedDependencyRevision,
-        secrets: submission.secrets,
-      }),
-    onSuccess: ({ result, error }, submission) => {
-      toast[error ? "error" : "success"](
-        error
-          ? `Workflow retry ${result.status}: ${error}`
-          : "Workflow retry started",
-      )
-      setRetrySecretsJSON((current) =>
-        current === submission.secretsJSON ? "{}" : current,
-      )
-      updateRouteSearch(
-        {
-          mode: "operate",
-          workflow: submission.workflowRef,
-          run: result.run_id,
-        },
-        false,
-      )
-      void invalidateRunQueries(queryClient, result.run_id)
-    },
-    onError: (err, submission) => {
-      toast.error(errorMessage(err))
-      void refetchPublishedDependency(queryClient, submission.workflowRef)
-    },
-  })
-
-  const submitWorkflowRun = async () => {
-    if (
-      selectedWorkflowRef == null ||
-      selectedWorkflow == null ||
-      runDependencyFence.status !== "ready" ||
-      runDependencyFence.revision == null
-    ) {
-      toast.error(runReadinessMessage)
-      return false
-    }
-    try {
-      await runWorkflowMutation.mutateAsync({
-        ref: selectedWorkflowRef,
-        expected_dependency_revision: runDependencyFence.revision,
-        inputs: workflowRunInputsPayload(selectedWorkflow, runInputValues),
-        secrets: workflowRunSecretsPayload(
-          selectedWorkflow,
-          runSecretValues,
-          runSecretsJSON,
-        ),
-        session: optionalString(runSession),
-        delivery: parseDeliveryJSONObject(runDeliveryJSON, "Delivery"),
-        async: true,
-      })
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  const retrySelectedWorkflowRun = () => {
-    if (
-      selectedRun == null ||
-      retryWorkflowRef == null ||
-      retryDependencyFence.status !== "ready" ||
-      retryDependencyFence.revision == null
-    ) {
-      toast.error(retryReadinessMessage)
-      return
-    }
-    retryMutation.mutate({
-      runID: selectedRun.id,
-      workflowRef: retryWorkflowRef,
-      expectedDependencyRevision: retryDependencyFence.revision,
-      secrets: parseStringJSONObject(retrySecretsJSON, "Retry secrets"),
-      secretsJSON: retrySecretsJSON,
-    })
-  }
-
   const startScaffold = () => {
     startMutation.mutate({
       reason: "new",
@@ -1666,8 +1106,7 @@ export function WorkflowsPage({
     session == null &&
     startPrompt.trim() !== "" &&
     !startMutation.isPending &&
-    !startWithAIMutation.isPending &&
-    !startRepairWithAIMutation.isPending
+    !startWithAIMutation.isPending
   const acceptedTestRequest = testDraftMutation.variables?.request
   const acceptedTestReconciliation =
     testDraftMutation.data != null &&
@@ -1701,32 +1140,8 @@ export function WorkflowsPage({
     publishTestReady &&
     publishSessionSnapshotReady &&
     dependencyReady
-  const canCancel = activeStatuses.has(selectedRun?.status ?? "")
-  const retryCompatibilityMessage = workflowRetryReadinessMessage(
-    selectedRun,
-    selectedRunWorkflow,
-    selectedRunWorkflowStamp,
-    compatibility,
-  )
-  const retryDraftEventBlocked =
-    selectedRunOrigin?.kind === "external_event_draft_test"
-  const canRetry =
-    selectedRun != null &&
-    terminalStatuses.has(selectedRun.status) &&
-    !selectedRun.workflow_ref.startsWith("draft:") &&
-    !retryDraftEventBlocked &&
-    isRunnableWorkflowStatus(selectedRunWorkflowStamp?.status, compatibility) &&
-    retryPayloadError == null &&
-    retryDependencyFence.status === "ready"
-  const retryReadinessMessage =
-    retryPayloadError ??
-    (retryDraftEventBlocked
-      ? "Event-backed draft test runs cannot be retried. Run the draft test again."
-      : retryCompatibilityMessage === "Ready to retry."
-        ? workflowDependencyFenceMessage("retry", retryDependencyFence)
-        : retryCompatibilityMessage)
   const developmentPendingAction: DevelopmentPendingAction | null =
-    startWithAIMutation.isPending || startRepairWithAIMutation.isPending
+    startWithAIMutation.isPending
       ? "start-ai"
       : startMutation.isPending
         ? "start"
@@ -1750,7 +1165,6 @@ export function WorkflowsPage({
   const developmentBusy =
     startMutation.isPending ||
     startWithAIMutation.isPending ||
-    startRepairWithAIMutation.isPending ||
     saveMutation.isPending ||
     aiReviseMutation.isPending ||
     fixDraftTestMutation.isPending ||
@@ -1762,73 +1176,8 @@ export function WorkflowsPage({
     discardMutation.isPending ||
     triggerEditorActivity.applying
 
-  const refresh = () => {
-    if (triggerEditorBlockingMessage != null) {
-      toast.warning(triggerEditorBlockingMessage)
-      return
-    }
-    void invalidateWorkflowQueries(queryClient)
-    void queryClient.invalidateQueries({
-      queryKey: ["events", "workflow-trigger-simulator"],
-    })
-  }
-
   return (
     <div className="flex h-full flex-col">
-      <PageHeader title={t("navigation.workflows", "Workflows")}>
-        <div className="border-border bg-background flex rounded-md border p-0.5">
-          <Button
-            variant={mode === "develop" ? "secondary" : "ghost"}
-            size="sm"
-            onClick={() => setMode("develop")}
-          >
-            <IconSparkles className="size-4" />
-            Develop
-          </Button>
-          <Button
-            variant={mode === "operate" ? "secondary" : "ghost"}
-            size="sm"
-            onClick={() => setMode("operate")}
-            aria-disabled={triggerEditorBlocked}
-            title={triggerEditorBlockingMessage ?? undefined}
-          >
-            <IconActivity className="size-4" />
-            Operate
-          </Button>
-        </div>
-        <WorkflowCapabilityCatalog />
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            settingsMutation.reset()
-            setSettingsOpen(true)
-          }}
-          aria-label="Workflow settings"
-          title="Workflow settings"
-        >
-          <IconSettings className="size-4" />
-          <span className="hidden lg:inline">Settings</span>
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={refresh}
-          disabled={
-            triggerEditorBlocked ||
-            workflowsQuery.isFetching ||
-            runsQuery.isFetching ||
-            developmentQuery.isFetching
-          }
-          title={triggerEditorBlockingMessage ?? "Refresh"}
-          aria-label="Refresh"
-        >
-          <IconRefresh className="size-4" />
-          <span className="hidden lg:inline">Refresh</span>
-        </Button>
-      </PageHeader>
-
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4 sm:p-6">
         <CompatibilityBanner
           compatibility={compatibility}
@@ -1836,217 +1185,87 @@ export function WorkflowsPage({
           onRevalidate={() => revalidateMutation.mutate()}
           revalidating={revalidateMutation.isPending}
         />
-        {mode === "develop" ? (
-          <DevelopSurface
-            session={session}
-            reconciliation={currentDevelopmentReconciliation}
-            workflows={workflows}
-            templates={templatesQuery.data?.templates ?? []}
-            templatesLoading={templatesQuery.isLoading}
-            templatesUnavailable={templatesQuery.isError}
-            templatesUnavailableMessage={
-              templatesQuery.isError
-                ? errorMessage(templatesQuery.error)
-                : undefined
+        <DevelopSurface
+          session={session}
+          reconciliation={currentDevelopmentReconciliation}
+          templates={templatesQuery.data?.templates ?? []}
+          templatesLoading={templatesQuery.isLoading}
+          templatesUnavailable={templatesQuery.isError}
+          templatesUnavailableMessage={
+            templatesQuery.isError
+              ? errorMessage(templatesQuery.error)
+              : undefined
+          }
+          showTemplates={showTemplates}
+          installingTemplateName={
+            installTemplateMutation.isPending
+              ? installTemplateMutation.variables?.name
+              : undefined
+          }
+          startPrompt={startPrompt}
+          startTargetRef={startTargetRef}
+          draftPrompt={draftPrompt}
+          draftTargetRef={draftTargetRef}
+          draftYAML={draftYAML}
+          draftEditorMode={draftEditorMode}
+          triggerEditorBlockingMessage={triggerEditorBlockingMessage}
+          developmentSessionConflict={developmentSessionConflict != null}
+          triggerEditorResetKey={triggerEditorResetKey}
+          jobEditorResetKey={jobEditorResetKey}
+          eventTriggerInspection={eventTriggerInspection}
+          onStartPromptChange={setStartPrompt}
+          onStartTargetRefChange={setStartTargetRef}
+          onDraftPromptChange={setDraftPrompt}
+          onDraftTargetRefChange={setDraftTargetRef}
+          onDraftYAMLChange={setDraftYAML}
+          onDraftEditorModeChange={(nextMode) => {
+            if (nextMode === "yaml" && triggerEditorBlockingMessage != null) {
+              toast.warning(triggerEditorBlockingMessage)
+              return
             }
-            installingTemplateName={
-              installTemplateMutation.isPending
-                ? installTemplateMutation.variables?.name
-                : undefined
+            setDraftEditorMode(nextMode)
+          }}
+          onEventTriggerInspectionChange={setEventTriggerInspection}
+          onTriggerEditorActivityChange={setTriggerEditorActivity}
+          onJobEditorActivityChange={setJobEditorActivity}
+          onLoadAuthoritativeDevelopmentSession={
+            loadAuthoritativeDevelopmentSession
+          }
+          onStartWithAI={() => startWithAIMutation.mutate()}
+          onStartScaffold={startScaffold}
+          onInstallTemplate={(name, overwrite) =>
+            installTemplateMutation.mutate({ name, overwrite })
+          }
+          onSave={() => saveMutation.mutate()}
+          onAIRevise={() => aiReviseMutation.mutate(undefined)}
+          onFixTestWithAI={() => fixDraftTestMutation.mutate()}
+          onRegenerate={() => regenerateMutation.mutate()}
+          onValidate={() => validateMutation.mutate()}
+          onTest={(submission) => testDraftMutation.mutate(submission)}
+          onPublish={() => publishMutation.mutate()}
+          onDiscard={() => discardMutation.mutate()}
+          onOpenTestRun={(runID) => {
+            if (triggerEditorBlockingMessage != null) {
+              toast.warning(triggerEditorBlockingMessage)
+              return
             }
-            compatibilityByRef={compatibilityByRef}
-            invalidWorkflows={invalidWorkflows}
-            startPrompt={startPrompt}
-            startTargetRef={startTargetRef}
-            draftPrompt={draftPrompt}
-            draftTargetRef={draftTargetRef}
-            draftYAML={draftYAML}
-            draftEditorMode={draftEditorMode}
-            triggerEditorBlockingMessage={triggerEditorBlockingMessage}
-            developmentSessionConflict={developmentSessionConflict != null}
-            triggerEditorResetKey={triggerEditorResetKey}
-            jobEditorResetKey={jobEditorResetKey}
-            eventTriggerInspection={eventTriggerInspection}
-            onStartPromptChange={setStartPrompt}
-            onStartTargetRefChange={setStartTargetRef}
-            onDraftPromptChange={setDraftPrompt}
-            onDraftTargetRefChange={setDraftTargetRef}
-            onDraftYAMLChange={setDraftYAML}
-            onDraftEditorModeChange={(nextMode) => {
-              if (nextMode === "yaml" && triggerEditorBlockingMessage != null) {
-                toast.warning(triggerEditorBlockingMessage)
-                return
-              }
-              setDraftEditorMode(nextMode)
-            }}
-            onEventTriggerInspectionChange={setEventTriggerInspection}
-            onTriggerEditorActivityChange={setTriggerEditorActivity}
-            onJobEditorActivityChange={setJobEditorActivity}
-            onLoadAuthoritativeDevelopmentSession={
-              loadAuthoritativeDevelopmentSession
-            }
-            onStartWithAI={() => startWithAIMutation.mutate()}
-            onStartScaffold={startScaffold}
-            onStartEdit={(ref) =>
-              startMutation.mutate({ reason: "edit", ref, target_ref: ref })
-            }
-            onStartRepair={(ref) =>
-              startMutation.mutate({
-                reason: "version_revalidation",
-                ref,
-                target_ref: ref,
-              })
-            }
-            onStartRepairWithAI={(ref, status) =>
-              startRepairWithAIMutation.mutate({ ref, status })
-            }
-            onInstallTemplate={(name, overwrite) =>
-              installTemplateMutation.mutate({ name, overwrite })
-            }
-            onSave={() => saveMutation.mutate()}
-            onAIRevise={() => aiReviseMutation.mutate(undefined)}
-            onFixTestWithAI={() => fixDraftTestMutation.mutate()}
-            onRegenerate={() => regenerateMutation.mutate()}
-            onValidate={() => validateMutation.mutate()}
-            onTest={(submission) => testDraftMutation.mutate(submission)}
-            onPublish={() => publishMutation.mutate()}
-            onDiscard={() => discardMutation.mutate()}
-            onOpenTestRun={(runID) => {
-              if (triggerEditorBlockingMessage != null) {
-                toast.warning(triggerEditorBlockingMessage)
-                return
-              }
-              updateRouteSearch({ mode: "operate", run: runID }, false)
-            }}
-            canStartNew={canStartNew}
-            canTestDraft={canTestDraft}
-            canPublish={canPublish}
-            testReadinessMessage={testReadinessMessage}
-            publishReadinessMessage={publishReadinessMessage}
-            publishValidationStatus={publishValidationState}
-            publishTestStatus={publishTestState}
-            dependencyState={dependencyCheckState}
-            dependencyReport={currentDependencyReport}
-            lastDraftTest={lastDraftTest}
-            lastDraftTestStale={lastDraftTestStale}
-            pendingAction={developmentPendingAction}
-            busy={developmentBusy}
-          />
-        ) : (
-          <OperateSurface
-            query={query}
-            workflows={workflows}
-            compatibilityByRef={compatibilityByRef}
-            compatibility={compatibility}
-            selectedWorkflowRef={selectedWorkflowRef}
-            publishedDependencyState={publishedDependencyState}
-            publishedDependencyReport={publishedDependencyReport}
-            retryDependencyState={retryDependencyState}
-            retryDependencyReport={retryDependencyReport}
-            retryWorkflowRef={retryWorkflowRef}
-            runInputValues={runInputValues}
-            runSecretValues={runSecretValues}
-            runSecretsJSON={runSecretsJSON}
-            runSession={runSession}
-            runDeliveryJSON={runDeliveryJSON}
-            retrySecretsJSON={retrySecretsJSON}
-            runs={filteredRuns}
-            allRuns={runs}
-            selectedRunID={selectedRunID}
-            selectedRun={selectedRun}
-            runDetailState={runDetailState}
-            events={selectedEvents}
-            graph={graphQuery.data}
-            loadingRuns={runsQuery.isLoading}
-            loadingEvents={eventsQuery.isLoading}
-            streamingEvents={
-              eventStreamActive && streamedRunID === selectedRunID
-            }
-            loadingGraph={graphQuery.isLoading}
-            onQueryChange={setQuery}
-            onSelectWorkflow={setSelectedWorkflowRef}
-            onRetryPublishedDependencies={() =>
-              void publishedDependencyQuery.refetch()
-            }
-            onRetryRunDependencies={() => void retryDependencyQuery.refetch()}
-            onRunInputChange={(name, value) =>
-              setRunInputValues((current) => ({ ...current, [name]: value }))
-            }
-            onRunSecretChange={(name, value) =>
-              setRunSecretValues((current) => ({ ...current, [name]: value }))
-            }
-            onRunSecretsJSONChange={setRunSecretsJSON}
-            onRunSessionChange={setRunSession}
-            onRunDeliveryJSONChange={setRunDeliveryJSON}
-            onRetrySecretsJSONChange={setRetrySecretsJSON}
-            onSelectRun={setSelectedRunID}
-            onRetryRunDetail={() => void runQuery.refetch()}
-            onReload={() => reloadMutation.mutate()}
-            onRunWorkflow={submitWorkflowRun}
-            reloading={reloadMutation.isPending}
-            runningWorkflow={runWorkflowMutation.isPending}
-            onCancel={() => {
-              if (selectedRun != null) {
-                cancelMutation.reset()
-                setCancelTarget({
-                  id: selectedRun.id,
-                  workflowRef: selectedRun.workflow_ref,
-                })
-              }
-            }}
-            onRetry={retrySelectedWorkflowRun}
-            canceling={cancelMutation.isPending}
-            retrying={retryMutation.isPending}
-            canRunWorkflow={canRunSelectedWorkflow}
-            runReadinessMessage={runReadinessMessage}
-            canCancel={canCancel}
-            canRetry={canRetry}
-            retryReadinessMessage={retryReadinessMessage}
-          />
-        )}
+            onOpenRun?.(runID)
+          }}
+          canStartNew={canStartNew}
+          canTestDraft={canTestDraft}
+          canPublish={canPublish}
+          testReadinessMessage={testReadinessMessage}
+          publishReadinessMessage={publishReadinessMessage}
+          publishValidationStatus={publishValidationState}
+          publishTestStatus={publishTestState}
+          dependencyState={dependencyCheckState}
+          dependencyReport={currentDependencyReport}
+          lastDraftTest={lastDraftTest}
+          lastDraftTestStale={lastDraftTestStale}
+          pendingAction={developmentPendingAction}
+          busy={developmentBusy}
+        />
       </div>
-      <WorkflowSettingsDialog
-        open={settingsOpen}
-        onOpenChange={(open) => {
-          if (open) {
-            settingsMutation.reset()
-          }
-          setSettingsOpen(open)
-        }}
-        settings={settingsQuery.data}
-        loading={settingsQuery.isLoading}
-        unavailable={settingsQuery.isError}
-        saving={settingsMutation.isPending}
-        saveError={
-          settingsMutation.isError
-            ? errorMessage(settingsMutation.error)
-            : undefined
-        }
-        reloading={reloadMutation.isPending}
-        onRetry={() => void settingsQuery.refetch()}
-        onSave={(values, expectedRevision) =>
-          settingsMutation.mutate({ values, expectedRevision })
-        }
-        onReload={() => reloadMutation.mutate()}
-      />
-      <WorkflowCancelDialog
-        target={cancelTarget}
-        pending={cancelMutation.isPending}
-        requestError={
-          cancelMutation.isError
-            ? errorMessage(cancelMutation.error)
-            : undefined
-        }
-        onDismiss={() => {
-          cancelMutation.reset()
-          setCancelTarget(null)
-        }}
-        onConfirm={(reason) => {
-          if (cancelTarget != null) {
-            cancelMutation.mutate({ runID: cancelTarget.id, reason })
-          }
-        }}
-      />
     </div>
   )
 }
@@ -2109,14 +1328,12 @@ function CompatibilityBanner({
 function DevelopSurface({
   session,
   reconciliation,
-  workflows,
   templates,
   templatesLoading,
   templatesUnavailable,
   templatesUnavailableMessage,
+  showTemplates,
   installingTemplateName,
-  compatibilityByRef,
-  invalidWorkflows,
   startPrompt,
   startTargetRef,
   draftPrompt,
@@ -2140,9 +1357,6 @@ function DevelopSurface({
   onLoadAuthoritativeDevelopmentSession,
   onStartWithAI,
   onStartScaffold,
-  onStartEdit,
-  onStartRepair,
-  onStartRepairWithAI,
   onInstallTemplate,
   onSave,
   onAIRevise,
@@ -2169,14 +1383,12 @@ function DevelopSurface({
 }: {
   session: WorkflowDevelopmentSession | null
   reconciliation?: WorkflowDevelopmentTestReconciliation
-  workflows: WorkflowDefinition[]
   templates: WorkflowTemplateCatalogEntry[]
   templatesLoading: boolean
   templatesUnavailable: boolean
   templatesUnavailableMessage?: string
+  showTemplates: boolean
   installingTemplateName?: string
-  compatibilityByRef: Map<string, WorkflowValidationStamp>
-  invalidWorkflows: WorkflowValidationStamp[]
   startPrompt: string
   startTargetRef: string
   draftPrompt: string
@@ -2202,9 +1414,6 @@ function DevelopSurface({
   onLoadAuthoritativeDevelopmentSession: () => void
   onStartWithAI: () => void
   onStartScaffold: () => void
-  onStartEdit: (ref: string) => void
-  onStartRepair: (ref: string) => void
-  onStartRepairWithAI: (ref: string, status?: string) => void
   onInstallTemplate: (name: string, overwrite: boolean) => void
   onSave: () => void
   onAIRevise: () => void
@@ -2314,7 +1523,7 @@ function DevelopSurface({
       pendingAction,
     )
     return (
-      <div className="grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[minmax(320px,0.85fr)_minmax(0,1.15fr)]">
+      <div className="grid min-h-0 flex-1 gap-4 overflow-hidden">
         <section className="border-border bg-card/40 flex min-h-0 flex-col rounded-lg border">
           <div className="border-border border-b px-4 py-3">
             <h2 className="text-sm font-medium">New workflow</h2>
@@ -2354,83 +1563,18 @@ function DevelopSurface({
             <div className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
               {startReadinessMessage}
             </div>
-            <WorkflowTemplateCatalog
-              templates={templates}
-              loading={templatesLoading}
-              unavailable={templatesUnavailable}
-              unavailableMessage={templatesUnavailableMessage}
-              installingName={installingTemplateName}
-              disabled={busy || installingTemplateName != null}
-              onInstall={onInstallTemplate}
-            />
-          </div>
-        </section>
-
-        <section className="border-border bg-card/40 flex min-h-0 flex-col overflow-hidden rounded-lg border">
-          <div className="border-border flex items-center justify-between gap-3 border-b px-4 py-3">
-            <h2 className="text-sm font-medium">Published workflows</h2>
-            <Badge variant="outline">{workflows.length}</Badge>
-          </div>
-          <ScrollRegion
-            label="Workflow development candidates"
-            className="min-h-0 flex-1 overflow-auto p-3"
-          >
-            {invalidWorkflows.length > 0 ? (
-              <div className="mb-3 grid gap-2">
-                {invalidWorkflows.map((workflow) => {
-                  const actionLabel =
-                    workflow.status === "pending_revalidation" ? "Open" : "Open"
-                  const aiActionLabel =
-                    workflow.status === "pending_revalidation"
-                      ? "AI Review"
-                      : "AI Repair"
-                  return (
-                    <WorkflowCandidate
-                      key={workflow.workflow_ref}
-                      refName={workflow.workflow_ref}
-                      status={workflow.status}
-                      issues={workflowStampIssues(workflow)}
-                      actionLabel={actionLabel}
-                      onAction={() => onStartRepair(workflow.workflow_ref)}
-                      aiActionLabel={aiActionLabel}
-                      onAIAction={() =>
-                        onStartRepairWithAI(
-                          workflow.workflow_ref,
-                          workflow.status,
-                        )
-                      }
-                      blocked={busy}
-                    />
-                  )
-                })}
-              </div>
+            {showTemplates ? (
+              <WorkflowTemplateCatalog
+                templates={templates}
+                loading={templatesLoading}
+                unavailable={templatesUnavailable}
+                unavailableMessage={templatesUnavailableMessage}
+                installingName={installingTemplateName}
+                disabled={busy || installingTemplateName != null}
+                onInstall={onInstallTemplate}
+              />
             ) : null}
-            <div className="grid gap-2">
-              {workflows.length === 0 ? (
-                <EmptyPanel label="No definitions" compact />
-              ) : (
-                workflows.map((workflow) => {
-                  const stamp = compatibilityByRef.get(workflow.ref)
-                  return (
-                    <WorkflowCandidate
-                      key={workflow.ref}
-                      refName={workflow.ref}
-                      title={workflow.name}
-                      status={workflow.error ? "invalid" : stamp?.status}
-                      issues={
-                        workflow.error
-                          ? [{ message: workflow.error }]
-                          : workflowStampIssues(stamp)
-                      }
-                      actionLabel="Edit"
-                      onAction={() => onStartEdit(workflow.ref)}
-                      blocked={busy}
-                    />
-                  )
-                })
-              )}
-            </div>
-          </ScrollRegion>
+          </div>
         </section>
       </div>
     )
@@ -2552,16 +1696,18 @@ function DevelopSurface({
             dependencyReport={dependencyReport}
             readinessMessage={publishReadinessMessage}
           />
-          <WorkflowTemplateCatalog
-            templates={templates}
-            loading={templatesLoading}
-            unavailable={templatesUnavailable}
-            unavailableMessage={templatesUnavailableMessage}
-            installingName={installingTemplateName}
-            disabled
-            disabledReason="Finish or discard the active workflow draft before installing or restoring templates."
-            onInstall={onInstallTemplate}
-          />
+          {showTemplates ? (
+            <WorkflowTemplateCatalog
+              templates={templates}
+              loading={templatesLoading}
+              unavailable={templatesUnavailable}
+              unavailableMessage={templatesUnavailableMessage}
+              installingName={installingTemplateName}
+              disabled
+              disabledReason="Finish or discard the active workflow draft before installing or restoring templates."
+              onInstall={onInstallTemplate}
+            />
+          ) : null}
         </div>
         <div className="border-border flex flex-wrap gap-2 border-t p-3">
           <Button
@@ -2909,398 +2055,7 @@ function workflowStartReadinessMessage(
   return "Ready to start. One workflow draft can be active at a time."
 }
 
-function workflowRepairPrompt(status?: string) {
-  if (status === "pending_revalidation") {
-    return "Review this workflow against the current PicoClaw runtime. Keep the behavior intact and update the YAML only where needed for current compatibility."
-  }
-  return "Repair this workflow for the current PicoClaw runtime. Preserve the intended behavior while fixing validation errors and compatibility issues."
-}
-
-function WorkflowCandidate({
-  refName,
-  title,
-  status,
-  issues,
-  actionLabel,
-  onAction,
-  aiActionLabel,
-  onAIAction,
-  blocked,
-}: {
-  refName: string
-  title?: string
-  status?: string
-  issues?: WorkflowValidationIssue[]
-  actionLabel: string
-  onAction: () => void
-  aiActionLabel?: string
-  onAIAction?: () => void
-  blocked: boolean
-}) {
-  const issueSummary = issues?.[0] ? formatIssueSummary(issues[0]) : ""
-  const description = issueSummary || title || "Workflow"
-  const issueIsBlocking =
-    issueSummary !== "" && (status === "invalid" || status === "blocked")
-  return (
-    <div className="border-border/70 flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2">
-      <div className="min-w-0">
-        <div className="truncate font-mono text-xs">{refName}</div>
-        <div
-          className={cn(
-            "text-muted-foreground mt-0.5 truncate text-xs",
-            issueIsBlocking && "text-destructive",
-          )}
-          title={description}
-        >
-          {description}
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {status ? <ValidationStatusBadge status={status} /> : null}
-        {aiActionLabel && onAIAction ? (
-          <Button size="sm" onClick={onAIAction} disabled={blocked}>
-            <IconSparkles className="size-4" />
-            {aiActionLabel}
-          </Button>
-        ) : null}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onAction}
-          disabled={blocked}
-        >
-          <IconPencil className="size-4" />
-          {actionLabel}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-function OperateSurface({
-  query,
-  workflows,
-  compatibilityByRef,
-  compatibility,
-  selectedWorkflowRef,
-  publishedDependencyState,
-  publishedDependencyReport,
-  retryDependencyState,
-  retryDependencyReport,
-  retryWorkflowRef,
-  runInputValues,
-  runSecretValues,
-  runSecretsJSON,
-  runSession,
-  runDeliveryJSON,
-  retrySecretsJSON,
-  runs,
-  allRuns,
-  selectedRunID,
-  selectedRun,
-  runDetailState,
-  events,
-  graph,
-  loadingRuns,
-  loadingEvents,
-  streamingEvents,
-  loadingGraph,
-  onQueryChange,
-  onSelectWorkflow,
-  onRetryPublishedDependencies,
-  onRetryRunDependencies,
-  onRunInputChange,
-  onRunSecretChange,
-  onRunSecretsJSONChange,
-  onRunSessionChange,
-  onRunDeliveryJSONChange,
-  onRetrySecretsJSONChange,
-  onSelectRun,
-  onRetryRunDetail,
-  onReload,
-  onRunWorkflow,
-  reloading,
-  runningWorkflow,
-  onCancel,
-  onRetry,
-  canceling,
-  retrying,
-  canRunWorkflow,
-  runReadinessMessage,
-  canCancel,
-  canRetry,
-  retryReadinessMessage,
-}: {
-  query: string
-  workflows: WorkflowDefinition[]
-  compatibilityByRef: Map<string, WorkflowValidationStamp>
-  compatibility?: WorkflowCompatibilitySummary
-  selectedWorkflowRef: string | null
-  publishedDependencyState: WorkflowDependencyCheckState
-  publishedDependencyReport?: WorkflowDependencyCheckResponse
-  retryDependencyState: WorkflowDependencyCheckState
-  retryDependencyReport?: WorkflowDependencyCheckResponse
-  retryWorkflowRef: string | null
-  runInputValues: WorkflowRunInputValues
-  runSecretValues: WorkflowRunSecretValues
-  runSecretsJSON: string
-  runSession: string
-  runDeliveryJSON: string
-  retrySecretsJSON: string
-  runs: WorkflowRun[]
-  allRuns: WorkflowRun[]
-  selectedRunID: string | null
-  selectedRun?: WorkflowRun
-  runDetailState: WorkflowRunDetailState
-  events: Awaited<ReturnType<typeof getWorkflowRunEvents>>["events"]
-  graph?: Awaited<ReturnType<typeof getWorkflowRunGraph>>
-  loadingRuns: boolean
-  loadingEvents: boolean
-  streamingEvents: boolean
-  loadingGraph: boolean
-  onQueryChange: (value: string) => void
-  onSelectWorkflow: (ref: string) => void
-  onRetryPublishedDependencies: () => void
-  onRetryRunDependencies: () => void
-  onRunInputChange: (name: string, value: string) => void
-  onRunSecretChange: (name: string, value: string) => void
-  onRunSecretsJSONChange: (value: string) => void
-  onRunSessionChange: (value: string) => void
-  onRunDeliveryJSONChange: (value: string) => void
-  onRetrySecretsJSONChange: (value: string) => void
-  onSelectRun: (runID: string) => void
-  onRetryRunDetail: () => void
-  onReload: () => void
-  onRunWorkflow: () => Promise<boolean>
-  reloading: boolean
-  runningWorkflow: boolean
-  onCancel: () => void
-  onRetry: () => void
-  canceling: boolean
-  retrying: boolean
-  canRunWorkflow: boolean
-  runReadinessMessage: string
-  canCancel: boolean
-  canRetry: boolean
-  retryReadinessMessage: string
-}) {
-  const selectedWorkflow =
-    workflows.find((workflow) => workflow.ref === selectedWorkflowRef) ?? null
-  const selectedStamp =
-    selectedWorkflowRef == null
-      ? undefined
-      : compatibilityByRef.get(selectedWorkflowRef)
-  return (
-    <div className="grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.3fr)]">
-      <section className="border-border bg-card/40 flex min-h-0 flex-col overflow-hidden rounded-lg border">
-        <div className="border-border flex items-center justify-between gap-3 border-b p-3">
-          <Input
-            value={query}
-            onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="Filter runs"
-            className="h-8"
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onReload}
-            disabled={reloading}
-            title="Reload definitions"
-          >
-            <IconReload className="size-4" />
-            Reload
-          </Button>
-        </div>
-        <div className="grid min-h-0 flex-1 grid-rows-[auto_auto_minmax(0,1fr)]">
-          <DefinitionStrip
-            workflows={workflows}
-            compatibilityByRef={compatibilityByRef}
-            selectedWorkflowRef={selectedWorkflowRef}
-            onSelectWorkflow={onSelectWorkflow}
-          />
-          <WorkflowRunPanel
-            workflows={workflows}
-            workflow={selectedWorkflow}
-            stamp={selectedStamp}
-            compatibility={compatibility}
-            selectedWorkflowRef={selectedWorkflowRef}
-            dependencyState={publishedDependencyState}
-            dependencyReport={publishedDependencyReport}
-            inputValues={runInputValues}
-            secretValues={runSecretValues}
-            secretsJSON={runSecretsJSON}
-            session={runSession}
-            deliveryJSON={runDeliveryJSON}
-            onSelectWorkflow={onSelectWorkflow}
-            onRetryDependencies={onRetryPublishedDependencies}
-            onInputChange={onRunInputChange}
-            onSecretChange={onRunSecretChange}
-            onSecretsJSONChange={onRunSecretsJSONChange}
-            onSessionChange={onRunSessionChange}
-            onDeliveryJSONChange={onRunDeliveryJSONChange}
-            onRun={onRunWorkflow}
-            running={runningWorkflow}
-            canRun={canRunWorkflow}
-            readinessMessage={runReadinessMessage}
-          />
-          <RunList
-            runs={runs}
-            selectedRunID={selectedRunID}
-            onSelect={onSelectRun}
-            loading={loadingRuns}
-            totalRuns={allRuns.length}
-          />
-        </div>
-      </section>
-
-      <section className="border-border bg-card/40 flex min-h-0 flex-col overflow-hidden rounded-lg border">
-        <RunDetailHeader
-          run={selectedRun}
-          requestedRunID={selectedRunID}
-          onCancel={onCancel}
-          onRetry={onRetry}
-          canceling={canceling}
-          retrying={retrying}
-          canCancel={canCancel}
-          canRetry={canRetry}
-          retryReadinessMessage={retryReadinessMessage}
-          retryWorkflowRef={retryWorkflowRef}
-          retryDependencyState={retryDependencyState}
-          retryDependencyReport={retryDependencyReport}
-          onRetryDependencies={onRetryRunDependencies}
-          retrySecretsJSON={retrySecretsJSON}
-          onRetrySecretsJSONChange={onRetrySecretsJSONChange}
-        />
-        <ScrollRegion
-          label="Workflow run detail"
-          className="min-h-0 flex-1 overflow-auto p-4"
-        >
-          {selectedRun == null ? (
-            <RunDetailAvailability
-              state={runDetailState}
-              runID={selectedRunID}
-              onRetry={onRetryRunDetail}
-            />
-          ) : (
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.65fr)]">
-              <RunSummary run={selectedRun} />
-              <RunGraphPanel graph={graph} loading={loadingGraph} />
-              <ExecutionPanel run={selectedRun} />
-              <ManagedExecutionPanel run={selectedRun} />
-              <EventsPanel
-                events={events}
-                loading={loadingEvents}
-                streaming={streamingEvents}
-              />
-            </div>
-          )}
-        </ScrollRegion>
-      </section>
-    </div>
-  )
-}
-
-function RunDetailAvailability({
-  state,
-  runID,
-  onRetry,
-}: {
-  state: WorkflowRunDetailState
-  runID: string | null
-  onRetry: () => void
-}) {
-  if (state === "none" || runID == null) {
-    return <EmptyPanel label="No run selected" />
-  }
-  if (state === "loading") {
-    return (
-      <div
-        role="status"
-        className="border-border/70 text-muted-foreground grid gap-2 rounded-md border border-dashed p-6 text-center text-sm"
-      >
-        <span>Loading workflow run</span>
-        <span className="font-mono text-xs">{runID}</span>
-      </div>
-    )
-  }
-  return (
-    <div
-      role="alert"
-      className="border-border/70 grid justify-items-center gap-3 rounded-md border border-dashed p-6 text-center text-sm"
-    >
-      <div>
-        <div className="font-medium">
-          {state === "not-found"
-            ? "Workflow run not found"
-            : "Workflow run unavailable"}
-        </div>
-        <div className="text-muted-foreground mt-1 font-mono text-xs">
-          {runID}
-        </div>
-      </div>
-      <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-        <IconRefresh className="size-4" />
-        Retry run detail
-      </Button>
-    </div>
-  )
-}
-
-function DefinitionStrip({
-  workflows,
-  compatibilityByRef,
-  selectedWorkflowRef,
-  onSelectWorkflow,
-}: {
-  workflows: WorkflowDefinition[]
-  compatibilityByRef: Map<string, WorkflowValidationStamp>
-  selectedWorkflowRef: string | null
-  onSelectWorkflow: (ref: string) => void
-}) {
-  return (
-    <div className="border-border border-b p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-sm font-medium">Definitions</h3>
-        <Badge variant="outline">{workflows.length}</Badge>
-      </div>
-      <ScrollRegion
-        label="Workflow definitions"
-        className="flex max-h-32 flex-col gap-1 overflow-auto rounded-md"
-      >
-        {workflows.length === 0 ? (
-          <span className="text-muted-foreground text-sm">No definitions</span>
-        ) : (
-          workflows.map((workflow) => {
-            const stamp = compatibilityByRef.get(workflow.ref)
-            return (
-              <button
-                type="button"
-                key={workflow.ref}
-                onClick={() => onSelectWorkflow(workflow.ref)}
-                className={cn(
-                  "text-muted-foreground hover:bg-muted/60 flex min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-xs",
-                  selectedWorkflowRef === workflow.ref &&
-                    "bg-accent/70 text-accent-foreground",
-                )}
-              >
-                <span className="min-w-0 truncate font-mono">
-                  {workflow.ref}
-                </span>
-                <ValidationStatusBadge
-                  status={
-                    workflow.error ? "invalid" : (stamp?.status ?? "unknown")
-                  }
-                />
-              </button>
-            )
-          })
-        )}
-      </ScrollRegion>
-    </div>
-  )
-}
-
-function WorkflowRunPanel({
+export function WorkflowRunPanel({
   workflows,
   workflow,
   stamp,
@@ -3664,205 +2419,8 @@ function WorkflowRunInputField({
   )
 }
 
-function RunList({
-  runs,
-  selectedRunID,
-  onSelect,
-  loading,
-  totalRuns,
-}: {
-  runs: WorkflowRun[]
-  selectedRunID: string | null
-  onSelect: (runID: string) => void
-  loading: boolean
-  totalRuns: number
-}) {
-  if (loading) {
-    return <EmptyPanel label="Loading runs" />
-  }
-  if (runs.length === 0) {
-    return <EmptyPanel label="No runs" />
-  }
-  const running = runs.filter((run) => run.status === "running").length
-  return (
-    <ScrollRegion label="Workflow runs" className="min-h-0 overflow-auto p-2">
-      <div className="mb-2 flex items-center gap-2 px-1">
-        <Badge variant={running > 0 ? "default" : "outline"}>
-          {running} running
-        </Badge>
-        <Badge variant="outline">{totalRuns} total</Badge>
-      </div>
-      <div className="flex flex-col gap-1">
-        {runs.map((run) => (
-          <button
-            key={run.id}
-            type="button"
-            onClick={() => onSelect(run.id)}
-            className={cn(
-              "border-border/70 hover:bg-muted/60 grid min-w-0 gap-1 rounded-md border px-3 py-2 text-left",
-              selectedRunID === run.id && "bg-accent/70 text-accent-foreground",
-            )}
-          >
-            <div className="flex min-w-0 items-center justify-between gap-2">
-              <span className="min-w-0 truncate font-mono text-xs">
-                {run.workflow_ref}
-              </span>
-              <StatusBadge status={run.status} />
-            </div>
-            <div className="text-muted-foreground flex min-w-0 items-center justify-between gap-2 text-xs">
-              <span className="min-w-0 truncate">{run.id}</span>
-              <span className="shrink-0">{formatDate(run.created_at)}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-    </ScrollRegion>
-  )
-}
-
-function RunDetailHeader({
-  run,
-  requestedRunID,
-  canCancel,
-  canRetry,
-  canceling,
-  retrying,
-  retryReadinessMessage,
-  retryWorkflowRef,
-  retryDependencyState,
-  retryDependencyReport,
-  retrySecretsJSON,
-  onRetrySecretsJSONChange,
-  onRetryDependencies,
-  onCancel,
-  onRetry,
-}: {
-  run?: WorkflowRun
-  requestedRunID: string | null
-  canCancel: boolean
-  canRetry: boolean
-  canceling: boolean
-  retrying: boolean
-  retryReadinessMessage: string
-  retryWorkflowRef: string | null
-  retryDependencyState: WorkflowDependencyCheckState
-  retryDependencyReport?: WorkflowDependencyCheckResponse
-  retrySecretsJSON: string
-  onRetrySecretsJSONChange: (value: string) => void
-  onRetryDependencies: () => void
-  onCancel: () => void
-  onRetry: () => void
-}) {
-  const showRetrySecrets =
-    run != null &&
-    terminalStatuses.has(run.status) &&
-    !run.workflow_ref.startsWith("draft:")
-  return (
-    <div className="border-border min-h-14 border-b px-4 py-3">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <h3 className="min-w-0 truncate text-sm font-medium">
-              {run?.workflow_ref ?? "Run detail"}
-            </h3>
-            {run ? <StatusBadge status={run.status} /> : null}
-          </div>
-          <div className="text-muted-foreground mt-0.5 truncate font-mono text-xs">
-            {run?.id ?? requestedRunID ?? "Select a workflow run"}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onCancel}
-            disabled={!canCancel || canceling}
-            title="Cancel run"
-          >
-            <IconPlayerStop className="size-4" />
-            Cancel
-          </Button>
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                disabled={
-                  !showRetrySecrets ||
-                  retryWorkflowRef == null ||
-                  retryDependencyState === "idle"
-                }
-                aria-label="Inspect retry dependencies"
-                title="Inspect retry dependencies"
-              >
-                <IconGitBranch className="size-4" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent
-              align="end"
-              className="max-h-[min(36rem,calc(100dvh-2rem))] w-[min(480px,calc(100vw-2rem))] overflow-y-auto p-0"
-            >
-              <WorkflowDependencyReadinessPanel
-                workflowRef={retryWorkflowRef ?? "No run selected"}
-                dependencyState={retryDependencyState}
-                dependencyReport={retryDependencyReport}
-                onRetry={onRetryDependencies}
-                ariaLabel="Retry workflow dependency readiness"
-                heading="Retry dependency readiness"
-                idleMessage="Select a retryable workflow run to inspect its dependencies."
-                loadingMessage="Checking dependencies for the selected run’s workflow…"
-                staleMessage="The retry dependency result is stale. Waiting for a fresh check…"
-                unavailableMessage="Retry dependency readiness is unavailable."
-              />
-            </PopoverContent>
-          </Popover>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onRetry}
-            disabled={!canRetry || retrying}
-            title={canRetry ? "Retry run" : retryReadinessMessage}
-          >
-            <IconRotateClockwise className="size-4" />
-            Retry
-          </Button>
-        </div>
-      </div>
-      {showRetrySecrets ? (
-        <div className="mt-3 grid gap-2">
-          <label
-            className="text-muted-foreground text-xs"
-            htmlFor="workflow-retry-secrets"
-          >
-            Retry secrets JSON
-          </label>
-          <Textarea
-            id="workflow-retry-secrets"
-            aria-label="Retry secrets JSON"
-            value={retrySecretsJSON}
-            onChange={(event) => onRetrySecretsJSONChange(event.target.value)}
-            disabled={retrying}
-            spellCheck={false}
-            className="min-h-16 resize-none font-mono text-xs"
-          />
-          <div
-            className={cn(
-              "text-xs",
-              canRetry ? "text-muted-foreground" : "text-destructive",
-            )}
-          >
-            {retryReadinessMessage}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function RunSummary({ run }: { run: WorkflowRun }) {
+export function RunSummary({ run }: { run: WorkflowRun }) {
   const workflowRef = navigableWorkflowRef(run.workflow_ref)
-  const runID = isWorkflowRunID(run.id) ? run.id : undefined
   const origin = trustedWorkflowRunOrigin(run.origin)
   return (
     <Panel title="Summary">
@@ -3870,14 +2428,11 @@ function RunSummary({ run }: { run: WorkflowRun }) {
         <Meta
           label="Workflow"
           value={
-            workflowRef ? (
+            workflowRef && run.workflow_id ? (
               <Link
-                to="/agent/workflows"
-                search={{
-                  mode: "operate",
-                  workflow: workflowRef,
-                  ...(runID ? { run: runID } : {}),
-                }}
+                to="/agent/workflows/$id"
+                params={{ id: run.workflow_id }}
+                search={{ q: "ORDER BY ref ASC" }}
                 className="text-primary hover:underline"
               >
                 {workflowRef}
@@ -3935,11 +2490,9 @@ function RunSummary({ run }: { run: WorkflowRun }) {
               origin.root_run_id
             ) : (
               <Link
-                to="/agent/workflows"
-                search={{
-                  mode: "operate",
-                  run: origin.root_run_id,
-                }}
+                to="/agent/workflows/runs/$id"
+                params={{ id: origin.root_run_id }}
+                search={{ q: "ORDER BY created DESC" }}
                 className="text-primary hover:underline"
               >
                 {origin.root_run_id}
@@ -3962,10 +2515,22 @@ function RunSummary({ run }: { run: WorkflowRun }) {
           valueClassName="break-words whitespace-pre-wrap"
         />
         <Meta label="Session" value={run.session ?? "-"} mono />
-        <Meta label="Parent" value={run.parent_run_id ?? "-"} mono />
+        <Meta
+          label="Parent"
+          value={<WorkflowRunLink runID={run.parent_run_id} />}
+          mono
+        />
         <Meta label="Caller job" value={run.caller_job_id ?? "-"} mono />
-        <Meta label="Retry of" value={run.retry_of_run_id ?? "-"} mono />
-        <Meta label="Children" value={formatIDList(run.child_run_ids)} mono />
+        <Meta
+          label="Retry of"
+          value={<WorkflowRunLink runID={run.retry_of_run_id} />}
+          mono
+        />
+        <Meta
+          label="Children"
+          value={<WorkflowRunLinks runIDs={run.child_run_ids} />}
+          mono
+        />
       </dl>
       {run.error ? (
         <div className="bg-destructive/10 text-destructive mt-3 rounded-md px-3 py-2 text-sm">
@@ -3980,7 +2545,33 @@ function RunSummary({ run }: { run: WorkflowRun }) {
   )
 }
 
-function RunGraphPanel({
+function WorkflowRunLink({ runID }: { runID?: string }) {
+  if (!runID) return "-"
+  if (!isWorkflowRunID(runID)) return runID
+  return (
+    <Link
+      to="/agent/workflows/runs/$id"
+      params={{ id: runID }}
+      search={{ q: "ORDER BY created DESC" }}
+      className="text-primary hover:underline"
+    >
+      {runID}
+    </Link>
+  )
+}
+
+function WorkflowRunLinks({ runIDs }: { runIDs?: string[] }) {
+  if (!runIDs || runIDs.length === 0) return "-"
+  return (
+    <span className="flex flex-wrap gap-x-2 gap-y-1">
+      {runIDs.map((runID) => (
+        <WorkflowRunLink key={runID} runID={runID} />
+      ))}
+    </span>
+  )
+}
+
+export function RunGraphPanel({
   graph,
   loading,
 }: {
@@ -4030,7 +2621,7 @@ function RunGraphPanel({
   )
 }
 
-function ManagedExecutionPanel({ run }: { run: WorkflowRun }) {
+export function ManagedExecutionPanel({ run }: { run: WorkflowRun }) {
   const entries = managedExecutionEntries(run)
   if (entries.length === 0) {
     return null
@@ -4098,7 +2689,7 @@ function ManagedExecutionPanel({ run }: { run: WorkflowRun }) {
   )
 }
 
-function ExecutionPanel({ run }: { run: WorkflowRun }) {
+export function ExecutionPanel({ run }: { run: WorkflowRun }) {
   const jobs = Object.values(run.jobs ?? {})
   const steps = Object.entries(run.steps ?? {})
   return (
@@ -4194,7 +2785,7 @@ function ExecutionOutputs({
   )
 }
 
-function EventsPanel({
+export function EventsPanel({
   events,
   loading,
   streaming,
@@ -4843,20 +3434,6 @@ function shortID(value: string) {
   return value.length <= 10 ? value : `${value.slice(0, 10)}...`
 }
 
-function formatIDList(values?: string[]) {
-  if (values == null || values.length === 0) {
-    return "-"
-  }
-  return values.join(", ")
-}
-
-function workflowStampIssues(stamp?: WorkflowValidationStamp) {
-  if (stamp == null) {
-    return []
-  }
-  return [...(stamp.errors ?? []), ...(stamp.warnings ?? [])]
-}
-
 function mergeWorkflowEventLists(
   current: WorkflowRunEvent[],
   incoming: WorkflowRunEvent[],
@@ -4886,13 +3463,6 @@ function workflowEventKey(event: WorkflowRunEvent) {
   ])
 }
 
-function formatIssueSummary(issue: WorkflowValidationIssue) {
-  if (issue.path && issue.path.trim() !== "") {
-    return `${issue.path}: ${issue.message}`
-  }
-  return issue.message
-}
-
 function firstMessage(messages: Array<string | null>) {
   return messages.find((message) => message != null) ?? null
 }
@@ -4909,14 +3479,9 @@ function workflowRunSecretEntries(workflow: WorkflowDefinition | null) {
     .sort((left, right) => left.name.localeCompare(right.name))
 }
 
-function workflowRunContractSignature(workflow: WorkflowDefinition | null) {
-  return JSON.stringify({
-    inputs: workflowRunInputEntries(workflow),
-    secrets: workflowRunSecretEntries(workflow),
-  })
-}
-
-function workflowRunInitialInputValues(workflow: WorkflowDefinition | null) {
+export function workflowRunInitialInputValues(
+  workflow: WorkflowDefinition | null,
+) {
   const values: WorkflowRunInputValues = {}
   for (const { name, input } of workflowRunInputEntries(workflow)) {
     values[name] = workflowInputInitialValue(input)
@@ -4924,7 +3489,9 @@ function workflowRunInitialInputValues(workflow: WorkflowDefinition | null) {
   return values
 }
 
-function workflowRunInitialSecretValues(workflow: WorkflowDefinition | null) {
+export function workflowRunInitialSecretValues(
+  workflow: WorkflowDefinition | null,
+) {
   const values: WorkflowRunSecretValues = {}
   for (const { name } of workflowRunSecretEntries(workflow)) {
     values[name] = ""
@@ -5014,7 +3581,22 @@ function workflowRunSecretValidationMessage(
   return null
 }
 
-function workflowRunInputsPayload(
+export function workflowRunPayloadValidationMessage(
+  workflow: WorkflowDefinition | null,
+  inputValues: WorkflowRunInputValues,
+  secretValues: WorkflowRunSecretValues,
+  secretsJSON: string,
+  deliveryJSON: string,
+): string | null {
+  return firstMessage([
+    workflowRunInputValidationMessage(workflow, inputValues),
+    jsonStringObjectValidationMessage(secretsJSON, "Secrets"),
+    workflowRunSecretValidationMessage(workflow, secretValues, secretsJSON),
+    jsonObjectValidationMessage(deliveryJSON, "Delivery"),
+  ])
+}
+
+export function workflowRunInputsPayload(
   workflow: WorkflowDefinition | null,
   values: WorkflowRunInputValues,
 ) {
@@ -5044,7 +3626,7 @@ function workflowInputPayloadValue(type: string, value: string) {
   return value
 }
 
-function workflowRunSecretsPayload(
+export function workflowRunSecretsPayload(
   workflow: WorkflowDefinition | null,
   values: WorkflowRunSecretValues,
   secretsJSON: string,
@@ -5109,12 +3691,26 @@ function jsonSyntaxMessage(err: unknown) {
   return err instanceof Error ? err.message : "invalid JSON"
 }
 
-function workflowRunWasNotFound(err: unknown) {
-  return err instanceof WorkflowAPIError && err.status === 404
-}
-
 function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : "Workflow request failed"
+}
+
+function workflowDevelopmentDraftFence(
+  session: WorkflowDevelopmentSession | null,
+) {
+  if (
+    session == null ||
+    session.id === "" ||
+    session.session_revision === "" ||
+    session.draft_revision === ""
+  ) {
+    throw new Error("Reload the workflow draft before changing it.")
+  }
+  return {
+    session_id: session.id,
+    expected_session_revision: session.session_revision,
+    expected_draft_revision: session.draft_revision,
+  }
 }
 
 function isRunnableWorkflowStatus(
@@ -5144,72 +3740,6 @@ function workflowRunStatus(
   return stamp?.status ?? "unknown"
 }
 
-function workflowRunReadinessMessage(
-  workflow: WorkflowDefinition | null,
-  stamp?: WorkflowValidationStamp,
-  compatibility?: WorkflowCompatibilitySummary,
-) {
-  if (workflow == null) {
-    return "Select a workflow before running."
-  }
-  if (workflow.error) {
-    return "Repair this workflow before running it."
-  }
-  if (isRunnableWorkflowStatus(stamp?.status, compatibility)) {
-    return "Ready to run."
-  }
-  switch (stamp?.status) {
-    case "pending_revalidation":
-      return "Revalidate this workflow before running it."
-    case "invalid":
-      return "Repair this workflow before running it."
-    case "blocked":
-      return "Resolve blocking workflow issues before running it."
-    default:
-      return compatibility == null
-        ? "Workflow status is still loading."
-        : "Revalidate this workflow before running it."
-  }
-}
-
-function workflowRetryReadinessMessage(
-  run: WorkflowRun | undefined,
-  workflow: WorkflowDefinition | null,
-  stamp?: WorkflowValidationStamp,
-  compatibility?: WorkflowCompatibilitySummary,
-) {
-  if (run == null) {
-    return "Select a workflow run before retrying."
-  }
-  if (run.workflow_ref.startsWith("draft:")) {
-    return "Draft test runs cannot be retried."
-  }
-  if (!terminalStatuses.has(run.status)) {
-    return "Wait for the workflow run to finish before retrying."
-  }
-  if (workflow == null) {
-    return "The workflow definition for this run is no longer available."
-  }
-  if (workflow.error) {
-    return "Repair this workflow before retrying the run."
-  }
-  if (isRunnableWorkflowStatus(stamp?.status, compatibility)) {
-    return "Ready to retry."
-  }
-  switch (stamp?.status) {
-    case "pending_revalidation":
-      return "Revalidate this workflow before retrying the run."
-    case "invalid":
-      return "Repair this workflow before retrying the run."
-    case "blocked":
-      return "Resolve blocking workflow issues before retrying the run."
-    default:
-      return compatibility == null
-        ? "Workflow status is still loading."
-        : "Revalidate this workflow before retrying the run."
-  }
-}
-
 function parseJSONObject(value: string, label: string) {
   const trimmed = value.trim()
   if (trimmed === "") {
@@ -5235,12 +3765,12 @@ function parseStringJSONObject(value: string, label: string) {
   return parsed as Record<string, string>
 }
 
-function optionalString(value: string) {
+export function optionalString(value: string) {
   const trimmed = value.trim()
   return trimmed === "" ? undefined : trimmed
 }
 
-function parseDeliveryJSONObject(value: string, label: string) {
+export function parseDeliveryJSONObject(value: string, label: string) {
   return parseJSONObject(value, label) as WorkflowDeliveryPayload | undefined
 }
 
@@ -5315,17 +3845,6 @@ async function invalidateWorkflowDefinitionInspections(
 ) {
   await queryClient.invalidateQueries({
     queryKey: workflowDefinitionInspectionQueryKey,
-  })
-}
-
-async function refetchPublishedDependency(
-  queryClient: ReturnType<typeof useQueryClient>,
-  workflowRef: string,
-) {
-  await queryClient.invalidateQueries({
-    queryKey: ["workflows", "dependencies", "published", workflowRef],
-    exact: true,
-    refetchType: "all",
   })
 }
 

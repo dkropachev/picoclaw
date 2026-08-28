@@ -5,7 +5,7 @@
 PicoClaw administrative collections use one shared presentation and interaction
 system. Standard surfaces include Accounts, Account Routers, Model Aliases,
 Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, and Event
-Sources. New collection surfaces, and legacy collection surfaces when
+Sources, and Workflow Definitions. New collection surfaces, and legacy collection surfaces when
 materially changed, must adopt this contract.
 
 This standard does not apply to intrinsically unique experiences such as chat,
@@ -131,21 +131,25 @@ maximum page size 200.
 
 Canonical pilot routes:
 
-| Collection        | List                 | New                      | Detail                     | Edit / related                                                       |
-| ----------------- | -------------------- | ------------------------ | -------------------------- | -------------------------------------------------------------------- |
-| Model Aliases     | `/models/aliases`    | `/models/aliases/new`    | `/models/aliases/:name`    | `/:name/edit`                                                        |
-| Model Routers     | `/models/routers`    | `/models/routers/new`    | `/models/routers/:name`    | `/:name/edit`                                                        |
-| MCP Servers       | `/agent/mcp/servers` | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name` | `/:name/edit`; settings live at `/agent/mcp/settings`                |
-| Agents            | `/agent/agents`      | `/agent/agents/new`      | `/agent/agents/:id`        | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
-| Model Evaluations | `/model-evaluations` | `/model-evaluations/new` | `/model-evaluations/:id`   | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
-| Event Sources     | `/event-sources`     | `/event-sources/new`     | `/event-sources/:id`       | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
-| Skills            | `/agent/skills`      | `/agent/skills/new`      | `/agent/skills/:id`        | None; marketplace choices remain at `/agent/hub`                     |
-| Tools             | `/agent/tools`       | None                     | `/agent/tools/:id`         | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
+| Collection           | List                    | New                      | Detail                      | Edit / related                                                       |
+| -------------------- | ----------------------- | ------------------------ | --------------------------- | -------------------------------------------------------------------- |
+| Model Aliases        | `/models/aliases`       | `/models/aliases/new`    | `/models/aliases/:name`     | `/:name/edit`                                                        |
+| Model Routers        | `/models/routers`       | `/models/routers/new`    | `/models/routers/:name`     | `/:name/edit`                                                        |
+| MCP Servers          | `/agent/mcp/servers`    | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name`  | `/:name/edit`; settings live at `/agent/mcp/settings`                |
+| Agents               | `/agent/agents`         | `/agent/agents/new`      | `/agent/agents/:id`         | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
+| Model Evaluations    | `/model-evaluations`    | `/model-evaluations/new` | `/model-evaluations/:id`    | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
+| Event Sources        | `/event-sources`        | `/event-sources/new`     | `/event-sources/:id`        | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
+| Skills               | `/agent/skills`         | `/agent/skills/new`      | `/agent/skills/:id`         | None; marketplace choices remain at `/agent/hub`                     |
+| Tools                | `/agent/tools`          | None                     | `/agent/tools/:id`          | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
+| Workflow Definitions | `/agent/workflows`      | `/agent/workflows/new`   | `/agent/workflows/:id`      | `/:id/edit`; global workflow policy at `/agent/workflows/settings`   |
+| Workflow Runs        | `/agent/workflows/runs` | None                     | `/agent/workflows/runs/:id` | Operational exemption; shared List/Table only                        |
 
 Legacy `/models`, `/agent/mcp`, `?agent=`, `?probe=`, and Tools `?tab=` UI forms
-are not redirected or compatibility-rendered. The existing evaluation report
-route remains canonical. Skill import and item detail are routed pages rather
-than dialog-only navigation.
+are not redirected or compatibility-rendered. Workflow `mode`, `workflow`, and
+`run` search URLs are likewise a hard cutover: definitions, authoring, runs,
+run detail, and settings use their dedicated routes. The existing evaluation
+report route remains canonical. Skill import and item detail are routed pages
+rather than dialog-only navigation.
 
 ## Backend List And Mutation Contract
 
@@ -183,6 +187,12 @@ validation, credential cleanup, selection-aware reference blockers, one fenced
 save, new revision, and restart-effect reporting. Evaluation deletion holds the
 catalog lock and deletes only version-matching drafts.
 
+Workflow definitions use `/api/workflows/definitions` for the paged collection
+and ID-addressed detail reads. Canonical workflow refs never become path
+segments: the backend emits and resolves their deterministic URL-safe IDs.
+Workflow runs use the same query and cursor envelope at `/api/workflows/runs`
+and keep their existing ID-addressed operational actions and detail resources.
+
 ## Governance And Evidence
 
 `web/frontend/collection-surfaces.json` is the auditable inventory. `standard`
@@ -193,7 +203,9 @@ implementation to migrate to `standard`. `exempt` entries require a specific
 rationale and are not an escape hatch for ordinary administrative collections.
 Workflow runs and Git workspace history are operational exemptions: they are
 not administrative inventories, but still render with the shared page and
-collection primitives and support List and Table.
+collection primitives and support List and Table. Their exemption covers only
+the view set and operational ownership; query, paging, route state, direct
+detail loading, and shared loading/empty/error behavior remain mandatory.
 
 PR validation runs formatting, ESLint/UI rules, the collection delta guard,
 Vitest, the production build, mocked Playwright smoke tests, and deterministic
