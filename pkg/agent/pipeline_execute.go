@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -326,15 +325,40 @@ toolLoop:
 						return ToolControlBreak, nil
 					}
 					hookResult := toolReq.HookResult
+					diagnosticToolArgs := normalizeAgentDiagnosticValue(toolArgs)
 
-					argsJSON, _ := json.Marshal(toolArgs)
-					argsPreview := utils.Truncate(string(argsJSON), 200)
-					logger.InfoCF("agent", fmt.Sprintf("Tool call (hook respond): %s(%s)", toolName, argsPreview),
-						map[string]any{
-							"agent_id":  ts.agent.ID,
-							"tool":      toolName,
-							"iteration": iteration,
-						})
+					logger.InfoSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageToolCall,
+						logger.NewSafeFields(
+							agentDiagnosticAgentField(ts.agent.ID),
+							agentDiagnosticToolField(toolName),
+							logger.SafeInt(logger.FieldIteration, iteration),
+							logger.SafeInt(logger.FieldArgumentCount, len(toolArgs)),
+							logger.SafeBool(logger.FieldHandled, true),
+							logger.SafeObservation(
+								logger.ObservationPrefixToolArguments,
+								logger.ObserveJSONValue(
+									logger.ObservationDomainToolArguments,
+									diagnosticToolArgs,
+								),
+							),
+						),
+					)
+					logger.DebugSensitiveCF(
+						logger.DiagnosticPolicy{},
+						logger.ComponentAgent,
+						logger.DiagnosticMessageHookToolArguments,
+						logger.NewSafeFields(
+							agentDiagnosticAgentField(ts.agent.ID),
+							agentDiagnosticToolField(toolName),
+							logger.SafeInt(logger.FieldIteration, iteration),
+							logger.SafeInt(logger.FieldArgumentCount, len(toolArgs)),
+						),
+						logger.SensitivityToolArguments,
+						logger.ObservationDomainToolArguments,
+						diagnosticToolArgs,
+					)
 
 					al.emitEvent(
 						runtimeevents.KindAgentToolExecStart,
@@ -420,14 +444,17 @@ toolLoop:
 						}
 						if al.channelManager != nil && ts.channel != "" && !constants.IsInternalChannel(ts.channel) {
 							if err := al.channelManager.SendMedia(ctx, outboundMedia); err != nil {
-								logger.WarnCF("agent", "Failed to deliver hook media",
-									map[string]any{
-										"agent_id": ts.agent.ID,
-										"tool":     toolName,
-										"channel":  ts.channel,
-										"chat_id":  ts.chatID,
-										"error":    err.Error(),
-									})
+								logger.WarnSafeCF(
+									logger.ComponentAgent,
+									logger.DiagnosticMessageAgentFailedToDeliverHookMedia,
+									logger.NewSafeFields(
+										agentDiagnosticAgentField(ts.agent.ID),
+										agentDiagnosticToolField(toolName),
+										agentDiagnosticChannelField(ts.channel),
+										agentDiagnosticChatField(ts.chatID),
+										agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+									),
+								)
 								hookResult.IsError = true
 								hookResult.ForLLM = fmt.Sprintf("failed to deliver attachment: %v", err)
 							} else {
@@ -505,34 +532,25 @@ toolLoop:
 					if skipReason != "" {
 						remaining := len(normalizedToolCalls) - i - 1
 						if remaining > 0 {
-							logger.InfoCF("agent", "Turn checkpoint: skipping remaining tools after hook respond",
-								map[string]any{
-									"agent_id":  ts.agent.ID,
-									"completed": i + 1,
-									"skipped":   remaining,
-									"reason":    skipReason,
-								})
-							for j := i + 1; j < len(normalizedToolCalls); j++ {
-								skippedTC := normalizedToolCalls[j]
-								al.emitEvent(
-									runtimeevents.KindAgentToolExecSkipped,
-									ts.eventMeta("runTurn", "turn.tool.skipped"),
-									ToolExecSkippedPayload{
-										Tool:   skippedTC.Name,
-										Reason: skipReason,
-									},
-								)
-								skippedMsg := providers.Message{
-									Role:       "tool",
-									Content:    skipMessage,
-									ToolCallID: skippedTC.ID,
-								}
-								messages = append(messages, skippedMsg)
-								if !ts.opts.NoHistory {
-									ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
-									ts.recordPersistedMessage(skippedMsg)
-								}
-							}
+							logger.InfoSafeCF(
+								logger.ComponentAgent,
+								logger.DiagnosticMessageAgentTurnCheckpointSkippingRemainingToolsAfterHookRespond,
+								logger.NewSafeFields(
+									agentDiagnosticAgentField(ts.agent.ID),
+									logger.SafeInt(logger.FieldCompletedCount, i+1),
+									logger.SafeInt(logger.FieldSkippedCount, remaining),
+									logger.SafeEnum(logger.FieldReason, logger.SafeEnumSkipped),
+									agentDiagnosticReasonField(skipReason),
+								),
+							)
+							messages = appendSkippedToolCallMessages(
+								al,
+								ts,
+								messages,
+								normalizedToolCalls[i+1:],
+								skipReason,
+								skipMessage,
+							)
 						}
 						break toolLoop
 					}
@@ -563,12 +581,15 @@ toolLoop:
 					continue
 				}
 				skipToolCall("Tool hook returned no response result.")
-				logger.WarnCF("agent", "Hook returned respond action but no HookResult provided",
-					map[string]any{
-						"agent_id": ts.agent.ID,
-						"tool":     toolName,
-						"action":   "respond",
-					})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentHookReturnedRespondActionButNoHookResultProvided,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agent.ID),
+						agentDiagnosticToolField(toolName),
+						logger.SafeEnum(logger.FieldOutcome, logger.SafeEnumFailed),
+					),
+				)
 				continue
 			case HookActionDenyTool:
 				skipToolCall(hookDeniedToolContent(
@@ -663,15 +684,40 @@ toolLoop:
 			exec.abortedByHardAbort = true
 			return ToolControlBreak, nil
 		}
+		diagnosticToolArgs := normalizeAgentDiagnosticValue(toolArgs)
 
-		argsJSON, _ := json.Marshal(toolArgs)
-		argsPreview := utils.Truncate(string(argsJSON), 200)
-		logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", toolName, argsPreview),
-			map[string]any{
-				"agent_id":  ts.agent.ID,
-				"tool":      toolName,
-				"iteration": iteration,
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageToolCall,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticToolField(toolName),
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldArgumentCount, len(toolArgs)),
+				logger.SafeBool(logger.FieldHandled, false),
+				logger.SafeObservation(
+					logger.ObservationPrefixToolArguments,
+					logger.ObserveJSONValue(
+						logger.ObservationDomainToolArguments,
+						diagnosticToolArgs,
+					),
+				),
+			),
+		)
+		logger.DebugSensitiveCF(
+			logger.DiagnosticPolicy{},
+			logger.ComponentAgent,
+			logger.DiagnosticMessageToolArguments,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticToolField(toolName),
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldArgumentCount, len(toolArgs)),
+			),
+			logger.SensitivityToolArguments,
+			logger.ObservationDomainToolArguments,
+			diagnosticToolArgs,
+		)
 		al.emitEvent(
 			runtimeevents.KindAgentToolExecStart,
 			ts.eventMeta("runTurn", "turn.tool.start"),
@@ -728,14 +774,14 @@ toolLoop:
 					return
 				}
 				if trackedSpawnRouteErr != nil {
-					logger.WarnCF(
-						"agent",
-						"Tracked spawn completion has no valid parent route",
-						map[string]any{
-							"task_id": completion.TaskID,
-							"turn_id": ts.turnID,
-							"reason":  "invalid_parent_route",
-						},
+					logger.WarnSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentTrackedSpawnCompletionHasNoValidParentRoute,
+						logger.NewSafeFields(
+							agentDiagnosticTaskField(completion.TaskID),
+							agentDiagnosticTurnField(ts.turnID),
+							logger.SafeEnum(logger.FieldReason, logger.SafeEnumUnavailable),
+						),
 					)
 					al.emitEvent(
 						runtimeevents.KindAgentSubTurnOrphan,
@@ -765,12 +811,15 @@ toolLoop:
 
 			content = al.cfg.FilterSensitiveData(content)
 
-			logger.InfoCF("agent", "Async tool completed, publishing result",
-				map[string]any{
-					"tool":        asyncToolName,
-					"content_len": len(content),
-					"channel":     ts.channel,
-				})
+			logger.InfoSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentAsyncToolCompletedPublishingResult,
+				logger.NewSafeFields(
+					agentDiagnosticToolField(asyncToolName),
+					agentDiagnosticChannelField(ts.channel),
+					logger.SafeInt64(logger.FieldContentBytes, int64(len(content))),
+				),
+			)
 			al.emitEvent(
 				runtimeevents.KindAgentFollowUpQueued,
 				ts.scope.meta(iteration, "runTurn", "turn.follow_up.queued"),
@@ -896,14 +945,17 @@ toolLoop:
 			}
 			if al.channelManager != nil && ts.channel != "" && !constants.IsInternalChannel(ts.channel) {
 				if err := al.channelManager.SendMedia(ctx, outboundMedia); err != nil {
-					logger.WarnCF("agent", "Failed to deliver handled tool media",
-						map[string]any{
-							"agent_id": ts.agent.ID,
-							"tool":     toolName,
-							"channel":  ts.channel,
-							"chat_id":  ts.chatID,
-							"error":    err.Error(),
-						})
+					logger.WarnSafeCF(
+						logger.ComponentAgent,
+						logger.DiagnosticMessageAgentFailedToDeliverHandledToolMedia,
+						logger.NewSafeFields(
+							agentDiagnosticAgentField(ts.agent.ID),
+							agentDiagnosticToolField(toolName),
+							agentDiagnosticChannelField(ts.channel),
+							agentDiagnosticChatField(ts.chatID),
+							agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+						),
+					)
 					toolResult = tools.ErrorResult(fmt.Sprintf("failed to deliver attachment: %v", err)).WithError(err)
 				} else {
 					handledAttachments = append(
@@ -930,11 +982,14 @@ toolLoop:
 			(ts.opts.SendResponse || toolResult.ResponseHandled)
 		if shouldSendForUser {
 			al.bus.PublishOutbound(ctx, outboundMessageForTurn(ts, toolResult.ForUser))
-			logger.DebugCF("agent", "Sent tool result to user",
-				map[string]any{
-					"tool":        toolName,
-					"content_len": len(toolResult.ForUser),
-				})
+			logger.DebugSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentSentToolResultToUser,
+				logger.NewSafeFields(
+					agentDiagnosticToolField(toolName),
+					logger.SafeInt64(logger.FieldContentBytes, int64(len(toolResult.ForUser))),
+				),
+			)
 		}
 		contentForLLM := toolResult.ContentForLLM()
 
@@ -990,34 +1045,25 @@ toolLoop:
 		if skipReason != "" {
 			remaining := len(normalizedToolCalls) - i - 1
 			if remaining > 0 {
-				logger.InfoCF("agent", "Turn checkpoint: skipping remaining tools",
-					map[string]any{
-						"agent_id":  ts.agent.ID,
-						"completed": i + 1,
-						"skipped":   remaining,
-						"reason":    skipReason,
-					})
-				for j := i + 1; j < len(normalizedToolCalls); j++ {
-					skippedTC := normalizedToolCalls[j]
-					al.emitEvent(
-						runtimeevents.KindAgentToolExecSkipped,
-						ts.eventMeta("runTurn", "turn.tool.skipped"),
-						ToolExecSkippedPayload{
-							Tool:   skippedTC.Name,
-							Reason: skipReason,
-						},
-					)
-					skippedMsg := providers.Message{
-						Role:       "tool",
-						Content:    skipMessage,
-						ToolCallID: skippedTC.ID,
-					}
-					messages = append(messages, skippedMsg)
-					if !ts.opts.NoHistory {
-						ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
-						ts.recordPersistedMessage(skippedMsg)
-					}
-				}
+				logger.InfoSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentTurnCheckpointSkippingRemainingTools,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agent.ID),
+						logger.SafeInt(logger.FieldCompletedCount, i+1),
+						logger.SafeInt(logger.FieldSkippedCount, remaining),
+						logger.SafeEnum(logger.FieldReason, logger.SafeEnumSkipped),
+						agentDiagnosticReasonField(skipReason),
+					),
+				)
+				messages = appendSkippedToolCallMessages(
+					al,
+					ts,
+					messages,
+					normalizedToolCalls[i+1:],
+					skipReason,
+					skipMessage,
+				)
 			}
 			break toolLoop
 		}
@@ -1049,23 +1095,29 @@ toolLoop:
 	// This covers the case where tools were partially executed and skipped due to steering,
 	// but one tool had ResponseHandled=false (so allResponsesHandled=false).
 	if len(exec.pendingMessages) > 0 {
-		logger.InfoCF("agent", "Pending steering after partial tool execution; continuing turn",
-			map[string]any{
-				"agent_id":            ts.agent.ID,
-				"pending_count":       len(exec.pendingMessages),
-				"allResponsesHandled": exec.allResponsesHandled,
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentPendingSteeringAfterPartialToolExecutionContinuingTurn,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				logger.SafeInt(logger.FieldPendingCount, len(exec.pendingMessages)),
+				logger.SafeBool(logger.FieldHandled, exec.allResponsesHandled),
+			),
+		)
 		exec.allResponsesHandled = false
 		return ToolControlContinue, nil
 	}
 
 	// Poll for newly arrived steering
 	if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
-		logger.InfoCF("agent", "Steering arrived after tool delivery; continuing turn",
-			map[string]any{
-				"agent_id":       ts.agent.ID,
-				"steering_count": len(steerMsgs),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentSteeringArrivedAfterToolDeliveryContinuingTurn,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				logger.SafeInt(logger.FieldMessageCount, len(steerMsgs)),
+			),
+		)
 		exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 		exec.allResponsesHandled = false
 		return ToolControlContinue, nil
@@ -1083,11 +1135,15 @@ toolLoop:
 			ts.recordPersistedMessage(summaryMsg)
 			ts.ingestMessage(turnCtx, al, summaryMsg)
 			if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
-				logger.WarnCF("agent", "Failed to save session after tool delivery",
-					map[string]any{
-						"agent_id": ts.agent.ID,
-						"error":    err.Error(),
-					})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToSaveSessionAfterToolDelivery,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agent.ID),
+						agentDiagnosticSessionField(ts.sessionKey),
+						agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+					),
+				)
 			}
 		}
 		if !ts.opts.NoHistory && ts.opts.EnableSummary {
@@ -1102,12 +1158,15 @@ toolLoop:
 		if al.channelManager != nil && ts.channel != "" {
 			al.channelManager.DismissToolFeedback(ctx, ts.channel, ts.chatID, ts.opts.InboundContext)
 		}
-		logger.InfoCF("agent", "Tool output satisfied delivery; ending turn without follow-up LLM",
-			map[string]any{
-				"agent_id":   ts.agent.ID,
-				"iteration":  iteration,
-				"tool_count": len(normalizedToolCalls),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentToolOutputSatisfiedDeliveryEndingTurnWithoutFollowUpLLM,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldToolCount, len(normalizedToolCalls)),
+			),
+		)
 		return ToolControlBreak, nil
 	}
 
@@ -1115,8 +1174,44 @@ toolLoop:
 	// makes another LLM call. The tool result is in messages and the LLM will
 	// return it as finalContent in the next iteration.
 	ts.agent.Tools.TickTTL()
-	logger.DebugCF("agent", "TTL tick after tool execution", map[string]any{
-		"agent_id": ts.agent.ID, "iteration": iteration,
-	})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentTTLTickAfterToolExecution,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			logger.SafeInt(logger.FieldIteration, iteration),
+		),
+	)
 	return ToolControlContinue, nil
+}
+
+func appendSkippedToolCallMessages(
+	al *AgentLoop,
+	ts *turnState,
+	messages []providers.Message,
+	skippedToolCalls []providers.ToolCall,
+	reason string,
+	message string,
+) []providers.Message {
+	for _, skippedToolCall := range skippedToolCalls {
+		al.emitEvent(
+			runtimeevents.KindAgentToolExecSkipped,
+			ts.eventMeta("runTurn", "turn.tool.skipped"),
+			ToolExecSkippedPayload{
+				Tool:   skippedToolCall.Name,
+				Reason: reason,
+			},
+		)
+		skippedMessage := providers.Message{
+			Role:       "tool",
+			Content:    message,
+			ToolCallID: skippedToolCall.ID,
+		}
+		messages = append(messages, skippedMessage)
+		if !ts.opts.NoHistory {
+			ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMessage)
+			ts.recordPersistedMessage(skippedMessage)
+		}
+	}
+	return messages
 }

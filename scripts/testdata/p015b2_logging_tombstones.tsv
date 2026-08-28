@@ -1,0 +1,14 @@
+# p015b2-frozen-d08-tombstones-v1
+# id	file	owner	ordinal	callee	sha256(file\0owner\0ordinal\0callee\0canonical_call)
+A004	pkg/agent/agent.go	github.com/sipeed/picoclaw/pkg/agent.(*AgentLoop).Run.$lit2.$lit1	1	pico.RecoverPanicNoExit	6e7fb00e40b5470988e7b57d321d456de4bfacb9f7aa575d973f192136b21b2b
+A019	pkg/agent/agent.go	github.com/sipeed/picoclaw/pkg/agent.(*AgentLoop).reloadProviderAndConfig.$lit1.$lit1	1	pico.RecoverPanicNoExit	526f398ab75cfabec82b3d6e255cca340bce2cef3c1a0edc91258ef550e4f47e
+A103	pkg/agent/subturn.go	github.com/sipeed/picoclaw/pkg/agent.spawnSubTurn.$lit4	1	pico.RecoverPanicNoExit	01ae24bbb2c67a9afc76c65c28b33867d6aef246b604fa5501567b91b7b345de
+A106	pkg/agent/turn_state.go	github.com/sipeed/picoclaw/pkg/agent.(*AgentLoop).runSteeringRescue.$lit1	1	pico.RecoverPanicNoExit	66d61e9136da39f1428099429b679b600b626a7580e65c99d878b9e21b54a5a3
+F002	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatMessagesForLog	1	fmt.Fprintf	2edf14d4082da39e9e3cac8d184815814802e4f851ab4dea831f3f864a0ddfc6
+F003	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatMessagesForLog	2	fmt.Fprintf	a62f854e949525208e7b363f3d8af123bb5787ab03285e279a4f0d6f7e39c267
+F004	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatMessagesForLog	3	fmt.Fprintf	108848567cd043878896540c10daef921309d8e8961e19b45cbce81a8b2f3dd1
+F005	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatMessagesForLog	4	fmt.Fprintf	e2af1196410d8ef12f9e1b539a26ebc8331a377ed3278a3f60a14ae537aac645
+F006	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatMessagesForLog	5	fmt.Fprintf	77bb32ec1b94f1012e6945313ab8267db47edee69262860397fbc1989b1344aa
+F007	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatToolsForLog	1	fmt.Fprintf	f852a73ffa00b9aeb7583ea8d692b044558ecf452fb10a1054e34a8a489b5c66
+F008	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatToolsForLog	2	fmt.Fprintf	4c85ad34d21efc52258f24a5a65eab1cffabdc3a63c776f050d63988683fd5cd
+F009	pkg/agent/agent_utils.go	github.com/sipeed/picoclaw/pkg/agent.formatToolsForLog	3	fmt.Fprintf	470920352e055422c3ed6bbcb0d573fb4b9d8cf5d0b5fad8eefbbdca52721cda

@@ -445,11 +445,15 @@ func spawnSubTurn(
 
 	// 1. Depth limit check
 	if parentTS.depth >= rtCfg.maxDepth {
-		logger.WarnCF("subturn", "Depth limit exceeded", map[string]any{
-			"parent_id": parentTS.turnID,
-			"depth":     parentTS.depth,
-			"max_depth": rtCfg.maxDepth,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentSubturn,
+			logger.DiagnosticMessageAgentDepthLimitExceeded,
+			logger.NewSafeFields(
+				agentDiagnosticParentTurnField(parentTS.turnID),
+				logger.SafeInt(logger.FieldDepth, parentTS.depth),
+				logger.SafeInt(logger.FieldMaxDepth, rtCfg.maxDepth),
+			),
+		)
 		return nil, ErrDepthLimitExceeded
 	}
 
@@ -665,14 +669,17 @@ func spawnSubTurn(
 	// 7. Defer cleanup: deliver result (for async), emit End event, and recover from panics
 	defer func() {
 		if r := recover(); r != nil {
-			logger.RecoverPanicNoExit(r)
 			err = fmt.Errorf("subturn panicked: %v", r)
 			result = tools.ErrorResult(fmt.Sprintf("SubTurn failed: %v", err)).WithError(err)
-			logger.ErrorCF("subturn", "SubTurn panicked", map[string]any{
-				"child_id":  childID,
-				"parent_id": parentTS.turnID,
-				"panic":     r,
-			})
+			logger.ErrorSafeCF(
+				logger.ComponentSubturn,
+				logger.DiagnosticMessageAgentSubTurnPanicked,
+				logger.NewSafeFields(
+					agentDiagnosticChildTurnField(childID),
+					agentDiagnosticParentTurnField(parentTS.turnID),
+					agentDiagnosticPanicField(r),
+				),
+			)
 		}
 
 		// Result Delivery Strategy (Async vs Sync)

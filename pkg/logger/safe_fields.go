@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"math"
 	"sort"
 
 	"github.com/rs/zerolog"
@@ -144,6 +145,105 @@ const (
 	DiagnosticMessageHookApprovalTimedOut
 	DiagnosticMessageHookUnsupportedAction
 	DiagnosticMessageHookCloseFailed
+	DiagnosticMessageAgentAccountRouterReselectedAfterContextCompression
+	DiagnosticMessageAgentApplyingPendingSkillOverride
+	DiagnosticMessageAgentAsyncToolCompletedPublishingResult
+	DiagnosticMessageAgentContextOverflowCompactFailed
+	DiagnosticMessageAgentContextStillExceedsBudgetAfterRetryCompactionRebuild
+	DiagnosticMessageAgentContextWindowErrorDetectedAttemptingCompression
+	DiagnosticMessageAgentDroppingAssistantMessageWithEmptyToolCallID
+	DiagnosticMessageAgentDroppingAssistantMessageWithIncompleteToolResults
+	DiagnosticMessageAgentDroppingAssistantToolCallTurnAtHistoryStart
+	DiagnosticMessageAgentDroppingAssistantToolCallTurnWithInvalidPredecessor
+	DiagnosticMessageAgentDroppingDuplicateToolResultInToolBlock
+	DiagnosticMessageAgentDroppingOrphanedLeadingToolMessage
+	DiagnosticMessageAgentDroppingOrphanedToolMessageAfterValidation
+	DiagnosticMessageAgentDroppingOrphanedToolMessage
+	DiagnosticMessageAgentDroppingSystemMessageFromHistory
+	DiagnosticMessageAgentDroppingToolResultWithoutToolCallID
+	DiagnosticMessageAgentDroppingUnexpectedToolResult
+	DiagnosticMessageAgentFailedToApplySimpleToolSurface
+	DiagnosticMessageAgentFailedToDeliverHandledToolMedia
+	DiagnosticMessageAgentFailedToDeliverHookMedia
+	DiagnosticMessageAgentFailedToFinalizeStreamedPicoReasoning
+	DiagnosticMessageAgentFailedToRegisterAgentDiscoveryPromptContributor
+	DiagnosticMessageAgentFailedToRegisterThreadPolicyPromptContributor
+	DiagnosticMessageAgentFailedToRegisterToolDiscoveryPromptContributor
+	DiagnosticMessageAgentFailedToSaveSessionAfterToolDelivery
+	DiagnosticMessageAgentForcedCompressionExecuted
+	DiagnosticMessageAgentFullLLMRequest
+	DiagnosticMessageAgentHookReturnedRespondActionButNoHookResultProvided
+	DiagnosticMessageAgentLLMRequest
+	DiagnosticMessageAgentLLMResponseWithoutToolCallsDirectAnswer
+	DiagnosticMessageAgentLLMResponse
+	DiagnosticMessageAgentMemoryThresholdReachedOptimizingConversationHistory
+	DiagnosticMessageAgentObservedToolAdaptationCacheBehavior
+	DiagnosticMessageAgentObservedToolAdaptationOutcome
+	DiagnosticMessageAgentPendingSteeringAfterPartialToolExecutionContinuingTurn
+	DiagnosticMessageAgentProcessingSystemMessage
+	DiagnosticMessageAgentPromptContributorCollectionFailed
+	DiagnosticMessageAgentProviderReloadGracePeriodExpiredWithInFlightRequests
+	DiagnosticMessageAgentProviderReloadInterruptedWhileWaitingForInFlightRequests
+	DiagnosticMessageAgentRoutedMessage
+	DiagnosticMessageAgentSentToolResultToUser
+	DiagnosticMessageAgentSkippingInvalidPromptOverlay
+	DiagnosticMessageAgentSkippingInvalidPromptPart
+	DiagnosticMessageAgentSteeringArrivedAfterDirectLLMResponseContinuingTurn
+	DiagnosticMessageAgentSteeringArrivedAfterToolDeliveryContinuingTurn
+	DiagnosticMessageAgentSubagentCompletedInternalChannel
+	DiagnosticMessageAgentSummarizationPanicRecovered
+	DiagnosticMessageAgentSystemPromptBuilt
+	DiagnosticMessageAgentSystemPromptCacheInvalidated
+	DiagnosticMessageAgentSystemPromptCached
+	DiagnosticMessageAgentSystemPromptPreview
+	DiagnosticMessageAgentTTLTickAfterToolExecution
+	DiagnosticMessageAgentToolOutputSatisfiedDeliveryEndingTurnWithoutFollowUpLLM
+	DiagnosticMessageAgentTrackedSpawnCompletionHasNoValidParentRoute
+	DiagnosticMessageAgentTransientLLMErrorRetryingAfterBackoff
+	DiagnosticMessageAgentTrimmedRebuiltHistoryAfterContextRetryCompaction
+	DiagnosticMessageAgentTurnCheckpointSkippingRemainingToolsAfterHookRespond
+	DiagnosticMessageAgentTurnCheckpointSkippingRemainingTools
+	DiagnosticMessageAgentSkillsWalkError
+	DiagnosticMessageAgentFallbackSucceeded
+	DiagnosticMessageAgentConfiguredHooksFailedToReinitializeAfterReload
+	DiagnosticMessageAgentContextManagerIngestFailed
+	DiagnosticMessageAgentDeferredTurnResourceCleanupFailed
+	DiagnosticMessageAgentDepthLimitExceeded
+	DiagnosticMessageAgentFailedToAcquireInboundMessageRuntime
+	DiagnosticMessageAgentFailedToActivateReloadedEvolutionBridge
+	DiagnosticMessageAgentFailedToCloseMCPManager
+	DiagnosticMessageAgentFailedToCloseContextManager
+	DiagnosticMessageAgentFailedToCloseEvolutionBridge
+	DiagnosticMessageAgentFailedToClosePreviousMCPManagerDuringReload
+	DiagnosticMessageAgentFailedToClosePreviousContextManagerDuringReload
+	DiagnosticMessageAgentFailedToClosePreviousEvolutionBridgeDuringReload
+	DiagnosticMessageAgentFailedToCloseReloadedEvolutionCandidate
+	DiagnosticMessageAgentFailedToCloseRuntimeEventBus
+	DiagnosticMessageAgentFailedToEnqueueSteeringMessage
+	DiagnosticMessageAgentFailedToPublishFollowUpAfterTurn
+	DiagnosticMessageAgentFailedToRecordLastChannel
+	DiagnosticMessageAgentFailedToReinitializeEvolutionBridgeDuringReload
+	DiagnosticMessageAgentFailedToResumeSteeringAfterReservationAbandonment
+	DiagnosticMessageAgentFailedToRetainInboundMessageRuntime
+	DiagnosticMessageAgentFailedToSubscribeReloadedEvolutionBridgeToRuntimeEvents
+	DiagnosticMessageAgentMCPFailedToReinitializeAfterReload
+	DiagnosticMessageAgentPanicDuringRegistryCreation
+	DiagnosticMessageAgentPostCommitSeahorseCatalogHandlingPanicked
+	DiagnosticMessageAgentProviderAndConfigReloadedSuccessfully
+	DiagnosticMessageAgentSeahorseAdmissionProjectionFailedAfterCatalogCommit
+	DiagnosticMessageAgentSteeringRescuePanicked
+	DiagnosticMessageAgentSubTurnPanicked
+	DiagnosticMessageAgentTrackedSubagentResultContinuationFailed
+	DiagnosticMessageAgentTrackedSubagentResultContinuationRejected
+	DiagnosticMessageAgentTrackedSubagentResultOutboundWasNotAccepted
+	DiagnosticMessageAgentTrackedSubagentSteeringRescueFailed
+	DiagnosticMessageAgentTrackedSubagentSteeringRescueRecheckFailed
+	DiagnosticMessageAgentTrackedSubagentSteeringRescueRejected
+	DiagnosticMessageAgentWorkerGoroutinePanicked
+	DiagnosticMessageAgentTrackedSubagentEventPanicRecovered
+	DiagnosticMessageAgentTrackedSubagentTurnTerminalPanicRecovered
+	DiagnosticMessageAgentTrackedSubagentResultPumpPanicRecovered
+	DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered
 )
 
 var diagnosticMessageLabels = [...]string{
@@ -202,6 +302,105 @@ var diagnosticMessageLabels = [...]string{
 	"Approval hook timed out",
 	"Hook returned unsupported action for stage",
 	"Failed to close hook",
+	"Account router reselected after context compression",
+	"Applying pending skill override",
+	"Async tool completed, publishing result",
+	"Context overflow compact failed",
+	"Context still exceeds budget after retry compaction rebuild",
+	"Context window error detected, attempting compression",
+	"Dropping assistant message with empty tool_call_id",
+	"Dropping assistant message with incomplete tool results",
+	"Dropping assistant tool-call turn at history start",
+	"Dropping assistant tool-call turn with invalid predecessor",
+	"Dropping duplicate tool result in tool block",
+	"Dropping orphaned leading tool message",
+	"Dropping orphaned tool message after validation",
+	"Dropping orphaned tool message",
+	"Dropping system message from history",
+	"Dropping tool result without tool_call_id",
+	"Dropping unexpected tool result",
+	"Failed to apply simple tool surface",
+	"Failed to deliver handled tool media",
+	"Failed to deliver hook media",
+	"Failed to finalize streamed pico reasoning",
+	"Failed to register agent discovery prompt contributor",
+	"Failed to register thread policy prompt contributor",
+	"Failed to register tool discovery prompt contributor",
+	"Failed to save session after tool delivery",
+	"Forced compression executed",
+	"Full LLM request",
+	"Hook returned respond action but no HookResult provided",
+	"LLM request",
+	"LLM response without tool calls (direct answer)",
+	"LLM response",
+	"Memory threshold reached. Optimizing conversation history...",
+	"Observed tool adaptation cache behavior",
+	"Observed tool adaptation outcome",
+	"Pending steering after partial tool execution; continuing turn",
+	"Processing system message",
+	"Prompt contributor collection failed",
+	"Provider reload grace period expired with in-flight requests still running",
+	"Provider reload interrupted while waiting for in-flight requests",
+	"Routed message",
+	"Sent tool result to user",
+	"Skipping invalid prompt overlay",
+	"Skipping invalid prompt part",
+	"Steering arrived after direct LLM response; continuing turn",
+	"Steering arrived after tool delivery; continuing turn",
+	"Subagent completed (internal channel)",
+	"Summarization panic recovered",
+	"System prompt built",
+	"System prompt cache invalidated",
+	"System prompt cached",
+	"System prompt preview",
+	"TTL tick after tool execution",
+	"Tool output satisfied delivery; ending turn without follow-up LLM",
+	"Tracked spawn completion has no valid parent route",
+	"Transient LLM error, retrying after backoff",
+	"Trimmed rebuilt history after context retry compaction",
+	"Turn checkpoint: skipping remaining tools after hook respond",
+	"Turn checkpoint: skipping remaining tools",
+	"skills walk error",
+	"Fallback succeeded",
+	"Configured hooks failed to reinitialize after reload",
+	"Context manager ingest failed",
+	"Deferred turn resource cleanup failed",
+	"Depth limit exceeded",
+	"Failed to acquire inbound message runtime",
+	"Failed to activate reloaded evolution bridge",
+	"Failed to close MCP manager",
+	"Failed to close context manager",
+	"Failed to close evolution bridge",
+	"Failed to close previous MCP manager during reload",
+	"Failed to close previous context manager during reload",
+	"Failed to close previous evolution bridge during reload",
+	"Failed to close reloaded evolution candidate",
+	"Failed to close runtime event bus",
+	"Failed to enqueue steering message",
+	"Failed to publish follow-up after turn",
+	"Failed to record last channel",
+	"Failed to reinitialize evolution bridge during reload",
+	"Failed to resume steering after reservation abandonment",
+	"Failed to retain inbound message runtime",
+	"Failed to subscribe reloaded evolution bridge to runtime events",
+	"MCP failed to reinitialize after reload",
+	"Panic during registry creation",
+	"Post-commit Seahorse catalog handling panicked; retained context manager",
+	"Provider and config reloaded successfully",
+	"Seahorse admission projection failed after catalog commit; retained context manager",
+	"Steering rescue panicked",
+	"SubTurn panicked",
+	"Tracked subagent result continuation failed",
+	"Tracked subagent result continuation rejected",
+	"Tracked subagent result outbound was not accepted",
+	"Tracked subagent steering rescue failed",
+	"Tracked subagent steering rescue recheck failed",
+	"Tracked subagent steering rescue rejected",
+	"Worker goroutine panicked",
+	"Tracked subagent event panic recovered",
+	"Tracked subagent turn-terminal panic recovered",
+	"Tracked subagent result-pump panic recovered",
+	"Tracked subagent steering-rescue panic recovered",
 }
 
 // FieldKey selects one fixed structured key and its required value type.
@@ -279,6 +478,50 @@ const (
 	FieldPromotedCount
 	FieldCore
 	FieldSource
+	// FieldMaxTokens begins the closed cross-slice P015b2 field block. Its
+	// numeric meanings were allocated from the exact A/B/G/C source census;
+	// fields not first consumed by P015b2a are intentionally reserved for the
+	// immediately following P015b2b/P015b2c migrations and must not be reused.
+	FieldMaxTokens
+	FieldContextWindow
+	FieldPromptTokens
+	FieldCompletionTokens
+	FieldTotalTokens
+	FieldCachedTokens
+	FieldReasoningTokens
+	FieldMaxRetries
+	FieldChunkCount
+	FieldExpectedCount
+	FieldFoundCount
+	FieldPendingCount
+	FieldRemainingCount
+	FieldCompletedCount
+	FieldSkippedCount
+	FieldAgentCount
+	FieldServerCount
+	FieldSkillCount
+	FieldAvailableCount
+	FieldNotificationCount
+	FieldMatchedCount
+	FieldInsertedCount
+	FieldBackoffMilliseconds
+	FieldGraceMilliseconds
+	FieldChunkSpanMilliseconds
+	FieldTemperature
+	FieldScore
+	FieldThreshold
+	FieldCacheHitRatio
+	FieldHasReasoning
+	FieldGracefulTerminal
+	FieldASREnabled
+	FieldTTSEnabled
+	FieldDebugEnabled
+	FieldAllowEmpty
+	FieldLimitedMode
+	FieldCacheHit
+	FieldFallback
+	FieldHasSummary
+	FieldCacheSensitive
 )
 
 type safeFieldKind uint8
@@ -289,6 +532,7 @@ const (
 	safeFieldKindBool
 	safeFieldKindEnum
 	safeFieldKindObservation
+	safeFieldKindFloat64
 )
 
 // SafeEnumValue is a fixed value for enum-valued SafeFields. It cannot carry
@@ -320,6 +564,9 @@ const (
 	SafeEnumInProcess
 	SafeEnumProcess
 	SafeEnumUnknown
+	// SafeEnumDeveloper is reserved from the provider-neutral role census for
+	// the deferred Agent history/lifecycle slice.
+	SafeEnumDeveloper
 )
 
 var safeEnumLabels = [...]string{
@@ -348,19 +595,21 @@ var safeEnumLabels = [...]string{
 	"in_process",
 	"process",
 	"unknown",
+	"developer",
 }
 
 // SafeField is one opaque typed field constructor result.
 type SafeField struct {
-	key         FieldKey
-	kind        safeFieldKind
-	intValue    int
-	int64Value  int64
-	boolValue   bool
-	enumValue   SafeEnumValue
-	prefix      ObservationFieldPrefix
-	observation Observation
-	valid       bool
+	key          FieldKey
+	kind         safeFieldKind
+	intValue     int
+	int64Value   int64
+	float64Value float64
+	boolValue    bool
+	enumValue    SafeEnumValue
+	prefix       ObservationFieldPrefix
+	observation  Observation
+	valid        bool
 }
 
 // SafeInt constructs a non-negative int field only for an int FieldKey.
@@ -378,6 +627,15 @@ func SafeInt64(key FieldKey, value int64) SafeField {
 	return SafeField{
 		key: key, kind: safeFieldKindInt64, int64Value: value,
 		valid: kind == safeFieldKindInt64 && value >= 0,
+	}
+}
+
+// SafeFloat64 constructs a finite float64 field only for a float FieldKey.
+func SafeFloat64(key FieldKey, value float64) SafeField {
+	_, kind := safeFieldSpec(key)
+	return SafeField{
+		key: key, kind: safeFieldKindFloat64, float64Value: value,
+		valid: kind == safeFieldKindFloat64 && !math.IsNaN(value) && !math.IsInf(value, 0),
 	}
 }
 
@@ -551,6 +809,8 @@ func appendSafeFields(event *zerolog.Event, fields SafeFields, invalidReason str
 			event.Str(label, safeEnumLabels[field.enumValue])
 		case safeFieldKindObservation:
 			appendSafeObservation(event, field.prefix, field.observation)
+		case safeFieldKindFloat64:
+			event.Float64(label, field.float64Value)
 		}
 	}
 	if fields.preview != nil {
@@ -602,6 +862,8 @@ func safeFieldValid(field SafeField) bool {
 		return true
 	case safeFieldKindEnum:
 		return safeEnumAllowed(field.key, field.enumValue)
+	case safeFieldKindFloat64:
+		return !math.IsNaN(field.float64Value) && !math.IsInf(field.float64Value, 0)
 	default:
 		return false
 	}
@@ -651,7 +913,8 @@ func safeEnumAllowed(key FieldKey, value SafeEnumValue) bool {
 		}
 	case FieldRole:
 		switch value {
-		case SafeEnumSystem, SafeEnumUser, SafeEnumAssistant, SafeEnumTool:
+		case SafeEnumSystem, SafeEnumUser, SafeEnumAssistant, SafeEnumTool,
+			SafeEnumDeveloper, SafeEnumUnknown:
 			return true
 		}
 	case FieldReason:
@@ -806,6 +1069,86 @@ func safeFieldSpec(key FieldKey) (string, safeFieldKind) {
 		return "core", safeFieldKindBool
 	case FieldSource:
 		return "source", safeFieldKindEnum
+	case FieldMaxTokens:
+		return "max_tokens", safeFieldKindInt
+	case FieldContextWindow:
+		return "context_window", safeFieldKindInt
+	case FieldPromptTokens:
+		return "prompt_tokens", safeFieldKindInt
+	case FieldCompletionTokens:
+		return "completion_tokens", safeFieldKindInt
+	case FieldTotalTokens:
+		return "total_tokens", safeFieldKindInt
+	case FieldCachedTokens:
+		return "cached_tokens", safeFieldKindInt
+	case FieldReasoningTokens:
+		return "reasoning_tokens", safeFieldKindInt
+	case FieldMaxRetries:
+		return "max_retries", safeFieldKindInt
+	case FieldChunkCount:
+		return "chunk_count", safeFieldKindInt
+	case FieldExpectedCount:
+		return "expected_count", safeFieldKindInt
+	case FieldFoundCount:
+		return "found_count", safeFieldKindInt
+	case FieldPendingCount:
+		return "pending_count", safeFieldKindInt
+	case FieldRemainingCount:
+		return "remaining_count", safeFieldKindInt
+	case FieldCompletedCount:
+		return "completed_count", safeFieldKindInt
+	case FieldSkippedCount:
+		return "skipped_count", safeFieldKindInt
+	case FieldAgentCount:
+		return "agent_count", safeFieldKindInt
+	case FieldServerCount:
+		return "server_count", safeFieldKindInt
+	case FieldSkillCount:
+		return "skill_count", safeFieldKindInt
+	case FieldAvailableCount:
+		return "available_count", safeFieldKindInt
+	case FieldNotificationCount:
+		return "notification_count", safeFieldKindInt
+	case FieldMatchedCount:
+		return "matched_count", safeFieldKindInt
+	case FieldInsertedCount:
+		return "inserted_count", safeFieldKindInt
+	case FieldBackoffMilliseconds:
+		return "backoff_ms", safeFieldKindInt64
+	case FieldGraceMilliseconds:
+		return "grace_ms", safeFieldKindInt64
+	case FieldChunkSpanMilliseconds:
+		return "chunk_span_ms", safeFieldKindInt64
+	case FieldTemperature:
+		return "temperature", safeFieldKindFloat64
+	case FieldScore:
+		return "score", safeFieldKindFloat64
+	case FieldThreshold:
+		return "threshold", safeFieldKindFloat64
+	case FieldCacheHitRatio:
+		return "cache_hit_ratio", safeFieldKindFloat64
+	case FieldHasReasoning:
+		return "has_reasoning", safeFieldKindBool
+	case FieldGracefulTerminal:
+		return "graceful_terminal", safeFieldKindBool
+	case FieldASREnabled:
+		return "asr_enabled", safeFieldKindBool
+	case FieldTTSEnabled:
+		return "tts_enabled", safeFieldKindBool
+	case FieldDebugEnabled:
+		return "debug_enabled", safeFieldKindBool
+	case FieldAllowEmpty:
+		return "allow_empty", safeFieldKindBool
+	case FieldLimitedMode:
+		return "limited_mode", safeFieldKindBool
+	case FieldCacheHit:
+		return "cache_hit", safeFieldKindBool
+	case FieldFallback:
+		return "fallback", safeFieldKindBool
+	case FieldHasSummary:
+		return "has_summary", safeFieldKindBool
+	case FieldCacheSensitive:
+		return "cache_sensitive", safeFieldKindBool
 	default:
 		return "", 0
 	}

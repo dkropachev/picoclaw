@@ -170,10 +170,10 @@ func newSeahorseContextManagerWithDependencies(
 			return
 		}
 		if recovered != nil {
-			logger.ErrorCF(
-				"seahorse",
-				"Post-commit Seahorse catalog handling panicked; retained context manager",
-				map[string]any{"panic": fmt.Sprint(recovered)},
+			logger.ErrorSafeCF(
+				logger.ComponentSeahorse,
+				logger.DiagnosticMessageAgentPostCommitSeahorseCatalogHandlingPanicked,
+				logger.NewSafeFields(agentDiagnosticPanicField(recovered)),
 			)
 			result = manager
 			returnErr = nil
@@ -299,10 +299,12 @@ func newSeahorseContextManagerWithDependencies(
 	result = manager
 
 	if verificationErr := verifySeahorseAdmissions(stage, admissions); verificationErr != nil {
-		logger.ErrorCF(
-			"seahorse",
-			"Seahorse admission projection failed after catalog commit; retained context manager",
-			map[string]any{"error": verificationErr.Error()},
+		logger.ErrorSafeCF(
+			logger.ComponentSeahorse,
+			logger.DiagnosticMessageAgentSeahorseAdmissionProjectionFailedAfterCatalogCommit,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassInternal, verificationErr),
+			),
 		)
 		state = seahorseConstructionReturned
 		return manager, nil

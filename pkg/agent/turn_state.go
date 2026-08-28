@@ -605,11 +605,15 @@ func (lease *subTurnConstructionLease) release() {
 	owner.mu.Unlock()
 	if finishResourceClose {
 		if closeErr := owner.finishOwnedTurnResourceClose(); closeErr != nil {
-			logger.ErrorCF("agent", "Deferred turn resource cleanup failed", map[string]any{
-				"agent_id": owner.agentID,
-				"turn_id":  owner.turnID,
-				"error":    closeErr.Error(),
-			})
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentDeferredTurnResourceCleanupFailed,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(owner.agentID),
+					agentDiagnosticTurnField(owner.turnID),
+					agentDiagnosticErrorField(logger.ErrorClassInternal, closeErr),
+				),
+			)
 		}
 	}
 }
@@ -998,15 +1002,15 @@ func (al *AgentLoop) runSteeringRescue(
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			retryRemainingQueue = false
-			logger.RecoverPanicNoExit(recovered)
-			logger.ErrorCF(
-				"agent",
-				"Steering rescue panicked",
-				map[string]any{
-					"session_key": sessionKey,
-					"channel":     request.channel,
-					"chat_id":     request.chatID,
-				},
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentSteeringRescuePanicked,
+				logger.NewSafeFields(
+					agentDiagnosticSessionField(sessionKey),
+					agentDiagnosticChannelField(request.channel),
+					agentDiagnosticChatField(request.chatID),
+					agentDiagnosticPanicField(recovered),
+				),
 			)
 		}
 		al.finishSteeringRescue(
@@ -1088,14 +1092,17 @@ func (al *AgentLoop) runSteeringRescue(
 				continueErr,
 				request.inboundContext,
 			) || outboundEnqueued
-			logger.WarnCF(
-				"agent",
-				"Failed to resume steering after reservation abandonment",
-				map[string]any{
-					"error":       continueErr.Error(),
-					"session_key": sessionKey,
-					"queue_depth": al.pendingSteeringCountForScope(sessionKey),
-				},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentFailedToResumeSteeringAfterReservationAbandonment,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassInternal, continueErr),
+					agentDiagnosticSessionField(sessionKey),
+					logger.SafeInt(
+						logger.FieldQueueDepth,
+						al.pendingSteeringCountForScope(sessionKey),
+					),
+				),
 			)
 		}
 	}
@@ -1776,10 +1783,14 @@ func (ts *turnState) ingestMessage(ctx context.Context, al *AgentLoop, msg provi
 		SessionKey: ts.sessionKey,
 		Message:    msg,
 	}); err != nil {
-		logger.WarnCF("agent", "Context manager ingest failed", map[string]any{
-			"session_key": ts.sessionKey,
-			"error":       err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentContextManagerIngestFailed,
+			logger.NewSafeFields(
+				agentDiagnosticSessionField(ts.sessionKey),
+				agentDiagnosticErrorField(logger.ErrorClassInternal, err),
+			),
+		)
 	}
 }
 

@@ -3,6 +3,7 @@ package logger
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,16 +39,18 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 
 	if DiagnosticMessageEvent != 1 || DiagnosticMessageRuntimeEvent != 21 ||
 		DiagnosticMessageToolCall != 22 || DiagnosticMessageHookCloseFailed != 54 ||
-		len(diagnosticMessageLabels) != 55 {
+		DiagnosticMessageAgentAccountRouterReselectedAfterContextCompression != 55 ||
+		DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered != 153 ||
+		len(diagnosticMessageLabels) != 154 {
 		t.Fatalf(
 			"message wire moved: first=%d last=%d labels=%d",
 			DiagnosticMessageEvent,
-			DiagnosticMessageHookCloseFailed,
+			DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered,
 			len(diagnosticMessageLabels),
 		)
 	}
 	seenMessages := make(map[string]DiagnosticMessageID)
-	for message := DiagnosticMessageEvent; message <= DiagnosticMessageHookCloseFailed; message++ {
+	for message := DiagnosticMessageEvent; message <= DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered; message++ {
 		label, ok := diagnosticMessageLabel(message)
 		if !ok || label == "" {
 			t.Fatalf("message %d invalid", message)
@@ -60,33 +63,371 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 	if _, ok := diagnosticMessageLabel(0); ok {
 		t.Fatal("zero message accepted")
 	}
-	if _, ok := diagnosticMessageLabel(DiagnosticMessageHookCloseFailed + 1); ok {
+	if _, ok := diagnosticMessageLabel(DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered + 1); ok {
 		t.Fatal("message after append-only tail accepted")
+	}
+}
+
+func TestP015b2aDiagnosticMessageWireManifest(t *testing.T) {
+	type namedWireID struct {
+		id   DiagnosticMessageID
+		wire int
+	}
+	namedIDs := [...]namedWireID{
+		{DiagnosticMessageAgentAccountRouterReselectedAfterContextCompression, 55},
+		{DiagnosticMessageAgentApplyingPendingSkillOverride, 56},
+		{DiagnosticMessageAgentAsyncToolCompletedPublishingResult, 57},
+		{DiagnosticMessageAgentContextOverflowCompactFailed, 58},
+		{DiagnosticMessageAgentContextStillExceedsBudgetAfterRetryCompactionRebuild, 59},
+		{DiagnosticMessageAgentContextWindowErrorDetectedAttemptingCompression, 60},
+		{DiagnosticMessageAgentDroppingAssistantMessageWithEmptyToolCallID, 61},
+		{DiagnosticMessageAgentDroppingAssistantMessageWithIncompleteToolResults, 62},
+		{DiagnosticMessageAgentDroppingAssistantToolCallTurnAtHistoryStart, 63},
+		{DiagnosticMessageAgentDroppingAssistantToolCallTurnWithInvalidPredecessor, 64},
+		{DiagnosticMessageAgentDroppingDuplicateToolResultInToolBlock, 65},
+		{DiagnosticMessageAgentDroppingOrphanedLeadingToolMessage, 66},
+		{DiagnosticMessageAgentDroppingOrphanedToolMessageAfterValidation, 67},
+		{DiagnosticMessageAgentDroppingOrphanedToolMessage, 68},
+		{DiagnosticMessageAgentDroppingSystemMessageFromHistory, 69},
+		{DiagnosticMessageAgentDroppingToolResultWithoutToolCallID, 70},
+		{DiagnosticMessageAgentDroppingUnexpectedToolResult, 71},
+		{DiagnosticMessageAgentFailedToApplySimpleToolSurface, 72},
+		{DiagnosticMessageAgentFailedToDeliverHandledToolMedia, 73},
+		{DiagnosticMessageAgentFailedToDeliverHookMedia, 74},
+		{DiagnosticMessageAgentFailedToFinalizeStreamedPicoReasoning, 75},
+		{DiagnosticMessageAgentFailedToRegisterAgentDiscoveryPromptContributor, 76},
+		{DiagnosticMessageAgentFailedToRegisterThreadPolicyPromptContributor, 77},
+		{DiagnosticMessageAgentFailedToRegisterToolDiscoveryPromptContributor, 78},
+		{DiagnosticMessageAgentFailedToSaveSessionAfterToolDelivery, 79},
+		{DiagnosticMessageAgentForcedCompressionExecuted, 80},
+		{DiagnosticMessageAgentFullLLMRequest, 81},
+		{DiagnosticMessageAgentHookReturnedRespondActionButNoHookResultProvided, 82},
+		{DiagnosticMessageAgentLLMRequest, 83},
+		{DiagnosticMessageAgentLLMResponseWithoutToolCallsDirectAnswer, 84},
+		{DiagnosticMessageAgentLLMResponse, 85},
+		{DiagnosticMessageAgentMemoryThresholdReachedOptimizingConversationHistory, 86},
+		{DiagnosticMessageAgentObservedToolAdaptationCacheBehavior, 87},
+		{DiagnosticMessageAgentObservedToolAdaptationOutcome, 88},
+		{DiagnosticMessageAgentPendingSteeringAfterPartialToolExecutionContinuingTurn, 89},
+		{DiagnosticMessageAgentProcessingSystemMessage, 90},
+		{DiagnosticMessageAgentPromptContributorCollectionFailed, 91},
+		{DiagnosticMessageAgentProviderReloadGracePeriodExpiredWithInFlightRequests, 92},
+		{DiagnosticMessageAgentProviderReloadInterruptedWhileWaitingForInFlightRequests, 93},
+		{DiagnosticMessageAgentRoutedMessage, 94},
+		{DiagnosticMessageAgentSentToolResultToUser, 95},
+		{DiagnosticMessageAgentSkippingInvalidPromptOverlay, 96},
+		{DiagnosticMessageAgentSkippingInvalidPromptPart, 97},
+		{DiagnosticMessageAgentSteeringArrivedAfterDirectLLMResponseContinuingTurn, 98},
+		{DiagnosticMessageAgentSteeringArrivedAfterToolDeliveryContinuingTurn, 99},
+		{DiagnosticMessageAgentSubagentCompletedInternalChannel, 100},
+		{DiagnosticMessageAgentSummarizationPanicRecovered, 101},
+		{DiagnosticMessageAgentSystemPromptBuilt, 102},
+		{DiagnosticMessageAgentSystemPromptCacheInvalidated, 103},
+		{DiagnosticMessageAgentSystemPromptCached, 104},
+		{DiagnosticMessageAgentSystemPromptPreview, 105},
+		{DiagnosticMessageAgentTTLTickAfterToolExecution, 106},
+		{DiagnosticMessageAgentToolOutputSatisfiedDeliveryEndingTurnWithoutFollowUpLLM, 107},
+		{DiagnosticMessageAgentTrackedSpawnCompletionHasNoValidParentRoute, 108},
+		{DiagnosticMessageAgentTransientLLMErrorRetryingAfterBackoff, 109},
+		{DiagnosticMessageAgentTrimmedRebuiltHistoryAfterContextRetryCompaction, 110},
+		{DiagnosticMessageAgentTurnCheckpointSkippingRemainingToolsAfterHookRespond, 111},
+		{DiagnosticMessageAgentTurnCheckpointSkippingRemainingTools, 112},
+		{DiagnosticMessageAgentSkillsWalkError, 113},
+		{DiagnosticMessageAgentFallbackSucceeded, 114},
+		{DiagnosticMessageAgentConfiguredHooksFailedToReinitializeAfterReload, 115},
+		{DiagnosticMessageAgentContextManagerIngestFailed, 116},
+		{DiagnosticMessageAgentDeferredTurnResourceCleanupFailed, 117},
+		{DiagnosticMessageAgentDepthLimitExceeded, 118},
+		{DiagnosticMessageAgentFailedToAcquireInboundMessageRuntime, 119},
+		{DiagnosticMessageAgentFailedToActivateReloadedEvolutionBridge, 120},
+		{DiagnosticMessageAgentFailedToCloseMCPManager, 121},
+		{DiagnosticMessageAgentFailedToCloseContextManager, 122},
+		{DiagnosticMessageAgentFailedToCloseEvolutionBridge, 123},
+		{DiagnosticMessageAgentFailedToClosePreviousMCPManagerDuringReload, 124},
+		{DiagnosticMessageAgentFailedToClosePreviousContextManagerDuringReload, 125},
+		{DiagnosticMessageAgentFailedToClosePreviousEvolutionBridgeDuringReload, 126},
+		{DiagnosticMessageAgentFailedToCloseReloadedEvolutionCandidate, 127},
+		{DiagnosticMessageAgentFailedToCloseRuntimeEventBus, 128},
+		{DiagnosticMessageAgentFailedToEnqueueSteeringMessage, 129},
+		{DiagnosticMessageAgentFailedToPublishFollowUpAfterTurn, 130},
+		{DiagnosticMessageAgentFailedToRecordLastChannel, 131},
+		{DiagnosticMessageAgentFailedToReinitializeEvolutionBridgeDuringReload, 132},
+		{DiagnosticMessageAgentFailedToResumeSteeringAfterReservationAbandonment, 133},
+		{DiagnosticMessageAgentFailedToRetainInboundMessageRuntime, 134},
+		{DiagnosticMessageAgentFailedToSubscribeReloadedEvolutionBridgeToRuntimeEvents, 135},
+		{DiagnosticMessageAgentMCPFailedToReinitializeAfterReload, 136},
+		{DiagnosticMessageAgentPanicDuringRegistryCreation, 137},
+		{DiagnosticMessageAgentPostCommitSeahorseCatalogHandlingPanicked, 138},
+		{DiagnosticMessageAgentProviderAndConfigReloadedSuccessfully, 139},
+		{DiagnosticMessageAgentSeahorseAdmissionProjectionFailedAfterCatalogCommit, 140},
+		{DiagnosticMessageAgentSteeringRescuePanicked, 141},
+		{DiagnosticMessageAgentSubTurnPanicked, 142},
+		{DiagnosticMessageAgentTrackedSubagentResultContinuationFailed, 143},
+		{DiagnosticMessageAgentTrackedSubagentResultContinuationRejected, 144},
+		{DiagnosticMessageAgentTrackedSubagentResultOutboundWasNotAccepted, 145},
+		{DiagnosticMessageAgentTrackedSubagentSteeringRescueFailed, 146},
+		{DiagnosticMessageAgentTrackedSubagentSteeringRescueRecheckFailed, 147},
+		{DiagnosticMessageAgentTrackedSubagentSteeringRescueRejected, 148},
+		{DiagnosticMessageAgentWorkerGoroutinePanicked, 149},
+		{DiagnosticMessageAgentTrackedSubagentEventPanicRecovered, 150},
+		{DiagnosticMessageAgentTrackedSubagentTurnTerminalPanicRecovered, 151},
+		{DiagnosticMessageAgentTrackedSubagentResultPumpPanicRecovered, 152},
+		{DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered, 153},
+	}
+	expectedLabels := [...]string{
+		"Account router reselected after context compression",
+		"Applying pending skill override",
+		"Async tool completed, publishing result",
+		"Context overflow compact failed",
+		"Context still exceeds budget after retry compaction rebuild",
+		"Context window error detected, attempting compression",
+		"Dropping assistant message with empty tool_call_id",
+		"Dropping assistant message with incomplete tool results",
+		"Dropping assistant tool-call turn at history start",
+		"Dropping assistant tool-call turn with invalid predecessor",
+		"Dropping duplicate tool result in tool block",
+		"Dropping orphaned leading tool message",
+		"Dropping orphaned tool message after validation",
+		"Dropping orphaned tool message",
+		"Dropping system message from history",
+		"Dropping tool result without tool_call_id",
+		"Dropping unexpected tool result",
+		"Failed to apply simple tool surface",
+		"Failed to deliver handled tool media",
+		"Failed to deliver hook media",
+		"Failed to finalize streamed pico reasoning",
+		"Failed to register agent discovery prompt contributor",
+		"Failed to register thread policy prompt contributor",
+		"Failed to register tool discovery prompt contributor",
+		"Failed to save session after tool delivery",
+		"Forced compression executed",
+		"Full LLM request",
+		"Hook returned respond action but no HookResult provided",
+		"LLM request",
+		"LLM response without tool calls (direct answer)",
+		"LLM response",
+		"Memory threshold reached. Optimizing conversation history...",
+		"Observed tool adaptation cache behavior",
+		"Observed tool adaptation outcome",
+		"Pending steering after partial tool execution; continuing turn",
+		"Processing system message",
+		"Prompt contributor collection failed",
+		"Provider reload grace period expired with in-flight requests still running",
+		"Provider reload interrupted while waiting for in-flight requests",
+		"Routed message",
+		"Sent tool result to user",
+		"Skipping invalid prompt overlay",
+		"Skipping invalid prompt part",
+		"Steering arrived after direct LLM response; continuing turn",
+		"Steering arrived after tool delivery; continuing turn",
+		"Subagent completed (internal channel)",
+		"Summarization panic recovered",
+		"System prompt built",
+		"System prompt cache invalidated",
+		"System prompt cached",
+		"System prompt preview",
+		"TTL tick after tool execution",
+		"Tool output satisfied delivery; ending turn without follow-up LLM",
+		"Tracked spawn completion has no valid parent route",
+		"Transient LLM error, retrying after backoff",
+		"Trimmed rebuilt history after context retry compaction",
+		"Turn checkpoint: skipping remaining tools after hook respond",
+		"Turn checkpoint: skipping remaining tools",
+		"skills walk error",
+		"Fallback succeeded",
+		"Configured hooks failed to reinitialize after reload",
+		"Context manager ingest failed",
+		"Deferred turn resource cleanup failed",
+		"Depth limit exceeded",
+		"Failed to acquire inbound message runtime",
+		"Failed to activate reloaded evolution bridge",
+		"Failed to close MCP manager",
+		"Failed to close context manager",
+		"Failed to close evolution bridge",
+		"Failed to close previous MCP manager during reload",
+		"Failed to close previous context manager during reload",
+		"Failed to close previous evolution bridge during reload",
+		"Failed to close reloaded evolution candidate",
+		"Failed to close runtime event bus",
+		"Failed to enqueue steering message",
+		"Failed to publish follow-up after turn",
+		"Failed to record last channel",
+		"Failed to reinitialize evolution bridge during reload",
+		"Failed to resume steering after reservation abandonment",
+		"Failed to retain inbound message runtime",
+		"Failed to subscribe reloaded evolution bridge to runtime events",
+		"MCP failed to reinitialize after reload",
+		"Panic during registry creation",
+		"Post-commit Seahorse catalog handling panicked; retained context manager",
+		"Provider and config reloaded successfully",
+		"Seahorse admission projection failed after catalog commit; retained context manager",
+		"Steering rescue panicked",
+		"SubTurn panicked",
+		"Tracked subagent result continuation failed",
+		"Tracked subagent result continuation rejected",
+		"Tracked subagent result outbound was not accepted",
+		"Tracked subagent steering rescue failed",
+		"Tracked subagent steering rescue recheck failed",
+		"Tracked subagent steering rescue rejected",
+		"Worker goroutine panicked",
+		"Tracked subagent event panic recovered",
+		"Tracked subagent turn-terminal panic recovered",
+		"Tracked subagent result-pump panic recovered",
+		"Tracked subagent steering-rescue panic recovered",
+	}
+
+	const firstWireID = 55
+	if len(namedIDs) != 99 || len(expectedLabels) != len(namedIDs) {
+		t.Fatalf(
+			"test manifest sizes: named IDs=%d labels=%d; want 99 each",
+			len(namedIDs),
+			len(expectedLabels),
+		)
+	}
+	for offset, expectedLabel := range expectedLabels {
+		numericID := firstWireID + offset
+		if named := namedIDs[offset]; int(named.id) != named.wire || named.wire != numericID {
+			t.Fatalf(
+				"named diagnostic message at offset %d = %d with declared wire %d; want wire %d",
+				offset,
+				named.id,
+				named.wire,
+				numericID,
+			)
+		}
+		label, ok := diagnosticMessageLabel(DiagnosticMessageID(numericID))
+		if !ok || label != expectedLabel {
+			t.Fatalf(
+				"diagnostic message wire %d = %q, %v; want %q",
+				numericID,
+				label,
+				ok,
+				expectedLabel,
+			)
+		}
+	}
+}
+
+func TestP015b2aFieldWireManifest(t *testing.T) {
+	type expectedSpec struct {
+		key   FieldKey
+		wire  int
+		label string
+		kind  safeFieldKind
+	}
+	expectedSpecs := [...]expectedSpec{
+		{FieldMaxTokens, 64, "max_tokens", safeFieldKindInt},
+		{FieldContextWindow, 65, "context_window", safeFieldKindInt},
+		{FieldPromptTokens, 66, "prompt_tokens", safeFieldKindInt},
+		{FieldCompletionTokens, 67, "completion_tokens", safeFieldKindInt},
+		{FieldTotalTokens, 68, "total_tokens", safeFieldKindInt},
+		{FieldCachedTokens, 69, "cached_tokens", safeFieldKindInt},
+		{FieldReasoningTokens, 70, "reasoning_tokens", safeFieldKindInt},
+		{FieldMaxRetries, 71, "max_retries", safeFieldKindInt},
+		{FieldChunkCount, 72, "chunk_count", safeFieldKindInt},
+		{FieldExpectedCount, 73, "expected_count", safeFieldKindInt},
+		{FieldFoundCount, 74, "found_count", safeFieldKindInt},
+		{FieldPendingCount, 75, "pending_count", safeFieldKindInt},
+		{FieldRemainingCount, 76, "remaining_count", safeFieldKindInt},
+		{FieldCompletedCount, 77, "completed_count", safeFieldKindInt},
+		{FieldSkippedCount, 78, "skipped_count", safeFieldKindInt},
+		{FieldAgentCount, 79, "agent_count", safeFieldKindInt},
+		{FieldServerCount, 80, "server_count", safeFieldKindInt},
+		{FieldSkillCount, 81, "skill_count", safeFieldKindInt},
+		{FieldAvailableCount, 82, "available_count", safeFieldKindInt},
+		{FieldNotificationCount, 83, "notification_count", safeFieldKindInt},
+		{FieldMatchedCount, 84, "matched_count", safeFieldKindInt},
+		{FieldInsertedCount, 85, "inserted_count", safeFieldKindInt},
+		{FieldBackoffMilliseconds, 86, "backoff_ms", safeFieldKindInt64},
+		{FieldGraceMilliseconds, 87, "grace_ms", safeFieldKindInt64},
+		{FieldChunkSpanMilliseconds, 88, "chunk_span_ms", safeFieldKindInt64},
+		{FieldTemperature, 89, "temperature", safeFieldKindFloat64},
+		{FieldScore, 90, "score", safeFieldKindFloat64},
+		{FieldThreshold, 91, "threshold", safeFieldKindFloat64},
+		{FieldCacheHitRatio, 92, "cache_hit_ratio", safeFieldKindFloat64},
+		{FieldHasReasoning, 93, "has_reasoning", safeFieldKindBool},
+		{FieldGracefulTerminal, 94, "graceful_terminal", safeFieldKindBool},
+		{FieldASREnabled, 95, "asr_enabled", safeFieldKindBool},
+		{FieldTTSEnabled, 96, "tts_enabled", safeFieldKindBool},
+		{FieldDebugEnabled, 97, "debug_enabled", safeFieldKindBool},
+		{FieldAllowEmpty, 98, "allow_empty", safeFieldKindBool},
+		{FieldLimitedMode, 99, "limited_mode", safeFieldKindBool},
+		{FieldCacheHit, 100, "cache_hit", safeFieldKindBool},
+		{FieldFallback, 101, "fallback", safeFieldKindBool},
+		{FieldHasSummary, 102, "has_summary", safeFieldKindBool},
+		{FieldCacheSensitive, 103, "cache_sensitive", safeFieldKindBool},
+	}
+
+	const firstWireKey = 64
+	if len(expectedSpecs) != 40 {
+		t.Fatalf("test manifest has %d specs; want 40", len(expectedSpecs))
+	}
+	for offset, expected := range expectedSpecs {
+		numericKey := firstWireKey + offset
+		if int(expected.key) != expected.wire || expected.wire != numericKey {
+			t.Fatalf(
+				"named field at offset %d = %d with declared wire %d; want wire %d",
+				offset,
+				expected.key,
+				expected.wire,
+				numericKey,
+			)
+		}
+		label, kind := safeFieldSpec(FieldKey(numericKey))
+		if label != expected.label || kind != expected.kind {
+			t.Fatalf(
+				"field wire %d = %q, kind %d; want %q, kind %d",
+				numericKey,
+				label,
+				kind,
+				expected.label,
+				expected.kind,
+			)
+		}
+	}
+
+	namedEnums := [...]struct {
+		value SafeEnumValue
+		wire  int
+	}{
+		{SafeEnumDeveloper, 25},
+	}
+	for _, expected := range namedEnums {
+		if int(expected.value) != expected.wire {
+			t.Fatalf(
+				"named enum value = %d; want wire %d",
+				expected.value,
+				expected.wire,
+			)
+		}
 	}
 }
 
 func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 	if FieldIteration != 1 || FieldDurationMilliseconds != 29 ||
 		FieldAsync != 42 || FieldState != 55 || FieldReason != 59 ||
-		FieldRequestedCount != 60 || FieldSource != 63 {
+		FieldRequestedCount != 60 || FieldSource != 63 ||
+		FieldMaxTokens != 64 || FieldFallback != 101 ||
+		FieldHasSummary != 102 || FieldCacheSensitive != 103 {
 		t.Fatalf(
 			"field wire moved: first=%d int64=%d bool=%d enum=%d last=%d",
 			FieldIteration,
 			FieldDurationMilliseconds,
 			FieldAsync,
 			FieldState,
-			FieldSource,
+			FieldCacheSensitive,
 		)
 	}
 	if SafeEnumPending != 1 || SafeEnumStopped != 21 ||
-		SafeEnumInProcess != 22 || SafeEnumUnknown != 24 || len(safeEnumLabels) != 25 {
+		SafeEnumInProcess != 22 || SafeEnumUnknown != 24 ||
+		SafeEnumDeveloper != 25 || len(safeEnumLabels) != 26 {
 		t.Fatalf(
 			"safe enum wire moved: first=%d last=%d labels=%d",
-			SafeEnumPending, SafeEnumUnknown, len(safeEnumLabels),
+			SafeEnumPending, SafeEnumDeveloper, len(safeEnumLabels),
 		)
 	}
 	seenLabels := make(map[string]FieldKey)
-	for key := FieldIteration; key <= FieldSource; key++ {
+	for key := FieldIteration; key <= FieldCacheSensitive; key++ {
 		label, kind := safeFieldSpec(key)
 		if label == "" || kind == 0 {
 			t.Fatalf("field key %d missing spec", key)
@@ -106,6 +447,8 @@ func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 			field = SafeBool(key, true)
 		case safeFieldKindEnum:
 			field = SafeEnum(key, firstAllowedSafeEnum(t, key))
+		case safeFieldKindFloat64:
+			field = SafeFloat64(key, 1.5)
 		default:
 			t.Fatalf("field key %d has unsupported kind %d", key, kind)
 		}
@@ -116,18 +459,21 @@ func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 	if label, kind := safeFieldSpec(0); label != "" || kind != 0 {
 		t.Fatalf("zero key spec = %q, %d", label, kind)
 	}
-	if label, kind := safeFieldSpec(FieldSource + 1); label != "" || kind != 0 {
+	if label, kind := safeFieldSpec(FieldCacheSensitive + 1); label != "" || kind != 0 {
 		t.Fatalf("key after append-only tail spec = %q, %d", label, kind)
 	}
 
 	for _, key := range []FieldKey{
 		FieldState, FieldAction, FieldOutcome, FieldRole, FieldReason, FieldSource,
 	} {
-		for value := SafeEnumPending; value <= SafeEnumUnknown; value++ {
+		for value := SafeEnumPending; value <= SafeEnumDeveloper; value++ {
 			if got := SafeEnum(key, value).valid; got != safeEnumAllowed(key, value) {
 				t.Fatalf("key %d enum %d validity = %v", key, value, got)
 			}
 		}
+	}
+	if !SafeEnum(FieldRole, SafeEnumUnknown).valid {
+		t.Fatal("unknown role rejected")
 	}
 	if SafeEnum(FieldRole, SafeEnumFailed).valid ||
 		SafeEnum(FieldState, SafeEnumUser).valid {
@@ -221,12 +567,14 @@ func TestSafeFieldsTypedProjectionAndDefensiveValidation(t *testing.T) {
 		SafeInt64(FieldDurationMilliseconds, 17),
 		SafeBool(FieldHandled, true),
 		SafeEnum(FieldRole, SafeEnumAssistant),
+		SafeFloat64(FieldTemperature, 0.75),
 	)
 	records, raw := captureSafeJSONRecords(t, func() {
 		InfoSafeCF(ComponentLogger, DiagnosticMessageEvent, fields)
 	})
 	if len(records) != 1 || records[0]["duration_ms"] != float64(17) ||
-		records[0]["handled"] != true || records[0]["role"] != "assistant" {
+		records[0]["handled"] != true || records[0]["role"] != "assistant" ||
+		records[0]["temperature"] != 0.75 {
 		t.Fatalf("typed projection = %#v; raw=%s", records, raw)
 	}
 
@@ -258,8 +606,13 @@ func TestSafeFieldsTypedProjectionAndDefensiveValidation(t *testing.T) {
 			t.Fatalf("forged safe field %d accepted: %#v", index, field)
 		}
 	}
-	if safeEnumAllowed(FieldRole, 0) || safeEnumAllowed(FieldRole, SafeEnumUnknown+1) {
+	if safeEnumAllowed(FieldRole, 0) || safeEnumAllowed(FieldRole, SafeEnumDeveloper+1) {
 		t.Fatal("out-of-range safe enum accepted")
+	}
+	if SafeFloat64(FieldTemperature, math.NaN()).valid ||
+		SafeFloat64(FieldTemperature, math.Inf(1)).valid ||
+		SafeFloat64(FieldIteration, 1).valid {
+		t.Fatal("invalid float safe field accepted")
 	}
 
 	var buffer bytes.Buffer
@@ -351,7 +704,7 @@ func TestLegacyFatalConvenienceVariantsExit(t *testing.T) {
 
 func firstAllowedSafeEnum(t *testing.T, key FieldKey) SafeEnumValue {
 	t.Helper()
-	for value := SafeEnumPending; value <= SafeEnumUnknown; value++ {
+	for value := SafeEnumPending; value <= SafeEnumDeveloper; value++ {
 		if safeEnumAllowed(key, value) {
 			return value
 		}

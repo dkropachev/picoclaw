@@ -1137,7 +1137,15 @@ func (al *AgentLoop) noteTrackedSubagentResultTurnTerminalSafely(
 ) (orphans []trackedSubagentResultOrphan) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentTrackedSubagentTurnTerminalPanicRecovered,
+				logger.NewSafeFields(
+					agentDiagnosticTurnField(turnID),
+					agentDiagnosticReasonField(string(status)),
+					agentDiagnosticPanicField(recovered),
+				),
+			)
 			orphans = nil
 		}
 	}()
@@ -1275,7 +1283,17 @@ func (al *AgentLoop) runTrackedSubagentResultPump(
 	reschedule := true
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentTrackedSubagentResultPumpPanicRecovered,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(scope.AgentID),
+					agentDiagnosticSessionField(scope.SessionKey),
+					agentDiagnosticParentTurnField(id.SourceTurnID),
+					agentDiagnosticTaskField(id.TaskID),
+					agentDiagnosticPanicField(recovered),
+				),
+			)
 			al.orphanTrackedSubagentResult(id, "continuation_panic")
 		}
 		al.finishTrackedSubagentResultPump(scope, reschedule)
@@ -1312,11 +1330,15 @@ func (al *AgentLoop) runTrackedSubagentResultPump(
 			return
 		}
 		al.orphanTrackedSubagentResult(id, preflightReason)
-		logger.WarnCF("agent", "Tracked subagent result continuation rejected", map[string]any{
-			"agent_id": route.RootAgentID,
-			"task_id":  id.TaskID,
-			"reason":   preflightReason,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentTrackedSubagentResultContinuationRejected,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(route.RootAgentID),
+				agentDiagnosticTaskField(id.TaskID),
+				agentDiagnosticReasonField(preflightReason),
+			),
+		)
 		return
 	}
 
@@ -1365,11 +1387,14 @@ func (al *AgentLoop) runTrackedSubagentResultPump(
 		initialMessages,
 	)
 	if runErr != nil {
-		logger.WarnCF("agent", "Tracked subagent result continuation failed", map[string]any{
-			"agent_id": route.RootAgentID,
-			"task_id":  id.TaskID,
-			"reason":   "continuation_failed",
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentTrackedSubagentResultContinuationFailed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(route.RootAgentID),
+				agentDiagnosticTaskField(id.TaskID),
+			),
+		)
 	}
 	if runErr != nil && response == "" {
 		return
@@ -1382,11 +1407,14 @@ func (al *AgentLoop) runTrackedSubagentResultPump(
 			route,
 			response,
 		) {
-			logger.WarnCF("agent", "Tracked subagent result outbound was not accepted", map[string]any{
-				"agent_id": route.RootAgentID,
-				"task_id":  id.TaskID,
-				"reason":   "outbound_failed",
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentTrackedSubagentResultOutboundWasNotAccepted,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(route.RootAgentID),
+					agentDiagnosticTaskField(id.TaskID),
+				),
+			)
 		}
 	}
 }
@@ -1573,7 +1601,16 @@ func (al *AgentLoop) runTrackedSubagentSteeringRescue(
 	var retryDelay time.Duration
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentTrackedSubagentSteeringRescuePanicRecovered,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(route.RootAgentID),
+					agentDiagnosticSessionField(route.RootSessionKey),
+					agentDiagnosticParentTurnField(route.RootTurnID),
+					agentDiagnosticPanicField(recovered),
+				),
+			)
 			retryDelay, retryMode = al.nextTrackedSubagentSteeringRescueRetry(scope)
 			if retryMode == "none" {
 				al.clearTrackedSubagentSteeringRescue(scope, route.RootSessionKey)
@@ -1617,10 +1654,14 @@ func (al *AgentLoop) runTrackedSubagentSteeringRescue(
 			retryMode = "none"
 			al.clearTrackedSubagentSteeringRescue(scope, route.RootSessionKey)
 		}
-		logger.WarnCF("agent", "Tracked subagent steering rescue rejected", map[string]any{
-			"agent_id": route.RootAgentID,
-			"reason":   reason,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentTrackedSubagentSteeringRescueRejected,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(route.RootAgentID),
+				agentDiagnosticReasonField(reason),
+			),
+		)
 		return
 	}
 	owner := &trackedSubagentResultOutputOwner{}
@@ -1635,10 +1676,11 @@ func (al *AgentLoop) runTrackedSubagentSteeringRescue(
 		if retryMode == "none" {
 			al.clearTrackedSubagentSteeringRescue(scope, route.RootSessionKey)
 		}
-		logger.WarnCF("agent", "Tracked subagent steering rescue recheck failed", map[string]any{
-			"agent_id": route.RootAgentID,
-			"reason":   "strict_session_recheck_failed",
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentTrackedSubagentSteeringRescueRecheckFailed,
+			logger.NewSafeFields(agentDiagnosticAgentField(route.RootAgentID)),
+		)
 		return
 	}
 	placeholder, messages, claimed := al.claimTrackedSubagentSteeringContinuation(route)
@@ -1661,10 +1703,11 @@ func (al *AgentLoop) runTrackedSubagentSteeringRescue(
 		response = formatProcessingError(runErr)
 		retryMode = "immediate"
 		al.resetTrackedSubagentSteeringRescueAttempts(scope)
-		logger.WarnCF("agent", "Tracked subagent steering rescue failed", map[string]any{
-			"agent_id": route.RootAgentID,
-			"reason":   "steering_rescue_failed",
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentTrackedSubagentSteeringRescueFailed,
+			logger.NewSafeFields(agentDiagnosticAgentField(route.RootAgentID)),
+		)
 	}
 	if runErr == nil {
 		al.resetTrackedSubagentSteeringRescueAttempts(scope)
@@ -1997,7 +2040,17 @@ func (al *AgentLoop) emitTrackedSubagentEventSafely(
 ) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentTrackedSubagentEventPanicRecovered,
+				logger.NewSafeFields(
+					agentDiagnosticRuntimeEventKindField(kind),
+					agentDiagnosticAgentField(meta.AgentID),
+					agentDiagnosticTurnField(meta.TurnID),
+					agentDiagnosticParentTurnField(meta.ParentTurnID),
+					agentDiagnosticPanicField(recovered),
+				),
+			)
 		}
 	}()
 	al.emitEvent(kind, meta, payload)

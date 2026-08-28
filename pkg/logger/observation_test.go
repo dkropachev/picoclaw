@@ -682,11 +682,16 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		ObservationDomainIdentityContextManager != 47 ||
 		ObservationDomainIdentityHookStage != 48 ||
 		ObservationDomainPanicType != 51 ||
-		len(observationDomainLabels) != 52 {
+		ObservationDomainIdentityWorkspace != 52 ||
+		ObservationDomainIdentityChildTurn != 65 ||
+		ObservationDomainIdentityReason != 66 ||
+		ObservationDomainIdentityScope != 67 ||
+		ObservationDomainIdentityToolSurface != 68 ||
+		len(observationDomainLabels) != 69 {
 		t.Fatalf(
 			"appended domain wire moved: first=%d last=%d labels=%d",
 			ObservationDomainHookMessage,
-			ObservationDomainPanicType,
+			ObservationDomainIdentityToolSurface,
 			len(observationDomainLabels),
 		)
 	}
@@ -694,11 +699,16 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		ObservationPrefixIdentityContextManager != 54 ||
 		ObservationPrefixIdentityHookStage != 55 ||
 		ObservationPrefixPanic != 58 ||
-		len(observationPrefixLabels) != 59 {
+		ObservationPrefixIdentityWorkspace != 59 ||
+		ObservationPrefixIdentityChildTurn != 72 ||
+		ObservationPrefixIdentityReason != 73 ||
+		ObservationPrefixIdentityScope != 74 ||
+		ObservationPrefixIdentityToolSurface != 75 ||
+		len(observationPrefixLabels) != 76 {
 		t.Fatalf(
 			"appended prefix wire moved: first=%d last=%d labels=%d",
 			ObservationPrefixHookMessage,
-			ObservationPrefixPanic,
+			ObservationPrefixIdentityToolSurface,
 			len(observationPrefixLabels),
 		)
 	}
@@ -736,6 +746,103 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 			ObservationDomainIdentityRuntimeEventKind,
 			ObservationPrefixIdentityRuntimeEventKind,
 			"identity_runtime_event_kind",
+			true,
+		},
+		{
+			ObservationDomainIdentityWorkspace,
+			ObservationPrefixIdentityWorkspace,
+			"identity_workspace",
+			true,
+		},
+		{ObservationDomainIdentityWorker, ObservationPrefixIdentityWorker, "identity_worker", true},
+		{
+			ObservationDomainIdentityPromptPart,
+			ObservationPrefixIdentityPromptPart,
+			"identity_prompt_part",
+			true,
+		},
+		{
+			ObservationDomainIdentityPromptSource,
+			ObservationPrefixIdentityPromptSource,
+			"identity_prompt_source",
+			true,
+		},
+		{
+			ObservationDomainIdentityPromptLayer,
+			ObservationPrefixIdentityPromptLayer,
+			"identity_prompt_layer",
+			true,
+		},
+		{
+			ObservationDomainIdentityPromptSlot,
+			ObservationPrefixIdentityPromptSlot,
+			"identity_prompt_slot",
+			true,
+		},
+		{
+			ObservationDomainIdentityRouteAgent,
+			ObservationPrefixIdentityRouteAgent,
+			"identity_route_agent",
+			true,
+		},
+		{
+			ObservationDomainIdentityRouteChannel,
+			ObservationPrefixIdentityRouteChannel,
+			"identity_route_channel",
+			true,
+		},
+		{
+			ObservationDomainIdentityRouteSession,
+			ObservationPrefixIdentityRouteSession,
+			"identity_route_session",
+			true,
+		},
+		{
+			ObservationDomainIdentityTargetChannel,
+			ObservationPrefixIdentityTargetChannel,
+			"identity_target_channel",
+			true,
+		},
+		{
+			ObservationDomainIdentityProviderModel,
+			ObservationPrefixIdentityProviderModel,
+			"identity_provider_model",
+			true,
+		},
+		{
+			ObservationDomainIdentityLightModel,
+			ObservationPrefixIdentityLightModel,
+			"identity_light_model",
+			true,
+		},
+		{
+			ObservationDomainIdentityParentTurn,
+			ObservationPrefixIdentityParentTurn,
+			"identity_parent_turn",
+			true,
+		},
+		{
+			ObservationDomainIdentityChildTurn,
+			ObservationPrefixIdentityChildTurn,
+			"identity_child_turn",
+			true,
+		},
+		{
+			ObservationDomainIdentityReason,
+			ObservationPrefixIdentityReason,
+			"identity_reason",
+			true,
+		},
+		{
+			ObservationDomainIdentityScope,
+			ObservationPrefixIdentityScope,
+			"identity_scope",
+			true,
+		},
+		{
+			ObservationDomainIdentityToolSurface,
+			ObservationPrefixIdentityToolSurface,
+			"identity_tool_surface",
 			true,
 		},
 	}
@@ -777,11 +884,192 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		ObservationPrefixIdentityHookStage <= ObservationPrefixIdentityContextManager {
 		t.Fatal("appended enums were not appended")
 	}
-	if !validDomain(ObservationDomainPanicType) ||
-		validDomain(ObservationDomainPanicType+1) {
+	if !validDomain(ObservationDomainIdentityToolSurface) ||
+		validDomain(ObservationDomainIdentityToolSurface+1) {
 		t.Fatal("domain after append-only tail accepted")
 	}
-	if _, ok := observationPrefixLabel(ObservationPrefixPanic + 1); ok {
+	if _, ok := observationPrefixLabel(ObservationPrefixIdentityToolSurface + 1); ok {
 		t.Fatal("prefix after append-only tail accepted")
+	}
+}
+
+func TestP015b2aObservationWireManifest(t *testing.T) {
+	namedDomains := [...]struct {
+		domain ObservationDomain
+		wire   int
+	}{
+		{ObservationDomainHookMessage, 41},
+		{ObservationDomainIdentityChannel, 42},
+		{ObservationDomainIdentityModel, 43},
+		{ObservationDomainIdentityWorkflow, 44},
+		{ObservationDomainIdentitySkill, 45},
+		{ObservationDomainIdentityRoute, 46},
+		{ObservationDomainIdentityContextManager, 47},
+		{ObservationDomainIdentityHookStage, 48},
+		{ObservationDomainIdentityHookAction, 49},
+		{ObservationDomainIdentityRuntimeEventKind, 50},
+		{ObservationDomainPanicType, 51},
+		{ObservationDomainIdentityWorkspace, 52},
+		{ObservationDomainIdentityWorker, 53},
+		{ObservationDomainIdentityPromptPart, 54},
+		{ObservationDomainIdentityPromptSource, 55},
+		{ObservationDomainIdentityPromptLayer, 56},
+		{ObservationDomainIdentityPromptSlot, 57},
+		{ObservationDomainIdentityRouteAgent, 58},
+		{ObservationDomainIdentityRouteChannel, 59},
+		{ObservationDomainIdentityRouteSession, 60},
+		{ObservationDomainIdentityTargetChannel, 61},
+		{ObservationDomainIdentityProviderModel, 62},
+		{ObservationDomainIdentityLightModel, 63},
+		{ObservationDomainIdentityParentTurn, 64},
+		{ObservationDomainIdentityChildTurn, 65},
+		{ObservationDomainIdentityReason, 66},
+		{ObservationDomainIdentityScope, 67},
+		{ObservationDomainIdentityToolSurface, 68},
+	}
+	namedPrefixes := [...]struct {
+		prefix ObservationFieldPrefix
+		wire   int
+	}{
+		{ObservationPrefixHookMessage, 48},
+		{ObservationPrefixIdentityChannel, 49},
+		{ObservationPrefixIdentityModel, 50},
+		{ObservationPrefixIdentityWorkflow, 51},
+		{ObservationPrefixIdentitySkill, 52},
+		{ObservationPrefixIdentityRoute, 53},
+		{ObservationPrefixIdentityContextManager, 54},
+		{ObservationPrefixIdentityHookStage, 55},
+		{ObservationPrefixIdentityHookAction, 56},
+		{ObservationPrefixIdentityRuntimeEventKind, 57},
+		{ObservationPrefixPanic, 58},
+		{ObservationPrefixIdentityWorkspace, 59},
+		{ObservationPrefixIdentityWorker, 60},
+		{ObservationPrefixIdentityPromptPart, 61},
+		{ObservationPrefixIdentityPromptSource, 62},
+		{ObservationPrefixIdentityPromptLayer, 63},
+		{ObservationPrefixIdentityPromptSlot, 64},
+		{ObservationPrefixIdentityRouteAgent, 65},
+		{ObservationPrefixIdentityRouteChannel, 66},
+		{ObservationPrefixIdentityRouteSession, 67},
+		{ObservationPrefixIdentityTargetChannel, 68},
+		{ObservationPrefixIdentityProviderModel, 69},
+		{ObservationPrefixIdentityLightModel, 70},
+		{ObservationPrefixIdentityParentTurn, 71},
+		{ObservationPrefixIdentityChildTurn, 72},
+		{ObservationPrefixIdentityReason, 73},
+		{ObservationPrefixIdentityScope, 74},
+		{ObservationPrefixIdentityToolSurface, 75},
+	}
+	expectedDomains := [...]string{
+		"hook_message",
+		"identity.channel",
+		"identity.model",
+		"identity.workflow",
+		"identity.skill",
+		"identity.route",
+		"identity.context_manager",
+		"identity.hook_stage",
+		"identity.hook_action",
+		"identity.runtime_event_kind",
+		"panic_type",
+		"identity.workspace",
+		"identity.worker",
+		"identity.prompt_part",
+		"identity.prompt_source",
+		"identity.prompt_layer",
+		"identity.prompt_slot",
+		"identity.route_agent",
+		"identity.route_channel",
+		"identity.route_session",
+		"identity.target_channel",
+		"identity.provider_model",
+		"identity.light_model",
+		"identity.parent_turn",
+		"identity.child_turn",
+		"identity.reason",
+		"identity.scope",
+		"identity.tool_surface",
+	}
+	expectedPrefixes := [...]string{
+		"hook_message",
+		"identity_channel",
+		"identity_model",
+		"identity_workflow",
+		"identity_skill",
+		"identity_route",
+		"identity_context_manager",
+		"identity_hook_stage",
+		"identity_hook_action",
+		"identity_runtime_event_kind",
+		"panic",
+		"identity_workspace",
+		"identity_worker",
+		"identity_prompt_part",
+		"identity_prompt_source",
+		"identity_prompt_layer",
+		"identity_prompt_slot",
+		"identity_route_agent",
+		"identity_route_channel",
+		"identity_route_session",
+		"identity_target_channel",
+		"identity_provider_model",
+		"identity_light_model",
+		"identity_parent_turn",
+		"identity_child_turn",
+		"identity_reason",
+		"identity_scope",
+		"identity_tool_surface",
+	}
+
+	if len(namedDomains) != 28 || len(namedPrefixes) != 28 ||
+		len(expectedDomains) != len(namedDomains) ||
+		len(expectedPrefixes) != len(namedPrefixes) {
+		t.Fatalf(
+			"test manifest sizes: named domains=%d domains=%d named prefixes=%d prefixes=%d; want 28 each",
+			len(namedDomains),
+			len(expectedDomains),
+			len(namedPrefixes),
+			len(expectedPrefixes),
+		)
+	}
+	for offset, expectedLabel := range expectedDomains {
+		numericDomain := 41 + offset
+		if named := namedDomains[offset]; int(named.domain) != named.wire || named.wire != numericDomain {
+			t.Fatalf(
+				"named domain at offset %d = %d with declared wire %d; want wire %d",
+				offset,
+				named.domain,
+				named.wire,
+				numericDomain,
+			)
+		}
+		if int(ObservationDomain(numericDomain)) >= len(observationDomainLabels) {
+			t.Fatalf("domain wire %d is outside labels", numericDomain)
+		}
+		if label := observationDomainLabels[numericDomain]; label != expectedLabel {
+			t.Fatalf("domain wire %d = %q; want %q", numericDomain, label, expectedLabel)
+		}
+	}
+	for offset, expectedLabel := range expectedPrefixes {
+		numericPrefix := 48 + offset
+		if named := namedPrefixes[offset]; int(named.prefix) != named.wire || named.wire != numericPrefix {
+			t.Fatalf(
+				"named prefix at offset %d = %d with declared wire %d; want wire %d",
+				offset,
+				named.prefix,
+				named.wire,
+				numericPrefix,
+			)
+		}
+		label, ok := observationPrefixLabel(ObservationFieldPrefix(numericPrefix))
+		if !ok || label != expectedLabel {
+			t.Fatalf(
+				"prefix wire %d = %q, %v; want %q",
+				numericPrefix,
+				label,
+				ok,
+				expectedLabel,
+			)
+		}
 	}
 }

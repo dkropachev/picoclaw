@@ -104,6 +104,27 @@ const (
 	ObservationDomainIdentityHookAction
 	ObservationDomainIdentityRuntimeEventKind
 	ObservationDomainPanicType
+	// ObservationDomainIdentityWorkspace begins the remaining identities
+	// allocated from the closed P015b2 A/B/G/C census. Workspace, worker, and
+	// light-model are first consumed by deferred b2b/b2c sinks; keeping their
+	// meanings here prevents later repurposing.
+	ObservationDomainIdentityWorkspace
+	ObservationDomainIdentityWorker
+	ObservationDomainIdentityPromptPart
+	ObservationDomainIdentityPromptSource
+	ObservationDomainIdentityPromptLayer
+	ObservationDomainIdentityPromptSlot
+	ObservationDomainIdentityRouteAgent
+	ObservationDomainIdentityRouteChannel
+	ObservationDomainIdentityRouteSession
+	ObservationDomainIdentityTargetChannel
+	ObservationDomainIdentityProviderModel
+	ObservationDomainIdentityLightModel
+	ObservationDomainIdentityParentTurn
+	ObservationDomainIdentityChildTurn
+	ObservationDomainIdentityReason
+	ObservationDomainIdentityScope
+	ObservationDomainIdentityToolSurface
 )
 
 var observationDomainLabels = [...]string{
@@ -159,6 +180,23 @@ var observationDomainLabels = [...]string{
 	"identity.hook_action",
 	"identity.runtime_event_kind",
 	"panic_type",
+	"identity.workspace",
+	"identity.worker",
+	"identity.prompt_part",
+	"identity.prompt_source",
+	"identity.prompt_layer",
+	"identity.prompt_slot",
+	"identity.route_agent",
+	"identity.route_channel",
+	"identity.route_session",
+	"identity.target_channel",
+	"identity.provider_model",
+	"identity.light_model",
+	"identity.parent_turn",
+	"identity.child_turn",
+	"identity.reason",
+	"identity.scope",
+	"identity.tool_surface",
 }
 
 // ObservationFieldPrefix selects one fixed family of structured log keys.
@@ -227,6 +265,23 @@ const (
 	ObservationPrefixIdentityHookAction
 	ObservationPrefixIdentityRuntimeEventKind
 	ObservationPrefixPanic
+	ObservationPrefixIdentityWorkspace
+	ObservationPrefixIdentityWorker
+	ObservationPrefixIdentityPromptPart
+	ObservationPrefixIdentityPromptSource
+	ObservationPrefixIdentityPromptLayer
+	ObservationPrefixIdentityPromptSlot
+	ObservationPrefixIdentityRouteAgent
+	ObservationPrefixIdentityRouteChannel
+	ObservationPrefixIdentityRouteSession
+	ObservationPrefixIdentityTargetChannel
+	ObservationPrefixIdentityProviderModel
+	ObservationPrefixIdentityLightModel
+	ObservationPrefixIdentityParentTurn
+	ObservationPrefixIdentityChildTurn
+	ObservationPrefixIdentityReason
+	ObservationPrefixIdentityScope
+	ObservationPrefixIdentityToolSurface
 )
 
 var observationPrefixLabels = [...]string{
@@ -289,6 +344,23 @@ var observationPrefixLabels = [...]string{
 	"identity_hook_action",
 	"identity_runtime_event_kind",
 	"panic",
+	"identity_workspace",
+	"identity_worker",
+	"identity_prompt_part",
+	"identity_prompt_source",
+	"identity_prompt_layer",
+	"identity_prompt_slot",
+	"identity_route_agent",
+	"identity_route_channel",
+	"identity_route_session",
+	"identity_target_channel",
+	"identity_provider_model",
+	"identity_light_model",
+	"identity_parent_turn",
+	"identity_child_turn",
+	"identity_reason",
+	"identity_scope",
+	"identity_tool_surface",
 }
 
 // ErrorClass is a trusted, fixed classification supplied by an error owner.
@@ -882,6 +954,40 @@ func prefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, bool) {
 		return ObservationPrefixIdentityRuntimeEventKind, true
 	case ObservationDomainPanicType:
 		return ObservationPrefixPanic, true
+	case ObservationDomainIdentityWorkspace:
+		return ObservationPrefixIdentityWorkspace, true
+	case ObservationDomainIdentityWorker:
+		return ObservationPrefixIdentityWorker, true
+	case ObservationDomainIdentityPromptPart:
+		return ObservationPrefixIdentityPromptPart, true
+	case ObservationDomainIdentityPromptSource:
+		return ObservationPrefixIdentityPromptSource, true
+	case ObservationDomainIdentityPromptLayer:
+		return ObservationPrefixIdentityPromptLayer, true
+	case ObservationDomainIdentityPromptSlot:
+		return ObservationPrefixIdentityPromptSlot, true
+	case ObservationDomainIdentityRouteAgent:
+		return ObservationPrefixIdentityRouteAgent, true
+	case ObservationDomainIdentityRouteChannel:
+		return ObservationPrefixIdentityRouteChannel, true
+	case ObservationDomainIdentityRouteSession:
+		return ObservationPrefixIdentityRouteSession, true
+	case ObservationDomainIdentityTargetChannel:
+		return ObservationPrefixIdentityTargetChannel, true
+	case ObservationDomainIdentityProviderModel:
+		return ObservationPrefixIdentityProviderModel, true
+	case ObservationDomainIdentityLightModel:
+		return ObservationPrefixIdentityLightModel, true
+	case ObservationDomainIdentityParentTurn:
+		return ObservationPrefixIdentityParentTurn, true
+	case ObservationDomainIdentityChildTurn:
+		return ObservationPrefixIdentityChildTurn, true
+	case ObservationDomainIdentityReason:
+		return ObservationPrefixIdentityReason, true
+	case ObservationDomainIdentityScope:
+		return ObservationPrefixIdentityScope, true
+	case ObservationDomainIdentityToolSurface:
+		return ObservationPrefixIdentityToolSurface, true
 	default:
 		return 0, false
 	}
@@ -900,7 +1006,24 @@ func identityPrefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, 
 		ObservationDomainIdentityContextManager,
 		ObservationDomainIdentityHookStage,
 		ObservationDomainIdentityHookAction,
-		ObservationDomainIdentityRuntimeEventKind:
+		ObservationDomainIdentityRuntimeEventKind,
+		ObservationDomainIdentityWorkspace,
+		ObservationDomainIdentityWorker,
+		ObservationDomainIdentityPromptPart,
+		ObservationDomainIdentityPromptSource,
+		ObservationDomainIdentityPromptLayer,
+		ObservationDomainIdentityPromptSlot,
+		ObservationDomainIdentityRouteAgent,
+		ObservationDomainIdentityRouteChannel,
+		ObservationDomainIdentityRouteSession,
+		ObservationDomainIdentityTargetChannel,
+		ObservationDomainIdentityProviderModel,
+		ObservationDomainIdentityLightModel,
+		ObservationDomainIdentityParentTurn,
+		ObservationDomainIdentityChildTurn,
+		ObservationDomainIdentityReason,
+		ObservationDomainIdentityScope,
+		ObservationDomainIdentityToolSurface:
 		return prefixForDomain(domain)
 	default:
 		return 0, false

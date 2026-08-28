@@ -194,23 +194,46 @@ func (p *Pipeline) CallLLM(
 		},
 	)
 
-	logger.DebugCF("agent", "LLM request",
-		map[string]any{
-			"agent_id":          ts.agent.ID,
-			"iteration":         iteration,
-			"model":             exec.llmModel,
-			"messages_count":    len(exec.callMessages),
-			"tools_count":       len(exec.providerToolDefs),
-			"max_tokens":        ts.agent.MaxTokens,
-			"temperature":       ts.agent.Temperature,
-			"system_prompt_len": len(exec.callMessages[0].Content),
-		})
-	logger.DebugCF("agent", "Full LLM request",
-		map[string]any{
-			"iteration":     iteration,
-			"messages_json": formatMessagesForLog(exec.callMessages),
-			"tools_json":    formatToolsForLog(exec.providerToolDefs),
-		})
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentLLMRequest,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			agentDiagnosticModelField(exec.llmModel),
+			logger.SafeInt(logger.FieldIteration, iteration),
+			logger.SafeInt(logger.FieldMessageCount, len(exec.callMessages)),
+			logger.SafeInt(logger.FieldToolCount, len(exec.providerToolDefs)),
+			logger.SafeInt(logger.FieldMaxTokens, ts.agent.MaxTokens),
+			logger.SafeFloat64(logger.FieldTemperature, float64(ts.agent.Temperature)),
+			logger.SafeInt64(
+				logger.FieldInputBytes,
+				int64(len(exec.callMessages[0].Content)),
+			),
+		),
+	)
+	roleCounts := countAgentDiagnosticMessageRoles(exec.callMessages)
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentFullLLMRequest,
+		logger.NewSafeFields(
+			logger.SafeInt(logger.FieldIteration, iteration),
+			logger.SafeInt(logger.FieldMessageCount, len(exec.callMessages)),
+			logger.SafeInt(logger.FieldSystemMessageCount, roleCounts.system),
+			logger.SafeInt(logger.FieldUserMessageCount, roleCounts.user),
+			logger.SafeInt(logger.FieldAssistantMessageCount, roleCounts.assistant),
+			logger.SafeInt(logger.FieldToolMessageCount, roleCounts.tool),
+			logger.SafeInt(logger.FieldUnknownCount, roleCounts.unknown),
+			logger.SafeInt(logger.FieldToolCount, len(exec.providerToolDefs)),
+			logger.SafeObservation(
+				logger.ObservationPrefixMessageGraph,
+				observeAgentMessageGraph(exec.callMessages),
+			),
+			logger.SafeObservation(
+				logger.ObservationPrefixToolSchema,
+				observeAgentToolDefinitions(exec.providerToolDefs),
+			),
+		),
+	)
 
 	// LLM call closure with fallback support
 	callLLM := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
@@ -405,11 +428,17 @@ func (p *Pipeline) CallLLM(
 				exec.accountRouter.RecordFallbackResult(exec.routerSelection, fbResult, nil)
 			}
 			if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
-				logger.InfoCF(
-					"agent",
-					fmt.Sprintf("Fallback: succeeded with %s/%s after %d attempts",
-						fbResult.Provider, fbResult.Model, len(fbResult.Attempts)+1),
-					map[string]any{"agent_id": ts.agent.ID, "iteration": iteration},
+				logger.InfoSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFallbackSucceeded,
+					logger.NewSafeFields(
+						agentDiagnosticAgentField(ts.agent.ID),
+						agentDiagnosticProviderField(fbResult.Provider),
+						agentDiagnosticProviderModelField(fbResult.Model),
+						logger.SafeInt(logger.FieldAttempt, len(fbResult.Attempts)+1),
+						logger.SafeInt(logger.FieldIteration, iteration),
+						logger.SafeBool(logger.FieldFallback, true),
+					),
 				)
 			}
 			p.applySuccessfulFallbackCandidate(ts, exec, fbResult)
@@ -517,12 +546,17 @@ func (p *Pipeline) CallLLM(
 					Backoff:    backoff,
 				},
 			)
-			logger.WarnCF("agent", "Transient LLM error, retrying after backoff", map[string]any{
-				"error":   err.Error(),
-				"reason":  retryReason,
-				"retry":   retry,
-				"backoff": backoff.String(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentTransientLLMErrorRetryingAfterBackoff,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassProvider, err),
+					agentDiagnosticReasonField(retryReason),
+					logger.SafeInt(logger.FieldRetryCount, retry),
+					logger.SafeInt64(logger.FieldBackoffMilliseconds, backoff.Milliseconds()),
+					logger.SafeBool(logger.FieldRetryable, true),
+				),
+			)
 			if sleepErr := sleepWithContext(turnCtx, backoff); sleepErr != nil {
 				if ts.hardAbortRequested() {
 					_ = ts.requestHardAbort()
@@ -545,13 +579,14 @@ func (p *Pipeline) CallLLM(
 					Error:      err.Error(),
 				},
 			)
-			logger.WarnCF(
-				"agent",
-				"Context window error detected, attempting compression",
-				map[string]any{
-					"error": err.Error(),
-					"retry": retry,
-				},
+			logger.WarnSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentContextWindowErrorDetectedAttemptingCompression,
+				logger.NewSafeFields(
+					agentDiagnosticErrorField(logger.ErrorClassProvider, err),
+					logger.SafeInt(logger.FieldRetryCount, retry),
+					logger.SafeBool(logger.FieldRetryable, true),
+				),
 			)
 
 			if retry == 0 && !constants.IsInternalChannel(ts.channel) {
@@ -566,10 +601,14 @@ func (p *Pipeline) CallLLM(
 				Reason:     ContextCompressReasonRetry,
 				Budget:     ts.agent.ContextWindow,
 			}); compactErr != nil {
-				logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
-					"session_key": ts.sessionKey,
-					"error":       compactErr.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentContextOverflowCompactFailed,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(ts.sessionKey),
+						agentDiagnosticErrorField(logger.ErrorClassInternal, compactErr),
+					),
+				)
 			}
 			ts.refreshRestorePointFromSession(ts.agent)
 			if asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
@@ -625,24 +664,32 @@ func (p *Pipeline) CallLLM(
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
 			}
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
-				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{
-					"session_key":     ts.sessionKey,
-					"retry":           retry,
-					"dropped_msgs":    dropped,
-					"remaining_msgs":  len(exec.history),
-					"context_window":  ts.agent.ContextWindow,
-					"max_tokens":      ts.agent.MaxTokens,
-					"still_overlimit": !fit,
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentTrimmedRebuiltHistoryAfterContextRetryCompaction,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(ts.sessionKey),
+						logger.SafeInt(logger.FieldRetryCount, retry),
+						logger.SafeInt(logger.FieldDroppedCount, dropped),
+						logger.SafeInt(logger.FieldRemainingCount, len(exec.history)),
+						logger.SafeInt(logger.FieldContextWindow, ts.agent.ContextWindow),
+						logger.SafeInt(logger.FieldMaxTokens, ts.agent.MaxTokens),
+						logger.SafeBool(logger.FieldSuccess, fit),
+					),
+				)
 			} else if !fit {
-				logger.WarnCF("agent", "Context still exceeds budget after retry compaction rebuild", map[string]any{
-					"session_key":         ts.sessionKey,
-					"retry":               retry,
-					"history_msgs":        len(exec.history),
-					"protected_turn_msgs": len(protectedTurnTail),
-					"context_window":      ts.agent.ContextWindow,
-					"max_tokens":          ts.agent.MaxTokens,
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentContextStillExceedsBudgetAfterRetryCompactionRebuild,
+					logger.NewSafeFields(
+						agentDiagnosticSessionField(ts.sessionKey),
+						logger.SafeInt(logger.FieldRetryCount, retry),
+						logger.SafeInt(logger.FieldHistoryMessageCount, len(exec.history)),
+						logger.SafeInt(logger.FieldMessageCount, len(protectedTurnTail)),
+						logger.SafeInt(logger.FieldContextWindow, ts.agent.ContextWindow),
+						logger.SafeInt(logger.FieldMaxTokens, ts.agent.MaxTokens),
+					),
+				)
 			}
 			if !fit {
 				err = fmt.Errorf(
@@ -666,13 +713,16 @@ func (p *Pipeline) CallLLM(
 				Message: err.Error(),
 			},
 		)
-		logger.ErrorCF("agent", "LLM call failed",
-			map[string]any{
-				"agent_id":  ts.agent.ID,
-				"iteration": iteration,
-				"model":     exec.llmModel,
-				"error":     err.Error(),
-			})
+		logger.ErrorSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageLLMCallFailed,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				agentDiagnosticModelField(exec.llmModel),
+				agentDiagnosticErrorField(logger.ErrorClassProvider, err),
+				logger.SafeInt(logger.FieldIteration, iteration),
+			),
+		)
 		return ControlBreak, fmt.Errorf("LLM call failed after retries: %w", err)
 	}
 
@@ -729,11 +779,15 @@ func (p *Pipeline) CallLLM(
 	} else if ts.channel == "pico" {
 		if exec.streamingPublisher != nil && exec.streamingPublisher.ReasoningPublished() {
 			if err := exec.streamingPublisher.FinalizeReasoning(turnCtx, reasoningContent); err != nil {
-				logger.WarnCF("agent", "Failed to finalize streamed pico reasoning", map[string]any{
-					"channel": ts.channel,
-					"chat_id": ts.chatID,
-					"error":   err.Error(),
-				})
+				logger.WarnSafeCF(
+					logger.ComponentAgent,
+					logger.DiagnosticMessageAgentFailedToFinalizeStreamedPicoReasoning,
+					logger.NewSafeFields(
+						agentDiagnosticChannelField(ts.channel),
+						agentDiagnosticChatField(ts.chatID),
+						agentDiagnosticErrorField(logger.ErrorClassTransport, err),
+					),
+				)
 			}
 		} else {
 			// Publish pico thoughts before the turn context is canceled at return time.
@@ -760,21 +814,74 @@ func (p *Pipeline) CallLLM(
 		},
 	)
 
-	llmResponseFields := map[string]any{
-		"agent_id":       ts.agent.ID,
-		"iteration":      iteration,
-		"content_chars":  len(exec.response.Content),
-		"tool_calls":     len(exec.response.ToolCalls),
-		"reasoning":      exec.response.Reasoning,
-		"target_channel": al.targetReasoningChannelID(ts.channel),
-		"channel":        ts.channel,
+	targetReasoningChannel := al.targetReasoningChannelID(ts.channel)
+	responseSafeFields := []logger.SafeField{
+		agentDiagnosticAgentField(ts.agent.ID),
+		agentDiagnosticChannelField(ts.channel),
+		agentDiagnosticTargetChannelField(targetReasoningChannel),
+		logger.SafeInt(logger.FieldIteration, iteration),
+		logger.SafeInt64(logger.FieldContentBytes, int64(len(exec.response.Content))),
+		logger.SafeInt(logger.FieldToolCallCount, len(exec.response.ToolCalls)),
+		logger.SafeBool(
+			logger.FieldHasReasoning,
+			reasoningContent != "",
+		),
+		logger.SafeObservation(
+			logger.ObservationPrefixModelResponse,
+			logger.ObserveText(
+				logger.ObservationDomainModelResponse,
+				exec.response.Content,
+			),
+		),
+		logger.SafeObservation(
+			logger.ObservationPrefixReasoning,
+			logger.ObserveText(logger.ObservationDomainReasoning, reasoningContent),
+		),
 	}
 	if exec.response.Usage != nil {
-		llmResponseFields["prompt_tokens"] = exec.response.Usage.PromptTokens
-		llmResponseFields["completion_tokens"] = exec.response.Usage.CompletionTokens
-		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
+		responseSafeFields = append(
+			responseSafeFields,
+			logger.SafeInt(logger.FieldPromptTokens, exec.response.Usage.PromptTokens),
+			logger.SafeInt(logger.FieldCompletionTokens, exec.response.Usage.CompletionTokens),
+			logger.SafeInt(logger.FieldTotalTokens, exec.response.Usage.TotalTokens),
+		)
 	}
-	logger.DebugCF("agent", "LLM response", llmResponseFields)
+	logger.DebugSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentLLMResponse,
+		logger.NewSafeFields(responseSafeFields...),
+	)
+	logger.DebugSensitiveCF(
+		logger.DiagnosticPolicy{},
+		logger.ComponentAgent,
+		logger.DiagnosticMessageModelResponse,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			agentDiagnosticChannelField(ts.channel),
+			agentDiagnosticTargetChannelField(targetReasoningChannel),
+			logger.SafeInt(logger.FieldIteration, iteration),
+			logger.SafeInt64(logger.FieldContentBytes, int64(len(exec.response.Content))),
+			logger.SafeInt(logger.FieldToolCallCount, len(exec.response.ToolCalls)),
+		),
+		logger.SensitivityModelResponse,
+		logger.ObservationDomainModelResponse,
+		exec.response.Content,
+	)
+	logger.DebugSensitiveCF(
+		logger.DiagnosticPolicy{},
+		logger.ComponentAgent,
+		logger.DiagnosticMessageModelReasoning,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			agentDiagnosticChannelField(ts.channel),
+			agentDiagnosticTargetChannelField(targetReasoningChannel),
+			logger.SafeInt(logger.FieldIteration, iteration),
+			logger.SafeBool(logger.FieldHasReasoning, reasoningContent != ""),
+		),
+		logger.SensitivityReasoning,
+		logger.ObservationDomainReasoning,
+		reasoningContent,
+	)
 
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
@@ -784,23 +891,29 @@ func (p *Pipeline) CallLLM(
 		}
 		if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
 			cancelConfiguredStreamingLLM(turnCtx, exec)
-			logger.InfoCF("agent", "Steering arrived after direct LLM response; continuing turn",
-				map[string]any{
-					"agent_id":       ts.agent.ID,
-					"iteration":      iteration,
-					"steering_count": len(steerMsgs),
-				})
+			logger.InfoSafeCF(
+				logger.ComponentAgent,
+				logger.DiagnosticMessageAgentSteeringArrivedAfterDirectLLMResponseContinuingTurn,
+				logger.NewSafeFields(
+					agentDiagnosticAgentField(ts.agent.ID),
+					logger.SafeInt(logger.FieldIteration, iteration),
+					logger.SafeInt(logger.FieldMessageCount, len(steerMsgs)),
+				),
+			)
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 			return ControlContinue, nil
 		}
 
 		exec.finalContent = responseContent
-		logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
-			map[string]any{
-				"agent_id":      ts.agent.ID,
-				"iteration":     iteration,
-				"content_chars": len(exec.finalContent),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentLLMResponseWithoutToolCallsDirectAnswer,
+			logger.NewSafeFields(
+				agentDiagnosticAgentField(ts.agent.ID),
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt64(logger.FieldContentBytes, int64(len(exec.finalContent))),
+			),
+		)
 		return ControlBreak, nil
 	}
 	cancelConfiguredStreamingLLM(turnCtx, exec)
@@ -820,17 +933,22 @@ func (p *Pipeline) CallLLM(
 		return ControlBreak, fmt.Errorf("invalid model tool-call batch: %w", err)
 	}
 
-	toolNames := make([]string, 0, len(exec.normalizedToolCalls))
-	for _, tc := range exec.normalizedToolCalls {
-		toolNames = append(toolNames, tc.Name)
-	}
-	logger.InfoCF("agent", "LLM requested tool calls",
-		map[string]any{
-			"agent_id":  ts.agent.ID,
-			"tools":     toolNames,
-			"count":     len(exec.normalizedToolCalls),
-			"iteration": iteration,
-		})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageLLMRequestedToolCalls,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			logger.SafeInt(logger.FieldToolCallCount, len(exec.normalizedToolCalls)),
+			logger.SafeInt(logger.FieldIteration, iteration),
+			logger.SafeObservation(
+				logger.ObservationPrefixMessageGraph,
+				observeAgentMessageGraph([]providers.Message{{
+					Role:      "assistant",
+					ToolCalls: exec.normalizedToolCalls,
+				}}),
+			),
+		),
+	)
 
 	exec.allResponsesHandled = len(exec.normalizedToolCalls) > 0
 	assistantMsg := providers.Message{
@@ -1027,13 +1145,16 @@ func (p *Pipeline) reselectAccountRouterAfterCompression(ts *turnState, exec *tu
 		exec.activeModel,
 		p.Cfg.Agents.Defaults.Provider,
 	)
-	logger.InfoCF("agent", "Account router reselected after context compression",
-		map[string]any{
-			"agent_id":    ts.agent.ID,
-			"session_key": ts.sessionKey,
-			"router":      selection.RouterName,
-			"model":       exec.llmModelName,
-		})
+	logger.InfoSafeCF(
+		logger.ComponentAgent,
+		logger.DiagnosticMessageAgentAccountRouterReselectedAfterContextCompression,
+		logger.NewSafeFields(
+			agentDiagnosticAgentField(ts.agent.ID),
+			agentDiagnosticSessionField(ts.sessionKey),
+			agentDiagnosticRouteField(selection.RouterName),
+			agentDiagnosticModelField(exec.llmModelName),
+		),
+	)
 }
 
 func providerForFallbackCandidate(
@@ -1069,16 +1190,23 @@ func observeToolAdaptationCache(cfg *config.Config, ts *turnState, exec *turnExe
 		exec.response.Usage,
 	)
 	if ok {
-		logger.DebugCF("agent", "Observed tool adaptation cache behavior", map[string]any{
-			"provider":             observation.Profile.Provider,
-			"model":                observation.Profile.Model,
-			"visible_tool_surface": observation.VisibleToolSurface,
-			"tool_schema_hash":     observation.ToolSchemaHash,
-			"prompt_tokens":        observation.PromptTokens,
-			"cached_tokens":        observation.CachedTokens,
-			"cache_hit_ratio":      observation.CacheHitRatio,
-			"cache_sensitive":      observation.CacheSensitive,
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentObservedToolAdaptationCacheBehavior,
+			logger.NewSafeFields(
+				agentDiagnosticProviderField(observation.Profile.Provider),
+				agentDiagnosticModelField(observation.Profile.Model),
+				agentDiagnosticToolSurfaceField(observation.VisibleToolSurface),
+				logger.SafeInt(logger.FieldPromptTokens, observation.PromptTokens),
+				logger.SafeInt(logger.FieldCachedTokens, observation.CachedTokens),
+				logger.SafeFloat64(logger.FieldCacheHitRatio, observation.CacheHitRatio),
+				logger.SafeBool(logger.FieldCacheSensitive, observation.CacheSensitive),
+				logger.SafeObservation(
+					logger.ObservationPrefixToolSchema,
+					observeAgentToolDefinitions(exec.providerToolDefs),
+				),
+			),
+		)
 	}
 }
 
@@ -1106,15 +1234,19 @@ func observeToolAdaptationOutcome(
 		duration,
 	)
 	if ok {
-		logger.DebugCF("agent", "Observed tool adaptation outcome", map[string]any{
-			"provider":             outcome.Profile.Provider,
-			"model":                outcome.Profile.Model,
-			"visible_tool_surface": outcome.VisibleToolSurface,
-			"tool":                 outcome.ToolName,
-			"successes":            outcome.Successes,
-			"failures":             outcome.Failures,
-			"last_duration_ms":     outcome.LastDurationMS,
-		})
+		logger.DebugSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentObservedToolAdaptationOutcome,
+			logger.NewSafeFields(
+				agentDiagnosticProviderField(outcome.Profile.Provider),
+				agentDiagnosticModelField(outcome.Profile.Model),
+				agentDiagnosticToolSurfaceField(outcome.VisibleToolSurface),
+				agentDiagnosticToolField(outcome.ToolName),
+				logger.SafeInt(logger.FieldSuccessCount, outcome.Successes),
+				logger.SafeInt(logger.FieldFailureCount, outcome.Failures),
+				logger.SafeInt64(logger.FieldDurationMilliseconds, outcome.LastDurationMS),
+			),
+		)
 	}
 }
 
@@ -1401,9 +1533,13 @@ func applyToolAdaptationSurface(
 	}
 	transformed, err := providercommon.TransformToolDefinitions(defs, providercommon.ToolSchemaTransformSimple)
 	if err != nil {
-		logger.WarnCF("agent", "Failed to apply simple tool surface", map[string]any{
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentAgent,
+			logger.DiagnosticMessageAgentFailedToApplySimpleToolSurface,
+			logger.NewSafeFields(
+				agentDiagnosticErrorField(logger.ErrorClassValidation, err),
+			),
+		)
 		return defs
 	}
 	return transformed
