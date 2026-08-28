@@ -4,9 +4,10 @@
 
 PicoClaw administrative collections use one shared presentation and interaction
 system. Standard surfaces include Accounts, Account Routers, Model Aliases,
-Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, and Event
-Sources, and Workflow Definitions. New collection surfaces, and legacy collection surfaces when
-materially changed, must adopt this contract.
+Model Routers, MCP Servers, Agents, Model Evaluations, Skills, Tools, Event
+Sources, Workflow Definitions, and Git Workspaces. New collection surfaces,
+and legacy collection surfaces when materially changed, must adopt this
+contract.
 
 This standard does not apply to intrinsically unique experiences such as chat,
 logs, code viewers, diagrams, result reports, marketplace search, or a single
@@ -131,18 +132,20 @@ maximum page size 200.
 
 Canonical pilot routes:
 
-| Collection           | List                    | New                      | Detail                      | Edit / related                                                       |
-| -------------------- | ----------------------- | ------------------------ | --------------------------- | -------------------------------------------------------------------- |
-| Model Aliases        | `/models/aliases`       | `/models/aliases/new`    | `/models/aliases/:name`     | `/:name/edit`                                                        |
-| Model Routers        | `/models/routers`       | `/models/routers/new`    | `/models/routers/:name`     | `/:name/edit`                                                        |
-| MCP Servers          | `/agent/mcp/servers`    | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name`  | `/:name/edit`; settings live at `/agent/mcp/settings`                |
-| Agents               | `/agent/agents`         | `/agent/agents/new`      | `/agent/agents/:id`         | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
-| Model Evaluations    | `/model-evaluations`    | `/model-evaluations/new` | `/model-evaluations/:id`    | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
-| Event Sources        | `/event-sources`        | `/event-sources/new`     | `/event-sources/:id`        | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
-| Skills               | `/agent/skills`         | `/agent/skills/new`      | `/agent/skills/:id`         | None; marketplace choices remain at `/agent/hub`                     |
-| Tools                | `/agent/tools`          | None                     | `/agent/tools/:id`          | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
-| Workflow Definitions | `/agent/workflows`      | `/agent/workflows/new`   | `/agent/workflows/:id`      | `/:id/edit`; global workflow policy at `/agent/workflows/settings`   |
-| Workflow Runs        | `/agent/workflows/runs` | None                     | `/agent/workflows/runs/:id` | Operational exemption; shared List/Table only                        |
+| Collection            | List                            | New                      | Detail                      | Edit / related                                                       |
+| --------------------- | ------------------------------- | ------------------------ | --------------------------- | -------------------------------------------------------------------- |
+| Model Aliases         | `/models/aliases`               | `/models/aliases/new`    | `/models/aliases/:name`     | `/:name/edit`                                                        |
+| Model Routers         | `/models/routers`               | `/models/routers/new`    | `/models/routers/:name`     | `/:name/edit`                                                        |
+| MCP Servers           | `/agent/mcp/servers`            | `/agent/mcp/servers/new` | `/agent/mcp/servers/:name`  | `/:name/edit`; settings live at `/agent/mcp/settings`                |
+| Agents                | `/agent/agents`                 | `/agent/agents/new`      | `/agent/agents/:id`         | `/:id/edit`, `/:id/capabilities`, `/:id/activity`                    |
+| Model Evaluations     | `/model-evaluations`            | `/model-evaluations/new` | `/model-evaluations/:id`    | `/:id/edit`, `/:id/languages`, `/:id/corpus`, `/:id/report`          |
+| Event Sources         | `/event-sources`                | `/event-sources/new`     | `/event-sources/:id`        | `/:id/edit`; ingress and storage policy at `/event-sources/settings` |
+| Skills                | `/agent/skills`                 | `/agent/skills/new`      | `/agent/skills/:id`         | None; marketplace choices remain at `/agent/hub`                     |
+| Tools                 | `/agent/tools`                  | None                     | `/agent/tools/:id`          | `/:id/edit`; global adaptation at `/agent/tools/settings/adaptation` |
+| Workflow Definitions  | `/agent/workflows`              | `/agent/workflows/new`   | `/agent/workflows/:id`      | `/:id/edit`; global workflow policy at `/agent/workflows/settings`   |
+| Workflow Runs         | `/agent/workflows/runs`         | None                     | `/agent/workflows/runs/:id` | Operational exemption; shared List/Table only                        |
+| Git Workspaces        | `/agent/git-workspaces`         | None                     | `/agent/git-workspaces/:id` | History at `/history`; global limits at `/settings`                  |
+| Git Workspace History | `/agent/git-workspaces/history` | None                     | None                        | Operational exemption; shared List/Table only                        |
 
 Legacy `/models`, `/agent/mcp`, `?agent=`, `?probe=`, and Tools `?tab=` UI forms
 are not redirected or compatibility-rendered. Workflow `mode`, `workflow`, and
@@ -192,6 +195,14 @@ and ID-addressed detail reads. Canonical workflow refs never become path
 segments: the backend emits and resolves their deterministic URL-safe IDs.
 Workflow runs use the same query and cursor envelope at `/api/workflows/runs`
 and keep their existing ID-addressed operational actions and detail resources.
+
+Git workspaces use `/api/git-workspaces` for the paged inventory and
+ID-addressed detail reads. `/api/git-workspaces/history` pages the generic
+operational history independently, and `/api/git-workspaces/settings` owns
+configured/effective generic storage limits through one same-origin,
+revision-fenced save. Cleanup and drop remain confirmed item actions; locked
+workspaces and every controller-private workspace stay ineligible and
+structurally absent from all three browser projections.
 
 ## Governance And Evidence
 

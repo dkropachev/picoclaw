@@ -33,9 +33,6 @@ export interface CoreConfigForm {
   evolutionMinSuccessRatio: string
   evolutionColdPathTrigger: string
   evolutionColdPathTimesText: string
-  gitWorkspaceMaxTotalSizeGB: string
-  gitWorkspaceIgnoredCleanupHours: string
-  gitWorkspaceDropDays: string
 }
 
 export type TurnProfileMode = "default" | "off" | "custom"
@@ -132,9 +129,6 @@ export const EMPTY_FORM: CoreConfigForm = {
   evolutionMinSuccessRatio: "0.7",
   evolutionColdPathTrigger: "after_turn",
   evolutionColdPathTimesText: "",
-  gitWorkspaceMaxTotalSizeGB: "20",
-  gitWorkspaceIgnoredCleanupHours: "24",
-  gitWorkspaceDropDays: "30",
 }
 
 export const EMPTY_LAUNCHER_FORM: LauncherForm = {
@@ -220,7 +214,6 @@ export function buildFormFromConfig(config: unknown): CoreConfigForm {
   const heartbeat = asRecord(root.heartbeat)
   const devices = asRecord(root.devices)
   const evolution = asRecord(root.evolution)
-  const gitWorkspaces = asRecord(root.git_workspaces)
   const tools = asRecord(root.tools)
   const cron = asRecord(tools.cron)
   const exec = asRecord(tools.exec)
@@ -340,18 +333,6 @@ export function buildFormFromConfig(config: unknown): CoreConfigForm {
           .filter((value): value is string => typeof value === "string")
           .join("\n")
       : EMPTY_FORM.evolutionColdPathTimesText,
-    gitWorkspaceMaxTotalSizeGB: bytesToGBString(
-      gitWorkspaces.max_total_size_bytes,
-      EMPTY_FORM.gitWorkspaceMaxTotalSizeGB,
-    ),
-    gitWorkspaceIgnoredCleanupHours: secondsToHoursString(
-      gitWorkspaces.ignored_cleanup_delay_seconds,
-      EMPTY_FORM.gitWorkspaceIgnoredCleanupHours,
-    ),
-    gitWorkspaceDropDays: secondsToDaysString(
-      gitWorkspaces.drop_delay_seconds,
-      EMPTY_FORM.gitWorkspaceDropDays,
-    ),
   }
 }
 
@@ -409,25 +390,4 @@ export function parseMultilineList(raw: string): string[] {
     .split("\n")
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
-}
-
-function bytesToGBString(value: unknown, fallback: string): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return fallback
-  }
-  return String(Math.round(value / 1024 / 1024 / 1024))
-}
-
-function secondsToHoursString(value: unknown, fallback: string): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return fallback
-  }
-  return String(Math.round(value / 3600))
-}
-
-function secondsToDaysString(value: unknown, fallback: string): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return fallback
-  }
-  return String(Math.round(value / 86400))
 }

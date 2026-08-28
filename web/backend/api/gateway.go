@@ -580,6 +580,9 @@ func computeConfigSignature(cfg *config.Config) string {
 	if workflowSignature := computeWorkflowRuntimeSignature(cfg); workflowSignature != "" {
 		parts = append(parts, "workflow_runtime:"+workflowSignature)
 	}
+	if gitWorkspaceSignature := computeGitWorkspaceRuntimeSignature(cfg); gitWorkspaceSignature != "" {
+		parts = append(parts, "git_workspaces:"+gitWorkspaceSignature)
+	}
 	channelSignatures := computeChannelSignatures(cfg.Channels)
 	if len(channelSignatures) > 0 {
 		parts = append(parts, "channels:"+strings.Join(channelSignatures, ","))
@@ -657,6 +660,26 @@ func computeWorkflowRuntimeSignature(cfg *config.Config) string {
 	if err != nil {
 		return "<invalid>"
 	}
+	return string(encoded)
+}
+
+func computeGitWorkspaceRuntimeSignature(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	payload := struct {
+		RootDir             string        `json:"root_dir"`
+		MaxTotalSizeBytes   int64         `json:"max_total_size_bytes"`
+		IgnoredCleanupDelay time.Duration `json:"ignored_cleanup_delay"`
+		DropDelay           time.Duration `json:"drop_delay"`
+	}{
+		RootDir:             cfg.GitWorkspaceRootPath(),
+		MaxTotalSizeBytes:   cfg.GitWorkspaces.EffectiveMaxTotalSizeBytes(),
+		IgnoredCleanupDelay: cfg.GitWorkspaces.EffectiveIgnoredCleanupDelay(),
+		DropDelay:           cfg.GitWorkspaces.EffectiveDropDelay(),
+	}
+	// Every field has a fixed JSON representation, so this marshal cannot fail.
+	encoded, _ := json.Marshal(payload)
 	return string(encoded)
 }
 

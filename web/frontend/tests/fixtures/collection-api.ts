@@ -190,6 +190,30 @@ const querySchemas = {
     field("updated", "timestamp"),
     field("completed", "timestamp"),
   ]),
+  gitWorkspaces: schema(
+    [
+      field("id", "string"),
+      field("repository", "string"),
+      field("branch", "string"),
+      field("status", "enum", ["available", "locked", "dropped"]),
+      field("locked", "boolean", ["true", "false"]),
+      field("dirty", "boolean", ["true", "false"]),
+      field("size", "number"),
+      field("ignored", "number"),
+      field("updated", "timestamp"),
+    ],
+    { field: "updated", direction: "DESC" },
+  ),
+  gitWorkspaceHistory: schema(
+    [
+      field("action", "string"),
+      field("workspace", "string"),
+      field("repository", "string"),
+      field("agent", "string"),
+      field("time", "timestamp"),
+    ],
+    { field: "time", direction: "DESC" },
+  ),
 }
 
 export const accountVisualIDs = {
@@ -377,6 +401,113 @@ const eligibleEventChannelAdapters = [
     channel_enabled: true,
   },
 ] as const
+
+export const gitWorkspaceVisualIDs = {
+  primary: "gw-111111111111",
+  locked: "gw-222222222222",
+  cache: "gw-333333333333-2",
+} as const
+
+const gitWorkspaces = [
+  {
+    id: gitWorkspaceVisualIDs.primary,
+    repository: "github.com/sipeed/picoclaw.git",
+    branch: "main",
+    status: "available",
+    locked: false,
+    dirty: false,
+    size: 18_874_368,
+    ignored: 524_288,
+    updated: "2026-08-25T14:24:00Z",
+  },
+  {
+    id: gitWorkspaceVisualIDs.locked,
+    repository: "github.com/octo/launcher.git",
+    branch: "feature/collection-routes",
+    status: "locked",
+    locked: true,
+    dirty: true,
+    size: 8_388_608,
+    ignored: 131_072,
+    updated: "2026-08-25T14:12:00Z",
+  },
+  {
+    id: gitWorkspaceVisualIDs.cache,
+    repository: "git.example.test/automation/rules.git",
+    branch: "release",
+    status: "available",
+    locked: false,
+    dirty: false,
+    size: 3_145_728,
+    ignored: 1_048_576,
+    updated: "2026-08-24T18:45:00Z",
+  },
+] as const
+
+const gitWorkspaceDetails = Object.fromEntries(
+  gitWorkspaces.map((workspace) => [
+    workspace.id,
+    {
+      ...workspace,
+      repository_id: workspace.id.replace(/-[0-9]+$/, ""),
+      remote_url: `https://${workspace.repository}`,
+      path: `/srv/picoclaw/git-workspaces/checkouts/${workspace.id}`,
+      ref: workspace.branch,
+      created: "2026-08-20T10:00:00Z",
+      last_work: workspace.updated,
+      ...(workspace.locked
+        ? {
+            locked_by: {
+              agent_id: "reviewer",
+              locked_at: "2026-08-25T14:00:00Z",
+              heartbeat_at: "2026-08-25T14:12:00Z",
+            },
+          }
+        : {}),
+    },
+  ]),
+) as Record<string, Record<string, unknown>>
+
+const gitWorkspaceHistory = [
+  {
+    id: "aaaaaaaaaaaa",
+    action: "cleaned_ignored",
+    workspace: gitWorkspaceVisualIDs.primary,
+    repository: "github.com/sipeed/picoclaw.git",
+    agent: "main",
+    time: "2026-08-25T14:26:00Z",
+  },
+  {
+    id: "bbbbbbbbbbbb",
+    action: "acquired",
+    workspace: gitWorkspaceVisualIDs.locked,
+    repository: "github.com/octo/launcher.git",
+    agent: "reviewer",
+    time: "2026-08-25T14:00:00Z",
+  },
+  {
+    id: "cccccccccccc",
+    action: "released",
+    workspace: gitWorkspaceVisualIDs.cache,
+    repository: "git.example.test/automation/rules.git",
+    agent: "main",
+    time: "2026-08-24T18:46:00Z",
+  },
+] as const
+
+const gitWorkspaceSettings = {
+  configured: {
+    max_total_size_bytes: 0,
+    ignored_cleanup_delay_seconds: 0,
+    drop_delay_seconds: 0,
+  },
+  effective: {
+    max_total_size_bytes: 21_474_836_480,
+    ignored_cleanup_delay_seconds: 86_400,
+    drop_delay_seconds: 2_592_000,
+  },
+  config_revision: "cfg-git-workspaces-visual-1",
+}
 
 export const workflowVisualIDs = {
   summarize: "tpC6ep8WMy-TZuE8ZnYqpGVom7Yf4X3fhF01wP528JU",
@@ -1210,6 +1341,34 @@ export async function installCollectionVisualMocks(
             eligible_channel_adapters: eligibleEventChannelAdapters,
             config_revision: "cfg-visual-1",
           })
+        case "/api/git-workspaces":
+          return json(route, {
+            workspaces: state === "empty" ? [] : gitWorkspaces,
+            total: state === "empty" ? 0 : gitWorkspaces.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY updated DESC",
+            query_schema: querySchemas.gitWorkspaces,
+            max_total_size_bytes: 21_474_836_480,
+            total_size_bytes: 30_408_704,
+            ignored_bytes: 1_703_936,
+            repository_count: 3,
+            workspace_count: 3,
+            locked_workspace_count: 1,
+            ignored_cleanup_delay_seconds: 86_400,
+            drop_delay_seconds: 2_592_000,
+          })
+        case "/api/git-workspaces/history":
+          return json(route, {
+            history: state === "empty" ? [] : gitWorkspaceHistory,
+            total: state === "empty" ? 0 : gitWorkspaceHistory.length,
+            next_cursor: "",
+            canonical_query:
+              url.searchParams.get("query") ?? "ORDER BY time DESC",
+            query_schema: querySchemas.gitWorkspaceHistory,
+          })
+        case "/api/git-workspaces/settings":
+          return json(route, gitWorkspaceSettings)
         case "/api/oauth/providers":
           return json(route, { providers: oauthProviders })
         case "/api/oauth/codex-account-limits":
@@ -1520,6 +1679,28 @@ export async function installCollectionVisualMocks(
               404,
             )
       }
+      const gitWorkspaceID = decodedTail(path, "/api/git-workspaces/")
+      if (
+        gitWorkspaceID &&
+        !gitWorkspaceID.includes("/") &&
+        gitWorkspaceID !== "history" &&
+        gitWorkspaceID !== "settings"
+      ) {
+        const workspace = gitWorkspaceDetails[gitWorkspaceID]
+        return workspace
+          ? json(route, {
+              workspace,
+              root_dir: "/srv/picoclaw/git-workspaces",
+            })
+          : json(
+              route,
+              {
+                code: "git_workspace_not_found",
+                message: "Git workspace not found",
+              },
+              404,
+            )
+      }
       const workflowRunID = decodedTail(path, "/api/workflows/runs/")
       if (workflowRunID && !workflowRunID.includes("/")) {
         const run = workflowRuns.find((item) => item.id === workflowRunID)
@@ -1596,9 +1777,11 @@ function field(
   suggestedValues: string[] = [],
 ) {
   const comparisons =
-    type === "string" || type === "enum"
+    type === "string"
       ? ["=", "!=", "~", "!~", "IN", "NOT IN"]
-      : ["=", "!=", "<", "<=", ">", ">="]
+      : type === "enum" || type === "boolean"
+        ? ["=", "!=", "IN", "NOT IN"]
+        : ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN"]
   return {
     name,
     type,
@@ -1610,8 +1793,14 @@ function field(
   }
 }
 
-function schema(fields: ReturnType<typeof field>[]) {
-  return { fields }
+function schema(
+  fields: ReturnType<typeof field>[],
+  defaultOrder?: { field: string; direction: "ASC" | "DESC" },
+) {
+  return {
+    fields,
+    ...(defaultOrder ? { default_order: [defaultOrder] } : {}),
+  }
 }
 
 function effects() {
@@ -1703,6 +1892,8 @@ function isCollectionList(path: string) {
     "/api/accounts",
     "/api/account-routers",
     "/api/event-sources",
+    "/api/git-workspaces",
+    "/api/git-workspaces/history",
     "/api/model-routers",
     "/api/mcp/servers",
     "/api/agents",

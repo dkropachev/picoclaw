@@ -59,6 +59,7 @@ type Handler struct {
 	projectAccountRouterResource          accountRouterResourceProjector
 	pageAccountRouters                    accountRouterPager
 	validateAccountRouterCandidate        accountRouterCandidateValidator
+	loadGitWorkspaceManager               func() (gitWorkspaceManagerAPI, error)
 }
 
 // NewHandler creates an instance of the API handler.

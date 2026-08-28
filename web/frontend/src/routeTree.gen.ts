@@ -81,6 +81,9 @@ import { Route as AgentSkillsNewRouteImport } from './routes/agent/skills_.new'
 import { Route as AgentSkillsIdRouteImport } from './routes/agent/skills_.$id'
 import { Route as AgentMcpSettingsRouteImport } from './routes/agent/mcp_.settings'
 import { Route as AgentMcpServersRouteImport } from './routes/agent/mcp_.servers'
+import { Route as AgentGitWorkspacesSettingsRouteImport } from './routes/agent/git-workspaces_.settings'
+import { Route as AgentGitWorkspacesHistoryRouteImport } from './routes/agent/git-workspaces_.history'
+import { Route as AgentGitWorkspacesIdRouteImport } from './routes/agent/git-workspaces_.$id'
 import { Route as AgentAgentsNewRouteImport } from './routes/agent/agents_.new'
 import { Route as AgentAgentsIdRouteImport } from './routes/agent/agents_.$id'
 import { Route as AccountsRoutersNewRouteImport } from './routes/accounts_.routers_.new'
@@ -483,6 +486,23 @@ const AgentMcpServersRoute = AgentMcpServersRouteImport.update({
   path: '/mcp/servers',
   getParentRoute: () => AgentRoute,
 } as any)
+const AgentGitWorkspacesSettingsRoute =
+  AgentGitWorkspacesSettingsRouteImport.update({
+    id: '/git-workspaces_/settings',
+    path: '/git-workspaces/settings',
+    getParentRoute: () => AgentRoute,
+  } as any)
+const AgentGitWorkspacesHistoryRoute =
+  AgentGitWorkspacesHistoryRouteImport.update({
+    id: '/git-workspaces_/history',
+    path: '/git-workspaces/history',
+    getParentRoute: () => AgentRoute,
+  } as any)
+const AgentGitWorkspacesIdRoute = AgentGitWorkspacesIdRouteImport.update({
+  id: '/git-workspaces_/$id',
+  path: '/git-workspaces/$id',
+  getParentRoute: () => AgentRoute,
+} as any)
 const AgentAgentsNewRoute = AgentAgentsNewRouteImport.update({
   id: '/agents_/new',
   path: '/agents/new',
@@ -676,6 +696,9 @@ export interface FileRoutesByFullPath {
   '/accounts/routers/new': typeof AccountsRoutersNewRoute
   '/agent/agents/$id': typeof AgentAgentsIdRoute
   '/agent/agents/new': typeof AgentAgentsNewRoute
+  '/agent/git-workspaces/$id': typeof AgentGitWorkspacesIdRoute
+  '/agent/git-workspaces/history': typeof AgentGitWorkspacesHistoryRoute
+  '/agent/git-workspaces/settings': typeof AgentGitWorkspacesSettingsRoute
   '/agent/mcp/servers': typeof AgentMcpServersRoute
   '/agent/mcp/settings': typeof AgentMcpSettingsRoute
   '/agent/skills/$id': typeof AgentSkillsIdRoute
@@ -776,6 +799,9 @@ export interface FileRoutesByTo {
   '/accounts/routers/new': typeof AccountsRoutersNewRoute
   '/agent/agents/$id': typeof AgentAgentsIdRoute
   '/agent/agents/new': typeof AgentAgentsNewRoute
+  '/agent/git-workspaces/$id': typeof AgentGitWorkspacesIdRoute
+  '/agent/git-workspaces/history': typeof AgentGitWorkspacesHistoryRoute
+  '/agent/git-workspaces/settings': typeof AgentGitWorkspacesSettingsRoute
   '/agent/mcp/servers': typeof AgentMcpServersRoute
   '/agent/mcp/settings': typeof AgentMcpSettingsRoute
   '/agent/skills/$id': typeof AgentSkillsIdRoute
@@ -877,6 +903,9 @@ export interface FileRoutesById {
   '/accounts_/routers_/new': typeof AccountsRoutersNewRoute
   '/agent/agents_/$id': typeof AgentAgentsIdRoute
   '/agent/agents_/new': typeof AgentAgentsNewRoute
+  '/agent/git-workspaces_/$id': typeof AgentGitWorkspacesIdRoute
+  '/agent/git-workspaces_/history': typeof AgentGitWorkspacesHistoryRoute
+  '/agent/git-workspaces_/settings': typeof AgentGitWorkspacesSettingsRoute
   '/agent/mcp_/servers': typeof AgentMcpServersRoute
   '/agent/mcp_/settings': typeof AgentMcpSettingsRoute
   '/agent/skills_/$id': typeof AgentSkillsIdRoute
@@ -979,6 +1008,9 @@ export interface FileRouteTypes {
     | '/accounts/routers/new'
     | '/agent/agents/$id'
     | '/agent/agents/new'
+    | '/agent/git-workspaces/$id'
+    | '/agent/git-workspaces/history'
+    | '/agent/git-workspaces/settings'
     | '/agent/mcp/servers'
     | '/agent/mcp/settings'
     | '/agent/skills/$id'
@@ -1079,6 +1111,9 @@ export interface FileRouteTypes {
     | '/accounts/routers/new'
     | '/agent/agents/$id'
     | '/agent/agents/new'
+    | '/agent/git-workspaces/$id'
+    | '/agent/git-workspaces/history'
+    | '/agent/git-workspaces/settings'
     | '/agent/mcp/servers'
     | '/agent/mcp/settings'
     | '/agent/skills/$id'
@@ -1179,6 +1214,9 @@ export interface FileRouteTypes {
     | '/accounts_/routers_/new'
     | '/agent/agents_/$id'
     | '/agent/agents_/new'
+    | '/agent/git-workspaces_/$id'
+    | '/agent/git-workspaces_/history'
+    | '/agent/git-workspaces_/settings'
     | '/agent/mcp_/servers'
     | '/agent/mcp_/settings'
     | '/agent/skills_/$id'
@@ -1802,6 +1840,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentMcpServersRouteImport
       parentRoute: typeof AgentRoute
     }
+    '/agent/git-workspaces_/settings': {
+      id: '/agent/git-workspaces_/settings'
+      path: '/git-workspaces/settings'
+      fullPath: '/agent/git-workspaces/settings'
+      preLoaderRoute: typeof AgentGitWorkspacesSettingsRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/git-workspaces_/history': {
+      id: '/agent/git-workspaces_/history'
+      path: '/git-workspaces/history'
+      fullPath: '/agent/git-workspaces/history'
+      preLoaderRoute: typeof AgentGitWorkspacesHistoryRouteImport
+      parentRoute: typeof AgentRoute
+    }
+    '/agent/git-workspaces_/$id': {
+      id: '/agent/git-workspaces_/$id'
+      path: '/git-workspaces/$id'
+      fullPath: '/agent/git-workspaces/$id'
+      preLoaderRoute: typeof AgentGitWorkspacesIdRouteImport
+      parentRoute: typeof AgentRoute
+    }
     '/agent/agents_/new': {
       id: '/agent/agents_/new'
       path: '/agents/new'
@@ -2008,6 +2067,9 @@ interface AgentRouteChildren {
   AgentWorkflowsRoute: typeof AgentWorkflowsRoute
   AgentAgentsIdRoute: typeof AgentAgentsIdRoute
   AgentAgentsNewRoute: typeof AgentAgentsNewRoute
+  AgentGitWorkspacesIdRoute: typeof AgentGitWorkspacesIdRoute
+  AgentGitWorkspacesHistoryRoute: typeof AgentGitWorkspacesHistoryRoute
+  AgentGitWorkspacesSettingsRoute: typeof AgentGitWorkspacesSettingsRoute
   AgentMcpServersRoute: typeof AgentMcpServersRoute
   AgentMcpSettingsRoute: typeof AgentMcpSettingsRoute
   AgentSkillsIdRoute: typeof AgentSkillsIdRoute
@@ -2038,6 +2100,9 @@ const AgentRouteChildren: AgentRouteChildren = {
   AgentWorkflowsRoute: AgentWorkflowsRoute,
   AgentAgentsIdRoute: AgentAgentsIdRoute,
   AgentAgentsNewRoute: AgentAgentsNewRoute,
+  AgentGitWorkspacesIdRoute: AgentGitWorkspacesIdRoute,
+  AgentGitWorkspacesHistoryRoute: AgentGitWorkspacesHistoryRoute,
+  AgentGitWorkspacesSettingsRoute: AgentGitWorkspacesSettingsRoute,
   AgentMcpServersRoute: AgentMcpServersRoute,
   AgentMcpSettingsRoute: AgentMcpSettingsRoute,
   AgentSkillsIdRoute: AgentSkillsIdRoute,
