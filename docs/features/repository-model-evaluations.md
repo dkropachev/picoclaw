@@ -104,7 +104,10 @@ Owns: UI /model-evaluations*
 
 Shared executor/model-resolution and built-in workflow registry behavior remains
 owned by Workflows and Agent Execution Optimization. Repository Reviews owns
-bug-finder scope planning even when both features call `reposcope`.
+bug-finder scope planning even when both features call `reposcope`. The shared
+native corpus filter validates Repository Reviews' internal frozen selection
+and plan on continuation, but model-evaluation corpus lifecycle and persisted
+candidate authority remain unchanged and owned by this feature.
 
 ## Auxiliary Interfaces
 

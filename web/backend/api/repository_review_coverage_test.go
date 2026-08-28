@@ -383,9 +383,18 @@ func TestRepositoryReviewSplitCoverageOffsets(t *testing.T) {
 
 	automation := repoaudit.RepositoryReviewAutomation{}
 	applyRepositoryReviewRunProgress(&automation, &workflows.RunResult{Outputs: map[string]any{
-		"scopePlan": map[string]any{"commit_sha": strings.Repeat("a", 40)},
+		"scopePlan": map[string]any{
+			"commit_sha": strings.Repeat("a", 40), "policy_hash": strings.Repeat("b", 64),
+			"hash": strings.Repeat("c", 64), "summary": "Frozen test scope",
+		},
+		"scopeSelection": map[string]any{
+			"include_prefixes": []any{"pkg"}, "exclude_prefixes": []any{},
+			"candidate_ids": []any{}, "hotpath_candidate_ids": []any{},
+		},
 	}})
-	if automation.ScopePlan.CommitSHA != strings.Repeat("a", 40) {
+	if automation.ScopePlan.CommitSHA != strings.Repeat("a", 40) ||
+		automation.ScopeSelection == nil ||
+		!reflect.DeepEqual(automation.ScopeSelection.IncludePrefixes, []string{"pkg"}) {
 		t.Fatalf("scope plan was not projected: %#v", automation.ScopePlan)
 	}
 }
@@ -2367,6 +2376,234 @@ func TestRepositoryReviewExecutionObserverBoundaryCoverage(t *testing.T) {
 	original := errors.New("run failed")
 	if joined := repositoryReviewJoinCommitError(automation, nil, original); !errors.Is(joined, original) {
 		t.Fatalf("joined run error=%v", joined)
+	}
+	selection := repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	plan := repoaudit.RepositoryReviewScopePlan{
+		CommitSHA: commitA, PolicyHash: strings.Repeat("c", 64), Hash: strings.Repeat("d", 64),
+		Summary: "frozen scope",
+	}
+	automation.ScopeSelection = &selection
+	automation.ScopePlan = plan
+	matchingScope := &workflows.RunResult{Outputs: map[string]any{
+		"scopeSelection": repositoryReviewWorkflowObject(selection),
+		"scopePlan":      repositoryReviewWorkflowObject(plan),
+	}}
+	if err := repositoryReviewValidateExecutionScope(automation, matchingScope); err != nil {
+		t.Fatalf("matching frozen scope error=%v", err)
+	}
+	persistedScope := &workflows.Run{Steps: map[string]workflows.StepExecution{
+		"scope": {
+			Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{
+				"scopeSelection": repositoryReviewWorkflowObject(selection),
+				"scopePlan":      repositoryReviewWorkflowObject(plan),
+			},
+		},
+		"review": {Status: workflows.RunStatusFailed, Error: "later review failed"},
+	}}
+	if err := repositoryReviewValidatePersistedScope(automation, persistedScope); err != nil {
+		t.Fatalf("persisted frozen scope after later failure error=%v", err)
+	}
+	matchingScope.Outputs["scopeSelection"] = map[string]any{
+		"include_prefixes": []any{"other"},
+	}
+	if err := repositoryReviewValidateExecutionScope(automation, matchingScope); err == nil ||
+		!strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed frozen scope error=%v", err)
+	}
+	if err := repositoryReviewValidateExecutionScope(
+		automation,
+		&workflows.RunResult{Outputs: map[string]any{}},
+	); err == nil || !strings.Contains(err.Error(), "omitted") {
+		t.Fatalf("omitted frozen scope error=%v", err)
+	}
+	if err := repositoryReviewValidateExecutionScope(automation, nil); err == nil ||
+		!strings.Contains(err.Error(), "omitted") {
+		t.Fatalf("nil frozen scope result error=%v", err)
+	}
+	if err := repositoryReviewValidateExecutionScope(
+		automation, &workflows.RunResult{},
+	); err == nil || !strings.Contains(err.Error(), "omitted") {
+		t.Fatalf("nil frozen scope outputs error=%v", err)
+	}
+	if got := repositoryReviewWorkflowObject(nil); len(got) != 0 {
+		t.Fatalf("nil workflow object=%#v", got)
+	}
+	if got := repositoryReviewWorkflowObject(make(chan int)); len(got) != 0 {
+		t.Fatalf("unserializable workflow object=%#v", got)
+	}
+	var nilSelection *repoaudit.RepositoryReviewScopeSelection
+	if got := repositoryReviewWorkflowObject(nilSelection); len(got) != 0 {
+		t.Fatalf("null workflow object=%#v", got)
+	}
+	if got := repositoryReviewWorkflowObject("scalar"); len(got) != 0 {
+		t.Fatalf("scalar workflow object=%#v", got)
+	}
+	if planned, selectionInput, planInput := repositoryReviewWorkflowScopeInputs(
+		repoaudit.RepositoryReviewAutomation{},
+	); planned || len(selectionInput) != 0 || len(planInput) != 0 {
+		t.Fatalf("empty workflow scope inputs=(%v, %#v, %#v)", planned, selectionInput, planInput)
+	}
+	if planned, selectionInput, planInput := repositoryReviewWorkflowScopeInputs(automation); !planned ||
+		selectionInput["include_prefixes"] == nil || planInput["hash"] != plan.Hash {
+		t.Fatalf("frozen workflow scope inputs=(%v, %#v, %#v)", planned, selectionInput, planInput)
+	}
+	if err := repositoryReviewValidatePersistedScope(
+		repoaudit.RepositoryReviewAutomation{}, nil,
+	); err != nil {
+		t.Fatalf("unplanned persisted scope error=%v", err)
+	}
+	if err := repositoryReviewValidatePersistedScope(
+		automation, &workflows.Run{},
+	); err == nil || !strings.Contains(err.Error(), "omitted") {
+		t.Fatalf("missing persisted scope error=%v", err)
+	}
+	invalidOutputs := &workflows.RunResult{Outputs: map[string]any{
+		"scopeSelection": make(chan int), "scopePlan": repositoryReviewWorkflowObject(plan),
+	}}
+	if err := repositoryReviewValidateExecutionScope(automation, invalidOutputs); err == nil ||
+		!strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("invalid frozen scope outputs error=%v", err)
+	}
+}
+
+func TestRepositoryReviewPersistsValidatedScopeBeforeReviewWork(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	store, storeErr := handler.repositoryReviewStore()
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	commit := strings.Repeat("a", 40)
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationRunning
+	input.ActiveRunID = "wr_scope_freeze"
+	input.RunIDs = []string{input.ActiveRunID}
+	input.ResolvedCommitSHA = commit
+	input.Progress.TotalBatches = 1
+	automation, createErr := store.CreateAutomation(t.Context(), input)
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	selection := repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	plan := repoaudit.RepositoryReviewScopePlan{
+		CommitSHA: commit, PolicyHash: strings.Repeat("b", 64), Hash: strings.Repeat("c", 64),
+		Summary: "Frozen target scope", Rationale: "Production package",
+		Warnings: []string{},
+		Counts: repoaudit.RepositoryReviewScopePlanCounts{
+			TotalFiles: 3, CodeTypeFiles: 3, IncludeFiles: 2, SelectedFiles: 2,
+		},
+	}
+	run := &workflows.Run{Steps: map[string]workflows.StepExecution{
+		"scope": {
+			Status: workflows.RunStatusSucceeded,
+			Outputs: map[string]any{
+				"scopeSelection": repositoryReviewWorkflowObject(selection),
+				"scopePlan":      repositoryReviewWorkflowObject(plan),
+			},
+		},
+	}}
+	controller := newRepositoryReviewController(handler)
+	observer := controller.repositoryReviewStepObserver(
+		automation.ID, automation.ActiveRunID, store, nil,
+	)
+	if err := observer(workflows.StepActivityEvent{RunID: "other", StepID: "scope_files"}); err != nil {
+		t.Fatalf("other-run scope observer error=%v", err)
+	}
+	if err := observer(workflows.StepActivityEvent{
+		RunID: automation.ActiveRunID, StepID: "scope_files",
+	}); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("nil-store scope observer error=%v", err)
+	}
+	missingWorkflowStore := workflows.NewFileRunStore(t.TempDir())
+	observer = controller.repositoryReviewStepObserver(
+		automation.ID, automation.ActiveRunID, store, missingWorkflowStore,
+	)
+	if err := observer(workflows.StepActivityEvent{
+		RunID: automation.ActiveRunID, StepID: "scope_files",
+	}); err == nil || !strings.Contains(err.Error(), "load") {
+		t.Fatalf("missing-run scope observer error=%v", err)
+	}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, automation.ID, automation.ActiveRunID, &workflows.Run{},
+	); err == nil || !strings.Contains(err.Error(), "not durably validated") {
+		t.Fatalf("unvalidated durable scope error=%v", err)
+	}
+	omitted := &workflows.Run{Steps: map[string]workflows.StepExecution{
+		"scope": {Status: workflows.RunStatusSucceeded},
+	}}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, automation.ID, automation.ActiveRunID, omitted,
+	); err == nil || !strings.Contains(err.Error(), "omitted") {
+		t.Fatalf("omitted durable scope error=%v", err)
+	}
+	workflowStore := workflows.NewFileRunStore(t.TempDir())
+	run.ID = automation.ActiveRunID
+	run.Status = workflows.RunStatusRunning
+	run.CreatedAt = time.Now().UTC()
+	run.UpdatedAt = run.CreatedAt
+	if err := workflowStore.CreateRun(t.Context(), run); err != nil {
+		t.Fatal(err)
+	}
+	observer = controller.repositoryReviewStepObserver(
+		automation.ID, automation.ActiveRunID, store, workflowStore,
+	)
+	if err := observer(workflows.StepActivityEvent{
+		RunID: automation.ActiveRunID, StepID: "scope_files",
+	}); err != nil {
+		t.Fatalf("durable scope observer error=%v", err)
+	}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, automation.ID, automation.ActiveRunID, run,
+	); err != nil {
+		t.Fatal(err)
+	}
+	updated, found, getErr := store.GetAutomation(t.Context(), automation.ID)
+	if getErr != nil || !found || updated.ScopeSelection == nil ||
+		!repositoryReviewScopeSelectionsEqual(*updated.ScopeSelection, selection) ||
+		!repositoryReviewScopePlansEqual(updated.ScopePlan, plan) {
+		t.Fatalf("persisted frozen scope=%#v found=%v err=%v", updated, found, getErr)
+	}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, automation.ID, automation.ActiveRunID, run,
+	); err != nil {
+		t.Fatalf("idempotent frozen scope error=%v", err)
+	}
+	changed := plan
+	changed.Hash = strings.Repeat("d", 64)
+	run.Steps["scope"] = workflows.StepExecution{
+		Status: workflows.RunStatusSucceeded,
+		Outputs: map[string]any{
+			"scopeSelection": repositoryReviewWorkflowObject(selection),
+			"scopePlan":      repositoryReviewWorkflowObject(changed),
+		},
+	}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, automation.ID, automation.ActiveRunID, run,
+	); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed durable scope error=%v", err)
+	}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, automation.ID, "wr_other", run,
+	); !errors.Is(err, errRepositoryReviewSafeStop) {
+		t.Fatalf("stale durable scope error=%v", err)
+	}
+	mismatchInput := testRepositoryReviewAutomation()
+	mismatchInput.Repository = "owner/frozen-scope-mismatch"
+	mismatchInput.Name = "Frozen scope mismatch"
+	mismatchInput.Status = repoaudit.RepositoryReviewAutomationRunning
+	mismatchInput.ActiveRunID = "wr_scope_mismatch"
+	mismatchInput.RunIDs = []string{mismatchInput.ActiveRunID}
+	mismatchInput.ResolvedCommitSHA = strings.Repeat("f", 40)
+	mismatchInput.Progress.TotalBatches = 1
+	mismatch, mismatchErr := store.CreateAutomation(t.Context(), mismatchInput)
+	if mismatchErr != nil {
+		t.Fatal(mismatchErr)
+	}
+	if err := controller.persistRepositoryReviewFrozenScope(
+		store, mismatch.ID, mismatch.ActiveRunID, run,
+	); err == nil || !strings.Contains(err.Error(), "admitted commit") {
+		t.Fatalf("commit-mismatched durable scope error=%v", err)
 	}
 }
 

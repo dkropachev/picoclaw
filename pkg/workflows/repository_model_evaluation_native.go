@@ -11,12 +11,18 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/repoaudit"
 	"github.com/sipeed/picoclaw/pkg/reposcope"
 )
 
 const repositoryEvaluationCatalogMaxFileBytes = 512 << 10
 
 const repositoryEvaluationAICandidateLimit = 4096
+
+const (
+	repositoryEvaluationScopeWarnings     = 32
+	repositoryEvaluationScopeWarningBytes = 2048
+)
 
 const (
 	repositoryEvaluationMaxClaimsPerChild     = 32
@@ -541,31 +547,74 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 		}
 		byID[candidate.ID] = candidate
 	}
-	planner := nativeMapValue(firstNonNil(args["planner"], args["filter"], args["scope_plan"], args["scopePlan"]))
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Path < candidates[j].Path
+	})
+	frozenSelectionValue, hasFrozenSelection := nativeRepositoryEvaluationOptionalArg(
+		args, "frozen_selection", "frozenSelection",
+	)
+	frozenPlanValue, hasFrozenPlan := nativeRepositoryEvaluationOptionalArg(
+		args, "frozen_plan", "frozenPlan",
+	)
+	if hasFrozenSelection != hasFrozenPlan {
+		return nil, errors.New("frozen repository scope requires both selection and plan")
+	}
+	frozen := hasFrozenSelection
+	if requested := nativeBoolAny(args, "scope_planned", "scopePlanned"); requested != frozen {
+		return nil, errors.New("repository scope planned flag does not match frozen scope state")
+	}
+	var selection repoaudit.RepositoryReviewScopeSelection
+	var frozenPlan repoaudit.RepositoryReviewScopePlan
+	var err error
+	if frozen {
+		selection, err = nativeRepositoryEvaluationParseScopeSelection(frozenSelectionValue)
+		if err != nil {
+			return nil, err
+		}
+		frozenPlan, err = nativeRepositoryEvaluationParseScopePlan(frozenPlanValue)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		planner := nativeMapValue(firstNonNil(
+			args["planner"], args["filter"], args["scope_plan"], args["scopePlan"],
+		))
+		plannedScope, scopeErr := reposcope.NormalizeScope(reposcope.Scope{
+			IncludePrefixes: nativeStringSliceAny(
+				planner, "includePrefixes", "include_prefixes", "include_folders", "includeFolders",
+			),
+			ExcludePrefixes: nativeStringSliceAny(
+				planner, "excludePrefixes", "exclude_prefixes", "exclude_folders", "excludeFolders",
+			),
+			CodeTypes: []reposcope.CodeType{
+				reposcope.CodeTypeHotpath, reposcope.CodeTypeCode,
+				reposcope.CodeTypeTest, reposcope.CodeTypeBenchTest,
+			},
+		})
+		if scopeErr != nil {
+			return nil, scopeErr
+		}
+		selection = repoaudit.RepositoryReviewScopeSelection{
+			IncludePrefixes: plannedScope.IncludePrefixes,
+			ExcludePrefixes: plannedScope.ExcludePrefixes,
+			CandidateIDs: nativeStringSliceAny(
+				planner,
+				"candidateIds", "candidate_ids", "selectedCandidateIds", "selected_candidate_ids",
+			),
+			HotpathCandidateIDs: nativeStringSliceAny(
+				planner, "hotpathCandidateIds", "hotpath_candidate_ids",
+			),
+		}
+	}
 	hardScope, err := nativeRepositoryEvaluationScope(firstNonNil(args["hard_scope"], args["hardScope"]))
 	if err != nil {
 		return nil, err
 	}
-	include := nativeStringSliceAny(planner, "includePrefixes", "include_folders", "includeFolders")
-	exclude := nativeStringSliceAny(planner, "excludePrefixes", "exclude_folders", "excludeFolders")
-	plannedScope, err := reposcope.NormalizeScope(reposcope.Scope{
-		IncludePrefixes: include,
-		ExcludePrefixes: exclude,
-		CodeTypes: []reposcope.CodeType{
-			reposcope.CodeTypeHotpath, reposcope.CodeTypeCode,
-			reposcope.CodeTypeTest, reposcope.CodeTypeBenchTest,
-		},
-	})
-	if err != nil {
-		return nil, err
+	if len(selection.CandidateIDs) > repositoryEvaluationAICandidateLimit ||
+		len(selection.HotpathCandidateIDs) > repositoryEvaluationAICandidateLimit {
+		return nil, fmt.Errorf("%w: repository scope candidate ID limit exceeded", reposcope.ErrInvalidPolicy)
 	}
-	exactIDs := nativeStringSliceAny(
-		planner,
-		"candidateIds",
-		"candidate_ids",
-		"selectedCandidateIds",
-		"selected_candidate_ids",
-	)
+	exactIDs := nativeRepositoryEvaluationCanonicalStrings(selection.CandidateIDs)
 	exact := make(map[string]struct{}, len(exactIDs))
 	for _, id := range exactIDs {
 		if _, duplicate := exact[id]; duplicate {
@@ -576,7 +625,7 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 		}
 		exact[id] = struct{}{}
 	}
-	hotpathIDs := nativeStringSliceAny(planner, "hotpathCandidateIds", "hotpath_candidate_ids")
+	hotpathIDs := nativeRepositoryEvaluationCanonicalStrings(selection.HotpathCandidateIDs)
 	hotpaths := make(map[string]struct{}, len(hotpathIDs))
 	for _, id := range hotpathIDs {
 		if _, duplicate := hotpaths[id]; duplicate {
@@ -590,6 +639,12 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 			return nil, reposcope.ErrInvalidCandidate
 		}
 		hotpaths[id] = struct{}{}
+	}
+	selection.CandidateIDs = exactIDs
+	selection.HotpathCandidateIDs = hotpathIDs
+	plannedScope := reposcope.Scope{
+		IncludePrefixes: selection.IncludePrefixes,
+		ExcludePrefixes: selection.ExcludePrefixes,
 	}
 	selected := make([]reposcope.Candidate, 0, len(candidates))
 	includeFiles := 0
@@ -618,11 +673,41 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 		return nil, errors.New("AI repository scope selected no safe files")
 	}
 	output := nativeRepositoryEvaluationSelectedOutput(selected, exactIDs, nil)
-	rationale := strings.TrimSpace(nativeAnyString(planner["rationale"]))
-	warnings := nativeStringSliceAny(planner, "warnings")
+	var rationale string
+	var warnings []string
+	if frozen {
+		rationale = frozenPlan.Rationale
+		warnings = nativeRepositoryEvaluationCloneStrings(frozenPlan.Warnings)
+	} else {
+		planner := nativeMapValue(firstNonNil(
+			args["planner"], args["filter"], args["scope_plan"], args["scopePlan"],
+		))
+		rationale = strings.TrimSpace(nativeAnyString(planner["rationale"]))
+		warnings, err = nativeRepositoryEvaluationPlannerWarnings(planner)
+		if err != nil {
+			return nil, err
+		}
+	}
 	policyHash, err := nativeStableHash(firstNonNil(args["hard_scope"], args["hardScope"], map[string]any{}))
 	if err != nil {
 		return nil, err
+	}
+	commit := strings.ToLower(strings.TrimSpace(nativeStringAny(args, "commit", "commit_sha", "commitSha")))
+	if frozen {
+		if !nativeValidGitObjectID(commit) {
+			return nil, errors.New("frozen repository scope requires an exact commit")
+		}
+		inventoryID := ""
+		for _, candidate := range candidates {
+			if candidate.CommitID != commit {
+				return nil, errors.New("frozen repository scope candidates do not match the exact commit")
+			}
+			if inventoryID == "" {
+				inventoryID = candidate.InventoryID
+			} else if candidate.InventoryID != inventoryID {
+				return nil, errors.New("frozen repository scope candidates do not share one inventory")
+			}
+		}
 	}
 	planHash := nativeRepositoryEvaluationPlanHash(
 		exactIDs,
@@ -633,18 +718,214 @@ func nativeRepositoryEvaluationFilter(args map[string]any) (map[string]any, erro
 		output["selectedPaths"].([]string),
 		rationale,
 	)
-	commit := strings.TrimSpace(nativeStringAny(args, "commit", "commit_sha", "commitSha"))
-	output["scopePlan"] = map[string]any{
-		"commit_sha": commit, "policy_hash": policyHash, "hash": planHash,
-		"summary":   fmt.Sprintf("AI scope preflight selected %d of %d safe files.", len(selected), len(candidates)),
-		"rationale": rationale, "warnings": warnings,
+	counts := repoaudit.RepositoryReviewScopePlanCounts{
+		TotalFiles: len(candidates), CodeTypeFiles: codeTypeFiles,
+		IncludeFiles: includeFiles, ExcludedFiles: includeFiles - len(selected),
+		SelectedFiles: len(selected),
+	}
+	summary := fmt.Sprintf("AI scope preflight selected %d of %d safe files.", len(selected), len(candidates))
+	plan := repoaudit.RepositoryReviewScopePlan{
+		CommitSHA: commit, PolicyHash: policyHash, Hash: planHash,
+		Summary: summary, Rationale: rationale, Warnings: warnings, Counts: counts,
+	}
+	if frozen {
+		if frozenPlan.CommitSHA != commit || frozenPlan.PolicyHash != policyHash ||
+			frozenPlan.Hash != planHash || frozenPlan.Summary != summary || frozenPlan.Counts != counts {
+			return nil, errors.New(
+				"frozen repository scope plan does not match the current commit, policy, or candidates",
+			)
+		}
+		plan = frozenPlan
+	}
+	output["scopeSelection"] = nativeRepositoryEvaluationScopeSelectionMap(selection)
+	output["scopePlan"] = nativeRepositoryEvaluationScopePlanMap(plan)
+	return output, nil
+}
+
+func nativeRepositoryEvaluationScopeSelectionMap(
+	selection repoaudit.RepositoryReviewScopeSelection,
+) map[string]any {
+	return map[string]any{
+		"include_prefixes":      nativeRepositoryEvaluationCloneStrings(selection.IncludePrefixes),
+		"exclude_prefixes":      nativeRepositoryEvaluationCloneStrings(selection.ExcludePrefixes),
+		"candidate_ids":         nativeRepositoryEvaluationCloneStrings(selection.CandidateIDs),
+		"hotpath_candidate_ids": nativeRepositoryEvaluationCloneStrings(selection.HotpathCandidateIDs),
+	}
+}
+
+func nativeRepositoryEvaluationScopePlanMap(plan repoaudit.RepositoryReviewScopePlan) map[string]any {
+	return map[string]any{
+		"commit_sha": plan.CommitSHA, "policy_hash": plan.PolicyHash, "hash": plan.Hash,
+		"summary": plan.Summary, "rationale": plan.Rationale,
+		"warnings": nativeRepositoryEvaluationCloneStrings(plan.Warnings),
 		"counts": map[string]any{
-			"total_files": len(candidates), "code_type_files": codeTypeFiles,
-			"include_files": includeFiles, "excluded_files": includeFiles - len(selected),
-			"selected_files": len(selected),
+			"total_files": plan.Counts.TotalFiles, "code_type_files": plan.Counts.CodeTypeFiles,
+			"include_files": plan.Counts.IncludeFiles, "excluded_files": plan.Counts.ExcludedFiles,
+			"selected_files": plan.Counts.SelectedFiles,
 		},
 	}
-	return output, nil
+}
+
+func nativeRepositoryEvaluationOptionalArg(args map[string]any, keys ...string) (any, bool) {
+	for _, key := range keys {
+		value, exists := args[key]
+		if !exists || value == nil {
+			continue
+		}
+		if object, ok := value.(map[string]any); ok && len(object) == 0 {
+			continue
+		}
+		return value, true
+	}
+	return nil, false
+}
+
+func nativeRepositoryEvaluationParseScopeSelection(
+	value any,
+) (repoaudit.RepositoryReviewScopeSelection, error) {
+	required := []string{
+		"include_prefixes", "exclude_prefixes", "candidate_ids", "hotpath_candidate_ids",
+	}
+	if err := nativeRepositoryEvaluationValidateFrozenObject(value, required, nil); err != nil {
+		return repoaudit.RepositoryReviewScopeSelection{}, fmt.Errorf(
+			"invalid frozen repository scope selection: %w", err,
+		)
+	}
+	var selection repoaudit.RepositoryReviewScopeSelection
+	if err := nativeRepositoryEvaluationDecode(value, &selection); err != nil {
+		return repoaudit.RepositoryReviewScopeSelection{}, errors.New("invalid frozen repository scope selection")
+	}
+	normalized, err := repoaudit.NormalizeRepositoryReviewScopeSelection(selection)
+	if err != nil || !nativeRepositoryEvaluationScopeSelectionsEqual(selection, normalized) {
+		return repoaudit.RepositoryReviewScopeSelection{}, errors.New(
+			"frozen repository scope selection is not canonical",
+		)
+	}
+	return normalized, nil
+}
+
+func nativeRepositoryEvaluationParseScopePlan(value any) (repoaudit.RepositoryReviewScopePlan, error) {
+	required := []string{"commit_sha", "policy_hash", "hash", "summary", "warnings", "counts"}
+	if err := nativeRepositoryEvaluationValidateFrozenObject(value, required, []string{"rationale"}); err != nil {
+		return repoaudit.RepositoryReviewScopePlan{}, errors.New("invalid frozen repository scope plan")
+	}
+	object := nativeMapValue(value)
+	countFields := []string{
+		"total_files", "code_type_files", "include_files", "excluded_files", "selected_files",
+	}
+	if err := nativeRepositoryEvaluationValidateFrozenObject(object["counts"], countFields, nil); err != nil {
+		return repoaudit.RepositoryReviewScopePlan{}, errors.New("invalid frozen repository scope plan counts")
+	}
+	var plan repoaudit.RepositoryReviewScopePlan
+	if err := nativeRepositoryEvaluationDecode(value, &plan); err != nil {
+		return repoaudit.RepositoryReviewScopePlan{}, errors.New("invalid frozen repository scope plan")
+	}
+	normalized, err := repoaudit.NormalizeRepositoryReviewScopePlan(plan)
+	if err != nil || normalized.Hash == "" || !nativeRepositoryEvaluationScopePlansEqual(plan, normalized) {
+		return repoaudit.RepositoryReviewScopePlan{}, errors.New("frozen repository scope plan is not canonical")
+	}
+	return normalized, nil
+}
+
+func nativeRepositoryEvaluationValidateFrozenObject(
+	value any,
+	required []string,
+	optional []string,
+) error {
+	object := nativeMapValue(value)
+	if object == nil {
+		return errors.New("object is required")
+	}
+	allowed := make(map[string]struct{}, len(required)+len(optional))
+	for _, key := range append(append([]string(nil), required...), optional...) {
+		allowed[key] = struct{}{}
+	}
+	if err := nativeValidateRepositoryReviewObjectFields(object, allowed, "frozen scope"); err != nil {
+		return err
+	}
+	for _, key := range required {
+		if _, exists := object[key]; !exists {
+			return errors.New("required field is missing")
+		}
+	}
+	return nil
+}
+
+func nativeRepositoryEvaluationCanonicalStrings(values []string) []string {
+	canonical := nativeRepositoryEvaluationCloneStrings(values)
+	sort.Strings(canonical)
+	return canonical
+}
+
+func nativeRepositoryEvaluationCloneStrings(values []string) []string {
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
+func nativeRepositoryEvaluationNormalizeWarnings(values []string) ([]string, error) {
+	if len(values) > repositoryEvaluationScopeWarnings {
+		return nil, errors.New("repository scope planner returned too many warnings")
+	}
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		warning := strings.TrimSpace(raw)
+		if warning == "" || len(warning) > repositoryEvaluationScopeWarningBytes ||
+			strings.ContainsRune(warning, 0) {
+			return nil, errors.New("repository scope planner returned an invalid warning")
+		}
+		if _, duplicate := seen[warning]; duplicate {
+			return nil, errors.New("repository scope planner returned duplicate warnings")
+		}
+		seen[warning] = struct{}{}
+		normalized = append(normalized, warning)
+	}
+	return normalized, nil
+}
+
+func nativeRepositoryEvaluationPlannerWarnings(planner map[string]any) ([]string, error) {
+	value, exists := planner["warnings"]
+	if !exists || value == nil {
+		return []string{}, nil
+	}
+	var warnings []string
+	if err := nativeRepositoryEvaluationDecode(value, &warnings); err != nil {
+		return nil, errors.New("repository scope planner returned invalid warnings")
+	}
+	return nativeRepositoryEvaluationNormalizeWarnings(warnings)
+}
+
+func nativeRepositoryEvaluationStringsEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeRepositoryEvaluationScopeSelectionsEqual(
+	left repoaudit.RepositoryReviewScopeSelection,
+	right repoaudit.RepositoryReviewScopeSelection,
+) bool {
+	return nativeRepositoryEvaluationStringsEqual(left.IncludePrefixes, right.IncludePrefixes) &&
+		nativeRepositoryEvaluationStringsEqual(left.ExcludePrefixes, right.ExcludePrefixes) &&
+		nativeRepositoryEvaluationStringsEqual(left.CandidateIDs, right.CandidateIDs) &&
+		nativeRepositoryEvaluationStringsEqual(left.HotpathCandidateIDs, right.HotpathCandidateIDs)
+}
+
+func nativeRepositoryEvaluationScopePlansEqual(
+	left repoaudit.RepositoryReviewScopePlan,
+	right repoaudit.RepositoryReviewScopePlan,
+) bool {
+	return left.CommitSHA == right.CommitSHA && left.PolicyHash == right.PolicyHash &&
+		left.Hash == right.Hash && left.Summary == right.Summary &&
+		left.Rationale == right.Rationale && left.Counts == right.Counts &&
+		nativeRepositoryEvaluationStringsEqual(left.Warnings, right.Warnings)
 }
 
 func nativeRepositoryEvaluationPathMatches(filePath string, prefixes []string) bool {

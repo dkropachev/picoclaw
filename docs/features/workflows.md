@@ -878,6 +878,11 @@ model-ensemble splitting, same-response confirmation, and the durable findings
 ledger consumed by the Repository Reviews page. Workflow development emits
 that incremental inventory-plan-review-record shape when it recognizes
 repository-wide review prompts.
+The first native-validated repository-review scope step freezes one canonical
+commit-bound selection and plan before review workers start. Continuation
+revalidates and reuses that durable scope without another planner call, so the
+workflow's authoritative file universe and checkpoint identity cannot drift
+between batches.
 Repository bug review defaults to 24 not-yet-reviewed files per run, groups up
 to three related files for cross-file checks, and lowers the effective file cap
 as required reviewer count grows to keep the managed child budget bounded. The

@@ -684,8 +684,13 @@ func TestRepositoryReviewModelOutcomeUsesRequestedReviewerAndAcknowledgedZeroFin
 	if updated.ModelCoverageSketches["cheap"] == "" {
 		t.Fatal("durable model coverage sketch was not stored")
 	}
-	if projected := projectRepositoryReviewAutomation(updated); projected.ModelCoverageSketches != nil {
-		t.Fatalf("API projection exposed internal coverage sketch: %#v", projected.ModelCoverageSketches)
+	updated.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{IncludePrefixes: []string{"pkg"}}
+	if projected := projectRepositoryReviewAutomation(updated); projected.ModelCoverageSketches != nil ||
+		projected.ScopeSelection != nil {
+		t.Fatalf(
+			"API projection exposed internal review state: sketches=%#v selection=%#v",
+			projected.ModelCoverageSketches, projected.ScopeSelection,
+		)
 	}
 }
 
@@ -975,6 +980,13 @@ func TestRepositoryReviewAutomationCommitOptionsExposeRememberedAndLatest(t *tes
 	input.PauseReason = repoaudit.RepositoryReviewPauseManual
 	input.PauseDetail = "paused between batches"
 	input.ResolvedCommitSHA = rememberedCommit
+	input.ScopePlan = repoaudit.RepositoryReviewScopePlan{
+		CommitSHA: rememberedCommit, PolicyHash: strings.Repeat("a", 64),
+		Hash: strings.Repeat("b", 64), Summary: "Frozen campaign scope",
+	}
+	input.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{
+		IncludePrefixes: []string{"pkg"},
+	}
 	automation, err := store.CreateAutomation(t.Context(), input)
 	if err != nil {
 		t.Fatal(err)
@@ -1348,6 +1360,8 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 			RunID: runID, Status: workflows.RunStatusSucceeded,
 			Outputs: map[string]any{
 				"commit": rememberedCommit, "remainingFiles": 0,
+				"scopeSelection": repositoryReviewWorkflowObject(automation.ScopeSelection),
+				"scopePlan":      repositoryReviewWorkflowObject(automation.ScopePlan),
 			},
 		}, nil
 	}
@@ -1369,6 +1383,13 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 	input.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
 	input.PauseDetail = "temporary provider outage"
 	input.ResolvedCommitSHA = rememberedCommit
+	input.ScopePlan = repoaudit.RepositoryReviewScopePlan{
+		CommitSHA: rememberedCommit, PolicyHash: strings.Repeat("a", 64),
+		Hash: strings.Repeat("b", 64), Summary: "Frozen campaign scope",
+	}
+	input.ScopeSelection = &repoaudit.RepositoryReviewScopeSelection{
+		IncludePrefixes: []string{"pkg"},
+	}
 	input.RunIDs = append([]string(nil), previousRunIDs...)
 	input.Usage = usage
 	input.EstimatedCostUSD = 0.0042
@@ -1415,7 +1436,9 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 		if observed.runID != newRunID || observed.automation.Usage != usage ||
 			observed.automation.Progress != expectedQueuedProgress ||
 			!observed.automation.StartedAt.Equal(startedAt) ||
-			!reflect.DeepEqual(observed.automation.RunIDs, expectedRunIDs) {
+			!reflect.DeepEqual(observed.automation.RunIDs, expectedRunIDs) ||
+			!reflect.DeepEqual(observed.automation.ScopeSelection, automation.ScopeSelection) ||
+			!reflect.DeepEqual(observed.automation.ScopePlan, automation.ScopePlan) {
 			t.Fatalf("resumed batch=%#v run_id=%q", observed.automation, observed.runID)
 		}
 	case <-time.After(time.Second):
@@ -1437,7 +1460,9 @@ func TestRepositoryReviewAutomationResumeFailedPreservesCampaignState(t *testing
 		completed.Progress.UnsupportedFiles != progress.UnsupportedFiles ||
 		completed.Progress.Findings != progress.Findings ||
 		!completed.StartedAt.Equal(startedAt) ||
-		!reflect.DeepEqual(completed.RunIDs, expectedRunIDs) {
+		!reflect.DeepEqual(completed.RunIDs, expectedRunIDs) ||
+		!reflect.DeepEqual(completed.ScopeSelection, automation.ScopeSelection) ||
+		!reflect.DeepEqual(completed.ScopePlan, automation.ScopePlan) {
 		t.Fatalf("completed resumed campaign=%#v", completed)
 	}
 }

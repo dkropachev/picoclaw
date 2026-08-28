@@ -251,8 +251,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewIssueCan
 			}
 		}
 	}
-	projected := automation
-	projected.ModelCoverageSketches = nil
+	projected := projectRepositoryReviewGatewayAutomation(automation)
 	response := map[string]any{
 		"automation":        projected,
 		"finding":           finding,
@@ -361,8 +360,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewIssueLin
 		return
 	}
 	updatedFinding, _ := repositoryReviewStateFinding(updated, finding.ID)
-	projected := automation
-	projected.ModelCoverageSketches = nil
+	projected := projectRepositoryReviewGatewayAutomation(automation)
 	writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 		"automation": projected, "repository": repoaudit.Summarize(updated),
 		"finding": updatedFinding, "contexts": repositoryReviewGatewayFindingContexts(updated, updatedFinding),
@@ -398,8 +396,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewIssueUnl
 		return
 	}
 	updatedFinding, _ := repositoryReviewStateFinding(updated, finding.ID)
-	projected := automation
-	projected.ModelCoverageSketches = nil
+	projected := projectRepositoryReviewGatewayAutomation(automation)
 	writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 		"automation": projected, "repository": repoaudit.Summarize(updated),
 		"finding": updatedFinding, "contexts": repositoryReviewGatewayFindingContexts(updated, updatedFinding),
@@ -464,8 +461,7 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewFindingS
 			writeRepositoryReviewPublicationError(w, http.StatusServiceUnavailable, "issue_sync_unavailable")
 			return
 		}
-		projected := automation
-		projected.ModelCoverageSketches = nil
+		projected := projectRepositoryReviewGatewayAutomation(automation)
 		writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 			"automation": projected, "repository": repoaudit.Summarize(updated),
 			"repository_finding": unknown,
@@ -496,12 +492,19 @@ func (handler *repositoryReviewPublicationHandler) serveRepositoryReviewFindingS
 		writeRepositoryReviewPublicationStoreError(w, err, true)
 		return
 	}
-	projected := automation
-	projected.ModelCoverageSketches = nil
+	projected := projectRepositoryReviewGatewayAutomation(automation)
 	writeRepositoryReviewPublicationJSON(w, http.StatusOK, map[string]any{
 		"automation": projected, "repository": repoaudit.Summarize(updated),
 		"repository_finding": updatedFinding,
 	})
+}
+
+func projectRepositoryReviewGatewayAutomation(
+	automation repoaudit.RepositoryReviewAutomation,
+) repoaudit.RepositoryReviewAutomation {
+	automation.ModelCoverageSketches = nil
+	automation.ScopeSelection = nil
+	return automation
 }
 
 func decodeRepositoryReviewGatewayRequest(r *http.Request, destination any) error {
