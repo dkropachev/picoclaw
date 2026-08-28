@@ -289,6 +289,13 @@ func TestAgentLoopCloseCancelsBlockedCandidatePublicationAndIsIdempotent(t *test
 		loop.Close()
 		close(closeDone)
 	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !loop.closing.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not begin closing the loop")
+		}
+		runtime.Gosched()
+	}
 	close(release)
 	if err := <-reloadDone; err == nil || !strings.Contains(err.Error(), "closing") {
 		t.Fatalf("reload during Close error = %v", err)
