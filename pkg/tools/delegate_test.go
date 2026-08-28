@@ -33,6 +33,9 @@ func TestDelegateTool_Name(t *testing.T) {
 	if tool.Name() != "delegate" {
 		t.Errorf("Name() = %q, want %q", tool.Name(), "delegate")
 	}
+	if description := tool.Description(); !strings.Contains(description, "another agent") {
+		t.Fatalf("Description() = %q", description)
+	}
 }
 
 func TestDelegateTool_Parameters(t *testing.T) {

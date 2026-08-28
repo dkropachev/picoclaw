@@ -302,7 +302,10 @@ func TestRunToolLoopSuppressesArgumentsAndResultErrorsFromRegistryLogs(t *testin
 	if strings.Contains(string(logged), canary) {
 		t.Fatalf("suppressed tool value entered logs: %s", logged)
 	}
-	if !strings.Contains(string(logged), "private_log") {
-		t.Fatalf("tool name missing from suppressed logs: %s", logged)
+	if strings.Contains(string(logged), "private_log") {
+		t.Fatalf("raw tool name entered suppressed logs: %s", logged)
+	}
+	if !strings.Contains(string(logged), "identity_tool_digest") {
+		t.Fatalf("tool identity observation missing from suppressed logs: %s", logged)
 	}
 }

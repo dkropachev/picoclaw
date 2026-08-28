@@ -19,6 +19,12 @@ type probeProvider struct {
 	tools    *[]providers.ToolDefinition
 }
 
+func TestFormatProbeExpectedArgsFailsClosed(t *testing.T) {
+	if got := formatProbeExpectedArgs(map[string]any{"unsupported": func() {}}); got != "{}" {
+		t.Fatalf("formatProbeExpectedArgs() = %q, want empty object", got)
+	}
+}
+
 func (p probeProvider) Chat(
 	_ context.Context,
 	messages []providers.Message,

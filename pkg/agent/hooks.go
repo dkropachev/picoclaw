@@ -97,6 +97,56 @@ type HookRegistration struct {
 	Hook     any
 }
 
+func safeHookIdentityField(name string) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixIdentityHook,
+		logger.ObserveIdentity(logger.ObservationDomainIdentityHook, name),
+	)
+}
+
+func safeHookStageField(stage string) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixIdentityHookStage,
+		logger.ObserveIdentity(logger.ObservationDomainIdentityHookStage, stage),
+	)
+}
+
+func safeHookActionField(action HookAction) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixIdentityHookAction,
+		logger.ObserveIdentity(logger.ObservationDomainIdentityHookAction, string(action)),
+	)
+}
+
+func safeHookEventKindField(kind runtimeevents.Kind) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixIdentityRuntimeEventKind,
+		logger.ObserveIdentity(logger.ObservationDomainIdentityRuntimeEventKind, string(kind)),
+	)
+}
+
+func safeHookSourceField(source HookSource) logger.SafeField {
+	value := logger.SafeEnumUnknown
+	switch source {
+	case HookSourceInProcess:
+		value = logger.SafeEnumInProcess
+	case HookSourceProcess:
+		value = logger.SafeEnumProcess
+	}
+	return logger.SafeEnum(logger.FieldSource, value)
+}
+
+func safeHookErrorField(class logger.ErrorClass, err error) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixError,
+		logger.ObserveErrorType(class, err),
+	)
+}
+
+func safeHookTimeoutField(timeout time.Duration) logger.SafeField {
+	return logger.SafeInt64(logger.FieldTimeoutMilliseconds, int64(timeout/time.Millisecond))
+}
+
 func NamedHook(name string, hook any) HookRegistration {
 	return HookRegistration{
 		Name:   name,
@@ -301,9 +351,11 @@ func NewHookManager(runtimeEvents runtimeevents.EventChannel) *HookManager {
 			Buffer: hookObserverBufferSize,
 		})
 		if err != nil {
-			logger.WarnCF("hooks", "Failed to subscribe runtime events for hooks", map[string]any{
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookEventSubscribeFailed,
+				logger.NewSafeFields(safeHookErrorField(logger.ErrorClassInternal, err)),
+			)
 			close(hm.runtimeDone)
 		} else {
 			hm.runtimeSub = sub
@@ -321,20 +373,31 @@ func (hm *HookManager) Close() {
 		return
 	}
 
+	primary := false
 	hm.closeOnce.Do(func() {
 		hm.mu.Lock()
 		hm.closed = true
 		hm.mu.Unlock()
-		if hm.runtimeSub != nil {
-			if err := hm.runtimeSub.Close(); err != nil {
-				logger.WarnCF("hooks", "Failed to close runtime event hook subscription", map[string]any{
-					"error": err.Error(),
-				})
-			}
-		}
-		<-hm.runtimeDone
-		hm.closeAllHooks()
+		primary = true
 	})
+	if !primary {
+		// Close callbacks may re-enter Close, and overlapping secondary callers
+		// are allowed to return once the primary caller has marked the manager
+		// closed. Only that primary caller performs subscription/hook cleanup.
+		return
+	}
+
+	if hm.runtimeSub != nil {
+		if err := hm.runtimeSub.Close(); err != nil {
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookEventSubscriptionCloseFailed,
+				logger.NewSafeFields(safeHookErrorField(logger.ErrorClassInternal, err)),
+			)
+		}
+	}
+	<-hm.runtimeDone
+	hm.closeAllHooks()
 }
 
 func (hm *HookManager) ConfigureTimeouts(observer, interceptor, approval time.Duration) {
@@ -397,29 +460,41 @@ func (hm *HookManager) mount(
 		return 0, fmt.Errorf("hook %q has unsupported trust %d", reg.Name, reg.Trust)
 	}
 
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
-	if hm.closed {
-		return 0, fmt.Errorf("hook manager is closed")
-	}
-
-	if existing, ok := hm.hooks[reg.Name]; ok {
-		if generationOwned && !existing.generationOwned {
-			return 0, fmt.Errorf(
-				"configured hook %q collides with a manual hook",
-				reg.Name,
-			)
+	var retired HookRegistration
+	var retire bool
+	mountID, err := func() (uint64, error) {
+		hm.mu.Lock()
+		defer hm.mu.Unlock()
+		if hm.closed {
+			return 0, fmt.Errorf("hook manager is closed")
 		}
-		closeHookIfPossible(existing.registration.Hook)
+
+		if existing, ok := hm.hooks[reg.Name]; ok {
+			if generationOwned && !existing.generationOwned {
+				return 0, fmt.Errorf(
+					"configured hook %q collides with a manual hook",
+					reg.Name,
+				)
+			}
+			retired = existing.registration
+			retire = true
+		}
+		hm.mountSeq++
+		mountID := hm.mountSeq
+		hm.hooks[reg.Name] = trackedHookRegistration{
+			registration:    reg,
+			mountID:         mountID,
+			generationOwned: generationOwned,
+		}
+		hm.rebuildOrdered()
+		return mountID, nil
+	}()
+	if err != nil {
+		return 0, err
 	}
-	hm.mountSeq++
-	mountID := hm.mountSeq
-	hm.hooks[reg.Name] = trackedHookRegistration{
-		registration:    reg,
-		mountID:         mountID,
-		generationOwned: generationOwned,
+	if retire {
+		closeHookIfPossible(retired.Hook)
 	}
-	hm.rebuildOrdered()
 	return mountID, nil
 }
 
@@ -439,12 +514,16 @@ func trustedHookProvenance(reg HookRegistration) tools.ToolHookProvenance {
 }
 
 func (hm *HookManager) logUntrustedMutation(reg HookRegistration, stage string, action HookAction) {
-	logger.WarnCF("hooks", "Discarded mutation from untrusted hook", map[string]any{
-		"hook":   reg.Name,
-		"source": reg.Source.String(),
-		"stage":  stage,
-		"action": action,
-	})
+	logger.WarnSafeCF(
+		logger.ComponentHooks,
+		logger.DiagnosticMessageHookUntrustedMutationDiscarded,
+		logger.NewSafeFields(
+			safeHookIdentityField(reg.Name),
+			safeHookSourceField(reg.Source),
+			safeHookStageField(stage),
+			safeHookActionField(action),
+		),
+	)
 }
 
 func (hm *HookManager) Unmount(name string) {
@@ -452,29 +531,44 @@ func (hm *HookManager) Unmount(name string) {
 		return
 	}
 
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
-
-	if existing, ok := hm.hooks[name]; ok {
-		closeHookIfPossible(existing.registration.Hook)
+	var retired HookRegistration
+	removed := func() bool {
+		hm.mu.Lock()
+		defer hm.mu.Unlock()
+		existing, ok := hm.hooks[name]
+		if !ok {
+			return false
+		}
+		retired = existing.registration
+		delete(hm.hooks, name)
+		hm.rebuildOrdered()
+		return true
+	}()
+	if removed {
+		closeHookIfPossible(retired.Hook)
 	}
-	delete(hm.hooks, name)
-	hm.rebuildOrdered()
 }
 
 func (hm *HookManager) unmountTracked(name string, mountID uint64) {
 	if hm == nil || name == "" || mountID == 0 {
 		return
 	}
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
-	existing, ok := hm.hooks[name]
-	if !ok || existing.mountID != mountID {
-		return
+	var retired HookRegistration
+	removed := func() bool {
+		hm.mu.Lock()
+		defer hm.mu.Unlock()
+		existing, ok := hm.hooks[name]
+		if !ok || existing.mountID != mountID {
+			return false
+		}
+		retired = existing.registration
+		delete(hm.hooks, name)
+		hm.rebuildOrdered()
+		return true
+	}()
+	if removed {
+		closeHookIfPossible(retired.Hook)
 	}
-	closeHookIfPossible(existing.registration.Hook)
-	delete(hm.hooks, name)
-	hm.rebuildOrdered()
 }
 
 func (hm *HookManager) dispatchRuntimeEvents(ch <-chan runtimeevents.Event) {
@@ -498,7 +592,11 @@ func (hm *HookManager) BeforeLLM(ctx context.Context, req *LLMHookRequest) (*LLM
 
 	current, err := detachLLMHookRequest(req)
 	if err != nil {
-		logger.WarnCF("hooks", "Skipping BeforeLLM hooks for invalid detached request", nil)
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookBeforeLLMRequestInvalid,
+			logger.NewSafeFields(safeHookErrorField(logger.ErrorClassValidation, err)),
+		)
 		return req.Clone(), HookDecision{Action: HookActionContinue}
 	}
 	for _, reg := range hm.snapshotHooks() {
@@ -509,10 +607,13 @@ func (hm *HookManager) BeforeLLM(ctx context.Context, req *LLMHookRequest) (*LLM
 
 		hookInput, cloneErr := detachLLMHookRequest(current)
 		if cloneErr != nil {
-			logger.WarnCF(
-				"hooks",
-				"Skipping BeforeLLM hook for invalid detached request",
-				map[string]any{"hook": reg.Name},
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookBeforeLLMInputInvalid,
+				logger.NewSafeFields(
+					safeHookIdentityField(reg.Name),
+					safeHookErrorField(logger.ErrorClassValidation, cloneErr),
+				),
 			)
 			continue
 		}
@@ -532,10 +633,13 @@ func (hm *HookManager) BeforeLLM(ctx context.Context, req *LLMHookRequest) (*LLM
 			if next != nil {
 				detached, detachErr := detachLLMHookRequest(next)
 				if detachErr != nil {
-					logger.WarnCF(
-						"hooks",
-						"Discarded invalid BeforeLLM hook mutation",
-						map[string]any{"hook": reg.Name},
+					logger.WarnSafeCF(
+						logger.ComponentHooks,
+						logger.DiagnosticMessageHookBeforeLLMMutationInvalid,
+						logger.NewSafeFields(
+							safeHookIdentityField(reg.Name),
+							safeHookErrorField(logger.ErrorClassValidation, detachErr),
+						),
 					)
 					continue
 				}
@@ -564,7 +668,11 @@ func (hm *HookManager) AfterLLM(ctx context.Context, resp *LLMHookResponse) (*LL
 
 	current, err := detachLLMHookResponse(resp)
 	if err != nil {
-		logger.WarnCF("hooks", "Skipping AfterLLM hooks for invalid detached response", nil)
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookAfterLLMResponseInvalid,
+			logger.NewSafeFields(safeHookErrorField(logger.ErrorClassValidation, err)),
+		)
 		return resp.Clone(), HookDecision{Action: HookActionContinue}
 	}
 	for _, reg := range hm.snapshotHooks() {
@@ -575,10 +683,13 @@ func (hm *HookManager) AfterLLM(ctx context.Context, resp *LLMHookResponse) (*LL
 
 		hookInput, cloneErr := detachLLMHookResponse(current)
 		if cloneErr != nil {
-			logger.WarnCF(
-				"hooks",
-				"Skipping AfterLLM hook for invalid detached response",
-				map[string]any{"hook": reg.Name},
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookAfterLLMInputInvalid,
+				logger.NewSafeFields(
+					safeHookIdentityField(reg.Name),
+					safeHookErrorField(logger.ErrorClassValidation, cloneErr),
+				),
 			)
 			continue
 		}
@@ -598,7 +709,14 @@ func (hm *HookManager) AfterLLM(ctx context.Context, resp *LLMHookResponse) (*LL
 			if next != nil {
 				detached, detachErr := detachLLMHookResponse(next)
 				if detachErr != nil {
-					logger.WarnCF("hooks", "Discarded invalid AfterLLM hook mutation", map[string]any{"hook": reg.Name})
+					logger.WarnSafeCF(
+						logger.ComponentHooks,
+						logger.DiagnosticMessageHookAfterLLMMutationInvalid,
+						logger.NewSafeFields(
+							safeHookIdentityField(reg.Name),
+							safeHookErrorField(logger.ErrorClassValidation, detachErr),
+						),
+					)
 					continue
 				}
 				detached.toolCallProvenance = afterLLMToolCallProvenance(reg, current, detached)
@@ -655,15 +773,19 @@ func (hm *HookManager) applyBeforeLLMControls(
 		return next
 	}
 	if !llmHookSystemMessagesUnchanged(current.Messages, next.Messages) {
-		logger.WarnCF("hooks", "Hook attempted to modify system prompt; preserving original messages", map[string]any{
-			"hook": hookName,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookSystemPromptMutationRejected,
+			logger.NewSafeFields(safeHookIdentityField(hookName)),
+		)
 		next.Messages = cloneProviderMessages(current.Messages)
 	}
 	if !llmHookToolDefinitionsUnchanged(current.Tools, next.Tools) {
-		logger.WarnCF("hooks", "Hook attempted to modify tool definitions; preserving original tools", map[string]any{
-			"hook": hookName,
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookToolDefinitionsMutationRejected,
+			logger.NewSafeFields(safeHookIdentityField(hookName)),
+		)
 		next.Tools = cloneToolDefinitions(current.Tools)
 	}
 	return next
@@ -815,7 +937,11 @@ func (hm *HookManager) AfterTool(
 
 	current, err := detachToolResultHookResponse(result)
 	if err != nil {
-		logger.WarnCF("hooks", "Skipping AfterTool hooks for invalid detached result", nil)
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookAfterToolResultInvalid,
+			logger.NewSafeFields(safeHookErrorField(logger.ErrorClassValidation, err)),
+		)
 		return result.Clone(), HookDecision{Action: HookActionContinue}
 	}
 	for _, reg := range hm.snapshotHooks() {
@@ -826,10 +952,13 @@ func (hm *HookManager) AfterTool(
 
 		hookInput, cloneErr := detachToolResultHookResponse(current)
 		if cloneErr != nil {
-			logger.WarnCF(
-				"hooks",
-				"Skipping AfterTool hook for invalid detached result",
-				map[string]any{"hook": reg.Name},
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookAfterToolInputInvalid,
+				logger.NewSafeFields(
+					safeHookIdentityField(reg.Name),
+					safeHookErrorField(logger.ErrorClassValidation, cloneErr),
+				),
 			)
 			continue
 		}
@@ -854,10 +983,13 @@ func (hm *HookManager) AfterTool(
 				nextCopy.Arguments = current.Arguments
 				detached, detachErr := detachToolResultHookResponse(&nextCopy)
 				if detachErr != nil {
-					logger.WarnCF(
-						"hooks",
-						"Discarded invalid AfterTool hook mutation",
-						map[string]any{"hook": reg.Name},
+					logger.WarnSafeCF(
+						logger.ComponentHooks,
+						logger.DiagnosticMessageHookAfterToolMutationInvalid,
+						logger.NewSafeFields(
+							safeHookIdentityField(reg.Name),
+							safeHookErrorField(logger.ErrorClassValidation, detachErr),
+						),
 					)
 					continue
 				}
@@ -934,14 +1066,21 @@ func (hm *HookManager) snapshotHooks() []HookRegistration {
 }
 
 func (hm *HookManager) closeAllHooks() {
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
+	retired := func() []HookRegistration {
+		hm.mu.Lock()
+		defer hm.mu.Unlock()
 
-	for name, reg := range hm.hooks {
-		closeHookIfPossible(reg.registration.Hook)
-		delete(hm.hooks, name)
+		registrations := make([]HookRegistration, 0, len(hm.hooks))
+		for name, reg := range hm.hooks {
+			registrations = append(registrations, reg.registration)
+			delete(hm.hooks, name)
+		}
+		hm.ordered = nil
+		return registrations
+	}()
+	for _, reg := range retired {
+		closeHookIfPossible(reg.Hook)
 	}
-	hm.ordered = nil
 }
 
 func (hm *HookManager) runRuntimeObserver(
@@ -961,18 +1100,26 @@ func (hm *HookManager) runRuntimeObserver(
 	select {
 	case err := <-done:
 		if err != nil {
-			logger.WarnCF("hooks", "Runtime event observer failed", map[string]any{
-				"hook":  name,
-				"event": evt.Kind.String(),
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookRuntimeObserverFailed,
+				logger.NewSafeFields(
+					safeHookIdentityField(name),
+					safeHookEventKindField(evt.Kind),
+					safeHookErrorField(logger.ErrorClassUnknown, err),
+				),
+			)
 		}
 	case <-ctx.Done():
-		logger.WarnCF("hooks", "Runtime event observer timed out", map[string]any{
-			"hook":       name,
-			"event":      evt.Kind.String(),
-			"timeout_ms": observerTimeout.Milliseconds(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookRuntimeObserverTimedOut,
+			logger.NewSafeFields(
+				safeHookIdentityField(name),
+				safeHookEventKindField(evt.Kind),
+				safeHookTimeoutField(observerTimeout),
+			),
+		)
 	}
 }
 
@@ -1092,20 +1239,28 @@ func runInterceptorHook[T any](
 	select {
 	case res := <-done:
 		if res.err != nil {
-			logger.WarnCF("hooks", "Interceptor hook failed", map[string]any{
-				"hook":  name,
-				"stage": stage,
-				"error": res.err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookInterceptorFailed,
+				logger.NewSafeFields(
+					safeHookIdentityField(name),
+					safeHookStageField(stage),
+					safeHookErrorField(logger.ErrorClassUnknown, res.err),
+				),
+			)
 			return zero, HookDecision{}, false
 		}
 		return res.value, res.decision, true
 	case <-ctx.Done():
-		logger.WarnCF("hooks", "Interceptor hook timed out", map[string]any{
-			"hook":       name,
-			"stage":      stage,
-			"timeout_ms": timeout.Milliseconds(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookInterceptorTimedOut,
+			logger.NewSafeFields(
+				safeHookIdentityField(name),
+				safeHookStageField(stage),
+				safeHookTimeoutField(timeout),
+			),
+		)
 		return zero, HookDecision{}, false
 	}
 }
@@ -1133,20 +1288,28 @@ func runApprovalHook(
 	select {
 	case res := <-done:
 		if res.err != nil {
-			logger.WarnCF("hooks", "Approval hook failed", map[string]any{
-				"hook":  name,
-				"stage": stage,
-				"error": res.err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookApprovalFailed,
+				logger.NewSafeFields(
+					safeHookIdentityField(name),
+					safeHookStageField(stage),
+					safeHookErrorField(logger.ErrorClassUnknown, res.err),
+				),
+			)
 			return ApprovalDecision{}, false
 		}
 		return res.decision, true
 	case <-ctx.Done():
-		logger.WarnCF("hooks", "Approval hook timed out", map[string]any{
-			"hook":       name,
-			"stage":      stage,
-			"timeout_ms": timeout.Milliseconds(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookApprovalTimedOut,
+			logger.NewSafeFields(
+				safeHookIdentityField(name),
+				safeHookStageField(stage),
+				safeHookTimeoutField(timeout),
+			),
+		)
 		return ApprovalDecision{
 			Approved: false,
 			Reason:   fmt.Sprintf("tool approval hook %q timed out", name),
@@ -1155,11 +1318,15 @@ func runApprovalHook(
 }
 
 func (hm *HookManager) logUnsupportedAction(name, stage string, action HookAction) {
-	logger.WarnCF("hooks", "Hook returned unsupported action for stage", map[string]any{
-		"hook":   name,
-		"stage":  stage,
-		"action": action,
-	})
+	logger.WarnSafeCF(
+		logger.ComponentHooks,
+		logger.DiagnosticMessageHookUnsupportedAction,
+		logger.NewSafeFields(
+			safeHookIdentityField(name),
+			safeHookStageField(stage),
+			safeHookActionField(action),
+		),
+	)
 }
 
 func validateDetachedMap(values map[string]any) error {
@@ -1438,8 +1605,10 @@ func closeHookIfPossible(hook any) {
 		return
 	}
 	if err := closer.Close(); err != nil {
-		logger.WarnCF("hooks", "Failed to close hook", map[string]any{
-			"error": err.Error(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageHookCloseFailed,
+			logger.NewSafeFields(safeHookErrorField(logger.ErrorClassUnknown, err)),
+		)
 	}
 }

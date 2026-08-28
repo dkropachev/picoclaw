@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -208,5 +209,159 @@ func TestDiagnosticPolicyRebindMeetsCurrentParentCap(t *testing.T) {
 	defer revokeNilParentRebind()
 	if !DiagnosticPolicyFromContext(nilParentRebind).allowsApplicationPreview() {
 		t.Fatal("nil current parent lost valid origin/current meet")
+	}
+}
+
+func TestNarrowDiagnosticPolicyRetainsLiveRevocationAndBounds(t *testing.T) {
+	enabled := NewDiagnosticPolicy(true, DEBUG)
+	disabled := NewDiagnosticPolicy(false, DEBUG)
+
+	root, revokeRoot := BindRootDiagnosticPolicy(context.Background(), enabled)
+	narrowed, revokeNarrowed := NarrowDiagnosticPolicy(root, enabled)
+	if !DiagnosticPolicyFromContext(narrowed).allowsApplicationPreview() {
+		t.Fatal("live enabled parent/current meet was disabled")
+	}
+	nestedRoot, revokeNestedRoot := BindRootDiagnosticPolicy(narrowed, enabled)
+	if !DiagnosticPolicyFromContext(nestedRoot).allowsApplicationPreview() {
+		t.Fatal("root bind on live-linked child lost enabled policy")
+	}
+	revokeRoot()
+	if DiagnosticPolicyFromContext(narrowed).allowsApplicationPreview() ||
+		DiagnosticPolicyFromContext(nestedRoot).allowsApplicationPreview() {
+		t.Fatal("parent revoke did not disable live-linked descendants")
+	}
+	revokeNestedRoot()
+	revokeNarrowed()
+
+	childRoot, revokeChildRoot := BindRootDiagnosticPolicy(context.Background(), enabled)
+	defer revokeChildRoot()
+	child, revokeChild := NarrowDiagnosticPolicy(childRoot, enabled)
+	childDescendant, revokeChildDescendant := BindRootDiagnosticPolicy(child, enabled)
+	defer revokeChildDescendant()
+	revokeChild()
+	if DiagnosticPolicyFromContext(child).allowsApplicationPreview() ||
+		DiagnosticPolicyFromContext(childDescendant).allowsApplicationPreview() {
+		t.Fatal("narrow child revoke did not disable itself and linked descendant")
+	}
+	brokenRebind, revokeBrokenRebind := RebindDiagnosticPolicy(
+		context.Background(),
+		child,
+		enabled,
+	)
+	defer revokeBrokenRebind()
+	if DiagnosticPolicyFromContext(brokenRebind).allowsApplicationPreview() {
+		t.Fatal("rebind revived an inactive live-linked origin")
+	}
+	brokenParentRebind, revokeBrokenParentRebind := RebindDiagnosticPolicy(
+		child,
+		childRoot,
+		enabled,
+	)
+	defer revokeBrokenParentRebind()
+	if DiagnosticPolicyFromContext(brokenParentRebind).allowsApplicationPreview() {
+		t.Fatal("rebind ignored an inactive live-linked current parent")
+	}
+	narrowedAfterRevoke, revokeNarrowedAfterRevoke := NarrowDiagnosticPolicy(child, enabled)
+	defer revokeNarrowedAfterRevoke()
+	if DiagnosticPolicyFromContext(narrowedAfterRevoke).allowsApplicationPreview() {
+		t.Fatal("narrow captured authority from an inactive live-linked parent")
+	}
+	rootAfterRevoke, revokeRootAfterRevoke := BindRootDiagnosticPolicy(child, enabled)
+	defer revokeRootAfterRevoke()
+	if DiagnosticPolicyFromContext(rootAfterRevoke).allowsApplicationPreview() {
+		t.Fatal("root bind revived an inactive live-linked parent")
+	}
+
+	falseRoot, revokeFalseRoot := BindRootDiagnosticPolicy(context.Background(), enabled)
+	defer revokeFalseRoot()
+	falseChild, revokeFalseChild := NarrowDiagnosticPolicy(falseRoot, disabled)
+	defer revokeFalseChild()
+	if DiagnosticPolicyFromContext(falseChild).allowsApplicationPreview() {
+		t.Fatal("narrow false cap was widened")
+	}
+
+	detached, revokeDetached := NarrowDiagnosticPolicy(context.Background(), enabled)
+	defer revokeDetached()
+	if DiagnosticPolicyFromContext(detached).allowsApplicationPreview() {
+		t.Fatal("narrow without parent provenance established preview rights")
+	}
+	nilParent, revokeNilParent := NarrowDiagnosticPolicy(nil, enabled)
+	defer revokeNilParent()
+	if DiagnosticPolicyFromContext(nilParent).allowsApplicationPreview() {
+		t.Fatal("narrow nil parent established preview rights")
+	}
+
+	boundedRoot, revokeBoundedRoot := BindRootDiagnosticPolicy(
+		context.Background(),
+		enabled,
+	)
+	defer revokeBoundedRoot()
+	current := boundedRoot
+	var atBound context.Context
+	revokes := make([]func(), 0, maxDiagnosticPolicyLiveAncestors+1)
+	for index := range maxDiagnosticPolicyLiveAncestors + 1 {
+		var revoke func()
+		//nolint:fatcontext // The test deliberately constructs the bounded live lineage.
+		current, revoke = NarrowDiagnosticPolicy(current, enabled)
+		revokes = append(revokes, revoke)
+		if index < maxDiagnosticPolicyLiveAncestors &&
+			!DiagnosticPolicyFromContext(current).allowsApplicationPreview() {
+			t.Fatalf("live ancestry disabled before bound at index %d", index)
+		}
+		if index == maxDiagnosticPolicyLiveAncestors-1 {
+			atBound = current
+		}
+	}
+	defer func() {
+		for _, revoke := range revokes {
+			revoke()
+		}
+	}()
+	if DiagnosticPolicyFromContext(current).allowsApplicationPreview() {
+		t.Fatal("live ancestry overflow did not fail closed")
+	}
+	rootPastBound, revokeRootPastBound := BindRootDiagnosticPolicy(atBound, enabled)
+	defer revokeRootPastBound()
+	if DiagnosticPolicyFromContext(rootPastBound).allowsApplicationPreview() {
+		t.Fatal("nested root bind widened ancestry overflow")
+	}
+}
+
+func TestNarrowDiagnosticPolicyConcurrentAncestorRevoke(t *testing.T) {
+	enabled := NewDiagnosticPolicy(true, DEBUG)
+	zero := DiagnosticPolicy{}
+	root, revokeRoot := BindRootDiagnosticPolicy(context.Background(), enabled)
+	narrowed, revokeNarrowed := NarrowDiagnosticPolicy(root, enabled)
+	defer revokeNarrowed()
+
+	const workers = 32
+	start := make(chan struct{})
+	sampled := make(chan struct{}, workers)
+	var wait sync.WaitGroup
+	var invalid atomic.Bool
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			for iteration := 0; iteration < 1000; iteration++ {
+				got := DiagnosticPolicyFromContext(narrowed)
+				if got != enabled && got != zero {
+					invalid.Store(true)
+				}
+				if iteration == 0 {
+					sampled <- struct{}{}
+				}
+			}
+		}()
+	}
+	close(start)
+	for range workers {
+		<-sampled
+	}
+	revokeRoot()
+	wait.Wait()
+	if invalid.Load() || DiagnosticPolicyFromContext(narrowed) != zero {
+		t.Fatal("concurrent live ancestor revoke produced an invalid or active policy")
 	}
 }

@@ -435,9 +435,10 @@ After completing the task, provide a clear summary of what was done.`
 				AgentID: task.AgentID, SessionKey: task.OriginSessionKey,
 				TurnID: task.ID, Source: ToolPolicySourceLegacySubagent,
 			},
-			MaxIterations: maxIter,
-			LLMOptions:    llmOptions,
-			MediaResolver: mediaResolver,
+			MaxIterations:         maxIter,
+			LLMOptions:            llmOptions,
+			SuppressToolArguments: ToolLogDetailsSuppressed(ctx),
+			MediaResolver:         mediaResolver,
 		}, messages, task.OriginChannel, task.OriginChatID)
 		if err != nil {
 			return nil, err
@@ -475,7 +476,14 @@ func callSubagentTaskRunner(
 ) (result *ToolResult, returnErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentTools,
+				logger.DiagnosticMessageSubagentRunnerPanic,
+				logger.NewSafeFields(logger.SafeObservation(
+					logger.ObservationPrefixPanic,
+					logger.ObservePanic(recovered),
+				)),
+			)
 			result = nil
 			returnErr = fmt.Errorf("subagent task panicked: %v", recovered)
 		}
@@ -534,7 +542,14 @@ func callSubagentTaskCallback(
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentTools,
+				logger.DiagnosticMessageSubagentCallbackPanic,
+				logger.NewSafeFields(logger.SafeObservation(
+					logger.ObservationPrefixPanic,
+					logger.ObservePanic(recovered),
+				)),
+			)
 		}
 	}()
 	callback(ctx, result)
@@ -546,7 +561,14 @@ func callSubagentTaskFinalizer(finalizer func()) {
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorSafeCF(
+				logger.ComponentTools,
+				logger.DiagnosticMessageSubagentFinalizerPanic,
+				logger.NewSafeFields(logger.SafeObservation(
+					logger.ObservationPrefixPanic,
+					logger.ObservePanic(recovered),
+				)),
+			)
 		}
 	}()
 	finalizer()

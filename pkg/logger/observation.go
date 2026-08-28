@@ -42,6 +42,7 @@ const (
 	reasonInvalidNumber   = "invalid_number"
 	reasonNonfiniteFloat  = "nonfinite_float"
 	reasonUnnamedError    = "unnamed_error_type"
+	reasonUnnamedPanic    = "unnamed_panic_type"
 	reasonInternalPanic   = "internal_panic"
 )
 
@@ -99,6 +100,10 @@ const (
 	ObservationDomainIdentitySkill
 	ObservationDomainIdentityRoute
 	ObservationDomainIdentityContextManager
+	ObservationDomainIdentityHookStage
+	ObservationDomainIdentityHookAction
+	ObservationDomainIdentityRuntimeEventKind
+	ObservationDomainPanicType
 )
 
 var observationDomainLabels = [...]string{
@@ -150,6 +155,10 @@ var observationDomainLabels = [...]string{
 	"identity.skill",
 	"identity.route",
 	"identity.context_manager",
+	"identity.hook_stage",
+	"identity.hook_action",
+	"identity.runtime_event_kind",
+	"panic_type",
 }
 
 // ObservationFieldPrefix selects one fixed family of structured log keys.
@@ -214,6 +223,10 @@ const (
 	ObservationPrefixIdentitySkill
 	ObservationPrefixIdentityRoute
 	ObservationPrefixIdentityContextManager
+	ObservationPrefixIdentityHookStage
+	ObservationPrefixIdentityHookAction
+	ObservationPrefixIdentityRuntimeEventKind
+	ObservationPrefixPanic
 )
 
 var observationPrefixLabels = [...]string{
@@ -272,6 +285,10 @@ var observationPrefixLabels = [...]string{
 	"identity_skill",
 	"identity_route",
 	"identity_context_manager",
+	"identity_hook_stage",
+	"identity_hook_action",
+	"identity_runtime_event_kind",
+	"panic",
 }
 
 // ErrorClass is a trusted, fixed classification supplied by an error owner.
@@ -362,8 +379,11 @@ type observationIntegrity struct {
 // ObserveText describes exact string bytes without retaining the string.
 func ObserveText(domain ObservationDomain, value string) Observation {
 	prefix, ok := prefixForDomain(domain)
-	if !ok || domain == ObservationDomainErrorType {
+	if !ok || domain == ObservationDomainErrorType || domain == ObservationDomainPanicType {
 		return unavailableObservation(ObservationPrefixError, "unknown", reasonInvalidDomain)
+	}
+	if len(value) > maxObservationBytes {
+		return unavailableObservation(prefix, "text", reasonByteLimit)
 	}
 	validUTF8 := utf8.ValidString(value)
 	runes := 0
@@ -385,7 +405,7 @@ func ObserveText(domain ObservationDomain, value string) Observation {
 // ObserveBytes describes exact bytes without retaining the byte slice.
 func ObserveBytes(domain ObservationDomain, value []byte) Observation {
 	prefix, ok := prefixForDomain(domain)
-	if !ok || domain == ObservationDomainErrorType {
+	if !ok || domain == ObservationDomainErrorType || domain == ObservationDomainPanicType {
 		return unavailableObservation(ObservationPrefixError, "unknown", reasonInvalidDomain)
 	}
 	typeLabel := "bytes"
@@ -395,6 +415,9 @@ func ObserveBytes(domain ObservationDomain, value []byte) Observation {
 		typeLabel = "bytes:nil"
 		class = "bytes_nil"
 		count = 0
+	}
+	if len(value) > maxObservationBytes {
+		return unavailableObservation(prefix, class, reasonByteLimit)
 	}
 	validUTF8 := utf8.Valid(value)
 	runes := 0
@@ -416,6 +439,9 @@ func ObserveBytes(domain ObservationDomain, value []byte) Observation {
 // ObservePath classifies a path lexically and digests its exact bytes. It does
 // not resolve, authorize, stat, or follow the path.
 func ObservePath(value string) Observation {
+	if len(value) > maxObservationBytes {
+		return unavailableObservation(ObservationPrefixPath, "unknown", reasonByteLimit)
+	}
 	class := classifyObservationPath(value)
 	validUTF8 := utf8.ValidString(value)
 	runes := 0
@@ -441,6 +467,9 @@ func ObservePath(value string) Observation {
 // ObserveURL reports only a fixed scheme/validity class and an exact digest.
 // No URL component is retained in the Observation.
 func ObserveURL(value string) Observation {
+	if len(value) > maxObservationBytes {
+		return unavailableObservation(ObservationPrefixURL, "unknown", reasonByteLimit)
+	}
 	class := classifyObservationURL(value)
 	validUTF8 := utf8.ValidString(value)
 	runes := 0
@@ -475,6 +504,9 @@ func ObserveIdentity(domain ObservationDomain, value string) Observation {
 	if value == "" {
 		class = "empty"
 		count = 0
+	}
+	if len(value) > maxObservationBytes {
+		return unavailableObservation(prefix, class, reasonByteLimit)
 	}
 	validUTF8 := utf8.ValidString(value)
 	runes := 0
@@ -588,11 +620,87 @@ func ObserveErrorType(class ErrorClass, err error) (observation Observation) {
 	)
 }
 
+// ObservePanic observes only a recovered value's concrete type identity. It
+// never formats the value or invokes String, Error, Format, or other methods.
+func ObservePanic(recovered any) (observation Observation) {
+	if recovered == nil {
+		return completeObservation(
+			ObservationPrefixPanic,
+			"none",
+			0,
+			0,
+			false,
+			0,
+			"",
+			false,
+		)
+	}
+
+	defer func() {
+		if recover() != nil {
+			observation = unavailableObservation(
+				ObservationPrefixPanic,
+				"panic",
+				reasonInternalPanic,
+			)
+		}
+	}()
+
+	typeOf := reflect.TypeOf(recovered)
+	pointerDepth := 0
+	for typeOf.Kind() == reflect.Pointer {
+		pointerDepth++
+		if pointerDepth > maxObservationDepth {
+			return unavailableObservation(
+				ObservationPrefixPanic,
+				"panic",
+				reasonInvalidBound,
+			)
+		}
+		typeOf = typeOf.Elem()
+	}
+	if typeOf.Name() == "" {
+		return unavailableObservation(
+			ObservationPrefixPanic,
+			"panic",
+			reasonUnnamedPanic,
+		)
+	}
+
+	payload := make([]byte, 1, 1+16+len(typeOf.PkgPath())+len(typeOf.Name()))
+	payload[0] = byte(pointerDepth)
+	payload = appendFramedBytes(payload, []byte(typeOf.PkgPath()))
+	payload = appendFramedBytes(payload, []byte(typeOf.Name()))
+	if len(payload) > maxObservationBytes {
+		return unavailableObservation(
+			ObservationPrefixPanic,
+			"panic",
+			reasonByteLimit,
+		)
+	}
+
+	count := 1
+	value := reflect.ValueOf(recovered)
+	if isNilableKind(value.Kind()) && value.IsNil() {
+		count = 0
+	}
+	return completeObservation(
+		ObservationPrefixPanic,
+		"panic",
+		len(payload),
+		0,
+		false,
+		count,
+		observationDigest(ObservationDomainPanicType, "panic:type", payload),
+		true,
+	)
+}
+
 // ObserveJSONValue canonicalizes an already detached, exclusively owned
 // JSON-compatible graph. Concurrent mutation by the caller is unsupported.
 func ObserveJSONValue(domain ObservationDomain, value any) (observation Observation) {
 	prefix, ok := prefixForDomain(domain)
-	if !ok || domain == ObservationDomainErrorType {
+	if !ok || domain == ObservationDomainErrorType || domain == ObservationDomainPanicType {
 		return unavailableObservation(ObservationPrefixError, "unknown", reasonInvalidDomain)
 	}
 
@@ -766,6 +874,14 @@ func prefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, bool) {
 		return ObservationPrefixIdentityRoute, true
 	case ObservationDomainIdentityContextManager:
 		return ObservationPrefixIdentityContextManager, true
+	case ObservationDomainIdentityHookStage:
+		return ObservationPrefixIdentityHookStage, true
+	case ObservationDomainIdentityHookAction:
+		return ObservationPrefixIdentityHookAction, true
+	case ObservationDomainIdentityRuntimeEventKind:
+		return ObservationPrefixIdentityRuntimeEventKind, true
+	case ObservationDomainPanicType:
+		return ObservationPrefixPanic, true
 	default:
 		return 0, false
 	}
@@ -781,7 +897,10 @@ func identityPrefixForDomain(domain ObservationDomain) (ObservationFieldPrefix, 
 		ObservationDomainIdentityWorkflow,
 		ObservationDomainIdentitySkill,
 		ObservationDomainIdentityRoute,
-		ObservationDomainIdentityContextManager:
+		ObservationDomainIdentityContextManager,
+		ObservationDomainIdentityHookStage,
+		ObservationDomainIdentityHookAction,
+		ObservationDomainIdentityRuntimeEventKind:
 		return prefixForDomain(domain)
 	default:
 		return 0, false
@@ -855,7 +974,7 @@ func validObservationClass(class string) bool {
 		"wss", "file", "other", "none", "canceled", "deadline",
 		"validation", "not_found", "permission", "conflict", "transport",
 		"provider", "internal", "credential", "environment",
-		"request_header", "authorization", "cookie", "private_key":
+		"request_header", "authorization", "cookie", "private_key", "panic":
 		return true
 	default:
 		return false
@@ -867,7 +986,8 @@ func validUnavailableReason(reason string) bool {
 	case reasonInvalidDomain, reasonInvalidPrefix, reasonInvalidBound,
 		reasonUnsupportedType, reasonCycle, reasonDepthLimit, reasonNodeLimit,
 		reasonMemberLimit, reasonByteLimit, reasonInvalidNumber,
-		reasonNonfiniteFloat, reasonUnnamedError, reasonInternalPanic:
+		reasonNonfiniteFloat, reasonUnnamedError, reasonUnnamedPanic,
+		reasonInternalPanic:
 		return true
 	default:
 		return false

@@ -430,7 +430,10 @@ func (r *ToolRegistry) InstantiateForOwner(
 		return nil, fmt.Errorf("strict owner instantiation requires an open owned registry")
 	}
 	r.mu.RUnlock()
-	destination, err := NewOwnedToolRegistry(owner)
+	destination, err := NewOwnedToolRegistryWithDiagnosticPolicy(
+		owner,
+		r.diagnosticOwnerCap,
+	)
 	if err != nil {
 		return nil, err
 	}

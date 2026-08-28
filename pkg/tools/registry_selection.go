@@ -177,7 +177,10 @@ func (r *ToolRegistry) InstantiateForOwnerSelection(
 	if roots == nil {
 		return nil, fmt.Errorf("tool owner selection must be explicit")
 	}
-	destination, err := NewOwnedToolRegistry(owner)
+	destination, err := NewOwnedToolRegistryWithDiagnosticPolicy(
+		owner,
+		r.diagnosticOwnerCap,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -111,6 +111,39 @@ const (
 	DiagnosticMessageProcessHookStderr
 	DiagnosticMessageHookDecodeFailed
 	DiagnosticMessageRuntimeEvent
+	DiagnosticMessageToolCall
+	DiagnosticMessageToolRegistrationSkipped
+	DiagnosticMessageToolRegistrationCollision
+	DiagnosticMessageToolRegistrationOverwritten
+	DiagnosticMessageToolRegistered
+	DiagnosticMessageToolUnregistered
+	DiagnosticMessageToolPromotionCompleted
+	DiagnosticMessageToolAsyncStarted
+	DiagnosticMessageSubagentRunnerPanic
+	DiagnosticMessageSubagentCallbackPanic
+	DiagnosticMessageSubagentFinalizerPanic
+	DiagnosticMessageHookEventSubscribeFailed
+	DiagnosticMessageHookEventSubscriptionCloseFailed
+	DiagnosticMessageHookUntrustedMutationDiscarded
+	DiagnosticMessageHookBeforeLLMRequestInvalid
+	DiagnosticMessageHookBeforeLLMInputInvalid
+	DiagnosticMessageHookBeforeLLMMutationInvalid
+	DiagnosticMessageHookAfterLLMResponseInvalid
+	DiagnosticMessageHookAfterLLMInputInvalid
+	DiagnosticMessageHookAfterLLMMutationInvalid
+	DiagnosticMessageHookSystemPromptMutationRejected
+	DiagnosticMessageHookToolDefinitionsMutationRejected
+	DiagnosticMessageHookAfterToolResultInvalid
+	DiagnosticMessageHookAfterToolInputInvalid
+	DiagnosticMessageHookAfterToolMutationInvalid
+	DiagnosticMessageHookRuntimeObserverFailed
+	DiagnosticMessageHookRuntimeObserverTimedOut
+	DiagnosticMessageHookInterceptorFailed
+	DiagnosticMessageHookInterceptorTimedOut
+	DiagnosticMessageHookApprovalFailed
+	DiagnosticMessageHookApprovalTimedOut
+	DiagnosticMessageHookUnsupportedAction
+	DiagnosticMessageHookCloseFailed
 )
 
 var diagnosticMessageLabels = [...]string{
@@ -136,6 +169,39 @@ var diagnosticMessageLabels = [...]string{
 	"Process hook stderr",
 	"Failed to decode process hook message",
 	"Runtime event",
+	"Tool call",
+	"Tool registration skipped",
+	"Tool registration collides with private dependency",
+	"Tool registration overwrites existing tool",
+	"Tool registered",
+	"Tool unregistered",
+	"Tool promotion completed",
+	"Tool started asynchronously",
+	"Subagent task runner panic recovered",
+	"Subagent callback panic recovered",
+	"Subagent finalizer panic recovered",
+	"Failed to subscribe runtime events for hooks",
+	"Failed to close runtime event hook subscription",
+	"Discarded mutation from untrusted hook",
+	"Skipping BeforeLLM hooks for invalid detached request",
+	"Skipping BeforeLLM hook for invalid detached request",
+	"Discarded invalid BeforeLLM hook mutation",
+	"Skipping AfterLLM hooks for invalid detached response",
+	"Skipping AfterLLM hook for invalid detached response",
+	"Discarded invalid AfterLLM hook mutation",
+	"Hook attempted to modify system prompt",
+	"Hook attempted to modify tool definitions",
+	"Skipping AfterTool hooks for invalid detached result",
+	"Skipping AfterTool hook for invalid detached result",
+	"Discarded invalid AfterTool hook mutation",
+	"Runtime event observer failed",
+	"Runtime event observer timed out",
+	"Interceptor hook failed",
+	"Interceptor hook timed out",
+	"Approval hook failed",
+	"Approval hook timed out",
+	"Hook returned unsupported action for stage",
+	"Failed to close hook",
 }
 
 // FieldKey selects one fixed structured key and its required value type.
@@ -209,6 +275,10 @@ const (
 	FieldOutcome
 	FieldRole
 	FieldReason
+	FieldRequestedCount
+	FieldPromotedCount
+	FieldCore
+	FieldSource
 )
 
 type safeFieldKind uint8
@@ -247,6 +317,9 @@ const (
 	SafeEnumReady
 	SafeEnumRunning
 	SafeEnumStopped
+	SafeEnumInProcess
+	SafeEnumProcess
+	SafeEnumUnknown
 )
 
 var safeEnumLabels = [...]string{
@@ -272,6 +345,9 @@ var safeEnumLabels = [...]string{
 	"ready",
 	"running",
 	"stopped",
+	"in_process",
+	"process",
+	"unknown",
 }
 
 // SafeField is one opaque typed field constructor result.
@@ -584,6 +660,11 @@ func safeEnumAllowed(key FieldKey, value SafeEnumValue) bool {
 			SafeEnumUnavailable:
 			return true
 		}
+	case FieldSource:
+		switch value {
+		case SafeEnumInProcess, SafeEnumProcess, SafeEnumUnknown:
+			return true
+		}
 	}
 	return false
 }
@@ -717,6 +798,14 @@ func safeFieldSpec(key FieldKey) (string, safeFieldKind) {
 		return "role", safeFieldKindEnum
 	case FieldReason:
 		return "reason", safeFieldKindEnum
+	case FieldRequestedCount:
+		return "requested_count", safeFieldKindInt
+	case FieldPromotedCount:
+		return "promoted_count", safeFieldKindInt
+	case FieldCore:
+		return "core", safeFieldKindBool
+	case FieldSource:
+		return "source", safeFieldKindEnum
 	default:
 		return "", 0
 	}

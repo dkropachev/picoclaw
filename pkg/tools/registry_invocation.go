@@ -443,8 +443,15 @@ func (r *ToolRegistry) DispatchClaimed(
 		return nil, err
 	}
 	invocation := claim.invocation
+	effectiveSuppressed := suppressLogDetails || ToolLogDetailsSuppressed(ctx)
 
-	logToolExecutionStart(invocation.entry.name, invocation.executionArguments, suppressLogDetails)
+	r.logToolExecutionStart(
+		ctx,
+		invocation.entry.name,
+		invocation.executionArguments,
+		effectiveSuppressed,
+	)
+	diagnosticCap := r.diagnosticPolicyForContext(ctx, effectiveSuppressed)
 	return executeResolvedToolWithContext(
 		ctx,
 		invocation.entry.name,
@@ -454,6 +461,7 @@ func (r *ToolRegistry) DispatchClaimed(
 		channel,
 		chatID,
 		asyncCallback,
-		suppressLogDetails,
+		diagnosticCap,
+		effectiveSuppressed,
 	), nil
 }

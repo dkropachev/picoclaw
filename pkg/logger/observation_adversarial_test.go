@@ -3,6 +3,7 @@ package logger
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -292,6 +293,53 @@ func TestObservationAdversarialMethodsAreNeverInvoked(t *testing.T) {
 	}
 	if got := errorCalls.Load(); got != 0 {
 		t.Fatalf("typed-nil observation invoked %d hostile method(s)", got)
+	}
+}
+
+func TestObservationAdversarialPanicTypeNeverInvokesMethods(t *testing.T) {
+	var calls atomic.Int64
+	recovered := observationAdversarialMethodValue{calls: &calls}
+	observed := ObservePanic(recovered)
+	if observed.State != observationStateComplete || observed.Class != "panic" ||
+		observed.Count != 1 || !validObservationDigest(observed.Digest) ||
+		observed.expectedPrefix != ObservationPrefixPanic {
+		t.Fatalf("panic observation = %#v", observed)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("panic observation invoked %d hostile method(s)", calls.Load())
+	}
+
+	var typedNil *observationAdversarialMethodError
+	typedNilObservation := ObservePanic(typedNil)
+	if typedNilObservation.State != observationStateComplete ||
+		typedNilObservation.Count != 0 ||
+		!validObservationDigest(typedNilObservation.Digest) {
+		t.Fatalf("typed-nil panic observation = %#v", typedNilObservation)
+	}
+	nilObservation := ObservePanic(nil)
+	if nilObservation.State != observationStateComplete ||
+		nilObservation.Class != "none" || nilObservation.Count != 0 ||
+		nilObservation.Digest != "" {
+		t.Fatalf("nil panic observation = %#v", nilObservation)
+	}
+	unnamed := struct{ value int }{value: 1}
+	assertUnavailableObservation(t, ObservePanic(unnamed), reasonUnnamedPanic)
+	tooDeepType := reflect.TypeOf(0)
+	for range maxObservationDepth + 1 {
+		tooDeepType = reflect.PointerTo(tooDeepType)
+	}
+	assertUnavailableObservation(
+		t,
+		ObservePanic(reflect.Zero(tooDeepType).Interface()),
+		reasonInvalidBound,
+	)
+
+	for _, observation := range []Observation{
+		ObserveText(ObservationDomainPanicType, "canary"),
+		ObserveBytes(ObservationDomainPanicType, []byte("canary")),
+		ObserveJSONValue(ObservationDomainPanicType, map[string]any{"canary": true}),
+	} {
+		assertUnavailableObservation(t, observation, reasonInvalidDomain)
 	}
 }
 
