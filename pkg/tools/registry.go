@@ -47,8 +47,11 @@ type ToolRegistry struct {
 	ownedValues               []any
 	reservations              []toolInstanceReservation
 	compatibilityReservations []toolInstanceReservation
+	diagnosticOwnerCap        logger.DiagnosticPolicy
 	closed                    bool
 }
+
+type toolRegistryDiagnosticCapContextKey struct{}
 
 // CoreToolSnapshotEntry preserves the exact registry key used to execute a
 // core tool. Tool.Name can be mutable or panic, so catalog callers must not
@@ -88,15 +91,40 @@ func toolEntryNameDescription(entry *ToolEntry) (string, string) {
 }
 
 func NewToolRegistry() *ToolRegistry {
+	return NewToolRegistryWithDiagnosticPolicy(logger.DiagnosticPolicy{})
+}
+
+// NewToolRegistryWithDiagnosticPolicy creates an explicitly policy-capped
+// unowned registry. Its immutable diagnostic capability is the maximum any
+// request may exercise. The zero policy is deliberately accepted and is the
+// safe compatibility default used by NewToolRegistry.
+func NewToolRegistryWithDiagnosticPolicy(
+	diagnosticPolicy logger.DiagnosticPolicy,
+) *ToolRegistry {
 	return &ToolRegistry{
 		tools:               make(map[string]*ToolEntry),
 		privateConstruction: make(map[string]*ToolEntry),
 		constructionCatalog: make(map[string]*ToolEntry),
 		services:            newToolServiceCache(),
+		diagnosticOwnerCap:  diagnosticPolicy,
 	}
 }
 
 func NewOwnedToolRegistry(owner ToolOwner) (*ToolRegistry, error) {
+	return NewOwnedToolRegistryWithDiagnosticPolicy(
+		owner,
+		logger.DiagnosticPolicy{},
+	)
+}
+
+// NewOwnedToolRegistryWithDiagnosticPolicy creates an owner-scoped registry
+// with one immutable diagnostic cap. There is intentionally no mutator or
+// accessor for this capability: descendants receive it only through registry
+// construction paths.
+func NewOwnedToolRegistryWithDiagnosticPolicy(
+	owner ToolOwner,
+	diagnosticPolicy logger.DiagnosticPolicy,
+) (*ToolRegistry, error) {
 	if err := owner.validate(); err != nil {
 		return nil, err
 	}
@@ -107,7 +135,50 @@ func NewOwnedToolRegistry(owner ToolOwner) (*ToolRegistry, error) {
 		owner:               owner,
 		owned:               true,
 		services:            newToolServiceCache(),
+		diagnosticOwnerCap:  diagnosticPolicy,
 	}, nil
+}
+
+// diagnosticPolicyForContext computes the immediate per-call capability. A
+// request can only narrow its registry owner, and argument suppression is an
+// unconditional false cap.
+func (r *ToolRegistry) diagnosticPolicyForContext(
+	ctx context.Context,
+	suppressed bool,
+) logger.DiagnosticPolicy {
+	effectiveSuppressed := suppressed || ToolLogDetailsSuppressed(ctx)
+	if r == nil || effectiveSuppressed {
+		return logger.DiagnosticPolicy{}
+	}
+	effective := r.diagnosticOwnerCap.Meet(logger.DiagnosticPolicyFromContext(ctx))
+	if inherited, ok := toolRegistryDiagnosticCapFromContext(ctx); ok {
+		effective = effective.Meet(inherited)
+	}
+	return effective
+}
+
+// withToolRegistryDiagnosticCap carries one immutable, false-dominating
+// registry/request meet into nested tool work without replacing the live
+// logger request binding. A later request revoke therefore remains visible,
+// while a nested caller cannot widen a false outer cap by swapping registries.
+func withToolRegistryDiagnosticCap(
+	ctx context.Context,
+	current logger.DiagnosticPolicy,
+) context.Context {
+	if inherited, ok := toolRegistryDiagnosticCapFromContext(ctx); ok {
+		current = inherited.Meet(current)
+	}
+	return context.WithValue(ctx, toolRegistryDiagnosticCapContextKey{}, current)
+}
+
+func toolRegistryDiagnosticCapFromContext(
+	ctx context.Context,
+) (logger.DiagnosticPolicy, bool) {
+	if ctx == nil {
+		return logger.DiagnosticPolicy{}, false
+	}
+	policy, ok := ctx.Value(toolRegistryDiagnosticCapContextKey{}).(logger.DiagnosticPolicy)
+	return policy, ok
 }
 
 func (r *ToolRegistry) Owner() (ToolOwner, bool) {
@@ -212,56 +283,62 @@ func (r *ToolRegistry) SetAllowlist(names []string) {
 }
 
 func (r *ToolRegistry) Register(tool Tool) {
-	r.registerLegacy(
-		tool,
-		true,
-		"Skipped core tool registration by agent allowlist",
-		"Tool registration overwrites existing tool",
-		"Registered core tool",
-	)
+	r.registerLegacy(tool, true)
 }
 
 // RegisterHidden saves hidden tools (visible only via TTL).
 func (r *ToolRegistry) RegisterHidden(tool Tool) {
-	r.registerLegacy(
-		tool,
-		false,
-		"Skipped hidden tool registration by agent allowlist",
-		"Hidden tool registration overwrites existing tool",
-		"Registered hidden tool",
-	)
+	r.registerLegacy(tool, false)
 }
 
-func (r *ToolRegistry) registerLegacy(
-	tool Tool,
-	core bool,
-	skippedMessage, overwriteMessage, registeredMessage string,
-) {
+func (r *ToolRegistry) registerLegacy(tool Tool, core bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			r.mu.Unlock()
+		}
+	}()
+	unlock := func() {
+		r.mu.Unlock()
+		locked = false
+	}
 	if r.closed {
+		unlock()
 		return
 	}
 	name := tool.Name()
 	if !r.toolAllowedLocked(name) {
-		logger.DebugCF(
-			"tools",
-			skippedMessage,
-			map[string]any{"name": name},
+		unlock()
+		logger.DebugSafeCF(
+			logger.ComponentTools,
+			logger.DiagnosticMessageToolRegistrationSkipped,
+			logger.NewSafeFields(
+				logger.SafeObservation(
+					logger.ObservationPrefixIdentityTool,
+					logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+				),
+				logger.SafeBool(logger.FieldCore, core),
+			),
 		)
 		return
 	}
 	if r.privateConstruction[name] != nil || r.constructionCatalog[name] != nil {
-		logger.WarnCF(
-			"tools",
-			"Tool registration collides with a private factory dependency",
-			map[string]any{"name": name},
+		unlock()
+		logger.WarnSafeCF(
+			logger.ComponentTools,
+			logger.DiagnosticMessageToolRegistrationCollision,
+			logger.NewSafeFields(
+				logger.SafeObservation(
+					logger.ObservationPrefixIdentityTool,
+					logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+				),
+				logger.SafeBool(logger.FieldCore, core),
+			),
 		)
 		return
 	}
-	if _, exists := r.tools[name]; exists {
-		logger.WarnCF("tools", overwriteMessage, map[string]any{"name": name})
-	}
+	_, overwritten := r.tools[name]
 	r.tools[name] = &ToolEntry{
 		Tool:   tool,
 		IsCore: core,
@@ -272,27 +349,58 @@ func (r *ToolRegistry) registerLegacy(
 		aware.SetMediaStore(r.mediaStore)
 	}
 	r.version.Add(1)
-	logger.DebugCF("tools", registeredMessage, map[string]any{"name": name})
+	unlock()
+
+	fields := logger.NewSafeFields(
+		logger.SafeObservation(
+			logger.ObservationPrefixIdentityTool,
+			logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+		),
+		logger.SafeBool(logger.FieldCore, core),
+	)
+	if overwritten {
+		logger.WarnSafeCF(
+			logger.ComponentTools,
+			logger.DiagnosticMessageToolRegistrationOverwritten,
+			fields,
+		)
+	}
+	logger.DebugSafeCF(
+		logger.ComponentTools,
+		logger.DiagnosticMessageToolRegistered,
+		fields,
+	)
 }
 
 // Unregister removes a tool from the registry if it is present.
 func (r *ToolRegistry) Unregister(name string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return
 	}
 
 	name = strings.TrimSpace(name)
 	if name == "" {
+		r.mu.Unlock()
 		return
 	}
 	if _, exists := r.tools[name]; !exists {
+		r.mu.Unlock()
 		return
 	}
 	delete(r.tools, name)
 	r.version.Add(1)
-	logger.DebugCF("tools", "Unregistered tool", map[string]any{"name": name})
+	r.mu.Unlock()
+
+	logger.DebugSafeCF(
+		logger.ComponentTools,
+		logger.DiagnosticMessageToolUnregistered,
+		logger.NewSafeFields(logger.SafeObservation(
+			logger.ObservationPrefixIdentityTool,
+			logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+		)),
+	)
 }
 
 // SetMediaStore injects a MediaStore into all registered tools that can
@@ -330,8 +438,8 @@ func (r *ToolRegistry) SetMediaStore(store media.MediaStore) {
 // This prevents a concurrent TickTTL from decrementing between promotions.
 func (r *ToolRegistry) PromoteTools(names []string, ttl int) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.closed {
+		r.mu.Unlock()
 		return
 	}
 	promoted := 0
@@ -346,10 +454,15 @@ func (r *ToolRegistry) PromoteTools(names []string, ttl int) {
 			}
 		}
 	}
-	logger.DebugCF(
-		"tools",
-		"PromoteTools completed",
-		map[string]any{"requested": len(names), "promoted": promoted, "ttl": ttl},
+	r.mu.Unlock()
+
+	logger.DebugSafeCF(
+		logger.ComponentTools,
+		logger.DiagnosticMessageToolPromotionCompleted,
+		logger.NewSafeFields(
+			logger.SafeInt(logger.FieldRequestedCount, len(names)),
+			logger.SafeInt(logger.FieldPromotedCount, promoted),
+		),
 	)
 }
 
@@ -532,9 +645,11 @@ func (r *ToolRegistry) ExecuteWithContext(
 	)
 }
 
-// executeWithContext keeps ordinary registry logging unchanged while allowing
-// narrow controller loops to suppress all model-authored or result-derived
-// values. The tool name and timing remain observable in that profile.
+// executeWithContext keeps functional execution unchanged while every central
+// diagnostic is projected through fixed, bounded observations. Suppression is
+// an additional false cap for raw argument previews. Direct callers retain
+// exclusive ownership of args until this synchronous call returns; model-loop
+// callers already supply a detached graph.
 func (r *ToolRegistry) executeWithContext(
 	ctx context.Context,
 	name string,
@@ -543,14 +658,19 @@ func (r *ToolRegistry) executeWithContext(
 	asyncCallback AsyncCallback,
 	suppressLogDetails bool,
 ) *ToolResult {
-	logToolExecutionStart(name, args, suppressLogDetails)
+	effectiveSuppressed := suppressLogDetails || ToolLogDetailsSuppressed(ctx)
+	r.logToolExecutionStart(ctx, name, args, effectiveSuppressed)
 
 	tool, descriptor, mediaStore, ok := r.executableEntry(name)
 	if !ok {
-		logger.ErrorCF("tool", "Tool not found",
-			map[string]any{
-				"tool": name,
-			})
+		logger.ErrorSafeCF(
+			logger.ComponentTool,
+			logger.DiagnosticMessageToolNotFound,
+			logger.NewSafeFields(logger.SafeObservation(
+				logger.ObservationPrefixIdentityTool,
+				logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+			)),
+		)
 		return ErrorResult(
 			fmt.Sprintf("tool %q not found", name),
 		).WithError(fmt.Errorf("tool not found"))
@@ -564,14 +684,24 @@ func (r *ToolRegistry) executeWithContext(
 		parameters = tool.Parameters()
 	}
 	if err := validateToolArgs(parameters, args); err != nil {
-		fields := map[string]any{"tool": name}
-		if !suppressLogDetails {
-			fields["error"] = err.Error()
-		}
-		logger.WarnCF("tool", "Tool argument validation failed", fields)
+		logger.WarnSafeCF(
+			logger.ComponentTool,
+			logger.DiagnosticMessageToolArgumentValidationFailed,
+			logger.NewSafeFields(
+				logger.SafeObservation(
+					logger.ObservationPrefixIdentityTool,
+					logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+				),
+				logger.SafeObservation(
+					logger.ObservationPrefixError,
+					logger.ObserveErrorType(logger.ErrorClassValidation, err),
+				),
+			),
+		)
 		return ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", name, err)).
 			WithError(fmt.Errorf("%w: argument validation failed: %w", workflows.ErrToolCallNotDispatched, err))
 	}
+	diagnosticCap := r.diagnosticPolicyForContext(ctx, effectiveSuppressed)
 
 	return executeResolvedToolWithContext(
 		ctx,
@@ -582,16 +712,50 @@ func (r *ToolRegistry) executeWithContext(
 		channel,
 		chatID,
 		asyncCallback,
-		suppressLogDetails,
+		diagnosticCap,
+		effectiveSuppressed,
 	)
 }
 
-func logToolExecutionStart(name string, args map[string]any, suppressLogDetails bool) {
-	startFields := map[string]any{"tool": name}
-	if !suppressLogDetails {
-		startFields["args"] = args
-	}
-	logger.InfoCF("tool", "Tool execution started", startFields)
+func (r *ToolRegistry) logToolExecutionStart(
+	ctx context.Context,
+	name string,
+	args map[string]any,
+	suppressLogDetails bool,
+) {
+	effectiveSuppressed := suppressLogDetails || ToolLogDetailsSuppressed(ctx)
+	normalizedArguments := normalizeToolArgumentsForDiagnostics(args)
+	identity := logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name)
+	argumentCount := len(args)
+	logger.InfoSafeCF(
+		logger.ComponentTool,
+		logger.DiagnosticMessageToolExecutionStarted,
+		logger.NewSafeFields(
+			logger.SafeObservation(logger.ObservationPrefixIdentityTool, identity),
+			logger.SafeObservation(
+				logger.ObservationPrefixToolArguments,
+				logger.ObserveJSONValue(
+					logger.ObservationDomainToolArguments,
+					normalizedArguments,
+				),
+			),
+			logger.SafeInt(logger.FieldArgumentCount, argumentCount),
+			logger.SafeBool(logger.FieldSuppressed, effectiveSuppressed),
+		),
+	)
+	logger.DebugSensitiveCF(
+		r.diagnosticPolicyForContext(ctx, effectiveSuppressed),
+		logger.ComponentTool,
+		logger.DiagnosticMessageToolArguments,
+		logger.NewSafeFields(
+			logger.SafeObservation(logger.ObservationPrefixIdentityTool, identity),
+			logger.SafeInt(logger.FieldArgumentCount, argumentCount),
+			logger.SafeBool(logger.FieldSuppressed, effectiveSuppressed),
+		),
+		logger.SensitivityToolArguments,
+		logger.ObservationDomainToolArguments,
+		normalizedArguments,
+	)
 }
 
 func executeResolvedToolWithContext(
@@ -602,12 +766,17 @@ func executeResolvedToolWithContext(
 	mediaStore media.MediaStore,
 	channel, chatID string,
 	asyncCallback AsyncCallback,
+	diagnosticCap logger.DiagnosticPolicy,
 	suppressLogDetails bool,
 ) *ToolResult {
+	effectiveSuppressed := suppressLogDetails || ToolLogDetailsSuppressed(ctx)
+	ctx, revokeDiagnosticPolicy := logger.NarrowDiagnosticPolicy(ctx, diagnosticCap)
+	defer revokeDiagnosticPolicy()
+	ctx = withToolRegistryDiagnosticCap(ctx, diagnosticCap)
 	// Inject channel/chatID into ctx so tools read them via ToolChannel(ctx)/ToolChatID(ctx).
 	// Always inject — tools validate what they require.
 	ctx = WithToolContext(ctx, channel, chatID)
-	if suppressLogDetails {
+	if effectiveSuppressed {
 		ctx = WithToolLogDetailsSuppressed(ctx)
 	}
 
@@ -622,13 +791,23 @@ func executeResolvedToolWithContext(
 		defer func() {
 			if re := recover(); re != nil {
 				errMsg := fmt.Sprintf("Tool '%s' crashed", name)
-				fields := map[string]any{"tool": name}
-				if !suppressLogDetails {
-					logger.RecoverPanicNoExit(re)
+				if !effectiveSuppressed {
 					errMsg = fmt.Sprintf("Tool '%s' crashed with panic: %v", name, re)
-					fields["panic"] = fmt.Sprintf("%v", re)
 				}
-				logger.ErrorCF("tool", "Tool execution panic recovered", fields)
+				logger.ErrorSafeCF(
+					logger.ComponentTool,
+					logger.DiagnosticMessageToolExecutionPanic,
+					logger.NewSafeFields(
+						logger.SafeObservation(
+							logger.ObservationPrefixIdentityTool,
+							logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+						),
+						logger.SafeObservation(
+							logger.ObservationPrefixPanic,
+							logger.ObservePanic(re),
+						),
+					),
+				)
 				result = &ToolResult{
 					ForLLM:  errMsg,
 					ForUser: errMsg,
@@ -639,10 +818,6 @@ func executeResolvedToolWithContext(
 		}()
 
 		if asyncExec, ok := tool.(AsyncExecutor); ok && asyncCallback != nil {
-			logger.DebugCF("tool", "Executing async tool via ExecuteAsync",
-				map[string]any{
-					"tool": name,
-				})
 			result = asyncExec.ExecuteAsync(ctx, args, asyncCallback)
 		} else {
 			result = tool.Execute(ctx, args)
@@ -662,30 +837,44 @@ func executeResolvedToolWithContext(
 	result = normalizeToolResult(result, name, mediaStore, channel, chatID)
 
 	duration := time.Since(start)
+	resultObservation := logger.ObserveText(logger.ObservationDomainToolResult, result.ForLLM)
+	commonFields := []logger.SafeField{
+		logger.SafeObservation(
+			logger.ObservationPrefixIdentityTool,
+			logger.ObserveIdentity(logger.ObservationDomainIdentityTool, name),
+		),
+		logger.SafeObservation(logger.ObservationPrefixToolResult, resultObservation),
+		logger.SafeInt64(logger.FieldDurationMilliseconds, duration.Milliseconds()),
+	}
 
 	// Log based on result type
 	if result.IsError {
-		fields := map[string]any{
-			"tool":     name,
-			"duration": duration.Milliseconds(),
-		}
-		if !suppressLogDetails {
-			fields["error"] = result.ForLLM
-		}
-		logger.ErrorCF("tool", "Tool execution failed", fields)
+		logger.ErrorSafeCF(
+			logger.ComponentTool,
+			logger.DiagnosticMessageToolExecutionFailed,
+			logger.NewSafeFields(append(
+				commonFields,
+				logger.SafeObservation(
+					logger.ObservationPrefixError,
+					logger.ObserveErrorType(logger.ErrorClassUnknown, result.Err),
+				),
+			)...),
+		)
 	} else if result.Async {
-		logger.InfoCF("tool", "Tool started (async)",
-			map[string]any{
-				"tool":     name,
-				"duration": duration.Milliseconds(),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentTool,
+			logger.DiagnosticMessageToolAsyncStarted,
+			logger.NewSafeFields(append(
+				commonFields,
+				logger.SafeBool(logger.FieldAsync, true),
+			)...),
+		)
 	} else {
-		logger.InfoCF("tool", "Tool execution completed",
-			map[string]any{
-				"tool":          name,
-				"duration_ms":   duration.Milliseconds(),
-				"result_length": len(result.ContentForLLM()),
-			})
+		logger.InfoSafeCF(
+			logger.ComponentTool,
+			logger.DiagnosticMessageToolExecutionCompleted,
+			logger.NewSafeFields(commonFields...),
+		)
 	}
 
 	return result
@@ -817,11 +1006,12 @@ func (r *ToolRegistry) List() []string {
 func (r *ToolRegistry) Clone() *ToolRegistry {
 	r.mu.RLock()
 	owned := r.owned
+	diagnosticPolicy := r.diagnosticOwnerCap
 	r.mu.RUnlock()
 	if owned {
 		// Owned registries carry live resource/reservation leases. Shallow
 		// cloning cannot duplicate that ownership safely, so fail closed.
-		return NewToolRegistry()
+		return NewToolRegistryWithDiagnosticPolicy(diagnosticPolicy)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -832,6 +1022,7 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 		mediaStore:          r.mediaStore,
 		mediaGen:            r.mediaGen,
 		services:            newToolServiceCache(),
+		diagnosticOwnerCap:  diagnosticPolicy,
 	}
 	clone.services.values = r.services.snapshot()
 	if r.allowlist != nil {

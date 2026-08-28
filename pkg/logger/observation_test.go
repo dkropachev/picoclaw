@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"math"
@@ -96,6 +97,29 @@ func TestObserveTextAndBytesMetadataAndTypeSeparation(t *testing.T) {
 	if ObserveBytes(ObservationDomainPrompt, nil).Digest ==
 		ObserveBytes(ObservationDomainPrompt, []byte{}).Digest {
 		t.Fatal("nil and non-nil empty bytes collided")
+	}
+}
+
+func TestScalarObservationsRejectOversizedInputBeforeScanning(t *testing.T) {
+	oversized := strings.Repeat("x", maxObservationBytes+1)
+	for name, observation := range map[string]Observation{
+		"text":     ObserveText(ObservationDomainPrompt, oversized),
+		"bytes":    ObserveBytes(ObservationDomainPrompt, []byte(oversized)),
+		"path":     ObservePath(oversized),
+		"url":      ObserveURL(oversized),
+		"identity": ObserveIdentity(ObservationDomainIdentityTool, oversized),
+	} {
+		if observation.State != observationStateUnavailable ||
+			observation.ReasonCode != reasonByteLimit || observation.Digest != "" {
+			t.Fatalf("%s oversized observation = %#v", name, observation)
+		}
+	}
+	invalidOversized := string(append(
+		bytes.Repeat([]byte{'x'}, maxObservationBytes),
+		0xff,
+	))
+	if got := ObserveText(ObservationDomainPrompt, invalidOversized); got.ReasonCode != reasonByteLimit {
+		t.Fatalf("oversized invalid UTF-8 text = %#v", got)
 	}
 }
 
@@ -527,7 +551,8 @@ func TestObservationEnumsAndReasonCodesAreClosed(t *testing.T) {
 		reasonInvalidDomain, reasonInvalidPrefix, reasonInvalidBound,
 		reasonUnsupportedType, reasonCycle, reasonDepthLimit, reasonNodeLimit,
 		reasonMemberLimit, reasonByteLimit, reasonInvalidNumber,
-		reasonNonfiniteFloat, reasonUnnamedError, reasonInternalPanic,
+		reasonNonfiniteFloat, reasonUnnamedError, reasonUnnamedPanic,
+		reasonInternalPanic,
 	} {
 		if !validUnavailableReason(reason) {
 			t.Fatalf("reason %q invalid", reason)
@@ -655,21 +680,25 @@ func TestObservationLegacyWireEnumsFrozen(t *testing.T) {
 func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 	if ObservationDomainHookMessage != 41 ||
 		ObservationDomainIdentityContextManager != 47 ||
-		len(observationDomainLabels) != 48 {
+		ObservationDomainIdentityHookStage != 48 ||
+		ObservationDomainPanicType != 51 ||
+		len(observationDomainLabels) != 52 {
 		t.Fatalf(
 			"appended domain wire moved: first=%d last=%d labels=%d",
 			ObservationDomainHookMessage,
-			ObservationDomainIdentityContextManager,
+			ObservationDomainPanicType,
 			len(observationDomainLabels),
 		)
 	}
 	if ObservationPrefixHookMessage != 48 ||
 		ObservationPrefixIdentityContextManager != 54 ||
-		len(observationPrefixLabels) != 55 {
+		ObservationPrefixIdentityHookStage != 55 ||
+		ObservationPrefixPanic != 58 ||
+		len(observationPrefixLabels) != 59 {
 		t.Fatalf(
 			"appended prefix wire moved: first=%d last=%d labels=%d",
 			ObservationPrefixHookMessage,
-			ObservationPrefixIdentityContextManager,
+			ObservationPrefixPanic,
 			len(observationPrefixLabels),
 		)
 	}
@@ -689,6 +718,24 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 			ObservationDomainIdentityContextManager,
 			ObservationPrefixIdentityContextManager,
 			"identity_context_manager",
+			true,
+		},
+		{
+			ObservationDomainIdentityHookStage,
+			ObservationPrefixIdentityHookStage,
+			"identity_hook_stage",
+			true,
+		},
+		{
+			ObservationDomainIdentityHookAction,
+			ObservationPrefixIdentityHookAction,
+			"identity_hook_action",
+			true,
+		},
+		{
+			ObservationDomainIdentityRuntimeEventKind,
+			ObservationPrefixIdentityRuntimeEventKind,
+			"identity_runtime_event_kind",
 			true,
 		},
 	}
@@ -725,13 +772,16 @@ func TestObservationAppendedDomainAndPrefixMapping(t *testing.T) {
 		digests[observation.Digest] = struct{}{}
 	}
 	if ObservationDomainHookMessage <= ObservationDomainErrorText ||
-		ObservationPrefixHookMessage <= ObservationPrefixPrivateKey {
+		ObservationPrefixHookMessage <= ObservationPrefixPrivateKey ||
+		ObservationDomainIdentityHookStage <= ObservationDomainIdentityContextManager ||
+		ObservationPrefixIdentityHookStage <= ObservationPrefixIdentityContextManager {
 		t.Fatal("appended enums were not appended")
 	}
-	if validDomain(ObservationDomainIdentityContextManager + 1) {
+	if !validDomain(ObservationDomainPanicType) ||
+		validDomain(ObservationDomainPanicType+1) {
 		t.Fatal("domain after append-only tail accepted")
 	}
-	if _, ok := observationPrefixLabel(ObservationPrefixIdentityContextManager + 1); ok {
+	if _, ok := observationPrefixLabel(ObservationPrefixPanic + 1); ok {
 		t.Fatal("prefix after append-only tail accepted")
 	}
 }

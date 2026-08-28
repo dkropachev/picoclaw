@@ -15,7 +15,6 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/utils"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -36,9 +35,10 @@ type ToolLoopConfig struct {
 	// read-oriented callers; mutation-capable controllers should enable this so
 	// one response cannot race two writes against the same state.
 	SequentialToolCalls bool
-	// SuppressToolArguments keeps model-authored arguments and result-derived
-	// error details out of loop, registry, and suppression-aware tool logs. Tool
-	// names, counts, and timings remain observable.
+	// SuppressToolArguments keeps raw model-authored arguments and result-derived
+	// error details out of loop, registry, and suppression-aware tool logs.
+	// Bounded observations, names, counts, and timings remain observable. An
+	// inherited ToolLogDetailsSuppressed context marker is false-dominating too.
 	SuppressToolArguments bool
 
 	// MediaResolver resolves media:// refs in messages before each LLM call.
@@ -64,6 +64,10 @@ func RunToolLoop(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	effectiveSuppressed := config.SuppressToolArguments || ToolLogDetailsSuppressed(ctx)
+	if effectiveSuppressed {
+		ctx = WithToolLogDetailsSuppressed(ctx)
+	}
 	iteration := 0
 	var finalContent string
 
@@ -73,11 +77,14 @@ func RunToolLoop(
 		}
 		iteration++
 
-		logger.DebugCF("toolloop", "LLM iteration",
-			map[string]any{
-				"iteration": iteration,
-				"max":       config.MaxIterations,
-			})
+		logger.DebugSafeCF(
+			logger.ComponentToolLoop,
+			logger.DiagnosticMessageLLMIteration,
+			logger.NewSafeFields(
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldMaxIterations, config.MaxIterations),
+			),
+		)
 
 		// 1. Build tool definitions
 		var providerToolDefs []providers.ToolDefinition
@@ -125,11 +132,17 @@ func RunToolLoop(
 		}
 		response, err := config.Provider.Chat(ctx, callMessages, providerDefinitions, config.Model, llmOpts)
 		if err != nil {
-			fields := map[string]any{"iteration": iteration}
-			if !config.SuppressToolArguments {
-				fields["error"] = err.Error()
-			}
-			logger.ErrorCF("toolloop", "LLM call failed", fields)
+			logger.ErrorSafeCF(
+				logger.ComponentToolLoop,
+				logger.DiagnosticMessageLLMCallFailed,
+				logger.NewSafeFields(
+					logger.SafeInt(logger.FieldIteration, iteration),
+					logger.SafeObservation(
+						logger.ObservationPrefixError,
+						logger.ObserveErrorType(logger.ErrorClassProvider, err),
+					),
+				),
+			)
 			return nil, fmt.Errorf("LLM call failed: %w", err)
 		}
 		if err := ctx.Err(); err != nil {
@@ -142,11 +155,14 @@ func RunToolLoop(
 		// 4. If no tool calls, we're done
 		if len(response.ToolCalls) == 0 {
 			finalContent = response.Content
-			logger.InfoCF("toolloop", "LLM response without tool calls (direct answer)",
-				map[string]any{
-					"iteration":     iteration,
-					"content_chars": len(finalContent),
-				})
+			logger.InfoSafeCF(
+				logger.ComponentToolLoop,
+				logger.DiagnosticMessageLLMDirectResponse,
+				logger.NewSafeFields(
+					logger.SafeInt(logger.FieldIteration, iteration),
+					logger.SafeInt64(logger.FieldContentBytes, int64(len(finalContent))),
+				),
+			)
 			break
 		}
 
@@ -168,16 +184,22 @@ func RunToolLoop(
 		}
 
 		// 5. Log tool calls
-		toolNames := make([]string, 0, len(normalizedToolCalls))
+		toolNames := make([]any, 0, len(normalizedToolCalls))
 		for _, tc := range normalizedToolCalls {
 			toolNames = append(toolNames, tc.Name)
 		}
-		logger.InfoCF("toolloop", "LLM requested tool calls",
-			map[string]any{
-				"tools":     toolNames,
-				"count":     len(normalizedToolCalls),
-				"iteration": iteration,
-			})
+		logger.InfoSafeCF(
+			logger.ComponentToolLoop,
+			logger.DiagnosticMessageLLMRequestedToolCalls,
+			logger.NewSafeFields(
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldToolCallCount, len(normalizedToolCalls)),
+				logger.SafeObservation(
+					logger.ObservationPrefixIdentityTool,
+					logger.ObserveJSONValue(logger.ObservationDomainIdentityTool, toolNames),
+				),
+			),
+		)
 
 		// 6. Build assistant message with tool calls
 		assistantMsg := providers.Message{
@@ -306,21 +328,53 @@ func RunToolLoop(
 				return
 			}
 
-			if config.SuppressToolArguments {
-				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s", tc.Name),
-					map[string]any{
-						"tool":      tc.Name,
-						"iteration": iteration,
-					})
-			} else {
-				argsJSON, _ := json.Marshal(tc.Arguments)
-				argsPreview := utils.Truncate(string(argsJSON), 200)
-				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
-					map[string]any{
-						"tool":      tc.Name,
-						"iteration": iteration,
-					})
-			}
+			diagnosticArguments := normalizeToolArgumentsForDiagnostics(tc.Arguments)
+			callFields := logger.NewSafeFields(
+				logger.SafeInt(logger.FieldIteration, iteration),
+				logger.SafeInt(logger.FieldArgumentCount, len(tc.Arguments)),
+				logger.SafeBool(logger.FieldSuppressed, effectiveSuppressed),
+				logger.SafeObservation(
+					logger.ObservationPrefixIdentityTool,
+					logger.ObserveIdentity(logger.ObservationDomainIdentityTool, tc.Name),
+				),
+				logger.SafeObservation(
+					logger.ObservationPrefixIdentityToolCall,
+					logger.ObserveIdentity(logger.ObservationDomainIdentityToolCall, tc.ID),
+				),
+				logger.SafeObservation(
+					logger.ObservationPrefixToolArguments,
+					logger.ObserveJSONValue(
+						logger.ObservationDomainToolArguments,
+						diagnosticArguments,
+					),
+				),
+			)
+			logger.InfoSafeCF(
+				logger.ComponentToolLoop,
+				logger.DiagnosticMessageToolCall,
+				callFields,
+			)
+			logger.DebugSensitiveCF(
+				config.Tools.diagnosticPolicyForContext(ctx, effectiveSuppressed),
+				logger.ComponentToolLoop,
+				logger.DiagnosticMessageToolArguments,
+				logger.NewSafeFields(
+					logger.SafeInt(logger.FieldIteration, iteration),
+					logger.SafeInt(logger.FieldArgumentCount, len(tc.Arguments)),
+					logger.SafeBool(logger.FieldSuppressed, effectiveSuppressed),
+					logger.SafeObservation(
+						logger.ObservationPrefixIdentityTool,
+						logger.ObserveIdentity(logger.ObservationDomainIdentityTool, tc.Name),
+					),
+					logger.SafeObservation(
+						logger.ObservationPrefixIdentityToolCall,
+						logger.ObserveIdentity(logger.ObservationDomainIdentityToolCall, tc.ID),
+					),
+				),
+				logger.SensitivityToolArguments,
+				logger.ObservationDomainToolArguments,
+				diagnosticArguments,
+			)
 
 			if results[i].claim == nil {
 				claim, claimErr := config.Tools.ClaimPrepared(ctx, results[i].invocation)
@@ -337,7 +391,7 @@ func RunToolLoop(
 				channel,
 				chatID,
 				nil,
-				config.SuppressToolArguments,
+				effectiveSuppressed,
 			)
 			if dispatchErr != nil {
 				results[i].err = dispatchErr

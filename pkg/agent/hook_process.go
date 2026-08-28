@@ -103,6 +103,20 @@ type processHookAfterToolResponse struct {
 	Result *ToolResultHookResponse `json:"result,omitempty"`
 }
 
+func safeHookMessageField(message []byte) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixHookMessage,
+		logger.ObserveBytes(logger.ObservationDomainHookMessage, message),
+	)
+}
+
+func safeProcessStderrField(stderr []byte) logger.SafeField {
+	return logger.SafeObservation(
+		logger.ObservationPrefixProcessStderr,
+		logger.ObserveBytes(logger.ObservationDomainProcessStderr, stderr),
+	)
+}
+
 // NewProcessHook starts a process hook with a fresh disabled, restricted
 // compatibility policy. It never consults the deprecated global policy.
 func NewProcessHook(ctx context.Context, name string, opts ProcessHookOptions) (*ProcessHook, error) {
@@ -433,10 +447,15 @@ func (ph *ProcessHook) readLoop(stdout io.Reader) {
 	for scanner.Scan() {
 		var msg processHookRPCMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-			logger.WarnCF("hooks", "Failed to decode process hook message", map[string]any{
-				"hook":  ph.name,
-				"error": err.Error(),
-			})
+			logger.WarnSafeCF(
+				logger.ComponentHooks,
+				logger.DiagnosticMessageHookDecodeFailed,
+				logger.NewSafeFields(
+					safeHookIdentityField(ph.name),
+					safeHookMessageField(scanner.Bytes()),
+					safeHookErrorField(logger.ErrorClassValidation, err),
+				),
+			)
 			continue
 		}
 		if msg.ID == 0 {
@@ -459,10 +478,14 @@ func (ph *ProcessHook) readStderr(stderr io.Reader) {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 16*1024), processHookReadBufferSize)
 	for scanner.Scan() {
-		logger.WarnCF("hooks", "Process hook stderr", map[string]any{
-			"hook":   ph.name,
-			"stderr": scanner.Text(),
-		})
+		logger.WarnSafeCF(
+			logger.ComponentHooks,
+			logger.DiagnosticMessageProcessHookStderr,
+			logger.NewSafeFields(
+				safeHookIdentityField(ph.name),
+				safeProcessStderrField(scanner.Bytes()),
+			),
+		)
 	}
 }
 

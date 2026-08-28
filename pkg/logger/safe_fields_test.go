@@ -37,16 +37,17 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 	}
 
 	if DiagnosticMessageEvent != 1 || DiagnosticMessageRuntimeEvent != 21 ||
-		len(diagnosticMessageLabels) != 22 {
+		DiagnosticMessageToolCall != 22 || DiagnosticMessageHookCloseFailed != 54 ||
+		len(diagnosticMessageLabels) != 55 {
 		t.Fatalf(
 			"message wire moved: first=%d last=%d labels=%d",
 			DiagnosticMessageEvent,
-			DiagnosticMessageRuntimeEvent,
+			DiagnosticMessageHookCloseFailed,
 			len(diagnosticMessageLabels),
 		)
 	}
 	seenMessages := make(map[string]DiagnosticMessageID)
-	for message := DiagnosticMessageEvent; message <= DiagnosticMessageRuntimeEvent; message++ {
+	for message := DiagnosticMessageEvent; message <= DiagnosticMessageHookCloseFailed; message++ {
 		label, ok := diagnosticMessageLabel(message)
 		if !ok || label == "" {
 			t.Fatalf("message %d invalid", message)
@@ -59,31 +60,33 @@ func TestSafeLoggerClosedEnumsAreExhaustive(t *testing.T) {
 	if _, ok := diagnosticMessageLabel(0); ok {
 		t.Fatal("zero message accepted")
 	}
-	if _, ok := diagnosticMessageLabel(DiagnosticMessageRuntimeEvent + 1); ok {
+	if _, ok := diagnosticMessageLabel(DiagnosticMessageHookCloseFailed + 1); ok {
 		t.Fatal("message after append-only tail accepted")
 	}
 }
 
 func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 	if FieldIteration != 1 || FieldDurationMilliseconds != 29 ||
-		FieldAsync != 42 || FieldState != 55 || FieldReason != 59 {
+		FieldAsync != 42 || FieldState != 55 || FieldReason != 59 ||
+		FieldRequestedCount != 60 || FieldSource != 63 {
 		t.Fatalf(
 			"field wire moved: first=%d int64=%d bool=%d enum=%d last=%d",
 			FieldIteration,
 			FieldDurationMilliseconds,
 			FieldAsync,
 			FieldState,
-			FieldReason,
+			FieldSource,
 		)
 	}
-	if SafeEnumPending != 1 || SafeEnumStopped != 21 || len(safeEnumLabels) != 22 {
+	if SafeEnumPending != 1 || SafeEnumStopped != 21 ||
+		SafeEnumInProcess != 22 || SafeEnumUnknown != 24 || len(safeEnumLabels) != 25 {
 		t.Fatalf(
 			"safe enum wire moved: first=%d last=%d labels=%d",
-			SafeEnumPending, SafeEnumStopped, len(safeEnumLabels),
+			SafeEnumPending, SafeEnumUnknown, len(safeEnumLabels),
 		)
 	}
 	seenLabels := make(map[string]FieldKey)
-	for key := FieldIteration; key <= FieldReason; key++ {
+	for key := FieldIteration; key <= FieldSource; key++ {
 		label, kind := safeFieldSpec(key)
 		if label == "" || kind == 0 {
 			t.Fatalf("field key %d missing spec", key)
@@ -113,14 +116,14 @@ func TestSafeFieldKeyKindsAndEnumFamiliesAreExhaustive(t *testing.T) {
 	if label, kind := safeFieldSpec(0); label != "" || kind != 0 {
 		t.Fatalf("zero key spec = %q, %d", label, kind)
 	}
-	if label, kind := safeFieldSpec(FieldReason + 1); label != "" || kind != 0 {
+	if label, kind := safeFieldSpec(FieldSource + 1); label != "" || kind != 0 {
 		t.Fatalf("key after append-only tail spec = %q, %d", label, kind)
 	}
 
 	for _, key := range []FieldKey{
-		FieldState, FieldAction, FieldOutcome, FieldRole, FieldReason,
+		FieldState, FieldAction, FieldOutcome, FieldRole, FieldReason, FieldSource,
 	} {
-		for value := SafeEnumPending; value <= SafeEnumStopped; value++ {
+		for value := SafeEnumPending; value <= SafeEnumUnknown; value++ {
 			if got := SafeEnum(key, value).valid; got != safeEnumAllowed(key, value) {
 				t.Fatalf("key %d enum %d validity = %v", key, value, got)
 			}
@@ -255,7 +258,7 @@ func TestSafeFieldsTypedProjectionAndDefensiveValidation(t *testing.T) {
 			t.Fatalf("forged safe field %d accepted: %#v", index, field)
 		}
 	}
-	if safeEnumAllowed(FieldRole, 0) || safeEnumAllowed(FieldRole, SafeEnumStopped+1) {
+	if safeEnumAllowed(FieldRole, 0) || safeEnumAllowed(FieldRole, SafeEnumUnknown+1) {
 		t.Fatal("out-of-range safe enum accepted")
 	}
 
@@ -348,7 +351,7 @@ func TestLegacyFatalConvenienceVariantsExit(t *testing.T) {
 
 func firstAllowedSafeEnum(t *testing.T, key FieldKey) SafeEnumValue {
 	t.Helper()
-	for value := SafeEnumPending; value <= SafeEnumStopped; value++ {
+	for value := SafeEnumPending; value <= SafeEnumUnknown; value++ {
 		if safeEnumAllowed(key, value) {
 			return value
 		}

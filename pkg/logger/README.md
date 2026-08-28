@@ -14,7 +14,10 @@ one and zero bytes while absence uses zero for both.
 Arbitrary `error` values are not rendered or unwrapped. `ObserveErrorType`
 records only a trusted fixed class and concrete named type identity. Callers
 that already own a bounded materialized error string may observe it through the
-separate non-previewable error-text domain.
+separate non-previewable error-text domain. `ObservePanic` likewise records
+only method-free concrete type identity and never formats a recovered value or
+captures a stack. Scalar text, byte, path, URL, and identity inputs over 1 MiB
+fail before content scanning or hashing.
 
 Logger file replacement uses per-file emission leases. A retired file remains
 open for records already admitted, then closes exactly once after the final
@@ -28,7 +31,13 @@ origin-aware rebindings are explicitly revoked with their generation lease;
 context cancellation alone does not revoke them. Revocation disables ordinary
 lookup but intentionally retains the captured origin cap for a trusted later
 rebind. Rebinding always meets origin, current, and parent policies, so a false
-capability cannot be widened.
+capability cannot be widened. `NarrowDiagnosticPolicy` is the synchronous form:
+it meets the current live parent and supplied cap, preserves live ancestor
+revocation through nested root binds, and must itself be revoked on return.
+Lineage is flattened to at most 64 immutable bindings; missing, inactive, or
+over-bound lineage fails closed. Rebind retains the established semantics for
+ordinary snapshot bindings but cannot revive an inactive live-linked narrow
+origin or parent.
 
 Safe diagnostic records use fixed component/message IDs and immutable typed
 `SafeFields`; arbitrary keys, strings, errors, maps, and interfaces are not
