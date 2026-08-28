@@ -760,6 +760,7 @@ func TestRepositoryReviewFinishSnapshotsUnmappedCampaign(t *testing.T) {
 	controller.finishAutomationRun(
 		automation.ID, automation.ActiveRunID,
 		&workflows.RunResult{Status: workflows.RunStatusFailed}, errors.New("run failed"), false,
+		nil,
 	)
 	updated, found, err := store.Get(state.Repository)
 	if err != nil || !found || len(updated.MappingJobs) == 0 ||
