@@ -23,6 +23,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+type closeableRepositoryReviewProfileRunner struct {
+	*repositoryReviewRecoveryProfileRunner
+	closed int
+}
+
+func (runner *closeableRepositoryReviewProfileRunner) Close() error {
+	runner.closed++
+	return nil
+}
+
 func TestRepositoryReviewCoverageDetailAndDraftUpdateHandlers(t *testing.T) {
 	handler, mux, workspace := newRepositoryReviewAutomationTestHandler(t)
 	t.Cleanup(handler.Shutdown)
@@ -3229,6 +3239,257 @@ func TestRepositoryReviewShouldRecoverLegacyCampaignOnlyOnResume(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewCampaignRecoveryAdmissionBoundaries(t *testing.T) {
+	handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+	t.Cleanup(handler.Shutdown)
+	controller := handler.repositoryReviewControllerInstance()
+	commit := strings.Repeat("a", 40)
+	controller.resolveCommit = func(
+		context.Context,
+		*config.Config,
+		repoaudit.RepositoryReviewAutomation,
+		string,
+	) (string, error) {
+		return commit, nil
+	}
+	store, err := handler.repositoryReviewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := testRepositoryReviewAutomation()
+	input.Status = repoaudit.RepositoryReviewAutomationFailed
+	input.PauseReason = repoaudit.RepositoryReviewPauseRunFailed
+	input.ResolvedCommitSHA = commit
+	input.RunIDs = []string{"wr_legacy_boundary"}
+	input.StartedAt = time.Now().Add(-time.Hour)
+	automation, err := store.CreateAutomation(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controller.recoverCampaign = nil
+	if _, startErr := controller.startAutomation(
+		t.Context(), automation.ID, automation.Version, false, "resume",
+	); startErr == nil || !strings.Contains(startErr.Error(), "recovery is unavailable") {
+		t.Fatalf("missing recovery adapter error = %v", startErr)
+	}
+	automation, found, err := store.GetAutomation(t.Context(), automation.ID)
+	if err != nil || !found {
+		t.Fatalf("reload automation found=%v err=%v", found, err)
+	}
+
+	previousRunners := newWorkflowRuntimeRunners
+	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
+	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+		return workflowRuntimeRunners{Agents: fakeWorkflowRuntimeRunner{}}
+	}
+	controller.recoverCampaign = controller.recoverLegacyRepositoryReviewCampaign
+	if _, startErr := controller.startAutomation(
+		t.Context(), automation.ID, automation.Version, false, "resume",
+	); startErr == nil || !strings.Contains(startErr.Error(), "profile-aware runtime") {
+		t.Fatalf("non-profile recovery runtime error = %v", startErr)
+	}
+
+	cfg, err := config.LoadConfig(handler.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeable := &closeableRepositoryReviewProfileRunner{
+		repositoryReviewRecoveryProfileRunner: &repositoryReviewRecoveryProfileRunner{
+			profile: workflows.RepositoryReviewModelProfile{
+				Revision: "sha256:profile", ReviewerModels: []string{"cheap"},
+				MaxContentBytes: 65536,
+			},
+		},
+	}
+	newWorkflowRuntimeRunners = func(string) workflowRuntimeRunners {
+		return workflowRuntimeRunners{Agents: closeable}
+	}
+	profile, err := resolveRepositoryReviewCampaignProfile(
+		t.Context(), handler.configPath, cfg, automation,
+	)
+	if err != nil || profile.Revision != "sha256:profile" || closeable.closed != 1 {
+		t.Fatalf("closeable profile=%#v closed=%d err=%v", profile, closeable.closed, err)
+	}
+	resetRepositoryReviewCampaignProgress(nil)
+}
+
+func TestRepositoryReviewCampaignAdmissionReadsLedgerAndFencesFinalCAS(t *testing.T) {
+	t.Run("ledger read failure", func(t *testing.T) {
+		handler, _, workspace := newRepositoryReviewAutomationTestHandler(t)
+		t.Cleanup(handler.Shutdown)
+		store, err := handler.repositoryReviewStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		commit := strings.Repeat("b", 40)
+		input := testRepositoryReviewAutomation()
+		if _, beginErr := store.BeginCampaign(t.Context(), repoaudit.BeginCampaignRequest{
+			Repository: input.Repository, CampaignID: repoaudit.NewRepositoryReviewCampaignID(),
+			CommitSHA: commit, ExpectedReviewVersion: 0, Exact: true,
+		}); beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		paths, err := filepath.Glob(filepath.Join(workspace, "repository_reviews", "repo_*.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		statePath := ""
+		for _, candidate := range paths {
+			if !strings.HasSuffix(candidate, ".summary.json") {
+				statePath = candidate
+				break
+			}
+		}
+		if statePath == "" {
+			t.Fatal("repository state path was not created")
+		}
+		if writeErr := os.WriteFile(statePath, []byte("{"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		automation, err := store.CreateAutomation(t.Context(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := handler.repositoryReviewControllerInstance()
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return commit, nil
+		}
+		if _, startErr := controller.startAutomation(
+			t.Context(), automation.ID, automation.Version, false, "start",
+		); startErr == nil {
+			t.Fatal("corrupt repository ledger was accepted")
+		}
+	})
+
+	t.Run("final admission mismatch", func(t *testing.T) {
+		handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+		t.Cleanup(handler.Shutdown)
+		store, err := handler.repositoryReviewStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := handler.repositoryReviewControllerInstance()
+		commit := strings.Repeat("d", 40)
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return commit, nil
+		}
+		calls := 0
+		controller.update = func(
+			ctx context.Context,
+			candidateStore repoaudit.Store,
+			id string,
+			expectedVersion int64,
+			mutate func(*repoaudit.RepositoryReviewAutomation) error,
+		) (repoaudit.RepositoryReviewAutomation, error) {
+			calls++
+			if calls != 3 {
+				return updateRepositoryReviewAutomation(
+					ctx, candidateStore, id, expectedVersion, mutate,
+				)
+			}
+			candidate, found, getErr := candidateStore.GetAutomation(ctx, id)
+			if getErr != nil || !found {
+				return repoaudit.RepositoryReviewAutomation{}, getErr
+			}
+			candidate.CampaignID = repoaudit.NewRepositoryReviewCampaignID()
+			return repoaudit.RepositoryReviewAutomation{}, mutate(&candidate)
+		}
+		if _, startErr := controller.startAutomation(
+			t.Context(), automation.ID, automation.Version, false, "start",
+		); !errors.Is(startErr, repoaudit.ErrConflict) {
+			t.Fatalf("final admission mismatch error = %v", startErr)
+		}
+	})
+
+	t.Run("authorization failure preserves newer campaign", func(t *testing.T) {
+		handler, _, _ := newRepositoryReviewAutomationTestHandler(t)
+		t.Cleanup(handler.Shutdown)
+		store, err := handler.repositoryReviewStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		automation, err := store.CreateAutomation(t.Context(), testRepositoryReviewAutomation())
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller := handler.repositoryReviewControllerInstance()
+		commit := strings.Repeat("f", 40)
+		controller.resolveCommit = func(
+			context.Context,
+			*config.Config,
+			repoaudit.RepositoryReviewAutomation,
+			string,
+		) (string, error) {
+			return commit, nil
+		}
+		calls := 0
+		var newerCampaignID string
+		controller.update = func(
+			ctx context.Context,
+			candidateStore repoaudit.Store,
+			id string,
+			expectedVersion int64,
+			mutate func(*repoaudit.RepositoryReviewAutomation) error,
+		) (repoaudit.RepositoryReviewAutomation, error) {
+			calls++
+			updated, updateErr := updateRepositoryReviewAutomation(
+				ctx, candidateStore, id, expectedVersion, mutate,
+			)
+			if updateErr != nil || calls != 2 {
+				return updated, updateErr
+			}
+			identity := repoaudit.CanonicalRepositoryIdentity(updated.Repository)
+			ledger, _, getErr := candidateStore.Get(identity)
+			if getErr != nil {
+				return repoaudit.RepositoryReviewAutomation{}, getErr
+			}
+			if _, beginErr := candidateStore.BeginCampaign(ctx, repoaudit.BeginCampaignRequest{
+				Repository: identity, CampaignID: updated.CampaignID,
+				CommitSHA: strings.Repeat("e", 40), ExpectedReviewVersion: ledger.ReviewVersion,
+				Exact: true,
+			}); beginErr != nil {
+				return repoaudit.RepositoryReviewAutomation{}, beginErr
+			}
+			newerCampaignID = repoaudit.NewRepositoryReviewCampaignID()
+			if _, replaceErr := candidateStore.UpdateAutomation(
+				ctx, id, updated.Version,
+				func(candidate *repoaudit.RepositoryReviewAutomation) error {
+					candidate.CampaignID = newerCampaignID
+					return nil
+				},
+			); replaceErr != nil {
+				return repoaudit.RepositoryReviewAutomation{}, replaceErr
+			}
+			return updated, nil
+		}
+		if _, startErr := controller.startAutomation(
+			t.Context(), automation.ID, automation.Version, false, "start",
+		); !errors.Is(startErr, repoaudit.ErrConflict) {
+			t.Fatalf("campaign authorization error = %v", startErr)
+		}
+		current, found, err := store.GetAutomation(t.Context(), automation.ID)
+		if err != nil || !found || current.CampaignID != newerCampaignID ||
+			current.Status == repoaudit.RepositoryReviewAutomationFailed {
+			t.Fatalf("newer campaign=%#v found=%v err=%v", current, found, err)
+		}
+	})
+}
+
 func TestApplyRepositoryReviewOutcomeUsesExactCampaignMetrics(t *testing.T) {
 	automation := repoaudit.RepositoryReviewAutomation{Progress: repoaudit.RepositoryReviewProgress{
 		ReviewedFiles: 9, RemainingFiles: 9, UnsupportedFiles: 9,
@@ -4077,6 +4338,13 @@ func TestRepositoryReviewCoverageOutcomeSelectionEdges(t *testing.T) {
 	if !outcome.found || outcome.unsupportedFiles != 1 || outcome.findings != 1 ||
 		outcome.modelFindings["other-model"] != 0 {
 		t.Fatalf("selected outcome=%#v state=%#v", outcome, recorded.State)
+	}
+	completeRepositoryReviewAPIMappingJobs(t, workspace, recorded.State)
+	mapped := loadRepositoryReviewOutcome(store, repoaudit.RepositoryReviewAutomation{
+		Repository: seed.Repository, RunIDs: []string{"edge-run"},
+	})
+	if mapped.findingAggregates != 1 || mapped.pendingFindingMappings != 0 {
+		t.Fatalf("mapped outcome=%#v", mapped)
 	}
 
 	automation := repoaudit.RepositoryReviewAutomation{

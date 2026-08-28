@@ -2492,12 +2492,9 @@ func (e *Executor) bindRepositoryReviewModelProfile(
 	profile["account_ref"] = resolved.AccountRef
 	profile["effective_models"] = append([]string(nil), resolved.ReviewerModels...)
 	profile["include_default_reviewer"] = resolved.IncludeDefaultReviewer
-	requestedMaxContent64, boundErr := RepositoryBugFinderEffectiveMaxContentBytes(
+	requestedMaxContent64, _ := RepositoryBugFinderEffectiveMaxContentBytes(
 		nativeInt64Any(profile, "max_content_bytes"), resolved.MaxContentBytes,
 	)
-	if boundErr != nil {
-		return nil, boundErr
-	}
 	requestedMaxContent := int(requestedMaxContent64)
 	profile["max_content_bytes"] = requestedMaxContent
 	bound["profile"] = profile

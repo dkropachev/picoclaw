@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"slices"
 	"strings"
 )
@@ -168,18 +167,12 @@ func nativeRepositoryBugFinderProfileHash(value any) (string, error) {
 	}
 	profile["models"] = strings.Join(models, ",")
 	profile["effective_models"] = effectiveModels
-	data, err = json.Marshal(profile)
-	if err != nil {
-		return "", err
-	}
+	data, _ = json.Marshal(profile)
 	var input RepositoryBugFinderProfileHashInput
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil {
 		return "", err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return "", errors.New("invalid repository bug finder profile hash input")
 	}
 	if input.Schema != RepositoryBugFinderProfileSchema ||
 		input.PromptRevision != RepositoryBugFinderPromptRevision {
