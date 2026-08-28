@@ -393,6 +393,10 @@ interfaces owned by their existing feature specifications.
    is admitted only for the built-in workflow, and native code derives the
    immutable required-assignment denominator from four trusted task assignments
    multiplied by required resolved reviewers; model output cannot choose it.
+   The immutable profile hash binds requested aliases, resolved model-graph
+   revision, effective reviewer cohort, default-chain classification, effective
+   account, and the resolver-clamped content bound, so routing drift conflicts
+   instead of reusing incompatible checkpoints.
 7. When a worker dequeues one managed child, the controller serializes only the
    admission decision, adds that child's projected prompt/output tokens and
    known cost to current in-flight reservations, refreshes referenced limit

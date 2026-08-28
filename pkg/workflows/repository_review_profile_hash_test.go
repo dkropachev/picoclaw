@@ -199,6 +199,40 @@ func TestRepositoryBugFinderProfileHashRejectsSchemaAndFieldDrift(t *testing.T) 
 	}
 }
 
+func TestRepositoryBugFinderProfileHashChangesWithResolvedModelGraphIdentity(t *testing.T) {
+	base := NewRepositoryBugFinderProfileHashInput(
+		"account", "all", "Find bugs.", `{}`, strings.Repeat("a", 64), "review-alias",
+		"sha256:graph-a", []string{"provider/model-a", "provider/model-b"}, false, 524288,
+	)
+	want, err := RepositoryBugFinderProfileHash(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*RepositoryBugFinderProfileHashInput){
+		"requested aliases": func(input *RepositoryBugFinderProfileHashInput) {
+			input.Models = "another-alias"
+		},
+		"model graph revision": func(input *RepositoryBugFinderProfileHashInput) {
+			input.ModelGraphRevision = "sha256:graph-b"
+		},
+		"effective reviewer cohort": func(input *RepositoryBugFinderProfileHashInput) {
+			input.EffectiveModels = []string{"provider/model-a", "provider/model-c"}
+		},
+		"default reviewer classification": func(input *RepositoryBugFinderProfileHashInput) {
+			input.IncludeDefaultReviewer = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			got, hashErr := RepositoryBugFinderProfileHash(candidate)
+			if hashErr != nil || got == want {
+				t.Fatalf("drifted hash=%q want different from %q err=%v", got, want, hashErr)
+			}
+		})
+	}
+}
+
 func TestRepositoryBugFinderRequiredAssignmentsMatchesReviewerRouting(t *testing.T) {
 	if got, err := RepositoryBugFinderRequiredAssignments(
 		[]string{"review-a", "review-b"}, false,

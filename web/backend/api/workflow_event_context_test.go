@@ -62,6 +62,65 @@ func TestRepositoryReviewWorkflowEventEndpointScrubsCampaignAuthority(t *testing
 	}
 }
 
+func TestRepositoryReviewWorkflowRunProjectionDeeplyScrubsCampaignAuthority(t *testing.T) {
+	const canary = "rrc_api_projection_canary"
+	if scrubRepositoryReviewCampaignRun(nil) != nil ||
+		scrubRepositoryReviewCampaignMap(nil) != nil {
+		t.Fatal("nil campaign projections were materialized")
+	}
+	ordinary := &workflows.Run{
+		WorkflowRef: "workflows/ordinary.yml",
+		Inputs:      map[string]any{"campaign_id": canary},
+	}
+	if projected := scrubRepositoryReviewCampaignRun(ordinary); projected != ordinary ||
+		projected.Inputs["campaign_id"] != canary {
+		t.Fatalf("ordinary workflow projection=%#v", projected)
+	}
+
+	run := &workflows.Run{
+		WorkflowRef: workflows.RepositoryBugFinderWorkflowRef,
+		Inputs: map[string]any{
+			"campaign_id": canary,
+			"nested": map[string]any{
+				"campaignId": canary,
+				"safe":       "input",
+			},
+		},
+		Outputs: map[string]any{
+			"items": []any{
+				map[string]any{"campaign_id": canary, "safe": "slice"},
+				"scalar",
+			},
+			"maps": []map[string]any{{"campaignId": canary, "safe": "typed-slice"}},
+		},
+		Jobs: map[string]workflows.JobExecution{
+			"review": {Outputs: map[string]any{"campaign_id": canary, "safe": "job"}},
+		},
+		Steps: map[string]workflows.StepExecution{
+			"record": {Outputs: map[string]any{"campaignId": canary, "safe": "step"}},
+		},
+	}
+	projected := scrubRepositoryReviewCampaignRun(run)
+	if projected == run || projected.Inputs["campaign_id"] != nil ||
+		projected.Inputs["nested"].(map[string]any)["campaignId"] != nil ||
+		projected.Inputs["nested"].(map[string]any)["safe"] != "input" ||
+		projected.Outputs["items"].([]any)[0].(map[string]any)["campaign_id"] != nil ||
+		projected.Outputs["items"].([]any)[1] != "scalar" ||
+		projected.Outputs["maps"].([]map[string]any)[0]["campaignId"] != nil ||
+		projected.Jobs["review"].Outputs["campaign_id"] != nil ||
+		projected.Steps["record"].Outputs["campaignId"] != nil {
+		t.Fatalf("campaign workflow projection=%#v", projected)
+	}
+	if run.Inputs["campaign_id"] != canary ||
+		run.Inputs["nested"].(map[string]any)["campaignId"] != canary ||
+		run.Outputs["items"].([]any)[0].(map[string]any)["campaign_id"] != canary ||
+		run.Outputs["maps"].([]map[string]any)[0]["campaignId"] != canary ||
+		run.Jobs["review"].Outputs["campaign_id"] != canary ||
+		run.Steps["record"].Outputs["campaignId"] != canary {
+		t.Fatal("campaign projection mutated the stored workflow run")
+	}
+}
+
 func TestLoadWorkflowEventEnvelopeUsesMetadataAndProtectedContextRoutes(t *testing.T) {
 	configPath := writeWorkflowEventTestConfig(t, t.TempDir())
 	var paths []string

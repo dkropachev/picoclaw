@@ -2911,7 +2911,8 @@ func loadRepositoryReviewOutcome(
 			}
 			for _, observation := range finding.Observations {
 				if contextRecord, selected := selectedContexts[observation.ContextID]; selected &&
-					(observation.Model == alias || contextRecord.Reviewer == alias) {
+					(observation.Model == alias || observation.Reviewer == alias ||
+						contextRecord.Model == alias || contextRecord.Reviewer == alias) {
 					modelFindingIDs[finding.ID] = struct{}{}
 				}
 			}
@@ -2964,7 +2965,8 @@ func loadRepositoryReviewCampaignOutcome(
 		for _, finding := range findings {
 			for _, observation := range finding.Observations {
 				if contextRecord, selected := selectedContexts[observation.ContextID]; selected &&
-					(observation.Model == alias || contextRecord.Reviewer == alias) {
+					(observation.Model == alias || observation.Reviewer == alias ||
+						contextRecord.Model == alias || contextRecord.Reviewer == alias) {
 					modelFindingIDs[finding.ID] = struct{}{}
 				}
 			}

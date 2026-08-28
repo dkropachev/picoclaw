@@ -3248,6 +3248,89 @@ func TestApplyRepositoryReviewOutcomeUsesExactCampaignMetrics(t *testing.T) {
 	}
 }
 
+func TestRepositoryReviewCampaignOutcomeUsesTaggedCoverageAndModelContexts(t *testing.T) {
+	campaignID := repoaudit.NewRepositoryReviewCampaignID()
+	files := []repoaudit.FileRef{
+		{Path: "a.go", BlobSHA: strings.Repeat("a", 40), SizeBytes: 1},
+		{Path: "b.go", BlobSHA: strings.Repeat("b", 40), SizeBytes: 2},
+		{Path: "c.bin", BlobSHA: strings.Repeat("c", 40), SizeBytes: 3},
+	}
+	state := repoaudit.RepositoryState{
+		CurrentCampaign: &repoaudit.RepositoryReviewCampaignCoverage{
+			ID: campaignID, CommitSHA: strings.Repeat("d", 40),
+			InventoryHash: "inventory", ProfileHash: "profile", SelectedFiles: 4, Exact: true,
+			Paths: map[string]repoaudit.RepositoryReviewCampaignPathCoverage{
+				files[0].Path: {Inspected: true, Completed: true},
+				files[1].Path: {Inspected: true},
+				files[2].Path: {Unsupported: true},
+			},
+		},
+		Contexts: []repoaudit.FindingContext{
+			{ID: "ctx-a", CampaignID: campaignID, Reviewer: "review-a", Files: []repoaudit.FileRef{files[0]}},
+			{ID: "ctx-b", CampaignID: campaignID, Model: "review-b", Files: []repoaudit.FileRef{files[1]}},
+			{ID: "ctx-old", CampaignID: repoaudit.NewRepositoryReviewCampaignID(), Reviewer: "review-a"},
+		},
+		Findings: []repoaudit.Finding{
+			{
+				ID: "finding-a", CampaignID: campaignID, RepositoryFindingID: "aggregate-a",
+				Observations: []repoaudit.FindingObservation{{ContextID: "ctx-a", Model: "review-a"}},
+			},
+			{
+				ID: "finding-b", CampaignID: campaignID,
+				Observations: []repoaudit.FindingObservation{{ContextID: "ctx-b", Reviewer: "review-b"}},
+			},
+			{ID: "finding-old", CampaignID: repoaudit.NewRepositoryReviewCampaignID()},
+		},
+	}
+	automation := repoaudit.RepositoryReviewAutomation{
+		CampaignID: campaignID, ReviewerModels: []string{"review-a", "review-b", "review-none"},
+		ModelStats: make(map[string]repoaudit.RepositoryReviewModelStats),
+		Progress: repoaudit.RepositoryReviewProgress{
+			ReviewedFiles: 9, RemainingFiles: 9, UnsupportedFiles: 9,
+		},
+	}
+	outcome := loadRepositoryReviewCampaignOutcome(state, automation)
+	if !outcome.found || !outcome.coverageAvailable || !outcome.coverageExact ||
+		outcome.selectedFiles != 4 || outcome.inspectedFiles != 2 || outcome.reviewedFiles != 1 ||
+		outcome.remainingFiles != 2 || outcome.unsupportedFiles != 1 || outcome.findings != 2 ||
+		outcome.findingAggregates != 1 || outcome.pendingFindingMappings != 1 ||
+		outcome.modelFindings["review-a"] != 1 || outcome.modelFindings["review-b"] != 1 ||
+		outcome.modelFindings["review-none"] != 0 ||
+		!reflect.DeepEqual(outcome.modelPaths["review-a"], []string{"a.go"}) ||
+		!reflect.DeepEqual(outcome.modelPaths["review-b"], []string{"b.go"}) {
+		t.Fatalf("campaign outcome=%#v", outcome)
+	}
+	applyRepositoryReviewLiveMetrics(&automation, state)
+	if !automation.Progress.CoverageExact || automation.Progress.SelectedFiles != 4 ||
+		automation.Progress.InspectedFiles != 2 || automation.Progress.ReviewedFiles != 1 ||
+		automation.Progress.RemainingFiles != 2 || automation.Progress.UnsupportedFiles != 1 ||
+		automation.Progress.Findings != 2 || automation.Progress.FindingAggregates != 1 ||
+		automation.Progress.PendingFindingMappings != 1 ||
+		automation.ModelStats["review-a"].Findings != 1 ||
+		automation.ModelStats["review-b"].ReviewedFiles != 1 ||
+		automation.ModelCoverageSketches["review-b"] == "" {
+		t.Fatalf("campaign live progress=%#v stats=%#v", automation.Progress, automation.ModelStats)
+	}
+
+	state.CurrentCampaign.Exact = false
+	automation.Progress.ReviewedFiles = 8
+	automation.Progress.RemainingFiles = 7
+	automation.Progress.UnsupportedFiles = 6
+	applyRepositoryReviewLiveMetrics(&automation, state)
+	if automation.Progress.CoverageExact || automation.Progress.ReviewedFiles != 8 ||
+		automation.Progress.RemainingFiles != 7 || automation.Progress.UnsupportedFiles != 6 ||
+		automation.Progress.SelectedFiles != 4 || automation.Progress.InspectedFiles != 2 {
+		t.Fatalf("inexact campaign overwrote operational progress=%#v", automation.Progress)
+	}
+	applyRepositoryReviewLiveMetrics(nil, state)
+	applyRepositoryReviewOutcome(nil, outcome)
+	unchanged := automation
+	applyRepositoryReviewOutcome(&unchanged, repositoryReviewOutcome{})
+	if !reflect.DeepEqual(unchanged, automation) {
+		t.Fatal("empty outcome mutated automation")
+	}
+}
+
 func TestRepositoryReviewPreparedCampaignUsesLegacyMembershipUntilCoverageBinds(t *testing.T) {
 	campaignID := repoaudit.NewRepositoryReviewCampaignID()
 	startedAt := time.Now().Add(-time.Hour)
