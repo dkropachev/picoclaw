@@ -220,9 +220,9 @@ func TestP015B2LoggingInventoryDetectors(t *testing.T) {
 	if len(p015ReviewedNonLoggingCalls) != 0 {
 		t.Fatalf("unexpected unresolved-receiver allowances: %#v", p015ReviewedNonLoggingCalls)
 	}
-	if len(p015ReviewedNonLoggingMethodValues) != 56 {
+	if len(p015ReviewedNonLoggingMethodValues) != 57 {
 		t.Fatalf(
-			"reviewed unresolved method-value allowances = %d, want exact 56: %#v",
+			"reviewed unresolved method-value allowances = %d, want exact 57: %#v",
 			len(p015ReviewedNonLoggingMethodValues),
 			p015ReviewedNonLoggingMethodValues,
 		)
